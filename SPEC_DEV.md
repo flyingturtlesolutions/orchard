@@ -1484,6 +1484,50 @@ element is <div>` → hard `mismatch`, blocking the landmark.
 - `Services/LandmarkProfile.js` — `_classifyElementShapes` cursor:pointer
   signal; `computeVerificationScore` mismatch→caveats for type-role.
 
+---
+
+## v2.74.343 — Locale_ref hint count via landmarkRefs (hardening pass)
+
+**Date:** 2026-05-22
+**Context:** post-verification hardening (the recurring "shape change left a
+reader behind" class).
+
+`locale.landmarks` is now `LandmarkNode[]`; `.length` is the ROOT-node count,
+which undercounts structured (nested) locales. The locale_ref condition-hint
+renderers in `studio.js` and `Sidepanel/modes/observation-author.js` now count
+via the flat `landmarkRefs` mirror, and show the node `role` (falling back to
+legacy `alias`). fragment-author's equivalent was already correct (it hydrates
+a flat landmark array).
+
+---
+
+## v2.74.344 — Locale Layer 2 Phase B-lite: per-node structure review (LOCALE_SPEC § 3/§ 5)
+
+**Date:** 2026-05-22
+**Decision by:** user ("B-lite: per-node review").
+
+**What.** Completes the "user-as-reviewer" half of the Layer 2 LLM-as-author
+premise. The structure preview in locale-capture is now interactive:
+- Per node: editable `role` (text) + `multiplicity` (select), and ✓ accept /
+  ✗ reject buttons.
+- Each action records `authoringMetadata.userJudgment` on the node
+  (`accepted` | `edited` | `rejected-but-kept`) + `reviewedAt` — the
+  LOCALE_SPEC § 3/§ 5 training signal. Visual: left-border tint per state.
+- role/multiplicity edits update in place without re-render (preserve input
+  focus); judgment buttons re-render to reflect state. Persisted with the
+  structured `landmarks` nodes on save.
+
+**Scope (B-lite, per the chosen option).** Re-nesting (move into/out of
+`contains`), groupings/sequences editing, and the full typed-relationship
+vocabulary (alternatives/references/triggers/derivedFrom/presenceCondition)
+are NOT editable yet — deferred to B-mid / B-full. "Reject" is metadata-only
+(flags the proposal; the landmark + node stay), not a structural delete.
+
+**Touched.**
+- `Sidepanel/modes/locale-capture.js` — `_findStructNode`,
+  `_markStructJudgment`, editable `_renderStructNodeRow`, review handlers.
+- `assets/sidepanel.css` — interactive node-row + judgment-state styles.
+
 **Locale audit — still open (acknowledged):** `isPrimary` + primary-Locale
 UX (§ 8), Locale lifecycle draft/active/deprecated + soft-delete (§ 12),
 per-field `authoringMetadata` + `proposalContext` (§ 5/§ 6), description

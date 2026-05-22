@@ -1293,16 +1293,59 @@ function _structAliasOf(uid) {
   return lm?.alias ?? lm?.accessibleName ?? (typeof uid === 'string' ? uid.slice(0, 8) : '?');
 }
 
+// v2.74.344 — Phase B-lite: per-node review. Find a node by ref in the
+// structuredLandmarks tree (walks `contains`).
+function _findStructNode(ref, nodes) {
+  const list = nodes ?? _locDraft?.structuredLandmarks;
+  for (const n of Array.isArray(list) ? list : []) {
+    if (n?.ref === ref) return n;
+    if (Array.isArray(n?.contains)) {
+      const hit = _findStructNode(ref, n.contains);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+// v2.74.344 — Record the author's review judgment on a node (LOCALE_SPEC § 5
+// LandmarkNodeAuthoringMetadata.userJudgment — the training signal). Values:
+// 'accepted' | 'edited' | 'rejected-but-kept'.
+function _markStructJudgment(node, judgment) {
+  if (!node) return;
+  if (!node.authoringMetadata || typeof node.authoringMetadata !== 'object') {
+    node.authoringMetadata = { capturedBy: 'llm-proposed', capturedAt: Date.now() };
+  }
+  node.authoringMetadata.userJudgment = judgment;
+  node.authoringMetadata.reviewedAt = Date.now();
+}
+
+const _STRUCT_MULT_OPTS = ['one', 'many', 'optional', 'conditional'];
+
+function _renderStructNodeRow(n, depth) {
+  if (!n || typeof n.ref !== 'string') return '';
+  const judgment = n.authoringMetadata?.userJudgment ?? null;
+  const judgedClass = judgment === 'accepted' ? ' loc-struct-judged-ok'
+    : judgment === 'rejected-but-kept' ? ' loc-struct-judged-rej'
+    : judgment === 'edited' ? ' loc-struct-judged-edit' : '';
+  const mult = _STRUCT_MULT_OPTS.includes(n.multiplicity) ? n.multiplicity : 'one';
+  const multOpts = _STRUCT_MULT_OPTS.map(m => `<option value="${m}"${m === mult ? ' selected' : ''}>${m}</option>`).join('');
+  const alias = _structAliasOf(n.ref);
+  let html = `
+    <div class="loc-struct-node${judgedClass}" style="padding-left:${depth * 14}px" data-struct-ref="${escAttr(n.ref)}">
+      <span class="loc-struct-alias" title="${escAttr(alias)}">${escHtml(alias)}</span>
+      <input type="text" class="loc-struct-role-input" data-struct-action="role" data-ref="${escAttr(n.ref)}"
+             value="${escAttr(n.role ?? '')}" placeholder="role" maxlength="40"
+             title="Semantic role within the parent (LLM-proposed — edit to correct)" />
+      <select class="loc-struct-mult-select" data-struct-action="mult" data-ref="${escAttr(n.ref)}" title="How many at runtime">${multOpts}</select>
+      <button class="loc-struct-judge-btn${judgment === 'accepted' ? ' active' : ''}" data-struct-action="judge" data-ref="${escAttr(n.ref)}" data-judgment="accepted" type="button" title="Accept Claude's proposal for this node as-is">✓</button>
+      <button class="loc-struct-judge-btn loc-struct-judge-rej${judgment === 'rejected-but-kept' ? ' active' : ''}" data-struct-action="judge" data-ref="${escAttr(n.ref)}" data-judgment="rejected-but-kept" type="button" title="Reject the structuring (landmark stays in the locale; flags the proposal as wrong)">✗</button>
+    </div>`;
+  if (Array.isArray(n.contains)) for (const c of n.contains) html += _renderStructNodeRow(c, depth + 1);
+  return html;
+}
+
 function _renderStructurePreview(nodes, groupings, sequences) {
-  const renderNode = (n, depth) => {
-    if (!n || typeof n.ref !== 'string') return '';
-    const role = n.role ? ` <span class="loc-struct-role">${escHtml(n.role)}</span>` : '';
-    const mult = (n.multiplicity && n.multiplicity !== 'one') ? ` <span class="loc-struct-mult">×${escHtml(n.multiplicity)}</span>` : '';
-    let html = `<div class="loc-struct-node" style="padding-left:${depth * 14}px">• ${escHtml(_structAliasOf(n.ref))}${role}${mult}</div>`;
-    if (Array.isArray(n.contains)) for (const c of n.contains) html += renderNode(c, depth + 1);
-    return html;
-  };
-  const tree = (Array.isArray(nodes) ? nodes : []).map(n => renderNode(n, 0)).join('');
+  const tree = (Array.isArray(nodes) ? nodes : []).map(n => _renderStructNodeRow(n, 0)).join('');
   const grp = (Array.isArray(groupings) ? groupings : []).map(g =>
     `<div class="loc-struct-overlay" title="grouping (cuts across containment)">▣ ${escHtml(g.name)}: ${(g.members ?? []).map(_structAliasOf).map(escHtml).join(', ')}</div>`).join('');
   const seq = (Array.isArray(sequences) ? sequences : []).map(s =>
@@ -1490,6 +1533,37 @@ function renderLocaleLandmarks() {
   // v2.74.336 — Phase C-lite: wire the "Structure with Claude" button.
   const _structBtn = locLandmarksList.querySelector('[data-loc-action="propose-structure"]');
   if (_structBtn) _structBtn.addEventListener('click', onProposeStructure);
+
+  // v2.74.344 — Phase B-lite: per-node structure review. role/multiplicity
+  // edits update the node in place (no re-render → preserve input focus) and
+  // flag it 'edited'; the ✓/✗ judgment buttons set userJudgment + re-render
+  // to reflect the state.
+  locLandmarksList.querySelectorAll('[data-struct-action]').forEach(el => {
+    const action = el.dataset.structAction;
+    const ref    = el.dataset.ref;
+    if (action === 'role') {
+      el.addEventListener('input', () => {
+        const node = _findStructNode(ref);
+        if (!node) return;
+        node.role = el.value.trim();
+        _markStructJudgment(node, 'edited');
+      });
+    } else if (action === 'mult') {
+      el.addEventListener('change', () => {
+        const node = _findStructNode(ref);
+        if (!node) return;
+        node.multiplicity = el.value;
+        _markStructJudgment(node, 'edited');
+      });
+    } else if (action === 'judge') {
+      el.addEventListener('click', () => {
+        const node = _findStructNode(ref);
+        if (!node) return;
+        _markStructJudgment(node, el.dataset.judgment);
+        renderLocaleLandmarks();
+      });
+    }
+  });
 
   locLandmarksList.querySelectorAll('input[data-field]').forEach(inp => {
     inp.addEventListener('input', () => {
