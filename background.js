@@ -3564,8 +3564,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'PROPOSE_LOCALE_STRUCTURE': {
       (async () => {
         try {
-          const { name, description, landmarks } = payload ?? {};
-          const structure = await AnthropicService.proposeLocaleStructure({ name, description, landmarks });
+          // v2.74.347 — `priorStructure` (the reviewed structure + judgments)
+          // turns this into a refine call; absent on a first proposal.
+          const { name, description, landmarks, priorStructure } = payload ?? {};
+          const structure = await AnthropicService.proposeLocaleStructure({ name, description, landmarks, priorStructure });
           if (!structure) {
             sendResponse({ success: false, error: 'No structure returned (LLM unavailable, or no landmarks with UIDs to structure)' });
             return;

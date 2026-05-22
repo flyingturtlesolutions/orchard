@@ -1319,9 +1319,73 @@ function _markStructJudgment(node, judgment) {
   node.authoringMetadata.reviewedAt = Date.now();
 }
 
+// v2.74.346 — Phase B-mid (overlays): groupings/sequences are the
+// cross-cutting overlays Claude proposes alongside the containment tree
+// (LOCALE_SPEC § 3). The author reviews them with the same vocabulary as
+// nodes — accept / edit (rename) / reject-but-kept — plus an explicit delete
+// for an overlay the author wants gone entirely. `_markStructJudgment` is
+// reused since it just stamps `.authoringMetadata`.
+function _overlayArr(kind) {
+  if (!_locDraft) return null;
+  if (kind === 'grouping') return Array.isArray(_locDraft.groupings) ? _locDraft.groupings : null;
+  if (kind === 'sequence') return Array.isArray(_locDraft.sequences) ? _locDraft.sequences : null;
+  return null;
+}
+function _findOverlay(kind, idx) {
+  const arr = _overlayArr(kind);
+  return (arr && idx >= 0 && idx < arr.length) ? arr[idx] : null;
+}
+function _deleteOverlay(kind, idx) {
+  const arr = _overlayArr(kind);
+  if (arr && idx >= 0 && idx < arr.length) arr.splice(idx, 1);
+}
+
+// v2.74.345 — Phase B-mid: locate a node + its position for re-nesting.
+// Returns { node, siblings (the array holding it), index, parentNode|null }.
+function _locateStructNode(ref, siblings, parentNode) {
+  const arr = Array.isArray(siblings) ? siblings : _locDraft?.structuredLandmarks;
+  if (!Array.isArray(arr)) return null;
+  for (let i = 0; i < arr.length; i++) {
+    if (arr[i]?.ref === ref) return { node: arr[i], siblings: arr, index: i, parentNode: parentNode ?? null };
+    if (Array.isArray(arr[i]?.contains)) {
+      const hit = _locateStructNode(ref, arr[i].contains, arr[i]);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+// v2.74.345 — Indent: nest the node under its preceding sibling. Outline-
+// editor semantics; cycle-free (only moves relative to existing siblings).
+function _indentStructNode(ref) {
+  const loc = _locateStructNode(ref);
+  if (!loc || loc.index === 0) return;          // need a preceding sibling
+  const prev = loc.siblings[loc.index - 1];
+  if (!prev) return;
+  loc.siblings.splice(loc.index, 1);
+  if (!Array.isArray(prev.contains)) prev.contains = [];
+  prev.contains.push(loc.node);
+  _markStructJudgment(loc.node, 'edited');
+}
+
+// v2.74.345 — Outdent: promote the node one level — out of its parent's
+// `contains` to sit right after the parent in the grandparent (or root).
+function _outdentStructNode(ref) {
+  const loc = _locateStructNode(ref);
+  if (!loc || !loc.parentNode) return;          // already at root
+  const parentLoc = _locateStructNode(loc.parentNode.ref);
+  if (!parentLoc) return;
+  loc.siblings.splice(loc.index, 1);            // detach from parent.contains
+  if (Array.isArray(loc.parentNode.contains) && loc.parentNode.contains.length === 0) {
+    delete loc.parentNode.contains;             // tidy: drop empty contains
+  }
+  parentLoc.siblings.splice(parentLoc.index + 1, 0, loc.node);  // insert after parent
+  _markStructJudgment(loc.node, 'edited');
+}
+
 const _STRUCT_MULT_OPTS = ['one', 'many', 'optional', 'conditional'];
 
-function _renderStructNodeRow(n, depth) {
+function _renderStructNodeRow(n, depth, index) {
   if (!n || typeof n.ref !== 'string') return '';
   const judgment = n.authoringMetadata?.userJudgment ?? null;
   const judgedClass = judgment === 'accepted' ? ' loc-struct-judged-ok'
@@ -1330,8 +1394,16 @@ function _renderStructNodeRow(n, depth) {
   const mult = _STRUCT_MULT_OPTS.includes(n.multiplicity) ? n.multiplicity : 'one';
   const multOpts = _STRUCT_MULT_OPTS.map(m => `<option value="${m}"${m === mult ? ' selected' : ''}>${m}</option>`).join('');
   const alias = _structAliasOf(n.ref);
+  // v2.74.345 — B-mid: outline re-nesting. ➡ nests this node under its
+  // preceding sibling (needs index>0); ⬅ promotes it to its grandparent
+  // (needs depth>0). Both are structurally cycle-proof — you can only ever
+  // move a node relative to its existing position in the tree.
+  const canIndent  = (index ?? 0) > 0;
+  const canOutdent = depth > 0;
   let html = `
     <div class="loc-struct-node${judgedClass}" style="padding-left:${depth * 14}px" data-struct-ref="${escAttr(n.ref)}">
+      <button class="loc-struct-move-btn" data-struct-action="outdent" data-ref="${escAttr(n.ref)}" type="button" ${canOutdent ? '' : 'disabled'} title="Promote: move this landmark out one level (to its grandparent)">⬅</button>
+      <button class="loc-struct-move-btn" data-struct-action="indent" data-ref="${escAttr(n.ref)}" type="button" ${canIndent ? '' : 'disabled'} title="Nest: move this landmark inside the landmark above it">➡</button>
       <span class="loc-struct-alias" title="${escAttr(alias)}">${escHtml(alias)}</span>
       <input type="text" class="loc-struct-role-input" data-struct-action="role" data-ref="${escAttr(n.ref)}"
              value="${escAttr(n.role ?? '')}" placeholder="role" maxlength="40"
@@ -1340,16 +1412,41 @@ function _renderStructNodeRow(n, depth) {
       <button class="loc-struct-judge-btn${judgment === 'accepted' ? ' active' : ''}" data-struct-action="judge" data-ref="${escAttr(n.ref)}" data-judgment="accepted" type="button" title="Accept Claude's proposal for this node as-is">✓</button>
       <button class="loc-struct-judge-btn loc-struct-judge-rej${judgment === 'rejected-but-kept' ? ' active' : ''}" data-struct-action="judge" data-ref="${escAttr(n.ref)}" data-judgment="rejected-but-kept" type="button" title="Reject the structuring (landmark stays in the locale; flags the proposal as wrong)">✗</button>
     </div>`;
-  if (Array.isArray(n.contains)) for (const c of n.contains) html += _renderStructNodeRow(c, depth + 1);
+  if (Array.isArray(n.contains)) n.contains.forEach((c, i) => { html += _renderStructNodeRow(c, depth + 1, i); });
   return html;
 }
 
+// v2.74.346 — One reviewable overlay row (grouping ▣ or sequence →). Mirrors
+// the node row's review affordances: editable name, ✓ accept / ✗ reject-kept,
+// plus 🗑 delete (overlays, unlike landmarks, are pure annotations — removing
+// one drops nothing from the Locale's landmark set).
+function _renderOverlayRow(kind, ov, idx) {
+  if (!ov || typeof ov !== 'object') return '';
+  const glyph = kind === 'grouping' ? '▣' : '→';
+  const members = kind === 'grouping' ? (ov.members ?? []) : (ov.steps ?? []);
+  const joiner  = kind === 'grouping' ? ', ' : ' → ';
+  const body    = members.map(_structAliasOf).map(escHtml).join(joiner);
+  const judgment = ov.authoringMetadata?.userJudgment ?? null;
+  const judgedClass = judgment === 'accepted' ? ' loc-struct-judged-ok'
+    : judgment === 'rejected-but-kept' ? ' loc-struct-judged-rej'
+    : judgment === 'edited' ? ' loc-struct-judged-edit' : '';
+  const title = kind === 'grouping' ? 'grouping (cuts across containment)' : 'sequence (ordered flow)';
+  return `
+    <div class="loc-struct-overlay loc-struct-overlay-row${judgedClass}" data-overlay-kind="${kind}" data-overlay-idx="${idx}" title="${escAttr(title)}">
+      <span class="loc-struct-overlay-glyph">${glyph}</span>
+      <input type="text" class="loc-struct-overlay-name" data-overlay-action="name" data-overlay-kind="${kind}" data-overlay-idx="${idx}"
+             value="${escAttr(ov.name ?? '')}" placeholder="name" maxlength="40" title="Overlay name (LLM-proposed — edit to correct)" />
+      <span class="loc-struct-overlay-body">${body}</span>
+      <button class="loc-struct-judge-btn${judgment === 'accepted' ? ' active' : ''}" data-overlay-action="judge" data-overlay-kind="${kind}" data-overlay-idx="${idx}" data-judgment="accepted" type="button" title="Accept this overlay as proposed">✓</button>
+      <button class="loc-struct-judge-btn loc-struct-judge-rej${judgment === 'rejected-but-kept' ? ' active' : ''}" data-overlay-action="judge" data-overlay-kind="${kind}" data-overlay-idx="${idx}" data-judgment="rejected-but-kept" type="button" title="Reject (kept, flagged wrong)">✗</button>
+      <button class="loc-struct-move-btn" data-overlay-action="delete" data-overlay-kind="${kind}" data-overlay-idx="${idx}" type="button" title="Delete this overlay (does not remove any landmark)">🗑</button>
+    </div>`;
+}
+
 function _renderStructurePreview(nodes, groupings, sequences) {
-  const tree = (Array.isArray(nodes) ? nodes : []).map(n => _renderStructNodeRow(n, 0)).join('');
-  const grp = (Array.isArray(groupings) ? groupings : []).map(g =>
-    `<div class="loc-struct-overlay" title="grouping (cuts across containment)">▣ ${escHtml(g.name)}: ${(g.members ?? []).map(_structAliasOf).map(escHtml).join(', ')}</div>`).join('');
-  const seq = (Array.isArray(sequences) ? sequences : []).map(s =>
-    `<div class="loc-struct-overlay" title="sequence (ordered flow)">→ ${escHtml(s.name)}: ${(s.steps ?? []).map(_structAliasOf).map(escHtml).join(' → ')}</div>`).join('');
+  const tree = (Array.isArray(nodes) ? nodes : []).map((n, i) => _renderStructNodeRow(n, 0, i)).join('');
+  const grp = (Array.isArray(groupings) ? groupings : []).map((g, i) => _renderOverlayRow('grouping', g, i)).join('');
+  const seq = (Array.isArray(sequences) ? sequences : []).map((s, i) => _renderOverlayRow('sequence', s, i)).join('');
   return `<div class="loc-structure-preview">${tree}${grp}${seq}</div>`;
 }
 
@@ -1388,11 +1485,20 @@ async function onProposeStructure() {
   }
   const btn = locLandmarksList?.querySelector('[data-loc-action="propose-structure"]');
   if (btn) { btn.disabled = true; btn.textContent = '🧬 Structuring…'; }
+  // v2.74.347 — On a re-structure, send the structure the user already
+  // reviewed (nodes + overlays, carrying authoringMetadata.userJudgment) so
+  // Claude refines it — preserving accepted/edited arrangements and re-thinking
+  // only the rejected ones — instead of proposing from scratch. This is the
+  // downstream consumer that makes the structured tree + the review judgments
+  // actually do something.
+  const priorStructure = (Array.isArray(_locDraft.structuredLandmarks) && _locDraft.structuredLandmarks.length)
+    ? { nodes: _locDraft.structuredLandmarks, groupings: _locDraft.groupings, sequences: _locDraft.sequences }
+    : undefined;
   let res;
   try {
     res = await new Promise(r => chrome.runtime.sendMessage({
       type: 'PROPOSE_LOCALE_STRUCTURE',
-      payload: { name: _locDraft.name, description: _locDraft.description, landmarks: lms },
+      payload: { name: _locDraft.name, description: _locDraft.description, landmarks: lms, priorStructure },
     }, r));
   } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
   if (!res?.success || !res.structure) {
@@ -1402,14 +1508,62 @@ async function onProposeStructure() {
   }
   // Stamp per-node authoring provenance (LOCALE_SPEC § 5 LandmarkNodeAuthoringMetadata).
   const now = Date.now();
-  const stamp = (nodes) => (Array.isArray(nodes) ? nodes : []).map(n => ({
-    ...n,
-    authoringMetadata: { capturedBy: 'llm-proposed', capturedAt: now },
-    ...(Array.isArray(n.contains) ? { contains: stamp(n.contains) } : {}),
-  }));
-  _locDraft.structuredLandmarks = stamp(res.structure.nodes);
-  _locDraft.groupings = Array.isArray(res.structure.groupings) ? res.structure.groupings : [];
-  _locDraft.sequences = Array.isArray(res.structure.sequences) ? res.structure.sequences : [];
+  // v2.74.347 — Carry the prior judgment forward onto any node/overlay the
+  // refine left UNCHANGED, so a re-structure that preserved accepted/edited
+  // arrangements doesn't force a re-review and doesn't discard the § 5 training
+  // signal. Matching is strict: a node carries forward only when its ref, role,
+  // multiplicity AND parent are identical; an overlay only when its name + exact
+  // members/steps match. Anything the LLM altered (or anything new) resets to
+  // llm-proposed for review.
+  const priorNodeJudg = new Map();   // ref -> { judgment, reviewedAt, role, mult, parentRef }
+  (function indexPrior(nodes, parentRef) {
+    for (const n of Array.isArray(nodes) ? nodes : []) {
+      if (n && typeof n.ref === 'string') {
+        const jv = n.authoringMetadata?.userJudgment;
+        if (jv) priorNodeJudg.set(n.ref, {
+          judgment: jv, reviewedAt: n.authoringMetadata?.reviewedAt,
+          role: (n.role ?? '').trim(), mult: n.multiplicity ?? '', parentRef: parentRef ?? null,
+        });
+        if (Array.isArray(n.contains)) indexPrior(n.contains, n.ref);
+      }
+    }
+  })(priorStructure?.nodes, null);
+  const carryMeta = (judgment, reviewedAt) => judgment
+    ? { capturedBy: 'llm-proposed', capturedAt: now, userJudgment: judgment, reviewedAt: reviewedAt ?? now }
+    : { capturedBy: 'llm-proposed', capturedAt: now };
+  const stamp = (nodes, parentRef) => (Array.isArray(nodes) ? nodes : []).map(n => {
+    const prior = priorNodeJudg.get(n.ref);
+    const unchanged = prior
+      && prior.role === (n.role ?? '').trim()
+      && prior.mult === (n.multiplicity ?? '')
+      && prior.parentRef === (parentRef ?? null);
+    return {
+      ...n,
+      authoringMetadata: carryMeta(unchanged ? prior.judgment : null, unchanged ? prior.reviewedAt : null),
+      ...(Array.isArray(n.contains) ? { contains: stamp(n.contains, n.ref) } : {}),
+    };
+  });
+  // v2.74.346 — Stamp overlays with the same llm-proposed provenance as nodes
+  // so the author's accept/edit/reject judgments have somewhere to land.
+  const indexOverlay = (arr, key) => {
+    const m = new Map();
+    for (const o of Array.isArray(arr) ? arr : []) {
+      if (o && typeof o.name === 'string' && o.authoringMetadata?.userJudgment) {
+        m.set(`${o.name}|${(Array.isArray(o[key]) ? o[key] : []).join(',')}`,
+          { judgment: o.authoringMetadata.userJudgment, reviewedAt: o.authoringMetadata.reviewedAt });
+      }
+    }
+    return m;
+  };
+  const priorGrp = indexOverlay(priorStructure?.groupings, 'members');
+  const priorSeq = indexOverlay(priorStructure?.sequences, 'steps');
+  const stampOverlay = (arr, key, priorMap) => (Array.isArray(arr) ? arr : []).map(o => {
+    const found = priorMap.get(`${o.name}|${(Array.isArray(o[key]) ? o[key] : []).join(',')}`);
+    return { ...o, authoringMetadata: carryMeta(found?.judgment ?? null, found?.reviewedAt ?? null) };
+  });
+  _locDraft.structuredLandmarks = stamp(res.structure.nodes, null);
+  _locDraft.groupings = stampOverlay(res.structure.groupings, 'members', priorGrp);
+  _locDraft.sequences = stampOverlay(res.structure.sequences, 'steps', priorSeq);
   renderLocaleLandmarks();
   updateLocaleSaveButtonState();
   toast?.(`Structured ${lms.length} landmark(s)`);
@@ -1562,6 +1716,38 @@ function renderLocaleLandmarks() {
         _markStructJudgment(node, el.dataset.judgment);
         renderLocaleLandmarks();
       });
+    } else if (action === 'indent') {
+      // v2.74.345 — B-mid: nest under preceding sibling, then re-render so
+      // the new depth/indentation and updated gating reflect immediately.
+      el.addEventListener('click', () => { _indentStructNode(ref); renderLocaleLandmarks(); });
+    } else if (action === 'outdent') {
+      el.addEventListener('click', () => { _outdentStructNode(ref); renderLocaleLandmarks(); });
+    }
+  });
+
+  // v2.74.346 — Phase B-mid (overlays): review groupings/sequences. name edit
+  // updates in place + flags 'edited' (no re-render → preserve focus); judge
+  // sets userJudgment + re-renders; delete removes the overlay + re-renders.
+  locLandmarksList.querySelectorAll('[data-overlay-action]').forEach(el => {
+    const action = el.dataset.overlayAction;
+    const kind   = el.dataset.overlayKind;
+    const idx    = parseInt(el.dataset.overlayIdx, 10);
+    if (action === 'name') {
+      el.addEventListener('input', () => {
+        const ov = _findOverlay(kind, idx);
+        if (!ov) return;
+        ov.name = el.value.trim();
+        _markStructJudgment(ov, 'edited');
+      });
+    } else if (action === 'judge') {
+      el.addEventListener('click', () => {
+        const ov = _findOverlay(kind, idx);
+        if (!ov) return;
+        _markStructJudgment(ov, el.dataset.judgment);
+        renderLocaleLandmarks();
+      });
+    } else if (action === 'delete') {
+      el.addEventListener('click', () => { _deleteOverlay(kind, idx); renderLocaleLandmarks(); });
     }
   });
 

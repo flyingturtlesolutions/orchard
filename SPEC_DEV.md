@@ -1534,3 +1534,118 @@ per-field `authoringMetadata` + `proposalContext` (§ 5/§ 6), description
 required-at-save (§ 6, currently auto-backfilled), Locale events (§ 10),
 deletion impact analysis / orphan detection (§ 11), event-driven/per-thread
 active-set (§ 9), description-first intent-driven authoring flow (§ 13).
+
+## v2.74.345 — Locale Layer 2 Phase B-mid: re-nesting outline controls (LOCALE_SPEC § 3)
+
+**Date:** 2026-05-22
+**Decision by:** continuation of the Locale Layer-2 thread (B-lite → B-mid).
+
+**What.** The structure preview now lets the reviewer correct Claude's
+containment proposal directly, not just flag it. Each node row gains two
+outline controls:
+- ➡ **nest** — moves the node into its preceding sibling's `contains`.
+  Disabled for the first child at any level (no preceding sibling).
+- ⬅ **promote** — moves the node out one level, inserted just after its old
+  parent in the grandparent's list; tidies an emptied `contains`. Disabled at
+  the root (depth 0).
+
+Both reuse the existing B-lite re-render path and mark the moved node
+`authoringMetadata.userJudgment = 'edited'` (the § 3/§ 5 training signal), so a
+structural correction is logged exactly like a role/multiplicity edit.
+
+**Why outline buttons, not drag.** Indent/outdent can only ever move a node
+relative to its current tree position, so cycles are structurally impossible —
+no validation pass needed — and there is no drag/drop hit-testing complexity.
+
+**Scope.** Containment only. Groupings/sequences editing and the full typed
+relationship vocabulary (alternatives/references/triggers/derivedFrom/
+presenceCondition) remain deferred to B-full.
+
+**Touched.**
+- `Sidepanel/modes/locale-capture.js` — `_locateStructNode`,
+  `_indentStructNode`, `_outdentStructNode`; `_renderStructNodeRow` gains an
+  `index` param + ⬅/➡ buttons; indent/outdent click handlers.
+- `assets/sidepanel.css` — `.loc-struct-move-btn` styling.
+
+## v2.74.346 — Locale Layer 2 Phase B-mid (overlays): grouping/sequence review (LOCALE_SPEC § 3/§ 5)
+
+**Date:** 2026-05-22
+**Decision by:** continuation of the Locale Layer-2 thread.
+
+**What.** Closes the last gap in the "user-as-reviewer" loop. Claude proposes
+`groupings` (cross-cutting ▣) and `sequences` (ordered →) alongside the
+containment tree, but until now they rendered read-only — the author could see
+them but not judge or fix them. Each overlay row is now interactive, mirroring
+the node row:
+- editable **name** (flags `userJudgment: 'edited'`),
+- ✓ **accept** / ✗ **reject-but-kept** judgment buttons (records
+  `authoringMetadata.userJudgment` + `reviewedAt` — the § 3/§ 5 training
+  signal; left-border tint per state), and
+- 🗑 **delete** — drops the overlay entirely. Safe because overlays are pure
+  annotations: deleting one removes no landmark from the Locale (the flatten
+  only follows `contains`/`alternatives`, never overlays).
+
+`onProposeStructure` now stamps overlays with the same
+`{capturedBy:'llm-proposed'}` provenance as nodes so judgments have somewhere
+to land; `_markStructJudgment` is reused since it only touches
+`.authoringMetadata`. Overlays persist via the existing `..._locDraft` spread
+in `saveLocale` (only when a valid structure is saved).
+
+**Consumer note.** As with the rest of the structure feature, the runtime
+`locale_ref` predicate path consumes only the flat landmark-UID set
+(`flattenLandmarkNodes`), which ignores overlays. The overlays' value is the
+LLM-as-author/user-as-reviewer training signal + human comprehension — the
+premise already accepted for C-lite/B-lite/B-mid, not a new abstraction.
+
+**Touched.**
+- `Sidepanel/modes/locale-capture.js` — `_overlayArr`, `_findOverlay`,
+  `_deleteOverlay`; `_renderOverlayRow`; overlay stamping in
+  `onProposeStructure`; `[data-overlay-action]` handlers.
+- `assets/sidepanel.css` — `.loc-struct-overlay-row` + inner styles; judged
+  tints generalized to cover overlay rows.
+
+## v2.74.347 — Structure gets a consumer: judgment-aware Re-structure (LOCALE_SPEC § 5/§ 13)
+
+**Date:** 2026-05-22
+**Decision by:** user ("Give structure a consumer").
+
+**Why this shape.** An Explore pass confirmed that **no downstream authoring
+prompt consumes locale landmarks via the LLM** — actions/fragments are authored
+manually + grounded on raw DOM (`suggestSelector`/`proposeNextStep` never see a
+landmark list). So there was no existing flat-list prompt to upgrade, and the
+structured tree (roles/containment/overlays) + the B-lite/B-mid review
+judgments had **no consumer at all** beyond being saved. Building a brand-new
+"author actions from landmarks" LLM surface would be a large, separate feature.
+The tightest genuinely-valuable consumer is the structure's own iterate loop.
+
+**What.** "🧬 Re-structure" previously discarded the reviewed structure and
+proposed from a blank slate — silently throwing away every accept/edit/reject.
+It now sends the current structure back to `proposeLocaleStructure` as
+`priorStructure`, turning the call into a **refine**:
+- The prior nodes + overlays are serialized to a compact outline with each
+  item's `[judgment]` (accepted / edited / rejected-but-kept) surfaced.
+- New system instructions: preserve accepted/edited arrangements verbatim;
+  re-think ONLY rejected ones + landmarks added since the last proposal.
+- First-time "Structure" (no prior) is unchanged — `priorStructure` is omitted
+  and the refine block is absent.
+- **Judgment carry-forward.** After a refine returns, the prior `userJudgment`
+  is re-applied to any node/overlay whose placement is unchanged (node: ref +
+  role + multiplicity + parent all match; overlay: name + exact members/steps
+  match). Without this, the post-refine re-stamp wiped every judgment —
+  forcing a full re-review and discarding the § 5 training signal each cycle.
+  Anything the LLM altered (or anything new) resets to unreviewed.
+
+This makes both the structured tree AND the § 5 `userJudgment` training signal
+an actual input to the LLM — closing the LLM-as-author / user-as-reviewer loop
+into an iterate cycle. Output path (sanitizer, completeness backfill) is
+untouched, so refine answers are still clamped to the allowed UID set.
+
+**Touched.**
+- `Services/AnthropicService.js` — `proposeLocaleStructure` gains
+  `priorStructure` param + conditional refine instructions; new
+  `#serializePriorStructure` (refs clamped to allowed set, dropped-ref children
+  promoted, judgments surfaced); `getPromptTexts` snapshot notes refine mode.
+- `background.js` — `PROPOSE_LOCALE_STRUCTURE` passes `priorStructure` through.
+- `Sidepanel/modes/locale-capture.js` — `onProposeStructure` builds
+  `priorStructure` from the draft on a re-structure.
+

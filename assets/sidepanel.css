@@ -4794,9 +4794,10 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   margin: 2px 0;
   border-left: 2px solid transparent;
 }
-.loc-struct-node.loc-struct-judged-ok   { border-left-color: rgba(61, 214, 140, 0.7); }
-.loc-struct-node.loc-struct-judged-rej  { border-left-color: rgba(247, 110, 110, 0.7); opacity: 0.7; }
-.loc-struct-node.loc-struct-judged-edit { border-left-color: rgba(125, 211, 252, 0.7); }
+/* v2.74.346 — judged tints shared by nodes + overlay rows */
+.loc-struct-judged-ok   { border-left-color: rgba(61, 214, 140, 0.7); }
+.loc-struct-judged-rej  { border-left-color: rgba(247, 110, 110, 0.7); opacity: 0.7; }
+.loc-struct-judged-edit { border-left-color: rgba(125, 211, 252, 0.7); }
 .loc-struct-alias {
   flex: 0 1 auto;
   min-width: 0;
@@ -4837,7 +4838,40 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 }
 .loc-struct-judge-btn.active        { background: rgba(61, 214, 140, 0.18); border-color: rgba(61, 214, 140, 0.6); color: rgba(61, 214, 140, 1); }
 .loc-struct-judge-rej.active        { background: rgba(247, 110, 110, 0.18); border-color: rgba(247, 110, 110, 0.6); color: rgba(252, 165, 165, 1); }
+/* v2.74.345 — B-mid re-nesting outline controls */
+.loc-struct-move-btn {
+  flex: 0 0 auto;
+  font-size: 11px;
+  line-height: 1;
+  padding: 1px 4px;
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 3px;
+  color: rgba(148, 163, 184, 0.7);
+  cursor: pointer;
+}
+.loc-struct-move-btn:hover:not(:disabled) { border-color: rgba(196, 181, 253, 0.6); color: rgba(196, 181, 253, 0.95); }
+.loc-struct-move-btn:disabled { opacity: 0.25; cursor: default; }
 .loc-struct-overlay { color: rgba(196, 181, 253, 0.85); font-size: 10.5px; margin-top: 3px; }
+/* v2.74.346 — B-mid overlay (grouping/sequence) review rows */
+.loc-struct-overlay-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  border-left: 2px solid transparent;
+}
+.loc-struct-overlay-glyph { flex: 0 0 auto; }
+.loc-struct-overlay-name {
+  flex: 0 0 auto;
+  width: 96px;
+  font-size: 10.5px;
+  padding: 1px 4px;
+  background: rgba(196, 181, 253, 0.07);
+  border: 1px solid rgba(196, 181, 253, 0.25);
+  border-radius: 3px;
+  color: rgba(229, 222, 255, 0.95);
+}
+.loc-struct-overlay-body { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ground-group-meta {
   display: flex;
   align-items: center;

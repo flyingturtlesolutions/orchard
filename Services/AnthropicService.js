@@ -1610,15 +1610,29 @@ Rules:
    * reviews. Returns null on failure. Prompt snapshot registered in
    * getPromptTexts under 'proposeLocaleStructure'.
    *
-   * @param {{ name?: string, description?: string, landmarks: Array<{uid:string, alias?:string, description?:string}> }} params
+   * v2.74.347 — LOCALE_SPEC § 5 review-as-input. When the caller passes
+   * `priorStructure` (the structure the user already reviewed, with per-node
+   * `authoringMetadata.userJudgment`), this becomes a REFINE call: the prior
+   * accepted/edited arrangements are preserved and the rejected ones are
+   * re-thought, instead of proposing from a blank slate. This is what makes
+   * the structured tree + the user's judgments an actual downstream consumer.
+   *
+   * @param {{ name?: string, description?: string, landmarks: Array<{uid:string, alias?:string, description?:string}>, priorStructure?: { nodes?: Array, groupings?: Array, sequences?: Array } }} params
    * @returns {Promise<{ nodes: Array, groupings: Array, sequences: Array }|null>}
    */
-  static async proposeLocaleStructure({ name, description, landmarks }) {
+  static async proposeLocaleStructure({ name, description, landmarks, priorStructure }) {
     const list = Array.isArray(landmarks)
       ? landmarks.filter(l => l && typeof l.uid === 'string' && l.uid)
       : [];
     if (list.length === 0) return null;
     const allowed = new Set(list.map(l => l.uid));
+    const aliasOf = new Map(list.map(l => [l.uid, l.alias ?? '(none)']));
+
+    // v2.74.347 — Serialize the prior reviewed structure (refs clamped to the
+    // current landmark set; judgments surfaced) so the model refines instead
+    // of starting over. Returns '' when there's nothing reviewed to refine.
+    const priorBlock = AnthropicService.#serializePriorStructure(priorStructure, allowed, aliasOf);
+    const refining = priorBlock !== '';
 
     const systemPrompt = `You organize a set of already-captured page landmarks into a structured "perspective" (a Locale) for a web-automation library. You are given the perspective's name + intent and a flat list of landmarks (each: a stable "ref" id, an alias, a description). Infer the STRUCTURE — which landmarks contain others, their semantic roles, and how many occur at runtime.
 
@@ -1640,17 +1654,27 @@ Rules:
 - "multiplicity" = one | many | optional | conditional. Use "many" for repeating items (list rows, reviews); default "one".
 - "groupings" (optional) = named clusters that cut across containment (e.g. all controls in a buying flow). "members" are ref ids.
 - "sequences" (optional) = ordered user-flow steps. "steps" are ref ids in order.
-- Don't force structure that isn't there — a flat list of root nodes is a fine answer when landmarks are unrelated.`;
+- Don't force structure that isn't there — a flat list of root nodes is a fine answer when landmarks are unrelated.${refining ? `
+
+REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous proposal — do NOT start over):
+- Each prior node/overlay carries a [judgment]:
+  - [accepted] — the user confirmed this. KEEP its role, containment, and placement unchanged.
+  - [edited] — the user adjusted this themselves. Treat the user's role/containment as authoritative; KEEP it.
+  - [rejected-but-kept] — the user flagged this arrangement as WRONG. Do NOT re-propose it; find a DIFFERENT structure for those landmarks.
+  - (no marker) — unreviewed; you may keep or improve it.
+- Preserve every accepted/edited arrangement verbatim in your output.
+- Re-think only the rejected arrangements plus any landmark NOT present in the prior structure (newly added since the last proposal).
+- The output shape is unchanged — still the full nodes/groupings/sequences JSON over ALL current landmarks.` : ''}`;
 
     const lmBlock = list.map(l =>
       `- ref: ${l.uid}\n  alias: ${l.alias ?? '(none)'}\n  desc: ${(l.description ?? '').trim() || '(none)'}`
     ).join('\n');
     const userContent = [{
       type: 'text',
-      text: `Perspective name: ${name ?? '(unnamed)'}\nIntent: ${(description ?? '').trim() || '(none)'}\n\nLandmarks:\n${lmBlock}`,
+      text: `Perspective name: ${name ?? '(unnamed)'}\nIntent: ${(description ?? '').trim() || '(none)'}\n\nLandmarks:\n${lmBlock}${refining ? `\n\nPRIOR REVIEWED STRUCTURE (refine this):\n${priorBlock}` : ''}`,
     }];
 
-    Logger.info('AnthropicService', `proposeLocaleStructure — "${name ?? '?'}" over ${list.length} landmark(s)`);
+    Logger.info('AnthropicService', `proposeLocaleStructure — "${name ?? '?'}" over ${list.length} landmark(s)${refining ? ' [refine]' : ''}`);
 
     let parsed;
     try {
@@ -1713,6 +1737,56 @@ Rules:
       groupings: sanitizeOverlay(parsed.groupings, 'members'),
       sequences: sanitizeOverlay(parsed.sequences, 'steps'),
     };
+  }
+
+  /**
+   * v2.74.347 — Serialize a prior reviewed structure into a compact outline
+   * for the refine path of proposeLocaleStructure. Refs are clamped to the
+   * current landmark set (`allowed`); a node whose ref was removed is dropped
+   * but its children are preserved (promoted in place). Per-node/overlay
+   * `authoringMetadata.userJudgment` is surfaced as a [marker] so the model
+   * knows what to keep vs. re-think. Returns '' when nothing is renderable.
+   * @returns {string}
+   */
+  static #serializePriorStructure(prior, allowed, aliasOf) {
+    if (!prior || typeof prior !== 'object') return '';
+    const mark = (o) => {
+      const v = o?.authoringMetadata?.userJudgment;
+      return (v === 'accepted' || v === 'edited' || v === 'rejected-but-kept') ? ` [${v}]` : '';
+    };
+    const renderNodes = (arr, depth) => {
+      let out = '';
+      for (const n of Array.isArray(arr) ? arr : []) {
+        const ref = (n && typeof n.ref === 'string') ? n.ref : null;
+        if (ref && allowed.has(ref)) {
+          const pad  = '  '.repeat(depth);
+          const role = (typeof n.role === 'string' && n.role.trim()) ? ` role=${n.role.trim()}` : '';
+          const mult = (typeof n.multiplicity === 'string' && n.multiplicity.trim()) ? ` mult=${n.multiplicity.trim()}` : '';
+          out += `${pad}- ref: ${ref} (${aliasOf.get(ref) ?? '?'})${role}${mult}${mark(n)}\n`;
+          if (Array.isArray(n.contains)) out += renderNodes(n.contains, depth + 1);
+        } else if (n && Array.isArray(n.contains)) {
+          out += renderNodes(n.contains, depth);   // ref gone → promote children
+        }
+      }
+      return out;
+    };
+    const renderOverlay = (arr, key, label) => {
+      let out = '';
+      for (const o of Array.isArray(arr) ? arr : []) {
+        const name = (o && typeof o.name === 'string' && o.name.trim()) ? o.name.trim() : null;
+        const members = (Array.isArray(o?.[key]) ? o[key] : []).filter(r => typeof r === 'string' && allowed.has(r));
+        if (name && members.length) out += `- ${label} ${name}: ${members.map(r => aliasOf.get(r) ?? r).join(', ')}${mark(o)}\n`;
+      }
+      return out;
+    };
+    const nodes = renderNodes(prior.nodes, 0);
+    const grp   = renderOverlay(prior.groupings, 'members', 'grouping');
+    const seq   = renderOverlay(prior.sequences, 'steps', 'sequence');
+    let block = '';
+    if (nodes) block += `nodes:\n${nodes}`;
+    if (grp)   block += `groupings:\n${grp}`;
+    if (seq)   block += `sequences:\n${seq}`;
+    return block.trim();
   }
 
   /**
@@ -3764,7 +3838,9 @@ Rules:
 - Use ONLY the provided ref ids; never invent ids. EVERY provided landmark must appear EXACTLY ONCE in the nodes tree.
 - "contains" = DOM-like containment (a section holds its items; a list holds its rows). Keep nesting shallow + meaningful.
 - "role" = short lowercase semantic role (product-name, primary-action, results-list, result…). "multiplicity" = one|many|optional|conditional ("many" for repeating items).
-- "groupings" = named clusters cutting across containment; "sequences" = ordered user-flow steps. Don't force structure that isn't there — flat roots are fine.`,
+- "groupings" = named clusters cutting across containment; "sequences" = ordered user-flow steps. Don't force structure that isn't there — flat roots are fine.
+
+REFINE MODE (v2.74.347): when the call includes a PRIOR REVIEWED STRUCTURE, this becomes a refinement — each prior node/overlay carries a [judgment] ([accepted]/[edited]/[rejected-but-kept]). Preserve accepted/edited arrangements verbatim; re-think only rejected ones + landmarks new since the last proposal.`,
 
       deriveGroundDescription: `You are writing a short, factual summary of a "Ground" — a user's automation surface for a single website. The Ground is COMPOSED of Locales (each Locale is a "kind of page" on the site, with a name and description). Synthesize what the WHOLE site-level automation surface is for, from its constituent Locales.
 
