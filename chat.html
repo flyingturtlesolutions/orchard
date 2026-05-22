@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AHuB</title>
+  <link rel="stylesheet" href="assets/chat.css" />
+</head>
+<body class="chat-page">
+
+  <!-- ── App header ─────────────────────────────────────────────────────── -->
+  <header class="app-header">
+    <button class="icon-btn" id="btn-history" title="Conversation history">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="3" y1="6" x2="21" y2="6"/>
+        <line x1="3" y1="12" x2="21" y2="12"/>
+        <line x1="3" y1="18" x2="21" y2="18"/>
+      </svg>
+    </button>
+    <div class="app-brand">
+      <span class="app-brand-mark">◈</span>
+      <span class="app-brand-name">AHuB</span>
+    </div>
+    <div class="app-header-actions">
+      <!-- v2.27.0 — Studio launcher. Opens the Studio tab (authoring surface).
+           Lab button removed in message 3 of the Studio relocation: sidepanel
+           is now chat-only, there's no Lab mode to switch to. -->
+      <button class="icon-btn" id="btn-open-studio" title="Open Studio (authoring tab)">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 3h7v7"/>
+          <path d="M10 14L21 3"/>
+          <path d="M21 14v7H3V3h7"/>
+        </svg>
+      </button>
+      <!-- v2.71.4 — Hide panel button. Closes the side panel without
+           cancelling running invocations. User reopens via the toolbar
+           icon. Toolbar badge indicates running tasks. -->
+      <button class="icon-btn" id="btn-hide-panel" title="Hide panel (running tasks continue)">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- ── v2.71.7 — Running-invocations transport bar ──────────────────────
+       Sticky below the header. Renders rows for each running invocation
+       with a stop button. Hidden when nothing is running. Visible regardless
+       of which conversation is loaded — shows global running state.
+  -->
+  <div class="running-bar hidden" id="running-bar"></div>
+
+  <!-- ── History sidebar (slide-over) ───────────────────────────────────── -->
+  <div class="history-overlay hidden" id="history-overlay"></div>
+  <aside class="history-sidebar hidden" id="history-sidebar">
+    <div class="history-header">
+      <span class="history-title">Conversations</span>
+      <button class="icon-btn" id="btn-close-history" title="Close">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <button class="history-new-btn" id="btn-new-conversation">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 5v14M5 12h14"/>
+      </svg>
+      <span>New conversation</span>
+    </button>
+    <div class="history-list" id="history-list">
+      <div class="history-empty">No conversations yet.</div>
+    </div>
+  </aside>
+
+  <!-- ── Main conversation area ─────────────────────────────────────────── -->
+  <main class="conversation" id="conversation">
+    <!-- Empty state — shown when no messages yet -->
+    <div class="empty-state" id="empty-state">
+      <div class="empty-state-content">
+        <h1 class="empty-state-greeting">How can I help you today?</h1>
+        <p class="empty-state-subtitle" id="empty-state-subtitle">
+          Loading available capabilities…
+        </p>
+        <div class="suggestion-cards" id="suggestion-cards"></div>
+      </div>
+    </div>
+
+    <!-- Message list — populated as conversation progresses -->
+    <div class="messages hidden" id="messages"></div>
+  </main>
+
+  <!-- v2.72.52 (Stage 3) — Walk-mode <section> removed. Chat no longer
+       overlays a walk panel; chat is only chat. v2.74.22 — The
+       fragment-walk sidepanel mode that this comment used to point at
+       is gone too (AI-walked path eliminated); fragment authoring lives
+       in the sidepanel fragment-author mode. -->
+
+  <!-- ── Input area ─────────────────────────────────────────────────────── -->
+  <div class="input-area">
+    <div class="input-container">
+      <!-- Slash command picker — shown when input starts with / -->
+      <div class="slash-picker hidden" id="slash-picker">
+        <div class="slash-picker-header">
+          <span class="slash-picker-hint">
+            <kbd>↑↓</kbd> navigate · <kbd>↵</kbd> select · <kbd>esc</kbd> dismiss
+          </span>
+        </div>
+        <div class="slash-picker-list" id="slash-picker-list"></div>
+      </div>
+
+      <span class="input-status" id="input-status"></span>
+      <div class="input-row">
+        <textarea
+          id="chat-input"
+          class="chat-input"
+          rows="1"
+          placeholder="Message AHuB…  (type / for capabilities)"></textarea>
+        <button class="send-btn" id="btn-chat-send" disabled title="Send message">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="19" x2="12" y2="5"/>
+            <polyline points="5 12 12 5 19 12"/>
+          </svg>
+        </button>
+      </div>
+      <div class="input-meta">
+        <span class="input-hint">Enter to send · Shift+Enter for newline · / for capabilities</span>
+        <button class="link-btn" id="btn-toggle-drawer" title="Show capability buttons">
+          Browse capabilities
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Capability picker drawer ───────────────────────────────────────── -->
+  <div class="capability-drawer hidden" id="capability-drawer">
+    <div class="drawer-header">
+      <span class="drawer-title">Available capabilities</span>
+      <button class="icon-btn" id="btn-close-drawer" title="Close">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <div class="drawer-content" id="capability-list"></div>
+  </div>
+
+  <!-- Toast notifications -->
+  <div class="toast hidden" id="toast"></div>
+
+  <script type="module" src="chat.js"></script>
+</body>
+</html>

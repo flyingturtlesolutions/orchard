@@ -1,0 +1,5643 @@
+/**
+ * @file Sidepanel/modes/locale-capture.js
+ * @description Locale-capture sidepanel mode. Extracted from debugger.js
+ * during Stage 1 of the multi-mode-sidepanel refactor (v2.72.50).
+ *
+ * Lifecycle:
+ *   mount(payload, mountEl)    — render HTML, wire listeners, fetch session
+ *   unmount()                   — remove listeners, clear state
+ *   handleEvent(message)        — receive forwarded chrome.runtime messages
+ *
+ * Payload contract:
+ *   { groundId, tabId?, sessionId? }
+ *   - groundId is required (which Ground we're authoring locales for)
+ *   - tabId/sessionId are populated from background's pending capture
+ *     session if present; otherwise the mode falls back to active-tab
+ *     tracking
+ *
+ * The mode is self-contained: it does NOT import from shell.js, debugger.js,
+ * or other mode modules. All cross-mode interaction goes through:
+ *   - shell-api.js (toast, getActiveTab, pingContentScript, requestModeChange)
+ *   - chrome.runtime.sendMessage (background coordination)
+ *
+ * @module Sidepanel/modes/locale-capture
+ * @author Agent HUB
+ * @version 2.72.50
+ */
+
+import { toast, getActiveTab, pingContentScript, exitToStudio, requestModeChange } from '../shell-api.js';
+// v2.74.166 — Frame-aware picker broadcast — same path fragment-author
+// and observation-author use, so locale landmarks can target same-origin
+// iframes too.
+import { broadcastStartPick, broadcastCancelPick } from '../../shared.js';
+// v2.74.231 — Auto-generate description from landmarks on save when
+// the author left it blank (mirrors the fragment-author / observation-
+// author pattern). Pure function, no DOM, no I/O.
+import { composeCompactDescription } from '../../Services/LocaleDescription.js';
+import { subscribe as subscribeGroundEvents } from '../../Services/GroundEventBus.js';
+import { isLocaleActive } from '../../Services/LocalePredicates.js';
+// v2.74.232 — Logger so "Ask Claude" suggestion outcomes land in the
+// Logs tab alongside the equivalents in fragment-author / observation-
+// author.
+import { Logger } from '../../Core/Logger.js';
+// v2.74.336 — Phase C-lite: flatten LandmarkNode trees for save-time coverage.
+import { flattenLandmarkNodes } from '../../Core/localeComposition.js';
+// v2.74.234 — Wave 1 of the landmark SSOT project. Pure helpers that
+// derive capabilities, allowed operations, and a verification score
+// from the INSPECT_ELEMENT fingerprint. Persisted on the landmark
+// record so downstream consumers (fragment actions, observation
+// extracts) can filter their dropdowns without re-running checks.
+import {
+  deriveCapabilities,
+  deriveAllowedOperations,
+  computeVerificationScore,
+  // v2.74.288 — Tier classifier for selector authority comparison.
+  // Picker's rule-based selector is the floor; Claude's Wave-2
+  // proposal is adopted only when it scores a STRICTLY lower tier
+  // (= more stable discriminator).
+  classifySelectorTier,
+} from '../../Services/LandmarkProfile.js';
+
+// ─── Module-local state ───────────────────────────────────────────────────
+//
+// All state is module-scoped — there's only ever one locale-capture mode
+// active at a time. unmount() clears everything.
+
+let _locDraft = null;             // working copy of the locale being authored
+let _locGroundId = null;          // session-scoped: which Ground
+let _locTabId = null;             // currently-tracked tab (the active tab)
+// v2.74.33 — Where Save / Cancel should send the user. 'ground-view' =
+// switch back to the Ground sidepanel mode; otherwise exitToStudio.
+let _locReturnTo = null;
+// v2.74.47 — Edit mode flag. Set when prefilledLocale carries an `id`
+// (Ground sidepanel's ✎ edit-locale path). When true, refreshLocale
+// ActiveTab skips overwriting the URL-pattern input with the active
+// tab's URL — the saved pattern is preserved.
+let _locIsEdit = false;
+let _locPickerSession = null;     // {sessionId, landmarkIdx} when picking
+let _mountEl = null;              // root element we rendered into
+// v2.74.233 — Per-landmark "refining with Claude" status text. Set on
+// the landmark idx when the picker just captured and Claude is being
+// invoked to refine; cleared when Claude responds (success or fail).
+// Surface text is shown inline below the landmark row so the author
+// knows pick is still in flight.
+let _landmarkRefining = new Map();
+// v2.74.235 — Per-landmark profile drawer expansion state. Ephemeral
+// (not saved). Drawer is collapsed by default — author clicks to
+// expand. Auto-expands after a fresh Pick→Claude completes so the
+// author sees the generated profile immediately and can review/edit.
+let _landmarkProfileExpanded = new Set();
+// v2.74.257 — Phase 10/10.5 surface: in-row replacement picker state.
+//   _landmarkReplaceOpen[idx]: 'loading' | 'ready' | 'error' | absent
+//   _landmarkReplaceCandidates[idx]: candidate array from Phase 10.5
+// Both are ephemeral (not persisted). Opening the picker triggers a
+// FIND_REPLACEMENT_CANDIDATES call; clicking a candidate triggers a
+// REPLACE_LANDMARK_REFERENCES dry-run preview then commit-on-confirm.
+let _landmarkReplaceOpen       = new Map();
+let _landmarkReplaceCandidates = new Map();
+let _landmarkReplaceError      = new Map();
+// v2.74.258 — Phase 9 surface: per-row Verify state.
+//   _landmarkVerifyInFlight[idx]: true while VERIFY_LANDMARK runs
+//   _landmarkVerifyOutcome[idx]: last outcome { via, error?, ts }
+// Outcome banner clears on next Pick / lifecycle-changing edit;
+// in-flight state blocks repeated clicks during the round-trip.
+let _landmarkVerifyInFlight = new Set();
+let _landmarkVerifyOutcome  = new Map();
+// v2.74.259 — Phase 8 surface: substrate events panel state.
+//   _eventsExpanded: open/closed
+//   _eventsCache: last fetched events array
+//   _eventsLandmarkNames: uid → accessibleName lookup populated lazily
+//   _eventsLoading: in-flight flag to avoid duplicate fetches
+let _eventsExpanded       = false;
+let _eventsCache          = null;
+let _eventsLandmarkNames  = new Map();
+let _eventsLoading        = false;
+// DOM refs for events panel (resolved in mount).
+let locEventsToggleBtn   = null;
+let locEventsBody        = null;
+let locEventsList        = null;
+let locEventsCount       = null;
+let locEventsClearBtn    = null;
+// v2.74.262 — Bulk verify affordance refs + in-flight flag.
+let locEventsStaleBadge   = null;
+let locEventsVerifyAllBtn = null;
+let locEventsBulkOutcome  = null;
+let _eventsBulkVerifyInFlight = false;
+// v2.74.272 — Health summary banner state. Re-rendered on initial
+// fetch, after bulk-verify, and (cheaply) on each new live event.
+// Stores the last-fetched landmark snapshot so live event additions
+// can recompute without an extra LIST_LANDMARKS_FOR_GROUND round-trip.
+let locEventsHealth     = null;
+let _eventsLandmarksCache = [];
+// v2.74.263 — Live event streaming. While the events panel is open,
+// chrome.storage.onChanged fires for new GroundEventBus writes;
+// subscribe() wraps that and invokes the callback with diffed-new
+// events. Unsubscribe handle is tracked so close/unmount tears down.
+let _eventsUnsubscribe = null;
+// v2.74.266 — Phase 6.5 closure: drift-confirmation UX. Tracks which
+// landmark-effect-drift events have been applied this session
+// (proposedEffect → observedEffect) so the row shows "✓ Applied"
+// instead of the Apply button. Ephemeral (session-scoped); the
+// substrate-level effect of the update is permanent via
+// updateLandmark, which would suppress future drift events for the
+// same effect mismatch automatically.
+let _eventsAppliedDrift = new Set();
+let _eventsApplyInFlight = new Set();
+// v2.74.260 — Phase 7d surface: predicate authoring DOM refs.
+let locPredicatesList   = null;
+let locPredicatesAddBtn = null;
+// v2.74.271 — Top-level operator selector. The draft's predicates may
+// be stored as either a plain array (implicit AND) or a tree object
+// { operator, children }. _predicatesOperator tracks the authored
+// top-level operator separately so we can serialize back to either
+// shape on save.
+let locPredicatesOpSelect = null;
+let locPredicatesHint     = null;
+let _predicatesOperator   = 'and';
+// v2.74.267 — iframe contexts editor DOM refs + ephemeral test state.
+//   _iframeTestOutcome[idx] = { kind: 'ok'|'absent'|'error', message, sameOrigin? }
+let locIframeContextsList = null;
+let locIframeContextsAdd  = null;
+let _iframeTestOutcome    = new Map();
+let _iframeTestInFlight   = new Set();
+// v2.74.265 — Active-state preview refs + state. Last evaluation is
+// cached so the section shows something meaningful while a fresh
+// evaluation runs in the background (avoids "blank" flicker).
+let locActiveStateRefreshBtn = null;
+let locActiveStateResult     = null;
+let _activeStateEvaluating   = false;
+let _activeStateDebounce     = null;
+
+// Listeners we registered, captured so unmount can remove them.
+let _onTabActivated = null;
+let _onTabUpdated = null;
+let _onKeyDown = null;
+// v2.74.46 — Focus / blur handlers on the sidepanel window. While the
+// panel is focused, verified-landmark overlays are drawn on the
+// authoring tab; when the user clicks away to interact with the page,
+// the overlays clear so they don't obstruct interaction. Coming back
+// to the panel redraws them.
+let _onPanelFocus = null;
+let _onPanelBlur = null;
+
+// DOM refs populated on mount. All are scoped to _mountEl.
+let locGroundLabelEl = null;
+let locTabUrlEl = null;
+let locWarningEl = null;
+let locNameInput = null;
+let locDescriptionInput = null;
+// v2.74.275 — locPatternInput removed.
+let locLandmarksList = null;
+let locAddLandmarkBtn = null;
+// v2.74.231 — Rediscover button ref (icon at top-right of landmarks card).
+let locRediscoverBtn = null;
+let locSaveBtn = null;
+let locCancelBtn = null;
+// v2.74.282 — Reason hint shown when Save Locale is disabled.
+let locSaveReasonEl = null;
+let locPickBanner = null;
+let locPickCancelBtn = null;
+
+// ─── HTML template ────────────────────────────────────────────────────────
+
+function renderHTML() {
+  return `
+    <div class="dbg-locale">
+      <header class="dbg-locale-header">
+        <div class="dbg-locale-title-row">
+          <span class="dbg-locale-badge">Locale capture</span>
+          <span data-loc="ground-label" class="dbg-locale-ground-label">on Ground: —</span>
+        </div>
+        <div class="dbg-locale-meta">
+          <span class="dbg-locale-meta-label">Active tab</span>
+          <span data-loc="tab-url" class="dbg-locale-meta-value mono">—</span>
+        </div>
+        <div data-loc="warning" class="dbg-locale-warning hidden"></div>
+      </header>
+
+      <section class="dbg-locale-meta-card dbg-locale-card" data-card-id="meta">
+        <button type="button" class="dbg-locale-card-head" data-card-toggle aria-expanded="true">
+          <span class="dbg-locale-card-chevron">▾</span>
+          <span class="dbg-locale-card-label">Locale</span>
+        </button>
+        <div class="dbg-locale-card-body">
+          <label class="dbg-locale-field">
+            <span class="dbg-locale-field-label">Name</span>
+            <input type="text" data-loc="name-input" maxlength="80"
+                   placeholder="e.g. search-results-page" />
+          </label>
+          <label class="dbg-locale-field">
+            <span class="dbg-locale-field-label">Description</span>
+            <textarea data-loc="description-input" rows="2" maxlength="280"
+                      placeholder="What kind of page is this?"></textarea>
+          </label>
+        </div>
+        <!-- v2.74.275 — Legacy urlPattern field REMOVED. URL gating
+             now expressed exclusively via a urlMatches predicate in
+             the Additional predicates section. New locales auto-seed
+             a urlMatches predicate from the current tab URL on first
+             Pick (see refreshLocaleActiveTab). -->
+      </section>
+
+      <!-- v2.74.283 — Outdated instructions block removed. The empty-
+           state hint in the Landmarks card now carries the same info
+           ("No landmarks yet — click + Pick landmark to add one.")
+           and the + Pick landmark button enters pick mode directly,
+           so the "click Pick to enter pick-mode" guidance is obsolete. -->
+
+      <!-- v2.74.267 — iframe contexts editor. Phase 7a/7b authoring
+           was previously a side-effect of Pick→Claude when an iframe
+           landmark was picked; this section makes the contexts
+           authorable directly. Authors can rename contexts (cascades
+           to referencing landmarks), edit predicates per kind, test
+           predicates against the live page, and remove contexts
+           (with warning if landmarks reference them). -->
+      <section class="dbg-locale-iframe-contexts dbg-locale-card" data-card-id="iframe-contexts">
+        <div class="dbg-locale-card-head-row">
+          <button type="button" class="dbg-locale-card-head" data-card-toggle aria-expanded="true">
+            <span class="dbg-locale-card-chevron">▾</span>
+            <span class="dbg-locale-card-label">iframe contexts</span>
+            <span class="dbg-locale-card-optional">(optional)</span>
+          </button>
+          <button data-loc="iframe-contexts-add" class="btn-secondary tiny" type="button">+ Add iframe context</button>
+        </div>
+        <div class="dbg-locale-card-body">
+          <div data-loc="iframe-contexts-list" class="dbg-locale-iframe-contexts-list">
+            <div class="dbg-locale-iframe-contexts-empty">No iframe contexts. Landmarks picked from iframes auto-populate this list.</div>
+          </div>
+          <p class="dbg-locale-iframe-contexts-hint">
+            Each context names an iframe by a predicate (name, selector, src pattern, or position). Landmarks bind to a context by name, so the engine can route to the right iframe even when its src changes between runs.
+          </p>
+        </div>
+      </section>
+
+      <!-- v2.74.260 — Phase 7d surface: additional predicates. The
+           URL pattern above remains the primary URL gate (legacy
+           shape). Additional predicates AND with it at runtime via
+           LocalePredicates.isLocaleActive, gating which Locale is
+           active for the current page state. Tree-form operators
+           (OR / NOT) are not authorable in this MVP — single-level
+           AND covers the common case. Edit raw locale.predicates in
+           storage for OR/NOT until a tree editor lands. -->
+      <section class="dbg-locale-predicates dbg-locale-card" data-card-id="predicates">
+        <div class="dbg-locale-card-head-row">
+          <button type="button" class="dbg-locale-card-head" data-card-toggle aria-expanded="true">
+            <span class="dbg-locale-card-chevron">▾</span>
+            <span class="dbg-locale-card-label">Additional predicates</span>
+            <span class="dbg-locale-card-optional">(optional)</span>
+          </button>
+          <label class="dbg-locale-predicates-op-label">
+            <span>combine with</span>
+            <select data-loc="predicates-operator" class="dbg-locale-predicates-operator">
+              <option value="and">AND (all must pass)</option>
+              <option value="or">OR (any must pass)</option>
+              <option value="not">NOT (single predicate, negated)</option>
+            </select>
+          </label>
+          <button data-loc="predicates-add" class="btn-secondary tiny" type="button">+ Add predicate</button>
+        </div>
+        <div class="dbg-locale-card-body">
+          <div data-loc="predicates-list" class="dbg-locale-predicates-list">
+            <div class="dbg-locale-predicates-empty">No additional predicates. Locale activates on URL pattern match alone.</div>
+          </div>
+          <p class="dbg-locale-predicates-hint" data-loc="predicates-hint">
+            Locale is active when URL pattern matches AND every predicate below evaluates true. Unverifiable predicates (e.g., landmark not on page) fail closed.
+          </p>
+        </div>
+      </section>
+
+      <section class="dbg-locale-landmarks dbg-locale-card" data-card-id="landmarks">
+        <div class="dbg-locale-card-head-row">
+          <button type="button" class="dbg-locale-card-head" data-card-toggle aria-expanded="true">
+            <span class="dbg-locale-card-chevron">▾</span>
+            <span class="dbg-locale-card-label">Landmarks</span>
+          </button>
+          <button data-loc="rediscover" class="dbg-locale-landmarks-rediscover" type="button"
+                  title="Re-run auto-discovery on this page (replaces current landmarks)">
+            <span class="dbg-locale-landmarks-rediscover-icon" aria-hidden="true">⟳</span>
+            <span class="dbg-locale-landmarks-rediscover-label">Rediscover</span>
+          </button>
+        </div>
+        <div class="dbg-locale-card-body">
+          <div data-loc="landmarks-list" class="dbg-locale-landmarks-list">
+            <div class="dbg-locale-landmarks-empty">No landmarks yet.</div>
+          </div>
+          <div class="dbg-locale-landmarks-footer">
+            <button data-loc="add-landmark" class="btn-secondary tiny" type="button" title="Click, then pick an element on the page. The landmark card appears after the pick is complete and Claude refines the selector.">+ Pick landmark</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- v2.74.259 — Phase 8 surface: ground event log. Collapsed by
+           default so it doesn't crowd the row when the author isn't
+           investigating. Click the header to expand; fetch fires
+           per-open. Count badge previews how many events are in the
+           ring buffer when the panel is closed. -->
+      <!-- v2.74.265 — Locale active-state preview. Substrate's
+           isLocaleActive evaluator (Phase 7d) is invoked against the
+           current tab + draft state on mount and on demand via the
+           refresh button. Surfaces ✓/✗/⚠ with per-leaf reasons so
+           authors can see WHY a predicate fails (e.g., "landmark not
+           visible on page" vs "URL pattern doesn't match"). -->
+      <section class="dbg-locale-active-state dbg-locale-card" data-card-id="active-state">
+        <div class="dbg-locale-card-head-row">
+          <button type="button" class="dbg-locale-card-head" data-card-toggle aria-expanded="true">
+            <span class="dbg-locale-card-chevron">▾</span>
+            <span class="dbg-locale-card-label">Active state preview</span>
+          </button>
+          <button data-loc="active-state-refresh" class="btn-secondary tiny" type="button" title="Re-evaluate predicates against the current tab">Refresh</button>
+        </div>
+        <div class="dbg-locale-card-body">
+          <div data-loc="active-state-result" class="dbg-locale-active-state-result">
+            <span class="dbg-locale-active-state-loading">⌛ Evaluating…</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="dbg-locale-events" data-loc="events-section">
+        <button class="dbg-locale-events-header" data-loc="events-toggle" type="button" aria-expanded="false">
+          <span class="dbg-locale-events-chevron">▸</span>
+          <span class="dbg-locale-events-label">Substrate events</span>
+          <span class="dbg-locale-events-count" data-loc="events-count"></span>
+          <span class="dbg-locale-events-stale-badge hidden" data-loc="events-stale-badge" title="Landmarks on this Ground currently marked stale-suspected"></span>
+        </button>
+        <div class="dbg-locale-events-body hidden" data-loc="events-body">
+          <!-- v2.74.272 — Health summary banner. Aggregates from the
+               already-fetched landmarks (lifecycle counts) and events
+               (recent activity by kind). Single-glance overview of
+               Ground-wide substrate state. -->
+          <div class="dbg-locale-events-health" data-loc="events-health"></div>
+          <div class="dbg-locale-events-list" data-loc="events-list"></div>
+          <div class="dbg-locale-events-bulk-outcome hidden" data-loc="events-bulk-outcome"></div>
+          <div class="dbg-locale-events-footer">
+            <span class="dbg-locale-events-hint">Per-Ground ring buffer (max 200 events). Includes runtime recovery, verifier outcomes, and action-effect observations.</span>
+            <button class="btn-secondary tiny" data-loc="events-verify-all" type="button" title="Re-probe every landmark currently in stale-suspected. Cached selector works → verified. Heuristic recovery → verified + selector updated. Both fail → stale-confirmed.">Verify all stale</button>
+            <button class="btn-secondary tiny" data-loc="events-clear" type="button" title="Clear the event log for this Ground">Clear log</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="dbg-locale-actions">
+        <!-- v2.74.282 — Reason hint surfaces the first blocking
+             condition when the Save button is disabled, so authors
+             don't have to guess what's missing. Hidden when save is
+             enabled. Title attribute on the button mirrors the
+             text for hover discoverability. -->
+        <div data-loc="save-reason" class="dbg-locale-save-reason hidden"></div>
+        <div class="dbg-locale-actions-buttons">
+          <button data-loc="save" class="btn-primary" type="button" disabled>Save Locale</button>
+          <button data-loc="cancel" class="btn-secondary" type="button">Cancel</button>
+        </div>
+      </section>
+
+      <div data-loc="pick-banner" class="dbg-locale-pick-banner hidden">
+        <span class="dbg-locale-pick-text">Click an element on the page to pick a selector. Press Esc to cancel.</span>
+        <button data-loc="pick-cancel" class="btn-secondary tiny" type="button">Cancel pick</button>
+      </div>
+    </div>
+  `;
+}
+
+// ─── Mount ────────────────────────────────────────────────────────────────
+
+async function mount(payload, mountEl) {
+  _mountEl = mountEl;
+  mountEl.innerHTML = renderHTML();
+
+  // Resolve DOM refs (scoped to mountEl).
+  const q = (sel) => mountEl.querySelector(`[data-loc="${sel}"]`);
+  locGroundLabelEl   = q('ground-label');
+  locTabUrlEl        = q('tab-url');
+  locWarningEl       = q('warning');
+  locNameInput       = q('name-input');
+  locDescriptionInput= q('description-input');
+  // v2.74.275 — locPatternInput removed.
+  locLandmarksList   = q('landmarks-list');
+  locAddLandmarkBtn  = q('add-landmark');
+  locRediscoverBtn   = q('rediscover');
+  locSaveBtn         = q('save');
+  locSaveReasonEl    = q('save-reason');
+  locCancelBtn       = q('cancel');
+  locPickBanner      = q('pick-banner');
+  locPickCancelBtn   = q('pick-cancel');
+  locEventsToggleBtn   = q('events-toggle');
+  locEventsBody        = q('events-body');
+  locEventsList        = q('events-list');
+  locEventsCount       = q('events-count');
+  locEventsClearBtn    = q('events-clear');
+  locEventsStaleBadge  = q('events-stale-badge');
+  locEventsVerifyAllBtn= q('events-verify-all');
+  locEventsBulkOutcome = q('events-bulk-outcome');
+  locEventsHealth      = q('events-health');
+  if (locEventsToggleBtn)    locEventsToggleBtn.addEventListener('click', _toggleEventsPanel);
+  if (locEventsClearBtn)     locEventsClearBtn.addEventListener('click', _clearEventsPanel);
+  if (locEventsVerifyAllBtn) locEventsVerifyAllBtn.addEventListener('click', _verifyAllStaleOnGround);
+  // v2.74.260 — Predicates DOM refs + add handler.
+  locPredicatesList   = q('predicates-list');
+  locPredicatesAddBtn = q('predicates-add');
+  if (locPredicatesAddBtn) locPredicatesAddBtn.addEventListener('click', _addPredicate);
+  // v2.74.271 — Top-level operator selector.
+  locPredicatesOpSelect = q('predicates-operator');
+  locPredicatesHint     = q('predicates-hint');
+  if (locPredicatesOpSelect) locPredicatesOpSelect.addEventListener('change', _onPredicatesOperatorChange);
+  // v2.74.267 — iframe contexts editor refs + add handler.
+  locIframeContextsList = q('iframe-contexts-list');
+  locIframeContextsAdd  = q('iframe-contexts-add');
+  if (locIframeContextsAdd) locIframeContextsAdd.addEventListener('click', _addIframeContext);
+  // v2.74.265 — Active-state preview refs + handler.
+  locActiveStateRefreshBtn = q('active-state-refresh');
+  locActiveStateResult     = q('active-state-result');
+  if (locActiveStateRefreshBtn) {
+    locActiveStateRefreshBtn.addEventListener('click', () => _evaluateActiveState({ immediate: true }));
+  }
+
+  // Initialize state from payload, or fetch from background if not provided.
+  // The shell may pass payload directly OR rely on background's pending
+  // session (set by BEGIN_LOCALE_CAPTURE).
+  let groundId = payload?.groundId ?? null;
+  let tabId    = payload?.tabId ?? null;
+
+  if (!groundId) {
+    try {
+      const res = await chrome.runtime.sendMessage({ type: 'GET_PENDING_LOCALE_CAPTURE' });
+      if (res?.success && res.session) {
+        groundId = res.session.groundId;
+        tabId    = res.session.tabId;
+      }
+    } catch (e) {
+      console.warn('[locale-capture] GET_PENDING_LOCALE_CAPTURE failed', e?.message);
+    }
+  }
+
+  if (!groundId) {
+    // No session — show idle-style message.
+    locGroundLabelEl.textContent = 'No active capture session';
+    return;
+  }
+
+  _locGroundId = groundId;
+  _locTabId = tabId;
+  _locReturnTo = payload?.returnTo ?? null;
+  _locDraft = newEmptyLocaleDraft(groundId);
+
+  // v2.74.43 — Seed the draft from a prefilled locale. Two callers:
+  //   • + Auto in the Ground sidepanel (no id) — Claude-suggested
+  //     name/description/landmarks. Landmarks come in unverified;
+  //     authoredBy flips to 'model' for the ⚡ badge.
+  //   • ✎ Edit in the Ground sidepanel (has id) — existing record.
+  //     Preserve id + urlPattern + authoredBy + per-landmark verified
+  //     state so the user lands in the saved record exactly as it was.
+  //     v2.74.47 — _locIsEdit flag gates refreshLocaleActiveTab so the
+  //     URL-pattern input isn't overwritten by the current tab URL.
+  const prefilled = payload?.prefilledLocale;
+  if (prefilled && typeof prefilled === 'object') {
+    _locIsEdit = typeof prefilled.id === 'string' && prefilled.id.length > 0;
+    if (_locIsEdit)                                _locDraft.id          = prefilled.id;
+    // v2.74.245 — Phase 7a: locale-scoped iframe context declarations.
+    // Carry through from the saved record so subsequent picks can
+    // dedup against existing contexts and the drawer can surface
+    // the iframe binding for hydrated landmarks.
+    if (Array.isArray(prefilled.iframeContexts)) {
+      _locDraft.iframeContexts = prefilled.iframeContexts
+        .filter(c => c && typeof c.contextName === 'string' && c.predicate)
+        .map(c => ({
+          contextName: c.contextName,
+          predicate  : c.predicate,
+          sameOrigin : c.sameOrigin === true,
+        }));
+    }
+    // v2.74.48 — Normalize prefilled name (auto-suggested OR existing
+    // record) so the visible input matches the lowercase-hyphenated
+    // rule the user types under.
+    if (typeof prefilled.name === 'string')        _locDraft.name        = _normalizeLocaleName(prefilled.name);
+    if (typeof prefilled.description === 'string') _locDraft.description = prefilled.description;
+    // v2.74.275 — Legacy `urlPattern` hydration REMOVED. URL gating
+    // expressed via predicates only.
+    // v2.74.275 — Phase 7d hydration, cleaned. Accepted shapes:
+    //   - Array (implicit AND): operator='and', children=array
+    //   - Tree with top-level operator (and/or/not) + leaf children
+    // Nested operator trees REMOVED (no legacy data; the sentinel
+    // _predicatesOriginalTree no longer exists).
+    _predicatesOperator = 'and';
+    if (Array.isArray(prefilled.predicates)) {
+      _locDraft.predicates = prefilled.predicates
+        .filter(p => p && typeof p === 'object' && typeof p.kind === 'string')
+        .map(p => ({ ...p }));
+    } else if (prefilled.predicates && typeof prefilled.predicates === 'object') {
+      const tree = prefilled.predicates;
+      if (tree.operator && Array.isArray(tree.children)
+          && (tree.operator === 'and' || tree.operator === 'or' || tree.operator === 'not')
+          && tree.children.every(c => c && typeof c.kind === 'string' && !c.operator)) {
+        _predicatesOperator = tree.operator;
+        _locDraft.predicates = tree.children.map(c => ({ ...c }));
+        if (tree.operator === 'not' && tree.children.length > 1) {
+          _locDraft.predicates = _locDraft.predicates.slice(0, 1);
+        }
+      } else if (tree.kind) {
+        _locDraft.predicates = [{ ...tree }];
+      }
+    }
+    // v2.74.275 — Phase 2 hydration: registry-only path. Embedded
+    // landmarks[] support REMOVED. Locales must store landmarkRefs[].
+    if (Array.isArray(prefilled.landmarkRefs) && prefilled.landmarkRefs.length > 0) {
+      try {
+        const res = await chrome.runtime.sendMessage({
+          type: 'GET_LANDMARKS',
+          payload: { uids: prefilled.landmarkRefs },
+        });
+        if (res?.success && res.landmarks) {
+          const hydrated = [];
+          for (const uid of prefilled.landmarkRefs) {
+            const rec = res.landmarks[uid];
+            if (!rec) {
+              console.warn('[locale-capture] landmark ref unresolved on hydrate:', uid);
+              continue;
+            }
+            // Map the registry record back to the in-memory editing
+            // shape. Every field flows through; the save path will
+            // round-trip it cleanly.
+            hydrated.push(_hydrateLandmarkEffectShape({
+              uid                 : rec.uid,
+              isCanonical         : rec.isCanonical,
+              alias               : rec.alias ?? '',
+              a11yRole            : rec.a11yRole ?? null,
+              accessibleName      : rec.accessibleName ?? null,
+              hierarchicalContext : rec.hierarchicalContext ?? null,
+              canonicalUrl        : rec.canonicalUrl ?? null,
+              derivationInputs    : rec.derivationInputs ?? null,
+              description         : rec.description ?? '',
+              aliases             : Array.isArray(rec.aliases) ? rec.aliases.slice() : [],
+              operationsCommon    : Array.isArray(rec.operationsCommon) ? rec.operationsCommon.slice() : [],
+              pitfalls            : Array.isArray(rec.pitfalls) ? rec.pitfalls.slice() : [],
+              expectedContent     : rec.expectedContent ?? null,
+              profileConfidence   : rec.profileConfidence ?? null,
+              selector            : rec.selector ?? '',
+              frameUrl            : rec.frameUrl ?? null,
+              verified            : rec.verified ?? null,
+              lifecycle           : rec.lifecycle ?? null,
+              // v2.74.305 — Effect taxonomy split per ACTION_SPEC § 5.
+              // Read all three field names; the hydrator picks the
+              // canonical shape and clears the legacy one.
+              effect              : rec.effect ?? null,
+              interactionPattern  : rec.interactionPattern ?? null,
+              effectSource        : rec.effectSource ?? null,
+              actionEffect        : rec.actionEffect ?? null,
+              iframeContext       : rec.iframeContext ?? null,
+            }));
+          }
+          _locDraft.landmarks = hydrated;
+        }
+      } catch (e) {
+        console.warn('[locale-capture] hydration from registry failed:', e?.message);
+      }
+    } else if (Array.isArray(prefilled.landmarks)) {
+      // v2.74.275 — Fresh-suggestion hydration (Claude's "+ Auto"
+      // output). These are draft entries with no UID — each needs
+      // Pick→Claude to become a registry record. Stored landmarks
+      // (with UIDs) go through landmarkRefs[] above. Legacy embedded
+      // SAVED landmarks (the pre-Phase-2 shape) are no longer
+      // supported — registry is authoritative.
+      _locDraft.landmarks = prefilled.landmarks
+        .filter(lm => lm && typeof lm.alias === 'string' && typeof lm.selector === 'string')
+        .map(lm => ({
+          alias    : lm.alias.trim(),
+          selector : lm.selector.trim(),
+          verified : null,
+        }));
+    }
+    _locDraft.authoredBy = typeof prefilled.authoredBy === 'string'
+      ? prefilled.authoredBy
+      : 'model';
+  }
+
+  // Resolve ground name for the label.
+  try {
+    const groundRes = await chrome.runtime.sendMessage({ type: 'GET_GROUND', payload: { id: groundId } });
+    const ground = groundRes?.ground;
+    locGroundLabelEl.textContent = ground
+      ? `on Ground: ${ground.aiName ?? ground.url ?? groundId}`
+      : `on Ground: (unknown)`;
+  } catch (_) {
+    locGroundLabelEl.textContent = `on Ground: ${groundId}`;
+  }
+
+  // Wire static listeners (input fields + buttons + tab tracking + keydown).
+  // v2.74.284 — Delegated card-collapse handler. Single listener on
+  // the mount root handles all [data-card-toggle] clicks.
+  if (_mountEl) _mountEl.addEventListener('click', _onCardToggle);
+
+  locNameInput.addEventListener('input', onNameInput);
+  locDescriptionInput.addEventListener('input', onDescriptionInput);
+  // v2.74.275 — locPatternInput element removed; no listener.
+  locAddLandmarkBtn.addEventListener('click', onAddLandmark);
+  // v2.74.231 — Rediscover: re-run AUTO_DISCOVER_LOCALE with force:true
+  // (bypasses cache + rewrites it). Replaces the draft's landmarks
+  // with the new suggestion. Confirms with the user first when the
+  // current draft has landmarks (avoids accidental destruction).
+  if (locRediscoverBtn) locRediscoverBtn.addEventListener('click', onRediscoverLandmarks);
+  locSaveBtn.addEventListener('click', saveLocale);
+  locCancelBtn.addEventListener('click', cancelLocaleCapture);
+  locPickCancelBtn.addEventListener('click', () => cancelLocalePick(true));
+
+  _onTabActivated = () => {
+    if (!_locDraft) return;
+    refreshLocaleActiveTab();
+  };
+  _onTabUpdated = (updatedTabId, changeInfo) => {
+    if (!_locDraft) return;
+    if (updatedTabId !== _locTabId) return;
+    if (changeInfo.url || changeInfo.status === 'complete') refreshLocaleActiveTab();
+  };
+  chrome.tabs?.onActivated?.addListener?.(_onTabActivated);
+  chrome.tabs?.onUpdated?.addListener?.(_onTabUpdated);
+
+  _onKeyDown = (e) => {
+    if (e.key === 'Escape' && _locPickerSession) {
+      e.preventDefault();
+      cancelLocalePick(true);
+    }
+  };
+  document.addEventListener('keydown', _onKeyDown);
+
+  // v2.74.43 — Reflect any prefilled fields in the inputs so the user
+  // sees them on mount. refreshLocaleActiveTab will set the URL
+  // pattern from the active tab UNLESS this is an edit (gated by
+  // _locIsEdit below).
+  // v2.74.47 — Also seed the URL pattern input so an edit shows the
+  // saved pattern immediately, before refreshLocaleActiveTab has a
+  // chance to (be skipped and) leave the field as empty default.
+  if (locNameInput)        locNameInput.value        = _locDraft.name        ?? '';
+  if (locDescriptionInput) locDescriptionInput.value = _locDraft.description ?? '';
+
+  // v2.74.46 — Wire panel focus/blur so verified-landmark overlays
+  // hide while the user works with the page and reappear when they
+  // come back to the sidepanel. Initial draw covers the case where
+  // the panel mounts already-focused (common path).
+  // v2.74.233 — Per-landmark "Show" toggle replaces the previous
+  // focus-driven overlay behavior. Toggled-on landmarks stay visible
+  // when the user interacts with the page (intentional — the toggle
+  // is the source of truth). On focus we redraw defensively in case
+  // the page reloaded; on blur we leave overlays alone so the author
+  // can see them while clicking around the page.
+  _onPanelFocus = () => { _refreshLocaleOverlays(); };
+  _onPanelBlur  = () => { /* no-op — toggle controls visibility */ };
+  window.addEventListener('focus', _onPanelFocus);
+  window.addEventListener('blur',  _onPanelBlur);
+  _refreshLocaleOverlays();
+
+  // Initial tab fill.
+  await refreshLocaleActiveTab();
+  renderLocaleLandmarks();
+  _renderPredicates();
+  _renderIframeContexts();   // v2.74.267
+  updateLocaleSaveButtonState();
+  // v2.74.265 — Initial active-state evaluation. Fires after tab fill
+  // so tabUrl is populated. Fire-and-forget; the section shows
+  // "Evaluating…" until done.
+  _evaluateActiveState({ immediate: true });
+}
+
+// ─── Unmount ──────────────────────────────────────────────────────────────
+
+async function unmount() {
+  // Cancel any picker session in progress (notify content script).
+  if (_locPickerSession) {
+    try { await cancelLocalePick(true); } catch {}
+  }
+  // v2.74.46 — Tear down panel focus/blur listeners and clear any
+  // overlays still on the authoring tab. Done BEFORE _locTabId is
+  // nulled below so the CLEAR_LOCALE_OVERLAYS message has a tab to
+  // send to.
+  if (_onPanelFocus) try { window.removeEventListener('focus', _onPanelFocus); } catch {}
+  if (_onPanelBlur)  try { window.removeEventListener('blur',  _onPanelBlur);  } catch {}
+  _onPanelFocus = null;
+  _onPanelBlur  = null;
+  await _clearLocaleOverlays();
+
+  // Remove tab listeners.
+  if (_onTabActivated) {
+    try { chrome.tabs?.onActivated?.removeListener?.(_onTabActivated); } catch {}
+  }
+  if (_onTabUpdated) {
+    try { chrome.tabs?.onUpdated?.removeListener?.(_onTabUpdated); } catch {}
+  }
+  if (_onKeyDown) {
+    try { document.removeEventListener('keydown', _onKeyDown); } catch {}
+  }
+
+  _onTabActivated = null;
+  _onTabUpdated = null;
+  _onKeyDown = null;
+
+  // Clear state.
+  _locDraft = null;
+  _locGroundId = null;
+  _locTabId = null;
+  _locPickerSession = null;
+  _locReturnTo = null;
+  _locIsEdit = false;
+
+  // Clear DOM refs (no leak — but clarity).
+  locGroundLabelEl = locTabUrlEl = locWarningEl = null;
+  // v2.74.275 — locPatternInput removed.
+  locNameInput = locDescriptionInput = null;
+  locLandmarksList = locAddLandmarkBtn = locSaveBtn = locCancelBtn = null;
+  locSaveReasonEl = null;
+  locPickBanner = locPickCancelBtn = null;
+  // v2.74.259 — Events panel refs + ephemeral state.
+  // v2.74.263 — Detach live-events subscription BEFORE clearing the
+  // ground id; the unsubscribe closes over chrome.storage.onChanged
+  // and stays safe to call regardless of state, but order matters
+  // for clarity.
+  _detachEventsLiveSubscription();
+  locEventsToggleBtn = locEventsBody = locEventsList = locEventsCount = locEventsClearBtn = null;
+  locEventsStaleBadge = locEventsVerifyAllBtn = locEventsBulkOutcome = null;
+  locEventsHealth = null;
+  _eventsLandmarksCache = [];
+  _eventsExpanded = false;
+  _eventsCache = null;
+  _eventsLandmarkNames.clear();
+  _eventsLoading = false;
+  _eventsBulkVerifyInFlight = false;
+  // v2.74.266 — Drift-applied state cleanup.
+  _eventsAppliedDrift.clear();
+  _eventsApplyInFlight.clear();
+  // v2.74.260 — Predicates DOM refs.
+  locPredicatesList = locPredicatesAddBtn = null;
+  locPredicatesOpSelect = locPredicatesHint = null;
+  _predicatesOperator = 'and';
+  // v2.74.265 — Active-state preview cleanup.
+  locActiveStateRefreshBtn = locActiveStateResult = null;
+  _activeStateEvaluating = false;
+  if (_activeStateDebounce) {
+    clearTimeout(_activeStateDebounce);
+    _activeStateDebounce = null;
+  }
+  // v2.74.267 — iframe contexts editor cleanup.
+  locIframeContextsList = locIframeContextsAdd = null;
+  _iframeTestOutcome.clear();
+  _iframeTestInFlight.clear();
+  // v2.74.261 — BUG FIX: clear all row-keyed state Maps/Sets on
+  // unmount. Without this, remounting the mode (open locale A, close,
+  // open locale B) leaks stale state where indices that match rows in
+  // the new locale show artifacts (refining badge, expanded drawer,
+  // open replace picker, verify outcome) from the prior locale. Both
+  // predate my work (refining/profileExpanded since v2.74.233/235) and
+  // are extensions of my work (verify/replace since v2.74.257/258).
+  _landmarkRefining.clear();
+  _landmarkProfileExpanded.clear();
+  _landmarkReplaceOpen.clear();
+  _landmarkReplaceCandidates.clear();
+  _landmarkReplaceError.clear();
+  _landmarkVerifyInFlight.clear();
+  _landmarkVerifyOutcome.clear();
+
+  if (_mountEl) {
+    // v2.74.284 — Remove delegated card-collapse listener before
+    // clearing the mount.
+    try { _mountEl.removeEventListener('click', _onCardToggle); } catch {}
+    _mountEl.innerHTML = '';
+    _mountEl = null;
+  }
+}
+
+// ─── Event forwarding (PICK_RESULT) ───────────────────────────────────────
+
+function handleEvent(message) {
+  if (!_locPickerSession) return;
+  if (message?.sessionId !== _locPickerSession.sessionId) return;
+  // v2.74.301 — Handle PICK_CANCELLED so the banner clears even when
+  // PICK_RESULT never arrives (e.g. picker aborted because synthesize-
+  // Selector returned null, content script torn down mid-flow, or the
+  // user pressed Esc / right-clicked). Pre-fix, PICK_CANCELLED was
+  // silently dropped — the sidepanel banner stayed up and the user
+  // had to refresh.
+  if (message.type === 'PICK_CANCELLED') {
+    const sessionId = _locPickerSession.sessionId;
+    _locPickerSession = null;
+    if (locPickBanner) locPickBanner.classList.add('hidden');
+    if (_locTabId != null) {
+      broadcastCancelPick(_locTabId, { sessionId });
+    }
+    Logger.info('locale-capture', `pick cancelled (${message.reason ?? 'unknown'})`);
+    return;
+  }
+  if (message.type !== 'PICK_RESULT') return;
+
+  const { landmarkIdx } = _locPickerSession;
+  const completedSessionId = _locPickerSession.sessionId;
+  _locPickerSession = null;
+  if (locPickBanner) locPickBanner.classList.add('hidden');
+  // v2.74.168 — Tear down pickers in sibling frames. The originating
+  // frame's picker already self-stopped on result; the top frame and
+  // any other same-origin iframes that armed via the broadcast are
+  // still active. Without this their overlays linger.
+  if (_locTabId != null) {
+    broadcastCancelPick(_locTabId, { sessionId: completedSessionId });
+  }
+
+  if (message.error) {
+    showLocaleWarning(`Pick error: ${message.error}`);
+    return;
+  }
+  const selector = message.selector ?? '';
+  if (!selector) {
+    showLocaleWarning('Pick returned an empty selector — try again');
+    return;
+  }
+  if (!_locDraft) return;
+  // v2.74.280 — Create-mode: PICK_RESULT arrived for a "+ Pick landmark"
+  // session (no row existed yet). Push a fresh landmark and adopt its
+  // index for the rest of the handler.
+  let effectiveIdx = landmarkIdx;
+  if (effectiveIdx === null) {
+    _locDraft.landmarks.push({ alias: '', selector: '', verified: null });
+    effectiveIdx = _locDraft.landmarks.length - 1;
+  }
+  if (!_locDraft.landmarks[effectiveIdx]) return;
+  _locDraft.landmarks[effectiveIdx].selector = selector;
+  // v2.74.198 — Persist iframe origin on the landmark. Symmetric to
+  // the fragment-action and observation-extract iframe fixes — when
+  // the user picks inside an iframe, PICK_RESULT carries the iframe
+  // URL on message.frame.url. Without persisting, runtime locale
+  // evaluation (locale_ref condition) routes to the top frame and
+  // the landmark's selector resolves there instead of the iframe.
+  if (message.frame && message.frame.url) {
+    _locDraft.landmarks[effectiveIdx].frameUrl = String(message.frame.url);
+  } else {
+    delete _locDraft.landmarks[effectiveIdx].frameUrl;
+  }
+  _locDraft.landmarks[effectiveIdx].verified = null;
+  _invalidateStructure();   // v2.74.336 — landmark set changed; drop stale structure
+  renderLocaleLandmarks();
+  // v2.74.245 — Phase 7a of substrate spec: iframe context detection.
+  // When the picked element lives inside an iframe (frame.isTop is
+  // false), ask the TOP frame's content script to identify the
+  // <iframe> element matching this frame URL and propose an iframe
+  // context (contextName + predicate + sameOrigin). Register the
+  // context on the locale; bind the landmark to it.
+  //
+  // Fire-and-forget — failures fall back to legacy frameUrl-only
+  // behavior. The Pick→Claude refinement runs in parallel; the
+  // iframe context registration is a side concern.
+  if (message.frame && message.frame.isTop === false) {
+    _registerIframeContextForLandmark(effectiveIdx, message.frame.url).catch(err => {
+      Logger.warn('locale-capture', `iframe context registration failed: ${err.message} (keeping frameUrl fallback)`);
+    });
+  }
+  // v2.74.233 — Pick now triggers Claude refinement automatically.
+  // Picker captures the raw selector → Claude refines it with role +
+  // DOM context + screenshot → final selector is what we verify.
+  // Fire-and-forget; refinement function handles its own UI updates
+  // and falls back to verify-on-picker-selector when Claude fails.
+  // v2.74.296 — Pass the picker's authoritative rect + DPR through so
+  // the screenshot helper doesn't have to re-resolve the (possibly
+  // ambiguous) selector to figure out where to crop.
+  // v2.74.299 — Also pass pickedAccessibilityProfile so the geometric
+  // verification step has a reliable UID for the actually-clicked
+  // element (not the wrong-element UID that came back from
+  // INSPECT_ELEMENT on an ambiguous selector pre-fix).
+  _refineLandmarkSelectorWithClaude(effectiveIdx, {
+    pickedRect                : message.pickedRect                 ?? null,
+    viewportInfo              : message.viewportInfo               ?? null,
+    pickedAccessibilityProfile: message.pickedAccessibilityProfile ?? null,
+  });
+}
+
+/**
+ * v2.74.245 — Phase 7a: query the top frame for iframe-element
+ * details, propose an iframe context, ensure the Locale's
+ * `iframeContexts[]` includes it, and bind the landmark to it via
+ * `landmark.iframeContext`.
+ *
+ * Context dedup: if the locale already has a context with the same
+ * predicate (e.g., the same iframe was picked into earlier in this
+ * session), reuse it rather than creating a duplicate.
+ */
+async function _registerIframeContextForLandmark(landmarkIdx, frameUrl) {
+  if (!_locDraft || !_locDraft.landmarks[landmarkIdx]) return;
+  if (_locTabId == null) return;
+  const res = await chrome.tabs.sendMessage(
+    _locTabId,
+    { type: 'IDENTIFY_IFRAME_ELEMENT', payload: { frameUrl } },
+    { frameId: 0 },
+  );
+  if (!res?.success) {
+    Logger.info('locale-capture', `Pick→iframe context: no iframe element found in top doc for url "${frameUrl}" — landmark stays bound by legacy frameUrl only`);
+    return;
+  }
+  const { proposedContextName, proposedPredicate, sameOrigin, iframeInfo } = res;
+  if (!_locDraft.iframeContexts) _locDraft.iframeContexts = [];
+  // Dedup: same predicate (kind + value/selector/pattern/index) →
+  // reuse the existing context name. Authors don't get N variants
+  // of the same iframe.
+  const predKey = JSON.stringify(proposedPredicate);
+  let existing = _locDraft.iframeContexts.find(c => JSON.stringify(c.predicate) === predKey);
+  if (!existing) {
+    // Ensure the proposed contextName doesn't collide with another
+    // context's name (different predicate, same name — unlikely but
+    // defensive). Append a numeric suffix if needed.
+    let name = proposedContextName;
+    let n = 2;
+    while (_locDraft.iframeContexts.some(c => c.contextName === name)) {
+      name = `${proposedContextName}-${n++}`;
+    }
+    existing = {
+      contextName: name,
+      predicate  : proposedPredicate,
+      sameOrigin : sameOrigin === true,
+    };
+    _locDraft.iframeContexts.push(existing);
+  }
+  _locDraft.landmarks[landmarkIdx].iframeContext = existing.contextName;
+  Logger.info('locale-capture', `Pick→iframe context bound [landmarkIdx=${landmarkIdx}]`, {
+    contextName : existing.contextName,
+    predicate   : existing.predicate,
+    sameOrigin  : existing.sameOrigin,
+    iframeInfo,
+  });
+  // Re-render so the drawer can surface the iframe binding.
+  renderLocaleLandmarks();
+}
+
+// ─── Input handlers ──────────────────────────────────────────────────────
+
+// v2.74.48 — Locale names are normalized as the user types: lowercase
+// and whitespace runs → single hyphen. Preserves cursor position
+// because both transforms are length-preserving for the typical case
+// (single space → single hyphen). When the user types two consecutive
+// spaces, the regex collapses them into one hyphen which DOES shorten
+// the value; we re-anchor the caret to keep input feeling natural.
+function _normalizeLocaleName(raw) {
+  return String(raw ?? '').toLowerCase().replace(/\s+/g, '-');
+}
+
+function onNameInput() {
+  if (!_locDraft) return;
+  const raw  = locNameInput.value;
+  const norm = _normalizeLocaleName(raw);
+  if (raw !== norm) {
+    const caret = locNameInput.selectionStart ?? norm.length;
+    locNameInput.value = norm;
+    const newCaret = Math.min(caret, norm.length);
+    try { locNameInput.setSelectionRange(newCaret, newCaret); } catch {}
+  }
+  _locDraft.name = norm;
+  updateLocaleSaveButtonState();
+}
+function onDescriptionInput() {
+  if (_locDraft) _locDraft.description = locDescriptionInput.value;
+}
+// v2.74.275 — onPatternInput removed (URL pattern field gone).
+/**
+ * v2.74.231 — Re-run auto-discovery on the current tab, replacing the
+ * draft's landmarks with Claude's fresh suggestion. Bypasses the cache
+ * via force:true; the new suggestion is also written to cache so
+ * subsequent "+ Locale" clicks pick it up.
+ *
+ * Confirms with the user when the draft has unsaved landmarks (avoids
+ * accidental destruction). Toggles the button into a "Rediscovering…"
+ * state for feedback. Toast on completion.
+ */
+async function onRediscoverLandmarks() {
+  if (!_locDraft) return;
+  if (_locTabId == null) { showLocaleWarning('No active tab — cannot rediscover'); return; }
+
+  const hadLandmarks = _locDraft.landmarks.length > 0;
+  if (hadLandmarks) {
+    const ok = confirm(`Rediscover landmarks? This replaces all ${_locDraft.landmarks.length} current landmark(s) with a fresh Claude suggestion.`);
+    if (!ok) return;
+  }
+
+  const origIconHtml = locRediscoverBtn?.innerHTML;
+  if (locRediscoverBtn) {
+    locRediscoverBtn.disabled = true;
+    locRediscoverBtn.innerHTML = `<span class="dbg-locale-landmarks-rediscover-icon" aria-hidden="true">⟳</span><span class="dbg-locale-landmarks-rediscover-label">Rediscovering…</span>`;
+  }
+
+  let res;
+  try {
+    res = await new Promise(resolve => {
+      chrome.runtime.sendMessage({
+        type: 'AUTO_DISCOVER_LOCALE',
+        payload: { tabId: _locTabId, groundId: _locGroundId, force: true },
+      }, resolve);
+    });
+  } catch (e) {
+    res = { success: false, error: e?.message ?? 'unknown' };
+  }
+
+  if (locRediscoverBtn) {
+    locRediscoverBtn.disabled = false;
+    if (origIconHtml) locRediscoverBtn.innerHTML = origIconHtml;
+  }
+
+  if (!res?.success || !res?.suggestion) {
+    showLocaleWarning(`Rediscover failed: ${res?.error ?? 'no suggestion returned'}`);
+    return;
+  }
+
+  const sug = res.suggestion;
+  // Replace landmarks; preserve user-edited name + description unless
+  // they were blank (then take from the suggestion).
+  if (Array.isArray(sug.landmarks)) {
+    _locDraft.landmarks = sug.landmarks
+      .filter(lm => lm && typeof lm.alias === 'string' && typeof lm.selector === 'string')
+      .map(lm => ({
+        alias    : lm.alias.trim(),
+        selector : lm.selector.trim(),
+        verified : null,   // fresh suggestion — must be re-verified
+      }));
+  }
+  if (!_locDraft.name && typeof sug.name === 'string')               _locDraft.name = _normalizeLocaleName(sug.name);
+  if (!_locDraft.description && typeof sug.description === 'string') _locDraft.description = sug.description;
+
+  // Reflect any field changes in the inputs.
+  if (locNameInput && locNameInput.value !== _locDraft.name) {
+    locNameInput.value = _locDraft.name ?? '';
+  }
+  if (locDescriptionInput && locDescriptionInput.value !== _locDraft.description) {
+    locDescriptionInput.value = _locDraft.description ?? '';
+  }
+
+  renderLocaleLandmarks();
+  updateLocaleSaveButtonState();
+  toast?.(`Rediscovered ${_locDraft.landmarks.length} landmark(s)${res.fromCache ? ' (from cache)' : ''}`);
+}
+
+// v2.74.280 — Authoring flow change: "+ Pick landmark" enters the
+// picker directly. The landmark card is no longer created up front
+// with empty fields — instead it's created AFTER the picker returns,
+// fully populated by Pick→Claude. Eliminates the empty-card stage
+// that previously preceded every pick.
+//
+// Cancel (Esc) is naturally a no-op for the draft: no landmark was
+// pushed yet. Errors and empty-selector returns also produce no
+// landmark — the create path only commits on successful PICK_RESULT.
+async function onAddLandmark() {
+  if (!_locDraft) return;
+  await startLocalePick(null);
+}
+
+// ─── Active tab tracking ─────────────────────────────────────────────────
+
+async function refreshLocaleActiveTab() {
+  if (!_locDraft) return;
+  const tab = await getActiveTab();
+  if (!tab) {
+    locTabUrlEl.textContent = '(no active tab)';
+    return;
+  }
+  if (/^(chrome|chrome-extension|about|edge):/i.test(tab.url ?? '')) {
+    locTabUrlEl.textContent = `${tab.url} (extension page — picker won't work here)`;
+    return;
+  }
+  _locTabId = tab.id;
+  locTabUrlEl.textContent = tab.url ?? '(unknown)';
+  // v2.74.275 — On new locales, auto-seed a urlMatches predicate from
+  // the current tab URL so authors don't have to type one. On edits,
+  // existing predicates are preserved.
+  if (!_locIsEdit && _locDraft && tab.url
+      && (!Array.isArray(_locDraft.predicates) || _locDraft.predicates.length === 0)) {
+    _locDraft.predicates = [{ kind: 'urlMatches', pattern: tab.url, mode: 'contains' }];
+    _predicatesOperator = 'and';
+    if (typeof _renderPredicates === 'function') _renderPredicates();
+  }
+
+  if (locWarningEl) {
+    locWarningEl.textContent = '';
+    locWarningEl.classList.add('hidden');
+    locWarningEl.classList.remove('status-ok');
+  }
+  // v2.74.265 — Tab changed; re-evaluate active state. Skip if section
+  // isn't mounted yet (initial mount calls _evaluateActiveState directly
+  // after this returns, so the first eval isn't lost).
+  if (locActiveStateResult) {
+    _evaluateActiveState({ debounce: true });
+  }
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────
+
+function newEmptyLocaleDraft(groundId) {
+  return {
+    id          : `loc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    groundId    : groundId,
+    name        : '',
+    description : '',
+    // v2.74.275 — `urlPattern` field REMOVED. URL gating expressed via
+    // `predicates` (urlMatches kind). New drafts seed an empty
+    // urlMatches predicate on first tab load (see refreshLocaleActiveTab).
+    landmarks   : [],
+    predicates  : [],
+    authoredBy  : 'human',
+  };
+}
+
+function escHtml(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+const escAttr = escHtml;
+
+// v2.74.304 — Tiered display-name deriver for the landmark row header.
+// Returns HTML (not a plain string) so each tier can carry its own
+// visual treatment + tooltip explaining where the displayed text came
+// from. Priority order:
+//
+//   Tier 1: lm.accessibleName            — canonical, normal text
+//   Tier 2: lm.alias (humanized)         — italic, "derived from alias"
+//   Tier 3: lm.description (truncated)   — italic, "from Claude description"
+//   Tier 4: <role/tag> placeholder       — muted, "no name available"
+//   Tier 5: "No element picked yet"      — muted, only when no selector
+//
+// Each tier below Tier 1 conveys "this isn't the W3C-computed name" via
+// italics + a tooltip. The Identity drawer section continues to show
+// the raw accessibleName field as ground truth — accessibility-poor
+// picks are still discoverable, just not used as the primary card label.
+function _humanizeAlias(s) {
+  if (!s || typeof s !== 'string') return '';
+  const flat = s.replace(/[-_]+/g, ' ').trim();
+  if (!flat) return '';
+  return flat.charAt(0).toUpperCase() + flat.slice(1);
+}
+
+function _deriveLandmarkDisplayName(lm) {
+  // Tier 1 — canonical accessibleName.
+  if (lm?.accessibleName && String(lm.accessibleName).trim()) {
+    return `<span title="Accessible name — W3C AccName computed from ARIA + label chain at Pick time. This is the canonical identity input.">${escHtml(lm.accessibleName)}</span>`;
+  }
+
+  // Tier 5 — truly nothing picked yet. Distinguish from "picked but
+  // accessibility-poor" by checking for a selector. Without one, no
+  // pick has occurred.
+  if (!lm?.selector || !String(lm.selector).trim()) {
+    return `<span class="lm-name-empty">No element picked yet</span>`;
+  }
+
+  // Tier 2 — humanized primary alias. Author-blessed name (auto-filled
+  // from Claude in v2.74.302) — strongest proxy for AccName when the
+  // element doesn't supply one. Italicized to telegraph "derived."
+  if (lm.alias && String(lm.alias).trim()) {
+    const human = _humanizeAlias(lm.alias);
+    return `<span class="lm-name-derived" title="Element has no accessible name — displaying the author/Claude alias instead. Identity hash uses local-UID rather than canonical.">${escHtml(human)}</span>`;
+  }
+
+  // Tier 3 — Claude's description, truncated. Falls through here when
+  // alias is also blank (rare — usually means Pick failed mid-flow).
+  if (lm.description && String(lm.description).trim()) {
+    const trimmed = _truncate(String(lm.description).trim(), 50);
+    return `<span class="lm-name-derived" title="Element has no accessible name and no alias — displaying Claude's description (truncated). Author should add an alias for a stable label.">${escHtml(trimmed)}</span>`;
+  }
+
+  // Tier 4 — last-resort role/tag placeholder. The landmark is
+  // genuinely identity-bare; surface the structural shape so the
+  // author can at least tell the rows apart.
+  const tagOrRole = lm.a11yRole && String(lm.a11yRole).trim()
+    ? String(lm.a11yRole).trim().toLowerCase()
+    : 'element';
+  return `<span class="lm-name-placeholder" title="Element has no accessible name, no alias, and no description — only structural role available. Add an alias to label this landmark.">&lt;${escHtml(tagOrRole)}&gt; (unnamed)</span>`;
+}
+
+// v2.74.279 — Compute a single status indicator from the landmark's
+// verified.score + lifecycle. Returns { icon, cls, tooltip }. Used by
+// the identity zone to replace the v2.74.234 multi-chip status block
+// — one glance, one icon, full detail in tooltip.
+function _computeLandmarkStatusIcon(lm) {
+  const lifecycle = lm?.lifecycle ?? null;
+  const v = lm?.verified ?? null;
+  const score = v?.score ?? null;
+  const legacyOk = !score && typeof v?.matchedCount === 'number' && v.matchedCount > 0;
+
+  // Lifecycle warning states override score display since they
+  // indicate runtime health drift the author needs to know about.
+  if (lifecycle === 'deprecated') {
+    return { icon: '⊘', cls: 'lm-status-deprecated', tooltip: 'Deprecated — new authoring won\'t surface this landmark. Existing refs still work.' };
+  }
+  if (lifecycle === 'stale-confirmed') {
+    return { icon: '⛔', cls: 'lm-status-fail', tooltip: 'Runtime: cached selector failed AND heuristic recovery couldn\'t find a unique candidate. Re-Pick or deprecate.' };
+  }
+  if (lifecycle === 'stale-suspected') {
+    return { icon: '⚠', cls: 'lm-status-stale', tooltip: 'Runtime: stored selector failed but description-layer recovery worked. Verify (✓) or re-Pick to refresh.' };
+  }
+  // Authoring-time score signals.
+  if (score === 'ready' || legacyOk) {
+    const ops = Array.isArray(v?.operationsAllowed) && v.operationsAllowed.length > 0
+      ? ` · supports: ${v.operationsAllowed.join(', ')}`
+      : '';
+    const mc = typeof v?.matchedCount === 'number' ? ` · ${v.matchedCount} match${v.matchedCount === 1 ? '' : 'es'}` : '';
+    return { icon: '✓', cls: 'lm-status-ready', tooltip: `Ready${mc}${ops}${legacyOk ? ' · legacy verification' : ''}` };
+  }
+  if (score === 'caveats') {
+    const issues = Array.isArray(v?.issues) && v.issues.length > 0 ? ` · ${v.issues.join('; ')}` : '';
+    return { icon: '⚠', cls: 'lm-status-caveats', tooltip: `Verified with caveats${issues}` };
+  }
+  if (score === 'mismatch') {
+    const issues = Array.isArray(v?.issues) && v.issues.length > 0 ? `: ${v.issues.join('; ')}` : '';
+    return { icon: '✗', cls: 'lm-status-fail', tooltip: `Mismatch${issues}` };
+  }
+  return { icon: '○', cls: 'lm-status-unverified', tooltip: 'Unverified — Pick an element to verify' };
+}
+
+// v2.74.274 — Slugify accessibleName into a kebab-case alias for
+// auto-fill on Pick. Trims to 48 chars (room for uniqueness suffixes
+// if the author needs to disambiguate manually).
+function _slugifyForAlias(name) {
+  if (!name) return '';
+  return String(name)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+}
+
+// v2.74.284 — Unified card-collapse handler. Delegated to the form
+// root so every section with `[data-card-toggle]` in its head gets
+// uniform collapse behavior. Toggles `data-collapsed` on the section;
+// CSS hides .dbg-locale-card-body when collapsed and rotates the
+// chevron via the attribute selector.
+function _onCardToggle(e) {
+  const btn = e.target.closest('[data-card-toggle]');
+  if (!btn) return;
+  const section = btn.closest('[data-card-id]');
+  if (!section) return;
+  const isCollapsed = section.getAttribute('data-collapsed') === 'true';
+  const next = !isCollapsed;
+  section.setAttribute('data-collapsed', next ? 'true' : 'false');
+  btn.setAttribute('aria-expanded', next ? 'false' : 'true');
+  const chevron = btn.querySelector('.dbg-locale-card-chevron');
+  if (chevron) chevron.textContent = next ? '▸' : '▾';
+}
+
+function showLocaleWarning(text) {
+  if (!locWarningEl) return;
+  locWarningEl.textContent = text;
+  locWarningEl.classList.remove('hidden');
+  locWarningEl.classList.remove('status-ok');
+}
+
+// ─── Layer 2 structure (Phase C-lite, LOCALE_SPEC § 3/§ 13) ───────────────
+// The LLM proposes a structured composition (LandmarkNode tree + groupings/
+// sequences) over the already-picked landmarks; the author reviews it. The
+// proposal is invalidated whenever the landmark SET changes (pick/remove) so
+// stored structure never references a missing/stale landmark.
+
+function _invalidateStructure() {
+  if (!_locDraft) return;
+  _locDraft.structuredLandmarks = null;
+  _locDraft.groupings = undefined;
+  _locDraft.sequences = undefined;
+}
+
+function _structAliasOf(uid) {
+  const lm = (_locDraft?.landmarks ?? []).find(l => l?.uid === uid);
+  return lm?.alias ?? lm?.accessibleName ?? (typeof uid === 'string' ? uid.slice(0, 8) : '?');
+}
+
+function _renderStructurePreview(nodes, groupings, sequences) {
+  const renderNode = (n, depth) => {
+    if (!n || typeof n.ref !== 'string') return '';
+    const role = n.role ? ` <span class="loc-struct-role">${escHtml(n.role)}</span>` : '';
+    const mult = (n.multiplicity && n.multiplicity !== 'one') ? ` <span class="loc-struct-mult">×${escHtml(n.multiplicity)}</span>` : '';
+    let html = `<div class="loc-struct-node" style="padding-left:${depth * 14}px">• ${escHtml(_structAliasOf(n.ref))}${role}${mult}</div>`;
+    if (Array.isArray(n.contains)) for (const c of n.contains) html += renderNode(c, depth + 1);
+    return html;
+  };
+  const tree = (Array.isArray(nodes) ? nodes : []).map(n => renderNode(n, 0)).join('');
+  const grp = (Array.isArray(groupings) ? groupings : []).map(g =>
+    `<div class="loc-struct-overlay" title="grouping (cuts across containment)">▣ ${escHtml(g.name)}: ${(g.members ?? []).map(_structAliasOf).map(escHtml).join(', ')}</div>`).join('');
+  const seq = (Array.isArray(sequences) ? sequences : []).map(s =>
+    `<div class="loc-struct-overlay" title="sequence (ordered flow)">→ ${escHtml(s.name)}: ${(s.steps ?? []).map(_structAliasOf).map(escHtml).join(' → ')}</div>`).join('');
+  return `<div class="loc-structure-preview">${tree}${grp}${seq}</div>`;
+}
+
+function _renderStructureBar() {
+  // v2.74.337 — Enable on ≥2 landmarks (any). The UID requirement is checked
+  // on click with a clear message, rather than silently disabling the button
+  // (UIDs are only assigned after a landmark's Pick→Claude profile completes,
+  // so an early-authoring landmark may not have one yet).
+  const lmCount = (_locDraft?.landmarks ?? []).length;
+  const canStructure = lmCount >= 2;
+  const struct = Array.isArray(_locDraft?.structuredLandmarks) && _locDraft.structuredLandmarks.length
+    ? _locDraft.structuredLandmarks : null;
+  const btnLabel = struct ? '🧬 Re-structure' : '🧬 Structure with Claude';
+  const btnTitle = canStructure
+    ? 'Ask Claude to organize these landmarks into a structured perspective (containment, roles, groupings/sequences). You review the result; it saves with the Locale.'
+    : 'Pick at least 2 landmarks to propose structure.';
+  return `
+    <div class="loc-structure-bar">
+      <button class="btn-secondary tiny" data-loc-action="propose-structure" type="button" ${canStructure ? '' : 'disabled'} title="${escAttr(btnTitle)}">${btnLabel}</button>
+      ${struct ? `<span class="loc-structure-tag" title="Structure proposed by Claude — review below. Saved with the Locale.">structured</span>` : ''}
+    </div>
+    ${struct ? _renderStructurePreview(struct, _locDraft.groupings, _locDraft.sequences) : ''}`;
+}
+
+async function onProposeStructure() {
+  if (!_locDraft) return;
+  const total = (_locDraft.landmarks ?? []).length;
+  const lms = (_locDraft.landmarks ?? [])
+    .filter(lm => lm?.uid)
+    .map(lm => ({ uid: lm.uid, alias: lm.alias ?? lm.accessibleName ?? '', description: lm.description ?? '' }));
+  if (lms.length < 2) {
+    // v2.74.337 — Clear feedback instead of a silent no-op. UIDs are assigned
+    // when a landmark finishes its Pick→Claude profile (or at save).
+    showLocaleWarning(`Structure needs at least 2 landmarks with a verified UID — ${lms.length} of ${total} have one. Finish picking/profiling them (each Pick→Claude assigns a UID), or save the Locale once to assign UIDs, then try again.`);
+    return;
+  }
+  const btn = locLandmarksList?.querySelector('[data-loc-action="propose-structure"]');
+  if (btn) { btn.disabled = true; btn.textContent = '🧬 Structuring…'; }
+  let res;
+  try {
+    res = await new Promise(r => chrome.runtime.sendMessage({
+      type: 'PROPOSE_LOCALE_STRUCTURE',
+      payload: { name: _locDraft.name, description: _locDraft.description, landmarks: lms },
+    }, r));
+  } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
+  if (!res?.success || !res.structure) {
+    showLocaleWarning(`Structure failed: ${res?.error ?? 'no structure returned'}`);
+    renderLocaleLandmarks();
+    return;
+  }
+  // Stamp per-node authoring provenance (LOCALE_SPEC § 5 LandmarkNodeAuthoringMetadata).
+  const now = Date.now();
+  const stamp = (nodes) => (Array.isArray(nodes) ? nodes : []).map(n => ({
+    ...n,
+    authoringMetadata: { capturedBy: 'llm-proposed', capturedAt: now },
+    ...(Array.isArray(n.contains) ? { contains: stamp(n.contains) } : {}),
+  }));
+  _locDraft.structuredLandmarks = stamp(res.structure.nodes);
+  _locDraft.groupings = Array.isArray(res.structure.groupings) ? res.structure.groupings : [];
+  _locDraft.sequences = Array.isArray(res.structure.sequences) ? res.structure.sequences : [];
+  renderLocaleLandmarks();
+  updateLocaleSaveButtonState();
+  toast?.(`Structured ${lms.length} landmark(s)`);
+}
+
+// ─── Landmark rendering ──────────────────────────────────────────────────
+
+function renderLocaleLandmarks() {
+  if (!_locDraft || !locLandmarksList) return;
+  if (_locDraft.landmarks.length === 0) {
+    locLandmarksList.innerHTML = `<div class="dbg-locale-landmarks-empty">No landmarks yet — click + Pick landmark to add one.</div>`;
+    return;
+  }
+  locLandmarksList.innerHTML = _renderStructureBar() + _locDraft.landmarks.map((lm, idx) => {
+    // v2.74.279 — Status computation moved to _computeLandmarkStatusIcon
+    // (used in identity zone). Verification detail (issues, ops, sample
+    // HTML) rendered in the drawer's Verification subsection by
+    // _renderLandmarkVerificationSection. No inline statusHtml block
+    // needed at the row level anymore.
+    // v2.74.233 — Claude is now built into the picker flow itself
+    // (Pick → picker captures element → DOM context + role + screenshot
+    // ship to Claude → Claude's selector becomes the landmark's
+    // selector). The standalone "Ask Claude" button is gone.
+    //
+    // Per-landmark "Show" toggle (eye icon) toggles the on-page
+    // overlay for THIS landmark independent of others. Green accent
+    // when active so the author can see at a glance which landmarks
+    // are currently highlighted on the live page.
+    const showActive = lm.showOverlay === true;
+    const showBtnLabel = showActive ? '👁' : '◌';
+    const showBtnTitle = showActive
+      ? 'Hide this landmark overlay on the page'
+      : 'Show this landmark overlay on the page (green outline)';
+    // v2.74.233 — Claude-refining state: when the picker just fired
+    // and we're awaiting Claude's refined selector, show a small
+    // inline indicator instead of the regular status.
+    const refining = _landmarkRefining.get(idx);
+    let extraStatusHtml = '';
+    if (refining) {
+      extraStatusHtml = `<div class="dbg-locale-landmark-refining">⌛ ${escHtml(refining)}</div>`;
+    }
+    // v2.74.238 — Row chrome reduced to semantic identity + action
+    // affordances. Selector input + Verify button moved to the
+    // profile drawer (selector display, Verify is automatic after
+    // Pick→Claude). Locales are now the SSOT for selectors; the
+    // selector is an implementation detail the author can inspect
+    // in the drawer rather than always-on UI clutter.
+    // v2.74.257 — Replace button visible only when the landmark has a
+    // UID (i.e., persisted to the registry). For fresh in-memory
+    // landmarks there's nothing to replace yet — the next Pick assigns
+    // the realization. Sits between 👁 (toggle-show) and ✕ (remove)
+    // so the destructive action stays at the end of the row.
+    const replaceBtnHtml = lm.uid
+      ? `<button class="dbg-locale-landmark-replace" data-action="replace-open" data-idx="${idx}" type="button" title="Swap downstream references to a different landmark">↻</button>`
+      : '';
+    // v2.74.258 — Verify button (Phase 9 surface). Same uid gate as
+    // Replace — needs a registry record to probe. In-flight is shown
+    // via spinner glyph; click is suppressed during round-trip.
+    const verifyInFlight = _landmarkVerifyInFlight.has(idx);
+    const verifyBtnHtml = lm.uid
+      ? `<button class="dbg-locale-landmark-verify" data-action="verify" data-idx="${idx}" type="button" ${verifyInFlight ? 'disabled' : ''} title="Probe this landmark against the live page. Cached selector works → lifecycle promotes to verified. Heuristic recovery → selector updated. Both fail → lifecycle marks stale-confirmed.">${verifyInFlight ? '⌛' : '✓'}</button>`
+      : '';
+    // v2.74.281 — Tight single-row header. Status icon sits as a
+    // left-edge column. Main column has accessibleName on top, and a
+    // single inline controls row below it carrying: alias input,
+    // action buttons, drawer toggle. No empty space — alias and
+    // buttons share the same horizontal flow.
+    const statusIcon = _computeLandmarkStatusIcon(lm);
+    // v2.74.304 — Tiered display-name derivation. Replaces the
+    // binary "accessibleName or No element picked yet" rendering.
+    // The previous code lied in State B (selector picked, element
+    // has no W3C-computed accessible name) by claiming nothing
+    // was picked. The deriver now distinguishes:
+    //   - State A (no pick yet)             → "No element picked yet"
+    //   - State B (no accessibleName)       → derived label, italicized
+    //   - Canonical (accessibleName present) → normal text
+    // The Identity drawer section still shows the raw accessibleName
+    // field as ground truth — author can spot accessibility-poor
+    // picks there. This change is cosmetic-only: lm.accessibleName,
+    // lm.uid, lm.isCanonical all stay untouched.
+    const displayName = _deriveLandmarkDisplayName(lm);
+    const isExpanded = _landmarkProfileExpanded.has(idx);
+    const caret = isExpanded ? '▾' : '▸';
+    return `
+      <div class="dbg-locale-landmark-row" data-idx="${idx}">
+        <div class="lm-header">
+          <span class="lm-status-icon ${statusIcon.cls}" title="${escAttr(statusIcon.tooltip)}">${statusIcon.icon}</span>
+          <div class="lm-header-main">
+            <div class="lm-name">${displayName}</div>
+            <div class="lm-controls">
+              <input type="text" class="dbg-locale-landmark-role lm-alias-input" data-field="aliases" data-idx="${idx}"
+                     placeholder="aliases (comma-separated)"
+                     title="Comma-separated identifiers for this landmark. First entry is the primary alias; the rest are alternative names. Auto-populated from Claude's suggestions on Pick."
+                     value="${escAttr([lm.alias, ...(Array.isArray(lm.aliases) ? lm.aliases : [])].filter(s => s && String(s).trim()).join(', '))}" />
+              <button class="dbg-locale-landmark-pick" data-action="pick" data-idx="${idx}" type="button" title="Re-pick this landmark on the page">Pick</button>
+              <button class="dbg-locale-landmark-show ${showActive ? 'dbg-locale-landmark-show-active' : ''}" data-action="toggle-show" data-idx="${idx}" type="button" title="${escAttr(showBtnTitle)}">${showBtnLabel}</button>
+              ${verifyBtnHtml}
+              ${replaceBtnHtml}
+              <button class="dbg-locale-landmark-remove" data-action="remove" data-idx="${idx}" title="Remove" type="button">✕</button>
+              <button class="lm-details-toggle" data-action="profile-toggle" data-idx="${idx}" type="button" title="${isExpanded ? 'Collapse details' : 'Expand details — identity, realization, description, verification, profile, lifecycle'}" aria-expanded="${isExpanded ? 'true' : 'false'}">${caret}</button>
+            </div>
+          </div>
+        </div>
+        ${extraStatusHtml}
+        ${_renderLandmarkVerifyOutcome(idx)}
+        ${_renderLandmarkReplacePicker(idx)}
+        ${isExpanded ? _renderLandmarkProfileDrawer(idx) : ''}
+      </div>`;
+  }).join('');
+
+  // v2.74.238 — Only the role input has data-field after the selector
+  // field was removed from the row.
+  // v2.74.302 — Field renamed alias → aliases (comma-separated). The
+  // visible row-header input now carries the full alias list: primary
+  // alias in slot 0, secondaries in slots 1..N. On edit we parse the
+  // comma-list, normalize each entry (lowercase + hyphen-spaces), then
+  // split: first → lm.alias, rest → lm.aliases. This is the single
+  // source of truth for alias authoring — the drawer's separate
+  // "Secondary aliases" field was removed (it was redundant once the
+  // header field went plural).
+  // v2.74.336 — Phase C-lite: wire the "Structure with Claude" button.
+  const _structBtn = locLandmarksList.querySelector('[data-loc-action="propose-structure"]');
+  if (_structBtn) _structBtn.addEventListener('click', onProposeStructure);
+
+  locLandmarksList.querySelectorAll('input[data-field]').forEach(inp => {
+    inp.addEventListener('input', () => {
+      const idx = parseInt(inp.dataset.idx, 10);
+      const f = inp.dataset.field;
+      if (!_locDraft.landmarks[idx]) return;
+      if (f === 'aliases') {
+        // Parse comma-separated list. Empty entries dropped. Each
+        // normalized to lowercase + dash-joined (matches the same
+        // shape Claude's aliases use, so author and Claude entries
+        // are interchangeable).
+        const parts = String(inp.value || '')
+          .split(',')
+          .map(s => s.trim().toLowerCase().replace(/\s+/g, '-'))
+          .filter(Boolean)
+          .slice(0, 6);   // hard cap — same as Claude's max
+        _locDraft.landmarks[idx].alias   = parts[0] ?? '';
+        _locDraft.landmarks[idx].aliases = parts.slice(1);
+      } else {
+        _locDraft.landmarks[idx][f] = inp.value;
+      }
+      if (_locDraft.landmarks[idx].verified) {
+        _locDraft.landmarks[idx].verified = null;
+        renderLocaleLandmarks();
+        const next = locLandmarksList.querySelector(`input[data-field="${f}"][data-idx="${idx}"]`);
+        if (next) {
+          next.focus();
+          next.setSelectionRange(next.value.length, next.value.length);
+        }
+      }
+      updateLocaleSaveButtonState();
+    });
+  });
+  locLandmarksList.querySelectorAll('[data-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.dataset.idx, 10);
+      const action = btn.dataset.action;
+      if (action === 'remove') {
+        // v2.74.243 — Phase 5: reference integrity. Before removing,
+        // run blast-radius analysis against the registry for any
+        // landmark that has a UID. If it's referenced by other
+        // locales / fragments / observations, surface the impact
+        // and require explicit confirmation. Landmarks without a
+        // UID (legacy, never saved to registry) skip the check.
+        _removeLandmarkWithImpactCheck(idx);
+      } else if (action === 'pick') {
+        startLocalePick(idx);
+      } else if (action === 'toggle-show') {
+        // v2.74.233 — Per-landmark overlay visibility toggle. State
+        // is ephemeral (not persisted to the saved record). Triggers
+        // an overlay refresh so the change is visible immediately.
+        const lm = _locDraft.landmarks[idx];
+        if (!lm) return;
+        lm.showOverlay = lm.showOverlay !== true;
+        renderLocaleLandmarks();
+        _refreshLocaleOverlays();
+      } else if (action === 'profile-toggle') {
+        // v2.74.235 — Expand/collapse the profile drawer for this
+        // landmark. State is ephemeral.
+        if (_landmarkProfileExpanded.has(idx)) _landmarkProfileExpanded.delete(idx);
+        else _landmarkProfileExpanded.add(idx);
+        renderLocaleLandmarks();
+      } else if (action === 'verify') {
+        // v2.74.258 — Phase 9 surface. Probe the landmark against the
+        // live page; lifecycle + selector update server-side. The row
+        // re-renders with the outcome and the new lifecycle chip.
+        _verifyLandmarkInRow(idx);
+      } else if (action === 'replace-open') {
+        // v2.74.257 — Phase 10.5 surface. Toggle the replacement
+        // candidate picker. First open kicks off a candidate fetch;
+        // re-open without close re-uses cached candidates.
+        _toggleReplacePicker(idx);
+      } else if (action === 'replace-cancel') {
+        _closeReplacePicker(idx);
+        renderLocaleLandmarks();
+      } else if (action === 'replace-commit') {
+        const newUid = btn.dataset.newUid;
+        if (newUid) _commitLandmarkReplace(idx, newUid);
+      } else if (action === 'lifecycle-deprecate') {
+        _setLandmarkLifecycle(idx, 'deprecated');
+      } else if (action === 'lifecycle-restore') {
+        _setLandmarkLifecycle(idx, 'fresh');
+      } else if (action === 'open-screenshot') {
+        // v2.74.293 — Open the captured screenshot in a new tab. Data
+        // URL goes through a blob conversion because MV3 silently drops
+        // chrome.tabs.create({url:'data:...'}) calls.
+        // v2.74.300 — Prefer the wider context shot (with red highlight
+        // box) over the tight thumbnail when available. The author
+        // wants to SEE WHAT CLAUDE SAW when reviewing landmark quality —
+        // the context shot is exactly that. Fall back to the tight
+        // thumb when context capture failed (iframe element, etc.).
+        const lm = _locDraft?.landmarks?.[idx];
+        const opened = lm?.captureContextScreenshot || lm?.captureScreenshot;
+        if (opened) _openScreenshotInNewTab(opened);
+      }
+    });
+  });
+  // v2.74.235 — Profile-field edit handlers. Description + aliases
+  // are author-editable; Claude's output is just a starting point.
+  // The author's edit wins on save.
+  locLandmarksList.querySelectorAll('[data-action="profile-desc-edit"]').forEach(el => {
+    el.addEventListener('input', () => {
+      const i = parseInt(el.dataset.idx, 10);
+      if (!_locDraft.landmarks[i]) return;
+      _locDraft.landmarks[i].description = el.value;
+    });
+  });
+  // v2.74.302 — `profile-aliases-edit` handler removed. The drawer no
+  // longer has a separate "Secondary aliases" input; the row-header
+  // "aliases" input (data-field="aliases") covers primary + secondaries.
+  // v2.74.305 — Replaced v2.74.244's single profile-effect-edit
+  // handler. Effect is now structured (kind + parameter) AND
+  // interaction pattern is separate. Three handlers below.
+  locLandmarksList.querySelectorAll('[data-action="profile-effect-kind-edit"]').forEach(el => {
+    el.addEventListener('change', () => {
+      const i = parseInt(el.dataset.idx, 10);
+      const lm = _locDraft?.landmarks?.[i];
+      if (!lm) return;
+      const newKind = el.value;
+      // Reset to default-parameter shape per kind. If the new kind
+      // takes no parameter, store just { kind }.
+      if (newKind === 'opens-new-thread') {
+        const prevForm = lm.effect?.form;
+        lm.effect = { kind: newKind, form: prevForm || 'tab' };
+      } else if (newKind === 'triggers-modal') {
+        const prevModalKind = lm.effect?.modalKind;
+        lm.effect = { kind: newKind, modalKind: prevModalKind || 'confirm' };
+      } else {
+        lm.effect = { kind: newKind };
+      }
+      lm.effectSource = 'authored';   // v2.74.309 — author set this
+      renderLocaleLandmarks();   // re-render to show/hide param picker
+    });
+  });
+  locLandmarksList.querySelectorAll('[data-action="profile-effect-form-edit"]').forEach(el => {
+    el.addEventListener('change', () => {
+      const i = parseInt(el.dataset.idx, 10);
+      const lm = _locDraft?.landmarks?.[i];
+      if (!lm?.effect) return;
+      if (lm.effect.kind !== 'opens-new-thread') return;
+      lm.effect = { ...lm.effect, form: el.value };
+      lm.effectSource = 'authored';
+    });
+  });
+  locLandmarksList.querySelectorAll('[data-action="profile-effect-modal-kind-edit"]').forEach(el => {
+    el.addEventListener('change', () => {
+      const i = parseInt(el.dataset.idx, 10);
+      const lm = _locDraft?.landmarks?.[i];
+      if (!lm?.effect) return;
+      if (lm.effect.kind !== 'triggers-modal') return;
+      lm.effect = { ...lm.effect, modalKind: el.value };
+      lm.effectSource = 'authored';
+    });
+  });
+  locLandmarksList.querySelectorAll('[data-action="profile-pattern-edit"]').forEach(el => {
+    el.addEventListener('change', () => {
+      const i = parseInt(el.dataset.idx, 10);
+      const lm = _locDraft?.landmarks?.[i];
+      if (!lm) return;
+      lm.interactionPattern = el.value;
+      lm.effectSource = 'authored';
+    });
+  });
+}
+
+/**
+ * v2.74.305 — Phase 1 migration. Existing landmark records carry a
+ * legacy `lm.actionEffect` string from the v2.74.303 vocabulary. This
+ * helper splits the string into the spec-aligned `effect` object +
+ * `interactionPattern` field. Idempotent — safe to call on already-
+ * migrated records (no-op when `effect` is already an object).
+ *
+ * Called from the landmark hydration paths so the in-memory shape is
+ * always the new one regardless of what's in storage. Save path also
+ * cleans up legacy fields.
+ *
+ * Mapping:
+ *   'unknown'           → effect: none,              pattern: none
+ *   'none'              → effect: none,              pattern: none
+ *   'triggers-navigation' → effect: triggers-navigation, pattern: none
+ *   'opens-new-thread'  → effect: opens-new-thread.tab, pattern: none
+ *   'triggers-download' → effect: triggers-download, pattern: none
+ *   'triggers-modal'    → effect: triggers-modal.confirm, pattern: none
+ *                          (best guess on modalKind — author can refine)
+ *   'opens-menu'        → effect: none, pattern: opens-menu
+ *   'switches-tab'      → effect: none, pattern: switches-tab
+ *   'toggles-expansion' → effect: none, pattern: toggles-expansion
+ *   'toggles-state'     → effect: none, pattern: toggles-state
+ *   'submits-in-place'  → effect: none, pattern: submits-in-place
+ *   'mutates-page'      → effect: none, pattern: mutates-page
+ */
+function _hydrateLandmarkEffectShape(lm) {
+  if (!lm || typeof lm !== 'object') return lm;
+  if (lm.effect && typeof lm.effect === 'object') return lm;   // already migrated
+  const legacy = typeof lm.actionEffect === 'string' ? lm.actionEffect : '';
+  const MAP = {
+    'unknown'            : { effect: { kind: 'none' },                                 interactionPattern: 'none' },
+    'none'               : { effect: { kind: 'none' },                                 interactionPattern: 'none' },
+    'triggers-navigation': { effect: { kind: 'triggers-navigation' },                  interactionPattern: 'none' },
+    'opens-new-thread'   : { effect: { kind: 'opens-new-thread', form: 'tab' },        interactionPattern: 'none' },
+    'triggers-download'  : { effect: { kind: 'triggers-download' },                    interactionPattern: 'none' },
+    'triggers-modal'     : { effect: { kind: 'triggers-modal', modalKind: 'confirm' }, interactionPattern: 'none' },
+    'opens-menu'         : { effect: { kind: 'none' },                                 interactionPattern: 'opens-menu' },
+    'switches-tab'       : { effect: { kind: 'none' },                                 interactionPattern: 'switches-tab' },
+    'toggles-expansion'  : { effect: { kind: 'none' },                                 interactionPattern: 'toggles-expansion' },
+    'toggles-state'      : { effect: { kind: 'none' },                                 interactionPattern: 'toggles-state' },
+    'submits-in-place'   : { effect: { kind: 'none' },                                 interactionPattern: 'submits-in-place' },
+    'mutates-page'       : { effect: { kind: 'none' },                                 interactionPattern: 'mutates-page' },
+  };
+  const migrated = MAP[legacy] || { effect: { kind: 'none' }, interactionPattern: 'none' };
+  lm.effect = migrated.effect;
+  lm.interactionPattern = migrated.interactionPattern;
+  // Keep legacy field around for one version cycle so any external
+  // consumers that read it don't break instantly. It'll be removed
+  // in a follow-up. Mark with leading underscore to indicate deprecated.
+  if (lm.actionEffect != null) {
+    lm._legacyActionEffect = lm.actionEffect;
+    delete lm.actionEffect;
+  }
+  return lm;
+}
+
+function updateLocaleSaveButtonState() {
+  if (!_locDraft || !locSaveBtn) { if (locSaveBtn) locSaveBtn.disabled = true; return; }
+  // v2.74.282 — Compute the first blocking reason in priority order:
+  //   1. Name
+  //   2. URL predicate
+  //   3. At least one landmark
+  //   4. Per-landmark validity (alias, selector, verified, score)
+  // Surfaced via title attribute (hover) AND inline hint element so
+  // authors don't have to guess why Save is disabled.
+  let reason = null;
+  const name = (locNameInput?.value ?? '').trim();
+  if (!name) {
+    reason = 'Locale needs a name (top of the form)';
+  }
+  if (!reason) {
+    const hasUrlPredicate = Array.isArray(_locDraft.predicates)
+      && _locDraft.predicates.some(p =>
+        p?.kind === 'urlMatches' && typeof p.pattern === 'string' && p.pattern.trim().length > 0
+      );
+    if (!hasUrlPredicate) {
+      reason = 'Add a URL-matches predicate in the Additional predicates section (otherwise the locale matches every page on this Ground)';
+    }
+  }
+  if (!reason) {
+    if (!Array.isArray(_locDraft.landmarks) || _locDraft.landmarks.length === 0) {
+      reason = 'Add at least one landmark (click + Pick landmark)';
+    }
+  }
+  if (!reason) {
+    for (let i = 0; i < _locDraft.landmarks.length; i++) {
+      const lm = _locDraft.landmarks[i];
+      const tag = lm.accessibleName ?? lm.alias ?? `#${i + 1}`;
+      if (!lm.alias || !lm.alias.trim()) {
+        reason = `Landmark "${tag}" needs an alias`;
+        break;
+      }
+      if (!lm.selector || !lm.selector.trim()) {
+        reason = `Landmark "${tag}" hasn't been picked yet — click Pick on its row`;
+        break;
+      }
+      if (!lm.verified) {
+        reason = `Landmark "${tag}" not yet verified — click ✓ to verify against the live page`;
+        break;
+      }
+      // v2.74.234 — Save gate uses the multi-axis verification score:
+      // 'mismatch' blocks; 'ready'/'caveats'/legacy matchedCount pass.
+      if (lm.verified.score === 'mismatch') {
+        const issues = Array.isArray(lm.verified.issues) && lm.verified.issues.length > 0
+          ? ` (${lm.verified.issues[0]})` : '';
+        reason = `Landmark "${tag}" failed verification${issues} — re-Pick or fix the selector`;
+        break;
+      }
+      if (!lm.verified.score && !(lm.verified.matchedCount > 0)) {
+        reason = `Landmark "${tag}" matched 0 elements on the page — re-Pick or fix the selector`;
+        break;
+      }
+    }
+  }
+  const isDisabled = reason !== null;
+  locSaveBtn.disabled = isDisabled;
+  if (isDisabled) {
+    locSaveBtn.setAttribute('title', reason);
+    if (locSaveReasonEl) {
+      locSaveReasonEl.textContent = reason;
+      locSaveReasonEl.classList.remove('hidden');
+    }
+  } else {
+    locSaveBtn.removeAttribute('title');
+    if (locSaveReasonEl) {
+      locSaveReasonEl.textContent = '';
+      locSaveReasonEl.classList.add('hidden');
+    }
+  }
+}
+
+// ─── Picker integration ──────────────────────────────────────────────────
+
+async function startLocalePick(landmarkIdx) {
+  if (!_locDraft) return;
+  // v2.74.280 — Two modes:
+  //   landmarkIdx === null : CREATE mode (entered via "+ Pick landmark").
+  //     No row exists yet. On PICK_RESULT, a new landmark is pushed +
+  //     populated by Pick→Claude. Cancel/error: no landmark is created.
+  //   landmarkIdx === number : RE-PICK mode (entered via row's Pick
+  //     button). Existing row's element is being changed; selector and
+  //     identity get refreshed.
+  const isCreate = landmarkIdx === null;
+  if (!isCreate && !_locDraft.landmarks[landmarkIdx]) return;
+  // v2.74.274 — Gate softened. Author-typed alias is no longer
+  // required before Pick. Rationale (see SPEC_DEV entry [2026-05-21]
+  // — alias field cleanup): the alias is a per-locale identifier
+  // and Claude hint, not part of substrate canonical identity. The
+  // natural flow is "Pick first, label later"; the post-Pick path
+  // auto-fills the alias from the computed accessibleName when
+  // blank, so the common case needs zero typing.
+  //
+  // Claude refinement still gets a role hint — falls back to
+  // 'landmark' (matched downstream in GENERATE_LANDMARK_PROFILE_BG).
+  // The author can override the alias at any time.
+  if (_locPickerSession) await cancelLocalePick(true);
+  if (_locTabId == null) {
+    showLocaleWarning('No capture tab. Cancel and start over.');
+    return;
+  }
+
+  const ready = await pingContentScript(_locTabId);
+  if (!ready.ok) {
+    showLocaleWarning(`Pick failed: ${ready.error}. ${ready.hint ?? ''}`);
+    return;
+  }
+
+  const sessionId = `loc_pick_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  _locPickerSession = { sessionId, landmarkIdx };
+
+  // v2.74.166 — Frame-aware broadcast (same helper fragment-author and
+  // observation-author use). Locale landmarks can now point at
+  // elements inside same-origin iframes.
+  const startRes = await broadcastStartPick(_locTabId, {
+    sessionId, mode: 'target', containerSelector: '', multiCandidate: false,
+  });
+  if (!startRes.success) {
+    _locPickerSession = null;
+    showLocaleWarning(`Pick failed: ${startRes.error}`);
+    return;
+  }
+  if (locPickBanner) locPickBanner.classList.remove('hidden');
+}
+
+async function cancelLocalePick(notifyContentScript) {
+  if (!_locPickerSession) return;
+  const session = _locPickerSession;
+  _locPickerSession = null;
+  if (locPickBanner) locPickBanner.classList.add('hidden');
+  if (notifyContentScript && _locTabId != null) {
+    // v2.74.166 — Broadcast cancel so iframe pickers tear down too.
+    await broadcastCancelPick(_locTabId, { sessionId: session.sessionId });
+  }
+}
+
+// ─── Verify landmark ─────────────────────────────────────────────────────
+
+// ─── v2.74.243 — Phase 5: landmark removal with impact analysis ─────────
+//
+// Removing a landmark from a locale is a reference-integrity event:
+//   - The locale loses one entry from its `landmarkRefs[]` on next save
+//   - The registry record stays (other locales / fragments may use it)
+//   - But IF this locale was the only consumer, the record becomes orphaned
+//   - AND IF fragments/observations referenced the landmark, they break
+//
+// We don't auto-delete the registry record on locale-level removal
+// (per spec § Reference integrity: "leave orphans for user cleanup").
+// We DO warn the author about downstream consumers so they know what
+// they're breaking.
+
+async function _removeLandmarkWithImpactCheck(idx) {
+  if (!_locDraft?.landmarks?.[idx]) return;
+  const lm = _locDraft.landmarks[idx];
+  // Helper that does the actual removal — extracted so both branches
+  // (no-impact and confirmed-impact) share the same cleanup path.
+  const doRemove = () => {
+    _locDraft.landmarks.splice(idx, 1);
+    _invalidateStructure();   // v2.74.336 — landmark set changed; drop stale structure
+    _landmarkRefining.delete(idx);
+    const reKeyed = new Map();
+    for (const [k, v] of _landmarkRefining) {
+      if (k > idx) reKeyed.set(k - 1, v);
+      else if (k < idx) reKeyed.set(k, v);
+    }
+    _landmarkRefining = reKeyed;
+    const expandedReKeyed = new Set();
+    for (const k of _landmarkProfileExpanded) {
+      if (k > idx) expandedReKeyed.add(k - 1);
+      else if (k < idx) expandedReKeyed.add(k);
+    }
+    _landmarkProfileExpanded = expandedReKeyed;
+    renderLocaleLandmarks();
+    updateLocaleSaveButtonState();
+    _refreshLocaleOverlays();
+  };
+
+  // No UID means the landmark hasn't been saved to the registry yet
+  // (fresh in-memory only). Skip analysis; just remove.
+  if (!lm.uid || !_locGroundId) {
+    doRemove();
+    return;
+  }
+
+  let impact;
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'ANALYZE_LANDMARK_IMPACT',
+      payload: { uid: lm.uid, groundId: _locGroundId },
+    });
+    impact = res?.impact ?? null;
+  } catch (e) {
+    // Analysis dispatch failed — proceed with removal but log it.
+    Logger.warn('locale-capture', `impact analysis failed (proceeding with remove): ${e.message}`);
+    doRemove();
+    return;
+  }
+  if (!impact) { doRemove(); return; }
+
+  // Filter out THIS locale from the impact.locales list — we know
+  // we're removing from here. What matters is what OTHER consumers
+  // remain.
+  const otherLocales = (impact.locales ?? []).filter(l => l.id !== _locDraft?.id);
+  const fragments = impact.fragments ?? [];
+  const observations = impact.observations ?? [];
+  const downstreamCount = fragments.length + observations.length;
+  const otherLocaleCount = otherLocales.length;
+
+  if (downstreamCount === 0 && otherLocaleCount === 0) {
+    // No downstream consumers, no other locales. Safe to remove —
+    // the registry record will be orphaned (left for user cleanup
+    // per spec § Reference integrity § Locale deletion).
+    doRemove();
+    return;
+  }
+
+  // v2.74.256 — Phase 10.5 surface: fetch replacement candidates so
+  // the confirm dialog can surface "you could use X instead" before
+  // the user commits to a breaking removal. Only fired when there's
+  // downstream impact (no point suggesting replacements for landmarks
+  // nothing depends on). Failure is silent — the dialog falls back to
+  // the original "remove only" prompt.
+  let candidates = [];
+  if (downstreamCount > 0) {
+    try {
+      const candRes = await chrome.runtime.sendMessage({
+        type: 'FIND_REPLACEMENT_CANDIDATES',
+        payload: { uid: lm.uid, groundId: _locGroundId, limit: 3, minConfidence: 'low' },
+      });
+      if (candRes?.success && Array.isArray(candRes.candidates)) {
+        candidates = candRes.candidates;
+      }
+    } catch (e) {
+      Logger.debug('locale-capture', `candidate fetch failed (proceeding without): ${e.message}`);
+    }
+  }
+
+  // Build the confirmation message.
+  const lines = [];
+  lines.push(`Remove landmark "${lm.accessibleName ?? lm.alias ?? lm.uid}" from this locale?`);
+  lines.push('');
+  if (downstreamCount > 0) {
+    lines.push('⚠ This landmark is referenced by:');
+    if (fragments.length > 0) {
+      lines.push(`  • ${fragments.length} fragment${fragments.length === 1 ? '' : 's'}: ${fragments.slice(0, 3).map(f => `"${f.name}"`).join(', ')}${fragments.length > 3 ? `, +${fragments.length - 3} more` : ''}`);
+    }
+    if (observations.length > 0) {
+      lines.push(`  • ${observations.length} observation${observations.length === 1 ? '' : 's'}: ${observations.slice(0, 3).map(o => `"${o.name}"`).join(', ')}${observations.length > 3 ? `, +${observations.length - 3} more` : ''}`);
+    }
+    lines.push('');
+    lines.push('Removing it from this locale will leave those references broken at runtime.');
+  }
+  if (otherLocaleCount > 0) {
+    lines.push(`This landmark is also referenced by ${otherLocaleCount} other locale${otherLocaleCount === 1 ? '' : 's'} (${otherLocales.slice(0, 3).map(l => `"${l.name}"`).join(', ')}${otherLocaleCount > 3 ? `, …` : ''}). The registry record stays available there.`);
+  } else if (downstreamCount > 0) {
+    lines.push('This locale is the last reference holder; the registry record will be orphaned.');
+  }
+  // v2.74.256 — Surface replacement candidates from Phase 10.5
+  // ranking. Confidence emoji: 🟢 high, 🟡 medium, ⚪ low. Author
+  // sees a concrete alternative path before committing to breakage.
+  if (candidates.length > 0) {
+    lines.push('');
+    lines.push('💡 Replacement candidates on this Ground:');
+    for (const c of candidates) {
+      const emoji = c.confidence === 'high' ? '🟢'
+                  : c.confidence === 'medium' ? '🟡' : '⚪';
+      const name = c.landmark?.accessibleName ?? c.landmark?.alias ?? c.uid;
+      const lc   = c.landmark?.lifecycle ?? 'fresh';
+      lines.push(`  ${emoji} ${name} — ${c.confidence} (${(c.score * 100).toFixed(0)}% match, ${lc})`);
+    }
+    lines.push('');
+    lines.push('To swap downstream references to one of these instead of breaking them, cancel and click the ↻ button on this landmark row.');
+  }
+  lines.push('');
+  lines.push('Continue with removal?');
+
+  if (confirm(lines.join('\n'))) {
+    Logger.info('locale-capture', `Landmark removed despite ${downstreamCount} downstream consumer(s)`, {
+      uid: lm.uid, alias: lm.alias, accessibleName: lm.accessibleName,
+      fragments: fragments.map(f => ({ id: f.id, name: f.name, refCount: f.refCount })),
+      observations: observations.map(o => ({ id: o.id, name: o.name, refCount: o.refCount })),
+      otherLocales: otherLocales.map(l => ({ id: l.id, name: l.name })),
+    });
+    doRemove();
+  }
+  // else: user cancelled, no change.
+}
+
+// ─── v2.74.235 — Profile drawer (Wave 2) ─────────────────────────────────
+//
+// Each landmark row has a collapsible drawer below it showing the
+// Claude-generated profile: description, aliases, common operations,
+// pitfalls, expected content kind, confidence. Fields are editable
+// inline — the author's edits override Claude's suggestion on save.
+
+// ─── v2.74.257 — Phase 10.5 surface: in-row replacement picker ──────────
+//
+// Author clicks ↻ on a landmark row → picker opens below the row
+// showing top candidates from Phase 10.5 ranking. Click a candidate
+// → dryRun preview (count of fragments/observations/locales touched)
+// → confirm → commit via Phase 10 backend.
+//
+// Stays inline in the row (no modal). Multiple pickers can be open
+// simultaneously; state is keyed by row index.
+
+function _renderLandmarkReplacePicker(idx) {
+  const state = _landmarkReplaceOpen.get(idx);
+  if (!state) return '';
+  if (state === 'loading') {
+    return `
+      <div class="dbg-locale-landmark-replace-picker">
+        <div class="dbg-locale-landmark-replace-loading">⌛ Finding replacement candidates…</div>
+      </div>`;
+  }
+  if (state === 'error') {
+    const err = _landmarkReplaceError.get(idx) ?? 'unknown error';
+    return `
+      <div class="dbg-locale-landmark-replace-picker">
+        <div class="dbg-locale-landmark-replace-error">⛔ ${escHtml(err)}</div>
+        <div class="dbg-locale-landmark-replace-actions">
+          <button class="btn-secondary tiny" data-action="replace-cancel" data-idx="${idx}" type="button">Close</button>
+        </div>
+      </div>`;
+  }
+  // state === 'ready'
+  const candidates = _landmarkReplaceCandidates.get(idx) ?? [];
+  if (candidates.length === 0) {
+    return `
+      <div class="dbg-locale-landmark-replace-picker">
+        <div class="dbg-locale-landmark-replace-empty">
+          No replacement candidates found on this Ground. Replacements must share the same a11y role.
+        </div>
+        <div class="dbg-locale-landmark-replace-actions">
+          <button class="btn-secondary tiny" data-action="replace-cancel" data-idx="${idx}" type="button">Close</button>
+        </div>
+      </div>`;
+  }
+  const rows = candidates.map(c => {
+    const name = c.landmark?.accessibleName ?? c.landmark?.alias ?? c.uid;
+    const lc   = c.landmark?.lifecycle ?? 'fresh';
+    const emoji = c.confidence === 'high' ? '🟢'
+                : c.confidence === 'medium' ? '🟡' : '⚪';
+    const pct = (c.score * 100).toFixed(0);
+    const breakdown = c.breakdown
+      ? `<span class="dbg-locale-landmark-replace-breakdown" title="name:${(c.breakdown.name*100).toFixed(0)}% ctx:${(c.breakdown.context*100).toFixed(0)}% url:${(c.breakdown.url*100).toFixed(0)}% lifecycle:${(c.breakdown.lifecycle*100).toFixed(0)}%">${pct}%</span>`
+      : '';
+    return `
+      <button class="dbg-locale-landmark-replace-candidate" data-action="replace-commit" data-idx="${idx}" data-new-uid="${escAttr(c.uid)}" type="button">
+        <span class="dbg-locale-landmark-replace-conf">${emoji} ${c.confidence}</span>
+        ${breakdown}
+        <span class="dbg-locale-landmark-replace-name">${escHtml(name)}</span>
+        <span class="dbg-locale-landmark-replace-lifecycle">${escHtml(lc)}</span>
+      </button>`;
+  }).join('');
+  return `
+    <div class="dbg-locale-landmark-replace-picker">
+      <div class="dbg-locale-landmark-replace-header">Replace with…</div>
+      <div class="dbg-locale-landmark-replace-list">${rows}</div>
+      <div class="dbg-locale-landmark-replace-actions">
+        <button class="btn-secondary tiny" data-action="replace-cancel" data-idx="${idx}" type="button">Cancel</button>
+      </div>
+    </div>`;
+}
+
+async function _toggleReplacePicker(idx) {
+  const lm = _locDraft?.landmarks?.[idx];
+  if (!lm || !lm.uid || !_locGroundId) return;
+  // Already open: close it.
+  if (_landmarkReplaceOpen.has(idx)) {
+    _closeReplacePicker(idx);
+    renderLocaleLandmarks();
+    return;
+  }
+  // Open in loading state, fetch candidates, re-render.
+  _landmarkReplaceOpen.set(idx, 'loading');
+  renderLocaleLandmarks();
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type   : 'FIND_REPLACEMENT_CANDIDATES',
+      payload: { uid: lm.uid, groundId: _locGroundId, limit: 5, minConfidence: 'low' },
+    });
+    if (res?.success) {
+      _landmarkReplaceCandidates.set(idx, Array.isArray(res.candidates) ? res.candidates : []);
+      _landmarkReplaceOpen.set(idx, 'ready');
+    } else {
+      _landmarkReplaceError.set(idx, res?.error ?? 'candidate fetch failed');
+      _landmarkReplaceOpen.set(idx, 'error');
+    }
+  } catch (e) {
+    _landmarkReplaceError.set(idx, e.message);
+    _landmarkReplaceOpen.set(idx, 'error');
+  }
+  renderLocaleLandmarks();
+}
+
+function _closeReplacePicker(idx) {
+  _landmarkReplaceOpen.delete(idx);
+  _landmarkReplaceCandidates.delete(idx);
+  _landmarkReplaceError.delete(idx);
+}
+
+async function _commitLandmarkReplace(idx, newUid) {
+  const lm = _locDraft?.landmarks?.[idx];
+  if (!lm || !lm.uid || !_locGroundId) return;
+  const oldUid = lm.uid;
+  if (oldUid === newUid) {
+    showLocaleWarning('Cannot replace a landmark with itself');
+    return;
+  }
+  // (1) Dry-run preview to count what would change.
+  let preview;
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'REPLACE_LANDMARK_REFERENCES',
+      payload: { oldUid, newUid, groundId: _locGroundId, dryRun: true },
+    });
+    if (!res?.success) {
+      showLocaleWarning(`Replace preview failed: ${res?.error ?? 'unknown error'}`);
+      return;
+    }
+    preview = res;
+  } catch (e) {
+    showLocaleWarning(`Replace preview failed: ${e.message}`);
+    return;
+  }
+  // (2) Build confirm message with the preview totals.
+  const t = preview.totals ?? {};
+  const newName = preview.changes?.locales?.[0]?.name
+    ?? _landmarkReplaceCandidates.get(idx)?.find(c => c.uid === newUid)?.landmark?.accessibleName
+    ?? newUid;
+  const lines = [];
+  lines.push(`Replace "${lm.accessibleName ?? lm.alias ?? oldUid}" with "${newName}"?`);
+  lines.push('');
+  lines.push('This rewrite will touch:');
+  lines.push(`  • ${t.localesRewritten ?? 0} locale ref list${(t.localesRewritten ?? 0) === 1 ? '' : 's'}`);
+  lines.push(`  • ${t.fragmentsRewritten ?? 0} fragment${(t.fragmentsRewritten ?? 0) === 1 ? '' : 's'}`);
+  lines.push(`  • ${t.observationsRewritten ?? 0} observation${(t.observationsRewritten ?? 0) === 1 ? '' : 's'}`);
+  lines.push(`  • ${t.totalRefsRewritten ?? 0} ref${(t.totalRefsRewritten ?? 0) === 1 ? '' : 's'} total`);
+  if ((t.skippedLegacyRefs ?? 0) > 0) {
+    lines.push('');
+    lines.push(`⚠ ${t.skippedLegacyRefs} legacy { localeId, role } ref(s) preserved (unsafe to auto-rewrite)`);
+  }
+  if (preview.rolePresentMismatch) {
+    lines.push('');
+    lines.push(`⚠ Role mismatch: "${preview.roleOld ?? '?'}" → "${preview.roleNew ?? '?'}". The replacement landmark has a different role descriptor.`);
+  }
+  lines.push('');
+  lines.push('Continue with replacement?');
+  if (!confirm(lines.join('\n'))) return;
+
+  // (3) Commit (dryRun: false).
+  let result;
+  try {
+    result = await chrome.runtime.sendMessage({
+      type: 'REPLACE_LANDMARK_REFERENCES',
+      payload: { oldUid, newUid, groundId: _locGroundId, dryRun: false },
+    });
+  } catch (e) {
+    showLocaleWarning(`Replace failed: ${e.message}`);
+    return;
+  }
+  if (!result?.success) {
+    showLocaleWarning(`Replace failed: ${result?.error ?? 'unknown error'}`);
+    return;
+  }
+  // (4) Update the in-memory locale draft so the row reflects the new
+  // landmark. Persisted state was rewritten by the backend; the draft
+  // tracks the visible identity here.
+  let newLandmark = null;
+  try {
+    const getRes = await chrome.runtime.sendMessage({ type: 'GET_LANDMARK', payload: { uid: newUid } });
+    if (getRes?.success) newLandmark = getRes.landmark;
+  } catch { /* fall back to candidate data */ }
+  if (!newLandmark) {
+    const candEntry = _landmarkReplaceCandidates.get(idx)?.find(c => c.uid === newUid);
+    newLandmark = candEntry?.landmark ?? null;
+  }
+  if (newLandmark) {
+    const existing = _locDraft.landmarks[idx];
+    _locDraft.landmarks[idx] = {
+      ...existing,
+      uid               : newLandmark.uid,
+      alias             : newLandmark.alias ?? existing.alias,
+      a11yRole          : newLandmark.a11yRole ?? null,
+      accessibleName    : newLandmark.accessibleName ?? null,
+      hierarchicalContext: newLandmark.hierarchicalContext ?? null,
+      selector          : newLandmark.selector ?? existing.selector,
+      frameUrl          : newLandmark.frameUrl ?? existing.frameUrl,
+      lifecycle         : newLandmark.lifecycle ?? 'verified',
+      // Author-customized fields on the OLD landmark (description,
+      // aliases, expectedShape) don't carry over — they were
+      // semantics for the prior identity. Discard.
+      description       : newLandmark.description ?? '',
+      aliases           : Array.isArray(newLandmark.aliases) ? newLandmark.aliases : [],
+    };
+  }
+  _closeReplacePicker(idx);
+  renderLocaleLandmarks();
+  updateLocaleSaveButtonState();
+  _refreshLocaleOverlays();
+  Logger.info('locale-capture',
+    `Replaced ${oldUid} → ${newUid} on ground ${_locGroundId}: ` +
+    `${result.totals?.totalRefsRewritten ?? 0} ref(s) across ` +
+    `${result.totals?.localesRewritten ?? 0} locale(s), ` +
+    `${result.totals?.fragmentsRewritten ?? 0} fragment(s), ` +
+    `${result.totals?.observationsRewritten ?? 0} observation(s)`);
+}
+
+// ─── v2.74.258 — Phase 9 surface: per-row verify ────────────────────────
+//
+// Author clicks ✓ on a landmark row → VERIFY_LANDMARK round-trips to
+// the content script. Three outcomes:
+//   via:'selector'  — cached works, lifecycle promotes to verified.
+//   via:'heuristic' — recovery found the same identity at a new
+//                     selector. Landmark record auto-updates (Phase
+//                     9 policy). Outcome banner shows the swap.
+//   via:'fail'      — both paths failed. Lifecycle = stale-confirmed.
+//
+// Row's lifecycle chip updates from the refreshed landmark record on
+// next render. The outcome banner below the row carries the narrative
+// (what changed, why) until the next interaction clears it.
+
+function _renderLandmarkVerifyOutcome(idx) {
+  const outcome = _landmarkVerifyOutcome.get(idx);
+  if (!outcome) return '';
+  const { via, error, lifecycleBefore, lifecycleAfter, selectorChanged, skipped, reason, _localOnly } = outcome;
+  if (skipped) {
+    return `
+      <div class="dbg-locale-landmark-verify-outcome dbg-locale-landmark-verify-skipped">
+        Verify skipped: ${escHtml(reason ?? 'unknown')}
+      </div>`;
+  }
+  if (via === 'selector') {
+    // v2.74.278 — Local-only verify (landmark not yet in registry).
+    // Skip the lifecycle transition narrative — there's no canonical
+    // lifecycle to report on.
+    if (_localOnly) {
+      return `
+        <div class="dbg-locale-landmark-verify-outcome dbg-locale-landmark-verify-ok">
+          ✓ Selector matched on the live page (save locale to persist + enable lifecycle tracking)
+        </div>`;
+    }
+    return `
+      <div class="dbg-locale-landmark-verify-outcome dbg-locale-landmark-verify-ok">
+        ✓ Verified via cached selector — lifecycle ${escHtml(lifecycleBefore ?? '?')} → ${escHtml(lifecycleAfter ?? 'verified')}
+      </div>`;
+  }
+  if (via === 'heuristic') {
+    return `
+      <div class="dbg-locale-landmark-verify-outcome dbg-locale-landmark-verify-recovered">
+        ↻ Heuristic recovery — selector ${selectorChanged ? 'updated to new element' : 'unchanged'}; lifecycle ${escHtml(lifecycleBefore ?? '?')} → ${escHtml(lifecycleAfter ?? 'verified')}
+      </div>`;
+  }
+  if (via === 'fail') {
+    // v2.74.278 — Local-only verify failure doesn't touch lifecycle
+    // (no registry record yet).
+    if (_localOnly) {
+      return `
+        <div class="dbg-locale-landmark-verify-outcome dbg-locale-landmark-verify-failed">
+          ⛔ Selector didn't match on the live page: ${escHtml(error ?? 'unknown')}
+        </div>`;
+    }
+    return `
+      <div class="dbg-locale-landmark-verify-outcome dbg-locale-landmark-verify-failed">
+        ⛔ Verify failed: ${escHtml(error ?? 'unknown')} — lifecycle ${escHtml(lifecycleBefore ?? '?')} → stale-confirmed
+      </div>`;
+  }
+  if (error) {
+    return `
+      <div class="dbg-locale-landmark-verify-outcome dbg-locale-landmark-verify-failed">
+        ⛔ ${escHtml(error)}
+      </div>`;
+  }
+  return '';
+}
+
+async function _verifyLandmarkInRow(idx) {
+  const lm = _locDraft?.landmarks?.[idx];
+  if (!lm || !lm.uid) return;
+  if (_locTabId == null) {
+    _landmarkVerifyOutcome.set(idx, { error: 'No active tab — switch to your target tab and try again.' });
+    renderLocaleLandmarks();
+    return;
+  }
+  if (_landmarkVerifyInFlight.has(idx)) return;
+  _landmarkVerifyInFlight.add(idx);
+  _landmarkVerifyOutcome.delete(idx);
+  renderLocaleLandmarks();
+
+  // v2.74.278 — Branch: Phase 9 verifier only works on registry-
+  // persisted landmarks. Fresh draft landmarks (just picked, not yet
+  // Save Locale'd) have a UID but no registry record. For those, fall
+  // back to the local verifyLocaleLandmark path (which probes the
+  // selector via INSPECT_ELEMENT against the live page — same logic
+  // Pick→Claude auto-runs).
+  //
+  // Detection: GET_LANDMARK returns null when not in registry.
+  let inRegistry = false;
+  try {
+    const getRes = await chrome.runtime.sendMessage({
+      type: 'GET_LANDMARK', payload: { uid: lm.uid },
+    });
+    inRegistry = !!(getRes?.success && getRes.landmark);
+  } catch { /* treat as not-in-registry */ }
+
+  if (!inRegistry) {
+    // Local-only verify path. Reuses verifyLocaleLandmark (the same
+    // verifier that auto-runs after Pick→Claude). Pose its outcome
+    // in the same shape so the row banner renders consistently.
+    _landmarkVerifyInFlight.delete(idx);
+    try {
+      await verifyLocaleLandmark(idx);
+      // After local verify, _locDraft.landmarks[idx].verified is set.
+      const v = _locDraft.landmarks[idx]?.verified;
+      if (v?.score === 'ready' || v?.score === 'caveats') {
+        _landmarkVerifyOutcome.set(idx, {
+          via             : 'selector',
+          lifecycleBefore : 'fresh',
+          lifecycleAfter  : 'fresh',
+          selectorChanged : false,
+          skipped         : false,
+          _localOnly      : true,
+        });
+      } else {
+        _landmarkVerifyOutcome.set(idx, {
+          via             : 'fail',
+          error           : v?.issues?.[0] ?? 'selector did not match on this page',
+          lifecycleBefore : 'fresh',
+          lifecycleAfter  : 'fresh',
+          _localOnly      : true,
+        });
+      }
+    } catch (e) {
+      _landmarkVerifyOutcome.set(idx, { error: `Local verify failed: ${e.message}` });
+    }
+    renderLocaleLandmarks();
+    return;
+  }
+
+  // Registry-backed: use Phase 9 verifier (heuristic recovery,
+  // lifecycle promotion, event emission).
+  let outcome;
+  try {
+    outcome = await chrome.runtime.sendMessage({
+      type: 'VERIFY_LANDMARK',
+      payload: { uid: lm.uid, tabId: _locTabId },
+    });
+  } catch (e) {
+    outcome = { success: false, error: e.message };
+  }
+  _landmarkVerifyInFlight.delete(idx);
+  if (!outcome || outcome.success === false) {
+    _landmarkVerifyOutcome.set(idx, { error: outcome?.error ?? 'verify failed' });
+    renderLocaleLandmarks();
+    return;
+  }
+  _landmarkVerifyOutcome.set(idx, outcome);
+  // After server-side mutation, pull the fresh landmark record so the
+  // in-memory locale draft reflects the new lifecycle + (possibly)
+  // updated selector.
+  try {
+    const getRes = await chrome.runtime.sendMessage({
+      type: 'GET_LANDMARK', payload: { uid: lm.uid },
+    });
+    if (getRes?.success && getRes.landmark) {
+      const fresh = getRes.landmark;
+      _locDraft.landmarks[idx] = {
+        ...lm,
+        selector  : fresh.selector ?? lm.selector,
+        lifecycle : fresh.lifecycle ?? lm.lifecycle,
+        a11yRole  : fresh.a11yRole ?? lm.a11yRole,
+      };
+    }
+  } catch (e) {
+    Logger.debug('locale-capture', `GET_LANDMARK refresh after verify failed: ${e.message}`);
+  }
+  renderLocaleLandmarks();
+  _refreshLocaleOverlays();
+  Logger.info('locale-capture',
+    `Verify ${lm.uid}: via=${outcome.via ?? '?'} ${outcome.lifecycleBefore ?? '?'} → ${outcome.lifecycleAfter ?? '?'}` +
+    (outcome.selectorChanged ? ' (selector swapped)' : ''));
+}
+
+// ─── v2.74.259 — Phase 8 surface: substrate events panel ────────────────
+//
+// Collapsible panel below the landmark list showing recent
+// GroundEventBus events for the current Ground. Fetch is on-demand
+// (when the panel opens) rather than eager, since most authoring
+// sessions don't need to inspect the event log. Refetch on each
+// open ensures fresh data without setting up a storage.onChanged
+// subscription.
+//
+// Event rendering is uniform: timestamp (relative) + kind icon +
+// brief detail line + affected landmark name (when uid present).
+// Per-uid name lookup pulls from the current locale draft first
+// (zero round-trip), then falls back to a batched GET_LANDMARKS
+// for unknowns.
+
+const _EVENT_KIND_META = Object.freeze({
+  'landmark-resolution-ok'        : { icon: '✓', label: 'Verified',  cssCls: 'evt-ok' },
+  'landmark-resolution-degraded'  : { icon: '↻', label: 'Recovered', cssCls: 'evt-recovered' },
+  'landmark-resolution-failed'    : { icon: '⛔', label: 'Failed',    cssCls: 'evt-failed' },
+  'landmark-lifecycle-changed'    : { icon: '⇄', label: 'Lifecycle', cssCls: 'evt-lifecycle' },
+  'landmark-effect-observed'      : { icon: '👁', label: 'Observed',  cssCls: 'evt-observed' },
+  'landmark-effect-drift'         : { icon: '⚠', label: 'Drift',     cssCls: 'evt-drift' },
+});
+
+function _formatRelativeTime(ts) {
+  if (typeof ts !== 'number') return '?';
+  const delta = Date.now() - ts;
+  if (delta < 0) return 'now';
+  if (delta < 60_000)        return `${Math.floor(delta / 1000)}s ago`;
+  if (delta < 3_600_000)     return `${Math.floor(delta / 60_000)}m ago`;
+  if (delta < 86_400_000)    return `${Math.floor(delta / 3_600_000)}h ago`;
+  if (delta < 7 * 86_400_000) return `${Math.floor(delta / 86_400_000)}d ago`;
+  return new Date(ts).toLocaleDateString();
+}
+
+// v2.74.310 — Phase 8: format a spec-aligned Effect object (or legacy
+// string) for display. Effects are now {kind, form?, modalKind?} per
+// ACTION_SPEC § 5; older events carried a bare string. Handles both.
+function _formatEffectForDisplay(eff) {
+  if (eff == null) return '?';
+  if (typeof eff === 'string') return eff;   // legacy string effect
+  if (typeof eff === 'object' && eff.kind) {
+    if (eff.kind === 'opens-new-thread' && eff.form) return `opens-new-thread (${eff.form})`;
+    if (eff.kind === 'triggers-modal' && eff.modalKind) return `triggers-modal (${eff.modalKind})`;
+    return eff.kind;
+  }
+  return '?';
+}
+
+function _renderEventDetailLine(event) {
+  const d = event.details ?? {};
+  switch (event.kind) {
+    case 'landmark-resolution-ok':
+      return d.via === 'heuristic' && d.selectorChanged
+        ? `selector swapped (heuristic); ${escHtml(d.lifecycleBefore ?? '?')} → ${escHtml(d.lifecycleAfter ?? '?')}`
+        : `cached selector OK; ${escHtml(d.lifecycleBefore ?? '?')} → ${escHtml(d.lifecycleAfter ?? '?')}`;
+    case 'landmark-resolution-degraded': {
+      // v2.74.270 — Match-method awareness. Fuzzy/substring match
+      // indicates name drift, which is the most informative signal
+      // for an author. Surface it concretely.
+      const m = d.matchMethod;
+      if (m === 'fuzzy' && d.authoredName && d.matchedName) {
+        return `name drift: "${escHtml(d.authoredName)}" → "${escHtml(d.matchedName)}" (${((d.nameSimilarity ?? 0) * 100).toFixed(0)}% match)`;
+      }
+      if (m === 'substring' && d.authoredName && d.matchedName) {
+        return `name partial: "${escHtml(d.authoredName)}" → "${escHtml(d.matchedName)}"`;
+      }
+      const methodNote = m && m !== 'exact' ? ` (${escHtml(m)})` : '';
+      return `cached failed; recovered via heuristic${methodNote}${d.trigger ? ` — ${escHtml(d.trigger)}` : ''}`;
+    }
+    case 'landmark-resolution-failed': {
+      // v2.74.273 — Specialize iframe-related failure reasons so the
+      // author sees a concrete explanation, not just "failed."
+      if (d.reason === 'cross-origin-iframe') {
+        return `cross-origin iframe "${escHtml(d.iframeContext ?? '?')}" — browser security blocks content-script access`;
+      }
+      if (d.reason === 'iframe-absent') {
+        return `iframe context "${escHtml(d.iframeContext ?? '?')}" not present on this page`;
+      }
+      return `${escHtml(d.reason ?? 'cached + heuristic both failed')}`;
+    }
+    case 'landmark-effect-observed': {
+      // v2.74.310 — declaredEffect/observedEffect are now Effect objects
+      // (ACTION_SPEC § 5). Fall back to legacy proposedEffect string.
+      const declared = d.declaredEffect ?? d.proposedEffect;
+      const observed = d.observedEffect;
+      const patternNote = d.observedInteractionPattern && d.observedInteractionPattern !== 'none'
+        ? ` [pattern: ${escHtml(d.observedInteractionPattern)}]` : '';
+      return `${escHtml(d.action ?? 'action')}: declared=${escHtml(_formatEffectForDisplay(declared))} observed=${escHtml(_formatEffectForDisplay(observed))}${patternNote}`;
+    }
+    case 'landmark-effect-drift': {
+      const declared = d.declaredEffect ?? d.proposedEffect;
+      const sevNote = d.severity ? ` (${escHtml(d.severity)})` : '';
+      return `declared "${escHtml(_formatEffectForDisplay(declared))}" but observed "${escHtml(_formatEffectForDisplay(d.observedEffect))}"${sevNote}`;
+    }
+    case 'landmark-lifecycle-changed':
+      return `${escHtml(d.lifecycleBefore ?? '?')} → ${escHtml(d.lifecycleAfter ?? '?')}`;
+    default:
+      return '';
+  }
+}
+
+async function _toggleEventsPanel() {
+  if (!locEventsToggleBtn || !locEventsBody) return;
+  _eventsExpanded = !_eventsExpanded;
+  locEventsToggleBtn.setAttribute('aria-expanded', _eventsExpanded ? 'true' : 'false');
+  const chevron = locEventsToggleBtn.querySelector('.dbg-locale-events-chevron');
+  if (chevron) chevron.textContent = _eventsExpanded ? '▾' : '▸';
+  if (_eventsExpanded) {
+    locEventsBody.classList.remove('hidden');
+    await _refreshEventsPanel();
+    // v2.74.263 — Subscribe to live events while panel is open. The
+    // subscribe() implementation uses chrome.storage.onChanged + an
+    // id-diffing pass so the callback only fires for genuinely new
+    // events (not for ring-buffer evictions of old ones).
+    _attachEventsLiveSubscription();
+  } else {
+    locEventsBody.classList.add('hidden');
+    _detachEventsLiveSubscription();
+  }
+}
+
+function _attachEventsLiveSubscription() {
+  if (_eventsUnsubscribe || !_locGroundId) return;
+  try {
+    _eventsUnsubscribe = subscribeGroundEvents(_locGroundId, _onLiveEventsAdded);
+  } catch (e) {
+    Logger.debug('locale-capture', `subscribe failed: ${e.message}`);
+    _eventsUnsubscribe = null;
+  }
+}
+
+function _detachEventsLiveSubscription() {
+  if (_eventsUnsubscribe) {
+    try { _eventsUnsubscribe(); } catch { /* ignore */ }
+    _eventsUnsubscribe = null;
+  }
+}
+
+async function _onLiveEventsAdded(newEvents) {
+  // Guard: panel may have closed between commit and callback dispatch.
+  if (!_eventsExpanded || !locEventsList) return;
+  if (!Array.isArray(newEvents) || newEvents.length === 0) return;
+  // Merge new events into the cache (newest-first ordering preserved).
+  const existingIds = new Set((_eventsCache ?? []).map(e => e?.id));
+  const additions = newEvents.filter(e => e?.id && !existingIds.has(e.id));
+  if (additions.length === 0) return;
+  _eventsCache = [...additions, ...(_eventsCache ?? [])].slice(0, 30);
+  // Update count badge.
+  if (locEventsCount) {
+    locEventsCount.textContent = _eventsCache.length === 0 ? '' : `(${_eventsCache.length})`;
+  }
+  // Fetch landmark names for any new uids not already cached.
+  await _populateEventLandmarkNames(additions);
+  _renderEventsList();
+  // Refresh stale badge — new events may have changed lifecycle
+  // state of landmarks on this ground (e.g., a verifier OK event
+  // means one fewer stale-suspected). Also refresh the health
+  // summary so the "Last 24h" counts pick up the new event.
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'LIST_LANDMARKS_FOR_GROUND', payload: { groundId: _locGroundId },
+    });
+    if (res?.success) {
+      _eventsLandmarksCache = res.landmarks ?? [];
+      _refreshStaleBadge(_eventsLandmarksCache);
+      _renderHealthSummary(_eventsLandmarksCache, _eventsCache);
+    }
+  } catch { /* non-fatal */ }
+}
+
+async function _refreshEventsPanel() {
+  if (!locEventsList || !_locGroundId) return;
+  if (_eventsLoading) return;
+  _eventsLoading = true;
+  locEventsList.innerHTML = `<div class="dbg-locale-events-loading">⌛ Loading events…</div>`;
+  try {
+    const [eventsRes, landmarksRes] = await Promise.all([
+      chrome.runtime.sendMessage({
+        type   : 'LIST_GROUND_EVENTS',
+        payload: { groundId: _locGroundId, opts: { limit: 30 } },
+      }),
+      // v2.74.262 — Also fetch all landmarks on the ground so we can
+      // compute the stale-suspected count for the header badge. Single
+      // round-trip per panel-open; fine for typical ground sizes.
+      chrome.runtime.sendMessage({
+        type   : 'LIST_LANDMARKS_FOR_GROUND',
+        payload: { groundId: _locGroundId },
+      }).catch(() => null),
+    ]);
+    if (!eventsRes?.success) {
+      locEventsList.innerHTML = `<div class="dbg-locale-events-error">⛔ ${escHtml(eventsRes?.error ?? 'fetch failed')}</div>`;
+      return;
+    }
+    _eventsCache = Array.isArray(eventsRes.events) ? eventsRes.events : [];
+    if (locEventsCount) {
+      locEventsCount.textContent = _eventsCache.length === 0 ? ''
+        : `(${_eventsCache.length})`;
+    }
+    // v2.74.262 — Stale-suspected count + enabled state for Verify all.
+    const landmarks = landmarksRes?.landmarks ?? [];
+    _eventsLandmarksCache = landmarks;
+    _refreshStaleBadge(landmarks);
+    // v2.74.272 — Health summary banner.
+    _renderHealthSummary(landmarks, _eventsCache);
+    await _populateEventLandmarkNames(_eventsCache);
+    _renderEventsList();
+  } catch (e) {
+    locEventsList.innerHTML = `<div class="dbg-locale-events-error">⛔ ${escHtml(e.message)}</div>`;
+  } finally {
+    _eventsLoading = false;
+  }
+}
+
+// v2.74.272 — Substrate health summary banner. Renders aggregate
+// counts at the top of the events panel body. Computed from already-
+// fetched data (landmarks + events) — no additional round-trips.
+//
+// Layout:
+//   Landmarks: N total · N verified · N stale · N deprecated
+//   Last 24h:  N recoveries (M fuzzy) · K drift · J failures
+//
+// Empty states collapse cleanly (e.g., "No substrate activity in the
+// last 24h." when events older than that or absent).
+function _renderHealthSummary(landmarks, events) {
+  if (!locEventsHealth) return;
+  const lms = Array.isArray(landmarks) ? landmarks : [];
+  const evs = Array.isArray(events) ? events : [];
+  // Landmark lifecycle aggregation.
+  const lcCounts = { 'verified': 0, 'fresh': 0, 'stale-suspected': 0, 'stale-confirmed': 0, 'deprecated': 0 };
+  for (const lm of lms) {
+    const lc = lm?.lifecycle ?? 'fresh';
+    if (lcCounts[lc] !== undefined) lcCounts[lc]++;
+  }
+  const total = lms.length;
+  // Recent-24h event aggregation.
+  const cutoff = Date.now() - 24 * 3_600_000;
+  const recent = evs.filter(e => e?.ts && e.ts >= cutoff);
+  let recoveries = 0, fuzzyRecoveries = 0, drifts = 0, failures = 0, observed = 0;
+  for (const ev of recent) {
+    if (ev.kind === 'landmark-resolution-degraded') {
+      recoveries++;
+      if (ev.details?.matchMethod === 'fuzzy' || ev.details?.matchMethod === 'substring') fuzzyRecoveries++;
+    } else if (ev.kind === 'landmark-effect-drift') {
+      drifts++;
+    } else if (ev.kind === 'landmark-resolution-failed') {
+      failures++;
+    } else if (ev.kind === 'landmark-effect-observed') {
+      observed++;
+    }
+  }
+  // Render. Skip the whole banner if there's nothing meaningful.
+  if (total === 0 && recent.length === 0) {
+    locEventsHealth.innerHTML = '';
+    return;
+  }
+  const lmParts = [];
+  if (total > 0) lmParts.push(`<span class="dbg-locale-events-health-total">${total} total</span>`);
+  if (lcCounts.verified > 0)         lmParts.push(`<span class="dbg-locale-events-health-tag tag-verified">✓ ${lcCounts.verified} verified</span>`);
+  if (lcCounts['stale-suspected'] > 0) lmParts.push(`<span class="dbg-locale-events-health-tag tag-suspected">⚠ ${lcCounts['stale-suspected']} stale</span>`);
+  if (lcCounts['stale-confirmed'] > 0) lmParts.push(`<span class="dbg-locale-events-health-tag tag-confirmed">⛔ ${lcCounts['stale-confirmed']} broken</span>`);
+  if (lcCounts.deprecated > 0)       lmParts.push(`<span class="dbg-locale-events-health-tag tag-deprecated">deprecated ${lcCounts.deprecated}</span>`);
+  if (lcCounts.fresh > 0 && lcCounts.fresh < total) lmParts.push(`<span class="dbg-locale-events-health-tag tag-fresh">${lcCounts.fresh} fresh</span>`);
+  const lmLine = lmParts.length > 0
+    ? `<div class="dbg-locale-events-health-line"><span class="dbg-locale-events-health-label">Landmarks:</span> ${lmParts.join(' · ')}</div>`
+    : '';
+
+  const recentParts = [];
+  if (recoveries > 0) {
+    const fuzzyNote = fuzzyRecoveries > 0 ? ` <span class="dbg-locale-events-health-subtle">(${fuzzyRecoveries} fuzzy)</span>` : '';
+    recentParts.push(`<span class="dbg-locale-events-health-tag tag-recovered">↻ ${recoveries} recoveries${fuzzyNote}</span>`);
+  }
+  if (drifts > 0)    recentParts.push(`<span class="dbg-locale-events-health-tag tag-drift">⚠ ${drifts} drift</span>`);
+  if (failures > 0)  recentParts.push(`<span class="dbg-locale-events-health-tag tag-failed">⛔ ${failures} failures</span>`);
+  if (observed > 0)  recentParts.push(`<span class="dbg-locale-events-health-tag tag-observed">👁 ${observed} observed</span>`);
+  const recentLine = recentParts.length > 0
+    ? `<div class="dbg-locale-events-health-line"><span class="dbg-locale-events-health-label">Last 24h:</span> ${recentParts.join(' · ')}</div>`
+    : (total > 0
+        ? `<div class="dbg-locale-events-health-line dbg-locale-events-health-quiet"><span class="dbg-locale-events-health-label">Last 24h:</span> No substrate activity.</div>`
+        : '');
+  locEventsHealth.innerHTML = lmLine + recentLine;
+}
+
+function _refreshStaleBadge(landmarks) {
+  if (!locEventsStaleBadge || !locEventsVerifyAllBtn) return;
+  const list = Array.isArray(landmarks) ? landmarks : [];
+  const staleCount = list.filter(lm => lm?.lifecycle === 'stale-suspected').length;
+  if (staleCount === 0) {
+    locEventsStaleBadge.classList.add('hidden');
+    locEventsStaleBadge.textContent = '';
+    locEventsVerifyAllBtn.disabled = true;
+    locEventsVerifyAllBtn.title = 'No stale-suspected landmarks on this Ground';
+  } else {
+    locEventsStaleBadge.classList.remove('hidden');
+    locEventsStaleBadge.textContent = `${staleCount} stale`;
+    locEventsVerifyAllBtn.disabled = _eventsBulkVerifyInFlight;
+    locEventsVerifyAllBtn.title = `Re-probe ${staleCount} stale-suspected landmark${staleCount === 1 ? '' : 's'} against the current tab`;
+  }
+}
+
+async function _verifyAllStaleOnGround() {
+  if (!_locGroundId) return;
+  if (_locTabId == null) {
+    _showBulkOutcome('error', 'No active tab — switch to your target tab and try again.');
+    return;
+  }
+  if (_eventsBulkVerifyInFlight) return;
+  _eventsBulkVerifyInFlight = true;
+  if (locEventsVerifyAllBtn) {
+    locEventsVerifyAllBtn.disabled = true;
+    locEventsVerifyAllBtn.textContent = '⌛ Verifying…';
+  }
+  _showBulkOutcome('loading', 'Probing stale-suspected landmarks…');
+  let result;
+  try {
+    result = await chrome.runtime.sendMessage({
+      type   : 'VERIFY_STALE_SUSPECTED_ON_GROUND',
+      payload: { groundId: _locGroundId, tabId: _locTabId },
+    });
+  } catch (e) {
+    result = { success: false, error: e.message };
+  }
+  _eventsBulkVerifyInFlight = false;
+  if (locEventsVerifyAllBtn) {
+    locEventsVerifyAllBtn.textContent = 'Verify all stale';
+  }
+  if (!result?.success) {
+    _showBulkOutcome('error', `Bulk verify failed: ${result?.error ?? 'unknown'}`);
+    return;
+  }
+  const { scanned, promoted, degraded, failed, skipped } = result;
+  if (scanned === 0) {
+    _showBulkOutcome('info', 'No stale-suspected landmarks to verify.');
+  } else {
+    const parts = [];
+    if (promoted > 0) parts.push(`${promoted} promoted`);
+    if (degraded > 0) parts.push(`${degraded} selector swapped`);
+    if (failed > 0)   parts.push(`${failed} confirmed broken`);
+    if (skipped > 0)  parts.push(`${skipped} skipped`);
+    _showBulkOutcome(
+      failed > 0 ? 'mixed' : 'success',
+      `Verified ${scanned} stale-suspected landmark${scanned === 1 ? '' : 's'}: ${parts.join(', ')}`,
+    );
+  }
+  // Refresh events panel to show the newly-emitted verifier events,
+  // and re-fetch landmarks so the stale-count badge reflects the new
+  // lifecycle state.
+  await _refreshEventsPanel();
+  // Refresh landmark row lifecycle chips in the locale view if any
+  // of the verified landmarks belong to the current locale.
+  if (Array.isArray(_locDraft?.landmarks)) {
+    const draftUids = _locDraft.landmarks.map(lm => lm?.uid).filter(Boolean);
+    const touchedUids = new Set((result.outcomes ?? []).map(o => o.uid));
+    const overlap = draftUids.filter(u => touchedUids.has(u));
+    if (overlap.length > 0) {
+      try {
+        const getRes = await chrome.runtime.sendMessage({
+          type: 'GET_LANDMARKS', payload: { uids: overlap },
+        });
+        if (getRes?.success && getRes.landmarks) {
+          for (let i = 0; i < _locDraft.landmarks.length; i++) {
+            const lm = _locDraft.landmarks[i];
+            const fresh = lm?.uid ? getRes.landmarks[lm.uid] : null;
+            if (fresh) {
+              _locDraft.landmarks[i] = {
+                ...lm,
+                selector : fresh.selector ?? lm.selector,
+                lifecycle: fresh.lifecycle ?? lm.lifecycle,
+              };
+            }
+          }
+          renderLocaleLandmarks();
+        }
+      } catch (e) {
+        Logger.debug('locale-capture', `bulk-verify landmark refresh failed: ${e.message}`);
+      }
+    }
+  }
+}
+
+function _showBulkOutcome(level, message) {
+  if (!locEventsBulkOutcome) return;
+  locEventsBulkOutcome.classList.remove('hidden');
+  locEventsBulkOutcome.className = `dbg-locale-events-bulk-outcome dbg-locale-events-bulk-${level}`;
+  locEventsBulkOutcome.textContent = message;
+}
+
+async function _populateEventLandmarkNames(events) {
+  // First pass: seed names from the current locale draft (free).
+  if (Array.isArray(_locDraft?.landmarks)) {
+    for (const lm of _locDraft.landmarks) {
+      if (lm?.uid && lm.accessibleName) _eventsLandmarkNames.set(lm.uid, lm.accessibleName);
+    }
+  }
+  // Second pass: any event uid not in the cache → batch fetch.
+  const missing = [];
+  const seen = new Set();
+  for (const ev of events) {
+    if (!ev?.uid) continue;
+    if (seen.has(ev.uid)) continue;
+    seen.add(ev.uid);
+    if (!_eventsLandmarkNames.has(ev.uid)) missing.push(ev.uid);
+  }
+  if (missing.length === 0) return;
+  try {
+    // v2.74.261 — Single bulk GET_LANDMARKS call instead of N sequential
+    // GET_LANDMARK round-trips. For an event list with 30 distinct uids,
+    // this is 1 round-trip instead of 30 — meaningfully faster for
+    // event-heavy grounds. Returns a { uid → landmark|null } map.
+    const res = await chrome.runtime.sendMessage({ type: 'GET_LANDMARKS', payload: { uids: missing } });
+    if (res?.success && res.landmarks) {
+      for (const uid of missing) {
+        const lm = res.landmarks[uid];
+        if (lm?.accessibleName) _eventsLandmarkNames.set(uid, lm.accessibleName);
+      }
+    }
+  } catch (e) {
+    Logger.debug('locale-capture', `event landmark name fetch failed: ${e.message}`);
+  }
+}
+
+function _renderEventsList() {
+  if (!locEventsList) return;
+  const events = _eventsCache ?? [];
+  if (events.length === 0) {
+    locEventsList.innerHTML = `<div class="dbg-locale-events-empty">No substrate events yet. Run a fragment or trigger verifier/replace to see activity here.</div>`;
+    return;
+  }
+  // Events come newest-first from LIST_GROUND_EVENTS (desc by default).
+  const rows = events.map(ev => {
+    const meta = _EVENT_KIND_META[ev.kind] ?? { icon: '·', label: ev.kind ?? '?', cssCls: 'evt-unknown' };
+    const name = ev.uid ? (_eventsLandmarkNames.get(ev.uid) ?? ev.uid) : '—';
+    const detail = _renderEventDetailLine(ev);
+    // v2.74.266 — Drift-confirmation action. For landmark-effect-drift
+    // events, show an Apply button that writes the observed effect
+    // back to the landmark's proposedEffect. Visual states: pristine →
+    // Apply button; in-flight → ⌛ disabled; applied this session →
+    // ✓ Applied marker.
+    let actionHtml = '';
+    if (ev.kind === 'landmark-effect-drift' && ev.uid && ev.details?.observedEffect) {
+      if (_eventsAppliedDrift.has(ev.id)) {
+        actionHtml = `<span class="dbg-locale-events-action-applied" title="Landmark's effect updated to the observed value">✓ Applied</span>`;
+      } else if (_eventsApplyInFlight.has(ev.id)) {
+        actionHtml = `<button class="dbg-locale-events-apply-btn" disabled type="button">⌛</button>`;
+      } else {
+        // v2.74.310 — observedEffect is now an Effect object (§ 5).
+        // Serialize as JSON in the data attr; _applyDriftEffect parses it.
+        const obsLabel = _formatEffectForDisplay(ev.details.observedEffect);
+        const obsJson  = JSON.stringify(ev.details.observedEffect);
+        actionHtml = `<button class="dbg-locale-events-apply-btn" data-action="apply-drift" data-event-id="${escAttr(ev.id)}" data-uid="${escAttr(ev.uid)}" data-effect="${escAttr(obsJson)}" type="button" title="Accept the observed effect (${escAttr(obsLabel)}) as this landmark's effect">Apply</button>`;
+      }
+    }
+    return `
+      <div class="dbg-locale-events-row ${meta.cssCls}">
+        <span class="dbg-locale-events-icon" title="${escAttr(ev.kind)}">${meta.icon}</span>
+        <span class="dbg-locale-events-kind">${escHtml(meta.label)}</span>
+        <span class="dbg-locale-events-landmark" title="${escAttr(ev.uid ?? '')}">${escHtml(name)}</span>
+        <span class="dbg-locale-events-detail">${detail}</span>
+        <span class="dbg-locale-events-time" title="${escAttr(new Date(ev.ts).toISOString())}">${escHtml(_formatRelativeTime(ev.ts))}</span>
+        <span class="dbg-locale-events-action">${actionHtml}</span>
+      </div>`;
+  }).join('');
+  locEventsList.innerHTML = rows;
+  // v2.74.266 — Wire apply-drift handlers (delegated).
+  locEventsList.querySelectorAll('[data-action="apply-drift"]').forEach(btn => {
+    btn.addEventListener('click', () => _applyDriftEffect(btn.dataset.eventId, btn.dataset.uid, btn.dataset.effect));
+  });
+}
+
+async function _applyDriftEffect(eventId, uid, newEffectRaw) {
+  if (!eventId || !uid || !newEffectRaw) return;
+  if (_eventsApplyInFlight.has(eventId)) return;
+  _eventsApplyInFlight.add(eventId);
+  _renderEventsList();
+  try {
+    // v2.74.310 — newEffectRaw arrives as a JSON string from the
+    // button's data-effect attribute (the observed Effect object was
+    // JSON-serialized at render time). Parse + normalize to the
+    // spec-aligned object. Legacy bare-string effects (pre-v2.74.305
+    // events) are also handled.
+    const _normalizeEffect = (raw) => {
+      let v = raw;
+      if (typeof raw === 'string') {
+        const trimmed = raw.trim();
+        if (trimmed.startsWith('{')) {
+          try { v = JSON.parse(trimmed); } catch { v = { kind: trimmed }; }
+        } else {
+          v = { kind: trimmed };   // legacy bare string
+        }
+      }
+      if (!v || typeof v !== 'object' || !v.kind) return { kind: 'none' };
+      const out = { kind: v.kind };
+      if (v.kind === 'opens-new-thread') out.form = v.form ?? 'tab';
+      if (v.kind === 'triggers-modal')   out.modalKind = v.modalKind ?? 'confirm';
+      return out;
+    };
+    const effectPatch = _normalizeEffect(newEffectRaw);
+    const res = await chrome.runtime.sendMessage({
+      type   : 'UPDATE_LANDMARK',
+      // v2.74.310 — Applying observed drift sets effectSource='observed'
+      // (ACTION_SPEC § 5 source attribution — the value is now confirmed
+      // by a real run, the highest-trust source).
+      payload: { uid, patch: { effect: effectPatch, effectSource: 'observed' } },
+    });
+    if (!res?.success) {
+      showLocaleWarning(`Drift apply failed: ${res?.error ?? 'unknown'}`);
+      return;
+    }
+    _eventsAppliedDrift.add(eventId);
+    Logger.info('locale-capture', `Applied drift: ${uid} effect → ${JSON.stringify(effectPatch)} (source=observed)`);
+    // Refresh the in-memory landmark copy if it's in the current draft.
+    if (Array.isArray(_locDraft?.landmarks)) {
+      for (let i = 0; i < _locDraft.landmarks.length; i++) {
+        if (_locDraft.landmarks[i]?.uid === uid) {
+          _locDraft.landmarks[i] = {
+            ..._locDraft.landmarks[i],
+            effect: effectPatch,
+            effectSource: 'observed',
+          };
+        }
+      }
+    }
+  } catch (e) {
+    showLocaleWarning(`Drift apply failed: ${e.message}`);
+  } finally {
+    _eventsApplyInFlight.delete(eventId);
+    _renderEventsList();
+  }
+}
+
+async function _clearEventsPanel() {
+  if (!_locGroundId) return;
+  if (!confirm('Clear all substrate events for this Ground? This is informational telemetry — clearing does not affect landmark state.')) return;
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'CLEAR_GROUND_EVENTS', payload: { groundId: _locGroundId },
+    });
+    if (res?.success) {
+      _eventsCache = [];
+      if (locEventsCount) locEventsCount.textContent = '';
+      _renderEventsList();
+    } else {
+      showLocaleWarning(`Clear failed: ${res?.error ?? 'unknown'}`);
+    }
+  } catch (e) {
+    showLocaleWarning(`Clear failed: ${e.message}`);
+  }
+}
+
+// ─── v2.74.260 — Phase 7d surface: predicate authoring ──────────────────
+//
+// Single-level AND-of-leaves authoring. Supported leaf kinds:
+//   visible       { target: uid }            — landmark visible on page
+//   hasText       { target: uid, value }     — landmark text contains value
+//   iframeLoaded  { contextName }            — named iframe context loaded
+//
+// urlMatches lives in the dedicated URL pattern field above (legacy
+// shape). The two are AND'd at runtime by LocalePredicates.
+//
+// Tree-form (AND/OR/NOT operators) is NOT authorable here. If the
+// hydrating locale carries a tree, it's preserved via
+// _locDraft._predicatesOriginalTree and the editor stays empty
+// (author sees a warning at load time). Future tree editor lands as
+// a Studio surface.
+
+const _PRED_KIND_CHOICES = [
+  { value: 'urlMatches',      label: 'URL matches' },
+  { value: 'visible',         label: 'Landmark visible' },
+  { value: 'hasText',         label: 'Landmark has text' },
+  // v2.74.331 — LOCALE_SPEC § 4: complete the predicate vocabulary.
+  { value: 'attributeEquals', label: 'Landmark attribute equals' },
+  { value: 'landmarkExists',  label: 'Landmark exists' },
+  { value: 'iframeLoaded',    label: 'iframe context loaded' },
+];
+
+function _landmarkUidOptionsForPredicates(selectedUid) {
+  // Build <option>s from current draft landmarks (free) — they're
+  // the most likely target for visible/hasText. Empty option first
+  // so author actively picks.
+  const opts = ['<option value="">— pick landmark —</option>'];
+  for (const lm of (_locDraft?.landmarks ?? [])) {
+    if (!lm?.uid) continue;   // un-persisted landmarks can't be referenced
+    const label = lm.accessibleName ?? lm.alias ?? lm.uid;
+    const sel = lm.uid === selectedUid ? ' selected' : '';
+    opts.push(`<option value="${escAttr(lm.uid)}"${sel}>${escHtml(label)}</option>`);
+  }
+  return opts.join('');
+}
+
+function _renderPredicateRow(predicate, idx) {
+  const kind = predicate.kind ?? 'visible';
+  const kindOpts = _PRED_KIND_CHOICES.map(c =>
+    `<option value="${escAttr(c.value)}"${c.value === kind ? ' selected' : ''}>${escHtml(c.label)}</option>`
+  ).join('');
+  let bodyHtml = '';
+  if (kind === 'urlMatches') {
+    const mode = predicate.mode ?? 'contains';
+    const modeOpts = ['contains', 'regex', 'exact'].map(m =>
+      `<option value="${m}"${m === mode ? ' selected' : ''}>${m}</option>`
+    ).join('');
+    bodyHtml = `
+      <label class="dbg-locale-predicate-field">
+        <span class="dbg-locale-predicate-field-label">URL pattern</span>
+        <input type="text" class="dbg-locale-predicate-value" data-action="predicate-pattern" data-idx="${idx}" maxlength="400" value="${escAttr(predicate.pattern ?? '')}" placeholder="e.g. github.com/repos, or full URL" />
+      </label>
+      <label class="dbg-locale-predicate-field">
+        <span class="dbg-locale-predicate-field-label">Match mode</span>
+        <select data-action="predicate-mode" data-idx="${idx}">${modeOpts}</select>
+      </label>`;
+  } else if (kind === 'visible') {
+    bodyHtml = `
+      <label class="dbg-locale-predicate-field">
+        <span class="dbg-locale-predicate-field-label">Target landmark</span>
+        <select class="dbg-locale-predicate-target" data-action="predicate-target" data-idx="${idx}">
+          ${_landmarkUidOptionsForPredicates(predicate.target)}
+        </select>
+      </label>`;
+  } else if (kind === 'hasText') {
+    const csChecked = predicate.caseSensitive === true ? ' checked' : '';
+    bodyHtml = `
+      <label class="dbg-locale-predicate-field">
+        <span class="dbg-locale-predicate-field-label">Target landmark</span>
+        <select class="dbg-locale-predicate-target" data-action="predicate-target" data-idx="${idx}">
+          ${_landmarkUidOptionsForPredicates(predicate.target)}
+        </select>
+      </label>
+      <label class="dbg-locale-predicate-field">
+        <span class="dbg-locale-predicate-field-label">Text contains</span>
+        <input type="text" class="dbg-locale-predicate-value" data-action="predicate-value" data-idx="${idx}" maxlength="280" value="${escAttr(predicate.value ?? '')}" placeholder="substring to match" />
+      </label>
+      <label class="dbg-locale-predicate-checkbox-label">
+        <input type="checkbox" data-action="predicate-case" data-idx="${idx}"${csChecked} />
+        <span>case-sensitive</span>
+      </label>`;
+  } else if (kind === 'attributeEquals') {
+    // v2.74.331 — target landmark + attribute name + expected value.
+    bodyHtml = `
+      <label class="dbg-locale-predicate-field">
+        <span class="dbg-locale-predicate-field-label">Target landmark</span>
+        <select class="dbg-locale-predicate-target" data-action="predicate-target" data-idx="${idx}">
+          ${_landmarkUidOptionsForPredicates(predicate.target)}
+        </select>
+      </label>
+      <label class="dbg-locale-predicate-field">
+        <span class="dbg-locale-predicate-field-label">Attribute</span>
+        <input type="text" class="dbg-locale-predicate-attr" data-action="predicate-attribute" data-idx="${idx}" maxlength="80" value="${escAttr(predicate.attribute ?? '')}" placeholder="e.g. aria-expanded, data-state, role" />
+      </label>
+      <label class="dbg-locale-predicate-field">
+        <span class="dbg-locale-predicate-field-label">Equals value</span>
+        <input type="text" class="dbg-locale-predicate-value" data-action="predicate-value" data-idx="${idx}" maxlength="280" value="${escAttr(predicate.value ?? '')}" placeholder="exact attribute value" />
+      </label>`;
+  } else if (kind === 'landmarkExists') {
+    // v2.74.331 — target landmark only (selector resolves in DOM).
+    bodyHtml = `
+      <label class="dbg-locale-predicate-field">
+        <span class="dbg-locale-predicate-field-label">Target landmark</span>
+        <select class="dbg-locale-predicate-target" data-action="predicate-target" data-idx="${idx}">
+          ${_landmarkUidOptionsForPredicates(predicate.target)}
+        </select>
+      </label>`;
+  } else if (kind === 'iframeLoaded') {
+    bodyHtml = `
+      <label class="dbg-locale-predicate-field">
+        <span class="dbg-locale-predicate-field-label">Context name</span>
+        <input type="text" class="dbg-locale-predicate-ctxname" data-action="predicate-ctxname" data-idx="${idx}" maxlength="80" value="${escAttr(predicate.contextName ?? '')}" placeholder="declared in this locale's iframeContexts[]" />
+      </label>`;
+  }
+  return `
+    <div class="dbg-locale-predicate-row" data-idx="${idx}">
+      <div class="dbg-locale-predicate-head">
+        <select class="dbg-locale-predicate-kind" data-action="predicate-kind" data-idx="${idx}">${kindOpts}</select>
+        <button class="dbg-locale-predicate-remove" data-action="predicate-remove" data-idx="${idx}" title="Remove this predicate" type="button">✕</button>
+      </div>
+      <div class="dbg-locale-predicate-body">${bodyHtml}</div>
+    </div>`;
+}
+
+function _renderPredicates() {
+  if (!locPredicatesList || !_locDraft) return;
+  // v2.74.271 — Reflect operator selector state.
+  if (locPredicatesOpSelect && locPredicatesOpSelect.value !== _predicatesOperator) {
+    locPredicatesOpSelect.value = _predicatesOperator;
+  }
+  _updatePredicatesHint();
+  // v2.74.271 — Add button visibility honors NOT-single-child constraint.
+  if (locPredicatesAddBtn) {
+    const atNotCap = _predicatesOperator === 'not' && (_locDraft.predicates?.length ?? 0) >= 1;
+    locPredicatesAddBtn.disabled = atNotCap;
+    locPredicatesAddBtn.title = atNotCap
+      ? 'NOT takes a single predicate — remove the current one or switch operator first'
+      : '';
+  }
+  const preds = Array.isArray(_locDraft.predicates) ? _locDraft.predicates : [];
+  if (preds.length === 0) {
+    locPredicatesList.innerHTML = `<div class="dbg-locale-predicates-empty">No additional predicates. Locale activates on URL pattern match alone.</div>`;
+    return;
+  }
+  locPredicatesList.innerHTML = preds.map((p, i) => _renderPredicateRow(p, i)).join('');
+  // Wire row-level handlers (delegated via data-action).
+  locPredicatesList.querySelectorAll('[data-action]').forEach(el => {
+    const evtName = (el.tagName === 'SELECT' || el.tagName === 'INPUT') ? 'change' : 'click';
+    el.addEventListener(evtName, () => _handlePredicateAction(el));
+    if (el.tagName === 'INPUT' && el.type === 'text') {
+      // Live edit on text inputs (so the draft stays in sync even
+      // without blur).
+      el.addEventListener('input', () => _handlePredicateAction(el));
+    }
+  });
+}
+
+function _handlePredicateAction(el) {
+  const idx = parseInt(el.dataset.idx, 10);
+  const action = el.dataset.action;
+  if (!_locDraft || !Array.isArray(_locDraft.predicates)) return;
+  const pred = _locDraft.predicates[idx];
+  if (!pred && action !== 'predicate-remove') return;
+  switch (action) {
+    case 'predicate-kind': {
+      // Changing kind discards kind-specific fields.
+      const newKind = el.value;
+      _locDraft.predicates[idx] = { kind: newKind };
+      _renderPredicates();
+      _evaluateActiveState({ debounce: true });   // v2.74.265
+      return;
+    }
+    case 'predicate-target':
+      pred.target = el.value || undefined;
+      _evaluateActiveState({ debounce: true });   // v2.74.265
+      return;
+    case 'predicate-value':
+      pred.value = el.value;
+      _evaluateActiveState({ debounce: true });   // v2.74.265
+      return;
+    case 'predicate-attribute':
+      // v2.74.331 — attributeEquals.attribute editor.
+      pred.attribute = el.value;
+      _evaluateActiveState({ debounce: true });
+      return;
+    case 'predicate-case':
+      pred.caseSensitive = el.checked === true;
+      _evaluateActiveState({ debounce: true });   // v2.74.265
+      return;
+    case 'predicate-ctxname':
+      pred.contextName = el.value.trim();
+      _evaluateActiveState({ debounce: true });   // v2.74.265
+      return;
+    case 'predicate-pattern':
+      // v2.74.275 — urlMatches.pattern editor.
+      pred.pattern = el.value;
+      _evaluateActiveState({ debounce: true });
+      return;
+    case 'predicate-mode':
+      // v2.74.275 — urlMatches.mode editor (contains | regex | exact).
+      pred.mode = el.value;
+      _evaluateActiveState({ debounce: true });
+      return;
+    case 'predicate-remove':
+      _locDraft.predicates.splice(idx, 1);
+      _renderPredicates();
+      _evaluateActiveState({ debounce: true });   // v2.74.265
+      return;
+  }
+}
+
+function _addPredicate() {
+  if (!_locDraft) return;
+  if (!Array.isArray(_locDraft.predicates)) _locDraft.predicates = [];
+  // v2.74.271 — NOT is a single-child operator. Block second predicate
+  // under NOT; surface an inline hint.
+  if (_predicatesOperator === 'not' && _locDraft.predicates.length >= 1) {
+    showLocaleWarning('NOT operator takes a single predicate. Switch to AND/OR to add more, or remove the existing one first.');
+    return;
+  }
+  // Default kind = visible (most useful for typical use cases). Target
+  // unset; author must pick.
+  _locDraft.predicates.push({ kind: 'visible' });
+  _renderPredicates();
+  // v2.74.265 — Predicate set changed; re-evaluate active state.
+  _evaluateActiveState({ debounce: true });
+}
+
+// v2.74.271 — Top-level operator change handler. AND ↔ OR is a
+// straight swap. Switching to NOT truncates to a single predicate
+// after author confirmation (since NOT takes one child).
+function _onPredicatesOperatorChange() {
+  if (!locPredicatesOpSelect) return;
+  const newOp = locPredicatesOpSelect.value;
+  if (newOp === 'not' && (_locDraft?.predicates?.length ?? 0) > 1) {
+    if (!confirm(`NOT operator takes a single predicate. Switching will keep only the first predicate (${_locDraft.predicates[0]?.kind ?? '?'}) and discard the others. Continue?`)) {
+      // Revert dropdown.
+      locPredicatesOpSelect.value = _predicatesOperator;
+      return;
+    }
+    _locDraft.predicates = _locDraft.predicates.slice(0, 1);
+  }
+  _predicatesOperator = newOp;
+  _renderPredicates();
+  _updatePredicatesHint();
+  _evaluateActiveState({ debounce: true });
+}
+
+function _updatePredicatesHint() {
+  if (!locPredicatesHint) return;
+  const hint = _predicatesOperator === 'and'
+    ? 'Locale is active when URL pattern matches AND every predicate below evaluates true. Unverifiable predicates (e.g., landmark not on page) fail closed.'
+    : _predicatesOperator === 'or'
+    ? 'Locale is active when URL pattern matches AND at least one predicate below evaluates true. Unverifiable predicates count as failed.'
+    : 'Locale is active when URL pattern matches AND the predicate below evaluates FALSE. Unverifiable predicates fail closed (so NOT-unverifiable = active).';
+  locPredicatesHint.textContent = hint;
+}
+
+// ─── v2.74.267 — iframe contexts editor ─────────────────────────────────
+//
+// Authors a list of named iframe predicates stored on the locale as
+// locale.iframeContexts[]. Each entry has { contextName, predicate,
+// sameOrigin? } where predicate is one of:
+//   { kind: 'iframeName',      value: '<name>' }
+//   { kind: 'iframeSelector',  selector: '<css>' }
+//   { kind: 'iframeSrcPattern', pattern: '<...>', mode: 'contains'|'regex'|'exact' }
+//   { kind: 'iframePositional', index: <num> }
+//
+// Landmarks bind to a context by name (landmark.iframeContext). Phase
+// 7b routing uses this binding to resolve the right frameId at
+// dispatch time without selector-frameUrl-equality fragility.
+//
+// Operations:
+//   Rename context: cascades to landmarks referencing it (same-locale).
+//   Remove context: warns if landmarks reference it; on confirm,
+//     clears their landmark.iframeContext binding.
+//   Test predicate: sends RESOLVE_IFRAME_BY_PREDICATE to live page;
+//     shows found/not-found + same-origin/loaded state.
+
+const _IFRAME_PRED_KINDS = [
+  { value: 'iframeName',       label: 'By name attribute' },
+  { value: 'iframeSelector',   label: 'By CSS selector' },
+  { value: 'iframeSrcPattern', label: 'By src pattern' },
+  { value: 'iframePositional', label: 'By position' },
+];
+
+function _renderIframeContexts() {
+  if (!locIframeContextsList || !_locDraft) return;
+  const ctxs = Array.isArray(_locDraft.iframeContexts) ? _locDraft.iframeContexts : [];
+  if (ctxs.length === 0) {
+    locIframeContextsList.innerHTML = `<div class="dbg-locale-iframe-contexts-empty">No iframe contexts. Landmarks picked from iframes auto-populate this list.</div>`;
+    return;
+  }
+  locIframeContextsList.innerHTML = ctxs.map((c, i) => _renderIframeContextRow(c, i)).join('');
+  // Wire delegated handlers (change for selects/inputs, click for buttons).
+  locIframeContextsList.querySelectorAll('[data-iframe-action]').forEach(el => {
+    const evt = (el.tagName === 'SELECT' || el.tagName === 'INPUT') ? 'change' : 'click';
+    el.addEventListener(evt, () => _handleIframeContextAction(el));
+    if (el.tagName === 'INPUT' && (el.type === 'text' || el.type === 'number')) {
+      el.addEventListener('input', () => _handleIframeContextAction(el));
+    }
+  });
+}
+
+function _renderIframeContextRow(ctx, idx) {
+  const kind = ctx.predicate?.kind ?? 'iframeName';
+  const kindOpts = _IFRAME_PRED_KINDS.map(k =>
+    `<option value="${escAttr(k.value)}"${k.value === kind ? ' selected' : ''}>${escHtml(k.label)}</option>`
+  ).join('');
+  let bodyHtml = '';
+  if (kind === 'iframeName') {
+    bodyHtml = `
+      <label class="dbg-locale-iframe-context-field">
+        <span class="dbg-locale-iframe-context-field-label">Name attribute</span>
+        <input type="text" data-iframe-action="pred-value" data-idx="${idx}" maxlength="200" value="${escAttr(ctx.predicate?.value ?? '')}" placeholder="iframe[name=&quot;...&quot;]" />
+      </label>`;
+  } else if (kind === 'iframeSelector') {
+    bodyHtml = `
+      <label class="dbg-locale-iframe-context-field">
+        <span class="dbg-locale-iframe-context-field-label">CSS selector</span>
+        <input type="text" data-iframe-action="pred-selector" data-idx="${idx}" maxlength="400" value="${escAttr(ctx.predicate?.selector ?? '')}" placeholder="iframe#main-frame, .embed > iframe" />
+      </label>`;
+  } else if (kind === 'iframeSrcPattern') {
+    const mode = ctx.predicate?.mode ?? 'contains';
+    const modeOpts = ['contains', 'regex', 'exact'].map(m =>
+      `<option value="${m}"${m === mode ? ' selected' : ''}>${m}</option>`
+    ).join('');
+    bodyHtml = `
+      <label class="dbg-locale-iframe-context-field">
+        <span class="dbg-locale-iframe-context-field-label">src pattern</span>
+        <input type="text" data-iframe-action="pred-pattern" data-idx="${idx}" maxlength="400" value="${escAttr(ctx.predicate?.pattern ?? '')}" placeholder="hubapi.com/widget" />
+      </label>
+      <label class="dbg-locale-iframe-context-field">
+        <span class="dbg-locale-iframe-context-field-label">match mode</span>
+        <select data-iframe-action="pred-mode" data-idx="${idx}">${modeOpts}</select>
+      </label>`;
+  } else if (kind === 'iframePositional') {
+    bodyHtml = `
+      <label class="dbg-locale-iframe-context-field">
+        <span class="dbg-locale-iframe-context-field-label">index (0-based)</span>
+        <input type="number" data-iframe-action="pred-index" data-idx="${idx}" min="0" max="50" value="${escAttr(ctx.predicate?.index ?? 0)}" />
+      </label>`;
+  }
+  // Find landmarks referencing this context (in this locale).
+  const refs = (_locDraft.landmarks ?? []).filter(lm => lm?.iframeContext === ctx.contextName);
+  const refsBadge = refs.length > 0
+    ? `<span class="dbg-locale-iframe-context-refs" title="Landmarks in this locale bound to this context">${refs.length} landmark${refs.length === 1 ? '' : 's'}</span>`
+    : '';
+  // sameOrigin display (captured at create time or from test).
+  let originBadge = '';
+  if (ctx.sameOrigin === true) {
+    originBadge = `<span class="dbg-locale-iframe-context-origin dbg-locale-iframe-context-same-origin">same-origin</span>`;
+  } else if (ctx.sameOrigin === false) {
+    originBadge = `<span class="dbg-locale-iframe-context-origin dbg-locale-iframe-context-cross-origin">cross-origin</span>`;
+  }
+  // Test outcome banner.
+  let testHtml = '';
+  if (_iframeTestInFlight.has(idx)) {
+    testHtml = `<div class="dbg-locale-iframe-context-test test-loading">⌛ Testing predicate against live page…</div>`;
+  } else {
+    const out = _iframeTestOutcome.get(idx);
+    if (out) {
+      testHtml = `<div class="dbg-locale-iframe-context-test test-${escAttr(out.kind)}">${escHtml(out.message)}</div>`;
+    }
+  }
+  return `
+    <div class="dbg-locale-iframe-context-row" data-idx="${idx}">
+      <div class="dbg-locale-iframe-context-head">
+        <label class="dbg-locale-iframe-context-name-label">
+          <span>Name</span>
+          <input type="text" data-iframe-action="rename" data-idx="${idx}" maxlength="80" value="${escAttr(ctx.contextName ?? '')}" placeholder="e.g. chatspot-widget" />
+        </label>
+        ${refsBadge}
+        ${originBadge}
+        <button class="btn-secondary tiny" data-iframe-action="test" data-idx="${idx}" type="button" title="Evaluate predicate against the current page">Test</button>
+        <button class="dbg-locale-iframe-context-remove" data-iframe-action="remove" data-idx="${idx}" type="button" title="Remove this iframe context">✕</button>
+      </div>
+      <div class="dbg-locale-iframe-context-body">
+        <label class="dbg-locale-iframe-context-field">
+          <span class="dbg-locale-iframe-context-field-label">Match by</span>
+          <select data-iframe-action="kind" data-idx="${idx}">${kindOpts}</select>
+        </label>
+        ${bodyHtml}
+      </div>
+      ${testHtml}
+    </div>`;
+}
+
+async function _handleIframeContextAction(el) {
+  const idx = parseInt(el.dataset.idx, 10);
+  const action = el.dataset.iframeAction;
+  if (!_locDraft) return;
+  if (!Array.isArray(_locDraft.iframeContexts)) _locDraft.iframeContexts = [];
+  const ctx = _locDraft.iframeContexts[idx];
+  if (!ctx && action !== 'remove') return;
+  switch (action) {
+    case 'rename': {
+      const oldName = ctx.contextName;
+      const newName = el.value.trim();
+      if (!newName || newName === oldName) {
+        if (!newName) ctx.contextName = oldName;   // restore non-empty
+        return;
+      }
+      // Cascade to landmarks referencing the old name (same locale).
+      let cascaded = 0;
+      for (const lm of (_locDraft.landmarks ?? [])) {
+        if (lm?.iframeContext === oldName) {
+          lm.iframeContext = newName;
+          cascaded++;
+        }
+      }
+      ctx.contextName = newName;
+      Logger.info('locale-capture', `iframe context renamed "${oldName}" → "${newName}"; cascaded to ${cascaded} landmark(s)`);
+      _renderIframeContexts();
+      return;
+    }
+    case 'kind': {
+      // Changing kind starts a fresh predicate of that kind.
+      const newKind = el.value;
+      ctx.predicate = { kind: newKind };
+      // Sensible default for positional.
+      if (newKind === 'iframePositional') ctx.predicate.index = 0;
+      if (newKind === 'iframeSrcPattern') ctx.predicate.mode  = 'contains';
+      _iframeTestOutcome.delete(idx);   // stale test outcome
+      _renderIframeContexts();
+      return;
+    }
+    case 'pred-value':
+      ctx.predicate.value = el.value;
+      _iframeTestOutcome.delete(idx);
+      return;
+    case 'pred-selector':
+      ctx.predicate.selector = el.value;
+      _iframeTestOutcome.delete(idx);
+      return;
+    case 'pred-pattern':
+      ctx.predicate.pattern = el.value;
+      _iframeTestOutcome.delete(idx);
+      return;
+    case 'pred-mode':
+      ctx.predicate.mode = el.value;
+      _iframeTestOutcome.delete(idx);
+      return;
+    case 'pred-index':
+      ctx.predicate.index = Math.max(0, parseInt(el.value, 10) || 0);
+      _iframeTestOutcome.delete(idx);
+      return;
+    case 'test':
+      await _testIframeContext(idx);
+      return;
+    case 'remove': {
+      const refs = (_locDraft.landmarks ?? []).filter(lm => lm?.iframeContext === ctx?.contextName);
+      if (refs.length > 0) {
+        const names = refs.slice(0, 3).map(lm => `"${lm.accessibleName ?? lm.alias}"`).join(', ');
+        const more = refs.length > 3 ? `, +${refs.length - 3} more` : '';
+        if (!confirm(`Remove iframe context "${ctx.contextName}"?\n\n${refs.length} landmark${refs.length === 1 ? '' : 's'} reference it: ${names}${more}\n\nTheir iframe binding will be cleared (they fall back to the legacy frameUrl path).\n\nContinue?`)) {
+          return;
+        }
+        for (const lm of refs) lm.iframeContext = null;
+      }
+      _locDraft.iframeContexts.splice(idx, 1);
+      _iframeTestOutcome.delete(idx);
+      _iframeTestInFlight.delete(idx);
+      _renderIframeContexts();
+      return;
+    }
+  }
+}
+
+async function _testIframeContext(idx) {
+  const ctx = _locDraft?.iframeContexts?.[idx];
+  if (!ctx) return;
+  if (_locTabId == null) {
+    _iframeTestOutcome.set(idx, { kind: 'error', message: '⚠ No active tab. Switch to your target tab and retry.' });
+    _renderIframeContexts();
+    return;
+  }
+  if (_iframeTestInFlight.has(idx)) return;
+  _iframeTestInFlight.add(idx);
+  _renderIframeContexts();
+  try {
+    const res = await new Promise((resolve, reject) => {
+      chrome.tabs.sendMessage(_locTabId, {
+        type   : 'RESOLVE_IFRAME_BY_PREDICATE',
+        payload: { predicate: ctx.predicate },
+      }, { frameId: 0 }, response => {
+        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+        else resolve(response);
+      });
+    });
+    if (!res) {
+      _iframeTestOutcome.set(idx, { kind: 'error', message: '⛔ No response from content script.' });
+    } else if (res.success === false) {
+      if (res.reason === 'iframe-absent') {
+        _iframeTestOutcome.set(idx, { kind: 'absent', message: '✗ No iframe matched the predicate on the current page.' });
+      } else {
+        _iframeTestOutcome.set(idx, { kind: 'error', message: `⛔ ${res.error ?? 'unknown error'}` });
+      }
+    } else {
+      // Update sameOrigin from the live observation.
+      ctx.sameOrigin = res.sameOrigin === true;
+      const originText = ctx.sameOrigin ? 'same-origin' : 'cross-origin';
+      const loadedText = res.loaded === true ? 'loaded' : 'not loaded';
+      _iframeTestOutcome.set(idx, {
+        kind   : 'ok',
+        message: `✓ Matched iframe (${originText}, ${loadedText})${res.src ? `: ${String(res.src).slice(0, 80)}` : ''}`,
+      });
+    }
+  } catch (e) {
+    _iframeTestOutcome.set(idx, { kind: 'error', message: `⛔ ${e.message}` });
+  } finally {
+    _iframeTestInFlight.delete(idx);
+    _renderIframeContexts();
+  }
+}
+
+function _addIframeContext() {
+  if (!_locDraft) return;
+  if (!Array.isArray(_locDraft.iframeContexts)) _locDraft.iframeContexts = [];
+  // Generate a unique default name.
+  let base = 'iframe-context';
+  let name = base;
+  let n = 2;
+  while (_locDraft.iframeContexts.some(c => c.contextName === name)) {
+    name = `${base}-${n++}`;
+  }
+  _locDraft.iframeContexts.push({
+    contextName: name,
+    predicate  : { kind: 'iframeName', value: '' },
+  });
+  _renderIframeContexts();
+}
+
+// ─── v2.74.265 — Phase 7d surface: locale active-state preview ──────────
+//
+// Author authors predicates → wants to know whether the locale would
+// activate on the current tab right now. isLocaleActive does the
+// evaluation; we wrap it with a small per-leaf diagnostic so authors
+// see WHY a predicate fails (target landmark not visible, URL doesn't
+// match, etc.) instead of just a binary ✓/✗.
+//
+// Evaluation triggers:
+//   - On mount (initial draft state)
+//   - On Refresh button click (immediate)
+//   - On any predicate edit (300ms debounce to avoid keystroke noise)
+//   - On urlPattern edit (debounced)
+//   - On tab change (handled by existing refreshLocaleActiveTab hook)
+//
+// Cost: 1 round-trip per visible/hasText/iframeLoaded leaf. URL match
+// is free (synchronous). For a typical 1-3 leaf locale, sub-100ms.
+
+async function _evaluateActiveState({ debounce = false, immediate = false } = {}) {
+  if (!locActiveStateResult) return;
+  if (debounce && !immediate) {
+    if (_activeStateDebounce) clearTimeout(_activeStateDebounce);
+    _activeStateDebounce = setTimeout(() => _evaluateActiveState({ immediate: true }), 300);
+    return;
+  }
+  if (_activeStateEvaluating) return;
+  _activeStateEvaluating = true;
+  if (locActiveStateRefreshBtn) locActiveStateRefreshBtn.disabled = true;
+  try {
+    locActiveStateResult.innerHTML = `<span class="dbg-locale-active-state-loading">⌛ Evaluating…</span>`;
+    // Build the draft as a pseudo-locale for the evaluator. Pull the
+    // current URL pattern from the input (not _locDraft.urlPattern,
+    // which is only synced on save) so live edits show.
+    // v2.74.271 — Wrap predicates per the top-level operator so the
+    // evaluator sees the operator semantics. AND ships as flat array
+    // (legacy shape, equivalent to implicit AND). OR/NOT ship as
+    // tree object the evaluator handles natively.
+    const rawPreds = Array.isArray(_locDraft?.predicates) ? _locDraft.predicates : [];
+    let predsForEval = rawPreds;
+    if ((_predicatesOperator === 'or' || _predicatesOperator === 'not') && rawPreds.length > 0) {
+      predsForEval = {
+        operator: _predicatesOperator,
+        children: _predicatesOperator === 'not' ? rawPreds.slice(0, 1) : rawPreds.slice(),
+      };
+    }
+    const draftLocale = {
+      id           : _locDraft?.id,
+      name         : _locDraft?.name ?? '',
+      // v2.74.275 — urlPattern field gone; predicates carry URL gating.
+      predicates   : predsForEval,
+      iframeContexts: _locDraft?.iframeContexts ?? [],
+      landmarkRefs : (_locDraft?.landmarks ?? []).map(lm => lm?.uid).filter(Boolean),
+    };
+    const context = {
+      tabId : _locTabId ?? undefined,
+      tabUrl: locTabUrlEl?.textContent && locTabUrlEl.textContent !== '—' && locTabUrlEl.textContent !== '(no active tab)'
+        ? locTabUrlEl.textContent
+        : null,
+    };
+    if (!context.tabUrl) {
+      // No tab info — surface a clear unverifiable state.
+      _renderActiveStateResult({ kind: 'no-tab' });
+      return;
+    }
+    // Run the top-level evaluation. We ALSO walk the leaves manually
+    // to build a per-predicate diagnostic — isLocaleActive collapses
+    // to a single bool so it can't tell us which leaf failed.
+    const overall = await isLocaleActive(draftLocale, context);
+    const leafDiagnostics = await _diagnoseLeaves(draftLocale, context);
+    _renderActiveStateResult({
+      kind: overall === true ? 'active' : 'inactive',
+      overall,
+      leafDiagnostics,
+      predicateCount: Array.isArray(draftLocale.predicates) ? draftLocale.predicates.length : (draftLocale.predicates?.children?.length ?? 0),
+    });
+  } catch (e) {
+    _renderActiveStateResult({ kind: 'error', error: e.message });
+  } finally {
+    _activeStateEvaluating = false;
+    if (locActiveStateRefreshBtn) locActiveStateRefreshBtn.disabled = false;
+  }
+}
+
+// Walk the predicates and evaluate each leaf in isolation. Returns
+// an array of { label, result, reason }. v2.74.271 — When predicates
+// is a tree (operator + children), walks the children. v2.74.275 —
+// Legacy urlPattern leaf removed; URL gating now flows through
+// predicates as a urlMatches leaf, evaluated like any other.
+async function _diagnoseLeaves(draftLocale, context) {
+  const diagnostics = [];
+  // Extract leaves from either flat-array or operator-tree shape.
+  let leaves = [];
+  if (Array.isArray(draftLocale.predicates)) {
+    leaves = draftLocale.predicates;
+  } else if (draftLocale.predicates?.children && Array.isArray(draftLocale.predicates.children)) {
+    leaves = draftLocale.predicates.children;
+  }
+  for (let i = 0; i < leaves.length; i++) {
+    const p = leaves[i];
+    if (!p || typeof p !== 'object' || !p.kind) {
+      diagnostics.push({ label: `Predicate #${i + 1}: missing kind`, result: null, reason: 'invalid' });
+      continue;
+    }
+    // Evaluate this leaf alone by wrapping it in a minimal pseudo-
+    // locale containing only this predicate. Cheap, reuses the same
+    // evaluator path.
+    const singletonLocale = {
+      ...draftLocale,
+      predicates: [p],
+    };
+    const result = await isLocaleActive(singletonLocale, context);
+    const label = _predicateLabel(p);
+    let reason = null;
+    if (result === false) {
+      reason = _predicateFailureReason(p);
+    } else if (result === null || result === undefined) {
+      reason = 'unverifiable (likely missing target or unreachable element)';
+    }
+    diagnostics.push({ label, result, reason });
+  }
+  return diagnostics;
+}
+
+function _predicateLabel(p) {
+  if (!p?.kind) return '(invalid)';
+  const targetName = (uid) => {
+    if (!uid) return '?';
+    const lm = (_locDraft?.landmarks ?? []).find(l => l?.uid === uid);
+    return lm?.accessibleName ?? lm?.alias ?? uid.slice(0, 12);
+  };
+  switch (p.kind) {
+    case 'visible':      return `Landmark visible: ${targetName(p.target)}`;
+    case 'hasText':      return `${targetName(p.target)} contains "${p.value ?? ''}"`;
+    case 'iframeLoaded': return `iframe context loaded: ${p.contextName ?? '?'}`;
+    case 'urlMatches':   return `URL ${p.mode ?? 'contains'} "${p.pattern ?? ''}"`;
+    default:             return `${p.kind} (unknown)`;
+  }
+}
+
+function _predicateFailureReason(p) {
+  switch (p?.kind) {
+    case 'visible':      return 'Target landmark not visible on the current page';
+    case 'hasText':      return 'Target landmark text does not contain the value';
+    case 'iframeLoaded': return 'Named iframe context not declared or not loaded';
+    case 'urlMatches':   return 'URL pattern does not match';
+    default:             return 'Failed';
+  }
+}
+
+function _renderActiveStateResult(state) {
+  if (!locActiveStateResult) return;
+  if (state.kind === 'no-tab') {
+    locActiveStateResult.innerHTML = `
+      <div class="dbg-locale-active-state-no-tab">
+        ⚠ No active tab — switch to your target tab and press Refresh to evaluate.
+      </div>`;
+    return;
+  }
+  if (state.kind === 'error') {
+    locActiveStateResult.innerHTML = `
+      <div class="dbg-locale-active-state-error">
+        ⛔ Evaluation failed: ${escHtml(state.error ?? 'unknown')}
+      </div>`;
+    return;
+  }
+  // active or inactive
+  const verdict = state.kind === 'active'
+    ? `<div class="dbg-locale-active-state-verdict dbg-locale-active-state-verdict-active">✓ Locale would activate on the current tab</div>`
+    : `<div class="dbg-locale-active-state-verdict dbg-locale-active-state-verdict-inactive">✗ Locale would NOT activate</div>`;
+  let leafRows = '';
+  if (!state.hasUrlPattern && state.predicateCount === 0) {
+    leafRows = `<div class="dbg-locale-active-state-leaf-empty">No predicates authored — any URL matches by default.</div>`;
+  } else {
+    leafRows = (state.leafDiagnostics ?? []).map(d => {
+      const icon = d.result === true ? '✓' : d.result === false ? '✗' : '⚠';
+      const cls  = d.result === true ? 'leaf-pass' : d.result === false ? 'leaf-fail' : 'leaf-null';
+      return `
+        <div class="dbg-locale-active-state-leaf ${cls}">
+          <span class="dbg-locale-active-state-leaf-icon">${icon}</span>
+          <span class="dbg-locale-active-state-leaf-label">${escHtml(d.label)}</span>
+          ${d.reason ? `<span class="dbg-locale-active-state-leaf-reason">${escHtml(d.reason)}</span>` : ''}
+        </div>`;
+    }).join('');
+  }
+  locActiveStateResult.innerHTML = verdict + leafRows;
+}
+
+function _renderLandmarkProfileDrawer(idx) {
+  if (!_locDraft?.landmarks?.[idx]) return '';
+  const lm = _locDraft.landmarks[idx];
+  // v2.74.281 — Drawer now body-only. Toggle button lives in the
+  // row's controls (v2.74.281 header refactor). This function returns
+  // empty when collapsed (caller already guards `isExpanded ? ... : ''`).
+  // Confidence chip moved into the body's Profile subsection.
+  const confChip = (typeof lm.profileConfidence === 'number')
+    ? `<span class="dbg-locale-landmark-profile-conf" title="Claude's self-reported confidence">conf: ${Math.round(lm.profileConfidence * 100)}%</span>`
+    : '';
+
+  // Expanded body — Selector (read-only) + Description (editable) +
+  // Aliases (editable) + Operations / Pitfalls / Expected (read-only).
+  // Selector lives here exclusively now (v2.74.238) — it was promoted
+  // off the always-visible row. Pick is the only authoring path to
+  // change it; if a one-off hand-edit is genuinely needed, that's
+  // worth an explicit "Edit selector" affordance to add later.
+  // v2.74.302 — `aliasesValue` was used by the now-removed "Secondary
+  // aliases" drawer input. Aliases live in the row-header field.
+  const selectorDisplay = lm.selector
+    ? `<code class="dbg-locale-landmark-profile-selector">${escHtml(lm.selector)}</code>`
+    : `<span class="dbg-locale-landmark-profile-empty">no selector yet — click Pick on the page</span>`;
+  // v2.74.245 — Phase 7a: iframe context display. When the landmark
+  // is bound to a named iframe context (new), show the context name
+  // + its predicate from the locale's iframeContexts. When only the
+  // legacy frameUrl is set (pre-Phase-7), show that. Both paths
+  // honest about which iframe binding mechanism is in effect.
+  let frameDisplay = '';
+  if (lm.iframeContext) {
+    const ctx = (_locDraft.iframeContexts ?? []).find(c => c.contextName === lm.iframeContext);
+    if (ctx) {
+      const predDesc = ctx.predicate.kind === 'iframeName' ? `name="${ctx.predicate.value}"`
+                     : ctx.predicate.kind === 'iframeSelector' ? `selector="${ctx.predicate.selector}"`
+                     : ctx.predicate.kind === 'iframeSrcPattern' ? `src ${ctx.predicate.mode}: "${ctx.predicate.pattern}"`
+                     : ctx.predicate.kind === 'iframePositional' ? `position [${ctx.predicate.index}]`
+                     : 'unknown predicate';
+      const originBadge = ctx.sameOrigin
+        ? `<span class="dbg-locale-landmark-iframe-origin dbg-locale-landmark-iframe-same-origin">same-origin</span>`
+        : `<span class="dbg-locale-landmark-iframe-origin dbg-locale-landmark-iframe-cross-origin">cross-origin</span>`;
+      frameDisplay = `<div class="dbg-locale-landmark-profile-frame">
+        in iframe context: <code>${escHtml(lm.iframeContext)}</code>
+        ${originBadge}
+        <div class="dbg-locale-landmark-iframe-predicate">predicate: ${escHtml(predDesc)}</div>
+      </div>`;
+    } else {
+      // Bound to a context name that isn't declared in this locale.
+      // Possible during cross-locale references in Phase 8+ but for
+      // now surface as an integrity warning.
+      frameDisplay = `<div class="dbg-locale-landmark-profile-frame dbg-locale-landmark-iframe-orphan">
+        ⚠ bound to iframe context "<code>${escHtml(lm.iframeContext)}</code>" not declared in this locale
+      </div>`;
+    }
+  } else if (lm.frameUrl) {
+    frameDisplay = `<div class="dbg-locale-landmark-profile-frame" title="${escAttr(lm.frameUrl)}">
+      in iframe (legacy): <code>${escHtml(_truncate(lm.frameUrl, 60))}</code>
+      <span class="dbg-locale-landmark-iframe-legacy-hint">re-Pick to migrate to a named iframe context</span>
+    </div>`;
+  }
+  const opsChips = Array.isArray(lm.operationsCommon) && lm.operationsCommon.length > 0
+    ? lm.operationsCommon.map(o => `<code class="dbg-locale-landmark-profile-chip">${escHtml(o)}</code>`).join(' ')
+    : '<span class="dbg-locale-landmark-profile-empty">none suggested</span>';
+  const pitfallsList = Array.isArray(lm.pitfalls) && lm.pitfalls.length > 0
+    ? `<ul class="dbg-locale-landmark-profile-pitfalls">${lm.pitfalls.map(p => `<li>${escHtml(p)}</li>`).join('')}</ul>`
+    : '<span class="dbg-locale-landmark-profile-empty">none</span>';
+  let expectedHtml;
+  if (lm.expectedContent && lm.expectedContent.kind) {
+    const ec = lm.expectedContent;
+    const parts = [escHtml(ec.kind)];
+    if (ec.format)  parts.push(`format: <code>${escHtml(ec.format)}</code>`);
+    if (ec.example) parts.push(`example: "${escHtml(ec.example)}"`);
+    expectedHtml = parts.join(', ');
+  } else {
+    expectedHtml = '<span class="dbg-locale-landmark-profile-empty">n/a (action landmark)</span>';
+  }
+
+  // v2.74.239 — Identity layer surfaced when the landmark has been
+  // captured with Phase 1 derivation. UID + canonical/local indicator
+  // + a11y role + accessible name + hierarchical context. Read-only
+  // — derived from the DOM at Pick / Verify time.
+  let identityHtml = '';
+  if (lm.uid) {
+    const canonicalChip = lm.isCanonical
+      ? `<span class="dbg-locale-landmark-identity-chip dbg-locale-landmark-identity-canonical" title="Derived from accessibility-tree-anchored observable properties; same meaning → same UID across users">canonical</span>`
+      : `<span class="dbg-locale-landmark-identity-chip dbg-locale-landmark-identity-local" title="Insufficient canonical inputs (no role or no accessible name); per-user identity only">local</span>`;
+    const ctxParts = [];
+    const ctx = lm.hierarchicalContext;
+    if (ctx) {
+      if (ctx.ancestorRole) ctxParts.push(escHtml(ctx.ancestorRole));
+      if (ctx.ancestorName) ctxParts.push(`"${escHtml(ctx.ancestorName)}"`);
+      if (ctx.siblingPosition > 0) ctxParts.push(`#${ctx.siblingPosition}`);
+    }
+    const ctxText = ctxParts.length > 0 ? ctxParts.join(' / ') : '<span class="dbg-locale-landmark-profile-empty">none</span>';
+    identityHtml = `
+      <div class="dbg-locale-landmark-identity">
+        <div class="dbg-locale-landmark-identity-grid">
+          <div class="dbg-locale-landmark-identity-key">UID</div>
+          <div class="dbg-locale-landmark-identity-val"><code>${escHtml(lm.uid)}</code> ${canonicalChip}</div>
+          <div class="dbg-locale-landmark-identity-key">A11y role</div>
+          <div class="dbg-locale-landmark-identity-val"><code>${escHtml(lm.a11yRole ?? '(none)')}</code></div>
+          <div class="dbg-locale-landmark-identity-key">Accessible name</div>
+          <div class="dbg-locale-landmark-identity-val">${lm.accessibleName
+            ? `<code>${escHtml(lm.accessibleName)}</code>`
+            : '<span class="dbg-locale-landmark-profile-empty" title="The picked element does not satisfy the W3C accessible-name calculation (no aria-label, no labelled-by, no text content, no alt). The card uses the alias as a derived display name; identity hashes as local-UID rather than canonical.">(none — element has no accessible name; using alias for display)</span>'}</div>
+          <div class="dbg-locale-landmark-identity-key">Hierarchical context</div>
+          <div class="dbg-locale-landmark-identity-val">${ctxText}</div>
+          ${lm.canonicalUrl ? `
+          <div class="dbg-locale-landmark-identity-key">Canonical URL</div>
+          <div class="dbg-locale-landmark-identity-val"><code class="dbg-locale-landmark-identity-url" title="${escAttr(lm.canonicalUrl)}">${escHtml(_truncate(lm.canonicalUrl, 80))}</code></div>` : ''}
+        </div>
+      </div>`;
+  }
+  // v2.74.279 — Drawer body restructured into labeled SUBSECTIONS so
+  // inputs and read-only displays group with their domain rather than
+  // appearing as a flat list of un-grouped rows. Five subsections:
+  //   1. IDENTITY (read-only) — UID, a11y role, ctx, canonical URL
+  //   2. REALIZATION (read-only) — selector code, iframe binding
+  //   3. DESCRIPTION (editable) — description, secondary aliases
+  //   4. VERIFICATION (read-only) — matched count, ops, issues, sample
+  //   5. PROFILE (read-only) — operations Claude suggests, pitfalls,
+  //      expected content, action effect
+  //   6. LIFECYCLE — chip + Deprecate/Restore
+  // v2.74.293 — Captured screenshot thumbnail. Stored as a JPEG-compressed
+  // copy of what was sent to Claude during the Pick→profile call.
+  // v2.74.300 — Two-image story: drawer shows the tight thumbnail
+  // (matches the picker overlay 1:1, for identification), but clicking
+  // it opens the WIDER CONTEXT SHOT (with red highlight box on the
+  // picked element) — that's the image Claude actually used for
+  // visual disambiguation, surfaced so the author can review what
+  // Claude saw. Falls back to opening the tight thumb when no
+  // context shot exists (iframe captures, etc.).
+  let screenshotHtml = '';
+  if (lm.captureScreenshot && typeof lm.captureScreenshot === 'string') {
+    const hasContext = !!lm.captureContextScreenshot;
+    const hint = hasContext
+      ? 'thumbnail matches the picker overlay; click to open the wider context shot Claude saw (with the highlight box around the picked element)'
+      : 'click to open the full image in a new tab';
+    screenshotHtml = `
+      <div class="lm-drawer-section">
+        <div class="lm-drawer-section-label">Captured screenshot <span class="lm-drawer-hint">(${escHtml(hint)})</span></div>
+        <div class="lm-screenshot-thumb-wrap">
+          <img class="lm-screenshot-thumb" data-action="open-screenshot" data-idx="${idx}" src="${escAttr(lm.captureScreenshot)}" alt="Cropped screenshot of the picked element" title="${escAttr(hasContext ? 'Click to open the wider context screenshot Claude saw (with the picked element highlighted in red)' : 'Click to open full image in a new tab')}" />
+        </div>
+      </div>`;
+  }
+
+  // v2.74.281 — Body-only render. Toggle button lives in row controls.
+  return `
+    <div class="dbg-locale-landmark-profile dbg-locale-landmark-profile-open">
+      <div class="dbg-locale-landmark-profile-body">
+        ${identityHtml ? `<div class="lm-drawer-section"><div class="lm-drawer-section-label">Identity <span class="lm-drawer-hint">(computed — never edited)</span>${confChip}</div>${identityHtml}</div>` : ''}
+
+        ${screenshotHtml}
+
+        <div class="lm-drawer-section">
+          <div class="lm-drawer-section-label">Realization <span class="lm-drawer-hint">(re-Pick to change)</span></div>
+          ${selectorDisplay}
+          ${frameDisplay}
+        </div>
+
+        <div class="lm-drawer-section">
+          <div class="lm-drawer-section-label">Description <span class="lm-drawer-hint">(editable)</span></div>
+          <div class="dbg-locale-landmark-profile-row">
+            <label class="lm-field-label">Description</label>
+            <textarea class="dbg-locale-landmark-profile-desc" data-action="profile-desc-edit" data-idx="${idx}" rows="2" maxlength="400" placeholder="What is this and what does it do?">${escHtml(lm.description ?? '')}</textarea>
+          </div>
+          <!-- v2.74.302 — "Secondary aliases" field removed. The row-header
+               "aliases" input is now the single source of truth (it carries
+               primary + all secondaries as a comma-separated list). -->
+        </div>
+
+        ${_renderLandmarkVerificationSection(lm)}
+
+        <div class="lm-drawer-section">
+          <div class="lm-drawer-section-label">Profile <span class="lm-drawer-hint">(Claude-generated)</span></div>
+          <div class="dbg-locale-landmark-profile-row">
+            <label class="lm-field-label">Typical operations</label>
+            <div>${opsChips}</div>
+          </div>
+          <div class="dbg-locale-landmark-profile-row">
+            <label class="lm-field-label">Pitfalls</label>
+            ${pitfallsList}
+          </div>
+          <div class="dbg-locale-landmark-profile-row">
+            <label class="lm-field-label">Expected content</label>
+            <div>${expectedHtml}</div>
+          </div>
+          ${_renderActionEffectRow(idx, lm)}
+        </div>
+
+        <div class="lm-drawer-section">
+          <div class="lm-drawer-section-label">Lifecycle</div>
+          ${_renderLifecycleRow(idx, lm)}
+        </div>
+      </div>
+    </div>`;
+}
+
+// v2.74.279 — Verification subsection. Renders matched count, ops
+// allowed (substrate-derived from real capabilities), issues, sample
+// HTML. Read-only display sourced from lm.verified. Empty section
+// (returns nothing) when the landmark hasn't been verified yet.
+function _renderLandmarkVerificationSection(lm) {
+  const v = lm?.verified;
+  if (!v) {
+    return `<div class="lm-drawer-section">
+      <div class="lm-drawer-section-label">Verification <span class="lm-drawer-hint">(read-only)</span></div>
+      <div class="dbg-locale-landmark-profile-empty">Not verified yet — click Pick or ✓ to verify against the live page.</div>
+    </div>`;
+  }
+  const legacyOk = !v.score && typeof v.matchedCount === 'number' && v.matchedCount > 0;
+  const effectiveScore = v.score ?? (legacyOk ? 'legacy' : null);
+  const scoreLabel =
+    effectiveScore === 'ready'    ? 'ready' :
+    effectiveScore === 'caveats'  ? 'caveats' :
+    effectiveScore === 'mismatch' ? 'mismatch' :
+    effectiveScore === 'legacy'   ? 'verified (legacy)' : 'unverified';
+  const matchLine = typeof v.matchedCount === 'number'
+    ? `${v.matchedCount} element${v.matchedCount === 1 ? '' : 's'}`
+    : '—';
+  const verifiedTime = typeof v.verifiedAt === 'number'
+    ? new Date(v.verifiedAt).toLocaleString()
+    : '—';
+  const opsAllowed = Array.isArray(v.operationsAllowed) && v.operationsAllowed.length > 0
+    ? `<div class="lm-verif-ops">${v.operationsAllowed.map(o => `<code class="dbg-locale-landmark-profile-chip">${escHtml(o)}</code>`).join(' ')}</div>`
+    : '<span class="dbg-locale-landmark-profile-empty">none</span>';
+  const issuesList = Array.isArray(v.issues) && v.issues.length > 0
+    ? `<ul class="dbg-locale-landmark-issues">${v.issues.map(i => `<li>${escHtml(i)}</li>`).join('')}</ul>`
+    : '<span class="dbg-locale-landmark-profile-empty">none</span>';
+  const sample = v.sampleHtml
+    ? `<code class="dbg-locale-landmark-sample">${escHtml(v.sampleHtml.slice(0, 200))}${v.sampleHtml.length > 200 ? '…' : ''}</code>`
+    : '<span class="dbg-locale-landmark-profile-empty">no sample captured</span>';
+  return `
+    <div class="lm-drawer-section">
+      <div class="lm-drawer-section-label">Verification <span class="lm-drawer-hint">(read-only — re-run via ✓)</span></div>
+      <div class="lm-verif-grid">
+        <div class="lm-verif-key">Score</div>     <div class="lm-verif-val">${escHtml(scoreLabel)}</div>
+        <div class="lm-verif-key">Matched</div>   <div class="lm-verif-val">${escHtml(matchLine)}</div>
+        <div class="lm-verif-key">Verified at</div><div class="lm-verif-val">${escHtml(verifiedTime)}</div>
+        <div class="lm-verif-key">Supports</div>  <div class="lm-verif-val">${opsAllowed}</div>
+        <div class="lm-verif-key">Issues</div>    <div class="lm-verif-val">${issuesList}</div>
+        <div class="lm-verif-key">Sample HTML</div><div class="lm-verif-val">${sample}</div>
+      </div>
+    </div>`;
+}
+
+// v2.74.268 — Lifecycle row in profile drawer. Shows current state +
+// deprecate/restore action. Deprecation marks the landmark as
+// obsolete; Phase 10.5 candidates already exclude deprecated
+// landmarks from replacement options, so this acts as a "soft
+// retire" — references continue to work but new authoring won't
+// surface this landmark.
+//
+// Restore sets lifecycle back to 'fresh' (unverified) — the author
+// can then click ✓ Verify to confirm and promote to 'verified'.
+// Storing pre-deprecation state would tie us to extra storage; the
+// re-verify path is simpler and more honest about the substrate's
+// uncertainty after a restore.
+function _renderLifecycleRow(idx, lm) {
+  if (!lm?.uid) return '';   // un-persisted landmarks have no lifecycle yet
+  const cur = lm.lifecycle ?? 'fresh';
+  const stateLabel = {
+    'fresh'           : 'fresh',
+    'verified'        : 'verified',
+    'stale-suspected' : 'stale-suspected',
+    'stale-confirmed' : 'stale-confirmed',
+    'deprecated'      : 'deprecated',
+  }[cur] ?? cur;
+  const stateClass = {
+    'fresh'           : 'lifecycle-fresh',
+    'verified'        : 'lifecycle-verified',
+    'stale-suspected' : 'lifecycle-suspected',
+    'stale-confirmed' : 'lifecycle-confirmed',
+    'deprecated'      : 'lifecycle-deprecated',
+  }[cur] ?? '';
+  const actionBtn = cur === 'deprecated'
+    ? `<button class="dbg-locale-landmark-lifecycle-action dbg-locale-landmark-lifecycle-restore" data-action="lifecycle-restore" data-idx="${idx}" type="button" title="Mark this landmark as fresh; click Verify to confirm it still works">Restore</button>`
+    : `<button class="dbg-locale-landmark-lifecycle-action dbg-locale-landmark-lifecycle-deprecate" data-action="lifecycle-deprecate" data-idx="${idx}" type="button" title="Mark this landmark as obsolete. Existing references continue to work; new authoring won't surface it.">Deprecate</button>`;
+  return `
+    <div class="dbg-locale-landmark-profile-row dbg-locale-landmark-lifecycle-row">
+      <label>Lifecycle <span class="dbg-locale-landmark-profile-hint">(runtime health state)</span></label>
+      <div class="dbg-locale-landmark-lifecycle-row-body">
+        <span class="dbg-locale-landmark-lifecycle-chip-large ${stateClass}">${escHtml(stateLabel)}</span>
+        ${actionBtn}
+      </div>
+    </div>`;
+}
+
+async function _setLandmarkLifecycle(idx, newLifecycle) {
+  const lm = _locDraft?.landmarks?.[idx];
+  if (!lm?.uid) return;
+  if (newLifecycle === 'deprecated') {
+    // Soft confirm — deprecation is reversible but warrants a moment
+    // of friction so authors don't deprecate by accident.
+    let impactSummary = '';
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: 'ANALYZE_LANDMARK_IMPACT',
+        payload: { uid: lm.uid, groundId: _locGroundId },
+      });
+      const impact = res?.impact;
+      if (impact) {
+        const consumers = (impact.fragments?.length ?? 0) + (impact.observations?.length ?? 0);
+        if (consumers > 0) {
+          impactSummary = `\n\n${consumers} downstream consumer${consumers === 1 ? '' : 's'} (${impact.fragments?.length ?? 0} fragment${(impact.fragments?.length ?? 0) === 1 ? '' : 's'}, ${impact.observations?.length ?? 0} observation${(impact.observations?.length ?? 0) === 1 ? '' : 's'}) currently reference this landmark. They will continue to work, but you should plan to migrate them.`;
+        }
+      }
+    } catch { /* impact lookup is informational; proceed without */ }
+    if (!confirm(`Deprecate landmark "${lm.accessibleName ?? lm.alias ?? lm.uid}"?\n\nDeprecation is a soft retire — existing references keep working, but the landmark won't surface in new authoring suggestions (Phase 10.5 candidates exclude deprecated landmarks).${impactSummary}\n\nReversible via the Restore button on the lifecycle row.`)) {
+      return;
+    }
+  }
+  const lifecycleBefore = lm.lifecycle ?? 'fresh';
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type   : 'UPDATE_LANDMARK',
+      payload: { uid: lm.uid, patch: { lifecycle: newLifecycle } },
+    });
+    if (!res?.success) {
+      showLocaleWarning(`Lifecycle update failed: ${res?.error ?? 'unknown'}`);
+      return;
+    }
+    // Reflect in draft so the chip and lifecycle row update without a
+    // full reload.
+    _locDraft.landmarks[idx] = { ...lm, lifecycle: newLifecycle };
+    renderLocaleLandmarks();
+    Logger.info('locale-capture', `Lifecycle ${lm.uid}: ${lifecycleBefore} → ${newLifecycle}`);
+    // v2.74.269 — Emit landmark-lifecycle-changed for the substrate
+    // event bus. Phase 8 declared this EVENT_KIND but until now
+    // nothing emitted it — the verifier and runtime-recovery paths
+    // emit specific resolution events instead. Deprecate/restore are
+    // author-driven lifecycle transitions not covered by those, so
+    // the dedicated event makes them visible in the events panel
+    // and to future drift-history consumers.
+    if (_locGroundId && lifecycleBefore !== newLifecycle) {
+      chrome.runtime.sendMessage({
+        type   : 'EMIT_GROUND_EVENT',
+        payload: {
+          groundId: _locGroundId,
+          event   : {
+            kind   : 'landmark-lifecycle-changed',
+            uid    : lm.uid,
+            details: {
+              lifecycleBefore,
+              lifecycleAfter: newLifecycle,
+              trigger       : newLifecycle === 'deprecated' ? 'deprecate'
+                            : lifecycleBefore === 'deprecated' ? 'restore'
+                            : 'author-override',
+            },
+          },
+        },
+      }).catch(err => Logger.debug('locale-capture', `lifecycle event emit failed: ${err.message}`));
+    }
+  } catch (e) {
+    showLocaleWarning(`Lifecycle update failed: ${e.message}`);
+  }
+}
+
+/**
+ * v2.74.244 — Phase 6: action effect annotation row in the drawer.
+ * Editable dropdown showing what the runtime should expect when an
+ * Action targets this landmark. Heuristic-proposed at Pick time;
+ * author can refine. Stored on landmark.actionEffect; surfaced by
+ * the resolver (Phase 6.5) to detect drift via `action-effect-mismatch`.
+ */
+function _renderActionEffectRow(idx, lm) {
+  // v2.74.305 — Phase 1 of ACTION_SPEC compliance. The previous single
+  // dropdown that mixed substrate effects with DOM interaction patterns
+  // is split into TWO controls per spec § 5:
+  //   1. Effect (substrate-level, bounded 5-kind vocabulary, with
+  //      structured parameters for opens-new-thread.form and
+  //      triggers-modal.modalKind)
+  //   2. Interaction pattern (our DOM-level pattern intel — separate
+  //      from substrate effects)
+  // Storage shape changed: lm.actionEffect (string) → lm.effect
+  // (object) + lm.interactionPattern (string). Migration runs at
+  // hydration in _hydrateLandmarkEffectShape.
+  const effect = lm.effect ?? { kind: 'none' };
+  const pattern = lm.interactionPattern ?? 'none';
+  const opt = (val, label, selected) => `<option value="${escAttr(val)}" ${selected ? 'selected' : ''}>${escHtml(label)}</option>`;
+
+  // Effect kind picker.
+  const effectKind = effect.kind ?? 'none';
+  const effectKindControl = `
+    <select class="dbg-locale-landmark-profile-effect" data-action="profile-effect-kind-edit" data-idx="${idx}">
+      ${opt('none',                'none — no substrate-level effect (default)',          effectKind === 'none')}
+      ${opt('triggers-navigation', 'triggers-navigation — clicking changes the URL',      effectKind === 'triggers-navigation')}
+      ${opt('opens-new-thread',    'opens-new-thread — new tab / window / popup',         effectKind === 'opens-new-thread')}
+      ${opt('triggers-modal',      'triggers-modal — BROWSER alert/confirm/prompt',       effectKind === 'triggers-modal')}
+      ${opt('triggers-download',   'triggers-download — file download initiates',         effectKind === 'triggers-download')}
+    </select>`;
+
+  // Conditional parameter pickers — only rendered for the kinds that
+  // need them. form for opens-new-thread, modalKind for triggers-modal.
+  let effectParamControl = '';
+  if (effectKind === 'opens-new-thread') {
+    const form = effect.form ?? 'tab';
+    effectParamControl = `
+      <select class="dbg-locale-landmark-profile-effect-param" data-action="profile-effect-form-edit" data-idx="${idx}" title="opens-new-thread.form (ACTION_SPEC § 5)">
+        ${opt('tab',     'tab — new browser tab',     form === 'tab')}
+        ${opt('window',  'window — new browser window', form === 'window')}
+        ${opt('popup',   'popup — window.open popup',   form === 'popup')}
+        ${opt('sidebar', 'sidebar — side panel',        form === 'sidebar')}
+      </select>`;
+  } else if (effectKind === 'triggers-modal') {
+    const modalKind = effect.modalKind ?? 'confirm';
+    effectParamControl = `
+      <select class="dbg-locale-landmark-profile-effect-param" data-action="profile-effect-modal-kind-edit" data-idx="${idx}" title="triggers-modal.modalKind (ACTION_SPEC § 5)">
+        ${opt('alert',   'alert — window.alert() dialog',     modalKind === 'alert')}
+        ${opt('confirm', 'confirm — window.confirm() dialog', modalKind === 'confirm')}
+        ${opt('prompt',  'prompt — window.prompt() dialog',   modalKind === 'prompt')}
+      </select>`;
+  }
+
+  // Interaction pattern picker (separate, our addition).
+  const patternControl = `
+    <select class="dbg-locale-landmark-profile-pattern" data-action="profile-pattern-edit" data-idx="${idx}">
+      ${opt('none',              'none — no recognized pattern',                          pattern === 'none')}
+      ${opt('opens-menu',        'opens-menu — dropdown / listbox / popup / DOM dialog',  pattern === 'opens-menu')}
+      ${opt('switches-tab',      'switches-tab — tab strip selection changes content',    pattern === 'switches-tab')}
+      ${opt('toggles-expansion', 'toggles-expansion — accordion / disclosure widget',     pattern === 'toggles-expansion')}
+      ${opt('toggles-state',     'toggles-state — checkbox / radio / switch',             pattern === 'toggles-state')}
+      ${opt('submits-in-place',  'submits-in-place — form submit without navigation',     pattern === 'submits-in-place')}
+      ${opt('mutates-page',      'mutates-page — in-page update (catch-all)',             pattern === 'mutates-page')}
+    </select>`;
+
+  // v2.74.309 — Phase 6: effect source badge. Shows where the current
+  // effect value came from so the author can judge how much to trust
+  // it (heuristic = rule-based guess; claude = LLM proposal; authored
+  // = you set it; observed = confirmed by a real run).
+  const source = lm.effectSource ?? null;
+  const SOURCE_META = {
+    heuristic: { label: 'heuristic', title: 'Rule-based proposal from the element’s ARIA / tag signals. A guess — confirm by running the action.' },
+    claude   : { label: 'Claude',    title: 'Proposed by Claude from the DOM + screenshot. A guess — confirm by running the action.' },
+    authored : { label: 'you set this', title: 'You chose this value manually. Takes precedence over heuristic / Claude proposals on re-Pick.' },
+    observed : { label: 'observed',  title: 'Confirmed by runtime observation of an actual run.' },
+  };
+  const sourceBadge = source && SOURCE_META[source]
+    ? ` <span class="lm-effect-source lm-effect-source-${escAttr(source)}" title="${escAttr(SOURCE_META[source].title)}">${escHtml(SOURCE_META[source].label)}</span>`
+    : '';
+
+  return `
+    <div class="dbg-locale-landmark-profile-row">
+      <label>Effect <span class="dbg-locale-landmark-profile-hint">(substrate-level browser effect — ACTION_SPEC § 5)</span>${sourceBadge}</label>
+      ${effectKindControl}
+      ${effectParamControl}
+    </div>
+    <div class="dbg-locale-landmark-profile-row">
+      <label>Interaction pattern <span class="dbg-locale-landmark-profile-hint">(DOM-level interaction shape — authoring intel only)</span></label>
+      ${patternControl}
+    </div>`;
+}
+
+// v2.74.238 — Helpers used by the drawer.
+function _selectorTail(sel) {
+  const parts = String(sel ?? '').split(/[\s>+~]/).filter(Boolean);
+  return parts[parts.length - 1] ?? sel;
+}
+function _truncate(s, n) {
+  s = String(s ?? '');
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+// ─── v2.74.233 — Claude-integrated picker for locale landmarks ────────────
+//
+// New picker flow (replaces the standalone "Ask Claude" button):
+//   1. Author types a role in the landmark row.
+//   2. Click Pick → role required check.
+//   3. Picker arms on the page; user clicks an element.
+//   4. PICK_RESULT arrives with the picker's selector + frameUrl.
+//   5. Sidepanel sets the landmark as "refining" so the UI shows
+//      progress, then:
+//      a. Runs INSPECT_ELEMENT against the picker's selector to get
+//         rich DOM context (outerHTML + parent + sibling tags + rect).
+//      b. Captures a screenshot of the element region via
+//         chrome.tabs.captureVisibleTab + canvas crop (top-frame
+//         elements only — iframe element rects don't map to the
+//         viewport coordinates captureVisibleTab returns).
+//      c. Forwards role (intent) + DOM context + screenshot to Claude
+//         via ASK_CLAUDE_FOR_SELECTOR_BG.
+//   6. Claude returns a refined selector — store it as the landmark's
+//      selector. If Claude fails, keep the picker's selector as a
+//      fallback so the author can still verify / hand-edit.
+//   7. Auto-verify and refresh on-page overlays.
+//
+// Authors get one click → a stable selector, with visual confirmation
+// baked into the model's reasoning.
+
+/**
+ * Capture a cropped screenshot of the picked element's region. Best-
+ * effort: returns null on any failure. Top-frame elements only —
+ * iframe rects don't translate to viewport coordinates without
+ * knowing the iframe's offset (could be added later but skipped for
+ * v1).
+ *
+ * @param {number} tabId
+ * @param {object} rect    { x, y, width, height } from getBoundingClientRect
+ * @param {string} frame   'top' | 'iframe — <url>' as reported by Inspect
+ * @returns {Promise<string|null>}  base64 data URL or null
+ */
+/**
+ * v2.74.293 — Re-encode a PNG data URL to JPEG at a moderate quality
+ * setting for compact persistence. The Claude API call uses the
+ * original PNG (sharper, no compression artifacts); only the persisted
+ * copy goes through this so the in-flight quality isn't degraded.
+ *
+ * Returns the compressed data URL, or the original on any error
+ * (caller can always store SOMETHING rather than nothing).
+ */
+async function _compressScreenshotForStorage(pngDataUrl) {
+  try {
+    if (!pngDataUrl || typeof pngDataUrl !== 'string') return pngDataUrl;
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('decode failed'));
+      img.src = pngDataUrl;
+    });
+    // Cap the long edge at 1200 px. Original captures can be 2400+ px
+    // wide on hi-DPI displays; that's overkill for a review thumbnail
+    // and bloats storage. Maintain aspect ratio.
+    const MAX_EDGE = 1200;
+    const longEdge = Math.max(img.width, img.height);
+    const scale = longEdge > MAX_EDGE ? MAX_EDGE / longEdge : 1;
+    const w = Math.round(img.width * scale);
+    const h = Math.round(img.height * scale);
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, w, h);
+    return canvas.toDataURL('image/jpeg', 0.85);
+  } catch (e) {
+    Logger.warn('locale-capture', `_compressScreenshotForStorage failed: ${e.message} — storing original PNG`);
+    return pngDataUrl;
+  }
+}
+
+/**
+ * v2.74.293 — Open a data URL in a new browser tab. Chrome MV3 blocks
+ * `chrome.tabs.create({url: 'data:...'})` directly — the navigation is
+ * silently dropped. The workaround: convert the data URL to a blob,
+ * mint a blob: URL with URL.createObjectURL, and open THAT. Blob URLs
+ * are first-class navigation targets even in MV3.
+ *
+ * Best-effort; logs and stays silent on failure (the screenshot can
+ * always be re-Pick'd if the open fails).
+ */
+async function _openScreenshotInNewTab(dataUrl) {
+  if (!dataUrl) return;
+  try {
+    // Convert data URL → blob via fetch (browser-built-in; no manual
+    // base64 decoding needed). This works in sidepanel context.
+    const res  = await fetch(dataUrl);
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    await chrome.tabs.create({ url: blobUrl, active: true });
+    // We don't revoke the blob URL — Chrome handles the lifetime once
+    // the tab owns it; revoking too early breaks the new tab's image.
+    // Memory cost is small (the blob is GC'd when the tab closes).
+  } catch (e) {
+    Logger.warn('locale-capture', `_openScreenshotInNewTab failed: ${e.message}`);
+  }
+}
+
+/**
+ * v2.74.298 — Capture BOTH the tight thumbnail (drawer-displayed,
+ * matches the picker overlay 1:1) AND a wider context shot for Claude
+ * with the picked element highlighted by a red box. One captureVisibleTab
+ * call, two crops on the same source image.
+ *
+ * Returns { thumb, contextShot, contextRect } where:
+ *   - thumb        — tight crop matching the picker overlay (1:1).
+ *                    Drawer thumbnail / what the user sees.
+ *   - contextShot  — wider crop showing the picked element plus
+ *                    surrounding chrome (target ±300px CSS each side,
+ *                    viewport-clamped), with a red rectangle drawn on
+ *                    top of the picked element's region. Used by
+ *                    Claude for visual reasoning about siblings,
+ *                    labels, and disambiguators. Never shown to the
+ *                    user — internal Claude payload only.
+ *   - contextRect  — the CSS-pixel rect of the contextShot region
+ *                    relative to the viewport. Useful for logs and
+ *                    future expansion.
+ * Either value is null when capture / crop fails; the caller proceeds
+ * with whatever is available.
+ */
+async function _captureLandmarkScreenshots(tabId, rect, frame, viewportInfo = null) {
+  const inputSummary = {
+    tabId,
+    rect: rect ? { x: rect.x, y: rect.y, w: rect.width, h: rect.height } : null,
+    frame: frame ?? null,
+    viewportInfo,
+  };
+  const FAIL = { thumb: null, contextShot: null, contextRect: null };
+  if (!rect || rect.width <= 0 || rect.height <= 0) {
+    Logger.info('locale-capture', `screenshot: SKIP (no rect or zero-sized)`, inputSummary);
+    return FAIL;
+  }
+  if (typeof frame === 'string' && frame.startsWith('iframe')) {
+    Logger.info('locale-capture', `screenshot: SKIP (iframe element — cross-frame coord translation not yet implemented)`, inputSummary);
+    return FAIL;
+  }
+  try {
+    const tabInfo = await chrome.tabs.get(tabId);
+    const windowId = tabInfo?.windowId;
+    if (typeof windowId !== 'number') {
+      Logger.info('locale-capture', `screenshot: SKIP (no windowId for tab)`, inputSummary);
+      return FAIL;
+    }
+    const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
+    if (!dataUrl) {
+      Logger.info('locale-capture', `screenshot: SKIP (captureVisibleTab returned empty)`, inputSummary);
+      return FAIL;
+    }
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('image decode failed'));
+      img.src = dataUrl;
+    });
+    const dpr = (typeof viewportInfo?.dpr === 'number' && viewportInfo.dpr > 0) ? viewportInfo.dpr : 1;
+    const vw  = (typeof viewportInfo?.viewportWidth  === 'number' && viewportInfo.viewportWidth  > 0) ? viewportInfo.viewportWidth  : Math.round(img.width  / dpr);
+    const vh  = (typeof viewportInfo?.viewportHeight === 'number' && viewportInfo.viewportHeight > 0) ? viewportInfo.viewportHeight : Math.round(img.height / dpr);
+
+    // ── Crop 1: tight thumbnail (matches overlay 1:1) ─────────────
+    const tightX = Math.max(0, Math.round(rect.x * dpr));
+    const tightY = Math.max(0, Math.round(rect.y * dpr));
+    const tightW = Math.min(img.width  - tightX, Math.round(rect.width  * dpr));
+    const tightH = Math.min(img.height - tightY, Math.round(rect.height * dpr));
+    let thumb = null;
+    if (tightW > 0 && tightH > 0) {
+      const tc = document.createElement('canvas');
+      tc.width = tightW;
+      tc.height = tightH;
+      tc.getContext('2d').drawImage(img, tightX, tightY, tightW, tightH, 0, 0, tightW, tightH);
+      thumb = tc.toDataURL('image/png');
+    } else {
+      Logger.info('locale-capture', `screenshot: tight crop yielded non-positive dimensions`, { ...inputSummary, tightX, tightY, tightW, tightH });
+    }
+
+    // ── Crop 2: context shot for Claude (with highlight box) ──────
+    // CSS-pixel context rect: pickedRect ± 300px each side, clamped
+    // to the viewport. Asymmetric? No — sibling labels can sit on
+    // any side. 300px is enough to capture group titles, sibling
+    // chips, sticky-bar boundaries. Bounded by viewport so we don't
+    // wander outside captured pixels.
+    const CTX_PAD = 300;
+    const ctxXcss = Math.max(0,  rect.x - CTX_PAD);
+    const ctxYcss = Math.max(0,  rect.y - CTX_PAD);
+    const ctxRcss = Math.min(vw, rect.x + rect.width  + CTX_PAD);
+    const ctxBcss = Math.min(vh, rect.y + rect.height + CTX_PAD);
+    const ctxWcss = ctxRcss - ctxXcss;
+    const ctxHcss = ctxBcss - ctxYcss;
+    const ctxX = Math.round(ctxXcss * dpr);
+    const ctxY = Math.round(ctxYcss * dpr);
+    const ctxW = Math.min(img.width  - ctxX, Math.round(ctxWcss * dpr));
+    const ctxH = Math.min(img.height - ctxY, Math.round(ctxHcss * dpr));
+    let contextShot = null;
+    let contextRect = null;
+    if (ctxW > 0 && ctxH > 0) {
+      const cc = document.createElement('canvas');
+      cc.width = ctxW;
+      cc.height = ctxH;
+      const cctx = cc.getContext('2d');
+      cctx.drawImage(img, ctxX, ctxY, ctxW, ctxH, 0, 0, ctxW, ctxH);
+      // Highlight box: pickedRect in crop-local image coordinates.
+      // Picked rect in image px: (rect.x*dpr, rect.y*dpr, rect.w*dpr, rect.h*dpr).
+      // Subtract the context crop's image origin (ctxX, ctxY).
+      const hlX = Math.round(rect.x * dpr) - ctxX;
+      const hlY = Math.round(rect.y * dpr) - ctxY;
+      const hlW = Math.round(rect.width  * dpr);
+      const hlH = Math.round(rect.height * dpr);
+      // Bright red, semi-transparent fill + solid border. Stroke width
+      // scales with DPR so hi-DPI captures don't get hairline borders.
+      cctx.lineWidth   = Math.max(2, Math.round(2 * dpr));
+      cctx.strokeStyle = 'rgba(239, 68, 68, 1.0)';     // red-500
+      cctx.fillStyle   = 'rgba(239, 68, 68, 0.18)';
+      cctx.fillRect(hlX, hlY, hlW, hlH);
+      cctx.strokeRect(hlX + 0.5, hlY + 0.5, hlW - 1, hlH - 1);
+      // JPEG at quality 0.85 for compact transmission to Claude.
+      contextShot = cc.toDataURL('image/jpeg', 0.85);
+      contextRect = { x: ctxXcss, y: ctxYcss, width: ctxWcss, height: ctxHcss };
+    } else {
+      Logger.info('locale-capture', `screenshot: context crop yielded non-positive dimensions`, { ...inputSummary, ctxX, ctxY, ctxW, ctxH });
+    }
+
+    Logger.info('locale-capture', `screenshot: OK (thumb ${tightW}×${tightH}, context ${ctxW}×${ctxH} px, dpr=${dpr}, thumb b64=${thumb?.length ?? 0}, context b64=${contextShot?.length ?? 0})`, {
+      ...inputSummary,
+      contextRect,
+    });
+    return { thumb, contextShot, contextRect };
+  } catch (e) {
+    Logger.warn('locale-capture', `screenshot: THROW — ${e.message}`, inputSummary);
+    return FAIL;
+  }
+}
+
+/**
+ * v2.74.298 — Rectangle Intersection-over-Union for two CSS-pixel rects.
+ * Used to verify Claude-proposed selectors land on the picker's
+ * actually-clicked element (rect overlap ≥80% means same element).
+ */
+function _computeIoU(a, b) {
+  if (!a || !b) return 0;
+  const ax2 = a.x + a.width;
+  const ay2 = a.y + a.height;
+  const bx2 = b.x + b.width;
+  const by2 = b.y + b.height;
+  const x1 = Math.max(a.x, b.x);
+  const y1 = Math.max(a.y, b.y);
+  const x2 = Math.min(ax2, bx2);
+  const y2 = Math.min(ay2, by2);
+  if (x2 <= x1 || y2 <= y1) return 0;
+  const inter = (x2 - x1) * (y2 - y1);
+  const union = a.width * a.height + b.width * b.height - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+// v2.74.298 — Legacy alias retained so any pre-refactor call sites still
+// resolve. Returns just the tight thumb (the original contract). New
+// callers should use _captureLandmarkScreenshots which returns both.
+async function _capturePickedElementScreenshot(tabId, rect, frame, selector = '', viewportInfo = null) {
+  // v2.74.291 — Diagnostic logging at every drop path. Every return-null
+  // emits a Logger.info with a reason code and the inputs that triggered
+  // it. Search for "screenshot:" in Logs to follow the path.
+  // v2.74.296 — Rect is now the picker's authoritative rect (passed
+  // directly from PICK_RESULT, not re-resolved via selector). The
+  // pre-supplied viewportInfo carries the page's DPR. scrollIntoView
+  // and re-Inspect were removed: the picker just clicked this element,
+  // it's in the viewport, and the rect is unambiguous.
+  const inputSummary = {
+    tabId,
+    rect: rect ? { x: rect.x, y: rect.y, w: rect.width, h: rect.height } : null,
+    frame: frame ?? null,
+    selector: (selector || '').slice(0, 120),
+    viewportInfo,
+  };
+
+  if (!rect || rect.width <= 0 || rect.height <= 0) {
+    Logger.info('locale-capture', `screenshot: SKIP (no rect or zero-sized)`, inputSummary);
+    return null;
+  }
+  // Iframe rects are local to the iframe document; without translating
+  // to the top-frame viewport we'd crop the wrong area. Skip for v1.
+  if (typeof frame === 'string' && frame.startsWith('iframe')) {
+    Logger.info('locale-capture', `screenshot: SKIP (iframe element — cross-frame coord translation not yet implemented)`, inputSummary);
+    return null;
+  }
+  try {
+    const tabInfo = await chrome.tabs.get(tabId);
+    const windowId = tabInfo?.windowId;
+    if (typeof windowId !== 'number') {
+      Logger.info('locale-capture', `screenshot: SKIP (no windowId for tab)`, inputSummary);
+      return null;
+    }
+    const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
+    if (!dataUrl) {
+      Logger.info('locale-capture', `screenshot: SKIP (captureVisibleTab returned empty)`, inputSummary);
+      return null;
+    }
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('image decode failed'));
+      img.src = dataUrl;
+    });
+
+    // v2.74.296 — Use the rect directly. No scroll, no re-Inspect.
+    // The picker just clicked this element; its rect is the source
+    // of truth. If by some race the element scrolled off between
+    // PICK_RESULT and capture, the crop math will return non-positive
+    // dimensions and we log + return null cleanly.
+    const liveRect = rect;
+    const liveViewportInfo = viewportInfo;
+    const reportDpr = (typeof liveViewportInfo?.dpr === 'number' && liveViewportInfo.dpr > 0)
+      ? liveViewportInfo.dpr
+      : 1;
+    const scale = reportDpr;
+    const x = Math.max(0, Math.round(liveRect.x      * scale));
+    const y = Math.max(0, Math.round(liveRect.y      * scale));
+    const w = Math.min(img.width  - x, Math.round(liveRect.width  * scale));
+    const h = Math.min(img.height - y, Math.round(liveRect.height * scale));
+    if (w <= 0 || h <= 0) {
+      Logger.info('locale-capture', `screenshot: SKIP (crop math yielded non-positive dimensions — element off-viewport?)`, {
+        ...inputSummary,
+        liveRect,
+        img: { w: img.width, h: img.height },
+        scale, x, y, w, h,
+      });
+      return null;
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, x, y, w, h, 0, 0, w, h);
+    const out = canvas.toDataURL('image/png');
+    // v2.74.295 — Log CSS and image-pixel dims plus DPR. Crop now equals
+    // the element rect 1:1 (no padding), so the CSS dims should match
+    // the rect exactly — easy to verify against what the picker overlay
+    // showed.
+    const cssW = Math.round(w / scale);
+    const cssH = Math.round(h / scale);
+    Logger.info('locale-capture', `screenshot: OK CSS=${cssW}×${cssH} px (matches overlay) / image=${w}×${h} px (dpr=${scale}, base64 length=${out.length})`, {
+      ...inputSummary,
+      liveRect,
+      liveViewportInfo,
+      scale,
+    });
+    return out;
+  } catch (e) {
+    Logger.warn('locale-capture', `screenshot: THROW — ${e.message}`, inputSummary);
+    return null;
+  }
+}
+
+/**
+ * v2.74.233 — Refine the picker's raw selector via Claude (DOM
+ * context + role + cropped screenshot). On success, replaces the
+ * landmark's selector with Claude's; on failure, keeps the picker's
+ * selector. Auto-verifies either way.
+ */
+async function _refineLandmarkSelectorWithClaude(landmarkIdx, pickContext = {}) {
+  if (!_locDraft?.landmarks?.[landmarkIdx]) return;
+  const lm = _locDraft.landmarks[landmarkIdx];
+  const pickerSelector = (lm.selector ?? '').toString().trim();
+  // v2.74.296 — pickContext carries the picker's authoritative rect
+  // (from elementFromPoint at click time) + page DPR + (v2.74.299)
+  // a11y profile of the clicked element. Used by the screenshot
+  // helper to crop exactly the overlay region regardless of whether
+  // the selector resolves uniquely, and by the geometric verification
+  // gate to compare Claude-proposed selectors against the authoritative
+  // clicked-element UID (not the wrong-element UID that came back from
+  // INSPECT_ELEMENT on the ambiguous picker selector).
+  const pickedRectFromPicker = pickContext?.pickedRect ?? null;
+  const pickViewportInfo     = pickContext?.viewportInfo ?? null;
+  const pickedAprofFromPicker = pickContext?.pickedAccessibilityProfile ?? null;
+  if (!pickerSelector) {
+    _landmarkRefining.delete(landmarkIdx);
+    renderLocaleLandmarks();
+    return;
+  }
+
+  // Resolve iframe frameId for Inspect dispatch.
+  let frameId = 0;
+  if (lm.frameUrl) {
+    try {
+      const frames = await new Promise((resolve) => {
+        chrome.webNavigation.getAllFrames({ tabId: _locTabId }, (fs) => resolve(fs ?? []));
+      });
+      const exact = frames.find(f => f && f.url === lm.frameUrl);
+      if (exact) frameId = exact.frameId;
+    } catch { /* fall through to top frame */ }
+  }
+
+  _landmarkRefining.set(landmarkIdx, 'Inspecting picked element…');
+  renderLocaleLandmarks();
+
+  let inspectRes;
+  try {
+    inspectRes = await chrome.tabs.sendMessage(
+      _locTabId,
+      { type: 'INSPECT_ELEMENT', payload: { target: pickerSelector, pickLast: false } },
+      { frameId },
+    );
+  } catch (e) {
+    // Fall back to picker's selector + auto-verify; user can hand-edit.
+    _landmarkRefining.delete(landmarkIdx);
+    Logger.warn('locale-capture', `Pick→Claude refinement inspect dispatch failed: ${e.message} (keeping picker selector)`);
+    renderLocaleLandmarks();
+    verifyLocaleLandmark(landmarkIdx);
+    return;
+  }
+  if (!inspectRes?.success) {
+    _landmarkRefining.delete(landmarkIdx);
+    Logger.warn('locale-capture', `Pick→Claude refinement inspect failed: ${inspectRes?.error} (keeping picker selector)`);
+    renderLocaleLandmarks();
+    verifyLocaleLandmark(landmarkIdx);
+    return;
+  }
+  const report = inspectRes.report ?? {};
+
+  _landmarkRefining.set(landmarkIdx, 'Capturing screenshot…');
+  renderLocaleLandmarks();
+  // v2.74.298 — Two-screenshot capture: tight thumb for the drawer
+  // (WYSIWYG with overlay) + wider context shot with highlight box for
+  // Claude (visual disambiguation). Uses the picker's authoritative
+  // rect (from elementFromPoint at click time), so capture is unambiguous
+  // even when the structural selector resolves to multiple elements.
+  const cropRect = pickedRectFromPicker || report.rect;
+  const { thumb: thumbScreenshot, contextShot, contextRect } =
+    await _captureLandmarkScreenshots(_locTabId, cropRect, report.frame, pickViewportInfo);
+
+  // v2.74.298 — Ambiguity detection. Re-Inspect the picker selector
+  // with no pickLast to learn how many elements it matches on the live
+  // DOM. If >1, we tell Claude the selector is ambiguous and ask for
+  // disambiguation using the highlighted region in the context shot.
+  // v2.74.299 — pickerClickedUid now comes from the PICKER (the a11y
+  // profile of the literally-clicked element), NOT from INSPECT on the
+  // selector. The INSPECT-derived UID would be wrong when the selector
+  // is ambiguous (returns the first match, possibly not the picked one).
+  // The picker's profile is the authoritative identity.
+  let pickerMatchCount = report.matchCount ?? 1;
+  const pickerClickedUid = pickedAprofFromPicker?.uid
+    ?? report.accessibilityProfile?.uid
+    ?? null;
+  try {
+    const ambigueProbe = await chrome.tabs.sendMessage(
+      _locTabId,
+      { type: 'INSPECT_ELEMENT', payload: { target: pickerSelector, pickLast: false } },
+      { frameId },
+    );
+    if (ambigueProbe?.success && ambigueProbe.report) {
+      pickerMatchCount = ambigueProbe.report.matchCount ?? pickerMatchCount;
+    }
+  } catch { /* fall back to original report.matchCount */ }
+
+  Logger.info('locale-capture', `Pick→Claude screenshot result`, {
+    landmarkIdx,
+    pickerSelector,
+    pickerMatchCount,
+    pickerAmbiguous: pickerMatchCount > 1,
+    pickerClickedUid,
+    rectSource: pickedRectFromPicker ? 'picker (authoritative)' : 'inspect-fallback',
+    cropRect,
+    contextRect,
+    frame: report.frame,
+    dpr: pickViewportInfo?.dpr ?? null,
+    thumbScreenshot: thumbScreenshot ? `data URL (${thumbScreenshot.length} chars)` : 'null',
+    contextShot    : contextShot     ? `data URL (${contextShot.length} chars)`     : 'null',
+  });
+  // For backwards compat with the existing identifier `screenshot` used
+  // by the persistence path below. The wider context shot goes to Claude
+  // separately via the GENERATE_LANDMARK_PROFILE_BG payload.
+  const screenshot = thumbScreenshot;
+
+  // v2.74.242 — Phase 4 of substrate spec: existing-landmark match.
+  // After INSPECT computes the accessibility profile (Phase 1) and
+  // the canonical UID, check the per-Ground registry to see if a
+  // landmark with this UID already exists. If found AND its
+  // lifecycle is fresh/verified, reuse it — skip the Claude call,
+  // hydrate the in-memory landmark from the registry record, toast
+  // the author. This is the SSOT win: pick the "same" element on
+  // the same page, get the same landmark every time, automatically.
+  //
+  // When the existing record is stale-suspected/stale-confirmed/
+  // deprecated, we proceed with Claude refinement — the cached
+  // record may carry a broken selector that the new pick can
+  // refresh (registry overwrites by UID on save).
+  const aprofForMatch = report.accessibilityProfile;
+  if (aprofForMatch?.uid && aprofForMatch.isCanonical) {
+    try {
+      const existingRes = await chrome.runtime.sendMessage({
+        type: 'GET_LANDMARK',
+        payload: { uid: aprofForMatch.uid },
+      });
+      const existing = existingRes?.success ? existingRes.landmark : null;
+      // v2.74.340 — Only reuse a registry landmark that belongs to the
+      // CURRENT ground. GET_LANDMARK is a global by-UID lookup, so it can
+      // return a landmark orphaned from a deleted/other ground (same element
+      // → same canonical UID). Reusing that cross-ground record would (a) hit
+      // the alias-restore gap and (b) throw at SAVE_LANDMARK's groundId guard
+      // ("cannot reassign to ground"). Falling through to Claude refinement
+      // instead mints a fresh per-ground record. (Re-homing orphaned
+      // landmarks into a new ground — GROUND_SPEC § 11's reuse case — is a
+      // separate future affordance.)
+      const reusable = existing
+        && existing.groundId === _locGroundId
+        && (existing.lifecycle === 'fresh' || existing.lifecycle === 'verified');
+      if (existing && reusable) {
+        Logger.info('locale-capture', `Existing landmark matched on UID — reusing [landmarkIdx=${landmarkIdx}]`, {
+          uid          : existing.uid,
+          alias        : existing.alias,
+          accessibleName: existing.accessibleName,
+          lifecycle    : existing.lifecycle,
+        });
+        // Hydrate the in-memory landmark from the registry. The
+        // author's typed `role` field stays (their semantic intent
+        // may differ from what the registry stored); everything
+        // else comes from the registry record so re-saves don't
+        // create divergence.
+        lm.uid                 = existing.uid;
+        lm.isCanonical         = existing.isCanonical === true;
+        lm.a11yRole            = existing.a11yRole;
+        lm.accessibleName      = existing.accessibleName;
+        lm.hierarchicalContext = existing.hierarchicalContext;
+        lm.canonicalUrl        = existing.canonicalUrl;
+        lm.derivationInputs    = existing.derivationInputs;
+        lm.selector            = existing.selector;
+        if (existing.frameUrl) lm.frameUrl = existing.frameUrl;
+        if (!lm.description)      lm.description       = existing.description ?? '';
+        // v2.74.340 — Restore the PRIMARY alias from the registry record.
+        // This reuse path historically restored only `aliases` (secondaries)
+        // — a leftover from the role→alias rename (v2.74.275) — leaving a
+        // reused landmark with an empty primary `alias`, which failed save
+        // validation ("needs an alias") even though the alias field showed
+        // the secondaries. (Triggers when a pick matches an orphaned registry
+        // landmark preserved across a ground delete, per GROUND_SPEC § 11.)
+        if (!lm.alias?.trim()) {
+          if (existing.alias && existing.alias.trim()) {
+            lm.alias = existing.alias;
+          } else if (Array.isArray(existing.aliases) && existing.aliases.length) {
+            // Edge: stored primary empty but secondaries present → promote first.
+            lm.alias   = existing.aliases[0];
+            lm.aliases = existing.aliases.slice(1);
+          }
+        }
+        if (!lm.aliases?.length)  lm.aliases           = Array.isArray(existing.aliases) ? existing.aliases.slice() : [];
+        if (!lm.operationsCommon?.length) lm.operationsCommon = Array.isArray(existing.operationsCommon) ? existing.operationsCommon.slice() : [];
+        if (!lm.pitfalls?.length)         lm.pitfalls         = Array.isArray(existing.pitfalls) ? existing.pitfalls.slice() : [];
+        if (!lm.expectedContent)          lm.expectedContent  = existing.expectedContent ?? null;
+        if (typeof lm.profileConfidence !== 'number') lm.profileConfidence = existing.profileConfidence ?? null;
+        lm.lifecycle = existing.lifecycle;
+        lm.verified  = existing.verified ?? null;
+        _landmarkRefining.delete(landmarkIdx);
+        _landmarkProfileExpanded.add(landmarkIdx);   // auto-expand to show what was reused
+        toast?.(`Reused existing landmark "${existing.accessibleName ?? existing.alias ?? existing.uid}" from registry`);
+        renderLocaleLandmarks();
+        updateLocaleSaveButtonState();
+        _refreshLocaleOverlays();
+        return;   // skip Claude — we already have the full record
+      }
+      if (existing && !reusable) {
+        Logger.info('locale-capture', `Existing landmark matched but lifecycle="${existing.lifecycle}" — refreshing via Claude [uid=${existing.uid}]`);
+      }
+    } catch (e) {
+      Logger.warn('locale-capture', `existing-landmark match check failed (proceeding with Claude): ${e.message}`);
+    }
+  }
+
+  _landmarkRefining.set(landmarkIdx, 'Asking Claude to generate landmark profile…');
+  renderLocaleLandmarks();
+
+  // v2.74.235 — Wave 2: one Claude call returns the FULL profile, not
+  // just the refined selector. Description, aliases, common ops,
+  // pitfalls, expected content all come back together. Rule-derived
+  // capabilities + operationsAllowed are sent in so Claude can ground
+  // operationsCommon in the actual allowlist (no hallucinating ops
+  // the element can't actually support).
+  const capsForPrompt = deriveCapabilities(report);
+  const opsForPrompt  = deriveAllowedOperations(capsForPrompt);
+
+  let claudeRes;
+  try {
+    claudeRes = await chrome.runtime.sendMessage({
+      type: 'GENERATE_LANDMARK_PROFILE_BG',
+      payload: {
+        role                  : (lm.alias ?? '').toString().trim() || 'landmark',
+        currentSelector       : pickerSelector,
+        fingerprint           : {
+          tag          : report.tag,
+          inputType    : report.inputType,
+          ariaRole     : report.ariaRole,
+          ariaLabel    : report.ariaLabel,
+          capabilities : capsForPrompt,
+        },
+        outerHTMLPreview      : report.outerHTMLPreview ?? '',
+        parentOuterHTMLPreview: report.parent?.outerHTMLPreview ?? '',
+        frame                 : report.frame ?? 'top',
+        matchedCount          : pickerMatchCount,
+        // v2.74.298 — Send the WIDER context shot to Claude (with red
+        // highlight rectangle drawn on the picked element). Falls back
+        // to the tight thumb if context capture failed. Claude can do
+        // visual selector reasoning from the context shot; thumb-only
+        // means "what you see is the whole thing."
+        screenshotDataUrl     : contextShot || screenshot,
+        operationsAllowed     : opsForPrompt,
+      },
+    });
+  } catch (e) {
+    _landmarkRefining.delete(landmarkIdx);
+    Logger.warn('locale-capture', `Pick→Claude profile dispatch failed: ${e.message} (keeping picker selector)`);
+    renderLocaleLandmarks();
+    verifyLocaleLandmark(landmarkIdx);
+    return;
+  }
+
+  _landmarkRefining.delete(landmarkIdx);
+
+  if (claudeRes?.success && claudeRes.profile?.selector) {
+    const p = claudeRes.profile;
+    // v2.74.239 — Phase 1 of the landmark substrate spec. The
+    // Inspect report's accessibilityProfile carries the canonical
+    // identity inputs (a11y role, accessible name, hierarchical
+    // context, canonical URL) AND the derived UID. Persist them on
+    // the landmark so Phase 2 (per-Ground registry) can migrate
+    // existing records without re-deriving from the live page.
+    //
+    // These fields sit alongside the existing free-form `role` /
+    // `description` for Phase 1 — the migration to a11y-role-as-
+    // role + accessibleName-as-display-label is a Phase 3 UI change.
+    // v2.74.299 — Prefer the picker's authoritative profile (computed
+    // at click time from the actually-clicked element) over the
+    // INSPECT-derived one (which uses the picker's selector and can
+    // return the wrong element when the selector is ambiguous). Falls
+    // back to the INSPECT profile if the picker didn't ship one
+    // (older content script during upgrade, or computeAccessibilityProfile
+    // threw on exotic DOM).
+    const aprof = pickedAprofFromPicker ?? report?.accessibilityProfile ?? null;
+    // v2.74.288 — Picker-wins-Claude-can-challenge selector authority.
+    // Previously Claude's selector unconditionally replaced the picker's;
+    // that's how `button:has(span.label--MoICp:text-is('All images'))`
+    // ended up overwriting a perfectly stable structural selector.
+    //
+    // Decision rule:
+    //   1. If Claude's selector EQUALS picker's (string match) → no-op,
+    //      record as not-challenged for the log.
+    //   2. Else classify both via classifySelectorTier. If Claude's
+    //      tier is NOT strictly lower (= NOT strictly more stable) than
+    //      picker's, reject Claude's selector and keep picker's.
+    //   3. If Claude's tier IS strictly lower, re-Inspect with Claude's
+    //      selector to verify it (a) resolves uniquely and (b) lands on
+    //      the SAME element (UID match). Only adopt on full verification.
+    //
+    // Rationale: the picker already ran the rule-based ladder and
+    // produced a verified, valid CSS selector. Claude's value-add in
+    // Wave 2 is the narrative profile (description / aliases /
+    // pitfalls / ops / expectedContent), not the selector. If Claude
+    // CAN spot a stronger discriminator the picker missed, great —
+    // but the burden of proof is on the challenger.
+    // v2.74.298 — Geometric verification replaces tier comparison.
+    //
+    // Pre-fix the substrate accepted Claude's selector only when its
+    // discriminator-tier was STRICTLY better than the picker's
+    // (classifySelectorTier comparison). That gate was selector-text-
+    // shaped and couldn't reward Claude for visual reasoning — if
+    // Claude looked at the highlight box and proposed something with
+    // a `:nth-of-type` (tier 6) when the picker had a `tag.class`
+    // chain (tier 5), the proposal got rejected as "not strictly
+    // stronger" even though it was the only one that actually
+    // uniquely identified the right element.
+    //
+    // New gate: accept Claude's selector IFF
+    //   (a) it resolves to exactly one element on the live DOM
+    //   (b) that element's bounding rect overlaps the picker's
+    //       pickedRect with IoU ≥ 0.8, OR its a11y UID matches the
+    //       picker's clicked-element UID.
+    // Tier is preserved as an informational field in the log but no
+    // longer gates the decision.
+    const pickerTier            = classifySelectorTier(pickerSelector);
+    const claudeTier            = classifySelectorTier(p.selector);
+    const selectorEqualsPicker  = p.selector === pickerSelector;
+
+    let adoptClaudeSelector = false;
+    let challengeOutcome    = 'kept-picker';
+    let claudeRect          = null;
+    let claudeMatchCount    = null;
+    let claudeUid           = null;
+    let iou                 = 0;
+    let uidMatches          = false;
+
+    if (selectorEqualsPicker) {
+      challengeOutcome = 'no-challenge (Claude echoed picker)';
+    } else {
+      try {
+        const reInspect = await chrome.tabs.sendMessage(
+          _locTabId,
+          { type: 'INSPECT_ELEMENT', payload: { target: p.selector, pickLast: false } },
+          { frameId },
+        );
+        if (reInspect?.success && reInspect.report) {
+          claudeMatchCount = reInspect.report.matchCount ?? 0;
+          claudeRect       = reInspect.report.rect       ?? null;
+          claudeUid        = reInspect.report.accessibilityProfile?.uid ?? null;
+          iou        = _computeIoU(claudeRect, pickedRectFromPicker || cropRect);
+          uidMatches = !!claudeUid && !!pickerClickedUid && claudeUid === pickerClickedUid;
+          const uniqueAndCorrect = claudeMatchCount === 1 && (iou >= 0.8 || uidMatches);
+          if (uniqueAndCorrect) {
+            adoptClaudeSelector = true;
+            challengeOutcome = `accepted (matchCount=1, IoU=${iou.toFixed(2)}, UID match=${uidMatches}, picker T${pickerTier} → claude T${claudeTier})`;
+          } else if (claudeMatchCount !== 1) {
+            challengeOutcome = `rejected (claude selector matches ${claudeMatchCount} elements, not 1)`;
+          } else {
+            challengeOutcome = `rejected (claude selector resolves to wrong element — IoU=${iou.toFixed(2)}, UID match=${uidMatches})`;
+          }
+        } else {
+          challengeOutcome = `rejected (claude selector failed INSPECT: ${reInspect?.error ?? 'unknown'})`;
+        }
+      } catch (e) {
+        challengeOutcome = `rejected-verify-throw (${e.message})`;
+      }
+    }
+
+    Logger.info('locale-capture', `Pick→Claude landmark profile [landmarkIdx=${landmarkIdx}]`, {
+      alias            : lm.alias,
+      pickerSelector,
+      pickerMatchCount,
+      pickerClickedUid,
+      claudeSelector   : p.selector,
+      claudeMatchCount,
+      claudeRect,
+      claudeUid,
+      iou              : Math.round(iou * 100) / 100,
+      uidMatches,
+      pickerTier,
+      claudeTier,
+      challenge        : challengeOutcome,
+      adoptedSelector  : adoptClaudeSelector ? p.selector : pickerSelector,
+      description      : p.description,
+      aliases          : p.aliases,
+      operationsCommon : p.operationsCommon,
+      pitfallCount     : p.pitfalls?.length ?? 0,
+      expectedContent  : p.expectedContent,
+      // v2.74.305 — Surface heuristic and Claude proposals (both
+      // structured as { effect, interactionPattern } per spec split).
+      heuristicEffect  : aprof?.proposedEffect?.effect ?? null,
+      heuristicPattern : aprof?.proposedEffect?.interactionPattern ?? null,
+      claudeEffect     : p.effect ?? null,
+      claudePattern    : p.interactionPattern ?? null,
+      confidence       : p.confidence,
+      rationale        : p.rationale,
+      screenshotIncluded: !!screenshot,
+      // v2.74.239 — Identity layer.
+      uid              : aprof?.uid ?? null,
+      isCanonical      : aprof?.isCanonical ?? null,
+      a11yRole         : aprof?.role ?? null,
+      accessibleName   : aprof?.accessibleName ?? null,
+      hierarchicalContext: aprof?.hierarchicalContext ?? null,
+      canonicalUrl     : aprof?.canonicalUrl ?? null,
+      usage            : claudeRes.usage ?? null,
+    });
+    lm.selector         = adoptClaudeSelector ? p.selector : pickerSelector;
+    // v2.74.239 — Persist identity layer on the landmark record.
+    // Top-level fields (for fast access by future resolver) plus
+    // `derivationInputs` (preserved for UID re-derivation when the
+    // hash function evolves).
+    if (aprof) {
+      lm.uid                 = aprof.uid;
+      lm.isCanonical         = aprof.isCanonical;
+      lm.a11yRole            = aprof.role;
+      lm.accessibleName      = aprof.accessibleName;
+      lm.hierarchicalContext = aprof.hierarchicalContext;
+      lm.canonicalUrl        = aprof.canonicalUrl;
+      lm.derivationInputs    = aprof.derivationInputs;
+      // v2.74.305 — Two-stage seeding per ACTION_SPEC § 5. Heuristic
+      // first (aprof.proposedEffect now returns { effect, interaction-
+      // Pattern } object); Claude's proposal upgrades when heuristic
+      // is empty/default. Author overrides win over both — if lm.effect
+      // or lm.interactionPattern is already set to a non-default value,
+      // neither touches it.
+      const heuristicEffect = aprof.proposedEffect?.effect ?? null;
+      const heuristicPattern = aprof.proposedEffect?.interactionPattern ?? null;
+      const lmEffectIsDefault =
+        !lm.effect || lm.effect.kind === 'none' || lm.effect.kind === undefined;
+      const lmPatternIsDefault =
+        !lm.interactionPattern || lm.interactionPattern === 'none';
+      // v2.74.309 — Phase 6: effect source metadata (ACTION_SPEC § 5
+      // 'source' + § 9 authoring metadata, extended with our extra
+      // proposal stages). Track WHERE the effect value came from:
+      //   'authored'  — author edited the drawer control (set there)
+      //   'claude'    — Claude's LLM proposal won
+      //   'heuristic' — rule-based proposer won
+      //   'observed'  — runtime observation (future; we don't auto-
+      //                 write landmark effects from observation yet)
+      // Seeding never overrides an author-set value (effectSource ===
+      // 'authored' implies the author already chose).
+      const authorSetEffect = lm.effectSource === 'authored';
+      // Stage 1: heuristic seeds defaults.
+      if (!authorSetEffect && lmEffectIsDefault && heuristicEffect && heuristicEffect.kind !== 'none') {
+        lm.effect = heuristicEffect;
+        lm.effectSource = 'heuristic';
+      } else if (!lm.effect) {
+        lm.effect = { kind: 'none' };   // ensure shape is set
+        if (!lm.effectSource) lm.effectSource = 'heuristic';
+      }
+      if (!authorSetEffect && lmPatternIsDefault && heuristicPattern && heuristicPattern !== 'none') {
+        lm.interactionPattern = heuristicPattern;
+      } else if (!lm.interactionPattern) {
+        lm.interactionPattern = 'none';
+      }
+      // Stage 2: Claude upgrades when heuristic was default.
+      if (!authorSetEffect && p?.effect && p.effect.kind !== 'none' &&
+          (lm.effect.kind === 'none' || !lm.effect.kind)) {
+        lm.effect = p.effect;
+        lm.effectSource = 'claude';
+      }
+      if (!authorSetEffect && typeof p?.interactionPattern === 'string' && p.interactionPattern !== 'none' &&
+          (lm.interactionPattern === 'none' || !lm.interactionPattern)) {
+        lm.interactionPattern = p.interactionPattern;
+      }
+      // v2.74.302 — Alias auto-fill moved BELOW the lm.aliases assign-
+      // ment so it can prefer Claude's purpose-named suggestions over
+      // the accessibleName slug. See the lm.alias / lm.aliases block
+      // just after this if/aprof guard.
+    }
+    // v2.74.235 — Persist the full profile alongside the existing
+    // verified.* block. Each field is independently editable in the
+    // profile drawer UI; the author's edits win over Claude's
+    // suggestion if they tweak before save.
+    // v2.74.302 — Alias auto-fill rewritten. Claude's aliases are
+    // purpose-named (per the v2.74.292 prompt — e.g.
+    // "content-type-filter") rather than value-named (e.g.
+    // "all-images" from the AccName-derived slug). When the author
+    // hasn't typed a primary alias yet, take Claude's FIRST suggestion
+    // as the primary and keep the rest as secondaries. Falls back to
+    // the accessibleName slug only when Claude returned no aliases.
+    // When the author HAS typed an alias, preserve it and use all
+    // of Claude's suggestions as secondaries.
+    lm.description      = p.description;
+    const claudeAliases = Array.isArray(p.aliases) ? p.aliases.filter(s => s && s.trim()) : [];
+    if (!lm.alias || !lm.alias.trim()) {
+      if (claudeAliases.length > 0) {
+        lm.alias   = claudeAliases[0];
+        lm.aliases = claudeAliases.slice(1);
+      } else if (aprof?.accessibleName) {
+        lm.alias   = _slugifyForAlias(aprof.accessibleName);
+        lm.aliases = [];
+      } else {
+        lm.aliases = [];
+      }
+    } else {
+      // Author already typed a primary — dedup it out of Claude's
+      // suggestions and use the remainder as secondaries.
+      lm.aliases = claudeAliases.filter(a => a !== lm.alias);
+    }
+    lm.operationsCommon = p.operationsCommon;
+    lm.pitfalls         = p.pitfalls;
+    lm.expectedContent  = p.expectedContent;
+    lm.profileConfidence= p.confidence;
+    lm.verified         = null;   // selector changed; force re-verify below
+
+    // v2.74.293 — Persist the cropped screenshot so the author can
+    // review what Claude actually saw when generating the profile.
+    // The drawer renders a thumbnail; click opens the full image in a
+    // new tab.
+    //
+    // v2.74.300 — TWO persisted images now:
+    //   captureScreenshot         — tight thumbnail (WYSIWYG with picker
+    //                               overlay). Shown in the drawer.
+    //   captureContextScreenshot  — wider context shot with red
+    //                               highlight box around the picked
+    //                               element. THIS is what Claude saw
+    //                               for visual disambiguation reasoning.
+    //                               Opened in a new tab when the author
+    //                               clicks the thumbnail.
+    // Tight thumbnail stays the in-drawer identifier (matches overlay
+    // pixel-for-pixel). Clicking it gives the author "show me what
+    // Claude saw" — closing the loop on the visual reasoning the
+    // substrate is now leveraging.
+    if (screenshot) {
+      lm.captureScreenshot = await _compressScreenshotForStorage(screenshot);
+    } else {
+      delete lm.captureScreenshot;
+    }
+    if (contextShot) {
+      // Already JPEG-encoded at 0.85 quality inside the helper, no need
+      // to re-compress. Store as-is.
+      lm.captureContextScreenshot = contextShot;
+    } else {
+      delete lm.captureContextScreenshot;
+    }
+    // Auto-expand the profile drawer so the author sees the generated
+    // content immediately and can review/edit.
+    _landmarkProfileExpanded.add(landmarkIdx);
+  } else {
+    Logger.warn('locale-capture', `Pick→Claude profile returned nothing usable (keeping picker selector): ${claudeRes?.error ?? 'unknown'}`);
+  }
+
+  renderLocaleLandmarks();
+  verifyLocaleLandmark(landmarkIdx);
+}
+
+async function verifyLocaleLandmark(landmarkIdx) {
+  if (!_locDraft || !_locDraft.landmarks[landmarkIdx]) return;
+  const lm = _locDraft.landmarks[landmarkIdx];
+  if (!lm.selector || !lm.selector.trim()) {
+    showLocaleWarning('Add a selector first');
+    return;
+  }
+  if (_locTabId == null) {
+    showLocaleWarning('No capture tab. Cancel and start over.');
+    return;
+  }
+  let tabUrl = '';
+  try {
+    const t = await chrome.tabs.get(_locTabId);
+    tabUrl = t?.url ?? '';
+  } catch {
+    showLocaleWarning('The active tab has been closed.');
+    return;
+  }
+
+  // v2.74.234 — Verify now goes through INSPECT_ELEMENT instead of
+  // PageProbe.probeSelector. INSPECT returns the rich fingerprint
+  // (tag, attrs, inputType, computedStyle, visibility, interactability,
+  // sibling pattern, etc.) which we feed into LandmarkProfile to
+  // derive capabilities + allowed operations + a multi-axis score.
+  // Persisting this on the landmark lets downstream consumers (Wave 3)
+  // filter their dropdowns without re-running anything.
+  //
+  // Resolve frameId from the landmark's frameUrl (set by the picker
+  // when capturing inside an iframe). Same chain Pick→Claude uses.
+  let frameId = 0;
+  if (lm.frameUrl) {
+    try {
+      const frames = await new Promise((resolve) => {
+        chrome.webNavigation.getAllFrames({ tabId: _locTabId }, (fs) => resolve(fs ?? []));
+      });
+      const exact = frames.find(f => f && f.url === lm.frameUrl);
+      if (exact) frameId = exact.frameId;
+    } catch { /* fall through to top frame */ }
+  }
+
+  let inspectRes;
+  try {
+    inspectRes = await chrome.tabs.sendMessage(
+      _locTabId,
+      { type: 'INSPECT_ELEMENT', payload: { target: lm.selector, pickLast: false } },
+      { frameId },
+    );
+  } catch (e) {
+    lm.verified = null;
+    showLocaleWarning(`Verify threw: ${e.message}`);
+    renderLocaleLandmarks();
+    updateLocaleSaveButtonState();
+    _refreshLocaleOverlays();
+    return;
+  }
+  if (!inspectRes?.success) {
+    // Selector didn't match — record a mismatch verdict with the
+    // diagnostic Inspect produces.
+    lm.verified = {
+      score: 'mismatch',
+      verifiedAt: Date.now(),
+      verifiedAgainstUrl: tabUrl,
+      matchedCount: 0,
+      sampleHtml: '',
+      capabilities: null,
+      operationsAllowed: [],
+      checks: { elementExists: false, visible: false, interactable: false, typeMatchesRole: true, uniqueMatch: false },
+      issues: [inspectRes?.error ?? 'inspect failed'],
+    };
+    showLocaleWarning(`Verify failed: ${inspectRes?.error ?? 'unknown'}`);
+    renderLocaleLandmarks();
+    updateLocaleSaveButtonState();
+    _refreshLocaleOverlays();
+    return;
+  }
+
+  const report = inspectRes.report ?? {};
+  const matchedCount = report.matchCount ?? (inspectRes?.success ? 1 : 0);
+  const capabilities = deriveCapabilities(report);
+  const operationsAllowed = deriveAllowedOperations(capabilities);
+  const { score, checks, issues } = computeVerificationScore({
+    fp: report,
+    capabilities,
+    role: lm.alias,
+    matchedCount,
+  });
+
+  lm.verified = {
+    score,
+    verifiedAt: Date.now(),
+    verifiedAgainstUrl: tabUrl,
+    matchedCount,
+    sampleHtml: (report.outerHTMLPreview ?? '').slice(0, 240),
+    capabilities,
+    operationsAllowed,
+    checks,
+    issues,
+    // Lightweight fingerprint snapshot — only the bits downstream
+    // consumers might want to see (tag, attrs that matter for
+    // semantic intent). Full report stays in-memory only.
+    fingerprint: {
+      tag           : report.tag ?? null,
+      inputType     : report.inputType ?? null,
+      ariaRole      : report.ariaRole ?? null,
+      ariaLabel     : report.ariaLabel ?? null,
+      childCount    : report.childCount ?? 0,
+      siblingsSameTag: report.siblingsSameTag ?? 0,
+      rect          : report.rect ?? null,
+    },
+  };
+
+  // v2.74.239 — Landmark identity (Phase 1 of substrate spec). Verify
+  // also captures the accessibility profile so legacy landmarks
+  // (saved pre-Phase-1) gain a UID + a11y role + accessibleName +
+  // hierarchicalContext on re-verify. Only ADD or update on this
+  // path — never overwrite a stronger value with weaker (e.g. don't
+  // replace a non-empty accessibleName with empty). Pick→Claude is
+  // the primary capture site; this is the secondary refresh site.
+  const aprof = report.accessibilityProfile ?? null;
+  if (aprof) {
+    if (!lm.uid)                                        lm.uid                 = aprof.uid;
+    if (typeof lm.isCanonical !== 'boolean')            lm.isCanonical         = aprof.isCanonical;
+    if (!lm.a11yRole && aprof.role)                     lm.a11yRole            = aprof.role;
+    if (!lm.accessibleName && aprof.accessibleName)     lm.accessibleName      = aprof.accessibleName;
+    if (!lm.hierarchicalContext && aprof.hierarchicalContext) {
+      lm.hierarchicalContext = aprof.hierarchicalContext;
+    }
+    if (!lm.canonicalUrl && aprof.canonicalUrl)         lm.canonicalUrl        = aprof.canonicalUrl;
+    if (!lm.derivationInputs && aprof.derivationInputs) lm.derivationInputs    = aprof.derivationInputs;
+    // v2.74.305 — Seed effect + interactionPattern from heuristic
+    // proposal when absent. Default-only seeding (kind === 'none' or
+    // pattern === 'none' counts as "default") so author overrides
+    // are preserved. aprof.proposedEffect is now { effect, interaction-
+    // Pattern } per ACTION_SPEC § 5 split.
+    const hEffect = aprof.proposedEffect?.effect ?? null;
+    const hPattern = aprof.proposedEffect?.interactionPattern ?? null;
+    const effDefault = !lm.effect || lm.effect.kind === 'none';
+    const patDefault = !lm.interactionPattern || lm.interactionPattern === 'none';
+    if (effDefault && hEffect && hEffect.kind !== 'none') lm.effect            = hEffect;
+    if (!lm.effect)                                       lm.effect            = { kind: 'none' };
+    if (patDefault && hPattern && hPattern !== 'none')    lm.interactionPattern = hPattern;
+    if (!lm.interactionPattern)                           lm.interactionPattern = 'none';
+  }
+
+  Logger.info('locale-capture', `Landmark verified [landmarkIdx=${landmarkIdx}] score=${score}`, {
+    alias        : lm.alias,
+    selector     : lm.selector,
+    matchedCount,
+    capabilities,
+    operationsAllowed,
+    issues,
+  });
+
+  // v2.74.234 — Auto-enable Show overlay on ready verifications so the
+  // author gets an immediate visual confirmation of what was matched.
+  // Doesn't override an explicit toggle-off — if the author had it
+  // toggled off, we leave their preference alone. (Caveats / mismatch
+  // verdicts do NOT auto-show — those need attention, not affirmation.)
+  if (score === 'ready' && lm.showOverlay !== false) {
+    lm.showOverlay = true;
+  }
+
+  renderLocaleLandmarks();
+  updateLocaleSaveButtonState();
+  _refreshLocaleOverlays();
+}
+
+// v2.74.46 — Send the current verified landmarks to the content script
+// so it can draw a translucent overlay around each one. Only verified
+// landmarks with non-empty selectors are drawn — un-verified rows are
+// hidden until the user runs Verify on them. Best-effort; failure
+// (tab closed, content script unreachable) is silently swallowed.
+async function _refreshLocaleOverlays() {
+  if (_locTabId == null || !_locDraft) return;
+  // v2.74.233 — Per-landmark "Show" toggle. Only landmarks the author
+  // has explicitly toggled on are drawn; the rest are hidden even
+  // when verified. Lets the author isolate landmarks visually without
+  // having to remove them. Replaces the previous all-verified-when-
+  // focused behavior (which painted every verified landmark whenever
+  // the sidepanel had focus — noisy on locales with many landmarks).
+  const landmarks = _locDraft.landmarks
+    .filter(lm => lm && lm.showOverlay === true && lm.selector && lm.selector.trim())
+    .map(lm => ({ alias: lm.alias ?? '', selector: lm.selector, frameUrl: lm.frameUrl ?? null }));
+  try {
+    await chrome.tabs.sendMessage(_locTabId, {
+      type: 'SHOW_LOCALE_OVERLAYS',
+      payload: { landmarks },
+    });
+  } catch { /* tab gone or content script not loaded */ }
+}
+
+async function _clearLocaleOverlays() {
+  if (_locTabId == null) return;
+  try {
+    await chrome.tabs.sendMessage(_locTabId, { type: 'CLEAR_LOCALE_OVERLAYS' });
+  } catch { /* fine */ }
+}
+
+// ─── Save / Cancel ───────────────────────────────────────────────────────
+
+async function saveLocale() {
+  if (!_locDraft) return;
+  // v2.74.48 — Re-normalize at save in case the input slipped through
+  // (e.g. paste with newlines, programmatic value set). Strip leading
+  // and trailing hyphens for tidy storage.
+  _locDraft.name = _normalizeLocaleName(locNameInput.value).replace(/^-+|-+$/g, '');
+  _locDraft.description = locDescriptionInput.value.trim();
+  // v2.74.275 — urlPattern field gone; URL gating expressed via the
+  // urlMatches predicate authored in the predicates section.
+
+  // v2.74.231 — Auto-generate description from landmarks when blank.
+  // Mirrors fragment-author's composeCompactDescription on save. The
+  // author can override by typing anything in the field; we only
+  // backfill empty descriptions so authored text is preserved.
+  // Reflect the generated text back into the input so the user sees
+  // what got saved.
+  if (!_locDraft.description && _locDraft.landmarks.length > 0) {
+    _locDraft.description = composeCompactDescription(_locDraft.landmarks);
+    if (locDescriptionInput) locDescriptionInput.value = _locDraft.description;
+  }
+  // Reflect the normalized name in the input so the user sees what was
+  // actually saved.
+  if (locNameInput.value !== _locDraft.name) locNameInput.value = _locDraft.name;
+
+  if (!_locDraft.name)        { showLocaleWarning('Locale name is required'); return; }
+  // v2.74.275 — Require a urlMatches predicate (replaces the
+  // urlPattern field check). Auto-seeded from tab URL on first
+  // tab load for new locales; author can edit or remove.
+  const hasUrlPredicate = Array.isArray(_locDraft.predicates)
+    && _locDraft.predicates.some(p =>
+      p?.kind === 'urlMatches' && typeof p.pattern === 'string' && p.pattern.trim().length > 0
+    );
+  if (!hasUrlPredicate) {
+    showLocaleWarning('Locale needs a URL gate — add a urlMatches predicate in the Additional predicates section (or it would match every page on this Ground).');
+    return;
+  }
+  if (_locDraft.landmarks.length === 0) {
+    showLocaleWarning('Add at least one landmark');
+    return;
+  }
+  const seen = new Set();
+  for (const lm of _locDraft.landmarks) {
+    // v2.74.275 — Storage field is now `lm.alias` (legacy `role`
+    // shape removed). Legacy { localeId, role } refs no longer
+    // supported.
+    if (!lm.alias?.trim())     { showLocaleWarning('All landmarks need an alias (auto-fills from accessibleName on Pick — type one manually if you skipped Pick)'); return; }
+    if (!lm.selector?.trim()) { showLocaleWarning('All landmarks need a selector — click Pick to choose an element'); return; }
+    if (seen.has(lm.alias))    { showLocaleWarning(`Duplicate alias "${lm.alias}" — aliases must be unique within a locale`); return; }
+    seen.add(lm.alias);
+  }
+
+  // v2.74.260 — Validate + normalize additional predicates. Each leaf
+  // needs the kind-specific required fields populated. Incomplete
+  // predicates would fail-closed at runtime (per Phase 7d semantics),
+  // so flag them at save time instead of silently shipping a locale
+  // that never activates.
+  if (Array.isArray(_locDraft.predicates) && _locDraft.predicates.length > 0) {
+    for (let i = 0; i < _locDraft.predicates.length; i++) {
+      const p = _locDraft.predicates[i];
+      if (!p || typeof p !== 'object' || !p.kind) {
+        showLocaleWarning(`Predicate #${i + 1}: missing kind`);
+        return;
+      }
+      if (p.kind === 'visible' || p.kind === 'hasText') {
+        if (!p.target || typeof p.target !== 'string') {
+          showLocaleWarning(`Predicate #${i + 1} (${p.kind}): pick a target landmark`);
+          return;
+        }
+        // v2.74.261 — BUG FIX: validate target uid still references a
+        // landmark in the current locale. Predicates created against a
+        // landmark that's since been removed would silently fail-closed
+        // at runtime (getLandmark returns null → predicate returns null
+        // → locale never activates). Catch at save time instead.
+        const targetExists = (_locDraft.landmarks ?? []).some(lm => lm?.uid === p.target);
+        if (!targetExists) {
+          showLocaleWarning(`Predicate #${i + 1} (${p.kind}): target landmark no longer exists in this locale. Pick a different landmark or remove the predicate.`);
+          return;
+        }
+        if (p.kind === 'hasText' && (typeof p.value !== 'string' || !p.value)) {
+          showLocaleWarning(`Predicate #${i + 1} (hasText): text value is required`);
+          return;
+        }
+      } else if (p.kind === 'iframeLoaded') {
+        if (!p.contextName || typeof p.contextName !== 'string' || !p.contextName.trim()) {
+          showLocaleWarning(`Predicate #${i + 1} (iframeLoaded): context name is required`);
+          return;
+        }
+      } else if (p.kind === 'urlMatches') {
+        // v2.74.275 — urlMatches authoring validation.
+        if (typeof p.pattern !== 'string' || !p.pattern.trim()) {
+          showLocaleWarning(`Predicate #${i + 1} (URL matches): pattern is required`);
+          return;
+        }
+        if (p.mode && !['contains', 'regex', 'exact'].includes(p.mode)) {
+          showLocaleWarning(`Predicate #${i + 1} (URL matches): invalid mode "${p.mode}"`);
+          return;
+        }
+      } else {
+        showLocaleWarning(`Predicate #${i + 1}: unknown kind "${p.kind}"`);
+        return;
+      }
+    }
+  }
+  // v2.74.267 — Validate iframe contexts. Each must have a non-empty
+  // unique contextName + a valid predicate per its kind. Authoring
+  // path may produce empty fields (e.g., just clicked + Add); flag
+  // so the author doesn't save a structurally-invalid locale.
+  if (Array.isArray(_locDraft.iframeContexts) && _locDraft.iframeContexts.length > 0) {
+    const namesSeen = new Set();
+    for (let i = 0; i < _locDraft.iframeContexts.length; i++) {
+      const c = _locDraft.iframeContexts[i];
+      if (!c?.contextName || !c.contextName.trim()) {
+        showLocaleWarning(`iframe context #${i + 1}: name is required`);
+        return;
+      }
+      const nm = c.contextName.trim();
+      if (namesSeen.has(nm)) {
+        showLocaleWarning(`Duplicate iframe context name "${nm}" — must be unique within the locale`);
+        return;
+      }
+      namesSeen.add(nm);
+      const p = c.predicate;
+      if (!p || !p.kind) {
+        showLocaleWarning(`iframe context "${nm}": predicate kind missing`);
+        return;
+      }
+      if (p.kind === 'iframeName' && (!p.value || !String(p.value).trim())) {
+        showLocaleWarning(`iframe context "${nm}" (by name): name value required`);
+        return;
+      }
+      if (p.kind === 'iframeSelector' && (!p.selector || !String(p.selector).trim())) {
+        showLocaleWarning(`iframe context "${nm}" (by selector): CSS selector required`);
+        return;
+      }
+      if (p.kind === 'iframeSrcPattern' && (!p.pattern || !String(p.pattern).trim())) {
+        showLocaleWarning(`iframe context "${nm}" (by src pattern): pattern required`);
+        return;
+      }
+      if (p.kind === 'iframePositional' && (typeof p.index !== 'number' || p.index < 0)) {
+        showLocaleWarning(`iframe context "${nm}" (by position): non-negative index required`);
+        return;
+      }
+    }
+    // Cross-reference: every landmark.iframeContext should match an
+    // existing context name. Catches typos (rare since UI never lets
+    // you type one) and orphans from rename gaps.
+    for (let li = 0; li < (_locDraft.landmarks ?? []).length; li++) {
+      const lm = _locDraft.landmarks[li];
+      if (lm?.iframeContext && !namesSeen.has(lm.iframeContext)) {
+        showLocaleWarning(`Landmark "${lm.accessibleName ?? lm.alias ?? li}" references iframe context "${lm.iframeContext}" which doesn't exist in this locale.`);
+        return;
+      }
+    }
+  }
+  // v2.74.275 — Save serialization, cleaned. Nested-tree sentinel
+  // removed. Two cases:
+  //   1. AND of leaves → flat array (implicit AND)
+  //   2. OR/NOT of leaves → tree { operator, children }
+  if (Array.isArray(_locDraft.predicates) && _locDraft.predicates.length > 0) {
+    if (_predicatesOperator === 'or' || _predicatesOperator === 'not') {
+      const children = _predicatesOperator === 'not'
+        ? _locDraft.predicates.slice(0, 1)
+        : _locDraft.predicates.slice();
+      _locDraft.predicates = { operator: _predicatesOperator, children };
+    }
+    // AND case: leave as flat array.
+  }
+
+  // v2.74.48 — Uniqueness check against existing locales on this
+  // Ground. Edit mode (same id) skips itself so the user can save
+  // unchanged. Names are compared case-insensitive even though input
+  // normalization forces lowercase — defensive.
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'LIST_LOCALES',
+      payload: { groundId: _locGroundId },
+    });
+    if (res?.success && Array.isArray(res.locales)) {
+      const lower = _locDraft.name.toLowerCase();
+      const clash = res.locales.find(l =>
+        l.id !== _locDraft.id && String(l.name ?? '').toLowerCase() === lower
+      );
+      if (clash) {
+        showLocaleWarning(`A locale named "${_locDraft.name}" already exists on this Ground. Pick a different name.`);
+        return;
+      }
+    }
+  } catch (e) {
+    // LIST_LOCALES failures are non-fatal — log and let save proceed.
+    // The user can retry if they hit a real duplicate; the storage
+    // layer will at worst overwrite a same-named record.
+    console.warn('[locale-capture] uniqueness check failed (continuing):', e?.message);
+  }
+  const unverified = _locDraft.landmarks.filter(lm => !lm.verified || lm.verified.matchedCount === 0);
+  if (unverified.length > 0) {
+    if (!confirm(`${unverified.length} landmark(s) are unverified or match 0 elements. Save anyway?`)) return;
+  }
+
+  // v2.74.121 — Mount-snapshot guard + Cancel disable during save.
+  // Same shape as assertion-author.js v2.74.120 / analysis-author.js
+  // v2.74.121. The reset-for-next-capture branch below makes this
+  // especially important: pre-fix, a Cancel-during-save would still
+  // complete the save, then proceed to reset the form for "another
+  // capture" — but the user has already left.
+  const mountSnapshot = _mountEl;
+  locSaveBtn.disabled = true;
+  if (locCancelBtn) locCancelBtn.disabled = true;
+  locSaveBtn.textContent = 'Saving…';
+  try {
+    // v2.74.240 — Phase 2 of substrate spec: write each landmark to
+    // the per-Ground registry, write the locale with landmarkRefs
+    // (no more embedded landmarks[]). Backward compat: locales that
+    // still carry embedded landmarks on load get migrated here
+    // (lazy migration on first save after upgrade).
+    //
+    // Save order:
+    //   1. Each landmark → registry (idempotent; same UID overwrites)
+    //   2. Locale → with landmarkRefs[] + landmarks[] removed
+    //
+    // Failure modes:
+    //   - A landmark write fails → abort the whole save (don't leave
+    //     half-migrated state).
+    //   - Last write wins for landmarks with shared UIDs across locales
+    //     (per spec: same UID = same landmark, intentionally one record).
+    const landmarkRefs = [];
+    for (const lm of _locDraft.landmarks) {
+      // Ensure a UID exists. Phase 1 derives at Pick time; legacy
+      // landmarks (saved pre-Phase 1) get a local UUID here.
+      if (!lm.uid) {
+        const localUid = 'lmk_local_' + (crypto.randomUUID
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+        lm.uid = localUid;
+        lm.isCanonical = false;
+      }
+      // Compose the registry record. Field set is the union of
+      // identity layer (Phase 1) + description (Wave 2) + realization
+      // (selector + verified). groundId comes from the locale.
+      const record = {
+        uid                 : lm.uid,
+        groundId            : _locGroundId,
+        isCanonical         : lm.isCanonical === true,
+        // v2.74.275 — Storage field renamed: role → alias.
+        alias               : lm.alias ?? '',
+        a11yRole            : lm.a11yRole ?? null,
+        accessibleName      : lm.accessibleName ?? null,
+        hierarchicalContext : lm.hierarchicalContext ?? null,
+        canonicalUrl        : lm.canonicalUrl ?? null,
+        derivationInputs    : lm.derivationInputs ?? null,
+        // Wave 2 author metadata
+        description         : lm.description ?? '',
+        aliases             : Array.isArray(lm.aliases) ? lm.aliases : [],
+        operationsCommon    : Array.isArray(lm.operationsCommon) ? lm.operationsCommon : [],
+        pitfalls            : Array.isArray(lm.pitfalls) ? lm.pitfalls : [],
+        expectedContent     : lm.expectedContent ?? null,
+        profileConfidence   : lm.profileConfidence ?? null,
+        // v2.74.305 — Phase 1 of ACTION_SPEC compliance. effect is
+        // the spec-aligned substrate-level annotation (object shape
+        // per § 5); interactionPattern is our DOM-level intel.
+        // Legacy actionEffect string no longer written — hydration
+        // migrates old records on load.
+        effect              : lm.effect ?? { kind: 'none' },
+        interactionPattern  : lm.interactionPattern ?? 'none',
+        // v2.74.309 — Phase 6: effect source metadata.
+        effectSource        : lm.effectSource ?? null,
+        // Realization
+        selector            : lm.selector ?? '',
+        frameUrl            : lm.frameUrl ?? null,
+        // v2.74.245 — Phase 7a: iframe binding via named context. The
+        // landmark references a context declared on its containing
+        // Locale (or any active Locale at resolution time). frameUrl
+        // is kept as a legacy fallback during the transition;
+        // future phase drops it once all consumers migrate.
+        iframeContext       : lm.iframeContext ?? null,
+        // Verified state (Wave 1) — carries score, capabilities, ops
+        verified            : lm.verified ?? null,
+        lifecycle           : lm.verified?.score === 'ready' ? 'verified' : 'fresh',
+      };
+      const saveRes = await chrome.runtime.sendMessage({
+        type: 'SAVE_LANDMARK',
+        payload: { landmark: record },
+      });
+      if (!saveRes?.success) {
+        throw new Error(`Failed to save landmark "${lm.alias || lm.accessibleName || lm.uid}": ${saveRes?.error ?? 'unknown'}`);
+      }
+      landmarkRefs.push(lm.uid);
+    }
+    // v2.74.336 — Phase C-lite: persist the LLM-proposed Layer 2 structure
+    // as `landmarks: LandmarkNode[]` when present AND it still covers exactly
+    // the picked landmarks (coverage safety net on top of pick/remove
+    // invalidation). Otherwise drop it → StorageManager derives flat nodes
+    // from landmarkRefs.
+    let structuredNodes = null;
+    if (Array.isArray(_locDraft.structuredLandmarks) && _locDraft.structuredLandmarks.length) {
+      const flat = new Set(flattenLandmarkNodes(_locDraft.structuredLandmarks));
+      if (flat.size === landmarkRefs.length && landmarkRefs.every(u => flat.has(u))) {
+        structuredNodes = _locDraft.structuredLandmarks;
+      }
+    }
+    // Build the locale payload — refs + (optional) structured nodes. Drop the
+    // hydrated landmarks[] / draft-only fields so reads don't pick up copies.
+    const localeForSave = {
+      ..._locDraft,
+      landmarkRefs,
+      landmarks: structuredNodes ?? undefined,
+    };
+    if (!localeForSave.landmarks) delete localeForSave.landmarks;
+    delete localeForSave.structuredLandmarks;   // draft-only
+    if (!structuredNodes) {
+      // No (valid) structure → don't persist stale overlays either.
+      delete localeForSave.groupings;
+      delete localeForSave.sequences;
+    }
+
+    const res = await chrome.runtime.sendMessage({
+      type: 'SAVE_LOCALE',
+      payload: { locale: localeForSave },
+    });
+    if (mountSnapshot !== _mountEl) return;
+    if (!res?.success) {
+      showLocaleWarning(`Save failed: ${res?.error ?? 'unknown'}`);
+      locSaveBtn.disabled = false;
+      if (locCancelBtn) locCancelBtn.disabled = false;
+      locSaveBtn.textContent = 'Save Locale';
+      return;
+    }
+    const savedName = _locDraft.name;
+    toast(`✓ Locale "${savedName}" saved`, 'ok');
+    // v2.74.33 — When launched from the Ground sidepanel, save → return
+    // rather than resetting to capture another locale.
+    // v2.74.34 — Capture the routing decision BEFORE sending
+    // CANCEL_LOCALE_CAPTURE: that handler clears the sidepanel mode,
+    // which unmounts this module and zeroes _locReturnTo.
+    if (_locReturnTo === 'ground-view') {
+      const returnTo = _locReturnTo;
+      // Clean up the pending capture session in the background before
+      // switching mode so we don't leave a half-finished capture entry.
+      try { await chrome.runtime.sendMessage({ type: 'CANCEL_LOCALE_CAPTURE' }); } catch {}
+      _routeExit(returnTo);
+      return;
+    }
+    _locDraft = newEmptyLocaleDraft(_locGroundId);
+    locNameInput.value = '';
+    locDescriptionInput.value = '';
+    refreshLocaleActiveTab();
+    renderLocaleLandmarks();
+    updateLocaleSaveButtonState();
+    locSaveBtn.textContent = 'Save Locale';
+    locSaveBtn.disabled = true;
+  } catch (e) {
+    // v2.74.121 — Same guard on the throw path.
+    if (mountSnapshot !== _mountEl) return;
+    showLocaleWarning(`Save threw: ${e.message}`);
+    locSaveBtn.disabled = false;
+    if (locCancelBtn) locCancelBtn.disabled = false;
+    locSaveBtn.textContent = 'Save Locale';
+  }
+}
+
+async function cancelLocaleCapture() {
+  // v2.74.34 — Capture the routing decision BEFORE the cleanup. The
+  // CANCEL_LOCALE_CAPTURE handler in background calls
+  // __setSidepanelMode(null) which triggers the shell to unmount this
+  // mode — which clears _locReturnTo to null. Reading the field after
+  // that point would always fall through to exitToStudio.
+  const returnTo = _locReturnTo;
+  if (_locPickerSession) await cancelLocalePick(true);
+  // Server-side cleanup: clear the pending capture session in background.
+  // This also clears the sidepanel mode (CANCEL_LOCALE_CAPTURE handler
+  // calls __setSidepanelMode(null) when the active mode is locale-capture),
+  // but we follow up with the appropriate exit (Studio or Ground sidepanel)
+  // anyway per the unified cancel UX (v2.72.54).
+  try {
+    await chrome.runtime.sendMessage({ type: 'CANCEL_LOCALE_CAPTURE' });
+  } catch { /* fine */ }
+  _routeExit(returnTo);
+}
+
+// v2.74.33 — Route the exit. When launched from the Ground sidepanel
+// (returnTo='ground-view'), switch the panel back to that mode instead
+// of dismissing it and focusing Studio. v2.74.34 — Takes returnTo as an
+// argument so callers capture it before any cleanup that may unmount
+// this mode (and reset the module-level _locReturnTo to null).
+// v2.74.36 — Clear the per-tab sidepanel mode record on exit so a
+// future visit to this tab doesn't auto-resume the finished session.
+function _routeExit(returnTo) {
+  if (typeof _locTabId === 'number') {
+    chrome.runtime.sendMessage({
+      type: 'CLEAR_TAB_SIDEPANEL_MODE',
+      payload: { tabId: _locTabId },
+    }).catch(() => {});
+  }
+  if (returnTo === 'ground-view') {
+    requestModeChange('ground-view', {});
+  } else {
+    exitToStudio();
+  }
+}
+
+// ─── Module export ───────────────────────────────────────────────────────
+
+export default {
+  name: 'locale-capture',
+  mount,
+  unmount,
+  handleEvent,
+};

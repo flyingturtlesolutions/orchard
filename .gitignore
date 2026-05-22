@@ -1,0 +1,19 @@
+# Google Drive sync scratch dirs (this folder is Drive-synced)
+.tmp.drivedownload/
+.tmp.driveupload/
+
+# Stray / temp scripts + scratch
+.tmp*
+__*.mjs
+__*.cjs
+
+# Claude Code local state (memory, session projects) — user-specific
+.claude/
+
+# Dependencies (if ever added)
+node_modules/
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini

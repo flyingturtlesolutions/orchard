@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>AHuB offscreen — clipboard</title>
+</head>
+<body>
+  <!--
+    v2.74.220 — Offscreen document for clipboard reads. Created on
+    demand by background.js when a click_copy extract needs to call
+    navigator.clipboard.readText() — content scripts and the side
+    panel can't reliably do this themselves because their documents
+    don't always have OS focus (notably during sidepanel-initiated
+    verify, where the side panel is focused but its document context
+    can't satisfy the focus check Chrome puts on Clipboard.readText).
+
+    Offscreen documents created with reasons:['CLIPBOARD'] bypass the
+    focus requirement. They run an isolated DOM in the service-worker
+    context, registered solely to read/write the system clipboard.
+  -->
+  <script src="offscreen.js" type="module"></script>
+</body>
+</html>

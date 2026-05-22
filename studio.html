@@ -1,0 +1,955 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AHuB — Studio</title>
+  <link rel="stylesheet" href="assets/sidepanel.css" />
+  <link rel="stylesheet" href="assets/studio.css" />
+</head>
+<body class="studio-body">
+
+  <!-- v2.72.2 (Pass 3c.0) — Live picker banner.
+       Shown when picker is armed/active. Tells the user to switch to
+       their target tab. Includes a Cancel button. Position fixed at
+       top of viewport so it's visible regardless of scroll position. -->
+  <div class="picker-banner hidden" id="picker-banner">
+    <span class="picker-banner-pulse"></span>
+    <span class="picker-banner-text" id="picker-banner-text">Pick mode armed — switch to your target tab and click an element.</span>
+    <button class="btn-secondary tiny" id="btn-cancel-pick" type="button">Cancel (Esc)</button>
+  </div>
+
+  <!-- ── Header ── -->
+  <header class="app-header">
+    <div class="app-logo">
+      <span class="logo-mark">◈</span>
+      <span class="logo-text">AHuB</span>
+      <span class="logo-mode">Studio</span>
+      <button class="mode-switch" id="btn-open-chat" title="Open chat sidepanel">
+        <span class="mode-switch-label">Chat</span>
+        <span class="mode-switch-arrow">→</span>
+      </button>
+    </div>
+    <nav class="tab-nav">
+      <button class="tab-btn active" data-tab="workflows">Workflows</button>
+      <button class="tab-btn"        data-tab="grounds">Ground</button>
+      <button class="tab-btn"        data-tab="logs">Logs</button>
+      <button class="tab-btn"        data-tab="prompts">Docs</button>
+      <button class="tab-btn"        data-tab="settings">Settings</button>
+    </nav>
+  </header>
+
+  <!-- ── Tab: Workflows (v2.74.142) ──────────────────────────────────────────
+       Top-level entity authoring + cross-Ground Strategy catalog. The tab
+       hosts the Workflow form (a Workflow composes Strategies + Analyses
+       across any Grounds) and a secondary catalog view of every Strategy
+       across every Ground (handy for cross-cutting search/filter).
+
+       Storage names: Workflows persist under kind=`workflow`, Strategies
+       under kind=`strategy`. UI labels match storage 1:1 since v2.74.142
+       (the earlier inversion from v2.74.71 is reverted). -->
+  <section class="tab-panel active" id="tab-workflows">
+    <div class="section-header">
+      <h2>Workflows</h2>
+      <button class="btn-icon" id="btn-add-workflow" title="Create a new Workflow">+</button>
+    </div>
+
+    <!-- Workflow form (inline, hidden until + Workflow / Edit). Workflows
+         are top-level — no parent Ground. They orchestrate one or more
+         Strategies (each Strategy is Ground-scoped) plus Analyses, with
+         param bindings between them. -->
+    <div class="card form-card hidden" id="workflow-form-card">
+      <h3 id="workflow-form-title">New Workflow</h3>
+
+      <label>Name
+        <input type="text" id="input-workflow-name" placeholder="e.g. Weekly sales report" maxlength="120" />
+      </label>
+
+      <label>Description <span class="optional">(optional)</span>
+        <textarea id="input-workflow-description" rows="3"
+                  placeholder="What does this Workflow accomplish? Which Strategies will it orchestrate?"
+                  maxlength="600"></textarea>
+        <span class="field-hint">Short prose. The composition body (which Strategies run, in what order, with which inputs) is authored separately.</span>
+      </label>
+
+      <!-- Aliases feed the chat routing LLM. A Workflow named
+           "summarize-jobs" matches more reliably for "summarize my recent
+           applications" when the aliases include phrases like "job
+           summary", "recent applications", etc. Comma-separated. -->
+      <label>Aliases <span class="optional">(optional)</span>
+        <input type="text" id="input-workflow-aliases" maxlength="280"
+               placeholder="e.g. job summary, recent applications, daily digest" />
+        <span class="field-hint">Comma-separated trigger phrases used by chat routing. The Workflow's name and description are searched too; aliases help disambiguate.</span>
+      </label>
+
+      <!-- Result template. Same {{NAME}} substitution chat already does
+           for Strategy results. Workflow scope flows out as
+           extractedValues; this template renders them into a single chat
+           headline when present. Empty → chat shows the default scope-
+           binding rows. -->
+      <label>Result template <span class="optional">(optional)</span>
+        <input type="text" id="input-workflow-result-template" maxlength="280"
+               placeholder="e.g. Found {{COUNT}} jobs, top salary {{TOP_SALARY}}" />
+        <span class="field-hint">Headline shown in chat when this Workflow completes. Use <code>{{NAME}}</code> to substitute scope bindings written by the Workflow's steps (Strategy outputs, Analysis results).</span>
+      </label>
+
+      <!-- Typed inputs editor. Workflows are the invocation surface, so
+           this is where authors declare the file uploads, numbers,
+           booleans, and string defaults the user (or chat) will be
+           prompted for at run time. Workflow bodies are composition
+           steps, not reference expressions over inputs — every entry is
+           user-declared. -->
+      <div class="strategy-inputs-card" id="workflow-inputs-card">
+        <div class="strategy-inputs-head">
+          <span class="strategy-inputs-label">Typed inputs</span>
+          <span class="strategy-inputs-hint">Inputs collected at run time. Declare file uploads, numbers, booleans, or string defaults. The composition layer routes these to the Strategies the Workflow orchestrates.</span>
+        </div>
+        <div class="strategy-inputs-list" id="workflow-inputs-list"></div>
+        <div class="strategy-inputs-add-row">
+          <button class="btn-secondary tiny" id="btn-add-workflow-input" type="button">+ Add typed input</button>
+        </div>
+      </div>
+
+      <!-- Workflow step body. Workflows compose:
+             • Strategy invocations (the T1 fragment-tree primitives)
+             • Analysis invocations (data transforms over scope bindings)
+             • Control flow: FOREACH / WAIT / DETECT / LOOP / TRY / PAUSE
+                 mirrored from the Strategy form's control set
+           No fragment/observation step types — those primitives live one
+           tier down, inside Strategies.
+           Each step renders as a read-only card; complex field editing
+           (param bindings, FOREACH bodies, DETECT branch conditions)
+           lives in the JSON modal until inline editors land. -->
+      <div class="strategy-steps-section" id="workflow-steps-section">
+        <div class="strategy-steps-head">
+          <span class="strategy-steps-label">Steps</span>
+          <span class="strategy-steps-hint">What this Workflow runs. Strategies and Analyses are the leaf invocations; the rest are control flow over their results.</span>
+        </div>
+        <div class="strategy-steps-list" id="workflow-steps-list"></div>
+        <div class="strategy-steps-add-row">
+          <button class="btn-secondary tiny" id="btn-add-strategy-workflow"  type="button" title="Invoke a Strategy as a step">+ Add Strategy</button>
+          <button class="btn-secondary tiny" id="btn-add-strategy-analysis"  type="button" title="Invoke an Analysis as a step">+ Add Analysis</button>
+          <button class="btn-secondary tiny" id="btn-add-strategy-foreach2"  type="button" title="Add a FOREACH node that iterates a list binding — each body step runs once per item">+ Add FOREACH</button>
+          <button class="btn-secondary tiny" id="btn-add-strategy-wait2"     type="button" title="Add a WAIT node — pause for a duration or until a binding condition holds">+ Add WAIT</button>
+          <button class="btn-secondary tiny" id="btn-add-strategy-detect2"   type="button" title="Add a DETECT node — branch based on scope binding conditions">+ Add DETECT</button>
+          <button class="btn-secondary tiny" id="btn-add-strategy-loop2"     type="button" title="Add a LOOP node — repeat a body while a condition holds">+ Add LOOP</button>
+          <button class="btn-secondary tiny" id="btn-add-strategy-try2"      type="button" title="Add a TRY node — run a body, fall back to a recovery body on failure">+ Add TRY</button>
+          <button class="btn-secondary tiny" id="btn-add-strategy-pause2"    type="button" title="Add a PAUSE node — halt the Workflow until the user clicks Resume">+ Add PAUSE</button>
+        </div>
+      </div>
+
+      <div class="form-actions">
+        <button class="btn-secondary" id="btn-cancel-workflow">Cancel</button>
+        <button class="btn-primary"   id="btn-save-workflow">Save</button>
+      </div>
+    </div>
+
+    <!-- Workflows section (the top-level orchestrating entity). -->
+    <div class="workflows-section">
+      <div class="workflows-section-head">
+        <span class="workflows-section-label">Workflows</span>
+        <span class="workflows-section-hint">Top-level orchestrations. Compose one or more Strategies (across any Grounds).</span>
+      </div>
+      <div class="workflows-entity-list" id="workflows-entity-list">
+        <div class="workflows-empty">Loading…</div>
+      </div>
+    </div>
+
+    <!-- Strategy catalog (derived view across all Grounds; kept here as a
+         secondary section so authors still have the cross-Ground overview). -->
+    <div class="workflows-section">
+      <div class="workflows-section-head">
+        <span class="workflows-section-label">Strategies on Grounds</span>
+        <span class="workflows-section-hint">Every Strategy across every Ground — the building blocks Workflows compose.</span>
+      </div>
+
+      <div class="workflows-toolbar">
+        <input type="search" class="workflows-search" id="workflows-search"
+               placeholder="Search by name, goal, or alias…" />
+        <select class="workflows-filter-ground" id="workflows-filter-ground">
+          <option value="">All Grounds</option>
+        </select>
+        <select class="workflows-filter-tier" id="workflows-filter-tier">
+          <option value="">All tiers</option>
+          <option value="cache">T1 — Hand-authored</option>
+          <option value="frontier">T3 — Composer-based</option>
+        </select>
+        <span class="workflows-count" id="workflows-count"></span>
+      </div>
+
+      <div class="workflows-list" id="workflows-list">
+        <div class="workflows-empty">Loading…</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Tab: Ground ── -->
+  <section class="tab-panel hidden" id="tab-grounds">
+    <div class="section-header">
+      <h2>Ground</h2>
+      <button class="btn-icon" id="btn-add-ground" title="Add ground">+</button>
+    </div>
+
+    <div class="card form-card hidden" id="ground-form-card">
+      <h3 id="ground-form-title">New Ground</h3>
+
+      <label>URL pattern
+        <input type="text" id="input-url" placeholder="https://example.com/*" />
+        <span class="field-hint">Glob pattern (matched spec-strict). <code>/*</code> = all pages on the site; <code>*.site.com/*</code> = include subdomains. A bare URL matches only that exact page.</span>
+      </label>
+
+      <label>Name
+        <input type="text" id="input-ground-name" placeholder="e.g. HubSpot, UPS, GitHub" maxlength="80" />
+      </label>
+
+      <label>Aliases
+        <input type="text" id="input-ground-aliases" placeholder="e.g. HS, Hub, *.hubspot.com" maxlength="200" />
+        <span class="field-hint">Comma-separated — other names or domain patterns for this Ground</span>
+      </label>
+
+      <div class="form-actions">
+        <button class="btn-secondary" id="btn-cancel-ground">Cancel</button>
+        <button class="btn-primary"   id="btn-save-ground">Save</button>
+      </div>
+    </div>
+
+    <!-- v2.74.22 — Fragment form removed. + Fragment opens the sidepanel
+         fragment-author mode directly (mirroring + Observation); the
+         antecedent picker + Run button live in the sidepanel. AI-walked
+         (T3 frontier) authoring path was eliminated; T1 cache is the
+         only path. -->
+
+
+    <!-- Strategy form — opens when "+ Strategy" is clicked on a Ground row.
+         Strategies are Ground-scoped Fragment trees (the deterministic
+         T1 building blocks Workflows compose). -->
+    <div class="card form-card hidden" id="strategy-form-card">
+      <h3 id="strategy-form-title">New Strategy</h3>
+      <p class="field-hint" id="strategy-form-ground-label">on Ground: …</p>
+
+      <label>Name
+        <input type="text" id="input-strategy-name" maxlength="80"
+               placeholder="e.g. Search Jobs" />
+        <span class="field-hint">Short name used in chat and the Strategy library</span>
+      </label>
+
+      <label>Goal
+        <textarea id="input-strategy-goal" rows="2" maxlength="280"
+                  placeholder="e.g. Search for jobs by role and location, applying recent-only filter"></textarea>
+        <span class="field-hint">Describes what the Strategy accomplishes — used by chat routing to decide which Strategy matches a user's question</span>
+      </label>
+
+      <label>Aliases <span class="optional">(optional)</span>
+        <input type="text" id="input-strategy-aliases" maxlength="200"
+               placeholder="e.g. find jobs, job search, search listings" />
+        <span class="field-hint">Comma-separated alternate phrasings that should route here</span>
+      </label>
+
+      <!-- Optional template for the chat result message. Substitutes
+           {{NAME}} with values from the final Strategy scope (input
+           params + EXTRACT values + OBSERVATION outputs). When empty,
+           chat shows the default key-value rows. -->
+      <label>Result template <span class="optional">(optional)</span>
+        <input type="text" id="input-strategy-result-template" maxlength="280"
+               placeholder="e.g. Found {{COUNT}} jobs starting at {{TOP_SALARY}}" />
+        <span class="field-hint">Template shown in chat when the Strategy completes. Use <code>{{NAME}}</code> to substitute Strategy params, OBSERVATION outputs, or EXTRACT values.</span>
+      </label>
+
+      <!-- Live preview of strategy-level params derived from bindings -->
+      <div class="strategy-params-preview hidden" id="strategy-params-preview"></div>
+
+      <!-- Typed inputs editor lives on the parent Workflow form (the
+           invocation surface). Strategies inherit their params via the
+           Workflow composition layer (not yet shipped). Existing
+           Strategy records with typed params keep working at runtime —
+           they're just no longer editable here. Edit the parent
+           Workflow's typed inputs instead. -->
+
+      <!-- Strategy tier picker. Strategies grow an implementations
+           envelope; T1 (cache) is the deterministic fragment tree;
+           T3 (frontier) is composer-based. Gating shown when no tier
+           picked yet (new strategies); indicator shown when tier is
+           set. Tier cannot be changed after save — delete and recreate
+           to switch. -->
+      <div class="analysis-tier-gating hidden" id="strategy-tier-gating">
+        <h4 class="analysis-tier-gating-title">What kind of Strategy?</h4>
+        <p class="field-hint">This determines how the body runs. The contract (preconditions, postconditions, params, result template) is the same either way.</p>
+        <div class="analysis-tier-choices">
+          <button class="analysis-tier-choice" id="btn-strategy-tier-cache" type="button">
+            <span class="analysis-tier-choice-title">Hand-authored</span>
+            <span class="analysis-tier-choice-tier">Cache (T1)</span>
+            <span class="analysis-tier-choice-desc">Fragment-step tree authored by you. Deterministic, fast. The current Strategy form. Use for known flows.</span>
+          </button>
+          <button class="analysis-tier-choice" id="btn-strategy-tier-frontier" type="button">
+            <span class="analysis-tier-choice-title">Composer-based</span>
+            <span class="analysis-tier-choice-tier">Frontier (T3)</span>
+            <span class="analysis-tier-choice-desc">Frontier model composes a Strategy from primitives at runtime, given the goal + contract. Real per-call cost. Best for novel goals or when no T1 Strategy exists. <strong>Composer ships in a future pass — T3 Strategies cannot run yet.</strong></span>
+          </button>
+        </div>
+      </div>
+
+      <div class="analysis-tier-indicator hidden" id="strategy-tier-indicator">
+        <span class="analysis-tier-indicator-label">Tier:</span>
+        <span class="analysis-tier-indicator-value" id="strategy-tier-indicator-value">—</span>
+        <span class="field-hint">tier cannot be changed; delete and recreate to switch</span>
+      </div>
+
+      <!-- Dynamic fragment-step list. Hidden in T3 mode (frontier tier
+           has no authored steps; the model composes at runtime). -->
+      <div class="strategy-steps-section" id="strategy-steps-section">
+        <div class="strategy-steps-head">
+          <span class="strategy-steps-label">Fragment steps</span>
+          <span class="strategy-steps-hint">Fragments run in order on a shared tab. Wrap in FOREACH to iterate over a list.</span>
+        </div>
+        <div class="strategy-steps-list" id="strategy-steps-list"></div>
+        <div class="strategy-steps-add-row">
+          <button class="btn-secondary tiny" id="btn-add-strategy-step">+ Add fragment step</button>
+          <button class="btn-secondary tiny" id="btn-add-strategy-foreach" title="Add a FOREACH node that iterates a list binding — each body step runs once per item">+ Add FOREACH</button>
+          <button class="btn-secondary tiny" id="btn-add-strategy-wait" title="Add a WAIT node — pause for a duration or until a condition holds">+ Add WAIT</button>
+          <button class="btn-secondary tiny" id="btn-add-strategy-pause" title="Add a PAUSE node — halt the Strategy until the user clicks Resume in the debugger (for human intervention)">+ Add PAUSE</button>
+          <button class="btn-secondary tiny" id="btn-add-strategy-sieve" title="Add a SIEVE node — narrow a captured list (filter / sort / take) before iterating it">+ Add SIEVE</button>
+          <button class="btn-secondary tiny" id="btn-add-strategy-detect" title="Add a DETECT node — branch based on page conditions">+ Add DETECT</button>
+          <button class="btn-secondary tiny" id="btn-add-strategy-loop" title="Add a LOOP node — repeat a body while a condition holds (pagination, retries)">+ Add LOOP</button>
+          <button class="btn-secondary tiny" id="btn-add-strategy-try" title="Add a TRY node — run a body, and if it fails run a recovery body (empty recovery = swallow failure)">+ Add TRY</button>
+          <button class="btn-secondary tiny" id="btn-add-strategy-navigate" title="Add a NAVIGATE node — go to URL, back, or reload the tab">+ Add NAVIGATE</button>
+          <button class="btn-secondary tiny" id="btn-add-strategy-scroll" title="Add a SCROLL node — smooth-scroll the window by N viewports (signed). Use inside LOOP for infinite-feed patterns.">+ Add SCROLL</button>
+          <button class="btn-secondary tiny" id="btn-add-strategy-observation" title="Add an OBSERVATION node — read page state into named scope bindings (page → data primitive)">+ Add OBSERVATION</button>
+          <button class="btn-secondary tiny" id="btn-add-strategy-in-new-tab" title="Add an IN_NEW_TAB node — run a trigger (e.g. CLICK Apply) that opens a new tab, then run body on that tab">+ Add IN_NEW_TAB</button>
+        </div>
+      </div>
+
+      <!-- Strategy preconditions and postconditions. Both can mix
+           page-family (URL, selector_present) and scope-family
+           (binding_is_*, scalar_*) conditions. Pre evaluated at Strategy
+           entry against the live page + initial scope (seeded from
+           params); post evaluated at Strategy exit against final page +
+           final scope. Sections collapse when empty; expand on click. -->
+      <details class="analysis-conditions-section" id="strategy-pre-section">
+        <summary>
+          <span class="analysis-conditions-label">Preconditions</span>
+          <span class="analysis-conditions-count" id="strategy-pre-count">0</span>
+          <span class="field-hint">checked at Strategy entry against page + initial scope</span>
+        </summary>
+        <div class="analysis-conditions-body" id="strategy-pre-list"></div>
+        <button class="btn-secondary tiny" id="btn-add-strategy-pre">+ Precondition</button>
+      </details>
+
+      <details class="analysis-conditions-section" id="strategy-post-section">
+        <summary>
+          <span class="analysis-conditions-label">Postconditions</span>
+          <span class="analysis-conditions-count" id="strategy-post-count">0</span>
+          <span class="field-hint">checked at Strategy exit against final page + final scope</span>
+        </summary>
+        <div class="analysis-conditions-body" id="strategy-post-list"></div>
+        <button class="btn-secondary tiny" id="btn-add-strategy-post">+ Postcondition</button>
+      </details>
+
+      <!-- Results section. Declares which of the Strategy's internal
+           scope bindings get promoted to the parent Workflow's context
+           when the Strategy completes. When this list is empty, the
+           runtime keeps the historical "promote everything" behavior
+           for back-compat; when non-empty, ONLY the declared names flow
+           up to the Workflow scope.
+           v2.74.160 — Each row is now a `<select>` dropdown populated
+           from the body's actual producers (OBSERVATION extracts, SIEVE
+           outputs, Analysis outputs). Free-text + datalist was retired:
+           too permissive (typed names that didn't exist) and visually
+           inconsistent across browsers. The datalist element is gone. -->
+      <details class="analysis-conditions-section" id="strategy-outputs-section">
+        <summary>
+          <span class="analysis-conditions-label">Results</span>
+          <span class="analysis-conditions-count" id="strategy-outputs-count">0</span>
+          <span class="field-hint">scope bindings promoted to the parent Workflow when this Strategy completes</span>
+        </summary>
+        <div class="analysis-conditions-body" id="strategy-outputs-list"></div>
+        <button class="btn-secondary tiny" id="btn-add-strategy-output">+ Result</button>
+      </details>
+
+      <!-- composition warnings (missing/out-of-order antecedents) -->
+      <div class="strategy-warnings hidden" id="strategy-warnings"></div>
+
+      <div class="form-actions">
+        <button class="btn-secondary" id="btn-cancel-strategy">Cancel</button>
+        <button class="btn-primary"   id="btn-save-strategy">Save Strategy</button>
+      </div>
+    </div>
+
+    <!-- v2.42.0 (Pass M2) — Assertion form. Used for both create + edit. -->
+    <div class="card form-card hidden" id="assertion-form-card">
+      <h3 id="assertion-form-title">New Assertion</h3>
+      <p class="field-hint" id="assertion-form-ground-label">on Ground: …</p>
+
+      <label>Name
+        <input type="text" id="input-assertion-name" maxlength="80"
+               placeholder="e.g. is-captcha-page, has-results, login-expired" />
+      </label>
+
+      <label>Description
+        <textarea id="input-assertion-description" rows="2" maxlength="280"
+                  placeholder="When does this assertion hold? What does it tell you about page or scope state?"></textarea>
+        <span class="field-hint">A short description of what the assertion asserts. Optional for hand-authoring; required if you click <em>Generate</em> below.</span>
+      </label>
+
+      <!-- v2.72.28 (Pass 16) — Generate-from-description panel. Assertions
+           are vocabulary; this panel provides a model-authoring affordance
+           that produces a {match, conditions} body from the description.
+           After generation, the proposed body fills the conditions list
+           below for review/edit before save. -->
+      <details class="assertion-generate-section" id="assertion-generate-section">
+        <summary>
+          <span class="assertion-generate-label">⚡ Generate from description</span>
+          <span class="field-hint">Have a model author the conditions for you</span>
+        </summary>
+        <div class="assertion-generate-body">
+          <label>Vocabulary
+            <select id="input-assertion-generate-family">
+              <option value="mixed">Mixed (page + scope conditions)</option>
+              <option value="page">Page only (selectors, URL, text)</option>
+              <option value="scope">Scope only (binding shape, record fields)</option>
+            </select>
+            <span class="field-hint">Constrains which condition vocabulary the model is allowed to use.</span>
+          </label>
+          <button class="btn-secondary" id="btn-assertion-generate" type="button">⚡ Generate</button>
+          <div class="assertion-generate-status" id="assertion-generate-status"></div>
+          <p class="field-hint">After generation, review the proposed conditions below. Edit any field or click Generate again to refine. The assertion is saved as a regular library artifact — it doesn't invoke the model at runtime.</p>
+        </div>
+      </details>
+
+      <label>Match mode
+        <select id="input-assertion-match">
+          <option value="all">all conditions must hold (AND)</option>
+          <option value="any">any condition holds (OR)</option>
+          <option value="k_of_n">at least K conditions must hold (K of N)</option>
+        </select>
+      </label>
+
+      <label id="input-assertion-count-row" class="hidden">Count (K)
+        <input type="number" id="input-assertion-count" min="1" value="1" />
+        <span class="field-hint">Assertion is satisfied when at least this many conditions hold.</span>
+      </label>
+
+      <div class="assertion-conditions-section">
+        <div class="assertion-conditions-head">
+          <span class="assertion-conditions-label">Conditions</span>
+          <button class="btn-secondary tiny" id="btn-add-assertion-condition">+ Add condition</button>
+        </div>
+        <div id="assertion-conditions-list" class="assertion-conditions-list"></div>
+      </div>
+
+      <!-- v2.72.47 (Pass 18) — Live-DOM verify. Probes the active tab in the
+           user's last-focused window. Page-family conditions (selector_present,
+           url_matches, etc.) get checked against the live DOM. Scope-family
+           conditions (binding_*, every_record_*) skip — they need a runtime
+           scope. Reference-family conditions (assertion_ref, locale_ref) skip
+           in v1; recursion lands later.
+
+           Status is ephemeral — not stored on the assertion. Stale state
+           clears on condition edit and on active-tab change. -->
+      <div class="assertion-verify-section" id="assertion-verify-section">
+        <div class="assertion-verify-head">
+          <button class="btn-secondary" id="btn-assertion-verify" type="button">▶ Verify on active tab</button>
+          <span class="assertion-verify-tab-info" id="assertion-verify-tab-info">No active tab</span>
+        </div>
+        <div class="assertion-verify-result hidden" id="assertion-verify-result"></div>
+      </div>
+
+      <div class="form-actions">
+        <button class="btn-secondary" id="btn-cancel-assertion">Cancel</button>
+        <button class="btn-primary"   id="btn-save-assertion">Save Assertion</button>
+      </div>
+    </div>
+
+    <!-- v2.72.29 (Pass 17) — Locale form. Used for both create + edit.
+         Locales are vocabulary (saved expressions referenced by primitive
+         contracts), specifically: verified DOM landmark records. They
+         capture "this kind of page exists; here are its structural
+         elements." Authored once with live DOM verification per landmark;
+         re-verifiable to detect drift.
+
+         Authoring flow:
+           1. Fill name + description + URL pattern.
+           2. Click "Capture page state" — system finds or opens a tab
+              matching the pattern and captures DOM snapshot.
+           3. Add landmarks. Each landmark: role name + CSS selector +
+              "Verify" button → reports match count and sample HTML.
+           4. Save when all landmarks verified. -->
+    <!-- v2.72.51 (Stage 2) — Locale form removed. Locale authoring lives
+         in the sidepanel locale-capture mode (Sidepanel/modes/locale-capture.js).
+         The Ground card's "+ Locale" button calls launchLocaleCapture()
+         which opens sidepanel.html and sends BEGIN_LOCALE_CAPTURE; the
+         shell mounts the locale-capture mode where authoring happens. -->
+
+    <!-- v2.62.0 — Analysis form. Iteration A: minimal editor. Operations
+         are authored as JSON; full GUI builder lands in a later iteration.
+         Params are auto-detected from {{NAME}} placeholders in operations. -->
+    <div class="card form-card hidden" id="analysis-form-card">
+      <h3 id="analysis-form-title">New Analysis</h3>
+      <p class="field-hint" id="analysis-form-ground-label">on Ground: …</p>
+
+      <!-- v2.68.0 (Pass 3c) — Tier gating. Visible on new Analyses until
+           the user picks a tier. Hidden on edit (tier is already set). -->
+      <div class="analysis-tier-gating hidden" id="analysis-tier-gating">
+        <h4 class="analysis-tier-gating-title">What kind of Analysis?</h4>
+        <p class="field-hint">This determines how the body runs. The contract (preconditions, postconditions) and runtime parameters are the same either way.</p>
+        <div class="analysis-tier-choices">
+          <button class="analysis-tier-choice" id="btn-tier-cache" type="button">
+            <span class="analysis-tier-choice-title">Rule-based</span>
+            <span class="analysis-tier-choice-tier">Cache (T1)</span>
+            <span class="analysis-tier-choice-desc">Deterministic operations: filter, sort, take. Free, instant. Best for predictable transformations.</span>
+          </button>
+          <button class="analysis-tier-choice" id="btn-tier-frontier" type="button">
+            <span class="analysis-tier-choice-title">Model-based</span>
+            <span class="analysis-tier-choice-tier">Frontier (T3)</span>
+            <span class="analysis-tier-choice-desc">Frontier model invocation. Real per-call cost, seconds of latency. Best for judgment, classification, semantic matching.</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- v2.68.0 — Tier indicator. Visible after tier is chosen (new
+           Analyses) or when editing existing Analyses. Read-only — to
+           change tier, delete and recreate. -->
+      <div class="analysis-tier-indicator hidden" id="analysis-tier-indicator">
+        <span class="analysis-tier-indicator-label">Tier:</span>
+        <span class="analysis-tier-indicator-value" id="analysis-tier-indicator-value">—</span>
+        <span class="field-hint">tier cannot be changed; delete and recreate to switch</span>
+      </div>
+
+      <!-- v2.72.18 (Pass 7b) — Body-kind sub-gating. Visible when tier is
+           cache and body kind hasn't been picked yet. Hidden on edit (kind
+           already set) and for frontier tier (no body kinds for frontier
+           in this build). -->
+      <div class="analysis-body-kind-gating hidden" id="analysis-body-kind-gating">
+        <h4 class="analysis-tier-gating-title">What kind of body?</h4>
+        <p class="field-hint">Cache-tier Analyses can have one of two body shapes. The contract (preconditions, postconditions) and runtime params are the same either way.</p>
+        <div class="analysis-tier-choices">
+          <button class="analysis-tier-choice" id="btn-body-kind-operations" type="button">
+            <span class="analysis-tier-choice-title">Operations pipeline</span>
+            <span class="analysis-tier-choice-tier">Filter / sort / take</span>
+            <span class="analysis-tier-choice-desc">Reduces a source list through a pipeline of operations. Output is a list. The original cache-tier shape — best for narrowing or ranking records.</span>
+          </button>
+          <button class="analysis-tier-choice" id="btn-body-kind-template" type="button">
+            <span class="analysis-tier-choice-title">Template composer</span>
+            <span class="analysis-tier-choice-tier">Mustache-lite</span>
+            <span class="analysis-tier-choice-desc">Renders a markdown template by fanning in named scope bindings (sections, images, lists, scalars). Output is a document. Best for composing reports, summaries, or any text artifact from upstream observations.</span>
+          </button>
+          <!-- v2.74.133 — Transform body kind. Named inputs → chain of value ops
+               → named outputs. JSON-textarea authoring for v1; structured per-op
+               editor lands in a follow-up. -->
+          <button class="analysis-tier-choice" id="btn-body-kind-transform" type="button">
+            <span class="analysis-tier-choice-title">Transform pipeline</span>
+            <span class="analysis-tier-choice-tier">Named bindings</span>
+            <span class="analysis-tier-choice-desc">Multi-input, multi-output value pipeline. Declared inputs flow through a chain of ops (replace, …) and produce declared outputs. Best for value-level transformations like string normalization or extracting derived fields.</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Body-kind indicator. Visible after kind is chosen. Read-only —
+           to change kind, delete and recreate. -->
+      <div class="analysis-body-kind-indicator hidden" id="analysis-body-kind-indicator">
+        <span class="analysis-tier-indicator-label">Body kind:</span>
+        <span class="analysis-tier-indicator-value" id="analysis-body-kind-indicator-value">—</span>
+        <span class="field-hint">body kind cannot be changed; delete and recreate to switch</span>
+      </div>
+
+      <!-- Tier-aware fields below. The renderAnalysisFormForTier JS
+           function controls which cache-only fields render visible. -->
+
+      <label>Name
+        <input type="text" id="input-analysis-name" maxlength="80"
+               placeholder="e.g. Most-recent matching, Active records by region" />
+      </label>
+
+      <label>Description
+        <textarea id="input-analysis-description" rows="2" maxlength="280"
+                  placeholder="One sentence describing what this Analysis does to its input list."></textarea>
+        <span class="field-hint">Strategies show this when picking Analyses — make it clear what the Analysis does, not how. Especially important for Frontier-tier Analyses: the description is the model's primary intent signal.</span>
+      </label>
+
+      <!-- Cache-only, operations-body-kind only: operations editor.
+           Hidden when tier === 'frontier' or body kind === 'template'. -->
+      <div class="analysis-cache-only analysis-body-operations-only" id="analysis-operations-section">
+        <label>Operations (JSON)
+          <textarea id="input-analysis-operations" rows="10" spellcheck="false"
+                    placeholder='[{"op":"filter","assertion":{"type":"field_starts_with","field":"{{FIELD}}","value":"{{VALUE}}"}}]'></textarea>
+          <span class="field-hint">Array of operations: filter / sort / take. Use <code>{{NAME}}</code> placeholders for params — they're auto-detected on save.</span>
+        </label>
+      </div>
+
+      <!-- v2.72.18 (Pass 7b) — Cache-only, template-body-kind only: template
+           editor + inputs declaration. Hidden when tier === 'frontier' or
+           body kind === 'operations'. -->
+      <div class="analysis-cache-only analysis-body-template-only hidden" id="analysis-template-section">
+        <label>Template
+          <textarea id="input-analysis-template" rows="12" spellcheck="false"
+                    placeholder="# {{TITLE}}&#10;&#10;{{ARTICLE.markdown}}&#10;&#10;## Gallery&#10;{{#each GALLERY as I}}![{{I.alt}}]({{I.src}})&#10;{{/each}}"></textarea>
+          <span class="field-hint">Mustache-lite. <code>{{NAME}}</code> substitutes a scope binding. <code>{{NAME.field}}</code> accesses sub-fields (e.g. <code>{{ARTICLE.markdown}}</code>, <code>{{IMG.dataUrl}}</code>). <code>{{#each LIST as ITEM}}...{{/each}}</code> iterates a list. Each <code>NAME</code> referenced should be declared as an input below.</span>
+        </label>
+
+        <div class="analysis-inputs-section">
+          <div class="analysis-inputs-header">
+            <span class="analysis-conditions-label">Inputs</span>
+            <span class="analysis-conditions-count" id="analysis-inputs-count">0</span>
+            <span class="field-hint">Scope bindings this template consumes. Each is resolved by name at runtime; type-checked against <code>expects</code>.</span>
+          </div>
+          <div id="analysis-inputs-list"></div>
+          <button class="btn-secondary tiny" id="btn-add-analysis-input" type="button">+ Input</button>
+        </div>
+      </div>
+
+      <!-- v2.74.133 — Cache-only, transform-body-kind only: transform body
+           editor (JSON for v1). Hidden when tier === 'frontier' or body kind
+           is not 'transform'. Structured per-op editor lands later. -->
+      <div class="analysis-cache-only analysis-body-transform-only hidden" id="analysis-transform-section">
+        <label>Transform body (JSON)
+          <textarea id="input-analysis-transform" rows="14" spellcheck="false"
+                    placeholder='{&#10;  "inputs":  [{"name":"RAW", "expects":"scalar"}],&#10;  "ops": [&#10;    {"op":"replace","in":"RAW","find":"old","replacement":"new","regex":false,"flags":"g","out":"FIXED"}&#10;  ],&#10;  "outputs": [{"name":"FIXED","expects":"scalar"}]&#10;}'></textarea>
+          <span class="field-hint">JSON body envelope: <code>{ inputs, ops, outputs }</code>. Each input/output declares <code>name</code> + <code>expects</code> (kind). Each op references prior bindings via its slot keys (e.g. <code>in</code>); the op type determines the available fields (see <code>Services/TransformOps.js</code>). Use <code>{{NAME}}</code> placeholders in string fields for params.</span>
+        </label>
+      </div>
+
+      <!-- Frontier-only: explanatory note. Hidden when tier === 'cache'. -->
+      <div class="analysis-frontier-only hidden" id="analysis-frontier-note">
+        <p class="field-hint">This Analysis uses frontier model invocation. The system constructs the prompt at runtime from your description, contract, and the input. No operations or prompt to author.</p>
+      </div>
+
+      <div class="analysis-params-preview" id="analysis-params-preview"></div>
+
+      <!-- v2.64.0 (Pass 1) — Pre/post conditions on the Analysis. INPUT
+           refers to the source list bound on the SIEVE node; OUTPUT refers
+           to the output binding. Condition values support {{NAME}}
+           placeholders for the Analysis's params. Sections collapse when
+           empty for visual lightness; expand on click. -->
+      <details class="analysis-conditions-section" id="analysis-pre-section">
+        <summary>
+          <span class="analysis-conditions-label">Preconditions</span>
+          <span class="analysis-conditions-count" id="analysis-pre-count">0</span>
+          <span class="field-hint">checked before operations run; reference <code>INPUT</code></span>
+        </summary>
+        <div class="analysis-conditions-body" id="analysis-pre-list"></div>
+        <button class="btn-secondary tiny" id="btn-add-analysis-pre">+ Precondition</button>
+      </details>
+
+      <details class="analysis-conditions-section" id="analysis-post-section">
+        <summary>
+          <span class="analysis-conditions-label">Postconditions</span>
+          <span class="analysis-conditions-count" id="analysis-post-count">0</span>
+          <span class="field-hint">checked after operations run; reference <code>INPUT</code> and <code>OUTPUT</code></span>
+        </summary>
+        <div class="analysis-conditions-body" id="analysis-post-list"></div>
+        <button class="btn-secondary tiny" id="btn-add-analysis-post">+ Postcondition</button>
+      </details>
+
+      <!-- v2.67.0 (Pass 3b) — Auto-recovery toggle. When active, postcondition
+           failures trigger escalation to higher-tier execution (frontier
+           today; future tier paths added later). When inactive, postcondition
+           failures are hard fails. Default off.
+           v2.67.1 — Uses the settings toggle pattern (matches the toggle in
+           Settings → Close tab after test run).
+           v2.68.0 — Cache-only. Frontier-primary Analyses can't autoRecover
+           (no further tier to escalate to in v1). Hidden for frontier tier. -->
+      <div class="setting-row analysis-auto-recover-row analysis-cache-only" id="analysis-auto-recover-section">
+        <div class="setting-row-text">
+          <span class="setting-label">Auto-recover on contract failure</span>
+          <span class="setting-desc">Escalate to higher-tier execution when postconditions fail. Off means hard fail.</span>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="input-analysis-auto-recover" />
+          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+        </label>
+      </div>
+
+      <div class="form-actions">
+        <button class="btn-secondary" id="btn-cancel-analysis">Cancel</button>
+        <button class="btn-primary"   id="btn-save-analysis">Save Analysis</button>
+      </div>
+    </div>
+
+    <!-- v2.72.0 (Pass 3a) — Observation form. Form-only authoring for
+         scalar / raw_text / raw_html shapes. List_of_records and live
+         picker are 3b/3c. Pre/post is 3d. -->
+    <div class="card form-card hidden" id="observation-form-card">
+      <h3 id="observation-form-title">New Observation</h3>
+      <p class="field-hint" id="observation-form-ground-label">on Ground: …</p>
+
+      <!-- v2.72.11 (Pass 8) — Tier gating. Visible on new Observations until
+           the user picks a tier. Hidden on edit (tier is already set).
+           Mirrors the Analysis tier-gating UI. -->
+      <div class="observation-tier-gating hidden" id="observation-tier-gating">
+        <h4 class="observation-tier-gating-title">What kind of Observation?</h4>
+        <p class="field-hint">This determines how the page is read. The contract (preconditions, postconditions, output binding) is the same either way.</p>
+        <div class="observation-tier-choices">
+          <button class="observation-tier-choice" id="btn-obs-tier-cache" type="button">
+            <span class="observation-tier-choice-title">DOM-based</span>
+            <span class="observation-tier-choice-tier">Cache (T1)</span>
+            <span class="observation-tier-choice-desc">Deterministic DOM extraction: scalars, lists, raw text or HTML. Free, instant. Best for structured page content reachable via CSS selectors.</span>
+          </button>
+          <button class="observation-tier-choice" id="btn-obs-tier-frontier" type="button"
+                  title="Frontier-tier Observation: Opus 4.7 with vision picks bounding box(es) for content described in the Observation, captured from a screenshot. Real per-call cost (~$0.01-0.05 per region depending on screenshot size).">
+            <span class="observation-tier-choice-title">Vision-based</span>
+            <span class="observation-tier-choice-tier">Frontier (T3)</span>
+            <span class="observation-tier-choice-desc">Frontier model with vision selects bounding box(es) for content described in the Observation. Real per-call cost. Best for visual content that DOM extraction misses (charts, embedded canvas, unstructured layouts).</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- v2.72.11 (Pass 8) — Tier indicator. Visible after tier is chosen
+           (new Observations) or when editing existing Observations.
+           Read-only — to change tier, delete and recreate. -->
+      <div class="observation-tier-indicator hidden" id="observation-tier-indicator">
+        <span class="observation-tier-indicator-label">Tier:</span>
+        <span class="observation-tier-indicator-value" id="observation-tier-indicator-value">—</span>
+        <span class="field-hint">tier cannot be changed; delete and recreate to switch</span>
+      </div>
+
+      <label>Name
+        <input type="text" id="input-observation-name" maxlength="80"
+               placeholder="e.g. job-listing-rows, post-title, page-text" />
+      </label>
+
+      <label>Description (optional)
+        <textarea id="input-observation-description" rows="2" maxlength="280"
+                  placeholder="What does this Observation read from the page?"></textarea>
+      </label>
+
+      <!-- v2.74.21 — Recorded extracts (read-only). Mirrors Fragment's
+           "Recorded actions" review section. Toggle button reveals/hides
+           the list; each row shows shape, selector or coordinates, and
+           output binding. To change extracts, use Walk Observation to
+           re-author from the live page; this form edits metadata only. -->
+      <div class="review-section observation-recorded-section">
+        <div class="review-section-head">
+          <span class="review-section-label">Recorded extracts</span>
+          <span class="review-section-hint">Each extract on this Observation — re-walk to change</span>
+        </div>
+        <button class="review-actions-toggle" id="observation-recorded-extracts-toggle" type="button">▶ Show recorded extracts (0)</button>
+        <div class="review-actions-list hidden" id="observation-recorded-extracts"></div>
+      </div>
+
+      <!-- v2.72.4 (Pass 3d) — Pre/post conditions on Observations.
+           Pre: page-state assertions (Services/Assertion.js vocabulary — same
+                as Fragments). Evaluated against the live page before
+                extraction runs.
+           Post: data-shape assertions (Services/DataAssertion.js vocabulary —
+                 same as Analyses). Evaluated against the bound OUTPUT after
+                 extraction. INPUT binding is not exposed; Observation pre
+                 runs against the page, not against scope. -->
+      <details class="observation-conditions-section" id="observation-pre-section">
+        <summary>
+          <span class="observation-conditions-label">Preconditions</span>
+          <span class="observation-conditions-count" id="observation-pre-count">0</span>
+          <span class="field-hint">checked against the live page before extraction</span>
+        </summary>
+        <div class="observation-conditions-body" id="observation-pre-list"></div>
+        <button class="btn-secondary tiny" id="btn-add-observation-pre" type="button">+ Precondition</button>
+      </details>
+
+      <details class="observation-conditions-section" id="observation-post-section">
+        <summary>
+          <span class="observation-conditions-label">Postconditions</span>
+          <span class="observation-conditions-count" id="observation-post-count">0</span>
+          <span class="field-hint">checked against extracted data; reference <code>OUTPUT</code></span>
+        </summary>
+        <div class="observation-conditions-body" id="observation-post-list"></div>
+        <button class="btn-secondary tiny" id="btn-add-observation-post" type="button">+ Postcondition</button>
+      </details>
+
+      <!-- v2.72.7 (Pass 3e) — Params auto-detected from {{NAME}} placeholders
+           in selectors and condition values. Live-updates as user types.
+           Read-only: the saved record's `params` is always derived from the
+           actual placeholder content, never from user input. -->
+      <div class="observation-params-preview" id="observation-params-preview">
+        <span class="observation-params-preview-label">Detected params</span>
+        <span class="observation-params-preview-list" id="observation-params-preview-list">none</span>
+        <span class="field-hint">Use <code>{{NAME}}</code> in selectors / extract attribute / condition values to make this Observation parameterized.</span>
+      </div>
+
+      <div class="form-actions">
+        <button class="btn-secondary" id="btn-cancel-observation">Cancel</button>
+        <button class="btn-primary"   id="btn-save-observation">Save Observation</button>
+      </div>
+    </div>
+
+    <div id="ground-list" class="ground-list">
+      <p class="empty-state">No grounds yet. Add one above.</p>
+    </div>
+  </section>
+
+  <!-- ── Tab: Run and Results removed (Path-era dead code).
+       Strategy test-running happens via ▶ Run on Strategy rows in the
+       Ground tab, invocation from chat, or returns as part of future
+       Strategy walks. ── -->
+
+  <!-- ── Tab: Logs ── -->
+  <section class="tab-panel hidden" id="tab-logs">
+    <div class="section-header">
+      <h2>Logs</h2>
+      <div style="display:flex;gap:6px;align-items:center">
+        <div class="log-filter-row">
+          <button class="log-filter-btn active" data-level="ALL">ALL</button>
+          <button class="log-filter-btn" data-level="DEBUG">DBG</button>
+          <button class="log-filter-btn" data-level="INFO">INFO</button>
+          <button class="log-filter-btn" data-level="WARN">WARN</button>
+          <button class="log-filter-btn" data-level="ERROR">ERR</button>
+        </div>
+        <button class="btn-secondary small" id="btn-copy-logs" title="Copy latest event logs">Copy</button>
+        <button class="btn-secondary small" id="btn-clear-logs">Clear</button>
+      </div>
+    </div>
+    <!-- Live indicator -->
+    <div class="log-live-bar">
+      <span class="live-dot"></span><span>Live</span>
+      <label class="checkbox-label" style="margin:0;margin-left:auto;gap:4px">
+        <input type="checkbox" id="chk-autoscroll" checked />
+        <span style="font-size:10px;color:var(--muted)">Auto-scroll</span>
+      </label>
+    </div>
+    <div id="log-list" class="log-list">
+      <p class="empty-state">No log entries yet.</p>
+    </div>
+  </section>
+
+  <!-- ── Tab: Docs ── -->
+  <section class="tab-panel hidden" id="tab-prompts">
+    <div class="section-header"><h2>Definitions</h2></div>
+    <p class="prompts-intro">Core system concepts and the primitives they're built from. Each card collapses to a one-line definition; expand it to see the building blocks with examples.</p>
+    <div id="definition-list" class="prompt-list"></div>
+
+    <div class="section-header"><h2>System Prompts</h2></div>
+    <p class="prompts-intro">Built-in prompts sent to the Anthropic API. Each is scoped to a specific purpose in the discovery, profiling, or routing pipeline.</p>
+    <div id="prompt-list" class="prompt-list"></div>
+  </section>
+
+  <!-- ── Tab: Settings ── -->
+  <section class="tab-panel hidden" id="tab-settings">
+    <div class="section-header"><h2>Settings</h2></div>
+
+    <div class="card">
+      <h3 class="card-subheading">Anthropic API Key</h3>
+      <label>API Key
+        <div style="display:flex;gap:6px">
+          <input type="password" id="input-api-key" placeholder="sk-ant-…" style="flex:1" autocomplete="off" />
+          <button class="btn-primary" id="btn-save-api-key" style="flex-shrink:0">Save</button>
+        </div>
+      </label>
+      <div id="api-key-status" class="msg hidden"></div>
+      <p class="settings-note">
+        Your key is stored locally in <code>chrome.storage.local</code> and sent only to
+        <code>api.anthropic.com</code>. It is never logged or transmitted elsewhere.
+      </p>
+    </div>
+
+    <div class="card">
+      <h3 class="card-subheading">Test Run Behaviour</h3>
+      <div class="setting-row">
+        <div class="setting-row-text">
+          <span class="setting-label">Close tab after test run</span>
+          <span class="setting-desc">When off, the tab stays open after each test so you can inspect the result.</span>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="chk-close-tab" checked />
+          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- v2.74.9 — Display preferences. Verbose toggle controls whether
+         fragment descriptions in the studio Ground card list render as
+         a single-line summary or a multi-line breakdown including chain
+         branch detail. Stored via SET_SETTING; read at render time. -->
+    <div class="card">
+      <h3 class="card-subheading">Display</h3>
+      <div class="setting-row">
+        <div class="setting-row-text">
+          <span class="setting-label">Verbose fragment descriptions</span>
+          <span class="setting-desc">When on, fragment descriptions show each action on its own line with chain branch detail. Useful for reviewing what a fragment does and for auto-compose. When off, descriptions are single-line summaries.</span>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="chk-verbose-fragment-desc" />
+          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- v2.74.12 — Authoring constraints. Fragment length cap is the
+         maximum number of actions allowed per fragment. Default 7 — long
+         fragments are harder to debug and reuse from strategies. The
+         "Unlimited" toggle removes the hard cap; the authoring UI shows
+         a soft warning past the soft threshold (7) regardless.
+         v2.74.18 (Ship D) — Same pattern extended to Observation extracts. -->
+    <div class="card">
+      <h3 class="card-subheading">Authoring</h3>
+      <div class="setting-row">
+        <div class="setting-row-text">
+          <span class="setting-label">Fragment length cap</span>
+          <span class="setting-desc">Hard limit on actions per fragment. Long fragments are more brittle (every action is a possible failure point) and harder to compose from strategies (reuse benefits from short, focused units). Default 7.</span>
+        </div>
+        <input type="number" id="input-fragment-cap" min="1" max="100" value="7"
+               style="width: 64px; text-align: right;" />
+      </div>
+      <div class="setting-row">
+        <div class="setting-row-text">
+          <span class="setting-label">Unlimited length (advanced)</span>
+          <span class="setting-desc">Disable the hard cap. The authoring panel will still warn when a fragment exceeds 7 actions, but won't block you. Use only when you've already chosen to accept the stability and composability tradeoffs.</span>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="chk-fragment-cap-unlimited" />
+          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+        </label>
+      </div>
+      <div class="setting-row">
+        <div class="setting-row-text">
+          <span class="setting-label">Observation extract cap</span>
+          <span class="setting-desc">Hard limit on extracts per Observation. Each extract is one read from the page; bundling many in one Observation is convenient but every extra extract is another selector that could go stale. Default 7.</span>
+        </div>
+        <input type="number" id="input-observation-extract-cap" min="1" max="100" value="7"
+               style="width: 64px; text-align: right;" />
+      </div>
+      <div class="setting-row">
+        <div class="setting-row-text">
+          <span class="setting-label">Unlimited extracts (advanced)</span>
+          <span class="setting-desc">Disable the hard cap on extracts per Observation. The authoring panel will still warn past 7 extracts, but won't block you. Use only when you've already chosen to accept the maintenance tradeoffs.</span>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="chk-observation-extract-cap-unlimited" />
+          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+        </label>
+      </div>
+    </div>
+
+    <div class="card">
+      <p class="settings-note" style="color:var(--sub)">
+        <strong style="color:var(--text)">AHuB</strong> v2.9.1<br>
+        Automated AI agent interaction testing.<br>
+        Variable-injected execution · Anthropic Claude template generation.
+      </p>
+    </div>
+  </section>
+
+
+  <!-- ── Toast ── -->
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- ── v2.43.0 — JSON view modal (read-only) ── -->
+  <!-- ── v2.51.0 — JSON modal is now editable. Save button parses JSON,
+       validates per entity kind, and persists via the same SAVE_X messages
+       used by the form editors. Bad JSON / failed validation surfaces inline
+       errors instead of saving. ── -->
+  <div id="json-modal" class="json-modal hidden" role="dialog" aria-modal="true">
+    <div class="json-modal-backdrop" data-action="json-modal-close"></div>
+    <div class="json-modal-card">
+      <div class="json-modal-head">
+        <h3 class="json-modal-title" id="json-modal-title">JSON</h3>
+        <div class="json-modal-actions">
+          <button class="btn-secondary small" id="btn-json-modal-copy" title="Copy to clipboard">Copy</button>
+          <button class="btn-primary small" id="btn-json-modal-save" title="Validate and save changes">Save</button>
+          <button class="btn-action" id="btn-json-modal-close" title="Close" data-action="json-modal-close">✕</button>
+        </div>
+      </div>
+      <textarea class="json-modal-body" id="json-modal-body" spellcheck="false"></textarea>
+      <div class="json-modal-error hidden" id="json-modal-error"></div>
+    </div>
+  </div>
+
+  <script src="studio.js" type="module"></script>
+</body>
+</html>

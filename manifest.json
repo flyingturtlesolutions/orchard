@@ -1,0 +1,59 @@
+{
+  "manifest_version": 3,
+  "name": "AHuB",
+  "version": "2.74.343",
+  "description": "Automated AI agent interaction testing with variable-injected LLM execution.",
+
+  "permissions": [
+    "sidePanel",
+    "tabs",
+    "storage",
+    "scripting",
+    "activeTab",
+    "debugger",
+    "webNavigation",
+    "clipboardRead",
+    "offscreen"
+  ],
+
+  "host_permissions": [
+    "<all_urls>",
+    "https://api.anthropic.com/"
+  ],
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "side_panel": {
+    "default_path": "chat.html"
+  },
+
+  "action": {
+    "default_title": "AHuB",
+    "default_popup": "popup.html"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["ContentScripts/contentScript.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+
+  "web_accessible_resources": [
+    {
+      "resources": ["ContentScripts/*", "assets/*", "Sidepanel/*", "studio.html", "chat.html", "sidepanel.html", "popup.html"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+
+  "icons": {
+    "16":  "assets/icon16.png",
+    "48":  "assets/icon48.png",
+    "128": "assets/icon128.png"
+  }
+}

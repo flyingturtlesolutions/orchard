@@ -1,0 +1,3014 @@
+/* ============================================================
+   Debugger surface — side panel
+   Three sections: header+controls, pause-state, log
+   ============================================================ */
+
+.debugger-body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--font);
+  background: var(--bg1);
+  color: var(--text);
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.hidden { display: none !important; }
+
+/* ── Idle state ─────────────────────────────────────────────────── */
+
+.dbg-idle {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 40px 24px;
+  text-align: center;
+  flex: 1;
+  color: var(--sub);
+}
+.dbg-idle-icon {
+  font-size: 36px;
+  opacity: 0.6;
+}
+.dbg-idle-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+.dbg-idle-hint {
+  font-size: 12px;
+  max-width: 280px;
+  line-height: 1.5;
+}
+.dbg-idle-links {
+  margin-top: 16px;
+  display: flex;
+  gap: 8px;
+}
+
+/* ── Active state container ─────────────────────────────────────── */
+
+.dbg-active {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* ── Header ─────────────────────────────────────────────────────── */
+
+.dbg-header {
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg2);
+  flex-shrink: 0;
+}
+.dbg-header-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dbg-strategy-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dbg-status-pill {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 3px 8px;
+  border-radius: 10px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+.dbg-status-pill.dbg-status-running   { background: rgba(96, 165, 250, 0.18); color: #60a5fa; }
+.dbg-status-pill.dbg-status-pausing   { background: rgba(245, 158, 11, 0.18); color: #f59e0b; animation: dbg-pulse 1.4s ease-in-out infinite; }
+.dbg-status-pill.dbg-status-paused    { background: rgba(245, 158, 11, 0.22); color: #f59e0b; }
+.dbg-status-pill.dbg-status-complete  { background: rgba(74, 222, 128, 0.2);  color: #4ade80; }
+.dbg-status-pill.dbg-status-failed    { background: rgba(248, 113, 113, 0.2); color: #f87171; }
+.dbg-status-pill.dbg-status-aborted   { background: rgba(148, 163, 184, 0.2); color: #94a3b8; }
+@keyframes dbg-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.5; }
+}
+.dbg-header-meta {
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--muted);
+  font-family: var(--font);
+  letter-spacing: 0.2px;
+}
+.dbg-meta-sep { margin: 0 6px; opacity: 0.5; }
+
+/* ── Run controls ───────────────────────────────────────────────── */
+
+.dbg-controls {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg1);
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+.dbg-btn {
+  flex: 1;
+  min-width: 80px;
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg2);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 100ms, border-color 100ms;
+}
+.dbg-btn:hover {
+  background: var(--bg3);
+}
+.dbg-btn-pause   { border-color: rgba(245, 158, 11, 0.4); color: #f59e0b; }
+.dbg-btn-pause:hover   { background: rgba(245, 158, 11, 0.1); }
+.dbg-btn-step    { border-color: rgba(96, 165, 250, 0.4); color: #60a5fa; }
+.dbg-btn-step:hover    { background: rgba(96, 165, 250, 0.1); }
+.dbg-btn-resume  { border-color: rgba(74, 222, 128, 0.4); color: #4ade80; }
+.dbg-btn-resume:hover  { background: rgba(74, 222, 128, 0.1); }
+.dbg-btn-abort   { border-color: rgba(248, 113, 113, 0.4); color: #f87171; }
+.dbg-btn-abort:hover   { background: rgba(248, 113, 113, 0.1); }
+.dbg-btn-close   { border-color: var(--line); color: var(--sub); }
+
+/* ── Scope rendering ─────────────────────────────────────────────── */
+
+.dbg-scope-table {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--bg1);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 6px;
+}
+.dbg-scope-empty {
+  font-size: 11px;
+  color: var(--muted);
+  font-style: italic;
+  text-align: center;
+  padding: 8px;
+}
+.dbg-scope-row {
+  display: grid;
+  grid-template-columns: minmax(80px, 0.5fr) auto 1fr;
+  gap: 8px;
+  align-items: baseline;
+  padding: 3px 4px;
+  border-radius: 2px;
+  font-size: 11px;
+}
+.dbg-scope-row:hover {
+  background: var(--bg2);
+}
+.dbg-scope-name {
+  font-weight: 600;
+  color: var(--text);
+  font-family: var(--font);
+}
+.dbg-scope-type {
+  font-size: 9px;
+  color: var(--muted);
+  background: var(--bg3);
+  padding: 1px 5px;
+  border-radius: 8px;
+  letter-spacing: 0.2px;
+}
+.dbg-scope-value {
+  color: var(--sub);
+  font-family: var(--font);
+  word-break: break-all;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Log section ────────────────────────────────────────────────── */
+
+.dbg-log-section {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+.dbg-log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.dbg-log-filter {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+}
+.dbg-log-filter label {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--sub);
+  cursor: pointer;
+}
+.dbg-log-filter input {
+  margin: 0;
+  cursor: pointer;
+}
+.dbg-log-clear {
+  font-size: 10px;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--sub);
+  padding: 2px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.dbg-log-clear:hover {
+  background: var(--bg3);
+  color: var(--text);
+}
+.dbg-log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 0;
+  font-size: 11px;
+  font-family: var(--font);
+  background: var(--bg1);
+}
+.dbg-log-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--muted);
+  font-style: italic;
+  font-size: 11px;
+}
+.dbg-log-row {
+  display: grid;
+  grid-template-columns: 50px 38px 110px 1fr;
+  gap: 6px;
+  padding: 3px 12px;
+  align-items: baseline;
+  font-size: 10px;
+  line-height: 1.4;
+  border-bottom: 1px solid transparent;
+}
+.dbg-log-row:hover {
+  background: var(--bg2);
+}
+.dbg-log-row.dbg-log-error {
+  background: rgba(248, 113, 113, 0.05);
+}
+.dbg-log-row.dbg-log-warn {
+  background: rgba(245, 158, 11, 0.04);
+}
+.dbg-log-ts {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.dbg-log-level {
+  font-weight: 700;
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  padding: 1px 4px;
+  border-radius: 6px;
+  text-align: center;
+  text-transform: uppercase;
+}
+.dbg-log-level.dbg-log-level-debug { background: rgba(148, 163, 184, 0.18); color: #94a3b8; }
+.dbg-log-level.dbg-log-level-info  { background: rgba(96, 165, 250, 0.16);  color: #60a5fa; }
+.dbg-log-level.dbg-log-level-warn  { background: rgba(245, 158, 11, 0.18);  color: #f59e0b; }
+.dbg-log-level.dbg-log-level-error { background: rgba(248, 113, 113, 0.18); color: #f87171; }
+.dbg-log-source {
+  color: var(--muted);
+  font-size: 9px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dbg-log-message {
+  color: var(--text);
+  word-break: break-word;
+}
+
+/* ===== v2.61.1 — Tabbed layout =========================================== */
+
+/* Persistent status strip directly under controls. Compact. Always visible
+   while the active view is shown — provides "where" and "tab url" at a
+   glance regardless of paused/running state. */
+.dbg-status-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 11px;
+}
+.dbg-strip-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 16px;
+}
+.dbg-strip-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted, #94a3b8);
+  flex-shrink: 0;
+  min-width: 50px;
+}
+.dbg-strip-value {
+  flex: 1;
+  color: inherit;
+  word-break: break-all;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dbg-strip-value.mono {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+}
+
+/* Tab nav — sibling tabs under the status strip */
+.dbg-tab-nav {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.02);
+}
+.dbg-tab-btn {
+  flex: 1;
+  padding: 8px 12px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted, #94a3b8);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.dbg-tab-btn:hover {
+  color: inherit;
+  background: rgba(255, 255, 255, 0.03);
+}
+.dbg-tab-btn.active {
+  color: inherit;
+  border-bottom-color: var(--color-primary, #68ccdd);
+}
+
+/* Tab panels — only the .active panel is displayed */
+.dbg-tab-panel {
+  display: none;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.dbg-tab-panel.active {
+  display: flex;
+}
+
+/* Scope panel — uses existing .dbg-scope-table styles for content; just
+   wraps it with consistent padding */
+.dbg-tab-panel[data-dbg-panel="scope"] {
+  padding: 12px;
+}
+
+/* ===== v2.61.3 — Rich Scope-tab rendering ============================== */
+
+/* Each binding renders as a self-contained card */
+.dbg-scope-binding {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.dbg-scope-binding:last-child { margin-bottom: 0; }
+
+/* Body block: tables, lists, field rows */
+.dbg-scope-body {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* List-of-records inline table */
+.dbg-scope-records-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.dbg-scope-records-table thead {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+}
+.dbg-scope-records-table th {
+  text-align: left;
+  padding: 4px 8px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted, #94a3b8);
+  white-space: nowrap;
+}
+.dbg-scope-records-table td {
+  padding: 4px 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 240px;
+}
+.dbg-scope-records-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.dbg-scope-idx-col,
+.dbg-scope-idx-cell {
+  text-align: right !important;
+  color: var(--text-muted, #94a3b8);
+  font-size: 9px;
+  width: 24px;
+}
+
+/* List-of-scalars bulleted list */
+.dbg-scope-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 11px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.dbg-scope-items li {
+  display: flex;
+  gap: 8px;
+  padding: 3px 0;
+  align-items: baseline;
+}
+.dbg-scope-item-value {
+  flex: 1;
+  word-break: break-all;
+}
+
+/* Single-record field display */
+.dbg-scope-fields-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dbg-scope-field-row {
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.dbg-scope-field-label {
+  flex-shrink: 0;
+  color: var(--text-muted, #94a3b8);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  min-width: 80px;
+  align-self: center;
+}
+.dbg-scope-field-value {
+  flex: 1;
+  word-break: break-all;
+}
+
+/* Show-all affordance */
+.dbg-scope-show-all {
+  margin-top: 6px;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px dashed rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  color: var(--text-muted, #94a3b8);
+  font-size: 10px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+  width: 100%;
+}
+.dbg-scope-show-all:hover {
+  color: inherit;
+  border-color: rgba(255, 255, 255, 0.30);
+}
+
+/* ===== v2.72.13 (Pass 10a) — Scope tab: image bindings =========================
+   Display frontier-tier Observation outputs (kind='image' single, or
+   image_list as list of kind='image' items) with thumbnails. Click
+   thumbnail or button to open full size in a new browser tab. */
+
+/* Single image binding: thumbnail + metadata side-by-side.
+   On narrow scope panels (<340px), wrap to vertical layout. */
+.dbg-scope-image-wrap {
+  margin-top: 6px;
+}
+.dbg-scope-image-card {
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+}
+.dbg-scope-image-thumb {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 3px;
+  overflow: hidden;
+  /* Default thumbnail size; image preserves aspect ratio inside. */
+  max-width: 200px;
+  max-height: 150px;
+  min-width: 80px;
+  min-height: 60px;
+}
+.dbg-scope-image-thumb-img {
+  display: block;
+  max-width: 200px;
+  max-height: 150px;
+  width: auto;
+  height: auto;
+  cursor: zoom-in;
+  /* Subtle hover feedback so the click affordance is discoverable. */
+  transition: opacity 0.12s;
+}
+.dbg-scope-image-thumb-img:hover {
+  opacity: 0.85;
+}
+.dbg-scope-image-thumb-empty {
+  width: 120px;
+  height: 80px;
+  font-size: 10px;
+  color: var(--sub, #888);
+  font-style: italic;
+}
+
+.dbg-scope-image-meta {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;  /* allow flex children to shrink below content width */
+}
+.dbg-scope-image-meta-row {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text, #ddd);
+  /* Truncate long metadata values rather than wrapping uglily. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dbg-scope-image-meta-label {
+  display: inline-block;
+  min-width: 36px;
+  color: var(--sub, #888);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.dbg-scope-image-meta-value {
+  color: var(--text, #ddd);
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.dbg-scope-image-open {
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 3px 8px;
+  font-size: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+  color: var(--text, #ddd);
+  cursor: pointer;
+  font-family: inherit;
+}
+.dbg-scope-image-open:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+/* Narrow-panel: stack thumbnail above metadata. The scope tab can be
+   resized by the operator — at <340px the side-by-side layout cramps. */
+@media (max-width: 340px) {
+  .dbg-scope-image-card {
+    flex-direction: column;
+  }
+  .dbg-scope-image-thumb,
+  .dbg-scope-image-thumb-img {
+    max-width: 100%;
+  }
+}
+
+/* Image list (image_list shape): thumbnail grid with index badges. */
+.dbg-scope-image-grid-wrap {
+  margin-top: 6px;
+}
+.dbg-scope-image-grid {
+  display: grid;
+  /* Auto-fit: as many 120px columns as fit; on narrow panels falls to 1col. */
+  grid-template-columns: repeat(auto-fit, minmax(120px, max-content));
+  gap: 8px;
+}
+.dbg-scope-image-grid-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+}
+.dbg-scope-image-grid-idx {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 1;
+  padding: 1px 5px;
+  font-size: 9px;
+  font-weight: 700;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  border-radius: 2px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  pointer-events: none;
+}
+.dbg-scope-image-grid-img {
+  display: block;
+  width: 120px;
+  height: 90px;
+  object-fit: cover;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 2px;
+  cursor: zoom-in;
+  transition: opacity 0.12s;
+}
+.dbg-scope-image-grid-img:hover {
+  opacity: 0.85;
+}
+.dbg-scope-image-grid-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 120px;
+  height: 90px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 2px;
+  font-size: 10px;
+  color: var(--sub, #888);
+  font-style: italic;
+}
+.dbg-scope-image-grid-caption {
+  font-size: 10px;
+  color: var(--sub, #aaa);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
+/* ===== v2.72.14 (Pass 6) — Scope tab: section bindings ========================
+   Render kind='section' bindings (cache-tier Observation, shape='section')
+   as a card with provenance, markdown preview, image refs grid, link
+   refs list. */
+
+.dbg-scope-section-wrap {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Provenance row: source URL + capture timestamp. */
+.dbg-scope-section-provenance {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.02);
+  border-left: 2px solid rgba(16, 185, 129, 0.5);
+  border-radius: 0 3px 3px 0;
+  font-size: 10px;
+}
+.dbg-scope-section-source {
+  color: var(--text, #ddd);
+  text-decoration: none;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dbg-scope-section-source:hover {
+  text-decoration: underline;
+}
+.dbg-scope-section-ts {
+  color: var(--sub, #888);
+  flex: 0 0 auto;
+}
+
+/* Each block (markdown / images / links) inside the section card. */
+.dbg-scope-section-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dbg-scope-section-block-label {
+  font-size: 10px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--sub, #888);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+}
+.dbg-scope-section-empty {
+  font-size: 11px;
+  color: var(--sub, #888);
+  font-style: italic;
+  padding: 4px 8px;
+}
+
+/* Markdown preview — pre-formatted, monospace, scrollable on overflow. */
+.dbg-scope-section-markdown {
+  margin: 0;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 3px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text, #ddd);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 400px;
+  overflow: auto;
+}
+
+/* Image refs: small thumbnail grid, ~80×60 each. */
+.dbg-scope-section-images {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(80px, max-content));
+  gap: 6px;
+}
+.dbg-scope-section-image-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 3px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+}
+.dbg-scope-section-image-idx {
+  position: absolute;
+  top: 5px;
+  left: 5px;
+  z-index: 1;
+  padding: 1px 4px;
+  font-size: 8px;
+  font-weight: 700;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  border-radius: 2px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  pointer-events: none;
+}
+.dbg-scope-section-image-img {
+  display: block;
+  width: 80px;
+  height: 60px;
+  object-fit: cover;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 2px;
+  cursor: zoom-in;
+  transition: opacity 0.12s;
+}
+.dbg-scope-section-image-img:hover {
+  opacity: 0.85;
+}
+.dbg-scope-section-image-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 80px;
+  height: 60px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 2px;
+  font-size: 9px;
+  color: var(--sub, #888);
+  font-style: italic;
+  text-align: center;
+  padding: 2px;
+  word-break: break-word;
+}
+.dbg-scope-section-image-caption {
+  font-size: 9px;
+  color: var(--sub, #aaa);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 80px;
+}
+
+/* Link refs: numbered list with text + href. */
+.dbg-scope-section-link-list {
+  margin: 0;
+  padding: 0 0 0 4px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dbg-scope-section-link-row {
+  display: grid;
+  grid-template-columns: 24px auto 1fr;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 3px 4px;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 2px;
+}
+.dbg-scope-section-link-idx {
+  color: var(--sub, #888);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  text-align: right;
+}
+.dbg-scope-section-link-text {
+  color: var(--text, #ddd);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dbg-scope-section-link-href {
+  color: var(--sub, #aaa);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dbg-scope-section-link-href:hover {
+  color: var(--text, #ddd);
+  text-decoration: underline;
+}
+
+/* ── v2.72.41 (Pass 17g) — Locale capture mode ─────────────────────────────
+   Third top-level state in the debugger sidepanel, alongside idle (no
+   invocation) and active (strategy-debug). Layout mirrors the Pass-17
+   locale form structure but lives in the debugger surface so DOM access
+   to the captured tab is direct (no separate findOrOpenTab dance). */
+
+.dbg-locale {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  height: 100%;
+  overflow-y: auto;
+}
+
+/* v2.74.284 — Unified collapsible-card pattern. Every locale form
+ * section that wraps content uses this structure:
+ *   <section class="dbg-locale-card" data-card-id="..." [data-collapsed]>
+ *     <div class="dbg-locale-card-head-row">
+ *       <button class="dbg-locale-card-head" data-card-toggle>
+ *         <span class="dbg-locale-card-chevron">▾</span>
+ *         <span class="dbg-locale-card-label">Section title</span>
+ *         <span class="dbg-locale-card-optional">(optional)</span>
+ *       </button>
+ *       <!-- optional sibling action buttons -->
+ *     </div>
+ *     <div class="dbg-locale-card-body"> ... </div>
+ *   </section>
+ *
+ * Clicking the head button toggles `data-collapsed` on the section,
+ * which hides the body via the attribute selector below. The chevron
+ * character also flips (▾ open / ▸ collapsed) — set by JS for
+ * accessibility + lightweight rendering. */
+.dbg-locale-card-head-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.dbg-locale-card-head {
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+.dbg-locale-card-head:hover .dbg-locale-card-label {
+  color: rgba(255, 255, 255, 0.95);
+}
+.dbg-locale-card-chevron {
+  font-size: 10px;
+  color: rgba(148, 163, 184, 0.85);
+  width: 12px;
+  display: inline-block;
+  text-align: center;
+  user-select: none;
+}
+.dbg-locale-card-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--sub);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  transition: color .15s;
+}
+.dbg-locale-card-optional {
+  font-size: 10px;
+  color: rgba(148, 163, 184, 0.65);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-style: italic;
+}
+.dbg-locale-card[data-collapsed="true"] > .dbg-locale-card-body {
+  display: none;
+}
+
+.dbg-locale-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: var(--r, 7px);
+}
+.dbg-locale-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dbg-locale-badge {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  background: var(--acc);
+  color: white;
+  border-radius: 3px;
+}
+.dbg-locale-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.dbg-locale-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+}
+.dbg-locale-meta-label {
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex: 0 0 60px;
+}
+.dbg-locale-meta-value {
+  color: var(--sub);
+  word-break: break-all;
+  flex: 1;
+  min-width: 0;
+}
+.dbg-locale-meta-value.mono {
+  font-family: ui-monospace, monospace;
+}
+.dbg-locale-warning {
+  margin-top: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  background: rgba(240, 180, 41, 0.10);
+  color: var(--warn);
+  border: 1px solid rgba(240, 180, 41, 0.30);
+  border-radius: 3px;
+}
+/* v2.72.45 — success variant for the same slot (used for save toasts) */
+.dbg-locale-warning.status-ok {
+  background: rgba(61, 214, 140, 0.10);
+  color: var(--pass);
+  border-color: rgba(61, 214, 140, 0.30);
+}
+
+.dbg-locale-instructions {
+  padding: 8px 10px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: var(--r, 7px);
+}
+.dbg-locale-help {
+  font-size: 11px;
+  color: var(--sub);
+  line-height: 1.5;
+}
+.dbg-locale-help strong {
+  color: var(--text);
+}
+
+.dbg-locale-landmarks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: var(--r, 7px);
+}
+.dbg-locale-landmarks-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.dbg-locale-landmarks-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--sub);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.dbg-locale-landmarks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dbg-locale-landmarks-empty {
+  padding: 12px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--bg3);
+  border-radius: 4px;
+}
+
+/* v2.74.231 — Rediscover icon button at top-right of landmarks card.
+ * Replaces the inline + Add landmark that used to live in the head.
+ * Violet accent matches the Claude-assisted affordance language we
+ * use elsewhere (Ask Claude, auto-discovery — all Claude-driven). */
+.dbg-locale-landmarks-head-spacer {
+  flex: 1 1 auto;
+}
+.dbg-locale-landmarks-rediscover {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: 1px solid rgba(167, 139, 250, 0.40);
+  color: rgba(196, 181, 253, 0.95);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.dbg-locale-landmarks-rediscover:hover:not([disabled]) {
+  border-color: rgba(167, 139, 250, 0.70);
+  color: rgba(216, 209, 255, 1);
+  background: rgba(167, 139, 250, 0.08);
+}
+.dbg-locale-landmarks-rediscover[disabled] {
+  opacity: 0.55;
+  cursor: progress;
+}
+.dbg-locale-landmarks-rediscover-icon {
+  font-size: 13px;
+  line-height: 1;
+  display: inline-block;
+}
+.dbg-locale-landmarks-rediscover[disabled] .dbg-locale-landmarks-rediscover-icon {
+  animation: dbg-locale-rediscover-spin 1.2s linear infinite;
+}
+@keyframes dbg-locale-rediscover-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.dbg-locale-landmarks-rediscover-label {
+  font-weight: 500;
+}
+
+/* v2.74.231 — Footer row beneath the landmark list. Mirrors
+ * fragment-author's + Action footer pattern (right-aligned add button
+ * inside the same card chrome as the list). */
+.dbg-locale-landmarks-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+/* v2.74.233 — Per-landmark Show toggle. Green when active (matches
+ * the on-page overlay accent in contentScript.js showLocaleOverlays).
+ * Dim circle when inactive so the affordance is visible without
+ * dominating the row. Replaces the v2.74.232 Ask Claude button:
+ * Claude is now built into the picker flow itself, so no standalone
+ * button is needed. */
+.dbg-locale-landmark-show {
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.45);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.dbg-locale-landmark-show:hover {
+  border-color: rgba(74, 222, 128, 0.55);
+  color: rgba(167, 243, 208, 0.95);
+}
+.dbg-locale-landmark-show-active {
+  border-color: rgba(74, 222, 128, 0.85);
+  background: rgba(74, 222, 128, 0.15);
+  color: rgba(187, 247, 208, 1);
+}
+
+/* v2.74.233 — Refining-with-Claude inline status. Shows beneath the
+ * landmark row while the picker→Claude pipeline is in flight. Same
+ * visual cue as other "asking Claude" bars (violet dashed border)
+ * so authors recognize the AI-assist phase. */
+.dbg-locale-landmark-refining {
+  margin-top: 4px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.3;
+  background: rgba(167, 139, 250, 0.08);
+  border: 1px dashed rgba(167, 139, 250, 0.40);
+  color: rgba(196, 181, 253, 0.95);
+  font-style: italic;
+}
+
+/* v2.74.234 — Multi-axis verification score chip. Replaces the binary
+ * "✓ matched N elements" with a chip that reflects the actual
+ * downstream-readiness signal (ready / caveats / mismatch) plus a
+ * list of issues and an operations summary. The chip color follows
+ * the chrome the rest of the app uses (green ok, amber caveat, red
+ * fail) so a glance tells the author whether the landmark is usable
+ * by downstream consumers without re-verifying. */
+.dbg-locale-landmark-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  margin-top: 4px;
+}
+.dbg-locale-landmark-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  font-size: 10px;
+}
+.dbg-locale-landmark-status-ready .dbg-locale-landmark-status-chip {
+  background: rgba(74, 222, 128, 0.18);
+  color: rgba(187, 247, 208, 1);
+  border: 1px solid rgba(74, 222, 128, 0.55);
+}
+.dbg-locale-landmark-status-caveats .dbg-locale-landmark-status-chip {
+  background: rgba(251, 191, 36, 0.18);
+  color: rgba(253, 224, 71, 1);
+  border: 1px solid rgba(251, 191, 36, 0.55);
+}
+.dbg-locale-landmark-status-mismatch .dbg-locale-landmark-status-chip {
+  background: rgba(247, 110, 110, 0.18);
+  color: rgba(252, 165, 165, 1);
+  border: 1px solid rgba(247, 110, 110, 0.55);
+}
+/* v2.74.237 — Legacy verified records (matchedCount>0, no .score)
+ * render with the ready style. Re-verifying upgrades them to the
+ * full multi-axis status. */
+.dbg-locale-landmark-status-legacy .dbg-locale-landmark-status-chip {
+  background: rgba(74, 222, 128, 0.12);
+  color: rgba(187, 247, 208, 0.9);
+  border: 1px solid rgba(74, 222, 128, 0.40);
+}
+.dbg-locale-landmark-status-match {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+.dbg-locale-landmark-issues {
+  margin: 2px 0 0 0;
+  padding-left: 18px;
+  list-style: disc;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: rgba(253, 224, 71, 0.95);
+}
+.dbg-locale-landmark-issues li {
+  margin: 2px 0;
+}
+.dbg-locale-landmark-status-mismatch + .dbg-locale-landmark-issues {
+  color: rgba(252, 165, 165, 0.95);
+}
+.dbg-locale-landmark-ops {
+  margin-top: 2px;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.dbg-locale-landmark-ops-label {
+  font-weight: 600;
+  margin-right: 4px;
+  color: rgba(255, 255, 255, 0.55);
+}
+.dbg-locale-landmark-ops code {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  padding: 1px 5px;
+  margin-right: 4px;
+  font-size: 10px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, monospace);
+  color: rgba(229, 222, 255, 0.85);
+}
+
+/* v2.74.235 — Profile drawer (Wave 2). Collapsible block beneath
+ * the landmark row showing Claude-generated context: description,
+ * aliases, common operations, pitfalls, expected content kind,
+ * confidence. Violet accent matches the rest of the Claude-assisted
+ * affordance language; the body uses a subtle indent + dimmer
+ * background so it reads as "supplementary to" the row above. */
+.dbg-locale-landmark-profile {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+.dbg-locale-landmark-profile-toggle {
+  background: transparent;
+  border: none;
+  color: rgba(196, 181, 253, 0.85);
+  font-size: 11px;
+  padding: 2px 4px;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dbg-locale-landmark-profile-toggle:hover {
+  color: rgba(216, 209, 255, 1);
+}
+.dbg-locale-landmark-profile-conf {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: rgba(196, 181, 253, 0.75);
+  background: rgba(167, 139, 250, 0.10);
+  border: 1px solid rgba(167, 139, 250, 0.30);
+  border-radius: 10px;
+  padding: 1px 8px;
+  letter-spacing: 0.02em;
+}
+.dbg-locale-landmark-profile-body {
+  flex: 1 1 100%;
+  margin-top: 4px;
+  padding: 8px 12px;
+  background: rgba(167, 139, 250, 0.05);
+  border: 1px solid rgba(167, 139, 250, 0.20);
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dbg-locale-landmark-profile-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+}
+.dbg-locale-landmark-profile-row label {
+  font-weight: 600;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: rgba(196, 181, 253, 0.85);
+}
+.dbg-locale-landmark-profile-hint {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--muted);
+  margin-left: 6px;
+}
+.dbg-locale-landmark-profile-desc {
+  width: 100%;
+  background: var(--bg2);
+  color: var(--text);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  resize: vertical;
+}
+.dbg-locale-landmark-profile-desc:focus {
+  outline: none;
+  border-color: rgba(167, 139, 250, 0.55);
+}
+.dbg-locale-landmark-profile-aliases {
+  width: 100%;
+  background: var(--bg2);
+  color: var(--text);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 11px;
+}
+.dbg-locale-landmark-profile-aliases:focus {
+  outline: none;
+  border-color: rgba(167, 139, 250, 0.55);
+}
+
+/* v2.74.244 — Action effect dropdown. Same chrome as the aliases
+ * input so the drawer reads as a single coherent edit surface. */
+.dbg-locale-landmark-profile-effect {
+  width: 100%;
+  background: var(--bg2);
+  color: var(--text);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: 11px;
+}
+.dbg-locale-landmark-profile-effect:focus {
+  outline: none;
+  border-color: rgba(167, 139, 250, 0.55);
+}
+.dbg-locale-landmark-profile-chip {
+  display: inline-block;
+  background: rgba(167, 139, 250, 0.15);
+  border: 1px solid rgba(167, 139, 250, 0.40);
+  border-radius: 3px;
+  padding: 1px 6px;
+  margin-right: 4px;
+  font-size: 10px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, monospace);
+  color: rgba(216, 209, 255, 0.95);
+}
+.dbg-locale-landmark-profile-pitfalls {
+  margin: 0;
+  padding-left: 18px;
+  list-style: disc;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: rgba(253, 224, 71, 0.92);
+}
+.dbg-locale-landmark-profile-pitfalls li {
+  margin: 2px 0;
+}
+.dbg-locale-landmark-profile-empty {
+  color: rgba(255, 255, 255, 0.40);
+  font-style: italic;
+  font-size: 10.5px;
+}
+
+/* v2.74.238 — Selector display in the profile drawer. Read-only
+ * monospace block, full row width, word-breaks on long selectors so
+ * it never overflows the drawer. Pick is the only path to change
+ * the selector — promoted off the always-visible row so locale
+ * authoring reads as "name + Pick", with selector as inspectable
+ * implementation detail behind the drawer. */
+.dbg-locale-landmark-profile-selector {
+  display: block;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 10.5px;
+  line-height: 1.4;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  padding: 6px 8px;
+  word-break: break-all;
+  color: rgba(229, 222, 255, 0.90);
+}
+.dbg-locale-landmark-profile-frame {
+  font-size: 10.5px;
+  color: rgba(196, 181, 253, 0.75);
+  margin-top: 4px;
+}
+.dbg-locale-landmark-profile-frame code {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 10px;
+  color: rgba(216, 209, 255, 0.9);
+}
+
+/* v2.74.245 — Phase 7a: iframe context display in drawer. Named
+ * contexts get an origin badge + predicate description; legacy
+ * frameUrl-only bindings get a "re-Pick to migrate" hint. */
+.dbg-locale-landmark-iframe-origin {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-left: 6px;
+}
+.dbg-locale-landmark-iframe-same-origin {
+  background: rgba(74, 222, 128, 0.15);
+  color: rgba(187, 247, 208, 1);
+  border: 1px solid rgba(74, 222, 128, 0.45);
+}
+.dbg-locale-landmark-iframe-cross-origin {
+  background: rgba(251, 191, 36, 0.15);
+  color: rgba(253, 224, 71, 0.95);
+  border: 1px solid rgba(251, 191, 36, 0.50);
+}
+.dbg-locale-landmark-iframe-predicate {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 2px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, monospace);
+}
+.dbg-locale-landmark-iframe-orphan {
+  color: rgba(252, 165, 165, 0.95);
+  background: rgba(247, 110, 110, 0.06);
+  border: 1px solid rgba(247, 110, 110, 0.35);
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.dbg-locale-landmark-iframe-legacy-hint {
+  display: block;
+  font-size: 9.5px;
+  color: rgba(251, 191, 36, 0.85);
+  margin-top: 2px;
+  font-style: italic;
+}
+
+/* v2.74.239 — Identity layer (Phase 1 of substrate spec). UID, a11y
+ * role, accessible name, hierarchical context, canonical URL — all
+ * derived from the DOM at Pick / Verify time, never edited directly.
+ * Two-column grid for compact key/value display; teal accent
+ * distinguishes the identity layer from the realization (selector)
+ * and description (description/aliases) sections of the drawer. */
+.dbg-locale-landmark-identity-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 12px;
+  row-gap: 4px;
+  align-items: baseline;
+  margin-top: 2px;
+  padding: 8px 10px;
+  background: rgba(45, 212, 191, 0.05);
+  border: 1px solid rgba(45, 212, 191, 0.25);
+  border-radius: 4px;
+}
+.dbg-locale-landmark-identity-key {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+  color: rgba(153, 246, 228, 0.80);
+  white-space: nowrap;
+}
+.dbg-locale-landmark-identity-val {
+  font-size: 11px;
+  color: rgba(229, 222, 255, 0.92);
+  word-break: break-all;
+  min-width: 0;
+}
+.dbg-locale-landmark-identity-val code {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 10.5px;
+  background: rgba(0, 0, 0, 0.25);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: rgba(187, 247, 208, 0.95);
+}
+.dbg-locale-landmark-identity-url {
+  font-size: 10px !important;
+  color: rgba(196, 181, 253, 0.75) !important;
+  background: rgba(0, 0, 0, 0.20) !important;
+}
+.dbg-locale-landmark-identity-chip {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-left: 4px;
+}
+.dbg-locale-landmark-identity-canonical {
+  background: rgba(45, 212, 191, 0.18);
+  color: rgba(153, 246, 228, 1);
+  border: 1px solid rgba(45, 212, 191, 0.55);
+}
+.dbg-locale-landmark-identity-local {
+  background: rgba(251, 191, 36, 0.15);
+  color: rgba(253, 224, 71, 0.95);
+  border: 1px solid rgba(251, 191, 36, 0.50);
+}
+
+/* v2.74.242 — Phase 4: lifecycle chip on the landmark row. Surfaces
+ * runtime substrate-health state (stale-suspected after heuristic
+ * recovery; stale-confirmed when recovery also failed; deprecated
+ * when the author marked it). Sits next to the authoring score chip
+ * so both signals are visible simultaneously. */
+.dbg-locale-landmark-lifecycle-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  font-size: 10px;
+  margin-left: 2px;
+}
+.dbg-locale-landmark-lifecycle-suspected {
+  background: rgba(251, 191, 36, 0.18);
+  color: rgba(253, 224, 71, 1);
+  border: 1px solid rgba(251, 191, 36, 0.55);
+}
+.dbg-locale-landmark-lifecycle-confirmed {
+  background: rgba(247, 110, 110, 0.18);
+  color: rgba(252, 165, 165, 1);
+  border: 1px solid rgba(247, 110, 110, 0.55);
+}
+.dbg-locale-landmark-lifecycle-deprecated {
+  background: rgba(120, 113, 108, 0.15);
+  color: rgba(168, 162, 158, 0.95);
+  border: 1px solid rgba(120, 113, 108, 0.40);
+}
+
+.dbg-locale-landmark-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: var(--bg3);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+
+/* v2.74.281 — Compact landmark card. Single-row header puts status
+ * icon + accessibleName + alias input + actions + drawer toggle on
+ * the same horizontal flow. No wasted vertical space; alias is
+ * inline with action buttons, not on its own line. */
+.lm-header {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+}
+.lm-header-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;   /* prevent grid blowout on long names */
+}
+.lm-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: rgba(226, 232, 240, 0.98);
+  line-height: 1.3;
+  word-break: break-word;
+}
+.lm-name-empty {
+  font-weight: 400;
+  font-style: italic;
+  color: rgba(148, 163, 184, 0.70);
+}
+/* v2.74.304 — Derived-name treatments. The card shows a meaningful
+   label even when W3C AccName came back empty; these classes telegraph
+   "this isn't the canonical accessible name" so the author can spot
+   accessibility-poor picks at a glance. Tooltips explain each tier. */
+.lm-name-derived {
+  font-style: italic;
+  color: rgba(226, 232, 240, 0.85);   /* slightly muted vs canonical */
+  cursor: help;
+}
+.lm-name-placeholder {
+  font-style: italic;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(148, 163, 184, 0.80);
+  cursor: help;
+}
+
+/* Single status icon — small, sits in the grid's left column.
+ * Tooltip carries the full detail (score, ops allowed, issues). */
+.lm-status-icon {
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: help;
+  font-weight: 600;
+  user-select: none;
+  align-self: start;
+  margin-top: 2px;
+}
+.lm-status-icon.lm-status-ready       { color: rgba(34, 197, 94, 0.95);  background: rgba(34, 197, 94, 0.12); }
+.lm-status-icon.lm-status-caveats     { color: rgba(253, 224, 71, 0.95); background: rgba(234, 179, 8, 0.12); }
+.lm-status-icon.lm-status-stale       { color: rgba(253, 224, 71, 0.95); background: rgba(234, 179, 8, 0.12); }
+.lm-status-icon.lm-status-fail        { color: rgba(254, 202, 202, 0.95); background: rgba(239, 68, 68, 0.12); }
+.lm-status-icon.lm-status-deprecated  { color: rgba(148, 163, 184, 0.90); background: rgba(100, 116, 139, 0.12); }
+.lm-status-icon.lm-status-unverified  { color: rgba(148, 163, 184, 0.85); background: rgba(148, 163, 184, 0.08); }
+
+/* Controls row: alias input + action buttons + drawer toggle, all
+ * inline. Alias input grows to fill remaining space; buttons hug
+ * the right edge. */
+.lm-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.lm-alias-input {
+  flex: 1;
+  min-width: 80px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  background: var(--bg1);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: inherit;
+}
+.lm-alias-input:focus {
+  border-color: rgba(96, 165, 250, 0.65);
+  outline: none;
+}
+
+/* Drawer toggle as a small chevron at the end of the controls row.
+ * Mutes the previous "▶ Details — <summary>" wide button. */
+.lm-details-toggle {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: rgba(148, 163, 184, 0.85);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.lm-details-toggle:hover {
+  border-color: rgba(255, 255, 255, 0.30);
+  color: rgba(226, 232, 240, 0.95);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* v2.74.309 — Effect source badge. Telegraphs trust level: heuristic /
+   claude are guesses (amber), authored is deliberate (blue), observed
+   is confirmed (green). */
+.lm-effect-source {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 7px;
+  margin-left: 4px;
+  letter-spacing: .02em;
+  cursor: help;
+  vertical-align: middle;
+}
+.lm-effect-source-heuristic { background: rgba(240,180,41,.14); color: #f0b429; border: 1px solid rgba(240,180,41,.3); }
+.lm-effect-source-claude    { background: rgba(217,70,239,.12); color: #d946ef; border: 1px solid rgba(217,70,239,.3); }
+.lm-effect-source-authored  { background: rgba(96,165,250,.14); color: #60a5fa; border: 1px solid rgba(96,165,250,.3); }
+.lm-effect-source-observed  { background: rgba(61,214,140,.14); color: #3dd68c; border: 1px solid rgba(61,214,140,.3); }
+
+/* Drawer subsection grouping — gives each domain area a clear label
+ * and visual containment, so inputs feel grouped rather than floating. */
+.lm-drawer-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+/* v2.74.293 — Captured screenshot thumbnail. Constrained width so even
+   wide section captures don't blow out the drawer; the click handler
+   opens the full image in a new tab where the author can pan/zoom. */
+.lm-screenshot-thumb-wrap {
+  display: flex;
+  justify-content: flex-start;
+  padding: 4px 0;
+}
+.lm-screenshot-thumb {
+  max-width: 260px;
+  max-height: 180px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.25);
+  cursor: zoom-in;
+  display: block;
+  object-fit: contain;
+  transition: border-color 0.12s ease, transform 0.12s ease;
+}
+.lm-screenshot-thumb:hover {
+  border-color: rgba(96, 165, 250, 0.6);
+  transform: scale(1.01);
+}
+.lm-drawer-section:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+.lm-drawer-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgba(148, 163, 184, 0.95);
+}
+.lm-drawer-hint {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-style: italic;
+  color: rgba(148, 163, 184, 0.70);
+  margin-left: 4px;
+}
+.lm-field-label {
+  font-size: 11px;
+  color: rgba(203, 213, 225, 0.92);
+  font-weight: 500;
+  display: block;
+  margin-bottom: 4px;
+}
+
+/* Verification subsection grid: key/value pairs */
+.lm-verif-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.lm-verif-key {
+  color: rgba(148, 163, 184, 0.85);
+  letter-spacing: 0.02em;
+}
+.lm-verif-val {
+  color: rgba(226, 232, 240, 0.92);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lm-verif-ops {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* Existing field — keep but reduce intrusiveness. Now nested in
+ * .lm-alias-input via the new identity zone. Old class kept for
+ * compat with the data-field selector wiring. */
+.dbg-locale-landmark-role {
+  /* deprecated visual styling — overridden by .lm-alias-input.
+   * Class still needed for the data-field event delegation. */
+}
+.dbg-locale-landmark-selector {
+  flex: 1;
+  min-width: 100px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  background: var(--bg1);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: inherit;
+}
+.dbg-locale-landmark-role:focus,
+.dbg-locale-landmark-selector:focus {
+  outline: none;
+  border-color: var(--acc);
+}
+.dbg-locale-landmark-pick,
+.dbg-locale-landmark-verify,
+.dbg-locale-landmark-remove {
+  font-size: 10px;
+  padding: 4px 8px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--sub);
+  cursor: pointer;
+}
+.dbg-locale-landmark-pick:hover,
+.dbg-locale-landmark-verify:hover {
+  color: var(--text);
+  border-color: var(--muted);
+}
+.dbg-locale-landmark-remove {
+  background: none;
+}
+.dbg-locale-landmark-remove:hover {
+  color: var(--fail);
+}
+.dbg-locale-landmark-status {
+  font-size: 10px;
+  padding: 3px 6px;
+  border-radius: 3px;
+  background: var(--bg1);
+  color: var(--muted);
+  align-self: flex-start;
+}
+.dbg-locale-landmark-status.status-ok {
+  background: rgba(61, 214, 140, 0.10);
+  color: var(--pass);
+  border: 1px solid rgba(61, 214, 140, 0.25);
+}
+.dbg-locale-landmark-status.status-err {
+  background: rgba(247, 110, 110, 0.10);
+  color: var(--fail);
+  border: 1px solid rgba(247, 110, 110, 0.25);
+}
+.dbg-locale-landmark-sample {
+  display: block;
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  padding: 4px 6px;
+  background: var(--bg1);
+  border-radius: 3px;
+  color: var(--sub);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 60px;
+  overflow: auto;
+}
+
+.dbg-locale-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+}
+.dbg-locale-actions-buttons {
+  display: flex;
+  gap: 8px;
+}
+.dbg-locale-actions .btn-primary,
+.dbg-locale-actions .btn-secondary {
+  flex: 1;
+}
+/* v2.74.282 — Inline reason hint shown when Save Locale is disabled.
+ * Yellow accent + warning glyph. Hides via .hidden when save is
+ * enabled. Wraps over multiple lines for long reasons. */
+.dbg-locale-save-reason {
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: rgba(234, 179, 8, 0.08);
+  border: 1px solid rgba(234, 179, 8, 0.35);
+  color: rgba(253, 224, 71, 0.92);
+}
+.dbg-locale-save-reason::before {
+  content: '⚠ ';
+  font-weight: 700;
+  margin-right: 2px;
+}
+.dbg-locale-save-reason.hidden { display: none; }
+
+.dbg-locale-pick-banner {
+  position: fixed;
+  bottom: 12px;
+  left: 12px;
+  right: 12px;
+  padding: 10px 12px;
+  background: var(--gen);
+  color: var(--bg0);
+  border-radius: var(--r, 7px);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 100;
+}
+.dbg-locale-pick-text { flex: 1; }
+.dbg-locale-pick-banner .btn-secondary {
+  background: rgba(255, 255, 255, 0.2);
+  color: var(--bg0);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+/* ── v2.72.45 (Pass 17g iter) — locale capture metadata card ──────────────
+   New editable metadata layer between the header and the instructions.
+   Header is now compact (just Ground + active tab); metadata card holds
+   the editable Name / Description / URL pattern fields. URL pattern
+   auto-syncs to the active tab on every tab change. */
+
+.dbg-locale-ground-label {
+  font-size: 11px;
+  color: var(--sub);
+  font-style: italic;
+}
+
+.dbg-locale-meta-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: var(--r, 7px);
+}
+.dbg-locale-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.dbg-locale-field-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--sub);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.dbg-locale-field input,
+.dbg-locale-field textarea {
+  padding: 6px 8px;
+  font-size: 11px;
+  background: var(--bg1);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--text);
+  font-family: inherit;
+  resize: vertical;
+}
+#dbg-locale-pattern-input {
+  font-family: ui-monospace, monospace;
+}
+.dbg-locale-field input:focus,
+.dbg-locale-field textarea:focus {
+  outline: none;
+  border-color: var(--acc);
+}
+.dbg-locale-field-hint {
+  font-size: 10px;
+  color: var(--muted);
+  font-style: italic;
+}
+.dbg-locale-field-hint code {
+  font-family: ui-monospace, monospace;
+  background: var(--bg3);
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+/* v2.74.257 — Phase 10.5 surface: inline landmark replacement picker.
+ * Sits in the landmark row between status and profile drawer. Mirrors
+ * the row's visual language (muted border, tight spacing). Candidates
+ * are clickable cards with confidence dot + composite percentage. */
+.dbg-locale-landmark-replace {
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.dbg-locale-landmark-replace:hover {
+  border-color: rgba(96, 165, 250, 0.60);
+  color: rgba(191, 219, 254, 0.95);
+  background: rgba(96, 165, 250, 0.08);
+}
+
+.dbg-locale-landmark-replace-picker {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: 5px;
+  background: rgba(96, 165, 250, 0.06);
+  border: 1px dashed rgba(96, 165, 250, 0.40);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dbg-locale-landmark-replace-header {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(191, 219, 254, 0.95);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.dbg-locale-landmark-replace-loading,
+.dbg-locale-landmark-replace-empty,
+.dbg-locale-landmark-replace-error {
+  font-size: 11px;
+  line-height: 1.4;
+  color: rgba(226, 232, 240, 0.78);
+  padding: 4px 0;
+}
+.dbg-locale-landmark-replace-error {
+  color: rgba(254, 202, 202, 0.92);
+}
+.dbg-locale-landmark-replace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dbg-locale-landmark-replace-candidate {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(15, 23, 42, 0.55);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  color: rgba(226, 232, 240, 0.92);
+  text-align: left;
+  transition: border-color .15s, background .15s;
+}
+.dbg-locale-landmark-replace-candidate:hover {
+  border-color: rgba(96, 165, 250, 0.70);
+  background: rgba(30, 41, 59, 0.85);
+}
+.dbg-locale-landmark-replace-conf {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.dbg-locale-landmark-replace-breakdown {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(226, 232, 240, 0.78);
+  cursor: help;
+}
+.dbg-locale-landmark-replace-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dbg-locale-landmark-replace-lifecycle {
+  font-size: 10px;
+  font-family: ui-monospace, monospace;
+  color: rgba(148, 163, 184, 0.85);
+  letter-spacing: 0.02em;
+}
+.dbg-locale-landmark-replace-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 2px;
+}
+
+/* v2.74.258 — Phase 9 surface: Verify button + outcome banner.
+ * Uses the show-button styling as base (transparent border, hover
+ * accent) but with cyan for the verify accent — distinct from
+ * green (show overlay), blue (replace), and red (remove). */
+.dbg-locale-landmark-verify {
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.dbg-locale-landmark-verify:hover:not(:disabled) {
+  border-color: rgba(34, 211, 238, 0.65);
+  color: rgba(165, 243, 252, 0.95);
+  background: rgba(34, 211, 238, 0.08);
+}
+.dbg-locale-landmark-verify:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.dbg-locale-landmark-verify-outcome {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.3;
+}
+.dbg-locale-landmark-verify-ok {
+  background: rgba(34, 197, 94, 0.10);
+  border: 1px solid rgba(34, 197, 94, 0.40);
+  color: rgba(187, 247, 208, 0.95);
+}
+.dbg-locale-landmark-verify-recovered {
+  background: rgba(234, 179, 8, 0.08);
+  border: 1px solid rgba(234, 179, 8, 0.40);
+  color: rgba(253, 224, 71, 0.92);
+}
+.dbg-locale-landmark-verify-failed {
+  background: rgba(239, 68, 68, 0.10);
+  border: 1px solid rgba(239, 68, 68, 0.40);
+  color: rgba(254, 202, 202, 0.95);
+}
+.dbg-locale-landmark-verify-skipped {
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px dashed rgba(148, 163, 184, 0.35);
+  color: rgba(203, 213, 225, 0.85);
+  font-style: italic;
+}
+
+/* v2.74.259 — Phase 8 surface: substrate events panel. Collapsible
+ * section between landmarks and Save actions. Header is a button
+ * (chevron + label + count badge). Body fades in when expanded; rows
+ * use the same kind→accent palette as the verify outcomes. */
+.dbg-locale-events {
+  /* v2.74.283 — Card chrome (was using a top divider line as a
+   * pseudo-separator; replaced with proper card chrome to match the
+   * other locale form sections). */
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: var(--r, 7px);
+}
+.dbg-locale-events-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  color: rgba(226, 232, 240, 0.85);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 4px 0;
+  cursor: pointer;
+  width: 100%;
+}
+.dbg-locale-events-header:hover { color: rgba(255, 255, 255, 0.95); }
+.dbg-locale-events-chevron {
+  font-size: 10px;
+  color: rgba(148, 163, 184, 0.85);
+  width: 12px;
+  display: inline-block;
+  text-align: center;
+}
+.dbg-locale-events-label { flex: 1; text-align: left; }
+.dbg-locale-events-count {
+  font-size: 10px;
+  font-family: ui-monospace, monospace;
+  color: rgba(148, 163, 184, 0.85);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.dbg-locale-events-body {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dbg-locale-events-body.hidden { display: none; }
+/* v2.74.272 — Substrate health summary banner. Compact two-line
+ * aggregate at the top of the events panel body. Each line wraps
+ * naturally on narrow widths; tags use the per-kind accent palette
+ * for visual continuity with event rows and lifecycle chips. */
+.dbg-locale-events-health {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dbg-locale-events-health:empty {
+  display: none;
+}
+.dbg-locale-events-health-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: rgba(15, 23, 42, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.dbg-locale-events-health-line.dbg-locale-events-health-quiet {
+  color: rgba(148, 163, 184, 0.78);
+  font-style: italic;
+}
+.dbg-locale-events-health-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: rgba(148, 163, 184, 0.85);
+  font-weight: 600;
+}
+.dbg-locale-events-health-total {
+  color: rgba(226, 232, 240, 0.95);
+  font-weight: 600;
+}
+.dbg-locale-events-health-tag {
+  font-size: 10px;
+  font-family: ui-monospace, monospace;
+  padding: 1px 6px;
+  border-radius: 8px;
+  letter-spacing: 0.02em;
+}
+.dbg-locale-events-health-tag.tag-verified  { background: rgba(34, 197, 94, 0.12);  border: 1px solid rgba(34, 197, 94, 0.40);  color: rgba(187, 247, 208, 0.95); }
+.dbg-locale-events-health-tag.tag-suspected { background: rgba(234, 179, 8, 0.10);  border: 1px solid rgba(234, 179, 8, 0.40);  color: rgba(253, 224, 71, 0.95); }
+.dbg-locale-events-health-tag.tag-confirmed { background: rgba(239, 68, 68, 0.10);  border: 1px solid rgba(239, 68, 68, 0.40);  color: rgba(254, 202, 202, 0.95); }
+.dbg-locale-events-health-tag.tag-deprecated{ background: rgba(100, 116, 139, 0.10); border: 1px dashed rgba(100, 116, 139, 0.50); color: rgba(148, 163, 184, 0.95); }
+.dbg-locale-events-health-tag.tag-fresh     { background: rgba(148, 163, 184, 0.10); border: 1px solid rgba(148, 163, 184, 0.35); color: rgba(203, 213, 225, 0.92); }
+.dbg-locale-events-health-tag.tag-recovered { background: rgba(234, 179, 8, 0.10);  border: 1px solid rgba(234, 179, 8, 0.40);  color: rgba(253, 224, 71, 0.95); }
+.dbg-locale-events-health-tag.tag-drift     { background: rgba(251, 146, 60, 0.10); border: 1px solid rgba(251, 146, 60, 0.40); color: rgba(254, 215, 170, 0.95); }
+.dbg-locale-events-health-tag.tag-failed    { background: rgba(239, 68, 68, 0.10);  border: 1px solid rgba(239, 68, 68, 0.40);  color: rgba(254, 202, 202, 0.95); }
+.dbg-locale-events-health-tag.tag-observed  { background: rgba(34, 211, 238, 0.10); border: 1px solid rgba(34, 211, 238, 0.40); color: rgba(165, 243, 252, 0.95); }
+.dbg-locale-events-health-subtle {
+  color: rgba(148, 163, 184, 0.80);
+  font-style: italic;
+}
+
+.dbg-locale-events-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 280px;
+  overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  padding: 4px;
+  background: rgba(15, 23, 42, 0.35);
+}
+.dbg-locale-events-loading,
+.dbg-locale-events-error,
+.dbg-locale-events-empty {
+  font-size: 11px;
+  padding: 8px;
+  color: rgba(203, 213, 225, 0.78);
+}
+.dbg-locale-events-error { color: rgba(254, 202, 202, 0.92); }
+.dbg-locale-events-empty { color: rgba(148, 163, 184, 0.78); font-style: italic; }
+.dbg-locale-events-row {
+  display: grid;
+  /* v2.74.266 — Added trailing action column for drift-apply button.
+   * Empty for non-drift events; collapses thanks to auto-sizing. */
+  grid-template-columns: auto auto 1fr 2fr auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 1.3;
+  border-left: 2px solid transparent;
+}
+.dbg-locale-events-row:hover { background: rgba(255, 255, 255, 0.03); }
+.dbg-locale-events-icon { font-size: 12px; width: 14px; text-align: center; }
+.dbg-locale-events-kind {
+  font-weight: 600;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.dbg-locale-events-landmark {
+  font-family: ui-monospace, monospace;
+  color: rgba(226, 232, 240, 0.92);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dbg-locale-events-detail {
+  color: rgba(148, 163, 184, 0.88);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dbg-locale-events-time {
+  font-size: 10px;
+  font-family: ui-monospace, monospace;
+  color: rgba(148, 163, 184, 0.85);
+  white-space: nowrap;
+}
+/* Per-kind accent (matches the verify-outcome palette so the colors
+ * are consistent across substrate UI). */
+.dbg-locale-events-row.evt-ok        { border-left-color: rgba(34, 197, 94, 0.65); }
+.dbg-locale-events-row.evt-recovered { border-left-color: rgba(234, 179, 8, 0.65); }
+.dbg-locale-events-row.evt-failed    { border-left-color: rgba(239, 68, 68, 0.65); }
+.dbg-locale-events-row.evt-lifecycle { border-left-color: rgba(96, 165, 250, 0.65); }
+.dbg-locale-events-row.evt-observed  { border-left-color: rgba(34, 211, 238, 0.65); }
+.dbg-locale-events-row.evt-drift     { border-left-color: rgba(251, 146, 60, 0.65); }
+.dbg-locale-events-row.evt-ok        .dbg-locale-events-kind { color: rgba(187, 247, 208, 0.95); }
+.dbg-locale-events-row.evt-recovered .dbg-locale-events-kind { color: rgba(253, 224, 71, 0.95); }
+.dbg-locale-events-row.evt-failed    .dbg-locale-events-kind { color: rgba(254, 202, 202, 0.95); }
+.dbg-locale-events-row.evt-lifecycle .dbg-locale-events-kind { color: rgba(191, 219, 254, 0.95); }
+.dbg-locale-events-row.evt-observed  .dbg-locale-events-kind { color: rgba(165, 243, 252, 0.95); }
+.dbg-locale-events-row.evt-drift     .dbg-locale-events-kind { color: rgba(254, 215, 170, 0.95); }
+.dbg-locale-events-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+}
+.dbg-locale-events-hint {
+  font-size: 10px;
+  color: rgba(148, 163, 184, 0.75);
+  font-style: italic;
+  flex: 1;
+}
+
+/* v2.74.262 — Bulk verify affordance: stale-count badge in header +
+ * bulk outcome banner above the footer. Badge uses the same yellow as
+ * the stale-suspected lifecycle chip for visual continuity. */
+.dbg-locale-events-stale-badge {
+  font-size: 10px;
+  font-family: ui-monospace, monospace;
+  background: rgba(234, 179, 8, 0.15);
+  border: 1px solid rgba(234, 179, 8, 0.40);
+  color: rgba(253, 224, 71, 0.95);
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.dbg-locale-events-stale-badge.hidden { display: none; }
+
+.dbg-locale-events-bulk-outcome {
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.3;
+  font-family: ui-monospace, monospace;
+}
+.dbg-locale-events-bulk-outcome.hidden { display: none; }
+.dbg-locale-events-bulk-loading {
+  background: rgba(34, 211, 238, 0.08);
+  border: 1px dashed rgba(34, 211, 238, 0.40);
+  color: rgba(165, 243, 252, 0.95);
+  font-style: italic;
+}
+.dbg-locale-events-bulk-success {
+  background: rgba(34, 197, 94, 0.10);
+  border: 1px solid rgba(34, 197, 94, 0.40);
+  color: rgba(187, 247, 208, 0.95);
+}
+.dbg-locale-events-bulk-mixed {
+  background: rgba(234, 179, 8, 0.08);
+  border: 1px solid rgba(234, 179, 8, 0.40);
+  color: rgba(253, 224, 71, 0.95);
+}
+.dbg-locale-events-bulk-error {
+  background: rgba(239, 68, 68, 0.10);
+  border: 1px solid rgba(239, 68, 68, 0.40);
+  color: rgba(254, 202, 202, 0.95);
+}
+.dbg-locale-events-bulk-info {
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px dashed rgba(148, 163, 184, 0.35);
+  color: rgba(203, 213, 225, 0.85);
+}
+
+.dbg-locale-events-footer button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* v2.74.265 — Phase 7d surface: locale active-state preview section.
+ * Sits between predicates and the events panel. Verdict header (✓/✗)
+ * uses the verify-outcome palette; per-leaf rows show kind-specific
+ * label + pass/fail icon + reason on failure. */
+.dbg-locale-active-state {
+  /* v2.74.283 — Card chrome. */
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: var(--r, 7px);
+}
+.dbg-locale-active-state-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dbg-locale-active-state-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(226, 232, 240, 0.85);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.dbg-locale-active-state-head-spacer { flex: 1; }
+.dbg-locale-active-state-result {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dbg-locale-active-state-loading,
+.dbg-locale-active-state-no-tab,
+.dbg-locale-active-state-error {
+  font-size: 11px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  line-height: 1.4;
+}
+.dbg-locale-active-state-loading {
+  background: rgba(34, 211, 238, 0.06);
+  border: 1px dashed rgba(34, 211, 238, 0.30);
+  color: rgba(165, 243, 252, 0.85);
+  font-style: italic;
+}
+.dbg-locale-active-state-no-tab {
+  background: rgba(234, 179, 8, 0.08);
+  border: 1px solid rgba(234, 179, 8, 0.40);
+  color: rgba(253, 224, 71, 0.92);
+}
+.dbg-locale-active-state-error {
+  background: rgba(239, 68, 68, 0.10);
+  border: 1px solid rgba(239, 68, 68, 0.40);
+  color: rgba(254, 202, 202, 0.92);
+}
+
+.dbg-locale-active-state-verdict {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 10px;
+  border-radius: 4px;
+  line-height: 1.3;
+}
+.dbg-locale-active-state-verdict-active {
+  background: rgba(34, 197, 94, 0.10);
+  border: 1px solid rgba(34, 197, 94, 0.40);
+  color: rgba(187, 247, 208, 0.95);
+}
+.dbg-locale-active-state-verdict-inactive {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.40);
+  color: rgba(254, 202, 202, 0.92);
+}
+
+.dbg-locale-active-state-leaf-empty {
+  font-size: 11px;
+  color: rgba(148, 163, 184, 0.78);
+  font-style: italic;
+  padding: 4px 0;
+}
+.dbg-locale-active-state-leaf {
+  display: grid;
+  grid-template-columns: auto 1fr 2fr;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 1.3;
+  border-left: 2px solid transparent;
+}
+.dbg-locale-active-state-leaf.leaf-pass { border-left-color: rgba(34, 197, 94, 0.65); }
+.dbg-locale-active-state-leaf.leaf-fail { border-left-color: rgba(239, 68, 68, 0.65); }
+.dbg-locale-active-state-leaf.leaf-null { border-left-color: rgba(148, 163, 184, 0.55); }
+.dbg-locale-active-state-leaf-icon {
+  width: 14px;
+  text-align: center;
+  font-size: 12px;
+}
+.dbg-locale-active-state-leaf.leaf-pass .dbg-locale-active-state-leaf-icon { color: rgba(187, 247, 208, 0.95); }
+.dbg-locale-active-state-leaf.leaf-fail .dbg-locale-active-state-leaf-icon { color: rgba(254, 202, 202, 0.95); }
+.dbg-locale-active-state-leaf.leaf-null .dbg-locale-active-state-leaf-icon { color: rgba(203, 213, 225, 0.85); }
+.dbg-locale-active-state-leaf-label {
+  color: rgba(226, 232, 240, 0.92);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dbg-locale-active-state-leaf-reason {
+  color: rgba(148, 163, 184, 0.85);
+  font-size: 10px;
+  font-style: italic;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* v2.74.266 — Drift-confirmation Apply button + applied marker.
+ * Renders in the trailing action column of landmark-effect-drift
+ * event rows. Orange accent matches the drift event kind palette. */
+.dbg-locale-events-action {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+}
+.dbg-locale-events-apply-btn {
+  background: transparent;
+  border: 1px solid rgba(251, 146, 60, 0.50);
+  color: rgba(254, 215, 170, 0.95);
+  border-radius: 3px;
+  padding: 1px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: border-color .15s, background .15s, color .15s;
+}
+.dbg-locale-events-apply-btn:hover:not(:disabled) {
+  border-color: rgba(251, 146, 60, 0.85);
+  background: rgba(251, 146, 60, 0.12);
+  color: rgba(255, 237, 213, 1);
+}
+.dbg-locale-events-apply-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+.dbg-locale-events-action-applied {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: rgba(187, 247, 208, 0.95);
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(34, 197, 94, 0.12);
+  border: 1px solid rgba(34, 197, 94, 0.40);
+}
+
+/* v2.74.267 — iframe contexts editor. Compact card per context with
+ * a name input + kind dropdown + per-kind fields + same-origin badge
+ * + Test/Remove buttons. Visual language follows predicates section
+ * (same border-radius, padding, hint typography). */
+.dbg-locale-iframe-contexts {
+  /* v2.74.283 — Card chrome to match the meta-card / landmarks pattern.
+   * The .dbg-locale parent has flex gap:12px so no margin-top needed. */
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: var(--r, 7px);
+}
+.dbg-locale-iframe-contexts-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dbg-locale-iframe-contexts-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(226, 232, 240, 0.85);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.dbg-locale-iframe-contexts-optional {
+  font-size: 10px;
+  color: rgba(148, 163, 184, 0.75);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-style: italic;
+}
+.dbg-locale-iframe-contexts-head-spacer { flex: 1; }
+.dbg-locale-iframe-contexts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dbg-locale-iframe-contexts-empty {
+  font-size: 11px;
+  color: rgba(148, 163, 184, 0.78);
+  font-style: italic;
+  padding: 6px 0;
+}
+.dbg-locale-iframe-contexts-hint {
+  font-size: 10px;
+  color: rgba(148, 163, 184, 0.75);
+  font-style: italic;
+  margin-top: 2px;
+}
+
+.dbg-locale-iframe-context-row {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(15, 23, 42, 0.45);
+  border-radius: 5px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dbg-locale-iframe-context-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.dbg-locale-iframe-context-name-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 140px;
+}
+.dbg-locale-iframe-context-name-label > span {
+  font-size: 10px;
+  color: rgba(148, 163, 184, 0.85);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.dbg-locale-iframe-context-name-label input {
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(226, 232, 240, 0.95);
+  border-radius: 3px;
+  padding: 4px 6px;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+}
+.dbg-locale-iframe-context-refs {
+  font-size: 10px;
+  font-family: ui-monospace, monospace;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(96, 165, 250, 0.12);
+  border: 1px solid rgba(96, 165, 250, 0.40);
+  color: rgba(191, 219, 254, 0.95);
+}
+.dbg-locale-iframe-context-origin {
+  font-size: 10px;
+  font-family: ui-monospace, monospace;
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+.dbg-locale-iframe-context-same-origin {
+  background: rgba(34, 197, 94, 0.10);
+  border: 1px solid rgba(34, 197, 94, 0.40);
+  color: rgba(187, 247, 208, 0.95);
+}
+.dbg-locale-iframe-context-cross-origin {
+  background: rgba(251, 146, 60, 0.10);
+  border: 1px solid rgba(251, 146, 60, 0.40);
+  color: rgba(254, 215, 170, 0.95);
+}
+.dbg-locale-iframe-context-remove {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: rgba(254, 202, 202, 0.78);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.dbg-locale-iframe-context-remove:hover {
+  border-color: rgba(239, 68, 68, 0.65);
+  background: rgba(239, 68, 68, 0.10);
+  color: rgba(254, 202, 202, 1);
+}
+.dbg-locale-iframe-context-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dbg-locale-iframe-context-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dbg-locale-iframe-context-field-label {
+  font-size: 10px;
+  color: rgba(148, 163, 184, 0.85);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.dbg-locale-iframe-context-field select,
+.dbg-locale-iframe-context-field input {
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(226, 232, 240, 0.95);
+  border-radius: 3px;
+  padding: 4px 6px;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+}
+.dbg-locale-iframe-context-test {
+  font-size: 11px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  line-height: 1.3;
+}
+.dbg-locale-iframe-context-test.test-loading {
+  background: rgba(34, 211, 238, 0.06);
+  border: 1px dashed rgba(34, 211, 238, 0.30);
+  color: rgba(165, 243, 252, 0.85);
+  font-style: italic;
+}
+.dbg-locale-iframe-context-test.test-ok {
+  background: rgba(34, 197, 94, 0.10);
+  border: 1px solid rgba(34, 197, 94, 0.40);
+  color: rgba(187, 247, 208, 0.95);
+}
+.dbg-locale-iframe-context-test.test-absent {
+  background: rgba(234, 179, 8, 0.08);
+  border: 1px solid rgba(234, 179, 8, 0.40);
+  color: rgba(253, 224, 71, 0.92);
+}
+.dbg-locale-iframe-context-test.test-error {
+  background: rgba(239, 68, 68, 0.10);
+  border: 1px solid rgba(239, 68, 68, 0.40);
+  color: rgba(254, 202, 202, 0.92);
+}
+
+/* v2.74.268 — Lifecycle row in profile drawer. Shows current state
+ * as a chip + a Deprecate/Restore button. Chip colors follow the
+ * existing per-state palette (verified=green, suspected=yellow,
+ * confirmed=red, deprecated=gray, fresh=neutral). */
+.dbg-locale-landmark-lifecycle-row-body {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.dbg-locale-landmark-lifecycle-chip-large {
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+.dbg-locale-landmark-lifecycle-chip-large.lifecycle-fresh {
+  background: rgba(148, 163, 184, 0.10);
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  color: rgba(203, 213, 225, 0.92);
+}
+.dbg-locale-landmark-lifecycle-chip-large.lifecycle-verified {
+  background: rgba(34, 197, 94, 0.10);
+  border: 1px solid rgba(34, 197, 94, 0.40);
+  color: rgba(187, 247, 208, 0.95);
+}
+.dbg-locale-landmark-lifecycle-chip-large.lifecycle-suspected {
+  background: rgba(234, 179, 8, 0.08);
+  border: 1px solid rgba(234, 179, 8, 0.40);
+  color: rgba(253, 224, 71, 0.92);
+}
+.dbg-locale-landmark-lifecycle-chip-large.lifecycle-confirmed {
+  background: rgba(239, 68, 68, 0.10);
+  border: 1px solid rgba(239, 68, 68, 0.40);
+  color: rgba(254, 202, 202, 0.95);
+}
+.dbg-locale-landmark-lifecycle-chip-large.lifecycle-deprecated {
+  background: rgba(100, 116, 139, 0.10);
+  border: 1px dashed rgba(100, 116, 139, 0.50);
+  color: rgba(148, 163, 184, 0.95);
+  text-decoration: line-through;
+  text-decoration-color: rgba(148, 163, 184, 0.50);
+}
+.dbg-locale-landmark-lifecycle-action {
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.dbg-locale-landmark-lifecycle-deprecate {
+  border: 1px solid rgba(100, 116, 139, 0.45);
+  color: rgba(148, 163, 184, 0.92);
+}
+.dbg-locale-landmark-lifecycle-deprecate:hover {
+  border-color: rgba(100, 116, 139, 0.75);
+  background: rgba(100, 116, 139, 0.10);
+  color: rgba(203, 213, 225, 1);
+}
+.dbg-locale-landmark-lifecycle-restore {
+  border: 1px solid rgba(34, 197, 94, 0.50);
+  color: rgba(187, 247, 208, 0.92);
+}
+.dbg-locale-landmark-lifecycle-restore:hover {
+  border-color: rgba(34, 197, 94, 0.85);
+  background: rgba(34, 197, 94, 0.10);
+  color: rgba(220, 252, 231, 1);
+}
+
+/* v2.74.260 — Phase 7d surface: additional predicates section.
+ * Sits below the URL pattern field. Each predicate row is a compact
+ * card with a kind dropdown header + a body that swaps shape based
+ * on kind (target landmark dropdown for visible/hasText, text input
+ * for hasText, context name for iframeLoaded). */
+.dbg-locale-predicates {
+  /* v2.74.283 — Card chrome. */
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: var(--r, 7px);
+}
+.dbg-locale-predicates-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dbg-locale-predicates-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(226, 232, 240, 0.85);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.dbg-locale-predicates-optional {
+  font-size: 10px;
+  color: rgba(148, 163, 184, 0.75);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-style: italic;
+}
+.dbg-locale-predicates-head-spacer { flex: 1; }
+
+/* v2.74.271 — Top-level operator selector. Inline label + dropdown
+ * tucked between the section label and the spacer. Compact so it
+ * doesn't dominate the header row. */
+.dbg-locale-predicates-op-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: rgba(148, 163, 184, 0.85);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.dbg-locale-predicates-operator {
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: rgba(226, 232, 240, 0.95);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+.dbg-locale-predicates-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dbg-locale-predicates-empty {
+  font-size: 11px;
+  color: rgba(148, 163, 184, 0.78);
+  font-style: italic;
+  padding: 6px 0;
+}
+.dbg-locale-predicates-hint {
+  font-size: 10px;
+  color: rgba(148, 163, 184, 0.75);
+  font-style: italic;
+  margin-top: 2px;
+}
+
+.dbg-locale-predicate-row {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(15, 23, 42, 0.45);
+  border-radius: 5px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dbg-locale-predicate-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dbg-locale-predicate-kind {
+  flex: 1;
+  background: var(--bg2, rgba(30, 41, 59, 0.85));
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: rgba(226, 232, 240, 0.95);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+.dbg-locale-predicate-remove {
+  flex: 0 0 auto;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: rgba(254, 202, 202, 0.78);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.dbg-locale-predicate-remove:hover {
+  border-color: rgba(239, 68, 68, 0.65);
+  background: rgba(239, 68, 68, 0.10);
+  color: rgba(254, 202, 202, 1);
+}
+.dbg-locale-predicate-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dbg-locale-predicate-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dbg-locale-predicate-field-label {
+  font-size: 10px;
+  color: rgba(148, 163, 184, 0.85);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.dbg-locale-predicate-target,
+.dbg-locale-predicate-value,
+.dbg-locale-predicate-ctxname {
+  background: rgba(15, 23, 42, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(226, 232, 240, 0.95);
+  border-radius: 3px;
+  padding: 4px 6px;
+  font-size: 11px;
+}
+.dbg-locale-predicate-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: rgba(203, 213, 225, 0.85);
+}
+

@@ -1,0 +1,354 @@
+/**
+ * studio.css — styles specific to the Studio page.
+ *
+ * sidepanel.css provides the base design tokens (colors, fonts, spacing) and
+ * the toast/button/form patterns. This file adds the studio-specific shell:
+ * a wider content area, a sticky header, and placeholder content styling.
+ *
+ * Added progressively across the relocation messages.
+ */
+
+.studio-body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg-base, #1a1a1d);
+  color: var(--text, #e4e4e7);
+  font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.studio-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 24px;
+  background: rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid var(--line, rgba(255,255,255,0.08));
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.studio-header-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.studio-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text, #e4e4e7);
+  letter-spacing: 0.2px;
+}
+
+.studio-subtitle {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--muted, #888);
+  font-weight: 500;
+}
+
+.studio-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.studio-main {
+  flex: 1;
+  max-width: 1200px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 24px;
+  box-sizing: border-box;
+}
+
+/* Placeholder shown only in message 1 — removed in message 2 */
+.studio-placeholder {
+  max-width: 640px;
+  margin: 80px auto 0;
+  text-align: center;
+  line-height: 1.6;
+}
+.studio-placeholder h1 {
+  font-size: 24px;
+  font-weight: 500;
+  margin-bottom: 16px;
+  color: var(--text, #e4e4e7);
+}
+.studio-placeholder p {
+  color: var(--sub, #b4b4b8);
+  margin: 12px 0;
+}
+.studio-placeholder .studio-note {
+  font-size: 12px;
+  color: var(--muted, #888);
+  font-style: italic;
+  margin-top: 24px;
+}
+
+/* ─── v2.41.0 (Pass M1.1) — unified condition editor ──────────────────── */
+/* Used in DETECT branch / LOOP / WAIT in the strategy editor, and in
+ * fragment pre/postcondition rows. Single source of truth for layout. */
+.cond-editor {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.cond-editor select.cond-type-select {
+  flex: 0 0 auto;
+}
+.cond-editor input.cond-value-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* attribute_equals 3-field row — narrower selector + attribute, wider value */
+.cond-editor .cond-attr-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.cond-editor .cond-attr-row .cond-value-narrow {
+  flex: 1 1 35%;
+  min-width: 80px;
+}
+.cond-editor .cond-attr-row .cond-value-input:not(.cond-value-narrow) {
+  flex: 1 1 30%;
+}
+/* Fragment review row: editor + remove button. */
+.review-condition-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.review-condition-row .cond-editor {
+  flex: 1 1 auto;
+}
+
+/* ─── v2.42.0 (Pass M2) — assertion library ───────────────────────────── */
+.assertion-row {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border, #2a2a30);
+}
+.assertion-row:last-child { border-bottom: none; }
+.assertion-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.assertion-name {
+  font-weight: 500;
+  color: var(--text, #e4e4e7);
+}
+.assertion-summary {
+  font-size: 11px;
+  color: var(--muted, #888);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.assertion-desc {
+  font-size: 11px;
+  color: var(--sub, #b4b4b8);
+  margin: 2px 0 4px 0;
+}
+.assertion-row-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+.assertion-conditions-section {
+  margin: 12px 0;
+}
+.assertion-conditions-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.assertion-conditions-label {
+  font-size: 12px;
+  color: var(--sub, #b4b4b8);
+}
+.assertion-conditions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* ─── v2.43.0 — JSON view modal (read-only) ─────────────────────────────── */
+.json-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.json-modal.hidden { display: none; }
+.json-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  cursor: pointer;
+}
+.json-modal-card {
+  position: relative;
+  background: var(--card, #1e1e23);
+  border: 1px solid var(--border, #2a2a30);
+  border-radius: 6px;
+  width: min(85vw, 900px);
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+.json-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border, #2a2a30);
+}
+.json-modal-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text, #e4e4e7);
+  margin: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.json-modal-actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.json-modal-body {
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  flex: 1 1 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text, #e4e4e7);
+  background: var(--bg, #16161a);
+  white-space: pre;
+  tab-size: 2;
+  /* v2.51.0 — textarea-specific reset so it visually matches the old
+     read-only <pre>. No border, no system styling, fills the modal body. */
+  border: none;
+  outline: none;
+  resize: none;
+  width: 100%;
+  min-height: 300px;
+  box-sizing: border-box;
+}
+.json-modal-body:focus {
+  /* Subtle focus highlight without the browser default ring */
+  background: var(--bg-elevated, #1a1a1f);
+}
+/* v2.51.0 — inline validation error display below the textarea */
+.json-modal-error {
+  flex: 0 0 auto;
+  padding: 8px 14px;
+  background: rgba(220, 53, 69, 0.12);
+  color: #ff8a95;
+  border-top: 1px solid rgba(220, 53, 69, 0.4);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ─── v2.46.0 (Pass O1) — ENUMERATE field capture ────────────────────── */
+.enum-fields-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.enum-fields-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+.enum-field-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.enum-field-name,
+.enum-field-source,
+.enum-field-attr {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--border, #2a2a30);
+  border-radius: 3px;
+  background: var(--bg, #16161a);
+  color: var(--text, #e4e4e7);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.enum-field-name { flex: 0 0 130px; }
+.enum-field-attr { flex: 0 0 130px; }
+.enum-field-type {
+  flex: 0 0 110px;
+  padding: 4px 6px;
+  border: 1px solid var(--border, #2a2a30);
+  border-radius: 3px;
+  background: var(--bg, #16161a);
+  color: var(--text, #e4e4e7);
+  font-size: 12px;
+}
+.action-enum-fields {
+  font-size: 11px;
+  color: var(--accent, #82c4ff);
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(130, 196, 255, 0.1);
+}
+
+/* ── v2.72.60 — Fragment tier badge ───────────────────────────────────────
+   Small inline badge in the fragment row header, after the fragment name.
+   T1 = hand-authored, T3 = AI-walked. */
+.fragment-tier {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  margin-left: 4px;
+}
+.fragment-tier.tier-t1 {
+  background: rgba(140, 200, 255, 0.16);
+  color: #8fc8ff;
+  border: 1px solid rgba(140, 200, 255, 0.3);
+}
+.fragment-tier.tier-t3 {
+  background: rgba(220, 180, 255, 0.16);
+  color: #d4a8ff;
+  border: 1px solid rgba(220, 180, 255, 0.3);
+}

@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>AHuB</title>
+  <style>
+    /* Self-contained — no shared stylesheet to avoid global body rules
+       (sidepanel.css declares min-height: 100vh which fights popup sizing). */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    html, body {
+      width: 240px;
+      background: #14141a;
+      color: #e0e0f0;
+      font-family: system-ui, -apple-system, sans-serif;
+      font-size: 13px;
+    }
+    body {
+      padding: 8px 0;
+    }
+    .popup-header {
+      padding: 6px 14px 10px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      color: #65657a;
+      text-transform: uppercase;
+      border-bottom: 1px solid #2c2c3a;
+      margin-bottom: 4px;
+    }
+    .popup-list {
+      padding: 4px 0;
+    }
+    .popup-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 14px;
+      cursor: pointer;
+      transition: background 100ms;
+      user-select: none;
+    }
+    .popup-item:hover {
+      background: #1b1b23;
+    }
+    .popup-icon {
+      width: 24px;
+      flex-shrink: 0;
+      text-align: center;
+      font-size: 18px;
+    }
+    .popup-text {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      flex: 1;
+      min-width: 0;
+    }
+    .popup-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: #e0e0f0;
+      line-height: 1.2;
+    }
+    .popup-sub {
+      font-size: 10px;
+      color: #8f8faa;
+      line-height: 1.2;
+    }
+  </style>
+</head>
+<body>
+  <div class="popup-header">AHuB</div>
+  <div class="popup-list">
+    <div class="popup-item" id="pop-studio">
+      <span class="popup-icon">🛠</span>
+      <div class="popup-text">
+        <span class="popup-label">Studio</span>
+        <span class="popup-sub">author workflows, strategies &amp; fragments</span>
+      </div>
+    </div>
+    <div class="popup-item" id="pop-chat">
+      <span class="popup-icon">💬</span>
+      <div class="popup-text">
+        <span class="popup-label">Chat</span>
+        <span class="popup-sub">conversational interface</span>
+      </div>
+    </div>
+    <div class="popup-item" id="pop-ground">
+      <span class="popup-icon">🌐</span>
+      <div class="popup-text">
+        <span class="popup-label">Ground</span>
+        <span class="popup-sub">author fragments, observations &amp; more</span>
+      </div>
+    </div>
+    <!--
+      v2.72.50 (Stage 1) — Debugger entry removed. The debugger is no
+      longer a top-level surface; it's a sidepanel mode launched
+      contextually from Studio (▶ on a strategy, + Locale on a ground,
+      etc.). Studio and Chat are the only direct entry points users need
+      from the extension icon. Everything else is launched in the right
+      context, keeping the popup focused.
+    -->
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>AHuB — Side Panel</title>
+  <link rel="stylesheet" href="assets/sidepanel.css">
+  <link rel="stylesheet" href="assets/debugger.css">
+</head>
+<body>
+  <!--
+    v2.72.50 (Stage 1) — Sidepanel shell. Hosts mutually-exclusive modes
+    (chat, strategy-debug, locale-capture, future). The shell handles
+    routing and rehydration; mode modules live under Sidepanel/modes/
+    and inject their own DOM into #sidepanel-mount on mount.
+
+    Why one HTML page: the side panel is a single visual surface. Having
+    one HTML file means transitions are JS-only (no page reload), state
+    persists naturally, and adding a new mode requires no manifest /
+    setOptions changes — just a new module registered in shell.js.
+  -->
+  <div id="sidepanel-mount"></div>
+
+  <!-- Toast container (shared across all modes) — styled by sidepanel.css. -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script type="module" src="Sidepanel/shell.js"></script>
+</body>
+</html>

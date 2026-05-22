@@ -1,0 +1,1314 @@
+/**
+ * @file Sidepanel/modes/ground-view.js
+ * @description Read-only Ground browse view. Mirrors Studio's Ground card
+ * layout — header (name + url + collapse), then per-section rows for
+ * Fragments, Assertions, Locales, Observations, and Analyses — minus
+ * the Strategies section and the per-row edit / view-json affordances.
+ *
+ * Per-section + Add buttons launch the sidepanel-authorable flows
+ * (fragment-author, observation-author, locale-capture). Assertion /
+ * Analysis authoring lives in Studio, so those entries are read-only
+ * here.
+ *
+ * Background contract:
+ *   GET_GROUND_LIBRARY — returns every Ground with its Fragment /
+ *                        Assertion / Locale / Observation / Analysis
+ *                        lists in one round trip.
+ *
+ * Mode lifecycle:
+ *   mount   — fetch the library, render, wire collapse + add buttons.
+ *   unmount — drop the mount element's contents, clear listeners.
+ *
+ * @module Sidepanel/modes/ground-view
+ * @version 2.74.27
+ */
+
+import { toast } from '../shell-api.js';
+import { matchGroundForUrl } from '../../Core/GroundMatcher.js';
+
+const escHtml = (s) => String(s ?? '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const escAttr = escHtml;
+
+let _mountEl = null;
+// v2.74.31 — Per-section collapse state. Map<groundId, Set<sectionKey>>
+// — sectionKey is one of 'fragments' | 'assertions' | 'locales' |
+// 'observations' | 'analyses'. Ephemeral; lost on unmount.
+// v2.74.35 — Ground-level collapse retired: the Ground card no longer
+// holds the section cards inside it (each section is a free-floating
+// sibling card with its own collapse), so a card-wide collapse no
+// longer makes sense.
+const _collapsedSections = new Map();
+// v2.74.38 — GroundMap viewer open-state per groundId. Mirrors Studio's
+// toggle-map behaviour. Ephemeral; lost on unmount.
+const _openGroundMaps = new Set();
+// Cache the most recently fetched groundMap per groundId so the toggle
+// handler can rebuild the viewer without another round trip to
+// GET_GROUND_LIBRARY.
+const _groundMapCache = new Map();
+// v2.74.42 — Discovery-in-progress tracking. While a groundId is in this
+// set, _renderList shows the indeterminate-loading view instead of the
+// section list. Discovery broadcasts (DISCOVERY_COMPLETE / FAILED)
+// remove the entry and trigger a re-render.
+const _discoveryRunning = new Set();
+// v2.74.42 — Collapse state for the matched-Ground header card.
+const _collapsedHeader = new Set();
+// v2.74.29 — Tab-change listeners. Hold references so unmount can detach
+// them cleanly. _refreshTimer coalesces bursts (SPA navigations fire many
+// tabs.onUpdated events in quick succession).
+let _tabListeners = null;
+let _refreshTimer = null;
+// v2.74.30 — Pin the panel to its own Chrome window. The sidepanel is
+// per-window (Chrome hosts one panel slot per window); we only care
+// about tab activity inside this window. Captured once on mount.
+let _windowId = null;
+
+async function mount(_payload, mountEl) {
+  _mountEl = mountEl;
+  _mountEl.innerHTML = `
+    <div class="gv-shell">
+      <div class="gv-header">
+        <span class="gv-header-title">Ground</span>
+        <span class="gv-header-sub">author fragments, observations &amp; more</span>
+      </div>
+      <div class="gv-list" data-gv="list">
+        <div class="gv-loading">Loading…</div>
+      </div>
+    </div>
+  `;
+  // v2.74.30 — Pin to the sidepanel's own window. Subsequent active-tab
+  // lookups and listener filtering all key off this id.
+  try {
+    const win = await chrome.windows.getCurrent();
+    _windowId = win?.id ?? null;
+  } catch {
+    _windowId = null;
+  }
+  _wireTabListeners();
+  await _renderList();
+}
+
+async function unmount() {
+  _unwireTabListeners();
+  if (_mountEl) _mountEl.innerHTML = '';
+  _mountEl = null;
+  _windowId = null;
+  _collapsedSections.clear();
+  _openGroundMaps.clear();
+  _groundMapCache.clear();
+  _discoveryRunning.clear();
+  _collapsedHeader.clear();
+}
+
+// v2.74.29 — Wire tab listeners so the panel re-renders whenever the
+// active page in THIS window changes:
+//   tabs.onActivated — user clicked a different tab in our window.
+//   tabs.onUpdated   — active tab's URL changed (incl. SPA pushState).
+// Both funnel through a 120 ms debounced trigger so a navigation that
+// fires multiple onUpdated events in a burst causes one re-render.
+// v2.74.30 — Filter events to _windowId so activity in OTHER Chrome
+// windows doesn't poke this panel. The sidepanel is per-window — each
+// window has its own panel slot and shows its own active tab's Ground.
+function _wireTabListeners() {
+  if (_tabListeners) return;
+  const trigger = () => {
+    if (_refreshTimer) clearTimeout(_refreshTimer);
+    _refreshTimer = setTimeout(() => {
+      _refreshTimer = null;
+      _renderList().catch(() => {});
+    }, 120);
+  };
+  const onActivated = (info) => {
+    if (_windowId != null && info?.windowId !== _windowId) return;
+    trigger();
+  };
+  const onUpdated = (_tabId, changeInfo, tab) => {
+    // Only care about URL changes in the active tab of our window —
+    // title/favicon updates and background-tab navigations shouldn't
+    // cause a re-render.
+    if (!changeInfo?.url) return;
+    if (_windowId != null && tab?.windowId !== _windowId) return;
+    if (tab && tab.active === false) return;
+    trigger();
+  };
+  chrome.tabs.onActivated.addListener(onActivated);
+  chrome.tabs.onUpdated.addListener(onUpdated);
+  _tabListeners = { onActivated, onUpdated };
+}
+
+function _unwireTabListeners() {
+  if (_refreshTimer) {
+    clearTimeout(_refreshTimer);
+    _refreshTimer = null;
+  }
+  if (!_tabListeners) return;
+  try { chrome.tabs.onActivated.removeListener(_tabListeners.onActivated); } catch {}
+  try { chrome.tabs.onUpdated.removeListener(_tabListeners.onUpdated); } catch {}
+  _tabListeners = null;
+}
+
+function handleEvent(message) {
+  // Refresh on relevant storage broadcasts so newly authored entries
+  // (saved Fragment, Observation, etc.) appear without a manual reload.
+  if (!message) return;
+  if (message.type === 'STORAGE_CHANGED') {
+    _renderList().catch(() => {});
+    return;
+  }
+  // v2.74.42 — Discovery broadcasts gate the indeterminate-spinner view.
+  // PROGRESS is a no-op for display (the user requested a simple
+  // in-flight indicator with no per-page text); COMPLETE / FAILED clear
+  // the running flag and re-render the panel.
+  if (message.type === 'DISCOVERY_PROGRESS') return;
+  if (message.type === 'DISCOVERY_COMPLETE') {
+    const { groundId, pageCount, aborted } = message.payload ?? {};
+    if (!_discoveryRunning.has(groundId)) return;
+    _discoveryRunning.delete(groundId);
+    toast(aborted
+      ? `Discovery aborted — kept partial map (${pageCount} pages)`
+      : `Discovery complete — mapped ${pageCount} page${pageCount === 1 ? '' : 's'}`);
+    _renderList().catch(() => {});
+    return;
+  }
+  if (message.type === 'DISCOVERY_FAILED') {
+    const { groundId, error } = message.payload ?? {};
+    if (!_discoveryRunning.has(groundId)) return;
+    _discoveryRunning.delete(groundId);
+    toast(`Discovery failed: ${error ?? 'unknown'}`, 'err');
+    _renderList().catch(() => {});
+  }
+}
+
+// v2.74.28 — Normalize a URL down to a comparable host. Strips a leading
+// "www." so "www.pixabay.com" and "pixabay.com" match each other. Returns
+// null for non-http(s) URLs (chrome://, chrome-extension://, file://,
+// about:blank) where domain matching doesn't make sense.
+function _normalizeHost(url) {
+  if (!url || typeof url !== 'string') return null;
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    const h = u.hostname.toLowerCase();
+    return h.startsWith('www.') ? h.slice(4) : h;
+  } catch {
+    return null;
+  }
+}
+
+// v2.74.326 — GROUND_SPEC § 3 spec-strict URL-pattern matching. The
+// library entry whose Ground's urlPatterns match the tab URL wins
+// (most-specific-wins, alphabetical-by-id tiebreak). NOTE: spec-strict
+// means a bare-origin Ground (`https://site.com`) matches ONLY that exact
+// URL — author the pattern as `https://site.com/*` to match all paths, or
+// `https://*.site.com/*` for subdomains. (Replaces the old host/subdomain
+// heuristic per the user's spec-strict decision.)
+function _findMatchingGround(tabUrl, grounds) {
+  const hit = matchGroundForUrl(tabUrl, grounds.map(e => e.ground).filter(Boolean));
+  if (!hit) return null;
+  return grounds.find(e => e.ground?.id === hit.ground.id) ?? null;
+}
+
+async function _getActiveTabUrl() {
+  // v2.74.30 — Query the active tab in OUR window (the one hosting this
+  // sidepanel). Falls back to lastFocusedWindow if _windowId wasn't
+  // captured (unusual — mount captures it before the first render).
+  try {
+    const queryOpts = _windowId != null
+      ? { active: true, windowId: _windowId }
+      : { active: true, lastFocusedWindow: true };
+    const [tab] = await chrome.tabs.query(queryOpts);
+    return tab?.url ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function _renderList() {
+  const list = _mountEl?.querySelector('[data-gv="list"]');
+  if (!list) return;
+
+  // Fetch the library + active tab URL in parallel. The library is the
+  // single source of truth for what Grounds exist; the tab URL drives
+  // which one (if any) gets shown.
+  let res, tabUrl;
+  try {
+    [res, tabUrl] = await Promise.all([
+      new Promise(resolve => chrome.runtime.sendMessage({ type: 'GET_GROUND_LIBRARY' }, resolve)),
+      _getActiveTabUrl(),
+    ]);
+  } catch (e) {
+    list.innerHTML = `<div class="gv-empty">Failed to load: ${escHtml(e?.message ?? 'unknown')}</div>`;
+    return;
+  }
+  if (!res?.success) {
+    list.innerHTML = `<div class="gv-empty">Failed to load: ${escHtml(res?.error ?? 'unknown')}</div>`;
+    return;
+  }
+
+  const grounds = res.grounds ?? [];
+
+  // No usable tab URL (chrome://, extension page, blank tab) — nothing to
+  // match against. Tell the user, don't render a stale list.
+  if (!_normalizeHost(tabUrl)) {
+    list.innerHTML = `<div class="gv-empty">Open a regular web page (http/https) to author its Ground.</div>`;
+    return;
+  }
+
+  const matched = _findMatchingGround(tabUrl, grounds);
+  if (matched) {
+    // v2.74.38 — Cache the fetched groundMap so the toggle handler can
+    // re-render the viewer without another GET_GROUND_LIBRARY trip.
+    if (matched.groundMap) _groundMapCache.set(matched.ground.id, matched.groundMap);
+    // v2.74.42 — Section list is gated on a successful Discover run.
+    // While discovery is in flight, show the indeterminate loading
+    // indicator. When a Ground exists but has no map yet, show a
+    // Discover prompt instead of empty section cards.
+    if (_discoveryRunning.has(matched.ground.id)) {
+      list.innerHTML = _renderHeaderOnly(matched) + _renderDiscoveringBlock();
+      _wireHeaderHandlers(matched);
+    } else if (matched.groundMap) {
+      list.innerHTML = _renderGroundCard(matched);
+      _wireHandlers([matched]);
+    } else {
+      list.innerHTML = _renderHeaderOnly(matched) + _renderUndiscoveredBlock(matched.ground.id);
+      _wireHeaderHandlers(matched);
+      _wireDiscoverPromptHandler(matched.ground);
+    }
+  } else {
+    list.innerHTML = _renderNewGroundCard(tabUrl);
+    _wireNewGroundHandlers(tabUrl);
+  }
+}
+
+// v2.74.42 — Render only the matched Ground's header card (no section
+// list, no map viewer). Used by the discovering / undiscovered render
+// paths. Mirrors the structure produced by _renderGroundCard's header
+// segment, so handler wiring (collapse toggle, map-badge click) works
+// identically.
+function _renderHeaderOnly(entry) {
+  const { ground, groundMap } = entry;
+  const collapsed = _collapsedHeader.has(ground.id);
+  const collapsedClass = collapsed ? ' gv-ground-card-collapsed' : '';
+  const chevron = collapsed ? '▸' : '▾';
+  const mapBadge = groundMap
+    ? `<button class="groundmap-badge" type="button"
+               data-gv-toggle-map="${escAttr(ground.id)}"
+               title="Mapped ${escAttr(new Date(groundMap.discoveredAt).toLocaleString())} — click to view">🗺 ${groundMap.pages?.length ?? 0} page${(groundMap.pages?.length ?? 0) === 1 ? '' : 's'}</button>`
+    : '';
+  const aliasTags = Array.isArray(ground.aliases) && ground.aliases.length > 0
+    ? `<div class="ground-alias-tags">${ground.aliases.map(a => `<span class="ground-alias-tag">${escHtml(a)}</span>`).join('')}</div>`
+    : '';
+  const metaRow = (mapBadge || aliasTags)
+    ? `<div class="ground-group-meta">${mapBadge}${aliasTags}</div>`
+    : '';
+  const descRow = (ground.description && typeof ground.description === 'string' && ground.description.trim())
+    ? `<div class="gv-ground-description">${escHtml(ground.description.trim())}</div>`
+    : '';
+  const mapOpen = groundMap && _openGroundMaps.has(ground.id);
+  const viewerHtml = groundMap
+    ? (mapOpen
+        ? `<div class="groundmap-viewer gv-groundmap-viewer" data-gv-gm-viewer="${escAttr(ground.id)}">${_renderGroundMapHtml(groundMap)}</div>`
+        : `<div class="groundmap-viewer gv-groundmap-viewer hidden" data-gv-gm-viewer="${escAttr(ground.id)}"></div>`)
+    : '';
+  // v2.74.43 — Header restructured so url / meta / description align to
+  // the left edge of the header instead of sitting in a column indented
+  // by the chevron. Only the name shares the row with the chevron; the
+  // other fields are full-width block children below.
+  return `
+    <section class="ground-card gv-ground-card${collapsedClass}" data-gv-gid="${escAttr(ground.id)}">
+      <div class="ground-group-header gv-ground-header">
+        <div class="gv-ground-header-top">
+          <button class="gv-ground-collapse-toggle" type="button"
+                  data-gv-toggle-header="${escAttr(ground.id)}"
+                  title="Collapse / expand Ground header"
+                  aria-expanded="${collapsed ? 'false' : 'true'}">
+            <span class="gv-ground-collapse-chevron">${chevron}</span>
+          </button>
+          <span class="ground-group-name">${escHtml(ground.name ?? 'Unnamed Ground')}</span>
+        </div>
+        <span class="ground-group-url">${escHtml(ground.url ?? '')}</span>
+        ${metaRow}
+        ${descRow}
+      </div>
+      ${viewerHtml}
+    </section>
+  `;
+}
+
+// v2.74.42 — Indeterminate spinner shown while discovery is running.
+// No progress text — the user requested a simple "in flight" indicator.
+function _renderDiscoveringBlock() {
+  return `
+    <div class="gv-discovering">
+      <div class="gv-spinner" aria-label="Discovering…" role="status"></div>
+      <span class="gv-discovering-label">Discovering…</span>
+    </div>
+  `;
+}
+
+// v2.74.42 — Inline prompt when a Ground exists but discovery has not
+// run yet (or failed). Surfaces a Discover button so the user can
+// kick off the crawl without leaving the sidepanel.
+function _renderUndiscoveredBlock(groundId) {
+  return `
+    <div class="gv-undiscovered">
+      <p class="gv-undiscovered-hint">Run Discover to crawl this site and reveal its Fragments / Observations sections.</p>
+      <button class="btn-secondary gv-undiscovered-btn" type="button"
+              data-gv-discover-existing="${escAttr(groundId)}">🔍 Discover</button>
+    </div>
+  `;
+}
+
+// v2.74.28 — Inline "create Ground" card for when the active tab's
+// domain doesn't match any existing Ground. Pre-fills the URL field.
+// v2.74.36 — Save button replaced with Discover (mirrors Studio's
+// per-Ground Discover button). Clicking saves the Ground record and
+// then starts a structural-map discovery — same flow Studio runs.
+// Progress and result are shown inline in the card.
+// v2.74.41 — URL field shows the ROOT origin of the current tab (e.g.
+// https://www.facilitron.com/) rather than the full deep URL. Name is
+// optional — when blank, the Discover-time site-summary call fills it
+// (along with aliases and a description) automatically.
+function _renderNewGroundCard(tabUrl) {
+  const rootUrl = _rootUrlOf(tabUrl) ?? tabUrl;
+  // v2.74.334 — Default the seed to a whole-site glob (`<root>/*`) so the new
+  // Ground matches every page on the site, not just the exact root. Spec-
+  // strict matching (v2.74.326) means a bare URL matches ONLY that page.
+  const seedPattern = (typeof rootUrl === 'string' && rootUrl)
+    ? (rootUrl.endsWith('/') ? `${rootUrl}*` : `${rootUrl}/*`)
+    : rootUrl;
+  return `
+    <section class="ground-card gv-new-ground-card">
+      <div class="ground-group-header gv-new-ground-header">
+        <div class="ground-group-info">
+          <span class="ground-group-name">New Ground</span>
+          <span class="ground-group-url">No Ground matches this page yet.</span>
+        </div>
+      </div>
+      <div class="gv-new-ground-body">
+        <label class="gv-new-ground-field">
+          <span class="gv-new-ground-label">Name <span class="gv-new-ground-hint">(optional — auto-filled by Discover)</span></span>
+          <input type="text" data-gv-new="name" maxlength="80"
+                 placeholder="leave blank to let Discover fill this in" />
+        </label>
+        <label class="gv-new-ground-field">
+          <span class="gv-new-ground-label">URL pattern <span class="gv-new-ground-hint"><code>/*</code> = all pages; <code>*.site.com/*</code> = subdomains</span></span>
+          <input type="text" data-gv-new="url" value="${escAttr(seedPattern)}" placeholder="https://example.com/*" />
+        </label>
+        <div class="gv-new-ground-actions">
+          <button class="btn-secondary" data-gv-new="discover" type="button"
+                  title="Save this Ground and discover its structural map (read-only crawl on the current tab)">🔍 Discover</button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+// v2.74.41 — Root origin of a URL with trailing slash, suitable as a
+// Ground seed URL. e.g.
+//   https://www.facilitron.com/facilities-for-rent → https://www.facilitron.com/
+// Returns null for non-http(s) URLs.
+function _rootUrlOf(url) {
+  if (!url || typeof url !== 'string') return null;
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return `${u.protocol}//${u.host}/`;
+  } catch {
+    return null;
+  }
+}
+
+function _wireNewGroundHandlers(_tabUrl) {
+  const nameEl     = _mountEl?.querySelector('[data-gv-new="name"]');
+  const urlEl      = _mountEl?.querySelector('[data-gv-new="url"]');
+  const discoverEl = _mountEl?.querySelector('[data-gv-new="discover"]');
+  if (!nameEl || !urlEl || !discoverEl) return;
+  nameEl.focus();
+  discoverEl.addEventListener('click', async () => {
+    const name = nameEl.value.trim();
+    const url  = urlEl.value.trim();
+    // v2.74.41 — Name is optional. Discover's site-summary call fills
+    // name + aliases + description on completion. URL is still required
+    // (it's the seed for the crawl).
+    if (!url) { toast('Enter a URL', 'err'); urlEl.focus(); return; }
+    try { new URL(url); } catch {
+      toast('That does not look like a valid URL', 'err');
+      urlEl.focus();
+      return;
+    }
+    discoverEl.disabled = true;
+    discoverEl.textContent = 'Saving…';
+    const id = `gnd_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const ground = {
+      id, url, name, aliases: [], description: '',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    const saveRes = await new Promise(resolve => {
+      chrome.runtime.sendMessage({ type: 'SAVE_GROUND', payload: { ground } }, resolve);
+    });
+    if (!saveRes?.success) {
+      toast(`Save failed: ${saveRes?.error ?? 'unknown'}`, 'err');
+      discoverEl.disabled = false;
+      discoverEl.textContent = '🔍 Discover';
+      return;
+    }
+    // v2.74.42 — Hand off to the shared kickoff. It runs the API-key
+    // check, marks _discoveryRunning, re-renders into the spinner
+    // view, then dispatches START_DISCOVERY. Replaces the inline
+    // progress strip the new-ground card used to render.
+    await _kickoffDiscovery(id);
+  });
+}
+
+// v2.74.35 — The Ground header card and the five section cards are now
+// independent sibling sections — none of the sections are nested inside
+// the Ground header. The Ground card just shows name + url; the
+// per-section cards (Fragments, Assertions, Locales, Observations,
+// Analyses) live below as free-floating cards with their own collapse
+// chevron, list of items, and (where applicable) right-aligned + Add
+// footer. Mirrors the fragment-author sidepanel pattern.
+// v2.74.37 — Header card now also surfaces the GroundMap page-count
+// badge and the alias tags, exactly mirroring Studio's ground header.
+// v2.74.38 — The 🗺 N pages badge is a clickable button that toggles an
+// inline GroundMap viewer beneath the header — same UX Studio provides.
+function _renderGroundCard(entry) {
+  const { ground, fragments, assertions, locales, observations, analyses } = entry;
+  // v2.74.42 — Header card is now collapsible; the chevron + body
+  // logic was hoisted into _renderHeaderOnly so the discovering /
+  // undiscovered render paths can reuse it.
+  const headerHtml = _renderHeaderOnly(entry);
+  return `
+    ${headerHtml}
+
+    ${_renderSection({
+      key: 'fragments',
+      label: 'Fragments',
+      count: fragments.length,
+      addLabel: '+ Fragment',
+      addKind: 'fragment',
+      groundId: ground.id,
+      groundUrl: ground.url,
+      emptyMsg: 'No Fragments yet — record page-state transitions as reusable units.',
+      entries: fragments.map(f => _renderFragmentEntry(f, fragments)),
+    })}
+
+    ${_renderSection({
+      key: 'assertions',
+      label: 'Assertions',
+      count: assertions.length,
+      // v2.74.53 — + Assert opens assertion-author sidepanel mode.
+      addLabel: '+ Assert',
+      addKind: 'assertion',
+      groundId: ground.id,
+      emptyMsg: 'No assertions yet.',
+      entries: assertions.map(p => _renderAssertionEntry(p)),
+    })}
+
+    ${_renderSection({
+      key: 'locales',
+      label: 'Locales',
+      count: locales.length,
+      // v2.74.45 — Single + Locale button now runs the Claude-suggested
+      // locale flow (DOM snapshot → suggestLocale → locale-capture with
+      // prefilled name + description + landmarks). Manual blank-form
+      // entry is no longer surfaced from the Ground sidepanel.
+      addLabel: '+ Locale',
+      addKind: 'locale-auto',
+      groundId: ground.id,
+      emptyMsg: 'No Locales yet — verified DOM landmark records for kinds of pages.',
+      entries: locales.map(l => _renderLocaleEntry(l)),
+    })}
+
+    ${_renderSection({
+      key: 'observations',
+      label: 'Observations',
+      count: observations.length,
+      addLabel: '+ Observation',
+      addKind: 'observation',
+      groundId: ground.id,
+      groundUrl: ground.url,
+      emptyMsg: 'No Observations yet — page → data extraction primitives.',
+      entries: observations.map(o => _renderObservationEntry(o)),
+    })}
+
+    ${_renderSection({
+      key: 'analyses',
+      label: 'Analyses',
+      count: analyses.length,
+      // v2.74.53 — + Analyze opens analysis-author sidepanel mode.
+      addLabel: '+ Analyze',
+      addKind: 'analysis',
+      groundId: ground.id,
+      emptyMsg: 'No Analyses yet.',
+      entries: analyses.map(a => _renderAnalysisEntry(a)),
+    })}
+  `;
+}
+
+// v2.74.31 — Each section is its own collapsible card. Chevron toggle on
+// the left of the head row hides the body. Collapse state tracked per
+// (groundId, sectionKey) in _collapsedSections so toggling one section
+// doesn't affect others.
+// v2.74.35 — + Add moved out of the head row and into a right-aligned
+// footer beneath the entries (mirrors the fragment-author + Action / pre
+// & post + Add pattern).
+function _renderSection({ key, label, count, addLabel, addKind, addButtons, groundId, groundUrl, emptyMsg, entries }) {
+  const body = entries.length === 0
+    ? `<span class="empty-state small">${escHtml(emptyMsg)}</span>`
+    : entries.join('');
+  // v2.74.43 — A section can declare either a single {addLabel, addKind}
+  // (most sections) or an array of `addButtons` (Locales, which offers
+  // + Manual / + Auto). The latter wins when present.
+  const buttons = Array.isArray(addButtons) && addButtons.length > 0
+    ? addButtons
+    : (addLabel ? [{ label: addLabel, kind: addKind }] : []);
+  const addFooter = buttons.length > 0
+    ? `<div class="gv-section-card-footer">${
+        buttons.map(b => `
+          <button class="btn-secondary fa-add-condition-btn"
+                  data-gv-add="${escAttr(b.kind)}"
+                  data-gid="${escAttr(groundId)}"
+                  data-gurl="${escAttr(groundUrl ?? '')}"
+                  type="button">${escHtml(b.label)}</button>`).join('')
+      }</div>`
+    : '';
+  const collapsed = _collapsedSections.get(groundId)?.has(key) ?? false;
+  const collapsedClass = collapsed ? ' gv-section-card-collapsed' : '';
+  const glyph = collapsed ? '▸' : '▾';
+  return `
+    <section class="gv-section-card${collapsedClass}"
+             data-gv-section-card="${escAttr(key)}"
+             data-gv-section-gid="${escAttr(groundId)}">
+      <div class="gv-section-card-head">
+        <button class="gv-section-collapse-toggle"
+                data-gv-section-toggle="${escAttr(key)}"
+                data-gv-section-gid="${escAttr(groundId)}"
+                type="button" title="Collapse / expand ${escAttr(label.toLowerCase())}"
+                aria-expanded="${collapsed ? 'false' : 'true'}">
+          <span class="gv-section-collapse-chevron">${glyph}</span>
+        </button>
+        <span class="ground-section-label">${escHtml(label)}</span>
+        <span class="ground-section-count">${count}</span>
+      </div>
+      <div class="gv-section-card-body">
+        ${body}
+        ${addFooter}
+      </div>
+    </section>
+  `;
+}
+
+// ─── Per-entry renderers ─────────────────────────────────────────────────
+// Read-only: name + meta summary + optional description. No edit, no view-
+// json, no per-row action buttons.
+
+// v2.74.35 — Each entry now carries a ✕ delete button in its top-right
+// corner (.gv-entry-delete). The delete button is wired in
+// _wireHandlers; clicking dispatches the right DELETE_X message and
+// re-renders the list.
+
+function _deleteBtn(kind, id, name) {
+  return `<button class="gv-entry-delete btn-action danger"
+                  data-gv-del="${escAttr(kind)}"
+                  data-gv-del-id="${escAttr(id)}"
+                  data-gv-del-name="${escAttr(name ?? '')}"
+                  type="button" title="Delete">✕</button>`;
+}
+
+// v2.74.47 — Edit button for entry rows that support inline editing.
+// Mirrors Studio's fragment-row ✎ pattern (top-right action area, to
+// the left of the ✕ delete). Currently used by locale entries; can be
+// reused for other entry kinds later.
+function _editBtn(kind, id, name) {
+  return `<button class="gv-entry-edit btn-action"
+                  data-gv-edit="${escAttr(kind)}"
+                  data-gv-edit-id="${escAttr(id)}"
+                  data-gv-edit-name="${escAttr(name ?? '')}"
+                  type="button" title="Edit">✎</button>`;
+}
+
+function _renderFragmentEntry(f, allFragments) {
+  const tier = f.authoringTier ?? 'T3';
+  const antecedentName = f.antecedentFragmentId
+    ? (allFragments.find(x => x.id === f.antecedentFragmentId)?.name ?? '?')
+    : null;
+  return `
+    <div class="fragment-row gv-entry">
+      ${_editBtn('fragment', f.id, f.name)}
+      ${_deleteBtn('fragment', f.id, f.name)}
+      <div class="fragment-row-main">
+        <span class="fragment-name">${escHtml(f.name ?? 'Unnamed')}</span>
+        <span class="fragment-tier tier-${escAttr(tier.toLowerCase())}">${escHtml(tier)}</span>
+        <span class="fragment-health health-${escAttr(f.healthStatus ?? 'untested')}">${escHtml(f.healthStatus ?? 'untested')}</span>
+      </div>
+      ${f.description ? `<div class="fragment-desc" style="white-space:pre-line">${escHtml(f.description)}</div>` : ''}
+      ${antecedentName ? `<div class="fragment-antecedent-indicator">↑ after <strong>${escHtml(antecedentName)}</strong></div>` : ''}
+      <div class="fragment-row-actions">
+        <span class="fragment-meta">${(f.preconditions?.length ?? 0)} pre · ${(f.postconditions?.length ?? 0)} post · ${(f.params?.length ?? 0)} param${(f.params?.length === 1) ? '' : 's'}</span>
+      </div>
+    </div>`;
+}
+
+function _renderAssertionEntry(p) {
+  const cs = p.body?.conditions ?? [];
+  const mode = p.body?.match ?? 'all';
+  const condSummary = cs.length === 0 ? '(empty)'
+    : cs.length === 1 ? '1 condition'
+    : mode === 'k_of_n' ? `${p.body?.count ?? '?'} of ${cs.length} conditions`
+    : `${cs.length} conditions ${mode === 'any' ? 'OR' : 'AND'}`;
+  return `
+    <div class="assertion-row gv-entry">
+      ${_deleteBtn('assertion', p.id, p.name)}
+      <div class="assertion-row-main">
+        <span class="assertion-name">${escHtml(p.name ?? 'Unnamed')}</span>
+        <span class="assertion-summary">${escHtml(condSummary)}</span>
+      </div>
+      ${p.description ? `<div class="assertion-desc">${escHtml(p.description)}</div>` : ''}
+    </div>`;
+}
+
+function _renderLocaleEntry(l) {
+  const lmCount = Array.isArray(l.landmarks) ? l.landmarks.length : 0;
+  return `
+    <div class="locale-row gv-entry">
+      ${_editBtn('locale', l.id, l.name)}
+      ${_deleteBtn('locale', l.id, l.name)}
+      <div class="locale-row-main">
+        <span class="locale-name">${escHtml(l.name ?? 'Unnamed')}</span>
+        <span class="locale-summary">${lmCount} landmark${lmCount === 1 ? '' : 's'}</span>
+      </div>
+      ${l.description ? `<div class="locale-desc">${escHtml(l.description)}</div>` : ''}
+    </div>`;
+}
+
+function _renderObservationEntry(o) {
+  const impl = o.implementations?.[0] ?? {};
+  const tier = impl.tier ?? 'cache';
+  const extracts = Array.isArray(impl.extracts) ? impl.extracts : [];
+  const outputSummary = extracts.length === 0
+    ? '<em>no extracts</em>'
+    : extracts.map(ex =>
+        `<span class="observation-output">${escHtml(ex.output ?? '?')}<span class="observation-output-shape">:${escHtml(ex.shape ?? '?')}</span></span>`
+      ).join(' ');
+  return `
+    <div class="observation-row gv-entry">
+      ${_editBtn('observation', o.id, o.name)}
+      ${_deleteBtn('observation', o.id, o.name)}
+      <div class="observation-row-main">
+        <span class="observation-name">${escHtml(o.name ?? 'Unnamed')}</span>
+        <span class="observation-shape">${escHtml(tier === 'cache' ? 'T1' : 'T3')}</span>
+        <span class="observation-extract-count">${extracts.length} extract${extracts.length === 1 ? '' : 's'}</span>
+      </div>
+      <div class="observation-outputs">${outputSummary}</div>
+      ${o.description ? `<div class="observation-desc">${escHtml(o.description)}</div>` : ''}
+    </div>`;
+}
+
+function _renderAnalysisEntry(a) {
+  const impl0 = Array.isArray(a.implementations) && a.implementations.length > 0
+    ? a.implementations[0]
+    : null;
+  const tier = impl0?.tier ?? 'cache';
+  const paramsCount = Array.isArray(a.params) ? a.params.length : 0;
+  const ops = impl0?.body?.operations ?? impl0?.operations ?? a.operations;
+  const opsCount = Array.isArray(ops) ? ops.length : 0;
+  const metaText = tier === 'frontier'
+    ? `frontier · ${paramsCount} param${paramsCount === 1 ? '' : 's'}`
+    : `${opsCount} op${opsCount === 1 ? '' : 's'} · ${paramsCount} param${paramsCount === 1 ? '' : 's'}`;
+  return `
+    <div class="analysis-row gv-entry">
+      ${_deleteBtn('analysis', a.id, a.name)}
+      <div class="analysis-row-main">
+        <span class="analysis-name">${escHtml(a.name ?? 'Unnamed')}</span>
+      </div>
+      ${a.description ? `<div class="analysis-desc">${escHtml(a.description)}</div>` : ''}
+      <div class="analysis-row-actions">
+        <span class="analysis-meta">${escHtml(metaText)}</span>
+      </div>
+    </div>`;
+}
+
+// ─── Handlers ────────────────────────────────────────────────────────────
+
+function _wireHandlers(grounds) {
+  if (!_mountEl) return;
+
+  // v2.74.42 — Header collapse + map-badge toggle wiring also runs in
+  // the header-only render paths. _wireHeaderHandlers is the shared
+  // subset; _wireHandlers calls it first, then layers per-section
+  // / per-entry handlers on top.
+  for (const entry of grounds) _wireHeaderHandlers(entry);
+
+  // v2.74.31 — Per-section collapse toggles. State lives in
+  // _collapsedSections keyed by groundId so per-section collapse
+  // survives a re-render driven by a tab change or a storage update.
+  _mountEl.querySelectorAll('[data-gv-section-toggle]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const key = btn.dataset.gvSectionToggle;
+      const gid = btn.dataset.gvSectionGid;
+      const card = btn.closest('.gv-section-card');
+      const collapsed = card.classList.toggle('gv-section-card-collapsed');
+      let set = _collapsedSections.get(gid);
+      if (!set) { set = new Set(); _collapsedSections.set(gid, set); }
+      if (collapsed) set.add(key);
+      else            set.delete(key);
+      btn.setAttribute('aria-expanded', String(!collapsed));
+      const chev = btn.querySelector('.gv-section-collapse-chevron');
+      if (chev) chev.textContent = collapsed ? '▸' : '▾';
+    });
+  });
+
+  // + Add buttons. Each opens a sidepanel-authorable flow; the
+  // requested mode replaces this ground-view mode in the shell, so
+  // returning to the browse view requires re-opening Ground from the
+  // extension icon.
+  _mountEl.querySelectorAll('[data-gv-add]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const kind = btn.dataset.gvAdd;
+      const gid  = btn.dataset.gid;
+      const gurl = btn.dataset.gurl || null;
+      await _launchAuthoring(kind, gid, gurl);
+    });
+  });
+
+  // v2.74.47 — Per-entry ✎ edit buttons.
+  //   locale      → BEGIN_LOCALE_CAPTURE with prefilledLocale (verified
+  //                 state + urlPattern + authoredBy preserved)
+  //   fragment    → BEGIN_FRAGMENT_AUTHOR in rewalk-mode with the saved
+  //                 rawJson parsed into prefilledActions (mirrors Studio's
+  //                 re-walk dispatch)
+  //   observation → BEGIN_OBSERVATION_AUTHOR with the existing
+  //                 observationId so the author mode loads the saved
+  //                 record (v2.74.142 — matches Studio's walk-observation
+  //                 dispatch). Existing extracts surface via the JSON
+  //                 modal; the live-page authoring re-walks them.
+  _mountEl.querySelectorAll('[data-gv-edit]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const kind = btn.dataset.gvEdit;
+      const id   = btn.dataset.gvEditId;
+      if (kind === 'locale') {
+        await _editLocale(id, grounds);
+        return;
+      }
+      if (kind === 'fragment') {
+        await _editFragment(id, grounds);
+        return;
+      }
+      if (kind === 'observation') {
+        await _editObservation(id, grounds);
+        return;
+      }
+    });
+  });
+
+  // v2.74.35 — Per-entry ✕ delete buttons. Maps the entry kind to its
+  // DELETE_X background message + id field. Confirms before destructive
+  // action; re-renders the list after success so the row vanishes.
+  _mountEl.querySelectorAll('[data-gv-del]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const kind = btn.dataset.gvDel;
+      const id   = btn.dataset.gvDelId;
+      const name = btn.dataset.gvDelName || id;
+      if (!confirm(`Delete ${kind} "${name}"? This cannot be undone.`)) return;
+      btn.disabled = true;
+      const res = await _deleteEntry(kind, id);
+      if (!res?.success) {
+        toast(`Delete failed: ${res?.error ?? 'unknown'}`, 'err');
+        btn.disabled = false;
+        return;
+      }
+      toast(`${kind.charAt(0).toUpperCase()}${kind.slice(1)} "${name}" deleted`);
+      // Re-render — STORAGE_CHANGED would catch this too, but a direct
+      // call keeps the response immediate.
+      await _renderList();
+    });
+  });
+}
+
+// v2.74.38 — Toggle the inline GroundMap viewer for a ground. Mirrors
+// Studio's toggleGroundMapViewer behavior: shows page cards with URLs,
+// form fields, and links. Open state in _openGroundMaps persists across
+// re-renders so the viewer doesn't snap shut on a STORAGE_CHANGED tick.
+function _toggleGroundMapViewer(groundId) {
+  const viewer = _mountEl?.querySelector(`[data-gv-gm-viewer="${CSS.escape(groundId)}"]`);
+  if (!viewer) return;
+  if (_openGroundMaps.has(groundId)) {
+    _openGroundMaps.delete(groundId);
+    viewer.classList.add('hidden');
+    viewer.innerHTML = '';
+    return;
+  }
+  const groundMap = _groundMapCache.get(groundId);
+  if (!groundMap) return;
+  _openGroundMaps.add(groundId);
+  viewer.innerHTML = _renderGroundMapHtml(groundMap);
+  viewer.classList.remove('hidden');
+  // Wire URL clicks → open in a background tab (same UX as Studio).
+  viewer.querySelectorAll('.gm-page-url-link').forEach(link => {
+    link.addEventListener('click', (e) => {
+      e.preventDefault();
+      const url = link.dataset.url;
+      if (url) chrome.tabs.create({ url, active: false }).catch(() => {});
+    });
+  });
+}
+
+// v2.74.38 — Mirrors Studio's renderGroundMapHtml exactly. Reuses the
+// .gm-* classes already in sidepanel.css so visuals match.
+function _renderGroundMapHtml(map) {
+  const pages = map.pages ?? [];
+  if (pages.length === 0) {
+    return '<div class="gm-empty">No pages mapped yet.</div>';
+  }
+  const typeCounts = {};
+  pages.forEach(p => { typeCounts[p.pageType] = (typeCounts[p.pageType] ?? 0) + 1; });
+  const summaryLine = Object.entries(typeCounts)
+    .map(([t, n]) => `${n} ${t}`)
+    .join(' · ');
+  const pageCards = pages.map(p => {
+    const fields = (p.formFields ?? []).slice(0, 6);
+    const links  = (p.outgoing ?? []).slice(0, 5);
+    return `
+      <div class="gm-page-card">
+        <div class="gm-page-head">
+          <span class="gm-page-type gm-type-${escAttr(p.pageType)}">${escHtml(p.pageType)}</span>
+          <span class="gm-page-title">${escHtml(p.title || '(no title)')}</span>
+        </div>
+        <a class="gm-page-url-link" href="#" data-url="${escAttr(p.url)}" title="Open in new tab">${escHtml(p.url)}</a>
+        ${fields.length > 0 ? `
+          <div class="gm-section">
+            <span class="gm-section-label">Form fields</span>
+            <div class="gm-field-list">
+              ${fields.map(f => `
+                <div class="gm-field-row">
+                  <span class="gm-field-label">${escHtml(f.label || '(no label)')}</span>
+                  <span class="gm-field-type">${escHtml(f.type || '?')}</span>
+                  <code class="gm-field-selector">${escHtml(f.selector || '')}</code>
+                  ${f.required ? '<span class="gm-field-required">required</span>' : ''}
+                </div>`).join('')}
+            </div>
+          </div>` : ''}
+        ${links.length > 0 ? `
+          <div class="gm-section">
+            <span class="gm-section-label">Links</span>
+            <div class="gm-link-list">
+              ${links.map(l => `<span class="gm-link">${escHtml(l.text || '(unnamed)')}</span>`).join('')}
+            </div>
+          </div>` : ''}
+      </div>`;
+  }).join('');
+  return `
+    <div class="gm-summary">${escHtml(summaryLine)} — mapped ${escHtml(new Date(map.discoveredAt).toLocaleString())}</div>
+    <div class="gm-page-list">${pageCards}</div>`;
+}
+
+// v2.74.42 — Header-card handlers (collapse chevron + map-badge toggle).
+// Run for every render path that shows a Ground header — full view,
+// discovering view, undiscovered view. Idempotent.
+function _wireHeaderHandlers(entry) {
+  const { ground } = entry;
+  // Map-badge toggle (when a GroundMap exists).
+  _mountEl.querySelectorAll(`[data-gv-toggle-map="${CSS.escape(ground.id)}"]`).forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      _toggleGroundMapViewer(ground.id);
+    });
+  });
+  // Header collapse toggle. Hides url + meta + description while
+  // keeping name + chevron visible (same UX as the section card
+  // chevrons elsewhere in the sidepanel).
+  _mountEl.querySelectorAll(`[data-gv-toggle-header="${CSS.escape(ground.id)}"]`).forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const card = btn.closest('.gv-ground-card');
+      const collapsed = card.classList.toggle('gv-ground-card-collapsed');
+      if (collapsed) _collapsedHeader.add(ground.id);
+      else            _collapsedHeader.delete(ground.id);
+      btn.setAttribute('aria-expanded', String(!collapsed));
+      const chev = btn.querySelector('.gv-ground-collapse-chevron');
+      if (chev) chev.textContent = collapsed ? '▸' : '▾';
+    });
+  });
+}
+
+// v2.74.42 — Wire the inline Discover button shown when a Ground exists
+// but has no map yet. Reuses the same kickoff logic as the new-ground
+// card's Discover handler (saves nothing — the Ground already exists).
+function _wireDiscoverPromptHandler(ground) {
+  const btn = _mountEl?.querySelector(`[data-gv-discover-existing="${CSS.escape(ground.id)}"]`);
+  if (!btn) return;
+  btn.addEventListener('click', () => _kickoffDiscovery(ground.id));
+}
+
+// v2.74.42 — Shared kickoff: API-key check, mark _discoveryRunning,
+// dispatch START_DISCOVERY with existingTabId, then re-render so the
+// indeterminate spinner replaces the prompt. Used by both the new-ground
+// card's Discover button (after it persists the Ground) and the
+// undiscovered-prompt's Discover button.
+async function _kickoffDiscovery(groundId) {
+  const keyRes = await new Promise(resolve => {
+    chrome.runtime.sendMessage({ type: 'CHECK_API_KEY' }, resolve);
+  });
+  if (!keyRes?.hasKey) {
+    toast('Add your Anthropic API key in Studio Settings first', 'err');
+    return;
+  }
+  const tab = await _getActiveTabForLaunch();
+  const existingTabId = tab?.id ?? null;
+  _discoveryRunning.add(groundId);
+  await _renderList();   // swap to the spinner view immediately
+  chrome.runtime.sendMessage({
+    type: 'START_DISCOVERY',
+    payload: { groundId, existingTabId },
+  }, (res) => {
+    if (!res?.success) {
+      _discoveryRunning.delete(groundId);
+      toast(`Discovery failed: ${res?.error ?? 'unknown'}`, 'err');
+      _renderList().catch(() => {});
+    }
+  });
+}
+
+// v2.74.59 — Edit Locale. Looks the existing record up from the
+// in-memory grounds list, dispatches BEGIN_LOCALE_CAPTURE with the
+// full record as prefilledLocale (verified state + urlPattern +
+// authoredBy preserved).
+async function _editLocale(id, grounds) {
+  let locale = null;
+  let groundId = null;
+  for (const entry of grounds) {
+    const found = entry.locales?.find(l => l.id === id);
+    if (found) { locale = found; groundId = entry.ground.id; break; }
+  }
+  if (!locale || !groundId) {
+    toast('Locale not found', 'err');
+    return;
+  }
+  const tab = await _getActiveTabForLaunch();
+  const existingTabId = tab?.id ?? null;
+  chrome.runtime.sendMessage({
+    type: 'BEGIN_LOCALE_CAPTURE',
+    payload: {
+      groundId,
+      existingTabId,
+      returnTo: 'ground-view',
+      prefilledLocale: {
+        // v2.74.275 — Legacy embedded landmarks[] + urlPattern fields
+        // removed. Pass through landmarkRefs[] (registry uids) and
+        // predicates only.
+        id          : locale.id,
+        name        : locale.name        ?? '',
+        description : locale.description ?? '',
+        authoredBy  : locale.authoredBy  ?? 'human',
+        landmarkRefs: Array.isArray(locale.landmarkRefs) ? locale.landmarkRefs : [],
+        predicates  : locale.predicates ?? [],
+        iframeContexts: Array.isArray(locale.iframeContexts) ? locale.iframeContexts : [],
+      },
+    },
+  });
+}
+
+// v2.74.59 — Edit Fragment. Looks the existing record up from the
+// in-memory grounds list, parses its rawJson into prefilledActions,
+// and dispatches BEGIN_FRAGMENT_AUTHOR with isRewalk=true. Mirrors
+// Studio's rewalkFragment dispatch so the same fragment-author
+// re-walk path runs (existing actions repopulate the list with
+// verified=null; user re-verifies any rows that still apply).
+async function _editFragment(id, grounds) {
+  let fragment = null;
+  let groundUrl = null;
+  let groundId = null;
+  for (const entry of grounds) {
+    const found = entry.fragments?.find(f => f.id === id);
+    if (found) {
+      fragment = found;
+      groundId = entry.ground.id;
+      groundUrl = entry.ground.url;
+      break;
+    }
+  }
+  if (!fragment || !groundId) {
+    toast('Fragment not found', 'err');
+    return;
+  }
+  let prefilledActions = null;
+  if (fragment.rawJson) {
+    try {
+      const parsed = JSON.parse(fragment.rawJson);
+      if (Array.isArray(parsed)) prefilledActions = parsed;
+    } catch (e) {
+      toast(`Could not parse fragment rawJson: ${e.message}`, 'err');
+      return;
+    }
+  }
+  const tab = await _getActiveTabForLaunch();
+  const existingTabId = tab?.id ?? null;
+  chrome.runtime.sendMessage({
+    type: 'BEGIN_FRAGMENT_AUTHOR',
+    payload: {
+      fragmentId : fragment.id,
+      groundId,
+      groundUrl  : fragment.startUrl ?? groundUrl,
+      name       : '',                 // mode reads rewalkName for the banner
+      description: '',
+      pageClass  : fragment.pageClass ?? null,
+      isRewalk   : true,
+      antecedentFragmentId    : fragment.antecedentFragmentId    ?? null,
+      antecedentParamBindings : fragment.antecedentParamBindings ?? null,
+      prefilledActions,
+      // v2.74.185 — Carry the saved pre/post conditions into the editor.
+      // Previously omitted, so fragment-author would show an empty
+      // pre/post list on edit-open and then auto-overwrite via
+      // _capturePreconditions / _capturePostconditions — the saved
+      // values weren't even visible to the author, and re-saving
+      // could silently replace them with newly-captured ones.
+      prefilledPreconditions  : Array.isArray(fragment.preconditions)  ? fragment.preconditions  : [],
+      prefilledPostconditions : Array.isArray(fragment.postconditions) ? fragment.postconditions : [],
+      rewalkName        : fragment.name,
+      rewalkDescription : fragment.description,
+      existingTabId,
+      returnTo: 'ground-view',
+    },
+  });
+}
+
+// Edit Observation — opens the saved record in observation-author mode
+// for in-place editing. Mirrors the fragment ✎ pattern.
+//
+// v2.74.143 — Initial wiring (passed only name + description). That left
+// the mode opening with empty extracts / preconditions / postconditions
+// — looked indistinguishable from a fresh New Observation form.
+// v2.74.149 — Forward the full record so the mode actually seeds the
+// saved state: extracts (from implementations[0].extracts),
+// preconditions, postconditions. Save reuses the existing observationId
+// so the persisted record is overwritten in place, not duplicated.
+//
+// NB: this differs from the "walk" semantics on Studio's observation row
+// (studio.js → walk-observation), which intentionally re-authors
+// extracts from scratch and leaves the saved values reachable only via
+// the JSON modal. Edit is for in-place tweaks; Walk is for re-recording.
+async function _editObservation(id, grounds) {
+  let observation = null;
+  let groundId = null;
+  let groundUrl = null;
+  for (const entry of grounds) {
+    const found = entry.observations?.find(o => o.id === id);
+    if (found) {
+      observation = found;
+      groundId = entry.ground.id;
+      groundUrl = entry.ground.url;
+      break;
+    }
+  }
+  if (!observation || !groundId) {
+    toast('Observation not found', 'err');
+    return;
+  }
+
+  // Pull extracts from the canonical post-v2.72.11 location
+  // (implementations[0].extracts). Fall back to the top-level legacy
+  // `extracts` field for records that haven't yet been migrated.
+  const impl0 = Array.isArray(observation.implementations) && observation.implementations.length > 0
+    ? observation.implementations[0] : null;
+  const savedExtracts = Array.isArray(impl0?.extracts)
+    ? impl0.extracts
+    : (Array.isArray(observation.extracts) ? observation.extracts : []);
+
+  // v2.74.158 — Frontier-tier observations can't be edited in the
+  // sidepanel observation-author mode (that mode authors cache-tier
+  // extracts only — selectors, rects, etc.). The previous Edit pencil
+  // silently routed frontier records through it, and the mode's save
+  // path then hardcoded `tier: 'cache'`, downgrading the record on
+  // every save. Block here with a toast pointing to Studio's full
+  // observation editor, which DOES handle both tiers.
+  const savedTier = impl0?.tier ?? observation.tier ?? 'cache';
+  if (savedTier === 'frontier') {
+    toast('Frontier-tier Observations must be edited in Studio (Ground card → ✎ Edit).', 'warn');
+    return;
+  }
+
+  const tab = await _getActiveTabForLaunch();
+  const existingTabId = tab?.id ?? null;
+
+  chrome.runtime.sendMessage({
+    type: 'BEGIN_OBSERVATION_AUTHOR',
+    payload: {
+      observationId: observation.id,
+      groundId,
+      groundUrl,
+      name        : observation.name        ?? '',
+      description : observation.description ?? '',
+      // Full-record seed — observation-author's mount reads these to
+      // pre-populate the draft instead of starting empty.
+      prefilledExtracts      : savedExtracts,
+      prefilledPreconditions : Array.isArray(observation.preconditions)  ? observation.preconditions  : [],
+      prefilledPostconditions: Array.isArray(observation.postconditions) ? observation.postconditions : [],
+      // Tier carries forward — frontier-tier records mustn't be reopened
+      // as cache and vice versa.
+      tier        : impl0?.tier ?? observation.tier ?? 'cache',
+      existingTabId,
+      returnTo: 'ground-view',
+    },
+  });
+}
+
+async function _deleteEntry(kind, id) {
+  // Mapping: kind → { messageType, idField }
+  const map = {
+    fragment   : { type: 'DELETE_FRAGMENT',    field: 'fragmentId'    },
+    assertion  : { type: 'DELETE_ASSERTION',   field: 'assertionId'   },
+    locale     : { type: 'DELETE_LOCALE',      field: 'localeId'      },
+    observation: { type: 'DELETE_OBSERVATION', field: 'observationId' },
+    analysis   : { type: 'DELETE_ANALYSIS',    field: 'analysisId'    },
+  };
+  const m = map[kind];
+  if (!m) return { success: false, error: `unknown entry kind: ${kind}` };
+  return new Promise(resolve => {
+    chrome.runtime.sendMessage({ type: m.type, payload: { [m.field]: id } }, resolve);
+  });
+}
+
+// v2.74.31 — Look up the active tab in this sidepanel's window and pass
+// its id as existingTabId to the BEGIN_X message. Background reuses that
+// tab instead of opening a fresh one at the Ground's stored URL, so
+// authoring starts on the page the user is currently looking at.
+async function _getActiveTabForLaunch() {
+  if (_windowId == null) return null;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, windowId: _windowId });
+    return tab ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function _launchAuthoring(kind, groundId, groundUrl) {
+  const tab = await _getActiveTabForLaunch();
+  const existingTabId = tab?.id ?? null;
+
+  // v2.74.33 — returnTo tells the launched mode to come BACK to the
+  // Ground sidepanel on Save / Cancel instead of exiting to Studio.
+  const returnTo = 'ground-view';
+
+  if (kind === 'fragment') {
+    const fragmentId = `frag_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    chrome.runtime.sendMessage({
+      type: 'BEGIN_FRAGMENT_AUTHOR',
+      payload: {
+        fragmentId, groundId, groundUrl,
+        name: '', description: '', pageClass: null, isRewalk: false,
+        antecedentFragmentId: null, antecedentParamBindings: null,
+        existingTabId, returnTo,
+      },
+    });
+    return;
+  }
+  if (kind === 'observation') {
+    const observationId = `obs_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    chrome.runtime.sendMessage({
+      type: 'BEGIN_OBSERVATION_AUTHOR',
+      payload: { observationId, groundId, groundUrl, name: '', description: '', existingTabId, returnTo },
+    });
+    return;
+  }
+  if (kind === 'locale') {
+    chrome.runtime.sendMessage({
+      type: 'BEGIN_LOCALE_CAPTURE',
+      payload: { groundId, existingTabId, returnTo },
+    });
+    return;
+  }
+  // v2.74.43 — Auto-locale: ask Claude to suggest name + landmarks +
+  // description from the current page's DOM, then open locale-capture
+  // pre-filled with those values.
+  if (kind === 'locale-auto') {
+    await _autoDiscoverLocale(groundId, existingTabId);
+    return;
+  }
+  // v2.74.53 — + Assert / + Analyze. Each dispatches a BEGIN_*_AUTHOR
+  // background message; background sets the sidepanel mode and the
+  // shell mounts the corresponding authoring panel. Same returnTo
+  // convention as the other Ground-launched flows.
+  if (kind === 'assertion') {
+    chrome.runtime.sendMessage({
+      type: 'BEGIN_ASSERTION_AUTHOR',
+      payload: { groundId, existingTabId, returnTo },
+    });
+    return;
+  }
+  if (kind === 'analysis') {
+    chrome.runtime.sendMessage({
+      type: 'BEGIN_ANALYSIS_AUTHOR',
+      payload: { groundId, existingTabId, returnTo },
+    });
+    return;
+  }
+  toast(`Authoring "${kind}" lives in Studio`, 'warn');
+}
+
+// v2.74.43 — Capture the current tab's DOM, ask Claude for a locale
+// suggestion (name + role/selector landmarks + description), then
+// dispatch BEGIN_LOCALE_CAPTURE with the suggestion as
+// `prefilledLocale`. locale-capture's mount seeds its draft from that
+// payload so the user lands in a fully-filled form ready to verify.
+async function _autoDiscoverLocale(groundId, existingTabId) {
+  // Toggle the button into a loading state so the user gets feedback
+  // while Claude works. Best-effort — if the button isn't found
+  // (re-render in flight), the toast at the end still signals.
+  const autoBtn = _mountEl?.querySelector(
+    `[data-gv-add="locale-auto"][data-gid="${CSS.escape(groundId)}"]`
+  );
+  const origLabel = autoBtn?.textContent;
+  if (autoBtn) { autoBtn.disabled = true; autoBtn.textContent = 'Suggesting…'; }
+
+  let res;
+  try {
+    res = await new Promise(resolve => {
+      chrome.runtime.sendMessage({
+        type: 'AUTO_DISCOVER_LOCALE',
+        // v2.74.231 — Pass groundId so background can cache the
+        // Claude suggestion per (groundId, sub-page URL). force:false
+        // (default) → use cache when available. Rediscover inside
+        // locale-capture passes force:true to bypass and rewrite.
+        payload: { tabId: existingTabId, groundId, force: false },
+      }, resolve);
+    });
+  } catch (e) {
+    res = { success: false, error: e?.message ?? 'unknown' };
+  }
+
+  if (!res?.success || !res?.suggestion) {
+    if (autoBtn) { autoBtn.disabled = false; autoBtn.textContent = origLabel ?? '+ Auto'; }
+    toast(`Locale suggestion failed: ${res?.error ?? 'no suggestion returned'}`, 'err');
+    return;
+  }
+
+  const suggestion = res.suggestion;
+  chrome.runtime.sendMessage({
+    type: 'BEGIN_LOCALE_CAPTURE',
+    payload: {
+      groundId,
+      existingTabId,
+      returnTo: 'ground-view',
+      prefilledLocale: {
+        name        : typeof suggestion.name        === 'string' ? suggestion.name        : '',
+        description : typeof suggestion.description === 'string' ? suggestion.description : '',
+        // v2.74.275 — Fresh suggestion (Claude's "+ Auto"); landmarks
+        // are draft entries without UIDs. Locale-capture hydrates
+        // these as starting state for Pick→Claude.
+        landmarks   : Array.isArray(suggestion.landmarks)
+          ? suggestion.landmarks
+              .filter(lm => lm && typeof lm.alias === 'string' && typeof lm.selector === 'string')
+              .map(lm => ({ alias: lm.alias.trim(), selector: lm.selector.trim() }))
+          : [],
+      },
+    },
+  });
+}
+
+export default { name: 'ground-view', mount, unmount, handleEvent };
