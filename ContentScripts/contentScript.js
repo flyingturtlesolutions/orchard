@@ -3828,6 +3828,109 @@ function extractLinkRefs(rootEl) {
     }));
 }
 
+// ─── Resolve-roles complexity metric (v2.74.353) ───────────────────────────────
+// Deterministic DOM scan that scores how hard this page is for "Resolve roles"
+// (role → selector). Two channels: SYNTHESIS (can a durable selector be written
+// — DOM hooks) and MATCHING (can Claude tell which element it is — the
+// screenshot only shows the viewport). Pure vanilla; no LLM. See
+// DESIGN_resolve_roles.md § 7.
+function computePageComplexity() {
+  const W = window, D = document;
+  const vh = W.innerHeight || 1;
+  const scrollY = W.scrollY || W.pageYOffset || 0;
+
+  // class tokens that look machine-generated (CSS-modules / styled-components /
+  // hashed utility classes) — class-based selectors are useless on these.
+  const HASH = [/^css-[a-z0-9]{4,}$/i, /^sc-[A-Za-z0-9]{5,}$/, /^[a-z]+-[a-z0-9]{6,}$/i, /^_[A-Za-z0-9]{5,}$/, /^[A-Za-z]{1,4}_[A-Za-z0-9]{5,}$/];
+  const isHashed = (t) => HASH.some(re => re.test(t));
+
+  const INTERACTIVE_SEL = 'a[href],button,input:not([type="hidden"]),select,textarea,[role="button"],[role="link"],[role="textbox"],[role="searchbox"],[role="checkbox"],[role="radio"],[role="tab"],[role="menuitem"],[role="combobox"],[contenteditable="true"],summary';
+  const hasHook = (el) => {
+    const id = el.id;
+    if (id && id.length <= 40 && !isHashed(id) && !/\s/.test(id)) return true;
+    for (const a of ['data-testid', 'data-test-id', 'data-test', 'data-qa', 'data-cy', 'name']) {
+      if (el.getAttribute(a)) return true;
+    }
+    if (el.getAttribute('aria-label')) return true;
+    if (el.getAttribute('role')) return true;
+    return false;
+  };
+  const accName = (el) => (el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('alt') || el.getAttribute('placeholder') || '').trim();
+
+  let total = 0, maxDepth = 0, generic = 0, shadowRoots = 0, customEls = 0;
+  let classTokens = 0, hashedTokens = 0;
+  let candTotal = 0, candHooked = 0, candOffscreen = 0, candOpaque = 0;
+  let sameOriginIframes = 0, crossOriginIframes = 0;
+
+  function visit(el, depth) {
+    if (!el || !el.tagName) return;
+    total++;
+    if (depth > maxDepth) maxDepth = depth;
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'div' || tag === 'span') generic++;
+    if (tag.indexOf('-') > 0) customEls++;             // custom element
+    const cls = (typeof el.className === 'string') ? el.className : (el.getAttribute && el.getAttribute('class')) || '';
+    if (cls) for (const t of cls.split(/\s+/)) { if (!t) continue; classTokens++; if (isHashed(t)) hashedTokens++; }
+    if (tag === 'iframe') {
+      try {
+        const u = new URL(el.getAttribute('src') || '', location.href);
+        if (u.origin === location.origin) sameOriginIframes++; else crossOriginIframes++;
+      } catch { crossOriginIframes++; }
+    }
+    let isCand = false;
+    try { isCand = el.matches(INTERACTIVE_SEL); } catch { /* invalid in some contexts */ }
+    if (isCand) {
+      let r = null; try { r = el.getBoundingClientRect(); } catch { /* detached */ }
+      if (r && r.width > 0 && r.height > 0) {                 // only rendered candidates
+        candTotal++;
+        if (hasHook(el)) candHooked++;
+        if ((r.top + scrollY) > vh) candOffscreen++;          // below the first fold (screenshot can't show)
+        if (!(el.textContent || '').trim() && !accName(el)) candOpaque++;  // no visible/acc label
+      }
+    }
+    if (el.shadowRoot) { shadowRoots++; for (const c of el.shadowRoot.children) visit(c, depth + 1); }
+    for (const c of el.children) visit(c, depth + 1);
+  }
+  try { visit(D.body || D.documentElement, 0); } catch { /* ignore */ }
+
+  const c01 = (x) => Math.max(0, Math.min(1, x));
+  // factor values (0..1, higher = harder)
+  const f = {
+    hookScarcity: candTotal > 0 ? c01(1 - candHooked / candTotal) : 0.5,
+    obfuscation:  classTokens > 0 ? c01(hashedTokens / classTokens) : 0,
+    genericRatio: total > 0 ? c01(generic / total) : 0,
+    shadow:       c01(shadowRoots / 3),
+    scale:        c01(0.6 * ((Math.log10(Math.max(total, 1)) - 2.3) / 1.5) + 0.4 * ((maxDepth - 12) / 18)),
+    offscreen:    candTotal > 0 ? c01(candOffscreen / candTotal) : 0,
+    opaque:       candTotal > 0 ? c01(candOpaque / candTotal) : 0,
+    iframe:       c01(crossOriginIframes * 0.5 + sameOriginIframes * 0.15),
+  };
+  // weights sum to 100. synthesis channel (DOM) = 60; matching (visual) = 30; blockers = 10.
+  const wSyn = { hookScarcity: 25, obfuscation: 15, genericRatio: 8, shadow: 7, scale: 5 };
+  const wMatch = { offscreen: 18, opaque: 12 };
+  const wBlock = { iframe: 10 };
+  const synRaw = wSyn.hookScarcity * f.hookScarcity + wSyn.obfuscation * f.obfuscation + wSyn.genericRatio * f.genericRatio + wSyn.shadow * f.shadow + wSyn.scale * f.scale;
+  const matchRaw = wMatch.offscreen * f.offscreen + wMatch.opaque * f.opaque;
+  const blockRaw = wBlock.iframe * f.iframe;
+  const score = Math.round(synRaw + matchRaw + blockRaw);
+  const synthScore = Math.round((synRaw / 60) * 100);
+  const matchScore = Math.round((matchRaw / 30) * 100);
+  const tier = score < 25 ? 'simple' : score < 50 ? 'moderate' : score < 75 ? 'complex' : 'severe';
+
+  return {
+    success: true,
+    report: {
+      score, tier, synthScore, matchScore,
+      factors: f,
+      counts: {
+        total, maxDepth, candTotal, candHooked, candOffscreen, candOpaque,
+        shadowRoots, customEls, sameOriginIframes, crossOriginIframes,
+        classTokens, hashedTokens,
+      },
+    },
+  };
+}
+
 // ─── Message router ───────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -4372,6 +4475,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     case 'DOM_SNAPSHOT_RICH':
       sendResponse(handleDomSnapshotRich(message.payload?.prevSigs ?? []));
+      return false;
+
+    // v2.74.353 — Resolve-roles complexity metric (deterministic DOM scan).
+    case 'PAGE_COMPLEXITY':
+      try { sendResponse(computePageComplexity()); }
+      catch (e) { sendResponse({ success: false, error: e.message }); }
       return false;
 
     case 'DOM_SNAPSHOT_FULL':

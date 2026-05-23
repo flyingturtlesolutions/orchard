@@ -86,7 +86,20 @@ let _mountEl = null;              // root element we rendered into
 // _perspectiveInFlightVariant: 'baseline' | 'enhanced' | null while round-tripping.
 let _perspectiveRuns = { baseline: null, enhanced: null };
 let _chosenPerspective = null;
+let _chosenPerspectiveVariant = null;   // v2.74.356 — which run/option the chosen one came from (for retry)
+let _chosenPerspectiveIdx = null;
 let _perspectiveInFlightVariant = null;
+// v2.74.352 — "Resolve roles" in flight: "<variant>:<idx>" of the option being
+// auto-resolved, or null. Disables the propose/use/resolve buttons meanwhile.
+let _resolveInFlightKey = null;
+// v2.74.353 — Latest page-complexity report (resolve-difficulty metric) for the
+// current tab, or null. Surfaced as the header badge + logged with each Resolve
+// run so success rate can be plotted against difficulty.
+let _pageComplexity = null;
+// v2.74.355 — Per-role notes from the last Resolve run: role -> { status, reason }
+// for roles that failed verification or were abstained. Rendered inline under
+// the unfilled role in the checklist; cleared when the role is filled manually.
+let _roleResolveNotes = {};
 // v2.74.233 — Per-landmark "refining with Claude" status text. Set on
 // the landmark idx when the picker just captured and Claude is being
 // invoked to refine; cleared when Claude responds (success or fail).
@@ -198,6 +211,7 @@ let locWarningEl = null;
 let locNameInput = null;
 let locDescriptionInput = null;
 let locPerspectiveBody = null;   // v2.74.348 — § 13 proposal-flow container
+let locComplexityBadge = null;   // v2.74.353 — resolve-difficulty header badge
 // v2.74.275 — locPatternInput removed.
 let locLandmarksList = null;
 let locAddLandmarkBtn = null;
@@ -223,6 +237,10 @@ function renderHTML() {
         <div class="dbg-locale-meta">
           <span class="dbg-locale-meta-label">Active tab</span>
           <span data-loc="tab-url" class="dbg-locale-meta-value mono">—</span>
+        </div>
+        <div class="dbg-locale-meta">
+          <span class="dbg-locale-meta-label">Resolve difficulty</span>
+          <span data-loc="complexity-badge" class="dbg-locale-complexity" title="How hard this page is for ⚡ Resolve roles (selector resolution).">—</span>
         </div>
         <div data-loc="warning" class="dbg-locale-warning hidden"></div>
       </header>
@@ -442,6 +460,7 @@ async function mount(payload, mountEl) {
   locNameInput       = q('name-input');
   locDescriptionInput= q('description-input');
   locPerspectiveBody = q('perspective-body');
+  locComplexityBadge = q('complexity-badge');
   // v2.74.275 — locPatternInput removed.
   locLandmarksList   = q('landmarks-list');
   locAddLandmarkBtn  = q('add-landmark');
@@ -803,16 +822,22 @@ async function unmount() {
   _locPickerSession = null;
   _locReturnTo = null;
   _locIsEdit = false;
-  // v2.74.348/350 — Reset § 13 proposal-flow state.
+  // v2.74.348/350/352/353 — Reset § 13 proposal-flow + complexity state.
   _perspectiveRuns = { baseline: null, enhanced: null };
   _chosenPerspective = null;
+  _chosenPerspectiveVariant = null;
+  _chosenPerspectiveIdx = null;
   _perspectiveInFlightVariant = null;
+  _resolveInFlightKey = null;
+  _pageComplexity = null;
+  _roleResolveNotes = {};
 
   // Clear DOM refs (no leak — but clarity).
   locGroundLabelEl = locTabUrlEl = locWarningEl = null;
   // v2.74.275 — locPatternInput removed.
   locNameInput = locDescriptionInput = null;
   locPerspectiveBody = null;
+  locComplexityBadge = null;
   locLandmarksList = locAddLandmarkBtn = locSaveBtn = locCancelBtn = null;
   locSaveReasonEl = null;
   locPickBanner = locPickCancelBtn = null;
@@ -951,6 +976,7 @@ function handleEvent(message) {
     if (!(_locDraft.landmarks[effectiveIdx].alias ?? '').trim()) {
       _locDraft.landmarks[effectiveIdx].alias = roleSlot.role;
     }
+    delete _roleResolveNotes[roleSlot.role];   // v2.74.355 — manual pick clears the stale "why failed" note
   }
   _invalidateStructure();   // v2.74.336 — landmark set changed; drop stale structure
   renderLocaleLandmarks();
@@ -1191,10 +1217,12 @@ async function refreshLocaleActiveTab() {
   const tab = await getActiveTab();
   if (!tab) {
     locTabUrlEl.textContent = '(no active tab)';
+    _pageComplexity = null; _renderComplexityBadge();
     return;
   }
   if (/^(chrome|chrome-extension|about|edge):/i.test(tab.url ?? '')) {
     locTabUrlEl.textContent = `${tab.url} (extension page — picker won't work here)`;
+    _pageComplexity = null; _renderComplexityBadge();
     return;
   }
   _locTabId = tab.id;
@@ -1220,6 +1248,10 @@ async function refreshLocaleActiveTab() {
   if (locActiveStateResult) {
     _evaluateActiveState({ debounce: true });
   }
+  // v2.74.353 — (Re)compute the resolve-difficulty badge. Always, because
+  // same-tab navigation re-fires this with an unchanged tab id but fresh page
+  // content; _refreshComplexity is idempotent and token-guards stale writes.
+  _refreshComplexity();
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
@@ -1726,9 +1758,18 @@ function _renderPerspectivePanel() {
       // Navigate there and re-propose (it'll come back onPage:true) or author
       // it as its own Locale — the seed of "linked/compound perspectives".
       const downstream = opt.onPage === false;
+      // v2.74.352 — on-page options get a second button: "Resolve roles" asks
+      // Claude to auto-pick a selector for every role in one call (then the
+      // sidepanel verifies each). Disabled while any propose/resolve is busy.
+      const resolveKey = `${variant}:${i}`;
+      const resolving = _resolveInFlightKey === resolveKey;
+      const busy = !!_perspectiveInFlightVariant || !!_resolveInFlightKey;
       const headRight = downstream
         ? `<span class="dbg-locale-perspective-downstream-badge" title="This perspective's elements aren't on the current page. Navigate to it, then author it as its own Locale.">⤳ downstream</span>`
-        : `<button class="btn-secondary tiny" data-loc-action="choose-perspective" data-variant="${variant}" data-idx="${i}" type="button">${chosen ? '✓ Using' : 'Use this'}</button>`;
+        : `<span class="dbg-locale-perspective-option-actions">
+            <button class="btn-secondary tiny" data-loc-action="choose-perspective" data-variant="${variant}" data-idx="${i}" type="button" ${busy ? 'disabled' : ''}>${chosen ? '✓ Using' : 'Use this'}</button>
+            <button class="btn-secondary tiny" data-loc-action="resolve-roles" data-variant="${variant}" data-idx="${i}" type="button" ${busy ? 'disabled' : ''} title="Ask Claude to auto-pick a selector for every role in this perspective, then verify each against the page. Roles Claude can't resolve stay for manual picking.">${resolving ? '⏳ Resolving…' : '⚡ Resolve roles'}</button>
+          </span>`;
       html += `
         <div class="dbg-locale-perspective-option${chosen ? ' chosen' : ''}${downstream ? ' downstream' : ''}">
           <div class="dbg-locale-perspective-option-head">
@@ -1755,8 +1796,25 @@ function _renderPerspectivePanel() {
           <span class="dbg-locale-perspective-role-name">${escHtml(r.role)}</span>
           ${multBadge}
           ${r.description ? `<span class="dbg-locale-perspective-role-desc">${escHtml(r.description)}</span>` : ''}
-          <button class="btn-secondary tiny" data-loc-action="pick-role" data-role="${escAttr(r.role)}" type="button" ${_locPickerSession ? 'disabled' : ''}>${filled ? 'Re-pick' : 'Pick'}</button>
+          <button class="btn-secondary tiny" data-loc-action="pick-role" data-role="${escAttr(r.role)}" type="button" ${(_locPickerSession || _resolveInFlightKey) ? 'disabled' : ''}>${filled ? 'Re-pick' : 'Pick'}</button>
         </div>`;
+      // v2.74.355 — Why ⚡ Resolve couldn't fill this role (last run). Cleared
+      // when filled manually.
+      const note = !filled ? _roleResolveNotes[r.role] : null;
+      if (note) {
+        html += `<div class="dbg-locale-perspective-role-note ${note.status === 'abstained' ? 'abstained' : 'failed'}">${note.status === 'abstained' ? '∅' : '⚠'} ${escHtml(note.reason)}</div>`;
+      }
+    }
+    // v2.74.356 — Opt-in repair round: retry the failed/abstained roles with
+    // the verification feedback. One LLM round-trip per click (latency is the
+    // user's call — see DESIGN_resolve_roles.md § 8).
+    const retryable = _chosenPerspective.roles.filter(r => !_perspectiveRoleFilled(r.role) && _roleResolveNotes[r.role]).length;
+    if (retryable > 0 && _chosenPerspectiveVariant != null && _chosenPerspectiveIdx != null) {
+      const busy = !!_perspectiveInFlightVariant || !!_resolveInFlightKey;
+      const retrying = _resolveInFlightKey === `retry:${_chosenPerspectiveVariant}:${_chosenPerspectiveIdx}`;
+      html += `<div class="dbg-locale-perspective-retry">
+        <button class="btn-secondary tiny" data-loc-action="retry-roles" type="button" ${busy ? 'disabled' : ''} title="Send the ${retryable} unresolved role(s) back to Claude with their verification-failure reasons + the selectors that worked, for a corrected attempt. Costs one more LLM round-trip.">${retrying ? '⏳ Retrying…' : `↻ Retry ${retryable} with feedback`}</button>
+      </div>`;
     }
     html += `</div>`;
   }
@@ -1766,6 +1824,10 @@ function _renderPerspectivePanel() {
     btn.addEventListener('click', () => onProposePerspectives(btn.dataset.variant)));
   locPerspectiveBody.querySelectorAll('[data-loc-action="choose-perspective"]').forEach(btn =>
     btn.addEventListener('click', () => onChoosePerspective(btn.dataset.variant, parseInt(btn.dataset.idx, 10))));
+  locPerspectiveBody.querySelectorAll('[data-loc-action="resolve-roles"]').forEach(btn =>
+    btn.addEventListener('click', () => onResolveRoles(btn.dataset.variant, parseInt(btn.dataset.idx, 10))));
+  locPerspectiveBody.querySelector('[data-loc-action="retry-roles"]')
+    ?.addEventListener('click', () => onRetryFailedRoles(_chosenPerspectiveVariant, _chosenPerspectiveIdx));
   locPerspectiveBody.querySelectorAll('[data-loc-action="pick-role"]').forEach(btn =>
     btn.addEventListener('click', () => onPickForRole(btn.dataset.role)));
 }
@@ -1830,6 +1892,8 @@ function onChoosePerspective(variant, idx) {
   const opt = _perspectiveRuns[variant]?.options?.[idx];
   if (!opt) return;
   _chosenPerspective = opt;
+  _chosenPerspectiveVariant = variant;
+  _chosenPerspectiveIdx = idx;
   // Name → locale name, but never clobber a name the user already typed.
   if (!(_locDraft.name ?? '').trim()) {
     _locDraft.name = _normalizeLocaleName(opt.name);
@@ -1858,6 +1922,142 @@ function onChoosePerspective(variant, idx) {
   updateLocaleSaveButtonState();
 }
 
+// v2.74.352 — "Resolve roles": adopt the perspective, then ask Claude to
+// auto-pick a selector for every role in ONE call. Each returned selector is
+// created as a draft landmark and run through the existing verifier
+// (verifyLocaleLandmark → INSPECT_ELEMENT → uid + score, no extra LLM call).
+// Selectors that don't resolve are dropped so their role stays unfilled (○)
+// for manual picking. See DESIGN_resolve_roles.md.
+async function onResolveRoles(variant, idx) {
+  if (!_locDraft) return;
+  const opt = _perspectiveRuns[variant]?.options?.[idx];
+  if (!opt || opt.onPage === false) return;
+  if (_locTabId == null) { showLocaleWarning('No active tab to analyze.'); return; }
+  if (_perspectiveInFlightVariant || _resolveInFlightKey) return;   // one op at a time
+  // Adopt it first (sets chosen + name + predicates + the role checklist).
+  onChoosePerspective(variant, idx);
+  const roles = (opt.roles ?? [])
+    .filter(r => r && typeof r.role === 'string')
+    .map(r => ({ role: r.role, description: r.description ?? '', multiplicity: r.multiplicity ?? 'one' }));
+  if (!roles.length) return;
+  _roleResolveNotes = {};   // fresh run — clear prior notes
+  await _runResolve({ variant, idx, opt, roles, priorAttempt: null, mode: 'initial', inFlightKey: `${variant}:${idx}` });
+}
+
+// v2.74.356 — Opt-in repair round (DESIGN_resolve_roles.md § 8). Re-resolves
+// ONLY the still-unfilled roles, feeding Claude back its prior selector + the
+// verification failure reason for each, plus the confirmed successes as
+// site-convention context. One LLM round-trip per click; the user is the cap.
+async function onRetryFailedRoles(variant, idx) {
+  if (!_locDraft) return;
+  const opt = _perspectiveRuns[variant]?.options?.[idx];
+  if (!opt) return;
+  if (_locTabId == null) { showLocaleWarning('No active tab to analyze.'); return; }
+  if (_perspectiveInFlightVariant || _resolveInFlightKey) return;
+  // Roles still unfilled that we have a note for (failed / abstained).
+  const retry = (opt.roles ?? []).filter(r => r && typeof r.role === 'string'
+    && !_perspectiveRoleFilled(r.role) && _roleResolveNotes[r.role]);
+  if (!retry.length) { toast?.('Nothing to retry'); return; }
+  const roles = retry.map(r => ({ role: r.role, description: r.description ?? '', multiplicity: r.multiplicity ?? 'one' }));
+  // Confirmed successes (working selectors on this site) + prior failed attempts.
+  const confirmed = (_locDraft.landmarks ?? [])
+    .filter(lm => lm?.roleFill && lm?.selector && (opt.roles ?? []).some(x => x.role === lm.roleFill))
+    .map(lm => ({ role: lm.roleFill, selector: lm.selector }));
+  const attempts = retry.map(r => ({ role: r.role, selector: _roleResolveNotes[r.role]?.selector ?? null, reason: _roleResolveNotes[r.role]?.reason ?? 'failed' }));
+  await _runResolve({ variant, idx, opt, roles, priorAttempt: { confirmed, attempts }, mode: 'repair', inFlightKey: `retry:${variant}:${idx}` });
+}
+
+// Shared driver for both the initial resolve and the repair round: send the
+// request, then create+verify a landmark per returned selector (drop failures),
+// record per-role notes/details, log, toast. `_roleResolveNotes` is cleared by
+// the caller for an initial run; a repair run updates only the retried roles.
+async function _runResolve({ variant, idx, opt, roles, priorAttempt, mode, inFlightKey }) {
+  const draftToken = _locDraft.id;
+  const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  _resolveInFlightKey = inFlightKey;
+  _renderPerspectivePanel();
+  let res;
+  try {
+    res = await new Promise(r => chrome.runtime.sendMessage({
+      type: 'RESOLVE_LOCALE_ROLES',
+      payload: { tabId: _locTabId, groundId: _locGroundId, roles, priorAttempt },
+    }, r));
+  } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
+  if (!_locDraft || _locDraft.id !== draftToken) return;   // unmounted / switched mid-flight
+  _resolveInFlightKey = null;
+  if (!res?.success || !Array.isArray(res.resolutions)) {
+    showLocaleWarning(`Resolve roles${mode === 'repair' ? ' (retry)' : ''} failed: ${res?.error ?? 'no resolutions returned'}`);
+    _renderPerspectivePanel();
+    return;
+  }
+  const multOf = (role) => (opt.roles.find(x => x.role === role)?.multiplicity) ?? 'one';
+  let filled = 0, failed = 0, abstained = 0;
+  const details = [];
+  for (const r of res.resolutions) {
+    if (!r || typeof r.role !== 'string') continue;
+    if (!r.selector) {                                   // Claude abstained
+      abstained++;
+      const reason = (r.justification && r.justification.trim()) || 'Claude found no matching element on this page';
+      details.push({ role: r.role, status: 'abstained', reason, confidence: r.confidence });
+      _roleResolveNotes[r.role] = { status: 'abstained', reason, selector: null };
+      Logger.info('locale-capture', `resolveRoles[${r.role}]${mode === 'repair' ? '(retry)' : ''} abstained — ${reason}`);
+      continue;
+    }
+    if (_perspectiveRoleFilled(r.role)) {                // already filled — don't duplicate
+      details.push({ role: r.role, status: 'skipped', reason: 'role already filled' });
+      continue;
+    }
+    const lmRef = { alias: r.role, selector: r.selector, roleFill: r.role, roleMult: multOf(r.role), verified: null };
+    _locDraft.landmarks.push(lmRef);
+    const newIdx = _locDraft.landmarks.indexOf(lmRef);
+    _invalidateStructure();
+    try { await verifyLocaleLandmark(newIdx); }
+    catch (e) { lmRef.verified = { score: 'mismatch', matchedCount: 0, issues: [`verify threw: ${e.message}`] }; }
+    if (!_locDraft || _locDraft.id !== draftToken) return;   // bail if torn down mid-verify
+    const v = lmRef.verified;
+    const ok = v && v.score !== 'mismatch' && (v.score === 'ready' || v.score === 'caveats' || v.matchedCount > 0);
+    if (ok) {
+      filled++;
+      delete _roleResolveNotes[r.role];   // repaired — clear the note
+      details.push({ role: r.role, status: 'resolved', selector: r.selector, score: v.score, matchedCount: v.matchedCount, confidence: r.confidence });
+      Logger.info('locale-capture', `resolveRoles[${r.role}]${mode === 'repair' ? '(retry)' : ''} resolved — "${r.selector}" (score=${v.score}, matched=${v.matchedCount})`);
+    } else {
+      const reason = _verifyFailReason(v);
+      const ci = _locDraft.landmarks.indexOf(lmRef);
+      if (ci >= 0) _locDraft.landmarks.splice(ci, 1);   // drop → role stays for manual pick
+      failed++;
+      details.push({ role: r.role, status: 'failed', selector: r.selector, reason, matchedCount: v?.matchedCount ?? 0, confidence: r.confidence });
+      _roleResolveNotes[r.role] = { status: 'failed', reason, selector: r.selector };
+      Logger.warn('locale-capture', `resolveRoles[${r.role}]${mode === 'repair' ? '(retry)' : ''} verify FAILED — selector="${r.selector}" — ${reason}`);
+    }
+  }
+  if (locWarningEl && filled > 0) { locWarningEl.textContent = ''; locWarningEl.classList.add('hidden'); }
+  renderLocaleLandmarks();
+  _renderPerspectivePanel();
+  updateLocaleSaveButtonState();
+  _refreshLocaleOverlays();
+  const ms = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0);
+  _logResolveRun({
+    ts: Date.now(),
+    url: locTabUrlEl?.textContent ?? '',
+    variant, mode,
+    rolesTotal: roles.length,
+    resolved: filled, failed, abstained,
+    ms,
+    score:      _pageComplexity?.score ?? null,
+    synthScore: _pageComplexity?.synthScore ?? null,
+    matchScore: _pageComplexity?.matchScore ?? null,
+    tier:       _pageComplexity?.tier ?? null,
+    details,
+  });
+  Logger.info('locale-capture', `resolveRoles done [${variant}/${mode}] — resolved ${filled}/${roles.length}, failed ${failed}, abstained ${abstained}, ${ms}ms, difficulty ${_pageComplexity?.score ?? '?'}`);
+  const bits = [`resolved ${filled}`];
+  if (failed) bits.push(`${failed} didn't match`);
+  if (abstained) bits.push(`${abstained} skipped`);
+  const cx = _pageComplexity ? ` · difficulty ${_pageComplexity.score}` : '';
+  toast?.(`${mode === 'repair' ? 'Retry' : 'Resolve roles'} — ${bits.join(', ')}${(failed || abstained) ? ' · pick the rest manually' : ''}${cx}`);
+}
+
 // Pick (or re-pick) the element that fills a role. A fresh role → CREATE-mode
 // pick (new landmark, alias + roleFill seeded from the role on PICK_RESULT);
 // an already-filled role → RE-PICK that landmark.
@@ -1867,6 +2067,81 @@ function onPickForRole(role) {
   const slot = { role, multiplicity: roleDef?.multiplicity ?? 'one', description: roleDef?.description ?? '' };
   const existingIdx = (_locDraft?.landmarks ?? []).findIndex(lm => lm?.roleFill === role);
   startLocalePick(existingIdx >= 0 ? existingIdx : null, slot);
+}
+
+// ─── Resolve-difficulty complexity badge (v2.74.353) ──────────────────────
+
+// Fetch the deterministic complexity report for the current tab + render the
+// header badge. Fire-and-forget from mount / tab change. See § 7 of
+// DESIGN_resolve_roles.md.
+async function _refreshComplexity() {
+  if (!locComplexityBadge) return;
+  if (_locTabId == null) { _pageComplexity = null; _renderComplexityBadge(); return; }
+  const token = _locTabId;
+  locComplexityBadge.textContent = '…';
+  locComplexityBadge.className = 'dbg-locale-complexity';
+  let res;
+  try {
+    res = await new Promise(r => chrome.runtime.sendMessage({ type: 'GET_PAGE_COMPLEXITY', payload: { tabId: token } }, r));
+  } catch (e) { res = { success: false, error: e?.message }; }
+  if (_locTabId !== token) return;   // tab changed mid-fetch
+  _pageComplexity = (res?.success && res.report) ? res.report : null;
+  _renderComplexityBadge();
+}
+
+function _renderComplexityBadge() {
+  if (!locComplexityBadge) return;
+  const r = _pageComplexity;
+  if (!r) {
+    locComplexityBadge.textContent = '—';
+    locComplexityBadge.className = 'dbg-locale-complexity';
+    locComplexityBadge.setAttribute('title', 'How hard this page is for ⚡ Resolve roles (selector resolution).');
+    return;
+  }
+  const tierLabel = r.tier.charAt(0).toUpperCase() + r.tier.slice(1);
+  locComplexityBadge.textContent = `🧩 ${tierLabel} · ${r.score}`;
+  locComplexityBadge.className = `dbg-locale-complexity cx-${r.tier}`;
+  const c = r.counts ?? {}, f = r.factors ?? {};
+  const pct = (x) => Math.round((x ?? 0) * 100);
+  locComplexityBadge.setAttribute('title',
+    `Resolve difficulty ${r.score}/100 (${tierLabel})\n` +
+    `Synthesis (write a durable selector): ${r.synthScore}/100\n` +
+    `  hooks missing ${pct(f.hookScarcity)}% · obfuscated classes ${pct(f.obfuscation)}% · div-soup ${pct(f.genericRatio)}% · shadow roots ${c.shadowRoots ?? 0} · ${c.total ?? 0} els, depth ${c.maxDepth ?? 0}\n` +
+    `Matching (which element is it): ${r.matchScore}/100\n` +
+    `  off-screen candidates ${pct(f.offscreen)}% · opaque controls ${pct(f.opaque)}%\n` +
+    `Candidates: ${c.candHooked ?? 0}/${c.candTotal ?? 0} hooked · iframes ${(c.sameOriginIframes ?? 0) + (c.crossOriginIframes ?? 0)} (${c.crossOriginIframes ?? 0} cross-origin)`);
+}
+
+// v2.74.355 — Human-readable "why verification failed" from the verified
+// verdict (the issues/checks the verifier already computes).
+function _verifyFailReason(v) {
+  if (!v) return 'no verification result (selector threw or returned nothing)';
+  if ((v.matchedCount ?? 0) === 0) return (v.issues && v.issues[0]) || 'selector matched 0 elements on the page';
+  if (Array.isArray(v.issues) && v.issues.length) return v.issues[0];
+  if (v.score === 'mismatch') {
+    const c = v.checks || {};
+    if (c.visible === false) return 'matched element is not visible';
+    if (c.interactable === false) return 'matched element is not interactable';
+    if (c.typeMatchesRole === false) return 'matched element type does not match the role';
+    if (c.uniqueMatch === false) return `selector matched ${v.matchedCount} elements (expected one)`;
+    return 'verification mismatch';
+  }
+  return `unverified (score=${v.score ?? 'unknown'})`;
+}
+
+// Persist one Resolve-roles run outcome against the page's complexity so
+// success-rate-vs-difficulty can be plotted over iterations. Capped ring.
+async function _logResolveRun(entry) {
+  try {
+    const KEY = 'resolveRoles:perf';
+    const got = await new Promise(r => chrome.storage.local.get(KEY, r));
+    const list = Array.isArray(got?.[KEY]) ? got[KEY] : [];
+    list.push(entry);
+    while (list.length > 200) list.shift();
+    await new Promise(r => chrome.storage.local.set({ [KEY]: list }, r));
+  } catch (e) {
+    Logger?.warn?.('locale-capture', `resolve perf-log failed: ${e.message}`);
+  }
 }
 
 // ─── Landmark rendering ──────────────────────────────────────────────────

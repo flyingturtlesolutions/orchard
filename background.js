@@ -4048,6 +4048,107 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
+    // v2.74.352 — "Resolve roles": one LLM call returns a CSS selector for each
+    // of a perspective's roles (or null to abstain), given screenshot + rich
+    // DOM + this Ground's landmark registry. The sidepanel verifies each
+    // selector and routes abstentions/failures to manual picking. See
+    // DESIGN_resolve_roles.md.
+    case 'RESOLVE_LOCALE_ROLES': {
+      (async () => {
+        try {
+          const { tabId, groundId = null, roles, priorAttempt = null } = payload ?? {};
+          if (typeof tabId !== 'number') { sendResponse({ success: false, error: 'tabId required' }); return; }
+          if (!Array.isArray(roles) || roles.length === 0) { sendResponse({ success: false, error: 'roles required' }); return; }
+          let tabInfo;
+          try { tabInfo = await chrome.tabs.get(tabId); }
+          catch (e) { sendResponse({ success: false, error: `Tab not found: ${e.message}` }); return; }
+          const url = tabInfo?.url ?? '';
+          if (!/^https?:/i.test(url)) {
+            sendResponse({ success: false, error: 'This page does not allow content scripts (chrome://, extension page, or restricted URL).' });
+            return;
+          }
+          try {
+            await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['ContentScripts/contentScript.js'] });
+          } catch (e) {
+            Logger.warn('background', `RESOLVE_LOCALE_ROLES: content-script inject failed (continuing): ${e.message}`);
+          }
+          let snap;
+          try { snap = await chrome.tabs.sendMessage(tabId, { type: 'DOM_SNAPSHOT_RICH' }); }
+          catch (e) { sendResponse({ success: false, error: `DOM snapshot failed: ${e.message}` }); return; }
+          if (!snap?.success) { sendResponse({ success: false, error: snap?.error ?? 'DOM snapshot returned no payload' }); return; }
+
+          // Screenshot (active tab only) — best-effort.
+          let screenshot = null;
+          if (tabInfo.active) {
+            try { screenshot = await chrome.tabs.captureVisibleTab(tabInfo.windowId, { format: 'jpeg', quality: 55 }); }
+            catch (e) { Logger.warn('background', `RESOLVE_LOCALE_ROLES: screenshot failed (continuing): ${e.message}`); }
+          }
+          // Ground landmark registry (reuse) — best-effort.
+          let registryLandmarks = null;
+          if (groundId) {
+            try {
+              const lms = await StorageManager.listLandmarksForGround(groundId);
+              registryLandmarks = (lms ?? []).map(lm => ({ alias: lm.alias, a11yRole: lm.a11yRole, description: lm.description, selector: lm.selector }));
+            } catch (e) {
+              Logger.warn('background', `RESOLVE_LOCALE_ROLES: listLandmarksForGround failed (continuing): ${e.message}`);
+            }
+          }
+
+          const out = await AnthropicService.resolveRoles({
+            roles,
+            url        : snap.url   ?? url,
+            title      : snap.title ?? '',
+            domSnapshot: snap.snapshot ?? '',
+            screenshot,
+            registryLandmarks,
+            priorAttempt,
+          });
+          if (!out || !Array.isArray(out.resolutions)) {
+            sendResponse({ success: false, error: 'Claude returned no usable resolutions.' });
+            return;
+          }
+          sendResponse({ success: true, resolutions: out.resolutions });
+        } catch (err) {
+          Logger.error('background', `RESOLVE_LOCALE_ROLES failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // v2.74.353 — Resolve-roles complexity metric. Injects the content script
+    // (so tabs loaded before this session answer) then asks it to scan the DOM
+    // and score how hard the page is to resolve. Used for the side-panel badge.
+    case 'GET_PAGE_COMPLEXITY': {
+      (async () => {
+        try {
+          const { tabId } = payload ?? {};
+          if (typeof tabId !== 'number') { sendResponse({ success: false, error: 'tabId required' }); return; }
+          let tabInfo;
+          try { tabInfo = await chrome.tabs.get(tabId); }
+          catch (e) { sendResponse({ success: false, error: `Tab not found: ${e.message}` }); return; }
+          if (!/^https?:/i.test(tabInfo?.url ?? '')) {
+            sendResponse({ success: false, error: 'not-a-web-page' });
+            return;
+          }
+          try {
+            await chrome.scripting.executeScript({ target: { tabId, allFrames: false }, files: ['ContentScripts/contentScript.js'] });
+          } catch (e) {
+            Logger.warn('background', `GET_PAGE_COMPLEXITY: inject failed (continuing): ${e.message}`);
+          }
+          let res;
+          try { res = await chrome.tabs.sendMessage(tabId, { type: 'PAGE_COMPLEXITY' }, { frameId: 0 }); }
+          catch (e) { sendResponse({ success: false, error: `complexity scan failed: ${e.message}` }); return; }
+          if (!res?.success) { sendResponse({ success: false, error: res?.error ?? 'no complexity report' }); return; }
+          sendResponse({ success: true, report: res.report });
+        } catch (err) {
+          Logger.error('background', `GET_PAGE_COMPLEXITY failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
     // v2.74.128 — GET_TAB_SIDEPANEL_MODE and the background-side
     // CLEAR_TAB_SIDEPANEL_MODE handler removed alongside the dead
     // __tabSidepanelModes map. The shell registers its own

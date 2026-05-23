@@ -1835,4 +1835,194 @@ executor), and open questions. Nothing in § 4 of that note is built.
 - `assets/sidepanel.css` — downstream option styles.
 - `DESIGN_linked_perspectives.md` (new) — the design note.
 
+## v2.74.352 — "Resolve roles": auto-fill a perspective's roles → selectors (LOCALE_SPEC § 13)
+
+**Date:** 2026-05-23
+**Decision by:** user ("add a second button … spec its use … write into spec and implement — we'll iterate with performance").
+
+**What.** A second button — **⚡ Resolve roles** — next to "Use this" on each
+*on-page* proposed perspective. The inverse of the picker: instead of the user
+clicking N elements, Claude resolves every role to a CSS selector in ONE call,
+the sidepanel verifies each, and the user reviews. See
+`DESIGN_resolve_roles.md` for the full spec (incl. the not-yet-built
+set-of-marks north-star).
+
+**Flow (v1).**
+1. Clicking it adopts the perspective (= "Use this": name, URL predicate, role
+   checklist) then calls the new `RESOLVE_LOCALE_ROLES`.
+2. Context for accuracy: screenshot (`captureVisibleTab`) + rich DOM
+   (`DOM_SNAPSHOT_RICH`) + the Ground's landmark registry (reuse). One LLM call
+   (`AnthropicService.resolveRoles`) returns a selector — or `null` (abstain) —
+   per role, with confidence + justification. Non-CSS selectors are rejected
+   (`_looksLikePlaywrightSelector`).
+3. Each returned selector becomes a draft landmark and runs through the
+   EXISTING `verifyLocaleLandmark` (INSPECT_ELEMENT → multi-axis score +
+   canonical uid + a11y profile — **no extra LLM call**, N cheap probes).
+4. Selectors that don't resolve / score `mismatch` are dropped, so that role
+   stays unfilled (○) in the checklist for manual picking. Abstentions likewise.
+5. Toast summary: *"resolved N, M didn't match, K skipped · pick the rest
+   manually."* Roles still become `LandmarkNode.role` at save (existing synthesis).
+
+**Why this shape.** Cost = 1 LLM call + N content-script probes (not 1+N LLM
+calls). Verification — not faith — gates what lands, so a hallucinated selector
+is caught and routed to manual. Consistent with LLM-as-author / user-as-reviewer.
+Downstream (off-page) perspectives get no Resolve button — their elements aren't
+on the page.
+
+**Guards.** One propose/resolve op at a time; the v2.74.349 draft-identity token
+discards results that land after unmount/switch (checked again after the
+per-role verify await).
+
+**Iteration note.** v1 has Claude write selectors directly (+ verify + manual
+fallback). If accuracy is weak, the documented next step is set-of-marks
+(label real candidates → Claude chooses by label → system synthesizes the
+selector) + region-first scoping + a verify-repair loop — `DESIGN_resolve_roles.md` § 4.
+
+**Touched.**
+- `Services/AnthropicService.js` — `resolveRoles` (+ sanitizer reusing
+  `_looksLikePlaywrightSelector`).
+- `background.js` — `RESOLVE_LOCALE_ROLES` handler (inject + DOM snapshot +
+  screenshot + registry → `resolveRoles`).
+- `Sidepanel/modes/locale-capture.js` — `⚡ Resolve roles` button on on-page
+  options; `onResolveRoles` (adopt → resolve → per-role `verifyLocaleLandmark`
+  → drop failures); `_resolveInFlightKey` state + unmount reset.
+- `assets/sidepanel.css` — option-actions button row.
+- `DESIGN_resolve_roles.md` (new) — the spec.
+
+## v2.74.353 — Resolve-difficulty complexity metric + run logging (testing instrument)
+
+**Date:** 2026-05-23
+**Decision by:** user ("quantify site complexity … rate performance and verify improvements … visually tag to the site page").
+
+**Why.** Resolve roles succeeds on simple sites, fails on complex ones. To make
+"we improved it" measurable, every page gets a deterministic difficulty score
+(the x-axis) and every Resolve run is logged against it (the y-axis).
+
+**What.** `computePageComplexity()` (content script, no LLM, stable per page)
+scores 0–100 (↑ = harder), tuned to selector-resolution difficulty across two
+channels — the user's insight that the *screenshot* Claude is sent must also be
+qualified:
+- **Synthesis (DOM, 60%)** — can a durable selector be written? hook scarcity
+  (25), class obfuscation (15), div-soup ratio (8), shadow DOM/custom els (7),
+  scale & depth (5).
+- **Matching (visual, 30%)** — can Claude tell which element it is, given the
+  viewport-only screenshot? off-screen-candidate ratio (18), opaque controls
+  (12).
+- **Blockers (10%)** — iframes (cross-origin heavier).
+Tiers: Simple / Moderate / Complex / Severe.
+
+**Surfaced** as a tiered colored badge in the locale-capture header
+(`🧩 Complex · 61`); hover shows synthesis/matching sub-scores + factor
+breakdown, so a failure reveals *which channel* is the bottleneck (→ set-of-marks
+vs better visual capture). Recomputed on tab-change / navigation.
+
+**Run logging.** Each Resolve run appends `{ts,url,variant,rolesTotal,resolved,
+failed,abstained,ms,score,synthScore,matchScore,tier}` to
+`chrome.storage.local['resolveRoles:perf']` (capped 200), and the score rides in
+the toast. Weights are first guesses, meant to be re-tuned from this data.
+
+**Touched.**
+- `ContentScripts/contentScript.js` — `computePageComplexity()` + `PAGE_COMPLEXITY`
+  message.
+- `background.js` — `GET_PAGE_COMPLEXITY` (inject + relay).
+- `Sidepanel/modes/locale-capture.js` — header badge + `_refreshComplexity` /
+  `_renderComplexityBadge`; recompute on tab change; `_logResolveRun`; state +
+  unmount reset.
+- `assets/sidepanel.css` — tiered badge styles.
+- `DESIGN_resolve_roles.md` — § 7 (the metric).
+
+## v2.74.354 — Robust JSON extraction (fix resolveRoles parse crash)
+
+**Date:** 2026-05-23
+**Decision by:** bug report — `resolveRoles error: Unexpected non-whitespace character after JSON at position 1433`.
+
+**Cause.** All the structured-output methods extracted JSON with
+`text.slice(indexOf('{'), lastIndexOf('}')+1)`. When the model appends prose
+after the JSON object (and that prose contains a `}`), the slice over-captures,
+so `JSON.parse` parses the object then chokes on the trailing content.
+
+**Fix.** New `AnthropicService.#firstJsonObject(text)` brace-matches from the
+first `{` (tracking string literals + escapes) to its matching `}`, returning
+the first complete object and ignoring anything after it (also tolerates
+markdown fences). Applied to `proposeLocaleStructure`, `proposePerspectives`,
+and `resolveRoles`.
+
+**Scope note.** ~11 other pre-existing methods (suggestLocale,
+generateLandmarkProfile, proposeNextStep, …) use the same `firstBrace/lastBrace`
+pattern. Left as-is for now (working, out of this feature area); the helper is a
+drop-in if they later hit the same failure.
+
+**Touched.** `Services/AnthropicService.js`.
+
+## v2.74.355 — Resolve roles: surface WHY each role failed verification
+
+**Date:** 2026-05-23
+**Decision by:** bug report — "there's no logging on why verification failed."
+
+**Gap.** When a Claude-resolved selector failed verification, `onResolveRoles`
+silently dropped the landmark and bumped a `failed` counter — no reason
+recorded, so there was nothing to debug complex-site failures with.
+
+**What.** Each role's outcome is now captured + surfaced three ways:
+- **Console log panel:** per role, `resolveRoles[<role>] resolved …` /
+  `verify FAILED — selector="…" — <reason>` / `abstained — <reason>`, plus a
+  done summary line.
+- **Persisted:** the run-log entry (`resolveRoles:perf`) gains a `details[]`
+  array — `{role, status, selector, reason, matchedCount, confidence}` per role
+  — so failure reasons are analyzable alongside the difficulty score.
+- **Inline:** under each unfilled role in the checklist, a note —
+  `⚠ <reason>` (verification failure) or `∅ <reason>` (Claude abstained).
+  Cleared when the role is filled manually.
+
+`_verifyFailReason(v)` derives the reason from the verdict the verifier already
+computes (issues / checks / matchedCount): "selector matched 0 elements",
+"matched element is not visible", "type does not match the role", "matched N
+elements (expected one)", etc. Abstain reason = Claude's `justification`.
+
+**Touched.**
+- `Sidepanel/modes/locale-capture.js` — `_verifyFailReason`, `_roleResolveNotes`
+  state, per-role logging + details in `onResolveRoles`, inline note render,
+  clear-on-manual-pick, unmount reset.
+- `assets/sidepanel.css` — role-note styles.
+
+## v2.74.356 — Verification feedback loop (opt-in repair round) — LOCALE_SPEC § 13 / DESIGN_resolve_roles § 8
+
+**Date:** 2026-05-23
+**Decision by:** user ("complete the loop … is this valuable? … Opt-in button").
+
+**Value call (recorded).** Feeding verification verdicts back to Claude is the
+highest-leverage v1 accuracy step for *fixable* failures (wrong-but-on-page
+selector, count mismatch, wrong element) — the reason tells Claude exactly what
+to change. Its ceiling is the *synthesis* ceiling: it can't manufacture a hook
+that doesn't exist (shadow DOM / iframe / no durable hook). Token cost ignored;
+latency cost = one extra LLM round-trip per round, so it's **opt-in** (user pays
+only on demand).
+
+**What.** After a Resolve run, unfilled roles that have a failure/abstain note
+get a **"↻ Retry K with feedback"** button under the role checklist. One click =
+one repair round:
+- `resolveRoles` gains a `priorAttempt` arm — `{confirmed:[{role,selector}],
+  attempts:[{role,selector,reason}]}`. Confirmed successes are shown as the
+  site's working selector conventions (not re-emitted); each failed role's prior
+  selector + verification reason is fed back, asking for a corrected selector.
+- `onRetryFailedRoles` re-resolves ONLY the still-unfilled noted roles through
+  the shared `_runResolve` driver (same create→verify→drop→note→log path,
+  `mode:'repair'`). Repaired roles light ✓ and clear their note; still-failing
+  ones update the reason. The user is the round cap (click again for another).
+- Run logged to `resolveRoles:perf` with `mode`, so repair lift is measurable
+  vs the difficulty score.
+
+**Refactor.** `onResolveRoles`' result-processing extracted into `_runResolve`
+(shared by initial + repair). Initial run clears `_roleResolveNotes`; repair run
+updates only retried roles. JSON parse for all three LLM methods already
+hardened in v2.74.354.
+
+**Touched.**
+- `Services/AnthropicService.js` — `resolveRoles` `priorAttempt` arm.
+- `background.js` — `RESOLVE_LOCALE_ROLES` passes `priorAttempt` through.
+- `Sidepanel/modes/locale-capture.js` — `_runResolve` extraction;
+  `onRetryFailedRoles`; chosen-variant/idx state; retry button render + wiring;
+  notes store prior `selector`.
+- `assets/sidepanel.css` — retry-button spacing.
+- `DESIGN_resolve_roles.md` — § 8 marked built.
 

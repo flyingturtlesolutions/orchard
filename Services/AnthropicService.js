@@ -1683,10 +1683,9 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
         Logger.warn('AnthropicService', `proposeLocaleStructure failed: ${raw?.error}`);
         return null;
       }
-      let text = String(raw.text ?? '').trim();
-      const a = text.indexOf('{'); const b = text.lastIndexOf('}');
-      if (a < 0 || b < a) { Logger.warn('AnthropicService', 'proposeLocaleStructure: no JSON'); return null; }
-      parsed = JSON.parse(text.slice(a, b + 1));
+      const json = AnthropicService.#firstJsonObject(raw.text);
+      if (!json) { Logger.warn('AnthropicService', 'proposeLocaleStructure: no JSON'); return null; }
+      parsed = JSON.parse(json);
     } catch (e) {
       Logger.warn('AnthropicService', `proposeLocaleStructure error: ${e.message}`);
       return null;
@@ -1901,10 +1900,9 @@ Rules:
         Logger.warn('AnthropicService', `proposePerspectives failed: ${raw?.error}`);
         return null;
       }
-      let text = String(raw.text ?? '').trim();
-      const a = text.indexOf('{'); const b = text.lastIndexOf('}');
-      if (a < 0 || b < a) { Logger.warn('AnthropicService', 'proposePerspectives: no JSON'); return null; }
-      parsed = JSON.parse(text.slice(a, b + 1));
+      const json = AnthropicService.#firstJsonObject(raw.text);
+      if (!json) { Logger.warn('AnthropicService', 'proposePerspectives: no JSON'); return null; }
+      parsed = JSON.parse(json);
     } catch (e) {
       Logger.warn('AnthropicService', `proposePerspectives error: ${e.message}`);
       return null;
@@ -1955,6 +1953,125 @@ Rules:
     }
     if (options.length === 0) return null;
     return { options };
+  }
+
+  /**
+   * v2.74.352 — "Resolve roles": given a proposed perspective's ROLES and the
+   * current page, return a concrete CSS selector for each role (or null to
+   * abstain). The inverse of the picker — Claude resolves all roles in one
+   * call; the caller verifies each selector against the live DOM and routes
+   * abstentions/failures to manual picking. See DESIGN_resolve_roles.md.
+   *
+   * Context for accuracy: screenshot (visual prominence / repetition) + rich
+   * DOM (real attributes) + the Ground's existing landmarks (reuse). The
+   * system, not Claude, owns verification — so a wrong selector is caught, not
+   * trusted.
+   *
+   * v2.74.356 — Optional `priorAttempt` turns this into a REPAIR pass (the
+   * opt-in feedback loop, DESIGN_resolve_roles.md § 8): `{ confirmed:[{role,
+   * selector}], attempts:[{role, selector, reason}] }`. Confirmed selectors are
+   * shown as working-on-this-site guides (not re-emitted); each attempt's prior
+   * selector + verification failure reason is fed back so Claude returns a
+   * corrected selector. `roles` then contains only the unresolved roles.
+   *
+   * @param {{ roles: Array<{role:string,description?:string,multiplicity?:string}>, url?:string, title?:string, domSnapshot?:string, screenshot?:string|null, registryLandmarks?:Array|null, priorAttempt?:{confirmed?:Array,attempts?:Array}|null }} params
+   * @returns {Promise<{ resolutions: Array<{role:string, selector:string|null, confidence:number, justification:string}> }|null>}
+   */
+  static async resolveRoles({ roles, url, title, domSnapshot, screenshot = null, registryLandmarks = null, priorAttempt = null }) {
+    const roleList = (Array.isArray(roles) ? roles : [])
+      .filter(r => r && typeof r.role === 'string' && r.role.trim());
+    if (roleList.length === 0) return null;
+
+    const systemPrompt = `You resolve a set of named ROLES to concrete CSS selectors on the CURRENT page. You are given each role (name + description + multiplicity), the page (a screenshot, if attached, plus a sanitized DOM listing with real element attributes), and any landmarks already captured on this Ground. For each role return ONE CSS selector for the element that plays it — or null if no element on THIS page clearly matches.
+
+Return ONLY a JSON object:
+{
+  "resolutions": [
+    { "role": "search-input", "selector": "#search", "confidence": 0.9, "justification": "the labelled search textbox in the header" },
+    { "role": "result-item",  "selector": "ul.results > li", "confidence": 0.8, "justification": "repeating result rows" },
+    { "role": "promo-banner", "selector": null, "confidence": 0.0, "justification": "no matching element on this page" }
+  ]
+}
+
+Rules:
+- Selector MUST be pure CSS usable by document.querySelectorAll. NEVER use Playwright/Cypress/jQuery extensions (:has-text, :text, :text-is, :contains, :visible, :nth-match, :near, text=, xpath=). They throw at runtime.
+- Prefer durable hooks: id, data-testid / data-*, name, aria-label, role, type, semantic tags. AVOID nth-child chains, hashed/auto-generated class names, and long brittle descendant chains.
+- multiplicity "one"/"optional" → the selector must resolve to EXACTLY ONE element. multiplicity "many" → the selector must match the REPEATING item (multiple elements — e.g. the row/card that recurs), not one arbitrary instance.
+- If a listed Ground landmark already matches a role, REUSE its selector verbatim.
+- ABSTAIN with selector:null when no element on this page clearly plays the role. A wrong selector is worse than a gap — the user will pick it manually.
+- Use the screenshot to judge which element is the right one (e.g. the visually prominent primary action) and what repeats.
+- Return exactly one entry per provided role, in the same order.`;
+
+    let rolesText = roleList.map(r =>
+      `- role: ${r.role}\n  desc: ${(r.description ?? '').trim() || '(none)'}\n  multiplicity: ${r.multiplicity ?? 'one'}`
+    ).join('\n');
+    let userText = `Roles to resolve:\n${rolesText}\n\nURL: ${url ?? '(unknown)'}\nTitle: ${title ?? '(unknown)'}\n\nPage (sanitized DOM):\n${(domSnapshot ?? '').slice(0, 12000)}`;
+    if (Array.isArray(registryLandmarks) && registryLandmarks.length) {
+      const block = registryLandmarks.slice(0, 30).map(lm => {
+        const role = lm?.a11yRole ? ` [${lm.a11yRole}]` : '';
+        const sel  = lm?.selector ? ` => ${String(lm.selector).slice(0, 120)}` : '';
+        const d    = lm?.description ? ` — ${String(lm.description).slice(0, 60)}` : '';
+        return `- ${lm?.alias ?? '(no-alias)'}${role}${sel}${d}`;
+      }).join('\n');
+      userText += `\n\nLANDMARKS ALREADY CAPTURED ON THIS GROUND (reuse a selector verbatim if it matches a role):\n${block}`;
+    }
+    // v2.74.356 — Repair pass: feed back verification verdicts so Claude
+    // corrects what failed. Confirmed successes guide the site's conventions.
+    if (priorAttempt && (priorAttempt.confirmed?.length || priorAttempt.attempts?.length)) {
+      let rep = '\n\nTHIS IS A REPAIR PASS — your previous selectors were verified against the live page.';
+      if (Array.isArray(priorAttempt.confirmed) && priorAttempt.confirmed.length) {
+        rep += `\nAlready CONFIRMED working (do NOT return these — they show this site's selector conventions):\n` +
+          priorAttempt.confirmed.map(c => `- ${c.role} => ${c.selector}`).join('\n');
+      }
+      if (Array.isArray(priorAttempt.attempts) && priorAttempt.attempts.length) {
+        rep += `\nThese FAILED verification — for each, your prior selector + why it failed. Return a DIFFERENT, corrected selector (or null if genuinely unresolvable on this page):\n` +
+          priorAttempt.attempts.map(a => `- ${a.role}: prior="${a.selector ?? '(none)'}" — failed: ${a.reason ?? 'unknown'}`).join('\n');
+      }
+      userText += rep;
+    }
+
+    const userContent = [];
+    if (typeof screenshot === 'string') {
+      const m = /^data:(image\/[a-z]+);base64,(.+)$/i.exec(screenshot);
+      if (m) {
+        userContent.push({ type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } });
+        userText += '\n\n(A screenshot of the current page is attached above.)';
+      }
+    }
+    userContent.push({ type: 'text', text: userText });
+
+    Logger.info('AnthropicService', `resolveRoles${priorAttempt ? ' [repair]' : ''} — ${roleList.length} role(s)`);
+
+    let parsed;
+    try {
+      const raw = await AnthropicService.#call(systemPrompt, userContent, 1200);
+      if (!raw?.success) { Logger.warn('AnthropicService', `resolveRoles failed: ${raw?.error}`); return null; }
+      const json = AnthropicService.#firstJsonObject(raw.text);
+      if (!json) { Logger.warn('AnthropicService', 'resolveRoles: no JSON'); return null; }
+      parsed = JSON.parse(json);
+    } catch (e) {
+      Logger.warn('AnthropicService', `resolveRoles error: ${e.message}`);
+      return null;
+    }
+
+    // ── Sanitizer: align to the requested roles; reject non-CSS selectors. ──
+    const byRole = new Map();
+    for (const r of Array.isArray(parsed.resolutions) ? parsed.resolutions : []) {
+      if (r && typeof r.role === 'string') byRole.set(r.role.trim(), r);
+    }
+    const resolutions = roleList.map(({ role }) => {
+      const r = byRole.get(role) ?? null;
+      let selector = (r && typeof r.selector === 'string') ? r.selector.trim() : null;
+      if (selector && _looksLikePlaywrightSelector(selector)) {
+        Logger.warn('AnthropicService', `resolveRoles: dropping non-CSS selector for "${role}": ${selector.slice(0, 120)}`);
+        selector = null;
+      }
+      if (!selector) selector = null;
+      const confidence = (r && typeof r.confidence === 'number') ? Math.max(0, Math.min(1, r.confidence)) : 0;
+      const justification = (r && typeof r.justification === 'string') ? r.justification.trim().slice(0, 160) : '';
+      return { role, selector, confidence, justification };
+    });
+    return { resolutions };
   }
 
   /**
@@ -3703,6 +3820,35 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    *                                        (used for assistant prefill).
    * @returns {Promise<{ success: boolean, text: string, error: string|null }>}
    */
+  /**
+   * v2.74.354 — Extract the FIRST complete JSON object from model text by
+   * brace-matching from the first `{` (respecting string literals/escapes).
+   * Robust to trailing prose, markdown fences, and braces in surrounding text
+   * — unlike `slice(indexOf('{'), lastIndexOf('}'))`, which over-captures any
+   * trailing `}` and makes JSON.parse throw "non-whitespace after JSON".
+   * @param {string} text
+   * @returns {string|null} the JSON substring, or null if none/unbalanced
+   */
+  static #firstJsonObject(text) {
+    const s = String(text ?? '');
+    const start = s.indexOf('{');
+    if (start < 0) return null;
+    let depth = 0, inStr = false, esc = false;
+    for (let i = start; i < s.length; i++) {
+      const ch = s[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === '\\') esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === '{') depth++;
+      else if (ch === '}') { depth--; if (depth === 0) return s.slice(start, i + 1); }
+    }
+    return null;   // unbalanced — truncated output
+  }
+
   static async #call(systemPrompt, userContent, maxTokens, extraMessages = []) {
     const apiKey = await AnthropicService.getApiKey();
     if (!apiKey) return { success: false, text: '', error: 'No API key' };
