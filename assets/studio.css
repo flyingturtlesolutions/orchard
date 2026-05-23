@@ -352,3 +352,41 @@
   color: #d4a8ff;
   border: 1px solid rgba(220, 180, 255, 0.3);
 }
+
+/* ── v2.74.357 — Resolve performance viewer ───────────────────────────── */
+.rp-summary { font-size: 12px; color: rgba(148,163,184,0.9); margin: 4px 0 10px; }
+.rp-dim { color: rgba(148,163,184,0.7); font-size: 11px; }
+.rp-up  { color: rgba(110,231,168,1); font-weight: 600; }
+.rp-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 8px; }
+.rp-table th { text-align: left; font-weight: 600; color: rgba(148,163,184,0.85); padding: 4px 8px; border-bottom: 1px solid rgba(148,163,184,0.2); }
+.rp-table td { padding: 4px 8px; border-bottom: 1px solid rgba(148,163,184,0.08); }
+/* tier pills (standalone — mirror the sidepanel badge colors) */
+.cx-pill { display: inline-block; font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; padding: 1px 6px; border-radius: 9px; border: 1px solid rgba(148,163,184,0.3); }
+.cx-pill.cx-simple   { background: rgba(61,214,140,0.14);  border-color: rgba(61,214,140,0.5);  color: rgba(110,231,168,1); }
+.cx-pill.cx-moderate { background: rgba(251,191,36,0.14);  border-color: rgba(251,191,36,0.5);  color: rgba(252,211,77,1); }
+.cx-pill.cx-complex  { background: rgba(251,146,60,0.16);  border-color: rgba(251,146,60,0.55); color: rgba(253,186,116,1); }
+.cx-pill.cx-severe   { background: rgba(247,110,110,0.16); border-color: rgba(247,110,110,0.6); color: rgba(252,165,165,1); }
+/* failure-mode split + reason histogram */
+.rp-modesplit { font-size: 13px; font-weight: 600; margin: 4px 0; }
+.rp-synthesis { color: rgba(253,186,116,1); }
+.rp-matching  { color: rgba(125,211,252,1); }
+.rp-modehint  { font-size: 11px; color: rgba(148,163,184,0.85); margin-bottom: 8px; line-height: 1.4; }
+.rp-reason { display: flex; align-items: center; gap: 8px; margin: 3px 0; font-size: 11px; }
+.rp-reason-tag { flex: 0 0 auto; width: 64px; text-align: center; font-size: 9px; text-transform: uppercase; padding: 1px 4px; border-radius: 3px; }
+.rp-reason-tag.rp-synthesis { background: rgba(251,146,60,0.16); color: rgba(253,186,116,1); }
+.rp-reason-tag.rp-matching  { background: rgba(125,211,252,0.16); color: rgba(125,211,252,1); }
+.rp-reason-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(226,232,240,0.92); }
+.rp-reason-bar { flex: 0 0 80px; height: 6px; background: rgba(148,163,184,0.12); border-radius: 3px; overflow: hidden; }
+.rp-reason-bar > span { display: block; height: 100%; background: rgba(148,163,184,0.6); }
+.rp-reason-count { flex: 0 0 auto; width: 24px; text-align: right; color: rgba(148,163,184,0.9); }
+
+/* ── v2.74.358 — LLM audit: role pills ────────────────────────────────── */
+.rp-fail { color: rgba(252,165,165,1); font-weight: 600; }
+.role-pill { display: inline-block; font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; padding: 1px 6px; border-radius: 9px; border: 1px solid rgba(148,163,184,0.3); }
+.role-pill.role-propose      { background: rgba(196,181,253,0.16); color: rgba(196,181,253,1); border-color: rgba(196,181,253,0.5); }
+.role-pill.role-resolve      { background: rgba(125,211,252,0.16); color: rgba(125,211,252,1); border-color: rgba(125,211,252,0.5); }
+.role-pill.role-describe     { background: rgba(61,214,140,0.14);  color: rgba(110,231,168,1); border-color: rgba(61,214,140,0.5); }
+.role-pill.role-plan         { background: rgba(251,146,60,0.16);  color: rgba(253,186,116,1); border-color: rgba(251,146,60,0.55); }
+.role-pill.role-extract      { background: rgba(96,165,250,0.16);  color: rgba(147,197,253,1); border-color: rgba(96,165,250,0.5); }
+.role-pill.role-classify     { background: rgba(244,114,182,0.16); color: rgba(249,168,212,1); border-color: rgba(244,114,182,0.5); }
+.role-pill.role-unclassified { background: rgba(251,191,36,0.14);  color: rgba(252,211,77,1);  border-color: rgba(251,191,36,0.5); }

@@ -123,6 +123,8 @@ qsa('.tab-btn').forEach((btn) => {
     panel.classList.add('active');
     if (btn.dataset.tab === 'settings')  refreshSettings();
     if (btn.dataset.tab === 'logs')      { refreshLogs(); btn.removeAttribute('data-has-alert'); btn.dataset.badge = '0'; }
+    if (btn.dataset.tab === 'resolveperf') renderResolvePerf();
+    if (btn.dataset.tab === 'llm')         renderLlmAudit();
     // v2.74.69 — Workflows tab is a derived view: every visit re-reads
     // strategies + grounds so newly-authored content shows up without a
     // full Studio reload.
@@ -5116,6 +5118,238 @@ qsa('.tab-btn').forEach(btn => {
   if (btn.dataset.tab === 'prompts') {
     btn.addEventListener('click', () => renderDocsTab());
   }
+});
+
+// ─── v2.74.357 — Resolve performance viewer ─────────────────────────────────
+// Mines the resolveRoles:perf log (written by locale-capture per ⚡ Resolve
+// run) into success-by-difficulty + failure-mode analysis. See
+// DESIGN_resolve_roles.md § 7/§ 8.
+const RESOLVE_PERF_KEY = 'resolveRoles:perf';
+const RP_TIERS = ['simple', 'moderate', 'complex', 'severe'];
+
+// Collapse near-identical reasons (digits → N) so they group in the histogram.
+function _rpNormReason(reason) {
+  return String(reason || 'unknown').toLowerCase().replace(/\d+/g, 'N').replace(/\s+/g, ' ').trim().slice(0, 80);
+}
+// SYNTHESIS = bad/unreachable/ambiguous selector (→ set-of-marks / feedback);
+// MATCHING = wrong element chosen (→ better visual capture / region scoping).
+function _rpFailClass(reason) {
+  const r = String(reason || '').toLowerCase();
+  if (r.includes('type does not match') || r.includes('role implies') || r.includes('not visible') || r.includes('not interactable')) return 'matching';
+  return 'synthesis';   // 0-matches, ambiguous (expected one), threw, default
+}
+
+async function renderResolvePerf() {
+  const body = $('resolveperf-body');
+  if (!body) return;
+  const got = await new Promise(r => chrome.storage.local.get(RESOLVE_PERF_KEY, r));
+  const runs = Array.isArray(got?.[RESOLVE_PERF_KEY]) ? got[RESOLVE_PERF_KEY] : [];
+  if (!runs.length) {
+    body.innerHTML = `<p class="empty-state">No Resolve-roles runs logged yet. Use ⚡ Resolve roles in locale capture — each run lands here.</p>`;
+    return;
+  }
+
+  const agg = {};
+  for (const t of RP_TIERS) agg[t] = { initRuns:0, initRoles:0, initResolved:0, repairRuns:0, repairResolved:0, msSum:0, msN:0, scoreSum:0, scoreN:0 };
+  const reasons = {};
+  let synth = 0, match = 0, firstTs = Infinity, lastTs = 0;
+
+  for (const run of runs) {
+    if (run.ts) { firstTs = Math.min(firstTs, run.ts); lastTs = Math.max(lastTs, run.ts); }
+    const t = RP_TIERS.includes(run.tier) ? run.tier : null;
+    if (t) {
+      const a = agg[t];
+      if (run.mode === 'repair') { a.repairRuns++; a.repairResolved += run.resolved||0; }
+      else { a.initRuns++; a.initRoles += run.rolesTotal||0; a.initResolved += run.resolved||0; }
+      if (typeof run.ms === 'number') { a.msSum += run.ms; a.msN++; }
+      if (typeof run.score === 'number') { a.scoreSum += run.score; a.scoreN++; }
+    }
+    for (const d of Array.isArray(run.details) ? run.details : []) {
+      if (d.status === 'failed' && d.reason) {
+        const key = _rpNormReason(d.reason);
+        const cls = _rpFailClass(d.reason);
+        if (!reasons[key]) reasons[key] = { count: 0, cls };
+        reasons[key].count++;
+        if (cls === 'matching') match++; else synth++;
+      }
+    }
+  }
+
+  const pct = (n, d) => d > 0 ? Math.round(100*n/d) : null;
+  let tierRows = '';
+  for (const t of RP_TIERS) {
+    const a = agg[t];
+    if (a.initRuns === 0 && a.repairRuns === 0) continue;
+    const initP = pct(a.initResolved, a.initRoles);
+    const afterP = pct(a.initResolved + a.repairResolved, a.initRoles);
+    const avgScore = a.scoreN ? Math.round(a.scoreSum/a.scoreN) : null;
+    const avgMs = a.msN ? Math.round(a.msSum/a.msN) : null;
+    tierRows += `<tr>
+      <td><span class="cx-pill cx-${t}">${t}</span>${avgScore!=null?` <span class="rp-dim">${avgScore}</span>`:''}</td>
+      <td>${initP!=null?initP+'%':'—'} <span class="rp-dim">${a.initResolved}/${a.initRoles}</span></td>
+      <td>${afterP!=null?afterP+'%':'—'}${a.repairResolved?` <span class="rp-up">+${a.repairResolved}</span>`:''}</td>
+      <td class="rp-dim">${a.initRuns}${a.repairRuns?` +${a.repairRuns}r`:''}</td>
+      <td class="rp-dim">${avgMs!=null?avgMs+'ms':'—'}</td>
+    </tr>`;
+  }
+
+  const totalFail = synth + match;
+  const synthPct = totalFail ? Math.round(100*synth/totalFail) : 0;
+  const matchPct = totalFail ? 100 - synthPct : 0;
+  const reasonList = Object.entries(reasons).sort((a,b)=>b[1].count-a[1].count).slice(0,10);
+  const maxReason = reasonList.length ? reasonList[0][1].count : 1;
+  const reasonRows = reasonList.map(([r, info]) => `
+    <div class="rp-reason">
+      <span class="rp-reason-tag rp-${info.cls}">${info.cls}</span>
+      <span class="rp-reason-label">${escHtml(r)}</span>
+      <span class="rp-reason-bar"><span style="width:${Math.round(100*info.count/maxReason)}%"></span></span>
+      <span class="rp-reason-count">${info.count}</span>
+    </div>`).join('');
+
+  const recent = runs.slice(-25).reverse().map(run => {
+    const time = run.ts ? new Date(run.ts).toLocaleTimeString() : '—';
+    let host = ''; try { host = new URL(run.url).host; } catch { host = (run.url || '').slice(0, 40); }
+    const t = RP_TIERS.includes(run.tier) ? run.tier : '';
+    return `<tr>
+      <td class="rp-dim">${escHtml(time)}</td>
+      <td>${run.mode==='repair'?'<span class="rp-up">retry</span>':'initial'}</td>
+      <td>${t?`<span class="cx-pill cx-${t}">${t}</span>`:''} <span class="rp-dim">${run.score??'?'}</span></td>
+      <td>${run.resolved??0}/${run.rolesTotal??0}</td>
+      <td class="rp-dim">${run.failed??0}</td>
+      <td class="rp-dim">${run.abstained??0}</td>
+      <td class="rp-dim">${run.ms??'?'}ms</td>
+      <td class="rp-dim" title="${escAttr(run.url||'')}">${escHtml(host)}</td>
+    </tr>`;
+  }).join('');
+
+  const range = (firstTs < Infinity) ? `${new Date(firstTs).toLocaleDateString()} – ${new Date(lastTs).toLocaleDateString()}` : '';
+
+  body.innerHTML = `
+    <div class="rp-summary">${runs.length} run(s) · ${escHtml(range)}</div>
+
+    <div class="section-header"><h3 class="card-subheading">Success by difficulty tier</h3></div>
+    <table class="rp-table">
+      <thead><tr><th>Tier <span class="rp-dim">(avg score)</span></th><th>Initial</th><th>After retry</th><th>Runs</th><th>Avg time</th></tr></thead>
+      <tbody>${tierRows || '<tr><td colspan="5" class="rp-dim">No tiered runs.</td></tr>'}</tbody>
+    </table>
+
+    <div class="section-header"><h3 class="card-subheading">Failure modes ${totalFail?`<span class="rp-dim">(${totalFail} failed roles)</span>`:''}</h3></div>
+    ${totalFail ? `
+      <div class="rp-modesplit">
+        <span class="rp-synthesis">synthesis ${synthPct}%</span> · <span class="rp-matching">matching ${matchPct}%</span>
+      </div>
+      <div class="rp-modehint">${synthPct >= matchPct
+        ? 'Synthesis-dominated → selectors are wrong / unreachable / ambiguous. Levers: the feedback loop (§8) and set-of-marks (§4).'
+        : 'Matching-dominated → Claude picks the wrong element. Levers: better visual capture / region scoping.'}</div>
+      ${reasonRows}
+    ` : `<p class="rp-dim">No verification failures logged.</p>`}
+
+    <div class="section-header"><h3 class="card-subheading">Recent runs</h3></div>
+    <table class="rp-table">
+      <thead><tr><th>Time</th><th>Mode</th><th>Tier</th><th>Resolved</th><th>Fail</th><th>Abst</th><th>ms</th><th>Site</th></tr></thead>
+      <tbody>${recent}</tbody>
+    </table>`;
+}
+
+$('btn-resolveperf-refresh')?.addEventListener('click', renderResolvePerf);
+$('btn-resolveperf-copy')?.addEventListener('click', async () => {
+  const got = await new Promise(r => chrome.storage.local.get(RESOLVE_PERF_KEY, r));
+  try { await navigator.clipboard.writeText(JSON.stringify(got?.[RESOLVE_PERF_KEY] ?? [], null, 2)); toast?.('Copied run log JSON'); }
+  catch (e) { toast?.(`Copy failed: ${e.message}`, 'err'); }
+});
+$('btn-resolveperf-clear')?.addEventListener('click', async () => {
+  if (!confirm('Clear the Resolve-roles run log? This cannot be undone.')) return;
+  await new Promise(r => chrome.storage.local.remove(RESOLVE_PERF_KEY, r));
+  renderResolvePerf();
+});
+
+// ─── v2.74.358 — LLM audit viewer (DESIGN_llm_roles.md § 5) ──────────────────
+const LLM_AUDIT_KEY = 'llm:audit';
+const LLM_ROLE_ORDER = ['propose', 'resolve', 'describe', 'plan', 'extract', 'classify', 'unclassified'];
+const _rolePillCls = (role) => `role-pill ${role === 'unclassified' ? 'role-unclassified' : 'role-' + role}`;
+
+async function renderLlmAudit() {
+  const body = $('llm-audit-body');
+  if (!body) return;
+  const got = await new Promise(r => chrome.storage.local.get(LLM_AUDIT_KEY, r));
+  const calls = Array.isArray(got?.[LLM_AUDIT_KEY]) ? got[LLM_AUDIT_KEY] : [];
+  if (!calls.length) {
+    body.innerHTML = `<p class="empty-state">No LLM calls audited yet. Trigger any Claude-backed action; calls land here.</p>`;
+    return;
+  }
+
+  const byRole = {}, byOp = {};
+  let firstTs = Infinity, lastTs = 0;
+  const add = (map, key, c) => {
+    const m = map[key] ?? (map[key] = { calls:0, ok:0, latSum:0, latN:0, lats:[] });
+    m.calls++; if (c.ok) m.ok++;
+    if (typeof c.latencyMs === 'number') { m.latSum += c.latencyMs; m.latN++; m.lats.push(c.latencyMs); }
+  };
+  for (const c of calls) {
+    const role = c.role || 'unclassified';
+    add(byRole, role, c);
+    add(byOp, `${role} ${c.operation || 'unknown'}`, c);
+    if (c.ts) { firstTs = Math.min(firstTs, c.ts); lastTs = Math.max(lastTs, c.ts); }
+  }
+  const p95 = (arr) => { if (!arr.length) return null; const s = [...arr].sort((a,b)=>a-b); return s[Math.min(s.length-1, Math.floor(0.95*s.length))]; };
+  const stat = (m) => ({ calls:m.calls, okPct: m.calls?Math.round(100*m.ok/m.calls):0, avg: m.latN?Math.round(m.latSum/m.latN):null, p95: p95(m.lats) });
+
+  const roleKeys = [...new Set([...LLM_ROLE_ORDER.filter(r=>byRole[r]), ...Object.keys(byRole)])];
+  const roleRows = roleKeys.map(role => {
+    const s = stat(byRole[role]);
+    return `<tr>
+      <td><span class="${_rolePillCls(role)}">${escHtml(role)}</span></td>
+      <td>${s.calls}</td><td>${s.okPct}%</td>
+      <td class="rp-dim">${s.avg!=null?s.avg+'ms':'—'}</td>
+      <td class="rp-dim">${s.p95!=null?s.p95+'ms':'—'}</td>
+    </tr>`;
+  }).join('');
+
+  const opRows = Object.entries(byOp)
+    .map(([k,m]) => { const [role,op] = k.split(' '); return { role, op, s: stat(m) }; })
+    .sort((a,b)=>b.s.calls-a.s.calls)
+    .map(e => `<tr>
+      <td><span class="${_rolePillCls(e.role)}">${escHtml(e.role)}</span></td>
+      <td>${escHtml(e.op)}</td><td>${e.s.calls}</td><td>${e.s.okPct}%</td>
+      <td class="rp-dim">${e.s.avg!=null?e.s.avg+'ms':'—'}</td>
+    </tr>`).join('');
+
+  const recent = calls.slice(-30).reverse().map(c => {
+    const role = c.role || 'unclassified';
+    const time = c.ts ? new Date(c.ts).toLocaleTimeString() : '—';
+    return `<tr>
+      <td class="rp-dim">${escHtml(time)}</td>
+      <td><span class="${_rolePillCls(role)}">${escHtml(role)}</span></td>
+      <td>${escHtml(c.operation || 'unknown')}</td>
+      <td>${c.ok ? '<span class="rp-up">ok</span>' : '<span class="rp-fail">fail</span>'}</td>
+      <td class="rp-dim">${c.latencyMs!=null?c.latencyMs+'ms':'—'}</td>
+      <td class="rp-dim">${c.outputChars ?? ''}</td>
+    </tr>`;
+  }).join('');
+
+  const unclassified = byRole['unclassified']?.calls ?? 0;
+  const range = firstTs<Infinity ? `${new Date(firstTs).toLocaleString()} – ${new Date(lastTs).toLocaleString()}` : '';
+
+  body.innerHTML = `
+    <div class="rp-summary">${calls.length} call(s) · ${escHtml(range)}${unclassified?` · <span class="rp-fail">${unclassified} unclassified</span> (need a role declared)`:''}</div>
+    <div class="section-header"><h3 class="card-subheading">By role</h3></div>
+    <table class="rp-table"><thead><tr><th>Role</th><th>Calls</th><th>OK</th><th>Avg</th><th>p95</th></tr></thead><tbody>${roleRows}</tbody></table>
+    <div class="section-header"><h3 class="card-subheading">By operation</h3></div>
+    <table class="rp-table"><thead><tr><th>Role</th><th>Operation</th><th>Calls</th><th>OK</th><th>Avg</th></tr></thead><tbody>${opRows}</tbody></table>
+    <div class="section-header"><h3 class="card-subheading">Recent calls</h3></div>
+    <table class="rp-table"><thead><tr><th>Time</th><th>Role</th><th>Operation</th><th>Status</th><th>Latency</th><th>Chars</th></tr></thead><tbody>${recent}</tbody></table>`;
+}
+
+$('btn-llm-refresh')?.addEventListener('click', renderLlmAudit);
+$('btn-llm-copy')?.addEventListener('click', async () => {
+  const got = await new Promise(r => chrome.storage.local.get(LLM_AUDIT_KEY, r));
+  try { await navigator.clipboard.writeText(JSON.stringify(got?.[LLM_AUDIT_KEY] ?? [], null, 2)); toast?.('Copied LLM audit JSON'); }
+  catch (e) { toast?.(`Copy failed: ${e.message}`, 'err'); }
+});
+$('btn-llm-clear')?.addEventListener('click', async () => {
+  if (!confirm('Clear the LLM audit log? This cannot be undone.')) return;
+  await new Promise(r => chrome.storage.local.remove(LLM_AUDIT_KEY, r));
+  renderLlmAudit();
 });
 
 

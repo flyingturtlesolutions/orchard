@@ -2026,3 +2026,72 @@ hardened in v2.74.354.
 - `assets/sidepanel.css` — retry-button spacing.
 - `DESIGN_resolve_roles.md` — § 8 marked built.
 
+## v2.74.357 — Studio "Resolve" tab: perf viewer over resolveRoles:perf
+
+**Date:** 2026-05-23
+**Decision by:** user ("continue with resolveRoles:perf").
+
+**What.** A new Studio tab turns the run log into the success-vs-difficulty
+instrument the metric was built for:
+- **Success by difficulty tier** — per tier (simple→severe): initial resolved%
+  (resolved/roles), after-retry% (+repair contribution), run counts, avg time.
+  Shows whether Resolve degrades with complexity and how much retry recovers.
+- **Failure modes** — every failed role's reason classified **synthesis**
+  (wrong/unreachable/ambiguous selector → feedback loop §8 / set-of-marks §4)
+  vs **matching** (wrong element → better visual capture / region scoping), with
+  a split % + interpretation hint + a top-reason histogram. This is the
+  actionable read: it names which lever to pull next.
+- **Recent runs** table (last 25): time, mode (initial/retry), tier·score,
+  resolved/total, fail, abstained, ms, site.
+- Refresh / Copy JSON / Clear controls.
+
+Read-only over `chrome.storage.local['resolveRoles:perf']` (written by
+locale-capture per ⚡ Resolve run). No new storage; analytics only.
+
+**Touched.**
+- `studio.html` — "Resolve" tab button + panel.
+- `studio.js` — `renderResolvePerf` + reason classify/normalize helpers + tab
+  hook + Refresh/Copy/Clear wiring.
+- `assets/studio.css` — viewer table, tier pills, failure-mode histogram styles.
+
+## v2.74.358 — LLM-call role framework (audited invoke + Studio LLM tab)
+
+**Date:** 2026-05-23
+**Decision by:** user ("role based framework of the LLM calls … better audited" → "Spec + invoke + audit view").
+
+**What.** Replaces the unaudited generic `#call` with a role-aware, audited
+path. See `DESIGN_llm_roles.md`. Roles (the judge-axis): **propose** (user
+judges), **resolve** (verification judges), **describe** (soft/staleness),
+**plan** (execution outcome), **extract** (schema), **classify** (threshold);
+modifier **refine/repair**.
+
+- **Audited call path.** `#call` gains an optional `meta = {role, operation}`
+  and records every invocation — `{ts, role, operation, latencyMs, ok,
+  outputChars, model}` — to `chrome.storage.local['llm:audit']` (capped 300,
+  write-serialized through a promise chain so concurrent calls don't clobber).
+  100% coverage regardless of labeling; un-labeled calls audit as
+  **`unclassified`** = the visible migration backlog.
+- **Core migration.** Labeled the Locale/Resolve/Propose/Describe pipeline:
+  `proposePerspectives`, `suggestLocale`, `proposeLocaleStructure`
+  (+`:refine`), `resolveRoles` (+`:repair`), `suggestSelector`,
+  `generateLandmarkProfile`, `deriveGroundDescription`. Long-tail methods read
+  `unclassified` until labeled.
+- **Studio "LLM" tab.** Generalizes the Resolve tab to all calls: by-role and
+  by-operation (calls, OK%, avg + p95 latency), recent calls, and a count of
+  `unclassified` calls. Refresh / Copy JSON / Clear.
+
+**Why low-risk.** Names + unifies patterns that already exist
+(propose→userJudgment, resolve→verification, describe→staleness); `#call`'s
+request/response is unchanged — the wrapper only times + records. Role labels
+are additive metadata; partial migration loses no audit coverage.
+
+**Discipline rule.** New LLM calls declare `{role, operation}`; the `unclassified`
+bucket surfaces any that don't — "no role ⇒ shows up as debt".
+
+**Touched.**
+- `Services/AnthropicService.js` — `#audit` + serialized ring; `#call` `meta`
+  param + per-call audit; 7 core methods labeled.
+- `studio.html` / `studio.js` / `assets/studio.css` — "LLM" tab + `renderLlmAudit`
+  + role pills.
+- `DESIGN_llm_roles.md` (new) — the framework spec.
+

@@ -1510,7 +1510,7 @@ Rules for description:
     Logger.info('AnthropicService', `suggestLocale — ${url}`);
 
     try {
-      const raw = await AnthropicService.#call(systemPrompt, userContent, 1200);
+      const raw = await AnthropicService.#call(systemPrompt, userContent, 1200, [], { role: 'propose', operation: 'suggestLocale' });
       if (!raw?.success) {
         Logger.warn('AnthropicService', `suggestLocale failed: ${raw?.error}`);
         return null;
@@ -1589,7 +1589,7 @@ Rules:
     Logger.info('AnthropicService', `deriveGroundDescription — "${name ?? '?'}" from ${list.length} locale(s)`);
 
     try {
-      const raw = await AnthropicService.#call(systemPrompt, userContent, 400);
+      const raw = await AnthropicService.#call(systemPrompt, userContent, 400, [], { role: 'describe', operation: 'deriveGroundDescription' });
       if (!raw?.success) {
         Logger.warn('AnthropicService', `deriveGroundDescription failed: ${raw?.error}`);
         return null;
@@ -1678,7 +1678,7 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
 
     let parsed;
     try {
-      const raw = await AnthropicService.#call(systemPrompt, userContent, 1500);
+      const raw = await AnthropicService.#call(systemPrompt, userContent, 1500, [], { role: 'propose', operation: priorStructure ? 'proposeLocaleStructure:refine' : 'proposeLocaleStructure' });
       if (!raw?.success) {
         Logger.warn('AnthropicService', `proposeLocaleStructure failed: ${raw?.error}`);
         return null;
@@ -1895,7 +1895,7 @@ Rules:
 
     let parsed;
     try {
-      const raw = await AnthropicService.#call(systemPrompt, userContent, 1800);
+      const raw = await AnthropicService.#call(systemPrompt, userContent, 1800, [], { role: 'propose', operation: 'proposePerspectives' });
       if (!raw?.success) {
         Logger.warn('AnthropicService', `proposePerspectives failed: ${raw?.error}`);
         return null;
@@ -2044,7 +2044,7 @@ Rules:
 
     let parsed;
     try {
-      const raw = await AnthropicService.#call(systemPrompt, userContent, 1200);
+      const raw = await AnthropicService.#call(systemPrompt, userContent, 1200, [], { role: 'resolve', operation: priorAttempt ? 'resolveRoles:repair' : 'resolveRoles' });
       if (!raw?.success) { Logger.warn('AnthropicService', `resolveRoles failed: ${raw?.error}`); return null; }
       const json = AnthropicService.#firstJsonObject(raw.text);
       if (!json) { Logger.warn('AnthropicService', 'resolveRoles: no JSON'); return null; }
@@ -2568,7 +2568,7 @@ Output ONLY the CSS selector as a single line. No backticks, no quotes, no "Here
       : [{ type: 'text', text: userText }];
 
     try {
-      const raw = await AnthropicService.#call(systemPrompt, userContent, 300);
+      const raw = await AnthropicService.#call(systemPrompt, userContent, 300, [], { role: 'resolve', operation: 'suggestSelector' });
       if (!raw?.success) {
         Logger.warn('AnthropicService', `suggestSelector failed: ${raw?.error}`);
         return { success: false, selector: '', error: raw?.error ?? 'unknown' };
@@ -2934,7 +2934,7 @@ RATIONALE:
       : [{ type: 'text', text: userText }];
 
     try {
-      const raw = await AnthropicService.#call(systemPrompt, userContent, 1200);
+      const raw = await AnthropicService.#call(systemPrompt, userContent, 1200, [], { role: 'describe', operation: 'generateLandmarkProfile' });
       if (!raw?.success) {
         Logger.warn('AnthropicService', `generateLandmarkProfile failed: ${raw?.error}`);
         return { success: false, profile: null, error: raw?.error ?? 'unknown' };
@@ -3849,9 +3849,39 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     return null;   // unbalanced — truncated output
   }
 
-  static async #call(systemPrompt, userContent, maxTokens, extraMessages = []) {
+  // ─── v2.74.358 — LLM-call audit (DESIGN_llm_roles.md § 4) ─────────────────
+  // Every #call records a generic { role, operation, latency, ok } entry,
+  // independent of whether the caller labeled a role — so audit coverage is
+  // 100% from day one and un-labeled calls show as 'unclassified' (the
+  // visible migration backlog). Writes are serialized through a promise chain
+  // so concurrent calls don't clobber the capped ring. Best-effort; never
+  // throws into the caller.
+  static #auditChain = Promise.resolve();
+  static #audit(entry) {
+    AnthropicService.#auditChain = AnthropicService.#auditChain.then(async () => {
+      try {
+        const KEY = 'llm:audit';
+        const got = await new Promise(r => chrome.storage.local.get(KEY, r));
+        const list = Array.isArray(got?.[KEY]) ? got[KEY] : [];
+        list.push(entry);
+        while (list.length > 300) list.shift();
+        await new Promise(r => chrome.storage.local.set({ [KEY]: list }, r));
+      } catch { /* audit is best-effort */ }
+    });
+  }
+
+  // `meta` (optional) = { role, operation } — the call's declared role
+  // (DESIGN_llm_roles.md § 2). Absent → audited as 'unclassified'.
+  static async #call(systemPrompt, userContent, maxTokens, extraMessages = [], meta = null) {
+    const role = meta?.role ?? 'unclassified';
+    const operation = meta?.operation ?? 'unknown';
+    const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    const t0 = now();
     const apiKey = await AnthropicService.getApiKey();
-    if (!apiKey) return { success: false, text: '', error: 'No API key' };
+    if (!apiKey) {
+      AnthropicService.#audit({ ts: Date.now(), role, operation, latencyMs: 0, ok: false, outputChars: 0, model: MODEL, error: 'no-api-key' });
+      return { success: false, text: '', error: 'No API key' };
+    }
 
     const messages = [
       { role: 'user', content: userContent },
@@ -3892,11 +3922,13 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
         inputTokens : Number(data?.usage?.input_tokens  ?? 0),
         outputTokens: Number(data?.usage?.output_tokens ?? 0),
       };
-      Logger.debug('AnthropicService', `API call success — ${text.length} chars`, usage);
+      AnthropicService.#audit({ ts: Date.now(), role, operation, latencyMs: Math.round(now() - t0), ok: true, outputChars: text.length, model: MODEL });
+      Logger.debug('AnthropicService', `API call success — ${text.length} chars [${role}/${operation}]`, usage);
       return { success: true, text, error: null, usage };
 
     } catch (err) {
-      Logger.error('AnthropicService', `API call failed: ${err.message}`);
+      AnthropicService.#audit({ ts: Date.now(), role, operation, latencyMs: Math.round(now() - t0), ok: false, outputChars: 0, model: MODEL, error: String(err.message).slice(0, 120) });
+      Logger.error('AnthropicService', `API call failed [${role}/${operation}]: ${err.message}`);
       return { success: false, text: '', error: err.message };
     }
   }

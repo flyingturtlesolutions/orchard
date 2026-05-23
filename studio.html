@@ -34,6 +34,8 @@
       <button class="tab-btn active" data-tab="workflows">Workflows</button>
       <button class="tab-btn"        data-tab="grounds">Ground</button>
       <button class="tab-btn"        data-tab="logs">Logs</button>
+      <button class="tab-btn"        data-tab="resolveperf">Resolve</button>
+      <button class="tab-btn"        data-tab="llm">LLM</button>
       <button class="tab-btn"        data-tab="prompts">Docs</button>
       <button class="tab-btn"        data-tab="settings">Settings</button>
     </nav>
@@ -806,6 +808,41 @@
     <div id="log-list" class="log-list">
       <p class="empty-state">No log entries yet.</p>
     </div>
+  </section>
+
+  <!-- ── Tab: Resolve (v2.74.357) — "⚡ Resolve roles" performance vs page
+       difficulty, mined from the resolveRoles:perf log. Initial-vs-retry
+       success by complexity tier + failure-mode breakdown (synthesis vs
+       matching) → tells whether the next fix is set-of-marks or better
+       matching. See DESIGN_resolve_roles.md § 7/§ 8. -->
+  <section class="tab-panel hidden" id="tab-resolveperf">
+    <div class="section-header">
+      <h2>Resolve performance</h2>
+      <div style="display:flex;gap:6px;align-items:center">
+        <button class="btn-secondary small" id="btn-resolveperf-refresh" title="Re-read the run log">Refresh</button>
+        <button class="btn-secondary small" id="btn-resolveperf-copy" title="Copy the raw run log as JSON">Copy JSON</button>
+        <button class="btn-secondary small" id="btn-resolveperf-clear" title="Clear the run log">Clear</button>
+      </div>
+    </div>
+    <p class="prompts-intro">Success of <code>⚡ Resolve roles</code> against the page's resolve-difficulty score, from the <code>resolveRoles:perf</code> log (capped 200 runs). Use it to see where Resolve breaks and whether an iteration actually helped.</p>
+    <div id="resolveperf-body"></div>
+  </section>
+
+  <!-- ── Tab: LLM (v2.74.358) — role-based audit of every Claude call.
+       Generalizes the Resolve tab to all LLM calls, grouped by their declared
+       role (propose/resolve/describe/plan/extract/classify) with an
+       'unclassified' bucket = the labeling backlog. See DESIGN_llm_roles.md. -->
+  <section class="tab-panel hidden" id="tab-llm">
+    <div class="section-header">
+      <h2>LLM audit</h2>
+      <div style="display:flex;gap:6px;align-items:center">
+        <button class="btn-secondary small" id="btn-llm-refresh" title="Re-read the audit log">Refresh</button>
+        <button class="btn-secondary small" id="btn-llm-copy" title="Copy the raw audit log as JSON">Copy JSON</button>
+        <button class="btn-secondary small" id="btn-llm-clear" title="Clear the audit log">Clear</button>
+      </div>
+    </div>
+    <p class="prompts-intro">Every Claude call, by its declared <b>role</b> (who/what judges it correct). From <code>llm:audit</code> (capped 300). <code>unclassified</code> = calls not yet labeled — the migration backlog (DESIGN_llm_roles.md § 2).</p>
+    <div id="llm-audit-body"></div>
   </section>
 
   <!-- ── Tab: Docs ── -->
