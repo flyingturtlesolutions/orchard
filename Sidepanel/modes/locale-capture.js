@@ -76,15 +76,17 @@ let _locReturnTo = null;
 let _locIsEdit = false;
 let _locPickerSession = null;     // {sessionId, landmarkIdx, roleSlot?} when picking
 let _mountEl = null;              // root element we rendered into
-// v2.74.348 — LOCALE_SPEC § 13 description-first proposal flow state.
-// _perspectiveOptions: the LLM's proposed options (null until proposed).
-// _chosenPerspective:  the option the user picked (its roles drive the
-//   role-fill checklist). A role is "filled" when some landmark carries
-//   roleFill === that role's name.
-// _perspectiveInFlight: true while the propose call is round-tripping.
-let _perspectiveOptions = null;
+// v2.74.348/350 — LOCALE_SPEC § 13 description-first proposal flow state.
+// _perspectiveRuns: per-variant results for the A/B benchmark. Each entry is
+//   { options:[...], elapsedMs, meta } or null. 'baseline' = DOM-only (the
+//   original call); 'enhanced' = + screenshot + sibling-Locale/registry context.
+// _chosenPerspective: the option object the user picked (from either run); its
+//   roles drive the role-fill checklist. A role is "filled" when some landmark
+//   carries roleFill === that role's name.
+// _perspectiveInFlightVariant: 'baseline' | 'enhanced' | null while round-tripping.
+let _perspectiveRuns = { baseline: null, enhanced: null };
 let _chosenPerspective = null;
-let _perspectiveInFlight = false;
+let _perspectiveInFlightVariant = null;
 // v2.74.233 — Per-landmark "refining with Claude" status text. Set on
 // the landmark idx when the picker just captured and Claude is being
 // invoked to refine; cleared when Claude responds (success or fail).
@@ -801,10 +803,10 @@ async function unmount() {
   _locPickerSession = null;
   _locReturnTo = null;
   _locIsEdit = false;
-  // v2.74.348 — Reset § 13 proposal-flow state.
-  _perspectiveOptions = null;
+  // v2.74.348/350 — Reset § 13 proposal-flow state.
+  _perspectiveRuns = { baseline: null, enhanced: null };
   _chosenPerspective = null;
-  _perspectiveInFlight = false;
+  _perspectiveInFlightVariant = null;
 
   // Clear DOM refs (no leak — but clarity).
   locGroundLabelEl = locTabUrlEl = locWarningEl = null;
@@ -1081,12 +1083,13 @@ function onDescriptionInput() {
     lastAuthoredAt: Date.now(),
     authoredBy: 'user',
   };
-  // The propose button enables once the intent is non-empty. Toggle it
+  // The propose buttons enable once the intent is non-empty. Toggle them
   // directly (rather than a full panel re-render) so editing the intent with
-  // options/roles already shown doesn't flicker the cards or lose nothing.
-  const proposeBtn = locPerspectiveBody?.querySelector('[data-loc-action="propose-perspectives"]');
-  if (proposeBtn && !_perspectiveInFlight) {
-    proposeBtn.disabled = (_locDraft.description ?? '').trim().length === 0;
+  // options/roles already shown doesn't flicker the cards.
+  if (locPerspectiveBody && !_perspectiveInFlightVariant) {
+    const empty = (_locDraft.description ?? '').trim().length === 0;
+    locPerspectiveBody.querySelectorAll('[data-loc-action="propose-perspectives"]')
+      .forEach(btn => { btn.disabled = empty; });
   }
   updateLocaleSaveButtonState();
 }
@@ -1683,35 +1686,57 @@ function _perspectiveRoleFilled(role) {
   return (_locDraft?.landmarks ?? []).some(lm => lm?.roleFill === role);
 }
 
-// v2.74.348 — Render the description-first proposal panel: propose button →
-// option cards → role-fill checklist. Re-rendered on description edits, after
-// proposing, on choice, and whenever a role is filled.
+// v2.74.348/350 — Render the description-first proposal panel: two propose
+// buttons (baseline vs enhanced A/B), each variant's options rendered
+// side-by-side with a context+timing summary, then the role-fill checklist for
+// whichever option the user adopts. Re-rendered on propose, choice, role-fill.
 function _renderPerspectivePanel() {
   if (!locPerspectiveBody) return;
   const intent = (_locDraft?.description ?? '').trim();
-  const canPropose = intent.length > 0 && !_perspectiveInFlight;
-  const proposeLabel = _perspectiveInFlight ? '✨ Proposing…'
-    : (_perspectiveOptions ? '✨ Re-propose' : '✨ Propose perspectives');
-  const proposeTitle = intent.length === 0
-    ? 'Write an intent description above first — it seeds the proposal.'
-    : 'Ask Claude to propose perspective options (named roles to fill) for this intent on the current page.';
+  const inFlight = _perspectiveInFlightVariant;
+  const canPropose = intent.length > 0 && !inFlight;
+  const emptyTitle = 'Write an intent description above first — it seeds the proposal.';
+
+  const proposeBtn = (variant, label, title) => {
+    const busy = inFlight === variant;
+    const has  = !!_perspectiveRuns[variant];
+    const text = busy ? `⏳ ${label}…` : (has ? `↻ ${label}` : `✨ ${label}`);
+    return `<button class="btn-secondary tiny" data-loc-action="propose-perspectives" data-variant="${variant}" type="button" ${canPropose ? '' : 'disabled'} title="${escAttr(title)}">${text}</button>`;
+  };
 
   let html = `
-    <p class="dbg-locale-perspective-intro">Describe the intent in <b>Description</b> above, then propose. Claude suggests named <b>roles</b>; you pick the real element for each.</p>
-    <button class="btn-secondary tiny" data-loc-action="propose-perspectives" type="button" ${canPropose ? '' : 'disabled'} title="${escAttr(proposeTitle)}">${proposeLabel}</button>`;
+    <p class="dbg-locale-perspective-intro">Describe the intent in <b>Description</b> above, then propose. Two variants let you compare: <b>baseline</b> (page DOM only) vs <b>enhanced</b> (+ screenshot + this Ground's existing locales & landmarks).</p>
+    <div class="dbg-locale-perspective-buttons">
+      ${proposeBtn('baseline', 'Propose (baseline)', intent.length === 0 ? emptyTitle : 'Baseline: propose from the page DOM only (the original call).')}
+      ${proposeBtn('enhanced', 'Propose (enhanced)', intent.length === 0 ? emptyTitle : "Enhanced: propose with a page screenshot + this Ground's existing locales & landmarks added as context.")}
+    </div>`;
 
-  if (Array.isArray(_perspectiveOptions) && _perspectiveOptions.length) {
-    html += `<div class="dbg-locale-perspective-options">`;
-    _perspectiveOptions.forEach((opt, i) => {
-      const chosen = _chosenPerspective === opt;   // identity — robust to same-named options
+  // Each variant's run, side-by-side for comparison.
+  for (const variant of ['baseline', 'enhanced']) {
+    const run = _perspectiveRuns[variant];
+    if (!run) continue;
+    html += `<div class="dbg-locale-perspective-run">
+      <div class="dbg-locale-perspective-run-head">${variant === 'enhanced' ? 'Enhanced' : 'Baseline'} · ${escHtml(_perspectiveRunSummary(variant, run))}</div>`;
+    run.options.forEach((opt, i) => {
+      const chosen = _chosenPerspective === opt;   // identity — robust to same-named options across variants
       const rolesPreview = opt.roles.map(r => escHtml(r.role)).join(', ');
+      // v2.74.351 — Downstream perspectives (onPage:false) belong to a page
+      // reached only after acting; their roles can't be picked in this
+      // single-page session, so they're flagged + not directly choosable.
+      // Navigate there and re-propose (it'll come back onPage:true) or author
+      // it as its own Locale — the seed of "linked/compound perspectives".
+      const downstream = opt.onPage === false;
+      const headRight = downstream
+        ? `<span class="dbg-locale-perspective-downstream-badge" title="This perspective's elements aren't on the current page. Navigate to it, then author it as its own Locale.">⤳ downstream</span>`
+        : `<button class="btn-secondary tiny" data-loc-action="choose-perspective" data-variant="${variant}" data-idx="${i}" type="button">${chosen ? '✓ Using' : 'Use this'}</button>`;
       html += `
-        <div class="dbg-locale-perspective-option${chosen ? ' chosen' : ''}">
+        <div class="dbg-locale-perspective-option${chosen ? ' chosen' : ''}${downstream ? ' downstream' : ''}">
           <div class="dbg-locale-perspective-option-head">
             <span class="dbg-locale-perspective-option-name">${escHtml(opt.name)}</span>
-            <button class="btn-secondary tiny" data-loc-action="choose-perspective" data-idx="${i}" type="button">${chosen ? '✓ Using' : 'Use this'}</button>
+            ${headRight}
           </div>
           ${opt.rationale ? `<div class="dbg-locale-perspective-option-rationale">${escHtml(opt.rationale)}</div>` : ''}
+          ${downstream && opt.reachedVia ? `<div class="dbg-locale-perspective-reached">↪ reached ${escHtml(opt.reachedVia)} — navigate there, then author it as its own Locale</div>` : ''}
           <div class="dbg-locale-perspective-option-roles">${opt.roles.length} role(s): ${rolesPreview}</div>
         </div>`;
     });
@@ -1737,45 +1762,58 @@ function _renderPerspectivePanel() {
   }
 
   locPerspectiveBody.innerHTML = html;
-  locPerspectiveBody.querySelector('[data-loc-action="propose-perspectives"]')
-    ?.addEventListener('click', onProposePerspectives);
+  locPerspectiveBody.querySelectorAll('[data-loc-action="propose-perspectives"]').forEach(btn =>
+    btn.addEventListener('click', () => onProposePerspectives(btn.dataset.variant)));
   locPerspectiveBody.querySelectorAll('[data-loc-action="choose-perspective"]').forEach(btn =>
-    btn.addEventListener('click', () => onChoosePerspective(parseInt(btn.dataset.idx, 10))));
+    btn.addEventListener('click', () => onChoosePerspective(btn.dataset.variant, parseInt(btn.dataset.idx, 10))));
   locPerspectiveBody.querySelectorAll('[data-loc-action="pick-role"]').forEach(btn =>
     btn.addEventListener('click', () => onPickForRole(btn.dataset.role)));
 }
 
-async function onProposePerspectives() {
+// Human-readable "what this run used + how long" for the benchmark header.
+function _perspectiveRunSummary(variant, run) {
+  const secs = run?.elapsedMs != null ? `${(run.elapsedMs / 1000).toFixed(1)}s` : '?';
+  if (variant === 'baseline') return `DOM only · ${secs}`;
+  const m = run?.meta ?? {};
+  const parts = [m.screenshot ? 'screenshot' : 'no-screenshot'];
+  if (m.siblingLocales)    parts.push(`${m.siblingLocales} locale(s)`);
+  if (m.registryLandmarks) parts.push(`${m.registryLandmarks} landmark(s)`);
+  return `${parts.join(' + ')} · ${secs}`;
+}
+
+async function onProposePerspectives(variant) {
   if (!_locDraft) return;
+  variant = (variant === 'enhanced') ? 'enhanced' : 'baseline';
   const intent = (_locDraft.description ?? '').trim();
   if (!intent) { showLocaleWarning('Write an intent description first — it seeds the proposal.'); return; }
   if (_locTabId == null) { showLocaleWarning('No active tab to analyze.'); return; }
+  if (_perspectiveInFlightVariant) return;   // one variant at a time (avoids tab-capture races)
   // v2.74.349 — Capture the draft identity; discard a result that lands after
   // the panel unmounted or remounted onto a different locale (else we'd write
   // to a null / wrong draft and crash).
   const draftToken = _locDraft.id;
-  _perspectiveInFlight = true;
+  _perspectiveInFlightVariant = variant;
   _renderPerspectivePanel();
+  const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
   let res;
   try {
     res = await new Promise(r => chrome.runtime.sendMessage({
       type: 'PROPOSE_LOCALE_PERSPECTIVES',
-      payload: { tabId: _locTabId, intent },
+      payload: { tabId: _locTabId, groundId: _locGroundId, intent, enhanced: variant === 'enhanced' },
     }, r));
   } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
   if (!_locDraft || _locDraft.id !== draftToken) return;   // unmounted / switched mid-flight
-  _perspectiveInFlight = false;
+  _perspectiveInFlightVariant = null;
   if (!res?.success || !Array.isArray(res.options) || !res.options.length) {
-    showLocaleWarning(`Perspective proposal failed: ${res?.error ?? 'no options returned'}`);
+    showLocaleWarning(`Perspective proposal (${variant}) failed: ${res?.error ?? 'no options returned'}`);
     _renderPerspectivePanel();
     return;
   }
-  _perspectiveOptions = res.options;
-  // v2.74.349 — Fresh options supersede any prior choice. Clear it so the
-  // role checklist doesn't render against a perspective no longer in the list
-  // (already-picked landmarks keep their roleFill and re-light if the user
-  // re-chooses an option with the same role names).
-  _chosenPerspective = null;
+  const elapsedMs = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0);
+  // If the current choice came from the run we're replacing, drop it (its
+  // option objects are about to be discarded).
+  if (_perspectiveRuns[variant]?.options?.includes(_chosenPerspective)) _chosenPerspective = null;
+  _perspectiveRuns[variant] = { options: res.options, elapsedMs, meta: res.meta ?? null };
   // Record that the description acted as a proposal seed (LOCALE_SPEC § 6).
   _locDraft.authoringMetadata = _locDraft.authoringMetadata ?? {};
   _locDraft.authoringMetadata.description = {
@@ -1784,12 +1822,12 @@ async function onProposePerspectives() {
     proposalContext: { seedText: intent, proposedAt: Date.now() },
   };
   _renderPerspectivePanel();
-  toast?.(`Proposed ${res.options.length} perspective option(s)`);
+  toast?.(`Proposed ${res.options.length} option(s) [${variant}] in ${(elapsedMs / 1000).toFixed(1)}s`);
 }
 
-function onChoosePerspective(idx) {
-  if (!_locDraft || !Array.isArray(_perspectiveOptions)) return;
-  const opt = _perspectiveOptions[idx];
+function onChoosePerspective(variant, idx) {
+  if (!_locDraft) return;
+  const opt = _perspectiveRuns[variant]?.options?.[idx];
   if (!opt) return;
   _chosenPerspective = opt;
   // Name → locale name, but never clobber a name the user already typed.

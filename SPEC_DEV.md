@@ -1746,4 +1746,93 @@ Hardening review of v2.74.345–348. Fixes:
 
 **Touched.** `Sidepanel/modes/locale-capture.js`, `Sidepanel/modes/ground-view.js`.
 
+## v2.74.350 — Perspective proposal: enhanced context + A/B benchmark (LOCALE_SPEC § 13)
+
+**Date:** 2026-05-23
+**Decision by:** user ("your pick … but with a benchmark … add second button").
+
+**What.** Two propose buttons in locale-capture — **baseline** and
+**enhanced** — so proposal quality can be compared empirically instead of by
+feel. Both call the same `proposePerspectives` with the **same system prompt**;
+they differ only in the context the enhanced arm adds, so the A/B isolates the
+value of that context (the DOM is held constant in both):
+
+- **Screenshot** — `chrome.tabs.captureVisibleTab` of the page, passed as a
+  multimodal image block (layout / visual prominence / repetition signal the
+  text DOM can't convey). Captured only when the target tab is active (else the
+  wrong page would be grabbed); failure degrades, never aborts.
+- **Sibling Locales** — `StorageManager.listLocales(groundId)` → each Locale's
+  name + description + role set, with an instruction to avoid duplicating them
+  and reuse role vocabulary (consistent library; the differentiated,
+  on-architecture signal a stock LLM can't have).
+- **Landmark registry** — `listLandmarksForGround(groundId)` → alias +
+  a11yRole + description, so a role can map to an already-captured landmark
+  (substrate reuse).
+
+Each run renders side-by-side under a header summarizing exactly what it used
+and how long it took (e.g. *"Enhanced · screenshot + 3 locale(s) + 12
+landmark(s) · 3.4s"* vs *"Baseline · DOM only · 2.1s"*). "Use this" works from
+either run; the chosen option drives the role checklist as before.
+
+**Design notes.**
+- Enhanced context is purely **additive** in the user message; when omitted the
+  call is byte-identical to baseline — clean A/B.
+- One variant runs at a time (avoids tab-capture races); the unmount/switch
+  guard (v2.74.349) applies to both.
+- The screenshot stays in the background process; only `options` + a `meta`
+  summary cross back to the sidepanel (no large payload over the wire).
+
+**Touched.**
+- `Services/AnthropicService.js` — `proposePerspectives` gains `screenshot`/
+  `siblingLocales`/`registryLandmarks` (additive blocks + image content).
+- `background.js` — `PROPOSE_LOCALE_PERSPECTIVES` gathers the enhanced context
+  (screenshot + listLocales + listLandmarksForGround) on `enhanced:true` and
+  returns a `meta` summary.
+- `Sidepanel/modes/locale-capture.js` — per-variant state (`_perspectiveRuns`,
+  `_perspectiveInFlightVariant`), two buttons, side-by-side render + timing,
+  `onProposePerspectives(variant)` / `onChoosePerspective(variant, idx)`.
+- `assets/sidepanel.css` — button row + per-run group styles.
+- `studio.js` — prompt-registry note on the benchmark.
+
+## v2.74.351 — Proposal on-page/downstream tagging + linked-perspectives design note
+
+**Date:** 2026-05-23
+**Decision by:** user ("tag on-page vs downstream and capture as a design note").
+
+**Context.** The benchmark surfaced that the intent-first proposal reasons about
+the whole *journey*, not just the current page — e.g. on a homepage it proposes
+both `music-search-homepage` (on the page) AND `music-results-grid` (a
+downstream page reached after searching). The latter's roles can't be picked in
+a single-page session, and the relationship between such perspectives is
+undefined by the Locale spec ("linked / compound perspectives").
+
+**What (built — the pragmatic half).**
+- `proposePerspectives` now tags each option `onPage: boolean` (default true)
+  and, for downstream options, a short `reachedVia` phrase ("after submitting
+  the search"). The LLM judges on-page vs downstream from the DOM/screenshot.
+  Option cap raised 3→4 to accommodate multi-stage flows.
+- locale-capture renders downstream options with a `⤳ downstream` badge + the
+  `reachedVia` note and **no "Use this"** (their roles aren't pickable here);
+  on-page options are fillable as before. Navigate to the downstream page and
+  re-propose → it returns `onPage:true` and becomes fillable; combined with the
+  v2.74.350 sibling-Locale context, flow knowledge accumulates across sessions
+  without an explicit link.
+- Keeps Locales flat / spec-conformant; preserves the LLM's flow foresight as
+  guidance.
+
+**What (captured — the design half).** `DESIGN_linked_perspectives.md` — the
+concept, why it arises, the affordance-vs-operation split, why it belongs at
+**Tier 2 (Ground)** not in Locale (per LOCALE_SPEC § 3's deferred "Inter-Locale
+relationships"), a candidate `Ground.localeTransitions` model (`from / via{
+landmarkRef, action } / to / condition`), its relationship to Workflow (the
+executor), and open questions. Nothing in § 4 of that note is built.
+
+**Touched.**
+- `Services/AnthropicService.js` — `proposePerspectives` option `onPage` +
+  `reachedVia` (prompt + sanitizer); cap 3→4.
+- `Sidepanel/modes/locale-capture.js` — downstream rendering (badge + reachedVia,
+  no choose button).
+- `assets/sidepanel.css` — downstream option styles.
+- `DESIGN_linked_perspectives.md` (new) — the design note.
+
 

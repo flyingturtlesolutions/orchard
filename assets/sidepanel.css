@@ -4877,6 +4877,18 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 .dbg-locale-perspective-body { display: flex; flex-direction: column; gap: 8px; }
 .dbg-locale-perspective-intro { margin: 0; font-size: 11px; color: rgba(148, 163, 184, 0.85); line-height: 1.4; }
 .dbg-locale-perspective-options { display: flex; flex-direction: column; gap: 6px; }
+/* v2.74.350 — A/B benchmark: two propose buttons + per-variant result groups */
+.dbg-locale-perspective-buttons { display: flex; gap: 6px; flex-wrap: wrap; }
+.dbg-locale-perspective-run {
+  display: flex; flex-direction: column; gap: 6px;
+  border: 1px dashed rgba(148, 163, 184, 0.3);
+  border-radius: 5px;
+  padding: 6px 8px;
+}
+.dbg-locale-perspective-run-head {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase;
+  color: rgba(196, 181, 253, 0.9);
+}
 .dbg-locale-perspective-option {
   border: 1px solid rgba(148, 163, 184, 0.25);
   border-radius: 5px;
@@ -4887,6 +4899,15 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   border-color: rgba(125, 211, 252, 0.6);
   background: rgba(125, 211, 252, 0.08);
 }
+/* v2.74.351 — downstream (off-current-page) perspectives: flagged, not fillable here */
+.dbg-locale-perspective-option.downstream { opacity: 0.72; border-style: dashed; }
+.dbg-locale-perspective-downstream-badge {
+  flex: 0 0 auto; font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 1px 5px; border-radius: 3px;
+  background: rgba(251, 191, 36, 0.15); color: rgba(252, 211, 77, 0.95);
+  border: 1px solid rgba(251, 191, 36, 0.4);
+}
+.dbg-locale-perspective-reached { margin-top: 3px; font-size: 10px; color: rgba(251, 191, 36, 0.85); font-style: italic; }
 .dbg-locale-perspective-option-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .dbg-locale-perspective-option-name { font-weight: 600; font-size: 12px; color: rgba(229, 222, 255, 0.95); }
 .dbg-locale-perspective-option-rationale { margin-top: 3px; font-size: 10.5px; color: rgba(148, 163, 184, 0.9); line-height: 1.35; }

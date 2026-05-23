@@ -1799,10 +1799,20 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
    * concrete landmarks) — it is intent-seeded and role-scaffolded, per the
    * canonical "LLM as proposal layer, user as committer" pattern.
    *
-   * @param {{ intent: string, url?: string, title?: string, domSnapshot?: string }} params
-   * @returns {Promise<{ options: Array<{name:string, rationale:string, roles:Array<{role:string,description:string,multiplicity:string}>, predicates:Array<{kind:'urlMatches',pattern:string,mode:string}>}> }|null>}
+   * v2.74.350 — Optional ENHANCED context (the benchmark's B arm). All three
+   * are additive — when omitted the call is byte-identical to the baseline, so
+   * an A/B isolates the value of the added context, holding the DOM constant:
+   *   - screenshot:        data:image/...;base64 of the visible page (multimodal
+   *                        grounding for layout / prominence / repetition).
+   *   - siblingLocales:    [{ name, description, roles[] }] already on this
+   *                        Ground — avoid duplicates, reuse role vocabulary.
+   *   - registryLandmarks: [{ alias, a11yRole, description }] already captured
+   *                        on this Ground — roles may map to existing landmarks.
+   *
+   * @param {{ intent: string, url?: string, title?: string, domSnapshot?: string, screenshot?: string|null, siblingLocales?: Array|null, registryLandmarks?: Array|null }} params
+   * @returns {Promise<{ options: Array<{name:string, rationale:string, onPage:boolean, reachedVia:string|null, roles:Array<{role:string,description:string,multiplicity:string}>, predicates:Array<{kind:'urlMatches',pattern:string,mode:string}>}> }|null>}
    */
-  static async proposePerspectives({ intent, url, title, domSnapshot }) {
+  static async proposePerspectives({ intent, url, title, domSnapshot, screenshot = null, siblingLocales = null, registryLandmarks = null }) {
     const seed = (typeof intent === 'string' ? intent : '').trim();
     if (!seed) return null;
 
@@ -1816,6 +1826,8 @@ Return ONLY a JSON object:
     {
       "name": "search-results",
       "rationale": "one sentence: why this perspective fits the intent and this page",
+      "onPage": true,
+      "reachedVia": null,
       "roles": [
         { "role": "search-input", "description": "the text box where the query is typed", "multiplicity": "one" },
         { "role": "result-item",  "description": "a single result row in the list",        "multiplicity": "many" }
@@ -1828,19 +1840,59 @@ Return ONLY a JSON object:
 }
 
 Rules:
-- 2-3 options. Each must be a COHERENT perspective serving the stated intent — not a grab-bag. If only one perspective makes sense, return one.
+- 2-4 options. Each must be a COHERENT perspective serving the stated intent — not a grab-bag.
 - "name" = short kebab-case identifier for the perspective ("search-results", "product-detail", "checkout-form").
 - "roles" = 2-8 per option. "role" is a short kebab-case semantic name; "description" says what element fills it (so the user knows what to pick); "multiplicity" is one | many | optional.
 - Roles describe FUNCTION, not appearance ("primary-action", "result-item" — not "blue-button", "div-3").
 - "predicates" (optional) = ONLY urlMatches entries that declare where this perspective applies. "pattern" is a URL substring/regex/exact string; "mode" is contains | exact | regex. Do NOT propose landmark-based predicates — the landmarks don't exist yet. Omit predicates if no reliable URL signal.
+- "onPage" = true if THIS perspective's elements are present on the CURRENT page you are analyzing; false if it belongs to a DOWNSTREAM page reached only AFTER acting (e.g., the results page that appears after submitting a search, or a detail page after clicking a result). Judge this from the actual page content/screenshot.
+- "reachedVia" = for a downstream perspective (onPage:false), a SHORT phrase for how you reach it from the current page ("after submitting the search", "after clicking a result"). null for on-page perspectives.
+- List the on-page perspective(s) FIRST. You MAY include downstream perspectives that complete the intent's journey, but mark them onPage:false — the user can only fill a perspective's roles once they are on its page.
 - Favor the intent. If the intent is narrow ("capture search results"), don't propose unrelated perspectives.`;
 
-    const userContent = [{
-      type: 'text',
-      text: `Intent: ${seed}\nURL: ${url ?? '(unknown)'}\nTitle: ${title ?? '(unknown)'}\n\nPage (sanitized DOM):\n${(domSnapshot ?? '').slice(0, 12000)}`,
-    }];
+    // Base context — identical in baseline and enhanced runs, so the A/B
+    // measures the ADDED context (screenshot + library) holding the DOM fixed.
+    let userText = `Intent: ${seed}\nURL: ${url ?? '(unknown)'}\nTitle: ${title ?? '(unknown)'}\n\nPage (sanitized DOM):\n${(domSnapshot ?? '').slice(0, 12000)}`;
 
-    Logger.info('AnthropicService', `proposePerspectives — intent="${seed.slice(0, 60)}"`);
+    // Enhanced — perspectives already on this Ground: avoid duplicating them,
+    // prefer complementary ones, and reuse their role vocabulary.
+    if (Array.isArray(siblingLocales) && siblingLocales.length) {
+      const block = siblingLocales.slice(0, 12).map(l => {
+        const roles = (Array.isArray(l?.roles) && l.roles.length) ? ` — roles: ${l.roles.join(', ')}` : '';
+        const desc  = l?.description ? `: ${String(l.description).slice(0, 120)}` : '';
+        return `- ${l?.name ?? '(unnamed)'}${desc}${roles}`;
+      }).join('\n');
+      userText += `\n\nPERSPECTIVES ALREADY ON THIS GROUND (do NOT re-propose one of these — prefer COMPLEMENTARY perspectives; reuse these role names where the same kind of element recurs, for a consistent library):\n${block}`;
+    }
+
+    // Enhanced — landmark registry: a role may map to an already-captured
+    // landmark (reuse, per the substrate's many-to-many sharing).
+    if (Array.isArray(registryLandmarks) && registryLandmarks.length) {
+      const block = registryLandmarks.slice(0, 30).map(lm => {
+        const role = lm?.a11yRole ? ` [${lm.a11yRole}]` : '';
+        const d    = lm?.description ? ` — ${String(lm.description).slice(0, 80)}` : '';
+        return `- ${lm?.alias ?? '(no-alias)'}${role}${d}`;
+      }).join('\n');
+      userText += `\n\nLANDMARKS ALREADY CAPTURED ON THIS GROUND (these elements exist and can be reused; align role names with them where the same element recurs):\n${block}`;
+    }
+
+    // Enhanced — screenshot as the first content block (layout / prominence /
+    // repetition signal the text DOM can't convey).
+    const userContent = [];
+    let imageNote = '';
+    if (typeof screenshot === 'string') {
+      const m = /^data:(image\/[a-z]+);base64,(.+)$/i.exec(screenshot);
+      if (m) {
+        userContent.push({ type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } });
+        imageNote = '\n\n(A screenshot of the current page is attached above — use it to judge layout, visual prominence, and which elements repeat.)';
+      }
+    }
+    userContent.push({ type: 'text', text: userText + imageNote });
+    const enhanced = userContent.length > 1
+      || (Array.isArray(siblingLocales) && siblingLocales.length)
+      || (Array.isArray(registryLandmarks) && registryLandmarks.length);
+
+    Logger.info('AnthropicService', `proposePerspectives [${enhanced ? 'enhanced' : 'baseline'}] — intent="${seed.slice(0, 60)}"`);
 
     let parsed;
     try {
@@ -1886,13 +1938,20 @@ Rules:
         predicates.push({ kind: 'urlMatches', pattern: pattern.slice(0, 300), mode: MODE.has(p?.mode) ? p.mode : 'contains' });
         if (predicates.length >= 4) break;
       }
+      // onPage: default true when absent (treat as fillable rather than
+      // hiding it). reachedVia only meaningful for downstream perspectives.
+      const onPage = o?.onPage !== false;
+      const reachedVia = (!onPage && typeof o?.reachedVia === 'string' && o.reachedVia.trim())
+        ? o.reachedVia.trim().slice(0, 120) : null;
       options.push({
         name,
         rationale: (typeof o?.rationale === 'string' ? o.rationale.trim() : '').slice(0, 240),
+        onPage,
+        reachedVia,
         roles,
         predicates,
       });
-      if (options.length >= 3) break;
+      if (options.length >= 4) break;
     }
     if (options.length === 0) return null;
     return { options };

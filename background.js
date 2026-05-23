@@ -3938,7 +3938,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'PROPOSE_LOCALE_PERSPECTIVES': {
       (async () => {
         try {
-          const { tabId, intent } = payload ?? {};
+          // v2.74.350 — `enhanced` arm of the benchmark. When true, gather a
+          // screenshot + the Ground's existing locales/landmarks and pass them
+          // to proposePerspectives; when false, behave exactly as the baseline.
+          const { tabId, intent, groundId = null, enhanced = false } = payload ?? {};
           if (typeof tabId !== 'number') {
             sendResponse({ success: false, error: 'tabId required' });
             return;
@@ -3978,17 +3981,65 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ success: false, error: snap?.error ?? 'DOM snapshot returned no payload' });
             return;
           }
+
+          // ── Enhanced context (best-effort; any failure degrades, not aborts) ──
+          let screenshot = null, siblingLocales = null, registryLandmarks = null;
+          if (enhanced) {
+            // Screenshot the visible tab. Only meaningful when the target tab
+            // is the active one in its window (captureVisibleTab grabs whatever
+            // is visible); skip otherwise so we never attach the wrong page.
+            if (tabInfo.active) {
+              try {
+                screenshot = await chrome.tabs.captureVisibleTab(tabInfo.windowId, { format: 'jpeg', quality: 55 });
+              } catch (e) {
+                Logger.warn('background', `PROPOSE_LOCALE_PERSPECTIVES: screenshot failed (continuing): ${e.message}`);
+              }
+            } else {
+              Logger.info('background', 'PROPOSE_LOCALE_PERSPECTIVES: target tab not active — skipping screenshot');
+            }
+            if (groundId) {
+              try {
+                const locales = await StorageManager.listLocales(groundId);
+                const rolesOf = (loc) => {
+                  const set = new Set();
+                  const walk = (nodes) => { for (const n of Array.isArray(nodes) ? nodes : []) { if (n?.role) set.add(n.role); if (Array.isArray(n?.contains)) walk(n.contains); if (Array.isArray(n?.alternatives)) walk(n.alternatives); } };
+                  walk(Array.isArray(loc?.landmarks) ? loc.landmarks : []);
+                  return [...set];
+                };
+                siblingLocales = (locales ?? []).map(l => ({ name: l.name, description: l.description, roles: rolesOf(l) }));
+              } catch (e) {
+                Logger.warn('background', `PROPOSE_LOCALE_PERSPECTIVES: listLocales failed (continuing): ${e.message}`);
+              }
+              try {
+                const lms = await StorageManager.listLandmarksForGround(groundId);
+                registryLandmarks = (lms ?? []).map(lm => ({ alias: lm.alias, a11yRole: lm.a11yRole, description: lm.description }));
+              } catch (e) {
+                Logger.warn('background', `PROPOSE_LOCALE_PERSPECTIVES: listLandmarksForGround failed (continuing): ${e.message}`);
+              }
+            }
+          }
+
           const proposal = await AnthropicService.proposePerspectives({
             intent,
             url        : snap.url   ?? url,
             title      : snap.title ?? '',
             domSnapshot: snap.snapshot ?? '',
+            screenshot,
+            siblingLocales,
+            registryLandmarks,
           });
           if (!proposal || !Array.isArray(proposal.options) || proposal.options.length === 0) {
             sendResponse({ success: false, error: 'Claude returned no usable perspectives — try a more specific intent.' });
             return;
           }
-          sendResponse({ success: true, options: proposal.options });
+          // meta lets the benchmark UI label exactly what context each run used.
+          const meta = {
+            enhanced: !!enhanced,
+            screenshot: !!screenshot,
+            siblingLocales: Array.isArray(siblingLocales) ? siblingLocales.length : 0,
+            registryLandmarks: Array.isArray(registryLandmarks) ? registryLandmarks.length : 0,
+          };
+          sendResponse({ success: true, options: proposal.options, meta });
         } catch (err) {
           Logger.error('background', `PROPOSE_LOCALE_PERSPECTIVES failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });

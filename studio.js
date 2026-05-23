@@ -4705,7 +4705,7 @@ const PROMPT_REGISTRY = [
     id   : 'proposePerspectives',
     label: 'Locale — Description-First Perspectives',
     badge: 'authoring',
-    desc : 'LOCALE_SPEC § 13 / § 16 priority 6 (description-first authoring). Seeded by the Locale\'s intent description + the current page; proposes 2-3 perspective OPTIONS, each a named set of landmark ROLES to fill (not concrete selectors) plus urlMatches predicates and a rationale. Run via "✨ Propose perspectives" in locale-capture; the user picks an option and fills each role with the picker.',
+    desc : 'LOCALE_SPEC § 13 / § 16 priority 6 (description-first authoring). Seeded by the Locale\'s intent description + the current page; proposes 2-3 perspective OPTIONS, each a named set of landmark ROLES to fill (not concrete selectors) plus urlMatches predicates and a rationale. Run via the baseline/enhanced buttons in locale-capture; the user picks an option and fills each role with the picker. v2.74.350 adds an A/B benchmark — the "enhanced" arm additively passes a page screenshot + this Ground\'s existing locales/landmarks as context (system prompt unchanged, so the comparison isolates the added context).',
   },
   // ── Walk / Auto-mode runner ────────────────────────────────────────
   {
