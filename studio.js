@@ -4699,7 +4699,13 @@ const PROMPT_REGISTRY = [
     id   : 'proposeLocaleStructure',
     label: 'Locale — Structured Composition',
     badge: 'authoring',
-    desc : 'LOCALE_SPEC § 3/§ 13 (LLM-as-author). Organizes a Locale\'s already-picked landmarks into a structured perspective — a LandmarkNode tree (contains/role/multiplicity) plus groupings/sequences overlays. Run via "🧬 Structure with Claude" in locale-capture; a safety parser clamps refs to the picked set and guarantees every landmark appears exactly once.',
+    desc : 'LOCALE_SPEC § 3/§ 13 (LLM-as-author). Organizes a Locale\'s already-picked landmarks into a structured perspective — a LandmarkNode tree (contains/role/multiplicity) plus groupings/sequences overlays. Run via "🧬 Structure with Claude" in locale-capture; a safety parser clamps refs to the picked set and guarantees every landmark appears exactly once. Refine mode (v2.74.347) feeds the reviewed structure + judgments back so "Re-structure" preserves accepted/edited arrangements.',
+  },
+  {
+    id   : 'proposePerspectives',
+    label: 'Locale — Description-First Perspectives',
+    badge: 'authoring',
+    desc : 'LOCALE_SPEC § 13 / § 16 priority 6 (description-first authoring). Seeded by the Locale\'s intent description + the current page; proposes 2-3 perspective OPTIONS, each a named set of landmark ROLES to fill (not concrete selectors) plus urlMatches predicates and a rationale. Run via "✨ Propose perspectives" in locale-capture; the user picks an option and fills each role with the picker.',
   },
   // ── Walk / Auto-mode runner ────────────────────────────────────────
   {

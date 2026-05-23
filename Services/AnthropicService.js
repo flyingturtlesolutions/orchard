@@ -1790,6 +1790,115 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
   }
 
   /**
+   * v2.74.348 — LOCALE_SPEC § 13 / § 16 priority 6: the description-first,
+   * LLM-mediated PROPOSAL flow. Given the user's INTENT (the Locale
+   * description) and the current page, propose 2–3 PERSPECTIVE OPTIONS — each
+   * a named set of landmark ROLES to fill (NOT concrete selectors; the user
+   * picks the real elements) plus suggested URL-applicability predicates and a
+   * one-line rationale. This is the inverse of suggestLocale (page-seeded,
+   * concrete landmarks) — it is intent-seeded and role-scaffolded, per the
+   * canonical "LLM as proposal layer, user as committer" pattern.
+   *
+   * @param {{ intent: string, url?: string, title?: string, domSnapshot?: string }} params
+   * @returns {Promise<{ options: Array<{name:string, rationale:string, roles:Array<{role:string,description:string,multiplicity:string}>, predicates:Array<{kind:'urlMatches',pattern:string,mode:string}>}> }|null>}
+   */
+  static async proposePerspectives({ intent, url, title, domSnapshot }) {
+    const seed = (typeof intent === 'string' ? intent : '').trim();
+    if (!seed) return null;
+
+    const systemPrompt = `You propose PERSPECTIVE OPTIONS for a web-automation "Locale" (a reusable "kind of page" view). You are given the user's INTENT (what they want to do) and the current page. Propose 2-3 distinct perspectives that serve the intent on this page.
+
+A perspective is a NAMED set of landmark ROLES — abstract slots the user will fill by picking real page elements. You do NOT pick elements or write selectors; you name the roles and describe what fills each.
+
+Return ONLY a JSON object:
+{
+  "options": [
+    {
+      "name": "search-results",
+      "rationale": "one sentence: why this perspective fits the intent and this page",
+      "roles": [
+        { "role": "search-input", "description": "the text box where the query is typed", "multiplicity": "one" },
+        { "role": "result-item",  "description": "a single result row in the list",        "multiplicity": "many" }
+      ],
+      "predicates": [
+        { "kind": "urlMatches", "pattern": "/search", "mode": "contains" }
+      ]
+    }
+  ]
+}
+
+Rules:
+- 2-3 options. Each must be a COHERENT perspective serving the stated intent — not a grab-bag. If only one perspective makes sense, return one.
+- "name" = short kebab-case identifier for the perspective ("search-results", "product-detail", "checkout-form").
+- "roles" = 2-8 per option. "role" is a short kebab-case semantic name; "description" says what element fills it (so the user knows what to pick); "multiplicity" is one | many | optional.
+- Roles describe FUNCTION, not appearance ("primary-action", "result-item" — not "blue-button", "div-3").
+- "predicates" (optional) = ONLY urlMatches entries that declare where this perspective applies. "pattern" is a URL substring/regex/exact string; "mode" is contains | exact | regex. Do NOT propose landmark-based predicates — the landmarks don't exist yet. Omit predicates if no reliable URL signal.
+- Favor the intent. If the intent is narrow ("capture search results"), don't propose unrelated perspectives.`;
+
+    const userContent = [{
+      type: 'text',
+      text: `Intent: ${seed}\nURL: ${url ?? '(unknown)'}\nTitle: ${title ?? '(unknown)'}\n\nPage (sanitized DOM):\n${(domSnapshot ?? '').slice(0, 12000)}`,
+    }];
+
+    Logger.info('AnthropicService', `proposePerspectives — intent="${seed.slice(0, 60)}"`);
+
+    let parsed;
+    try {
+      const raw = await AnthropicService.#call(systemPrompt, userContent, 1800);
+      if (!raw?.success) {
+        Logger.warn('AnthropicService', `proposePerspectives failed: ${raw?.error}`);
+        return null;
+      }
+      let text = String(raw.text ?? '').trim();
+      const a = text.indexOf('{'); const b = text.lastIndexOf('}');
+      if (a < 0 || b < a) { Logger.warn('AnthropicService', 'proposePerspectives: no JSON'); return null; }
+      parsed = JSON.parse(text.slice(a, b + 1));
+    } catch (e) {
+      Logger.warn('AnthropicService', `proposePerspectives error: ${e.message}`);
+      return null;
+    }
+
+    // ── Safety sanitizer ──────────────────────────────────────────────
+    const MULT = new Set(['one', 'many', 'optional', 'conditional']);
+    const MODE = new Set(['contains', 'exact', 'regex']);
+    const kebab = (s) => String(s ?? '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+    const options = [];
+    for (const o of Array.isArray(parsed.options) ? parsed.options : []) {
+      const name = kebab(o?.name);
+      const roles = [];
+      for (const r of Array.isArray(o?.roles) ? o.roles : []) {
+        const role = kebab(r?.role);
+        if (!role) continue;
+        if (roles.some(x => x.role === role)) continue;   // dedup within option
+        roles.push({
+          role,
+          description: (typeof r?.description === 'string' ? r.description.trim() : '').slice(0, 160),
+          multiplicity: MULT.has(r?.multiplicity) ? r.multiplicity : 'one',
+        });
+        if (roles.length >= 10) break;
+      }
+      if (!name || roles.length === 0) continue;           // an option needs a name + ≥1 role
+      const predicates = [];
+      for (const p of Array.isArray(o?.predicates) ? o.predicates : []) {
+        if (p?.kind !== 'urlMatches') continue;
+        const pattern = (typeof p?.pattern === 'string' ? p.pattern.trim() : '');
+        if (!pattern) continue;
+        predicates.push({ kind: 'urlMatches', pattern: pattern.slice(0, 300), mode: MODE.has(p?.mode) ? p.mode : 'contains' });
+        if (predicates.length >= 4) break;
+      }
+      options.push({
+        name,
+        rationale: (typeof o?.rationale === 'string' ? o.rationale.trim() : '').slice(0, 240),
+        roles,
+        predicates,
+      });
+      if (options.length >= 3) break;
+    }
+    if (options.length === 0) return null;
+    return { options };
+  }
+
+  /**
    * v2.74.61 — Distill a captured section into a curated list. The
    * Observation Section extract shape uses this for its Text / URL
    * modes:
@@ -3841,6 +3950,14 @@ Rules:
 - "groupings" = named clusters cutting across containment; "sequences" = ordered user-flow steps. Don't force structure that isn't there — flat roots are fine.
 
 REFINE MODE (v2.74.347): when the call includes a PRIOR REVIEWED STRUCTURE, this becomes a refinement — each prior node/overlay carries a [judgment] ([accepted]/[edited]/[rejected-but-kept]). Preserve accepted/edited arrangements verbatim; re-think only rejected ones + landmarks new since the last proposal.`,
+
+      proposePerspectives: `You propose PERSPECTIVE OPTIONS for a web-automation "Locale", given the user's INTENT (what they want to do) and the current page. The description-first authoring flow (LOCALE_SPEC § 13): the user states intent, you propose 2-3 perspectives, the user picks one and fills its roles.
+
+A perspective is a NAMED set of landmark ROLES — abstract slots the user fills by picking real elements. You name + describe roles; you do NOT pick elements or write selectors.
+
+Return ONLY JSON: { "options": [ { "name": "<kebab>", "rationale": "<one line>", "roles": [ { "role": "<kebab>", "description": "<what fills it>", "multiplicity": "one|many|optional" } ], "predicates": [ { "kind": "urlMatches", "pattern": "<url substring>", "mode": "contains|exact|regex" } ] } ] }
+
+Rules: 2-3 coherent options serving the intent; roles describe FUNCTION not appearance; predicates are urlMatches-only (landmarks don't exist yet); favor the stated intent over unrelated perspectives.`,
 
       deriveGroundDescription: `You are writing a short, factual summary of a "Ground" — a user's automation surface for a single website. The Ground is COMPOSED of Locales (each Locale is a "kind of page" on the site, with a name and description). Synthesize what the WHOLE site-level automation surface is for, from its constituent Locales.
 

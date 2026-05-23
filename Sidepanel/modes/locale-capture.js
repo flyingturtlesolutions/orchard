@@ -74,8 +74,17 @@ let _locReturnTo = null;
 // ActiveTab skips overwriting the URL-pattern input with the active
 // tab's URL — the saved pattern is preserved.
 let _locIsEdit = false;
-let _locPickerSession = null;     // {sessionId, landmarkIdx} when picking
+let _locPickerSession = null;     // {sessionId, landmarkIdx, roleSlot?} when picking
 let _mountEl = null;              // root element we rendered into
+// v2.74.348 — LOCALE_SPEC § 13 description-first proposal flow state.
+// _perspectiveOptions: the LLM's proposed options (null until proposed).
+// _chosenPerspective:  the option the user picked (its roles drive the
+//   role-fill checklist). A role is "filled" when some landmark carries
+//   roleFill === that role's name.
+// _perspectiveInFlight: true while the propose call is round-tripping.
+let _perspectiveOptions = null;
+let _chosenPerspective = null;
+let _perspectiveInFlight = false;
 // v2.74.233 — Per-landmark "refining with Claude" status text. Set on
 // the landmark idx when the picker just captured and Claude is being
 // invoked to refine; cleared when Claude responds (success or fail).
@@ -186,6 +195,7 @@ let locTabUrlEl = null;
 let locWarningEl = null;
 let locNameInput = null;
 let locDescriptionInput = null;
+let locPerspectiveBody = null;   // v2.74.348 — § 13 proposal-flow container
 // v2.74.275 — locPatternInput removed.
 let locLandmarksList = null;
 let locAddLandmarkBtn = null;
@@ -237,6 +247,24 @@ function renderHTML() {
              the Additional predicates section. New locales auto-seed
              a urlMatches predicate from the current tab URL on first
              Pick (see refreshLocaleActiveTab). -->
+      </section>
+
+      <!-- v2.74.348 — LOCALE_SPEC § 13 description-first proposal flow.
+           The intent (Description above) seeds an LLM call that proposes
+           2-3 perspective OPTIONS, each a named set of landmark ROLES to
+           fill. The user picks an option, then fills each role via the
+           picker. Body is rendered dynamically by _renderPerspectivePanel. -->
+      <section class="dbg-locale-perspective dbg-locale-card" data-card-id="perspective">
+        <div class="dbg-locale-card-head-row">
+          <button type="button" class="dbg-locale-card-head" data-card-toggle aria-expanded="true">
+            <span class="dbg-locale-card-chevron">▾</span>
+            <span class="dbg-locale-card-label">Perspective (LLM-assisted)</span>
+            <span class="dbg-locale-card-optional">(optional)</span>
+          </button>
+        </div>
+        <div class="dbg-locale-card-body">
+          <div data-loc="perspective-body" class="dbg-locale-perspective-body"></div>
+        </div>
       </section>
 
       <!-- v2.74.283 — Outdated instructions block removed. The empty-
@@ -411,6 +439,7 @@ async function mount(payload, mountEl) {
   locWarningEl       = q('warning');
   locNameInput       = q('name-input');
   locDescriptionInput= q('description-input');
+  locPerspectiveBody = q('perspective-body');
   // v2.74.275 — locPatternInput removed.
   locLandmarksList   = q('landmarks-list');
   locAddLandmarkBtn  = q('add-landmark');
@@ -605,6 +634,41 @@ async function mount(payload, mountEl) {
           verified : null,
         }));
     }
+    // v2.74.349 — Rehydrate the saved structured composition on edit so the
+    // structure review, judgment-aware Re-structure (§ 5), and role authoring
+    // (§ 13) round-trip instead of resetting every time the Locale reopens.
+    // Guarded two ways: (1) ref-shaped nodes only (Auto-suggestions carry
+    // alias/selector, no ref); (2) NON-TRIVIAL only — StorageManager
+    // normalizes every Locale's `landmarks` to at least flat {ref} nodes, so
+    // we load it as structure only when a node carries role/multiplicity/
+    // contains/alternatives or overlays exist. Otherwise the trivial mirror
+    // would make every edited Locale falsely show as "structured".
+    const _pl = prefilled.landmarks;
+    const _refShaped = Array.isArray(_pl) && _pl.length > 0 && _pl.every(n => n && typeof n.ref === 'string' && n.ref);
+    const _nodeIsStructured = (n) => n && (
+      (typeof n.role === 'string' && n.role) || n.multiplicity ||
+      (Array.isArray(n.contains) && n.contains.length) ||
+      (Array.isArray(n.alternatives) && n.alternatives.length));
+    const _hasOverlays = (Array.isArray(prefilled.groupings) && prefilled.groupings.length)
+      || (Array.isArray(prefilled.sequences) && prefilled.sequences.length);
+    if (_refShaped && (_pl.some(_nodeIsStructured) || _hasOverlays)) {
+      _locDraft.structuredLandmarks = _pl;
+      if (Array.isArray(prefilled.groupings)) _locDraft.groupings = prefilled.groupings;
+      if (Array.isArray(prefilled.sequences)) _locDraft.sequences = prefilled.sequences;
+      // Reconstruct roleFill (root + contains) so the role→structure synthesis
+      // still applies if the user later edits the landmark set (which
+      // invalidates the explicit structure).
+      const _applyRoles = (nodes) => {
+        for (const n of Array.isArray(nodes) ? nodes : []) {
+          if (n && typeof n.ref === 'string' && typeof n.role === 'string' && n.role) {
+            const lm = _locDraft.landmarks.find(l => l.uid === n.ref);
+            if (lm) { lm.roleFill = n.role; if (n.multiplicity) lm.roleMult = n.multiplicity; }
+          }
+          if (Array.isArray(n?.contains)) _applyRoles(n.contains);
+        }
+      };
+      _applyRoles(_pl);
+    }
     _locDraft.authoredBy = typeof prefilled.authoredBy === 'string'
       ? prefilled.authoredBy
       : 'model';
@@ -688,6 +752,7 @@ async function mount(payload, mountEl) {
   // Initial tab fill.
   await refreshLocaleActiveTab();
   renderLocaleLandmarks();
+  _renderPerspectivePanel();   // v2.74.348 — § 13 description-first proposal
   _renderPredicates();
   _renderIframeContexts();   // v2.74.267
   updateLocaleSaveButtonState();
@@ -736,11 +801,16 @@ async function unmount() {
   _locPickerSession = null;
   _locReturnTo = null;
   _locIsEdit = false;
+  // v2.74.348 — Reset § 13 proposal-flow state.
+  _perspectiveOptions = null;
+  _chosenPerspective = null;
+  _perspectiveInFlight = false;
 
   // Clear DOM refs (no leak — but clarity).
   locGroundLabelEl = locTabUrlEl = locWarningEl = null;
   // v2.74.275 — locPatternInput removed.
   locNameInput = locDescriptionInput = null;
+  locPerspectiveBody = null;
   locLandmarksList = locAddLandmarkBtn = locSaveBtn = locCancelBtn = null;
   locSaveReasonEl = null;
   locPickBanner = locPickCancelBtn = null;
@@ -824,7 +894,7 @@ function handleEvent(message) {
   }
   if (message.type !== 'PICK_RESULT') return;
 
-  const { landmarkIdx } = _locPickerSession;
+  const { landmarkIdx, roleSlot } = _locPickerSession;
   const completedSessionId = _locPickerSession.sessionId;
   _locPickerSession = null;
   if (locPickBanner) locPickBanner.classList.add('hidden');
@@ -868,8 +938,21 @@ function handleEvent(message) {
     delete _locDraft.landmarks[effectiveIdx].frameUrl;
   }
   _locDraft.landmarks[effectiveIdx].verified = null;
+  // v2.74.348 — § 13 role binding. When this pick fills a proposed role, tag
+  // the landmark with roleFill (+ multiplicity) and seed its alias from the
+  // role (only if blank) so Claude's profile gets the role as context and the
+  // role-fill checklist marks it done. roleFill also drives the save-time
+  // structured-composition synthesis (role → LandmarkNode.role).
+  if (roleSlot?.role) {
+    _locDraft.landmarks[effectiveIdx].roleFill = roleSlot.role;
+    _locDraft.landmarks[effectiveIdx].roleMult = roleSlot.multiplicity ?? 'one';
+    if (!(_locDraft.landmarks[effectiveIdx].alias ?? '').trim()) {
+      _locDraft.landmarks[effectiveIdx].alias = roleSlot.role;
+    }
+  }
   _invalidateStructure();   // v2.74.336 — landmark set changed; drop stale structure
   renderLocaleLandmarks();
+  _renderPerspectivePanel();   // v2.74.348 — reflect the newly-filled role
   // v2.74.245 — Phase 7a of substrate spec: iframe context detection.
   // When the picked element lives inside an iframe (frame.isTop is
   // false), ask the TOP frame's content script to identify the
@@ -986,7 +1069,26 @@ function onNameInput() {
   updateLocaleSaveButtonState();
 }
 function onDescriptionInput() {
-  if (_locDraft) _locDraft.description = locDescriptionInput.value;
+  if (!_locDraft) return;
+  _locDraft.description = locDescriptionInput.value;
+  // v2.74.348 — A manual edit marks the description source 'direct' (unless a
+  // proposal seeded it and the user hasn't changed it). Keep it simple: any
+  // typing here is direct authorship.
+  _locDraft.authoringMetadata = _locDraft.authoringMetadata ?? {};
+  _locDraft.authoringMetadata.description = {
+    ...(_locDraft.authoringMetadata.description ?? {}),
+    source: 'direct',
+    lastAuthoredAt: Date.now(),
+    authoredBy: 'user',
+  };
+  // The propose button enables once the intent is non-empty. Toggle it
+  // directly (rather than a full panel re-render) so editing the intent with
+  // options/roles already shown doesn't flicker the cards or lose nothing.
+  const proposeBtn = locPerspectiveBody?.querySelector('[data-loc-action="propose-perspectives"]');
+  if (proposeBtn && !_perspectiveInFlight) {
+    proposeBtn.disabled = (_locDraft.description ?? '').trim().length === 0;
+  }
+  updateLocaleSaveButtonState();
 }
 // v2.74.275 — onPatternInput removed (URL pattern field gone).
 /**
@@ -1494,6 +1596,10 @@ async function onProposeStructure() {
   const priorStructure = (Array.isArray(_locDraft.structuredLandmarks) && _locDraft.structuredLandmarks.length)
     ? { nodes: _locDraft.structuredLandmarks, groupings: _locDraft.groupings, sequences: _locDraft.sequences }
     : undefined;
+  // v2.74.349 — Capture the draft identity so a result that lands after the
+  // panel unmounted (or remounted onto a different locale) is discarded rather
+  // than written to a null / wrong draft.
+  const draftToken = _locDraft.id;
   let res;
   try {
     res = await new Promise(r => chrome.runtime.sendMessage({
@@ -1501,6 +1607,7 @@ async function onProposeStructure() {
       payload: { name: _locDraft.name, description: _locDraft.description, landmarks: lms, priorStructure },
     }, r));
   } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
+  if (!_locDraft || _locDraft.id !== draftToken) return;   // unmounted / switched mid-flight
   if (!res?.success || !res.structure) {
     showLocaleWarning(`Structure failed: ${res?.error ?? 'no structure returned'}`);
     renderLocaleLandmarks();
@@ -1567,6 +1674,161 @@ async function onProposeStructure() {
   renderLocaleLandmarks();
   updateLocaleSaveButtonState();
   toast?.(`Structured ${lms.length} landmark(s)`);
+}
+
+// ─── Perspective proposal (LOCALE_SPEC § 13 description-first flow) ────────
+
+// A role is "filled" when some draft landmark carries roleFill === role.
+function _perspectiveRoleFilled(role) {
+  return (_locDraft?.landmarks ?? []).some(lm => lm?.roleFill === role);
+}
+
+// v2.74.348 — Render the description-first proposal panel: propose button →
+// option cards → role-fill checklist. Re-rendered on description edits, after
+// proposing, on choice, and whenever a role is filled.
+function _renderPerspectivePanel() {
+  if (!locPerspectiveBody) return;
+  const intent = (_locDraft?.description ?? '').trim();
+  const canPropose = intent.length > 0 && !_perspectiveInFlight;
+  const proposeLabel = _perspectiveInFlight ? '✨ Proposing…'
+    : (_perspectiveOptions ? '✨ Re-propose' : '✨ Propose perspectives');
+  const proposeTitle = intent.length === 0
+    ? 'Write an intent description above first — it seeds the proposal.'
+    : 'Ask Claude to propose perspective options (named roles to fill) for this intent on the current page.';
+
+  let html = `
+    <p class="dbg-locale-perspective-intro">Describe the intent in <b>Description</b> above, then propose. Claude suggests named <b>roles</b>; you pick the real element for each.</p>
+    <button class="btn-secondary tiny" data-loc-action="propose-perspectives" type="button" ${canPropose ? '' : 'disabled'} title="${escAttr(proposeTitle)}">${proposeLabel}</button>`;
+
+  if (Array.isArray(_perspectiveOptions) && _perspectiveOptions.length) {
+    html += `<div class="dbg-locale-perspective-options">`;
+    _perspectiveOptions.forEach((opt, i) => {
+      const chosen = _chosenPerspective === opt;   // identity — robust to same-named options
+      const rolesPreview = opt.roles.map(r => escHtml(r.role)).join(', ');
+      html += `
+        <div class="dbg-locale-perspective-option${chosen ? ' chosen' : ''}">
+          <div class="dbg-locale-perspective-option-head">
+            <span class="dbg-locale-perspective-option-name">${escHtml(opt.name)}</span>
+            <button class="btn-secondary tiny" data-loc-action="choose-perspective" data-idx="${i}" type="button">${chosen ? '✓ Using' : 'Use this'}</button>
+          </div>
+          ${opt.rationale ? `<div class="dbg-locale-perspective-option-rationale">${escHtml(opt.rationale)}</div>` : ''}
+          <div class="dbg-locale-perspective-option-roles">${opt.roles.length} role(s): ${rolesPreview}</div>
+        </div>`;
+    });
+    html += `</div>`;
+  }
+
+  if (_chosenPerspective && Array.isArray(_chosenPerspective.roles)) {
+    html += `<div class="dbg-locale-perspective-roles"><div class="dbg-locale-perspective-roles-title">Fill each role by picking its element:</div>`;
+    for (const r of _chosenPerspective.roles) {
+      const filled = _perspectiveRoleFilled(r.role);
+      const multBadge = (r.multiplicity && r.multiplicity !== 'one')
+        ? `<span class="dbg-locale-perspective-mult">${escHtml(r.multiplicity)}</span>` : '';
+      html += `
+        <div class="dbg-locale-perspective-role${filled ? ' filled' : ''}">
+          <span class="dbg-locale-perspective-role-status">${filled ? '✓' : '○'}</span>
+          <span class="dbg-locale-perspective-role-name">${escHtml(r.role)}</span>
+          ${multBadge}
+          ${r.description ? `<span class="dbg-locale-perspective-role-desc">${escHtml(r.description)}</span>` : ''}
+          <button class="btn-secondary tiny" data-loc-action="pick-role" data-role="${escAttr(r.role)}" type="button" ${_locPickerSession ? 'disabled' : ''}>${filled ? 'Re-pick' : 'Pick'}</button>
+        </div>`;
+    }
+    html += `</div>`;
+  }
+
+  locPerspectiveBody.innerHTML = html;
+  locPerspectiveBody.querySelector('[data-loc-action="propose-perspectives"]')
+    ?.addEventListener('click', onProposePerspectives);
+  locPerspectiveBody.querySelectorAll('[data-loc-action="choose-perspective"]').forEach(btn =>
+    btn.addEventListener('click', () => onChoosePerspective(parseInt(btn.dataset.idx, 10))));
+  locPerspectiveBody.querySelectorAll('[data-loc-action="pick-role"]').forEach(btn =>
+    btn.addEventListener('click', () => onPickForRole(btn.dataset.role)));
+}
+
+async function onProposePerspectives() {
+  if (!_locDraft) return;
+  const intent = (_locDraft.description ?? '').trim();
+  if (!intent) { showLocaleWarning('Write an intent description first — it seeds the proposal.'); return; }
+  if (_locTabId == null) { showLocaleWarning('No active tab to analyze.'); return; }
+  // v2.74.349 — Capture the draft identity; discard a result that lands after
+  // the panel unmounted or remounted onto a different locale (else we'd write
+  // to a null / wrong draft and crash).
+  const draftToken = _locDraft.id;
+  _perspectiveInFlight = true;
+  _renderPerspectivePanel();
+  let res;
+  try {
+    res = await new Promise(r => chrome.runtime.sendMessage({
+      type: 'PROPOSE_LOCALE_PERSPECTIVES',
+      payload: { tabId: _locTabId, intent },
+    }, r));
+  } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
+  if (!_locDraft || _locDraft.id !== draftToken) return;   // unmounted / switched mid-flight
+  _perspectiveInFlight = false;
+  if (!res?.success || !Array.isArray(res.options) || !res.options.length) {
+    showLocaleWarning(`Perspective proposal failed: ${res?.error ?? 'no options returned'}`);
+    _renderPerspectivePanel();
+    return;
+  }
+  _perspectiveOptions = res.options;
+  // v2.74.349 — Fresh options supersede any prior choice. Clear it so the
+  // role checklist doesn't render against a perspective no longer in the list
+  // (already-picked landmarks keep their roleFill and re-light if the user
+  // re-chooses an option with the same role names).
+  _chosenPerspective = null;
+  // Record that the description acted as a proposal seed (LOCALE_SPEC § 6).
+  _locDraft.authoringMetadata = _locDraft.authoringMetadata ?? {};
+  _locDraft.authoringMetadata.description = {
+    ...(_locDraft.authoringMetadata.description ?? {}),
+    source: 'proposal',
+    proposalContext: { seedText: intent, proposedAt: Date.now() },
+  };
+  _renderPerspectivePanel();
+  toast?.(`Proposed ${res.options.length} perspective option(s)`);
+}
+
+function onChoosePerspective(idx) {
+  if (!_locDraft || !Array.isArray(_perspectiveOptions)) return;
+  const opt = _perspectiveOptions[idx];
+  if (!opt) return;
+  _chosenPerspective = opt;
+  // Name → locale name, but never clobber a name the user already typed.
+  if (!(_locDraft.name ?? '').trim()) {
+    _locDraft.name = _normalizeLocaleName(opt.name);
+    if (locNameInput) locNameInput.value = _locDraft.name;
+  }
+  // Seed URL predicates from the option. The option's urlMatches REPLACE any
+  // existing urlMatches (typically just the over-specific full-URL predicate
+  // auto-seeded on mount) — appending instead would AND the broad option
+  // pattern with the exact-URL seed and the Locale would never match sibling
+  // pages. Non-URL predicates (visible/hasText/…) are preserved. If the option
+  // proposes no predicates, leave the existing ones untouched.
+  if (Array.isArray(opt.predicates) && opt.predicates.length) {
+    if (!Array.isArray(_locDraft.predicates)) _locDraft.predicates = [];
+    // Seed only the FIRST urlMatches. Multiple urlMatches under the default
+    // AND operator would require a single URL to satisfy several substring
+    // patterns at once (almost never true). One pattern is the sane default;
+    // the author can add more in the Additional predicates section.
+    const p = opt.predicates.find(x => x?.kind === 'urlMatches' && typeof x.pattern === 'string' && x.pattern.trim());
+    if (p) {
+      _locDraft.predicates = _locDraft.predicates.filter(x => x?.kind !== 'urlMatches');
+      _locDraft.predicates.push({ kind: 'urlMatches', pattern: p.pattern, mode: p.mode });
+      if (typeof _renderPredicates === 'function') _renderPredicates();
+    }
+  }
+  _renderPerspectivePanel();
+  updateLocaleSaveButtonState();
+}
+
+// Pick (or re-pick) the element that fills a role. A fresh role → CREATE-mode
+// pick (new landmark, alias + roleFill seeded from the role on PICK_RESULT);
+// an already-filled role → RE-PICK that landmark.
+function onPickForRole(role) {
+  if (!role) return;
+  const roleDef = (_chosenPerspective?.roles ?? []).find(r => r.role === role);
+  const slot = { role, multiplicity: roleDef?.multiplicity ?? 'one', description: roleDef?.description ?? '' };
+  const existingIdx = (_locDraft?.landmarks ?? []).findIndex(lm => lm?.roleFill === role);
+  startLocalePick(existingIdx >= 0 ? existingIdx : null, slot);
 }
 
 // ─── Landmark rendering ──────────────────────────────────────────────────
@@ -1986,6 +2248,14 @@ function updateLocaleSaveButtonState() {
   if (!name) {
     reason = 'Locale needs a name (top of the form)';
   }
+  // v2.74.348 — LOCALE_SPEC § 6 / § 15 EmptyDescriptionError: the description
+  // is the intent-capture entry point and is mandatory in presence at save.
+  if (!reason) {
+    const desc = (locDescriptionInput?.value ?? _locDraft.description ?? '').trim();
+    if (!desc) {
+      reason = 'Locale needs a description (it captures the intent — top of the form)';
+    }
+  }
   if (!reason) {
     const hasUrlPredicate = Array.isArray(_locDraft.predicates)
       && _locDraft.predicates.some(p =>
@@ -2049,7 +2319,7 @@ function updateLocaleSaveButtonState() {
 
 // ─── Picker integration ──────────────────────────────────────────────────
 
-async function startLocalePick(landmarkIdx) {
+async function startLocalePick(landmarkIdx, roleSlot) {
   if (!_locDraft) return;
   // v2.74.280 — Two modes:
   //   landmarkIdx === null : CREATE mode (entered via "+ Pick landmark").
@@ -2084,7 +2354,9 @@ async function startLocalePick(landmarkIdx) {
   }
 
   const sessionId = `loc_pick_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  _locPickerSession = { sessionId, landmarkIdx };
+  // v2.74.348 — roleSlot ({role, multiplicity}) is carried through so the
+  // PICK_RESULT handler can bind the resulting landmark to a § 13 role.
+  _locPickerSession = { sessionId, landmarkIdx, roleSlot: roleSlot ?? null };
 
   // v2.74.166 — Frame-aware broadcast (same helper fragment-author and
   // observation-author use). Locale landmarks can now point at
@@ -2148,6 +2420,7 @@ async function _removeLandmarkWithImpactCheck(idx) {
     }
     _landmarkProfileExpanded = expandedReKeyed;
     renderLocaleLandmarks();
+    _renderPerspectivePanel();   // v2.74.348 — a role may now be unfilled
     updateLocaleSaveButtonState();
     _refreshLocaleOverlays();
   };
@@ -5791,6 +6064,26 @@ async function saveLocale() {
       const flat = new Set(flattenLandmarkNodes(_locDraft.structuredLandmarks));
       if (flat.size === landmarkRefs.length && landmarkRefs.every(u => flat.has(u))) {
         structuredNodes = _locDraft.structuredLandmarks;
+      }
+    }
+    // v2.74.348/349 — § 13 role flow: if the author filled any landmark INTO a
+    // proposed role (roleFill) but never ran "Structure", emit a flat
+    // composition so the roles aren't discarded — they become
+    // LandmarkNode.role. Trigger when ANY landmark is roled; map every saved
+    // landmark to a node (roled → role + multiplicity + 'accepted'; free-picked
+    // → bare {ref}). This covers exactly the landmark set, so mixed authoring
+    // (some roles + some + Pick landmark) keeps its role signal instead of
+    // dropping all of it. No roleFill anywhere → leave null (StorageManager
+    // derives flat nodes from landmarkRefs as before).
+    if (!structuredNodes) {
+      const withUid = _locDraft.landmarks.filter(lm => lm.uid);
+      const anyRoled = withUid.some(lm => lm.roleFill);
+      if (anyRoled && withUid.length === landmarkRefs.length) {
+        const now = Date.now();
+        structuredNodes = withUid.map(lm => lm.roleFill
+          ? { ref: lm.uid, role: lm.roleFill, multiplicity: lm.roleMult ?? 'one',
+              authoringMetadata: { capturedBy: 'llm-proposed', capturedAt: now, userJudgment: 'accepted', reviewedAt: now } }
+          : { ref: lm.uid });
       }
     }
     // Build the locale payload — refs + (optional) structured nodes. Drop the

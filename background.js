@@ -3928,6 +3928,75 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })();
       return true;
     }
+
+    // v2.74.348 — LOCALE_SPEC § 13 description-first proposal flow. Given the
+    // user's intent (the Locale description) + the current page, Claude
+    // proposes 2-3 perspective options (named roles to fill + URL predicates).
+    // Mirrors AUTO_DISCOVER_LOCALE's content-script inject + DOM_SNAPSHOT_RICH,
+    // but is intent-seeded and role-scaffolded, and is NOT cached (the
+    // proposal depends on the free-text intent, not just the URL).
+    case 'PROPOSE_LOCALE_PERSPECTIVES': {
+      (async () => {
+        try {
+          const { tabId, intent } = payload ?? {};
+          if (typeof tabId !== 'number') {
+            sendResponse({ success: false, error: 'tabId required' });
+            return;
+          }
+          if (typeof intent !== 'string' || !intent.trim()) {
+            sendResponse({ success: false, error: 'Write an intent description first — it is the proposal seed.' });
+            return;
+          }
+          let tabInfo;
+          try {
+            tabInfo = await chrome.tabs.get(tabId);
+          } catch (e) {
+            sendResponse({ success: false, error: `Tab not found: ${e.message}` });
+            return;
+          }
+          const url = tabInfo?.url ?? '';
+          if (!/^https?:/i.test(url)) {
+            sendResponse({ success: false, error: 'This page does not allow content scripts (chrome://, extension page, or restricted URL). Open a regular https:// page first.' });
+            return;
+          }
+          try {
+            await chrome.scripting.executeScript({
+              target: { tabId, allFrames: true },
+              files: ['ContentScripts/contentScript.js'],
+            });
+          } catch (e) {
+            Logger.warn('background', `PROPOSE_LOCALE_PERSPECTIVES: content-script inject failed (continuing): ${e.message}`);
+          }
+          let snap;
+          try {
+            snap = await chrome.tabs.sendMessage(tabId, { type: 'DOM_SNAPSHOT_RICH' });
+          } catch (e) {
+            sendResponse({ success: false, error: `DOM snapshot failed: ${e.message}` });
+            return;
+          }
+          if (!snap?.success) {
+            sendResponse({ success: false, error: snap?.error ?? 'DOM snapshot returned no payload' });
+            return;
+          }
+          const proposal = await AnthropicService.proposePerspectives({
+            intent,
+            url        : snap.url   ?? url,
+            title      : snap.title ?? '',
+            domSnapshot: snap.snapshot ?? '',
+          });
+          if (!proposal || !Array.isArray(proposal.options) || proposal.options.length === 0) {
+            sendResponse({ success: false, error: 'Claude returned no usable perspectives — try a more specific intent.' });
+            return;
+          }
+          sendResponse({ success: true, options: proposal.options });
+        } catch (err) {
+          Logger.error('background', `PROPOSE_LOCALE_PERSPECTIVES failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
     // v2.74.128 — GET_TAB_SIDEPANEL_MODE and the background-side
     // CLEAR_TAB_SIDEPANEL_MODE handler removed alongside the dead
     // __tabSidepanelModes map. The shell registers its own

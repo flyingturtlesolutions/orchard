@@ -1649,3 +1649,101 @@ untouched, so refine answers are still clamped to the allowed UID set.
 - `Sidepanel/modes/locale-capture.js` — `onProposeStructure` builds
   `priorStructure` from the draft on a re-structure.
 
+## v2.74.348 — Locale description-first proposal flow (LOCALE_SPEC § 13 / § 16.6)
+
+**Date:** 2026-05-22
+**Decision by:** user ("Build the full flow").
+
+**Gap closed.** The spec's canonical authoring flow (§ 13 "LLM-mediated
+proposal flow", § 16 implementation-priority 6) was unimplemented. The two
+existing LLM touchpoints were both capture/page-first: `suggestLocale`
+(page-only autofill of concrete landmarks) and `proposeLocaleStructure`
+(structure imposed AFTER free-form capture). Neither is intent-seeded or
+role-scaffolded. This builds the missing inverse: **intent → propose roles →
+fill**.
+
+**What.** A new "Perspective (LLM-assisted)" card in locale-capture:
+1. The author writes the intent in **Description** (now the proposal seed).
+2. **✨ Propose perspectives** sends intent + page DOM to the new
+   `AnthropicService.proposePerspectives`, which returns 2-3 perspective
+   OPTIONS — each a name, rationale, named landmark **roles** (role +
+   description + multiplicity, NOT selectors), and urlMatches predicates.
+3. The author picks an option (**Use this**) → its name seeds the Locale name
+   (if blank), its predicates seed the Additional-predicates section.
+4. A **role checklist** appears; each role's **Pick** button enters the picker
+   bound to that role. On `PICK_RESULT` the landmark is tagged `roleFill` +
+   `roleMult` and its alias is seeded from the role; the checklist marks ✓.
+5. At save, if every landmark filled a role and no explicit structure exists,
+   a flat structured composition is synthesized (`role` →
+   `LandmarkNode.role`, `userJudgment: 'accepted'`) so the role authoring
+   lands in the composition rather than being discarded.
+
+**Also (§ 6 / § 15).** Description is now **required at save**
+(`EmptyDescriptionError` equivalent) — fixes the legacy "blank-page" Locale.
+`authoringMetadata.description` records `source` ('direct' | 'proposal') +
+`proposalContext.seedText` when the description seeded a proposal.
+
+**Faithful-but-bounded.** Roles do NOT carry suggested selectors — per "LLM as
+proposal layer, user as committer", the LLM names roles and the user picks the
+real elements. Predicates proposed are urlMatches-only (landmarks don't exist
+at proposal time). The manual/direct path (+ Pick landmark) is unchanged and
+still available; the proposal card is optional.
+
+**Touched.**
+- `Services/AnthropicService.js` — `proposePerspectives` (+ sanitizer) and its
+  `getPromptTexts` snapshot.
+- `background.js` — `PROPOSE_LOCALE_PERSPECTIVES` handler (inject +
+  `DOM_SNAPSHOT_RICH` + call; uncached since intent-dependent).
+- `Sidepanel/modes/locale-capture.js` — perspective card template + state;
+  `_renderPerspectivePanel`, `onProposePerspectives`, `onChoosePerspective`,
+  `onPickForRole`, `_perspectiveRoleFilled`; `startLocalePick`/`PICK_RESULT`
+  role binding; description-required save gate; role→structure synthesis;
+  `authoringMetadata.description` tracking.
+- `assets/sidepanel.css` — perspective panel + option/role styles.
+- `studio.js` — `proposePerspectives` prompt-registry entry.
+
+## v2.74.349 — Bug pass on the Locale Layer-2 + proposal-flow work
+
+**Date:** 2026-05-22
+**Decision by:** user ("bug pass").
+
+Hardening review of v2.74.345–348. Fixes:
+
+1. **In-flight unmount/switch crash (real).** `onProposeStructure` and
+   `onProposePerspectives` wrote to `_locDraft` after their `await`, with no
+   guard. If the panel unmounted (or remounted onto a different Locale) during
+   the multi-second LLM call, the result handler hit `_locDraft.X =` on a null
+   or wrong draft — TypeError or cross-Locale contamination. Both now capture a
+   `draftToken = _locDraft.id` before the await and bail if it changed.
+
+2. **Structured composition didn't round-trip on edit (real).** Re-opening a
+   saved Locale hydrated only the flat `landmarkRefs`; the structured
+   `landmarks` tree + overlays were dropped — so judgment-aware Re-structure
+   (§ 5) silently proposed from scratch and role authoring (§ 13) vanished.
+   Now `ground-view._editLocale` passes `landmarks`/`groupings`/`sequences`,
+   and locale-capture rehydrates them into `structuredLandmarks` — but ONLY
+   when non-trivial (a node carries role/multiplicity/contains/alternatives, or
+   overlays exist), since StorageManager normalizes every Locale's `landmarks`
+   to at least flat `{ref}` nodes (else every edited Locale would falsely show
+   as "structured"). `roleFill` is reconstructed from node roles.
+
+3. **Over-constrained predicates from perspective choice (real footgun).**
+   Choosing a perspective APPENDED its `urlMatches` to the full-URL predicate
+   auto-seeded on mount; ANDed, the Locale would never match sibling pages.
+   Now the option's first `urlMatches` REPLACES existing `urlMatches`
+   (non-URL predicates preserved); only one is seeded (multiple under AND can't
+   all match one URL).
+
+4. **Mixed role/manual authoring dropped all roles (correctness).** The
+   save-time role→structure synthesis only fired when EVERY landmark was
+   roled. Now it fires when ANY landmark is roled, mapping each landmark to a
+   node (roled → role; free-picked → bare `{ref}`), covering the exact set.
+
+5. **Stale chosen-perspective after Re-propose (UX).** Fresh options now clear
+   `_chosenPerspective` so the role checklist can't render against an option no
+   longer in the list. Chosen-option highlight switched to object identity
+   (robust to same-named options).
+
+**Touched.** `Sidepanel/modes/locale-capture.js`, `Sidepanel/modes/ground-view.js`.
+
+

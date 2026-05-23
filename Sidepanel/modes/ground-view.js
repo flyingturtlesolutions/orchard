@@ -1006,6 +1006,13 @@ async function _editLocale(id, grounds) {
         description : locale.description ?? '',
         authoredBy  : locale.authoredBy  ?? 'human',
         landmarkRefs: Array.isArray(locale.landmarkRefs) ? locale.landmarkRefs : [],
+        // v2.74.349 — Pass the structured composition + overlays so the
+        // structure review / judgment-aware Re-structure / role authoring
+        // round-trip on edit (locale-capture only treats it as structure when
+        // it's non-trivial — see prefill). landmarks is a LandmarkNode[].
+        landmarks   : Array.isArray(locale.landmarks) ? locale.landmarks : null,
+        groupings   : Array.isArray(locale.groupings) ? locale.groupings : null,
+        sequences   : Array.isArray(locale.sequences) ? locale.sequences : null,
         predicates  : locale.predicates ?? [],
         iframeContexts: Array.isArray(locale.iframeContexts) ? locale.iframeContexts : [],
       },
