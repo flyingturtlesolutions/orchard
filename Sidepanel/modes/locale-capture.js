@@ -76,21 +76,20 @@ let _locReturnTo = null;
 let _locIsEdit = false;
 let _locPickerSession = null;     // {sessionId, landmarkIdx, roleSlot?} when picking
 let _mountEl = null;              // root element we rendered into
-// v2.74.348/350 — LOCALE_SPEC § 13 description-first proposal flow state.
-// _perspectiveRuns: per-variant results for the A/B benchmark. Each entry is
-//   { options:[...], elapsedMs, meta } or null. 'baseline' = DOM-only (the
-//   original call); 'enhanced' = + screenshot + sibling-Locale/registry context.
-// _chosenPerspective: the option object the user picked (from either run); its
-//   roles drive the role-fill checklist. A role is "filled" when some landmark
-//   carries roleFill === that role's name.
-// _perspectiveInFlightVariant: 'baseline' | 'enhanced' | null while round-tripping.
-let _perspectiveRuns = { baseline: null, enhanced: null };
+// v2.74.348/350/366 — LOCALE_SPEC § 13 description-first proposal flow state.
+// v2.74.366 collapsed the baseline/enhanced A/B to a single canonical
+// (always-enhanced) run.
+// _perspectiveRun: { options:[...], elapsedMs, meta } or null — the latest
+//   proposal (screenshot + sibling-Locale/registry context).
+// _chosenPerspective: the option object the user picked; its roles drive the
+//   role-fill checklist. _chosenPerspectiveIdx is its index in _perspectiveRun.
+// _perspectiveInFlight: true while a proposal round-trips.
+let _perspectiveRun = null;
 let _chosenPerspective = null;
-let _chosenPerspectiveVariant = null;   // v2.74.356 — which run/option the chosen one came from (for retry)
 let _chosenPerspectiveIdx = null;
-let _perspectiveInFlightVariant = null;
-// v2.74.352 — "Resolve roles" in flight: "<variant>:<idx>" of the option being
-// auto-resolved, or null. Disables the propose/use/resolve buttons meanwhile.
+let _perspectiveInFlight = false;
+// v2.74.352 — "Resolve roles" in flight key: "<idx>" or "retry:<idx>" of the
+// option being auto-resolved, or null. Disables the propose/use/resolve buttons.
 let _resolveInFlightKey = null;
 // v2.74.353 — Latest page-complexity report (resolve-difficulty metric) for the
 // current tab, or null. Surfaced as the header badge + logged with each Resolve
@@ -100,6 +99,16 @@ let _pageComplexity = null;
 // for roles that failed verification or were abstained. Rendered inline under
 // the unfilled role in the checklist; cleared when the role is filled manually.
 let _roleResolveNotes = {};
+// v2.74.368 — pageStructure depth-exploration state. The "+ Locale" flow can
+// run a poke→observe→restore sweep over the page so propose-perspectives sees
+// post-interaction content (modal sections, dropdown menus). The artifact is
+// cached in the background per (ground, url); this just tracks the UI status.
+//   _pageStructureStatus: 'none' | 'fresh' | 'building' | 'built' | 'skipped' | 'failed'
+//   _pageStructureInfo:   { controls, revealing, totalRevealed, capturedAt } | null (summary for the chip)
+//   _exploreToken:        bumped to soft-cancel an in-flight sweep (ignore its landing result)
+let _pageStructureStatus = 'none';
+let _pageStructureInfo = null;
+let _exploreToken = 0;
 // v2.74.233 — Per-landmark "refining with Claude" status text. Set on
 // the landmark idx when the picker just captured and Claude is being
 // invoked to refine; cleared when Claude responds (success or fail).
@@ -776,6 +785,10 @@ async function mount(payload, mountEl) {
   await refreshLocaleActiveTab();
   renderLocaleLandmarks();
   _renderPerspectivePanel();   // v2.74.348 — § 13 description-first proposal
+  // v2.74.368 — Check for a cached pageStructure artifact for this page. If a
+  // fresh one exists we reuse it silently; otherwise the panel offers to
+  // explore. Fire-and-forget (the panel shows "none" until this resolves).
+  _refreshPageStructureStatus();
   _renderPredicates();
   _renderIframeContexts();   // v2.74.267
   updateLocaleSaveButtonState();
@@ -824,15 +837,18 @@ async function unmount() {
   _locPickerSession = null;
   _locReturnTo = null;
   _locIsEdit = false;
-  // v2.74.348/350/352/353 — Reset § 13 proposal-flow + complexity state.
-  _perspectiveRuns = { baseline: null, enhanced: null };
+  // v2.74.348/350/352/353/366/368 — Reset § 13 proposal-flow + complexity +
+  // pageStructure-exploration state.
+  _perspectiveRun = null;
   _chosenPerspective = null;
-  _chosenPerspectiveVariant = null;
   _chosenPerspectiveIdx = null;
-  _perspectiveInFlightVariant = null;
+  _perspectiveInFlight = false;
   _resolveInFlightKey = null;
   _pageComplexity = null;
   _roleResolveNotes = {};
+  _pageStructureStatus = 'none';
+  _pageStructureInfo = null;
+  _exploreToken++;   // invalidate any in-flight sweep landing after unmount
 
   // Clear DOM refs (no leak — but clarity).
   locGroundLabelEl = locTabUrlEl = locWarningEl = null;
@@ -1114,7 +1130,7 @@ function onDescriptionInput() {
   // The propose buttons enable once the intent is non-empty. Toggle them
   // directly (rather than a full panel re-render) so editing the intent with
   // options/roles already shown doesn't flicker the cards.
-  if (locPerspectiveBody && !_perspectiveInFlightVariant) {
+  if (locPerspectiveBody && !_perspectiveInFlight) {
     const empty = (_locDraft.description ?? '').trim().length === 0;
     locPerspectiveBody.querySelectorAll('[data-loc-action="propose-perspectives"]')
       .forEach(btn => { btn.disabled = empty; });
@@ -1898,57 +1914,43 @@ function _perspectiveRoleFilled(role) {
   return (_locDraft?.landmarks ?? []).some(lm => lm?.roleFill === role);
 }
 
-// v2.74.348/350 — Render the description-first proposal panel: two propose
-// buttons (baseline vs enhanced A/B), each variant's options rendered
-// side-by-side with a context+timing summary, then the role-fill checklist for
-// whichever option the user adopts. Re-rendered on propose, choice, role-fill.
+// v2.74.348/350/366 — Render the description-first proposal panel: one
+// "Propose perspectives" button (always enhanced — screenshot + sibling-Locale/
+// registry context), the proposed options, then the role-fill checklist for the
+// adopted option. Re-rendered on propose, choice, role-fill.
 function _renderPerspectivePanel() {
   if (!locPerspectiveBody) return;
   const intent = (_locDraft?.description ?? '').trim();
-  const inFlight = _perspectiveInFlightVariant;
-  const canPropose = intent.length > 0 && !inFlight;
+  const exploring = _pageStructureStatus === 'building';
+  const canPropose = intent.length > 0 && !_perspectiveInFlight && !exploring;
   const emptyTitle = 'Write an intent description above first — it seeds the proposal.';
-
-  const proposeBtn = (variant, label, title) => {
-    const busy = inFlight === variant;
-    const has  = !!_perspectiveRuns[variant];
-    const text = busy ? `⏳ ${label}…` : (has ? `↻ ${label}` : `✨ ${label}`);
-    return `<button class="btn-secondary tiny" data-loc-action="propose-perspectives" data-variant="${variant}" type="button" ${canPropose ? '' : 'disabled'} title="${escAttr(title)}">${text}</button>`;
-  };
+  const label = _perspectiveInFlight ? '⏳ Proposing…' : (_perspectiveRun ? '↻ Re-propose perspectives' : '✨ Propose perspectives');
 
   let html = `
-    <p class="dbg-locale-perspective-intro">Describe the intent in <b>Description</b> above, then propose. Two variants let you compare: <b>baseline</b> (page DOM only) vs <b>enhanced</b> (+ screenshot + this Ground's existing locales & landmarks).</p>
+    <p class="dbg-locale-perspective-intro">Describe the intent in <b>Description</b> above, then propose. Claude suggests named <b>roles</b> (using a page screenshot + this Ground's existing locales & landmarks); you pick the real element for each.</p>
+    ${_renderExploreRow()}
     <div class="dbg-locale-perspective-buttons">
-      ${proposeBtn('baseline', 'Propose (baseline)', intent.length === 0 ? emptyTitle : 'Baseline: propose from the page DOM only (the original call).')}
-      ${proposeBtn('enhanced', 'Propose (enhanced)', intent.length === 0 ? emptyTitle : "Enhanced: propose with a page screenshot + this Ground's existing locales & landmarks added as context.")}
+      <button class="btn-secondary tiny" data-loc-action="propose-perspectives" type="button" ${canPropose ? '' : 'disabled'} title="${escAttr(intent.length === 0 ? emptyTitle : "Propose perspective options for this intent, using a page screenshot + this Ground's locales & landmarks.")}">${label}</button>
     </div>`;
 
-  // Each variant's run, side-by-side for comparison.
-  for (const variant of ['baseline', 'enhanced']) {
-    const run = _perspectiveRuns[variant];
-    if (!run) continue;
+  const run = _perspectiveRun;
+  if (run) {
     html += `<div class="dbg-locale-perspective-run">
-      <div class="dbg-locale-perspective-run-head">${variant === 'enhanced' ? 'Enhanced' : 'Baseline'} · ${escHtml(_perspectiveRunSummary(variant, run))}</div>`;
+      <div class="dbg-locale-perspective-run-head">${escHtml(_perspectiveRunSummary(run))}</div>`;
     run.options.forEach((opt, i) => {
-      const chosen = _chosenPerspective === opt;   // identity — robust to same-named options across variants
+      const chosen = _chosenPerspective === opt;   // identity
       const rolesPreview = opt.roles.map(r => escHtml(r.role)).join(', ');
       // v2.74.351 — Downstream perspectives (onPage:false) belong to a page
       // reached only after acting; their roles can't be picked in this
       // single-page session, so they're flagged + not directly choosable.
-      // Navigate there and re-propose (it'll come back onPage:true) or author
-      // it as its own Locale — the seed of "linked/compound perspectives".
       const downstream = opt.onPage === false;
-      // v2.74.352 — on-page options get a second button: "Resolve roles" asks
-      // Claude to auto-pick a selector for every role in one call (then the
-      // sidepanel verifies each). Disabled while any propose/resolve is busy.
-      const resolveKey = `${variant}:${i}`;
-      const resolving = _resolveInFlightKey === resolveKey;
-      const busy = !!_perspectiveInFlightVariant || !!_resolveInFlightKey;
+      const resolving = _resolveInFlightKey === String(i);
+      const busy = _perspectiveInFlight || !!_resolveInFlightKey;
       const headRight = downstream
         ? `<span class="dbg-locale-perspective-downstream-badge" title="This perspective's elements aren't on the current page. Navigate to it, then author it as its own Locale.">⤳ downstream</span>`
         : `<span class="dbg-locale-perspective-option-actions">
-            <button class="btn-secondary tiny" data-loc-action="choose-perspective" data-variant="${variant}" data-idx="${i}" type="button" ${busy ? 'disabled' : ''}>${chosen ? '✓ Using' : 'Use this'}</button>
-            <button class="btn-secondary tiny" data-loc-action="resolve-roles" data-variant="${variant}" data-idx="${i}" type="button" ${busy ? 'disabled' : ''} title="Ask Claude to auto-pick a selector for every role in this perspective, then verify each against the page. Roles Claude can't resolve stay for manual picking.">${resolving ? '⏳ Resolving…' : '⚡ Resolve roles'}</button>
+            <button class="btn-secondary tiny" data-loc-action="choose-perspective" data-idx="${i}" type="button" ${busy ? 'disabled' : ''}>${chosen ? '✓ Using' : 'Use this'}</button>
+            <button class="btn-secondary tiny" data-loc-action="resolve-roles" data-idx="${i}" type="button" ${busy ? 'disabled' : ''} title="Ask Claude to auto-pick a selector for every role in this perspective, then verify each against the page. Roles Claude can't resolve stay for manual picking.">${resolving ? '⏳ Resolving…' : '⚡ Resolve roles'}</button>
           </span>`;
       html += `
         <div class="dbg-locale-perspective-option${chosen ? ' chosen' : ''}${downstream ? ' downstream' : ''}">
@@ -1970,11 +1972,15 @@ function _renderPerspectivePanel() {
       const filled = _perspectiveRoleFilled(r.role);
       const multBadge = (r.multiplicity && r.multiplicity !== 'one')
         ? `<span class="dbg-locale-perspective-mult">${escHtml(r.multiplicity)}</span>` : '';
+      // v2.74.381 — hidden roles live in a layer revealed by a trigger; Resolve
+      // opens that trigger to find them.
+      const hiddenBadge = (r.hidden || r.revealedBy)
+        ? `<span class="dbg-locale-perspective-hidden" title="In a hidden layer — Resolve opens the trigger to find it.">⤿ ${r.revealedBy ? `via ${escHtml(r.revealedBy)}` : 'hidden'}</span>` : '';
       html += `
         <div class="dbg-locale-perspective-role${filled ? ' filled' : ''}">
           <span class="dbg-locale-perspective-role-status">${filled ? '✓' : '○'}</span>
           <span class="dbg-locale-perspective-role-name">${escHtml(r.role)}</span>
-          ${multBadge}
+          ${multBadge}${hiddenBadge}
           ${r.description ? `<span class="dbg-locale-perspective-role-desc">${escHtml(r.description)}</span>` : ''}
           <button class="btn-secondary tiny" data-loc-action="pick-role" data-role="${escAttr(r.role)}" type="button" ${(_locPickerSession || _resolveInFlightKey) ? 'disabled' : ''}>${filled ? 'Re-pick' : 'Pick'}</button>
         </div>`;
@@ -1989,9 +1995,9 @@ function _renderPerspectivePanel() {
     // the verification feedback. One LLM round-trip per click (latency is the
     // user's call — see DESIGN_resolve_roles.md § 8).
     const retryable = _chosenPerspective.roles.filter(r => !_perspectiveRoleFilled(r.role) && _roleResolveNotes[r.role]).length;
-    if (retryable > 0 && _chosenPerspectiveVariant != null && _chosenPerspectiveIdx != null) {
-      const busy = !!_perspectiveInFlightVariant || !!_resolveInFlightKey;
-      const retrying = _resolveInFlightKey === `retry:${_chosenPerspectiveVariant}:${_chosenPerspectiveIdx}`;
+    if (retryable > 0 && _chosenPerspectiveIdx != null) {
+      const busy = _perspectiveInFlight || !!_resolveInFlightKey;
+      const retrying = _resolveInFlightKey === `retry:${_chosenPerspectiveIdx}`;
       html += `<div class="dbg-locale-perspective-retry">
         <button class="btn-secondary tiny" data-loc-action="retry-roles" type="button" ${busy ? 'disabled' : ''} title="Send the ${retryable} unresolved role(s) back to Claude with their verification-failure reasons + the selectors that worked, for a corrected attempt. Costs one more LLM round-trip.">${retrying ? '⏳ Retrying…' : `↻ Retry ${retryable} with feedback`}</button>
       </div>`;
@@ -2000,62 +2006,108 @@ function _renderPerspectivePanel() {
   }
 
   locPerspectiveBody.innerHTML = html;
-  locPerspectiveBody.querySelectorAll('[data-loc-action="propose-perspectives"]').forEach(btn =>
-    btn.addEventListener('click', () => onProposePerspectives(btn.dataset.variant)));
+  locPerspectiveBody.querySelector('[data-loc-action="propose-perspectives"]')
+    ?.addEventListener('click', () => onProposePerspectives());
   locPerspectiveBody.querySelectorAll('[data-loc-action="choose-perspective"]').forEach(btn =>
-    btn.addEventListener('click', () => onChoosePerspective(btn.dataset.variant, parseInt(btn.dataset.idx, 10))));
+    btn.addEventListener('click', () => onChoosePerspective(parseInt(btn.dataset.idx, 10))));
   locPerspectiveBody.querySelectorAll('[data-loc-action="resolve-roles"]').forEach(btn =>
-    btn.addEventListener('click', () => onResolveRoles(btn.dataset.variant, parseInt(btn.dataset.idx, 10))));
+    btn.addEventListener('click', () => onResolveRoles(parseInt(btn.dataset.idx, 10))));
   locPerspectiveBody.querySelector('[data-loc-action="retry-roles"]')
-    ?.addEventListener('click', () => onRetryFailedRoles(_chosenPerspectiveVariant, _chosenPerspectiveIdx));
+    ?.addEventListener('click', () => onRetryFailedRoles(_chosenPerspectiveIdx));
   locPerspectiveBody.querySelectorAll('[data-loc-action="pick-role"]').forEach(btn =>
     btn.addEventListener('click', () => onPickForRole(btn.dataset.role)));
+  // v2.74.368 — pageStructure exploration controls.
+  locPerspectiveBody.querySelector('[data-loc-action="explore"]')
+    ?.addEventListener('click', () => onExplorePageStructure(false));
+  locPerspectiveBody.querySelector('[data-loc-action="reexplore"]')
+    ?.addEventListener('click', () => onExplorePageStructure(true));
+  locPerspectiveBody.querySelector('[data-loc-action="skip-explore"]')
+    ?.addEventListener('click', () => onSkipExplore());
+  locPerspectiveBody.querySelector('[data-loc-action="cancel-explore"]')
+    ?.addEventListener('click', () => onCancelExplore());
 }
 
-// Human-readable "what this run used + how long" for the benchmark header.
-function _perspectiveRunSummary(variant, run) {
+// v2.74.368 — Render the depth-exploration row based on _pageStructureStatus.
+// The artifact is the channel to propose-perspectives (read from cache at
+// propose-time); this row just lets the author trigger/skip/re-run the sweep.
+function _renderExploreRow() {
+  const info = _pageStructureInfo;
+  const reveals = info && Number.isFinite(info.revealing) ? info.revealing : null;
+  switch (_pageStructureStatus) {
+    case 'building':
+      return `<div class="dbg-locale-explore building"><span>⏳ Exploring page depth… (poking disclosure controls)</span>
+        <button class="btn-secondary tiny" data-loc-action="cancel-explore" type="button">Cancel</button></div>`;
+    case 'fresh':
+    case 'built': {
+      const detail = reveals != null ? `${reveals} control(s) revealed hidden content` : 'no hidden content found';
+      // Diagnostics so a "0" is explainable: how many candidates were found,
+      // how many were poked, and whether the page was scrolled for depth.
+      const diag = info
+        ? ` (${info.candidates ?? '?'} candidate(s), ${info.poked ?? '?'} poked${info.scrollSteps ? `, scrolled ${info.scrollSteps}×` : ''})`
+        : '';
+      return `<div class="dbg-locale-explore done" title="Proposals on this page now include post-interaction landmarks the static snapshot can't show.">
+        <span>✓ Page depth explored — ${escHtml(detail)}${escHtml(diag)}.</span>
+        <button class="btn-secondary tiny" data-loc-action="reexplore" type="button" title="Re-run the sweep (the page may have changed).">↻ Re-explore</button></div>`;
+    }
+    case 'skipped':
+      return `<div class="dbg-locale-explore skipped"><span>Depth exploration skipped — proposals use the static snapshot only.</span>
+        <button class="btn-secondary tiny" data-loc-action="explore" type="button">🔍 Explore now</button></div>`;
+    case 'failed':
+      return `<div class="dbg-locale-explore failed"><span>⚠ Depth exploration failed.</span>
+        <button class="btn-secondary tiny" data-loc-action="explore" type="button">↻ Retry</button></div>`;
+    case 'none':
+    default:
+      return `<div class="dbg-locale-explore offer">
+        <span>🔍 <b>Explore page depth?</b> Safely pokes dropdowns / menus / modals so proposals can include landmarks revealed only after an interaction.</span>
+        <span class="dbg-locale-explore-actions">
+          <button class="btn-secondary tiny" data-loc-action="explore" type="button">Explore</button>
+          <button class="btn-secondary tiny" data-loc-action="skip-explore" type="button">Skip</button>
+        </span></div>`;
+  }
+}
+
+// Human-readable "what this run used + how long" for the run header.
+function _perspectiveRunSummary(run) {
   const secs = run?.elapsedMs != null ? `${(run.elapsedMs / 1000).toFixed(1)}s` : '?';
-  if (variant === 'baseline') return `DOM only · ${secs}`;
   const m = run?.meta ?? {};
   const parts = [m.screenshot ? 'screenshot' : 'no-screenshot'];
   if (m.siblingLocales)    parts.push(`${m.siblingLocales} locale(s)`);
   if (m.registryLandmarks) parts.push(`${m.registryLandmarks} landmark(s)`);
+  if (m.pageStructure)     parts.push(`depth(${m.revealingControls || 0} reveal)`);
   return `${parts.join(' + ')} · ${secs}`;
 }
 
-async function onProposePerspectives(variant) {
+async function onProposePerspectives() {
   if (!_locDraft) return;
-  variant = (variant === 'enhanced') ? 'enhanced' : 'baseline';
   const intent = (_locDraft.description ?? '').trim();
   if (!intent) { showLocaleWarning('Write an intent description first — it seeds the proposal.'); return; }
   if (_locTabId == null) { showLocaleWarning('No active tab to analyze.'); return; }
-  if (_perspectiveInFlightVariant) return;   // one variant at a time (avoids tab-capture races)
+  if (_perspectiveInFlight || _resolveInFlightKey) return;
   // v2.74.349 — Capture the draft identity; discard a result that lands after
   // the panel unmounted or remounted onto a different locale (else we'd write
   // to a null / wrong draft and crash).
   const draftToken = _locDraft.id;
-  _perspectiveInFlightVariant = variant;
+  _perspectiveInFlight = true;
   _renderPerspectivePanel();
   const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
   let res;
   try {
     res = await new Promise(r => chrome.runtime.sendMessage({
       type: 'PROPOSE_LOCALE_PERSPECTIVES',
-      payload: { tabId: _locTabId, groundId: _locGroundId, intent, enhanced: variant === 'enhanced' },
+      payload: { tabId: _locTabId, groundId: _locGroundId, intent },
     }, r));
   } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
   if (!_locDraft || _locDraft.id !== draftToken) return;   // unmounted / switched mid-flight
-  _perspectiveInFlightVariant = null;
+  _perspectiveInFlight = false;
   if (!res?.success || !Array.isArray(res.options) || !res.options.length) {
-    showLocaleWarning(`Perspective proposal (${variant}) failed: ${res?.error ?? 'no options returned'}`);
+    showLocaleWarning(`Perspective proposal failed: ${res?.error ?? 'no options returned'}`);
     _renderPerspectivePanel();
     return;
   }
   const elapsedMs = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0);
-  // If the current choice came from the run we're replacing, drop it (its
-  // option objects are about to be discarded).
-  if (_perspectiveRuns[variant]?.options?.includes(_chosenPerspective)) _chosenPerspective = null;
-  _perspectiveRuns[variant] = { options: res.options, elapsedMs, meta: res.meta ?? null };
+  // Fresh options supersede any prior choice.
+  if (_perspectiveRun?.options?.includes(_chosenPerspective)) { _chosenPerspective = null; _chosenPerspectiveIdx = null; }
+  _perspectiveRun = { options: res.options, elapsedMs, meta: res.meta ?? null };
   // Record that the description acted as a proposal seed (LOCALE_SPEC § 6).
   _locDraft.authoringMetadata = _locDraft.authoringMetadata ?? {};
   _locDraft.authoringMetadata.description = {
@@ -2064,15 +2116,101 @@ async function onProposePerspectives(variant) {
     proposalContext: { seedText: intent, proposedAt: Date.now() },
   };
   _renderPerspectivePanel();
-  toast?.(`Proposed ${res.options.length} option(s) [${variant}] in ${(elapsedMs / 1000).toFixed(1)}s`);
+  toast?.(`Proposed ${res.options.length} option(s) in ${(elapsedMs / 1000).toFixed(1)}s`);
 }
 
-function onChoosePerspective(variant, idx) {
+// ─── v2.74.368 — pageStructure depth exploration ──────────────────────────
+// Summarize an artifact (or its background-side stats) into the chip info.
+function _summarizePageStructure(structure) {
+  if (!structure) return null;
+  const controls = Array.isArray(structure.controls) ? structure.controls : [];
+  const revealing = controls.filter(c => c?.observation === 'reveal').length;
+  const totalRevealed = controls.reduce((n, c) => n + (Number(c?.revealCount) || 0), 0);
+  const st = structure.stats ?? {};
+  return {
+    controls: controls.length, revealing, totalRevealed, capturedAt: structure.capturedAt ?? null,
+    candidates: Number(st.candidates) || controls.length, poked: Number(st.controlsTried) || controls.length,
+    scrollSteps: Number(st.scrollSteps) || 0,
+  };
+}
+
+// On mount: ask the background whether a FRESH artifact already exists for this
+// page. Fresh → reuse silently ('fresh'); otherwise leave the offer ('none').
+async function _refreshPageStructureStatus() {
   if (!_locDraft) return;
-  const opt = _perspectiveRuns[variant]?.options?.[idx];
+  const draftToken = _locDraft.id;
+  const url = locTabUrlEl?.textContent ?? '';
+  if (!/^https?:/i.test(url)) return;   // not an explorable page
+  let res;
+  try {
+    res = await new Promise(r => chrome.runtime.sendMessage({
+      type: 'GET_PAGE_STRUCTURE', payload: { groundId: _locGroundId, url },
+    }, r));
+  } catch { return; }
+  if (!_locDraft || _locDraft.id !== draftToken) return;   // unmounted / switched
+  if (_pageStructureStatus === 'building') return;          // a sweep started meanwhile — don't clobber
+  if (res?.success && res.structure && res.fresh) {
+    _pageStructureStatus = 'fresh';
+    _pageStructureInfo = _summarizePageStructure(res.structure);
+    _renderPerspectivePanel();
+  }
+  // stale or absent → leave 'none' (the offer); no re-render needed.
+}
+
+// Run the depth sweep (LLM-planned in the background). `force` re-runs even if
+// a fresh artifact exists. Soft-cancellable via _exploreToken.
+async function onExplorePageStructure(force = false) {
+  if (!_locDraft) return;
+  if (_locTabId == null) { showLocaleWarning('No active tab to explore.'); return; }
+  if (_pageStructureStatus === 'building') return;
+  const draftToken = _locDraft.id;
+  const myToken = ++_exploreToken;
+  _pageStructureStatus = 'building';
+  _renderPerspectivePanel();
+  let res;
+  try {
+    res = await new Promise(r => chrome.runtime.sendMessage({
+      type: 'EXPLORE_PAGE_STRUCTURE',
+      // v2.74.378 — banded walk: background orchestrates metrics → per-band
+      // (enumerate → screenshot → LLM plan → poke) bottom-to-top → cleanup.
+      payload: { tabId: _locTabId, groundId: _locGroundId },
+    }, r));
+  } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
+  // Drop the result if cancelled, unmounted, or superseded by a newer run.
+  if (myToken !== _exploreToken || !_locDraft || _locDraft.id !== draftToken) return;
+  if (!res?.success || !res.structure) {
+    _pageStructureStatus = 'failed';
+    _renderPerspectivePanel();
+    showLocaleWarning(`Page depth exploration failed: ${res?.error ?? 'no structure returned'}`);
+    return;
+  }
+  _pageStructureStatus = 'built';
+  _pageStructureInfo = _summarizePageStructure(res.structure);
+  _renderPerspectivePanel();
+  const rv = _pageStructureInfo?.revealing ?? 0;
+  toast?.(rv > 0 ? `Explored — ${rv} control(s) reveal hidden content` : 'Explored — no hidden content found');
+}
+
+function onSkipExplore() {
+  if (_pageStructureStatus === 'building') return;
+  _pageStructureStatus = 'skipped';
+  _renderPerspectivePanel();
+}
+
+// Soft-cancel: we can't abort the content-script sweep mid-flight, but we can
+// invalidate its landing result and restore the offer.
+function onCancelExplore() {
+  if (_pageStructureStatus !== 'building') return;
+  _exploreToken++;
+  _pageStructureStatus = _pageStructureInfo ? 'built' : 'none';
+  _renderPerspectivePanel();
+}
+
+function onChoosePerspective(idx) {
+  if (!_locDraft) return;
+  const opt = _perspectiveRun?.options?.[idx];
   if (!opt) return;
   _chosenPerspective = opt;
-  _chosenPerspectiveVariant = variant;
   _chosenPerspectiveIdx = idx;
   // Name → locale name, but never clobber a name the user already typed.
   if (!(_locDraft.name ?? '').trim()) {
@@ -2108,32 +2246,32 @@ function onChoosePerspective(variant, idx) {
 // (verifyLocaleLandmark → INSPECT_ELEMENT → uid + score, no extra LLM call).
 // Selectors that don't resolve are dropped so their role stays unfilled (○)
 // for manual picking. See DESIGN_resolve_roles.md.
-async function onResolveRoles(variant, idx) {
+async function onResolveRoles(idx) {
   if (!_locDraft) return;
-  const opt = _perspectiveRuns[variant]?.options?.[idx];
+  const opt = _perspectiveRun?.options?.[idx];
   if (!opt || opt.onPage === false) return;
   if (_locTabId == null) { showLocaleWarning('No active tab to analyze.'); return; }
-  if (_perspectiveInFlightVariant || _resolveInFlightKey) return;   // one op at a time
+  if (_perspectiveInFlight || _resolveInFlightKey) return;   // one op at a time
   // Adopt it first (sets chosen + name + predicates + the role checklist).
-  onChoosePerspective(variant, idx);
+  onChoosePerspective(idx);
   const roles = (opt.roles ?? [])
     .filter(r => r && typeof r.role === 'string')
     .map(r => ({ role: r.role, description: r.description ?? '', multiplicity: r.multiplicity ?? 'one' }));
   if (!roles.length) return;
   _roleResolveNotes = {};   // fresh run — clear prior notes
-  await _runResolve({ variant, idx, opt, roles, priorAttempt: null, mode: 'initial', inFlightKey: `${variant}:${idx}` });
+  await _runResolve({ opt, roles, priorAttempt: null, mode: 'initial', inFlightKey: String(idx) });
 }
 
 // v2.74.356 — Opt-in repair round (DESIGN_resolve_roles.md § 8). Re-resolves
 // ONLY the still-unfilled roles, feeding Claude back its prior selector + the
 // verification failure reason for each, plus the confirmed successes as
 // site-convention context. One LLM round-trip per click; the user is the cap.
-async function onRetryFailedRoles(variant, idx) {
+async function onRetryFailedRoles(idx) {
   if (!_locDraft) return;
-  const opt = _perspectiveRuns[variant]?.options?.[idx];
+  const opt = _perspectiveRun?.options?.[idx];
   if (!opt) return;
   if (_locTabId == null) { showLocaleWarning('No active tab to analyze.'); return; }
-  if (_perspectiveInFlightVariant || _resolveInFlightKey) return;
+  if (_perspectiveInFlight || _resolveInFlightKey) return;
   // Roles still unfilled that we have a note for (failed / abstained).
   const retry = (opt.roles ?? []).filter(r => r && typeof r.role === 'string'
     && !_perspectiveRoleFilled(r.role) && _roleResolveNotes[r.role]);
@@ -2144,14 +2282,14 @@ async function onRetryFailedRoles(variant, idx) {
     .filter(lm => lm?.roleFill && lm?.selector && (opt.roles ?? []).some(x => x.role === lm.roleFill))
     .map(lm => ({ role: lm.roleFill, selector: lm.selector }));
   const attempts = retry.map(r => ({ role: r.role, selector: _roleResolveNotes[r.role]?.selector ?? null, reason: _roleResolveNotes[r.role]?.reason ?? 'failed' }));
-  await _runResolve({ variant, idx, opt, roles, priorAttempt: { confirmed, attempts }, mode: 'repair', inFlightKey: `retry:${variant}:${idx}` });
+  await _runResolve({ opt, roles, priorAttempt: { confirmed, attempts }, mode: 'repair', inFlightKey: `retry:${idx}` });
 }
 
 // Shared driver for both the initial resolve and the repair round: send the
 // request, then create+verify a landmark per returned selector (drop failures),
 // record per-role notes/details, log, toast. `_roleResolveNotes` is cleared by
 // the caller for an initial run; a repair run updates only the retried roles.
-async function _runResolve({ variant, idx, opt, roles, priorAttempt, mode, inFlightKey }) {
+async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
   const draftToken = _locDraft.id;
   const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
   _resolveInFlightKey = inFlightKey;
@@ -2211,6 +2349,61 @@ async function _runResolve({ variant, idx, opt, roles, priorAttempt, mode, inFli
       Logger.warn('locale-capture', `resolveRoles[${r.role}]${mode === 'repair' ? '(retry)' : ''} verify FAILED — selector="${r.selector}" — ${reason}`);
     }
   }
+
+  // v2.74.381 — Reveal-aware pass. Roles in a hidden layer (modal/menu) can't
+  // resolve/verify against the static DOM. Group still-unfilled HIDDEN roles by
+  // their trigger, open it, and resolve + verify them WHILE OPEN (done in the
+  // background), then fill them as hidden landmarks carrying their trigger.
+  const hiddenUnfilled = (opt.roles ?? []).filter(r => r?.role && !_perspectiveRoleFilled(r.role) && (r.hidden === true || r.revealedBy));
+  if (hiddenUnfilled.length && _locTabId != null) {
+    const groups = new Map();
+    for (const r of hiddenUnfilled) { const k = r.revealedBy || ''; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
+    for (const [triggerRole, groupRoles] of groups) {
+      let triggerSelector = null;
+      if (triggerRole) { const lm = (_locDraft.landmarks ?? []).find(l => l?.roleFill === triggerRole && l?.selector); triggerSelector = lm?.selector ?? null; }
+      const reqRoles = groupRoles.map(r => ({ role: r.role, description: r.description ?? '', multiplicity: r.multiplicity ?? 'one' }));
+      _resolveInFlightKey = inFlightKey; _renderPerspectivePanel();   // keep the "⏳ Resolving…" state while revealing
+      let rr;
+      try {
+        rr = await new Promise(res => chrome.runtime.sendMessage({
+          type: 'RESOLVE_REVEALED_ROLES',
+          payload: { tabId: _locTabId, groundId: _locGroundId, triggerSelector, triggerLabel: triggerRole, roles: reqRoles },
+        }, res));
+      } catch (e) { rr = { success: false, error: e?.message ?? 'unknown' }; }
+      if (!_locDraft || _locDraft.id !== draftToken) return;
+      _resolveInFlightKey = null;
+      if (!rr?.success || !Array.isArray(rr.resolutions)) {
+        for (const r of groupRoles) { if (!_roleResolveNotes[r.role]) _roleResolveNotes[r.role] = { status: 'failed', reason: `couldn't reveal hidden layer: ${rr?.error ?? 'no result'}`, selector: null }; }
+        Logger.warn('locale-capture', `reveal-resolve [${triggerRole || 'artifact'}] failed — ${rr?.error ?? 'no result'}`);
+        continue;
+      }
+      for (const r of rr.resolutions) {
+        if (!r?.role || _perspectiveRoleFilled(r.role)) continue;
+        const matched = Number(r.matchedCount) || 0;
+        if (!r.selector || matched <= 0) {
+          const reason = !r.selector ? ((r.justification && r.justification.trim()) || 'not found in the revealed layer') : 'selector matched nothing in the revealed layer';
+          _roleResolveNotes[r.role] = { status: !r.selector ? 'abstained' : 'failed', reason, selector: r.selector || null };
+          if (!r.selector) abstained++; else failed++;
+          details.push({ role: r.role, status: !r.selector ? 'abstained' : 'failed', selector: r.selector || null, reason, revealed: true });
+          continue;
+        }
+        const lmRef = {
+          alias: r.role, selector: r.selector, roleFill: r.role, roleMult: multOf(r.role),
+          hidden: true, revealedBy: triggerRole || null,
+          ...(rr.trigger ? { triggerSelector: rr.trigger } : {}),
+          verified: { score: matched === 1 ? 'ready' : 'caveats', matchedCount: matched, revealState: true, verifiedAt: Date.now(), note: `verified in revealed state${triggerRole ? ` (via ${triggerRole})` : ''}` },
+        };
+        _locDraft.landmarks.push(lmRef);
+        _invalidateStructure();
+        delete _roleResolveNotes[r.role];
+        filled++;
+        details.push({ role: r.role, status: 'resolved', selector: r.selector, score: lmRef.verified.score, matchedCount: matched, revealed: true });
+        Logger.info('locale-capture', `resolveRoles[${r.role}] resolved in REVEALED layer — "${r.selector}" (matched=${matched}, via ${triggerRole || 'artifact'})`);
+      }
+    }
+    renderLocaleLandmarks(); _renderPerspectivePanel(); updateLocaleSaveButtonState(); _refreshLocaleOverlays();
+  }
+
   if (locWarningEl && filled > 0) { locWarningEl.textContent = ''; locWarningEl.classList.add('hidden'); }
   renderLocaleLandmarks();
   _renderPerspectivePanel();
@@ -2220,7 +2413,7 @@ async function _runResolve({ variant, idx, opt, roles, priorAttempt, mode, inFli
   _logResolveRun({
     ts: Date.now(),
     url: locTabUrlEl?.textContent ?? '',
-    variant, mode,
+    mode,
     rolesTotal: roles.length,
     resolved: filled, failed, abstained,
     ms,
@@ -2230,7 +2423,7 @@ async function _runResolve({ variant, idx, opt, roles, priorAttempt, mode, inFli
     tier:       _pageComplexity?.tier ?? null,
     details,
   });
-  Logger.info('locale-capture', `resolveRoles done [${variant}/${mode}] — resolved ${filled}/${roles.length}, failed ${failed}, abstained ${abstained}, ${ms}ms, difficulty ${_pageComplexity?.score ?? '?'}`);
+  Logger.info('locale-capture', `resolveRoles done [${mode}] — resolved ${filled}/${roles.length}, failed ${failed}, abstained ${abstained}, ${ms}ms, difficulty ${_pageComplexity?.score ?? '?'}`);
   const bits = [`resolved ${filled}`];
   if (failed) bits.push(`${failed} didn't match`);
   if (abstained) bits.push(`${abstained} skipped`);

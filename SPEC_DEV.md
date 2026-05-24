@@ -2339,3 +2339,882 @@ ONCE on the container.
 (prompt + sanitizer + refine outline), `ContentScripts/contentScript.js`
 (skip virtual in checkNode), `Sidepanel/modes/locale-capture.js` (node-id =
 ref∥vid, virtual render + verdict skip), `assets/sidepanel.css`.
+
+---
+
+## v2.74.366 — Perspective propose: collapse baseline/enhanced A/B → single canonical (always-enhanced) run
+
+**Date:** 2026-05-23
+**Decision by:** user ("Enhanced is better and should be canonical — remove baseline").
+
+**Context.** v2.74.350 introduced a two-arm benchmark for the "✨ Propose
+perspectives" button: a **baseline** run (DOM snapshot + intent only) and an
+**enhanced** run (also screenshot + the Ground's sibling-Locale roles +
+registry landmarks). The A/B confirmed enhanced consistently produces richer,
+more grounded perspectives. The benchmark plumbing (per-variant runs, variant
+keys, dual buttons) is now dead weight.
+
+**Change.** One button, one run, always enhanced.
+- **Sidepanel (`locale-capture.js`)**: replaced `_perspectiveRuns =
+  {baseline, enhanced}` / `_perspectiveInFlightVariant` /
+  `_chosenPerspectiveVariant` with single `_perspectiveRun` /
+  `_perspectiveInFlight` / `_chosenPerspectiveIdx`. `_renderPerspectivePanel`
+  renders one run; options key on `data-idx` (no `data-variant`); resolve /
+  retry in-flight keyed by `String(idx)` / `retry:${idx}`. Dropped the
+  `variant` parameter from `onProposePerspectives`, `onChoosePerspective`,
+  `onResolveRoles`, `onRetryFailedRoles`, `_runResolve`,
+  `_perspectiveRunSummary`, `_logResolveRun`. Unmount reset + intent-toggle
+  guard updated to the new var names. Payload no longer sends `enhanced`.
+- **Background (`background.js`)**: `PROPOSE_LOCALE_PERSPECTIVES` removed the
+  `enhanced` gate — it ALWAYS gathers screenshot (when target tab active) +
+  sibling locales + registry landmarks (best-effort; any failure degrades, not
+  aborts). `meta` dropped the `enhanced` field.
+
+**Why this first.** Small, isolated, and unblocks the pivot: the next phases
+build a **pageStructure** exploration artifact (poke→observe→verify sweep over
+the whole page) that feeds depth-aware context INTO this same enhanced propose
+call. Collapsing to one canonical path first keeps that wiring single-headed.
+
+**Touched.** `Sidepanel/modes/locale-capture.js`, `background.js`,
+`manifest.json`.
+
+---
+
+## v2.74.367 — pageStructure artifact foundation: page-depth sweep (poke→observe→restore), no LLM
+
+**Date:** 2026-05-23
+**Decision by:** user ("fires poke loop on all candidate selectors and generates
+a page depth structure … this is then fed to propose for depth-aware
+roles/landmarks" → "change to pageStructure — build"). Phase 2 of 3.
+
+**Problem (the depth gap).** propose-perspectives authors from ONE static DOM
+snapshot, so any content that exists only AFTER an interaction — a dropdown's
+menu, a modal's sections, a tab panel, an accordion body — is invisible to it.
+Those landmarks can today only be user-authored, because capture requires the
+reveal to have already happened. The fix is a page-level exploration pass that
+discovers that depth automatically, BEFORE proposing.
+
+**This phase (foundation, no LLM yet).** A content-script sweep + a Ground-scoped
+artifact cache.
+- **`explorePageStructure(payload)`** (`contentScript.js`): enumerates the
+  visible interactive **surface**, then the **disclosure candidates** (things
+  likely to reveal hidden content: `[aria-expanded]`/`[aria-haspopup]`/`summary`
+  /`[role=tab]`/`[role=combobox]` + toggle-ish class/label hints). For each
+  candidate (bounded by `maxPokes`, default 24): snapshot the visible
+  interactive set, fire ONE safe synthetic click (reuses the verify poke guard —
+  never navigates/submits), wait to settle, diff for **novel visible
+  elements** (the revealed depth), record their selector/role/label/rect, then
+  **restore** (re-click to toggle closed → Escape fallback) so the next poke
+  starts clean. Aborts the whole sweep if a click navigates. Per-control
+  baseline (fresh visible set each time) so a sibling's reveal isn't
+  miscounted. NO screenshots (captured fresh at propose-time) — text + geometry
+  only. `payload.plan` is a Phase-3 hook: when present, only the planned
+  selectors are poked.
+- **Artifact shape** (`pageStructure`): `{ version, url, title, capturedAt,
+  driftHash, viewport, surface[], controls[], stats }`; each control =
+  `{ cid, selector, role, label, rect, expanded, haspopup, revealed[],
+  revealCount, observation, restored }`; observation ∈ `reveal | no-change |
+  unsafe | navigation-suppressed`.
+- **driftHash**: cheap djb2 fingerprint over DOM size + candidate count +
+  pathname + sorted control labels — for staleness detection at read-time.
+- **Cache** (`background.js`): `pageStructureCache` keyed
+  `{[groundId]:{[normalizedUrl]:{structure,url,capturedAt}}}`, mirroring
+  `localeAutoDiscoveryCache` (reuses `_normalizeUrlForLocaleCache`, origin+
+  pathname). `_readPageStructureCache`/`_writePageStructureCache`; 7-day TTL.
+- **Handlers**: `EXPLORE_PAGE_STRUCTURE` (inject CS → run sweep → write cache →
+  return artifact) and `GET_PAGE_STRUCTURE` (read cache, report `fresh` vs TTL,
+  no sweep).
+
+**Not yet (Phase 3).** No LLM planner, no "+ Locale" wiring/consent UI, no
+feed into propose. Skeleton/surface elements are scaffolding, NOT landmarks.
+
+**Touched.** `ContentScripts/contentScript.js` (sweep + message case),
+`background.js` (cache helpers + 2 handlers), `manifest.json`.
+
+---
+
+## v2.74.368 — pageStructure Phase 3: LLM-planned sweep, "+ Locale" exploration UI, depth-aware propose
+
+**Date:** 2026-05-23
+**Decision by:** user ("LLM-planned … the + locale trigger was conditional on
+if there wasn't already an artifact" → "change to pageStructure — build").
+Phase 3 of 3 — the integration that makes the Phase-2 foundation pay off.
+
+**1. LLM-planned sweep (the `plan` role).** The depth sweep is now two-pass:
+- Content-script `explorePageStructure` gained an **`enumerateOnly`** mode:
+  returns the disclosure candidates (selector/role/label/rect/safe) WITHOUT
+  poking — so the planner can choose before the page is mutated.
+- New `AnthropicService.planPageExploration({ url, title, candidates,
+  screenshot, maxPokes })` (`plan` role, op `planPageExploration`): given the
+  numbered candidates (+ optional screenshot for prominence), returns a
+  budget-limited subset of indices worth activating, with a one-phrase reason
+  each. Validates every pick is a real candidate and `safe!==false`. A bad pick
+  wastes a poke, never corrupts the artifact (the sweep stays deterministic).
+- Background `EXPLORE_PAGE_STRUCTURE` orchestrates enumerate → plan → sweep,
+  passing the planned selectors to the content-script `plan` filter. **Graceful
+  fallback**: planner failure/no-API degrades to poking all candidates (bounded
+  by `maxPokes`). Annotates the artifact with `planned` + `plannerReasons`.
+
+**2. "+ Locale" exploration UI (`locale-capture.js`).** The perspective panel
+now carries a depth-exploration row, conditional on artifact freshness:
+- On mount, `_refreshPageStructureStatus()` asks `GET_PAGE_STRUCTURE` — a FRESH
+  artifact (within 7-day TTL) is reused silently (status `fresh`); otherwise the
+  row offers **🔍 Explore / Skip**.
+- **Explore** runs the sweep with a cancellable **"⏳ Exploring…"** state
+  (soft-cancel via `_exploreToken` — invalidates the landing result, since the
+  content-script sweep can't be truly aborted), then shows **"✓ Page depth
+  explored — N control(s) revealed content · ↻ Re-explore"**. Failure → retry.
+  Skip → static-only. Propose is disabled while exploring.
+- New state: `_pageStructureStatus`/`_pageStructureInfo`/`_exploreToken`
+  (reset on unmount). Handlers: `onExplorePageStructure(force)`,
+  `onSkipExplore`, `onCancelExplore`, `_summarizePageStructure`.
+
+**3. Depth-aware propose (`proposePerspectives` + `PROPOSE_LOCALE_PERSPECTIVES`).**
+- `proposePerspectives` gained a `pageStructure` param: renders ONLY the
+  reveal-confirmed controls with their revealed children into a "PAGE STRUCTURE"
+  block, plus a system-prompt rule telling the author these elements are NOT in
+  the static DOM — propose roles for them and note how each is revealed (they
+  stay `onPage:true`; `onPage:false` remains navigation-only).
+- The background reads the cached artifact at propose-time (cache is the channel
+  — the UI just ensures it exists) and threads it in. `meta` gains
+  `pageStructure` + `revealingControls`; the run header shows `depth(N reveal)`.
+
+**Scaffolding, not landmarks.** Surface/revealed elements are exploration
+signal that informs proposals; they are not auto-saved as landmarks — the author
+still picks/resolves real elements per role.
+
+**Touched.** `Services/AnthropicService.js` (planPageExploration + pageStructure
+render), `background.js` (two-pass orchestration + propose-time read),
+`ContentScripts/contentScript.js` (enumerateOnly), `Sidepanel/modes/locale-capture.js`
+(exploration UI + state + handlers), `assets/sidepanel.css` (explore row),
+`manifest.json`.
+
+---
+
+## v2.74.369 — pageStructure: fix "0 reveals" (chevron recognition, pointer-event poke, panel reveals, scroll depth)
+
+**Date:** 2026-05-23
+**Reported by:** user ("✓ explored — 0 control(s) revealed … impossible, multiple
+dropdown buttons visible … does Claude not recognize chevrons? what about
+vertical depth (scrolling)?").
+
+**Root causes of the false 0.**
+1. **Enumeration too narrow.** `isDisclosureCandidate` only matched
+   `aria-expanded`/`aria-haspopup`/`summary`/`tab`/`combobox` or keyword class
+   names. A real chevron dropdown is often a `<button>`/`<div>` with an SVG
+   icon and hashed CSS-module classes — none of those — so it was never a
+   candidate.
+2. **`.click()` doesn't open many menus.** Lots of dropdown/menu libraries open
+   on `pointerdown`/`mousedown`, not `click`.
+3. **Reveal detection too narrow.** Only newly-visible INTERACTIVE_SEL elements
+   counted; a revealed menu/dialog/tabpanel of non-interactive content scored 0.
+4. **Planner pruned icon controls it couldn't label**, and an empty plan meant
+   "poke nothing."
+5. **No scrolling** — lazy / below-the-fold content was never triggered.
+
+**Fixes (`contentScript.js`).**
+- **Wider candidate net** (`CANDIDATE_SEL`): adds `[aria-controls]`,
+  `[data-toggle]`/`[data-bs-toggle]`/`[data-state]`/`[data-headlessui-state]`,
+  and `[class*=dropdown|chevron|caret|accordion|expand|disclosure|menu-toggle]`.
+- **`candidateHint(el)`** classifies WHY an element qualifies — `aria-expanded`,
+  `haspopup`, `aria-controls`, `details`, `tab`, `combobox`, `data-toggle`,
+  **`arrow-glyph`** (▲▼▴▾◀▶∨⌄⌃ in short text), **`icon`** (svg/use/i with a
+  chevron/caret/arrow class or href), **`icon-only`** (icon + ≤2 chars text),
+  `keyword`. Drives candidacy + is surfaced to the planner + artifact.
+- **`pokeOpen(el)`** fires the full sequence: `scrollIntoView` → `focus` →
+  pointerdown → mousedown → pointerup → mouseup → `click()`.
+- **`REVEAL_SEL`** widens the before/after diff to menu/menubar/listbox/dialog/
+  tooltip/tabpanel/region/grid/tree/group; `aria-expanded` flipping
+  `false→true` also counts as a reveal (CSS-only expansions).
+- **Scroll depth**: steps down the page (≤12 × ~0.9 vh), re-collecting surface +
+  candidates at each step to trigger lazy content, stops at bottom / stable
+  height, then **restores scroll**. `stats.scrollSteps` recorded.
+- Candidates now carry `hint` + `context` (nearby text) so the planner can
+  identify an icon-only control ("the chevron near 'Sort by'").
+
+**Planner changes (`background.js` + `AnthropicService.js`).**
+- **Planner only prunes when it must**: skip it entirely when
+  `candidates.length ≤ budget` (poke them all); an empty plan is ignored
+  (poke-all-bounded) rather than poking nothing.
+- Planner prompt renders each candidate's `hint` + `near "context"` and a rule:
+  an icon/arrow-glyph control with an empty label is very likely a dropdown —
+  prefer it.
+
+**UI (`locale-capture.js`).** The done-chip now shows diagnostics —
+"N revealed (C candidate(s), P poked, scrolled S×)" — so a 0 is explainable.
+
+**Touched.** `ContentScripts/contentScript.js`, `background.js`,
+`Services/AnthropicService.js`, `Sidepanel/modes/locale-capture.js`,
+`manifest.json`.
+
+---
+
+## v2.74.370 — pageStructure: navigation guard (stop page transitions), extensive logging
+
+**Date:** 2026-05-23
+**Reported by:** user ("page transitions are occurring", "everything happens
+extremely fast", "log depth exploration extensively").
+
+**Diagnosis.** #3 explained #2: the richer pointer-event poke + wider candidate
+net (v2.74.369) started poking nav links / SPA route triggers. The first poke
+navigated, the sweep hit its navigation-abort (`break`), and finished in one
+step — hence "extremely fast". So the real fix is to STOP transitions, not just
+detect them.
+
+**Navigation guard (`contentScript.js`).** Installed for the duration of the
+sweep, removed in a `finally`:
+- **Don't poke navigators**: `isSafeToClick` now refuses `a[href]`,
+  `[role="link"]`, `[target="_blank"]`, and anything with `closest('a[href],
+  [role="link"]')` (a chevron INSIDE a nav link is skipped).
+- **Capture-phase click guard**: `preventDefault()`s anchor clicks (the JS
+  handler still runs — a menu still opens — only the browser navigation is
+  cancelled; no `stopImmediatePropagation`, so disclosure handlers fire).
+- **SPA guard**: `history.pushState`/`replaceState` are no-op'd during the
+  sweep (records the attempt) so client-side routers can't change the route.
+- **Loop behavior**: a BLOCKED nav (guard caught it) is no longer a hard stop —
+  the control is marked `navigation-blocked` and the sweep continues. Only a
+  REAL URL change that slips the guard (e.g. `window.location =`) aborts.
+
+**Extensive logging (`contentScript.js` + `background.js`).** The sweep builds a
+structured `log[]` — begin params, enumerated counts, every candidate
+(hint/role/label/context), each poke + observation (reveal/no-change/
+navigation-blocked) + restore result, scroll steps, nav-guard hits, final
+stats. Each line is `console.debug('[AHuB explore]', …)` in the page console
+AND returned in the artifact; the background mirrors every line to the SW
+console via `Logger.info('explore', …)` (enumerate + sweep passes), plus
+planner decisions. The `log` array is stripped before caching (diagnostic
+only). Planner now also logs "skipped (≤budget) — poking all" / "picked N".
+
+**Touched.** `ContentScripts/contentScript.js` (nav guard + try/finally + log),
+`background.js` (mirror log to SW console + strip before cache), `manifest.json`.
+
+---
+
+## v2.74.371 — pageStructure: "Page Structures" section on the Studio Ground card
+
+**Date:** 2026-05-23
+**Decision by:** user ("it's part of the ground, it should be on the ground card
+in studio — a list of discovered page structures").
+
+**What.** The discovered `pageStructure` artifacts are now listed on each Ground
+card in Studio, alongside Locales — they belong to the Ground (one per explored
+URL), so that's their home (not a separate audit tab).
+
+- `_refreshGroundListImpl` reads `chrome.storage.local['pageStructureCache']`
+  once and indexes it per ground.
+- A new **"Page Structures"** `ground-section-row` (after Locales) lists each
+  cached artifact, newest first: the URL path, a ⚡ badge when the poke set was
+  LLM-planned, and a stat summary — *N reveals · C candidate(s) · P poked ·
+  scrolled S× · M nav blocked · relTime(capturedAt)*.
+- Per row: **{ }** opens the full structure JSON (controls + revealed children +
+  stats + plannerReasons) via the existing read-only `showJsonModal` (kind
+  `page-structure` → falls through `saveJsonModalEdits`' final else, so it's
+  view-only like `locale`); **✕** deletes that entry from the cache (next "+
+  Locale" on the page runs a fresh sweep) and refreshes the list.
+- Empty state explains what page structures are (auto-discovered depth maps that
+  feed depth-aware perspective proposals).
+- Styles mirror `.locale-row` (`.page-structure-row` etc. in `sidepanel.css`,
+  which Studio loads).
+
+**Touched.** `studio.js` (cache read + Page Structures section + JSON/delete
+wiring), `assets/sidepanel.css` (row styles), `manifest.json`.
+
+---
+
+## v2.74.372 — pageStructure: target the TOP frame + stop result-tile pokes (fix mid-sweep navigation)
+
+**Date:** 2026-05-23
+**Reported by:** user (log showed the sweep ran on `url:"about:blank"` with 0
+candidates, yet the page navigated pixabay.com → a butterfly photo result).
+
+**Two root causes.**
+1. **Message fanned out to every frame.** `chrome.tabs.sendMessage(tabId, …)`
+   with no `frameId` delivers to ALL frames. An ad/`about:blank` iframe answered
+   first (0 candidates — what the log showed), while the real top frame ALSO ran
+   the sweep, poked a result, and navigated — its response discarded. Fix: both
+   the enumerate and sweep passes now send with **`{ frameId: 0 }`** (top frame
+   only). The sweep is inherently a top-frame operation.
+2. **Result/product tiles became "icon" candidates.** `candidateHint`'s icon
+   branch did `el.querySelector('svg, …icon…')` over the WHOLE subtree, so a
+   large result card containing an overlay heart/download icon qualified as an
+   `icon-only` disclosure control — poking it navigated. Fix: the icon branch
+   now requires the element to be **small** (≤96×96) and to NOT wrap a link or
+   image (`a[href]`/`img`). A real icon toggle is small + self-contained; a
+   navigation tile is large or wraps a link.
+
+**Extra navigation insurance.** The sweep nav-guard now also no-ops
+`window.open`, `location.assign`, and `location.replace` for its duration
+(restored in `finally`), on top of the existing anchor-`preventDefault` +
+`history.pushState/replaceState` blocks. The begin-log line now records
+`top: <bool>` so the target frame is visible.
+
+**Touched.** `background.js` (`frameId: 0` on both passes),
+`ContentScripts/contentScript.js` (icon size/link guard + open/location guards +
+frame log), `manifest.json`.
+
+---
+
+## v2.74.373 — pageStructure: catch labeled dropdown buttons ("Explore ▾"), keep carousels, plan less timidly
+
+**Date:** 2026-05-23
+**Reported by:** user, from a pixabay.com artifact: (1) carousels/sliders ARE
+depth (advancing one surfaces additional selectable landmarks), and (2) the
+top "Explore ▾" dropdown (a modal of real value) was missed.
+
+**Bug #2 cause — my own width guard.** v2.74.372's tile-exclusion required an
+icon control to be ≤96px WIDE. The "Explore" button is 103×40, so the icon
+branch was skipped → never a candidate → never poked. The discriminator was
+wrong: a labeled dropdown button is wide-but-SHORT; a content tile is large in
+BOTH dimensions and wraps a link/image.
+- **Fix** (`contentScript.js` `candidateHint`): the tile-guard now keys on
+  HEIGHT + wrapping nav content (`wrapsNav && height>80`), not width. Added a
+  **`labeled-icon`** hint: a `button`/`[role=button]`/`summary`/`[role=tab]`
+  with an icon child and a short (≤24 char) label — the classic "Label ▾"
+  dropdown pattern — qualifies even when the chevron `<svg>` has no telltale
+  class. (Result tiles, large + wrapping `a`/`img`, stay excluded; navigation
+  is independently blocked by the v2.74.370/372 guards.)
+
+**#1 — carousels are depth (no exclusion).** Confirmed the earlier "false
+positive" framing was wrong: advancing a carousel reveals more selectable items
+that are otherwise unreachable. No carousel/slider filter was added; the planner
+prompt now explicitly lists carousels/sliders as worth poking.
+
+**Planner under-picked (1 of 34).** Prompt now: "USE THE BUDGET … err toward
+INCLUDING (poking is safe)"; documents the `labeled-icon` hint with "ALWAYS
+include" for "Label ▾" buttons; lists carousels among preferred targets; trims
+the skip-list (play/pause cosmetic, not whole categories).
+
+**Touched.** `ContentScripts/contentScript.js` (height-based tile guard +
+labeled-icon hint), `Services/AnthropicService.js` (planner prompt), `manifest.json`.
+
+---
+
+## v2.74.374 — pageStructure: generalize candidacy — broad net + vision planner (stop recognizing affordances by heuristic)
+
+**Date:** 2026-05-23
+**Decision by:** user ("we are designing for this specific page … how is any of
+this generalizable? is the heuristic the best approach for candidates?").
+
+**The problem with the heuristic gate.** Candidacy was deciding "is this a
+disclosure control?" by recognizing affordances — chevron class regexes, icon
+shape, size thresholds, glyph matching. That's brittle by construction: it
+whack-a-moles per site, and the class/keyword matching is *dead on obfuscated
+sites* (pixabay's own classes — `button--af32y`, `prevButton--iYnGM` — matched
+no regex; the catches came from structural guesses). "Does activating this
+reveal hidden content?" is **not knowable statically** — only poke→observe knows.
+
+**The reframe (separate the three jobs).**
+- **Recall** — a dumb, broad enumerator (not affordance-recognition).
+- **Precision** — the **LLM planner WITH the screenshot** (vision sees a chevron
+  regardless of class; this is where generalization comes from).
+- **Truth** — poke→observe→diff (already deterministic + general).
+
+**Changes (`contentScript.js`).**
+- **Candidacy = `isSafeToClick(el) && !looksLikeContentTile(el)`** — safe to
+  click, plausibly interactive, not a big link/image-wrapping content tile. No
+  chevron/size/glyph in the GATE.
+- `CANDIDATE_SEL` widened to a recall net: roles (button/menuitem/tab/treeitem),
+  `aria-expanded/haspopup/controls`, `data-*` toggles, `[tabindex]:not(-1)`, and
+  common clickable class patterns; cursor:pointer confirmed via `isSafeToClick`.
+- `candidateHint` is now **pure metadata** (never null) — classifies the
+  affordance for the planner (`labeled-icon`/`icon`/`arrow-glyph`/`haspopup`/
+  `menuitem`/…/`clickable`), but doesn't gate.
+- **`pokeOpen` now hovers first** (pointerover/mouseover/enter) before the
+  click sequence — hover-opened mega-menus/nav dropdowns would otherwise never
+  reveal; restore fires mouseout/leave too. (A real generalization gap, not a
+  pixabay quirk.)
+- Enumerate cap 80 → 120 (broad net produces more; planner prunes).
+
+**Planner prompt (`AnthropicService.js`).** Reframed: the candidate list is a
+deliberately BROAD net (many irrelevant); the planner is the precision filter,
+and **the screenshot is its strongest signal** — pick anything that visually
+looks like a menu/▾/tab regardless of hint (hints come from imperfect markup);
+`clickable` hint = judge from the screenshot. Candidate slice 80 → 120.
+
+**Residual limits (documented, not fixed):** event-delegated/signalless
+controls (no role/cursor) still escape the net; very dense pages can exceed the
+120 cap; the planner is one model call (recall/budget tradeoff, not a
+correctness one — observe still gates truth).
+
+**Touched.** `ContentScripts/contentScript.js` (broad candidacy + hover poke +
+caps), `Services/AnthropicService.js` (planner prompt + slice), `manifest.json`.
+
+---
+
+## v2.74.375 — pageStructure: close modals after poking them (don't leave a login dialog open)
+
+**Date:** 2026-05-23
+**Reported by:** user ("a log-in popup is triggered (expected and good) but never
+closed — remains open after exploration").
+
+**Cause.** A poke that opens a MODAL (login, etc.) is a valid reveal, but the
+old restore only re-clicked the opener + dispatched a document-level Escape.
+Neither dismisses a modal: re-clicking "Log in" doesn't close it, and a
+focus-trapped dialog's Escape listener is bound to the dialog/focused element,
+not `document`. So the modal stayed open — blocking later pokes and the
+propose-time screenshot.
+
+**Fix — deliberate, escalating close (`contentScript.js`).** Per control, until
+the revealed UI is gone:
+1. **Toggle** → re-click the opener (only for genuine toggles: aria-expanded
+   true / haspopup / summary / tab / data-state).
+2. **Modal** → locate the dialog among the revealed nodes (`modalScopeOf`:
+   `[role=dialog|alertdialog]`/`[aria-modal]`, else the largest revealed box)
+   and click its close affordance (`findCloseControl`: `aria-label*=close`,
+   `[data-dismiss]`, `.close`, or a button whose text is ×/✕/"Close"), scoped to
+   the dialog so we don't click stray ×'s.
+3. **Escape** dispatched on the FOCUSED element + the dialog + document (covers
+   modal-bound listeners), plus mouseout/leave for hover menus.
+4. **Backdrop** click (`[class*=backdrop|overlay|scrim]`) as last resort.
+Plus a **final safety net** after the loop: up to 2 passes that close any
+remaining visible `[role=dialog]`/`[aria-modal]` (close-control + Escape), so a
+lingering modal from the last poke can't survive the sweep.
+
+**Touched.** `ContentScripts/contentScript.js` (close machinery + escalating
+restore + post-loop cleanup), `manifest.json`.
+
+---
+
+## v2.74.376 — pageStructure: only "restore" OVERLAYS; actually close the (class-based) login modal
+
+**Date:** 2026-05-23
+**Reported by:** user log — every control logged "restore failed (left open)",
+incl. carousel arrows + Collections/Playlists tabs; the Log-in modal really did
+stay open.
+
+**Two issues.**
+1. **In-place reveals were treated as needing restore.** Advancing a carousel
+   (c2/c3) or switching a Collections/Playlists tab (c4/c5) is the depth we
+   WANT — there's nothing to "restore", and re-clicking a tab/arrow won't undo
+   it. They were falsely logged as restore failures.
+2. **The modal close failed** because pixabay's login modal isn't
+   `[role=dialog]`/`[aria-modal]` — it's a class-based `<div>`, so the old
+   `modalScopeOf` couldn't find it and the close-button search was mis-scoped.
+
+**Fix (`contentScript.js`).**
+- **Classify reveal as OVERLAY vs IN-PLACE** (`isOverlayReveal`/`isOverlayEl`):
+  overlay = a dialog/menu/listbox/tooltip role, OR a `position:fixed` ancestor
+  (modals), OR `position:absolute` with `z-index > 10` (dropdowns/portals).
+  Carousels (absolute, low z) and tab panels (in flow) are IN-PLACE → marked
+  `restored:true`, no close attempt, no failure log. Only overlays are closed.
+- **Find the close control among the REVEALED nodes** first (the × is usually a
+  revealed button — `isCloseControl`), then within the overlay host
+  (`overlayHostOf`: nearest dialog/`[class*=modal|dialog|popup|overlay]`),
+  before Escape (focused element + host + document) and backdrop click. Works
+  for class-based modals with no ARIA.
+- **Final safety net** broadened to class-based overlays:
+  `[role=dialog|alertdialog]`,`[aria-modal]`,`[class*=modal|dialog|popup|lightbox]`
+  that are visible AND sizable (area > 50000, so a `.modal-trigger` button isn't
+  mistaken for one); 3 passes of close-control + Escape + backdrop click.
+- Per-control `ctl.overlay` recorded; "restore failed" now only logged for
+  overlays. Removed the dead `modalScopeOf`.
+
+**Touched.** `ContentScripts/contentScript.js` (overlay classification + close
+search over revealed nodes + class-based final cleanup), `manifest.json`.
+
+---
+
+## v2.74.377 — pageStructure: deterministic bottom-to-top sweep, no budget, planner off by default
+
+**Date:** 2026-05-23
+**Decision by:** user ("re-running explore no longer clicks Login/Join
+consistently … can the plan be better organized? start from the top and
+sequentially poke + verify + scroll" → chose **bottom-to-top, deterministic, no
+budget**).
+
+**Why.** The plan was an LLM call (`planPageExploration`) picking ≤budget(12) of
+the broad candidate set; with ~34+ candidates its picks varied run-to-run, so
+Login/Join (hence the login modal) were inconsistently captured. The candidacy
+was stable — the *selection* was a lottery.
+
+**Change — deterministic spatial sweep.**
+- **No LLM planner by default.** `EXPLORE_PAGE_STRUCTURE` `usePlanner` now
+  defaults to **false**; the sidepanel sends `usePlanner:false` (no `maxPokes`).
+  The background skips the enumerate + planner passes and runs ONE sweep. The
+  planner remains opt-in (`usePlanner:true`) — enumerate → plan → sweep — and is
+  only used to prune when candidates exceed the budget.
+- **No budget.** Content-script `maxPokes` is now `Infinity` unless a positive
+  value is passed (then clamped ≤1000 as a runaway guard). Every candidate is
+  poked.
+- **Bottom-to-top order.** Before the poke loop, candidates are sorted by
+  absolute document Y **descending** (snapshotted with scroll restored to top).
+  The sweep starts at the footer and works UP to the header, so the top-nav
+  modal-openers (Login/Join) are poked LAST — any modal interference lands at
+  the very end of the sweep, not mid-page. Deterministic + exhaustive; the login
+  modal is captured every run.
+
+**Tradeoff.** Poking all candidates is slower (≈20–30s on a busy page); the
+"Exploring…" state is cancellable. The deterministic sweep is fully predictable
+and needs no model call.
+
+**Touched.** `ContentScripts/contentScript.js` (unlimited maxPokes + bottom-to-top
+sort), `background.js` (planner opt-in, default deterministic single sweep),
+`Sidepanel/modes/locale-capture.js` (request `usePlanner:false`), `manifest.json`.
+
+---
+
+## v2.74.378 — pageStructure: BANDED WALK (per-band LLM planning), revert the no-planner sweep
+
+**Date:** 2026-05-23
+**Reported by:** user — v2.74.377 (no planner, poke everything) "entirely wrong
+and predictably broke the depth explorer" by reopening the navigation problem.
+Clarified intent: scroll to bottom → screenshot + candidates → LLM plan → poke
+→ scroll up, repeat. The planner was right; the ONE-SHOT was the problem.
+
+**Why no-planner broke it.** Poking every broad-net candidate (incl. div-tiles
+with JS click handlers) navigated despite the guards. The planner's whole value
+is choosing NOT to poke navigators — dropping it removed that protection.
+
+**Banded walk (background-orchestrated; only the background can screenshot
+between content-script calls).** `explorePageStructure` is now PHASE-based:
+- **metrics** — scroll to the bottom (trigger lazy content), report
+  `scrollHeight`/viewport so the background can compute band stops.
+- **band(scrollY)** — scroll to a band and enumerate the candidates + surface
+  VISIBLE there (no poking).
+- **poke(selectors, cidStart)** — poke ONLY the planned selectors for this band
+  (resolve + scrollIntoView each), observe each reveal, restore overlays; nav
+  guard installed for the duration; returns the band's controls + `aborted`.
+- **cleanup** — close any leftover overlay, scroll to top.
+
+**Background loop (`EXPLORE_PAGE_STRUCTURE`):** metrics → bands BOTTOM-TO-TOP
+(`y` from `scrollHeight-vh` down to 0, step 0.85·vh) → for each band: enumerate
+→ `captureVisibleTab` (screenshot of THIS band) → `planPageExploration`
+(candidates+matching screenshot, `bandBudget` default 8) → poke the planned
+(deduped across bands via `seenCand`/`seenPoked`). Stops if a poke really
+navigates. Assembles the artifact (surface, controls, stats, driftHash) from the
+per-band results and caches it. Per-band planning = piecemeal, with a screenshot
+that actually matches the candidates — fixes the one-shot's poor grounding AND
+the Login/Join inconsistency.
+
+**Sidepanel** now sends just `{ tabId, groundId }` (banded always plans).
+
+**Tradeoff.** One planner call per non-empty band (≈7–8 on a tall page) — more
+LLM calls + latency than one-shot, but far better grounded and safe (only
+planned controls poked + nav guard). "Exploring…" stays cancellable.
+
+**Touched.** `ContentScripts/contentScript.js` (phase dispatch: metrics/band/
+poke/cleanup; reuses the per-control poke→observe→restore body), `background.js`
+(banded orchestration + artifact assembly), `Sidepanel/modes/locale-capture.js`
+(payload), `manifest.json`.
+
+---
+
+## v2.74.379 — pageStructure: carry-forward candidate coverage + background navigation recovery
+
+**Date:** 2026-05-23
+**Reported by:** user — banded walk still "sometimes failing to capture every
+reveal and sometimes opening navigation pages." Two distinct root causes, two
+fixes (both in `background.js` + a planner-prompt nudge).
+
+**1. Missed reveals — cross-band dedup burned skipped candidates.** The band
+loop deduped candidates on ENUMERATION (`seenCand`): a control enumerated in an
+early (overlapping) band but NOT chosen by that band's planner was added to
+`seenCand` and then excluded from every later band — so "skipped once = never
+poked." **Fix:** dedup on what's been **poked** (`seenPoked`), not enumerated.
+A candidate the planner passes over reappears in the next overlapping band and
+gets another chance when it's more central / better framed in the screenshot.
+(`seenCand` is kept only for the candidate count.)
+
+**2. Opening pages — `location.href=` can't be guarded in-page.** The nav guard
+blocks anchor clicks, `pushState`/`replaceState`, `window.open`,
+`location.assign`/`replace` — but NOT a direct `location.href = …` /
+`window.location = …` assignment (the `Location` href setter is unforgeable).
+So an occasional planner mispick onto a JS-navigating control still left the
+page, aborting the whole sweep. **Fix — recover in the background:**
+`ensureOnPage()` runs at the top of each band; if the tab URL no longer matches
+`pageUrl` it navigates back (`chrome.tabs.update`), waits for load, re-injects,
+and the loop continues the REMAINING bands. The navigator is already in
+`seenPoked` (marked before poking) so it's never re-poked → no nav loop. Capped
+at 3 recoveries; a poke message that rejects (frame torn down) is treated the
+same way. The sweep no longer aborts on navigation — it heals and finishes.
+
+**Planner nudge:** added a rule to SKIP controls that navigate to another page
+(logo/home, breadcrumbs, "see more / view all", category links, pagination) and
+prefer in-place disclosure — a sign-in MODAL is good, a sign-in PAGE is not.
+
+**Touched.** `background.js` (poke-dedup + ensureOnPage/waitForTabLoad recovery),
+`Services/AnthropicService.js` (planner skip-navigators rule), `manifest.json`.
+
+---
+
+## v2.74.380 — pageStructure: true viewport banding, selector dedup, last-band restore
+
+**Date:** 2026-05-24
+**Reported by:** user log — banding worked (All images / Explore / Upload / Log
+in / Join modals all captured) but exposed three bugs: every band reported the
+SAME 85 candidates, "Go to slide 1/2" + "Collections" got poked twice with
+identical selectors, and a poke in the LAST band (y=0) navigated to a photo page
+and the tab was left there.
+
+**1. Banding wasn't viewport-scoped.** `visible()` is true for off-screen-but-
+rendered elements (their rect still has size), so each `band` phase enumerated
+the WHOLE page (85 candidates) — the per-band screenshot didn't match the list,
+the planner ground through 85 each call (8–10s), and it could pick off-screen
+navigators (the y=0 → photo-page nav). **Fix:** added an `inViewport(el)` gate
+(rect intersects the current viewport) to the band enumeration for BOTH
+candidates and surface. Now each band yields only what's actually on screen, the
+screenshot matches, planner calls are small/fast, and off-screen mispicks are
+impossible.
+
+**2. Non-unique selectors poked twice.** computeUniqueSelector emitted stateful
+`.active--…` selectors, so two distinct controls ("Go to slide 1" / "2",
+"Collections" ×2) shared one selector and the second poke hit the wrong element
+(`no-change`). **Fix:** the band phase now dedupes candidates by selector
+(`selSeen`) and drops empty ones — one poke per unique selector.
+
+**3. Last-band navigation stranded the tab.** Recovery (`ensureOnPage`) ran only
+at the TOP of each band; a nav in the final band (y=0) had no next band, so the
+user's tab was left on the navigated-to page and cleanup ran there. **Fix:** an
+UNconditional restore after the loop (bypasses the 3-recovery cap) — if the tab
+URL ≠ `pageUrl`, navigate back, wait for load, re-inject, then cleanup.
+
+**Also:** band surface rects are now ABSOLUTE document coords (was viewport-
+relative), so the background's cross-band surface dedup (`role|label|x,y`) is
+stable and no longer duplicates the same element seen in overlapping bands.
+
+**Touched.** `ContentScripts/contentScript.js` (inViewport gate + selector dedup
++ absolute surface rects), `background.js` (post-loop unconditional restore),
+`manifest.json`.
+
+---
+
+## v2.74.381 — Reveal-aware Resolve: poke the trigger to resolve roles in hidden layers
+
+**Date:** 2026-05-24
+**Decision by:** user — depth-aware proposals now emit roles like
+"google-signin (revealed after clicking the login trigger)", but Resolve only
+filled the visible trigger because the others are in a closed modal. Chose
+**Both** (structured links + artifact fallback).
+
+**Problem.** Resolve + its verification both ran against the STATIC DOM, so a
+role inside a closed modal could neither be selected by Claude (not in the
+snapshot) nor verified (PROBE_SELECTOR → 0). Only `login-trigger` resolved.
+
+**Fix — resolve hidden roles in the REVEALED state.**
+- **Propose (`AnthropicService.proposePerspectives`):** roles gain optional
+  `hidden:true` + `revealedBy:<role>` (the trigger role, listed before its
+  children). Prompt + example + sanitizer updated; dangling `revealedBy` refs
+  are dropped.
+- **Content script:** two standalone messages — `POKE_AND_SNAPSHOT {selector}`
+  (full pointer+click on the trigger, wait, return a rich DOM snapshot of the
+  revealed state, LEAVE it open) and `CLOSE_OVERLAYS` (close-control → Escape →
+  backdrop, 3 passes).
+- **Background `RESOLVE_REVEALED_ROLES`:** resolve the trigger selector
+  (structured: the already-resolved trigger role's selector; else match the
+  cached pageStructure artifact by label/overlay) → `POKE_AND_SNAPSHOT` →
+  screenshot the open state → `resolveRoles` against the revealed DOM → verify
+  each selector via `PROBE_SELECTOR` WHILE OPEN → `CLOSE_OVERLAYS`.
+- **Sidepanel `_runResolve`:** after the normal pass, group still-unfilled
+  HIDDEN roles by `revealedBy`, call the reveal flow per group, and fill the
+  successes as landmarks carrying `hidden:true` + `revealedBy` + `triggerSelector`
+  and a `verified{revealState:true}` (so static re-verify won't later flag them).
+  Role checklist shows a `⤿ via <trigger>` badge for hidden roles.
+
+**Result:** for "I'd like to login using Google" on pixabay, Resolve fills
+`login-trigger` (visible), then opens the modal and resolves + verifies
+`google-signin` and `alternative-signin-options` against the revealed DOM, then
+closes the modal.
+
+**Touched.** `Services/AnthropicService.js` (role schema + prompt),
+`ContentScripts/contentScript.js` (POKE_AND_SNAPSHOT + CLOSE_OVERLAYS),
+`background.js` (RESOLVE_REVEALED_ROLES), `Sidepanel/modes/locale-capture.js`
+(reveal-aware pass + hidden badge), `assets/sidepanel.css`, `manifest.json`.
+
+---
+
+## v2.74.382 — Propose prompt: "depth is not downstream"
+
+**Date:** 2026-05-24
+**Decision by:** user ("the propose prompt should note page structure depth
+doesn't equal downstream — downstream means other pages").
+
+Added an explicit rule to `proposePerspectives`: content revealed by an
+interaction on the SAME page (dropdown / modal / expanded panel / accordion /
+tab — URL unchanged) is in-page **DEPTH** → `onPage:true`, modeled with
+hidden/revealedBy roles. **`onPage:false` (downstream)** means a DIFFERENT page
+you NAVIGATE to (URL changes). Spelled out the contrast — a login MODAL is depth
+(onPage:true); a separate login PAGE is downstream — so the model stops marking
+modal/dropdown content as downstream.
+
+**Touched.** `Services/AnthropicService.js` (prompt), `manifest.json`.
+
+---
+
+## v2.74.383 — Resolve/propose/auto-discover: DOM_SNAPSHOT_RICH from the TOP frame (fix empty-DOM abstentions)
+
+**Date:** 2026-05-24
+**Reported by:** user — Resolve abstained on EVERY role with "sanitized DOM is
+completely empty (only `<body url="blank" />`)".
+
+**Cause.** Same wrong-frame bug fixed for Explore in v2.74.372, but in the older
+handlers: `RESOLVE_LOCALE_ROLES`, `PROPOSE_LOCALE_PERSPECTIVES`, and
+`AUTO_DISCOVER_LOCALE` all sent `DOM_SNAPSHOT_RICH` with NO `frameId`, so
+`chrome.tabs.sendMessage` fanned out to every frame and an empty `about:blank`
+iframe could answer first. Claude then resolved against an empty DOM →
+everything abstained (the `<body url="blank">` is the iframe's body). Intermittent
+(whichever frame replied first), which is why earlier runs sometimes worked.
+
+**Fix.** All three `DOM_SNAPSHOT_RICH` calls now pass `{ frameId: 0 }` (top
+frame only) — deterministic, real page DOM. (The reveal-aware resolve added in
+.381 already used `frameId:0` for POKE_AND_SNAPSHOT/PROBE_SELECTOR.)
+
+**Touched.** `background.js` (3× DOM_SNAPSHOT_RICH → frameId:0), `manifest.json`.
+
+---
+
+## v2.74.384 — Reveal-aware resolve: poll for the reveal + observability
+
+**Date:** 2026-05-24
+**Reported by:** user — after the frameId fix, `login-trigger` resolves but the
+hidden modal roles still abstain with "modal not present in current DOM" (the
+reveal pass isn't capturing the modal open).
+
+**Changes (to diagnose + harden, since the failure point wasn't observable).**
+- **`POKE_AND_SNAPSHOT` now polls for the reveal** instead of a fixed 550 ms
+  wait: snapshots the visible interactive/dialog set BEFORE the poke, then polls
+  up to ~2 s, stopping as soon as new visible elements appear (handles modals
+  that animate or fetch content). Returns `opened` (count of newly-visible
+  elements) and `navigated` (true if the trigger left the page). Adds
+  pointerenter/mouseenter to the poke.
+- **`RESOLVE_REVEALED_ROLES` logging:** the SW console now shows the trigger
+  selector, `opened` count + snapshot size, a WARN when the poke revealed
+  nothing (trigger likely isn't the real opener), each role's selector +
+  matched-count, and the final verified tally — so the exact failure point
+  (didn't open / opened-but-not-serialized / resolved-but-unverified) is visible.
+- Aborts cleanly if the trigger navigates instead of revealing.
+
+**Diagnostic, not yet a root-cause fix** — the SW log from a re-run will show
+whether the modal opened (`opened > 0`) and, if so, why the roles still didn't
+resolve/verify.
+
+**Touched.** `ContentScripts/contentScript.js` (pokeAndSnapshot poll + opened/
+navigated), `background.js` (RESOLVE_REVEALED_ROLES logging), `manifest.json`.
+
+---
+
+## v2.74.385 — Fewer roles + reuse Explore's verified selectors in Resolve
+
+**Date:** 2026-05-24
+**Reported by:** user log — propose returned 6 roles for "sign in using Google",
+and `login-trigger` resolved to a generic `button[type='button']:nth-of-type(2)`
+(matched 1, "verified" — but the wrong button), so the reveal opened the wrong
+thing and the hidden roles got 0/5.
+
+**Root causes.** (1) Propose over-produced roles. (2) On a hashed-class page the
+"Log in" button has no stable CSS hook (its identity is its TEXT, which CSS
+can't target), so Resolve fell back to a meaningless positional selector that
+"matches one element" — a false positive verification.
+
+**Fixes.**
+- **Propose — MINIMAL roles.** New prompt rule: propose the FEWEST roles the
+  intent needs (the elements acted on + the trigger to reach them), never enumerate
+  a modal's every field. "sign in with Google" → login-trigger + google-signin.
+- **Resolve — reuse verified selectors.** `resolveRoles` gains a `knownSelectors`
+  param; the background flattens the cached **pageStructure** artifact (every
+  control's verified selector + each control's revealed-children selectors, with
+  labels + `via`) and passes it to BOTH the main resolve and the reveal resolve.
+  Prompt: "REUSE verbatim when a role matches a KNOWN VERIFIED SELECTOR." So
+  `login-trigger` reuses the button Explore PROVED opens the modal (not a
+  positional guess) → the reveal pokes the right button → the modal's children
+  (google-signin, …) reuse their verified selectors too.
+- **Resolve — anti-positional rule.** A bare positional selector on a generic tag
+  is flagged as almost-always-wrong; if no stable hook exists, scope it under a
+  semantic ancestor, and for TRIGGER roles prefer abstaining over a positional
+  guess (a wrong trigger opens the wrong thing).
+
+**Net:** the verified trigger selector flows main-resolve → reveal-poke →
+reveal-resolve, so the right modal opens and its roles resolve against verified
+selectors. Requires a pageStructure artifact (built by "+ Locale" Explore); the
+prompt rules are the fallback when none exists.
+
+**Touched.** `Services/AnthropicService.js` (minimal-roles + knownSelectors +
+anti-positional prompt), `background.js` (`_knownSelectorsForUrl` + wired into
+both resolve handlers), `manifest.json`.
+
+---
+
+## v2.74.386 — Log known-selector reuse (diagnose "verified selector not reused")
+
+**Date:** 2026-05-24
+**Reported by:** user — `login-trigger` resolved to `button:has(div[role='img']
+[aria-label='ChevronDown']):nth-of-type(2)` (matched 0; it's a CHEVRON dropdown
+button, not Log in) — "how is this possible when explore verified the actual
+selector?"
+
+**Diagnosis.** That guess can only happen if resolve had no verified selector to
+reuse — i.e. `_knownSelectorsForUrl` returned nothing for this page. The cached
+pageStructure artifact either doesn't exist for this URL, is stale, or (because
+the banded sweep's per-band planner is non-deterministic) didn't capture the
+"Log in" control in the run that produced the current cache. v2.74.385 wired the
+reuse but can't help when the artifact lacks the control.
+
+**This change (observability):** both resolve handlers now log the
+known-selector count + sample labels (`RESOLVE_LOCALE_ROLES: N known verified
+selector(s) … "Log in", …` or `(none — page not explored …)`). A re-run will say
+definitively whether the artifact fed a "Log in" selector — if N=0 the artifact
+is the gap (Re-explore so it's captured); if N>0 yet still mis-resolved, the
+prompt reuse needs forcing.
+
+**Touched.** `background.js` (knownSelectors count logging in both resolve
+handlers), `manifest.json`.
+
+---
+
+## v2.74.387 — knownSelectors: per-control cap so the giant nav menu stops crowding out the Log-in selector
+
+**Date:** 2026-05-24
+**Reported by:** user — log confirmed `RESOLVE_LOCALE_ROLES: 60 known verified
+selector(s) … "All images", "Explore", …` yet `login-trigger` STILL resolved to
+`button:nth-of-type(2)`. Why, when the artifact has the verified "Log in"
+selector?
+
+**Root cause (two truncations).** The artifact's "Log in" control is `c5`, but
+`c0` "All images" (13 children) and especially `c1` "Explore" (a **42-link
+mega-menu**) exhausted the flat 60-cap in `_knownSelectorsForUrl` BEFORE reaching
+`c5` — so the verified login/modal selectors were never in the list. And
+`resolveRoles` only rendered `slice(0, 40)`, cutting it further to pure nav
+noise. The verified selectors existed but never reached the model.
+
+**Fix.**
+- `_knownSelectorsForUrl`: cap revealed children **per control** (10) with a
+  higher total (140), so a single mega-menu can't dominate — every control
+  (incl. "Log in" + its modal's Google/Facebook/username/password/close) gets
+  represented.
+- `resolveRoles`: render up to 140 known selectors (was 40).
+
+Now `login-trigger` reuses the verified `div.desktopOnly--WxB0K:nth-of-type(2) >
+button…` (proven to open the modal) instead of a positional guess, and the
+modal's child selectors are available for the hidden roles.
+
+**Known follow-up (not this fix):** "Sign up with Google" lives in the modal's
+SIGN-UP tab (captured via the Upload/Join openers), while `login-trigger` opens
+the LOG-IN tab — so google-signin may still need the modal's tab switched. The
+known-selector reuse + present-but-hidden PROBE may cover it; if not, a
+tab-aware reveal is the next step.
+
+**Touched.** `background.js` (`_knownSelectorsForUrl` per-control cap),
+`Services/AnthropicService.js` (render 40→140), `manifest.json`.
+
+---
+
+## v2.74.388 — Reveal snapshot: wait for the modal to FULLY render (poll-until-stable)
+
+**Date:** 2026-05-24
+**Reported by:** user — reveal-aware resolve "works much better but fails on the
+first attempt, likely slow rendering — need a delay after the trigger click /
+modal visible before DOM capture."
+
+**Cause.** `pokeAndSnapshot` broke out of its reveal poll on the FIRST poll where
+any new visible element appeared — but a modal renders its container/backdrop
+first (1 element) and fills in the form/buttons over the next few frames. So the
+snapshot caught a half-built modal and the child roles abstained; a retry
+happened to catch it rendered.
+
+**Fix.** Poll until the count of newly-visible elements **stabilizes** (held
+steady for 2 consecutive 200 ms polls = fully rendered) rather than first
+appearance, then a **final 300 ms settle** before snapshotting, and recount
+`opened` after settle. Up to ~3.4 s. So the snapshot (and the child resolve +
+verify that run against it) see the complete modal.
+
+**Touched.** `ContentScripts/contentScript.js` (pokeAndSnapshot poll-until-stable
++ settle), `manifest.json`.

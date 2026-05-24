@@ -4904,8 +4904,22 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 .dbg-locale-perspective-body { display: flex; flex-direction: column; gap: 8px; }
 .dbg-locale-perspective-intro { margin: 0; font-size: 11px; color: rgba(148, 163, 184, 0.85); line-height: 1.4; }
 .dbg-locale-perspective-options { display: flex; flex-direction: column; gap: 6px; }
-/* v2.74.350 — A/B benchmark: two propose buttons + per-variant result groups */
 .dbg-locale-perspective-buttons { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* v2.74.368 — pageStructure depth-exploration row (offer / building / done) */
+.dbg-locale-explore {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 11px; line-height: 1.4;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 5px; padding: 6px 8px;
+}
+.dbg-locale-explore > span:first-child { flex: 1 1 auto; min-width: 0; }
+.dbg-locale-explore-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+.dbg-locale-explore.offer    { border-style: dashed; border-color: rgba(196, 181, 253, 0.45); background: rgba(196, 181, 253, 0.06); color: rgba(216, 207, 255, 0.92); }
+.dbg-locale-explore.building { border-color: rgba(250, 204, 21, 0.45); background: rgba(250, 204, 21, 0.07); color: rgba(253, 224, 130, 0.95); }
+.dbg-locale-explore.done     { border-color: rgba(74, 222, 128, 0.45); background: rgba(74, 222, 128, 0.07); color: rgba(167, 243, 208, 0.95); }
+.dbg-locale-explore.skipped  { border-color: rgba(148, 163, 184, 0.3); color: rgba(148, 163, 184, 0.85); }
+.dbg-locale-explore.failed   { border-color: rgba(248, 113, 113, 0.5); background: rgba(248, 113, 113, 0.08); color: rgba(254, 202, 202, 0.95); }
 .dbg-locale-perspective-run {
   display: flex; flex-direction: column; gap: 6px;
   border: 1px dashed rgba(148, 163, 184, 0.3);
@@ -4973,6 +4987,12 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   flex: 0 0 auto; font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em;
   padding: 0 4px; border-radius: 3px;
   background: rgba(196, 181, 253, 0.15); color: rgba(196, 181, 253, 0.95);
+}
+/* v2.74.381 — hidden-layer role badge (revealed via a trigger). */
+.dbg-locale-perspective-hidden {
+  flex: 0 0 auto; font-size: 9px; letter-spacing: 0.02em;
+  padding: 0 4px; border-radius: 3px;
+  background: rgba(251, 191, 36, 0.15); color: rgba(253, 224, 130, 0.95);
 }
 .dbg-locale-perspective-role button { flex: 0 0 auto; margin-left: auto; }
 /* v2.74.355 — why ⚡ Resolve couldn't fill a role (verification failure / abstain) */
@@ -8267,6 +8287,52 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   transition: opacity 0.15s ease;
 }
 .locale-row:hover .locale-row-actions {
+  opacity: 1;
+}
+
+/* v2.74.371 — Page Structures section rows (Studio ground card). Mirrors
+   .locale-row; the path is monospace, the summary a stat pill. */
+.page-structure-row {
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 3px;
+  margin-bottom: 4px;
+  position: relative;
+}
+.page-structure-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-right: 56px;   /* room for the hover actions */
+}
+.page-structure-path {
+  font-size: 12px;
+  font-weight: 500;
+  font-family: ui-monospace, monospace;
+  color: var(--text, #ddd);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.page-structure-summary {
+  font-size: 10px;
+  font-family: ui-monospace, monospace;
+  color: var(--sub, #888);
+  padding: 1px 5px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.05);
+}
+.page-structure-row-actions {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.page-structure-row:hover .page-structure-row-actions {
   opacity: 1;
 }
 

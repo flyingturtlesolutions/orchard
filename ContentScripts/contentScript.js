@@ -4048,6 +4048,498 @@ async function verifyStructure(payload) {
   return { success: true, results };
 }
 
+// ─── Page structure exploration (v2.74.367) ────────────────────────────────
+// Depth discovery for a fresh page. The propose-perspectives author only ever
+// sees ONE static snapshot, so anything that exists only AFTER an interaction
+// (a dropdown's menu, a modal's sections, a tab panel) is invisible to it. This
+// sweep enumerates disclosure controls (things that reveal hidden content when
+// activated), SAFELY pokes each, observes what becomes visible, then RESTORES
+// the page so the next poke starts clean. The result is a `pageStructure`
+// artifact: a depth-1 map of the page that downstream propose can use to author
+// depth-aware roles/landmarks for post-interaction content.
+//
+// SAFETY: only pokes controls that don't navigate/submit (mirrors the verify
+// poke guard) and aborts the whole sweep if a click navigates. NOTE: NO
+// screenshots here — the background captures fresh at propose-time; this
+// returns text + geometry only. `payload.plan` (Phase 3) may pre-select which
+// candidate selectors to poke; absent → poke all candidates up to `maxPokes`.
+async function explorePageStructure(payload) {
+  const opts = (payload && typeof payload === 'object') ? payload : {};
+  // v2.74.377 — NO BUDGET by default: poke every candidate. A positive maxPokes
+  // caps it (clamped to 1000 as a runaway guard); null/0/absent = unlimited.
+  const maxPokes = (Number.isFinite(opts.maxPokes) && opts.maxPokes > 0) ? Math.min(1000, opts.maxPokes) : Infinity;
+  const settleMs = Number.isFinite(opts.settleMs) ? Math.max(120, Math.min(1200, opts.settleMs)) : 420;
+  // Phase 3 hook: an ARRAY (even empty) means "poke only these selectors" — an
+  // empty plan = the planner judged nothing worth poking, so poke nothing.
+  // Absent/null means "poke all candidates" (the unplanned/fallback path).
+  const planSet  = Array.isArray(opts.plan) ? new Set(opts.plan) : null;
+  const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  const INTERACTIVE_SEL = 'a[href],button,input:not([type="hidden"]),select,textarea,[role="button"],[role="link"],[role="textbox"],[role="searchbox"],[role="checkbox"],[role="radio"],[role="tab"],[role="menuitem"],[role="menuitemcheckbox"],[role="menuitemradio"],[role="option"],[role="combobox"],[role="switch"],[contenteditable="true"],summary';
+  // v2.74.374 — BROAD NET. Candidacy is recall, not affordance-recognition:
+  // gate on "safe + plausibly interactive", let the vision planner do precision
+  // and poke→observe decide truth. Recognizing chevrons by class/icon/size was
+  // brittle (and dead on obfuscated/hashed-class sites — exactly the hard ones),
+  // so those signals are now PLANNER HINTS only, never a pass/fail gate.
+  const CANDIDATE_SEL = INTERACTIVE_SEL +
+    ',[role="menuitem"],[role="menuitemcheckbox"],[role="menuitemradio"],[role="treeitem"]' +
+    ',[aria-expanded],[aria-haspopup],[aria-controls]' +
+    ',[data-toggle],[data-bs-toggle],[data-state],[data-dropdown],[data-headlessui-state],[data-radix-collection-item]' +
+    ',[tabindex]:not([tabindex="-1"])' +
+    ',[class*="dropdown" i],[class*="chevron" i],[class*="caret" i],[class*="accordion" i],[class*="expand" i],[class*="disclosure" i],[class*="toggle" i],[class*="trigger" i],[class*="popover" i],[class*="flyout" i]';
+  // v2.74.369 — what counts as a "reveal": interactive elements PLUS overlay /
+  // panel containers (a menu/dialog/tabpanel of non-interactive content reveals
+  // structure even with no buttons inside).
+  const REVEAL_SEL = INTERACTIVE_SEL + ',[role="menu"],[role="menubar"],[role="listbox"],[role="dialog"],[role="tooltip"],[role="tabpanel"],[role="region"],[role="grid"],[role="tree"],[role="group"]';
+  const ICON_HINT = /(chevron|caret|arrow|angle|triangle|expand|collapse|disclos|dropdown|kebab|ellipsis|hamburger|\bmore\b|\bmenu\b)/i;
+  const ARROW_GLYPH = /[▲▼▴▾◀▶∨⌄⌃˅˄ˇ﹀]/;   // ▲▼▴▾◀▶ ∨ ⌄⌃ ˅˄ ˇ ﹀
+
+  const visible = (el) => { if (!el) return false; try { const r = el.getBoundingClientRect(); if (r.width <= 0 || r.height <= 0) return false; const cs = getComputedStyle(el); return cs.visibility !== 'hidden' && cs.display !== 'none'; } catch { return false; } };
+  const accName = (el) => { try { return (el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('placeholder') || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 80); } catch { return ''; } };
+  const roleOf  = (el) => { try { return el.getAttribute('role') || el.tagName.toLowerCase(); } catch { return '?'; } };
+  const rectOf  = (el) => { try { const b = el.getBoundingClientRect(); return { x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.width), h: Math.round(b.height) }; } catch { return null; } };
+  // Nearby text helps the planner identify an icon-only control ("the chevron
+  // next to 'Sort by'") and is shown in the artifact for diagnostics.
+  const nearbyText = (el) => {
+    try {
+      const a = accName(el); if (a) return a;
+      const lbl = el.closest('[aria-label]'); if (lbl && lbl !== el) return (lbl.getAttribute('aria-label') || '').trim().slice(0, 60);
+      const par = el.parentElement; if (par) { const pt = (par.textContent || '').trim().replace(/\s+/g, ' '); if (pt && pt.length <= 60) return pt; }
+      return '';
+    } catch { return ''; }
+  };
+
+  // Never poke things that navigate or submit (mirror verifyStructure guard).
+  // v2.74.370 — also refuse anything that is, or lives inside, a real link:
+  // poking nav links is what was transitioning the page mid-sweep.
+  const isSafeToClick = (el) => {
+    if (!el) return false;
+    try {
+      if (el.matches('a[href], [type="submit"], input[type="submit"], button[type="submit"], [role="link"], [target="_blank"]')) return false;
+      if (el.closest('a[href], [role="link"]')) return false;                                      // chevron inside a nav link → skip
+      if (el.closest('form') && el.matches('button:not([type]), input[type="image"]')) return false;   // default-submit
+      if (el.matches('button:not([type="submit"]), [role="button"], summary, [aria-haspopup], [aria-expanded], [aria-controls], [role="combobox"], [role="tab"], [role="menuitem"], [data-toggle], [data-bs-toggle], [data-state]')) return true;
+      return getComputedStyle(el).cursor === 'pointer';
+    } catch { return false; }
+  };
+  // v2.74.374 — Pure CLASSIFICATION, not gating. Describes WHY an element looks
+  // interactive so the planner (which also sees the screenshot) can prioritize.
+  // Never returns null: an element that passed the safe+interactive gate but
+  // matches no specific affordance is still a candidate — hint 'clickable'.
+  const candidateHint = (el) => {
+    try {
+      if (el.getAttribute('aria-expanded') != null) return 'aria-expanded';
+      if (el.getAttribute('aria-haspopup'))          return 'haspopup';
+      if (el.getAttribute('aria-controls'))          return 'aria-controls';
+      if (el.matches('summary'))                     return 'details';
+      if (el.matches('[role="tab"]'))                return 'tab';
+      if (el.matches('[role="combobox"]'))           return 'combobox';
+      if (el.matches('[role="menuitem"],[role="menuitemcheckbox"],[role="menuitemradio"]')) return 'menuitem';
+      if (el.matches('[data-toggle],[data-bs-toggle],[data-state],[data-dropdown],[data-headlessui-state]')) return 'data-toggle';
+      const txt = (el.textContent || '').trim();
+      if (txt.length <= 4 && ARROW_GLYPH.test(txt)) return 'arrow-glyph';
+      const icon = el.querySelector('svg, use, i[class], [class*="icon" i]');
+      if (icon) {
+        let sc = '';
+        try { sc = `${icon.getAttribute('class') || ''} ${icon.getAttribute('href') || icon.getAttribute('xlink:href') || ''} ${(icon.querySelector && icon.querySelector('use')?.getAttribute('href')) || ''}`; } catch { /* */ }
+        if (ICON_HINT.test(sc)) return 'icon';
+        if (txt.length <= 2) return 'icon-only';
+        if (txt.length <= 24 && el.matches('button, [role="button"], summary, [role="tab"]')) return 'labeled-icon';
+      }
+      if (ICON_HINT.test(`${el.className || ''} ${accName(el)} ${el.id || ''}`)) return 'keyword';
+      return 'clickable';
+    } catch { return 'clickable'; }
+  };
+  // The ONE structural exclusion that survives: a large element that WRAPS a
+  // link or image is CONTENT (a result/product card), not a control. Poking it
+  // is wasted budget (and navigation is independently blocked anyway).
+  const looksLikeContentTile = (el) => {
+    try { const r = el.getBoundingClientRect(); if (r.height > 120 && (el.querySelector('a[href]') || el.querySelector('img'))) return true; } catch { /* */ }
+    return false;
+  };
+  // Candidacy = recall: safe to click, plausibly interactive, not a content
+  // tile. Precision is the planner's job; truth is poke→observe's.
+  const isDisclosureCandidate = (el) => isSafeToClick(el) && !looksLikeContentTile(el);
+
+  // v2.74.369/374 — open a control with a full pointer+mouse+click sequence
+  // (many dropdown/menu libraries fire on pointerdown/mousedown, not click),
+  // PRECEDED by hover events (mega-menus / nav dropdowns open on mouseover, not
+  // click — without this they'd never reveal).
+  const PE = (typeof PointerEvent === 'function') ? PointerEvent : MouseEvent;
+  const fire = (el, Ctor, type, init) => { try { el.dispatchEvent(new Ctor(type, { bubbles: true, cancelable: true, composed: true, view: window, button: 0, ...init })); } catch { /* */ } };
+  const pokeOpen = (el) => {
+    try { el.scrollIntoView?.({ block: 'center', inline: 'nearest' }); } catch { /* */ }
+    fire(el, PE, 'pointerover', { pointerId: 1, isPrimary: true });
+    fire(el, MouseEvent, 'mouseover', {});
+    fire(el, PE, 'pointerenter', { pointerId: 1, isPrimary: true });
+    fire(el, MouseEvent, 'mouseenter', {});
+    try { el.focus?.({ preventScroll: true }); } catch { /* */ }
+    fire(el, PE, 'pointerdown', { pointerId: 1, isPrimary: true });
+    fire(el, MouseEvent, 'mousedown', {});
+    fire(el, PE, 'pointerup', { pointerId: 1, isPrimary: true });
+    fire(el, MouseEvent, 'mouseup', {});
+    try { el.click(); } catch { /* */ }
+  };
+
+  // v2.74.375/376 — close machinery. A poke that opens a MODAL (login, etc.) is
+  // a valid reveal, but re-clicking the opener doesn't dismiss a modal and a
+  // document-level Escape is often ignored by a focus-trapped dialog. So we
+  // close deliberately: click the close affordance (× / "Close") found among the
+  // revealed nodes or in the overlay host, else Escape on the FOCUSED element
+  // (modal-bound listeners) + host + document, else click the backdrop.
+  const isCloseControl = (el) => {
+    try {
+      if (el.matches('[aria-label*="close" i],[aria-label*="dismiss" i],[title*="close" i],[data-dismiss],[data-close],[class*="modal-close" i],[class*="dialog-close" i],button[class*="close" i]')) return true;
+      const t = (el.textContent || '').trim();
+      return (t === '×' || t === '✕' || t === '✖' || t === '⨯' || /^(close|dismiss)$/i.test(t)) && el.matches('button, [role="button"], a');
+    } catch { return false; }
+  };
+  const findCloseControl = (scope) => {
+    try {
+      const root = scope || document;
+      const found = [];
+      try { for (const b of root.querySelectorAll('button, [role="button"], a, [aria-label], [data-dismiss], [data-close]')) { if (isCloseControl(b)) found.push(b); } } catch { /* */ }
+      return found.find(b => { try { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0; } catch { return false; } }) || null;
+    } catch { return null; }
+  };
+  // v2.74.376 — is a revealed thing an OVERLAY (modal/dropdown that covers
+  // content and must be CLOSED) vs an IN-PLACE reveal (carousel advance, tab
+  // panel, accordion — leave it, that's the depth we wanted)? Overlay = a
+  // dialog/menu role, or a positioned (fixed/absolute) ancestor stack.
+  const isOverlayEl = (el) => {
+    try {
+      if (el.matches('[role="dialog"],[role="alertdialog"],[aria-modal="true"],[role="menu"],[role="listbox"],[role="tooltip"]')) return true;
+      // A true covering overlay is position:fixed (modals) or absolute with a
+      // high stacking order (dropdowns/portals). Carousels use absolute with a
+      // LOW z-index within a relative track — exclude them (the z>10 gate), so
+      // advancing a carousel isn't mistaken for an overlay that needs closing.
+      let n = el, hops = 0;
+      while (n && n !== document.body && hops < 6) {
+        const cs = getComputedStyle(n);
+        if (cs.position === 'fixed') return true;
+        if (cs.position === 'absolute' && (parseInt(cs.zIndex, 10) || 0) > 10) return true;
+        n = n.parentElement; hops++;
+      }
+    } catch { /* */ }
+    return false;
+  };
+  const isOverlayReveal = (novel) => novel.some(isOverlayEl);
+  const overlayHostOf = (novel) => {
+    for (const el of novel) { try { const h = el.closest('[role="dialog"],[role="alertdialog"],[aria-modal="true"],[role="menu"],[role="listbox"],[class*="modal" i],[class*="dialog" i],[class*="popup" i],[class*="overlay" i]'); if (h) return h; } catch { /* */ } }
+    return novel.length ? (novel[0].parentElement || null) : null;
+  };
+
+  // v2.74.370 — extensive, structured logging. Each line is pushed to `log`
+  // (returned in the artifact + mirrored to the background SW console) AND
+  // console.debug'd into the page console with a clear prefix.
+  const log = [];
+  const dbg = (msg, extra) => {
+    const line = (extra !== undefined) ? `${msg} ${typeof extra === 'object' ? JSON.stringify(extra) : extra}` : msg;
+    if (log.length < 400) log.push(line);
+    try { console.debug('[AHuB explore]', line); } catch { /* */ }
+  };
+
+  // v2.74.370 — Navigation guard. Poking a misclassified nav control must NOT
+  // leave / re-route the page mid-sweep. We (a) preventDefault anchor clicks in
+  // capture phase (the JS handler still runs, so a menu still opens — only the
+  // browser navigation is cancelled), and (b) no-op history.pushState/
+  // replaceState so SPA routers can't change the route. Both undone in finally.
+  let navAttempts = 0;
+  const onCaptureClick = (e) => { try { if (e.target?.closest?.('a[href]')) { e.preventDefault(); navAttempts++; dbg('nav-guard: blocked anchor click'); } } catch { /* */ } };
+  const onBeforeUnload = () => { navAttempts++; dbg('nav-guard: beforeunload fired (real navigation in progress)'); };
+  const _origPush = history.pushState, _origReplace = history.replaceState;
+  const _origOpen = window.open, _origAssign = window.location.assign, _origReplaceLoc = window.location.replace;
+  const installGuard = () => {
+    try { document.addEventListener('click', onCaptureClick, true); } catch { /* */ }
+    try { window.addEventListener('beforeunload', onBeforeUnload, true); } catch { /* */ }
+    try { history.pushState = function () { navAttempts++; dbg('nav-guard: blocked history.pushState'); return undefined; }; } catch { /* */ }
+    try { history.replaceState = function () { navAttempts++; dbg('nav-guard: blocked history.replaceState'); return undefined; }; } catch { /* */ }
+    try { window.open = function () { navAttempts++; dbg('nav-guard: blocked window.open'); return null; }; } catch { /* */ }
+    try { window.location.assign = function () { navAttempts++; dbg('nav-guard: blocked location.assign'); }; } catch { /* */ }
+    try { window.location.replace = function () { navAttempts++; dbg('nav-guard: blocked location.replace'); }; } catch { /* */ }
+  };
+  const removeGuard = () => {
+    try { document.removeEventListener('click', onCaptureClick, true); } catch { /* */ }
+    try { window.removeEventListener('beforeunload', onBeforeUnload, true); } catch { /* */ }
+    try { history.pushState = _origPush; } catch { /* */ }
+    try { history.replaceState = _origReplace; } catch { /* */ }
+    try { window.open = _origOpen; } catch { /* */ }
+    try { window.location.assign = _origAssign; } catch { /* */ }
+    try { window.location.replace = _origReplaceLoc; } catch { /* */ }
+  };
+
+  // v2.74.378 — BANDED WALK. The sweep is split into phases the BACKGROUND
+  // orchestrates (it alone can screenshot between steps): metrics → for each
+  // viewport band bottom-to-top { band(enumerate visible) → [bg: screenshot +
+  // LLM plan] → poke(planned) } → cleanup. Per-band planning (piecemeal, with a
+  // screenshot that matches what's in view) replaces the brittle one-shot plan,
+  // and the planner only poking what it chose is what keeps the sweep from
+  // navigating.
+  const findOpenOverlays = () => {
+    const out = [];
+    try {
+      for (const el of document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"],[class*="modal" i],[class*="dialog" i],[class*="popup" i],[class*="lightbox" i]')) {
+        if (!visible(el)) continue;
+        try { const r = el.getBoundingClientRect(); if (r.width * r.height < 50000) continue; } catch { continue; }
+        out.push(el);
+      }
+    } catch { /* */ }
+    return out;
+  };
+  const closeOverlays = async (passes) => {
+    for (let p = 0; p < passes; p++) {
+      const open = findOpenOverlays();
+      if (!open.length) break;
+      dbg('cleanup: closing overlay(s)', { count: open.length });
+      for (const d of open) { const c = findCloseControl(d); if (c) { try { c.click(); } catch { /* */ } } }
+      for (const t of [document.activeElement, document].filter(Boolean)) { try { t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true })); } catch { /* */ } }
+      let bd = null; try { bd = document.querySelector('[class*="backdrop" i], [class*="overlay" i], [class*="scrim" i], [data-backdrop]'); } catch { /* */ }
+      if (bd && visible(bd)) { try { bd.click(); } catch { /* */ } }
+      await sleep(170);
+    }
+  };
+
+  const phase = opts.phase || 'metrics';
+  dbg(`phase ${phase}`, { url: location.href, top: (window.top === window.self), scrollY: window.scrollY });
+
+  // PHASE metrics — scroll to the bottom (triggering lazy content) and report
+  // the page height so the background can compute the band stops.
+  if (phase === 'metrics') {
+    const vh = window.innerHeight || 800; let lastH = -1, steps = 0;
+    for (let i = 1; i <= 16; i++) {
+      try { window.scrollTo(0, i * Math.round(vh * 0.9)); } catch { /* */ }
+      await sleep(220); steps++;
+      const docH = (() => { try { return document.documentElement.scrollHeight; } catch { return 0; } })();
+      if ((window.scrollY + vh) >= docH - 4) break;
+      if (docH === lastH && i >= 3) break;
+      lastH = docH;
+    }
+    const scrollHeight = (() => { try { return document.documentElement.scrollHeight; } catch { return vh; } })();
+    dbg('metrics', { scrollHeight, vh, steps });
+    return { success: true, phase, scrollHeight, viewportH: vh, viewportW: window.innerWidth, scrollY: window.scrollY, url: location.href, title: document.title || '', log };
+  }
+
+  // PHASE band — scroll to scrollY and enumerate the candidates + surface that
+  // are VISIBLE in this viewport band (no poking). The background screenshots
+  // this band and asks the planner which to poke.
+  if (phase === 'band') {
+    const y = Number.isFinite(opts.scrollY) ? opts.scrollY : window.scrollY;
+    try { window.scrollTo(0, y); } catch { /* */ }
+    await sleep(Number.isFinite(opts.settleScroll) ? opts.settleScroll : 280);
+    // v2.74.380 — TRUE viewport gate. visible() passes for off-screen-but-
+    // rendered elements (their rect still has size), so without this every band
+    // enumerated the whole page (85 candidates each) and the screenshot didn't
+    // match the list. inViewport limits to what's actually on screen in THIS band.
+    const vpH = window.innerHeight || 800, vpW = window.innerWidth || 1200;
+    const sx = window.scrollX || 0, sy = window.scrollY || 0;
+    const inViewport = (el) => { try { const r = el.getBoundingClientRect(); return r.bottom > 0 && r.top < vpH && r.right > 0 && r.left < vpW; } catch { return false; } };
+    const absRect = (el) => { try { const r = el.getBoundingClientRect(); return { x: Math.round(r.left + sx), y: Math.round(r.top + sy), w: Math.round(r.width), h: Math.round(r.height) }; } catch { return null; } };
+    const candidates = []; const seen = new Set(); const selSeen = new Set();
+    try {
+      for (const el of document.querySelectorAll(CANDIDATE_SEL)) {
+        if (seen.has(el)) continue; seen.add(el);
+        if (!visible(el) || !inViewport(el) || !isDisclosureCandidate(el)) continue;
+        const selector = computeUniqueSelector(el);
+        if (!selector || selSeen.has(selector)) continue;   // drop non-unique / duplicate selectors (e.g. stateful .active)
+        selSeen.add(selector);
+        candidates.push({ selector, role: roleOf(el), label: accName(el), context: nearbyText(el), hint: candidateHint(el), rect: rectOf(el), expanded: el.getAttribute('aria-expanded'), haspopup: el.getAttribute('aria-haspopup'), safe: isSafeToClick(el) });
+      }
+    } catch { /* */ }
+    const surface = [];
+    try { for (const el of document.querySelectorAll(INTERACTIVE_SEL)) { if (visible(el) && inViewport(el) && surface.length < 200) surface.push({ role: roleOf(el), label: accName(el), rect: absRect(el) }); } } catch { /* */ }
+    dbg('band', { scrollY: window.scrollY, candidates: candidates.length, surface: surface.length });
+    return { success: true, phase, scrollY: window.scrollY, viewportH: window.innerHeight, url: location.href, title: document.title || '', candidates, surface, log };
+  }
+
+  // PHASE cleanup — close any leftover overlay, return scroll to the top.
+  if (phase === 'cleanup') {
+    installGuard();
+    try { await closeOverlays(3); } finally { removeGuard(); }
+    try { window.scrollTo(0, 0); } catch { /* */ }
+    await sleep(80);
+    return { success: true, phase, navAttempts, log };
+  }
+
+  // PHASE poke — poke the planned selectors for this band (resolve each, scroll
+  // into view), observe the reveal, restore overlays. The page is mutated here,
+  // so the nav guard is installed for the duration.
+  const selectors = Array.isArray(opts.selectors) ? opts.selectors : [];
+  const controls = [];
+  let controlsTried = 0, controlsRevealing = 0, totalRevealed = 0, cidN = Number.isFinite(opts.cidStart) ? opts.cidStart : 0, aborted = null;
+  installGuard();
+  try {
+  for (const _selector of selectors) {
+    let src = null; try { src = document.querySelector(_selector); } catch { /* */ }
+    if (!src) { dbg('poke skip (no match)', { selector: String(_selector).slice(0, 80) }); continue; }
+    try { src.scrollIntoView?.({ block: 'center', inline: 'nearest' }); } catch { /* */ }
+    await sleep(60);
+    if (controlsTried >= maxPokes) break;
+    if (!visible(src)) continue;                                   // a prior poke may have hidden it
+    const selector = computeUniqueSelector(src);
+    if (planSet && !planSet.has(selector)) continue;               // Phase 3: only poke planned controls
+    const safe = isSafeToClick(src);
+    const ctl = {
+      cid: `c${cidN++}`, selector, role: roleOf(src), label: accName(src), hint: candidateHint(src), rect: rectOf(src),
+      expanded: src.getAttribute('aria-expanded'), haspopup: src.getAttribute('aria-haspopup'),
+      revealed: [], revealCount: 0, observation: safe ? null : 'unsafe', restored: null,
+    };
+    if (!safe) { dbg('skip (unsafe)', { cid: ctl.cid, hint: ctl.hint, label: ctl.label.slice(0, 40) }); controls.push(ctl); continue; }
+    controlsTried++;
+    dbg('poke', { cid: ctl.cid, hint: ctl.hint, role: ctl.role, label: ctl.label.slice(0, 40), selector: selector.slice(0, 80) });
+
+    // Per-control baseline over the WIDER reveal selector (interactive +
+    // menu/dialog/panel containers), so a revealed panel of non-interactive
+    // content still registers.
+    const beforeSet = new Set();
+    try { for (const el of document.querySelectorAll(REVEAL_SEL)) if (visible(el)) beforeSet.add(el); } catch { /* */ }
+    const expandedBefore = src.getAttribute('aria-expanded');
+    const naBefore = navAttempts;
+    const urlBefore = location.href;
+    pokeOpen(src);                                                 // full pointer+mouse+click sequence
+    await sleep(settleMs);
+    // A real navigation slipped past the guard (e.g. window.location =) — the
+    // page is leaving; stop the whole sweep. A BLOCKED nav (guard caught it) is
+    // not a hard stop: the menu may still have opened, so keep going.
+    if (location.href !== urlBefore) {
+      ctl.observation = 'navigation'; aborted = 'navigation';
+      dbg('ABORT — real navigation', { cid: ctl.cid, from: urlBefore.slice(0, 80), to: location.href.slice(0, 80) });
+      controls.push(ctl); break;
+    }
+    const navBlocked = navAttempts > naBefore;
+
+    let afterEls = [];
+    try { afterEls = Array.from(document.querySelectorAll(REVEAL_SEL)); } catch { afterEls = []; }
+    const novel = [];
+    for (const el of afterEls) { if (beforeSet.has(el)) continue; if (!visible(el)) continue; novel.push(el); }
+    for (const el of novel.slice(0, 40)) ctl.revealed.push({ selector: computeUniqueSelector(el), role: roleOf(el), label: accName(el), rect: rectOf(el) });
+    ctl.revealCount = novel.length;
+    // aria-expanded flipping true is itself evidence the control disclosed,
+    // even when the revealed nodes are off-DOM-diff (e.g. CSS-only expansion).
+    const expandedAfter = src.getAttribute('aria-expanded');
+    const ariaOpened = expandedBefore === 'false' && expandedAfter === 'true';
+    ctl.observation = (novel.length > 0 || ariaOpened) ? 'reveal' : (navBlocked ? 'navigation-blocked' : 'no-change');
+    if (ctl.navBlocked = navBlocked) { /* recorded */ }
+    if (ctl.observation === 'reveal') { controlsRevealing++; totalRevealed += novel.length; }
+    dbg('observe', { cid: ctl.cid, observation: ctl.observation, revealCount: novel.length, ariaOpened, navBlocked });
+
+    // Restore — ONLY for OVERLAY reveals (modals, dropdowns that cover the
+    // page). An IN-PLACE reveal — carousel advance, tab-panel switch, accordion
+    // expand — is the depth we wanted; leave it (re-clicking a tab/arrow won't
+    // "undo" it anyway), so it doesn't count as a restore failure.
+    const overlay = ctl.observation === 'reveal' && isOverlayReveal(novel);
+    ctl.overlay = overlay;
+    if (!overlay) {
+      ctl.restored = true;   // nothing to restore for in-place reveals
+    } else try {
+      const stillOpen = () => novel.some(el => visible(el));
+      // 1) genuine TOGGLE → re-click to close (dropdowns, accordions, summary).
+      if (stillOpen() && visible(src) && isSafeToClick(src)
+          && (expandedAfter === 'true' || src.matches('[aria-haspopup], summary, [role="tab"], [data-state]'))) {
+        try { src.click(); } catch { /* */ } await sleep(140);
+      }
+      // 2) Click a CLOSE affordance — first among the revealed nodes themselves
+      //    (the × is usually a revealed button), then within the overlay host.
+      if (stillOpen()) {
+        let close = novel.find(el => { try { return visible(el) && isCloseControl(el); } catch { return false; } }) || null;
+        if (!close) { const host = overlayHostOf(novel); if (host) close = findCloseControl(host); }
+        if (close) { try { close.click(); } catch { /* */ } await sleep(160); }
+      }
+      // 3) Escape — on the FOCUSED element (modal-bound listener) + host + document.
+      if (stillOpen()) {
+        for (const t of [document.activeElement, overlayHostOf(novel), document].filter(Boolean)) {
+          try { t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true })); } catch { /* */ }
+        }
+        fire(src, MouseEvent, 'mouseout', {}); fire(src, MouseEvent, 'mouseleave', {});   // close hover menus
+        await sleep(150);
+      }
+      // 4) Backdrop/overlay click — last resort for backdrop-dismiss modals.
+      if (stillOpen()) {
+        let bd = null; try { bd = document.querySelector('[class*="backdrop" i], [class*="overlay" i], [class*="scrim" i], [data-backdrop]'); } catch { /* */ }
+        if (bd && visible(bd)) { try { bd.click(); } catch { /* */ } await sleep(130); }
+      }
+      ctl.restored = !stillOpen();
+    } catch { ctl.restored = false; }
+    if (overlay && !ctl.restored) dbg('restore failed (overlay left open)', { cid: ctl.cid });
+
+    controls.push(ctl);
+    if (aborted === 'navigation') break;   // page is leaving — stop this band
+  }
+  await closeOverlays(2);   // close any overlay opened in this band before returning
+  } finally { removeGuard(); }
+  dbg('poke band done', { poked: controls.length, controlsRevealing, totalRevealed, aborted, navAttempts });
+  return { success: true, phase, controls, controlsRevealing, totalRevealed, aborted, navAttempts, viewport: { w: window.innerWidth, h: window.innerHeight }, log };
+}
+
+// v2.74.381 — Reveal-aware resolve helpers (standalone; the explore phases'
+// close machinery is function-local, so these duplicate the minimal logic).
+
+// Poke a trigger (modal/menu opener) and return a rich DOM snapshot of the
+// REVEALED state, leaving it OPEN so the caller can resolve + verify against it.
+async function pokeAndSnapshot(payload) {
+  const sel = payload && payload.selector;
+  if (!sel) return { success: false, error: 'selector required' };
+  let el = null; try { el = document.querySelector(sel); } catch { /* */ }
+  if (!el) return { success: false, error: 'trigger not found on page' };
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const REVEAL_SEL = 'a[href],button,input,select,textarea,[role="button"],[role="menuitem"],[role="option"],[role="tab"],[role="dialog"],[role="alertdialog"],[role="menu"],[role="listbox"],[aria-modal="true"]';
+  const vis = (x) => { try { const r = x.getBoundingClientRect(); if (r.width <= 0 || r.height <= 0) return false; const cs = getComputedStyle(x); return cs.visibility !== 'hidden' && cs.display !== 'none'; } catch { return false; } };
+  const before = new Set(); try { for (const x of document.querySelectorAll(REVEAL_SEL)) if (vis(x)) before.add(x); } catch { /* */ }
+  const urlBefore = location.href;
+  const PE = (typeof PointerEvent === 'function') ? PointerEvent : MouseEvent;
+  const fire = (t, Ctor, type, init) => { try { t.dispatchEvent(new Ctor(type, { bubbles: true, cancelable: true, composed: true, view: window, button: 0, ...init })); } catch { /* */ } };
+  try { el.scrollIntoView?.({ block: 'center', inline: 'nearest' }); } catch { /* */ }
+  fire(el, PE, 'pointerover', { pointerId: 1, isPrimary: true }); fire(el, MouseEvent, 'mouseover', {});
+  fire(el, PE, 'pointerenter', { pointerId: 1, isPrimary: true }); fire(el, MouseEvent, 'mouseenter', {});
+  try { el.focus?.({ preventScroll: true }); } catch { /* */ }
+  fire(el, PE, 'pointerdown', { pointerId: 1, isPrimary: true }); fire(el, MouseEvent, 'mousedown', {});
+  fire(el, PE, 'pointerup', { pointerId: 1, isPrimary: true }); fire(el, MouseEvent, 'mouseup', {});
+  try { el.click(); } catch { /* */ }
+  // v2.74.388 — Poll until the reveal STABILIZES, not just appears. A modal
+  // renders its container/backdrop first (1 element) then fills in the form/
+  // buttons over a few frames; capturing on first-appearance grabs a half-built
+  // modal and the child roles fail. So wait until the count of newly-visible
+  // elements stops growing for 2 consecutive polls, then a final settle, before
+  // snapshotting. Up to ~3.4s; minimum a couple polls so we don't capture early.
+  const countNovel = () => { let n = 0; try { for (const x of document.querySelectorAll(REVEAL_SEL)) { if (!before.has(x) && vis(x)) n++; } } catch { /* */ } return n; };
+  let opened = 0, lastN = -1, stable = 0;
+  for (let i = 0; i < 17; i++) {
+    await sleep(200);
+    if (location.href !== urlBefore) return { success: true, navigated: true, opened: 0, url: location.href, title: document.title || '', snapshot: '' };
+    const n = countNovel();
+    opened = n;
+    if (n > 0 && n === lastN) { stable++; if (stable >= 2) break; }   // count held steady → fully rendered
+    else stable = 0;
+    lastN = n;
+  }
+  await sleep(300);   // final settle (late images/icons in the revealed layer)
+  opened = countNovel();
+  let s = {};
+  try { s = handleDomSnapshotRich([]) || {}; } catch (e) { return { success: false, error: `snapshot failed: ${e.message}` }; }
+  return { success: true, opened, url: s.url ?? location.href, title: s.title ?? document.title ?? '', snapshot: s.snapshot ?? '' };
+}
+
+// Close any visible, sizable overlay (modal/dialog): close-control → Escape →
+// backdrop, up to 3 passes.
+async function closeOpenOverlays() {
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const vis = (el) => { try { const r = el.getBoundingClientRect(); if (r.width <= 0 || r.height <= 0) return false; const cs = getComputedStyle(el); return cs.visibility !== 'hidden' && cs.display !== 'none'; } catch { return false; } };
+  const isClose = (el) => { try { if (el.matches('[aria-label*="close" i],[aria-label*="dismiss" i],[title*="close" i],[data-dismiss],[data-close],[class*="modal-close" i],[class*="dialog-close" i],button[class*="close" i]')) return true; const t = (el.textContent || '').trim(); return (t === '×' || t === '✕' || t === '✖' || t === '⨯' || /^(close|dismiss)$/i.test(t)) && el.matches('button,[role="button"],a'); } catch { return false; } };
+  const findClose = (root) => { try { for (const b of (root || document).querySelectorAll('button,[role="button"],a,[aria-label],[data-dismiss],[data-close]')) { if (isClose(b) && vis(b)) return b; } } catch { /* */ } return null; };
+  const openOverlays = () => { const out = []; try { for (const el of document.querySelectorAll('[role="dialog"],[role="alertdialog"],[aria-modal="true"],[class*="modal" i],[class*="dialog" i],[class*="popup" i],[class*="lightbox" i]')) { if (!vis(el)) continue; try { const r = el.getBoundingClientRect(); if (r.width * r.height < 50000) continue; } catch { continue; } out.push(el); } } catch { /* */ } return out; };
+  let closed = 0;
+  for (let p = 0; p < 3; p++) {
+    const open = openOverlays();
+    if (!open.length) break;
+    for (const d of open) { const c = findClose(d); if (c) { try { c.click(); closed++; } catch { /* */ } } }
+    for (const t of [document.activeElement, document].filter(Boolean)) { try { t.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true })); } catch { /* */ } }
+    let bd = null; try { bd = document.querySelector('[class*="backdrop" i],[class*="overlay" i],[class*="scrim" i],[data-backdrop]'); } catch { /* */ }
+    if (bd && vis(bd)) { try { bd.click(); } catch { /* */ } }
+    await sleep(160);
+  }
+  return { success: true, closed, remaining: openOverlays().length };
+}
+
 // ─── Message router ───────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -4603,6 +5095,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // v2.74.362 — Auto-verify a Locale's structured composition (async: poke).
     case 'VERIFY_STRUCTURE':
       verifyStructure(payload).then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
+      return true;   // async sendResponse
+
+    // v2.74.367 — pageStructure depth sweep (async: poke→observe→restore).
+    case 'EXPLORE_PAGE_STRUCTURE':
+      explorePageStructure(payload).then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
+      return true;   // async sendResponse
+
+    // v2.74.381 — Reveal-aware resolve: open a trigger (modal/menu) and return a
+    // rich DOM snapshot of the REVEALED state, leaving it open so the caller can
+    // resolve + verify hidden-layer roles against it. Pair with CLOSE_OVERLAYS.
+    case 'POKE_AND_SNAPSHOT':
+      pokeAndSnapshot(payload).then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
+      return true;   // async sendResponse
+
+    // v2.74.381 — Close any open overlay (modal/dialog) — used after a
+    // reveal-aware resolve to restore the page.
+    case 'CLOSE_OVERLAYS':
+      closeOpenOverlays().then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
       return true;   // async sendResponse
 
     case 'DOM_SNAPSHOT_FULL':

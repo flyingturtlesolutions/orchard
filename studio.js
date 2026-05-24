@@ -2549,6 +2549,15 @@ async function _refreshGroundListImpl() {
     return;
   }
 
+  // v2.74.371 — pageStructure artifacts (auto-discovered depth maps) live in
+  // chrome.storage.local under 'pageStructureCache', keyed by ground → url.
+  // Loaded once and indexed per ground for the "Page Structures" section.
+  let pageStructureMap = {};
+  try {
+    const got = await new Promise(r => chrome.storage.local.get('pageStructureCache', r));
+    pageStructureMap = got?.pageStructureCache ?? {};
+  } catch { pageStructureMap = {}; }
+
   list.innerHTML = '';
 
   for (const ground of grounds) {
@@ -2963,6 +2972,77 @@ async function _refreshGroundListImpl() {
       });
     });
     card.appendChild(locRow);
+
+    // v2.74.371 — Page Structures section. Auto-discovered depth maps from the
+    // "+ Locale" exploration sweep (dropdowns/menus/modals revealed by poking),
+    // cached per (ground, normalized URL). They feed depth-aware perspective
+    // proposals; listed here so the discovered depth is inspectable per ground.
+    const pageStructures = (pageStructureMap && pageStructureMap[ground.id]) ? pageStructureMap[ground.id] : {};
+    const psEntries = Object.entries(pageStructures)
+      .sort((a, b) => (b[1]?.capturedAt ?? 0) - (a[1]?.capturedAt ?? 0));
+    const psRow = document.createElement('div');
+    psRow.className = 'ground-section-row';
+    psRow.innerHTML = `
+      <div class="ground-section-head">
+        <span class="ground-section-label">Page Structures</span>
+        <span class="ground-section-count">${psEntries.length}</span>
+      </div>
+      <div class="ground-section-body" id="page-structures-body-${ground.id}">
+        ${psEntries.length === 0
+          ? `<span class="empty-state small">No page structures yet — these are auto-discovered <strong>depth maps</strong> (dropdowns / menus / modals revealed by the "+ Locale" exploration sweep). They feed depth-aware perspective proposals.</span>`
+          : psEntries.map(([key, entry]) => {
+              const s = entry?.structure ?? {};
+              const st = s.stats ?? {};
+              const controls = Array.isArray(s.controls) ? s.controls : [];
+              const revealing = controls.filter(c => c?.observation === 'reveal').length;
+              const full = entry?.url || s.url || key;
+              let path = key;
+              try { const u = new URL(full); path = (u.pathname || '/') + (u.search || ''); } catch { /* keep key */ }
+              const bits = [
+                `${revealing} reveal${revealing === 1 ? '' : 's'}`,
+                `${st.candidates ?? controls.length} candidate(s)`,
+                `${st.controlsTried ?? controls.length} poked`,
+              ];
+              if (st.scrollSteps) bits.push(`scrolled ${st.scrollSteps}×`);
+              if (st.navAttempts) bits.push(`${st.navAttempts} nav blocked`);
+              if (entry?.capturedAt) bits.push(relTime(entry.capturedAt));
+              return `
+            <div class="page-structure-row" data-ps-key="${escAttr(key)}">
+              <div class="page-structure-row-main">
+                <span class="page-structure-path" title="${escAttr(full)}">${escHtml(path)}</span>
+                ${s.planned ? `<span class="assertion-generated-badge" title="Which controls to poke was chosen by the LLM planner.">⚡</span>` : ''}
+                <span class="page-structure-summary">${escHtml(bits.join(' · '))}</span>
+              </div>
+              <div class="page-structure-row-actions">
+                <button class="btn-action" data-action="json-page-structure" data-ps-key="${escAttr(key)}" title="View the full structure JSON (controls + revealed children)">{ }</button>
+                <button class="btn-action danger" data-action="delete-page-structure" data-ps-key="${escAttr(key)}" title="Delete this page structure (next + Locale will run a fresh sweep)">✕</button>
+              </div>
+            </div>`;
+            }).join('')
+        }
+      </div>`;
+    psRow.querySelectorAll('[data-action="json-page-structure"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const entry = pageStructures[btn.dataset.psKey];
+        if (!entry?.structure) { toast('Page structure not found', 'err'); return; }
+        showJsonModal(`Page structure: ${btn.dataset.psKey}`, entry.structure, 'page-structure');
+      });
+    });
+    psRow.querySelectorAll('[data-action="delete-page-structure"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const key = btn.dataset.psKey;
+        if (!confirm('Delete this page structure? The next "+ Locale" on this page will run a fresh exploration sweep.')) return;
+        try {
+          const got = await new Promise(r => chrome.storage.local.get('pageStructureCache', r));
+          const map = got?.pageStructureCache ?? {};
+          if (map[ground.id]) { delete map[ground.id][key]; if (Object.keys(map[ground.id]).length === 0) delete map[ground.id]; }
+          await new Promise(r => chrome.storage.local.set({ pageStructureCache: map }, r));
+          toast('Page structure deleted');
+          await refreshGroundList();
+        } catch (e) { toast(`Failed: ${e?.message ?? 'unknown'}`, 'err'); }
+      });
+    });
+    card.appendChild(psRow);
 
     // v2.65.0 (Pass 2) — Observations section. Foundation only: storage
     // exists, library row exists. NO authoring flow, NO runtime path,

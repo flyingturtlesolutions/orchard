@@ -977,6 +977,67 @@ async function _writeLocaleDiscoveryCache(groundId, cacheKey, entry) {
   await chrome.storage.local.set({ [LOCALE_DISCOVERY_CACHE_KEY]: map });
 }
 
+// v2.74.367 — pageStructure artifact cache. The "+ Locale" depth sweep
+// (poke→observe→restore over the whole page) is expensive and mutates the page,
+// so its artifact is memoized per (groundId, normalized URL) exactly like the
+// auto-discovery cache. The sweep runs only when no FRESH artifact exists
+// (staleness judged by `driftHash` + age at read-time); "Re-explore" forces a
+// rewrite. Shape mirrors LOCALE_DISCOVERY_CACHE:
+//   key: 'pageStructureCache'
+//   value: { [groundId]: { [normalizedUrl]: { structure, url, capturedAt } } }
+const PAGE_STRUCTURE_CACHE_KEY = 'pageStructureCache';
+// Artifacts older than this are treated as stale (page may have changed).
+const PAGE_STRUCTURE_TTL_MS = 1000 * 60 * 60 * 24 * 7;   // 7 days
+
+async function _readPageStructureCache(groundId, cacheKey) {
+  if (!groundId || !cacheKey) return null;
+  try {
+    const got = await chrome.storage.local.get(PAGE_STRUCTURE_CACHE_KEY);
+    const map = got?.[PAGE_STRUCTURE_CACHE_KEY] ?? {};
+    return map[groundId]?.[cacheKey] ?? null;
+  } catch (e) {
+    Logger.warn('background', `pageStructureCache read failed: ${e.message}`);
+    return null;
+  }
+}
+
+async function _writePageStructureCache(groundId, cacheKey, entry) {
+  if (!groundId || !cacheKey) return;
+  const got = await chrome.storage.local.get(PAGE_STRUCTURE_CACHE_KEY);
+  const map = got?.[PAGE_STRUCTURE_CACHE_KEY] ?? {};
+  if (!map[groundId]) map[groundId] = {};
+  map[groundId][cacheKey] = entry;
+  await chrome.storage.local.set({ [PAGE_STRUCTURE_CACHE_KEY]: map });
+}
+
+// v2.74.385 — Flatten a cached pageStructure artifact into verified
+// {label, role, selector, via?} hints for resolveRoles to reuse. Each control's
+// own selector resolved during exploration, and each control that REVEALED
+// content was confirmed to actually open it — far better than letting Claude
+// guess a positional selector on a hashed-class page.
+async function _knownSelectorsForUrl(groundId, url) {
+  if (!groundId) return null;
+  try {
+    const entry = await _readPageStructureCache(groundId, _normalizeUrlForLocaleCache(url));
+    const controls = entry?.structure?.controls ?? [];
+    const out = [];
+    // v2.74.387 — cap revealed children PER CONTROL so one giant nav menu
+    // (e.g. an "Explore" mega-menu with 42 links) can't exhaust the budget and
+    // crowd out later controls (the "Log in" opener + its modal's children).
+    const PER_CONTROL = 10, TOTAL = 140;
+    for (const c of controls) {
+      if (out.length >= TOTAL) break;
+      if (c?.selector && c?.observation === 'reveal') out.push({ label: c.label || '', role: c.role || 'control', selector: c.selector });
+      let k = 0;
+      for (const rv of Array.isArray(c?.revealed) ? c.revealed : []) {
+        if (out.length >= TOTAL || k >= PER_CONTROL) break;
+        if (rv?.selector) { out.push({ label: rv.label || '', role: rv.role || '?', selector: rv.selector, via: c.label || '' }); k++; }
+      }
+    }
+    return out.length ? out : null;
+  } catch (e) { Logger.warn('background', `_knownSelectorsForUrl failed: ${e.message}`); return null; }
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const { type, payload } = message;
   Logger.debug('background', `Message: ${type}`);
@@ -3892,7 +3953,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // (id / name / aria attrs preserved).
           let snap;
           try {
-            snap = await chrome.tabs.sendMessage(tabId, { type: 'DOM_SNAPSHOT_RICH' });
+            snap = await chrome.tabs.sendMessage(tabId, { type: 'DOM_SNAPSHOT_RICH' }, { frameId: 0 });   // top frame only
           } catch (e) {
             sendResponse({ success: false, error: `DOM snapshot failed: ${e.message}` });
             return;
@@ -3938,10 +3999,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'PROPOSE_LOCALE_PERSPECTIVES': {
       (async () => {
         try {
-          // v2.74.350 — `enhanced` arm of the benchmark. When true, gather a
-          // screenshot + the Ground's existing locales/landmarks and pass them
-          // to proposePerspectives; when false, behave exactly as the baseline.
-          const { tabId, intent, groundId = null, enhanced = false } = payload ?? {};
+          // v2.74.350/366 — Enhanced context is now canonical (baseline arm
+          // removed). Always gather a screenshot + the Ground's existing
+          // locales/landmarks and pass them to proposePerspectives.
+          const { tabId, intent, groundId = null } = payload ?? {};
           if (typeof tabId !== 'number') {
             sendResponse({ success: false, error: 'tabId required' });
             return;
@@ -3972,7 +4033,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
           let snap;
           try {
-            snap = await chrome.tabs.sendMessage(tabId, { type: 'DOM_SNAPSHOT_RICH' });
+            snap = await chrome.tabs.sendMessage(tabId, { type: 'DOM_SNAPSHOT_RICH' }, { frameId: 0 });   // top frame only
           } catch (e) {
             sendResponse({ success: false, error: `DOM snapshot failed: ${e.message}` });
             return;
@@ -3984,38 +4045,52 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
           // ── Enhanced context (best-effort; any failure degrades, not aborts) ──
           let screenshot = null, siblingLocales = null, registryLandmarks = null;
-          if (enhanced) {
-            // Screenshot the visible tab. Only meaningful when the target tab
-            // is the active one in its window (captureVisibleTab grabs whatever
-            // is visible); skip otherwise so we never attach the wrong page.
-            if (tabInfo.active) {
-              try {
-                screenshot = await chrome.tabs.captureVisibleTab(tabInfo.windowId, { format: 'jpeg', quality: 55 });
-              } catch (e) {
-                Logger.warn('background', `PROPOSE_LOCALE_PERSPECTIVES: screenshot failed (continuing): ${e.message}`);
-              }
-            } else {
-              Logger.info('background', 'PROPOSE_LOCALE_PERSPECTIVES: target tab not active — skipping screenshot');
+          // Screenshot the visible tab. Only meaningful when the target tab
+          // is the active one in its window (captureVisibleTab grabs whatever
+          // is visible); skip otherwise so we never attach the wrong page.
+          if (tabInfo.active) {
+            try {
+              screenshot = await chrome.tabs.captureVisibleTab(tabInfo.windowId, { format: 'jpeg', quality: 55 });
+            } catch (e) {
+              Logger.warn('background', `PROPOSE_LOCALE_PERSPECTIVES: screenshot failed (continuing): ${e.message}`);
             }
-            if (groundId) {
-              try {
-                const locales = await StorageManager.listLocales(groundId);
-                const rolesOf = (loc) => {
-                  const set = new Set();
-                  const walk = (nodes) => { for (const n of Array.isArray(nodes) ? nodes : []) { if (n?.role) set.add(n.role); if (Array.isArray(n?.contains)) walk(n.contains); if (Array.isArray(n?.alternatives)) walk(n.alternatives); } };
-                  walk(Array.isArray(loc?.landmarks) ? loc.landmarks : []);
-                  return [...set];
-                };
-                siblingLocales = (locales ?? []).map(l => ({ name: l.name, description: l.description, roles: rolesOf(l) }));
-              } catch (e) {
-                Logger.warn('background', `PROPOSE_LOCALE_PERSPECTIVES: listLocales failed (continuing): ${e.message}`);
-              }
-              try {
-                const lms = await StorageManager.listLandmarksForGround(groundId);
-                registryLandmarks = (lms ?? []).map(lm => ({ alias: lm.alias, a11yRole: lm.a11yRole, description: lm.description }));
-              } catch (e) {
-                Logger.warn('background', `PROPOSE_LOCALE_PERSPECTIVES: listLandmarksForGround failed (continuing): ${e.message}`);
-              }
+          } else {
+            Logger.info('background', 'PROPOSE_LOCALE_PERSPECTIVES: target tab not active — skipping screenshot');
+          }
+          if (groundId) {
+            try {
+              const locales = await StorageManager.listLocales(groundId);
+              const rolesOf = (loc) => {
+                const set = new Set();
+                const walk = (nodes) => { for (const n of Array.isArray(nodes) ? nodes : []) { if (n?.role) set.add(n.role); if (Array.isArray(n?.contains)) walk(n.contains); if (Array.isArray(n?.alternatives)) walk(n.alternatives); } };
+                walk(Array.isArray(loc?.landmarks) ? loc.landmarks : []);
+                return [...set];
+              };
+              siblingLocales = (locales ?? []).map(l => ({ name: l.name, description: l.description, roles: rolesOf(l) }));
+            } catch (e) {
+              Logger.warn('background', `PROPOSE_LOCALE_PERSPECTIVES: listLocales failed (continuing): ${e.message}`);
+            }
+            try {
+              const lms = await StorageManager.listLandmarksForGround(groundId);
+              registryLandmarks = (lms ?? []).map(lm => ({ alias: lm.alias, a11yRole: lm.a11yRole, description: lm.description }));
+            } catch (e) {
+              Logger.warn('background', `PROPOSE_LOCALE_PERSPECTIVES: listLandmarksForGround failed (continuing): ${e.message}`);
+            }
+          }
+
+          // v2.74.368 — Depth: feed the cached pageStructure artifact (the "+
+          // Locale" exploration sweep) so the author can propose roles for
+          // post-interaction content the static snapshot can't show. Read-only
+          // here; the artifact is built/cached by EXPLORE_PAGE_STRUCTURE.
+          let pageStructure = null;
+          if (groundId) {
+            try {
+              const entry = await _readPageStructureCache(groundId, _normalizeUrlForLocaleCache(snap.url ?? url));
+              // Only use a FRESH artifact (within TTL) — matches the UI's
+              // freshness gate, so a skipped/stale sweep stays static-only.
+              if (entry?.structure && (Date.now() - (entry.capturedAt ?? 0)) < PAGE_STRUCTURE_TTL_MS) pageStructure = entry.structure;
+            } catch (e) {
+              Logger.warn('background', `PROPOSE_LOCALE_PERSPECTIVES: pageStructure read failed (continuing): ${e.message}`);
             }
           }
 
@@ -4027,21 +4102,229 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             screenshot,
             siblingLocales,
             registryLandmarks,
+            pageStructure,
           });
           if (!proposal || !Array.isArray(proposal.options) || proposal.options.length === 0) {
             sendResponse({ success: false, error: 'Claude returned no usable perspectives — try a more specific intent.' });
             return;
           }
-          // meta lets the benchmark UI label exactly what context each run used.
+          // meta lets the UI label exactly what context this run used.
+          const revealingControls = (pageStructure && Array.isArray(pageStructure.controls))
+            ? pageStructure.controls.filter(c => c?.observation === 'reveal').length : 0;
           const meta = {
-            enhanced: !!enhanced,
             screenshot: !!screenshot,
             siblingLocales: Array.isArray(siblingLocales) ? siblingLocales.length : 0,
             registryLandmarks: Array.isArray(registryLandmarks) ? registryLandmarks.length : 0,
+            pageStructure: !!pageStructure,
+            revealingControls,
           };
           sendResponse({ success: true, options: proposal.options, meta });
         } catch (err) {
           Logger.error('background', `PROPOSE_LOCALE_PERSPECTIVES failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // v2.74.378 — pageStructure BANDED WALK. The background drives a viewport-
+    // band loop bottom-to-top: metrics (scroll to bottom, measure) → for each
+    // band { content-script enumerates VISIBLE candidates → background
+    // screenshots THIS band → LLM planner picks which to poke (piecemeal, with a
+    // screenshot that matches what's in view) → content-script pokes only those,
+    // verifying each } → cleanup. Per-band planning replaces the brittle one-shot
+    // plan, and the planner only poking what it CHOSE is what keeps the sweep
+    // from navigating. The artifact is assembled here from the per-band results.
+    // Payload: { tabId, groundId?, bandBudget? } → { success, structure, cacheKey }.
+    case 'EXPLORE_PAGE_STRUCTURE': {
+      (async () => {
+        try {
+          const { tabId, groundId = null, bandBudget = 8 } = payload ?? {};
+          if (typeof tabId !== 'number') { sendResponse({ success: false, error: 'tabId required' }); return; }
+          let tabInfo;
+          try { tabInfo = await chrome.tabs.get(tabId); }
+          catch (e) { sendResponse({ success: false, error: `Tab not found: ${e.message}` }); return; }
+          const url = tabInfo?.url ?? '';
+          if (!/^https?:/i.test(url)) {
+            sendResponse({ success: false, error: 'This page does not allow content scripts (chrome://, extension page, or restricted URL).' });
+            return;
+          }
+          try { await chrome.scripting.executeScript({ target: { tabId }, files: ['ContentScripts/contentScript.js'] }); }
+          catch (e) { Logger.warn('background', `EXPLORE_PAGE_STRUCTURE: inject failed (continuing): ${e.message}`); }
+
+          const emitLog = (lines, tag) => { for (const ln of Array.isArray(lines) ? lines : []) Logger.info('explore', `[${tag}] ${ln}`); };
+          // frameId:0 = TOP frame only (else sendMessage fans out to ad/about:blank iframes).
+          const cs = (phasePayload) => chrome.tabs.sendMessage(tabId, { type: 'EXPLORE_PAGE_STRUCTURE', payload: phasePayload }, { frameId: 0 });
+
+          // 1) metrics — scroll to the bottom (trigger lazy content), measure height.
+          let metrics;
+          try { metrics = await cs({ phase: 'metrics' }); }
+          catch (e) { sendResponse({ success: false, error: `Page structure metrics failed: ${e.message}` }); return; }
+          if (!metrics?.success) { sendResponse({ success: false, error: metrics?.error ?? 'metrics returned nothing' }); return; }
+          emitLog(metrics.log, 'metrics');
+          const vh = Number(metrics.viewportH) || 800;
+          const scrollHeight = Number(metrics.scrollHeight) || vh;
+          const title = metrics.title || '';
+          const pageUrl = metrics.url || url;
+
+          // Band stops, BOTTOM-TO-TOP: from (scrollHeight - vh) up to 0.
+          const step = Math.max(1, Math.round(vh * 0.85));
+          const bandYs = [];
+          for (let y = Math.max(0, scrollHeight - vh); y > 0; y -= step) bandYs.push(y);
+          bandYs.push(0);   // always include the top band
+          Logger.info('explore', `EXPLORE_PAGE_STRUCTURE: banded walk — height ${scrollHeight}, vh ${vh}, ${bandYs.length} band(s), bandBudget ${bandBudget}`);
+
+          const seenCand = new Set();   // all enumerated selectors (for the count)
+          const seenPoked = new Set();  // selectors already poked (cross-band dedup)
+          const surfSeen = new Set();
+          const allSurface = [];
+          const allControls = [];
+          let totalNav = 0, cid = 0, aborted = null;
+
+          // v2.74.379 — Navigation recovery. A poked control can navigate via a
+          // `location.href = …` assignment, which the in-page guard CANNOT
+          // intercept. Detect it, go back to pageUrl, re-inject, and continue the
+          // remaining bands (the navigator is already in seenPoked → not
+          // re-poked). Capped to avoid nav loops eating the whole run.
+          const norm = (u) => _normalizeUrlForLocaleCache(u || '');
+          let recoveries = 0;
+          const waitForTabLoad = async (timeoutMs = 8000) => {
+            const t1 = Date.now();
+            while (Date.now() - t1 < timeoutMs) {
+              let info; try { info = await chrome.tabs.get(tabId); } catch { return false; }
+              if (info && info.status === 'complete') return true;
+              await new Promise(r => setTimeout(r, 200));
+            }
+            return true;
+          };
+          const ensureOnPage = async () => {
+            let cur; try { cur = await chrome.tabs.get(tabId); } catch { return false; }
+            if (norm(cur?.url) === norm(pageUrl)) return true;
+            if (recoveries >= 3) { Logger.warn('explore', `recovery limit reached (stuck at ${cur?.url})`); return false; }
+            recoveries++;
+            Logger.warn('explore', `navigated away to ${cur?.url} — returning to ${pageUrl} (recovery ${recoveries}/3)`);
+            try {
+              await chrome.tabs.update(tabId, { url: pageUrl });
+              await waitForTabLoad();
+              await new Promise(r => setTimeout(r, 400));
+              try { await chrome.scripting.executeScript({ target: { tabId }, files: ['ContentScripts/contentScript.js'] }); } catch { /* */ }
+              return true;
+            } catch (e) { Logger.warn('explore', `recovery failed: ${e.message}`); return false; }
+          };
+
+          for (const y of bandYs) {
+            // Recover first if a prior poke navigated the tab away.
+            if (!(await ensureOnPage())) { aborted = aborted || 'navigation-unrecovered'; break; }
+
+            // a) content-script enumerates the candidates VISIBLE in this band.
+            let band;
+            try { band = await cs({ phase: 'band', scrollY: y }); }
+            catch (e) { Logger.warn('background', `band y=${y} enumerate failed: ${e.message}`); continue; }
+            if (!band?.success) continue;
+            emitLog(band.log, 'band');
+            for (const s of Array.isArray(band.surface) ? band.surface : []) {
+              const k = `${s.role}|${s.label}|${s.rect?.x},${s.rect?.y}`;
+              if (!surfSeen.has(k)) { surfSeen.add(k); if (allSurface.length < 400) allSurface.push(s); }
+            }
+            // Carry-forward: dedup on what's been POKED, not enumerated — a
+            // candidate the planner skipped in an earlier (overlapping) band
+            // reappears here and gets another chance when it's more central.
+            for (const c of Array.isArray(band.candidates) ? band.candidates : []) { if (c?.selector) seenCand.add(c.selector); }
+            const bandCands = (Array.isArray(band.candidates) ? band.candidates : []).filter(c => c?.selector && !seenPoked.has(c.selector));
+            if (!bandCands.length) continue;
+
+            // b) screenshot THIS band (matches the candidates exactly).
+            let shot = null;
+            if (tabInfo.active) {
+              try { shot = await chrome.tabs.captureVisibleTab(tabInfo.windowId, { format: 'jpeg', quality: 55 }); }
+              catch (e) { Logger.warn('background', `band y=${y} screenshot failed: ${e.message}`); }
+            }
+            // c) LLM plans which of THIS band's candidates to poke.
+            let planSels = [];
+            try {
+              const planned = await AnthropicService.planPageExploration({ url: pageUrl, title, candidates: bandCands, screenshot: shot, maxPokes: bandBudget });
+              if (planned && Array.isArray(planned.plan)) planSels = planned.plan;
+            } catch (e) { Logger.warn('background', `band y=${y} planner failed: ${e.message}`); }
+            planSels = planSels.filter(s => s && !seenPoked.has(s));
+            for (const s of planSels) seenPoked.add(s);   // mark BEFORE poking → a navigator is never re-poked
+            Logger.info('explore', `band y=${y}: ${bandCands.length} candidate(s) (poke-deduped), planned ${planSels.length}`);
+            if (!planSels.length) continue;
+
+            // d) content-script pokes ONLY the planned controls, verifying each.
+            let pk = null;
+            try { pk = await cs({ phase: 'poke', selectors: planSels, cidStart: cid }); }
+            catch (e) { Logger.warn('background', `band y=${y} poke failed (likely navigation) — will recover next band: ${e.message}`); }
+            if (pk?.success) {
+              emitLog(pk.log, 'poke');
+              for (const c of Array.isArray(pk.controls) ? pk.controls : []) allControls.push(c);
+              cid += (pk.controls?.length || 0);
+              totalNav += pk.navAttempts || 0;
+              if (pk.aborted === 'navigation') Logger.warn('explore', `band y=${y}: a poke navigated — recovering on next band`);
+            }
+            // If pk failed, the frame likely navigated; ensureOnPage (next iter) recovers.
+          }
+
+          // Restore AFTER the loop (UNconditionally — bypasses the recovery cap):
+          // a navigation in the LAST band has no "next band" to heal it, so
+          // without this the user's tab is left on the navigated-to page.
+          try {
+            const cur = await chrome.tabs.get(tabId);
+            if (norm(cur?.url) !== norm(pageUrl)) {
+              Logger.warn('explore', `restoring tab to ${pageUrl} (was ${cur?.url})`);
+              await chrome.tabs.update(tabId, { url: pageUrl });
+              await waitForTabLoad();
+              await new Promise(r => setTimeout(r, 400));
+              try { await chrome.scripting.executeScript({ target: { tabId }, files: ['ContentScripts/contentScript.js'] }); } catch { /* */ }
+            }
+          } catch (e) { Logger.warn('explore', `final restore failed: ${e.message}`); }
+
+          // cleanup — close any leftover overlay, scroll to top.
+          try { const cl = await cs({ phase: 'cleanup' }); emitLog(cl?.log, 'cleanup'); }
+          catch (e) { Logger.warn('background', `cleanup failed: ${e.message}`); }
+
+          // Assemble the artifact from the per-band results.
+          const controlsRevealing = allControls.filter(c => c?.observation === 'reveal').length;
+          const totalRevealed = allControls.reduce((n, c) => n + (Number(c?.revealCount) || 0), 0);
+          const fp = `${scrollHeight}#${seenCand.size}#${pageUrl}#` + allControls.map(c => `${c.role}:${(c.label || '').slice(0, 16)}`).sort().join('|');
+          let hsh = 5381; for (let i = 0; i < fp.length; i++) hsh = ((hsh << 5) + hsh + fp.charCodeAt(i)) | 0;
+          const structure = {
+            version: 1, url: pageUrl, title, capturedAt: Date.now(), driftHash: (hsh >>> 0).toString(36),
+            viewport: { w: Number(metrics.viewportW) || tabInfo.width || 0, h: vh },
+            surface: allSurface, controls: allControls, planned: true,
+            stats: { candidates: seenCand.size, controlsTried: allControls.length, controlsRevealing, totalRevealed, navAttempts: totalNav, bands: bandYs.length, aborted },
+          };
+          Logger.info('explore', `EXPLORE_PAGE_STRUCTURE done: ${bandYs.length} band(s), poked ${allControls.length}, revealed ${controlsRevealing}, navAttempts ${totalNav}${aborted ? `, aborted=${aborted}` : ''}`);
+
+          const cacheKey = _normalizeUrlForLocaleCache(pageUrl);
+          if (groundId) {
+            try { await _writePageStructureCache(groundId, cacheKey, { structure, url: pageUrl, capturedAt: structure.capturedAt }); }
+            catch (e) { Logger.warn('background', `pageStructureCache write failed: ${e.message}`); }
+          }
+          sendResponse({ success: true, structure, cacheKey });
+        } catch (err) {
+          Logger.error('background', `EXPLORE_PAGE_STRUCTURE failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // v2.74.367 — Read a cached pageStructure artifact (no sweep). Payload:
+    //   { groundId, url }  → { success, structure|null, fresh, capturedAt }
+    // `fresh` is false when the artifact is older than PAGE_STRUCTURE_TTL_MS;
+    // the caller decides whether to trigger a fresh sweep.
+    case 'GET_PAGE_STRUCTURE': {
+      (async () => {
+        try {
+          const { groundId = null, url = '' } = payload ?? {};
+          if (!groundId) { sendResponse({ success: true, structure: null, fresh: false }); return; }
+          const cacheKey = _normalizeUrlForLocaleCache(url);
+          const entry = await _readPageStructureCache(groundId, cacheKey);
+          if (!entry) { sendResponse({ success: true, structure: null, fresh: false }); return; }
+          const age = Date.now() - (entry.capturedAt ?? 0);
+          sendResponse({ success: true, structure: entry.structure ?? null, fresh: age < PAGE_STRUCTURE_TTL_MS, capturedAt: entry.capturedAt ?? null });
+        } catch (err) {
+          Logger.error('background', `GET_PAGE_STRUCTURE failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();
@@ -4073,7 +4356,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             Logger.warn('background', `RESOLVE_LOCALE_ROLES: content-script inject failed (continuing): ${e.message}`);
           }
           let snap;
-          try { snap = await chrome.tabs.sendMessage(tabId, { type: 'DOM_SNAPSHOT_RICH' }); }
+          try { snap = await chrome.tabs.sendMessage(tabId, { type: 'DOM_SNAPSHOT_RICH' }, { frameId: 0 }); }   // frameId:0 — top frame only (avoid empty about:blank iframes winning the race)
           catch (e) { sendResponse({ success: false, error: `DOM snapshot failed: ${e.message}` }); return; }
           if (!snap?.success) { sendResponse({ success: false, error: snap?.error ?? 'DOM snapshot returned no payload' }); return; }
 
@@ -4094,6 +4377,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
           }
 
+          // v2.74.385 — verified selectors from the page-exploration artifact,
+          // so resolve REUSES proven selectors (esp. for triggers) instead of
+          // guessing positional ones on hashed-class pages.
+          const knownSelectors = await _knownSelectorsForUrl(groundId, snap.url ?? url);
+          Logger.info('explore', `RESOLVE_LOCALE_ROLES: ${Array.isArray(knownSelectors) ? knownSelectors.length : 0} known verified selector(s) from artifact${Array.isArray(knownSelectors) && knownSelectors.length ? ' — e.g. ' + knownSelectors.slice(0, 6).map(k => `"${(k.label || '').slice(0, 24)}"`).join(', ') : ' (none — page not explored, or Explore did not capture these controls)'}`);
+
           const out = await AnthropicService.resolveRoles({
             roles,
             url        : snap.url   ?? url,
@@ -4101,6 +4390,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             domSnapshot: snap.snapshot ?? '',
             screenshot,
             registryLandmarks,
+            knownSelectors,
             priorAttempt,
           });
           if (!out || !Array.isArray(out.resolutions)) {
@@ -4110,6 +4400,93 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ success: true, resolutions: out.resolutions });
         } catch (err) {
           Logger.error('background', `RESOLVE_LOCALE_ROLES failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // v2.74.381 — Reveal-aware resolve. Roles that live in a hidden layer (a
+    // modal/menu) can't resolve against the static DOM. Open the trigger, snapshot
+    // the REVEALED state, resolve the hidden roles against it, verify each WHILE
+    // OPEN, then close. Trigger selector comes from the resolved trigger role
+    // (structured) or, when absent, the cached pageStructure artifact.
+    // Payload: { tabId, groundId?, triggerSelector?, triggerLabel?, roles } →
+    //          { success, resolutions:[{role,selector,confidence,justification,matchedCount}], trigger }
+    case 'RESOLVE_REVEALED_ROLES': {
+      (async () => {
+        try {
+          const { tabId, groundId = null, triggerSelector = null, triggerLabel = null, roles } = payload ?? {};
+          if (typeof tabId !== 'number') { sendResponse({ success: false, error: 'tabId required' }); return; }
+          if (!Array.isArray(roles) || !roles.length) { sendResponse({ success: false, error: 'roles required' }); return; }
+          let tabInfo;
+          try { tabInfo = await chrome.tabs.get(tabId); }
+          catch (e) { sendResponse({ success: false, error: `Tab not found: ${e.message}` }); return; }
+          const url = tabInfo?.url ?? '';
+          if (!/^https?:/i.test(url)) { sendResponse({ success: false, error: 'restricted URL' }); return; }
+          try { await chrome.scripting.executeScript({ target: { tabId }, files: ['ContentScripts/contentScript.js'] }); } catch { /* */ }
+
+          // Resolve the trigger selector: prefer the one passed (the resolved
+          // trigger role), else match the cached pageStructure artifact.
+          let trigger = (typeof triggerSelector === 'string' && triggerSelector) ? triggerSelector : null;
+          if (!trigger && groundId) {
+            try {
+              const entry = await _readPageStructureCache(groundId, _normalizeUrlForLocaleCache(url));
+              const controls = (entry?.structure?.controls ?? []).filter(c => c?.observation === 'reveal' && c?.selector);
+              const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+              const want = norm(triggerLabel).split(' ').filter(Boolean);
+              let best = null;
+              if (want.length) best = controls.find(c => { const l = norm(c.label); return want.some(w => w.length > 2 && l.includes(w)); });
+              if (!best) best = controls.find(c => c.overlay) || controls[0];
+              trigger = best?.selector ?? null;
+              if (trigger) Logger.info('explore', `RESOLVE_REVEALED_ROLES: trigger from artifact = "${(best.label || '').slice(0, 40)}"`);
+            } catch (e) { Logger.warn('background', `RESOLVE_REVEALED_ROLES artifact lookup failed: ${e.message}`); }
+          }
+          if (!trigger) { sendResponse({ success: false, error: 'no trigger to reveal the hidden layer — resolve the trigger role first, or run Explore' }); return; }
+
+          Logger.info('explore', `RESOLVE_REVEALED_ROLES: trigger="${String(trigger).slice(0, 80)}" for ${roles.length} hidden role(s): ${roles.map(r => r.role).join(', ')}`);
+
+          // Open the trigger and snapshot the revealed state (leaves it open).
+          let snap;
+          try { snap = await chrome.tabs.sendMessage(tabId, { type: 'POKE_AND_SNAPSHOT', payload: { selector: trigger } }, { frameId: 0 }); }
+          catch (e) { sendResponse({ success: false, error: `reveal failed: ${e.message}` }); return; }
+          if (!snap?.success) { sendResponse({ success: false, error: snap?.error ?? 'reveal returned no snapshot' }); return; }
+          if (snap.navigated) { Logger.warn('explore', 'RESOLVE_REVEALED_ROLES: trigger NAVIGATED instead of revealing — aborting'); sendResponse({ success: false, error: 'trigger navigated to another page instead of opening a layer' }); return; }
+          Logger.info('explore', `RESOLVE_REVEALED_ROLES: poked trigger → opened ${snap.opened ?? '?'} new element(s), snapshot ${String(snap.snapshot || '').length} chars`);
+          if (!snap.opened) Logger.warn('explore', 'RESOLVE_REVEALED_ROLES: poke revealed NOTHING — the trigger selector may not be the actual opener (resolving against the unchanged DOM)');
+
+          let screenshot = null;
+          if (tabInfo.active) {
+            try { screenshot = await chrome.tabs.captureVisibleTab(tabInfo.windowId, { format: 'jpeg', quality: 55 }); }
+            catch (e) { Logger.warn('background', `RESOLVE_REVEALED_ROLES screenshot failed (continuing): ${e.message}`); }
+          }
+
+          // Reuse the artifact's verified revealed-child selectors for the
+          // hidden roles (the modal's buttons were captured during exploration).
+          const knownSelectors = await _knownSelectorsForUrl(groundId, snap.url ?? url);
+          Logger.info('explore', `RESOLVE_REVEALED_ROLES: ${Array.isArray(knownSelectors) ? knownSelectors.length : 0} known verified selector(s) from artifact`);
+          const out = await AnthropicService.resolveRoles({
+            roles, url: snap.url ?? url, title: snap.title ?? '', domSnapshot: snap.snapshot ?? '', screenshot, registryLandmarks: null, knownSelectors, priorAttempt: null,
+          });
+          const resolutions = Array.isArray(out?.resolutions) ? out.resolutions : [];
+
+          // Verify each selector WHILE the layer is still open.
+          for (const r of resolutions) {
+            if (!r || !r.selector) { if (r) r.matchedCount = 0; continue; }
+            try {
+              const pr = await chrome.tabs.sendMessage(tabId, { type: 'PROBE_SELECTOR', payload: { selector: r.selector } }, { frameId: 0 });
+              r.matchedCount = pr?.matchedCount ?? 0;
+            } catch { r.matchedCount = 0; }
+            Logger.info('explore', `RESOLVE_REVEALED_ROLES[${r.role}]: ${r.selector ? `"${String(r.selector).slice(0, 70)}" → matched ${r.matchedCount}` : 'abstained'}`);
+          }
+
+          // Restore the page.
+          try { await chrome.tabs.sendMessage(tabId, { type: 'CLOSE_OVERLAYS' }, { frameId: 0 }); } catch { /* */ }
+
+          Logger.info('explore', `RESOLVE_REVEALED_ROLES done: ${resolutions.filter(r => r?.selector && r.matchedCount > 0).length}/${roles.length} verified in revealed layer`);
+          sendResponse({ success: true, resolutions, trigger });
+        } catch (err) {
+          Logger.error('background', `RESOLVE_REVEALED_ROLES failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();

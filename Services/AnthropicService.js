@@ -1894,7 +1894,7 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
    * @param {{ intent: string, url?: string, title?: string, domSnapshot?: string, screenshot?: string|null, siblingLocales?: Array|null, registryLandmarks?: Array|null }} params
    * @returns {Promise<{ options: Array<{name:string, rationale:string, onPage:boolean, reachedVia:string|null, roles:Array<{role:string,description:string,multiplicity:string}>, predicates:Array<{kind:'urlMatches',pattern:string,mode:string}>}> }|null>}
    */
-  static async proposePerspectives({ intent, url, title, domSnapshot, screenshot = null, siblingLocales = null, registryLandmarks = null }) {
+  static async proposePerspectives({ intent, url, title, domSnapshot, screenshot = null, siblingLocales = null, registryLandmarks = null, pageStructure = null }) {
     const seed = (typeof intent === 'string' ? intent : '').trim();
     if (!seed) return null;
 
@@ -1912,7 +1912,9 @@ Return ONLY a JSON object:
       "reachedVia": null,
       "roles": [
         { "role": "search-input", "description": "the text box where the query is typed", "multiplicity": "one" },
-        { "role": "result-item",  "description": "a single result row in the list",        "multiplicity": "many" }
+        { "role": "result-item",  "description": "a single result row in the list",        "multiplicity": "many" },
+        { "role": "login-trigger", "description": "the 'Log in' button that opens the auth modal", "multiplicity": "one" },
+        { "role": "google-signin", "description": "the Google sign-in button inside the modal", "multiplicity": "one", "hidden": true, "revealedBy": "login-trigger" }
       ],
       "predicates": [
         { "kind": "urlMatches", "pattern": "/search", "mode": "contains" }
@@ -1924,13 +1926,17 @@ Return ONLY a JSON object:
 Rules:
 - 2-4 options. Each must be a COHERENT perspective serving the stated intent — not a grab-bag.
 - "name" = short kebab-case identifier for the perspective ("search-results", "product-detail", "checkout-form").
-- "roles" = 2-8 per option. "role" is a short kebab-case semantic name; "description" says what element fills it (so the user knows what to pick); "multiplicity" is one | many | optional.
+- MINIMAL roles — propose the FEWEST that accomplish the intent: only the elements the user must act on, plus the trigger(s) needed to reach them. Do NOT enumerate every element of a revealed modal/menu/form. Examples: "sign in with Google" → login-trigger + google-signin (≈2 roles), NOT username/password/facebook/close; "search for X" → search-input + submit (+ result-item if the intent is to read results). A focused 2-4 role perspective beats an 8-role grab-bag.
+- "roles" = "role" is a short kebab-case semantic name; "description" says what element fills it (so the user knows what to pick); "multiplicity" is one | many | optional.
+- HIDDEN roles: for a role whose element appears ONLY after an interaction (inside a dropdown menu, a modal, an expanded panel), set "hidden": true and "revealedBy": the role name (within THIS perspective's roles) of the control that reveals it. That revealing control MUST itself be one of the roles (e.g. a "login-trigger" role), and you must list the trigger role BEFORE the role(s) it reveals. This lets the resolver open the trigger and find the hidden element. (On-page trigger + hidden children all stay onPage:true.)
 - Roles describe FUNCTION, not appearance ("primary-action", "result-item" — not "blue-button", "div-3").
 - "predicates" (optional) = ONLY urlMatches entries that declare where this perspective applies. "pattern" is a URL substring/regex/exact string; "mode" is contains | exact | regex. Do NOT propose landmark-based predicates — the landmarks don't exist yet. Omit predicates if no reliable URL signal.
 - "onPage" = true if THIS perspective's elements are present on the CURRENT page you are analyzing; false if it belongs to a DOWNSTREAM page reached only AFTER acting (e.g., the results page that appears after submitting a search, or a detail page after clicking a result). Judge this from the actual page content/screenshot.
+- DEPTH IS NOT DOWNSTREAM. Content revealed by an interaction on the SAME page — a dropdown menu, a modal/dialog, an expanded panel, an accordion, a tab — stays on the current page (the URL does not change). That is in-page DEPTH: keep onPage:true and model it with hidden/revealedBy roles (below). "downstream" (onPage:false) means a DIFFERENT page you NAVIGATE to (the URL changes). A login MODAL that opens over this page is depth (onPage:true); a separate login PAGE is downstream (onPage:false).
 - "reachedVia" = for a downstream perspective (onPage:false), a SHORT phrase for how you reach it from the current page ("after submitting the search", "after clicking a result"). null for on-page perspectives.
 - List the on-page perspective(s) FIRST. You MAY include downstream perspectives that complete the intent's journey, but mark them onPage:false — the user can only fill a perspective's roles once they are on its page.
-- Favor the intent. If the intent is narrow ("capture search results"), don't propose unrelated perspectives.`;
+- Favor the intent. If the intent is narrow ("capture search results"), don't propose unrelated perspectives.
+- DEPTH: a PAGE STRUCTURE map may be attached — it lists disclosure controls (dropdowns, menus, modals, tabs, accordions) that were poked, and the elements each one REVEALED. This content is NOT in the static DOM listing because it only appears after an interaction. Treat revealed elements as first-class: propose roles for them too, and in the role "description" say how it is revealed (e.g., "an item in the account menu, revealed after clicking the avatar"). These stay onPage:true (same page, just disclosed) — onPage:false is only for content reached by NAVIGATING away.`;
 
     // Base context — identical in baseline and enhanced runs, so the A/B
     // measures the ADDED context (screenshot + library) holding the DOM fixed.
@@ -1956,6 +1962,23 @@ Rules:
         return `- ${lm?.alias ?? '(no-alias)'}${role}${d}`;
       }).join('\n');
       userText += `\n\nLANDMARKS ALREADY CAPTURED ON THIS GROUND (these elements exist and can be reused; align role names with them where the same element recurs):\n${block}`;
+    }
+
+    // v2.74.368 — Depth: the pageStructure artifact (a poke→observe sweep over
+    // disclosure controls). Render ONLY controls that actually revealed content,
+    // with their revealed children, so the author can propose roles for
+    // post-interaction landmarks the static DOM can't show.
+    if (pageStructure && Array.isArray(pageStructure.controls)) {
+      const revealing = pageStructure.controls.filter(c => c?.observation === 'reveal' && Array.isArray(c.revealed) && c.revealed.length);
+      if (revealing.length) {
+        const block = revealing.slice(0, 16).map(c => {
+          const head = `▸ "${(c.label || c.role || 'control').slice(0, 50)}" [${c.role}]${c.haspopup ? ` haspopup=${c.haspopup}` : ''} reveals:`;
+          const kids = c.revealed.slice(0, 12).map(r => `    • "${(r.label || '').slice(0, 50)}" [${r.role}]`).join('\n');
+          const more = c.revealed.length > 12 ? `\n    • …(+${c.revealed.length - 12} more)` : '';
+          return `${head}\n${kids}${more}`;
+        }).join('\n');
+        userText += `\n\nPAGE STRUCTURE (interactions that REVEAL hidden content — these elements are NOT in the static DOM above; propose roles for them and note how each is revealed):\n${block}`;
+      }
     }
 
     // Enhanced — screenshot as the first content block (layout / prominence /
@@ -2007,9 +2030,14 @@ Rules:
           role,
           description: (typeof r?.description === 'string' ? r.description.trim() : '').slice(0, 160),
           multiplicity: MULT.has(r?.multiplicity) ? r.multiplicity : 'one',
+          // v2.74.381 — depth linkage for reveal-aware resolve.
+          hidden: r?.hidden === true,
+          revealedBy: (typeof r?.revealedBy === 'string' && r.revealedBy.trim()) ? kebab(r.revealedBy) : null,
         });
         if (roles.length >= 10) break;
       }
+      // Drop revealedBy references that don't point to a real role in this option.
+      for (const rr of roles) { if (rr.revealedBy && !roles.some(x => x.role === rr.revealedBy)) { rr.revealedBy = null; } }
       if (!name || roles.length === 0) continue;           // an option needs a name + ≥1 role
       const predicates = [];
       for (const p of Array.isArray(o?.predicates) ? o.predicates : []) {
@@ -2039,6 +2067,86 @@ Rules:
   }
 
   /**
+   * v2.74.368 — "Plan page exploration": given the enumerated disclosure
+   * CANDIDATES on a page (controls likely to reveal hidden content), pick a
+   * budget-limited subset worth ACTIVATING. The content-script sweep then pokes
+   * only those, so we spend the poke budget on controls that expose structural
+   * depth (menus, modals, tab panels, accordions) instead of every toggle.
+   *
+   * The `plan` role: Claude judges which interactions to perform; the system
+   * still verifies what each reveal produces (the sweep is deterministic). A
+   * bad pick wastes a poke, never corrupts the artifact. Returns selectors that
+   * MUST be members of the supplied candidate set (others are dropped).
+   *
+   * @param {{ url?:string, title?:string, candidates: Array<{selector:string,role?:string,label?:string,expanded?:string|null,haspopup?:string|null,safe?:boolean}>, screenshot?:string|null, maxPokes?:number }} params
+   * @returns {Promise<{ plan: string[], reasons: Record<string,string> }|null>}
+   */
+  static async planPageExploration({ url, title, candidates, screenshot = null, maxPokes = 12 }) {
+    const cand = (Array.isArray(candidates) ? candidates : []).filter(c => c && typeof c.selector === 'string' && c.selector);
+    if (cand.length === 0) return null;
+    const budget = Math.max(1, Math.min(24, Number.isFinite(maxPokes) ? maxPokes : 12));
+
+    const systemPrompt = `You plan a DISCLOSURE-EXPLORATION sweep of a web page. You are given a SCREENSHOT and a numbered list of candidate CONTROLS. The list is a deliberately BROAD net — every safe, plausibly-interactive element — so MANY entries will be irrelevant (plain links, list items, decorative buttons). YOU are the precision filter: use the screenshot + each control's position (rect) + label/hint to pick the ones that, when activated, will REVEAL hidden structure (dropdowns, menus, modals, tabs, accordions, carousels, "show more", filter panels). The system then ACTIVATES the ones you pick (hover + click), observes what becomes visible, and restores the page. Spend a limited budget on the controls most likely to expose STRUCTURAL DEPTH the static page can't show.
+
+Return ONLY a JSON object:
+{ "plan": [ { "index": 3, "reason": "account menu — likely reveals nav links" } ] }
+
+Rules:
+- Pick UP TO ${budget} controls, by their "index" in the list. USE THE BUDGET: when several distinct controls could each reveal something (a nav/account menu, a category dropdown, a carousel, a tab strip, a filter panel), include them all up to the limit — don't return just one or two unless the page truly has only that. Poking is SAFE (navigation is blocked), so err toward INCLUDING the plausibly-revealing ones.
+- The screenshot is your STRONGEST signal — a control drawn with a ▾ chevron / caret / arrow, or that visually looks like a menu/dropdown/tab, should be picked regardless of how its hint reads (hints come from imperfect markup; what you SEE is more reliable).
+- Each control has a "hint" tag: labeled-icon, icon, arrow-glyph, chevron, haspopup, aria-expanded, aria-controls, combobox, tab, menuitem, data-toggle, keyword, clickable (clickable = matched the broad net but no specific affordance — judge it from the screenshot).
+  • hint=labeled-icon is the classic "Label ▾" DROPDOWN BUTTON ("Explore ▾", "Sort by ▾", "Filters ▾") — these almost always open a useful menu/modal. ALWAYS include them.
+  • hint=icon / arrow-glyph / icon-only with an EMPTY label are bare icon controls (menu/dropdown/carousel arrows); the 'near "…"' text says what they relate to. Prefer them; don't skip for lacking a label.
+- Prefer controls that reveal NAVIGATION, distinct SECTIONS, or MORE SELECTABLE OPTIONS — account/profile menus, hamburger nav, category/"Explore" dropdowns, filter panels, modal openers, tab strips, accordions, AND carousels/sliders (advancing a carousel surfaces additional selectable items that aren't otherwise reachable).
+- SKIP: duplicates of a control you already picked, pure cosmetic toggles (dark mode, mute, play/pause), and controls marked safe=false.
+- IMPORTANT — skip controls that NAVIGATE to another page rather than reveal content in place: a site logo/home, breadcrumb links, "see more / view all" links, category links that load a new page, pagination. Poking those leaves the page. Prefer controls that DISCLOSE in place (a menu/modal/panel/tab/accordion/carousel opens without leaving). A control that opens a sign-in/sign-up MODAL is good (it discloses); one that goes to a separate login PAGE is not.
+- "reason" = a short phrase (why this control is worth opening).
+- If genuinely nothing is worth poking, return { "plan": [] }.`;
+
+    const lines = cand.slice(0, 120).map((c, i) => {
+      const flags = [c.hint ? `hint=${c.hint}` : '', c.expanded != null ? `expanded=${c.expanded}` : '', c.haspopup ? `haspopup=${c.haspopup}` : '', c.safe === false ? 'safe=false' : ''].filter(Boolean).join(' ');
+      const label = String(c.label || '').slice(0, 60);
+      const ctx = (!label && c.context) ? ` near "${String(c.context).slice(0, 50)}"` : '';
+      return `${i}. [${c.role || '?'}] "${label}"${ctx}${flags ? ` (${flags})` : ''}`;
+    }).join('\n');
+    let userText = `URL: ${url ?? '(unknown)'}\nTitle: ${title ?? '(unknown)'}\nBudget: ${budget} pokes\n\nCANDIDATE CONTROLS:\n${lines}`;
+
+    const userContent = [];
+    if (typeof screenshot === 'string') {
+      const m = /^data:(image\/[a-z]+);base64,(.+)$/i.exec(screenshot);
+      if (m) { userContent.push({ type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } }); userText += '\n\n(A screenshot of the page is attached — use it to judge which controls are prominent / structural.)'; }
+    }
+    userContent.push({ type: 'text', text: userText });
+
+    Logger.info('AnthropicService', `planPageExploration — ${cand.length} candidates, budget ${budget}`);
+    let parsed;
+    try {
+      const raw = await AnthropicService.#call(systemPrompt, userContent, 700, [], { role: 'plan', operation: 'planPageExploration' });
+      if (!raw?.success) { Logger.warn('AnthropicService', `planPageExploration failed: ${raw?.error}`); return null; }
+      const json = AnthropicService.#firstJsonObject(raw.text);
+      if (!json) { Logger.warn('AnthropicService', 'planPageExploration: no JSON'); return null; }
+      parsed = JSON.parse(json);
+    } catch (e) {
+      Logger.warn('AnthropicService', `planPageExploration error: ${e.message}`);
+      return null;
+    }
+
+    const plan = [];
+    const reasons = {};
+    for (const p of Array.isArray(parsed?.plan) ? parsed.plan : []) {
+      const idx = Number(p?.index);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= cand.length) continue;
+      const sel = cand[idx].selector;
+      if (plan.includes(sel)) continue;
+      if (cand[idx].safe === false) continue;                 // never plan an unsafe control
+      plan.push(sel);
+      if (typeof p?.reason === 'string' && p.reason.trim()) reasons[sel] = p.reason.trim().slice(0, 120);
+      if (plan.length >= budget) break;
+    }
+    return { plan, reasons };
+  }
+
+  /**
    * v2.74.352 — "Resolve roles": given a proposed perspective's ROLES and the
    * current page, return a concrete CSS selector for each role (or null to
    * abstain). The inverse of the picker — Claude resolves all roles in one
@@ -2060,7 +2168,7 @@ Rules:
    * @param {{ roles: Array<{role:string,description?:string,multiplicity?:string}>, url?:string, title?:string, domSnapshot?:string, screenshot?:string|null, registryLandmarks?:Array|null, priorAttempt?:{confirmed?:Array,attempts?:Array}|null }} params
    * @returns {Promise<{ resolutions: Array<{role:string, selector:string|null, confidence:number, justification:string}> }|null>}
    */
-  static async resolveRoles({ roles, url, title, domSnapshot, screenshot = null, registryLandmarks = null, priorAttempt = null }) {
+  static async resolveRoles({ roles, url, title, domSnapshot, screenshot = null, registryLandmarks = null, priorAttempt = null, knownSelectors = null }) {
     const roleList = (Array.isArray(roles) ? roles : [])
       .filter(r => r && typeof r.role === 'string' && r.role.trim());
     if (roleList.length === 0) return null;
@@ -2079,6 +2187,8 @@ Return ONLY a JSON object:
 Rules:
 - Selector MUST be pure CSS usable by document.querySelectorAll. NEVER use Playwright/Cypress/jQuery extensions (:has-text, :text, :text-is, :contains, :visible, :nth-match, :near, text=, xpath=). They throw at runtime.
 - Prefer durable hooks: id, data-testid / data-*, name, aria-label, role, type, semantic tags. AVOID nth-child chains, hashed/auto-generated class names, and long brittle descendant chains.
+- A BARE POSITIONAL selector on a generic tag (e.g. "button:nth-of-type(2)", "div > button:nth-child(3)") is almost always WRONG — it matches by POSITION, not meaning, and "matches one element" does NOT prove it's the right one. If the element has no stable hook, SCOPE the positional part under a stable/semantic ancestor (a landmark id, header/nav, [role=dialog], an aria-label'd container) so it cannot match the wrong element. For a TRIGGER role (one whose job is to OPEN something), a wrong target opens the wrong thing — be extra strict, and abstain rather than guess positionally.
+- KNOWN VERIFIED SELECTORS may be provided below (captured by automated page exploration — each was confirmed to resolve, and triggers were confirmed to reveal content). When a role matches one, REUSE its selector VERBATIM — it is more reliable than anything you can infer from the DOM text.
 - multiplicity "one"/"optional" → the selector must resolve to EXACTLY ONE element. multiplicity "many" → the selector must match the REPEATING item (multiple elements — e.g. the row/card that recurs), not one arbitrary instance.
 - If a listed Ground landmark already matches a role, REUSE its selector verbatim.
 - ABSTAIN with selector:null when no element on this page clearly plays the role. A wrong selector is worse than a gap — the user will pick it manually.
@@ -2097,6 +2207,16 @@ Rules:
         return `- ${lm?.alias ?? '(no-alias)'}${role}${sel}${d}`;
       }).join('\n');
       userText += `\n\nLANDMARKS ALREADY CAPTURED ON THIS GROUND (reuse a selector verbatim if it matches a role):\n${block}`;
+    }
+    // v2.74.385 — Verified selectors from page exploration (pageStructure). Each
+    // was confirmed to resolve; triggers were confirmed to actually reveal. Far
+    // more reliable than inferring a positional selector from hashed-class DOM.
+    if (Array.isArray(knownSelectors) && knownSelectors.length) {
+      const block = knownSelectors.slice(0, 140).map(k => {
+        const via = k?.via ? ` (revealed via "${String(k.via).slice(0, 30)}")` : '';
+        return `- "${String(k?.label ?? '').slice(0, 50)}" [${k?.role ?? '?'}]${via} => ${String(k?.selector ?? '').slice(0, 140)}`;
+      }).join('\n');
+      userText += `\n\nKNOWN VERIFIED SELECTORS (from page exploration — REUSE verbatim when a role matches one):\n${block}`;
     }
     // v2.74.356 — Repair pass: feed back verification verdicts so Claude
     // corrects what failed. Confirmed successes guide the site's conventions.
