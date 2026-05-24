@@ -932,49 +932,19 @@ CapabilityAPI.subscribe((event) => {
   }
 });
 
-// v2.74.231 — Locale auto-discovery cache helpers. Used by the
-// AUTO_DISCOVER_LOCALE handler to memoize Claude's suggestions per
-// (groundId, normalized page URL) so the "+ Locale" button doesn't
-// re-call Claude on every click. Rediscover button in locale-capture
-// passes force:true to bypass and rewrite cache.
-//
-// Storage shape:
-//   key: 'localeAutoDiscoveryCache'
-//   value: { [groundId]: { [normalizedUrl]: { suggestion, url, capturedAt } } }
-const LOCALE_DISCOVERY_CACHE_KEY = 'localeAutoDiscoveryCache';
-
+// v2.74.231/392 — URL normalizer (origin + pathname; strips query/fragment) for
+// per-(ground, page) caches. Originally for the now-removed locale auto-discovery
+// cache; retained because the pageStructure cache + resolve knownSelectors reuse
+// it. (The localeAutoDiscoveryCache + its read/write helpers were removed with
+// the legacy auto-suggest feature.)
 function _normalizeUrlForLocaleCache(url) {
   if (!url || typeof url !== 'string') return '';
   try {
     const u = new URL(url);
-    // origin + pathname — strip query + fragment. Same kind of page
-    // (different query params for filters, sort, etc.) collides into
-    // the same cache entry intentionally.
     return u.origin + u.pathname;
   } catch {
     return url;
   }
-}
-
-async function _readLocaleDiscoveryCache(groundId, cacheKey) {
-  if (!groundId || !cacheKey) return null;
-  try {
-    const got = await chrome.storage.local.get(LOCALE_DISCOVERY_CACHE_KEY);
-    const map = got?.[LOCALE_DISCOVERY_CACHE_KEY] ?? {};
-    return map[groundId]?.[cacheKey] ?? null;
-  } catch (e) {
-    Logger.warn('background', `localeAutoDiscoveryCache read failed: ${e.message}`);
-    return null;
-  }
-}
-
-async function _writeLocaleDiscoveryCache(groundId, cacheKey, entry) {
-  if (!groundId || !cacheKey) return;
-  const got = await chrome.storage.local.get(LOCALE_DISCOVERY_CACHE_KEY);
-  const map = got?.[LOCALE_DISCOVERY_CACHE_KEY] ?? {};
-  if (!map[groundId]) map[groundId] = {};
-  map[groundId][cacheKey] = entry;
-  await chrome.storage.local.set({ [LOCALE_DISCOVERY_CACHE_KEY]: map });
 }
 
 // v2.74.367 — pageStructure artifact cache. The "+ Locale" depth sweep
@@ -3876,119 +3846,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // figure out what mode (if any) was previously associated with the
     // newly-active tab. Returns null when no record exists; the shell
     // falls back to ground-view for that tab.
-    // v2.74.43 — Ground sidepanel's + Auto locale flow. Capture the
-    // active tab's DOM, send it to Claude with a locale-identification
-    // prompt, return the suggestion. The caller (ground-view) then
-    // dispatches BEGIN_LOCALE_CAPTURE with the suggestion as
-    // `prefilledLocale` so the user lands in a pre-filled form.
-    //
-    // v2.74.231 — Caching. Discovery results cache per (groundId, page
-    // pathname) in chrome.storage.local under
-    // `localeAutoDiscoveryCache`. The "+ Locale" button now hits cache
-    // by default, only calling Claude once per (ground, sub-page);
-    // the rediscover button in locale-capture passes `force: true` to
-    // bypass cache and rewrite it.
-    case 'AUTO_DISCOVER_LOCALE': {
-      (async () => {
-        try {
-          const { tabId, groundId, force } = payload ?? {};
-          if (typeof tabId !== 'number') {
-            sendResponse({ success: false, error: 'tabId required' });
-            return;
-          }
-          // v2.74.44 — Refuse non-http(s) tabs early — content scripts
-          // can't run on chrome://, chrome-extension://, the web store,
-          // etc. Surface a clearer error than the "Receiving end does
-          // not exist" message chrome.tabs.sendMessage would otherwise
-          // raise.
-          let tabInfo;
-          try {
-            tabInfo = await chrome.tabs.get(tabId);
-          } catch (e) {
-            sendResponse({ success: false, error: `Tab not found: ${e.message}` });
-            return;
-          }
-          const url = tabInfo?.url ?? '';
-          if (!/^https?:/i.test(url)) {
-            sendResponse({
-              success: false,
-              error: 'This page does not allow content scripts (chrome://, extension page, or restricted URL). Open a regular https:// page first.',
-            });
-            return;
-          }
-          // v2.74.231 — Cache lookup. Key normalizes URL to origin +
-          // pathname (drop query + fragment) so re-visits of the
-          // "same kind of page" hit cache. The user can broaden the
-          // cache by passing force:true via the rediscover button.
-          const cacheKey = _normalizeUrlForLocaleCache(url);
-          if (!force && groundId && cacheKey) {
-            const cached = await _readLocaleDiscoveryCache(groundId, cacheKey);
-            if (cached?.suggestion) {
-              Logger.info('background', `AUTO_DISCOVER_LOCALE cache hit (groundId=${groundId}, key=${cacheKey})`);
-              sendResponse({ success: true, suggestion: cached.suggestion, fromCache: true });
-              return;
-            }
-          }
-          // v2.74.44 — Re-inject the content script before messaging.
-          // The manifest's document_start auto-injection only runs on
-          // fresh page loads — a tab loaded before this extension
-          // session has no live listener, so chrome.tabs.sendMessage
-          // throws "Receiving end does not exist". Best-effort
-          // injection (mirrors BEGIN_LOCALE_CAPTURE / prepareTabFor
-          // Authoring); failure is non-fatal because the existing
-          // script (if any) still answers the next sendMessage.
-          try {
-            // v2.74.166 — allFrames: true so subsequent picker /
-            // locale-capture activity reaches iframes too.
-            await chrome.scripting.executeScript({
-              target: { tabId, allFrames: true },
-              files: ['ContentScripts/contentScript.js'],
-            });
-          } catch (e) {
-            Logger.warn('background', `AUTO_DISCOVER_LOCALE: content-script inject failed (continuing): ${e.message}`);
-          }
-          // Pull the rich DOM snapshot from the content script. Same
-          // shape DiscoveryService uses — a sanitized representation
-          // with text-bearing landmarks + interactive controls
-          // (id / name / aria attrs preserved).
-          let snap;
-          try {
-            snap = await chrome.tabs.sendMessage(tabId, { type: 'DOM_SNAPSHOT_RICH' }, { frameId: 0 });   // top frame only
-          } catch (e) {
-            sendResponse({ success: false, error: `DOM snapshot failed: ${e.message}` });
-            return;
-          }
-          if (!snap?.success) {
-            sendResponse({ success: false, error: snap?.error ?? 'DOM snapshot returned no payload' });
-            return;
-          }
-          const suggestion = await AnthropicService.suggestLocale({
-            url         : snap.url   ?? url,
-            title       : snap.title ?? '',
-            domSnapshot : snap.snapshot ?? '',
-          });
-          if (!suggestion) {
-            sendResponse({ success: false, error: 'Claude returned no usable suggestion' });
-            return;
-          }
-          // v2.74.231 — Persist the Claude suggestion to cache so
-          // subsequent "+ Locale" clicks on the same sub-page reuse
-          // it instead of re-calling Claude.
-          if (groundId && cacheKey) {
-            try {
-              await _writeLocaleDiscoveryCache(groundId, cacheKey, { suggestion, url, capturedAt: Date.now() });
-            } catch (e) {
-              Logger.warn('background', `localeAutoDiscoveryCache write failed: ${e.message}`);
-            }
-          }
-          sendResponse({ success: true, suggestion, fromCache: false });
-        } catch (err) {
-          Logger.error('background', `AUTO_DISCOVER_LOCALE failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
+    // v2.74.392 — AUTO_DISCOVER_LOCALE removed (legacy Claude auto-suggested
+    // landmarks). Locale authoring is the description-first propose→resolve→
+    // auto-structure flow; "+ Locale" opens a blank draft.
 
     // v2.74.348 — LOCALE_SPEC § 13 description-first proposal flow. Given the
     // user's intent (the Locale description) + the current page, Claude
@@ -4295,6 +4155,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           };
           Logger.info('explore', `EXPLORE_PAGE_STRUCTURE done: ${bandYs.length} band(s), poked ${allControls.length}, revealed ${controlsRevealing}, navAttempts ${totalNav}${aborted ? `, aborted=${aborted}` : ''}`);
 
+          // v2.74.393 — Page-affordance description (intent-independent "what
+          // goals can be accomplished here"), cached on the artifact so the
+          // grounded-intent step can reuse it without recomputing per intent.
+          try {
+            let affShot = null;
+            if (tabInfo.active) { try { affShot = await chrome.tabs.captureVisibleTab(tabInfo.windowId, { format: 'jpeg', quality: 55 }); } catch { /* */ } }
+            const affordances = await AnthropicService.describePageAffordances({ url: pageUrl, title, surface: allSurface, controls: allControls, screenshot: affShot });
+            if (affordances) { structure.affordances = affordances; Logger.info('explore', `affordances described (${affordances.length} chars)`); }
+          } catch (e) { Logger.warn('background', `describePageAffordances failed (continuing): ${e.message}`); }
+
           const cacheKey = _normalizeUrlForLocaleCache(pageUrl);
           if (groundId) {
             try { await _writePageStructureCache(groundId, cacheKey, { structure, url: pageUrl, capturedAt: structure.capturedAt }); }
@@ -4303,6 +4173,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ success: true, structure, cacheKey });
         } catch (err) {
           Logger.error('background', `EXPLORE_PAGE_STRUCTURE failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // v2.74.393 — Ground a user's raw intent in the page. Reads the cached
+    // pageStructure affordance description and asks Claude for a refined,
+    // page-grounded intent + achievability verdict (preserving the user's goal).
+    // Payload: { tabId, groundId?, intent } → { success, groundedIntent,
+    //   achievable, note, hadAffordance } | { success:false, error }.
+    case 'GROUND_INTENT': {
+      (async () => {
+        try {
+          const { tabId, groundId = null, intent } = payload ?? {};
+          if (typeof intent !== 'string' || !intent.trim()) { sendResponse({ success: false, error: 'intent required' }); return; }
+          let url = '', title = '';
+          if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); url = t?.url ?? ''; title = t?.title ?? ''; } catch { /* */ } }
+          // Reuse the cached affordance description (built during Explore).
+          let affordances = null;
+          if (groundId && url) {
+            try { const entry = await _readPageStructureCache(groundId, _normalizeUrlForLocaleCache(url)); affordances = entry?.structure?.affordances ?? null; } catch { /* */ }
+          }
+          if (!affordances) {
+            // No explored affordance → can't ground; pass the intent through so
+            // the UI can still propose (and nudge the user to Explore first).
+            sendResponse({ success: true, groundedIntent: intent.trim(), achievable: 'unknown', note: 'Run Explore on this page to ground the intent in its actual capabilities.', hadAffordance: false });
+            return;
+          }
+          const out = await AnthropicService.groundIntent({ userIntent: intent, affordances, url, title });
+          if (!out) { sendResponse({ success: false, error: 'Claude returned no grounded intent.' }); return; }
+          sendResponse({ success: true, ...out, hadAffordance: true });
+        } catch (err) {
+          Logger.error('background', `GROUND_INTENT failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();
@@ -4470,12 +4374,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           });
           const resolutions = Array.isArray(out?.resolutions) ? out.resolutions : [];
 
-          // Verify each selector WHILE the layer is still open.
+          // Verify each selector WHILE the layer is still open — via INSPECT so
+          // we also capture the report needed to profile the hidden landmark
+          // (description/ops/pitfalls); the element is gone once the modal closes.
           for (const r of resolutions) {
             if (!r || !r.selector) { if (r) r.matchedCount = 0; continue; }
             try {
-              const pr = await chrome.tabs.sendMessage(tabId, { type: 'PROBE_SELECTOR', payload: { selector: r.selector } }, { frameId: 0 });
-              r.matchedCount = pr?.matchedCount ?? 0;
+              const ins = await chrome.tabs.sendMessage(tabId, { type: 'INSPECT_ELEMENT', payload: { target: r.selector, pickLast: false } }, { frameId: 0 });
+              if (ins?.success && ins.report) { r.matchedCount = ins.report.matchCount ?? 1; r.inspect = ins.report; }
+              else r.matchedCount = 0;
             } catch { r.matchedCount = 0; }
             Logger.info('explore', `RESOLVE_REVEALED_ROLES[${r.role}]: ${r.selector ? `"${String(r.selector).slice(0, 70)}" → matched ${r.matchedCount}` : 'abstained'}`);
           }

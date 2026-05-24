@@ -3218,3 +3218,211 @@ verify that run against it) see the complete modal.
 
 **Touched.** `ContentScripts/contentScript.js` (pokeAndSnapshot poll-until-stable
 + settle), `manifest.json`.
+
+---
+
+## v2.74.389 — Converge propose→resolve with "Structure with Claude": seed the 🧬 step with Resolve's roles + verified triggers
+
+**Date:** 2026-05-24
+**Decision by:** user — "propose→resolve should mirror Structure-with-Claude;
+struct-with-claude is the user-authored path but they should produce the same
+rich structure." Chose **"Seed the 🧬 button"** (structuring stays an explicit
+click; Resolve feeds it priors).
+
+**Context.** The two paths only differ in HOW landmarks get picked (LLM intent→
+resolve vs. user-authored picks); the structuring job (the typed LandmarkNode
+tree) should be identical. But propose→resolve's role + verified trigger
+knowledge (`roleFill`/`roleMult`/`hidden`/`revealedBy`/`triggerSelector`) was
+dropped before structuring, so `proposeLocaleStructure` re-inferred everything
+from alias/description — and hidden modal landmarks (no UID) were excluded
+entirely.
+
+**Changes.**
+- **Hidden landmarks get a local UID** at resolve time (`lmk_local_…`) so they're
+  structurable now (their element only exists with the modal open, so a profile
+  UID via static INSPECT isn't possible; save back-fills the same way).
+- **`onProposeStructure` passes priors**: each landmark now carries its GIVEN
+  `role`/`multiplicity`/`hidden` and a `revealedByRef` (the trigger landmark's
+  UID, mapped from the `revealedBy` role name via a roleFill→uid index).
+- **`proposeLocaleStructure` uses them**: renders the priors per landmark and a
+  new rule — use GIVEN role/multiplicity verbatim; for a `revealedBy: X`
+  landmark, add it to X's `triggers`, mark it conditional with a
+  presenceCondition, and group all co-revealed landmarks under ONE virtual
+  container (the revealed modal/menu) inside X's `contains`. So the structure
+  reflects the VERIFIED interaction depth instead of re-guessing it.
+
+**Net:** clicking 🧬 after propose→resolve yields the same rich, depth-accurate
+LandmarkNode tree as the user-authored path — now grounded in what Resolve
+actually proved (correct triggers + a virtual modal container), not inference.
+
+**Touched.** `Sidepanel/modes/locale-capture.js` (hidden-landmark uid +
+onProposeStructure priors), `Services/AnthropicService.js`
+(proposeLocaleStructure priors + prompt rule), `manifest.json`.
+
+---
+
+## v2.74.390 — Auto-profile resolved landmarks (Resolve now fills description/ops/pitfalls like Pick→Claude)
+
+**Date:** 2026-05-24
+**Reported by:** user — auto-created (resolved) landmarks have empty Description
++ all Claude-authored fields (operationsCommon, pitfalls, expectedContent,
+aliases). Chose **"Auto-profile during Resolve."**
+
+**Cause.** The Pick→Claude path runs `generateLandmarkProfile` after each pick to
+fill the rich profile; Resolve only set alias/selector/role + verified
+capabilities, so those fields stayed empty.
+
+**Fix.**
+- New `_profileResolvedLandmark(idx, presetProfile?, presetReport?)`: INSPECT the
+  selector (or use a preset report), call `GENERATE_LANDMARK_PROFILE_BG`, and
+  apply ONLY the authored metadata (description / aliases / operationsCommon /
+  pitfalls / expectedContent / effect / interactionPattern / profileConfidence) —
+  keeps Resolve's selector + verified + role untouched.
+- **Visible roles:** after the resolve loop, the newly-filled landmarks are
+  profiled in PARALLEL (`Promise.all`) so N landmarks ≈ one call's latency; the
+  "⏳ Resolving…" state holds during it.
+- **Hidden (modal) roles:** can't be INSPECTed once the modal closes, so
+  `RESOLVE_REVEALED_ROLES` now verifies via INSPECT (instead of PROBE) WHILE the
+  modal is open and returns the report (`r.inspect`); the reveal pass profiles
+  the hidden landmark from that report (the profile call is text-based — no live
+  element needed).
+
+**Net:** resolved landmarks (visible and hidden) come out with the same
+Claude-authored profile fields as manually Pick→Claude'd ones.
+
+**Touched.** `Sidepanel/modes/locale-capture.js` (`_profileResolvedLandmark` +
+parallel visible profiling + reveal-pass profiling), `background.js`
+(RESOLVE_REVEALED_ROLES INSPECT + return report), `manifest.json`.
+
+---
+
+## v2.74.391 — Auto-structure after Resolve
+
+**Date:** 2026-05-24
+**Decision by:** user ("auto struct after resolve" — superseding the earlier
+"seed the 🧬 button" choice).
+
+**Change.** `_runResolve` now calls `onProposeStructure()` automatically once
+Resolve has filled the roles + profiled them — so propose→resolve ends with the
+full LandmarkNode tree (contains/triggers/roles/virtual containers + overlays),
+no manual 🧬 click. Gated on `filled > 0` and ≥2 uid'd landmarks (so it won't
+fire on an empty/insufficient resolve, and won't hit onProposeStructure's
+"needs ≥2" warning). On a later resolve/retry it refines the prior tree (the
+existing refine path). Structuring is seeded with the v2.74.389 role + verified-
+trigger priors, so the auto tree matches the verified interaction depth.
+
+**Touched.** `Sidepanel/modes/locale-capture.js` (auto-call onProposeStructure
+at the end of _runResolve), `manifest.json`.
+
+---
+
+## v2.74.392 — Remove the legacy auto-suggested-landmarks feature; "+ Locale" opens a blank draft
+
+**Date:** 2026-05-24
+**Decision by:** user ("remove legacy auto suggested landmarks + locale button no
+longer suggests landmarks").
+
+**Context.** The old path: "+ Locale" (sidepanel) → AUTO_DISCOVER_LOCALE →
+`suggestLocale` (Claude proposes name + {alias,selector} landmarks) → locale-
+capture pre-filled, with a Rediscover button to re-run. That's fully superseded
+by the description-first propose → resolve → auto-profile → auto-structure flow,
+so it's removed.
+
+**Removed.**
+- **ground-view:** "+ Locale" button switched from `locale-auto` to `locale`
+  (opens a BLANK draft); the `locale-auto` dispatch branch + `_autoDiscoverLocale`
+  deleted. (Studio's "+ Locale" already opened blank.)
+- **locale-capture:** the Rediscover button (markup + `locRediscoverBtn` ref +
+  wiring) + `onRediscoverLandmarks`; the prefilled `{alias,selector}` fresh-
+  suggestion hydration branch (edit-mode `landmarkRefs` + structured-rehydration
+  paths untouched).
+- **background:** the `AUTO_DISCOVER_LOCALE` handler + the `localeAutoDiscovery
+  Cache` helpers (`LOCALE_DISCOVERY_CACHE_KEY` / `_read`/`_writeLocaleDiscovery
+  Cache`). KEPT `_normalizeUrlForLocaleCache` (pageStructure cache + resolve
+  knownSelectors reuse it).
+- **AnthropicService:** the `suggestLocale` method + its `getPromptTexts` entry.
+- **studio:** the `suggestLocale` Prompts-tab list entry.
+
+**Net.** "+ Locale" everywhere opens a blank locale-capture draft; landmark
+authoring is the description-first LLM flow (or manual Pick→Claude). No code
+references to the removed symbols remain (verified by grep).
+
+**Touched.** `Sidepanel/modes/ground-view.js`, `Sidepanel/modes/locale-capture.js`,
+`background.js`, `Services/AnthropicService.js`, `studio.js`, `manifest.json`.
+
+---
+
+## v2.74.393 — Intent grounding: cached page affordances + synthetic intent (editable proposal)
+
+**Date:** 2026-05-24
+**Decision by:** user ("Let's now focus on the locale's intent the main driver.
+1. rename description field → intent. 2. use the LLM to enrich the user's intent:
+a detailed page description of what goals are achievable, then a synthetic intent
+that redescribes the user's intent in page terms while preserving its goal, which
+then seeds propose→resolve"). Chosen via AskUserQuestion: **Architecture C —
+cached affordance + synth** and **Apply mode: editable proposal**.
+
+**Context.** The locale's free-text "description" is the main driver of the
+propose→resolve pipeline (it seeds `proposePerspectives`). But a raw user intent
+is unbounded — it can be vague, mis-scoped, or describe goals the page can't
+actually serve. The goal: enrich the intent against what the page can really do,
+without (a) paying to re-derive page understanding on every intent edit, (b)
+silently overwriting the author's words, or (c) warping their goal.
+
+**What we did.**
+- **Rename (UI only).** The "Description" field is relabeled **Intent**
+  (placeholder "What do you want to accomplish on this kind of page?"; propose
+  intro updated). The storage key stays `description` (no migration) — it remains
+  the seed `proposePerspectives` consumes.
+- **Intent-independent affordance, cached on the artifact.** New
+  `AnthropicService.describePageAffordances({url,title,surface,controls,
+  screenshot})` returns plain text — "what goals can be accomplished on this kind
+  of page" — derived from the explored structure (NOT from any intent). It is
+  generated ONCE at the end of `EXPLORE_PAGE_STRUCTURE` and stored on the artifact
+  as `structure.affordances`, so it is cached per (ground, normalized URL) for the
+  artifact's 7-day TTL. No per-intent cost.
+- **Per-intent grounding (cheap).** New `AnthropicService.groundIntent(
+  {userIntent,affordances,url,title})` returns JSON `{groundedIntent, achievable:
+  'yes'|'partial'|'no', note}`. It redescribes the user's intent in the page's
+  terms while **preserving the goal**, and flags (does not silently fix) a
+  goal/page mismatch via `achievable` + `note`. Background `GROUND_INTENT` reads
+  the cached `structure.affordances`; if none exists it degrades to a pass-through
+  (`{success:true, groundedIntent:intent, achievable:'unknown', note:'Run
+  Explore…', hadAffordance:false}`) — NO LLM call when there's nothing to ground
+  against.
+- **Editable proposal (no silent overwrite).** locale-capture shows a "✨ Ground
+  intent in this page" affordance under the Explore row. Clicking it renders a
+  proposal card: the grounded intent + an achievability badge
+  (yes/partial/no/unknown) + the note + **Use it / Dismiss**. The author's
+  original Intent is untouched until they click **Use it**, which writes the
+  grounded text into `_locDraft.description` (+ the input) and records provenance
+  in `authoringMetadata.description` (`source:'grounded'`, `authoredBy:'llm'`,
+  `originalIntent`, `achievable`). Then it seeds Propose as usual.
+
+**Justification.**
+- **Cost.** Affordance derivation is the expensive, screenshot-grounded step;
+  caching it on the artifact means re-grounding a tweaked intent is one small
+  text→JSON call. Editing the intent never re-explores the page.
+- **Goal fidelity.** `groundIntent` is instructed to preserve the goal and only
+  *flag* a mismatch (`achievable`/`note`) rather than rewrite it into something
+  the page supports — the author stays in control of scope.
+- **Transparency.** Editable proposal + preserved original + provenance metadata
+  means the synthetic intent is a suggestion the author accepts, not a black-box
+  mutation.
+- **Non-redundancy.** The synthetic intent earns its keep by becoming the saved
+  seed that drives propose→resolve; it isn't a throwaway.
+
+**Trade-off accepted.** Grounding quality is only as good as the cached
+affordance — if the page wasn't Explored (or the artifact is stale), grounding
+degrades to pass-through and the badge reads "? not explored". The author must run
+Explore first to get real grounding.
+
+**Reversibility.** Additive. The two AnthropicService methods, the `GROUND_INTENT`
+handler, and the locale-capture UI row are self-contained; removing them leaves
+the plain free-text Intent field (still keyed `description`) fully functional.
+
+**Touched.** `Services/AnthropicService.js` (`describePageAffordances`,
+`groundIntent`), `background.js` (`EXPLORE_PAGE_STRUCTURE` affordance capture,
+`GROUND_INTENT` handler), `Sidepanel/modes/locale-capture.js` (Intent rename,
+grounding row + handlers), `assets/sidepanel.css` (`.dbg-locale-ground*`),
+`manifest.json`.

@@ -510,12 +510,11 @@ function _renderGroundCard(entry) {
       key: 'locales',
       label: 'Locales',
       count: locales.length,
-      // v2.74.45 — Single + Locale button now runs the Claude-suggested
-      // locale flow (DOM snapshot → suggestLocale → locale-capture with
-      // prefilled name + description + landmarks). Manual blank-form
-      // entry is no longer surfaced from the Ground sidepanel.
+      // v2.74.392 — + Locale opens a BLANK locale-capture draft. Authoring is
+      // the description-first propose→resolve→auto-structure flow; the legacy
+      // Claude auto-suggested-landmarks path was removed.
       addLabel: '+ Locale',
-      addKind: 'locale-auto',
+      addKind: 'locale',
       groundId: ground.id,
       emptyMsg: 'No Locales yet — verified DOM landmark records for kinds of pages.',
       entries: locales.map(l => _renderLocaleEntry(l)),
@@ -1230,13 +1229,6 @@ async function _launchAuthoring(kind, groundId, groundUrl) {
     });
     return;
   }
-  // v2.74.43 — Auto-locale: ask Claude to suggest name + landmarks +
-  // description from the current page's DOM, then open locale-capture
-  // pre-filled with those values.
-  if (kind === 'locale-auto') {
-    await _autoDiscoverLocale(groundId, existingTabId);
-    return;
-  }
   // v2.74.53 — + Assert / + Analyze. Each dispatches a BEGIN_*_AUTHOR
   // background message; background sets the sidepanel mode and the
   // shell mounts the corresponding authoring panel. Same returnTo
@@ -1258,64 +1250,8 @@ async function _launchAuthoring(kind, groundId, groundUrl) {
   toast(`Authoring "${kind}" lives in Studio`, 'warn');
 }
 
-// v2.74.43 — Capture the current tab's DOM, ask Claude for a locale
-// suggestion (name + role/selector landmarks + description), then
-// dispatch BEGIN_LOCALE_CAPTURE with the suggestion as
-// `prefilledLocale`. locale-capture's mount seeds its draft from that
-// payload so the user lands in a fully-filled form ready to verify.
-async function _autoDiscoverLocale(groundId, existingTabId) {
-  // Toggle the button into a loading state so the user gets feedback
-  // while Claude works. Best-effort — if the button isn't found
-  // (re-render in flight), the toast at the end still signals.
-  const autoBtn = _mountEl?.querySelector(
-    `[data-gv-add="locale-auto"][data-gid="${CSS.escape(groundId)}"]`
-  );
-  const origLabel = autoBtn?.textContent;
-  if (autoBtn) { autoBtn.disabled = true; autoBtn.textContent = 'Suggesting…'; }
-
-  let res;
-  try {
-    res = await new Promise(resolve => {
-      chrome.runtime.sendMessage({
-        type: 'AUTO_DISCOVER_LOCALE',
-        // v2.74.231 — Pass groundId so background can cache the
-        // Claude suggestion per (groundId, sub-page URL). force:false
-        // (default) → use cache when available. Rediscover inside
-        // locale-capture passes force:true to bypass and rewrite.
-        payload: { tabId: existingTabId, groundId, force: false },
-      }, resolve);
-    });
-  } catch (e) {
-    res = { success: false, error: e?.message ?? 'unknown' };
-  }
-
-  if (!res?.success || !res?.suggestion) {
-    if (autoBtn) { autoBtn.disabled = false; autoBtn.textContent = origLabel ?? '+ Auto'; }
-    toast(`Locale suggestion failed: ${res?.error ?? 'no suggestion returned'}`, 'err');
-    return;
-  }
-
-  const suggestion = res.suggestion;
-  chrome.runtime.sendMessage({
-    type: 'BEGIN_LOCALE_CAPTURE',
-    payload: {
-      groundId,
-      existingTabId,
-      returnTo: 'ground-view',
-      prefilledLocale: {
-        name        : typeof suggestion.name        === 'string' ? suggestion.name        : '',
-        description : typeof suggestion.description === 'string' ? suggestion.description : '',
-        // v2.74.275 — Fresh suggestion (Claude's "+ Auto"); landmarks
-        // are draft entries without UIDs. Locale-capture hydrates
-        // these as starting state for Pick→Claude.
-        landmarks   : Array.isArray(suggestion.landmarks)
-          ? suggestion.landmarks
-              .filter(lm => lm && typeof lm.alias === 'string' && typeof lm.selector === 'string')
-              .map(lm => ({ alias: lm.alias.trim(), selector: lm.selector.trim() }))
-          : [],
-      },
-    },
-  });
-}
+// v2.74.392 — _autoDiscoverLocale removed: "+ Locale" no longer Claude-suggests
+// landmarks; it opens a blank draft (the description-first propose→resolve→
+// auto-structure flow does the authoring).
 
 export default { name: 'ground-view', mount, unmount, handleEvent };

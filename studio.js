@@ -4866,12 +4866,7 @@ const PROMPT_REGISTRY = [
   },
 
   // ── Locale / Landmark ──────────────────────────────────────────────
-  {
-    id   : 'suggestLocale',
-    label: 'Locale — Suggest Locale',
-    badge: 'discovery',
-    desc : 'Identifies a Locale (kind-of-page descriptor + named landmarks) from a URL + DOM snapshot. Used by the Locale Discover flow. Drops landmarks with Playwright-style selectors (v2.74.287).',
-  },
+  // v2.74.392 — 'suggestLocale' entry removed with the legacy auto-suggest feature.
   {
     id   : 'suggestSelector',
     label: 'Picker — Suggest Selector',

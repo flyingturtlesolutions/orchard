@@ -1484,109 +1484,9 @@ Rules:
     }
   }
 
-  /**
-   * v2.74.43 — Ask Claude to suggest a Locale for the current page.
-   * A Locale is a verified-landmark record: a kind-of-page descriptor
-   * with role-keyed CSS selectors that automation Fragments and
-   * Observations later reference.
-   *
-   * Returns:
-   *   name        — short locale name ("Search results", "Product detail")
-   *   description — 1-2 sentence summary of the page's purpose
-   *   landmarks   — array of { role, selector }
-   *
-   * The DOM snapshot should be a sanitized representation of the page —
-   * DiscoveryService's DOM_SNAPSHOT_RICH content-script call produces
-   * the right shape (text-bearing landmarks, interactive controls,
-   * stable id/name/aria attributes preserved).
-   *
-   * @param {Object} options
-   * @param {string} options.url
-   * @param {string} [options.title]
-   * @param {string} options.domSnapshot
-   * @returns {Promise<{ name: string, description: string, landmarks: Array<{role:string, selector:string}> } | null>}
-   */
-  static async suggestLocale({ url, title, domSnapshot }) {
-    if (!url || !domSnapshot) return null;
-
-    const systemPrompt = `You are identifying a Locale for a page in a structured automation library. A Locale is a "kind of page" descriptor — its name, what the page is for, and the durable DOM landmarks (alias → CSS selector) automation will reference.
-
-Return ONLY a JSON object with exactly these fields:
-{
-  "name": "...",                                              // 2-4 word kind-of-page name. Examples: "Search results", "Product detail", "Sign-in form", "Cart". Not the site name.
-  "description": "...",                                       // 1-2 sentences. What kind of page is this? What actions does it support? What data does it display?
-  "landmarks": [                                              // 3-8 entries. Each is an alias + a CSS selector that resolves to ONE durable element on this page.
-    { "alias": "search_input",     "selector": "#search" },
-    { "alias": "results_list",     "selector": "ul.results" },
-    { "alias": "filter_panel",     "selector": "aside.filters" }
-  ]
-}
-
-Rules for landmarks:
-- alias: snake_case, descriptive of FUNCTION not appearance ("submit_button", "results_list" — not "blue_button", "div_container").
-- selector: pure CSS, usable by document.querySelectorAll. NEVER use Playwright / Cypress / jQuery pseudo-classes: :has-text, :text, :text-is, :text-matches, :contains, :visible, :nth-match, :near, :right-of, :left-of, :above, :below, text=, xpath=. They are NOT valid CSS and will throw at runtime.
-- selector: use id, name, aria-label, or stable class chain. Never invented attributes. Pick the MOST stable selector — prefer #id, then [name], [aria-label], then a short stable class chain.
-- Each selector must resolve to exactly ONE element. If a selector might match multiple, scope it tighter.
-- Include only landmarks an automation script would actually care about: input fields, primary buttons, lists/result containers, navigational regions, key data displays. SKIP decorative chrome, footer links, cookie banners, social-media widgets.
-- If the page has fewer than 3 useful landmarks, return what's there — don't pad with weak selectors.
-
-Rules for name:
-- Describe the page TYPE, not the brand. "Search results" not "Google search results".
-
-Rules for description:
-- Active voice from the user's perspective. "Browse and filter search results; click a result to open its detail page."`;
-
-    const userContent = [{
-      type: 'text',
-      text: `URL: ${url}\nTitle: ${title ?? '(untitled)'}\n\nDOM snapshot:\n${String(domSnapshot).slice(0, 12000)}`,
-    }];
-
-    Logger.info('AnthropicService', `suggestLocale — ${url}`);
-
-    try {
-      const raw = await AnthropicService.#call(systemPrompt, userContent, 1200, [], { role: 'propose', operation: 'suggestLocale' });
-      if (!raw?.success) {
-        Logger.warn('AnthropicService', `suggestLocale failed: ${raw?.error}`);
-        return null;
-      }
-      let text = String(raw.text ?? '').trim();
-      const firstBrace = text.indexOf('{');
-      const lastBrace  = text.lastIndexOf('}');
-      if (firstBrace < 0 || lastBrace < firstBrace) {
-        Logger.warn('AnthropicService', `suggestLocale returned no JSON: ${text.slice(0, 200)}`);
-        return null;
-      }
-      text = text.slice(firstBrace, lastBrace + 1);
-      const parsed = JSON.parse(text);
-      return {
-        name        : typeof parsed.name === 'string' ? parsed.name.trim() : '',
-        description : typeof parsed.description === 'string' ? parsed.description.trim() : '',
-        // v2.74.287 — Drop any landmark whose selector contains a
-        // Playwright / Cypress / jQuery pseudo. Unlike generateLandmark-
-        // Profile (which has currentSelector as a fallback floor),
-        // suggestLocale has no picker selector to substitute, so the
-        // safest action is to skip the offender rather than surface a
-        // landmark whose verify call will throw SyntaxError on every
-        // re-open of the locale.
-        landmarks   : Array.isArray(parsed.landmarks)
-          ? parsed.landmarks
-              .filter(lm => lm && typeof lm.alias === 'string' && typeof lm.selector === 'string')
-              .map(lm => ({ alias: lm.alias.trim(), selector: lm.selector.trim() }))
-              .filter(lm => lm.alias && lm.selector)
-              .filter(lm => {
-                if (_looksLikePlaywrightSelector(lm.selector)) {
-                  Logger.warn('AnthropicService', `suggestLocale: dropping landmark "${lm.alias}" — Playwright-style selector "${lm.selector.slice(0, 120)}" is not valid CSS`);
-                  return false;
-                }
-                return true;
-              })
-          : [],
-      };
-    } catch (e) {
-      Logger.warn('AnthropicService', `suggestLocale error: ${e.message}`);
-      return null;
-    }
-  }
+  // v2.74.392 — suggestLocale REMOVED with the legacy auto-suggested-landmarks
+  // feature. Locales are authored via the description-first propose→resolve→
+  // auto-structure flow (proposePerspectives / resolveRoles / proposeLocaleStructure).
 
   /**
    * v2.74.329 — GROUND_SPEC § 5 derived intent. Synthesize a short
@@ -1697,6 +1597,7 @@ Rules:
 - "virtual" (optional) = set true on a CONTAINER node that holds landmarks but was NOT itself captured (a modal / menu / section wrapper). A virtual node has NO ref, MUST have a "role" and a non-empty "contains", and MAY carry multiplicity/presenceCondition. Use it when several captured landmarks are sections of one container revealed together — put the shared presenceCondition ONCE on the virtual container instead of duplicating it on each section, and DON'T mislabel one section as the whole container. Only introduce a virtual node when no captured landmark already represents that container.
 - "groupings" (optional) = named clusters that cut across containment (e.g. all controls in a buying flow). "members" are ref ids.
 - "sequences" (optional) = ordered user-flow steps. "steps" are ref ids in order.
+- KNOWN PRIORS (authoritative — these were ESTABLISHED by automated resolution, not guesses): a landmark may list a GIVEN "role"/"multiplicity" and/or a "revealedBy" ref. Use the given role + multiplicity VERBATIM (don't relabel them). When a landmark has "revealedBy: X": add this landmark's ref to X's node "triggers"; mark this landmark conditional with a presenceCondition like "after <X> is activated"; and GROUP every landmark sharing the same revealedBy under ONE virtual container (the revealed modal/menu) nested inside X's "contains" — don't scatter co-revealed landmarks. This makes the structure match the verified interaction depth.
 - Don't force structure that isn't there — a flat list of root nodes is a fine answer when landmarks are unrelated.${refining ? `
 
 REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous proposal — do NOT start over):
@@ -1709,9 +1610,14 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
 - Re-think only the rejected arrangements plus any landmark NOT present in the prior structure (newly added since the last proposal).
 - The output shape is unchanged — still the full nodes/groupings/sequences JSON over ALL current landmarks.` : ''}`;
 
-    const lmBlock = list.map(l =>
-      `- ref: ${l.uid}\n  alias: ${l.alias ?? '(none)'}\n  desc: ${(l.description ?? '').trim() || '(none)'}`
-    ).join('\n');
+    const lmBlock = list.map(l => {
+      let s = `- ref: ${l.uid}\n  alias: ${l.alias ?? '(none)'}\n  desc: ${(l.description ?? '').trim() || '(none)'}`;
+      if (l.role)          s += `\n  role: ${l.role} (GIVEN — use verbatim)`;
+      if (l.multiplicity)  s += `\n  multiplicity: ${l.multiplicity} (GIVEN)`;
+      if (l.hidden)        s += `\n  hidden: only present after its trigger is activated`;
+      if (l.revealedByRef && allowed.has(l.revealedByRef)) s += `\n  revealedBy: ${l.revealedByRef} (activating that landmark reveals this one)`;
+      return s;
+    }).join('\n');
     const userContent = [{
       type: 'text',
       text: `Perspective name: ${name ?? '(unnamed)'}\nIntent: ${(description ?? '').trim() || '(none)'}\n\nLandmarks:\n${lmBlock}${refining ? `\n\nPRIOR REVIEWED STRUCTURE (refine this):\n${priorBlock}` : ''}`,
@@ -2144,6 +2050,84 @@ Rules:
       if (plan.length >= budget) break;
     }
     return { plan, reasons };
+  }
+
+  /**
+   * v2.74.393 — Page-affordance description. Given the explored page's surface +
+   * disclosures, describe (plain text) WHAT KINDS OF GOALS a user can accomplish
+   * here. Intent-INDEPENDENT, so it's generated once during Explore and cached
+   * in the pageStructure artifact; `groundIntent` reuses it to anchor a user's
+   * raw intent in the page's real capabilities.
+   * @returns {Promise<string|null>}
+   */
+  static async describePageAffordances({ url, title, surface, controls, screenshot = null }) {
+    const surf = (Array.isArray(surface) ? surface : []).map(s => (s?.label || s?.role || '').toString().trim()).filter(Boolean);
+    const uniqSurf = [...new Set(surf)].slice(0, 120);
+    const ctrlLines = (Array.isArray(controls) ? controls : [])
+      .filter(c => c?.observation === 'reveal' && Array.isArray(c.revealed) && c.revealed.length)
+      .slice(0, 16)
+      .map(c => `- "${(c.label || c.role || 'control').slice(0, 40)}" reveals: ${c.revealed.slice(0, 8).map(r => `"${(r.label || '').slice(0, 30)}"`).join(', ')}`);
+    if (!uniqSurf.length && !ctrlLines.length) return null;
+
+    const systemPrompt = `You describe a web page for an automation-authoring tool. Given the page's interactive SURFACE (visible controls/links) and its DISCLOSURES (controls that reveal hidden menus/modals when activated), describe WHAT KINDS OF GOALS a user can accomplish on THIS kind of page.
+
+Return PLAIN TEXT (no JSON, no markdown headers), ~4-8 sentences:
+- What kind of page this is / its purpose.
+- The distinct GOALS achievable here (e.g. "search for media", "sign in / sign up", "filter by media type", "browse curated collections") — grounded in the ACTUAL surface + disclosures, not generic boilerplate.
+- For each goal, the key affordance(s) that enable it (the control/region a user would use).
+Be specific to what is actually present; do not invent capabilities that aren't represented in the surface/disclosures.`;
+
+    let text = `URL: ${url ?? '(unknown)'}\nTitle: ${title ?? '(unknown)'}\n\nVISIBLE SURFACE (controls/links):\n${uniqSurf.map(s => `- ${s}`).join('\n').slice(0, 4000)}`;
+    if (ctrlLines.length) text += `\n\nDISCLOSURES (revealed by interaction):\n${ctrlLines.join('\n').slice(0, 3000)}`;
+    const userContent = [];
+    if (typeof screenshot === 'string') { const m = /^data:(image\/[a-z]+);base64,(.+)$/i.exec(screenshot); if (m) { userContent.push({ type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } }); text += '\n\n(A screenshot of the page top is attached.)'; } }
+    userContent.push({ type: 'text', text });
+
+    Logger.info('AnthropicService', `describePageAffordances — ${url}`);
+    try {
+      const raw = await AnthropicService.#call(systemPrompt, userContent, 700, [], { role: 'describe', operation: 'describePageAffordances' });
+      if (!raw?.success) { Logger.warn('AnthropicService', `describePageAffordances failed: ${raw?.error}`); return null; }
+      const t = String(raw.text ?? '').trim();
+      return t ? t.slice(0, 1600) : null;
+    } catch (e) { Logger.warn('AnthropicService', `describePageAffordances error: ${e.message}`); return null; }
+  }
+
+  /**
+   * v2.74.393 — Ground a user's raw intent in a specific page. Given the user's
+   * intent + the page's affordance description, return a refined "grounded
+   * intent" that restates the SAME goal in the page's concrete terms — WITHOUT
+   * warping the goal toward what the page happens to offer — plus an
+   * achievability verdict (the page may not serve the intent at all).
+   * @returns {Promise<{groundedIntent:string, achievable:'yes'|'partial'|'no', note:string}|null>}
+   */
+  static async groundIntent({ userIntent, affordances, url, title }) {
+    const intent = (typeof userIntent === 'string' ? userIntent : '').trim();
+    if (!intent) return null;
+    const systemPrompt = `You GROUND a user's automation intent in a specific page. You are given the user's RAW intent and a description of what goals the page actually supports (its affordances). Produce a single refined "grounded intent" that restates the user's goal in this page's concrete terms — more complete and specific — WITHOUT changing what the user wants.
+
+CRITICAL — preserve the user's goal. Do NOT substitute what the page offers for what the user asked for. If the page cannot serve the user's intent, SAY SO (achievable:"no") and restate their goal faithfully; never warp the intent to fit the page.
+
+Return ONLY a JSON object:
+{
+  "groundedIntent": "<refined intent, 1-2 sentences, in this page's terms, SAME goal>",
+  "achievable": "yes" | "partial" | "no",
+  "note": "<short: what this page covers / what it can't do for this intent>"
+}
+- "yes" = the page fully supports the intent. "partial" = some of it (note what's missing). "no" = this page can't serve the intent.
+- groundedIntent stays in the user's voice + goal; concretize using the affordances, don't replace the goal.`;
+    const userText = `User intent: ${intent}\nURL: ${url ?? '(unknown)'}\nTitle: ${title ?? '(unknown)'}\n\nPage affordances (what this page supports):\n${(affordances ?? '(none provided)').slice(0, 3000)}`;
+    Logger.info('AnthropicService', `groundIntent — "${intent.slice(0, 60)}"`);
+    try {
+      const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text: userText }], 500, [], { role: 'describe', operation: 'groundIntent' });
+      if (!raw?.success) { Logger.warn('AnthropicService', `groundIntent failed: ${raw?.error}`); return null; }
+      const json = AnthropicService.#firstJsonObject(raw.text);
+      if (!json) return null;
+      const p = JSON.parse(json);
+      const gi = typeof p.groundedIntent === 'string' ? p.groundedIntent.trim().slice(0, 280) : '';
+      if (!gi) return null;
+      const ACH = new Set(['yes', 'partial', 'no']);
+      return { groundedIntent: gi, achievable: ACH.has(p.achievable) ? p.achievable : 'partial', note: typeof p.note === 'string' ? p.note.trim().slice(0, 240) : '' };
+    } catch (e) { Logger.warn('AnthropicService', `groundIntent error: ${e.message}`); return null; }
   }
 
   /**
@@ -4806,30 +4790,7 @@ Return a JSON object with exactly these fields:
 Return ONLY the JSON object. No explanation, no markdown.`,
 
       // ── Locale / Landmark ─────────────────────────────────────────
-
-      suggestLocale: `You are identifying a Locale for a page in a structured automation library. A Locale is a "kind of page" descriptor — its name, what the page is for, and the durable DOM landmarks (alias → CSS selector) automation will reference.
-
-Return ONLY a JSON object with exactly these fields:
-{
-  "name": "...",                  // 2-4 word kind-of-page name. Examples: "Search results", "Product detail", "Sign-in form".
-  "description": "...",           // 1-2 sentences. What kind of page is this? What actions does it support? What data does it display?
-  "landmarks": [                  // 3-8 entries. Each is an alias + CSS selector that resolves to ONE durable element.
-    { "alias": "search_input",   "selector": "#search" },
-    { "alias": "results_list",   "selector": "ul.results" },
-    { "alias": "filter_panel",   "selector": "aside.filters" }
-  ]
-}
-
-Rules for landmarks:
-- alias: snake_case, descriptive of FUNCTION not appearance ("submit_button", "results_list" — not "blue_button").
-- selector: pure CSS, usable by document.querySelectorAll. NEVER use Playwright / Cypress / jQuery pseudo-classes: :has-text, :text, :text-is, :text-matches, :contains, :visible, :nth-match, :near, :right-of, :left-of, :above, :below, text=, xpath=. They are NOT valid CSS and will throw at runtime.
-- selector: use id, name, aria-label, or stable class chain. Prefer #id, then [name], [aria-label], then a short stable class chain.
-- Each selector must resolve to exactly ONE element.
-- Include only landmarks an automation script would actually care about. SKIP decorative chrome, footer links, cookie banners.
-
-Rules for name: describe the page TYPE, not the brand. "Search results" not "Google search results".
-
-Rules for description: active voice from the user's perspective.`,
+      // v2.74.392 — suggestLocale prompt removed with the legacy auto-suggest feature.
 
       suggestSelector: `You are a CSS selector expert. Given an HTML element and the author's intent (and possibly a cropped screenshot of the element region), output the most STABLE CSS selector that uniquely identifies the right element.
 

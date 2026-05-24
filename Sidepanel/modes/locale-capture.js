@@ -109,6 +109,13 @@ let _roleResolveNotes = {};
 let _pageStructureStatus = 'none';
 let _pageStructureInfo = null;
 let _exploreToken = 0;
+// v2.74.393 — Grounded-intent state. The user's raw Intent can be refined
+// against the page's affordances (cached from Explore) into a "grounded intent"
+// they accept/edit before it seeds propose.
+//   _groundIntentResult: { groundedIntent, achievable:'yes'|'partial'|'no'|'unknown', note, forIntent } | null
+//   _groundInFlight: true while the grounding call round-trips.
+let _groundIntentResult = null;
+let _groundInFlight = false;
 // v2.74.233 — Per-landmark "refining with Claude" status text. Set on
 // the landmark idx when the picker just captured and Claude is being
 // invoked to refine; cleared when Claude responds (success or fail).
@@ -224,8 +231,6 @@ let locComplexityBadge = null;   // v2.74.353 — resolve-difficulty header badg
 // v2.74.275 — locPatternInput removed.
 let locLandmarksList = null;
 let locAddLandmarkBtn = null;
-// v2.74.231 — Rediscover button ref (icon at top-right of landmarks card).
-let locRediscoverBtn = null;
 let locSaveBtn = null;
 let locCancelBtn = null;
 // v2.74.282 — Reason hint shown when Save Locale is disabled.
@@ -266,9 +271,9 @@ function renderHTML() {
                    placeholder="e.g. search-results-page" />
           </label>
           <label class="dbg-locale-field">
-            <span class="dbg-locale-field-label">Description</span>
+            <span class="dbg-locale-field-label">Intent</span>
             <textarea data-loc="description-input" rows="2" maxlength="280"
-                      placeholder="What kind of page is this?"></textarea>
+                      placeholder="What do you want to accomplish on this kind of page?"></textarea>
           </label>
         </div>
         <!-- v2.74.275 — Legacy urlPattern field REMOVED. URL gating
@@ -369,11 +374,6 @@ function renderHTML() {
             <span class="dbg-locale-card-chevron">▾</span>
             <span class="dbg-locale-card-label">Landmarks</span>
           </button>
-          <button data-loc="rediscover" class="dbg-locale-landmarks-rediscover" type="button"
-                  title="Re-run auto-discovery on this page (replaces current landmarks)">
-            <span class="dbg-locale-landmarks-rediscover-icon" aria-hidden="true">⟳</span>
-            <span class="dbg-locale-landmarks-rediscover-label">Rediscover</span>
-          </button>
         </div>
         <div class="dbg-locale-card-body">
           <div data-loc="landmarks-list" class="dbg-locale-landmarks-list">
@@ -473,7 +473,6 @@ async function mount(payload, mountEl) {
   // v2.74.275 — locPatternInput removed.
   locLandmarksList   = q('landmarks-list');
   locAddLandmarkBtn  = q('add-landmark');
-  locRediscoverBtn   = q('rediscover');
   locSaveBtn         = q('save');
   locSaveReasonEl    = q('save-reason');
   locCancelBtn       = q('cancel');
@@ -649,21 +648,10 @@ async function mount(payload, mountEl) {
       } catch (e) {
         console.warn('[locale-capture] hydration from registry failed:', e?.message);
       }
-    } else if (Array.isArray(prefilled.landmarks)) {
-      // v2.74.275 — Fresh-suggestion hydration (Claude's "+ Auto"
-      // output). These are draft entries with no UID — each needs
-      // Pick→Claude to become a registry record. Stored landmarks
-      // (with UIDs) go through landmarkRefs[] above. Legacy embedded
-      // SAVED landmarks (the pre-Phase-2 shape) are no longer
-      // supported — registry is authoritative.
-      _locDraft.landmarks = prefilled.landmarks
-        .filter(lm => lm && typeof lm.alias === 'string' && typeof lm.selector === 'string')
-        .map(lm => ({
-          alias    : lm.alias.trim(),
-          selector : lm.selector.trim(),
-          verified : null,
-        }));
     }
+    // v2.74.392 — legacy "+ Auto" fresh-suggestion hydration (prefilled.landmarks
+    // as {alias,selector} draft entries) removed; landmarks come from the
+    // registry (landmarkRefs) on edit, or from propose→resolve when authoring.
     // v2.74.349 — Rehydrate the saved structured composition on edit so the
     // structure review, judgment-aware Re-structure (§ 5), and role authoring
     // (§ 13) round-trip instead of resetting every time the Locale reopens.
@@ -726,11 +714,6 @@ async function mount(payload, mountEl) {
   locDescriptionInput.addEventListener('input', onDescriptionInput);
   // v2.74.275 — locPatternInput element removed; no listener.
   locAddLandmarkBtn.addEventListener('click', onAddLandmark);
-  // v2.74.231 — Rediscover: re-run AUTO_DISCOVER_LOCALE with force:true
-  // (bypasses cache + rewrites it). Replaces the draft's landmarks
-  // with the new suggestion. Confirms with the user first when the
-  // current draft has landmarks (avoids accidental destruction).
-  if (locRediscoverBtn) locRediscoverBtn.addEventListener('click', onRediscoverLandmarks);
   locSaveBtn.addEventListener('click', saveLocale);
   locCancelBtn.addEventListener('click', cancelLocaleCapture);
   locPickCancelBtn.addEventListener('click', () => cancelLocalePick(true));
@@ -849,6 +832,8 @@ async function unmount() {
   _pageStructureStatus = 'none';
   _pageStructureInfo = null;
   _exploreToken++;   // invalidate any in-flight sweep landing after unmount
+  _groundIntentResult = null;
+  _groundInFlight = false;
 
   // Clear DOM refs (no leak — but clarity).
   locGroundLabelEl = locTabUrlEl = locWarningEl = null;
@@ -1127,92 +1112,25 @@ function onDescriptionInput() {
     lastAuthoredAt: Date.now(),
     authoredBy: 'user',
   };
-  // The propose buttons enable once the intent is non-empty. Toggle them
-  // directly (rather than a full panel re-render) so editing the intent with
-  // options/roles already shown doesn't flicker the cards.
+  // The propose + ground-intent buttons enable once the intent is non-empty.
+  // Toggle them directly (rather than a full panel re-render) so editing the
+  // intent with options/roles already shown doesn't flicker the cards.
+  // v2.74.394 — also toggle ground-intent (it was left permanently disabled
+  // when typed in after an empty initial render → "does nothing").
   if (locPerspectiveBody && !_perspectiveInFlight) {
     const empty = (_locDraft.description ?? '').trim().length === 0;
-    locPerspectiveBody.querySelectorAll('[data-loc-action="propose-perspectives"]')
-      .forEach(btn => { btn.disabled = empty; });
+    locPerspectiveBody.querySelectorAll('[data-loc-action="propose-perspectives"], [data-loc-action="ground-intent"]')
+      .forEach(btn => {
+        btn.disabled = empty;
+        if (btn.dataset.locAction === 'ground-intent') {
+          btn.title = empty ? 'Write an Intent first.' : 'Refine your Intent against what this page can actually do (uses the explored page affordances).';
+        }
+      });
   }
   updateLocaleSaveButtonState();
 }
 // v2.74.275 — onPatternInput removed (URL pattern field gone).
-/**
- * v2.74.231 — Re-run auto-discovery on the current tab, replacing the
- * draft's landmarks with Claude's fresh suggestion. Bypasses the cache
- * via force:true; the new suggestion is also written to cache so
- * subsequent "+ Locale" clicks pick it up.
- *
- * Confirms with the user when the draft has unsaved landmarks (avoids
- * accidental destruction). Toggles the button into a "Rediscovering…"
- * state for feedback. Toast on completion.
- */
-async function onRediscoverLandmarks() {
-  if (!_locDraft) return;
-  if (_locTabId == null) { showLocaleWarning('No active tab — cannot rediscover'); return; }
-
-  const hadLandmarks = _locDraft.landmarks.length > 0;
-  if (hadLandmarks) {
-    const ok = confirm(`Rediscover landmarks? This replaces all ${_locDraft.landmarks.length} current landmark(s) with a fresh Claude suggestion.`);
-    if (!ok) return;
-  }
-
-  const origIconHtml = locRediscoverBtn?.innerHTML;
-  if (locRediscoverBtn) {
-    locRediscoverBtn.disabled = true;
-    locRediscoverBtn.innerHTML = `<span class="dbg-locale-landmarks-rediscover-icon" aria-hidden="true">⟳</span><span class="dbg-locale-landmarks-rediscover-label">Rediscovering…</span>`;
-  }
-
-  let res;
-  try {
-    res = await new Promise(resolve => {
-      chrome.runtime.sendMessage({
-        type: 'AUTO_DISCOVER_LOCALE',
-        payload: { tabId: _locTabId, groundId: _locGroundId, force: true },
-      }, resolve);
-    });
-  } catch (e) {
-    res = { success: false, error: e?.message ?? 'unknown' };
-  }
-
-  if (locRediscoverBtn) {
-    locRediscoverBtn.disabled = false;
-    if (origIconHtml) locRediscoverBtn.innerHTML = origIconHtml;
-  }
-
-  if (!res?.success || !res?.suggestion) {
-    showLocaleWarning(`Rediscover failed: ${res?.error ?? 'no suggestion returned'}`);
-    return;
-  }
-
-  const sug = res.suggestion;
-  // Replace landmarks; preserve user-edited name + description unless
-  // they were blank (then take from the suggestion).
-  if (Array.isArray(sug.landmarks)) {
-    _locDraft.landmarks = sug.landmarks
-      .filter(lm => lm && typeof lm.alias === 'string' && typeof lm.selector === 'string')
-      .map(lm => ({
-        alias    : lm.alias.trim(),
-        selector : lm.selector.trim(),
-        verified : null,   // fresh suggestion — must be re-verified
-      }));
-  }
-  if (!_locDraft.name && typeof sug.name === 'string')               _locDraft.name = _normalizeLocaleName(sug.name);
-  if (!_locDraft.description && typeof sug.description === 'string') _locDraft.description = sug.description;
-
-  // Reflect any field changes in the inputs.
-  if (locNameInput && locNameInput.value !== _locDraft.name) {
-    locNameInput.value = _locDraft.name ?? '';
-  }
-  if (locDescriptionInput && locDescriptionInput.value !== _locDraft.description) {
-    locDescriptionInput.value = _locDraft.description ?? '';
-  }
-
-  renderLocaleLandmarks();
-  updateLocaleSaveButtonState();
-  toast?.(`Rediscovered ${_locDraft.landmarks.length} landmark(s)${res.fromCache ? ' (from cache)' : ''}`);
-}
+// v2.74.392 — onRediscoverLandmarks removed with the legacy auto-suggest path.
 
 // v2.74.280 — Authoring flow change: "+ Pick landmark" enters the
 // picker directly. The landmark card is no longer created up front
@@ -1665,9 +1583,23 @@ function _renderStructureBar() {
 async function onProposeStructure() {
   if (!_locDraft) return;
   const total = (_locDraft.landmarks ?? []).length;
+  // v2.74.389 — map a roleFill name → its landmark uid, so a hidden role's
+  // `revealedBy` (a role NAME from propose) becomes a `revealedByRef` (the
+  // trigger landmark's uid) that the structure step can turn into a `trigger`.
+  const roleToUid = new Map();
+  for (const lm of (_locDraft.landmarks ?? [])) { if (lm?.roleFill && lm?.uid && !roleToUid.has(lm.roleFill)) roleToUid.set(lm.roleFill, lm.uid); }
   const lms = (_locDraft.landmarks ?? [])
     .filter(lm => lm?.uid)
-    .map(lm => ({ uid: lm.uid, alias: lm.alias ?? lm.accessibleName ?? '', description: lm.description ?? '' }));
+    .map(lm => ({
+      uid: lm.uid,
+      alias: lm.alias ?? lm.accessibleName ?? '',
+      description: lm.description ?? '',
+      // Resolve's verified signal, fed to the structure step as priors:
+      role: lm.roleFill || undefined,
+      multiplicity: lm.roleMult || undefined,
+      hidden: lm.hidden === true || undefined,
+      revealedByRef: (lm.revealedBy && roleToUid.get(lm.revealedBy)) || undefined,
+    }));
   if (lms.length < 2) {
     // v2.74.337 — Clear feedback instead of a silent no-op. UIDs are assigned
     // when a landmark finishes its Pick→Claude profile (or at save).
@@ -1927,8 +1859,9 @@ function _renderPerspectivePanel() {
   const label = _perspectiveInFlight ? '⏳ Proposing…' : (_perspectiveRun ? '↻ Re-propose perspectives' : '✨ Propose perspectives');
 
   let html = `
-    <p class="dbg-locale-perspective-intro">Describe the intent in <b>Description</b> above, then propose. Claude suggests named <b>roles</b> (using a page screenshot + this Ground's existing locales & landmarks); you pick the real element for each.</p>
+    <p class="dbg-locale-perspective-intro">Write your <b>Intent</b> above, then propose. Claude suggests named <b>roles</b> (using a page screenshot + this Ground's existing locales & landmarks); you pick the real element for each.</p>
     ${_renderExploreRow()}
+    ${_renderGroundIntentRow(intent)}
     <div class="dbg-locale-perspective-buttons">
       <button class="btn-secondary tiny" data-loc-action="propose-perspectives" type="button" ${canPropose ? '' : 'disabled'} title="${escAttr(intent.length === 0 ? emptyTitle : "Propose perspective options for this intent, using a page screenshot + this Ground's locales & landmarks.")}">${label}</button>
     </div>`;
@@ -2025,6 +1958,41 @@ function _renderPerspectivePanel() {
     ?.addEventListener('click', () => onSkipExplore());
   locPerspectiveBody.querySelector('[data-loc-action="cancel-explore"]')
     ?.addEventListener('click', () => onCancelExplore());
+  // v2.74.393 — grounded-intent controls.
+  locPerspectiveBody.querySelector('[data-loc-action="ground-intent"]')
+    ?.addEventListener('click', () => onGroundIntent());
+  locPerspectiveBody.querySelector('[data-loc-action="use-grounded-intent"]')
+    ?.addEventListener('click', () => onUseGroundedIntent());
+  locPerspectiveBody.querySelector('[data-loc-action="dismiss-grounded-intent"]')
+    ?.addEventListener('click', () => { _groundIntentResult = null; _renderPerspectivePanel(); });
+}
+
+// v2.74.393 — Grounded-intent row: a "✨ Ground intent" action that refines the
+// user's raw Intent against the page's affordances (cached from Explore), shown
+// as an editable proposal (Use it / Dismiss) before it seeds propose.
+function _renderGroundIntentRow(intent) {
+  if (_groundInFlight) {
+    return `<div class="dbg-locale-ground building"><span>⏳ Grounding intent in this page…</span></div>`;
+  }
+  const r = _groundIntentResult;
+  if (r && r.forIntent === intent) {
+    const ach = r.achievable || 'unknown';
+    const achLabel = ach === 'yes' ? '✓ fully supported' : ach === 'partial' ? '◐ partially supported' : ach === 'no' ? '✗ not supported here' : '? not explored';
+    return `<div class="dbg-locale-ground result ${escAttr(ach)}">
+        <div class="dbg-locale-ground-head"><span class="dbg-locale-ground-title">Grounded intent</span><span class="dbg-locale-ground-ach ${escAttr(ach)}">${achLabel}</span></div>
+        <div class="dbg-locale-ground-text">${escHtml(r.groundedIntent)}</div>
+        ${r.note ? `<div class="dbg-locale-ground-note">${escHtml(r.note)}</div>` : ''}
+        <div class="dbg-locale-ground-actions">
+          <button class="btn-secondary tiny" data-loc-action="use-grounded-intent" type="button" title="Replace your Intent with this grounded version; it then seeds Propose.">Use it</button>
+          <button class="btn-secondary tiny" data-loc-action="dismiss-grounded-intent" type="button">Dismiss</button>
+        </div>
+      </div>`;
+  }
+  // Offer button (disabled until an intent is typed).
+  const disabled = intent.length === 0;
+  return `<div class="dbg-locale-ground offer">
+      <button class="btn-secondary tiny" data-loc-action="ground-intent" type="button" ${disabled ? 'disabled' : ''} title="${escAttr(disabled ? 'Write an Intent first.' : 'Refine your Intent against what this page can actually do (uses the explored page affordances).')}">✨ Ground intent in this page</button>
+    </div>`;
 }
 
 // v2.74.368 — Render the depth-exploration row based on _pageStructureStatus.
@@ -2206,6 +2174,51 @@ function onCancelExplore() {
   _renderPerspectivePanel();
 }
 
+// v2.74.393 — Ground the user's raw Intent against the page's affordances.
+async function onGroundIntent() {
+  if (!_locDraft) return;
+  const intent = (_locDraft.description ?? '').trim();
+  if (!intent) { showLocaleWarning('Write an Intent first.'); return; }
+  if (_groundInFlight) return;
+  const draftToken = _locDraft.id;
+  _groundInFlight = true; _renderPerspectivePanel();
+  let res;
+  try {
+    res = await new Promise(r => chrome.runtime.sendMessage({
+      type: 'GROUND_INTENT', payload: { tabId: _locTabId, groundId: _locGroundId, intent },
+    }, r));
+  } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
+  if (!_locDraft || _locDraft.id !== draftToken) return;
+  _groundInFlight = false;
+  if (!res?.success || !res.groundedIntent) {
+    showLocaleWarning(`Ground intent failed: ${res?.error ?? 'no result'}`);
+    _renderPerspectivePanel();
+    return;
+  }
+  _groundIntentResult = { groundedIntent: res.groundedIntent, achievable: res.achievable || 'unknown', note: res.note || '', forIntent: intent };
+  _renderPerspectivePanel();
+  if (res.hadAffordance === false) toast?.('Run Explore to ground the intent in this page');
+}
+
+// Accept the grounded intent → it becomes the Intent field + seeds propose.
+function onUseGroundedIntent() {
+  if (!_locDraft || !_groundIntentResult?.groundedIntent) return;
+  const original = (_locDraft.description ?? '').trim();
+  _locDraft.description = _groundIntentResult.groundedIntent;
+  if (locDescriptionInput) locDescriptionInput.value = _locDraft.description;
+  // Record provenance (LOCALE_SPEC § 6): grounded from the user's original.
+  _locDraft.authoringMetadata = _locDraft.authoringMetadata ?? {};
+  _locDraft.authoringMetadata.description = {
+    ...(_locDraft.authoringMetadata.description ?? {}),
+    source: 'grounded', authoredBy: 'llm', lastAuthoredAt: Date.now(),
+    originalIntent: original, achievable: _groundIntentResult.achievable,
+  };
+  _groundIntentResult = null;
+  _renderPerspectivePanel();
+  updateLocaleSaveButtonState();
+  toast?.('Intent grounded — now Propose perspectives');
+}
+
 function onChoosePerspective(idx) {
   if (!_locDraft) return;
   const opt = _perspectiveRun?.options?.[idx];
@@ -2311,6 +2324,7 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
   const multOf = (role) => (opt.roles.find(x => x.role === role)?.multiplicity) ?? 'one';
   let filled = 0, failed = 0, abstained = 0;
   const details = [];
+  const profileRefs = [];   // v2.74.390 — visible landmarks to auto-profile after the loop
   for (const r of res.resolutions) {
     if (!r || typeof r.role !== 'string') continue;
     if (!r.selector) {                                   // Claude abstained
@@ -2337,6 +2351,7 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
     if (ok) {
       filled++;
       delete _roleResolveNotes[r.role];   // repaired — clear the note
+      profileRefs.push(lmRef);            // queue for Claude profiling (visible landmark)
       details.push({ role: r.role, status: 'resolved', selector: r.selector, score: v.score, matchedCount: v.matchedCount, confidence: r.confidence });
       Logger.info('locale-capture', `resolveRoles[${r.role}]${mode === 'repair' ? '(retry)' : ''} resolved — "${r.selector}" (score=${v.score}, matched=${v.matchedCount})`);
     } else {
@@ -2388,6 +2403,11 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
           continue;
         }
         const lmRef = {
+          // v2.74.389 — local uid up front so hidden landmarks are structurable
+          // (their element only exists with the modal open, so they can't get a
+          // profile uid via static INSPECT; save back-fills the same way).
+          uid: 'lmk_local_' + (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`),
+          isCanonical: false,
           alias: r.role, selector: r.selector, roleFill: r.role, roleMult: multOf(r.role),
           hidden: true, revealedBy: triggerRole || null,
           ...(rr.trigger ? { triggerSelector: rr.trigger } : {}),
@@ -2395,6 +2415,11 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
         };
         _locDraft.landmarks.push(lmRef);
         _invalidateStructure();
+        // v2.74.390 — profile the hidden landmark from the INSPECT report the
+        // background captured WHILE the modal was open (the element is gone now,
+        // so a fresh static INSPECT can't see it; the profile call itself is
+        // text-based and doesn't need the live element).
+        if (r.inspect) { try { await _profileResolvedLandmark(_locDraft.landmarks.indexOf(lmRef), null, r.inspect); } catch { /* */ } }
         delete _roleResolveNotes[r.role];
         filled++;
         details.push({ role: r.role, status: 'resolved', selector: r.selector, score: lmRef.verified.score, matchedCount: matched, revealed: true });
@@ -2402,6 +2427,22 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
       }
     }
     renderLocaleLandmarks(); _renderPerspectivePanel(); updateLocaleSaveButtonState(); _refreshLocaleOverlays();
+  }
+
+  // v2.74.390 — Auto-profile the VISIBLE resolved landmarks (Claude description /
+  // aliases / operationsCommon / pitfalls / expectedContent), mirroring
+  // Pick→Claude. Run in PARALLEL so N landmarks ≈ one call's latency. Hidden
+  // landmarks were already profiled in the reveal pass (modal open).
+  if (profileRefs.length) {
+    _resolveInFlightKey = inFlightKey; _renderPerspectivePanel();   // show "⏳ Resolving…" while profiling
+    await Promise.all(profileRefs.map(async (ref) => {
+      const idx = _locDraft.landmarks.indexOf(ref);
+      if (idx < 0) return;
+      try { await _profileResolvedLandmark(idx); } catch { /* */ }
+    }));
+    if (!_locDraft || _locDraft.id !== draftToken) return;
+    _resolveInFlightKey = null;
+    Logger.info('locale-capture', `resolveRoles: profiled ${profileRefs.length} visible landmark(s)`);
   }
 
   if (locWarningEl && filled > 0) { locWarningEl.textContent = ''; locWarningEl.classList.add('hidden'); }
@@ -2429,6 +2470,17 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
   if (abstained) bits.push(`${abstained} skipped`);
   const cx = _pageComplexity ? ` · difficulty ${_pageComplexity.score}` : '';
   toast?.(`${mode === 'repair' ? 'Retry' : 'Resolve roles'} — ${bits.join(', ')}${(failed || abstained) ? ' · pick the rest manually' : ''}${cx}`);
+
+  // v2.74.391 — Auto-structure after Resolve: mirror "Structure with Claude"
+  // automatically (seeded with the role + verified-trigger priors), so
+  // propose→resolve ends with the rich LandmarkNode tree, no extra click. Runs
+  // only when this resolve actually filled roles and there are ≥2 uid'd
+  // landmarks; on a re-run it refines the prior tree (existing refine path).
+  const uidCount = (_locDraft?.landmarks ?? []).filter(l => l?.uid).length;
+  if (filled > 0 && uidCount >= 2) {
+    try { await onProposeStructure(); }
+    catch (e) { Logger.warn('locale-capture', `auto-structure after resolve failed: ${e.message}`); }
+  }
 }
 
 // Pick (or re-pick) the element that fills a role. A fresh role → CREATE-mode
@@ -6273,6 +6325,72 @@ async function _refineLandmarkSelectorWithClaude(landmarkIdx, pickContext = {}) 
 
   renderLocaleLandmarks();
   verifyLocaleLandmark(landmarkIdx);
+}
+
+// v2.74.390 — Fill a RESOLVED landmark's Claude-authored profile (description,
+// aliases, operationsCommon, pitfalls, expectedContent, effect, interaction-
+// pattern, confidence) — the same generateLandmarkProfile the Pick→Claude path
+// runs, which Resolve previously skipped (leaving those fields empty). KEEPS the
+// resolved selector + verified + role (only fills the metadata). `report` may be
+// passed in (e.g. from a while-modal-open inspect) to skip a fresh INSPECT.
+async function _profileResolvedLandmark(landmarkIdx, presetProfile, presetReport) {
+  const lm = _locDraft?.landmarks?.[landmarkIdx];
+  if (!lm || !lm.selector) return false;
+  let p = presetProfile || null;
+  if (!p) {
+    // Get the INSPECT report — from a preset (e.g. captured while a modal was
+    // open, since the element is gone now) or by inspecting the live element.
+    let report = presetReport || null;
+    if (!report) {
+      if (_locTabId == null) return false;
+      // Resolve frameId from the landmark's frame (same chain as verify).
+      let frameId = 0;
+      if (lm.frameUrl) {
+        try {
+          const frames = await new Promise((r) => chrome.webNavigation.getAllFrames({ tabId: _locTabId }, (fs) => r(fs ?? [])));
+          const ex = frames.find(f => f && f.url === lm.frameUrl);
+          if (ex) frameId = ex.frameId;
+        } catch { /* top frame */ }
+      }
+      let inspectRes;
+      try { inspectRes = await chrome.tabs.sendMessage(_locTabId, { type: 'INSPECT_ELEMENT', payload: { target: lm.selector, pickLast: false } }, { frameId }); }
+      catch { return false; }
+      if (!inspectRes?.success) return false;
+      report = inspectRes.report ?? {};
+    }
+    const caps = deriveCapabilities(report);
+    const ops  = deriveAllowedOperations(caps);
+    let res;
+    try {
+      res = await chrome.runtime.sendMessage({
+        type: 'GENERATE_LANDMARK_PROFILE_BG',
+        payload: {
+          role                  : (lm.roleFill || lm.alias || 'landmark').toString().trim(),
+          currentSelector       : lm.selector,
+          fingerprint           : { tag: report.tag, inputType: report.inputType, ariaRole: report.ariaRole, ariaLabel: report.ariaLabel, capabilities: caps },
+          outerHTMLPreview      : report.outerHTMLPreview ?? '',
+          parentOuterHTMLPreview: report.parent?.outerHTMLPreview ?? '',
+          frame                 : report.frame ?? 'top',
+          matchedCount          : report.matchCount ?? 1,
+          screenshotDataUrl     : null,
+          operationsAllowed     : ops,
+        },
+      });
+    } catch { return false; }
+    if (!res?.success || !res.profile) return false;
+    p = res.profile;
+  }
+  // Apply ONLY the authored metadata — never touch selector / verified / role.
+  if (typeof p.description === 'string' && p.description.trim()) lm.description = p.description;
+  const aliases = Array.isArray(p.aliases) ? p.aliases.filter(s => s && s.trim() && s !== lm.alias) : [];
+  if (aliases.length) lm.aliases = aliases;
+  if (Array.isArray(p.operationsCommon) && p.operationsCommon.length) lm.operationsCommon = p.operationsCommon;
+  if (Array.isArray(p.pitfalls)) lm.pitfalls = p.pitfalls;
+  if (p.expectedContent !== undefined) lm.expectedContent = p.expectedContent;
+  if (p.effect && (!lm.effect || lm.effect.kind === 'none')) lm.effect = p.effect;
+  if (p.interactionPattern && (!lm.interactionPattern || lm.interactionPattern === 'none')) lm.interactionPattern = p.interactionPattern;
+  if (typeof p.confidence === 'number') lm.profileConfidence = p.confidence;
+  return true;
 }
 
 async function verifyLocaleLandmark(landmarkIdx) {
