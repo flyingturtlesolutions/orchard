@@ -3015,7 +3015,7 @@ function _buildConditionTypeOptions(c) {
     const opts = sorted.map(l => {
       const lmCount = Array.isArray(l.landmarks) ? l.landmarks.length : 0;
       const label = `${l.name ?? l.id} (${lmCount} landmark${lmCount === 1 ? '' : 's'})`;
-      return opt(`loc_ref:${l.id}`, label, currentType === 'perspective_ref' && currentPerspectiveId === l.id);
+      return opt(`perspective_ref:${l.id}`, label, currentType === 'perspective_ref' && currentPerspectiveId === l.id);
     }).join('');
     groups.push(`<optgroup label="Perspectives">${opts}</optgroup>`);
   }
@@ -3023,7 +3023,7 @@ function _buildConditionTypeOptions(c) {
     const inList = _groundPerspectives.some(l => l.id === currentPerspectiveId);
     if (!inList) {
       groups.push(`<optgroup label="Perspectives · Stale">${
-        opt(`loc_ref:${currentPerspectiveId}`, `(missing: ${currentPerspectiveId})`, true)
+        opt(`perspective_ref:${currentPerspectiveId}`, `(missing: ${currentPerspectiveId})`, true)
       }</optgroup>`);
     }
   }
@@ -3034,8 +3034,8 @@ function _decodeConditionTypeValue(value) {
   if (typeof value === 'string' && value.startsWith('pred_ref:')) {
     return { type: 'assertion_ref', assertionId: value.slice('pred_ref:'.length) };
   }
-  if (typeof value === 'string' && value.startsWith('loc_ref:')) {
-    return { type: 'perspective_ref', perspectiveId: value.slice('loc_ref:'.length) };
+  if (typeof value === 'string' && value.startsWith('perspective_ref:')) {
+    return { type: 'perspective_ref', perspectiveId: value.slice('perspective_ref:'.length) };
   }
   return { type: value };
 }

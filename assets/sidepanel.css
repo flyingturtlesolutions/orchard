@@ -4759,13 +4759,13 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   border: 1px solid rgba(148, 163, 184, 0.35);
 }
 /* v2.74.336 — Phase C-lite: Perspective structure proposal bar + preview. */
-.loc-structure-bar {
+.perspective-structure-bar {
   display: flex;
   align-items: center;
   gap: 8px;
   margin: 4px 0 8px;
 }
-.loc-structure-tag {
+.perspective-structure-tag {
   font-size: 9.5px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -4776,7 +4776,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   border: 1px solid rgba(167, 139, 250, 0.35);
   cursor: help;
 }
-.loc-structure-preview {
+.perspective-structure-preview {
   margin: 0 0 10px;
   padding: 8px 10px;
   border-left: 2px solid rgba(167, 139, 250, 0.4);
@@ -4786,7 +4786,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   line-height: 1.5;
 }
 /* v2.74.344 — Phase B-lite: interactive per-node review row. */
-.loc-struct-node {
+.perspective-struct-node {
   display: flex;
   align-items: center;
   gap: 5px;
@@ -4795,10 +4795,10 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   border-left: 2px solid transparent;
 }
 /* v2.74.346 — judged tints shared by nodes + overlay rows */
-.loc-struct-judged-ok   { border-left-color: rgba(61, 214, 140, 0.7); }
-.loc-struct-judged-rej  { border-left-color: rgba(247, 110, 110, 0.7); opacity: 0.7; }
-.loc-struct-judged-edit { border-left-color: rgba(125, 211, 252, 0.7); }
-.loc-struct-alias {
+.perspective-struct-judged-ok   { border-left-color: rgba(61, 214, 140, 0.7); }
+.perspective-struct-judged-rej  { border-left-color: rgba(247, 110, 110, 0.7); opacity: 0.7; }
+.perspective-struct-judged-edit { border-left-color: rgba(125, 211, 252, 0.7); }
+.perspective-struct-alias {
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -4806,7 +4806,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   white-space: nowrap;
   font-size: 11px;
 }
-.loc-struct-role-input {
+.perspective-struct-role-input {
   flex: 1 1 90px;
   min-width: 60px;
   font-size: 10px;
@@ -4816,7 +4816,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   border-radius: 3px;
   color: rgba(125, 211, 252, 0.95);
 }
-.loc-struct-mult-select {
+.perspective-struct-mult-select {
   flex: 0 0 auto;
   font-size: 10px;
   padding: 1px 2px;
@@ -4825,7 +4825,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   border-radius: 3px;
   color: rgba(255, 176, 130, 0.95);
 }
-.loc-struct-judge-btn {
+.perspective-struct-judge-btn {
   flex: 0 0 auto;
   font-size: 11px;
   line-height: 1;
@@ -4836,10 +4836,10 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   color: rgba(148, 163, 184, 0.8);
   cursor: pointer;
 }
-.loc-struct-judge-btn.active        { background: rgba(61, 214, 140, 0.18); border-color: rgba(61, 214, 140, 0.6); color: rgba(61, 214, 140, 1); }
-.loc-struct-judge-rej.active        { background: rgba(247, 110, 110, 0.18); border-color: rgba(247, 110, 110, 0.6); color: rgba(252, 165, 165, 1); }
+.perspective-struct-judge-btn.active        { background: rgba(61, 214, 140, 0.18); border-color: rgba(61, 214, 140, 0.6); color: rgba(61, 214, 140, 1); }
+.perspective-struct-judge-rej.active        { background: rgba(247, 110, 110, 0.18); border-color: rgba(247, 110, 110, 0.6); color: rgba(252, 165, 165, 1); }
 /* v2.74.345 — B-mid re-nesting outline controls */
-.loc-struct-move-btn {
+.perspective-struct-move-btn {
   flex: 0 0 auto;
   font-size: 11px;
   line-height: 1;
@@ -4850,45 +4850,45 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   color: rgba(148, 163, 184, 0.7);
   cursor: pointer;
 }
-.loc-struct-move-btn:hover:not(:disabled) { border-color: rgba(196, 181, 253, 0.6); color: rgba(196, 181, 253, 0.95); }
-.loc-struct-move-btn:disabled { opacity: 0.25; cursor: default; }
+.perspective-struct-move-btn:hover:not(:disabled) { border-color: rgba(196, 181, 253, 0.6); color: rgba(196, 181, 253, 0.95); }
+.perspective-struct-move-btn:disabled { opacity: 0.25; cursor: default; }
 /* v2.74.361 — B-full node dynamics: presenceCondition + triggers detail rows */
-.loc-struct-detail { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 1px 0 2px; font-size: 10px; }
-.loc-struct-detail-label { flex: 0 0 auto; color: rgba(148, 163, 184, 0.8); text-transform: uppercase; letter-spacing: 0.03em; }
-.loc-struct-presence-input {
+.perspective-struct-detail { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 1px 0 2px; font-size: 10px; }
+.perspective-struct-detail-label { flex: 0 0 auto; color: rgba(148, 163, 184, 0.8); text-transform: uppercase; letter-spacing: 0.03em; }
+.perspective-struct-presence-input {
   flex: 1 1 auto; min-width: 120px; font-size: 10px; padding: 1px 5px;
   background: rgba(148, 163, 184, 0.06); border: 1px solid rgba(148, 163, 184, 0.25);
   border-radius: 3px; color: rgba(229, 222, 255, 0.95);
 }
-.loc-struct-trigger-chip {
+.perspective-struct-trigger-chip {
   display: inline-flex; align-items: center; gap: 3px; font-size: 10px;
   padding: 0 3px 0 6px; border-radius: 9px;
   background: rgba(251, 191, 36, 0.12); color: rgba(252, 211, 77, 0.95);
   border: 1px solid rgba(251, 191, 36, 0.35);
 }
-.loc-struct-trigger-x { background: none; border: none; color: rgba(252, 211, 77, 0.8); cursor: pointer; font-size: 9px; padding: 0 1px; line-height: 1; }
-.loc-struct-trigger-x:hover { color: rgba(252, 165, 165, 1); }
+.perspective-struct-trigger-x { background: none; border: none; color: rgba(252, 211, 77, 0.8); cursor: pointer; font-size: 9px; padding: 0 1px; line-height: 1; }
+.perspective-struct-trigger-x:hover { color: rgba(252, 165, 165, 1); }
 /* v2.74.362 — auto-verification verdict badge on a structure node */
-.loc-struct-auto {
+.perspective-struct-auto {
   flex: 0 0 auto; font-size: 9px; padding: 0 5px; border-radius: 9px;
   white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis;
 }
-.loc-struct-auto.cx-verified { background: rgba(61, 214, 140, 0.16);  color: rgba(110, 231, 168, 1); border: 1px solid rgba(61, 214, 140, 0.45); }
-.loc-struct-auto.cx-failed   { background: rgba(247, 110, 110, 0.16); color: rgba(252, 165, 165, 1); border: 1px solid rgba(247, 110, 110, 0.5); }
-.loc-struct-auto.cx-unver    { background: rgba(251, 191, 36, 0.14);  color: rgba(252, 211, 77, 1);  border: 1px solid rgba(251, 191, 36, 0.45); }
+.perspective-struct-auto.cx-verified { background: rgba(61, 214, 140, 0.16);  color: rgba(110, 231, 168, 1); border: 1px solid rgba(61, 214, 140, 0.45); }
+.perspective-struct-auto.cx-failed   { background: rgba(247, 110, 110, 0.16); color: rgba(252, 165, 165, 1); border: 1px solid rgba(247, 110, 110, 0.5); }
+.perspective-struct-auto.cx-unver    { background: rgba(251, 191, 36, 0.14);  color: rgba(252, 211, 77, 1);  border: 1px solid rgba(251, 191, 36, 0.45); }
 /* v2.74.365 — virtual container node (not a captured landmark) */
-.loc-struct-vnode { border-left: 2px dashed rgba(196, 181, 253, 0.5); }
-.loc-struct-vlabel { font-style: italic; color: rgba(196, 181, 253, 0.95); }
-.loc-struct-overlay { color: rgba(196, 181, 253, 0.85); font-size: 10.5px; margin-top: 3px; }
+.perspective-struct-vnode { border-left: 2px dashed rgba(196, 181, 253, 0.5); }
+.perspective-struct-vlabel { font-style: italic; color: rgba(196, 181, 253, 0.95); }
+.perspective-struct-overlay { color: rgba(196, 181, 253, 0.85); font-size: 10.5px; margin-top: 3px; }
 /* v2.74.346 — B-mid overlay (grouping/sequence) review rows */
-.loc-struct-overlay-row {
+.perspective-struct-overlay-row {
   display: flex;
   align-items: center;
   gap: 5px;
   border-left: 2px solid transparent;
 }
-.loc-struct-overlay-glyph { flex: 0 0 auto; }
-.loc-struct-overlay-name {
+.perspective-struct-overlay-glyph { flex: 0 0 auto; }
+.perspective-struct-overlay-name {
   flex: 0 0 auto;
   width: 96px;
   font-size: 10.5px;
@@ -4898,7 +4898,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   border-radius: 3px;
   color: rgba(229, 222, 255, 0.95);
 }
-.loc-struct-overlay-body { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.perspective-struct-overlay-body { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* v2.74.348 — PERSPECTIVE_SPEC § 13 description-first perspective proposal panel */
 .dbg-perspective-perspective-body { display: flex; flex-direction: column; gap: 8px; }

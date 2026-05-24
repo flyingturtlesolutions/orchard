@@ -5030,7 +5030,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           __pendingPerspectiveCapture = {
             groundId,
             tabId: tabRes.tabId,
-            sessionId: `loc_cap_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            sessionId: `perspective_cap_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
             startedAt: Date.now(),
           };
 

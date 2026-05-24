@@ -1490,9 +1490,9 @@ const _STRUCT_MULT_OPTS = ['one', 'many', 'optional', 'conditional'];
 function _renderStructNodeRow(n, depth, index) {
   if (!n || typeof n.ref !== 'string') return '';
   const judgment = n.authoringMetadata?.userJudgment ?? null;
-  const judgedClass = judgment === 'accepted' ? ' loc-struct-judged-ok'
-    : judgment === 'rejected-but-kept' ? ' loc-struct-judged-rej'
-    : judgment === 'edited' ? ' loc-struct-judged-edit' : '';
+  const judgedClass = judgment === 'accepted' ? ' perspective-struct-judged-ok'
+    : judgment === 'rejected-but-kept' ? ' perspective-struct-judged-rej'
+    : judgment === 'edited' ? ' perspective-struct-judged-edit' : '';
   const mult = _STRUCT_MULT_OPTS.includes(n.multiplicity) ? n.multiplicity : 'one';
   const multOpts = _STRUCT_MULT_OPTS.map(m => `<option value="${m}"${m === mult ? ' selected' : ''}>${m}</option>`).join('');
   // v2.74.365 — node identity is a landmark ref OR a virtual container's vid.
@@ -1507,22 +1507,22 @@ function _renderStructNodeRow(n, depth, index) {
   // v2.74.362 — auto-verification verdict badge (set by onVerifyStructure).
   const aj = n.autoJudgment ?? null;
   const vis = n.autoVisual ? ' 👁' : '';   // v2.74.364 — verdict came from the visual critic
-  const autoBadge = aj === 'verified'    ? `<span class="loc-struct-auto cx-verified" title="${escAttr(n.autoVisual ? 'Confirmed visually (screenshot critic)' : 'Auto-verified against the live page')}">✓ ${n.autoVisual ? 'visual' : 'auto'}</span>`
-    : aj === 'failed'       ? `<span class="loc-struct-auto cx-failed" title="${escAttr(n.autoNote ?? 'failed verification')}">✗${vis} ${escHtml(n.autoNote ?? 'failed')}</span>`
-    : aj === 'unverifiable' ? `<span class="loc-struct-auto cx-unver" title="${escAttr(n.autoNote ?? 'could not verify')}">?${vis} ${escHtml(n.autoNote ?? 'unverifiable')}</span>`
+  const autoBadge = aj === 'verified'    ? `<span class="perspective-struct-auto cx-verified" title="${escAttr(n.autoVisual ? 'Confirmed visually (screenshot critic)' : 'Auto-verified against the live page')}">✓ ${n.autoVisual ? 'visual' : 'auto'}</span>`
+    : aj === 'failed'       ? `<span class="perspective-struct-auto cx-failed" title="${escAttr(n.autoNote ?? 'failed verification')}">✗${vis} ${escHtml(n.autoNote ?? 'failed')}</span>`
+    : aj === 'unverifiable' ? `<span class="perspective-struct-auto cx-unver" title="${escAttr(n.autoNote ?? 'could not verify')}">?${vis} ${escHtml(n.autoNote ?? 'unverifiable')}</span>`
     : '';
   let html = `
-    <div class="loc-struct-node${judgedClass}${n.virtual ? ' loc-struct-vnode' : ''}" style="padding-left:${depth * 14}px" data-struct-ref="${escAttr(nodeId)}">
-      <button class="loc-struct-move-btn" data-struct-action="outdent" data-ref="${escAttr(nodeId)}" type="button" ${canOutdent ? '' : 'disabled'} title="Promote: move out one level (to its grandparent)">⬅</button>
-      <button class="loc-struct-move-btn" data-struct-action="indent" data-ref="${escAttr(nodeId)}" type="button" ${canIndent ? '' : 'disabled'} title="Nest: move inside the node above it">➡</button>
-      <span class="loc-struct-alias${n.virtual ? ' loc-struct-vlabel' : ''}" title="${escAttr(n.virtual ? 'Virtual container — holds landmarks but isn\'t itself a captured landmark' : alias)}">${escHtml(alias)}</span>
-      <input type="text" class="loc-struct-role-input" data-struct-action="role" data-ref="${escAttr(nodeId)}"
+    <div class="perspective-struct-node${judgedClass}${n.virtual ? ' perspective-struct-vnode' : ''}" style="padding-left:${depth * 14}px" data-struct-ref="${escAttr(nodeId)}">
+      <button class="perspective-struct-move-btn" data-struct-action="outdent" data-ref="${escAttr(nodeId)}" type="button" ${canOutdent ? '' : 'disabled'} title="Promote: move out one level (to its grandparent)">⬅</button>
+      <button class="perspective-struct-move-btn" data-struct-action="indent" data-ref="${escAttr(nodeId)}" type="button" ${canIndent ? '' : 'disabled'} title="Nest: move inside the node above it">➡</button>
+      <span class="perspective-struct-alias${n.virtual ? ' perspective-struct-vlabel' : ''}" title="${escAttr(n.virtual ? 'Virtual container — holds landmarks but isn\'t itself a captured landmark' : alias)}">${escHtml(alias)}</span>
+      <input type="text" class="perspective-struct-role-input" data-struct-action="role" data-ref="${escAttr(nodeId)}"
              value="${escAttr(n.role ?? '')}" placeholder="role" maxlength="40"
              title="${escAttr(n.virtual ? 'Container role (e.g. dropdown-menu, modal)' : 'Semantic role within the parent (LLM-proposed — edit to correct)')}" />
-      <select class="loc-struct-mult-select" data-struct-action="mult" data-ref="${escAttr(nodeId)}" title="How many at runtime">${multOpts}</select>
+      <select class="perspective-struct-mult-select" data-struct-action="mult" data-ref="${escAttr(nodeId)}" title="How many at runtime">${multOpts}</select>
       ${autoBadge}
-      <button class="loc-struct-judge-btn${judgment === 'accepted' ? ' active' : ''}" data-struct-action="judge" data-ref="${escAttr(nodeId)}" data-judgment="accepted" type="button" title="Accept Claude's proposal for this node as-is">✓</button>
-      <button class="loc-struct-judge-btn loc-struct-judge-rej${judgment === 'rejected-but-kept' ? ' active' : ''}" data-struct-action="judge" data-ref="${escAttr(nodeId)}" data-judgment="rejected-but-kept" type="button" title="Reject the structuring (members stay in the perspective; flags the proposal as wrong)">✗</button>
+      <button class="perspective-struct-judge-btn${judgment === 'accepted' ? ' active' : ''}" data-struct-action="judge" data-ref="${escAttr(nodeId)}" data-judgment="accepted" type="button" title="Accept Claude's proposal for this node as-is">✓</button>
+      <button class="perspective-struct-judge-btn perspective-struct-judge-rej${judgment === 'rejected-but-kept' ? ' active' : ''}" data-struct-action="judge" data-ref="${escAttr(nodeId)}" data-judgment="rejected-but-kept" type="button" title="Reject the structuring (members stay in the perspective; flags the proposal as wrong)">✗</button>
     </div>`;
   // v2.74.361 — B-full (partial): per-node dynamics detail.
   //  • presenceCondition — shown when the node isn't always present
@@ -1533,19 +1533,19 @@ function _renderStructNodeRow(n, depth, index) {
   const detailPad = `padding-left:${(depth + 1) * 14}px`;
   if (mult === 'conditional' || mult === 'optional') {
     html += `
-      <div class="loc-struct-detail" style="${detailPad}">
-        <span class="loc-struct-detail-label" title="When is this landmark present at runtime?">when present</span>
-        <input type="text" class="loc-struct-presence-input" data-struct-action="presence" data-ref="${escAttr(nodeId)}"
+      <div class="perspective-struct-detail" style="${detailPad}">
+        <span class="perspective-struct-detail-label" title="When is this landmark present at runtime?">when present</span>
+        <input type="text" class="perspective-struct-presence-input" data-struct-action="presence" data-ref="${escAttr(nodeId)}"
                value="${escAttr(n.presenceCondition ?? '')}" placeholder="e.g. after the control is opened" maxlength="120" />
       </div>`;
   }
   if (Array.isArray(n.triggers) && n.triggers.length) {
     const chips = n.triggers.map(t =>
-      `<span class="loc-struct-trigger-chip">${escHtml(_structAliasOf(t))}<button class="loc-struct-trigger-x" data-struct-action="untrigger" data-ref="${escAttr(nodeId)}" data-trigger="${escAttr(t)}" type="button" title="Remove this trigger">✕</button></span>`
+      `<span class="perspective-struct-trigger-chip">${escHtml(_structAliasOf(t))}<button class="perspective-struct-trigger-x" data-struct-action="untrigger" data-ref="${escAttr(nodeId)}" data-trigger="${escAttr(t)}" type="button" title="Remove this trigger">✕</button></span>`
     ).join('');
     html += `
-      <div class="loc-struct-detail loc-struct-triggers" style="${detailPad}">
-        <span class="loc-struct-detail-label" title="Interacting with this landmark reveals or changes these">⚡ triggers</span>${chips}
+      <div class="perspective-struct-detail perspective-struct-triggers" style="${detailPad}">
+        <span class="perspective-struct-detail-label" title="Interacting with this landmark reveals or changes these">⚡ triggers</span>${chips}
       </div>`;
   }
   if (Array.isArray(n.contains)) n.contains.forEach((c, i) => { html += _renderStructNodeRow(c, depth + 1, i); });
@@ -1563,19 +1563,19 @@ function _renderOverlayRow(kind, ov, idx) {
   const joiner  = kind === 'grouping' ? ', ' : ' → ';
   const body    = members.map(_structAliasOf).map(escHtml).join(joiner);
   const judgment = ov.authoringMetadata?.userJudgment ?? null;
-  const judgedClass = judgment === 'accepted' ? ' loc-struct-judged-ok'
-    : judgment === 'rejected-but-kept' ? ' loc-struct-judged-rej'
-    : judgment === 'edited' ? ' loc-struct-judged-edit' : '';
+  const judgedClass = judgment === 'accepted' ? ' perspective-struct-judged-ok'
+    : judgment === 'rejected-but-kept' ? ' perspective-struct-judged-rej'
+    : judgment === 'edited' ? ' perspective-struct-judged-edit' : '';
   const title = kind === 'grouping' ? 'grouping (cuts across containment)' : 'sequence (ordered flow)';
   return `
-    <div class="loc-struct-overlay loc-struct-overlay-row${judgedClass}" data-overlay-kind="${kind}" data-overlay-idx="${idx}" title="${escAttr(title)}">
-      <span class="loc-struct-overlay-glyph">${glyph}</span>
-      <input type="text" class="loc-struct-overlay-name" data-overlay-action="name" data-overlay-kind="${kind}" data-overlay-idx="${idx}"
+    <div class="perspective-struct-overlay perspective-struct-overlay-row${judgedClass}" data-overlay-kind="${kind}" data-overlay-idx="${idx}" title="${escAttr(title)}">
+      <span class="perspective-struct-overlay-glyph">${glyph}</span>
+      <input type="text" class="perspective-struct-overlay-name" data-overlay-action="name" data-overlay-kind="${kind}" data-overlay-idx="${idx}"
              value="${escAttr(ov.name ?? '')}" placeholder="name" maxlength="40" title="Overlay name (LLM-proposed — edit to correct)" />
-      <span class="loc-struct-overlay-body">${body}</span>
-      <button class="loc-struct-judge-btn${judgment === 'accepted' ? ' active' : ''}" data-overlay-action="judge" data-overlay-kind="${kind}" data-overlay-idx="${idx}" data-judgment="accepted" type="button" title="Accept this overlay as proposed">✓</button>
-      <button class="loc-struct-judge-btn loc-struct-judge-rej${judgment === 'rejected-but-kept' ? ' active' : ''}" data-overlay-action="judge" data-overlay-kind="${kind}" data-overlay-idx="${idx}" data-judgment="rejected-but-kept" type="button" title="Reject (kept, flagged wrong)">✗</button>
-      <button class="loc-struct-move-btn" data-overlay-action="delete" data-overlay-kind="${kind}" data-overlay-idx="${idx}" type="button" title="Delete this overlay (does not remove any landmark)">🗑</button>
+      <span class="perspective-struct-overlay-body">${body}</span>
+      <button class="perspective-struct-judge-btn${judgment === 'accepted' ? ' active' : ''}" data-overlay-action="judge" data-overlay-kind="${kind}" data-overlay-idx="${idx}" data-judgment="accepted" type="button" title="Accept this overlay as proposed">✓</button>
+      <button class="perspective-struct-judge-btn perspective-struct-judge-rej${judgment === 'rejected-but-kept' ? ' active' : ''}" data-overlay-action="judge" data-overlay-kind="${kind}" data-overlay-idx="${idx}" data-judgment="rejected-but-kept" type="button" title="Reject (kept, flagged wrong)">✗</button>
+      <button class="perspective-struct-move-btn" data-overlay-action="delete" data-overlay-kind="${kind}" data-overlay-idx="${idx}" type="button" title="Delete this overlay (does not remove any landmark)">🗑</button>
     </div>`;
 }
 
@@ -1583,7 +1583,7 @@ function _renderStructurePreview(nodes, groupings, sequences) {
   const tree = (Array.isArray(nodes) ? nodes : []).map((n, i) => _renderStructNodeRow(n, 0, i)).join('');
   const grp = (Array.isArray(groupings) ? groupings : []).map((g, i) => _renderOverlayRow('grouping', g, i)).join('');
   const seq = (Array.isArray(sequences) ? sequences : []).map((s, i) => _renderOverlayRow('sequence', s, i)).join('');
-  return `<div class="loc-structure-preview">${tree}${grp}${seq}</div>`;
+  return `<div class="perspective-structure-preview">${tree}${grp}${seq}</div>`;
 }
 
 function _renderStructureBar() {
@@ -1600,10 +1600,10 @@ function _renderStructureBar() {
     ? 'Ask Claude to organize these landmarks into a structured perspective (containment, roles, groupings/sequences). You review the result; it saves with the Perspective.'
     : 'Pick at least 2 landmarks to propose structure.';
   return `
-    <div class="loc-structure-bar">
+    <div class="perspective-structure-bar">
       <button class="btn-secondary tiny" data-perspective-action="propose-structure" type="button" ${canStructure ? '' : 'disabled'} title="${escAttr(btnTitle)}">${btnLabel}</button>
       ${struct ? `<button class="btn-secondary tiny" data-perspective-action="verify-structure" type="button" title="Auto-verify the structure against the live page: resolution + multiplicity + containment (deterministic), and poke-and-observe for triggers. Synthetic clicks interact with the page.">✓ Verify</button>` : ''}
-      ${struct ? `<span class="loc-structure-tag" title="Structure proposed by Claude — review below. Saved with the Perspective.">structured</span>` : ''}
+      ${struct ? `<span class="perspective-structure-tag" title="Structure proposed by Claude — review below. Saved with the Perspective.">structured</span>` : ''}
     </div>
     ${struct ? _renderStructurePreview(struct, _perspectiveDraft.groupings, _perspectiveDraft.sequences) : ''}`;
 }
@@ -3375,7 +3375,7 @@ async function startPerspectivePick(landmarkIdx, roleSlot) {
     return;
   }
 
-  const sessionId = `loc_pick_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const sessionId = `perspective_pick_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   // v2.74.348 — roleSlot ({role, multiplicity}) is carried through so the
   // PICK_RESULT handler can bind the resulting landmark to a § 13 role.
   _perspectivePickerSession = { sessionId, landmarkIdx, roleSlot: roleSlot ?? null };

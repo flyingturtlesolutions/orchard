@@ -278,7 +278,7 @@ function _buildTypeOptions(c) {
   if (_groundPerspectives.length > 0) {
     const opts = _groundPerspectives
       .slice().sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''))
-      .map(l => opt(`loc_ref:${l.id}`, l.name ?? l.id, cur === 'perspective_ref' && curPerspectiveId === l.id))
+      .map(l => opt(`perspective_ref:${l.id}`, l.name ?? l.id, cur === 'perspective_ref' && curPerspectiveId === l.id))
       .join('');
     groups.push(`<optgroup label="Perspectives">${opts}</optgroup>`);
   }
@@ -297,8 +297,8 @@ function _buildTypeOptions(c) {
 function _decodeTypeValue(value) {
   if (typeof value === 'string' && value.startsWith('pred_ref:'))
     return { type: 'assertion_ref', assertionId: value.slice('pred_ref:'.length) };
-  if (typeof value === 'string' && value.startsWith('loc_ref:'))
-    return { type: 'perspective_ref', perspectiveId: value.slice('loc_ref:'.length) };
+  if (typeof value === 'string' && value.startsWith('perspective_ref:'))
+    return { type: 'perspective_ref', perspectiveId: value.slice('perspective_ref:'.length) };
   return { type: value };
 }
 

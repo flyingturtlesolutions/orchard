@@ -4051,6 +4051,46 @@ locale-capture.js` (matchedGoal in the grounded-intent card), `manifest.json`.
 
 ---
 
+## v2.74.421 — Bug pass on the rename + finish the `loc` abbreviation leftovers
+
+**Date:** 2026-05-24
+**Decision by:** user ("bug pass"). Post-commit review of v2.74.408–420.
+
+**Bug-pass result — no functional bugs.** Verified the rename introduced nothing
+broken: cross-module exports↔imports match (incl. `PerspectivePredicates`'
+`export async function`s), message types match sender↔handler, `perspective_ref`
+condition kind consistent across write-sites and evaluators, storage-key strings
+internally consistent, mode-registry key `'perspective-capture'` consistent, no
+header/i18n/regex string collateral, JS builtins (`localeCompare`/`toLocale*`)
+intact. Re-read the OUTCOMES `EMIT_RESOLVE_OUTCOMES` handler end-to-end: featureId
+maps the *proposed* selector, decay folds the fresh stream, provenance stamps only
+`corrected` events with a mapped feature, graceful when no pageModel is cached —
+correct.
+
+**Completeness fix (the `loc` separator leftovers).** The rename passes keyed on
+`loc[A-Z]`/`Locale`/`locale`, so `loc`-tokens with a `_`/`-` separator slipped
+through. They were *internally consistent* (untouched on every side → not bugs)
+but are exactly the divergence the rename set out to remove, so finished them:
+- `loc-struct*` → `perspective-struct*` (perspective-capture.js + sidepanel.css,
+  33↔33 in sync — the structure-panel CSS classes).
+- `loc_ref:` → `perspective_ref:` (assertion/fragment/observation authors + studio
+  — the condition select-option encoding; opt-value, `startsWith`, and
+  `slice(…​.length)` all moved together).
+- `loc_cap_` / `loc_pick_` → `perspective_cap_` / `perspective_pick_` (opaque
+  sessionId prefixes; generation-only, never prefix-matched).
+
+Remaining `loc` in code: only bare loop/param scratch vars (`for (const loc of
+…)`) — deliberately left (ambiguous, throwaway, invisible) — and JS builtins.
+
+**Verification.** Affected files re-syntax-checked; paired contracts confirmed in
+sync; zero `loc_ref`/`loc-struct`/`loc_cap`/`loc_pick` remain.
+
+**Touched.** `Sidepanel/modes/{perspective-capture,assertion-author,fragment-author,
+observation-author}.js`, `studio.js`, `background.js`, `assets/sidepanel.css`,
+`manifest.json`.
+
+---
+
 ## v2.74.420 — Terminology: `Locale` → `Perspective` (full end-to-end rename)
 
 **Date:** 2026-05-24

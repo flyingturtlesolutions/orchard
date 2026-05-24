@@ -4048,7 +4048,7 @@ function renderConditionEditor(condition, path, opts = {}) {
     }
   } else if (type === 'perspective_ref') {
     // v2.72.29 (Pass 17) — perspective_ref. Like assertion_ref, the primary
-    // dropdown carries the perspective selection (synthetic `loc_ref:<id>`).
+    // dropdown carries the perspective selection (synthetic `perspective_ref:<id>`).
     // Right-side area shows the selected perspective's landmark count + first
     // landmark role as a quick reference.
     const refId = condition?.perspectiveId;
@@ -4346,7 +4346,7 @@ function buildConditionTypeOptions(opts = {}) {
       return an < bn ? -1 : an > bn ? 1 : 0;
     });
     const optionsHtml = sortedLocs.map(l => {
-      const value = `loc_ref:${l.id}`;
+      const value = `perspective_ref:${l.id}`;
       const isSelected = currentType === 'perspective_ref' && currentPerspectiveId === l.id;
       const lmCount = Array.isArray(l.landmarks) ? l.landmarks.length : 0;
       return `<option value="${escAttr(value)}"${isSelected ? ' selected' : ''}>${escHtml(l.name ?? l.id)} (${lmCount} landmark${lmCount === 1 ? '' : 's'})</option>`;
@@ -4357,7 +4357,7 @@ function buildConditionTypeOptions(opts = {}) {
   if (currentType === 'perspective_ref' && currentPerspectiveId) {
     const presentInList = perspectives.some(l => l.id === currentPerspectiveId);
     if (!presentInList) {
-      const value = `loc_ref:${currentPerspectiveId}`;
+      const value = `perspective_ref:${currentPerspectiveId}`;
       groups.push(`<optgroup label="Perspectives · Stale"><option value="${escAttr(value)}" selected>(missing: ${escHtml(currentPerspectiveId)})</option></optgroup>`);
     }
   }
@@ -4376,9 +4376,9 @@ function decodeConditionTypeValue(value) {
   if (typeof value === 'string' && value.startsWith('pred_ref:')) {
     return { type: 'assertion_ref', assertionId: value.slice('pred_ref:'.length) };
   }
-  // v2.72.29 (Pass 17) — loc_ref:<id> → perspective_ref condition.
-  if (typeof value === 'string' && value.startsWith('loc_ref:')) {
-    return { type: 'perspective_ref', perspectiveId: value.slice('loc_ref:'.length) };
+  // v2.72.29 (Pass 17) — perspective_ref:<id> → perspective_ref condition.
+  if (typeof value === 'string' && value.startsWith('perspective_ref:')) {
+    return { type: 'perspective_ref', perspectiveId: value.slice('perspective_ref:'.length) };
   }
   return { type: value };
 }
