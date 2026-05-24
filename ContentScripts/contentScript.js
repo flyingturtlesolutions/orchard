@@ -3105,7 +3105,272 @@ function handleDomSnapshotPostSend(baselineSelectors = [], typedQuestion = '') {
  * @param {string[]} prevSigs  — signatures from previous turn for delta detection
  * @returns {{ success: boolean, snapshot: string, sigs: string[] }}
  */
-function handleDomSnapshotRich(prevSigs = []) {
+// v2.74.395 — Repeating content-block detector. The DOM_SNAPSHOT_RICH walker
+// (SEL) is CONTROL-centric: cards/tiles/rows/sections that carry no role /
+// aria-label / data-testid are invisible to it, and full class attributes are
+// stripped elsewhere as "hashed noise". But those repeating content blocks are
+// exactly what "many"-multiplicity CONTENT roles (collection-card, result-item,
+// gallery-tile) need to resolve — and on CSS-module / styled-component sites
+// (e.g. Pixabay's `div.layout--JZpqG…`) the element's own class signature is the
+// ONLY stable handle it has. This finds elements whose tag+class signature
+// recurs ≥3× and emits the SHARED class signature as a ready-to-use, querySelector
+// -verified selector + a content sample. Opt-in (resolve only) so the agent
+// walker's per-turn snapshots aren't bloated.
+function detectRepeatingContentBlocks() {
+  let nodes;
+  try { nodes = document.body ? document.body.getElementsByTagName('*') : []; }
+  catch { return []; }
+  const groups = new Map();              // sigKey -> { tag, classes, els:[] }
+  const MAX_SCAN = 6000;                 // bound cost on huge pages
+  const n = Math.min(nodes.length, MAX_SCAN);
+  for (let i = 0; i < n; i++) {
+    const el = nodes[i];
+    const raw = (typeof el.className === 'string') ? el.className : ((el.getAttribute && el.getAttribute('class')) || '');
+    if (!raw) continue;
+    const classes = raw.trim().split(/\s+/).filter(Boolean);
+    if (classes.length === 0) continue;
+    const sigKey = el.tagName + '|' + classes.slice().sort().join('.');
+    let g = groups.get(sigKey);
+    if (!g) { g = { tag: el.tagName, classes, els: [] }; groups.set(sigKey, g); }
+    g.els.push(el);
+  }
+  const cssEscape = (c) => {
+    try { return (window.CSS && CSS.escape) ? CSS.escape(c) : c.replace(/[^a-zA-Z0-9_-]/g, '\\$&'); }
+    catch { return c; }
+  };
+  const blocks = [];
+  let groupsChecked = 0;
+  for (const g of groups.values()) {
+    if (g.els.length < 3) continue;                 // must repeat
+    if (++groupsChecked > 400) break;               // hard cap on expensive checks
+    // Content-like filter: a fair share carry text or an image, and the element
+    // is block-sized (not an inline chip/icon that merely repeats).
+    let contentful = 0, withImg = 0, sized = 0;
+    const sample = g.els.slice(0, 12);
+    for (const el of sample) {
+      try {
+        const r = el.getBoundingClientRect();
+        if (r.width >= 60 && r.height >= 40) sized++;
+        const txt = (el.innerText || el.textContent || '').trim();
+        if (txt.length >= 2) contentful++;
+        if (el.querySelector && el.querySelector('img,svg,picture,video,[style*="background-image"]')) withImg++;
+      } catch { /* */ }
+    }
+    if (sized < 2) continue;                          // skip inline/tiny repeats
+    if (contentful < 2 && withImg < 2) continue;      // skip empty repeats
+    const sel = g.tag.toLowerCase() + g.classes.map(c => '.' + cssEscape(c)).join('');
+    let matchCount = 0;
+    try { matchCount = document.querySelectorAll(sel).length; } catch { matchCount = 0; }
+    if (matchCount < 3) continue;                     // selector must actually repeat
+    let sampleText = '';
+    try { sampleText = (g.els[0].innerText || g.els[0].textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60); } catch { /* */ }
+    blocks.push({ tag: g.tag.toLowerCase(), selector: sel, count: matchCount, hasImage: withImg >= 2, sampleText });
+  }
+  blocks.sort((a, b) => b.count - a.count);
+  return blocks.slice(0, 12);
+}
+
+// v2.74.397 — L0 page enumeration (read-only). Builds the raw Feature list for a
+// PageModel (PAGEMODEL_SPEC § 8, tier L0): scroll the page in viewport bands and
+// enumerate every interactive control, content collection, and region — each with
+// a selector, absolute location (+ scrollToY), kind, and interaction — WITHOUT any
+// clicking. Self-contained: unlike the poke sweep, enumeration is read-only, so it
+// can scroll the whole page in one call and restore, with no background banding/
+// navigation-recovery orchestration. Returns { success, features, meta }.
+async function enumeratePage() {
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const origScrollY = window.scrollY || 0;
+  const docH = (() => { try { return Math.max(document.documentElement.scrollHeight, (document.body && document.body.scrollHeight) || 0, vh); } catch { return vh; } })();
+  const bandStep = Math.max(1, Math.round(vh * 0.9));
+  const bandCount = Math.min(24, Math.max(1, Math.ceil(docH / bandStep)));
+  const FEATURE_CAP = 500;
+
+  const djb2 = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return (h >>> 0).toString(36); };
+  const vis = (el) => { try { const r = el.getBoundingClientRect(); if (r.width <= 0 || r.height <= 0) return false; const cs = getComputedStyle(el); return cs.visibility !== 'hidden' && cs.display !== 'none' && cs.opacity !== '0'; } catch { return false; } };
+  const accName = (el) => {
+    try {
+      const al = el.getAttribute('aria-label'); if (al && al.trim()) return al.trim();
+      const lb = el.getAttribute('aria-labelledby'); if (lb) { const t = lb.split(/\s+/).map(id => document.getElementById(id) && document.getElementById(id).textContent ? document.getElementById(id).textContent.trim() : '').filter(Boolean).join(' '); if (t) return t; }
+      const ph = el.getAttribute('placeholder'); if (ph && ph.trim()) return ph.trim();
+      const ti = el.getAttribute('title'); if (ti && ti.trim()) return ti.trim();
+      const alt = el.getAttribute('alt'); if (alt && alt.trim()) return alt.trim();
+      const tx = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' '); if (tx) return tx;
+      const v = el.value; if (typeof v === 'string' && v.trim()) return v.trim();
+    } catch { /* */ }
+    return '';
+  };
+  const absRect = (el) => { try { const r = el.getBoundingClientRect(); return { x: Math.round(r.left + window.scrollX), y: Math.round(r.top + window.scrollY), w: Math.round(r.width), h: Math.round(r.height) }; } catch { return { x: 0, y: 0, w: 0, h: 0 }; } };
+  const tierOf = (sel) => {
+    if (!sel) return 'positional';
+    if (/(^|\s|>)#[A-Za-z]/.test(sel)) return 'id';
+    if (/\[data-/.test(sel)) return 'data';
+    if (/\[aria-|\[role=/.test(sel)) return 'aria';
+    if (/:nth-|:first-|:last-|>\s|\+\s|~\s/.test(sel)) return 'positional';
+    if (/\./.test(sel)) return 'class';
+    return 'semantic';
+  };
+  const INTERACTIVE_SEL = 'a[href],button,input:not([type="hidden"]),select,textarea,[role="button"],[role="link"],[role="textbox"],[role="combobox"],[role="searchbox"],[role="menuitem"],[role="tab"],[role="checkbox"],[role="radio"],[role="switch"],summary,[contenteditable="true"]';
+  const REGION_SEL = 'header,nav,main,footer,aside,[role="banner"],[role="navigation"],[role="main"],[role="contentinfo"],[role="search"],[role="complementary"]';
+
+  const classifyKind = (el) => {
+    const tag = el.tagName.toLowerCase();
+    const role = el.getAttribute('role');
+    if (tag === 'input') { const t = (el.getAttribute('type') || 'text').toLowerCase(); if (['button', 'submit', 'reset', 'image', 'checkbox', 'radio'].includes(t)) return 'action'; return 'input'; }
+    if (tag === 'textarea' || tag === 'select' || el.isContentEditable || role === 'textbox' || role === 'combobox' || role === 'searchbox') return 'input';
+    // v2.74.401 — disclosure detection beyond ARIA: many sites (e.g. Pixabay's
+    // "Explore" / "All images") build dropdowns as class-based menus with no
+    // aria-haspopup/expanded. Catch dropdown/flyout/triggerWrapper containers too.
+    const cls = el.getAttribute('class') || '';
+    if (el.getAttribute('aria-haspopup') || el.hasAttribute('aria-expanded') || tag === 'summary'
+        || /(dropdown|flyout|menutrigger|hasmenu)/i.test(cls)
+        || (tag !== 'a' && el.closest && el.closest('[class*="dropdown" i],[class*="flyout" i],[class*="triggerWrapper" i]'))) return 'disclosure';
+    if (tag === 'a' && el.getAttribute('href')) return 'navigation';
+    return 'action';
+  };
+  const interactionOf = (kind, el) => {
+    if (kind === 'input') { const isSel = el.tagName.toLowerCase() === 'select'; return { pattern: isSel ? 'select' : 'type', effect: isSel ? 'select' : 'none' }; }
+    if (kind === 'navigation') return { pattern: 'click', effect: 'navigate' };
+    if (kind === 'disclosure') return { pattern: 'click', effect: 'reveal' };
+    const t = (el.getAttribute('type') || '').toLowerCase();
+    const nm = accName(el).toLowerCase();
+    return { pattern: 'click', effect: (t === 'submit' || /search|submit|go|apply|sign in|log in|find/.test(nm)) ? 'submit' : 'none' };
+  };
+
+  const feats = new Map();
+  const add = (f) => { if (f && f.id && !feats.has(f.id) && feats.size < FEATURE_CAP) feats.set(f.id, f); };
+
+  // ── 1. Content collections FIRST (read at the top), so per-item controls can
+  // be SUPPRESSED below. v2.74.401 — validated: a 20-card image grid otherwise
+  // emits 100+ brittle positional features for its per-card edit/creator/like
+  // controls. The card IS the feature; its inner controls are a template.
+  try { window.scrollTo(0, 0); } catch { /* */ }
+  await sleep(80);
+  let blocks = [];
+  try { blocks = detectRepeatingContentBlocks(); } catch { blocks = []; }
+  const blockInfo = blocks.map((b) => {
+    let els = [];
+    try { els = Array.from(document.querySelectorAll(b.selector)); } catch { els = []; }
+    const areas = els.map((e) => { try { const r = e.getBoundingClientRect(); return r.width * r.height; } catch { return 0; } }).filter((a) => a > 0).sort((x, y) => x - y);
+    const medArea = areas.length ? areas[Math.floor(areas.length / 2)] : 0;
+    return { ...b, els, medArea };
+  });
+  // Content cards = repeating items that each contain a CLUSTER of controls
+  // (≥3 interactive descendants: edit + creator + like + link…). Their inner
+  // controls are suppressed (the card is the feature). A nav tile / thumbnail
+  // has ~1 link (<3), so its link SURVIVES as an individual navigation feature —
+  // size/has-image alone would wrongly hide media-type & collection nav links.
+  const countInteractive = (el) => { try { return el.querySelectorAll(INTERACTIVE_SEL).length; } catch { return 0; } };
+  const suppressSet = new Set();
+  for (const b of blockInfo) {
+    const counts = b.els.slice(0, 6).map(countInteractive).sort((x, y) => x - y);
+    b.medInteractive = counts.length ? counts[Math.floor(counts.length / 2)] : 0;
+    if (b.medInteractive >= 3) for (const e of b.els) suppressSet.add(e);
+  }
+  const insideSuppressed = (el) => { let n = el, d = 0; while (n && d < 14) { if (suppressSet.has(n)) return true; n = n.parentElement; d++; } return false; };
+  // Collapse NESTED collections for emission: keep the outermost (largest-area)
+  // card, drop the rest of the same grid. v2.74.402 — sampled BI-DIRECTIONAL
+  // containment over up to 8 items (≥50% overlap) handles non-1:1 nesting (12
+  // cells vs 10 inner contentContainers vs 25 overlay images) that a first-element
+  // check missed.
+  const keptBlocks = [];
+  for (const b of [...blockInfo].sort((a, c) => c.medArea - a.medArea)) {
+    const sample = b.els.slice(0, 8);
+    const overlapsKept = keptBlocks.some((k) => {
+      let hit = 0;
+      for (const be of sample) {
+        if (k.els.some((ke) => ke === be || (ke.contains && ke.contains(be)) || (be.contains && be.contains(ke)))) hit++;
+      }
+      return sample.length && hit / sample.length >= 0.5;
+    });
+    if (!overlapsKept) keptBlocks.push(b);
+  }
+  for (const blk of keptBlocks) {
+    if (feats.size >= FEATURE_CAP) break;
+    let absY = 0;
+    try { if (blk.els[0]) absY = Math.round(blk.els[0].getBoundingClientRect().top + window.scrollY); } catch { /* */ }
+    const label = (blk.sampleText || `${blk.count} items`).slice(0, 80);
+    const id = djb2(`collection|list|${label}|${blk.selector}`);
+    add({
+      id, kind: 'collection', label, a11yRole: 'list',
+      selector: blk.selector, selectorKind: 'class', selectorVerified: true,
+      members: { itemSelector: blk.selector, count: blk.count, sampleLabels: blk.sampleText ? [blk.sampleText] : [] },
+      location: { band: Math.floor(absY / bandStep), absRect: { x: 0, y: absY, w: vw, h: 0 }, visibleAtRest: absY >= origScrollY && absY < origScrollY + vh, scrollToY: Math.max(0, absY - Math.round(vh * 0.3)) },
+      interaction: { pattern: 'none', effect: 'none' },
+      confidence: 0.7,
+      evidence: { method: 'enumeration', observedAt: Date.now() },
+    });
+  }
+
+  // ── 2. Interactive controls, band by band (whole page) — skipping anything
+  // inside a content card (the collection represents it).
+  for (let b = 0; b < bandCount && feats.size < FEATURE_CAP; b++) {
+    try { window.scrollTo(0, b * bandStep); } catch { /* */ }
+    await sleep(110);   // settle lazy content / scroll-reactive chrome
+    let els;
+    try { els = document.querySelectorAll(INTERACTIVE_SEL); } catch { els = []; }
+    for (const el of els) {
+      if (feats.size >= FEATURE_CAP) break;
+      if (!vis(el)) continue;
+      if (suppressSet.has(el) || insideSuppressed(el)) continue;   // inside a content card → template, not a landmark
+      const r = el.getBoundingClientRect();
+      if (r.bottom < -40 || r.top > vh + 40) continue;   // band-local only
+      let selector = null;
+      try { selector = synthesizeSelector(el, document); } catch { /* */ }
+      if (!selector) { try { selector = _synthesizeSelectorForElement(el); } catch { /* */ } }
+      if (!selector) continue;
+      const kind = classifyKind(el);
+      const label = accName(el).slice(0, 80);
+      const ar = absRect(el);
+      const id = djb2(`${kind}|${el.getAttribute('role') || el.tagName.toLowerCase()}|${label}|${selector}`);
+      add({
+        id, kind, label, a11yRole: el.getAttribute('role') || null,
+        selector, selectorKind: tierOf(selector), selectorVerified: false,
+        location: { band: b, absRect: ar, visibleAtRest: (ar.y + ar.h) > origScrollY && ar.y < origScrollY + vh, scrollToY: Math.max(0, ar.y - Math.round(vh * 0.3)) },
+        interaction: interactionOf(kind, el),
+        confidence: 0.6,
+        evidence: { method: 'enumeration', observedAt: Date.now() },
+      });
+    }
+  }
+
+  // ── 3. Regions (landmarks). Measure at the TOP: a sticky/fixed header's rect
+  // is scroll-relative, so measuring it after the band loop (left at page bottom)
+  // mis-reports its absolute Y. Scroll to rest first. (v2.74.402)
+  try { window.scrollTo(0, 0); } catch { /* */ }
+  await sleep(60);
+  try {
+    for (const el of document.querySelectorAll(REGION_SEL)) {
+      if (feats.size >= FEATURE_CAP) break;
+      if (!vis(el)) continue;
+      let selector = null;
+      try { selector = synthesizeSelector(el, document); } catch { /* */ }
+      if (!selector) continue;
+      const label = (el.getAttribute('aria-label') || el.getAttribute('role') || el.tagName.toLowerCase()).slice(0, 60);
+      const ar = absRect(el);
+      const id = djb2(`region|${el.getAttribute('role') || el.tagName.toLowerCase()}|${label}|${selector}`);
+      add({
+        id, kind: 'region', label, a11yRole: el.getAttribute('role') || el.tagName.toLowerCase(),
+        selector, selectorKind: tierOf(selector), selectorVerified: false,
+        location: { band: Math.floor(ar.y / bandStep), absRect: ar, visibleAtRest: (ar.y + ar.h) > origScrollY && ar.y < origScrollY + vh, scrollToY: Math.max(0, ar.y - Math.round(vh * 0.3)) },
+        interaction: { pattern: 'none', effect: 'none' },
+        confidence: 0.6,
+        evidence: { method: 'enumeration', observedAt: Date.now() },
+      });
+    }
+  } catch { /* */ }
+
+  try { window.scrollTo(0, origScrollY); } catch { /* */ }
+  return {
+    success: true,
+    features: [...feats.values()],
+    meta: { url: location.href, title: document.title || '', viewport: { w: vw, h: vh }, scrollHeight: docH, bands: bandCount, enumeratedAt: Date.now() },
+  };
+}
+
+// v2.74.395 — opts.includeContentBlocks → prepend a REPEATING CONTENT BLOCKS
+// section (for Resolve). Default off (agent walker path stays control-only).
+function handleDomSnapshotRich(prevSigs = [], opts = {}) {
   const prevSet = new Set(prevSigs);
 
   // Attributes captured per element. Expanded in v2.24.0 to cover selection
@@ -3501,7 +3766,23 @@ function handleDomSnapshotRich(prevSigs = []) {
     const idx = visible.indexOf(el);
     return summarise(el, currentSigs[idx + 1]);
   });
-  const snapshot = diffHeader + [bodyLine, ...elementLines].join('\n');
+
+  // v2.74.395 — Opt-in repeating-content-block section (Resolve). Placed at the
+  // TOP of the snapshot so the resolver's 12k-char slice never truncates it —
+  // these are the only handles content/structural roles have.
+  let contentHeader = '';
+  if (opts && opts.includeContentBlocks) {
+    try {
+      const blocks = detectRepeatingContentBlocks();
+      if (blocks.length) {
+        contentHeader = `<!-- REPEATING CONTENT BLOCKS (structural items with no semantic hook; each selector is querySelector-verified to match N elements — use these for "many" content roles) -->\n` +
+          blocks.map(b => `<repeating-block tag="${b.tag}" count="${b.count}"${b.hasImage ? ' has-image="true"' : ''} selector="${b.selector.replace(/"/g, "'")}"${b.sampleText ? ` sample-text="${b.sampleText.replace(/"/g, "'")}"` : ''} />`).join('\n') +
+          '\n';
+      }
+    } catch { /* best-effort */ }
+  }
+
+  const snapshot = diffHeader + contentHeader + [bodyLine, ...elementLines].join('\n');
   return {
     success : true,
     snapshot,
@@ -4515,8 +4796,77 @@ async function pokeAndSnapshot(payload) {
   await sleep(300);   // final settle (late images/icons in the revealed layer)
   opened = countNovel();
   let s = {};
-  try { s = handleDomSnapshotRich([]) || {}; } catch (e) { return { success: false, error: `snapshot failed: ${e.message}` }; }
+  // v2.74.395 — includeContentBlocks: revealed layers (mega-menus, modals) can
+  // also hold repeating content blocks the hidden content roles need.
+  try { s = handleDomSnapshotRich([], { includeContentBlocks: true }) || {}; } catch (e) { return { success: false, error: `snapshot failed: ${e.message}` }; }
   return { success: true, opened, url: s.url ?? location.href, title: s.title ?? document.title ?? '', snapshot: s.snapshot ?? '' };
+}
+
+// v2.74.396 — Resolve Tier-2 VISUAL pick. Given a NORMALIZED box (screenshot /
+// viewport space, top-left origin) proposed by the vision model, find the on-page
+// element whose REAL rect best matches it (max IoU), then synthesize a selector +
+// a11y profile + rect — a picker-shaped result the sidepanel feeds into the
+// Pick→Claude refine. Mirrors a human pick, but the "where" comes from an LLM
+// region instead of a click. Robust to pixel slop: we score real element rects by
+// IoU rather than trusting a single elementFromPoint hit, and we let a card's
+// container out-score its inner image/label.
+async function locatePick(payload) {
+  const box = payload && payload.box;
+  if (!box || !['x1', 'y1', 'x2', 'y2'].every(k => typeof box[k] === 'number')) return { success: false, error: 'box required' };
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const B = { x: box.x1 * vw, y: box.y1 * vh, w: Math.max(1, (box.x2 - box.x1) * vw), h: Math.max(1, (box.y2 - box.y1) * vh) };
+  const boxArea = B.w * B.h;
+  const iou = (r) => {
+    const ix1 = Math.max(B.x, r.left), iy1 = Math.max(B.y, r.top);
+    const ix2 = Math.min(B.x + B.w, r.right), iy2 = Math.min(B.y + B.h, r.bottom);
+    const iw = Math.max(0, ix2 - ix1), ih = Math.max(0, iy2 - iy1);
+    const inter = iw * ih;
+    if (inter <= 0) return 0;
+    const uni = boxArea + (r.width * r.height) - inter;
+    return uni > 0 ? inter / uni : 0;
+  };
+  // Candidate set: elements under a grid of sample points in the box, plus their
+  // ancestors a few levels up (so the card container competes with the inner hit).
+  const cand = new Set();
+  const addWithAncestors = (el) => {
+    let n = el, depth = 0;
+    while (n && n.nodeType === 1 && depth < 5 && n !== document.body && n !== document.documentElement) { cand.add(n); n = n.parentElement; depth++; }
+  };
+  const GX = 3, GY = 3;
+  for (let i = 0; i <= GX; i++) {
+    for (let j = 0; j <= GY; j++) {
+      const px = B.x + (B.w * i / GX), py = B.y + (B.h * j / GY);
+      if (px < 0 || py < 0 || px > vw || py > vh) continue;
+      let stack = [];
+      try { stack = document.elementsFromPoint(px, py) || []; } catch { stack = []; }
+      for (const el of stack.slice(0, 4)) addWithAncestors(el);
+    }
+  }
+  let best = null, bestIoU = 0;
+  for (const el of cand) {
+    let r; try { r = el.getBoundingClientRect(); } catch { continue; }
+    if (r.width <= 0 || r.height <= 0) continue;
+    if (r.width * r.height > boxArea * 2.5) continue;   // skip giant wrappers that engulf the box
+    const score = iou(r);
+    if (score > bestIoU) { bestIoU = score; best = el; }
+  }
+  if (!best || bestIoU < 0.2) return { success: false, error: `no element matched the located region (best IoU ${bestIoU.toFixed(2)})` };
+  let selector = null;
+  try { selector = synthesizeSelector(best, document); } catch { selector = null; }
+  if (!selector) { try { selector = _synthesizeSelectorForElement(best); } catch { /* */ } }
+  if (!selector) return { success: false, error: 'could not synthesize a selector for the located element' };
+  let accessibilityProfile = null;
+  try { accessibilityProfile = await _computeAccessibilityProfile(best); } catch { /* */ }
+  let matchedCount = 1;
+  try { matchedCount = document.querySelectorAll(selector).length; } catch { /* */ }
+  const rect = best.getBoundingClientRect();
+  return {
+    success: true, selector, iou: bestIoU, matchedCount,
+    rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+    accessibilityProfile,
+    viewportInfo: { dpr: window.devicePixelRatio || 1, innerWidth: vw, innerHeight: vh },
+    frame: (typeof __pickerFrameInfo === 'function' ? __pickerFrameInfo() : null),
+  };
 }
 
 // Close any visible, sizable overlay (modal/dialog): close-control → Escape →
@@ -5083,8 +5433,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return false;
 
     case 'DOM_SNAPSHOT_RICH':
-      sendResponse(handleDomSnapshotRich(message.payload?.prevSigs ?? []));
+      sendResponse(handleDomSnapshotRich(message.payload?.prevSigs ?? [], { includeContentBlocks: !!message.payload?.includeContentBlocks }));
       return false;
+
+    // v2.74.396 — Resolve Tier-2 visual pick: normalized box → best-IoU element.
+    case 'LOCATE_PICK':
+      locatePick(payload).then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
+      return true;   // async sendResponse
+
+    // v2.74.397 — L0 page enumeration (read-only) → raw Feature list for a PageModel.
+    case 'ENUMERATE_PAGE':
+      enumeratePage().then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
+      return true;   // async sendResponse
 
     // v2.74.353 — Resolve-roles complexity metric (deterministic DOM scan).
     case 'PAGE_COMPLEXITY':

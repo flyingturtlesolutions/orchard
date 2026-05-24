@@ -2558,6 +2558,14 @@ async function _refreshGroundListImpl() {
     pageStructureMap = got?.pageStructureCache ?? {};
   } catch { pageStructureMap = {}; }
 
+  // v2.74.399 — PageModel catalogs (Locale capability model, PAGEMODEL_SPEC) live
+  // under 'pageModelCache', keyed ground → url. Listed in the "Page Models" section.
+  let pageModelMap = {};
+  try {
+    const got = await new Promise(r => chrome.storage.local.get('pageModelCache', r));
+    pageModelMap = got?.pageModelCache ?? {};
+  } catch { pageModelMap = {}; }
+
   list.innerHTML = '';
 
   for (const ground of grounds) {
@@ -3043,6 +3051,75 @@ async function _refreshGroundListImpl() {
       });
     });
     card.appendChild(psRow);
+
+    // v2.74.399 — Page Models section. The PageModel capability catalog
+    // (PAGEMODEL_SPEC): a whole-page Feature list (input/action/disclosure/
+    // navigation/collection/region) built read-only at L0, cached per (ground,
+    // normalized URL). Listed here so captures are inspectable across sessions.
+    const pageModels = (pageModelMap && pageModelMap[ground.id]) ? pageModelMap[ground.id] : {};
+    const pmEntries = Object.entries(pageModels)
+      .sort((a, b) => (b[1]?.capturedAt ?? 0) - (a[1]?.capturedAt ?? 0));
+    const pmRow = document.createElement('div');
+    pmRow.className = 'ground-section-row';
+    pmRow.innerHTML = `
+      <div class="ground-section-head">
+        <span class="ground-section-label">Page Models</span>
+        <span class="ground-section-count">${pmEntries.length}</span>
+      </div>
+      <div class="ground-section-body" id="page-models-body-${ground.id}">
+        ${pmEntries.length === 0
+          ? `<span class="empty-state small">No page models yet — a <strong>capability catalog</strong> (every Feature on the page, with selectors + scroll positions) is built read-only by Explore or the side panel's "🗂 Build page catalog".</span>`
+          : pmEntries.map(([key, entry]) => {
+              const m = entry?.model ?? {};
+              const feats = m.features ? Object.values(m.features) : [];
+              const byKind = {};
+              for (const f of feats) byKind[f.kind] = (byKind[f.kind] ?? 0) + 1;
+              const order = ['input', 'action', 'disclosure', 'navigation', 'collection', 'region'];
+              const counts = order.filter(k => byKind[k]).map(k => `${byKind[k]} ${k}`).join(' · ');
+              const full = entry?.url || m.url || key;
+              let path = key;
+              try { const u = new URL(full); path = (u.pathname || '/') + (u.search || ''); } catch { /* keep key */ }
+              const bits = [`${feats.length} feature(s)`];
+              if (counts) bits.push(counts);
+              if (m.coverage?.bands) bits.push(`${m.coverage.bands} band(s)`);
+              if (m.coverage?.fidelity) bits.push(m.coverage.fidelity);
+              if (entry?.capturedAt) bits.push(relTime(entry.capturedAt));
+              return `
+            <div class="page-structure-row" data-pm-key="${escAttr(key)}">
+              <div class="page-structure-row-main">
+                <span class="page-structure-path" title="${escAttr(full)}">${escHtml(path)}</span>
+                <span class="page-structure-summary">${escHtml(bits.join(' · '))}</span>
+              </div>
+              <div class="page-structure-row-actions">
+                <button class="btn-action" data-action="json-page-model" data-pm-key="${escAttr(key)}" title="View the full PageModel JSON (features + layers + goals + index)">{ }</button>
+                <button class="btn-action danger" data-action="delete-page-model" data-pm-key="${escAttr(key)}" title="Delete this page model (next Explore / Build catalog will re-enumerate)">✕</button>
+              </div>
+            </div>`;
+            }).join('')
+        }
+      </div>`;
+    pmRow.querySelectorAll('[data-action="json-page-model"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const entry = pageModels[btn.dataset.pmKey];
+        if (!entry?.model) { toast('Page model not found', 'err'); return; }
+        showJsonModal(`Page model: ${btn.dataset.pmKey}`, entry.model, 'page-model');
+      });
+    });
+    pmRow.querySelectorAll('[data-action="delete-page-model"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const key = btn.dataset.pmKey;
+        if (!confirm('Delete this page model? The next Explore / Build catalog on this page will re-enumerate it.')) return;
+        try {
+          const got = await new Promise(r => chrome.storage.local.get('pageModelCache', r));
+          const map = got?.pageModelCache ?? {};
+          if (map[ground.id]) { delete map[ground.id][key]; if (Object.keys(map[ground.id]).length === 0) delete map[ground.id]; }
+          await new Promise(r => chrome.storage.local.set({ pageModelCache: map }, r));
+          toast('Page model deleted');
+          await refreshGroundList();
+        } catch (e) { toast(`Failed: ${e?.message ?? 'unknown'}`, 'err'); }
+      });
+    });
+    card.appendChild(pmRow);
 
     // v2.65.0 (Pass 2) — Observations section. Foundation only: storage
     // exists, library row exists. NO authoring flow, NO runtime path,

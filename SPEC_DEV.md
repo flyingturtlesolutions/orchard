@@ -3426,3 +3426,553 @@ the plain free-text Intent field (still keyed `description`) fully functional.
 `GROUND_INTENT` handler), `Sidepanel/modes/locale-capture.js` (Intent rename,
 grounding row + handlers), `assets/sidepanel.css` (`.dbg-locale-ground*`),
 `manifest.json`.
+
+---
+
+## v2.74.395 — Resolve sees content landmarks: repeating-content-block snapshot pass + class-selector allowance
+
+**Date:** 2026-05-24
+**Decision by:** user (reported content roles failing verification — e.g. a
+Pixabay `collection-card` resolved to `a[href*='/collections/'] > div` which
+matched 0, while the hand-pick `div.layout--JZpqG.column--FuwM5…` worked).
+AskUserQuestion: **"Content pass + allow classes"** and **"DOM-first, no scroll"**.
+
+**Observed gap.** Resolve was structurally blind to non-interactive landmarks,
+for three compounding reasons:
+1. `DOM_SNAPSHOT_RICH` (`handleDomSnapshotRich`) selects elements via a
+   CONTROL-centric `SEL` list (`button, input, [role=…], [aria-label],
+   [data-testid], [title], img[alt]`, signals). A plain content card
+   `<div class="layout--JZpqG…">` with no role/aria/data-testid/title is never
+   matched → never in the snapshot. The resolver couldn't see the card at all.
+2. The snapshot deliberately strips full `class` attributes ("hashed noise"),
+   emitting only state-classes — so even an included element loses the
+   CSS-module class that is its only stable handle.
+3. `resolveRoles`' prompt told Claude to "AVOID hashed/auto-generated class
+   names" — the exact selector type content cards need on CSS-module sites.
+   Result: the resolver guessed a child chain off the nearest visible anchor.
+   Separately, the Resolve screenshot is a single top-viewport `captureVisibleTab`
+   (no scroll), so below-fold repeating grids aren't visible to the visual eval
+   either.
+
+**What we did.**
+- **Repeating-content-block pass (content script).** New
+  `detectRepeatingContentBlocks()`: groups elements by tag + sorted class
+  signature, keeps groups that recur ≥3×, filters to "content-like" (block-sized,
+  carrying text or an image), and emits each as a `<repeating-block tag count
+  has-image selector sample-text />` line whose `selector` (the shared, CSS-escaped
+  class signature) is `querySelectorAll`-VERIFIED to match N elements. Capped
+  (≤6000 nodes scanned, ≤400 groups checked, ≤12 blocks emitted). `handleDomSnapshotRich`
+  gained an opt-in `{ includeContentBlocks }` flag; when set, the blocks are
+  PREPENDED to the snapshot (so Resolve's 12k-char slice never truncates them).
+  Opt-in keeps the agent-walker's per-turn snapshots control-only (no token bloat).
+- **Wiring.** `RESOLVE_LOCALE_ROLES` sends `DOM_SNAPSHOT_RICH` with
+  `includeContentBlocks:true`; `pokeAndSnapshot` (the reveal-resolve path) also
+  enables it (revealed mega-menus/modals can hold repeating content).
+- **Prompt (resolveRoles).** Split the "durable hooks" rule: the AVOID-hashed-
+  classes guidance now applies only to INTERACTIVE/CONTROL roles. Added a
+  CONTENT/STRUCTURAL roles rule (class-based selectors — including hashed/module
+  classes — are correct and expected; do NOT route a card through a clickable
+  ancestor's child chain) and a REPEATING CONTENT BLOCKS rule (reuse a listed
+  block's verified `selector` verbatim when a "many"/content role matches it).
+
+**Justification.**
+- **Root cause, not symptom.** The resolver now SEES content blocks and is
+  ALLOWED to select them — fixing both the visibility and the policy gap.
+- **Cost-bounded & opt-in.** The pass only runs for Resolve, is hard-capped, and
+  reuses the existing snapshot round-trip (no extra messages, no screenshots).
+- **Verification-backed.** Each emitted `selector` is already confirmed by
+  `querySelectorAll` to match ≥3 elements, and the system still INSPECT-verifies
+  the chosen selector — a wrong block is caught, not trusted.
+- **DOM-first (no scroll).** Repetition is encoded in the DOM (same class on N
+  siblings), so the enriched snapshot — not a costlier full-page screenshot — is
+  the authoritative content signal; the single top screenshot stays as context.
+
+**Trade-off accepted.** Hashed/module class selectors are stable within a
+deployment but brittle across rebuilds; content-role selectors may need re-resolve
+after a site redeploys. Acceptable — it's the same handle a human pick uses, and
+re-resolve is one click. Tailwind-style utility-class grids can produce noisier
+block candidates; the content-like filter + count ranking + sample-text/has-image
+hints keep the right one pickable.
+
+**Reversibility.** Additive + opt-in. Dropping the `includeContentBlocks` flag at
+the two call sites reverts Resolve to the prior control-only snapshot; the prompt
+rules are independent text.
+
+**Touched.** `ContentScripts/contentScript.js` (`detectRepeatingContentBlocks`,
+`handleDomSnapshotRich` opt-in flag, `pokeAndSnapshot`, `DOM_SNAPSHOT_RICH` case),
+`background.js` (`RESOLVE_LOCALE_ROLES` flag), `Services/AnthropicService.js`
+(`resolveRoles` prompt), `manifest.json`.
+
+---
+
+## v2.74.396 — Resolve Tier-2 VISUAL fallback ("Path C"): LLM locates a region → IoU hit-test → Pick→Claude refine
+
+**Date:** 2026-05-24
+**Decision by:** user ("create a third path C — mirrors A in certain areas but
+LLM-driven … replace the user as the driver for the pick click event"). After a
+design critique, AskUserQuestion chose **Tier-2 fallback of Resolve** (not a
+standalone path) and **bounding-box + IoU match** (not single-point
+`elementFromPoint`).
+
+**Context.** Two authoring paths existed: **A** = manual Pick→Claude (human click
+is ground truth; Claude profiles + may challenge the selector, gated by an IoU
+check against the picked rect), and **B** = Resolve-from-roles (`resolveRoles`
+returns a selector per role from the DOM + screenshot, one call for all roles;
+verified, dropped if wrong). B is blind to landmarks with no DOM handle that are
+nonetheless visually obvious. Path C fills that gap by letting the LLM do what a
+human does — *look at the page and point* — but only for the roles B couldn't
+resolve.
+
+**What we did.**
+- **`AnthropicService.locateRoleRegion`** (new): role + description + intent +
+  cached page-affordances + the viewport screenshot → JSON `{ found, box:{x1,y1,
+  x2,y2} (normalized, screenshot space, top-left origin), confidence, note }`.
+  Returns `found:false` (no box) when the role isn't visible in this view — never
+  guesses. JSON-via-`#call` (role `resolve` → vision-capable model, op
+  `locateRoleRegion`); validates/clamps the box.
+- **`locatePick` + `LOCATE_PICK` (content script):** given the normalized box →
+  viewport px, hit-test by **IoU against REAL element rects** — sample a 4×4 grid
+  of points (`elementsFromPoint`) + their ancestors (≤5 levels), score each
+  candidate by `IoU(rect, box)`, skip wrappers >2.5× the box area, pick max IoU
+  (≥0.2). Then `synthesizeSelector` + `_computeAccessibilityProfile` + rect +
+  `viewportInfo` (dpr) + frame — a picker-shaped result. (Robust to pixel slop and
+  the "topmost node isn't the container" problem: a card's own rect out-scores its
+  inner image/label.)
+- **`RESOLVE_ROLE_VISUAL` (background):** inject CS → `captureVisibleTab` → read
+  cached affordances → `locateRoleRegion` → `LOCATE_PICK` (frameId 0) → return
+  `{ found, box, confidence, pick }`. Degrades to `found:false` when the tab isn't
+  active or the role isn't visible.
+- **`_runResolve` Tier-2 orchestration + `_visualResolveRole` (sidepanel):** after
+  the DOM resolve loop AND the reveal pass, for still-unfilled **visible** roles
+  (those with a failure/abstain note; hidden roles excluded — the reveal pass owns
+  them), run the visual fallback, **capped at 8**. Each success pushes a landmark
+  and runs the **existing `_refineLandmarkSelectorWithClaude`** (Path A step 4 —
+  INSPECT + screenshots + full profile + the geometric selector challenge), then
+  verifies; failures drop the landmark and leave a note for manual pick. Resolve's
+  counters/toast/run-log fold visual fills in.
+
+**Justification.**
+- **Restores A's independent verification anchor.** The known weakness of "LLM
+  proposes a click" is that A's safety comes from cross-checking the *human* rect
+  against Claude's selector — replace the human with an LLM and it becomes
+  LLM-vs-LLM. We avoid that: the box only *selects a real element*; the refine's
+  IoU selector-challenge then runs against that **resolved element's real DOM
+  rect**, not the proposed box.
+- **Cost discipline (Tier-2, not a path).** B's one-call resolve runs first;
+  per-role vision is spent only on the residual hard roles, capped at 8.
+- **Reuse over invention.** Box encoding mirrors the existing `locate_regions`
+  screenshot-space convention; the resolved pick flows into the existing
+  Pick→Claude refine unchanged (it already accepts `pickedRect` +
+  `pickedAccessibilityProfile`).
+
+**Trade-off accepted.** Viewport-only (no scroll/stitch): roles below the fold
+return `found:false` and stay for manual pick — the visual tier helps with what's
+on screen, deferring full-page banding to a future change. Vision coordinates are
+imprecise, so the box is treated as approximate and resolved by IoU, never as an
+exact click point.
+
+**Reversibility.** Additive. Removing the Tier-2 block in `_runResolve` (and the
+three new units) reverts Resolve to B + reveal; nothing else depends on them.
+
+**Touched.** `Services/AnthropicService.js` (`locateRoleRegion`),
+`ContentScripts/contentScript.js` (`locatePick` + `LOCATE_PICK` case),
+`background.js` (`RESOLVE_ROLE_VISUAL`), `Sidepanel/modes/locale-capture.js`
+(`_runResolve` Tier-2 block + `_visualResolveRole`), `manifest.json`.
+
+---
+
+## v2.74.397 — PageModel build slice 1: Locale capability catalog (L0 enumerate + query API)
+
+**Date:** 2026-05-24
+**Decision by:** user ("lock-in and write up" → "continue"). First build slice of
+the `GROUND_SPEC.md` / `PAGEMODEL_SPEC.md` / `OUTCOMES_SPEC.md` architecture (clean
+slate, agreed). Implements `PAGEMODEL_SPEC.md` § 10 step 1.
+
+**Spec.** `PAGEMODEL_SPEC.md` defines a **Locale = PageModel**: an
+intent-independent capability catalog (Features/Layers/Goals) built at tiered
+fidelity (L0 enumerate / L1 depth / L2 goals), consumed via a query API. The
+canonical architecture is **clean slate, no migration** (`GROUND_SPEC.md` § 0.5).
+
+**Deviation (implementation, not design).** The build ships the new PageModel **in
+parallel** with the existing `pageStructure` artifact rather than replacing it:
+- New cache key `pageModelCache` (mirrors `pageStructureCache` keying + 7-day TTL);
+  `pageStructure` stays the live artifact for resolve / intent-grounding / Path C
+  until later slices rewire those consumers.
+- This is a transitional *parallel-run*, not a contradiction of clean-slate: no
+  migration of old data occurs; the old path simply isn't torn out mid-transition,
+  so the running extension is never broken between slices.
+
+**What shipped (slice 1, additive).**
+- **`Core/pageModel.js`** (new, pure ES module — no chrome/DOM deps): `buildPageModel`,
+  `buildIndex`, and the query API (`featuresForRole` with head-final role-affinity
+  ranking, `featuresByKind`, `knownSelectors` spanning the whole page,
+  `scrollTargetFor`, `collections`, `disclosureFor`, `goals`) + `driftHash`.
+- **`contentScript.js` `enumeratePage()` + `ENUMERATE_PAGE`**: L0 read-only
+  whole-page enumeration — scroll bands, enumerate interactive controls + content
+  collections (reuses `detectRepeatingContentBlocks`) + regions, each with
+  selector + `location {band, absRect, visibleAtRest, scrollToY}` + kind +
+  interaction + a cheap stable id; dedup; restore scroll. **Read-only ⇒ no
+  background banding/poke orchestration needed** (the key simplification vs Explore).
+- **`background.js` `BUILD_PAGEMODEL` + `GET_PAGEMODEL`** + `_read/_writePageModelCache`:
+  inject CS → `ENUMERATE_PAGE` → `PageModel.buildPageModel` → cache.
+
+**Justification.** Delivers the whole-page Feature catalog with `scrollToY` per
+feature — structurally fixing the "viewport-assumed-canonical" resolve bug — and a
+pure, unit-tested query contract, **without disturbing the live runtime**.
+Head-final affinity (last token is the noun) fixes "search-submit" mis-ranking as
+an input because of the "search" qualifier.
+
+**Trade-off accepted.** Two artifacts coexist transiently (more storage, two code
+paths) until slices 2–4 re-label locales→perspectives, move
+description/goals/conventions/chrome onto the Ground, and switch resolve to catalog
+selection — at which point `pageStructure` is retired.
+
+**Reversibility.** Fully additive: nothing reads `pageModelCache` yet except the
+new `GET_PAGEMODEL`; deleting the three units + key reverts cleanly.
+
+**Verification.** All edited files syntax-check; `Core/pageModel.js` query API
+unit-tested (search-input→input, search-submit→action, collection-card/result-item→
+collection, nav-link→navigation, whole-page knownSelectors, `scrollTargetFor`).
+
+**Touched.** `Core/pageModel.js` (new), `ContentScripts/contentScript.js`
+(`enumeratePage` + `ENUMERATE_PAGE`), `background.js` (import + cache helpers +
+`BUILD_PAGEMODEL`/`GET_PAGEMODEL`), `manifest.json`. New specs:
+`GROUND_SPEC.md`, `PAGEMODEL_SPEC.md`, `OUTCOMES_SPEC.md`.
+
+---
+
+## v2.74.398–399 — PageModel slice 1.5 (catalog inspector UI) + slice-2 start (Resolve consumes the catalog)
+
+**Date:** 2026-05-24
+**Decision by:** user ("continue" ×2). Slice 1.5 = make slice-1 captures visible;
+slice-2 start = the catalog's first *consumer*. Both additive / non-breaking;
+the structural locale→perspective re-labeling is intentionally deferred until a
+real capture validates the L0 feature/kind classification.
+
+**v2.74.398 — Catalog inspector (read-only UI).** locale-capture's perspective
+panel gains a **🗂 Build page catalog (L0)** control + a read-only Features panel:
+`onBuildPageModel` fires `BUILD_PAGEMODEL` for the active tab/ground, then
+`_renderPageModelPanel` shows the result — `N feature(s), M band(s)`, a per-kind
+counts line, and a scrollable list grouped by kind (colored kind badge + label +
+`selectorKind · band · ✓`, capped 8/kind with "+N more"). State (`_pageModelResult`
+/ `_pageModelInFlight`) resets on unmount; draft-token guarded. Not wired to
+authoring — it exists to make captures inspectable while the architecture is built.
+(CSS: `.dbg-locale-pagemodel*` / `.dbg-locale-pm-*`.)
+
+**v2.74.399 — Resolve consumes the catalog.** `_knownSelectorsForUrl(groundId, url)`
+now merges, after the pageStructure poked-control hints, the **whole-page PageModel
+catalog** (`pageModelCache`): feature selectors ordered by kind priority
+(input→action→collection→navigation→disclosure), deduped by selector, within the
+existing 140 cap. This reaches off-screen controls (the top search box when the
+author was scrolled away) and content collections the poke sweep never touches —
+the architecture's "resolve = selection over the catalog" promise, delivered
+additively into the existing resolve flow (`RESOLVE_LOCALE_ROLES` +
+`RESOLVE_REVEALED_ROLES` both call this).
+
+**Justification.** Safe because **resolve INSPECT-verifies every chosen selector**
+— a stale/wrong catalog hint is dropped exactly like a wrong LLM guess, so feeding
+catalog selectors as "known" hints cannot degrade correctness. Opportunistic: with
+no cached PageModel the behavior is byte-for-byte unchanged (returns the
+pageStructure list or null).
+
+**Trade-off accepted.** Catalog hints are "observed at capture" (the element
+existed when its selector was synthesized), a weaker guarantee than pageStructure's
+"poked + reveal-confirmed" — but they're ordered AFTER the stronger hints and
+gated by downstream verification, so the weaker provenance never wins on a tie that
+matters. Requires the author to have built the catalog first (no auto-build yet).
+
+**Reversibility.** Fully additive. Removing the catalog-merge block in
+`_knownSelectorsForUrl` and the inspector panel reverts cleanly; no storage shape
+changed (still the parallel `pageModelCache`).
+
+**Touched.** `Sidepanel/modes/locale-capture.js` (`_pageModelResult`/`_pageModelInFlight`
+state + reset, `_renderPageModelPanel`, `onBuildPageModel`, panel insertion +
+button wiring), `assets/sidepanel.css` (`.dbg-locale-pagemodel*`), `background.js`
+(`_knownSelectorsForUrl` merges `pageModelCache`), `manifest.json`.
+
+---
+
+## v2.74.400 — PageModel auto-built during Explore + Studio "Page Models" inspector
+
+**Date:** 2026-05-24
+**Decision by:** user ("continue"). Makes the catalog populate through the normal
+Explore flow (so the v2.74.399 resolve-consumer has data without a manual click),
+and makes captures inspectable across sessions in the durable inspector.
+
+**What shipped (both additive / non-breaking).**
+- **Auto-build during Explore.** At the end of `EXPLORE_PAGE_STRUCTURE` (after the
+  `pageStructure` artifact is cached), a best-effort read-only `ENUMERATE_PAGE`
+  pass → `PageModel.buildPageModel` → `pageModelCache`. The content script is
+  already injected (the sweep used it). Wrapped so it never fails the Explore
+  response. Result: every Explore now produces BOTH artifacts in sync; Resolve's
+  catalog consumer gets data automatically.
+- **Studio "Page Models" section.** Mirrors the existing "Page Structures" panel
+  on the ground card: lists cached `pageModelCache` entries per ground with a
+  per-kind feature summary (`12 input · 8 action · 1 collection · …`), band count,
+  fidelity, and age; `{ }` opens the full PageModel JSON; `✕` deletes the entry.
+
+**Justification.** Closes the loop opened in v2.74.399 — the catalog is only
+useful to Resolve if it exists, and authors already run Explore. The extra
+enumerate pass is read-only and bounded (it self-restores scroll). Studio
+inspectability directly supports validating the L0 feature/kind classification
+before the (deferred) locale→perspective storage re-labeling.
+
+**Trade-off accepted.** Explore costs one extra whole-page scroll pass (~bands ×
+110ms). Acceptable for an explicit, already-heavy action; the pass is read-only and
+failure-isolated.
+
+**Reversibility.** Additive. Remove the enumerate block in `EXPLORE_PAGE_STRUCTURE`
+and the `pmRow` section in `studio.js` to revert; no storage shape changed.
+
+**Touched.** `background.js` (`EXPLORE_PAGE_STRUCTURE` auto-build), `studio.js`
+(`pageModelMap` load + "Page Models" section), `manifest.json`.
+
+---
+
+## v2.74.401 — L0 enumeration tuning (validation-driven): suppress per-card controls, collapse nested collections, class-based disclosures
+
+**Date:** 2026-05-24
+**Decision by:** user (shared a real Pixabay-homepage L0 capture for validation
+before the locale→perspective re-labeling). The capture exposed the L0 classifier's
+signal/noise problem.
+
+**Observed (180 features on pixabay.com/):** the search box, login, nav, regions,
+and collections all captured correctly — BUT ~140 features were **per-image-card
+controls enumerated individually** with brittle positional selectors ("Edit image"
+×~15, creator links ×~15, like-count buttons ×~30, each a deep `:nth-of-type`
+chain), and **12 "collections" were one image grid detected at 6 nesting levels**
+(`cell--uzyOP` ⊃ `contentContainer` ⊃ `container--mVjnq` ⊃ `overlay--Nk44Q` …).
+Zero disclosures — Pixabay's "Explore"/"All images" dropdowns are class-based
+(no `aria-haspopup`), so the ARIA-only check missed them.
+
+**Root cause.** The interactive elements inside a repeating content card are a
+TEMPLATE, not N separate landmarks. The card is the feature.
+
+**What we did (`enumeratePage`).**
+- **Collections detected FIRST**, then per-card controls **suppressed**: a
+  repeating block whose items each contain a CLUSTER of controls (median ≥3
+  interactive descendants) is a content card → its descendant controls are
+  skipped during interactive enumeration. Crucially the discriminator is
+  *control-count, not size/has-image* — a nav tile / collection thumbnail has ~1
+  link (<3) so its link SURVIVES as a navigation feature (size/has-image would
+  have wrongly hidden the media-type & collection nav links, which the capture
+  showed are real).
+- **Nested collections collapsed** for emission: sort blocks by median item area
+  desc, keep a block only if its first item isn't `contains`-nested in an
+  already-kept block → the outermost card wins, the 5 inner duplicates drop.
+- **Class-based disclosure detection**: `classifyKind` now also flags
+  `dropdown`/`flyout`/`menutrigger`/`hasmenu` classes and `dropdown`/`flyout`/
+  `triggerWrapper` ancestor containers (non-anchor) as `disclosure`, catching
+  custom menus that lack `aria-haspopup`/`aria-expanded`.
+
+**Expected effect.** ~180 → ~40–50 features: one image-card collection instead of
+6 collections + ~100 per-card controls, media-type/collection nav links preserved,
+"Explore"/"All images" now `disclosure`. (To be confirmed by a re-capture.)
+
+**Justification.** Makes the catalog clean enough to drive Perspective authoring —
+the prerequisite for the (still-deferred) locale→perspective re-labeling. Control-
+count suppression is principled (targets internal control clusters) and spares
+genuine repeated nav.
+
+**Trade-off accepted.** A medium product grid whose cards have <3 controls won't
+suppress (some residual per-card noise); a card grid with exactly the threshold is
+a judgment call. Tunable.
+
+**Reversibility.** Contained to `enumeratePage` + `classifyKind`; revert restores
+the prior flat enumeration.
+
+**Touched.** `ContentScripts/contentScript.js` (`enumeratePage` collection-first +
+suppression + collapse, `classifyKind` disclosures), `manifest.json`.
+
+---
+
+## v2.74.402 — L0 re-capture fixes: sticky-region position + stronger collection collapse
+
+**Date:** 2026-05-24
+**Decision by:** user (second Pixabay re-capture — 180→110 features confirmed the
+v2.74.401 tuning worked: per-card noise gone, "Explore"/"All images" now
+`disclosure`, search/nav/regions intact). Two issues the capture surfaced:
+
+1. **Sticky-header mis-position.** Regions were measured at the END of enumeration
+   (page scrolled to the bottom by the band loop), so the *sticky* header's
+   scroll-relative rect reported `y≈4957` instead of `0`. Fix: `scrollTo(0,0)` +
+   settle before measuring regions, so sticky/fixed regions get their at-rest
+   absolute Y.
+2. **Incomplete collection collapse.** The image grid still emitted ~4 overlapping
+   collections (`cell` + `contentContainer` + `overlayContainer` + generic
+   `layout--column`) because collapse only checked the *first* element and the
+   nesting isn't 1:1 (12 cells vs 10 inner containers vs 25 images). Fix: collapse
+   now drops a block when **≥50% of up to 8 sampled items share DOM ancestry**
+   (bi-directional `contains`) with an already-kept larger block.
+
+**Note.** The residual ~83 navigation features are mostly genuine distinct
+destinations (footer link groups, search tag chips, media-type tiles, collection
+thumbnails), not noise — the original 40-50 estimate undercounted them. Generic
+utility-class collections (`layout--column`) and hidden overlay menu collections
+(`menuItem`) remain mild noise; deferred (a later "is this a real content grid"
+refinement) — acceptable for L0.
+
+**Touched.** `ContentScripts/contentScript.js` (`enumeratePage` region scroll-to-top
++ overlap-based collapse), `manifest.json`.
+
+---
+
+## v2.74.403 — Propose seeds roles from the PageModel catalog (slice 2: route authoring through the Locale)
+
+**Date:** 2026-05-24
+**Decision by:** user ("continue" → slice 2). The architecture's core value is
+*"a Perspective is authored by SELECTING from the Locale catalog."* The resolve
+side already consumes the catalog (v2.74.399); this adds the propose side.
+
+**Scope choice (transparent deviation from the literal slice-2 plan).** Slice 2 as
+written also called for a `locale`→`perspective` storage/terminology RENAME +
+introducing the Locale as a first-class stored entity. A big-bang rename across
+storage / runtime / UI is mostly cosmetic churn with large breakage risk and was
+**deferred** — the functional realization of the hierarchy (authoring grounded in
+the page catalog) delivers the value safely and additively. The rename remains a
+separate, optional, deliberate pass.
+
+**What shipped (additive / opportunistic).** `proposePerspectives` gained a
+`pageModel` param; when a fresh PageModel exists for the page, the background
+(`PROPOSE_LOCALE_PERSPECTIVES`) reads `pageModelCache` and passes it, and the prompt
+renders a **PAGE FEATURE CATALOG** block — the whole-page inventory grouped by kind
+(input / action / disclosure / navigation / collection / region, with labels +
+collection counts, off-screen features included). A prompt rule instructs the LLM
+to GROUND roles in the catalog (map "many" content roles → a `collection` entry, a
+`disclosure` entry → a hidden/revealedBy trigger). Propose meta now reports
+`pageModel` + `pageModelFeatures`.
+
+**Justification.** Propose previously guessed roles from a single top-of-viewport
+screenshot + truncated DOM; it now starts from the page's *real, whole-page*
+affordances (the same catalog the resolve step reuses). With both propose and
+resolve catalog-aware, the Perspective-authoring loop is functionally "select from
+the Locale" — the hierarchy realized without a risky rename. Opportunistic: no
+cached model ⇒ behavior unchanged.
+
+**Reversibility.** Additive. Drop the `pageModel` param + the handler read to
+revert; no storage shape changed.
+
+**Touched.** `Services/AnthropicService.js` (`proposePerspectives` catalog block +
+rule), `background.js` (`PROPOSE_LOCALE_PERSPECTIVES` reads `pageModelCache` + meta),
+`manifest.json`.
+
+---
+
+## v2.74.404 — PageModel L1 depth: merge the Explore poke→reveal sweep into Layers (no re-poking)
+
+**Date:** 2026-05-24
+**Decision by:** user ("continue"). Makes disclosures (Explore / All images)
+resolvable by giving the PageModel its depth layer — the missing piece flagged in
+the v2.74.402 validation (`triggers: []` at L0).
+
+**Key insight.** The poke→reveal data already exists. Explore's sweep records, per
+disclosure control, what it REVEALED (`structure.controls[].revealed`), and Explore
+builds BOTH artifacts in the same handler. So L1 = **merge that reveal data into the
+PageModel** — no new, flaky poke machinery (the thing that was historically brittle:
+navigation, overlays not closing).
+
+**What shipped.** New pure `PageModel.mergeDepthFromControls(model, controls)`: for
+each control with `observation:'reveal'` + revealed children, it (a) finds the
+matching L0 disclosure feature (by selector, then label) and upgrades it
+(`kind:'disclosure'`, `reveals:layerId`, `selectorVerified:true`, evidence
+`poke`), or mints a trigger if L0 missed it; (b) creates a **Layer** node
+(`kind:'modal'` if `overlay`, else `dropdown`; `openedBy`); (c) adds the revealed
+children as features tagged `hidden:true` + `revealedBy:trigger` +
+`selectorVerified:true`, kind inferred from a11y role (link→navigation,
+textbox→input, else action); (d) rebuilds `index` (so `index.triggers` populates)
+and sets `coverage.fidelity:'L1'`. Wired into `EXPLORE_PAGE_STRUCTURE` after
+`buildPageModel`, fed `structure.controls`. The manual 🗂 catalog stays **L0** (it
+never poked).
+
+**Justification.** Disclosures become first-class resolvable triggers with their
+revealed layers — the depth half of the capability model — by reusing the proven
+sweep rather than re-poking. Pure + unit-tested (trigger linkage, layer kind,
+hidden/verified children, `index.triggers`, no-change ignored, L1 upgrade).
+
+**Trade-off accepted.** L1 depth only attaches when Explore ran (the manual catalog
+is L0-only). Revealed-child selectors inherit the sweep's `computeUniqueSelector`
+output (often positional) — acceptable; they're poke-verified and resolve re-verifies.
+
+**Reversibility.** Additive: drop the `mergeDepthFromControls` call to revert the
+model to L0; the function is self-contained.
+
+**Touched.** `Core/pageModel.js` (`mergeDepthFromControls` + `hashId`/`selectorTier`
+helpers), `background.js` (`EXPLORE_PAGE_STRUCTURE` L1 merge), `manifest.json`.
+
+---
+
+## v2.74.405 — Manual 🗂 catalog reaches L1 by merging a fresh cached pageStructure
+
+**Date:** 2026-05-24
+**Decision by:** user (capture showed `fidelity:L0` / `triggers:[]` from the manual
+🗂 button — L1 only attached via Explore). Closes the confusing gap where the
+button literally named "Build page catalog" couldn't produce depth.
+
+**What shipped.** `BUILD_PAGEMODEL` (the 🗂 button) now, after `buildPageModel`,
+reads the FRESH cached `pageStructure` (a prior Explore's poke→reveal sweep) and
+`mergeDepthFromControls` into the model — so the manual catalog reaches **L1** when
+depth was previously captured. With no fresh pageStructure it stays **L0** (the
+manual path is read-only and can't poke; run **Explore** to capture depth).
+
+**Why not poke from 🗂?** Poking is the heavy/flaky path (navigation, overlay
+close). The catalog stays read-only; it reuses Explore's proven depth data rather
+than re-deriving it. (Future: unify the two into one "Explore = L0+L1" action.)
+
+**Touched.** `background.js` (`BUILD_PAGEMODEL` depth merge), `manifest.json`.
+
+---
+
+## v2.74.406 — L1 depth: drop content-swap false disclosures (carousels/tabs)
+
+**Date:** 2026-05-24
+**Decision by:** user (first L1 Pixabay capture — login modal, Explore mega-menu,
+and media-type dropdown all captured as resolvable hidden features ✓). It also
+showed carousel arrows (next/prev/scroll) and a tab mis-captured as disclosures:
+the poke sweep counts a carousel ADVANCE as a "reveal," surfacing 1 swapped slide.
+
+**What shipped.** `mergeDepthFromControls` now skips a control whose reveal is
+**non-overlay AND surfaces <2 new elements** — a content swap (carousel slide / tab
+content change), not a menu/panel disclosure. Real disclosures are overlays
+(modals/dropdowns) or reveal several items, so they're untouched. Removes the
+false `next`/`prev`/`scroll`/single-item-`tab` layers; those triggers keep their L0
+kind (`action`).
+
+**Trade-off accepted.** A genuine in-place disclosure that reveals exactly one
+element is dropped — rare, and the element is still in the L0 surface if visible.
+
+**Known, deferred.** The shared auth modal is captured as 3 overlapping layers
+(Log in / Join / Upload each open it). Redundant but not wrong; a layer-dedup pass
+(merge layers with high feature overlap, point all triggers at one) is a later
+polish.
+
+**Touched.** `Core/pageModel.js` (`mergeDepthFromControls` content-swap filter),
+`manifest.json`.
+
+---
+
+## v2.74.407 — L1 depth: consolidate the same overlay opened by several triggers
+
+**Date:** 2026-05-24
+**Decision by:** user ("continue"). The L1 capture showed Pixabay's auth modal as
+THREE layers — Log in / Join / Upload each open it, each capturing a different tab
+(login form vs signup form), so the layers held *complementary* fields, not pure
+dups.
+
+**What shipped.** New pure `dedupeOverlayLayers(model)` (run inside
+`mergeDepthFromControls` before `buildIndex`): among OVERLAY layers (modals), merge
+any that share members (≥3 shared selectors, or ≥50% of the smaller set) into one
+survivor — union their features (dedup by selector), and repoint every trigger's
+`reveals` at the survivor. Orphan-cleanup drops hidden features no surviving layer
+references. In-place dropdowns are trigger-specific and untouched; non-overlapping
+overlays (Explore mega-menu vs auth modal) stay separate.
+
+**Net.** The auth modal becomes ONE layer holding login + signup fields, with all
+three triggers (Log in / Join / Upload) pointing at it — cleaner and more useful
+for authoring a "sign in" perspective (pick any auth field from one layer).
+`index.triggers` still lists all triggers (multiple → same layer is correct).
+
+**Justification.** Restricting to overlays + requiring shared members keeps it
+safe: distinct menus don't share selectors, so they never wrongly merge (unit-
+tested: Explore stays separate while Log in + Join consolidate).
+
+**Touched.** `Core/pageModel.js` (`dedupeOverlayLayers` + call site), `manifest.json`.

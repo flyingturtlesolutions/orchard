@@ -20,6 +20,7 @@
 
 import { Logger, LOG_LEVEL }  from './Core/Logger.js';
 import { installGlobalErrorHandlers } from './Core/ErrorCapture.js';
+import * as PageModel          from './Core/pageModel.js';   // v2.74.397 — Locale/PageModel builder + query API
 import { ExecutionEngine }    from './Services/ExecutionEngine.js';
 import { StorageManager }     from './Services/StorageManager.js';
 import { executeWorkflow }    from './Services/WorkflowExecutor.js';
@@ -980,6 +981,35 @@ async function _writePageStructureCache(groundId, cacheKey, entry) {
   await chrome.storage.local.set({ [PAGE_STRUCTURE_CACHE_KEY]: map });
 }
 
+// v2.74.397 — PageModel cache (PAGEMODEL_SPEC). Parallel to pageStructureCache and
+// keyed identically (per ground + normalized URL); additive/non-breaking while the
+// old pageStructure artifact is still the live one for resolve/grounding.
+//   key: 'pageModelCache'
+//   value: { [groundId]: { [normalizedUrl]: { model, url, capturedAt } } }
+const PAGE_MODEL_CACHE_KEY = 'pageModelCache';
+const PAGE_MODEL_TTL_MS = 1000 * 60 * 60 * 24 * 7;   // 7 days
+
+async function _readPageModelCache(groundId, cacheKey) {
+  if (!groundId || !cacheKey) return null;
+  try {
+    const got = await chrome.storage.local.get(PAGE_MODEL_CACHE_KEY);
+    const map = got?.[PAGE_MODEL_CACHE_KEY] ?? {};
+    return map[groundId]?.[cacheKey] ?? null;
+  } catch (e) {
+    Logger.warn('background', `pageModelCache read failed: ${e.message}`);
+    return null;
+  }
+}
+
+async function _writePageModelCache(groundId, cacheKey, entry) {
+  if (!groundId || !cacheKey) return;
+  const got = await chrome.storage.local.get(PAGE_MODEL_CACHE_KEY);
+  const map = got?.[PAGE_MODEL_CACHE_KEY] ?? {};
+  if (!map[groundId]) map[groundId] = {};
+  map[groundId][cacheKey] = entry;
+  await chrome.storage.local.set({ [PAGE_MODEL_CACHE_KEY]: map });
+}
+
 // v2.74.385 — Flatten a cached pageStructure artifact into verified
 // {label, role, selector, via?} hints for resolveRoles to reuse. Each control's
 // own selector resolved during exploration, and each control that REVEALED
@@ -987,25 +1017,52 @@ async function _writePageStructureCache(groundId, cacheKey, entry) {
 // guess a positional selector on a hashed-class page.
 async function _knownSelectorsForUrl(groundId, url) {
   if (!groundId) return null;
+  const cacheKey = _normalizeUrlForLocaleCache(url);
+  const out = [];
+  const seenSel = new Set();
+  const TOTAL = 140;
+  const push = (item) => {
+    if (!item?.selector || seenSel.has(item.selector) || out.length >= TOTAL) return;
+    seenSel.add(item.selector); out.push(item);
+  };
+
+  // (1) pageStructure poked controls + revealed children — the STRONGEST hints:
+  // each control's own selector resolved during exploration, and each control that
+  // REVEALED content was confirmed to actually open it.
   try {
-    const entry = await _readPageStructureCache(groundId, _normalizeUrlForLocaleCache(url));
+    const entry = await _readPageStructureCache(groundId, cacheKey);
     const controls = entry?.structure?.controls ?? [];
-    const out = [];
     // v2.74.387 — cap revealed children PER CONTROL so one giant nav menu
     // (e.g. an "Explore" mega-menu with 42 links) can't exhaust the budget and
     // crowd out later controls (the "Log in" opener + its modal's children).
-    const PER_CONTROL = 10, TOTAL = 140;
+    const PER_CONTROL = 10;
     for (const c of controls) {
       if (out.length >= TOTAL) break;
-      if (c?.selector && c?.observation === 'reveal') out.push({ label: c.label || '', role: c.role || 'control', selector: c.selector });
+      if (c?.selector && c?.observation === 'reveal') push({ label: c.label || '', role: c.role || 'control', selector: c.selector });
       let k = 0;
       for (const rv of Array.isArray(c?.revealed) ? c.revealed : []) {
         if (out.length >= TOTAL || k >= PER_CONTROL) break;
-        if (rv?.selector) { out.push({ label: rv.label || '', role: rv.role || '?', selector: rv.selector, via: c.label || '' }); k++; }
+        if (rv?.selector) { push({ label: rv.label || '', role: rv.role || '?', selector: rv.selector, via: c.label || '' }); k++; }
       }
     }
-    return out.length ? out : null;
-  } catch (e) { Logger.warn('background', `_knownSelectorsForUrl failed: ${e.message}`); return null; }
+  } catch (e) { Logger.warn('background', `_knownSelectorsForUrl (structure) failed: ${e.message}`); }
+
+  // (2) v2.74.398 — whole-page PageModel catalog. Covers off-screen controls
+  // (the top search box when the user was scrolled away) + content collections
+  // the poke sweep never reaches. Each was synthesized from a real element at
+  // capture; downstream INSPECT verifies every chosen selector, so a stale hint
+  // is caught, not trusted. (Resolve = selection over the catalog, PAGEMODEL_SPEC § 7.)
+  try {
+    const pm = await _readPageModelCache(groundId, cacheKey);
+    const feats = pm?.model?.features ? Object.values(pm.model.features) : [];
+    const KIND_PRI = { input: 0, action: 1, collection: 2, navigation: 3, disclosure: 4 };
+    feats
+      .filter((f) => f?.selector && Object.prototype.hasOwnProperty.call(KIND_PRI, f.kind))
+      .sort((a, b) => KIND_PRI[a.kind] - KIND_PRI[b.kind])
+      .forEach((f) => push({ label: f.label || '', role: f.a11yRole || f.kind, selector: f.selector }));
+  } catch (e) { Logger.warn('background', `_knownSelectorsForUrl (pagemodel) failed: ${e.message}`); }
+
+  return out.length ? out : null;
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -3954,6 +4011,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
           }
 
+          // v2.74.403 — Whole-page feature catalog (PageModel / Locale capability
+          // model) so propose grounds roles in the page's real affordances —
+          // including off-screen features. Fresh-gated like pageStructure.
+          let pageModelForPropose = null;
+          if (groundId) {
+            try {
+              const pm = await _readPageModelCache(groundId, _normalizeUrlForLocaleCache(snap.url ?? url));
+              if (pm?.model && (Date.now() - (pm.capturedAt ?? 0)) < PAGE_MODEL_TTL_MS) pageModelForPropose = pm.model;
+            } catch (e) {
+              Logger.warn('background', `PROPOSE_LOCALE_PERSPECTIVES: pageModel read failed (continuing): ${e.message}`);
+            }
+          }
+
           const proposal = await AnthropicService.proposePerspectives({
             intent,
             url        : snap.url   ?? url,
@@ -3963,6 +4033,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             siblingLocales,
             registryLandmarks,
             pageStructure,
+            pageModel  : pageModelForPropose,
           });
           if (!proposal || !Array.isArray(proposal.options) || proposal.options.length === 0) {
             sendResponse({ success: false, error: 'Claude returned no usable perspectives — try a more specific intent.' });
@@ -3977,6 +4048,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             registryLandmarks: Array.isArray(registryLandmarks) ? registryLandmarks.length : 0,
             pageStructure: !!pageStructure,
             revealingControls,
+            pageModel: !!pageModelForPropose,
+            pageModelFeatures: pageModelForPropose ? Object.keys(pageModelForPropose.features || {}).length : 0,
           };
           sendResponse({ success: true, options: proposal.options, meta });
         } catch (err) {
@@ -4170,6 +4243,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             try { await _writePageStructureCache(groundId, cacheKey, { structure, url: pageUrl, capturedAt: structure.capturedAt }); }
             catch (e) { Logger.warn('background', `pageStructureCache write failed: ${e.message}`); }
           }
+
+          // v2.74.399 — Also build the PageModel catalog (L0) from a read-only
+          // enumerate pass, so the two artifacts stay in sync and Resolve's catalog
+          // consumer (_knownSelectorsForUrl) has data without a separate manual
+          // build. Best-effort; never fails the Explore response. The content
+          // script is already injected (the sweep used it).
+          try {
+            const enr = await chrome.tabs.sendMessage(tabId, { type: 'ENUMERATE_PAGE' }, { frameId: 0 });
+            if (enr?.success) {
+              const model = PageModel.buildPageModel(enr.features, enr.meta);
+              // v2.74.404 — L1 depth: merge THIS sweep's poke→reveal data (already
+              // captured in `structure.controls`) into the model as Layers, so
+              // disclosures (Explore / All images) become resolvable triggers — no
+              // re-poking. The manual 🗂 catalog stays L0 (it never poked).
+              try { PageModel.mergeDepthFromControls(model, structure?.controls || []); }
+              catch (e) { Logger.warn('background', `mergeDepthFromControls failed (continuing): ${e.message}`); }
+              if (groundId) await _writePageModelCache(groundId, _normalizeUrlForLocaleCache(enr.meta?.url ?? pageUrl), { model, url: enr.meta?.url ?? pageUrl, capturedAt: model.coverage.lastExploredAt });
+              const layerCount = Object.keys(model.layers || {}).length - 1;   // minus the surface layer
+              Logger.info('explore', `PageModel built alongside Explore: ${Object.keys(model.features).length} feature(s), ${Math.max(0, layerCount)} depth layer(s), fidelity ${model.coverage.fidelity}`);
+            }
+          } catch (e) { Logger.warn('background', `PageModel build during Explore failed (continuing): ${e.message}`); }
+
           sendResponse({ success: true, structure, cacheKey });
         } catch (err) {
           Logger.error('background', `EXPLORE_PAGE_STRUCTURE failed: ${err.message}`);
@@ -4260,7 +4355,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             Logger.warn('background', `RESOLVE_LOCALE_ROLES: content-script inject failed (continuing): ${e.message}`);
           }
           let snap;
-          try { snap = await chrome.tabs.sendMessage(tabId, { type: 'DOM_SNAPSHOT_RICH' }, { frameId: 0 }); }   // frameId:0 — top frame only (avoid empty about:blank iframes winning the race)
+          // v2.74.395 — includeContentBlocks: surface repeating content blocks
+          // (cards/tiles/rows) with their class-signature selector, so content
+          // roles with no semantic hook can resolve.
+          try { snap = await chrome.tabs.sendMessage(tabId, { type: 'DOM_SNAPSHOT_RICH', payload: { includeContentBlocks: true } }, { frameId: 0 }); }   // frameId:0 — top frame only (avoid empty about:blank iframes winning the race)
           catch (e) { sendResponse({ success: false, error: `DOM snapshot failed: ${e.message}` }); return; }
           if (!snap?.success) { sendResponse({ success: false, error: snap?.error ?? 'DOM snapshot returned no payload' }); return; }
 
@@ -4394,6 +4492,130 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ success: true, resolutions, trigger });
         } catch (err) {
           Logger.error('background', `RESOLVE_REVEALED_ROLES failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // v2.74.396 — Resolve Tier-2 VISUAL fallback ("Path C"): for a role the DOM
+    // resolve pass couldn't pin down, look at the page and locate it by region.
+    // Capture the viewport → ask the vision model for a normalized box of the
+    // element that plays the role → hit-test the box to a real element (IoU) in
+    // the content script → return the picker-shaped result. The sidepanel then
+    // runs the Pick→Claude refine on it. Payload: { tabId, groundId?, role:{role,
+    // description, multiplicity}, intent } → { success, found, box?, confidence?,
+    // pick? } | { success:false, error }.
+    case 'RESOLVE_ROLE_VISUAL': {
+      (async () => {
+        try {
+          const { tabId, groundId = null, role, intent = '' } = payload ?? {};
+          if (typeof tabId !== 'number') { sendResponse({ success: false, error: 'tabId required' }); return; }
+          if (!role || !role.role) { sendResponse({ success: false, error: 'role required' }); return; }
+          let tabInfo;
+          try { tabInfo = await chrome.tabs.get(tabId); }
+          catch (e) { sendResponse({ success: false, error: `Tab not found: ${e.message}` }); return; }
+          const url = tabInfo?.url ?? '';
+          if (!/^https?:/i.test(url)) { sendResponse({ success: false, error: 'restricted URL' }); return; }
+          try { await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['ContentScripts/contentScript.js'] }); } catch { /* */ }
+          // The locate is purely visual → needs a screenshot of the active tab.
+          let screenshot = null;
+          if (tabInfo.active) {
+            try { screenshot = await chrome.tabs.captureVisibleTab(tabInfo.windowId, { format: 'jpeg', quality: 60 }); }
+            catch (e) { Logger.warn('background', `RESOLVE_ROLE_VISUAL screenshot failed: ${e.message}`); }
+          }
+          if (!screenshot) { sendResponse({ success: true, found: false, note: 'no screenshot (tab not the active one in its window)' }); return; }
+          // Reuse the cached page-affordance description for grounding context.
+          let affordances = null;
+          if (groundId) {
+            try { const entry = await _readPageStructureCache(groundId, _normalizeUrlForLocaleCache(url)); affordances = entry?.structure?.affordances ?? null; } catch { /* */ }
+          }
+          const loc = await AnthropicService.locateRoleRegion({
+            role: role.role, description: role.description ?? '', intent,
+            affordances, url, title: tabInfo.title ?? '', screenshot,
+          });
+          if (!loc) { sendResponse({ success: false, error: 'visual locate call failed' }); return; }
+          if (!loc.found || !loc.box) {
+            sendResponse({ success: true, found: false, confidence: loc.confidence ?? 0, note: loc.note || 'role not visible in the current view' });
+            return;
+          }
+          let pick;
+          try { pick = await chrome.tabs.sendMessage(tabId, { type: 'LOCATE_PICK', payload: { box: loc.box } }, { frameId: 0 }); }
+          catch (e) { sendResponse({ success: false, error: `locate-pick failed: ${e.message}` }); return; }
+          if (!pick?.success) {
+            sendResponse({ success: true, found: false, box: loc.box, confidence: loc.confidence, note: pick?.error || 'no element matched the located region' });
+            return;
+          }
+          Logger.info('explore', `RESOLVE_ROLE_VISUAL[${role.role}]: box conf=${loc.confidence} → "${String(pick.selector).slice(0, 70)}" (IoU ${typeof pick.iou === 'number' ? pick.iou.toFixed(2) : '?'}, matched ${pick.matchedCount})`);
+          sendResponse({ success: true, found: true, box: loc.box, confidence: loc.confidence, pick });
+        } catch (err) {
+          Logger.error('background', `RESOLVE_ROLE_VISUAL failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // v2.74.397 — Build a PageModel (Locale capability catalog) at tier L0:
+    // read-only whole-page enumeration in the content script → buildPageModel →
+    // cache under the new pageModelCache key (additive; old pageStructure stays
+    // live). Payload: { tabId, groundId? } → { success, model, cacheKey }.
+    case 'BUILD_PAGEMODEL': {
+      (async () => {
+        try {
+          const { tabId, groundId = null } = payload ?? {};
+          if (typeof tabId !== 'number') { sendResponse({ success: false, error: 'tabId required' }); return; }
+          let tabInfo;
+          try { tabInfo = await chrome.tabs.get(tabId); }
+          catch (e) { sendResponse({ success: false, error: `Tab not found: ${e.message}` }); return; }
+          const url = tabInfo?.url ?? '';
+          if (!/^https?:/i.test(url)) { sendResponse({ success: false, error: 'restricted URL' }); return; }
+          try { await chrome.scripting.executeScript({ target: { tabId }, files: ['ContentScripts/contentScript.js'] }); }
+          catch (e) { Logger.warn('background', `BUILD_PAGEMODEL inject failed (continuing): ${e.message}`); }
+          let enr;
+          try { enr = await chrome.tabs.sendMessage(tabId, { type: 'ENUMERATE_PAGE' }, { frameId: 0 }); }
+          catch (e) { sendResponse({ success: false, error: `enumerate failed: ${e.message}` }); return; }
+          if (!enr?.success) { sendResponse({ success: false, error: enr?.error ?? 'enumerate returned no payload' }); return; }
+          const model = PageModel.buildPageModel(enr.features, enr.meta);
+          const cacheKey = _normalizeUrlForLocaleCache(enr.meta?.url ?? url);
+          // v2.74.405 — The manual catalog is read-only (no poke), so it can't
+          // discover depth itself — but if a FRESH pageStructure exists (a prior
+          // Explore poked this page), merge its reveal data so the catalog reaches
+          // L1 too. Otherwise it stays L0 (run Explore to capture depth).
+          if (groundId) {
+            try {
+              const ps = await _readPageStructureCache(groundId, cacheKey);
+              if (ps?.structure && Array.isArray(ps.structure.controls) && (Date.now() - (ps.capturedAt ?? 0)) < PAGE_STRUCTURE_TTL_MS) {
+                PageModel.mergeDepthFromControls(model, ps.structure.controls);
+              }
+            } catch (e) { Logger.warn('background', `BUILD_PAGEMODEL depth merge failed (continuing): ${e.message}`); }
+          }
+          if (groundId) {
+            try { await _writePageModelCache(groundId, cacheKey, { model, url: enr.meta?.url ?? url, capturedAt: model.coverage.lastExploredAt }); }
+            catch (e) { Logger.warn('background', `pageModelCache write failed: ${e.message}`); }
+          }
+          Logger.info('explore', `BUILD_PAGEMODEL done: ${Object.keys(model.features).length} feature(s) across ${model.coverage.bands} band(s), fidelity ${model.coverage.fidelity}`);
+          sendResponse({ success: true, model, cacheKey });
+        } catch (err) {
+          Logger.error('background', `BUILD_PAGEMODEL failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // v2.74.397 — Read a cached PageModel (no enumeration). Payload: { groundId, url }
+    //   → { success, model|null, fresh, capturedAt? }.
+    case 'GET_PAGEMODEL': {
+      (async () => {
+        try {
+          const { groundId = null, url } = payload ?? {};
+          if (!groundId || !url) { sendResponse({ success: true, model: null, fresh: false }); return; }
+          const entry = await _readPageModelCache(groundId, _normalizeUrlForLocaleCache(url));
+          if (!entry?.model) { sendResponse({ success: true, model: null, fresh: false }); return; }
+          const fresh = (Date.now() - (entry.capturedAt ?? 0)) < PAGE_MODEL_TTL_MS;
+          sendResponse({ success: true, model: entry.model, fresh, capturedAt: entry.capturedAt });
+        } catch (err) {
           sendResponse({ success: false, error: err.message });
         }
       })();

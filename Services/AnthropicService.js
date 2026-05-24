@@ -1800,7 +1800,7 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
    * @param {{ intent: string, url?: string, title?: string, domSnapshot?: string, screenshot?: string|null, siblingLocales?: Array|null, registryLandmarks?: Array|null }} params
    * @returns {Promise<{ options: Array<{name:string, rationale:string, onPage:boolean, reachedVia:string|null, roles:Array<{role:string,description:string,multiplicity:string}>, predicates:Array<{kind:'urlMatches',pattern:string,mode:string}>}> }|null>}
    */
-  static async proposePerspectives({ intent, url, title, domSnapshot, screenshot = null, siblingLocales = null, registryLandmarks = null, pageStructure = null }) {
+  static async proposePerspectives({ intent, url, title, domSnapshot, screenshot = null, siblingLocales = null, registryLandmarks = null, pageStructure = null, pageModel = null }) {
     const seed = (typeof intent === 'string' ? intent : '').trim();
     if (!seed) return null;
 
@@ -1842,7 +1842,8 @@ Rules:
 - "reachedVia" = for a downstream perspective (onPage:false), a SHORT phrase for how you reach it from the current page ("after submitting the search", "after clicking a result"). null for on-page perspectives.
 - List the on-page perspective(s) FIRST. You MAY include downstream perspectives that complete the intent's journey, but mark them onPage:false — the user can only fill a perspective's roles once they are on its page.
 - Favor the intent. If the intent is narrow ("capture search results"), don't propose unrelated perspectives.
-- DEPTH: a PAGE STRUCTURE map may be attached — it lists disclosure controls (dropdowns, menus, modals, tabs, accordions) that were poked, and the elements each one REVEALED. This content is NOT in the static DOM listing because it only appears after an interaction. Treat revealed elements as first-class: propose roles for them too, and in the role "description" say how it is revealed (e.g., "an item in the account menu, revealed after clicking the avatar"). These stay onPage:true (same page, just disclosed) — onPage:false is only for content reached by NAVIGATING away.`;
+- DEPTH: a PAGE STRUCTURE map may be attached — it lists disclosure controls (dropdowns, menus, modals, tabs, accordions) that were poked, and the elements each one REVEALED. This content is NOT in the static DOM listing because it only appears after an interaction. Treat revealed elements as first-class: propose roles for them too, and in the role "description" say how it is revealed (e.g., "an item in the account menu, revealed after clicking the avatar"). These stay onPage:true (same page, just disclosed) — onPage:false is only for content reached by NAVIGATING away.
+- A PAGE FEATURE CATALOG may be attached — the WHOLE-PAGE inventory of interactive features (inputs / actions / disclosures / navigation) and content collections (repeating cards/tiles/rows) actually enumerated on the page, INCLUDING off-screen ones the static DOM/screenshot miss. This is the page's real affordances: GROUND your perspectives in it. Prefer roles that MAP to catalogued features, and align role names with the catalogued labels. A multiplicity:"many" content role usually maps to a "collection" entry; a "disclosure" entry is a trigger you can model with hidden/revealedBy roles.`;
 
     // Base context — identical in baseline and enhanced runs, so the A/B
     // measures the ADDED context (screenshot + library) holding the DOM fixed.
@@ -1884,6 +1885,32 @@ Rules:
           return `${head}\n${kids}${more}`;
         }).join('\n');
         userText += `\n\nPAGE STRUCTURE (interactions that REVEAL hidden content — these elements are NOT in the static DOM above; propose roles for them and note how each is revealed):\n${block}`;
+      }
+    }
+
+    // v2.74.403 — Whole-page feature catalog (the PageModel / Locale capability
+    // model). Grounds perspectives in the page's REAL affordances — including
+    // off-screen features the static DOM/screenshot miss — so roles MAP to
+    // catalogued features instead of being guessed. (PAGEMODEL_SPEC § 6, § 7.)
+    if (pageModel && pageModel.features) {
+      const feats = pageModel.features;
+      const byKind = pageModel.index?.byKind || {};
+      const order = ['input', 'action', 'disclosure', 'navigation', 'collection', 'region'];
+      const lines = [];
+      for (const k of order) {
+        const cap = (k === 'navigation') ? 30 : 16;
+        const ids = (byKind[k] || []).slice(0, cap);
+        const items = ids.map((id) => {
+          const f = feats[id]; if (!f) return null;
+          const lbl = (f.label || '(no label)').toString().slice(0, 40);
+          const mem = f.members ? ` ×${f.members.count}` : '';
+          return `"${lbl}"${mem}`;
+        }).filter(Boolean);
+        const more = (byKind[k] || []).length > cap ? ` …(+${(byKind[k] || []).length - cap})` : '';
+        if (items.length) lines.push(`  ${k}: ${items.join(', ')}${more}`);
+      }
+      if (lines.length) {
+        userText += `\n\nPAGE FEATURE CATALOG (whole-page inventory, incl. off-screen — propose roles that MAP to these; "many" content roles → a collection entry; a disclosure entry is a trigger):\n${lines.join('\n')}`;
       }
     }
 
@@ -2131,6 +2158,64 @@ Return ONLY a JSON object:
   }
 
   /**
+   * v2.74.396 — Visual role locator (Resolve Tier-2 fallback / "Path C"). Given a
+   * ROLE + the current viewport screenshot (+ intent / page-affordance context),
+   * return a NORMALIZED bounding box (screenshot space, top-left origin) of the
+   * element that PLAYS the role — mirroring how a person scanning the page finds
+   * where to click. The caller hit-tests the box against real element rects (IoU)
+   * to resolve the actual element, then runs the Pick→Claude refine. This is used
+   * ONLY for roles the DOM-text resolve pass couldn't pin down (abstained / failed
+   * verification), so the per-role vision cost is paid only on the hard cases.
+   *
+   * Returns null on parse failure; `{ found:false }` when the role isn't visible
+   * in this screenshot (below the fold / not present) — do NOT guess a box then.
+   * @returns {Promise<{found:boolean, box:{x1:number,y1:number,x2:number,y2:number}|null, confidence:number, note:string}|null>}
+   */
+  static async locateRoleRegion({ role, description, intent, affordances, url, title, screenshot }) {
+    if (!role || typeof screenshot !== 'string') return null;
+    const m = /^data:(image\/[a-z]+);base64,(.+)$/i.exec(screenshot);
+    if (!m) return null;
+    const systemPrompt = `You visually locate the element that plays a named ROLE on a web page — the way a person scanning the page finds where to click. You are shown a screenshot of the CURRENT viewport and a role to find.
+
+Return ONLY a JSON object:
+{ "found": true, "box": { "x1": 0.0, "y1": 0.0, "x2": 1.0, "y2": 1.0 }, "confidence": 0.0, "note": "" }
+
+COORDINATES: normalized [0.0,1.0] in SCREENSHOT space, top-left origin (x=0 left edge, x=1 right edge; y=0 TOP edge, y=1 BOTTOM edge). The box is TIGHT around the element that plays the role, with x1<x2 and y1<y2.
+- CONTAINER / CONTENT role (card, tile, row, list item, section, gallery item): box the WHOLE repeating block — NOT an inner image or text label inside it.
+- CONTROL role (button, input, link, tab, menu trigger): box just that control.
+
+RULES:
+- If the role's element is NOT visible in this screenshot (it is below the fold, scrolled off, or simply not on this page), return { "found": false, "box": null, "confidence": <0..1 how sure it's absent>, "note": "<why>" }. Do NOT invent a box for something you cannot see.
+- If several candidates match, pick the most prominent / primary instance and box THAT one.
+- "confidence" in [0,1]: how sure you are the box contains exactly the element that plays the role.
+- Output ONLY the JSON object, no prose.`;
+    let text = `Role to locate: ${role}\nRole description: ${(description ?? '').toString().trim() || '(none)'}\nLocale intent: ${(intent ?? '').toString().trim() || '(none)'}\nURL: ${url ?? '(unknown)'}\nTitle: ${title ?? '(unknown)'}`;
+    if (affordances) text += `\n\nPage affordances (what this kind of page supports):\n${String(affordances).slice(0, 1500)}`;
+    text += `\n\nThe current viewport screenshot is attached. Return the normalized box of the element that plays the role "${role}", or found:false if it is not visible here.`;
+    const userContent = [
+      { type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } },
+      { type: 'text', text },
+    ];
+    Logger.info('AnthropicService', `locateRoleRegion — "${role}"`);
+    try {
+      const raw = await AnthropicService.#call(systemPrompt, userContent, 400, [], { role: 'resolve', operation: 'locateRoleRegion' });
+      if (!raw?.success) { Logger.warn('AnthropicService', `locateRoleRegion failed: ${raw?.error}`); return null; }
+      const json = AnthropicService.#firstJsonObject(raw.text);
+      if (!json) return null;
+      const p = JSON.parse(json);
+      const conf = typeof p?.confidence === 'number' ? p.confidence : 0.5;
+      const note = typeof p?.note === 'string' ? p.note.trim().slice(0, 200) : '';
+      if (!p || p.found !== true || !p.box) return { found: false, box: null, confidence: conf, note };
+      const b = p.box;
+      const nums = ['x1', 'y1', 'x2', 'y2'].map(k => Number(b[k]));
+      if (nums.some(v => !Number.isFinite(v) || v < -0.05 || v > 1.05)) return null;
+      const [x1, y1, x2, y2] = nums.map(v => Math.min(1, Math.max(0, v)));
+      if (x2 <= x1 || y2 <= y1) return null;
+      return { found: true, box: { x1, y1, x2, y2 }, confidence: conf, note };
+    } catch (e) { Logger.warn('AnthropicService', `locateRoleRegion error: ${e.message}`); return null; }
+  }
+
+  /**
    * v2.74.352 — "Resolve roles": given a proposed perspective's ROLES and the
    * current page, return a concrete CSS selector for each role (or null to
    * abstain). The inverse of the picker — Claude resolves all roles in one
@@ -2170,7 +2255,9 @@ Return ONLY a JSON object:
 
 Rules:
 - Selector MUST be pure CSS usable by document.querySelectorAll. NEVER use Playwright/Cypress/jQuery extensions (:has-text, :text, :text-is, :contains, :visible, :nth-match, :near, text=, xpath=). They throw at runtime.
-- Prefer durable hooks: id, data-testid / data-*, name, aria-label, role, type, semantic tags. AVOID nth-child chains, hashed/auto-generated class names, and long brittle descendant chains.
+- For INTERACTIVE / CONTROL roles (buttons, inputs, links, triggers, tabs): prefer durable hooks — id, data-testid / data-*, name, aria-label, role, type, semantic tags. AVOID nth-child chains, hashed/auto-generated class names, and long brittle descendant chains.
+- CONTENT / STRUCTURAL roles (cards, tiles, rows, list items, sections, gallery/collection items — usually multiplicity "many") frequently have NO semantic hook: no id, no role, no aria, no data-*. For THESE, a CLASS-BASED selector is correct and expected — INCLUDING CSS-module / styled-component / "hashed" class names (e.g. "div.layout--JZpqG.column--FuwM5"), which are the element's ONLY stable handle. Do NOT avoid hashed classes for content roles. Do NOT route a content card through a clickable ancestor's child chain (e.g. "a[href*='/x/'] > div") — that breaks when the anchor wraps a label/icon; instead select the REPEATING element by its OWN class signature.
+- REPEATING CONTENT BLOCKS may be listed near the top of the DOM listing — each is a structural element whose tag+class signature recurs N× on the page, with a "selector" ALREADY querySelector-verified to match N elements (plus count / has-image / sample-text). When a CONTENT or multiplicity-"many" role matches one (judge by sample-text, has-image, and count vs. the role's description), REUSE that "selector" VERBATIM — it is the single most reliable handle for that role.
 - A BARE POSITIONAL selector on a generic tag (e.g. "button:nth-of-type(2)", "div > button:nth-child(3)") is almost always WRONG — it matches by POSITION, not meaning, and "matches one element" does NOT prove it's the right one. If the element has no stable hook, SCOPE the positional part under a stable/semantic ancestor (a landmark id, header/nav, [role=dialog], an aria-label'd container) so it cannot match the wrong element. For a TRIGGER role (one whose job is to OPEN something), a wrong target opens the wrong thing — be extra strict, and abstain rather than guess positionally.
 - KNOWN VERIFIED SELECTORS may be provided below (captured by automated page exploration — each was confirmed to resolve, and triggers were confirmed to reveal content). When a role matches one, REUSE its selector VERBATIM — it is more reliable than anything you can infer from the DOM text.
 - multiplicity "one"/"optional" → the selector must resolve to EXACTLY ONE element. multiplicity "many" → the selector must match the REPEATING item (multiple elements — e.g. the row/card that recurs), not one arbitrary instance.

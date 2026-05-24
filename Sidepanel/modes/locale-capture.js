@@ -116,6 +116,10 @@ let _exploreToken = 0;
 //   _groundInFlight: true while the grounding call round-trips.
 let _groundIntentResult = null;
 let _groundInFlight = false;
+// v2.74.397 — PageModel (Locale capability catalog) build-slice-1 inspector.
+//   _pageModelResult: the built model | null;  _pageModelInFlight: BUILD_PAGEMODEL round-trip.
+let _pageModelResult = null;
+let _pageModelInFlight = false;
 // v2.74.233 — Per-landmark "refining with Claude" status text. Set on
 // the landmark idx when the picker just captured and Claude is being
 // invoked to refine; cleared when Claude responds (success or fail).
@@ -834,6 +838,8 @@ async function unmount() {
   _exploreToken++;   // invalidate any in-flight sweep landing after unmount
   _groundIntentResult = null;
   _groundInFlight = false;
+  _pageModelResult = null;
+  _pageModelInFlight = false;
 
   // Clear DOM refs (no leak — but clarity).
   locGroundLabelEl = locTabUrlEl = locWarningEl = null;
@@ -1862,6 +1868,7 @@ function _renderPerspectivePanel() {
     <p class="dbg-locale-perspective-intro">Write your <b>Intent</b> above, then propose. Claude suggests named <b>roles</b> (using a page screenshot + this Ground's existing locales & landmarks); you pick the real element for each.</p>
     ${_renderExploreRow()}
     ${_renderGroundIntentRow(intent)}
+    ${_renderPageModelPanel()}
     <div class="dbg-locale-perspective-buttons">
       <button class="btn-secondary tiny" data-loc-action="propose-perspectives" type="button" ${canPropose ? '' : 'disabled'} title="${escAttr(intent.length === 0 ? emptyTitle : "Propose perspective options for this intent, using a page screenshot + this Ground's locales & landmarks.")}">${label}</button>
     </div>`;
@@ -1958,6 +1965,9 @@ function _renderPerspectivePanel() {
     ?.addEventListener('click', () => onSkipExplore());
   locPerspectiveBody.querySelector('[data-loc-action="cancel-explore"]')
     ?.addEventListener('click', () => onCancelExplore());
+  // v2.74.397 — PageModel catalog inspector (build slice 1).
+  locPerspectiveBody.querySelector('[data-loc-action="build-pagemodel"]')
+    ?.addEventListener('click', () => onBuildPageModel());
   // v2.74.393 — grounded-intent controls.
   locPerspectiveBody.querySelector('[data-loc-action="ground-intent"]')
     ?.addEventListener('click', () => onGroundIntent());
@@ -2219,6 +2229,75 @@ function onUseGroundedIntent() {
   toast?.('Intent grounded — now Propose perspectives');
 }
 
+// v2.74.397 — Build slice 1 inspector: capture a read-only L0 PageModel (Locale
+// capability catalog) of the active tab and show the Feature list. No authoring
+// wired to it yet — this exercises BUILD_PAGEMODEL + the catalog so captures are
+// visible while the architecture is built out.
+async function onBuildPageModel() {
+  if (!_locDraft) return;
+  if (_locTabId == null) { showLocaleWarning('No active tab to enumerate.'); return; }
+  if (_pageModelInFlight) return;
+  const draftToken = _locDraft.id;
+  _pageModelInFlight = true; _renderPerspectivePanel();
+  let res;
+  try {
+    res = await new Promise(r => chrome.runtime.sendMessage({
+      type: 'BUILD_PAGEMODEL', payload: { tabId: _locTabId, groundId: _locGroundId },
+    }, r));
+  } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
+  if (!_locDraft || _locDraft.id !== draftToken) return;
+  _pageModelInFlight = false;
+  if (!res?.success || !res.model) {
+    showLocaleWarning(`Build page catalog failed: ${res?.error ?? 'no model'}`);
+    _renderPerspectivePanel();
+    return;
+  }
+  _pageModelResult = res.model;
+  _renderPerspectivePanel();
+  const n = Object.keys(res.model.features || {}).length;
+  toast?.(`Page catalog — ${n} feature(s) across ${res.model.coverage?.bands ?? '?'} band(s)`);
+}
+
+// Render the PageModel catalog panel: offer (build) / building / result (Features
+// grouped by kind, each with selectorKind + band, capped per kind). Read-only.
+function _renderPageModelPanel() {
+  if (_pageModelInFlight) {
+    return `<div class="dbg-locale-pagemodel building"><span>⏳ Enumerating page (L0)…</span></div>`;
+  }
+  const m = _pageModelResult;
+  if (!m) {
+    return `<div class="dbg-locale-pagemodel offer">
+        <button class="btn-secondary tiny" data-loc-action="build-pagemodel" type="button" title="Capture a read-only L0 capability catalog of this page — every Feature (input/action/disclosure/navigation/collection/region) with its selector + scroll position. Build slice 1; not yet wired to authoring.">🗂 Build page catalog (L0)</button>
+      </div>`;
+  }
+  const feats = Object.values(m.features || {});
+  const byKind = {};
+  for (const f of feats) (byKind[f.kind] ||= []).push(f);
+  const order = ['input', 'action', 'disclosure', 'navigation', 'collection', 'region', 'composite'];
+  const present = order.filter((k) => byKind[k]?.length);
+  const counts = present.map((k) => `${byKind[k].length} ${k}`).join(' · ');
+  const rows = present.map((k) => {
+    const list = byKind[k];
+    const shown = list.slice(0, 8);
+    const items = shown.map((f) => `
+        <div class="dbg-locale-pm-feat">
+          <span class="dbg-locale-pm-kind ${escAttr(k)}">${escHtml(k)}</span>
+          <span class="dbg-locale-pm-label" title="${escAttr(f.selector || '')}">${escHtml(f.label || '(no label)')}</span>
+          <span class="dbg-locale-pm-meta">${escHtml(f.selectorKind || '?')}${f.location ? ` · b${f.location.band}` : ''}${f.selectorVerified ? ' · ✓' : ''}</span>
+        </div>`).join('');
+    const more = list.length > shown.length ? `<div class="dbg-locale-pm-more">+${list.length - shown.length} more ${escHtml(k)}</div>` : '';
+    return items + more;
+  }).join('');
+  return `<div class="dbg-locale-pagemodel result">
+      <div class="dbg-locale-pm-head">
+        <span class="dbg-locale-pm-title">Page catalog — ${feats.length} feature(s)${m.coverage?.bands ? `, ${m.coverage.bands} band(s)` : ''}</span>
+        <button class="btn-secondary tiny" data-loc-action="build-pagemodel" type="button" title="Re-enumerate this page.">↻</button>
+      </div>
+      <div class="dbg-locale-pm-counts">${escHtml(counts)}</div>
+      <div class="dbg-locale-pm-list">${rows}</div>
+    </div>`;
+}
+
 function onChoosePerspective(idx) {
   if (!_locDraft) return;
   const opt = _perspectiveRun?.options?.[idx];
@@ -2429,6 +2508,38 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
     renderLocaleLandmarks(); _renderPerspectivePanel(); updateLocaleSaveButtonState(); _refreshLocaleOverlays();
   }
 
+  // v2.74.396 — Resolve Tier-2: VISUAL fallback ("Path C"). For VISIBLE roles the
+  // DOM-text pass couldn't resolve (abstained or failed verification), look at the
+  // page screenshot and locate the element by region (vision → IoU hit-test), then
+  // run the same Pick→Claude refine + verify a manual pick gets. Hidden roles are
+  // handled by the reveal pass above (they aren't visible to locate). Bounded so
+  // the per-role vision cost lands only on the hard cases.
+  const visualCandidates = (opt.roles ?? []).filter(r =>
+    r?.role && !_perspectiveRoleFilled(r.role) && !(r.hidden === true || r.revealedBy) && _roleResolveNotes[r.role]);
+  if (visualCandidates.length && _locTabId != null) {
+    _resolveInFlightKey = inFlightKey; _renderPerspectivePanel();
+    let visualFilled = 0;
+    for (const r of visualCandidates.slice(0, 8)) {
+      if (_perspectiveRoleFilled(r.role)) continue;
+      const prior = _roleResolveNotes[r.role]?.status;
+      const okv = await _visualResolveRole(r, multOf(r.role), draftToken);
+      if (!_locDraft || _locDraft.id !== draftToken) return;
+      if (okv) {
+        visualFilled++; filled++;
+        if (prior === 'abstained') abstained = Math.max(0, abstained - 1);
+        else if (prior)            failed    = Math.max(0, failed - 1);
+        details.push({ role: r.role, status: 'resolved', via: 'visual' });
+      } else {
+        details.push({ role: r.role, status: _roleResolveNotes[r.role]?.status ?? 'failed', via: 'visual', reason: _roleResolveNotes[r.role]?.reason });
+      }
+    }
+    _resolveInFlightKey = null;
+    if (visualFilled) {
+      Logger.info('locale-capture', `resolveRoles: visual tier filled ${visualFilled}/${visualCandidates.length} role(s)`);
+      renderLocaleLandmarks(); _renderPerspectivePanel(); updateLocaleSaveButtonState(); _refreshLocaleOverlays();
+    }
+  }
+
   // v2.74.390 — Auto-profile the VISIBLE resolved landmarks (Claude description /
   // aliases / operationsCommon / pitfalls / expectedContent), mirroring
   // Pick→Claude. Run in PARALLEL so N landmarks ≈ one call's latency. Hidden
@@ -2481,6 +2592,68 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
     try { await onProposeStructure(); }
     catch (e) { Logger.warn('locale-capture', `auto-structure after resolve failed: ${e.message}`); }
   }
+}
+
+// v2.74.396 — Resolve ONE role visually (Tier-2 / "Path C"). Asks the background
+// to locate the role's region on the page screenshot and hit-test it to a real
+// element, then runs the SAME Pick→Claude refine + verify a manual pick gets —
+// anchored on the REAL resolved rect + a11y profile, so the refine's geometric
+// selector challenge compares against a real DOM element, not the LLM-proposed
+// box. Returns true iff a verified landmark was created; updates the role's note
+// on a miss so the checklist explains why (and leaves it for manual pick).
+async function _visualResolveRole(roleDef, mult, draftToken) {
+  const role = roleDef.role;
+  let res;
+  try {
+    res = await new Promise(r => chrome.runtime.sendMessage({
+      type: 'RESOLVE_ROLE_VISUAL',
+      payload: {
+        tabId: _locTabId, groundId: _locGroundId,
+        role: { role, description: roleDef.description ?? '', multiplicity: mult },
+        intent: (_locDraft?.description ?? '').trim(),
+      },
+    }, r));
+  } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
+  if (!_locDraft || _locDraft.id !== draftToken) return false;
+  if (!res?.success) {
+    _roleResolveNotes[role] = { status: 'failed', reason: `visual locate failed: ${res?.error ?? 'unknown'}`, selector: null };
+    return false;
+  }
+  if (!res.found || !res.pick?.selector) {
+    _roleResolveNotes[role] = { status: 'abstained', reason: res.note ? `not found visually — ${res.note}` : 'not visible on screen — scroll to it, then pick', selector: null };
+    Logger.info('locale-capture', `resolveRoles[${role}] visual: not found — ${res.note ?? ''}`);
+    return false;
+  }
+  const pick = res.pick;
+  const lmRef = { alias: role, selector: pick.selector, roleFill: role, roleMult: mult, verified: null };
+  if (pick.frame && pick.frame.url && pick.frame.isTop === false) lmRef.frameUrl = String(pick.frame.url);
+  _locDraft.landmarks.push(lmRef);
+  _invalidateStructure();
+  const idx = _locDraft.landmarks.indexOf(lmRef);
+  // Path A step 4 — Pick→Claude refine (INSPECT + screenshots + full profile +
+  // the geometric selector challenge), fed the REAL resolved rect + a11y profile.
+  try {
+    await _refineLandmarkSelectorWithClaude(idx, {
+      pickedRect                : pick.rect ?? null,
+      viewportInfo              : pick.viewportInfo ?? null,
+      pickedAccessibilityProfile: pick.accessibilityProfile ?? null,
+    });
+  } catch (e) { Logger.warn('locale-capture', `visual refine threw for ${role}: ${e.message}`); }
+  if (!_locDraft || _locDraft.id !== draftToken) return false;
+  const curIdx = _locDraft.landmarks.indexOf(lmRef);
+  if (curIdx < 0) return false;
+  try { await verifyLocaleLandmark(curIdx); } catch { /* */ }
+  const v = lmRef.verified;
+  const ok = v && v.score !== 'mismatch' && (v.score === 'ready' || v.score === 'caveats' || v.matchedCount > 0);
+  if (ok) {
+    delete _roleResolveNotes[role];
+    Logger.info('locale-capture', `resolveRoles[${role}] resolved VISUALLY — "${lmRef.selector}" (IoU ${typeof pick.iou === 'number' ? pick.iou.toFixed(2) : '?'}, score=${v.score}, matched=${v.matchedCount})`);
+    return true;
+  }
+  const ci = _locDraft.landmarks.indexOf(lmRef);
+  if (ci >= 0) _locDraft.landmarks.splice(ci, 1);
+  _roleResolveNotes[role] = { status: 'failed', reason: `visual pick didn't verify: ${_verifyFailReason(v)}`, selector: lmRef.selector };
+  return false;
 }
 
 // Pick (or re-pick) the element that fills a role. A fresh role → CREATE-mode

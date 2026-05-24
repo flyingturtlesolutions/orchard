@@ -4945,6 +4945,32 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 .dbg-locale-ground-text { color: rgba(226, 232, 240, 0.92); }
 .dbg-locale-ground-note { color: rgba(148, 163, 184, 0.85); font-size: 10px; font-style: italic; }
 .dbg-locale-ground-actions { display: flex; gap: 6px; }
+
+/* v2.74.397 — PageModel (Locale capability catalog) inspector (build slice 1) */
+.dbg-locale-pagemodel {
+  display: flex; flex-direction: column; gap: 6px;
+  font-size: 11px; line-height: 1.4;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 5px; padding: 6px 8px;
+}
+.dbg-locale-pagemodel.offer    { border-style: dashed; border-color: rgba(125, 211, 252, 0.4); background: rgba(125, 211, 252, 0.05); align-items: flex-start; }
+.dbg-locale-pagemodel.building { border-color: rgba(250, 204, 21, 0.45); background: rgba(250, 204, 21, 0.07); color: rgba(253, 224, 130, 0.95); }
+.dbg-locale-pagemodel.result   { border-color: rgba(125, 211, 252, 0.4); background: rgba(125, 211, 252, 0.05); }
+.dbg-locale-pm-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dbg-locale-pm-title { font-weight: 600; color: rgba(226, 232, 240, 0.95); }
+.dbg-locale-pm-counts { color: rgba(148, 163, 184, 0.9); font-size: 10px; }
+.dbg-locale-pm-list { display: flex; flex-direction: column; gap: 3px; max-height: 220px; overflow-y: auto; }
+.dbg-locale-pm-feat { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.dbg-locale-pm-kind { font-size: 9px; text-transform: uppercase; letter-spacing: 0.03em; padding: 0 5px; border-radius: 999px; flex: 0 0 auto; background: rgba(148, 163, 184, 0.15); color: rgba(203, 213, 225, 0.9); }
+.dbg-locale-pm-kind.input      { background: rgba(125, 211, 252, 0.18); color: rgba(186, 230, 253, 0.95); }
+.dbg-locale-pm-kind.action     { background: rgba(74, 222, 128, 0.16); color: rgba(167, 243, 208, 0.95); }
+.dbg-locale-pm-kind.disclosure { background: rgba(196, 181, 253, 0.18); color: rgba(216, 207, 255, 0.95); }
+.dbg-locale-pm-kind.navigation { background: rgba(250, 204, 21, 0.16); color: rgba(253, 224, 130, 0.95); }
+.dbg-locale-pm-kind.collection { background: rgba(244, 114, 182, 0.16); color: rgba(251, 207, 232, 0.95); }
+.dbg-locale-pm-kind.region     { background: rgba(148, 163, 184, 0.2); color: rgba(203, 213, 225, 0.9); }
+.dbg-locale-pm-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(226, 232, 240, 0.92); }
+.dbg-locale-pm-meta { flex: 0 0 auto; color: rgba(148, 163, 184, 0.8); font-size: 10px; }
+.dbg-locale-pm-more { color: rgba(148, 163, 184, 0.7); font-size: 10px; font-style: italic; padding-left: 4px; }
 .dbg-locale-perspective-run {
   display: flex; flex-direction: column; gap: 6px;
   border: 1px dashed rgba(148, 163, 184, 0.3);

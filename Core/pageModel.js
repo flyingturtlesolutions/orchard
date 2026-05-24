@@ -1,0 +1,363 @@
+// Core/pageModel.js — PageModel (Locale capability catalog) builder + query API.
+//
+// See PAGEMODEL_SPEC.md. A PageModel is the intent-independent capability catalog
+// of ONE page archetype: Features (units of capability) organized into Layers and
+// serving Goals. This module is PURE (no chrome / DOM deps) so it can run in the
+// background, the sidepanel, and node unit tests alike. The content script emits
+// RAW features (read-only enumeration, L0); `buildPageModel` assembles them into
+// the queryable artifact; downstream calls the query API rather than walking the
+// raw object.
+//
+// v2.74.397 — Build slice 1: schema + builder + query API + L0 assembly. Old
+// `pageStructure` remains the live artifact; this is additive (new cache key)
+// until later slices rewire resolve / grounding to consume it.
+
+export const PAGEMODEL_SCHEMA = 2;
+
+export const FEATURE_KINDS = Object.freeze([
+  'input', 'action', 'disclosure', 'navigation', 'collection', 'region', 'composite',
+]);
+
+// ─── Builder ──────────────────────────────────────────────────────────────────
+
+/**
+ * Assemble a PageModel from raw enumerated features + capture meta.
+ * @param {Array<object>} rawFeatures  feature objects (must carry a stable `id`)
+ * @param {object} meta  { url, urlPattern?, title, viewport, scrollHeight, enumeratedAt, fidelity? }
+ * @returns {object} PageModel
+ */
+export function buildPageModel(rawFeatures, meta = {}) {
+  const features = {};
+  for (const f of Array.isArray(rawFeatures) ? rawFeatures : []) {
+    if (f && typeof f.id === 'string' && f.id) features[f.id] = f;
+  }
+  const surfaceFeatureIds = Object.keys(features);
+  const layers = {
+    surface: { id: 'surface', kind: 'surface', openedBy: null, overlay: false, features: surfaceFeatureIds },
+  };
+  const goals = {};
+  return {
+    schema: PAGEMODEL_SCHEMA,
+    url: meta.url ?? '',
+    urlPattern: meta.urlPattern ?? meta.url ?? '',
+    title: meta.title ?? '',
+    viewport: meta.viewport ?? null,
+    scrollHeight: meta.scrollHeight ?? null,
+    features,
+    layers,
+    goals,
+    index: buildIndex(features),
+    coverage: {
+      fidelity: meta.fidelity ?? 'L0',
+      driftHash: driftHash(features),
+      lastExploredAt: meta.enumeratedAt ?? Date.now(),
+      bands: meta.bands ?? null,
+      featureCount: surfaceFeatureIds.length,
+    },
+  };
+}
+
+/** Denormalized indices for cheap queries (PAGEMODEL_SPEC § 2). */
+export function buildIndex(features) {
+  const byKind = {};
+  const byGoal = {};
+  const triggers = [];
+  for (const f of Object.values(features || {})) {
+    if (!f) continue;
+    (byKind[f.kind] ||= []).push(f.id);
+    for (const g of f.goals || []) (byGoal[g] ||= []).push(f.id);
+    if (f.kind === 'disclosure' && f.reveals) triggers.push({ featureId: f.id, revealsLayerId: f.reveals });
+  }
+  return { byKind, byGoal, triggers };
+}
+
+// ─── Query API (PAGEMODEL_SPEC § 7) ─────────────────────────────────────────────
+// Downstream SELECTS from the catalog; it never walks the raw artifact.
+
+/** All features of a kind. */
+export function featuresByKind(model, kind) {
+  return (model?.index?.byKind?.[kind] || []).map((id) => model.features[id]).filter(Boolean);
+}
+
+/**
+ * Rank features that could fill a named role (fuzzy: label/role/kind token overlap
+ * + kind affinity). Returns selection-ready rows, best first.
+ */
+export function featuresForRole(model, role, { kind = null } = {}) {
+  const want = tokens(role);
+  const affinity = kindAffinityForRole(role);
+  const pool = Object.values(model?.features || {}).filter((f) => f && (!kind || f.kind === kind));
+  return pool
+    .map((f) => ({ f, score: matchScore(want, affinity, f) }))
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .map((x) => ({
+      id: x.f.id,
+      kind: x.f.kind,
+      label: x.f.label,
+      selector: x.f.selector,
+      location: x.f.location ?? null,
+      scrollToY: x.f.location?.scrollToY ?? null,
+      verified: !!x.f.selectorVerified,
+      score: round2(x.score),
+    }));
+}
+
+/**
+ * Flat verified-selector hints over the WHOLE page (not just poked controls).
+ * Back-compat shape for resolveRoles' KNOWN VERIFIED SELECTORS block.
+ */
+export function knownSelectors(model) {
+  return Object.values(model?.features || {})
+    .filter((f) => f && f.selector)
+    .map((f) => ({ label: f.label || '', role: f.a11yRole || f.kind, selector: f.selector, verified: !!f.selectorVerified }));
+}
+
+/** Scroll offset to bring a feature into view (kills "viewport = canonical"). */
+export function scrollTargetFor(model, featureId) {
+  return model?.features?.[featureId]?.location?.scrollToY ?? null;
+}
+
+/** Content collections (cards/tiles/rows) — the repeating-block features. */
+export function collections(model) {
+  return featuresByKind(model, 'collection');
+}
+
+/** Best disclosure feature matching a trigger label (reveal-resolve). */
+export function disclosureFor(model, triggerLabel) {
+  const want = tokens(triggerLabel);
+  const pool = featuresByKind(model, 'disclosure');
+  let best = null;
+  let bestScore = 0;
+  for (const f of pool) {
+    const s = overlap(want, tokens(f.label));
+    if (s > bestScore) { bestScore = s; best = f; }
+  }
+  if (!best) return null;
+  const layer = best.reveals ? model.layers?.[best.reveals] ?? null : null;
+  return { trigger: best, layer, close: layer?.close ?? null };
+}
+
+/** Structured goals (composed elsewhere; here just the local goals). */
+export function goals(model) {
+  return Object.values(model?.goals || {});
+}
+
+// ─── Internals ──────────────────────────────────────────────────────────────
+
+function tokens(s) {
+  return String(s || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t && t.length > 1);
+}
+
+function overlap(a, b) {
+  if (!a.length || !b.length) return 0;
+  const set = new Set(b);
+  let n = 0;
+  for (const t of a) if (set.has(t)) n++;
+  return n;
+}
+
+// Map role-name hints → the kind we'd expect to fill them. Role names are
+// head-final English compounds ("search-SUBMIT", "collection-CARD", "result-ITEM"),
+// so the LAST token decides the kind; earlier tokens are qualifiers. We check the
+// head token first, then fall back to any token. (Without head-first, "search-
+// submit" would match input on "search" before action on "submit".)
+const KIND_HINTS = Object.freeze({
+  input:      ['input', 'field', 'box', 'search', 'query', 'textarea', 'email', 'password', 'textbox', 'combobox', 'searchbox'],
+  action:     ['submit', 'button', 'btn', 'action', 'cta', 'go', 'apply', 'confirm', 'add', 'buy', 'signin', 'login'],
+  navigation: ['link', 'nav', 'menuitem', 'breadcrumb', 'tab'],
+  collection: ['card', 'tile', 'item', 'result', 'cell', 'row', 'product', 'listing', 'thumb', 'gallery', 'collection', 'grid'],
+  disclosure: ['dropdown', 'menu', 'filter', 'expand', 'disclosure', 'accordion', 'toggle', 'flyout', 'popover', 'more'],
+  region:     ['header', 'footer', 'sidebar', 'region', 'section', 'banner', 'main', 'aside'],
+});
+function kindAffinityForRole(role) {
+  const toks = tokens(role);
+  if (!toks.length) return null;
+  const head = toks[toks.length - 1];                       // head-final: the last token is the noun
+  for (const [kind, hints] of Object.entries(KIND_HINTS)) if (hints.includes(head)) return kind;
+  for (const t of toks) for (const [kind, hints] of Object.entries(KIND_HINTS)) if (hints.includes(t)) return kind;
+  return null;
+}
+
+function matchScore(wantTokens, affinity, f) {
+  let score = 0;
+  score += overlap(wantTokens, tokens(f.label)) * 2;       // label match is strong
+  score += overlap(wantTokens, tokens(f.a11yRole || '')); // a11y role token
+  score += overlap(wantTokens, tokens(f.kind));            // literal kind word in the role name
+  if (affinity && f.kind === affinity) score += 1.5;       // kind affinity bonus
+  // A bare affinity match (no token overlap) still surfaces a candidate, weakly.
+  if (score === 0 && affinity && f.kind === affinity) score = 0.5;
+  return score;
+}
+
+function round2(n) { return Math.round(n * 100) / 100; }
+
+/** Stable, order-independent hash of the feature id set (drift detection). */
+export function driftHash(features) {
+  const ids = Object.keys(features || {}).sort();
+  let h = 5381;
+  const s = ids.join('|');
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+function hashId(s) {
+  const str = String(s);
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+function selectorTier(sel) {
+  if (!sel) return 'positional';
+  if (/(^|\s|>)#[A-Za-z]/.test(sel)) return 'id';
+  if (/\[data-/.test(sel)) return 'data';
+  if (/\[aria-|\[role=/.test(sel)) return 'aria';
+  if (/:nth-|:first-|:last-|>\s|\+\s|~\s/.test(sel)) return 'positional';
+  if (/\./.test(sel)) return 'class';
+  return 'semantic';
+}
+
+// ─── L1 depth (PAGEMODEL_SPEC § 4, § 8) ─────────────────────────────────────────
+
+/**
+ * v2.74.404 — Merge the pageStructure poke→reveal sweep into the model as Layer
+ * nodes, WITHOUT re-poking (the Explore sweep already captured what each
+ * disclosure reveals). Each control with `observation:'reveal'` + revealed
+ * children becomes a `disclosure` trigger whose `reveals` points at a Layer
+ * holding those revealed features (tagged `hidden` + `revealedBy`). Pure — runs
+ * over the cached `structure.controls`. Upgrades the model to fidelity L1.
+ *
+ * Control shape (from contentScript explore): { selector, role, label, haspopup,
+ *   observation, overlay, revealed:[{selector, role, label}] }.
+ */
+export function mergeDepthFromControls(model, controls) {
+  if (!model || !model.features || !Array.isArray(controls)) return model;
+  const features = model.features;
+  const layers = model.layers || (model.layers = {});
+  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+  // Index existing CONTROL-ish features (so a poked control maps to its L0 entry).
+  const bySelector = new Map();
+  const byLabel = new Map();
+  for (const f of Object.values(features)) {
+    if (f.kind === 'collection' || f.kind === 'region') continue;
+    if (f.selector && !bySelector.has(f.selector)) bySelector.set(f.selector, f);
+    const k = norm(f.label);
+    if (k && !byLabel.has(k)) byLabel.set(k, f);
+  }
+  const revealKindOf = (role) => {
+    const r = String(role || '').toLowerCase();
+    if (/textbox|combobox|searchbox|textarea/.test(r)) return 'input';
+    if (/(^|[^a-z])link/.test(r)) return 'navigation';
+    return 'action';
+  };
+
+  for (const c of controls) {
+    if (!c || c.observation !== 'reveal' || !Array.isArray(c.revealed) || !c.revealed.length) continue;
+    // v2.74.406 — Skip CONTENT-SWAP false disclosures: a non-overlay "reveal" that
+    // surfaces only 1 new element is almost always a carousel advance / tab swap
+    // (e.g. a next/prev arrow whose "revealed" child is just the next slide), not a
+    // menu/panel disclosure. Real disclosures are overlays or reveal several items.
+    if (!c.overlay && c.revealed.length < 2) continue;
+    // Find the disclosure feature this control corresponds to (selector, then label).
+    let trigger = (c.selector && bySelector.get(c.selector)) || (c.label && byLabel.get(norm(c.label))) || null;
+    if (trigger) {
+      trigger.kind = 'disclosure';
+      trigger.interaction = { pattern: 'click', effect: 'reveal' };
+      trigger.selectorVerified = true;
+      trigger.evidence = { ...(trigger.evidence || {}), method: 'poke' };
+    } else {
+      const tid = hashId('disc|' + (c.role || '') + '|' + (c.label || '') + '|' + (c.selector || ''));
+      trigger = {
+        id: tid, kind: 'disclosure', label: (c.label || '').toString().slice(0, 80), a11yRole: c.role || null,
+        selector: c.selector || '', selectorKind: selectorTier(c.selector), selectorVerified: true,
+        location: null, interaction: { pattern: 'click', effect: 'reveal' },
+        confidence: 0.7, evidence: { method: 'poke', observedAt: Date.now() },
+      };
+      features[tid] = trigger;
+    }
+
+    const layerId = 'layer_' + trigger.id;
+    const overlay = !!c.overlay;
+    const layer = { id: layerId, kind: overlay ? 'modal' : 'dropdown', openedBy: trigger.id, overlay, features: [], close: null };
+    for (const rv of c.revealed.slice(0, 30)) {
+      if (!rv || !rv.selector) continue;
+      const cid = hashId('revealed|' + (rv.role || '') + '|' + (rv.label || '') + '|' + rv.selector);
+      if (!features[cid]) {
+        const kind = revealKindOf(rv.role);
+        features[cid] = {
+          id: cid, kind,
+          label: (rv.label || '').toString().slice(0, 80), a11yRole: rv.role || null,
+          selector: rv.selector, selectorKind: selectorTier(rv.selector), selectorVerified: true,
+          hidden: true, revealedBy: trigger.id,
+          interaction: { pattern: kind === 'input' ? 'type' : 'click', effect: kind === 'navigation' ? 'navigate' : 'none' },
+          confidence: 0.7, evidence: { method: 'poke', observedAt: Date.now() },
+        };
+      }
+      if (!layer.features.includes(cid)) layer.features.push(cid);
+    }
+    if (layer.features.length) {
+      layers[layerId] = layer;
+      trigger.reveals = layerId;
+    }
+  }
+
+  dedupeOverlayLayers(model);
+  model.index = buildIndex(model.features);
+  if (model.coverage) model.coverage.fidelity = 'L1';
+  return model;
+}
+
+/**
+ * v2.74.407 — Consolidate OVERLAY layers that are really the same overlay opened
+ * from several triggers (e.g. Pixabay's auth modal reached via Log in / Join /
+ * Upload, each capturing a different tab → login vs signup fields). Merge layers
+ * that share members (by selector) into one, union their features, and repoint
+ * every trigger's `reveals` at the survivor — so 3 layers collapse to 1 richer
+ * layer that all 3 triggers open. Only OVERLAY layers (modals) are considered;
+ * in-place dropdowns are trigger-specific and left alone.
+ */
+export function dedupeOverlayLayers(model) {
+  if (!model || !model.layers || !model.features) return model;
+  const layers = model.layers;
+  const ids = Object.keys(layers).filter((id) => id !== 'surface' && layers[id].overlay);
+  const selSet = (layer) => new Set((layer.features || []).map((fid) => model.features[fid]?.selector).filter(Boolean));
+  const kept = [];
+  for (const id of ids) {
+    const layer = layers[id];
+    const sig = selSet(layer);
+    let target = null;
+    for (const k of kept) {
+      const ksig = selSet(layers[k]);
+      let inter = 0;
+      for (const s of sig) if (ksig.has(s)) inter++;
+      const minSize = Math.min(sig.size, ksig.size) || 1;
+      if (inter >= 3 || inter / minSize >= 0.5) { target = k; break; }   // same overlay
+    }
+    if (target) {
+      const kl = layers[target];
+      const kSel = new Set(kl.features.map((fid) => model.features[fid]?.selector));
+      for (const fid of layer.features) {
+        const sel = model.features[fid]?.selector;
+        if (sel && !kSel.has(sel)) { kl.features.push(fid); kSel.add(sel); }
+      }
+      if (layer.openedBy && model.features[layer.openedBy]) model.features[layer.openedBy].reveals = target;
+      // re-point the hidden children's revealedBy stays valid (they keep their own trigger);
+      delete layers[id];
+    } else {
+      kept.push(id);
+    }
+  }
+  // Orphan cleanup: drop hidden features no surviving layer references.
+  const ref = new Set();
+  for (const lid of Object.keys(layers)) for (const fid of layers[lid].features) ref.add(fid);
+  for (const fid of Object.keys(model.features)) {
+    const f = model.features[fid];
+    if (f && f.hidden && !ref.has(fid)) delete model.features[fid];
+  }
+  return model;
+}
