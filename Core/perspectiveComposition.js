@@ -1,9 +1,9 @@
 /**
- * @file Core/localeComposition.js
- * @description LOCALE_SPEC § 3 "Layer 2" composition helpers. Pure,
+ * @file Core/perspectiveComposition.js
+ * @description PERSPECTIVE_SPEC § 3 "Layer 2" composition helpers. Pure,
  * storage-free.
  *
- * A Locale's composition is a tree of `LandmarkNode`s ({ ref, role?,
+ * A Perspective's composition is a tree of `LandmarkNode`s ({ ref, role?,
  * multiplicity?, contains?, alternatives?, references?, triggers?,
  * derivedFrom?, ... }) plus cross-cutting overlays (groupings, sequences).
  * This module owns the canonical-shape derivation + the node-tree → flat-UID
@@ -15,7 +15,7 @@
  * land. A flat `landmarkRefs` mirror (= full flatten of the node tree) is
  * kept alongside for back-compat consumers during the transition.
  *
- * @module Core/localeComposition
+ * @module Core/perspectiveComposition
  * @version 2.74.332
  */
 
@@ -52,14 +52,14 @@ export function isLandmarkNodeArray(arr) {
 }
 
 /**
- * Derive the canonical LandmarkNode[] for a Locale record from whatever
+ * Derive the canonical LandmarkNode[] for a Perspective record from whatever
  * shape it currently has:
  *   - already LandmarkNode[] ({ref}) → preserved verbatim (keeps structure)
  *   - legacy embedded full records ({uid, selector, …}) → flat {ref:uid} nodes
  *   - legacy flat landmarkRefs:[uid] → flat {ref:uid} nodes
  *   - nothing → []
  *
- * @param {object} loc  Locale record
+ * @param {object} loc  Perspective record
  * @returns {Array}     LandmarkNode[]
  */
 export function deriveLandmarkNodes(loc) {
@@ -78,15 +78,15 @@ export function deriveLandmarkNodes(loc) {
 }
 
 /**
- * The flat, ordered, unique landmark UIDs for a Locale — the canonical way
- * for consumers to ask "which landmarks does this Locale compose?" regardless
+ * The flat, ordered, unique landmark UIDs for a Perspective — the canonical way
+ * for consumers to ask "which landmarks does this Perspective compose?" regardless
  * of internal node structure. Prefers the node tree; falls back to the
  * landmarkRefs mirror, then legacy embedded records.
  *
- * @param {object} loc  Locale record
+ * @param {object} loc  Perspective record
  * @returns {string[]}
  */
-export function localeLandmarkUids(loc) {
+export function perspectiveLandmarkUids(loc) {
   if (!loc || typeof loc !== 'object') return [];
   if (isLandmarkNodeArray(loc.landmarks)) return flattenLandmarkNodes(loc.landmarks);
   if (Array.isArray(loc.landmarkRefs)) return loc.landmarkRefs.filter(u => typeof u === 'string' && u);

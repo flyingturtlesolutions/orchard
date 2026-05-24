@@ -135,7 +135,7 @@ export async function openSidepanelHere(path = 'sidepanel.html') {
 // Three sidepanel modes start a live-page selector picker:
 //   - fragment-author  (+ Action / + Action branch / + Action gate body)
 //   - observation-author (Pick on each extract)
-//   - locale-capture   (Pick on each landmark)
+//   - perspective-capture   (Pick on each landmark)
 //
 // Each one sends START_PICK to the active tab's content script. The
 // historical implementation targeted `{ frameId: 0 }` only, which made

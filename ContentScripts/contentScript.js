@@ -4213,7 +4213,7 @@ function computePageComplexity() {
 }
 
 // ─── Structure verification (v2.74.362) ────────────────────────────────────
-// Auto-verify a Locale's structured composition against the live page.
+// Auto-verify a Perspective's structured composition against the live page.
 //  A) STATIC (deterministic): resolution, multiplicity (match count),
 //     containment (DOM ancestry vs declared parent).
 //  C) POKE-AND-OBSERVE: for nodes with `triggers`, snapshot the targets'
@@ -4241,7 +4241,7 @@ async function verifyStructure(payload) {
       return getComputedStyle(el).cursor === 'pointer';
     } catch { return false; }
   };
-  // v2.74.363 — `contains` is LOGICAL containment (LOCALE_SPEC § 3), not strict
+  // v2.74.363 — `contains` is LOGICAL containment (PERSPECTIVE_SPEC § 3), not strict
   // DOM ancestry. Portaled dropdowns/menus/modals render at <body> level, so
   // they are NOT DOM descendants of their trigger — yet logically belong inside
   // it. Recognize that link via ARIA (aria-controls/owns/labelledby) or the
@@ -4897,7 +4897,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   switch (type) {
 
-    // v2.72.43 (Pass 17g iter) — readiness probe. Used by debugger's locale
+    // v2.72.43 (Pass 17g iter) — readiness probe. Used by debugger's perspective
     // capture flow to verify the content script is reachable before sending
     // START_PICK / DOM_SNAPSHOT_FULL. Cheap; no side effects. Returns sync.
     case 'PING': {
@@ -4905,17 +4905,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return false;
     }
 
-    // v2.74.46 — Locale-capture verification overlays.
-    case 'SHOW_LOCALE_OVERLAYS': {
-      try { showLocaleOverlays(payload?.landmarks); } catch (e) {
+    // v2.74.46 — Perspective-capture verification overlays.
+    case 'SHOW_PERSPECTIVE_OVERLAYS': {
+      try { showPerspectiveOverlays(payload?.landmarks); } catch (e) {
         sendResponse({ success: false, error: e.message });
         return false;
       }
-      sendResponse({ success: true, count: __localeOverlays.length });
+      sendResponse({ success: true, count: __perspectiveOverlays.length });
       return false;
     }
-    case 'CLEAR_LOCALE_OVERLAYS': {
-      try { clearLocaleOverlays(); } catch (e) {
+    case 'CLEAR_PERSPECTIVE_OVERLAYS': {
+      try { clearPerspectiveOverlays(); } catch (e) {
         sendResponse({ success: false, error: e.message });
         return false;
       }
@@ -5400,7 +5400,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return false;
 
     // v2.72.29 (Pass 17) — PROBE_SELECTOR returns count + sample HTML for
-    // locale landmark verification. Mirrors COUNT_ELEMENTS in spirit but
+    // perspective landmark verification. Mirrors COUNT_ELEMENTS in spirit but
     // includes the first match's outerHTML truncated to a budget. Used by
     // Services/PageProbe.js → probeSelector.
     case 'PROBE_SELECTOR': {
@@ -5452,7 +5452,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       catch (e) { sendResponse({ success: false, error: e.message }); }
       return false;
 
-    // v2.74.362 — Auto-verify a Locale's structured composition (async: poke).
+    // v2.74.362 — Auto-verify a Perspective's structured composition (async: poke).
     case 'VERIFY_STRUCTURE':
       verifyStructure(payload).then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
       return true;   // async sendResponse
@@ -5730,7 +5730,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // > srcPattern > positional, in stability order.
     // v2.74.246 — Phase 7b of substrate spec: runtime iframe predicate
     // evaluator. Used by TemplateWalker to resolve iframe-scoped
-    // landmarks at dispatch time. Given a predicate from a Locale's
+    // landmarks at dispatch time. Given a predicate from a Perspective's
     // iframeContexts[], finds the matching <iframe> element in the
     // top document and returns:
     //   - its current src (for frameId correlation via webNavigation)
@@ -5740,11 +5740,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // The spec's predicate kinds (§ 4): iframeName / iframeSelector /
     // iframeSrcPattern (with mode contains|regex|exact) / iframePositional.
     // First-match in document order per spec § 8.
-    // v2.74.248 — Phase 7d substrate spec: Locale predicate leaf
+    // v2.74.248 — Phase 7d substrate spec: Perspective predicate leaf
     // evaluators that need DOM inspection. `visible` checks bounding
     // rect + CSS visibility; `hasText` checks innerText contains. Both
-    // are called from the Locale predicate evaluator (LocalePredicates.js)
-    // when determining whether a locale is active for the current page
+    // are called from the Perspective predicate evaluator (PerspectivePredicates.js)
+    // when determining whether a perspective is active for the current page
     // state.
     case 'EVALUATE_PREDICATE_VISIBLE': {
       try {
@@ -5831,7 +5831,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return false;
     }
 
-    // v2.74.331 — LOCALE_SPEC § 4 attributeEquals predicate. Element's
+    // v2.74.331 — PERSPECTIVE_SPEC § 4 attributeEquals predicate. Element's
     // attribute === expected value (string compare; absent attr never matches).
     case 'EVALUATE_PREDICATE_ATTRIBUTE_EQUALS': {
       try {
@@ -5864,7 +5864,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return false;
     }
 
-    // v2.74.331 — LOCALE_SPEC § 4 landmarkExists predicate. The selector
+    // v2.74.331 — PERSPECTIVE_SPEC § 4 landmarkExists predicate. The selector
     // resolves to an element in the DOM (present; visibility not required).
     case 'EVALUATE_PREDICATE_EXISTS': {
       try {
@@ -7360,24 +7360,24 @@ function stopPicker(notify, cancelled) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// v2.74.46 — Locale-capture verification overlays
+// v2.74.46 — Perspective-capture verification overlays
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// Persistent, multi-element overlays drawn around verified locale
+// Persistent, multi-element overlays drawn around verified perspective
 // landmarks (one per landmark, with the role displayed as a small
-// label). The locale-capture sidepanel mode sends:
+// label). The perspective-capture sidepanel mode sends:
 //
-//   SHOW_LOCALE_OVERLAYS  payload: { landmarks: [{alias, selector}, …] }
-//   CLEAR_LOCALE_OVERLAYS payload: (none)
+//   SHOW_PERSPECTIVE_OVERLAYS  payload: { landmarks: [{alias, selector}, …] }
+//   CLEAR_PERSPECTIVE_OVERLAYS payload: (none)
 //
 // These are separate from the picker overlay system (different DOM
 // marker, separate state). Position is absolute in document coords so
 // the overlays scroll naturally with the page.
 
-let __localeOverlays = [];
+let __perspectiveOverlays = [];
 
-function showLocaleOverlays(landmarks) {
-  clearLocaleOverlays();
+function showPerspectiveOverlays(landmarks) {
+  clearPerspectiveOverlays();
   if (!Array.isArray(landmarks)) return;
   for (const lm of landmarks) {
     if (!lm || typeof lm.selector !== 'string' || !lm.selector.trim()) continue;
@@ -7388,7 +7388,7 @@ function showLocaleOverlays(landmarks) {
     // Skip elements that are display:none / removed (zero box).
     if (rect.width === 0 && rect.height === 0) continue;
     const overlay = document.createElement('div');
-    overlay.setAttribute('data-agent-hub-locale-overlay', '1');
+    overlay.setAttribute('data-agent-hub-perspective-overlay', '1');
     // v2.74.233 — Green accent (was violet). Green signals "I am
     // actively highlighting this landmark" — set by the per-landmark
     // Show toggle in the sidepanel. Violet was retired here because
@@ -7427,15 +7427,15 @@ function showLocaleOverlays(landmarks) {
       overlay.appendChild(label);
     }
     document.body.appendChild(overlay);
-    __localeOverlays.push(overlay);
+    __perspectiveOverlays.push(overlay);
   }
 }
 
-function clearLocaleOverlays() {
-  for (const o of __localeOverlays) {
+function clearPerspectiveOverlays() {
+  for (const o of __perspectiveOverlays) {
     try { o.remove(); } catch { /* fine */ }
   }
-  __localeOverlays = [];
+  __perspectiveOverlays = [];
 }
 
 // ── Selector synthesis ───────────────────────────────────────────────────

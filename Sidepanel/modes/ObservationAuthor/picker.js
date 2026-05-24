@@ -16,7 +16,7 @@
  */
 
 // v2.74.166 — Frame-aware picker. Same broadcast helpers fragment-author
-// and locale-capture use, so observation extracts can target elements
+// and perspective-capture use, so observation extracts can target elements
 // inside same-origin iframes too.
 import { broadcastStartPick, broadcastCancelPick } from '../../../shared.js';
 

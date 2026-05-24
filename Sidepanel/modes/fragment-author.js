@@ -16,7 +16,7 @@
  *     pageClass, isRewalk, antecedentFragmentId, antecedentParamBindings,
  *     tabId }
  *
- * Per-action UI mirrors locale-capture's per-landmark UI:
+ * Per-action UI mirrors perspective-capture's per-landmark UI:
  *   [order #] [↑↓] [action-type dropdown] [selector input] [value input — conditional]
  *   [Pick]    [Verify]   [✕]
  *
@@ -46,7 +46,7 @@ import { toast, exitToStudio, requestModeChange } from '../shell-api.js';
 import { composeCompactDescription } from '../../Services/FragmentDescription.js';
 import { CONDITION_FIELDS, emptyCondition } from '../../Services/Assertion.js';
 // v2.74.166 — Shared frame-aware picker broadcast helpers. Same code
-// path also used by observation-author and locale-capture.
+// path also used by observation-author and perspective-capture.
 import { broadcastStartPick, broadcastCancelPick } from '../../shared.js';
 // v2.74.230 — Logger for "Ask Claude" suggestion logging.
 import { Logger } from '../../Core/Logger.js';
@@ -206,18 +206,18 @@ let _savedChain = [];
 //   - At Save (final snapshot before persisting).
 //
 // Both are arrays of condition objects in the canonical shape:
-//   { type: 'locale_ref', localeId }
+//   { type: 'perspective_ref', perspectiveId }
 //   { type: 'assertion_ref', assertionId }
 //   { type: 'url_matches', pattern }
 //
-// Display metadata (locale name, etc.) is derived at render time from
+// Display metadata (perspective name, etc.) is derived at render time from
 // the most recent EVALUATE_GROUND_PREDICATES response stored in
 // _conditionDisplay.
 let _preconditions = [];
 let _postconditions = [];
 let _conditionDisplay = {
-  // Maps locale id → {name, urlPattern, landmarkCount}
-  locales: new Map(),
+  // Maps perspective id → {name, urlPattern, landmarkCount}
+  perspectives: new Map(),
   // Maps assertion id → {name}
   assertions: new Map(),
 };
@@ -237,7 +237,7 @@ let doneRevealBtnEl = null;
 let cancelBtnEl = null;
 let warningEl = null;
 let actionsListEl = null;
-let activePerspectivesEl = null;   // v2.74.317 — active-Locale banner
+let activePerspectivesEl = null;   // v2.74.317 — active-Perspective banner
 let addActionBtnEl = null;
 // v2.74.0 — Sibling button for inserting an action-chain card. Lives next
 // to + Add action in the same footer; clicking adds a CLICK_BY_LABEL with
@@ -342,19 +342,19 @@ let postAddBtnEl = null;
 let _preUserModified = false;
 let _postUserModified = false;
 // Ground catalog cached at mount for the condition-type dropdown's
-// Custom (assertions) and Locales optgroups. Same source-of-truth as
+// Custom (assertions) and Perspectives optgroups. Same source-of-truth as
 // the Studio review panel — fetched via GET_GROUND.
-let _groundLocales = [];
+let _groundPerspectives = [];
 let _groundAssertions = [];
-// v2.74.317 — Active-Locale set for the authoring tab (LOCALE_SPEC § 8/§ 9).
-// Populated by _refreshActiveLocales() via EVALUATE_GROUND_PREDICATES —
-// the set of Locales whose predicates currently match the live page. Used
+// v2.74.317 — Active-Perspective set for the authoring tab (PERSPECTIVE_SPEC § 8/§ 9).
+// Populated by _refreshActivePerspectives() via EVALUATE_GROUND_PREDICATES —
+// the set of Perspectives whose predicates currently match the live page. Used
 // to partition the landmark dropdown into "on this page" (active) vs
 // "other perspectives" (inactive), so the author sees the landmarks that
 // actually live on the page in front of them first. `null` = not yet
 // evaluated (treat all as available until we know).
-let _activeLocaleIds = null;            // Set<localeId> | null
-let _activeLocaleNames = [];            // [name, …] for the banner
+let _activePerspectiveIds = null;            // Set<perspectiveId> | null
+let _activePerspectiveNames = [];            // [name, …] for the banner
 
 // v2.74.236 — Action type → required landmark operation, used to filter
 // the landmark dropdown so authors see only landmarks the action can
@@ -374,24 +374,24 @@ const ACTION_TO_LANDMARK_OP = Object.freeze({
 });
 
 /**
- * Flatten _groundLocales into landmark entries enriched with
- * localeId/Name. Filters out landmarks with `mismatch` score (broken)
+ * Flatten _groundPerspectives into landmark entries enriched with
+ * perspectiveId/Name. Filters out landmarks with `mismatch` score (broken)
  * unless the action already references one — in which case the
  * dropdown surfaces it so the author can see + clear it.
  */
 function _flatLandmarksForGround() {
   const out = [];
-  for (const locale of _groundLocales) {
-    // v2.74.335 — LOCALE_SPEC § 12: don't offer landmarks from a deprecated
-    // (retired) Locale for new fragment links.
-    if (locale?.lifecycle === 'deprecated') continue;
-    const lms = Array.isArray(locale?.landmarks) ? locale.landmarks : [];
+  for (const perspective of _groundPerspectives) {
+    // v2.74.335 — PERSPECTIVE_SPEC § 12: don't offer landmarks from a deprecated
+    // (retired) Perspective for new fragment links.
+    if (perspective?.lifecycle === 'deprecated') continue;
+    const lms = Array.isArray(perspective?.landmarks) ? perspective.landmarks : [];
     for (const lm of lms) {
       if (!lm || typeof lm.alias !== 'string' || !lm.selector) continue;
       const score = lm.verified?.score ?? null;
       out.push({
-        localeId         : locale.id,
-        localeName       : locale.name ?? locale.id,
+        perspectiveId         : perspective.id,
+        perspectiveName       : perspective.name ?? perspective.id,
         // v2.74.275 — Storage field renamed: role → alias.
         alias            : lm.alias,
         uid              : lm.uid,
@@ -400,10 +400,10 @@ function _flatLandmarksForGround() {
         description      : lm.description ?? '',
         operationsAllowed: lm.verified?.operationsAllowed ?? [],
         score,
-        // v2.74.317 — LOCALE_SPEC § 8: is this landmark's Locale active
+        // v2.74.317 — PERSPECTIVE_SPEC § 8: is this landmark's Perspective active
         // on the authoring page right now? `null` active-set = not yet
         // evaluated → treat as active (don't hide anything before we know).
-        isActive         : _activeLocaleIds === null || _activeLocaleIds.has(locale.id),
+        isActive         : _activePerspectiveIds === null || _activePerspectiveIds.has(perspective.id),
       });
     }
   }
@@ -411,13 +411,13 @@ function _flatLandmarksForGround() {
 }
 
 /**
- * v2.74.317 — Evaluate the Ground's Locales against the authoring tab and
- * cache the active set (LOCALE_SPEC § 9 predicate evaluation → active-set).
+ * v2.74.317 — Evaluate the Ground's Perspectives against the authoring tab and
+ * cache the active set (PERSPECTIVE_SPEC § 9 predicate evaluation → active-set).
  * Reuses EVALUATE_GROUND_PREDICATES (already used for precondition
- * capture); its matchingLocales[] IS the active set. Re-renders the
+ * capture); its matchingPerspectives[] IS the active set. Re-renders the
  * actions list so dropdowns + the perspective banner reflect the result.
  */
-async function _refreshActiveLocales() {
+async function _refreshActivePerspectives() {
   if (!_payload?.groundId || _tabId == null) return;
   let res;
   try {
@@ -428,24 +428,24 @@ async function _refreshActiveLocales() {
       }, resolve);
     });
   } catch {
-    return;   // leave _activeLocaleIds as-is (null = all available)
+    return;   // leave _activePerspectiveIds as-is (null = all available)
   }
-  if (!res?.success || !Array.isArray(res.matchingLocales)) return;
-  _activeLocaleIds   = new Set(res.matchingLocales.map(l => l.id));
-  _activeLocaleNames = res.matchingLocales.map(l => l.name ?? l.id);
+  if (!res?.success || !Array.isArray(res.matchingPerspectives)) return;
+  _activePerspectiveIds   = new Set(res.matchingPerspectives.map(l => l.id));
+  _activePerspectiveNames = res.matchingPerspectives.map(l => l.name ?? l.id);
   _renderActivePerspectiveBanner();
   _renderActions();
 }
 
 /**
- * v2.74.318 — LOCALE_SPEC § 2/§ 18: derive which Locale(s) this fragment
+ * v2.74.318 — PERSPECTIVE_SPEC § 2/§ 18: derive which Perspective(s) this fragment
  * is authored against, from the landmarks its actions reference. A
- * fragment's perspective is the set of Locales owning its referenced
+ * fragment's perspective is the set of Perspectives owning its referenced
  * landmark UIDs. Walks top-level actions + chain branches + gate sub-
- * actions. Returns an array of locale IDs (usually one; more when the
+ * actions. Returns an array of perspective IDs (usually one; more when the
  * fragment spans perspectives).
  */
-function _fragmentPerspectiveLocaleIds() {
+function _fragmentPerspectiveIds() {
   const uids = new Set();
   const collect = (act) => { if (act?.landmarkRef?.uid) uids.add(act.landmarkRef.uid); };
   for (const a of _actions) {
@@ -454,56 +454,56 @@ function _fragmentPerspectiveLocaleIds() {
     if (Array.isArray(a.body))     for (const sub of a.body) collect(sub);
   }
   if (uids.size === 0) return [];
-  const localeIds = new Set();
-  for (const loc of _groundLocales) {
+  const perspectiveIds = new Set();
+  for (const loc of _groundPerspectives) {
     const lms = Array.isArray(loc?.landmarks) ? loc.landmarks : [];
-    if (lms.some(lm => lm?.uid && uids.has(lm.uid))) localeIds.add(loc.id);
+    if (lms.some(lm => lm?.uid && uids.has(lm.uid))) perspectiveIds.add(loc.id);
   }
-  return [...localeIds];
+  return [...perspectiveIds];
 }
 
 /**
- * v2.74.317 — Render the active-perspective banner (LOCALE_SPEC § 8).
+ * v2.74.317 — Render the active-perspective banner (PERSPECTIVE_SPEC § 8).
  * Hidden until the active set has been evaluated. Three states:
- *   - ≥1 active Locale → "📍 On this page: <names>" + refresh
- *   - 0 active Locales → warning that no Locale matches (landmarks here
+ *   - ≥1 active Perspective → "📍 On this page: <names>" + refresh
+ *   - 0 active Perspectives → warning that no Perspective matches (landmarks here
  *     may not resolve) + refresh
  *   - not-yet-evaluated → stays hidden
  */
 function _renderActivePerspectiveBanner() {
   if (!activePerspectivesEl) return;
-  if (_activeLocaleIds === null) {
+  if (_activePerspectiveIds === null) {
     activePerspectivesEl.classList.add('hidden');
     activePerspectivesEl.innerHTML = '';
     return;
   }
   activePerspectivesEl.classList.remove('hidden');
-  const refreshBtn = `<button class="fa-perspectives-refresh" data-fa-action="refresh-perspectives" type="button" title="Re-evaluate which Locales match the current page (after navigating or changing page state)">↻</button>`;
+  const refreshBtn = `<button class="fa-perspectives-refresh" data-fa-action="refresh-perspectives" type="button" title="Re-evaluate which Perspectives match the current page (after navigating or changing page state)">↻</button>`;
 
   // Active perspectives line (or no-match warning).
   let activeLine;
   let emptyClass = false;
-  if (_activeLocaleNames.length > 0) {
-    const names = _activeLocaleNames.map(n => `<span class="fa-perspective-chip">${escHtml(n)}</span>`).join('');
-    activeLine = `<span class="fa-perspectives-label" title="Locales whose predicates match the current page. Their landmarks appear under '📍 On this page' in the landmark dropdowns.">📍 On this page:</span>${names}`;
+  if (_activePerspectiveNames.length > 0) {
+    const names = _activePerspectiveNames.map(n => `<span class="fa-perspective-chip">${escHtml(n)}</span>`).join('');
+    activeLine = `<span class="fa-perspectives-label" title="Perspectives whose predicates match the current page. Their landmarks appear under '📍 On this page' in the landmark dropdowns.">📍 On this page:</span>${names}`;
   } else {
     emptyClass = true;
-    activeLine = `<span class="fa-perspectives-label fa-perspectives-label-warn" title="No Locale's predicates match the current page. Landmarks you pick here may not resolve at runtime unless their Locale becomes active.">⚠ No perspective matches this page</span>`;
+    activeLine = `<span class="fa-perspectives-label fa-perspectives-label-warn" title="No Perspective's predicates match the current page. Landmarks you pick here may not resolve at runtime unless their Perspective becomes active.">⚠ No perspective matches this page</span>`;
   }
 
-  // v2.74.318 — Authored-against line (LOCALE_SPEC § 2/§ 18). The
+  // v2.74.318 — Authored-against line (PERSPECTIVE_SPEC § 2/§ 18). The
   // perspective(s) this fragment's linked landmarks belong to. Flags a
-  // mismatch when an authored-against Locale isn't active on the current
+  // mismatch when an authored-against Perspective isn't active on the current
   // page (you can't verify those actions here — wrong page state).
-  const authoredIds = _fragmentPerspectiveLocaleIds();
+  const authoredIds = _fragmentPerspectiveIds();
   let authoredHtml = '';
   if (authoredIds.length > 0) {
-    const nameFor = (id) => _groundLocales.find(l => l.id === id)?.name ?? id;
+    const nameFor = (id) => _groundPerspectives.find(l => l.id === id)?.name ?? id;
     const chips = authoredIds.map(id => {
-      const active = _activeLocaleIds.has(id);
+      const active = _activePerspectiveIds.has(id);
       return `<span class="fa-perspective-chip ${active ? '' : 'fa-perspective-chip-inactive'}" title="${active ? 'Authored against this perspective — active on the current page.' : 'Authored against this perspective — NOT active on the current page. Verify may fail here; navigate to a matching page.'}">${escHtml(nameFor(id))}${active ? '' : ' ⚠'}</span>`;
     }).join('');
-    authoredHtml = `<span class="fa-perspectives-sep">·</span><span class="fa-perspectives-label" title="The perspective(s) this fragment is authored against — derived from the Locales that own its linked landmarks (LOCALE_SPEC § 2).">authored against:</span>${chips}`;
+    authoredHtml = `<span class="fa-perspectives-sep">·</span><span class="fa-perspectives-label" title="The perspective(s) this fragment is authored against — derived from the Perspectives that own its linked landmarks (PERSPECTIVE_SPEC § 2).">authored against:</span>${chips}`;
   }
 
   activePerspectivesEl.classList.toggle('fa-active-perspectives-empty', emptyClass);
@@ -511,7 +511,7 @@ function _renderActivePerspectiveBanner() {
 
   // Wire the refresh button (re-evaluate on demand).
   const btn = activePerspectivesEl.querySelector('[data-fa-action="refresh-perspectives"]');
-  if (btn) btn.addEventListener('click', () => _refreshActiveLocales());
+  if (btn) btn.addEventListener('click', () => _refreshActivePerspectives());
 }
 
 // ─── Tiny escape helpers ─────────────────────────────────────────────────
@@ -669,17 +669,17 @@ function _composeDescriptionFromActions(actions) {
 
 function renderHTML() {
   return `
-    <div class="dbg-locale fa-author">
-      <header class="dbg-locale-header">
-        <div class="dbg-locale-title-row">
-          <span class="dbg-locale-badge">Fragment author</span>
-          <span data-fa="title" class="dbg-locale-ground-label">Authoring…</span>
+    <div class="dbg-perspective fa-author">
+      <header class="dbg-perspective-header">
+        <div class="dbg-perspective-title-row">
+          <span class="dbg-perspective-badge">Fragment author</span>
+          <span data-fa="title" class="dbg-perspective-ground-label">Authoring…</span>
         </div>
-        <div class="dbg-locale-meta">
-          <span class="dbg-locale-meta-label">Tab</span>
-          <span data-fa="subtitle" class="dbg-locale-meta-value mono">—</span>
+        <div class="dbg-perspective-meta">
+          <span class="dbg-perspective-meta-label">Tab</span>
+          <span data-fa="subtitle" class="dbg-perspective-meta-value mono">—</span>
         </div>
-        <div data-fa="warning" class="dbg-locale-warning hidden"></div>
+        <div data-fa="warning" class="dbg-perspective-warning hidden"></div>
       </header>
 
       <!-- v2.74.22 — Antecedent + Run card. Sub-card under the Fragment
@@ -695,7 +695,7 @@ function renderHTML() {
            order. Run navigates the tab to the antecedent's url_matches
            precondition first so re-clicking always starts from a
            known-good state. -->
-      <section data-fa="antecedent-card" class="dbg-locale-meta-card fa-antecedent-card">
+      <section data-fa="antecedent-card" class="dbg-perspective-meta-card fa-antecedent-card">
         <button class="fa-antecedent-collapse-toggle" data-fa="antecedent-toggle" type="button"
                 title="Collapse / expand antecedent card"
                 aria-label="Collapse antecedent card" aria-expanded="true">
@@ -703,7 +703,7 @@ function renderHTML() {
         </button>
         <div class="fa-antecedent-content">
           <div class="fa-antecedent-header-row">
-            <span class="dbg-locale-field-label fa-antecedent-header-label">Antecedent fragment</span>
+            <span class="dbg-perspective-field-label fa-antecedent-header-label">Antecedent fragment</span>
             <span data-fa="antecedent-collapsed-name" class="fa-antecedent-collapsed-name">none</span>
           </div>
           <div data-fa="antecedent-body" class="fa-antecedent-body">
@@ -716,7 +716,7 @@ function renderHTML() {
             </div>
             <div class="fa-antecedent-row fa-antecedent-row-2">
               <label class="fa-antecedent-params-input hidden" data-fa="antecedent-params-wrap">
-                <span class="dbg-locale-field-label">Param values</span>
+                <span class="dbg-perspective-field-label">Param values</span>
                 <input type="text" data-fa="antecedent-params" placeholder="comma-separated values" />
               </label>
               <button data-fa="antecedent-run" class="btn-secondary fa-antecedent-run" type="button" disabled>Run</button>
@@ -746,7 +746,7 @@ function renderHTML() {
            list collapses when the chevron is toggled; the head stays
            visible so the user can see what section they're in and
            the source summary. -->
-      <section data-fa="pre-card" class="dbg-locale-meta-card fa-conditions-card">
+      <section data-fa="pre-card" class="dbg-perspective-meta-card fa-conditions-card">
         <button class="fa-conditions-collapse-toggle" data-fa="pre-toggle" type="button"
                 title="Collapse / expand preconditions"
                 aria-label="Collapse preconditions" aria-expanded="true">
@@ -768,29 +768,29 @@ function renderHTML() {
         </div>
       </section>
 
-      <section class="dbg-locale-instructions">
-        <p class="dbg-locale-help">
+      <section class="dbg-perspective-instructions">
+        <p class="dbg-perspective-help">
           Add each action in order. Pick a selector, then click <strong>Verify</strong> to execute the action on the page. State advances per action — author against what you see.
         </p>
       </section>
 
-      <section data-fa="actions-card" class="dbg-locale-landmarks">
-        <div class="dbg-locale-landmarks-head">
+      <section data-fa="actions-card" class="dbg-perspective-landmarks">
+        <div class="dbg-perspective-landmarks-head">
           <button class="fa-actions-collapse-toggle" data-fa="actions-toggle" type="button"
                   title="Collapse / expand actions"
                   aria-label="Collapse actions" aria-expanded="true">
             <span class="fa-actions-collapse-chevron" data-fa="actions-toggle-glyph" aria-hidden="true">▾</span>
           </button>
-          <span class="dbg-locale-landmarks-label">Actions</span>
+          <span class="dbg-perspective-landmarks-label">Actions</span>
           <span data-fa="action-count" class="fa-action-count">—</span>
         </div>
-        <!-- v2.74.317 — Active-perspective banner (LOCALE_SPEC § 8). Shows
-             which Locales' predicates match the authoring tab, so the
+        <!-- v2.74.317 — Active-perspective banner (PERSPECTIVE_SPEC § 8). Shows
+             which Perspectives' predicates match the authoring tab, so the
              author knows what the substrate thinks the page is. Populated
-             by _renderActivePerspectiveBanner after _refreshActiveLocales. -->
+             by _renderActivePerspectiveBanner after _refreshActivePerspectives. -->
         <div data-fa="active-perspectives" class="fa-active-perspectives hidden"></div>
-        <div data-fa="actions-list" class="dbg-locale-landmarks-list">
-          <div class="dbg-locale-landmarks-empty">No actions yet — click + Add action below.</div>
+        <div data-fa="actions-list" class="dbg-perspective-landmarks-list">
+          <div class="dbg-perspective-landmarks-empty">No actions yet — click + Add action below.</div>
         </div>
         <!-- v2.72.90 — + Action moved below the list. The action list
              grows downward as new actions are added; placing the button
@@ -816,7 +816,7 @@ function renderHTML() {
            fragment runs, mirroring its position in the action timeline.
            v2.74.23 — Same collapsible card pattern as the preconditions
            card (chevron + always-visible head + collapsible list). -->
-      <section data-fa="post-card" class="dbg-locale-meta-card fa-conditions-card">
+      <section data-fa="post-card" class="dbg-perspective-meta-card fa-conditions-card">
         <button class="fa-conditions-collapse-toggle" data-fa="post-toggle" type="button"
                 title="Collapse / expand postconditions"
                 aria-label="Collapse postconditions" aria-expanded="true">
@@ -847,7 +847,7 @@ function renderHTML() {
                 same persistence path the old "Save Fragment" button ran.
            Save button starts disabled; _updateSaveState enables it once
            the validation rules pass (non-empty name + ≥1 verified action). -->
-      <section data-fa="name-card" class="dbg-locale-meta-card fa-name-card hidden">
+      <section data-fa="name-card" class="dbg-perspective-meta-card fa-name-card hidden">
         <div class="fa-name-row">
           <input type="text" data-fa="name-input" maxlength="80"
                  placeholder="Fragment name (e.g. Open Easy Apply form)" />
@@ -858,13 +858,13 @@ function renderHTML() {
       <!-- v2.74.26 — Bottom action row: "Done" reveals the Name card and
            collapses every collapsible card; "Cancel" exits to Studio
            without saving (same behaviour the old "Done" button had). -->
-      <section class="dbg-locale-actions">
+      <section class="dbg-perspective-actions">
         <button data-fa="reveal-done" class="btn-primary" type="button">Done</button>
         <button data-fa="cancel" class="btn-secondary" type="button">Cancel</button>
       </section>
 
-      <div data-fa="pick-banner" class="dbg-locale-pick-banner hidden">
-        <span class="dbg-locale-pick-text">Click an element on the page to pick a selector. Press Esc to cancel.</span>
+      <div data-fa="pick-banner" class="dbg-perspective-pick-banner hidden">
+        <span class="dbg-perspective-pick-text">Click an element on the page to pick a selector. Press Esc to cancel.</span>
         <button data-fa="pick-cancel" class="btn-secondary tiny" type="button">Cancel pick</button>
       </div>
     </div>
@@ -969,7 +969,7 @@ async function mount(payload, mountEl) {
         // re-resolution behavior. selector + frameUrl come from the
         // saved cache; the runtime resolver still re-fetches the
         // landmark's current values at dispatch time.
-        // v2.74.275 — Legacy { localeId, role } ref shape removed.
+        // v2.74.275 — Legacy { perspectiveId, role } ref shape removed.
         // Only { uid } refs supported.
         if (a.landmarkRef && typeof a.landmarkRef === 'object'
             && typeof a.landmarkRef.uid === 'string') {
@@ -1140,7 +1140,7 @@ async function mount(payload, mountEl) {
   // v2.74.36 — Skip these resets when restoring from a snapshot; the
   // restore block at the top of mount() already populated them with
   // the values the user had before unmount.
-  _conditionDisplay = { locales: new Map(), assertions: new Map() };
+  _conditionDisplay = { perspectives: new Map(), assertions: new Map() };
   if (!_restoredState) {
     _savedChain = [];
     // v2.74.185 — Hydrate pre/post from the saved fragment when the
@@ -1247,8 +1247,8 @@ async function mount(payload, mountEl) {
   _renderConditionsToggle('pre');
   _renderConditionsToggle('post');
   _renderActionsToggle();
-  // v2.74.24 — Fetch the Ground's locales + assertions so the condition-
-  // type dropdown can offer the Custom / Locales optgroups (matching the
+  // v2.74.24 — Fetch the Ground's perspectives + assertions so the condition-
+  // type dropdown can offer the Custom / Perspectives optgroups (matching the
   // Studio Edit-Fragment review panel's behaviour). Fire-and-forget — if
   // it fails the dropdown simply shows page-family types only.
   _loadGroundCatalog();
@@ -1322,7 +1322,7 @@ async function unmount() {
   _savedChain = [];
   _preconditions = [];
   _postconditions = [];
-  _conditionDisplay = { locales: new Map(), assertions: new Map() };
+  _conditionDisplay = { perspectives: new Map(), assertions: new Map() };
   _preSource = '—';
   _postSource = '—';
 
@@ -1349,10 +1349,10 @@ async function unmount() {
   _postCardCollapsed = false;
   _preUserModified = false;
   _postUserModified = false;
-  _groundLocales = [];
+  _groundPerspectives = [];
   _groundAssertions = [];
-  _activeLocaleIds = null;
-  _activeLocaleNames = [];
+  _activePerspectiveIds = null;
+  _activePerspectiveNames = [];
   breadcrumbEl = null;
   preListEl = preSourceEl = postListEl = postSourceEl = null;
 
@@ -1382,10 +1382,10 @@ function handleEvent(message) {
       // Inherits from antecedent if present; otherwise auto-captures
       // from the page state.
       _capturePreconditions();
-      // v2.74.317 — Evaluate which Locales are active on the authoring
+      // v2.74.317 — Evaluate which Perspectives are active on the authoring
       // tab so the landmark dropdown can foreground "on this page"
       // landmarks. Fire-and-forget; re-renders when it resolves.
-      _refreshActiveLocales();
+      _refreshActivePerspectives();
     } else {
       _setupReady = false;
       if (addActionBtnEl) addActionBtnEl.disabled = true;
@@ -1574,7 +1574,7 @@ function _onAddActionChainClick() {
 /**
  * v2.74.156 — Add an Action gate card. Header is a single condition
  * (same vocabulary as pre/postconditions: selector_present, url_matches,
- * text_present, attribute_equals, plus assertion_ref / locale_ref from
+ * text_present, attribute_equals, plus assertion_ref / perspective_ref from
  * the Ground catalog). Body is a list of sub-actions; runtime evaluates
  * the condition before entering the body and runs the body only when
  * `(condition is satisfied) XOR negate` is true.
@@ -1657,7 +1657,7 @@ function _updateActionCountUI() {
 function _scrollNewestActionIntoView() {
   if (!actionsListEl) return;
   requestAnimationFrame(() => {
-    const rows = actionsListEl.querySelectorAll('.dbg-locale-landmark-row');
+    const rows = actionsListEl.querySelectorAll('.dbg-perspective-landmark-row');
     const last = rows[rows.length - 1];
     if (!last) return;
     last.scrollIntoView({ block: 'end', behavior: 'smooth' });
@@ -1673,7 +1673,7 @@ function _renderActions() {
   // v2.74.318 — Refresh the perspective banner's "authored against" line
   // — it tracks the fragment's linked landmarks, which change as the
   // author links/clears them. Active-set itself only changes on
-  // _refreshActiveLocales; this just re-derives the authored-against side.
+  // _refreshActivePerspectives; this just re-derives the authored-against side.
   _renderActivePerspectiveBanner();
   // v2.74.22 — Antecedent card lock-state tracks the actions list. Empty
   // → enabled (user can pick + Run); non-empty → disabled (changing the
@@ -1702,7 +1702,7 @@ function _renderActions() {
   }
   _anteLastActionCount = cur;
   if (_actions.length === 0) {
-    actionsListEl.innerHTML = `<div class="dbg-locale-landmarks-empty">No actions yet — click + Add action.</div>`;
+    actionsListEl.innerHTML = `<div class="dbg-perspective-landmarks-empty">No actions yet — click + Add action.</div>`;
     return;
   }
   // v2.72.65 — Interleave rows with insert-wait strips. Strip at index i
@@ -1959,9 +1959,9 @@ function _renderActions() {
       if (!value) return;   // header option
       const colonIdx = value.indexOf('::');
       if (colonIdx < 0) return;
-      const localeId = value.slice(0, colonIdx);
+      const perspectiveId = value.slice(0, colonIdx);
       const role     = value.slice(colonIdx + 2);
-      _applyActionLandmarkRef(idx, localeId, role);
+      _applyActionLandmarkRef(idx, perspectiveId, role);
     });
   });
 
@@ -1993,7 +1993,7 @@ function _renderActions() {
       // iframe context and the new selector would route to top frame.
       if (old.frameUrl) fresh.frameUrl = old.frameUrl;
       if (decoded.assertionId) fresh.assertionId = decoded.assertionId;
-      if (decoded.localeId)    fresh.localeId    = decoded.localeId;
+      if (decoded.perspectiveId)    fresh.perspectiveId    = decoded.perspectiveId;
       a.condition = fresh;
       _renderActions();
       _updateSaveState();
@@ -2151,7 +2151,7 @@ function _renderActions() {
 function _wireDragAndDrop() {
   if (!actionsListEl) return;
   let dragSourceIdx = null;
-  actionsListEl.querySelectorAll(':scope > .dbg-locale-landmark-row').forEach(card => {
+  actionsListEl.querySelectorAll(':scope > .dbg-perspective-landmark-row').forEach(card => {
     const handle = card.querySelector('.fa-drag-handle');
     if (!handle) return;
     handle.addEventListener('mousedown', () => { card.draggable = true; });
@@ -2168,7 +2168,7 @@ function _wireDragAndDrop() {
       card.classList.remove('dragging');
       card.draggable = false;
       dragSourceIdx = null;
-      actionsListEl.querySelectorAll('.dbg-locale-landmark-row').forEach(c =>
+      actionsListEl.querySelectorAll('.dbg-perspective-landmark-row').forEach(c =>
         c.classList.remove('drop-before', 'drop-after'));
     });
     card.addEventListener('dragover', (e) => {
@@ -2237,7 +2237,7 @@ function _renderActionRow(a, idx) {
   const isVerified = v?.success === true;
   let statusHtml = '';
   if (v && !v.success) {
-    statusHtml = `<div class="dbg-locale-landmark-status status-err">✗ ${escHtml(v.error ?? 'failed')}</div>`;
+    statusHtml = `<div class="dbg-perspective-landmark-status status-err">✗ ${escHtml(v.error ?? 'failed')}</div>`;
   }
 
   const dropdownOptions = ACTIONS.map(opt =>
@@ -2313,7 +2313,7 @@ function _renderActionRow(a, idx) {
       <select class="fa-action-type" data-fa-field="action" data-idx="${idx}">${dropdownOptions}</select>
       <span class="fa-action-row-spacer"></span>
       ${showSelector
-        ? `<button class="dbg-locale-landmark-pick fa-action-pick" data-fa-action="pick" data-idx="${idx}" type="button">Pick</button>`
+        ? `<button class="dbg-perspective-landmark-pick fa-action-pick" data-fa-action="pick" data-idx="${idx}" type="button">Pick</button>`
         : ``}
     </div>`;
 
@@ -2348,19 +2348,19 @@ function _renderActionRow(a, idx) {
     lm.operationsAllowed.length === 0 ||
     lm.operationsAllowed.includes(requiredOp)
   );
-  // v2.74.317 — LOCALE_SPEC § 8: partition the landmark dropdown by
-  // active-Locale set. Landmarks whose Locale matches the live page go
+  // v2.74.317 — PERSPECTIVE_SPEC § 8: partition the landmark dropdown by
+  // active-Perspective set. Landmarks whose Perspective matches the live page go
   // in an "📍 On this page" group (first); the rest in "Other
   // perspectives" (still pickable — the author may stage a multi-page
   // fragment). When the active set hasn't been evaluated yet
-  // (_activeLocaleIds === null), every landmark reads isActive=true and
+  // (_activePerspectiveIds === null), every landmark reads isActive=true and
   // the partition collapses to a single flat group (prior behavior).
-  const _optFor = (lm) => `<option value="${escAttr(lm.localeId)}::${escAttr(lm.alias)}">${escHtml(lm.localeName)} › ${escHtml(lm.alias)}${lm.score === 'caveats' ? ' ⚠' : ''}</option>`;
+  const _optFor = (lm) => `<option value="${escAttr(lm.perspectiveId)}::${escAttr(lm.alias)}">${escHtml(lm.perspectiveName)} › ${escHtml(lm.alias)}${lm.score === 'caveats' ? ' ⚠' : ''}</option>`;
   let landmarkSelectHtml = '';
   if (availableLandmarks.length > 0) {
     const active   = availableLandmarks.filter(lm => lm.isActive);
     const inactive = availableLandmarks.filter(lm => !lm.isActive);
-    const partitioned = _activeLocaleIds !== null && active.length > 0 && inactive.length > 0;
+    const partitioned = _activePerspectiveIds !== null && active.length > 0 && inactive.length > 0;
     let body;
     if (partitioned) {
       body = `
@@ -2369,7 +2369,7 @@ function _renderActionRow(a, idx) {
     } else {
       body = availableLandmarks.map(_optFor).join('');
     }
-    landmarkSelectHtml = `<select class="fa-action-landmark-select" data-fa-action="landmark-select" data-idx="${idx}" title="Pick a verified landmark. 'On this page' = its Locale's predicates match the current tab.">
+    landmarkSelectHtml = `<select class="fa-action-landmark-select" data-fa-action="landmark-select" data-idx="${idx}" title="Pick a verified landmark. 'On this page' = its Perspective's predicates match the current tab.">
          <option value="">🔗 Use landmark…</option>
          ${body}
        </select>`;
@@ -2385,31 +2385,31 @@ function _renderActionRow(a, idx) {
       ? `No ${escHtml(requiredOp)}-capable landmark`
       : `No landmarks captured yet`;
     const tip = hasLandmarks
-      ? `This ground has ${groundLandmarks.length} landmark(s), but none support the ${requiredOp} operation. A ${a.action} action needs a landmark with that capability — capture one in Locale mode, or type a selector manually below.`
-      : `No landmarks captured for this ground's locales yet. Capture one in Locale mode to reuse it here, or type a selector manually below.`;
+      ? `This ground has ${groundLandmarks.length} landmark(s), but none support the ${requiredOp} operation. A ${a.action} action needs a landmark with that capability — capture one in Perspective mode, or type a selector manually below.`
+      : `No landmarks captured for this ground's perspectives yet. Capture one in Perspective mode to reuse it here, or type a selector manually below.`;
     landmarkSelectHtml = `<span class="fa-action-landmark-empty" title="${escAttr(tip)}">🔗 ${hint}</span>`;
   }
-  // v2.74.275 — Legacy { localeId, role } ref shape removed. Refs
+  // v2.74.275 — Legacy { perspectiveId, role } ref shape removed. Refs
   // now carry { uid } only. Look up the landmark in the cache to
-  // display owning locale + alias.
-  let refLocaleName = '';
+  // display owning perspective + alias.
+  let refPerspectiveName = '';
   let refAlias      = '';
   let refLandmark   = null;   // v2.74.311 — captured for effect-intel surfacing
   if (isRef && a.landmarkRef?.uid) {
     const targetUid = a.landmarkRef.uid;
-    let lmHit = null, locHit = null;
-    for (const loc of _groundLocales) {
+    let lmHit = null, perspectiveHit = null;
+    for (const loc of _groundPerspectives) {
       const cand = (loc.landmarks ?? []).find(lm => lm?.uid === targetUid);
-      if (cand) { lmHit = cand; locHit = loc; break; }
+      if (cand) { lmHit = cand; perspectiveHit = loc; break; }
     }
-    refLocaleName = locHit?.name ?? '(unlinked)';
+    refPerspectiveName = perspectiveHit?.name ?? '(unlinked)';
     refAlias      = lmHit?.alias ?? lmHit?.accessibleName ?? targetUid.slice(0, 8);
     refLandmark   = lmHit;
   }
   const refChipHtml = isRef
     ? `<div class="fa-action-landmark-chip">
          <span class="fa-action-landmark-chip-icon">🔗</span>
-         <span class="fa-action-landmark-chip-text">${escHtml(refLocaleName)} › ${escHtml(refAlias)}</span>
+         <span class="fa-action-landmark-chip-text">${escHtml(refPerspectiveName)} › ${escHtml(refAlias)}</span>
          <button class="fa-action-landmark-chip-clear" data-fa-action="landmark-clear" data-idx="${idx}" type="button" title="Stop using this landmark; edit selector inline">✕</button>
        </div>`
     : '';
@@ -2422,10 +2422,10 @@ function _renderActionRow(a, idx) {
   const row2Html = `
     <div class="fa-action-row-2">
       ${showSelector && !isRef
-        ? `<input type="text" class="dbg-locale-landmark-selector fa-action-selector" data-fa-field="selector" data-idx="${idx}"
+        ? `<input type="text" class="dbg-perspective-landmark-selector fa-action-selector" data-fa-field="selector" data-idx="${idx}"
                   placeholder="CSS selector" value="${escAttr(a.selector)}" />`
         : `<span class="fa-action-row-spacer"></span>`}
-      <button class="dbg-locale-landmark-verify fa-action-verify" data-fa-action="verify" data-idx="${idx}" type="button" ${verifyDisabled}>${verifyText}</button>
+      <button class="dbg-perspective-landmark-verify fa-action-verify" data-fa-action="verify" data-idx="${idx}" type="button" ${verifyDisabled}>${verifyText}</button>
       ${landmarkSelectHtml}
     </div>
     ${refChipHtml}`;
@@ -2489,7 +2489,7 @@ function _renderActionRow(a, idx) {
     </div>` : '';
 
   return `
-    <div class="dbg-locale-landmark-row ${accentClass}" data-idx="${idx}">
+    <div class="dbg-perspective-landmark-row ${accentClass}" data-idx="${idx}">
       <div class="fa-action-head">
         <span class="strategy-step-handle fa-drag-handle" title="Drag to reorder" aria-label="Drag handle">⋮⋮</span>
         <span class="fa-order">${idx + 1}.</span>
@@ -2577,7 +2577,7 @@ function _renderKeyValueRow(a, idx) {
              placeholder="or {{PARAM}} for runtime"
              title="Optional. When set, the saved key is a parameter ({{NAME}}) bound at runtime; the dropdown above is the literal used at verify time."
              value="${escAttr(paramName)}" />
-      <button class="dbg-locale-landmark-verify fa-action-verify fa-key-verify" data-fa-action="verify" data-idx="${idx}" type="button" ${verifyDisabled}>${verifyText}</button>
+      <button class="dbg-perspective-landmark-verify fa-action-verify fa-key-verify" data-fa-action="verify" data-idx="${idx}" type="button" ${verifyDisabled}>${verifyText}</button>
     </div>
     <div class="fa-key-repeat-row">
       <span class="fa-key-repeat-label" title="Number of times to send the key (keydown/keypress/keyup repeated). 1 = single press.">repeat:</span>
@@ -2798,7 +2798,7 @@ function _renderActionChainCard(a, idx) {
 
   // Head verify status row (errors only).
   const headStatusHtml = (a.verified && !a.verified.success)
-    ? `<div class="dbg-locale-landmark-status status-err">✗ ${escHtml(a.verified.error ?? 'failed')}</div>`
+    ? `<div class="dbg-perspective-landmark-status status-err">✗ ${escHtml(a.verified.error ?? 'failed')}</div>`
     : '';
 
   let headVerifyText = 'Verify';
@@ -2810,13 +2810,13 @@ function _renderActionChainCard(a, idx) {
     <div class="fa-action-row-1">
       <span class="fa-action-chain-tag">CLICK_BY_LABEL (chain head)</span>
       <span class="fa-action-row-spacer"></span>
-      <button class="dbg-locale-landmark-pick fa-action-pick" data-fa-action="pick" data-idx="${idx}" type="button">Pick</button>
+      <button class="dbg-perspective-landmark-pick fa-action-pick" data-fa-action="pick" data-idx="${idx}" type="button">Pick</button>
     </div>`;
   const headRow2 = `
     <div class="fa-action-row-2">
-      <input type="text" class="dbg-locale-landmark-selector fa-action-selector" data-fa-field="selector" data-idx="${idx}"
+      <input type="text" class="dbg-perspective-landmark-selector fa-action-selector" data-fa-field="selector" data-idx="${idx}"
              placeholder="layer-1 container CSS selector" value="${escAttr(a.selector)}" />
-      <button class="dbg-locale-landmark-verify fa-action-verify" data-fa-action="verify" data-idx="${idx}" type="button" ${headVerifyDisabled}>${headVerifyText}</button>
+      <button class="dbg-perspective-landmark-verify fa-action-verify" data-fa-action="verify" data-idx="${idx}" type="button" ${headVerifyDisabled}>${headVerifyText}</button>
     </div>`;
   const headValueRow = `
     <div class="fa-action-value-row">
@@ -2887,7 +2887,7 @@ function _renderActionChainCard(a, idx) {
     </div>`;
 
   return `
-    <div class="dbg-locale-landmark-row ${accentClass}" data-idx="${idx}">
+    <div class="dbg-perspective-landmark-row ${accentClass}" data-idx="${idx}">
       <div class="fa-action-head">
         <span class="strategy-step-handle fa-drag-handle" title="Drag to reorder" aria-label="Drag handle">⋮⋮</span>
         <span class="fa-order">${idx + 1}.</span>
@@ -2916,7 +2916,7 @@ function _renderActionChainCard(a, idx) {
 //
 // Header: a single condition (selector_present / selector_absent /
 //   url_matches / text_present / attribute_equals / assertion_ref /
-//   locale_ref — same vocabulary the pre/postcondition rows accept)
+//   perspective_ref — same vocabulary the pre/postcondition rows accept)
 //   plus a negate toggle.
 // Body: a list of sub-action rows. At runtime the body runs only when
 //   `(condition is satisfied) XOR negate` is true.
@@ -2936,7 +2936,7 @@ function _renderActionGateCard(a, idx) {
   const cond = a.condition ?? { type: 'selector_present', selector: '' };
 
   // Reuse the same condition-type dropdown the pre/post UI uses so the
-  // vocabulary stays in lockstep — Ground assertions and locales appear
+  // vocabulary stays in lockstep — Ground assertions and perspectives appear
   // as well, since this is just a condition.
   const typeOpts = _buildConditionTypeOptions(cond);
 
@@ -2952,7 +2952,7 @@ function _renderActionGateCard(a, idx) {
              ${attrs} data-field="selector"
              value="${escAttr(cond.selector ?? '')}"
              placeholder="CSS selector, e.g. .results-loaded" />
-      <button class="dbg-locale-landmark-pick fa-gate-cond-pick"
+      <button class="dbg-perspective-landmark-pick fa-gate-cond-pick"
               data-fa-action="gate-pick-cond" data-idx="${idx}" type="button">Pick</button>`;
   } else if (t === 'url_matches') {
     valueHtml = `<input type="text" class="cond-value-input fa-gate-cond-input"
@@ -2983,7 +2983,7 @@ function _renderActionGateCard(a, idx) {
              ${attrs} data-field="selector"
              value="${escAttr(cond.selector ?? '')}"
              placeholder="CSS selector (optional — whole page if blank)" />
-      <button class="dbg-locale-landmark-pick fa-gate-cond-pick"
+      <button class="dbg-perspective-landmark-pick fa-gate-cond-pick"
               data-fa-action="gate-pick-cond" data-idx="${idx}" type="button">Pick</button>
       <input type="text" class="cond-value-input fa-gate-cond-input fa-gate-cond-text-input"
              ${attrs} data-field="text"
@@ -2994,7 +2994,7 @@ function _renderActionGateCard(a, idx) {
              value="${escAttr(cond._verifyHelper ?? '')}"
              placeholder="param test value (used when text is {{PARAM}})"
              title="Authoring-only. When the text field is a {{PARAM}}, this literal substitutes for it at Verify time. Not saved with the fragment — runtime substitutes the actual bound value." />
-      <button class="dbg-locale-landmark-verify fa-gate-cond-verify"
+      <button class="dbg-perspective-landmark-verify fa-gate-cond-verify"
               data-fa-action="gate-verify-text" data-idx="${idx}" type="button" ${verifyDisabled}>${verifyText}</button>`;
   } else if (t === 'attribute_equals') {
     valueHtml = `
@@ -3017,14 +3017,14 @@ function _renderActionGateCard(a, idx) {
       : (cond.assertionId
           ? `<span class="cond-pred-hint cond-pred-hint-stale">missing assertion: ${escHtml(cond.assertionId)}</span>`
           : `<span class="cond-pred-hint cond-pred-hint-empty">— pick an assertion from the dropdown —</span>`);
-  } else if (t === 'locale_ref') {
-    const meta = _groundLocales.find(l => l.id === cond.localeId)
-              || _conditionDisplay.locales.get(cond.localeId);
+  } else if (t === 'perspective_ref') {
+    const meta = _groundPerspectives.find(l => l.id === cond.perspectiveId)
+              || _conditionDisplay.perspectives.get(cond.perspectiveId);
     valueHtml = meta
       ? `<span class="cond-pred-hint" title="${escAttr(meta.description ?? '')}">${escHtml(`${(meta.landmarks?.length ?? meta.landmarkCount ?? 0)} landmark${(meta.landmarks?.length ?? meta.landmarkCount ?? 0) === 1 ? '' : 's'}`)}</span>`
-      : (cond.localeId
-          ? `<span class="cond-pred-hint cond-pred-hint-stale">missing locale: ${escHtml(cond.localeId)}</span>`
-          : `<span class="cond-pred-hint cond-pred-hint-empty">— pick a locale from the dropdown —</span>`);
+      : (cond.perspectiveId
+          ? `<span class="cond-pred-hint cond-pred-hint-stale">missing perspective: ${escHtml(cond.perspectiveId)}</span>`
+          : `<span class="cond-pred-hint cond-pred-hint-empty">— pick a perspective from the dropdown —</span>`);
   } else {
     valueHtml = `<span class="cond-pred-hint cond-pred-hint-empty">unsupported type: ${escHtml(t)}</span>`;
   }
@@ -3104,7 +3104,7 @@ function _renderActionGateCard(a, idx) {
     : subActions.map((sub, gIdx) => _renderGateSubAction(sub, idx, gIdx)).join('');
 
   return `
-    <div class="dbg-locale-landmark-row fa-action-row fa-action-gate-card" data-idx="${idx}">
+    <div class="dbg-perspective-landmark-row fa-action-row fa-action-gate-card" data-idx="${idx}">
       <div class="fa-action-head">
         <span class="strategy-step-handle fa-drag-handle" title="Drag to reorder" aria-label="Drag handle">⋮⋮</span>
         <span class="fa-order">${idx + 1}.</span>
@@ -3211,17 +3211,17 @@ function _renderGateSubAction(sub, parentIdx, gIdx) {
       <select class="fa-action-type" data-fa-field="action" ${dataIds}>${dropdownOptions}</select>
       <span class="fa-action-row-spacer"></span>
       ${showSelector
-        ? `<button class="dbg-locale-landmark-pick fa-action-pick" data-fa-action="pick" ${dataIds} type="button">Pick</button>`
+        ? `<button class="dbg-perspective-landmark-pick fa-action-pick" data-fa-action="pick" ${dataIds} type="button">Pick</button>`
         : ``}
     </div>`;
   const row2 = `
     <div class="fa-action-row-2">
       ${showSelector
-        ? `<input type="text" class="dbg-locale-landmark-selector fa-action-selector"
+        ? `<input type="text" class="dbg-perspective-landmark-selector fa-action-selector"
                   data-fa-field="selector" ${dataIds}
                   placeholder="CSS selector" value="${escAttr(sub.selector ?? '')}" />`
         : `<span class="fa-action-row-spacer"></span>`}
-      <button class="dbg-locale-landmark-verify fa-action-verify"
+      <button class="dbg-perspective-landmark-verify fa-action-verify"
               data-fa-action="verify" ${dataIds} type="button" ${verifyDisabled}>${verifyText}</button>
     </div>`;
   // v2.74.181 — SELECT in a gate body renders its value + test-value
@@ -3248,7 +3248,7 @@ function _renderGateSubAction(sub, parentIdx, gIdx) {
   ) : '';
 
   const statusHtml = (v && !v.success)
-    ? `<div class="dbg-locale-landmark-status status-err">✗ ${escHtml(v.error ?? 'failed')}</div>`
+    ? `<div class="dbg-perspective-landmark-status status-err">✗ ${escHtml(v.error ?? 'failed')}</div>`
     : '';
   const footerHtml = statusHtml
     ? `<div class="fa-action-footer"><div class="fa-action-footer-status">${statusHtml}</div></div>`
@@ -3295,7 +3295,7 @@ function _renderChainBranch(actionIdx, bIdx, b) {
   else if (isVerified) { verifyText = 'Re-verify'; }
 
   const errorHtml = (b.verified && !b.verified.success)
-    ? `<div class="dbg-locale-landmark-status status-err">✗ ${escHtml(b.verified.error ?? 'failed')}</div>`
+    ? `<div class="dbg-perspective-landmark-status status-err">✗ ${escHtml(b.verified.error ?? 'failed')}</div>`
     : '';
 
   // Branch action-type indicator (read-only — set at add-time, not editable).
@@ -3312,10 +3312,10 @@ function _renderChainBranch(actionIdx, bIdx, b) {
   // Selector + Pick + Verify row, mirroring main action row layout.
   const selectorRowHtml = showSelector ? `
     <div class="fa-chain-branch-row-selector">
-      <input type="text" class="dbg-locale-landmark-selector fa-action-selector" data-fa-field="selector" data-idx="${actionIdx}" data-branch-idx="${bIdx}"
+      <input type="text" class="dbg-perspective-landmark-selector fa-action-selector" data-fa-field="selector" data-idx="${actionIdx}" data-branch-idx="${bIdx}"
              placeholder="${b.action === 'CLICK_BY_LABEL' ? 'layer-2 container CSS selector' : 'CSS selector'}"
              value="${escAttr(b.selector ?? '')}" />
-      <button class="dbg-locale-landmark-pick fa-action-pick" data-fa-action="pick" data-idx="${actionIdx}" data-branch-idx="${bIdx}" type="button">Pick</button>
+      <button class="dbg-perspective-landmark-pick fa-action-pick" data-fa-action="pick" data-idx="${actionIdx}" data-branch-idx="${bIdx}" type="button">Pick</button>
     </div>` : '';
 
   // Value row.
@@ -3334,7 +3334,7 @@ function _renderChainBranch(actionIdx, bIdx, b) {
   const verifyRowHtml = `
     <div class="fa-chain-branch-row-verify">
       <span class="fa-action-row-spacer"></span>
-      <button class="dbg-locale-landmark-verify fa-action-verify" data-fa-action="verify" data-idx="${actionIdx}" data-branch-idx="${bIdx}" type="button" ${verifyDisabled}>${verifyText}</button>
+      <button class="dbg-perspective-landmark-verify fa-action-verify" data-fa-action="verify" data-idx="${actionIdx}" data-branch-idx="${bIdx}" type="button" ${verifyDisabled}>${verifyText}</button>
     </div>`;
 
   return `
@@ -3725,7 +3725,7 @@ async function _startPick(actionIdx, branchIdx = null, gateIdx = null) {
   // v2.74.166 — Centralized through broadcastStartPick. Top frame's
   // response is the canonical pass/fail; iframe arming happens
   // asynchronously. Same helper used by observation-author and
-  // locale-capture so every picker is frame-aware.
+  // perspective-capture so every picker is frame-aware.
   const startRes = await broadcastStartPick(_tabId, {
     sessionId, mode: 'target', containerSelector: '', multiCandidate: false, labelMode,
   });
@@ -3753,8 +3753,8 @@ async function _cancelPick(notifyContentScript) {
 // ─── v2.74.236 — Landmark ref (fragment actions, Wave 3) ──────────────────
 //
 // Authors can either type a selector inline (legacy path) or pick a
-// landmark from the ground's locales (SSOT path). When a landmark is
-// chosen, action.landmarkRef carries {localeId, role}; action.selector
+// landmark from the ground's perspectives (SSOT path). When a landmark is
+// chosen, action.landmarkRef carries {perspectiveId, role}; action.selector
 // and action.frameUrl are populated from the landmark for verify-time
 // + display, and the inline selector input becomes read-only. The
 // runtime (TemplateWalker.#executeStep) re-resolves the ref at
@@ -3764,23 +3764,23 @@ async function _cancelPick(notifyContentScript) {
 // dropped, selector remains as-is (the author can edit, repick, or
 // run Ask Claude).
 
-function _applyActionLandmarkRef(actionIdx, localeId, alias) {
+function _applyActionLandmarkRef(actionIdx, perspectiveId, alias) {
   // v2.74.275 — Renamed second param `role` → `alias`. landmarkRef
-  // now writes { uid } (canonical) instead of legacy { localeId, role }.
+  // now writes { uid } (canonical) instead of legacy { perspectiveId, role }.
   const a = _actions[actionIdx];
   if (!a) return;
-  const locale = _groundLocales.find(l => l.id === localeId);
-  if (!locale) {
-    _showWarning(`Landmark ref failed: locale "${localeId}" not in this ground`);
+  const perspective = _groundPerspectives.find(l => l.id === perspectiveId);
+  if (!perspective) {
+    _showWarning(`Landmark ref failed: perspective "${perspectiveId}" not in this ground`);
     return;
   }
-  const lm = (locale.landmarks ?? []).find(l => l.alias === alias);
+  const lm = (perspective.landmarks ?? []).find(l => l.alias === alias);
   if (!lm) {
-    _showWarning(`Landmark ref failed: alias "${alias}" not in locale "${locale.name}"`);
+    _showWarning(`Landmark ref failed: alias "${alias}" not in perspective "${perspective.name}"`);
     return;
   }
   if (!lm.uid) {
-    _showWarning(`Landmark ref failed: "${alias}" in locale "${locale.name}" has no uid (not yet persisted to registry)`);
+    _showWarning(`Landmark ref failed: "${alias}" in perspective "${perspective.name}" has no uid (not yet persisted to registry)`);
     return;
   }
   a.landmarkRef = { uid: lm.uid };
@@ -4523,7 +4523,7 @@ function _computeSaveDisabledReasons() {
     if (cond.type === 'url_matches'      && !((cond.pattern ?? '').trim()))   return `Action ${rowNum} (gate): URL pattern required`;
     if (cond.type === 'text_present'     && !((cond.text ?? '').trim()))      return `Action ${rowNum} (gate): text required`;
     if (cond.type === 'assertion_ref'    && !cond.assertionId)                return `Action ${rowNum} (gate): pick an assertion`;
-    if (cond.type === 'locale_ref'       && !cond.localeId)                   return `Action ${rowNum} (gate): pick a locale`;
+    if (cond.type === 'perspective_ref'       && !cond.perspectiveId)                   return `Action ${rowNum} (gate): pick a perspective`;
     return null;
   };
 
@@ -4650,7 +4650,7 @@ async function _onSaveClick() {
       if (cond.type === 'url_matches'      && !((cond.pattern ?? '').trim()))   return false;
       if (cond.type === 'text_present'     && !((cond.text ?? '').trim()))      return false;
       if (cond.type === 'assertion_ref'    && !cond.assertionId)                return false;
-      if (cond.type === 'locale_ref'       && !cond.localeId)                   return false;
+      if (cond.type === 'perspective_ref'       && !cond.perspectiveId)                   return false;
       const body = Array.isArray(a.body) ? a.body : [];
       return body.every(sub => sub?.verified?.success === true);
     }
@@ -4709,7 +4709,7 @@ async function _onSaveClick() {
     // landmark's latest (post-rediscover etc.) value. Selector +
     // frameUrl are still persisted (they were populated from the
     // landmark at authoring time) — they're a cache + the fallback
-    // when the ref can't be resolved (deleted locale, etc.).
+    // when the ref can't be resolved (deleted perspective, etc.).
     // v2.74.275 — Only { uid } refs serialized into saved fragment.
     if (a.landmarkRef && typeof a.landmarkRef.uid === 'string') {
       step.landmarkRef = { uid: a.landmarkRef.uid };
@@ -4794,7 +4794,7 @@ async function _onSaveClick() {
     // only state (verified, verifying, _uid, id, pickedLabel-when-empty)
     // matching the chain-branch hygiene above. condition is a shallow
     // clone — its inner fields are primitives (selector / pattern /
-    // text / attribute / value / type / assertionId / localeId), so
+    // text / attribute / value / type / assertionId / perspectiveId), so
     // shallow is safe.
     if (a.action === 'ACTION_GATE') {
       step.condition = { ...(a.condition ?? {}) };
@@ -4895,14 +4895,14 @@ async function _onSaveClick() {
   // effect, dedupes per the spec's keying rules.
   const aggregatedEffects = _aggregateActionEffects(rawList);
 
-  // v2.74.318 — Perspective anchor (LOCALE_SPEC § 2/§ 18). The Locale(s)
+  // v2.74.318 — Perspective anchor (PERSPECTIVE_SPEC § 2/§ 18). The Perspective(s)
   // this fragment is authored against, derived from the landmarks its
   // actions reference. Lets the runtime / Workflow tier know which
   // perspective(s) must be active for the fragment's landmarks to
   // resolve, and lets Studio show "this fragment belongs to the X
   // perspective" without walking landmarkRefs. Empty when the fragment
   // uses only inline selectors (no landmark links).
-  const localeIds = _fragmentPerspectiveLocaleIds();
+  const perspectiveIds = _fragmentPerspectiveIds();
 
   // v2.72.67 — Final postconditions snapshot. Page should be in the
   // post-state from the last Verify; capture once more in case anything
@@ -4921,9 +4921,9 @@ async function _onSaveClick() {
     // invocation directive coverage (onSpawn/onNavigate/onModal/
     // onDownload) validates against this list.
     aggregatedEffects,
-    // v2.74.318 — Perspective anchor (LOCALE_SPEC § 2). Locale IDs whose
+    // v2.74.318 — Perspective anchor (PERSPECTIVE_SPEC § 2). Perspective IDs whose
     // landmarks this fragment references. Derived; recomputed each save.
-    localeIds,
+    perspectiveIds,
     // v2.72.67 — Auto-captured pre/post conditions. Inherited from
     // antecedent (preconditions) or auto-captured from page state.
     preconditions : _preconditions.map(c => ({ ...c })),
@@ -4944,7 +4944,7 @@ async function _onSaveClick() {
 
   // v2.74.122 — Mount-snapshot guard + Cancel disable during save. Same
   // pattern as the other author modes (assertion v2.74.120, analysis +
-  // locale v2.74.121, observation v2.74.122). Especially important here
+  // perspective v2.74.121, observation v2.74.122). Especially important here
   // because the success path forks two ways — exit-to-ground OR
   // chain-author-reset — and pre-fix, a Cancel mid-save would still run
   // EITHER branch, including resetting the form for a new fragment when
@@ -5188,7 +5188,7 @@ function _hideWarning() {
  *      the antecedent fragment's postconditions and use them as
  *      preconditions verbatim. Antecedent is authoritative for the
  *      starting state.
- *   B. Auto-capture — no antecedent, evaluate all locales + assertions
+ *   B. Auto-capture — no antecedent, evaluate all perspectives + assertions
  *      on the Ground against the current page, return matching ones.
  *
  * Updates _preconditions and re-renders.
@@ -5214,7 +5214,7 @@ async function _capturePreconditions() {
         _preconditions = inherited.map(c => ({ ...c }));
         _preSource = `inherited from ${ante.fragment.name ?? 'antecedent'}`;
         // For inherited conditions, we still need display metadata for
-        // any locale_ref / assertion_ref entries. Resolve those via a
+        // any perspective_ref / assertion_ref entries. Resolve those via a
         // single EVALUATE call so the renderer has names to show.
         await _refreshConditionDisplay();
         _renderPreconditions();
@@ -5253,8 +5253,8 @@ async function _capturePreconditions() {
   }
 
   // Cache display metadata.
-  for (const loc of res.matchingLocales) {
-    _conditionDisplay.locales.set(loc.id, loc);
+  for (const loc of res.matchingPerspectives) {
+    _conditionDisplay.perspectives.set(loc.id, loc);
   }
   for (const ast of res.matchingAssertions) {
     _conditionDisplay.assertions.set(ast.id, ast);
@@ -5270,13 +5270,13 @@ async function _capturePreconditions() {
   if (url) {
     _preconditions.push({ type: 'url_matches', pattern: url });
   }
-  for (const loc of res.matchingLocales) {
-    _preconditions.push({ type: 'locale_ref', localeId: loc.id });
+  for (const loc of res.matchingPerspectives) {
+    _preconditions.push({ type: 'perspective_ref', perspectiveId: loc.id });
   }
   for (const ast of res.matchingAssertions) {
     _preconditions.push({ type: 'assertion_ref', assertionId: ast.id });
   }
-  _preSource = `auto-captured (${res.matchingLocales.length} locale${res.matchingLocales.length === 1 ? '' : 's'}, ${res.matchingAssertions.length} assertion${res.matchingAssertions.length === 1 ? '' : 's'})`;
+  _preSource = `auto-captured (${res.matchingPerspectives.length} perspective${res.matchingPerspectives.length === 1 ? '' : 's'}, ${res.matchingAssertions.length} assertion${res.matchingAssertions.length === 1 ? '' : 's'})`;
   _renderPreconditions();
 }
 
@@ -5316,8 +5316,8 @@ async function _capturePostconditions() {
   }
 
   // Cache display metadata.
-  for (const loc of res.matchingLocales) {
-    _conditionDisplay.locales.set(loc.id, loc);
+  for (const loc of res.matchingPerspectives) {
+    _conditionDisplay.perspectives.set(loc.id, loc);
   }
   for (const ast of res.matchingAssertions) {
     _conditionDisplay.assertions.set(ast.id, ast);
@@ -5332,13 +5332,13 @@ async function _capturePostconditions() {
   if (url) {
     _postconditions.push({ type: 'url_matches', pattern: url });
   }
-  for (const loc of res.matchingLocales) {
-    _postconditions.push({ type: 'locale_ref', localeId: loc.id });
+  for (const loc of res.matchingPerspectives) {
+    _postconditions.push({ type: 'perspective_ref', perspectiveId: loc.id });
   }
   for (const ast of res.matchingAssertions) {
     _postconditions.push({ type: 'assertion_ref', assertionId: ast.id });
   }
-  _postSource = `auto-captured (${res.matchingLocales.length} locale${res.matchingLocales.length === 1 ? '' : 's'}, ${res.matchingAssertions.length} assertion${res.matchingAssertions.length === 1 ? '' : 's'})`;
+  _postSource = `auto-captured (${res.matchingPerspectives.length} perspective${res.matchingPerspectives.length === 1 ? '' : 's'}, ${res.matchingAssertions.length} assertion${res.matchingAssertions.length === 1 ? '' : 's'})`;
   _renderPostconditions();
 }
 
@@ -5357,7 +5357,7 @@ async function _refreshConditionDisplay() {
       }, resolve);
     });
     if (res?.success) {
-      for (const loc of res.matchingLocales) _conditionDisplay.locales.set(loc.id, loc);
+      for (const loc of res.matchingPerspectives) _conditionDisplay.perspectives.set(loc.id, loc);
       for (const ast of res.matchingAssertions) _conditionDisplay.assertions.set(ast.id, ast);
     }
   } catch (e) {
@@ -5383,7 +5383,7 @@ function _renderPostconditions() {
 // review panel: each row is a [type-dropdown] [type-specific input(s)]
 // [✕] triple. Page-family types (selector_present/absent, url_matches,
 // text_present, attribute_equals) plus Custom (library assertions) and
-// Locales optgroups when the ground has them. Reuses .cond-editor,
+// Perspectives optgroups when the ground has them. Reuses .cond-editor,
 // .cond-type-select, .cond-value-input, .review-condition-row styles
 // from sidepanel.css so the visual matches Studio's review panel.
 function _renderConditionList(conditions, side, emptyMsg) {
@@ -5432,9 +5432,9 @@ function _renderConditionRow(c, side, idx) {
     } else {
       valueHtml = `<span class="cond-pred-hint cond-pred-hint-empty">— pick an assertion from the dropdown —</span>`;
     }
-  } else if (type === 'locale_ref') {
-    const meta = _groundLocales.find(l => l.id === c?.localeId)
-              || _conditionDisplay.locales.get(c?.localeId);
+  } else if (type === 'perspective_ref') {
+    const meta = _groundPerspectives.find(l => l.id === c?.perspectiveId)
+              || _conditionDisplay.perspectives.get(c?.perspectiveId);
     if (meta) {
       const lmCount = Array.isArray(meta.landmarks)
         ? meta.landmarks.length
@@ -5444,10 +5444,10 @@ function _renderConditionRow(c, side, idx) {
         ? `${lmCount} landmark${lmCount === 1 ? '' : 's'}${firstRole ? ` · ${firstRole}${lmCount > 1 ? '…' : ''}` : ''}`
         : 'no landmarks';
       valueHtml = `<span class="cond-pred-hint" title="${escAttr(meta.description ?? '')}">${escHtml(summary)}</span>`;
-    } else if (c?.localeId) {
-      valueHtml = `<span class="cond-pred-hint cond-pred-hint-stale">missing locale: ${escHtml(c.localeId)}</span>`;
+    } else if (c?.perspectiveId) {
+      valueHtml = `<span class="cond-pred-hint cond-pred-hint-stale">missing perspective: ${escHtml(c.perspectiveId)}</span>`;
     } else {
-      valueHtml = `<span class="cond-pred-hint cond-pred-hint-empty">— pick a locale from the dropdown —</span>`;
+      valueHtml = `<span class="cond-pred-hint cond-pred-hint-empty">— pick a perspective from the dropdown —</span>`;
     }
   } else {
     valueHtml = `<span class="cond-pred-hint cond-pred-hint-empty">unsupported type: ${escHtml(type)}</span>`;
@@ -5466,13 +5466,13 @@ function _renderConditionRow(c, side, idx) {
 // Build the type dropdown options. Page-family types (visible set matches
 // Studio's review panel: selector_present/absent, text_present,
 // attribute_equals under Page · DOM; url_matches under Page · Browser),
-// plus Custom (library assertions on this ground) and Locales optgroups.
-// Library assertions / locales encode as synthetic `pred_ref:<id>` /
+// plus Custom (library assertions on this ground) and Perspectives optgroups.
+// Library assertions / perspectives encode as synthetic `pred_ref:<id>` /
 // `loc_ref:<id>` values which _decodeConditionTypeValue unpacks.
 function _buildConditionTypeOptions(c) {
   const currentType = c?.type ?? 'selector_present';
   const currentPredId = c?.assertionId ?? '';
-  const currentLocaleId = c?.localeId ?? '';
+  const currentPerspectiveId = c?.perspectiveId ?? '';
   const opt = (value, label, selected) =>
     `<option value="${escAttr(value)}"${selected ? ' selected' : ''}>${escHtml(label)}</option>`;
 
@@ -5515,8 +5515,8 @@ function _buildConditionTypeOptions(c) {
     }
   }
 
-  if (_groundLocales.length > 0) {
-    const sorted = [..._groundLocales].sort((a, b) => {
+  if (_groundPerspectives.length > 0) {
+    const sorted = [..._groundPerspectives].sort((a, b) => {
       const an = (a.name ?? a.id ?? '').toLowerCase();
       const bn = (b.name ?? b.id ?? '').toLowerCase();
       return an < bn ? -1 : an > bn ? 1 : 0;
@@ -5524,15 +5524,15 @@ function _buildConditionTypeOptions(c) {
     const opts = sorted.map(l => {
       const lmCount = Array.isArray(l.landmarks) ? l.landmarks.length : 0;
       const label = `${l.name ?? l.id} (${lmCount} landmark${lmCount === 1 ? '' : 's'})`;
-      return opt(`loc_ref:${l.id}`, label, currentType === 'locale_ref' && currentLocaleId === l.id);
+      return opt(`loc_ref:${l.id}`, label, currentType === 'perspective_ref' && currentPerspectiveId === l.id);
     }).join('');
-    groups.push(`<optgroup label="Locales">${opts}</optgroup>`);
+    groups.push(`<optgroup label="Perspectives">${opts}</optgroup>`);
   }
-  if (currentType === 'locale_ref' && currentLocaleId) {
-    const inList = _groundLocales.some(l => l.id === currentLocaleId);
+  if (currentType === 'perspective_ref' && currentPerspectiveId) {
+    const inList = _groundPerspectives.some(l => l.id === currentPerspectiveId);
     if (!inList) {
-      groups.push(`<optgroup label="Locales · Stale">${
-        opt(`loc_ref:${currentLocaleId}`, `(missing: ${currentLocaleId})`, true)
+      groups.push(`<optgroup label="Perspectives · Stale">${
+        opt(`loc_ref:${currentPerspectiveId}`, `(missing: ${currentPerspectiveId})`, true)
       }</optgroup>`);
     }
   }
@@ -5544,7 +5544,7 @@ function _decodeConditionTypeValue(value) {
     return { type: 'assertion_ref', assertionId: value.slice('pred_ref:'.length) };
   }
   if (typeof value === 'string' && value.startsWith('loc_ref:')) {
-    return { type: 'locale_ref', localeId: value.slice('loc_ref:'.length) };
+    return { type: 'perspective_ref', perspectiveId: value.slice('loc_ref:'.length) };
   }
   return { type: value };
 }
@@ -5565,7 +5565,7 @@ function _wireConditionListHandlers(side) {
       const decoded = _decodeConditionTypeValue(sel.value);
       const fresh = emptyCondition(decoded.type);
       if (decoded.assertionId) fresh.assertionId = decoded.assertionId;
-      if (decoded.localeId)    fresh.localeId    = decoded.localeId;
+      if (decoded.perspectiveId)    fresh.perspectiveId    = decoded.perspectiveId;
       arr[idx] = fresh;
       _markConditionsUserModified(side);
       side === 'pre' ? _renderPreconditions() : _renderPostconditions();
@@ -5614,7 +5614,7 @@ function _onAddCondition(side) {
 }
 
 // v2.74.24 — Fetch the active Ground so the type dropdown can offer
-// the Custom (library assertions) and Locales optgroups. Cached for
+// the Custom (library assertions) and Perspectives optgroups. Cached for
 // the lifetime of the mode mount; cleared in unmount.
 async function _loadGroundCatalog() {
   if (!_payload?.groundId) return;
@@ -5626,16 +5626,16 @@ async function _loadGroundCatalog() {
       );
     });
     if (res?.success && res.ground) {
-      _groundLocales    = Array.isArray(res.ground.locales)    ? res.ground.locales    : [];
+      _groundPerspectives    = Array.isArray(res.ground.perspectives)    ? res.ground.perspectives    : [];
       _groundAssertions = Array.isArray(res.ground.assertions) ? res.ground.assertions : [];
-      // v2.74.275 — Hydrate locale.landmarks from registry. Legacy
-      // embedded landmarks[] shape removed; locales store
+      // v2.74.275 — Hydrate perspective.landmarks from registry. Legacy
+      // embedded landmarks[] shape removed; perspectives store
       // landmarkRefs[] (uids) only. Fetch the records once on load
       // so the synchronous _flatLandmarksForGround() can build
       // dropdowns without async round-trips per render.
       try {
         const allRefs = new Set();
-        for (const l of _groundLocales) {
+        for (const l of _groundPerspectives) {
           if (Array.isArray(l.landmarkRefs)) for (const u of l.landmarkRefs) allRefs.add(u);
         }
         if (allRefs.size > 0) {
@@ -5643,7 +5643,7 @@ async function _loadGroundCatalog() {
             type: 'GET_LANDMARKS', payload: { uids: Array.from(allRefs) },
           }, r));
           if (lmRes?.success && lmRes.landmarks) {
-            for (const l of _groundLocales) {
+            for (const l of _groundPerspectives) {
               if (!Array.isArray(l.landmarkRefs)) { l.landmarks = []; continue; }
               l.landmarks = l.landmarkRefs.map(u => lmRes.landmarks[u]).filter(Boolean);
             }
@@ -5658,9 +5658,9 @@ async function _loadGroundCatalog() {
       _renderPreconditions();
       _renderPostconditions();
       // v2.74.237 — Wave 3 bug: actions with landmarkRef render their
-      // chip via _groundLocales.find(...).name. On a fresh load
-      // _groundLocales is empty until GET_GROUND completes, so the
-      // chip falls back to localeId. Re-render now that we have
+      // chip via _groundPerspectives.find(...).name. On a fresh load
+      // _groundPerspectives is empty until GET_GROUND completes, so the
+      // chip falls back to perspectiveId. Re-render now that we have
       // names — also surfaces the landmark dropdown on actions that
       // had no usable landmarks before the cache populated.
       _renderActions();

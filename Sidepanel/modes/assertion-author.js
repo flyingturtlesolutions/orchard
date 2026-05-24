@@ -5,7 +5,7 @@
  * pre/post envelopes (DETECT, LOOP, WAIT, fragment/observation
  * pre/post, etc.) via `assertion_ref`.
  *
- * Minimal v1 surface mirroring locale-capture's shape:
+ * Minimal v1 surface mirroring perspective-capture's shape:
  *   - name (required), description (optional)
  *   - match mode: 'all' | 'any'  (k_of_n deferred to Studio for now)
  *   - conditions list, each editable inline via the same
@@ -33,7 +33,7 @@ let _tabId = null;
 let _draft = null;       // { id, groundId, name, description, body: {match, conditions} }
 let _returnTo = null;
 let _isEdit = false;
-let _groundLocales = [];
+let _groundPerspectives = [];
 let _groundAssertions = [];
 
 // DOM refs (scoped to mountEl)
@@ -89,7 +89,7 @@ async function mount(payload, mountEl) {
   _wireHandlers();
 
   // Populate the editor dropdowns from the Ground's other assertions /
-  // locales so referenced conditions (assertion_ref / locale_ref)
+  // perspectives so referenced conditions (assertion_ref / perspective_ref)
   // surface in the type dropdown.
   _loadGroundCatalog();
 
@@ -105,7 +105,7 @@ async function unmount() {
   _draft = null;
   _returnTo = null;
   _isEdit = false;
-  _groundLocales = [];
+  _groundPerspectives = [];
   _groundAssertions = [];
   nameInputEl = descInputEl = matchSelectEl = null;
   condListEl = addCondBtnEl = saveBtnEl = cancelBtnEl = warningEl = null;
@@ -117,25 +117,25 @@ function handleEvent(_message) { /* no-op for this mode */ }
 
 function _renderHtml() {
   return `
-    <div class="dbg-locale-card">
-      <div class="dbg-locale-banner">
-        <span class="dbg-locale-banner-title">${escHtml(_isEdit ? 'Edit Assertion' : 'New Assertion')}</span>
+    <div class="dbg-perspective-card">
+      <div class="dbg-perspective-banner">
+        <span class="dbg-perspective-banner-title">${escHtml(_isEdit ? 'Edit Assertion' : 'New Assertion')}</span>
       </div>
-      <div data-aa="warning" class="dbg-locale-warning hidden"></div>
+      <div data-aa="warning" class="dbg-perspective-warning hidden"></div>
 
-      <section class="dbg-locale-meta-card">
-        <label class="dbg-locale-field">
-          <span class="dbg-locale-field-label">Name</span>
+      <section class="dbg-perspective-meta-card">
+        <label class="dbg-perspective-field">
+          <span class="dbg-perspective-field-label">Name</span>
           <input type="text" data-aa="name" maxlength="80"
                  placeholder="e.g. signed-in" value="${escAttr(_draft.name)}" />
         </label>
-        <label class="dbg-locale-field">
-          <span class="dbg-locale-field-label">Description</span>
+        <label class="dbg-perspective-field">
+          <span class="dbg-perspective-field-label">Description</span>
           <textarea data-aa="description" rows="2"
                     placeholder="What this assertion checks for.">${escHtml(_draft.description)}</textarea>
         </label>
-        <label class="dbg-locale-field">
-          <span class="dbg-locale-field-label">Match mode</span>
+        <label class="dbg-perspective-field">
+          <span class="dbg-perspective-field-label">Match mode</span>
           <select data-aa="match">
             <option value="all" ${_draft.body.match === 'all' ? 'selected' : ''}>all (AND)</option>
             <option value="any" ${_draft.body.match === 'any' ? 'selected' : ''}>any (OR)</option>
@@ -143,7 +143,7 @@ function _renderHtml() {
         </label>
       </section>
 
-      <section class="dbg-locale-meta-card fa-conditions-card">
+      <section class="dbg-perspective-meta-card fa-conditions-card">
         <div class="fa-conditions-content">
           <div class="fa-conditions-head">
             <span class="fa-conditions-label">Conditions</span>
@@ -158,7 +158,7 @@ function _renderHtml() {
         </div>
       </section>
 
-      <section class="dbg-locale-actions">
+      <section class="dbg-perspective-actions">
         <button data-aa="save" class="btn-primary" type="button" disabled>${escHtml(_isEdit ? 'Update' : 'Save')}</button>
         <button data-aa="cancel" class="btn-secondary" type="button">Cancel</button>
       </section>
@@ -237,11 +237,11 @@ function _renderConditionRow(c, idx) {
         <input type="text" class="cond-value-input" ${attrs} data-field="value"
                value="${escAttr(c?.value ?? '')}" placeholder="expected value" />
       </div>`;
-  } else if (type === 'locale_ref') {
-    const meta = _groundLocales.find(l => l.id === c?.localeId);
+  } else if (type === 'perspective_ref') {
+    const meta = _groundPerspectives.find(l => l.id === c?.perspectiveId);
     valueHtml = meta
       ? `<span class="cond-pred-hint">${escHtml(meta.name ?? meta.id)}</span>`
-      : `<span class="cond-pred-hint cond-pred-hint-empty">— pick a locale from the dropdown —</span>`;
+      : `<span class="cond-pred-hint cond-pred-hint-empty">— pick a perspective from the dropdown —</span>`;
   } else if (type === 'assertion_ref') {
     const meta = _groundAssertions.find(p => p.id === c?.assertionId);
     valueHtml = meta
@@ -263,7 +263,7 @@ function _renderConditionRow(c, idx) {
 function _buildTypeOptions(c) {
   const cur = c?.type ?? 'selector_present';
   const curPredId = c?.assertionId ?? '';
-  const curLocaleId = c?.localeId ?? '';
+  const curPerspectiveId = c?.perspectiveId ?? '';
   const opt = (v, l, sel) => `<option value="${escAttr(v)}"${sel ? ' selected' : ''}>${escHtml(l)}</option>`;
   const groups = [];
   groups.push(`<optgroup label="Page · DOM">
@@ -275,12 +275,12 @@ function _buildTypeOptions(c) {
   groups.push(`<optgroup label="Page · Browser">
     ${opt('url_matches', 'URL matches', cur === 'url_matches')}
   </optgroup>`);
-  if (_groundLocales.length > 0) {
-    const opts = _groundLocales
+  if (_groundPerspectives.length > 0) {
+    const opts = _groundPerspectives
       .slice().sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''))
-      .map(l => opt(`loc_ref:${l.id}`, l.name ?? l.id, cur === 'locale_ref' && curLocaleId === l.id))
+      .map(l => opt(`loc_ref:${l.id}`, l.name ?? l.id, cur === 'perspective_ref' && curPerspectiveId === l.id))
       .join('');
-    groups.push(`<optgroup label="Locales">${opts}</optgroup>`);
+    groups.push(`<optgroup label="Perspectives">${opts}</optgroup>`);
   }
   if (_groundAssertions.length > 0) {
     // Don't reference self (an assertion shouldn't recurse into itself).
@@ -298,7 +298,7 @@ function _decodeTypeValue(value) {
   if (typeof value === 'string' && value.startsWith('pred_ref:'))
     return { type: 'assertion_ref', assertionId: value.slice('pred_ref:'.length) };
   if (typeof value === 'string' && value.startsWith('loc_ref:'))
-    return { type: 'locale_ref', localeId: value.slice('loc_ref:'.length) };
+    return { type: 'perspective_ref', perspectiveId: value.slice('loc_ref:'.length) };
   return { type: value };
 }
 
@@ -309,7 +309,7 @@ function _wireConditionRowHandlers() {
       const decoded = _decodeTypeValue(sel.value);
       const fresh = emptyCondition(decoded.type);
       if (decoded.assertionId) fresh.assertionId = decoded.assertionId;
-      if (decoded.localeId)    fresh.localeId    = decoded.localeId;
+      if (decoded.perspectiveId)    fresh.perspectiveId    = decoded.perspectiveId;
       _draft.body.conditions[idx] = fresh;
       _renderConditions();
       _updateSaveState();
@@ -340,11 +340,11 @@ function _wireConditionRowHandlers() {
 
 async function _loadGroundCatalog() {
   try {
-    const [locRes, predRes] = await Promise.all([
-      new Promise(r => chrome.runtime.sendMessage({ type: 'LIST_LOCALES',    payload: { groundId: _draft.groundId } }, r)),
+    const [perspectiveRes, predRes] = await Promise.all([
+      new Promise(r => chrome.runtime.sendMessage({ type: 'LIST_PERSPECTIVES',    payload: { groundId: _draft.groundId } }, r)),
       new Promise(r => chrome.runtime.sendMessage({ type: 'LIST_ASSERTIONS', payload: { groundId: _draft.groundId } }, r)),
     ]);
-    if (locRes?.success)  _groundLocales    = locRes.locales    ?? [];
+    if (perspectiveRes?.success)  _groundPerspectives    = perspectiveRes.perspectives    ?? [];
     if (predRes?.success) _groundAssertions = predRes.assertions ?? [];
     // Re-render conditions so the new dropdown options take effect.
     _renderConditions();

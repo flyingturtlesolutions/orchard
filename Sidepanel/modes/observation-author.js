@@ -98,12 +98,12 @@ let _snapSession   = null;       // { sessionId, extractIdx } | null
 let _askClaudeState = new Map();
 
 // Pre/post condition rendering — mirrors fragment-author.js so the visual
-// treatment matches across modes. _conditionDisplay caches Locale and
+// treatment matches across modes. _conditionDisplay caches Perspective and
 // Assertion metadata (name, landmarkCount) so the rendered rows can show
 // human-readable labels instead of bare ids. _preSource/_postSource carry
-// the per-side source label ("auto-captured (N locales, …)") shown in the
+// the per-side source label ("auto-captured (N perspectives, …)") shown in the
 // section header.
-let _conditionDisplay = { locales: new Map(), assertions: new Map() };
+let _conditionDisplay = { perspectives: new Map(), assertions: new Map() };
 let _preSource = '—';
 let _postSource = '—';
 
@@ -127,8 +127,8 @@ let preAddBtnEl, postAddBtnEl;
 let _preUserModified = false;
 let _postUserModified = false;
 // Ground catalog cached at mount for the condition-type dropdown's
-// Custom (library assertions) and Locales optgroups.
-let _groundLocales = [];
+// Custom (library assertions) and Perspectives optgroups.
+let _groundPerspectives = [];
 let _groundAssertions = [];
 // v2.74.26 — Extracts card collapse refs + state. Chevron lives inline in
 // the head row (before the "Extracts" label); toggling adds
@@ -160,17 +160,17 @@ let _postCardCollapsed = false;
 
 function renderHTML() {
   return `
-    <div class="dbg-locale fa-author">
-      <header class="dbg-locale-header">
-        <div class="dbg-locale-title-row">
-          <span class="dbg-locale-badge">Observation author</span>
-          <span data-oa="title" class="dbg-locale-ground-label">Authoring…</span>
+    <div class="dbg-perspective fa-author">
+      <header class="dbg-perspective-header">
+        <div class="dbg-perspective-title-row">
+          <span class="dbg-perspective-badge">Observation author</span>
+          <span data-oa="title" class="dbg-perspective-ground-label">Authoring…</span>
         </div>
-        <div class="dbg-locale-meta">
-          <span class="dbg-locale-meta-label">Tab</span>
-          <span data-oa="subtitle" class="dbg-locale-meta-value mono">—</span>
+        <div class="dbg-perspective-meta">
+          <span class="dbg-perspective-meta-label">Tab</span>
+          <span data-oa="subtitle" class="dbg-perspective-meta-value mono">—</span>
         </div>
-        <div data-oa="warning" class="dbg-locale-warning hidden"></div>
+        <div data-oa="warning" class="dbg-perspective-warning hidden"></div>
       </header>
 
       <!-- v2.74.23 — Antecedent fragment card. Same UX as the fragment
@@ -184,7 +184,7 @@ function renderHTML() {
            record — Observations don't carry antecedent metadata. This
            card only drives tab state for authoring; once the user is
            done, the chosen antecedent is forgotten. -->
-      <section data-oa="antecedent-card" class="dbg-locale-meta-card fa-antecedent-card">
+      <section data-oa="antecedent-card" class="dbg-perspective-meta-card fa-antecedent-card">
         <button class="fa-antecedent-collapse-toggle" data-oa="antecedent-toggle" type="button"
                 title="Collapse / expand antecedent card"
                 aria-label="Collapse antecedent card" aria-expanded="true">
@@ -192,7 +192,7 @@ function renderHTML() {
         </button>
         <div class="fa-antecedent-content">
           <div class="fa-antecedent-header-row">
-            <span class="dbg-locale-field-label fa-antecedent-header-label">Antecedent fragment</span>
+            <span class="dbg-perspective-field-label fa-antecedent-header-label">Antecedent fragment</span>
             <span data-oa="antecedent-collapsed-name" class="fa-antecedent-collapsed-name">none</span>
           </div>
           <div data-oa="antecedent-body" class="fa-antecedent-body">
@@ -205,7 +205,7 @@ function renderHTML() {
             </div>
             <div class="fa-antecedent-row fa-antecedent-row-2">
               <label class="fa-antecedent-params-input hidden" data-oa="antecedent-params-wrap">
-                <span class="dbg-locale-field-label">Param values</span>
+                <span class="dbg-perspective-field-label">Param values</span>
                 <input type="text" data-oa="antecedent-params" placeholder="comma-separated values" />
               </label>
               <button data-oa="antecedent-run" class="btn-secondary fa-antecedent-run" type="button" disabled>Run</button>
@@ -219,11 +219,11 @@ function renderHTML() {
       <!-- v2.74.23 — Preconditions card with the same collapsible
            pattern as fragment-author: chevron + always-visible head +
            collapsible list body.
-           v2.74.26 — Adopt .dbg-locale-meta-card chrome so the card
+           v2.74.26 — Adopt .dbg-perspective-meta-card chrome so the card
            visual matches the other authoring cards; rows are editable
            (type dropdown + value input + ✕) with a right-aligned + Add
            footer mirroring the Studio review panel. -->
-      <section data-oa="pre-card" class="dbg-locale-meta-card fa-conditions-card">
+      <section data-oa="pre-card" class="dbg-perspective-meta-card fa-conditions-card">
         <button class="fa-conditions-collapse-toggle" data-oa="pre-toggle" type="button"
                 title="Collapse / expand preconditions"
                 aria-label="Collapse preconditions" aria-expanded="true">
@@ -245,8 +245,8 @@ function renderHTML() {
         </div>
       </section>
 
-      <section class="dbg-locale-instructions">
-        <p class="dbg-locale-help">
+      <section class="dbg-perspective-instructions">
+        <p class="dbg-perspective-help">
           Add each extract in turn. Pick a target, then click <strong>Verify</strong> to read the value from the page. Each extract binds its own output name into scope.
         </p>
       </section>
@@ -254,18 +254,18 @@ function renderHTML() {
       <!-- v2.74.26 — Extracts card. Chevron in the head row toggles
            .fa-landmarks-card-collapsed which hides the list + footer
            while keeping the label + count chip visible. -->
-      <section data-oa="extracts-card" class="dbg-locale-landmarks">
-        <div class="dbg-locale-landmarks-head">
+      <section data-oa="extracts-card" class="dbg-perspective-landmarks">
+        <div class="dbg-perspective-landmarks-head">
           <button class="fa-actions-collapse-toggle" data-oa="extracts-toggle" type="button"
                   title="Collapse / expand extracts"
                   aria-label="Collapse extracts" aria-expanded="true">
             <span class="fa-actions-collapse-chevron" data-oa="extracts-toggle-glyph" aria-hidden="true">▾</span>
           </button>
-          <span class="dbg-locale-landmarks-label">Extracts</span>
+          <span class="dbg-perspective-landmarks-label">Extracts</span>
           <span data-oa="extract-count" class="fa-action-count">—</span>
         </div>
-        <div data-oa="extracts-list" class="dbg-locale-landmarks-list oa-extracts-list">
-          <div class="dbg-locale-landmarks-empty">No extracts yet — click + Extract below.</div>
+        <div data-oa="extracts-list" class="dbg-perspective-landmarks-list oa-extracts-list">
+          <div class="dbg-perspective-landmarks-empty">No extracts yet — click + Extract below.</div>
         </div>
         <div class="fa-actions-footer">
           <button data-oa="add-extract" class="btn-secondary fa-add-action-btn" type="button">+ Extract</button>
@@ -283,7 +283,7 @@ function renderHTML() {
            pattern as preconditions.
            v2.74.26 — Same chrome + editable rows + + Add footer as the
            preconditions card. -->
-      <section data-oa="post-card" class="dbg-locale-meta-card fa-conditions-card">
+      <section data-oa="post-card" class="dbg-perspective-meta-card fa-conditions-card">
         <button class="fa-conditions-collapse-toggle" data-oa="post-toggle" type="button"
                 title="Collapse / expand postconditions"
                 aria-label="Collapse postconditions" aria-expanded="true">
@@ -309,7 +309,7 @@ function renderHTML() {
            hidden until the author clicks Done. Save button lives inline
            on the same row as the name input; clicking it persists the
            observation (the old "Save Observation" path). -->
-      <section data-oa="name-card" class="dbg-locale-meta-card fa-name-card hidden">
+      <section data-oa="name-card" class="dbg-perspective-meta-card fa-name-card hidden">
         <div class="fa-name-row">
           <input type="text" data-oa="name-input" maxlength="80"
                  placeholder="Observation name (e.g. Product card data)" />
@@ -320,13 +320,13 @@ function renderHTML() {
       <!-- v2.74.26 — Bottom action row: "Done" reveals the Name card and
            collapses every collapsible card; "Cancel" exits to Studio
            without saving (same behaviour the old "Done" button had). -->
-      <section class="dbg-locale-actions">
+      <section class="dbg-perspective-actions">
         <button data-oa="reveal-done" class="btn-primary" type="button">Done</button>
         <button data-oa="cancel" class="btn-secondary" type="button">Cancel</button>
       </section>
 
-      <div data-oa="pick-banner" class="dbg-locale-pick-banner hidden">
-        <span class="dbg-locale-pick-text">Click an element on the page to pick a selector. Press Esc to cancel.</span>
+      <div data-oa="pick-banner" class="dbg-perspective-pick-banner hidden">
+        <span class="dbg-perspective-pick-text">Click an element on the page to pick a selector. Press Esc to cancel.</span>
         <button data-oa="pick-cancel" class="btn-secondary tiny" type="button">Cancel pick</button>
       </div>
     </div>
@@ -502,8 +502,8 @@ async function mount(payload, mountEl) {
   _renderConditionsToggle('pre');
   _renderConditionsToggle('post');
   _renderExtractsToggle();
-  // v2.74.26 — Fetch the Ground's locales + assertions so the condition-
-  // type dropdown can offer Custom + Locales optgroups.
+  // v2.74.26 — Fetch the Ground's perspectives + assertions so the condition-
+  // type dropdown can offer Custom + Perspectives optgroups.
   _loadGroundCatalog();
 
   _renderExtracts();
@@ -525,7 +525,7 @@ async function unmount() {
   _payload = null;
   _tabId = null;
   _setupReady = false;
-  _conditionDisplay = { locales: new Map(), assertions: new Map() };
+  _conditionDisplay = { perspectives: new Map(), assertions: new Map() };
   _preSource = '—';
   _postSource = '—';
   // v2.74.23 — Reset antecedent + collapse state. The DOM refs go null
@@ -549,7 +549,7 @@ async function unmount() {
   _extractsCardCollapsed = false;
   _preUserModified = false;
   _postUserModified = false;
-  _groundLocales = [];
+  _groundPerspectives = [];
   _groundAssertions = [];
   if (_mountEl) _mountEl.innerHTML = '';
   _mountEl = null;
@@ -751,7 +751,7 @@ function _onAddExtractGateClick() {
     // Condition seed: a default selector_present row. Author edits via
     // the condition-type dropdown — same vocabulary the fragment-author
     // gate accepts (selector_present, selector_absent, url_matches,
-    // text_present, attribute_equals, assertion_ref, locale_ref).
+    // text_present, attribute_equals, assertion_ref, perspective_ref).
     condition: emptyCondition('selector_present'),
     negate: false,
     body: [],
@@ -819,7 +819,7 @@ function _renderExtractGateCard(ex, exIdx, _state) {
   const t = cond.type ?? 'selector_present';
 
   // Condition type options — same family ACTION_GATE accepts. v1
-  // doesn't surface assertion_ref / locale_ref to keep the picker
+  // doesn't surface assertion_ref / perspective_ref to keep the picker
   // simple; can be added when the broader option-group builder gets
   // shared between fragment-author and observation-author.
   const typeOptions = [
@@ -985,7 +985,7 @@ function _renderExtractGateCard(ex, exIdx, _state) {
       }).join('');
 
   return `
-    <div class="dbg-locale-landmark-row fa-action-row fa-action-gate-card oa-extract-gate-card" data-idx="${exIdx}">
+    <div class="dbg-perspective-landmark-row fa-action-row fa-action-gate-card oa-extract-gate-card" data-idx="${exIdx}">
       <div class="fa-action-head">
         <span class="fa-order">${exIdx + 1}.</span>
         <span class="fa-action-head-label">GATE${negate ? ' <span class="fa-gate-negate-tag">(negated)</span>' : ''}</span>
@@ -1011,7 +1011,7 @@ function _renderExtractGateCard(ex, exIdx, _state) {
             let verifyDisabled = '';
             if (isVerifying)            { verifyLabel = 'Verifying…'; verifyDisabled = 'disabled'; }
             else if (v?.success === true) { verifyLabel = 'Re-verify'; }
-            return `<button class="dbg-locale-landmark-verify fa-gate-cond-verify"
+            return `<button class="dbg-perspective-landmark-verify fa-gate-cond-verify"
                             data-oa-gate-action="verify-cond" data-idx="${exIdx}"
                             type="button" ${verifyDisabled}>${verifyLabel}</button>`;
           })()}
@@ -1984,7 +1984,7 @@ function _renderExtracts() {
   }
   _anteLastExtractCount = cur;
   if (_draft.extracts.length === 0) {
-    extractsListEl.innerHTML = `<div class="dbg-locale-landmarks-empty">No extracts yet — click + Extract below.</div>`;
+    extractsListEl.innerHTML = `<div class="dbg-perspective-landmarks-empty">No extracts yet — click + Extract below.</div>`;
     return;
   }
   const state = { tier: 'cache', verifying: _verifying, verified: _verified };
@@ -2688,7 +2688,7 @@ async function _onSaveClick() {
   };
 
   // v2.74.122 — Mount-snapshot guard + Cancel disable. Same pattern as
-  // assertion-author v2.74.120 / analysis-author + locale-capture
+  // assertion-author v2.74.120 / analysis-author + perspective-capture
   // v2.74.121. The Cancel button here is bound to _onDoneClick (which
   // calls _exitOrReturn), so disabling it during save prevents the user
   // from leaving mid-round-trip and seeing a "Saved" toast for what they
@@ -2837,19 +2837,19 @@ async function _captureConditions(which) {
     return;
   }
 
-  // Cache locale/assertion metadata so renders show names, not bare ids.
-  for (const loc of res.matchingLocales ?? [])    _conditionDisplay.locales.set(loc.id, loc);
+  // Cache perspective/assertion metadata so renders show names, not bare ids.
+  for (const loc of res.matchingPerspectives ?? [])    _conditionDisplay.perspectives.set(loc.id, loc);
   for (const ast of res.matchingAssertions ?? []) _conditionDisplay.assertions.set(ast.id, ast);
 
   const conds = [];
   const url = res.currentUrl ?? res.urlPattern ?? null;
   if (url) conds.push({ type: 'url_matches', pattern: url });
-  for (const loc of res.matchingLocales ?? [])    conds.push({ type: 'locale_ref', localeId: loc.id });
+  for (const loc of res.matchingPerspectives ?? [])    conds.push({ type: 'perspective_ref', perspectiveId: loc.id });
   for (const ast of res.matchingAssertions ?? []) conds.push({ type: 'assertion_ref', assertionId: ast.id });
 
-  const nLoc = (res.matchingLocales    ?? []).length;
+  const nLoc = (res.matchingPerspectives    ?? []).length;
   const nAst = (res.matchingAssertions ?? []).length;
-  const sourceLabel = `auto-captured (${nLoc} locale${nLoc === 1 ? '' : 's'}, ${nAst} assertion${nAst === 1 ? '' : 's'})`;
+  const sourceLabel = `auto-captured (${nLoc} perspective${nLoc === 1 ? '' : 's'}, ${nAst} assertion${nAst === 1 ? '' : 's'})`;
 
   if (isPre) {
     _draft.preconditions = conds;
@@ -2931,13 +2931,13 @@ function _renderConditionRow(c, side, idx) {
     } else {
       valueHtml = `<span class="cond-pred-hint cond-pred-hint-empty">— pick an assertion from the dropdown —</span>`;
     }
-  } else if (type === 'locale_ref') {
-    const meta = _groundLocales.find(l => l.id === c?.localeId)
-              || _conditionDisplay.locales.get(c?.localeId);
+  } else if (type === 'perspective_ref') {
+    const meta = _groundPerspectives.find(l => l.id === c?.perspectiveId)
+              || _conditionDisplay.perspectives.get(c?.perspectiveId);
     if (meta) {
       // v2.74.343 — Count via the flat landmarkRefs mirror (landmarks is a
       // LandmarkNode[] tree now; .length is the root count, undercounting
-      // structured locales). Node role label, falling back to legacy alias.
+      // structured perspectives). Node role label, falling back to legacy alias.
       const lmCount = Array.isArray(meta.landmarkRefs)
         ? meta.landmarkRefs.length
         : (Array.isArray(meta.landmarks) ? meta.landmarks.length : (meta.landmarkCount ?? 0));
@@ -2946,10 +2946,10 @@ function _renderConditionRow(c, side, idx) {
         ? `${lmCount} landmark${lmCount === 1 ? '' : 's'}${firstRole ? ` · ${firstRole}${lmCount > 1 ? '…' : ''}` : ''}`
         : 'no landmarks';
       valueHtml = `<span class="cond-pred-hint" title="${escAttr(meta.description ?? '')}">${escHtml(summary)}</span>`;
-    } else if (c?.localeId) {
-      valueHtml = `<span class="cond-pred-hint cond-pred-hint-stale">missing locale: ${escHtml(c.localeId)}</span>`;
+    } else if (c?.perspectiveId) {
+      valueHtml = `<span class="cond-pred-hint cond-pred-hint-stale">missing perspective: ${escHtml(c.perspectiveId)}</span>`;
     } else {
-      valueHtml = `<span class="cond-pred-hint cond-pred-hint-empty">— pick a locale from the dropdown —</span>`;
+      valueHtml = `<span class="cond-pred-hint cond-pred-hint-empty">— pick a perspective from the dropdown —</span>`;
     }
   } else {
     valueHtml = `<span class="cond-pred-hint cond-pred-hint-empty">unsupported type: ${escHtml(type)}</span>`;
@@ -2968,7 +2968,7 @@ function _renderConditionRow(c, side, idx) {
 function _buildConditionTypeOptions(c) {
   const currentType = c?.type ?? 'selector_present';
   const currentPredId = c?.assertionId ?? '';
-  const currentLocaleId = c?.localeId ?? '';
+  const currentPerspectiveId = c?.perspectiveId ?? '';
   const opt = (value, label, selected) =>
     `<option value="${escAttr(value)}"${selected ? ' selected' : ''}>${escHtml(label)}</option>`;
   const groups = [];
@@ -3006,8 +3006,8 @@ function _buildConditionTypeOptions(c) {
     }
   }
 
-  if (_groundLocales.length > 0) {
-    const sorted = [..._groundLocales].sort((a, b) => {
+  if (_groundPerspectives.length > 0) {
+    const sorted = [..._groundPerspectives].sort((a, b) => {
       const an = (a.name ?? a.id ?? '').toLowerCase();
       const bn = (b.name ?? b.id ?? '').toLowerCase();
       return an < bn ? -1 : an > bn ? 1 : 0;
@@ -3015,15 +3015,15 @@ function _buildConditionTypeOptions(c) {
     const opts = sorted.map(l => {
       const lmCount = Array.isArray(l.landmarks) ? l.landmarks.length : 0;
       const label = `${l.name ?? l.id} (${lmCount} landmark${lmCount === 1 ? '' : 's'})`;
-      return opt(`loc_ref:${l.id}`, label, currentType === 'locale_ref' && currentLocaleId === l.id);
+      return opt(`loc_ref:${l.id}`, label, currentType === 'perspective_ref' && currentPerspectiveId === l.id);
     }).join('');
-    groups.push(`<optgroup label="Locales">${opts}</optgroup>`);
+    groups.push(`<optgroup label="Perspectives">${opts}</optgroup>`);
   }
-  if (currentType === 'locale_ref' && currentLocaleId) {
-    const inList = _groundLocales.some(l => l.id === currentLocaleId);
+  if (currentType === 'perspective_ref' && currentPerspectiveId) {
+    const inList = _groundPerspectives.some(l => l.id === currentPerspectiveId);
     if (!inList) {
-      groups.push(`<optgroup label="Locales · Stale">${
-        opt(`loc_ref:${currentLocaleId}`, `(missing: ${currentLocaleId})`, true)
+      groups.push(`<optgroup label="Perspectives · Stale">${
+        opt(`loc_ref:${currentPerspectiveId}`, `(missing: ${currentPerspectiveId})`, true)
       }</optgroup>`);
     }
   }
@@ -3035,7 +3035,7 @@ function _decodeConditionTypeValue(value) {
     return { type: 'assertion_ref', assertionId: value.slice('pred_ref:'.length) };
   }
   if (typeof value === 'string' && value.startsWith('loc_ref:')) {
-    return { type: 'locale_ref', localeId: value.slice('loc_ref:'.length) };
+    return { type: 'perspective_ref', perspectiveId: value.slice('loc_ref:'.length) };
   }
   return { type: value };
 }
@@ -3053,7 +3053,7 @@ function _wireConditionListHandlers(side) {
       const decoded = _decodeConditionTypeValue(sel.value);
       const fresh = emptyCondition(decoded.type);
       if (decoded.assertionId) fresh.assertionId = decoded.assertionId;
-      if (decoded.localeId)    fresh.localeId    = decoded.localeId;
+      if (decoded.perspectiveId)    fresh.perspectiveId    = decoded.perspectiveId;
       arr[idx] = fresh;
       _markConditionsUserModified(side);
       side === 'pre' ? _renderPreconditions() : _renderPostconditions();
@@ -3103,7 +3103,7 @@ function _onAddCondition(side) {
 }
 
 // v2.74.26 — Fetch the active Ground so the type dropdown can offer
-// the Custom (library assertions) and Locales optgroups. Re-renders
+// the Custom (library assertions) and Perspectives optgroups. Re-renders
 // once loaded so any displayed conditions pick up the new dropdown
 // options.
 async function _loadGroundCatalog() {
@@ -3116,7 +3116,7 @@ async function _loadGroundCatalog() {
       );
     });
     if (res?.success && res.ground) {
-      _groundLocales    = Array.isArray(res.ground.locales)    ? res.ground.locales    : [];
+      _groundPerspectives    = Array.isArray(res.ground.perspectives)    ? res.ground.perspectives    : [];
       _groundAssertions = Array.isArray(res.ground.assertions) ? res.ground.assertions : [];
       _renderPreconditions();
       _renderPostconditions();

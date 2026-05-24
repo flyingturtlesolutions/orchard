@@ -442,7 +442,7 @@
            user's last-focused window. Page-family conditions (selector_present,
            url_matches, etc.) get checked against the live DOM. Scope-family
            conditions (binding_*, every_record_*) skip — they need a runtime
-           scope. Reference-family conditions (assertion_ref, locale_ref) skip
+           scope. Reference-family conditions (assertion_ref, perspective_ref) skip
            in v1; recursion lands later.
 
            Status is ephemeral — not stored on the assertion. Stale state
@@ -461,8 +461,8 @@
       </div>
     </div>
 
-    <!-- v2.72.29 (Pass 17) — Locale form. Used for both create + edit.
-         Locales are vocabulary (saved expressions referenced by primitive
+    <!-- v2.72.29 (Pass 17) — Perspective form. Used for both create + edit.
+         Perspectives are vocabulary (saved expressions referenced by primitive
          contracts), specifically: verified DOM landmark records. They
          capture "this kind of page exists; here are its structural
          elements." Authored once with live DOM verification per landmark;
@@ -475,11 +475,11 @@
            3. Add landmarks. Each landmark: role name + CSS selector +
               "Verify" button → reports match count and sample HTML.
            4. Save when all landmarks verified. -->
-    <!-- v2.72.51 (Stage 2) — Locale form removed. Locale authoring lives
-         in the sidepanel locale-capture mode (Sidepanel/modes/locale-capture.js).
-         The Ground card's "+ Locale" button calls launchLocaleCapture()
-         which opens sidepanel.html and sends BEGIN_LOCALE_CAPTURE; the
-         shell mounts the locale-capture mode where authoring happens. -->
+    <!-- v2.72.51 (Stage 2) — Perspective form removed. Perspective authoring lives
+         in the sidepanel perspective-capture mode (Sidepanel/modes/perspective-capture.js).
+         The Ground card's "+ Perspective" button calls launchPerspectiveCapture()
+         which opens sidepanel.html and sends BEGIN_PERSPECTIVE_CAPTURE; the
+         shell mounts the perspective-capture mode where authoring happens. -->
 
     <!-- v2.62.0 — Analysis form. Iteration A: minimal editor. Operations
          are authored as JSON; full GUI builder lands in a later iteration.

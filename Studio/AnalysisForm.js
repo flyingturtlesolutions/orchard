@@ -16,7 +16,7 @@
  * description as the primary instruction.
  *
  * Pre/post conditions are scope-only (allowedFamilies=['scope']) — they
- * assert shape on the input/output bindings, not page state. Locales and
+ * assert shape on the input/output bindings, not page state. Perspectives and
  * page-family assertions don't apply here.
  *
  * ── Module shape ──────────────────────────────────────────────────────
@@ -53,7 +53,7 @@
  * conditions and the analysis-specific binding semantics (INPUT/OUTPUT
  * implicit, named bindings for template body).
  *
- * Extracted from studio.js (Pass 17e) following the LocaleForm /
+ * Extracted from studio.js (Pass 17e) following the PerspectiveForm /
  * AssertionForm / ObservationForm pattern.
  *
  * @module Studio/AnalysisForm
@@ -624,7 +624,7 @@ function renderAnalysisConditions(which) {
       // chosen assertion's ID encoded in the dropdown value. Apply it here,
       // overriding any preserved field from a prior reference.
       if (decoded.assertionId) fresh.assertionId = decoded.assertionId;
-      if (decoded.localeId) fresh.localeId = decoded.localeId;
+      if (decoded.perspectiveId) fresh.perspectiveId = decoded.perspectiveId;
       // v2.64.1 — Force binding to implicit value per section. The user
       // never sets binding directly; it's a fixed convention per pre/post.
       // Only applies to scope conditions that have a `binding` field;
@@ -767,7 +767,7 @@ function renderAnalysisConditionRow(cond, idx, which) {
 
 // v2.72.71 — renderStrategyConditions and renderStrategyConditionRow used
 // to live here but were moved to studio.js. They reference strategyDraft,
-// strategyAssertionCache, and strategyLocaleCache, which all live in
+// strategyAssertionCache, and strategyPerspectiveCache, which all live in
 // studio.js's module scope. Hosting them here was a mis-placement that
 // made the strategy form's pre/post condition rendering permanently
 // broken ("renderStrategyConditions is not defined" when called from

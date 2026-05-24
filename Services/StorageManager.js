@@ -45,14 +45,14 @@
  *                  They aren't invoked black-box; they're inlined into other
  *                  artifacts' pre/post envelopes via assertion_ref flattening.
  *
- *   Locale       — a verified DOM landmark record. Captures "this kind of
+ *   Perspective       — a verified DOM landmark record. Captures "this kind of
  *                  page exists; here are its structural elements" with
  *                  per-landmark verification metadata (matched count, sample
  *                  HTML, when verified, against what URL). Authored once
  *                  with live DOM verification; re-verifiable to detect
  *                  drift. Referenced from primitive contracts via the
- *                  `locale_ref` condition type. The Ground accumulates
- *                  Locales as a DOM lexicon that downstream primitive
+ *                  `perspective_ref` condition type. The Ground accumulates
+ *                  Perspectives as a DOM lexicon that downstream primitive
  *                  auto-authoring composes from.
  *
  *   Vocabulary differs from primitives in four load-bearing ways:
@@ -64,15 +64,15 @@
  *       model-write) but no runtime tiers.
  *     - Contract surface: vocabulary has no pre/post; primitives do.
  *
- *   Assertion vs Locale (distinction within vocabulary):
+ *   Assertion vs Perspective (distinction within vocabulary):
  *     - Assertion is a logical function (no persistent verification);
  *       evaluated fresh each time against current state. The thing you
  *       reference when you want "this must be true *right now*."
- *     - Locale is a structural record (persistent verification with
+ *     - Perspective is a structural record (persistent verification with
  *       metadata); represents stable page structure. The thing you
  *       reference when you want "this primitive runs on *that kind of
  *       page*."
- *     Both can be referenced from a primitive's pre/post: `locale_ref`
+ *     Both can be referenced from a primitive's pre/post: `perspective_ref`
  *     for "what kind of page" and `assertion_ref` for logical conditions
  *     (often over scope). They compose naturally.
  *
@@ -102,7 +102,7 @@
  *   analyses:<id>            — Analysis record (primitive)
  *   strategies:<id>          — Strategy record (primitive)
  *   assertions:<id>          — Assertion record (vocabulary; logical assertion)
- *   locales:<id>             — Locale record (vocabulary; verified DOM landmarks)
+ *   perspectives:<id>             — Perspective record (vocabulary; verified DOM landmarks)
  *   results:<jobId>          — Test result record
  *   <kind>:index:<groundId>  — Per-Ground index of artifact ids
  *   meta:index               — Master index of Ground ids
@@ -114,8 +114,8 @@
  */
 
 import { Logger } from '../Core/Logger.js';
-// v2.74.332 — LOCALE_SPEC § 3 Layer 2 composition (nodes + flat mirror).
-import { deriveLandmarkNodes, flattenLandmarkNodes } from '../Core/localeComposition.js';
+// v2.74.332 — PERSPECTIVE_SPEC § 3 Layer 2 composition (nodes + flat mirror).
+import { deriveLandmarkNodes, flattenLandmarkNodes } from '../Core/perspectiveComposition.js';
 import { normalizeStrategyParams } from './StrategyTree.js';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -135,7 +135,7 @@ const MAX_RESULTS_STORED = 500;
 
 /**
  * Ground — Tier 2 affordance (GROUND_SPEC § 6). The user's automation
- * surface for one site, composing Locales.
+ * surface for one site, composing Perspectives.
  *
  * v2.74.325 — Shape aligned to GROUND_SPEC. Legacy mirrors `url` and
  * `aiName` are retained for back-compat readers and `aliases` is kept as a
@@ -145,7 +145,7 @@ const MAX_RESULTS_STORED = 500;
  * @property {string}        id          - 'gnd_<uid>' for new grounds; legacy ids preserved.
  * @property {string}        name        - User-authored display name.
  * @property {UrlPattern[]}  urlPatterns - Patterns identifying this Ground.
- * @property {string[]}      localeIds   - Ordered composition (read-time projection of locales:index).
+ * @property {string[]}      perspectiveIds   - Ordered composition (read-time projection of perspectives:index).
  * @property {{createdAt:number, updatedAt:number, lifecycle:('draft'|'active'|'deprecated')}} metadata
  * @property {string}        [url]       - Navigable mirror of the primary pattern (wildcards stripped); legacy readers + tab-open consumers.
  * @property {string}        [aiName]    - DEPRECATED mirror = name (legacy readers).
@@ -260,7 +260,7 @@ export class StorageManager {
   // snapshot the same index, both push their own id, the second writer
   // clobbers the first's addition. The blast radius: ~16 save/delete
   // sites for the 8 entity types (Fragment / Analysis / Observation /
-  // Assertion / Locale / Path / Strategy / Workflow), plus the Ground
+  // Assertion / Perspective / Path / Strategy / Workflow), plus the Ground
   // index and the test-results index.
   //
   // Same shape and same fix as ConversationStore's v2.74.109 work:
@@ -331,15 +331,15 @@ export class StorageManager {
    *   - metadata       { createdAt, updatedAt, lifecycle }
    *   - aliases        preserved as a tolerated non-spec extension
    *
-   * `localeIds[]` and the *effective* lifecycle are populated by the read
-   * path (getGround / getAllGrounds) from the per-Ground locales index —
+   * `perspectiveIds[]` and the *effective* lifecycle are populated by the read
+   * path (getGround / getAllGrounds) from the per-Ground perspectives index —
    * the composition source of truth that already maintains membership and
    * order — so they never drift. They are intentionally NOT persisted here
    * (stripped) to avoid a stale second copy.
    *
    * DEVIATIONS (see SPEC_DEV): existing ids are NOT re-keyed to `gnd_<uid>`
    * (only new grounds get the prefix; re-keying would rewrite groundId on
-   * every locale/fragment/landmark/strategy + all per-Ground index keys),
+   * every perspective/fragment/landmark/strategy + all per-Ground index keys),
    * and urlPatterns is single-entry (driven by the one editable `url`)
    * until the URL-pattern-matcher slice adds multi-pattern authoring.
    */
@@ -360,8 +360,8 @@ export class StorageManager {
   static #normalizeGroundRecord(g) {
     if (!g || typeof g !== 'object') return g;
     const now = Date.now();
-    // localeIds is a read-time projection — never persist it.
-    const { localeIds: _derivedLocaleIds, ...base } = g;
+    // perspectiveIds is a read-time projection — never persist it.
+    const { perspectiveIds: _derivedPerspectiveIds, ...base } = g;
     const name = (typeof base.name === 'string' && base.name.trim())
       ? base.name
       : (typeof base.aiName === 'string' && base.aiName.trim() ? base.aiName : 'Ground');
@@ -399,7 +399,7 @@ export class StorageManager {
       metadata  : {
         createdAt,
         updatedAt,
-        // Effective lifecycle is set in the read path from locale presence;
+        // Effective lifecycle is set in the read path from perspective presence;
         // only 'deprecated' (a future slice) is meaningfully persisted.
         lifecycle: base.metadata?.lifecycle ?? null,
       },
@@ -442,19 +442,19 @@ export class StorageManager {
     const raw  = data[`grounds:${groundId}`] ?? null;
     if (!raw) return null;
     const g = StorageManager.#normalizeGroundRecord(raw);
-    // v2.74.325 — Populate localeIds (ordered composition) + effective
-    // lifecycle from the per-Ground locales index. The index is the
+    // v2.74.325 — Populate perspectiveIds (ordered composition) + effective
+    // lifecycle from the per-Ground perspectives index. The index is the
     // composition source of truth, so this never drifts.
-    let localeIds = [];
+    let perspectiveIds = [];
     try {
-      const idxKey  = `locales:index:${groundId}`;
+      const idxKey  = `perspectives:index:${groundId}`;
       const idxData = await StorageManager.#get(idxKey);
-      if (Array.isArray(idxData[idxKey])) localeIds = idxData[idxKey];
+      if (Array.isArray(idxData[idxKey])) perspectiveIds = idxData[idxKey];
     } catch { /* default [] */ }
-    g.localeIds = localeIds;
+    g.perspectiveIds = perspectiveIds;
     g.metadata.lifecycle = (g.metadata.lifecycle === 'deprecated')
       ? 'deprecated'
-      : (localeIds.length > 0 ? 'active' : 'draft');
+      : (perspectiveIds.length > 0 ? 'active' : 'draft');
     return g;
   }
 
@@ -465,23 +465,23 @@ export class StorageManager {
   static async getAllGrounds() {
     const index = await StorageManager.#getGroundIndex();
     if (index.length === 0) return [];
-    // v2.74.325 — Batch-read the ground records AND each ground's locales
-    // index in one storage call, then normalize + project localeIds /
+    // v2.74.325 — Batch-read the ground records AND each ground's perspectives
+    // index in one storage call, then normalize + project perspectiveIds /
     // effective lifecycle (GROUND_SPEC § 6).
     const groundKeys    = index.map((id) => `grounds:${id}`);
-    const localeIdxKeys = index.map((id) => `locales:index:${id}`);
-    const data = await StorageManager.#get([...groundKeys, ...localeIdxKeys]);
+    const perspectiveIdxKeys = index.map((id) => `perspectives:index:${id}`);
+    const data = await StorageManager.#get([...groundKeys, ...perspectiveIdxKeys]);
     return index
       .map((id) => data[`grounds:${id}`])
       .filter(Boolean)
       .map(raw => {
         const g = StorageManager.#normalizeGroundRecord(raw);
-        const idxKey = `locales:index:${g.id}`;
-        const localeIds = Array.isArray(data[idxKey]) ? data[idxKey] : [];
-        g.localeIds = localeIds;
+        const idxKey = `perspectives:index:${g.id}`;
+        const perspectiveIds = Array.isArray(data[idxKey]) ? data[idxKey] : [];
+        g.perspectiveIds = perspectiveIds;
         g.metadata.lifecycle = (g.metadata.lifecycle === 'deprecated')
           ? 'deprecated'
-          : (localeIds.length > 0 ? 'active' : 'draft');
+          : (perspectiveIds.length > 0 ? 'active' : 'draft');
         return g;
       });
   }
@@ -500,7 +500,7 @@ export class StorageManager {
     }
     // v2.74.325 — Merge then normalize so the persisted record stays
     // GROUND_SPEC-shaped (urlPatterns rebuilt if `url` changed; derived
-    // localeIds stripped; metadata.updatedAt bumped).
+    // perspectiveIds stripped; metadata.updatedAt bumped).
     const now = Date.now();
     const mergedRaw = {
       ...existing, ...patch, id: groundId,
@@ -524,7 +524,7 @@ export class StorageManager {
     //
     // v2.74.327 — Full Tier-1 cascade (GROUND_SPEC § 11 reference
     // integrity). Previously only Fragments + Strategies cascaded, which
-    // left this Ground's Locales, Observations, Analyses, and Assertions
+    // left this Ground's Perspectives, Observations, Analyses, and Assertions
     // orphaned in storage (their `<kind>:index:<groundId>` keys + records
     // pointed at a deleted Ground, polluting getAll* and risking dangling
     // references). All per-Ground Tier-1 artifacts are now removed.
@@ -539,7 +539,7 @@ export class StorageManager {
     const idxKeys = {
       fragments   : `fragments:index:${groundId}`,
       strategies  : `strategies:index:${groundId}`,
-      locales     : `locales:index:${groundId}`,
+      perspectives     : `perspectives:index:${groundId}`,
       observations: `observations:index:${groundId}`,
       analyses    : `analyses:index:${groundId}`,
       assertions  : `assertions:index:${groundId}`,
@@ -548,7 +548,7 @@ export class StorageManager {
     const idsFor  = (k) => (Array.isArray(idxData[idxKeys[k]]) ? idxData[idxKeys[k]] : []);
     const fragmentIds    = idsFor('fragments');
     const strategyIds    = idsFor('strategies');
-    const localeIds      = idsFor('locales');
+    const perspectiveIds      = idsFor('perspectives');
     const observationIds = idsFor('observations');
     const analysisIds    = idsFor('analyses');
     const assertionIds   = idsFor('assertions');
@@ -559,7 +559,7 @@ export class StorageManager {
       // gone and these were never written by the new T1 author flow.
       ...strategyIds.map(id => `strategies:${id}`),
       ...strategyIds.map(id => `strategy-walk:${id}`),
-      ...localeIds.map(id => `locales:${id}`),
+      ...perspectiveIds.map(id => `perspectives:${id}`),
       ...observationIds.map(id => `observations:${id}`),
       ...analysisIds.map(id => `analyses:${id}`),
       ...assertionIds.map(id => `assertions:${id}`),
@@ -569,7 +569,7 @@ export class StorageManager {
       `grounds:${groundId}`,
       idxKeys.fragments,
       idxKeys.strategies,
-      idxKeys.locales,
+      idxKeys.perspectives,
       idxKeys.observations,
       idxKeys.analyses,
       idxKeys.assertions,
@@ -584,7 +584,7 @@ export class StorageManager {
 
     Logger.info('StorageManager',
       `Ground deleted: ${groundId} (cascade removed ${fragmentIds.length} fragment(s), ` +
-      `${strategyIds.length} strategy/ies, ${localeIds.length} locale(s), ` +
+      `${strategyIds.length} strategy/ies, ${perspectiveIds.length} perspective(s), ` +
       `${observationIds.length} observation(s), ${analysisIds.length} analysis/es, ` +
       `${assertionIds.length} assertion(s); landmarks preserved per GROUND_SPEC § 11)`);
   }
@@ -1852,13 +1852,13 @@ export class StorageManager {
     return updated;
   }
 
-  // ── Locales ─────────────────────────────────────────────────────────────
+  // ── Perspectives ─────────────────────────────────────────────────────────────
   //
-  // v2.72.29 (Pass 17) — Locales are verified DOM landmark records.
+  // v2.72.29 (Pass 17) — Perspectives are verified DOM landmark records.
   // Architecturally, they're the persistent form of "this kind of page
   // exists; here are its structural elements." Authored once with live
   // DOM verification; re-verifiable to detect drift; referenced by other
-  // primitives' contracts via the `locale_ref` condition type.
+  // primitives' contracts via the `perspective_ref` condition type.
   //
   // Storage shape:
   //   {
@@ -1872,31 +1872,31 @@ export class StorageManager {
   //   }
   //
   // See StorageManager top-of-file architectural docstring for the
-  // primitive/vocabulary distinction and where Locales fit.
-  // v2.74.332 — LOCALE_SPEC § 3 Layer 2 composition. Ensure `landmarks` is a
+  // primitive/vocabulary distinction and where Perspectives fit.
+  // v2.74.332 — PERSPECTIVE_SPEC § 3 Layer 2 composition. Ensure `landmarks` is a
   // LandmarkNode[] (canonical) and `landmarkRefs` is its flat-UID mirror.
   // Builds nodes from legacy `landmarkRefs[uid]` (or legacy embedded full
   // records) when the record predates Layer 2; preserves authored structure
   // when nodes already carry relationships. Used on read (migrate) AND write
   // (save/update) so the persisted shape converges.
-  static #withLocaleComposition(loc) {
+  static #withPerspectiveComposition(loc) {
     if (!loc || typeof loc !== 'object') return loc;
     const nodes = deriveLandmarkNodes(loc);
     return {
       ...loc,
       landmarks: nodes,
       landmarkRefs: flattenLandmarkNodes(nodes),
-      // v2.74.335 — LOCALE_SPEC § 12 lifecycle. Locales are saved=active;
+      // v2.74.335 — PERSPECTIVE_SPEC § 12 lifecycle. Perspectives are saved=active;
       // only the 'deprecated' soft-delete state is meaningfully persisted.
       lifecycle: loc.lifecycle === 'deprecated' ? 'deprecated' : 'active',
     };
   }
 
-  static #migrateLocaleShape(loc) {
+  static #migratePerspectiveShape(loc) {
     if (!loc || typeof loc !== 'object') return loc;
     // Composition normalization runs unconditionally (independent of the
     // authoredBy back-compat check below).
-    const composed = StorageManager.#withLocaleComposition(loc);
+    const composed = StorageManager.#withPerspectiveComposition(loc);
     if (typeof composed.authoredBy === 'string' && composed.authoredBy) return composed;
     return {
       ...composed,
@@ -1905,97 +1905,97 @@ export class StorageManager {
     };
   }
 
-  static async saveLocale(locale) {
-    if (!locale?.id || !locale?.groundId) {
-      throw new Error('saveLocale requires { id, groundId }');
+  static async savePerspective(perspective) {
+    if (!perspective?.id || !perspective?.groundId) {
+      throw new Error('savePerspective requires { id, groundId }');
     }
-    if (!locale?.name || !String(locale.name).trim()) {
-      throw new Error('saveLocale requires a non-empty name');
+    if (!perspective?.name || !String(perspective.name).trim()) {
+      throw new Error('savePerspective requires a non-empty name');
     }
-    const existing = await StorageManager.getLocale(locale.id);
-    if (existing && existing.groundId !== locale.groundId) {
-      throw new Error(`Locale ${locale.id} already exists on ground ${existing.groundId}; cannot reassign to ${locale.groundId}`);
+    const existing = await StorageManager.getPerspective(perspective.id);
+    if (existing && existing.groundId !== perspective.groundId) {
+      throw new Error(`Perspective ${perspective.id} already exists on ground ${existing.groundId}; cannot reassign to ${perspective.groundId}`);
     }
     // v2.74.119 — Serialized index add.
-    const indexKey = `locales:index:${locale.groundId}`;
-    await StorageManager.#addToIndex(indexKey, locale.id);
+    const indexKey = `perspectives:index:${perspective.groundId}`;
+    await StorageManager.#addToIndex(indexKey, perspective.id);
     const now = Date.now();
-    const authoredBy = (locale.authoredBy === 'model') ? 'model' : 'human';
-    const authoredAt = locale.authoredAt ?? now;
+    const authoredBy = (perspective.authoredBy === 'model') ? 'model' : 'human';
+    const authoredAt = perspective.authoredAt ?? now;
     // v2.74.332 — Persist the canonical Layer 2 composition: LandmarkNode[]
     // + the flat landmarkRefs mirror, regardless of which shape the caller
-    // passed (locale-capture writes landmarkRefs and drops landmarks).
-    const composed = StorageManager.#withLocaleComposition(locale);
+    // passed (perspective-capture writes landmarkRefs and drops landmarks).
+    const composed = StorageManager.#withPerspectiveComposition(perspective);
     await StorageManager.#set({
-      [`locales:${locale.id}`]: {
+      [`perspectives:${perspective.id}`]: {
         ...composed,
         authoredBy,
         authoredAt,
-        createdAt: locale.createdAt ?? now,
+        createdAt: perspective.createdAt ?? now,
         updatedAt: now,
       },
     });
-    Logger.info('StorageManager', `Locale saved: ${locale.id} (${locale.name}) on ground ${locale.groundId} [${authoredBy}, ${(composed.landmarks ?? []).length} landmark node(s)]`);
+    Logger.info('StorageManager', `Perspective saved: ${perspective.id} (${perspective.name}) on ground ${perspective.groundId} [${authoredBy}, ${(composed.landmarks ?? []).length} landmark node(s)]`);
   }
 
-  static async getLocale(localeId) {
-    const data = await StorageManager.#get(`locales:${localeId}`);
-    const loc = data[`locales:${localeId}`] ?? null;
-    return loc ? StorageManager.#migrateLocaleShape(loc) : null;
+  static async getPerspective(perspectiveId) {
+    const data = await StorageManager.#get(`perspectives:${perspectiveId}`);
+    const loc = data[`perspectives:${perspectiveId}`] ?? null;
+    return loc ? StorageManager.#migratePerspectiveShape(loc) : null;
   }
 
-  static async listLocales(groundId) {
-    const indexKey = `locales:index:${groundId}`;
+  static async listPerspectives(groundId) {
+    const indexKey = `perspectives:index:${groundId}`;
     const indexData = await StorageManager.#get(indexKey);
     const ids = indexData[indexKey] ?? [];
     if (ids.length === 0) return [];
-    const keys = ids.map(id => `locales:${id}`);
+    const keys = ids.map(id => `perspectives:${id}`);
     const data = await new Promise(res => chrome.storage.local.get(keys, res));
-    const missing = ids.filter(id => !data[`locales:${id}`]);
+    const missing = ids.filter(id => !data[`perspectives:${id}`]);
     if (missing.length > 0) {
-      Logger.warn('StorageManager', `listLocales(${groundId}): index has ${missing.length} id(s) with no matching record — ${missing.slice(0, 3).join(', ')}${missing.length > 3 ? '…' : ''}`);
+      Logger.warn('StorageManager', `listPerspectives(${groundId}): index has ${missing.length} id(s) with no matching record — ${missing.slice(0, 3).join(', ')}${missing.length > 3 ? '…' : ''}`);
     }
-    return ids.map(id => data[`locales:${id}`]).filter(Boolean)
-      .map(l => StorageManager.#migrateLocaleShape(l));
+    return ids.map(id => data[`perspectives:${id}`]).filter(Boolean)
+      .map(l => StorageManager.#migratePerspectiveShape(l));
   }
 
-  static async deleteLocale(localeId) {
-    const loc = await StorageManager.getLocale(localeId);
+  static async deletePerspective(perspectiveId) {
+    const loc = await StorageManager.getPerspective(perspectiveId);
     if (!loc) return;
     // v2.74.119 — Serialized index removal.
-    const indexKey = `locales:index:${loc.groundId}`;
-    await StorageManager.#removeFromIndex(indexKey, localeId);
-    await StorageManager.#remove([`locales:${localeId}`]);
-    Logger.info('StorageManager', `Locale deleted: ${localeId}`);
+    const indexKey = `perspectives:index:${loc.groundId}`;
+    await StorageManager.#removeFromIndex(indexKey, perspectiveId);
+    await StorageManager.#remove([`perspectives:${perspectiveId}`]);
+    Logger.info('StorageManager', `Perspective deleted: ${perspectiveId}`);
   }
 
-  static async updateLocale(localeId, patch) {
-    const existing = await StorageManager.getLocale(localeId);
-    if (!existing) throw new Error(`Locale ${localeId} not found`);
+  static async updatePerspective(perspectiveId, patch) {
+    const existing = await StorageManager.getPerspective(perspectiveId);
+    if (!existing) throw new Error(`Perspective ${perspectiveId} not found`);
     // v2.74.332 — Re-normalize composition after merge (a patch may change
     // landmarks/landmarkRefs; keep nodes + mirror consistent).
-    const updated = StorageManager.#withLocaleComposition({
+    const updated = StorageManager.#withPerspectiveComposition({
       ...existing, ...patch,
       id: existing.id, groundId: existing.groundId,
       createdAt: existing.createdAt,
       updatedAt: Date.now(),
     });
-    await StorageManager.#set({ [`locales:${localeId}`]: updated });
-    Logger.info('StorageManager', `Locale updated: ${localeId}`);
+    await StorageManager.#set({ [`perspectives:${perspectiveId}`]: updated });
+    Logger.info('StorageManager', `Perspective updated: ${perspectiveId}`);
     return updated;
   }
 
   // ─── v2.74.240 — Landmark registry (Phase 2 of substrate spec) ───
   //
-  // Top-level per-Ground registry indexed by UID. Mirrors the locale
+  // Top-level per-Ground registry indexed by UID. Mirrors the perspective
   // storage pattern:
   //   landmarks:index:{groundId}  → ordered list of UIDs in that ground
   //   landmarks:{uid}             → full landmark record
   //
   // Same-UID writes intentionally OVERWRITE — per the spec, two
   // landmarks with the same canonical inputs ARE the same landmark.
-  // Save semantics: last-write-wins. Cross-locale sharing (multiple
-  // Locales referencing the same UID) gets one canonical record.
+  // Save semantics: last-write-wins. Cross-perspective sharing (multiple
+  // Perspectives referencing the same UID) gets one canonical record.
 
   static async saveLandmark(landmark) {
     if (!landmark?.uid)      throw new Error('saveLandmark requires { uid }');

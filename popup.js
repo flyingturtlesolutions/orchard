@@ -4,7 +4,7 @@
  * v2.72.50 (Stage 1) — Two entry points: Studio (full-page tab) and Chat
  * (side panel). The debugger entry was removed; debugging is no longer
  * a top-level surface but a sidepanel mode launched contextually from
- * Studio (▶ on a strategy, + Locale on a ground, etc.). Locale capture,
+ * Studio (▶ on a strategy, + Perspective on a ground, etc.). Perspective capture,
  * strategy debug, and future modes (fragment walk, observation trace)
  * all launch from Studio.
  */

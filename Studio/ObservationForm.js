@@ -25,7 +25,7 @@
  * Internal state (file-local):
  *   - observationDraft         : in-progress Observation
  *   - libraryAssertionCache    : assertions on this Ground (for assertion_ref)
- *   - libraryLocaleCache       : locales on this Ground (for locale_ref)
+ *   - libraryPerspectiveCache       : perspectives on this Ground (for perspective_ref)
  *
  * Exported entry points:
  *   - openObservationForm(groundId, observationId)  — observationId required
@@ -63,12 +63,12 @@ import { composeCompactDescription } from '../Services/ObservationDescription.js
 
 // ─── File-local state ───────────────────────────────────────────────────
 
-// Assertions and locales cached when form opens, used by pre/post editors.
+// Assertions and perspectives cached when form opens, used by pre/post editors.
 // v2.72.34 (Pass 17d) — were module-globals in studio.js used only by this
 // form; now genuinely private. Defensive `typeof` guards in the body have
 // been removed since these are guaranteed declared.
 let libraryAssertionCache = [];
-let libraryLocaleCache = [];
+let libraryPerspectiveCache = [];
 
 // Setup-time injections.
 let _refreshGroundList = null;
@@ -100,12 +100,12 @@ export async function openObservationForm(groundId, observationId) {
     libraryAssertionCache = [];
   }
 
-  // v2.72.31 (Pass 17a) — Load locales for the Observation pre editor's
-  // locale_ref picker. Observation post is scope-only; locales don't apply.
+  // v2.72.31 (Pass 17a) — Load perspectives for the Observation pre editor's
+  // perspective_ref picker. Observation post is scope-only; perspectives don't apply.
   try {
-    libraryLocaleCache = await StorageManager.listLocales(groundId);
+    libraryPerspectiveCache = await StorageManager.listPerspectives(groundId);
   } catch (_) {
-    libraryLocaleCache = [];
+    libraryPerspectiveCache = [];
   }
 
   if (!observationId) {
@@ -290,7 +290,7 @@ export function closeObservationForm() {
   $('observation-form-card')?.classList.add('hidden');
   observationDraft = null;
   libraryAssertionCache = [];
-  libraryLocaleCache = [];
+  libraryPerspectiveCache = [];
 }
 
 // Show/hide per-shape conditional rows. Called on form open + on shape change.
@@ -604,13 +604,13 @@ function renderObservationConditions(which) {
     // libraryAssertionCache: same library available to Fragment forms — page
     // and scope assertions on this Ground.
     const preds = libraryAssertionCache;
-    // v2.72.31 (Pass 17a) — Locales for the locale_ref picker.
-    const locs = libraryLocaleCache;
+    // v2.72.31 (Pass 17a) — Perspectives for the perspective_ref picker.
+    const locs = libraryPerspectiveCache;
     listEl.innerHTML = arr.map((cond, idx) => {
       const editorHtml = _renderConditionEditor(cond, { side: 'pre', idx }, {
         context: 'observation',
         assertions: preds,
-        locales: locs,
+        perspectives: locs,
         // Observation pre runs against the live page only — restrict to page family.
         allowedFamilies: ['page'],
       });
@@ -697,7 +697,7 @@ function renderObservationConditions(which) {
         const decoded = _decodeConditionTypeValue(sel.value);
         const fresh = emptyCondition(decoded.type);
         if (decoded.assertionId) fresh.assertionId = decoded.assertionId;
-        if (decoded.localeId) fresh.localeId = decoded.localeId;
+        if (decoded.perspectiveId) fresh.perspectiveId = decoded.perspectiveId;
         observationDraft.preconditions[idx] = fresh;
         renderObservationConditions('pre');
         _refreshObservationParamsPreview();
@@ -724,7 +724,7 @@ function renderObservationConditions(which) {
         const decoded = _decodeConditionTypeValue(sel.value);
         const fresh = emptyCondition(decoded.type);
         if (decoded.assertionId) fresh.assertionId = decoded.assertionId;
-        if (decoded.localeId) fresh.localeId = decoded.localeId;
+        if (decoded.perspectiveId) fresh.perspectiveId = decoded.perspectiveId;
         // Force binding=OUTPUT for scope conditions (mirrors Analysis post).
         if (CONDITION_FIELDS[decoded.type]?.fields?.includes('binding')) {
           fresh.binding = 'OUTPUT';

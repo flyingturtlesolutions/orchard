@@ -54,7 +54,7 @@ export const imageFull = Object.freeze({
   validate: (_ex) => {
     // No per-shape requirement: a screenshot is always capturable. The
     // generic output-binding-name check is enforced by the outer
-    // saveLocale / validateObservation flow.
+    // savePerspective / validateObservation flow.
     return null;
   },
 });

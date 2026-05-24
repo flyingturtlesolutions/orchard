@@ -380,7 +380,7 @@ function handleInvocationStarted(event) {
 
   // v2.72.51 (Stage 2) — In mode-based architecture, this mode IS the
   // visible view. The shell handles mutually-exclusive mode switching;
-  // there's no internal idle/locale view to hide here.
+  // there's no internal idle/perspective view to hide here.
 
   stratNameEl.textContent = capabilityName;
   invIdEl.textContent     = event.invocationId.slice(0, 8) + '…';
@@ -1857,7 +1857,7 @@ async function unmount() {
 }
 
 // Shell forwards every chrome.runtime.onMessage to handleEvent. We filter
-// for LOG_ENTRY here. Other modes' messages (e.g., PICK_RESULT for locale-
+// for LOG_ENTRY here. Other modes' messages (e.g., PICK_RESULT for perspective-
 // capture) are not relevant.
 function handleEvent(message) {
   if (message?.type === 'LOG_ENTRY') {

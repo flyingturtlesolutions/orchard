@@ -148,7 +148,7 @@ export function matchGroundForUrl(url, grounds, opts = {}) {
   // "draft not active for URL matching"). That rule is for the RUNTIME
   // active-Ground tracker (deferred § 8). The current consumer is the
   // AUTHORING entry point (ground-view), which MUST be able to match a
-  // brand-new draft Ground to author its first Locale — excluding draft
+  // brand-new draft Ground to author its first Perspective — excluding draft
   // there deadlocked new-Ground creation (the v2.74.330 regression). So
   // draft is INCLUDED by default; pass { activeOnly: true } for runtime use.
   const activeOnly = opts.activeOnly === true;

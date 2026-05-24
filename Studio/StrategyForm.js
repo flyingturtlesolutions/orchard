@@ -72,7 +72,7 @@ import { normalizeStrategyBody, validateStrategyBody, normalizeStrategyParams } 
 let _strategyDraft = null;
 let _strategyFragmentCache = new Map();
 let _strategyAssertionCache = new Map();
-let _strategyLocaleCache = new Map();
+let _strategyPerspectiveCache = new Map();
 let _strategyAnalysisCache = new Map();
 let _strategyObservationCache = new Map();
 let _dragSourceIdx = null;
@@ -346,7 +346,7 @@ export async function countStrategyRefsToObservation(groundId, observationId) {
 // renderStrategyConditions and renderStrategyConditionRow render the
 // pre/post condition lists in the strategy form. They're tightly coupled
 // to _strategyDraft (preconditions/postconditions arrays) and the
-// assertion + locale caches. Initially extracted with _setup getter
+// assertion + perspective caches. Initially extracted with _setup getter
 // access; state migrated to module-locals in Pass 4-f Phase 2 (v2.73.2).
 
 /**
@@ -401,7 +401,7 @@ function renderStrategyConditions(which) {
         if (oldFieldsByName[f] != null) fresh[f] = oldFieldsByName[f];
       }
       if (decoded.assertionId) fresh.assertionId = decoded.assertionId;
-      if (decoded.localeId) fresh.localeId = decoded.localeId;
+      if (decoded.perspectiveId) fresh.perspectiveId = decoded.perspectiveId;
       target[idx] = fresh;
       renderStrategyConditions(w);
     });
@@ -600,25 +600,25 @@ function renderStrategyOutputs() {
  */
 function renderStrategyConditionRow(cond, idx, which) {
   const assertionCache = _strategyAssertionCache;
-  const localeCache    = _strategyLocaleCache;
+  const perspectiveCache    = _strategyPerspectiveCache;
   // Type dropdown: both families allowed. Custom group filtered by
   // family-compat — assertions with both page and scope children are fine
   // in the strategy form because the engine evaluates each by family.
   const typeOpts = _setup.buildConditionTypeOptions({
     allowedFamilies: ['page', 'scope'],
     assertions: [...assertionCache.values()],
-    locales: [...localeCache.values()],
+    perspectives: [...perspectiveCache.values()],
     iterScope: null,
     currentType: cond.type,
     currentPredId: cond.assertionId ?? '',
-    currentLocaleId: cond.localeId ?? '',
+    currentPerspectiveId: cond.perspectiveId ?? '',
   });
 
   // Per-type fields. Page-side types use selector / pattern / text /
   // attribute / value. Scope-side types use the schema-driven fields
   // (binding, min, max, count, value, values, fieldName, variable).
   // assertion_ref renders the picked assertion's description as a hint.
-  // locale_ref (Pass 17) renders the picked locale's landmark count.
+  // perspective_ref (Pass 17) renders the picked perspective's landmark count.
   let fieldsHtml;
   if (cond.type === 'assertion_ref') {
     const refId = cond.assertionId;
@@ -633,17 +633,17 @@ function renderStrategyConditionRow(cond, idx, which) {
     } else {
       fieldsHtml = `<span class="cond-pred-hint cond-pred-hint-empty">— pick a assertion from the dropdown —</span>`;
     }
-  } else if (cond.type === 'locale_ref') {
-    const refId = cond.localeId;
-    const matched = [...localeCache.values()].find(l => l.id === refId);
+  } else if (cond.type === 'perspective_ref') {
+    const refId = cond.perspectiveId;
+    const matched = [...perspectiveCache.values()].find(l => l.id === refId);
     if (matched) {
       const lmCount = Array.isArray(matched.landmarks) ? matched.landmarks.length : 0;
       const summary = `${lmCount} landmark${lmCount === 1 ? '' : 's'}`;
       fieldsHtml = `<span class="cond-pred-hint" title="${escAttr(matched.description ?? '')}">${escHtml(summary)}</span>`;
     } else if (refId) {
-      fieldsHtml = `<span class="cond-pred-hint cond-pred-hint-stale">missing locale: ${escHtml(refId)}</span>`;
+      fieldsHtml = `<span class="cond-pred-hint cond-pred-hint-stale">missing perspective: ${escHtml(refId)}</span>`;
     } else {
-      fieldsHtml = `<span class="cond-pred-hint cond-pred-hint-empty">— pick a locale from the dropdown —</span>`;
+      fieldsHtml = `<span class="cond-pred-hint cond-pred-hint-empty">— pick a perspective from the dropdown —</span>`;
     }
   } else {
     // Generic schema-driven field rendering. CONDITION_FIELDS includes
@@ -2112,7 +2112,7 @@ function closeStrategyForm() {
   _strategyAssertionCache = new Map();
   _strategyAnalysisCache = new Map();
   _strategyObservationCache = new Map();
-  _strategyLocaleCache = new Map();
+  _strategyPerspectiveCache = new Map();
   _dragSourceIdx = null;
   $('strategy-form-card').classList.add('hidden');
   $('input-strategy-name').value    = '';
@@ -2218,7 +2218,7 @@ function wireTopLevelDragAndDrop() {
  * v2.29.0+ — Open the Strategy form. If existingStrategy is supplied,
  * the form opens in edit mode with all fields populated; otherwise it
  * opens fresh. Loads all per-Ground caches needed by the form modules
- * (Fragments, Assertions, Locales, Analyses, Observations) and runs
+ * (Fragments, Assertions, Perspectives, Analyses, Observations) and runs
  * legacy-sieve migration if any inline-ops sieves remain.
  */
 export async function openStrategyForm(groundId, existingStrategy = null) {
@@ -2234,9 +2234,9 @@ export async function openStrategyForm(groundId, existingStrategy = null) {
   const assertions = await StorageManager.listAssertions(groundId);
   _strategyAssertionCache = new Map(assertions.map(p => [p.id, p]));
 
-  // v2.72.29 (Pass 17) — Load Locales for the locale_ref picker.
-  const locales = await StorageManager.listLocales(groundId);
-  _strategyLocaleCache = new Map(locales.map(l => [l.id, l]));
+  // v2.72.29 (Pass 17) — Load Perspectives for the perspective_ref picker.
+  const perspectives = await StorageManager.listPerspectives(groundId);
+  _strategyPerspectiveCache = new Map(perspectives.map(l => [l.id, l]));
 
   // v2.63.0 (Iteration B) — Load Analyses (built-in + user) for the SIEVE
   // step's Analysis-picker dropdown. Cache mirrors the fragment/assertion
@@ -2878,7 +2878,7 @@ function renderStrategyNodes(nodes, pathPrefix, fragOptions, iterScope, availabl
           <div class="wait-mode-body">
             <label class="wait-field">
               <span class="wait-label">Wait until</span>
-              ${_setup.renderConditionEditor(cond, [...path, 'condition'], { assertions: [..._strategyAssertionCache.values()], locales: [..._strategyLocaleCache.values()], iterScope, allowedFamilies: ['page', 'scope'] })}
+              ${_setup.renderConditionEditor(cond, [...path, 'condition'], { assertions: [..._strategyAssertionCache.values()], perspectives: [..._strategyPerspectiveCache.values()], iterScope, allowedFamilies: ['page', 'scope'] })}
             </label>
             <label class="wait-field wait-field-inline">
               <span class="wait-label">Timeout (ms)</span>
@@ -2938,7 +2938,7 @@ function renderStrategyNodes(nodes, pathPrefix, fragOptions, iterScope, availabl
         const branchPathJson = JSON.stringify(branchPath);
         const bodyPath = [...branchPath, 'body'];
         const bodyAddPathJson = JSON.stringify(bodyPath);
-        const condEditorHtml = _setup.renderConditionEditor(branch?.condition ?? {}, [...branchPath, 'condition'], { assertions: [..._strategyAssertionCache.values()], locales: [..._strategyLocaleCache.values()], iterScope, allowedFamilies: ['page', 'scope'] });
+        const condEditorHtml = _setup.renderConditionEditor(branch?.condition ?? {}, [...branchPath, 'condition'], { assertions: [..._strategyAssertionCache.values()], perspectives: [..._strategyPerspectiveCache.values()], iterScope, allowedFamilies: ['page', 'scope'] });
         // DETECT is scope-transparent — branch body sees same iterScope
         // as the detect itself (not a new frame).
         const branchBodyHtml = renderStrategyNodes(branch?.body ?? [], bodyPath, fragOptions, iterScope, new Set(availableLists));
@@ -3030,7 +3030,7 @@ function renderStrategyNodes(nodes, pathPrefix, fragOptions, iterScope, availabl
       const maxIterations = Number.isFinite(node.maxIterations) ? node.maxIterations : 100;
       const bodyPath = [...path, 'body'];
       const bodyAddPathJson = JSON.stringify(bodyPath);
-      const condEditorHtml = _setup.renderConditionEditor(cond, [...path, 'condition'], { assertions: [..._strategyAssertionCache.values()], locales: [..._strategyLocaleCache.values()], iterScope, allowedFamilies: ['page', 'scope'] });
+      const condEditorHtml = _setup.renderConditionEditor(cond, [...path, 'condition'], { assertions: [..._strategyAssertionCache.values()], perspectives: [..._strategyPerspectiveCache.values()], iterScope, allowedFamilies: ['page', 'scope'] });
       // LOOP is scope-transparent — body sees same iterScope as the loop itself.
       const bodyHtml = renderStrategyNodes(node.body ?? [], bodyPath, fragOptions, iterScope, new Set(availableLists));
 
@@ -3997,7 +3997,7 @@ function wireStrategyStepHandlers() {
       const decoded = _setup.decodeConditionTypeValue(sel.value);
       const fresh = emptyCondition(decoded.type);
       if (decoded.assertionId) fresh.assertionId = decoded.assertionId;
-      if (decoded.localeId) fresh.localeId = decoded.localeId;
+      if (decoded.perspectiveId) fresh.perspectiveId = decoded.perspectiveId;
       parent.condition = fresh;
       renderStrategySteps();
     });

@@ -417,7 +417,7 @@ body { display: flex; flex-direction: column; min-height: 100vh; }
   color: var(--fail, #ff6b6b);
 }
 /* v2.74.31 — Per-section collapsible cards inside the Ground sidepanel.
-   Each section (Fragments, Assertions, Locales, Observations, Analyses)
+   Each section (Fragments, Assertions, Perspectives, Observations, Analyses)
    is its own card with a chevron toggle on the head row. Collapsing
    hides the body but keeps the head (label + count) visible.
    v2.74.35 — Sections are now free-floating siblings of the Ground
@@ -525,7 +525,7 @@ body { display: flex; flex-direction: column; min-height: 100vh; }
    original row classes (.fragment-row etc.) might have layered on. */
 .gv-entry.fragment-row,
 .gv-entry.assertion-row,
-.gv-entry.locale-row,
+.gv-entry.perspective-row,
 .gv-entry.observation-row,
 .gv-entry.analysis-row {
   background: var(--bg3);
@@ -877,7 +877,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 }
 .toast.err  { border-color: var(--fail); color: var(--fail); }
 .toast.warn { border-color: var(--warn); color: var(--warn); }
-/* v2.72.46 — green variant for success confirmations (e.g. locale saved) */
+/* v2.72.46 — green variant for success confirmations (e.g. perspective saved) */
 .toast.ok   { border-color: var(--pass); color: var(--pass); }
 
 @keyframes pulse    { 0%,100%{opacity:1} 50%{opacity:.35} }
@@ -4731,12 +4731,12 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 /* v2.74.330 — GROUND_SPEC § 9 lifecycle. Dim deprecated Ground cards;
    lifecycle badges next to the name. */
 .ground-card-deprecated,
-.locale-row-deprecated {
+.perspective-row-deprecated {
   opacity: 0.55;
   transition: opacity .15s;
 }
 .ground-card-deprecated:hover,
-.locale-row-deprecated:hover {
+.perspective-row-deprecated:hover {
   opacity: 0.85;
 }
 .ground-lifecycle-badge {
@@ -4758,7 +4758,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   color: rgba(148, 163, 184, 0.95);
   border: 1px solid rgba(148, 163, 184, 0.35);
 }
-/* v2.74.336 — Phase C-lite: Locale structure proposal bar + preview. */
+/* v2.74.336 — Phase C-lite: Perspective structure proposal bar + preview. */
 .loc-structure-bar {
   display: flex;
   align-items: center;
@@ -4900,109 +4900,116 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 }
 .loc-struct-overlay-body { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* v2.74.348 — LOCALE_SPEC § 13 description-first perspective proposal panel */
-.dbg-locale-perspective-body { display: flex; flex-direction: column; gap: 8px; }
-.dbg-locale-perspective-intro { margin: 0; font-size: 11px; color: rgba(148, 163, 184, 0.85); line-height: 1.4; }
-.dbg-locale-perspective-options { display: flex; flex-direction: column; gap: 6px; }
-.dbg-locale-perspective-buttons { display: flex; gap: 6px; flex-wrap: wrap; }
+/* v2.74.348 — PERSPECTIVE_SPEC § 13 description-first perspective proposal panel */
+.dbg-perspective-perspective-body { display: flex; flex-direction: column; gap: 8px; }
+.dbg-perspective-perspective-intro { margin: 0; font-size: 11px; color: rgba(148, 163, 184, 0.85); line-height: 1.4; }
+.dbg-perspective-perspective-options { display: flex; flex-direction: column; gap: 6px; }
+.dbg-perspective-perspective-buttons { display: flex; gap: 6px; flex-wrap: wrap; }
 
 /* v2.74.368 — pageStructure depth-exploration row (offer / building / done) */
-.dbg-locale-explore {
+.dbg-perspective-explore {
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   font-size: 11px; line-height: 1.4;
   border: 1px solid rgba(148, 163, 184, 0.25);
   border-radius: 5px; padding: 6px 8px;
 }
-.dbg-locale-explore > span:first-child { flex: 1 1 auto; min-width: 0; }
-.dbg-locale-explore-actions { display: flex; gap: 6px; flex: 0 0 auto; }
-.dbg-locale-explore.offer    { border-style: dashed; border-color: rgba(196, 181, 253, 0.45); background: rgba(196, 181, 253, 0.06); color: rgba(216, 207, 255, 0.92); }
-.dbg-locale-explore.building { border-color: rgba(250, 204, 21, 0.45); background: rgba(250, 204, 21, 0.07); color: rgba(253, 224, 130, 0.95); }
-.dbg-locale-explore.done     { border-color: rgba(74, 222, 128, 0.45); background: rgba(74, 222, 128, 0.07); color: rgba(167, 243, 208, 0.95); }
-.dbg-locale-explore.skipped  { border-color: rgba(148, 163, 184, 0.3); color: rgba(148, 163, 184, 0.85); }
-.dbg-locale-explore.failed   { border-color: rgba(248, 113, 113, 0.5); background: rgba(248, 113, 113, 0.08); color: rgba(254, 202, 202, 0.95); }
+.dbg-perspective-explore > span:first-child { flex: 1 1 auto; min-width: 0; }
+.dbg-perspective-explore-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+.dbg-perspective-explore.offer    { border-style: dashed; border-color: rgba(196, 181, 253, 0.45); background: rgba(196, 181, 253, 0.06); color: rgba(216, 207, 255, 0.92); }
+.dbg-perspective-explore.building { border-color: rgba(250, 204, 21, 0.45); background: rgba(250, 204, 21, 0.07); color: rgba(253, 224, 130, 0.95); }
+.dbg-perspective-explore.done     { border-color: rgba(74, 222, 128, 0.45); background: rgba(74, 222, 128, 0.07); color: rgba(167, 243, 208, 0.95); }
+.dbg-perspective-explore.skipped  { border-color: rgba(148, 163, 184, 0.3); color: rgba(148, 163, 184, 0.85); }
+.dbg-perspective-explore.failed   { border-color: rgba(248, 113, 113, 0.5); background: rgba(248, 113, 113, 0.08); color: rgba(254, 202, 202, 0.95); }
 
 /* v2.74.393 — intent-grounding row (offer / building / result) */
-.dbg-locale-ground {
+.dbg-perspective-ground {
   display: flex; flex-direction: column; gap: 6px;
   font-size: 11px; line-height: 1.4;
   border: 1px solid rgba(148, 163, 184, 0.25);
   border-radius: 5px; padding: 6px 8px;
 }
-.dbg-locale-ground.offer    { border-style: dashed; border-color: rgba(196, 181, 253, 0.45); background: rgba(196, 181, 253, 0.06); }
-.dbg-locale-ground.offer    { align-items: flex-start; }
-.dbg-locale-ground.building { border-color: rgba(250, 204, 21, 0.45); background: rgba(250, 204, 21, 0.07); color: rgba(253, 224, 130, 0.95); }
-.dbg-locale-ground.result.yes      { border-color: rgba(74, 222, 128, 0.45); background: rgba(74, 222, 128, 0.06); }
-.dbg-locale-ground.result.partial  { border-color: rgba(250, 204, 21, 0.45); background: rgba(250, 204, 21, 0.06); }
-.dbg-locale-ground.result.no       { border-color: rgba(248, 113, 113, 0.5); background: rgba(248, 113, 113, 0.07); }
-.dbg-locale-ground.result.unknown  { border-color: rgba(148, 163, 184, 0.35); background: rgba(148, 163, 184, 0.05); }
-.dbg-locale-ground-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.dbg-locale-ground-title { font-weight: 600; color: rgba(226, 232, 240, 0.95); }
-.dbg-locale-ground-ach { font-size: 10px; padding: 1px 6px; border-radius: 999px; white-space: nowrap; }
-.dbg-locale-ground-ach.yes      { background: rgba(74, 222, 128, 0.15); color: rgba(167, 243, 208, 0.95); }
-.dbg-locale-ground-ach.partial  { background: rgba(250, 204, 21, 0.15); color: rgba(253, 224, 130, 0.95); }
-.dbg-locale-ground-ach.no       { background: rgba(248, 113, 113, 0.15); color: rgba(254, 202, 202, 0.95); }
-.dbg-locale-ground-ach.unknown  { background: rgba(148, 163, 184, 0.15); color: rgba(203, 213, 225, 0.9); }
-.dbg-locale-ground-text { color: rgba(226, 232, 240, 0.92); }
-.dbg-locale-ground-note { color: rgba(148, 163, 184, 0.85); font-size: 10px; font-style: italic; }
-.dbg-locale-ground-actions { display: flex; gap: 6px; }
+.dbg-perspective-ground.offer    { border-style: dashed; border-color: rgba(196, 181, 253, 0.45); background: rgba(196, 181, 253, 0.06); }
+.dbg-perspective-ground.offer    { align-items: flex-start; }
+.dbg-perspective-ground.building { border-color: rgba(250, 204, 21, 0.45); background: rgba(250, 204, 21, 0.07); color: rgba(253, 224, 130, 0.95); }
+.dbg-perspective-ground.result.yes      { border-color: rgba(74, 222, 128, 0.45); background: rgba(74, 222, 128, 0.06); }
+.dbg-perspective-ground.result.partial  { border-color: rgba(250, 204, 21, 0.45); background: rgba(250, 204, 21, 0.06); }
+.dbg-perspective-ground.result.no       { border-color: rgba(248, 113, 113, 0.5); background: rgba(248, 113, 113, 0.07); }
+.dbg-perspective-ground.result.unknown  { border-color: rgba(148, 163, 184, 0.35); background: rgba(148, 163, 184, 0.05); }
+.dbg-perspective-ground-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dbg-perspective-ground-title { font-weight: 600; color: rgba(226, 232, 240, 0.95); }
+.dbg-perspective-ground-ach { font-size: 10px; padding: 1px 6px; border-radius: 999px; white-space: nowrap; }
+.dbg-perspective-ground-ach.yes      { background: rgba(74, 222, 128, 0.15); color: rgba(167, 243, 208, 0.95); }
+.dbg-perspective-ground-ach.partial  { background: rgba(250, 204, 21, 0.15); color: rgba(253, 224, 130, 0.95); }
+.dbg-perspective-ground-ach.no       { background: rgba(248, 113, 113, 0.15); color: rgba(254, 202, 202, 0.95); }
+.dbg-perspective-ground-ach.unknown  { background: rgba(148, 163, 184, 0.15); color: rgba(203, 213, 225, 0.9); }
+.dbg-perspective-ground-text { color: rgba(226, 232, 240, 0.92); }
+.dbg-perspective-ground-note { color: rgba(148, 163, 184, 0.85); font-size: 10px; font-style: italic; }
+.dbg-perspective-ground-actions { display: flex; gap: 6px; }
 
-/* v2.74.397 — PageModel (Locale capability catalog) inspector (build slice 1) */
-.dbg-locale-pagemodel {
+/* v2.74.397 — PageModel (Perspective capability catalog) inspector (build slice 1) */
+.dbg-perspective-pagemodel {
   display: flex; flex-direction: column; gap: 6px;
   font-size: 11px; line-height: 1.4;
   border: 1px solid rgba(148, 163, 184, 0.25);
   border-radius: 5px; padding: 6px 8px;
 }
-.dbg-locale-pagemodel.offer    { border-style: dashed; border-color: rgba(125, 211, 252, 0.4); background: rgba(125, 211, 252, 0.05); align-items: flex-start; }
-.dbg-locale-pagemodel.building { border-color: rgba(250, 204, 21, 0.45); background: rgba(250, 204, 21, 0.07); color: rgba(253, 224, 130, 0.95); }
-.dbg-locale-pagemodel.result   { border-color: rgba(125, 211, 252, 0.4); background: rgba(125, 211, 252, 0.05); }
-.dbg-locale-pm-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.dbg-locale-pm-title { font-weight: 600; color: rgba(226, 232, 240, 0.95); }
-.dbg-locale-pm-counts { color: rgba(148, 163, 184, 0.9); font-size: 10px; }
-.dbg-locale-pm-list { display: flex; flex-direction: column; gap: 3px; max-height: 220px; overflow-y: auto; }
-.dbg-locale-pm-feat { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.dbg-locale-pm-kind { font-size: 9px; text-transform: uppercase; letter-spacing: 0.03em; padding: 0 5px; border-radius: 999px; flex: 0 0 auto; background: rgba(148, 163, 184, 0.15); color: rgba(203, 213, 225, 0.9); }
-.dbg-locale-pm-kind.input      { background: rgba(125, 211, 252, 0.18); color: rgba(186, 230, 253, 0.95); }
-.dbg-locale-pm-kind.action     { background: rgba(74, 222, 128, 0.16); color: rgba(167, 243, 208, 0.95); }
-.dbg-locale-pm-kind.disclosure { background: rgba(196, 181, 253, 0.18); color: rgba(216, 207, 255, 0.95); }
-.dbg-locale-pm-kind.navigation { background: rgba(250, 204, 21, 0.16); color: rgba(253, 224, 130, 0.95); }
-.dbg-locale-pm-kind.collection { background: rgba(244, 114, 182, 0.16); color: rgba(251, 207, 232, 0.95); }
-.dbg-locale-pm-kind.region     { background: rgba(148, 163, 184, 0.2); color: rgba(203, 213, 225, 0.9); }
-.dbg-locale-pm-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(226, 232, 240, 0.92); }
-.dbg-locale-pm-meta { flex: 0 0 auto; color: rgba(148, 163, 184, 0.8); font-size: 10px; }
-.dbg-locale-pm-more { color: rgba(148, 163, 184, 0.7); font-size: 10px; font-style: italic; padding-left: 4px; }
-.dbg-locale-perspective-run {
+.dbg-perspective-pagemodel.offer    { border-style: dashed; border-color: rgba(125, 211, 252, 0.4); background: rgba(125, 211, 252, 0.05); align-items: flex-start; }
+.dbg-perspective-pagemodel.building { border-color: rgba(250, 204, 21, 0.45); background: rgba(250, 204, 21, 0.07); color: rgba(253, 224, 130, 0.95); }
+.dbg-perspective-pagemodel.result   { border-color: rgba(125, 211, 252, 0.4); background: rgba(125, 211, 252, 0.05); }
+.dbg-perspective-pm-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dbg-perspective-pm-title { font-weight: 600; color: rgba(226, 232, 240, 0.95); }
+.dbg-perspective-pm-counts { color: rgba(148, 163, 184, 0.9); font-size: 10px; }
+.dbg-perspective-pm-list { display: flex; flex-direction: column; gap: 3px; max-height: 220px; overflow-y: auto; }
+.dbg-perspective-pm-feat { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.dbg-perspective-pm-kind { font-size: 9px; text-transform: uppercase; letter-spacing: 0.03em; padding: 0 5px; border-radius: 999px; flex: 0 0 auto; background: rgba(148, 163, 184, 0.15); color: rgba(203, 213, 225, 0.9); }
+.dbg-perspective-pm-kind.input      { background: rgba(125, 211, 252, 0.18); color: rgba(186, 230, 253, 0.95); }
+.dbg-perspective-pm-kind.action     { background: rgba(74, 222, 128, 0.16); color: rgba(167, 243, 208, 0.95); }
+.dbg-perspective-pm-kind.disclosure { background: rgba(196, 181, 253, 0.18); color: rgba(216, 207, 255, 0.95); }
+.dbg-perspective-pm-kind.navigation { background: rgba(250, 204, 21, 0.16); color: rgba(253, 224, 130, 0.95); }
+.dbg-perspective-pm-kind.collection { background: rgba(244, 114, 182, 0.16); color: rgba(251, 207, 232, 0.95); }
+.dbg-perspective-pm-kind.region     { background: rgba(148, 163, 184, 0.2); color: rgba(203, 213, 225, 0.9); }
+.dbg-perspective-pm-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(226, 232, 240, 0.92); }
+.dbg-perspective-pm-meta { flex: 0 0 auto; color: rgba(148, 163, 184, 0.8); font-size: 10px; }
+.dbg-perspective-pm-more { color: rgba(148, 163, 184, 0.7); font-size: 10px; font-style: italic; padding-left: 4px; }
+.dbg-perspective-pm-fidelity { font-size: 9px; font-weight: 700; letter-spacing: 0.04em; padding: 0 5px; border-radius: 4px; margin-right: 5px; background: rgba(148, 163, 184, 0.2); color: rgba(203, 213, 225, 0.95); }
+.dbg-perspective-pm-fidelity.L1 { background: rgba(196, 181, 253, 0.22); color: rgba(216, 207, 255, 0.98); }
+.dbg-perspective-pm-fidelity.L2 { background: rgba(74, 222, 128, 0.2); color: rgba(167, 243, 208, 0.98); }
+.dbg-perspective-pm-section { margin-top: 8px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: rgba(148, 163, 184, 0.85); border-top: 1px solid rgba(148, 163, 184, 0.14); padding-top: 6px; }
+.dbg-perspective-pm-goal { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.dbg-perspective-pm-goal-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(226, 232, 240, 0.92); }
+.dbg-perspective-pm-layer { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.dbg-perspective-perspective-run {
   display: flex; flex-direction: column; gap: 6px;
   border: 1px dashed rgba(148, 163, 184, 0.3);
   border-radius: 5px;
   padding: 6px 8px;
 }
-.dbg-locale-perspective-run-head {
+.dbg-perspective-perspective-run-head {
   font-size: 10px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase;
   color: rgba(196, 181, 253, 0.9);
 }
-.dbg-locale-perspective-option {
+.dbg-perspective-perspective-option {
   border: 1px solid rgba(148, 163, 184, 0.25);
   border-radius: 5px;
   padding: 6px 8px;
   background: rgba(148, 163, 184, 0.05);
 }
-.dbg-locale-perspective-option.chosen {
+.dbg-perspective-perspective-option.chosen {
   border-color: rgba(125, 211, 252, 0.6);
   background: rgba(125, 211, 252, 0.08);
 }
 /* v2.74.351 — downstream (off-current-page) perspectives: flagged, not fillable here */
-.dbg-locale-perspective-option.downstream { opacity: 0.72; border-style: dashed; }
-.dbg-locale-perspective-downstream-badge {
+.dbg-perspective-perspective-option.downstream { opacity: 0.72; border-style: dashed; }
+.dbg-perspective-perspective-downstream-badge {
   flex: 0 0 auto; font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em;
   padding: 1px 5px; border-radius: 3px;
   background: rgba(251, 191, 36, 0.15); color: rgba(252, 211, 77, 0.95);
   border: 1px solid rgba(251, 191, 36, 0.4);
 }
-.dbg-locale-perspective-reached { margin-top: 3px; font-size: 10px; color: rgba(251, 191, 36, 0.85); font-style: italic; }
+.dbg-perspective-perspective-reached { margin-top: 3px; font-size: 10px; color: rgba(251, 191, 36, 0.85); font-style: italic; }
 
 /* v2.74.353 — Resolve-difficulty badge (tiered) */
-.dbg-locale-complexity {
+.dbg-perspective-complexity {
   display: inline-block;
   font-size: 10.5px; font-weight: 600;
   padding: 1px 7px; border-radius: 10px;
@@ -5010,51 +5017,51 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   color: rgba(148, 163, 184, 0.9);
   cursor: help;
 }
-.dbg-locale-complexity.cx-simple   { background: rgba(61, 214, 140, 0.14);  border-color: rgba(61, 214, 140, 0.5);  color: rgba(110, 231, 168, 1); }
-.dbg-locale-complexity.cx-moderate { background: rgba(251, 191, 36, 0.14);  border-color: rgba(251, 191, 36, 0.5);  color: rgba(252, 211, 77, 1); }
-.dbg-locale-complexity.cx-complex  { background: rgba(251, 146, 60, 0.16);  border-color: rgba(251, 146, 60, 0.55); color: rgba(253, 186, 116, 1); }
-.dbg-locale-complexity.cx-severe   { background: rgba(247, 110, 110, 0.16); border-color: rgba(247, 110, 110, 0.6);  color: rgba(252, 165, 165, 1); }
-.dbg-locale-perspective-option-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dbg-perspective-complexity.cx-simple   { background: rgba(61, 214, 140, 0.14);  border-color: rgba(61, 214, 140, 0.5);  color: rgba(110, 231, 168, 1); }
+.dbg-perspective-complexity.cx-moderate { background: rgba(251, 191, 36, 0.14);  border-color: rgba(251, 191, 36, 0.5);  color: rgba(252, 211, 77, 1); }
+.dbg-perspective-complexity.cx-complex  { background: rgba(251, 146, 60, 0.16);  border-color: rgba(251, 146, 60, 0.55); color: rgba(253, 186, 116, 1); }
+.dbg-perspective-complexity.cx-severe   { background: rgba(247, 110, 110, 0.16); border-color: rgba(247, 110, 110, 0.6);  color: rgba(252, 165, 165, 1); }
+.dbg-perspective-perspective-option-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 /* v2.74.352 — "Use this" + "Resolve roles" sit together on the right */
-.dbg-locale-perspective-option-actions { display: inline-flex; gap: 5px; flex: 0 0 auto; }
-.dbg-locale-perspective-option-name { font-weight: 600; font-size: 12px; color: rgba(229, 222, 255, 0.95); }
-.dbg-locale-perspective-option-rationale { margin-top: 3px; font-size: 10.5px; color: rgba(148, 163, 184, 0.9); line-height: 1.35; }
-.dbg-locale-perspective-option-roles { margin-top: 3px; font-size: 10px; color: rgba(196, 181, 253, 0.85); }
-.dbg-locale-perspective-roles {
+.dbg-perspective-perspective-option-actions { display: inline-flex; gap: 5px; flex: 0 0 auto; }
+.dbg-perspective-perspective-option-name { font-weight: 600; font-size: 12px; color: rgba(229, 222, 255, 0.95); }
+.dbg-perspective-perspective-option-rationale { margin-top: 3px; font-size: 10.5px; color: rgba(148, 163, 184, 0.9); line-height: 1.35; }
+.dbg-perspective-perspective-option-roles { margin-top: 3px; font-size: 10px; color: rgba(196, 181, 253, 0.85); }
+.dbg-perspective-perspective-roles {
   display: flex; flex-direction: column; gap: 4px;
   border-top: 1px solid rgba(148, 163, 184, 0.18);
   padding-top: 8px;
 }
-.dbg-locale-perspective-roles-title { font-size: 11px; font-weight: 600; color: rgba(229, 222, 255, 0.9); }
-.dbg-locale-perspective-role {
+.dbg-perspective-perspective-roles-title { font-size: 11px; font-weight: 600; color: rgba(229, 222, 255, 0.9); }
+.dbg-perspective-perspective-role {
   display: flex; align-items: center; gap: 6px;
   font-size: 11px; color: rgba(229, 222, 255, 0.92);
 }
-.dbg-locale-perspective-role-status { flex: 0 0 auto; width: 14px; text-align: center; color: rgba(148, 163, 184, 0.7); }
-.dbg-locale-perspective-role.filled .dbg-locale-perspective-role-status { color: rgba(61, 214, 140, 1); }
-.dbg-locale-perspective-role-name { flex: 0 0 auto; font-weight: 600; }
-.dbg-locale-perspective-role-desc { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(148, 163, 184, 0.8); }
-.dbg-locale-perspective-mult {
+.dbg-perspective-perspective-role-status { flex: 0 0 auto; width: 14px; text-align: center; color: rgba(148, 163, 184, 0.7); }
+.dbg-perspective-perspective-role.filled .dbg-perspective-perspective-role-status { color: rgba(61, 214, 140, 1); }
+.dbg-perspective-perspective-role-name { flex: 0 0 auto; font-weight: 600; }
+.dbg-perspective-perspective-role-desc { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(148, 163, 184, 0.8); }
+.dbg-perspective-perspective-mult {
   flex: 0 0 auto; font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em;
   padding: 0 4px; border-radius: 3px;
   background: rgba(196, 181, 253, 0.15); color: rgba(196, 181, 253, 0.95);
 }
 /* v2.74.381 — hidden-layer role badge (revealed via a trigger). */
-.dbg-locale-perspective-hidden {
+.dbg-perspective-perspective-hidden {
   flex: 0 0 auto; font-size: 9px; letter-spacing: 0.02em;
   padding: 0 4px; border-radius: 3px;
   background: rgba(251, 191, 36, 0.15); color: rgba(253, 224, 130, 0.95);
 }
-.dbg-locale-perspective-role button { flex: 0 0 auto; margin-left: auto; }
+.dbg-perspective-perspective-role button { flex: 0 0 auto; margin-left: auto; }
 /* v2.74.355 — why ⚡ Resolve couldn't fill a role (verification failure / abstain) */
-.dbg-locale-perspective-role-note {
+.dbg-perspective-perspective-role-note {
   font-size: 10px; line-height: 1.35; margin: 1px 0 4px 20px;
   padding: 2px 6px; border-radius: 3px;
 }
-.dbg-locale-perspective-role-note.failed    { color: rgba(252, 165, 165, 0.95); background: rgba(247, 110, 110, 0.1); }
-.dbg-locale-perspective-role-note.abstained { color: rgba(148, 163, 184, 0.9);  background: rgba(148, 163, 184, 0.08); }
+.dbg-perspective-perspective-role-note.failed    { color: rgba(252, 165, 165, 0.95); background: rgba(247, 110, 110, 0.1); }
+.dbg-perspective-perspective-role-note.abstained { color: rgba(148, 163, 184, 0.9);  background: rgba(148, 163, 184, 0.08); }
 /* v2.74.356 — opt-in repair-round button */
-.dbg-locale-perspective-retry { margin-top: 6px; }
+.dbg-perspective-perspective-retry { margin-top: 6px; }
 
 .ground-group-meta {
   display: flex;
@@ -8079,19 +8086,19 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   color: rgba(220, 160, 100, 0.95);
 }
 
-/* ── Locale form (v2.72.38) ────────────────────────────────────────────────
-   Pass 17 shipped Locale authoring without CSS — functional rendering relied
+/* ── Perspective form (v2.72.38) ────────────────────────────────────────────────
+   Pass 17 shipped Perspective authoring without CSS — functional rendering relied
    on default browser styling, which made the capture status invisible and
    landmark rows hard to scan. This section adds explicit styling for the
    capture flow and landmarks list, matching the design language of the
    adjacent forms (Assertion, Observation).
 
    Status modifier classes — .status-info / .status-ok / .status-err — are
-   used both by .locale-capture-status and .locale-landmark-status. They
+   used both by .perspective-capture-status and .perspective-landmark-status. They
    share base color tokens (--gen / --pass / --fail) for consistency with
    toasts and other status surfaces. */
 
-.locale-capture-section {
+.perspective-capture-section {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -8101,10 +8108,10 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   border: 1px solid var(--line);
   border-radius: var(--r);
 }
-.locale-capture-section .btn-secondary {
+.perspective-capture-section .btn-secondary {
   align-self: flex-start;
 }
-.locale-capture-status {
+.perspective-capture-status {
   font-size: 11px;
   padding: 6px 8px;
   border-radius: 4px;
@@ -8118,7 +8125,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 }
 /* Empty status — collapsed so there's no awkward gap when nothing's been
    captured yet. */
-.locale-capture-status:empty {
+.perspective-capture-status:empty {
   display: none;
 }
 
@@ -8139,7 +8146,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   border: 1px solid rgba(247, 110, 110, 0.25);
 }
 
-.locale-landmarks-section {
+.perspective-landmarks-section {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -8149,31 +8156,31 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   border: 1px solid var(--line);
   border-radius: var(--r);
 }
-.locale-landmarks-head {
+.perspective-landmarks-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
-.locale-landmarks-label {
+.perspective-landmarks-label {
   font-size: 11px;
   font-weight: 600;
   color: var(--sub);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.locale-landmarks-list {
+.perspective-landmarks-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
-.locale-landmarks-empty {
+.perspective-landmarks-empty {
   padding: 12px;
   text-align: center;
   background: var(--bg3);
   border-radius: 4px;
 }
-.locale-landmark-row {
+.perspective-landmark-row {
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -8182,12 +8189,12 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   border: 1px solid var(--line);
   border-radius: 4px;
 }
-.locale-landmark-fields {
+.perspective-landmark-fields {
   display: flex;
   align-items: center;
   gap: 6px;
 }
-.locale-landmark-role {
+.perspective-landmark-role {
   flex: 0 0 140px;
   padding: 4px 8px;
   font-size: 11px;
@@ -8196,7 +8203,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   border-radius: 3px;
   color: inherit;
 }
-.locale-landmark-selector {
+.perspective-landmark-selector {
   flex: 1;
   padding: 4px 8px;
   font-size: 11px;
@@ -8207,12 +8214,12 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   color: inherit;
   min-width: 0;
 }
-.locale-landmark-role:focus,
-.locale-landmark-selector:focus {
+.perspective-landmark-role:focus,
+.perspective-landmark-selector:focus {
   outline: none;
   border-color: var(--acc);
 }
-.locale-landmark-status {
+.perspective-landmark-status {
   font-size: 10px;
   padding: 3px 6px;
   border-radius: 3px;
@@ -8220,7 +8227,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   color: var(--muted);
   align-self: flex-start;
 }
-.locale-landmark-sample {
+.perspective-landmark-sample {
   display: block;
   font-family: var(--mono, ui-monospace, monospace);
   font-size: 10px;
@@ -8234,16 +8241,16 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   overflow: auto;
 }
 
-/* ── Locale form Pass 17g additions ────────────────────────────────────────
-   The locale form is now metadata + planned-landmark-roles only; the
+/* ── Perspective form Pass 17g additions ────────────────────────────────────────
+   The perspective form is now metadata + planned-landmark-roles only; the
    actual capture happens in the debugger sidepanel. These two classes
    support the new shape:
-     .locale-form-status         → handoff feedback ("Tab opened...", errors)
-     .locale-landmark-ctx        → re-edit context: existing selector +
+     .perspective-form-status         → handoff feedback ("Tab opened...", errors)
+     .perspective-landmark-ctx        → re-edit context: existing selector +
                                     verified state shown read-only beneath
                                     each landmark role. */
 
-.locale-form-status {
+.perspective-form-status {
   font-size: 11px;
   padding: 6px 8px;
   margin: 8px 0;
@@ -8255,11 +8262,11 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   align-items: center;
   word-break: break-word;
 }
-.locale-form-status:empty { display: none; }
+.perspective-form-status:empty { display: none; }
 /* status-info / status-ok / status-err already defined above for the
    landmark form; classes are reused here. */
 
-.locale-landmark-ctx {
+.perspective-landmark-ctx {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
@@ -8267,7 +8274,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   margin-top: 4px;
   font-size: 10px;
 }
-.locale-landmark-ctx-sel {
+.perspective-landmark-ctx-sel {
   font-family: ui-monospace, monospace;
   color: var(--sub);
   padding: 2px 6px;
@@ -8277,43 +8284,43 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   flex: 1;
   min-width: 0;
 }
-.locale-landmark-ctx-status {
+.perspective-landmark-ctx-status {
   font-size: 10px;
   padding: 2px 6px;
   border-radius: 3px;
   color: var(--muted);
   background: var(--bg-base, var(--bg1));
 }
-.locale-landmark-ctx-status.status-ok {
+.perspective-landmark-ctx-status.status-ok {
   background: rgba(61, 214, 140, 0.10);
   color: var(--pass);
 }
 
-/* ── v2.72.46 — Locale row in Ground card ─────────────────────────────────
-   Pre-Pass-17g iter the locale row had no CSS — items appeared as raw
+/* ── v2.72.46 — Perspective row in Ground card ─────────────────────────────────
+   Pre-Pass-17g iter the perspective row had no CSS — items appeared as raw
    floating text under the section head. Now matches .observation-row
    visual treatment (subtle bg, hover-visible action buttons, name +
    summary pill on the same line, optional description below). */
 
-.locale-row {
+.perspective-row {
   padding: 6px 8px;
   background: rgba(255, 255, 255, 0.02);
   border-radius: 3px;
   margin-bottom: 4px;
   position: relative;
 }
-.locale-row-main {
+.perspective-row-main {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
-.locale-name {
+.perspective-name {
   font-size: 12px;
   font-weight: 500;
   color: var(--text, #ddd);
 }
-.locale-summary {
+.perspective-summary {
   font-size: 10px;
   font-family: ui-monospace, monospace;
   color: var(--sub, #888);
@@ -8321,14 +8328,14 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   border-radius: 2px;
   background: rgba(255, 255, 255, 0.05);
 }
-.locale-desc {
+.perspective-desc {
   font-size: 11px;
   color: var(--sub, #aaa);
   margin-top: 3px;
   /* Leave room on the right for action buttons */
   padding-right: 60px;
 }
-.locale-row-actions {
+.perspective-row-actions {
   position: absolute;
   top: 6px;
   right: 8px;
@@ -8337,12 +8344,12 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   opacity: 0;
   transition: opacity 0.15s ease;
 }
-.locale-row:hover .locale-row-actions {
+.perspective-row:hover .perspective-row-actions {
   opacity: 1;
 }
 
 /* v2.74.371 — Page Structures section rows (Studio ground card). Mirrors
-   .locale-row; the path is monospace, the summary a stat pill. */
+   .perspective-row; the path is monospace, the summary a stat pill. */
 .page-structure-row {
   padding: 6px 8px;
   background: rgba(255, 255, 255, 0.02);
@@ -8387,10 +8394,32 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   opacity: 1;
 }
 
+/* ── v2.74.416 — OUTCOMES stream viewer (studio Outcomes section) ───────────── */
+.outcomes-summary {
+  font-size: 10px;
+  font-family: ui-monospace, monospace;
+  color: var(--sub, #888);
+  margin-bottom: 6px;
+  line-height: 1.5;
+}
+.outcomes-events { display: flex; flex-direction: column; gap: 2px; }
+.outcomes-event {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+  font-size: 11px; font-family: ui-monospace, monospace;
+}
+.outcomes-ev-icon { flex: 0 0 auto; width: 12px; text-align: center; color: var(--sub, #888); }
+.outcomes-verified .outcomes-ev-icon { color: #4ade80; }
+.outcomes-failed   .outcomes-ev-icon { color: #f87171; }
+.outcomes-corrected .outcomes-ev-icon { color: #c4b5fd; }
+.outcomes-abstained .outcomes-ev-icon { color: #94a3b8; }
+.outcomes-ev-op { flex: 0 0 auto; color: var(--sub, #888); text-transform: uppercase; font-size: 9px; letter-spacing: 0.03em; }
+.outcomes-ev-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text, #ddd); }
+.outcomes-ev-ts { flex: 0 0 auto; color: var(--sub, #888); font-size: 9px; }
+
 /* ── v2.72.47 (Pass 18) — Assertion live-DOM verify ─────────────────────────
    New verify section in the assertion form. Probes the active tab and
    shows per-condition status pills + an overall match-mode banner.
-   Mirrors the locale-form's status pattern (status-ok / status-err /
+   Mirrors the perspective-form's status pattern (status-ok / status-err /
    status-skip). */
 
 .assertion-verify-section {
@@ -8494,11 +8523,11 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 
 /* v2.74.22 — Fragment-walk mode styles (.walk-mode, .walk-log,
  .chat-review-*, .walk-pending-*) removed alongside the AI-walked path.
- The fragment-author mode below uses .fa-* and .dbg-locale-* styles. */
+ The fragment-author mode below uses .fa-* and .dbg-perspective-* styles. */
 
 /* ── v2.72.60 — fragment-author mode ──────────────────────────────────────
-   Per-row UI for action authoring. Reuses .dbg-locale-* container styles
-   from locale-capture; adds the action-row-specific bits. */
+   Per-row UI for action authoring. Reuses .dbg-perspective-* container styles
+   from perspective-capture; adds the action-row-specific bits. */
 
 /* v2.74.12 — Fixed Save/Done bar at viewport bottom.
    v2.74.13 — Switched to position:fixed; padding-bottom hack on
@@ -8518,7 +8547,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
    bar is in NATURAL flow at the bottom, so it always sits below the
    last content row — never covers it, no padding-hack needed.
 
-   Scoped to .fa-author so locale-capture and observation-author keep
+   Scoped to .fa-author so perspective-capture and observation-author keep
    their natural-flow buttons. Other authoring modes (assertion-author,
    analysis-author) don't use .fa-author and were always fine. */
 .fa-author {
@@ -8530,10 +8559,10 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 /* All non-bar children keep their natural size; flex-shrink:0 prevents
    them from compressing if the bar's content + their content exceeds
    viewport height. The bar then triggers normal scroll. */
-.fa-author > :not(.dbg-locale-actions) {
+.fa-author > :not(.dbg-perspective-actions) {
   flex-shrink: 0;
 }
-.fa-author .dbg-locale-actions {
+.fa-author .dbg-perspective-actions {
   /* margin-top:auto pushes the bar to the bottom of .fa-author when
      the content above doesn't fill the viewport. Combined with sticky
      bottom:0, the bar stays pinned to viewport bottom whether content
@@ -8556,7 +8585,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
      above the bar). */
   order: 100;
 }
-.fa-author .dbg-locale-actions button {
+.fa-author .dbg-perspective-actions button {
   flex: 1;
 }
 /* v2.74.192 — Pick-banner sits just above the action bar when visible.
@@ -8564,7 +8593,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
    `order:99` lays it out before the order:100 bar. When hidden the
    `.hidden` class collapses it; when visible it appears as a sticky
    instructional strip directly above the Done/Cancel row. */
-.fa-author .dbg-locale-pick-banner {
+.fa-author .dbg-perspective-pick-banner {
   order: 99;
   flex-shrink: 0;
   position: sticky;
@@ -8647,7 +8676,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   line-height: 1;
   user-select: none;
 }
-.fa-landmarks-card-collapsed .dbg-locale-landmarks-list,
+.fa-landmarks-card-collapsed .dbg-perspective-landmarks-list,
 .fa-landmarks-card-collapsed .fa-actions-footer {
   display: none;
 }
@@ -8665,8 +8694,8 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   border-radius: 3px;
   background: rgba(255, 255, 255, 0.04);
 }
-/* v2.74.317 — Active-perspective banner (LOCALE_SPEC § 8). Sits above the
-   actions list; tells the author which Locales match the current page. */
+/* v2.74.317 — Active-perspective banner (PERSPECTIVE_SPEC § 8). Sits above the
+   actions list; tells the author which Perspectives match the current page. */
 .fa-active-perspectives {
   display: flex;
   align-items: center;
@@ -8807,11 +8836,11 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
  * No content sits beneath the chevron — when collapsed, only the
  * chevron remains visible.
  *
- * Specificity note: the base .dbg-locale-meta-card class lives in
+ * Specificity note: the base .dbg-perspective-meta-card class lives in
  * debugger.css (loaded AFTER sidepanel.css) and sets flex-direction:
  * column. Stacking both classes in the selector raises specificity so
  * our row layout wins regardless of stylesheet load order. */
-.dbg-locale-meta-card.fa-antecedent-card {
+.dbg-perspective-meta-card.fa-antecedent-card {
   margin-top: 4px;
   flex-direction: row;
   align-items: flex-start;
@@ -8852,7 +8881,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   gap: 8px;
 }
 .fa-antecedent-header-label {
-  /* Inherits font/color from .dbg-locale-field-label; this class only
+  /* Inherits font/color from .dbg-perspective-field-label; this class only
    * exists to give the header instance its own selector hook in case
    * we want to style it separately later. */
   line-height: 22px;
@@ -9020,11 +9049,11 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
    v2.74.23 — Collapsible card pattern (mirrors the antecedent card):
    chevron in a left column, head + list in a right column. The head
    (label + source) stays visible when collapsed; only the list hides.
-   v2.74.24 — Adopt the .dbg-locale-meta-card chrome so the card visual
+   v2.74.24 — Adopt the .dbg-perspective-meta-card chrome so the card visual
    matches the Name and Antecedent cards. Specificity bumped (stacked
-   classes) to override .dbg-locale-meta-card's column flex-direction
+   classes) to override .dbg-perspective-meta-card's column flex-direction
    from debugger.css, which loads after sidepanel.css. */
-.dbg-locale-meta-card.fa-conditions-card {
+.dbg-perspective-meta-card.fa-conditions-card {
   margin-top: 4px;
   flex-direction: row;
   align-items: flex-start;
@@ -9097,7 +9126,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 }
 
 /* v2.74.25 — Header label matches the Actions card's
-   .dbg-locale-landmarks-label exactly: same color (--sub), weight, size,
+   .dbg-perspective-landmarks-label exactly: same color (--sub), weight, size,
    transform, and tracking. Keeps the three card headers (Actions /
    Preconditions / Postconditions) visually unified. */
 .fa-conditions-label {
@@ -9160,7 +9189,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   min-width: 60px;
   text-align: center;
 }
-.fa-condition-locale .fa-condition-type {
+.fa-condition-perspective .fa-condition-type {
   background: rgba(140, 200, 255, 0.16);
   color: #8fc8ff;
 }
@@ -9221,7 +9250,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 
    v2.72.74 design choice: accent applies ONLY to verified-success rows
    (.fa-action-row-verified). Unverified or failed rows keep the
-   default .dbg-locale-landmark-row gray styling. This makes the accent
+   default .dbg-perspective-landmark-row gray styling. This makes the accent
    double as a state indicator — colored row = verified, gray row =
    pending. Scanning a Fragment, you can see at a glance which actions
    are confirmed and what type each is.
@@ -9348,17 +9377,17 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 /* ── v2.72.76 — Drag-and-drop visuals for fragment-author rows ────────────
    Reuses .strategy-step-handle for the drag handle itself (already
    styled with grab cursor + dotted icon). These rules add the dragging
-   and drop-target visual feedback specific to .dbg-locale-landmark-row,
+   and drop-target visual feedback specific to .dbg-perspective-landmark-row,
    matching the strategy form's pattern. */
-.dbg-locale-landmark-row.dragging {
+.dbg-perspective-landmark-row.dragging {
   opacity: 0.55;
   background: rgba(120, 180, 255, 0.04);
   border-style: dashed;
 }
-.dbg-locale-landmark-row.drop-before {
+.dbg-perspective-landmark-row.drop-before {
   box-shadow: inset 0 2px 0 0 rgba(120, 180, 255, 0.8);
 }
-.dbg-locale-landmark-row.drop-after {
+.dbg-perspective-landmark-row.drop-after {
   box-shadow: inset 0 -2px 0 0 rgba(120, 180, 255, 0.8);
 }
 /* Slightly tweak the drag handle in this context — make it more
@@ -9381,7 +9410,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
    logic stays consistent: Verify always on row 2's right edge. */
 
 /* Re-define landmark-row as block flex column to host head/body/footer. */
-.dbg-locale-landmark-row {
+.dbg-perspective-landmark-row {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -9428,15 +9457,15 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
   box-sizing: border-box;
 }
 .fa-action-row-2 > .fa-action-selector,
-.fa-action-row-2 > .dbg-locale-landmark-selector {
+.fa-action-row-2 > .dbg-perspective-landmark-selector {
   flex: 1;
   min-width: 0;
   box-sizing: border-box;
 }
 .fa-action-row-1 > .fa-action-pick,
-.fa-action-row-1 > .dbg-locale-landmark-pick,
+.fa-action-row-1 > .dbg-perspective-landmark-pick,
 .fa-action-row-2 > .fa-action-verify,
-.fa-action-row-2 > .dbg-locale-landmark-verify {
+.fa-action-row-2 > .dbg-perspective-landmark-verify {
   flex: 0 0 auto;
   min-width: 60px;
 }
@@ -9582,7 +9611,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 
 /* ── v2.72.95 — Observation author mode ───────────────────────────────────
    New T1 sidepanel mode for live-picking Observation extractors. Phase 1
-   handles scalar / raw_text / raw_html. Visual language reuses dbg-locale
+   handles scalar / raw_text / raw_html. Visual language reuses dbg-perspective
    primitives where possible; only Observation-specific bits get oa- classes. */
 
 .oa-shape, .oa-target, .oa-extract, .oa-conditions {
@@ -10068,7 +10097,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
  * specific framing for the body region.
  */
 
-/* The card wrapper is the same .dbg-locale-landmark-row + .fa-action-row
+/* The card wrapper is the same .dbg-perspective-landmark-row + .fa-action-row
  * scaffolding as a regular action; the .fa-action-chain-card class adds
  * the body-zone styling below. */
 .fa-action-chain-card .fa-chain-head-body {
@@ -10743,7 +10772,7 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
  * action's landmarkRef + selector + frameUrl; a chip below the row
  * displays the ref with a clear button to revert to inline editing.
  * Green accent here matches the landmark-overlay accent in
- * locale-capture — they're the same conceptual color (landmarks
+ * perspective-capture — they're the same conceptual color (landmarks
  * verified + in use). */
 .fa-action-landmark-select {
   flex: 0 0 auto;

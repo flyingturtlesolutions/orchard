@@ -2,17 +2,17 @@
  * @file Sidepanel/modes/ground-view.js
  * @description Read-only Ground browse view. Mirrors Studio's Ground card
  * layout — header (name + url + collapse), then per-section rows for
- * Fragments, Assertions, Locales, Observations, and Analyses — minus
+ * Fragments, Assertions, Perspectives, Observations, and Analyses — minus
  * the Strategies section and the per-row edit / view-json affordances.
  *
  * Per-section + Add buttons launch the sidepanel-authorable flows
- * (fragment-author, observation-author, locale-capture). Assertion /
+ * (fragment-author, observation-author, perspective-capture). Assertion /
  * Analysis authoring lives in Studio, so those entries are read-only
  * here.
  *
  * Background contract:
  *   GET_GROUND_LIBRARY — returns every Ground with its Fragment /
- *                        Assertion / Locale / Observation / Analysis
+ *                        Assertion / Perspective / Observation / Analysis
  *                        lists in one round trip.
  *
  * Mode lifecycle:
@@ -32,7 +32,7 @@ const escAttr = escHtml;
 
 let _mountEl = null;
 // v2.74.31 — Per-section collapse state. Map<groundId, Set<sectionKey>>
-// — sectionKey is one of 'fragments' | 'assertions' | 'locales' |
+// — sectionKey is one of 'fragments' | 'assertions' | 'perspectives' |
 // 'observations' | 'analyses'. Ephemeral; lost on unmount.
 // v2.74.35 — Ground-level collapse retired: the Ground card no longer
 // holds the section cards inside it (each section is a free-floating
@@ -465,7 +465,7 @@ function _wireNewGroundHandlers(_tabUrl) {
 // v2.74.35 — The Ground header card and the five section cards are now
 // independent sibling sections — none of the sections are nested inside
 // the Ground header. The Ground card just shows name + url; the
-// per-section cards (Fragments, Assertions, Locales, Observations,
+// per-section cards (Fragments, Assertions, Perspectives, Observations,
 // Analyses) live below as free-floating cards with their own collapse
 // chevron, list of items, and (where applicable) right-aligned + Add
 // footer. Mirrors the fragment-author sidepanel pattern.
@@ -474,7 +474,7 @@ function _wireNewGroundHandlers(_tabUrl) {
 // v2.74.38 — The 🗺 N pages badge is a clickable button that toggles an
 // inline GroundMap viewer beneath the header — same UX Studio provides.
 function _renderGroundCard(entry) {
-  const { ground, fragments, assertions, locales, observations, analyses } = entry;
+  const { ground, fragments, assertions, perspectives, observations, analyses } = entry;
   // v2.74.42 — Header card is now collapsible; the chevron + body
   // logic was hoisted into _renderHeaderOnly so the discovering /
   // undiscovered render paths can reuse it.
@@ -507,17 +507,17 @@ function _renderGroundCard(entry) {
     })}
 
     ${_renderSection({
-      key: 'locales',
-      label: 'Locales',
-      count: locales.length,
-      // v2.74.392 — + Locale opens a BLANK locale-capture draft. Authoring is
+      key: 'perspectives',
+      label: 'Perspectives',
+      count: perspectives.length,
+      // v2.74.392 — + Perspective opens a BLANK perspective-capture draft. Authoring is
       // the description-first propose→resolve→auto-structure flow; the legacy
       // Claude auto-suggested-landmarks path was removed.
-      addLabel: '+ Locale',
-      addKind: 'locale',
+      addLabel: '+ Perspective',
+      addKind: 'perspective',
       groundId: ground.id,
-      emptyMsg: 'No Locales yet — verified DOM landmark records for kinds of pages.',
-      entries: locales.map(l => _renderLocaleEntry(l)),
+      emptyMsg: 'No Perspectives yet — verified DOM landmark records for kinds of pages.',
+      entries: perspectives.map(l => _renderPerspectiveEntry(l)),
     })}
 
     ${_renderSection({
@@ -558,7 +558,7 @@ function _renderSection({ key, label, count, addLabel, addKind, addButtons, grou
     ? `<span class="empty-state small">${escHtml(emptyMsg)}</span>`
     : entries.join('');
   // v2.74.43 — A section can declare either a single {addLabel, addKind}
-  // (most sections) or an array of `addButtons` (Locales, which offers
+  // (most sections) or an array of `addButtons` (Perspectives, which offers
   // + Manual / + Auto). The latter wins when present.
   const buttons = Array.isArray(addButtons) && addButtons.length > 0
     ? addButtons
@@ -618,7 +618,7 @@ function _deleteBtn(kind, id, name) {
 
 // v2.74.47 — Edit button for entry rows that support inline editing.
 // Mirrors Studio's fragment-row ✎ pattern (top-right action area, to
-// the left of the ✕ delete). Currently used by locale entries; can be
+// the left of the ✕ delete). Currently used by perspective entries; can be
 // reused for other entry kinds later.
 function _editBtn(kind, id, name) {
   return `<button class="gv-entry-edit btn-action"
@@ -668,17 +668,17 @@ function _renderAssertionEntry(p) {
     </div>`;
 }
 
-function _renderLocaleEntry(l) {
+function _renderPerspectiveEntry(l) {
   const lmCount = Array.isArray(l.landmarks) ? l.landmarks.length : 0;
   return `
-    <div class="locale-row gv-entry">
-      ${_editBtn('locale', l.id, l.name)}
-      ${_deleteBtn('locale', l.id, l.name)}
-      <div class="locale-row-main">
-        <span class="locale-name">${escHtml(l.name ?? 'Unnamed')}</span>
-        <span class="locale-summary">${lmCount} landmark${lmCount === 1 ? '' : 's'}</span>
+    <div class="perspective-row gv-entry">
+      ${_editBtn('perspective', l.id, l.name)}
+      ${_deleteBtn('perspective', l.id, l.name)}
+      <div class="perspective-row-main">
+        <span class="perspective-name">${escHtml(l.name ?? 'Unnamed')}</span>
+        <span class="perspective-summary">${lmCount} landmark${lmCount === 1 ? '' : 's'}</span>
       </div>
-      ${l.description ? `<div class="locale-desc">${escHtml(l.description)}</div>` : ''}
+      ${l.description ? `<div class="perspective-desc">${escHtml(l.description)}</div>` : ''}
     </div>`;
 }
 
@@ -774,7 +774,7 @@ function _wireHandlers(grounds) {
   });
 
   // v2.74.47 — Per-entry ✎ edit buttons.
-  //   locale      → BEGIN_LOCALE_CAPTURE with prefilledLocale (verified
+  //   perspective      → BEGIN_PERSPECTIVE_CAPTURE with prefilledPerspective (verified
   //                 state + urlPattern + authoredBy preserved)
   //   fragment    → BEGIN_FRAGMENT_AUTHOR in rewalk-mode with the saved
   //                 rawJson parsed into prefilledActions (mirrors Studio's
@@ -789,8 +789,8 @@ function _wireHandlers(grounds) {
       e.stopPropagation();
       const kind = btn.dataset.gvEdit;
       const id   = btn.dataset.gvEditId;
-      if (kind === 'locale') {
-        await _editLocale(id, grounds);
+      if (kind === 'perspective') {
+        await _editPerspective(id, grounds);
         return;
       }
       if (kind === 'fragment') {
@@ -973,47 +973,47 @@ async function _kickoffDiscovery(groundId) {
   });
 }
 
-// v2.74.59 — Edit Locale. Looks the existing record up from the
-// in-memory grounds list, dispatches BEGIN_LOCALE_CAPTURE with the
-// full record as prefilledLocale (verified state + urlPattern +
+// v2.74.59 — Edit Perspective. Looks the existing record up from the
+// in-memory grounds list, dispatches BEGIN_PERSPECTIVE_CAPTURE with the
+// full record as prefilledPerspective (verified state + urlPattern +
 // authoredBy preserved).
-async function _editLocale(id, grounds) {
-  let locale = null;
+async function _editPerspective(id, grounds) {
+  let perspective = null;
   let groundId = null;
   for (const entry of grounds) {
-    const found = entry.locales?.find(l => l.id === id);
-    if (found) { locale = found; groundId = entry.ground.id; break; }
+    const found = entry.perspectives?.find(l => l.id === id);
+    if (found) { perspective = found; groundId = entry.ground.id; break; }
   }
-  if (!locale || !groundId) {
-    toast('Locale not found', 'err');
+  if (!perspective || !groundId) {
+    toast('Perspective not found', 'err');
     return;
   }
   const tab = await _getActiveTabForLaunch();
   const existingTabId = tab?.id ?? null;
   chrome.runtime.sendMessage({
-    type: 'BEGIN_LOCALE_CAPTURE',
+    type: 'BEGIN_PERSPECTIVE_CAPTURE',
     payload: {
       groundId,
       existingTabId,
       returnTo: 'ground-view',
-      prefilledLocale: {
+      prefilledPerspective: {
         // v2.74.275 — Legacy embedded landmarks[] + urlPattern fields
         // removed. Pass through landmarkRefs[] (registry uids) and
         // predicates only.
-        id          : locale.id,
-        name        : locale.name        ?? '',
-        description : locale.description ?? '',
-        authoredBy  : locale.authoredBy  ?? 'human',
-        landmarkRefs: Array.isArray(locale.landmarkRefs) ? locale.landmarkRefs : [],
+        id          : perspective.id,
+        name        : perspective.name        ?? '',
+        description : perspective.description ?? '',
+        authoredBy  : perspective.authoredBy  ?? 'human',
+        landmarkRefs: Array.isArray(perspective.landmarkRefs) ? perspective.landmarkRefs : [],
         // v2.74.349 — Pass the structured composition + overlays so the
         // structure review / judgment-aware Re-structure / role authoring
-        // round-trip on edit (locale-capture only treats it as structure when
+        // round-trip on edit (perspective-capture only treats it as structure when
         // it's non-trivial — see prefill). landmarks is a LandmarkNode[].
-        landmarks   : Array.isArray(locale.landmarks) ? locale.landmarks : null,
-        groupings   : Array.isArray(locale.groupings) ? locale.groupings : null,
-        sequences   : Array.isArray(locale.sequences) ? locale.sequences : null,
-        predicates  : locale.predicates ?? [],
-        iframeContexts: Array.isArray(locale.iframeContexts) ? locale.iframeContexts : [],
+        landmarks   : Array.isArray(perspective.landmarks) ? perspective.landmarks : null,
+        groupings   : Array.isArray(perspective.groupings) ? perspective.groupings : null,
+        sequences   : Array.isArray(perspective.sequences) ? perspective.sequences : null,
+        predicates  : perspective.predicates ?? [],
+        iframeContexts: Array.isArray(perspective.iframeContexts) ? perspective.iframeContexts : [],
       },
     },
   });
@@ -1168,7 +1168,7 @@ async function _deleteEntry(kind, id) {
   const map = {
     fragment   : { type: 'DELETE_FRAGMENT',    field: 'fragmentId'    },
     assertion  : { type: 'DELETE_ASSERTION',   field: 'assertionId'   },
-    locale     : { type: 'DELETE_LOCALE',      field: 'localeId'      },
+    perspective     : { type: 'DELETE_PERSPECTIVE',      field: 'perspectiveId'      },
     observation: { type: 'DELETE_OBSERVATION', field: 'observationId' },
     analysis   : { type: 'DELETE_ANALYSIS',    field: 'analysisId'    },
   };
@@ -1222,9 +1222,9 @@ async function _launchAuthoring(kind, groundId, groundUrl) {
     });
     return;
   }
-  if (kind === 'locale') {
+  if (kind === 'perspective') {
     chrome.runtime.sendMessage({
-      type: 'BEGIN_LOCALE_CAPTURE',
+      type: 'BEGIN_PERSPECTIVE_CAPTURE',
       payload: { groundId, existingTabId, returnTo },
     });
     return;
@@ -1250,7 +1250,7 @@ async function _launchAuthoring(kind, groundId, groundUrl) {
   toast(`Authoring "${kind}" lives in Studio`, 'warn');
 }
 
-// v2.74.392 — _autoDiscoverLocale removed: "+ Locale" no longer Claude-suggests
+// v2.74.392 — _autoDiscoverPerspective removed: "+ Perspective" no longer Claude-suggests
 // landmarks; it opens a blank draft (the description-first propose→resolve→
 // auto-structure flow does the authoring).
 

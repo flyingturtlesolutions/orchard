@@ -1,4 +1,4 @@
-// Core/pageModel.js — PageModel (Locale capability catalog) builder + query API.
+// Core/pageModel.js — PageModel (Perspective capability catalog) builder + query API.
 //
 // See PAGEMODEL_SPEC.md. A PageModel is the intent-independent capability catalog
 // of ONE page archetype: Features (units of capability) organized into Layers and
@@ -359,5 +359,35 @@ export function dedupeOverlayLayers(model) {
     const f = model.features[fid];
     if (f && f.hidden && !ref.has(fid)) delete model.features[fid];
   }
+  return model;
+}
+
+/**
+ * v2.74.408 — L2: attach synthesized Goals (PAGEMODEL_SPEC § 5). Each raw goal
+ * carries { label, description, achievableVia:[featureId] }; this assigns a stable
+ * id, drops dangling feature refs, backlinks `feature.goals`, rebuilds the index
+ * (so `byGoal` populates), and upgrades fidelity to L2. Pure.
+ */
+export function attachGoals(model, goals) {
+  if (!model || !model.features || !Array.isArray(goals)) return model;
+  model.goals = model.goals || {};
+  for (const g of goals) {
+    if (!g || !g.label) continue;
+    const via = (Array.isArray(g.achievableVia) ? g.achievableVia : []).filter((fid) => model.features[fid]);
+    const id = 'goal_' + hashId(g.label + '|' + via.join(','));
+    model.goals[id] = {
+      id, label: String(g.label).slice(0, 60),
+      description: g.description ? String(g.description).slice(0, 200) : '',
+      achievableVia: via,
+      confidence: typeof g.confidence === 'number' ? g.confidence : 0.6,
+    };
+    for (const fid of via) {
+      const f = model.features[fid];
+      f.goals = f.goals || [];
+      if (!f.goals.includes(id)) f.goals.push(id);
+    }
+  }
+  model.index = buildIndex(model.features);
+  if (model.coverage && Object.keys(model.goals).length) model.coverage.fidelity = 'L2';
   return model;
 }

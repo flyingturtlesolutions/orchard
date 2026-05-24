@@ -20,7 +20,8 @@
 
 import { Logger, LOG_LEVEL }  from './Core/Logger.js';
 import { installGlobalErrorHandlers } from './Core/ErrorCapture.js';
-import * as PageModel          from './Core/pageModel.js';   // v2.74.397 — Locale/PageModel builder + query API
+import * as PageModel          from './Core/pageModel.js';   // v2.74.397 — Perspective/PageModel builder + query API
+import * as Outcomes           from './Core/outcomes.js';    // v2.74.413 — OutcomeEvent stream + rollups
 import { ExecutionEngine }    from './Services/ExecutionEngine.js';
 import { StorageManager }     from './Services/StorageManager.js';
 import { executeWorkflow }    from './Services/WorkflowExecutor.js';
@@ -52,7 +53,7 @@ import {
 // at SW startup, which is fine — these modules are small + the
 // startup is already paying for many other imports.
 import { listLandmarksForGround, resolveLandmarkRef } from './Services/LandmarkResolver.js';
-import { listActiveLocales }                          from './Services/LocalePredicates.js';
+import { listActivePerspectives }                          from './Services/PerspectivePredicates.js';
 import { analyzeLandmarkImpact }                      from './Services/LandmarkImpactAnalysis.js';
 import { emit as emitGroundEvent_bg,
          list as listGroundEvents_bg,
@@ -341,13 +342,13 @@ function _broadcastWorkflowBreakpoints(invId, set, workflowId) {
 }
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
-// ║ v2.72.41 (Pass 17g) — Pending locale capture session.                    ║
+// ║ v2.72.41 (Pass 17g) — Pending perspective capture session.                    ║
 // ║                                                                          ║
-// ║ When studio's Locale form clicks "Open in debugger to capture", studio   ║
-// ║ hands off the locale draft (name + description + urlPattern + landmark   ║
+// ║ When studio's Perspective form clicks "Open in debugger to capture", studio   ║
+// ║ hands off the perspective draft (name + description + urlPattern + landmark   ║
 // ║ roles) to background, which opens the URL tab + debugger sidepanel,     ║
 // ║ stores the draft here, and the debugger queries it on boot to enter     ║
-// ║ locale-capture mode.                                                     ║
+// ║ perspective-capture mode.                                                     ║
 // ║                                                                          ║
 // ║ At most one session at a time (single sidepanel can't host two flows).  ║
 // ║ Cleared on COMMIT (after debugger saves) or CANCEL (user dismisses).    ║
@@ -355,7 +356,7 @@ function _broadcastWorkflowBreakpoints(invId, set, workflowId) {
 // ║ a long pause that puts background to sleep loses the session, which is  ║
 // ║ acceptable for v1 (user starts over from studio).                        ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
-let __pendingLocaleCapture = null;  // { draft, tabId, sessionId, startedAt }
+let __pendingPerspectiveCapture = null;  // { draft, tabId, sessionId, startedAt }
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║ v2.72.50 (Stage 1) — Sidepanel mode registry.                            ║
@@ -374,8 +375,8 @@ let __pendingLocaleCapture = null;  // { draft, tabId, sessionId, startedAt }
 // ║ runs in background regardless of whether the sidepanel is in            ║
 // ║ strategy-debug mode. The mode is just the visual surface.                ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
-let __sidepanelMode = null;          // null | 'chat' | 'strategy-debug' | 'locale-capture' | ...
-let __sidepanelModePayload = null;   // mode-specific payload (e.g. {groundId} for locale-capture)
+let __sidepanelMode = null;          // null | 'chat' | 'strategy-debug' | 'perspective-capture' | ...
+let __sidepanelModePayload = null;   // mode-specific payload (e.g. {groundId} for perspective-capture)
 
 function __setSidepanelMode(mode, payload = null) {
   __sidepanelMode = mode;
@@ -422,12 +423,12 @@ function __startKeepAlive() {
   Logger.debug('background', 'keep-alive started');
 }
 
-// v2.72.41 (Pass 17g) — Locale-capture tab-finder. Mirrors PageProbe's
+// v2.72.41 (Pass 17g) — Perspective-capture tab-finder. Mirrors PageProbe's
 // findOrOpenTab but lives in background so we don't have to import a
 // service module from the message dispatcher. Same pattern semantics:
 // substring/regex match against existing tabs first, then open https://
 // for domain-shaped patterns.
-async function __findOrOpenTabForLocale(urlPattern) {
+async function __findOrOpenTabForPerspective(urlPattern) {
   if (!urlPattern || typeof urlPattern !== 'string') {
     return { ok: false, error: 'urlPattern required' };
   }
@@ -934,11 +935,11 @@ CapabilityAPI.subscribe((event) => {
 });
 
 // v2.74.231/392 — URL normalizer (origin + pathname; strips query/fragment) for
-// per-(ground, page) caches. Originally for the now-removed locale auto-discovery
+// per-(ground, page) caches. Originally for the now-removed perspective auto-discovery
 // cache; retained because the pageStructure cache + resolve knownSelectors reuse
-// it. (The localeAutoDiscoveryCache + its read/write helpers were removed with
+// it. (The perspectiveAutoDiscoveryCache + its read/write helpers were removed with
 // the legacy auto-suggest feature.)
-function _normalizeUrlForLocaleCache(url) {
+function _normalizeUrlForPerspectiveCache(url) {
   if (!url || typeof url !== 'string') return '';
   try {
     const u = new URL(url);
@@ -948,12 +949,12 @@ function _normalizeUrlForLocaleCache(url) {
   }
 }
 
-// v2.74.367 — pageStructure artifact cache. The "+ Locale" depth sweep
+// v2.74.367 — pageStructure artifact cache. The "+ Perspective" depth sweep
 // (poke→observe→restore over the whole page) is expensive and mutates the page,
 // so its artifact is memoized per (groundId, normalized URL) exactly like the
 // auto-discovery cache. The sweep runs only when no FRESH artifact exists
 // (staleness judged by `driftHash` + age at read-time); "Re-explore" forces a
-// rewrite. Shape mirrors LOCALE_DISCOVERY_CACHE:
+// rewrite. Shape mirrors PERSPECTIVE_DISCOVERY_CACHE:
 //   key: 'pageStructureCache'
 //   value: { [groundId]: { [normalizedUrl]: { structure, url, capturedAt } } }
 const PAGE_STRUCTURE_CACHE_KEY = 'pageStructureCache';
@@ -1010,6 +1011,52 @@ async function _writePageModelCache(groundId, cacheKey, entry) {
   await chrome.storage.local.set({ [PAGE_MODEL_CACHE_KEY]: map });
 }
 
+// v2.74.413 — OUTCOMES slice 2: the ONE unified append-only stream (OUTCOMES_SPEC
+// § 1, GROUND_SPEC § 0.13). Authoring + runtime events land here once; the small
+// artifact rollups (Feature.health / Perspective.usage / Ground.conventions) are
+// FOLDED on read, never authored. Bounded so the store can't grow without limit;
+// the durable training corpus body is a later exporter slice (§ 0.17).
+//   key: 'outcomesStream'   value: { [groundId]: OutcomeEvent[] }
+const OUTCOMES_STREAM_KEY = 'outcomesStream';
+const OUTCOMES_STREAM_CAP = 1000;   // per ground; oldest dropped (appendEvents)
+
+async function _appendOutcomes(groundId, events) {
+  if (!groundId || !Array.isArray(events) || !events.length) return;
+  try {
+    const got = await chrome.storage.local.get(OUTCOMES_STREAM_KEY);
+    const map = got?.[OUTCOMES_STREAM_KEY] ?? {};
+    map[groundId] = Outcomes.appendEvents(map[groundId] ?? [], events, OUTCOMES_STREAM_CAP);
+    await chrome.storage.local.set({ [OUTCOMES_STREAM_KEY]: map });
+  } catch (e) {
+    Logger.warn('background', `outcomesStream append failed: ${e.message}`);
+  }
+}
+
+async function _readOutcomes(groundId) {
+  if (!groundId) return [];
+  try {
+    const got = await chrome.storage.local.get(OUTCOMES_STREAM_KEY);
+    return got?.[OUTCOMES_STREAM_KEY]?.[groundId] ?? [];
+  } catch (e) {
+    Logger.warn('background', `outcomesStream read failed: ${e.message}`);
+    return [];
+  }
+}
+
+// Lazy fold-on-read (OUTCOMES_SPEC § 4): recompute the derived rollups from the
+// stream on demand rather than maintaining them per-event. Returns the three
+// artifact rollup bundles + the raw count, for consumers (resolve bias, studio,
+// active decay) to read.
+async function _outcomeRollups(groundId) {
+  const stream = await _readOutcomes(groundId);
+  return {
+    featureHealth: Outcomes.foldFeatureHealth(stream),
+    perspectiveUsage: Outcomes.foldPerspectiveUsage(stream),
+    conventions: Outcomes.foldConventions(stream),
+    eventCount: stream.length,
+  };
+}
+
 // v2.74.385 — Flatten a cached pageStructure artifact into verified
 // {label, role, selector, via?} hints for resolveRoles to reuse. Each control's
 // own selector resolved during exploration, and each control that REVEALED
@@ -1017,7 +1064,7 @@ async function _writePageModelCache(groundId, cacheKey, entry) {
 // guess a positional selector on a hashed-class page.
 async function _knownSelectorsForUrl(groundId, url) {
   if (!groundId) return null;
-  const cacheKey = _normalizeUrlForLocaleCache(url);
+  const cacheKey = _normalizeUrlForPerspectiveCache(url);
   const out = [];
   const seenSel = new Set();
   const TOTAL = 140;
@@ -1747,7 +1794,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // ask Claude → paste back. This handler closes that loop in one
     // click. Payload includes the inspect report + shape; we call
     // AnthropicService.suggestSelector and return the candidate.
-    // v2.74.235 — Wave 2 of the landmark SSOT project. Locale-capture's
+    // v2.74.235 — Wave 2 of the landmark SSOT project. Perspective-capture's
     // Pick flow forwards the full DOM context + screenshot + role +
     // rule-derived capabilities/operations to this handler, which calls
     // Claude once and returns the complete landmark profile (refined
@@ -1779,9 +1826,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     // v2.74.240 — Phase 2 substrate registry CRUD. Sidepanel writes
-    // each landmark to the registry directly during locale save; reads
+    // each landmark to the registry directly during perspective save; reads
     // hydrate refs into full records at edit time. Same handler pattern
-    // as locale CRUD for symmetry.
+    // as perspective CRUD for symmetry.
     case 'SAVE_LANDMARK': {
       (async () => {
         try {
@@ -1867,14 +1914,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     // v2.74.243 — Phase 5 substrate spec: blast-radius computation.
     // Authoring UIs call this BEFORE removing / deprecating a
-    // landmark to warn the author about dependent locales / fragments
+    // landmark to warn the author about dependent perspectives / fragments
     // / observations. Returns the consumer list + summary counts.
-    // v2.74.247 — Phase 7c substrate spec: locale activation
+    // v2.74.247 — Phase 7c substrate spec: perspective activation
     // evaluator. Sidepanel callers (Studio surfaces, drift detection)
-    // ask "which locales are active given this page state?" The
+    // ask "which perspectives are active given this page state?" The
     // runtime equivalent lives inside TemplateWalker; this handler
     // makes the same evaluator reachable from authoring UIs.
-    case 'LIST_ACTIVE_LOCALES': {
+    case 'LIST_ACTIVE_PERSPECTIVES': {
       (async () => {
         try {
           const { groundId, tabUrl, tabId } = payload ?? {};
@@ -1887,21 +1934,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             try { url = (await chrome.tabs.get(tabId))?.url ?? ''; }
             catch { url = ''; }
           }
-          // v2.74.277 — listActiveLocales now statically imported.
-          const locales = await listActiveLocales(groundId, { tabUrl: url ?? '', tabId });
+          // v2.74.277 — listActivePerspectives now statically imported.
+          const perspectives = await listActivePerspectives(groundId, { tabUrl: url ?? '', tabId });
           sendResponse({
             success: true,
             tabUrl : url ?? null,
             // v2.74.275 — Legacy urlPattern field removed; URL gating
             // expressed via predicates (urlMatches kind).
-            locales: locales.map(l => ({
+            perspectives: perspectives.map(l => ({
               id: l.id, name: l.name,
               landmarkCount: Array.isArray(l.landmarkRefs) ? l.landmarkRefs.length : 0,
               iframeContextCount: Array.isArray(l.iframeContexts) ? l.iframeContexts.length : 0,
             })),
           });
         } catch (err) {
-          Logger.warn('background', `LIST_ACTIVE_LOCALES failed: ${err.message}`);
+          Logger.warn('background', `LIST_ACTIVE_PERSPECTIVES failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();
@@ -2029,7 +2076,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // v2.74.254 — Phase 10: Landmark reference replacement. Symmetric
     // to ANALYZE_LANDMARK_IMPACT (Phase 5). Supports dryRun preview
     // so Studio can show "this would rewrite N fragments / M
-    // observations / K locale refs" before commit.
+    // observations / K perspective refs" before commit.
     case 'REPLACE_LANDMARK_REFERENCES': {
       (async () => {
         try {
@@ -2088,7 +2135,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             selector: resolved.selector,
             frameUrl: resolved.frameUrl,
             landmark: resolved.landmark,
-            locale  : { id: resolved.locale.id, name: resolved.locale.name },
+            perspective  : { id: resolved.perspective.id, name: resolved.perspective.name },
           });
         } catch (err) {
           sendResponse({ success: false, error: err.message });
@@ -2133,7 +2180,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             outerHTMLPreview, parentOuterHTMLPreview,
             frame,
             // v2.74.233 — Optional cropped screenshot of the picked
-            // element region (locale-landmark Pick flow uses this).
+            // element region (perspective-landmark Pick flow uses this).
             screenshotDataUrl,
           } = payload ?? {};
           const res = await AnthropicService.suggestSelector({
@@ -2476,13 +2523,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
-    // v2.72.67 — Evaluate all of a Ground's named predicates (locales +
+    // v2.72.67 — Evaluate all of a Ground's named predicates (perspectives +
     // assertions) against the current page state of a tab. Returns the
     // ones that hold (match the page right now). Used by fragment-author
     // mode for auto-capturing preconditions at mount and postconditions
     // at save / per-Verify.
     //
-    // Method: each locale becomes a {locale_ref} assertion; each
+    // Method: each perspective becomes a {perspective_ref} assertion; each
     // assertion is itself an assertion. Each is evaluated via
     // TemplateWalker.checkConditions against the live tab. Matching
     // ones are returned by id+name.
@@ -2490,10 +2537,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Returns:
     //   {
     //     success: true,
-    //     matchingLocales:    [{ id, name, urlPattern, landmarkCount }, ...],
+    //     matchingPerspectives:    [{ id, name, urlPattern, landmarkCount }, ...],
     //     matchingAssertions: [{ id, name }, ...],
     //     urlPattern: string|null,   // ground.urlPattern as a precondition baseline
-    //     evaluatedCount: { locales: N, assertions: N },
+    //     evaluatedCount: { perspectives: N, assertions: N },
     //   }
     case 'EVALUATE_GROUND_PREDICATES': {
       (async () => {
@@ -2510,32 +2557,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             return;
           }
 
-          const allLocales    = await StorageManager.listLocales(groundId);
+          const allPerspectives    = await StorageManager.listPerspectives(groundId);
           const allAssertions = await StorageManager.listAssertions(groundId);
 
-          // Evaluate each locale via locale_ref. Matches if URL pattern
+          // Evaluate each perspective via perspective_ref. Matches if URL pattern
           // matches AND every landmark's selector resolves on the page.
-          const matchingLocales = [];
-          for (const loc of allLocales) {
-            // v2.74.335 — LOCALE_SPEC § 12: deprecated Locales are not active
+          const matchingPerspectives = [];
+          for (const loc of allPerspectives) {
+            // v2.74.335 — PERSPECTIVE_SPEC § 12: deprecated Perspectives are not active
             // (retired perspectives don't contribute to the active set).
             if (loc?.lifecycle === 'deprecated') continue;
             try {
               const probe = await TemplateWalker.checkConditions({
                 tabId,
-                conditions: { match: 'all', conditions: [{ type: 'locale_ref', localeId: loc.id }] },
+                conditions: { match: 'all', conditions: [{ type: 'perspective_ref', perspectiveId: loc.id }] },
                 timeoutMs: 0,
               });
               if (probe.ok) {
                 // v2.74.275 — urlPattern removed; landmarkRefs[] is canonical.
-                matchingLocales.push({
+                matchingPerspectives.push({
                   id: loc.id,
                   name: loc.name,
                   landmarkCount: (loc.landmarkRefs ?? []).length,
                 });
               }
             } catch (e) {
-              Logger.warn('background', `EVALUATE_GROUND_PREDICATES: locale ${loc.id} eval threw: ${e.message}`);
+              Logger.warn('background', `EVALUATE_GROUND_PREDICATES: perspective ${loc.id} eval threw: ${e.message}`);
             }
           }
 
@@ -2580,11 +2627,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
           sendResponse({
             success: true,
-            matchingLocales,
+            matchingPerspectives,
             matchingAssertions,
             currentUrl,
             urlPattern: ground.urlPattern ?? ground.url ?? null,
-            evaluatedCount: { locales: allLocales.length, assertions: allAssertions.length },
+            evaluatedCount: { perspectives: allPerspectives.length, assertions: allAssertions.length },
           });
         } catch (err) {
           Logger.error('background', `EVALUATE_GROUND_PREDICATES failed: ${err.message}`);
@@ -2674,7 +2721,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // ╚══════════════════════════════════════════════════════════════════════╝
 
     // v2.74.53 — Begin handlers for the Ground sidepanel's + Assert /
-    // + Analyze buttons. Mirror BEGIN_LOCALE_CAPTURE's minimal shape:
+    // + Analyze buttons. Mirror BEGIN_PERSPECTIVE_CAPTURE's minimal shape:
     // set the sidepanel mode with payload; the mode itself mounts and
     // owns its lifecycle.
     case 'BEGIN_ASSERTION_AUTHOR': {
@@ -2839,62 +2886,62 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
-    // ── v2.72.29 (Pass 17) — Locale CRUD ──────────────────────────────
-    case 'SAVE_LOCALE': {
+    // ── v2.72.29 (Pass 17) — Perspective CRUD ──────────────────────────────
+    case 'SAVE_PERSPECTIVE': {
       (async () => {
         try {
-          const { locale } = payload;
-          await StorageManager.saveLocale(locale);
-          broadcastStorageChanged('locale', locale.id, 'saved');
+          const { perspective } = payload;
+          await StorageManager.savePerspective(perspective);
+          broadcastStorageChanged('perspective', perspective.id, 'saved');
           sendResponse({ success: true });
         } catch (err) {
-          Logger.error('background', `SAVE_LOCALE failed: ${err.message}`);
+          Logger.error('background', `SAVE_PERSPECTIVE failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();
       return true;
     }
-    case 'LIST_LOCALES': {
+    case 'LIST_PERSPECTIVES': {
       (async () => {
         try {
           const { groundId } = payload;
-          const locales = await StorageManager.listLocales(groundId);
-          sendResponse({ success: true, locales });
+          const perspectives = await StorageManager.listPerspectives(groundId);
+          sendResponse({ success: true, perspectives });
         } catch (err) {
-          Logger.error('background', `LIST_LOCALES failed: ${err.message}`);
+          Logger.error('background', `LIST_PERSPECTIVES failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();
       return true;
     }
-    // v2.72.45 (Pass 17g iter) — GET_GROUND for the debugger's locale-capture
-    // header label. Mirrors GET_LOCALE.
+    // v2.72.45 (Pass 17g iter) — GET_GROUND for the debugger's perspective-capture
+    // header label. Mirrors GET_PERSPECTIVE.
     case 'GET_GROUND': {
       (async () => {
         try {
           const { id } = payload ?? {};
           const ground = await StorageManager.getGround(id);
-          // v2.74.319 — Attach the Ground's locales + assertions to the
+          // v2.74.319 — Attach the Ground's perspectives + assertions to the
           // response. getGround() returns only the raw Ground record;
-          // locales/assertions are stored separately per-Ground. Several
+          // perspectives/assertions are stored separately per-Ground. Several
           // consumers (fragment-author's _loadGroundCatalog, which powers
-          // the landmark dropdown + condition-type Locales/Custom
-          // optgroups) read `res.ground.locales` / `.assertions` — without
+          // the landmark dropdown + condition-type Perspectives/Custom
+          // optgroups) read `res.ground.perspectives` / `.assertions` — without
           // this assembly those were always undefined, so the landmark
           // dropdown never populated. Mirrors GET_GROUND_LIBRARY's
           // per-Ground assembly. Additive: callers that ignore the arrays
           // are unaffected.
           if (ground) {
             try {
-              const [locales, assertions] = await Promise.all([
-                StorageManager.listLocales(id),
+              const [perspectives, assertions] = await Promise.all([
+                StorageManager.listPerspectives(id),
                 StorageManager.listAssertions(id),
               ]);
-              ground.locales    = Array.isArray(locales)    ? locales    : [];
+              ground.perspectives    = Array.isArray(perspectives)    ? perspectives    : [];
               ground.assertions = Array.isArray(assertions) ? assertions : [];
             } catch (e) {
-              Logger.warn('background', `GET_GROUND: locale/assertion assembly failed: ${e.message}`);
-              if (!Array.isArray(ground.locales))    ground.locales    = [];
+              Logger.warn('background', `GET_GROUND: perspective/assertion assembly failed: ${e.message}`);
+              if (!Array.isArray(ground.perspectives))    ground.perspectives    = [];
               if (!Array.isArray(ground.assertions)) ground.assertions = [];
             }
           }
@@ -2907,7 +2954,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
     // v2.74.27 — Bulk fetch for the Ground sidepanel's read-only browse
-    // view. Returns every Ground with its Fragment / Assertion / Locale /
+    // view. Returns every Ground with its Fragment / Assertion / Perspective /
     // Observation / Analysis lists in one round trip. Strategies are
     // intentionally omitted — the Ground sidepanel doesn't surface them.
     case 'GET_GROUND_LIBRARY': {
@@ -2918,16 +2965,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           for (const g of grounds) {
             // v2.74.37 — Include groundMap so the sidepanel header can
             // mirror Studio's: name + url + 🗺 N pages badge.
-            const [fragments, assertions, locales, observations, analyses, groundMap] =
+            const [fragments, assertions, perspectives, observations, analyses, groundMap] =
               await Promise.all([
                 StorageManager.listFragments(g.id),
                 StorageManager.listAssertions(g.id),
-                StorageManager.listLocales(g.id),
+                StorageManager.listPerspectives(g.id),
                 StorageManager.listObservations(g.id),
                 StorageManager.listAnalyses(g.id),
                 StorageManager.getGroundMap(g.id),
               ]);
-            out.push({ ground: g, fragments, assertions, locales, observations, analyses, groundMap });
+            out.push({ ground: g, fragments, assertions, perspectives, observations, analyses, groundMap });
           }
           sendResponse({ success: true, grounds: out });
         } catch (err) {
@@ -2937,28 +2984,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })();
       return true;
     }
-    case 'GET_LOCALE': {
+    case 'GET_PERSPECTIVE': {
       (async () => {
         try {
-          const { localeId } = payload;
-          const locale = await StorageManager.getLocale(localeId);
-          sendResponse({ success: true, locale });
+          const { perspectiveId } = payload;
+          const perspective = await StorageManager.getPerspective(perspectiveId);
+          sendResponse({ success: true, perspective });
         } catch (err) {
-          Logger.error('background', `GET_LOCALE failed: ${err.message}`);
+          Logger.error('background', `GET_PERSPECTIVE failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();
       return true;
     }
-    case 'DELETE_LOCALE': {
+    case 'DELETE_PERSPECTIVE': {
       (async () => {
         try {
-          const { localeId } = payload;
-          await StorageManager.deleteLocale(localeId);
-          broadcastStorageChanged('locale', localeId, 'deleted');
+          const { perspectiveId } = payload;
+          await StorageManager.deletePerspective(perspectiveId);
+          broadcastStorageChanged('perspective', perspectiveId, 'deleted');
           sendResponse({ success: true });
         } catch (err) {
-          Logger.error('background', `DELETE_LOCALE failed: ${err.message}`);
+          Logger.error('background', `DELETE_PERSPECTIVE failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();
@@ -3507,7 +3554,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     // v2.74.329 — GROUND_SPEC § 5 derived intent. Synthesize a Ground's
-    // description from its constituent Locales (lazy/manual: only on explicit
+    // description from its constituent Perspectives (lazy/manual: only on explicit
     // request). Cache-validated by inputs hash + prompt version; returns the
     // cached value untouched when nothing changed (unless force=true).
     case 'DERIVE_GROUND_DESCRIPTION': {
@@ -3517,12 +3564,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
           const ground = await StorageManager.getGround(groundId);
           if (!ground) { sendResponse({ success: false, error: `Ground ${groundId} not found` }); return; }
-          const locales = await StorageManager.listLocales(groundId);
-          if (!Array.isArray(locales) || locales.length === 0) {
-            sendResponse({ success: false, error: 'Ground has no Locales to derive from' });
+          const perspectives = await StorageManager.listPerspectives(groundId);
+          if (!Array.isArray(perspectives) || perspectives.length === 0) {
+            sendResponse({ success: false, error: 'Ground has no Perspectives to derive from' });
             return;
           }
-          const hash = derivationInputsHash(locales);
+          const hash = derivationInputsHash(perspectives);
           if (!force && ground.derivedDescription
               && ground.derivationInputsHash === hash
               && (ground.derivationVersion || 0) === DERIVATION_VERSION) {
@@ -3532,7 +3579,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const text = await AnthropicService.deriveGroundDescription({
             name      : ground.name,
             urlPrimary: ground.urlPatterns?.find(p => p?.isPrimary)?.pattern ?? ground.urlPatterns?.[0]?.pattern ?? ground.url,
-            locales   : locales.map(l => ({ name: l.name, description: l.description })),
+            perspectives   : perspectives.map(l => ({ name: l.name, description: l.description })),
           });
           if (!text) {
             sendResponse({ success: false, error: 'Derivation returned nothing (LLM unavailable or empty response)' });
@@ -3577,8 +3624,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     // v2.74.330 — GROUND_SPEC § 9 lifecycle. Deprecate (soft-delete) /
     // reactivate. 'deprecated' is persisted; 'active' clears the flag so
-    // getGround re-derives active/draft from Locale presence. (Cascade-
-    // deprecation to Locales/Workflows is deferred — those entities have no
+    // getGround re-derives active/draft from Perspective presence. (Cascade-
+    // deprecation to Perspectives/Workflows is deferred — those entities have no
     // lifecycle field yet; see SPEC_DEV.)
     case 'SET_GROUND_LIFECYCLE': {
       (async () => {
@@ -3595,24 +3642,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const updated = await StorageManager.updateGround(groundId, { metadata: { lifecycle: persisted } });
           if (!updated) { sendResponse({ success: false, error: `Ground ${groundId} not found` }); return; }
           // v2.74.335 — GROUND_SPEC § 11 cascade: deprecating a Ground
-          // deprecates its constituent Locales. Reactivation does NOT auto-
-          // reactivate Locales (spec: opt-in, user reviews each).
+          // deprecates its constituent Perspectives. Reactivation does NOT auto-
+          // reactivate Perspectives (spec: opt-in, user reviews each).
           let cascaded = 0;
           if (lifecycle === 'deprecated') {
             try {
-              const locales = await StorageManager.listLocales(groundId);
-              for (const loc of locales) {
+              const perspectives = await StorageManager.listPerspectives(groundId);
+              for (const loc of perspectives) {
                 if (loc?.lifecycle !== 'deprecated') {
-                  await StorageManager.updateLocale(loc.id, { lifecycle: 'deprecated' });
+                  await StorageManager.updatePerspective(loc.id, { lifecycle: 'deprecated' });
                   cascaded++;
                 }
               }
             } catch (e) {
-              Logger.warn('background', `SET_GROUND_LIFECYCLE locale cascade failed: ${e.message}`);
+              Logger.warn('background', `SET_GROUND_LIFECYCLE perspective cascade failed: ${e.message}`);
             }
           }
           broadcastStorageChanged('ground', groundId, 'saved');
-          sendResponse({ success: true, lifecycle: updated.metadata?.lifecycle, cascadedLocales: cascaded });
+          sendResponse({ success: true, lifecycle: updated.metadata?.lifecycle, cascadedPerspectives: cascaded });
         } catch (err) {
           Logger.error('background', `SET_GROUND_LIFECYCLE failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
@@ -3621,48 +3668,48 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
-    // v2.74.335 — LOCALE_SPEC § 12 lifecycle. Deprecate (soft-delete) /
-    // reactivate a single Locale. 'deprecated' excludes it from the active
+    // v2.74.335 — PERSPECTIVE_SPEC § 12 lifecycle. Deprecate (soft-delete) /
+    // reactivate a single Perspective. 'deprecated' excludes it from the active
     // set + authoring; 'active' restores it.
-    case 'SET_LOCALE_LIFECYCLE': {
+    case 'SET_PERSPECTIVE_LIFECYCLE': {
       (async () => {
         try {
-          const { localeId, lifecycle } = payload ?? {};
-          if (!localeId) { sendResponse({ success: false, error: 'localeId required' }); return; }
+          const { perspectiveId, lifecycle } = payload ?? {};
+          if (!perspectiveId) { sendResponse({ success: false, error: 'perspectiveId required' }); return; }
           if (lifecycle !== 'deprecated' && lifecycle !== 'active') {
             sendResponse({ success: false, error: `lifecycle must be 'deprecated' or 'active' (got ${lifecycle})` });
             return;
           }
-          const updated = await StorageManager.updateLocale(localeId, { lifecycle });
-          if (!updated) { sendResponse({ success: false, error: `Locale ${localeId} not found` }); return; }
-          broadcastStorageChanged('locale', localeId, 'saved');
+          const updated = await StorageManager.updatePerspective(perspectiveId, { lifecycle });
+          if (!updated) { sendResponse({ success: false, error: `Perspective ${perspectiveId} not found` }); return; }
+          broadcastStorageChanged('perspective', perspectiveId, 'saved');
           sendResponse({ success: true, lifecycle: updated.lifecycle });
         } catch (err) {
-          Logger.error('background', `SET_LOCALE_LIFECYCLE failed: ${err.message}`);
+          Logger.error('background', `SET_PERSPECTIVE_LIFECYCLE failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();
       return true;
     }
 
-    // v2.74.336 — LOCALE_SPEC § 3/§ 13: LLM proposes a structured composition
-    // (LandmarkNode[] + groupings/sequences) over the locale's already-picked
+    // v2.74.336 — PERSPECTIVE_SPEC § 3/§ 13: LLM proposes a structured composition
+    // (LandmarkNode[] + groupings/sequences) over the perspective's already-picked
     // landmarks. The author reviews/keeps it. Stateless — takes the landmarks
     // in the payload (they live in the unsaved draft).
-    case 'PROPOSE_LOCALE_STRUCTURE': {
+    case 'PROPOSE_PERSPECTIVE_STRUCTURE': {
       (async () => {
         try {
           // v2.74.347 — `priorStructure` (the reviewed structure + judgments)
           // turns this into a refine call; absent on a first proposal.
           const { name, description, landmarks, priorStructure } = payload ?? {};
-          const structure = await AnthropicService.proposeLocaleStructure({ name, description, landmarks, priorStructure });
+          const structure = await AnthropicService.proposePerspectiveStructure({ name, description, landmarks, priorStructure });
           if (!structure) {
             sendResponse({ success: false, error: 'No structure returned (LLM unavailable, or no landmarks with UIDs to structure)' });
             return;
           }
           sendResponse({ success: true, structure });
         } catch (err) {
-          Logger.error('background', `PROPOSE_LOCALE_STRUCTURE failed: ${err.message}`);
+          Logger.error('background', `PROPOSE_PERSPECTIVE_STRUCTURE failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();
@@ -3858,25 +3905,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
-    // v2.72.45 (Pass 17g iter) — Locale capture session, simplified.
+    // v2.72.45 (Pass 17g iter) — Perspective capture session, simplified.
     //
     // The session model changed: studio no longer hands off a metadata
-    // draft. The user clicks "+ Locale" on a Ground card; studio sends
-    // BEGIN_LOCALE_CAPTURE with just the groundId. Background:
+    // draft. The user clicks "+ Perspective" on a Ground card; studio sends
+    // BEGIN_PERSPECTIVE_CAPTURE with just the groundId. Background:
     //   1. Refuses if any debug invocation is active OR a session is pending
     //   2. Looks up the Ground, opens its URL as the starting tab (or
     //      focuses an existing tab matching it) — user navigates from there
     //   3. Stores the session {groundId, tabId, sessionId, startedAt}
     //   4. Re-injects the content script so PING/START_PICK reach the
     //      tab without a manual reload
-    //   5. Broadcasts LOCALE_CAPTURE_BEGIN_BROADCAST so the debugger
+    //   5. Broadcasts PERSPECTIVE_CAPTURE_BEGIN_BROADCAST so the debugger
     //      sidepanel (already opened by studio in its gesture-fresh
     //      click handler) enters capture mode
     //
     // The debugger then handles authoring: name + description + URL pattern
     // (auto-synced to the active tab) + landmarks + save. After save the
     // debugger STAYS in capture mode (only name/description/landmarks
-    // clear), letting the user author multiple locales for the same Ground
+    // clear), letting the user author multiple perspectives for the same Ground
     // without leaving the sidepanel.
     // v2.72.50 (Stage 1) — Sidepanel mode registry handlers.
     //
@@ -3903,22 +3950,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // figure out what mode (if any) was previously associated with the
     // newly-active tab. Returns null when no record exists; the shell
     // falls back to ground-view for that tab.
-    // v2.74.392 — AUTO_DISCOVER_LOCALE removed (legacy Claude auto-suggested
-    // landmarks). Locale authoring is the description-first propose→resolve→
-    // auto-structure flow; "+ Locale" opens a blank draft.
+    // v2.74.392 — AUTO_DISCOVER_PERSPECTIVE removed (legacy Claude auto-suggested
+    // landmarks). Perspective authoring is the description-first propose→resolve→
+    // auto-structure flow; "+ Perspective" opens a blank draft.
 
-    // v2.74.348 — LOCALE_SPEC § 13 description-first proposal flow. Given the
-    // user's intent (the Locale description) + the current page, Claude
+    // v2.74.348 — PERSPECTIVE_SPEC § 13 description-first proposal flow. Given the
+    // user's intent (the Perspective description) + the current page, Claude
     // proposes 2-3 perspective options (named roles to fill + URL predicates).
-    // Mirrors AUTO_DISCOVER_LOCALE's content-script inject + DOM_SNAPSHOT_RICH,
+    // Mirrors AUTO_DISCOVER_PERSPECTIVE's content-script inject + DOM_SNAPSHOT_RICH,
     // but is intent-seeded and role-scaffolded, and is NOT cached (the
     // proposal depends on the free-text intent, not just the URL).
-    case 'PROPOSE_LOCALE_PERSPECTIVES': {
+    case 'PROPOSE_PERSPECTIVES': {
       (async () => {
         try {
           // v2.74.350/366 — Enhanced context is now canonical (baseline arm
           // removed). Always gather a screenshot + the Ground's existing
-          // locales/landmarks and pass them to proposePerspectives.
+          // perspectives/landmarks and pass them to proposePerspectives.
           const { tabId, intent, groundId = null } = payload ?? {};
           if (typeof tabId !== 'number') {
             sendResponse({ success: false, error: 'tabId required' });
@@ -3946,7 +3993,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               files: ['ContentScripts/contentScript.js'],
             });
           } catch (e) {
-            Logger.warn('background', `PROPOSE_LOCALE_PERSPECTIVES: content-script inject failed (continuing): ${e.message}`);
+            Logger.warn('background', `PROPOSE_PERSPECTIVES: content-script inject failed (continuing): ${e.message}`);
           }
           let snap;
           try {
@@ -3961,7 +4008,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
 
           // ── Enhanced context (best-effort; any failure degrades, not aborts) ──
-          let screenshot = null, siblingLocales = null, registryLandmarks = null;
+          let screenshot = null, siblingPerspectives = null, registryLandmarks = null;
           // Screenshot the visible tab. Only meaningful when the target tab
           // is the active one in its window (captureVisibleTab grabs whatever
           // is visible); skip otherwise so we never attach the wrong page.
@@ -3969,58 +4016,58 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             try {
               screenshot = await chrome.tabs.captureVisibleTab(tabInfo.windowId, { format: 'jpeg', quality: 55 });
             } catch (e) {
-              Logger.warn('background', `PROPOSE_LOCALE_PERSPECTIVES: screenshot failed (continuing): ${e.message}`);
+              Logger.warn('background', `PROPOSE_PERSPECTIVES: screenshot failed (continuing): ${e.message}`);
             }
           } else {
-            Logger.info('background', 'PROPOSE_LOCALE_PERSPECTIVES: target tab not active — skipping screenshot');
+            Logger.info('background', 'PROPOSE_PERSPECTIVES: target tab not active — skipping screenshot');
           }
           if (groundId) {
             try {
-              const locales = await StorageManager.listLocales(groundId);
+              const perspectives = await StorageManager.listPerspectives(groundId);
               const rolesOf = (loc) => {
                 const set = new Set();
                 const walk = (nodes) => { for (const n of Array.isArray(nodes) ? nodes : []) { if (n?.role) set.add(n.role); if (Array.isArray(n?.contains)) walk(n.contains); if (Array.isArray(n?.alternatives)) walk(n.alternatives); } };
                 walk(Array.isArray(loc?.landmarks) ? loc.landmarks : []);
                 return [...set];
               };
-              siblingLocales = (locales ?? []).map(l => ({ name: l.name, description: l.description, roles: rolesOf(l) }));
+              siblingPerspectives = (perspectives ?? []).map(l => ({ name: l.name, description: l.description, roles: rolesOf(l) }));
             } catch (e) {
-              Logger.warn('background', `PROPOSE_LOCALE_PERSPECTIVES: listLocales failed (continuing): ${e.message}`);
+              Logger.warn('background', `PROPOSE_PERSPECTIVES: listPerspectives failed (continuing): ${e.message}`);
             }
             try {
               const lms = await StorageManager.listLandmarksForGround(groundId);
               registryLandmarks = (lms ?? []).map(lm => ({ alias: lm.alias, a11yRole: lm.a11yRole, description: lm.description }));
             } catch (e) {
-              Logger.warn('background', `PROPOSE_LOCALE_PERSPECTIVES: listLandmarksForGround failed (continuing): ${e.message}`);
+              Logger.warn('background', `PROPOSE_PERSPECTIVES: listLandmarksForGround failed (continuing): ${e.message}`);
             }
           }
 
           // v2.74.368 — Depth: feed the cached pageStructure artifact (the "+
-          // Locale" exploration sweep) so the author can propose roles for
+          // Perspective" exploration sweep) so the author can propose roles for
           // post-interaction content the static snapshot can't show. Read-only
           // here; the artifact is built/cached by EXPLORE_PAGE_STRUCTURE.
           let pageStructure = null;
           if (groundId) {
             try {
-              const entry = await _readPageStructureCache(groundId, _normalizeUrlForLocaleCache(snap.url ?? url));
+              const entry = await _readPageStructureCache(groundId, _normalizeUrlForPerspectiveCache(snap.url ?? url));
               // Only use a FRESH artifact (within TTL) — matches the UI's
               // freshness gate, so a skipped/stale sweep stays static-only.
               if (entry?.structure && (Date.now() - (entry.capturedAt ?? 0)) < PAGE_STRUCTURE_TTL_MS) pageStructure = entry.structure;
             } catch (e) {
-              Logger.warn('background', `PROPOSE_LOCALE_PERSPECTIVES: pageStructure read failed (continuing): ${e.message}`);
+              Logger.warn('background', `PROPOSE_PERSPECTIVES: pageStructure read failed (continuing): ${e.message}`);
             }
           }
 
-          // v2.74.403 — Whole-page feature catalog (PageModel / Locale capability
+          // v2.74.403 — Whole-page feature catalog (PageModel / Perspective capability
           // model) so propose grounds roles in the page's real affordances —
           // including off-screen features. Fresh-gated like pageStructure.
           let pageModelForPropose = null;
           if (groundId) {
             try {
-              const pm = await _readPageModelCache(groundId, _normalizeUrlForLocaleCache(snap.url ?? url));
+              const pm = await _readPageModelCache(groundId, _normalizeUrlForPerspectiveCache(snap.url ?? url));
               if (pm?.model && (Date.now() - (pm.capturedAt ?? 0)) < PAGE_MODEL_TTL_MS) pageModelForPropose = pm.model;
             } catch (e) {
-              Logger.warn('background', `PROPOSE_LOCALE_PERSPECTIVES: pageModel read failed (continuing): ${e.message}`);
+              Logger.warn('background', `PROPOSE_PERSPECTIVES: pageModel read failed (continuing): ${e.message}`);
             }
           }
 
@@ -4030,7 +4077,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             title      : snap.title ?? '',
             domSnapshot: snap.snapshot ?? '',
             screenshot,
-            siblingLocales,
+            siblingPerspectives,
             registryLandmarks,
             pageStructure,
             pageModel  : pageModelForPropose,
@@ -4044,7 +4091,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             ? pageStructure.controls.filter(c => c?.observation === 'reveal').length : 0;
           const meta = {
             screenshot: !!screenshot,
-            siblingLocales: Array.isArray(siblingLocales) ? siblingLocales.length : 0,
+            siblingPerspectives: Array.isArray(siblingPerspectives) ? siblingPerspectives.length : 0,
             registryLandmarks: Array.isArray(registryLandmarks) ? registryLandmarks.length : 0,
             pageStructure: !!pageStructure,
             revealingControls,
@@ -4053,7 +4100,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           };
           sendResponse({ success: true, options: proposal.options, meta });
         } catch (err) {
-          Logger.error('background', `PROPOSE_LOCALE_PERSPECTIVES failed: ${err.message}`);
+          Logger.error('background', `PROPOSE_PERSPECTIVES failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();
@@ -4119,7 +4166,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // intercept. Detect it, go back to pageUrl, re-inject, and continue the
           // remaining bands (the navigator is already in seenPoked → not
           // re-poked). Capped to avoid nav loops eating the whole run.
-          const norm = (u) => _normalizeUrlForLocaleCache(u || '');
+          const norm = (u) => _normalizeUrlForPerspectiveCache(u || '');
           let recoveries = 0;
           const waitForTabLoad = async (timeoutMs = 8000) => {
             const t1 = Date.now();
@@ -4238,7 +4285,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (affordances) { structure.affordances = affordances; Logger.info('explore', `affordances described (${affordances.length} chars)`); }
           } catch (e) { Logger.warn('background', `describePageAffordances failed (continuing): ${e.message}`); }
 
-          const cacheKey = _normalizeUrlForLocaleCache(pageUrl);
+          const cacheKey = _normalizeUrlForPerspectiveCache(pageUrl);
           if (groundId) {
             try { await _writePageStructureCache(groundId, cacheKey, { structure, url: pageUrl, capturedAt: structure.capturedAt }); }
             catch (e) { Logger.warn('background', `pageStructureCache write failed: ${e.message}`); }
@@ -4259,9 +4306,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               // re-poking. The manual 🗂 catalog stays L0 (it never poked).
               try { PageModel.mergeDepthFromControls(model, structure?.controls || []); }
               catch (e) { Logger.warn('background', `mergeDepthFromControls failed (continuing): ${e.message}`); }
-              if (groundId) await _writePageModelCache(groundId, _normalizeUrlForLocaleCache(enr.meta?.url ?? pageUrl), { model, url: enr.meta?.url ?? pageUrl, capturedAt: model.coverage.lastExploredAt });
+              // v2.74.408 — L2: synthesize structured Goals from the catalog (LLM)
+              // and attach them (feeds intent-grounding + perspective seeding). The
+              // manual 🗂 catalog stays L0/L1 (no LLM goals call).
+              try {
+                const g = await AnthropicService.synthesizeGoals({ model, url: enr.meta?.url ?? pageUrl, title, affordances: structure.affordances });
+                if (g?.goals?.length) PageModel.attachGoals(model, g.goals);
+              } catch (e) { Logger.warn('background', `synthesizeGoals failed (continuing): ${e.message}`); }
+              if (groundId) await _writePageModelCache(groundId, _normalizeUrlForPerspectiveCache(enr.meta?.url ?? pageUrl), { model, url: enr.meta?.url ?? pageUrl, capturedAt: model.coverage.lastExploredAt });
               const layerCount = Object.keys(model.layers || {}).length - 1;   // minus the surface layer
-              Logger.info('explore', `PageModel built alongside Explore: ${Object.keys(model.features).length} feature(s), ${Math.max(0, layerCount)} depth layer(s), fidelity ${model.coverage.fidelity}`);
+              Logger.info('explore', `PageModel built alongside Explore: ${Object.keys(model.features).length} feature(s), ${Math.max(0, layerCount)} depth layer(s), ${Object.keys(model.goals || {}).length} goal(s), fidelity ${model.coverage.fidelity}`);
+
+              // v2.74.417 — OUTCOMES: poke-reveal events (OUTCOMES_SPEC § 5). A
+              // poke that REVEALED is a free, deterministic "this element IS a
+              // disclosure" label — confirm the disclosure Feature's health and
+              // bank a positive training pair. Only revealing pokes are emitted:
+              // a control that (correctly) opens nothing must NOT log a poke-miss,
+              // which foldFeatureHealth would count as a resolve-miss and decay a
+              // perfectly healthy action button.
+              try {
+                if (groundId && model.features) {
+                  const selToFid = new Map();
+                  for (const f of Object.values(model.features)) if (f?.selector && f?.id && !selToFid.has(f.selector)) selToFid.set(f.selector, f.id);
+                  const pokeEvents = [];
+                  for (const c of structure?.controls || []) {
+                    if (!c?.selector || c.observation !== 'reveal') continue;
+                    const revealed = Array.isArray(c.revealed) ? c.revealed : [];
+                    if (!revealed.length) continue;
+                    pokeEvents.push(Outcomes.makeEvent({
+                      phase: 'author', op: 'poke',
+                      groundId, perspectiveId: enr.meta?.url ?? pageUrl,
+                      featureId: selToFid.get(c.selector) ?? null,
+                      input: { roleOrIntent: c.label || c.role || '' },
+                      llmOutput: { selector: c.selector, operation: 'explore-poke' },
+                      verdict: 'verified',
+                      detail: { matchedCount: revealed.length, reason: c.overlay ? 'overlay-reveal' : 'inline-reveal' },
+                    }));
+                  }
+                  if (pokeEvents.length) { await _appendOutcomes(groundId, pokeEvents); Logger.info('outcomes', `explore poke-reveal → ${pokeEvents.length} disclosure confirmation(s)`); }
+                }
+              } catch (e) { Logger.warn('background', `poke-reveal outcomes emit failed (continuing): ${e.message}`); }
             }
           } catch (e) { Logger.warn('background', `PageModel build during Explore failed (continuing): ${e.message}`); }
 
@@ -4286,20 +4370,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (typeof intent !== 'string' || !intent.trim()) { sendResponse({ success: false, error: 'intent required' }); return; }
           let url = '', title = '';
           if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); url = t?.url ?? ''; title = t?.title ?? ''; } catch { /* */ } }
-          // Reuse the cached affordance description (built during Explore).
+          // v2.74.409 — Prefer the PageModel's STRUCTURED goals (L2) to anchor the
+          // grounding; fall back to the free-text affordance description. Both come
+          // from Explore.
           let affordances = null;
+          let goals = null;
           if (groundId && url) {
-            try { const entry = await _readPageStructureCache(groundId, _normalizeUrlForLocaleCache(url)); affordances = entry?.structure?.affordances ?? null; } catch { /* */ }
+            const key = _normalizeUrlForPerspectiveCache(url);
+            try { const entry = await _readPageStructureCache(groundId, key); affordances = entry?.structure?.affordances ?? null; } catch { /* */ }
+            try {
+              const pm = await _readPageModelCache(groundId, key);
+              const gs = pm?.model?.goals ? Object.values(pm.model.goals) : [];
+              if (gs.length && (Date.now() - (pm.capturedAt ?? 0)) < PAGE_MODEL_TTL_MS) {
+                goals = gs.map(g => ({ label: g.label, description: g.description }));
+              }
+            } catch { /* */ }
           }
-          if (!affordances) {
-            // No explored affordance → can't ground; pass the intent through so
-            // the UI can still propose (and nudge the user to Explore first).
+          if (!affordances && !goals) {
+            // Nothing explored → can't ground; pass the intent through so the UI
+            // can still propose (and nudge the user to Explore first).
             sendResponse({ success: true, groundedIntent: intent.trim(), achievable: 'unknown', note: 'Run Explore on this page to ground the intent in its actual capabilities.', hadAffordance: false });
             return;
           }
-          const out = await AnthropicService.groundIntent({ userIntent: intent, affordances, url, title });
+          const out = await AnthropicService.groundIntent({ userIntent: intent, affordances, goals, url, title });
           if (!out) { sendResponse({ success: false, error: 'Claude returned no grounded intent.' }); return; }
-          sendResponse({ success: true, ...out, hadAffordance: true });
+          sendResponse({ success: true, ...out, hadAffordance: true, hadGoals: !!goals });
         } catch (err) {
           Logger.error('background', `GROUND_INTENT failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
@@ -4317,7 +4412,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         try {
           const { groundId = null, url = '' } = payload ?? {};
           if (!groundId) { sendResponse({ success: true, structure: null, fresh: false }); return; }
-          const cacheKey = _normalizeUrlForLocaleCache(url);
+          const cacheKey = _normalizeUrlForPerspectiveCache(url);
           const entry = await _readPageStructureCache(groundId, cacheKey);
           if (!entry) { sendResponse({ success: true, structure: null, fresh: false }); return; }
           const age = Date.now() - (entry.capturedAt ?? 0);
@@ -4335,7 +4430,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // DOM + this Ground's landmark registry. The sidepanel verifies each
     // selector and routes abstentions/failures to manual picking. See
     // DESIGN_resolve_roles.md.
-    case 'RESOLVE_LOCALE_ROLES': {
+    case 'RESOLVE_PERSPECTIVE_ROLES': {
       (async () => {
         try {
           const { tabId, groundId = null, roles, priorAttempt = null } = payload ?? {};
@@ -4352,7 +4447,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           try {
             await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['ContentScripts/contentScript.js'] });
           } catch (e) {
-            Logger.warn('background', `RESOLVE_LOCALE_ROLES: content-script inject failed (continuing): ${e.message}`);
+            Logger.warn('background', `RESOLVE_PERSPECTIVE_ROLES: content-script inject failed (continuing): ${e.message}`);
           }
           let snap;
           // v2.74.395 — includeContentBlocks: surface repeating content blocks
@@ -4366,7 +4461,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           let screenshot = null;
           if (tabInfo.active) {
             try { screenshot = await chrome.tabs.captureVisibleTab(tabInfo.windowId, { format: 'jpeg', quality: 55 }); }
-            catch (e) { Logger.warn('background', `RESOLVE_LOCALE_ROLES: screenshot failed (continuing): ${e.message}`); }
+            catch (e) { Logger.warn('background', `RESOLVE_PERSPECTIVE_ROLES: screenshot failed (continuing): ${e.message}`); }
           }
           // Ground landmark registry (reuse) — best-effort.
           let registryLandmarks = null;
@@ -4375,7 +4470,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               const lms = await StorageManager.listLandmarksForGround(groundId);
               registryLandmarks = (lms ?? []).map(lm => ({ alias: lm.alias, a11yRole: lm.a11yRole, description: lm.description, selector: lm.selector }));
             } catch (e) {
-              Logger.warn('background', `RESOLVE_LOCALE_ROLES: listLandmarksForGround failed (continuing): ${e.message}`);
+              Logger.warn('background', `RESOLVE_PERSPECTIVE_ROLES: listLandmarksForGround failed (continuing): ${e.message}`);
             }
           }
 
@@ -4383,7 +4478,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // so resolve REUSES proven selectors (esp. for triggers) instead of
           // guessing positional ones on hashed-class pages.
           const knownSelectors = await _knownSelectorsForUrl(groundId, snap.url ?? url);
-          Logger.info('explore', `RESOLVE_LOCALE_ROLES: ${Array.isArray(knownSelectors) ? knownSelectors.length : 0} known verified selector(s) from artifact${Array.isArray(knownSelectors) && knownSelectors.length ? ' — e.g. ' + knownSelectors.slice(0, 6).map(k => `"${(k.label || '').slice(0, 24)}"`).join(', ') : ' (none — page not explored, or Explore did not capture these controls)'}`);
+          Logger.info('explore', `RESOLVE_PERSPECTIVE_ROLES: ${Array.isArray(knownSelectors) ? knownSelectors.length : 0} known verified selector(s) from artifact${Array.isArray(knownSelectors) && knownSelectors.length ? ' — e.g. ' + knownSelectors.slice(0, 6).map(k => `"${(k.label || '').slice(0, 24)}"`).join(', ') : ' (none — page not explored, or Explore did not capture these controls)'}`);
+
+          // v2.74.415 — OUTCOMES slice 4: the conventions histogram (selector-tier
+          // distribution learned from this Ground's verified selectors, § 6) biases
+          // the next resolve — each Perspective built makes the next cheaper/accurate.
+          let conventions = null;
+          if (groundId) {
+            try {
+              const conv = (await _outcomeRollups(groundId)).conventions;
+              if (conv && conv.total >= 5) conventions = conv;   // only once there's signal
+            } catch (e) { Logger.warn('background', `RESOLVE_PERSPECTIVE_ROLES: conventions read failed (continuing): ${e.message}`); }
+          }
 
           const out = await AnthropicService.resolveRoles({
             roles,
@@ -4393,6 +4499,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             screenshot,
             registryLandmarks,
             knownSelectors,
+            conventions,
             priorAttempt,
           });
           if (!out || !Array.isArray(out.resolutions)) {
@@ -4401,7 +4508,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
           sendResponse({ success: true, resolutions: out.resolutions });
         } catch (err) {
-          Logger.error('background', `RESOLVE_LOCALE_ROLES failed: ${err.message}`);
+          Logger.error('background', `RESOLVE_PERSPECTIVE_ROLES failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();
@@ -4433,7 +4540,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           let trigger = (typeof triggerSelector === 'string' && triggerSelector) ? triggerSelector : null;
           if (!trigger && groundId) {
             try {
-              const entry = await _readPageStructureCache(groundId, _normalizeUrlForLocaleCache(url));
+              const entry = await _readPageStructureCache(groundId, _normalizeUrlForPerspectiveCache(url));
               const controls = (entry?.structure?.controls ?? []).filter(c => c?.observation === 'reveal' && c?.selector);
               const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
               const want = norm(triggerLabel).split(' ').filter(Boolean);
@@ -4528,7 +4635,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // Reuse the cached page-affordance description for grounding context.
           let affordances = null;
           if (groundId) {
-            try { const entry = await _readPageStructureCache(groundId, _normalizeUrlForLocaleCache(url)); affordances = entry?.structure?.affordances ?? null; } catch { /* */ }
+            try { const entry = await _readPageStructureCache(groundId, _normalizeUrlForPerspectiveCache(url)); affordances = entry?.structure?.affordances ?? null; } catch { /* */ }
           }
           const loc = await AnthropicService.locateRoleRegion({
             role: role.role, description: role.description ?? '', intent,
@@ -4556,7 +4663,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
-    // v2.74.397 — Build a PageModel (Locale capability catalog) at tier L0:
+    // v2.74.397 — Build a PageModel (Perspective capability catalog) at tier L0:
     // read-only whole-page enumeration in the content script → buildPageModel →
     // cache under the new pageModelCache key (additive; old pageStructure stays
     // live). Payload: { tabId, groundId? } → { success, model, cacheKey }.
@@ -4577,7 +4684,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           catch (e) { sendResponse({ success: false, error: `enumerate failed: ${e.message}` }); return; }
           if (!enr?.success) { sendResponse({ success: false, error: enr?.error ?? 'enumerate returned no payload' }); return; }
           const model = PageModel.buildPageModel(enr.features, enr.meta);
-          const cacheKey = _normalizeUrlForLocaleCache(enr.meta?.url ?? url);
+          const cacheKey = _normalizeUrlForPerspectiveCache(enr.meta?.url ?? url);
           // v2.74.405 — The manual catalog is read-only (no poke), so it can't
           // discover depth itself — but if a FRESH pageStructure exists (a prior
           // Explore poked this page), merge its reveal data so the catalog reaches
@@ -4611,11 +4718,116 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         try {
           const { groundId = null, url } = payload ?? {};
           if (!groundId || !url) { sendResponse({ success: true, model: null, fresh: false }); return; }
-          const entry = await _readPageModelCache(groundId, _normalizeUrlForLocaleCache(url));
+          const entry = await _readPageModelCache(groundId, _normalizeUrlForPerspectiveCache(url));
           if (!entry?.model) { sendResponse({ success: true, model: null, fresh: false }); return; }
           const fresh = (Date.now() - (entry.capturedAt ?? 0)) < PAGE_MODEL_TTL_MS;
           sendResponse({ success: true, model: entry.model, fresh, capturedAt: entry.capturedAt });
         } catch (err) {
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // v2.74.413 — OUTCOMES slice 2: read the append-only stream + its lazily
+    // folded rollups (Feature.health / Perspective.usage / Ground.conventions).
+    // Read-only; consumed by the studio viewer (slice 5) and resolve bias / decay
+    // (slice 4). `includeEvents` returns the raw stream too (capped for transport).
+    case 'GET_OUTCOMES': {
+      (async () => {
+        try {
+          const { groundId = null, includeEvents = false, limit = 200 } = payload ?? {};
+          if (!groundId) { sendResponse({ success: true, rollups: null, events: [], eventCount: 0 }); return; }
+          const rollups = await _outcomeRollups(groundId);
+          let events = [];
+          if (includeEvents) {
+            const stream = await _readOutcomes(groundId);
+            events = stream.slice(-limit).reverse();   // newest first
+          }
+          sendResponse({ success: true, rollups, events, eventCount: rollups.eventCount });
+        } catch (err) {
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // v2.74.414 — OUTCOMES slice 3: emit hook. The sidepanel's resolve-run
+    // (`_logResolveRun`) ships its perf entry here; we transform each per-role
+    // detail into an authoring `resolve` OutcomeEvent (OUTCOMES_SPEC § 9 — the
+    // gold `corrected` label rides along when a row carries `humanFinal`) and
+    // append it to the ground's stream. Centralizing the write in background
+    // avoids read-modify-write races on the shared `outcomesStream` map.
+    case 'EMIT_RESOLVE_OUTCOMES': {
+      (async () => {
+        try {
+          const { groundId = null, run = null, ctx = {} } = payload ?? {};
+          if (!groundId || !run) { sendResponse({ success: true, emitted: 0 }); return; }
+
+          // v2.74.415 — map each resolved/corrected selector to its catalog
+          // Feature id so Feature.health keys land (slice 4). Build a verbatim
+          // selector→id index from the cached pageModel for this ground+URL.
+          let selToFid = null, pmEntry = null, pmKey = null;
+          try {
+            pmKey = _normalizeUrlForPerspectiveCache(run.url ?? ctx.localeId ?? '');
+            pmEntry = await _readPageModelCache(groundId, pmKey);
+            const feats = pmEntry?.model?.features ? Object.values(pmEntry.model.features) : [];
+            if (feats.length) {
+              selToFid = new Map();
+              for (const f of feats) if (f?.selector && f?.id && !selToFid.has(f.selector)) selToFid.set(f.selector, f.id);
+            }
+          } catch (e) { Logger.warn('background', `EMIT_RESOLVE_OUTCOMES: pageModel index failed (continuing): ${e.message}`); }
+
+          const featureIdForRole = (_role, selector) => (selector && selToFid ? (selToFid.get(selector) ?? null) : null);
+          const events = Outcomes.eventsFromResolveRun(run, { groundId, ...ctx, featureIdForRole });
+          await _appendOutcomes(groundId, events);
+          Logger.info('outcomes', `resolve-run → ${events.length} event(s) for ground ${groundId}`);
+
+          // v2.74.415 — active decay (OUTCOMES_SPEC § 7, GROUND_SPEC § 0.16). Fold
+          // the full stream's Feature health and push decayed confidence/lifecycle
+          // back onto the cached pageModel features — a resolve-miss flags JUST
+          // that feature stale-suspected, never its siblings. Write back if changed.
+          try {
+            if (pmEntry?.model?.features) {
+              const feats = pmEntry.model.features;
+              const health = (await _outcomeRollups(groundId)).featureHealth;
+              let changed = 0;
+              for (const [fid, f] of Object.entries(feats)) {
+                const h = health[fid];
+                if (!h) continue;
+                const d = Outcomes.decayFeature(f, h);
+                if (d.changed) { f.confidence = d.confidence; f.lifecycle = d.lifecycle; changed++; }
+              }
+              // v2.74.419 — provenance: stamp `correctedByHuman` ON the catalog
+              // Feature the LLM wrongly proposed (OUTCOMES_SPEC § 3 — the gold label
+              // as durable artifact provenance, not only a stream row). featureId
+              // for a `corrected` event already points at the PROPOSED (wrong)
+              // element; record { role, from→to, at } + the corpusRef backlink.
+              for (const ev of events) {
+                if (ev.verdict !== 'corrected' || !ev.featureId) continue;
+                const f = feats[ev.featureId];
+                if (!f) continue;
+                f.provenance = f.provenance || {};
+                f.provenance.proposedBy = f.provenance.proposedBy || 'llm-resolve';
+                f.provenance.correctedByHuman = {
+                  role: ev.role ?? null,
+                  from: ev.llmOutput?.selector ?? null,
+                  to: ev.humanFinal?.selector ?? null,
+                  at: ev.ts,
+                };
+                if (ev.corpusRef) f.provenance.corpusRef = ev.corpusRef;
+                changed++;
+              }
+              if (changed) {
+                await _writePageModelCache(groundId, pmKey, pmEntry);
+                Logger.info('outcomes', `pageModel ${pmKey}: ${changed} feature update(s) (decay + provenance)`);
+              }
+            }
+          } catch (e) { Logger.warn('background', `EMIT_RESOLVE_OUTCOMES: decay/provenance pass failed (continuing): ${e.message}`); }
+
+          sendResponse({ success: true, emitted: events.length });
+        } catch (err) {
+          Logger.warn('background', `EMIT_RESOLVE_OUTCOMES failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();
@@ -4702,7 +4914,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     //   3. Find or open Studio in a tab and focus it
     //
     // The sidepanel re-enables itself the next time a launcher (Studio's
-    // ▶, + Locale, Walk button) calls setOptions({enabled:true}) before
+    // ▶, + Perspective, Walk button) calls setOptions({enabled:true}) before
     // sidePanel.open. That setOptions call effectively re-arms the panel
     // for the relevant tab.
     case 'EXIT_TO_STUDIO': {
@@ -4757,16 +4969,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
-    // v2.72.41 (Pass 17g) — Locale capture handoff to debugger.
-    case 'BEGIN_LOCALE_CAPTURE': {
+    // v2.72.41 (Pass 17g) — Perspective capture handoff to debugger.
+    case 'BEGIN_PERSPECTIVE_CAPTURE': {
       (async () => {
         try {
           // v2.74.31 — Optional existingTabId reuses the user's current
           // tab (sidepanel-launched capture) instead of open/find-by-URL.
           // v2.74.33 — Optional returnTo decides where Save / Cancel goes.
-          // v2.74.43 — Optional prefilledLocale seeds name + description
-          // + landmarks (Claude-suggested via AUTO_DISCOVER_LOCALE).
-          const { groundId, existingTabId = null, returnTo = null, prefilledLocale = null } = payload ?? {};
+          // v2.74.43 — Optional prefilledPerspective seeds name + description
+          // + landmarks (Claude-suggested via AUTO_DISCOVER_PERSPECTIVE).
+          const { groundId, existingTabId = null, returnTo = null, prefilledPerspective = null } = payload ?? {};
           if (!groundId) {
             sendResponse({ success: false, error: 'groundId required' });
             return;
@@ -4775,14 +4987,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (__activeInvocations.size > 0) {
             sendResponse({
               success: false,
-              error: 'A strategy is currently running under the debugger. Cancel or finish it before capturing a locale.',
+              error: 'A strategy is currently running under the debugger. Cancel or finish it before capturing a perspective.',
             });
             return;
           }
-          if (__pendingLocaleCapture) {
+          if (__pendingPerspectiveCapture) {
             sendResponse({
               success: false,
-              error: 'Another locale capture is already in progress. Cancel it from the debugger first.',
+              error: 'Another perspective capture is already in progress. Cancel it from the debugger first.',
             });
             return;
           }
@@ -4803,11 +5015,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           let tabRes;
           if (existingTabId != null) {
             try { await chrome.tabs.update(existingTabId, { active: true }); } catch (e) {
-              Logger.warn('background', `BEGIN_LOCALE_CAPTURE: focus tab ${existingTabId} failed: ${e.message}`);
+              Logger.warn('background', `BEGIN_PERSPECTIVE_CAPTURE: focus tab ${existingTabId} failed: ${e.message}`);
             }
             tabRes = { ok: true, tabId: existingTabId };
           } else {
-            tabRes = await __findOrOpenTabForLocale(ground.url);
+            tabRes = await __findOrOpenTabForPerspective(ground.url);
           }
           if (!tabRes.ok) {
             sendResponse({ success: false, error: tabRes.error });
@@ -4815,7 +5027,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
 
           // Stash session.
-          __pendingLocaleCapture = {
+          __pendingPerspectiveCapture = {
             groundId,
             tabId: tabRes.tabId,
             sessionId: `loc_cap_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -4826,17 +5038,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             await chrome.sidePanel.setOptions({
               tabId: tabRes.tabId,
               // v2.72.50 (Stage 1) — use the new shell HTML. Shell will
-              // route to the locale-capture mode based on the mode set
+              // route to the perspective-capture mode based on the mode set
               // below. Old per-tab debugger.html assignment retired.
               path: 'sidepanel.html',
               enabled: true,
             });
           } catch (e) {
-            Logger.warn('background', `BEGIN_LOCALE_CAPTURE: setOptions failed (non-fatal): ${e.message}`);
+            Logger.warn('background', `BEGIN_PERSPECTIVE_CAPTURE: setOptions failed (non-fatal): ${e.message}`);
           }
 
           // v2.72.44 — Wait for tab complete + re-inject content script.
-          // v2.74.166 — allFrames: true so locale-capture's frame-aware
+          // v2.74.166 — allFrames: true so perspective-capture's frame-aware
           // picker broadcast actually reaches iframes (the picker now
           // routes through shared.js broadcastStartPick).
           await __waitForTabComplete(tabRes.tabId, 8000);
@@ -4845,69 +5057,69 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               target: { tabId: tabRes.tabId, allFrames: true },
               files: ['ContentScripts/contentScript.js'],
             });
-            Logger.info('background', `BEGIN_LOCALE_CAPTURE: re-injected content script into tab ${tabRes.tabId} (all frames)`);
+            Logger.info('background', `BEGIN_PERSPECTIVE_CAPTURE: re-injected content script into tab ${tabRes.tabId} (all frames)`);
           } catch (e) {
-            Logger.warn('background', `BEGIN_LOCALE_CAPTURE: executeScript failed (continuing): ${e.message}`);
+            Logger.warn('background', `BEGIN_PERSPECTIVE_CAPTURE: executeScript failed (continuing): ${e.message}`);
           }
 
           // v2.72.50 (Stage 1) — Set the sidepanel mode. The shell
           // listens for SIDEPANEL_MODE_CHANGED (broadcast by
-          // __setSidepanelMode) and mounts locale-capture.js. The
-          // legacy LOCALE_CAPTURE_BEGIN_BROADCAST is preserved for
+          // __setSidepanelMode) and mounts perspective-capture.js. The
+          // legacy PERSPECTIVE_CAPTURE_BEGIN_BROADCAST is preserved for
           // backward compatibility with the not-yet-extracted
           // debugger.html flows in the interim.
-          __setSidepanelMode('locale-capture', {
+          __setSidepanelMode('perspective-capture', {
             groundId,
             tabId: tabRes.tabId,
-            sessionId: __pendingLocaleCapture.sessionId,
+            sessionId: __pendingPerspectiveCapture.sessionId,
             returnTo,
-            prefilledLocale,
+            prefilledPerspective,
           });
           chrome.runtime.sendMessage({
-            type: 'LOCALE_CAPTURE_BEGIN_BROADCAST',
+            type: 'PERSPECTIVE_CAPTURE_BEGIN_BROADCAST',
             payload: {
-              session: __pendingLocaleCapture,
+              session: __pendingPerspectiveCapture,
             },
           }).catch(() => { /* no listeners is fine */ });
 
           sendResponse({
             success: true,
             tabId: tabRes.tabId,
-            sessionId: __pendingLocaleCapture.sessionId,
+            sessionId: __pendingPerspectiveCapture.sessionId,
           });
         } catch (err) {
-          Logger.error('background', `BEGIN_LOCALE_CAPTURE failed: ${err.message}`);
+          Logger.error('background', `BEGIN_PERSPECTIVE_CAPTURE failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();
       return true;
     }
 
-    case 'GET_PENDING_LOCALE_CAPTURE': {
+    case 'GET_PENDING_PERSPECTIVE_CAPTURE': {
       // Synchronous reply — debugger polls this on boot. No async work.
       sendResponse({
         success: true,
-        session: __pendingLocaleCapture ? { ...__pendingLocaleCapture } : null,
+        session: __pendingPerspectiveCapture ? { ...__pendingPerspectiveCapture } : null,
       });
       return false;
     }
 
-    case 'CANCEL_LOCALE_CAPTURE': {
+    case 'CANCEL_PERSPECTIVE_CAPTURE': {
       // Clear pending session. Used when:
-      //  - debugger commits a save (followup after SAVE_LOCALE success)
+      //  - debugger commits a save (followup after SAVE_PERSPECTIVE success)
       //  - user explicitly cancels in the debugger
       //  - studio cancels its handoff
-      const cleared = __pendingLocaleCapture;
-      __pendingLocaleCapture = null;
-      Logger.info('background', `CANCEL_LOCALE_CAPTURE: cleared session`, {
+      const cleared = __pendingPerspectiveCapture;
+      __pendingPerspectiveCapture = null;
+      Logger.info('background', `CANCEL_PERSPECTIVE_CAPTURE: cleared session`, {
         hadSession: !!cleared,
         sessionId: cleared?.sessionId,
       });
       // v2.72.50 (Stage 1) — also clear the sidepanel mode if the
-      // current mode is locale-capture. The shell unmounts and shows
+      // current mode is perspective-capture. The shell unmounts and shows
       // idle. (If the user already switched to a different mode, leave
       // that mode alone.)
-      if (__sidepanelMode === 'locale-capture') {
+      if (__sidepanelMode === 'perspective-capture') {
         __setSidepanelMode(null, null);
       }
       sendResponse({ success: true, hadSession: !!cleared });

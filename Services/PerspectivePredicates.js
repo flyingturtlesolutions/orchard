@@ -1,14 +1,14 @@
 /**
- * @file Services/LocalePredicates.js
+ * @file Services/PerspectivePredicates.js
  * @description Phase 7c+7d of the landmark substrate spec. Evaluates a
- * Locale's applicability predicates against runtime page state to
- * determine whether the Locale is "active" — meaning its landmarks
+ * Perspective's applicability predicates against runtime page state to
+ * determine whether the Perspective is "active" — meaning its landmarks
  * contribute to the addressable namespace and operations targeting
  * them can resolve.
  *
- * Per spec/02-CAPABILITIES.md § Locale:
+ * Per spec/02-CAPABILITIES.md § Perspective:
  *   predicates: AssertionTree-shaped applicability rules
- *   Leaf kinds (LOCALE_SPEC § 4 — all six implemented as of v2.74.331):
+ *   Leaf kinds (PERSPECTIVE_SPEC § 4 — all six implemented as of v2.74.331):
  *     - urlMatches      { pattern, mode: 'contains'|'regex'|'exact' }
  *     - visible         { target: <landmark uid> }
  *     - hasText         { target: <landmark uid>, value, caseSensitive? }
@@ -36,7 +36,7 @@
  *                   selector and the predicate's `value`. Honors optional
  *                   caseSensitive (defaults to insensitive).
  *
- *   iframeLoaded  → reads the active locale's iframeContexts[] for the
+ *   iframeLoaded  → reads the active perspective's iframeContexts[] for the
  *                   named context, then asks the content script
  *                   (top frame) to RESOLVE_IFRAME_BY_PREDICATE. Returns
  *                   true iff the iframe is reachable and same-origin
@@ -46,15 +46,15 @@
  * unreachable, landmark missing, selector syntax error, frame missing).
  * The tree evaluator treats null inside AND as null overall and null
  * inside OR only as null if no peer evaluated true — matching the
- * spec's "don't activate locales whose conditions can't be verified"
+ * spec's "don't activate perspectives whose conditions can't be verified"
  * stance.
  *
- * Backward compatibility: legacy locales carry a string `urlPattern`
+ * Backward compatibility: legacy perspectives carry a string `urlPattern`
  * field (no tree). This is treated as an implicit
  * `{ kind: 'urlMatches', pattern, mode: 'contains' }` predicate and
  * combined with any tree-form `predicates` via AND.
  *
- * @module Services/LocalePredicates
+ * @module Services/PerspectivePredicates
  * @version 2.74.248
  */
 
@@ -72,7 +72,7 @@ const TOP_FRAME_ID = 0;
  *             decides fail-open or fail-closed)
  *
  * @param {object} predicate
- * @param {object} context  { tabUrl, tabId, locale, ... }
+ * @param {object} context  { tabUrl, tabId, perspective, ... }
  * @returns {Promise<boolean|null>}
  */
 async function _evaluateLeafPredicate(predicate, context) {
@@ -91,7 +91,7 @@ async function _evaluateLeafPredicate(predicate, context) {
     case 'iframeLoaded':
       return _evaluateIframeLoaded(predicate, context);
     default:
-      Logger.debug('LocalePredicates', `unknown predicate kind: ${predicate.kind} — treating as null`);
+      Logger.debug('PerspectivePredicates', `unknown predicate kind: ${predicate.kind} — treating as null`);
       return null;
   }
 }
@@ -151,7 +151,7 @@ async function _evaluateTree(tree, context) {
     if (r === null) return null;
     return !r;
   }
-  Logger.debug('LocalePredicates', `unknown operator: ${op}`);
+  Logger.debug('PerspectivePredicates', `unknown operator: ${op}`);
   return null;
 }
 
@@ -163,7 +163,7 @@ function _matchUrl(url, pattern, mode) {
     case 'regex':
       try { return new RegExp(pattern).test(url); }
       catch (e) {
-        Logger.warn('LocalePredicates', `invalid regex pattern "${pattern}": ${e.message}`);
+        Logger.warn('PerspectivePredicates', `invalid regex pattern "${pattern}": ${e.message}`);
         return false;
       }
     case 'contains':
@@ -179,7 +179,7 @@ function _matchUrl(url, pattern, mode) {
  * record. Tolerates the record shape variations that accumulated
  * through the migration: top-level `selector`/`frameUrl` (current),
  * `realization: { selector, frameUrl }` (spec-aligned wrapping that
- * may land later), and legacy embedded-only locales (no record at
+ * may land later), and legacy embedded-only perspectives (no record at
  * all → caller handles).
  *
  * @param {object} landmark
@@ -246,13 +246,13 @@ function _send(tabId, message, frameId = TOP_FRAME_ID) {
     try {
       chrome.tabs.sendMessage(tabId, message, { frameId }, response => {
         if (chrome.runtime.lastError) {
-          Logger.debug('LocalePredicates', `_send to frame ${frameId} failed: ${chrome.runtime.lastError.message}`);
+          Logger.debug('PerspectivePredicates', `_send to frame ${frameId} failed: ${chrome.runtime.lastError.message}`);
           return resolve(null);
         }
         resolve(response);
       });
     } catch (e) {
-      Logger.debug('LocalePredicates', `_send threw: ${e.message}`);
+      Logger.debug('PerspectivePredicates', `_send threw: ${e.message}`);
       resolve(null);
     }
   });
@@ -263,13 +263,13 @@ async function _evaluateVisible(predicate, context) {
   if (typeof tabId !== 'number') return null;
   const uid = predicate.target;
   if (!uid || typeof uid !== 'string') {
-    Logger.debug('LocalePredicates', 'visible predicate missing target uid');
+    Logger.debug('PerspectivePredicates', 'visible predicate missing target uid');
     return null;
   }
   let landmark;
   try { landmark = await StorageManager.getLandmark(uid); }
   catch (e) {
-    Logger.debug('LocalePredicates', `getLandmark(${uid}) failed: ${e.message}`);
+    Logger.debug('PerspectivePredicates', `getLandmark(${uid}) failed: ${e.message}`);
     return null;
   }
   if (!landmark) return null;
@@ -289,17 +289,17 @@ async function _evaluateHasText(predicate, context) {
   if (typeof tabId !== 'number') return null;
   const uid = predicate.target;
   if (!uid || typeof uid !== 'string') {
-    Logger.debug('LocalePredicates', 'hasText predicate missing target uid');
+    Logger.debug('PerspectivePredicates', 'hasText predicate missing target uid');
     return null;
   }
   if (typeof predicate.value !== 'string') {
-    Logger.debug('LocalePredicates', 'hasText predicate missing string value');
+    Logger.debug('PerspectivePredicates', 'hasText predicate missing string value');
     return null;
   }
   let landmark;
   try { landmark = await StorageManager.getLandmark(uid); }
   catch (e) {
-    Logger.debug('LocalePredicates', `getLandmark(${uid}) failed: ${e.message}`);
+    Logger.debug('PerspectivePredicates', `getLandmark(${uid}) failed: ${e.message}`);
     return null;
   }
   if (!landmark) return null;
@@ -318,23 +318,23 @@ async function _evaluateHasText(predicate, context) {
   return res.hasText === true;
 }
 
-// v2.74.331 — LOCALE_SPEC § 4 attributeEquals. Landmark's attribute === value.
+// v2.74.331 — PERSPECTIVE_SPEC § 4 attributeEquals. Landmark's attribute === value.
 async function _evaluateAttributeEquals(predicate, context) {
   const tabId = context?.tabId;
   if (typeof tabId !== 'number') return null;
   const uid = predicate.target;
   if (!uid || typeof uid !== 'string') {
-    Logger.debug('LocalePredicates', 'attributeEquals predicate missing target uid');
+    Logger.debug('PerspectivePredicates', 'attributeEquals predicate missing target uid');
     return null;
   }
   if (typeof predicate.attribute !== 'string' || !predicate.attribute.trim()) {
-    Logger.debug('LocalePredicates', 'attributeEquals predicate missing attribute');
+    Logger.debug('PerspectivePredicates', 'attributeEquals predicate missing attribute');
     return null;
   }
   let landmark;
   try { landmark = await StorageManager.getLandmark(uid); }
   catch (e) {
-    Logger.debug('LocalePredicates', `getLandmark(${uid}) failed: ${e.message}`);
+    Logger.debug('PerspectivePredicates', `getLandmark(${uid}) failed: ${e.message}`);
     return null;
   }
   if (!landmark) return null;
@@ -349,20 +349,20 @@ async function _evaluateAttributeEquals(predicate, context) {
   return res.matches === true;
 }
 
-// v2.74.331 — LOCALE_SPEC § 4 landmarkExists. Landmark's selector resolves
+// v2.74.331 — PERSPECTIVE_SPEC § 4 landmarkExists. Landmark's selector resolves
 // to an element in the DOM (present; visibility not required).
 async function _evaluateLandmarkExists(predicate, context) {
   const tabId = context?.tabId;
   if (typeof tabId !== 'number') return null;
   const uid = predicate.target;
   if (!uid || typeof uid !== 'string') {
-    Logger.debug('LocalePredicates', 'landmarkExists predicate missing target uid');
+    Logger.debug('PerspectivePredicates', 'landmarkExists predicate missing target uid');
     return null;
   }
   let landmark;
   try { landmark = await StorageManager.getLandmark(uid); }
   catch (e) {
-    Logger.debug('LocalePredicates', `getLandmark(${uid}) failed: ${e.message}`);
+    Logger.debug('PerspectivePredicates', `getLandmark(${uid}) failed: ${e.message}`);
     return null;
   }
   if (!landmark) return null;
@@ -379,22 +379,22 @@ async function _evaluateLandmarkExists(predicate, context) {
 
 async function _evaluateIframeLoaded(predicate, context) {
   const tabId  = context?.tabId;
-  const locale = context?.locale;
+  const perspective = context?.perspective;
   if (typeof tabId !== 'number') return null;
-  if (!locale || typeof locale !== 'object') {
-    Logger.debug('LocalePredicates', 'iframeLoaded predicate evaluated without locale in context');
+  if (!perspective || typeof perspective !== 'object') {
+    Logger.debug('PerspectivePredicates', 'iframeLoaded predicate evaluated without perspective in context');
     return null;
   }
   const contextName = predicate.contextName;
   if (!contextName || typeof contextName !== 'string') {
-    Logger.debug('LocalePredicates', 'iframeLoaded predicate missing contextName');
+    Logger.debug('PerspectivePredicates', 'iframeLoaded predicate missing contextName');
     return null;
   }
-  const ctx = Array.isArray(locale.iframeContexts)
-    ? locale.iframeContexts.find(c => c?.contextName === contextName)
+  const ctx = Array.isArray(perspective.iframeContexts)
+    ? perspective.iframeContexts.find(c => c?.contextName === contextName)
     : null;
   if (!ctx || !ctx.predicate) {
-    Logger.debug('LocalePredicates', `locale "${locale.id ?? locale.name}" has no iframeContext named "${contextName}"`);
+    Logger.debug('PerspectivePredicates', `perspective "${perspective.id ?? perspective.name}" has no iframeContext named "${contextName}"`);
     return null;
   }
   const res = await _send(tabId, {
@@ -410,7 +410,7 @@ async function _evaluateIframeLoaded(predicate, context) {
   //   { success: true, sameOrigin, loaded, ... }      on match. The
   //     handler already encodes the cross-origin policy: it sets
   //     loaded=true when the element is present even though we can't
-  //     read the iframe's readyState. Respect that decision so locales
+  //     read the iframe's readyState. Respect that decision so perspectives
   //     scoped to cross-origin iframes can activate.
   if (res.success === false) {
     if (res.reason === 'iframe-absent') return false;
@@ -420,65 +420,65 @@ async function _evaluateIframeLoaded(predicate, context) {
 }
 
 /**
- * Determine whether a Locale is active given the runtime context.
+ * Determine whether a Perspective is active given the runtime context.
  *
  * v2.74.275 — Legacy `urlPattern` field REMOVED. URL gating is now
  * expressed exclusively via a `urlMatches` predicate in the
- * predicates tree. Locales must declare at least one urlMatches
- * predicate to be URL-scoped; locales with no predicates are
+ * predicates tree. Perspectives must declare at least one urlMatches
+ * predicate to be URL-scoped; perspectives with no predicates are
  * always active.
  *
- * Treats null (unverifiable leaves) as fail-closed: a locale with
+ * Treats null (unverifiable leaves) as fail-closed: a perspective with
  * unverifiable predicates is NOT considered active. This matches the
  * spec's "don't silently use the wrong element" stance — when in
  * doubt, exclude.
  *
- * Phase 7d: locale is threaded into the evaluation context so
- * `iframeLoaded` leaves can look up the locale's iframeContexts[].
+ * Phase 7d: perspective is threaded into the evaluation context so
+ * `iframeLoaded` leaves can look up the perspective's iframeContexts[].
  *
- * @param {object} locale
+ * @param {object} perspective
  * @param {object} context  { tabUrl, tabId? }
  * @returns {Promise<boolean>}
  */
-export async function isLocaleActive(locale, context) {
-  if (!locale || typeof locale !== 'object') return false;
-  // v2.74.335 — LOCALE_SPEC § 12: a deprecated Locale is excluded from the
+export async function isPerspectiveActive(perspective, context) {
+  if (!perspective || typeof perspective !== 'object') return false;
+  // v2.74.335 — PERSPECTIVE_SPEC § 12: a deprecated Perspective is excluded from the
   // active set (its perspective is retired; authoring/proposals filter it).
-  if (locale.lifecycle === 'deprecated') return false;
-  const ctx = { ...(context ?? {}), locale };
-  if (Array.isArray(locale.predicates)) {
-    if (locale.predicates.length === 0) return true;
-    const verdict = await _evaluateTree({ operator: 'and', children: locale.predicates }, ctx);
+  if (perspective.lifecycle === 'deprecated') return false;
+  const ctx = { ...(context ?? {}), perspective };
+  if (Array.isArray(perspective.predicates)) {
+    if (perspective.predicates.length === 0) return true;
+    const verdict = await _evaluateTree({ operator: 'and', children: perspective.predicates }, ctx);
     return verdict === true;
   }
-  if (locale.predicates && typeof locale.predicates === 'object') {
-    const verdict = await _evaluateTree(locale.predicates, ctx);
+  if (perspective.predicates && typeof perspective.predicates === 'object') {
+    const verdict = await _evaluateTree(perspective.predicates, ctx);
     return verdict === true;
   }
   return true;   // no predicates → always active
 }
 
 /**
- * List all active locales for a Ground given the current page context.
+ * List all active perspectives for a Ground given the current page context.
  *
  * @param {string} groundId
  * @param {object} context  { tabUrl, tabId? }
  * @returns {Promise<Array<object>>}
  */
-export async function listActiveLocales(groundId, context) {
-  let locales;
+export async function listActivePerspectives(groundId, context) {
+  let perspectives;
   try {
-    locales = await StorageManager.listLocales(groundId);
+    perspectives = await StorageManager.listPerspectives(groundId);
   } catch (e) {
-    Logger.warn('LocalePredicates', `listActiveLocales(${groundId}) failed: ${e.message}`);
+    Logger.warn('PerspectivePredicates', `listActivePerspectives(${groundId}) failed: ${e.message}`);
     return [];
   }
   const active = [];
-  for (const locale of locales ?? []) {
+  for (const perspective of perspectives ?? []) {
     try {
-      if (await isLocaleActive(locale, context)) active.push(locale);
+      if (await isPerspectiveActive(perspective, context)) active.push(perspective);
     } catch (e) {
-      Logger.warn('LocalePredicates', `isLocaleActive(${locale?.id}) threw: ${e.message}`);
+      Logger.warn('PerspectivePredicates', `isPerspectiveActive(${perspective?.id}) threw: ${e.message}`);
     }
   }
   return active;

@@ -14,7 +14,7 @@
  *   - _libraryAssertionCache    : OTHER assertions on the ground (for
  *                                 nested assertion_ref dropdown). Excludes
  *                                 the assertion being edited.
- *   - _libraryLocaleCache       : Locales on the ground (for locale_ref
+ *   - _libraryPerspectiveCache       : Perspectives on the ground (for perspective_ref
  *                                 dropdown).
  *
  * Exported entry points:
@@ -39,7 +39,7 @@
  *   - Services/Assertion    : CONDITION_FIELDS for field-validation in
  *                             value-input handler
  *
- * Extracted from studio.js (Pass 17c) following the Locale form pattern
+ * Extracted from studio.js (Pass 17c) following the Perspective form pattern
  * established in Pass 17b.
  *
  * @module Studio/AssertionForm
@@ -65,10 +65,10 @@ let assertionDraft = null;
 // are excluded to prevent obvious cycles at authoring time.
 let _libraryAssertionCache = [];
 
-// v2.72.31 (Pass 17a) — Locales on the current ground for the locale_ref
+// v2.72.31 (Pass 17a) — Perspectives on the current ground for the perspective_ref
 // picker. v2.72.33 (Pass 17c) — now file-local; was a module-global
 // before extraction.
-let _libraryLocaleCache = [];
+let _libraryPerspectiveCache = [];
 
 // Setup-time injections. See setupAssertionForm below.
 let _refreshGroundList = null;
@@ -111,11 +111,11 @@ export async function openAssertionForm(groundId, assertionId) {
     _libraryAssertionCache = [];
   }
 
-  // v2.72.31 (Pass 17a) — Load locales for the locale_ref picker.
+  // v2.72.31 (Pass 17a) — Load perspectives for the perspective_ref picker.
   try {
-    _libraryLocaleCache = await StorageManager.listLocales(groundId);
+    _libraryPerspectiveCache = await StorageManager.listPerspectives(groundId);
   } catch (_) {
-    _libraryLocaleCache = [];
+    _libraryPerspectiveCache = [];
   }
 
   if (assertionId) {
@@ -190,7 +190,7 @@ function closeAssertionForm() {
   $('assertion-form-card').classList.add('hidden');
   assertionDraft = null;
   _libraryAssertionCache = [];
-  _libraryLocaleCache = [];
+  _libraryPerspectiveCache = [];
   // v2.72.47 (Pass 18) — clear verify state on close so the next
   // form-open starts clean.
   clearVerifyState();
@@ -207,7 +207,7 @@ function renderAssertionConditions() {
   }
 
   container.innerHTML = cs.map((c, i) => {
-    const editorHtml = _renderConditionEditor(c, { fragmentId: '__assertion__', side: 'cond', idx: i }, { context: 'fragment', assertions: _libraryAssertionCache, locales: _libraryLocaleCache, allowedFamilies: ['page', 'scope'] });
+    const editorHtml = _renderConditionEditor(c, { fragmentId: '__assertion__', side: 'cond', idx: i }, { context: 'fragment', assertions: _libraryAssertionCache, perspectives: _libraryPerspectiveCache, allowedFamilies: ['page', 'scope'] });
     // v2.72.47 (Pass 18) — per-condition verify status pill, if a verify
     // run has been performed since the last edit. Pill placement: directly
     // after the condition row, full-width, color-coded.
@@ -246,7 +246,7 @@ function renderAssertionConditions() {
       const decoded = _decodeConditionTypeValue(sel.value);
       const fresh = _emptyCondition(decoded.type);
       if (decoded.assertionId) fresh.assertionId = decoded.assertionId;
-      if (decoded.localeId) fresh.localeId = decoded.localeId;
+      if (decoded.perspectiveId) fresh.perspectiveId = decoded.perspectiveId;
       assertionDraft.body.conditions[idx] = fresh;
       // v2.72.47 — clear stale verify state on condition mutation.
       clearVerifyState();

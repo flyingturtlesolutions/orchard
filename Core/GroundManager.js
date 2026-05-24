@@ -15,7 +15,7 @@ export class GroundManager {
    * Creates and persists a new Ground (GROUND_SPEC § 6 shape).
    * Accepts `name` (canonical) or legacy `aiName`. saveGround normalizes
    * the record (builds urlPatterns[] from `url`, sets the deprecated
-   * name/url mirrors); we return the normalized + localeIds-projected
+   * name/url mirrors); we return the normalized + perspectiveIds-projected
    * record via getGround.
    * @param {{ name?: string, aiName?: string, url: string }} params
    * @returns {Promise<import('../Services/StorageManager.js').Ground>}

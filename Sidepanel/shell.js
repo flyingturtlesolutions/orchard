@@ -39,7 +39,7 @@ import { installGlobalErrorHandlers } from '../Core/ErrorCapture.js';
 installGlobalErrorHandlers('sidepanel', window);
 
 const MODE_REGISTRY = {
-  'locale-capture':     () => import('./modes/locale-capture.js'),
+  'perspective-capture':     () => import('./modes/perspective-capture.js'),
   'strategy-debug':     () => import('./modes/strategy-debug.js'),
   // v2.74.22 — 'fragment-walk' removed. The AI-walked (T3) authoring
   // path was eliminated; T1 cache authoring (fragment-author) is the
@@ -47,7 +47,7 @@ const MODE_REGISTRY = {
   'fragment-author':    () => import('./modes/fragment-author.js'),
   'observation-author': () => import('./modes/observation-author.js'),
   // v2.74.27 — Read-only Ground browse view. Lists all Grounds and their
-  // libraries (Fragments, Assertions, Locales, Observations, Analyses);
+  // libraries (Fragments, Assertions, Perspectives, Observations, Analyses);
   // no Strategies section, no per-row edit/json affordances. + Add
   // buttons still launch sidepanel-authorable flows.
   'ground-view':        () => import('./modes/ground-view.js'),
@@ -148,7 +148,7 @@ const _tabModes = new Map();
 let _panelWindowId = null;
 
 // v2.74.58 — Snapshot key includes the per-session id so a NEW
-// + Fragment / + Observation / + Locale on the same tab doesn't
+// + Fragment / + Observation / + Perspective on the same tab doesn't
 // inherit the previous session's snapshot. Previously the key was
 // just `${mode}:${tabId}`, which meant a stale snapshot from an
 // already-cancelled fragmentA would attach to a freshly-launched
@@ -204,7 +204,7 @@ async function boot() {
   _wireTabRemovalListener();
 
   // Cold-boot rehydration: ask background what mode should be active.
-  // If background reports an active mode (e.g., a pending locale capture
+  // If background reports an active mode (e.g., a pending perspective capture
   // session, an active strategy invocation), mount it. Otherwise idle.
   let initialMode = null;
   let initialPayload = null;

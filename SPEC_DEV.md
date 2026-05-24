@@ -3976,3 +3976,485 @@ safe: distinct menus don't share selectors, so they never wrongly merge (unit-
 tested: Explore stays separate while Log in + Join consolidate).
 
 **Touched.** `Core/pageModel.js` (`dedupeOverlayLayers` + call site), `manifest.json`.
+
+---
+
+## v2.74.408 — PageModel L2: synthesize structured Goals from the catalog
+
+**Date:** 2026-05-24
+**Decision by:** user ("continue"). The last capability tier: turn the L0+L1
+feature catalog into structured **Goals** (the outcomes a user can accomplish),
+each linked to the features that realize it — what intent-grounding and
+perspective-seeding should reason over, vs the free-text `affordances`.
+
+**What shipped.**
+- **`AnthropicService.synthesizeGoals({ model, url, title, affordances })`**:
+  presents the model as an INDEXED catalog (balanced per-kind so footer-link spam
+  can't crowd out inputs/actions/disclosures/collections), asks the LLM for 3-8
+  goals each referencing feature INDEXES, and maps indexes → feature ids (robust
+  vs. copying cryptic ids). role `describe`, op `synthesizeGoals`.
+- **`PageModel.attachGoals(model, goals)`** (pure): assigns stable goal ids, drops
+  dangling feature refs, backlinks `feature.goals`, rebuilds `index` (so `byGoal`
+  populates), upgrades `coverage.fidelity` → **L2**.
+- **Explore wiring**: after the L1 merge, `EXPLORE_PAGE_STRUCTURE` synthesizes +
+  attaches goals (best-effort; never fails the response). The manual 🗂 catalog
+  stays L0/L1 (no LLM goals call).
+
+**Justification.** Completes L0 (features) → L1 (depth) → L2 (goals). Goals are
+grounded in the actual catalog (index-referenced, not invented) and give the
+authoring loop a structured "what can be done here" to reason over. Pure/unit-
+tested (goal linkage, dangling-ref drop, backlinks, `byGoal`, empty-label skip,
+L2 upgrade).
+
+**Follow-up (not yet wired).** `groundIntent` still reads the free-text
+`affordances`; switching it (and perspective-seeding) to consume `model.goals`,
+and surfacing goals in the inspectors, is the consumption slice.
+
+**Touched.** `Services/AnthropicService.js` (`synthesizeGoals`), `Core/pageModel.js`
+(`attachGoals`), `background.js` (`EXPLORE_PAGE_STRUCTURE` L2 wiring), `manifest.json`.
+
+---
+
+## v2.74.409 — Consumption: intent-grounding reasons over structured Goals
+
+**Date:** 2026-05-24
+**Decision by:** user ("continue"). First L2 *consumption* slice — make the goals
+pay off where the author feels it: intent grounding.
+
+**What shipped.**
+- **`groundIntent`** gained an optional `goals` param. When present, the prompt
+  renders the page's structured GOALS and instructs the model to MATCH the intent
+  to the closest goal, base `achievable` on goal coverage, and return a new
+  `matchedGoal` (the goal's label, or null). Free-text `affordances` is kept as a
+  secondary/fallback signal.
+- **`GROUND_INTENT`** now reads the cached PageModel's `goals` (fresh-gated) and
+  passes them; falls back to `affordances`; still degrades to pass-through when
+  nothing is explored (`hadAffordance:false`). Reports `hadGoals`.
+- **Sidepanel** surfaces the match: the grounded-intent card shows
+  "↳ matches page goal: **<label>**" when present.
+
+**Justification.** Grounding moves from prose-similarity to *structured goal
+matching* — sharper grounded intents, more reliable achievability verdicts, and a
+visible link from the user's intent to a concrete page goal (whose `achievableVia`
+features the propose→resolve pipeline can then target). Additive: no goals ⇒ prior
+affordance-text behavior; `matchedGoal` is optional so the existing card/handler
+are unaffected when absent.
+
+**Follow-up.** Perspective-seeding (`proposePerspectives`) already consumes the
+feature catalog (v2.74.403); feeding it the matched goal's `achievableVia` features
+is a further refinement. Surfacing goals + layers in the catalog inspectors is the
+remaining consumption UI.
+
+**Touched.** `Services/AnthropicService.js` (`groundIntent` goals + matchedGoal),
+`background.js` (`GROUND_INTENT` reads `pageModelCache` goals), `Sidepanel/modes/
+locale-capture.js` (matchedGoal in the grounded-intent card), `manifest.json`.
+
+---
+
+## v2.74.420 — Terminology: `Locale` → `Perspective` (full end-to-end rename)
+
+**Date:** 2026-05-24
+**Decision by:** user ("update locale → perspective renaming … this should be end
+to end … saved data isn't a concern - clean slate"). Realizes the locked
+hierarchy (GROUND_SPEC § 0.1–0.3): **Ground → Locale → Perspective → Landmark**,
+where the authored intent+landmark artifact (was "Locale") is now a **Perspective**,
+and the capability catalog **is** the Locale (already implemented as `PageModel`).
+
+**Why fully (not user-facing only).** Prior splits where internal names diverged
+from user-facing terms caused recurring confusion. Per the user, this rename is
+end-to-end: storage keys, message types, the runtime DSL (`locale_ref` →
+`perspective_ref`), function/variable names, CSS classes, file names, UI strings,
+comments — everything. No back-compat shim (clean slate; existing data is
+discarded).
+
+**Method (auditable, phased).**
+- *Phase 0* — inventoried every `locale` token (2306 occurrences / 50 files) and
+  built a definitive map: rename rules + exclusions.
+- *Phase 1* — applied an ordered, sentinel-guarded `perl` rename across 101
+  `.js/.html/.css` files (protect JS builtins → collapse special compound → swap
+  case variants → restore builtins). A second pass collapsed the `loc`/`_loc`
+  camelCase abbreviations (`_locDraft` → `_perspectiveDraft`, etc.) and
+  `data-loc-action` → `data-perspective-action`.
+- *Phase 2* — `git mv` of 5 files (`locale-capture.js` → `perspective-capture.js`,
+  `LocaleForm`/`LocalePredicates`/`localeComposition`/`LocaleDescription` →
+  `Perspective*`); collapsed two double-`Perspective` artifacts
+  (`_fragmentPerspectiveIds`, `perspectiveBody`).
+- *Phase 3* — verification.
+
+**Special handling (preserved on purpose).**
+- **JS builtins** — `localeCompare`, `toLocaleString`/`toLocaleDateString`/
+  `toLocaleTimeString` are NOT domain terms; left intact.
+- **OUTCOMES `localeId`** — in the OutcomeEvent schema `localeId` means the **new
+  Locale = PageModel** (distinct from `perspectiveId`), exactly per OUTCOMES_SPEC
+  § 5. `Core/outcomes.js` and the three emit-site `localeId` keys were kept as-is
+  (renaming would have collided with `perspectiveId` and broken the schema).
+- **Compound collapse** — `PROPOSE_LOCALE_PERSPECTIVES` → `PROPOSE_PERSPECTIVES`
+  (the redundant prefix; the proposal options always were "perspectives").
+
+**Verification.** `node --check` on every `.js` (classic for contentScript, module
+for the rest) — all pass. Case-sensitive residual sweep: zero domain `locale`
+remaining except the intentional OUTCOMES `localeId`. Cross-file contracts
+confirmed consistent: message types match sender↔handler
+(`BEGIN_PERSPECTIVE_CAPTURE`, `RESOLVE_PERSPECTIVE_ROLES`, `SAVE_PERSPECTIVE`,
+`PROPOSE_PERSPECTIVES`, …), `StorageManager` methods (`getPerspective` /
+`listPerspectives` / `savePerspective` / `deletePerspective`), the
+`perspective_ref` condition kind (17 files), all renamed-file imports resolve,
+`.dbg-perspective-*` CSS classes match their JS emitters, manifest clean. A
+non-destructive `git stash create` snapshot (`2301c24`) was taken first as a
+recovery point.
+
+**Scope note.** The capability catalog keeps its implementation name `PageModel`
+(the spec's "Locale = PageModel"); renaming PageModel → Locale was not requested
+and is a separate concern. The word "Locale" now appears in code only as the
+OUTCOMES `localeId` (= PageModel), consistent with the spec.
+
+**Touched.** ~50 files across the repo (every layer); 5 files renamed;
+`manifest.json`.
+
+---
+
+## v2.74.419 — OUTCOMES: provenance on the Feature + decay/correction visible in the inspector
+
+**Date:** 2026-05-24
+**Decision by:** user ("continue"). Completes the provenance half of OUTCOMES_SPEC
+§ 3 (the gold label as durable artifact provenance, not only a stream row) and
+makes the whole closed loop visible to the operator.
+
+**What shipped.**
+- **Provenance stamp** (`background.js`, in the `EMIT_RESOLVE_OUTCOMES` decay/
+  write-back pass). For each `corrected` event whose featureId maps to a catalog
+  Feature (the element the LLM wrongly proposed), it now sets
+  `feature.provenance = { proposedBy:'llm-resolve', correctedByHuman:{ role, from→to,
+  at }, corpusRef }` and persists it with the same write that applies decay. § 3's
+  "the LLM was wrong here" now lives ON the Feature, with a backlink to the stream
+  event.
+- **Inspector markers** (`Sidepanel/modes/locale-capture.js`, `_renderPageModelPanel`
+  from v2.74.411). Each feature row now shows `✎` when it carries
+  `correctedByHuman` and `⚠` when its `lifecycle === 'stale-suspected'`, with the
+  correction (`from → to`) and the staleness reason on hover. The operator can now
+  SEE what the loop learned — which catalog features got corrected and which the
+  decay flagged for re-capture.
+
+**Justification.** Before this, the corrected/decayed signal lived only in the
+stream + folded rollups; the artifact the author actually inspects (the page
+catalog) looked unchanged. Putting provenance on the Feature and surfacing it
+closes the perceptual loop: capture → use → correct/decay → *visible* on the
+catalog. Best-effort and additive — features without corrections render exactly as
+before.
+
+**Touched.** `background.js` (`EMIT_RESOLVE_OUTCOMES` provenance stamp folded into
+the existing write-back), `Sidepanel/modes/locale-capture.js` (inspector ✎/⚠
+markers), `manifest.json`.
+
+---
+
+## v2.74.418 — OUTCOMES: the gold label — human re-picks emit `corrected` events
+
+**Date:** 2026-05-24
+**Decision by:** user ("continue"). Captures the signal OUTCOMES_SPEC § 3 calls
+"the STRONGEST training signal" / "the gold label" — which until now was silently
+discarded.
+
+**What shipped.**
+- **Emit at the manual-pick site** (`Sidepanel/modes/locale-capture.js`). When a
+  manual pick fills a role, the handler already deleted the stale resolve note
+  (`_roleResolveNotes[role]`). It now CAPTURES that note first and — if resolve had
+  proposed/failed/abstained on this role — emits a synthetic single-detail run
+  through `EMIT_RESOLVE_OUTCOMES` carrying `humanFinal:{selector}`. The adapter
+  maps `humanFinal` → verdict `corrected`: an explicit "proposed X, truth was Y."
+- **Adapter semantics fix** (`Core/outcomes.js`). `featureId` now tracks the
+  element resolve PROPOSED (`d.selector`), not the human truth. So a `corrected`
+  row debits the WRONG catalog feature (active decay flags it), while the human's
+  selector rides in `humanFinal` for the corpus + the **conventions histogram**
+  (`foldConventions` already reads the human selector for corrected rows). This
+  corrects a latent slice-4 bug that would otherwise have penalized the feature
+  the human confirmed CORRECT.
+
+**Verified (10/10 node test).** corrected verdict; featureId = proposed/wrong
+element (not the human's); health debits only the wrong feature; conventions learns
+the human selector's tier; abstained-correction → corrected with null featureId
+(corpus-only, no decay).
+
+**Justification.** Every other event is the system grading itself; this is the
+human grading the system. It feeds active decay (the proposed-but-rejected catalog
+feature → stale-suspected) AND the conventions prior (the human's correct selector
+tier), so both compounding mechanisms now learn from real corrections. Fire-and-
+forget, gated on a prior resolve note — a first-time manual pick (no resolve
+attempt) emits nothing.
+
+**Touched.** `Sidepanel/modes/locale-capture.js` (corrected emit at the pick site),
+`Core/outcomes.js` (`fidSelector` = proposed selector), `manifest.json`.
+
+---
+
+## v2.74.417 — OUTCOMES: poke-reveal emit (the free deterministic disclosure label)
+
+**Date:** 2026-05-24
+**Decision by:** user ("continue"). A v1 emit-hook the arc hadn't wired yet
+(OUTCOMES_SPEC § 5 calls `op:'poke'` special — "the reveal observation is a free
+deterministic label: is this element a disclosure, yes/no").
+
+**What shipped.** The `EXPLORE_PAGE_STRUCTURE` handler, right after it builds +
+caches the PageModel (with `mergeDepthFromControls`), now emits a `poke`
+OutcomeEvent for every Explore control that ACTUALLY revealed something:
+`{ phase:'author', op:'poke', verdict:'verified', featureId (mapped by selector),
+llmOutput.selector, detail.matchedCount/reason }`, appended via `_appendOutcomes`.
+This confirms each disclosure Feature's health (a poke-verified is a resolve-hit
+in `foldFeatureHealth`) and banks a positive training pair — for free, from data
+the sweep already captured.
+
+**Design guard — only REVEALING pokes are emitted.** A control that (correctly)
+opens nothing must not log a poke-miss: `foldFeatureHealth` counts a poke-failure
+as a resolve-miss, which would decay a perfectly healthy action button. Positive
+disclosure labels are clean; negative-label corpus enrichment (poke→nothing) is a
+later refinement that must first decouple poke verdicts from the decay path.
+
+**Justification.** The stream previously held only resolve events; Explore happens
+far more often than authoring, so poke-reveal is the highest-volume *free* signal
+available — and it directly strengthens disclosure-trigger health (the features
+most likely to be brittle). The poke selectors also feed the conventions histogram
+as additional deterministically-verified samples.
+
+**Touched.** `background.js` (`EXPLORE_PAGE_STRUCTURE` poke-emit), `manifest.json`.
+No studio change — the generic event renderer already shows `op:'poke'` /
+verified ✓.
+
+---
+
+## v2.74.416 — OUTCOMES slice 5: studio viewer for the stream + rollups
+
+**Date:** 2026-05-24
+**Decision by:** user ("continue"). Final slice of the OUTCOMES v1 arc — make the
+stream and its derived rollups inspectable.
+
+**What shipped.** A new **Outcomes** section per Ground in the studio ground card
+(`studio.js`), mirroring the Page Models section. It calls the background fold
+(`GET_OUTCOMES` with `includeEvents`) and renders:
+- **Header** — event count + a `{ }` rollups-JSON view + a `✕` clear control.
+- **Summary line** — the conventions histogram (`data 60% · class 30% · …`), the
+  Feature-health tally (`N tracked · M stale-suspected`), and the
+  Perspective-usage tally (`N perspectives · X% avg success`).
+- **Recent events** — the last ~12 events as verdict-icon + op + role/feature +
+  relative time, color-coded (verified ✓ green / failed ✗ red / corrected ✎ violet
+  / abstained ∅ grey). Empty state explains the stream fills via ⚡ Resolve.
+- **Clear** — deletes `outcomesStream[groundId]`; rollups recompute empty (the
+  pageModel features keep their decayed confidence — the stream is the source, not
+  the artifact).
+
+CSS for `.outcomes-*` added to `assets/sidepanel.css` (shared by studio).
+
+**Justification.** The whole arc produced a stream that bias resolve and decay
+features silently; the operator needs to see it — what's being learned (the
+histogram), what's being flagged (stale-suspected features), and the raw training
+pairs. Read-only + a clear control; no new authoring surface.
+
+**This closes the OUTCOMES v1 arc** (slices 1–5): pure module → persistence → emit
+hook → close-the-loop (featureId/decay/conventions) → viewer. Deferred per
+OUTCOMES_SPEC § 8: the labeled-corpus store/exporter (bodies behind `corpusRef`),
+age-based passive decay, `#audit` stream wiring (no groundId), and any
+model-training consumer.
+
+**Touched.** `studio.js` (Outcomes section + GET_OUTCOMES read + clear handler),
+`assets/sidepanel.css` (`.outcomes-*`), `manifest.json`.
+
+---
+
+## v2.74.415 — OUTCOMES slice 4: close the loop (featureId map + decay + conventions bias)
+
+**Date:** 2026-05-24
+**Decision by:** user ("continue"). Fourth slice — the stream now flows BACK into
+the artifacts and the next resolve.
+
+**What shipped (three parts).**
+1. **Feature health keys land.** `eventsFromResolveRun` now passes the resolved
+   selector (the HUMAN-truth selector for a corrected row) to
+   `featureIdForRole(role, selector)`. `EMIT_RESOLVE_OUTCOMES` builds a verbatim
+   selector→Feature-id index from the cached pageModel for the ground+URL, so each
+   resolve event is keyed to the catalog Feature it exercised.
+2. **Active decay (§ 7, § 0.16).** After appending, the handler folds the full
+   stream's `featureHealth` and runs `Outcomes.decayFeature` over the cached
+   pageModel features — a resolve-miss lowers JUST that feature's `confidence` and
+   flips its `lifecycle` toward `stale-suspected`, never touching siblings — then
+   writes the pageModel back if anything changed.
+3. **Conventions bias (§ 6, the compounding asset).** `RESOLVE_LOCALE_ROLES` reads
+   the folded `conventions` histogram (gated at ≥5 verified selectors) and passes
+   it to `resolveRoles`, which renders a SITE SELECTOR CONVENTIONS line ("80%
+   data-testid, 15% class…"). A SOFT prior — when two interactive selectors are
+   equally good, prefer the tier this site actually uses; content roles keep their
+   class signature regardless.
+
+**Justification.** This is the payoff of the stream: authoring signal becomes (a)
+trust decay that flags stale catalog features for re-capture without disturbing the
+rest of the model, and (b) a learned selector prior that makes each subsequent
+Locale on the same Ground cheaper and more accurate (GROUND_SPEC § 9 compounding).
+All three are best-effort and gated, so a cold Ground (no stream yet) behaves
+exactly as before.
+
+**`locateRoleRegion` excluded by design.** It returns a bounding BOX, not a
+selector, so a selector-tier histogram doesn't apply; the conventions bias is
+selector-only.
+
+**Touched.** `Core/outcomes.js` (`featureIdForRole(role, selector)`),
+`background.js` (`EMIT_RESOLVE_OUTCOMES` featureId index + decay pass;
+`RESOLVE_LOCALE_ROLES` conventions read), `Services/AnthropicService.js`
+(`resolveRoles` conventions block), `manifest.json`. Re-tested the adapter (5/5).
+
+---
+
+## v2.74.414 — OUTCOMES slice 3: emit hook — resolve-runs fill the stream
+
+**Date:** 2026-05-24
+**Decision by:** user ("continue"). Third slice of the OUTCOMES arc — the
+consequential one: the corpus actually starts filling.
+
+**What shipped.** The sidepanel's resolve-run now flows into the append-only
+stream (OUTCOMES_SPEC § 9):
+- `_logResolveRun` (`Sidepanel/modes/locale-capture.js`) — after persisting its
+  `resolveRoles:perf` entry (unchanged), it fire-and-forgets an
+  `EMIT_RESOLVE_OUTCOMES` message with `{ groundId: _locGroundId, run: entry,
+  ctx: { localeId: url, perspectiveId: _locDraft.id } }`. Wrapped in try/catch +
+  `lastError` swallow — an emit failure can never affect resolve.
+- `background.js` — new `EMIT_RESOLVE_OUTCOMES` handler transforms the run via
+  `Outcomes.eventsFromResolveRun(run, ctx)` (each per-role detail → one authoring
+  `resolve` event; `resolved→verified`, `failed→failed`, `abstained→abstained`,
+  and a row carrying `humanFinal` → `corrected`) and `_appendOutcomes`. Writes are
+  centralized in background to avoid races on the shared `outcomesStream` map.
+
+This immediately powers the **conventions histogram** (verified selectors' tiers,
+§ 6) and the per-Perspective/run corpus. Feature-`health` keying by `featureId`
+and the explicit human-correction linkage (`humanFinal`) are populated in slice 4
+(`featureIdForRole` map + manual-repick hook); the adapter already supports both.
+
+**`#audit` deferred (scoped, not skipped).** `AnthropicService.#audit` persists
+operational telemetry to `llm:audit` and runs WITHOUT a `groundId`, so feeding it
+into the per-ground stream would orphan the events. The `eventFromAudit` adapter
+exists for a future consumer that has ground context; wiring it is left out of
+this slice deliberately.
+
+**Touched.** `Sidepanel/modes/locale-capture.js` (`_logResolveRun` emit),
+`background.js` (`EMIT_RESOLVE_OUTCOMES`), `manifest.json`.
+
+---
+
+## v2.74.413 — OUTCOMES slice 2: persist the stream + lazy rollups (background)
+
+**Date:** 2026-05-24
+**Decision by:** user ("continue"). Second slice of the OUTCOMES arc — give the
+pure module (v2.74.412) a home. Store + read/fold plumbing only; no emit yet.
+
+**What shipped.** `background.js` imports `Core/outcomes.js` (as `Outcomes`) and
+adds the ONE unified append-only stream (OUTCOMES_SPEC § 1, GROUND_SPEC § 0.13):
+- **Store** — cache key `outcomesStream`, value `{ [groundId]: OutcomeEvent[] }`,
+  bounded at `OUTCOMES_STREAM_CAP=1000`/ground via `Outcomes.appendEvents` (oldest
+  dropped). Helpers `_appendOutcomes(groundId, events)` / `_readOutcomes(groundId)`.
+- **Lazy rollups** — `_outcomeRollups(groundId)` folds the stream on demand into
+  `{ featureHealth, perspectiveUsage, conventions, eventCount }` (§ 4) rather than
+  maintaining per-event — recomputed lazily (§ 0.15).
+- **Read handler** — `GET_OUTCOMES` returns the rollups (and the raw stream when
+  `includeEvents`, newest-first, capped). Consumed by the studio viewer (slice 5)
+  and resolve-bias / active-decay (slice 4).
+
+**Justification.** Mirrors the existing `pageModelCache` plumbing (per-ground map,
+read/write helpers, a GET_* handler). Keeping the stream per-ground matches the
+conventions rollup, which is learned across a Ground's Locales (§ 6). Read-only and
+additive — nothing emits into the stream yet, so behaviour is unchanged until
+slice 3 wires the hooks.
+
+**Touched.** `background.js` (import, `_appendOutcomes`/`_readOutcomes`/
+`_outcomeRollups`, `GET_OUTCOMES`), `manifest.json`.
+
+---
+
+## v2.74.412 — OUTCOMES slice 1: pure `Core/outcomes.js` (schema + rollups + decay)
+
+**Date:** 2026-05-24
+**Decision by:** user ("continue"). First slice of the OUTCOMES "close the loop"
+arc (OUTCOMES_SPEC § 8 v1 scope, GROUND_SPEC § 0.13–0.17). Pure module only —
+mirrors how `Core/pageModel.js` was bootstrapped (additive, unit-testable, no
+wiring) so the next "continue" can attach emit hooks at the live call sites
+without re-litigating the schema.
+
+**What shipped.** New pure ES module `Core/outcomes.js` (no chrome/DOM deps):
+- **Schema + vocab** — `OUTCOMES_SCHEMA=1`, `PHASES`/`OPS`/`VERDICTS`/`OUTCOMES`/
+  `PROVENANCE_SOURCES`/`LIFECYCLE` frozen enums.
+- **Event factory** — `makeEvent(partial)` normalizes to the § 5 `OutcomeEvent`,
+  mints `id`+`ts`, and mints a `corpusRef` for `phase:'author'` events (training
+  pairs; body stubbed per § 0.17). Bad phase/op coerce to safe defaults — an
+  append-only stream must never reject a real signal.
+- **Adapters from the telemetry seeds (§ 9)** — `eventsFromResolveRun(run, ctx)`
+  turns each `_logResolveRun` `details[]` row into a `resolve` author event
+  (`resolved→verified`, `failed→failed`, `abstained→abstained`, and **`humanFinal`
+  present → `corrected`**, the gold label); skips `skipped`. `eventFromAudit`
+  widens `#audit` telemetry into the stream.
+- **Derived rollups (§ 4)** — `foldFeatureHealth` (→ per-Feature
+  `{lifecycle,lastVerifiedAt,resolveHits,resolveMisses,lastResolvedAt}`, incremental
+  via `prior`), `foldPerspectiveUsage` (→ `{activations,lastUsedAt,successRate,
+  lastOutcome}`), `foldConventions` (→ selector-tier histogram from verified/
+  corrected selectors — a 'corrected' event counts the HUMAN selector, § 6).
+- **Active decay (§ 7, § 0.16)** — `decayFeature(feature, health, opts)` lowers
+  `confidence` + flips lifecycle → `stale-suspected` once net resolve-misses cross
+  a threshold, without touching siblings. Age-based passive decay deferred.
+- **Store helper** — `appendEvents(stream, events, cap)` (pure, bounded).
+
+**Justification.** The substrate already produces the exact signal worth keeping —
+LLM proposal → deterministic verdict → human correction — and discards it. This
+module is the one append-only stream (§ 0.13) that captures it once and folds it
+into the small artifact rollups. Built pure first so it is verifiable in isolation
+(45-assertion node `.mjs` test, all passing) before any storage/UI risk.
+
+**Touched.** `Core/outcomes.js` (new), `manifest.json`. No wiring yet (emit hooks
+at `_logResolveRun` / `#audit` and the rollup persistence are the next slice).
+
+---
+
+## v2.74.411 — Inspector: surface L1 layers + L2 goals in the 🗂 catalog panel
+
+**Date:** 2026-05-24
+**Decision by:** user ("continue"). Visibility slice — the sidepanel catalog
+inspector showed only features-grouped-by-kind, hiding the depth and goals that
+L1/L2 capture produces.
+
+**What shipped.** `_renderPageModelPanel` (`Sidepanel/modes/locale-capture.js`)
+now renders three additions:
+- A **fidelity badge** (`L0`/`L1`/`L2`) in the panel header, color-coded
+  (grey/violet/green) with a tooltip describing the tier.
+- A **Depth — revealed layers** section: every non-surface Layer (modal/dropdown)
+  as `kind` chip + trigger label (`openedBy` feature) + `→ N hidden` count, with
+  the first revealed child labels on hover.
+- A **Goals** section: each synthesized Goal as `🎯 label` + `N feat · NN%`
+  confidence, with description + `achievableVia` feature labels on hover.
+Hidden features in the by-kind list now show a `🔒` marker. Sections render only
+when present (no goals/layers ⇒ unchanged L0 view).
+
+**Justification.** The catalog is the locale's capability artifact; the inspector
+should reflect what each capture tier actually found. Previously an L2 build looked
+identical to an L0 build in the UI — the operator couldn't see that depth/goals
+were captured. Read-only; no new messages or handlers.
+
+**Touched.** `Sidepanel/modes/locale-capture.js` (`_renderPageModelPanel`),
+`assets/sidepanel.css` (`.dbg-locale-pm-fidelity`/`-section`/`-goal`/`-layer`),
+`manifest.json`.
+
+---
+
+## v2.74.410 — Consumption: propose aligns perspectives to the matched Goal
+
+**Date:** 2026-05-24
+**Decision by:** user ("continue"). Second L2 consumption slice — let perspective
+proposal build roles around the page's goals.
+
+**What shipped.** `proposePerspectives` already receives the `pageModel`
+(v2.74.403, for the feature catalog). It now ALSO renders a **PAGE GOALS** block —
+each goal + the labels of the features that achieve it (`achievableVia`) — and
+instructs the model to identify which goal the INTENT targets and build the
+perspective's roles around THAT goal's features. No handler change (the model was
+already passed); opportunistic (no goals ⇒ unchanged).
+
+**Justification.** Completes the chain **intent → goal → features → roles →
+landmarks**: grounding maps the intent to a goal (v2.74.409); propose now builds
+the role set from that goal's catalogued features; resolve reuses their verified
+selectors (v2.74.399). The perspective is pre-aligned to a real, achievable page
+outcome instead of guessed from a screenshot.
+
+**Touched.** `Services/AnthropicService.js` (`proposePerspectives` PAGE GOALS
+block), `manifest.json`.

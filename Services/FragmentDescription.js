@@ -282,7 +282,7 @@ function _summarizeGateCondition(c) {
                                 ? `${_selectorTail(c.selector ?? '')} has ${c.attribute}="${_truncateValue(c.value)}"`
                                 : 'attribute equals';
     case 'assertion_ref':     return c.assertionId ? `assertion holds` : 'assertion';
-    case 'locale_ref':        return c.localeId ? `locale matches` : 'locale';
+    case 'perspective_ref':        return c.perspectiveId ? `perspective matches` : 'perspective';
     default:                  return String(t);
   }
 }

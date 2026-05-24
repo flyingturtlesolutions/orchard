@@ -105,12 +105,12 @@ export const CONDITION_TYPES = Object.freeze([
   // assertion_ref points at a Ground-scoped library assertion. The
   // referenced assertion's effective family is the union of its
   // contained conditions' families. Resolved at evaluation time.
-  // v2.72.29 (Pass 17) — locale_ref points at a Ground-scoped Locale.
-  // Evaluation: at primitive entry, the locale's landmarks are queried
+  // v2.72.29 (Pass 17) — perspective_ref points at a Ground-scoped Perspective.
+  // Evaluation: at primitive entry, the perspective's landmarks are queried
   // against the live page; the condition holds if all landmarks match
   // ≥1 element. Effective family is page (DOM-touching).
   'assertion_ref',
-  'locale_ref',
+  'perspective_ref',
 ]);
 
 /**
@@ -197,12 +197,12 @@ export const CONDITION_FIELDS = Object.freeze({
 
   // ── Reference ───────────────────────────────────────────────────────────
   assertion_ref:    { family: 'reference', fields: ['assertionId'],                required: ['assertionId'] },
-  // v2.72.29 (Pass 17) — locale_ref. Points at a Locale on the same Ground.
+  // v2.72.29 (Pass 17) — perspective_ref. Points at a Perspective on the same Ground.
   // Evaluation: query each landmark's selector against the live page;
   // condition holds if all landmarks match ≥1 element. Pure DOM check;
-  // does NOT walk to the locale's verification metadata (that's authoring
+  // does NOT walk to the perspective's verification metadata (that's authoring
   // history, not runtime fact).
-  locale_ref:       { family: 'reference', fields: ['localeId'],                   required: ['localeId'] },
+  perspective_ref:       { family: 'reference', fields: ['perspectiveId'],                   required: ['perspectiveId'] },
 });
 
 /**

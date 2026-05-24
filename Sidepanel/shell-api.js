@@ -34,7 +34,7 @@ export function toast(msg, type = 'ok') {
 
 // ─── Mode change request ──────────────────────────────────────────────────
 //
-// Modes can request a transition (e.g., locale-capture's Cancel button
+// Modes can request a transition (e.g., perspective-capture's Cancel button
 // might want to return to idle/chat). Goes through background's mode
 // registry so the source of truth stays consistent.
 
@@ -106,7 +106,7 @@ export async function exitToStudio() {
 
 // ─── Active tab ──────────────────────────────────────────────────────────
 //
-// Several modes (locale-capture, strategy-debug-future, observation-trace-
+// Several modes (perspective-capture, strategy-debug-future, observation-trace-
 // future) need "the tab the user is looking at right now." This wraps the
 // chrome.tabs.query call so all modes use the same semantics.
 //
@@ -126,7 +126,7 @@ export async function getActiveTab() {
 //
 // Probes whether the content script is reachable in the main frame of
 // the given tab. Used by modes that need to send messages to the page
-// (locale-capture's picker, strategy-debug's CHECK_CONDITION, etc.).
+// (perspective-capture's picker, strategy-debug's CHECK_CONDITION, etc.).
 //
 // Returns { ok: true } | { ok: false, error: string, hint?: string }.
 

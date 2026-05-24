@@ -1,6 +1,6 @@
 /**
- * @file Sidepanel/modes/locale-capture.js
- * @description Locale-capture sidepanel mode. Extracted from debugger.js
+ * @file Sidepanel/modes/perspective-capture.js
+ * @description Perspective-capture sidepanel mode. Extracted from debugger.js
  * during Stage 1 of the multi-mode-sidepanel refactor (v2.72.50).
  *
  * Lifecycle:
@@ -10,7 +10,7 @@
  *
  * Payload contract:
  *   { groundId, tabId?, sessionId? }
- *   - groundId is required (which Ground we're authoring locales for)
+ *   - groundId is required (which Ground we're authoring perspectives for)
  *   - tabId/sessionId are populated from background's pending capture
  *     session if present; otherwise the mode falls back to active-tab
  *     tracking
@@ -20,28 +20,28 @@
  *   - shell-api.js (toast, getActiveTab, pingContentScript, requestModeChange)
  *   - chrome.runtime.sendMessage (background coordination)
  *
- * @module Sidepanel/modes/locale-capture
+ * @module Sidepanel/modes/perspective-capture
  * @author Agent HUB
  * @version 2.72.50
  */
 
 import { toast, getActiveTab, pingContentScript, exitToStudio, requestModeChange } from '../shell-api.js';
 // v2.74.166 — Frame-aware picker broadcast — same path fragment-author
-// and observation-author use, so locale landmarks can target same-origin
+// and observation-author use, so perspective landmarks can target same-origin
 // iframes too.
 import { broadcastStartPick, broadcastCancelPick } from '../../shared.js';
 // v2.74.231 — Auto-generate description from landmarks on save when
 // the author left it blank (mirrors the fragment-author / observation-
 // author pattern). Pure function, no DOM, no I/O.
-import { composeCompactDescription } from '../../Services/LocaleDescription.js';
+import { composeCompactDescription } from '../../Services/PerspectiveDescription.js';
 import { subscribe as subscribeGroundEvents } from '../../Services/GroundEventBus.js';
-import { isLocaleActive } from '../../Services/LocalePredicates.js';
+import { isPerspectiveActive } from '../../Services/PerspectivePredicates.js';
 // v2.74.232 — Logger so "Ask Claude" suggestion outcomes land in the
 // Logs tab alongside the equivalents in fragment-author / observation-
 // author.
 import { Logger } from '../../Core/Logger.js';
 // v2.74.336 — Phase C-lite: flatten LandmarkNode trees for save-time coverage.
-import { flattenLandmarkNodes } from '../../Core/localeComposition.js';
+import { flattenLandmarkNodes } from '../../Core/perspectiveComposition.js';
 // v2.74.234 — Wave 1 of the landmark SSOT project. Pure helpers that
 // derive capabilities, allowed operations, and a verification score
 // from the INSPECT_ELEMENT fingerprint. Persisted on the landmark
@@ -60,27 +60,27 @@ import {
 
 // ─── Module-local state ───────────────────────────────────────────────────
 //
-// All state is module-scoped — there's only ever one locale-capture mode
+// All state is module-scoped — there's only ever one perspective-capture mode
 // active at a time. unmount() clears everything.
 
-let _locDraft = null;             // working copy of the locale being authored
-let _locGroundId = null;          // session-scoped: which Ground
-let _locTabId = null;             // currently-tracked tab (the active tab)
+let _perspectiveDraft = null;             // working copy of the perspective being authored
+let _perspectiveGroundId = null;          // session-scoped: which Ground
+let _perspectiveTabId = null;             // currently-tracked tab (the active tab)
 // v2.74.33 — Where Save / Cancel should send the user. 'ground-view' =
 // switch back to the Ground sidepanel mode; otherwise exitToStudio.
-let _locReturnTo = null;
-// v2.74.47 — Edit mode flag. Set when prefilledLocale carries an `id`
-// (Ground sidepanel's ✎ edit-locale path). When true, refreshLocale
+let _perspectiveReturnTo = null;
+// v2.74.47 — Edit mode flag. Set when prefilledPerspective carries an `id`
+// (Ground sidepanel's ✎ edit-perspective path). When true, refreshPerspective
 // ActiveTab skips overwriting the URL-pattern input with the active
 // tab's URL — the saved pattern is preserved.
-let _locIsEdit = false;
-let _locPickerSession = null;     // {sessionId, landmarkIdx, roleSlot?} when picking
+let _perspectiveIsEdit = false;
+let _perspectivePickerSession = null;     // {sessionId, landmarkIdx, roleSlot?} when picking
 let _mountEl = null;              // root element we rendered into
-// v2.74.348/350/366 — LOCALE_SPEC § 13 description-first proposal flow state.
+// v2.74.348/350/366 — PERSPECTIVE_SPEC § 13 description-first proposal flow state.
 // v2.74.366 collapsed the baseline/enhanced A/B to a single canonical
 // (always-enhanced) run.
 // _perspectiveRun: { options:[...], elapsedMs, meta } or null — the latest
-//   proposal (screenshot + sibling-Locale/registry context).
+//   proposal (screenshot + sibling-Perspective/registry context).
 // _chosenPerspective: the option object the user picked; its roles drive the
 //   role-fill checklist. _chosenPerspectiveIdx is its index in _perspectiveRun.
 // _perspectiveInFlight: true while a proposal round-trips.
@@ -99,7 +99,7 @@ let _pageComplexity = null;
 // for roles that failed verification or were abstained. Rendered inline under
 // the unfilled role in the checklist; cleared when the role is filled manually.
 let _roleResolveNotes = {};
-// v2.74.368 — pageStructure depth-exploration state. The "+ Locale" flow can
+// v2.74.368 — pageStructure depth-exploration state. The "+ Perspective" flow can
 // run a poke→observe→restore sweep over the page so propose-perspectives sees
 // post-interaction content (modal sections, dropdown menus). The artifact is
 // cached in the background per (ground, url); this just tracks the UI status.
@@ -116,7 +116,7 @@ let _exploreToken = 0;
 //   _groundInFlight: true while the grounding call round-trips.
 let _groundIntentResult = null;
 let _groundInFlight = false;
-// v2.74.397 — PageModel (Locale capability catalog) build-slice-1 inspector.
+// v2.74.397 — PageModel (Perspective capability catalog) build-slice-1 inspector.
 //   _pageModelResult: the built model | null;  _pageModelInFlight: BUILD_PAGEMODEL round-trip.
 let _pageModelResult = null;
 let _pageModelInFlight = false;
@@ -157,21 +157,21 @@ let _eventsCache          = null;
 let _eventsLandmarkNames  = new Map();
 let _eventsLoading        = false;
 // DOM refs for events panel (resolved in mount).
-let locEventsToggleBtn   = null;
-let locEventsBody        = null;
-let locEventsList        = null;
-let locEventsCount       = null;
-let locEventsClearBtn    = null;
+let perspectiveEventsToggleBtn   = null;
+let perspectiveEventsBody        = null;
+let perspectiveEventsList        = null;
+let perspectiveEventsCount       = null;
+let perspectiveEventsClearBtn    = null;
 // v2.74.262 — Bulk verify affordance refs + in-flight flag.
-let locEventsStaleBadge   = null;
-let locEventsVerifyAllBtn = null;
-let locEventsBulkOutcome  = null;
+let perspectiveEventsStaleBadge   = null;
+let perspectiveEventsVerifyAllBtn = null;
+let perspectiveEventsBulkOutcome  = null;
 let _eventsBulkVerifyInFlight = false;
 // v2.74.272 — Health summary banner state. Re-rendered on initial
 // fetch, after bulk-verify, and (cheaply) on each new live event.
 // Stores the last-fetched landmark snapshot so live event additions
 // can recompute without an extra LIST_LANDMARKS_FOR_GROUND round-trip.
-let locEventsHealth     = null;
+let perspectiveEventsHealth     = null;
 let _eventsLandmarksCache = [];
 // v2.74.263 — Live event streaming. While the events panel is open,
 // chrome.storage.onChanged fires for new GroundEventBus writes;
@@ -188,27 +188,27 @@ let _eventsUnsubscribe = null;
 let _eventsAppliedDrift = new Set();
 let _eventsApplyInFlight = new Set();
 // v2.74.260 — Phase 7d surface: predicate authoring DOM refs.
-let locPredicatesList   = null;
-let locPredicatesAddBtn = null;
+let perspectivePredicatesList   = null;
+let perspectivePredicatesAddBtn = null;
 // v2.74.271 — Top-level operator selector. The draft's predicates may
 // be stored as either a plain array (implicit AND) or a tree object
 // { operator, children }. _predicatesOperator tracks the authored
 // top-level operator separately so we can serialize back to either
 // shape on save.
-let locPredicatesOpSelect = null;
-let locPredicatesHint     = null;
+let perspectivePredicatesOpSelect = null;
+let perspectivePredicatesHint     = null;
 let _predicatesOperator   = 'and';
 // v2.74.267 — iframe contexts editor DOM refs + ephemeral test state.
 //   _iframeTestOutcome[idx] = { kind: 'ok'|'absent'|'error', message, sameOrigin? }
-let locIframeContextsList = null;
-let locIframeContextsAdd  = null;
+let perspectiveIframeContextsList = null;
+let perspectiveIframeContextsAdd  = null;
 let _iframeTestOutcome    = new Map();
 let _iframeTestInFlight   = new Set();
 // v2.74.265 — Active-state preview refs + state. Last evaluation is
 // cached so the section shows something meaningful while a fresh
 // evaluation runs in the background (avoids "blank" flicker).
-let locActiveStateRefreshBtn = null;
-let locActiveStateResult     = null;
+let perspectiveActiveStateRefreshBtn = null;
+let perspectiveActiveStateResult     = null;
 let _activeStateEvaluating   = false;
 let _activeStateDebounce     = null;
 
@@ -225,83 +225,83 @@ let _onPanelFocus = null;
 let _onPanelBlur = null;
 
 // DOM refs populated on mount. All are scoped to _mountEl.
-let locGroundLabelEl = null;
-let locTabUrlEl = null;
-let locWarningEl = null;
-let locNameInput = null;
-let locDescriptionInput = null;
-let locPerspectiveBody = null;   // v2.74.348 — § 13 proposal-flow container
-let locComplexityBadge = null;   // v2.74.353 — resolve-difficulty header badge
-// v2.74.275 — locPatternInput removed.
-let locLandmarksList = null;
-let locAddLandmarkBtn = null;
-let locSaveBtn = null;
-let locCancelBtn = null;
-// v2.74.282 — Reason hint shown when Save Locale is disabled.
-let locSaveReasonEl = null;
-let locPickBanner = null;
-let locPickCancelBtn = null;
+let perspectiveGroundLabelEl = null;
+let perspectiveTabUrlEl = null;
+let perspectiveWarningEl = null;
+let perspectiveNameInput = null;
+let perspectiveDescriptionInput = null;
+let perspectiveBody = null;   // v2.74.348 — § 13 proposal-flow container
+let perspectiveComplexityBadge = null;   // v2.74.353 — resolve-difficulty header badge
+// v2.74.275 — perspectivePatternInput removed.
+let perspectiveLandmarksList = null;
+let perspectiveAddLandmarkBtn = null;
+let perspectiveSaveBtn = null;
+let perspectiveCancelBtn = null;
+// v2.74.282 — Reason hint shown when Save Perspective is disabled.
+let perspectiveSaveReasonEl = null;
+let perspectivePickBanner = null;
+let perspectivePickCancelBtn = null;
 
 // ─── HTML template ────────────────────────────────────────────────────────
 
 function renderHTML() {
   return `
-    <div class="dbg-locale">
-      <header class="dbg-locale-header">
-        <div class="dbg-locale-title-row">
-          <span class="dbg-locale-badge">Locale capture</span>
-          <span data-loc="ground-label" class="dbg-locale-ground-label">on Ground: —</span>
+    <div class="dbg-perspective">
+      <header class="dbg-perspective-header">
+        <div class="dbg-perspective-title-row">
+          <span class="dbg-perspective-badge">Perspective capture</span>
+          <span data-loc="ground-label" class="dbg-perspective-ground-label">on Ground: —</span>
         </div>
-        <div class="dbg-locale-meta">
-          <span class="dbg-locale-meta-label">Active tab</span>
-          <span data-loc="tab-url" class="dbg-locale-meta-value mono">—</span>
+        <div class="dbg-perspective-meta">
+          <span class="dbg-perspective-meta-label">Active tab</span>
+          <span data-loc="tab-url" class="dbg-perspective-meta-value mono">—</span>
         </div>
-        <div class="dbg-locale-meta">
-          <span class="dbg-locale-meta-label">Resolve difficulty</span>
-          <span data-loc="complexity-badge" class="dbg-locale-complexity" title="How hard this page is for ⚡ Resolve roles (selector resolution).">—</span>
+        <div class="dbg-perspective-meta">
+          <span class="dbg-perspective-meta-label">Resolve difficulty</span>
+          <span data-loc="complexity-badge" class="dbg-perspective-complexity" title="How hard this page is for ⚡ Resolve roles (selector resolution).">—</span>
         </div>
-        <div data-loc="warning" class="dbg-locale-warning hidden"></div>
+        <div data-loc="warning" class="dbg-perspective-warning hidden"></div>
       </header>
 
-      <section class="dbg-locale-meta-card dbg-locale-card" data-card-id="meta">
-        <button type="button" class="dbg-locale-card-head" data-card-toggle aria-expanded="true">
-          <span class="dbg-locale-card-chevron">▾</span>
-          <span class="dbg-locale-card-label">Locale</span>
+      <section class="dbg-perspective-meta-card dbg-perspective-card" data-card-id="meta">
+        <button type="button" class="dbg-perspective-card-head" data-card-toggle aria-expanded="true">
+          <span class="dbg-perspective-card-chevron">▾</span>
+          <span class="dbg-perspective-card-label">Perspective</span>
         </button>
-        <div class="dbg-locale-card-body">
-          <label class="dbg-locale-field">
-            <span class="dbg-locale-field-label">Name</span>
+        <div class="dbg-perspective-card-body">
+          <label class="dbg-perspective-field">
+            <span class="dbg-perspective-field-label">Name</span>
             <input type="text" data-loc="name-input" maxlength="80"
                    placeholder="e.g. search-results-page" />
           </label>
-          <label class="dbg-locale-field">
-            <span class="dbg-locale-field-label">Intent</span>
+          <label class="dbg-perspective-field">
+            <span class="dbg-perspective-field-label">Intent</span>
             <textarea data-loc="description-input" rows="2" maxlength="280"
                       placeholder="What do you want to accomplish on this kind of page?"></textarea>
           </label>
         </div>
         <!-- v2.74.275 — Legacy urlPattern field REMOVED. URL gating
              now expressed exclusively via a urlMatches predicate in
-             the Additional predicates section. New locales auto-seed
+             the Additional predicates section. New perspectives auto-seed
              a urlMatches predicate from the current tab URL on first
-             Pick (see refreshLocaleActiveTab). -->
+             Pick (see refreshPerspectiveActiveTab). -->
       </section>
 
-      <!-- v2.74.348 — LOCALE_SPEC § 13 description-first proposal flow.
+      <!-- v2.74.348 — PERSPECTIVE_SPEC § 13 description-first proposal flow.
            The intent (Description above) seeds an LLM call that proposes
            2-3 perspective OPTIONS, each a named set of landmark ROLES to
            fill. The user picks an option, then fills each role via the
            picker. Body is rendered dynamically by _renderPerspectivePanel. -->
-      <section class="dbg-locale-perspective dbg-locale-card" data-card-id="perspective">
-        <div class="dbg-locale-card-head-row">
-          <button type="button" class="dbg-locale-card-head" data-card-toggle aria-expanded="true">
-            <span class="dbg-locale-card-chevron">▾</span>
-            <span class="dbg-locale-card-label">Perspective (LLM-assisted)</span>
-            <span class="dbg-locale-card-optional">(optional)</span>
+      <section class="dbg-perspective-perspective dbg-perspective-card" data-card-id="perspective">
+        <div class="dbg-perspective-card-head-row">
+          <button type="button" class="dbg-perspective-card-head" data-card-toggle aria-expanded="true">
+            <span class="dbg-perspective-card-chevron">▾</span>
+            <span class="dbg-perspective-card-label">Perspective (LLM-assisted)</span>
+            <span class="dbg-perspective-card-optional">(optional)</span>
           </button>
         </div>
-        <div class="dbg-locale-card-body">
-          <div data-loc="perspective-body" class="dbg-locale-perspective-body"></div>
+        <div class="dbg-perspective-card-body">
+          <div data-loc="perspective-body" class="dbg-perspective-perspective-body"></div>
         </div>
       </section>
 
@@ -318,20 +318,20 @@ function renderHTML() {
            to referencing landmarks), edit predicates per kind, test
            predicates against the live page, and remove contexts
            (with warning if landmarks reference them). -->
-      <section class="dbg-locale-iframe-contexts dbg-locale-card" data-card-id="iframe-contexts">
-        <div class="dbg-locale-card-head-row">
-          <button type="button" class="dbg-locale-card-head" data-card-toggle aria-expanded="true">
-            <span class="dbg-locale-card-chevron">▾</span>
-            <span class="dbg-locale-card-label">iframe contexts</span>
-            <span class="dbg-locale-card-optional">(optional)</span>
+      <section class="dbg-perspective-iframe-contexts dbg-perspective-card" data-card-id="iframe-contexts">
+        <div class="dbg-perspective-card-head-row">
+          <button type="button" class="dbg-perspective-card-head" data-card-toggle aria-expanded="true">
+            <span class="dbg-perspective-card-chevron">▾</span>
+            <span class="dbg-perspective-card-label">iframe contexts</span>
+            <span class="dbg-perspective-card-optional">(optional)</span>
           </button>
           <button data-loc="iframe-contexts-add" class="btn-secondary tiny" type="button">+ Add iframe context</button>
         </div>
-        <div class="dbg-locale-card-body">
-          <div data-loc="iframe-contexts-list" class="dbg-locale-iframe-contexts-list">
-            <div class="dbg-locale-iframe-contexts-empty">No iframe contexts. Landmarks picked from iframes auto-populate this list.</div>
+        <div class="dbg-perspective-card-body">
+          <div data-loc="iframe-contexts-list" class="dbg-perspective-iframe-contexts-list">
+            <div class="dbg-perspective-iframe-contexts-empty">No iframe contexts. Landmarks picked from iframes auto-populate this list.</div>
           </div>
-          <p class="dbg-locale-iframe-contexts-hint">
+          <p class="dbg-perspective-iframe-contexts-hint">
             Each context names an iframe by a predicate (name, selector, src pattern, or position). Landmarks bind to a context by name, so the engine can route to the right iframe even when its src changes between runs.
           </p>
         </div>
@@ -340,21 +340,21 @@ function renderHTML() {
       <!-- v2.74.260 — Phase 7d surface: additional predicates. The
            URL pattern above remains the primary URL gate (legacy
            shape). Additional predicates AND with it at runtime via
-           LocalePredicates.isLocaleActive, gating which Locale is
+           PerspectivePredicates.isPerspectiveActive, gating which Perspective is
            active for the current page state. Tree-form operators
            (OR / NOT) are not authorable in this MVP — single-level
-           AND covers the common case. Edit raw locale.predicates in
+           AND covers the common case. Edit raw perspective.predicates in
            storage for OR/NOT until a tree editor lands. -->
-      <section class="dbg-locale-predicates dbg-locale-card" data-card-id="predicates">
-        <div class="dbg-locale-card-head-row">
-          <button type="button" class="dbg-locale-card-head" data-card-toggle aria-expanded="true">
-            <span class="dbg-locale-card-chevron">▾</span>
-            <span class="dbg-locale-card-label">Additional predicates</span>
-            <span class="dbg-locale-card-optional">(optional)</span>
+      <section class="dbg-perspective-predicates dbg-perspective-card" data-card-id="predicates">
+        <div class="dbg-perspective-card-head-row">
+          <button type="button" class="dbg-perspective-card-head" data-card-toggle aria-expanded="true">
+            <span class="dbg-perspective-card-chevron">▾</span>
+            <span class="dbg-perspective-card-label">Additional predicates</span>
+            <span class="dbg-perspective-card-optional">(optional)</span>
           </button>
-          <label class="dbg-locale-predicates-op-label">
+          <label class="dbg-perspective-predicates-op-label">
             <span>combine with</span>
-            <select data-loc="predicates-operator" class="dbg-locale-predicates-operator">
+            <select data-loc="predicates-operator" class="dbg-perspective-predicates-operator">
               <option value="and">AND (all must pass)</option>
               <option value="or">OR (any must pass)</option>
               <option value="not">NOT (single predicate, negated)</option>
@@ -362,28 +362,28 @@ function renderHTML() {
           </label>
           <button data-loc="predicates-add" class="btn-secondary tiny" type="button">+ Add predicate</button>
         </div>
-        <div class="dbg-locale-card-body">
-          <div data-loc="predicates-list" class="dbg-locale-predicates-list">
-            <div class="dbg-locale-predicates-empty">No additional predicates. Locale activates on URL pattern match alone.</div>
+        <div class="dbg-perspective-card-body">
+          <div data-loc="predicates-list" class="dbg-perspective-predicates-list">
+            <div class="dbg-perspective-predicates-empty">No additional predicates. Perspective activates on URL pattern match alone.</div>
           </div>
-          <p class="dbg-locale-predicates-hint" data-loc="predicates-hint">
-            Locale is active when URL pattern matches AND every predicate below evaluates true. Unverifiable predicates (e.g., landmark not on page) fail closed.
+          <p class="dbg-perspective-predicates-hint" data-loc="predicates-hint">
+            Perspective is active when URL pattern matches AND every predicate below evaluates true. Unverifiable predicates (e.g., landmark not on page) fail closed.
           </p>
         </div>
       </section>
 
-      <section class="dbg-locale-landmarks dbg-locale-card" data-card-id="landmarks">
-        <div class="dbg-locale-card-head-row">
-          <button type="button" class="dbg-locale-card-head" data-card-toggle aria-expanded="true">
-            <span class="dbg-locale-card-chevron">▾</span>
-            <span class="dbg-locale-card-label">Landmarks</span>
+      <section class="dbg-perspective-landmarks dbg-perspective-card" data-card-id="landmarks">
+        <div class="dbg-perspective-card-head-row">
+          <button type="button" class="dbg-perspective-card-head" data-card-toggle aria-expanded="true">
+            <span class="dbg-perspective-card-chevron">▾</span>
+            <span class="dbg-perspective-card-label">Landmarks</span>
           </button>
         </div>
-        <div class="dbg-locale-card-body">
-          <div data-loc="landmarks-list" class="dbg-locale-landmarks-list">
-            <div class="dbg-locale-landmarks-empty">No landmarks yet.</div>
+        <div class="dbg-perspective-card-body">
+          <div data-loc="landmarks-list" class="dbg-perspective-landmarks-list">
+            <div class="dbg-perspective-landmarks-empty">No landmarks yet.</div>
           </div>
-          <div class="dbg-locale-landmarks-footer">
+          <div class="dbg-perspective-landmarks-footer">
             <button data-loc="add-landmark" class="btn-secondary tiny" type="button" title="Click, then pick an element on the page. The landmark card appears after the pick is complete and Claude refines the selector.">+ Pick landmark</button>
           </div>
         </div>
@@ -394,65 +394,65 @@ function renderHTML() {
            investigating. Click the header to expand; fetch fires
            per-open. Count badge previews how many events are in the
            ring buffer when the panel is closed. -->
-      <!-- v2.74.265 — Locale active-state preview. Substrate's
-           isLocaleActive evaluator (Phase 7d) is invoked against the
+      <!-- v2.74.265 — Perspective active-state preview. Substrate's
+           isPerspectiveActive evaluator (Phase 7d) is invoked against the
            current tab + draft state on mount and on demand via the
            refresh button. Surfaces ✓/✗/⚠ with per-leaf reasons so
            authors can see WHY a predicate fails (e.g., "landmark not
            visible on page" vs "URL pattern doesn't match"). -->
-      <section class="dbg-locale-active-state dbg-locale-card" data-card-id="active-state">
-        <div class="dbg-locale-card-head-row">
-          <button type="button" class="dbg-locale-card-head" data-card-toggle aria-expanded="true">
-            <span class="dbg-locale-card-chevron">▾</span>
-            <span class="dbg-locale-card-label">Active state preview</span>
+      <section class="dbg-perspective-active-state dbg-perspective-card" data-card-id="active-state">
+        <div class="dbg-perspective-card-head-row">
+          <button type="button" class="dbg-perspective-card-head" data-card-toggle aria-expanded="true">
+            <span class="dbg-perspective-card-chevron">▾</span>
+            <span class="dbg-perspective-card-label">Active state preview</span>
           </button>
           <button data-loc="active-state-refresh" class="btn-secondary tiny" type="button" title="Re-evaluate predicates against the current tab">Refresh</button>
         </div>
-        <div class="dbg-locale-card-body">
-          <div data-loc="active-state-result" class="dbg-locale-active-state-result">
-            <span class="dbg-locale-active-state-loading">⌛ Evaluating…</span>
+        <div class="dbg-perspective-card-body">
+          <div data-loc="active-state-result" class="dbg-perspective-active-state-result">
+            <span class="dbg-perspective-active-state-loading">⌛ Evaluating…</span>
           </div>
         </div>
       </section>
 
-      <section class="dbg-locale-events" data-loc="events-section">
-        <button class="dbg-locale-events-header" data-loc="events-toggle" type="button" aria-expanded="false">
-          <span class="dbg-locale-events-chevron">▸</span>
-          <span class="dbg-locale-events-label">Substrate events</span>
-          <span class="dbg-locale-events-count" data-loc="events-count"></span>
-          <span class="dbg-locale-events-stale-badge hidden" data-loc="events-stale-badge" title="Landmarks on this Ground currently marked stale-suspected"></span>
+      <section class="dbg-perspective-events" data-loc="events-section">
+        <button class="dbg-perspective-events-header" data-loc="events-toggle" type="button" aria-expanded="false">
+          <span class="dbg-perspective-events-chevron">▸</span>
+          <span class="dbg-perspective-events-label">Substrate events</span>
+          <span class="dbg-perspective-events-count" data-loc="events-count"></span>
+          <span class="dbg-perspective-events-stale-badge hidden" data-loc="events-stale-badge" title="Landmarks on this Ground currently marked stale-suspected"></span>
         </button>
-        <div class="dbg-locale-events-body hidden" data-loc="events-body">
+        <div class="dbg-perspective-events-body hidden" data-loc="events-body">
           <!-- v2.74.272 — Health summary banner. Aggregates from the
                already-fetched landmarks (lifecycle counts) and events
                (recent activity by kind). Single-glance overview of
                Ground-wide substrate state. -->
-          <div class="dbg-locale-events-health" data-loc="events-health"></div>
-          <div class="dbg-locale-events-list" data-loc="events-list"></div>
-          <div class="dbg-locale-events-bulk-outcome hidden" data-loc="events-bulk-outcome"></div>
-          <div class="dbg-locale-events-footer">
-            <span class="dbg-locale-events-hint">Per-Ground ring buffer (max 200 events). Includes runtime recovery, verifier outcomes, and action-effect observations.</span>
+          <div class="dbg-perspective-events-health" data-loc="events-health"></div>
+          <div class="dbg-perspective-events-list" data-loc="events-list"></div>
+          <div class="dbg-perspective-events-bulk-outcome hidden" data-loc="events-bulk-outcome"></div>
+          <div class="dbg-perspective-events-footer">
+            <span class="dbg-perspective-events-hint">Per-Ground ring buffer (max 200 events). Includes runtime recovery, verifier outcomes, and action-effect observations.</span>
             <button class="btn-secondary tiny" data-loc="events-verify-all" type="button" title="Re-probe every landmark currently in stale-suspected. Cached selector works → verified. Heuristic recovery → verified + selector updated. Both fail → stale-confirmed.">Verify all stale</button>
             <button class="btn-secondary tiny" data-loc="events-clear" type="button" title="Clear the event log for this Ground">Clear log</button>
           </div>
         </div>
       </section>
 
-      <section class="dbg-locale-actions">
+      <section class="dbg-perspective-actions">
         <!-- v2.74.282 — Reason hint surfaces the first blocking
              condition when the Save button is disabled, so authors
              don't have to guess what's missing. Hidden when save is
              enabled. Title attribute on the button mirrors the
              text for hover discoverability. -->
-        <div data-loc="save-reason" class="dbg-locale-save-reason hidden"></div>
-        <div class="dbg-locale-actions-buttons">
-          <button data-loc="save" class="btn-primary" type="button" disabled>Save Locale</button>
+        <div data-loc="save-reason" class="dbg-perspective-save-reason hidden"></div>
+        <div class="dbg-perspective-actions-buttons">
+          <button data-loc="save" class="btn-primary" type="button" disabled>Save Perspective</button>
           <button data-loc="cancel" class="btn-secondary" type="button">Cancel</button>
         </div>
       </section>
 
-      <div data-loc="pick-banner" class="dbg-locale-pick-banner hidden">
-        <span class="dbg-locale-pick-text">Click an element on the page to pick a selector. Press Esc to cancel.</span>
+      <div data-loc="pick-banner" class="dbg-perspective-pick-banner hidden">
+        <span class="dbg-perspective-pick-text">Click an element on the page to pick a selector. Press Esc to cancel.</span>
         <button data-loc="pick-cancel" class="btn-secondary tiny" type="button">Cancel pick</button>
       </div>
     </div>
@@ -467,100 +467,100 @@ async function mount(payload, mountEl) {
 
   // Resolve DOM refs (scoped to mountEl).
   const q = (sel) => mountEl.querySelector(`[data-loc="${sel}"]`);
-  locGroundLabelEl   = q('ground-label');
-  locTabUrlEl        = q('tab-url');
-  locWarningEl       = q('warning');
-  locNameInput       = q('name-input');
-  locDescriptionInput= q('description-input');
-  locPerspectiveBody = q('perspective-body');
-  locComplexityBadge = q('complexity-badge');
-  // v2.74.275 — locPatternInput removed.
-  locLandmarksList   = q('landmarks-list');
-  locAddLandmarkBtn  = q('add-landmark');
-  locSaveBtn         = q('save');
-  locSaveReasonEl    = q('save-reason');
-  locCancelBtn       = q('cancel');
-  locPickBanner      = q('pick-banner');
-  locPickCancelBtn   = q('pick-cancel');
-  locEventsToggleBtn   = q('events-toggle');
-  locEventsBody        = q('events-body');
-  locEventsList        = q('events-list');
-  locEventsCount       = q('events-count');
-  locEventsClearBtn    = q('events-clear');
-  locEventsStaleBadge  = q('events-stale-badge');
-  locEventsVerifyAllBtn= q('events-verify-all');
-  locEventsBulkOutcome = q('events-bulk-outcome');
-  locEventsHealth      = q('events-health');
-  if (locEventsToggleBtn)    locEventsToggleBtn.addEventListener('click', _toggleEventsPanel);
-  if (locEventsClearBtn)     locEventsClearBtn.addEventListener('click', _clearEventsPanel);
-  if (locEventsVerifyAllBtn) locEventsVerifyAllBtn.addEventListener('click', _verifyAllStaleOnGround);
+  perspectiveGroundLabelEl   = q('ground-label');
+  perspectiveTabUrlEl        = q('tab-url');
+  perspectiveWarningEl       = q('warning');
+  perspectiveNameInput       = q('name-input');
+  perspectiveDescriptionInput= q('description-input');
+  perspectiveBody = q('perspective-body');
+  perspectiveComplexityBadge = q('complexity-badge');
+  // v2.74.275 — perspectivePatternInput removed.
+  perspectiveLandmarksList   = q('landmarks-list');
+  perspectiveAddLandmarkBtn  = q('add-landmark');
+  perspectiveSaveBtn         = q('save');
+  perspectiveSaveReasonEl    = q('save-reason');
+  perspectiveCancelBtn       = q('cancel');
+  perspectivePickBanner      = q('pick-banner');
+  perspectivePickCancelBtn   = q('pick-cancel');
+  perspectiveEventsToggleBtn   = q('events-toggle');
+  perspectiveEventsBody        = q('events-body');
+  perspectiveEventsList        = q('events-list');
+  perspectiveEventsCount       = q('events-count');
+  perspectiveEventsClearBtn    = q('events-clear');
+  perspectiveEventsStaleBadge  = q('events-stale-badge');
+  perspectiveEventsVerifyAllBtn= q('events-verify-all');
+  perspectiveEventsBulkOutcome = q('events-bulk-outcome');
+  perspectiveEventsHealth      = q('events-health');
+  if (perspectiveEventsToggleBtn)    perspectiveEventsToggleBtn.addEventListener('click', _toggleEventsPanel);
+  if (perspectiveEventsClearBtn)     perspectiveEventsClearBtn.addEventListener('click', _clearEventsPanel);
+  if (perspectiveEventsVerifyAllBtn) perspectiveEventsVerifyAllBtn.addEventListener('click', _verifyAllStaleOnGround);
   // v2.74.260 — Predicates DOM refs + add handler.
-  locPredicatesList   = q('predicates-list');
-  locPredicatesAddBtn = q('predicates-add');
-  if (locPredicatesAddBtn) locPredicatesAddBtn.addEventListener('click', _addPredicate);
+  perspectivePredicatesList   = q('predicates-list');
+  perspectivePredicatesAddBtn = q('predicates-add');
+  if (perspectivePredicatesAddBtn) perspectivePredicatesAddBtn.addEventListener('click', _addPredicate);
   // v2.74.271 — Top-level operator selector.
-  locPredicatesOpSelect = q('predicates-operator');
-  locPredicatesHint     = q('predicates-hint');
-  if (locPredicatesOpSelect) locPredicatesOpSelect.addEventListener('change', _onPredicatesOperatorChange);
+  perspectivePredicatesOpSelect = q('predicates-operator');
+  perspectivePredicatesHint     = q('predicates-hint');
+  if (perspectivePredicatesOpSelect) perspectivePredicatesOpSelect.addEventListener('change', _onPredicatesOperatorChange);
   // v2.74.267 — iframe contexts editor refs + add handler.
-  locIframeContextsList = q('iframe-contexts-list');
-  locIframeContextsAdd  = q('iframe-contexts-add');
-  if (locIframeContextsAdd) locIframeContextsAdd.addEventListener('click', _addIframeContext);
+  perspectiveIframeContextsList = q('iframe-contexts-list');
+  perspectiveIframeContextsAdd  = q('iframe-contexts-add');
+  if (perspectiveIframeContextsAdd) perspectiveIframeContextsAdd.addEventListener('click', _addIframeContext);
   // v2.74.265 — Active-state preview refs + handler.
-  locActiveStateRefreshBtn = q('active-state-refresh');
-  locActiveStateResult     = q('active-state-result');
-  if (locActiveStateRefreshBtn) {
-    locActiveStateRefreshBtn.addEventListener('click', () => _evaluateActiveState({ immediate: true }));
+  perspectiveActiveStateRefreshBtn = q('active-state-refresh');
+  perspectiveActiveStateResult     = q('active-state-result');
+  if (perspectiveActiveStateRefreshBtn) {
+    perspectiveActiveStateRefreshBtn.addEventListener('click', () => _evaluateActiveState({ immediate: true }));
   }
 
   // Initialize state from payload, or fetch from background if not provided.
   // The shell may pass payload directly OR rely on background's pending
-  // session (set by BEGIN_LOCALE_CAPTURE).
+  // session (set by BEGIN_PERSPECTIVE_CAPTURE).
   let groundId = payload?.groundId ?? null;
   let tabId    = payload?.tabId ?? null;
 
   if (!groundId) {
     try {
-      const res = await chrome.runtime.sendMessage({ type: 'GET_PENDING_LOCALE_CAPTURE' });
+      const res = await chrome.runtime.sendMessage({ type: 'GET_PENDING_PERSPECTIVE_CAPTURE' });
       if (res?.success && res.session) {
         groundId = res.session.groundId;
         tabId    = res.session.tabId;
       }
     } catch (e) {
-      console.warn('[locale-capture] GET_PENDING_LOCALE_CAPTURE failed', e?.message);
+      console.warn('[perspective-capture] GET_PENDING_PERSPECTIVE_CAPTURE failed', e?.message);
     }
   }
 
   if (!groundId) {
     // No session — show idle-style message.
-    locGroundLabelEl.textContent = 'No active capture session';
+    perspectiveGroundLabelEl.textContent = 'No active capture session';
     return;
   }
 
-  _locGroundId = groundId;
-  _locTabId = tabId;
-  _locReturnTo = payload?.returnTo ?? null;
-  _locDraft = newEmptyLocaleDraft(groundId);
+  _perspectiveGroundId = groundId;
+  _perspectiveTabId = tabId;
+  _perspectiveReturnTo = payload?.returnTo ?? null;
+  _perspectiveDraft = newEmptyPerspectiveDraft(groundId);
 
-  // v2.74.43 — Seed the draft from a prefilled locale. Two callers:
+  // v2.74.43 — Seed the draft from a prefilled perspective. Two callers:
   //   • + Auto in the Ground sidepanel (no id) — Claude-suggested
   //     name/description/landmarks. Landmarks come in unverified;
   //     authoredBy flips to 'model' for the ⚡ badge.
   //   • ✎ Edit in the Ground sidepanel (has id) — existing record.
   //     Preserve id + urlPattern + authoredBy + per-landmark verified
   //     state so the user lands in the saved record exactly as it was.
-  //     v2.74.47 — _locIsEdit flag gates refreshLocaleActiveTab so the
+  //     v2.74.47 — _perspectiveIsEdit flag gates refreshPerspectiveActiveTab so the
   //     URL-pattern input isn't overwritten by the current tab URL.
-  const prefilled = payload?.prefilledLocale;
+  const prefilled = payload?.prefilledPerspective;
   if (prefilled && typeof prefilled === 'object') {
-    _locIsEdit = typeof prefilled.id === 'string' && prefilled.id.length > 0;
-    if (_locIsEdit)                                _locDraft.id          = prefilled.id;
-    // v2.74.245 — Phase 7a: locale-scoped iframe context declarations.
+    _perspectiveIsEdit = typeof prefilled.id === 'string' && prefilled.id.length > 0;
+    if (_perspectiveIsEdit)                                _perspectiveDraft.id          = prefilled.id;
+    // v2.74.245 — Phase 7a: perspective-scoped iframe context declarations.
     // Carry through from the saved record so subsequent picks can
     // dedup against existing contexts and the drawer can surface
     // the iframe binding for hydrated landmarks.
     if (Array.isArray(prefilled.iframeContexts)) {
-      _locDraft.iframeContexts = prefilled.iframeContexts
+      _perspectiveDraft.iframeContexts = prefilled.iframeContexts
         .filter(c => c && typeof c.contextName === 'string' && c.predicate)
         .map(c => ({
           contextName: c.contextName,
@@ -571,8 +571,8 @@ async function mount(payload, mountEl) {
     // v2.74.48 — Normalize prefilled name (auto-suggested OR existing
     // record) so the visible input matches the lowercase-hyphenated
     // rule the user types under.
-    if (typeof prefilled.name === 'string')        _locDraft.name        = _normalizeLocaleName(prefilled.name);
-    if (typeof prefilled.description === 'string') _locDraft.description = prefilled.description;
+    if (typeof prefilled.name === 'string')        _perspectiveDraft.name        = _normalizePerspectiveName(prefilled.name);
+    if (typeof prefilled.description === 'string') _perspectiveDraft.description = prefilled.description;
     // v2.74.275 — Legacy `urlPattern` hydration REMOVED. URL gating
     // expressed via predicates only.
     // v2.74.275 — Phase 7d hydration, cleaned. Accepted shapes:
@@ -582,7 +582,7 @@ async function mount(payload, mountEl) {
     // _predicatesOriginalTree no longer exists).
     _predicatesOperator = 'and';
     if (Array.isArray(prefilled.predicates)) {
-      _locDraft.predicates = prefilled.predicates
+      _perspectiveDraft.predicates = prefilled.predicates
         .filter(p => p && typeof p === 'object' && typeof p.kind === 'string')
         .map(p => ({ ...p }));
     } else if (prefilled.predicates && typeof prefilled.predicates === 'object') {
@@ -591,16 +591,16 @@ async function mount(payload, mountEl) {
           && (tree.operator === 'and' || tree.operator === 'or' || tree.operator === 'not')
           && tree.children.every(c => c && typeof c.kind === 'string' && !c.operator)) {
         _predicatesOperator = tree.operator;
-        _locDraft.predicates = tree.children.map(c => ({ ...c }));
+        _perspectiveDraft.predicates = tree.children.map(c => ({ ...c }));
         if (tree.operator === 'not' && tree.children.length > 1) {
-          _locDraft.predicates = _locDraft.predicates.slice(0, 1);
+          _perspectiveDraft.predicates = _perspectiveDraft.predicates.slice(0, 1);
         }
       } else if (tree.kind) {
-        _locDraft.predicates = [{ ...tree }];
+        _perspectiveDraft.predicates = [{ ...tree }];
       }
     }
     // v2.74.275 — Phase 2 hydration: registry-only path. Embedded
-    // landmarks[] support REMOVED. Locales must store landmarkRefs[].
+    // landmarks[] support REMOVED. Perspectives must store landmarkRefs[].
     if (Array.isArray(prefilled.landmarkRefs) && prefilled.landmarkRefs.length > 0) {
       try {
         const res = await chrome.runtime.sendMessage({
@@ -612,7 +612,7 @@ async function mount(payload, mountEl) {
           for (const uid of prefilled.landmarkRefs) {
             const rec = res.landmarks[uid];
             if (!rec) {
-              console.warn('[locale-capture] landmark ref unresolved on hydrate:', uid);
+              console.warn('[perspective-capture] landmark ref unresolved on hydrate:', uid);
               continue;
             }
             // Map the registry record back to the in-memory editing
@@ -647,10 +647,10 @@ async function mount(payload, mountEl) {
               iframeContext       : rec.iframeContext ?? null,
             }));
           }
-          _locDraft.landmarks = hydrated;
+          _perspectiveDraft.landmarks = hydrated;
         }
       } catch (e) {
-        console.warn('[locale-capture] hydration from registry failed:', e?.message);
+        console.warn('[perspective-capture] hydration from registry failed:', e?.message);
       }
     }
     // v2.74.392 — legacy "+ Auto" fresh-suggestion hydration (prefilled.landmarks
@@ -658,13 +658,13 @@ async function mount(payload, mountEl) {
     // registry (landmarkRefs) on edit, or from propose→resolve when authoring.
     // v2.74.349 — Rehydrate the saved structured composition on edit so the
     // structure review, judgment-aware Re-structure (§ 5), and role authoring
-    // (§ 13) round-trip instead of resetting every time the Locale reopens.
+    // (§ 13) round-trip instead of resetting every time the Perspective reopens.
     // Guarded two ways: (1) ref-shaped nodes only (Auto-suggestions carry
     // alias/selector, no ref); (2) NON-TRIVIAL only — StorageManager
-    // normalizes every Locale's `landmarks` to at least flat {ref} nodes, so
+    // normalizes every Perspective's `landmarks` to at least flat {ref} nodes, so
     // we load it as structure only when a node carries role/multiplicity/
     // contains/alternatives or overlays exist. Otherwise the trivial mirror
-    // would make every edited Locale falsely show as "structured".
+    // would make every edited Perspective falsely show as "structured".
     const _pl = prefilled.landmarks;
     const _refShaped = Array.isArray(_pl) && _pl.length > 0 && _pl.every(n => n && typeof n.ref === 'string' && n.ref);
     const _nodeIsStructured = (n) => n && (
@@ -676,16 +676,16 @@ async function mount(payload, mountEl) {
     const _hasOverlays = (Array.isArray(prefilled.groupings) && prefilled.groupings.length)
       || (Array.isArray(prefilled.sequences) && prefilled.sequences.length);
     if (_refShaped && (_pl.some(_nodeIsStructured) || _hasOverlays)) {
-      _locDraft.structuredLandmarks = _pl;
-      if (Array.isArray(prefilled.groupings)) _locDraft.groupings = prefilled.groupings;
-      if (Array.isArray(prefilled.sequences)) _locDraft.sequences = prefilled.sequences;
+      _perspectiveDraft.structuredLandmarks = _pl;
+      if (Array.isArray(prefilled.groupings)) _perspectiveDraft.groupings = prefilled.groupings;
+      if (Array.isArray(prefilled.sequences)) _perspectiveDraft.sequences = prefilled.sequences;
       // Reconstruct roleFill (root + contains) so the role→structure synthesis
       // still applies if the user later edits the landmark set (which
       // invalidates the explicit structure).
       const _applyRoles = (nodes) => {
         for (const n of Array.isArray(nodes) ? nodes : []) {
           if (n && typeof n.ref === 'string' && typeof n.role === 'string' && n.role) {
-            const lm = _locDraft.landmarks.find(l => l.uid === n.ref);
+            const lm = _perspectiveDraft.landmarks.find(l => l.uid === n.ref);
             if (lm) { lm.roleFill = n.role; if (n.multiplicity) lm.roleMult = n.multiplicity; }
           }
           if (Array.isArray(n?.contains)) _applyRoles(n.contains);
@@ -693,7 +693,7 @@ async function mount(payload, mountEl) {
       };
       _applyRoles(_pl);
     }
-    _locDraft.authoredBy = typeof prefilled.authoredBy === 'string'
+    _perspectiveDraft.authoredBy = typeof prefilled.authoredBy === 'string'
       ? prefilled.authoredBy
       : 'model';
   }
@@ -702,11 +702,11 @@ async function mount(payload, mountEl) {
   try {
     const groundRes = await chrome.runtime.sendMessage({ type: 'GET_GROUND', payload: { id: groundId } });
     const ground = groundRes?.ground;
-    locGroundLabelEl.textContent = ground
+    perspectiveGroundLabelEl.textContent = ground
       ? `on Ground: ${ground.aiName ?? ground.url ?? groundId}`
       : `on Ground: (unknown)`;
   } catch (_) {
-    locGroundLabelEl.textContent = `on Ground: ${groundId}`;
+    perspectiveGroundLabelEl.textContent = `on Ground: ${groundId}`;
   }
 
   // Wire static listeners (input fields + buttons + tab tracking + keydown).
@@ -714,43 +714,43 @@ async function mount(payload, mountEl) {
   // the mount root handles all [data-card-toggle] clicks.
   if (_mountEl) _mountEl.addEventListener('click', _onCardToggle);
 
-  locNameInput.addEventListener('input', onNameInput);
-  locDescriptionInput.addEventListener('input', onDescriptionInput);
-  // v2.74.275 — locPatternInput element removed; no listener.
-  locAddLandmarkBtn.addEventListener('click', onAddLandmark);
-  locSaveBtn.addEventListener('click', saveLocale);
-  locCancelBtn.addEventListener('click', cancelLocaleCapture);
-  locPickCancelBtn.addEventListener('click', () => cancelLocalePick(true));
+  perspectiveNameInput.addEventListener('input', onNameInput);
+  perspectiveDescriptionInput.addEventListener('input', onDescriptionInput);
+  // v2.74.275 — perspectivePatternInput element removed; no listener.
+  perspectiveAddLandmarkBtn.addEventListener('click', onAddLandmark);
+  perspectiveSaveBtn.addEventListener('click', savePerspective);
+  perspectiveCancelBtn.addEventListener('click', cancelPerspectiveCapture);
+  perspectivePickCancelBtn.addEventListener('click', () => cancelPerspectivePick(true));
 
   _onTabActivated = () => {
-    if (!_locDraft) return;
-    refreshLocaleActiveTab();
+    if (!_perspectiveDraft) return;
+    refreshPerspectiveActiveTab();
   };
   _onTabUpdated = (updatedTabId, changeInfo) => {
-    if (!_locDraft) return;
-    if (updatedTabId !== _locTabId) return;
-    if (changeInfo.url || changeInfo.status === 'complete') refreshLocaleActiveTab();
+    if (!_perspectiveDraft) return;
+    if (updatedTabId !== _perspectiveTabId) return;
+    if (changeInfo.url || changeInfo.status === 'complete') refreshPerspectiveActiveTab();
   };
   chrome.tabs?.onActivated?.addListener?.(_onTabActivated);
   chrome.tabs?.onUpdated?.addListener?.(_onTabUpdated);
 
   _onKeyDown = (e) => {
-    if (e.key === 'Escape' && _locPickerSession) {
+    if (e.key === 'Escape' && _perspectivePickerSession) {
       e.preventDefault();
-      cancelLocalePick(true);
+      cancelPerspectivePick(true);
     }
   };
   document.addEventListener('keydown', _onKeyDown);
 
   // v2.74.43 — Reflect any prefilled fields in the inputs so the user
-  // sees them on mount. refreshLocaleActiveTab will set the URL
+  // sees them on mount. refreshPerspectiveActiveTab will set the URL
   // pattern from the active tab UNLESS this is an edit (gated by
-  // _locIsEdit below).
+  // _perspectiveIsEdit below).
   // v2.74.47 — Also seed the URL pattern input so an edit shows the
-  // saved pattern immediately, before refreshLocaleActiveTab has a
+  // saved pattern immediately, before refreshPerspectiveActiveTab has a
   // chance to (be skipped and) leave the field as empty default.
-  if (locNameInput)        locNameInput.value        = _locDraft.name        ?? '';
-  if (locDescriptionInput) locDescriptionInput.value = _locDraft.description ?? '';
+  if (perspectiveNameInput)        perspectiveNameInput.value        = _perspectiveDraft.name        ?? '';
+  if (perspectiveDescriptionInput) perspectiveDescriptionInput.value = _perspectiveDraft.description ?? '';
 
   // v2.74.46 — Wire panel focus/blur so verified-landmark overlays
   // hide while the user works with the page and reappear when they
@@ -762,15 +762,15 @@ async function mount(payload, mountEl) {
   // is the source of truth). On focus we redraw defensively in case
   // the page reloaded; on blur we leave overlays alone so the author
   // can see them while clicking around the page.
-  _onPanelFocus = () => { _refreshLocaleOverlays(); };
+  _onPanelFocus = () => { _refreshPerspectiveOverlays(); };
   _onPanelBlur  = () => { /* no-op — toggle controls visibility */ };
   window.addEventListener('focus', _onPanelFocus);
   window.addEventListener('blur',  _onPanelBlur);
-  _refreshLocaleOverlays();
+  _refreshPerspectiveOverlays();
 
   // Initial tab fill.
-  await refreshLocaleActiveTab();
-  renderLocaleLandmarks();
+  await refreshPerspectiveActiveTab();
+  renderPerspectiveLandmarks();
   _renderPerspectivePanel();   // v2.74.348 — § 13 description-first proposal
   // v2.74.368 — Check for a cached pageStructure artifact for this page. If a
   // fresh one exists we reuse it silently; otherwise the panel offers to
@@ -778,7 +778,7 @@ async function mount(payload, mountEl) {
   _refreshPageStructureStatus();
   _renderPredicates();
   _renderIframeContexts();   // v2.74.267
-  updateLocaleSaveButtonState();
+  updatePerspectiveSaveButtonState();
   // v2.74.265 — Initial active-state evaluation. Fires after tab fill
   // so tabUrl is populated. Fire-and-forget; the section shows
   // "Evaluating…" until done.
@@ -789,18 +789,18 @@ async function mount(payload, mountEl) {
 
 async function unmount() {
   // Cancel any picker session in progress (notify content script).
-  if (_locPickerSession) {
-    try { await cancelLocalePick(true); } catch {}
+  if (_perspectivePickerSession) {
+    try { await cancelPerspectivePick(true); } catch {}
   }
   // v2.74.46 — Tear down panel focus/blur listeners and clear any
-  // overlays still on the authoring tab. Done BEFORE _locTabId is
-  // nulled below so the CLEAR_LOCALE_OVERLAYS message has a tab to
+  // overlays still on the authoring tab. Done BEFORE _perspectiveTabId is
+  // nulled below so the CLEAR_PERSPECTIVE_OVERLAYS message has a tab to
   // send to.
   if (_onPanelFocus) try { window.removeEventListener('focus', _onPanelFocus); } catch {}
   if (_onPanelBlur)  try { window.removeEventListener('blur',  _onPanelBlur);  } catch {}
   _onPanelFocus = null;
   _onPanelBlur  = null;
-  await _clearLocaleOverlays();
+  await _clearPerspectiveOverlays();
 
   // Remove tab listeners.
   if (_onTabActivated) {
@@ -818,12 +818,12 @@ async function unmount() {
   _onKeyDown = null;
 
   // Clear state.
-  _locDraft = null;
-  _locGroundId = null;
-  _locTabId = null;
-  _locPickerSession = null;
-  _locReturnTo = null;
-  _locIsEdit = false;
+  _perspectiveDraft = null;
+  _perspectiveGroundId = null;
+  _perspectiveTabId = null;
+  _perspectivePickerSession = null;
+  _perspectiveReturnTo = null;
+  _perspectiveIsEdit = false;
   // v2.74.348/350/352/353/366/368 — Reset § 13 proposal-flow + complexity +
   // pageStructure-exploration state.
   _perspectiveRun = null;
@@ -842,23 +842,23 @@ async function unmount() {
   _pageModelInFlight = false;
 
   // Clear DOM refs (no leak — but clarity).
-  locGroundLabelEl = locTabUrlEl = locWarningEl = null;
-  // v2.74.275 — locPatternInput removed.
-  locNameInput = locDescriptionInput = null;
-  locPerspectiveBody = null;
-  locComplexityBadge = null;
-  locLandmarksList = locAddLandmarkBtn = locSaveBtn = locCancelBtn = null;
-  locSaveReasonEl = null;
-  locPickBanner = locPickCancelBtn = null;
+  perspectiveGroundLabelEl = perspectiveTabUrlEl = perspectiveWarningEl = null;
+  // v2.74.275 — perspectivePatternInput removed.
+  perspectiveNameInput = perspectiveDescriptionInput = null;
+  perspectiveBody = null;
+  perspectiveComplexityBadge = null;
+  perspectiveLandmarksList = perspectiveAddLandmarkBtn = perspectiveSaveBtn = perspectiveCancelBtn = null;
+  perspectiveSaveReasonEl = null;
+  perspectivePickBanner = perspectivePickCancelBtn = null;
   // v2.74.259 — Events panel refs + ephemeral state.
   // v2.74.263 — Detach live-events subscription BEFORE clearing the
   // ground id; the unsubscribe closes over chrome.storage.onChanged
   // and stays safe to call regardless of state, but order matters
   // for clarity.
   _detachEventsLiveSubscription();
-  locEventsToggleBtn = locEventsBody = locEventsList = locEventsCount = locEventsClearBtn = null;
-  locEventsStaleBadge = locEventsVerifyAllBtn = locEventsBulkOutcome = null;
-  locEventsHealth = null;
+  perspectiveEventsToggleBtn = perspectiveEventsBody = perspectiveEventsList = perspectiveEventsCount = perspectiveEventsClearBtn = null;
+  perspectiveEventsStaleBadge = perspectiveEventsVerifyAllBtn = perspectiveEventsBulkOutcome = null;
+  perspectiveEventsHealth = null;
   _eventsLandmarksCache = [];
   _eventsExpanded = false;
   _eventsCache = null;
@@ -869,25 +869,25 @@ async function unmount() {
   _eventsAppliedDrift.clear();
   _eventsApplyInFlight.clear();
   // v2.74.260 — Predicates DOM refs.
-  locPredicatesList = locPredicatesAddBtn = null;
-  locPredicatesOpSelect = locPredicatesHint = null;
+  perspectivePredicatesList = perspectivePredicatesAddBtn = null;
+  perspectivePredicatesOpSelect = perspectivePredicatesHint = null;
   _predicatesOperator = 'and';
   // v2.74.265 — Active-state preview cleanup.
-  locActiveStateRefreshBtn = locActiveStateResult = null;
+  perspectiveActiveStateRefreshBtn = perspectiveActiveStateResult = null;
   _activeStateEvaluating = false;
   if (_activeStateDebounce) {
     clearTimeout(_activeStateDebounce);
     _activeStateDebounce = null;
   }
   // v2.74.267 — iframe contexts editor cleanup.
-  locIframeContextsList = locIframeContextsAdd = null;
+  perspectiveIframeContextsList = perspectiveIframeContextsAdd = null;
   _iframeTestOutcome.clear();
   _iframeTestInFlight.clear();
   // v2.74.261 — BUG FIX: clear all row-keyed state Maps/Sets on
-  // unmount. Without this, remounting the mode (open locale A, close,
-  // open locale B) leaks stale state where indices that match rows in
-  // the new locale show artifacts (refining badge, expanded drawer,
-  // open replace picker, verify outcome) from the prior locale. Both
+  // unmount. Without this, remounting the mode (open perspective A, close,
+  // open perspective B) leaks stale state where indices that match rows in
+  // the new perspective show artifacts (refining badge, expanded drawer,
+  // open replace picker, verify outcome) from the prior perspective. Both
   // predate my work (refining/profileExpanded since v2.74.233/235) and
   // are extensions of my work (verify/replace since v2.74.257/258).
   _landmarkRefining.clear();
@@ -910,8 +910,8 @@ async function unmount() {
 // ─── Event forwarding (PICK_RESULT) ───────────────────────────────────────
 
 function handleEvent(message) {
-  if (!_locPickerSession) return;
-  if (message?.sessionId !== _locPickerSession.sessionId) return;
+  if (!_perspectivePickerSession) return;
+  if (message?.sessionId !== _perspectivePickerSession.sessionId) return;
   // v2.74.301 — Handle PICK_CANCELLED so the banner clears even when
   // PICK_RESULT never arrives (e.g. picker aborted because synthesize-
   // Selector returned null, content script torn down mid-flow, or the
@@ -919,90 +919,112 @@ function handleEvent(message) {
   // silently dropped — the sidepanel banner stayed up and the user
   // had to refresh.
   if (message.type === 'PICK_CANCELLED') {
-    const sessionId = _locPickerSession.sessionId;
-    _locPickerSession = null;
-    if (locPickBanner) locPickBanner.classList.add('hidden');
-    if (_locTabId != null) {
-      broadcastCancelPick(_locTabId, { sessionId });
+    const sessionId = _perspectivePickerSession.sessionId;
+    _perspectivePickerSession = null;
+    if (perspectivePickBanner) perspectivePickBanner.classList.add('hidden');
+    if (_perspectiveTabId != null) {
+      broadcastCancelPick(_perspectiveTabId, { sessionId });
     }
-    Logger.info('locale-capture', `pick cancelled (${message.reason ?? 'unknown'})`);
+    Logger.info('perspective-capture', `pick cancelled (${message.reason ?? 'unknown'})`);
     return;
   }
   if (message.type !== 'PICK_RESULT') return;
 
-  const { landmarkIdx, roleSlot } = _locPickerSession;
-  const completedSessionId = _locPickerSession.sessionId;
-  _locPickerSession = null;
-  if (locPickBanner) locPickBanner.classList.add('hidden');
+  const { landmarkIdx, roleSlot } = _perspectivePickerSession;
+  const completedSessionId = _perspectivePickerSession.sessionId;
+  _perspectivePickerSession = null;
+  if (perspectivePickBanner) perspectivePickBanner.classList.add('hidden');
   // v2.74.168 — Tear down pickers in sibling frames. The originating
   // frame's picker already self-stopped on result; the top frame and
   // any other same-origin iframes that armed via the broadcast are
   // still active. Without this their overlays linger.
-  if (_locTabId != null) {
-    broadcastCancelPick(_locTabId, { sessionId: completedSessionId });
+  if (_perspectiveTabId != null) {
+    broadcastCancelPick(_perspectiveTabId, { sessionId: completedSessionId });
   }
 
   if (message.error) {
-    showLocaleWarning(`Pick error: ${message.error}`);
+    showPerspectiveWarning(`Pick error: ${message.error}`);
     return;
   }
   const selector = message.selector ?? '';
   if (!selector) {
-    showLocaleWarning('Pick returned an empty selector — try again');
+    showPerspectiveWarning('Pick returned an empty selector — try again');
     return;
   }
-  if (!_locDraft) return;
+  if (!_perspectiveDraft) return;
   // v2.74.280 — Create-mode: PICK_RESULT arrived for a "+ Pick landmark"
   // session (no row existed yet). Push a fresh landmark and adopt its
   // index for the rest of the handler.
   let effectiveIdx = landmarkIdx;
   if (effectiveIdx === null) {
-    _locDraft.landmarks.push({ alias: '', selector: '', verified: null });
-    effectiveIdx = _locDraft.landmarks.length - 1;
+    _perspectiveDraft.landmarks.push({ alias: '', selector: '', verified: null });
+    effectiveIdx = _perspectiveDraft.landmarks.length - 1;
   }
-  if (!_locDraft.landmarks[effectiveIdx]) return;
-  _locDraft.landmarks[effectiveIdx].selector = selector;
+  if (!_perspectiveDraft.landmarks[effectiveIdx]) return;
+  _perspectiveDraft.landmarks[effectiveIdx].selector = selector;
   // v2.74.198 — Persist iframe origin on the landmark. Symmetric to
   // the fragment-action and observation-extract iframe fixes — when
   // the user picks inside an iframe, PICK_RESULT carries the iframe
-  // URL on message.frame.url. Without persisting, runtime locale
-  // evaluation (locale_ref condition) routes to the top frame and
+  // URL on message.frame.url. Without persisting, runtime perspective
+  // evaluation (perspective_ref condition) routes to the top frame and
   // the landmark's selector resolves there instead of the iframe.
   if (message.frame && message.frame.url) {
-    _locDraft.landmarks[effectiveIdx].frameUrl = String(message.frame.url);
+    _perspectiveDraft.landmarks[effectiveIdx].frameUrl = String(message.frame.url);
   } else {
-    delete _locDraft.landmarks[effectiveIdx].frameUrl;
+    delete _perspectiveDraft.landmarks[effectiveIdx].frameUrl;
   }
-  _locDraft.landmarks[effectiveIdx].verified = null;
+  _perspectiveDraft.landmarks[effectiveIdx].verified = null;
   // v2.74.348 — § 13 role binding. When this pick fills a proposed role, tag
   // the landmark with roleFill (+ multiplicity) and seed its alias from the
   // role (only if blank) so Claude's profile gets the role as context and the
   // role-fill checklist marks it done. roleFill also drives the save-time
   // structured-composition synthesis (role → LandmarkNode.role).
   if (roleSlot?.role) {
-    _locDraft.landmarks[effectiveIdx].roleFill = roleSlot.role;
-    _locDraft.landmarks[effectiveIdx].roleMult = roleSlot.multiplicity ?? 'one';
-    if (!(_locDraft.landmarks[effectiveIdx].alias ?? '').trim()) {
-      _locDraft.landmarks[effectiveIdx].alias = roleSlot.role;
+    _perspectiveDraft.landmarks[effectiveIdx].roleFill = roleSlot.role;
+    _perspectiveDraft.landmarks[effectiveIdx].roleMult = roleSlot.multiplicity ?? 'one';
+    if (!(_perspectiveDraft.landmarks[effectiveIdx].alias ?? '').trim()) {
+      _perspectiveDraft.landmarks[effectiveIdx].alias = roleSlot.role;
     }
+    // v2.74.418 — OUTCOMES gold label (OUTCOMES_SPEC § 3): if resolve had
+    // PROPOSED or FAILED on this role, the manual pick is an explicit correction
+    // ("proposed X, truth was Y") — the strongest training signal. Capture the
+    // stale note BEFORE deleting it and emit a `corrected` event: the proposed
+    // selector debits its catalog feature (active decay), the human's selector is
+    // banked as the truth. Fire-and-forget — never let it affect the pick.
+    const priorNote = _roleResolveNotes[roleSlot.role];
     delete _roleResolveNotes[roleSlot.role];   // v2.74.355 — manual pick clears the stale "why failed" note
+    if (priorNote && _perspectiveGroundId && selector) {
+      try {
+        chrome.runtime.sendMessage({
+          type: 'EMIT_RESOLVE_OUTCOMES',
+          payload: {
+            groundId: _perspectiveGroundId,
+            run: { ts: Date.now(), url: perspectiveTabUrlEl?.textContent ?? '', mode: 'manual-correction',
+                   details: [{ role: roleSlot.role, status: priorNote.status ?? 'failed',
+                               selector: priorNote.selector ?? null, reason: priorNote.reason,
+                               humanFinal: { selector } }] },
+            ctx: { localeId: perspectiveTabUrlEl?.textContent ?? null, perspectiveId: _perspectiveDraft?.id ?? null },
+          },
+        }, () => void chrome.runtime.lastError);
+      } catch (e) { Logger?.warn?.('perspective-capture', `corrected-outcome emit failed: ${e.message}`); }
+    }
   }
   _invalidateStructure();   // v2.74.336 — landmark set changed; drop stale structure
-  renderLocaleLandmarks();
+  renderPerspectiveLandmarks();
   _renderPerspectivePanel();   // v2.74.348 — reflect the newly-filled role
   // v2.74.245 — Phase 7a of substrate spec: iframe context detection.
   // When the picked element lives inside an iframe (frame.isTop is
   // false), ask the TOP frame's content script to identify the
   // <iframe> element matching this frame URL and propose an iframe
   // context (contextName + predicate + sameOrigin). Register the
-  // context on the locale; bind the landmark to it.
+  // context on the perspective; bind the landmark to it.
   //
   // Fire-and-forget — failures fall back to legacy frameUrl-only
   // behavior. The Pick→Claude refinement runs in parallel; the
   // iframe context registration is a side concern.
   if (message.frame && message.frame.isTop === false) {
     _registerIframeContextForLandmark(effectiveIdx, message.frame.url).catch(err => {
-      Logger.warn('locale-capture', `iframe context registration failed: ${err.message} (keeping frameUrl fallback)`);
+      Logger.warn('perspective-capture', `iframe context registration failed: ${err.message} (keeping frameUrl fallback)`);
     });
   }
   // v2.74.233 — Pick now triggers Claude refinement automatically.
@@ -1026,40 +1048,40 @@ function handleEvent(message) {
 
 /**
  * v2.74.245 — Phase 7a: query the top frame for iframe-element
- * details, propose an iframe context, ensure the Locale's
+ * details, propose an iframe context, ensure the Perspective's
  * `iframeContexts[]` includes it, and bind the landmark to it via
  * `landmark.iframeContext`.
  *
- * Context dedup: if the locale already has a context with the same
+ * Context dedup: if the perspective already has a context with the same
  * predicate (e.g., the same iframe was picked into earlier in this
  * session), reuse it rather than creating a duplicate.
  */
 async function _registerIframeContextForLandmark(landmarkIdx, frameUrl) {
-  if (!_locDraft || !_locDraft.landmarks[landmarkIdx]) return;
-  if (_locTabId == null) return;
+  if (!_perspectiveDraft || !_perspectiveDraft.landmarks[landmarkIdx]) return;
+  if (_perspectiveTabId == null) return;
   const res = await chrome.tabs.sendMessage(
-    _locTabId,
+    _perspectiveTabId,
     { type: 'IDENTIFY_IFRAME_ELEMENT', payload: { frameUrl } },
     { frameId: 0 },
   );
   if (!res?.success) {
-    Logger.info('locale-capture', `Pick→iframe context: no iframe element found in top doc for url "${frameUrl}" — landmark stays bound by legacy frameUrl only`);
+    Logger.info('perspective-capture', `Pick→iframe context: no iframe element found in top doc for url "${frameUrl}" — landmark stays bound by legacy frameUrl only`);
     return;
   }
   const { proposedContextName, proposedPredicate, sameOrigin, iframeInfo } = res;
-  if (!_locDraft.iframeContexts) _locDraft.iframeContexts = [];
+  if (!_perspectiveDraft.iframeContexts) _perspectiveDraft.iframeContexts = [];
   // Dedup: same predicate (kind + value/selector/pattern/index) →
   // reuse the existing context name. Authors don't get N variants
   // of the same iframe.
   const predKey = JSON.stringify(proposedPredicate);
-  let existing = _locDraft.iframeContexts.find(c => JSON.stringify(c.predicate) === predKey);
+  let existing = _perspectiveDraft.iframeContexts.find(c => JSON.stringify(c.predicate) === predKey);
   if (!existing) {
     // Ensure the proposed contextName doesn't collide with another
     // context's name (different predicate, same name — unlikely but
     // defensive). Append a numeric suffix if needed.
     let name = proposedContextName;
     let n = 2;
-    while (_locDraft.iframeContexts.some(c => c.contextName === name)) {
+    while (_perspectiveDraft.iframeContexts.some(c => c.contextName === name)) {
       name = `${proposedContextName}-${n++}`;
     }
     existing = {
@@ -1067,53 +1089,53 @@ async function _registerIframeContextForLandmark(landmarkIdx, frameUrl) {
       predicate  : proposedPredicate,
       sameOrigin : sameOrigin === true,
     };
-    _locDraft.iframeContexts.push(existing);
+    _perspectiveDraft.iframeContexts.push(existing);
   }
-  _locDraft.landmarks[landmarkIdx].iframeContext = existing.contextName;
-  Logger.info('locale-capture', `Pick→iframe context bound [landmarkIdx=${landmarkIdx}]`, {
+  _perspectiveDraft.landmarks[landmarkIdx].iframeContext = existing.contextName;
+  Logger.info('perspective-capture', `Pick→iframe context bound [landmarkIdx=${landmarkIdx}]`, {
     contextName : existing.contextName,
     predicate   : existing.predicate,
     sameOrigin  : existing.sameOrigin,
     iframeInfo,
   });
   // Re-render so the drawer can surface the iframe binding.
-  renderLocaleLandmarks();
+  renderPerspectiveLandmarks();
 }
 
 // ─── Input handlers ──────────────────────────────────────────────────────
 
-// v2.74.48 — Locale names are normalized as the user types: lowercase
+// v2.74.48 — Perspective names are normalized as the user types: lowercase
 // and whitespace runs → single hyphen. Preserves cursor position
 // because both transforms are length-preserving for the typical case
 // (single space → single hyphen). When the user types two consecutive
 // spaces, the regex collapses them into one hyphen which DOES shorten
 // the value; we re-anchor the caret to keep input feeling natural.
-function _normalizeLocaleName(raw) {
+function _normalizePerspectiveName(raw) {
   return String(raw ?? '').toLowerCase().replace(/\s+/g, '-');
 }
 
 function onNameInput() {
-  if (!_locDraft) return;
-  const raw  = locNameInput.value;
-  const norm = _normalizeLocaleName(raw);
+  if (!_perspectiveDraft) return;
+  const raw  = perspectiveNameInput.value;
+  const norm = _normalizePerspectiveName(raw);
   if (raw !== norm) {
-    const caret = locNameInput.selectionStart ?? norm.length;
-    locNameInput.value = norm;
+    const caret = perspectiveNameInput.selectionStart ?? norm.length;
+    perspectiveNameInput.value = norm;
     const newCaret = Math.min(caret, norm.length);
-    try { locNameInput.setSelectionRange(newCaret, newCaret); } catch {}
+    try { perspectiveNameInput.setSelectionRange(newCaret, newCaret); } catch {}
   }
-  _locDraft.name = norm;
-  updateLocaleSaveButtonState();
+  _perspectiveDraft.name = norm;
+  updatePerspectiveSaveButtonState();
 }
 function onDescriptionInput() {
-  if (!_locDraft) return;
-  _locDraft.description = locDescriptionInput.value;
+  if (!_perspectiveDraft) return;
+  _perspectiveDraft.description = perspectiveDescriptionInput.value;
   // v2.74.348 — A manual edit marks the description source 'direct' (unless a
   // proposal seeded it and the user hasn't changed it). Keep it simple: any
   // typing here is direct authorship.
-  _locDraft.authoringMetadata = _locDraft.authoringMetadata ?? {};
-  _locDraft.authoringMetadata.description = {
-    ...(_locDraft.authoringMetadata.description ?? {}),
+  _perspectiveDraft.authoringMetadata = _perspectiveDraft.authoringMetadata ?? {};
+  _perspectiveDraft.authoringMetadata.description = {
+    ...(_perspectiveDraft.authoringMetadata.description ?? {}),
     source: 'direct',
     lastAuthoredAt: Date.now(),
     authoredBy: 'user',
@@ -1123,17 +1145,17 @@ function onDescriptionInput() {
   // intent with options/roles already shown doesn't flicker the cards.
   // v2.74.394 — also toggle ground-intent (it was left permanently disabled
   // when typed in after an empty initial render → "does nothing").
-  if (locPerspectiveBody && !_perspectiveInFlight) {
-    const empty = (_locDraft.description ?? '').trim().length === 0;
-    locPerspectiveBody.querySelectorAll('[data-loc-action="propose-perspectives"], [data-loc-action="ground-intent"]')
+  if (perspectiveBody && !_perspectiveInFlight) {
+    const empty = (_perspectiveDraft.description ?? '').trim().length === 0;
+    perspectiveBody.querySelectorAll('[data-perspective-action="propose-perspectives"], [data-perspective-action="ground-intent"]')
       .forEach(btn => {
         btn.disabled = empty;
-        if (btn.dataset.locAction === 'ground-intent') {
+        if (btn.dataset.perspectiveAction === 'ground-intent') {
           btn.title = empty ? 'Write an Intent first.' : 'Refine your Intent against what this page can actually do (uses the explored page affordances).';
         }
       });
   }
-  updateLocaleSaveButtonState();
+  updatePerspectiveSaveButtonState();
 }
 // v2.74.275 — onPatternInput removed (URL pattern field gone).
 // v2.74.392 — onRediscoverLandmarks removed with the legacy auto-suggest path.
@@ -1148,46 +1170,46 @@ function onDescriptionInput() {
 // pushed yet. Errors and empty-selector returns also produce no
 // landmark — the create path only commits on successful PICK_RESULT.
 async function onAddLandmark() {
-  if (!_locDraft) return;
-  await startLocalePick(null);
+  if (!_perspectiveDraft) return;
+  await startPerspectivePick(null);
 }
 
 // ─── Active tab tracking ─────────────────────────────────────────────────
 
-async function refreshLocaleActiveTab() {
-  if (!_locDraft) return;
+async function refreshPerspectiveActiveTab() {
+  if (!_perspectiveDraft) return;
   const tab = await getActiveTab();
   if (!tab) {
-    locTabUrlEl.textContent = '(no active tab)';
+    perspectiveTabUrlEl.textContent = '(no active tab)';
     _pageComplexity = null; _renderComplexityBadge();
     return;
   }
   if (/^(chrome|chrome-extension|about|edge):/i.test(tab.url ?? '')) {
-    locTabUrlEl.textContent = `${tab.url} (extension page — picker won't work here)`;
+    perspectiveTabUrlEl.textContent = `${tab.url} (extension page — picker won't work here)`;
     _pageComplexity = null; _renderComplexityBadge();
     return;
   }
-  _locTabId = tab.id;
-  locTabUrlEl.textContent = tab.url ?? '(unknown)';
-  // v2.74.275 — On new locales, auto-seed a urlMatches predicate from
+  _perspectiveTabId = tab.id;
+  perspectiveTabUrlEl.textContent = tab.url ?? '(unknown)';
+  // v2.74.275 — On new perspectives, auto-seed a urlMatches predicate from
   // the current tab URL so authors don't have to type one. On edits,
   // existing predicates are preserved.
-  if (!_locIsEdit && _locDraft && tab.url
-      && (!Array.isArray(_locDraft.predicates) || _locDraft.predicates.length === 0)) {
-    _locDraft.predicates = [{ kind: 'urlMatches', pattern: tab.url, mode: 'contains' }];
+  if (!_perspectiveIsEdit && _perspectiveDraft && tab.url
+      && (!Array.isArray(_perspectiveDraft.predicates) || _perspectiveDraft.predicates.length === 0)) {
+    _perspectiveDraft.predicates = [{ kind: 'urlMatches', pattern: tab.url, mode: 'contains' }];
     _predicatesOperator = 'and';
     if (typeof _renderPredicates === 'function') _renderPredicates();
   }
 
-  if (locWarningEl) {
-    locWarningEl.textContent = '';
-    locWarningEl.classList.add('hidden');
-    locWarningEl.classList.remove('status-ok');
+  if (perspectiveWarningEl) {
+    perspectiveWarningEl.textContent = '';
+    perspectiveWarningEl.classList.add('hidden');
+    perspectiveWarningEl.classList.remove('status-ok');
   }
   // v2.74.265 — Tab changed; re-evaluate active state. Skip if section
   // isn't mounted yet (initial mount calls _evaluateActiveState directly
   // after this returns, so the first eval isn't lost).
-  if (locActiveStateResult) {
+  if (perspectiveActiveStateResult) {
     _evaluateActiveState({ debounce: true });
   }
   // v2.74.353 — (Re)compute the resolve-difficulty badge. Always, because
@@ -1198,7 +1220,7 @@ async function refreshLocaleActiveTab() {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
-function newEmptyLocaleDraft(groundId) {
+function newEmptyPerspectiveDraft(groundId) {
   return {
     id          : `loc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     groundId    : groundId,
@@ -1206,7 +1228,7 @@ function newEmptyLocaleDraft(groundId) {
     description : '',
     // v2.74.275 — `urlPattern` field REMOVED. URL gating expressed via
     // `predicates` (urlMatches kind). New drafts seed an empty
-    // urlMatches predicate on first tab load (see refreshLocaleActiveTab).
+    // urlMatches predicate on first tab load (see refreshPerspectiveActiveTab).
     landmarks   : [],
     predicates  : [],
     authoredBy  : 'human',
@@ -1332,7 +1354,7 @@ function _slugifyForAlias(name) {
 // v2.74.284 — Unified card-collapse handler. Delegated to the form
 // root so every section with `[data-card-toggle]` in its head gets
 // uniform collapse behavior. Toggles `data-collapsed` on the section;
-// CSS hides .dbg-locale-card-body when collapsed and rotates the
+// CSS hides .dbg-perspective-card-body when collapsed and rotates the
 // chevron via the attribute selector.
 function _onCardToggle(e) {
   const btn = e.target.closest('[data-card-toggle]');
@@ -1343,32 +1365,32 @@ function _onCardToggle(e) {
   const next = !isCollapsed;
   section.setAttribute('data-collapsed', next ? 'true' : 'false');
   btn.setAttribute('aria-expanded', next ? 'false' : 'true');
-  const chevron = btn.querySelector('.dbg-locale-card-chevron');
+  const chevron = btn.querySelector('.dbg-perspective-card-chevron');
   if (chevron) chevron.textContent = next ? '▸' : '▾';
 }
 
-function showLocaleWarning(text) {
-  if (!locWarningEl) return;
-  locWarningEl.textContent = text;
-  locWarningEl.classList.remove('hidden');
-  locWarningEl.classList.remove('status-ok');
+function showPerspectiveWarning(text) {
+  if (!perspectiveWarningEl) return;
+  perspectiveWarningEl.textContent = text;
+  perspectiveWarningEl.classList.remove('hidden');
+  perspectiveWarningEl.classList.remove('status-ok');
 }
 
-// ─── Layer 2 structure (Phase C-lite, LOCALE_SPEC § 3/§ 13) ───────────────
+// ─── Layer 2 structure (Phase C-lite, PERSPECTIVE_SPEC § 3/§ 13) ───────────────
 // The LLM proposes a structured composition (LandmarkNode tree + groupings/
 // sequences) over the already-picked landmarks; the author reviews it. The
 // proposal is invalidated whenever the landmark SET changes (pick/remove) so
 // stored structure never references a missing/stale landmark.
 
 function _invalidateStructure() {
-  if (!_locDraft) return;
-  _locDraft.structuredLandmarks = null;
-  _locDraft.groupings = undefined;
-  _locDraft.sequences = undefined;
+  if (!_perspectiveDraft) return;
+  _perspectiveDraft.structuredLandmarks = null;
+  _perspectiveDraft.groupings = undefined;
+  _perspectiveDraft.sequences = undefined;
 }
 
 function _structAliasOf(uid) {
-  const lm = (_locDraft?.landmarks ?? []).find(l => l?.uid === uid);
+  const lm = (_perspectiveDraft?.landmarks ?? []).find(l => l?.uid === uid);
   return lm?.alias ?? lm?.accessibleName ?? (typeof uid === 'string' ? uid.slice(0, 8) : '?');
 }
 
@@ -1376,7 +1398,7 @@ function _structAliasOf(uid) {
 // structuredLandmarks tree (walks `contains`). `id` is a landmark `ref` or a
 // virtual node's `vid` (v2.74.365).
 function _findStructNode(ref, nodes) {
-  const list = nodes ?? _locDraft?.structuredLandmarks;
+  const list = nodes ?? _perspectiveDraft?.structuredLandmarks;
   for (const n of Array.isArray(list) ? list : []) {
     if (n?.ref === ref || n?.vid === ref) return n;
     if (Array.isArray(n?.contains)) {
@@ -1387,7 +1409,7 @@ function _findStructNode(ref, nodes) {
   return null;
 }
 
-// v2.74.344 — Record the author's review judgment on a node (LOCALE_SPEC § 5
+// v2.74.344 — Record the author's review judgment on a node (PERSPECTIVE_SPEC § 5
 // LandmarkNodeAuthoringMetadata.userJudgment — the training signal). Values:
 // 'accepted' | 'edited' | 'rejected-but-kept'.
 function _markStructJudgment(node, judgment) {
@@ -1401,14 +1423,14 @@ function _markStructJudgment(node, judgment) {
 
 // v2.74.346 — Phase B-mid (overlays): groupings/sequences are the
 // cross-cutting overlays Claude proposes alongside the containment tree
-// (LOCALE_SPEC § 3). The author reviews them with the same vocabulary as
+// (PERSPECTIVE_SPEC § 3). The author reviews them with the same vocabulary as
 // nodes — accept / edit (rename) / reject-but-kept — plus an explicit delete
 // for an overlay the author wants gone entirely. `_markStructJudgment` is
 // reused since it just stamps `.authoringMetadata`.
 function _overlayArr(kind) {
-  if (!_locDraft) return null;
-  if (kind === 'grouping') return Array.isArray(_locDraft.groupings) ? _locDraft.groupings : null;
-  if (kind === 'sequence') return Array.isArray(_locDraft.sequences) ? _locDraft.sequences : null;
+  if (!_perspectiveDraft) return null;
+  if (kind === 'grouping') return Array.isArray(_perspectiveDraft.groupings) ? _perspectiveDraft.groupings : null;
+  if (kind === 'sequence') return Array.isArray(_perspectiveDraft.sequences) ? _perspectiveDraft.sequences : null;
   return null;
 }
 function _findOverlay(kind, idx) {
@@ -1423,7 +1445,7 @@ function _deleteOverlay(kind, idx) {
 // v2.74.345 — Phase B-mid: locate a node + its position for re-nesting.
 // Returns { node, siblings (the array holding it), index, parentNode|null }.
 function _locateStructNode(ref, siblings, parentNode) {
-  const arr = Array.isArray(siblings) ? siblings : _locDraft?.structuredLandmarks;
+  const arr = Array.isArray(siblings) ? siblings : _perspectiveDraft?.structuredLandmarks;
   if (!Array.isArray(arr)) return null;
   for (let i = 0; i < arr.length; i++) {
     if (arr[i]?.ref === ref || arr[i]?.vid === ref) return { node: arr[i], siblings: arr, index: i, parentNode: parentNode ?? null };
@@ -1500,7 +1522,7 @@ function _renderStructNodeRow(n, depth, index) {
       <select class="loc-struct-mult-select" data-struct-action="mult" data-ref="${escAttr(nodeId)}" title="How many at runtime">${multOpts}</select>
       ${autoBadge}
       <button class="loc-struct-judge-btn${judgment === 'accepted' ? ' active' : ''}" data-struct-action="judge" data-ref="${escAttr(nodeId)}" data-judgment="accepted" type="button" title="Accept Claude's proposal for this node as-is">✓</button>
-      <button class="loc-struct-judge-btn loc-struct-judge-rej${judgment === 'rejected-but-kept' ? ' active' : ''}" data-struct-action="judge" data-ref="${escAttr(nodeId)}" data-judgment="rejected-but-kept" type="button" title="Reject the structuring (members stay in the locale; flags the proposal as wrong)">✗</button>
+      <button class="loc-struct-judge-btn loc-struct-judge-rej${judgment === 'rejected-but-kept' ? ' active' : ''}" data-struct-action="judge" data-ref="${escAttr(nodeId)}" data-judgment="rejected-but-kept" type="button" title="Reject the structuring (members stay in the perspective; flags the proposal as wrong)">✗</button>
     </div>`;
   // v2.74.361 — B-full (partial): per-node dynamics detail.
   //  • presenceCondition — shown when the node isn't always present
@@ -1533,7 +1555,7 @@ function _renderStructNodeRow(n, depth, index) {
 // v2.74.346 — One reviewable overlay row (grouping ▣ or sequence →). Mirrors
 // the node row's review affordances: editable name, ✓ accept / ✗ reject-kept,
 // plus 🗑 delete (overlays, unlike landmarks, are pure annotations — removing
-// one drops nothing from the Locale's landmark set).
+// one drops nothing from the Perspective's landmark set).
 function _renderOverlayRow(kind, ov, idx) {
   if (!ov || typeof ov !== 'object') return '';
   const glyph = kind === 'grouping' ? '▣' : '→';
@@ -1569,32 +1591,32 @@ function _renderStructureBar() {
   // on click with a clear message, rather than silently disabling the button
   // (UIDs are only assigned after a landmark's Pick→Claude profile completes,
   // so an early-authoring landmark may not have one yet).
-  const lmCount = (_locDraft?.landmarks ?? []).length;
+  const lmCount = (_perspectiveDraft?.landmarks ?? []).length;
   const canStructure = lmCount >= 2;
-  const struct = Array.isArray(_locDraft?.structuredLandmarks) && _locDraft.structuredLandmarks.length
-    ? _locDraft.structuredLandmarks : null;
+  const struct = Array.isArray(_perspectiveDraft?.structuredLandmarks) && _perspectiveDraft.structuredLandmarks.length
+    ? _perspectiveDraft.structuredLandmarks : null;
   const btnLabel = struct ? '🧬 Re-structure' : '🧬 Structure with Claude';
   const btnTitle = canStructure
-    ? 'Ask Claude to organize these landmarks into a structured perspective (containment, roles, groupings/sequences). You review the result; it saves with the Locale.'
+    ? 'Ask Claude to organize these landmarks into a structured perspective (containment, roles, groupings/sequences). You review the result; it saves with the Perspective.'
     : 'Pick at least 2 landmarks to propose structure.';
   return `
     <div class="loc-structure-bar">
-      <button class="btn-secondary tiny" data-loc-action="propose-structure" type="button" ${canStructure ? '' : 'disabled'} title="${escAttr(btnTitle)}">${btnLabel}</button>
-      ${struct ? `<button class="btn-secondary tiny" data-loc-action="verify-structure" type="button" title="Auto-verify the structure against the live page: resolution + multiplicity + containment (deterministic), and poke-and-observe for triggers. Synthetic clicks interact with the page.">✓ Verify</button>` : ''}
-      ${struct ? `<span class="loc-structure-tag" title="Structure proposed by Claude — review below. Saved with the Locale.">structured</span>` : ''}
+      <button class="btn-secondary tiny" data-perspective-action="propose-structure" type="button" ${canStructure ? '' : 'disabled'} title="${escAttr(btnTitle)}">${btnLabel}</button>
+      ${struct ? `<button class="btn-secondary tiny" data-perspective-action="verify-structure" type="button" title="Auto-verify the structure against the live page: resolution + multiplicity + containment (deterministic), and poke-and-observe for triggers. Synthetic clicks interact with the page.">✓ Verify</button>` : ''}
+      ${struct ? `<span class="loc-structure-tag" title="Structure proposed by Claude — review below. Saved with the Perspective.">structured</span>` : ''}
     </div>
-    ${struct ? _renderStructurePreview(struct, _locDraft.groupings, _locDraft.sequences) : ''}`;
+    ${struct ? _renderStructurePreview(struct, _perspectiveDraft.groupings, _perspectiveDraft.sequences) : ''}`;
 }
 
 async function onProposeStructure() {
-  if (!_locDraft) return;
-  const total = (_locDraft.landmarks ?? []).length;
+  if (!_perspectiveDraft) return;
+  const total = (_perspectiveDraft.landmarks ?? []).length;
   // v2.74.389 — map a roleFill name → its landmark uid, so a hidden role's
   // `revealedBy` (a role NAME from propose) becomes a `revealedByRef` (the
   // trigger landmark's uid) that the structure step can turn into a `trigger`.
   const roleToUid = new Map();
-  for (const lm of (_locDraft.landmarks ?? [])) { if (lm?.roleFill && lm?.uid && !roleToUid.has(lm.roleFill)) roleToUid.set(lm.roleFill, lm.uid); }
-  const lms = (_locDraft.landmarks ?? [])
+  for (const lm of (_perspectiveDraft.landmarks ?? [])) { if (lm?.roleFill && lm?.uid && !roleToUid.has(lm.roleFill)) roleToUid.set(lm.roleFill, lm.uid); }
+  const lms = (_perspectiveDraft.landmarks ?? [])
     .filter(lm => lm?.uid)
     .map(lm => ({
       uid: lm.uid,
@@ -1609,10 +1631,10 @@ async function onProposeStructure() {
   if (lms.length < 2) {
     // v2.74.337 — Clear feedback instead of a silent no-op. UIDs are assigned
     // when a landmark finishes its Pick→Claude profile (or at save).
-    showLocaleWarning(`Structure needs at least 2 landmarks with a verified UID — ${lms.length} of ${total} have one. Finish picking/profiling them (each Pick→Claude assigns a UID), or save the Locale once to assign UIDs, then try again.`);
+    showPerspectiveWarning(`Structure needs at least 2 landmarks with a verified UID — ${lms.length} of ${total} have one. Finish picking/profiling them (each Pick→Claude assigns a UID), or save the Perspective once to assign UIDs, then try again.`);
     return;
   }
-  const btn = locLandmarksList?.querySelector('[data-loc-action="propose-structure"]');
+  const btn = perspectiveLandmarksList?.querySelector('[data-perspective-action="propose-structure"]');
   if (btn) { btn.disabled = true; btn.textContent = '🧬 Structuring…'; }
   // v2.74.347 — On a re-structure, send the structure the user already
   // reviewed (nodes + overlays, carrying authoringMetadata.userJudgment) so
@@ -1620,27 +1642,27 @@ async function onProposeStructure() {
   // only the rejected ones — instead of proposing from scratch. This is the
   // downstream consumer that makes the structured tree + the review judgments
   // actually do something.
-  const priorStructure = (Array.isArray(_locDraft.structuredLandmarks) && _locDraft.structuredLandmarks.length)
-    ? { nodes: _locDraft.structuredLandmarks, groupings: _locDraft.groupings, sequences: _locDraft.sequences }
+  const priorStructure = (Array.isArray(_perspectiveDraft.structuredLandmarks) && _perspectiveDraft.structuredLandmarks.length)
+    ? { nodes: _perspectiveDraft.structuredLandmarks, groupings: _perspectiveDraft.groupings, sequences: _perspectiveDraft.sequences }
     : undefined;
   // v2.74.349 — Capture the draft identity so a result that lands after the
-  // panel unmounted (or remounted onto a different locale) is discarded rather
+  // panel unmounted (or remounted onto a different perspective) is discarded rather
   // than written to a null / wrong draft.
-  const draftToken = _locDraft.id;
+  const draftToken = _perspectiveDraft.id;
   let res;
   try {
     res = await new Promise(r => chrome.runtime.sendMessage({
-      type: 'PROPOSE_LOCALE_STRUCTURE',
-      payload: { name: _locDraft.name, description: _locDraft.description, landmarks: lms, priorStructure },
+      type: 'PROPOSE_PERSPECTIVE_STRUCTURE',
+      payload: { name: _perspectiveDraft.name, description: _perspectiveDraft.description, landmarks: lms, priorStructure },
     }, r));
   } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
-  if (!_locDraft || _locDraft.id !== draftToken) return;   // unmounted / switched mid-flight
+  if (!_perspectiveDraft || _perspectiveDraft.id !== draftToken) return;   // unmounted / switched mid-flight
   if (!res?.success || !res.structure) {
-    showLocaleWarning(`Structure failed: ${res?.error ?? 'no structure returned'}`);
-    renderLocaleLandmarks();
+    showPerspectiveWarning(`Structure failed: ${res?.error ?? 'no structure returned'}`);
+    renderPerspectiveLandmarks();
     return;
   }
-  // Stamp per-node authoring provenance (LOCALE_SPEC § 5 LandmarkNodeAuthoringMetadata).
+  // Stamp per-node authoring provenance (PERSPECTIVE_SPEC § 5 LandmarkNodeAuthoringMetadata).
   const now = Date.now();
   // v2.74.347 — Carry the prior judgment forward onto any node/overlay the
   // refine left UNCHANGED, so a re-structure that preserved accepted/edited
@@ -1695,11 +1717,11 @@ async function onProposeStructure() {
     const found = priorMap.get(`${o.name}|${(Array.isArray(o[key]) ? o[key] : []).join(',')}`);
     return { ...o, authoringMetadata: carryMeta(found?.judgment ?? null, found?.reviewedAt ?? null) };
   });
-  _locDraft.structuredLandmarks = stamp(res.structure.nodes, null);
-  _locDraft.groupings = stampOverlay(res.structure.groupings, 'members', priorGrp);
-  _locDraft.sequences = stampOverlay(res.structure.sequences, 'steps', priorSeq);
-  renderLocaleLandmarks();
-  updateLocaleSaveButtonState();
+  _perspectiveDraft.structuredLandmarks = stamp(res.structure.nodes, null);
+  _perspectiveDraft.groupings = stampOverlay(res.structure.groupings, 'members', priorGrp);
+  _perspectiveDraft.sequences = stampOverlay(res.structure.sequences, 'steps', priorSeq);
+  renderPerspectiveLandmarks();
+  updatePerspectiveSaveButtonState();
   toast?.(`Structured ${lms.length} landmark(s)`);
 }
 
@@ -1709,26 +1731,26 @@ async function onProposeStructure() {
 // checks (resolution/multiplicity/containment) + poke-and-observe (triggers),
 // then turns the per-ref results into a per-node autoJudgment.
 async function onVerifyStructure() {
-  if (!_locDraft || !Array.isArray(_locDraft.structuredLandmarks) || !_locDraft.structuredLandmarks.length) return;
-  if (_locTabId == null) { showLocaleWarning('No active tab to verify against.'); return; }
+  if (!_perspectiveDraft || !Array.isArray(_perspectiveDraft.structuredLandmarks) || !_perspectiveDraft.structuredLandmarks.length) return;
+  if (_perspectiveTabId == null) { showPerspectiveWarning('No active tab to verify against.'); return; }
   // ref(uid) → selector, top-frame landmarks only (iframe-bound → unverifiable).
   const selectors = {};
-  for (const lm of _locDraft.landmarks ?? []) {
+  for (const lm of _perspectiveDraft.landmarks ?? []) {
     if (lm?.uid && lm.selector && !lm.frameUrl) selectors[lm.uid] = lm.selector;
   }
-  const btn = locLandmarksList?.querySelector('[data-loc-action="verify-structure"]');
+  const btn = perspectiveLandmarksList?.querySelector('[data-perspective-action="verify-structure"]');
   if (btn) { btn.disabled = true; btn.textContent = '✓ Verifying…'; }
-  const draftToken = _locDraft.id;
+  const draftToken = _perspectiveDraft.id;
   let res;
   try {
-    res = await chrome.tabs.sendMessage(_locTabId,
-      { type: 'VERIFY_STRUCTURE', payload: { tree: _locDraft.structuredLandmarks, selectors } },
+    res = await chrome.tabs.sendMessage(_perspectiveTabId,
+      { type: 'VERIFY_STRUCTURE', payload: { tree: _perspectiveDraft.structuredLandmarks, selectors } },
       { frameId: 0 });
   } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
-  if (!_locDraft || _locDraft.id !== draftToken) return;
+  if (!_perspectiveDraft || _perspectiveDraft.id !== draftToken) return;
   if (!res?.success) {
-    showLocaleWarning(`Structure verify failed: ${res?.error ?? 'unknown'}`);
-    renderLocaleLandmarks();
+    showPerspectiveWarning(`Structure verify failed: ${res?.error ?? 'unknown'}`);
+    renderPerspectiveLandmarks();
     return;
   }
   const results = res.results || {};
@@ -1760,15 +1782,15 @@ async function onVerifyStructure() {
       if (Array.isArray(n.contains)) buildClaims(n.contains, n.ref);
     }
   };
-  buildClaims(_locDraft.structuredLandmarks, null);
+  buildClaims(_perspectiveDraft.structuredLandmarks, null);
 
-  if (claims.length && _locTabId != null) {
+  if (claims.length && _perspectiveTabId != null) {
     if (btn) btn.textContent = '✓ Adjudicating…';
     let vres;
     try {
-      vres = await new Promise(r => chrome.runtime.sendMessage({ type: 'ADJUDICATE_STRUCTURE', payload: { tabId: _locTabId, claims } }, r));
+      vres = await new Promise(r => chrome.runtime.sendMessage({ type: 'ADJUDICATE_STRUCTURE', payload: { tabId: _perspectiveTabId, claims } }, r));
     } catch (e) { vres = { success: false, error: e?.message ?? 'unknown' }; }
-    if (!_locDraft || _locDraft.id !== draftToken) return;
+    if (!_perspectiveDraft || _perspectiveDraft.id !== draftToken) return;
     if (vres?.success && Array.isArray(vres.verdicts)) {
       for (const v of vres.verdicts) {
         if (typeof v?.id !== 'string') continue;
@@ -1798,8 +1820,8 @@ async function onVerifyStructure() {
       if (Array.isArray(n.contains)) apply(n.contains);
     }
   };
-  apply(_locDraft.structuredLandmarks);
-  renderLocaleLandmarks();
+  apply(_perspectiveDraft.structuredLandmarks);
+  renderPerspectiveLandmarks();
   toast?.(`Structure verified — ${verified} ok, ${failed} failed, ${unverifiable} unverifiable${viaVisual ? ` (${viaVisual} via screenshot)` : ''}`);
 }
 
@@ -1845,38 +1867,38 @@ function _structVerdict(n, r, revealed) {
   return ok();
 }
 
-// ─── Perspective proposal (LOCALE_SPEC § 13 description-first flow) ────────
+// ─── Perspective proposal (PERSPECTIVE_SPEC § 13 description-first flow) ────────
 
 // A role is "filled" when some draft landmark carries roleFill === role.
 function _perspectiveRoleFilled(role) {
-  return (_locDraft?.landmarks ?? []).some(lm => lm?.roleFill === role);
+  return (_perspectiveDraft?.landmarks ?? []).some(lm => lm?.roleFill === role);
 }
 
 // v2.74.348/350/366 — Render the description-first proposal panel: one
-// "Propose perspectives" button (always enhanced — screenshot + sibling-Locale/
+// "Propose perspectives" button (always enhanced — screenshot + sibling-Perspective/
 // registry context), the proposed options, then the role-fill checklist for the
 // adopted option. Re-rendered on propose, choice, role-fill.
 function _renderPerspectivePanel() {
-  if (!locPerspectiveBody) return;
-  const intent = (_locDraft?.description ?? '').trim();
+  if (!perspectiveBody) return;
+  const intent = (_perspectiveDraft?.description ?? '').trim();
   const exploring = _pageStructureStatus === 'building';
   const canPropose = intent.length > 0 && !_perspectiveInFlight && !exploring;
   const emptyTitle = 'Write an intent description above first — it seeds the proposal.';
   const label = _perspectiveInFlight ? '⏳ Proposing…' : (_perspectiveRun ? '↻ Re-propose perspectives' : '✨ Propose perspectives');
 
   let html = `
-    <p class="dbg-locale-perspective-intro">Write your <b>Intent</b> above, then propose. Claude suggests named <b>roles</b> (using a page screenshot + this Ground's existing locales & landmarks); you pick the real element for each.</p>
+    <p class="dbg-perspective-perspective-intro">Write your <b>Intent</b> above, then propose. Claude suggests named <b>roles</b> (using a page screenshot + this Ground's existing perspectives & landmarks); you pick the real element for each.</p>
     ${_renderExploreRow()}
     ${_renderGroundIntentRow(intent)}
     ${_renderPageModelPanel()}
-    <div class="dbg-locale-perspective-buttons">
-      <button class="btn-secondary tiny" data-loc-action="propose-perspectives" type="button" ${canPropose ? '' : 'disabled'} title="${escAttr(intent.length === 0 ? emptyTitle : "Propose perspective options for this intent, using a page screenshot + this Ground's locales & landmarks.")}">${label}</button>
+    <div class="dbg-perspective-perspective-buttons">
+      <button class="btn-secondary tiny" data-perspective-action="propose-perspectives" type="button" ${canPropose ? '' : 'disabled'} title="${escAttr(intent.length === 0 ? emptyTitle : "Propose perspective options for this intent, using a page screenshot + this Ground's perspectives & landmarks.")}">${label}</button>
     </div>`;
 
   const run = _perspectiveRun;
   if (run) {
-    html += `<div class="dbg-locale-perspective-run">
-      <div class="dbg-locale-perspective-run-head">${escHtml(_perspectiveRunSummary(run))}</div>`;
+    html += `<div class="dbg-perspective-perspective-run">
+      <div class="dbg-perspective-perspective-run-head">${escHtml(_perspectiveRunSummary(run))}</div>`;
     run.options.forEach((opt, i) => {
       const chosen = _chosenPerspective === opt;   // identity
       const rolesPreview = opt.roles.map(r => escHtml(r.role)).join(', ');
@@ -1887,48 +1909,48 @@ function _renderPerspectivePanel() {
       const resolving = _resolveInFlightKey === String(i);
       const busy = _perspectiveInFlight || !!_resolveInFlightKey;
       const headRight = downstream
-        ? `<span class="dbg-locale-perspective-downstream-badge" title="This perspective's elements aren't on the current page. Navigate to it, then author it as its own Locale.">⤳ downstream</span>`
-        : `<span class="dbg-locale-perspective-option-actions">
-            <button class="btn-secondary tiny" data-loc-action="choose-perspective" data-idx="${i}" type="button" ${busy ? 'disabled' : ''}>${chosen ? '✓ Using' : 'Use this'}</button>
-            <button class="btn-secondary tiny" data-loc-action="resolve-roles" data-idx="${i}" type="button" ${busy ? 'disabled' : ''} title="Ask Claude to auto-pick a selector for every role in this perspective, then verify each against the page. Roles Claude can't resolve stay for manual picking.">${resolving ? '⏳ Resolving…' : '⚡ Resolve roles'}</button>
+        ? `<span class="dbg-perspective-perspective-downstream-badge" title="This perspective's elements aren't on the current page. Navigate to it, then author it as its own Perspective.">⤳ downstream</span>`
+        : `<span class="dbg-perspective-perspective-option-actions">
+            <button class="btn-secondary tiny" data-perspective-action="choose-perspective" data-idx="${i}" type="button" ${busy ? 'disabled' : ''}>${chosen ? '✓ Using' : 'Use this'}</button>
+            <button class="btn-secondary tiny" data-perspective-action="resolve-roles" data-idx="${i}" type="button" ${busy ? 'disabled' : ''} title="Ask Claude to auto-pick a selector for every role in this perspective, then verify each against the page. Roles Claude can't resolve stay for manual picking.">${resolving ? '⏳ Resolving…' : '⚡ Resolve roles'}</button>
           </span>`;
       html += `
-        <div class="dbg-locale-perspective-option${chosen ? ' chosen' : ''}${downstream ? ' downstream' : ''}">
-          <div class="dbg-locale-perspective-option-head">
-            <span class="dbg-locale-perspective-option-name">${escHtml(opt.name)}</span>
+        <div class="dbg-perspective-perspective-option${chosen ? ' chosen' : ''}${downstream ? ' downstream' : ''}">
+          <div class="dbg-perspective-perspective-option-head">
+            <span class="dbg-perspective-perspective-option-name">${escHtml(opt.name)}</span>
             ${headRight}
           </div>
-          ${opt.rationale ? `<div class="dbg-locale-perspective-option-rationale">${escHtml(opt.rationale)}</div>` : ''}
-          ${downstream && opt.reachedVia ? `<div class="dbg-locale-perspective-reached">↪ reached ${escHtml(opt.reachedVia)} — navigate there, then author it as its own Locale</div>` : ''}
-          <div class="dbg-locale-perspective-option-roles">${opt.roles.length} role(s): ${rolesPreview}</div>
+          ${opt.rationale ? `<div class="dbg-perspective-perspective-option-rationale">${escHtml(opt.rationale)}</div>` : ''}
+          ${downstream && opt.reachedVia ? `<div class="dbg-perspective-perspective-reached">↪ reached ${escHtml(opt.reachedVia)} — navigate there, then author it as its own Perspective</div>` : ''}
+          <div class="dbg-perspective-perspective-option-roles">${opt.roles.length} role(s): ${rolesPreview}</div>
         </div>`;
     });
     html += `</div>`;
   }
 
   if (_chosenPerspective && Array.isArray(_chosenPerspective.roles)) {
-    html += `<div class="dbg-locale-perspective-roles"><div class="dbg-locale-perspective-roles-title">Fill each role by picking its element:</div>`;
+    html += `<div class="dbg-perspective-perspective-roles"><div class="dbg-perspective-perspective-roles-title">Fill each role by picking its element:</div>`;
     for (const r of _chosenPerspective.roles) {
       const filled = _perspectiveRoleFilled(r.role);
       const multBadge = (r.multiplicity && r.multiplicity !== 'one')
-        ? `<span class="dbg-locale-perspective-mult">${escHtml(r.multiplicity)}</span>` : '';
+        ? `<span class="dbg-perspective-perspective-mult">${escHtml(r.multiplicity)}</span>` : '';
       // v2.74.381 — hidden roles live in a layer revealed by a trigger; Resolve
       // opens that trigger to find them.
       const hiddenBadge = (r.hidden || r.revealedBy)
-        ? `<span class="dbg-locale-perspective-hidden" title="In a hidden layer — Resolve opens the trigger to find it.">⤿ ${r.revealedBy ? `via ${escHtml(r.revealedBy)}` : 'hidden'}</span>` : '';
+        ? `<span class="dbg-perspective-perspective-hidden" title="In a hidden layer — Resolve opens the trigger to find it.">⤿ ${r.revealedBy ? `via ${escHtml(r.revealedBy)}` : 'hidden'}</span>` : '';
       html += `
-        <div class="dbg-locale-perspective-role${filled ? ' filled' : ''}">
-          <span class="dbg-locale-perspective-role-status">${filled ? '✓' : '○'}</span>
-          <span class="dbg-locale-perspective-role-name">${escHtml(r.role)}</span>
+        <div class="dbg-perspective-perspective-role${filled ? ' filled' : ''}">
+          <span class="dbg-perspective-perspective-role-status">${filled ? '✓' : '○'}</span>
+          <span class="dbg-perspective-perspective-role-name">${escHtml(r.role)}</span>
           ${multBadge}${hiddenBadge}
-          ${r.description ? `<span class="dbg-locale-perspective-role-desc">${escHtml(r.description)}</span>` : ''}
-          <button class="btn-secondary tiny" data-loc-action="pick-role" data-role="${escAttr(r.role)}" type="button" ${(_locPickerSession || _resolveInFlightKey) ? 'disabled' : ''}>${filled ? 'Re-pick' : 'Pick'}</button>
+          ${r.description ? `<span class="dbg-perspective-perspective-role-desc">${escHtml(r.description)}</span>` : ''}
+          <button class="btn-secondary tiny" data-perspective-action="pick-role" data-role="${escAttr(r.role)}" type="button" ${(_perspectivePickerSession || _resolveInFlightKey) ? 'disabled' : ''}>${filled ? 'Re-pick' : 'Pick'}</button>
         </div>`;
       // v2.74.355 — Why ⚡ Resolve couldn't fill this role (last run). Cleared
       // when filled manually.
       const note = !filled ? _roleResolveNotes[r.role] : null;
       if (note) {
-        html += `<div class="dbg-locale-perspective-role-note ${note.status === 'abstained' ? 'abstained' : 'failed'}">${note.status === 'abstained' ? '∅' : '⚠'} ${escHtml(note.reason)}</div>`;
+        html += `<div class="dbg-perspective-perspective-role-note ${note.status === 'abstained' ? 'abstained' : 'failed'}">${note.status === 'abstained' ? '∅' : '⚠'} ${escHtml(note.reason)}</div>`;
       }
     }
     // v2.74.356 — Opt-in repair round: retry the failed/abstained roles with
@@ -1938,42 +1960,42 @@ function _renderPerspectivePanel() {
     if (retryable > 0 && _chosenPerspectiveIdx != null) {
       const busy = _perspectiveInFlight || !!_resolveInFlightKey;
       const retrying = _resolveInFlightKey === `retry:${_chosenPerspectiveIdx}`;
-      html += `<div class="dbg-locale-perspective-retry">
-        <button class="btn-secondary tiny" data-loc-action="retry-roles" type="button" ${busy ? 'disabled' : ''} title="Send the ${retryable} unresolved role(s) back to Claude with their verification-failure reasons + the selectors that worked, for a corrected attempt. Costs one more LLM round-trip.">${retrying ? '⏳ Retrying…' : `↻ Retry ${retryable} with feedback`}</button>
+      html += `<div class="dbg-perspective-perspective-retry">
+        <button class="btn-secondary tiny" data-perspective-action="retry-roles" type="button" ${busy ? 'disabled' : ''} title="Send the ${retryable} unresolved role(s) back to Claude with their verification-failure reasons + the selectors that worked, for a corrected attempt. Costs one more LLM round-trip.">${retrying ? '⏳ Retrying…' : `↻ Retry ${retryable} with feedback`}</button>
       </div>`;
     }
     html += `</div>`;
   }
 
-  locPerspectiveBody.innerHTML = html;
-  locPerspectiveBody.querySelector('[data-loc-action="propose-perspectives"]')
+  perspectiveBody.innerHTML = html;
+  perspectiveBody.querySelector('[data-perspective-action="propose-perspectives"]')
     ?.addEventListener('click', () => onProposePerspectives());
-  locPerspectiveBody.querySelectorAll('[data-loc-action="choose-perspective"]').forEach(btn =>
+  perspectiveBody.querySelectorAll('[data-perspective-action="choose-perspective"]').forEach(btn =>
     btn.addEventListener('click', () => onChoosePerspective(parseInt(btn.dataset.idx, 10))));
-  locPerspectiveBody.querySelectorAll('[data-loc-action="resolve-roles"]').forEach(btn =>
+  perspectiveBody.querySelectorAll('[data-perspective-action="resolve-roles"]').forEach(btn =>
     btn.addEventListener('click', () => onResolveRoles(parseInt(btn.dataset.idx, 10))));
-  locPerspectiveBody.querySelector('[data-loc-action="retry-roles"]')
+  perspectiveBody.querySelector('[data-perspective-action="retry-roles"]')
     ?.addEventListener('click', () => onRetryFailedRoles(_chosenPerspectiveIdx));
-  locPerspectiveBody.querySelectorAll('[data-loc-action="pick-role"]').forEach(btn =>
+  perspectiveBody.querySelectorAll('[data-perspective-action="pick-role"]').forEach(btn =>
     btn.addEventListener('click', () => onPickForRole(btn.dataset.role)));
   // v2.74.368 — pageStructure exploration controls.
-  locPerspectiveBody.querySelector('[data-loc-action="explore"]')
+  perspectiveBody.querySelector('[data-perspective-action="explore"]')
     ?.addEventListener('click', () => onExplorePageStructure(false));
-  locPerspectiveBody.querySelector('[data-loc-action="reexplore"]')
+  perspectiveBody.querySelector('[data-perspective-action="reexplore"]')
     ?.addEventListener('click', () => onExplorePageStructure(true));
-  locPerspectiveBody.querySelector('[data-loc-action="skip-explore"]')
+  perspectiveBody.querySelector('[data-perspective-action="skip-explore"]')
     ?.addEventListener('click', () => onSkipExplore());
-  locPerspectiveBody.querySelector('[data-loc-action="cancel-explore"]')
+  perspectiveBody.querySelector('[data-perspective-action="cancel-explore"]')
     ?.addEventListener('click', () => onCancelExplore());
   // v2.74.397 — PageModel catalog inspector (build slice 1).
-  locPerspectiveBody.querySelector('[data-loc-action="build-pagemodel"]')
+  perspectiveBody.querySelector('[data-perspective-action="build-pagemodel"]')
     ?.addEventListener('click', () => onBuildPageModel());
   // v2.74.393 — grounded-intent controls.
-  locPerspectiveBody.querySelector('[data-loc-action="ground-intent"]')
+  perspectiveBody.querySelector('[data-perspective-action="ground-intent"]')
     ?.addEventListener('click', () => onGroundIntent());
-  locPerspectiveBody.querySelector('[data-loc-action="use-grounded-intent"]')
+  perspectiveBody.querySelector('[data-perspective-action="use-grounded-intent"]')
     ?.addEventListener('click', () => onUseGroundedIntent());
-  locPerspectiveBody.querySelector('[data-loc-action="dismiss-grounded-intent"]')
+  perspectiveBody.querySelector('[data-perspective-action="dismiss-grounded-intent"]')
     ?.addEventListener('click', () => { _groundIntentResult = null; _renderPerspectivePanel(); });
 }
 
@@ -1982,26 +2004,27 @@ function _renderPerspectivePanel() {
 // as an editable proposal (Use it / Dismiss) before it seeds propose.
 function _renderGroundIntentRow(intent) {
   if (_groundInFlight) {
-    return `<div class="dbg-locale-ground building"><span>⏳ Grounding intent in this page…</span></div>`;
+    return `<div class="dbg-perspective-ground building"><span>⏳ Grounding intent in this page…</span></div>`;
   }
   const r = _groundIntentResult;
   if (r && r.forIntent === intent) {
     const ach = r.achievable || 'unknown';
     const achLabel = ach === 'yes' ? '✓ fully supported' : ach === 'partial' ? '◐ partially supported' : ach === 'no' ? '✗ not supported here' : '? not explored';
-    return `<div class="dbg-locale-ground result ${escAttr(ach)}">
-        <div class="dbg-locale-ground-head"><span class="dbg-locale-ground-title">Grounded intent</span><span class="dbg-locale-ground-ach ${escAttr(ach)}">${achLabel}</span></div>
-        <div class="dbg-locale-ground-text">${escHtml(r.groundedIntent)}</div>
-        ${r.note ? `<div class="dbg-locale-ground-note">${escHtml(r.note)}</div>` : ''}
-        <div class="dbg-locale-ground-actions">
-          <button class="btn-secondary tiny" data-loc-action="use-grounded-intent" type="button" title="Replace your Intent with this grounded version; it then seeds Propose.">Use it</button>
-          <button class="btn-secondary tiny" data-loc-action="dismiss-grounded-intent" type="button">Dismiss</button>
+    return `<div class="dbg-perspective-ground result ${escAttr(ach)}">
+        <div class="dbg-perspective-ground-head"><span class="dbg-perspective-ground-title">Grounded intent</span><span class="dbg-perspective-ground-ach ${escAttr(ach)}">${achLabel}</span></div>
+        <div class="dbg-perspective-ground-text">${escHtml(r.groundedIntent)}</div>
+        ${r.matchedGoal ? `<div class="dbg-perspective-ground-note">↳ matches page goal: <b>${escHtml(r.matchedGoal)}</b></div>` : ''}
+        ${r.note ? `<div class="dbg-perspective-ground-note">${escHtml(r.note)}</div>` : ''}
+        <div class="dbg-perspective-ground-actions">
+          <button class="btn-secondary tiny" data-perspective-action="use-grounded-intent" type="button" title="Replace your Intent with this grounded version; it then seeds Propose.">Use it</button>
+          <button class="btn-secondary tiny" data-perspective-action="dismiss-grounded-intent" type="button">Dismiss</button>
         </div>
       </div>`;
   }
   // Offer button (disabled until an intent is typed).
   const disabled = intent.length === 0;
-  return `<div class="dbg-locale-ground offer">
-      <button class="btn-secondary tiny" data-loc-action="ground-intent" type="button" ${disabled ? 'disabled' : ''} title="${escAttr(disabled ? 'Write an Intent first.' : 'Refine your Intent against what this page can actually do (uses the explored page affordances).')}">✨ Ground intent in this page</button>
+  return `<div class="dbg-perspective-ground offer">
+      <button class="btn-secondary tiny" data-perspective-action="ground-intent" type="button" ${disabled ? 'disabled' : ''} title="${escAttr(disabled ? 'Write an Intent first.' : 'Refine your Intent against what this page can actually do (uses the explored page affordances).')}">✨ Ground intent in this page</button>
     </div>`;
 }
 
@@ -2013,8 +2036,8 @@ function _renderExploreRow() {
   const reveals = info && Number.isFinite(info.revealing) ? info.revealing : null;
   switch (_pageStructureStatus) {
     case 'building':
-      return `<div class="dbg-locale-explore building"><span>⏳ Exploring page depth… (poking disclosure controls)</span>
-        <button class="btn-secondary tiny" data-loc-action="cancel-explore" type="button">Cancel</button></div>`;
+      return `<div class="dbg-perspective-explore building"><span>⏳ Exploring page depth… (poking disclosure controls)</span>
+        <button class="btn-secondary tiny" data-perspective-action="cancel-explore" type="button">Cancel</button></div>`;
     case 'fresh':
     case 'built': {
       const detail = reveals != null ? `${reveals} control(s) revealed hidden content` : 'no hidden content found';
@@ -2023,23 +2046,23 @@ function _renderExploreRow() {
       const diag = info
         ? ` (${info.candidates ?? '?'} candidate(s), ${info.poked ?? '?'} poked${info.scrollSteps ? `, scrolled ${info.scrollSteps}×` : ''})`
         : '';
-      return `<div class="dbg-locale-explore done" title="Proposals on this page now include post-interaction landmarks the static snapshot can't show.">
+      return `<div class="dbg-perspective-explore done" title="Proposals on this page now include post-interaction landmarks the static snapshot can't show.">
         <span>✓ Page depth explored — ${escHtml(detail)}${escHtml(diag)}.</span>
-        <button class="btn-secondary tiny" data-loc-action="reexplore" type="button" title="Re-run the sweep (the page may have changed).">↻ Re-explore</button></div>`;
+        <button class="btn-secondary tiny" data-perspective-action="reexplore" type="button" title="Re-run the sweep (the page may have changed).">↻ Re-explore</button></div>`;
     }
     case 'skipped':
-      return `<div class="dbg-locale-explore skipped"><span>Depth exploration skipped — proposals use the static snapshot only.</span>
-        <button class="btn-secondary tiny" data-loc-action="explore" type="button">🔍 Explore now</button></div>`;
+      return `<div class="dbg-perspective-explore skipped"><span>Depth exploration skipped — proposals use the static snapshot only.</span>
+        <button class="btn-secondary tiny" data-perspective-action="explore" type="button">🔍 Explore now</button></div>`;
     case 'failed':
-      return `<div class="dbg-locale-explore failed"><span>⚠ Depth exploration failed.</span>
-        <button class="btn-secondary tiny" data-loc-action="explore" type="button">↻ Retry</button></div>`;
+      return `<div class="dbg-perspective-explore failed"><span>⚠ Depth exploration failed.</span>
+        <button class="btn-secondary tiny" data-perspective-action="explore" type="button">↻ Retry</button></div>`;
     case 'none':
     default:
-      return `<div class="dbg-locale-explore offer">
+      return `<div class="dbg-perspective-explore offer">
         <span>🔍 <b>Explore page depth?</b> Safely pokes dropdowns / menus / modals so proposals can include landmarks revealed only after an interaction.</span>
-        <span class="dbg-locale-explore-actions">
-          <button class="btn-secondary tiny" data-loc-action="explore" type="button">Explore</button>
-          <button class="btn-secondary tiny" data-loc-action="skip-explore" type="button">Skip</button>
+        <span class="dbg-perspective-explore-actions">
+          <button class="btn-secondary tiny" data-perspective-action="explore" type="button">Explore</button>
+          <button class="btn-secondary tiny" data-perspective-action="skip-explore" type="button">Skip</button>
         </span></div>`;
   }
 }
@@ -2049,36 +2072,36 @@ function _perspectiveRunSummary(run) {
   const secs = run?.elapsedMs != null ? `${(run.elapsedMs / 1000).toFixed(1)}s` : '?';
   const m = run?.meta ?? {};
   const parts = [m.screenshot ? 'screenshot' : 'no-screenshot'];
-  if (m.siblingLocales)    parts.push(`${m.siblingLocales} locale(s)`);
+  if (m.siblingPerspectives)    parts.push(`${m.siblingPerspectives} perspective(s)`);
   if (m.registryLandmarks) parts.push(`${m.registryLandmarks} landmark(s)`);
   if (m.pageStructure)     parts.push(`depth(${m.revealingControls || 0} reveal)`);
   return `${parts.join(' + ')} · ${secs}`;
 }
 
 async function onProposePerspectives() {
-  if (!_locDraft) return;
-  const intent = (_locDraft.description ?? '').trim();
-  if (!intent) { showLocaleWarning('Write an intent description first — it seeds the proposal.'); return; }
-  if (_locTabId == null) { showLocaleWarning('No active tab to analyze.'); return; }
+  if (!_perspectiveDraft) return;
+  const intent = (_perspectiveDraft.description ?? '').trim();
+  if (!intent) { showPerspectiveWarning('Write an intent description first — it seeds the proposal.'); return; }
+  if (_perspectiveTabId == null) { showPerspectiveWarning('No active tab to analyze.'); return; }
   if (_perspectiveInFlight || _resolveInFlightKey) return;
   // v2.74.349 — Capture the draft identity; discard a result that lands after
-  // the panel unmounted or remounted onto a different locale (else we'd write
+  // the panel unmounted or remounted onto a different perspective (else we'd write
   // to a null / wrong draft and crash).
-  const draftToken = _locDraft.id;
+  const draftToken = _perspectiveDraft.id;
   _perspectiveInFlight = true;
   _renderPerspectivePanel();
   const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
   let res;
   try {
     res = await new Promise(r => chrome.runtime.sendMessage({
-      type: 'PROPOSE_LOCALE_PERSPECTIVES',
-      payload: { tabId: _locTabId, groundId: _locGroundId, intent },
+      type: 'PROPOSE_PERSPECTIVES',
+      payload: { tabId: _perspectiveTabId, groundId: _perspectiveGroundId, intent },
     }, r));
   } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
-  if (!_locDraft || _locDraft.id !== draftToken) return;   // unmounted / switched mid-flight
+  if (!_perspectiveDraft || _perspectiveDraft.id !== draftToken) return;   // unmounted / switched mid-flight
   _perspectiveInFlight = false;
   if (!res?.success || !Array.isArray(res.options) || !res.options.length) {
-    showLocaleWarning(`Perspective proposal failed: ${res?.error ?? 'no options returned'}`);
+    showPerspectiveWarning(`Perspective proposal failed: ${res?.error ?? 'no options returned'}`);
     _renderPerspectivePanel();
     return;
   }
@@ -2086,10 +2109,10 @@ async function onProposePerspectives() {
   // Fresh options supersede any prior choice.
   if (_perspectiveRun?.options?.includes(_chosenPerspective)) { _chosenPerspective = null; _chosenPerspectiveIdx = null; }
   _perspectiveRun = { options: res.options, elapsedMs, meta: res.meta ?? null };
-  // Record that the description acted as a proposal seed (LOCALE_SPEC § 6).
-  _locDraft.authoringMetadata = _locDraft.authoringMetadata ?? {};
-  _locDraft.authoringMetadata.description = {
-    ...(_locDraft.authoringMetadata.description ?? {}),
+  // Record that the description acted as a proposal seed (PERSPECTIVE_SPEC § 6).
+  _perspectiveDraft.authoringMetadata = _perspectiveDraft.authoringMetadata ?? {};
+  _perspectiveDraft.authoringMetadata.description = {
+    ...(_perspectiveDraft.authoringMetadata.description ?? {}),
     source: 'proposal',
     proposalContext: { seedText: intent, proposedAt: Date.now() },
   };
@@ -2115,17 +2138,17 @@ function _summarizePageStructure(structure) {
 // On mount: ask the background whether a FRESH artifact already exists for this
 // page. Fresh → reuse silently ('fresh'); otherwise leave the offer ('none').
 async function _refreshPageStructureStatus() {
-  if (!_locDraft) return;
-  const draftToken = _locDraft.id;
-  const url = locTabUrlEl?.textContent ?? '';
+  if (!_perspectiveDraft) return;
+  const draftToken = _perspectiveDraft.id;
+  const url = perspectiveTabUrlEl?.textContent ?? '';
   if (!/^https?:/i.test(url)) return;   // not an explorable page
   let res;
   try {
     res = await new Promise(r => chrome.runtime.sendMessage({
-      type: 'GET_PAGE_STRUCTURE', payload: { groundId: _locGroundId, url },
+      type: 'GET_PAGE_STRUCTURE', payload: { groundId: _perspectiveGroundId, url },
     }, r));
   } catch { return; }
-  if (!_locDraft || _locDraft.id !== draftToken) return;   // unmounted / switched
+  if (!_perspectiveDraft || _perspectiveDraft.id !== draftToken) return;   // unmounted / switched
   if (_pageStructureStatus === 'building') return;          // a sweep started meanwhile — don't clobber
   if (res?.success && res.structure && res.fresh) {
     _pageStructureStatus = 'fresh';
@@ -2138,10 +2161,10 @@ async function _refreshPageStructureStatus() {
 // Run the depth sweep (LLM-planned in the background). `force` re-runs even if
 // a fresh artifact exists. Soft-cancellable via _exploreToken.
 async function onExplorePageStructure(force = false) {
-  if (!_locDraft) return;
-  if (_locTabId == null) { showLocaleWarning('No active tab to explore.'); return; }
+  if (!_perspectiveDraft) return;
+  if (_perspectiveTabId == null) { showPerspectiveWarning('No active tab to explore.'); return; }
   if (_pageStructureStatus === 'building') return;
-  const draftToken = _locDraft.id;
+  const draftToken = _perspectiveDraft.id;
   const myToken = ++_exploreToken;
   _pageStructureStatus = 'building';
   _renderPerspectivePanel();
@@ -2151,15 +2174,15 @@ async function onExplorePageStructure(force = false) {
       type: 'EXPLORE_PAGE_STRUCTURE',
       // v2.74.378 — banded walk: background orchestrates metrics → per-band
       // (enumerate → screenshot → LLM plan → poke) bottom-to-top → cleanup.
-      payload: { tabId: _locTabId, groundId: _locGroundId },
+      payload: { tabId: _perspectiveTabId, groundId: _perspectiveGroundId },
     }, r));
   } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
   // Drop the result if cancelled, unmounted, or superseded by a newer run.
-  if (myToken !== _exploreToken || !_locDraft || _locDraft.id !== draftToken) return;
+  if (myToken !== _exploreToken || !_perspectiveDraft || _perspectiveDraft.id !== draftToken) return;
   if (!res?.success || !res.structure) {
     _pageStructureStatus = 'failed';
     _renderPerspectivePanel();
-    showLocaleWarning(`Page depth exploration failed: ${res?.error ?? 'no structure returned'}`);
+    showPerspectiveWarning(`Page depth exploration failed: ${res?.error ?? 'no structure returned'}`);
     return;
   }
   _pageStructureStatus = 'built';
@@ -2186,69 +2209,69 @@ function onCancelExplore() {
 
 // v2.74.393 — Ground the user's raw Intent against the page's affordances.
 async function onGroundIntent() {
-  if (!_locDraft) return;
-  const intent = (_locDraft.description ?? '').trim();
-  if (!intent) { showLocaleWarning('Write an Intent first.'); return; }
+  if (!_perspectiveDraft) return;
+  const intent = (_perspectiveDraft.description ?? '').trim();
+  if (!intent) { showPerspectiveWarning('Write an Intent first.'); return; }
   if (_groundInFlight) return;
-  const draftToken = _locDraft.id;
+  const draftToken = _perspectiveDraft.id;
   _groundInFlight = true; _renderPerspectivePanel();
   let res;
   try {
     res = await new Promise(r => chrome.runtime.sendMessage({
-      type: 'GROUND_INTENT', payload: { tabId: _locTabId, groundId: _locGroundId, intent },
+      type: 'GROUND_INTENT', payload: { tabId: _perspectiveTabId, groundId: _perspectiveGroundId, intent },
     }, r));
   } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
-  if (!_locDraft || _locDraft.id !== draftToken) return;
+  if (!_perspectiveDraft || _perspectiveDraft.id !== draftToken) return;
   _groundInFlight = false;
   if (!res?.success || !res.groundedIntent) {
-    showLocaleWarning(`Ground intent failed: ${res?.error ?? 'no result'}`);
+    showPerspectiveWarning(`Ground intent failed: ${res?.error ?? 'no result'}`);
     _renderPerspectivePanel();
     return;
   }
-  _groundIntentResult = { groundedIntent: res.groundedIntent, achievable: res.achievable || 'unknown', note: res.note || '', forIntent: intent };
+  _groundIntentResult = { groundedIntent: res.groundedIntent, achievable: res.achievable || 'unknown', note: res.note || '', matchedGoal: res.matchedGoal || null, forIntent: intent };
   _renderPerspectivePanel();
   if (res.hadAffordance === false) toast?.('Run Explore to ground the intent in this page');
 }
 
 // Accept the grounded intent → it becomes the Intent field + seeds propose.
 function onUseGroundedIntent() {
-  if (!_locDraft || !_groundIntentResult?.groundedIntent) return;
-  const original = (_locDraft.description ?? '').trim();
-  _locDraft.description = _groundIntentResult.groundedIntent;
-  if (locDescriptionInput) locDescriptionInput.value = _locDraft.description;
-  // Record provenance (LOCALE_SPEC § 6): grounded from the user's original.
-  _locDraft.authoringMetadata = _locDraft.authoringMetadata ?? {};
-  _locDraft.authoringMetadata.description = {
-    ...(_locDraft.authoringMetadata.description ?? {}),
+  if (!_perspectiveDraft || !_groundIntentResult?.groundedIntent) return;
+  const original = (_perspectiveDraft.description ?? '').trim();
+  _perspectiveDraft.description = _groundIntentResult.groundedIntent;
+  if (perspectiveDescriptionInput) perspectiveDescriptionInput.value = _perspectiveDraft.description;
+  // Record provenance (PERSPECTIVE_SPEC § 6): grounded from the user's original.
+  _perspectiveDraft.authoringMetadata = _perspectiveDraft.authoringMetadata ?? {};
+  _perspectiveDraft.authoringMetadata.description = {
+    ...(_perspectiveDraft.authoringMetadata.description ?? {}),
     source: 'grounded', authoredBy: 'llm', lastAuthoredAt: Date.now(),
     originalIntent: original, achievable: _groundIntentResult.achievable,
   };
   _groundIntentResult = null;
   _renderPerspectivePanel();
-  updateLocaleSaveButtonState();
+  updatePerspectiveSaveButtonState();
   toast?.('Intent grounded — now Propose perspectives');
 }
 
-// v2.74.397 — Build slice 1 inspector: capture a read-only L0 PageModel (Locale
+// v2.74.397 — Build slice 1 inspector: capture a read-only L0 PageModel (Perspective
 // capability catalog) of the active tab and show the Feature list. No authoring
 // wired to it yet — this exercises BUILD_PAGEMODEL + the catalog so captures are
 // visible while the architecture is built out.
 async function onBuildPageModel() {
-  if (!_locDraft) return;
-  if (_locTabId == null) { showLocaleWarning('No active tab to enumerate.'); return; }
+  if (!_perspectiveDraft) return;
+  if (_perspectiveTabId == null) { showPerspectiveWarning('No active tab to enumerate.'); return; }
   if (_pageModelInFlight) return;
-  const draftToken = _locDraft.id;
+  const draftToken = _perspectiveDraft.id;
   _pageModelInFlight = true; _renderPerspectivePanel();
   let res;
   try {
     res = await new Promise(r => chrome.runtime.sendMessage({
-      type: 'BUILD_PAGEMODEL', payload: { tabId: _locTabId, groundId: _locGroundId },
+      type: 'BUILD_PAGEMODEL', payload: { tabId: _perspectiveTabId, groundId: _perspectiveGroundId },
     }, r));
   } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
-  if (!_locDraft || _locDraft.id !== draftToken) return;
+  if (!_perspectiveDraft || _perspectiveDraft.id !== draftToken) return;
   _pageModelInFlight = false;
   if (!res?.success || !res.model) {
-    showLocaleWarning(`Build page catalog failed: ${res?.error ?? 'no model'}`);
+    showPerspectiveWarning(`Build page catalog failed: ${res?.error ?? 'no model'}`);
     _renderPerspectivePanel();
     return;
   }
@@ -2262,12 +2285,12 @@ async function onBuildPageModel() {
 // grouped by kind, each with selectorKind + band, capped per kind). Read-only.
 function _renderPageModelPanel() {
   if (_pageModelInFlight) {
-    return `<div class="dbg-locale-pagemodel building"><span>⏳ Enumerating page (L0)…</span></div>`;
+    return `<div class="dbg-perspective-pagemodel building"><span>⏳ Enumerating page (L0)…</span></div>`;
   }
   const m = _pageModelResult;
   if (!m) {
-    return `<div class="dbg-locale-pagemodel offer">
-        <button class="btn-secondary tiny" data-loc-action="build-pagemodel" type="button" title="Capture a read-only L0 capability catalog of this page — every Feature (input/action/disclosure/navigation/collection/region) with its selector + scroll position. Build slice 1; not yet wired to authoring.">🗂 Build page catalog (L0)</button>
+    return `<div class="dbg-perspective-pagemodel offer">
+        <button class="btn-secondary tiny" data-perspective-action="build-pagemodel" type="button" title="Capture a read-only L0 capability catalog of this page — every Feature (input/action/disclosure/navigation/collection/region) with its selector + scroll position. Build slice 1; not yet wired to authoring.">🗂 Build page catalog (L0)</button>
       </div>`;
   }
   const feats = Object.values(m.features || {});
@@ -2279,70 +2302,120 @@ function _renderPageModelPanel() {
   const rows = present.map((k) => {
     const list = byKind[k];
     const shown = list.slice(0, 8);
-    const items = shown.map((f) => `
-        <div class="dbg-locale-pm-feat">
-          <span class="dbg-locale-pm-kind ${escAttr(k)}">${escHtml(k)}</span>
-          <span class="dbg-locale-pm-label" title="${escAttr(f.selector || '')}">${escHtml(f.label || '(no label)')}</span>
-          <span class="dbg-locale-pm-meta">${escHtml(f.selectorKind || '?')}${f.location ? ` · b${f.location.band}` : ''}${f.selectorVerified ? ' · ✓' : ''}</span>
-        </div>`).join('');
-    const more = list.length > shown.length ? `<div class="dbg-locale-pm-more">+${list.length - shown.length} more ${escHtml(k)}</div>` : '';
+    const items = shown.map((f) => {
+      const corr = f.provenance?.correctedByHuman;
+      const stale = f.lifecycle === 'stale-suspected';
+      const titleBits = [f.selector || ''];
+      if (corr) titleBits.push(`✎ corrected${corr.role ? ` (${corr.role})` : ''}: ${corr.from || '?'} → ${corr.to || '?'}`);
+      if (stale) titleBits.push('⚠ stale-suspected (recent resolve-misses lowered confidence)');
+      return `
+        <div class="dbg-perspective-pm-feat">
+          <span class="dbg-perspective-pm-kind ${escAttr(k)}">${escHtml(k)}</span>
+          <span class="dbg-perspective-pm-label" title="${escAttr(titleBits.filter(Boolean).join('\n'))}">${escHtml(f.label || '(no label)')}</span>
+          <span class="dbg-perspective-pm-meta">${escHtml(f.selectorKind || '?')}${f.location ? ` · b${f.location.band}` : ''}${f.selectorVerified ? ' · ✓' : ''}${f.hidden ? ' · 🔒' : ''}${corr ? ' · ✎' : ''}${stale ? ' · ⚠' : ''}</span>
+        </div>`;
+    }).join('');
+    const more = list.length > shown.length ? `<div class="dbg-perspective-pm-more">+${list.length - shown.length} more ${escHtml(k)}</div>` : '';
     return items + more;
   }).join('');
-  return `<div class="dbg-locale-pagemodel result">
-      <div class="dbg-locale-pm-head">
-        <span class="dbg-locale-pm-title">Page catalog — ${feats.length} feature(s)${m.coverage?.bands ? `, ${m.coverage.bands} band(s)` : ''}</span>
-        <button class="btn-secondary tiny" data-loc-action="build-pagemodel" type="button" title="Re-enumerate this page.">↻</button>
+
+  // Fidelity badge (L0 enumerate / L1 depth / L2 goals).
+  const fid = m.coverage?.fidelity || 'L0';
+  const fidTitle = { L0: 'L0 — read-only enumeration', L1: 'L1 — depth (revealed layers)', L2: 'L2 — synthesized goals' }[fid] || fid;
+
+  // L2 — Goals section. Each goal lists its achievableVia feature labels.
+  const goals = Object.values(m.goals || {});
+  let goalsHtml = '';
+  if (goals.length) {
+    const gitems = goals.slice(0, 8).map((g) => {
+      const viaLabels = (g.achievableVia || []).map((fid2) => m.features?.[fid2]?.label).filter(Boolean);
+      const viaTitle = viaLabels.length ? viaLabels.join(' · ') : '(no features)';
+      return `
+        <div class="dbg-perspective-pm-goal" title="${escAttr((g.description || '') + (g.description ? ' — ' : '') + viaTitle)}">
+          <span class="dbg-perspective-pm-goal-label">🎯 ${escHtml(g.label || '(goal)')}</span>
+          <span class="dbg-perspective-pm-meta">${(g.achievableVia || []).length} feat${typeof g.confidence === 'number' ? ` · ${Math.round(g.confidence * 100)}%` : ''}</span>
+        </div>`;
+    }).join('');
+    const gmore = goals.length > 8 ? `<div class="dbg-perspective-pm-more">+${goals.length - 8} more goal(s)</div>` : '';
+    goalsHtml = `<div class="dbg-perspective-pm-section">Goals (${goals.length})</div><div class="dbg-perspective-pm-list">${gitems}${gmore}</div>`;
+  }
+
+  // L1 — Depth/Layers section. Non-surface layers (modals/dropdowns) revealed by a trigger.
+  const layers = Object.values(m.layers || {}).filter((l) => l && l.kind !== 'surface');
+  let layersHtml = '';
+  if (layers.length) {
+    const litems = layers.map((l) => {
+      const trig = l.openedBy ? m.features?.[l.openedBy] : null;
+      const trigLabel = trig?.label || '(trigger)';
+      const n = (l.features || []).length;
+      const childLabels = (l.features || []).map((fid2) => m.features?.[fid2]?.label).filter(Boolean).slice(0, 6).join(' · ');
+      return `
+        <div class="dbg-perspective-pm-layer" title="${escAttr(childLabels)}">
+          <span class="dbg-perspective-pm-kind ${l.overlay ? 'disclosure' : 'navigation'}">${escHtml(l.kind)}</span>
+          <span class="dbg-perspective-pm-label">${escHtml(trigLabel)}</span>
+          <span class="dbg-perspective-pm-meta">→ ${n} hidden</span>
+        </div>`;
+    }).join('');
+    layersHtml = `<div class="dbg-perspective-pm-section">Depth — revealed layers (${layers.length})</div><div class="dbg-perspective-pm-list">${litems}</div>`;
+  }
+
+  return `<div class="dbg-perspective-pagemodel result">
+      <div class="dbg-perspective-pm-head">
+        <span class="dbg-perspective-pm-title"><span class="dbg-perspective-pm-fidelity ${escAttr(fid)}" title="${escAttr(fidTitle)}">${escHtml(fid)}</span> Page catalog — ${feats.length} feature(s)${m.coverage?.bands ? `, ${m.coverage.bands} band(s)` : ''}</span>
+        <button class="btn-secondary tiny" data-perspective-action="build-pagemodel" type="button" title="Re-enumerate this page.">↻</button>
       </div>
-      <div class="dbg-locale-pm-counts">${escHtml(counts)}</div>
-      <div class="dbg-locale-pm-list">${rows}</div>
+      <div class="dbg-perspective-pm-counts">${escHtml(counts)}</div>
+      <div class="dbg-perspective-pm-list">${rows}</div>
+      ${layersHtml}
+      ${goalsHtml}
     </div>`;
 }
 
 function onChoosePerspective(idx) {
-  if (!_locDraft) return;
+  if (!_perspectiveDraft) return;
   const opt = _perspectiveRun?.options?.[idx];
   if (!opt) return;
   _chosenPerspective = opt;
   _chosenPerspectiveIdx = idx;
-  // Name → locale name, but never clobber a name the user already typed.
-  if (!(_locDraft.name ?? '').trim()) {
-    _locDraft.name = _normalizeLocaleName(opt.name);
-    if (locNameInput) locNameInput.value = _locDraft.name;
+  // Name → perspective name, but never clobber a name the user already typed.
+  if (!(_perspectiveDraft.name ?? '').trim()) {
+    _perspectiveDraft.name = _normalizePerspectiveName(opt.name);
+    if (perspectiveNameInput) perspectiveNameInput.value = _perspectiveDraft.name;
   }
   // Seed URL predicates from the option. The option's urlMatches REPLACE any
   // existing urlMatches (typically just the over-specific full-URL predicate
   // auto-seeded on mount) — appending instead would AND the broad option
-  // pattern with the exact-URL seed and the Locale would never match sibling
+  // pattern with the exact-URL seed and the Perspective would never match sibling
   // pages. Non-URL predicates (visible/hasText/…) are preserved. If the option
   // proposes no predicates, leave the existing ones untouched.
   if (Array.isArray(opt.predicates) && opt.predicates.length) {
-    if (!Array.isArray(_locDraft.predicates)) _locDraft.predicates = [];
+    if (!Array.isArray(_perspectiveDraft.predicates)) _perspectiveDraft.predicates = [];
     // Seed only the FIRST urlMatches. Multiple urlMatches under the default
     // AND operator would require a single URL to satisfy several substring
     // patterns at once (almost never true). One pattern is the sane default;
     // the author can add more in the Additional predicates section.
     const p = opt.predicates.find(x => x?.kind === 'urlMatches' && typeof x.pattern === 'string' && x.pattern.trim());
     if (p) {
-      _locDraft.predicates = _locDraft.predicates.filter(x => x?.kind !== 'urlMatches');
-      _locDraft.predicates.push({ kind: 'urlMatches', pattern: p.pattern, mode: p.mode });
+      _perspectiveDraft.predicates = _perspectiveDraft.predicates.filter(x => x?.kind !== 'urlMatches');
+      _perspectiveDraft.predicates.push({ kind: 'urlMatches', pattern: p.pattern, mode: p.mode });
       if (typeof _renderPredicates === 'function') _renderPredicates();
     }
   }
   _renderPerspectivePanel();
-  updateLocaleSaveButtonState();
+  updatePerspectiveSaveButtonState();
 }
 
 // v2.74.352 — "Resolve roles": adopt the perspective, then ask Claude to
 // auto-pick a selector for every role in ONE call. Each returned selector is
 // created as a draft landmark and run through the existing verifier
-// (verifyLocaleLandmark → INSPECT_ELEMENT → uid + score, no extra LLM call).
+// (verifyPerspectiveLandmark → INSPECT_ELEMENT → uid + score, no extra LLM call).
 // Selectors that don't resolve are dropped so their role stays unfilled (○)
 // for manual picking. See DESIGN_resolve_roles.md.
 async function onResolveRoles(idx) {
-  if (!_locDraft) return;
+  if (!_perspectiveDraft) return;
   const opt = _perspectiveRun?.options?.[idx];
   if (!opt || opt.onPage === false) return;
-  if (_locTabId == null) { showLocaleWarning('No active tab to analyze.'); return; }
+  if (_perspectiveTabId == null) { showPerspectiveWarning('No active tab to analyze.'); return; }
   if (_perspectiveInFlight || _resolveInFlightKey) return;   // one op at a time
   // Adopt it first (sets chosen + name + predicates + the role checklist).
   onChoosePerspective(idx);
@@ -2359,10 +2432,10 @@ async function onResolveRoles(idx) {
 // verification failure reason for each, plus the confirmed successes as
 // site-convention context. One LLM round-trip per click; the user is the cap.
 async function onRetryFailedRoles(idx) {
-  if (!_locDraft) return;
+  if (!_perspectiveDraft) return;
   const opt = _perspectiveRun?.options?.[idx];
   if (!opt) return;
-  if (_locTabId == null) { showLocaleWarning('No active tab to analyze.'); return; }
+  if (_perspectiveTabId == null) { showPerspectiveWarning('No active tab to analyze.'); return; }
   if (_perspectiveInFlight || _resolveInFlightKey) return;
   // Roles still unfilled that we have a note for (failed / abstained).
   const retry = (opt.roles ?? []).filter(r => r && typeof r.role === 'string'
@@ -2370,7 +2443,7 @@ async function onRetryFailedRoles(idx) {
   if (!retry.length) { toast?.('Nothing to retry'); return; }
   const roles = retry.map(r => ({ role: r.role, description: r.description ?? '', multiplicity: r.multiplicity ?? 'one' }));
   // Confirmed successes (working selectors on this site) + prior failed attempts.
-  const confirmed = (_locDraft.landmarks ?? [])
+  const confirmed = (_perspectiveDraft.landmarks ?? [])
     .filter(lm => lm?.roleFill && lm?.selector && (opt.roles ?? []).some(x => x.role === lm.roleFill))
     .map(lm => ({ role: lm.roleFill, selector: lm.selector }));
   const attempts = retry.map(r => ({ role: r.role, selector: _roleResolveNotes[r.role]?.selector ?? null, reason: _roleResolveNotes[r.role]?.reason ?? 'failed' }));
@@ -2382,21 +2455,21 @@ async function onRetryFailedRoles(idx) {
 // record per-role notes/details, log, toast. `_roleResolveNotes` is cleared by
 // the caller for an initial run; a repair run updates only the retried roles.
 async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
-  const draftToken = _locDraft.id;
+  const draftToken = _perspectiveDraft.id;
   const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
   _resolveInFlightKey = inFlightKey;
   _renderPerspectivePanel();
   let res;
   try {
     res = await new Promise(r => chrome.runtime.sendMessage({
-      type: 'RESOLVE_LOCALE_ROLES',
-      payload: { tabId: _locTabId, groundId: _locGroundId, roles, priorAttempt },
+      type: 'RESOLVE_PERSPECTIVE_ROLES',
+      payload: { tabId: _perspectiveTabId, groundId: _perspectiveGroundId, roles, priorAttempt },
     }, r));
   } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
-  if (!_locDraft || _locDraft.id !== draftToken) return;   // unmounted / switched mid-flight
+  if (!_perspectiveDraft || _perspectiveDraft.id !== draftToken) return;   // unmounted / switched mid-flight
   _resolveInFlightKey = null;
   if (!res?.success || !Array.isArray(res.resolutions)) {
-    showLocaleWarning(`Resolve roles${mode === 'repair' ? ' (retry)' : ''} failed: ${res?.error ?? 'no resolutions returned'}`);
+    showPerspectiveWarning(`Resolve roles${mode === 'repair' ? ' (retry)' : ''} failed: ${res?.error ?? 'no resolutions returned'}`);
     _renderPerspectivePanel();
     return;
   }
@@ -2411,7 +2484,7 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
       const reason = (r.justification && r.justification.trim()) || 'Claude found no matching element on this page';
       details.push({ role: r.role, status: 'abstained', reason, confidence: r.confidence });
       _roleResolveNotes[r.role] = { status: 'abstained', reason, selector: null };
-      Logger.info('locale-capture', `resolveRoles[${r.role}]${mode === 'repair' ? '(retry)' : ''} abstained — ${reason}`);
+      Logger.info('perspective-capture', `resolveRoles[${r.role}]${mode === 'repair' ? '(retry)' : ''} abstained — ${reason}`);
       continue;
     }
     if (_perspectiveRoleFilled(r.role)) {                // already filled — don't duplicate
@@ -2419,12 +2492,12 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
       continue;
     }
     const lmRef = { alias: r.role, selector: r.selector, roleFill: r.role, roleMult: multOf(r.role), verified: null };
-    _locDraft.landmarks.push(lmRef);
-    const newIdx = _locDraft.landmarks.indexOf(lmRef);
+    _perspectiveDraft.landmarks.push(lmRef);
+    const newIdx = _perspectiveDraft.landmarks.indexOf(lmRef);
     _invalidateStructure();
-    try { await verifyLocaleLandmark(newIdx); }
+    try { await verifyPerspectiveLandmark(newIdx); }
     catch (e) { lmRef.verified = { score: 'mismatch', matchedCount: 0, issues: [`verify threw: ${e.message}`] }; }
-    if (!_locDraft || _locDraft.id !== draftToken) return;   // bail if torn down mid-verify
+    if (!_perspectiveDraft || _perspectiveDraft.id !== draftToken) return;   // bail if torn down mid-verify
     const v = lmRef.verified;
     const ok = v && v.score !== 'mismatch' && (v.score === 'ready' || v.score === 'caveats' || v.matchedCount > 0);
     if (ok) {
@@ -2432,15 +2505,15 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
       delete _roleResolveNotes[r.role];   // repaired — clear the note
       profileRefs.push(lmRef);            // queue for Claude profiling (visible landmark)
       details.push({ role: r.role, status: 'resolved', selector: r.selector, score: v.score, matchedCount: v.matchedCount, confidence: r.confidence });
-      Logger.info('locale-capture', `resolveRoles[${r.role}]${mode === 'repair' ? '(retry)' : ''} resolved — "${r.selector}" (score=${v.score}, matched=${v.matchedCount})`);
+      Logger.info('perspective-capture', `resolveRoles[${r.role}]${mode === 'repair' ? '(retry)' : ''} resolved — "${r.selector}" (score=${v.score}, matched=${v.matchedCount})`);
     } else {
       const reason = _verifyFailReason(v);
-      const ci = _locDraft.landmarks.indexOf(lmRef);
-      if (ci >= 0) _locDraft.landmarks.splice(ci, 1);   // drop → role stays for manual pick
+      const ci = _perspectiveDraft.landmarks.indexOf(lmRef);
+      if (ci >= 0) _perspectiveDraft.landmarks.splice(ci, 1);   // drop → role stays for manual pick
       failed++;
       details.push({ role: r.role, status: 'failed', selector: r.selector, reason, matchedCount: v?.matchedCount ?? 0, confidence: r.confidence });
       _roleResolveNotes[r.role] = { status: 'failed', reason, selector: r.selector };
-      Logger.warn('locale-capture', `resolveRoles[${r.role}]${mode === 'repair' ? '(retry)' : ''} verify FAILED — selector="${r.selector}" — ${reason}`);
+      Logger.warn('perspective-capture', `resolveRoles[${r.role}]${mode === 'repair' ? '(retry)' : ''} verify FAILED — selector="${r.selector}" — ${reason}`);
     }
   }
 
@@ -2449,26 +2522,26 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
   // their trigger, open it, and resolve + verify them WHILE OPEN (done in the
   // background), then fill them as hidden landmarks carrying their trigger.
   const hiddenUnfilled = (opt.roles ?? []).filter(r => r?.role && !_perspectiveRoleFilled(r.role) && (r.hidden === true || r.revealedBy));
-  if (hiddenUnfilled.length && _locTabId != null) {
+  if (hiddenUnfilled.length && _perspectiveTabId != null) {
     const groups = new Map();
     for (const r of hiddenUnfilled) { const k = r.revealedBy || ''; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); }
     for (const [triggerRole, groupRoles] of groups) {
       let triggerSelector = null;
-      if (triggerRole) { const lm = (_locDraft.landmarks ?? []).find(l => l?.roleFill === triggerRole && l?.selector); triggerSelector = lm?.selector ?? null; }
+      if (triggerRole) { const lm = (_perspectiveDraft.landmarks ?? []).find(l => l?.roleFill === triggerRole && l?.selector); triggerSelector = lm?.selector ?? null; }
       const reqRoles = groupRoles.map(r => ({ role: r.role, description: r.description ?? '', multiplicity: r.multiplicity ?? 'one' }));
       _resolveInFlightKey = inFlightKey; _renderPerspectivePanel();   // keep the "⏳ Resolving…" state while revealing
       let rr;
       try {
         rr = await new Promise(res => chrome.runtime.sendMessage({
           type: 'RESOLVE_REVEALED_ROLES',
-          payload: { tabId: _locTabId, groundId: _locGroundId, triggerSelector, triggerLabel: triggerRole, roles: reqRoles },
+          payload: { tabId: _perspectiveTabId, groundId: _perspectiveGroundId, triggerSelector, triggerLabel: triggerRole, roles: reqRoles },
         }, res));
       } catch (e) { rr = { success: false, error: e?.message ?? 'unknown' }; }
-      if (!_locDraft || _locDraft.id !== draftToken) return;
+      if (!_perspectiveDraft || _perspectiveDraft.id !== draftToken) return;
       _resolveInFlightKey = null;
       if (!rr?.success || !Array.isArray(rr.resolutions)) {
         for (const r of groupRoles) { if (!_roleResolveNotes[r.role]) _roleResolveNotes[r.role] = { status: 'failed', reason: `couldn't reveal hidden layer: ${rr?.error ?? 'no result'}`, selector: null }; }
-        Logger.warn('locale-capture', `reveal-resolve [${triggerRole || 'artifact'}] failed — ${rr?.error ?? 'no result'}`);
+        Logger.warn('perspective-capture', `reveal-resolve [${triggerRole || 'artifact'}] failed — ${rr?.error ?? 'no result'}`);
         continue;
       }
       for (const r of rr.resolutions) {
@@ -2492,20 +2565,20 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
           ...(rr.trigger ? { triggerSelector: rr.trigger } : {}),
           verified: { score: matched === 1 ? 'ready' : 'caveats', matchedCount: matched, revealState: true, verifiedAt: Date.now(), note: `verified in revealed state${triggerRole ? ` (via ${triggerRole})` : ''}` },
         };
-        _locDraft.landmarks.push(lmRef);
+        _perspectiveDraft.landmarks.push(lmRef);
         _invalidateStructure();
         // v2.74.390 — profile the hidden landmark from the INSPECT report the
         // background captured WHILE the modal was open (the element is gone now,
         // so a fresh static INSPECT can't see it; the profile call itself is
         // text-based and doesn't need the live element).
-        if (r.inspect) { try { await _profileResolvedLandmark(_locDraft.landmarks.indexOf(lmRef), null, r.inspect); } catch { /* */ } }
+        if (r.inspect) { try { await _profileResolvedLandmark(_perspectiveDraft.landmarks.indexOf(lmRef), null, r.inspect); } catch { /* */ } }
         delete _roleResolveNotes[r.role];
         filled++;
         details.push({ role: r.role, status: 'resolved', selector: r.selector, score: lmRef.verified.score, matchedCount: matched, revealed: true });
-        Logger.info('locale-capture', `resolveRoles[${r.role}] resolved in REVEALED layer — "${r.selector}" (matched=${matched}, via ${triggerRole || 'artifact'})`);
+        Logger.info('perspective-capture', `resolveRoles[${r.role}] resolved in REVEALED layer — "${r.selector}" (matched=${matched}, via ${triggerRole || 'artifact'})`);
       }
     }
-    renderLocaleLandmarks(); _renderPerspectivePanel(); updateLocaleSaveButtonState(); _refreshLocaleOverlays();
+    renderPerspectiveLandmarks(); _renderPerspectivePanel(); updatePerspectiveSaveButtonState(); _refreshPerspectiveOverlays();
   }
 
   // v2.74.396 — Resolve Tier-2: VISUAL fallback ("Path C"). For VISIBLE roles the
@@ -2516,14 +2589,14 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
   // the per-role vision cost lands only on the hard cases.
   const visualCandidates = (opt.roles ?? []).filter(r =>
     r?.role && !_perspectiveRoleFilled(r.role) && !(r.hidden === true || r.revealedBy) && _roleResolveNotes[r.role]);
-  if (visualCandidates.length && _locTabId != null) {
+  if (visualCandidates.length && _perspectiveTabId != null) {
     _resolveInFlightKey = inFlightKey; _renderPerspectivePanel();
     let visualFilled = 0;
     for (const r of visualCandidates.slice(0, 8)) {
       if (_perspectiveRoleFilled(r.role)) continue;
       const prior = _roleResolveNotes[r.role]?.status;
       const okv = await _visualResolveRole(r, multOf(r.role), draftToken);
-      if (!_locDraft || _locDraft.id !== draftToken) return;
+      if (!_perspectiveDraft || _perspectiveDraft.id !== draftToken) return;
       if (okv) {
         visualFilled++; filled++;
         if (prior === 'abstained') abstained = Math.max(0, abstained - 1);
@@ -2535,8 +2608,8 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
     }
     _resolveInFlightKey = null;
     if (visualFilled) {
-      Logger.info('locale-capture', `resolveRoles: visual tier filled ${visualFilled}/${visualCandidates.length} role(s)`);
-      renderLocaleLandmarks(); _renderPerspectivePanel(); updateLocaleSaveButtonState(); _refreshLocaleOverlays();
+      Logger.info('perspective-capture', `resolveRoles: visual tier filled ${visualFilled}/${visualCandidates.length} role(s)`);
+      renderPerspectiveLandmarks(); _renderPerspectivePanel(); updatePerspectiveSaveButtonState(); _refreshPerspectiveOverlays();
     }
   }
 
@@ -2547,24 +2620,24 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
   if (profileRefs.length) {
     _resolveInFlightKey = inFlightKey; _renderPerspectivePanel();   // show "⏳ Resolving…" while profiling
     await Promise.all(profileRefs.map(async (ref) => {
-      const idx = _locDraft.landmarks.indexOf(ref);
+      const idx = _perspectiveDraft.landmarks.indexOf(ref);
       if (idx < 0) return;
       try { await _profileResolvedLandmark(idx); } catch { /* */ }
     }));
-    if (!_locDraft || _locDraft.id !== draftToken) return;
+    if (!_perspectiveDraft || _perspectiveDraft.id !== draftToken) return;
     _resolveInFlightKey = null;
-    Logger.info('locale-capture', `resolveRoles: profiled ${profileRefs.length} visible landmark(s)`);
+    Logger.info('perspective-capture', `resolveRoles: profiled ${profileRefs.length} visible landmark(s)`);
   }
 
-  if (locWarningEl && filled > 0) { locWarningEl.textContent = ''; locWarningEl.classList.add('hidden'); }
-  renderLocaleLandmarks();
+  if (perspectiveWarningEl && filled > 0) { perspectiveWarningEl.textContent = ''; perspectiveWarningEl.classList.add('hidden'); }
+  renderPerspectiveLandmarks();
   _renderPerspectivePanel();
-  updateLocaleSaveButtonState();
-  _refreshLocaleOverlays();
+  updatePerspectiveSaveButtonState();
+  _refreshPerspectiveOverlays();
   const ms = Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0);
   _logResolveRun({
     ts: Date.now(),
-    url: locTabUrlEl?.textContent ?? '',
+    url: perspectiveTabUrlEl?.textContent ?? '',
     mode,
     rolesTotal: roles.length,
     resolved: filled, failed, abstained,
@@ -2575,7 +2648,7 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
     tier:       _pageComplexity?.tier ?? null,
     details,
   });
-  Logger.info('locale-capture', `resolveRoles done [${mode}] — resolved ${filled}/${roles.length}, failed ${failed}, abstained ${abstained}, ${ms}ms, difficulty ${_pageComplexity?.score ?? '?'}`);
+  Logger.info('perspective-capture', `resolveRoles done [${mode}] — resolved ${filled}/${roles.length}, failed ${failed}, abstained ${abstained}, ${ms}ms, difficulty ${_pageComplexity?.score ?? '?'}`);
   const bits = [`resolved ${filled}`];
   if (failed) bits.push(`${failed} didn't match`);
   if (abstained) bits.push(`${abstained} skipped`);
@@ -2587,10 +2660,10 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
   // propose→resolve ends with the rich LandmarkNode tree, no extra click. Runs
   // only when this resolve actually filled roles and there are ≥2 uid'd
   // landmarks; on a re-run it refines the prior tree (existing refine path).
-  const uidCount = (_locDraft?.landmarks ?? []).filter(l => l?.uid).length;
+  const uidCount = (_perspectiveDraft?.landmarks ?? []).filter(l => l?.uid).length;
   if (filled > 0 && uidCount >= 2) {
     try { await onProposeStructure(); }
-    catch (e) { Logger.warn('locale-capture', `auto-structure after resolve failed: ${e.message}`); }
+    catch (e) { Logger.warn('perspective-capture', `auto-structure after resolve failed: ${e.message}`); }
   }
 }
 
@@ -2608,28 +2681,28 @@ async function _visualResolveRole(roleDef, mult, draftToken) {
     res = await new Promise(r => chrome.runtime.sendMessage({
       type: 'RESOLVE_ROLE_VISUAL',
       payload: {
-        tabId: _locTabId, groundId: _locGroundId,
+        tabId: _perspectiveTabId, groundId: _perspectiveGroundId,
         role: { role, description: roleDef.description ?? '', multiplicity: mult },
-        intent: (_locDraft?.description ?? '').trim(),
+        intent: (_perspectiveDraft?.description ?? '').trim(),
       },
     }, r));
   } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
-  if (!_locDraft || _locDraft.id !== draftToken) return false;
+  if (!_perspectiveDraft || _perspectiveDraft.id !== draftToken) return false;
   if (!res?.success) {
     _roleResolveNotes[role] = { status: 'failed', reason: `visual locate failed: ${res?.error ?? 'unknown'}`, selector: null };
     return false;
   }
   if (!res.found || !res.pick?.selector) {
     _roleResolveNotes[role] = { status: 'abstained', reason: res.note ? `not found visually — ${res.note}` : 'not visible on screen — scroll to it, then pick', selector: null };
-    Logger.info('locale-capture', `resolveRoles[${role}] visual: not found — ${res.note ?? ''}`);
+    Logger.info('perspective-capture', `resolveRoles[${role}] visual: not found — ${res.note ?? ''}`);
     return false;
   }
   const pick = res.pick;
   const lmRef = { alias: role, selector: pick.selector, roleFill: role, roleMult: mult, verified: null };
   if (pick.frame && pick.frame.url && pick.frame.isTop === false) lmRef.frameUrl = String(pick.frame.url);
-  _locDraft.landmarks.push(lmRef);
+  _perspectiveDraft.landmarks.push(lmRef);
   _invalidateStructure();
-  const idx = _locDraft.landmarks.indexOf(lmRef);
+  const idx = _perspectiveDraft.landmarks.indexOf(lmRef);
   // Path A step 4 — Pick→Claude refine (INSPECT + screenshots + full profile +
   // the geometric selector challenge), fed the REAL resolved rect + a11y profile.
   try {
@@ -2638,20 +2711,20 @@ async function _visualResolveRole(roleDef, mult, draftToken) {
       viewportInfo              : pick.viewportInfo ?? null,
       pickedAccessibilityProfile: pick.accessibilityProfile ?? null,
     });
-  } catch (e) { Logger.warn('locale-capture', `visual refine threw for ${role}: ${e.message}`); }
-  if (!_locDraft || _locDraft.id !== draftToken) return false;
-  const curIdx = _locDraft.landmarks.indexOf(lmRef);
+  } catch (e) { Logger.warn('perspective-capture', `visual refine threw for ${role}: ${e.message}`); }
+  if (!_perspectiveDraft || _perspectiveDraft.id !== draftToken) return false;
+  const curIdx = _perspectiveDraft.landmarks.indexOf(lmRef);
   if (curIdx < 0) return false;
-  try { await verifyLocaleLandmark(curIdx); } catch { /* */ }
+  try { await verifyPerspectiveLandmark(curIdx); } catch { /* */ }
   const v = lmRef.verified;
   const ok = v && v.score !== 'mismatch' && (v.score === 'ready' || v.score === 'caveats' || v.matchedCount > 0);
   if (ok) {
     delete _roleResolveNotes[role];
-    Logger.info('locale-capture', `resolveRoles[${role}] resolved VISUALLY — "${lmRef.selector}" (IoU ${typeof pick.iou === 'number' ? pick.iou.toFixed(2) : '?'}, score=${v.score}, matched=${v.matchedCount})`);
+    Logger.info('perspective-capture', `resolveRoles[${role}] resolved VISUALLY — "${lmRef.selector}" (IoU ${typeof pick.iou === 'number' ? pick.iou.toFixed(2) : '?'}, score=${v.score}, matched=${v.matchedCount})`);
     return true;
   }
-  const ci = _locDraft.landmarks.indexOf(lmRef);
-  if (ci >= 0) _locDraft.landmarks.splice(ci, 1);
+  const ci = _perspectiveDraft.landmarks.indexOf(lmRef);
+  if (ci >= 0) _perspectiveDraft.landmarks.splice(ci, 1);
   _roleResolveNotes[role] = { status: 'failed', reason: `visual pick didn't verify: ${_verifyFailReason(v)}`, selector: lmRef.selector };
   return false;
 }
@@ -2663,8 +2736,8 @@ function onPickForRole(role) {
   if (!role) return;
   const roleDef = (_chosenPerspective?.roles ?? []).find(r => r.role === role);
   const slot = { role, multiplicity: roleDef?.multiplicity ?? 'one', description: roleDef?.description ?? '' };
-  const existingIdx = (_locDraft?.landmarks ?? []).findIndex(lm => lm?.roleFill === role);
-  startLocalePick(existingIdx >= 0 ? existingIdx : null, slot);
+  const existingIdx = (_perspectiveDraft?.landmarks ?? []).findIndex(lm => lm?.roleFill === role);
+  startPerspectivePick(existingIdx >= 0 ? existingIdx : null, slot);
 }
 
 // ─── Resolve-difficulty complexity badge (v2.74.353) ──────────────────────
@@ -2673,35 +2746,35 @@ function onPickForRole(role) {
 // header badge. Fire-and-forget from mount / tab change. See § 7 of
 // DESIGN_resolve_roles.md.
 async function _refreshComplexity() {
-  if (!locComplexityBadge) return;
-  if (_locTabId == null) { _pageComplexity = null; _renderComplexityBadge(); return; }
-  const token = _locTabId;
-  locComplexityBadge.textContent = '…';
-  locComplexityBadge.className = 'dbg-locale-complexity';
+  if (!perspectiveComplexityBadge) return;
+  if (_perspectiveTabId == null) { _pageComplexity = null; _renderComplexityBadge(); return; }
+  const token = _perspectiveTabId;
+  perspectiveComplexityBadge.textContent = '…';
+  perspectiveComplexityBadge.className = 'dbg-perspective-complexity';
   let res;
   try {
     res = await new Promise(r => chrome.runtime.sendMessage({ type: 'GET_PAGE_COMPLEXITY', payload: { tabId: token } }, r));
   } catch (e) { res = { success: false, error: e?.message }; }
-  if (_locTabId !== token) return;   // tab changed mid-fetch
+  if (_perspectiveTabId !== token) return;   // tab changed mid-fetch
   _pageComplexity = (res?.success && res.report) ? res.report : null;
   _renderComplexityBadge();
 }
 
 function _renderComplexityBadge() {
-  if (!locComplexityBadge) return;
+  if (!perspectiveComplexityBadge) return;
   const r = _pageComplexity;
   if (!r) {
-    locComplexityBadge.textContent = '—';
-    locComplexityBadge.className = 'dbg-locale-complexity';
-    locComplexityBadge.setAttribute('title', 'How hard this page is for ⚡ Resolve roles (selector resolution).');
+    perspectiveComplexityBadge.textContent = '—';
+    perspectiveComplexityBadge.className = 'dbg-perspective-complexity';
+    perspectiveComplexityBadge.setAttribute('title', 'How hard this page is for ⚡ Resolve roles (selector resolution).');
     return;
   }
   const tierLabel = r.tier.charAt(0).toUpperCase() + r.tier.slice(1);
-  locComplexityBadge.textContent = `🧩 ${tierLabel} · ${r.score}`;
-  locComplexityBadge.className = `dbg-locale-complexity cx-${r.tier}`;
+  perspectiveComplexityBadge.textContent = `🧩 ${tierLabel} · ${r.score}`;
+  perspectiveComplexityBadge.className = `dbg-perspective-complexity cx-${r.tier}`;
   const c = r.counts ?? {}, f = r.factors ?? {};
   const pct = (x) => Math.round((x ?? 0) * 100);
-  locComplexityBadge.setAttribute('title',
+  perspectiveComplexityBadge.setAttribute('title',
     `Resolve difficulty ${r.score}/100 (${tierLabel})\n` +
     `Synthesis (write a durable selector): ${r.synthScore}/100\n` +
     `  hooks missing ${pct(f.hookScarcity)}% · obfuscated classes ${pct(f.obfuscation)}% · div-soup ${pct(f.genericRatio)}% · shadow roots ${c.shadowRoots ?? 0} · ${c.total ?? 0} els, depth ${c.maxDepth ?? 0}\n` +
@@ -2738,19 +2811,34 @@ async function _logResolveRun(entry) {
     while (list.length > 200) list.shift();
     await new Promise(r => chrome.storage.local.set({ [KEY]: list }, r));
   } catch (e) {
-    Logger?.warn?.('locale-capture', `resolve perf-log failed: ${e.message}`);
+    Logger?.warn?.('perspective-capture', `resolve perf-log failed: ${e.message}`);
+  }
+  // v2.74.414 — OUTCOMES slice 3: also emit the run into the append-only stream
+  // (background transforms each detail → authoring `resolve` OutcomeEvent). The
+  // perf log is unchanged; this is the corpus/usage signal. Fire-and-forget —
+  // never let an emit failure affect resolve. (Perspective = the draft being
+  // authored; the new-terminology Perspective is the page archetype, keyed by URL.)
+  try {
+    if (_perspectiveGroundId && Array.isArray(entry?.details) && entry.details.length) {
+      chrome.runtime.sendMessage({
+        type: 'EMIT_RESOLVE_OUTCOMES',
+        payload: { groundId: _perspectiveGroundId, run: entry, ctx: { localeId: entry.url ?? null, perspectiveId: _perspectiveDraft?.id ?? null } },
+      }, () => void chrome.runtime.lastError);
+    }
+  } catch (e) {
+    Logger?.warn?.('perspective-capture', `resolve outcomes emit failed: ${e.message}`);
   }
 }
 
 // ─── Landmark rendering ──────────────────────────────────────────────────
 
-function renderLocaleLandmarks() {
-  if (!_locDraft || !locLandmarksList) return;
-  if (_locDraft.landmarks.length === 0) {
-    locLandmarksList.innerHTML = `<div class="dbg-locale-landmarks-empty">No landmarks yet — click + Pick landmark to add one.</div>`;
+function renderPerspectiveLandmarks() {
+  if (!_perspectiveDraft || !perspectiveLandmarksList) return;
+  if (_perspectiveDraft.landmarks.length === 0) {
+    perspectiveLandmarksList.innerHTML = `<div class="dbg-perspective-landmarks-empty">No landmarks yet — click + Pick landmark to add one.</div>`;
     return;
   }
-  locLandmarksList.innerHTML = _renderStructureBar() + _locDraft.landmarks.map((lm, idx) => {
+  perspectiveLandmarksList.innerHTML = _renderStructureBar() + _perspectiveDraft.landmarks.map((lm, idx) => {
     // v2.74.279 — Status computation moved to _computeLandmarkStatusIcon
     // (used in identity zone). Verification detail (issues, ops, sample
     // HTML) rendered in the drawer's Verification subsection by
@@ -2776,12 +2864,12 @@ function renderLocaleLandmarks() {
     const refining = _landmarkRefining.get(idx);
     let extraStatusHtml = '';
     if (refining) {
-      extraStatusHtml = `<div class="dbg-locale-landmark-refining">⌛ ${escHtml(refining)}</div>`;
+      extraStatusHtml = `<div class="dbg-perspective-landmark-refining">⌛ ${escHtml(refining)}</div>`;
     }
     // v2.74.238 — Row chrome reduced to semantic identity + action
     // affordances. Selector input + Verify button moved to the
     // profile drawer (selector display, Verify is automatic after
-    // Pick→Claude). Locales are now the SSOT for selectors; the
+    // Pick→Claude). Perspectives are now the SSOT for selectors; the
     // selector is an implementation detail the author can inspect
     // in the drawer rather than always-on UI clutter.
     // v2.74.257 — Replace button visible only when the landmark has a
@@ -2790,14 +2878,14 @@ function renderLocaleLandmarks() {
     // the realization. Sits between 👁 (toggle-show) and ✕ (remove)
     // so the destructive action stays at the end of the row.
     const replaceBtnHtml = lm.uid
-      ? `<button class="dbg-locale-landmark-replace" data-action="replace-open" data-idx="${idx}" type="button" title="Swap downstream references to a different landmark">↻</button>`
+      ? `<button class="dbg-perspective-landmark-replace" data-action="replace-open" data-idx="${idx}" type="button" title="Swap downstream references to a different landmark">↻</button>`
       : '';
     // v2.74.258 — Verify button (Phase 9 surface). Same uid gate as
     // Replace — needs a registry record to probe. In-flight is shown
     // via spinner glyph; click is suppressed during round-trip.
     const verifyInFlight = _landmarkVerifyInFlight.has(idx);
     const verifyBtnHtml = lm.uid
-      ? `<button class="dbg-locale-landmark-verify" data-action="verify" data-idx="${idx}" type="button" ${verifyInFlight ? 'disabled' : ''} title="Probe this landmark against the live page. Cached selector works → lifecycle promotes to verified. Heuristic recovery → selector updated. Both fail → lifecycle marks stale-confirmed.">${verifyInFlight ? '⌛' : '✓'}</button>`
+      ? `<button class="dbg-perspective-landmark-verify" data-action="verify" data-idx="${idx}" type="button" ${verifyInFlight ? 'disabled' : ''} title="Probe this landmark against the live page. Cached selector works → lifecycle promotes to verified. Heuristic recovery → selector updated. Both fail → lifecycle marks stale-confirmed.">${verifyInFlight ? '⌛' : '✓'}</button>`
       : '';
     // v2.74.281 — Tight single-row header. Status icon sits as a
     // left-edge column. Main column has accessibleName on top, and a
@@ -2821,21 +2909,21 @@ function renderLocaleLandmarks() {
     const isExpanded = _landmarkProfileExpanded.has(idx);
     const caret = isExpanded ? '▾' : '▸';
     return `
-      <div class="dbg-locale-landmark-row" data-idx="${idx}">
+      <div class="dbg-perspective-landmark-row" data-idx="${idx}">
         <div class="lm-header">
           <span class="lm-status-icon ${statusIcon.cls}" title="${escAttr(statusIcon.tooltip)}">${statusIcon.icon}</span>
           <div class="lm-header-main">
             <div class="lm-name">${displayName}</div>
             <div class="lm-controls">
-              <input type="text" class="dbg-locale-landmark-role lm-alias-input" data-field="aliases" data-idx="${idx}"
+              <input type="text" class="dbg-perspective-landmark-role lm-alias-input" data-field="aliases" data-idx="${idx}"
                      placeholder="aliases (comma-separated)"
                      title="Comma-separated identifiers for this landmark. First entry is the primary alias; the rest are alternative names. Auto-populated from Claude's suggestions on Pick."
                      value="${escAttr([lm.alias, ...(Array.isArray(lm.aliases) ? lm.aliases : [])].filter(s => s && String(s).trim()).join(', '))}" />
-              <button class="dbg-locale-landmark-pick" data-action="pick" data-idx="${idx}" type="button" title="Re-pick this landmark on the page">Pick</button>
-              <button class="dbg-locale-landmark-show ${showActive ? 'dbg-locale-landmark-show-active' : ''}" data-action="toggle-show" data-idx="${idx}" type="button" title="${escAttr(showBtnTitle)}">${showBtnLabel}</button>
+              <button class="dbg-perspective-landmark-pick" data-action="pick" data-idx="${idx}" type="button" title="Re-pick this landmark on the page">Pick</button>
+              <button class="dbg-perspective-landmark-show ${showActive ? 'dbg-perspective-landmark-show-active' : ''}" data-action="toggle-show" data-idx="${idx}" type="button" title="${escAttr(showBtnTitle)}">${showBtnLabel}</button>
               ${verifyBtnHtml}
               ${replaceBtnHtml}
-              <button class="dbg-locale-landmark-remove" data-action="remove" data-idx="${idx}" title="Remove" type="button">✕</button>
+              <button class="dbg-perspective-landmark-remove" data-action="remove" data-idx="${idx}" title="Remove" type="button">✕</button>
               <button class="lm-details-toggle" data-action="profile-toggle" data-idx="${idx}" type="button" title="${isExpanded ? 'Collapse details' : 'Expand details — identity, realization, description, verification, profile, lifecycle'}" aria-expanded="${isExpanded ? 'true' : 'false'}">${caret}</button>
             </div>
           </div>
@@ -2858,16 +2946,16 @@ function renderLocaleLandmarks() {
   // "Secondary aliases" field was removed (it was redundant once the
   // header field went plural).
   // v2.74.336 — Phase C-lite: wire the "Structure with Claude" button.
-  const _structBtn = locLandmarksList.querySelector('[data-loc-action="propose-structure"]');
+  const _structBtn = perspectiveLandmarksList.querySelector('[data-perspective-action="propose-structure"]');
   if (_structBtn) _structBtn.addEventListener('click', onProposeStructure);
-  const _verifyBtn = locLandmarksList.querySelector('[data-loc-action="verify-structure"]');
+  const _verifyBtn = perspectiveLandmarksList.querySelector('[data-perspective-action="verify-structure"]');
   if (_verifyBtn) _verifyBtn.addEventListener('click', onVerifyStructure);
 
   // v2.74.344 — Phase B-lite: per-node structure review. role/multiplicity
   // edits update the node in place (no re-render → preserve input focus) and
   // flag it 'edited'; the ✓/✗ judgment buttons set userJudgment + re-render
   // to reflect the state.
-  locLandmarksList.querySelectorAll('[data-struct-action]').forEach(el => {
+  perspectiveLandmarksList.querySelectorAll('[data-struct-action]').forEach(el => {
     const action = el.dataset.structAction;
     const ref    = el.dataset.ref;
     if (action === 'role') {
@@ -2885,7 +2973,7 @@ function renderLocaleLandmarks() {
         _markStructJudgment(node, 'edited');
         // v2.74.361 — re-render so the "when present" input shows/hides as the
         // node becomes conditional/optional (or no longer is).
-        renderLocaleLandmarks();
+        renderPerspectiveLandmarks();
       });
     } else if (action === 'presence') {
       // v2.74.361 — edit in place (no re-render → preserve focus).
@@ -2903,28 +2991,28 @@ function renderLocaleLandmarks() {
         node.triggers = node.triggers.filter(t => t !== el.dataset.trigger);
         if (!node.triggers.length) delete node.triggers;
         _markStructJudgment(node, 'edited');
-        renderLocaleLandmarks();
+        renderPerspectiveLandmarks();
       });
     } else if (action === 'judge') {
       el.addEventListener('click', () => {
         const node = _findStructNode(ref);
         if (!node) return;
         _markStructJudgment(node, el.dataset.judgment);
-        renderLocaleLandmarks();
+        renderPerspectiveLandmarks();
       });
     } else if (action === 'indent') {
       // v2.74.345 — B-mid: nest under preceding sibling, then re-render so
       // the new depth/indentation and updated gating reflect immediately.
-      el.addEventListener('click', () => { _indentStructNode(ref); renderLocaleLandmarks(); });
+      el.addEventListener('click', () => { _indentStructNode(ref); renderPerspectiveLandmarks(); });
     } else if (action === 'outdent') {
-      el.addEventListener('click', () => { _outdentStructNode(ref); renderLocaleLandmarks(); });
+      el.addEventListener('click', () => { _outdentStructNode(ref); renderPerspectiveLandmarks(); });
     }
   });
 
   // v2.74.346 — Phase B-mid (overlays): review groupings/sequences. name edit
   // updates in place + flags 'edited' (no re-render → preserve focus); judge
   // sets userJudgment + re-renders; delete removes the overlay + re-renders.
-  locLandmarksList.querySelectorAll('[data-overlay-action]').forEach(el => {
+  perspectiveLandmarksList.querySelectorAll('[data-overlay-action]').forEach(el => {
     const action = el.dataset.overlayAction;
     const kind   = el.dataset.overlayKind;
     const idx    = parseInt(el.dataset.overlayIdx, 10);
@@ -2940,18 +3028,18 @@ function renderLocaleLandmarks() {
         const ov = _findOverlay(kind, idx);
         if (!ov) return;
         _markStructJudgment(ov, el.dataset.judgment);
-        renderLocaleLandmarks();
+        renderPerspectiveLandmarks();
       });
     } else if (action === 'delete') {
-      el.addEventListener('click', () => { _deleteOverlay(kind, idx); renderLocaleLandmarks(); });
+      el.addEventListener('click', () => { _deleteOverlay(kind, idx); renderPerspectiveLandmarks(); });
     }
   });
 
-  locLandmarksList.querySelectorAll('input[data-field]').forEach(inp => {
+  perspectiveLandmarksList.querySelectorAll('input[data-field]').forEach(inp => {
     inp.addEventListener('input', () => {
       const idx = parseInt(inp.dataset.idx, 10);
       const f = inp.dataset.field;
-      if (!_locDraft.landmarks[idx]) return;
+      if (!_perspectiveDraft.landmarks[idx]) return;
       if (f === 'aliases') {
         // Parse comma-separated list. Empty entries dropped. Each
         // normalized to lowercase + dash-joined (matches the same
@@ -2962,24 +3050,24 @@ function renderLocaleLandmarks() {
           .map(s => s.trim().toLowerCase().replace(/\s+/g, '-'))
           .filter(Boolean)
           .slice(0, 6);   // hard cap — same as Claude's max
-        _locDraft.landmarks[idx].alias   = parts[0] ?? '';
-        _locDraft.landmarks[idx].aliases = parts.slice(1);
+        _perspectiveDraft.landmarks[idx].alias   = parts[0] ?? '';
+        _perspectiveDraft.landmarks[idx].aliases = parts.slice(1);
       } else {
-        _locDraft.landmarks[idx][f] = inp.value;
+        _perspectiveDraft.landmarks[idx][f] = inp.value;
       }
-      if (_locDraft.landmarks[idx].verified) {
-        _locDraft.landmarks[idx].verified = null;
-        renderLocaleLandmarks();
-        const next = locLandmarksList.querySelector(`input[data-field="${f}"][data-idx="${idx}"]`);
+      if (_perspectiveDraft.landmarks[idx].verified) {
+        _perspectiveDraft.landmarks[idx].verified = null;
+        renderPerspectiveLandmarks();
+        const next = perspectiveLandmarksList.querySelector(`input[data-field="${f}"][data-idx="${idx}"]`);
         if (next) {
           next.focus();
           next.setSelectionRange(next.value.length, next.value.length);
         }
       }
-      updateLocaleSaveButtonState();
+      updatePerspectiveSaveButtonState();
     });
   });
-  locLandmarksList.querySelectorAll('[data-action]').forEach(btn => {
+  perspectiveLandmarksList.querySelectorAll('[data-action]').forEach(btn => {
     btn.addEventListener('click', () => {
       const idx = parseInt(btn.dataset.idx, 10);
       const action = btn.dataset.action;
@@ -2987,27 +3075,27 @@ function renderLocaleLandmarks() {
         // v2.74.243 — Phase 5: reference integrity. Before removing,
         // run blast-radius analysis against the registry for any
         // landmark that has a UID. If it's referenced by other
-        // locales / fragments / observations, surface the impact
+        // perspectives / fragments / observations, surface the impact
         // and require explicit confirmation. Landmarks without a
         // UID (legacy, never saved to registry) skip the check.
         _removeLandmarkWithImpactCheck(idx);
       } else if (action === 'pick') {
-        startLocalePick(idx);
+        startPerspectivePick(idx);
       } else if (action === 'toggle-show') {
         // v2.74.233 — Per-landmark overlay visibility toggle. State
         // is ephemeral (not persisted to the saved record). Triggers
         // an overlay refresh so the change is visible immediately.
-        const lm = _locDraft.landmarks[idx];
+        const lm = _perspectiveDraft.landmarks[idx];
         if (!lm) return;
         lm.showOverlay = lm.showOverlay !== true;
-        renderLocaleLandmarks();
-        _refreshLocaleOverlays();
+        renderPerspectiveLandmarks();
+        _refreshPerspectiveOverlays();
       } else if (action === 'profile-toggle') {
         // v2.74.235 — Expand/collapse the profile drawer for this
         // landmark. State is ephemeral.
         if (_landmarkProfileExpanded.has(idx)) _landmarkProfileExpanded.delete(idx);
         else _landmarkProfileExpanded.add(idx);
-        renderLocaleLandmarks();
+        renderPerspectiveLandmarks();
       } else if (action === 'verify') {
         // v2.74.258 — Phase 9 surface. Probe the landmark against the
         // live page; lifecycle + selector update server-side. The row
@@ -3020,7 +3108,7 @@ function renderLocaleLandmarks() {
         _toggleReplacePicker(idx);
       } else if (action === 'replace-cancel') {
         _closeReplacePicker(idx);
-        renderLocaleLandmarks();
+        renderPerspectiveLandmarks();
       } else if (action === 'replace-commit') {
         const newUid = btn.dataset.newUid;
         if (newUid) _commitLandmarkReplace(idx, newUid);
@@ -3037,7 +3125,7 @@ function renderLocaleLandmarks() {
         // wants to SEE WHAT CLAUDE SAW when reviewing landmark quality —
         // the context shot is exactly that. Fall back to the tight
         // thumb when context capture failed (iframe element, etc.).
-        const lm = _locDraft?.landmarks?.[idx];
+        const lm = _perspectiveDraft?.landmarks?.[idx];
         const opened = lm?.captureContextScreenshot || lm?.captureScreenshot;
         if (opened) _openScreenshotInNewTab(opened);
       }
@@ -3046,11 +3134,11 @@ function renderLocaleLandmarks() {
   // v2.74.235 — Profile-field edit handlers. Description + aliases
   // are author-editable; Claude's output is just a starting point.
   // The author's edit wins on save.
-  locLandmarksList.querySelectorAll('[data-action="profile-desc-edit"]').forEach(el => {
+  perspectiveLandmarksList.querySelectorAll('[data-action="profile-desc-edit"]').forEach(el => {
     el.addEventListener('input', () => {
       const i = parseInt(el.dataset.idx, 10);
-      if (!_locDraft.landmarks[i]) return;
-      _locDraft.landmarks[i].description = el.value;
+      if (!_perspectiveDraft.landmarks[i]) return;
+      _perspectiveDraft.landmarks[i].description = el.value;
     });
   });
   // v2.74.302 — `profile-aliases-edit` handler removed. The drawer no
@@ -3059,10 +3147,10 @@ function renderLocaleLandmarks() {
   // v2.74.305 — Replaced v2.74.244's single profile-effect-edit
   // handler. Effect is now structured (kind + parameter) AND
   // interaction pattern is separate. Three handlers below.
-  locLandmarksList.querySelectorAll('[data-action="profile-effect-kind-edit"]').forEach(el => {
+  perspectiveLandmarksList.querySelectorAll('[data-action="profile-effect-kind-edit"]').forEach(el => {
     el.addEventListener('change', () => {
       const i = parseInt(el.dataset.idx, 10);
-      const lm = _locDraft?.landmarks?.[i];
+      const lm = _perspectiveDraft?.landmarks?.[i];
       if (!lm) return;
       const newKind = el.value;
       // Reset to default-parameter shape per kind. If the new kind
@@ -3077,33 +3165,33 @@ function renderLocaleLandmarks() {
         lm.effect = { kind: newKind };
       }
       lm.effectSource = 'authored';   // v2.74.309 — author set this
-      renderLocaleLandmarks();   // re-render to show/hide param picker
+      renderPerspectiveLandmarks();   // re-render to show/hide param picker
     });
   });
-  locLandmarksList.querySelectorAll('[data-action="profile-effect-form-edit"]').forEach(el => {
+  perspectiveLandmarksList.querySelectorAll('[data-action="profile-effect-form-edit"]').forEach(el => {
     el.addEventListener('change', () => {
       const i = parseInt(el.dataset.idx, 10);
-      const lm = _locDraft?.landmarks?.[i];
+      const lm = _perspectiveDraft?.landmarks?.[i];
       if (!lm?.effect) return;
       if (lm.effect.kind !== 'opens-new-thread') return;
       lm.effect = { ...lm.effect, form: el.value };
       lm.effectSource = 'authored';
     });
   });
-  locLandmarksList.querySelectorAll('[data-action="profile-effect-modal-kind-edit"]').forEach(el => {
+  perspectiveLandmarksList.querySelectorAll('[data-action="profile-effect-modal-kind-edit"]').forEach(el => {
     el.addEventListener('change', () => {
       const i = parseInt(el.dataset.idx, 10);
-      const lm = _locDraft?.landmarks?.[i];
+      const lm = _perspectiveDraft?.landmarks?.[i];
       if (!lm?.effect) return;
       if (lm.effect.kind !== 'triggers-modal') return;
       lm.effect = { ...lm.effect, modalKind: el.value };
       lm.effectSource = 'authored';
     });
   });
-  locLandmarksList.querySelectorAll('[data-action="profile-pattern-edit"]').forEach(el => {
+  perspectiveLandmarksList.querySelectorAll('[data-action="profile-pattern-edit"]').forEach(el => {
     el.addEventListener('change', () => {
       const i = parseInt(el.dataset.idx, 10);
-      const lm = _locDraft?.landmarks?.[i];
+      const lm = _perspectiveDraft?.landmarks?.[i];
       if (!lm) return;
       lm.interactionPattern = el.value;
       lm.effectSource = 'authored';
@@ -3168,8 +3256,8 @@ function _hydrateLandmarkEffectShape(lm) {
   return lm;
 }
 
-function updateLocaleSaveButtonState() {
-  if (!_locDraft || !locSaveBtn) { if (locSaveBtn) locSaveBtn.disabled = true; return; }
+function updatePerspectiveSaveButtonState() {
+  if (!_perspectiveDraft || !perspectiveSaveBtn) { if (perspectiveSaveBtn) perspectiveSaveBtn.disabled = true; return; }
   // v2.74.282 — Compute the first blocking reason in priority order:
   //   1. Name
   //   2. URL predicate
@@ -3178,35 +3266,35 @@ function updateLocaleSaveButtonState() {
   // Surfaced via title attribute (hover) AND inline hint element so
   // authors don't have to guess why Save is disabled.
   let reason = null;
-  const name = (locNameInput?.value ?? '').trim();
+  const name = (perspectiveNameInput?.value ?? '').trim();
   if (!name) {
-    reason = 'Locale needs a name (top of the form)';
+    reason = 'Perspective needs a name (top of the form)';
   }
-  // v2.74.348 — LOCALE_SPEC § 6 / § 15 EmptyDescriptionError: the description
+  // v2.74.348 — PERSPECTIVE_SPEC § 6 / § 15 EmptyDescriptionError: the description
   // is the intent-capture entry point and is mandatory in presence at save.
   if (!reason) {
-    const desc = (locDescriptionInput?.value ?? _locDraft.description ?? '').trim();
+    const desc = (perspectiveDescriptionInput?.value ?? _perspectiveDraft.description ?? '').trim();
     if (!desc) {
-      reason = 'Locale needs a description (it captures the intent — top of the form)';
+      reason = 'Perspective needs a description (it captures the intent — top of the form)';
     }
   }
   if (!reason) {
-    const hasUrlPredicate = Array.isArray(_locDraft.predicates)
-      && _locDraft.predicates.some(p =>
+    const hasUrlPredicate = Array.isArray(_perspectiveDraft.predicates)
+      && _perspectiveDraft.predicates.some(p =>
         p?.kind === 'urlMatches' && typeof p.pattern === 'string' && p.pattern.trim().length > 0
       );
     if (!hasUrlPredicate) {
-      reason = 'Add a URL-matches predicate in the Additional predicates section (otherwise the locale matches every page on this Ground)';
+      reason = 'Add a URL-matches predicate in the Additional predicates section (otherwise the perspective matches every page on this Ground)';
     }
   }
   if (!reason) {
-    if (!Array.isArray(_locDraft.landmarks) || _locDraft.landmarks.length === 0) {
+    if (!Array.isArray(_perspectiveDraft.landmarks) || _perspectiveDraft.landmarks.length === 0) {
       reason = 'Add at least one landmark (click + Pick landmark)';
     }
   }
   if (!reason) {
-    for (let i = 0; i < _locDraft.landmarks.length; i++) {
-      const lm = _locDraft.landmarks[i];
+    for (let i = 0; i < _perspectiveDraft.landmarks.length; i++) {
+      const lm = _perspectiveDraft.landmarks[i];
       const tag = lm.accessibleName ?? lm.alias ?? `#${i + 1}`;
       if (!lm.alias || !lm.alias.trim()) {
         reason = `Landmark "${tag}" needs an alias`;
@@ -3235,26 +3323,26 @@ function updateLocaleSaveButtonState() {
     }
   }
   const isDisabled = reason !== null;
-  locSaveBtn.disabled = isDisabled;
+  perspectiveSaveBtn.disabled = isDisabled;
   if (isDisabled) {
-    locSaveBtn.setAttribute('title', reason);
-    if (locSaveReasonEl) {
-      locSaveReasonEl.textContent = reason;
-      locSaveReasonEl.classList.remove('hidden');
+    perspectiveSaveBtn.setAttribute('title', reason);
+    if (perspectiveSaveReasonEl) {
+      perspectiveSaveReasonEl.textContent = reason;
+      perspectiveSaveReasonEl.classList.remove('hidden');
     }
   } else {
-    locSaveBtn.removeAttribute('title');
-    if (locSaveReasonEl) {
-      locSaveReasonEl.textContent = '';
-      locSaveReasonEl.classList.add('hidden');
+    perspectiveSaveBtn.removeAttribute('title');
+    if (perspectiveSaveReasonEl) {
+      perspectiveSaveReasonEl.textContent = '';
+      perspectiveSaveReasonEl.classList.add('hidden');
     }
   }
 }
 
 // ─── Picker integration ──────────────────────────────────────────────────
 
-async function startLocalePick(landmarkIdx, roleSlot) {
-  if (!_locDraft) return;
+async function startPerspectivePick(landmarkIdx, roleSlot) {
+  if (!_perspectiveDraft) return;
   // v2.74.280 — Two modes:
   //   landmarkIdx === null : CREATE mode (entered via "+ Pick landmark").
   //     No row exists yet. On PICK_RESULT, a new landmark is pushed +
@@ -3263,10 +3351,10 @@ async function startLocalePick(landmarkIdx, roleSlot) {
   //     button). Existing row's element is being changed; selector and
   //     identity get refreshed.
   const isCreate = landmarkIdx === null;
-  if (!isCreate && !_locDraft.landmarks[landmarkIdx]) return;
+  if (!isCreate && !_perspectiveDraft.landmarks[landmarkIdx]) return;
   // v2.74.274 — Gate softened. Author-typed alias is no longer
   // required before Pick. Rationale (see SPEC_DEV entry [2026-05-21]
-  // — alias field cleanup): the alias is a per-locale identifier
+  // — alias field cleanup): the alias is a per-perspective identifier
   // and Claude hint, not part of substrate canonical identity. The
   // natural flow is "Pick first, label later"; the post-Pick path
   // auto-fills the alias from the computed accessibleName when
@@ -3275,45 +3363,45 @@ async function startLocalePick(landmarkIdx, roleSlot) {
   // Claude refinement still gets a role hint — falls back to
   // 'landmark' (matched downstream in GENERATE_LANDMARK_PROFILE_BG).
   // The author can override the alias at any time.
-  if (_locPickerSession) await cancelLocalePick(true);
-  if (_locTabId == null) {
-    showLocaleWarning('No capture tab. Cancel and start over.');
+  if (_perspectivePickerSession) await cancelPerspectivePick(true);
+  if (_perspectiveTabId == null) {
+    showPerspectiveWarning('No capture tab. Cancel and start over.');
     return;
   }
 
-  const ready = await pingContentScript(_locTabId);
+  const ready = await pingContentScript(_perspectiveTabId);
   if (!ready.ok) {
-    showLocaleWarning(`Pick failed: ${ready.error}. ${ready.hint ?? ''}`);
+    showPerspectiveWarning(`Pick failed: ${ready.error}. ${ready.hint ?? ''}`);
     return;
   }
 
   const sessionId = `loc_pick_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   // v2.74.348 — roleSlot ({role, multiplicity}) is carried through so the
   // PICK_RESULT handler can bind the resulting landmark to a § 13 role.
-  _locPickerSession = { sessionId, landmarkIdx, roleSlot: roleSlot ?? null };
+  _perspectivePickerSession = { sessionId, landmarkIdx, roleSlot: roleSlot ?? null };
 
   // v2.74.166 — Frame-aware broadcast (same helper fragment-author and
-  // observation-author use). Locale landmarks can now point at
+  // observation-author use). Perspective landmarks can now point at
   // elements inside same-origin iframes.
-  const startRes = await broadcastStartPick(_locTabId, {
+  const startRes = await broadcastStartPick(_perspectiveTabId, {
     sessionId, mode: 'target', containerSelector: '', multiCandidate: false,
   });
   if (!startRes.success) {
-    _locPickerSession = null;
-    showLocaleWarning(`Pick failed: ${startRes.error}`);
+    _perspectivePickerSession = null;
+    showPerspectiveWarning(`Pick failed: ${startRes.error}`);
     return;
   }
-  if (locPickBanner) locPickBanner.classList.remove('hidden');
+  if (perspectivePickBanner) perspectivePickBanner.classList.remove('hidden');
 }
 
-async function cancelLocalePick(notifyContentScript) {
-  if (!_locPickerSession) return;
-  const session = _locPickerSession;
-  _locPickerSession = null;
-  if (locPickBanner) locPickBanner.classList.add('hidden');
-  if (notifyContentScript && _locTabId != null) {
+async function cancelPerspectivePick(notifyContentScript) {
+  if (!_perspectivePickerSession) return;
+  const session = _perspectivePickerSession;
+  _perspectivePickerSession = null;
+  if (perspectivePickBanner) perspectivePickBanner.classList.add('hidden');
+  if (notifyContentScript && _perspectiveTabId != null) {
     // v2.74.166 — Broadcast cancel so iframe pickers tear down too.
-    await broadcastCancelPick(_locTabId, { sessionId: session.sessionId });
+    await broadcastCancelPick(_perspectiveTabId, { sessionId: session.sessionId });
   }
 }
 
@@ -3321,24 +3409,24 @@ async function cancelLocalePick(notifyContentScript) {
 
 // ─── v2.74.243 — Phase 5: landmark removal with impact analysis ─────────
 //
-// Removing a landmark from a locale is a reference-integrity event:
-//   - The locale loses one entry from its `landmarkRefs[]` on next save
-//   - The registry record stays (other locales / fragments may use it)
-//   - But IF this locale was the only consumer, the record becomes orphaned
+// Removing a landmark from a perspective is a reference-integrity event:
+//   - The perspective loses one entry from its `landmarkRefs[]` on next save
+//   - The registry record stays (other perspectives / fragments may use it)
+//   - But IF this perspective was the only consumer, the record becomes orphaned
 //   - AND IF fragments/observations referenced the landmark, they break
 //
-// We don't auto-delete the registry record on locale-level removal
+// We don't auto-delete the registry record on perspective-level removal
 // (per spec § Reference integrity: "leave orphans for user cleanup").
 // We DO warn the author about downstream consumers so they know what
 // they're breaking.
 
 async function _removeLandmarkWithImpactCheck(idx) {
-  if (!_locDraft?.landmarks?.[idx]) return;
-  const lm = _locDraft.landmarks[idx];
+  if (!_perspectiveDraft?.landmarks?.[idx]) return;
+  const lm = _perspectiveDraft.landmarks[idx];
   // Helper that does the actual removal — extracted so both branches
   // (no-impact and confirmed-impact) share the same cleanup path.
   const doRemove = () => {
-    _locDraft.landmarks.splice(idx, 1);
+    _perspectiveDraft.landmarks.splice(idx, 1);
     _invalidateStructure();   // v2.74.336 — landmark set changed; drop stale structure
     _landmarkRefining.delete(idx);
     const reKeyed = new Map();
@@ -3353,15 +3441,15 @@ async function _removeLandmarkWithImpactCheck(idx) {
       else if (k < idx) expandedReKeyed.add(k);
     }
     _landmarkProfileExpanded = expandedReKeyed;
-    renderLocaleLandmarks();
+    renderPerspectiveLandmarks();
     _renderPerspectivePanel();   // v2.74.348 — a role may now be unfilled
-    updateLocaleSaveButtonState();
-    _refreshLocaleOverlays();
+    updatePerspectiveSaveButtonState();
+    _refreshPerspectiveOverlays();
   };
 
   // No UID means the landmark hasn't been saved to the registry yet
   // (fresh in-memory only). Skip analysis; just remove.
-  if (!lm.uid || !_locGroundId) {
+  if (!lm.uid || !_perspectiveGroundId) {
     doRemove();
     return;
   }
@@ -3370,30 +3458,30 @@ async function _removeLandmarkWithImpactCheck(idx) {
   try {
     const res = await chrome.runtime.sendMessage({
       type: 'ANALYZE_LANDMARK_IMPACT',
-      payload: { uid: lm.uid, groundId: _locGroundId },
+      payload: { uid: lm.uid, groundId: _perspectiveGroundId },
     });
     impact = res?.impact ?? null;
   } catch (e) {
     // Analysis dispatch failed — proceed with removal but log it.
-    Logger.warn('locale-capture', `impact analysis failed (proceeding with remove): ${e.message}`);
+    Logger.warn('perspective-capture', `impact analysis failed (proceeding with remove): ${e.message}`);
     doRemove();
     return;
   }
   if (!impact) { doRemove(); return; }
 
-  // Filter out THIS locale from the impact.locales list — we know
+  // Filter out THIS perspective from the impact.perspectives list — we know
   // we're removing from here. What matters is what OTHER consumers
   // remain.
-  const otherLocales = (impact.locales ?? []).filter(l => l.id !== _locDraft?.id);
+  const otherPerspectives = (impact.perspectives ?? []).filter(l => l.id !== _perspectiveDraft?.id);
   const fragments = impact.fragments ?? [];
   const observations = impact.observations ?? [];
   const downstreamCount = fragments.length + observations.length;
-  const otherLocaleCount = otherLocales.length;
+  const otherPerspectiveCount = otherPerspectives.length;
 
-  if (downstreamCount === 0 && otherLocaleCount === 0) {
-    // No downstream consumers, no other locales. Safe to remove —
+  if (downstreamCount === 0 && otherPerspectiveCount === 0) {
+    // No downstream consumers, no other perspectives. Safe to remove —
     // the registry record will be orphaned (left for user cleanup
-    // per spec § Reference integrity § Locale deletion).
+    // per spec § Reference integrity § Perspective deletion).
     doRemove();
     return;
   }
@@ -3409,19 +3497,19 @@ async function _removeLandmarkWithImpactCheck(idx) {
     try {
       const candRes = await chrome.runtime.sendMessage({
         type: 'FIND_REPLACEMENT_CANDIDATES',
-        payload: { uid: lm.uid, groundId: _locGroundId, limit: 3, minConfidence: 'low' },
+        payload: { uid: lm.uid, groundId: _perspectiveGroundId, limit: 3, minConfidence: 'low' },
       });
       if (candRes?.success && Array.isArray(candRes.candidates)) {
         candidates = candRes.candidates;
       }
     } catch (e) {
-      Logger.debug('locale-capture', `candidate fetch failed (proceeding without): ${e.message}`);
+      Logger.debug('perspective-capture', `candidate fetch failed (proceeding without): ${e.message}`);
     }
   }
 
   // Build the confirmation message.
   const lines = [];
-  lines.push(`Remove landmark "${lm.accessibleName ?? lm.alias ?? lm.uid}" from this locale?`);
+  lines.push(`Remove landmark "${lm.accessibleName ?? lm.alias ?? lm.uid}" from this perspective?`);
   lines.push('');
   if (downstreamCount > 0) {
     lines.push('⚠ This landmark is referenced by:');
@@ -3432,12 +3520,12 @@ async function _removeLandmarkWithImpactCheck(idx) {
       lines.push(`  • ${observations.length} observation${observations.length === 1 ? '' : 's'}: ${observations.slice(0, 3).map(o => `"${o.name}"`).join(', ')}${observations.length > 3 ? `, +${observations.length - 3} more` : ''}`);
     }
     lines.push('');
-    lines.push('Removing it from this locale will leave those references broken at runtime.');
+    lines.push('Removing it from this perspective will leave those references broken at runtime.');
   }
-  if (otherLocaleCount > 0) {
-    lines.push(`This landmark is also referenced by ${otherLocaleCount} other locale${otherLocaleCount === 1 ? '' : 's'} (${otherLocales.slice(0, 3).map(l => `"${l.name}"`).join(', ')}${otherLocaleCount > 3 ? `, …` : ''}). The registry record stays available there.`);
+  if (otherPerspectiveCount > 0) {
+    lines.push(`This landmark is also referenced by ${otherPerspectiveCount} other perspective${otherPerspectiveCount === 1 ? '' : 's'} (${otherPerspectives.slice(0, 3).map(l => `"${l.name}"`).join(', ')}${otherPerspectiveCount > 3 ? `, …` : ''}). The registry record stays available there.`);
   } else if (downstreamCount > 0) {
-    lines.push('This locale is the last reference holder; the registry record will be orphaned.');
+    lines.push('This perspective is the last reference holder; the registry record will be orphaned.');
   }
   // v2.74.256 — Surface replacement candidates from Phase 10.5
   // ranking. Confidence emoji: 🟢 high, 🟡 medium, ⚪ low. Author
@@ -3459,11 +3547,11 @@ async function _removeLandmarkWithImpactCheck(idx) {
   lines.push('Continue with removal?');
 
   if (confirm(lines.join('\n'))) {
-    Logger.info('locale-capture', `Landmark removed despite ${downstreamCount} downstream consumer(s)`, {
+    Logger.info('perspective-capture', `Landmark removed despite ${downstreamCount} downstream consumer(s)`, {
       uid: lm.uid, alias: lm.alias, accessibleName: lm.accessibleName,
       fragments: fragments.map(f => ({ id: f.id, name: f.name, refCount: f.refCount })),
       observations: observations.map(o => ({ id: o.id, name: o.name, refCount: o.refCount })),
-      otherLocales: otherLocales.map(l => ({ id: l.id, name: l.name })),
+      otherPerspectives: otherPerspectives.map(l => ({ id: l.id, name: l.name })),
     });
     doRemove();
   }
@@ -3481,7 +3569,7 @@ async function _removeLandmarkWithImpactCheck(idx) {
 //
 // Author clicks ↻ on a landmark row → picker opens below the row
 // showing top candidates from Phase 10.5 ranking. Click a candidate
-// → dryRun preview (count of fragments/observations/locales touched)
+// → dryRun preview (count of fragments/observations/perspectives touched)
 // → confirm → commit via Phase 10 backend.
 //
 // Stays inline in the row (no modal). Multiple pickers can be open
@@ -3492,16 +3580,16 @@ function _renderLandmarkReplacePicker(idx) {
   if (!state) return '';
   if (state === 'loading') {
     return `
-      <div class="dbg-locale-landmark-replace-picker">
-        <div class="dbg-locale-landmark-replace-loading">⌛ Finding replacement candidates…</div>
+      <div class="dbg-perspective-landmark-replace-picker">
+        <div class="dbg-perspective-landmark-replace-loading">⌛ Finding replacement candidates…</div>
       </div>`;
   }
   if (state === 'error') {
     const err = _landmarkReplaceError.get(idx) ?? 'unknown error';
     return `
-      <div class="dbg-locale-landmark-replace-picker">
-        <div class="dbg-locale-landmark-replace-error">⛔ ${escHtml(err)}</div>
-        <div class="dbg-locale-landmark-replace-actions">
+      <div class="dbg-perspective-landmark-replace-picker">
+        <div class="dbg-perspective-landmark-replace-error">⛔ ${escHtml(err)}</div>
+        <div class="dbg-perspective-landmark-replace-actions">
           <button class="btn-secondary tiny" data-action="replace-cancel" data-idx="${idx}" type="button">Close</button>
         </div>
       </div>`;
@@ -3510,11 +3598,11 @@ function _renderLandmarkReplacePicker(idx) {
   const candidates = _landmarkReplaceCandidates.get(idx) ?? [];
   if (candidates.length === 0) {
     return `
-      <div class="dbg-locale-landmark-replace-picker">
-        <div class="dbg-locale-landmark-replace-empty">
+      <div class="dbg-perspective-landmark-replace-picker">
+        <div class="dbg-perspective-landmark-replace-empty">
           No replacement candidates found on this Ground. Replacements must share the same a11y role.
         </div>
-        <div class="dbg-locale-landmark-replace-actions">
+        <div class="dbg-perspective-landmark-replace-actions">
           <button class="btn-secondary tiny" data-action="replace-cancel" data-idx="${idx}" type="button">Close</button>
         </div>
       </div>`;
@@ -3526,42 +3614,42 @@ function _renderLandmarkReplacePicker(idx) {
                 : c.confidence === 'medium' ? '🟡' : '⚪';
     const pct = (c.score * 100).toFixed(0);
     const breakdown = c.breakdown
-      ? `<span class="dbg-locale-landmark-replace-breakdown" title="name:${(c.breakdown.name*100).toFixed(0)}% ctx:${(c.breakdown.context*100).toFixed(0)}% url:${(c.breakdown.url*100).toFixed(0)}% lifecycle:${(c.breakdown.lifecycle*100).toFixed(0)}%">${pct}%</span>`
+      ? `<span class="dbg-perspective-landmark-replace-breakdown" title="name:${(c.breakdown.name*100).toFixed(0)}% ctx:${(c.breakdown.context*100).toFixed(0)}% url:${(c.breakdown.url*100).toFixed(0)}% lifecycle:${(c.breakdown.lifecycle*100).toFixed(0)}%">${pct}%</span>`
       : '';
     return `
-      <button class="dbg-locale-landmark-replace-candidate" data-action="replace-commit" data-idx="${idx}" data-new-uid="${escAttr(c.uid)}" type="button">
-        <span class="dbg-locale-landmark-replace-conf">${emoji} ${c.confidence}</span>
+      <button class="dbg-perspective-landmark-replace-candidate" data-action="replace-commit" data-idx="${idx}" data-new-uid="${escAttr(c.uid)}" type="button">
+        <span class="dbg-perspective-landmark-replace-conf">${emoji} ${c.confidence}</span>
         ${breakdown}
-        <span class="dbg-locale-landmark-replace-name">${escHtml(name)}</span>
-        <span class="dbg-locale-landmark-replace-lifecycle">${escHtml(lc)}</span>
+        <span class="dbg-perspective-landmark-replace-name">${escHtml(name)}</span>
+        <span class="dbg-perspective-landmark-replace-lifecycle">${escHtml(lc)}</span>
       </button>`;
   }).join('');
   return `
-    <div class="dbg-locale-landmark-replace-picker">
-      <div class="dbg-locale-landmark-replace-header">Replace with…</div>
-      <div class="dbg-locale-landmark-replace-list">${rows}</div>
-      <div class="dbg-locale-landmark-replace-actions">
+    <div class="dbg-perspective-landmark-replace-picker">
+      <div class="dbg-perspective-landmark-replace-header">Replace with…</div>
+      <div class="dbg-perspective-landmark-replace-list">${rows}</div>
+      <div class="dbg-perspective-landmark-replace-actions">
         <button class="btn-secondary tiny" data-action="replace-cancel" data-idx="${idx}" type="button">Cancel</button>
       </div>
     </div>`;
 }
 
 async function _toggleReplacePicker(idx) {
-  const lm = _locDraft?.landmarks?.[idx];
-  if (!lm || !lm.uid || !_locGroundId) return;
+  const lm = _perspectiveDraft?.landmarks?.[idx];
+  if (!lm || !lm.uid || !_perspectiveGroundId) return;
   // Already open: close it.
   if (_landmarkReplaceOpen.has(idx)) {
     _closeReplacePicker(idx);
-    renderLocaleLandmarks();
+    renderPerspectiveLandmarks();
     return;
   }
   // Open in loading state, fetch candidates, re-render.
   _landmarkReplaceOpen.set(idx, 'loading');
-  renderLocaleLandmarks();
+  renderPerspectiveLandmarks();
   try {
     const res = await chrome.runtime.sendMessage({
       type   : 'FIND_REPLACEMENT_CANDIDATES',
-      payload: { uid: lm.uid, groundId: _locGroundId, limit: 5, minConfidence: 'low' },
+      payload: { uid: lm.uid, groundId: _perspectiveGroundId, limit: 5, minConfidence: 'low' },
     });
     if (res?.success) {
       _landmarkReplaceCandidates.set(idx, Array.isArray(res.candidates) ? res.candidates : []);
@@ -3574,7 +3662,7 @@ async function _toggleReplacePicker(idx) {
     _landmarkReplaceError.set(idx, e.message);
     _landmarkReplaceOpen.set(idx, 'error');
   }
-  renderLocaleLandmarks();
+  renderPerspectiveLandmarks();
 }
 
 function _closeReplacePicker(idx) {
@@ -3584,11 +3672,11 @@ function _closeReplacePicker(idx) {
 }
 
 async function _commitLandmarkReplace(idx, newUid) {
-  const lm = _locDraft?.landmarks?.[idx];
-  if (!lm || !lm.uid || !_locGroundId) return;
+  const lm = _perspectiveDraft?.landmarks?.[idx];
+  if (!lm || !lm.uid || !_perspectiveGroundId) return;
   const oldUid = lm.uid;
   if (oldUid === newUid) {
-    showLocaleWarning('Cannot replace a landmark with itself');
+    showPerspectiveWarning('Cannot replace a landmark with itself');
     return;
   }
   // (1) Dry-run preview to count what would change.
@@ -3596,33 +3684,33 @@ async function _commitLandmarkReplace(idx, newUid) {
   try {
     const res = await chrome.runtime.sendMessage({
       type: 'REPLACE_LANDMARK_REFERENCES',
-      payload: { oldUid, newUid, groundId: _locGroundId, dryRun: true },
+      payload: { oldUid, newUid, groundId: _perspectiveGroundId, dryRun: true },
     });
     if (!res?.success) {
-      showLocaleWarning(`Replace preview failed: ${res?.error ?? 'unknown error'}`);
+      showPerspectiveWarning(`Replace preview failed: ${res?.error ?? 'unknown error'}`);
       return;
     }
     preview = res;
   } catch (e) {
-    showLocaleWarning(`Replace preview failed: ${e.message}`);
+    showPerspectiveWarning(`Replace preview failed: ${e.message}`);
     return;
   }
   // (2) Build confirm message with the preview totals.
   const t = preview.totals ?? {};
-  const newName = preview.changes?.locales?.[0]?.name
+  const newName = preview.changes?.perspectives?.[0]?.name
     ?? _landmarkReplaceCandidates.get(idx)?.find(c => c.uid === newUid)?.landmark?.accessibleName
     ?? newUid;
   const lines = [];
   lines.push(`Replace "${lm.accessibleName ?? lm.alias ?? oldUid}" with "${newName}"?`);
   lines.push('');
   lines.push('This rewrite will touch:');
-  lines.push(`  • ${t.localesRewritten ?? 0} locale ref list${(t.localesRewritten ?? 0) === 1 ? '' : 's'}`);
+  lines.push(`  • ${t.perspectivesRewritten ?? 0} perspective ref list${(t.perspectivesRewritten ?? 0) === 1 ? '' : 's'}`);
   lines.push(`  • ${t.fragmentsRewritten ?? 0} fragment${(t.fragmentsRewritten ?? 0) === 1 ? '' : 's'}`);
   lines.push(`  • ${t.observationsRewritten ?? 0} observation${(t.observationsRewritten ?? 0) === 1 ? '' : 's'}`);
   lines.push(`  • ${t.totalRefsRewritten ?? 0} ref${(t.totalRefsRewritten ?? 0) === 1 ? '' : 's'} total`);
   if ((t.skippedLegacyRefs ?? 0) > 0) {
     lines.push('');
-    lines.push(`⚠ ${t.skippedLegacyRefs} legacy { localeId, role } ref(s) preserved (unsafe to auto-rewrite)`);
+    lines.push(`⚠ ${t.skippedLegacyRefs} legacy { perspectiveId, role } ref(s) preserved (unsafe to auto-rewrite)`);
   }
   if (preview.rolePresentMismatch) {
     lines.push('');
@@ -3637,17 +3725,17 @@ async function _commitLandmarkReplace(idx, newUid) {
   try {
     result = await chrome.runtime.sendMessage({
       type: 'REPLACE_LANDMARK_REFERENCES',
-      payload: { oldUid, newUid, groundId: _locGroundId, dryRun: false },
+      payload: { oldUid, newUid, groundId: _perspectiveGroundId, dryRun: false },
     });
   } catch (e) {
-    showLocaleWarning(`Replace failed: ${e.message}`);
+    showPerspectiveWarning(`Replace failed: ${e.message}`);
     return;
   }
   if (!result?.success) {
-    showLocaleWarning(`Replace failed: ${result?.error ?? 'unknown error'}`);
+    showPerspectiveWarning(`Replace failed: ${result?.error ?? 'unknown error'}`);
     return;
   }
-  // (4) Update the in-memory locale draft so the row reflects the new
+  // (4) Update the in-memory perspective draft so the row reflects the new
   // landmark. Persisted state was rewritten by the backend; the draft
   // tracks the visible identity here.
   let newLandmark = null;
@@ -3660,8 +3748,8 @@ async function _commitLandmarkReplace(idx, newUid) {
     newLandmark = candEntry?.landmark ?? null;
   }
   if (newLandmark) {
-    const existing = _locDraft.landmarks[idx];
-    _locDraft.landmarks[idx] = {
+    const existing = _perspectiveDraft.landmarks[idx];
+    _perspectiveDraft.landmarks[idx] = {
       ...existing,
       uid               : newLandmark.uid,
       alias             : newLandmark.alias ?? existing.alias,
@@ -3679,13 +3767,13 @@ async function _commitLandmarkReplace(idx, newUid) {
     };
   }
   _closeReplacePicker(idx);
-  renderLocaleLandmarks();
-  updateLocaleSaveButtonState();
-  _refreshLocaleOverlays();
-  Logger.info('locale-capture',
-    `Replaced ${oldUid} → ${newUid} on ground ${_locGroundId}: ` +
+  renderPerspectiveLandmarks();
+  updatePerspectiveSaveButtonState();
+  _refreshPerspectiveOverlays();
+  Logger.info('perspective-capture',
+    `Replaced ${oldUid} → ${newUid} on ground ${_perspectiveGroundId}: ` +
     `${result.totals?.totalRefsRewritten ?? 0} ref(s) across ` +
-    `${result.totals?.localesRewritten ?? 0} locale(s), ` +
+    `${result.totals?.perspectivesRewritten ?? 0} perspective(s), ` +
     `${result.totals?.fragmentsRewritten ?? 0} fragment(s), ` +
     `${result.totals?.observationsRewritten ?? 0} observation(s)`);
 }
@@ -3710,7 +3798,7 @@ function _renderLandmarkVerifyOutcome(idx) {
   const { via, error, lifecycleBefore, lifecycleAfter, selectorChanged, skipped, reason, _localOnly } = outcome;
   if (skipped) {
     return `
-      <div class="dbg-locale-landmark-verify-outcome dbg-locale-landmark-verify-skipped">
+      <div class="dbg-perspective-landmark-verify-outcome dbg-perspective-landmark-verify-skipped">
         Verify skipped: ${escHtml(reason ?? 'unknown')}
       </div>`;
   }
@@ -3720,18 +3808,18 @@ function _renderLandmarkVerifyOutcome(idx) {
     // lifecycle to report on.
     if (_localOnly) {
       return `
-        <div class="dbg-locale-landmark-verify-outcome dbg-locale-landmark-verify-ok">
-          ✓ Selector matched on the live page (save locale to persist + enable lifecycle tracking)
+        <div class="dbg-perspective-landmark-verify-outcome dbg-perspective-landmark-verify-ok">
+          ✓ Selector matched on the live page (save perspective to persist + enable lifecycle tracking)
         </div>`;
     }
     return `
-      <div class="dbg-locale-landmark-verify-outcome dbg-locale-landmark-verify-ok">
+      <div class="dbg-perspective-landmark-verify-outcome dbg-perspective-landmark-verify-ok">
         ✓ Verified via cached selector — lifecycle ${escHtml(lifecycleBefore ?? '?')} → ${escHtml(lifecycleAfter ?? 'verified')}
       </div>`;
   }
   if (via === 'heuristic') {
     return `
-      <div class="dbg-locale-landmark-verify-outcome dbg-locale-landmark-verify-recovered">
+      <div class="dbg-perspective-landmark-verify-outcome dbg-perspective-landmark-verify-recovered">
         ↻ Heuristic recovery — selector ${selectorChanged ? 'updated to new element' : 'unchanged'}; lifecycle ${escHtml(lifecycleBefore ?? '?')} → ${escHtml(lifecycleAfter ?? 'verified')}
       </div>`;
   }
@@ -3740,18 +3828,18 @@ function _renderLandmarkVerifyOutcome(idx) {
     // (no registry record yet).
     if (_localOnly) {
       return `
-        <div class="dbg-locale-landmark-verify-outcome dbg-locale-landmark-verify-failed">
+        <div class="dbg-perspective-landmark-verify-outcome dbg-perspective-landmark-verify-failed">
           ⛔ Selector didn't match on the live page: ${escHtml(error ?? 'unknown')}
         </div>`;
     }
     return `
-      <div class="dbg-locale-landmark-verify-outcome dbg-locale-landmark-verify-failed">
+      <div class="dbg-perspective-landmark-verify-outcome dbg-perspective-landmark-verify-failed">
         ⛔ Verify failed: ${escHtml(error ?? 'unknown')} — lifecycle ${escHtml(lifecycleBefore ?? '?')} → stale-confirmed
       </div>`;
   }
   if (error) {
     return `
-      <div class="dbg-locale-landmark-verify-outcome dbg-locale-landmark-verify-failed">
+      <div class="dbg-perspective-landmark-verify-outcome dbg-perspective-landmark-verify-failed">
         ⛔ ${escHtml(error)}
       </div>`;
   }
@@ -3759,22 +3847,22 @@ function _renderLandmarkVerifyOutcome(idx) {
 }
 
 async function _verifyLandmarkInRow(idx) {
-  const lm = _locDraft?.landmarks?.[idx];
+  const lm = _perspectiveDraft?.landmarks?.[idx];
   if (!lm || !lm.uid) return;
-  if (_locTabId == null) {
+  if (_perspectiveTabId == null) {
     _landmarkVerifyOutcome.set(idx, { error: 'No active tab — switch to your target tab and try again.' });
-    renderLocaleLandmarks();
+    renderPerspectiveLandmarks();
     return;
   }
   if (_landmarkVerifyInFlight.has(idx)) return;
   _landmarkVerifyInFlight.add(idx);
   _landmarkVerifyOutcome.delete(idx);
-  renderLocaleLandmarks();
+  renderPerspectiveLandmarks();
 
   // v2.74.278 — Branch: Phase 9 verifier only works on registry-
   // persisted landmarks. Fresh draft landmarks (just picked, not yet
-  // Save Locale'd) have a UID but no registry record. For those, fall
-  // back to the local verifyLocaleLandmark path (which probes the
+  // Save Perspective'd) have a UID but no registry record. For those, fall
+  // back to the local verifyPerspectiveLandmark path (which probes the
   // selector via INSPECT_ELEMENT against the live page — same logic
   // Pick→Claude auto-runs).
   //
@@ -3788,14 +3876,14 @@ async function _verifyLandmarkInRow(idx) {
   } catch { /* treat as not-in-registry */ }
 
   if (!inRegistry) {
-    // Local-only verify path. Reuses verifyLocaleLandmark (the same
+    // Local-only verify path. Reuses verifyPerspectiveLandmark (the same
     // verifier that auto-runs after Pick→Claude). Pose its outcome
     // in the same shape so the row banner renders consistently.
     _landmarkVerifyInFlight.delete(idx);
     try {
-      await verifyLocaleLandmark(idx);
-      // After local verify, _locDraft.landmarks[idx].verified is set.
-      const v = _locDraft.landmarks[idx]?.verified;
+      await verifyPerspectiveLandmark(idx);
+      // After local verify, _perspectiveDraft.landmarks[idx].verified is set.
+      const v = _perspectiveDraft.landmarks[idx]?.verified;
       if (v?.score === 'ready' || v?.score === 'caveats') {
         _landmarkVerifyOutcome.set(idx, {
           via             : 'selector',
@@ -3817,7 +3905,7 @@ async function _verifyLandmarkInRow(idx) {
     } catch (e) {
       _landmarkVerifyOutcome.set(idx, { error: `Local verify failed: ${e.message}` });
     }
-    renderLocaleLandmarks();
+    renderPerspectiveLandmarks();
     return;
   }
 
@@ -3827,7 +3915,7 @@ async function _verifyLandmarkInRow(idx) {
   try {
     outcome = await chrome.runtime.sendMessage({
       type: 'VERIFY_LANDMARK',
-      payload: { uid: lm.uid, tabId: _locTabId },
+      payload: { uid: lm.uid, tabId: _perspectiveTabId },
     });
   } catch (e) {
     outcome = { success: false, error: e.message };
@@ -3835,12 +3923,12 @@ async function _verifyLandmarkInRow(idx) {
   _landmarkVerifyInFlight.delete(idx);
   if (!outcome || outcome.success === false) {
     _landmarkVerifyOutcome.set(idx, { error: outcome?.error ?? 'verify failed' });
-    renderLocaleLandmarks();
+    renderPerspectiveLandmarks();
     return;
   }
   _landmarkVerifyOutcome.set(idx, outcome);
   // After server-side mutation, pull the fresh landmark record so the
-  // in-memory locale draft reflects the new lifecycle + (possibly)
+  // in-memory perspective draft reflects the new lifecycle + (possibly)
   // updated selector.
   try {
     const getRes = await chrome.runtime.sendMessage({
@@ -3848,7 +3936,7 @@ async function _verifyLandmarkInRow(idx) {
     });
     if (getRes?.success && getRes.landmark) {
       const fresh = getRes.landmark;
-      _locDraft.landmarks[idx] = {
+      _perspectiveDraft.landmarks[idx] = {
         ...lm,
         selector  : fresh.selector ?? lm.selector,
         lifecycle : fresh.lifecycle ?? lm.lifecycle,
@@ -3856,11 +3944,11 @@ async function _verifyLandmarkInRow(idx) {
       };
     }
   } catch (e) {
-    Logger.debug('locale-capture', `GET_LANDMARK refresh after verify failed: ${e.message}`);
+    Logger.debug('perspective-capture', `GET_LANDMARK refresh after verify failed: ${e.message}`);
   }
-  renderLocaleLandmarks();
-  _refreshLocaleOverlays();
-  Logger.info('locale-capture',
+  renderPerspectiveLandmarks();
+  _refreshPerspectiveOverlays();
+  Logger.info('perspective-capture',
     `Verify ${lm.uid}: via=${outcome.via ?? '?'} ${outcome.lifecycleBefore ?? '?'} → ${outcome.lifecycleAfter ?? '?'}` +
     (outcome.selectorChanged ? ' (selector swapped)' : ''));
 }
@@ -3876,7 +3964,7 @@ async function _verifyLandmarkInRow(idx) {
 //
 // Event rendering is uniform: timestamp (relative) + kind icon +
 // brief detail line + affected landmark name (when uid present).
-// Per-uid name lookup pulls from the current locale draft first
+// Per-uid name lookup pulls from the current perspective draft first
 // (zero round-trip), then falls back to a batched GET_LANDMARKS
 // for unknowns.
 
@@ -3968,13 +4056,13 @@ function _renderEventDetailLine(event) {
 }
 
 async function _toggleEventsPanel() {
-  if (!locEventsToggleBtn || !locEventsBody) return;
+  if (!perspectiveEventsToggleBtn || !perspectiveEventsBody) return;
   _eventsExpanded = !_eventsExpanded;
-  locEventsToggleBtn.setAttribute('aria-expanded', _eventsExpanded ? 'true' : 'false');
-  const chevron = locEventsToggleBtn.querySelector('.dbg-locale-events-chevron');
+  perspectiveEventsToggleBtn.setAttribute('aria-expanded', _eventsExpanded ? 'true' : 'false');
+  const chevron = perspectiveEventsToggleBtn.querySelector('.dbg-perspective-events-chevron');
   if (chevron) chevron.textContent = _eventsExpanded ? '▾' : '▸';
   if (_eventsExpanded) {
-    locEventsBody.classList.remove('hidden');
+    perspectiveEventsBody.classList.remove('hidden');
     await _refreshEventsPanel();
     // v2.74.263 — Subscribe to live events while panel is open. The
     // subscribe() implementation uses chrome.storage.onChanged + an
@@ -3982,17 +4070,17 @@ async function _toggleEventsPanel() {
     // events (not for ring-buffer evictions of old ones).
     _attachEventsLiveSubscription();
   } else {
-    locEventsBody.classList.add('hidden');
+    perspectiveEventsBody.classList.add('hidden');
     _detachEventsLiveSubscription();
   }
 }
 
 function _attachEventsLiveSubscription() {
-  if (_eventsUnsubscribe || !_locGroundId) return;
+  if (_eventsUnsubscribe || !_perspectiveGroundId) return;
   try {
-    _eventsUnsubscribe = subscribeGroundEvents(_locGroundId, _onLiveEventsAdded);
+    _eventsUnsubscribe = subscribeGroundEvents(_perspectiveGroundId, _onLiveEventsAdded);
   } catch (e) {
-    Logger.debug('locale-capture', `subscribe failed: ${e.message}`);
+    Logger.debug('perspective-capture', `subscribe failed: ${e.message}`);
     _eventsUnsubscribe = null;
   }
 }
@@ -4006,7 +4094,7 @@ function _detachEventsLiveSubscription() {
 
 async function _onLiveEventsAdded(newEvents) {
   // Guard: panel may have closed between commit and callback dispatch.
-  if (!_eventsExpanded || !locEventsList) return;
+  if (!_eventsExpanded || !perspectiveEventsList) return;
   if (!Array.isArray(newEvents) || newEvents.length === 0) return;
   // Merge new events into the cache (newest-first ordering preserved).
   const existingIds = new Set((_eventsCache ?? []).map(e => e?.id));
@@ -4014,8 +4102,8 @@ async function _onLiveEventsAdded(newEvents) {
   if (additions.length === 0) return;
   _eventsCache = [...additions, ...(_eventsCache ?? [])].slice(0, 30);
   // Update count badge.
-  if (locEventsCount) {
-    locEventsCount.textContent = _eventsCache.length === 0 ? '' : `(${_eventsCache.length})`;
+  if (perspectiveEventsCount) {
+    perspectiveEventsCount.textContent = _eventsCache.length === 0 ? '' : `(${_eventsCache.length})`;
   }
   // Fetch landmark names for any new uids not already cached.
   await _populateEventLandmarkNames(additions);
@@ -4026,7 +4114,7 @@ async function _onLiveEventsAdded(newEvents) {
   // summary so the "Last 24h" counts pick up the new event.
   try {
     const res = await chrome.runtime.sendMessage({
-      type: 'LIST_LANDMARKS_FOR_GROUND', payload: { groundId: _locGroundId },
+      type: 'LIST_LANDMARKS_FOR_GROUND', payload: { groundId: _perspectiveGroundId },
     });
     if (res?.success) {
       _eventsLandmarksCache = res.landmarks ?? [];
@@ -4037,31 +4125,31 @@ async function _onLiveEventsAdded(newEvents) {
 }
 
 async function _refreshEventsPanel() {
-  if (!locEventsList || !_locGroundId) return;
+  if (!perspectiveEventsList || !_perspectiveGroundId) return;
   if (_eventsLoading) return;
   _eventsLoading = true;
-  locEventsList.innerHTML = `<div class="dbg-locale-events-loading">⌛ Loading events…</div>`;
+  perspectiveEventsList.innerHTML = `<div class="dbg-perspective-events-loading">⌛ Loading events…</div>`;
   try {
     const [eventsRes, landmarksRes] = await Promise.all([
       chrome.runtime.sendMessage({
         type   : 'LIST_GROUND_EVENTS',
-        payload: { groundId: _locGroundId, opts: { limit: 30 } },
+        payload: { groundId: _perspectiveGroundId, opts: { limit: 30 } },
       }),
       // v2.74.262 — Also fetch all landmarks on the ground so we can
       // compute the stale-suspected count for the header badge. Single
       // round-trip per panel-open; fine for typical ground sizes.
       chrome.runtime.sendMessage({
         type   : 'LIST_LANDMARKS_FOR_GROUND',
-        payload: { groundId: _locGroundId },
+        payload: { groundId: _perspectiveGroundId },
       }).catch(() => null),
     ]);
     if (!eventsRes?.success) {
-      locEventsList.innerHTML = `<div class="dbg-locale-events-error">⛔ ${escHtml(eventsRes?.error ?? 'fetch failed')}</div>`;
+      perspectiveEventsList.innerHTML = `<div class="dbg-perspective-events-error">⛔ ${escHtml(eventsRes?.error ?? 'fetch failed')}</div>`;
       return;
     }
     _eventsCache = Array.isArray(eventsRes.events) ? eventsRes.events : [];
-    if (locEventsCount) {
-      locEventsCount.textContent = _eventsCache.length === 0 ? ''
+    if (perspectiveEventsCount) {
+      perspectiveEventsCount.textContent = _eventsCache.length === 0 ? ''
         : `(${_eventsCache.length})`;
     }
     // v2.74.262 — Stale-suspected count + enabled state for Verify all.
@@ -4073,7 +4161,7 @@ async function _refreshEventsPanel() {
     await _populateEventLandmarkNames(_eventsCache);
     _renderEventsList();
   } catch (e) {
-    locEventsList.innerHTML = `<div class="dbg-locale-events-error">⛔ ${escHtml(e.message)}</div>`;
+    perspectiveEventsList.innerHTML = `<div class="dbg-perspective-events-error">⛔ ${escHtml(e.message)}</div>`;
   } finally {
     _eventsLoading = false;
   }
@@ -4090,7 +4178,7 @@ async function _refreshEventsPanel() {
 // Empty states collapse cleanly (e.g., "No substrate activity in the
 // last 24h." when events older than that or absent).
 function _renderHealthSummary(landmarks, events) {
-  if (!locEventsHealth) return;
+  if (!perspectiveEventsHealth) return;
   const lms = Array.isArray(landmarks) ? landmarks : [];
   const evs = Array.isArray(events) ? events : [];
   // Landmark lifecycle aggregation.
@@ -4118,78 +4206,78 @@ function _renderHealthSummary(landmarks, events) {
   }
   // Render. Skip the whole banner if there's nothing meaningful.
   if (total === 0 && recent.length === 0) {
-    locEventsHealth.innerHTML = '';
+    perspectiveEventsHealth.innerHTML = '';
     return;
   }
   const lmParts = [];
-  if (total > 0) lmParts.push(`<span class="dbg-locale-events-health-total">${total} total</span>`);
-  if (lcCounts.verified > 0)         lmParts.push(`<span class="dbg-locale-events-health-tag tag-verified">✓ ${lcCounts.verified} verified</span>`);
-  if (lcCounts['stale-suspected'] > 0) lmParts.push(`<span class="dbg-locale-events-health-tag tag-suspected">⚠ ${lcCounts['stale-suspected']} stale</span>`);
-  if (lcCounts['stale-confirmed'] > 0) lmParts.push(`<span class="dbg-locale-events-health-tag tag-confirmed">⛔ ${lcCounts['stale-confirmed']} broken</span>`);
-  if (lcCounts.deprecated > 0)       lmParts.push(`<span class="dbg-locale-events-health-tag tag-deprecated">deprecated ${lcCounts.deprecated}</span>`);
-  if (lcCounts.fresh > 0 && lcCounts.fresh < total) lmParts.push(`<span class="dbg-locale-events-health-tag tag-fresh">${lcCounts.fresh} fresh</span>`);
+  if (total > 0) lmParts.push(`<span class="dbg-perspective-events-health-total">${total} total</span>`);
+  if (lcCounts.verified > 0)         lmParts.push(`<span class="dbg-perspective-events-health-tag tag-verified">✓ ${lcCounts.verified} verified</span>`);
+  if (lcCounts['stale-suspected'] > 0) lmParts.push(`<span class="dbg-perspective-events-health-tag tag-suspected">⚠ ${lcCounts['stale-suspected']} stale</span>`);
+  if (lcCounts['stale-confirmed'] > 0) lmParts.push(`<span class="dbg-perspective-events-health-tag tag-confirmed">⛔ ${lcCounts['stale-confirmed']} broken</span>`);
+  if (lcCounts.deprecated > 0)       lmParts.push(`<span class="dbg-perspective-events-health-tag tag-deprecated">deprecated ${lcCounts.deprecated}</span>`);
+  if (lcCounts.fresh > 0 && lcCounts.fresh < total) lmParts.push(`<span class="dbg-perspective-events-health-tag tag-fresh">${lcCounts.fresh} fresh</span>`);
   const lmLine = lmParts.length > 0
-    ? `<div class="dbg-locale-events-health-line"><span class="dbg-locale-events-health-label">Landmarks:</span> ${lmParts.join(' · ')}</div>`
+    ? `<div class="dbg-perspective-events-health-line"><span class="dbg-perspective-events-health-label">Landmarks:</span> ${lmParts.join(' · ')}</div>`
     : '';
 
   const recentParts = [];
   if (recoveries > 0) {
-    const fuzzyNote = fuzzyRecoveries > 0 ? ` <span class="dbg-locale-events-health-subtle">(${fuzzyRecoveries} fuzzy)</span>` : '';
-    recentParts.push(`<span class="dbg-locale-events-health-tag tag-recovered">↻ ${recoveries} recoveries${fuzzyNote}</span>`);
+    const fuzzyNote = fuzzyRecoveries > 0 ? ` <span class="dbg-perspective-events-health-subtle">(${fuzzyRecoveries} fuzzy)</span>` : '';
+    recentParts.push(`<span class="dbg-perspective-events-health-tag tag-recovered">↻ ${recoveries} recoveries${fuzzyNote}</span>`);
   }
-  if (drifts > 0)    recentParts.push(`<span class="dbg-locale-events-health-tag tag-drift">⚠ ${drifts} drift</span>`);
-  if (failures > 0)  recentParts.push(`<span class="dbg-locale-events-health-tag tag-failed">⛔ ${failures} failures</span>`);
-  if (observed > 0)  recentParts.push(`<span class="dbg-locale-events-health-tag tag-observed">👁 ${observed} observed</span>`);
+  if (drifts > 0)    recentParts.push(`<span class="dbg-perspective-events-health-tag tag-drift">⚠ ${drifts} drift</span>`);
+  if (failures > 0)  recentParts.push(`<span class="dbg-perspective-events-health-tag tag-failed">⛔ ${failures} failures</span>`);
+  if (observed > 0)  recentParts.push(`<span class="dbg-perspective-events-health-tag tag-observed">👁 ${observed} observed</span>`);
   const recentLine = recentParts.length > 0
-    ? `<div class="dbg-locale-events-health-line"><span class="dbg-locale-events-health-label">Last 24h:</span> ${recentParts.join(' · ')}</div>`
+    ? `<div class="dbg-perspective-events-health-line"><span class="dbg-perspective-events-health-label">Last 24h:</span> ${recentParts.join(' · ')}</div>`
     : (total > 0
-        ? `<div class="dbg-locale-events-health-line dbg-locale-events-health-quiet"><span class="dbg-locale-events-health-label">Last 24h:</span> No substrate activity.</div>`
+        ? `<div class="dbg-perspective-events-health-line dbg-perspective-events-health-quiet"><span class="dbg-perspective-events-health-label">Last 24h:</span> No substrate activity.</div>`
         : '');
-  locEventsHealth.innerHTML = lmLine + recentLine;
+  perspectiveEventsHealth.innerHTML = lmLine + recentLine;
 }
 
 function _refreshStaleBadge(landmarks) {
-  if (!locEventsStaleBadge || !locEventsVerifyAllBtn) return;
+  if (!perspectiveEventsStaleBadge || !perspectiveEventsVerifyAllBtn) return;
   const list = Array.isArray(landmarks) ? landmarks : [];
   const staleCount = list.filter(lm => lm?.lifecycle === 'stale-suspected').length;
   if (staleCount === 0) {
-    locEventsStaleBadge.classList.add('hidden');
-    locEventsStaleBadge.textContent = '';
-    locEventsVerifyAllBtn.disabled = true;
-    locEventsVerifyAllBtn.title = 'No stale-suspected landmarks on this Ground';
+    perspectiveEventsStaleBadge.classList.add('hidden');
+    perspectiveEventsStaleBadge.textContent = '';
+    perspectiveEventsVerifyAllBtn.disabled = true;
+    perspectiveEventsVerifyAllBtn.title = 'No stale-suspected landmarks on this Ground';
   } else {
-    locEventsStaleBadge.classList.remove('hidden');
-    locEventsStaleBadge.textContent = `${staleCount} stale`;
-    locEventsVerifyAllBtn.disabled = _eventsBulkVerifyInFlight;
-    locEventsVerifyAllBtn.title = `Re-probe ${staleCount} stale-suspected landmark${staleCount === 1 ? '' : 's'} against the current tab`;
+    perspectiveEventsStaleBadge.classList.remove('hidden');
+    perspectiveEventsStaleBadge.textContent = `${staleCount} stale`;
+    perspectiveEventsVerifyAllBtn.disabled = _eventsBulkVerifyInFlight;
+    perspectiveEventsVerifyAllBtn.title = `Re-probe ${staleCount} stale-suspected landmark${staleCount === 1 ? '' : 's'} against the current tab`;
   }
 }
 
 async function _verifyAllStaleOnGround() {
-  if (!_locGroundId) return;
-  if (_locTabId == null) {
+  if (!_perspectiveGroundId) return;
+  if (_perspectiveTabId == null) {
     _showBulkOutcome('error', 'No active tab — switch to your target tab and try again.');
     return;
   }
   if (_eventsBulkVerifyInFlight) return;
   _eventsBulkVerifyInFlight = true;
-  if (locEventsVerifyAllBtn) {
-    locEventsVerifyAllBtn.disabled = true;
-    locEventsVerifyAllBtn.textContent = '⌛ Verifying…';
+  if (perspectiveEventsVerifyAllBtn) {
+    perspectiveEventsVerifyAllBtn.disabled = true;
+    perspectiveEventsVerifyAllBtn.textContent = '⌛ Verifying…';
   }
   _showBulkOutcome('loading', 'Probing stale-suspected landmarks…');
   let result;
   try {
     result = await chrome.runtime.sendMessage({
       type   : 'VERIFY_STALE_SUSPECTED_ON_GROUND',
-      payload: { groundId: _locGroundId, tabId: _locTabId },
+      payload: { groundId: _perspectiveGroundId, tabId: _perspectiveTabId },
     });
   } catch (e) {
     result = { success: false, error: e.message };
   }
   _eventsBulkVerifyInFlight = false;
-  if (locEventsVerifyAllBtn) {
-    locEventsVerifyAllBtn.textContent = 'Verify all stale';
+  if (perspectiveEventsVerifyAllBtn) {
+    perspectiveEventsVerifyAllBtn.textContent = 'Verify all stale';
   }
   if (!result?.success) {
     _showBulkOutcome('error', `Bulk verify failed: ${result?.error ?? 'unknown'}`);
@@ -4213,10 +4301,10 @@ async function _verifyAllStaleOnGround() {
   // and re-fetch landmarks so the stale-count badge reflects the new
   // lifecycle state.
   await _refreshEventsPanel();
-  // Refresh landmark row lifecycle chips in the locale view if any
-  // of the verified landmarks belong to the current locale.
-  if (Array.isArray(_locDraft?.landmarks)) {
-    const draftUids = _locDraft.landmarks.map(lm => lm?.uid).filter(Boolean);
+  // Refresh landmark row lifecycle chips in the perspective view if any
+  // of the verified landmarks belong to the current perspective.
+  if (Array.isArray(_perspectiveDraft?.landmarks)) {
+    const draftUids = _perspectiveDraft.landmarks.map(lm => lm?.uid).filter(Boolean);
     const touchedUids = new Set((result.outcomes ?? []).map(o => o.uid));
     const overlap = draftUids.filter(u => touchedUids.has(u));
     if (overlap.length > 0) {
@@ -4225,37 +4313,37 @@ async function _verifyAllStaleOnGround() {
           type: 'GET_LANDMARKS', payload: { uids: overlap },
         });
         if (getRes?.success && getRes.landmarks) {
-          for (let i = 0; i < _locDraft.landmarks.length; i++) {
-            const lm = _locDraft.landmarks[i];
+          for (let i = 0; i < _perspectiveDraft.landmarks.length; i++) {
+            const lm = _perspectiveDraft.landmarks[i];
             const fresh = lm?.uid ? getRes.landmarks[lm.uid] : null;
             if (fresh) {
-              _locDraft.landmarks[i] = {
+              _perspectiveDraft.landmarks[i] = {
                 ...lm,
                 selector : fresh.selector ?? lm.selector,
                 lifecycle: fresh.lifecycle ?? lm.lifecycle,
               };
             }
           }
-          renderLocaleLandmarks();
+          renderPerspectiveLandmarks();
         }
       } catch (e) {
-        Logger.debug('locale-capture', `bulk-verify landmark refresh failed: ${e.message}`);
+        Logger.debug('perspective-capture', `bulk-verify landmark refresh failed: ${e.message}`);
       }
     }
   }
 }
 
 function _showBulkOutcome(level, message) {
-  if (!locEventsBulkOutcome) return;
-  locEventsBulkOutcome.classList.remove('hidden');
-  locEventsBulkOutcome.className = `dbg-locale-events-bulk-outcome dbg-locale-events-bulk-${level}`;
-  locEventsBulkOutcome.textContent = message;
+  if (!perspectiveEventsBulkOutcome) return;
+  perspectiveEventsBulkOutcome.classList.remove('hidden');
+  perspectiveEventsBulkOutcome.className = `dbg-perspective-events-bulk-outcome dbg-perspective-events-bulk-${level}`;
+  perspectiveEventsBulkOutcome.textContent = message;
 }
 
 async function _populateEventLandmarkNames(events) {
-  // First pass: seed names from the current locale draft (free).
-  if (Array.isArray(_locDraft?.landmarks)) {
-    for (const lm of _locDraft.landmarks) {
+  // First pass: seed names from the current perspective draft (free).
+  if (Array.isArray(_perspectiveDraft?.landmarks)) {
+    for (const lm of _perspectiveDraft.landmarks) {
       if (lm?.uid && lm.accessibleName) _eventsLandmarkNames.set(lm.uid, lm.accessibleName);
     }
   }
@@ -4282,15 +4370,15 @@ async function _populateEventLandmarkNames(events) {
       }
     }
   } catch (e) {
-    Logger.debug('locale-capture', `event landmark name fetch failed: ${e.message}`);
+    Logger.debug('perspective-capture', `event landmark name fetch failed: ${e.message}`);
   }
 }
 
 function _renderEventsList() {
-  if (!locEventsList) return;
+  if (!perspectiveEventsList) return;
   const events = _eventsCache ?? [];
   if (events.length === 0) {
-    locEventsList.innerHTML = `<div class="dbg-locale-events-empty">No substrate events yet. Run a fragment or trigger verifier/replace to see activity here.</div>`;
+    perspectiveEventsList.innerHTML = `<div class="dbg-perspective-events-empty">No substrate events yet. Run a fragment or trigger verifier/replace to see activity here.</div>`;
     return;
   }
   // Events come newest-first from LIST_GROUND_EVENTS (desc by default).
@@ -4306,30 +4394,30 @@ function _renderEventsList() {
     let actionHtml = '';
     if (ev.kind === 'landmark-effect-drift' && ev.uid && ev.details?.observedEffect) {
       if (_eventsAppliedDrift.has(ev.id)) {
-        actionHtml = `<span class="dbg-locale-events-action-applied" title="Landmark's effect updated to the observed value">✓ Applied</span>`;
+        actionHtml = `<span class="dbg-perspective-events-action-applied" title="Landmark's effect updated to the observed value">✓ Applied</span>`;
       } else if (_eventsApplyInFlight.has(ev.id)) {
-        actionHtml = `<button class="dbg-locale-events-apply-btn" disabled type="button">⌛</button>`;
+        actionHtml = `<button class="dbg-perspective-events-apply-btn" disabled type="button">⌛</button>`;
       } else {
         // v2.74.310 — observedEffect is now an Effect object (§ 5).
         // Serialize as JSON in the data attr; _applyDriftEffect parses it.
         const obsLabel = _formatEffectForDisplay(ev.details.observedEffect);
         const obsJson  = JSON.stringify(ev.details.observedEffect);
-        actionHtml = `<button class="dbg-locale-events-apply-btn" data-action="apply-drift" data-event-id="${escAttr(ev.id)}" data-uid="${escAttr(ev.uid)}" data-effect="${escAttr(obsJson)}" type="button" title="Accept the observed effect (${escAttr(obsLabel)}) as this landmark's effect">Apply</button>`;
+        actionHtml = `<button class="dbg-perspective-events-apply-btn" data-action="apply-drift" data-event-id="${escAttr(ev.id)}" data-uid="${escAttr(ev.uid)}" data-effect="${escAttr(obsJson)}" type="button" title="Accept the observed effect (${escAttr(obsLabel)}) as this landmark's effect">Apply</button>`;
       }
     }
     return `
-      <div class="dbg-locale-events-row ${meta.cssCls}">
-        <span class="dbg-locale-events-icon" title="${escAttr(ev.kind)}">${meta.icon}</span>
-        <span class="dbg-locale-events-kind">${escHtml(meta.label)}</span>
-        <span class="dbg-locale-events-landmark" title="${escAttr(ev.uid ?? '')}">${escHtml(name)}</span>
-        <span class="dbg-locale-events-detail">${detail}</span>
-        <span class="dbg-locale-events-time" title="${escAttr(new Date(ev.ts).toISOString())}">${escHtml(_formatRelativeTime(ev.ts))}</span>
-        <span class="dbg-locale-events-action">${actionHtml}</span>
+      <div class="dbg-perspective-events-row ${meta.cssCls}">
+        <span class="dbg-perspective-events-icon" title="${escAttr(ev.kind)}">${meta.icon}</span>
+        <span class="dbg-perspective-events-kind">${escHtml(meta.label)}</span>
+        <span class="dbg-perspective-events-landmark" title="${escAttr(ev.uid ?? '')}">${escHtml(name)}</span>
+        <span class="dbg-perspective-events-detail">${detail}</span>
+        <span class="dbg-perspective-events-time" title="${escAttr(new Date(ev.ts).toISOString())}">${escHtml(_formatRelativeTime(ev.ts))}</span>
+        <span class="dbg-perspective-events-action">${actionHtml}</span>
       </div>`;
   }).join('');
-  locEventsList.innerHTML = rows;
+  perspectiveEventsList.innerHTML = rows;
   // v2.74.266 — Wire apply-drift handlers (delegated).
-  locEventsList.querySelectorAll('[data-action="apply-drift"]').forEach(btn => {
+  perspectiveEventsList.querySelectorAll('[data-action="apply-drift"]').forEach(btn => {
     btn.addEventListener('click', () => _applyDriftEffect(btn.dataset.eventId, btn.dataset.uid, btn.dataset.effect));
   });
 }
@@ -4370,17 +4458,17 @@ async function _applyDriftEffect(eventId, uid, newEffectRaw) {
       payload: { uid, patch: { effect: effectPatch, effectSource: 'observed' } },
     });
     if (!res?.success) {
-      showLocaleWarning(`Drift apply failed: ${res?.error ?? 'unknown'}`);
+      showPerspectiveWarning(`Drift apply failed: ${res?.error ?? 'unknown'}`);
       return;
     }
     _eventsAppliedDrift.add(eventId);
-    Logger.info('locale-capture', `Applied drift: ${uid} effect → ${JSON.stringify(effectPatch)} (source=observed)`);
+    Logger.info('perspective-capture', `Applied drift: ${uid} effect → ${JSON.stringify(effectPatch)} (source=observed)`);
     // Refresh the in-memory landmark copy if it's in the current draft.
-    if (Array.isArray(_locDraft?.landmarks)) {
-      for (let i = 0; i < _locDraft.landmarks.length; i++) {
-        if (_locDraft.landmarks[i]?.uid === uid) {
-          _locDraft.landmarks[i] = {
-            ..._locDraft.landmarks[i],
+    if (Array.isArray(_perspectiveDraft?.landmarks)) {
+      for (let i = 0; i < _perspectiveDraft.landmarks.length; i++) {
+        if (_perspectiveDraft.landmarks[i]?.uid === uid) {
+          _perspectiveDraft.landmarks[i] = {
+            ..._perspectiveDraft.landmarks[i],
             effect: effectPatch,
             effectSource: 'observed',
           };
@@ -4388,7 +4476,7 @@ async function _applyDriftEffect(eventId, uid, newEffectRaw) {
       }
     }
   } catch (e) {
-    showLocaleWarning(`Drift apply failed: ${e.message}`);
+    showPerspectiveWarning(`Drift apply failed: ${e.message}`);
   } finally {
     _eventsApplyInFlight.delete(eventId);
     _renderEventsList();
@@ -4396,21 +4484,21 @@ async function _applyDriftEffect(eventId, uid, newEffectRaw) {
 }
 
 async function _clearEventsPanel() {
-  if (!_locGroundId) return;
+  if (!_perspectiveGroundId) return;
   if (!confirm('Clear all substrate events for this Ground? This is informational telemetry — clearing does not affect landmark state.')) return;
   try {
     const res = await chrome.runtime.sendMessage({
-      type: 'CLEAR_GROUND_EVENTS', payload: { groundId: _locGroundId },
+      type: 'CLEAR_GROUND_EVENTS', payload: { groundId: _perspectiveGroundId },
     });
     if (res?.success) {
       _eventsCache = [];
-      if (locEventsCount) locEventsCount.textContent = '';
+      if (perspectiveEventsCount) perspectiveEventsCount.textContent = '';
       _renderEventsList();
     } else {
-      showLocaleWarning(`Clear failed: ${res?.error ?? 'unknown'}`);
+      showPerspectiveWarning(`Clear failed: ${res?.error ?? 'unknown'}`);
     }
   } catch (e) {
-    showLocaleWarning(`Clear failed: ${e.message}`);
+    showPerspectiveWarning(`Clear failed: ${e.message}`);
   }
 }
 
@@ -4422,11 +4510,11 @@ async function _clearEventsPanel() {
 //   iframeLoaded  { contextName }            — named iframe context loaded
 //
 // urlMatches lives in the dedicated URL pattern field above (legacy
-// shape). The two are AND'd at runtime by LocalePredicates.
+// shape). The two are AND'd at runtime by PerspectivePredicates.
 //
 // Tree-form (AND/OR/NOT operators) is NOT authorable here. If the
-// hydrating locale carries a tree, it's preserved via
-// _locDraft._predicatesOriginalTree and the editor stays empty
+// hydrating perspective carries a tree, it's preserved via
+// _perspectiveDraft._predicatesOriginalTree and the editor stays empty
 // (author sees a warning at load time). Future tree editor lands as
 // a Studio surface.
 
@@ -4434,7 +4522,7 @@ const _PRED_KIND_CHOICES = [
   { value: 'urlMatches',      label: 'URL matches' },
   { value: 'visible',         label: 'Landmark visible' },
   { value: 'hasText',         label: 'Landmark has text' },
-  // v2.74.331 — LOCALE_SPEC § 4: complete the predicate vocabulary.
+  // v2.74.331 — PERSPECTIVE_SPEC § 4: complete the predicate vocabulary.
   { value: 'attributeEquals', label: 'Landmark attribute equals' },
   { value: 'landmarkExists',  label: 'Landmark exists' },
   { value: 'iframeLoaded',    label: 'iframe context loaded' },
@@ -4445,7 +4533,7 @@ function _landmarkUidOptionsForPredicates(selectedUid) {
   // the most likely target for visible/hasText. Empty option first
   // so author actively picks.
   const opts = ['<option value="">— pick landmark —</option>'];
-  for (const lm of (_locDraft?.landmarks ?? [])) {
+  for (const lm of (_perspectiveDraft?.landmarks ?? [])) {
     if (!lm?.uid) continue;   // un-persisted landmarks can't be referenced
     const label = lm.accessibleName ?? lm.alias ?? lm.uid;
     const sel = lm.uid === selectedUid ? ' selected' : '';
@@ -4466,105 +4554,105 @@ function _renderPredicateRow(predicate, idx) {
       `<option value="${m}"${m === mode ? ' selected' : ''}>${m}</option>`
     ).join('');
     bodyHtml = `
-      <label class="dbg-locale-predicate-field">
-        <span class="dbg-locale-predicate-field-label">URL pattern</span>
-        <input type="text" class="dbg-locale-predicate-value" data-action="predicate-pattern" data-idx="${idx}" maxlength="400" value="${escAttr(predicate.pattern ?? '')}" placeholder="e.g. github.com/repos, or full URL" />
+      <label class="dbg-perspective-predicate-field">
+        <span class="dbg-perspective-predicate-field-label">URL pattern</span>
+        <input type="text" class="dbg-perspective-predicate-value" data-action="predicate-pattern" data-idx="${idx}" maxlength="400" value="${escAttr(predicate.pattern ?? '')}" placeholder="e.g. github.com/repos, or full URL" />
       </label>
-      <label class="dbg-locale-predicate-field">
-        <span class="dbg-locale-predicate-field-label">Match mode</span>
+      <label class="dbg-perspective-predicate-field">
+        <span class="dbg-perspective-predicate-field-label">Match mode</span>
         <select data-action="predicate-mode" data-idx="${idx}">${modeOpts}</select>
       </label>`;
   } else if (kind === 'visible') {
     bodyHtml = `
-      <label class="dbg-locale-predicate-field">
-        <span class="dbg-locale-predicate-field-label">Target landmark</span>
-        <select class="dbg-locale-predicate-target" data-action="predicate-target" data-idx="${idx}">
+      <label class="dbg-perspective-predicate-field">
+        <span class="dbg-perspective-predicate-field-label">Target landmark</span>
+        <select class="dbg-perspective-predicate-target" data-action="predicate-target" data-idx="${idx}">
           ${_landmarkUidOptionsForPredicates(predicate.target)}
         </select>
       </label>`;
   } else if (kind === 'hasText') {
     const csChecked = predicate.caseSensitive === true ? ' checked' : '';
     bodyHtml = `
-      <label class="dbg-locale-predicate-field">
-        <span class="dbg-locale-predicate-field-label">Target landmark</span>
-        <select class="dbg-locale-predicate-target" data-action="predicate-target" data-idx="${idx}">
+      <label class="dbg-perspective-predicate-field">
+        <span class="dbg-perspective-predicate-field-label">Target landmark</span>
+        <select class="dbg-perspective-predicate-target" data-action="predicate-target" data-idx="${idx}">
           ${_landmarkUidOptionsForPredicates(predicate.target)}
         </select>
       </label>
-      <label class="dbg-locale-predicate-field">
-        <span class="dbg-locale-predicate-field-label">Text contains</span>
-        <input type="text" class="dbg-locale-predicate-value" data-action="predicate-value" data-idx="${idx}" maxlength="280" value="${escAttr(predicate.value ?? '')}" placeholder="substring to match" />
+      <label class="dbg-perspective-predicate-field">
+        <span class="dbg-perspective-predicate-field-label">Text contains</span>
+        <input type="text" class="dbg-perspective-predicate-value" data-action="predicate-value" data-idx="${idx}" maxlength="280" value="${escAttr(predicate.value ?? '')}" placeholder="substring to match" />
       </label>
-      <label class="dbg-locale-predicate-checkbox-label">
+      <label class="dbg-perspective-predicate-checkbox-label">
         <input type="checkbox" data-action="predicate-case" data-idx="${idx}"${csChecked} />
         <span>case-sensitive</span>
       </label>`;
   } else if (kind === 'attributeEquals') {
     // v2.74.331 — target landmark + attribute name + expected value.
     bodyHtml = `
-      <label class="dbg-locale-predicate-field">
-        <span class="dbg-locale-predicate-field-label">Target landmark</span>
-        <select class="dbg-locale-predicate-target" data-action="predicate-target" data-idx="${idx}">
+      <label class="dbg-perspective-predicate-field">
+        <span class="dbg-perspective-predicate-field-label">Target landmark</span>
+        <select class="dbg-perspective-predicate-target" data-action="predicate-target" data-idx="${idx}">
           ${_landmarkUidOptionsForPredicates(predicate.target)}
         </select>
       </label>
-      <label class="dbg-locale-predicate-field">
-        <span class="dbg-locale-predicate-field-label">Attribute</span>
-        <input type="text" class="dbg-locale-predicate-attr" data-action="predicate-attribute" data-idx="${idx}" maxlength="80" value="${escAttr(predicate.attribute ?? '')}" placeholder="e.g. aria-expanded, data-state, role" />
+      <label class="dbg-perspective-predicate-field">
+        <span class="dbg-perspective-predicate-field-label">Attribute</span>
+        <input type="text" class="dbg-perspective-predicate-attr" data-action="predicate-attribute" data-idx="${idx}" maxlength="80" value="${escAttr(predicate.attribute ?? '')}" placeholder="e.g. aria-expanded, data-state, role" />
       </label>
-      <label class="dbg-locale-predicate-field">
-        <span class="dbg-locale-predicate-field-label">Equals value</span>
-        <input type="text" class="dbg-locale-predicate-value" data-action="predicate-value" data-idx="${idx}" maxlength="280" value="${escAttr(predicate.value ?? '')}" placeholder="exact attribute value" />
+      <label class="dbg-perspective-predicate-field">
+        <span class="dbg-perspective-predicate-field-label">Equals value</span>
+        <input type="text" class="dbg-perspective-predicate-value" data-action="predicate-value" data-idx="${idx}" maxlength="280" value="${escAttr(predicate.value ?? '')}" placeholder="exact attribute value" />
       </label>`;
   } else if (kind === 'landmarkExists') {
     // v2.74.331 — target landmark only (selector resolves in DOM).
     bodyHtml = `
-      <label class="dbg-locale-predicate-field">
-        <span class="dbg-locale-predicate-field-label">Target landmark</span>
-        <select class="dbg-locale-predicate-target" data-action="predicate-target" data-idx="${idx}">
+      <label class="dbg-perspective-predicate-field">
+        <span class="dbg-perspective-predicate-field-label">Target landmark</span>
+        <select class="dbg-perspective-predicate-target" data-action="predicate-target" data-idx="${idx}">
           ${_landmarkUidOptionsForPredicates(predicate.target)}
         </select>
       </label>`;
   } else if (kind === 'iframeLoaded') {
     bodyHtml = `
-      <label class="dbg-locale-predicate-field">
-        <span class="dbg-locale-predicate-field-label">Context name</span>
-        <input type="text" class="dbg-locale-predicate-ctxname" data-action="predicate-ctxname" data-idx="${idx}" maxlength="80" value="${escAttr(predicate.contextName ?? '')}" placeholder="declared in this locale's iframeContexts[]" />
+      <label class="dbg-perspective-predicate-field">
+        <span class="dbg-perspective-predicate-field-label">Context name</span>
+        <input type="text" class="dbg-perspective-predicate-ctxname" data-action="predicate-ctxname" data-idx="${idx}" maxlength="80" value="${escAttr(predicate.contextName ?? '')}" placeholder="declared in this perspective's iframeContexts[]" />
       </label>`;
   }
   return `
-    <div class="dbg-locale-predicate-row" data-idx="${idx}">
-      <div class="dbg-locale-predicate-head">
-        <select class="dbg-locale-predicate-kind" data-action="predicate-kind" data-idx="${idx}">${kindOpts}</select>
-        <button class="dbg-locale-predicate-remove" data-action="predicate-remove" data-idx="${idx}" title="Remove this predicate" type="button">✕</button>
+    <div class="dbg-perspective-predicate-row" data-idx="${idx}">
+      <div class="dbg-perspective-predicate-head">
+        <select class="dbg-perspective-predicate-kind" data-action="predicate-kind" data-idx="${idx}">${kindOpts}</select>
+        <button class="dbg-perspective-predicate-remove" data-action="predicate-remove" data-idx="${idx}" title="Remove this predicate" type="button">✕</button>
       </div>
-      <div class="dbg-locale-predicate-body">${bodyHtml}</div>
+      <div class="dbg-perspective-predicate-body">${bodyHtml}</div>
     </div>`;
 }
 
 function _renderPredicates() {
-  if (!locPredicatesList || !_locDraft) return;
+  if (!perspectivePredicatesList || !_perspectiveDraft) return;
   // v2.74.271 — Reflect operator selector state.
-  if (locPredicatesOpSelect && locPredicatesOpSelect.value !== _predicatesOperator) {
-    locPredicatesOpSelect.value = _predicatesOperator;
+  if (perspectivePredicatesOpSelect && perspectivePredicatesOpSelect.value !== _predicatesOperator) {
+    perspectivePredicatesOpSelect.value = _predicatesOperator;
   }
   _updatePredicatesHint();
   // v2.74.271 — Add button visibility honors NOT-single-child constraint.
-  if (locPredicatesAddBtn) {
-    const atNotCap = _predicatesOperator === 'not' && (_locDraft.predicates?.length ?? 0) >= 1;
-    locPredicatesAddBtn.disabled = atNotCap;
-    locPredicatesAddBtn.title = atNotCap
+  if (perspectivePredicatesAddBtn) {
+    const atNotCap = _predicatesOperator === 'not' && (_perspectiveDraft.predicates?.length ?? 0) >= 1;
+    perspectivePredicatesAddBtn.disabled = atNotCap;
+    perspectivePredicatesAddBtn.title = atNotCap
       ? 'NOT takes a single predicate — remove the current one or switch operator first'
       : '';
   }
-  const preds = Array.isArray(_locDraft.predicates) ? _locDraft.predicates : [];
+  const preds = Array.isArray(_perspectiveDraft.predicates) ? _perspectiveDraft.predicates : [];
   if (preds.length === 0) {
-    locPredicatesList.innerHTML = `<div class="dbg-locale-predicates-empty">No additional predicates. Locale activates on URL pattern match alone.</div>`;
+    perspectivePredicatesList.innerHTML = `<div class="dbg-perspective-predicates-empty">No additional predicates. Perspective activates on URL pattern match alone.</div>`;
     return;
   }
-  locPredicatesList.innerHTML = preds.map((p, i) => _renderPredicateRow(p, i)).join('');
+  perspectivePredicatesList.innerHTML = preds.map((p, i) => _renderPredicateRow(p, i)).join('');
   // Wire row-level handlers (delegated via data-action).
-  locPredicatesList.querySelectorAll('[data-action]').forEach(el => {
+  perspectivePredicatesList.querySelectorAll('[data-action]').forEach(el => {
     const evtName = (el.tagName === 'SELECT' || el.tagName === 'INPUT') ? 'change' : 'click';
     el.addEventListener(evtName, () => _handlePredicateAction(el));
     if (el.tagName === 'INPUT' && el.type === 'text') {
@@ -4578,14 +4666,14 @@ function _renderPredicates() {
 function _handlePredicateAction(el) {
   const idx = parseInt(el.dataset.idx, 10);
   const action = el.dataset.action;
-  if (!_locDraft || !Array.isArray(_locDraft.predicates)) return;
-  const pred = _locDraft.predicates[idx];
+  if (!_perspectiveDraft || !Array.isArray(_perspectiveDraft.predicates)) return;
+  const pred = _perspectiveDraft.predicates[idx];
   if (!pred && action !== 'predicate-remove') return;
   switch (action) {
     case 'predicate-kind': {
       // Changing kind discards kind-specific fields.
       const newKind = el.value;
-      _locDraft.predicates[idx] = { kind: newKind };
+      _perspectiveDraft.predicates[idx] = { kind: newKind };
       _renderPredicates();
       _evaluateActiveState({ debounce: true });   // v2.74.265
       return;
@@ -4622,7 +4710,7 @@ function _handlePredicateAction(el) {
       _evaluateActiveState({ debounce: true });
       return;
     case 'predicate-remove':
-      _locDraft.predicates.splice(idx, 1);
+      _perspectiveDraft.predicates.splice(idx, 1);
       _renderPredicates();
       _evaluateActiveState({ debounce: true });   // v2.74.265
       return;
@@ -4630,17 +4718,17 @@ function _handlePredicateAction(el) {
 }
 
 function _addPredicate() {
-  if (!_locDraft) return;
-  if (!Array.isArray(_locDraft.predicates)) _locDraft.predicates = [];
+  if (!_perspectiveDraft) return;
+  if (!Array.isArray(_perspectiveDraft.predicates)) _perspectiveDraft.predicates = [];
   // v2.74.271 — NOT is a single-child operator. Block second predicate
   // under NOT; surface an inline hint.
-  if (_predicatesOperator === 'not' && _locDraft.predicates.length >= 1) {
-    showLocaleWarning('NOT operator takes a single predicate. Switch to AND/OR to add more, or remove the existing one first.');
+  if (_predicatesOperator === 'not' && _perspectiveDraft.predicates.length >= 1) {
+    showPerspectiveWarning('NOT operator takes a single predicate. Switch to AND/OR to add more, or remove the existing one first.');
     return;
   }
   // Default kind = visible (most useful for typical use cases). Target
   // unset; author must pick.
-  _locDraft.predicates.push({ kind: 'visible' });
+  _perspectiveDraft.predicates.push({ kind: 'visible' });
   _renderPredicates();
   // v2.74.265 — Predicate set changed; re-evaluate active state.
   _evaluateActiveState({ debounce: true });
@@ -4650,15 +4738,15 @@ function _addPredicate() {
 // straight swap. Switching to NOT truncates to a single predicate
 // after author confirmation (since NOT takes one child).
 function _onPredicatesOperatorChange() {
-  if (!locPredicatesOpSelect) return;
-  const newOp = locPredicatesOpSelect.value;
-  if (newOp === 'not' && (_locDraft?.predicates?.length ?? 0) > 1) {
-    if (!confirm(`NOT operator takes a single predicate. Switching will keep only the first predicate (${_locDraft.predicates[0]?.kind ?? '?'}) and discard the others. Continue?`)) {
+  if (!perspectivePredicatesOpSelect) return;
+  const newOp = perspectivePredicatesOpSelect.value;
+  if (newOp === 'not' && (_perspectiveDraft?.predicates?.length ?? 0) > 1) {
+    if (!confirm(`NOT operator takes a single predicate. Switching will keep only the first predicate (${_perspectiveDraft.predicates[0]?.kind ?? '?'}) and discard the others. Continue?`)) {
       // Revert dropdown.
-      locPredicatesOpSelect.value = _predicatesOperator;
+      perspectivePredicatesOpSelect.value = _predicatesOperator;
       return;
     }
-    _locDraft.predicates = _locDraft.predicates.slice(0, 1);
+    _perspectiveDraft.predicates = _perspectiveDraft.predicates.slice(0, 1);
   }
   _predicatesOperator = newOp;
   _renderPredicates();
@@ -4667,19 +4755,19 @@ function _onPredicatesOperatorChange() {
 }
 
 function _updatePredicatesHint() {
-  if (!locPredicatesHint) return;
+  if (!perspectivePredicatesHint) return;
   const hint = _predicatesOperator === 'and'
-    ? 'Locale is active when URL pattern matches AND every predicate below evaluates true. Unverifiable predicates (e.g., landmark not on page) fail closed.'
+    ? 'Perspective is active when URL pattern matches AND every predicate below evaluates true. Unverifiable predicates (e.g., landmark not on page) fail closed.'
     : _predicatesOperator === 'or'
-    ? 'Locale is active when URL pattern matches AND at least one predicate below evaluates true. Unverifiable predicates count as failed.'
-    : 'Locale is active when URL pattern matches AND the predicate below evaluates FALSE. Unverifiable predicates fail closed (so NOT-unverifiable = active).';
-  locPredicatesHint.textContent = hint;
+    ? 'Perspective is active when URL pattern matches AND at least one predicate below evaluates true. Unverifiable predicates count as failed.'
+    : 'Perspective is active when URL pattern matches AND the predicate below evaluates FALSE. Unverifiable predicates fail closed (so NOT-unverifiable = active).';
+  perspectivePredicatesHint.textContent = hint;
 }
 
 // ─── v2.74.267 — iframe contexts editor ─────────────────────────────────
 //
-// Authors a list of named iframe predicates stored on the locale as
-// locale.iframeContexts[]. Each entry has { contextName, predicate,
+// Authors a list of named iframe predicates stored on the perspective as
+// perspective.iframeContexts[]. Each entry has { contextName, predicate,
 // sameOrigin? } where predicate is one of:
 //   { kind: 'iframeName',      value: '<name>' }
 //   { kind: 'iframeSelector',  selector: '<css>' }
@@ -4691,7 +4779,7 @@ function _updatePredicatesHint() {
 // dispatch time without selector-frameUrl-equality fragility.
 //
 // Operations:
-//   Rename context: cascades to landmarks referencing it (same-locale).
+//   Rename context: cascades to landmarks referencing it (same-perspective).
 //   Remove context: warns if landmarks reference it; on confirm,
 //     clears their landmark.iframeContext binding.
 //   Test predicate: sends RESOLVE_IFRAME_BY_PREDICATE to live page;
@@ -4705,15 +4793,15 @@ const _IFRAME_PRED_KINDS = [
 ];
 
 function _renderIframeContexts() {
-  if (!locIframeContextsList || !_locDraft) return;
-  const ctxs = Array.isArray(_locDraft.iframeContexts) ? _locDraft.iframeContexts : [];
+  if (!perspectiveIframeContextsList || !_perspectiveDraft) return;
+  const ctxs = Array.isArray(_perspectiveDraft.iframeContexts) ? _perspectiveDraft.iframeContexts : [];
   if (ctxs.length === 0) {
-    locIframeContextsList.innerHTML = `<div class="dbg-locale-iframe-contexts-empty">No iframe contexts. Landmarks picked from iframes auto-populate this list.</div>`;
+    perspectiveIframeContextsList.innerHTML = `<div class="dbg-perspective-iframe-contexts-empty">No iframe contexts. Landmarks picked from iframes auto-populate this list.</div>`;
     return;
   }
-  locIframeContextsList.innerHTML = ctxs.map((c, i) => _renderIframeContextRow(c, i)).join('');
+  perspectiveIframeContextsList.innerHTML = ctxs.map((c, i) => _renderIframeContextRow(c, i)).join('');
   // Wire delegated handlers (change for selects/inputs, click for buttons).
-  locIframeContextsList.querySelectorAll('[data-iframe-action]').forEach(el => {
+  perspectiveIframeContextsList.querySelectorAll('[data-iframe-action]').forEach(el => {
     const evt = (el.tagName === 'SELECT' || el.tagName === 'INPUT') ? 'change' : 'click';
     el.addEventListener(evt, () => _handleIframeContextAction(el));
     if (el.tagName === 'INPUT' && (el.type === 'text' || el.type === 'number')) {
@@ -4730,14 +4818,14 @@ function _renderIframeContextRow(ctx, idx) {
   let bodyHtml = '';
   if (kind === 'iframeName') {
     bodyHtml = `
-      <label class="dbg-locale-iframe-context-field">
-        <span class="dbg-locale-iframe-context-field-label">Name attribute</span>
+      <label class="dbg-perspective-iframe-context-field">
+        <span class="dbg-perspective-iframe-context-field-label">Name attribute</span>
         <input type="text" data-iframe-action="pred-value" data-idx="${idx}" maxlength="200" value="${escAttr(ctx.predicate?.value ?? '')}" placeholder="iframe[name=&quot;...&quot;]" />
       </label>`;
   } else if (kind === 'iframeSelector') {
     bodyHtml = `
-      <label class="dbg-locale-iframe-context-field">
-        <span class="dbg-locale-iframe-context-field-label">CSS selector</span>
+      <label class="dbg-perspective-iframe-context-field">
+        <span class="dbg-perspective-iframe-context-field-label">CSS selector</span>
         <input type="text" data-iframe-action="pred-selector" data-idx="${idx}" maxlength="400" value="${escAttr(ctx.predicate?.selector ?? '')}" placeholder="iframe#main-frame, .embed > iframe" />
       </label>`;
   } else if (kind === 'iframeSrcPattern') {
@@ -4746,58 +4834,58 @@ function _renderIframeContextRow(ctx, idx) {
       `<option value="${m}"${m === mode ? ' selected' : ''}>${m}</option>`
     ).join('');
     bodyHtml = `
-      <label class="dbg-locale-iframe-context-field">
-        <span class="dbg-locale-iframe-context-field-label">src pattern</span>
+      <label class="dbg-perspective-iframe-context-field">
+        <span class="dbg-perspective-iframe-context-field-label">src pattern</span>
         <input type="text" data-iframe-action="pred-pattern" data-idx="${idx}" maxlength="400" value="${escAttr(ctx.predicate?.pattern ?? '')}" placeholder="hubapi.com/widget" />
       </label>
-      <label class="dbg-locale-iframe-context-field">
-        <span class="dbg-locale-iframe-context-field-label">match mode</span>
+      <label class="dbg-perspective-iframe-context-field">
+        <span class="dbg-perspective-iframe-context-field-label">match mode</span>
         <select data-iframe-action="pred-mode" data-idx="${idx}">${modeOpts}</select>
       </label>`;
   } else if (kind === 'iframePositional') {
     bodyHtml = `
-      <label class="dbg-locale-iframe-context-field">
-        <span class="dbg-locale-iframe-context-field-label">index (0-based)</span>
+      <label class="dbg-perspective-iframe-context-field">
+        <span class="dbg-perspective-iframe-context-field-label">index (0-based)</span>
         <input type="number" data-iframe-action="pred-index" data-idx="${idx}" min="0" max="50" value="${escAttr(ctx.predicate?.index ?? 0)}" />
       </label>`;
   }
-  // Find landmarks referencing this context (in this locale).
-  const refs = (_locDraft.landmarks ?? []).filter(lm => lm?.iframeContext === ctx.contextName);
+  // Find landmarks referencing this context (in this perspective).
+  const refs = (_perspectiveDraft.landmarks ?? []).filter(lm => lm?.iframeContext === ctx.contextName);
   const refsBadge = refs.length > 0
-    ? `<span class="dbg-locale-iframe-context-refs" title="Landmarks in this locale bound to this context">${refs.length} landmark${refs.length === 1 ? '' : 's'}</span>`
+    ? `<span class="dbg-perspective-iframe-context-refs" title="Landmarks in this perspective bound to this context">${refs.length} landmark${refs.length === 1 ? '' : 's'}</span>`
     : '';
   // sameOrigin display (captured at create time or from test).
   let originBadge = '';
   if (ctx.sameOrigin === true) {
-    originBadge = `<span class="dbg-locale-iframe-context-origin dbg-locale-iframe-context-same-origin">same-origin</span>`;
+    originBadge = `<span class="dbg-perspective-iframe-context-origin dbg-perspective-iframe-context-same-origin">same-origin</span>`;
   } else if (ctx.sameOrigin === false) {
-    originBadge = `<span class="dbg-locale-iframe-context-origin dbg-locale-iframe-context-cross-origin">cross-origin</span>`;
+    originBadge = `<span class="dbg-perspective-iframe-context-origin dbg-perspective-iframe-context-cross-origin">cross-origin</span>`;
   }
   // Test outcome banner.
   let testHtml = '';
   if (_iframeTestInFlight.has(idx)) {
-    testHtml = `<div class="dbg-locale-iframe-context-test test-loading">⌛ Testing predicate against live page…</div>`;
+    testHtml = `<div class="dbg-perspective-iframe-context-test test-loading">⌛ Testing predicate against live page…</div>`;
   } else {
     const out = _iframeTestOutcome.get(idx);
     if (out) {
-      testHtml = `<div class="dbg-locale-iframe-context-test test-${escAttr(out.kind)}">${escHtml(out.message)}</div>`;
+      testHtml = `<div class="dbg-perspective-iframe-context-test test-${escAttr(out.kind)}">${escHtml(out.message)}</div>`;
     }
   }
   return `
-    <div class="dbg-locale-iframe-context-row" data-idx="${idx}">
-      <div class="dbg-locale-iframe-context-head">
-        <label class="dbg-locale-iframe-context-name-label">
+    <div class="dbg-perspective-iframe-context-row" data-idx="${idx}">
+      <div class="dbg-perspective-iframe-context-head">
+        <label class="dbg-perspective-iframe-context-name-label">
           <span>Name</span>
           <input type="text" data-iframe-action="rename" data-idx="${idx}" maxlength="80" value="${escAttr(ctx.contextName ?? '')}" placeholder="e.g. chatspot-widget" />
         </label>
         ${refsBadge}
         ${originBadge}
         <button class="btn-secondary tiny" data-iframe-action="test" data-idx="${idx}" type="button" title="Evaluate predicate against the current page">Test</button>
-        <button class="dbg-locale-iframe-context-remove" data-iframe-action="remove" data-idx="${idx}" type="button" title="Remove this iframe context">✕</button>
+        <button class="dbg-perspective-iframe-context-remove" data-iframe-action="remove" data-idx="${idx}" type="button" title="Remove this iframe context">✕</button>
       </div>
-      <div class="dbg-locale-iframe-context-body">
-        <label class="dbg-locale-iframe-context-field">
-          <span class="dbg-locale-iframe-context-field-label">Match by</span>
+      <div class="dbg-perspective-iframe-context-body">
+        <label class="dbg-perspective-iframe-context-field">
+          <span class="dbg-perspective-iframe-context-field-label">Match by</span>
           <select data-iframe-action="kind" data-idx="${idx}">${kindOpts}</select>
         </label>
         ${bodyHtml}
@@ -4809,9 +4897,9 @@ function _renderIframeContextRow(ctx, idx) {
 async function _handleIframeContextAction(el) {
   const idx = parseInt(el.dataset.idx, 10);
   const action = el.dataset.iframeAction;
-  if (!_locDraft) return;
-  if (!Array.isArray(_locDraft.iframeContexts)) _locDraft.iframeContexts = [];
-  const ctx = _locDraft.iframeContexts[idx];
+  if (!_perspectiveDraft) return;
+  if (!Array.isArray(_perspectiveDraft.iframeContexts)) _perspectiveDraft.iframeContexts = [];
+  const ctx = _perspectiveDraft.iframeContexts[idx];
   if (!ctx && action !== 'remove') return;
   switch (action) {
     case 'rename': {
@@ -4821,16 +4909,16 @@ async function _handleIframeContextAction(el) {
         if (!newName) ctx.contextName = oldName;   // restore non-empty
         return;
       }
-      // Cascade to landmarks referencing the old name (same locale).
+      // Cascade to landmarks referencing the old name (same perspective).
       let cascaded = 0;
-      for (const lm of (_locDraft.landmarks ?? [])) {
+      for (const lm of (_perspectiveDraft.landmarks ?? [])) {
         if (lm?.iframeContext === oldName) {
           lm.iframeContext = newName;
           cascaded++;
         }
       }
       ctx.contextName = newName;
-      Logger.info('locale-capture', `iframe context renamed "${oldName}" → "${newName}"; cascaded to ${cascaded} landmark(s)`);
+      Logger.info('perspective-capture', `iframe context renamed "${oldName}" → "${newName}"; cascaded to ${cascaded} landmark(s)`);
       _renderIframeContexts();
       return;
     }
@@ -4869,7 +4957,7 @@ async function _handleIframeContextAction(el) {
       await _testIframeContext(idx);
       return;
     case 'remove': {
-      const refs = (_locDraft.landmarks ?? []).filter(lm => lm?.iframeContext === ctx?.contextName);
+      const refs = (_perspectiveDraft.landmarks ?? []).filter(lm => lm?.iframeContext === ctx?.contextName);
       if (refs.length > 0) {
         const names = refs.slice(0, 3).map(lm => `"${lm.accessibleName ?? lm.alias}"`).join(', ');
         const more = refs.length > 3 ? `, +${refs.length - 3} more` : '';
@@ -4878,7 +4966,7 @@ async function _handleIframeContextAction(el) {
         }
         for (const lm of refs) lm.iframeContext = null;
       }
-      _locDraft.iframeContexts.splice(idx, 1);
+      _perspectiveDraft.iframeContexts.splice(idx, 1);
       _iframeTestOutcome.delete(idx);
       _iframeTestInFlight.delete(idx);
       _renderIframeContexts();
@@ -4888,9 +4976,9 @@ async function _handleIframeContextAction(el) {
 }
 
 async function _testIframeContext(idx) {
-  const ctx = _locDraft?.iframeContexts?.[idx];
+  const ctx = _perspectiveDraft?.iframeContexts?.[idx];
   if (!ctx) return;
-  if (_locTabId == null) {
+  if (_perspectiveTabId == null) {
     _iframeTestOutcome.set(idx, { kind: 'error', message: '⚠ No active tab. Switch to your target tab and retry.' });
     _renderIframeContexts();
     return;
@@ -4900,7 +4988,7 @@ async function _testIframeContext(idx) {
   _renderIframeContexts();
   try {
     const res = await new Promise((resolve, reject) => {
-      chrome.tabs.sendMessage(_locTabId, {
+      chrome.tabs.sendMessage(_perspectiveTabId, {
         type   : 'RESOLVE_IFRAME_BY_PREDICATE',
         payload: { predicate: ctx.predicate },
       }, { frameId: 0 }, response => {
@@ -4935,26 +5023,26 @@ async function _testIframeContext(idx) {
 }
 
 function _addIframeContext() {
-  if (!_locDraft) return;
-  if (!Array.isArray(_locDraft.iframeContexts)) _locDraft.iframeContexts = [];
+  if (!_perspectiveDraft) return;
+  if (!Array.isArray(_perspectiveDraft.iframeContexts)) _perspectiveDraft.iframeContexts = [];
   // Generate a unique default name.
   let base = 'iframe-context';
   let name = base;
   let n = 2;
-  while (_locDraft.iframeContexts.some(c => c.contextName === name)) {
+  while (_perspectiveDraft.iframeContexts.some(c => c.contextName === name)) {
     name = `${base}-${n++}`;
   }
-  _locDraft.iframeContexts.push({
+  _perspectiveDraft.iframeContexts.push({
     contextName: name,
     predicate  : { kind: 'iframeName', value: '' },
   });
   _renderIframeContexts();
 }
 
-// ─── v2.74.265 — Phase 7d surface: locale active-state preview ──────────
+// ─── v2.74.265 — Phase 7d surface: perspective active-state preview ──────────
 //
-// Author authors predicates → wants to know whether the locale would
-// activate on the current tab right now. isLocaleActive does the
+// Author authors predicates → wants to know whether the perspective would
+// activate on the current tab right now. isPerspectiveActive does the
 // evaluation; we wrap it with a small per-leaf diagnostic so authors
 // see WHY a predicate fails (target landmark not visible, URL doesn't
 // match, etc.) instead of just a binary ✓/✗.
@@ -4964,13 +5052,13 @@ function _addIframeContext() {
 //   - On Refresh button click (immediate)
 //   - On any predicate edit (300ms debounce to avoid keystroke noise)
 //   - On urlPattern edit (debounced)
-//   - On tab change (handled by existing refreshLocaleActiveTab hook)
+//   - On tab change (handled by existing refreshPerspectiveActiveTab hook)
 //
 // Cost: 1 round-trip per visible/hasText/iframeLoaded leaf. URL match
-// is free (synchronous). For a typical 1-3 leaf locale, sub-100ms.
+// is free (synchronous). For a typical 1-3 leaf perspective, sub-100ms.
 
 async function _evaluateActiveState({ debounce = false, immediate = false } = {}) {
-  if (!locActiveStateResult) return;
+  if (!perspectiveActiveStateResult) return;
   if (debounce && !immediate) {
     if (_activeStateDebounce) clearTimeout(_activeStateDebounce);
     _activeStateDebounce = setTimeout(() => _evaluateActiveState({ immediate: true }), 300);
@@ -4978,17 +5066,17 @@ async function _evaluateActiveState({ debounce = false, immediate = false } = {}
   }
   if (_activeStateEvaluating) return;
   _activeStateEvaluating = true;
-  if (locActiveStateRefreshBtn) locActiveStateRefreshBtn.disabled = true;
+  if (perspectiveActiveStateRefreshBtn) perspectiveActiveStateRefreshBtn.disabled = true;
   try {
-    locActiveStateResult.innerHTML = `<span class="dbg-locale-active-state-loading">⌛ Evaluating…</span>`;
-    // Build the draft as a pseudo-locale for the evaluator. Pull the
-    // current URL pattern from the input (not _locDraft.urlPattern,
+    perspectiveActiveStateResult.innerHTML = `<span class="dbg-perspective-active-state-loading">⌛ Evaluating…</span>`;
+    // Build the draft as a pseudo-perspective for the evaluator. Pull the
+    // current URL pattern from the input (not _perspectiveDraft.urlPattern,
     // which is only synced on save) so live edits show.
     // v2.74.271 — Wrap predicates per the top-level operator so the
     // evaluator sees the operator semantics. AND ships as flat array
     // (legacy shape, equivalent to implicit AND). OR/NOT ship as
     // tree object the evaluator handles natively.
-    const rawPreds = Array.isArray(_locDraft?.predicates) ? _locDraft.predicates : [];
+    const rawPreds = Array.isArray(_perspectiveDraft?.predicates) ? _perspectiveDraft.predicates : [];
     let predsForEval = rawPreds;
     if ((_predicatesOperator === 'or' || _predicatesOperator === 'not') && rawPreds.length > 0) {
       predsForEval = {
@@ -4996,18 +5084,18 @@ async function _evaluateActiveState({ debounce = false, immediate = false } = {}
         children: _predicatesOperator === 'not' ? rawPreds.slice(0, 1) : rawPreds.slice(),
       };
     }
-    const draftLocale = {
-      id           : _locDraft?.id,
-      name         : _locDraft?.name ?? '',
+    const draftPerspective = {
+      id           : _perspectiveDraft?.id,
+      name         : _perspectiveDraft?.name ?? '',
       // v2.74.275 — urlPattern field gone; predicates carry URL gating.
       predicates   : predsForEval,
-      iframeContexts: _locDraft?.iframeContexts ?? [],
-      landmarkRefs : (_locDraft?.landmarks ?? []).map(lm => lm?.uid).filter(Boolean),
+      iframeContexts: _perspectiveDraft?.iframeContexts ?? [],
+      landmarkRefs : (_perspectiveDraft?.landmarks ?? []).map(lm => lm?.uid).filter(Boolean),
     };
     const context = {
-      tabId : _locTabId ?? undefined,
-      tabUrl: locTabUrlEl?.textContent && locTabUrlEl.textContent !== '—' && locTabUrlEl.textContent !== '(no active tab)'
-        ? locTabUrlEl.textContent
+      tabId : _perspectiveTabId ?? undefined,
+      tabUrl: perspectiveTabUrlEl?.textContent && perspectiveTabUrlEl.textContent !== '—' && perspectiveTabUrlEl.textContent !== '(no active tab)'
+        ? perspectiveTabUrlEl.textContent
         : null,
     };
     if (!context.tabUrl) {
@@ -5016,21 +5104,21 @@ async function _evaluateActiveState({ debounce = false, immediate = false } = {}
       return;
     }
     // Run the top-level evaluation. We ALSO walk the leaves manually
-    // to build a per-predicate diagnostic — isLocaleActive collapses
+    // to build a per-predicate diagnostic — isPerspectiveActive collapses
     // to a single bool so it can't tell us which leaf failed.
-    const overall = await isLocaleActive(draftLocale, context);
-    const leafDiagnostics = await _diagnoseLeaves(draftLocale, context);
+    const overall = await isPerspectiveActive(draftPerspective, context);
+    const leafDiagnostics = await _diagnoseLeaves(draftPerspective, context);
     _renderActiveStateResult({
       kind: overall === true ? 'active' : 'inactive',
       overall,
       leafDiagnostics,
-      predicateCount: Array.isArray(draftLocale.predicates) ? draftLocale.predicates.length : (draftLocale.predicates?.children?.length ?? 0),
+      predicateCount: Array.isArray(draftPerspective.predicates) ? draftPerspective.predicates.length : (draftPerspective.predicates?.children?.length ?? 0),
     });
   } catch (e) {
     _renderActiveStateResult({ kind: 'error', error: e.message });
   } finally {
     _activeStateEvaluating = false;
-    if (locActiveStateRefreshBtn) locActiveStateRefreshBtn.disabled = false;
+    if (perspectiveActiveStateRefreshBtn) perspectiveActiveStateRefreshBtn.disabled = false;
   }
 }
 
@@ -5039,14 +5127,14 @@ async function _evaluateActiveState({ debounce = false, immediate = false } = {}
 // is a tree (operator + children), walks the children. v2.74.275 —
 // Legacy urlPattern leaf removed; URL gating now flows through
 // predicates as a urlMatches leaf, evaluated like any other.
-async function _diagnoseLeaves(draftLocale, context) {
+async function _diagnoseLeaves(draftPerspective, context) {
   const diagnostics = [];
   // Extract leaves from either flat-array or operator-tree shape.
   let leaves = [];
-  if (Array.isArray(draftLocale.predicates)) {
-    leaves = draftLocale.predicates;
-  } else if (draftLocale.predicates?.children && Array.isArray(draftLocale.predicates.children)) {
-    leaves = draftLocale.predicates.children;
+  if (Array.isArray(draftPerspective.predicates)) {
+    leaves = draftPerspective.predicates;
+  } else if (draftPerspective.predicates?.children && Array.isArray(draftPerspective.predicates.children)) {
+    leaves = draftPerspective.predicates.children;
   }
   for (let i = 0; i < leaves.length; i++) {
     const p = leaves[i];
@@ -5055,13 +5143,13 @@ async function _diagnoseLeaves(draftLocale, context) {
       continue;
     }
     // Evaluate this leaf alone by wrapping it in a minimal pseudo-
-    // locale containing only this predicate. Cheap, reuses the same
+    // perspective containing only this predicate. Cheap, reuses the same
     // evaluator path.
-    const singletonLocale = {
-      ...draftLocale,
+    const singletonPerspective = {
+      ...draftPerspective,
       predicates: [p],
     };
-    const result = await isLocaleActive(singletonLocale, context);
+    const result = await isPerspectiveActive(singletonPerspective, context);
     const label = _predicateLabel(p);
     let reason = null;
     if (result === false) {
@@ -5078,7 +5166,7 @@ function _predicateLabel(p) {
   if (!p?.kind) return '(invalid)';
   const targetName = (uid) => {
     if (!uid) return '?';
-    const lm = (_locDraft?.landmarks ?? []).find(l => l?.uid === uid);
+    const lm = (_perspectiveDraft?.landmarks ?? []).find(l => l?.uid === uid);
     return lm?.accessibleName ?? lm?.alias ?? uid.slice(0, 12);
   };
   switch (p.kind) {
@@ -5101,52 +5189,52 @@ function _predicateFailureReason(p) {
 }
 
 function _renderActiveStateResult(state) {
-  if (!locActiveStateResult) return;
+  if (!perspectiveActiveStateResult) return;
   if (state.kind === 'no-tab') {
-    locActiveStateResult.innerHTML = `
-      <div class="dbg-locale-active-state-no-tab">
+    perspectiveActiveStateResult.innerHTML = `
+      <div class="dbg-perspective-active-state-no-tab">
         ⚠ No active tab — switch to your target tab and press Refresh to evaluate.
       </div>`;
     return;
   }
   if (state.kind === 'error') {
-    locActiveStateResult.innerHTML = `
-      <div class="dbg-locale-active-state-error">
+    perspectiveActiveStateResult.innerHTML = `
+      <div class="dbg-perspective-active-state-error">
         ⛔ Evaluation failed: ${escHtml(state.error ?? 'unknown')}
       </div>`;
     return;
   }
   // active or inactive
   const verdict = state.kind === 'active'
-    ? `<div class="dbg-locale-active-state-verdict dbg-locale-active-state-verdict-active">✓ Locale would activate on the current tab</div>`
-    : `<div class="dbg-locale-active-state-verdict dbg-locale-active-state-verdict-inactive">✗ Locale would NOT activate</div>`;
+    ? `<div class="dbg-perspective-active-state-verdict dbg-perspective-active-state-verdict-active">✓ Perspective would activate on the current tab</div>`
+    : `<div class="dbg-perspective-active-state-verdict dbg-perspective-active-state-verdict-inactive">✗ Perspective would NOT activate</div>`;
   let leafRows = '';
   if (!state.hasUrlPattern && state.predicateCount === 0) {
-    leafRows = `<div class="dbg-locale-active-state-leaf-empty">No predicates authored — any URL matches by default.</div>`;
+    leafRows = `<div class="dbg-perspective-active-state-leaf-empty">No predicates authored — any URL matches by default.</div>`;
   } else {
     leafRows = (state.leafDiagnostics ?? []).map(d => {
       const icon = d.result === true ? '✓' : d.result === false ? '✗' : '⚠';
       const cls  = d.result === true ? 'leaf-pass' : d.result === false ? 'leaf-fail' : 'leaf-null';
       return `
-        <div class="dbg-locale-active-state-leaf ${cls}">
-          <span class="dbg-locale-active-state-leaf-icon">${icon}</span>
-          <span class="dbg-locale-active-state-leaf-label">${escHtml(d.label)}</span>
-          ${d.reason ? `<span class="dbg-locale-active-state-leaf-reason">${escHtml(d.reason)}</span>` : ''}
+        <div class="dbg-perspective-active-state-leaf ${cls}">
+          <span class="dbg-perspective-active-state-leaf-icon">${icon}</span>
+          <span class="dbg-perspective-active-state-leaf-label">${escHtml(d.label)}</span>
+          ${d.reason ? `<span class="dbg-perspective-active-state-leaf-reason">${escHtml(d.reason)}</span>` : ''}
         </div>`;
     }).join('');
   }
-  locActiveStateResult.innerHTML = verdict + leafRows;
+  perspectiveActiveStateResult.innerHTML = verdict + leafRows;
 }
 
 function _renderLandmarkProfileDrawer(idx) {
-  if (!_locDraft?.landmarks?.[idx]) return '';
-  const lm = _locDraft.landmarks[idx];
+  if (!_perspectiveDraft?.landmarks?.[idx]) return '';
+  const lm = _perspectiveDraft.landmarks[idx];
   // v2.74.281 — Drawer now body-only. Toggle button lives in the
   // row's controls (v2.74.281 header refactor). This function returns
   // empty when collapsed (caller already guards `isExpanded ? ... : ''`).
   // Confidence chip moved into the body's Profile subsection.
   const confChip = (typeof lm.profileConfidence === 'number')
-    ? `<span class="dbg-locale-landmark-profile-conf" title="Claude's self-reported confidence">conf: ${Math.round(lm.profileConfidence * 100)}%</span>`
+    ? `<span class="dbg-perspective-landmark-profile-conf" title="Claude's self-reported confidence">conf: ${Math.round(lm.profileConfidence * 100)}%</span>`
     : '';
 
   // Expanded body — Selector (read-only) + Description (editable) +
@@ -5158,16 +5246,16 @@ function _renderLandmarkProfileDrawer(idx) {
   // v2.74.302 — `aliasesValue` was used by the now-removed "Secondary
   // aliases" drawer input. Aliases live in the row-header field.
   const selectorDisplay = lm.selector
-    ? `<code class="dbg-locale-landmark-profile-selector">${escHtml(lm.selector)}</code>`
-    : `<span class="dbg-locale-landmark-profile-empty">no selector yet — click Pick on the page</span>`;
+    ? `<code class="dbg-perspective-landmark-profile-selector">${escHtml(lm.selector)}</code>`
+    : `<span class="dbg-perspective-landmark-profile-empty">no selector yet — click Pick on the page</span>`;
   // v2.74.245 — Phase 7a: iframe context display. When the landmark
   // is bound to a named iframe context (new), show the context name
-  // + its predicate from the locale's iframeContexts. When only the
+  // + its predicate from the perspective's iframeContexts. When only the
   // legacy frameUrl is set (pre-Phase-7), show that. Both paths
   // honest about which iframe binding mechanism is in effect.
   let frameDisplay = '';
   if (lm.iframeContext) {
-    const ctx = (_locDraft.iframeContexts ?? []).find(c => c.contextName === lm.iframeContext);
+    const ctx = (_perspectiveDraft.iframeContexts ?? []).find(c => c.contextName === lm.iframeContext);
     if (ctx) {
       const predDesc = ctx.predicate.kind === 'iframeName' ? `name="${ctx.predicate.value}"`
                      : ctx.predicate.kind === 'iframeSelector' ? `selector="${ctx.predicate.selector}"`
@@ -5175,33 +5263,33 @@ function _renderLandmarkProfileDrawer(idx) {
                      : ctx.predicate.kind === 'iframePositional' ? `position [${ctx.predicate.index}]`
                      : 'unknown predicate';
       const originBadge = ctx.sameOrigin
-        ? `<span class="dbg-locale-landmark-iframe-origin dbg-locale-landmark-iframe-same-origin">same-origin</span>`
-        : `<span class="dbg-locale-landmark-iframe-origin dbg-locale-landmark-iframe-cross-origin">cross-origin</span>`;
-      frameDisplay = `<div class="dbg-locale-landmark-profile-frame">
+        ? `<span class="dbg-perspective-landmark-iframe-origin dbg-perspective-landmark-iframe-same-origin">same-origin</span>`
+        : `<span class="dbg-perspective-landmark-iframe-origin dbg-perspective-landmark-iframe-cross-origin">cross-origin</span>`;
+      frameDisplay = `<div class="dbg-perspective-landmark-profile-frame">
         in iframe context: <code>${escHtml(lm.iframeContext)}</code>
         ${originBadge}
-        <div class="dbg-locale-landmark-iframe-predicate">predicate: ${escHtml(predDesc)}</div>
+        <div class="dbg-perspective-landmark-iframe-predicate">predicate: ${escHtml(predDesc)}</div>
       </div>`;
     } else {
-      // Bound to a context name that isn't declared in this locale.
-      // Possible during cross-locale references in Phase 8+ but for
+      // Bound to a context name that isn't declared in this perspective.
+      // Possible during cross-perspective references in Phase 8+ but for
       // now surface as an integrity warning.
-      frameDisplay = `<div class="dbg-locale-landmark-profile-frame dbg-locale-landmark-iframe-orphan">
-        ⚠ bound to iframe context "<code>${escHtml(lm.iframeContext)}</code>" not declared in this locale
+      frameDisplay = `<div class="dbg-perspective-landmark-profile-frame dbg-perspective-landmark-iframe-orphan">
+        ⚠ bound to iframe context "<code>${escHtml(lm.iframeContext)}</code>" not declared in this perspective
       </div>`;
     }
   } else if (lm.frameUrl) {
-    frameDisplay = `<div class="dbg-locale-landmark-profile-frame" title="${escAttr(lm.frameUrl)}">
+    frameDisplay = `<div class="dbg-perspective-landmark-profile-frame" title="${escAttr(lm.frameUrl)}">
       in iframe (legacy): <code>${escHtml(_truncate(lm.frameUrl, 60))}</code>
-      <span class="dbg-locale-landmark-iframe-legacy-hint">re-Pick to migrate to a named iframe context</span>
+      <span class="dbg-perspective-landmark-iframe-legacy-hint">re-Pick to migrate to a named iframe context</span>
     </div>`;
   }
   const opsChips = Array.isArray(lm.operationsCommon) && lm.operationsCommon.length > 0
-    ? lm.operationsCommon.map(o => `<code class="dbg-locale-landmark-profile-chip">${escHtml(o)}</code>`).join(' ')
-    : '<span class="dbg-locale-landmark-profile-empty">none suggested</span>';
+    ? lm.operationsCommon.map(o => `<code class="dbg-perspective-landmark-profile-chip">${escHtml(o)}</code>`).join(' ')
+    : '<span class="dbg-perspective-landmark-profile-empty">none suggested</span>';
   const pitfallsList = Array.isArray(lm.pitfalls) && lm.pitfalls.length > 0
-    ? `<ul class="dbg-locale-landmark-profile-pitfalls">${lm.pitfalls.map(p => `<li>${escHtml(p)}</li>`).join('')}</ul>`
-    : '<span class="dbg-locale-landmark-profile-empty">none</span>';
+    ? `<ul class="dbg-perspective-landmark-profile-pitfalls">${lm.pitfalls.map(p => `<li>${escHtml(p)}</li>`).join('')}</ul>`
+    : '<span class="dbg-perspective-landmark-profile-empty">none</span>';
   let expectedHtml;
   if (lm.expectedContent && lm.expectedContent.kind) {
     const ec = lm.expectedContent;
@@ -5210,7 +5298,7 @@ function _renderLandmarkProfileDrawer(idx) {
     if (ec.example) parts.push(`example: "${escHtml(ec.example)}"`);
     expectedHtml = parts.join(', ');
   } else {
-    expectedHtml = '<span class="dbg-locale-landmark-profile-empty">n/a (action landmark)</span>';
+    expectedHtml = '<span class="dbg-perspective-landmark-profile-empty">n/a (action landmark)</span>';
   }
 
   // v2.74.239 — Identity layer surfaced when the landmark has been
@@ -5220,8 +5308,8 @@ function _renderLandmarkProfileDrawer(idx) {
   let identityHtml = '';
   if (lm.uid) {
     const canonicalChip = lm.isCanonical
-      ? `<span class="dbg-locale-landmark-identity-chip dbg-locale-landmark-identity-canonical" title="Derived from accessibility-tree-anchored observable properties; same meaning → same UID across users">canonical</span>`
-      : `<span class="dbg-locale-landmark-identity-chip dbg-locale-landmark-identity-local" title="Insufficient canonical inputs (no role or no accessible name); per-user identity only">local</span>`;
+      ? `<span class="dbg-perspective-landmark-identity-chip dbg-perspective-landmark-identity-canonical" title="Derived from accessibility-tree-anchored observable properties; same meaning → same UID across users">canonical</span>`
+      : `<span class="dbg-perspective-landmark-identity-chip dbg-perspective-landmark-identity-local" title="Insufficient canonical inputs (no role or no accessible name); per-user identity only">local</span>`;
     const ctxParts = [];
     const ctx = lm.hierarchicalContext;
     if (ctx) {
@@ -5229,23 +5317,23 @@ function _renderLandmarkProfileDrawer(idx) {
       if (ctx.ancestorName) ctxParts.push(`"${escHtml(ctx.ancestorName)}"`);
       if (ctx.siblingPosition > 0) ctxParts.push(`#${ctx.siblingPosition}`);
     }
-    const ctxText = ctxParts.length > 0 ? ctxParts.join(' / ') : '<span class="dbg-locale-landmark-profile-empty">none</span>';
+    const ctxText = ctxParts.length > 0 ? ctxParts.join(' / ') : '<span class="dbg-perspective-landmark-profile-empty">none</span>';
     identityHtml = `
-      <div class="dbg-locale-landmark-identity">
-        <div class="dbg-locale-landmark-identity-grid">
-          <div class="dbg-locale-landmark-identity-key">UID</div>
-          <div class="dbg-locale-landmark-identity-val"><code>${escHtml(lm.uid)}</code> ${canonicalChip}</div>
-          <div class="dbg-locale-landmark-identity-key">A11y role</div>
-          <div class="dbg-locale-landmark-identity-val"><code>${escHtml(lm.a11yRole ?? '(none)')}</code></div>
-          <div class="dbg-locale-landmark-identity-key">Accessible name</div>
-          <div class="dbg-locale-landmark-identity-val">${lm.accessibleName
+      <div class="dbg-perspective-landmark-identity">
+        <div class="dbg-perspective-landmark-identity-grid">
+          <div class="dbg-perspective-landmark-identity-key">UID</div>
+          <div class="dbg-perspective-landmark-identity-val"><code>${escHtml(lm.uid)}</code> ${canonicalChip}</div>
+          <div class="dbg-perspective-landmark-identity-key">A11y role</div>
+          <div class="dbg-perspective-landmark-identity-val"><code>${escHtml(lm.a11yRole ?? '(none)')}</code></div>
+          <div class="dbg-perspective-landmark-identity-key">Accessible name</div>
+          <div class="dbg-perspective-landmark-identity-val">${lm.accessibleName
             ? `<code>${escHtml(lm.accessibleName)}</code>`
-            : '<span class="dbg-locale-landmark-profile-empty" title="The picked element does not satisfy the W3C accessible-name calculation (no aria-label, no labelled-by, no text content, no alt). The card uses the alias as a derived display name; identity hashes as local-UID rather than canonical.">(none — element has no accessible name; using alias for display)</span>'}</div>
-          <div class="dbg-locale-landmark-identity-key">Hierarchical context</div>
-          <div class="dbg-locale-landmark-identity-val">${ctxText}</div>
+            : '<span class="dbg-perspective-landmark-profile-empty" title="The picked element does not satisfy the W3C accessible-name calculation (no aria-label, no labelled-by, no text content, no alt). The card uses the alias as a derived display name; identity hashes as local-UID rather than canonical.">(none — element has no accessible name; using alias for display)</span>'}</div>
+          <div class="dbg-perspective-landmark-identity-key">Hierarchical context</div>
+          <div class="dbg-perspective-landmark-identity-val">${ctxText}</div>
           ${lm.canonicalUrl ? `
-          <div class="dbg-locale-landmark-identity-key">Canonical URL</div>
-          <div class="dbg-locale-landmark-identity-val"><code class="dbg-locale-landmark-identity-url" title="${escAttr(lm.canonicalUrl)}">${escHtml(_truncate(lm.canonicalUrl, 80))}</code></div>` : ''}
+          <div class="dbg-perspective-landmark-identity-key">Canonical URL</div>
+          <div class="dbg-perspective-landmark-identity-val"><code class="dbg-perspective-landmark-identity-url" title="${escAttr(lm.canonicalUrl)}">${escHtml(_truncate(lm.canonicalUrl, 80))}</code></div>` : ''}
         </div>
       </div>`;
   }
@@ -5285,8 +5373,8 @@ function _renderLandmarkProfileDrawer(idx) {
 
   // v2.74.281 — Body-only render. Toggle button lives in row controls.
   return `
-    <div class="dbg-locale-landmark-profile dbg-locale-landmark-profile-open">
-      <div class="dbg-locale-landmark-profile-body">
+    <div class="dbg-perspective-landmark-profile dbg-perspective-landmark-profile-open">
+      <div class="dbg-perspective-landmark-profile-body">
         ${identityHtml ? `<div class="lm-drawer-section"><div class="lm-drawer-section-label">Identity <span class="lm-drawer-hint">(computed — never edited)</span>${confChip}</div>${identityHtml}</div>` : ''}
 
         ${screenshotHtml}
@@ -5299,9 +5387,9 @@ function _renderLandmarkProfileDrawer(idx) {
 
         <div class="lm-drawer-section">
           <div class="lm-drawer-section-label">Description <span class="lm-drawer-hint">(editable)</span></div>
-          <div class="dbg-locale-landmark-profile-row">
+          <div class="dbg-perspective-landmark-profile-row">
             <label class="lm-field-label">Description</label>
-            <textarea class="dbg-locale-landmark-profile-desc" data-action="profile-desc-edit" data-idx="${idx}" rows="2" maxlength="400" placeholder="What is this and what does it do?">${escHtml(lm.description ?? '')}</textarea>
+            <textarea class="dbg-perspective-landmark-profile-desc" data-action="profile-desc-edit" data-idx="${idx}" rows="2" maxlength="400" placeholder="What is this and what does it do?">${escHtml(lm.description ?? '')}</textarea>
           </div>
           <!-- v2.74.302 — "Secondary aliases" field removed. The row-header
                "aliases" input is now the single source of truth (it carries
@@ -5312,15 +5400,15 @@ function _renderLandmarkProfileDrawer(idx) {
 
         <div class="lm-drawer-section">
           <div class="lm-drawer-section-label">Profile <span class="lm-drawer-hint">(Claude-generated)</span></div>
-          <div class="dbg-locale-landmark-profile-row">
+          <div class="dbg-perspective-landmark-profile-row">
             <label class="lm-field-label">Typical operations</label>
             <div>${opsChips}</div>
           </div>
-          <div class="dbg-locale-landmark-profile-row">
+          <div class="dbg-perspective-landmark-profile-row">
             <label class="lm-field-label">Pitfalls</label>
             ${pitfallsList}
           </div>
-          <div class="dbg-locale-landmark-profile-row">
+          <div class="dbg-perspective-landmark-profile-row">
             <label class="lm-field-label">Expected content</label>
             <div>${expectedHtml}</div>
           </div>
@@ -5344,7 +5432,7 @@ function _renderLandmarkVerificationSection(lm) {
   if (!v) {
     return `<div class="lm-drawer-section">
       <div class="lm-drawer-section-label">Verification <span class="lm-drawer-hint">(read-only)</span></div>
-      <div class="dbg-locale-landmark-profile-empty">Not verified yet — click Pick or ✓ to verify against the live page.</div>
+      <div class="dbg-perspective-landmark-profile-empty">Not verified yet — click Pick or ✓ to verify against the live page.</div>
     </div>`;
   }
   const legacyOk = !v.score && typeof v.matchedCount === 'number' && v.matchedCount > 0;
@@ -5361,14 +5449,14 @@ function _renderLandmarkVerificationSection(lm) {
     ? new Date(v.verifiedAt).toLocaleString()
     : '—';
   const opsAllowed = Array.isArray(v.operationsAllowed) && v.operationsAllowed.length > 0
-    ? `<div class="lm-verif-ops">${v.operationsAllowed.map(o => `<code class="dbg-locale-landmark-profile-chip">${escHtml(o)}</code>`).join(' ')}</div>`
-    : '<span class="dbg-locale-landmark-profile-empty">none</span>';
+    ? `<div class="lm-verif-ops">${v.operationsAllowed.map(o => `<code class="dbg-perspective-landmark-profile-chip">${escHtml(o)}</code>`).join(' ')}</div>`
+    : '<span class="dbg-perspective-landmark-profile-empty">none</span>';
   const issuesList = Array.isArray(v.issues) && v.issues.length > 0
-    ? `<ul class="dbg-locale-landmark-issues">${v.issues.map(i => `<li>${escHtml(i)}</li>`).join('')}</ul>`
-    : '<span class="dbg-locale-landmark-profile-empty">none</span>';
+    ? `<ul class="dbg-perspective-landmark-issues">${v.issues.map(i => `<li>${escHtml(i)}</li>`).join('')}</ul>`
+    : '<span class="dbg-perspective-landmark-profile-empty">none</span>';
   const sample = v.sampleHtml
-    ? `<code class="dbg-locale-landmark-sample">${escHtml(v.sampleHtml.slice(0, 200))}${v.sampleHtml.length > 200 ? '…' : ''}</code>`
-    : '<span class="dbg-locale-landmark-profile-empty">no sample captured</span>';
+    ? `<code class="dbg-perspective-landmark-sample">${escHtml(v.sampleHtml.slice(0, 200))}${v.sampleHtml.length > 200 ? '…' : ''}</code>`
+    : '<span class="dbg-perspective-landmark-profile-empty">no sample captured</span>';
   return `
     <div class="lm-drawer-section">
       <div class="lm-drawer-section-label">Verification <span class="lm-drawer-hint">(read-only — re-run via ✓)</span></div>
@@ -5413,20 +5501,20 @@ function _renderLifecycleRow(idx, lm) {
     'deprecated'      : 'lifecycle-deprecated',
   }[cur] ?? '';
   const actionBtn = cur === 'deprecated'
-    ? `<button class="dbg-locale-landmark-lifecycle-action dbg-locale-landmark-lifecycle-restore" data-action="lifecycle-restore" data-idx="${idx}" type="button" title="Mark this landmark as fresh; click Verify to confirm it still works">Restore</button>`
-    : `<button class="dbg-locale-landmark-lifecycle-action dbg-locale-landmark-lifecycle-deprecate" data-action="lifecycle-deprecate" data-idx="${idx}" type="button" title="Mark this landmark as obsolete. Existing references continue to work; new authoring won't surface it.">Deprecate</button>`;
+    ? `<button class="dbg-perspective-landmark-lifecycle-action dbg-perspective-landmark-lifecycle-restore" data-action="lifecycle-restore" data-idx="${idx}" type="button" title="Mark this landmark as fresh; click Verify to confirm it still works">Restore</button>`
+    : `<button class="dbg-perspective-landmark-lifecycle-action dbg-perspective-landmark-lifecycle-deprecate" data-action="lifecycle-deprecate" data-idx="${idx}" type="button" title="Mark this landmark as obsolete. Existing references continue to work; new authoring won't surface it.">Deprecate</button>`;
   return `
-    <div class="dbg-locale-landmark-profile-row dbg-locale-landmark-lifecycle-row">
-      <label>Lifecycle <span class="dbg-locale-landmark-profile-hint">(runtime health state)</span></label>
-      <div class="dbg-locale-landmark-lifecycle-row-body">
-        <span class="dbg-locale-landmark-lifecycle-chip-large ${stateClass}">${escHtml(stateLabel)}</span>
+    <div class="dbg-perspective-landmark-profile-row dbg-perspective-landmark-lifecycle-row">
+      <label>Lifecycle <span class="dbg-perspective-landmark-profile-hint">(runtime health state)</span></label>
+      <div class="dbg-perspective-landmark-lifecycle-row-body">
+        <span class="dbg-perspective-landmark-lifecycle-chip-large ${stateClass}">${escHtml(stateLabel)}</span>
         ${actionBtn}
       </div>
     </div>`;
 }
 
 async function _setLandmarkLifecycle(idx, newLifecycle) {
-  const lm = _locDraft?.landmarks?.[idx];
+  const lm = _perspectiveDraft?.landmarks?.[idx];
   if (!lm?.uid) return;
   if (newLifecycle === 'deprecated') {
     // Soft confirm — deprecation is reversible but warrants a moment
@@ -5435,7 +5523,7 @@ async function _setLandmarkLifecycle(idx, newLifecycle) {
     try {
       const res = await chrome.runtime.sendMessage({
         type: 'ANALYZE_LANDMARK_IMPACT',
-        payload: { uid: lm.uid, groundId: _locGroundId },
+        payload: { uid: lm.uid, groundId: _perspectiveGroundId },
       });
       const impact = res?.impact;
       if (impact) {
@@ -5456,14 +5544,14 @@ async function _setLandmarkLifecycle(idx, newLifecycle) {
       payload: { uid: lm.uid, patch: { lifecycle: newLifecycle } },
     });
     if (!res?.success) {
-      showLocaleWarning(`Lifecycle update failed: ${res?.error ?? 'unknown'}`);
+      showPerspectiveWarning(`Lifecycle update failed: ${res?.error ?? 'unknown'}`);
       return;
     }
     // Reflect in draft so the chip and lifecycle row update without a
     // full reload.
-    _locDraft.landmarks[idx] = { ...lm, lifecycle: newLifecycle };
-    renderLocaleLandmarks();
-    Logger.info('locale-capture', `Lifecycle ${lm.uid}: ${lifecycleBefore} → ${newLifecycle}`);
+    _perspectiveDraft.landmarks[idx] = { ...lm, lifecycle: newLifecycle };
+    renderPerspectiveLandmarks();
+    Logger.info('perspective-capture', `Lifecycle ${lm.uid}: ${lifecycleBefore} → ${newLifecycle}`);
     // v2.74.269 — Emit landmark-lifecycle-changed for the substrate
     // event bus. Phase 8 declared this EVENT_KIND but until now
     // nothing emitted it — the verifier and runtime-recovery paths
@@ -5471,11 +5559,11 @@ async function _setLandmarkLifecycle(idx, newLifecycle) {
     // author-driven lifecycle transitions not covered by those, so
     // the dedicated event makes them visible in the events panel
     // and to future drift-history consumers.
-    if (_locGroundId && lifecycleBefore !== newLifecycle) {
+    if (_perspectiveGroundId && lifecycleBefore !== newLifecycle) {
       chrome.runtime.sendMessage({
         type   : 'EMIT_GROUND_EVENT',
         payload: {
-          groundId: _locGroundId,
+          groundId: _perspectiveGroundId,
           event   : {
             kind   : 'landmark-lifecycle-changed',
             uid    : lm.uid,
@@ -5488,10 +5576,10 @@ async function _setLandmarkLifecycle(idx, newLifecycle) {
             },
           },
         },
-      }).catch(err => Logger.debug('locale-capture', `lifecycle event emit failed: ${err.message}`));
+      }).catch(err => Logger.debug('perspective-capture', `lifecycle event emit failed: ${err.message}`));
     }
   } catch (e) {
-    showLocaleWarning(`Lifecycle update failed: ${e.message}`);
+    showPerspectiveWarning(`Lifecycle update failed: ${e.message}`);
   }
 }
 
@@ -5521,7 +5609,7 @@ function _renderActionEffectRow(idx, lm) {
   // Effect kind picker.
   const effectKind = effect.kind ?? 'none';
   const effectKindControl = `
-    <select class="dbg-locale-landmark-profile-effect" data-action="profile-effect-kind-edit" data-idx="${idx}">
+    <select class="dbg-perspective-landmark-profile-effect" data-action="profile-effect-kind-edit" data-idx="${idx}">
       ${opt('none',                'none — no substrate-level effect (default)',          effectKind === 'none')}
       ${opt('triggers-navigation', 'triggers-navigation — clicking changes the URL',      effectKind === 'triggers-navigation')}
       ${opt('opens-new-thread',    'opens-new-thread — new tab / window / popup',         effectKind === 'opens-new-thread')}
@@ -5535,7 +5623,7 @@ function _renderActionEffectRow(idx, lm) {
   if (effectKind === 'opens-new-thread') {
     const form = effect.form ?? 'tab';
     effectParamControl = `
-      <select class="dbg-locale-landmark-profile-effect-param" data-action="profile-effect-form-edit" data-idx="${idx}" title="opens-new-thread.form (ACTION_SPEC § 5)">
+      <select class="dbg-perspective-landmark-profile-effect-param" data-action="profile-effect-form-edit" data-idx="${idx}" title="opens-new-thread.form (ACTION_SPEC § 5)">
         ${opt('tab',     'tab — new browser tab',     form === 'tab')}
         ${opt('window',  'window — new browser window', form === 'window')}
         ${opt('popup',   'popup — window.open popup',   form === 'popup')}
@@ -5544,7 +5632,7 @@ function _renderActionEffectRow(idx, lm) {
   } else if (effectKind === 'triggers-modal') {
     const modalKind = effect.modalKind ?? 'confirm';
     effectParamControl = `
-      <select class="dbg-locale-landmark-profile-effect-param" data-action="profile-effect-modal-kind-edit" data-idx="${idx}" title="triggers-modal.modalKind (ACTION_SPEC § 5)">
+      <select class="dbg-perspective-landmark-profile-effect-param" data-action="profile-effect-modal-kind-edit" data-idx="${idx}" title="triggers-modal.modalKind (ACTION_SPEC § 5)">
         ${opt('alert',   'alert — window.alert() dialog',     modalKind === 'alert')}
         ${opt('confirm', 'confirm — window.confirm() dialog', modalKind === 'confirm')}
         ${opt('prompt',  'prompt — window.prompt() dialog',   modalKind === 'prompt')}
@@ -5553,7 +5641,7 @@ function _renderActionEffectRow(idx, lm) {
 
   // Interaction pattern picker (separate, our addition).
   const patternControl = `
-    <select class="dbg-locale-landmark-profile-pattern" data-action="profile-pattern-edit" data-idx="${idx}">
+    <select class="dbg-perspective-landmark-profile-pattern" data-action="profile-pattern-edit" data-idx="${idx}">
       ${opt('none',              'none — no recognized pattern',                          pattern === 'none')}
       ${opt('opens-menu',        'opens-menu — dropdown / listbox / popup / DOM dialog',  pattern === 'opens-menu')}
       ${opt('switches-tab',      'switches-tab — tab strip selection changes content',    pattern === 'switches-tab')}
@@ -5579,13 +5667,13 @@ function _renderActionEffectRow(idx, lm) {
     : '';
 
   return `
-    <div class="dbg-locale-landmark-profile-row">
-      <label>Effect <span class="dbg-locale-landmark-profile-hint">(substrate-level browser effect — ACTION_SPEC § 5)</span>${sourceBadge}</label>
+    <div class="dbg-perspective-landmark-profile-row">
+      <label>Effect <span class="dbg-perspective-landmark-profile-hint">(substrate-level browser effect — ACTION_SPEC § 5)</span>${sourceBadge}</label>
       ${effectKindControl}
       ${effectParamControl}
     </div>
-    <div class="dbg-locale-landmark-profile-row">
-      <label>Interaction pattern <span class="dbg-locale-landmark-profile-hint">(DOM-level interaction shape — authoring intel only)</span></label>
+    <div class="dbg-perspective-landmark-profile-row">
+      <label>Interaction pattern <span class="dbg-perspective-landmark-profile-hint">(DOM-level interaction shape — authoring intel only)</span></label>
       ${patternControl}
     </div>`;
 }
@@ -5600,7 +5688,7 @@ function _truncate(s, n) {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
-// ─── v2.74.233 — Claude-integrated picker for locale landmarks ────────────
+// ─── v2.74.233 — Claude-integrated picker for perspective landmarks ────────────
 //
 // New picker flow (replaces the standalone "Ask Claude" button):
 //   1. Author types a role in the landmark row.
@@ -5670,7 +5758,7 @@ async function _compressScreenshotForStorage(pngDataUrl) {
     ctx.drawImage(img, 0, 0, w, h);
     return canvas.toDataURL('image/jpeg', 0.85);
   } catch (e) {
-    Logger.warn('locale-capture', `_compressScreenshotForStorage failed: ${e.message} — storing original PNG`);
+    Logger.warn('perspective-capture', `_compressScreenshotForStorage failed: ${e.message} — storing original PNG`);
     return pngDataUrl;
   }
 }
@@ -5698,7 +5786,7 @@ async function _openScreenshotInNewTab(dataUrl) {
     // the tab owns it; revoking too early breaks the new tab's image.
     // Memory cost is small (the blob is GC'd when the tab closes).
   } catch (e) {
-    Logger.warn('locale-capture', `_openScreenshotInNewTab failed: ${e.message}`);
+    Logger.warn('perspective-capture', `_openScreenshotInNewTab failed: ${e.message}`);
   }
 }
 
@@ -5733,23 +5821,23 @@ async function _captureLandmarkScreenshots(tabId, rect, frame, viewportInfo = nu
   };
   const FAIL = { thumb: null, contextShot: null, contextRect: null };
   if (!rect || rect.width <= 0 || rect.height <= 0) {
-    Logger.info('locale-capture', `screenshot: SKIP (no rect or zero-sized)`, inputSummary);
+    Logger.info('perspective-capture', `screenshot: SKIP (no rect or zero-sized)`, inputSummary);
     return FAIL;
   }
   if (typeof frame === 'string' && frame.startsWith('iframe')) {
-    Logger.info('locale-capture', `screenshot: SKIP (iframe element — cross-frame coord translation not yet implemented)`, inputSummary);
+    Logger.info('perspective-capture', `screenshot: SKIP (iframe element — cross-frame coord translation not yet implemented)`, inputSummary);
     return FAIL;
   }
   try {
     const tabInfo = await chrome.tabs.get(tabId);
     const windowId = tabInfo?.windowId;
     if (typeof windowId !== 'number') {
-      Logger.info('locale-capture', `screenshot: SKIP (no windowId for tab)`, inputSummary);
+      Logger.info('perspective-capture', `screenshot: SKIP (no windowId for tab)`, inputSummary);
       return FAIL;
     }
     const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
     if (!dataUrl) {
-      Logger.info('locale-capture', `screenshot: SKIP (captureVisibleTab returned empty)`, inputSummary);
+      Logger.info('perspective-capture', `screenshot: SKIP (captureVisibleTab returned empty)`, inputSummary);
       return FAIL;
     }
     const img = new Image();
@@ -5775,7 +5863,7 @@ async function _captureLandmarkScreenshots(tabId, rect, frame, viewportInfo = nu
       tc.getContext('2d').drawImage(img, tightX, tightY, tightW, tightH, 0, 0, tightW, tightH);
       thumb = tc.toDataURL('image/png');
     } else {
-      Logger.info('locale-capture', `screenshot: tight crop yielded non-positive dimensions`, { ...inputSummary, tightX, tightY, tightW, tightH });
+      Logger.info('perspective-capture', `screenshot: tight crop yielded non-positive dimensions`, { ...inputSummary, tightX, tightY, tightW, tightH });
     }
 
     // ── Crop 2: context shot for Claude (with highlight box) ──────
@@ -5821,16 +5909,16 @@ async function _captureLandmarkScreenshots(tabId, rect, frame, viewportInfo = nu
       contextShot = cc.toDataURL('image/jpeg', 0.85);
       contextRect = { x: ctxXcss, y: ctxYcss, width: ctxWcss, height: ctxHcss };
     } else {
-      Logger.info('locale-capture', `screenshot: context crop yielded non-positive dimensions`, { ...inputSummary, ctxX, ctxY, ctxW, ctxH });
+      Logger.info('perspective-capture', `screenshot: context crop yielded non-positive dimensions`, { ...inputSummary, ctxX, ctxY, ctxW, ctxH });
     }
 
-    Logger.info('locale-capture', `screenshot: OK (thumb ${tightW}×${tightH}, context ${ctxW}×${ctxH} px, dpr=${dpr}, thumb b64=${thumb?.length ?? 0}, context b64=${contextShot?.length ?? 0})`, {
+    Logger.info('perspective-capture', `screenshot: OK (thumb ${tightW}×${tightH}, context ${ctxW}×${ctxH} px, dpr=${dpr}, thumb b64=${thumb?.length ?? 0}, context b64=${contextShot?.length ?? 0})`, {
       ...inputSummary,
       contextRect,
     });
     return { thumb, contextShot, contextRect };
   } catch (e) {
-    Logger.warn('locale-capture', `screenshot: THROW — ${e.message}`, inputSummary);
+    Logger.warn('perspective-capture', `screenshot: THROW — ${e.message}`, inputSummary);
     return FAIL;
   }
 }
@@ -5877,25 +5965,25 @@ async function _capturePickedElementScreenshot(tabId, rect, frame, selector = ''
   };
 
   if (!rect || rect.width <= 0 || rect.height <= 0) {
-    Logger.info('locale-capture', `screenshot: SKIP (no rect or zero-sized)`, inputSummary);
+    Logger.info('perspective-capture', `screenshot: SKIP (no rect or zero-sized)`, inputSummary);
     return null;
   }
   // Iframe rects are local to the iframe document; without translating
   // to the top-frame viewport we'd crop the wrong area. Skip for v1.
   if (typeof frame === 'string' && frame.startsWith('iframe')) {
-    Logger.info('locale-capture', `screenshot: SKIP (iframe element — cross-frame coord translation not yet implemented)`, inputSummary);
+    Logger.info('perspective-capture', `screenshot: SKIP (iframe element — cross-frame coord translation not yet implemented)`, inputSummary);
     return null;
   }
   try {
     const tabInfo = await chrome.tabs.get(tabId);
     const windowId = tabInfo?.windowId;
     if (typeof windowId !== 'number') {
-      Logger.info('locale-capture', `screenshot: SKIP (no windowId for tab)`, inputSummary);
+      Logger.info('perspective-capture', `screenshot: SKIP (no windowId for tab)`, inputSummary);
       return null;
     }
     const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: 'png' });
     if (!dataUrl) {
-      Logger.info('locale-capture', `screenshot: SKIP (captureVisibleTab returned empty)`, inputSummary);
+      Logger.info('perspective-capture', `screenshot: SKIP (captureVisibleTab returned empty)`, inputSummary);
       return null;
     }
     const img = new Image();
@@ -5921,7 +6009,7 @@ async function _capturePickedElementScreenshot(tabId, rect, frame, selector = ''
     const w = Math.min(img.width  - x, Math.round(liveRect.width  * scale));
     const h = Math.min(img.height - y, Math.round(liveRect.height * scale));
     if (w <= 0 || h <= 0) {
-      Logger.info('locale-capture', `screenshot: SKIP (crop math yielded non-positive dimensions — element off-viewport?)`, {
+      Logger.info('perspective-capture', `screenshot: SKIP (crop math yielded non-positive dimensions — element off-viewport?)`, {
         ...inputSummary,
         liveRect,
         img: { w: img.width, h: img.height },
@@ -5941,7 +6029,7 @@ async function _capturePickedElementScreenshot(tabId, rect, frame, selector = ''
     // showed.
     const cssW = Math.round(w / scale);
     const cssH = Math.round(h / scale);
-    Logger.info('locale-capture', `screenshot: OK CSS=${cssW}×${cssH} px (matches overlay) / image=${w}×${h} px (dpr=${scale}, base64 length=${out.length})`, {
+    Logger.info('perspective-capture', `screenshot: OK CSS=${cssW}×${cssH} px (matches overlay) / image=${w}×${h} px (dpr=${scale}, base64 length=${out.length})`, {
       ...inputSummary,
       liveRect,
       liveViewportInfo,
@@ -5949,7 +6037,7 @@ async function _capturePickedElementScreenshot(tabId, rect, frame, selector = ''
     });
     return out;
   } catch (e) {
-    Logger.warn('locale-capture', `screenshot: THROW — ${e.message}`, inputSummary);
+    Logger.warn('perspective-capture', `screenshot: THROW — ${e.message}`, inputSummary);
     return null;
   }
 }
@@ -5961,8 +6049,8 @@ async function _capturePickedElementScreenshot(tabId, rect, frame, selector = ''
  * selector. Auto-verifies either way.
  */
 async function _refineLandmarkSelectorWithClaude(landmarkIdx, pickContext = {}) {
-  if (!_locDraft?.landmarks?.[landmarkIdx]) return;
-  const lm = _locDraft.landmarks[landmarkIdx];
+  if (!_perspectiveDraft?.landmarks?.[landmarkIdx]) return;
+  const lm = _perspectiveDraft.landmarks[landmarkIdx];
   const pickerSelector = (lm.selector ?? '').toString().trim();
   // v2.74.296 — pickContext carries the picker's authoritative rect
   // (from elementFromPoint at click time) + page DPR + (v2.74.299)
@@ -5977,7 +6065,7 @@ async function _refineLandmarkSelectorWithClaude(landmarkIdx, pickContext = {}) 
   const pickedAprofFromPicker = pickContext?.pickedAccessibilityProfile ?? null;
   if (!pickerSelector) {
     _landmarkRefining.delete(landmarkIdx);
-    renderLocaleLandmarks();
+    renderPerspectiveLandmarks();
     return;
   }
 
@@ -5986,7 +6074,7 @@ async function _refineLandmarkSelectorWithClaude(landmarkIdx, pickContext = {}) 
   if (lm.frameUrl) {
     try {
       const frames = await new Promise((resolve) => {
-        chrome.webNavigation.getAllFrames({ tabId: _locTabId }, (fs) => resolve(fs ?? []));
+        chrome.webNavigation.getAllFrames({ tabId: _perspectiveTabId }, (fs) => resolve(fs ?? []));
       });
       const exact = frames.find(f => f && f.url === lm.frameUrl);
       if (exact) frameId = exact.frameId;
@@ -5994,34 +6082,34 @@ async function _refineLandmarkSelectorWithClaude(landmarkIdx, pickContext = {}) 
   }
 
   _landmarkRefining.set(landmarkIdx, 'Inspecting picked element…');
-  renderLocaleLandmarks();
+  renderPerspectiveLandmarks();
 
   let inspectRes;
   try {
     inspectRes = await chrome.tabs.sendMessage(
-      _locTabId,
+      _perspectiveTabId,
       { type: 'INSPECT_ELEMENT', payload: { target: pickerSelector, pickLast: false } },
       { frameId },
     );
   } catch (e) {
     // Fall back to picker's selector + auto-verify; user can hand-edit.
     _landmarkRefining.delete(landmarkIdx);
-    Logger.warn('locale-capture', `Pick→Claude refinement inspect dispatch failed: ${e.message} (keeping picker selector)`);
-    renderLocaleLandmarks();
-    verifyLocaleLandmark(landmarkIdx);
+    Logger.warn('perspective-capture', `Pick→Claude refinement inspect dispatch failed: ${e.message} (keeping picker selector)`);
+    renderPerspectiveLandmarks();
+    verifyPerspectiveLandmark(landmarkIdx);
     return;
   }
   if (!inspectRes?.success) {
     _landmarkRefining.delete(landmarkIdx);
-    Logger.warn('locale-capture', `Pick→Claude refinement inspect failed: ${inspectRes?.error} (keeping picker selector)`);
-    renderLocaleLandmarks();
-    verifyLocaleLandmark(landmarkIdx);
+    Logger.warn('perspective-capture', `Pick→Claude refinement inspect failed: ${inspectRes?.error} (keeping picker selector)`);
+    renderPerspectiveLandmarks();
+    verifyPerspectiveLandmark(landmarkIdx);
     return;
   }
   const report = inspectRes.report ?? {};
 
   _landmarkRefining.set(landmarkIdx, 'Capturing screenshot…');
-  renderLocaleLandmarks();
+  renderPerspectiveLandmarks();
   // v2.74.298 — Two-screenshot capture: tight thumb for the drawer
   // (WYSIWYG with overlay) + wider context shot with highlight box for
   // Claude (visual disambiguation). Uses the picker's authoritative
@@ -6029,7 +6117,7 @@ async function _refineLandmarkSelectorWithClaude(landmarkIdx, pickContext = {}) 
   // even when the structural selector resolves to multiple elements.
   const cropRect = pickedRectFromPicker || report.rect;
   const { thumb: thumbScreenshot, contextShot, contextRect } =
-    await _captureLandmarkScreenshots(_locTabId, cropRect, report.frame, pickViewportInfo);
+    await _captureLandmarkScreenshots(_perspectiveTabId, cropRect, report.frame, pickViewportInfo);
 
   // v2.74.298 — Ambiguity detection. Re-Inspect the picker selector
   // with no pickLast to learn how many elements it matches on the live
@@ -6046,7 +6134,7 @@ async function _refineLandmarkSelectorWithClaude(landmarkIdx, pickContext = {}) 
     ?? null;
   try {
     const ambigueProbe = await chrome.tabs.sendMessage(
-      _locTabId,
+      _perspectiveTabId,
       { type: 'INSPECT_ELEMENT', payload: { target: pickerSelector, pickLast: false } },
       { frameId },
     );
@@ -6055,7 +6143,7 @@ async function _refineLandmarkSelectorWithClaude(landmarkIdx, pickContext = {}) 
     }
   } catch { /* fall back to original report.matchCount */ }
 
-  Logger.info('locale-capture', `Pick→Claude screenshot result`, {
+  Logger.info('perspective-capture', `Pick→Claude screenshot result`, {
     landmarkIdx,
     pickerSelector,
     pickerMatchCount,
@@ -6105,10 +6193,10 @@ async function _refineLandmarkSelectorWithClaude(landmarkIdx, pickContext = {}) 
       // landmarks into a new ground — GROUND_SPEC § 11's reuse case — is a
       // separate future affordance.)
       const reusable = existing
-        && existing.groundId === _locGroundId
+        && existing.groundId === _perspectiveGroundId
         && (existing.lifecycle === 'fresh' || existing.lifecycle === 'verified');
       if (existing && reusable) {
-        Logger.info('locale-capture', `Existing landmark matched on UID — reusing [landmarkIdx=${landmarkIdx}]`, {
+        Logger.info('perspective-capture', `Existing landmark matched on UID — reusing [landmarkIdx=${landmarkIdx}]`, {
           uid          : existing.uid,
           alias        : existing.alias,
           accessibleName: existing.accessibleName,
@@ -6155,21 +6243,21 @@ async function _refineLandmarkSelectorWithClaude(landmarkIdx, pickContext = {}) 
         _landmarkRefining.delete(landmarkIdx);
         _landmarkProfileExpanded.add(landmarkIdx);   // auto-expand to show what was reused
         toast?.(`Reused existing landmark "${existing.accessibleName ?? existing.alias ?? existing.uid}" from registry`);
-        renderLocaleLandmarks();
-        updateLocaleSaveButtonState();
-        _refreshLocaleOverlays();
+        renderPerspectiveLandmarks();
+        updatePerspectiveSaveButtonState();
+        _refreshPerspectiveOverlays();
         return;   // skip Claude — we already have the full record
       }
       if (existing && !reusable) {
-        Logger.info('locale-capture', `Existing landmark matched but lifecycle="${existing.lifecycle}" — refreshing via Claude [uid=${existing.uid}]`);
+        Logger.info('perspective-capture', `Existing landmark matched but lifecycle="${existing.lifecycle}" — refreshing via Claude [uid=${existing.uid}]`);
       }
     } catch (e) {
-      Logger.warn('locale-capture', `existing-landmark match check failed (proceeding with Claude): ${e.message}`);
+      Logger.warn('perspective-capture', `existing-landmark match check failed (proceeding with Claude): ${e.message}`);
     }
   }
 
   _landmarkRefining.set(landmarkIdx, 'Asking Claude to generate landmark profile…');
-  renderLocaleLandmarks();
+  renderPerspectiveLandmarks();
 
   // v2.74.235 — Wave 2: one Claude call returns the FULL profile, not
   // just the refined selector. Description, aliases, common ops,
@@ -6209,9 +6297,9 @@ async function _refineLandmarkSelectorWithClaude(landmarkIdx, pickContext = {}) 
     });
   } catch (e) {
     _landmarkRefining.delete(landmarkIdx);
-    Logger.warn('locale-capture', `Pick→Claude profile dispatch failed: ${e.message} (keeping picker selector)`);
-    renderLocaleLandmarks();
-    verifyLocaleLandmark(landmarkIdx);
+    Logger.warn('perspective-capture', `Pick→Claude profile dispatch failed: ${e.message} (keeping picker selector)`);
+    renderPerspectiveLandmarks();
+    verifyPerspectiveLandmark(landmarkIdx);
     return;
   }
 
@@ -6294,7 +6382,7 @@ async function _refineLandmarkSelectorWithClaude(landmarkIdx, pickContext = {}) 
     } else {
       try {
         const reInspect = await chrome.tabs.sendMessage(
-          _locTabId,
+          _perspectiveTabId,
           { type: 'INSPECT_ELEMENT', payload: { target: p.selector, pickLast: false } },
           { frameId },
         );
@@ -6321,7 +6409,7 @@ async function _refineLandmarkSelectorWithClaude(landmarkIdx, pickContext = {}) 
       }
     }
 
-    Logger.info('locale-capture', `Pick→Claude landmark profile [landmarkIdx=${landmarkIdx}]`, {
+    Logger.info('perspective-capture', `Pick→Claude landmark profile [landmarkIdx=${landmarkIdx}]`, {
       alias            : lm.alias,
       pickerSelector,
       pickerMatchCount,
@@ -6493,11 +6581,11 @@ async function _refineLandmarkSelectorWithClaude(landmarkIdx, pickContext = {}) 
     // content immediately and can review/edit.
     _landmarkProfileExpanded.add(landmarkIdx);
   } else {
-    Logger.warn('locale-capture', `Pick→Claude profile returned nothing usable (keeping picker selector): ${claudeRes?.error ?? 'unknown'}`);
+    Logger.warn('perspective-capture', `Pick→Claude profile returned nothing usable (keeping picker selector): ${claudeRes?.error ?? 'unknown'}`);
   }
 
-  renderLocaleLandmarks();
-  verifyLocaleLandmark(landmarkIdx);
+  renderPerspectiveLandmarks();
+  verifyPerspectiveLandmark(landmarkIdx);
 }
 
 // v2.74.390 — Fill a RESOLVED landmark's Claude-authored profile (description,
@@ -6507,7 +6595,7 @@ async function _refineLandmarkSelectorWithClaude(landmarkIdx, pickContext = {}) 
 // resolved selector + verified + role (only fills the metadata). `report` may be
 // passed in (e.g. from a while-modal-open inspect) to skip a fresh INSPECT.
 async function _profileResolvedLandmark(landmarkIdx, presetProfile, presetReport) {
-  const lm = _locDraft?.landmarks?.[landmarkIdx];
+  const lm = _perspectiveDraft?.landmarks?.[landmarkIdx];
   if (!lm || !lm.selector) return false;
   let p = presetProfile || null;
   if (!p) {
@@ -6515,18 +6603,18 @@ async function _profileResolvedLandmark(landmarkIdx, presetProfile, presetReport
     // open, since the element is gone now) or by inspecting the live element.
     let report = presetReport || null;
     if (!report) {
-      if (_locTabId == null) return false;
+      if (_perspectiveTabId == null) return false;
       // Resolve frameId from the landmark's frame (same chain as verify).
       let frameId = 0;
       if (lm.frameUrl) {
         try {
-          const frames = await new Promise((r) => chrome.webNavigation.getAllFrames({ tabId: _locTabId }, (fs) => r(fs ?? [])));
+          const frames = await new Promise((r) => chrome.webNavigation.getAllFrames({ tabId: _perspectiveTabId }, (fs) => r(fs ?? [])));
           const ex = frames.find(f => f && f.url === lm.frameUrl);
           if (ex) frameId = ex.frameId;
         } catch { /* top frame */ }
       }
       let inspectRes;
-      try { inspectRes = await chrome.tabs.sendMessage(_locTabId, { type: 'INSPECT_ELEMENT', payload: { target: lm.selector, pickLast: false } }, { frameId }); }
+      try { inspectRes = await chrome.tabs.sendMessage(_perspectiveTabId, { type: 'INSPECT_ELEMENT', payload: { target: lm.selector, pickLast: false } }, { frameId }); }
       catch { return false; }
       if (!inspectRes?.success) return false;
       report = inspectRes.report ?? {};
@@ -6566,23 +6654,23 @@ async function _profileResolvedLandmark(landmarkIdx, presetProfile, presetReport
   return true;
 }
 
-async function verifyLocaleLandmark(landmarkIdx) {
-  if (!_locDraft || !_locDraft.landmarks[landmarkIdx]) return;
-  const lm = _locDraft.landmarks[landmarkIdx];
+async function verifyPerspectiveLandmark(landmarkIdx) {
+  if (!_perspectiveDraft || !_perspectiveDraft.landmarks[landmarkIdx]) return;
+  const lm = _perspectiveDraft.landmarks[landmarkIdx];
   if (!lm.selector || !lm.selector.trim()) {
-    showLocaleWarning('Add a selector first');
+    showPerspectiveWarning('Add a selector first');
     return;
   }
-  if (_locTabId == null) {
-    showLocaleWarning('No capture tab. Cancel and start over.');
+  if (_perspectiveTabId == null) {
+    showPerspectiveWarning('No capture tab. Cancel and start over.');
     return;
   }
   let tabUrl = '';
   try {
-    const t = await chrome.tabs.get(_locTabId);
+    const t = await chrome.tabs.get(_perspectiveTabId);
     tabUrl = t?.url ?? '';
   } catch {
-    showLocaleWarning('The active tab has been closed.');
+    showPerspectiveWarning('The active tab has been closed.');
     return;
   }
 
@@ -6600,7 +6688,7 @@ async function verifyLocaleLandmark(landmarkIdx) {
   if (lm.frameUrl) {
     try {
       const frames = await new Promise((resolve) => {
-        chrome.webNavigation.getAllFrames({ tabId: _locTabId }, (fs) => resolve(fs ?? []));
+        chrome.webNavigation.getAllFrames({ tabId: _perspectiveTabId }, (fs) => resolve(fs ?? []));
       });
       const exact = frames.find(f => f && f.url === lm.frameUrl);
       if (exact) frameId = exact.frameId;
@@ -6610,16 +6698,16 @@ async function verifyLocaleLandmark(landmarkIdx) {
   let inspectRes;
   try {
     inspectRes = await chrome.tabs.sendMessage(
-      _locTabId,
+      _perspectiveTabId,
       { type: 'INSPECT_ELEMENT', payload: { target: lm.selector, pickLast: false } },
       { frameId },
     );
   } catch (e) {
     lm.verified = null;
-    showLocaleWarning(`Verify threw: ${e.message}`);
-    renderLocaleLandmarks();
-    updateLocaleSaveButtonState();
-    _refreshLocaleOverlays();
+    showPerspectiveWarning(`Verify threw: ${e.message}`);
+    renderPerspectiveLandmarks();
+    updatePerspectiveSaveButtonState();
+    _refreshPerspectiveOverlays();
     return;
   }
   if (!inspectRes?.success) {
@@ -6636,10 +6724,10 @@ async function verifyLocaleLandmark(landmarkIdx) {
       checks: { elementExists: false, visible: false, interactable: false, typeMatchesRole: true, uniqueMatch: false },
       issues: [inspectRes?.error ?? 'inspect failed'],
     };
-    showLocaleWarning(`Verify failed: ${inspectRes?.error ?? 'unknown'}`);
-    renderLocaleLandmarks();
-    updateLocaleSaveButtonState();
-    _refreshLocaleOverlays();
+    showPerspectiveWarning(`Verify failed: ${inspectRes?.error ?? 'unknown'}`);
+    renderPerspectiveLandmarks();
+    updatePerspectiveSaveButtonState();
+    _refreshPerspectiveOverlays();
     return;
   }
 
@@ -6711,7 +6799,7 @@ async function verifyLocaleLandmark(landmarkIdx) {
     if (!lm.interactionPattern)                           lm.interactionPattern = 'none';
   }
 
-  Logger.info('locale-capture', `Landmark verified [landmarkIdx=${landmarkIdx}] score=${score}`, {
+  Logger.info('perspective-capture', `Landmark verified [landmarkIdx=${landmarkIdx}] score=${score}`, {
     alias        : lm.alias,
     selector     : lm.selector,
     matchedCount,
@@ -6729,9 +6817,9 @@ async function verifyLocaleLandmark(landmarkIdx) {
     lm.showOverlay = true;
   }
 
-  renderLocaleLandmarks();
-  updateLocaleSaveButtonState();
-  _refreshLocaleOverlays();
+  renderPerspectiveLandmarks();
+  updatePerspectiveSaveButtonState();
+  _refreshPerspectiveOverlays();
 }
 
 // v2.74.46 — Send the current verified landmarks to the content script
@@ -6739,41 +6827,41 @@ async function verifyLocaleLandmark(landmarkIdx) {
 // landmarks with non-empty selectors are drawn — un-verified rows are
 // hidden until the user runs Verify on them. Best-effort; failure
 // (tab closed, content script unreachable) is silently swallowed.
-async function _refreshLocaleOverlays() {
-  if (_locTabId == null || !_locDraft) return;
+async function _refreshPerspectiveOverlays() {
+  if (_perspectiveTabId == null || !_perspectiveDraft) return;
   // v2.74.233 — Per-landmark "Show" toggle. Only landmarks the author
   // has explicitly toggled on are drawn; the rest are hidden even
   // when verified. Lets the author isolate landmarks visually without
   // having to remove them. Replaces the previous all-verified-when-
   // focused behavior (which painted every verified landmark whenever
-  // the sidepanel had focus — noisy on locales with many landmarks).
-  const landmarks = _locDraft.landmarks
+  // the sidepanel had focus — noisy on perspectives with many landmarks).
+  const landmarks = _perspectiveDraft.landmarks
     .filter(lm => lm && lm.showOverlay === true && lm.selector && lm.selector.trim())
     .map(lm => ({ alias: lm.alias ?? '', selector: lm.selector, frameUrl: lm.frameUrl ?? null }));
   try {
-    await chrome.tabs.sendMessage(_locTabId, {
-      type: 'SHOW_LOCALE_OVERLAYS',
+    await chrome.tabs.sendMessage(_perspectiveTabId, {
+      type: 'SHOW_PERSPECTIVE_OVERLAYS',
       payload: { landmarks },
     });
   } catch { /* tab gone or content script not loaded */ }
 }
 
-async function _clearLocaleOverlays() {
-  if (_locTabId == null) return;
+async function _clearPerspectiveOverlays() {
+  if (_perspectiveTabId == null) return;
   try {
-    await chrome.tabs.sendMessage(_locTabId, { type: 'CLEAR_LOCALE_OVERLAYS' });
+    await chrome.tabs.sendMessage(_perspectiveTabId, { type: 'CLEAR_PERSPECTIVE_OVERLAYS' });
   } catch { /* fine */ }
 }
 
 // ─── Save / Cancel ───────────────────────────────────────────────────────
 
-async function saveLocale() {
-  if (!_locDraft) return;
+async function savePerspective() {
+  if (!_perspectiveDraft) return;
   // v2.74.48 — Re-normalize at save in case the input slipped through
   // (e.g. paste with newlines, programmatic value set). Strip leading
   // and trailing hyphens for tidy storage.
-  _locDraft.name = _normalizeLocaleName(locNameInput.value).replace(/^-+|-+$/g, '');
-  _locDraft.description = locDescriptionInput.value.trim();
+  _perspectiveDraft.name = _normalizePerspectiveName(perspectiveNameInput.value).replace(/^-+|-+$/g, '');
+  _perspectiveDraft.description = perspectiveDescriptionInput.value.trim();
   // v2.74.275 — urlPattern field gone; URL gating expressed via the
   // urlMatches predicate authored in the predicates section.
 
@@ -6783,89 +6871,89 @@ async function saveLocale() {
   // backfill empty descriptions so authored text is preserved.
   // Reflect the generated text back into the input so the user sees
   // what got saved.
-  if (!_locDraft.description && _locDraft.landmarks.length > 0) {
-    _locDraft.description = composeCompactDescription(_locDraft.landmarks);
-    if (locDescriptionInput) locDescriptionInput.value = _locDraft.description;
+  if (!_perspectiveDraft.description && _perspectiveDraft.landmarks.length > 0) {
+    _perspectiveDraft.description = composeCompactDescription(_perspectiveDraft.landmarks);
+    if (perspectiveDescriptionInput) perspectiveDescriptionInput.value = _perspectiveDraft.description;
   }
   // Reflect the normalized name in the input so the user sees what was
   // actually saved.
-  if (locNameInput.value !== _locDraft.name) locNameInput.value = _locDraft.name;
+  if (perspectiveNameInput.value !== _perspectiveDraft.name) perspectiveNameInput.value = _perspectiveDraft.name;
 
-  if (!_locDraft.name)        { showLocaleWarning('Locale name is required'); return; }
+  if (!_perspectiveDraft.name)        { showPerspectiveWarning('Perspective name is required'); return; }
   // v2.74.275 — Require a urlMatches predicate (replaces the
   // urlPattern field check). Auto-seeded from tab URL on first
-  // tab load for new locales; author can edit or remove.
-  const hasUrlPredicate = Array.isArray(_locDraft.predicates)
-    && _locDraft.predicates.some(p =>
+  // tab load for new perspectives; author can edit or remove.
+  const hasUrlPredicate = Array.isArray(_perspectiveDraft.predicates)
+    && _perspectiveDraft.predicates.some(p =>
       p?.kind === 'urlMatches' && typeof p.pattern === 'string' && p.pattern.trim().length > 0
     );
   if (!hasUrlPredicate) {
-    showLocaleWarning('Locale needs a URL gate — add a urlMatches predicate in the Additional predicates section (or it would match every page on this Ground).');
+    showPerspectiveWarning('Perspective needs a URL gate — add a urlMatches predicate in the Additional predicates section (or it would match every page on this Ground).');
     return;
   }
-  if (_locDraft.landmarks.length === 0) {
-    showLocaleWarning('Add at least one landmark');
+  if (_perspectiveDraft.landmarks.length === 0) {
+    showPerspectiveWarning('Add at least one landmark');
     return;
   }
   const seen = new Set();
-  for (const lm of _locDraft.landmarks) {
+  for (const lm of _perspectiveDraft.landmarks) {
     // v2.74.275 — Storage field is now `lm.alias` (legacy `role`
-    // shape removed). Legacy { localeId, role } refs no longer
+    // shape removed). Legacy { perspectiveId, role } refs no longer
     // supported.
-    if (!lm.alias?.trim())     { showLocaleWarning('All landmarks need an alias (auto-fills from accessibleName on Pick — type one manually if you skipped Pick)'); return; }
-    if (!lm.selector?.trim()) { showLocaleWarning('All landmarks need a selector — click Pick to choose an element'); return; }
-    if (seen.has(lm.alias))    { showLocaleWarning(`Duplicate alias "${lm.alias}" — aliases must be unique within a locale`); return; }
+    if (!lm.alias?.trim())     { showPerspectiveWarning('All landmarks need an alias (auto-fills from accessibleName on Pick — type one manually if you skipped Pick)'); return; }
+    if (!lm.selector?.trim()) { showPerspectiveWarning('All landmarks need a selector — click Pick to choose an element'); return; }
+    if (seen.has(lm.alias))    { showPerspectiveWarning(`Duplicate alias "${lm.alias}" — aliases must be unique within a perspective`); return; }
     seen.add(lm.alias);
   }
 
   // v2.74.260 — Validate + normalize additional predicates. Each leaf
   // needs the kind-specific required fields populated. Incomplete
   // predicates would fail-closed at runtime (per Phase 7d semantics),
-  // so flag them at save time instead of silently shipping a locale
+  // so flag them at save time instead of silently shipping a perspective
   // that never activates.
-  if (Array.isArray(_locDraft.predicates) && _locDraft.predicates.length > 0) {
-    for (let i = 0; i < _locDraft.predicates.length; i++) {
-      const p = _locDraft.predicates[i];
+  if (Array.isArray(_perspectiveDraft.predicates) && _perspectiveDraft.predicates.length > 0) {
+    for (let i = 0; i < _perspectiveDraft.predicates.length; i++) {
+      const p = _perspectiveDraft.predicates[i];
       if (!p || typeof p !== 'object' || !p.kind) {
-        showLocaleWarning(`Predicate #${i + 1}: missing kind`);
+        showPerspectiveWarning(`Predicate #${i + 1}: missing kind`);
         return;
       }
       if (p.kind === 'visible' || p.kind === 'hasText') {
         if (!p.target || typeof p.target !== 'string') {
-          showLocaleWarning(`Predicate #${i + 1} (${p.kind}): pick a target landmark`);
+          showPerspectiveWarning(`Predicate #${i + 1} (${p.kind}): pick a target landmark`);
           return;
         }
         // v2.74.261 — BUG FIX: validate target uid still references a
-        // landmark in the current locale. Predicates created against a
+        // landmark in the current perspective. Predicates created against a
         // landmark that's since been removed would silently fail-closed
         // at runtime (getLandmark returns null → predicate returns null
-        // → locale never activates). Catch at save time instead.
-        const targetExists = (_locDraft.landmarks ?? []).some(lm => lm?.uid === p.target);
+        // → perspective never activates). Catch at save time instead.
+        const targetExists = (_perspectiveDraft.landmarks ?? []).some(lm => lm?.uid === p.target);
         if (!targetExists) {
-          showLocaleWarning(`Predicate #${i + 1} (${p.kind}): target landmark no longer exists in this locale. Pick a different landmark or remove the predicate.`);
+          showPerspectiveWarning(`Predicate #${i + 1} (${p.kind}): target landmark no longer exists in this perspective. Pick a different landmark or remove the predicate.`);
           return;
         }
         if (p.kind === 'hasText' && (typeof p.value !== 'string' || !p.value)) {
-          showLocaleWarning(`Predicate #${i + 1} (hasText): text value is required`);
+          showPerspectiveWarning(`Predicate #${i + 1} (hasText): text value is required`);
           return;
         }
       } else if (p.kind === 'iframeLoaded') {
         if (!p.contextName || typeof p.contextName !== 'string' || !p.contextName.trim()) {
-          showLocaleWarning(`Predicate #${i + 1} (iframeLoaded): context name is required`);
+          showPerspectiveWarning(`Predicate #${i + 1} (iframeLoaded): context name is required`);
           return;
         }
       } else if (p.kind === 'urlMatches') {
         // v2.74.275 — urlMatches authoring validation.
         if (typeof p.pattern !== 'string' || !p.pattern.trim()) {
-          showLocaleWarning(`Predicate #${i + 1} (URL matches): pattern is required`);
+          showPerspectiveWarning(`Predicate #${i + 1} (URL matches): pattern is required`);
           return;
         }
         if (p.mode && !['contains', 'regex', 'exact'].includes(p.mode)) {
-          showLocaleWarning(`Predicate #${i + 1} (URL matches): invalid mode "${p.mode}"`);
+          showPerspectiveWarning(`Predicate #${i + 1} (URL matches): invalid mode "${p.mode}"`);
           return;
         }
       } else {
-        showLocaleWarning(`Predicate #${i + 1}: unknown kind "${p.kind}"`);
+        showPerspectiveWarning(`Predicate #${i + 1}: unknown kind "${p.kind}"`);
         return;
       }
     }
@@ -6873,50 +6961,50 @@ async function saveLocale() {
   // v2.74.267 — Validate iframe contexts. Each must have a non-empty
   // unique contextName + a valid predicate per its kind. Authoring
   // path may produce empty fields (e.g., just clicked + Add); flag
-  // so the author doesn't save a structurally-invalid locale.
-  if (Array.isArray(_locDraft.iframeContexts) && _locDraft.iframeContexts.length > 0) {
+  // so the author doesn't save a structurally-invalid perspective.
+  if (Array.isArray(_perspectiveDraft.iframeContexts) && _perspectiveDraft.iframeContexts.length > 0) {
     const namesSeen = new Set();
-    for (let i = 0; i < _locDraft.iframeContexts.length; i++) {
-      const c = _locDraft.iframeContexts[i];
+    for (let i = 0; i < _perspectiveDraft.iframeContexts.length; i++) {
+      const c = _perspectiveDraft.iframeContexts[i];
       if (!c?.contextName || !c.contextName.trim()) {
-        showLocaleWarning(`iframe context #${i + 1}: name is required`);
+        showPerspectiveWarning(`iframe context #${i + 1}: name is required`);
         return;
       }
       const nm = c.contextName.trim();
       if (namesSeen.has(nm)) {
-        showLocaleWarning(`Duplicate iframe context name "${nm}" — must be unique within the locale`);
+        showPerspectiveWarning(`Duplicate iframe context name "${nm}" — must be unique within the perspective`);
         return;
       }
       namesSeen.add(nm);
       const p = c.predicate;
       if (!p || !p.kind) {
-        showLocaleWarning(`iframe context "${nm}": predicate kind missing`);
+        showPerspectiveWarning(`iframe context "${nm}": predicate kind missing`);
         return;
       }
       if (p.kind === 'iframeName' && (!p.value || !String(p.value).trim())) {
-        showLocaleWarning(`iframe context "${nm}" (by name): name value required`);
+        showPerspectiveWarning(`iframe context "${nm}" (by name): name value required`);
         return;
       }
       if (p.kind === 'iframeSelector' && (!p.selector || !String(p.selector).trim())) {
-        showLocaleWarning(`iframe context "${nm}" (by selector): CSS selector required`);
+        showPerspectiveWarning(`iframe context "${nm}" (by selector): CSS selector required`);
         return;
       }
       if (p.kind === 'iframeSrcPattern' && (!p.pattern || !String(p.pattern).trim())) {
-        showLocaleWarning(`iframe context "${nm}" (by src pattern): pattern required`);
+        showPerspectiveWarning(`iframe context "${nm}" (by src pattern): pattern required`);
         return;
       }
       if (p.kind === 'iframePositional' && (typeof p.index !== 'number' || p.index < 0)) {
-        showLocaleWarning(`iframe context "${nm}" (by position): non-negative index required`);
+        showPerspectiveWarning(`iframe context "${nm}" (by position): non-negative index required`);
         return;
       }
     }
     // Cross-reference: every landmark.iframeContext should match an
     // existing context name. Catches typos (rare since UI never lets
     // you type one) and orphans from rename gaps.
-    for (let li = 0; li < (_locDraft.landmarks ?? []).length; li++) {
-      const lm = _locDraft.landmarks[li];
+    for (let li = 0; li < (_perspectiveDraft.landmarks ?? []).length; li++) {
+      const lm = _perspectiveDraft.landmarks[li];
       if (lm?.iframeContext && !namesSeen.has(lm.iframeContext)) {
-        showLocaleWarning(`Landmark "${lm.accessibleName ?? lm.alias ?? li}" references iframe context "${lm.iframeContext}" which doesn't exist in this locale.`);
+        showPerspectiveWarning(`Landmark "${lm.accessibleName ?? lm.alias ?? li}" references iframe context "${lm.iframeContext}" which doesn't exist in this perspective.`);
         return;
       }
     }
@@ -6925,42 +7013,42 @@ async function saveLocale() {
   // removed. Two cases:
   //   1. AND of leaves → flat array (implicit AND)
   //   2. OR/NOT of leaves → tree { operator, children }
-  if (Array.isArray(_locDraft.predicates) && _locDraft.predicates.length > 0) {
+  if (Array.isArray(_perspectiveDraft.predicates) && _perspectiveDraft.predicates.length > 0) {
     if (_predicatesOperator === 'or' || _predicatesOperator === 'not') {
       const children = _predicatesOperator === 'not'
-        ? _locDraft.predicates.slice(0, 1)
-        : _locDraft.predicates.slice();
-      _locDraft.predicates = { operator: _predicatesOperator, children };
+        ? _perspectiveDraft.predicates.slice(0, 1)
+        : _perspectiveDraft.predicates.slice();
+      _perspectiveDraft.predicates = { operator: _predicatesOperator, children };
     }
     // AND case: leave as flat array.
   }
 
-  // v2.74.48 — Uniqueness check against existing locales on this
+  // v2.74.48 — Uniqueness check against existing perspectives on this
   // Ground. Edit mode (same id) skips itself so the user can save
   // unchanged. Names are compared case-insensitive even though input
   // normalization forces lowercase — defensive.
   try {
     const res = await chrome.runtime.sendMessage({
-      type: 'LIST_LOCALES',
-      payload: { groundId: _locGroundId },
+      type: 'LIST_PERSPECTIVES',
+      payload: { groundId: _perspectiveGroundId },
     });
-    if (res?.success && Array.isArray(res.locales)) {
-      const lower = _locDraft.name.toLowerCase();
-      const clash = res.locales.find(l =>
-        l.id !== _locDraft.id && String(l.name ?? '').toLowerCase() === lower
+    if (res?.success && Array.isArray(res.perspectives)) {
+      const lower = _perspectiveDraft.name.toLowerCase();
+      const clash = res.perspectives.find(l =>
+        l.id !== _perspectiveDraft.id && String(l.name ?? '').toLowerCase() === lower
       );
       if (clash) {
-        showLocaleWarning(`A locale named "${_locDraft.name}" already exists on this Ground. Pick a different name.`);
+        showPerspectiveWarning(`A perspective named "${_perspectiveDraft.name}" already exists on this Ground. Pick a different name.`);
         return;
       }
     }
   } catch (e) {
-    // LIST_LOCALES failures are non-fatal — log and let save proceed.
+    // LIST_PERSPECTIVES failures are non-fatal — log and let save proceed.
     // The user can retry if they hit a real duplicate; the storage
     // layer will at worst overwrite a same-named record.
-    console.warn('[locale-capture] uniqueness check failed (continuing):', e?.message);
+    console.warn('[perspective-capture] uniqueness check failed (continuing):', e?.message);
   }
-  const unverified = _locDraft.landmarks.filter(lm => !lm.verified || lm.verified.matchedCount === 0);
+  const unverified = _perspectiveDraft.landmarks.filter(lm => !lm.verified || lm.verified.matchedCount === 0);
   if (unverified.length > 0) {
     if (!confirm(`${unverified.length} landmark(s) are unverified or match 0 elements. Save anyway?`)) return;
   }
@@ -6972,27 +7060,27 @@ async function saveLocale() {
   // complete the save, then proceed to reset the form for "another
   // capture" — but the user has already left.
   const mountSnapshot = _mountEl;
-  locSaveBtn.disabled = true;
-  if (locCancelBtn) locCancelBtn.disabled = true;
-  locSaveBtn.textContent = 'Saving…';
+  perspectiveSaveBtn.disabled = true;
+  if (perspectiveCancelBtn) perspectiveCancelBtn.disabled = true;
+  perspectiveSaveBtn.textContent = 'Saving…';
   try {
     // v2.74.240 — Phase 2 of substrate spec: write each landmark to
-    // the per-Ground registry, write the locale with landmarkRefs
-    // (no more embedded landmarks[]). Backward compat: locales that
+    // the per-Ground registry, write the perspective with landmarkRefs
+    // (no more embedded landmarks[]). Backward compat: perspectives that
     // still carry embedded landmarks on load get migrated here
     // (lazy migration on first save after upgrade).
     //
     // Save order:
     //   1. Each landmark → registry (idempotent; same UID overwrites)
-    //   2. Locale → with landmarkRefs[] + landmarks[] removed
+    //   2. Perspective → with landmarkRefs[] + landmarks[] removed
     //
     // Failure modes:
     //   - A landmark write fails → abort the whole save (don't leave
     //     half-migrated state).
-    //   - Last write wins for landmarks with shared UIDs across locales
+    //   - Last write wins for landmarks with shared UIDs across perspectives
     //     (per spec: same UID = same landmark, intentionally one record).
     const landmarkRefs = [];
-    for (const lm of _locDraft.landmarks) {
+    for (const lm of _perspectiveDraft.landmarks) {
       // Ensure a UID exists. Phase 1 derives at Pick time; legacy
       // landmarks (saved pre-Phase 1) get a local UUID here.
       if (!lm.uid) {
@@ -7004,10 +7092,10 @@ async function saveLocale() {
       }
       // Compose the registry record. Field set is the union of
       // identity layer (Phase 1) + description (Wave 2) + realization
-      // (selector + verified). groundId comes from the locale.
+      // (selector + verified). groundId comes from the perspective.
       const record = {
         uid                 : lm.uid,
-        groundId            : _locGroundId,
+        groundId            : _perspectiveGroundId,
         isCanonical         : lm.isCanonical === true,
         // v2.74.275 — Storage field renamed: role → alias.
         alias               : lm.alias ?? '',
@@ -7037,7 +7125,7 @@ async function saveLocale() {
         frameUrl            : lm.frameUrl ?? null,
         // v2.74.245 — Phase 7a: iframe binding via named context. The
         // landmark references a context declared on its containing
-        // Locale (or any active Locale at resolution time). frameUrl
+        // Perspective (or any active Perspective at resolution time). frameUrl
         // is kept as a legacy fallback during the transition;
         // future phase drops it once all consumers migrate.
         iframeContext       : lm.iframeContext ?? null,
@@ -7060,10 +7148,10 @@ async function saveLocale() {
     // invalidation). Otherwise drop it → StorageManager derives flat nodes
     // from landmarkRefs.
     let structuredNodes = null;
-    if (Array.isArray(_locDraft.structuredLandmarks) && _locDraft.structuredLandmarks.length) {
-      const flat = new Set(flattenLandmarkNodes(_locDraft.structuredLandmarks));
+    if (Array.isArray(_perspectiveDraft.structuredLandmarks) && _perspectiveDraft.structuredLandmarks.length) {
+      const flat = new Set(flattenLandmarkNodes(_perspectiveDraft.structuredLandmarks));
       if (flat.size === landmarkRefs.length && landmarkRefs.every(u => flat.has(u))) {
-        structuredNodes = _locDraft.structuredLandmarks;
+        structuredNodes = _perspectiveDraft.structuredLandmarks;
       }
     }
     // v2.74.348/349 — § 13 role flow: if the author filled any landmark INTO a
@@ -7076,7 +7164,7 @@ async function saveLocale() {
     // dropping all of it. No roleFill anywhere → leave null (StorageManager
     // derives flat nodes from landmarkRefs as before).
     if (!structuredNodes) {
-      const withUid = _locDraft.landmarks.filter(lm => lm.uid);
+      const withUid = _perspectiveDraft.landmarks.filter(lm => lm.uid);
       const anyRoled = withUid.some(lm => lm.roleFill);
       if (anyRoled && withUid.length === landmarkRefs.length) {
         const now = Date.now();
@@ -7094,81 +7182,81 @@ async function saveLocale() {
         (Array.isArray(rest.contains) ? { ...rest, contains: stripAuto(rest.contains) } : rest));
       structuredNodes = stripAuto(structuredNodes);
     }
-    // Build the locale payload — refs + (optional) structured nodes. Drop the
+    // Build the perspective payload — refs + (optional) structured nodes. Drop the
     // hydrated landmarks[] / draft-only fields so reads don't pick up copies.
-    const localeForSave = {
-      ..._locDraft,
+    const perspectiveForSave = {
+      ..._perspectiveDraft,
       landmarkRefs,
       landmarks: structuredNodes ?? undefined,
     };
-    if (!localeForSave.landmarks) delete localeForSave.landmarks;
-    delete localeForSave.structuredLandmarks;   // draft-only
+    if (!perspectiveForSave.landmarks) delete perspectiveForSave.landmarks;
+    delete perspectiveForSave.structuredLandmarks;   // draft-only
     if (!structuredNodes) {
       // No (valid) structure → don't persist stale overlays either.
-      delete localeForSave.groupings;
-      delete localeForSave.sequences;
+      delete perspectiveForSave.groupings;
+      delete perspectiveForSave.sequences;
     }
 
     const res = await chrome.runtime.sendMessage({
-      type: 'SAVE_LOCALE',
-      payload: { locale: localeForSave },
+      type: 'SAVE_PERSPECTIVE',
+      payload: { perspective: perspectiveForSave },
     });
     if (mountSnapshot !== _mountEl) return;
     if (!res?.success) {
-      showLocaleWarning(`Save failed: ${res?.error ?? 'unknown'}`);
-      locSaveBtn.disabled = false;
-      if (locCancelBtn) locCancelBtn.disabled = false;
-      locSaveBtn.textContent = 'Save Locale';
+      showPerspectiveWarning(`Save failed: ${res?.error ?? 'unknown'}`);
+      perspectiveSaveBtn.disabled = false;
+      if (perspectiveCancelBtn) perspectiveCancelBtn.disabled = false;
+      perspectiveSaveBtn.textContent = 'Save Perspective';
       return;
     }
-    const savedName = _locDraft.name;
-    toast(`✓ Locale "${savedName}" saved`, 'ok');
+    const savedName = _perspectiveDraft.name;
+    toast(`✓ Perspective "${savedName}" saved`, 'ok');
     // v2.74.33 — When launched from the Ground sidepanel, save → return
-    // rather than resetting to capture another locale.
+    // rather than resetting to capture another perspective.
     // v2.74.34 — Capture the routing decision BEFORE sending
-    // CANCEL_LOCALE_CAPTURE: that handler clears the sidepanel mode,
-    // which unmounts this module and zeroes _locReturnTo.
-    if (_locReturnTo === 'ground-view') {
-      const returnTo = _locReturnTo;
+    // CANCEL_PERSPECTIVE_CAPTURE: that handler clears the sidepanel mode,
+    // which unmounts this module and zeroes _perspectiveReturnTo.
+    if (_perspectiveReturnTo === 'ground-view') {
+      const returnTo = _perspectiveReturnTo;
       // Clean up the pending capture session in the background before
       // switching mode so we don't leave a half-finished capture entry.
-      try { await chrome.runtime.sendMessage({ type: 'CANCEL_LOCALE_CAPTURE' }); } catch {}
+      try { await chrome.runtime.sendMessage({ type: 'CANCEL_PERSPECTIVE_CAPTURE' }); } catch {}
       _routeExit(returnTo);
       return;
     }
-    _locDraft = newEmptyLocaleDraft(_locGroundId);
-    locNameInput.value = '';
-    locDescriptionInput.value = '';
-    refreshLocaleActiveTab();
-    renderLocaleLandmarks();
-    updateLocaleSaveButtonState();
-    locSaveBtn.textContent = 'Save Locale';
-    locSaveBtn.disabled = true;
+    _perspectiveDraft = newEmptyPerspectiveDraft(_perspectiveGroundId);
+    perspectiveNameInput.value = '';
+    perspectiveDescriptionInput.value = '';
+    refreshPerspectiveActiveTab();
+    renderPerspectiveLandmarks();
+    updatePerspectiveSaveButtonState();
+    perspectiveSaveBtn.textContent = 'Save Perspective';
+    perspectiveSaveBtn.disabled = true;
   } catch (e) {
     // v2.74.121 — Same guard on the throw path.
     if (mountSnapshot !== _mountEl) return;
-    showLocaleWarning(`Save threw: ${e.message}`);
-    locSaveBtn.disabled = false;
-    if (locCancelBtn) locCancelBtn.disabled = false;
-    locSaveBtn.textContent = 'Save Locale';
+    showPerspectiveWarning(`Save threw: ${e.message}`);
+    perspectiveSaveBtn.disabled = false;
+    if (perspectiveCancelBtn) perspectiveCancelBtn.disabled = false;
+    perspectiveSaveBtn.textContent = 'Save Perspective';
   }
 }
 
-async function cancelLocaleCapture() {
+async function cancelPerspectiveCapture() {
   // v2.74.34 — Capture the routing decision BEFORE the cleanup. The
-  // CANCEL_LOCALE_CAPTURE handler in background calls
+  // CANCEL_PERSPECTIVE_CAPTURE handler in background calls
   // __setSidepanelMode(null) which triggers the shell to unmount this
-  // mode — which clears _locReturnTo to null. Reading the field after
+  // mode — which clears _perspectiveReturnTo to null. Reading the field after
   // that point would always fall through to exitToStudio.
-  const returnTo = _locReturnTo;
-  if (_locPickerSession) await cancelLocalePick(true);
+  const returnTo = _perspectiveReturnTo;
+  if (_perspectivePickerSession) await cancelPerspectivePick(true);
   // Server-side cleanup: clear the pending capture session in background.
-  // This also clears the sidepanel mode (CANCEL_LOCALE_CAPTURE handler
-  // calls __setSidepanelMode(null) when the active mode is locale-capture),
+  // This also clears the sidepanel mode (CANCEL_PERSPECTIVE_CAPTURE handler
+  // calls __setSidepanelMode(null) when the active mode is perspective-capture),
   // but we follow up with the appropriate exit (Studio or Ground sidepanel)
   // anyway per the unified cancel UX (v2.72.54).
   try {
-    await chrome.runtime.sendMessage({ type: 'CANCEL_LOCALE_CAPTURE' });
+    await chrome.runtime.sendMessage({ type: 'CANCEL_PERSPECTIVE_CAPTURE' });
   } catch { /* fine */ }
   _routeExit(returnTo);
 }
@@ -7177,14 +7265,14 @@ async function cancelLocaleCapture() {
 // (returnTo='ground-view'), switch the panel back to that mode instead
 // of dismissing it and focusing Studio. v2.74.34 — Takes returnTo as an
 // argument so callers capture it before any cleanup that may unmount
-// this mode (and reset the module-level _locReturnTo to null).
+// this mode (and reset the module-level _perspectiveReturnTo to null).
 // v2.74.36 — Clear the per-tab sidepanel mode record on exit so a
 // future visit to this tab doesn't auto-resume the finished session.
 function _routeExit(returnTo) {
-  if (typeof _locTabId === 'number') {
+  if (typeof _perspectiveTabId === 'number') {
     chrome.runtime.sendMessage({
       type: 'CLEAR_TAB_SIDEPANEL_MODE',
-      payload: { tabId: _locTabId },
+      payload: { tabId: _perspectiveTabId },
     }).catch(() => {});
   }
   if (returnTo === 'ground-view') {
@@ -7197,7 +7285,7 @@ function _routeExit(returnTo) {
 // ─── Module export ───────────────────────────────────────────────────────
 
 export default {
-  name: 'locale-capture',
+  name: 'perspective-capture',
   mount,
   unmount,
   handleEvent,

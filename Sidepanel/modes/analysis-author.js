@@ -229,11 +229,11 @@ function handleEvent(_message) { /* no-op */ }
 
 function _renderHtml() {
   return `
-    <div class="dbg-locale-card">
-      <div class="dbg-locale-banner">
-        <span data-aa="banner-title" class="dbg-locale-banner-title">${escHtml(_isEdit ? 'Edit Analysis' : 'New Analysis')}</span>
+    <div class="dbg-perspective-card">
+      <div class="dbg-perspective-banner">
+        <span data-aa="banner-title" class="dbg-perspective-banner-title">${escHtml(_isEdit ? 'Edit Analysis' : 'New Analysis')}</span>
       </div>
-      <div data-aa="warning" class="dbg-locale-warning hidden"></div>
+      <div data-aa="warning" class="dbg-perspective-warning hidden"></div>
 
       ${_collapsibleCardHtml('pre', 'Preconditions', `
         <div data-aa="pre-list" class="fa-conditions-list">
@@ -242,8 +242,8 @@ function _renderHtml() {
       `)}
 
       ${_collapsibleCardHtml('data', 'Data inputs', `
-        <label class="dbg-locale-field aa-data-input-field">
-          <span class="dbg-locale-field-label">Add binding</span>
+        <label class="dbg-perspective-field aa-data-input-field">
+          <span class="dbg-perspective-field-label">Add binding</span>
           <select data-aa="data-select">
             <option value="">— pick a binding —</option>
           </select>
@@ -259,13 +259,13 @@ function _renderHtml() {
       `)}
 
       ${_collapsibleCardHtml('result', 'Results', `
-        <label class="dbg-locale-field">
-          <span class="dbg-locale-field-label">Result name</span>
+        <label class="dbg-perspective-field">
+          <span class="dbg-perspective-field-label">Result name</span>
           <input type="text" data-aa="result-name" maxlength="80"
                  placeholder="e.g. FILTERED_ITEMS" value="${escAttr(_draft.result.name)}" />
         </label>
-        <label class="dbg-locale-field">
-          <span class="dbg-locale-field-label">Type</span>
+        <label class="dbg-perspective-field">
+          <span class="dbg-perspective-field-label">Type</span>
           <select data-aa="result-type">
             ${RESULT_TYPES.map(t => `<option value="${escAttr(t.id)}" ${_draft.result.type === t.id ? 'selected' : ''}>${escHtml(t.label)}</option>`).join('')}
           </select>
@@ -279,21 +279,21 @@ function _renderHtml() {
       `)}
 
       <!-- Name card: hidden until Done. Mirrors fragment-author. -->
-      <section data-aa="name-card" class="dbg-locale-meta-card fa-name-card hidden">
+      <section data-aa="name-card" class="dbg-perspective-meta-card fa-name-card hidden">
         <div class="fa-name-row">
           <input type="text" data-aa="name" maxlength="80"
                  placeholder="Analysis name (e.g. top-rated-items)"
                  value="${escAttr(_draft.name)}" />
           <button data-aa="save" class="btn-primary fa-name-save-btn" type="button" disabled>${escHtml(_isEdit ? 'Update' : 'Save')}</button>
         </div>
-        <label class="dbg-locale-field aa-name-desc-field">
-          <span class="dbg-locale-field-label">Description</span>
+        <label class="dbg-perspective-field aa-name-desc-field">
+          <span class="dbg-perspective-field-label">Description</span>
           <textarea data-aa="description" rows="2"
                     placeholder="What this analysis does.">${escHtml(_draft.description)}</textarea>
         </label>
       </section>
 
-      <section class="dbg-locale-actions">
+      <section class="dbg-perspective-actions">
         <button data-aa="reveal-done" class="btn-primary" type="button">Done</button>
         <button data-aa="cancel" class="btn-secondary" type="button">Cancel</button>
       </section>
@@ -303,7 +303,7 @@ function _renderHtml() {
 
 function _collapsibleCardHtml(key, label, bodyHtml) {
   return `
-    <section data-aa-card="${escAttr(key)}" class="dbg-locale-meta-card fa-conditions-card">
+    <section data-aa-card="${escAttr(key)}" class="dbg-perspective-meta-card fa-conditions-card">
       <button class="fa-conditions-collapse-toggle" data-aa-toggle="${escAttr(key)}" type="button"
               title="Collapse / expand ${escAttr(label.toLowerCase())}" aria-expanded="true">
         <span class="fa-conditions-collapse-chevron" data-aa-toggle-glyph="${escAttr(key)}">▾</span>

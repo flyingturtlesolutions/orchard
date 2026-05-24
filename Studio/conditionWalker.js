@@ -1,7 +1,7 @@
 /**
  * @file Studio/conditionWalker.js
  * @description Generic visitor for all condition objects in a strategy
- * tree. Used by reference-counting code (assertion usages, locale
+ * tree. Used by reference-counting code (assertion usages, perspective
  * usages) and any future code that needs to inspect every condition
  * regardless of where it sits in the tree (DETECT branches, LOOP exit
  * checks, WAIT_FOR conditions, FOREACH/TRY/IN_NEW_TAB body recursion).

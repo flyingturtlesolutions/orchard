@@ -13,11 +13,11 @@
  * Until this module, only the second path existed in code — authors
  * could see warnings on landmark deletion but had no automated way
  * to rewire downstream consumers. They had to manually re-author each
- * fragment / observation / locale.
+ * fragment / observation / perspective.
  *
  * ── WHAT GETS REWRITTEN ──────────────────────────────────────────────
  *
- *   Locales — `landmarkRefs[]` entries where ref === oldUid are
+ *   Perspectives — `landmarkRefs[]` entries where ref === oldUid are
  *             replaced with newUid (dedupe if newUid already present).
  *             Legacy `landmarks[]` embedded records are NOT mutated
  *             — those are realization-bearing data the spec treats as
@@ -28,9 +28,9 @@
  *   Fragments — `rawJson` is parsed, walked (top-level + chain
  *             branches + gate body subs), and every
  *             `action.landmarkRef.uid === oldUid` is rewritten to
- *             newUid. Legacy `{ localeId, role }` refs are SKIPPED:
- *             the role-to-uid association is locale-scoped and may
- *             mean different things in different locales — rewriting
+ *             newUid. Legacy `{ perspectiveId, role }` refs are SKIPPED:
+ *             the role-to-uid association is perspective-scoped and may
+ *             mean different things in different perspectives — rewriting
  *             blindly is unsafe. Each rewrite re-serializes the
  *             rawJson and calls updateFragment().
  *
@@ -65,7 +65,7 @@ import { Logger }         from '../Core/Logger.js';
  * tree with rewrites applied + a count of rewrites. Pure function.
  *
  * Walks: top-level actions; action.branches[] (chains); action.body[]
- * (gate bodies). Modern `{ uid }` refs only — legacy `{ localeId,
+ * (gate bodies). Modern `{ uid }` refs only — legacy `{ perspectiveId,
  * role }` refs are left untouched (see module header rationale).
  *
  * @param {Array} actions
@@ -144,13 +144,13 @@ function _rewriteExtracts(extracts, oldUid, newUid) {
  *   a11yRoleOld?: string,
  *   a11yRoleNew?: string,
  *   changes: {
- *     locales: Array<{id, name, refsRewritten, alreadyHadNew}>,
+ *     perspectives: Array<{id, name, refsRewritten, alreadyHadNew}>,
  *     fragments: Array<{id, name, refsRewritten}>,
  *     observations: Array<{id, name, refsRewritten}>,
  *     skipped: Array<{kind, id, reason}>,
  *   },
  *   totals: {
- *     localesRewritten: number,
+ *     perspectivesRewritten: number,
  *     fragmentsRewritten: number,
  *     observationsRewritten: number,
  *     totalRefsRewritten: number,
@@ -169,9 +169,9 @@ export async function replaceLandmarkReferences(oldUid, newUid, groundId, opts =
     // Tracks divergence in the author-typed alias (formerly `role`) +
     // a11yRole between old and new landmarks.
     aliasPresentMismatch: false,
-    changes: { locales: [], fragments: [], observations: [], skipped: [] },
+    changes: { perspectives: [], fragments: [], observations: [], skipped: [] },
     totals: {
-      localesRewritten: 0, fragmentsRewritten: 0, observationsRewritten: 0,
+      perspectivesRewritten: 0, fragmentsRewritten: 0, observationsRewritten: 0,
       totalRefsRewritten: 0,
     },
     errors: [],
@@ -209,11 +209,11 @@ export async function replaceLandmarkReferences(oldUid, newUid, groundId, opts =
   baseResult.aliasPresentMismatch = !equal(oldLm.alias, newLm.alias)
                                  || !equal(oldLm.a11yRole, newLm.a11yRole);
 
-  // ── Locales: rewrite landmarkRefs[]; preserve legacy landmarks[] ──
+  // ── Perspectives: rewrite landmarkRefs[]; preserve legacy landmarks[] ──
   try {
-    const allLocales = await StorageManager.listLocales(groundId);
-    for (const locale of allLocales ?? []) {
-      const refs = Array.isArray(locale.landmarkRefs) ? locale.landmarkRefs : null;
+    const allPerspectives = await StorageManager.listPerspectives(groundId);
+    for (const perspective of allPerspectives ?? []) {
+      const refs = Array.isArray(perspective.landmarkRefs) ? perspective.landmarkRefs : null;
       if (refs && refs.includes(oldUid)) {
         const alreadyHadNew = refs.includes(newUid);
         // Replace oldUid with newUid; dedupe (preserve first
@@ -235,29 +235,29 @@ export async function replaceLandmarkReferences(oldUid, newUid, groundId, opts =
         let writeOk = true;
         if (!dryRun) {
           try {
-            await StorageManager.updateLocale(locale.id, { landmarkRefs: newRefs });
+            await StorageManager.updatePerspective(perspective.id, { landmarkRefs: newRefs });
           } catch (e) {
             writeOk = false;
-            baseResult.errors.push({ kind: 'locale', id: locale.id, error: e.message });
+            baseResult.errors.push({ kind: 'perspective', id: perspective.id, error: e.message });
           }
         }
         if (writeOk || dryRun) {
-          baseResult.changes.locales.push({
-            id            : locale.id,
-            name          : locale.name ?? locale.id,
+          baseResult.changes.perspectives.push({
+            id            : perspective.id,
+            name          : perspective.name ?? perspective.id,
             refsRewritten,
             alreadyHadNew,
           });
-          baseResult.totals.localesRewritten++;
+          baseResult.totals.perspectivesRewritten++;
           baseResult.totals.totalRefsRewritten += refsRewritten;
         }
       }
       // v2.74.275 — Legacy embedded landmarks[] detection REMOVED.
-      // Embedded shape no longer supported; locales use landmarkRefs[] only.
+      // Embedded shape no longer supported; perspectives use landmarkRefs[] only.
     }
   } catch (e) {
-    Logger.warn('LandmarkReplacer', `listLocales failed: ${e.message}`);
-    baseResult.errors.push({ kind: 'locales-scan', id: groundId, error: e.message });
+    Logger.warn('LandmarkReplacer', `listPerspectives failed: ${e.message}`);
+    baseResult.errors.push({ kind: 'perspectives-scan', id: groundId, error: e.message });
   }
 
   // ── Fragments: walk rawJson, rewrite uid refs ─────────────────────
@@ -336,7 +336,7 @@ export async function replaceLandmarkReferences(oldUid, newUid, groundId, opts =
   if (!dryRun) {
     Logger.info('LandmarkReplacer',
       `replaceLandmarkReferences ${oldUid} → ${newUid} on ${groundId}: ` +
-      `${baseResult.totals.localesRewritten} locale(s), ` +
+      `${baseResult.totals.perspectivesRewritten} perspective(s), ` +
       `${baseResult.totals.fragmentsRewritten} fragment(s), ` +
       `${baseResult.totals.observationsRewritten} observation(s), ` +
       `${baseResult.totals.totalRefsRewritten} refs rewritten, ` +

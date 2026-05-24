@@ -35,7 +35,7 @@ import { evaluateDataCondition } from './DataAssertion.js';
 // dynamic in v2.74.236 first cut) — TemplateWalker.#executeStep runs
 // hot in every fragment dispatch, and dynamic import per call adds
 // cost for no benefit (the module is always needed).
-import { applyLandmarkRefToStep, findLocaleIframeContext } from './LandmarkResolver.js';
+import { applyLandmarkRefToStep, findPerspectiveIframeContext } from './LandmarkResolver.js';
 import { emit as emitGroundEvent, EVENT_KIND }            from './GroundEventBus.js';
 import { bracket as observeActionBracket, shouldObserveStep, isEffectDrift, classifyEffectDrift } from './ActionEffectObserver.js';
 
@@ -363,7 +363,7 @@ export class TemplateWalker {
         // tab that was loaded before this extension session has no live
         // content script — #waitForContentScript would loop until its
         // retry budget runs out and throw "Content script did not become
-        // reachable in frameId 0". Mirrors the same fix BEGIN_LOCALE_
+        // reachable in frameId 0". Mirrors the same fix BEGIN_PERSPECTIVE_
         // CAPTURE uses for reusing an existing tab. Best-effort: failure
         // here just falls through to the wait below, which will surface
         // a clearer error if the script truly can't be injected
@@ -1388,25 +1388,25 @@ export class TemplateWalker {
       assertion = await flattenAssertion(assertion, async (id) => {
         return await StorageManager.getAssertion(id);
       }, {
-        // v2.72.29 (Pass 17) — locale_ref expansion during flatten.
+        // v2.72.29 (Pass 17) — perspective_ref expansion during flatten.
         // v2.74.320 — Hydrate landmarks[] from the registry. The Phase-2
-        // migration (v2.74.275) made saved locales store ONLY landmarkRefs[]
+        // migration (v2.74.275) made saved perspectives store ONLY landmarkRefs[]
         // (UIDs) and explicitly drop the embedded landmarks[] (see
-        // locale-capture.js saveLocale). But Assertion.js's locale_ref
-        // expansion reads locale.landmarks[].selector — so without rehydration
-        // every locale_ref hit the empty-landmarks fail-soft and evaluated
-        // false, breaking active-Locale-set evaluation (fragment-author showed
+        // perspective-capture.js savePerspective). But Assertion.js's perspective_ref
+        // expansion reads perspective.landmarks[].selector — so without rehydration
+        // every perspective_ref hit the empty-landmarks fail-soft and evaluated
+        // false, breaking active-Perspective-set evaluation (fragment-author showed
         // "No perspective matches this page" for every page). Rehydrate here so
         // the registry stays authoritative while the expander still sees
         // selectors. One extra batched read only when landmarks[] is absent.
-        getLocale: async (id) => {
-          const loc = await StorageManager.getLocale(id);
-          // v2.74.332 — `landmarks` is now LandmarkNode[] (LOCALE_SPEC § 3
-          // Layer 2), NOT hydrated records. Assertion.js's locale_ref
+        getPerspective: async (id) => {
+          const loc = await StorageManager.getPerspective(id);
+          // v2.74.332 — `landmarks` is now LandmarkNode[] (PERSPECTIVE_SPEC § 3
+          // Layer 2), NOT hydrated records. Assertion.js's perspective_ref
           // expansion needs records WITH selectors, so flatten the node tree
           // → UIDs (the landmarkRefs mirror is exactly that) and REPLACE
           // loc.landmarks with the fetched registry records for the
-          // expansion. (This locale object is transient — used only for
+          // expansion. (This perspective object is transient — used only for
           // predicate expansion — so overwriting the canonical nodes is safe.)
           // Always hydrate when refs exist; the old "only if landmarks empty"
           // gate would now skip (nodes are present) and break the expansion.
@@ -1417,7 +1417,7 @@ export class TemplateWalker {
                 .map(uid => map[uid])
                 .filter(lm => lm && typeof lm.selector === 'string' && lm.selector.trim());
             } catch (e) {
-              Logger.warn('TemplateWalker', `locale_ref hydrate failed for ${id}: ${e.message}`);
+              Logger.warn('TemplateWalker', `perspective_ref hydrate failed for ${id}: ${e.message}`);
             }
           }
           return loc;
@@ -3707,7 +3707,7 @@ export class TemplateWalker {
         }
         // v2.74.246 — Phase 7b of substrate spec: iframe context
         // routing. If the resolved landmark carries an iframeContext,
-        // find its declaring locale, evaluate the predicate against
+        // find its declaring perspective, evaluate the predicate against
         // the live DOM, and route to the matching iframe's frameId.
         // Falls back to the cached frameUrl path when no context is
         // declared or the lookup fails (legacy landmarks unchanged).
@@ -3726,16 +3726,16 @@ export class TemplateWalker {
             } catch { /* fall through */ }
             if (groundId) {
               // v2.74.247 — Phase 7c: pass runtime context (tabUrl)
-              // so the context lookup narrows to ACTIVE locales per
+              // so the context lookup narrows to ACTIVE perspectives per
               // their predicates. The lookup falls back to all
-              // locales when the runtime context yields no active
+              // perspectives when the runtime context yields no active
               // matches — graceful degradation during the transition.
               let runtimeContext = null;
               try {
                 const tabInfo = await chrome.tabs.get(tabId);
                 runtimeContext = { tabUrl: tabInfo?.url ?? '', tabId };
               } catch { /* runtimeContext stays null */ }
-              const ctxLookup = await findLocaleIframeContext(desc0.uid, ctxName, groundId, runtimeContext);
+              const ctxLookup = await findPerspectiveIframeContext(desc0.uid, ctxName, groundId, runtimeContext);
               if (ctxLookup?.context) {
                 const predRes = await TemplateWalker.#msg(tabId, {
                   type: 'RESOLVE_IFRAME_BY_PREDICATE',
@@ -3795,7 +3795,7 @@ export class TemplateWalker {
                 // else: predicate evaluator failed in some other way;
                 // fall through to legacy frameUrl handling.
               } else {
-                Logger.warn('TemplateWalker', `iframeContext "${ctxName}" not declared in any locale on ground ${groundId}; falling back to frameUrl`);
+                Logger.warn('TemplateWalker', `iframeContext "${ctxName}" not declared in any perspective on ground ${groundId}; falling back to frameUrl`);
               }
             }
           } catch (e) {

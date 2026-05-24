@@ -895,13 +895,13 @@
   text-decoration: underline;
 }
 
-/* ── v2.72.41 (Pass 17g) — Locale capture mode ─────────────────────────────
+/* ── v2.72.41 (Pass 17g) — Perspective capture mode ─────────────────────────────
    Third top-level state in the debugger sidepanel, alongside idle (no
    invocation) and active (strategy-debug). Layout mirrors the Pass-17
-   locale form structure but lives in the debugger surface so DOM access
+   perspective form structure but lives in the debugger surface so DOM access
    to the captured tab is direct (no separate findOrOpenTab dance). */
 
-.dbg-locale {
+.dbg-perspective {
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -910,31 +910,31 @@
   overflow-y: auto;
 }
 
-/* v2.74.284 — Unified collapsible-card pattern. Every locale form
+/* v2.74.284 — Unified collapsible-card pattern. Every perspective form
  * section that wraps content uses this structure:
- *   <section class="dbg-locale-card" data-card-id="..." [data-collapsed]>
- *     <div class="dbg-locale-card-head-row">
- *       <button class="dbg-locale-card-head" data-card-toggle>
- *         <span class="dbg-locale-card-chevron">▾</span>
- *         <span class="dbg-locale-card-label">Section title</span>
- *         <span class="dbg-locale-card-optional">(optional)</span>
+ *   <section class="dbg-perspective-card" data-card-id="..." [data-collapsed]>
+ *     <div class="dbg-perspective-card-head-row">
+ *       <button class="dbg-perspective-card-head" data-card-toggle>
+ *         <span class="dbg-perspective-card-chevron">▾</span>
+ *         <span class="dbg-perspective-card-label">Section title</span>
+ *         <span class="dbg-perspective-card-optional">(optional)</span>
  *       </button>
  *       <!-- optional sibling action buttons -->
  *     </div>
- *     <div class="dbg-locale-card-body"> ... </div>
+ *     <div class="dbg-perspective-card-body"> ... </div>
  *   </section>
  *
  * Clicking the head button toggles `data-collapsed` on the section,
  * which hides the body via the attribute selector below. The chevron
  * character also flips (▾ open / ▸ collapsed) — set by JS for
  * accessibility + lightweight rendering. */
-.dbg-locale-card-head-row {
+.dbg-perspective-card-head-row {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
-.dbg-locale-card-head {
+.dbg-perspective-card-head {
   background: transparent;
   border: none;
   color: inherit;
@@ -947,10 +947,10 @@
   min-width: 0;
   text-align: left;
 }
-.dbg-locale-card-head:hover .dbg-locale-card-label {
+.dbg-perspective-card-head:hover .dbg-perspective-card-label {
   color: rgba(255, 255, 255, 0.95);
 }
-.dbg-locale-card-chevron {
+.dbg-perspective-card-chevron {
   font-size: 10px;
   color: rgba(148, 163, 184, 0.85);
   width: 12px;
@@ -958,7 +958,7 @@
   text-align: center;
   user-select: none;
 }
-.dbg-locale-card-label {
+.dbg-perspective-card-label {
   font-size: 11px;
   font-weight: 600;
   color: var(--sub);
@@ -966,7 +966,7 @@
   letter-spacing: 0.04em;
   transition: color .15s;
 }
-.dbg-locale-card-optional {
+.dbg-perspective-card-optional {
   font-size: 10px;
   color: rgba(148, 163, 184, 0.65);
   font-weight: 400;
@@ -974,11 +974,11 @@
   letter-spacing: 0;
   font-style: italic;
 }
-.dbg-locale-card[data-collapsed="true"] > .dbg-locale-card-body {
+.dbg-perspective-card[data-collapsed="true"] > .dbg-perspective-card-body {
   display: none;
 }
 
-.dbg-locale-header {
+.dbg-perspective-header {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -987,12 +987,12 @@
   border: 1px solid var(--line);
   border-radius: var(--r, 7px);
 }
-.dbg-locale-title-row {
+.dbg-perspective-title-row {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.dbg-locale-badge {
+.dbg-perspective-badge {
   font-size: 9px;
   font-weight: 600;
   text-transform: uppercase;
@@ -1002,33 +1002,33 @@
   color: white;
   border-radius: 3px;
 }
-.dbg-locale-name {
+.dbg-perspective-name {
   font-size: 13px;
   font-weight: 600;
   color: var(--text);
 }
-.dbg-locale-meta {
+.dbg-perspective-meta {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 10px;
 }
-.dbg-locale-meta-label {
+.dbg-perspective-meta-label {
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   flex: 0 0 60px;
 }
-.dbg-locale-meta-value {
+.dbg-perspective-meta-value {
   color: var(--sub);
   word-break: break-all;
   flex: 1;
   min-width: 0;
 }
-.dbg-locale-meta-value.mono {
+.dbg-perspective-meta-value.mono {
   font-family: ui-monospace, monospace;
 }
-.dbg-locale-warning {
+.dbg-perspective-warning {
   margin-top: 6px;
   padding: 6px 8px;
   font-size: 11px;
@@ -1038,28 +1038,28 @@
   border-radius: 3px;
 }
 /* v2.72.45 — success variant for the same slot (used for save toasts) */
-.dbg-locale-warning.status-ok {
+.dbg-perspective-warning.status-ok {
   background: rgba(61, 214, 140, 0.10);
   color: var(--pass);
   border-color: rgba(61, 214, 140, 0.30);
 }
 
-.dbg-locale-instructions {
+.dbg-perspective-instructions {
   padding: 8px 10px;
   background: var(--bg2);
   border: 1px solid var(--line);
   border-radius: var(--r, 7px);
 }
-.dbg-locale-help {
+.dbg-perspective-help {
   font-size: 11px;
   color: var(--sub);
   line-height: 1.5;
 }
-.dbg-locale-help strong {
+.dbg-perspective-help strong {
   color: var(--text);
 }
 
-.dbg-locale-landmarks {
+.dbg-perspective-landmarks {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -1068,25 +1068,25 @@
   border: 1px solid var(--line);
   border-radius: var(--r, 7px);
 }
-.dbg-locale-landmarks-head {
+.dbg-perspective-landmarks-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
-.dbg-locale-landmarks-label {
+.dbg-perspective-landmarks-label {
   font-size: 11px;
   font-weight: 600;
   color: var(--sub);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.dbg-locale-landmarks-list {
+.dbg-perspective-landmarks-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
-.dbg-locale-landmarks-empty {
+.dbg-perspective-landmarks-empty {
   padding: 12px;
   text-align: center;
   font-size: 11px;
@@ -1099,10 +1099,10 @@
  * Replaces the inline + Add landmark that used to live in the head.
  * Violet accent matches the Claude-assisted affordance language we
  * use elsewhere (Ask Claude, auto-discovery — all Claude-driven). */
-.dbg-locale-landmarks-head-spacer {
+.dbg-perspective-landmarks-head-spacer {
   flex: 1 1 auto;
 }
-.dbg-locale-landmarks-rediscover {
+.dbg-perspective-landmarks-rediscover {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -1115,47 +1115,47 @@
   cursor: pointer;
   transition: border-color .15s, color .15s, background .15s;
 }
-.dbg-locale-landmarks-rediscover:hover:not([disabled]) {
+.dbg-perspective-landmarks-rediscover:hover:not([disabled]) {
   border-color: rgba(167, 139, 250, 0.70);
   color: rgba(216, 209, 255, 1);
   background: rgba(167, 139, 250, 0.08);
 }
-.dbg-locale-landmarks-rediscover[disabled] {
+.dbg-perspective-landmarks-rediscover[disabled] {
   opacity: 0.55;
   cursor: progress;
 }
-.dbg-locale-landmarks-rediscover-icon {
+.dbg-perspective-landmarks-rediscover-icon {
   font-size: 13px;
   line-height: 1;
   display: inline-block;
 }
-.dbg-locale-landmarks-rediscover[disabled] .dbg-locale-landmarks-rediscover-icon {
-  animation: dbg-locale-rediscover-spin 1.2s linear infinite;
+.dbg-perspective-landmarks-rediscover[disabled] .dbg-perspective-landmarks-rediscover-icon {
+  animation: dbg-perspective-rediscover-spin 1.2s linear infinite;
 }
-@keyframes dbg-locale-rediscover-spin {
+@keyframes dbg-perspective-rediscover-spin {
   from { transform: rotate(0deg); }
   to   { transform: rotate(360deg); }
 }
-.dbg-locale-landmarks-rediscover-label {
+.dbg-perspective-landmarks-rediscover-label {
   font-weight: 500;
 }
 
 /* v2.74.231 — Footer row beneath the landmark list. Mirrors
  * fragment-author's + Action footer pattern (right-aligned add button
  * inside the same card chrome as the list). */
-.dbg-locale-landmarks-footer {
+.dbg-perspective-landmarks-footer {
   display: flex;
   justify-content: flex-end;
   margin-top: 4px;
 }
 
 /* v2.74.233 — Per-landmark Show toggle. Green when active (matches
- * the on-page overlay accent in contentScript.js showLocaleOverlays).
+ * the on-page overlay accent in contentScript.js showPerspectiveOverlays).
  * Dim circle when inactive so the affordance is visible without
  * dominating the row. Replaces the v2.74.232 Ask Claude button:
  * Claude is now built into the picker flow itself, so no standalone
  * button is needed. */
-.dbg-locale-landmark-show {
+.dbg-perspective-landmark-show {
   flex: 0 0 auto;
   border: 1px solid rgba(255, 255, 255, 0.18);
   background: transparent;
@@ -1167,11 +1167,11 @@
   cursor: pointer;
   transition: border-color .15s, color .15s, background .15s;
 }
-.dbg-locale-landmark-show:hover {
+.dbg-perspective-landmark-show:hover {
   border-color: rgba(74, 222, 128, 0.55);
   color: rgba(167, 243, 208, 0.95);
 }
-.dbg-locale-landmark-show-active {
+.dbg-perspective-landmark-show-active {
   border-color: rgba(74, 222, 128, 0.85);
   background: rgba(74, 222, 128, 0.15);
   color: rgba(187, 247, 208, 1);
@@ -1181,7 +1181,7 @@
  * landmark row while the picker→Claude pipeline is in flight. Same
  * visual cue as other "asking Claude" bars (violet dashed border)
  * so authors recognize the AI-assist phase. */
-.dbg-locale-landmark-refining {
+.dbg-perspective-landmark-refining {
   margin-top: 4px;
   padding: 6px 10px;
   border-radius: 4px;
@@ -1200,14 +1200,14 @@
  * the chrome the rest of the app uses (green ok, amber caveat, red
  * fail) so a glance tells the author whether the landmark is usable
  * by downstream consumers without re-verifying. */
-.dbg-locale-landmark-status {
+.dbg-perspective-landmark-status {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 11px;
   margin-top: 4px;
 }
-.dbg-locale-landmark-status-chip {
+.dbg-perspective-landmark-status-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -1218,17 +1218,17 @@
   text-transform: uppercase;
   font-size: 10px;
 }
-.dbg-locale-landmark-status-ready .dbg-locale-landmark-status-chip {
+.dbg-perspective-landmark-status-ready .dbg-perspective-landmark-status-chip {
   background: rgba(74, 222, 128, 0.18);
   color: rgba(187, 247, 208, 1);
   border: 1px solid rgba(74, 222, 128, 0.55);
 }
-.dbg-locale-landmark-status-caveats .dbg-locale-landmark-status-chip {
+.dbg-perspective-landmark-status-caveats .dbg-perspective-landmark-status-chip {
   background: rgba(251, 191, 36, 0.18);
   color: rgba(253, 224, 71, 1);
   border: 1px solid rgba(251, 191, 36, 0.55);
 }
-.dbg-locale-landmark-status-mismatch .dbg-locale-landmark-status-chip {
+.dbg-perspective-landmark-status-mismatch .dbg-perspective-landmark-status-chip {
   background: rgba(247, 110, 110, 0.18);
   color: rgba(252, 165, 165, 1);
   border: 1px solid rgba(247, 110, 110, 0.55);
@@ -1236,16 +1236,16 @@
 /* v2.74.237 — Legacy verified records (matchedCount>0, no .score)
  * render with the ready style. Re-verifying upgrades them to the
  * full multi-axis status. */
-.dbg-locale-landmark-status-legacy .dbg-locale-landmark-status-chip {
+.dbg-perspective-landmark-status-legacy .dbg-perspective-landmark-status-chip {
   background: rgba(74, 222, 128, 0.12);
   color: rgba(187, 247, 208, 0.9);
   border: 1px solid rgba(74, 222, 128, 0.40);
 }
-.dbg-locale-landmark-status-match {
+.dbg-perspective-landmark-status-match {
   color: var(--muted);
   font-size: 10.5px;
 }
-.dbg-locale-landmark-issues {
+.dbg-perspective-landmark-issues {
   margin: 2px 0 0 0;
   padding-left: 18px;
   list-style: disc;
@@ -1253,23 +1253,23 @@
   line-height: 1.4;
   color: rgba(253, 224, 71, 0.95);
 }
-.dbg-locale-landmark-issues li {
+.dbg-perspective-landmark-issues li {
   margin: 2px 0;
 }
-.dbg-locale-landmark-status-mismatch + .dbg-locale-landmark-issues {
+.dbg-perspective-landmark-status-mismatch + .dbg-perspective-landmark-issues {
   color: rgba(252, 165, 165, 0.95);
 }
-.dbg-locale-landmark-ops {
+.dbg-perspective-landmark-ops {
   margin-top: 2px;
   font-size: 10.5px;
   color: var(--muted);
 }
-.dbg-locale-landmark-ops-label {
+.dbg-perspective-landmark-ops-label {
   font-weight: 600;
   margin-right: 4px;
   color: rgba(255, 255, 255, 0.55);
 }
-.dbg-locale-landmark-ops code {
+.dbg-perspective-landmark-ops code {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 3px;
@@ -1286,14 +1286,14 @@
  * confidence. Violet accent matches the rest of the Claude-assisted
  * affordance language; the body uses a subtle indent + dimmer
  * background so it reads as "supplementary to" the row above. */
-.dbg-locale-landmark-profile {
+.dbg-perspective-landmark-profile {
   display: flex;
   align-items: flex-start;
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 4px;
 }
-.dbg-locale-landmark-profile-toggle {
+.dbg-perspective-landmark-profile-toggle {
   background: transparent;
   border: none;
   color: rgba(196, 181, 253, 0.85);
@@ -1308,10 +1308,10 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.dbg-locale-landmark-profile-toggle:hover {
+.dbg-perspective-landmark-profile-toggle:hover {
   color: rgba(216, 209, 255, 1);
 }
-.dbg-locale-landmark-profile-conf {
+.dbg-perspective-landmark-profile-conf {
   flex: 0 0 auto;
   font-size: 10px;
   color: rgba(196, 181, 253, 0.75);
@@ -1321,7 +1321,7 @@
   padding: 1px 8px;
   letter-spacing: 0.02em;
 }
-.dbg-locale-landmark-profile-body {
+.dbg-perspective-landmark-profile-body {
   flex: 1 1 100%;
   margin-top: 4px;
   padding: 8px 12px;
@@ -1332,27 +1332,27 @@
   flex-direction: column;
   gap: 8px;
 }
-.dbg-locale-landmark-profile-row {
+.dbg-perspective-landmark-profile-row {
   display: flex;
   flex-direction: column;
   gap: 3px;
   font-size: 11px;
 }
-.dbg-locale-landmark-profile-row label {
+.dbg-perspective-landmark-profile-row label {
   font-weight: 600;
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: rgba(196, 181, 253, 0.85);
 }
-.dbg-locale-landmark-profile-hint {
+.dbg-perspective-landmark-profile-hint {
   font-weight: 400;
   text-transform: none;
   letter-spacing: 0;
   color: var(--muted);
   margin-left: 6px;
 }
-.dbg-locale-landmark-profile-desc {
+.dbg-perspective-landmark-profile-desc {
   width: 100%;
   background: var(--bg2);
   color: var(--text);
@@ -1364,11 +1364,11 @@
   line-height: 1.4;
   resize: vertical;
 }
-.dbg-locale-landmark-profile-desc:focus {
+.dbg-perspective-landmark-profile-desc:focus {
   outline: none;
   border-color: rgba(167, 139, 250, 0.55);
 }
-.dbg-locale-landmark-profile-aliases {
+.dbg-perspective-landmark-profile-aliases {
   width: 100%;
   background: var(--bg2);
   color: var(--text);
@@ -1378,14 +1378,14 @@
   font-family: var(--mono, ui-monospace, SFMono-Regular, monospace);
   font-size: 11px;
 }
-.dbg-locale-landmark-profile-aliases:focus {
+.dbg-perspective-landmark-profile-aliases:focus {
   outline: none;
   border-color: rgba(167, 139, 250, 0.55);
 }
 
 /* v2.74.244 — Action effect dropdown. Same chrome as the aliases
  * input so the drawer reads as a single coherent edit surface. */
-.dbg-locale-landmark-profile-effect {
+.dbg-perspective-landmark-profile-effect {
   width: 100%;
   background: var(--bg2);
   color: var(--text);
@@ -1395,11 +1395,11 @@
   font-family: inherit;
   font-size: 11px;
 }
-.dbg-locale-landmark-profile-effect:focus {
+.dbg-perspective-landmark-profile-effect:focus {
   outline: none;
   border-color: rgba(167, 139, 250, 0.55);
 }
-.dbg-locale-landmark-profile-chip {
+.dbg-perspective-landmark-profile-chip {
   display: inline-block;
   background: rgba(167, 139, 250, 0.15);
   border: 1px solid rgba(167, 139, 250, 0.40);
@@ -1410,7 +1410,7 @@
   font-family: var(--mono, ui-monospace, SFMono-Regular, monospace);
   color: rgba(216, 209, 255, 0.95);
 }
-.dbg-locale-landmark-profile-pitfalls {
+.dbg-perspective-landmark-profile-pitfalls {
   margin: 0;
   padding-left: 18px;
   list-style: disc;
@@ -1418,10 +1418,10 @@
   line-height: 1.4;
   color: rgba(253, 224, 71, 0.92);
 }
-.dbg-locale-landmark-profile-pitfalls li {
+.dbg-perspective-landmark-profile-pitfalls li {
   margin: 2px 0;
 }
-.dbg-locale-landmark-profile-empty {
+.dbg-perspective-landmark-profile-empty {
   color: rgba(255, 255, 255, 0.40);
   font-style: italic;
   font-size: 10.5px;
@@ -1430,10 +1430,10 @@
 /* v2.74.238 — Selector display in the profile drawer. Read-only
  * monospace block, full row width, word-breaks on long selectors so
  * it never overflows the drawer. Pick is the only path to change
- * the selector — promoted off the always-visible row so locale
+ * the selector — promoted off the always-visible row so perspective
  * authoring reads as "name + Pick", with selector as inspectable
  * implementation detail behind the drawer. */
-.dbg-locale-landmark-profile-selector {
+.dbg-perspective-landmark-profile-selector {
   display: block;
   font-family: var(--mono, ui-monospace, SFMono-Regular, monospace);
   font-size: 10.5px;
@@ -1445,12 +1445,12 @@
   word-break: break-all;
   color: rgba(229, 222, 255, 0.90);
 }
-.dbg-locale-landmark-profile-frame {
+.dbg-perspective-landmark-profile-frame {
   font-size: 10.5px;
   color: rgba(196, 181, 253, 0.75);
   margin-top: 4px;
 }
-.dbg-locale-landmark-profile-frame code {
+.dbg-perspective-landmark-profile-frame code {
   font-family: var(--mono, ui-monospace, SFMono-Regular, monospace);
   font-size: 10px;
   color: rgba(216, 209, 255, 0.9);
@@ -1459,7 +1459,7 @@
 /* v2.74.245 — Phase 7a: iframe context display in drawer. Named
  * contexts get an origin badge + predicate description; legacy
  * frameUrl-only bindings get a "re-Pick to migrate" hint. */
-.dbg-locale-landmark-iframe-origin {
+.dbg-perspective-landmark-iframe-origin {
   display: inline-block;
   padding: 1px 6px;
   border-radius: 8px;
@@ -1469,30 +1469,30 @@
   letter-spacing: 0.04em;
   margin-left: 6px;
 }
-.dbg-locale-landmark-iframe-same-origin {
+.dbg-perspective-landmark-iframe-same-origin {
   background: rgba(74, 222, 128, 0.15);
   color: rgba(187, 247, 208, 1);
   border: 1px solid rgba(74, 222, 128, 0.45);
 }
-.dbg-locale-landmark-iframe-cross-origin {
+.dbg-perspective-landmark-iframe-cross-origin {
   background: rgba(251, 191, 36, 0.15);
   color: rgba(253, 224, 71, 0.95);
   border: 1px solid rgba(251, 191, 36, 0.50);
 }
-.dbg-locale-landmark-iframe-predicate {
+.dbg-perspective-landmark-iframe-predicate {
   font-size: 10px;
   color: var(--muted);
   margin-top: 2px;
   font-family: var(--mono, ui-monospace, SFMono-Regular, monospace);
 }
-.dbg-locale-landmark-iframe-orphan {
+.dbg-perspective-landmark-iframe-orphan {
   color: rgba(252, 165, 165, 0.95);
   background: rgba(247, 110, 110, 0.06);
   border: 1px solid rgba(247, 110, 110, 0.35);
   padding: 4px 8px;
   border-radius: 4px;
 }
-.dbg-locale-landmark-iframe-legacy-hint {
+.dbg-perspective-landmark-iframe-legacy-hint {
   display: block;
   font-size: 9.5px;
   color: rgba(251, 191, 36, 0.85);
@@ -1506,7 +1506,7 @@
  * Two-column grid for compact key/value display; teal accent
  * distinguishes the identity layer from the realization (selector)
  * and description (description/aliases) sections of the drawer. */
-.dbg-locale-landmark-identity-grid {
+.dbg-perspective-landmark-identity-grid {
   display: grid;
   grid-template-columns: max-content 1fr;
   column-gap: 12px;
@@ -1518,7 +1518,7 @@
   border: 1px solid rgba(45, 212, 191, 0.25);
   border-radius: 4px;
 }
-.dbg-locale-landmark-identity-key {
+.dbg-perspective-landmark-identity-key {
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -1526,13 +1526,13 @@
   color: rgba(153, 246, 228, 0.80);
   white-space: nowrap;
 }
-.dbg-locale-landmark-identity-val {
+.dbg-perspective-landmark-identity-val {
   font-size: 11px;
   color: rgba(229, 222, 255, 0.92);
   word-break: break-all;
   min-width: 0;
 }
-.dbg-locale-landmark-identity-val code {
+.dbg-perspective-landmark-identity-val code {
   font-family: var(--mono, ui-monospace, SFMono-Regular, monospace);
   font-size: 10.5px;
   background: rgba(0, 0, 0, 0.25);
@@ -1540,12 +1540,12 @@
   border-radius: 3px;
   color: rgba(187, 247, 208, 0.95);
 }
-.dbg-locale-landmark-identity-url {
+.dbg-perspective-landmark-identity-url {
   font-size: 10px !important;
   color: rgba(196, 181, 253, 0.75) !important;
   background: rgba(0, 0, 0, 0.20) !important;
 }
-.dbg-locale-landmark-identity-chip {
+.dbg-perspective-landmark-identity-chip {
   display: inline-block;
   padding: 1px 8px;
   border-radius: 10px;
@@ -1555,12 +1555,12 @@
   text-transform: uppercase;
   margin-left: 4px;
 }
-.dbg-locale-landmark-identity-canonical {
+.dbg-perspective-landmark-identity-canonical {
   background: rgba(45, 212, 191, 0.18);
   color: rgba(153, 246, 228, 1);
   border: 1px solid rgba(45, 212, 191, 0.55);
 }
-.dbg-locale-landmark-identity-local {
+.dbg-perspective-landmark-identity-local {
   background: rgba(251, 191, 36, 0.15);
   color: rgba(253, 224, 71, 0.95);
   border: 1px solid rgba(251, 191, 36, 0.50);
@@ -1571,7 +1571,7 @@
  * recovery; stale-confirmed when recovery also failed; deprecated
  * when the author marked it). Sits next to the authoring score chip
  * so both signals are visible simultaneously. */
-.dbg-locale-landmark-lifecycle-chip {
+.dbg-perspective-landmark-lifecycle-chip {
   display: inline-flex;
   align-items: center;
   gap: 2px;
@@ -1583,23 +1583,23 @@
   font-size: 10px;
   margin-left: 2px;
 }
-.dbg-locale-landmark-lifecycle-suspected {
+.dbg-perspective-landmark-lifecycle-suspected {
   background: rgba(251, 191, 36, 0.18);
   color: rgba(253, 224, 71, 1);
   border: 1px solid rgba(251, 191, 36, 0.55);
 }
-.dbg-locale-landmark-lifecycle-confirmed {
+.dbg-perspective-landmark-lifecycle-confirmed {
   background: rgba(247, 110, 110, 0.18);
   color: rgba(252, 165, 165, 1);
   border: 1px solid rgba(247, 110, 110, 0.55);
 }
-.dbg-locale-landmark-lifecycle-deprecated {
+.dbg-perspective-landmark-lifecycle-deprecated {
   background: rgba(120, 113, 108, 0.15);
   color: rgba(168, 162, 158, 0.95);
   border: 1px solid rgba(120, 113, 108, 0.40);
 }
 
-.dbg-locale-landmark-row {
+.dbg-perspective-landmark-row {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1824,11 +1824,11 @@
 /* Existing field — keep but reduce intrusiveness. Now nested in
  * .lm-alias-input via the new identity zone. Old class kept for
  * compat with the data-field selector wiring. */
-.dbg-locale-landmark-role {
+.dbg-perspective-landmark-role {
   /* deprecated visual styling — overridden by .lm-alias-input.
    * Class still needed for the data-field event delegation. */
 }
-.dbg-locale-landmark-selector {
+.dbg-perspective-landmark-selector {
   flex: 1;
   min-width: 100px;
   padding: 4px 8px;
@@ -1839,14 +1839,14 @@
   border-radius: 3px;
   color: inherit;
 }
-.dbg-locale-landmark-role:focus,
-.dbg-locale-landmark-selector:focus {
+.dbg-perspective-landmark-role:focus,
+.dbg-perspective-landmark-selector:focus {
   outline: none;
   border-color: var(--acc);
 }
-.dbg-locale-landmark-pick,
-.dbg-locale-landmark-verify,
-.dbg-locale-landmark-remove {
+.dbg-perspective-landmark-pick,
+.dbg-perspective-landmark-verify,
+.dbg-perspective-landmark-remove {
   font-size: 10px;
   padding: 4px 8px;
   background: var(--bg2);
@@ -1855,18 +1855,18 @@
   color: var(--sub);
   cursor: pointer;
 }
-.dbg-locale-landmark-pick:hover,
-.dbg-locale-landmark-verify:hover {
+.dbg-perspective-landmark-pick:hover,
+.dbg-perspective-landmark-verify:hover {
   color: var(--text);
   border-color: var(--muted);
 }
-.dbg-locale-landmark-remove {
+.dbg-perspective-landmark-remove {
   background: none;
 }
-.dbg-locale-landmark-remove:hover {
+.dbg-perspective-landmark-remove:hover {
   color: var(--fail);
 }
-.dbg-locale-landmark-status {
+.dbg-perspective-landmark-status {
   font-size: 10px;
   padding: 3px 6px;
   border-radius: 3px;
@@ -1874,17 +1874,17 @@
   color: var(--muted);
   align-self: flex-start;
 }
-.dbg-locale-landmark-status.status-ok {
+.dbg-perspective-landmark-status.status-ok {
   background: rgba(61, 214, 140, 0.10);
   color: var(--pass);
   border: 1px solid rgba(61, 214, 140, 0.25);
 }
-.dbg-locale-landmark-status.status-err {
+.dbg-perspective-landmark-status.status-err {
   background: rgba(247, 110, 110, 0.10);
   color: var(--fail);
   border: 1px solid rgba(247, 110, 110, 0.25);
 }
-.dbg-locale-landmark-sample {
+.dbg-perspective-landmark-sample {
   display: block;
   font-family: ui-monospace, monospace;
   font-size: 10px;
@@ -1898,24 +1898,24 @@
   overflow: auto;
 }
 
-.dbg-locale-actions {
+.dbg-perspective-actions {
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding-top: 4px;
 }
-.dbg-locale-actions-buttons {
+.dbg-perspective-actions-buttons {
   display: flex;
   gap: 8px;
 }
-.dbg-locale-actions .btn-primary,
-.dbg-locale-actions .btn-secondary {
+.dbg-perspective-actions .btn-primary,
+.dbg-perspective-actions .btn-secondary {
   flex: 1;
 }
-/* v2.74.282 — Inline reason hint shown when Save Locale is disabled.
+/* v2.74.282 — Inline reason hint shown when Save Perspective is disabled.
  * Yellow accent + warning glyph. Hides via .hidden when save is
  * enabled. Wraps over multiple lines for long reasons. */
-.dbg-locale-save-reason {
+.dbg-perspective-save-reason {
   font-size: 11px;
   line-height: 1.4;
   padding: 6px 10px;
@@ -1924,14 +1924,14 @@
   border: 1px solid rgba(234, 179, 8, 0.35);
   color: rgba(253, 224, 71, 0.92);
 }
-.dbg-locale-save-reason::before {
+.dbg-perspective-save-reason::before {
   content: '⚠ ';
   font-weight: 700;
   margin-right: 2px;
 }
-.dbg-locale-save-reason.hidden { display: none; }
+.dbg-perspective-save-reason.hidden { display: none; }
 
-.dbg-locale-pick-banner {
+.dbg-perspective-pick-banner {
   position: fixed;
   bottom: 12px;
   left: 12px;
@@ -1948,26 +1948,26 @@
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   z-index: 100;
 }
-.dbg-locale-pick-text { flex: 1; }
-.dbg-locale-pick-banner .btn-secondary {
+.dbg-perspective-pick-text { flex: 1; }
+.dbg-perspective-pick-banner .btn-secondary {
   background: rgba(255, 255, 255, 0.2);
   color: var(--bg0);
   border-color: rgba(255, 255, 255, 0.4);
 }
 
-/* ── v2.72.45 (Pass 17g iter) — locale capture metadata card ──────────────
+/* ── v2.72.45 (Pass 17g iter) — perspective capture metadata card ──────────────
    New editable metadata layer between the header and the instructions.
    Header is now compact (just Ground + active tab); metadata card holds
    the editable Name / Description / URL pattern fields. URL pattern
    auto-syncs to the active tab on every tab change. */
 
-.dbg-locale-ground-label {
+.dbg-perspective-ground-label {
   font-size: 11px;
   color: var(--sub);
   font-style: italic;
 }
 
-.dbg-locale-meta-card {
+.dbg-perspective-meta-card {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1976,20 +1976,20 @@
   border: 1px solid var(--line);
   border-radius: var(--r, 7px);
 }
-.dbg-locale-field {
+.dbg-perspective-field {
   display: flex;
   flex-direction: column;
   gap: 3px;
 }
-.dbg-locale-field-label {
+.dbg-perspective-field-label {
   font-size: 10px;
   font-weight: 600;
   color: var(--sub);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.dbg-locale-field input,
-.dbg-locale-field textarea {
+.dbg-perspective-field input,
+.dbg-perspective-field textarea {
   padding: 6px 8px;
   font-size: 11px;
   background: var(--bg1);
@@ -1999,20 +1999,20 @@
   font-family: inherit;
   resize: vertical;
 }
-#dbg-locale-pattern-input {
+#dbg-perspective-pattern-input {
   font-family: ui-monospace, monospace;
 }
-.dbg-locale-field input:focus,
-.dbg-locale-field textarea:focus {
+.dbg-perspective-field input:focus,
+.dbg-perspective-field textarea:focus {
   outline: none;
   border-color: var(--acc);
 }
-.dbg-locale-field-hint {
+.dbg-perspective-field-hint {
   font-size: 10px;
   color: var(--muted);
   font-style: italic;
 }
-.dbg-locale-field-hint code {
+.dbg-perspective-field-hint code {
   font-family: ui-monospace, monospace;
   background: var(--bg3);
   padding: 1px 4px;
@@ -2023,7 +2023,7 @@
  * Sits in the landmark row between status and profile drawer. Mirrors
  * the row's visual language (muted border, tight spacing). Candidates
  * are clickable cards with confidence dot + composite percentage. */
-.dbg-locale-landmark-replace {
+.dbg-perspective-landmark-replace {
   flex: 0 0 auto;
   border: 1px solid rgba(255, 255, 255, 0.18);
   background: transparent;
@@ -2035,13 +2035,13 @@
   cursor: pointer;
   transition: border-color .15s, color .15s, background .15s;
 }
-.dbg-locale-landmark-replace:hover {
+.dbg-perspective-landmark-replace:hover {
   border-color: rgba(96, 165, 250, 0.60);
   color: rgba(191, 219, 254, 0.95);
   background: rgba(96, 165, 250, 0.08);
 }
 
-.dbg-locale-landmark-replace-picker {
+.dbg-perspective-landmark-replace-picker {
   margin-top: 6px;
   padding: 8px 10px;
   border-radius: 5px;
@@ -2051,30 +2051,30 @@
   flex-direction: column;
   gap: 6px;
 }
-.dbg-locale-landmark-replace-header {
+.dbg-perspective-landmark-replace-header {
   font-size: 11px;
   font-weight: 600;
   color: rgba(191, 219, 254, 0.95);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
-.dbg-locale-landmark-replace-loading,
-.dbg-locale-landmark-replace-empty,
-.dbg-locale-landmark-replace-error {
+.dbg-perspective-landmark-replace-loading,
+.dbg-perspective-landmark-replace-empty,
+.dbg-perspective-landmark-replace-error {
   font-size: 11px;
   line-height: 1.4;
   color: rgba(226, 232, 240, 0.78);
   padding: 4px 0;
 }
-.dbg-locale-landmark-replace-error {
+.dbg-perspective-landmark-replace-error {
   color: rgba(254, 202, 202, 0.92);
 }
-.dbg-locale-landmark-replace-list {
+.dbg-perspective-landmark-replace-list {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
-.dbg-locale-landmark-replace-candidate {
+.dbg-perspective-landmark-replace-candidate {
   display: grid;
   grid-template-columns: auto auto 1fr auto;
   align-items: center;
@@ -2089,15 +2089,15 @@
   text-align: left;
   transition: border-color .15s, background .15s;
 }
-.dbg-locale-landmark-replace-candidate:hover {
+.dbg-perspective-landmark-replace-candidate:hover {
   border-color: rgba(96, 165, 250, 0.70);
   background: rgba(30, 41, 59, 0.85);
 }
-.dbg-locale-landmark-replace-conf {
+.dbg-perspective-landmark-replace-conf {
   font-weight: 600;
   letter-spacing: 0.02em;
 }
-.dbg-locale-landmark-replace-breakdown {
+.dbg-perspective-landmark-replace-breakdown {
   font-family: ui-monospace, monospace;
   font-size: 10px;
   padding: 1px 5px;
@@ -2106,19 +2106,19 @@
   color: rgba(226, 232, 240, 0.78);
   cursor: help;
 }
-.dbg-locale-landmark-replace-name {
+.dbg-perspective-landmark-replace-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.dbg-locale-landmark-replace-lifecycle {
+.dbg-perspective-landmark-replace-lifecycle {
   font-size: 10px;
   font-family: ui-monospace, monospace;
   color: rgba(148, 163, 184, 0.85);
   letter-spacing: 0.02em;
 }
-.dbg-locale-landmark-replace-actions {
+.dbg-perspective-landmark-replace-actions {
   display: flex;
   justify-content: flex-end;
   padding-top: 2px;
@@ -2128,7 +2128,7 @@
  * Uses the show-button styling as base (transparent border, hover
  * accent) but with cyan for the verify accent — distinct from
  * green (show overlay), blue (replace), and red (remove). */
-.dbg-locale-landmark-verify {
+.dbg-perspective-landmark-verify {
   flex: 0 0 auto;
   border: 1px solid rgba(255, 255, 255, 0.18);
   background: transparent;
@@ -2140,39 +2140,39 @@
   cursor: pointer;
   transition: border-color .15s, color .15s, background .15s;
 }
-.dbg-locale-landmark-verify:hover:not(:disabled) {
+.dbg-perspective-landmark-verify:hover:not(:disabled) {
   border-color: rgba(34, 211, 238, 0.65);
   color: rgba(165, 243, 252, 0.95);
   background: rgba(34, 211, 238, 0.08);
 }
-.dbg-locale-landmark-verify:disabled {
+.dbg-perspective-landmark-verify:disabled {
   opacity: 0.6;
   cursor: wait;
 }
 
-.dbg-locale-landmark-verify-outcome {
+.dbg-perspective-landmark-verify-outcome {
   margin-top: 6px;
   padding: 6px 10px;
   border-radius: 4px;
   font-size: 11px;
   line-height: 1.3;
 }
-.dbg-locale-landmark-verify-ok {
+.dbg-perspective-landmark-verify-ok {
   background: rgba(34, 197, 94, 0.10);
   border: 1px solid rgba(34, 197, 94, 0.40);
   color: rgba(187, 247, 208, 0.95);
 }
-.dbg-locale-landmark-verify-recovered {
+.dbg-perspective-landmark-verify-recovered {
   background: rgba(234, 179, 8, 0.08);
   border: 1px solid rgba(234, 179, 8, 0.40);
   color: rgba(253, 224, 71, 0.92);
 }
-.dbg-locale-landmark-verify-failed {
+.dbg-perspective-landmark-verify-failed {
   background: rgba(239, 68, 68, 0.10);
   border: 1px solid rgba(239, 68, 68, 0.40);
   color: rgba(254, 202, 202, 0.95);
 }
-.dbg-locale-landmark-verify-skipped {
+.dbg-perspective-landmark-verify-skipped {
   background: rgba(148, 163, 184, 0.08);
   border: 1px dashed rgba(148, 163, 184, 0.35);
   color: rgba(203, 213, 225, 0.85);
@@ -2183,10 +2183,10 @@
  * section between landmarks and Save actions. Header is a button
  * (chevron + label + count badge). Body fades in when expanded; rows
  * use the same kind→accent palette as the verify outcomes. */
-.dbg-locale-events {
+.dbg-perspective-events {
   /* v2.74.283 — Card chrome (was using a top divider line as a
    * pseudo-separator; replaced with proper card chrome to match the
-   * other locale form sections). */
+   * other perspective form sections). */
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2195,7 +2195,7 @@
   border: 1px solid var(--line);
   border-radius: var(--r, 7px);
 }
-.dbg-locale-events-header {
+.dbg-perspective-events-header {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -2210,16 +2210,16 @@
   cursor: pointer;
   width: 100%;
 }
-.dbg-locale-events-header:hover { color: rgba(255, 255, 255, 0.95); }
-.dbg-locale-events-chevron {
+.dbg-perspective-events-header:hover { color: rgba(255, 255, 255, 0.95); }
+.dbg-perspective-events-chevron {
   font-size: 10px;
   color: rgba(148, 163, 184, 0.85);
   width: 12px;
   display: inline-block;
   text-align: center;
 }
-.dbg-locale-events-label { flex: 1; text-align: left; }
-.dbg-locale-events-count {
+.dbg-perspective-events-label { flex: 1; text-align: left; }
+.dbg-perspective-events-count {
   font-size: 10px;
   font-family: ui-monospace, monospace;
   color: rgba(148, 163, 184, 0.85);
@@ -2227,26 +2227,26 @@
   letter-spacing: 0;
   text-transform: none;
 }
-.dbg-locale-events-body {
+.dbg-perspective-events-body {
   margin-top: 8px;
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
-.dbg-locale-events-body.hidden { display: none; }
+.dbg-perspective-events-body.hidden { display: none; }
 /* v2.74.272 — Substrate health summary banner. Compact two-line
  * aggregate at the top of the events panel body. Each line wraps
  * naturally on narrow widths; tags use the per-kind accent palette
  * for visual continuity with event rows and lifecycle chips. */
-.dbg-locale-events-health {
+.dbg-perspective-events-health {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
-.dbg-locale-events-health:empty {
+.dbg-perspective-events-health:empty {
   display: none;
 }
-.dbg-locale-events-health-line {
+.dbg-perspective-events-health-line {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -2258,43 +2258,43 @@
   font-size: 11px;
   line-height: 1.4;
 }
-.dbg-locale-events-health-line.dbg-locale-events-health-quiet {
+.dbg-perspective-events-health-line.dbg-perspective-events-health-quiet {
   color: rgba(148, 163, 184, 0.78);
   font-style: italic;
 }
-.dbg-locale-events-health-label {
+.dbg-perspective-events-health-label {
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: rgba(148, 163, 184, 0.85);
   font-weight: 600;
 }
-.dbg-locale-events-health-total {
+.dbg-perspective-events-health-total {
   color: rgba(226, 232, 240, 0.95);
   font-weight: 600;
 }
-.dbg-locale-events-health-tag {
+.dbg-perspective-events-health-tag {
   font-size: 10px;
   font-family: ui-monospace, monospace;
   padding: 1px 6px;
   border-radius: 8px;
   letter-spacing: 0.02em;
 }
-.dbg-locale-events-health-tag.tag-verified  { background: rgba(34, 197, 94, 0.12);  border: 1px solid rgba(34, 197, 94, 0.40);  color: rgba(187, 247, 208, 0.95); }
-.dbg-locale-events-health-tag.tag-suspected { background: rgba(234, 179, 8, 0.10);  border: 1px solid rgba(234, 179, 8, 0.40);  color: rgba(253, 224, 71, 0.95); }
-.dbg-locale-events-health-tag.tag-confirmed { background: rgba(239, 68, 68, 0.10);  border: 1px solid rgba(239, 68, 68, 0.40);  color: rgba(254, 202, 202, 0.95); }
-.dbg-locale-events-health-tag.tag-deprecated{ background: rgba(100, 116, 139, 0.10); border: 1px dashed rgba(100, 116, 139, 0.50); color: rgba(148, 163, 184, 0.95); }
-.dbg-locale-events-health-tag.tag-fresh     { background: rgba(148, 163, 184, 0.10); border: 1px solid rgba(148, 163, 184, 0.35); color: rgba(203, 213, 225, 0.92); }
-.dbg-locale-events-health-tag.tag-recovered { background: rgba(234, 179, 8, 0.10);  border: 1px solid rgba(234, 179, 8, 0.40);  color: rgba(253, 224, 71, 0.95); }
-.dbg-locale-events-health-tag.tag-drift     { background: rgba(251, 146, 60, 0.10); border: 1px solid rgba(251, 146, 60, 0.40); color: rgba(254, 215, 170, 0.95); }
-.dbg-locale-events-health-tag.tag-failed    { background: rgba(239, 68, 68, 0.10);  border: 1px solid rgba(239, 68, 68, 0.40);  color: rgba(254, 202, 202, 0.95); }
-.dbg-locale-events-health-tag.tag-observed  { background: rgba(34, 211, 238, 0.10); border: 1px solid rgba(34, 211, 238, 0.40); color: rgba(165, 243, 252, 0.95); }
-.dbg-locale-events-health-subtle {
+.dbg-perspective-events-health-tag.tag-verified  { background: rgba(34, 197, 94, 0.12);  border: 1px solid rgba(34, 197, 94, 0.40);  color: rgba(187, 247, 208, 0.95); }
+.dbg-perspective-events-health-tag.tag-suspected { background: rgba(234, 179, 8, 0.10);  border: 1px solid rgba(234, 179, 8, 0.40);  color: rgba(253, 224, 71, 0.95); }
+.dbg-perspective-events-health-tag.tag-confirmed { background: rgba(239, 68, 68, 0.10);  border: 1px solid rgba(239, 68, 68, 0.40);  color: rgba(254, 202, 202, 0.95); }
+.dbg-perspective-events-health-tag.tag-deprecated{ background: rgba(100, 116, 139, 0.10); border: 1px dashed rgba(100, 116, 139, 0.50); color: rgba(148, 163, 184, 0.95); }
+.dbg-perspective-events-health-tag.tag-fresh     { background: rgba(148, 163, 184, 0.10); border: 1px solid rgba(148, 163, 184, 0.35); color: rgba(203, 213, 225, 0.92); }
+.dbg-perspective-events-health-tag.tag-recovered { background: rgba(234, 179, 8, 0.10);  border: 1px solid rgba(234, 179, 8, 0.40);  color: rgba(253, 224, 71, 0.95); }
+.dbg-perspective-events-health-tag.tag-drift     { background: rgba(251, 146, 60, 0.10); border: 1px solid rgba(251, 146, 60, 0.40); color: rgba(254, 215, 170, 0.95); }
+.dbg-perspective-events-health-tag.tag-failed    { background: rgba(239, 68, 68, 0.10);  border: 1px solid rgba(239, 68, 68, 0.40);  color: rgba(254, 202, 202, 0.95); }
+.dbg-perspective-events-health-tag.tag-observed  { background: rgba(34, 211, 238, 0.10); border: 1px solid rgba(34, 211, 238, 0.40); color: rgba(165, 243, 252, 0.95); }
+.dbg-perspective-events-health-subtle {
   color: rgba(148, 163, 184, 0.80);
   font-style: italic;
 }
 
-.dbg-locale-events-list {
+.dbg-perspective-events-list {
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -2305,16 +2305,16 @@
   padding: 4px;
   background: rgba(15, 23, 42, 0.35);
 }
-.dbg-locale-events-loading,
-.dbg-locale-events-error,
-.dbg-locale-events-empty {
+.dbg-perspective-events-loading,
+.dbg-perspective-events-error,
+.dbg-perspective-events-empty {
   font-size: 11px;
   padding: 8px;
   color: rgba(203, 213, 225, 0.78);
 }
-.dbg-locale-events-error { color: rgba(254, 202, 202, 0.92); }
-.dbg-locale-events-empty { color: rgba(148, 163, 184, 0.78); font-style: italic; }
-.dbg-locale-events-row {
+.dbg-perspective-events-error { color: rgba(254, 202, 202, 0.92); }
+.dbg-perspective-events-empty { color: rgba(148, 163, 184, 0.78); font-style: italic; }
+.dbg-perspective-events-row {
   display: grid;
   /* v2.74.266 — Added trailing action column for drift-apply button.
    * Empty for non-drift events; collapses thanks to auto-sizing. */
@@ -2327,16 +2327,16 @@
   line-height: 1.3;
   border-left: 2px solid transparent;
 }
-.dbg-locale-events-row:hover { background: rgba(255, 255, 255, 0.03); }
-.dbg-locale-events-icon { font-size: 12px; width: 14px; text-align: center; }
-.dbg-locale-events-kind {
+.dbg-perspective-events-row:hover { background: rgba(255, 255, 255, 0.03); }
+.dbg-perspective-events-icon { font-size: 12px; width: 14px; text-align: center; }
+.dbg-perspective-events-kind {
   font-weight: 600;
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   white-space: nowrap;
 }
-.dbg-locale-events-landmark {
+.dbg-perspective-events-landmark {
   font-family: ui-monospace, monospace;
   color: rgba(226, 232, 240, 0.92);
   min-width: 0;
@@ -2344,14 +2344,14 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.dbg-locale-events-detail {
+.dbg-perspective-events-detail {
   color: rgba(148, 163, 184, 0.88);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.dbg-locale-events-time {
+.dbg-perspective-events-time {
   font-size: 10px;
   font-family: ui-monospace, monospace;
   color: rgba(148, 163, 184, 0.85);
@@ -2359,26 +2359,26 @@
 }
 /* Per-kind accent (matches the verify-outcome palette so the colors
  * are consistent across substrate UI). */
-.dbg-locale-events-row.evt-ok        { border-left-color: rgba(34, 197, 94, 0.65); }
-.dbg-locale-events-row.evt-recovered { border-left-color: rgba(234, 179, 8, 0.65); }
-.dbg-locale-events-row.evt-failed    { border-left-color: rgba(239, 68, 68, 0.65); }
-.dbg-locale-events-row.evt-lifecycle { border-left-color: rgba(96, 165, 250, 0.65); }
-.dbg-locale-events-row.evt-observed  { border-left-color: rgba(34, 211, 238, 0.65); }
-.dbg-locale-events-row.evt-drift     { border-left-color: rgba(251, 146, 60, 0.65); }
-.dbg-locale-events-row.evt-ok        .dbg-locale-events-kind { color: rgba(187, 247, 208, 0.95); }
-.dbg-locale-events-row.evt-recovered .dbg-locale-events-kind { color: rgba(253, 224, 71, 0.95); }
-.dbg-locale-events-row.evt-failed    .dbg-locale-events-kind { color: rgba(254, 202, 202, 0.95); }
-.dbg-locale-events-row.evt-lifecycle .dbg-locale-events-kind { color: rgba(191, 219, 254, 0.95); }
-.dbg-locale-events-row.evt-observed  .dbg-locale-events-kind { color: rgba(165, 243, 252, 0.95); }
-.dbg-locale-events-row.evt-drift     .dbg-locale-events-kind { color: rgba(254, 215, 170, 0.95); }
-.dbg-locale-events-footer {
+.dbg-perspective-events-row.evt-ok        { border-left-color: rgba(34, 197, 94, 0.65); }
+.dbg-perspective-events-row.evt-recovered { border-left-color: rgba(234, 179, 8, 0.65); }
+.dbg-perspective-events-row.evt-failed    { border-left-color: rgba(239, 68, 68, 0.65); }
+.dbg-perspective-events-row.evt-lifecycle { border-left-color: rgba(96, 165, 250, 0.65); }
+.dbg-perspective-events-row.evt-observed  { border-left-color: rgba(34, 211, 238, 0.65); }
+.dbg-perspective-events-row.evt-drift     { border-left-color: rgba(251, 146, 60, 0.65); }
+.dbg-perspective-events-row.evt-ok        .dbg-perspective-events-kind { color: rgba(187, 247, 208, 0.95); }
+.dbg-perspective-events-row.evt-recovered .dbg-perspective-events-kind { color: rgba(253, 224, 71, 0.95); }
+.dbg-perspective-events-row.evt-failed    .dbg-perspective-events-kind { color: rgba(254, 202, 202, 0.95); }
+.dbg-perspective-events-row.evt-lifecycle .dbg-perspective-events-kind { color: rgba(191, 219, 254, 0.95); }
+.dbg-perspective-events-row.evt-observed  .dbg-perspective-events-kind { color: rgba(165, 243, 252, 0.95); }
+.dbg-perspective-events-row.evt-drift     .dbg-perspective-events-kind { color: rgba(254, 215, 170, 0.95); }
+.dbg-perspective-events-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   padding: 4px 0;
 }
-.dbg-locale-events-hint {
+.dbg-perspective-events-hint {
   font-size: 10px;
   color: rgba(148, 163, 184, 0.75);
   font-style: italic;
@@ -2388,7 +2388,7 @@
 /* v2.74.262 — Bulk verify affordance: stale-count badge in header +
  * bulk outcome banner above the footer. Badge uses the same yellow as
  * the stale-suspected lifecycle chip for visual continuity. */
-.dbg-locale-events-stale-badge {
+.dbg-perspective-events-stale-badge {
   font-size: 10px;
   font-family: ui-monospace, monospace;
   background: rgba(234, 179, 8, 0.15);
@@ -2400,53 +2400,53 @@
   letter-spacing: 0;
   text-transform: none;
 }
-.dbg-locale-events-stale-badge.hidden { display: none; }
+.dbg-perspective-events-stale-badge.hidden { display: none; }
 
-.dbg-locale-events-bulk-outcome {
+.dbg-perspective-events-bulk-outcome {
   padding: 6px 10px;
   border-radius: 4px;
   font-size: 11px;
   line-height: 1.3;
   font-family: ui-monospace, monospace;
 }
-.dbg-locale-events-bulk-outcome.hidden { display: none; }
-.dbg-locale-events-bulk-loading {
+.dbg-perspective-events-bulk-outcome.hidden { display: none; }
+.dbg-perspective-events-bulk-loading {
   background: rgba(34, 211, 238, 0.08);
   border: 1px dashed rgba(34, 211, 238, 0.40);
   color: rgba(165, 243, 252, 0.95);
   font-style: italic;
 }
-.dbg-locale-events-bulk-success {
+.dbg-perspective-events-bulk-success {
   background: rgba(34, 197, 94, 0.10);
   border: 1px solid rgba(34, 197, 94, 0.40);
   color: rgba(187, 247, 208, 0.95);
 }
-.dbg-locale-events-bulk-mixed {
+.dbg-perspective-events-bulk-mixed {
   background: rgba(234, 179, 8, 0.08);
   border: 1px solid rgba(234, 179, 8, 0.40);
   color: rgba(253, 224, 71, 0.95);
 }
-.dbg-locale-events-bulk-error {
+.dbg-perspective-events-bulk-error {
   background: rgba(239, 68, 68, 0.10);
   border: 1px solid rgba(239, 68, 68, 0.40);
   color: rgba(254, 202, 202, 0.95);
 }
-.dbg-locale-events-bulk-info {
+.dbg-perspective-events-bulk-info {
   background: rgba(148, 163, 184, 0.08);
   border: 1px dashed rgba(148, 163, 184, 0.35);
   color: rgba(203, 213, 225, 0.85);
 }
 
-.dbg-locale-events-footer button:disabled {
+.dbg-perspective-events-footer button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-/* v2.74.265 — Phase 7d surface: locale active-state preview section.
+/* v2.74.265 — Phase 7d surface: perspective active-state preview section.
  * Sits between predicates and the events panel. Verdict header (✓/✗)
  * uses the verify-outcome palette; per-leaf rows show kind-specific
  * label + pass/fail icon + reason on failure. */
-.dbg-locale-active-state {
+.dbg-perspective-active-state {
   /* v2.74.283 — Card chrome. */
   display: flex;
   flex-direction: column;
@@ -2456,74 +2456,74 @@
   border: 1px solid var(--line);
   border-radius: var(--r, 7px);
 }
-.dbg-locale-active-state-head {
+.dbg-perspective-active-state-head {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.dbg-locale-active-state-label {
+.dbg-perspective-active-state-label {
   font-size: 11px;
   font-weight: 600;
   color: rgba(226, 232, 240, 0.85);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
-.dbg-locale-active-state-head-spacer { flex: 1; }
-.dbg-locale-active-state-result {
+.dbg-perspective-active-state-head-spacer { flex: 1; }
+.dbg-perspective-active-state-result {
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
-.dbg-locale-active-state-loading,
-.dbg-locale-active-state-no-tab,
-.dbg-locale-active-state-error {
+.dbg-perspective-active-state-loading,
+.dbg-perspective-active-state-no-tab,
+.dbg-perspective-active-state-error {
   font-size: 11px;
   padding: 6px 10px;
   border-radius: 4px;
   line-height: 1.4;
 }
-.dbg-locale-active-state-loading {
+.dbg-perspective-active-state-loading {
   background: rgba(34, 211, 238, 0.06);
   border: 1px dashed rgba(34, 211, 238, 0.30);
   color: rgba(165, 243, 252, 0.85);
   font-style: italic;
 }
-.dbg-locale-active-state-no-tab {
+.dbg-perspective-active-state-no-tab {
   background: rgba(234, 179, 8, 0.08);
   border: 1px solid rgba(234, 179, 8, 0.40);
   color: rgba(253, 224, 71, 0.92);
 }
-.dbg-locale-active-state-error {
+.dbg-perspective-active-state-error {
   background: rgba(239, 68, 68, 0.10);
   border: 1px solid rgba(239, 68, 68, 0.40);
   color: rgba(254, 202, 202, 0.92);
 }
 
-.dbg-locale-active-state-verdict {
+.dbg-perspective-active-state-verdict {
   font-size: 12px;
   font-weight: 600;
   padding: 6px 10px;
   border-radius: 4px;
   line-height: 1.3;
 }
-.dbg-locale-active-state-verdict-active {
+.dbg-perspective-active-state-verdict-active {
   background: rgba(34, 197, 94, 0.10);
   border: 1px solid rgba(34, 197, 94, 0.40);
   color: rgba(187, 247, 208, 0.95);
 }
-.dbg-locale-active-state-verdict-inactive {
+.dbg-perspective-active-state-verdict-inactive {
   background: rgba(239, 68, 68, 0.08);
   border: 1px solid rgba(239, 68, 68, 0.40);
   color: rgba(254, 202, 202, 0.92);
 }
 
-.dbg-locale-active-state-leaf-empty {
+.dbg-perspective-active-state-leaf-empty {
   font-size: 11px;
   color: rgba(148, 163, 184, 0.78);
   font-style: italic;
   padding: 4px 0;
 }
-.dbg-locale-active-state-leaf {
+.dbg-perspective-active-state-leaf {
   display: grid;
   grid-template-columns: auto 1fr 2fr;
   align-items: center;
@@ -2534,25 +2534,25 @@
   line-height: 1.3;
   border-left: 2px solid transparent;
 }
-.dbg-locale-active-state-leaf.leaf-pass { border-left-color: rgba(34, 197, 94, 0.65); }
-.dbg-locale-active-state-leaf.leaf-fail { border-left-color: rgba(239, 68, 68, 0.65); }
-.dbg-locale-active-state-leaf.leaf-null { border-left-color: rgba(148, 163, 184, 0.55); }
-.dbg-locale-active-state-leaf-icon {
+.dbg-perspective-active-state-leaf.leaf-pass { border-left-color: rgba(34, 197, 94, 0.65); }
+.dbg-perspective-active-state-leaf.leaf-fail { border-left-color: rgba(239, 68, 68, 0.65); }
+.dbg-perspective-active-state-leaf.leaf-null { border-left-color: rgba(148, 163, 184, 0.55); }
+.dbg-perspective-active-state-leaf-icon {
   width: 14px;
   text-align: center;
   font-size: 12px;
 }
-.dbg-locale-active-state-leaf.leaf-pass .dbg-locale-active-state-leaf-icon { color: rgba(187, 247, 208, 0.95); }
-.dbg-locale-active-state-leaf.leaf-fail .dbg-locale-active-state-leaf-icon { color: rgba(254, 202, 202, 0.95); }
-.dbg-locale-active-state-leaf.leaf-null .dbg-locale-active-state-leaf-icon { color: rgba(203, 213, 225, 0.85); }
-.dbg-locale-active-state-leaf-label {
+.dbg-perspective-active-state-leaf.leaf-pass .dbg-perspective-active-state-leaf-icon { color: rgba(187, 247, 208, 0.95); }
+.dbg-perspective-active-state-leaf.leaf-fail .dbg-perspective-active-state-leaf-icon { color: rgba(254, 202, 202, 0.95); }
+.dbg-perspective-active-state-leaf.leaf-null .dbg-perspective-active-state-leaf-icon { color: rgba(203, 213, 225, 0.85); }
+.dbg-perspective-active-state-leaf-label {
   color: rgba(226, 232, 240, 0.92);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.dbg-locale-active-state-leaf-reason {
+.dbg-perspective-active-state-leaf-reason {
   color: rgba(148, 163, 184, 0.85);
   font-size: 10px;
   font-style: italic;
@@ -2565,13 +2565,13 @@
 /* v2.74.266 — Drift-confirmation Apply button + applied marker.
  * Renders in the trailing action column of landmark-effect-drift
  * event rows. Orange accent matches the drift event kind palette. */
-.dbg-locale-events-action {
+.dbg-perspective-events-action {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   min-width: 0;
 }
-.dbg-locale-events-apply-btn {
+.dbg-perspective-events-apply-btn {
   background: transparent;
   border: 1px solid rgba(251, 146, 60, 0.50);
   color: rgba(254, 215, 170, 0.95);
@@ -2583,16 +2583,16 @@
   cursor: pointer;
   transition: border-color .15s, background .15s, color .15s;
 }
-.dbg-locale-events-apply-btn:hover:not(:disabled) {
+.dbg-perspective-events-apply-btn:hover:not(:disabled) {
   border-color: rgba(251, 146, 60, 0.85);
   background: rgba(251, 146, 60, 0.12);
   color: rgba(255, 237, 213, 1);
 }
-.dbg-locale-events-apply-btn:disabled {
+.dbg-perspective-events-apply-btn:disabled {
   opacity: 0.6;
   cursor: wait;
 }
-.dbg-locale-events-action-applied {
+.dbg-perspective-events-action-applied {
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -2607,9 +2607,9 @@
  * a name input + kind dropdown + per-kind fields + same-origin badge
  * + Test/Remove buttons. Visual language follows predicates section
  * (same border-radius, padding, hint typography). */
-.dbg-locale-iframe-contexts {
+.dbg-perspective-iframe-contexts {
   /* v2.74.283 — Card chrome to match the meta-card / landmarks pattern.
-   * The .dbg-locale parent has flex gap:12px so no margin-top needed. */
+   * The .dbg-perspective parent has flex gap:12px so no margin-top needed. */
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -2618,19 +2618,19 @@
   border: 1px solid var(--line);
   border-radius: var(--r, 7px);
 }
-.dbg-locale-iframe-contexts-head {
+.dbg-perspective-iframe-contexts-head {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.dbg-locale-iframe-contexts-label {
+.dbg-perspective-iframe-contexts-label {
   font-size: 11px;
   font-weight: 600;
   color: rgba(226, 232, 240, 0.85);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
-.dbg-locale-iframe-contexts-optional {
+.dbg-perspective-iframe-contexts-optional {
   font-size: 10px;
   color: rgba(148, 163, 184, 0.75);
   font-weight: 400;
@@ -2638,26 +2638,26 @@
   letter-spacing: 0;
   font-style: italic;
 }
-.dbg-locale-iframe-contexts-head-spacer { flex: 1; }
-.dbg-locale-iframe-contexts-list {
+.dbg-perspective-iframe-contexts-head-spacer { flex: 1; }
+.dbg-perspective-iframe-contexts-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
-.dbg-locale-iframe-contexts-empty {
+.dbg-perspective-iframe-contexts-empty {
   font-size: 11px;
   color: rgba(148, 163, 184, 0.78);
   font-style: italic;
   padding: 6px 0;
 }
-.dbg-locale-iframe-contexts-hint {
+.dbg-perspective-iframe-contexts-hint {
   font-size: 10px;
   color: rgba(148, 163, 184, 0.75);
   font-style: italic;
   margin-top: 2px;
 }
 
-.dbg-locale-iframe-context-row {
+.dbg-perspective-iframe-context-row {
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(15, 23, 42, 0.45);
   border-radius: 5px;
@@ -2666,26 +2666,26 @@
   flex-direction: column;
   gap: 8px;
 }
-.dbg-locale-iframe-context-head {
+.dbg-perspective-iframe-context-head {
   display: flex;
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
 }
-.dbg-locale-iframe-context-name-label {
+.dbg-perspective-iframe-context-name-label {
   display: flex;
   flex-direction: column;
   gap: 2px;
   flex: 1;
   min-width: 140px;
 }
-.dbg-locale-iframe-context-name-label > span {
+.dbg-perspective-iframe-context-name-label > span {
   font-size: 10px;
   color: rgba(148, 163, 184, 0.85);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
-.dbg-locale-iframe-context-name-label input {
+.dbg-perspective-iframe-context-name-label input {
   background: rgba(15, 23, 42, 0.85);
   border: 1px solid rgba(255, 255, 255, 0.12);
   color: rgba(226, 232, 240, 0.95);
@@ -2694,7 +2694,7 @@
   font-size: 11px;
   font-family: ui-monospace, monospace;
 }
-.dbg-locale-iframe-context-refs {
+.dbg-perspective-iframe-context-refs {
   font-size: 10px;
   font-family: ui-monospace, monospace;
   padding: 1px 6px;
@@ -2703,23 +2703,23 @@
   border: 1px solid rgba(96, 165, 250, 0.40);
   color: rgba(191, 219, 254, 0.95);
 }
-.dbg-locale-iframe-context-origin {
+.dbg-perspective-iframe-context-origin {
   font-size: 10px;
   font-family: ui-monospace, monospace;
   padding: 1px 6px;
   border-radius: 8px;
 }
-.dbg-locale-iframe-context-same-origin {
+.dbg-perspective-iframe-context-same-origin {
   background: rgba(34, 197, 94, 0.10);
   border: 1px solid rgba(34, 197, 94, 0.40);
   color: rgba(187, 247, 208, 0.95);
 }
-.dbg-locale-iframe-context-cross-origin {
+.dbg-perspective-iframe-context-cross-origin {
   background: rgba(251, 146, 60, 0.10);
   border: 1px solid rgba(251, 146, 60, 0.40);
   color: rgba(254, 215, 170, 0.95);
 }
-.dbg-locale-iframe-context-remove {
+.dbg-perspective-iframe-context-remove {
   background: transparent;
   border: 1px solid rgba(255, 255, 255, 0.15);
   color: rgba(254, 202, 202, 0.78);
@@ -2729,29 +2729,29 @@
   cursor: pointer;
   transition: border-color .15s, color .15s, background .15s;
 }
-.dbg-locale-iframe-context-remove:hover {
+.dbg-perspective-iframe-context-remove:hover {
   border-color: rgba(239, 68, 68, 0.65);
   background: rgba(239, 68, 68, 0.10);
   color: rgba(254, 202, 202, 1);
 }
-.dbg-locale-iframe-context-body {
+.dbg-perspective-iframe-context-body {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
-.dbg-locale-iframe-context-field {
+.dbg-perspective-iframe-context-field {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
-.dbg-locale-iframe-context-field-label {
+.dbg-perspective-iframe-context-field-label {
   font-size: 10px;
   color: rgba(148, 163, 184, 0.85);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
-.dbg-locale-iframe-context-field select,
-.dbg-locale-iframe-context-field input {
+.dbg-perspective-iframe-context-field select,
+.dbg-perspective-iframe-context-field input {
   background: rgba(15, 23, 42, 0.85);
   border: 1px solid rgba(255, 255, 255, 0.12);
   color: rgba(226, 232, 240, 0.95);
@@ -2760,29 +2760,29 @@
   font-size: 11px;
   font-family: ui-monospace, monospace;
 }
-.dbg-locale-iframe-context-test {
+.dbg-perspective-iframe-context-test {
   font-size: 11px;
   padding: 6px 8px;
   border-radius: 4px;
   line-height: 1.3;
 }
-.dbg-locale-iframe-context-test.test-loading {
+.dbg-perspective-iframe-context-test.test-loading {
   background: rgba(34, 211, 238, 0.06);
   border: 1px dashed rgba(34, 211, 238, 0.30);
   color: rgba(165, 243, 252, 0.85);
   font-style: italic;
 }
-.dbg-locale-iframe-context-test.test-ok {
+.dbg-perspective-iframe-context-test.test-ok {
   background: rgba(34, 197, 94, 0.10);
   border: 1px solid rgba(34, 197, 94, 0.40);
   color: rgba(187, 247, 208, 0.95);
 }
-.dbg-locale-iframe-context-test.test-absent {
+.dbg-perspective-iframe-context-test.test-absent {
   background: rgba(234, 179, 8, 0.08);
   border: 1px solid rgba(234, 179, 8, 0.40);
   color: rgba(253, 224, 71, 0.92);
 }
-.dbg-locale-iframe-context-test.test-error {
+.dbg-perspective-iframe-context-test.test-error {
   background: rgba(239, 68, 68, 0.10);
   border: 1px solid rgba(239, 68, 68, 0.40);
   color: rgba(254, 202, 202, 0.92);
@@ -2792,12 +2792,12 @@
  * as a chip + a Deprecate/Restore button. Chip colors follow the
  * existing per-state palette (verified=green, suspected=yellow,
  * confirmed=red, deprecated=gray, fresh=neutral). */
-.dbg-locale-landmark-lifecycle-row-body {
+.dbg-perspective-landmark-lifecycle-row-body {
   display: flex;
   align-items: center;
   gap: 10px;
 }
-.dbg-locale-landmark-lifecycle-chip-large {
+.dbg-perspective-landmark-lifecycle-chip-large {
   font-size: 11px;
   font-family: ui-monospace, monospace;
   font-weight: 600;
@@ -2805,34 +2805,34 @@
   border-radius: 4px;
   letter-spacing: 0.02em;
 }
-.dbg-locale-landmark-lifecycle-chip-large.lifecycle-fresh {
+.dbg-perspective-landmark-lifecycle-chip-large.lifecycle-fresh {
   background: rgba(148, 163, 184, 0.10);
   border: 1px solid rgba(148, 163, 184, 0.35);
   color: rgba(203, 213, 225, 0.92);
 }
-.dbg-locale-landmark-lifecycle-chip-large.lifecycle-verified {
+.dbg-perspective-landmark-lifecycle-chip-large.lifecycle-verified {
   background: rgba(34, 197, 94, 0.10);
   border: 1px solid rgba(34, 197, 94, 0.40);
   color: rgba(187, 247, 208, 0.95);
 }
-.dbg-locale-landmark-lifecycle-chip-large.lifecycle-suspected {
+.dbg-perspective-landmark-lifecycle-chip-large.lifecycle-suspected {
   background: rgba(234, 179, 8, 0.08);
   border: 1px solid rgba(234, 179, 8, 0.40);
   color: rgba(253, 224, 71, 0.92);
 }
-.dbg-locale-landmark-lifecycle-chip-large.lifecycle-confirmed {
+.dbg-perspective-landmark-lifecycle-chip-large.lifecycle-confirmed {
   background: rgba(239, 68, 68, 0.10);
   border: 1px solid rgba(239, 68, 68, 0.40);
   color: rgba(254, 202, 202, 0.95);
 }
-.dbg-locale-landmark-lifecycle-chip-large.lifecycle-deprecated {
+.dbg-perspective-landmark-lifecycle-chip-large.lifecycle-deprecated {
   background: rgba(100, 116, 139, 0.10);
   border: 1px dashed rgba(100, 116, 139, 0.50);
   color: rgba(148, 163, 184, 0.95);
   text-decoration: line-through;
   text-decoration-color: rgba(148, 163, 184, 0.50);
 }
-.dbg-locale-landmark-lifecycle-action {
+.dbg-perspective-landmark-lifecycle-action {
   font-size: 11px;
   padding: 3px 10px;
   border-radius: 4px;
@@ -2842,20 +2842,20 @@
   letter-spacing: 0.02em;
   transition: border-color .15s, color .15s, background .15s;
 }
-.dbg-locale-landmark-lifecycle-deprecate {
+.dbg-perspective-landmark-lifecycle-deprecate {
   border: 1px solid rgba(100, 116, 139, 0.45);
   color: rgba(148, 163, 184, 0.92);
 }
-.dbg-locale-landmark-lifecycle-deprecate:hover {
+.dbg-perspective-landmark-lifecycle-deprecate:hover {
   border-color: rgba(100, 116, 139, 0.75);
   background: rgba(100, 116, 139, 0.10);
   color: rgba(203, 213, 225, 1);
 }
-.dbg-locale-landmark-lifecycle-restore {
+.dbg-perspective-landmark-lifecycle-restore {
   border: 1px solid rgba(34, 197, 94, 0.50);
   color: rgba(187, 247, 208, 0.92);
 }
-.dbg-locale-landmark-lifecycle-restore:hover {
+.dbg-perspective-landmark-lifecycle-restore:hover {
   border-color: rgba(34, 197, 94, 0.85);
   background: rgba(34, 197, 94, 0.10);
   color: rgba(220, 252, 231, 1);
@@ -2866,7 +2866,7 @@
  * card with a kind dropdown header + a body that swaps shape based
  * on kind (target landmark dropdown for visible/hasText, text input
  * for hasText, context name for iframeLoaded). */
-.dbg-locale-predicates {
+.dbg-perspective-predicates {
   /* v2.74.283 — Card chrome. */
   display: flex;
   flex-direction: column;
@@ -2876,19 +2876,19 @@
   border: 1px solid var(--line);
   border-radius: var(--r, 7px);
 }
-.dbg-locale-predicates-head {
+.dbg-perspective-predicates-head {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.dbg-locale-predicates-label {
+.dbg-perspective-predicates-label {
   font-size: 11px;
   font-weight: 600;
   color: rgba(226, 232, 240, 0.85);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
-.dbg-locale-predicates-optional {
+.dbg-perspective-predicates-optional {
   font-size: 10px;
   color: rgba(148, 163, 184, 0.75);
   font-weight: 400;
@@ -2896,12 +2896,12 @@
   letter-spacing: 0;
   font-style: italic;
 }
-.dbg-locale-predicates-head-spacer { flex: 1; }
+.dbg-perspective-predicates-head-spacer { flex: 1; }
 
 /* v2.74.271 — Top-level operator selector. Inline label + dropdown
  * tucked between the section label and the spacer. Compact so it
  * doesn't dominate the header row. */
-.dbg-locale-predicates-op-label {
+.dbg-perspective-predicates-op-label {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -2910,7 +2910,7 @@
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
-.dbg-locale-predicates-operator {
+.dbg-perspective-predicates-operator {
   background: rgba(15, 23, 42, 0.85);
   border: 1px solid rgba(255, 255, 255, 0.15);
   color: rgba(226, 232, 240, 0.95);
@@ -2921,25 +2921,25 @@
   text-transform: none;
   font-family: ui-sans-serif, system-ui, sans-serif;
 }
-.dbg-locale-predicates-list {
+.dbg-perspective-predicates-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
-.dbg-locale-predicates-empty {
+.dbg-perspective-predicates-empty {
   font-size: 11px;
   color: rgba(148, 163, 184, 0.78);
   font-style: italic;
   padding: 6px 0;
 }
-.dbg-locale-predicates-hint {
+.dbg-perspective-predicates-hint {
   font-size: 10px;
   color: rgba(148, 163, 184, 0.75);
   font-style: italic;
   margin-top: 2px;
 }
 
-.dbg-locale-predicate-row {
+.dbg-perspective-predicate-row {
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(15, 23, 42, 0.45);
   border-radius: 5px;
@@ -2948,12 +2948,12 @@
   flex-direction: column;
   gap: 6px;
 }
-.dbg-locale-predicate-head {
+.dbg-perspective-predicate-head {
   display: flex;
   align-items: center;
   gap: 6px;
 }
-.dbg-locale-predicate-kind {
+.dbg-perspective-predicate-kind {
   flex: 1;
   background: var(--bg2, rgba(30, 41, 59, 0.85));
   border: 1px solid rgba(255, 255, 255, 0.15);
@@ -2962,7 +2962,7 @@
   padding: 4px 6px;
   font-size: 12px;
 }
-.dbg-locale-predicate-remove {
+.dbg-perspective-predicate-remove {
   flex: 0 0 auto;
   background: transparent;
   border: 1px solid rgba(255, 255, 255, 0.15);
@@ -2973,30 +2973,30 @@
   cursor: pointer;
   transition: border-color .15s, color .15s, background .15s;
 }
-.dbg-locale-predicate-remove:hover {
+.dbg-perspective-predicate-remove:hover {
   border-color: rgba(239, 68, 68, 0.65);
   background: rgba(239, 68, 68, 0.10);
   color: rgba(254, 202, 202, 1);
 }
-.dbg-locale-predicate-body {
+.dbg-perspective-predicate-body {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
-.dbg-locale-predicate-field {
+.dbg-perspective-predicate-field {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
-.dbg-locale-predicate-field-label {
+.dbg-perspective-predicate-field-label {
   font-size: 10px;
   color: rgba(148, 163, 184, 0.85);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
-.dbg-locale-predicate-target,
-.dbg-locale-predicate-value,
-.dbg-locale-predicate-ctxname {
+.dbg-perspective-predicate-target,
+.dbg-perspective-predicate-value,
+.dbg-perspective-predicate-ctxname {
   background: rgba(15, 23, 42, 0.85);
   border: 1px solid rgba(255, 255, 255, 0.12);
   color: rgba(226, 232, 240, 0.95);
@@ -3004,7 +3004,7 @@
   padding: 4px 6px;
   font-size: 11px;
 }
-.dbg-locale-predicate-checkbox-label {
+.dbg-perspective-predicate-checkbox-label {
   display: flex;
   align-items: center;
   gap: 6px;

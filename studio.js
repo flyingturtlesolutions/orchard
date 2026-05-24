@@ -34,12 +34,12 @@ import { BUILTIN_ANALYSES, isBuiltinAnalysisId, getBuiltinAnalysis } from './Ser
 import { parseTemplate, collectTemplateReferences } from './Services/TemplateEngine.js';
 import { uid, $, qs, qsa, escHtml, escAttr, relTime, toast, broadcastStorageChanged, openSidepanelHere } from './shared.js';
 import { composeDescriptions } from './Services/FragmentDescription.js';
-// v2.72.45 (Pass 17g iter) — Locale form removed entirely. Locale authoring
+// v2.72.45 (Pass 17g iter) — Perspective form removed entirely. Perspective authoring
 // now happens in the debugger sidepanel. Studio retains: the Ground card's
-// "+ Locale" button (calls launchLocaleCapture in this file), the locale
-// row's delete button (deleteLocale from this module), and the
-// condition-editor surface (locale_ref dropdown handling).
-import { deleteLocale, setupLocaleForm } from './Studio/LocaleForm.js';
+// "+ Perspective" button (calls launchPerspectiveCapture in this file), the perspective
+// row's delete button (deletePerspective from this module), and the
+// condition-editor surface (perspective_ref dropdown handling).
+import { deletePerspective, setupPerspectiveForm } from './Studio/PerspectiveForm.js';
 // v2.72.33 (Pass 17c) — Assertion form extracted. Studio.js retains the
 // Ground card's assertion library section rendering and the
 // assertion_ref dropdown handling.
@@ -2351,36 +2351,36 @@ $('btn-open-chat')?.addEventListener('click', async () => {
   }
 });
 
-// ─── v2.72.45 (Pass 17g iter) — Locale capture launcher ─────────────────────
+// ─── v2.72.45 (Pass 17g iter) — Perspective capture launcher ─────────────────────
 //
-// Click "+ Locale" on a Ground card → this helper opens the debugger
+// Click "+ Perspective" on a Ground card → this helper opens the debugger
 // sidepanel (preserving the click's user gesture for chrome.sidePanel.open)
-// and sends BEGIN_LOCALE_CAPTURE to background, which:
+// and sends BEGIN_PERSPECTIVE_CAPTURE to background, which:
 //   1. Opens (or focuses) a tab on the Ground's URL
 //   2. Re-injects the content script for reliable picker reach
 //   3. Stores a pending session and broadcasts to the debugger
 //
-// All locale authoring then happens in the debugger sidepanel — name,
+// All perspective authoring then happens in the debugger sidepanel — name,
 // description, URL pattern (auto-synced to active tab), landmark
 // selectors, save. Studio's role ends here; the debugger handles
 // the loop. STORAGE_CHANGED broadcasts after each save refresh the
-// Ground's locale library row.
-async function launchLocaleCapture(groundId) {
+// Ground's perspective library row.
+async function launchPerspectiveCapture(groundId) {
   // Open the sidepanel SYNCHRONOUSLY first (preserves user gesture).
   // v2.72.50 (Stage 1) — point the panel at sidepanel.html (the new
-  // shell). Background's BEGIN_LOCALE_CAPTURE handler will set the mode
-  // to 'locale-capture' which the shell mounts.
+  // shell). Background's BEGIN_PERSPECTIVE_CAPTURE handler will set the mode
+  // to 'perspective-capture' which the shell mounts.
   //
   // v2.74.140 — Use openSidepanelHere so a prior per-tab Chat override
   // doesn't leave the panel on chat.html.
   await openSidepanelHere('sidepanel.html');
-  // Send BEGIN_LOCALE_CAPTURE. Background will open the Ground's URL
+  // Send BEGIN_PERSPECTIVE_CAPTURE. Background will open the Ground's URL
   // as the starting tab and set the mode (broadcasting
   // SIDEPANEL_MODE_CHANGED for the shell).
   let res;
   try {
     res = await chrome.runtime.sendMessage({
-      type: 'BEGIN_LOCALE_CAPTURE',
+      type: 'BEGIN_PERSPECTIVE_CAPTURE',
       payload: { groundId },
     });
   } catch (e) {
@@ -2391,7 +2391,7 @@ async function launchLocaleCapture(groundId) {
     toast(`Could not start capture: ${res?.error ?? 'unknown'}`, 'err');
     return;
   }
-  toast(`Capture started — author locales in the debugger sidepanel.`);
+  toast(`Capture started — author perspectives in the debugger sidepanel.`);
 }
 
 // ─── v2.27.0 — STORAGE_CHANGED listener ──────────────────────────────────────
@@ -2455,7 +2455,7 @@ function assertionConditionSummary(c) {
   if (c.type === 'text_present')      return `text "${truncate(c.text ?? '', 40)}" appears`;
   if (c.type === 'attribute_equals')  return `${truncate(c.selector ?? '', 30)}[${c.attribute ?? ''}]="${truncate(c.value ?? '', 20)}"`;
   if (c.type === 'assertion_ref')     return `@${c.assertionId ?? '?'}`;
-  if (c.type === 'locale_ref')        return `@locale:${c.localeId ?? '?'}`;
+  if (c.type === 'perspective_ref')        return `@perspective:${c.perspectiveId ?? '?'}`;
   return c.type ?? '?';
 }
 
@@ -2558,7 +2558,7 @@ async function _refreshGroundListImpl() {
     pageStructureMap = got?.pageStructureCache ?? {};
   } catch { pageStructureMap = {}; }
 
-  // v2.74.399 — PageModel catalogs (Locale capability model, PAGEMODEL_SPEC) live
+  // v2.74.399 — PageModel catalogs (Perspective capability model, PAGEMODEL_SPEC) live
   // under 'pageModelCache', keyed ground → url. Listed in the "Page Models" section.
   let pageModelMap = {};
   try {
@@ -2577,14 +2577,14 @@ async function _refreshGroundListImpl() {
     // v2.65.0 (Pass 2) — Observations are foundation-only. Listed here for
     // count display in the Ground card; no authoring or runtime yet.
     const observations = await StorageManager.listObservations(ground.id);
-    // v2.72.29 (Pass 17) — Locales: vocabulary (verified DOM landmarks).
-    const locales = await StorageManager.listLocales(ground.id);
+    // v2.72.29 (Pass 17) — Perspectives: vocabulary (verified DOM landmarks).
+    const perspectives = await StorageManager.listPerspectives(ground.id);
 
     // v2.74.329 — GROUND_SPEC § 5 derived intent. Effective description =
-    // override ?? derived ?? placeholder; stale = Locales changed since the
+    // override ?? derived ?? placeholder; stale = Perspectives changed since the
     // cached derivation.
-    const descStale = isDerivationStale(ground, locales);
-    const descText  = effectiveDescription(ground, locales);
+    const descStale = isDerivationStale(ground, perspectives);
+    const descText  = effectiveDescription(ground, perspectives);
     const descKind  = ground.descriptionOverride ? 'override' : (ground.derivedDescription ? 'derived' : '');
 
     const mapBadge = groundMap
@@ -2615,16 +2615,16 @@ async function _refreshGroundListImpl() {
           ground.metadata?.lifecycle === 'deprecated'
             ? ` <span class="ground-lifecycle-badge ground-lifecycle-deprecated" title="Deprecated (soft-deleted). Hidden from active URL matching; reactivate to restore.">deprecated</span>`
             : (ground.metadata?.lifecycle === 'draft'
-                ? ` <span class="ground-lifecycle-badge ground-lifecycle-draft" title="Draft — no Locales yet. Not active for URL matching until it has at least one Locale.">draft</span>`
+                ? ` <span class="ground-lifecycle-badge ground-lifecycle-draft" title="Draft — no Perspectives yet. Not active for URL matching until it has at least one Perspective.">draft</span>`
                 : '')}</span>
         <span class="ground-group-url">${escHtml(ground.url ?? '')}</span>
         <div class="ground-group-desc">
-          <span class="ground-group-desc-text ${descText ? '' : 'ground-group-desc-empty'}">${escHtml(descText || '(no description yet — click ↻ to derive from Locales)')}</span>
+          <span class="ground-group-desc-text ${descText ? '' : 'ground-group-desc-empty'}">${escHtml(descText || '(no description yet — click ↻ to derive from Perspectives)')}</span>
           <span class="ground-desc-badges">
-            ${descKind === 'override' ? `<span class="ground-desc-tag ground-desc-tag-override" title="Custom description (override). Clear it to fall back to the auto-derived one.">overridden</span>` : (descKind === 'derived' ? `<span class="ground-desc-tag" title="Auto-derived from this Ground's Locales (GROUND_SPEC § 5).">derived</span>` : '')}
-            ${descStale ? `<span class="ground-desc-tag ground-desc-tag-stale" title="Locales changed since this was derived — click ↻ to refresh.">stale</span>` : ''}
+            ${descKind === 'override' ? `<span class="ground-desc-tag ground-desc-tag-override" title="Custom description (override). Clear it to fall back to the auto-derived one.">overridden</span>` : (descKind === 'derived' ? `<span class="ground-desc-tag" title="Auto-derived from this Ground's Perspectives (GROUND_SPEC § 5).">derived</span>` : '')}
+            ${descStale ? `<span class="ground-desc-tag ground-desc-tag-stale" title="Perspectives changed since this was derived — click ↻ to refresh.">stale</span>` : ''}
           </span>
-          <button class="btn-action ground-desc-refresh" data-action="derive-desc" data-gid="${ground.id}" title="Derive / refresh the description from this Ground's Locales (calls the LLM)" ${locales.length === 0 ? 'disabled' : ''}>↻</button>
+          <button class="btn-action ground-desc-refresh" data-action="derive-desc" data-gid="${ground.id}" title="Derive / refresh the description from this Ground's Perspectives (calls the LLM)" ${perspectives.length === 0 ? 'disabled' : ''}>↻</button>
           <button class="btn-action ground-desc-override-btn" data-action="override-desc" data-gid="${ground.id}" title="${ground.descriptionOverride ? 'Edit or clear the custom description' : 'Write a custom description (overrides the derived one)'}">✎</button>
         </div>
         <div class="ground-group-meta">
@@ -2644,7 +2644,7 @@ async function _refreshGroundListImpl() {
       <div class="groundmap-viewer hidden" id="groundmap-viewer-${ground.id}"></div>`;
 
     // v2.74.8 — Collapse toggle. Hides all the .ground-section-row children
-    // (Fragments, Assertions, Locales, Observations, Analyses, Strategies)
+    // (Fragments, Assertions, Perspectives, Observations, Analyses, Strategies)
     // when the user wants to focus on a different Ground. Header stays
     // visible so name, url, badges, and action buttons remain accessible.
     // Ephemeral state — lost on reload. Default expanded.
@@ -2658,7 +2658,7 @@ async function _refreshGroundListImpl() {
       if (chev) chev.textContent = collapsed ? '▸' : '▾';
     });
 
-    // v2.74.329 — Derive / refresh the Ground description from its Locales.
+    // v2.74.329 — Derive / refresh the Ground description from its Perspectives.
     // force=false: respects the cache (returns "up to date" when unchanged),
     // derives when stale or never-derived. Lazy/manual — only on click.
     groupHeader.querySelector('[data-action="derive-desc"]')?.addEventListener('click', async (e) => {
@@ -2710,7 +2710,7 @@ async function _refreshGroundListImpl() {
       // v2.74.327 — Message reflects the full Tier-1 cascade (GROUND_SPEC
       // § 11). Landmarks are preserved (orphaned) per spec, so they're
       // excluded from this list.
-      if (confirm(`Delete Ground "${ground.name}" and all its Fragments, Strategies, Locales, Observations, Analyses, and Assertions? Captured landmarks are kept. This cannot be undone.`)) {
+      if (confirm(`Delete Ground "${ground.name}" and all its Fragments, Strategies, Perspectives, Observations, Analyses, and Assertions? Captured landmarks are kept. This cannot be undone.`)) {
         deleteGround(ground.id);
       }
     });
@@ -2895,22 +2895,22 @@ async function _refreshGroundListImpl() {
     });
     card.appendChild(predRow);
 
-    // v2.72.29 (Pass 17) — Locales section. Vocabulary, like Assertions,
+    // v2.72.29 (Pass 17) — Perspectives section. Vocabulary, like Assertions,
     // but for verified DOM landmark records rather than logical assertions.
-    // Referenced from primitive contracts via `locale_ref` to assert "this
+    // Referenced from primitive contracts via `perspective_ref` to assert "this
     // primitive runs on that kind of page."
-    const locRow = document.createElement('div');
-    locRow.className = 'ground-section-row';
-    locRow.innerHTML = `
+    const perspectiveRow = document.createElement('div');
+    perspectiveRow.className = 'ground-section-row';
+    perspectiveRow.innerHTML = `
       <div class="ground-section-head">
-        <span class="ground-section-label">Locales</span>
-        <span class="ground-section-count">${locales.length}</span>
-        <button class="btn-secondary tiny" data-action="add-locale" data-gid="${ground.id}" title="Author a new Locale (verified DOM landmarks for a kind of page)">+ Locale</button>
+        <span class="ground-section-label">Perspectives</span>
+        <span class="ground-section-count">${perspectives.length}</span>
+        <button class="btn-secondary tiny" data-action="add-perspective" data-gid="${ground.id}" title="Author a new Perspective (verified DOM landmarks for a kind of page)">+ Perspective</button>
       </div>
-      <div class="ground-section-body" id="locales-body-${ground.id}">
-        ${locales.length === 0
-          ? `<span class="empty-state small">No Locales yet — Locales are <strong>vocabulary</strong>: verified DOM landmark records. Author one when you have a "kind of page" (e.g. search-results, job-detail) whose structural elements multiple primitives will need.</span>`
-          : locales.map(l => {
+      <div class="ground-section-body" id="perspectives-body-${ground.id}">
+        ${perspectives.length === 0
+          ? `<span class="empty-state small">No Perspectives yet — Perspectives are <strong>vocabulary</strong>: verified DOM landmark records. Author one when you have a "kind of page" (e.g. search-results, job-detail) whose structural elements multiple primitives will need.</span>`
+          : perspectives.map(l => {
               // v2.74.335 — landmarks is now LandmarkNode[]; count via the
               // flat landmarkRefs mirror. lifecycle drives the deprecated UI.
               const isDeprecated = l.lifecycle === 'deprecated';
@@ -2925,64 +2925,64 @@ async function _refreshGroundListImpl() {
                 ? `last verified ${relTime(oldestVerified)}`
                 : 'unverified';
               return `
-            <div class="locale-row${isDeprecated ? ' locale-row-deprecated' : ''}" data-lid="${l.id}">
-              <div class="locale-row-main">
-                <span class="locale-name">${escHtml(l.name ?? 'Unnamed')}</span>
+            <div class="perspective-row${isDeprecated ? ' perspective-row-deprecated' : ''}" data-lid="${l.id}">
+              <div class="perspective-row-main">
+                <span class="perspective-name">${escHtml(l.name ?? 'Unnamed')}</span>
                 ${l.authoredBy === 'model' ? `<span class="assertion-generated-badge" title="Authored by model.">⚡</span>` : ''}
                 ${isDeprecated ? `<span class="ground-lifecycle-badge ground-lifecycle-deprecated" title="Deprecated (soft-deleted). Excluded from the active set + authoring; reactivate to restore.">deprecated</span>` : ''}
-                <span class="locale-summary">${lmCount} landmark${lmCount === 1 ? '' : 's'} · ${escHtml(verifiedSummary)}</span>
+                <span class="perspective-summary">${lmCount} landmark${lmCount === 1 ? '' : 's'} · ${escHtml(verifiedSummary)}</span>
               </div>
-              ${l.description ? `<div class="locale-desc">${escHtml(l.description)}</div>` : ''}
-              <div class="locale-row-actions">
-                <button class="btn-action" data-action="json-locale" data-lid="${l.id}" title="View JSON (read-only, copyable)">{ }</button>
+              ${l.description ? `<div class="perspective-desc">${escHtml(l.description)}</div>` : ''}
+              <div class="perspective-row-actions">
+                <button class="btn-action" data-action="json-perspective" data-lid="${l.id}" title="View JSON (read-only, copyable)">{ }</button>
                 ${isDeprecated
-                  ? `<button class="btn-secondary small" data-action="reactivate-locale" data-lid="${l.id}" title="Reactivate this Locale (restore to active)">↑</button>`
-                  : `<button class="btn-action" data-action="deprecate-locale" data-lid="${l.id}" title="Deprecate (soft-delete) — hide from active set + authoring, reversible">⤓</button>`}
-                <button class="btn-action danger" data-action="delete-locale" data-lid="${l.id}" title="Delete locale">✕</button>
+                  ? `<button class="btn-secondary small" data-action="reactivate-perspective" data-lid="${l.id}" title="Reactivate this Perspective (restore to active)">↑</button>`
+                  : `<button class="btn-action" data-action="deprecate-perspective" data-lid="${l.id}" title="Deprecate (soft-delete) — hide from active set + authoring, reversible">⤓</button>`}
+                <button class="btn-action danger" data-action="delete-perspective" data-lid="${l.id}" title="Delete perspective">✕</button>
               </div>
             </div>`;
             }).join('')
         }
       </div>`;
-    locRow.querySelector('[data-action="add-locale"]').addEventListener('click', async () => {
-      await launchLocaleCapture(ground.id);
+    perspectiveRow.querySelector('[data-action="add-perspective"]').addEventListener('click', async () => {
+      await launchPerspectiveCapture(ground.id);
     });
-    // v2.72.45 (Pass 17g iter) — Edit-locale removed. The new debugger-based
-    // capture flow doesn't support editing existing locales; users delete +
+    // v2.72.45 (Pass 17g iter) — Edit-perspective removed. The new debugger-based
+    // capture flow doesn't support editing existing perspectives; users delete +
     // re-create. Edit can return in a future pass if/when the debugger gets
     // a "load existing for re-capture" mode.
-    locRow.querySelectorAll('[data-action="json-locale"]').forEach(btn => {
+    perspectiveRow.querySelectorAll('[data-action="json-perspective"]').forEach(btn => {
       btn.addEventListener('click', async () => {
-        const l = await StorageManager.getLocale(btn.dataset.lid);
-        if (!l) { toast('Locale not found', 'err'); return; }
-        showJsonModal(`Locale: ${l.name ?? l.id}`, l, 'locale');
+        const l = await StorageManager.getPerspective(btn.dataset.lid);
+        if (!l) { toast('Perspective not found', 'err'); return; }
+        showJsonModal(`Perspective: ${l.name ?? l.id}`, l, 'perspective');
       });
     });
-    locRow.querySelectorAll('[data-action="delete-locale"]').forEach(btn => {
-      btn.addEventListener('click', () => deleteLocale(btn.dataset.lid));
+    perspectiveRow.querySelectorAll('[data-action="delete-perspective"]').forEach(btn => {
+      btn.addEventListener('click', () => deletePerspective(btn.dataset.lid));
     });
-    // v2.74.335 — LOCALE_SPEC § 12 deprecate (soft-delete) / reactivate.
-    locRow.querySelectorAll('[data-action="deprecate-locale"]').forEach(btn => {
+    // v2.74.335 — PERSPECTIVE_SPEC § 12 deprecate (soft-delete) / reactivate.
+    perspectiveRow.querySelectorAll('[data-action="deprecate-perspective"]').forEach(btn => {
       btn.addEventListener('click', async () => {
-        if (!confirm('Deprecate this Locale? It will be excluded from the active set and authoring, but kept — reactivate it any time.')) return;
+        if (!confirm('Deprecate this Perspective? It will be excluded from the active set and authoring, but kept — reactivate it any time.')) return;
         const res = await new Promise(r => chrome.runtime.sendMessage(
-          { type: 'SET_LOCALE_LIFECYCLE', payload: { localeId: btn.dataset.lid, lifecycle: 'deprecated' } }, r));
-        if (res?.success) { toast('Locale deprecated'); await refreshGroundList(); }
+          { type: 'SET_PERSPECTIVE_LIFECYCLE', payload: { perspectiveId: btn.dataset.lid, lifecycle: 'deprecated' } }, r));
+        if (res?.success) { toast('Perspective deprecated'); await refreshGroundList(); }
         else toast(`Failed: ${res?.error ?? 'unknown'}`, 'err');
       });
     });
-    locRow.querySelectorAll('[data-action="reactivate-locale"]').forEach(btn => {
+    perspectiveRow.querySelectorAll('[data-action="reactivate-perspective"]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const res = await new Promise(r => chrome.runtime.sendMessage(
-          { type: 'SET_LOCALE_LIFECYCLE', payload: { localeId: btn.dataset.lid, lifecycle: 'active' } }, r));
-        if (res?.success) { toast('Locale reactivated'); await refreshGroundList(); }
+          { type: 'SET_PERSPECTIVE_LIFECYCLE', payload: { perspectiveId: btn.dataset.lid, lifecycle: 'active' } }, r));
+        if (res?.success) { toast('Perspective reactivated'); await refreshGroundList(); }
         else toast(`Failed: ${res?.error ?? 'unknown'}`, 'err');
       });
     });
-    card.appendChild(locRow);
+    card.appendChild(perspectiveRow);
 
     // v2.74.371 — Page Structures section. Auto-discovered depth maps from the
-    // "+ Locale" exploration sweep (dropdowns/menus/modals revealed by poking),
+    // "+ Perspective" exploration sweep (dropdowns/menus/modals revealed by poking),
     // cached per (ground, normalized URL). They feed depth-aware perspective
     // proposals; listed here so the discovered depth is inspectable per ground.
     const pageStructures = (pageStructureMap && pageStructureMap[ground.id]) ? pageStructureMap[ground.id] : {};
@@ -2997,7 +2997,7 @@ async function _refreshGroundListImpl() {
       </div>
       <div class="ground-section-body" id="page-structures-body-${ground.id}">
         ${psEntries.length === 0
-          ? `<span class="empty-state small">No page structures yet — these are auto-discovered <strong>depth maps</strong> (dropdowns / menus / modals revealed by the "+ Locale" exploration sweep). They feed depth-aware perspective proposals.</span>`
+          ? `<span class="empty-state small">No page structures yet — these are auto-discovered <strong>depth maps</strong> (dropdowns / menus / modals revealed by the "+ Perspective" exploration sweep). They feed depth-aware perspective proposals.</span>`
           : psEntries.map(([key, entry]) => {
               const s = entry?.structure ?? {};
               const st = s.stats ?? {};
@@ -3023,7 +3023,7 @@ async function _refreshGroundListImpl() {
               </div>
               <div class="page-structure-row-actions">
                 <button class="btn-action" data-action="json-page-structure" data-ps-key="${escAttr(key)}" title="View the full structure JSON (controls + revealed children)">{ }</button>
-                <button class="btn-action danger" data-action="delete-page-structure" data-ps-key="${escAttr(key)}" title="Delete this page structure (next + Locale will run a fresh sweep)">✕</button>
+                <button class="btn-action danger" data-action="delete-page-structure" data-ps-key="${escAttr(key)}" title="Delete this page structure (next + Perspective will run a fresh sweep)">✕</button>
               </div>
             </div>`;
             }).join('')
@@ -3039,7 +3039,7 @@ async function _refreshGroundListImpl() {
     psRow.querySelectorAll('[data-action="delete-page-structure"]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const key = btn.dataset.psKey;
-        if (!confirm('Delete this page structure? The next "+ Locale" on this page will run a fresh exploration sweep.')) return;
+        if (!confirm('Delete this page structure? The next "+ Perspective" on this page will run a fresh exploration sweep.')) return;
         try {
           const got = await new Promise(r => chrome.storage.local.get('pageStructureCache', r));
           const map = got?.pageStructureCache ?? {};
@@ -3120,6 +3120,80 @@ async function _refreshGroundListImpl() {
       });
     });
     card.appendChild(pmRow);
+
+    // v2.74.416 — OUTCOMES slice 5: the unified append-only stream viewer
+    // (OUTCOMES_SPEC). Reads the background fold (GET_OUTCOMES) — recent events
+    // (phase/op/verdict), the conventions histogram, and rollup tallies for
+    // Feature health + Perspective usage. Read-only inspector + clear control.
+    let outcomes = null;
+    try {
+      outcomes = await new Promise(r => chrome.runtime.sendMessage(
+        { type: 'GET_OUTCOMES', payload: { groundId: ground.id, includeEvents: true, limit: 60 } }, r));
+    } catch { outcomes = null; }
+    const oRoll = outcomes?.rollups ?? null;
+    const oEvents = Array.isArray(outcomes?.events) ? outcomes.events : [];
+    const oCount = outcomes?.eventCount ?? 0;
+    const oRow = document.createElement('div');
+    oRow.className = 'ground-section-row';
+    {
+      const conv = oRoll?.conventions;
+      const convStr = (conv && conv.total)
+        ? Object.entries(conv.selectorTierHistogram || {}).filter(([, f]) => f > 0)
+            .sort((a, b) => b[1] - a[1]).map(([t, f]) => `${t} ${Math.round(f * 100)}%`).join(' · ')
+        : '';
+      const fh = oRoll?.featureHealth ?? {};
+      const fhVals = Object.values(fh);
+      const stale = fhVals.filter(h => h?.lifecycle === 'stale-suspected').length;
+      const pu = oRoll?.perspectiveUsage ?? {};
+      const puVals = Object.values(pu);
+      const avgSucc = puVals.length ? Math.round(puVals.reduce((a, h) => a + (h?.successRate ?? 0), 0) / puVals.length * 100) : null;
+      const summaryBits = [];
+      if (convStr) summaryBits.push(`conventions: ${convStr}`);
+      if (fhVals.length) summaryBits.push(`${fhVals.length} feature(s) tracked${stale ? ` · ${stale} stale-suspected` : ''}`);
+      if (puVals.length) summaryBits.push(`${puVals.length} perspective(s)${avgSucc != null ? ` · ${avgSucc}% avg success` : ''}`);
+      const VERDICT_ICON = { verified: '✓', failed: '✗', abstained: '∅', corrected: '✎' };
+      const eventsHtml = oEvents.slice(0, 12).map(ev => {
+        const v = ev.verdict || ev.outcome || '?';
+        const icon = VERDICT_ICON[ev.verdict] ?? (ev.outcome === 'success' ? '✓' : ev.outcome === 'failure' ? '✗' : '·');
+        const sel = ev.llmOutput?.selector || ev.humanFinal?.selector || '';
+        const label = ev.role || ev.featureId || ev.perspectiveId || '';
+        return `<div class="outcomes-event outcomes-${escAttr(v)}">
+            <span class="outcomes-ev-icon">${icon}</span>
+            <span class="outcomes-ev-op">${escHtml(ev.op || '?')}</span>
+            <span class="outcomes-ev-label" title="${escAttr(sel)}">${escHtml(label)}</span>
+            <span class="outcomes-ev-ts">${ev.ts ? relTime(ev.ts) : ''}</span>
+          </div>`;
+      }).join('');
+      oRow.innerHTML = `
+      <div class="ground-section-head">
+        <span class="ground-section-label">Outcomes</span>
+        <span class="ground-section-count">${oCount}</span>
+        ${oCount ? `<button class="btn-secondary tiny" data-action="json-outcomes" data-gid="${ground.id}" title="View the full rollups (Feature health · Perspective usage · conventions histogram) as JSON">{ }</button>
+        <button class="btn-secondary tiny danger" data-action="clear-outcomes" data-gid="${ground.id}" title="Clear this ground's outcome stream (rollups recompute empty)">✕</button>` : ''}
+      </div>
+      <div class="ground-section-body" id="outcomes-body-${ground.id}">
+        ${oCount === 0
+          ? `<span class="empty-state small">No outcomes yet — the append-only stream fills as you <strong>⚡ Resolve roles</strong> (each verdict becomes a training pair; verified selectors build the site's <em>conventions histogram</em>).</span>`
+          : `${summaryBits.length ? `<div class="outcomes-summary">${escHtml(summaryBits.join('  ·  '))}</div>` : ''}
+             <div class="outcomes-events">${eventsHtml}${oEvents.length > 12 ? `<div class="empty-state small">+${oEvents.length - 12} more recent event(s) — see JSON</div>` : ''}</div>`
+        }
+      </div>`;
+    }
+    oRow.querySelector('[data-action="json-outcomes"]')?.addEventListener('click', () => {
+      showJsonModal(`Outcomes rollups: ${ground.name ?? ground.id}`, { rollups: oRoll, recentEvents: oEvents }, 'outcomes');
+    });
+    oRow.querySelector('[data-action="clear-outcomes"]')?.addEventListener('click', async () => {
+      if (!confirm('Clear this ground\'s outcome stream? Rollups (Feature health, conventions histogram) will recompute from empty. The pageModel features keep their current confidence.')) return;
+      try {
+        const got = await new Promise(r => chrome.storage.local.get('outcomesStream', r));
+        const map = got?.outcomesStream ?? {};
+        delete map[ground.id];
+        await new Promise(r => chrome.storage.local.set({ outcomesStream: map }, r));
+        toast('Outcome stream cleared');
+        await refreshGroundList();
+      } catch (e) { toast(`Failed: ${e?.message ?? 'unknown'}`, 'err'); }
+    });
+    card.appendChild(oRow);
 
     // v2.65.0 (Pass 2) — Observations section. Foundation only: storage
     // exists, library row exists. NO authoring flow, NO runtime path,
@@ -3690,7 +3764,7 @@ function extractParams(text) {
 //   - fragmentDrafts (Map)
 //   - fragmentReviews (Map)
 //   - fragmentAssertionCache (Map)
-//   - fragmentLocaleCache (Map)
+//   - fragmentPerspectiveCache (Map)
 //
 // checkAssertionRefFamilies extracted to Studio/assertionFamilyCheck.js
 // (used by Fragment review save and Analysis save).
@@ -3788,7 +3862,7 @@ function extractParams(text) {
 // v2.72.84 (Pass 2) — renderStrategyConditions and
 // renderStrategyConditionRow moved to Studio/StrategyForm.js. Imported
 // at the top of this file along with Pass 1 helpers. The form module
-// reads strategyDraft / strategyAssertionCache / strategyLocaleCache
+// reads strategyDraft / strategyAssertionCache / strategyPerspectiveCache
 // via injected getters (state still lives here until Pass 4); mutations
 // happen on the returned references and propagate naturally.
 
@@ -3887,8 +3961,8 @@ function extractParams(text) {
 function renderConditionEditor(condition, path, opts = {}) {
   const context = opts.context ?? 'strategy';
   const assertions = Array.isArray(opts.assertions) ? opts.assertions : null;
-  // v2.72.29 (Pass 17) — locales for locale_ref dropdown integration.
-  const locales = Array.isArray(opts.locales) ? opts.locales : [];
+  // v2.72.29 (Pass 17) — perspectives for perspective_ref dropdown integration.
+  const perspectives = Array.isArray(opts.perspectives) ? opts.perspectives : [];
   const iterScope = opts.iterScope instanceof Set ? opts.iterScope : null;
   const iterNames = iterScope ? [...iterScope] : [];
   // v2.70.1 — Per-context family allowlist. Defaults to ['page'] — pre-v2.70
@@ -3972,17 +4046,17 @@ function renderConditionEditor(condition, path, opts = {}) {
     } else {
       valueFieldHtml = `<span class="cond-pred-hint cond-pred-hint-empty">— pick a assertion from the dropdown —</span>`;
     }
-  } else if (type === 'locale_ref') {
-    // v2.72.29 (Pass 17) — locale_ref. Like assertion_ref, the primary
-    // dropdown carries the locale selection (synthetic `loc_ref:<id>`).
-    // Right-side area shows the selected locale's landmark count + first
+  } else if (type === 'perspective_ref') {
+    // v2.72.29 (Pass 17) — perspective_ref. Like assertion_ref, the primary
+    // dropdown carries the perspective selection (synthetic `loc_ref:<id>`).
+    // Right-side area shows the selected perspective's landmark count + first
     // landmark role as a quick reference.
-    const refId = condition?.localeId;
-    const matched = locales.find(l => l.id === refId);
+    const refId = condition?.perspectiveId;
+    const matched = perspectives.find(l => l.id === refId);
     if (matched) {
       // v2.74.343 — Count via the flat landmarkRefs mirror (matched.landmarks
       // is now a LandmarkNode[] tree; .length is just the root count, which
-      // undercounts structured locales). Node role label, falling back to
+      // undercounts structured perspectives). Node role label, falling back to
       // legacy alias.
       const lmCount = Array.isArray(matched.landmarkRefs) ? matched.landmarkRefs.length
         : (Array.isArray(matched.landmarks) ? matched.landmarks.length : 0);
@@ -3992,9 +4066,9 @@ function renderConditionEditor(condition, path, opts = {}) {
         : 'no landmarks';
       valueFieldHtml = `<span class="cond-pred-hint" title="${escAttr(matched.description ?? '')}">${escHtml(summary)}</span>`;
     } else if (refId) {
-      valueFieldHtml = `<span class="cond-pred-hint cond-pred-hint-stale">missing locale: ${escHtml(refId)}</span>`;
+      valueFieldHtml = `<span class="cond-pred-hint cond-pred-hint-stale">missing perspective: ${escHtml(refId)}</span>`;
     } else {
-      valueFieldHtml = `<span class="cond-pred-hint cond-pred-hint-empty">— pick a locale from the dropdown —</span>`;
+      valueFieldHtml = `<span class="cond-pred-hint cond-pred-hint-empty">— pick a perspective from the dropdown —</span>`;
     }
   } else if (isFieldOp) {
     // v2.46.0 (Pass O1) — record-field condition on iteration variable.
@@ -4043,11 +4117,11 @@ function renderConditionEditor(condition, path, opts = {}) {
   const typeOpts = buildConditionTypeOptions({
     allowedFamilies,
     assertions,
-    locales,
+    perspectives,
     iterScope,
     currentType: type,
     currentPredId: condition?.assertionId ?? '',
-    currentLocaleId: condition?.localeId ?? '',
+    currentPerspectiveId: condition?.perspectiveId ?? '',
   });
 
   return `
@@ -4140,15 +4214,15 @@ function buildConditionTypeOptions(opts = {}) {
     ? opts.allowedFamilies
     : ['page'];
   const assertions = Array.isArray(opts.assertions) ? opts.assertions : [];
-  // v2.72.29 (Pass 17) — locales array and currentLocaleId for locale_ref
-  // dropdown integration. Locales are page-family vocabulary; only surfaced
+  // v2.72.29 (Pass 17) — perspectives array and currentPerspectiveId for perspective_ref
+  // dropdown integration. Perspectives are page-family vocabulary; only surfaced
   // when 'page' is in allowedFamilies.
-  const locales = Array.isArray(opts.locales) ? opts.locales : [];
+  const perspectives = Array.isArray(opts.perspectives) ? opts.perspectives : [];
   const iterScope = opts.iterScope instanceof Set ? opts.iterScope : null;
   const iterAvailable = iterScope ? iterScope.size > 0 : false;
   const currentType = opts.currentType ?? '';
   const currentPredId = opts.currentPredId ?? '';
-  const currentLocaleId = opts.currentLocaleId ?? '';
+  const currentPerspectiveId = opts.currentPerspectiveId ?? '';
 
   const groups = [];
 
@@ -4262,29 +4336,29 @@ function buildConditionTypeOptions(opts = {}) {
     }
   }
 
-  // ── v2.72.29 (Pass 17) — Locales optgroup ─────────────────────────────
-  // Locales are page-family vocabulary. Only surfaced when 'page' is
+  // ── v2.72.29 (Pass 17) — Perspectives optgroup ─────────────────────────────
+  // Perspectives are page-family vocabulary. Only surfaced when 'page' is
   // allowed at the call-site. Sorted alphabetically.
-  if (allowedFamilies.includes('page') && locales.length > 0) {
-    const sortedLocs = [...locales].sort((a, b) => {
+  if (allowedFamilies.includes('page') && perspectives.length > 0) {
+    const sortedLocs = [...perspectives].sort((a, b) => {
       const an = (a.name ?? a.id ?? '').toLowerCase();
       const bn = (b.name ?? b.id ?? '').toLowerCase();
       return an < bn ? -1 : an > bn ? 1 : 0;
     });
     const optionsHtml = sortedLocs.map(l => {
       const value = `loc_ref:${l.id}`;
-      const isSelected = currentType === 'locale_ref' && currentLocaleId === l.id;
+      const isSelected = currentType === 'perspective_ref' && currentPerspectiveId === l.id;
       const lmCount = Array.isArray(l.landmarks) ? l.landmarks.length : 0;
       return `<option value="${escAttr(value)}"${isSelected ? ' selected' : ''}>${escHtml(l.name ?? l.id)} (${lmCount} landmark${lmCount === 1 ? '' : 's'})</option>`;
     }).join('');
-    groups.push(`<optgroup label="Locales">${optionsHtml}</optgroup>`);
+    groups.push(`<optgroup label="Perspectives">${optionsHtml}</optgroup>`);
   }
-  // Stale locale_ref handling.
-  if (currentType === 'locale_ref' && currentLocaleId) {
-    const presentInList = locales.some(l => l.id === currentLocaleId);
+  // Stale perspective_ref handling.
+  if (currentType === 'perspective_ref' && currentPerspectiveId) {
+    const presentInList = perspectives.some(l => l.id === currentPerspectiveId);
     if (!presentInList) {
-      const value = `loc_ref:${currentLocaleId}`;
-      groups.push(`<optgroup label="Locales · Stale"><option value="${escAttr(value)}" selected>(missing: ${escHtml(currentLocaleId)})</option></optgroup>`);
+      const value = `loc_ref:${currentPerspectiveId}`;
+      groups.push(`<optgroup label="Perspectives · Stale"><option value="${escAttr(value)}" selected>(missing: ${escHtml(currentPerspectiveId)})</option></optgroup>`);
     }
   }
 
@@ -4302,9 +4376,9 @@ function decodeConditionTypeValue(value) {
   if (typeof value === 'string' && value.startsWith('pred_ref:')) {
     return { type: 'assertion_ref', assertionId: value.slice('pred_ref:'.length) };
   }
-  // v2.72.29 (Pass 17) — loc_ref:<id> → locale_ref condition.
+  // v2.72.29 (Pass 17) — loc_ref:<id> → perspective_ref condition.
   if (typeof value === 'string' && value.startsWith('loc_ref:')) {
-    return { type: 'locale_ref', localeId: value.slice('loc_ref:'.length) };
+    return { type: 'perspective_ref', perspectiveId: value.slice('loc_ref:'.length) };
   }
   return { type: value };
 }
@@ -4851,20 +4925,20 @@ const PROMPT_REGISTRY = [
     id   : 'deriveGroundDescription',
     label: 'Ground — Derived Description',
     badge: 'authoring',
-    desc : 'GROUND_SPEC § 5. Synthesizes a 1-3 sentence summary of "what this Ground is for" from its constituent Locales\' names + descriptions. Lazy/manual — run on demand via the ↻ button on a Ground card; cache-validated by an inputs hash so unchanged Locales don\'t re-spend tokens.',
+    desc : 'GROUND_SPEC § 5. Synthesizes a 1-3 sentence summary of "what this Ground is for" from its constituent Perspectives\' names + descriptions. Lazy/manual — run on demand via the ↻ button on a Ground card; cache-validated by an inputs hash so unchanged Perspectives don\'t re-spend tokens.',
   },
-  // ── Locale (Tier 1 affordance) ─────────────────────────────────────
+  // ── Perspective (Tier 1 affordance) ─────────────────────────────────────
   {
-    id   : 'proposeLocaleStructure',
-    label: 'Locale — Structured Composition',
+    id   : 'proposePerspectiveStructure',
+    label: 'Perspective — Structured Composition',
     badge: 'authoring',
-    desc : 'LOCALE_SPEC § 3/§ 13 (LLM-as-author). Organizes a Locale\'s already-picked landmarks into a structured perspective — a LandmarkNode tree (contains/role/multiplicity) plus groupings/sequences overlays. Run via "🧬 Structure with Claude" in locale-capture; a safety parser clamps refs to the picked set and guarantees every landmark appears exactly once. Refine mode (v2.74.347) feeds the reviewed structure + judgments back so "Re-structure" preserves accepted/edited arrangements.',
+    desc : 'PERSPECTIVE_SPEC § 3/§ 13 (LLM-as-author). Organizes a Perspective\'s already-picked landmarks into a structured perspective — a LandmarkNode tree (contains/role/multiplicity) plus groupings/sequences overlays. Run via "🧬 Structure with Claude" in perspective-capture; a safety parser clamps refs to the picked set and guarantees every landmark appears exactly once. Refine mode (v2.74.347) feeds the reviewed structure + judgments back so "Re-structure" preserves accepted/edited arrangements.',
   },
   {
     id   : 'proposePerspectives',
-    label: 'Locale — Description-First Perspectives',
+    label: 'Perspective — Description-First Perspectives',
     badge: 'authoring',
-    desc : 'LOCALE_SPEC § 13 / § 16 priority 6 (description-first authoring). Seeded by the Locale\'s intent description + the current page; proposes 2-3 perspective OPTIONS, each a named set of landmark ROLES to fill (not concrete selectors) plus urlMatches predicates and a rationale. Run via the baseline/enhanced buttons in locale-capture; the user picks an option and fills each role with the picker. v2.74.350 adds an A/B benchmark — the "enhanced" arm additively passes a page screenshot + this Ground\'s existing locales/landmarks as context (system prompt unchanged, so the comparison isolates the added context).',
+    desc : 'PERSPECTIVE_SPEC § 13 / § 16 priority 6 (description-first authoring). Seeded by the Perspective\'s intent description + the current page; proposes 2-3 perspective OPTIONS, each a named set of landmark ROLES to fill (not concrete selectors) plus urlMatches predicates and a rationale. Run via the baseline/enhanced buttons in perspective-capture; the user picks an option and fills each role with the picker. v2.74.350 adds an A/B benchmark — the "enhanced" arm additively passes a page screenshot + this Ground\'s existing perspectives/landmarks as context (system prompt unchanged, so the comparison isolates the added context).',
   },
   // ── Walk / Auto-mode runner ────────────────────────────────────────
   {
@@ -4942,8 +5016,8 @@ const PROMPT_REGISTRY = [
     desc : 'Builds a semantic routing profile for a user-defined task ground. Generated directly from task description + steps + params (no live Q&A).',
   },
 
-  // ── Locale / Landmark ──────────────────────────────────────────────
-  // v2.74.392 — 'suggestLocale' entry removed with the legacy auto-suggest feature.
+  // ── Perspective / Landmark ──────────────────────────────────────────────
+  // v2.74.392 — 'suggestPerspective' entry removed with the legacy auto-suggest feature.
   {
     id   : 'suggestSelector',
     label: 'Picker — Suggest Selector',
@@ -5273,7 +5347,7 @@ qsa('.tab-btn').forEach(btn => {
 });
 
 // ─── v2.74.357 — Resolve performance viewer ─────────────────────────────────
-// Mines the resolveRoles:perf log (written by locale-capture per ⚡ Resolve
+// Mines the resolveRoles:perf log (written by perspective-capture per ⚡ Resolve
 // run) into success-by-difficulty + failure-mode analysis. See
 // DESIGN_resolve_roles.md § 7/§ 8.
 const RESOLVE_PERF_KEY = 'resolveRoles:perf';
@@ -5297,7 +5371,7 @@ async function renderResolvePerf() {
   const got = await new Promise(r => chrome.storage.local.get(RESOLVE_PERF_KEY, r));
   const runs = Array.isArray(got?.[RESOLVE_PERF_KEY]) ? got[RESOLVE_PERF_KEY] : [];
   if (!runs.length) {
-    body.innerHTML = `<p class="empty-state">No Resolve-roles runs logged yet. Use ⚡ Resolve roles in locale capture — each run lands here.</p>`;
+    body.innerHTML = `<p class="empty-state">No Resolve-roles runs logged yet. Use ⚡ Resolve roles in perspective capture — each run lands here.</p>`;
     return;
   }
 
@@ -5533,24 +5607,24 @@ $('btn-llm-clear')?.addEventListener('click', async () => {
 //   - strategyAssertionCache / fragmentAssertionCache / analysisAssertionCache
 //
 // v2.72.34 (Pass 17d) — The dangling libraryAssertionCache /
-// libraryLocaleCache module-globals previously here have been removed:
+// libraryPerspectiveCache module-globals previously here have been removed:
 // they were Observation-form-only state and are now file-local in
 // Studio/ObservationForm.js.
 
-// ─── v2.72.45 (Pass 17g iter) — Locale authoring ────────────────────────
+// ─── v2.72.45 (Pass 17g iter) — Perspective authoring ────────────────────────
 //
-// Locale authoring lives in the debugger sidepanel as of Pass 17g iter.
-// "+ Locale" on a Ground card calls launchLocaleCapture (top of this file)
-// which opens the debugger sidepanel and sends BEGIN_LOCALE_CAPTURE.
+// Perspective authoring lives in the debugger sidepanel as of Pass 17g iter.
+// "+ Perspective" on a Ground card calls launchPerspectiveCapture (top of this file)
+// which opens the debugger sidepanel and sends BEGIN_PERSPECTIVE_CAPTURE.
 // The debugger handles name/description/URL pattern + landmarks + save.
 //
-// Studio/LocaleForm.js still hosts: deleteLocale (with usage-count UX) +
-// setupLocaleForm (no-op shim that wires refreshGroundList for delete).
+// Studio/PerspectiveForm.js still hosts: deletePerspective (with usage-count UX) +
+// setupPerspectiveForm (no-op shim that wires refreshGroundList for delete).
 //
-// Locale-related code that remains in studio.js:
-//   - Ground card's Locale library section rendering (above)
-//   - locale_ref handling in renderConditionEditor / buildConditionTypeOptions
-//   - strategyLocaleCache, libraryLocaleCache, fragmentLocaleCache
+// Perspective-related code that remains in studio.js:
+//   - Ground card's Perspective library section rendering (above)
+//   - perspective_ref handling in renderConditionEditor / buildConditionTypeOptions
+//   - strategyPerspectiveCache, libraryPerspectiveCache, fragmentPerspectiveCache
 //     (state owned by their respective forms; lifecycle stays here)
 
 // v2.72.33 (Pass 17c) — Assertion form button wiring + Generate handler
@@ -5941,7 +6015,7 @@ document.addEventListener('keydown', (e) => {
 // openObservationForm + the migration tool) and imports detectObservationParams
 // for the JSON modal validator and migration tool.
 //
-// Note: libraryAssertionCache and libraryLocaleCache (which were dangling
+// Note: libraryAssertionCache and libraryPerspectiveCache (which were dangling
 // in studio.js after Pass 17c) are now properly file-local in the form
 // module. They no longer exist as studio.js globals.
 
@@ -6316,7 +6390,7 @@ async function openMigrationModal(groundId, fragmentId) {
 // callbacks (like refreshGroundList) plumbed through. Setup runs once at
 // script load; the DOM is ready because studio.html loads studio.js after
 // the form markup.
-setupLocaleForm({ refreshGroundList });
+setupPerspectiveForm({ refreshGroundList });
 
 // v2.72.33 (Pass 17c) — AssertionForm needs the shared editor surface
 // (renderConditionEditor, decodeConditionTypeValue, emptyCondition)

@@ -14,7 +14,7 @@
  *   - fragmentWalkPanels      : Map<fragmentId, panelEl> for live walk display
  *   - fragmentReviews         : Map<fragmentId, fragment> for post-walk review
  *   - fragmentAssertionCache  : Map<fragmentId, assertions[]> for review panel
- *   - fragmentLocaleCache     : Map<fragmentId, locales[]> for review panel
+ *   - fragmentPerspectiveCache     : Map<fragmentId, perspectives[]> for review panel
  *
  * Exported entry points (post v2.74.22 — review panel + lifecycle only;
  * the new-fragment form was removed alongside the AI-walked path):
@@ -400,12 +400,12 @@ const fragmentReviews = new Map();
 const fragmentAssertionCache = new Map();
 
 /**
- * v2.72.31 (Pass 17a) — per-fragment cache of locales on the fragment's
+ * v2.72.31 (Pass 17a) — per-fragment cache of perspectives on the fragment's
  * ground. Mirrors fragmentAssertionCache. Used by the review panel's
- * pre/post condition editor to populate the locale_ref picker.
- * @type {Map<string, Array<Object>>} fragmentId → locales list
+ * pre/post condition editor to populate the perspective_ref picker.
+ * @type {Map<string, Array<Object>>} fragmentId → perspectives list
  */
-const fragmentLocaleCache = new Map();
+const fragmentPerspectiveCache = new Map();
 
 /**
  * Render the post-walk review panel. Conditions/params are editable inline;
@@ -425,12 +425,12 @@ export function showFragmentReviewPanel(fragment, actions) {
     renderReviewConditions(fragment.id, 'post');
   }).catch(() => fragmentAssertionCache.set(fragment.id, []));
 
-  // v2.72.31 (Pass 17a) — Cache locales for this fragment's ground.
-  StorageManager.listLocales(fragment.groundId).then(locs => {
-    fragmentLocaleCache.set(fragment.id, locs);
+  // v2.72.31 (Pass 17a) — Cache perspectives for this fragment's ground.
+  StorageManager.listPerspectives(fragment.groundId).then(locs => {
+    fragmentPerspectiveCache.set(fragment.id, locs);
     renderReviewConditions(fragment.id, 'pre');
     renderReviewConditions(fragment.id, 'post');
-  }).catch(() => fragmentLocaleCache.set(fragment.id, []));
+  }).catch(() => fragmentPerspectiveCache.set(fragment.id, []));
 
   const panel = document.createElement('div');
   panel.className = 'fragment-review-panel';
@@ -683,7 +683,7 @@ function hideFragmentReviewPanel(fragmentId) {
   document.getElementById(`fragment-review-${fragmentId}`)?.remove();
   fragmentReviews.delete(fragmentId);
   fragmentAssertionCache.delete(fragmentId);
-  fragmentLocaleCache.delete(fragmentId);
+  fragmentPerspectiveCache.delete(fragmentId);
 }
 
 /**
@@ -707,11 +707,11 @@ function renderReviewConditions(fragmentId, side /* 'pre' | 'post' */) {
   // v2.41.0 (Pass M1.1) — render rows using the unified condition editor.
   // v2.42.0 (Pass M2) — pass assertions list so the named-assertion option
   // appears in the type dropdown when assertions are available on this ground.
-  // v2.72.31 (Pass 17a) — pass locales list for locale_ref picker.
+  // v2.72.31 (Pass 17a) — pass perspectives list for perspective_ref picker.
   const preds = fragmentAssertionCache.get(fragmentId) ?? [];
-  const locs  = fragmentLocaleCache.get(fragmentId) ?? [];
+  const locs  = fragmentPerspectiveCache.get(fragmentId) ?? [];
   container.innerHTML = list.map((c, i) => {
-    const editorHtml = _renderConditionEditor(c, { fragmentId, side, idx: i }, { context: 'fragment', assertions: preds, locales: locs });
+    const editorHtml = _renderConditionEditor(c, { fragmentId, side, idx: i }, { context: 'fragment', assertions: preds, perspectives: locs });
     return `
       <div class="review-condition-row" data-idx="${i}">
         ${editorHtml}
@@ -737,7 +737,7 @@ function renderReviewConditions(fragmentId, side /* 'pre' | 'post' */) {
       const decoded = _decodeConditionTypeValue(sel.value);
       const fresh = emptyCondition(decoded.type);
       if (decoded.assertionId) fresh.assertionId = decoded.assertionId;
-      if (decoded.localeId) fresh.localeId = decoded.localeId;
+      if (decoded.perspectiveId) fresh.perspectiveId = decoded.perspectiveId;
       cs[idx] = fresh;
       renderReviewConditions(sel.dataset.fragmentId, sel.dataset.side);
     });

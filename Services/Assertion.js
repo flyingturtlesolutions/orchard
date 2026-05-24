@@ -430,11 +430,11 @@ export async function flattenAssertion(assertion, getAssertion, opts = {}) {
   const seen      = opts.seen      ?? new Set();
   const depth     = opts.depth     ?? 0;
   const maxDepth  = opts.maxDepth  ?? 16;
-  // v2.72.29 (Pass 17) — locale_ref expansion. If a getLocale resolver is
-  // provided, locale_ref conditions expand to selector_present conditions
+  // v2.72.29 (Pass 17) — perspective_ref expansion. If a getPerspective resolver is
+  // provided, perspective_ref conditions expand to selector_present conditions
   // (one per landmark). If not provided, they expand to a permanent-fail
   // synthetic to match the assertion_ref fail-soft behavior.
-  const getLocale = opts.getLocale ?? null;
+  const getPerspective = opts.getPerspective ?? null;
 
   if (depth > maxDepth) {
     throw new Error(`Assertion depth limit exceeded (${maxDepth}) — possible misconfiguration`);
@@ -442,63 +442,63 @@ export async function flattenAssertion(assertion, getAssertion, opts = {}) {
 
   const p = normalizeAssertion(assertion);
   const flatConditions = [];
-  // v2.72.30 (Pass 17.1, B4) — locale_ref expansion requires the parent
-  // envelope's match mode to be 'all'. A locale's "satisfied" semantic is
+  // v2.72.30 (Pass 17.1, B4) — perspective_ref expansion requires the parent
+  // envelope's match mode to be 'all'. A perspective's "satisfied" semantic is
   // "all of its landmarks match"; expanding into a parent envelope with
   // match='any' would mean any single landmark satisfies the parent (wrong)
   // and 'k_of_n' would mean each landmark counts separately toward k
   // (wrong). Until we add proper nested-assertion wrapping, fail-soft on
   // misuse rather than producing incorrect semantics silently.
-  const parentMatchAllowsLocale = (p.match === 'all');
+  const parentMatchAllowsPerspective = (p.match === 'all');
 
   for (const cond of p.conditions) {
-    // ── locale_ref expansion ──────────────────────────────────────────
-    if (cond.type === 'locale_ref') {
-      const localeId = cond.localeId;
-      if (!localeId) {
-        // Empty localeId — same fail-soft as empty assertionId.
+    // ── perspective_ref expansion ──────────────────────────────────────────
+    if (cond.type === 'perspective_ref') {
+      const perspectiveId = cond.perspectiveId;
+      if (!perspectiveId) {
+        // Empty perspectiveId — same fail-soft as empty assertionId.
         flatConditions.push({ type: 'selector_absent', selector: 'body' });
         continue;
       }
-      if (!getLocale) {
-        // Locale resolver wasn't passed; can't expand. Fail-soft.
+      if (!getPerspective) {
+        // Perspective resolver wasn't passed; can't expand. Fail-soft.
         flatConditions.push({ type: 'selector_absent', selector: 'body' });
         continue;
       }
-      if (!parentMatchAllowsLocale) {
-        // Misuse: locale_ref inside a non-'all' envelope. The expanded
+      if (!parentMatchAllowsPerspective) {
+        // Misuse: perspective_ref inside a non-'all' envelope. The expanded
         // landmark conditions would be combined wrongly with siblings.
         // Log the misuse and treat as unmet rather than producing
         // incorrect semantics.
-        Logger.warn('Assertion', `flattenAssertion: locale_ref "${localeId}" used inside a parent envelope with match="${p.match}". locale_ref currently requires match="all" to expand correctly. Treating as unmet — restructure the envelope or wrap the locale_ref alone.`);
+        Logger.warn('Assertion', `flattenAssertion: perspective_ref "${perspectiveId}" used inside a parent envelope with match="${p.match}". perspective_ref currently requires match="all" to expand correctly. Treating as unmet — restructure the envelope or wrap the perspective_ref alone.`);
         flatConditions.push({ type: 'selector_absent', selector: 'body' });
         continue;
       }
-      let locale;
+      let perspective;
       try {
-        locale = await getLocale(localeId);
+        perspective = await getPerspective(perspectiveId);
       } catch {
-        locale = null;
+        perspective = null;
       }
-      if (!locale || !Array.isArray(locale.landmarks) || locale.landmarks.length === 0) {
-        // Stale or empty locale — fail-soft.
+      if (!perspective || !Array.isArray(perspective.landmarks) || perspective.landmarks.length === 0) {
+        // Stale or empty perspective — fail-soft.
         flatConditions.push({ type: 'selector_absent', selector: 'body' });
         continue;
       }
       // Expand each landmark into a selector_present condition. The
       // implicit AND piggybacks on the parent envelope's match='all'
       // (guarded above). Each landmark must individually match for the
-      // locale to be considered satisfied.
+      // perspective to be considered satisfied.
       // v2.74.198 — Carry the landmark's iframe routing through the
-      // expansion. Locale-capture's picker can land in iframes, and
+      // expansion. Perspective-capture's picker can land in iframes, and
       // the saved landmark carries `frameUrl`. Without copying it to
       // the synthetic selector_present condition, the downstream
       // TemplateWalker.checkConditions probe routes to the top frame
       // (per its per-condition frame resolver at v2.74.177) and the
       // iframe-scoped selector misses. Symmetric to the fragment-
-      // action / observation-extract iframe fixes; locale picks were
+      // action / observation-extract iframe fixes; perspective picks were
       // missed because the picker write path silently dropped frameUrl.
-      for (const lm of locale.landmarks) {
+      for (const lm of perspective.landmarks) {
         if (typeof lm?.selector === 'string' && lm.selector.trim()) {
           const expanded = { type: 'selector_present', selector: lm.selector };
           if (typeof lm.frameUrl === 'string' && lm.frameUrl.trim()) {
@@ -547,7 +547,7 @@ export async function flattenAssertion(assertion, getAssertion, opts = {}) {
     const innerSeen = new Set(seen);
     innerSeen.add(refId);
     const inner = await flattenAssertion(referenced.body, getAssertion, {
-      seen: innerSeen, depth: depth + 1, maxDepth, getLocale,
+      seen: innerSeen, depth: depth + 1, maxDepth, getPerspective,
     });
 
     // Match-mode constraint check.

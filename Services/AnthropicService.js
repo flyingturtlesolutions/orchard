@@ -482,7 +482,7 @@ SELECTOR RULES:
 // v2.74.287 — Playwright / Cypress / jQuery pseudo-class detector.
 // Used to reject LLM-proposed selectors that would throw at runtime in
 // document.querySelectorAll. The substrate ingests selectors authored
-// by Claude (generateLandmarkProfile, suggestLocale) and applies them
+// by Claude (generateLandmarkProfile, suggestPerspective) and applies them
 // verbatim via the standard DOM Selectors API — anything Playwright-
 // specific (`:text-is(...)`, `:has-text(...)`, `text=...`, `xpath=...`,
 // `:nth-match(...)`, etc.) parses as invalid CSS and the INSPECT_ELEMENT
@@ -1484,43 +1484,43 @@ Rules:
     }
   }
 
-  // v2.74.392 — suggestLocale REMOVED with the legacy auto-suggested-landmarks
-  // feature. Locales are authored via the description-first propose→resolve→
-  // auto-structure flow (proposePerspectives / resolveRoles / proposeLocaleStructure).
+  // v2.74.392 — suggestPerspective REMOVED with the legacy auto-suggested-landmarks
+  // feature. Perspectives are authored via the description-first propose→resolve→
+  // auto-structure flow (proposePerspectives / resolveRoles / proposePerspectiveStructure).
 
   /**
    * v2.74.329 — GROUND_SPEC § 5 derived intent. Synthesize a short
    * natural-language summary of "what this Ground is for" from its
-   * constituent Locales' names + descriptions. Returns plain text (no JSON)
+   * constituent Perspectives' names + descriptions. Returns plain text (no JSON)
    * or null on failure. Prompt snapshot registered in getPromptTexts under
    * 'deriveGroundDescription'.
-   * @param {{ name?: string, urlPrimary?: string, locales: Array<{name?:string, description?:string}> }} params
+   * @param {{ name?: string, urlPrimary?: string, perspectives: Array<{name?:string, description?:string}> }} params
    * @returns {Promise<string|null>}
    */
-  static async deriveGroundDescription({ name, urlPrimary, locales }) {
-    const list = Array.isArray(locales) ? locales.filter(l => l && (l.name || l.description)) : [];
+  static async deriveGroundDescription({ name, urlPrimary, perspectives }) {
+    const list = Array.isArray(perspectives) ? perspectives.filter(l => l && (l.name || l.description)) : [];
     if (list.length === 0) return null;
 
-    const systemPrompt = `You are writing a short, factual summary of a "Ground" — a user's automation surface for a single website. The Ground is COMPOSED of Locales (each Locale is a "kind of page" on the site, with a name and description). Synthesize what the WHOLE site-level automation surface is for, from its constituent Locales.
+    const systemPrompt = `You are writing a short, factual summary of a "Ground" — a user's automation surface for a single website. The Ground is COMPOSED of Perspectives (each Perspective is a "kind of page" on the site, with a name and description). Synthesize what the WHOLE site-level automation surface is for, from its constituent Perspectives.
 
 Return ONLY the summary text — no preamble, no JSON, no markdown headers, no surrounding quotes.
 
 Rules:
 - 1-3 sentences. Concise. Plain prose.
-- Describe what the site is and what automation across these Locales accomplishes — the emergent whole, not a list of the Locales.
-- Active voice, user's perspective. Do not invent capabilities not implied by the Locales.
+- Describe what the site is and what automation across these Perspectives accomplishes — the emergent whole, not a list of the Perspectives.
+- Active voice, user's perspective. Do not invent capabilities not implied by the Perspectives.
 - Do not restate the URL or repeat the Ground name verbatim as a label.`;
 
-    const localeBlock = list.map((l, i) =>
+    const perspectiveBlock = list.map((l, i) =>
       `${i + 1}. ${l.name ?? '(unnamed)'}: ${(l.description ?? '').trim() || '(no description)'}`
     ).join('\n');
 
     const userContent = [{
       type: 'text',
-      text: `Ground name: ${name ?? '(unnamed)'}\nPrimary URL: ${urlPrimary ?? '(unknown)'}\n\nConstituent Locales:\n${localeBlock}`,
+      text: `Ground name: ${name ?? '(unnamed)'}\nPrimary URL: ${urlPrimary ?? '(unknown)'}\n\nConstituent Perspectives:\n${perspectiveBlock}`,
     }];
 
-    Logger.info('AnthropicService', `deriveGroundDescription — "${name ?? '?'}" from ${list.length} locale(s)`);
+    Logger.info('AnthropicService', `deriveGroundDescription — "${name ?? '?'}" from ${list.length} perspective(s)`);
 
     try {
       const raw = await AnthropicService.#call(systemPrompt, userContent, 400, [], { role: 'describe', operation: 'deriveGroundDescription' });
@@ -1537,14 +1537,14 @@ Rules:
   }
 
   /**
-   * v2.74.336 — LOCALE_SPEC § 3 Layer 2 / § 13 LLM-as-author. Organize a
+   * v2.74.336 — PERSPECTIVE_SPEC § 3 Layer 2 / § 13 LLM-as-author. Organize a
    * set of already-captured landmarks into a structured perspective:
    * a LandmarkNode[] tree (contains/role/multiplicity) + optional
    * groupings/sequences overlays. The LLM proposes structure; the user
    * reviews. Returns null on failure. Prompt snapshot registered in
-   * getPromptTexts under 'proposeLocaleStructure'.
+   * getPromptTexts under 'proposePerspectiveStructure'.
    *
-   * v2.74.347 — LOCALE_SPEC § 5 review-as-input. When the caller passes
+   * v2.74.347 — PERSPECTIVE_SPEC § 5 review-as-input. When the caller passes
    * `priorStructure` (the structure the user already reviewed, with per-node
    * `authoringMetadata.userJudgment`), this becomes a REFINE call: the prior
    * accepted/edited arrangements are preserved and the rejected ones are
@@ -1554,7 +1554,7 @@ Rules:
    * @param {{ name?: string, description?: string, landmarks: Array<{uid:string, alias?:string, description?:string}>, priorStructure?: { nodes?: Array, groupings?: Array, sequences?: Array } }} params
    * @returns {Promise<{ nodes: Array, groupings: Array, sequences: Array }|null>}
    */
-  static async proposeLocaleStructure({ name, description, landmarks, priorStructure }) {
+  static async proposePerspectiveStructure({ name, description, landmarks, priorStructure }) {
     const list = Array.isArray(landmarks)
       ? landmarks.filter(l => l && typeof l.uid === 'string' && l.uid)
       : [];
@@ -1568,7 +1568,7 @@ Rules:
     const priorBlock = AnthropicService.#serializePriorStructure(priorStructure, allowed, aliasOf);
     const refining = priorBlock !== '';
 
-    const systemPrompt = `You organize a set of already-captured page landmarks into a structured "perspective" (a Locale) for a web-automation library. You are given the perspective's name + intent and a flat list of landmarks (each: a stable "ref" id, an alias, a description). Infer the STRUCTURE — which landmarks contain others, their semantic roles, and how many occur at runtime.
+    const systemPrompt = `You organize a set of already-captured page landmarks into a structured "perspective" (a Perspective) for a web-automation library. You are given the perspective's name + intent and a flat list of landmarks (each: a stable "ref" id, an alias, a description). Infer the STRUCTURE — which landmarks contain others, their semantic roles, and how many occur at runtime.
 
 Return ONLY a JSON object:
 {
@@ -1623,20 +1623,20 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
       text: `Perspective name: ${name ?? '(unnamed)'}\nIntent: ${(description ?? '').trim() || '(none)'}\n\nLandmarks:\n${lmBlock}${refining ? `\n\nPRIOR REVIEWED STRUCTURE (refine this):\n${priorBlock}` : ''}`,
     }];
 
-    Logger.info('AnthropicService', `proposeLocaleStructure — "${name ?? '?'}" over ${list.length} landmark(s)${refining ? ' [refine]' : ''}`);
+    Logger.info('AnthropicService', `proposePerspectiveStructure — "${name ?? '?'}" over ${list.length} landmark(s)${refining ? ' [refine]' : ''}`);
 
     let parsed;
     try {
-      const raw = await AnthropicService.#call(systemPrompt, userContent, 1500, [], { role: 'propose', operation: priorStructure ? 'proposeLocaleStructure:refine' : 'proposeLocaleStructure' });
+      const raw = await AnthropicService.#call(systemPrompt, userContent, 1500, [], { role: 'propose', operation: priorStructure ? 'proposePerspectiveStructure:refine' : 'proposePerspectiveStructure' });
       if (!raw?.success) {
-        Logger.warn('AnthropicService', `proposeLocaleStructure failed: ${raw?.error}`);
+        Logger.warn('AnthropicService', `proposePerspectiveStructure failed: ${raw?.error}`);
         return null;
       }
       const json = AnthropicService.#firstJsonObject(raw.text);
-      if (!json) { Logger.warn('AnthropicService', 'proposeLocaleStructure: no JSON'); return null; }
+      if (!json) { Logger.warn('AnthropicService', 'proposePerspectiveStructure: no JSON'); return null; }
       parsed = JSON.parse(json);
     } catch (e) {
-      Logger.warn('AnthropicService', `proposeLocaleStructure error: ${e.message}`);
+      Logger.warn('AnthropicService', `proposePerspectiveStructure error: ${e.message}`);
       return null;
     }
 
@@ -1717,7 +1717,7 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
 
   /**
    * v2.74.347 — Serialize a prior reviewed structure into a compact outline
-   * for the refine path of proposeLocaleStructure. Refs are clamped to the
+   * for the refine path of proposePerspectiveStructure. Refs are clamped to the
    * current landmark set (`allowed`); a node whose ref was removed is dropped
    * but its children are preserved (promoted in place). Per-node/overlay
    * `authoringMetadata.userJudgment` is surfaced as a [marker] so the model
@@ -1778,12 +1778,12 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
   }
 
   /**
-   * v2.74.348 — LOCALE_SPEC § 13 / § 16 priority 6: the description-first,
-   * LLM-mediated PROPOSAL flow. Given the user's INTENT (the Locale
+   * v2.74.348 — PERSPECTIVE_SPEC § 13 / § 16 priority 6: the description-first,
+   * LLM-mediated PROPOSAL flow. Given the user's INTENT (the Perspective
    * description) and the current page, propose 2–3 PERSPECTIVE OPTIONS — each
    * a named set of landmark ROLES to fill (NOT concrete selectors; the user
    * picks the real elements) plus suggested URL-applicability predicates and a
-   * one-line rationale. This is the inverse of suggestLocale (page-seeded,
+   * one-line rationale. This is the inverse of suggestPerspective (page-seeded,
    * concrete landmarks) — it is intent-seeded and role-scaffolded, per the
    * canonical "LLM as proposal layer, user as committer" pattern.
    *
@@ -1792,19 +1792,19 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
    * an A/B isolates the value of the added context, holding the DOM constant:
    *   - screenshot:        data:image/...;base64 of the visible page (multimodal
    *                        grounding for layout / prominence / repetition).
-   *   - siblingLocales:    [{ name, description, roles[] }] already on this
+   *   - siblingPerspectives:    [{ name, description, roles[] }] already on this
    *                        Ground — avoid duplicates, reuse role vocabulary.
    *   - registryLandmarks: [{ alias, a11yRole, description }] already captured
    *                        on this Ground — roles may map to existing landmarks.
    *
-   * @param {{ intent: string, url?: string, title?: string, domSnapshot?: string, screenshot?: string|null, siblingLocales?: Array|null, registryLandmarks?: Array|null }} params
+   * @param {{ intent: string, url?: string, title?: string, domSnapshot?: string, screenshot?: string|null, siblingPerspectives?: Array|null, registryLandmarks?: Array|null }} params
    * @returns {Promise<{ options: Array<{name:string, rationale:string, onPage:boolean, reachedVia:string|null, roles:Array<{role:string,description:string,multiplicity:string}>, predicates:Array<{kind:'urlMatches',pattern:string,mode:string}>}> }|null>}
    */
-  static async proposePerspectives({ intent, url, title, domSnapshot, screenshot = null, siblingLocales = null, registryLandmarks = null, pageStructure = null, pageModel = null }) {
+  static async proposePerspectives({ intent, url, title, domSnapshot, screenshot = null, siblingPerspectives = null, registryLandmarks = null, pageStructure = null, pageModel = null }) {
     const seed = (typeof intent === 'string' ? intent : '').trim();
     if (!seed) return null;
 
-    const systemPrompt = `You propose PERSPECTIVE OPTIONS for a web-automation "Locale" (a reusable "kind of page" view). You are given the user's INTENT (what they want to do) and the current page. Propose 2-3 distinct perspectives that serve the intent on this page.
+    const systemPrompt = `You propose PERSPECTIVE OPTIONS for a web-automation "Perspective" (a reusable "kind of page" view). You are given the user's INTENT (what they want to do) and the current page. Propose 2-3 distinct perspectives that serve the intent on this page.
 
 A perspective is a NAMED set of landmark ROLES — abstract slots the user will fill by picking real page elements. You do NOT pick elements or write selectors; you name the roles and describe what fills each.
 
@@ -1851,8 +1851,8 @@ Rules:
 
     // Enhanced — perspectives already on this Ground: avoid duplicating them,
     // prefer complementary ones, and reuse their role vocabulary.
-    if (Array.isArray(siblingLocales) && siblingLocales.length) {
-      const block = siblingLocales.slice(0, 12).map(l => {
+    if (Array.isArray(siblingPerspectives) && siblingPerspectives.length) {
+      const block = siblingPerspectives.slice(0, 12).map(l => {
         const roles = (Array.isArray(l?.roles) && l.roles.length) ? ` — roles: ${l.roles.join(', ')}` : '';
         const desc  = l?.description ? `: ${String(l.description).slice(0, 120)}` : '';
         return `- ${l?.name ?? '(unnamed)'}${desc}${roles}`;
@@ -1888,7 +1888,7 @@ Rules:
       }
     }
 
-    // v2.74.403 — Whole-page feature catalog (the PageModel / Locale capability
+    // v2.74.403 — Whole-page feature catalog (the PageModel / Perspective capability
     // model). Grounds perspectives in the page's REAL affordances — including
     // off-screen features the static DOM/screenshot miss — so roles MAP to
     // catalogued features instead of being guessed. (PAGEMODEL_SPEC § 6, § 7.)
@@ -1912,6 +1912,16 @@ Rules:
       if (lines.length) {
         userText += `\n\nPAGE FEATURE CATALOG (whole-page inventory, incl. off-screen — propose roles that MAP to these; "many" content roles → a collection entry; a disclosure entry is a trigger):\n${lines.join('\n')}`;
       }
+      // v2.74.410 — PAGE GOALS (L2): the page's outcomes + the features that
+      // achieve each. The intent usually maps to ONE goal; build the perspective's
+      // roles around THAT goal's features. (Intent → goal → features → roles.)
+      if (pageModel.goals && Object.keys(pageModel.goals).length) {
+        const gl = Object.values(pageModel.goals).slice(0, 10).map((g) => {
+          const fl = (g.achievableVia || []).map((fid) => feats[fid]?.label).filter(Boolean).slice(0, 8);
+          return `- ${g.label}${g.description ? `: ${String(g.description).slice(0, 100)}` : ''}${fl.length ? ` → [${fl.join(', ')}]` : ''}`;
+        }).join('\n');
+        if (gl) userText += `\n\nPAGE GOALS (outcomes this page supports + the features that achieve each — identify which goal the INTENT targets and build the perspective's roles around THAT goal's features):\n${gl}`;
+      }
     }
 
     // Enhanced — screenshot as the first content block (layout / prominence /
@@ -1927,7 +1937,7 @@ Rules:
     }
     userContent.push({ type: 'text', text: userText + imageNote });
     const enhanced = userContent.length > 1
-      || (Array.isArray(siblingLocales) && siblingLocales.length)
+      || (Array.isArray(siblingPerspectives) && siblingPerspectives.length)
       || (Array.isArray(registryLandmarks) && registryLandmarks.length);
 
     Logger.info('AnthropicService', `proposePerspectives [${enhanced ? 'enhanced' : 'baseline'}] — intent="${seed.slice(0, 60)}"`);
@@ -2120,6 +2130,59 @@ Be specific to what is actually present; do not invent capabilities that aren't 
   }
 
   /**
+   * v2.74.408 — L2 goal synthesis (PAGEMODEL_SPEC § 5, § 8). Given a built
+   * PageModel (L0 features + L1 depth), identify the distinct GOALS a user can
+   * accomplish, each linked to the catalogued features that realize it. The model
+   * is presented as an INDEXED catalog (balanced per-kind so footer-link spam
+   * can't crowd out inputs/actions); the LLM references feature INDEXES, which the
+   * caller maps back to feature ids — robust vs. having it copy cryptic ids.
+   * @returns {Promise<{ goals: Array<{label:string, description:string, achievableVia:string[]}> }|null>}
+   */
+  static async synthesizeGoals({ model, url, title, affordances = null }) {
+    if (!model || !model.features) return null;
+    const feats = model.features;
+    const byKind = model.index?.byKind || {};
+    // Balanced selection: all inputs/disclosures/collections; capped actions/nav.
+    const take = (kind, cap) => (byKind[kind] || []).map(id => feats[id]).filter(f => f && (f.label || '').trim()).slice(0, cap);
+    const picked = [
+      ...take('input', 20), ...take('disclosure', 20), ...take('collection', 12),
+      ...take('action', 24), ...take('navigation', 28),
+    ].slice(0, 90);
+    if (picked.length < 2) return null;
+    const list = picked.map((f, i) => `[${i}] "${(f.label || '').slice(0, 50)}" (${f.kind}${f.members ? ` ×${f.members.count}` : ''}${f.hidden ? ', revealed' : ''})`).join('\n');
+
+    const systemPrompt = `You identify the distinct GOALS a user can accomplish on a web page, given its FEATURE CATALOG (the interactive features + content collections actually found on the page, including ones revealed by interaction).
+
+Return ONLY a JSON object:
+{ "goals": [ { "label": "search for media", "description": "one sentence", "featureIndexes": [0, 5] } ] }
+
+Rules:
+- 3-8 goals. Each is a COHERENT user OUTCOME (e.g. "search for images", "sign in", "browse curated collections", "filter by media type", "download or edit an image"), NOT a single control.
+- "featureIndexes" = indexes (from the list below) of the features that realize the goal — the input(s)/control(s)/collection a user would actually use. Use ONLY indexes present in the list.
+- GROUND goals in the actual catalog; do not invent capabilities not represented. Prefer goals an automation author would target.`;
+    let text = `URL: ${url ?? '(unknown)'}\nTitle: ${title ?? '(unknown)'}`;
+    if (affordances) text += `\n\nPage summary:\n${String(affordances).slice(0, 1000)}`;
+    text += `\n\nFEATURE CATALOG (index: "label" (kind)):\n${list}`;
+
+    Logger.info('AnthropicService', `synthesizeGoals — ${picked.length} features, ${url}`);
+    try {
+      const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text }], 800, [], { role: 'describe', operation: 'synthesizeGoals' });
+      if (!raw?.success) { Logger.warn('AnthropicService', `synthesizeGoals failed: ${raw?.error}`); return null; }
+      const json = AnthropicService.#firstJsonObject(raw.text);
+      if (!json) return null;
+      const parsed = JSON.parse(json);
+      const out = (Array.isArray(parsed.goals) ? parsed.goals : []).map(g => {
+        const label = typeof g?.label === 'string' ? g.label.trim().slice(0, 60) : '';
+        if (!label) return null;
+        const ids = (Array.isArray(g.featureIndexes) ? g.featureIndexes : [])
+          .map(i => picked[Number(i)]?.id).filter(Boolean);
+        return { label, description: typeof g.description === 'string' ? g.description.trim().slice(0, 200) : '', achievableVia: [...new Set(ids)] };
+      }).filter(Boolean);
+      return out.length ? { goals: out } : null;
+    } catch (e) { Logger.warn('AnthropicService', `synthesizeGoals error: ${e.message}`); return null; }
+  }
+
+  /**
    * v2.74.393 — Ground a user's raw intent in a specific page. Given the user's
    * intent + the page's affordance description, return a refined "grounded
    * intent" that restates the SAME goal in the page's concrete terms — WITHOUT
@@ -2127,23 +2190,32 @@ Be specific to what is actually present; do not invent capabilities that aren't 
    * achievability verdict (the page may not serve the intent at all).
    * @returns {Promise<{groundedIntent:string, achievable:'yes'|'partial'|'no', note:string}|null>}
    */
-  static async groundIntent({ userIntent, affordances, url, title }) {
+  static async groundIntent({ userIntent, affordances, goals = null, url, title }) {
     const intent = (typeof userIntent === 'string' ? userIntent : '').trim();
     if (!intent) return null;
-    const systemPrompt = `You GROUND a user's automation intent in a specific page. You are given the user's RAW intent and a description of what goals the page actually supports (its affordances). Produce a single refined "grounded intent" that restates the user's goal in this page's concrete terms — more complete and specific — WITHOUT changing what the user wants.
+    const goalList = (Array.isArray(goals) ? goals : []).filter(g => g && g.label);
+    const hasGoals = goalList.length > 0;
+    const systemPrompt = `You GROUND a user's automation intent in a specific page. You are given the user's RAW intent and what the page actually supports. Produce a single refined "grounded intent" that restates the user's goal in this page's concrete terms — more complete and specific — WITHOUT changing what the user wants.
 
 CRITICAL — preserve the user's goal. Do NOT substitute what the page offers for what the user asked for. If the page cannot serve the user's intent, SAY SO (achievable:"no") and restate their goal faithfully; never warp the intent to fit the page.
-
+${hasGoals ? `
+You are given the page's structured GOALS (the distinct outcomes it supports). MATCH the user's intent to the closest goal(s): set "matchedGoal" to the best-fitting goal's label (or "" if none fits), and base "achievable" on goal coverage (full match → yes; the intent spans a goal plus more the page lacks → partial; no goal fits → no).` : ''}
 Return ONLY a JSON object:
 {
   "groundedIntent": "<refined intent, 1-2 sentences, in this page's terms, SAME goal>",
-  "achievable": "yes" | "partial" | "no",
+  "achievable": "yes" | "partial" | "no",${hasGoals ? `\n  "matchedGoal": "<the label of the best-fitting page goal, or \\"\\" if none>",` : ''}
   "note": "<short: what this page covers / what it can't do for this intent>"
 }
 - "yes" = the page fully supports the intent. "partial" = some of it (note what's missing). "no" = this page can't serve the intent.
-- groundedIntent stays in the user's voice + goal; concretize using the affordances, don't replace the goal.`;
-    const userText = `User intent: ${intent}\nURL: ${url ?? '(unknown)'}\nTitle: ${title ?? '(unknown)'}\n\nPage affordances (what this page supports):\n${(affordances ?? '(none provided)').slice(0, 3000)}`;
-    Logger.info('AnthropicService', `groundIntent — "${intent.slice(0, 60)}"`);
+- groundedIntent stays in the user's voice + goal; concretize using the page's terms, don't replace the goal.`;
+    let userText = `User intent: ${intent}\nURL: ${url ?? '(unknown)'}\nTitle: ${title ?? '(unknown)'}`;
+    if (hasGoals) {
+      const block = goalList.slice(0, 12).map(g => `- ${g.label}${g.description ? `: ${String(g.description).slice(0, 120)}` : ''}`).join('\n');
+      userText += `\n\nPAGE GOALS (the outcomes this page supports — match the intent to one):\n${block}`;
+    }
+    if (affordances) userText += `\n\nPage summary:\n${String(affordances).slice(0, hasGoals ? 1200 : 3000)}`;
+    if (!hasGoals && !affordances) userText += `\n\nPage affordances: (none provided)`;
+    Logger.info('AnthropicService', `groundIntent — "${intent.slice(0, 60)}"${hasGoals ? ` (${goalList.length} goals)` : ''}`);
     try {
       const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text: userText }], 500, [], { role: 'describe', operation: 'groundIntent' });
       if (!raw?.success) { Logger.warn('AnthropicService', `groundIntent failed: ${raw?.error}`); return null; }
@@ -2153,7 +2225,12 @@ Return ONLY a JSON object:
       const gi = typeof p.groundedIntent === 'string' ? p.groundedIntent.trim().slice(0, 280) : '';
       if (!gi) return null;
       const ACH = new Set(['yes', 'partial', 'no']);
-      return { groundedIntent: gi, achievable: ACH.has(p.achievable) ? p.achievable : 'partial', note: typeof p.note === 'string' ? p.note.trim().slice(0, 240) : '' };
+      return {
+        groundedIntent: gi,
+        achievable: ACH.has(p.achievable) ? p.achievable : 'partial',
+        note: typeof p.note === 'string' ? p.note.trim().slice(0, 240) : '',
+        matchedGoal: typeof p.matchedGoal === 'string' && p.matchedGoal.trim() ? p.matchedGoal.trim().slice(0, 60) : null,
+      };
     } catch (e) { Logger.warn('AnthropicService', `groundIntent error: ${e.message}`); return null; }
   }
 
@@ -2189,7 +2266,7 @@ RULES:
 - If several candidates match, pick the most prominent / primary instance and box THAT one.
 - "confidence" in [0,1]: how sure you are the box contains exactly the element that plays the role.
 - Output ONLY the JSON object, no prose.`;
-    let text = `Role to locate: ${role}\nRole description: ${(description ?? '').toString().trim() || '(none)'}\nLocale intent: ${(intent ?? '').toString().trim() || '(none)'}\nURL: ${url ?? '(unknown)'}\nTitle: ${title ?? '(unknown)'}`;
+    let text = `Role to locate: ${role}\nRole description: ${(description ?? '').toString().trim() || '(none)'}\nPerspective intent: ${(intent ?? '').toString().trim() || '(none)'}\nURL: ${url ?? '(unknown)'}\nTitle: ${title ?? '(unknown)'}`;
     if (affordances) text += `\n\nPage affordances (what this kind of page supports):\n${String(affordances).slice(0, 1500)}`;
     text += `\n\nThe current viewport screenshot is attached. Return the normalized box of the element that plays the role "${role}", or found:false if it is not visible here.`;
     const userContent = [
@@ -2237,7 +2314,7 @@ RULES:
    * @param {{ roles: Array<{role:string,description?:string,multiplicity?:string}>, url?:string, title?:string, domSnapshot?:string, screenshot?:string|null, registryLandmarks?:Array|null, priorAttempt?:{confirmed?:Array,attempts?:Array}|null }} params
    * @returns {Promise<{ resolutions: Array<{role:string, selector:string|null, confidence:number, justification:string}> }|null>}
    */
-  static async resolveRoles({ roles, url, title, domSnapshot, screenshot = null, registryLandmarks = null, priorAttempt = null, knownSelectors = null }) {
+  static async resolveRoles({ roles, url, title, domSnapshot, screenshot = null, registryLandmarks = null, priorAttempt = null, knownSelectors = null, conventions = null }) {
     const roleList = (Array.isArray(roles) ? roles : [])
       .filter(r => r && typeof r.role === 'string' && r.role.trim());
     if (roleList.length === 0) return null;
@@ -2288,6 +2365,20 @@ Rules:
         return `- "${String(k?.label ?? '').slice(0, 50)}" [${k?.role ?? '?'}]${via} => ${String(k?.selector ?? '').slice(0, 140)}`;
       }).join('\n');
       userText += `\n\nKNOWN VERIFIED SELECTORS (from page exploration — REUSE verbatim when a role matches one):\n${block}`;
+    }
+    // v2.74.415 — Site selector conventions, LEARNED from this Ground's verified
+    // selectors across its Perspectives (OUTCOMES_SPEC § 6, the compounding asset). A
+    // soft prior: when two candidate selectors are equally plausible, prefer the
+    // tier this site actually uses. NOT a hard rule — a content role still takes a
+    // class selector even on an id-heavy site.
+    if (conventions?.selectorTierHistogram && conventions.total >= 5) {
+      const TIER_DESC = { id: 'id', data: 'data-* / data-testid', aria: 'aria-* / role', class: 'class-based', semantic: 'semantic tag', positional: 'positional (nth-child)' };
+      const dist = Object.entries(conventions.selectorTierHistogram)
+        .filter(([, frac]) => frac > 0)
+        .sort((a, b) => b[1] - a[1])
+        .map(([tier, frac]) => `${Math.round(frac * 100)}% ${TIER_DESC[tier] ?? tier}`)
+        .join(', ');
+      userText += `\n\nSITE SELECTOR CONVENTIONS (learned from ${conventions.total} verified selector(s) on this Ground): ${dist}. When two selectors are equally good for an INTERACTIVE role, prefer the dominant durable tier above. (Content/structural roles still use their own class signature regardless.)`;
     }
     // v2.74.356 — Repair pass: feed back verification verdicts so Claude
     // corrects what failed. Confirmed successes guide the site's conventions.
@@ -4502,7 +4593,7 @@ Return ONLY the raw JSON array. No fences, no explanation.`,
     const INPUT_SEL = '{handoff.inputSelector}';
     return {
 
-      proposeLocaleStructure: `You organize a set of already-captured page landmarks into a structured "perspective" (a Locale) for a web-automation library. You are given the perspective's name + intent and a flat list of landmarks (each: a stable "ref" id, an alias, a description). Infer the STRUCTURE — which landmarks contain others, their semantic roles, and how many occur at runtime.
+      proposePerspectiveStructure: `You organize a set of already-captured page landmarks into a structured "perspective" (a Perspective) for a web-automation library. You are given the perspective's name + intent and a flat list of landmarks (each: a stable "ref" id, an alias, a description). Infer the STRUCTURE — which landmarks contain others, their semantic roles, and how many occur at runtime.
 
 Return ONLY a JSON object with "nodes" (a tree of { ref, role, multiplicity, contains? }), and optional "groupings" / "sequences" overlays.
 
@@ -4514,7 +4605,7 @@ Rules:
 
 REFINE MODE (v2.74.347): when the call includes a PRIOR REVIEWED STRUCTURE, this becomes a refinement — each prior node/overlay carries a [judgment] ([accepted]/[edited]/[rejected-but-kept]). Preserve accepted/edited arrangements verbatim; re-think only rejected ones + landmarks new since the last proposal.`,
 
-      proposePerspectives: `You propose PERSPECTIVE OPTIONS for a web-automation "Locale", given the user's INTENT (what they want to do) and the current page. The description-first authoring flow (LOCALE_SPEC § 13): the user states intent, you propose 2-3 perspectives, the user picks one and fills its roles.
+      proposePerspectives: `You propose PERSPECTIVE OPTIONS for a web-automation "Perspective", given the user's INTENT (what they want to do) and the current page. The description-first authoring flow (PERSPECTIVE_SPEC § 13): the user states intent, you propose 2-3 perspectives, the user picks one and fills its roles.
 
 A perspective is a NAMED set of landmark ROLES — abstract slots the user fills by picking real elements. You name + describe roles; you do NOT pick elements or write selectors.
 
@@ -4522,14 +4613,14 @@ Return ONLY JSON: { "options": [ { "name": "<kebab>", "rationale": "<one line>",
 
 Rules: 2-3 coherent options serving the intent; roles describe FUNCTION not appearance; predicates are urlMatches-only (landmarks don't exist yet); favor the stated intent over unrelated perspectives.`,
 
-      deriveGroundDescription: `You are writing a short, factual summary of a "Ground" — a user's automation surface for a single website. The Ground is COMPOSED of Locales (each Locale is a "kind of page" on the site, with a name and description). Synthesize what the WHOLE site-level automation surface is for, from its constituent Locales.
+      deriveGroundDescription: `You are writing a short, factual summary of a "Ground" — a user's automation surface for a single website. The Ground is COMPOSED of Perspectives (each Perspective is a "kind of page" on the site, with a name and description). Synthesize what the WHOLE site-level automation surface is for, from its constituent Perspectives.
 
 Return ONLY the summary text — no preamble, no JSON, no markdown headers, no surrounding quotes.
 
 Rules:
 - 1-3 sentences. Concise. Plain prose.
-- Describe what the site is and what automation across these Locales accomplishes — the emergent whole, not a list of the Locales.
-- Active voice, user's perspective. Do not invent capabilities not implied by the Locales.
+- Describe what the site is and what automation across these Perspectives accomplishes — the emergent whole, not a list of the Perspectives.
+- Active voice, user's perspective. Do not invent capabilities not implied by the Perspectives.
 - Do not restate the URL or repeat the Ground name verbatim as a label.`,
 
       getNextStep_phase1: `You are a browser automation engineer navigating to an AI assistant's chat input.
@@ -4876,8 +4967,8 @@ Return a JSON object with exactly these fields:
 
 Return ONLY the JSON object. No explanation, no markdown.`,
 
-      // ── Locale / Landmark ─────────────────────────────────────────
-      // v2.74.392 — suggestLocale prompt removed with the legacy auto-suggest feature.
+      // ── Perspective / Landmark ─────────────────────────────────────────
+      // v2.74.392 — suggestPerspective prompt removed with the legacy auto-suggest feature.
 
       suggestSelector: `You are a CSS selector expert. Given an HTML element and the author's intent (and possibly a cropped screenshot of the element region), output the most STABLE CSS selector that uniquely identifies the right element.
 

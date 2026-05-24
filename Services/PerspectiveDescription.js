@@ -1,12 +1,12 @@
 /**
- * @file Services/LocaleDescription.js
- * @description Pure description-composer for locale landmark lists.
+ * @file Services/PerspectiveDescription.js
+ * @description Pure description-composer for perspective landmark lists.
  * Mirrors the FragmentDescription / ObservationDescription pattern so
- * locales get auto-generated, human-readable summaries at save time.
+ * perspectives get auto-generated, human-readable summaries at save time.
  *
  * Used by:
- *   - Sidepanel/modes/locale-capture.js — at save time, to write a
- *     descriptive summary into the locale record's description field
+ *   - Sidepanel/modes/perspective-capture.js — at save time, to write a
+ *     descriptive summary into the perspective record's description field
  *     when the author left it blank.
  *   - studio.js — render-time fallback when a stored description is
  *     empty (regenerate from landmarks rather than show "—").
@@ -18,18 +18,18 @@
  * Determinism: pure functions, no DOM, no async, no I/O. Same input
  * always produces same output.
  *
- * @module Services/LocaleDescription
+ * @module Services/PerspectiveDescription
  * @version 2.74.231
  */
 
 /**
- * Compose a compact description from a locale's landmarks.
+ * Compose a compact description from a perspective's landmarks.
  *
  * Format examples:
  *   1 landmark:   "Landmark: search input."
  *   2 landmarks:  "Landmarks: search input and results list."
  *   3+ landmarks: "Landmarks: search input, results list, and pagination controls."
- *   0 landmarks:  "Empty locale (no landmarks)."
+ *   0 landmarks:  "Empty perspective (no landmarks)."
  *
  * Falls back to the selector tail when a landmark's role is missing
  * — exists rarely (the schema enforces role at save time) but
@@ -40,14 +40,14 @@
  */
 export function composeCompactDescription(landmarks) {
   if (!Array.isArray(landmarks) || landmarks.length === 0) {
-    return 'Empty locale (no landmarks).';
+    return 'Empty perspective (no landmarks).';
   }
 
   const roles = landmarks
     .map(lm => _humanizeRole(lm))
     .filter(Boolean);
 
-  if (roles.length === 0) return 'Empty locale (no landmarks).';
+  if (roles.length === 0) return 'Empty perspective (no landmarks).';
 
   const label = roles.length === 1 ? 'Landmark' : 'Landmarks';
 

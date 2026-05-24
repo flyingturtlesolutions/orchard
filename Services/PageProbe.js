@@ -1,6 +1,6 @@
 /**
  * @file Services/PageProbe.js
- * @description Live page interaction primitives for locale authoring and
+ * @description Live page interaction primitives for perspective authoring and
  * verification. Provides three capabilities, all CSP-safe (routed through
  * the persistent content script via chrome.tabs.sendMessage rather than
  * chrome.scripting.executeScript with inline functions):
@@ -15,15 +15,15 @@
  *
  * ── Why a separate module ──────────────────────────────────────────────
  *
- * Locales (Pass 17) capture verified DOM landmarks. To author one, we need
+ * Perspectives (Pass 17) capture verified DOM landmarks. To author one, we need
  * to (a) reach a tab on the right URL, (b) snapshot its DOM, and (c) verify
- * each landmark's selector against that DOM. To re-verify a locale later,
- * we need (a) and (c) again. To evaluate a `locale_ref` condition at
+ * each landmark's selector against that DOM. To re-verify a perspective later,
+ * we need (a) and (c) again. To evaluate a `perspective_ref` condition at
  * runtime, we need (c) against the running tab.
  *
  * Existing modules (TemplateWalker, ExecutionEngine, DiscoveryService) all
  * have their own tab/DOM utilities, but none expose the right shape for
- * locale work. PageProbe consolidates the primitives that locales need
+ * perspective work. PageProbe consolidates the primitives that perspectives need
  * without rewriting the consumers.
  *
  * Future passes (Observation auto-authoring, Fragment auto-authoring,
@@ -156,7 +156,7 @@ async function waitForTabReady(tabId, timeoutMs = 15000) {
  *   "/jobs/"   → ambiguous: regex if body is non-empty AND no spaces, else substring
  *   "indeed.com/jobs" → substring match
  *
- * For locales, the URL pattern is usually a substring like "/jobs?q=" or
+ * For perspectives, the URL pattern is usually a substring like "/jobs?q=" or
  * a regex like "/^https:\\/\\/(www\\.)?indeed\\.com\\/jobs/".
  *
  * @private
@@ -268,7 +268,7 @@ export async function probeSelector(tabId, selector, opts = {}) {
   const sampleMax = Number.isFinite(opts.sampleHtmlMax) ? opts.sampleHtmlMax : 400;
 
   // v2.74.198 — frameUrl opt — when set, resolve to a frameId and
-  // route the probe into that iframe. Caller (locale-capture verify,
+  // route the probe into that iframe. Caller (perspective-capture verify,
   // future picker-driven verifies) passes ex.frameUrl / lm.frameUrl
   // captured by the picker. _resolveFrameId returns 0 when frameUrl
   // is absent / iframe gone, preserving back-compat.

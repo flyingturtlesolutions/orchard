@@ -1,7 +1,7 @@
 /**
  * @file Services/LandmarkImpactAnalysis.js
  * @description Phase 5 of the landmark SSOT project. Compute the
- * "blast radius" of a landmark — which Locales, Fragments, and
+ * "blast radius" of a landmark — which Perspectives, Fragments, and
  * Observations reference it — so authors can see the impact before
  * removing or deprecating.
  *
@@ -12,11 +12,11 @@
  *     that those primitives become broken
  *
  * v1 scope:
- *   - Locales referencing the UID (modern `landmarkRefs[]` OR legacy
+ *   - Perspectives referencing the UID (modern `landmarkRefs[]` OR legacy
  *     embedded `landmarks[]` with matching uid).
  *   - Fragments containing actions with `landmarkRef.uid === target`.
- *     Legacy `{ localeId, role }` refs are also counted when the
- *     landmark's role matches and the localeId references the same
+ *     Legacy `{ perspectiveId, role }` refs are also counted when the
+ *     landmark's role matches and the perspectiveId references the same
  *     landmark UID at lookup time.
  *   - Observations: same as fragments.
  *
@@ -29,7 +29,7 @@ import { Logger }         from '../Core/Logger.js';
 
 /**
  * Walk a fragment's rawJson actions and count references to the
- * target UID. v2.74.275 — Legacy `{ localeId, role }` ref counting
+ * target UID. v2.74.275 — Legacy `{ perspectiveId, role }` ref counting
  * REMOVED; only canonical `{ uid }` refs exist.
  */
 function _countRefsInFragmentActions(actions, targetUid) {
@@ -63,7 +63,7 @@ function _countRefsInObservationExtracts(extracts, targetUid) {
  * @returns {Promise<{
  *   uid: string,
  *   landmark: object|null,
- *   locales: Array<{id, name}>,
+ *   perspectives: Array<{id, name}>,
  *   fragments: Array<{id, name, refCount}>,
  *   observations: Array<{id, name, refCount}>,
  *   totalConsumers: number,
@@ -72,22 +72,22 @@ function _countRefsInObservationExtracts(extracts, targetUid) {
  */
 export async function analyzeLandmarkImpact(uid, groundId) {
   if (!uid || !groundId) {
-    return { uid, landmark: null, locales: [], fragments: [], observations: [], totalConsumers: 0, orphanIfRemoved: true };
+    return { uid, landmark: null, perspectives: [], fragments: [], observations: [], totalConsumers: 0, orphanIfRemoved: true };
   }
 
   const landmark = await StorageManager.getLandmark(uid).catch(() => null);
 
-  // (1) Locales — landmarkRefs[] only. v2.74.275: embedded path removed.
-  let locales = [];
+  // (1) Perspectives — landmarkRefs[] only. v2.74.275: embedded path removed.
+  let perspectives = [];
   try {
-    const allLocales = await StorageManager.listLocales(groundId);
-    for (const locale of allLocales ?? []) {
-      if (Array.isArray(locale.landmarkRefs) && locale.landmarkRefs.includes(uid)) {
-        locales.push({ id: locale.id, name: locale.name ?? locale.id });
+    const allPerspectives = await StorageManager.listPerspectives(groundId);
+    for (const perspective of allPerspectives ?? []) {
+      if (Array.isArray(perspective.landmarkRefs) && perspective.landmarkRefs.includes(uid)) {
+        perspectives.push({ id: perspective.id, name: perspective.name ?? perspective.id });
       }
     }
   } catch (e) {
-    Logger.warn('LandmarkImpactAnalysis', `listLocales failed: ${e.message}`);
+    Logger.warn('LandmarkImpactAnalysis', `listPerspectives failed: ${e.message}`);
   }
 
   // (2) Fragments — parse rawJson and count refs across all action
@@ -126,10 +126,10 @@ export async function analyzeLandmarkImpact(uid, groundId) {
     Logger.warn('LandmarkImpactAnalysis', `listObservations failed: ${e.message}`);
   }
 
-  const totalConsumers = locales.length + fragments.length + observations.length;
-  // If only ONE locale references this landmark, removing it from that
-  // locale orphans the registry record (no other locale references it).
-  const orphanIfRemoved = locales.length <= 1 && fragments.length === 0 && observations.length === 0;
+  const totalConsumers = perspectives.length + fragments.length + observations.length;
+  // If only ONE perspective references this landmark, removing it from that
+  // perspective orphans the registry record (no other perspective references it).
+  const orphanIfRemoved = perspectives.length <= 1 && fragments.length === 0 && observations.length === 0;
 
-  return { uid, landmark, locales, fragments, observations, totalConsumers, orphanIfRemoved };
+  return { uid, landmark, perspectives, fragments, observations, totalConsumers, orphanIfRemoved };
 }

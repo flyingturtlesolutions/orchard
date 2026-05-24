@@ -2935,7 +2935,7 @@ export class ExecutionEngine {
    * v2.61.0 — Build a sort comparator for a sieve sort op.
    *
    * coerceAs determines how field values get compared:
-   *   'string' (default) — locale-aware string compare
+   *   'string' (default) — perspective-aware string compare
    *   'number'           — parseFloat both sides; NaN sorts last
    *   'date'             — Date.parse both sides; invalid dates sort last
    *
