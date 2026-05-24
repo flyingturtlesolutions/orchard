@@ -3931,6 +3931,123 @@ function computePageComplexity() {
   };
 }
 
+// ─── Structure verification (v2.74.362) ────────────────────────────────────
+// Auto-verify a Locale's structured composition against the live page.
+//  A) STATIC (deterministic): resolution, multiplicity (match count),
+//     containment (DOM ancestry vs declared parent).
+//  C) POKE-AND-OBSERVE: for nodes with `triggers`, snapshot the targets'
+//     visibility, fire ONE synthetic click on the (safe-to-click) source, wait,
+//     re-check — did the claimed targets get revealed?
+// Returns a per-ref verdict map; the sidepanel turns it into auto-judgments.
+// `selectors` maps ref(landmark uid) → CSS selector (top-frame only; iframe-
+// bound nodes are omitted and come back unverifiable). Synthetic clicks mutate
+// the page (menus left open etc.) — acceptable for an explicit verify action.
+async function verifyStructure(payload) {
+  const tree = Array.isArray(payload?.tree) ? payload.tree : [];
+  const selectors = (payload && typeof payload.selectors === 'object' && payload.selectors) ? payload.selectors : {};
+  const results = {};
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const q1 = (ref) => { const s = selectors[ref]; if (!s) return null; try { return document.querySelector(s); } catch { return null; } };
+  const qn = (ref) => { const s = selectors[ref]; if (!s) return []; try { return Array.from(document.querySelectorAll(s)); } catch { return []; } };
+  const visible = (el) => { if (!el) return false; try { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; } catch { return false; } };
+  const isSafeToClick = (el) => {
+    if (!el) return false;
+    try {
+      // Never poke things that navigate or submit — they'd wreck the page.
+      if (el.matches('a[href], [type="submit"], input[type="submit"], button[type="submit"]')) return false;
+      if (el.closest('form') && el.matches('button:not([type]), input[type="image"]')) return false;   // default-submit
+      if (el.matches('button:not([type="submit"]), [role="button"], summary, [aria-haspopup], [aria-expanded], [role="combobox"]')) return true;
+      return getComputedStyle(el).cursor === 'pointer';
+    } catch { return false; }
+  };
+  // v2.74.363 — `contains` is LOGICAL containment (LOCALE_SPEC § 3), not strict
+  // DOM ancestry. Portaled dropdowns/menus/modals render at <body> level, so
+  // they are NOT DOM descendants of their trigger — yet logically belong inside
+  // it. Recognize that link via ARIA (aria-controls/owns/labelledby) or the
+  // popup pattern (parent opens a popup, child is a popup-ish role/class).
+  const isLogicallyContained = (parent, child) => {
+    try {
+      const cid = child.id;
+      const owns = `${parent.getAttribute('aria-controls') || ''} ${parent.getAttribute('aria-owns') || ''}`.trim();
+      if (cid && owns.split(/\s+/).includes(cid)) return true;
+      if (cid && child.closest(`[aria-controls~="${cid}"], [aria-owns~="${cid}"]`)) return true;
+      const pid = parent.id;
+      if (pid && (child.getAttribute('aria-labelledby') || child.getAttribute('aria-describedby') || '').split(/\s+/).includes(pid)) return true;
+      const popupParent = parent.matches('[aria-haspopup], [aria-expanded], [role="combobox"]');
+      const popupChild  = child.matches('[role="menu"], [role="listbox"], [role="dialog"], [role="tree"], [role="grid"], [role="combobox"], [role="option"], [role="menuitem"]')
+        || /\b(menu|dropdown|popover|popup|modal|dialog|portal|overlay|listbox)\b/i.test(child.className || '');
+      return popupParent && popupChild;
+    } catch { return false; }
+  };
+
+  // Static check of one node against the CURRENT DOM (run post-poke so revealed
+  // subtrees exist). `parentRef` is the declared containment parent.
+  const checkNode = (n, parentRef) => {
+    if (n?.virtual) return;   // v2.74.365 — virtual containers have no element; verified via their contents
+    const ref = n?.ref; if (typeof ref !== 'string') return;
+    const r = results[ref] = results[ref] || {};
+    if (!selectors[ref]) { r.resolved = null; r.note = 'no selector (iframe-bound or not picked)'; }
+    else {
+      const els = qn(ref); const el = els[0] || null;
+      r.resolved = !!el; r.count = els.length;
+      if (el) {
+        try { const bb = el.getBoundingClientRect(); r.rect = { x: Math.round(bb.x), y: Math.round(bb.y), w: Math.round(bb.width), h: Math.round(bb.height) }; } catch { /* */ }
+        r.text = ((el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('placeholder'))) || el.textContent || '').trim().slice(0, 60);
+      }
+      const m = n.multiplicity || 'one';
+      if (el) {
+        if (m === 'one')        r.multiplicity = els.length === 1 ? 'ok' : 'mismatch';
+        else if (m === 'many')  r.multiplicity = els.length > 1 ? 'ok' : 'too-few';
+        else if (m === 'optional') r.multiplicity = els.length <= 1 ? 'ok' : 'too-many';
+        else                    r.multiplicity = 'skip';   // conditional
+        if (parentRef) {
+          const pel = q1(parentRef);
+          r.containment = !pel ? 'parent-missing'
+            : pel.contains(el) ? 'ok'
+            : isLogicallyContained(pel, el) ? 'ok-portaled'
+            : 'detached';   // resolves but no DOM/ARIA link — likely portaled; SOFT, never a hard fail
+        }
+      }
+    }
+  };
+  const walk = (nodes, parentRef) => {
+    for (const n of Array.isArray(nodes) ? nodes : []) {
+      checkNode(n, parentRef);
+      if (Array.isArray(n.contains)) walk(n.contains, n.ref);
+    }
+  };
+
+  // 1) Snapshot trigger targets' visibility BEFORE poking (for the reveal diff).
+  const sources = [];
+  const collect = (nodes) => { for (const n of Array.isArray(nodes) ? nodes : []) { if (Array.isArray(n?.triggers) && n.triggers.length) sources.push(n); if (Array.isArray(n?.contains)) collect(n.contains); } };
+  collect(tree);
+  const before = {};
+  for (const n of sources) { before[n.ref] = {}; for (const t of n.triggers) before[n.ref][t] = visible(q1(t)); }
+
+  // 2) Poke each safe trigger source, then diff its targets.
+  for (const n of sources) {
+    const r = results[n.ref] = results[n.ref] || {};
+    r.triggers = {};
+    const src = q1(n.ref);
+    if (!src)                { for (const t of n.triggers) r.triggers[t] = 'no-source'; continue; }
+    if (!isSafeToClick(src)) { for (const t of n.triggers) r.triggers[t] = 'unsafe-to-poke'; continue; }
+    try { src.click(); } catch { /* ignore */ }
+    await sleep(450);
+    for (const t of n.triggers) {
+      const after = visible(q1(t));
+      if (!before[n.ref][t] && after)      r.triggers[t] = 'verified';        // hidden → shown
+      else if (before[n.ref][t] && after)  r.triggers[t] = 'already-present';  // can't demonstrate reveal
+      else                                 r.triggers[t] = 'no-change';        // claimed reveal didn't happen
+    }
+  }
+
+  // 3) Static check AFTER poking — conditional menus/options now exist in the
+  //    DOM (or portaled into it), so resolution/multiplicity/containment see
+  //    the revealed structure rather than the closed state.
+  walk(tree, null);
+  return { success: true, results };
+}
+
 // ─── Message router ───────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -4482,6 +4599,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       try { sendResponse(computePageComplexity()); }
       catch (e) { sendResponse({ success: false, error: e.message }); }
       return false;
+
+    // v2.74.362 — Auto-verify a Locale's structured composition (async: poke).
+    case 'VERIFY_STRUCTURE':
+      verifyStructure(payload).then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
+      return true;   // async sendResponse
 
     case 'DOM_SNAPSHOT_FULL':
       sendResponse(handleDomSnapshotFull());

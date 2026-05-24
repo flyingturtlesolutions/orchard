@@ -27,6 +27,11 @@ const MODEL             = 'claude-sonnet-4-5';
 // images up to 2576px on the long edge. Per Anthropic docs, temperature/
 // top_p/top_k are NOT supported on Opus 4.7 — we omit them.
 const MODEL_OBSERVATION_FRONTIER = 'claude-opus-4-7';
+// v2.74.360 — Fast/cheap tier for low-stakes roles (classify, trivial
+// describe, simple extract). NOTE: verify this model id against the account's
+// available models before routing critical operations to it — if wrong, the
+// routed calls 400. v1 routes only two harmless ops (see ROLE_MODEL_POLICY).
+const MODEL_FAST        = 'claude-haiku-4-5';
 const SETTINGS_KEY      = 'settings:anthropic_key';
 
 // v2.74.154 — Per-million-token USD pricing for cost-metadata logging on
@@ -35,6 +40,7 @@ const SETTINGS_KEY      = 'settings:anthropic_key';
 // above and the rate map below stay in lockstep — there's no scenario
 // where we'd want one without the other.
 const MODEL_PRICING_USD_PER_MILLION = Object.freeze({
+  'claude-haiku-4-5' : { input: 1.00,  output: 5.00 },   // v2.74.360 — estimate; verify against published rates
   'claude-sonnet-4-5': { input: 3.00,  output: 15.00 },
   'claude-opus-4-7'  : { input: 15.00, output: 75.00 },
 });
@@ -56,6 +62,34 @@ export function estimateCostUSD(model, usage) {
   const input  = (inputTokens  * rates.input)  / 1_000_000;
   const output = (outputTokens * rates.output) / 1_000_000;
   return { input, output, total: input + output };
+}
+
+// ─── v2.74.360 — Role→model policy (DESIGN_llm_roles.md § 4) ──────────────────
+// Model becomes a resolved parameter of the call: an operation override wins,
+// else the role default, else MODEL. Vision-bearing calls fall back to a
+// vision-capable model (all current models are multimodal, so the guard is a
+// safety net for any future text-only tier). Applies only to #call-routed
+// operations — the Opus frontier + readImage build their own fetch and keep
+// their own model. Defaults are conservative (everything on the proven MODEL);
+// flipping a role/op to MODEL_FAST is a one-line edit once verified + measured.
+const VISION_CAPABLE = new Set([MODEL, MODEL_OBSERVATION_FRONTIER, MODEL_FAST]);
+const ROLE_MODEL_POLICY = Object.freeze({
+  defaults: {
+    propose: MODEL, resolve: MODEL, describe: MODEL,
+    plan: MODEL, extract: MODEL, classify: MODEL, unclassified: MODEL,
+  },
+  // Per-operation overrides. v1 demonstrates the fast tier on two harmless,
+  // low-stakes describe ops; the cheap roles (classify/extract) stay on MODEL
+  // until the MODEL_FAST id is verified and the audit confirms quality holds.
+  ops: {
+    generateConversationTitle: MODEL_FAST,
+    generateSampleQuestion:    MODEL_FAST,
+  },
+});
+function pickModelForCall(role, operation, hasVision) {
+  let m = ROLE_MODEL_POLICY.ops[operation] ?? ROLE_MODEL_POLICY.defaults[role] ?? MODEL;
+  if (hasVision && !VISION_CAPABLE.has(m)) m = MODEL;   // never route an image to a text-only model
+  return m;
 }
 
 // ─── Analysis T3 recovery system prompt ──────────────────────────────────────
@@ -1639,8 +1673,14 @@ Rules:
 Return ONLY a JSON object:
 {
   "nodes": [
-    { "ref": "<id>", "role": "results-list", "multiplicity": "one",
-      "contains": [ { "ref": "<id>", "role": "result", "multiplicity": "many" } ] }
+    { "ref": "<control-id>", "role": "filter-control", "multiplicity": "one", "triggers": ["<section-a-id>", "<section-b-id>"],
+      "contains": [
+        { "virtual": true, "role": "dropdown-menu", "multiplicity": "conditional", "presenceCondition": "after the control is opened",
+          "contains": [
+            { "ref": "<section-a-id>", "role": "menu-section", "multiplicity": "one" },
+            { "ref": "<section-b-id>", "role": "social-links", "multiplicity": "one" }
+          ] }
+      ] }
   ],
   "groupings": [ { "name": "buying-flow", "members": ["<id>", "<id>"] } ],
   "sequences": [ { "name": "checkout-steps", "steps": ["<id>", "<id>"] } ]
@@ -1649,9 +1689,12 @@ Return ONLY a JSON object:
 Rules:
 - Use ONLY the provided ref ids. Never invent ids.
 - EVERY provided landmark must appear EXACTLY ONCE in the "nodes" tree — as a root or nested inside some node's "contains".
-- "contains" = DOM-like containment: use it when one landmark logically holds others (a section holds its items; a list holds its rows). Keep nesting shallow and meaningful.
+- "contains" = DOM-like containment: use it when one landmark logically holds others (a section holds its items; a list holds its rows; a dropdown holds its menu/options). Keep nesting shallow and meaningful.
 - "role" = short lowercase semantic role within the parent (e.g. product-name, primary-action, results-list, result, price-current, review). 1-3 words, kebab-case.
-- "multiplicity" = one | many | optional | conditional. Use "many" for repeating items (list rows, reviews); default "one".
+- "multiplicity" = one | many | optional | conditional. Use "many" for repeating items (list rows, reviews); "conditional" for a landmark only present in some state (a menu that appears after a click); default "one".
+- "triggers" (optional) = ref ids whose presence/content this landmark's INTERACTION reveals or changes (a dropdown control triggers its menu; a quantity input triggers a total). The referenced ids MUST also appear as their own nodes — triggers is a cross-link, not a way to introduce new landmarks. Omit when nothing is triggered.
+- "presenceCondition" (optional) = a SHORT phrase for WHEN a not-always-present landmark exists (pair with multiplicity conditional/optional) — e.g. "after the control is opened", "when in stock". Omit for always-present landmarks.
+- "virtual" (optional) = set true on a CONTAINER node that holds landmarks but was NOT itself captured (a modal / menu / section wrapper). A virtual node has NO ref, MUST have a "role" and a non-empty "contains", and MAY carry multiplicity/presenceCondition. Use it when several captured landmarks are sections of one container revealed together — put the shared presenceCondition ONCE on the virtual container instead of duplicating it on each section, and DON'T mislabel one section as the whole container. Only introduce a virtual node when no captured landmark already represents that container.
 - "groupings" (optional) = named clusters that cut across containment (e.g. all controls in a buying flow). "members" are ref ids.
 - "sequences" (optional) = ordered user-flow steps. "steps" are ref ids in order.
 - Don't force structure that isn't there — a flat list of root nodes is a fine answer when landmarks are unrelated.${refining ? `
@@ -1697,11 +1740,30 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
     // as a flat root — so the stored composition NEVER loses a landmark.
     const MULT = new Set(['one', 'many', 'optional', 'conditional']);
     const seen = new Set();
+    let vCount = 0;
     const sanitizeNodes = (arr) => {
       const out = [];
       for (const n of Array.isArray(arr) ? arr : []) {
         const ref = (n && typeof n.ref === 'string') ? n.ref : null;
         if (!ref || !allowed.has(ref) || seen.has(ref)) {
+          // v2.74.365 — VIRTUAL container: a ref-less node with role + contains
+          // is a structural wrapper (modal/menu) that wasn't captured. Keep it
+          // (with a synthetic vid) instead of flattening its children up, so the
+          // shared presence/condition lives once on the container.
+          if (n && n.virtual === true && typeof n.role === 'string' && n.role.trim() && Array.isArray(n.contains)) {
+            const kids = sanitizeNodes(n.contains);
+            if (kids.length) {
+              const vnode = { virtual: true, vid: `v${++vCount}`, role: n.role.trim().slice(0, 40), contains: kids };
+              if (typeof n.multiplicity === 'string' && MULT.has(n.multiplicity)) vnode.multiplicity = n.multiplicity;
+              if (typeof n.presenceCondition === 'string' && n.presenceCondition.trim()) vnode.presenceCondition = n.presenceCondition.trim().slice(0, 120);
+              if (Array.isArray(n.triggers)) {
+                const trg = [...new Set(n.triggers.filter(t => typeof t === 'string' && allowed.has(t)))].slice(0, 6);
+                if (trg.length) vnode.triggers = trg;
+              }
+              out.push(vnode);
+            }
+            continue;
+          }
           // unknown / duplicate ref — skip the node but still recurse its
           // children (they may be valid).
           if (n && Array.isArray(n.contains)) out.push(...sanitizeNodes(n.contains));
@@ -1711,6 +1773,15 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
         const node = { ref };
         if (typeof n.role === 'string' && n.role.trim()) node.role = n.role.trim().slice(0, 40);
         if (typeof n.multiplicity === 'string' && MULT.has(n.multiplicity)) node.multiplicity = n.multiplicity;
+        // v2.74.361 — B-full (partial): triggers (cross-link refs clamped to the
+        // allowed set, deduped, no self-ref) + presenceCondition (short string).
+        if (typeof n.presenceCondition === 'string' && n.presenceCondition.trim()) {
+          node.presenceCondition = n.presenceCondition.trim().slice(0, 120);
+        }
+        if (Array.isArray(n.triggers)) {
+          const trg = [...new Set(n.triggers.filter(t => typeof t === 'string' && allowed.has(t) && t !== ref))].slice(0, 6);
+          if (trg.length) node.triggers = trg;
+        }
         const kids = sanitizeNodes(n.contains);
         if (kids.length) node.contains = kids;
         out.push(node);
@@ -1757,11 +1828,23 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
       let out = '';
       for (const n of Array.isArray(arr) ? arr : []) {
         const ref = (n && typeof n.ref === 'string') ? n.ref : null;
+        if (n && n.virtual === true && Array.isArray(n.contains)) {
+          // v2.74.365 — virtual container: keep it in the refine view.
+          const pad = '  '.repeat(depth);
+          const role = (typeof n.role === 'string' && n.role.trim()) ? ` role=${n.role.trim()}` : '';
+          const mult = (typeof n.multiplicity === 'string' && n.multiplicity.trim()) ? ` mult=${n.multiplicity.trim()}` : '';
+          const pres = (typeof n.presenceCondition === 'string' && n.presenceCondition.trim()) ? ` when="${n.presenceCondition.trim()}"` : '';
+          out += `${pad}- (virtual container)${role}${mult}${pres}${mark(n)}\n`;
+          out += renderNodes(n.contains, depth + 1);
+          continue;
+        }
         if (ref && allowed.has(ref)) {
           const pad  = '  '.repeat(depth);
           const role = (typeof n.role === 'string' && n.role.trim()) ? ` role=${n.role.trim()}` : '';
           const mult = (typeof n.multiplicity === 'string' && n.multiplicity.trim()) ? ` mult=${n.multiplicity.trim()}` : '';
-          out += `${pad}- ref: ${ref} (${aliasOf.get(ref) ?? '?'})${role}${mult}${mark(n)}\n`;
+          const trg  = (Array.isArray(n.triggers) && n.triggers.length) ? ` triggers=[${n.triggers.map(t => aliasOf.get(t) ?? t).join(', ')}]` : '';
+          const pres = (typeof n.presenceCondition === 'string' && n.presenceCondition.trim()) ? ` when="${n.presenceCondition.trim()}"` : '';
+          out += `${pad}- ref: ${ref} (${aliasOf.get(ref) ?? '?'})${role}${mult}${trg}${pres}${mark(n)}\n`;
           if (Array.isArray(n.contains)) out += renderNodes(n.contains, depth + 1);
         } else if (n && Array.isArray(n.contains)) {
           out += renderNodes(n.contains, depth);   // ref gone → promote children
@@ -2072,6 +2155,56 @@ Rules:
       return { role, selector, confidence, justification };
     });
     return { resolutions };
+  }
+
+  /**
+   * v2.74.364 — Visual critic for structure verification: adjudicate the
+   * residual claims that deterministic checks couldn't settle (portaled
+   * containment, DOM-invisible trigger reveals) against a screenshot. STRICT —
+   * say "no" when the relationship isn't visually supported; deterministic
+   * verdicts stay authoritative, this only touches the residual. classify role.
+   *
+   * @param {{ claims: Array<{id:string, kind:'containment'|'trigger', text:string}>, screenshot?:string|null }} params
+   * @returns {Promise<{ verdicts: Array<{id:string, hold:'yes'|'no'|'unsure', reason:string}> }|null>}
+   */
+  static async adjudicateStructure({ claims, screenshot }) {
+    const list = (Array.isArray(claims) ? claims : []).filter(c => c && typeof c.id === 'string' && typeof c.text === 'string');
+    if (list.length === 0) return null;
+
+    const systemPrompt = `You are a STRICT critic verifying claims about a web page's structure against a screenshot. Each claim asserts either a CONTAINMENT relationship (one element visually belongs inside/with another — e.g. a dropdown menu belongs to its control, even when rendered as a floating popup) or a TRIGGER reveal (activating a control made another element appear). For each claim, judge whether the screenshot SUPPORTS it.
+
+Return ONLY JSON: { "verdicts": [ { "id": "<claim id>", "hold": "yes" | "no" | "unsure", "reason": "<short>" } ] }
+
+Rules:
+- "yes" only when the screenshot clearly supports the claim (the elements are visible and the relationship is evident — e.g. the menu sits directly under/over its control, or the revealed element is now visible).
+- "no" when the screenshot contradicts it (elements visible but unrelated/elsewhere, or the supposedly-revealed element isn't visible).
+- "unsure" when the relevant elements aren't clearly identifiable in the screenshot — do NOT guess.
+- Be strict: a wrong "yes" is worse than "unsure". One verdict per claim id.`;
+
+    let text = `Claims:\n${list.map(c => `- id ${c.id} [${c.kind}]: ${c.text}`).join('\n')}`;
+    const userContent = [];
+    if (typeof screenshot === 'string') {
+      const m = /^data:(image\/[a-z]+);base64,(.+)$/i.exec(screenshot);
+      if (m) { userContent.push({ type: 'image', source: { type: 'base64', media_type: m[1], data: m[2] } }); text += '\n\n(A screenshot of the current page state is attached above.)'; }
+    }
+    userContent.push({ type: 'text', text });
+
+    let parsed;
+    try {
+      const raw = await AnthropicService.#call(systemPrompt, userContent, 900, [], { role: 'classify', operation: 'adjudicateStructure' });
+      if (!raw?.success) { Logger.warn('AnthropicService', `adjudicateStructure failed: ${raw?.error}`); return null; }
+      const json = AnthropicService.#firstJsonObject(raw.text);
+      if (!json) { Logger.warn('AnthropicService', 'adjudicateStructure: no JSON'); return null; }
+      parsed = JSON.parse(json);
+    } catch (e) {
+      Logger.warn('AnthropicService', `adjudicateStructure error: ${e.message}`);
+      return null;
+    }
+    const HOLD = new Set(['yes', 'no', 'unsure']);
+    const verdicts = (Array.isArray(parsed.verdicts) ? parsed.verdicts : [])
+      .filter(v => v && typeof v.id === 'string')
+      .map(v => ({ id: v.id, hold: HOLD.has(v.hold) ? v.hold : 'unsure', reason: (typeof v.reason === 'string' ? v.reason.trim() : '').slice(0, 120) }));
+    return { verdicts };
   }
 
   /**
@@ -3875,11 +4008,13 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
   static async #call(systemPrompt, userContent, maxTokens, extraMessages = [], meta = null) {
     const role = meta?.role ?? 'unclassified';
     const operation = meta?.operation ?? 'unknown';
+    const hasVision = Array.isArray(userContent) && userContent.some(b => b?.type === 'image');
+    const model = pickModelForCall(role, operation, hasVision);   // v2.74.360 — role→model policy
     const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
     const t0 = now();
     const apiKey = await AnthropicService.getApiKey();
     if (!apiKey) {
-      AnthropicService.#audit({ ts: Date.now(), role, operation, latencyMs: 0, ok: false, outputChars: 0, model: MODEL, error: 'no-api-key' });
+      AnthropicService.#audit({ ts: Date.now(), role, operation, latencyMs: 0, ok: false, outputChars: 0, inTokens: 0, outTokens: 0, costUsd: null, model, error: 'no-api-key' });
       return { success: false, text: '', error: 'No API key' };
     }
 
@@ -3898,7 +4033,7 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
           'anthropic-dangerous-direct-browser-access': 'true',
         },
         body: JSON.stringify({
-          model      : MODEL,
+          model,
           max_tokens : maxTokens,
           system     : systemPrompt,
           messages,
@@ -3922,12 +4057,12 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
         inputTokens : Number(data?.usage?.input_tokens  ?? 0),
         outputTokens: Number(data?.usage?.output_tokens ?? 0),
       };
-      AnthropicService.#audit({ ts: Date.now(), role, operation, latencyMs: Math.round(now() - t0), ok: true, outputChars: text.length, model: MODEL });
+      AnthropicService.#audit({ ts: Date.now(), role, operation, latencyMs: Math.round(now() - t0), ok: true, outputChars: text.length, inTokens: usage.inputTokens, outTokens: usage.outputTokens, costUsd: estimateCostUSD(model, usage)?.total ?? null, model });
       Logger.debug('AnthropicService', `API call success — ${text.length} chars [${role}/${operation}]`, usage);
       return { success: true, text, error: null, usage };
 
     } catch (err) {
-      AnthropicService.#audit({ ts: Date.now(), role, operation, latencyMs: Math.round(now() - t0), ok: false, outputChars: 0, model: MODEL, error: String(err.message).slice(0, 120) });
+      AnthropicService.#audit({ ts: Date.now(), role, operation, latencyMs: Math.round(now() - t0), ok: false, outputChars: 0, inTokens: 0, outTokens: 0, costUsd: null, model, error: String(err.message).slice(0, 120) });
       Logger.error('AnthropicService', `API call failed [${role}/${operation}]: ${err.message}`);
       return { success: false, text: '', error: err.message };
     }

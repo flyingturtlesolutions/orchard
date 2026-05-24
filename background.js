@@ -4149,6 +4149,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
+    // v2.74.364 — Visual-critic escalation for structure verification: capture
+    // the (post-poke) page state + adjudicate the residual claims deterministic
+    // checks couldn't settle. See DESIGN_resolve_roles / structure verify notes.
+    case 'ADJUDICATE_STRUCTURE': {
+      (async () => {
+        try {
+          const { tabId, claims } = payload ?? {};
+          if (typeof tabId !== 'number') { sendResponse({ success: false, error: 'tabId required' }); return; }
+          if (!Array.isArray(claims) || !claims.length) { sendResponse({ success: false, error: 'claims required' }); return; }
+          let tabInfo;
+          try { tabInfo = await chrome.tabs.get(tabId); }
+          catch (e) { sendResponse({ success: false, error: `Tab not found: ${e.message}` }); return; }
+          let screenshot = null;
+          if (tabInfo.active) {
+            try { screenshot = await chrome.tabs.captureVisibleTab(tabInfo.windowId, { format: 'jpeg', quality: 60 }); }
+            catch (e) { Logger.warn('background', `ADJUDICATE_STRUCTURE: screenshot failed (continuing): ${e.message}`); }
+          }
+          const out = await AnthropicService.adjudicateStructure({ claims, screenshot });
+          if (!out || !Array.isArray(out.verdicts)) { sendResponse({ success: false, error: 'no verdicts' }); return; }
+          sendResponse({ success: true, verdicts: out.verdicts });
+        } catch (err) {
+          Logger.error('background', `ADJUDICATE_STRUCTURE failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
     // v2.74.128 — GET_TAB_SIDEPANEL_MODE and the background-side
     // CLEAR_TAB_SIDEPANEL_MODE handler removed alongside the dead
     // __tabSidepanelModes map. The shell registers its own

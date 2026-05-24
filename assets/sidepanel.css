@@ -4852,6 +4852,33 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 }
 .loc-struct-move-btn:hover:not(:disabled) { border-color: rgba(196, 181, 253, 0.6); color: rgba(196, 181, 253, 0.95); }
 .loc-struct-move-btn:disabled { opacity: 0.25; cursor: default; }
+/* v2.74.361 — B-full node dynamics: presenceCondition + triggers detail rows */
+.loc-struct-detail { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 1px 0 2px; font-size: 10px; }
+.loc-struct-detail-label { flex: 0 0 auto; color: rgba(148, 163, 184, 0.8); text-transform: uppercase; letter-spacing: 0.03em; }
+.loc-struct-presence-input {
+  flex: 1 1 auto; min-width: 120px; font-size: 10px; padding: 1px 5px;
+  background: rgba(148, 163, 184, 0.06); border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 3px; color: rgba(229, 222, 255, 0.95);
+}
+.loc-struct-trigger-chip {
+  display: inline-flex; align-items: center; gap: 3px; font-size: 10px;
+  padding: 0 3px 0 6px; border-radius: 9px;
+  background: rgba(251, 191, 36, 0.12); color: rgba(252, 211, 77, 0.95);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+}
+.loc-struct-trigger-x { background: none; border: none; color: rgba(252, 211, 77, 0.8); cursor: pointer; font-size: 9px; padding: 0 1px; line-height: 1; }
+.loc-struct-trigger-x:hover { color: rgba(252, 165, 165, 1); }
+/* v2.74.362 — auto-verification verdict badge on a structure node */
+.loc-struct-auto {
+  flex: 0 0 auto; font-size: 9px; padding: 0 5px; border-radius: 9px;
+  white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis;
+}
+.loc-struct-auto.cx-verified { background: rgba(61, 214, 140, 0.16);  color: rgba(110, 231, 168, 1); border: 1px solid rgba(61, 214, 140, 0.45); }
+.loc-struct-auto.cx-failed   { background: rgba(247, 110, 110, 0.16); color: rgba(252, 165, 165, 1); border: 1px solid rgba(247, 110, 110, 0.5); }
+.loc-struct-auto.cx-unver    { background: rgba(251, 191, 36, 0.14);  color: rgba(252, 211, 77, 1);  border: 1px solid rgba(251, 191, 36, 0.45); }
+/* v2.74.365 — virtual container node (not a captured landmark) */
+.loc-struct-vnode { border-left: 2px dashed rgba(196, 181, 253, 0.5); }
+.loc-struct-vlabel { font-style: italic; color: rgba(196, 181, 253, 0.95); }
 .loc-struct-overlay { color: rgba(196, 181, 253, 0.85); font-size: 10.5px; margin-top: 3px; }
 /* v2.74.346 — B-mid overlay (grouping/sequence) review rows */
 .loc-struct-overlay-row {

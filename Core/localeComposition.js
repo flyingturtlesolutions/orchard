@@ -41,12 +41,14 @@ export function flattenLandmarkNodes(nodes, _out, _seen) {
   return out;
 }
 
-// True when an array is already LandmarkNode-shaped (every item carries a
-// string `ref`). Distinguishes the Layer 2 shape from legacy embedded
-// landmark records (which carry `uid` + `selector`, no `ref`).
+// True when an array is already LandmarkNode-shaped. Each item is either a
+// landmark node (string `ref`) or a v2.74.365 VIRTUAL container node (`virtual:
+// true` with `contains`) — a structural wrapper (modal/menu) that holds
+// landmarks but wasn't itself captured. Distinguishes the Layer 2 shape from
+// legacy embedded landmark records (which carry `uid` + `selector`, no `ref`).
 export function isLandmarkNodeArray(arr) {
   return Array.isArray(arr) && arr.length > 0
-    && arr.every(n => n && typeof n.ref === 'string' && n.ref);
+    && arr.every(n => n && ((typeof n.ref === 'string' && n.ref) || (n.virtual === true && Array.isArray(n.contains))));
 }
 
 /**

@@ -5279,20 +5279,27 @@ async function renderLlmAudit() {
   }
 
   const byRole = {}, byOp = {};
-  let firstTs = Infinity, lastTs = 0;
+  let firstTs = Infinity, lastTs = 0, totalTok = 0, totalCost = 0;
   const add = (map, key, c) => {
-    const m = map[key] ?? (map[key] = { calls:0, ok:0, latSum:0, latN:0, lats:[] });
+    const m = map[key] ?? (map[key] = { calls:0, ok:0, latSum:0, latN:0, lats:[], tok:0, cost:0 });
     m.calls++; if (c.ok) m.ok++;
     if (typeof c.latencyMs === 'number') { m.latSum += c.latencyMs; m.latN++; m.lats.push(c.latencyMs); }
+    m.tok += (c.inTokens || 0) + (c.outTokens || 0);
+    m.cost += (c.costUsd || 0);
   };
   for (const c of calls) {
     const role = c.role || 'unclassified';
     add(byRole, role, c);
     add(byOp, `${role} ${c.operation || 'unknown'}`, c);
+    totalTok += (c.inTokens || 0) + (c.outTokens || 0);
+    totalCost += (c.costUsd || 0);
     if (c.ts) { firstTs = Math.min(firstTs, c.ts); lastTs = Math.max(lastTs, c.ts); }
   }
   const p95 = (arr) => { if (!arr.length) return null; const s = [...arr].sort((a,b)=>a-b); return s[Math.min(s.length-1, Math.floor(0.95*s.length))]; };
-  const stat = (m) => ({ calls:m.calls, okPct: m.calls?Math.round(100*m.ok/m.calls):0, avg: m.latN?Math.round(m.latSum/m.latN):null, p95: p95(m.lats) });
+  const stat = (m) => ({ calls:m.calls, okPct: m.calls?Math.round(100*m.ok/m.calls):0, avg: m.latN?Math.round(m.latSum/m.latN):null, p95: p95(m.lats), tok: m.tok, cost: m.cost });
+  const fmtTok = (n) => !n ? '—' : (n >= 1000 ? (n/1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n));
+  const fmtUsd = (n) => !n ? '—' : (n < 0.01 ? '<$0.01' : '$' + n.toFixed(n < 1 ? 3 : 2));
+  const shortModel = (m) => String(m || '—').replace(/-(\d{8})$/, '').replace(/^claude-/, '');
 
   const roleKeys = [...new Set([...LLM_ROLE_ORDER.filter(r=>byRole[r]), ...Object.keys(byRole)])];
   const roleRows = roleKeys.map(role => {
@@ -5302,6 +5309,8 @@ async function renderLlmAudit() {
       <td>${s.calls}</td><td>${s.okPct}%</td>
       <td class="rp-dim">${s.avg!=null?s.avg+'ms':'—'}</td>
       <td class="rp-dim">${s.p95!=null?s.p95+'ms':'—'}</td>
+      <td class="rp-dim">${fmtTok(s.tok)}</td>
+      <td class="rp-dim">${fmtUsd(s.cost)}</td>
     </tr>`;
   }).join('');
 
@@ -5312,6 +5321,8 @@ async function renderLlmAudit() {
       <td><span class="${_rolePillCls(e.role)}">${escHtml(e.role)}</span></td>
       <td>${escHtml(e.op)}</td><td>${e.s.calls}</td><td>${e.s.okPct}%</td>
       <td class="rp-dim">${e.s.avg!=null?e.s.avg+'ms':'—'}</td>
+      <td class="rp-dim">${fmtTok(e.s.tok)}</td>
+      <td class="rp-dim">${fmtUsd(e.s.cost)}</td>
     </tr>`).join('');
 
   const recent = calls.slice(-30).reverse().map(c => {
@@ -5323,7 +5334,9 @@ async function renderLlmAudit() {
       <td>${escHtml(c.operation || 'unknown')}</td>
       <td>${c.ok ? '<span class="rp-up">ok</span>' : '<span class="rp-fail">fail</span>'}</td>
       <td class="rp-dim">${c.latencyMs!=null?c.latencyMs+'ms':'—'}</td>
-      <td class="rp-dim">${c.outputChars ?? ''}</td>
+      <td class="rp-dim" title="${(c.inTokens||0)} in / ${(c.outTokens||0)} out">${fmtTok((c.inTokens||0)+(c.outTokens||0))}</td>
+      <td class="rp-dim">${fmtUsd(c.costUsd)}</td>
+      <td class="rp-dim">${escHtml(shortModel(c.model))}</td>
     </tr>`;
   }).join('');
 
@@ -5331,13 +5344,13 @@ async function renderLlmAudit() {
   const range = firstTs<Infinity ? `${new Date(firstTs).toLocaleString()} – ${new Date(lastTs).toLocaleString()}` : '';
 
   body.innerHTML = `
-    <div class="rp-summary">${calls.length} call(s) · ${escHtml(range)}${unclassified?` · <span class="rp-fail">${unclassified} unclassified</span> (need a role declared)`:''}</div>
+    <div class="rp-summary">${calls.length} call(s) · ${fmtTok(totalTok)} tokens · ${fmtUsd(totalCost)} · ${escHtml(range)}${unclassified?` · <span class="rp-fail">${unclassified} unclassified</span> (need a role declared)`:''}</div>
     <div class="section-header"><h3 class="card-subheading">By role</h3></div>
-    <table class="rp-table"><thead><tr><th>Role</th><th>Calls</th><th>OK</th><th>Avg</th><th>p95</th></tr></thead><tbody>${roleRows}</tbody></table>
+    <table class="rp-table"><thead><tr><th>Role</th><th>Calls</th><th>OK</th><th>Avg</th><th>p95</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>${roleRows}</tbody></table>
     <div class="section-header"><h3 class="card-subheading">By operation</h3></div>
-    <table class="rp-table"><thead><tr><th>Role</th><th>Operation</th><th>Calls</th><th>OK</th><th>Avg</th></tr></thead><tbody>${opRows}</tbody></table>
+    <table class="rp-table"><thead><tr><th>Role</th><th>Operation</th><th>Calls</th><th>OK</th><th>Avg</th><th>Tokens</th><th>Cost</th></tr></thead><tbody>${opRows}</tbody></table>
     <div class="section-header"><h3 class="card-subheading">Recent calls</h3></div>
-    <table class="rp-table"><thead><tr><th>Time</th><th>Role</th><th>Operation</th><th>Status</th><th>Latency</th><th>Chars</th></tr></thead><tbody>${recent}</tbody></table>`;
+    <table class="rp-table"><thead><tr><th>Time</th><th>Role</th><th>Operation</th><th>Status</th><th>Latency</th><th>Tokens</th><th>Cost</th><th>Model</th></tr></thead><tbody>${recent}</tbody></table>`;
 }
 
 $('btn-llm-refresh')?.addEventListener('click', renderLlmAudit);

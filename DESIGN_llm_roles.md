@@ -75,8 +75,9 @@ caller labeled a role (so coverage is 100% from day one):
   → return result
 ```
 
-- **Audit record** (lean — latency, not tokens, per the project's cost stance):
-  `{ ts, role, operation, latencyMs, ok, outputChars, model }`.
+- **Audit record:** `{ ts, role, operation, latencyMs, ok, outputChars,
+  inTokens, outTokens, model }` (v2.74.359 added token cost + model from the
+  API `usage`; old records lack tokens and show as `—`).
 - Stored in `chrome.storage.local['llm:audit']`, capped ring (300). Writes are
   serialized through an in-memory promise chain so concurrent calls don't
   clobber the ring (best-effort; cross-context races tolerated).
@@ -85,13 +86,33 @@ caller labeled a role (so coverage is 100% from day one):
   `resolveRoles:perf` (verify pass-rate) is the exemplar. A future
   `propose:perf` could log accept/edit/reject the same way.
 
+## 4b. Role→model policy (v2.74.360)
+
+Model is a *resolved parameter* of the call, not a global constant — because the
+roles cluster into cost/quality tiers (cheap+fast: classify/extract/trivial
+describe; capable: propose/resolve/plan/rich describe). `pickModelForCall(role,
+operation, hasVision)` resolves: **op override → role default → MODEL**, then a
+**vision guard** (an image-bearing call can't be routed to a text-only model;
+all current models are multimodal so it's a safety net). Resolved inside `#call`,
+so it covers every `#call`-routed op; the Opus frontier + `readImage` build their
+own fetch and keep their own model (and currently bypass the audit — a known
+gap). Tiers: `MODEL_FAST` (haiku), `MODEL` (sonnet, default), the frontier
+(opus). v1 defaults everything to `MODEL` (zero regression) and demonstrates the
+fast tier on two harmless describe ops (`generateConversationTitle`,
+`generateSampleQuestion`); flipping a cheap role to `MODEL_FAST` is a one-line
+policy edit once the haiku id is verified and the audit confirms quality holds.
+
+**Cost.** Each call's `costUsd` is computed at the source via `estimateCostUSD`
++ the pricing table and stored in the audit record — so the Studio tab shows $
+without coupling to pricing. Old records lack it → `—`.
+
 ## 5. Studio "LLM" tab
 
 Generalizes the "Resolve" tab to all calls:
-- **By role:** calls, avg + p95 latency, ok-rate, last seen. Plus an
-  `unclassified` row = the labeling backlog.
-- **By operation:** same, drill-down.
-- **Recent calls** table.
+- **By role / by operation:** calls, OK-rate, avg + p95 latency, **tokens**, **$ cost**.
+  Plus an `unclassified` row = the labeling backlog.
+- **Recent calls:** time, role, operation, status, latency, tokens, **$**, **model**.
+- Summary: total calls / tokens / **$**.
 - Refresh / Copy JSON / Clear.
 
 ## 6. Why this is low-risk

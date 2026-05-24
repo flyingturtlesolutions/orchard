@@ -2095,3 +2095,247 @@ bucket surfaces any that don't — "no role ⇒ shows up as debt".
   + role pills.
 - `DESIGN_llm_roles.md` (new) — the framework spec.
 
+## v2.74.359 — LLM audit: token cost + model columns
+
+**Date:** 2026-05-23
+**Decision by:** user ("add cost column to LLM tab in tokens and model used column").
+
+**What.** The audit record now captures `inTokens`/`outTokens` (from the API
+`usage` `#call` already received) and the existing `model`. The Studio "LLM"
+tab surfaces both: a **Tokens** column on the by-role and by-operation tables
+(summed, compact `1.2k` formatting), Tokens (in→out on hover) + **Model** columns
+on recent calls, and total tokens in the summary line. Old records (pre-359)
+lack tokens and render `—`.
+
+**Touched.**
+- `Services/AnthropicService.js` — `#call` audit records `inTokens`/`outTokens`.
+- `studio.js` — `renderLlmAudit` token aggregation, `fmtTok`/`shortModel`
+  helpers, Tokens + Model columns.
+- `DESIGN_llm_roles.md` — audit-record shape updated.
+
+## v2.74.360 — Role→model policy + $ cost column
+
+**Date:** 2026-05-23
+**Decision by:** user (asked whether roles profit from different models → "yes").
+
+**Rationale (recorded).** The roles cluster into cost/quality tiers: cheap+fast
+(classify, simple extract, trivial describe) vs capable (propose, resolve, plan,
+rich describe), with a vision constraint cutting across. The codebase already
+did model-per-call ad hoc (Opus frontier); this systematizes it on the role axis.
+
+**What.**
+- **`pickModelForCall(role, operation, hasVision)`** resolves the model inside
+  `#call`: op override → role default → `MODEL`; then a vision guard (image-
+  bearing call → must be a vision-capable model). Tiers: `MODEL_FAST` (haiku,
+  new), `MODEL` (sonnet, default), frontier (opus, unchanged + still bypasses
+  `#call`). `ROLE_MODEL_POLICY` defaults everything to `MODEL` (zero regression)
+  and demonstrates the fast tier on two harmless ops (`generateConversationTitle`,
+  `generateSampleQuestion`, now labeled). Flipping a cheap role to `MODEL_FAST`
+  is a one-line edit — deferred until the haiku id is verified + measured.
+- **$ cost.** `#call` stores `costUsd` per call (via existing `estimateCostUSD`
+  + pricing table; added a haiku pricing estimate). The Studio "LLM" tab gains a
+  **Cost** column on by-role / by-operation / recent + total $ in the summary —
+  no Studio↔pricing coupling (cost computed at source).
+
+**Caveat flagged.** `MODEL_FAST = 'claude-haiku-4-5'` is a best-guess id; only
+two non-critical ops route to it in v1, and the constant is the single place to
+fix if wrong.
+
+**Touched.**
+- `Services/AnthropicService.js` — `MODEL_FAST` + pricing; `VISION_CAPABLE`,
+  `ROLE_MODEL_POLICY`, `pickModelForCall`; `#call` resolves model + records
+  `costUsd`; labeled 2 trivial describe ops.
+- `studio.js` — `renderLlmAudit` cost aggregation, `fmtUsd`, Cost columns.
+- `DESIGN_llm_roles.md` — § 4b model policy.
+
+## v2.74.361 — Structure: capture dynamic depth (triggers + presenceCondition) — LOCALE_SPEC § 3 (partial B-full)
+
+**Date:** 2026-05-23
+**Decision by:** user (structure should capture "dropdown → reveals menu → option", conditionally present).
+
+**Context.** The structure feature captured static containment (`contains`) +
+roles + multiplicity + overlays, but not the *dynamics* — that a control reveals
+its menu on interaction, and that the menu/options are only present in that
+state. Those are LOCALE_SPEC § 3's `triggers` + `presenceCondition`, previously
+deferred (the unbuilt "B-full"). This adds the two that capture the user's
+dropdown case; `alternatives`/`references`/`derivedFrom` remain deferred.
+
+**What.**
+- **Proposal** (`proposeLocaleStructure`): the prompt + example now ask Claude
+  for `triggers` (ref ids whose presence/content this node's interaction reveals
+  or changes — cross-link, must also appear as nodes) and `presenceCondition`
+  (short phrase for when a not-always-present node exists, paired with
+  multiplicity conditional/optional). The example shows the canonical dropdown:
+  control `triggers` its menu; menu is `multiplicity:conditional` +
+  `presenceCondition:"after the control is opened"`; menu `contains` options.
+- **Sanitizer**: `triggers` clamped to the allowed UID set (deduped, no self,
+  ≤6); `presenceCondition` string ≤120.
+- **Review UI**: per node, a "when present" editable note (shown when
+  multiplicity is conditional/optional) and `⚡ triggers` removable chips. Edits
+  flag the node `edited`; mult change re-renders to toggle the presence input.
+- **Refine** (`#serializePriorStructure`): triggers + presence surfaced so a
+  Re-structure preserves them. **Edit rehydration**: a triggers/presence-only
+  node now counts as non-trivial structure.
+
+**No coverage regression.** `flattenLandmarkNodes` follows only
+`contains`/`alternatives`, so `triggers` (a cross-link) and `presenceCondition`
+(a string) don't affect the save-time coverage check; they ride along on the
+nodes via the existing spread.
+
+**Consumer note.** Still authoring metadata — no runtime executor reads
+`triggers`/`presenceCondition` yet (that's a Tier-2/Workflow consumer). Value is
+the richer perspective + training signal + the substrate a future runtime needs.
+
+**Touched.**
+- `Services/AnthropicService.js` — `proposeLocaleStructure` prompt + sanitizer;
+  `#serializePriorStructure` outline.
+- `Sidepanel/modes/locale-capture.js` — `_renderStructNodeRow` detail rows;
+  presence/untrigger handlers; mult-change re-render; rehydration guard.
+- `assets/sidepanel.css` — detail-row + trigger-chip styles.
+
+## v2.74.362 — Automated structure verification (static checks + poke-and-observe)
+
+**Date:** 2026-05-23
+**Decision by:** user ("automate structure verification … A and C").
+
+**What.** A **✓ Verify** button on a structured Locale auto-checks the
+composition against the live page, producing a per-node verdict (verified /
+failed / unverifiable) so the human reviews only exceptions instead of
+confirming every node. Two layers, routed by claim kind:
+- **A — static (deterministic, no LLM):** content-script `verifyStructure`
+  checks **resolution** (selector matches), **multiplicity** (match count vs
+  one/many/optional), and **containment** (child element is a DOM descendant of
+  its declared parent). Covers the bulk instantly.
+- **C — poke-and-observe (behavioral):** for nodes with `triggers`, snapshot the
+  targets' visibility, fire ONE synthetic click on the (safe-to-click — never a
+  link/submit) source, wait, re-check → did the claimed targets get revealed?
+  Conditional nodes (a menu) verify their presence by being revealed.
+
+Verdicts: `failed` (0 matches, wrong count, not-contained, trigger revealed
+nothing), `unverifiable` (no selector / iframe-bound / unsafe-to-poke /
+conditional with no demonstrating trigger), else `verified`. Conditional/optional
+nodes correctly treat absent-at-rest as expected, not a failure.
+
+**UI.** Per-node badge (✓ auto / ✗ <reason> / ? <reason>) next to the manual
+judge buttons; a toast summary. The transient `autoJudgment`/`autoNote` are
+stripped at save (point-in-time verdict, not authored structure).
+
+**Caveats (recorded).** Synthetic clicks mutate the page (menus left open) —
+acceptable for an explicit verify action. Top-frame only (iframe-bound nodes →
+unverifiable). It verifies *structural* claims, not semantic role correctness
+(that's the deferred critic/self-consistency option D/E).
+
+**Touched.**
+- `ContentScripts/contentScript.js` — `verifyStructure` + `VERIFY_STRUCTURE` (async).
+- `Sidepanel/modes/locale-capture.js` — `onVerifyStructure`, `_structVerdict`,
+  ✓ Verify button + wiring, auto-badge render, save-time strip.
+- `assets/sidepanel.css` — auto-verdict badge styles.
+
+## v2.74.363 — Structure verify: portal-aware containment + check-after-poke
+
+**Date:** 2026-05-23
+**Decision by:** bug report — "✗ not a DOM descendant of its declared parent" for a custom dropdown/modal.
+
+**Cause.** v2.74.362 verified `contains` with strict DOM ancestry
+(`parentEl.contains(childEl)`). But `contains` is *logical* containment
+(LOCALE_SPEC § 3 — "DOM-*like*… logically belong inside"), and custom dropdowns/
+menus/modals are routinely **portaled** to `<body>` level, so they're not DOM
+descendants of their trigger. Strict ancestry hard-failed every portaled popup.
+Also, the static check ran before the poke, so a closed dropdown's
+conditional subtree didn't exist yet → spurious resolution failures.
+
+**Fix.**
+- **Containment never hard-fails now.** Verdicts: `ok` (DOM descendant),
+  `ok-portaled` (linked via ARIA `aria-controls`/`owns`/`labelledby` OR the
+  popup pattern — parent has `aria-haspopup`/`expanded`/combobox + child is a
+  menu/listbox/dialog/…-role or `*menu/dropdown/popover/modal/portal*` class) —
+  both pass; `detached` (resolves, no link) → **unverifiable** "likely portaled
+  — review", not ✗; `parent-missing` → unverifiable.
+- **Static check runs AFTER poke**, so revealed conditional subtrees (the open
+  menu + its options) exist when checked. Trigger reveal-diff snapshots target
+  visibility before poking, as before.
+
+**Known limit.** Sequential pokes can leave multiple menus interfering (last
+opened wins); fine for the common 1–2 dropdown case. Top-frame only.
+
+**Touched.** `ContentScripts/contentScript.js` (`isLogicallyContained`,
+reordered poke→walk), `Sidepanel/modes/locale-capture.js` (`_structVerdict`
+containment mapping).
+
+## v2.74.364 — Structure verify: visual-critic escalation for the residual
+
+**Date:** 2026-05-23
+**Decision by:** user ("poke → monitor → unsure → screenshot → claude … yes").
+
+**What.** After the deterministic pass, the residual claims determinism can't
+settle escalate to a strict visual critic (one post-poke screenshot + one
+`classify` call) — the tiered "cheap-first, LLM only on the residual" pipeline.
+Determinism stays authoritative; only two residual kinds escalate:
+- **`detached` containment** — portaled popups DOM ancestry can't prove. Critic
+  judges visual association → `yes` = verified-visual, `no` = failed-visual,
+  `unsure` = soft review.
+- **`no-change` triggers** — DOM `getBoundingClientRect` visibility is
+  unreliable for canvas/animated/transform widgets. Critic judges whether the
+  target became visible after the poke → rescues false negatives.
+
+`AnthropicService.adjudicateStructure({claims, screenshot})` (classify role, so
+it auto-lands in the LLM audit tab with latency/token/$); claims carry the
+elements' aliases + visible text for grounding; verdicts merge back into the
+results and `_structVerdict` consumes them. Visual verdicts are labeled (badge
+shows "✓ visual" / a 👁 on ✗/?) since they're softer than deterministic ones.
+
+**Boundaries.** Single post-poke screenshot (state may be imperfect for
+multi-dropdown). The critic is prompted to be STRICT (a wrong "yes" is worse
+than "unsure") and never overrides a deterministic ✓/✗ — it only adjudicates the
+residual. `unsafe-to-poke` / absent-conditional are NOT escalated (no visual
+evidence to judge).
+
+**Touched.**
+- `Services/AnthropicService.js` — `adjudicateStructure` (classify critic).
+- `background.js` — `ADJUDICATE_STRUCTURE` (screenshot + critic).
+- `ContentScripts/contentScript.js` — per-node `rect` + `text` for grounding.
+- `Sidepanel/modes/locale-capture.js` — escalation in `onVerifyStructure`,
+  visual-aware `_structVerdict`, `autoVisual` badge, save-time strip.
+
+## v2.74.365 — Virtual container nodes (model an unlandmarked modal/menu holding sections)
+
+**Date:** 2026-05-23
+**Decision by:** user ("dropdown opens a modal with sections … the whole menu can't be selected, only sections" → "Virtual container nodes").
+
+**Problem.** The structure tree was built only from picked landmarks, so a real
+container (modal/dropdown-menu) that wasn't itself landmarked had no node to be
+the parent. Worse, the sanitizer DROPPED any ref-less node and promoted its
+children — so even if Claude proposed a container, its sections were flattened
+into peers, each redundantly carrying the shared trigger/presence (or one
+section mislabeled as the whole menu).
+
+**Fix — virtual nodes.** The composition may now include a **virtual container
+node**: `{ virtual: true, vid, role, multiplicity?, presenceCondition?,
+triggers?, contains: [...] }` — no `ref` (not a landmark), a structural wrapper
+holding the section landmarks, with the shared presence/condition expressed
+ONCE on the container.
+- **Prompt + example**: the dropdown example now shows a virtual `dropdown-menu`
+  (conditional, "after control opened") containing two section landmarks; a rule
+  explains when to use it (and not to duplicate conditions or mislabel a
+  section).
+- **Sanitizer**: keeps ref-less role+contains nodes as virtual (synthetic
+  `vid`), instead of flattening them.
+- **`isLandmarkNodeArray`**: accepts virtual nodes (else the whole structure was
+  misclassified as non-Layer-2). `flattenLandmarkNodes` already skips ref-less
+  nodes + recurses `contains`, so save coverage / landmarkRefs are unaffected
+  (virtual nodes contribute no refs; children flatten normally).
+- **Review UI**: virtual rows render with a ▢ container label (italic, dashed
+  left border), editable role/multiplicity/presence, judge + re-nest — keyed by
+  `vid`. `_findStructNode`/`_locateStructNode` match `ref` OR `vid`.
+- **Verification**: virtual nodes are skipped (no element → no resolution/
+  containment verdict, no badge); their members verify normally and
+  containment-against-a-virtual-parent is skipped (never a false fail). The
+  shared presence is carried by the members' trigger reveal.
+- **Refine** (`#serializePriorStructure`) renders virtual containers so a
+  Re-structure preserves them. Runtime unaffected (locale_ref uses the flat
+  landmarkRefs, never the node tree).
+
+**Touched.** `Core/localeComposition.js`, `Services/AnthropicService.js`
+(prompt + sanitizer + refine outline), `ContentScripts/contentScript.js`
+(skip virtual in checkNode), `Sidepanel/modes/locale-capture.js` (node-id =
+ref∥vid, virtual render + verdict skip), `assets/sidepanel.css`.

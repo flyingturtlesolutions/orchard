@@ -669,7 +669,9 @@ async function mount(payload, mountEl) {
     const _nodeIsStructured = (n) => n && (
       (typeof n.role === 'string' && n.role) || n.multiplicity ||
       (Array.isArray(n.contains) && n.contains.length) ||
-      (Array.isArray(n.alternatives) && n.alternatives.length));
+      (Array.isArray(n.alternatives) && n.alternatives.length) ||
+      (Array.isArray(n.triggers) && n.triggers.length) ||           // v2.74.361 — B-full
+      (typeof n.presenceCondition === 'string' && n.presenceCondition));
     const _hasOverlays = (Array.isArray(prefilled.groupings) && prefilled.groupings.length)
       || (Array.isArray(prefilled.sequences) && prefilled.sequences.length);
     if (_refShaped && (_pl.some(_nodeIsStructured) || _hasOverlays)) {
@@ -1430,12 +1432,13 @@ function _structAliasOf(uid) {
   return lm?.alias ?? lm?.accessibleName ?? (typeof uid === 'string' ? uid.slice(0, 8) : '?');
 }
 
-// v2.74.344 — Phase B-lite: per-node review. Find a node by ref in the
-// structuredLandmarks tree (walks `contains`).
+// v2.74.344 — Phase B-lite: per-node review. Find a node by id in the
+// structuredLandmarks tree (walks `contains`). `id` is a landmark `ref` or a
+// virtual node's `vid` (v2.74.365).
 function _findStructNode(ref, nodes) {
   const list = nodes ?? _locDraft?.structuredLandmarks;
   for (const n of Array.isArray(list) ? list : []) {
-    if (n?.ref === ref) return n;
+    if (n?.ref === ref || n?.vid === ref) return n;
     if (Array.isArray(n?.contains)) {
       const hit = _findStructNode(ref, n.contains);
       if (hit) return hit;
@@ -1483,7 +1486,7 @@ function _locateStructNode(ref, siblings, parentNode) {
   const arr = Array.isArray(siblings) ? siblings : _locDraft?.structuredLandmarks;
   if (!Array.isArray(arr)) return null;
   for (let i = 0; i < arr.length; i++) {
-    if (arr[i]?.ref === ref) return { node: arr[i], siblings: arr, index: i, parentNode: parentNode ?? null };
+    if (arr[i]?.ref === ref || arr[i]?.vid === ref) return { node: arr[i], siblings: arr, index: i, parentNode: parentNode ?? null };
     if (Array.isArray(arr[i]?.contains)) {
       const hit = _locateStructNode(ref, arr[i].contains, arr[i]);
       if (hit) return hit;
@@ -1530,25 +1533,59 @@ function _renderStructNodeRow(n, depth, index) {
     : judgment === 'edited' ? ' loc-struct-judged-edit' : '';
   const mult = _STRUCT_MULT_OPTS.includes(n.multiplicity) ? n.multiplicity : 'one';
   const multOpts = _STRUCT_MULT_OPTS.map(m => `<option value="${m}"${m === mult ? ' selected' : ''}>${m}</option>`).join('');
-  const alias = _structAliasOf(n.ref);
+  // v2.74.365 — node identity is a landmark ref OR a virtual container's vid.
+  const nodeId = n.ref ?? n.vid ?? '';
+  const alias = n.virtual ? '▢ container' : _structAliasOf(n.ref);
   // v2.74.345 — B-mid: outline re-nesting. ➡ nests this node under its
   // preceding sibling (needs index>0); ⬅ promotes it to its grandparent
   // (needs depth>0). Both are structurally cycle-proof — you can only ever
   // move a node relative to its existing position in the tree.
   const canIndent  = (index ?? 0) > 0;
   const canOutdent = depth > 0;
+  // v2.74.362 — auto-verification verdict badge (set by onVerifyStructure).
+  const aj = n.autoJudgment ?? null;
+  const vis = n.autoVisual ? ' 👁' : '';   // v2.74.364 — verdict came from the visual critic
+  const autoBadge = aj === 'verified'    ? `<span class="loc-struct-auto cx-verified" title="${escAttr(n.autoVisual ? 'Confirmed visually (screenshot critic)' : 'Auto-verified against the live page')}">✓ ${n.autoVisual ? 'visual' : 'auto'}</span>`
+    : aj === 'failed'       ? `<span class="loc-struct-auto cx-failed" title="${escAttr(n.autoNote ?? 'failed verification')}">✗${vis} ${escHtml(n.autoNote ?? 'failed')}</span>`
+    : aj === 'unverifiable' ? `<span class="loc-struct-auto cx-unver" title="${escAttr(n.autoNote ?? 'could not verify')}">?${vis} ${escHtml(n.autoNote ?? 'unverifiable')}</span>`
+    : '';
   let html = `
-    <div class="loc-struct-node${judgedClass}" style="padding-left:${depth * 14}px" data-struct-ref="${escAttr(n.ref)}">
-      <button class="loc-struct-move-btn" data-struct-action="outdent" data-ref="${escAttr(n.ref)}" type="button" ${canOutdent ? '' : 'disabled'} title="Promote: move this landmark out one level (to its grandparent)">⬅</button>
-      <button class="loc-struct-move-btn" data-struct-action="indent" data-ref="${escAttr(n.ref)}" type="button" ${canIndent ? '' : 'disabled'} title="Nest: move this landmark inside the landmark above it">➡</button>
-      <span class="loc-struct-alias" title="${escAttr(alias)}">${escHtml(alias)}</span>
-      <input type="text" class="loc-struct-role-input" data-struct-action="role" data-ref="${escAttr(n.ref)}"
+    <div class="loc-struct-node${judgedClass}${n.virtual ? ' loc-struct-vnode' : ''}" style="padding-left:${depth * 14}px" data-struct-ref="${escAttr(nodeId)}">
+      <button class="loc-struct-move-btn" data-struct-action="outdent" data-ref="${escAttr(nodeId)}" type="button" ${canOutdent ? '' : 'disabled'} title="Promote: move out one level (to its grandparent)">⬅</button>
+      <button class="loc-struct-move-btn" data-struct-action="indent" data-ref="${escAttr(nodeId)}" type="button" ${canIndent ? '' : 'disabled'} title="Nest: move inside the node above it">➡</button>
+      <span class="loc-struct-alias${n.virtual ? ' loc-struct-vlabel' : ''}" title="${escAttr(n.virtual ? 'Virtual container — holds landmarks but isn\'t itself a captured landmark' : alias)}">${escHtml(alias)}</span>
+      <input type="text" class="loc-struct-role-input" data-struct-action="role" data-ref="${escAttr(nodeId)}"
              value="${escAttr(n.role ?? '')}" placeholder="role" maxlength="40"
-             title="Semantic role within the parent (LLM-proposed — edit to correct)" />
-      <select class="loc-struct-mult-select" data-struct-action="mult" data-ref="${escAttr(n.ref)}" title="How many at runtime">${multOpts}</select>
-      <button class="loc-struct-judge-btn${judgment === 'accepted' ? ' active' : ''}" data-struct-action="judge" data-ref="${escAttr(n.ref)}" data-judgment="accepted" type="button" title="Accept Claude's proposal for this node as-is">✓</button>
-      <button class="loc-struct-judge-btn loc-struct-judge-rej${judgment === 'rejected-but-kept' ? ' active' : ''}" data-struct-action="judge" data-ref="${escAttr(n.ref)}" data-judgment="rejected-but-kept" type="button" title="Reject the structuring (landmark stays in the locale; flags the proposal as wrong)">✗</button>
+             title="${escAttr(n.virtual ? 'Container role (e.g. dropdown-menu, modal)' : 'Semantic role within the parent (LLM-proposed — edit to correct)')}" />
+      <select class="loc-struct-mult-select" data-struct-action="mult" data-ref="${escAttr(nodeId)}" title="How many at runtime">${multOpts}</select>
+      ${autoBadge}
+      <button class="loc-struct-judge-btn${judgment === 'accepted' ? ' active' : ''}" data-struct-action="judge" data-ref="${escAttr(nodeId)}" data-judgment="accepted" type="button" title="Accept Claude's proposal for this node as-is">✓</button>
+      <button class="loc-struct-judge-btn loc-struct-judge-rej${judgment === 'rejected-but-kept' ? ' active' : ''}" data-struct-action="judge" data-ref="${escAttr(nodeId)}" data-judgment="rejected-but-kept" type="button" title="Reject the structuring (members stay in the locale; flags the proposal as wrong)">✗</button>
     </div>`;
+  // v2.74.361 — B-full (partial): per-node dynamics detail.
+  //  • presenceCondition — shown when the node isn't always present
+  //    (multiplicity conditional/optional): "when present" editable note.
+  //  • triggers — landmarks this node's interaction reveals/changes
+  //    (dropdown → its menu). Rendered as removable chips (reviewer prunes
+  //    Claude's proposal). Both sit indented under the node row.
+  const detailPad = `padding-left:${(depth + 1) * 14}px`;
+  if (mult === 'conditional' || mult === 'optional') {
+    html += `
+      <div class="loc-struct-detail" style="${detailPad}">
+        <span class="loc-struct-detail-label" title="When is this landmark present at runtime?">when present</span>
+        <input type="text" class="loc-struct-presence-input" data-struct-action="presence" data-ref="${escAttr(nodeId)}"
+               value="${escAttr(n.presenceCondition ?? '')}" placeholder="e.g. after the control is opened" maxlength="120" />
+      </div>`;
+  }
+  if (Array.isArray(n.triggers) && n.triggers.length) {
+    const chips = n.triggers.map(t =>
+      `<span class="loc-struct-trigger-chip">${escHtml(_structAliasOf(t))}<button class="loc-struct-trigger-x" data-struct-action="untrigger" data-ref="${escAttr(nodeId)}" data-trigger="${escAttr(t)}" type="button" title="Remove this trigger">✕</button></span>`
+    ).join('');
+    html += `
+      <div class="loc-struct-detail loc-struct-triggers" style="${detailPad}">
+        <span class="loc-struct-detail-label" title="Interacting with this landmark reveals or changes these">⚡ triggers</span>${chips}
+      </div>`;
+  }
   if (Array.isArray(n.contains)) n.contains.forEach((c, i) => { html += _renderStructNodeRow(c, depth + 1, i); });
   return html;
 }
@@ -1603,6 +1640,7 @@ function _renderStructureBar() {
   return `
     <div class="loc-structure-bar">
       <button class="btn-secondary tiny" data-loc-action="propose-structure" type="button" ${canStructure ? '' : 'disabled'} title="${escAttr(btnTitle)}">${btnLabel}</button>
+      ${struct ? `<button class="btn-secondary tiny" data-loc-action="verify-structure" type="button" title="Auto-verify the structure against the live page: resolution + multiplicity + containment (deterministic), and poke-and-observe for triggers. Synthetic clicks interact with the page.">✓ Verify</button>` : ''}
       ${struct ? `<span class="loc-structure-tag" title="Structure proposed by Claude — review below. Saved with the Locale.">structured</span>` : ''}
     </div>
     ${struct ? _renderStructurePreview(struct, _locDraft.groupings, _locDraft.sequences) : ''}`;
@@ -1709,6 +1747,148 @@ async function onProposeStructure() {
   renderLocaleLandmarks();
   updateLocaleSaveButtonState();
   toast?.(`Structured ${lms.length} landmark(s)`);
+}
+
+// v2.74.362 — Auto-verify the structure against the live page (replaces manual
+// confirm with machine verdicts; human reviews only the exceptions). Sends the
+// node tree + a ref→selector map to the content script, which runs static
+// checks (resolution/multiplicity/containment) + poke-and-observe (triggers),
+// then turns the per-ref results into a per-node autoJudgment.
+async function onVerifyStructure() {
+  if (!_locDraft || !Array.isArray(_locDraft.structuredLandmarks) || !_locDraft.structuredLandmarks.length) return;
+  if (_locTabId == null) { showLocaleWarning('No active tab to verify against.'); return; }
+  // ref(uid) → selector, top-frame landmarks only (iframe-bound → unverifiable).
+  const selectors = {};
+  for (const lm of _locDraft.landmarks ?? []) {
+    if (lm?.uid && lm.selector && !lm.frameUrl) selectors[lm.uid] = lm.selector;
+  }
+  const btn = locLandmarksList?.querySelector('[data-loc-action="verify-structure"]');
+  if (btn) { btn.disabled = true; btn.textContent = '✓ Verifying…'; }
+  const draftToken = _locDraft.id;
+  let res;
+  try {
+    res = await chrome.tabs.sendMessage(_locTabId,
+      { type: 'VERIFY_STRUCTURE', payload: { tree: _locDraft.structuredLandmarks, selectors } },
+      { frameId: 0 });
+  } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
+  if (!_locDraft || _locDraft.id !== draftToken) return;
+  if (!res?.success) {
+    showLocaleWarning(`Structure verify failed: ${res?.error ?? 'unknown'}`);
+    renderLocaleLandmarks();
+    return;
+  }
+  const results = res.results || {};
+  // Targets a trigger demonstrably revealed (or that were already present) — a
+  // conditional node in this set has its presence verified.
+  const revealed = new Set();
+  for (const r of Object.values(results)) {
+    if (r && r.triggers) for (const [t, v] of Object.entries(r.triggers)) {
+      if (v === 'verified' || v === 'already-present') revealed.add(t);
+    }
+  }
+
+  // v2.74.364 — Escalate the residual deterministic checks couldn't settle to a
+  // visual critic (one post-poke screenshot + one classify call). Only two
+  // kinds escalate: `detached` containment (portaled popups DOM ancestry can't
+  // prove) and `no-change` triggers (DOM visibility is unreliable for some
+  // widgets). Determinism stays authoritative for everything else.
+  const aliasText = (ref) => { const a = _structAliasOf(ref); const t = results[ref]?.text; return t ? `"${a}" (visible text: "${t}")` : `"${a}"`; };
+  const claims = [];
+  const buildClaims = (nodes, parentRef) => {
+    for (const n of Array.isArray(nodes) ? nodes : []) {
+      const r = results[n.ref] || {};
+      if (r.containment === 'detached' && parentRef) {
+        claims.push({ id: `c:${n.ref}`, kind: 'containment', text: `${aliasText(n.ref)} belongs inside / is the popup of ${aliasText(parentRef)}.` });
+      }
+      if (r.triggers) for (const [t, v] of Object.entries(r.triggers)) {
+        if (v === 'no-change') claims.push({ id: `t:${n.ref}:${t}`, kind: 'trigger', text: `Activating ${aliasText(n.ref)} reveals ${aliasText(t)} — is ${aliasText(t)} now visible?` });
+      }
+      if (Array.isArray(n.contains)) buildClaims(n.contains, n.ref);
+    }
+  };
+  buildClaims(_locDraft.structuredLandmarks, null);
+
+  if (claims.length && _locTabId != null) {
+    if (btn) btn.textContent = '✓ Adjudicating…';
+    let vres;
+    try {
+      vres = await new Promise(r => chrome.runtime.sendMessage({ type: 'ADJUDICATE_STRUCTURE', payload: { tabId: _locTabId, claims } }, r));
+    } catch (e) { vres = { success: false, error: e?.message ?? 'unknown' }; }
+    if (!_locDraft || _locDraft.id !== draftToken) return;
+    if (vres?.success && Array.isArray(vres.verdicts)) {
+      for (const v of vres.verdicts) {
+        if (typeof v?.id !== 'string') continue;
+        if (v.id.startsWith('c:')) {
+          const ref = v.id.slice(2); (results[ref] = results[ref] || {}).containmentVisual = v.hold;
+        } else if (v.id.startsWith('t:')) {
+          const [, src, tgt] = v.id.split(':');
+          const rr = results[src] = results[src] || {}; rr.triggerVisual = rr.triggerVisual || {}; rr.triggerVisual[tgt] = v.hold;
+        }
+      }
+    }
+  }
+
+  let verified = 0, failed = 0, unverifiable = 0, viaVisual = 0;
+  const apply = (nodes) => {
+    for (const n of Array.isArray(nodes) ? nodes : []) {
+      if (n.virtual) {
+        // v2.74.365 — virtual containers have no element; no own verdict (their
+        // correctness is their members' verdicts + the shared trigger/presence).
+        n.autoJudgment = null; n.autoNote = null; n.autoVisual = false;
+      } else {
+        const v = _structVerdict(n, results[n.ref] || {}, revealed);
+        n.autoJudgment = v.judgment; n.autoNote = v.note; n.autoVisual = !!v.visual;
+        if (v.judgment === 'verified') verified++; else if (v.judgment === 'failed') failed++; else unverifiable++;
+        if (v.visual) viaVisual++;
+      }
+      if (Array.isArray(n.contains)) apply(n.contains);
+    }
+  };
+  apply(_locDraft.structuredLandmarks);
+  renderLocaleLandmarks();
+  toast?.(`Structure verified — ${verified} ok, ${failed} failed, ${unverifiable} unverifiable${viaVisual ? ` (${viaVisual} via screenshot)` : ''}`);
+}
+
+// Turn one node's raw verdict map into a verified / failed / unverifiable
+// judgment. Conditional/optional nodes treat absent-at-rest as expected (not a
+// failure) and are verified when a trigger revealed them.
+function _structVerdict(n, r, revealed) {
+  const ok  = (note = '', visual = false) => ({ judgment: 'verified', note, visual });
+  const bad = (note, visual = false) => ({ judgment: 'failed', note, visual });
+  const meh = (note, visual = false) => ({ judgment: 'unverifiable', note, visual });
+  const m = n.multiplicity || 'one';
+  const conditional = (m === 'conditional' || m === 'optional');
+  if (r.resolved === null || r.resolved === undefined) return meh(r.note || 'no selector to test');
+  if (r.resolved === false) {
+    if (conditional) return revealed.has(n.ref) ? ok('revealed by a trigger') : meh('conditional — absent at rest, no trigger demonstrated it');
+    return bad('selector matched 0 elements');
+  }
+  if (m === 'one'  && r.multiplicity === 'mismatch') return bad(`expected one, matched ${r.count}`);
+  if (m === 'many' && r.multiplicity === 'too-few')  return bad(`expected many, matched ${r.count}`);
+  if (m === 'optional' && r.multiplicity === 'too-many') return bad(`expected optional, matched ${r.count}`);
+  // v2.74.363/364 — containment is LOGICAL (portaled dropdowns/modals live at
+  // body level): 'ok' (DOM descendant) and 'ok-portaled' (ARIA/popup link) pass.
+  // 'detached' escalates to the visual critic (v2.74.364): yes → verified-visual,
+  // no → failed-visual, else a soft review note.
+  if (r.containment === 'detached') {
+    if (r.containmentVisual === 'yes') return ok('contained (confirmed visually)', true);
+    if (r.containmentVisual === 'no')  return bad('child is not visually inside its parent', true);
+    return meh('outside parent\'s DOM, no ARIA/popup link — likely portaled; review');
+  }
+  if (r.containment === 'parent-missing') return meh('parent did not resolve');
+  if (r.triggers) {
+    const noChange = Object.entries(r.triggers).filter(([, v]) => v === 'no-change').map(([t]) => t);
+    if (noChange.length) {
+      const tv = r.triggerVisual || {};
+      const anyVisual = noChange.some(t => tv[t]);
+      if (noChange.some(t => tv[t] === 'no'))  return bad('trigger fired but its target did not appear', anyVisual);
+      if (noChange.every(t => tv[t] === 'yes')) return ok('trigger reveal confirmed visually', true);
+      return meh('trigger reveal not confirmed', anyVisual);
+    }
+    const vals = Object.values(r.triggers);
+    if (vals.length && vals.every(v => v === 'unsafe-to-poke' || v === 'no-source')) return meh('trigger not safely testable (would navigate/submit)');
+  }
+  return ok();
 }
 
 // ─── Perspective proposal (LOCALE_SPEC § 13 description-first flow) ────────
@@ -2262,6 +2442,8 @@ function renderLocaleLandmarks() {
   // v2.74.336 — Phase C-lite: wire the "Structure with Claude" button.
   const _structBtn = locLandmarksList.querySelector('[data-loc-action="propose-structure"]');
   if (_structBtn) _structBtn.addEventListener('click', onProposeStructure);
+  const _verifyBtn = locLandmarksList.querySelector('[data-loc-action="verify-structure"]');
+  if (_verifyBtn) _verifyBtn.addEventListener('click', onVerifyStructure);
 
   // v2.74.344 — Phase B-lite: per-node structure review. role/multiplicity
   // edits update the node in place (no re-render → preserve input focus) and
@@ -2283,6 +2465,27 @@ function renderLocaleLandmarks() {
         if (!node) return;
         node.multiplicity = el.value;
         _markStructJudgment(node, 'edited');
+        // v2.74.361 — re-render so the "when present" input shows/hides as the
+        // node becomes conditional/optional (or no longer is).
+        renderLocaleLandmarks();
+      });
+    } else if (action === 'presence') {
+      // v2.74.361 — edit in place (no re-render → preserve focus).
+      el.addEventListener('input', () => {
+        const node = _findStructNode(ref);
+        if (!node) return;
+        node.presenceCondition = el.value.trim();
+        _markStructJudgment(node, 'edited');
+      });
+    } else if (action === 'untrigger') {
+      // v2.74.361 — prune a Claude-proposed trigger ref.
+      el.addEventListener('click', () => {
+        const node = _findStructNode(ref);
+        if (!node || !Array.isArray(node.triggers)) return;
+        node.triggers = node.triggers.filter(t => t !== el.dataset.trigger);
+        if (!node.triggers.length) delete node.triggers;
+        _markStructJudgment(node, 'edited');
+        renderLocaleLandmarks();
       });
     } else if (action === 'judge') {
       el.addEventListener('click', () => {
@@ -6398,6 +6601,14 @@ async function saveLocale() {
               authoringMetadata: { capturedBy: 'llm-proposed', capturedAt: now, userJudgment: 'accepted', reviewedAt: now } }
           : { ref: lm.uid });
       }
+    }
+    // v2.74.362 — strip transient auto-verification state (autoJudgment/
+    // autoNote) so it isn't persisted into the composition (it's a point-in-
+    // time verdict, re-derived by ✓ Verify; clones, doesn't mutate the draft).
+    if (Array.isArray(structuredNodes)) {
+      const stripAuto = (nodes) => nodes.map(({ autoJudgment, autoNote, autoVisual, ...rest }) =>
+        (Array.isArray(rest.contains) ? { ...rest, contains: stripAuto(rest.contains) } : rest));
+      structuredNodes = stripAuto(structuredNodes);
     }
     // Build the locale payload — refs + (optional) structured nodes. Drop the
     // hydrated landmarks[] / draft-only fields so reads don't pick up copies.
