@@ -4051,6 +4051,49 @@ locale-capture.js` (matchedGoal in the grounded-intent card), `manifest.json`.
 
 ---
 
+## v2.74.429 — Validation (Notion SPA): reject framework auto-ids in capture selectors
+
+**Date:** 2026-05-24
+**Decision by:** user (capture-validation round). Exploring a Notion page (React
+SPA, Meta atomic CSS, `useId()` ids) surfaced a real capture break.
+
+**Bug.** ~30 revealed modal items got selectors like `#\:r2s\:` — React 18
+`useId()` outputs. They resolve uniquely at capture but **regenerate every render**,
+so the selector is dead on reload. Cause: `computeUniqueSelector` (the poke/snapshot
+path) and the secondary id-builder took ANY unique `id`, while `isStableIdent`
+(which already rejects React useId / emotion / css-modules / long-digit ids) was
+only consulted by the L0 picker paths.
+
+**Fix.** Both `computeUniqueSelector` (line ~146) and the `(2) id` builder
+(line ~1574) now gate the id fast-path on `isStableIdent(el.id)` — ephemeral ids
+fall through to the class/positional segment builder, which produces a selector
+that actually survives a reload. Verified: `isStableIdent` rejects `:r2s:`/`:r3c:`/
+`123`/`css-…`, accepts `skip-to-content`/`main`. contentScript syntax-checks.
+
+**Also confirmed working on this artifact:** L1 depth captured 7 modals (share
+menu, page-actions ⋅⋅⋅, workspace switcher, teamspace menu, search, new-page menu)
+with trigger→revealed mapping; L2 synthesized 8 sensible goals; regions
+(header/main/sidebar-nav) detected; affordances accurate.
+
+**Diagnosed, NOT yet fixed (need care / lower priority):**
+- **Overlay-dedup over-merge.** `dedupeOverlayLayers` merged the page-actions menu
+  (`9wdd2n`) into the "Private" sidebar menu (`1jjlxt4`) — distinct menus that share
+  identical *atomic-CSS class* selectors (`div.x87ps6o…`) on similar buttons, which
+  the selector-overlap test counts as "same overlay". A pure selector-overlap
+  heuristic can't distinguish "same modal opened 3 ways" (Pixabay — should merge)
+  from "different menus reusing atomic classes" (Notion — shouldn't). A robust fix
+  needs a DOM-side distinctiveness/identity signal from the poke snapshot; tightening
+  the threshold risks regressing Pixabay's auth-modal merge.
+- **Container noise.** Revealed `menu`/`dialog`/`listbox` *container* elements were
+  captured as `action` features with long concatenated labels — should be skipped
+  (they're the layer wrapper, not an actionable item).
+- **`kind:"action"` for role `input`** (e.g. `1lby0ob`) — already fixed in v2.74.428;
+  this artifact predates that build (re-capture will type them `input`).
+
+**Touched.** `ContentScripts/contentScript.js` (two id-builders), `manifest.json`.
+
+---
+
 ## v2.74.428 — Fidelity: type revealed modal inputs/links by role (mergeDepthFromControls)
 
 **Date:** 2026-05-24
