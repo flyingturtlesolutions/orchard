@@ -249,10 +249,15 @@ export function mergeDepthFromControls(model, controls) {
     const k = norm(f.label);
     if (k && !byLabel.has(k)) byLabel.set(k, f);
   }
+  // v2.74.428 — Type a revealed child by its role/tagName. The poke snapshot
+  // reports tagNames ("input", "a") as well as ARIA roles ("textbox", "link"), so
+  // match both — otherwise modal inputs/links fell through to 'action' (a password
+  // field typed 'action' won't rank for an '…-input' role). Mirrors how L0
+  // enumeration types these kinds.
   const revealKindOf = (role) => {
-    const r = String(role || '').toLowerCase();
-    if (/textbox|combobox|searchbox|textarea/.test(r)) return 'input';
-    if (/(^|[^a-z])link/.test(r)) return 'navigation';
+    const r = String(role || '').toLowerCase().trim();
+    if (/textbox|combobox|searchbox|textarea|(^|[^a-z])input([^a-z]|$)/.test(r)) return 'input';
+    if (/(^|[^a-z])(a|link)([^a-z]|$)/.test(r)) return 'navigation';
     return 'action';
   };
 

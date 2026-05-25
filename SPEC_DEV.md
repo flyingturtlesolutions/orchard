@@ -4051,6 +4051,32 @@ locale-capture.js` (matchedGoal in the grounded-intent card), `manifest.json`.
 
 ---
 
+## v2.74.428 — Fidelity: type revealed modal inputs/links by role (mergeDepthFromControls)
+
+**Date:** 2026-05-24
+**Decision by:** user ("take it"). Capture-quality nit surfaced reviewing the
+real Pixabay L2 Locale: revealed auth-modal inputs (e.g. `Username or email`,
+`Password`) were typed `kind:"action"`.
+
+**Cause.** `revealKindOf` (in `mergeDepthFromControls`) only mapped ARIA roles
+`textbox|combobox|searchbox|textarea` → input and `link` → navigation. But the
+poke snapshot reports **tagNames** too (`"input"`, `"a"`), which fell through to
+`action`. So a password field typed `action` wouldn't rank for an `…-input` role
+in `featuresForRole`, and revealed menu links weren't `navigation`.
+
+**Fix.** `revealKindOf` now matches both vocabularies: `…|input` → `input`,
+`a|link` → `navigation` (word-boundary guarded so "navigation"/"menuitem" don't
+false-match). Mirrors how L0 enumeration types these kinds, so a feature's `kind`
+is consistent whether captured at rest or revealed. The dependent
+`interaction.pattern` (`type` for inputs) / `effect` (`navigate` for links) follow.
+
+**Verification.** `Core/locale.js` syntax-checks; a 5-assertion node test through
+`mergeDepthFromControls` confirms input/textbox→input, a→navigation, button→action.
+
+**Touched.** `Core/locale.js` (`revealKindOf`), `manifest.json`.
+
+---
+
 ## v2.74.427 — #2 P4–P5: retire the `pageStructure` artifact (consolidation complete)
 
 **Date:** 2026-05-24
