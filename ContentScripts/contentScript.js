@@ -3168,6 +3168,17 @@ function detectRepeatingContentBlocks() {
     let matchCount = 0;
     try { matchCount = document.querySelectorAll(sel).length; } catch { matchCount = 0; }
     if (matchCount < 3) continue;                     // selector must actually repeat
+    // v2.74.430 — Reject HIGH-COUNT repeats that carry NO content/semantic class
+    // token. innerText on a layout wrapper bubbles up its children's text, so the
+    // contentful check above can't tell a real card from a generic flex/grid
+    // wrapper. A design-system utility class (e.g. Expedia `uitk-layout-flex-item`
+    // ×170, `uitk-layout-position-relative` ×73) recurs far past any real content
+    // grid but carries only layout classes; a real collection either has a content
+    // token (card/tile/photo/…) or stays under the ceiling. Count-gated so an
+    // all-layout-class but genuine grid (e.g. Pixabay's photo grid ×30) survives.
+    const sigStr = g.classes.join(' ').toLowerCase();
+    const hasContentToken = /card|tile|product|listing|result|article|thumbnail|teaser|gallery|photo|image|media|review|story|\bpost\b|hit|\bentry\b/.test(sigStr);
+    if (!hasContentToken && matchCount > 60) continue;
     let sampleText = '';
     try { sampleText = (g.els[0].innerText || g.els[0].textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60); } catch { /* */ }
     blocks.push({ tag: g.tag.toLowerCase(), selector: sel, count: matchCount, hasImage: withImg >= 2, sampleText });

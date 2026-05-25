@@ -4051,6 +4051,45 @@ locale-capture.js` (matchedGoal in the grounded-intent card), `manifest.json`.
 
 ---
 
+## v2.74.430 — Validation (Expedia): reject layout-utility classes as content collections
+
+**Date:** 2026-05-25
+**Decision by:** user (capture-validation round). Exploring Expedia (uitk design
+system) surfaced garbage collections.
+
+**Bug.** `detectRepeatingContentBlocks` emitted two noise collections: 170×
+`div.uitk-layout-flex-item` (labeled "Need to book 9 or more rooms?") and 73×
+`div.uitk-layout-position-relative` (labeled "Dates…"). These are CSS layout/utility
+wrappers, not content. They passed the `contentful`/`sized` filters because
+`innerText` on a wrapper bubbles up its descendants' text, so any wrapper around
+content "looks contentful." The 73-item noise collection even **swallowed the
+date-picker field** and propagated into 6 goals' `achievableVia`.
+
+**Fix.** After the repeat-count check, reject a block when it carries **no
+content/semantic class token** (`card|tile|product|listing|result|article|
+thumbnail|teaser|gallery|photo|image|media|review|story|post|hit|entry`) **and**
+`matchCount > 60`. Count-gated so a genuine grid with only layout classes (e.g.
+Pixabay's photo grid ×30) survives, while design-system utility classes that recur
+far past any real grid are dropped. Verified vs both sites' real selectors (8/8):
+drops Expedia's 170/73, keeps Expedia cards (37/42), tabs (25), and Pixabay's
+layout-class grid (30), image overlay (25), menuItem (40).
+
+**Also confirmed working on this artifact:** L2 goal modeling was excellent —
+correctly shared the ONE search form (Where-to / Dates / Travelers / Search) across
+all six tab-goals (stays/flights/cars/packages/things-to-do/cruises), each
+differentiated by its tab. Depth captured the Shop-travel, Sign-in, and nav
+dropdowns. No ephemeral-id issue (validates v2.74.429 didn't regress).
+
+**Diagnosed, lower priority:** Expedia's destination/date fields are *fake-input
+buttons* (`uitk-fake-input`) that open overlays — captured as `action`/swallowed
+rather than as disclosures with their typeahead/calendar layers (the poke sweep
+didn't open them). A richer capture would treat fake-input triggers as disclosures.
+
+**Touched.** `ContentScripts/contentScript.js` (`detectRepeatingContentBlocks`
+content-token guard), `manifest.json`.
+
+---
+
 ## v2.74.429 — Validation (Notion SPA): reject framework auto-ids in capture selectors
 
 **Date:** 2026-05-24
