@@ -20,7 +20,7 @@
 
 import { Logger, LOG_LEVEL }  from './Core/Logger.js';
 import { installGlobalErrorHandlers } from './Core/ErrorCapture.js';
-import * as PageModel          from './Core/pageModel.js';   // v2.74.397 — Perspective/PageModel builder + query API
+import * as Locale          from './Core/locale.js';   // v2.74.397 — Perspective/Locale builder + query API
 import * as Outcomes           from './Core/outcomes.js';    // v2.74.413 — OutcomeEvent stream + rollups
 import { ExecutionEngine }    from './Services/ExecutionEngine.js';
 import { StorageManager }     from './Services/StorageManager.js';
@@ -949,66 +949,37 @@ function _normalizeUrlForPerspectiveCache(url) {
   }
 }
 
-// v2.74.367 — pageStructure artifact cache. The "+ Perspective" depth sweep
-// (poke→observe→restore over the whole page) is expensive and mutates the page,
-// so its artifact is memoized per (groundId, normalized URL) exactly like the
-// auto-discovery cache. The sweep runs only when no FRESH artifact exists
-// (staleness judged by `driftHash` + age at read-time); "Re-explore" forces a
-// rewrite. Shape mirrors PERSPECTIVE_DISCOVERY_CACHE:
-//   key: 'pageStructureCache'
-//   value: { [groundId]: { [normalizedUrl]: { structure, url, capturedAt } } }
-const PAGE_STRUCTURE_CACHE_KEY = 'pageStructureCache';
-// Artifacts older than this are treated as stale (page may have changed).
-const PAGE_STRUCTURE_TTL_MS = 1000 * 60 * 60 * 24 * 7;   // 7 days
+// v2.74.427 — #2 P5: the pageStructure artifact cache is retired. The "+ Perspective"
+// depth sweep still runs (EXPLORE_PAGE_STRUCTURE) and its in-memory `structure` is
+// folded into the Locale (mergeDepthFromControls); only the Locale is persisted.
 
-async function _readPageStructureCache(groundId, cacheKey) {
-  if (!groundId || !cacheKey) return null;
-  try {
-    const got = await chrome.storage.local.get(PAGE_STRUCTURE_CACHE_KEY);
-    const map = got?.[PAGE_STRUCTURE_CACHE_KEY] ?? {};
-    return map[groundId]?.[cacheKey] ?? null;
-  } catch (e) {
-    Logger.warn('background', `pageStructureCache read failed: ${e.message}`);
-    return null;
-  }
-}
-
-async function _writePageStructureCache(groundId, cacheKey, entry) {
-  if (!groundId || !cacheKey) return;
-  const got = await chrome.storage.local.get(PAGE_STRUCTURE_CACHE_KEY);
-  const map = got?.[PAGE_STRUCTURE_CACHE_KEY] ?? {};
-  if (!map[groundId]) map[groundId] = {};
-  map[groundId][cacheKey] = entry;
-  await chrome.storage.local.set({ [PAGE_STRUCTURE_CACHE_KEY]: map });
-}
-
-// v2.74.397 — PageModel cache (PAGEMODEL_SPEC). Parallel to pageStructureCache and
+// v2.74.397 — Locale cache (PAGEMODEL_SPEC). Parallel to pageStructureCache and
 // keyed identically (per ground + normalized URL); additive/non-breaking while the
 // old pageStructure artifact is still the live one for resolve/grounding.
-//   key: 'pageModelCache'
+//   key: 'localeCache'
 //   value: { [groundId]: { [normalizedUrl]: { model, url, capturedAt } } }
-const PAGE_MODEL_CACHE_KEY = 'pageModelCache';
-const PAGE_MODEL_TTL_MS = 1000 * 60 * 60 * 24 * 7;   // 7 days
+const LOCALE_CACHE_KEY = 'localeCache';
+const LOCALE_TTL_MS = 1000 * 60 * 60 * 24 * 7;   // 7 days
 
-async function _readPageModelCache(groundId, cacheKey) {
+async function _readLocaleCache(groundId, cacheKey) {
   if (!groundId || !cacheKey) return null;
   try {
-    const got = await chrome.storage.local.get(PAGE_MODEL_CACHE_KEY);
-    const map = got?.[PAGE_MODEL_CACHE_KEY] ?? {};
+    const got = await chrome.storage.local.get(LOCALE_CACHE_KEY);
+    const map = got?.[LOCALE_CACHE_KEY] ?? {};
     return map[groundId]?.[cacheKey] ?? null;
   } catch (e) {
-    Logger.warn('background', `pageModelCache read failed: ${e.message}`);
+    Logger.warn('background', `localeCache read failed: ${e.message}`);
     return null;
   }
 }
 
-async function _writePageModelCache(groundId, cacheKey, entry) {
+async function _writeLocaleCache(groundId, cacheKey, entry) {
   if (!groundId || !cacheKey) return;
-  const got = await chrome.storage.local.get(PAGE_MODEL_CACHE_KEY);
-  const map = got?.[PAGE_MODEL_CACHE_KEY] ?? {};
+  const got = await chrome.storage.local.get(LOCALE_CACHE_KEY);
+  const map = got?.[LOCALE_CACHE_KEY] ?? {};
   if (!map[groundId]) map[groundId] = {};
   map[groundId][cacheKey] = entry;
-  await chrome.storage.local.set({ [PAGE_MODEL_CACHE_KEY]: map });
+  await chrome.storage.local.set({ [LOCALE_CACHE_KEY]: map });
 }
 
 // v2.74.413 — OUTCOMES slice 2: the ONE unified append-only stream (OUTCOMES_SPEC
@@ -1057,11 +1028,11 @@ async function _outcomeRollups(groundId) {
   };
 }
 
-// v2.74.385 — Flatten a cached pageStructure artifact into verified
-// {label, role, selector, via?} hints for resolveRoles to reuse. Each control's
-// own selector resolved during exploration, and each control that REVEALED
-// content was confirmed to actually open it — far better than letting Claude
-// guess a positional selector on a hashed-class page.
+// v2.74.385 — Flatten the cached Locale's Features into verified
+// {label, role, selector} hints for resolveRoles to reuse. Each Feature's selector
+// was synthesized from a real element at capture (incl. disclosure triggers + their
+// revealed children, folded in from the Explore sweep) — far better than letting
+// Claude guess a positional selector on a hashed-class page. (v2.74.426 #2 P3.)
 async function _knownSelectorsForUrl(groundId, url) {
   if (!groundId) return null;
   const cacheKey = _normalizeUrlForPerspectiveCache(url);
@@ -1073,41 +1044,22 @@ async function _knownSelectorsForUrl(groundId, url) {
     seenSel.add(item.selector); out.push(item);
   };
 
-  // (1) pageStructure poked controls + revealed children — the STRONGEST hints:
-  // each control's own selector resolved during exploration, and each control that
-  // REVEALED content was confirmed to actually open it.
+  // v2.74.426 — #2 P3: the whole-page Locale catalog is the SINGLE source of resolve
+  // hints. Its L1 features already include the disclosure triggers + their revealed
+  // children (folded from the poke sweep via mergeDepthFromControls), plus off-screen
+  // controls + content collections the sweep never reaches. Each was synthesized from
+  // a real element at capture; downstream INSPECT verifies every chosen selector, so a
+  // stale hint is caught, not trusted. (Resolve = selection over the catalog.) The raw
+  // pageStructure-controls pass is gone — it duplicated this with less curation.
   try {
-    const entry = await _readPageStructureCache(groundId, cacheKey);
-    const controls = entry?.structure?.controls ?? [];
-    // v2.74.387 — cap revealed children PER CONTROL so one giant nav menu
-    // (e.g. an "Explore" mega-menu with 42 links) can't exhaust the budget and
-    // crowd out later controls (the "Log in" opener + its modal's children).
-    const PER_CONTROL = 10;
-    for (const c of controls) {
-      if (out.length >= TOTAL) break;
-      if (c?.selector && c?.observation === 'reveal') push({ label: c.label || '', role: c.role || 'control', selector: c.selector });
-      let k = 0;
-      for (const rv of Array.isArray(c?.revealed) ? c.revealed : []) {
-        if (out.length >= TOTAL || k >= PER_CONTROL) break;
-        if (rv?.selector) { push({ label: rv.label || '', role: rv.role || '?', selector: rv.selector, via: c.label || '' }); k++; }
-      }
-    }
-  } catch (e) { Logger.warn('background', `_knownSelectorsForUrl (structure) failed: ${e.message}`); }
-
-  // (2) v2.74.398 — whole-page PageModel catalog. Covers off-screen controls
-  // (the top search box when the user was scrolled away) + content collections
-  // the poke sweep never reaches. Each was synthesized from a real element at
-  // capture; downstream INSPECT verifies every chosen selector, so a stale hint
-  // is caught, not trusted. (Resolve = selection over the catalog, PAGEMODEL_SPEC § 7.)
-  try {
-    const pm = await _readPageModelCache(groundId, cacheKey);
+    const pm = await _readLocaleCache(groundId, cacheKey);
     const feats = pm?.model?.features ? Object.values(pm.model.features) : [];
     const KIND_PRI = { input: 0, action: 1, collection: 2, navigation: 3, disclosure: 4 };
     feats
       .filter((f) => f?.selector && Object.prototype.hasOwnProperty.call(KIND_PRI, f.kind))
       .sort((a, b) => KIND_PRI[a.kind] - KIND_PRI[b.kind])
       .forEach((f) => push({ label: f.label || '', role: f.a11yRole || f.kind, selector: f.selector }));
-  } catch (e) { Logger.warn('background', `_knownSelectorsForUrl (pagemodel) failed: ${e.message}`); }
+  } catch (e) { Logger.warn('background', `_knownSelectorsForUrl (locale) failed: ${e.message}`); }
 
   return out.length ? out : null;
 }
@@ -4042,32 +3994,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
           }
 
-          // v2.74.368 — Depth: feed the cached pageStructure artifact (the "+
-          // Perspective" exploration sweep) so the author can propose roles for
-          // post-interaction content the static snapshot can't show. Read-only
-          // here; the artifact is built/cached by EXPLORE_PAGE_STRUCTURE.
-          let pageStructure = null;
+          // v2.74.426 — #2 P2: depth now rides on the Locale (its layers), so propose
+          // reads ONE artifact. The poke→reveal sweep is folded into the Locale during
+          // Explore; the separate pageStructure read is gone.
+          let localeForPropose = null;
           if (groundId) {
             try {
-              const entry = await _readPageStructureCache(groundId, _normalizeUrlForPerspectiveCache(snap.url ?? url));
-              // Only use a FRESH artifact (within TTL) — matches the UI's
-              // freshness gate, so a skipped/stale sweep stays static-only.
-              if (entry?.structure && (Date.now() - (entry.capturedAt ?? 0)) < PAGE_STRUCTURE_TTL_MS) pageStructure = entry.structure;
+              const pm = await _readLocaleCache(groundId, _normalizeUrlForPerspectiveCache(snap.url ?? url));
+              if (pm?.model && (Date.now() - (pm.capturedAt ?? 0)) < LOCALE_TTL_MS) localeForPropose = pm.model;
             } catch (e) {
-              Logger.warn('background', `PROPOSE_PERSPECTIVES: pageStructure read failed (continuing): ${e.message}`);
-            }
-          }
-
-          // v2.74.403 — Whole-page feature catalog (PageModel / Perspective capability
-          // model) so propose grounds roles in the page's real affordances —
-          // including off-screen features. Fresh-gated like pageStructure.
-          let pageModelForPropose = null;
-          if (groundId) {
-            try {
-              const pm = await _readPageModelCache(groundId, _normalizeUrlForPerspectiveCache(snap.url ?? url));
-              if (pm?.model && (Date.now() - (pm.capturedAt ?? 0)) < PAGE_MODEL_TTL_MS) pageModelForPropose = pm.model;
-            } catch (e) {
-              Logger.warn('background', `PROPOSE_PERSPECTIVES: pageModel read failed (continuing): ${e.message}`);
+              Logger.warn('background', `PROPOSE_PERSPECTIVES: locale read failed (continuing): ${e.message}`);
             }
           }
 
@@ -4079,24 +4015,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             screenshot,
             siblingPerspectives,
             registryLandmarks,
-            pageStructure,
-            pageModel  : pageModelForPropose,
+            locale  : localeForPropose,
           });
           if (!proposal || !Array.isArray(proposal.options) || proposal.options.length === 0) {
             sendResponse({ success: false, error: 'Claude returned no usable perspectives — try a more specific intent.' });
             return;
           }
-          // meta lets the UI label exactly what context this run used.
-          const revealingControls = (pageStructure && Array.isArray(pageStructure.controls))
-            ? pageStructure.controls.filter(c => c?.observation === 'reveal').length : 0;
+          // meta lets the UI label exactly what context this run used. Depth = the
+          // Locale's non-surface layers (revealed content).
+          const revealingControls = localeForPropose
+            ? Object.values(localeForPropose.layers || {}).filter(l => l && l.kind !== 'surface').length : 0;
           const meta = {
             screenshot: !!screenshot,
             siblingPerspectives: Array.isArray(siblingPerspectives) ? siblingPerspectives.length : 0,
             registryLandmarks: Array.isArray(registryLandmarks) ? registryLandmarks.length : 0,
-            pageStructure: !!pageStructure,
+            pageStructure: revealingControls > 0,
             revealingControls,
-            pageModel: !!pageModelForPropose,
-            pageModelFeatures: pageModelForPropose ? Object.keys(pageModelForPropose.features || {}).length : 0,
+            locale: !!localeForPropose,
+            localeFeatures: localeForPropose ? Object.keys(localeForPropose.features || {}).length : 0,
           };
           sendResponse({ success: true, options: proposal.options, meta });
         } catch (err) {
@@ -4285,13 +4221,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (affordances) { structure.affordances = affordances; Logger.info('explore', `affordances described (${affordances.length} chars)`); }
           } catch (e) { Logger.warn('background', `describePageAffordances failed (continuing): ${e.message}`); }
 
+          // v2.74.427 — #2 P5: pageStructure is no longer persisted as its own
+          // artifact. The sweep's `structure` stays in-memory — folded into the
+          // Locale below (mergeDepthFromControls) + returned for the sidepanel's
+          // post-Explore chip; only the Locale is cached.
           const cacheKey = _normalizeUrlForPerspectiveCache(pageUrl);
-          if (groundId) {
-            try { await _writePageStructureCache(groundId, cacheKey, { structure, url: pageUrl, capturedAt: structure.capturedAt }); }
-            catch (e) { Logger.warn('background', `pageStructureCache write failed: ${e.message}`); }
-          }
 
-          // v2.74.399 — Also build the PageModel catalog (L0) from a read-only
+          // v2.74.399 — Also build the Locale catalog (L0) from a read-only
           // enumerate pass, so the two artifacts stay in sync and Resolve's catalog
           // consumer (_knownSelectorsForUrl) has data without a separate manual
           // build. Best-effort; never fails the Explore response. The content
@@ -4299,23 +4235,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           try {
             const enr = await chrome.tabs.sendMessage(tabId, { type: 'ENUMERATE_PAGE' }, { frameId: 0 });
             if (enr?.success) {
-              const model = PageModel.buildPageModel(enr.features, enr.meta);
+              const model = Locale.buildLocale(enr.features, enr.meta);
               // v2.74.404 — L1 depth: merge THIS sweep's poke→reveal data (already
               // captured in `structure.controls`) into the model as Layers, so
               // disclosures (Explore / All images) become resolvable triggers — no
               // re-poking. The manual 🗂 catalog stays L0 (it never poked).
-              try { PageModel.mergeDepthFromControls(model, structure?.controls || []); }
+              try { Locale.mergeDepthFromControls(model, structure?.controls || []); }
               catch (e) { Logger.warn('background', `mergeDepthFromControls failed (continuing): ${e.message}`); }
               // v2.74.408 — L2: synthesize structured Goals from the catalog (LLM)
               // and attach them (feeds intent-grounding + perspective seeding). The
               // manual 🗂 catalog stays L0/L1 (no LLM goals call).
               try {
                 const g = await AnthropicService.synthesizeGoals({ model, url: enr.meta?.url ?? pageUrl, title, affordances: structure.affordances });
-                if (g?.goals?.length) PageModel.attachGoals(model, g.goals);
+                if (g?.goals?.length) Locale.attachGoals(model, g.goals);
               } catch (e) { Logger.warn('background', `synthesizeGoals failed (continuing): ${e.message}`); }
-              if (groundId) await _writePageModelCache(groundId, _normalizeUrlForPerspectiveCache(enr.meta?.url ?? pageUrl), { model, url: enr.meta?.url ?? pageUrl, capturedAt: model.coverage.lastExploredAt });
+              // v2.74.426 — #2 P1: the free-text affordance description lives ON the
+              // Locale now (was only on pageStructure). Consumers read locale.affordances.
+              if (structure.affordances) model.affordances = structure.affordances;
+              if (groundId) await _writeLocaleCache(groundId, _normalizeUrlForPerspectiveCache(enr.meta?.url ?? pageUrl), { model, url: enr.meta?.url ?? pageUrl, capturedAt: model.coverage.lastExploredAt });
               const layerCount = Object.keys(model.layers || {}).length - 1;   // minus the surface layer
-              Logger.info('explore', `PageModel built alongside Explore: ${Object.keys(model.features).length} feature(s), ${Math.max(0, layerCount)} depth layer(s), ${Object.keys(model.goals || {}).length} goal(s), fidelity ${model.coverage.fidelity}`);
+              Logger.info('explore', `Locale built alongside Explore: ${Object.keys(model.features).length} feature(s), ${Math.max(0, layerCount)} depth layer(s), ${Object.keys(model.goals || {}).length} goal(s), fidelity ${model.coverage.fidelity}`);
 
               // v2.74.417 — OUTCOMES: poke-reveal events (OUTCOMES_SPEC § 5). A
               // poke that REVEALED is a free, deterministic "this element IS a
@@ -4347,7 +4286,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 }
               } catch (e) { Logger.warn('background', `poke-reveal outcomes emit failed (continuing): ${e.message}`); }
             }
-          } catch (e) { Logger.warn('background', `PageModel build during Explore failed (continuing): ${e.message}`); }
+          } catch (e) { Logger.warn('background', `Locale build during Explore failed (continuing): ${e.message}`); }
 
           sendResponse({ success: true, structure, cacheKey });
         } catch (err) {
@@ -4358,8 +4297,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
-    // v2.74.393 — Ground a user's raw intent in the page. Reads the cached
-    // pageStructure affordance description and asks Claude for a refined,
+    // v2.74.393 — Ground a user's raw intent in the page. Reads the Locale's L2
+    // goals (preferred) + its affordance description and asks Claude for a refined,
     // page-grounded intent + achievability verdict (preserving the user's goal).
     // Payload: { tabId, groundId?, intent } → { success, groundedIntent,
     //   achievable, note, hadAffordance } | { success:false, error }.
@@ -4370,18 +4309,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (typeof intent !== 'string' || !intent.trim()) { sendResponse({ success: false, error: 'intent required' }); return; }
           let url = '', title = '';
           if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); url = t?.url ?? ''; title = t?.title ?? ''; } catch { /* */ } }
-          // v2.74.409 — Prefer the PageModel's STRUCTURED goals (L2) to anchor the
+          // v2.74.409 — Prefer the Locale's STRUCTURED goals (L2) to anchor the
           // grounding; fall back to the free-text affordance description. Both come
           // from Explore.
           let affordances = null;
           let goals = null;
           if (groundId && url) {
             const key = _normalizeUrlForPerspectiveCache(url);
-            try { const entry = await _readPageStructureCache(groundId, key); affordances = entry?.structure?.affordances ?? null; } catch { /* */ }
             try {
-              const pm = await _readPageModelCache(groundId, key);
+              const pm = await _readLocaleCache(groundId, key);
+              affordances = pm?.model?.affordances ?? null;   // v2.74.426 — #2 P1: from the Locale now
               const gs = pm?.model?.goals ? Object.values(pm.model.goals) : [];
-              if (gs.length && (Date.now() - (pm.capturedAt ?? 0)) < PAGE_MODEL_TTL_MS) {
+              if (gs.length && (Date.now() - (pm.capturedAt ?? 0)) < LOCALE_TTL_MS) {
                 goals = gs.map(g => ({ label: g.label, description: g.description }));
               }
             } catch { /* */ }
@@ -4403,27 +4342,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
-    // v2.74.367 — Read a cached pageStructure artifact (no sweep). Payload:
-    //   { groundId, url }  → { success, structure|null, fresh, capturedAt }
-    // `fresh` is false when the artifact is older than PAGE_STRUCTURE_TTL_MS;
-    // the caller decides whether to trigger a fresh sweep.
-    case 'GET_PAGE_STRUCTURE': {
-      (async () => {
-        try {
-          const { groundId = null, url = '' } = payload ?? {};
-          if (!groundId) { sendResponse({ success: true, structure: null, fresh: false }); return; }
-          const cacheKey = _normalizeUrlForPerspectiveCache(url);
-          const entry = await _readPageStructureCache(groundId, cacheKey);
-          if (!entry) { sendResponse({ success: true, structure: null, fresh: false }); return; }
-          const age = Date.now() - (entry.capturedAt ?? 0);
-          sendResponse({ success: true, structure: entry.structure ?? null, fresh: age < PAGE_STRUCTURE_TTL_MS, capturedAt: entry.capturedAt ?? null });
-        } catch (err) {
-          Logger.error('background', `GET_PAGE_STRUCTURE failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
 
     // v2.74.352 — "Resolve roles": one LLM call returns a CSS selector for each
     // of a perspective's roles (or null to abstain), given screenshot + rich
@@ -4519,7 +4437,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // modal/menu) can't resolve against the static DOM. Open the trigger, snapshot
     // the REVEALED state, resolve the hidden roles against it, verify each WHILE
     // OPEN, then close. Trigger selector comes from the resolved trigger role
-    // (structured) or, when absent, the cached pageStructure artifact.
+    // (structured) or, when absent, the Locale's disclosure features.
     // Payload: { tabId, groundId?, triggerSelector?, triggerLabel?, roles } →
     //          { success, resolutions:[{role,selector,confidence,justification,matchedCount}], trigger }
     case 'RESOLVE_REVEALED_ROLES': {
@@ -4536,20 +4454,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           try { await chrome.scripting.executeScript({ target: { tabId }, files: ['ContentScripts/contentScript.js'] }); } catch { /* */ }
 
           // Resolve the trigger selector: prefer the one passed (the resolved
-          // trigger role), else match the cached pageStructure artifact.
+          // trigger role), else match the Locale's disclosure features (v2.74.426 #2 P3 —
+          // was the pageStructure artifact; the sweep's triggers live on the Locale now).
           let trigger = (typeof triggerSelector === 'string' && triggerSelector) ? triggerSelector : null;
           if (!trigger && groundId) {
             try {
-              const entry = await _readPageStructureCache(groundId, _normalizeUrlForPerspectiveCache(url));
-              const controls = (entry?.structure?.controls ?? []).filter(c => c?.observation === 'reveal' && c?.selector);
+              const pm = await _readLocaleCache(groundId, _normalizeUrlForPerspectiveCache(url));
+              const layers = pm?.model?.layers || {};
+              const discs = (pm?.model?.features ? Object.values(pm.model.features) : [])
+                .filter(f => f?.kind === 'disclosure' && f?.selector && f?.reveals);
               const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
               const want = norm(triggerLabel).split(' ').filter(Boolean);
               let best = null;
-              if (want.length) best = controls.find(c => { const l = norm(c.label); return want.some(w => w.length > 2 && l.includes(w)); });
-              if (!best) best = controls.find(c => c.overlay) || controls[0];
+              if (want.length) best = discs.find(f => { const l = norm(f.label); return want.some(w => w.length > 2 && l.includes(w)); });
+              if (!best) best = discs.find(f => layers[f.reveals]?.overlay) || discs[0];
               trigger = best?.selector ?? null;
-              if (trigger) Logger.info('explore', `RESOLVE_REVEALED_ROLES: trigger from artifact = "${(best.label || '').slice(0, 40)}"`);
-            } catch (e) { Logger.warn('background', `RESOLVE_REVEALED_ROLES artifact lookup failed: ${e.message}`); }
+              if (trigger) Logger.info('explore', `RESOLVE_REVEALED_ROLES: trigger from Locale = "${(best.label || '').slice(0, 40)}"`);
+            } catch (e) { Logger.warn('background', `RESOLVE_REVEALED_ROLES Locale lookup failed: ${e.message}`); }
           }
           if (!trigger) { sendResponse({ success: false, error: 'no trigger to reveal the hidden layer — resolve the trigger role first, or run Explore' }); return; }
 
@@ -4632,10 +4553,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             catch (e) { Logger.warn('background', `RESOLVE_ROLE_VISUAL screenshot failed: ${e.message}`); }
           }
           if (!screenshot) { sendResponse({ success: true, found: false, note: 'no screenshot (tab not the active one in its window)' }); return; }
-          // Reuse the cached page-affordance description for grounding context.
+          // Reuse the Locale's page-affordance description for grounding context.
           let affordances = null;
           if (groundId) {
-            try { const entry = await _readPageStructureCache(groundId, _normalizeUrlForPerspectiveCache(url)); affordances = entry?.structure?.affordances ?? null; } catch { /* */ }
+            try { const pm = await _readLocaleCache(groundId, _normalizeUrlForPerspectiveCache(url)); affordances = pm?.model?.affordances ?? null; } catch { /* */ }
           }
           const loc = await AnthropicService.locateRoleRegion({
             role: role.role, description: role.description ?? '', intent,
@@ -4663,64 +4584,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
-    // v2.74.397 — Build a PageModel (Perspective capability catalog) at tier L0:
-    // read-only whole-page enumeration in the content script → buildPageModel →
-    // cache under the new pageModelCache key (additive; old pageStructure stays
-    // live). Payload: { tabId, groundId? } → { success, model, cacheKey }.
-    case 'BUILD_PAGEMODEL': {
-      (async () => {
-        try {
-          const { tabId, groundId = null } = payload ?? {};
-          if (typeof tabId !== 'number') { sendResponse({ success: false, error: 'tabId required' }); return; }
-          let tabInfo;
-          try { tabInfo = await chrome.tabs.get(tabId); }
-          catch (e) { sendResponse({ success: false, error: `Tab not found: ${e.message}` }); return; }
-          const url = tabInfo?.url ?? '';
-          if (!/^https?:/i.test(url)) { sendResponse({ success: false, error: 'restricted URL' }); return; }
-          try { await chrome.scripting.executeScript({ target: { tabId }, files: ['ContentScripts/contentScript.js'] }); }
-          catch (e) { Logger.warn('background', `BUILD_PAGEMODEL inject failed (continuing): ${e.message}`); }
-          let enr;
-          try { enr = await chrome.tabs.sendMessage(tabId, { type: 'ENUMERATE_PAGE' }, { frameId: 0 }); }
-          catch (e) { sendResponse({ success: false, error: `enumerate failed: ${e.message}` }); return; }
-          if (!enr?.success) { sendResponse({ success: false, error: enr?.error ?? 'enumerate returned no payload' }); return; }
-          const model = PageModel.buildPageModel(enr.features, enr.meta);
-          const cacheKey = _normalizeUrlForPerspectiveCache(enr.meta?.url ?? url);
-          // v2.74.405 — The manual catalog is read-only (no poke), so it can't
-          // discover depth itself — but if a FRESH pageStructure exists (a prior
-          // Explore poked this page), merge its reveal data so the catalog reaches
-          // L1 too. Otherwise it stays L0 (run Explore to capture depth).
-          if (groundId) {
-            try {
-              const ps = await _readPageStructureCache(groundId, cacheKey);
-              if (ps?.structure && Array.isArray(ps.structure.controls) && (Date.now() - (ps.capturedAt ?? 0)) < PAGE_STRUCTURE_TTL_MS) {
-                PageModel.mergeDepthFromControls(model, ps.structure.controls);
-              }
-            } catch (e) { Logger.warn('background', `BUILD_PAGEMODEL depth merge failed (continuing): ${e.message}`); }
-          }
-          if (groundId) {
-            try { await _writePageModelCache(groundId, cacheKey, { model, url: enr.meta?.url ?? url, capturedAt: model.coverage.lastExploredAt }); }
-            catch (e) { Logger.warn('background', `pageModelCache write failed: ${e.message}`); }
-          }
-          Logger.info('explore', `BUILD_PAGEMODEL done: ${Object.keys(model.features).length} feature(s) across ${model.coverage.bands} band(s), fidelity ${model.coverage.fidelity}`);
-          sendResponse({ success: true, model, cacheKey });
-        } catch (err) {
-          Logger.error('background', `BUILD_PAGEMODEL failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
-
-    // v2.74.397 — Read a cached PageModel (no enumeration). Payload: { groundId, url }
+    // v2.74.397 — Read a cached Locale (no enumeration). Payload: { groundId, url }
     //   → { success, model|null, fresh, capturedAt? }.
-    case 'GET_PAGEMODEL': {
+    case 'GET_LOCALE': {
       (async () => {
         try {
           const { groundId = null, url } = payload ?? {};
           if (!groundId || !url) { sendResponse({ success: true, model: null, fresh: false }); return; }
-          const entry = await _readPageModelCache(groundId, _normalizeUrlForPerspectiveCache(url));
+          const entry = await _readLocaleCache(groundId, _normalizeUrlForPerspectiveCache(url));
           if (!entry?.model) { sendResponse({ success: true, model: null, fresh: false }); return; }
-          const fresh = (Date.now() - (entry.capturedAt ?? 0)) < PAGE_MODEL_TTL_MS;
+          const fresh = (Date.now() - (entry.capturedAt ?? 0)) < LOCALE_TTL_MS;
           sendResponse({ success: true, model: entry.model, fresh, capturedAt: entry.capturedAt });
         } catch (err) {
           sendResponse({ success: false, error: err.message });
@@ -4766,17 +4639,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
           // v2.74.415 — map each resolved/corrected selector to its catalog
           // Feature id so Feature.health keys land (slice 4). Build a verbatim
-          // selector→id index from the cached pageModel for this ground+URL.
-          let selToFid = null, pmEntry = null, pmKey = null;
+          // selector→id index from the cached locale for this ground+URL.
+          let selToFid = null, localeEntry = null, localeKey = null;
           try {
-            pmKey = _normalizeUrlForPerspectiveCache(run.url ?? ctx.localeId ?? '');
-            pmEntry = await _readPageModelCache(groundId, pmKey);
-            const feats = pmEntry?.model?.features ? Object.values(pmEntry.model.features) : [];
+            localeKey = _normalizeUrlForPerspectiveCache(run.url ?? ctx.localeId ?? '');
+            localeEntry = await _readLocaleCache(groundId, localeKey);
+            const feats = localeEntry?.model?.features ? Object.values(localeEntry.model.features) : [];
             if (feats.length) {
               selToFid = new Map();
               for (const f of feats) if (f?.selector && f?.id && !selToFid.has(f.selector)) selToFid.set(f.selector, f.id);
             }
-          } catch (e) { Logger.warn('background', `EMIT_RESOLVE_OUTCOMES: pageModel index failed (continuing): ${e.message}`); }
+          } catch (e) { Logger.warn('background', `EMIT_RESOLVE_OUTCOMES: locale index failed (continuing): ${e.message}`); }
 
           const featureIdForRole = (_role, selector) => (selector && selToFid ? (selToFid.get(selector) ?? null) : null);
           const events = Outcomes.eventsFromResolveRun(run, { groundId, ...ctx, featureIdForRole });
@@ -4785,11 +4658,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
           // v2.74.415 — active decay (OUTCOMES_SPEC § 7, GROUND_SPEC § 0.16). Fold
           // the full stream's Feature health and push decayed confidence/lifecycle
-          // back onto the cached pageModel features — a resolve-miss flags JUST
+          // back onto the cached locale features — a resolve-miss flags JUST
           // that feature stale-suspected, never its siblings. Write back if changed.
           try {
-            if (pmEntry?.model?.features) {
-              const feats = pmEntry.model.features;
+            if (localeEntry?.model?.features) {
+              const feats = localeEntry.model.features;
               const health = (await _outcomeRollups(groundId)).featureHealth;
               let changed = 0;
               for (const [fid, f] of Object.entries(feats)) {
@@ -4819,8 +4692,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 changed++;
               }
               if (changed) {
-                await _writePageModelCache(groundId, pmKey, pmEntry);
-                Logger.info('outcomes', `pageModel ${pmKey}: ${changed} feature update(s) (decay + provenance)`);
+                await _writeLocaleCache(groundId, localeKey, localeEntry);
+                Logger.info('outcomes', `locale ${localeKey}: ${changed} feature update(s) (decay + provenance)`);
               }
             }
           } catch (e) { Logger.warn('background', `EMIT_RESOLVE_OUTCOMES: decay/provenance pass failed (continuing): ${e.message}`); }

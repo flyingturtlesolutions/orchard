@@ -116,10 +116,6 @@ let _exploreToken = 0;
 //   _groundInFlight: true while the grounding call round-trips.
 let _groundIntentResult = null;
 let _groundInFlight = false;
-// v2.74.397 — PageModel (Perspective capability catalog) build-slice-1 inspector.
-//   _pageModelResult: the built model | null;  _pageModelInFlight: BUILD_PAGEMODEL round-trip.
-let _pageModelResult = null;
-let _pageModelInFlight = false;
 // v2.74.233 — Per-landmark "refining with Claude" status text. Set on
 // the landmark idx when the picker just captured and Claude is being
 // invoked to refine; cleared when Claude responds (success or fail).
@@ -250,17 +246,17 @@ function renderHTML() {
       <header class="dbg-perspective-header">
         <div class="dbg-perspective-title-row">
           <span class="dbg-perspective-badge">Perspective capture</span>
-          <span data-loc="ground-label" class="dbg-perspective-ground-label">on Ground: —</span>
+          <span data-perspective="ground-label" class="dbg-perspective-ground-label">on Ground: —</span>
         </div>
         <div class="dbg-perspective-meta">
           <span class="dbg-perspective-meta-label">Active tab</span>
-          <span data-loc="tab-url" class="dbg-perspective-meta-value mono">—</span>
+          <span data-perspective="tab-url" class="dbg-perspective-meta-value mono">—</span>
         </div>
         <div class="dbg-perspective-meta">
           <span class="dbg-perspective-meta-label">Resolve difficulty</span>
-          <span data-loc="complexity-badge" class="dbg-perspective-complexity" title="How hard this page is for ⚡ Resolve roles (selector resolution).">—</span>
+          <span data-perspective="complexity-badge" class="dbg-perspective-complexity" title="How hard this page is for ⚡ Resolve roles (selector resolution).">—</span>
         </div>
-        <div data-loc="warning" class="dbg-perspective-warning hidden"></div>
+        <div data-perspective="warning" class="dbg-perspective-warning hidden"></div>
       </header>
 
       <section class="dbg-perspective-meta-card dbg-perspective-card" data-card-id="meta">
@@ -271,12 +267,12 @@ function renderHTML() {
         <div class="dbg-perspective-card-body">
           <label class="dbg-perspective-field">
             <span class="dbg-perspective-field-label">Name</span>
-            <input type="text" data-loc="name-input" maxlength="80"
+            <input type="text" data-perspective="name-input" maxlength="80"
                    placeholder="e.g. search-results-page" />
           </label>
           <label class="dbg-perspective-field">
             <span class="dbg-perspective-field-label">Intent</span>
-            <textarea data-loc="description-input" rows="2" maxlength="280"
+            <textarea data-perspective="description-input" rows="2" maxlength="280"
                       placeholder="What do you want to accomplish on this kind of page?"></textarea>
           </label>
         </div>
@@ -301,7 +297,7 @@ function renderHTML() {
           </button>
         </div>
         <div class="dbg-perspective-card-body">
-          <div data-loc="perspective-body" class="dbg-perspective-perspective-body"></div>
+          <div data-perspective="perspective-body" class="dbg-perspective-perspective-body"></div>
         </div>
       </section>
 
@@ -325,10 +321,10 @@ function renderHTML() {
             <span class="dbg-perspective-card-label">iframe contexts</span>
             <span class="dbg-perspective-card-optional">(optional)</span>
           </button>
-          <button data-loc="iframe-contexts-add" class="btn-secondary tiny" type="button">+ Add iframe context</button>
+          <button data-perspective="iframe-contexts-add" class="btn-secondary tiny" type="button">+ Add iframe context</button>
         </div>
         <div class="dbg-perspective-card-body">
-          <div data-loc="iframe-contexts-list" class="dbg-perspective-iframe-contexts-list">
+          <div data-perspective="iframe-contexts-list" class="dbg-perspective-iframe-contexts-list">
             <div class="dbg-perspective-iframe-contexts-empty">No iframe contexts. Landmarks picked from iframes auto-populate this list.</div>
           </div>
           <p class="dbg-perspective-iframe-contexts-hint">
@@ -354,19 +350,19 @@ function renderHTML() {
           </button>
           <label class="dbg-perspective-predicates-op-label">
             <span>combine with</span>
-            <select data-loc="predicates-operator" class="dbg-perspective-predicates-operator">
+            <select data-perspective="predicates-operator" class="dbg-perspective-predicates-operator">
               <option value="and">AND (all must pass)</option>
               <option value="or">OR (any must pass)</option>
               <option value="not">NOT (single predicate, negated)</option>
             </select>
           </label>
-          <button data-loc="predicates-add" class="btn-secondary tiny" type="button">+ Add predicate</button>
+          <button data-perspective="predicates-add" class="btn-secondary tiny" type="button">+ Add predicate</button>
         </div>
         <div class="dbg-perspective-card-body">
-          <div data-loc="predicates-list" class="dbg-perspective-predicates-list">
+          <div data-perspective="predicates-list" class="dbg-perspective-predicates-list">
             <div class="dbg-perspective-predicates-empty">No additional predicates. Perspective activates on URL pattern match alone.</div>
           </div>
-          <p class="dbg-perspective-predicates-hint" data-loc="predicates-hint">
+          <p class="dbg-perspective-predicates-hint" data-perspective="predicates-hint">
             Perspective is active when URL pattern matches AND every predicate below evaluates true. Unverifiable predicates (e.g., landmark not on page) fail closed.
           </p>
         </div>
@@ -380,11 +376,11 @@ function renderHTML() {
           </button>
         </div>
         <div class="dbg-perspective-card-body">
-          <div data-loc="landmarks-list" class="dbg-perspective-landmarks-list">
+          <div data-perspective="landmarks-list" class="dbg-perspective-landmarks-list">
             <div class="dbg-perspective-landmarks-empty">No landmarks yet.</div>
           </div>
           <div class="dbg-perspective-landmarks-footer">
-            <button data-loc="add-landmark" class="btn-secondary tiny" type="button" title="Click, then pick an element on the page. The landmark card appears after the pick is complete and Claude refines the selector.">+ Pick landmark</button>
+            <button data-perspective="add-landmark" class="btn-secondary tiny" type="button" title="Click, then pick an element on the page. The landmark card appears after the pick is complete and Claude refines the selector.">+ Pick landmark</button>
           </div>
         </div>
       </section>
@@ -406,34 +402,34 @@ function renderHTML() {
             <span class="dbg-perspective-card-chevron">▾</span>
             <span class="dbg-perspective-card-label">Active state preview</span>
           </button>
-          <button data-loc="active-state-refresh" class="btn-secondary tiny" type="button" title="Re-evaluate predicates against the current tab">Refresh</button>
+          <button data-perspective="active-state-refresh" class="btn-secondary tiny" type="button" title="Re-evaluate predicates against the current tab">Refresh</button>
         </div>
         <div class="dbg-perspective-card-body">
-          <div data-loc="active-state-result" class="dbg-perspective-active-state-result">
+          <div data-perspective="active-state-result" class="dbg-perspective-active-state-result">
             <span class="dbg-perspective-active-state-loading">⌛ Evaluating…</span>
           </div>
         </div>
       </section>
 
-      <section class="dbg-perspective-events" data-loc="events-section">
-        <button class="dbg-perspective-events-header" data-loc="events-toggle" type="button" aria-expanded="false">
+      <section class="dbg-perspective-events" data-perspective="events-section">
+        <button class="dbg-perspective-events-header" data-perspective="events-toggle" type="button" aria-expanded="false">
           <span class="dbg-perspective-events-chevron">▸</span>
           <span class="dbg-perspective-events-label">Substrate events</span>
-          <span class="dbg-perspective-events-count" data-loc="events-count"></span>
-          <span class="dbg-perspective-events-stale-badge hidden" data-loc="events-stale-badge" title="Landmarks on this Ground currently marked stale-suspected"></span>
+          <span class="dbg-perspective-events-count" data-perspective="events-count"></span>
+          <span class="dbg-perspective-events-stale-badge hidden" data-perspective="events-stale-badge" title="Landmarks on this Ground currently marked stale-suspected"></span>
         </button>
-        <div class="dbg-perspective-events-body hidden" data-loc="events-body">
+        <div class="dbg-perspective-events-body hidden" data-perspective="events-body">
           <!-- v2.74.272 — Health summary banner. Aggregates from the
                already-fetched landmarks (lifecycle counts) and events
                (recent activity by kind). Single-glance overview of
                Ground-wide substrate state. -->
-          <div class="dbg-perspective-events-health" data-loc="events-health"></div>
-          <div class="dbg-perspective-events-list" data-loc="events-list"></div>
-          <div class="dbg-perspective-events-bulk-outcome hidden" data-loc="events-bulk-outcome"></div>
+          <div class="dbg-perspective-events-health" data-perspective="events-health"></div>
+          <div class="dbg-perspective-events-list" data-perspective="events-list"></div>
+          <div class="dbg-perspective-events-bulk-outcome hidden" data-perspective="events-bulk-outcome"></div>
           <div class="dbg-perspective-events-footer">
             <span class="dbg-perspective-events-hint">Per-Ground ring buffer (max 200 events). Includes runtime recovery, verifier outcomes, and action-effect observations.</span>
-            <button class="btn-secondary tiny" data-loc="events-verify-all" type="button" title="Re-probe every landmark currently in stale-suspected. Cached selector works → verified. Heuristic recovery → verified + selector updated. Both fail → stale-confirmed.">Verify all stale</button>
-            <button class="btn-secondary tiny" data-loc="events-clear" type="button" title="Clear the event log for this Ground">Clear log</button>
+            <button class="btn-secondary tiny" data-perspective="events-verify-all" type="button" title="Re-probe every landmark currently in stale-suspected. Cached selector works → verified. Heuristic recovery → verified + selector updated. Both fail → stale-confirmed.">Verify all stale</button>
+            <button class="btn-secondary tiny" data-perspective="events-clear" type="button" title="Clear the event log for this Ground">Clear log</button>
           </div>
         </div>
       </section>
@@ -444,16 +440,16 @@ function renderHTML() {
              don't have to guess what's missing. Hidden when save is
              enabled. Title attribute on the button mirrors the
              text for hover discoverability. -->
-        <div data-loc="save-reason" class="dbg-perspective-save-reason hidden"></div>
+        <div data-perspective="save-reason" class="dbg-perspective-save-reason hidden"></div>
         <div class="dbg-perspective-actions-buttons">
-          <button data-loc="save" class="btn-primary" type="button" disabled>Save Perspective</button>
-          <button data-loc="cancel" class="btn-secondary" type="button">Cancel</button>
+          <button data-perspective="save" class="btn-primary" type="button" disabled>Save Perspective</button>
+          <button data-perspective="cancel" class="btn-secondary" type="button">Cancel</button>
         </div>
       </section>
 
-      <div data-loc="pick-banner" class="dbg-perspective-pick-banner hidden">
+      <div data-perspective="pick-banner" class="dbg-perspective-pick-banner hidden">
         <span class="dbg-perspective-pick-text">Click an element on the page to pick a selector. Press Esc to cancel.</span>
-        <button data-loc="pick-cancel" class="btn-secondary tiny" type="button">Cancel pick</button>
+        <button data-perspective="pick-cancel" class="btn-secondary tiny" type="button">Cancel pick</button>
       </div>
     </div>
   `;
@@ -466,7 +462,7 @@ async function mount(payload, mountEl) {
   mountEl.innerHTML = renderHTML();
 
   // Resolve DOM refs (scoped to mountEl).
-  const q = (sel) => mountEl.querySelector(`[data-loc="${sel}"]`);
+  const q = (sel) => mountEl.querySelector(`[data-perspective="${sel}"]`);
   perspectiveGroundLabelEl   = q('ground-label');
   perspectiveTabUrlEl        = q('tab-url');
   perspectiveWarningEl       = q('warning');
@@ -838,8 +834,6 @@ async function unmount() {
   _exploreToken++;   // invalidate any in-flight sweep landing after unmount
   _groundIntentResult = null;
   _groundInFlight = false;
-  _pageModelResult = null;
-  _pageModelInFlight = false;
 
   // Clear DOM refs (no leak — but clarity).
   perspectiveGroundLabelEl = perspectiveTabUrlEl = perspectiveWarningEl = null;
@@ -1890,7 +1884,6 @@ function _renderPerspectivePanel() {
     <p class="dbg-perspective-perspective-intro">Write your <b>Intent</b> above, then propose. Claude suggests named <b>roles</b> (using a page screenshot + this Ground's existing perspectives & landmarks); you pick the real element for each.</p>
     ${_renderExploreRow()}
     ${_renderGroundIntentRow(intent)}
-    ${_renderPageModelPanel()}
     <div class="dbg-perspective-perspective-buttons">
       <button class="btn-secondary tiny" data-perspective-action="propose-perspectives" type="button" ${canPropose ? '' : 'disabled'} title="${escAttr(intent.length === 0 ? emptyTitle : "Propose perspective options for this intent, using a page screenshot + this Ground's perspectives & landmarks.")}">${label}</button>
     </div>`;
@@ -1987,9 +1980,6 @@ function _renderPerspectivePanel() {
     ?.addEventListener('click', () => onSkipExplore());
   perspectiveBody.querySelector('[data-perspective-action="cancel-explore"]')
     ?.addEventListener('click', () => onCancelExplore());
-  // v2.74.397 — PageModel catalog inspector (build slice 1).
-  perspectiveBody.querySelector('[data-perspective-action="build-pagemodel"]')
-    ?.addEventListener('click', () => onBuildPageModel());
   // v2.74.393 — grounded-intent controls.
   perspectiveBody.querySelector('[data-perspective-action="ground-intent"]')
     ?.addEventListener('click', () => onGroundIntent());
@@ -2120,8 +2110,9 @@ async function onProposePerspectives() {
   toast?.(`Proposed ${res.options.length} option(s) in ${(elapsedMs / 1000).toFixed(1)}s`);
 }
 
-// ─── v2.74.368 — pageStructure depth exploration ──────────────────────────
-// Summarize an artifact (or its background-side stats) into the chip info.
+// ─── v2.74.368 — depth exploration (the Explore sweep) ─────────────────────
+// Summarize the IN-MEMORY sweep result (post-Explore) into the chip info — keeps
+// the rich diagnostics (candidates/poked/scrolled) the sweep produced this run.
 function _summarizePageStructure(structure) {
   if (!structure) return null;
   const controls = Array.isArray(structure.controls) ? structure.controls : [];
@@ -2135,8 +2126,23 @@ function _summarizePageStructure(structure) {
   };
 }
 
-// On mount: ask the background whether a FRESH artifact already exists for this
-// page. Fresh → reuse silently ('fresh'); otherwise leave the offer ('none').
+// v2.74.427 — #2 P4: summarize DEPTH from the cached Locale (on-mount freshness).
+// The sweep is folded into the Locale's layers; per-run sweep diagnostics
+// (candidates/poked/scrolled) aren't persisted, so the chip shows just the depth.
+function _summarizeLocaleDepth(model) {
+  if (!model) return null;
+  const layers = Object.values(model.layers || {}).filter((l) => l && l.kind !== 'surface');
+  const totalRevealed = layers.reduce((n, l) => n + (Array.isArray(l.features) ? l.features.length : 0), 0);
+  const feats = model.features ? Object.values(model.features) : [];
+  return {
+    controls: feats.filter((f) => f?.kind === 'disclosure').length,
+    revealing: layers.length, totalRevealed, capturedAt: model.coverage?.lastExploredAt ?? null,
+  };
+}
+
+// On mount: ask the background whether a FRESH Locale already exists for this page
+// (v2.74.427 #2 P4 — was GET_PAGE_STRUCTURE). Fresh → reuse silently ('fresh');
+// otherwise leave the offer ('none').
 async function _refreshPageStructureStatus() {
   if (!_perspectiveDraft) return;
   const draftToken = _perspectiveDraft.id;
@@ -2145,14 +2151,14 @@ async function _refreshPageStructureStatus() {
   let res;
   try {
     res = await new Promise(r => chrome.runtime.sendMessage({
-      type: 'GET_PAGE_STRUCTURE', payload: { groundId: _perspectiveGroundId, url },
+      type: 'GET_LOCALE', payload: { groundId: _perspectiveGroundId, url },
     }, r));
   } catch { return; }
   if (!_perspectiveDraft || _perspectiveDraft.id !== draftToken) return;   // unmounted / switched
   if (_pageStructureStatus === 'building') return;          // a sweep started meanwhile — don't clobber
-  if (res?.success && res.structure && res.fresh) {
+  if (res?.success && res.model && res.fresh) {
     _pageStructureStatus = 'fresh';
-    _pageStructureInfo = _summarizePageStructure(res.structure);
+    _pageStructureInfo = _summarizeLocaleDepth(res.model);
     _renderPerspectivePanel();
   }
   // stale or absent → leave 'none' (the offer); no re-render needed.
@@ -2252,124 +2258,6 @@ function onUseGroundedIntent() {
   toast?.('Intent grounded — now Propose perspectives');
 }
 
-// v2.74.397 — Build slice 1 inspector: capture a read-only L0 PageModel (Perspective
-// capability catalog) of the active tab and show the Feature list. No authoring
-// wired to it yet — this exercises BUILD_PAGEMODEL + the catalog so captures are
-// visible while the architecture is built out.
-async function onBuildPageModel() {
-  if (!_perspectiveDraft) return;
-  if (_perspectiveTabId == null) { showPerspectiveWarning('No active tab to enumerate.'); return; }
-  if (_pageModelInFlight) return;
-  const draftToken = _perspectiveDraft.id;
-  _pageModelInFlight = true; _renderPerspectivePanel();
-  let res;
-  try {
-    res = await new Promise(r => chrome.runtime.sendMessage({
-      type: 'BUILD_PAGEMODEL', payload: { tabId: _perspectiveTabId, groundId: _perspectiveGroundId },
-    }, r));
-  } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
-  if (!_perspectiveDraft || _perspectiveDraft.id !== draftToken) return;
-  _pageModelInFlight = false;
-  if (!res?.success || !res.model) {
-    showPerspectiveWarning(`Build page catalog failed: ${res?.error ?? 'no model'}`);
-    _renderPerspectivePanel();
-    return;
-  }
-  _pageModelResult = res.model;
-  _renderPerspectivePanel();
-  const n = Object.keys(res.model.features || {}).length;
-  toast?.(`Page catalog — ${n} feature(s) across ${res.model.coverage?.bands ?? '?'} band(s)`);
-}
-
-// Render the PageModel catalog panel: offer (build) / building / result (Features
-// grouped by kind, each with selectorKind + band, capped per kind). Read-only.
-function _renderPageModelPanel() {
-  if (_pageModelInFlight) {
-    return `<div class="dbg-perspective-pagemodel building"><span>⏳ Enumerating page (L0)…</span></div>`;
-  }
-  const m = _pageModelResult;
-  if (!m) {
-    return `<div class="dbg-perspective-pagemodel offer">
-        <button class="btn-secondary tiny" data-perspective-action="build-pagemodel" type="button" title="Capture a read-only L0 capability catalog of this page — every Feature (input/action/disclosure/navigation/collection/region) with its selector + scroll position. Build slice 1; not yet wired to authoring.">🗂 Build page catalog (L0)</button>
-      </div>`;
-  }
-  const feats = Object.values(m.features || {});
-  const byKind = {};
-  for (const f of feats) (byKind[f.kind] ||= []).push(f);
-  const order = ['input', 'action', 'disclosure', 'navigation', 'collection', 'region', 'composite'];
-  const present = order.filter((k) => byKind[k]?.length);
-  const counts = present.map((k) => `${byKind[k].length} ${k}`).join(' · ');
-  const rows = present.map((k) => {
-    const list = byKind[k];
-    const shown = list.slice(0, 8);
-    const items = shown.map((f) => {
-      const corr = f.provenance?.correctedByHuman;
-      const stale = f.lifecycle === 'stale-suspected';
-      const titleBits = [f.selector || ''];
-      if (corr) titleBits.push(`✎ corrected${corr.role ? ` (${corr.role})` : ''}: ${corr.from || '?'} → ${corr.to || '?'}`);
-      if (stale) titleBits.push('⚠ stale-suspected (recent resolve-misses lowered confidence)');
-      return `
-        <div class="dbg-perspective-pm-feat">
-          <span class="dbg-perspective-pm-kind ${escAttr(k)}">${escHtml(k)}</span>
-          <span class="dbg-perspective-pm-label" title="${escAttr(titleBits.filter(Boolean).join('\n'))}">${escHtml(f.label || '(no label)')}</span>
-          <span class="dbg-perspective-pm-meta">${escHtml(f.selectorKind || '?')}${f.location ? ` · b${f.location.band}` : ''}${f.selectorVerified ? ' · ✓' : ''}${f.hidden ? ' · 🔒' : ''}${corr ? ' · ✎' : ''}${stale ? ' · ⚠' : ''}</span>
-        </div>`;
-    }).join('');
-    const more = list.length > shown.length ? `<div class="dbg-perspective-pm-more">+${list.length - shown.length} more ${escHtml(k)}</div>` : '';
-    return items + more;
-  }).join('');
-
-  // Fidelity badge (L0 enumerate / L1 depth / L2 goals).
-  const fid = m.coverage?.fidelity || 'L0';
-  const fidTitle = { L0: 'L0 — read-only enumeration', L1: 'L1 — depth (revealed layers)', L2: 'L2 — synthesized goals' }[fid] || fid;
-
-  // L2 — Goals section. Each goal lists its achievableVia feature labels.
-  const goals = Object.values(m.goals || {});
-  let goalsHtml = '';
-  if (goals.length) {
-    const gitems = goals.slice(0, 8).map((g) => {
-      const viaLabels = (g.achievableVia || []).map((fid2) => m.features?.[fid2]?.label).filter(Boolean);
-      const viaTitle = viaLabels.length ? viaLabels.join(' · ') : '(no features)';
-      return `
-        <div class="dbg-perspective-pm-goal" title="${escAttr((g.description || '') + (g.description ? ' — ' : '') + viaTitle)}">
-          <span class="dbg-perspective-pm-goal-label">🎯 ${escHtml(g.label || '(goal)')}</span>
-          <span class="dbg-perspective-pm-meta">${(g.achievableVia || []).length} feat${typeof g.confidence === 'number' ? ` · ${Math.round(g.confidence * 100)}%` : ''}</span>
-        </div>`;
-    }).join('');
-    const gmore = goals.length > 8 ? `<div class="dbg-perspective-pm-more">+${goals.length - 8} more goal(s)</div>` : '';
-    goalsHtml = `<div class="dbg-perspective-pm-section">Goals (${goals.length})</div><div class="dbg-perspective-pm-list">${gitems}${gmore}</div>`;
-  }
-
-  // L1 — Depth/Layers section. Non-surface layers (modals/dropdowns) revealed by a trigger.
-  const layers = Object.values(m.layers || {}).filter((l) => l && l.kind !== 'surface');
-  let layersHtml = '';
-  if (layers.length) {
-    const litems = layers.map((l) => {
-      const trig = l.openedBy ? m.features?.[l.openedBy] : null;
-      const trigLabel = trig?.label || '(trigger)';
-      const n = (l.features || []).length;
-      const childLabels = (l.features || []).map((fid2) => m.features?.[fid2]?.label).filter(Boolean).slice(0, 6).join(' · ');
-      return `
-        <div class="dbg-perspective-pm-layer" title="${escAttr(childLabels)}">
-          <span class="dbg-perspective-pm-kind ${l.overlay ? 'disclosure' : 'navigation'}">${escHtml(l.kind)}</span>
-          <span class="dbg-perspective-pm-label">${escHtml(trigLabel)}</span>
-          <span class="dbg-perspective-pm-meta">→ ${n} hidden</span>
-        </div>`;
-    }).join('');
-    layersHtml = `<div class="dbg-perspective-pm-section">Depth — revealed layers (${layers.length})</div><div class="dbg-perspective-pm-list">${litems}</div>`;
-  }
-
-  return `<div class="dbg-perspective-pagemodel result">
-      <div class="dbg-perspective-pm-head">
-        <span class="dbg-perspective-pm-title"><span class="dbg-perspective-pm-fidelity ${escAttr(fid)}" title="${escAttr(fidTitle)}">${escHtml(fid)}</span> Page catalog — ${feats.length} feature(s)${m.coverage?.bands ? `, ${m.coverage.bands} band(s)` : ''}</span>
-        <button class="btn-secondary tiny" data-perspective-action="build-pagemodel" type="button" title="Re-enumerate this page.">↻</button>
-      </div>
-      <div class="dbg-perspective-pm-counts">${escHtml(counts)}</div>
-      <div class="dbg-perspective-pm-list">${rows}</div>
-      ${layersHtml}
-      ${goalsHtml}
-    </div>`;
-}
 
 function onChoosePerspective(idx) {
   if (!_perspectiveDraft) return;

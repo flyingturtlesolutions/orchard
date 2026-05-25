@@ -1800,7 +1800,7 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
    * @param {{ intent: string, url?: string, title?: string, domSnapshot?: string, screenshot?: string|null, siblingPerspectives?: Array|null, registryLandmarks?: Array|null }} params
    * @returns {Promise<{ options: Array<{name:string, rationale:string, onPage:boolean, reachedVia:string|null, roles:Array<{role:string,description:string,multiplicity:string}>, predicates:Array<{kind:'urlMatches',pattern:string,mode:string}>}> }|null>}
    */
-  static async proposePerspectives({ intent, url, title, domSnapshot, screenshot = null, siblingPerspectives = null, registryLandmarks = null, pageStructure = null, pageModel = null }) {
+  static async proposePerspectives({ intent, url, title, domSnapshot, screenshot = null, siblingPerspectives = null, registryLandmarks = null, locale = null }) {
     const seed = (typeof intent === 'string' ? intent : '').trim();
     if (!seed) return null;
 
@@ -1842,7 +1842,7 @@ Rules:
 - "reachedVia" = for a downstream perspective (onPage:false), a SHORT phrase for how you reach it from the current page ("after submitting the search", "after clicking a result"). null for on-page perspectives.
 - List the on-page perspective(s) FIRST. You MAY include downstream perspectives that complete the intent's journey, but mark them onPage:false — the user can only fill a perspective's roles once they are on its page.
 - Favor the intent. If the intent is narrow ("capture search results"), don't propose unrelated perspectives.
-- DEPTH: a PAGE STRUCTURE map may be attached — it lists disclosure controls (dropdowns, menus, modals, tabs, accordions) that were poked, and the elements each one REVEALED. This content is NOT in the static DOM listing because it only appears after an interaction. Treat revealed elements as first-class: propose roles for them too, and in the role "description" say how it is revealed (e.g., "an item in the account menu, revealed after clicking the avatar"). These stay onPage:true (same page, just disclosed) — onPage:false is only for content reached by NAVIGATING away.
+- DEPTH: a PAGE DEPTH map may be attached — it lists disclosure controls (dropdowns, menus, modals, tabs, accordions) and the elements each one REVEALED. This content is NOT in the static DOM listing because it only appears after an interaction. Treat revealed elements as first-class: propose roles for them too, and in the role "description" say how it is revealed (e.g., "an item in the account menu, revealed after clicking the avatar"). These stay onPage:true (same page, just disclosed) — onPage:false is only for content reached by NAVIGATING away.
 - A PAGE FEATURE CATALOG may be attached — the WHOLE-PAGE inventory of interactive features (inputs / actions / disclosures / navigation) and content collections (repeating cards/tiles/rows) actually enumerated on the page, INCLUDING off-screen ones the static DOM/screenshot miss. This is the page's real affordances: GROUND your perspectives in it. Prefer roles that MAP to catalogued features, and align role names with the catalogued labels. A multiplicity:"many" content role usually maps to a "collection" entry; a "disclosure" entry is a trigger you can model with hidden/revealedBy roles.`;
 
     // Base context — identical in baseline and enhanced runs, so the A/B
@@ -1871,30 +1871,34 @@ Rules:
       userText += `\n\nLANDMARKS ALREADY CAPTURED ON THIS GROUND (these elements exist and can be reused; align role names with them where the same element recurs):\n${block}`;
     }
 
-    // v2.74.368 — Depth: the pageStructure artifact (a poke→observe sweep over
-    // disclosure controls). Render ONLY controls that actually revealed content,
-    // with their revealed children, so the author can propose roles for
+    // v2.74.426 — #2 P2: DEPTH now comes from the Locale's LAYERS (the poke→reveal
+    // sweep is folded into the Locale during Explore), not a separate pageStructure
+    // artifact. Each non-surface layer = a disclosure trigger + the elements it
+    // reveals. The flat feature catalog (below) doesn't convey these REVEAL
+    // relationships, so render them explicitly so the author can propose roles for
     // post-interaction landmarks the static DOM can't show.
-    if (pageStructure && Array.isArray(pageStructure.controls)) {
-      const revealing = pageStructure.controls.filter(c => c?.observation === 'reveal' && Array.isArray(c.revealed) && c.revealed.length);
-      if (revealing.length) {
-        const block = revealing.slice(0, 16).map(c => {
-          const head = `▸ "${(c.label || c.role || 'control').slice(0, 50)}" [${c.role}]${c.haspopup ? ` haspopup=${c.haspopup}` : ''} reveals:`;
-          const kids = c.revealed.slice(0, 12).map(r => `    • "${(r.label || '').slice(0, 50)}" [${r.role}]`).join('\n');
-          const more = c.revealed.length > 12 ? `\n    • …(+${c.revealed.length - 12} more)` : '';
+    if (locale && locale.layers && locale.features) {
+      const layers = Object.values(locale.layers).filter(l => l && l.kind !== 'surface' && Array.isArray(l.features) && l.features.length);
+      if (layers.length) {
+        const block = layers.slice(0, 16).map(l => {
+          const trig = l.openedBy ? locale.features[l.openedBy] : null;
+          const head = `▸ "${((trig?.label || trig?.a11yRole || 'control')).slice(0, 50)}" [${l.kind}] reveals:`;
+          const kidIds = l.features.slice(0, 12);
+          const kids = kidIds.map(fid => { const f = locale.features[fid]; return `    • "${(f?.label || '').slice(0, 50)}" [${f?.a11yRole || f?.kind || '?'}]`; }).join('\n');
+          const more = l.features.length > 12 ? `\n    • …(+${l.features.length - 12} more)` : '';
           return `${head}\n${kids}${more}`;
         }).join('\n');
-        userText += `\n\nPAGE STRUCTURE (interactions that REVEAL hidden content — these elements are NOT in the static DOM above; propose roles for them and note how each is revealed):\n${block}`;
+        userText += `\n\nPAGE DEPTH (interactions that REVEAL hidden content — these elements are NOT in the static DOM above; propose roles for them and note how each is revealed, e.g. "an item in the account menu, revealed after clicking the avatar"):\n${block}`;
       }
     }
 
-    // v2.74.403 — Whole-page feature catalog (the PageModel / Perspective capability
+    // v2.74.403 — Whole-page feature catalog (the Locale / Perspective capability
     // model). Grounds perspectives in the page's REAL affordances — including
     // off-screen features the static DOM/screenshot miss — so roles MAP to
     // catalogued features instead of being guessed. (PAGEMODEL_SPEC § 6, § 7.)
-    if (pageModel && pageModel.features) {
-      const feats = pageModel.features;
-      const byKind = pageModel.index?.byKind || {};
+    if (locale && locale.features) {
+      const feats = locale.features;
+      const byKind = locale.index?.byKind || {};
       const order = ['input', 'action', 'disclosure', 'navigation', 'collection', 'region'];
       const lines = [];
       for (const k of order) {
@@ -1915,8 +1919,8 @@ Rules:
       // v2.74.410 — PAGE GOALS (L2): the page's outcomes + the features that
       // achieve each. The intent usually maps to ONE goal; build the perspective's
       // roles around THAT goal's features. (Intent → goal → features → roles.)
-      if (pageModel.goals && Object.keys(pageModel.goals).length) {
-        const gl = Object.values(pageModel.goals).slice(0, 10).map((g) => {
+      if (locale.goals && Object.keys(locale.goals).length) {
+        const gl = Object.values(locale.goals).slice(0, 10).map((g) => {
           const fl = (g.achievableVia || []).map((fid) => feats[fid]?.label).filter(Boolean).slice(0, 8);
           return `- ${g.label}${g.description ? `: ${String(g.description).slice(0, 100)}` : ''}${fl.length ? ` → [${fl.join(', ')}]` : ''}`;
         }).join('\n');
@@ -2131,7 +2135,7 @@ Be specific to what is actually present; do not invent capabilities that aren't 
 
   /**
    * v2.74.408 — L2 goal synthesis (PAGEMODEL_SPEC § 5, § 8). Given a built
-   * PageModel (L0 features + L1 depth), identify the distinct GOALS a user can
+   * Locale (L0 features + L1 depth), identify the distinct GOALS a user can
    * accomplish, each linked to the catalogued features that realize it. The model
    * is presented as an INDEXED catalog (balanced per-kind so footer-link spam
    * can't crowd out inputs/actions); the LLM references feature INDEXES, which the

@@ -4051,6 +4051,271 @@ locale-capture.js` (matchedGoal in the grounded-intent card), `manifest.json`.
 
 ---
 
+## v2.74.427 — #2 P4–P5: retire the `pageStructure` artifact (consolidation complete)
+
+**Date:** 2026-05-24
+**Decision by:** user ("confirmed — go" after smoke-testing P1–P3). Finishes the
+pageStructure→Locale consolidation. The Locale is now the SINGLE durable page
+artifact; `pageStructure` exists only as the Explore sweep's in-memory output.
+
+**P4 — Explore status UI reads the Locale.** On mount, `_refreshPageStructureStatus`
+now sends `GET_LOCALE` (not `GET_PAGE_STRUCTURE`) and summarizes depth via the new
+`_summarizeLocaleDepth(model)` (non-surface layer count = revealing controls; layer
+features = revealed elements; `coverage.lastExploredAt` = capturedAt). The
+post-Explore chip keeps the richer in-memory `_summarizePageStructure(res.structure)`
+(retains per-run candidates/poked/scrolled diagnostics the sweep produced).
+
+**P5 — artifact retired.** `EXPLORE_PAGE_STRUCTURE` no longer persists
+`pageStructureCache` (the sweep's `structure` stays in-memory — folded into the
+Locale via `mergeDepthFromControls` + returned for the chip). Removed:
+`_readPageStructureCache`, `_writePageStructureCache`, `PAGE_STRUCTURE_CACHE_KEY`,
+`PAGE_STRUCTURE_TTL_MS`, the `GET_PAGE_STRUCTURE` handler (`background.js`), and the
+studio **"Page Structures"** section + its data load (`studio.js`). Stale function-
+header comments updated. The `.page-structure-*` CSS stays (reused by the Locales
+section).
+
+**Audit.** Zero references to any removed symbol remain (only an explanatory
+comment mentions the old `GET_PAGE_STRUCTURE` by name). All three touched files
+syntax-check.
+
+**Net architecture.** Ground → **Locale** (capability catalog + affordances + L1
+depth/layers + L2 goals, the ONE persisted page artifact) → Perspective → Landmark.
+The Explore sweep (`EXPLORE_PAGE_STRUCTURE`) still discovers depth; its output now
+flows only into the Locale. propose / ground / resolve / visual-locate / the Explore
+status UI all read the Locale.
+
+**Deferred (optional polish):** the sidepanel's `_pageStructureStatus` /
+`_pageStructureInfo` state vars + `_refreshPageStructureStatus` /
+`_summarizePageStructure` still carry the old name; they track the live Explore
+sweep (not the retired artifact) and are internal, so left as-is. `EXPLORE_PAGE_STRUCTURE`
+message name kept (it accurately names the sweep).
+
+**Touched.** `background.js`, `studio.js`,
+`Sidepanel/modes/perspective-capture.js`, `manifest.json`.
+
+**⚠ Re-validate in-browser** (uncovered by unit tests): the Explore status chip
+(on mount + post-sweep) and that a deleted/absent Locale shows the Explore offer.
+
+---
+
+## v2.74.426 — #2 P1–P3: route propose/ground/resolve through the Locale (not pageStructure)
+
+**Date:** 2026-05-24
+**Decision by:** user ("go"). First three phases of the pageStructure→Locale
+consolidation. The LLM-feeding + resolve-hint paths now read ONE artifact (the
+Locale); pageStructure stays only as the Explore sweep's transient output + the
+Explore status UI source (P4/P5 still pending).
+
+**P1 — affordances on the Locale.** Explore now stores `describePageAffordances`
+output on `localeModel.affordances` (the one datum that previously lived only on
+pageStructure). `GROUND_INTENT` and `RESOLVE_ROLE_VISUAL` read `locale.affordances`
+(GROUND_INTENT already read the Locale for L2 goals — now one read serves both).
+
+**P2 — propose depth from the Locale's layers.** `proposePerspectives` dropped its
+`pageStructure` param; the DEPTH block (disclosure → revealed elements, which the
+flat feature catalog does NOT convey) is now rendered from `locale.layers`
+(`openedBy` trigger + revealed `features[]`), renamed PAGE DEPTH. `PROPOSE_PERSPECTIVES`
+stops reading/passing pageStructure; `meta.revealingControls` derives from the
+Locale's non-surface layer count.
+
+**P3 — resolve hints + reveal-trigger from the Locale.** `_knownSelectorsForUrl`
+dropped the raw pageStructure-controls pass (section 1) — the Locale's L1 features
+already carry the disclosure + revealed-child selectors, with curation
+(carousel/overlay dedup) the raw pass lacked. `RESOLVE_REVEALED_ROLES`' trigger
+fallback (when no resolved trigger role) now matches the Locale's `disclosure`
+features instead of pageStructure controls.
+
+**Audit.** Swept every `_readPageStructureCache` CALL: the only one left is the
+`GET_PAGE_STRUCTURE` handler (Explore-UI freshness) — a P4 target. No propose/
+ground/resolve/visual path reads pageStructure anymore.
+
+**Verification.** `background.js` + `AnthropicService.js` syntax-check.
+
+**⏸ Checkpoint before P4–P5:** these phases changed the propose DEPTH source, the
+resolve hint source, and the reveal-trigger fallback — all uncovered by unit tests.
+Smoke-test in-browser: Explore a page, then propose (confirm depth/hidden roles
+still appear) and resolve (confirm hints still land). P4 (Explore status UI off the
+Locale) + P5 (retire pageStructureCache + GET_PAGE_STRUCTURE + studio section) follow
+once this is confirmed.
+
+**Touched.** `background.js` (Explore write, GROUND_INTENT, RESOLVE_ROLE_VISUAL,
+PROPOSE_PERSPECTIVES, _knownSelectorsForUrl, RESOLVE_REVEALED_ROLES),
+`Services/AnthropicService.js` (proposePerspectives), `manifest.json`.
+
+---
+
+## v2.74.425 — Remove the "Build Locale (L0)" scaffolding (Explore is canonical)
+
+**Date:** 2026-05-24
+**Decision by:** user ("Build Locale (L0)… these were all scaffolding for the
+current Explore"). #1 of a two-part cleanup (the #2 pageStructure consolidation is
+scoped separately below).
+
+**What it was.** The sidepanel `🗂 Build Locale (L0)` button + `onBuildLocale` +
+the `BUILD_LOCALE` background handler + the `_renderLocalePanel` inspector were
+build-slice-1 scaffolding: a STANDALONE manual L0 enumerate that was never wired to
+consume the Explore-built Locale (the panel only ever showed its own manual build).
+Explore already builds a richer Locale automatically (L0 enumerate + L1 depth from
+the poke sweep + L2 synthesized goals), and the studio **Locales** section (v2.74.424)
+is the real viewer.
+
+**Removed.** `BUILD_LOCALE` handler (`background.js`); `onBuildLocale`,
+`_renderLocalePanel`, the `${_renderLocalePanel()}` mount, the `build-locale` click
+wiring, and the `_localeResult`/`_localeInFlight` state (`perspective-capture.js`).
+Kept `GET_LOCALE` (clean read API) and the `.dbg-perspective-locale*` CSS (orphaned
+but harmless; a future in-sidepanel Locale viewer can reuse it).
+
+**Verification.** Both files syntax-check; no orphan refs to the removed symbols.
+
+**Touched.** `background.js`, `Sidepanel/modes/perspective-capture.js`,
+`manifest.json`.
+
+### Scoped (not yet built) — #2: consolidate `pageStructure` into the Locale
+
+Tracing showed `pageStructure` is **not** vestigial but **heavily overlaps** the
+Locale, and — importantly — it also feeds the *live* sidepanel Explore status UI,
+so this is a real multi-phase refactor, not a delete:
+- **P1 — affordances onto the Locale.** Store `describePageAffordances` output on
+  `localeModel.affordances` during Explore (the one datum that lives ONLY on
+  pageStructure today). Repoint `GROUND_INTENT` + `RESOLVE_ROLE_VISUAL` to read
+  `locale.affordances`.
+- **P2 — propose depth from the Locale.** Replace `proposePerspectives`' pageStructure
+  DEPTH block with one rendered from `locale.layers` (`openedBy` + revealed
+  `features[]`) — the catalog block alone does NOT convey reveal relationships, so
+  this must be preserved, not dropped. Stop passing `pageStructure` to propose.
+- **P3 — resolve hints from the Locale.** Drop `_knownSelectorsForUrl` section (1)
+  (raw pageStructure controls); the Locale's L1 features already carry the
+  disclosure/revealed selectors.
+- **P4 — Explore status UI off pageStructure.** Rewire `_refreshPageStructureStatus`
+  / the depth chip / `GET_PAGE_STRUCTURE` freshness to read the Locale's
+  `coverage.lastExploredAt` + layer counts instead.
+- **P5 — retire the artifact.** Stop persisting `pageStructureCache` (keep the
+  sweep's in-memory `structure` for `mergeDepthFromControls`), remove the cache
+  helpers + `GET_PAGE_STRUCTURE`, and remove the studio "Page Structures" section.
+- **Risk:** P2–P4 touch the just-validated resolve/propose/Explore flow with no
+  unit coverage → needs an in-browser checkpoint before commit.
+
+---
+
+## v2.74.424 — Rename gap: user-facing "Page Model(s)" display strings → "Locale(s)"
+
+**Date:** 2026-05-24
+**Decision by:** user ("where is the locale in the UI? I still see PAGE MODELS").
+
+**Gap.** The PageModel→Locale rename (v2.74.422) keyed on identifier forms
+(`PageModel`/`pageModel`/`pagemodel`/`page-model`), so **space-separated display
+text** — the studio section label `Page Models`, toasts like `Page model deleted`,
+and the sidepanel `Page catalog` inspector titles — matched no rule and survived.
+So the capability catalog ran under its new identifiers but still SHOWED its old
+name. Fixed the visible strings:
+- Studio: section label `Page Models` → **`Locales`**; empty-state, JSON-modal
+  title, delete-confirm, toasts (`Locale not found` / `Locale deleted`), and the
+  delete tooltip.
+- Sidepanel inspector: the build button `🗂 Build page catalog (L0)` →
+  `🗂 Build Locale (L0)`, the panel title `Page catalog — N feature(s)` →
+  `Locale — N feature(s)`, and the build toast/warning.
+- Kept the word "catalog" only in *explanatory* prose ("a Locale is the page's
+  capability catalog…"), and left the LLM-prompt `FEATURE CATALOG` wording (it's
+  descriptive for the model, not a UI label).
+
+**Not a bug — "Page Structures" is a different artifact.** The studio "Page
+Structures" section is `pageStructure` (the poke/reveal DEPTH MAP that feeds a
+Locale's L1 via `mergeDepthFromControls`), an intermediate/debug artifact distinct
+from the Locale. It was correctly never part of the rename and is left as-is.
+
+**Verification.** Both files syntax-check; zero non-comment `page model`/`page
+catalog` display strings remain.
+
+**Touched.** `studio.js`, `Sidepanel/modes/perspective-capture.js`, `manifest.json`.
+
+---
+
+## v2.74.423 — Bug pass on PageModel→Locale: fix a kebab/camel data-attr desync
+
+**Date:** 2026-05-24
+**Decision by:** user ("bug pass"). Review of the uncommitted v2.74.422 rename.
+
+**Real bug found + fixed.** The rename's `pm`-abbreviation rule (`pmKey`→`localeKey`)
+hit the camelCase `dataset.pmKey` access in studio.js, but the **kebab** HTML
+attribute `data-pm-key` has a hyphen (`pm-key`) so it escaped the rule. Result:
+the studio "Locales" (capability-catalog) section emitted `data-pm-key` while its
+handlers read `btn.dataset.localeKey` — a `data-pm-key` attribute maps to
+`dataset.pmKey`, NOT `dataset.localeKey`, so the key was `undefined` and the
+section's **JSON-view and Delete buttons were broken** (toast "not found" / no-op
+delete). Fix: `data-pm-key` → `data-locale-key` (3 attrs) to match the renamed
+`dataset.localeKey` (3 accesses). This kebab/camel split is the one desync class a
+token rename can introduce; a full codebase sweep confirmed it was the only one
+(e.g. `data-perspective-action`↔`dataset.perspectiveAction` renamed on both sides
+and stayed consistent).
+
+**Consistency leftover finished.** `data-loc="…"` — the perspective-capture mode's
+element-lookup namespace (templates tag `data-loc="name-input"`; `q()` queries
+`[data-loc="…"]`) — was internally consistent (not a bug) but a `loc`-for-locale
+leftover, the sibling of the `data-loc-action`→`data-perspective-action` cleaned in
+v2.74.421. Renamed `data-loc` → `data-perspective` (33 attrs + the `q()` helper, in
+sync; distinct attribute from `data-perspective-action`, no selector collision).
+
+**Verification.** Every `.js` syntax-checks; `data-locale-key`(3)↔`dataset.localeKey`(3)
+and `data-perspective`(33)↔`q()` confirmed paired; zero `data-pm-key`/`data-loc=`
+remain. Full dataset-access ↔ data-attribute cross-check across the repo shows no
+other desync.
+
+**Touched.** `studio.js` (data-pm-key→data-locale-key),
+`Sidepanel/modes/perspective-capture.js` (data-loc→data-perspective),
+`manifest.json`.
+
+---
+
+## v2.74.422 — Terminology: `PageModel` → `Locale` (completes the hierarchy)
+
+**Date:** 2026-05-24
+**Decision by:** user (chose this direction). Completes the locked hierarchy
+(GROUND_SPEC § 0.2) in code: the capability catalog — implemented as `PageModel`
+— is now named **`Locale`**, so the code reads Ground → Locale → Perspective →
+Landmark end-to-end. Clean slate (no migration).
+
+**Why it composed cleanly.** The earlier Locale→Perspective rename FREED the word
+"locale", and the OUTCOMES `localeId` already denoted the new Locale=PageModel — so
+this rename *aligns* `localeId` rather than colliding with it. Verified all target
+names (`Locale`, `localeCache`, `GET_LOCALE`, `BUILD_LOCALE`, …) had zero prior
+occurrences before applying.
+
+**Method.** Sentinel-guarded `perl` pass over all `.js/.html/.css`:
+`PageModel`→`Locale`, `PAGE_MODEL`/`PAGEMODEL`→`LOCALE` (constants/messages),
+`pageModel`→`locale`, `page-model(s)`→`locale(s)` (studio data-actions/ids),
+`pagemodel`→`locale`, the inspector CSS `dbg-perspective-pm-*`→
+`dbg-perspective-locale-*`, and the `pmEntry`/`pmKey`/`pmRow`/`pmEntries`
+abbreviation→`locale*`. File `Core/pageModel.js` → `Core/locale.js` (git mv;
+`import * as PageModel` → `import * as Locale`).
+
+**Preserved.** `PAGEMODEL_SPEC` references + `PAGEMODEL_SPEC.md` (doc filename, a
+proper noun pointing to a real file — same `.md`-untouched discipline as the prior
+rename). JS builtins unaffected (no overlap). `OUTCOMES_SCHEMA`/`outcomes.js`
+functional code unchanged — only its comments now point to `Core/locale.js`.
+
+**Key renames.** `buildLocale`, `LOCALE_SCHEMA`, `localeCache` +
+`_read/_writeLocaleCache`, `LOCALE_CACHE_KEY`/`LOCALE_TTL_MS`, `BUILD_LOCALE` /
+`GET_LOCALE` messages, `onBuildLocale`, `_renderLocalePanel`, `_localeResult` /
+`_localeInFlight`, `localeMap`/`locales` (studio).
+
+**Verification.** `node --check` on every `.js` — all pass. `Core/locale.js`
+exists and `import * as Locale` resolves; every `Locale.*` member access maps to a
+real export. `BUILD_LOCALE` consistent sender↔handler. Every JS-emitted
+`dbg-perspective-locale-*` class is defined in CSS (no orphans). Zero residual
+`pagemodel`/`page-model`/`pm`-abbrev tokens (only `PAGEMODEL_SPEC` doc refs). No
+`LocaleLocale`/`Locale=Locale` corruption.
+
+**Net terminology state.** The code now matches the spec exactly: **Ground →
+Locale (capability catalog, was PageModel) → Perspective (intent+landmark artifact,
+was Locale) → Landmark**, with the OUTCOMES stream's `localeId`/`perspectiveId`
+fields already aligned.
+
+**Touched.** ~20 files (`Core/locale.js` [renamed], `background.js`,
+`Sidepanel/modes/perspective-capture.js`, `studio.js`, `assets/sidepanel.css`,
+`Core/outcomes.js` comments, …), `manifest.json`.
+
+---
+
 ## v2.74.421 — Bug pass on the rename + finish the `loc` abbreviation leftovers
 
 **Date:** 2026-05-24

@@ -3171,7 +3171,7 @@ function detectRepeatingContentBlocks() {
 }
 
 // v2.74.397 — L0 page enumeration (read-only). Builds the raw Feature list for a
-// PageModel (PAGEMODEL_SPEC § 8, tier L0): scroll the page in viewport bands and
+// Locale (PAGEMODEL_SPEC § 8, tier L0): scroll the page in viewport bands and
 // enumerate every interactive control, content collection, and region — each with
 // a selector, absolute location (+ scrollToY), kind, and interaction — WITHOUT any
 // clicking. Self-contained: unlike the poke sweep, enumeration is read-only, so it
@@ -5441,7 +5441,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       locatePick(payload).then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
       return true;   // async sendResponse
 
-    // v2.74.397 — L0 page enumeration (read-only) → raw Feature list for a PageModel.
+    // v2.74.397 — L0 page enumeration (read-only) → raw Feature list for a Locale.
     case 'ENUMERATE_PAGE':
       enumeratePage().then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
       return true;   // async sendResponse

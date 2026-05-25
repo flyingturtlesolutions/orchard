@@ -1,10 +1,10 @@
-// Core/pageModel.js — PageModel (Perspective capability catalog) builder + query API.
+// Core/locale.js — Locale (Perspective capability catalog) builder + query API.
 //
-// See PAGEMODEL_SPEC.md. A PageModel is the intent-independent capability catalog
+// See PAGEMODEL_SPEC.md. A Locale is the intent-independent capability catalog
 // of ONE page archetype: Features (units of capability) organized into Layers and
 // serving Goals. This module is PURE (no chrome / DOM deps) so it can run in the
 // background, the sidepanel, and node unit tests alike. The content script emits
-// RAW features (read-only enumeration, L0); `buildPageModel` assembles them into
+// RAW features (read-only enumeration, L0); `buildLocale` assembles them into
 // the queryable artifact; downstream calls the query API rather than walking the
 // raw object.
 //
@@ -12,7 +12,7 @@
 // `pageStructure` remains the live artifact; this is additive (new cache key)
 // until later slices rewire resolve / grounding to consume it.
 
-export const PAGEMODEL_SCHEMA = 2;
+export const LOCALE_SCHEMA = 2;
 
 export const FEATURE_KINDS = Object.freeze([
   'input', 'action', 'disclosure', 'navigation', 'collection', 'region', 'composite',
@@ -21,12 +21,12 @@ export const FEATURE_KINDS = Object.freeze([
 // ─── Builder ──────────────────────────────────────────────────────────────────
 
 /**
- * Assemble a PageModel from raw enumerated features + capture meta.
+ * Assemble a Locale from raw enumerated features + capture meta.
  * @param {Array<object>} rawFeatures  feature objects (must carry a stable `id`)
  * @param {object} meta  { url, urlPattern?, title, viewport, scrollHeight, enumeratedAt, fidelity? }
- * @returns {object} PageModel
+ * @returns {object} Locale
  */
-export function buildPageModel(rawFeatures, meta = {}) {
+export function buildLocale(rawFeatures, meta = {}) {
   const features = {};
   for (const f of Array.isArray(rawFeatures) ? rawFeatures : []) {
     if (f && typeof f.id === 'string' && f.id) features[f.id] = f;
@@ -37,7 +37,7 @@ export function buildPageModel(rawFeatures, meta = {}) {
   };
   const goals = {};
   return {
-    schema: PAGEMODEL_SCHEMA,
+    schema: LOCALE_SCHEMA,
     url: meta.url ?? '',
     urlPattern: meta.urlPattern ?? meta.url ?? '',
     title: meta.title ?? '',

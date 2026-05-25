@@ -4,7 +4,7 @@
 // stream is both the training corpus and the usage-metrics source; artifacts
 // carry only small ROLLUPS derived from it (§ 0.13). This module is PURE (no
 // chrome / DOM deps) so it runs in the background, the sidepanel, and node unit
-// tests alike — mirroring Core/pageModel.js.
+// tests alike — mirroring Core/locale.js.
 //
 // v1 (OUTCOMES_SPEC § 8) lands: the OutcomeEvent schema + factory; adapters from
 // the existing telemetry seeds (`_logResolveRun`, `#audit`, § 9); the derived
@@ -26,7 +26,7 @@ export const LIFECYCLE = Object.freeze(['fresh', 'verified', 'stale-suspected', 
 
 // ─── id minting ─────────────────────────────────────────────────────────────────
 
-/** djb2 — same deriver style as Core/pageModel.js (base36). */
+/** djb2 — same deriver style as Core/locale.js (base36). */
 export function hashId(s) {
   const str = String(s);
   let h = 5381;
@@ -152,7 +152,7 @@ export function eventFromAudit(entry = {}) {
   });
 }
 
-// ─── Selector-tier classifier (mirrors Core/pageModel.js for one histogram vocab) ─
+// ─── Selector-tier classifier (mirrors Core/locale.js for one histogram vocab) ─
 
 export function selectorTier(sel) {
   if (!sel) return 'positional';
