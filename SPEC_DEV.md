@@ -4051,6 +4051,155 @@ locale-capture.js` (matchedGoal in the grounded-intent card), `manifest.json`.
 
 ---
 
+## v2.74.434 — siteMap Slice B: retire the GroundMap (the siteMap is canonical)
+
+**Date:** 2026-05-25
+**Decision by:** user ("continue") — completes the "siteMap subsumes the GroundMap"
+choice from v2.74.432.
+
+**What shipped.** The persisted GroundMap is gone; the Ground siteMap (GROUND_SPEC
+§ 7, `siteMapCache` key, `GET_SITEMAP`) is the single structural record.
+
+- **`Services/DiscoveryService.js`** — `discover()` no longer builds/saves a
+  GroundMap; it returns `{ pages, error, aborted }`. The caller folds `pages` into
+  the siteMap. (Early-return + catch shapes updated to `pages: []`.)
+- **`Services/StorageManager.js`** — removed `saveGroundMap` / `getGroundMap` /
+  `deleteGroundMap` and the `groundmap:*` key. The section is now a tombstone
+  comment. Stale `pageClass` + migration "Preserved" comments corrected.
+- **`background.js`** — `START_DISCOVERY` destructures `pages`, folds via
+  `siteMapFromCrawl`, and broadcasts `DISCOVERY_COMPLETE { pageCount, siteMapStats }`
+  (no `groundMap`). The `GET_GROUND_LIBRARY` bundle now ships `siteMap` +
+  `siteMapStats` per ground (via `_readSiteMap`) instead of `groundMap`.
+- **`studio.js`** — header fetches the siteMap once (`GET_SITEMAP`) and reuses it
+  for the 🗺 node-count badge, the Discover/Rediscover label, AND the existing
+  "Site Map" section (the section's duplicate fetch was removed). The legacy
+  click-to-toggle GroundMap viewer (`toggleGroundMapViewer` / `renderGroundMapHtml`
+  / the `groundmap-viewer` div / dead `walkGroundMaps` map) was deleted. The
+  re-discover confirm reads siteMap stats.
+- **`Sidepanel/modes/ground-view.js`** — `_groundMapCache`/`_openGroundMaps` →
+  `_siteMapCache`/`_openSiteMaps`; the section-list gate keys on `siteMapStats.nodes
+  > 0`; the 🗺 badge shows node counts; the inline viewer renders the siteMap node
+  list (`_renderSiteMapHtml`, reusing the `.sitemap-*` classes) instead of crawl
+  page cards.
+
+**Note.** The siteMap gate is now satisfied by EITHER an Explore (modeled nodes) or
+a Discovery crawl (discovered nodes) — strictly broader than the old
+discovery-only GroundMap gate, and consistent with § 7. Dead `.gm-*` CSS rules are
+left in place (harmless).
+
+**Touched.** `Services/DiscoveryService.js`, `Services/StorageManager.js`,
+`Services/TemplateWalker.js` (comment), `background.js`, `studio.js`,
+`Sidepanel/modes/ground-view.js`, `manifest.json`.
+
+---
+
+## v2.74.433 — Deterministic link extraction for the discovery crawl
+
+**Date:** 2026-05-25
+**Decision by:** user pasted a 1-node/0-edge Pixabay siteMap ("this seems wrong:").
+
+**Finding.** The discovery crawl's outgoing links (which seed BOTH the BFS frontier
+and the siteMap edges) came from the LLM classifier's `outgoingLinks`. That field is
+unreliable AND over-restrictive — the `classifyPage` prompt says "Include links that
+lead to meaningful app pages (**not footer/nav/external**); **Max 8 most prominent**".
+A homepage like Pixabay is *built* from category/nav links, so the classifier returned
+`[]` → the BFS found nothing to follow → the crawl visited only the seed → siteMap =
+1 node, 0 edges. Link extraction is a **deterministic DOM task**, not a judgment task.
+
+**What shipped.** New content-script `extractPageLinks()` + `EXTRACT_LINKS` message:
+walks every `<a href>` (shadow-DOM aware via `queryAllDeep`), resolves each to an
+absolute `http(s)` URL, drops the hash, dedupes, and returns `[{href,text}]` (cap 250).
+`DiscoveryService` gained `#extractLinks(tabId)` and now uses it for BOTH the BFS
+enqueue and `page.outgoing` (→ `siteMapFromCrawl` edges); the LLM's `outgoingLinks`
+remains only as a fallback if the content-script call yields nothing. The classifier
+still supplies `pageType` + `formFields` (genuine judgment tasks). Net effect: a single
+homepage now yields a rich graph (its self node + a `discovered` node and `link` edge
+per same-site nav target, even before those targets are crawled).
+
+**Touched.** `ContentScripts/contentScript.js` (`extractPageLinks` + `EXTRACT_LINKS`
+case), `Services/DiscoveryService.js` (`#extractLinks`, crawl uses it), `manifest.json`.
+
+---
+
+## v2.74.432 — siteMap built during ground DISCOVERY (the crawl is the source)
+
+**Date:** 2026-05-25
+**Decision by:** user ("the site map should be captured during ground discover") +
+chose "siteMap subsumes the GroundMap". Correction to v2.74.431, which wrongly fed
+the siteMap from single-page Explore (it only ever saw the homepage's nav).
+
+**Finding.** Ground discovery (`DiscoveryService.discover`) is already a multi-page
+BFS crawl that records, per page, `{ url, title, pageType, outgoing: links }` and
+assembles a persisted GroundMap. That crawl — not Explore — is the siteMap's
+breadth source. (Verified the only real GroundMap consumers are the two 🗺 viewers
++ the per-ground bundle; `pageClass` is an author label, not a GroundMap lookup;
+`branches`/`selectorConfidence`/`discoveryHints` are unused stubs.)
+
+**Slice A (this version).** `Core/siteMap.js` gained `siteMapFromCrawl(pages)`:
+every crawled page → a `discovered` node (carrying `pageType` + title), every
+same-site outgoing link (resolved against the page URL) → an edge. Node shape
+extended with `pageType`/`visitedAt`; `mergeSiteMap` carries them. `START_DISCOVERY`
+now merges the crawl's contribution into `siteMapCache` on completion. A later
+Explore upgrades a crawled page's node to `modeled` (status precedence). 14-assertion
+node test (crawl nodes/edges, relative-href resolution, cross-site skip, pageType
+carry, discovery→Explore upgrade). The Explore-side contribution (v2.74.431) stays
+as the modeled-upgrade. **Transitional:** the GroundMap is still written/read by its
+viewers — Slice B repoints those to the siteMap and retires the GroundMap store.
+
+**Touched.** `Core/siteMap.js` (siteMapFromCrawl + pageType in node/merge),
+`background.js` (`START_DISCOVERY` merge), `manifest.json`.
+
+### Slice B (next) — retire the GroundMap
+Repoint the per-ground bundle (`background.js` ~2946) + the studio and ground-view
+🗺 badge/viewer to read the siteMap (`GET_SITEMAP`); remove `saveGroundMap`/
+`getGroundMap`/`deleteGroundMap` + the GroundMap build in `DiscoveryService`; the
+studio "Site Map" section (v2.74.431) becomes the canonical viewer.
+
+---
+
+## v2.74.431 — Ground arc: siteMap (GROUND_SPEC § 7) — the territory graph
+
+**Date:** 2026-05-25
+**Decision by:** user (chose siteMap as the Ground-arc entry slice — highest
+value-per-effort: it pays off from a SINGLE Explore, unlike description/goals
+inheritance or chrome hoisting which need ≥2 Locales per Ground).
+
+**What shipped — end-to-end siteMap.**
+- **Capture** (`ContentScripts/contentScript.js`): enumeration now records the
+  absolute destination `href` on navigation features (the element, or an anchor it
+  wraps / is wrapped by). This is the edge data the graph needs.
+- **Pure module** `Core/siteMap.js` (no chrome/DOM): `siteMapFromLocale(locale)`
+  builds one Locale's contribution — a `modeled` node for its own page + a
+  `discovered` node and `link` edge for every SAME-SITE nav destination it surfaced;
+  `mergeSiteMap` folds contributions (status precedence stub<discovered<modeled, so
+  Exploring a discovered page upgrades its node to modeled; edge dedup);
+  `siteMapStats`, `normalizePattern` (origin+pathname), `archetypeId`. 16-assertion
+  node test.
+- **Persist + merge** (`background.js`): `siteMapCache` key `{ [groundId]: SiteMap }`;
+  `_readSiteMap` / `_mergeSiteMapForGround`. Explore merges the Locale's contribution
+  after caching it. `GET_SITEMAP` handler returns the map + stats.
+- **Viewer** (`studio.js` + `.sitemap-*` CSS): a per-Ground **Site Map** section —
+  "M modeled · D discovered · E edges", modeled + discovered node list (status dot,
+  name, path, goal count), `{ }` JSON view, clear control.
+
+**Why it pays off immediately.** One Explore of a homepage yields the page as a
+modeled node plus dozens of discovered archetypes (every nav link) + edges — the
+"modeled M of N discovered" coverage view, before any other page is Explored. This
+is the § 7 structure that subsumes the locale index (= the modeled nodes), nav
+observations (= edges), and (later) cross-page flows; chrome nav will bootstrap it
+"for free" once chrome hoisting (§ 4) lands.
+
+**Scope note.** v1 edges come only from real `<a href>` nav features (same-site);
+JS-driven tabs/buttons (no href) don't yet yield edges. urlPattern is coarse
+(origin+pathname; query variants collapse) — id-segment templating is a later
+refinement. `stub` nodes (from sitemap.xml) and flow-step edges are future slices.
+
+**Touched.** `ContentScripts/contentScript.js` (nav href), `Core/siteMap.js` (new),
+`background.js` (cache + merge + GET_SITEMAP), `studio.js` (Site Map section),
+`assets/sidepanel.css` (`.sitemap-*`), `manifest.json`.
+
+---
+
 ## v2.74.430 — Validation (Expedia): reject layout-utility classes as content collections
 
 **Date:** 2026-05-25

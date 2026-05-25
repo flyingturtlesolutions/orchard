@@ -8416,6 +8416,16 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 .outcomes-ev-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text, #ddd); }
 .outcomes-ev-ts { flex: 0 0 auto; color: var(--sub, #888); font-size: 9px; }
 
+/* ── v2.74.431 — Site Map viewer (studio Site Map section) ──────────────────── */
+.sitemap-summary { font-size: 10px; font-family: ui-monospace, monospace; color: var(--sub, #888); margin-bottom: 6px; }
+.sitemap-nodes { display: flex; flex-direction: column; gap: 2px; }
+.sitemap-node { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 11px; font-family: ui-monospace, monospace; }
+.sitemap-node-status { flex: 0 0 auto; width: 12px; text-align: center; color: var(--sub, #888); }
+.sitemap-modeled .sitemap-node-status { color: #4ade80; }
+.sitemap-discovered .sitemap-node-status { color: #94a3b8; }
+.sitemap-node-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text, #ddd); }
+.sitemap-node-meta { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--sub, #888); font-size: 9px; }
+
 /* ── v2.72.47 (Pass 18) — Assertion live-DOM verify ─────────────────────────
    New verify section in the assertion form. Probes the active tab and
    shows per-condition status pills + an overall match-mode banner.

@@ -2490,7 +2490,7 @@ export class TemplateWalker {
           confirmedOuterSteps,
           rejectedProposals,
           activeBranchLabel,
-          discoveryHints: [],   // TODO: thread GroundMap hints in future
+          discoveryHints: [],   // TODO: thread siteMap hints in future
         });
 
         if (proposal.kind === 'error') {

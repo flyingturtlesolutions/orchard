@@ -39,13 +39,13 @@ let _mountEl = null;
 // sibling card with its own collapse), so a card-wide collapse no
 // longer makes sense.
 const _collapsedSections = new Map();
-// v2.74.38 — GroundMap viewer open-state per groundId. Mirrors Studio's
-// toggle-map behaviour. Ephemeral; lost on unmount.
-const _openGroundMaps = new Set();
-// Cache the most recently fetched groundMap per groundId so the toggle
+// v2.74.434 — siteMap viewer open-state per groundId (was the GroundMap
+// viewer). Ephemeral; lost on unmount.
+const _openSiteMaps = new Set();
+// Cache the most recently fetched siteMap per groundId so the toggle
 // handler can rebuild the viewer without another round trip to
 // GET_GROUND_LIBRARY.
-const _groundMapCache = new Map();
+const _siteMapCache = new Map();
 // v2.74.42 — Discovery-in-progress tracking. While a groundId is in this
 // set, _renderList shows the indeterminate-loading view instead of the
 // section list. Discovery broadcasts (DISCOVERY_COMPLETE / FAILED)
@@ -94,8 +94,8 @@ async function unmount() {
   _mountEl = null;
   _windowId = null;
   _collapsedSections.clear();
-  _openGroundMaps.clear();
-  _groundMapCache.clear();
+  _openSiteMaps.clear();
+  _siteMapCache.clear();
   _discoveryRunning.clear();
   _collapsedHeader.clear();
 }
@@ -256,17 +256,18 @@ async function _renderList() {
 
   const matched = _findMatchingGround(tabUrl, grounds);
   if (matched) {
-    // v2.74.38 — Cache the fetched groundMap so the toggle handler can
+    // v2.74.434 — Cache the fetched siteMap so the toggle handler can
     // re-render the viewer without another GET_GROUND_LIBRARY trip.
-    if (matched.groundMap) _groundMapCache.set(matched.ground.id, matched.groundMap);
-    // v2.74.42 — Section list is gated on a successful Discover run.
+    if (matched.siteMap) _siteMapCache.set(matched.ground.id, matched.siteMap);
+    const hasMap = !!(matched.siteMapStats && matched.siteMapStats.nodes > 0);
+    // v2.74.42 — Section list is gated on a mapped Ground (siteMap present).
     // While discovery is in flight, show the indeterminate loading
     // indicator. When a Ground exists but has no map yet, show a
     // Discover prompt instead of empty section cards.
     if (_discoveryRunning.has(matched.ground.id)) {
       list.innerHTML = _renderHeaderOnly(matched) + _renderDiscoveringBlock();
       _wireHeaderHandlers(matched);
-    } else if (matched.groundMap) {
+    } else if (hasMap) {
       list.innerHTML = _renderGroundCard(matched);
       _wireHandlers([matched]);
     } else {
@@ -286,14 +287,15 @@ async function _renderList() {
 // segment, so handler wiring (collapse toggle, map-badge click) works
 // identically.
 function _renderHeaderOnly(entry) {
-  const { ground, groundMap } = entry;
+  const { ground, siteMap, siteMapStats } = entry;
   const collapsed = _collapsedHeader.has(ground.id);
   const collapsedClass = collapsed ? ' gv-ground-card-collapsed' : '';
   const chevron = collapsed ? '▸' : '▾';
-  const mapBadge = groundMap
+  const hasMap = !!(siteMapStats && siteMapStats.nodes > 0);
+  const mapBadge = hasMap
     ? `<button class="groundmap-badge" type="button"
                data-gv-toggle-map="${escAttr(ground.id)}"
-               title="Mapped ${escAttr(new Date(groundMap.discoveredAt).toLocaleString())} — click to view">🗺 ${groundMap.pages?.length ?? 0} page${(groundMap.pages?.length ?? 0) === 1 ? '' : 's'}</button>`
+               title="Site map — ${siteMapStats.modeled} modeled · ${siteMapStats.discovered} discovered${siteMapStats.stub ? ` · ${siteMapStats.stub} stub` : ''} · ${siteMapStats.edges} edge(s) — click to view">🗺 ${siteMapStats.nodes} node${siteMapStats.nodes === 1 ? '' : 's'}</button>`
     : '';
   const aliasTags = Array.isArray(ground.aliases) && ground.aliases.length > 0
     ? `<div class="ground-alias-tags">${ground.aliases.map(a => `<span class="ground-alias-tag">${escHtml(a)}</span>`).join('')}</div>`
@@ -304,10 +306,10 @@ function _renderHeaderOnly(entry) {
   const descRow = (ground.description && typeof ground.description === 'string' && ground.description.trim())
     ? `<div class="gv-ground-description">${escHtml(ground.description.trim())}</div>`
     : '';
-  const mapOpen = groundMap && _openGroundMaps.has(ground.id);
-  const viewerHtml = groundMap
+  const mapOpen = hasMap && _openSiteMaps.has(ground.id);
+  const viewerHtml = hasMap
     ? (mapOpen
-        ? `<div class="groundmap-viewer gv-groundmap-viewer" data-gv-gm-viewer="${escAttr(ground.id)}">${_renderGroundMapHtml(groundMap)}</div>`
+        ? `<div class="groundmap-viewer gv-groundmap-viewer" data-gv-gm-viewer="${escAttr(ground.id)}">${_renderSiteMapHtml(siteMap)}</div>`
         : `<div class="groundmap-viewer gv-groundmap-viewer hidden" data-gv-gm-viewer="${escAttr(ground.id)}"></div>`)
     : '';
   // v2.74.43 — Header restructured so url / meta / description align to
@@ -469,10 +471,9 @@ function _wireNewGroundHandlers(_tabUrl) {
 // Analyses) live below as free-floating cards with their own collapse
 // chevron, list of items, and (where applicable) right-aligned + Add
 // footer. Mirrors the fragment-author sidepanel pattern.
-// v2.74.37 — Header card now also surfaces the GroundMap page-count
-// badge and the alias tags, exactly mirroring Studio's ground header.
-// v2.74.38 — The 🗺 N pages badge is a clickable button that toggles an
-// inline GroundMap viewer beneath the header — same UX Studio provides.
+// v2.74.434 — Header card surfaces a 🗺 siteMap node-count badge + alias tags,
+// mirroring Studio's ground header. The badge is a clickable button that toggles
+// an inline siteMap viewer (node list) beneath the header.
 function _renderGroundCard(entry) {
   const { ground, fragments, assertions, perspectives, observations, analyses } = entry;
   // v2.74.42 — Header card is now collapsible; the chevron + body
@@ -829,81 +830,47 @@ function _wireHandlers(grounds) {
   });
 }
 
-// v2.74.38 — Toggle the inline GroundMap viewer for a ground. Mirrors
-// Studio's toggleGroundMapViewer behavior: shows page cards with URLs,
-// form fields, and links. Open state in _openGroundMaps persists across
-// re-renders so the viewer doesn't snap shut on a STORAGE_CHANGED tick.
-function _toggleGroundMapViewer(groundId) {
+// v2.74.434 — Toggle the inline siteMap viewer for a ground (was the GroundMap
+// viewer). Open state in _openSiteMaps persists across re-renders so the viewer
+// doesn't snap shut on a STORAGE_CHANGED tick.
+function _toggleSiteMapViewer(groundId) {
   const viewer = _mountEl?.querySelector(`[data-gv-gm-viewer="${CSS.escape(groundId)}"]`);
   if (!viewer) return;
-  if (_openGroundMaps.has(groundId)) {
-    _openGroundMaps.delete(groundId);
+  if (_openSiteMaps.has(groundId)) {
+    _openSiteMaps.delete(groundId);
     viewer.classList.add('hidden');
     viewer.innerHTML = '';
     return;
   }
-  const groundMap = _groundMapCache.get(groundId);
-  if (!groundMap) return;
-  _openGroundMaps.add(groundId);
-  viewer.innerHTML = _renderGroundMapHtml(groundMap);
+  const siteMap = _siteMapCache.get(groundId);
+  if (!siteMap) return;
+  _openSiteMaps.add(groundId);
+  viewer.innerHTML = _renderSiteMapHtml(siteMap);
   viewer.classList.remove('hidden');
-  // Wire URL clicks → open in a background tab (same UX as Studio).
-  viewer.querySelectorAll('.gm-page-url-link').forEach(link => {
-    link.addEventListener('click', (e) => {
-      e.preventDefault();
-      const url = link.dataset.url;
-      if (url) chrome.tabs.create({ url, active: false }).catch(() => {});
-    });
-  });
 }
 
-// v2.74.38 — Mirrors Studio's renderGroundMapHtml exactly. Reuses the
-// .gm-* classes already in sidepanel.css so visuals match.
-function _renderGroundMapHtml(map) {
-  const pages = map.pages ?? [];
-  if (pages.length === 0) {
-    return '<div class="gm-empty">No pages mapped yet.</div>';
-  }
-  const typeCounts = {};
-  pages.forEach(p => { typeCounts[p.pageType] = (typeCounts[p.pageType] ?? 0) + 1; });
-  const summaryLine = Object.entries(typeCounts)
-    .map(([t, n]) => `${n} ${t}`)
-    .join(' · ');
-  const pageCards = pages.map(p => {
-    const fields = (p.formFields ?? []).slice(0, 6);
-    const links  = (p.outgoing ?? []).slice(0, 5);
-    return `
-      <div class="gm-page-card">
-        <div class="gm-page-head">
-          <span class="gm-page-type gm-type-${escAttr(p.pageType)}">${escHtml(p.pageType)}</span>
-          <span class="gm-page-title">${escHtml(p.title || '(no title)')}</span>
-        </div>
-        <a class="gm-page-url-link" href="#" data-url="${escAttr(p.url)}" title="Open in new tab">${escHtml(p.url)}</a>
-        ${fields.length > 0 ? `
-          <div class="gm-section">
-            <span class="gm-section-label">Form fields</span>
-            <div class="gm-field-list">
-              ${fields.map(f => `
-                <div class="gm-field-row">
-                  <span class="gm-field-label">${escHtml(f.label || '(no label)')}</span>
-                  <span class="gm-field-type">${escHtml(f.type || '?')}</span>
-                  <code class="gm-field-selector">${escHtml(f.selector || '')}</code>
-                  ${f.required ? '<span class="gm-field-required">required</span>' : ''}
-                </div>`).join('')}
-            </div>
-          </div>` : ''}
-        ${links.length > 0 ? `
-          <div class="gm-section">
-            <span class="gm-section-label">Links</span>
-            <div class="gm-link-list">
-              ${links.map(l => `<span class="gm-link">${escHtml(l.text || '(unnamed)')}</span>`).join('')}
-            </div>
-          </div>` : ''}
+// v2.74.434 — Render the Ground siteMap (GROUND_SPEC § 7) as a node list,
+// mirroring Studio's "Site Map" section. Reuses the .sitemap-* classes in
+// sidepanel.css. Modeled nodes (● — captured Locales) first, then discovered
+// (○ — nav destinations / crawled pages), capped at 20.
+function _renderSiteMapHtml(siteMap) {
+  const nodes = siteMap?.nodes ? Object.values(siteMap.nodes) : [];
+  if (nodes.length === 0) return '<div class="gm-empty">No site map yet.</div>';
+  const shortPath = (pat) => { try { return new URL(pat).pathname || '/'; } catch { return pat; } };
+  const modeled = nodes.filter(n => n.status === 'modeled');
+  const discovered = nodes.filter(n => n.status === 'discovered');
+  const stub = nodes.filter(n => n.status !== 'modeled' && n.status !== 'discovered');
+  const edges = Array.isArray(siteMap.edges) ? siteMap.edges.length : 0;
+  const nodeRow = (n) => `
+      <div class="sitemap-node sitemap-${escAttr(n.status)}">
+        <span class="sitemap-node-status">${n.status === 'modeled' ? '●' : '○'}</span>
+        <span class="sitemap-node-name" title="${escAttr(n.urlPattern || '')}">${escHtml(n.name || shortPath(n.urlPattern || ''))}</span>
+        <span class="sitemap-node-meta">${escHtml(shortPath(n.urlPattern || ''))}${n.goals?.length ? ` · ${n.goals.length} goal(s)` : ''}</span>
       </div>`;
-  }).join('');
+  const summary = `${modeled.length} modeled · ${discovered.length} discovered${stub.length ? ` · ${stub.length} stub` : ''} · ${edges} edge(s)`;
   return `
-    <div class="gm-summary">${escHtml(summaryLine)} — mapped ${escHtml(new Date(map.discoveredAt).toLocaleString())}</div>
-    <div class="gm-page-list">${pageCards}</div>`;
+    <div class="sitemap-summary">${escHtml(summary)}</div>
+    <div class="sitemap-nodes">${modeled.map(nodeRow).join('')}${discovered.slice(0, 20).map(nodeRow).join('')}${discovered.length > 20 ? `<div class="empty-state small">+${discovered.length - 20} more discovered</div>` : ''}</div>`;
 }
 
 // v2.74.42 — Header-card handlers (collapse chevron + map-badge toggle).
@@ -911,11 +878,11 @@ function _renderGroundMapHtml(map) {
 // discovering view, undiscovered view. Idempotent.
 function _wireHeaderHandlers(entry) {
   const { ground } = entry;
-  // Map-badge toggle (when a GroundMap exists).
+  // Map-badge toggle (when a siteMap exists).
   _mountEl.querySelectorAll(`[data-gv-toggle-map="${CSS.escape(ground.id)}"]`).forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
-      _toggleGroundMapViewer(ground.id);
+      _toggleSiteMapViewer(ground.id);
     });
   });
   // Header collapse toggle. Hides url + meta + description while

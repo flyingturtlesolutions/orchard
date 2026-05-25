@@ -1122,39 +1122,14 @@ export class StorageManager {
     return data[`snapshots:${groundId}`] ?? null;
   }
 
-  // ── Ground Map (Discovery output, Pass 4) ────────────────────────────────
+  // ── Ground Map — RETIRED (v2.74.434) ─────────────────────────────────────
   //
-  // A GroundMap is structural knowledge of a Ground — what pages exist, what
-  // kinds they are, what forms they expose. Produced by DiscoveryService via
-  // a read-only crawl. One map per Ground, overwritten on re-discovery.
-  //
-  // Shape: { groundId, discoveredAt, pages: [...], branches: [...], selectorConfidence: {} }
-  // See DiscoveryService for full schema. Branches and selectorConfidence
-  // populate in Pass 6; Pass 4 fills only `pages`.
-
-  /**
-   * Save a GroundMap for a Ground. Overwrites any existing map.
-   * @param {string} groundId
-   * @param {Object} map
-   */
-  static async saveGroundMap(groundId, map) {
-    await StorageManager.#set({
-      [`groundmap:${groundId}`]: { ...map, groundId, savedAt: Date.now() },
-    });
-    Logger.info('StorageManager', `GroundMap saved for ${groundId} (${map.pages?.length ?? 0} pages)`);
-  }
-
-  /** @param {string} groundId @returns {Promise<Object|null>} */
-  static async getGroundMap(groundId) {
-    const data = await StorageManager.#get(`groundmap:${groundId}`);
-    return data[`groundmap:${groundId}`] ?? null;
-  }
-
-  /** @param {string} groundId */
-  static async deleteGroundMap(groundId) {
-    await StorageManager.#remove([`groundmap:${groundId}`]);
-    Logger.info('StorageManager', `GroundMap deleted for ${groundId}`);
-  }
+  // The persisted GroundMap (a per-Ground crawl record) was subsumed by the
+  // Ground siteMap (GROUND_SPEC § 7), stored in background.js under the
+  // `siteMapCache` key and read via the GET_SITEMAP message. DiscoveryService
+  // now returns the crawled `pages` directly; background folds them into the
+  // siteMap via SiteMap.siteMapFromCrawl. The save/get/deleteGroundMap methods
+  // and the `groundmap:*` storage keys are gone.
 
   // ── Authoring Session (Pass 5b) ──────────────────────────────────────────
   //
@@ -1283,7 +1258,7 @@ export class StorageManager {
   //     postconditions : [{type, selector?, pattern?, value?}, ...],
   //     rawJson        : JSON string — linear DOM action sequence
   //     params         : [PARAM_NAME, ...]
-  //     pageClass      : string|null — matches a page type in the GroundMap
+  //     pageClass      : string|null — author label for a kind of page
   //     healthStatus   : 'ready'|'stale'|'broken'|'untested'
   //     lastExecutedAt : timestamp|null
   //     createdAt, updatedAt
@@ -2477,7 +2452,7 @@ export class StorageManager {
   // ── Wipe-and-reset migration to v2.21.0 ──────────────────────────────────
   //
   // User decision: Path-era data is discarded. No backward compatibility.
-  // Preserved: Grounds, GroundMaps, conversations, API key, preferences.
+  // Preserved: Grounds, conversations, API key, preferences.
   // Wiped: all paths:*, trace:*, procedure:*, template:*, questions:*,
   //        profile:*, snapshots:*, authoring-session:*, template_status:*,
   //        template_error:*, paths:index:*, result:*, the old v2.14.0 marker.

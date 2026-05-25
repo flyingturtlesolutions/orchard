@@ -2433,8 +2433,8 @@ let expandedGrounds   = new Set();
  * Pass A (v2.21.0) — slimmed Ground list.
  *
  * Each Ground renders as:
- *   - Header row (name, URL, aliases, GroundMap badge, Discover/Edit/Delete buttons)
- *   - GroundMap viewer panel (collapsible, from Pass 6)
+ *   - Header row (name, URL, aliases, 🗺 siteMap node badge, Discover/Edit/Delete buttons)
+ *   - Site Map section (canonical structural viewer — GROUND_SPEC § 7)
  *   - Fragment stub row ("Fragments: N" with + Fragment button — stubbed in A, wired in B)
  *   - Strategy stub row ("Strategies: N" with + Strategy button — stubbed in A, wired in C)
  *
@@ -2561,7 +2561,15 @@ async function _refreshGroundListImpl() {
   list.innerHTML = '';
 
   for (const ground of grounds) {
-    const groundMap = await StorageManager.getGroundMap(ground.id);
+    // v2.74.434 — Ground siteMap (GROUND_SPEC § 7) replaces the retired
+    // GroundMap. Fetched once here and reused by the header badge / Discover
+    // label AND the Site Map section below (single GET_SITEMAP round trip).
+    let siteMapRes = null;
+    try { siteMapRes = await new Promise(r => chrome.runtime.sendMessage({ type: 'GET_SITEMAP', payload: { groundId: ground.id } }, r)); }
+    catch { siteMapRes = null; }
+    const smMap   = siteMapRes?.siteMap ?? null;
+    const smStats = siteMapRes?.stats ?? null;
+    const hasMap  = !!(smStats && smStats.nodes > 0);
     const fragments = await StorageManager.listFragments(ground.id);
     const strategies = await StorageManager.listStrategies(ground.id);
     const assertions = await StorageManager.listAssertions(ground.id);
@@ -2579,8 +2587,10 @@ async function _refreshGroundListImpl() {
     const descText  = effectiveDescription(ground, perspectives);
     const descKind  = ground.descriptionOverride ? 'override' : (ground.derivedDescription ? 'derived' : '');
 
-    const mapBadge = groundMap
-      ? `<button class="groundmap-badge" data-action="toggle-map" data-gid="${ground.id}" title="Mapped ${new Date(groundMap.discoveredAt).toLocaleString()} — click to view">🗺 ${groundMap.pages?.length ?? 0} pages</button>`
+    // v2.74.434 — Static 🗺 node-count badge. The Site Map section below is the
+    // canonical viewer (the old click-to-toggle GroundMap viewer was retired).
+    const mapBadge = hasMap
+      ? `<span class="groundmap-badge" title="Site map — ${smStats.modeled} modeled · ${smStats.discovered} discovered${smStats.stub ? ` · ${smStats.stub} stub` : ''} · ${smStats.edges} edge(s)">🗺 ${smStats.nodes} node${smStats.nodes === 1 ? '' : 's'}</span>`
       : '';
 
     // v2.28.4 — Visual grouping. Each Ground renders as a single card
@@ -2625,15 +2635,14 @@ async function _refreshGroundListImpl() {
         </div>
       </div>
       <div class="ground-group-actions">
-        <button class="btn-secondary small" data-action="discover"     data-gid="${ground.id}" title="${groundMap ? 'Re-discover' : 'Discover structural map of this Ground (read-only crawl)'}">${groundMap ? '↻ Rediscover' : '🔍 Discover'}</button>
+        <button class="btn-secondary small" data-action="discover"     data-gid="${ground.id}" title="${hasMap ? 'Re-discover' : 'Discover structural map of this Ground (read-only crawl)'}">${hasMap ? '↻ Rediscover' : '🔍 Discover'}</button>
         <button class="btn-action" data-action="edit-ground"           data-gid="${ground.id}" title="Edit Ground">✎</button>
         ${ground.metadata?.lifecycle === 'deprecated'
           ? `<button class="btn-secondary small" data-action="reactivate-ground" data-gid="${ground.id}" title="Reactivate this Ground (restore to active)">↑ Reactivate</button>`
           : `<button class="btn-action" data-action="deprecate-ground" data-gid="${ground.id}" title="Deprecate (soft-delete) — hide from active use, reversible">⤓</button>`}
         <button class="btn-action danger" data-action="delete-ground"  data-gid="${ground.id}" title="Delete Ground permanently (and everything on it)">✕</button>
       </div>
-      <div class="ground-discovery-panel hidden" id="discovery-panel-${ground.id}"></div>
-      <div class="groundmap-viewer hidden" id="groundmap-viewer-${ground.id}"></div>`;
+      <div class="ground-discovery-panel hidden" id="discovery-panel-${ground.id}"></div>`;
 
     // v2.74.8 — Collapse toggle. Hides all the .ground-section-row children
     // (Fragments, Assertions, Perspectives, Observations, Analyses, Strategies)
@@ -2707,12 +2716,6 @@ async function _refreshGroundListImpl() {
       }
     });
     groupHeader.querySelector('[data-action="discover"]').addEventListener('click', () => startDiscovery(ground.id));
-    if (groundMap) {
-      groupHeader.querySelector('[data-action="toggle-map"]').addEventListener('click', (e) => {
-        e.stopPropagation();
-        toggleGroundMapViewer(ground.id, groundMap);
-      });
-    }
     card.appendChild(groupHeader);
 
     // Fragments stub row — wired in Pass B
@@ -3116,6 +3119,57 @@ async function _refreshGroundListImpl() {
       } catch (e) { toast(`Failed: ${e?.message ?? 'unknown'}`, 'err'); }
     });
     card.appendChild(oRow);
+
+    // v2.74.431 — Site Map section (GROUND_SPEC § 7). The navigation graph of the
+    // site: the current page(s) modeled, every nav destination discovered. Reuses
+    // the smMap/smStats fetched once at the top of this iteration (v2.74.434).
+    // Read-only inspector + clear control.
+    const smRow = document.createElement('div');
+    smRow.className = 'ground-section-row';
+    {
+      const nodes = smMap?.nodes ? Object.values(smMap.nodes) : [];
+      const shortPath = (pat) => { try { const u = new URL(pat); return (u.pathname || '/') + (u.host ? '' : ''); } catch { return pat; } };
+      const modeled = nodes.filter(n => n.status === 'modeled');
+      const discovered = nodes.filter(n => n.status === 'discovered');
+      const nodeRow = (n) => `
+          <div class="sitemap-node sitemap-${escAttr(n.status)}">
+            <span class="sitemap-node-status">${n.status === 'modeled' ? '●' : '○'}</span>
+            <span class="sitemap-node-name" title="${escAttr(n.urlPattern)}">${escHtml(n.name || shortPath(n.urlPattern))}</span>
+            <span class="sitemap-node-meta">${escHtml(shortPath(n.urlPattern))}${n.goals?.length ? ` · ${n.goals.length} goal(s)` : ''}</span>
+          </div>`;
+      const summary = smStats
+        ? `${smStats.modeled} modeled · ${smStats.discovered} discovered${smStats.stub ? ` · ${smStats.stub} stub` : ''} · ${smStats.edges} edge(s)`
+        : '';
+      smRow.innerHTML = `
+      <div class="ground-section-head">
+        <span class="ground-section-label">Site Map</span>
+        <span class="ground-section-count">${nodes.length}</span>
+        ${nodes.length ? `<button class="btn-secondary tiny" data-action="json-sitemap" data-gid="${ground.id}" title="View the full siteMap (nodes + edges) as JSON">{ }</button>
+        <button class="btn-secondary tiny danger" data-action="clear-sitemap" data-gid="${ground.id}" title="Clear this ground's site map (rebuilds on next Explore)">✕</button>` : ''}
+      </div>
+      <div class="ground-section-body" id="sitemap-body-${ground.id}">
+        ${nodes.length === 0
+          ? `<span class="empty-state small">No site map yet — <strong>Explore</strong> a page to sketch the territory: the current page becomes a <em>modeled</em> node and every same-site nav destination a <em>discovered</em> node + edge.</span>`
+          : `<div class="sitemap-summary">${escHtml(summary)}</div>
+             <div class="sitemap-nodes">${modeled.map(nodeRow).join('')}${discovered.slice(0, 20).map(nodeRow).join('')}${discovered.length > 20 ? `<div class="empty-state small">+${discovered.length - 20} more discovered — see JSON</div>` : ''}</div>`
+        }
+      </div>`;
+    }
+    smRow.querySelector('[data-action="json-sitemap"]')?.addEventListener('click', () => {
+      showJsonModal(`Site Map: ${ground.name ?? ground.id}`, smMap, 'sitemap');
+    });
+    smRow.querySelector('[data-action="clear-sitemap"]')?.addEventListener('click', async () => {
+      if (!confirm('Clear this ground\'s site map? It rebuilds as you Explore pages.')) return;
+      try {
+        const got = await new Promise(r => chrome.storage.local.get('siteMapCache', r));
+        const map = got?.siteMapCache ?? {};
+        delete map[ground.id];
+        await new Promise(r => chrome.storage.local.set({ siteMapCache: map }, r));
+        toast('Site map cleared');
+        await refreshGroundList();
+      } catch (e) { toast(`Failed: ${e?.message ?? 'unknown'}`, 'err'); }
+    });
+    card.appendChild(smRow);
 
     // v2.65.0 (Pass 2) — Observations section. Foundation only: storage
     // exists, library row exists. NO authoring flow, NO runtime path,
@@ -3532,9 +3586,14 @@ async function startDiscovery(groundId) {
     return;
   }
 
-  const existingMap = await StorageManager.getGroundMap(groundId);
-  if (existingMap) {
-    if (!confirm(`Re-discover this Ground? This will overwrite the existing map of ${existingMap.pages?.length ?? 0} pages.`)) return;
+  // v2.74.434 — Confirm re-discovery against the siteMap (GroundMap retired).
+  let existingStats = null;
+  try {
+    const r = await new Promise(res => chrome.runtime.sendMessage({ type: 'GET_SITEMAP', payload: { groundId } }, res));
+    existingStats = r?.stats ?? null;
+  } catch { existingStats = null; }
+  if (existingStats && existingStats.nodes > 0) {
+    if (!confirm(`Re-discover this Ground? The crawl re-folds into the existing site map (${existingStats.nodes} node${existingStats.nodes === 1 ? '' : 's'}, ${existingStats.edges} edge${existingStats.edges === 1 ? '' : 's'}).`)) return;
   }
 
   const panel = document.getElementById(`discovery-panel-${groundId}`);
@@ -3584,81 +3643,11 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
-// ─── GroundMap viewer (Pass 6) ──────────────────────────────────────────────
+// ─── GroundMap viewer — RETIRED (v2.74.434) ─────────────────────────────────
 //
-// Clickable disclosure under each Ground header that renders the GroundMap
-// produced by Discovery. Shows each crawled page with its type, form fields,
-// and outgoing links. Click a URL to open it in a new tab. Read-only.
-
-function toggleGroundMapViewer(groundId, groundMap) {
-  const viewer = document.getElementById(`groundmap-viewer-${groundId}`);
-  if (!viewer) return;
-  if (!viewer.classList.contains('hidden')) {
-    viewer.classList.add('hidden');
-    viewer.innerHTML = '';
-    return;
-  }
-  viewer.innerHTML = renderGroundMapHtml(groundMap);
-  viewer.classList.remove('hidden');
-
-  // Wire URL clicks to open in a new tab
-  viewer.querySelectorAll('.gm-page-url-link').forEach(link => {
-    link.addEventListener('click', (e) => {
-      e.preventDefault();
-      chrome.tabs.create({ url: link.dataset.url, active: false });
-    });
-  });
-}
-
-function renderGroundMapHtml(map) {
-  const pages = map.pages ?? [];
-  if (pages.length === 0) {
-    return '<div class="gm-empty">No pages mapped yet.</div>';
-  }
-
-  const typeCounts = {};
-  pages.forEach(p => { typeCounts[p.pageType] = (typeCounts[p.pageType] ?? 0) + 1; });
-  const summaryLine = Object.entries(typeCounts)
-    .map(([t, n]) => `${n} ${t}`)
-    .join(' · ');
-
-  const pageCards = pages.map(p => {
-    const fields = (p.formFields ?? []).slice(0, 6);
-    const links  = (p.outgoing ?? []).slice(0, 5);
-    return `
-      <div class="gm-page-card">
-        <div class="gm-page-head">
-          <span class="gm-page-type gm-type-${p.pageType}">${escHtml(p.pageType)}</span>
-          <span class="gm-page-title">${escHtml(p.title || '(no title)')}</span>
-        </div>
-        <a class="gm-page-url-link" href="#" data-url="${escAttr(p.url)}" title="Open in new tab">${escHtml(p.url)}</a>
-        ${fields.length > 0 ? `
-          <div class="gm-section">
-            <span class="gm-section-label">Form fields</span>
-            <div class="gm-field-list">
-              ${fields.map(f => `
-                <div class="gm-field-row">
-                  <span class="gm-field-label">${escHtml(f.label || '(no label)')}</span>
-                  <span class="gm-field-type">${escHtml(f.type || '?')}</span>
-                  <code class="gm-field-selector">${escHtml(f.selector || '')}</code>
-                  ${f.required ? '<span class="gm-field-required">required</span>' : ''}
-                </div>`).join('')}
-            </div>
-          </div>` : ''}
-        ${links.length > 0 ? `
-          <div class="gm-section">
-            <span class="gm-section-label">Links</span>
-            <div class="gm-link-list">
-              ${links.map(l => `<span class="gm-link">${escHtml(l.text || '(unnamed)')}</span>`).join('')}
-            </div>
-          </div>` : ''}
-      </div>`;
-  }).join('');
-
-  return `
-    <div class="gm-summary">${escHtml(summaryLine)} — mapped ${new Date(map.discoveredAt).toLocaleString()}</div>
-    <div class="gm-page-list">${pageCards}</div>`;
-}
+// The per-Ground GroundMap viewer (toggleGroundMapViewer / renderGroundMapHtml)
+// was removed: the Site Map section (GROUND_SPEC § 7) in each Ground card is now
+// the canonical structural viewer, fed by GET_SITEMAP.
 
 // ─── Parameter extraction helper ───────────────────────────────────────────
 
@@ -4766,11 +4755,6 @@ $('chk-autoscroll').addEventListener('change', (e) => {
 
 /** @type {Map<string, HTMLElement>} groundId → walk panel element */
 const walkPanels = new Map();
-
-// Pass 6 — Cache the parent Ground's GroundMap per active walk, keyed by
-// pathId (same key the walk panel uses). Used to surface Discovery hints
-// during Fork prompts.
-const walkGroundMaps = new Map();
 
 /**
  * Creates or resets the live walk panel for a ground card.

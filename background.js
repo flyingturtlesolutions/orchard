@@ -22,6 +22,7 @@ import { Logger, LOG_LEVEL }  from './Core/Logger.js';
 import { installGlobalErrorHandlers } from './Core/ErrorCapture.js';
 import * as Locale          from './Core/locale.js';   // v2.74.397 — Perspective/Locale builder + query API
 import * as Outcomes           from './Core/outcomes.js';    // v2.74.413 — OutcomeEvent stream + rollups
+import * as SiteMap            from './Core/siteMap.js';     // v2.74.431 — Ground siteMap (GROUND_SPEC § 7)
 import { ExecutionEngine }    from './Services/ExecutionEngine.js';
 import { StorageManager }     from './Services/StorageManager.js';
 import { executeWorkflow }    from './Services/WorkflowExecutor.js';
@@ -1012,6 +1013,31 @@ async function _readOutcomes(groundId) {
     Logger.warn('background', `outcomesStream read failed: ${e.message}`);
     return [];
   }
+}
+
+// v2.74.431 — Ground siteMap (GROUND_SPEC § 7). One per ground; each captured
+// Locale merges its contribution (a modeled self-node + discovered nav-destination
+// nodes/edges) into it. Key: 'siteMapCache'  value: { [groundId]: SiteMap }.
+const SITEMAP_CACHE_KEY = 'siteMapCache';
+
+async function _readSiteMap(groundId) {
+  if (!groundId) return null;
+  try {
+    const got = await chrome.storage.local.get(SITEMAP_CACHE_KEY);
+    return got?.[SITEMAP_CACHE_KEY]?.[groundId] ?? null;
+  } catch (e) { Logger.warn('background', `siteMapCache read failed: ${e.message}`); return null; }
+}
+
+async function _mergeSiteMapForGround(groundId, contribution) {
+  if (!groundId || !contribution) return;
+  try {
+    const got = await chrome.storage.local.get(SITEMAP_CACHE_KEY);
+    const map = got?.[SITEMAP_CACHE_KEY] ?? {};
+    map[groundId] = SiteMap.mergeSiteMap(map[groundId] ?? null, contribution);
+    await chrome.storage.local.set({ [SITEMAP_CACHE_KEY]: map });
+    const s = SiteMap.siteMapStats(map[groundId]);
+    Logger.info('explore', `siteMap[${groundId}]: ${s.modeled} modeled · ${s.discovered} discovered · ${s.edges} edge(s)`);
+  } catch (e) { Logger.warn('background', `siteMap merge failed: ${e.message}`); }
 }
 
 // Lazy fold-on-read (OUTCOMES_SPEC § 4): recompute the derived rollups from the
@@ -2915,18 +2941,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const grounds = await StorageManager.getAllGrounds();
           const out = [];
           for (const g of grounds) {
-            // v2.74.37 — Include groundMap so the sidepanel header can
-            // mirror Studio's: name + url + 🗺 N pages badge.
-            const [fragments, assertions, perspectives, observations, analyses, groundMap] =
+            // v2.74.434 — Include the Ground siteMap (GROUND_SPEC § 7) so the
+            // sidepanel header can show a 🗺 node badge + inline graph viewer.
+            // (Replaces the retired GroundMap.)
+            const [fragments, assertions, perspectives, observations, analyses, siteMap] =
               await Promise.all([
                 StorageManager.listFragments(g.id),
                 StorageManager.listAssertions(g.id),
                 StorageManager.listPerspectives(g.id),
                 StorageManager.listObservations(g.id),
                 StorageManager.listAnalyses(g.id),
-                StorageManager.getGroundMap(g.id),
+                _readSiteMap(g.id),
               ]);
-            out.push({ ground: g, fragments, assertions, perspectives, observations, analyses, groundMap });
+            const siteMapStats = siteMap ? SiteMap.siteMapStats(siteMap) : null;
+            out.push({ ground: g, fragments, assertions, perspectives, observations, analyses, siteMap, siteMapStats });
           }
           sendResponse({ success: true, grounds: out });
         } catch (err) {
@@ -4252,7 +4280,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               // v2.74.426 — #2 P1: the free-text affordance description lives ON the
               // Locale now (was only on pageStructure). Consumers read locale.affordances.
               if (structure.affordances) model.affordances = structure.affordances;
-              if (groundId) await _writeLocaleCache(groundId, _normalizeUrlForPerspectiveCache(enr.meta?.url ?? pageUrl), { model, url: enr.meta?.url ?? pageUrl, capturedAt: model.coverage.lastExploredAt });
+              const localeKey = _normalizeUrlForPerspectiveCache(enr.meta?.url ?? pageUrl);
+              if (groundId) await _writeLocaleCache(groundId, localeKey, { model, url: enr.meta?.url ?? pageUrl, capturedAt: model.coverage.lastExploredAt });
+              // v2.74.431 — Ground siteMap (GROUND_SPEC § 7): merge this Locale's
+              // contribution — a modeled node for this page + discovered nodes/edges
+              // for every same-site nav destination it surfaced. One Explore sketches
+              // the whole territory; a later Explore of a discovered page upgrades its
+              // node modeled.
+              if (groundId) {
+                try { await _mergeSiteMapForGround(groundId, SiteMap.siteMapFromLocale(model, { localeKey })); }
+                catch (e) { Logger.warn('background', `siteMap contribution failed (continuing): ${e.message}`); }
+              }
               const layerCount = Object.keys(model.layers || {}).length - 1;   // minus the surface layer
               Logger.info('explore', `Locale built alongside Explore: ${Object.keys(model.features).length} feature(s), ${Math.max(0, layerCount)} depth layer(s), ${Object.keys(model.goals || {}).length} goal(s), fidelity ${model.coverage.fidelity}`);
 
@@ -4595,6 +4633,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (!entry?.model) { sendResponse({ success: true, model: null, fresh: false }); return; }
           const fresh = (Date.now() - (entry.capturedAt ?? 0)) < LOCALE_TTL_MS;
           sendResponse({ success: true, model: entry.model, fresh, capturedAt: entry.capturedAt });
+        } catch (err) {
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // v2.74.431 — Ground siteMap (GROUND_SPEC § 7). Read-only; consumed by the
+    // studio Site Map viewer. → { success, siteMap|null, stats }.
+    case 'GET_SITEMAP': {
+      (async () => {
+        try {
+          const { groundId = null } = payload ?? {};
+          if (!groundId) { sendResponse({ success: true, siteMap: null, stats: null }); return; }
+          const siteMap = await _readSiteMap(groundId);
+          sendResponse({ success: true, siteMap, stats: siteMap ? SiteMap.siteMapStats(siteMap) : null });
         } catch (err) {
           sendResponse({ success: false, error: err.message });
         }
@@ -5130,7 +5184,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ success: true, started: true });
         (async () => {
           try {
-            const { groundMap, error, aborted } = await DiscoveryService.discover({
+            const { pages, error, aborted } = await DiscoveryService.discover({
               groundId,
               existingTabId,
               onProgress: (progress) => {
@@ -5147,9 +5201,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 payload: { groundId, error },
               }).catch(() => {});
             } else {
+              // v2.74.432 — Ground arc: the multi-page crawl IS the siteMap's breadth
+              // source (GROUND_SPEC § 9). Fold every crawled page → a node (with
+              // pageType) and every same-site outgoing link → an edge. A later Explore
+              // upgrades a page's node to `modeled`. v2.74.434 — the siteMap is now the
+              // ONLY persisted structural record (the GroundMap was retired).
+              const crawled = pages || [];
+              let siteMapStats = null;
+              try {
+                await _mergeSiteMapForGround(groundId, SiteMap.siteMapFromCrawl(crawled));
+                const sm = await _readSiteMap(groundId);
+                siteMapStats = sm ? SiteMap.siteMapStats(sm) : null;
+              } catch (e) { Logger.warn('background', `siteMap from crawl failed (continuing): ${e.message}`); }
               chrome.runtime.sendMessage({
                 type: 'DISCOVERY_COMPLETE',
-                payload: { groundId, pageCount: groundMap.pages.length, groundMap, aborted: !!aborted },
+                payload: { groundId, pageCount: crawled.length, siteMapStats, aborted: !!aborted },
               }).catch(() => {});
             }
           } catch (err) {

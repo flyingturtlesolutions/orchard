@@ -3339,10 +3339,22 @@ async function enumeratePage() {
       const kind = classifyKind(el);
       const label = accName(el).slice(0, 80);
       const ar = absRect(el);
+      // v2.74.431 — capture the absolute destination href on navigation features so
+      // the Ground siteMap (GROUND_SPEC § 7) can build edges. The element itself, or
+      // an anchor it wraps / is wrapped by (cards often wrap a single link).
+      let href = null;
+      if (kind === 'navigation') {
+        try {
+          const a = (el.tagName === 'A' && el.getAttribute('href')) ? el
+            : (el.querySelector && el.querySelector('a[href]')) || (el.closest && el.closest('a[href]'));
+          if (a && a.href && /^https?:/i.test(a.href)) href = a.href;
+        } catch { /* */ }
+      }
       const id = djb2(`${kind}|${el.getAttribute('role') || el.tagName.toLowerCase()}|${label}|${selector}`);
       add({
         id, kind, label, a11yRole: el.getAttribute('role') || null,
         selector, selectorKind: tierOf(selector), selectorVerified: false,
+        ...(href ? { href } : {}),
         location: { band: b, absRect: ar, visibleAtRest: (ar.y + ar.h) > origScrollY && ar.y < origScrollY + vh, scrollToY: Math.max(0, ar.y - Math.round(vh * 0.3)) },
         interaction: interactionOf(kind, el),
         confidence: 0.6,
@@ -3383,6 +3395,40 @@ async function enumeratePage() {
     features: [...feats.values()],
     meta: { url: location.href, title: document.title || '', viewport: { w: vw, h: vh }, scrollHeight: docH, bands: bandCount, enumeratedAt: Date.now() },
   };
+}
+
+// v2.74.433 — Deterministic outgoing-link extraction for the Ground discovery
+// crawl. Link extraction is a DOM task, not a judgment task: walk every
+// <a href> (shadow-DOM aware), resolve to an absolute http(s) URL, dedupe, and
+// return {href,text}. This replaces the LLM classifier's unreliable+over-
+// restrictive `outgoingLinks` (which excluded nav/footer and capped at 8 —
+// discarding exactly the category/nav links a homepage is built from, yielding
+// the impoverished 1-node/0-edge siteMap). DiscoveryService feeds this into
+// both the BFS enqueue and siteMapFromCrawl edges.
+function extractPageLinks() {
+  const LINK_CAP = 250;          // pathological pages (mega-menus) can have 1000s
+  const seen = new Set();
+  const links = [];
+  let anchors = [];
+  try { anchors = queryAllDeep('a[href]'); } catch { anchors = []; }
+  for (const a of anchors) {
+    if (links.length >= LINK_CAP) break;
+    let abs = '';
+    try { abs = a.href; } catch { continue; }          // .href resolves relative→absolute
+    if (!abs || !/^https?:/i.test(abs)) continue;       // skip javascript:/mailto:/tel:/#
+    // Normalize: drop hash so /x and /x#sec collapse to one edge target.
+    let key = abs;
+    try { const u = new URL(abs); u.hash = ''; key = u.toString(); } catch { /* */ }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    let text = '';
+    try {
+      text = (a.getAttribute('aria-label') || a.getAttribute('title') || a.innerText || a.textContent || '')
+        .trim().replace(/\s+/g, ' ').slice(0, 120);
+    } catch { /* */ }
+    links.push({ href: key, text });
+  }
+  return { success: true, links, url: location.href, title: document.title || '' };
 }
 
 // v2.74.395 — opts.includeContentBlocks → prepend a REPEATING CONTENT BLOCKS
@@ -5451,6 +5497,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     case 'DOM_SNAPSHOT_RICH':
       sendResponse(handleDomSnapshotRich(message.payload?.prevSigs ?? [], { includeContentBlocks: !!message.payload?.includeContentBlocks }));
+      return false;
+
+    // v2.74.433 — Deterministic outgoing-link extraction for Ground discovery.
+    case 'EXTRACT_LINKS':
+      try { sendResponse(extractPageLinks()); }
+      catch (e) { sendResponse({ success: false, links: [], error: e.message }); }
       return false;
 
     // v2.74.396 — Resolve Tier-2 visual pick: normalized box → best-IoU element.

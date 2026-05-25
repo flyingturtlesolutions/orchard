@@ -1,9 +1,12 @@
 /**
  * @file Services/DiscoveryService.js
- * @description Read-only crawler that produces a GroundMap — structural
+ * @description Read-only crawler that feeds the Ground siteMap — structural
  * knowledge of a Ground. Visits the seed URL, classifies the page via
  * AnthropicService.classifyPage, follows same-origin outgoing links to
- * configurable depth, and records form fields along the way.
+ * configurable depth, and records form fields along the way. Returns the
+ * crawled `pages` array; the caller folds it into the siteMap
+ * (GROUND_SPEC § 7) via SiteMap.siteMapFromCrawl. (v2.74.434 — the legacy
+ * persisted GroundMap was retired; the siteMap subsumes it.)
  *
  * Safety invariants:
  *   1. NEVER fires CLICK, TYPE, SELECT, or SUBMIT.
@@ -47,7 +50,8 @@ export class DiscoveryService {
 
   /**
    * Run a Discovery pass on a Ground. Opens a dedicated tab, crawls from the
-   * Ground's URL, produces a GroundMap, persists it, and returns it.
+   * Ground's URL, and returns the crawled `pages` for the caller to fold into
+   * the siteMap (the legacy persisted GroundMap was retired in v2.74.434).
    *
    * @param {Object} options
    * @param {string} options.groundId
@@ -55,7 +59,9 @@ export class DiscoveryService {
    * @param {Function} [options.isAborted]  - Returns true if the user cancelled
    * @param {number}  [options.maxDepth=2]
    * @param {number}  [options.maxPages=20]
-   * @returns {Promise<{ groundMap: Object|null, error: string|null }>}
+   * @returns {Promise<{ pages: Array, error: string|null, aborted?: boolean }>}
+   *          `pages` = crawled page records ({ url, title, pageType, formFields,
+   *          outgoing, visitedAt }); the caller folds them into the siteMap.
    */
   static async discover({
     groundId,
@@ -70,18 +76,18 @@ export class DiscoveryService {
     existingTabId = null,
   }) {
     if (!groundId) {
-      return { groundMap: null, error: 'groundId required' };
+      return { pages: [], error: 'groundId required' };
     }
 
     const ground = await StorageManager.getGround(groundId);
     if (!ground?.url) {
-      return { groundMap: null, error: `Ground ${groundId} has no URL` };
+      return { pages: [], error: `Ground ${groundId} has no URL` };
     }
 
     const seedUrl = ground.url;
     let seedOrigin;
     try { seedOrigin = new URL(seedUrl).origin; }
-    catch { return { groundMap: null, error: `Invalid seed URL: ${seedUrl}` }; }
+    catch { return { pages: [], error: `Invalid seed URL: ${seedUrl}` }; }
 
     Logger.info('DiscoveryService', `Starting discovery — ${seedUrl} (depth ${maxDepth}, max ${maxPages})${existingTabId != null ? ` reusing tab ${existingTabId}` : ''}`);
 
@@ -141,7 +147,10 @@ export class DiscoveryService {
             continue;
           }
 
-          // Classify via Claude
+          // Classify via Claude — pageType + formFields are judgment tasks the
+          // LLM is good at. Link extraction is NOT: it's a deterministic DOM
+          // task (see #extractLinks below), so we no longer use
+          // classification.outgoingLinks for the crawl/siteMap.
           const classification = await AnthropicService.classifyPage({
             url,
             title       : snapshot.title,
@@ -152,12 +161,23 @@ export class DiscoveryService {
             continue;
           }
 
+          // v2.74.433 — Deterministic outgoing-link extraction (every <a href>,
+          // resolved + deduped) from the live DOM. This is the source of both the
+          // BFS frontier and the siteMap edges — replacing the LLM's unreliable,
+          // over-restrictive (no nav/footer, max 8) outgoingLinks that produced
+          // empty siteMaps. Falls back to the classifier's links if the content
+          // script call fails.
+          let outgoing = await DiscoveryService.#extractLinks(tabId);
+          if (!outgoing || outgoing.length === 0) {
+            outgoing = Array.isArray(classification.outgoingLinks) ? classification.outgoingLinks : [];
+          }
+
           const pageRecord = {
             url,
             title         : classification.title,
             pageType      : classification.pageType,
             formFields    : classification.formFields,
-            outgoing      : classification.outgoingLinks,
+            outgoing,
             visitedAt     : Date.now(),
           };
           pages.push(pageRecord);
@@ -171,7 +191,7 @@ export class DiscoveryService {
 
           // Enqueue follow-up links (same-origin, safe)
           if (depth < maxDepth) {
-            for (const link of classification.outgoingLinks ?? []) {
+            for (const link of outgoing) {
               const nextUrl = DiscoveryService.#canonicalize(link.href, url);
               if (!nextUrl) continue;
               if (visited.has(nextUrl))                  continue;
@@ -186,17 +206,10 @@ export class DiscoveryService {
         }
       }
 
-      const groundMap = {
-        groundId,
-        discoveredAt      : Date.now(),
-        seedUrl,
-        pages,
-        branches          : [],   // populated in Pass 6
-        selectorConfidence: {},   // populated in Pass 6
-      };
-
-      await StorageManager.saveGroundMap(groundId, groundMap);
-      Logger.info('DiscoveryService', `Discovery ${aborted ? 'aborted' : 'complete'} — mapped ${pages.length} page(s)`);
+      // v2.74.434 — No persisted GroundMap anymore: the siteMap (built by the
+      // caller from `pages` via SiteMap.siteMapFromCrawl) is the canonical
+      // structural record. We just hand back the crawled pages.
+      Logger.info('DiscoveryService', `Discovery ${aborted ? 'aborted' : 'complete'} — crawled ${pages.length} page(s)`);
 
       // v2.74.41 — Site-level summary. Asks Claude for a brand name,
       // aliases, and a 1-2 sentence description based on the crawled
@@ -233,11 +246,11 @@ export class DiscoveryService {
         }
       }
 
-      return { groundMap, error: null, aborted };
+      return { pages, error: null, aborted };
 
     } catch (err) {
       Logger.error('DiscoveryService', `Discovery failed: ${err.message}`);
-      return { groundMap: null, error: err.message };
+      return { pages: [], error: err.message };
     } finally {
       // v2.74.41 — Only close the tab if WE opened it. When the caller
       // supplied an existingTabId, the user is actively using that tab
@@ -299,6 +312,23 @@ export class DiscoveryService {
     } catch (e) {
       Logger.warn('DiscoveryService', `Snapshot failed: ${e.message}`);
       return null;
+    }
+  }
+
+  /**
+   * v2.74.433 — Deterministic outgoing-link extraction. Asks the content script
+   * to walk every <a href> (shadow-DOM aware), resolve to absolute http(s), and
+   * dedupe. Returns [{href,text}]. This is the reliable source of the crawl
+   * frontier + siteMap edges, replacing the LLM classifier's link guesses.
+   */
+  static async #extractLinks(tabId) {
+    try {
+      const res = await chrome.tabs.sendMessage(tabId, { type: 'EXTRACT_LINKS' });
+      if (!res?.success || !Array.isArray(res.links)) return [];
+      return res.links;
+    } catch (e) {
+      Logger.warn('DiscoveryService', `Link extraction failed: ${e.message}`);
+      return [];
     }
   }
 
