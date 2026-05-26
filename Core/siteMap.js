@@ -711,6 +711,53 @@ export function siteMapCapabilities(map) {
   return { capabilities, byPageType, totals: { modeled, withGoals, distinct: capabilities.length } };
 }
 
+// Intent → capability matching. Given a free-text user intent and the catalog above, rank the
+// site's goals by lexical overlap so the UI can answer "where do I go / what do I run to do X".
+// PURE + deterministic (token overlap, no LLM) — a solid, testable v1; an LLM re-rank for
+// synonymy / paraphrase is a later slice that layers on top of these candidates.
+// (Named matchSITEcapabilities to not collide with CapabilityAPI.matchCapabilities, which
+// matches runnable Strategies/Workflows — a different notion of "capability".)
+
+const _MATCH_STOP = new Set([
+  'a','an','the','to','of','for','and','or','my','me','i','it','is','this','that','on','in','with',
+  'want','wanna','need','would','like','how','do','can','could','please','find','get','go','see','my','site','page',
+]);
+/** Content tokens of a string: lowercase alphanumerics, length>1, minus stopwords. */
+function _matchTokens(s) {
+  return (String(s || '').toLowerCase().match(/[a-z0-9]+/g) || []).filter((t) => t.length > 1 && !_MATCH_STOP.has(t));
+}
+
+/**
+ * Rank a site's capability catalog against a free-text intent by lexical overlap. Pure.
+ * Score = 0.7·(fraction of the GOAL's content tokens the intent covers) + 0.3·(fraction of the
+ * INTENT's tokens the goal covers); ties broken by prevalence (count) then label. Goals with no
+ * shared token are dropped. Returns the top `limit` candidates, each carrying the archetype(s)
+ * (with exemplarUrl) to navigate to.
+ * @param {string} intent
+ * @param {{capabilities:Array}} catalog  — output of siteMapCapabilities
+ * @param {{limit?:number}} [opts]
+ * @returns {Array<{goal,score,matched:string[],count,pageTypes:string[],archetypes:Array}>}
+ */
+export function matchSiteCapabilities(intent, catalog, { limit = 8 } = {}) {
+  const want = _matchTokens(intent);
+  if (!want.length) return [];
+  const wantSet = new Set(want);
+  const caps = (catalog && Array.isArray(catalog.capabilities)) ? catalog.capabilities : [];
+  const scored = [];
+  for (const c of caps) {
+    const goalToks = _matchTokens(c.goal);
+    if (!goalToks.length) continue;
+    const matched = [...new Set(goalToks.filter((t) => wantSet.has(t)))];
+    if (!matched.length) continue;
+    const goalCover   = matched.length / new Set(goalToks).size;   // how much of the goal the intent hits
+    const intentCover = matched.length / wantSet.size;             // how much of the intent the goal hits
+    const score = +(goalCover * 0.7 + intentCover * 0.3).toFixed(4);
+    scored.push({ goal: c.goal, score, matched, count: c.count, pageTypes: c.pageTypes, archetypes: c.archetypes });
+  }
+  scored.sort((a, b) => b.score - a.score || b.count - a.count || (a.goal < b.goal ? -1 : a.goal > b.goal ? 1 : 0));
+  return scored.slice(0, limit);
+}
+
 // ── Drift & re-discovery (GROUND_SPEC § 8) ───────────────────────────────────
 
 /**
