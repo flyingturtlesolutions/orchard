@@ -23,14 +23,21 @@
 import { Logger }           from '../Core/Logger.js';
 import { StorageManager }   from './StorageManager.js';
 import { AnthropicService } from './AnthropicService.js';
+import { templatePattern }  from '../Core/siteMap.js';   // v2.74.440 — archetype-driven crawl
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
 /** Max depth of the crawl from the seed URL (0 = seed only, 1 = seed + its links, …). */
 const DEFAULT_MAX_DEPTH = 2;
 
-/** Hard cap on total pages visited per Discovery run. */
-const DEFAULT_MAX_PAGES = 20;
+/** Hard safety cap on total pages visited per Discovery run (archetype budget is the
+ *  effective limit; this just bounds pathological cases). v2.74.440 raised 20→60. */
+const DEFAULT_MAX_PAGES = 60;
+
+/** v2.74.440 — Primary budget: distinct page ARCHETYPES to confirm/classify per run.
+ *  The crawl visits ONE representative per template (sitemap stubs collapse instances),
+ *  so coverage is measured in archetypes, not raw pages. Tunable. */
+const DEFAULT_MAX_ARCHETYPES = 40;
 
 /** Milliseconds to wait after navigation before capturing a DOM snapshot. */
 const NAV_SETTLE_MS = 2000;
@@ -74,6 +81,14 @@ export class DiscoveryService {
     // and NOT closed at the end. When null, the original behavior runs:
     // open a fresh background tab and close it on completion.
     existingTabId = null,
+    // v2.74.440 — Architecture crawl (slice 3). `templateRules` (corpus rules from
+    // sitemap ingestion) let the crawl group URLs by ARCHETYPE; `seedUrls` (sitemap
+    // stub exemplars, one per archetype) seed the frontier so coverage spans the real
+    // architecture — not just what's link-reachable from the homepage within maxDepth.
+    // The crawl then visits ONE representative per archetype, budgeted by maxArchetypes.
+    templateRules = [],
+    seedUrls      = [],
+    maxArchetypes = DEFAULT_MAX_ARCHETYPES,
   }) {
     if (!groundId) {
       return { pages: [], error: 'groundId required' };
@@ -89,14 +104,24 @@ export class DiscoveryService {
     try { seedOrigin = new URL(seedUrl).origin; }
     catch { return { pages: [], error: `Invalid seed URL: ${seedUrl}` }; }
 
-    Logger.info('DiscoveryService', `Starting discovery — ${seedUrl} (depth ${maxDepth}, max ${maxPages})${existingTabId != null ? ` reusing tab ${existingTabId}` : ''}`);
+    // v2.74.440 — archetype key for a URL (corpus rules collapse instances → one template).
+    const archetypeOf = (u) => { try { return templatePattern(u, templateRules); } catch { return String(u || ''); } };
+
+    Logger.info('DiscoveryService', `Starting discovery — ${seedUrl} (depth ${maxDepth}, ≤${maxArchetypes} archetypes, ${seedUrls.length} sitemap seed(s))${existingTabId != null ? ` reusing tab ${existingTabId}` : ''}`);
 
     let tabId = null;
     let openedNewTab = false;
     let aborted = false;
+    let lastNavUrl = seedUrl;   // v2.74.440 — tab starts at the seed (created/navigated below)
     const pages = [];
-    const visited = new Set();           // URLs we've already classified
+    const visited = new Set();             // URLs we've already dequeued
+    const visitedArchetypes = new Set();   // v2.74.440 — one representative visited per archetype
+    // Seed the frontier with the live tab's seed URL, then the sitemap stub exemplars
+    // (one concrete URL per known archetype) so the crawl confirms the whole architecture.
     const queue   = [{ url: seedUrl, depth: 0 }];
+    for (const u of seedUrls) {
+      if (u && u !== seedUrl && DiscoveryService.#sameOrigin(u, seedOrigin)) queue.push({ url: u, depth: 0 });
+    }
 
     try {
       if (existingTabId != null) {
@@ -113,7 +138,7 @@ export class DiscoveryService {
         openedNewTab = true;
       }
 
-      while (queue.length > 0 && pages.length < maxPages) {
+      while (queue.length > 0 && pages.length < maxPages && visitedArchetypes.size < maxArchetypes) {
         if (isAborted()) {
           Logger.info('DiscoveryService', 'Discovery aborted by user');
           aborted = true;
@@ -124,18 +149,25 @@ export class DiscoveryService {
         if (visited.has(url)) continue;
         visited.add(url);
 
+        // v2.74.440 — one representative per archetype: if we've already classified a
+        // page of this template, skip its siblings (the siteMap node is the same node).
+        const arch = archetypeOf(url);
+        if (visitedArchetypes.has(arch)) continue;
+
         onProgress({
           visited         : pages.length,
-          total           : Math.min(maxPages, visited.size + queue.length),
+          total           : maxArchetypes,
           currentUrl      : url,
           currentPageType : null,
         });
 
         try {
-          // Navigate to the page (idempotent read). Skip navigation for the
-          // seed if this is the first visit — tab was already opened there.
-          if (pages.length > 0) {
+          // Navigate only when the tab isn't already at this URL. v2.74.440 — keyed on
+          // the tab's actual location (not pages.length): with sitemap exemplars seeded,
+          // a failed seed must NOT make the next page skip navigation.
+          if (url !== lastNavUrl) {
             await DiscoveryService.#navigate(tabId, url);
+            lastNavUrl = url;
           }
           await DiscoveryService.#waitForPageReady(tabId);
           await DiscoveryService.#sleep(NAV_SETTLE_MS);
@@ -181,22 +213,25 @@ export class DiscoveryService {
             visitedAt     : Date.now(),
           };
           pages.push(pageRecord);
+          visitedArchetypes.add(arch);   // v2.74.440 — this archetype is now confirmed
 
           onProgress({
-            visited         : pages.length,
-            total           : Math.min(maxPages, visited.size + queue.length),
+            visited         : visitedArchetypes.size,
+            total           : maxArchetypes,
             currentUrl      : url,
             currentPageType : classification.pageType,
           });
 
-          // Enqueue follow-up links (same-origin, safe)
+          // Enqueue follow-up links (same-origin, safe). Skip links whose archetype is
+          // already confirmed — the siteMap node exists, no need to visit a sibling.
           if (depth < maxDepth) {
             for (const link of outgoing) {
               const nextUrl = DiscoveryService.#canonicalize(link.href, url);
               if (!nextUrl) continue;
-              if (visited.has(nextUrl))                  continue;
+              if (visited.has(nextUrl))                               continue;
               if (!DiscoveryService.#sameOrigin(nextUrl, seedOrigin)) continue;
               if (DiscoveryService.#isDangerousLink(link))            continue;
+              if (visitedArchetypes.has(archetypeOf(nextUrl)))        continue;
               queue.push({ url: nextUrl, depth: depth + 1 });
             }
           }

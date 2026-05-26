@@ -3132,9 +3132,15 @@ async function _refreshGroundListImpl() {
       const shortPath = (pat) => (pat || '').replace(/^https?:\/\/[^/]+/i, '') || '/';
       const modeled = nodes.filter(n => n.status === 'modeled');
       const discovered = nodes.filter(n => n.status === 'discovered');
+      // v2.74.439 — surface stubs (sitemap.xml-known, not yet crawled) so a freshly
+      // ingested ground isn't an empty list under "N stub".
+      const stub = nodes.filter(n => n.status !== 'modeled' && n.status !== 'discovered');
+      // v2.74.441 — Explore queue (slice 4): archetypes not yet modeled but with a
+      // navigable exemplar URL can be auto-Explored → modeled.
+      const modelable = nodes.filter(n => n.status !== 'modeled' && n.exemplarUrl);
       const nodeRow = (n) => `
           <div class="sitemap-node sitemap-${escAttr(n.status)}">
-            <span class="sitemap-node-status">${n.status === 'modeled' ? '●' : '○'}</span>
+            <span class="sitemap-node-status">${n.status === 'modeled' ? '●' : (n.status === 'discovered' ? '◐' : '○')}</span>
             <span class="sitemap-node-name" title="${escAttr(n.urlPattern)}">${escHtml(n.name || shortPath(n.urlPattern))}</span>
             <span class="sitemap-node-meta">${escHtml(shortPath(n.urlPattern))}${n.instanceCount > 1 ? ` · ×${n.instanceCount}` : ''}${n.goals?.length ? ` · ${n.goals.length} goal(s)` : ''}</span>
           </div>`;
@@ -3145,6 +3151,7 @@ async function _refreshGroundListImpl() {
       <div class="ground-section-head">
         <span class="ground-section-label">Site Map</span>
         <span class="ground-section-count">${nodes.length}</span>
+        ${modelable.length ? `<button class="btn-secondary tiny" data-action="explore-queue" data-gid="${ground.id}" title="Auto-Explore every un-modeled archetype (opens a background tab; one Explore per template → modeled). Slow (~15–30s each); Abort anytime.">▶ Model ${modelable.length}</button>` : ''}
         ${nodes.length ? `<button class="btn-secondary tiny" data-action="json-sitemap" data-gid="${ground.id}" title="View the full siteMap (nodes + edges) as JSON">{ }</button>
         <button class="btn-secondary tiny danger" data-action="clear-sitemap" data-gid="${ground.id}" title="Clear this ground's site map (rebuilds on next Explore)">✕</button>` : ''}
       </div>
@@ -3152,10 +3159,12 @@ async function _refreshGroundListImpl() {
         ${nodes.length === 0
           ? `<span class="empty-state small">No site map yet — <strong>Explore</strong> a page to sketch the territory: the current page becomes a <em>modeled</em> node and every same-site nav destination a <em>discovered</em> node + edge.</span>`
           : `<div class="sitemap-summary">${escHtml(summary)}</div>
-             <div class="sitemap-nodes">${modeled.map(nodeRow).join('')}${discovered.slice(0, 20).map(nodeRow).join('')}${discovered.length > 20 ? `<div class="empty-state small">+${discovered.length - 20} more discovered — see JSON</div>` : ''}</div>`
+             <div class="sitemap-nodes">${modeled.map(nodeRow).join('')}${discovered.slice(0, 20).map(nodeRow).join('')}${discovered.length > 20 ? `<div class="empty-state small">+${discovered.length - 20} more discovered — see JSON</div>` : ''}${stub.slice(0, 25).map(nodeRow).join('')}${stub.length > 25 ? `<div class="empty-state small">+${stub.length - 25} more stub — see JSON</div>` : ''}</div>`
         }
-      </div>`;
+      </div>
+      <div class="explore-queue-panel hidden" id="exq-panel-${ground.id}"></div>`;
     }
+    smRow.querySelector('[data-action="explore-queue"]')?.addEventListener('click', () => startExploreQueue(ground.id));
     smRow.querySelector('[data-action="json-sitemap"]')?.addEventListener('click', () => {
       showJsonModal(`Site Map: ${ground.name ?? ground.id}`, smMap, 'sitemap');
     });
@@ -3615,6 +3624,82 @@ async function startDiscovery(groundId) {
       panel.innerHTML = `<span class="discovery-error">${escHtml(response?.error ?? 'Failed to start discovery')}</span>`;
     }
   });
+}
+
+// ─── Explore queue (Completeness slice 4) ────────────────────────────────────
+//
+// Auto-Explore every un-modeled archetype → modeled. Studio-driven (not a
+// background worker): it opens ONE dedicated background tab, then for each
+// archetype navigates the tab to that archetype's exemplar URL and reuses the
+// existing EXPLORE_PAGE_STRUCTURE handler (which builds + caches the Locale and
+// merges siteMapFromLocale → the node becomes `modeled`). Rate-limited; Abortable;
+// resumable across runs (each run re-derives the not-yet-modeled set, so closing
+// Studio merely pauses — re-click ▶ Model to continue). Background tab ⇒ the
+// Explore runs without screenshots (planner/affordances use DOM only) — the
+// trade-off for not hijacking the user's active tab.
+const exploreQueueRunning = new Set();   // groundIds with a live queue (also the abort flag)
+
+function _navigateStudioTab(tabId, url, timeoutMs = 20000) {
+  return new Promise((resolve, reject) => {
+    const to = setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); reject(new Error('navigation timeout')); }, timeoutMs);
+    const listener = (id, info) => {
+      if (id === tabId && info.status === 'complete') { clearTimeout(to); chrome.tabs.onUpdated.removeListener(listener); resolve(); }
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.update(tabId, { url }).catch((e) => { clearTimeout(to); chrome.tabs.onUpdated.removeListener(listener); reject(e); });
+  });
+}
+
+async function startExploreQueue(groundId) {
+  if (exploreQueueRunning.has(groundId)) return;
+
+  const hasKey = await new Promise(res => chrome.runtime.sendMessage({ type: 'CHECK_API_KEY' }, r => res(r?.hasKey)));
+  if (!hasKey) { toast('Add your Anthropic API key in Settings first', 'err'); qs('[data-tab="settings"]')?.click(); return; }
+
+  let res = null;
+  try { res = await new Promise(r => chrome.runtime.sendMessage({ type: 'GET_SITEMAP', payload: { groundId } }, r)); } catch { res = null; }
+  const nodes = res?.siteMap?.nodes ? Object.values(res.siteMap.nodes) : [];
+  const targets = nodes
+    .filter(n => n.status !== 'modeled' && n.exemplarUrl && /^https?:/i.test(n.exemplarUrl))
+    .map(n => ({ url: n.exemplarUrl, name: n.name || n.urlPattern || n.exemplarUrl }));
+  if (!targets.length) { toast('No un-modeled archetypes with a navigable URL'); return; }
+  if (!confirm(`Auto-Explore ${targets.length} archetype(s)? Opens a background tab and runs one Explore per template (~15–30s each → a few minutes total). Abort anytime; closing Studio pauses it (re-run to resume).`)) return;
+
+  const panel = document.getElementById(`exq-panel-${groundId}`);
+  const render = (msg, cls = '') => {
+    if (!panel) return;
+    panel.classList.remove('hidden');
+    panel.innerHTML = `<div class="discovery-progress"><span class="discovery-progress-status ${cls}">${escHtml(msg)}</span><button class="btn-secondary tiny" data-action="abort-exq">Abort</button></div>`;
+    panel.querySelector('[data-action="abort-exq"]')?.addEventListener('click', () => { exploreQueueRunning.delete(groundId); toast('Aborting after the current page…'); });
+  };
+
+  exploreQueueRunning.add(groundId);
+  render(`Starting — ${targets.length} archetype(s)…`);
+  let tab = null, done = 0, failed = 0;
+  try {
+    tab = await chrome.tabs.create({ url: 'about:blank', active: false });
+    for (let i = 0; i < targets.length; i++) {
+      if (!exploreQueueRunning.has(groundId)) break;   // aborted
+      const t = targets[i];
+      render(`Modeling ${i + 1}/${targets.length}: ${t.name.slice(0, 56)}`);
+      try {
+        await _navigateStudioTab(tab.id, t.url);
+        await new Promise(r => setTimeout(r, 1500));   // settle (lazy content)
+        const r = await new Promise(rs => chrome.runtime.sendMessage({ type: 'EXPLORE_PAGE_STRUCTURE', payload: { tabId: tab.id, groundId } }, rs));
+        if (r?.success) done++; else failed++;
+      } catch { failed++; }
+      await new Promise(r => setTimeout(r, 1200));      // rate-limit between archetypes
+    }
+    const aborted = !exploreQueueRunning.has(groundId);
+    render(`${aborted ? 'Aborted' : 'Done'} — modeled ${done}/${targets.length}${failed ? `, ${failed} failed` : ''}`, aborted ? '' : 'discovery-progress-done');
+    toast(`${aborted ? 'Explore queue aborted' : 'Explore queue complete'} — ${done} modeled${failed ? `, ${failed} failed` : ''}`);
+  } catch (e) {
+    if (panel) panel.innerHTML = `<span class="discovery-error">${escHtml(e?.message ?? 'Explore queue failed')}</span>`;
+  } finally {
+    exploreQueueRunning.delete(groundId);
+    if (tab?.id != null) { try { await chrome.tabs.remove(tab.id); } catch { /* */ } }
+    refreshGroundList().catch(() => {});
+  }
 }
 
 // Listen for discovery progress/completion broadcasts

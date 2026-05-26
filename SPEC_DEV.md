@@ -4051,6 +4051,140 @@ locale-capture.js` (matchedGoal in the grounded-intent card), `manifest.json`.
 
 ---
 
+## v2.74.441 — Completeness slice 4: Explore queue (auto-model every archetype)
+
+**Date:** 2026-05-26
+**Decision by:** user ("continue"). The "every archetype gets Explored" payoff.
+
+**Design choice.** Implemented studio-DRIVEN (not a background service-worker worker):
+the existing `EXPLORE_PAGE_STRUCTURE` background handler is a ~250-line pipeline keyed
+on a `tabId`; extracting it to call headless from a SW worker is a risky large refactor.
+Instead the queue lives in `studio.js` and REUSES the handler via messaging — zero
+extraction, all the existing Explore logic (banded poke walk → Locale build → cache →
+`siteMapFromLocale` merge → node `modeled`). Trade-off: it pauses if Studio is closed
+(re-click to resume) and runs in a background tab so the Explore has no screenshots
+(planner/affordances use DOM only). A fully-background, resumable-through-restart worker
+is a future hardening.
+
+**What shipped (`studio.js`).** A **▶ Model N** control in the Site Map section head
+(shown when N archetypes are un-modeled but have a navigable `exemplarUrl`).
+`startExploreQueue(groundId)`: API-key check → `GET_SITEMAP` → targets = non-modeled
+nodes with an http(s) exemplar → confirm → opens ONE dedicated background tab → for each
+archetype: navigate the tab to its exemplar, settle, send `EXPLORE_PAGE_STRUCTURE
+{tabId, groundId}` (which upgrades the node `stub/discovered → modeled`), rate-limit ~1.2s.
+Live progress panel + **Abort** (finishes the current page, then stops). Resumable across
+runs (each run re-derives the not-yet-modeled set, so modeled archetypes are skipped).
+Tab closed + ground list refreshed in `finally`.
+
+**Verified.** studio syntax OK; confirmed no `storage.onChanged` auto-refresh in studio,
+so the live queue panel + Abort button aren't detached mid-run. Live behavior (tab driving
++ per-archetype Explore) needs the loaded extension.
+
+**Completeness arc now end-to-end:** Discover → sitemap `stub`s + crawl `discovered` →
+**▶ Model** walks every archetype to `modeled`.
+
+**Touched.** `studio.js`, `manifest.json`.
+
+---
+
+## v2.74.440 — Completeness slice 3: architecture crawl over the templated set
+
+**Date:** 2026-05-26
+**Decision by:** user ("continue").
+
+**Problem.** The crawl was pure BFS-from-homepage (≤20 pages, depth 2): it spent its
+budget on whatever was link-reachable from the seed and could easily never reach a
+`/product` or `/blog` archetype. It also re-visited many instances of the same template.
+
+**What shipped (`Services/DiscoveryService.js`).** The crawl is now **archetype-driven**:
+- New args `templateRules`, `seedUrls`, `maxArchetypes` (default 40; `maxPages` raised to
+  60 as a pure safety cap). `archetypeOf(url) = templatePattern(url, templateRules)`.
+- The frontier is seeded with the **sitemap stub exemplars** (one concrete URL per known
+  archetype) in addition to the seed URL — so coverage spans the whole architecture, not
+  just the homepage's neighborhood.
+- Visits are **deduped by archetype**: dequeue computes the archetype and skips if one was
+  already classified; links whose archetype is already confirmed aren't enqueued. So the
+  crawl visits ONE representative per template, and `pages.length === visitedArchetypes.size`
+  (archetype budget binds, not raw pages).
+- Every confirmed archetype upgrades its node `stub → discovered` (merge precedence) with
+  pageType + edges, via the shared corpus rules so crawl nodes land on the stub's id.
+
+**Background wiring.** `START_DISCOVERY` reads the persisted siteMap after sitemap
+ingestion and passes `templateRules` + the stub `exemplarUrl`s as `seedUrls` to `discover()`.
+
+**Correctness fix folded in.** The old "skip navigation for the first page" used
+`pages.length > 0`, which assumed the seed was the only depth-0 page. With exemplars now
+pre-seeded, a seed that fails to classify would leave `pages.length === 0` and make the
+next page skip navigation (snapshotting the wrong URL). Replaced with `lastNavUrl`
+tracking (navigate only when the tab isn't already at the target).
+
+**Verified.** Syntax (DiscoveryService + background) OK; archetype templating/dedup logic
+unit-tested in `Core/siteMap.js` (v437). Live crawl behavior needs the loaded extension.
+
+**Touched.** `Services/DiscoveryService.js`, `background.js`, `manifest.json`.
+
+---
+
+## v2.74.439 — siteMap viewers: surface stub archetypes (+ 3-way status glyph)
+
+**Date:** 2026-05-26
+**Decision by:** user ("continue") — the slice-2b follow-up flagged in v2.74.438:
+after sitemap ingestion a ground is almost all `stub`, but both viewers listed only
+`modeled` + `discovered`, so the panel read e.g. "0 modeled · 0 discovered · 480 stub"
+with an EMPTY node list — looked broken.
+
+**What shipped.** studio "Site Map" section + ground-view `_renderSiteMapHtml` now
+render `stub` nodes too (capped at 25, with a "+N more stub" overflow note), after the
+modeled + discovered rows. Status glyph is now 3-way: `●` modeled · `◐` discovered ·
+`○` stub — so the crawl/Explore upgrade progression reads at a glance. Read-only; the
+summary line + JSON view are unchanged.
+
+**Touched.** `studio.js`, `Sidepanel/modes/ground-view.js`, `manifest.json`.
+
+---
+
+## v2.74.438 — Completeness slice 2b: sitemap.xml ingestion wired into Discover
+
+**Date:** 2026-05-26
+**Decision by:** user ("continue"). Completes slice 2 — the 2a engine now has a
+real data source and fires automatically on Discover.
+
+**What shipped.**
+- **`Services/SitemapService.js`** (new) — `fetchSitemapUrls(origin)`: discovers
+  sitemap locations from `/robots.txt` (`Sitemap:` directives) + conventional
+  fallbacks (`/sitemap.xml`, `/sitemap_index.xml`), walks sitemap **index** files
+  into their children, transparently gunzips `.gz` via `DecompressionStream`, and
+  parses `<loc>` page URLs by **regex** (MV3 service workers have no `DOMParser`).
+  Same-origin PAGE filtering; hard caps (25 sitemap docs, 5000 URLs, 10s/fetch);
+  best-effort (any failure → empty set). Cross-origin GETs ride the extension's
+  `<all_urls>` host permission (not page-CORS).
+- **`background.js` `START_DISCOVERY`** — sitemap is fetched FIRST: fold the URL
+  set via `SiteMap.siteMapFromSitemap` → `stub` archetypes + **persist the corpus
+  template rules**. The crawl then merges with those persisted rules
+  (`siteMapFromCrawl(crawled, { rules })`) so crawl nodes align with the stubs and
+  upgrade them in place (`stub → discovered`). The Explore→`siteMapFromLocale` merge
+  also threads the persisted rules (`stub/discovered → modeled`). Emits a
+  "Reading sitemap.xml…" progress tick. Abort-flag honored before the fetch.
+
+**Net effect.** Click Discover → the whole site appears immediately as `stub`
+archetypes (authoritative, from sitemap.xml), then the bounded crawl confirms
+reachability + adds edges + pageType on the SAME nodes. Sites with no sitemap fall
+back to crawl-only (prior behavior).
+
+**Verified.** 7-assertion mock-fetch test of `fetchSitemapUrls` (robots discovery,
+index recursion, `&amp;` entity decode, cross-origin filtering, `/sitemap.xml`
+fallback + origin extraction, total-failure → empty/no-throw). Both files syntax OK.
+
+**Known follow-ups.** Viewers count stubs in the summary but don't list them (the
+node list still shows only modeled + discovered) — coverage display is slice 5.
+`matchTemplate` re-parses rules per URL (fine at typical counts).
+
+**Touched.** `Services/SitemapService.js` (new), `background.js`
+(import + `START_DISCOVERY` sitemap-first + rules threaded into crawl & Explore
+merges), `manifest.json`.
+
+---
+
 ## v2.74.437 — Completeness slice 2a: corpus templating engine (shared rules)
 
 **Date:** 2026-05-26

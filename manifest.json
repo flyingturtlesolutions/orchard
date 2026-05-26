@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AHuB",
-  "version": "2.74.437",
+  "version": "2.74.441",
   "description": "Automated AI agent interaction testing with variable-injected LLM execution.",
 
   "permissions": [

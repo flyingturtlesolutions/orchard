@@ -30,6 +30,7 @@ import { AnthropicService }   from './Services/AnthropicService.js';
 import { CapabilityAPI, EVENT as CAP_EVENT } from './Services/CapabilityAPI.js';
 import { TemplateWalker }     from './Services/TemplateWalker.js';
 import { DiscoveryService }   from './Services/DiscoveryService.js';
+import * as SitemapService    from './Services/SitemapService.js';  // v2.74.438 — sitemap.xml ingestion
 import { PageClassifier }     from './Services/PageClassifier.js';
 // v2.71.4 — ConversationStore for background-side terminal-event persistence.
 // Lets chat-launched invocations write their result back to the conversation
@@ -4288,8 +4289,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               // the whole territory; a later Explore of a discovered page upgrades its
               // node modeled.
               if (groundId) {
-                try { await _mergeSiteMapForGround(groundId, SiteMap.siteMapFromLocale(model, { localeKey })); }
-                catch (e) { Logger.warn('background', `siteMap contribution failed (continuing): ${e.message}`); }
+                try {
+                  // v2.74.438 — template through any persisted corpus rules (from sitemap
+                  // ingestion) so this modeled node lands on the SAME archetype as the
+                  // crawl/stub it upgrades.
+                  const existingSm = await _readSiteMap(groundId);
+                  const rules = (existingSm && existingSm.templateRules) || [];
+                  await _mergeSiteMapForGround(groundId, SiteMap.siteMapFromLocale(model, { localeKey, rules }));
+                } catch (e) { Logger.warn('background', `siteMap contribution failed (continuing): ${e.message}`); }
               }
               const layerCount = Object.keys(model.layers || {}).length - 1;   // minus the surface layer
               Logger.info('explore', `Locale built alongside Explore: ${Object.keys(model.features).length} feature(s), ${Math.max(0, layerCount)} depth layer(s), ${Object.keys(model.goals || {}).length} goal(s), fidelity ${model.coverage.fidelity}`);
@@ -5184,9 +5191,44 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ success: true, started: true });
         (async () => {
           try {
+            // v2.74.438 — Completeness slice 2b: sitemap.xml is the authoritative page
+            // set (the bounded crawl can't reach the whole site). Fetch it FIRST → fold
+            // as `stub` archetypes + persist the corpus template rules, so the crawl
+            // below templates through the SAME rules and upgrades these stubs in place
+            // (stub → discovered). Best-effort; on any failure the crawl runs crawl-only.
+            try {
+              const g = await StorageManager.getGround(groundId);
+              const origin = g?.url ? new URL(g.url).origin : null;
+              if (origin && discoveryAbortFlags.get(groundId) !== true) {
+                chrome.runtime.sendMessage({ type: 'DISCOVERY_PROGRESS', payload: { groundId, visited: 0, total: 0, currentUrl: 'Reading sitemap.xml…', currentPageType: 'sitemap' } }).catch(() => {});
+                const { urls, count } = await SitemapService.fetchSitemapUrls(origin);
+                if (urls.length) {
+                  await _mergeSiteMapForGround(groundId, SiteMap.siteMapFromSitemap(urls));
+                  Logger.info('background', `sitemap seeded ${count} stub archetype URL(s) for ${groundId}`);
+                }
+              }
+            } catch (e) { Logger.warn('background', `sitemap ingestion skipped: ${e.message}`); }
+
+            // v2.74.440 — Architecture crawl (slice 3): seed the crawl from the persisted
+            // siteMap — corpus rules (so the crawl groups URLs by archetype) + one exemplar
+            // URL per known archetype (so coverage spans the architecture, not just what's
+            // link-reachable from the homepage). The crawl visits one representative per
+            // archetype, upgrading stubs → discovered.
+            let templateRules = [];
+            let seedUrls = [];
+            try {
+              const sm = await _readSiteMap(groundId);
+              if (sm) {
+                templateRules = sm.templateRules || [];
+                seedUrls = sm.nodes ? Object.values(sm.nodes).map((n) => n.exemplarUrl).filter(Boolean) : [];
+              }
+            } catch (e) { Logger.warn('background', `siteMap seed read failed: ${e.message}`); }
+
             const { pages, error, aborted } = await DiscoveryService.discover({
               groundId,
               existingTabId,
+              templateRules,
+              seedUrls,
               onProgress: (progress) => {
                 chrome.runtime.sendMessage({
                   type: 'DISCOVERY_PROGRESS',
@@ -5209,7 +5251,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               const crawled = pages || [];
               let siteMapStats = null;
               try {
-                await _mergeSiteMapForGround(groundId, SiteMap.siteMapFromCrawl(crawled));
+                // v2.74.438 — template the crawl through the corpus rules the sitemap
+                // ingestion persisted, so crawl nodes align with the stub archetypes.
+                const existing = await _readSiteMap(groundId);
+                const rules = (existing && existing.templateRules) || [];
+                await _mergeSiteMapForGround(groundId, SiteMap.siteMapFromCrawl(crawled, { rules }));
                 const sm = await _readSiteMap(groundId);
                 siteMapStats = sm ? SiteMap.siteMapStats(sm) : null;
               } catch (e) { Logger.warn('background', `siteMap from crawl failed (continuing): ${e.message}`); }

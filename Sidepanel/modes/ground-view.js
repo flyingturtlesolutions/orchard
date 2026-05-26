@@ -865,14 +865,16 @@ function _renderSiteMapHtml(siteMap) {
   const pagesTotal = nodes.reduce((s, n) => s + (n.instanceCount || 0), 0);
   const nodeRow = (n) => `
       <div class="sitemap-node sitemap-${escAttr(n.status)}">
-        <span class="sitemap-node-status">${n.status === 'modeled' ? '●' : '○'}</span>
+        <span class="sitemap-node-status">${n.status === 'modeled' ? '●' : (n.status === 'discovered' ? '◐' : '○')}</span>
         <span class="sitemap-node-name" title="${escAttr(n.urlPattern || '')}">${escHtml(n.name || shortPath(n.urlPattern || ''))}</span>
         <span class="sitemap-node-meta">${escHtml(shortPath(n.urlPattern || ''))}${n.instanceCount > 1 ? ` · ×${n.instanceCount}` : ''}${n.goals?.length ? ` · ${n.goals.length} goal(s)` : ''}</span>
       </div>`;
   const summary = `${modeled.length} modeled · ${discovered.length} discovered${stub.length ? ` · ${stub.length} stub` : ''} · ${edges} edge(s)${pagesTotal > nodes.length ? ` · ~${pagesTotal} pages` : ''}`;
+  // v2.74.439 — render stubs too (capped), so a sitemap-ingested ground shows its
+  // known archetypes immediately instead of an empty list under "N stub".
   return `
     <div class="sitemap-summary">${escHtml(summary)}</div>
-    <div class="sitemap-nodes">${modeled.map(nodeRow).join('')}${discovered.slice(0, 20).map(nodeRow).join('')}${discovered.length > 20 ? `<div class="empty-state small">+${discovered.length - 20} more discovered</div>` : ''}</div>`;
+    <div class="sitemap-nodes">${modeled.map(nodeRow).join('')}${discovered.slice(0, 20).map(nodeRow).join('')}${discovered.length > 20 ? `<div class="empty-state small">+${discovered.length - 20} more discovered</div>` : ''}${stub.slice(0, 25).map(nodeRow).join('')}${stub.length > 25 ? `<div class="empty-state small">+${stub.length - 25} more stub</div>` : ''}</div>`;
 }
 
 // v2.74.42 — Header-card handlers (collapse chevron + map-badge toggle).
