@@ -16,6 +16,7 @@
 
 import { installGlobalErrorHandlers } from './Core/ErrorCapture.js';
 import { isDerivationStale, effectiveDescription } from './Core/groundDerivation.js';
+import { siteMapCapabilities } from './Core/siteMap.js';   // v2.74.465 — site capability catalog
 // v2.74.188 — Install global error + unhandledrejection handlers BEFORE
 // any other module-init runs, so an error in a downstream import is
 // still captured by the Logger and surfaces in the Logs tab.
@@ -3158,6 +3159,24 @@ async function _refreshGroundListImpl() {
           <div style="display:flex;height:6px;border-radius:3px;overflow:hidden;background:rgba(127,127,127,.18);margin:2px 0 4px">${covSeg(cov.modeled, '#3fb950')}${covSeg(cov.discovered, '#d29922')}${covSeg(cov.stub, '#6e7681')}</div>
           <div style="font-size:11px;opacity:.75"><strong>${covPct}% modeled</strong> · ${cov.modeled}/${covTotal} archetypes · ${cov.edges} edge(s)${cov.pages > covTotal ? ` · ${cov.modeledPages}/${cov.pages} pages` : ''}${cov.locales?.length > 1 ? ` · 🌐 ${cov.locales.length} langs` : ''}</div>
         </div>` : '';
+      // v2.74.465 — Site capability catalog: "what can I do across this site", rolled up from
+      // every modeled archetype's goals (siteMapCapabilities). Sits beside coverage ("how much
+      // is modeled") to answer "what does the modeled territory let me DO".
+      const caps = smMap ? siteMapCapabilities(smMap) : { capabilities: [], totals: { distinct: 0 } };
+      const CAP_SHOWN = 12;
+      const capRow = (c) => `
+          <div class="sitemap-node" title="${escAttr(c.archetypes.map(a => shortPath(a.urlPattern)).join('\n'))}">
+            <span class="sitemap-node-status">★</span>
+            <span class="sitemap-node-name">${escHtml(c.goal)}</span>
+            <span class="sitemap-node-meta">${c.count > 1 ? `×${c.count}` : ''}${c.pageTypes.length ? `${c.count > 1 ? ' · ' : ''}${escHtml(c.pageTypes.join(', '))}` : ''}</span>
+          </div>`;
+      const capabilitiesHtml = caps.totals.distinct ? `
+        <div class="ground-section-head" style="margin-top:8px;border-top:1px solid rgba(127,127,127,.18);padding-top:6px">
+          <span class="ground-section-label">Can do</span>
+          <span class="ground-section-count">${caps.totals.distinct}</span>
+          <button class="btn-secondary tiny" data-action="json-capabilities" data-gid="${ground.id}" title="View the full site capability catalog (goals × archetypes) as JSON">{ }</button>
+        </div>
+        <div class="sitemap-nodes">${caps.capabilities.slice(0, CAP_SHOWN).map(capRow).join('')}${caps.capabilities.length > CAP_SHOWN ? `<div class="empty-state small">+${caps.capabilities.length - CAP_SHOWN} more — see JSON</div>` : ''}</div>` : '';
       smRow.innerHTML = `
       <div class="ground-section-head">
         <span class="ground-section-label">Site Map</span>
@@ -3170,7 +3189,7 @@ async function _refreshGroundListImpl() {
         ${nodes.length === 0
           ? `<span class="empty-state small">No site map yet — <strong>Explore</strong> a page to sketch the territory: the current page becomes a <em>modeled</em> node and every same-site nav destination a <em>discovered</em> node + edge.</span>`
           : `${coverageHtml}
-             <div class="sitemap-nodes">${modeled.map(nodeRow).join('')}${discovered.slice(0, 20).map(nodeRow).join('')}${discovered.length > 20 ? `<div class="empty-state small">+${discovered.length - 20} more discovered — see JSON</div>` : ''}${stub.slice(0, 25).map(nodeRow).join('')}${stub.length > 25 ? `<div class="empty-state small">+${stub.length - 25} more stub — see JSON</div>` : ''}</div>`
+             <div class="sitemap-nodes">${modeled.map(nodeRow).join('')}${discovered.slice(0, 20).map(nodeRow).join('')}${discovered.length > 20 ? `<div class="empty-state small">+${discovered.length - 20} more discovered — see JSON</div>` : ''}${stub.slice(0, 25).map(nodeRow).join('')}${stub.length > 25 ? `<div class="empty-state small">+${stub.length - 25} more stub — see JSON</div>` : ''}</div>${capabilitiesHtml}`
         }
       </div>
       <div class="explore-queue-panel hidden" id="exq-panel-${ground.id}"></div>`;
@@ -3178,6 +3197,9 @@ async function _refreshGroundListImpl() {
     smRow.querySelector('[data-action="explore-queue"]')?.addEventListener('click', () => startExploreQueue(ground.id));
     smRow.querySelector('[data-action="json-sitemap"]')?.addEventListener('click', () => {
       showJsonModal(`Site Map: ${ground.name ?? ground.id}`, smMap, 'sitemap');
+    });
+    smRow.querySelector('[data-action="json-capabilities"]')?.addEventListener('click', () => {
+      showJsonModal(`Capabilities: ${ground.name ?? ground.id}`, siteMapCapabilities(smMap), 'capabilities');
     });
     smRow.querySelector('[data-action="clear-sitemap"]')?.addEventListener('click', async () => {
       if (!confirm('Clear this ground\'s site map? It rebuilds as you Explore pages.')) return;

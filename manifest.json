@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AHuB",
-  "version": "2.74.464",
+  "version": "2.74.465",
   "description": "Automated AI agent interaction testing with variable-injected LLM execution.",
 
   "permissions": [
@@ -14,12 +14,15 @@
     "debugger",
     "webNavigation",
     "clipboardRead",
-    "offscreen"
+    "offscreen",
+    "identity"
   ],
 
   "host_permissions": [
     "<all_urls>",
-    "https://api.anthropic.com/"
+    "https://api.anthropic.com/",
+    "https://api.dev.orchard.example.com/*",
+    "https://*.auth.us-east-1.amazoncognito.com/*"
   ],
 
   "background": {
