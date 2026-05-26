@@ -3110,10 +3110,13 @@ async function _refreshGroundListImpl() {
     oRow.querySelector('[data-action="clear-outcomes"]')?.addEventListener('click', async () => {
       if (!confirm('Clear this ground\'s outcome stream? Rollups (Feature health, conventions histogram) will recompute from empty. The locale features keep their current confidence.')) return;
       try {
+        // v2.74.463 — per-ground key; also prune the legacy aggregate if it predates migration.
+        await new Promise(r => chrome.storage.local.remove(`outcomes:${ground.id}`, r));
         const got = await new Promise(r => chrome.storage.local.get('outcomesStream', r));
-        const map = got?.outcomesStream ?? {};
-        delete map[ground.id];
-        await new Promise(r => chrome.storage.local.set({ outcomesStream: map }, r));
+        if (got?.outcomesStream && ground.id in got.outcomesStream) {
+          delete got.outcomesStream[ground.id];
+          await new Promise(r => chrome.storage.local.set({ outcomesStream: got.outcomesStream }, r));
+        }
         toast('Outcome stream cleared');
         await refreshGroundList();
       } catch (e) { toast(`Failed: ${e?.message ?? 'unknown'}`, 'err'); }
@@ -3179,10 +3182,13 @@ async function _refreshGroundListImpl() {
     smRow.querySelector('[data-action="clear-sitemap"]')?.addEventListener('click', async () => {
       if (!confirm('Clear this ground\'s site map? It rebuilds as you Explore pages.')) return;
       try {
+        // v2.74.463 — per-ground key; also prune the legacy aggregate if it predates migration.
+        await new Promise(r => chrome.storage.local.remove(`siteMap:${ground.id}`, r));
         const got = await new Promise(r => chrome.storage.local.get('siteMapCache', r));
-        const map = got?.siteMapCache ?? {};
-        delete map[ground.id];
-        await new Promise(r => chrome.storage.local.set({ siteMapCache: map }, r));
+        if (got?.siteMapCache && ground.id in got.siteMapCache) {
+          delete got.siteMapCache[ground.id];
+          await new Promise(r => chrome.storage.local.set({ siteMapCache: got.siteMapCache }, r));
+        }
         toast('Site map cleared');
         await refreshGroundList();
       } catch (e) { toast(`Failed: ${e?.message ?? 'unknown'}`, 'err'); }

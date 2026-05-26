@@ -574,6 +574,9 @@ export class StorageManager {
       idxKeys.analyses,
       idxKeys.assertions,
       `groundmap:${groundId}`,
+      // v2.74.463 — per-ground siteMap + OUTCOMES keys (replaced the single-aggregate scheme).
+      `siteMap:${groundId}`,
+      `outcomes:${groundId}`,
       // Pre-migration cleanup — harmless if already absent
       `paths:index:${groundId}`,
     ];

@@ -1056,56 +1056,92 @@ function _navigateBgTab(tabId, url, timeoutMs = 15000) {
 // FOLDED on read, never authored. Bounded so the store can't grow without limit;
 // the durable training corpus body is a later exporter slice (§ 0.17).
 //   key: 'outcomesStream'   value: { [groundId]: OutcomeEvent[] }
-const OUTCOMES_STREAM_KEY = 'outcomesStream';
-const OUTCOMES_STREAM_CAP = 1000;   // per ground; oldest dropped (appendEvents)
+// v2.74.463 — PER-GROUND storage keys. The old scheme kept ALL grounds in one aggregate
+// object under a single key (`siteMapCache`/`outcomesStream` → { [groundId]: … }), so every
+// merge/append rewrote the entire multi-ground blob — O(all grounds) per write, and one
+// oversized item (a factor in the kQuotaBytes failures). Now each ground's siteMap / outcome
+// stream is its own key, so a write touches only that ground. The two legacy aggregate keys
+// are migrated away once (see _migrateAggregates) and then never written again.
+const OUTCOMES_STREAM_KEY = 'outcomesStream';   // legacy aggregate (pre-v463) — migrated away
+const SITEMAP_CACHE_KEY   = 'siteMapCache';     // legacy aggregate (pre-v463) — migrated away
+const OUTCOMES_STREAM_CAP = 1000;               // per ground; oldest dropped (appendEvents)
+const _siteMapKey  = (groundId) => `siteMap:${groundId}`;
+const _outcomesKey = (groundId) => `outcomes:${groundId}`;
+
+// One-time, idempotent migration of the legacy aggregates → per-ground keys. Gated behind a
+// shared promise so every accessor awaits it exactly once. Safety: write the new keys FIRST,
+// remove the old aggregate only AFTER (a mid-migration failure never loses data), and never
+// clobber an existing per-ground key (re-runs are no-ops; a concurrent fresh write wins).
+let _storageMigration = null;
+function _ensureStorageMigrated() { return (_storageMigration ??= _migrateAggregates()); }
+async function _migrateAggregates() {
+  try {
+    const got = await chrome.storage.local.get([SITEMAP_CACHE_KEY, OUTCOMES_STREAM_KEY]);
+    for (const [oldKey, keyFn] of [[SITEMAP_CACHE_KEY, _siteMapKey], [OUTCOMES_STREAM_KEY, _outcomesKey]]) {
+      const blob = got?.[oldKey];
+      if (!blob || typeof blob !== 'object') continue;
+      const ids = Object.keys(blob);
+      if (ids.length) {
+        const existing = await chrome.storage.local.get(ids.map(keyFn));
+        const writes = {};
+        for (const id of ids) { const k = keyFn(id); if (existing[k] === undefined) writes[k] = blob[id]; }
+        if (Object.keys(writes).length) await chrome.storage.local.set(writes);
+      }
+      await chrome.storage.local.remove(oldKey);   // only after the per-ground writes succeeded
+      Logger.info('background', `storage migrated: ${oldKey} → ${ids.length} per-ground key(s)`);
+    }
+  } catch (e) { Logger.warn('background', `storage migration skipped: ${e.message}`); }
+}
 
 async function _appendOutcomes(groundId, events) {
   if (!groundId || !Array.isArray(events) || !events.length) return;
+  await _ensureStorageMigrated();
   try {
-    const got = await chrome.storage.local.get(OUTCOMES_STREAM_KEY);
-    const map = got?.[OUTCOMES_STREAM_KEY] ?? {};
-    map[groundId] = Outcomes.appendEvents(map[groundId] ?? [], events, OUTCOMES_STREAM_CAP);
-    await chrome.storage.local.set({ [OUTCOMES_STREAM_KEY]: map });
+    const k = _outcomesKey(groundId);
+    const got = await chrome.storage.local.get(k);
+    const next = Outcomes.appendEvents(got?.[k] ?? [], events, OUTCOMES_STREAM_CAP);
+    await chrome.storage.local.set({ [k]: next });
   } catch (e) {
-    Logger.warn('background', `outcomesStream append failed: ${e.message}`);
+    Logger.warn('background', `outcomes append failed: ${e.message}`);
   }
 }
 
 async function _readOutcomes(groundId) {
   if (!groundId) return [];
+  await _ensureStorageMigrated();
   try {
-    const got = await chrome.storage.local.get(OUTCOMES_STREAM_KEY);
-    return got?.[OUTCOMES_STREAM_KEY]?.[groundId] ?? [];
+    const k = _outcomesKey(groundId);
+    const got = await chrome.storage.local.get(k);
+    return got?.[k] ?? [];
   } catch (e) {
-    Logger.warn('background', `outcomesStream read failed: ${e.message}`);
+    Logger.warn('background', `outcomes read failed: ${e.message}`);
     return [];
   }
 }
 
-// v2.74.431 — Ground siteMap (GROUND_SPEC § 7). One per ground; each captured
-// Locale merges its contribution (a modeled self-node + discovered nav-destination
-// nodes/edges) into it. Key: 'siteMapCache'  value: { [groundId]: SiteMap }.
-const SITEMAP_CACHE_KEY = 'siteMapCache';
-
+// v2.74.431 — Ground siteMap (GROUND_SPEC § 7). One per ground; each captured Locale merges
+// its contribution (a modeled self-node + discovered nav-destination nodes/edges) into it.
+// v2.74.463 — now stored under its own key `siteMap:<groundId>` (was an entry in siteMapCache).
 async function _readSiteMap(groundId) {
   if (!groundId) return null;
+  await _ensureStorageMigrated();
   try {
-    const got = await chrome.storage.local.get(SITEMAP_CACHE_KEY);
-    return got?.[SITEMAP_CACHE_KEY]?.[groundId] ?? null;
-  } catch (e) { Logger.warn('background', `siteMapCache read failed: ${e.message}`); return null; }
+    const k = _siteMapKey(groundId);
+    const got = await chrome.storage.local.get(k);
+    return got?.[k] ?? null;
+  } catch (e) { Logger.warn('background', `siteMap read failed: ${e.message}`); return null; }
 }
 
 async function _mergeSiteMapForGround(groundId, contribution) {
   if (!groundId || !contribution) return;
+  await _ensureStorageMigrated();
   try {
-    const got = await chrome.storage.local.get(SITEMAP_CACHE_KEY);
-    const map = got?.[SITEMAP_CACHE_KEY] ?? {};
-    map[groundId] = SiteMap.mergeSiteMap(map[groundId] ?? null, contribution);
-    await chrome.storage.local.set({ [SITEMAP_CACHE_KEY]: map });
-    const s = SiteMap.siteMapStats(map[groundId]);
-    // v2.74.462 — include `stub` (sitemap-only archetypes the crawl hasn't reached). It was
-    // already computed by siteMapStats but omitted here, so the sitemap's contribution
-    // (e.g. pixabay's ~2,500 stubs) was invisible in the log.
+    const k = _siteMapKey(groundId);
+    const got = await chrome.storage.local.get(k);
+    const merged = SiteMap.mergeSiteMap(got?.[k] ?? null, contribution);
+    await chrome.storage.local.set({ [k]: merged });
+    const s = SiteMap.siteMapStats(merged);
+    // v2.74.462 — include `stub` (sitemap-only archetypes the crawl hasn't reached).
     Logger.info('explore', `siteMap[${groundId}]: ${s.modeled} modeled · ${s.discovered} discovered · ${s.stub} stub · ${s.edges} edge(s)`);
   } catch (e) { Logger.warn('background', `siteMap merge failed: ${e.message}`); }
 }
