@@ -3454,17 +3454,21 @@ async function fetchUrlText(url) {
     const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow', credentials: 'include', headers: { Accept: ACCEPT } });
     const status = res ? res.status : 0;
     if (!res || !res.ok) return { ok: false, status, text: null };
-    const ct = res.headers.get('content-type') || '';
-    const isGz = /\.gz(\?|$)/i.test(url) || /application\/(x-)?gzip/i.test(ct) || /application\/octet-stream/i.test(ct);
-    if (isGz && res.body && typeof DecompressionStream !== 'undefined') {
+    // v2.74.457 — decide gzip by the actual leading bytes (magic 0x1f 0x8b), not the .gz
+    // extension. fetch() already inflates a `Content-Encoding: gzip` body, so a second manual
+    // inflate would corrupt it; and a challenge HTML page at the .gz URL isn't gzip at all.
+    // Inflate only true gzip; otherwise decode as-is. Mirrors SitemapService._bodyText.
+    const buf = new Uint8Array(await res.arrayBuffer());
+    const isGzip = buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b;
+    if (isGzip && typeof DecompressionStream !== 'undefined') {
       try {
-        const stream = res.body.pipeThrough(new DecompressionStream('gzip'));
+        const stream = new Response(buf).body.pipeThrough(new DecompressionStream('gzip'));
         return { ok: true, status, text: await new Response(stream).text() };
-      } catch {
-        return { ok: false, status, text: null };   // not actually gzip / corrupt
-      }
+      } catch { /* corrupt gzip — fall through to raw decode */ }
     }
-    return { ok: true, status, text: await res.text() };
+    let text = '';
+    try { text = new TextDecoder('utf-8').decode(buf); } catch { text = ''; }
+    return { ok: true, status, text };
   } catch (e) {
     return { ok: false, status: 0, text: null, error: e && e.message };
   } finally {

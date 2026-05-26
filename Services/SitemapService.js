@@ -17,7 +17,7 @@
  * an empty set and the crawl proceeds crawl-only.
  *
  * @module Services/SitemapService
- * @version 2.74.456
+ * @version 2.74.457
  */
 
 import { Logger } from '../Core/Logger.js';
@@ -32,8 +32,37 @@ const MAX_URLS           = 5000;    // page URLs collected per run
 const _ACCEPT = 'application/xml,text/xml,application/xhtml+xml,text/html;q=0.9,*/*;q=0.8';
 
 /**
- * GET text with a timeout; transparently gunzip a `.gz` sitemap.
- * Returns { text, status }: `text` is the body string, or null on failure / non-OK.
+ * v2.74.457 — Decode a (possibly gzipped) sitemap body ROBUSTLY, deciding by the actual
+ * bytes rather than the `.gz` extension. A `.gz` sitemap can arrive three ways:
+ *   (a) a real gzip FILE (Content-Type: application/gzip, no Content-Encoding) — raw gzip
+ *       bytes we must inflate ourselves;
+ *   (b) served with `Content-Encoding: gzip` — `fetch()` ALREADY inflated it, so the body is
+ *       plaintext and a SECOND manual inflate corrupts it (throws);
+ *   (c) a bot-challenge HTML page sitting at the .gz URL (no gzip at all).
+ * The old extension-keyed inflate broke (b) and (c) — it threw and returned null text →
+ * "unreadable" — which is exactly what stalled pixabay in BOTH the SW and the in-tab fetch
+ * (same code, same failure). Now: inflate ONLY when the leading bytes are the gzip magic
+ * number (0x1f 0x8b); otherwise decode as-is. Never returns null on a 200, so the caller can
+ * always classify the body (XML vs challenge) and log a snippet.
+ * @param {Response} res
+ * @returns {Promise<string>}
+ */
+async function _bodyText(res) {
+  let buf;
+  try { buf = new Uint8Array(await res.arrayBuffer()); } catch { return ''; }
+  const isGzip = buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b;
+  if (isGzip && typeof DecompressionStream !== 'undefined') {
+    try {
+      const stream = new Response(buf).body.pipeThrough(new DecompressionStream('gzip'));
+      return await new Response(stream).text();
+    } catch { /* corrupt gzip — fall through to a raw decode */ }
+  }
+  try { return new TextDecoder('utf-8').decode(buf); } catch { return ''; }
+}
+
+/**
+ * GET text with a timeout. Returns { text, status }: `text` is the body string (gunzipped
+ * iff the bytes are really gzip — see _bodyText), or null on network failure / non-OK status.
  *
  * v2.74.452 — `credentials:'include'` (was 'omit'). The service-worker fetch now rides
  * the user's existing browser session for the target origin, so a sitemap/robots behind a
@@ -53,17 +82,7 @@ async function _fetchText(url) {
     });
     const status = res ? res.status : 0;
     if (!res || !res.ok) return { text: null, status };
-    const ct = res.headers.get('content-type') || '';
-    const isGz = /\.gz(\?|$)/i.test(url) || /application\/(x-)?gzip/i.test(ct) || /application\/octet-stream/i.test(ct);
-    if (isGz && res.body && typeof DecompressionStream !== 'undefined') {
-      try {
-        const stream = res.body.pipeThrough(new DecompressionStream('gzip'));
-        return { text: await new Response(stream).text(), status };
-      } catch {
-        return { text: null, status };   // not actually gzip / corrupt
-      }
-    }
-    return { text: await res.text(), status };
+    return { text: await _bodyText(res), status };
   } catch {
     return { text: null, status: 0 };    // network error, abort, etc.
   } finally {
@@ -155,6 +174,7 @@ export async function fetchSitemapUrls(origin, { fetchText = _fetchText } = {}) 
   let blockStatus = 0;   // v2.74.452 — a non-OK status (403/503/…) on a sitemap doc → likely a bot-challenge
   let softBlock = false; // v2.74.455 — an OK (200) response that's a challenge/HTML page, not XML
   let sawValidXml = false; // v2.74.456 — did ANY fetched doc actually look like a sitemap?
+  let sampleSnippet = '';  // v2.74.457 — first non-XML body seen, for the diagnostic log
 
   while (queue.length && pageUrls.size < MAX_URLS && fetched < MAX_CHILD_SITEMAPS) {
     const sm = queue.shift();
@@ -164,6 +184,7 @@ export async function fetchSitemapUrls(origin, { fetchText = _fetchText } = {}) 
     const { text: xml, status } = await fetchText(sm);
     if (!xml) { if (status >= 400) blockStatus = status; continue; }
     if (_looksLikeSitemapXml(xml)) sawValidXml = true;
+    else if (!sampleSnippet) sampleSnippet = String(xml).replace(/\s+/g, ' ').trim().slice(0, 140);
     const locs = _extractLocs(xml);
     if (_isIndex(xml)) {
       for (const loc of locs) if (!seen.has(loc)) queue.push(loc);   // child sitemaps
@@ -194,6 +215,6 @@ export async function fetchSitemapUrls(origin, { fetchText = _fetchText } = {}) 
     : blockStatus >= 400 ? `HTTP ${blockStatus}`
     : softBlock ? 'challenge/HTML (200)'
     : 'unreadable (no valid XML; gz/challenge?)';
-  Logger.info('SitemapService', `sitemap[${normOrigin}]: ${pageUrls.size} page URL(s) from ${fetched} sitemap doc(s)${truncated ? ' (truncated)' : ''}${blocked ? ` — BLOCKED (${reason}; bot-challenge?)` : ''}`);
+  Logger.info('SitemapService', `sitemap[${normOrigin}]: ${pageUrls.size} page URL(s) from ${fetched} sitemap doc(s)${truncated ? ' (truncated)' : ''}${blocked ? ` — BLOCKED (${reason}; bot-challenge?)${sampleSnippet ? ` | body: "${sampleSnippet}"` : ''}` : ''}`);
   return { urls: [...pageUrls], count: pageUrls.size, truncated, sitemaps: fetched, source: seeds[0] || null, blocked, status: blockStatus, reason };
 }
