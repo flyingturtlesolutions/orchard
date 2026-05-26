@@ -73,6 +73,8 @@ export function templateSegment(seg) {
 // and the sitemap stub share one archetype id (the stub→discovered→modeled chain
 // stays intact). Without the shared rules the two sources would split.
 
+const MIN_LOCALE_SIBLINGS    = 3;   // distinct locale-code siblings to call a position a {locale} axis
+const LOCALE_FRACTION        = 0.7; // … and they must be this majority of the position's values
 const MIN_SLUG_SIBLINGS      = 8;   // distinct sibling values at a DEEP position to suspect a parameter
 // v2.74.437 — depth-0 needs a far higher bar: distinct *sections* (/privacy-policy,
 // /terms-of-service, …) live at the top and are often hyphenated, so they'd trip the
@@ -85,6 +87,17 @@ const SLUG_FRACTION          = 0.6; // ≥ this fraction must look slug-like (no
 /** Looks like an instance identifier (slug), not a fixed section word ("about"). */
 function isSluggish(seg) {
   return seg.length >= 12 || seg.includes('-') || /\d/.test(seg);
+}
+
+/**
+ * Language/locale path segment: en, de, fr, en-US, zh-Hans, pt_br, … Used only in
+ * CORPUS context, where several such SIBLINGS at one position confirm a language axis
+ * — so the same page repeated per locale collapses to ONE archetype (/{locale}/x)
+ * instead of being modeled once per language. Bare 2-letter is ambiguous alone
+ * (e.g. /id/ for an ID), but a majority of locale-shaped siblings disambiguates it.
+ */
+function isLocaleCode(seg) {
+  return /^[a-z]{2}([-_][a-z0-9]{2,4})?$/i.test(seg);
 }
 
 /** Split a rule string ("https://x.com/blog/{slug}") WITHOUT new URL (which %7B-encodes braces). */
@@ -140,10 +153,18 @@ export function deriveTemplateRules(urls) {
     const minSibs = i === 0 ? MIN_SLUG_SIBLINGS_ROOT : MIN_SLUG_SIBLINGS;  // sections live at depth 0
     for (const b of buckets.values()) {
       const nonParam = [...b.vals].filter((v) => !isParamSeg(v));
-      const isParam = b.vals.size >= minSibs
-        && nonParam.length >= minSibs
-        && (nonParam.filter(isSluggish).length / nonParam.length) >= SLUG_FRACTION;
-      for (const it of b.members) it.out.push(isParam ? '{slug}' : it.segs[i]);
+      let param = null;
+      // Locale axis FIRST: the same page repeated per language (/en/x, /de/x, …).
+      // Low sibling bar (sites have few languages) but high precision via the code
+      // shape + majority — so a lone /id/ route never trips it.
+      const localeLike = nonParam.filter(isLocaleCode).length;
+      if (localeLike >= MIN_LOCALE_SIBLINGS && nonParam.length && (localeLike / nonParam.length) >= LOCALE_FRACTION) {
+        param = '{locale}';
+      } else if (b.vals.size >= minSibs && nonParam.length >= minSibs
+        && (nonParam.filter(isSluggish).length / nonParam.length) >= SLUG_FRACTION) {
+        param = '{slug}';
+      }
+      for (const it of b.members) it.out.push(param ?? it.segs[i]);
     }
   }
   const rules = new Set();

@@ -4051,6 +4051,41 @@ locale-capture.js` (matchedGoal in the grounded-intent card), `manifest.json`.
 
 ---
 
+## v2.74.443 — Collapse localized URLs into one archetype (`{locale}`)
+
+**Date:** 2026-05-26
+**Decision by:** user ("the modeling seems to repeat for different languages").
+
+**Bug.** Path-prefix locales (`/en/products`, `/de/products`, `/fr/products`) were
+treated as DISTINCT archetypes, so the Explore queue modeled the same page once per
+language. Locale codes are short, non-sluggish 2-letter segments, so they slipped under
+both the slug threshold and the `isSluggish` filter. (Query-param locales `?lang=` already
+collapse via `normalizePattern`; subdomain locales are a different origin, out of scope.)
+
+**Fix (`Core/siteMap.js`, corpus templating).** `deriveTemplateRules` now detects a
+**locale axis**: a path position where ≥3 distinct siblings are locale-shaped
+(`isLocaleCode`: `en`, `de`, `en-US`, `zh-Hans`, `pt_br`, …) AND they're ≥70% of the
+position's values → that position becomes `{locale}` (checked before `{slug}`). So
+`/{locale}/products` is one archetype. Because all sources template through the shared
+rules, the sitemap stub, crawl node, and Explore all align → the page is modeled ONCE.
+`instanceCount` still reflects the language count (e.g. ×12).
+
+**Precision.** The low sibling bar (3) is offset by the code-shape + majority gates:
+verified a lone `/id/{id}` route is NOT mislabelled a locale, and a stray `/en` among
+real sections (`/about`, `/contact`, `/help`) doesn't trip it.
+
+**Caveat (no auto-migration).** Existing siteMaps still contain the OLD per-language
+nodes. Re-running Discover replaces the rules but leaves the stale duplicates alongside
+the new collapsed nodes — so to get a clean result, **Clear the site map (✕) then
+re-Discover**.
+
+**Verified.** 10-assertion test: 9 localized URLs → 3 archetypes; en/de collapse;
+`en-US` region variants collapse; lone `/id/` + lone `/en` guards. Syntax OK.
+
+**Touched.** `Core/siteMap.js`, `manifest.json`.
+
+---
+
 ## v2.74.442 — Explore queue → separate window + coverage UI (slice 5)
 
 **Date:** 2026-05-26
