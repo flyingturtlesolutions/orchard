@@ -8,6 +8,11 @@
  *   SET_API_KEY       — Persists Anthropic API key.
  *   GET_API_KEY       — Returns masked key.
  *   CHECK_API_KEY     — Returns boolean hasKey.
+ *   GET_CLOUD_STATUS  — Orchard cloud auth + settings summary (P0).
+ *   CLOUD_SIGN_IN     — Cognito hosted UI sign-in.
+ *   CLOUD_SIGN_OUT    — Clear cloud session.
+ *   CLOUD_GET_ME      — GET /identity/me (read-only P0).
+ *   CLOUD_GET_OBJECT  — GET /objects/{path} (read-only P0).
  *   GET_GROUNDS       — Returns all Ground records.
  *   GET_RESULTS       — Returns recent JobResult records.
  *   GET_LOGS          — Returns persisted log entries.
@@ -72,6 +77,17 @@ import { bracket as observeActionBracket,
          classifyEffectDrift }                        from './Services/ActionEffectObserver.js';
 // v2.74.329 — GROUND_SPEC § 5 derived-intent cache validation.
 import { derivationInputsHash, DERIVATION_VERSION }   from './Core/groundDerivation.js';
+// Orchard cloud P0 — StoragePort seam + cloud API client (AWS_INTEGRATION §17).
+import { ChromeStorageAdapter } from './Services/Storage/ChromeStorageAdapter.js';
+import { initStoragePort, getStoragePortMeta } from './Services/Storage/StoragePort.js';
+import { getCloudSettings, setCloudSettings } from './Services/Cloud/CloudSettings.js';
+import {
+  getCloudAuthStatus,
+  signInToCloud,
+  signOutOfCloud,
+} from './Services/Cloud/OrchardAuth.js';
+import { getIdentityMe, getCloudObject } from './Services/Cloud/CloudClient.js';
+import { getIdentitySummary } from './Core/OrchardIdentity.js';
 
 Logger.setLevel(LOG_LEVEL.DEBUG);
 Logger.setPersist(true);
@@ -114,6 +130,15 @@ async function _runMigrations() {
 }
 let _migrationPromise = _runMigrations()
   .catch(err => Logger.error('background', `migration failed: ${err.message}`));
+
+// Orchard P0 — initialize storage port (ChromeStorageAdapter → StorageManager).
+initStoragePort(new ChromeStorageAdapter('local'));
+getIdentitySummary()
+  .then(({ orchardUserIdPreview }) => {
+    Logger.info('background', `Orchard identity ready (preview ${orchardUserIdPreview})`);
+  })
+  .catch(err => Logger.warn('background', `Orchard identity init: ${err.message}`));
+
 chrome.runtime.onInstalled.addListener(() => {
   _migrationPromise = _runMigrations()
     .catch(err => Logger.error('background', `migration failed: ${err.message}`));
@@ -4543,6 +4568,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
+    // v2.74.468 — Match a free-text intent against the site capability catalog. The lexical
+    // ranker (SiteMap.matchSiteCapabilities) is the instant baseline + fallback; when Claude is
+    // reachable an LLM re-rank (semantic / synonym) replaces it. Payload: { groundId, intent } →
+    // { success, matches:[{goal,count,pageTypes,archetypes,why?}], source:'llm'|'lexical'|'none' }.
+    case 'MATCH_CAPABILITIES': {
+      (async () => {
+        try {
+          const { groundId = null, intent } = payload ?? {};
+          if (typeof intent !== 'string' || !intent.trim()) { sendResponse({ success: false, error: 'intent required' }); return; }
+          const sm = groundId ? await _readSiteMap(groundId) : null;
+          const catalog = SiteMap.siteMapCapabilities(sm);
+          if (!catalog.capabilities.length) { sendResponse({ success: true, matches: [], source: 'none' }); return; }
+          let matches = SiteMap.matchSiteCapabilities(intent, catalog, { limit: 12 });
+          let source = 'lexical';
+          // LLM re-rank over a bounded, numbered pool; only override lexical when it returns
+          // something usable (else lexical stands — never worse than the instant baseline).
+          const pool = catalog.capabilities.slice(0, 60);
+          try {
+            const ranking = await AnthropicService.matchCapabilitiesLLM({ intent, goals: pool.map(c => ({ label: c.goal, pageTypes: c.pageTypes })) });
+            if (Array.isArray(ranking) && ranking.length) {
+              const ranked = SiteMap.applyCapabilityRanking(pool, ranking).slice(0, 12);
+              if (ranked.length) { matches = ranked; source = 'llm'; }
+            }
+          } catch (e) { Logger.warn('background', `MATCH_CAPABILITIES llm re-rank skipped: ${e.message}`); }
+          sendResponse({ success: true, matches, source });
+        } catch (err) {
+          Logger.error('background', `MATCH_CAPABILITIES failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
 
     // v2.74.352 — "Resolve roles": one LLM call returns a CSS selector for each
     // of a perspective's roles (or null to abstain), given screenshot + rich
@@ -5550,6 +5608,53 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       AnthropicService.getApiKey()
         .then(key => sendResponse({ hasKey: !!key }))
         .catch(() => sendResponse({ hasKey: false }));
+      return true;
+
+    // ── Orchard cloud (P0) ───────────────────────────────────────────────────
+    case 'GET_STORAGE_PORT_META':
+      sendResponse({ success: true, meta: getStoragePortMeta() });
+      return false;
+
+    case 'GET_CLOUD_SETTINGS':
+      getCloudSettings()
+        .then(settings => sendResponse({ success: true, settings }))
+        .catch(e => sendResponse({ success: false, error: e.message }));
+      return true;
+
+    case 'SET_CLOUD_SETTINGS':
+      setCloudSettings(payload.settings || {})
+        .then(settings => sendResponse({ success: true, settings }))
+        .catch(e => sendResponse({ success: false, error: e.message }));
+      return true;
+
+    case 'GET_CLOUD_STATUS':
+      getCloudAuthStatus()
+        .then(status => sendResponse({ success: true, status }))
+        .catch(e => sendResponse({ success: false, error: e.message }));
+      return true;
+
+    case 'CLOUD_SIGN_IN':
+      signInToCloud()
+        .then(result => sendResponse({ success: result.success, ...result }))
+        .catch(e => sendResponse({ success: false, error: e.message }));
+      return true;
+
+    case 'CLOUD_SIGN_OUT':
+      signOutOfCloud()
+        .then(() => sendResponse({ success: true }))
+        .catch(e => sendResponse({ success: false, error: e.message }));
+      return true;
+
+    case 'CLOUD_GET_ME':
+      getIdentityMe()
+        .then(me => sendResponse({ success: true, me }))
+        .catch(e => sendResponse({ success: false, error: e.message, status: e.status }));
+      return true;
+
+    case 'CLOUD_GET_OBJECT':
+      getCloudObject(payload.path)
+        .then(object => sendResponse({ success: true, object }))
+        .catch(e => sendResponse({ success: false, error: e.message, status: e.status }));
       return true;
 
     // ── Data ──────────────────────────────────────────────────────────────────

@@ -758,6 +758,31 @@ export function matchSiteCapabilities(intent, catalog, { limit = 8 } = {}) {
   return scored.slice(0, limit);
 }
 
+/**
+ * Apply an LLM re-ranking onto a capability pool. `ranking` is [{i, why}] with 1-BASED indices
+ * into `capabilities` (as the pool was numbered in the prompt). Returns the referenced
+ * capabilities in ranked order, each annotated with a short `why`, deduped, with invalid /
+ * out-of-range indices dropped. Pure — the LLM provides the order, this just resolves it safely.
+ * Empty/garbage ranking → []; the caller then falls back to the lexical matcher.
+ * @param {Array} capabilities  the pool shown to the model (e.g. siteMapCapabilities().capabilities)
+ * @param {Array<{i:number,why?:string}>} ranking
+ * @returns {Array} capability objects (cloned) in ranked order, each with `.why`
+ */
+export function applyCapabilityRanking(capabilities, ranking) {
+  const pool = Array.isArray(capabilities) ? capabilities : [];
+  const out = [];
+  const seen = new Set();
+  for (const r of (Array.isArray(ranking) ? ranking : [])) {
+    const oneBased = Number.isInteger(r && r.i) ? r.i : parseInt(r && r.i, 10);
+    const i = oneBased - 1;                                   // 1-based prompt index → 0-based
+    if (!(i >= 0 && i < pool.length) || seen.has(i)) continue;
+    seen.add(i);
+    const why = (r && typeof r.why === 'string') ? r.why.trim().slice(0, 80) : '';
+    out.push({ ...pool[i], why });
+  }
+  return out;
+}
+
 // ── Drift & re-discovery (GROUND_SPEC § 8) ───────────────────────────────────
 
 /**

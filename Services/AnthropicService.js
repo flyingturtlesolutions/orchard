@@ -2239,6 +2239,45 @@ Return ONLY a JSON object:
   }
 
   /**
+   * v2.74.468 — LLM re-rank of the site capability catalog against a free-text intent. The pure
+   * lexical matcher (SiteMap.matchSiteCapabilities) is the instant default + fallback; this adds
+   * SEMANTIC matching ("buy" ≈ "checkout", "sign up" ≈ "create an account") the token-overlap
+   * ranker can't see. Given the intent + the site's goals (NUMBERED), returns the best-fitting
+   * goals ranked best-first as 1-based indices + a terse reason. [] when none fit; null on
+   * failure (caller falls back to the lexical ranker). Pure-ish: no storage, just one LLM call.
+   * @param {{intent:string, goals:Array<{label:string,pageTypes?:string[]}>}} args
+   * @returns {Promise<Array<{i:number, why:string}> | null>}
+   */
+  static async matchCapabilitiesLLM({ intent, goals }) {
+    const q = (typeof intent === 'string' ? intent : '').trim();
+    const list = (Array.isArray(goals) ? goals : []).filter(g => g && g.label).slice(0, 60);
+    if (!q || !list.length) return null;
+    const systemPrompt = `You match a user's intent to the things a website lets you do. You are given the user's intent and a NUMBERED list of the site's capabilities (each a goal the site supports). Pick the capabilities that accomplish the intent, ranked best-first. INCLUDE semantic matches — synonyms and paraphrases (e.g. "buy" ≈ "checkout"/"purchase"; "sign up" ≈ "create an account"; "see prices" ≈ "view pricing") — not just literal word overlap. Exclude capabilities that don't actually serve the intent.
+
+Return ONLY a JSON object:
+{ "matches": [ { "i": <capability number>, "why": "<=8 words: how it serves the intent>" } ] }
+Ranked best-first. Return { "matches": [] } if NOTHING on the site fits the intent. Never invent numbers outside the list.`;
+    const block = list.map((g, idx) => `${idx + 1}. ${g.label}${g.pageTypes && g.pageTypes.length ? ` [${g.pageTypes.join('/')}]` : ''}`).join('\n');
+    const userText = `User intent: ${q}\n\nSite capabilities:\n${block}`;
+    Logger.info('AnthropicService', `matchCapabilitiesLLM — "${q.slice(0, 60)}" over ${list.length} goal(s)`);
+    try {
+      const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text: userText }], 500, [], { role: 'describe', operation: 'matchCapabilities' });
+      if (!raw?.success) { Logger.warn('AnthropicService', `matchCapabilitiesLLM failed: ${raw?.error}`); return null; }
+      const json = AnthropicService.#firstJsonObject(raw.text);
+      if (!json) return null;
+      const p = JSON.parse(json);
+      const matches = Array.isArray(p.matches) ? p.matches : [];
+      const out = [];
+      for (const m of matches) {
+        const i = Number.isInteger(m && m.i) ? m.i : parseInt(m && m.i, 10);
+        if (!(i >= 1 && i <= list.length)) continue;
+        out.push({ i, why: (m && typeof m.why === 'string') ? m.why.trim().slice(0, 80) : '' });
+      }
+      return out;
+    } catch (e) { Logger.warn('AnthropicService', `matchCapabilitiesLLM error: ${e.message}`); return null; }
+  }
+
+  /**
    * v2.74.396 — Visual role locator (Resolve Tier-2 fallback / "Path C"). Given a
    * ROLE + the current viewport screenshot (+ intent / page-affordance context),
    * return a NORMALIZED bounding box (screenshot space, top-left origin) of the
