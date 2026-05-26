@@ -5312,6 +5312,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             // so we can report what this (re-)discovery changed.
             const prevSiteMap = await _readSiteMap(groundId);
             let sitemapUrls = [];   // v2.74.451 — kept for removal detection (authoritative set)
+            let sitemapTruncated = false;   // v2.74.458 — was that set CAPPED (MAX_URLS)? then it's NOT authoritative
             // v2.74.438 — Completeness slice 2b: sitemap.xml is the authoritative page
             // set (the bounded crawl can't reach the whole site). Fetch it FIRST → fold
             // as `stub` archetypes + persist the corpus template rules, so the crawl
@@ -5322,7 +5323,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               const origin = g?.url ? new URL(g.url).origin : null;
               if (origin && discoveryAbortFlags.get(groundId) !== true) {
                 chrome.runtime.sendMessage({ type: 'DISCOVERY_PROGRESS', payload: { groundId, visited: 0, total: 0, currentUrl: 'Reading sitemap.xml…', currentPageType: 'sitemap' } }).catch(() => {});
-                let { urls, count, blocked, status, reason } = await SitemapService.fetchSitemapUrls(origin);
+                let { urls, count, blocked, status, reason, truncated } = await SitemapService.fetchSitemapUrls(origin);
                 // v2.74.455 — the SW fetch was blocked by a bot-challenge (Cloudflare 403, or a
                 // 200 "Just a moment…" interstitial). Retry over an IN-TAB content-script fetch:
                 // a tab on the origin auto-solves the challenge and the content-script fetch rides
@@ -5334,13 +5335,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   chrome.runtime.sendMessage({ type: 'DISCOVERY_PROGRESS', payload: { groundId, visited: 0, total: 0, currentUrl: 'Reading sitemap.xml (in-tab)…', currentPageType: 'sitemap' } }).catch(() => {});
                   const viaTab = await _fetchSitemapViaTab(origin, () => discoveryAbortFlags.get(groundId) === true);
                   if (viaTab && Array.isArray(viaTab.urls) && viaTab.urls.length) {
-                    ({ urls, count, blocked, status, reason } = viaTab);
+                    ({ urls, count, blocked, status, reason, truncated } = viaTab);
                     Logger.info('background', `sitemap[${groundId}] in-tab fetch recovered ${count} URL(s)`);
                   } else if (viaTab) {
                     ({ blocked, status, reason } = viaTab);   // still blocked — keep the diagnostic
                   }
                 }
                 sitemapUrls = Array.isArray(urls) ? urls : [];
+                sitemapTruncated = !!truncated;
                 if (urls.length) {
                   await _mergeSiteMapForGround(groundId, SiteMap.siteMapFromSitemap(urls));
                   Logger.info('background', `sitemap seeded ${count} stub archetype URL(s) for ${groundId}`);
@@ -5411,11 +5413,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 // current sitemap URL set (a prior archetype absent from it is gone) —
                 // only when a sitemap was found, since a budgeted crawl alone can't prove
                 // absence. Report-only (no pruning yet).
+                // v2.74.458 — …AND only when that set is COMPLETE. A truncated sitemap (capped
+                // at MAX_URLS — pixabay returns 5000 of millions) is just a window, not the full
+                // page set, so a prior stub's absence from it does NOT prove removal — it may
+                // simply have fallen outside the cap (or the window shifted, e.g. pixabay's
+                // dynamic search-keyword sitemap). Computing `removed` against a partial set
+                // false-positives en masse, so suppress it when truncated.
+                let removalSkipped = false;
                 if (sm) {
                   try {
                     const d = SiteMap.diffSiteMap(prevSiteMap, sm).counts;
                     let removed = 0;
-                    if (sitemapUrls.length && prevSiteMap?.nodes) {
+                    if (sitemapUrls.length && !sitemapTruncated && prevSiteMap?.nodes) {
                       const r2 = sm.templateRules || rules || [];
                       const runIds = new Set(sitemapUrls.map((u) => { try { return SiteMap.archetypeId(SiteMap.templatePattern(u, r2)); } catch { return null; } }));
                       // Only `stub` nodes are sitemap-ONLY (never crawled/modeled): a stub that
@@ -5423,12 +5432,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                       // / Explore-modeled nodes legitimately live outside the sitemap (homepage,
                       // link-only pages) — judging them by sitemap membership false-positives.
                       removed = Object.values(prevSiteMap.nodes).filter((n) => n.status === 'stub' && !runIds.has(n.id)).length;
+                    } else if (sitemapUrls.length && sitemapTruncated && prevSiteMap?.nodes) {
+                      removalSkipped = true;   // had a sitemap + prior map, but the set was capped
                     }
-                    drift = { ...d, removed };
+                    drift = { ...d, removed, removalSkipped };
                   } catch { /* */ }
                 }
               } catch (e) { Logger.warn('background', `siteMap from crawl failed (continuing): ${e.message}`); }
-              if (drift) Logger.info('explore', `discovery drift[${groundId}]: +${drift.added} new · ${drift.statusChanged} status-changed · ${drift.removed || 0} removed · ${drift.unchanged} unchanged`);
+              if (drift) Logger.info('explore', `discovery drift[${groundId}]: +${drift.added} new · ${drift.statusChanged} status-changed · ${drift.removalSkipped ? 'removal n/a (sitemap truncated)' : `${drift.removed || 0} removed`} · ${drift.unchanged} unchanged`);
               chrome.runtime.sendMessage({
                 type: 'DISCOVERY_COMPLETE',
                 payload: { groundId, pageCount: crawled.length, siteMapStats, drift, aborted: !!aborted },
