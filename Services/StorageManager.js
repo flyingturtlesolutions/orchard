@@ -582,11 +582,32 @@ export class StorageManager {
     if (recordKeys.length > 0) await StorageManager.#remove(recordKeys);
     await StorageManager.#remove(indexAndMetaKeys);
 
+    // v2.74.460 — also prune the per-ground siteMap + OUTCOMES stream. These live as
+    // sub-keys of single aggregate objects (`siteMapCache` / `outcomesStream`, owned by
+    // background.js) rather than their own storage keys, so the cascade above missed them:
+    // it removed the LEGACY `groundmap:<id>` key but not these newer ones. A deleted ground's
+    // siteMap (often multi-MB) was therefore left ORPHANED in storage — deleting every ground
+    // still left chrome.storage.local full (the bug behind the kQuotaBytes failures). Read-
+    // modify-write each aggregate, dropping this ground's entry. Best-effort + key-independent.
+    let sitemapPruned = false;
+    for (const aggKey of ['siteMapCache', 'outcomesStream']) {
+      try {
+        const got = await StorageManager.#get([aggKey]);
+        const agg = got?.[aggKey];
+        if (agg && typeof agg === 'object' && Object.prototype.hasOwnProperty.call(agg, groundId)) {
+          delete agg[groundId];
+          await StorageManager.#set({ [aggKey]: agg });
+          if (aggKey === 'siteMapCache') sitemapPruned = true;
+        }
+      } catch (e) { Logger.warn('StorageManager', `deleteGround: could not prune ${aggKey}: ${e.message}`); }
+    }
+
     Logger.info('StorageManager',
       `Ground deleted: ${groundId} (cascade removed ${fragmentIds.length} fragment(s), ` +
       `${strategyIds.length} strategy/ies, ${perspectiveIds.length} perspective(s), ` +
       `${observationIds.length} observation(s), ${analysisIds.length} analysis/es, ` +
-      `${assertionIds.length} assertion(s); landmarks preserved per GROUND_SPEC § 11)`);
+      `${assertionIds.length} assertion(s)${sitemapPruned ? ', siteMap pruned' : ''}; ` +
+      `landmarks preserved per GROUND_SPEC § 11)`);
   }
 
   // ── Paths ─────────────────────────────────────────────────────────────────
