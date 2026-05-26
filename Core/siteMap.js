@@ -436,12 +436,37 @@ export function siteMapFromLocale(locale, { localeKey = null, rules = null } = {
  * (carrying pageType + title), every same-site outgoing link an edge. A later
  * Explore of a page upgrades its node to `modeled` (mergeSiteMap status precedence).
  * @param {Array} pages  crawl pages: [{ url, title, pageType, outgoing:[{href,text?}], visitedAt }]
- * @returns {{ nodes:Object, edges:Array }}
+ * @returns {{ nodes:Object, edges:Array, templateRules:string[] }}
  */
-export function siteMapFromCrawl(pages, { rules = null } = {}) {
+export function siteMapFromCrawl(pages, { rules: sitemapRules = null } = {}) {
   const nodes = {};
   const edges = [];
   const list = Array.isArray(pages) ? pages : [];
+  // v2.74.453 — Corpus templating from the CRAWL's OWN harvested URLs. The locale/slug
+  // folding engine (deriveTemplateRules) previously ran ONLY on a sitemap.xml corpus;
+  // when the sitemap is unreachable (Cloudflare bot-challenge → templateRules empty) the
+  // crawl degraded to single-URL templating and locale families stayed split (/de/photos
+  // vs /photos; /fr/photos/{id} vs /photos/{id}). But the crawl already harvests hundreds
+  // of locale-mirrored URLs — a corpus rich enough to detect the {locale} axis on its own.
+  // Derive rules from page URLs + every outgoing href, UNION with any authoritative sitemap
+  // rules (sitemap first so it wins match order), and template through the combined set.
+  // Field-verified on pixabay: folds /{locale}/… and /{locale}/photos/{id} into one
+  // archetype each with NO sitemap. Returned so the merge persists them → Explore +
+  // re-discovery template identically (stable archetype ids across actions).
+  const corpus = [];
+  for (const p of list) {
+    if (!p || !p.url) continue;
+    corpus.push(p.url);
+    for (const link of Array.isArray(p.outgoing) ? p.outgoing : []) {
+      try { corpus.push(new URL(link && link.href, p.url).href); } catch { /* skip unresolvable */ }
+    }
+  }
+  const derived = corpus.length ? deriveTemplateRules(corpus) : [];
+  const seenRule = new Set();
+  const rules = [];
+  for (const r of [...(Array.isArray(sitemapRules) ? sitemapRules : []), ...derived]) {
+    if (!seenRule.has(r)) { seenRule.add(r); rules.push(r); }
+  }
   const inst = makeInstanceTracker(rules);
   // Pass 1 — a node per crawled page ARCHETYPE (carries pageType + title).
   for (const p of list) {
@@ -479,7 +504,7 @@ export function siteMapFromCrawl(pages, { rules = null } = {}) {
     }
   }
   inst.apply(nodes);
-  return { nodes, edges };
+  return { nodes, edges, templateRules: rules };   // v2.74.453 — persist combined rules for alignment
 }
 
 /**

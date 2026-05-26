@@ -5268,11 +5268,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               const origin = g?.url ? new URL(g.url).origin : null;
               if (origin && discoveryAbortFlags.get(groundId) !== true) {
                 chrome.runtime.sendMessage({ type: 'DISCOVERY_PROGRESS', payload: { groundId, visited: 0, total: 0, currentUrl: 'Reading sitemap.xml…', currentPageType: 'sitemap' } }).catch(() => {});
-                const { urls, count } = await SitemapService.fetchSitemapUrls(origin);
+                const { urls, count, blocked, status } = await SitemapService.fetchSitemapUrls(origin);
                 sitemapUrls = Array.isArray(urls) ? urls : [];
                 if (urls.length) {
                   await _mergeSiteMapForGround(groundId, SiteMap.siteMapFromSitemap(urls));
                   Logger.info('background', `sitemap seeded ${count} stub archetype URL(s) for ${groundId}`);
+                } else if (blocked) {
+                  // v2.74.452 — a Cloudflare/WAF challenge 403'd the sitemap fetch even though
+                  // it's credentialed: corpus templating (locale + slug folding) is unavailable
+                  // this run, so the crawl degrades to single-URL templating only. Surface WHY.
+                  Logger.warn('background', `sitemap[${groundId}] BLOCKED (HTTP ${status}) — corpus templating (locale/slug folding) unavailable; crawl-only this run`);
                 }
               }
             } catch (e) { Logger.warn('background', `sitemap ingestion skipped: ${e.message}`); }
