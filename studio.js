@@ -3738,10 +3738,14 @@ chrome.runtime.onMessage.addListener((message) => {
       statusSpan.textContent = `Mapped ${visited} of ~${total} · ${currentUrl.slice(0, 60)}${type}`;
     }
   } else if (message.type === 'DISCOVERY_COMPLETE') {
-    const { groundId, pageCount, aborted } = message.payload;
+    const { groundId, pageCount, aborted, drift } = message.payload;
+    // v2.74.450 — drift (§8): surface what (re-)discovery changed.
+    const driftTxt = drift && (drift.added || drift.statusChanged || drift.removed)
+      ? ` · ${drift.added} new${drift.statusChanged ? `, ${drift.statusChanged} changed` : ''}${drift.removed ? `, ${drift.removed} removed` : ''}`
+      : '';
     toast(aborted
       ? `Discovery aborted — kept partial map (${pageCount} pages)`
-      : `Discovery complete — mapped ${pageCount} pages`);
+      : `Discovery complete — mapped ${pageCount} pages${driftTxt}`);
     refreshGroundList().catch(() => {});
   } else if (message.type === 'DISCOVERY_FAILED') {
     const { groundId, error } = message.payload;

@@ -5254,6 +5254,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ success: true, started: true });
         (async () => {
           try {
+            // v2.74.450 — drift (§8 slice 2): snapshot the prior siteMap BEFORE any merge,
+            // so we can report what this (re-)discovery changed.
+            const prevSiteMap = await _readSiteMap(groundId);
+            let sitemapUrls = [];   // v2.74.451 — kept for removal detection (authoritative set)
             // v2.74.438 — Completeness slice 2b: sitemap.xml is the authoritative page
             // set (the bounded crawl can't reach the whole site). Fetch it FIRST → fold
             // as `stub` archetypes + persist the corpus template rules, so the crawl
@@ -5265,6 +5269,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               if (origin && discoveryAbortFlags.get(groundId) !== true) {
                 chrome.runtime.sendMessage({ type: 'DISCOVERY_PROGRESS', payload: { groundId, visited: 0, total: 0, currentUrl: 'Reading sitemap.xml…', currentPageType: 'sitemap' } }).catch(() => {});
                 const { urls, count } = await SitemapService.fetchSitemapUrls(origin);
+                sitemapUrls = Array.isArray(urls) ? urls : [];
                 if (urls.length) {
                   await _mergeSiteMapForGround(groundId, SiteMap.siteMapFromSitemap(urls));
                   Logger.info('background', `sitemap seeded ${count} stub archetype URL(s) for ${groundId}`);
@@ -5313,6 +5318,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               // ONLY persisted structural record (the GroundMap was retired).
               const crawled = pages || [];
               let siteMapStats = null;
+              let drift = null;
               try {
                 // v2.74.438 — template the crawl through the corpus rules the sitemap
                 // ingestion persisted, so crawl nodes align with the stub archetypes.
@@ -5321,10 +5327,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 await _mergeSiteMapForGround(groundId, SiteMap.siteMapFromCrawl(crawled, { rules }));
                 const sm = await _readSiteMap(groundId);
                 siteMapStats = sm ? SiteMap.siteMapStats(sm) : null;
+                // v2.74.450 — drift (§8): what changed vs the prior siteMap. The persisted
+                // map is cumulative (merge is additive), so the diff gives `added` (NEW
+                // archetypes) + `statusChanged` (upgrades, e.g. stub→discovered).
+                // v2.74.451 — `removed` is computed separately against the AUTHORITATIVE
+                // current sitemap URL set (a prior archetype absent from it is gone) —
+                // only when a sitemap was found, since a budgeted crawl alone can't prove
+                // absence. Report-only (no pruning yet).
+                if (sm) {
+                  try {
+                    const d = SiteMap.diffSiteMap(prevSiteMap, sm).counts;
+                    let removed = 0;
+                    if (sitemapUrls.length && prevSiteMap?.nodes) {
+                      const r2 = sm.templateRules || rules || [];
+                      const runIds = new Set(sitemapUrls.map((u) => { try { return SiteMap.archetypeId(SiteMap.templatePattern(u, r2)); } catch { return null; } }));
+                      // Only `stub` nodes are sitemap-ONLY (never crawled/modeled): a stub that
+                      // vanished from the current sitemap is a confident removal. Crawl-discovered
+                      // / Explore-modeled nodes legitimately live outside the sitemap (homepage,
+                      // link-only pages) — judging them by sitemap membership false-positives.
+                      removed = Object.values(prevSiteMap.nodes).filter((n) => n.status === 'stub' && !runIds.has(n.id)).length;
+                    }
+                    drift = { ...d, removed };
+                  } catch { /* */ }
+                }
               } catch (e) { Logger.warn('background', `siteMap from crawl failed (continuing): ${e.message}`); }
+              if (drift) Logger.info('explore', `discovery drift[${groundId}]: +${drift.added} new · ${drift.statusChanged} status-changed · ${drift.removed || 0} removed · ${drift.unchanged} unchanged`);
               chrome.runtime.sendMessage({
                 type: 'DISCOVERY_COMPLETE',
-                payload: { groundId, pageCount: crawled.length, siteMapStats, aborted: !!aborted },
+                payload: { groundId, pageCount: crawled.length, siteMapStats, drift, aborted: !!aborted },
               }).catch(() => {});
             }
           } catch (err) {

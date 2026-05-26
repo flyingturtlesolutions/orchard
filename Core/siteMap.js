@@ -100,6 +100,47 @@ function isLocaleCode(seg) {
   return /^[a-z]{2}([-_][a-z0-9]{2,4})?$/i.test(seg);
 }
 
+// Sentinel locale for the UNPREFIXED default-language variant (Google hreflang's term).
+const DEFAULT_LOCALE_TAG = 'x-default';
+
+/**
+ * Detect locale PREFIX segments at depth 0 for default-unprefixed sites — where the
+ * locale codes are NOT a position-0 majority (the unprefixed default-language pages
+ * dilute them), so the in-loop majority test misses them. Signal: a locale-shaped top
+ * segment whose subtree MIRRORS the unprefixed pages or another locale's subtree
+ * (`/de/products` ↔ `/products` and/or `/fr/products`). Returns the confirmed locale
+ * prefixes + the set of suffixes that exist in a localized form (so the matching
+ * UNPREFIXED page is recognized as the default-locale variant). Pure.
+ * @param {Array} items  [{ segs:string[] }] — single-URL-templated path segments
+ */
+function _detectLocalePrefixes(items) {
+  const empty = { localePrefixes: new Set(), localizedSuffixes: new Set() };
+  const childSuffixes = new Map();   // locale candidate → Set(suffix after it)
+  const unprefixed = new Set();      // full templated path of non-locale-headed items
+  for (const it of items) {
+    if (it.segs.length && isLocaleCode(it.segs[0])) {
+      const suf = it.segs.slice(1).join('/');
+      if (!childSuffixes.has(it.segs[0])) childSuffixes.set(it.segs[0], new Set());
+      childSuffixes.get(it.segs[0]).add(suf);
+    } else {
+      unprefixed.add(it.segs.join('/'));
+    }
+  }
+  if (childSuffixes.size < 2) return empty;
+  const cands = [...childSuffixes.keys()];
+  const localePrefixes = new Set();
+  const localizedSuffixes = new Set();
+  for (const c of cands) {
+    for (const suf of childSuffixes.get(c)) {
+      const mirrored = unprefixed.has(suf) || cands.some((o) => o !== c && childSuffixes.get(o).has(suf));
+      if (mirrored) { localePrefixes.add(c); localizedSuffixes.add(suf); }
+    }
+  }
+  // Need ≥2 mirroring locale prefixes to treat depth-0 as a language axis (mirroring is
+  // the precision guard, so a low bar is safe — a lone /id/ has nothing to mirror).
+  return localePrefixes.size >= 2 ? { localePrefixes, localizedSuffixes } : empty;
+}
+
 /** Split a rule string ("https://x.com/blog/{slug}") WITHOUT new URL (which %7B-encodes braces). */
 function ruleParts(rule) {
   const m = /^(https?:\/\/[^/]+)(\/.*)?$/i.exec(String(rule || ''));
@@ -109,19 +150,39 @@ function ruleParts(rule) {
 
 const isParamSeg = (s) => s.length > 1 && s.startsWith('{') && s.endsWith('}');
 
-/** Match a concrete URL against a corpus rule (same origin, same length, literals equal, params wild). */
+/** Match a concrete URL against a corpus rule (same origin, literals equal, params wild). */
 function matchTemplate(url, rules) {
   let u; try { u = new URL(url); } catch { return null; }
+  const origin = u.origin;
   const segs = u.pathname.split('/').filter(Boolean).map(templateSegment);
+  const litEq = (rsegs) => {                            // rsegs.length === segs.length assumed
+    for (let i = 0; i < rsegs.length; i++) {
+      // {locale} is NOT fully wild — it matches only a locale-shaped segment, so a bare
+      // /products doesn't get swallowed by the per-locale home rule /{locale}.
+      if (rsegs[i] === '{locale}') { if (!isLocaleCode(segs[i])) return false; continue; }
+      if (isParamSeg(rsegs[i])) continue;               // {slug}/{id}/… match anything
+      if (rsegs[i] !== segs[i]) return false;
+    }
+    return true;
+  };
+  // Pass 1 — exact length (locale present, or a non-locale rule).
   for (const rule of rules) {
     const rp = ruleParts(rule);
-    if (!rp || rp.origin !== u.origin || rp.segs.length !== segs.length) continue;
-    let ok = true;
-    for (let i = 0; i < rp.segs.length; i++) {
-      if (isParamSeg(rp.segs[i])) continue;            // {slug}/{id}/… matches anything
-      if (rp.segs[i] !== segs[i]) { ok = false; break; }
-    }
-    if (ok) return rule;
+    if (!rp || rp.origin !== origin || rp.segs.length !== segs.length) continue;
+    if (litEq(rp.segs)) return rule;
+  }
+  // Pass 2 — locale-ABSENT: the UNPREFIXED default-locale variant of a {locale} rule
+  // (/products ↔ /{locale}/products, / ↔ /{locale}). Skip a non-empty all-param
+  // remainder (e.g. /{locale}/{slug}) — it would swallow any bare /section.
+  for (const rule of rules) {
+    const rp = ruleParts(rule);
+    if (!rp || rp.origin !== origin) continue;
+    const li = rp.segs.indexOf('{locale}');
+    if (li < 0) continue;
+    const rem = rp.segs.slice(0, li).concat(rp.segs.slice(li + 1));
+    if (rem.length !== segs.length) continue;
+    if (rem.length > 0 && rem.every(isParamSeg)) continue;
+    if (litEq(rem)) return rule;
   }
   return null;
 }
@@ -139,6 +200,21 @@ export function deriveTemplateRules(urls) {
   for (const u of (Array.isArray(urls) ? urls : [])) {
     let url; try { url = new URL(u); } catch { continue; }
     items.push({ origin: url.origin, segs: url.pathname.split('/').filter(Boolean).map(templateSegment), out: [] });
+  }
+  // Default-locale unification: canonicalize the depth-0 locale slot BEFORE templating, per
+  // origin. A prefixed page (/de/products) → {locale}/products; an UNPREFIXED page whose
+  // suffix is also served localized (/products, with /de/products present) → {locale}/products
+  // too (the default-locale variant). So /products, /de/products, /fr/products share ONE
+  // archetype, and the bare URL resolves via matchTemplate's locale-absent pass.
+  const byOrigin = new Map();
+  for (const it of items) { if (!byOrigin.has(it.origin)) byOrigin.set(it.origin, []); byOrigin.get(it.origin).push(it); }
+  for (const group of byOrigin.values()) {
+    const { localePrefixes, localizedSuffixes } = _detectLocalePrefixes(group);
+    if (!localePrefixes.size) continue;
+    for (const it of group) {
+      if (it.segs.length && localePrefixes.has(it.segs[0])) it.segs = ['{locale}', ...it.segs.slice(1)];
+      else if (localizedSuffixes.has(it.segs.join('/'))) it.segs = ['{locale}', ...it.segs];
+    }
   }
   const maxDepth = items.reduce((m, it) => Math.max(m, it.segs.length), 0);
   for (let i = 0; i < maxDepth; i++) {
@@ -210,7 +286,9 @@ export function localeFromUrl(url, rules) {
   if (li < 0) return null;
   let u; try { u = new URL(url); } catch { return null; }
   const segs = u.pathname.split('/').filter(Boolean);
-  return segs[li] ?? null;
+  if (segs.length === rp.segs.length) return segs[li] ?? null;        // exact: locale present
+  if (segs.length === rp.segs.length - 1) return DEFAULT_LOCALE_TAG;  // unprefixed default variant
+  return null;
 }
 
 /**
@@ -506,4 +584,47 @@ export function siteMapStats(map) {
     ? Object.entries(localeCounts).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))[0][0]
     : null;
   return { nodes: ns.length, modeled, discovered, stub, edges: map && map.edges ? map.edges.length : 0, pages, modeledPages, locales, defaultLocale };
+}
+
+// ── Drift & re-discovery (GROUND_SPEC § 8) ───────────────────────────────────
+
+/**
+ * Diff two siteMaps by archetype — what a re-discovery CHANGED about the site's
+ * architecture: added / removed archetypes + status or pageType changes on shared ones.
+ * Keyed by archetype id (stable for a given urlPattern). Pure; the engine for "what
+ * changed on the site" + re-discovery prioritization (slice 1 of the drift arc).
+ * @returns {{ added, removed, statusChanged, pageTypeChanged, unchanged:number, counts }}
+ */
+export function diffSiteMap(prev, next) {
+  const P = (prev && prev.nodes) || {};
+  const N = (next && next.nodes) || {};
+  const sum = (n) => ({ id: n.id, urlPattern: n.urlPattern, status: n.status, name: n.name || n.urlPattern });
+  const added = [], removed = [], statusChanged = [], pageTypeChanged = [];
+  let unchanged = 0;
+  for (const id of Object.keys(N)) {
+    const b = N[id], a = P[id];
+    if (!a) { added.push(sum(b)); continue; }
+    let ch = false;
+    if (a.status !== b.status) { statusChanged.push({ ...sum(b), from: a.status, to: b.status }); ch = true; }
+    if ((a.pageType ?? null) !== (b.pageType ?? null)) { pageTypeChanged.push({ ...sum(b), from: a.pageType ?? null, to: b.pageType ?? null }); ch = true; }
+    if (!ch) unchanged++;
+  }
+  for (const id of Object.keys(P)) if (!N[id]) removed.push(sum(P[id]));
+  return {
+    added, removed, statusChanged, pageTypeChanged, unchanged,
+    counts: { added: added.length, removed: removed.length, statusChanged: statusChanged.length, pageTypeChanged: pageTypeChanged.length, unchanged },
+  };
+}
+
+/**
+ * Archetypes whose capture is STALE: visited (crawled/modeled) longer ago than maxAgeMs.
+ * Stubs (never visited, visitedAt null) are excluded — they're un-crawled, not stale.
+ * Pure (pass `now`). Feeds re-crawl prioritization + a "needs refresh" UI signal.
+ */
+export function staleNodes(map, { maxAgeMs = 1000 * 60 * 60 * 24 * 30, now = Date.now() } = {}) {
+  const ns = map && map.nodes ? Object.values(map.nodes) : [];
+  return ns
+    .filter((n) => n.visitedAt && (now - n.visitedAt) > maxAgeMs)
+    .map((n) => ({ id: n.id, urlPattern: n.urlPattern, status: n.status, name: n.name || n.urlPattern, visitedAt: n.visitedAt, ageMs: now - n.visitedAt }))
+    .sort((a, b) => b.ageMs - a.ageMs);
 }

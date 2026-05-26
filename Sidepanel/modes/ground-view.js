@@ -161,12 +161,16 @@ function handleEvent(message) {
   // the running flag and re-render the panel.
   if (message.type === 'DISCOVERY_PROGRESS') return;
   if (message.type === 'DISCOVERY_COMPLETE') {
-    const { groundId, pageCount, aborted } = message.payload ?? {};
+    const { groundId, pageCount, aborted, drift } = message.payload ?? {};
     if (!_discoveryRunning.has(groundId)) return;
     _discoveryRunning.delete(groundId);
+    // v2.74.450 — drift (§8): show what (re-)discovery changed.
+    const driftTxt = drift && (drift.added || drift.statusChanged || drift.removed)
+      ? ` · ${drift.added} new${drift.statusChanged ? `, ${drift.statusChanged} changed` : ''}${drift.removed ? `, ${drift.removed} removed` : ''}`
+      : '';
     toast(aborted
       ? `Discovery aborted — kept partial map (${pageCount} pages)`
-      : `Discovery complete — mapped ${pageCount} page${pageCount === 1 ? '' : 's'}`);
+      : `Discovery complete — mapped ${pageCount} page${pageCount === 1 ? '' : 's'}${driftTxt}`);
     _renderList().catch(() => {});
     return;
   }

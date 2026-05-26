@@ -4051,6 +4051,127 @@ locale-capture.js` (matchedGoal in the grounded-intent card), `manifest.json`.
 
 ---
 
+## v2.74.451 — Drift: detect removed archetypes against the sitemap (§ 8 slice 3, report-only)
+
+**Date:** 2026-05-26
+**Decision by:** user ("continue"). Closes the `removed`-detection gap from v2.74.450
+without the risky restructure of the core merge flow.
+
+**Approach.** The persisted siteMap is cumulative (additive merge), so a diff can't see
+removals. Rather than rebuild the run as a standalone map, compute `removed` against the
+AUTHORITATIVE current sitemap URL set: a prior **`stub`** archetype (sitemap-ONLY — never
+crawled or modeled) whose id isn't producible from any current sitemap URL
+(`archetypeId(templatePattern(url, rules))`) is gone. **Restricted to stubs** so that
+crawl-discovered / Explore-modeled archetypes that legitimately live outside the sitemap
+(homepage, link-only pages) aren't false-flagged. Gated on a sitemap actually being found
+this run — a budgeted crawl alone can't prove absence. **Report-only** (logged, in
+`DISCOVERY_COMPLETE.drift`, and the studio/ground-view toasts: "N removed"); no pruning yet.
+
+**Limitation.** Assumes the sitemap is complete — a real page omitted from sitemap.xml would
+be falsely flagged removed. And if `templateRules` changed between runs, ids may not align.
+Acceptable for a report-only signal.
+
+**Verified.** background + studio + ground-view syntax OK. (`diffSiteMap`/`archetypeId`/
+`templatePattern` engines unit-tested in v445/v449.) Live numbers need the loaded extension.
+
+**Touched.** `background.js` (sitemap-set removal calc + drift payload/log), `studio.js` +
+`Sidepanel/modes/ground-view.js` (toast), `manifest.json`.
+
+---
+
+## v2.74.450 — Drift wired into re-discovery (§ 8 slice 2)
+
+**Date:** 2026-05-26
+**Decision by:** user ("continue").
+
+**What shipped.** `START_DISCOVERY` (background) now snapshots the siteMap BEFORE any merge
+(`prevSiteMap`), and after the sitemap+crawl merge computes `SiteMap.diffSiteMap(prevSiteMap,
+sm).counts`, logged and included in the `DISCOVERY_COMPLETE` payload as `drift`. The studio
++ ground-view completion toasts now append "· N new[, M changed]". So a re-Discover reports
+what changed since last time.
+
+**Known limit (honest).** The persisted siteMap is CUMULATIVE (merge is additive), so the
+diff reliably surfaces **added** archetypes + **statusChanged** upgrades (e.g. stub→discovered),
+but NOT **removed** ones — a dropped archetype lingers until a prune step. Accurate
+removed-detection needs a standalone this-run map (or a sitemap-set comparison); deferred to
+a later slice. First discovery (no prior map) → everything counts as added (expected).
+
+**Verified.** background + studio + ground-view syntax OK; the diff/stale engine itself is
+unit-tested (v449). Live drift numbers need the loaded extension.
+
+**Touched.** `background.js` (snapshot + diff + payload), `studio.js` + `Sidepanel/modes/
+ground-view.js` (drift in the completion toast), `manifest.json`.
+
+---
+
+## v2.74.449 — Drift & re-discovery engine (GROUND_SPEC § 8, slice 1)
+
+**Date:** 2026-05-26
+**Decision by:** user ("continue" — next discovery thread after the locale work).
+
+**Why.** Discovery was one-shot; sites change but nothing detected new/removed/changed
+archetypes or flagged a stale capture. This is the pure, testable foundation of the drift
+arc (wiring into the discovery flow + UI is slice 2).
+
+**What shipped (`Core/siteMap.js`, pure + tested).**
+- **`diffSiteMap(prev, next)`** — diffs two siteMaps by archetype id: `added` / `removed`
+  archetypes + `statusChanged` (e.g. discovered→modeled) + `pageTypeChanged` on shared
+  ones, with `unchanged` count and a `counts` summary. `null` prev → everything added
+  (first discovery). The engine for "what changed on the site" + re-discovery prioritization.
+- **`staleNodes(map, { maxAgeMs=30d, now })`** — archetypes visited longer ago than the
+  threshold (stubs excluded — un-crawled, not stale), sorted oldest-first. Feeds re-crawl
+  prioritization + a "needs refresh" signal.
+
+**Verified.** 8-assertion test: added/removed/status/pageType/unchanged classification,
+no-prev → all-added, age-threshold staleness at two thresholds. Syntax OK.
+
+**Next (slice 2).** Wire it: snapshot the siteMap before a re-Discover, diff after, broadcast
+the drift summary (studio: "+3 new · 1 removed · 2 newly modeled"); surface `staleNodes` as
+a refresh prompt; optionally let the Explore queue prioritize new/stale archetypes.
+
+**Touched.** `Core/siteMap.js`, `manifest.json`.
+
+---
+
+## v2.74.448 — Unify the default (unprefixed) locale into the {locale} archetype
+
+**Date:** 2026-05-26
+**Decision by:** user ("what's next for discovery" → "Unify default locale").
+
+**Problem.** Sites that serve the default language UNPREFIXED (`/products` = English) and
+other languages PREFIXED (`/de/products`, `/fr/products`) didn't collapse: the v443
+majority test only fires when locale codes dominate depth-0, but here the unprefixed
+sections (`/products`, `/about`, …) dilute them below the threshold — so `/de/products`
+and `/fr/products` stayed separate from `/products` (and from each other). The default
+language was modeled as a parallel archetype set.
+
+**Fix (`Core/siteMap.js`, pure + tested).**
+- **`_detectLocalePrefixes`** — a mirroring-based detector for depth-0 locale prefixes
+  that survives dilution: a locale-shaped top segment is a confirmed prefix when its
+  subtree MIRRORS the unprefixed pages or another locale's subtree (`/de/products` ↔
+  `/products` and/or `/fr/products`). ≥2 mirroring prefixes required (mirroring is the
+  precision guard, so the bar is low).
+- **`deriveTemplateRules` pre-canonicalization** (per origin): a prefixed page →
+  `{locale}/…`; an UNPREFIXED page whose suffix is served localized → `{locale}/…` too
+  (the default variant). So `/products`, `/de/products`, `/fr/products` emit ONE rule
+  `/{locale}/products` and no bare `/products` rule.
+- **`matchTemplate` Pass 2 (locale-absent)** — a bare URL maps to the `{locale}` rule with
+  its locale slot omitted (`/products` → `/{locale}/products`, `/` → `/{locale}`); skips
+  all-param remainders so `/about` isn't swallowed by `/{locale}/{slug}`.
+- **`{locale}` is no longer fully wild** in matching — it matches only a locale-SHAPED
+  segment, so the per-locale home rule `/{locale}` doesn't grab a bare `/products`.
+- **`localeFromUrl`** returns `x-default` (hreflang term) for the unprefixed variant, so the
+  default page joins the archetype's `exemplarByLocale` as a real language.
+
+**Verified.** 15-assertion test (unify pattern-2 → 3 archetypes, `/about` unified, bare
+`/` → home, x-default extraction, locales `de,fr,x-default`) + 7-assertion regression
+(slug/id templating, sections, crawl, cross-locale alignment all intact). Guards: `/about`
+not swallowed by `{locale}/{slug}`, lone `/id/`, monolingual site → no false `{locale}`.
+
+**Touched.** `Core/siteMap.js`, `manifest.json`.
+
+---
+
 ## v2.74.447 — Resolve matches any language (slice 3c — language-agnostic loop closed)
 
 **Date:** 2026-05-26
