@@ -3128,17 +3128,18 @@ async function _refreshGroundListImpl() {
     smRow.className = 'ground-section-row';
     {
       const nodes = smMap?.nodes ? Object.values(smMap.nodes) : [];
-      const shortPath = (pat) => { try { const u = new URL(pat); return (u.pathname || '/') + (u.host ? '' : ''); } catch { return pat; } };
+      // String-strip the origin (NOT new URL — patterns contain {id} which URL would %7B-encode).
+      const shortPath = (pat) => (pat || '').replace(/^https?:\/\/[^/]+/i, '') || '/';
       const modeled = nodes.filter(n => n.status === 'modeled');
       const discovered = nodes.filter(n => n.status === 'discovered');
       const nodeRow = (n) => `
           <div class="sitemap-node sitemap-${escAttr(n.status)}">
             <span class="sitemap-node-status">${n.status === 'modeled' ? '●' : '○'}</span>
             <span class="sitemap-node-name" title="${escAttr(n.urlPattern)}">${escHtml(n.name || shortPath(n.urlPattern))}</span>
-            <span class="sitemap-node-meta">${escHtml(shortPath(n.urlPattern))}${n.goals?.length ? ` · ${n.goals.length} goal(s)` : ''}</span>
+            <span class="sitemap-node-meta">${escHtml(shortPath(n.urlPattern))}${n.instanceCount > 1 ? ` · ×${n.instanceCount}` : ''}${n.goals?.length ? ` · ${n.goals.length} goal(s)` : ''}</span>
           </div>`;
       const summary = smStats
-        ? `${smStats.modeled} modeled · ${smStats.discovered} discovered${smStats.stub ? ` · ${smStats.stub} stub` : ''} · ${smStats.edges} edge(s)`
+        ? `${smStats.modeled} modeled · ${smStats.discovered} discovered${smStats.stub ? ` · ${smStats.stub} stub` : ''} · ${smStats.edges} edge(s)${smStats.pages > smStats.nodes ? ` · ~${smStats.pages} pages` : ''}`
         : '';
       smRow.innerHTML = `
       <div class="ground-section-head">

@@ -4051,6 +4051,122 @@ locale-capture.js` (matchedGoal in the grounded-intent card), `manifest.json`.
 
 ---
 
+## v2.74.437 — Completeness slice 2a: corpus templating engine (shared rules)
+
+**Date:** 2026-05-26
+**Decision by:** user ("what's next" → chose "Slice 2, auto on Discover"). Pure
+engine first; `SitemapService` fetch/parse + background wiring is slice 2b.
+
+**What shipped (`Core/siteMap.js`, pure + tested).**
+- `deriveTemplateRules(urls)` — given a URL corpus (sitemap.xml), level-order detection
+  of parameter positions: at each depth, bucket URLs by their already-templated prefix
+  (so nested params compose → `/blog/{slug}/comments`) and flag a position `{slug}` when
+  its distinct sibling values are numerous AND mostly slug-like (`isSluggish`: hyphen /
+  ≥12 chars / digit). Emits parameterized template strings.
+- `templatePattern(url, rules)` — a matching corpus rule wins (catches slugs the
+  single-URL heuristic can't); else the single-URL heuristic. `matchTemplate` compares
+  by origin + segment count + literal equality (params wild); `ruleParts` splits without
+  `new URL` (which would `%7B`-encode braces).
+- `siteMapFromSitemap(urls)` → `stub` archetype nodes + **returns `templateRules`**.
+- **Shared-rules alignment (the key design point).** Both the sitemap stubs AND the
+  crawl/Explore contributions template through the SAME rules, so `/blog/my-post` from a
+  crawl lands on the SAME archetype id as its sitemap stub — keeping the
+  `stub → discovered → modeled` upgrade chain intact. `siteMapFromCrawl(pages,{rules})`
+  and `siteMapFromLocale(locale,{localeKey,rules})` now thread `rules`; `mergeSiteMap`
+  carries `templateRules` on the map (sitemap supplies the authoritative set).
+
+**Bug-pass fix (same version).** `isSluggish` flags hyphenated tokens, so ≥8 *distinct*
+top-level sections (`/privacy-policy`, `/terms-of-service`, …) would wrongly collapse to
+`/{slug}` at depth 0 — where sections live. Added a **depth-aware threshold**
+(`MIN_SLUG_SIBLINGS_ROOT=20` at depth 0 vs `8` deeper): real top-level instance sets
+(a flat CMS, dozens+) still collapse; a handful of distinct sections don't.
+
+**Verified.** 10-assertion test: deep + nested slug collapse, id pre-templating,
+8 hyphenated sections kept distinct, 25 flat-root slugs collapse, sitemap↔crawl
+alignment + stub→discovered merge + rule carry. Syntax OK.
+
+**Not yet (slice 2b).** `SitemapService` (robots.txt → sitemap-index → `.gz` → `<loc>`,
+regex-parsed since MV3 SW has no `DOMParser`); fetch on Discover start; persist + thread
+the rules to the crawl/Explore merges. **Known limit:** `matchTemplate` re-parses rules
+per URL — fine for typical rule counts, optimize in 2b if needed.
+
+**Touched.** `Core/siteMap.js`, `manifest.json`.
+
+---
+
+## v2.74.436 — Bug pass on slice-1 templating: exact instance counting + edge collapse
+
+**Date:** 2026-05-25
+**Decision by:** user ("bug pass") — scrutiny of v2.74.435 found three real defects in
+the new instance/edge accounting (all in `Core/siteMap.js`).
+
+1. **`addInstance` double-counted past the sample cap.** `instanceCount` incremented
+   whenever a URL wasn't in the capped (8) `instances` array — so an archetype with
+   >8 distinct instances re-counted any beyond-sample URL each time it recurred across
+   pages (the `includes` check only saw the 8 retained samples). Large catalogs inflated.
+2. **Query / trailing-slash variants over-counted.** `/a?ref=1`, `/a?ref=2`, `/a/` are
+   one concrete page but were counted as three instances.
+3. **`siteMapFromLocale` emitted parallel edges.** Edge dedup keyed on feature id, so a
+   20-card grid all collapsing to `/product/{id}` produced 20 edges to one node;
+   `siteMapFromCrawl` already deduped by (from,to) to 1.
+
+**Fix.** Replaced `addInstance` with a per-build **instance tracker** (`makeInstanceTracker`):
+notes every concrete URL, dedupes on its NORMALIZED form across the FULL distinct set
+(a `Set`, not a capped `includes`), then `apply(nodes)` writes the true `instanceCount`,
+a capped sample of ORIGINAL (navigable) URLs, and the exemplar (first seen). Both builders
+use it. `siteMapFromLocale` now dedupes edges by archetype pair `from→to` (was `from→to|featureId`);
+`via` keeps the first linking feature as representative provenance.
+
+**Verified.** 11-assertion test: 12 distinct products with cross-page repeats count
+exactly 12 (not 14); `/shop?cat=1|2|/|` → 1 instance + 1 edge; 3 product navs in a Locale →
+1 edge; counts survive merge; status-precedence upgrade intact. Syntax OK.
+
+**Touched.** `Core/siteMap.js`, `manifest.json`.
+
+---
+
+## v2.74.435 — Completeness arc, slice 1: id-segment templating (archetype graph)
+
+**Date:** 2026-05-25
+**Decision by:** user — "completeness matters … ground discovery captures the entire
+site architecture … perspective-level Explore executed on every site page." Chose:
+one Explore per **archetype** (not per URL), **sitemap.xml + crawl** for breadth, and
+a **two-phase** (discover-then-Explore-queue) execution model.
+
+**Why this slice first.** "One Explore per archetype" is impossible without collapsing
+instance URLs to a template — otherwise a 10k-item catalog is 10k near-identical
+Explores. Templating is the pure, testable keystone every later slice builds on.
+
+**What shipped (Core/siteMap.js, SCHEMA 1→2).**
+- `templateSegment(seg)` — conservative single-URL heuristic: numeric / uuid /
+  long-hash / embedded-digit-run → `{id}`/`{uuid}`/`{hash}` (e.g. `/123`, `/page/2`,
+  `/sku-987654`). Pure-numeric collapses (so `/2024/03/post` + `/2023/11/post` →
+  `/{id}/{id}/post`, the dated-post template). SLUG instances (`/blog/my-post`) look
+  like real pages to a single-URL view → deferred to corpus templating in slice 2.
+- `templatePattern(url)` — origin + templated pathname. Nodes now key on this, so
+  `/product/123` + `/product/456` → one `…/product/{id}` archetype.
+- Node shape gains `exemplarUrl` (a concrete URL a per-archetype Explore navigates
+  to), `instances` (capped sample), `instanceCount` (distinct concrete pages). New
+  `makeNode` + `addInstance` helpers; `siteMapFromLocale`/`siteMapFromCrawl`/
+  `mergeSiteMap` fold instances and collapse intra-archetype links (3 product links →
+  1 edge). `siteMapStats` adds `pages` (Σ instanceCount) + `modeledPages` (coverage).
+- Viewers (studio + ground-view): `shortPath` now string-strips the origin (NOT
+  `new URL`, which `%7B`-encodes braces); node meta shows `×N` for multi-instance
+  archetypes; summary shows `~P pages`.
+
+**Verified.** 24-assertion node test (templateSegment cases, template collapse, crawl
+archetype counts + exemplar + instanceCount, edge collapse, Σpages, modeled upgrade
+preserving exemplar/count, modeledPages). Syntax OK across Core + both viewers.
+
+**Next (slice 2).** `SitemapService` (robots.txt → sitemap-index → `.gz` → `<loc>`) +
+`siteMapFromSitemap` → templated `stub` nodes, plus **corpus** templating (the full
+URL set reveals slug params the single-URL heuristic can't).
+
+**Touched.** `Core/siteMap.js`, `studio.js`, `Sidepanel/modes/ground-view.js`,
+`manifest.json`.
+
+---
+
 ## v2.74.434 — siteMap Slice B: retire the GroundMap (the siteMap is canonical)
 
 **Date:** 2026-05-25

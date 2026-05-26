@@ -856,18 +856,20 @@ function _toggleSiteMapViewer(groundId) {
 function _renderSiteMapHtml(siteMap) {
   const nodes = siteMap?.nodes ? Object.values(siteMap.nodes) : [];
   if (nodes.length === 0) return '<div class="gm-empty">No site map yet.</div>';
-  const shortPath = (pat) => { try { return new URL(pat).pathname || '/'; } catch { return pat; } };
+  // String-strip the origin (NOT new URL — patterns contain {id} which URL would %7B-encode).
+  const shortPath = (pat) => (pat || '').replace(/^https?:\/\/[^/]+/i, '') || '/';
   const modeled = nodes.filter(n => n.status === 'modeled');
   const discovered = nodes.filter(n => n.status === 'discovered');
   const stub = nodes.filter(n => n.status !== 'modeled' && n.status !== 'discovered');
   const edges = Array.isArray(siteMap.edges) ? siteMap.edges.length : 0;
+  const pagesTotal = nodes.reduce((s, n) => s + (n.instanceCount || 0), 0);
   const nodeRow = (n) => `
       <div class="sitemap-node sitemap-${escAttr(n.status)}">
         <span class="sitemap-node-status">${n.status === 'modeled' ? '●' : '○'}</span>
         <span class="sitemap-node-name" title="${escAttr(n.urlPattern || '')}">${escHtml(n.name || shortPath(n.urlPattern || ''))}</span>
-        <span class="sitemap-node-meta">${escHtml(shortPath(n.urlPattern || ''))}${n.goals?.length ? ` · ${n.goals.length} goal(s)` : ''}</span>
+        <span class="sitemap-node-meta">${escHtml(shortPath(n.urlPattern || ''))}${n.instanceCount > 1 ? ` · ×${n.instanceCount}` : ''}${n.goals?.length ? ` · ${n.goals.length} goal(s)` : ''}</span>
       </div>`;
-  const summary = `${modeled.length} modeled · ${discovered.length} discovered${stub.length ? ` · ${stub.length} stub` : ''} · ${edges} edge(s)`;
+  const summary = `${modeled.length} modeled · ${discovered.length} discovered${stub.length ? ` · ${stub.length} stub` : ''} · ${edges} edge(s)${pagesTotal > nodes.length ? ` · ~${pagesTotal} pages` : ''}`;
   return `
     <div class="sitemap-summary">${escHtml(summary)}</div>
     <div class="sitemap-nodes">${modeled.map(nodeRow).join('')}${discovered.slice(0, 20).map(nodeRow).join('')}${discovered.length > 20 ? `<div class="empty-state small">+${discovered.length - 20} more discovered</div>` : ''}</div>`;
