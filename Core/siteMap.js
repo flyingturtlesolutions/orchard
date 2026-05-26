@@ -160,7 +160,18 @@ function matchTemplate(url, rules) {
       // {locale} is NOT fully wild — it matches only a locale-shaped segment, so a bare
       // /products doesn't get swallowed by the per-locale home rule /{locale}.
       if (rsegs[i] === '{locale}') { if (!isLocaleCode(segs[i])) return false; continue; }
-      if (isParamSeg(rsegs[i])) continue;               // {slug}/{id}/… match anything
+      // v2.74.461 — {id}/{hash}/{uuid} are SHAPE params minted by templateSegment, so they
+      // match ONLY a segment templateSegment classifies the same way (segs[] is already
+      // mapped → compare the param directly). Previously they were fully wild, so a corpus
+      // {id} rule born from a SINGLE numeric value (e.g. pixabay's /images/search/2025 →
+      // {id}) swallowed every non-numeric sibling (/images/search/ocean, …), splitting
+      // keyword pages inconsistently — some literal, some {id}. {slug} stays wild below
+      // (it's a fuzzy cohort param with no fixed shape).
+      if (rsegs[i] === '{id}' || rsegs[i] === '{hash}' || rsegs[i] === '{uuid}') {
+        if (segs[i] !== rsegs[i]) return false;
+        continue;
+      }
+      if (isParamSeg(rsegs[i])) continue;               // {slug} (and any future param) match anything
       if (rsegs[i] !== segs[i]) return false;
     }
     return true;
