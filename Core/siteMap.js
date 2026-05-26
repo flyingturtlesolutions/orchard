@@ -650,6 +650,67 @@ export function siteMapStats(map) {
   return { nodes: ns.length, modeled, discovered, stub, edges: map && map.edges ? map.edges.length : 0, pages, modeledPages, locales, defaultLocale };
 }
 
+// ── Site capability catalog ──────────────────────────────────────────────────
+// "What can I do across this site?" — the site-level roll-up of the per-archetype
+// goals Explore synthesizes (a Locale's L2 goals, copied as LABELS onto each modeled
+// node). siteMapStats answers "how much is modeled"; this answers "what does the modeled
+// territory let me DO". The full goal objects (description + achievableVia features) live
+// in each archetype's Locale — this is the site-wide index over their labels.
+
+/** Normalize a goal label for dedup: lowercase, collapse whitespace, drop trailing sentence punctuation. */
+function _normGoal(s) {
+  return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim().replace(/[.!?…]+$/, '').trim();
+}
+
+/**
+ * Aggregate every modeled archetype's goal labels into a deduplicated, prevalence-ranked
+ * capability catalog. One entry per DISTINCT goal (by normalized label), annotated with the
+ * archetype(s) that offer it + their pageType(s). Pure (no DOM/chrome/storage).
+ *
+ * Dedup is exact-on-normalized-label: case / whitespace / trailing-punctuation variants merge;
+ * semantically-near labels ("search media" vs "search the library") stay distinct (semantic
+ * clustering is a later LLM-backed slice). Within one archetype, repeated labels collapse, so
+ * `count` is the number of distinct archetypes offering the goal.
+ *
+ * @param {{nodes:Object}} map
+ * @returns {{ capabilities: Array<{goal:string,count:number,pageTypes:string[],archetypes:Array}>,
+ *             byPageType: Object<string,string[]>,
+ *             totals: { modeled:number, withGoals:number, distinct:number } }}
+ */
+export function siteMapCapabilities(map) {
+  const ns = map && map.nodes ? Object.values(map.nodes) : [];
+  const byNorm = new Map();   // normalized label → entry
+  let modeled = 0, withGoals = 0;
+  for (const n of ns) {
+    if (n.status === 'modeled') modeled++;
+    const goals = Array.isArray(n.goals) ? n.goals : [];
+    if (!goals.length) continue;
+    withGoals++;
+    const arch = {
+      id: n.id, urlPattern: n.urlPattern, name: n.name || n.urlPattern,
+      pageType: n.pageType ?? null, exemplarUrl: n.exemplarUrl || null, status: n.status,
+    };
+    const seen = new Set();   // collapse repeated labels within one archetype
+    for (const label of goals) {
+      const key = _normGoal(label);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      let e = byNorm.get(key);
+      if (!e) { e = { goal: label, pageTypes: new Set(), archetypes: [] }; byNorm.set(key, e); }
+      if (arch.pageType) e.pageTypes.add(arch.pageType);
+      e.archetypes.push(arch);
+    }
+  }
+  const capabilities = [...byNorm.values()]
+    .map((e) => ({ goal: e.goal, count: e.archetypes.length, pageTypes: [...e.pageTypes].sort(), archetypes: e.archetypes }))
+    .sort((a, b) => b.count - a.count || (a.goal < b.goal ? -1 : a.goal > b.goal ? 1 : 0));
+  const byPageType = {};
+  for (const cap of capabilities) {
+    for (const pt of (cap.pageTypes.length ? cap.pageTypes : ['(unknown)'])) (byPageType[pt] ??= []).push(cap.goal);
+  }
+  return { capabilities, byPageType, totals: { modeled, withGoals, distinct: capabilities.length } };
+}
+
 // ── Drift & re-discovery (GROUND_SPEC § 8) ───────────────────────────────────
 
 /**
