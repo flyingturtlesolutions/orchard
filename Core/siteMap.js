@@ -240,7 +240,25 @@ export function deriveTemplateRules(urls) {
         && (nonParam.filter(isSluggish).length / nonParam.length) >= SLUG_FRACTION) {
         param = '{slug}';
       }
-      for (const it of b.members) it.out.push(param ?? it.segs[i]);
+      // v2.74.454 — PER-VALUE slug folding. A {slug} position can hold a structural
+      // literal mixed in with the instance cohort: /3d-models/{search,lego-castle-3954,…}
+      // — `search` is a section HUB (it heads /search/<query>), the rest are detail
+      // leaves. The old all-or-nothing push parameterized `search` too, yielding the bogus
+      // /3d-models/{slug}/<query> (cousin: /forum/{slug}/create). Fix: when the position is
+      // {slug}, keep a value LITERAL iff it is non-sluggish AND heads a subtree (a member
+      // continues past it) — i.e. a fixed hub word, not a leaf instance. Sluggish values and
+      // non-sluggish leaves still fold, so genuine flat-slug sites are unaffected.
+      const deepVals = param === '{slug}'
+        ? new Set(b.members.filter((it) => it.segs.length > i + 1).map((it) => it.segs[i]))
+        : null;
+      for (const it of b.members) {
+        if (param === '{slug}') {
+          const v = it.segs[i];
+          it.out.push((!isSluggish(v) && deepVals.has(v)) ? v : '{slug}');
+        } else {
+          it.out.push(param ?? it.segs[i]);
+        }
+      }
     }
   }
   const rules = new Set();
@@ -453,12 +471,22 @@ export function siteMapFromCrawl(pages, { rules: sitemapRules = null } = {}) {
   // Field-verified on pixabay: folds /{locale}/… and /{locale}/photos/{id} into one
   // archetype each with NO sitemap. Returned so the merge persists them → Explore +
   // re-discovery template identically (stable archetype ids across actions).
+  // v2.74.454 — restrict the corpus to SAME-SITE URLs (hosts the crawl actually
+  // visited). An external outgoing link (cdn.pixabay.com/photo/{id}/…, istockphoto,
+  // google-support) can never match a same-site node — matchTemplate keys on origin —
+  // so its derived rule is pure noise in templateRules. Drop it at the source: the
+  // page set defines the site's host(s); only those URLs seed rule derivation.
+  const siteHosts = new Set();
+  for (const p of list) { if (p && p.url) { const h = hostOf(p.url); if (h) siteHosts.add(h); } }
   const corpus = [];
   for (const p of list) {
     if (!p || !p.url) continue;
     corpus.push(p.url);
     for (const link of Array.isArray(p.outgoing) ? p.outgoing : []) {
-      try { corpus.push(new URL(link && link.href, p.url).href); } catch { /* skip unresolvable */ }
+      try {
+        const abs = new URL(link && link.href, p.url).href;
+        if (siteHosts.has(hostOf(abs))) corpus.push(abs);   // same-site only
+      } catch { /* skip unresolvable */ }
     }
   }
   const derived = corpus.length ? deriveTemplateRules(corpus) : [];
