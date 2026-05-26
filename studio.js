@@ -3173,7 +3173,7 @@ async function _refreshGroundListImpl() {
         return `
           <div class="sitemap-node" title="${escAttr(c.archetypes.map(a => shortPath(a.urlPattern)).join('\n'))}">
             <span class="sitemap-node-status">★</span>
-            <span class="sitemap-node-name">${escHtml(c.goal)}</span>
+            <span class="sitemap-node-name">${escHtml(c.goal)}${c.why ? ` <span style="opacity:.6;font-style:italic">— ${escHtml(c.why)}</span>` : ''}</span>
             <span class="sitemap-node-meta">${escHtml(meta)}${ex ? ` · <a href="${escAttr(ex)}" target="_blank" rel="noopener" title="Open ${escAttr(ex)}">↗</a>` : ''}</span>
           </div>`;
       };
@@ -3184,6 +3184,7 @@ async function _refreshGroundListImpl() {
         <div class="ground-section-head" style="margin-top:8px;border-top:1px solid rgba(127,127,127,.18);padding-top:6px">
           <span class="ground-section-label">Can do</span>
           <span class="ground-section-count">${caps.totals.distinct}</span>
+          <button class="btn-secondary tiny" data-action="ai-rank" data-gid="${ground.id}" title="Rank the catalog against your typed intent with AI (semantic / synonym match, e.g. &quot;buy&quot; → &quot;checkout&quot;)">✨</button>
           <button class="btn-secondary tiny" data-action="json-capabilities" data-gid="${ground.id}" title="View the full site capability catalog (goals × archetypes) as JSON">{ }</button>
         </div>
         <input type="text" id="cap-intent-${ground.id}" placeholder="What do you want to do? (type to rank)" autocomplete="off" style="width:100%;box-sizing:border-box;margin:2px 0 4px;font-size:12px;padding:3px 6px" />
@@ -3210,11 +3211,33 @@ async function _refreshGroundListImpl() {
       const capInput = smRow.querySelector(`#cap-intent-${ground.id}`);
       const capResults = smRow.querySelector(`#cap-results-${ground.id}`);
       if (capInput && capResults) {
+        // Instant lexical re-rank as you type (resets the default list when cleared).
         capInput.addEventListener('input', () => {
           const q = capInput.value.trim();
           capResults.innerHTML = q
             ? capListHtml(matchSiteCapabilities(q, caps, { limit: CAP_SHOWN }), false)
             : capListHtml(caps.capabilities.slice(0, CAP_SHOWN), true);
+        });
+        // v2.74.469 — "✨" sends the typed intent for an LLM semantic re-rank (MATCH_CAPABILITIES);
+        // results carry a `why`. Falls back to the lexical list when AI is unavailable.
+        const aiBtn = smRow.querySelector('[data-action="ai-rank"]');
+        aiBtn?.addEventListener('click', async () => {
+          const q = capInput.value.trim();
+          if (!q) { capInput.focus(); return; }
+          aiBtn.disabled = true; const prev = aiBtn.textContent; aiBtn.textContent = '…';
+          capResults.innerHTML = `<div class="empty-state small">Ranking with AI…</div>`;
+          try {
+            const resp = await new Promise(r => chrome.runtime.sendMessage({ type: 'MATCH_CAPABILITIES', payload: { groundId: ground.id, intent: q } }, r));
+            if (resp?.success && Array.isArray(resp.matches)) {
+              capResults.innerHTML = resp.matches.length
+                ? capListHtml(resp.matches, false) + (resp.source === 'lexical' ? `<div class="empty-state small">lexical match — AI unavailable</div>` : '')
+                : `<div class="empty-state small">No capability fits “${escHtml(q)}”.</div>`;
+            } else {
+              capResults.innerHTML = `<div class="empty-state small">Match failed: ${escHtml(resp?.error || 'unknown')}</div>`;
+            }
+          } catch (e) {
+            capResults.innerHTML = `<div class="empty-state small">Match failed: ${escHtml(e?.message || 'error')}</div>`;
+          } finally { aiBtn.disabled = false; aiBtn.textContent = prev; }
         });
       }
     }
