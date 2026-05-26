@@ -4051,6 +4051,142 @@ locale-capture.js` (matchedGoal in the grounded-intent card), `manifest.json`.
 
 ---
 
+## v2.74.447 — Resolve matches any language (slice 3c — language-agnostic loop closed)
+
+**Date:** 2026-05-26
+**Decision by:** user ("continue"). Makes resolution CONSUME the harvested
+`labelsByLocale`, completing the language-agnostic chain (3a align → 3b harvest → 3c use).
+
+**What shipped.**
+- **`Core/locale.js` (deterministic matcher).** New `labelTokens(f)` = tokens of the
+  primary `label` PLUS every `labelsByLocale` value. `matchScore` (used by
+  `featuresForRole`) and `disclosureFor` now score against it — so a role/intent in ANY
+  language matches (e.g. "Suche"/"Rechercher" hit a feature whose primary label is
+  "Search"). `knownSelectors` emits an `aliases` array (the other-language labels).
+- **`background.js` `_knownSelectorsForUrl`.** Each verified-selector hint now carries
+  `aliases` (the feature's `labelsByLocale`, minus the primary).
+- **`Services/AnthropicService.js` `resolveRoles`.** The KNOWN VERIFIED SELECTORS prompt
+  block renders the aliases (`"Search" [button] aka "Suche" / "Rechercher" => .sel`) and
+  tells the model it may match a role in ANY language — so the LLM resolve path is
+  language-agnostic too, not just the deterministic matcher.
+
+**Result — full chain works:** locales collapse to one archetype (v443) → per-archetype
+`exemplarByLocale` captured (v444) → cross-locale alignment (v445) → harvest attaches
+`labelsByLocale` to features (v446) → resolve matches any language (this). A German user's
+intent now resolves on an English-modeled page (and vice-versa) without re-modeling.
+
+**Verified.** 7-assertion test: German/French roles → English-primary feature, English
+still works, multi-word German, any-language disclosure, `knownSelectors` aliases exclude
+the primary, no-`labelsByLocale` features unaffected. Syntax OK (locale + background +
+AnthropicService).
+
+**Touched.** `Core/locale.js`, `background.js`, `Services/AnthropicService.js`, `manifest.json`.
+
+---
+
+## v2.74.446 — Cross-locale label harvest orchestration (slice 3b)
+
+**Date:** 2026-05-26
+**Decision by:** user ("continue"). Wires the 3a alignment core into the live pipeline.
+
+**What shipped.**
+- **`background.js` `HARVEST_LOCALE_LABELS` handler** — for a just-modeled archetype with
+  multiple locales: read the cached Locale (primary language), then drive the queue's tab
+  to each OTHER-language exemplar (`exemplarByLocale`, capped at `MAX_HARVEST_OTHER_LOCALES=4`),
+  run read-only `ENUMERATE_PAGE` on each, `SiteMap.alignFeaturesAcrossLocales` the lot, and
+  attach the resulting `labelsByLocale` alias set onto the cached Locale's features (matched
+  back by id — the primary locale is inserted first, so a shared feature's aligned `id` is
+  the model feature's). Re-caches. **No LLM** (enumerate deterministic, align pure); cost is
+  just ≤4 quick page loads per multilingual archetype. Added `_navigateBgTab` helper.
+- **`studio.js` Explore queue** — targets now carry `exemplarByLocale`; after a successful
+  per-archetype Explore, if the archetype has >1 locale it fires `HARVEST_LOCALE_LABELS`
+  (progress: "Harvesting labels (N langs)"). Best-effort; abort-aware.
+
+**Result.** A modeled archetype's features carry `{en:"Products", de:"Produkte", …}`.
+**Still pending — 3c:** `featuresForRole`/`resolveRoles` must MATCH against `labelsByLocale`
+(not just the primary `label`) for resolution to actually be language-agnostic. Until 3c,
+the alias set is captured but unused at resolve time.
+
+**Verified.** background + studio syntax OK; alignment core unit-tested (v445). Live
+multi-locale tab driving needs the loaded extension.
+
+**Touched.** `background.js` (`HARVEST_LOCALE_LABELS` + `_navigateBgTab`), `studio.js`
+(queue harvest step), `manifest.json`.
+
+---
+
+## v2.74.445 — Cross-locale feature alignment (language-agnostic resolution, slice 3a)
+
+**Date:** 2026-05-26
+**Decision by:** user ("continue" toward the language-agnostic approach). Pure core first;
+orchestration (3b) + resolution consumption (3c) next.
+
+**What shipped (`Core/siteMap.js`, pure + tested).** `alignFeaturesAcrossLocales(byLocale,
+{rules})` — given the SAME page enumerated in multiple languages (`{ en:feature[],
+de:feature[], … }`), fuses its features into ONE language-agnostic set:
+- **Match key is language-INVARIANT:** a navigation feature aligns by its DESTINATION
+  archetype (`templatePattern(href, rules)` — `/de/products` and `/en/products` collapse to
+  the same target); every other feature aligns by `kind|role|selector` (selectors aren't
+  translated). The varying visible text becomes a **`labelsByLocale`** alias set
+  (`{en:"Products", de:"Produkte", fr:"Produits"}`).
+- Partial features (present in only some locales) keep whatever labels they have;
+  single-locale features survive. Output: `{ ...baseFeature, labelsByLocale, locales[] }`.
+
+**Why.** Downstream role/goal matching can then hit ANY language's label (or the invariant
+key), so resolution stops depending on the captured language — the core of the
+language-agnostic approach. Builds directly on the per-archetype `exemplarByLocale` map
+(v2.74.444), which supplies the per-language URLs to enumerate.
+
+**Verified.** 7-assertion test: nav aligned by destination archetype across 3 languages,
+controls by selector, partial (en+de-only) feature keeps both, fr-only feature retained,
+4 distinct features, empty inputs → []. Syntax OK.
+
+**Next.** 3b — a background pass that, per modeled archetype, enumerates its
+`exemplarByLocale` URLs and attaches `labelsByLocale` to the Locale's features. 3c —
+`featuresForRole`/`resolveRoles` match against the alias set. Known nuance: two nav links
+to the same destination collapse to one aligned feature (label of the first wins).
+
+**Touched.** `Core/siteMap.js`, `manifest.json`.
+
+---
+
+## v2.74.444 — Capture the locale dimension per archetype (language-agnostic enabler)
+
+**Date:** 2026-05-26
+**Decision by:** user ("I'd like a language-agnostic approach, what can be added on the
+discovery layer") → chose option (1): make the locale axis a first-class captured dimension.
+
+**Rationale.** v2.74.443 collapsed `/en/x`, `/de/x` into one `/{locale}/x` archetype (right
+— same structure, selectors are locale-independent). But it discarded *which* languages
+exist. Recording them turns "which locale gets modeled" from arbitrary into a choice, and
+is the enabler for language-agnostic resolution (preferred-locale modeling now; cross-locale
+label harvest / structural-identity matching later).
+
+**What shipped (`Core/siteMap.js`, pure + tested).**
+- `localeFromUrl(url, rules)` — extracts the `{locale}` slot value from a URL via its
+  matching rule (`/de/products` + `/{locale}/products` → `de`).
+- `makeInstanceTracker(rules)` now records, per archetype, `locales[]` (sorted) +
+  `exemplarByLocale{ en:url, de:url, … }` (first concrete URL per language). `makeNode`
+  carries the fields; `mergeSiteMap` unions `locales` and keeps existing per-locale
+  exemplars while adding new ones.
+- `siteMapStats` rolls up the **Ground-level** language set: `locales[]` (union across
+  archetypes) + `defaultLocale` (most prevalent).
+- Non-localized sites → empty `locales`, no behavior change.
+
+**Surfaced.** studio + ground-view coverage lines show `🌐 N langs` when >1.
+
+**Verified.** 11-assertion test: per-archetype `locales`/`exemplarByLocale`, Ground rollup
++ `defaultLocale`, merge unions a new locale while preserving existing exemplars,
+non-localized → empty. Syntax OK (siteMap + studio + ground-view).
+
+**Next (not in this version).** Consume it: (a) preferred-locale exemplar in the Explore
+queue; (b) cross-locale alignment harvest → per-feature `{locale:label}` + canonical
+concept for text-agnostic resolution.
+
+**Touched.** `Core/siteMap.js`, `studio.js`, `Sidepanel/modes/ground-view.js`, `manifest.json`.
+
+---
+
 ## v2.74.443 — Collapse localized URLs into one archetype (`{locale}`)
 
 **Date:** 2026-05-26

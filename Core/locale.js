@@ -110,7 +110,11 @@ export function featuresForRole(model, role, { kind = null } = {}) {
 export function knownSelectors(model) {
   return Object.values(model?.features || {})
     .filter((f) => f && f.selector)
-    .map((f) => ({ label: f.label || '', role: f.a11yRole || f.kind, selector: f.selector, verified: !!f.selectorVerified }));
+    .map((f) => ({
+      label: f.label || '', role: f.a11yRole || f.kind, selector: f.selector, verified: !!f.selectorVerified,
+      // v2.74.447 — other-language labels (cross-locale harvest) so resolve matches any language.
+      aliases: f.labelsByLocale ? Object.values(f.labelsByLocale).filter((l) => l && l !== f.label) : [],
+    }));
 }
 
 /** Scroll offset to bring a feature into view (kills "viewport = canonical"). */
@@ -130,7 +134,7 @@ export function disclosureFor(model, triggerLabel) {
   let best = null;
   let bestScore = 0;
   for (const f of pool) {
-    const s = overlap(want, tokens(f.label));
+    const s = overlap(want, labelTokens(f));   // any-language trigger label
     if (s > bestScore) { bestScore = s; best = f; }
   }
   if (!best) return null;
@@ -160,6 +164,21 @@ function overlap(a, b) {
   return n;
 }
 
+// v2.74.447 — Language-agnostic label tokens: the primary label PLUS every harvested
+// locale label (labelsByLocale, from the cross-locale alignment). So a role/intent in
+// ANY language matches — "Suche" hits a feature whose primary label is "Search".
+function labelTokens(f) {
+  const toks = tokens(f && f.label);
+  const byLoc = f && f.labelsByLocale;
+  if (byLoc) {
+    const seen = new Set(toks);
+    for (const lbl of Object.values(byLoc)) {
+      for (const t of tokens(lbl)) if (!seen.has(t)) { seen.add(t); toks.push(t); }
+    }
+  }
+  return toks;
+}
+
 // Map role-name hints → the kind we'd expect to fill them. Role names are
 // head-final English compounds ("search-SUBMIT", "collection-CARD", "result-ITEM"),
 // so the LAST token decides the kind; earlier tokens are qualifiers. We check the
@@ -184,7 +203,7 @@ function kindAffinityForRole(role) {
 
 function matchScore(wantTokens, affinity, f) {
   let score = 0;
-  score += overlap(wantTokens, tokens(f.label)) * 2;       // label match is strong
+  score += overlap(wantTokens, labelTokens(f)) * 2;        // label match is strong (any language)
   score += overlap(wantTokens, tokens(f.a11yRole || '')); // a11y role token
   score += overlap(wantTokens, tokens(f.kind));            // literal kind word in the role name
   if (affinity && f.kind === affinity) score += 1.5;       // kind affinity bonus

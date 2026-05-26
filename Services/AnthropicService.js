@@ -2366,9 +2366,14 @@ Rules:
     if (Array.isArray(knownSelectors) && knownSelectors.length) {
       const block = knownSelectors.slice(0, 140).map(k => {
         const via = k?.via ? ` (revealed via "${String(k.via).slice(0, 30)}")` : '';
-        return `- "${String(k?.label ?? '').slice(0, 50)}" [${k?.role ?? '?'}]${via} => ${String(k?.selector ?? '').slice(0, 140)}`;
+        // v2.74.447 — other-language labels (cross-locale harvest): the SAME element's text
+        // in other languages, so a role/intent in any language matches this verified selector.
+        const aliases = Array.isArray(k?.aliases) && k.aliases.length
+          ? ` aka ${k.aliases.slice(0, 6).map(a => `"${String(a).slice(0, 30)}"`).join(' / ')}`
+          : '';
+        return `- "${String(k?.label ?? '').slice(0, 50)}" [${k?.role ?? '?'}]${aliases}${via} => ${String(k?.selector ?? '').slice(0, 140)}`;
       }).join('\n');
-      userText += `\n\nKNOWN VERIFIED SELECTORS (from page exploration — REUSE verbatim when a role matches one):\n${block}`;
+      userText += `\n\nKNOWN VERIFIED SELECTORS (from page exploration — REUSE verbatim when a role matches one, in ANY language via the "aka" aliases):\n${block}`;
     }
     // v2.74.415 — Site selector conventions, LEARNED from this Ground's verified
     // selectors across its Perspectives (OUTCOMES_SPEC § 6, the compounding asset). A

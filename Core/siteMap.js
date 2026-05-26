@@ -194,6 +194,69 @@ export function templatePattern(url, rules = null) {
   }
 }
 
+/**
+ * Given a URL and the corpus rules, return the value occupying the `{locale}` slot of
+ * its matching rule (e.g. /en/products + /{locale}/products → "en"), else null. Lets
+ * the builders record WHICH language each instance is, so a collapsed archetype keeps a
+ * per-locale exemplar map — the enabler for language-agnostic modeling (GROUND_SPEC § 7).
+ */
+export function localeFromUrl(url, rules) {
+  if (!rules || !rules.length) return null;
+  const matched = matchTemplate(url, rules);
+  if (!matched) return null;
+  const rp = ruleParts(matched);
+  if (!rp) return null;
+  const li = rp.segs.indexOf('{locale}');
+  if (li < 0) return null;
+  let u; try { u = new URL(url); } catch { return null; }
+  const segs = u.pathname.split('/').filter(Boolean);
+  return segs[li] ?? null;
+}
+
+/**
+ * Cross-locale alignment harvest (language-agnostic resolution, slice 3a). Given the
+ * SAME page enumerated in multiple languages, fuse its features into ONE language-
+ * agnostic set: match features across locales by a language-INVARIANT key (a nav link
+ * by its DESTINATION archetype — `/de/products` and `/en/products` collapse to the same
+ * target; everything else by `kind|role|selector`, which devs don't translate), and turn
+ * the varying visible text into a `labelsByLocale` alias set. Downstream role/goal
+ * matching can then hit ANY language's label (or use the invariant), so resolution stops
+ * depending on the captured language. Pure.
+ *
+ * @param {Object} byLocale  { en: feature[], de: feature[], … } — enumeratePage features
+ * @param {Object} opts      { rules } corpus template rules (to collapse localized nav hrefs)
+ * @returns {Array} aligned features: { ...baseFeature, labelsByLocale:{loc:label}, locales:[…] }
+ */
+export function alignFeaturesAcrossLocales(byLocale, { rules = null } = {}) {
+  const locales = Object.keys(byLocale || {});
+  if (!locales.length) return [];
+  const invariantKey = (f) => {
+    if (!f) return '';
+    if (f.kind === 'navigation' && f.href) {
+      try { return 'nav|' + templatePattern(f.href, rules); } catch { return 'nav|' + f.href; }
+    }
+    return [f.kind || '', f.a11yRole || '', f.selector || ''].join('|');   // selectors are locale-independent
+  };
+  const merged = new Map();   // invariantKey → { base, labelsByLocale }
+  for (const loc of locales) {
+    const feats = Array.isArray(byLocale[loc]) ? byLocale[loc] : [];
+    const seenThisLocale = new Set();   // first feature per key represents this locale
+    for (const f of feats) {
+      const k = invariantKey(f);
+      if (!k || seenThisLocale.has(k)) continue;
+      seenThisLocale.add(k);
+      let rec = merged.get(k);
+      if (!rec) { rec = { base: f, labelsByLocale: {} }; merged.set(k, rec); }
+      if (f && typeof f.label === 'string' && f.label.trim()) rec.labelsByLocale[loc] = f.label.trim();
+    }
+  }
+  const out = [];
+  for (const { base, labelsByLocale } of merged.values()) {
+    out.push({ ...base, labelsByLocale, locales: Object.keys(labelsByLocale).sort() });
+  }
+  return out;
+}
+
 function hostOf(url) { try { return new URL(url).host; } catch { return ''; } }
 
 /**
@@ -204,19 +267,22 @@ function hostOf(url) { try { return new URL(url).host; } catch { return ''; } }
  * building, `apply(nodes)` writes instanceCount (true distinct count), a capped
  * sample of ORIGINAL (navigable) URLs, and the exemplar (first URL seen) onto each node.
  */
-function makeInstanceTracker() {
-  const recs = new Map();   // nodeId → { set:Set<normUrl>, sample:string[], exemplar:string|null }
+function makeInstanceTracker(rules = null) {
+  const recs = new Map();   // nodeId → { set, sample, exemplar, byLocale:Map<locale,url> }
   return {
     note(nodeId, url) {
       if (!nodeId || !url) return;
       let rec = recs.get(nodeId);
-      if (!rec) { rec = { set: new Set(), sample: [], exemplar: null }; recs.set(nodeId, rec); }
+      if (!rec) { rec = { set: new Set(), sample: [], exemplar: null, byLocale: new Map() }; recs.set(nodeId, rec); }
       const norm = normalizePattern(url);
       if (!rec.set.has(norm)) {
         rec.set.add(norm);
         if (rec.sample.length < INSTANCE_SAMPLE_CAP) rec.sample.push(url);
       }
       if (!rec.exemplar) rec.exemplar = url;
+      // Language dimension: record one concrete URL per locale (first seen wins).
+      const loc = localeFromUrl(url, rules);
+      if (loc && !rec.byLocale.has(loc)) rec.byLocale.set(loc, url);
     },
     apply(nodes) {
       for (const [nid, rec] of recs) {
@@ -225,6 +291,10 @@ function makeInstanceTracker() {
         node.instances = rec.sample;
         node.instanceCount = rec.set.size;
         node.exemplarUrl = rec.exemplar;
+        if (rec.byLocale.size) {
+          node.locales = [...rec.byLocale.keys()].sort();
+          node.exemplarByLocale = Object.fromEntries(rec.byLocale);
+        }
       }
     },
   };
@@ -236,6 +306,7 @@ function makeNode(pattern, { status, name = null, localeId = null, pageType = nu
     id: archetypeId(pattern), urlPattern: pattern, localeId,
     name: name || pattern, goals: [], status, pageType, visitedAt,
     exemplarUrl: null, instances: [], instanceCount: 0,
+    locales: [], exemplarByLocale: {},   // language dimension (filled when a {locale} axis is present)
   };
 }
 
@@ -249,7 +320,7 @@ export function siteMapFromLocale(locale, { localeKey = null, rules = null } = {
   const nodes = {};
   const edges = [];
   if (!locale || !locale.url) return { nodes, edges };
-  const inst = makeInstanceTracker();
+  const inst = makeInstanceTracker(rules);
   const selfPattern = templatePattern(locale.url, rules);
   const selfId = archetypeId(selfPattern);
   const host = hostOf(locale.url);
@@ -293,7 +364,7 @@ export function siteMapFromCrawl(pages, { rules = null } = {}) {
   const nodes = {};
   const edges = [];
   const list = Array.isArray(pages) ? pages : [];
-  const inst = makeInstanceTracker();
+  const inst = makeInstanceTracker(rules);
   // Pass 1 — a node per crawled page ARCHETYPE (carries pageType + title).
   for (const p of list) {
     if (!p || !p.url) continue;
@@ -347,7 +418,7 @@ export function siteMapFromSitemap(urls) {
   const list = (Array.isArray(urls) ? urls : []).filter((u) => typeof u === 'string' && /^https?:/i.test(u));
   const templateRules = deriveTemplateRules(list);
   const nodes = {};
-  const inst = makeInstanceTracker();
+  const inst = makeInstanceTracker(templateRules);
   for (const u of list) {
     const pat = templatePattern(u, templateRules);
     const id = archetypeId(pat);
@@ -398,6 +469,10 @@ export function mergeSiteMap(existing, fresh) {
       exemplarUrl: cur.exemplarUrl || n.exemplarUrl || null,
       instances,
       instanceCount: Math.max(cur.instanceCount || 0, n.instanceCount || 0, instances.length),
+      // Language dimension: union the locale sets; keep existing per-locale exemplars
+      // (stable) and fill any the fresh contribution adds.
+      locales: [...new Set([...(cur.locales || []), ...(n.locales || [])])].sort(),
+      exemplarByLocale: { ...(n.exemplarByLocale || {}), ...(cur.exemplarByLocale || {}) },
     };
   }
   const seen = new Set(map.edges.map((e) => e.from + '->' + e.to + '|' + e.via));
@@ -416,12 +491,19 @@ export function mergeSiteMap(existing, fresh) {
 export function siteMapStats(map) {
   const ns = map && map.nodes ? Object.values(map.nodes) : [];
   let modeled = 0, discovered = 0, stub = 0, pages = 0, modeledPages = 0;
+  const localeCounts = {};   // locale → # of archetypes it appears on
   for (const n of ns) {
     const inst = n.instanceCount || 0;
     pages += inst;
     if (n.status === 'modeled') { modeled++; modeledPages += inst; }
     else if (n.status === 'discovered') discovered++;
     else stub++;
+    for (const l of (n.locales || [])) localeCounts[l] = (localeCounts[l] || 0) + 1;
   }
-  return { nodes: ns.length, modeled, discovered, stub, edges: map && map.edges ? map.edges.length : 0, pages, modeledPages };
+  // Ground-level language rollup: the site's locale set + the most prevalent as default.
+  const locales = Object.keys(localeCounts).sort();
+  const defaultLocale = locales.length
+    ? Object.entries(localeCounts).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))[0][0]
+    : null;
+  return { nodes: ns.length, modeled, discovered, stub, edges: map && map.edges ? map.edges.length : 0, pages, modeledPages, locales, defaultLocale };
 }

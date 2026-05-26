@@ -984,6 +984,18 @@ async function _writeLocaleCache(groundId, cacheKey, entry) {
   await chrome.storage.local.set({ [LOCALE_CACHE_KEY]: map });
 }
 
+// v2.74.446 — navigate a tab and resolve when it reports 'complete' (cross-locale
+// label harvest drives the queue's tab to each language's exemplar).
+const MAX_HARVEST_OTHER_LOCALES = 4;   // extra languages enumerated per archetype
+function _navigateBgTab(tabId, url, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    const to = setTimeout(() => { chrome.tabs.onUpdated.removeListener(l); reject(new Error('navigation timeout')); }, timeoutMs);
+    const l = (id, info) => { if (id === tabId && info.status === 'complete') { clearTimeout(to); chrome.tabs.onUpdated.removeListener(l); resolve(); } };
+    chrome.tabs.onUpdated.addListener(l);
+    chrome.tabs.update(tabId, { url }).catch((e) => { clearTimeout(to); chrome.tabs.onUpdated.removeListener(l); reject(e); });
+  });
+}
+
 // v2.74.413 — OUTCOMES slice 2: the ONE unified append-only stream (OUTCOMES_SPEC
 // § 1, GROUND_SPEC § 0.13). Authoring + runtime events land here once; the small
 // artifact rollups (Feature.health / Perspective.usage / Ground.conventions) are
@@ -1085,7 +1097,9 @@ async function _knownSelectorsForUrl(groundId, url) {
     feats
       .filter((f) => f?.selector && Object.prototype.hasOwnProperty.call(KIND_PRI, f.kind))
       .sort((a, b) => KIND_PRI[a.kind] - KIND_PRI[b.kind])
-      .forEach((f) => push({ label: f.label || '', role: f.a11yRole || f.kind, selector: f.selector }));
+      .forEach((f) => push({ label: f.label || '', role: f.a11yRole || f.kind, selector: f.selector,
+        // v2.74.447 — other-language labels (cross-locale harvest) so resolve matches any language.
+        aliases: f.labelsByLocale ? Object.values(f.labelsByLocale).filter((l) => l && l !== f.label) : [] }));
   } catch (e) { Logger.warn('background', `_knownSelectorsForUrl (locale) failed: ${e.message}`); }
 
   return out.length ? out : null;
@@ -4336,6 +4350,55 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ success: true, structure, cacheKey });
         } catch (err) {
           Logger.error('background', `EXPLORE_PAGE_STRUCTURE failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // v2.74.446 — Cross-locale label harvest (language-agnostic resolution, slice 3b).
+    // For a just-modeled archetype with multiple locales, enumerate its OTHER-language
+    // exemplars (read-only ENUMERATE_PAGE), align features across locales by their
+    // language-invariant key (SiteMap.alignFeaturesAcrossLocales), and attach the
+    // {locale:label} alias set onto the cached Locale's features. No LLM (enumerate is
+    // deterministic, alignment is pure). Driven by the studio Explore queue's background tab.
+    case 'HARVEST_LOCALE_LABELS': {
+      (async () => {
+        try {
+          const { tabId, groundId, exemplarUrl, exemplarByLocale = {} } = payload ?? {};
+          if (typeof tabId !== 'number' || !groundId || !exemplarUrl) { sendResponse({ success: false, error: 'tabId, groundId, exemplarUrl required' }); return; }
+          const localeKey = _normalizeUrlForPerspectiveCache(exemplarUrl);
+          const cached = await _readLocaleCache(groundId, localeKey);
+          const model = cached?.model;
+          if (!model?.features || !Object.keys(model.features).length) { sendResponse({ success: false, error: 'no cached Locale to enrich' }); return; }
+          const rules = (await _readSiteMap(groundId))?.templateRules || [];
+          const primaryLocale = SiteMap.localeFromUrl(exemplarUrl, rules) || 'primary';
+          const byLocale = { [primaryLocale]: Object.values(model.features) };
+
+          const others = Object.entries(exemplarByLocale)
+            .filter(([loc, url]) => loc !== primaryLocale && url && url !== exemplarUrl)
+            .slice(0, MAX_HARVEST_OTHER_LOCALES);
+          for (const [loc, url] of others) {
+            try {
+              await _navigateBgTab(tabId, url);
+              await new Promise(r => setTimeout(r, 1200));
+              try { await chrome.scripting.executeScript({ target: { tabId }, files: ['ContentScripts/contentScript.js'] }); } catch { /* */ }
+              const enr = await chrome.tabs.sendMessage(tabId, { type: 'ENUMERATE_PAGE' }, { frameId: 0 });
+              if (enr?.success && Array.isArray(enr.features)) byLocale[loc] = enr.features;
+            } catch (e) { Logger.warn('explore', `label harvest ${loc} failed (continuing): ${e.message}`); }
+          }
+
+          const aligned = SiteMap.alignFeaturesAcrossLocales(byLocale, { rules });
+          let enriched = 0;
+          for (const af of aligned) {
+            const mf = model.features[af.id];   // base feature is from the primary locale → same id
+            if (mf && af.labelsByLocale && Object.keys(af.labelsByLocale).length > 1) { mf.labelsByLocale = af.labelsByLocale; enriched++; }
+          }
+          if (enriched) await _writeLocaleCache(groundId, localeKey, { ...cached, model });
+          Logger.info('explore', `locale label harvest: ${Object.keys(byLocale).length} language(s), ${enriched} feature(s) enriched for ${localeKey}`);
+          sendResponse({ success: true, enriched, languages: Object.keys(byLocale) });
+        } catch (err) {
+          Logger.error('background', `HARVEST_LOCALE_LABELS failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();

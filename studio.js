@@ -3153,7 +3153,7 @@ async function _refreshGroundListImpl() {
       const coverageHtml = covTotal ? `
         <div class="sitemap-coverage" title="${cov.modeled} modeled · ${cov.discovered} discovered · ${cov.stub} stub of ${covTotal} archetypes">
           <div style="display:flex;height:6px;border-radius:3px;overflow:hidden;background:rgba(127,127,127,.18);margin:2px 0 4px">${covSeg(cov.modeled, '#3fb950')}${covSeg(cov.discovered, '#d29922')}${covSeg(cov.stub, '#6e7681')}</div>
-          <div style="font-size:11px;opacity:.75"><strong>${covPct}% modeled</strong> · ${cov.modeled}/${covTotal} archetypes · ${cov.edges} edge(s)${cov.pages > covTotal ? ` · ${cov.modeledPages}/${cov.pages} pages` : ''}</div>
+          <div style="font-size:11px;opacity:.75"><strong>${covPct}% modeled</strong> · ${cov.modeled}/${covTotal} archetypes · ${cov.edges} edge(s)${cov.pages > covTotal ? ` · ${cov.modeledPages}/${cov.pages} pages` : ''}${cov.locales?.length > 1 ? ` · 🌐 ${cov.locales.length} langs` : ''}</div>
         </div>` : '';
       smRow.innerHTML = `
       <div class="ground-section-head">
@@ -3673,7 +3673,7 @@ async function startExploreQueue(groundId) {
   const nodes = res?.siteMap?.nodes ? Object.values(res.siteMap.nodes) : [];
   const targets = nodes
     .filter(n => n.status !== 'modeled' && n.exemplarUrl && /^https?:/i.test(n.exemplarUrl))
-    .map(n => ({ url: n.exemplarUrl, name: n.name || n.urlPattern || n.exemplarUrl }));
+    .map(n => ({ url: n.exemplarUrl, name: n.name || n.urlPattern || n.exemplarUrl, exemplarByLocale: n.exemplarByLocale || {} }));
   if (!targets.length) { toast('No un-modeled archetypes with a navigable URL'); return; }
   if (!confirm(`Auto-Explore ${targets.length} archetype(s)? Opens a separate window (behind this one) and runs one Explore per template (~15–30s each → a few minutes total). Abort anytime; closing Studio pauses it (re-run to resume).`)) return;
 
@@ -3702,7 +3702,15 @@ async function startExploreQueue(groundId) {
         await _navigateStudioTab(tabId, t.url);
         await new Promise(r => setTimeout(r, 1500));   // settle (lazy content)
         const r = await new Promise(rs => chrome.runtime.sendMessage({ type: 'EXPLORE_PAGE_STRUCTURE', payload: { tabId, groundId } }, rs));
-        if (r?.success) done++; else failed++;
+        if (r?.success) {
+          done++;
+          // v2.74.446 — slice 3b: harvest other-language labels for this archetype
+          // (bounded, no LLM) so resolution is language-agnostic. Best-effort.
+          if (Object.keys(t.exemplarByLocale || {}).length > 1 && exploreQueueRunning.has(groundId)) {
+            render(`Harvesting labels (${Object.keys(t.exemplarByLocale).length} langs): ${t.name.slice(0, 44)}`);
+            try { await new Promise(rs => chrome.runtime.sendMessage({ type: 'HARVEST_LOCALE_LABELS', payload: { tabId, groundId, exemplarUrl: t.url, exemplarByLocale: t.exemplarByLocale } }, rs)); } catch { /* */ }
+          }
+        } else failed++;
       } catch { failed++; }
       await new Promise(r => setTimeout(r, 1200));      // rate-limit between archetypes
     }

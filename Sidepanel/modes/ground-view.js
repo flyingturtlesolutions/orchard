@@ -872,11 +872,12 @@ function _renderSiteMapHtml(siteMap) {
   // v2.74.442 — Coverage (slice 5): proportional modeled/discovered/stub bar + "% modeled".
   const total = nodes.length;
   const pct = total ? Math.round((modeled.length / total) * 100) : 0;
+  const localesCount = new Set(nodes.flatMap(n => n.locales || [])).size;
   const seg = (n, color) => (total && n) ? `<span style="display:inline-block;height:100%;width:${(n / total * 100).toFixed(1)}%;background:${color}"></span>` : '';
   const coverageHtml = total ? `
     <div class="sitemap-coverage" title="${modeled.length} modeled · ${discovered.length} discovered · ${stub.length} stub of ${total} archetypes">
       <div style="display:flex;height:6px;border-radius:3px;overflow:hidden;background:rgba(127,127,127,.18);margin:2px 0 4px">${seg(modeled.length, '#3fb950')}${seg(discovered.length, '#d29922')}${seg(stub.length, '#6e7681')}</div>
-      <div style="font-size:11px;opacity:.75"><strong>${pct}% modeled</strong> · ${modeled.length}/${total} archetypes · ${edges} edge(s)${pagesTotal > total ? ` · ~${pagesTotal} pages` : ''}</div>
+      <div style="font-size:11px;opacity:.75"><strong>${pct}% modeled</strong> · ${modeled.length}/${total} archetypes · ${edges} edge(s)${pagesTotal > total ? ` · ~${pagesTotal} pages` : ''}${localesCount > 1 ? ` · 🌐 ${localesCount} langs` : ''}</div>
     </div>` : '';
   // v2.74.439 — render stubs too (capped), so a sitemap-ingested ground shows its
   // known archetypes immediately instead of an empty list under "N stub".
