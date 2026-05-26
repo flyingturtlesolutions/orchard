@@ -3431,6 +3431,47 @@ function extractPageLinks() {
   return { success: true, links, url: location.href, title: document.title || '' };
 }
 
+/**
+ * v2.74.455 — Fetch a (typically same-origin) URL's text from THIS PAGE's context.
+ * Used by background.js to read a sitemap behind a Cloudflare/WAF bot-challenge: a
+ * service-worker fetch reliably 403s such a sitemap (no real navigation fingerprint, and
+ * the challenge JS can't run in a worker), but a fetch issued from a tab the browser has
+ * ALREADY loaded the site in is a genuine first-party request — it carries the user's
+ * cf_clearance cookie, the real UA/TLS fingerprint, and the Sec-Fetch-* headers, so
+ * Cloudflare serves it. Transparently gunzips a `.gz` sitemap (DecompressionStream exists
+ * in the page realm). Returns { ok, status, text } — the shape background.js adapts to
+ * SitemapService's injectable { text, status } fetcher.
+ *
+ * Same-origin only in practice: an MV3 content-script fetch is subject to the PAGE's CORS,
+ * so a cross-origin child sitemap would fail — acceptable (sitemaps keep children
+ * same-origin); the SW transport remains the fallback for those.
+ */
+async function fetchUrlText(url) {
+  const ACCEPT = 'application/xml,text/xml,application/xhtml+xml,text/html;q=0.9,*/*;q=0.8';
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow', credentials: 'include', headers: { Accept: ACCEPT } });
+    const status = res ? res.status : 0;
+    if (!res || !res.ok) return { ok: false, status, text: null };
+    const ct = res.headers.get('content-type') || '';
+    const isGz = /\.gz(\?|$)/i.test(url) || /application\/(x-)?gzip/i.test(ct) || /application\/octet-stream/i.test(ct);
+    if (isGz && res.body && typeof DecompressionStream !== 'undefined') {
+      try {
+        const stream = res.body.pipeThrough(new DecompressionStream('gzip'));
+        return { ok: true, status, text: await new Response(stream).text() };
+      } catch {
+        return { ok: false, status, text: null };   // not actually gzip / corrupt
+      }
+    }
+    return { ok: true, status, text: await res.text() };
+  } catch (e) {
+    return { ok: false, status: 0, text: null, error: e && e.message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // v2.74.395 — opts.includeContentBlocks → prepend a REPEATING CONTENT BLOCKS
 // section (for Resolve). Default off (agent walker path stays control-only).
 function handleDomSnapshotRich(prevSigs = [], opts = {}) {
@@ -5504,6 +5545,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       try { sendResponse(extractPageLinks()); }
       catch (e) { sendResponse({ success: false, links: [], error: e.message }); }
       return false;
+
+    // v2.74.455 — in-tab first-party fetch (sitemap behind a Cloudflare/WAF challenge).
+    case 'FETCH_URL_TEXT':
+      fetchUrlText(payload?.url).then(sendResponse).catch(e => sendResponse({ ok: false, status: 0, text: null, error: e.message }));
+      return true;   // async sendResponse
 
     // v2.74.396 — Resolve Tier-2 visual pick: normalized box → best-IoU element.
     case 'LOCATE_PICK':

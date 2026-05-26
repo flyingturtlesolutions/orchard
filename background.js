@@ -517,6 +517,60 @@ async function __waitForTabComplete(tabId, timeoutMs = 8000) {
 }
 
 /**
+ * v2.74.455 — Read a site's sitemap from an IN-TAB content-script context. A
+ * Cloudflare/WAF-gated sitemap 403s a service-worker fetch even when credentialed (the
+ * request lacks a real navigation's fingerprint and the challenge JS can't run in a
+ * worker). A tab navigated to the origin auto-solves the managed challenge, after which a
+ * content-script fetch is a genuine first-party request (carries cf_clearance + real
+ * UA/TLS fingerprint + Sec-Fetch-* headers) and Cloudflare serves the XML. This is the
+ * authoritative URL set that powers removal detection (drift §8) — a budgeted crawl can't
+ * prove a page is GONE — so it's worth a short-lived tab.
+ *
+ * Opens a background tab on `origin`, runs SitemapService's same walk (index fan-out,
+ * caps, origin filtering, block detection) over a content-script-backed fetcher, and
+ * ALWAYS closes the tab. Returns the fetchSitemapUrls result, or null on failure.
+ *
+ * @param {string} origin
+ * @param {() => boolean} [isAborted]
+ * @returns {Promise<object|null>}
+ */
+async function _fetchSitemapViaTab(origin, isAborted = () => false) {
+  let tab = null;
+  try { tab = await chrome.tabs.create({ url: origin, active: false }); }
+  catch (e) { Logger.warn('background', `sitemap in-tab: tab open failed: ${e.message}`); return null; }
+  const tabId = tab.id;
+  try {
+    await __waitForTabComplete(tabId, 15000);
+    // Settle: let Cloudflare's managed challenge auto-solve + reload to the real page.
+    await new Promise(r => setTimeout(r, 3000));
+    // Poll content-script readiness (re-injected at document_start on each navigation).
+    let ready = false;
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      if (isAborted()) return null;
+      try {
+        const pong = await chrome.tabs.sendMessage(tabId, { type: 'PING' });
+        if (pong?.ready || pong?.success) { ready = true; break; }
+      } catch { /* not injected yet — retry */ }
+      await new Promise(r => setTimeout(r, 400));
+    }
+    if (!ready) { Logger.warn('background', `sitemap in-tab: content script not ready on ${origin}`); return null; }
+    const tabFetch = async (url) => {
+      try {
+        const res = await chrome.tabs.sendMessage(tabId, { type: 'FETCH_URL_TEXT', payload: { url } });
+        return { text: res?.ok ? (res.text ?? null) : null, status: res?.status ?? 0 };
+      } catch { return { text: null, status: 0 }; }
+    };
+    return await SitemapService.fetchSitemapUrls(origin, { fetchText: tabFetch });
+  } catch (e) {
+    Logger.warn('background', `sitemap in-tab fetch failed: ${e.message}`);
+    return null;
+  } finally {
+    try { await chrome.tabs.remove(tabId); } catch { /* best-effort */ }
+  }
+}
+
+/**
  * v2.72.72 — Execute a CLICK action with navigation/new-tab observation.
  *
  * A CLICK can produce three outcomes:
@@ -5268,16 +5322,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               const origin = g?.url ? new URL(g.url).origin : null;
               if (origin && discoveryAbortFlags.get(groundId) !== true) {
                 chrome.runtime.sendMessage({ type: 'DISCOVERY_PROGRESS', payload: { groundId, visited: 0, total: 0, currentUrl: 'Reading sitemap.xml…', currentPageType: 'sitemap' } }).catch(() => {});
-                const { urls, count, blocked, status } = await SitemapService.fetchSitemapUrls(origin);
+                let { urls, count, blocked, status, reason } = await SitemapService.fetchSitemapUrls(origin);
+                // v2.74.455 — the SW fetch was blocked by a bot-challenge (Cloudflare 403, or a
+                // 200 "Just a moment…" interstitial). Retry over an IN-TAB content-script fetch:
+                // a tab on the origin auto-solves the challenge and the content-script fetch rides
+                // the user's first-party session, so the sitemap is reachable. This recovers the
+                // authoritative URL set — the source of removal detection (drift §8) that the
+                // crawl alone can't provide.
+                if (blocked && !urls.length && discoveryAbortFlags.get(groundId) !== true) {
+                  Logger.info('background', `sitemap[${groundId}] SW fetch BLOCKED (${reason}) — retrying via in-tab fetch…`);
+                  chrome.runtime.sendMessage({ type: 'DISCOVERY_PROGRESS', payload: { groundId, visited: 0, total: 0, currentUrl: 'Reading sitemap.xml (in-tab)…', currentPageType: 'sitemap' } }).catch(() => {});
+                  const viaTab = await _fetchSitemapViaTab(origin, () => discoveryAbortFlags.get(groundId) === true);
+                  if (viaTab && Array.isArray(viaTab.urls) && viaTab.urls.length) {
+                    ({ urls, count, blocked, status, reason } = viaTab);
+                    Logger.info('background', `sitemap[${groundId}] in-tab fetch recovered ${count} URL(s)`);
+                  } else if (viaTab) {
+                    ({ blocked, status, reason } = viaTab);   // still blocked — keep the diagnostic
+                  }
+                }
                 sitemapUrls = Array.isArray(urls) ? urls : [];
                 if (urls.length) {
                   await _mergeSiteMapForGround(groundId, SiteMap.siteMapFromSitemap(urls));
                   Logger.info('background', `sitemap seeded ${count} stub archetype URL(s) for ${groundId}`);
                 } else if (blocked) {
-                  // v2.74.452 — a Cloudflare/WAF challenge 403'd the sitemap fetch even though
-                  // it's credentialed: corpus templating (locale + slug folding) is unavailable
-                  // this run, so the crawl degrades to single-URL templating only. Surface WHY.
-                  Logger.warn('background', `sitemap[${groundId}] BLOCKED (HTTP ${status}) — corpus templating (locale/slug folding) unavailable; crawl-only this run`);
+                  // v2.74.452/455 — a Cloudflare/WAF challenge blocked the sitemap even via the
+                  // in-tab fetch: removal detection is unavailable this run (the crawl can't prove
+                  // absence). Templating still works — siteMapFromCrawl derives locale/slug rules
+                  // from the crawl's own URLs (v453). Surface WHY so it's never a silent degrade.
+                  Logger.warn('background', `sitemap[${groundId}] BLOCKED (${reason}) — even in-tab fetch could not reach it; removal detection off, templating from crawl corpus this run`);
                 }
               }
             } catch (e) { Logger.warn('background', `sitemap ingestion skipped: ${e.message}`); }

@@ -17,7 +17,7 @@
  * an empty set and the crawl proceeds crawl-only.
  *
  * @module Services/SitemapService
- * @version 2.74.452
+ * @version 2.74.455
  */
 
 import { Logger } from '../Core/Logger.js';
@@ -93,10 +93,27 @@ function _extractLocs(xml) {
 /** A sitemap-index lists child sitemaps (vs a urlset listing pages). */
 const _isIndex = (xml) => /<sitemapindex[\s>]/i.test(xml);
 
+/** Has the shape of a real sitemap (urlset / sitemapindex / a <loc>). */
+const _looksLikeSitemapXml = (text) => /<(urlset|sitemapindex|loc)[\s>]/i.test(text || '');
+
+/**
+ * v2.74.455 — A bot-challenge / WAF interstitial served at the sitemap path. Cloudflare's
+ * managed challenge frequently returns HTTP **200** with an HTML "Just a moment…" body (not
+ * a 403), so a status-only block check misses it — the old detector then silently degraded
+ * to crawl-only. Match the well-known challenge markers AND the generic "we asked for XML
+ * and got an HTML document" case.
+ */
+function _looksLikeChallenge(text) {
+  if (!text) return false;
+  const t = String(text).slice(0, 4000);
+  if (/just a moment|cf-browser-verification|challenge-platform|cdn-cgi\/challenge|enable javascript and cookies|attention required|are you a robot|access denied/i.test(t)) return true;
+  return /<html[\s>]/i.test(t) && !_looksLikeSitemapXml(t);   // HTML where a sitemap was expected
+}
+
 /** Discover candidate sitemap locations: robots.txt directives, then conventions. */
-async function _discoverSitemapLocations(origin) {
+async function _discoverSitemapLocations(origin, fetchText) {
   const locs = [];
-  const { text: robots } = await _fetchText(origin + '/robots.txt');   // v2.74.452 — { text, status }
+  const { text: robots } = await fetchText(origin + '/robots.txt');   // v2.74.452 — { text, status }
   if (robots) {
     const re = /^\s*sitemap:\s*(\S+)/gim;
     let m;
@@ -111,46 +128,60 @@ async function _discoverSitemapLocations(origin) {
 
 /**
  * Fetch the same-origin page URL set for a site from its sitemap(s).
+ *
+ * v2.74.455 — the HTTP transport is INJECTABLE. By default it uses the module's own
+ * service-worker fetch (`_fetchText`), but a Cloudflare-fronted sitemap reliably 403s an
+ * SW fetch even when credentialed (the request lacks a real navigation's fingerprint and
+ * the challenge JS can't run in a worker). The caller can pass a `fetchText` backed by an
+ * in-TAB content-script fetch — a real first-party browser context that auto-solves the
+ * challenge — to reach those sitemaps. Same orchestration (index walk, caps, origin
+ * filtering, block detection) over either transport.
+ *
  * @param {string} origin  e.g. "https://example.com"
- * @returns {Promise<{ urls:string[], count:number, truncated:boolean, sitemaps:number, source:string|null }>}
+ * @param {{ fetchText?: (url:string)=>Promise<{text:string|null,status:number}> }} [opts]
+ * @returns {Promise<{ urls:string[], count:number, truncated:boolean, sitemaps:number, source:string|null, blocked:boolean, status:number, reason:string|null }>}
  */
-export async function fetchSitemapUrls(origin) {
+export async function fetchSitemapUrls(origin, { fetchText = _fetchText } = {}) {
   let normOrigin;
   try { normOrigin = new URL(origin).origin; }
-  catch { return { urls: [], count: 0, truncated: false, sitemaps: 0, source: null }; }
+  catch { return { urls: [], count: 0, truncated: false, sitemaps: 0, source: null, blocked: false, status: 0, reason: null }; }
 
-  const seeds = await _discoverSitemapLocations(normOrigin);
+  const seeds = await _discoverSitemapLocations(normOrigin, fetchText);
   const pageUrls = new Set();
   const seen = new Set();
   const queue = [...seeds];
   let fetched = 0;
   let truncated = false;
   let blockStatus = 0;   // v2.74.452 — a non-OK status (403/503/…) on a sitemap doc → likely a bot-challenge
+  let softBlock = false; // v2.74.455 — an OK (200) response that's a challenge/HTML page, not XML
 
   while (queue.length && pageUrls.size < MAX_URLS && fetched < MAX_CHILD_SITEMAPS) {
     const sm = queue.shift();
     if (seen.has(sm)) continue;
     seen.add(sm);
     fetched++;
-    const { text: xml, status } = await _fetchText(sm);
+    const { text: xml, status } = await fetchText(sm);
     if (!xml) { if (status >= 400) blockStatus = status; continue; }
     const locs = _extractLocs(xml);
     if (_isIndex(xml)) {
       for (const loc of locs) if (!seen.has(loc)) queue.push(loc);   // child sitemaps
-    } else {
+    } else if (locs.length) {
       for (const loc of locs) {
         if (pageUrls.size >= MAX_URLS) { truncated = true; break; }
         try { if (new URL(loc).origin === normOrigin) pageUrls.add(loc); } catch { /* skip junk */ }
       }
+    } else if (_looksLikeChallenge(xml)) {
+      softBlock = true;   // v2.74.455 — 200 OK but a bot-challenge / HTML interstitial (no <loc>)
     }
   }
   if (queue.length) truncated = true;   // hit the child/url cap with sitemaps still pending
 
-  // v2.74.452 — explicit "blocked" signal: zero URLs AND every doc fetch was a >=400 (no
-  // OK XML reached). Lets the caller surface WHY corpus templating is dark (vs a silent
-  // crawl-only degrade) — the field test on a Cloudflare-fronted site (pixabay) returned 0
-  // because anonymous fetches were 403'd; the credentialed fetch above is the fix.
-  const blocked = pageUrls.size === 0 && blockStatus >= 400;
-  Logger.info('SitemapService', `sitemap[${normOrigin}]: ${pageUrls.size} page URL(s) from ${fetched} sitemap doc(s)${truncated ? ' (truncated)' : ''}${blocked ? ` — BLOCKED (HTTP ${blockStatus}; bot-challenge?)` : ''}`);
-  return { urls: [...pageUrls], count: pageUrls.size, truncated, sitemaps: fetched, source: seeds[0] || null, blocked, status: blockStatus };
+  // v2.74.452/455 — explicit "blocked" signal: zero URLs reached AND the fetch hit a
+  // bot-challenge — either a >=400 status (403 "Forbidden") OR an OK 200 that returned a
+  // challenge/HTML interstitial instead of XML. Lets the caller surface WHY corpus
+  // templating is dark AND decide to retry over an in-tab transport (background.js).
+  const blocked = pageUrls.size === 0 && (blockStatus >= 400 || softBlock);
+  const reason = !blocked ? null : (blockStatus >= 400 ? `HTTP ${blockStatus}` : 'challenge/HTML (200)');
+  Logger.info('SitemapService', `sitemap[${normOrigin}]: ${pageUrls.size} page URL(s) from ${fetched} sitemap doc(s)${truncated ? ' (truncated)' : ''}${blocked ? ` — BLOCKED (${reason}; bot-challenge?)` : ''}`);
+  return { urls: [...pageUrls], count: pageUrls.size, truncated, sitemaps: fetched, source: seeds[0] || null, blocked, status: blockStatus, reason };
 }
