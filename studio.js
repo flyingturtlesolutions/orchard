@@ -3144,9 +3144,17 @@ async function _refreshGroundListImpl() {
             <span class="sitemap-node-name" title="${escAttr(n.urlPattern)}">${escHtml(n.name || shortPath(n.urlPattern))}</span>
             <span class="sitemap-node-meta">${escHtml(shortPath(n.urlPattern))}${n.instanceCount > 1 ? ` · ×${n.instanceCount}` : ''}${n.goals?.length ? ` · ${n.goals.length} goal(s)` : ''}</span>
           </div>`;
-      const summary = smStats
-        ? `${smStats.modeled} modeled · ${smStats.discovered} discovered${smStats.stub ? ` · ${smStats.stub} stub` : ''} · ${smStats.edges} edge(s)${smStats.pages > smStats.nodes ? ` · ~${smStats.pages} pages` : ''}`
-        : '';
+      // v2.74.442 — Coverage (slice 5): proportional bar (modeled/discovered/stub) +
+      // "% modeled" headline, so a Ground's modeling progress reads at a glance.
+      const cov = smStats || { nodes: 0, modeled: 0, discovered: 0, stub: 0, edges: 0, pages: 0, modeledPages: 0 };
+      const covTotal = cov.nodes || 0;
+      const covPct = covTotal ? Math.round((cov.modeled / covTotal) * 100) : 0;
+      const covSeg = (n, color) => (covTotal && n) ? `<span style="display:inline-block;height:100%;width:${(n / covTotal * 100).toFixed(1)}%;background:${color}"></span>` : '';
+      const coverageHtml = covTotal ? `
+        <div class="sitemap-coverage" title="${cov.modeled} modeled · ${cov.discovered} discovered · ${cov.stub} stub of ${covTotal} archetypes">
+          <div style="display:flex;height:6px;border-radius:3px;overflow:hidden;background:rgba(127,127,127,.18);margin:2px 0 4px">${covSeg(cov.modeled, '#3fb950')}${covSeg(cov.discovered, '#d29922')}${covSeg(cov.stub, '#6e7681')}</div>
+          <div style="font-size:11px;opacity:.75"><strong>${covPct}% modeled</strong> · ${cov.modeled}/${covTotal} archetypes · ${cov.edges} edge(s)${cov.pages > covTotal ? ` · ${cov.modeledPages}/${cov.pages} pages` : ''}</div>
+        </div>` : '';
       smRow.innerHTML = `
       <div class="ground-section-head">
         <span class="ground-section-label">Site Map</span>
@@ -3158,7 +3166,7 @@ async function _refreshGroundListImpl() {
       <div class="ground-section-body" id="sitemap-body-${ground.id}">
         ${nodes.length === 0
           ? `<span class="empty-state small">No site map yet — <strong>Explore</strong> a page to sketch the territory: the current page becomes a <em>modeled</em> node and every same-site nav destination a <em>discovered</em> node + edge.</span>`
-          : `<div class="sitemap-summary">${escHtml(summary)}</div>
+          : `${coverageHtml}
              <div class="sitemap-nodes">${modeled.map(nodeRow).join('')}${discovered.slice(0, 20).map(nodeRow).join('')}${discovered.length > 20 ? `<div class="empty-state small">+${discovered.length - 20} more discovered — see JSON</div>` : ''}${stub.slice(0, 25).map(nodeRow).join('')}${stub.length > 25 ? `<div class="empty-state small">+${stub.length - 25} more stub — see JSON</div>` : ''}</div>`
         }
       </div>
@@ -3629,14 +3637,18 @@ async function startDiscovery(groundId) {
 // ─── Explore queue (Completeness slice 4) ────────────────────────────────────
 //
 // Auto-Explore every un-modeled archetype → modeled. Studio-driven (not a
-// background worker): it opens ONE dedicated background tab, then for each
-// archetype navigates the tab to that archetype's exemplar URL and reuses the
-// existing EXPLORE_PAGE_STRUCTURE handler (which builds + caches the Locale and
+// background worker): it opens ONE dedicated UNFOCUSED window, then for each
+// archetype navigates that window's tab to the archetype's exemplar URL and reuses
+// the existing EXPLORE_PAGE_STRUCTURE handler (which builds + caches the Locale and
 // merges siteMapFromLocale → the node becomes `modeled`). Rate-limited; Abortable;
 // resumable across runs (each run re-derives the not-yet-modeled set, so closing
-// Studio merely pauses — re-click ▶ Model to continue). Background tab ⇒ the
-// Explore runs without screenshots (planner/affordances use DOM only) — the
-// trade-off for not hijacking the user's active tab.
+// Studio merely pauses — re-click ▶ Model to continue).
+//
+// v2.74.442 — a SEPARATE unfocused window (not a background tab in the user's
+// window): the queue tab is then the ACTIVE/visible tab of its own window, so it
+// renders + loads lazy content AND screenshots work (captureVisibleTab needs the
+// active tab) — closing the focused-vs-unfocused capture gap — without hijacking
+// the user's working tab. (A window does briefly appear behind theirs.)
 const exploreQueueRunning = new Set();   // groundIds with a live queue (also the abort flag)
 
 function _navigateStudioTab(tabId, url, timeoutMs = 20000) {
@@ -3663,7 +3675,7 @@ async function startExploreQueue(groundId) {
     .filter(n => n.status !== 'modeled' && n.exemplarUrl && /^https?:/i.test(n.exemplarUrl))
     .map(n => ({ url: n.exemplarUrl, name: n.name || n.urlPattern || n.exemplarUrl }));
   if (!targets.length) { toast('No un-modeled archetypes with a navigable URL'); return; }
-  if (!confirm(`Auto-Explore ${targets.length} archetype(s)? Opens a background tab and runs one Explore per template (~15–30s each → a few minutes total). Abort anytime; closing Studio pauses it (re-run to resume).`)) return;
+  if (!confirm(`Auto-Explore ${targets.length} archetype(s)? Opens a separate window (behind this one) and runs one Explore per template (~15–30s each → a few minutes total). Abort anytime; closing Studio pauses it (re-run to resume).`)) return;
 
   const panel = document.getElementById(`exq-panel-${groundId}`);
   const render = (msg, cls = '') => {
@@ -3675,17 +3687,21 @@ async function startExploreQueue(groundId) {
 
   exploreQueueRunning.add(groundId);
   render(`Starting — ${targets.length} archetype(s)…`);
-  let tab = null, done = 0, failed = 0;
+  let win = null, tabId = null, done = 0, failed = 0;
   try {
-    tab = await chrome.tabs.create({ url: 'about:blank', active: false });
+    // Separate, unfocused window → its tab is active/visible (renders lazy content +
+    // captureVisibleTab works) without taking over the user's current tab.
+    win = await chrome.windows.create({ url: 'about:blank', focused: false, type: 'normal', width: 1280, height: 900 });
+    tabId = win?.tabs?.[0]?.id ?? null;
+    if (tabId == null) throw new Error('could not open a window for the Explore queue');
     for (let i = 0; i < targets.length; i++) {
       if (!exploreQueueRunning.has(groundId)) break;   // aborted
       const t = targets[i];
       render(`Modeling ${i + 1}/${targets.length}: ${t.name.slice(0, 56)}`);
       try {
-        await _navigateStudioTab(tab.id, t.url);
+        await _navigateStudioTab(tabId, t.url);
         await new Promise(r => setTimeout(r, 1500));   // settle (lazy content)
-        const r = await new Promise(rs => chrome.runtime.sendMessage({ type: 'EXPLORE_PAGE_STRUCTURE', payload: { tabId: tab.id, groundId } }, rs));
+        const r = await new Promise(rs => chrome.runtime.sendMessage({ type: 'EXPLORE_PAGE_STRUCTURE', payload: { tabId, groundId } }, rs));
         if (r?.success) done++; else failed++;
       } catch { failed++; }
       await new Promise(r => setTimeout(r, 1200));      // rate-limit between archetypes
@@ -3697,7 +3713,7 @@ async function startExploreQueue(groundId) {
     if (panel) panel.innerHTML = `<span class="discovery-error">${escHtml(e?.message ?? 'Explore queue failed')}</span>`;
   } finally {
     exploreQueueRunning.delete(groundId);
-    if (tab?.id != null) { try { await chrome.tabs.remove(tab.id); } catch { /* */ } }
+    if (win?.id != null) { try { await chrome.windows.remove(win.id); } catch { /* */ } }
     refreshGroundList().catch(() => {});
   }
 }

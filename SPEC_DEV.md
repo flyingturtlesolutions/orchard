@@ -4051,6 +4051,35 @@ locale-capture.js` (matchedGoal in the grounded-intent card), `manifest.json`.
 
 ---
 
+## v2.74.442 — Explore queue → separate window + coverage UI (slice 5)
+
+**Date:** 2026-05-26
+**Decision by:** user ("yes and continue slice 5").
+
+**1. Explore queue runs in a separate UNFOCUSED window** (`studio.js`). Was a background
+tab in the user's window → hidden ⇒ Chrome throttled rendering + suspended
+`IntersectionObserver` (lazy/infinite-scroll content never loaded) AND `captureVisibleTab`
+was skipped (no screenshots → DOM-only poke-planning + affordances). Now `chrome.windows
+.create({ focused:false })`: the queue tab is the ACTIVE/visible tab of its own window, so
+it renders + loads lazy content and screenshots work — closing the focused-vs-unfocused
+capture gap — without hijacking the user's tab (a window briefly appears behind theirs).
+Cleanup closes the window (`chrome.windows.remove`). `chrome.windows` needs no extra
+permission. If `captureVisibleTab` still fails on an unfocused window, the handler's
+existing try/catch degrades gracefully to DOM-only (≥ the old behavior).
+
+**2. Coverage UI (slice 5)** — studio Site Map section + ground-view inline viewer now
+render a proportional **modeled / discovered / stub** bar (green/amber/grey, widths = share
+of archetypes) + a **"X% modeled"** headline (`M/N archetypes · E edges · MP/P pages`),
+replacing the plain text summary. Reads `siteMapStats` (`modeledPages`/`pages` already
+provided). Inline styles (no CSS-file dependency). Makes a Ground's modeling progress
+legible at a glance — the completeness arc's scoreboard.
+
+**Verified.** studio + ground-view syntax OK.
+
+**Touched.** `studio.js`, `Sidepanel/modes/ground-view.js`, `manifest.json`.
+
+---
+
 ## v2.74.441 — Completeness slice 4: Explore queue (auto-model every archetype)
 
 **Date:** 2026-05-26
