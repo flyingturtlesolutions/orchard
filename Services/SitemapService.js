@@ -17,7 +17,7 @@
  * an empty set and the crawl proceeds crawl-only.
  *
  * @module Services/SitemapService
- * @version 2.74.455
+ * @version 2.74.456
  */
 
 import { Logger } from '../Core/Logger.js';
@@ -154,6 +154,7 @@ export async function fetchSitemapUrls(origin, { fetchText = _fetchText } = {}) 
   let truncated = false;
   let blockStatus = 0;   // v2.74.452 — a non-OK status (403/503/…) on a sitemap doc → likely a bot-challenge
   let softBlock = false; // v2.74.455 — an OK (200) response that's a challenge/HTML page, not XML
+  let sawValidXml = false; // v2.74.456 — did ANY fetched doc actually look like a sitemap?
 
   while (queue.length && pageUrls.size < MAX_URLS && fetched < MAX_CHILD_SITEMAPS) {
     const sm = queue.shift();
@@ -162,6 +163,7 @@ export async function fetchSitemapUrls(origin, { fetchText = _fetchText } = {}) 
     fetched++;
     const { text: xml, status } = await fetchText(sm);
     if (!xml) { if (status >= 400) blockStatus = status; continue; }
+    if (_looksLikeSitemapXml(xml)) sawValidXml = true;
     const locs = _extractLocs(xml);
     if (_isIndex(xml)) {
       for (const loc of locs) if (!seen.has(loc)) queue.push(loc);   // child sitemaps
@@ -176,12 +178,22 @@ export async function fetchSitemapUrls(origin, { fetchText = _fetchText } = {}) 
   }
   if (queue.length) truncated = true;   // hit the child/url cap with sitemaps still pending
 
-  // v2.74.452/455 — explicit "blocked" signal: zero URLs reached AND the fetch hit a
-  // bot-challenge — either a >=400 status (403 "Forbidden") OR an OK 200 that returned a
-  // challenge/HTML interstitial instead of XML. Lets the caller surface WHY corpus
-  // templating is dark AND decide to retry over an in-tab transport (background.js).
-  const blocked = pageUrls.size === 0 && (blockStatus >= 400 || softBlock);
-  const reason = !blocked ? null : (blockStatus >= 400 ? `HTTP ${blockStatus}` : 'challenge/HTML (200)');
+  // v2.74.452/455/456 — explicit "blocked" signal: zero URLs reached AND a sitemap doc was
+  // fetched but unusable. Three flavors:
+  //   • blockStatus >= 400  — a 403/503 etc. (anonymous bot-challenge)
+  //   • softBlock           — an OK 200 whose BODY is a challenge/HTML interstitial (has text)
+  //   • unreadable          — fetched ≥1 doc, 0 URLs, and NEVER saw valid sitemap XML. This is
+  //     the case that bit pixabay: the credentialed SW fetch of sitemap.xml.gz returns a 200
+  //     bot-challenge whose body ISN'T gzip, so _fetchText's DecompressionStream throws and
+  //     returns { text:null, status:200 } — null text with status < 400, which the first two
+  //     checks both miss. (Also covers network errors / empty 200s.) Without this the in-tab
+  //     retry never fired. Lets the caller surface WHY templating is dark AND retry in-tab.
+  const unreadable = fetched > 0 && pageUrls.size === 0 && !sawValidXml;
+  const blocked = pageUrls.size === 0 && (blockStatus >= 400 || softBlock || unreadable);
+  const reason = !blocked ? null
+    : blockStatus >= 400 ? `HTTP ${blockStatus}`
+    : softBlock ? 'challenge/HTML (200)'
+    : 'unreadable (no valid XML; gz/challenge?)';
   Logger.info('SitemapService', `sitemap[${normOrigin}]: ${pageUrls.size} page URL(s) from ${fetched} sitemap doc(s)${truncated ? ' (truncated)' : ''}${blocked ? ` — BLOCKED (${reason}; bot-challenge?)` : ''}`);
   return { urls: [...pageUrls], count: pageUrls.size, truncated, sitemaps: fetched, source: seeds[0] || null, blocked, status: blockStatus, reason };
 }
