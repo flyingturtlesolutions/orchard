@@ -1103,7 +1103,10 @@ async function _mergeSiteMapForGround(groundId, contribution) {
     map[groundId] = SiteMap.mergeSiteMap(map[groundId] ?? null, contribution);
     await chrome.storage.local.set({ [SITEMAP_CACHE_KEY]: map });
     const s = SiteMap.siteMapStats(map[groundId]);
-    Logger.info('explore', `siteMap[${groundId}]: ${s.modeled} modeled · ${s.discovered} discovered · ${s.edges} edge(s)`);
+    // v2.74.462 — include `stub` (sitemap-only archetypes the crawl hasn't reached). It was
+    // already computed by siteMapStats but omitted here, so the sitemap's contribution
+    // (e.g. pixabay's ~2,500 stubs) was invisible in the log.
+    Logger.info('explore', `siteMap[${groundId}]: ${s.modeled} modeled · ${s.discovered} discovered · ${s.stub} stub · ${s.edges} edge(s)`);
   } catch (e) { Logger.warn('background', `siteMap merge failed: ${e.message}`); }
 }
 
