@@ -16,7 +16,7 @@
 
 import { installGlobalErrorHandlers } from './Core/ErrorCapture.js';
 import { isDerivationStale, effectiveDescription } from './Core/groundDerivation.js';
-import { siteMapCapabilities } from './Core/siteMap.js';   // v2.74.465 — site capability catalog
+import { siteMapCapabilities, matchSiteCapabilities } from './Core/siteMap.js';   // v2.74.465/467 — site capability catalog + intent match
 // v2.74.188 — Install global error + unhandledrejection handlers BEFORE
 // any other module-init runs, so an error in a downstream import is
 // still captured by the Logger and surfaces in the Logs tab.
@@ -3164,19 +3164,30 @@ async function _refreshGroundListImpl() {
       // is modeled") to answer "what does the modeled territory let me DO".
       const caps = smMap ? siteMapCapabilities(smMap) : { capabilities: [], totals: { distinct: 0 } };
       const CAP_SHOWN = 12;
-      const capRow = (c) => `
+      // v2.74.467 — each row carries an "open" link to the archetype's exemplar (the "go there"
+      // action) and a per-row meta line; the same renderer serves the default prevalence list
+      // AND the live intent-ranked results (matchSiteCapabilities returns the same shape).
+      const capRow = (c) => {
+        const ex = (c.archetypes.find(a => a.exemplarUrl) || {}).exemplarUrl || '';
+        const meta = [c.count > 1 ? `×${c.count}` : '', c.pageTypes.join(', ')].filter(Boolean).join(' · ');
+        return `
           <div class="sitemap-node" title="${escAttr(c.archetypes.map(a => shortPath(a.urlPattern)).join('\n'))}">
             <span class="sitemap-node-status">★</span>
             <span class="sitemap-node-name">${escHtml(c.goal)}</span>
-            <span class="sitemap-node-meta">${c.count > 1 ? `×${c.count}` : ''}${c.pageTypes.length ? `${c.count > 1 ? ' · ' : ''}${escHtml(c.pageTypes.join(', '))}` : ''}</span>
+            <span class="sitemap-node-meta">${escHtml(meta)}${ex ? ` · <a href="${escAttr(ex)}" target="_blank" rel="noopener" title="Open ${escAttr(ex)}">↗</a>` : ''}</span>
           </div>`;
+      };
+      const capListHtml = (list, isDefault) => list.length
+        ? list.map(capRow).join('') + ((isDefault && caps.capabilities.length > CAP_SHOWN) ? `<div class="empty-state small">+${caps.capabilities.length - CAP_SHOWN} more — see JSON</div>` : '')
+        : `<div class="empty-state small">No capability matches that intent.</div>`;
       const capabilitiesHtml = caps.totals.distinct ? `
         <div class="ground-section-head" style="margin-top:8px;border-top:1px solid rgba(127,127,127,.18);padding-top:6px">
           <span class="ground-section-label">Can do</span>
           <span class="ground-section-count">${caps.totals.distinct}</span>
           <button class="btn-secondary tiny" data-action="json-capabilities" data-gid="${ground.id}" title="View the full site capability catalog (goals × archetypes) as JSON">{ }</button>
         </div>
-        <div class="sitemap-nodes">${caps.capabilities.slice(0, CAP_SHOWN).map(capRow).join('')}${caps.capabilities.length > CAP_SHOWN ? `<div class="empty-state small">+${caps.capabilities.length - CAP_SHOWN} more — see JSON</div>` : ''}</div>` : '';
+        <input type="text" id="cap-intent-${ground.id}" placeholder="What do you want to do? (type to rank)" autocomplete="off" style="width:100%;box-sizing:border-box;margin:2px 0 4px;font-size:12px;padding:3px 6px" />
+        <div class="sitemap-nodes" id="cap-results-${ground.id}">${capListHtml(caps.capabilities.slice(0, CAP_SHOWN), true)}</div>` : '';
       smRow.innerHTML = `
       <div class="ground-section-head">
         <span class="ground-section-label">Site Map</span>
@@ -3193,6 +3204,19 @@ async function _refreshGroundListImpl() {
         }
       </div>
       <div class="explore-queue-panel hidden" id="exq-panel-${ground.id}"></div>`;
+      // v2.74.467 — live intent ranking: type → matchSiteCapabilities re-ranks the "Can do"
+      // list; empty input restores the default prevalence-ordered catalog. Pure client-side,
+      // no LLM. Attached here (inside the block) so caps/capListHtml/CAP_SHOWN are in scope.
+      const capInput = smRow.querySelector(`#cap-intent-${ground.id}`);
+      const capResults = smRow.querySelector(`#cap-results-${ground.id}`);
+      if (capInput && capResults) {
+        capInput.addEventListener('input', () => {
+          const q = capInput.value.trim();
+          capResults.innerHTML = q
+            ? capListHtml(matchSiteCapabilities(q, caps, { limit: CAP_SHOWN }), false)
+            : capListHtml(caps.capabilities.slice(0, CAP_SHOWN), true);
+        });
+      }
     }
     smRow.querySelector('[data-action="explore-queue"]')?.addEventListener('click', () => startExploreQueue(ground.id));
     smRow.querySelector('[data-action="json-sitemap"]')?.addEventListener('click', () => {
