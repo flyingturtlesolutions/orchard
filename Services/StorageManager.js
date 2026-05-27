@@ -1348,6 +1348,22 @@ export class StorageManager {
   // actions" walk rawJson directly (the pre-Pass-14 behavior).
   //
   // Pure function over (fragment) — no side effects.
+  /**
+   * Pick the `updatedAt` to persist. On a remote (sync) apply — `opts.fromRemote` — preserve the
+   * incoming record's own `updatedAt` so a just-pulled record does NOT look locally-dirty (which
+   * would re-push it: the pull→push ping-pong, escalating across devices). For local authoring
+   * (the default) stamp the current time. Backward-compatible: no opts → always Date.now().
+   * @param {{ updatedAt?: unknown }} record
+   * @param {{ fromRemote?: boolean }} [opts]
+   * @returns {number}
+   * @private
+   */
+  static #persistedUpdatedAt(record, opts) {
+    const incoming = Number(record?.updatedAt);
+    if (opts?.fromRemote && Number.isFinite(incoming) && incoming > 0) return incoming;
+    return Date.now();
+  }
+
   static #migrateFragmentShape(fragment) {
     if (!fragment || typeof fragment !== 'object') return fragment;
     if ('produces' in fragment) {
@@ -1357,7 +1373,7 @@ export class StorageManager {
     return fragment;
   }
 
-  static async saveFragment(fragment) {
+  static async saveFragment(fragment, opts = {}) {
     if (!fragment?.id || !fragment?.groundId) {
       throw new Error('saveFragment requires { id, groundId }');
     }
@@ -1372,7 +1388,7 @@ export class StorageManager {
     // is name/description/pre/post/params/rawJson — that's the Fragment
     // contract. Internals are opaque.
     const migrated = StorageManager.#migrateFragmentShape(fragment);
-    const toSave = { ...migrated, updatedAt: Date.now() };
+    const toSave = { ...migrated, updatedAt: StorageManager.#persistedUpdatedAt(migrated, opts) };
     await maybeWritePartitionPrimary('fragment', toSave);
     // v2.74.119 — Serialized index add.
     const indexKey = `fragments:index:${migrated.groundId}`;
@@ -1559,7 +1575,7 @@ export class StorageManager {
     };
   }
 
-  static async saveAnalysis(analysis) {
+  static async saveAnalysis(analysis, opts = {}) {
     if (!analysis?.id || !analysis?.groundId) {
       throw new Error('saveAnalysis requires { id, groundId }');
     }
@@ -1574,7 +1590,7 @@ export class StorageManager {
     // somehow still carry legacy `operations` field; ensures persisted
     // records are always in new shape.
     const migrated = StorageManager.#migrateAnalysisShape(analysis);
-    const toSave = { ...migrated, updatedAt: Date.now() };
+    const toSave = { ...migrated, updatedAt: StorageManager.#persistedUpdatedAt(migrated, opts) };
     await maybeWritePartitionPrimary('analysis', toSave);
     await StorageManager.#set({
       [`analyses:${analysis.id}`]: toSave,
@@ -1732,7 +1748,7 @@ export class StorageManager {
     };
   }
 
-  static async saveObservation(observation) {
+  static async saveObservation(observation, opts = {}) {
     if (!observation?.id || !observation?.groundId) {
       throw new Error('saveObservation requires { id, groundId }');
     }
@@ -1744,7 +1760,7 @@ export class StorageManager {
     // new shape directly, but anything bypassing the form (JSON modal,
     // direct API, migration tool) gets canonicalized here.
     const migrated = StorageManager.#migrateObservationShape(observation);
-    const toSave = { ...migrated, updatedAt: Date.now() };
+    const toSave = { ...migrated, updatedAt: StorageManager.#persistedUpdatedAt(migrated, opts) };
     await maybeWritePartitionPrimary('observation', toSave);
     // v2.74.119 — Serialized index add.
     const indexKey = `observations:index:${migrated.groundId}`;
@@ -1834,7 +1850,7 @@ export class StorageManager {
     };
   }
 
-  static async saveAssertion(assertion) {
+  static async saveAssertion(assertion, opts = {}) {
     if (!assertion?.id || !assertion?.groundId) {
       throw new Error('saveAssertion requires { id, groundId }');
     }
@@ -1858,7 +1874,7 @@ export class StorageManager {
       authoredBy,
       authoredAt,
       createdAt: assertion.createdAt ?? now,
-      updatedAt: now,
+      updatedAt: StorageManager.#persistedUpdatedAt(assertion, opts),
     };
     await maybeWritePartitionPrimary('assertion', toSave);
     await StorageManager.#set({
@@ -1975,7 +1991,7 @@ export class StorageManager {
     };
   }
 
-  static async savePerspective(perspective) {
+  static async savePerspective(perspective, opts = {}) {
     if (!perspective?.id || !perspective?.groundId) {
       throw new Error('savePerspective requires { id, groundId }');
     }
@@ -2001,7 +2017,7 @@ export class StorageManager {
       authoredBy,
       authoredAt,
       createdAt: perspective.createdAt ?? now,
-      updatedAt: now,
+      updatedAt: StorageManager.#persistedUpdatedAt(perspective, opts),
     };
     await maybeWritePartitionPrimary('perspective', toSave);
     await StorageManager.#set({
@@ -2079,7 +2095,7 @@ export class StorageManager {
   // Save semantics: last-write-wins. Cross-perspective sharing (multiple
   // Perspectives referencing the same UID) gets one canonical record.
 
-  static async saveLandmark(landmark) {
+  static async saveLandmark(landmark, opts = {}) {
     if (!landmark?.uid)      throw new Error('saveLandmark requires { uid }');
     if (!landmark?.groundId) throw new Error('saveLandmark requires { groundId }');
     const existing = await StorageManager.getLandmark(landmark.uid);
@@ -2107,7 +2123,7 @@ export class StorageManager {
     const merged = {
       ...landmark,
       createdAt : existing?.createdAt ?? landmark.createdAt ?? now,
-      updatedAt : now,
+      updatedAt : StorageManager.#persistedUpdatedAt(landmark, opts),
       lifecycle : landmark.lifecycle ?? existing?.lifecycle ?? 'fresh',
     };
     await maybeWritePartitionPrimary('landmark', merged);
@@ -2319,7 +2335,7 @@ export class StorageManager {
 
   // ── Strategies ───────────────────────────────────────────────────────────
 
-  static async saveStrategy(strategy) {
+  static async saveStrategy(strategy, opts = {}) {
     if (!strategy?.id || !strategy?.groundId) {
       throw new Error('saveStrategy requires { id, groundId }');
     }
@@ -2335,7 +2351,7 @@ export class StorageManager {
     const indexKey = `strategies:index:${migrated.groundId}`;
     await StorageManager.#addToIndex(indexKey, migrated.id);
     await StorageManager.#set({
-      [`strategies:${migrated.id}`]: { ...migrated, updatedAt: Date.now() },
+      [`strategies:${migrated.id}`]: { ...migrated, updatedAt: StorageManager.#persistedUpdatedAt(migrated, opts) },
     });
     Logger.info('StorageManager', `Strategy saved: ${migrated.id} (${migrated.name ?? 'unnamed'}) on ground ${migrated.groundId}`);
   }
@@ -2435,7 +2451,7 @@ export class StorageManager {
   // listWorkflows() returns [] on a missing index and authoring builds the
   // index lazily on first save.
 
-  static async saveWorkflow(workflow) {
+  static async saveWorkflow(workflow, opts = {}) {
     if (!workflow?.id) throw new Error('saveWorkflow requires { id }');
     // v2.74.119 — Serialized index add.
     const indexKey = 'workflows:index';
@@ -2450,7 +2466,7 @@ export class StorageManager {
       steps     : Array.isArray(workflow.steps) ? workflow.steps : [],
       params    : normalizeStrategyParams(workflow.params),
       createdAt : workflow.createdAt ?? existing?.createdAt ?? Date.now(),
-      updatedAt : Date.now(),
+      updatedAt : StorageManager.#persistedUpdatedAt(workflow, opts),
     };
     await StorageManager.#set({ [`workflows:${workflow.id}`]: record });
     Logger.info('StorageManager', `Workflow saved: ${record.id} (${record.name ?? 'unnamed'})`);

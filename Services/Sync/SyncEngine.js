@@ -294,33 +294,36 @@ async function applyRemoteObject(path, envelope, etag) {
   const body = unwrapEnvelope(envelope);
   const { kind, id } = meta;
 
+  // fromRemote: preserve the pulled record's updatedAt (don't bump to now) so bootstrap's
+  // isLocalRecordDirty doesn't see it as locally-newer and re-push it (the pull→push ping-pong).
+  const fromRemote = { fromRemote: true };
   switch (kind) {
     case 'ground':
-      await StorageManager.saveGround(/** @type {any} */ (body));
+      await StorageManager.saveGround(/** @type {any} */ (body));   // preserves updatedAt already
       break;
     case 'fragment':
-      await StorageManager.saveFragment(/** @type {any} */ (body));
+      await StorageManager.saveFragment(/** @type {any} */ (body), fromRemote);
       break;
     case 'observation':
-      await StorageManager.saveObservation(/** @type {any} */ (body));
+      await StorageManager.saveObservation(/** @type {any} */ (body), fromRemote);
       break;
     case 'analysis':
-      await StorageManager.saveAnalysis(/** @type {any} */ (body));
+      await StorageManager.saveAnalysis(/** @type {any} */ (body), fromRemote);
       break;
     case 'assertion':
-      await StorageManager.saveAssertion(/** @type {any} */ (body));
+      await StorageManager.saveAssertion(/** @type {any} */ (body), fromRemote);
       break;
     case 'perspective':
-      await StorageManager.savePerspective(/** @type {any} */ (body));
+      await StorageManager.savePerspective(/** @type {any} */ (body), fromRemote);
       break;
     case 'landmark':
-      await StorageManager.saveLandmark(/** @type {any} */ (body));
+      await StorageManager.saveLandmark(/** @type {any} */ (body), fromRemote);
       break;
     case 'strategy':
-      await StorageManager.saveStrategy(/** @type {any} */ (body));
+      await StorageManager.saveStrategy(/** @type {any} */ (body), fromRemote);
       break;
     case 'workflow':
-      await StorageManager.saveWorkflow(/** @type {any} */ (body));
+      await StorageManager.saveWorkflow(/** @type {any} */ (body), fromRemote);
       break;
     case 'locale': {
       const rec = /** @type {any} */ (body);
