@@ -93,3 +93,64 @@ export function synthesizeCapabilityDraft(goal, locale, { groundId = null, url =
     runnable: actionable > 0,
   };
 }
+
+/**
+ * Turn a draft (from synthesizeCapabilityDraft) into the persistable Fragment + Strategy records
+ * the execution store expects (slice 2/3). PURE — the caller mints the ids and does the saves.
+ *
+ * Shape contract (verified against StorageManager + CapabilityAPI):
+ *  - Fragment: { id, groundId, name, description, rawJson:JSON.stringify(actions), params:[names],
+ *    preconditions/postconditions envelopes, healthStatus } — rawJson actions use {{PARAM}} which
+ *    TemplateWalker substitutes from the fragment's paramBindings.
+ *  - Strategy: { id, groundId, name, goal, params:[{name,kind:'scalar',type,required}],
+ *    fragmentSteps:[{type:'fragment',fragmentId,paramBindings}] }. saveStrategy's
+ *    #migrateStrategyShape lifts fragmentSteps → implementations envelope; status becomes 'ready'
+ *    because there's ≥1 executable (fragment) node. Each strategy param flows into the fragment
+ *    via a {kind:'strategy_param', name} binding.
+ *
+ * @param {object} draft  output of synthesizeCapabilityDraft
+ * @param {{groundId:string, fragmentId:string, strategyId:string}} ids
+ * @returns {{ fragment:object, strategy:object } | null}
+ */
+export function buildCapabilityRecords(draft, { groundId, fragmentId, strategyId } = {}) {
+  if (!draft || !groundId || !fragmentId || !strategyId) return null;
+  const now = Date.now();
+  const paramNames = (Array.isArray(draft.params) ? draft.params : []).map((p) => p.name);
+
+  const fragment = {
+    id: fragmentId,
+    groundId,
+    name: `${draft.name} — steps`.slice(0, 80),
+    description: draft.goal || '',
+    rawJson: JSON.stringify(Array.isArray(draft.actions) ? draft.actions : []),
+    params: paramNames,
+    preconditions: { match: 'all', conditions: [] },
+    postconditions: { match: 'all', conditions: [] },
+    healthStatus: 'untested',
+    lastExecutedAt: null,
+    synthesized: true,                 // provenance: auto-authored from a goal, not hand-built
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const paramBindings = {};
+  for (const name of paramNames) paramBindings[name] = { kind: 'strategy_param', name };
+
+  const strategy = {
+    id: strategyId,
+    groundId,
+    name: draft.name,
+    goal: draft.goal || '',
+    params: (Array.isArray(draft.params) ? draft.params : []).map((p) => ({
+      name: p.name, kind: 'scalar', type: 'string', required: p.required !== false,
+    })),
+    fragmentSteps: [{ type: 'fragment', fragmentId, paramBindings }],
+    aliases: [],
+    outcomeSignal: null,
+    synthesized: true,                 // provenance marker (a draft for review, not vetted)
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  return { fragment, strategy };
+}

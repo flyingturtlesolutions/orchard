@@ -28,6 +28,7 @@ import { installGlobalErrorHandlers } from './Core/ErrorCapture.js';
 import * as Locale          from './Core/locale.js';   // v2.74.397 — Perspective/Locale builder + query API
 import * as Outcomes           from './Core/outcomes.js';    // v2.74.413 — OutcomeEvent stream + rollups
 import * as SiteMap            from './Core/siteMap.js';     // v2.74.431 — Ground siteMap (GROUND_SPEC § 7)
+import * as CapabilitySynth    from './Core/capabilitySynth.js';  // v2.74.471 — synthesize capability from a goal
 import { ExecutionEngine }    from './Services/ExecutionEngine.js';
 import { StorageManager }     from './Services/StorageManager.js';
 import { executeWorkflow }    from './Services/WorkflowExecutor.js';
@@ -4595,6 +4596,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ success: true, matches, source });
         } catch (err) {
           Logger.error('background', `MATCH_CAPABILITIES failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // v2.74.471 — Synthesize a runnable capability (Fragment + Strategy) from a MODELED goal
+    // (invocation arc, slice 2/3). Resolve the archetype's Locale → find the goal → draft an
+    // action procedure (Core/capabilitySynth) → persist a Fragment + Strategy → return the
+    // capabilityId. The result is a DRAFT for review (selectors/values/order may need
+    // refinement); it's `runnable` (Strategy status 'ready') iff it has ≥1 real action.
+    // Payload: { groundId, archetypeId, goal } → { success, capabilityId, name, runnable, warnings, actionCount }.
+    case 'SYNTHESIZE_CAPABILITY': {
+      (async () => {
+        try {
+          const { groundId = null, archetypeId = null, goal: goalLabel = null } = payload ?? {};
+          if (!groundId || !archetypeId || !goalLabel) { sendResponse({ success: false, error: 'groundId, archetypeId, goal required' }); return; }
+          const sm = await _readSiteMap(groundId);
+          const node = sm?.nodes?.[archetypeId];
+          if (!node) { sendResponse({ success: false, error: 'archetype not found in siteMap' }); return; }
+          if (!node.localeId) { sendResponse({ success: false, error: 'archetype not modeled yet (no Locale) — Explore it first' }); return; }
+          const pm = await _readLocaleCache(groundId, node.localeId);
+          const model = pm?.model;
+          const goal = model?.goals ? Object.values(model.goals).find((g) => g && g.label === goalLabel) : null;
+          if (!goal) { sendResponse({ success: false, error: `goal "${goalLabel}" not found in the archetype's Locale` }); return; }
+          const url = node.exemplarUrl || (Array.isArray(node.instances) ? node.instances[0] : null) || null;
+          const draft = CapabilitySynth.synthesizeCapabilityDraft(goal, model, { groundId, url });
+          const records = CapabilitySynth.buildCapabilityRecords(draft, { groundId, fragmentId: crypto.randomUUID(), strategyId: crypto.randomUUID() });
+          if (!records) { sendResponse({ success: false, error: 'could not build capability records' }); return; }
+          await StorageManager.saveFragment(records.fragment);
+          await StorageManager.saveStrategy(records.strategy);
+          Logger.info('background', `synthesized capability ${records.strategy.id} from goal "${goalLabel.slice(0, 50)}" — ${draft.actions.length} action(s), runnable=${draft.runnable}${draft.warnings.length ? ` (${draft.warnings.length} warning(s))` : ''}`);
+          sendResponse({ success: true, capabilityId: records.strategy.id, name: draft.name, runnable: draft.runnable, warnings: draft.warnings, actionCount: draft.actions.length });
+        } catch (err) {
+          Logger.error('background', `SYNTHESIZE_CAPABILITY failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();
