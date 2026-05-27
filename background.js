@@ -30,6 +30,7 @@ import * as Outcomes           from './Core/outcomes.js';    // v2.74.413 — Ou
 import * as SiteMap            from './Core/siteMap.js';     // v2.74.431 — Ground siteMap (GROUND_SPEC § 7)
 import * as CapabilitySynth    from './Core/capabilitySynth.js';  // v2.74.471 — synthesize capability from a goal
 import * as ChromeHoist        from './Core/chromeHoist.js';  // v2.74.480 — hoist recurring chrome off Locales → Ground.chrome
+import * as Workflows          from './Core/workflows.js';   // v2.74.488 — cross-Locale workflows (partOf) over the siteMap
 import { ExecutionEngine }    from './Services/ExecutionEngine.js';
 import { StorageManager }     from './Services/StorageManager.js';
 import { executeWorkflow }    from './Services/WorkflowExecutor.js';
@@ -4836,6 +4837,74 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ success: true, capabilityId: records.strategy.id, name: draft.name, runnable: draft.runnable, warnings: draft.warnings, actionCount: draft.actions.length });
         } catch (err) {
           Logger.error('background', `SYNTHESIZE_CAPABILITY failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // v2.74.493 — Cross-Locale Workflows (GROUND_SPEC partOf): candidate multi-page journeys
+    // to a target archetype, as workflow skeletons (workflowsTo). Read-only — feeds the studio
+    // picker + lets the user choose a path before BUILD_WORKFLOW.
+    case 'GET_WORKFLOWS': {
+      (async () => {
+        try {
+          const { groundId = null, target = null, from = null, maxPaths = 8, maxDepth = 6 } = payload ?? {};
+          if (!groundId || !target) { sendResponse({ success: false, error: 'groundId, target required' }); return; }
+          const sm = await _readSiteMap(groundId);
+          if (!sm?.nodes?.[target]) { sendResponse({ success: false, error: 'target archetype not in siteMap' }); return; }
+          const skeletons = Workflows.workflowsTo(sm, target, { from, maxPaths, maxDepth });
+          sendResponse({ success: true, target, count: skeletons.length, workflows: skeletons });
+        } catch (err) {
+          Logger.error('background', `GET_WORKFLOWS failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // v2.74.493 — Build a RUNNABLE cross-Locale workflow: resolve the path's per-step Locales,
+    // stitch nav + per-step goals (buildWorkflowDraft), and persist as a Fragment + Strategy the
+    // execution engine runs (buildCapabilityRecords). `path` (archetype ids) overrides the
+    // shortest auto-path to `target`; `goals` maps archetypeId → goal label (omitted steps are
+    // pass-through navigation). Best-effort DRAFT — review before running.
+    case 'BUILD_WORKFLOW': {
+      (async () => {
+        try {
+          const { groundId = null, target = null, from = null, path = null, goals = {}, name = null } = payload ?? {};
+          if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
+          const sm = await _readSiteMap(groundId);
+          if (!sm?.nodes) { sendResponse({ success: false, error: 'no siteMap for this ground' }); return; }
+          // Resolve the skeleton: explicit path, else shortest path to target.
+          let skeleton = null;
+          if (Array.isArray(path) && path.length) {
+            if (!path.every((id) => sm.nodes[id])) { sendResponse({ success: false, error: 'path contains an unknown archetype' }); return; }
+            skeleton = Workflows.workflowFromPath(sm, path);
+          } else if (target) {
+            const found = Workflows.pathsTo(sm, target, { from });
+            if (!found.length) { sendResponse({ success: false, error: `no path to "${target}" in the siteMap` }); return; }
+            skeleton = Workflows.workflowFromPath(sm, found[0]);
+          } else {
+            sendResponse({ success: false, error: 'target or path required' }); return;
+          }
+          // Resolve each step's Locale (modeled steps only; others are pass-through).
+          const localesByArchetype = {};
+          for (const step of skeleton.steps) {
+            const node = sm.nodes[step.archetypeId];
+            if (node?.localeId) {
+              const pm = await _readLocaleCache(groundId, node.localeId);
+              if (pm?.model) localesByArchetype[step.archetypeId] = pm.model;
+            }
+          }
+          const draft = Workflows.buildWorkflowDraft(skeleton, { localesByArchetype, goals, name });
+          const records = CapabilitySynth.buildCapabilityRecords(draft, { groundId, fragmentId: crypto.randomUUID(), strategyId: crypto.randomUUID() });
+          if (!records) { sendResponse({ success: false, error: 'could not build workflow records' }); return; }
+          await StorageManager.saveFragment(records.fragment);
+          await StorageManager.saveStrategy(records.strategy);
+          Logger.info('background', `built workflow ${records.strategy.id} "${draft.name.slice(0, 50)}" — ${skeleton.steps.length} step(s), ${draft.actions.length} action(s), runnable=${draft.runnable}${draft.warnings.length ? ` (${draft.warnings.length} warning(s))` : ''}`);
+          sendResponse({ success: true, capabilityId: records.strategy.id, name: draft.name, runnable: draft.runnable, steps: draft.steps, warnings: draft.warnings, actionCount: draft.actions.length });
+        } catch (err) {
+          Logger.error('background', `BUILD_WORKFLOW failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();
