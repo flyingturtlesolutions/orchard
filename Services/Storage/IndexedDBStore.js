@@ -64,6 +64,18 @@ export async function getCachedObject(path) {
   );
 }
 
+/** @returns {Promise<string[]>} */
+export async function listCachedObjectPaths() {
+  return /** @type {Promise<string[]>} */ (
+    idbRequest('objects', 'readonly', (os) => os.getAllKeys())
+  );
+}
+
+/** @param {string} path */
+export async function removeCachedObject(path) {
+  await idbRequest('objects', 'readwrite', (os) => os.delete(path));
+}
+
 /**
  * @typedef {Object} OutboxEntry
  * @property {string} path

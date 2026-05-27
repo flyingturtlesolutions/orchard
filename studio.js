@@ -3746,7 +3746,11 @@ $('btn-cancel-ground').addEventListener('click', () => closeGroundForm());
 $('btn-save-ground').addEventListener('click', saveGroundFromForm);
 
 async function deleteGround(id) {
+  await new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'SYNC_BRIDGE', kind: 'ground', id, action: 'deleted' }, () => resolve());
+  });
   await StorageManager.deleteGround(id);
+  await cloudMsg('RUN_SYNC');
   broadcastStorageChanged('ground', id, 'deleted');
   expandedGrounds.delete(id);
   toast('Ground deleted');

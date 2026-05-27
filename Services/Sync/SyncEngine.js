@@ -22,6 +22,8 @@ import {
   getPendingConflicts,
   listOutboxEntries,
   putCachedObject,
+  removeCachedObject,
+  listCachedObjectPaths,
   removeOutboxEntries,
   setLastSyncToken,
   setPendingConflicts,
@@ -113,6 +115,115 @@ export async function enqueueRecordWrite(kind, record, opts = {}) {
       await enqueueSyncWrite(m.path, m.envelope, { expectedEtag: '*', groundId });
     }
   }
+}
+
+/**
+ * @param {import('../Storage/StoragePaths.js').SyncKind} kind
+ * @param {Record<string, unknown>} record
+ * @param {{ orchardUserId?: string }} [opts]
+ */
+export async function enqueueRecordDelete(kind, record, opts = {}) {
+  if (!(await isHybridSyncActive())) return;
+
+  const path = logicalPathForRecord(kind, record);
+  if (!path) return;
+
+  const cached = await getCachedObject(path);
+  await enqueueSyncWrite(path, cached?.envelope ?? null, {
+    op: 'delete',
+    expectedEtag: cached?.etag ?? '*',
+    groundId: typeof record.groundId === 'string'
+      ? record.groundId
+      : (kind === 'ground' ? String(record.id) : undefined),
+  });
+
+}
+
+/**
+ * Rebuild and enqueue ground manifest after a local delete (call after StorageManager delete).
+ * @param {string} groundId
+ * @param {{ orchardUserId?: string }} [opts]
+ */
+export async function enqueueGroundManifestSync(groundId, opts = {}) {
+  if (!(await isHybridSyncActive()) || !groundId) return;
+
+  const manifests = await rebuildRefs(groundId, opts);
+  for (const m of manifests) {
+    await enqueueSyncWrite(m.path, m.envelope, { expectedEtag: '*', groundId });
+  }
+}
+
+/**
+ * @param {string} groundId
+ * @param {{ orchardUserId?: string }} [opts]
+ */
+export async function enqueueGroundTreeDelete(groundId, opts = {}) {
+  if (!(await isHybridSyncActive()) || !groundId) return;
+
+  const prefix = `workspace/grounds/${groundId}/`;
+  const paths = new Set(await listCachedObjectPaths());
+  paths.add(`${prefix}ground.json`);
+
+  for (const path of paths) {
+    if (path.startsWith(prefix)) {
+      const cached = await getCachedObject(path);
+      await enqueueSyncWrite(path, cached?.envelope ?? null, {
+        op: 'delete',
+        expectedEtag: cached?.etag ?? '*',
+        groundId,
+      });
+    }
+  }
+}
+
+/**
+ * @param {string} path
+ * @param {string} etag
+ */
+async function applyRemoteDelete(path) {
+  const meta = recordMetaFromPath(path);
+  if (!meta) {
+    await removeCachedObject(path);
+    return null;
+  }
+
+  const { kind, id } = meta;
+  if (await localRecordExists(kind, id)) {
+    switch (kind) {
+      case 'ground':
+        await StorageManager.deleteGround(id);
+        break;
+      case 'fragment':
+        await StorageManager.deleteFragment(id);
+        break;
+      case 'observation':
+        await StorageManager.deleteObservation(id);
+        break;
+      case 'analysis':
+        await StorageManager.deleteAnalysis(id);
+        break;
+      case 'assertion':
+        await StorageManager.deleteAssertion(id);
+        break;
+      case 'perspective':
+        await StorageManager.deletePerspective(id);
+        break;
+      case 'landmark':
+        await StorageManager.deleteLandmark(id);
+        break;
+      case 'strategy':
+        await StorageManager.deleteStrategy(id);
+        break;
+      case 'workflow':
+        await StorageManager.deleteWorkflow(id);
+        break;
+      default:
+        break;
+    }
+  }
+
+  await removeCachedObject(path);
+  return { kind, id, groundId: meta.groundId, deleted: true };
 }
 
 /**
@@ -272,6 +383,23 @@ async function pushOutbox() {
 
   let pushed = 0;
 
+  if (deleteEntries.length) {
+    Logger.info('SyncEngine', `push: ${deleteEntries.length} delete(s), ${putEntries.length} put(s)`);
+  }
+
+  // Tombstones first — a failed manifest PUT must not block delete propagation.
+  for (const entry of deleteEntries) {
+    try {
+      await deleteCloudObject(entry.path);
+      await removeOutboxEntries([entry.path]);
+      await removeCachedObject(entry.path);
+      pushed += 1;
+      Logger.info('SyncEngine', `pushed delete ${entry.path}`);
+    } catch (err) {
+      Logger.warn('SyncEngine', `delete failed ${entry.path}: ${err.message}`);
+    }
+  }
+
   for (let i = 0; i < putEntries.length; i += MAX_BATCH) {
     const chunk = putEntries.slice(i, i + MAX_BATCH);
     const items = chunk.map((e) => ({
@@ -301,16 +429,6 @@ async function pushOutbox() {
       } else {
         throw e;
       }
-    }
-  }
-
-  for (const entry of deleteEntries) {
-    try {
-      await deleteCloudObject(entry.path);
-      await removeOutboxEntries([entry.path]);
-      pushed += 1;
-    } catch (err) {
-      Logger.warn('SyncEngine', `delete failed ${entry.path}: ${err.message}`);
     }
   }
 
@@ -350,44 +468,73 @@ async function handleConflict(conflict) {
 }
 
 async function pullChanges() {
-  const since = await getLastSyncToken();
-  const feed = await listCloudChanges(since || undefined);
-  const changes = feed.changes || [];
   const session = await getCloudSession();
-  if (changes.length === 0) {
-    Logger.info('SyncEngine', `pull: 0 changes (orchardUserId=${session?.orchardUserId || 'none'}, since=${since || 'start'})`);
-    if (feed.nextToken) await setLastSyncToken(feed.nextToken);
-    return { pulled: 0, applied: [], remoteChangeCount: 0 };
-  }
-
+  let since = await getLastSyncToken();
   const applied = [];
   let skippedCached = 0;
-  for (const change of changes) {
-    if (!change.path || change.path.endsWith('/_manifest.json')) continue;
+  let totalRemote = 0;
+  let pages = 0;
 
-    const cached = await getCachedObject(change.path);
-    if (cached?.etag && change.etag && cached.etag === change.etag) {
-      const meta = recordMetaFromPath(change.path);
-      if (meta && await localRecordExists(meta.kind, meta.id)) {
-        skippedCached += 1;
-        continue;
+  while (pages < 20) {
+    const feed = await listCloudChanges(since || undefined);
+    const changes = feed.changes || [];
+    pages += 1;
+
+    if (changes.length === 0) {
+      if (pages === 1) {
+        Logger.info('SyncEngine', `pull: 0 changes (orchardUserId=${session?.orchardUserId || 'none'}, since=${since || 'start'})`);
       }
+      if (feed.nextToken && feed.nextToken !== since) {
+        await setLastSyncToken(feed.nextToken);
+      }
+      break;
     }
 
-    const { envelope, etag } = await fetchCloudObjectRaw(change.path);
-    const result = await applyRemoteObject(change.path, envelope, etag || change.etag || '');
-    if (result) applied.push(result);
+    totalRemote += changes.length;
+
+    for (const change of changes) {
+      if (!change.path || change.path.endsWith('/_manifest.json')) continue;
+
+      if (change.deleted) {
+        const result = await applyRemoteDelete(change.path);
+        if (result) {
+          applied.push(result);
+          Logger.info('SyncEngine', `pull delete ${change.path}`);
+        }
+        continue;
+      }
+
+      const cached = await getCachedObject(change.path);
+      if (cached?.etag && change.etag && cached.etag === change.etag) {
+        const meta = recordMetaFromPath(change.path);
+        if (meta && await localRecordExists(meta.kind, meta.id)) {
+          skippedCached += 1;
+          continue;
+        }
+      }
+
+      const { envelope, etag } = await fetchCloudObjectRaw(change.path);
+      const result = await applyRemoteObject(change.path, envelope, etag || change.etag || '');
+      if (result) applied.push(result);
+    }
+
+    if (feed.nextToken) {
+      since = feed.nextToken;
+      await setLastSyncToken(feed.nextToken);
+    }
+
+    if (changes.length < 100 || !feed.nextToken) break;
   }
 
-  if (feed.nextToken) await setLastSyncToken(feed.nextToken);
-
-  const groundIds = [...new Set(changes.map((c) => c.groundId).filter(Boolean))];
-  if (groundIds.length) {
-    await rebuildRefs(groundIds, { orchardUserId: session?.orchardUserId });
+  const deletedGroundIds = [...new Set(
+    applied.filter((a) => a.deleted && a.groundId).map((a) => a.groundId)
+  )];
+  for (const gid of deletedGroundIds) {
+    await enqueueGroundManifestSync(gid, { orchardUserId: session?.orchardUserId });
   }
 
-  Logger.info('SyncEngine', `pull: ${applied.length} applied, ${changes.length} remote, ${skippedCached} skipped (cached)`);
-  return { pulled: applied.length, applied, remoteChangeCount: changes.length };
+  Logger.info('SyncEngine', `pull: ${applied.length} applied, ${totalRemote} remote, ${skippedCached} skipped (cached)`);
+  return { pulled: applied.length, applied, remoteChangeCount: totalRemote };
 }
 
 /**

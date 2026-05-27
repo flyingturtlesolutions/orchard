@@ -307,6 +307,11 @@ async function handleGetObject(event) {
     return json(logicalPath ? 403 : 400, { error: logicalPath ? 'path_denied' : 'invalid_path' });
   }
 
+  const index = await getIndexRecord(auth.orchardUserId, logicalPath);
+  if (index?.deleted) {
+    return json(404, { error: 'not_found', path: logicalPath });
+  }
+
   const key = s3Key(auth.orchardUserId, logicalPath);
 
   try {
@@ -361,6 +366,7 @@ async function handleListObjects(event) {
     updatedAt: item.updatedAt,
     groundId: item.groundId || null,
     primitiveType: item.primitiveType || null,
+    deleted: item.deleted === true,
   }));
 
   const nextToken = changes.length > 0 ? res.Items[res.Items.length - 1].GSI2SK : since;
@@ -476,6 +482,9 @@ async function handleDeleteObject(event) {
     return json(logicalPath ? 403 : 400, { error: logicalPath ? 'path_denied' : 'invalid_path' });
   }
 
+  const existing = await getIndexRecord(auth.orchardUserId, logicalPath);
+  const updatedAt = Math.max(Date.now(), (existing?.updatedAt || 0) + 1);
+
   try {
     await s3.send(new DeleteObjectCommand({
       Bucket: WORKSPACE_BUCKET,
@@ -485,12 +494,22 @@ async function handleDeleteObject(event) {
     if (e.name !== 'NoSuchKey' && e.$metadata?.httpStatusCode !== 404) throw e;
   }
 
-  await ddb.send(new DeleteCommand({
+  await ddb.send(new PutCommand({
     TableName: OBJECT_TABLE,
-    Key: objectKeys(auth.orchardUserId, logicalPath),
+    Item: {
+      ...objectKeys(auth.orchardUserId, logicalPath),
+      GSI2PK: `USER#${auth.orchardUserId}`,
+      GSI2SK: gsi2Sk(updatedAt, logicalPath),
+      path: logicalPath,
+      groundId: extractGroundId(logicalPath),
+      primitiveType: extractPrimitiveType(logicalPath),
+      updatedAt,
+      deleted: true,
+      etag: existing?.etag || null,
+    },
   }));
 
-  return json(200, { deleted: true, path: logicalPath });
+  return json(200, { deleted: true, path: logicalPath, updatedAt });
 }
 
 async function handleBatchWrite(event) {

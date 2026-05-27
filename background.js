@@ -97,6 +97,7 @@ import {
   enableHybridSync,
   disableHybridSync,
   ensureHybridSyncReady,
+  enqueueGroundManifestSync,
   getSyncConflicts,
   resetSyncBootstrap,
   resolveSyncConflict,
@@ -188,8 +189,29 @@ async function configureSyncAlarm() {
 function broadcastSyncApplied(applied) {
   if (!Array.isArray(applied)) return;
   for (const row of applied) {
-    if (row?.kind && row?.id) broadcastStorageChanged(row.kind, row.id, 'saved');
+    if (row?.kind && row?.id) {
+      broadcastStorageChanged(row.kind, row.id, row.deleted ? 'deleted' : 'saved');
+    }
   }
+}
+
+/**
+ * Enqueue cloud tombstone + manifest, push immediately, notify UI.
+ * @param {string} kind
+ * @param {string} id
+ * @param {() => Promise<void>} deleteFn
+ * @param {string} [groundId]
+ */
+async function deleteRecordWithSync(kind, id, deleteFn, groundId) {
+  await syncBridgeOnStorageChange(kind, id, 'deleted');
+  await deleteFn();
+  if (groundId && kind !== 'ground' && kind !== 'workflow') {
+    await enqueueGroundManifestSync(groundId);
+  }
+  const syncRes = await runSync();
+  broadcastSyncApplied(syncRes.applied);
+  broadcastStorageChanged(kind, id, 'deleted');
+  return syncRes;
 }
 
 _migrationPromise = _migrationPromise.then(() => refreshStoragePort());
@@ -233,9 +255,11 @@ function broadcastStorageChanged(kind, id, action) {
     ts: Date.now(),
   }).catch(() => { /* no listeners; fine */ });
 
-  return syncBridgeOnStorageChange(kind, id, action).catch((err) => {
-    Logger.warn('background', `sync bridge: ${err?.message || err}`);
-  });
+  if (action === 'saved') {
+    return syncBridgeOnStorageChange(kind, id, action).catch((err) => {
+      Logger.warn('background', `sync bridge: ${err?.message || err}`);
+    });
+  }
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -2141,7 +2165,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         try {
           const { uid } = payload ?? {};
           if (!uid) { sendResponse({ success: false, error: 'uid required' }); return; }
-          await StorageManager.deleteLandmark(uid);
+          const landmark = await StorageManager.getLandmark(uid);
+          await deleteRecordWithSync('landmark', uid, () => StorageManager.deleteLandmark(uid), landmark?.groundId);
           sendResponse({ success: true });
         } catch (err) {
           sendResponse({ success: false, error: err.message });
@@ -2928,8 +2953,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       (async () => {
         try {
           const { fragmentId } = payload;
-          await StorageManager.deleteFragment(fragmentId);
-          broadcastStorageChanged('fragment', fragmentId, 'deleted');
+          const fragment = await StorageManager.getFragment(fragmentId);
+          await deleteRecordWithSync('fragment', fragmentId, () => StorageManager.deleteFragment(fragmentId), fragment?.groundId);
           sendResponse({ success: true });
         } catch (err) {
           Logger.error('background', `DELETE_FRAGMENT failed: ${err.message}`);
@@ -3055,8 +3080,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       (async () => {
         try {
           const { observationId } = payload;
-          await StorageManager.deleteObservation(observationId);
-          broadcastStorageChanged('observation', observationId, 'deleted');
+          const observation = await StorageManager.getObservation(observationId);
+          await deleteRecordWithSync('observation', observationId, () => StorageManager.deleteObservation(observationId), observation?.groundId);
           sendResponse({ success: true });
         } catch (err) {
           Logger.error('background', `DELETE_OBSERVATION failed: ${err.message}`);
@@ -3113,8 +3138,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       (async () => {
         try {
           const { assertionId } = payload;
-          await StorageManager.deleteAssertion(assertionId);
-          broadcastStorageChanged('assertion', assertionId, 'deleted');
+          const assertion = await StorageManager.getAssertion(assertionId);
+          await deleteRecordWithSync('assertion', assertionId, () => StorageManager.deleteAssertion(assertionId), assertion?.groundId);
           sendResponse({ success: true });
         } catch (err) {
           Logger.error('background', `DELETE_ASSERTION failed: ${err.message}`);
@@ -3241,8 +3266,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       (async () => {
         try {
           const { perspectiveId } = payload;
-          await StorageManager.deletePerspective(perspectiveId);
-          broadcastStorageChanged('perspective', perspectiveId, 'deleted');
+          const perspective = await StorageManager.getPerspective(perspectiveId);
+          await deleteRecordWithSync('perspective', perspectiveId, () => StorageManager.deletePerspective(perspectiveId), perspective?.groundId);
           sendResponse({ success: true });
         } catch (err) {
           Logger.error('background', `DELETE_PERSPECTIVE failed: ${err.message}`);
@@ -3260,8 +3285,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       (async () => {
         try {
           const { analysisId } = payload;
-          await StorageManager.deleteAnalysis(analysisId);
-          broadcastStorageChanged('analysis', analysisId, 'deleted');
+          const analysis = await StorageManager.getAnalysis(analysisId);
+          await deleteRecordWithSync('analysis', analysisId, () => StorageManager.deleteAnalysis(analysisId), analysis?.groundId);
           sendResponse({ success: true });
         } catch (err) {
           Logger.error('background', `DELETE_ANALYSIS failed: ${err.message}`);
@@ -3303,8 +3328,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       (async () => {
         try {
           const { strategyId } = payload;
-          await StorageManager.deleteStrategy(strategyId);
-          broadcastStorageChanged('strategy', strategyId, 'deleted');
+          const strategy = await StorageManager.getStrategy(strategyId);
+          await deleteRecordWithSync('strategy', strategyId, () => StorageManager.deleteStrategy(strategyId), strategy?.groundId);
           CapabilityAPI.notifyRegistryChange('removed', strategyId);
           sendResponse({ success: true });
         } catch (err) {
@@ -3353,8 +3378,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       (async () => {
         try {
           const { workflowId } = payload;
-          await StorageManager.deleteWorkflow(workflowId);
-          broadcastStorageChanged('workflow', workflowId, 'deleted');
+          await deleteRecordWithSync('workflow', workflowId, () => StorageManager.deleteWorkflow(workflowId));
           CapabilityAPI.notifyRegistryChange('removed', workflowId);
           sendResponse({ success: true });
         } catch (err) {
@@ -3781,7 +3805,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       (async () => {
         try {
           const { groundId } = payload;
+          await syncBridgeOnStorageChange('ground', groundId, 'deleted');
           await StorageManager.deleteGround(groundId);
+          const syncRes = await runSync();
+          broadcastSyncApplied(syncRes.applied);
           broadcastStorageChanged('ground', groundId, 'deleted');
           CapabilityAPI.notifyRegistryChange('removed', null);
           sendResponse({ success: true });
