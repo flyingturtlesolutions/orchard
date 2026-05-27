@@ -410,7 +410,7 @@ history of classified events (correction = new outcome event).
 
 | Slice | Deliverable |
 |-------|-------------|
-| **C0** | Schemas in `Core/userActionClassification.js` + unit tests for L2 pure classifier |
+| **C0** | `SPEC_USER_ACTION_CLASSIFIER_C0.md` + `Core/userActionClassification.js` + `node --test` |
 | **C1** | `ObservationDemand` registry in background; demand from accepted Perspectives |
 | **C2** | Content-script listeners (click, input debounced, submit, focus) → `USER_ACTION_RAW` |
 | **C3** | `RESOLVE_USER_EVENT_TARGET` in content script + L1 resolver |
