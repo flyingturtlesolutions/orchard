@@ -1,0 +1,19 @@
+{
+  "name": "orchard-dev-infra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Orchard AWS P0 stack (dev account) — see ../schemas/orchard/AWS_INTEGRATION.md",
+  "scripts": {
+    "cdk": "cdk",
+    "deploy": "cdk deploy --require-approval never",
+    "synth": "cdk synth",
+    "diff": "cdk diff"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.170.0",
+    "constructs": "^10.4.2"
+  },
+  "devDependencies": {
+    "aws-cdk": "^2.170.0"
+  }
+}

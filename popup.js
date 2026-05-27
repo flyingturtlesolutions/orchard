@@ -85,3 +85,95 @@ document.getElementById('pop-ground').addEventListener('click', async () => {
   });
   window.close();
 });
+
+// ── Orchard cloud (P0) ───────────────────────────────────────────────────────
+
+function cloudMsg(type, payload = {}) {
+  const timeoutMs = (type === 'CLOUD_SIGN_IN' || type === 'CLOUD_SIGN_OUT') ? 120000 : 15000;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (res) => {
+      if (settled) return;
+      settled = true;
+      resolve(res);
+    };
+    const timer = setTimeout(() => {
+      finish({
+        success: false,
+        error: 'Background not responding — reload the extension at chrome://extensions',
+      });
+    }, timeoutMs);
+    chrome.runtime.sendMessage({ type, payload }, (res) => {
+      clearTimeout(timer);
+      finish(res ?? {
+        success: false,
+        error: chrome.runtime.lastError?.message || 'No response from background',
+      });
+    });
+  });
+}
+
+async function refreshPopupCloud() {
+  const statusEl = document.getElementById('popup-cloud-status');
+  const signInBtn = document.getElementById('popup-cloud-sign-in');
+  const signOutBtn = document.getElementById('popup-cloud-sign-out');
+  const res = await cloudMsg('GET_CLOUD_STATUS');
+  if (!res?.success) {
+    statusEl.textContent = res?.error
+      ? `Cloud unavailable: ${res.error}`
+      : 'Cloud: unavailable';
+    signInBtn.disabled = false;
+    signOutBtn.disabled = false;
+    return;
+  }
+  const s = res.status || {};
+  if (s.signedIn) {
+    statusEl.textContent = s.orchardUserId
+      ? `Signed in · ${s.orchardUserId}`
+      : 'Signed in';
+    statusEl.classList.add('signed-in');
+    signInBtn.disabled = true;
+    signOutBtn.disabled = false;
+  } else {
+    statusEl.textContent = s.cloudEnabled
+      ? `Signed out · ${s.orchardUserIdPreview || 'identity ready'}`
+      : 'Sign in to sync with Orchard Cloud';
+    statusEl.classList.remove('signed-in');
+    signInBtn.disabled = false;
+    signOutBtn.disabled = true;
+  }
+}
+
+document.getElementById('popup-cloud-sign-in')?.addEventListener('click', async () => {
+  const btn = document.getElementById('popup-cloud-sign-in');
+  const statusEl = document.getElementById('popup-cloud-status');
+  if (btn) btn.disabled = true;
+  if (statusEl) statusEl.textContent = 'Opening sign-in…';
+  try {
+    await cloudMsg('SET_CLOUD_SETTINGS', { settings: { enabled: true } });
+    const res = await cloudMsg('CLOUD_SIGN_IN');
+    if (!res?.success && statusEl) {
+      statusEl.textContent = res?.error || 'Sign-in failed';
+    }
+  } catch (e) {
+    if (statusEl) statusEl.textContent = e?.message || 'Sign-in failed';
+  } finally {
+    await refreshPopupCloud();
+  }
+});
+
+document.getElementById('popup-cloud-sign-out')?.addEventListener('click', async () => {
+  const btn = document.getElementById('popup-cloud-sign-out');
+  const statusEl = document.getElementById('popup-cloud-status');
+  if (btn) btn.disabled = true;
+  if (statusEl) statusEl.textContent = 'Signing out…';
+  try {
+    await cloudMsg('CLOUD_SIGN_OUT');
+  } catch (e) {
+    if (statusEl) statusEl.textContent = e?.message || 'Sign-out failed';
+  } finally {
+    await refreshPopupCloud();
+  }
+});
+
+refreshPopupCloud();

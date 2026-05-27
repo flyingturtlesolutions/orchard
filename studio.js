@@ -4644,7 +4644,273 @@ async function refreshSettings() {
   const obsUnlimChk = $('chk-observation-extract-cap-unlimited');
   if (obsUnlimChk) obsUnlimChk.checked = obsUnlimRes?.value === true;
   if (obsCapInput) obsCapInput.disabled = obsUnlimRes?.value === true;
+
+  await refreshCloudSettings();
 }
+
+function cloudMsg(type, payload = {}) {
+  const timeoutMs = (type === 'RUN_SYNC' || type === 'CLOUD_SIGN_IN' || type === 'CLOUD_SIGN_OUT')
+    ? 120000
+    : 15000;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (res) => {
+      if (settled) return;
+      settled = true;
+      resolve(res);
+    };
+    const timer = setTimeout(() => {
+      finish({
+        success: false,
+        error: 'Background not responding — open chrome://extensions and reload AHuB',
+      });
+    }, timeoutMs);
+    chrome.runtime.sendMessage({ type, payload }, (res) => {
+      clearTimeout(timer);
+      finish(res ?? {
+        success: false,
+        error: chrome.runtime.lastError?.message || 'No response from background',
+      });
+    });
+  });
+}
+
+function showCloudMsg(text, type) {
+  const el = $('cloud-status-msg');
+  if (!el) return;
+  el.textContent = text;
+  el.className = `msg ${type}`;
+  el.classList.remove('hidden');
+  setTimeout(() => el.classList.add('hidden'), 4000);
+}
+
+async function refreshCloudSettings() {
+  const statusLine = $('cloud-status-line');
+  const userIdEl = $('cloud-user-id');
+  const signInBtn = $('btn-cloud-sign-in');
+  const signOutBtn = $('btn-cloud-sign-out');
+  const syncBtn = $('btn-cloud-sync-now');
+  const syncLine = $('cloud-sync-line');
+  const conflictsEl = $('cloud-conflicts');
+  const enabledChk = $('chk-cloud-enabled');
+  if (!statusLine) return;
+
+  const [statusRes, settingsRes] = await Promise.all([
+    cloudMsg('GET_CLOUD_STATUS'),
+    cloudMsg('GET_CLOUD_SETTINGS'),
+  ]);
+
+  const settings = settingsRes?.settings || {};
+  if (enabledChk) enabledChk.checked = settings.enabled === true;
+
+  const apiInput = $('input-cloud-api-url');
+  const domainInput = $('input-cloud-cognito-domain');
+  const clientInput = $('input-cloud-cognito-client');
+  if (apiInput) apiInput.value = settings.apiBaseUrl || '';
+  if (domainInput) domainInput.value = settings.cognitoDomain || '';
+  if (clientInput) clientInput.value = settings.cognitoClientId || '';
+
+  if (!statusRes?.success) {
+    const err = statusRes?.error ? `: ${statusRes.error}` : '';
+    statusLine.textContent = `Cloud status unavailable${err}`;
+    if (userIdEl) userIdEl.classList.add('hidden');
+    // Keep auth buttons usable even when the status probe fails.
+    if (signInBtn) signInBtn.disabled = false;
+    if (signOutBtn) signOutBtn.disabled = false;
+    if (syncBtn) syncBtn.disabled = true;
+    return;
+  }
+
+  const s = statusRes.status || {};
+  const canSync = !!(s.signedIn && s.cloudEnabled);
+  const hybridActive = canSync && s.storageBackend === 'hybrid';
+
+  if (syncBtn) syncBtn.disabled = !canSync;
+  if (syncLine) {
+    if (canSync) {
+      const mode = hybridActive ? 'hybrid sync' : 'ready (upgrades on sync)';
+      syncLine.textContent = `${mode} · conflicts: ${s.pendingConflicts || 0}`;
+      syncLine.classList.remove('hidden');
+    } else if (s.signedIn) {
+      syncLine.textContent = 'Signed in — enable Orchard Cloud to sync';
+      syncLine.classList.remove('hidden');
+    } else {
+      syncLine.classList.add('hidden');
+    }
+  }
+
+  if (conflictsEl) {
+    if ((s.pendingConflicts || 0) > 0 && hybridActive) {
+      const conflictsRes = await cloudMsg('GET_SYNC_CONFLICTS');
+      const rows = conflictsRes?.conflicts || [];
+      conflictsEl.innerHTML = rows.map((row) => `
+        <div class="settings-note" style="margin-bottom:8px">
+          <div style="font-family:monospace;font-size:11px">${row.path}</div>
+          <div style="display:flex;gap:6px;margin-top:6px">
+            <button class="btn-secondary tiny" type="button" data-conflict-path="${row.path}" data-resolution="keep-mine">Keep mine</button>
+            <button class="btn-secondary tiny" type="button" data-conflict-path="${row.path}" data-resolution="keep-theirs">Keep theirs</button>
+          </div>
+        </div>`).join('');
+      conflictsEl.classList.remove('hidden');
+      conflictsEl.querySelectorAll('[data-conflict-path]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const path = btn.getAttribute('data-conflict-path');
+          const resolution = btn.getAttribute('data-resolution');
+          const res = await cloudMsg('RESOLVE_SYNC_CONFLICT', { path, resolution });
+          if (res?.success) {
+            showCloudMsg('Conflict resolved', 'ok');
+            await refreshCloudSettings();
+            refreshGroundList().catch(() => {});
+          } else {
+            showCloudMsg(res?.error || 'Resolve failed', 'err');
+          }
+        });
+      });
+    } else {
+      conflictsEl.innerHTML = '';
+      conflictsEl.classList.add('hidden');
+    }
+  }
+
+  if (s.signedIn) {
+    statusLine.textContent = 'Signed in to Orchard Cloud';
+    if (userIdEl) {
+      userIdEl.textContent = s.orchardUserId || s.orchardUserIdPreview || '';
+      userIdEl.classList.toggle('hidden', !userIdEl.textContent);
+    }
+    if (signInBtn) signInBtn.disabled = true;
+    if (signOutBtn) signOutBtn.disabled = false;
+  } else if (s.cloudEnabled) {
+    statusLine.textContent = 'Signed out — sign in to link this device';
+    if (userIdEl) {
+      userIdEl.textContent = s.orchardUserIdPreview ? `Local identity: ${s.orchardUserIdPreview}` : '';
+      userIdEl.classList.toggle('hidden', !userIdEl.textContent);
+    }
+    if (signInBtn) signInBtn.disabled = false;
+    if (signOutBtn) signOutBtn.disabled = true;
+  } else {
+    statusLine.textContent = 'Cloud disabled — enable below, then sign in';
+    if (userIdEl) {
+      userIdEl.textContent = s.orchardUserIdPreview ? `Local identity: ${s.orchardUserIdPreview}` : '';
+      userIdEl.classList.toggle('hidden', !userIdEl.textContent);
+    }
+    if (signInBtn) signInBtn.disabled = false;
+    if (signOutBtn) signOutBtn.disabled = true;
+  }
+}
+
+$('chk-cloud-enabled')?.addEventListener('change', async (e) => {
+  const enabled = e.target.checked;
+  const res = await cloudMsg('SET_CLOUD_SETTINGS', { settings: { enabled } });
+  if (res?.success) {
+    toast(enabled ? 'Orchard Cloud enabled' : 'Orchard Cloud disabled');
+    await refreshCloudSettings();
+  } else {
+    showCloudMsg(res?.error || 'Failed to update cloud setting', 'err');
+    toast(res?.error || 'Failed to update cloud setting', 'err');
+    e.target.checked = !enabled;
+  }
+});
+
+async function handleCloudSignIn() {
+  const btn = $('btn-cloud-sign-in');
+  if (btn) btn.disabled = true;
+  toast('Opening sign-in…', 'ok');
+  try {
+    await cloudMsg('SET_CLOUD_SETTINGS', { settings: { enabled: true } });
+    const enabledChk = $('chk-cloud-enabled');
+    if (enabledChk) enabledChk.checked = true;
+    const res = await cloudMsg('CLOUD_SIGN_IN');
+    if (res?.success) {
+      toast('Signed in to Orchard Cloud', 'ok');
+      showCloudMsg('Signed in', 'ok');
+    } else {
+      const err = res?.error || 'Sign-in failed';
+      toast(err, 'err');
+      showCloudMsg(err, 'err');
+    }
+  } finally {
+    await refreshCloudSettings();
+  }
+}
+
+async function handleCloudSignOut() {
+  const btn = $('btn-cloud-sign-out');
+  if (btn) btn.disabled = true;
+  toast('Signing out…', 'ok');
+  try {
+    const res = await cloudMsg('CLOUD_SIGN_OUT');
+    if (res?.success) {
+      toast('Signed out', 'ok');
+      showCloudMsg('Signed out', 'ok');
+    } else {
+      const err = res?.error || 'Sign-out failed';
+      toast(err, 'err');
+      showCloudMsg(err, 'err');
+    }
+  } finally {
+    await refreshCloudSettings();
+  }
+}
+
+// Cloud auth/sync — delegated on the card so clicks always reach handlers.
+document.getElementById('card-orchard-cloud')?.addEventListener('click', (e) => {
+  const t = /** @type {HTMLElement|null} */ (e.target instanceof HTMLElement ? e.target : null);
+  if (!t?.id) return;
+  e.preventDefault();
+  if (t.id === 'btn-cloud-sign-in') {
+    handleCloudSignIn().catch((err) => toast(err?.message || 'Sign-in failed', 'err'));
+  } else if (t.id === 'btn-cloud-sign-out') {
+    handleCloudSignOut().catch((err) => toast(err?.message || 'Sign-out failed', 'err'));
+  } else if (t.id === 'btn-cloud-sync-now') {
+    handleCloudSyncNow().catch((err) => toast(err?.message || 'Sync failed', 'err'));
+  }
+});
+
+async function handleCloudSyncNow() {
+  const btn = $('btn-cloud-sync-now');
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+  const prevLabel = btn.textContent;
+  btn.textContent = 'Syncing…';
+  toast('Syncing…', 'ok');
+  try {
+    const res = await cloudMsg('RUN_SYNC');
+    if (res?.success || res?.ok) {
+      const seed = res.bootstrapped ? ` · seeded ${res.bootstrapped}` : '';
+      const msg = `Sync complete · pushed ${res.pushed ?? 0}, pulled ${res.pulled ?? 0}${seed}`;
+      toast(msg, 'ok');
+      showCloudMsg(msg, 'ok');
+      refreshGroundList().catch(() => {});
+    } else {
+      const err = res?.error || 'Sync failed';
+      toast(err, 'err');
+      showCloudMsg(err, 'err');
+    }
+  } catch (e) {
+    const err = e?.message || 'Sync failed';
+    toast(err, 'err');
+    showCloudMsg(err, 'err');
+  } finally {
+    btn.textContent = prevLabel || 'Sync now';
+    await refreshCloudSettings();
+  }
+}
+
+$('btn-save-cloud-config')?.addEventListener('click', async () => {
+  const patch = {
+    apiBaseUrl: $('input-cloud-api-url')?.value.trim() || '',
+    cognitoDomain: $('input-cloud-cognito-domain')?.value.trim() || '',
+    cognitoClientId: $('input-cloud-cognito-client')?.value.trim() || '',
+  };
+  const res = await cloudMsg('SET_CLOUD_SETTINGS', { settings: patch });
+  if (res?.success) {
+    showCloudMsg('Cloud config saved', 'ok');
+    await refreshCloudSettings();
+  } else {
+    showCloudMsg(res?.error || 'Save failed', 'err');
+  }
+});
 
 // v2.28.2 (Pass Q) — Chat Mode toggle removed. The multi-ground chat setting
 // was a pre-relocation chat-UI feature; chat.js doesn't read it, the toggle

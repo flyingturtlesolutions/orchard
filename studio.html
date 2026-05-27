@@ -860,6 +860,46 @@
   <section class="tab-panel hidden" id="tab-settings">
     <div class="section-header"><h2>Settings</h2></div>
 
+    <div class="card" id="card-orchard-cloud">
+      <h3 class="card-subheading">Orchard Cloud</h3>
+      <p id="cloud-status-line" class="settings-note">Checking account status…</p>
+      <p id="cloud-user-id" class="settings-note hidden" style="font-family:monospace;font-size:11px"></p>
+      <div class="setting-row" style="margin-top:8px">
+        <div class="setting-row-text">
+          <span class="setting-label">Enable cloud</span>
+          <span class="setting-desc">Required for sign-in and future cross-device sync.</span>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="chk-cloud-enabled" />
+          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+        </label>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <button class="btn-primary" id="btn-cloud-sign-in" type="button">Sign in</button>
+        <button class="btn-secondary" id="btn-cloud-sign-out" type="button" disabled>Sign out</button>
+        <button class="btn-secondary" id="btn-cloud-sync-now" type="button" disabled>Sync now</button>
+      </div>
+      <p id="cloud-sync-line" class="settings-note hidden"></p>
+      <div id="cloud-conflicts" class="hidden" style="margin-top:10px"></div>
+      <div id="cloud-status-msg" class="msg hidden"></div>
+      <details style="margin-top:12px">
+        <summary class="settings-note" style="cursor:pointer">Advanced (dev endpoints)</summary>
+        <label style="display:block;margin-top:10px">API base URL
+          <input type="text" id="input-cloud-api-url" style="width:100%;margin-top:4px" autocomplete="off" />
+        </label>
+        <label style="display:block;margin-top:8px">Cognito domain
+          <input type="text" id="input-cloud-cognito-domain" style="width:100%;margin-top:4px" autocomplete="off" />
+        </label>
+        <label style="display:block;margin-top:8px">Cognito client ID
+          <input type="text" id="input-cloud-cognito-client" style="width:100%;margin-top:4px" autocomplete="off" />
+        </label>
+        <button class="btn-secondary" id="btn-save-cloud-config" type="button" style="margin-top:10px">Save cloud config</button>
+      </details>
+      <p class="settings-note" style="margin-top:10px">
+        Sign-in uses Cognito hosted UI. LLM calls are app-managed when cloud is enabled (no API key in the extension).
+      </p>
+    </div>
+
     <div class="card">
       <h3 class="card-subheading">Anthropic API Key</h3>
       <label>API Key

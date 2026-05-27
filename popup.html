@@ -70,6 +70,45 @@
       color: #8f8faa;
       line-height: 1.2;
     }
+    .popup-cloud {
+      border-top: 1px solid #2c2c3a;
+      margin-top: 4px;
+      padding: 10px 14px 6px;
+    }
+    .popup-cloud-status {
+      font-size: 10px;
+      color: #8f8faa;
+      margin-bottom: 8px;
+      line-height: 1.35;
+      word-break: break-all;
+    }
+    .popup-cloud-status.signed-in { color: #7dcea0; }
+    .popup-cloud-actions {
+      display: flex;
+      gap: 6px;
+    }
+    .popup-cloud-btn {
+      flex: 1;
+      padding: 6px 8px;
+      border: 1px solid #3a3a4a;
+      border-radius: 6px;
+      background: #1b1b23;
+      color: #e0e0f0;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .popup-cloud-btn:hover { background: #24242f; }
+    .popup-cloud-btn:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+    .popup-cloud-btn.primary {
+      background: #3d5afe;
+      border-color: #3d5afe;
+      color: #fff;
+    }
+    .popup-cloud-btn.primary:hover { background: #536dfe; }
   </style>
 </head>
 <body>
@@ -104,6 +143,13 @@
       from the extension icon. Everything else is launched in the right
       context, keeping the popup focused.
     -->
+  </div>
+  <div class="popup-cloud">
+    <div class="popup-cloud-status" id="popup-cloud-status">Cloud: checking…</div>
+    <div class="popup-cloud-actions">
+      <button type="button" class="popup-cloud-btn primary" id="popup-cloud-sign-in">Sign in</button>
+      <button type="button" class="popup-cloud-btn" id="popup-cloud-sign-out" disabled>Sign out</button>
+    </div>
   </div>
   <script src="popup.js"></script>
 </body>
