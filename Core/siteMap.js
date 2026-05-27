@@ -657,8 +657,14 @@ export function siteMapStats(map) {
 // territory let me DO". The full goal objects (description + achievableVia features) live
 // in each archetype's Locale — this is the site-wide index over their labels.
 
-/** Normalize a goal label for dedup: lowercase, collapse whitespace, drop trailing sentence punctuation. */
-function _normGoal(s) {
+/**
+ * Normalize a goal label: lowercase, collapse whitespace, drop trailing sentence punctuation.
+ * Exported so consumers that need to RE-FIND a catalog goal in a specific archetype's Locale
+ * (e.g. capability synthesis) match the SAME way the catalog deduped — the catalog keeps one
+ * archetype's original-cased label as the representative, so an exact compare against a
+ * different archetype's variant would miss.
+ */
+export function normalizeGoalLabel(s) {
   return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim().replace(/[.!?…]+$/, '').trim();
 }
 
@@ -692,7 +698,7 @@ export function siteMapCapabilities(map) {
     };
     const seen = new Set();   // collapse repeated labels within one archetype
     for (const label of goals) {
-      const key = _normGoal(label);
+      const key = normalizeGoalLabel(label);
       if (!key || seen.has(key)) continue;
       seen.add(key);
       let e = byNorm.get(key);

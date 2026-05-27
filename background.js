@@ -4619,7 +4619,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (!node.localeId) { sendResponse({ success: false, error: 'archetype not modeled yet (no Locale) — Explore it first' }); return; }
           const pm = await _readLocaleCache(groundId, node.localeId);
           const model = pm?.model;
-          const goal = model?.goals ? Object.values(model.goals).find((g) => g && g.label === goalLabel) : null;
+          // v2.74.473 — match on the NORMALIZED label: the catalog dedups goals across archetypes
+          // and keeps one representative's original-cased label, which may differ from THIS
+          // archetype's variant — an exact compare would spuriously miss.
+          const wantKey = SiteMap.normalizeGoalLabel(goalLabel);
+          const goal = model?.goals ? Object.values(model.goals).find((g) => g && SiteMap.normalizeGoalLabel(g.label) === wantKey) : null;
           if (!goal) { sendResponse({ success: false, error: `goal "${goalLabel}" not found in the archetype's Locale` }); return; }
           const url = node.exemplarUrl || (Array.isArray(node.instances) ? node.instances[0] : null) || null;
           const draft = CapabilitySynth.synthesizeCapabilityDraft(goal, model, { groundId, url });
