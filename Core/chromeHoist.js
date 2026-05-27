@@ -260,3 +260,22 @@ export function composeChromeFeatures(locale, chrome = {}) {
   }
   return out;
 }
+
+/**
+ * The EFFECTIVE chrome Features for a given Locale, straight from the Ground.chrome artifact:
+ * every promoted feature with this Locale's overrides applied (e.g. visibleAtRest:false where
+ * "search collapsed until scroll-top" on that archetype). This is the read that finally
+ * CONSUMES chromeOverrides — unlike composeChromeFeatures (which assumes a slimmed Locale that
+ * references chrome), this works against the unslimmed reality: hand it the artifact + a Locale
+ * key and get that page's chrome view. Used to augment resolve hints so a control modeled once
+ * resolves on every page. Pure; returns features in stable id order.
+ *
+ * @param {{chrome?:Object, overrides?:Object}} artifact  Ground.chrome
+ * @param {string|null} [localeKey]  the Locale cache key whose overrides to apply
+ * @returns {Array<object>} override-applied chrome features
+ */
+export function chromeFeaturesForLocale(artifact, localeKey = null) {
+  const chrome = (artifact && artifact.chrome) || {};
+  const ov = (localeKey && artifact && artifact.overrides && artifact.overrides[localeKey]) || {};
+  return Object.keys(chrome).sort().map((id) => (ov[id] ? { ...chrome[id], ...ov[id] } : { ...chrome[id] }));
+}
