@@ -17,6 +17,7 @@
 import { installGlobalErrorHandlers } from './Core/ErrorCapture.js';
 import { isDerivationStale, effectiveDescription } from './Core/groundDerivation.js';
 import { siteMapCapabilities, matchSiteCapabilities } from './Core/siteMap.js';   // v2.74.465/467 — site capability catalog + intent match
+import { layoutLocaleGraph } from './Core/graphLayout.js';   // v2.74.478 — pure layered layout for the Locale graph viz
 // v2.74.188 — Install global error + unhandledrejection handlers BEFORE
 // any other module-init runs, so an error in a downstream import is
 // still captured by the Logger and surfaces in the Logs tab.
@@ -3146,7 +3147,7 @@ async function _refreshGroundListImpl() {
           <div class="sitemap-node sitemap-${escAttr(n.status)}">
             <span class="sitemap-node-status">${n.status === 'modeled' ? '●' : (n.status === 'discovered' ? '◐' : '○')}</span>
             <span class="sitemap-node-name" title="${escAttr(n.urlPattern)}">${escHtml(n.name || shortPath(n.urlPattern))}</span>
-            <span class="sitemap-node-meta">${escHtml(shortPath(n.urlPattern))}${n.instanceCount > 1 ? ` · ×${n.instanceCount}` : ''}${n.goals?.length ? ` · ${n.goals.length} goal(s)` : ''}</span>
+            <span class="sitemap-node-meta">${escHtml(shortPath(n.urlPattern))}${n.instanceCount > 1 ? ` · ×${n.instanceCount}` : ''}${n.goals?.length ? ` · ${n.goals.length} goal(s)` : ''}${n.status === 'modeled' ? ` · <button class="btn-secondary tiny" data-action="locale-graph" data-arch="${escAttr(n.id)}" title="Show this archetype's page graph — reveals / contains / enables / leadsTo edges — and which outgoing links lead to modeled vs unknown archetypes (discovery gaps)">⊹ graph</button>` : ''}</span>
           </div>`;
       // v2.74.442 — Coverage (slice 5): proportional bar (modeled/discovered/stub) +
       // "% modeled" headline, so a Ground's modeling progress reads at a glance.
@@ -3267,6 +3268,26 @@ async function _refreshGroundListImpl() {
       }
     }
     smRow.querySelector('[data-action="explore-queue"]')?.addEventListener('click', () => startExploreQueue(ground.id));
+    // v2.74.477 — Locale graph inspector: "⊹ graph" on a modeled archetype fetches its
+    // typed edge set (LOCALE_GRAPH) + the leadsTo→siteMap reconciliation, shown in the
+    // JSON modal. Delegated on smRow so it survives re-renders (there can be many rows).
+    smRow.addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-action="locale-graph"]');
+      if (!btn) return;
+      const archId = btn.getAttribute('data-arch');
+      if (!archId) return;
+      btn.disabled = true; const prev = btn.textContent; btn.textContent = '…';
+      try {
+        const resp = await new Promise(r => chrome.runtime.sendMessage({ type: 'LOCALE_GRAPH', payload: { groundId: ground.id, archetypeId: archId } }, r));
+        if (resp?.success) {
+          showGraphModal(archId, resp);
+        } else {
+          toast(`Graph failed: ${resp?.error || 'unknown'}`, 'err');
+        }
+      } catch (err) {
+        toast(`Graph failed: ${err?.message || 'error'}`, 'err');
+      } finally { btn.disabled = false; btn.textContent = prev; }
+    });
     smRow.querySelector('[data-action="json-sitemap"]')?.addEventListener('click', () => {
       showJsonModal(`Site Map: ${ground.name ?? ground.id}`, smMap, 'sitemap');
     });
@@ -5786,6 +5807,94 @@ $('btn-llm-clear')?.addEventListener('click', async () => {
  * @param {Object} obj    - the entity record (storage shape)
  * @param {'strategy'|'fragment'|'assertion'} kind - which save channel to use
  */
+// v2.74.478 — Locale graph viz: render the LOCALE_GRAPH response as an SVG node-link
+// diagram (layers → features → goals, edges colored by kind) in a self-contained modal
+// built entirely in JS with inline styles (so studio.html is untouched). The layout is
+// the pure Core/graphLayout helper; this is just the draw + chrome (close / JSON / legend).
+const _GRAPH_NODE_COLOR = {
+  layer: '#a371f7', goal: '#3fb950',
+  input: '#1f6feb', action: '#db61a2', navigation: '#388bfd',
+  disclosure: '#d29922', collection: '#6e7681', region: '#484f58', composite: '#8957e5',
+};
+const _GRAPH_EDGE_COLOR = { reveals: '#d29922', contains: '#8b949e', enables: '#3fb950' };
+
+function showGraphModal(archId, resp) {
+  const L = layoutLocaleGraph({ nodes: resp?.nodes || [], edges: resp?.edges || [] });
+  const labelPad = 180;
+  const W = Math.max(L.width + labelPad, 360);
+  const H = Math.max(L.height, 140);
+  const colX = [100, 330, 560];   // mirrors graphLayout padX(100)+ci*colGap(230)
+  const colHdr = ['LAYERS', 'FEATURES', 'GOALS'];
+
+  let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="font-family:inherit">`;
+  colHdr.forEach((h, i) => { svg += `<text x="${colX[i]}" y="14" font-size="10" fill="#6e7681" text-anchor="middle" letter-spacing="1">${h}</text>`; });
+  for (const e of L.edges) {
+    svg += `<line x1="${e.x1}" y1="${e.y1}" x2="${e.x2}" y2="${e.y2}" stroke="${_GRAPH_EDGE_COLOR[e.kind] || '#888'}" stroke-width="1.2" opacity="0.5"/>`;
+  }
+  for (const n of L.nodes) {
+    const c = _GRAPH_NODE_COLOR[n.kind] || '#888';
+    const anchor = n.col === 0 ? 'end' : 'start';
+    const tx = n.col === 0 ? n.x - n.r - 5 : n.x + n.r + 5;
+    const label = (n.label || n.kind || '').slice(0, 30);
+    svg += `<circle cx="${n.x}" cy="${n.y}" r="${n.r}" fill="${c}" stroke="#0d1117" stroke-width="1"><title>${escHtml(n.kind + ': ' + (n.label || ''))}</title></circle>`;
+    svg += `<text x="${tx}" y="${n.y + 3.5}" font-size="11" fill="#c9d1d9" text-anchor="${anchor}">${escHtml(label)}</text>`;
+  }
+  svg += `</svg>`;
+
+  const counts = resp?.counts || {};
+  const edgeLegend = Object.entries(_GRAPH_EDGE_COLOR)
+    .map(([k, col]) => `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:10px"><span style="width:14px;height:2px;background:${col};display:inline-block"></span>${k}${counts[k] ? ` (${counts[k]})` : ''}</span>`).join('');
+
+  // Achievement paths: how each goal is reached (depth-aware), with disclosure gating shown
+  // as "(open ‹trigger›)" before a hidden control. Verb hints make the step sequence readable.
+  const stepVerb = (kind) => kind === 'input' ? 'type' : (kind === 'navigation' ? 'go' : (kind === 'disclosure' ? 'open' : 'click'));
+  const pathsHtml = (Array.isArray(resp?.goalPaths) && resp.goalPaths.length)
+    ? `<div style="padding:8px 14px;border-top:1px solid #21262d;max-height:26vh;overflow:auto">
+         <div style="font-size:10px;letter-spacing:1px;color:#6e7681;margin-bottom:6px">ACHIEVEMENT PATHS</div>
+         ${resp.goalPaths.map((gp) => {
+           const seenTrig = new Set();
+           const steps = (gp.steps || []).map((s) => {
+             let pre = '';
+             if (s.trigger && !seenTrig.has(s.trigger)) { seenTrig.add(s.trigger); pre = `<span style="opacity:.6">open “${escHtml((s.triggerLabel || 'menu').slice(0, 24))}” ▸ </span>`; }
+             return `${pre}<span title="${escHtml(s.kind || '')}">${stepVerb(s.kind)} “${escHtml((s.label || s.kind || '').slice(0, 28))}”</span>`;
+           }).join('<span style="opacity:.4"> ▸ </span>');
+           return `<div style="margin:3px 0;font-size:11px"><span style="color:#3fb950">★ ${escHtml(gp.label || '(goal)')}</span>${steps ? ` <span style="opacity:.5">—</span> ${steps}` : ' <span style="opacity:.5">(navigate only)</span>'}</div>`;
+         }).join('')}
+       </div>`
+    : '';
+  const leadsToTxt = counts.leadsTo
+    ? ` · <span title="navigation links out of this page; ${resp.gaps || 0} lead to archetypes not yet modeled">leadsTo ${counts.leadsTo}${resp.gaps ? ` · ${resp.gaps} gap(s)` : ''}</span>`
+    : '';
+  const droppedTxt = L.dropped ? ` · <span title="leadsTo (cross-page) + collection→members are not drawn">${L.dropped} off-graph</span>` : '';
+
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(1,4,9,.72);z-index:10000;display:flex;align-items:center;justify-content:center';
+  const panel = document.createElement('div');
+  panel.style.cssText = 'background:#0d1117;border:1px solid #30363d;border-radius:8px;max-width:92vw;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 8px 40px rgba(0,0,0,.6);min-width:360px';
+  panel.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid #21262d">
+      <strong style="font-size:13px">Locale graph</strong>
+      <span style="font-size:11px;opacity:.6;font-family:monospace">${escHtml(archId)}</span>
+      <span style="flex:1"></span>
+      <button data-g="json" class="btn-secondary tiny" title="View the raw graph data (edges + leadsTo reconciliation) as JSON">{ }</button>
+      <button data-g="close" class="btn-secondary tiny" title="Close">✕</button>
+    </div>
+    <div style="overflow:auto;padding:10px 14px;flex:1">${L.nodes.length ? svg : '<div class="empty-state small">This Locale has no graph nodes yet.</div>'}</div>
+    ${pathsHtml}
+    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:8px 14px;border-top:1px solid #21262d;font-size:11px;opacity:.85">${edgeLegend}${leadsToTxt}${droppedTxt}</div>`;
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (ev) => { if (ev.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  overlay.addEventListener('click', (ev) => { if (ev.target === overlay) close(); });
+  panel.querySelector('[data-g="close"]').addEventListener('click', close);
+  panel.querySelector('[data-g="json"]').addEventListener('click', () => {
+    showJsonModal(`Locale graph: ${archId}`, { counts: resp.counts, gaps: resp.gaps, leadsTo: resp.leadsTo, nodes: resp.nodes, edges: resp.edges }, 'locale-graph');
+  });
+}
+
 function showJsonModal(title, obj, kind) {
   const modal = $('json-modal');
   const titleEl = $('json-modal-title');

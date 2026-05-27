@@ -321,6 +321,49 @@ export function localeFromUrl(url, rules) {
 }
 
 /**
+ * v2.74.476 — Bridge a Locale's `leadsTo` edges to the Ground siteMap (GROUND_SPEC § 7). The
+ * spec calls `leadsTo` "also a GROUND.siteMap edge" (PAGEMODEL_SPEC § 1): a nav
+ * feature points at a destination URL, and that URL collapses — through the SAME
+ * corpus template rules the siteMap was built with — to one of the map's archetype
+ * nodes. This resolves each Locale-local nav edge to its concrete site-graph node, so
+ * the two graph layers connect: you can tell whether a link's target is already
+ * `modeled` / `discovered` / `stub`, or `unknown` (a node the map has never seen — a
+ * discovery gap worth crawling). PURE — neither the map nor the edges are mutated.
+ *
+ * Cross-origin destinations (`sameOrigin === false`) belong to another Ground, so they
+ * are NOT templated against this site's rules — they resolve to status `external`.
+ *
+ * @param {Array<{to?:string, kind?:string, sameOrigin?:boolean}>} edges  localeEdges(), kind 'leadsTo'
+ * @param {{nodes?:Object, templateRules?:string[]}} map  the Ground siteMap
+ * @returns {Array<object>} enriched COPIES: { ...edge, pattern, archetypeId, status, name, known }
+ */
+export function reconcileLeadsTo(edges, map) {
+  const list = Array.isArray(edges) ? edges : [];
+  const nodes = (map && map.nodes) || {};
+  const rules = (map && map.templateRules) || [];
+  const out = [];
+  for (const e of list) {
+    if (!e || (e.kind && e.kind !== 'leadsTo') || !e.to) continue;
+    if (e.sameOrigin === false) {        // another site's graph — don't template here
+      out.push({ ...e, pattern: null, archetypeId: null, status: 'external', name: null, known: false });
+      continue;
+    }
+    const pattern = templatePattern(e.to, rules);
+    const aid = archetypeId(pattern);
+    const node = nodes[aid] || null;
+    out.push({
+      ...e,
+      pattern,
+      archetypeId: aid,
+      status: node ? (node.status || 'discovered') : 'unknown',
+      name: node ? (node.name || pattern) : null,
+      known: !!node,
+    });
+  }
+  return out;
+}
+
+/**
  * Cross-locale alignment harvest (language-agnostic resolution, slice 3a). Given the
  * SAME page enumerated in multiple languages, fuse its features into ONE language-
  * agnostic set: match features across locales by a language-INVARIANT key (a nav link

@@ -8,9 +8,11 @@
 // the queryable artifact; downstream calls the query API rather than walking the
 // raw object.
 //
-// v2.74.397 — Build slice 1: schema + builder + query API + L0 assembly. Old
-// `pageStructure` remains the live artifact; this is additive (new cache key)
-// until later slices rewire resolve / grounding to consume it.
+// v2.74.475 — Graph edges: `localeEdges` materializes the typed edge set (reveals /
+// contains / enables / leadsTo) from the denormalized node fields, plus edgesFrom /
+// edgesTo / edgesByKind selectors and `pathToGoal` (depth-aware goal traversal). The
+// Locale's "small graph" (PAGEMODEL_SPEC § 1) becomes traversable, not just per-kind
+// queryable. (Build slice 1 baseline: schema + builder + query API + L0 assembly.)
 
 export const LOCALE_SCHEMA = 2;
 
@@ -414,4 +416,135 @@ export function attachGoals(model, goals) {
   model.index = buildIndex(model.features);
   if (model.coverage && Object.keys(model.goals).length) model.coverage.fidelity = 'L2';
   return model;
+}
+
+// ─── Graph edges (PAGEMODEL_SPEC § 1) ───────────────────────────────────────────
+// A Locale is conceptually "a small graph" — Feature / Layer / Goal nodes joined by
+// typed edges. Storage keeps those edges DENORMALIZED as fields on the nodes they
+// leave (`disclosure.reveals`, `layer.features`, `collection.members`, `feature.goals`,
+// `navigation.href`), which is cheap to write but means every consumer re-walks a
+// different field by hand. These functions MATERIALIZE the unified typed edge set so
+// downstream can traverse the graph directly (studio viz, goal→control path-finding,
+// the future composite/workflow layer) — the § 7 "query it, don't walk it" contract,
+// extended from per-kind lookups (byKind/byGoal/triggers) to full graph traversal.
+//
+// Computed on demand (not stored on the model): the edge set is a projection of the
+// node fields, and those fields mutate across build slices (mergeDepthFromControls,
+// attachGoals); deriving lazily keeps a single source of truth. PURE.
+
+/**
+ * Same-origin test for a `leadsTo` destination, resolving relative hrefs against the
+ * Locale's own URL. Defensive: malformed/empty URLs are treated as not-same-origin
+ * rather than throwing.
+ */
+function _sameOrigin(base, href) {
+  try { return new URL(href, base || undefined).origin === new URL(base).origin; }
+  catch { return false; }
+}
+
+/**
+ * Materialize the Locale's typed edge set (PAGEMODEL_SPEC § 1).
+ *
+ * Edge kinds emitted (each edge: { from, to, kind, ...payload }):
+ *   - `reveals`  disclosure feature → the layer it opens (to = layerId)
+ *   - `contains` layer → each member feature (to = featureId); AND
+ *                collection feature → its repeating members (to = null, `members` payload —
+ *                members are a {itemSelector,count} descriptor, not first-class nodes)
+ *   - `enables`  feature → a goal it helps achieve (to = goalId)
+ *   - `leadsTo`  navigation feature → its destination URL (to = url, `sameOrigin` payload;
+ *                also surfaced as a GROUND.siteMap edge — § 1)
+ *
+ * `partOf` (composite flow) is intentionally NOT emitted: composites are unrealized
+ * at the Locale level (no source field), and cross-Locale flows live ABOVE the Locale
+ * (Workflows). When composite `parts` get materialized this is where they'd join.
+ *
+ * @param {object} model  a Locale
+ * @returns {Array<{from:string, to:(string|null), kind:string}>}
+ */
+export function localeEdges(model) {
+  const edges = [];
+  if (!model) return edges;
+  const features = model.features || {};
+  const layers = model.layers || {};
+  const goals = model.goals || {};
+  const base = model.url || model.urlPattern || '';
+
+  // reveals: disclosure → layer (only when the target layer actually exists)
+  for (const f of Object.values(features)) {
+    if (f && f.kind === 'disclosure' && f.reveals && layers[f.reveals]) {
+      edges.push({ from: f.id, to: f.reveals, kind: 'reveals' });
+    }
+  }
+
+  // contains: layer → member feature (the surface layer included)
+  for (const layer of Object.values(layers)) {
+    if (!layer || !Array.isArray(layer.features)) continue;
+    for (const fid of layer.features) {
+      if (features[fid]) edges.push({ from: layer.id, to: fid, kind: 'contains' });
+    }
+  }
+  // contains: collection → its repeating members (descriptor, not nodes)
+  for (const f of Object.values(features)) {
+    if (f && f.kind === 'collection' && f.members && f.members.itemSelector) {
+      edges.push({
+        from: f.id, to: null, kind: 'contains',
+        members: { itemSelector: f.members.itemSelector, count: f.members.count ?? null },
+      });
+    }
+  }
+
+  // enables: feature → goal (iterate the feature side so dangling refs are dropped)
+  for (const f of Object.values(features)) {
+    if (!f || !Array.isArray(f.goals)) continue;
+    for (const gid of f.goals) if (goals[gid]) edges.push({ from: f.id, to: gid, kind: 'enables' });
+  }
+
+  // leadsTo: navigation → destination URL (the Locale-local half of the siteMap edge)
+  for (const f of Object.values(features)) {
+    if (f && f.kind === 'navigation' && f.href) {
+      edges.push({ from: f.id, to: f.href, kind: 'leadsTo', sameOrigin: _sameOrigin(base, f.href) });
+    }
+  }
+
+  return edges;
+}
+
+/** Edges leaving a node id (feature or layer). Pass precomputed `edges` to avoid recompute. */
+export function edgesFrom(model, nodeId, edges = null) {
+  return (edges || localeEdges(model)).filter((e) => e.from === nodeId);
+}
+
+/** Edges entering a node id (feature, layer, goal, or URL). Pass precomputed `edges` to avoid recompute. */
+export function edgesTo(model, nodeId, edges = null) {
+  return (edges || localeEdges(model)).filter((e) => e.to === nodeId);
+}
+
+/** All edges of one kind. Pass precomputed `edges` to avoid recompute. */
+export function edgesByKind(model, kind, edges = null) {
+  return (edges || localeEdges(model)).filter((e) => e.kind === kind);
+}
+
+/**
+ * The realizable-goal traversal: for a goal, the ordered control plan that accounts
+ * for DEPTH — a feature hidden behind a disclosure needs its trigger CLICKED first.
+ * Returns `{ goalId, label, steps }` where each step is a featureId plus, when that
+ * feature is `hidden`, the `revealedBy` trigger that must precede it. This is the
+ * graph traversal capabilitySynth's flat fills-before-acts ordering can't do on its
+ * own — it threads goal → enables⁻¹ → (reveals trigger) → feature. Pure.
+ *
+ * @returns {{ goalId:string, label:string, steps:Array<{featureId:string, trigger:(string|null), hidden:boolean}> }|null}
+ */
+export function pathToGoal(model, goalId) {
+  const goal = model?.goals?.[goalId];
+  if (!goal) return null;
+  const features = model.features || {};
+  const steps = [];
+  for (const fid of Array.isArray(goal.achievableVia) ? goal.achievableVia : []) {
+    const f = features[fid];
+    if (!f) continue;
+    const hidden = !!f.hidden;
+    const trigger = hidden && f.revealedBy && features[f.revealedBy] ? f.revealedBy : null;
+    steps.push({ featureId: fid, trigger, hidden });
+  }
+  return { goalId, label: goal.label || '', steps };
 }

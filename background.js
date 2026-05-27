@@ -78,10 +78,12 @@ import { bracket as observeActionBracket,
          classifyEffectDrift }                        from './Services/ActionEffectObserver.js';
 // v2.74.329 — GROUND_SPEC § 5 derived-intent cache validation.
 import { derivationInputsHash, DERIVATION_VERSION }   from './Core/groundDerivation.js';
-// Orchard cloud P0 — StoragePort seam + cloud API client (AWS_INTEGRATION §17).
+// Orchard cloud P0/P1 — StoragePort seam + cloud sync (AWS_INTEGRATION §17).
 import { ChromeStorageAdapter } from './Services/Storage/ChromeStorageAdapter.js';
+import { HybridStorageAdapter } from './Services/Storage/HybridStorageAdapter.js';
 import { initStoragePort, getStoragePortMeta } from './Services/Storage/StoragePort.js';
 import { getCloudSettings, setCloudSettings } from './Services/Cloud/CloudSettings.js';
+import { isCloudSignedIn } from './Services/Cloud/CloudTokenStore.js';
 import {
   getCloudAuthStatus,
   signInToCloud,
@@ -89,6 +91,15 @@ import {
 } from './Services/Cloud/OrchardAuth.js';
 import { getIdentityMe, getCloudObject } from './Services/Cloud/CloudClient.js';
 import { getIdentitySummary } from './Core/OrchardIdentity.js';
+import { syncBridgeOnStorageChange } from './Services/Sync/SyncBridge.js';
+import {
+  enableHybridSync,
+  ensureHybridSyncReady,
+  getSyncConflicts,
+  resetSyncBootstrap,
+  resolveSyncConflict,
+  runSync,
+} from './Services/Sync/SyncEngine.js';
 
 Logger.setLevel(LOG_LEVEL.DEBUG);
 Logger.setPersist(true);
@@ -132,7 +143,51 @@ async function _runMigrations() {
 let _migrationPromise = _runMigrations()
   .catch(err => Logger.error('background', `migration failed: ${err.message}`));
 
-// Orchard P0 — initialize storage port (ChromeStorageAdapter → StorageManager).
+// Orchard P0/P1 — initialize storage port; hybrid when signed in + enabled.
+async function refreshStoragePort() {
+  try {
+    const settings = await getCloudSettings();
+    const signedIn = await isCloudSignedIn();
+    if (settings.enabled && signedIn && settings.storageBackend !== 'hybrid') {
+      await enableHybridSync();
+    }
+    const latest = await getCloudSettings();
+    if (latest.enabled && signedIn && latest.storageBackend === 'hybrid') {
+      initStoragePort(new HybridStorageAdapter());
+    } else {
+      initStoragePort(new ChromeStorageAdapter('local'));
+    }
+    await configureSyncAlarm();
+  } catch (e) {
+    Logger.warn('background', `refreshStoragePort: ${e.message}`);
+    initStoragePort(new ChromeStorageAdapter('local'));
+  }
+}
+
+async function configureSyncAlarm() {
+  try {
+    const settings = await getCloudSettings();
+    const signedIn = await isCloudSignedIn();
+    if (!settings.enabled || !signedIn || settings.storageBackend !== 'hybrid') {
+      await chrome.alarms.clear('orchard-sync');
+      return;
+    }
+    const period = Math.max(1, Math.ceil((settings.syncIntervalSec || 30) / 60));
+    await chrome.alarms.create('orchard-sync', { periodInMinutes: period });
+  } catch (e) {
+    Logger.warn('background', `configureSyncAlarm: ${e.message}`);
+  }
+}
+
+function broadcastSyncApplied(applied) {
+  if (!Array.isArray(applied)) return;
+  for (const row of applied) {
+    if (row?.kind && row?.id) broadcastStorageChanged(row.kind, row.id, 'saved');
+  }
+}
+
+_migrationPromise = _migrationPromise.then(() => refreshStoragePort());
+
 initStoragePort(new ChromeStorageAdapter('local'));
 getIdentitySummary()
   .then(({ orchardUserIdPreview }) => {
@@ -171,7 +226,20 @@ function broadcastStorageChanged(kind, id, action) {
     kind, id, action,
     ts: Date.now(),
   }).catch(() => { /* no listeners; fine */ });
+
+  syncBridgeOnStorageChange(kind, id, action).catch((err) => {
+    Logger.warn('background', `sync bridge: ${err?.message || err}`);
+  });
 }
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== 'orchard-sync') return;
+  runSync()
+    .then((res) => {
+      if (res.ok) broadcastSyncApplied(res.applied);
+    })
+    .catch((err) => Logger.warn('background', `sync alarm: ${err?.message || err}`));
+});
 
 
 // v2.74.22 — walkAbortFlags + stepApprovalResolvers removed; only the
@@ -4641,6 +4709,56 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
+    // v2.74.477 — Locale graph: materialize the modeled archetype's typed edge set
+    // (reveals / contains / enables / leadsTo — PAGEMODEL_SPEC § 1) and reconcile its
+    // leadsTo destinations against this Ground's siteMap, so a UI can render the page
+    // graph AND see which links lead to already-modeled vs unknown archetypes (a
+    // discovery gap). Read-only; consumes the pure Core graph API.
+    case 'LOCALE_GRAPH': {
+      (async () => {
+        try {
+          const { groundId = null, archetypeId = null } = payload ?? {};
+          if (!groundId || !archetypeId) { sendResponse({ success: false, error: 'groundId, archetypeId required' }); return; }
+          const sm = await _readSiteMap(groundId);
+          const node = sm?.nodes?.[archetypeId];
+          if (!node) { sendResponse({ success: false, error: 'archetype not found in siteMap' }); return; }
+          if (!node.localeId) { sendResponse({ success: false, error: 'archetype not modeled yet (no Locale) — Explore it first' }); return; }
+          const pm = await _readLocaleCache(groundId, node.localeId);
+          const model = pm?.model;
+          if (!model) { sendResponse({ success: false, error: 'Locale model not found in cache' }); return; }
+          const edges = Locale.localeEdges(model);
+          const leadsTo = SiteMap.reconcileLeadsTo(Locale.edgesByKind(model, 'leadsTo', edges), sm);
+          const counts = edges.reduce((m, e) => { m[e.kind] = (m[e.kind] || 0) + 1; return m; }, {});
+          const gaps = leadsTo.filter((e) => e.known === false && e.status !== 'external').length;
+          // Node list (id/kind/label) for the layout renderer: features + layers + goals.
+          // (leadsTo destinations are URLs, not graph nodes — surfaced via leadsTo/gaps.)
+          const nodes = [
+            ...Object.values(model.features || {}).map((f) => ({ id: f.id, kind: f.kind, label: f.label || '' })),
+            ...Object.values(model.layers || {}).map((l) => ({ id: l.id, kind: 'layer', label: l.kind === 'surface' ? 'surface' : (l.kind || 'layer') })),
+            ...Object.values(model.goals || {}).map((g) => ({ id: g.id, kind: 'goal', label: g.label || '' })),
+          ];
+          // Per-goal achievement paths (depth-aware traversal): each goal's ordered controls,
+          // flagging the disclosure trigger that must open a hidden control first (pathToGoal).
+          // Enriched with feature/trigger labels + kinds so the UI can render readable steps.
+          const goalPaths = Object.values(model.goals || {}).map((g) => {
+            const p = Locale.pathToGoal(model, g.id);
+            if (!p) return null;
+            const steps = p.steps.map((s) => {
+              const f = model.features[s.featureId] || {};
+              const t = s.trigger ? (model.features[s.trigger] || {}) : null;
+              return { featureId: s.featureId, kind: f.kind || null, label: f.label || '', hidden: !!s.hidden, trigger: s.trigger || null, triggerLabel: t ? (t.label || '') : null };
+            });
+            return { goalId: g.id, label: g.label || '', steps };
+          }).filter(Boolean);
+          sendResponse({ success: true, nodes, edges, leadsTo, counts, gaps, goalPaths });
+        } catch (err) {
+          Logger.error('background', `LOCALE_GRAPH failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
 
     // v2.74.352 — "Resolve roles": one LLM call returns a CSS selector for each
     // of a perspective's roles (or null to abstain), given screenshot + rich
@@ -5651,6 +5769,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
 
     // ── Orchard cloud (P0) ───────────────────────────────────────────────────
+    case 'CLOUD_PING':
+      sendResponse({ success: true, pong: true, ts: Date.now() });
+      return false;
+
     case 'GET_STORAGE_PORT_META':
       sendResponse({ success: true, meta: getStoragePortMeta() });
       return false;
@@ -5663,25 +5785,63 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case 'SET_CLOUD_SETTINGS':
       setCloudSettings(payload.settings || {})
-        .then(settings => sendResponse({ success: true, settings }))
+        .then(async (settings) => {
+          await refreshStoragePort();
+          sendResponse({ success: true, settings });
+        })
         .catch(e => sendResponse({ success: false, error: e.message }));
       return true;
 
     case 'GET_CLOUD_STATUS':
       getCloudAuthStatus()
-        .then(status => sendResponse({ success: true, status }))
+        .then(async (status) => {
+          /** @type {{ storageBackend: string, adapterKind: string }} */
+          let meta = { storageBackend: 'local', adapterKind: 'chrome-storage' };
+          try {
+            meta = getStoragePortMeta();
+          } catch { /* port not initialized yet */ }
+
+          let pendingConflicts = 0;
+          try {
+            pendingConflicts = (await getSyncConflicts()).length;
+          } catch (e) {
+            Logger.warn('background', `GET_CLOUD_STATUS conflicts: ${e.message}`);
+          }
+
+          sendResponse({
+            success: true,
+            status: {
+              ...status,
+              storageBackend: meta.storageBackend,
+              adapterKind: meta.adapterKind,
+              pendingConflicts,
+            },
+          });
+        })
         .catch(e => sendResponse({ success: false, error: e.message }));
       return true;
 
     case 'CLOUD_SIGN_IN':
       signInToCloud()
-        .then(result => sendResponse({ success: result.success, ...result }))
+        .then(async (result) => {
+          if (result.success) {
+            await enableHybridSync();
+            await refreshStoragePort();
+            const syncRes = await runSync().catch(() => null);
+            broadcastSyncApplied(syncRes?.applied);
+          }
+          sendResponse({ success: result.success, ...result });
+        })
         .catch(e => sendResponse({ success: false, error: e.message }));
       return true;
 
     case 'CLOUD_SIGN_OUT':
       signOutOfCloud()
-        .then(() => sendResponse({ success: true }))
+        .then(async () => {
+          await resetSyncBootstrap();
+          await refreshStoragePort();
+          sendResponse({ success: true });
+        })
         .catch(e => sendResponse({ success: false, error: e.message }));
       return true;
 
@@ -5695,6 +5855,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       getCloudObject(payload.path)
         .then(object => sendResponse({ success: true, object }))
         .catch(e => sendResponse({ success: false, error: e.message, status: e.status }));
+      return true;
+
+    case 'RUN_SYNC':
+      ensureHybridSyncReady()
+        .then(async (ready) => {
+          if (!ready.ready) {
+            sendResponse({ success: false, ok: false, error: ready.error });
+            return;
+          }
+          await refreshStoragePort();
+          const res = await runSync();
+          broadcastSyncApplied(res.applied);
+          sendResponse({ success: !!res.ok, ...res });
+        })
+        .catch(e => sendResponse({ success: false, ok: false, error: e.message }));
+      return true;
+
+    case 'GET_SYNC_CONFLICTS':
+      getSyncConflicts()
+        .then(conflicts => sendResponse({ success: true, conflicts }))
+        .catch(e => sendResponse({ success: false, error: e.message }));
+      return true;
+
+    case 'RESOLVE_SYNC_CONFLICT':
+      resolveSyncConflict(payload.path, payload.resolution)
+        .then(result => sendResponse({ success: true, ...result }))
+        .catch(e => sendResponse({ success: false, error: e.message }));
       return true;
 
     // ── Data ──────────────────────────────────────────────────────────────────

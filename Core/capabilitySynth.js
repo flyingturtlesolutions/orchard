@@ -14,7 +14,7 @@
 // PURE: no DOM / chrome / storage / id-minting (the persistence slice mints ids + saves).
 //
 // @module Core/capabilitySynth
-// @version 2.74.470
+// @version 2.74.475
 
 /** Feature kinds that FILL a value (typed first), vs ACT (clicked after). */
 const _FILL_KINDS = new Set(['input']);
@@ -59,7 +59,22 @@ export function synthesizeCapabilityDraft(goal, locale, { groundId = null, url =
     }
   }
 
+  // Depth (PAGEMODEL_SPEC `reveals` edge): a feature hidden behind a disclosure can't
+  // be typed/clicked until its trigger is CLICKED to reveal it. Follow each picked
+  // feature's `revealedBy` back-edge to the trigger and emit those reveal clicks FIRST
+  // (deduped by selector), so a hidden search field is opened before TYPE. Triggers
+  // resolved here are remembered so the acts loop below doesn't click them twice.
   let unverified = 0;
+  const revealed = new Set();
+  for (const f of [...fills, ...acts]) {
+    if (!f.hidden || !f.revealedBy) continue;
+    const trig = features[f.revealedBy];
+    if (!trig || !trig.selector || revealed.has(trig.selector)) continue;
+    revealed.add(trig.selector);
+    if (trig.selectorVerified === false) unverified++;
+    actions.push({ action: 'CLICK', selector: trig.selector });
+  }
+
   const used = new Set();
   for (const f of fills) {
     if (!f.selector) { skipped.push({ featureId: f.id, kind: f.kind, why: 'no selector' }); continue; }
@@ -72,12 +87,14 @@ export function synthesizeCapabilityDraft(goal, locale, { groundId = null, url =
   }
   for (const f of acts) {
     if (!f.selector) { skipped.push({ featureId: f.id, kind: f.kind, why: 'no selector' }); continue; }
+    if (revealed.has(f.selector)) continue;   // already emitted as a reveal trigger above
     if (f.selectorVerified === false) unverified++;
     actions.push({ action: 'CLICK', selector: f.selector });
   }
 
   const actionable = actions.filter((a) => a.action !== 'NAVIGATE').length;
   if (!picked.length) warnings.push('goal has no linked features (achievableVia empty) — nothing to do but navigate');
+  if (revealed.size) warnings.push(`${revealed.size} disclosure step(s) injected to reveal hidden controls — review the step order`);
   if (unverified) warnings.push(`${unverified} selector(s) unverified — likely need refinement before running`);
   if (!actionable) warnings.push('no actionable controls resolved — draft only navigates to the page');
 
