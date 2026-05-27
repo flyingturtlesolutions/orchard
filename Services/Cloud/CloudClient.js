@@ -100,6 +100,20 @@ export async function bindIdentity(body) {
   return completeIdentityBind(body);
 }
 
+// ── Publication registry (AWS_INTEGRATION §7.4) ──────────────────────────────
+/** @param {{ publication: object, manifest: object, packages: object }} pkg */
+export async function publishToRegistry(pkg) {
+  return cloudRequest('POST', '/publications', { body: pkg });
+}
+/** @param {string} publicationId @returns {Promise<{ publication: object, manifest: object, packages: object }>} */
+export async function fetchPublication(publicationId) {
+  return /** @type {any} */ (cloudRequest('GET', `/publications/${encodeURIComponent(publicationId)}`));
+}
+/** @param {string} [query] @returns {Promise<{ publications: object[] }>} */
+export async function searchPublications(query) {
+  return /** @type {any} */ (cloudRequest('GET', '/publications', { query: query ? { query } : {} }));
+}
+
 /**
  * @param {string} logicalPath
  * @returns {Promise<unknown>}

@@ -69,6 +69,7 @@ import { analyzeDeletionImpact }                     from './Services/Storage/Re
 import { bindPublicIdentity }                        from './Services/Storage/IdentityStore.js';
 import { publishPrimitive, listOutgoingPublications, getOutgoingPublication } from './Services/Storage/PublicationStore.js';
 import { importPublicationPackage, listIncomingPublications } from './Services/Storage/PublicationImport.js';
+import { fetchPublication } from './Services/Cloud/CloudClient.js';
 import { emit as emitGroundEvent_bg,
          list as listGroundEvents_bg,
          clear as clearGroundEvents_bg }              from './Services/GroundEventBus.js';
@@ -3091,7 +3092,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       (async () => {
         try {
           const { publicationId, package: pkgArg, targetGroundId } = payload;
-          const pkg = pkgArg || (publicationId ? await getOutgoingPublication(publicationId) : null);
+          // Resolve the package: explicit, local outgoing (same-device round-trip), then registry.
+          let pkg = pkgArg || (publicationId ? await getOutgoingPublication(publicationId) : null);
+          if (!pkg?.manifest && publicationId) {
+            try { pkg = await fetchPublication(publicationId); }
+            catch (e) { Logger.warn('background', `registry fetch ${publicationId}: ${e.message}`); }
+          }
           if (!pkg?.manifest) { sendResponse({ success: false, error: 'publication package not found' }); return; }
           const result = await importPublicationPackage(pkg, { targetGroundId });
           if (result.ok) {

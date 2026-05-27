@@ -16,6 +16,7 @@ import { buildManifest, buildPublication } from '../../Core/publication.js';
 import { rebuildReferenceGraph, collectWorkspacePrimitives } from './ReferenceStore.js';
 import { getLocalUserRef } from './IdentityStore.js';
 import { signMessage } from '../../Core/OrchardIdentity.js';
+import { publishToRegistry } from '../Cloud/CloudClient.js';
 
 const OUT_INDEX_KEY = 'publications:outgoing:index';
 const outKey = (id) => `publications:outgoing:${id}`;
@@ -181,10 +182,21 @@ export async function publishPrimitive(kind, id, details = {}) {
   const pkg = await buildPackage(kind, id, details);
   await signPackage(pkg);
   await persistOutgoing(pkg);
+
+  // Best-effort registry upload (AWS_INTEGRATION §7.4). Requires cloud sign-in + the deployed
+  // /publications endpoint; on failure the signed local copy is kept and can be re-uploaded later.
+  let registry = null;
+  try {
+    registry = await publishToRegistry(pkg);
+    Logger.info('PublicationStore', `uploaded ${pkg.publication.publicationId} to registry ${registry?.registry ?? '?'}`);
+  } catch (e) {
+    Logger.warn('PublicationStore', `registry upload deferred (${e.message}); local copy saved`);
+  }
+
   Logger.info(
     'PublicationStore',
     `published ${kind} ${id} → ${pkg.publication.publicationId} `
-    + `(${pkg.packages.dependencies.length} bundled dep(s); local — registry upload pending)`,
+    + `(${pkg.packages.dependencies.length} bundled dep(s); ${registry ? 'uploaded' : 'local-only'})`,
   );
-  return pkg.publication;
+  return { ...pkg.publication, uploaded: !!registry };
 }

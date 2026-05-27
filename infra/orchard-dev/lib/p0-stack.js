@@ -93,6 +93,32 @@ class P0Stack extends cdk.Stack {
       }],
     });
 
+    // Publication registry (STORAGE_SCHEMA §9 / AWS_INTEGRATION §5.2, §6.4). v1: single
+    // `orchard-public` registry (DD-16). Packages immutable per version (DD-12 B).
+    const publicationTable = new dynamodb.Table(this, 'OrchardPublicationRegistry', {
+      tableName: 'orchard-publications-dev',
+      partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING },   // REGISTRY#{registryId}
+      sortKey: { name: 'SK', type: dynamodb.AttributeType.STRING },        // PUB#{publicationId}
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    publicationTable.addGlobalSecondaryIndex({
+      indexName: 'LineageIndex',                                           // list versions in a series
+      partitionKey: { name: 'GSI1PK', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'GSI1SK', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    const publicationsBucket = new s3.Bucket(this, 'PublicationsBucket', {
+      bucketName: `dev-orchard-publications-${cdk.Aws.ACCOUNT_ID}`,
+      encryption: s3.BucketEncryption.KMS,
+      encryptionKey: workspaceKey,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+    });
+
     const apiHandler = new lambda.Function(this, 'ApiHandler', {
       functionName: 'orchard-p0-api',
       runtime: lambda.Runtime.NODEJS_20_X,
@@ -103,6 +129,8 @@ class P0Stack extends cdk.Stack {
         IDENTITY_TABLE: identityTable.tableName,
         OBJECT_TABLE: objectTable.tableName,
         WORKSPACE_BUCKET: workspaceBucket.bucketName,
+        PUBLICATIONS_TABLE: publicationTable.tableName,
+        PUBLICATIONS_BUCKET: publicationsBucket.bucketName,
       },
     });
 
@@ -110,6 +138,8 @@ class P0Stack extends cdk.Stack {
     objectTable.grantReadWriteData(apiHandler);
     workspaceBucket.grantReadWrite(apiHandler);
     workspaceKey.grantDecrypt(apiHandler);
+    publicationTable.grantReadWriteData(apiHandler);
+    publicationsBucket.grantReadWrite(apiHandler);
 
     const httpApi = new apigwv2.HttpApi(this, 'HttpApi', {
       apiName: 'orchard-dev',

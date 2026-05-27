@@ -22,6 +22,9 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const IDENTITY_TABLE = process.env.IDENTITY_TABLE;
 const OBJECT_TABLE = process.env.OBJECT_TABLE;
 const WORKSPACE_BUCKET = process.env.WORKSPACE_BUCKET;
+const PUBLICATIONS_TABLE = process.env.PUBLICATIONS_TABLE;
+const PUBLICATIONS_BUCKET = process.env.PUBLICATIONS_BUCKET;
+const REGISTRY_ID = 'orchard-public';   // v1 single registry (DD-16)
 const MAX_BATCH = 10;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -812,6 +815,138 @@ async function handleBatchWrite(event) {
   return json(200, { etags, updatedAt, count: written.length });
 }
 
+// ── Publication registry (STORAGE_SCHEMA §9 / AWS_INTEGRATION §5.2, §6.4, §7.4) ────────
+function pubPrefix(publicationId) {
+  return `registries/${REGISTRY_ID}/pub/${publicationId}/`;
+}
+
+async function s3PutJson(bucket, key, obj) {
+  await s3.send(new PutObjectCommand({
+    Bucket: bucket, Key: key, ContentType: 'application/json', Body: JSON.stringify(obj),
+  }));
+}
+
+async function s3GetJson(bucket, key) {
+  try {
+    const res = await s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    return JSON.parse(await res.Body.transformToString());
+  } catch { return null; }
+}
+
+async function getPublicationRow(publicationId) {
+  const res = await ddb.send(new GetCommand({
+    TableName: PUBLICATIONS_TABLE,
+    Key: { PK: `REGISTRY#${REGISTRY_ID}`, SK: `PUB#${publicationId}` },
+  }));
+  return res.Item || null;
+}
+
+async function handlePublishPublication(event) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+
+  let payload;
+  try { payload = JSON.parse(event.body || '{}'); } catch { return json(400, { error: 'invalid_json' }); }
+  const { publication, manifest, packages } = payload;
+  if (!publication?.publicationId || !manifest || !packages) {
+    return json(400, { error: 'missing_publication_manifest_or_packages' });
+  }
+  const publicationId = String(publication.publicationId);
+
+  // Anti-impersonation: the signer's public key must match the caller's bound identity (DD-01).
+  const identity = await getIdentityRecord(auth.claims.sub);
+  const signerKey = publication.publishedBy && publication.publishedBy.publicKey;
+  if (!signerKey || (identity && identity.publicKey && signerKey !== identity.publicKey)) {
+    return json(403, { error: 'publisher_key_mismatch' });
+  }
+  if (!publication.signature) return json(400, { error: 'unsigned_publication' });
+
+  // Immutable per version (DD-12 B): a publicationId is written once.
+  if (await getPublicationRow(publicationId)) return json(409, { error: 'already_published', publicationId });
+
+  // Lineage root (DD-12 B): inherit from previousVersionId, else this id starts the series.
+  let lineageRootId = publicationId;
+  if (publication.previousVersionId) {
+    const prev = await getPublicationRow(String(publication.previousVersionId));
+    lineageRootId = (prev && prev.lineageRootId) || String(publication.previousVersionId);
+  }
+
+  const prefix = pubPrefix(publicationId);
+  await s3PutJson(PUBLICATIONS_BUCKET, `${prefix}publication.json`, publication);
+  await s3PutJson(PUBLICATIONS_BUCKET, `${prefix}manifest.json`, manifest);
+  await s3PutJson(PUBLICATIONS_BUCKET, `${prefix}packages.json`, packages);
+
+  const createdAt = Date.now();
+  await ddb.send(new PutCommand({
+    TableName: PUBLICATIONS_TABLE,
+    Item: {
+      PK: `REGISTRY#${REGISTRY_ID}`,
+      SK: `PUB#${publicationId}`,
+      GSI1PK: `REGISTRY#${REGISTRY_ID}#ROOT#${lineageRootId}`,
+      GSI1SK: `CREATED#${String(createdAt).padStart(16, '0')}`,
+      publicationId,
+      publisherPublicKey: signerKey,
+      publisherUserRef: publication.publishedBy || null,
+      title: publication.title || '',
+      description: publication.description || '',
+      tags: Array.isArray(publication.tags) ? publication.tags : [],
+      visibility: publication.visibility || 'unlisted',
+      version: publication.version || '1.0.0',
+      previousVersionId: publication.previousVersionId || null,
+      lineageRootId,
+      primaryS3Prefix: prefix,
+      bundleHash: manifest.bundleHash || publication.bundleHash || '',
+      schemaCompatibility: Number(publication.schemaVersions && publication.schemaVersions.schemaCompatibility) || 1,
+      createdAt,
+    },
+  }));
+
+  return json(200, { publicationId, registryPublicationId: publicationId, lineageRootId, registry: REGISTRY_ID });
+}
+
+async function handleGetPublication(event, publicationId) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+  const row = await getPublicationRow(publicationId);
+  if (!row) return json(404, { error: 'not_found', publicationId });
+  if (row.visibility === 'private') {
+    const identity = await getIdentityRecord(auth.claims.sub);
+    if (!identity || row.publisherPublicKey !== identity.publicKey) return json(403, { error: 'forbidden' });
+  }
+  const prefix = row.primaryS3Prefix || pubPrefix(publicationId);
+  const [publication, manifest, packages] = await Promise.all([
+    s3GetJson(PUBLICATIONS_BUCKET, `${prefix}publication.json`),
+    s3GetJson(PUBLICATIONS_BUCKET, `${prefix}manifest.json`),
+    s3GetJson(PUBLICATIONS_BUCKET, `${prefix}packages.json`),
+  ]);
+  if (!publication || !manifest) return json(404, { error: 'package_missing', publicationId });
+  return json(200, { publication, manifest, packages });
+}
+
+async function handleListPublications(event) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+  const q = ((event.queryStringParameters && event.queryStringParameters.query) || '').toLowerCase();
+  const res = await ddb.send(new QueryCommand({
+    TableName: PUBLICATIONS_TABLE,
+    KeyConditionExpression: 'PK = :pk',
+    ExpressionAttributeValues: { ':pk': `REGISTRY#${REGISTRY_ID}` },
+  }));
+  let rows = (res.Items || []).filter((r) => r.visibility !== 'private');
+  if (q) {
+    rows = rows.filter((r) => String(r.title || '').toLowerCase().includes(q)
+      || String(r.description || '').toLowerCase().includes(q)
+      || (Array.isArray(r.tags) && r.tags.some((t) => String(t).toLowerCase().includes(q))));
+  }
+  rows.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const publications = rows.slice(0, 100).map((r) => ({
+    publicationId: r.publicationId, title: r.title, description: r.description, tags: r.tags,
+    visibility: r.visibility, version: r.version, publisherUserRef: r.publisherUserRef,
+    lineageRootId: r.lineageRootId, bundleHash: r.bundleHash, createdAt: r.createdAt,
+  }));
+  return json(200, { publications, registry: REGISTRY_ID });
+}
+
 exports.handler = async (event) => {
   try {
     const method = event.requestContext?.http?.method || 'GET';
@@ -833,6 +968,12 @@ exports.handler = async (event) => {
     if (method === 'GET' && path.startsWith('/objects/')) return handleGetObject(event);
     if (method === 'PUT' && path.startsWith('/objects/')) return handlePutObject(event);
     if (method === 'DELETE' && path.startsWith('/objects/')) return handleDeleteObject(event);
+
+    if (method === 'POST' && path === '/publications') return handlePublishPublication(event);
+    if (method === 'GET' && path === '/publications') return handleListPublications(event);
+    if (method === 'GET' && path.startsWith('/publications/')) {
+      return handleGetPublication(event, decodeURIComponent(path.slice('/publications/'.length)));
+    }
 
     return json(404, { error: 'not_found', method, path });
   } catch (err) {
