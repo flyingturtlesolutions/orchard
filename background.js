@@ -66,6 +66,7 @@ import { listLandmarksForGround, resolveLandmarkRef } from './Services/LandmarkR
 import { listActivePerspectives }                          from './Services/PerspectivePredicates.js';
 import { analyzeLandmarkImpact }                      from './Services/LandmarkImpactAnalysis.js';
 import { analyzeDeletionImpact }                     from './Services/Storage/ReferenceStore.js';
+import { bindPublicIdentity }                        from './Services/Storage/IdentityStore.js';
 import { emit as emitGroundEvent_bg,
          list as listGroundEvents_bg,
          clear as clearGroundEvents_bg }              from './Services/GroundEventBus.js';
@@ -252,7 +253,10 @@ _migrationPromise = _migrationPromise.then(() => refreshStoragePort());
 
 initStoragePort(new ChromeStorageAdapter('local'));
 getIdentitySummary()
-  .then(({ orchardUserIdPreview }) => {
+  .then(async ({ publicKeyB64, orchardUserIdPreview }) => {
+    // C-P0 — reflect the device's Ed25519 identity onto the §4 LocalUser record (idempotent;
+    // independent of cloud sign-in so local-only users still get publicIdentity).
+    await bindPublicIdentity({ publicKey: publicKeyB64, publicKeyAlgorithm: 'Ed25519' }).catch(() => {});
     Logger.info('background', `Orchard identity ready (preview ${orchardUserIdPreview})`);
   })
   .catch(err => Logger.warn('background', `Orchard identity init: ${err.message}`));

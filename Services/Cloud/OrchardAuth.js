@@ -5,37 +5,55 @@
 
 import { Logger } from '../../Core/Logger.js';
 import { getCloudSettings } from './CloudSettings.js';
-import { setCloudSession, getCloudSession } from './CloudTokenStore.js';
+import {
+  setCloudSession, getCloudSession, getStoredSession, isCloudSignedIn, exchangeAuthCode,
+} from './CloudTokenStore.js';
 import { CloudClientError, completeIdentityBind, requestBindChallenge } from './CloudClient.js';
 import { getIdentitySummary, signBindChallenge } from '../../Core/OrchardIdentity.js';
+import { bindAccount } from '../Storage/IdentityStore.js';
+
+/** base64url (no padding) of a byte array. */
+function base64UrlFromBytes(bytes) {
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
 
 /**
- * Parse tokens from implicit-grant redirect URL hash.
+ * Generate a PKCE verifier (high-entropy) + S256 challenge.
+ * @returns {Promise<{ verifier: string, challenge: string }>}
+ */
+async function generatePkce() {
+  const verifier = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(48)));  // ~64 chars
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  const challenge = base64UrlFromBytes(new Uint8Array(digest));
+  return { verifier, challenge };
+}
+
+/**
+ * Extract the authorization code from the redirect (code grant → `?code=...`). Throws on error
+ * or a missing code.
  * @param {string} redirectUrl
  */
-function parseTokensFromRedirect(redirectUrl) {
-  const hash = new URL(redirectUrl).hash.replace(/^#/, '');
-  const params = new URLSearchParams(hash);
-  const idToken = params.get('id_token');
-  const accessToken = params.get('access_token');
-  const expiresIn = Number(params.get('expires_in') || '3600');
-  if (!idToken) {
-    throw new Error('Cognito redirect missing id_token — check app client OAuth flows');
+function parseCodeFromRedirect(redirectUrl) {
+  const u = new URL(redirectUrl);
+  const err = u.searchParams.get('error');
+  if (err) {
+    const desc = u.searchParams.get('error_description');
+    throw new Error(`Cognito error: ${err}${desc ? ` — ${desc}` : ''}`);
   }
-  return {
-    idToken,
-    accessToken: accessToken || undefined,
-    expiresAt: Date.now() + expiresIn * 1000,
-  };
+  const code = u.searchParams.get('code');
+  if (!code) throw new Error('Cognito redirect missing authorization code — check app client OAuth flows (authorization code grant + PKCE)');
+  return code;
 }
 
 /** @returns {Promise<{ signedIn: boolean, orchardUserId?: string }>} */
 export async function getCloudAuthStatus() {
-  const session = await getCloudSession();
+  const session = await getStoredSession();
   const settings = await getCloudSettings();
   const { orchardUserIdPreview } = await getIdentitySummary();
   return {
-    signedIn: !!session,
+    signedIn: await isCloudSignedIn(),
     orchardUserId: session?.orchardUserId,
     orchardUserIdPreview,
     cloudEnabled: settings.enabled,
@@ -50,16 +68,18 @@ export function getOAuthRedirectUri() {
   return chrome.identity.getRedirectURL('orchard');
 }
 
-/** Build hosted UI authorize URL (implicit grant). */
-function buildAuthorizeUrl(settings) {
+/** Build hosted UI authorize URL (authorization code grant + PKCE). */
+function buildAuthorizeUrl(settings, codeChallenge) {
   const redirectUri = getOAuthRedirectUri();
   const domain = settings.cognitoDomain.replace(/\/$/, '');
   const scope = encodeURIComponent(settings.cognitoScope || 'openid email');
   return `${domain}/oauth2/authorize`
     + `?client_id=${encodeURIComponent(settings.cognitoClientId)}`
-    + `&response_type=token`
+    + `&response_type=code`
     + `&redirect_uri=${encodeURIComponent(redirectUri)}`
     + `&scope=${scope}`
+    + `&code_challenge=${encodeURIComponent(codeChallenge)}`
+    + `&code_challenge_method=S256`
     + `&prompt=login`;
 }
 
@@ -104,7 +124,8 @@ export async function signInToCloud() {
     };
   }
 
-  const authUrl = buildAuthorizeUrl(settings);
+  const { verifier, challenge } = await generatePkce();
+  const authUrl = buildAuthorizeUrl(settings, challenge);
   const redirectUri = getOAuthRedirectUri();
 
   // Clear any Cognito browser cookie so prompt=login shows credentials (ignore cancel).
@@ -119,8 +140,9 @@ export async function signInToCloud() {
   }
 
   try {
-    const tokens = parseTokensFromRedirect(redirectUrl);
-    await setCloudSession({ ...tokens });
+    // PKCE: exchange the authorization code (+ verifier) for id/access/refresh tokens.
+    const code = parseCodeFromRedirect(redirectUrl);
+    await exchangeAuthCode({ code, redirectUri, codeVerifier: verifier });
     const bindResult = await tryBindIdentity();
     return { success: true, bind: bindResult };
   } catch (e) {
@@ -156,6 +178,12 @@ export async function tryBindIdentity() {
     const session = await getCloudSession();
     if (session && result?.orchardUserId) {
       await setCloudSession({ ...session, orchardUserId: result.orchardUserId });
+    }
+    // C-P0 — record the backend account binding on the §4 LocalUser (orchardUserId = server-derived).
+    if (result?.orchardUserId) {
+      await bindAccount({ accountId: result.orchardUserId, provider: 'orchard-cloud' }).catch((e) => {
+        Logger.warn('OrchardAuth', `bindAccount: ${e.message}`);
+      });
     }
     return { bound: true, orchardUserId: result?.orchardUserId };
   } catch (e) {

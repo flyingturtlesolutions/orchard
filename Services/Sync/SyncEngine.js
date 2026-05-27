@@ -6,7 +6,7 @@
 import { Logger } from '../../Core/Logger.js';
 import { StorageManager } from '../StorageManager.js';
 import { getCloudSettings, setCloudSettings } from '../Cloud/CloudSettings.js';
-import { isCloudSignedIn, getCloudSession } from '../Cloud/CloudTokenStore.js';
+import { isCloudSignedIn, getStoredSession } from '../Cloud/CloudTokenStore.js';
 import {
   batchWriteCloudObjects,
   deleteCloudObject,
@@ -419,7 +419,7 @@ function isLocalRecordDirty(record, cached) {
 async function bootstrapLocalWorkspace() {
   if (!(await isHybridSyncActive())) return 0;
 
-  const session = await getCloudSession();
+  const session = await getStoredSession();
   const opts = { orchardUserId: session?.orchardUserId, deferSchedule: true };
   const outboxPaths = new Set((await listOutboxEntries()).map((e) => e.path));
   const conflictPaths = new Set((await getPendingConflicts()).map((p) => p.path));
@@ -646,7 +646,7 @@ async function handleConflict(conflict) {
 }
 
 async function pullChanges() {
-  const session = await getCloudSession();
+  const session = await getStoredSession();
   let since = await getLastSyncToken();
   const applied = [];
   let skippedCached = 0;

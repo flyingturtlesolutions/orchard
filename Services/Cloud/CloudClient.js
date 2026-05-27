@@ -5,7 +5,7 @@
 
 import { Logger } from '../../Core/Logger.js';
 import { getCloudSettings, normalizeApiBaseUrl } from './CloudSettings.js';
-import { getCloudSession } from './CloudTokenStore.js';
+import { ensureFreshSession } from './CloudTokenStore.js';
 
 export class CloudClientError extends Error {
   /** @param {number} status @param {string} message @param {unknown} [body] */
@@ -50,7 +50,7 @@ export async function cloudRequest(method, path, opts = {}) {
 
   const useAuth = opts.auth !== false;
   if (useAuth) {
-    const session = await getCloudSession();
+    const session = await ensureFreshSession();
     if (!session?.idToken) {
       throw new CloudClientError(401, 'Not signed in to Orchard cloud');
     }
@@ -129,7 +129,7 @@ async function fetchObjectResponse(logicalPath) {
   const encoded = logicalPath.split('/').map(encodeURIComponent).join('/');
   const url = new URL(`objects/${encoded}`, `${base}/`);
 
-  const session = await getCloudSession();
+  const session = await ensureFreshSession();
   if (!session?.idToken) {
     throw new CloudClientError(401, 'Not signed in to Orchard cloud');
   }

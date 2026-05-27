@@ -39,7 +39,10 @@ class P0Stack extends cdk.Stack {
       userPoolClientName: 'ahub-extension',
       generateSecret: false,
       oAuth: {
-        flows: { implicitCodeGrant: true },
+        // Authorization code grant + PKCE (public client, no secret). The extension uses the
+        // Hosted UI code flow (/oauth2/authorize?response_type=code → /oauth2/token) and a refresh
+        // token for durable sessions. Implicit grant is retired (no refresh token, ~1h expiry).
+        flows: { authorizationCodeGrant: true },
         scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL],
         callbackUrls: [extensionRedirectUri],
         logoutUrls: [extensionRedirectUri],
