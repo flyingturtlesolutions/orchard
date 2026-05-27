@@ -359,17 +359,39 @@ async function presignedGetUrl(orchardUserId, logicalPath) {
   return getSignedUrl(s3, command, { expiresIn: PRESIGN_TTL_SECONDS });
 }
 
+function safeDecode(s) { try { return decodeURIComponent(s); } catch { return s; } }
+
+/**
+ * Resolve a URL-routed object path to the form actually stored. Writes persist `body.path` (raw,
+ * single-encoded — locale keys legitimately contain %3A/%2F as one segment); reads route via the
+ * URL, where API Gateway's %-decoding may leave the path raw or over-decoded. Try the as-given form
+ * first (matches writes), then a single decodeURIComponent fallback, picking whichever has a stored
+ * index row. Cannot regress plain ids (raw === decoded); fixes encoded keys (locales).
+ * @returns {Promise<{ logicalPath: string, index: object|null }>}
+ */
+async function resolveObjectPath(orchardUserId, rawFromUrl) {
+  const candidates = [rawFromUrl];
+  try {
+    const decoded = decodeURIComponent(rawFromUrl);
+    if (decoded !== rawFromUrl) candidates.push(decoded);
+  } catch { /* malformed % sequence → only the raw form is usable */ }
+  for (const candidate of candidates) {
+    const index = await getIndexRecord(orchardUserId, candidate);
+    if (index) return { logicalPath: candidate, index };
+  }
+  return { logicalPath: candidates[0], index: null };
+}
+
 async function handleGetObject(event) {
   const auth = await requireOrchardUser(event);
   if (auth.error) return auth.error;
 
-  const path = routePath(event);
-  const logicalPath = decodeURIComponent(path.replace(/^\/objects\/?/, ''));
-  if (!logicalPath || isPathDenied(logicalPath)) {
-    return json(logicalPath ? 403 : 400, { error: logicalPath ? 'path_denied' : 'invalid_path' });
+  const rawPath = routePath(event).replace(/^\/objects\/?/, '');
+  if (!rawPath || isPathDenied(rawPath) || isPathDenied(safeDecode(rawPath))) {
+    return json(rawPath ? 403 : 400, { error: rawPath ? 'path_denied' : 'invalid_path' });
   }
+  const { logicalPath, index } = await resolveObjectPath(auth.orchardUserId, rawPath);
 
-  const index = await getIndexRecord(auth.orchardUserId, logicalPath);
   if (index?.deleted) {
     return json(404, { error: 'not_found', path: logicalPath });
   }
@@ -695,13 +717,12 @@ async function handleDeleteObject(event) {
   const auth = await requireOrchardUser(event);
   if (auth.error) return auth.error;
 
-  const path = routePath(event);
-  const logicalPath = decodeURIComponent(path.replace(/^\/objects\/?/, ''));
-  if (!logicalPath || isPathDenied(logicalPath)) {
-    return json(logicalPath ? 403 : 400, { error: logicalPath ? 'path_denied' : 'invalid_path' });
+  const rawPath = routePath(event).replace(/^\/objects\/?/, '');
+  if (!rawPath || isPathDenied(rawPath) || isPathDenied(safeDecode(rawPath))) {
+    return json(rawPath ? 403 : 400, { error: rawPath ? 'path_denied' : 'invalid_path' });
   }
-
-  const existing = await getIndexRecord(auth.orchardUserId, logicalPath);
+  // Resolve to the stored key form (encoding-tolerant) so a locale delete targets the right object.
+  const { logicalPath, index: existing } = await resolveObjectPath(auth.orchardUserId, rawPath);
   const updatedAt = Math.max(Date.now(), (existing?.updatedAt || 0) + 1);
 
   try {
