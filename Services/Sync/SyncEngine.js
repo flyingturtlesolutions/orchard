@@ -702,11 +702,16 @@ async function pullChanges() {
         const result = await applyRemoteObject(change.path, envelope, etag || change.etag || '');
         if (result) applied.push(result);
       } catch (e) {
-        const missing = e instanceof CloudClientError && e.status === 404
-          && typeof e.body === 'object' && e.body && /** @type {{ error?: string }} */ (e.body).error === 'not_found';
-        if (missing) {
+        // A single unavailable object must NOT wedge the whole sync. If it re-threw, the page never
+        // reaches the token commit below, so the same batch re-pulls every cycle forever. An orphan
+        // (index row present, S3 body gone) surfaces differently by size: inline → lambda 404 JSON
+        // {error:'not_found'}; large → presigned S3 GET returns 403/404 with an XML body. Skip any
+        // gone/inaccessible status regardless of body shape; only transient 5xx/network aborts the
+        // run so a later retry can still make progress.
+        const status = e instanceof CloudClientError ? e.status : 0;
+        if (status === 404 || status === 403 || status === 410) {
           skippedMissing += 1;
-          Logger.warn('SyncEngine', `pull skip missing cloud object: ${change.path}`);
+          Logger.warn('SyncEngine', `pull skip unavailable object (${status}): ${change.path}`);
           continue;
         }
         throw e;
