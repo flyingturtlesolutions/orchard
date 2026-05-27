@@ -4706,6 +4706,7 @@ async function refreshCloudSettings() {
   const apiInput = $('input-cloud-api-url');
   const domainInput = $('input-cloud-cognito-domain');
   const clientInput = $('input-cloud-cognito-client');
+  const redirectInput = $('input-cloud-oauth-redirect');
   if (apiInput) apiInput.value = settings.apiBaseUrl || '';
   if (domainInput) domainInput.value = settings.cognitoDomain || '';
   if (clientInput) clientInput.value = settings.cognitoClientId || '';
@@ -4722,6 +4723,7 @@ async function refreshCloudSettings() {
   }
 
   const s = statusRes.status || {};
+  if (redirectInput) redirectInput.value = s.oauthRedirectUri || '';
   const canSync = !!(s.signedIn && s.cloudEnabled);
   const hybridActive = canSync && s.storageBackend === 'hybrid';
 

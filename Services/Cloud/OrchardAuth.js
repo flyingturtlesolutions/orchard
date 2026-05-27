@@ -40,17 +40,22 @@ export async function getCloudAuthStatus() {
     orchardUserIdPreview,
     cloudEnabled: settings.enabled,
     storageBackend: settings.storageBackend,
+    oauthRedirectUri: getOAuthRedirectUri(),
+    extensionId: chrome.runtime.id,
   };
 }
 
-/** Build hosted UI URL that clears any Cognito session cookie, then shows login. */
-function buildSignInUrl(settings) {
-  const redirectUri = chrome.identity.getRedirectURL('orchard');
+/** Stable OAuth redirect for Cognito hosted UI (must match app client callback URLs). */
+export function getOAuthRedirectUri() {
+  return chrome.identity.getRedirectURL('orchard');
+}
+
+/** Build hosted UI authorize URL (implicit grant). */
+function buildAuthorizeUrl(settings) {
+  const redirectUri = getOAuthRedirectUri();
   const domain = settings.cognitoDomain.replace(/\/$/, '');
   const scope = encodeURIComponent(settings.cognitoScope || 'openid email');
-  // /logout + redirect_uri signs out any existing Cognito cookie, then opens
-  // the login page and returns tokens to redirect_uri (implicit grant).
-  return `${domain}/logout`
+  return `${domain}/oauth2/authorize`
     + `?client_id=${encodeURIComponent(settings.cognitoClientId)}`
     + `&response_type=token`
     + `&redirect_uri=${encodeURIComponent(redirectUri)}`
@@ -60,7 +65,7 @@ function buildSignInUrl(settings) {
 
 /** Build hosted UI URL that clears the Cognito session cookie only. */
 function buildSignOutUrl(settings) {
-  const redirectUri = chrome.identity.getRedirectURL('orchard');
+  const redirectUri = getOAuthRedirectUri();
   const domain = settings.cognitoDomain.replace(/\/$/, '');
   return `${domain}/logout`
     + `?client_id=${encodeURIComponent(settings.cognitoClientId)}`
@@ -99,11 +104,18 @@ export async function signInToCloud() {
     };
   }
 
-  const authUrl = buildSignInUrl(settings);
+  const authUrl = buildAuthorizeUrl(settings);
+  const redirectUri = getOAuthRedirectUri();
+
+  // Clear any Cognito browser cookie so prompt=login shows credentials (ignore cancel).
+  await launchAuthFlow(buildSignOutUrl(settings));
+
   const { redirectUrl, error } = await launchAuthFlow(authUrl);
   if (!redirectUrl) {
-    Logger.warn('OrchardAuth', error || 'Sign-in cancelled');
-    return { success: false, error: error || 'Sign-in cancelled' };
+    const base = error || 'Sign-in cancelled';
+    const hint = `Register this redirect URI in Cognito (callback + sign-out URLs): ${redirectUri}`;
+    Logger.warn('OrchardAuth', `${base} — ${hint}`);
+    return { success: false, error: `${base}. ${hint}` };
   }
 
   try {

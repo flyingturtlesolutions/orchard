@@ -32,14 +32,17 @@ class P0Stack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    const extensionRedirectUri = this.node.tryGetContext('extensionRedirectUri')
+      || 'https://pnihglgmdjgdckddleipneompomedioc.chromiumapp.org/orchard';
+
     const client = userPool.addClient('ExtensionClient', {
       userPoolClientName: 'ahub-extension',
       generateSecret: false,
       oAuth: {
         flows: { implicitCodeGrant: true },
         scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL],
-        callbackUrls: ['https://<EXTENSION_ID>.chromiumapp.org/orchard'],
-        logoutUrls: ['https://<EXTENSION_ID>.chromiumapp.org/orchard'],
+        callbackUrls: [extensionRedirectUri],
+        logoutUrls: [extensionRedirectUri],
       },
     });
 

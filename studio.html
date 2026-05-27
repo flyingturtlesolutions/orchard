@@ -893,6 +893,10 @@
         <label style="display:block;margin-top:8px">Cognito client ID
           <input type="text" id="input-cloud-cognito-client" style="width:100%;margin-top:4px" autocomplete="off" />
         </label>
+        <label style="display:block;margin-top:8px">OAuth redirect URI
+          <input type="text" id="input-cloud-oauth-redirect" readonly style="width:100%;margin-top:4px;font-family:monospace;font-size:11px" />
+        </label>
+        <p class="settings-note" style="margin-top:6px">Add the redirect URI above to Cognito app client callback and sign-out URLs (same on every device when manifest <code>key</code> is set).</p>
         <button class="btn-secondary" id="btn-save-cloud-config" type="button" style="margin-top:10px">Save cloud config</button>
       </details>
       <p class="settings-note" style="margin-top:10px">
