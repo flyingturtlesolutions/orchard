@@ -15,7 +15,9 @@ const {
   GetObjectCommand,
   PutObjectCommand,
   DeleteObjectCommand,
+  HeadObjectCommand,
 } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
 const IDENTITY_TABLE = process.env.IDENTITY_TABLE;
 const OBJECT_TABLE = process.env.OBJECT_TABLE;
@@ -175,6 +177,12 @@ async function getIndexRecord(orchardUserId, logicalPath) {
 function s3Key(orchardUserId, logicalPath) {
   return `users/${orchardUserId}/${logicalPath}`;
 }
+
+function stagingS3Key(orchardUserId, uploadId) {
+  return `users/${orchardUserId}/_staging/${uploadId}`;
+}
+
+const PRESIGN_TTL_SECONDS = 900;
 
 function normalizeEtag(etag) {
   if (!etag) return null;
@@ -377,50 +385,38 @@ async function handleListObjects(event) {
   return json(200, { changes, nextToken });
 }
 
-async function writeOneObject(orchardUserId, item) {
-  const { path: logicalPath, envelope } = item;
-  const expectedEtag = item.expectedEtag ?? '*';
-
-  if (!logicalPath || !envelope || isPathDenied(logicalPath)) {
-    return { error: json(400, { error: 'invalid_item', path: logicalPath }) };
-  }
+async function checkEtagConflict(orchardUserId, logicalPath, expectedEtag, clientEnvelope = null) {
+  if (expectedEtag === '*') return null;
 
   const existing = await getIndexRecord(orchardUserId, logicalPath);
   const serverEtag = existing?.etag || null;
-
-  if (expectedEtag !== '*' && serverEtag && normalizeEtag(expectedEtag) !== normalizeEtag(serverEtag)) {
-    let serverBody = null;
-    try {
-      const obj = await s3.send(new GetObjectCommand({
-        Bucket: WORKSPACE_BUCKET,
-        Key: s3Key(orchardUserId, logicalPath),
-      }));
-      serverBody = JSON.parse(await obj.Body.transformToString());
-    } catch {
-      serverBody = null;
-    }
-    const meta = conflictResolution(logicalPath, envelope, serverBody);
-    return {
-      conflict: json(409, {
-        error: 'conflict',
-        path: logicalPath,
-        server: serverBody,
-        client: envelope,
-        ...meta,
-      }),
-    };
+  if (!serverEtag || normalizeEtag(expectedEtag) === normalizeEtag(serverEtag)) {
+    return null;
   }
 
-  const bodyStr = JSON.stringify(envelope);
-  const updatedAt = envelope.updatedAt || Date.now();
-  const putRes = await s3.send(new PutObjectCommand({
-    Bucket: WORKSPACE_BUCKET,
-    Key: s3Key(orchardUserId, logicalPath),
-    Body: bodyStr,
-    ContentType: 'application/json',
-  }));
+  let serverBody = null;
+  try {
+    const obj = await s3.send(new GetObjectCommand({
+      Bucket: WORKSPACE_BUCKET,
+      Key: s3Key(orchardUserId, logicalPath),
+    }));
+    serverBody = JSON.parse(await obj.Body.transformToString());
+  } catch {
+    serverBody = null;
+  }
 
-  const etag = normalizeEtag(putRes.ETag || crypto.createHash('md5').update(bodyStr).digest('hex'));
+  const meta = conflictResolution(logicalPath, clientEnvelope || {}, serverBody);
+  return json(409, {
+    error: 'conflict',
+    path: logicalPath,
+    server: serverBody,
+    client: clientEnvelope,
+    ...meta,
+  });
+}
+
+async function registerObjectIndex(orchardUserId, logicalPath, envelope, etag, sizeBytes, s3VersionId = null) {
+  const updatedAt = envelope.updatedAt || Date.now();
   const indexItem = {
     ...objectKeys(orchardUserId, logicalPath),
     GSI2PK: `USER#${orchardUserId}`,
@@ -431,9 +427,10 @@ async function writeOneObject(orchardUserId, item) {
     schemaVersion: envelope.schemaVersion || 1,
     updatedAt,
     etag,
-    sizeBytes: Buffer.byteLength(bodyStr),
+    sizeBytes,
     lifecycle: envelope.lifecycle || 'active',
-    s3VersionId: putRes.VersionId || null,
+    s3VersionId,
+    deleted: false,
   };
 
   await ddb.send(new PutCommand({
@@ -442,6 +439,152 @@ async function writeOneObject(orchardUserId, item) {
   }));
 
   return { path: logicalPath, etag, updatedAt };
+}
+
+async function writeOneObject(orchardUserId, item) {
+  const { path: logicalPath, envelope } = item;
+  const expectedEtag = item.expectedEtag ?? '*';
+
+  if (!logicalPath || !envelope || isPathDenied(logicalPath)) {
+    return { error: json(400, { error: 'invalid_item', path: logicalPath }) };
+  }
+
+  const conflict = await checkEtagConflict(orchardUserId, logicalPath, expectedEtag, envelope);
+  if (conflict) return { conflict };
+
+  const bodyStr = JSON.stringify(envelope);
+  const putRes = await s3.send(new PutObjectCommand({
+    Bucket: WORKSPACE_BUCKET,
+    Key: s3Key(orchardUserId, logicalPath),
+    Body: bodyStr,
+    ContentType: 'application/json',
+  }));
+
+  const etag = normalizeEtag(putRes.ETag || crypto.createHash('md5').update(bodyStr).digest('hex'));
+  return registerObjectIndex(
+    orchardUserId,
+    logicalPath,
+    envelope,
+    etag,
+    Buffer.byteLength(bodyStr),
+    putRes.VersionId || null,
+  );
+}
+
+async function handlePresignPut(event) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+
+  let body = {};
+  try {
+    body = event.body ? JSON.parse(event.body) : {};
+  } catch {
+    return json(400, { error: 'invalid_json' });
+  }
+
+  const logicalPath = body.path;
+  if (!logicalPath || isPathDenied(logicalPath)) {
+    return json(logicalPath ? 403 : 400, { error: logicalPath ? 'path_denied' : 'invalid_path' });
+  }
+
+  const expectedEtag = body.expectedEtag ?? '*';
+  const conflict = await checkEtagConflict(auth.orchardUserId, logicalPath, expectedEtag);
+  if (conflict) return conflict;
+
+  const uploadId = crypto.randomUUID();
+  const stagingKey = stagingS3Key(auth.orchardUserId, uploadId);
+  const command = new PutObjectCommand({
+    Bucket: WORKSPACE_BUCKET,
+    Key: stagingKey,
+    ContentType: 'application/json',
+  });
+  const uploadUrl = await getSignedUrl(s3, command, { expiresIn: PRESIGN_TTL_SECONDS });
+
+  return json(200, {
+    uploadUrl,
+    uploadId,
+    path: logicalPath,
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    expiresIn: PRESIGN_TTL_SECONDS,
+  });
+}
+
+async function handleCompletePut(event) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+
+  let body = {};
+  try {
+    body = event.body ? JSON.parse(event.body) : {};
+  } catch {
+    return json(400, { error: 'invalid_json' });
+  }
+
+  const logicalPath = body.path;
+  const uploadId = body.uploadId;
+  if (!logicalPath || !uploadId || isPathDenied(logicalPath)) {
+    return json(400, { error: 'path_and_uploadId_required' });
+  }
+
+  const expectedEtag = body.expectedEtag ?? '*';
+  const stagingKey = stagingS3Key(auth.orchardUserId, uploadId);
+  const finalKey = s3Key(auth.orchardUserId, logicalPath);
+
+  try {
+    await s3.send(new HeadObjectCommand({
+      Bucket: WORKSPACE_BUCKET,
+      Key: stagingKey,
+    }));
+  } catch (e) {
+    if (e.name === 'NotFound' || e.$metadata?.httpStatusCode === 404) {
+      return json(404, { error: 'upload_not_found', path: logicalPath, uploadId });
+    }
+    throw e;
+  }
+
+  let envelope;
+  try {
+    const obj = await s3.send(new GetObjectCommand({
+      Bucket: WORKSPACE_BUCKET,
+      Key: stagingKey,
+    }));
+    envelope = JSON.parse(await obj.Body.transformToString());
+  } catch {
+    return json(400, { error: 'invalid_upload_body', path: logicalPath });
+  }
+
+  const conflict = await checkEtagConflict(auth.orchardUserId, logicalPath, expectedEtag, envelope);
+  if (conflict) {
+    try {
+      await s3.send(new DeleteObjectCommand({ Bucket: WORKSPACE_BUCKET, Key: stagingKey }));
+    } catch { /* best effort */ }
+    return conflict;
+  }
+
+  const bodyStr = JSON.stringify(envelope);
+  const putRes = await s3.send(new PutObjectCommand({
+    Bucket: WORKSPACE_BUCKET,
+    Key: finalKey,
+    Body: bodyStr,
+    ContentType: 'application/json',
+  }));
+
+  try {
+    await s3.send(new DeleteObjectCommand({ Bucket: WORKSPACE_BUCKET, Key: stagingKey }));
+  } catch { /* best effort */ }
+
+  const etag = normalizeEtag(putRes.ETag || crypto.createHash('md5').update(bodyStr).digest('hex'));
+  const result = await registerObjectIndex(
+    auth.orchardUserId,
+    logicalPath,
+    envelope,
+    etag,
+    Buffer.byteLength(bodyStr),
+    putRes.VersionId || null,
+  );
+
+  return json(200, { path: result.path, etag: result.etag, updatedAt: result.updatedAt });
 }
 
 async function handlePutObject(event) {
@@ -608,6 +751,8 @@ exports.handler = async (event) => {
     if (method === 'POST' && path === '/identity/bind') return handleBind(event);
 
     if (method === 'GET' && path === '/objects') return handleListObjects(event);
+    if (method === 'POST' && path === '/objects/presign-put') return handlePresignPut(event);
+    if (method === 'POST' && path === '/objects/complete-put') return handleCompletePut(event);
     if (method === 'POST' && path === '/objects/batch') return handleBatchWrite(event);
     if (method === 'GET' && path.startsWith('/objects/')) return handleGetObject(event);
     if (method === 'PUT' && path.startsWith('/objects/')) return handlePutObject(event);

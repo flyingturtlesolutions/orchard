@@ -175,6 +175,76 @@ export async function putCloudObject(logicalPath, envelope, expectedEtag = '*') 
   });
 }
 
+/** Inline API Gateway body limit — larger objects use presigned S3 upload. */
+export const INLINE_OBJECT_MAX_BYTES = 256 * 1024;
+
+/**
+ * @param {unknown} envelope
+ */
+export function objectBodyBytes(envelope) {
+  return new TextEncoder().encode(JSON.stringify(envelope)).length;
+}
+
+/**
+ * @param {string} logicalPath
+ * @param {string} [expectedEtag]
+ */
+export async function presignPutCloudObject(logicalPath, expectedEtag = '*') {
+  return /** @type {Promise<any>} */ (cloudRequest('POST', '/objects/presign-put', {
+    body: { path: logicalPath, expectedEtag },
+  }));
+}
+
+/**
+ * @param {string} logicalPath
+ * @param {string} uploadId
+ * @param {string} [expectedEtag]
+ */
+export async function completePutCloudObject(logicalPath, uploadId, expectedEtag = '*') {
+  return /** @type {Promise<any>} */ (cloudRequest('POST', '/objects/complete-put', {
+    body: { path: logicalPath, uploadId, expectedEtag },
+  }));
+}
+
+/**
+ * Upload via presigned staging key + complete (bypasses API Gateway body limit).
+ * @param {string} logicalPath
+ * @param {unknown} envelope
+ * @param {string} [expectedEtag]
+ */
+export async function putCloudObjectDirect(logicalPath, envelope, expectedEtag = '*') {
+  const presign = await presignPutCloudObject(logicalPath, expectedEtag);
+  const bodyStr = JSON.stringify(envelope);
+  /** @type {Record<string, string>} */
+  const headers = { 'Content-Type': 'application/json', ...(presign.headers || {}) };
+
+  const res = await fetch(presign.uploadUrl, {
+    method: presign.method || 'PUT',
+    headers,
+    body: bodyStr,
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new CloudClientError(res.status, 'Presigned S3 upload failed', text);
+  }
+
+  return completePutCloudObject(logicalPath, presign.uploadId, expectedEtag);
+}
+
+/**
+ * Inline PUT when small enough; presigned direct upload when over threshold.
+ * @param {string} logicalPath
+ * @param {unknown} envelope
+ * @param {string} [expectedEtag]
+ */
+export async function putCloudObjectAuto(logicalPath, envelope, expectedEtag = '*') {
+  if (objectBodyBytes(envelope) <= INLINE_OBJECT_MAX_BYTES) {
+    return putCloudObject(logicalPath, envelope, expectedEtag);
+  }
+  return putCloudObjectDirect(logicalPath, envelope, expectedEtag);
+}
+
 /**
  * @param {{ groundId?: string, items: Array<{ path: string, envelope: unknown, expectedEtag?: string }> }} body
  * @returns {Promise<{ etags: Record<string, string>, updatedAt: number, count: number }>}

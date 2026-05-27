@@ -31,7 +31,11 @@
 export function wrapEnvelope(body, id, updatedBy) {
   const record = /** @type {Record<string, unknown>} */ (body || {});
   const now = Date.now();
-  const updatedAt = typeof record.updatedAt === 'number' ? record.updatedAt : now;
+  const updatedAt = typeof record.updatedAt === 'number'
+    ? record.updatedAt
+    : typeof record.lastRebuiltAt === 'number'
+      ? record.lastRebuiltAt
+      : now;
   const lifecycle = /** @type {StoredPrimitive<unknown>['lifecycle']} */ (
     record.metadata && typeof record.metadata === 'object' && record.metadata.lifecycle
       ? record.metadata.lifecycle

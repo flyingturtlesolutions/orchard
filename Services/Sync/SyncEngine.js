@@ -13,6 +13,9 @@ import {
   fetchCloudObjectRaw,
   listCloudChanges,
   getIdentityMe,
+  putCloudObjectAuto,
+  objectBodyBytes,
+  INLINE_OBJECT_MAX_BYTES,
   CloudClientError,
 } from '../Cloud/CloudClient.js';
 import {
@@ -56,7 +59,7 @@ export async function isHybridSyncActive() {
 /**
  * @param {string} path
  * @param {unknown} envelope
- * @param {{ expectedEtag?: string, groundId?: string, op?: 'put'|'delete' }} [opts]
+ * @param {{ expectedEtag?: string, groundId?: string, op?: 'put'|'delete', deferSchedule?: boolean }} [opts]
  */
 export async function enqueueSyncWrite(path, envelope, opts = {}) {
   if (!(await isHybridSyncActive())) return;
@@ -74,7 +77,7 @@ export async function enqueueSyncWrite(path, envelope, opts = {}) {
     op: opts.op || 'put',
   });
 
-  scheduleSyncRun();
+  if (!opts.deferSchedule) scheduleSyncRun();
 }
 
 /** @type {ReturnType<typeof setTimeout>|null} */
@@ -91,7 +94,7 @@ export function scheduleSyncRun() {
 /**
  * @param {import('../Storage/StoragePaths.js').SyncKind} kind
  * @param {Record<string, unknown>} record
- * @param {{ orchardUserId?: string }} [opts]
+ * @param {{ orchardUserId?: string, deferSchedule?: boolean }} [opts]
  */
 export async function enqueueRecordWrite(kind, record, opts = {}) {
   if (!(await isHybridSyncActive())) return;
@@ -106,6 +109,7 @@ export async function enqueueRecordWrite(kind, record, opts = {}) {
 
   await enqueueSyncWrite(path, envelope, {
     groundId: typeof record.groundId === 'string' ? record.groundId : undefined,
+    deferSchedule: opts.deferSchedule,
   });
 
   const groundId = typeof record.groundId === 'string'
@@ -114,7 +118,11 @@ export async function enqueueRecordWrite(kind, record, opts = {}) {
   if (groundId) {
     const manifests = await rebuildRefs(groundId, opts);
     for (const m of manifests) {
-      await enqueueSyncWrite(m.path, m.envelope, { expectedEtag: '*', groundId });
+      await enqueueSyncWrite(m.path, m.envelope, {
+        expectedEtag: '*',
+        groundId,
+        deferSchedule: opts.deferSchedule,
+      });
     }
   }
 }
@@ -293,17 +301,19 @@ async function applyRemoteObject(path, envelope, etag) {
     }
     case 'siteMap': {
       const rec = { ...(/** @type {Record<string, unknown>} */ (body)) };
+      const syncedAt = envelopeUpdatedAt(envelope);
       delete rec.id;
       delete rec.groundId;
-      delete rec.updatedAt;
+      if (syncedAt) rec.updatedAt = syncedAt;
       await GroundAssetStore.writeSiteMap(id, rec);
       break;
     }
     case 'chrome': {
       const rec = { ...(/** @type {Record<string, unknown>} */ (body)) };
+      const syncedAt = envelopeUpdatedAt(envelope);
       delete rec.id;
       delete rec.groundId;
-      delete rec.updatedAt;
+      if (syncedAt) rec.updatedAt = syncedAt;
       await GroundAssetStore.writeChrome(id, rec);
       break;
     }
@@ -372,16 +382,20 @@ async function bootstrapLocalWorkspace() {
   if (!(await isHybridSyncActive())) return 0;
 
   const session = await getCloudSession();
-  const opts = { orchardUserId: session?.orchardUserId };
+  const opts = { orchardUserId: session?.orchardUserId, deferSchedule: true };
+  const outboxPaths = new Set((await listOutboxEntries()).map((e) => e.path));
+  const conflictPaths = new Set((await getPendingConflicts()).map((p) => p.path));
   let enqueued = 0;
 
   /** @param {import('../Storage/StoragePaths.js').SyncKind} kind @param {Record<string, unknown>} record */
   async function maybeEnqueue(kind, record) {
     const path = logicalPathForRecord(kind, record);
     if (!path) return;
+    if (outboxPaths.has(path) || conflictPaths.has(path)) return;
     const cached = await getCachedObject(path);
     if (!isLocalRecordDirty(record, cached)) return;
     await enqueueRecordWrite(kind, record, opts);
+    outboxPaths.add(path);
     enqueued += 1;
   }
 
@@ -436,7 +450,8 @@ async function pushOutbox() {
   const entries = await listOutboxEntries();
   if (entries.length === 0) return { pushed: 0 };
 
-  const putEntries = entries.filter((e) => e.op !== 'delete');
+  const conflictPaths = new Set((await getPendingConflicts()).map((p) => p.path));
+  const putEntries = entries.filter((e) => e.op !== 'delete' && !conflictPaths.has(e.path));
   const deleteEntries = entries.filter((e) => e.op === 'delete');
 
   let pushed = 0;
@@ -458,9 +473,52 @@ async function pushOutbox() {
     }
   }
 
-  for (let i = 0; i < putEntries.length; i += MAX_BATCH) {
-    const chunk = putEntries.slice(i, i + MAX_BATCH);
-    const items = chunk.map((e) => ({
+  const largePuts = putEntries.filter((e) => objectBodyBytes(e.envelope) > INLINE_OBJECT_MAX_BYTES);
+  const smallPuts = putEntries.filter((e) => objectBodyBytes(e.envelope) <= INLINE_OBJECT_MAX_BYTES);
+
+  if (largePuts.length) {
+    Logger.info('SyncEngine', `push: ${largePuts.length} large put(s) via presigned S3`);
+  }
+
+  for (const entry of largePuts) {
+    try {
+      const res = await putCloudObjectAuto(entry.path, entry.envelope, entry.expectedEtag || '*');
+      if (res?.etag) {
+        await putCachedObject({
+          path: entry.path,
+          envelope: entry.envelope,
+          etag: res.etag,
+          updatedAt: envelopeUpdatedAt(entry.envelope) || res.updatedAt || Date.now(),
+        });
+      }
+      await removeOutboxEntries([entry.path]);
+      pushed += 1;
+    } catch (e) {
+      if (e instanceof CloudClientError && e.status === 409 && e.body && typeof e.body === 'object') {
+        await handleConflict(/** @type {any} */ (e.body));
+      } else {
+        Logger.warn('SyncEngine', `large put failed ${entry.path}: ${e.message}`);
+      }
+    }
+  }
+
+  for (let i = 0; i < smallPuts.length; i += MAX_BATCH) {
+    const chunk = smallPuts.slice(i, i + MAX_BATCH);
+    pushed += await pushBatchChunk(chunk);
+  }
+
+  return { pushed };
+}
+
+/**
+ * @param {Array<{ path: string, envelope: unknown, expectedEtag?: string }>} chunk
+ */
+async function pushBatchChunk(chunk) {
+  let remaining = chunk;
+  let pushed = 0;
+
+  while (remaining.length > 0) {
+    const items = remaining.map((e) => ({
       path: e.path,
       envelope: e.envelope,
       expectedEtag: e.expectedEtag || '*',
@@ -468,7 +526,7 @@ async function pushOutbox() {
 
     try {
       const res = await batchWriteCloudObjects({ items });
-      for (const entry of chunk) {
+      for (const entry of remaining) {
         const etag = res.etags?.[entry.path];
         if (etag) {
           await putCachedObject({
@@ -479,18 +537,23 @@ async function pushOutbox() {
           });
         }
       }
-      await removeOutboxEntries(chunk.map((e) => e.path));
-      pushed += chunk.length;
+      await removeOutboxEntries(remaining.map((e) => e.path));
+      pushed += remaining.length;
+      break;
     } catch (e) {
       if (e instanceof CloudClientError && e.status === 409 && e.body && typeof e.body === 'object') {
+        const conflict = /** @type {{ path?: string }} */ (e.body);
         await handleConflict(/** @type {any} */ (e.body));
-      } else {
-        throw e;
+        if (!conflict.path) break;
+        remaining = remaining.filter((entry) => entry.path !== conflict.path);
+        if (remaining.length === 0) break;
+        continue;
       }
+      throw e;
     }
   }
 
-  return { pushed };
+  return pushed;
 }
 
 /**
@@ -524,6 +587,7 @@ async function handleConflict(conflict) {
       await setPendingConflicts(pending);
       Logger.warn('SyncEngine', `Manual conflict queued: ${conflict.path}`);
     }
+    await removeOutboxEntries([conflict.path]);
   }
 }
 
@@ -678,6 +742,7 @@ export async function resolveSyncConflict(path, resolution) {
 
   const conflict = /** @type {any} */ (row.conflict);
   if (resolution === 'keep-mine' && conflict.client) {
+    await removeOutboxEntries([path]);
     await enqueueSyncWrite(path, conflict.client, { expectedEtag: '*' });
   } else if (resolution === 'keep-theirs' && conflict.server) {
     await applyRemoteObject(path, conflict.server, '*');

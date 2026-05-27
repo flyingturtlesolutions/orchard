@@ -1,0 +1,7 @@
+{
+  "name": "orchard-p0-api",
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/s3-request-presigner": "^3.700.0"
+  }
+}
