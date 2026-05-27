@@ -10,9 +10,9 @@
 // it and keeps only a tiny `chromeOverrides` delta for per-archetype variation (e.g.
 // "search collapsed until scroll-top" → `visibleAtRest:false` on that archetype).
 //
-// PURE: no DOM / chrome / storage. This is the detector + splitter + read-side composer;
-// the wiring slice persists `Ground.chrome`, rewrites Locales to reference it, and makes
-// enumeration/Explore skip already-promoted chrome.
+// PURE: no DOM / chrome / storage. This is the detector (hoistChrome), the depth graft
+// (graftChromeDepth), and the per-Locale chrome read (chromeFeaturesForLocale); background
+// persists `Ground.chrome`, grafts depth onto skipped Locales, and skips re-poking known chrome.
 //
 // @module Core/chromeHoist
 // @version 2.74.480
@@ -221,54 +221,13 @@ export function graftChromeDepth(model, { chrome = {}, chromeLayers = {}, chrome
 }
 
 /**
- * Rewrite ONE Locale against a promoted chrome set: strip the promoted Features out of
- * `features`, returning the page-specific remainder plus the chrome references + this
- * Locale's overrides. (The wiring slice stores this back as the Locale's new shape.)
- *
- * @returns {{ features:Object, chromeRefs:string[], chromeOverrides:Object }}
- */
-export function splitLocaleChrome(locale, promotedIdsOrSet, overridesForLocale = {}) {
-  const promoted = promotedIdsOrSet instanceof Set ? promotedIdsOrSet : new Set(promotedIdsOrSet || []);
-  const features = {};
-  const chromeRefs = [];
-  for (const [id, f] of Object.entries(locale?.features || {})) {
-    if (promoted.has(id)) chromeRefs.push(id);
-    else features[id] = f;
-  }
-  const chromeOverrides = {};
-  for (const id of chromeRefs) if (overridesForLocale[id]) chromeOverrides[id] = overridesForLocale[id];
-  return { features, chromeRefs: chromeRefs.sort(), chromeOverrides };
-}
-
-/**
- * Read-side composition: reconstruct a Locale's EFFECTIVE feature set = its page-specific
- * features ∪ the referenced Ground chrome (with this Locale's overrides applied). The
- * inverse of splitLocaleChrome for the identity + override fields. Pure.
- *
- * @param {{features?:Object, chromeRefs?:string[], chromeOverrides?:Object}} locale  rewritten Locale
- * @param {Object<string,object>} chrome  Ground.chrome
- * @returns {Object<string,object>} effective features keyed by id
- */
-export function composeChromeFeatures(locale, chrome = {}) {
-  const out = { ...(locale?.features || {}) };
-  const refs = Array.isArray(locale?.chromeRefs) ? locale.chromeRefs : [];
-  const ov = locale?.chromeOverrides || {};
-  for (const id of refs) {
-    const base = chrome[id];
-    if (!base) continue;
-    out[id] = ov[id] ? { ...base, ...ov[id] } : { ...base };
-  }
-  return out;
-}
-
-/**
  * The EFFECTIVE chrome Features for a given Locale, straight from the Ground.chrome artifact:
  * every promoted feature with this Locale's overrides applied (e.g. visibleAtRest:false where
- * "search collapsed until scroll-top" on that archetype). This is the read that finally
- * CONSUMES chromeOverrides — unlike composeChromeFeatures (which assumes a slimmed Locale that
- * references chrome), this works against the unslimmed reality: hand it the artifact + a Locale
- * key and get that page's chrome view. Used to augment resolve hints so a control modeled once
- * resolves on every page. Pure; returns features in stable id order.
+ * "search collapsed until scroll-top" on that archetype). This is the read that CONSUMES
+ * chromeOverrides — against the unslimmed reality (Locales keep their own copies; graft keeps
+ * them self-contained), so hand it the artifact + a Locale key and get that page's chrome view.
+ * Used to augment resolve hints so a control modeled once resolves on every page. Pure; returns
+ * features in stable id order.
  *
  * @param {{chrome?:Object, overrides?:Object}} artifact  Ground.chrome
  * @param {string|null} [localeKey]  the Locale cache key whose overrides to apply
