@@ -2750,4 +2750,102 @@ export class StorageManager {
       StorageManager.#renameAssertionRefsInPlace(value[k]);
     }
   }
+
+  // ── Soft-delete (lifecycle) — STORAGE_SCHEMA §9/§10 ────────────────────────
+  //
+  // deprecatePrimitive is the DEFAULT, reversible delete: it flips the record's
+  // lifecycle to 'deprecated' and re-saves through the normal save<Kind> path, so
+  // the change propagates to the IndexedDB workspace partition envelope (lifecycle
+  // is a StoredPrimitive field) and, when hybrid sync is active, rides out as an
+  // ordinary update — no tombstone needed (a soft-delete-as-update dissolves the
+  // resurrection race on its own). Hard delete (delete<Kind>) is unchanged and
+  // remains the explicit, cascade-aware path; choose it via analyzeDeletionImpact.
+  //
+  // Read semantics follow this codebase's existing Ground convention: deprecated
+  // records are TAGGED, not hidden at the storage layer (getAllGrounds already
+  // returns deprecated grounds with metadata.lifecycle === 'deprecated'); callers
+  // and the UI filter on lifecycle. The §10 listPrimitives lifecycle filter is a
+  // later slice and intentionally not forced on existing list readers here.
+
+  /**
+   * kind → [getter, saver]. Built at call time so the static methods are defined.
+   * Covers the workspace primitives that have uniform get/save CRUD.
+   * @private
+   */
+  static #lifecycleOps() {
+    return {
+      ground:      [StorageManager.getGround,      StorageManager.saveGround],
+      fragment:    [StorageManager.getFragment,    StorageManager.saveFragment],
+      observation: [StorageManager.getObservation, StorageManager.saveObservation],
+      analysis:    [StorageManager.getAnalysis,    StorageManager.saveAnalysis],
+      assertion:   [StorageManager.getAssertion,   StorageManager.saveAssertion],
+      perspective: [StorageManager.getPerspective, StorageManager.savePerspective],
+      landmark:    [StorageManager.getLandmark,    StorageManager.saveLandmark],
+      strategy:    [StorageManager.getStrategy,    StorageManager.saveStrategy],
+    };
+  }
+
+  /**
+   * @private
+   * @param {string} kind
+   * @param {string} id
+   * @param {'active'|'deprecated'} lifecycle
+   * @returns {Promise<object|null>} the updated record, or null if not found
+   */
+  static async #setPrimitiveLifecycle(kind, id, lifecycle) {
+    const pair = StorageManager.#lifecycleOps()[kind];
+    if (!pair) throw new Error(`setPrimitiveLifecycle: unsupported kind "${kind}"`);
+    const [getter, saver] = pair;
+    const record = await getter.call(StorageManager, id);
+    if (!record) {
+      Logger.warn('StorageManager',
+        `${lifecycle === 'deprecated' ? 'deprecate' : 'restore'}: ${kind} ${id} not found`);
+      return null;
+    }
+    const now = Date.now();
+    const meta = (record.metadata && typeof record.metadata === 'object') ? record.metadata : {};
+    const updated = {
+      ...record,
+      lifecycle,                                   // top-level mirror (envelope fallback)
+      updatedAt: now,
+      metadata: { ...meta, lifecycle, updatedAt: now },
+    };
+    await saver.call(StorageManager, updated);
+    Logger.info('StorageManager', `${kind} ${id} lifecycle → ${lifecycle}`);
+    return updated;
+  }
+
+  /**
+   * Soft-delete (default, reversible) — STORAGE_SCHEMA §10 deprecatePrimitive.
+   * @param {('ground'|'fragment'|'observation'|'analysis'|'assertion'|'perspective'|'landmark'|'strategy')} kind
+   * @param {string} id
+   * @returns {Promise<object|null>}
+   */
+  static async deprecatePrimitive(kind, id) {
+    return StorageManager.#setPrimitiveLifecycle(kind, id, 'deprecated');
+  }
+
+  /**
+   * Un-deprecate — STORAGE_SCHEMA §10 restorePrimitive.
+   * @param {('ground'|'fragment'|'observation'|'analysis'|'assertion'|'perspective'|'landmark'|'strategy')} kind
+   * @param {string} id
+   * @returns {Promise<object|null>}
+   */
+  static async restorePrimitive(kind, id) {
+    return StorageManager.#setPrimitiveLifecycle(kind, id, 'active');
+  }
+
+  /**
+   * Effective lifecycle of a primitive (defaults to 'active' when unset/missing).
+   * @param {string} kind
+   * @param {string} id
+   * @returns {Promise<'draft'|'active'|'deprecated'|'retired'>}
+   */
+  static async getPrimitiveLifecycle(kind, id) {
+    const pair = StorageManager.#lifecycleOps()[kind];
+    if (!pair) throw new Error(`getPrimitiveLifecycle: unsupported kind "${kind}"`);
+    const record = await pair[0].call(StorageManager, id);
+    if (!record) return 'active';
+    return record.metadata?.lifecycle ?? record.lifecycle ?? 'active';
+  }
 }

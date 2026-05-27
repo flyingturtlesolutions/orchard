@@ -26,9 +26,10 @@
  * @param {unknown} body
  * @param {string} id
  * @param {UserRef} [updatedBy]
+ * @param {number} [schemaVersion]   per-primitive-type version (STORAGE §3/§11); default 1
  * @returns {StoredPrimitive<unknown>}
  */
-export function wrapEnvelope(body, id, updatedBy) {
+export function wrapEnvelope(body, id, updatedBy, schemaVersion = 1) {
   const record = /** @type {Record<string, unknown>} */ (body || {});
   const now = Date.now();
   const updatedAt = typeof record.updatedAt === 'number'
@@ -43,13 +44,21 @@ export function wrapEnvelope(body, id, updatedBy) {
   );
 
   return {
-    schemaVersion: 1,
+    schemaVersion: schemaVersion ?? 1,
     id,
     updatedAt,
     updatedBy: updatedBy || { type: 'local' },
     lifecycle,
     body: record,
   };
+}
+
+/** @param {StoredPrimitive<unknown>|unknown} envelope @returns {number} */
+export function envelopeSchemaVersion(envelope) {
+  if (envelope && typeof envelope === 'object' && 'schemaVersion' in envelope) {
+    return Number(/** @type {StoredPrimitive<unknown>} */ (envelope).schemaVersion) || 0;
+  }
+  return 0;   // 0 = un-enveloped legacy body
 }
 
 /**
@@ -68,11 +77,13 @@ export function unwrapEnvelope(envelope) {
  * @returns {number}
  */
 export function envelopeUpdatedAt(envelope) {
-  if (envelope && typeof envelope === 'object' && 'updatedAt' in envelope) {
-    return Number(/** @type {StoredPrimitive<unknown>} */ (envelope).updatedAt) || 0;
-  }
-  if (envelope && typeof envelope === 'object' && 'updatedAt' in /** @type {object} */ (envelope)) {
-    return Number(/** @type {{ updatedAt?: number }} */ (envelope).updatedAt) || 0;
+  if (envelope && typeof envelope === 'object') {
+    const env = /** @type {StoredPrimitive<unknown>} */ (envelope);
+    if ('updatedAt' in env) return Number(env.updatedAt) || 0;
+    // Un-enveloped legacy body, or envelope whose timestamp lives on the body.
+    const body = /** @type {{ updatedAt?: number, lastRebuiltAt?: number }} */ (env.body ?? env);
+    if (typeof body.updatedAt === 'number') return body.updatedAt;
+    if (typeof body.lastRebuiltAt === 'number') return body.lastRebuiltAt;
   }
   return 0;
 }

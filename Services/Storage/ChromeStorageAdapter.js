@@ -6,6 +6,26 @@
  */
 
 import { StorageManager } from '../StorageManager.js';
+import {
+  getOutboundReferences,
+  getInboundReferences,
+  analyzeDeletionImpact,
+  detectCycles,
+  findOrphans,
+  rebuildReferenceGraph,
+  invalidateReferenceGraph,
+} from './ReferenceStore.js';
+import {
+  getLocalUser,
+  updateLocalUser,
+  getLocalUserRef,
+  bindPublicIdentity,
+  bindAccount,
+  listKnownExternalUsers,
+  getExternalUser,
+  recordExternalUserEncounter,
+  setUserTrust,
+} from './IdentityStore.js';
 
 /** @typedef {import('./StoragePort.js').StorageBackend} StorageBackend */
 /** @typedef {import('./StoragePort.js').StorageAdapterKind} StorageAdapterKind */
@@ -64,6 +84,55 @@ export class ChromeStorageAdapter {
   saveLandmark(landmark) { return StorageManager.saveLandmark(landmark); }
   getLandmark(uid) { return StorageManager.getLandmark(uid); }
   listLandmarksForGround(groundId) { return StorageManager.listLandmarksForGround(groundId); }
+
+  // ── Soft-delete (STORAGE_SCHEMA §10) ──────────────────────────────────────
+  // Default, reversible delete. Hard delete stays the explicit delete<Kind> path.
+
+  /** @param {string} kind @param {string} id */
+  deprecatePrimitive(kind, id) { return StorageManager.deprecatePrimitive(kind, id); }
+  /** @param {string} kind @param {string} id */
+  restorePrimitive(kind, id) { return StorageManager.restorePrimitive(kind, id); }
+  /** @param {string} kind @param {string} id */
+  getPrimitiveLifecycle(kind, id) { return StorageManager.getPrimitiveLifecycle(kind, id); }
+
+  // ── Reference graph (STORAGE_SCHEMA §7/§10; rebuilt from workspace) ────────
+  // refs are derived, never the source of truth. Hard delete should consult
+  // analyzeDeletionImpact first (block when inboundRefs / blockers are present).
+
+  /** @param {string} id @param {{ groundId?: string }} [opts] */
+  getOutboundReferences(id, opts) { return getOutboundReferences(id, opts); }
+  /** @param {string} id @param {{ groundId?: string }} [opts] */
+  getInboundReferences(id, opts) { return getInboundReferences(id, opts); }
+  /** @param {string} id @param {object} [opts] */
+  analyzeDeletionImpact(id, opts) { return analyzeDeletionImpact(id, opts); }
+  /** @param {object} [opts] */
+  detectCycles(opts) { return detectCycles(opts); }
+  /** @param {object} [opts] */
+  findOrphans(opts) { return findOrphans(opts); }
+  /** @param {{ groundId?: string, fresh?: boolean }} [opts] */
+  rebuildRefs(opts) { return rebuildReferenceGraph(opts); }
+  /** Drop the cached reference graph (call after external mutations). */
+  invalidateRefs() { return invalidateReferenceGraph(); }
+
+  // ── Identity (STORAGE_SCHEMA §4/§10) ──────────────────────────────────────
+  // Local user record + known external users. publicIdentity/account are attached
+  // by the C-P0 auth flow via bindPublicIdentity()/bindAccount().
+
+  getLocalUser() { return getLocalUser(); }
+  /** @param {object} patch */
+  updateLocalUser(patch) { return updateLocalUser(patch); }
+  getLocalUserRef() { return getLocalUserRef(); }
+  /** @param {object} identity */
+  bindPublicIdentity(identity) { return bindPublicIdentity(identity); }
+  /** @param {object} account */
+  bindAccount(account) { return bindAccount(account); }
+  listKnownExternalUsers() { return listKnownExternalUsers(); }
+  /** @param {string} externalUserId */
+  getExternalUser(externalUserId) { return getExternalUser(externalUserId); }
+  /** @param {string} publicKey @param {object} [metadata] */
+  recordExternalUserEncounter(publicKey, metadata) { return recordExternalUserEncounter(publicKey, metadata); }
+  /** @param {string} externalUserId @param {string} trustLevel @param {string} [by] */
+  setUserTrust(externalUserId, trustLevel, by) { return setUserTrust(externalUserId, trustLevel, by); }
 
   // ── Escape hatch (migrate callers incrementally) ──────────────────────────
 
