@@ -3,7 +3,7 @@
  * @description Legacy chrome.storage keys ↔ Orchard logical paths (§19.2).
  */
 
-/** @typedef {'ground'|'fragment'|'observation'|'analysis'|'assertion'|'perspective'|'landmark'|'strategy'|'workflow'} SyncKind */
+/** @typedef {'ground'|'fragment'|'observation'|'analysis'|'assertion'|'perspective'|'landmark'|'strategy'|'workflow'|'locale'|'siteMap'|'chrome'} SyncKind */
 
 /** @type {SyncKind[]} */
 export const SYNCABLE_KINDS = [
@@ -16,6 +16,9 @@ export const SYNCABLE_KINDS = [
   'landmark',
   'strategy',
   'workflow',
+  'locale',
+  'siteMap',
+  'chrome',
 ];
 
 const LEGACY_PREFIX = {
@@ -29,6 +32,24 @@ const LEGACY_PREFIX = {
   strategy: 'strategies',
   workflow: 'workflows',
 };
+
+/**
+ * @param {string} segment
+ */
+export function encodePathSegment(segment) {
+  return encodeURIComponent(segment);
+}
+
+/**
+ * @param {string} segment
+ */
+export function decodePathSegment(segment) {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
 
 /**
  * @param {SyncKind} kind
@@ -47,7 +68,7 @@ export function legacyStorageKey(kind, id) {
  */
 export function logicalPathForRecord(kind, record) {
   const id = String(record.id || '');
-  if (!id) return null;
+  if (!id && kind !== 'siteMap' && kind !== 'chrome') return null;
 
   switch (kind) {
     case 'ground':
@@ -68,6 +89,20 @@ export function logicalPathForRecord(kind, record) {
       return `workspace/grounds/${record.groundId}/workflows/${id}.json`;
     case 'workflow':
       return `workspace/strategies/${id}/strategy.json`;
+    case 'locale': {
+      const groundId = String(record.groundId || '');
+      const localeKey = String(record.localeKey || record.id || '');
+      if (!groundId || !localeKey) return null;
+      return `workspace/grounds/${groundId}/locales/${encodePathSegment(localeKey)}/locale.json`;
+    }
+    case 'siteMap':
+    case 'chrome': {
+      const groundId = String(record.groundId || id || '');
+      if (!groundId) return null;
+      return kind === 'siteMap'
+        ? `workspace/grounds/${groundId}/siteMap.json`
+        : `workspace/grounds/${groundId}/chrome.json`;
+    }
     default:
       return null;
   }
@@ -81,6 +116,15 @@ export function recordMetaFromPath(logicalPath) {
   let m;
   m = logicalPath.match(/^workspace\/grounds\/([^/]+)\/ground\.json$/);
   if (m) return { kind: 'ground', id: m[1], groundId: m[1] };
+
+  m = logicalPath.match(/^workspace\/grounds\/([^/]+)\/siteMap\.json$/);
+  if (m) return { kind: 'siteMap', id: m[1], groundId: m[1] };
+
+  m = logicalPath.match(/^workspace\/grounds\/([^/]+)\/chrome\.json$/);
+  if (m) return { kind: 'chrome', id: m[1], groundId: m[1] };
+
+  m = logicalPath.match(/^workspace\/grounds\/([^/]+)\/locales\/([^/]+)\/locale\.json$/);
+  if (m) return { kind: 'locale', id: decodePathSegment(m[2]), groundId: m[1] };
 
   m = logicalPath.match(/^workspace\/grounds\/([^/]+)\/tier1\/fragments\/([^/]+)\.json$/);
   if (m) return { kind: 'fragment', id: m[2], groundId: m[1] };
@@ -122,9 +166,10 @@ export function manifestPath(groundId) {
  */
 export function conflictTierForPath(logicalPath) {
   if (logicalPath.endsWith('/_manifest.json')) return 2;
+  if (logicalPath.endsWith('/siteMap.json') || logicalPath.endsWith('/chrome.json')) return 2;
   if (logicalPath.includes('/workflows/') && logicalPath.endsWith('.json')) return 2;
   if (logicalPath.includes('workspace/strategies/')) return 3;
-  if (logicalPath.endsWith('/ground.json') || logicalPath.endsWith('/siteMap.json')) return 2;
+  if (logicalPath.endsWith('/ground.json')) return 2;
   if (logicalPath.includes('/intents/')) return 2;
   return 1;
 }

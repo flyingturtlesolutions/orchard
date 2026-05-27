@@ -101,6 +101,9 @@ function extractPrimitiveType(logicalPath) {
   if (logicalPath.includes('/perspectives/')) return 'perspective';
   if (logicalPath.includes('/substrate/landmarks/')) return 'landmark';
   if (logicalPath.includes('/strategies/')) return 'strategy';
+  if (logicalPath.includes('/locales/')) return 'locale';
+  if (logicalPath.endsWith('/siteMap.json')) return 'siteMap';
+  if (logicalPath.endsWith('/chrome.json')) return 'chrome';
   if (logicalPath.endsWith('/_manifest.json')) return 'manifest';
   return 'object';
 }
@@ -110,7 +113,7 @@ function tierForPath(logicalPath) {
     return 2;
   }
   if (logicalPath.includes('workspace/strategies/')) return 3;
-  if (logicalPath.endsWith('/ground.json') || logicalPath.endsWith('/siteMap.json')) return 2;
+  if (logicalPath.endsWith('/ground.json') || logicalPath.endsWith('/siteMap.json') || logicalPath.endsWith('/chrome.json')) return 2;
   if (logicalPath.includes('/intents/')) return 2;
   return 1;
 }

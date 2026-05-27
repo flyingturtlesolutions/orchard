@@ -4,6 +4,7 @@
  */
 
 import { StorageManager } from '../StorageManager.js';
+import * as GroundAssetStore from '../Storage/GroundAssetStore.js';
 import { manifestPath } from '../Storage/StoragePaths.js';
 import { wrapEnvelope } from '../Storage/StoredEnvelope.js';
 
@@ -23,6 +24,7 @@ export async function rebuildGroundManifest(groundId, opts = {}) {
     perspectives,
     landmarks,
     strategies,
+    locales,
   ] = await Promise.all([
     StorageManager.listFragments(groundId).catch(() => []),
     StorageManager.listObservations(groundId).catch(() => []),
@@ -31,11 +33,12 @@ export async function rebuildGroundManifest(groundId, opts = {}) {
     StorageManager.listPerspectives(groundId).catch(() => []),
     StorageManager.listLandmarksForGround(groundId).catch(() => []),
     StorageManager.listStrategies(groundId).catch(() => []),
+    GroundAssetStore.listLocales(groundId).catch(() => []),
   ]);
 
   const body = {
     groundId,
-    localeIds: [],
+    localeIds: locales.map((l) => l.localeKey),
     perspectiveIds: perspectives.map((p) => p.id),
     fragmentIds: fragments.map((f) => f.id),
     observationIds: observations.map((o) => o.id),

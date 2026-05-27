@@ -144,6 +144,28 @@ export async function setLastSyncToken(token) {
   await setMeta('lastSyncAt', Date.now());
 }
 
+/** @returns {Promise<number>} */
+export async function getLastSyncAt() {
+  const at = await getMeta('lastSyncAt');
+  return typeof at === 'number' ? at : 0;
+}
+
+/** @param {Record<string, unknown>} result */
+export async function setLastSyncResult(result) {
+  await setMeta('lastSyncResult', result);
+}
+
+/** @returns {Promise<Record<string, unknown>|null>} */
+export async function getLastSyncResult() {
+  const row = await getMeta('lastSyncResult');
+  return row && typeof row === 'object' ? /** @type {Record<string, unknown>} */ (row) : null;
+}
+
+/** @returns {Promise<number>} */
+export async function getOutboxCount() {
+  return (await listOutboxEntries()).length;
+}
+
 /** @returns {Promise<Array<{ path: string, conflict: unknown }>>} */
 export async function getPendingConflicts() {
   try {

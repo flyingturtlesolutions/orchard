@@ -27,10 +27,12 @@ import {
   removeOutboxEntries,
   setLastSyncToken,
   setPendingConflicts,
+  setLastSyncResult,
   upsertOutboxEntry,
   clearAllSyncData,
 } from '../Storage/IndexedDBStore.js';
 import { logicalPathForRecord, recordMetaFromPath } from '../Storage/StoragePaths.js';
+import * as GroundAssetStore from '../Storage/GroundAssetStore.js';
 import { unwrapEnvelope, wrapEnvelope, envelopeUpdatedAt } from '../Storage/StoredEnvelope.js';
 import { rebuildRefs } from './RebuildRefs.js';
 import {
@@ -217,6 +219,15 @@ async function applyRemoteDelete(path) {
       case 'workflow':
         await StorageManager.deleteWorkflow(id);
         break;
+      case 'locale':
+        if (meta.groundId) await GroundAssetStore.deleteLocale(meta.groundId, id);
+        break;
+      case 'siteMap':
+        await GroundAssetStore.deleteSiteMap(id);
+        break;
+      case 'chrome':
+        await GroundAssetStore.deleteChrome(id);
+        break;
       default:
         break;
     }
@@ -269,6 +280,33 @@ async function applyRemoteObject(path, envelope, etag) {
     case 'workflow':
       await StorageManager.saveWorkflow(/** @type {any} */ (body));
       break;
+    case 'locale': {
+      const rec = /** @type {any} */ (body);
+      if (meta.groundId && rec?.model) {
+        await GroundAssetStore.writeLocale(meta.groundId, id, {
+          model: rec.model,
+          url: rec.url,
+          capturedAt: rec.capturedAt,
+        });
+      }
+      break;
+    }
+    case 'siteMap': {
+      const rec = { ...(/** @type {Record<string, unknown>} */ (body)) };
+      delete rec.id;
+      delete rec.groundId;
+      delete rec.updatedAt;
+      await GroundAssetStore.writeSiteMap(id, rec);
+      break;
+    }
+    case 'chrome': {
+      const rec = { ...(/** @type {Record<string, unknown>} */ (body)) };
+      delete rec.id;
+      delete rec.groundId;
+      delete rec.updatedAt;
+      await GroundAssetStore.writeChrome(id, rec);
+      break;
+    }
     default:
       break;
   }
@@ -286,8 +324,9 @@ async function applyRemoteObject(path, envelope, etag) {
 /**
  * @param {import('../Storage/StoragePaths.js').SyncKind} kind
  * @param {string} id
+ * @param {string} [groundId]
  */
-async function localRecordExists(kind, id) {
+async function localRecordExists(kind, id, groundId) {
   switch (kind) {
     case 'ground': return !!(await StorageManager.getGround(id));
     case 'fragment': return !!(await StorageManager.getFragment(id));
@@ -298,6 +337,12 @@ async function localRecordExists(kind, id) {
     case 'landmark': return !!(await StorageManager.getLandmark(id));
     case 'strategy': return !!(await StorageManager.getStrategy(id));
     case 'workflow': return !!(await StorageManager.getWorkflow(id));
+    case 'locale':
+      return !!(groundId && (await GroundAssetStore.readLocale(groundId, id))?.model);
+    case 'siteMap':
+      return !!(await GroundAssetStore.readSiteMap(id));
+    case 'chrome':
+      return !!(await GroundAssetStore.readChrome(id));
     default: return false;
   }
 }
@@ -362,6 +407,19 @@ async function bootstrapLocalWorkspace() {
     for (const r of perspectives) await maybeEnqueue('perspective', r);
     for (const r of landmarks) await maybeEnqueue('landmark', r);
     for (const r of strategies) await maybeEnqueue('strategy', r);
+
+    const locales = await GroundAssetStore.listLocales(ground.id);
+    for (const loc of locales) {
+      await maybeEnqueue('locale', GroundAssetStore.localeSyncRecord(ground.id, loc.localeKey, loc));
+    }
+    const siteMap = await GroundAssetStore.readSiteMap(ground.id);
+    if (siteMap) {
+      await maybeEnqueue('siteMap', GroundAssetStore.siteMapSyncRecord(ground.id, siteMap));
+    }
+    const chrome = await GroundAssetStore.readChrome(ground.id);
+    if (chrome) {
+      await maybeEnqueue('chrome', GroundAssetStore.chromeSyncRecord(ground.id, chrome));
+    }
   }
 
   for (const wf of await StorageManager.listWorkflows()) {
@@ -461,9 +519,11 @@ async function handleConflict(conflict) {
 
   if (shouldQueueManualConflict(conflict)) {
     const pending = await getPendingConflicts();
-    pending.push({ path: conflict.path, conflict });
-    await setPendingConflicts(pending);
-    Logger.warn('SyncEngine', `Manual conflict queued: ${conflict.path}`);
+    if (!pending.some((p) => p.path === conflict.path)) {
+      pending.push({ path: conflict.path, conflict });
+      await setPendingConflicts(pending);
+      Logger.warn('SyncEngine', `Manual conflict queued: ${conflict.path}`);
+    }
   }
 }
 
@@ -507,7 +567,7 @@ async function pullChanges() {
       const cached = await getCachedObject(change.path);
       if (cached?.etag && change.etag && cached.etag === change.etag) {
         const meta = recordMetaFromPath(change.path);
-        if (meta && await localRecordExists(meta.kind, meta.id)) {
+        if (meta && await localRecordExists(meta.kind, meta.id, meta.groundId)) {
           skippedCached += 1;
           continue;
         }
@@ -564,6 +624,15 @@ export async function runSync() {
     const pullResult = await pullChanges();
     const outboxPending = (await listOutboxEntries()).length;
     Logger.info('SyncEngine', `sync complete pushed=${pushResult.pushed} pulled=${pullResult.pulled} bootstrapped=${bootstrapped} outbox=${outboxPending}`);
+    await setLastSyncResult({
+      ok: true,
+      at: Date.now(),
+      pushed: pushResult.pushed,
+      pulled: pullResult.pulled,
+      bootstrapped,
+      outboxPending,
+      remoteChangeCount: pullResult.remoteChangeCount ?? 0,
+    });
     return {
       ok: true,
       pushed: pushResult.pushed,
@@ -615,6 +684,9 @@ export async function resolveSyncConflict(path, resolution) {
   }
 
   await setPendingConflicts(pending.filter((p) => p.path !== path));
+  if (resolution === 'keep-theirs') {
+    await removeOutboxEntries([path]);
+  }
   scheduleSyncRun();
   return { ok: true };
 }

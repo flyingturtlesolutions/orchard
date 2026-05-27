@@ -35,6 +35,7 @@ import {
 import { BUILTIN_ANALYSES, isBuiltinAnalysisId, getBuiltinAnalysis } from './Services/BuiltinAnalyses.js';
 import { parseTemplate, collectTemplateReferences } from './Services/TemplateEngine.js';
 import { uid, $, qs, qsa, escHtml, escAttr, relTime, toast, broadcastStorageChanged, openSidepanelHere } from './shared.js';
+import { recordMetaFromPath, conflictTierForPath } from './Services/Storage/StoragePaths.js';
 import { composeDescriptions } from './Services/FragmentDescription.js';
 // v2.72.45 (Pass 17g iter) — Perspective form removed entirely. Perspective authoring
 // now happens in the debugger sidepanel. Studio retains: the Ground card's
@@ -3043,10 +3044,14 @@ async function _refreshGroundListImpl() {
         const key = btn.dataset.localeKey;
         if (!confirm('Delete this Locale? The next Explore / Build Locale on this page will re-enumerate it.')) return;
         try {
-          const got = await new Promise(r => chrome.storage.local.get('localeCache', r));
-          const map = got?.localeCache ?? {};
-          if (map[ground.id]) { delete map[ground.id][key]; if (Object.keys(map[ground.id]).length === 0) delete map[ground.id]; }
-          await new Promise(r => chrome.storage.local.set({ localeCache: map }, r));
+          const res = await new Promise(r => chrome.runtime.sendMessage({
+            type: 'DELETE_LOCALE',
+            payload: { groundId: ground.id, localeKey: key },
+          }, r));
+          if (!res?.success) {
+            toast(`Failed: ${res?.error ?? 'unknown'}`, 'err');
+            return;
+          }
           toast('Locale deleted');
           await refreshGroundList();
         } catch (e) { toast(`Failed: ${e?.message ?? 'unknown'}`, 'err'); }
@@ -4728,6 +4733,16 @@ function showCloudMsg(text, type) {
   setTimeout(() => el.classList.add('hidden'), 4000);
 }
 
+function syncPathLabel(path) {
+  const meta = recordMetaFromPath(path);
+  if (meta) {
+    const name = meta.kind === 'locale' ? meta.id : `${meta.kind} ${meta.id}`;
+    return name.length > 80 ? `${name.slice(0, 77)}…` : name;
+  }
+  const tail = String(path).split('/').slice(-2).join('/');
+  return tail.length > 80 ? `${tail.slice(0, 77)}…` : tail;
+}
+
 async function refreshCloudSettings() {
   const statusLine = $('cloud-status-line');
   const userIdEl = $('cloud-user-id');
@@ -4775,7 +4790,18 @@ async function refreshCloudSettings() {
   if (syncLine) {
     if (canSync) {
       const mode = hybridActive ? 'hybrid sync' : 'ready (upgrades on sync)';
-      syncLine.textContent = `${mode} · conflicts: ${s.pendingConflicts || 0}`;
+      const parts = [mode, `conflicts: ${s.pendingConflicts || 0}`];
+      if (hybridActive) {
+        parts.push(`outbox: ${s.outboxPending || 0}`);
+        const last = s.lastSync;
+        if (last?.ok) {
+          parts.push(`last: +${last.pushed || 0}/-${last.pulled || 0}`);
+        }
+        if (s.lastSyncAt) {
+          parts.push(relTime(s.lastSyncAt));
+        }
+      }
+      syncLine.textContent = parts.join(' · ');
       syncLine.classList.remove('hidden');
     } else if (s.signedIn) {
       syncLine.textContent = 'Signed in — enable Orchard Cloud to sync';
@@ -4789,15 +4815,33 @@ async function refreshCloudSettings() {
     if ((s.pendingConflicts || 0) > 0 && hybridActive) {
       const conflictsRes = await cloudMsg('GET_SYNC_CONFLICTS');
       const rows = conflictsRes?.conflicts || [];
-      conflictsEl.innerHTML = rows.map((row) => `
-        <div class="settings-note" style="margin-bottom:8px">
-          <div style="font-family:monospace;font-size:11px">${row.path}</div>
-          <div style="display:flex;gap:6px;margin-top:6px">
-            <button class="btn-secondary tiny" type="button" data-conflict-path="${row.path}" data-resolution="keep-mine">Keep mine</button>
-            <button class="btn-secondary tiny" type="button" data-conflict-path="${row.path}" data-resolution="keep-theirs">Keep theirs</button>
+      conflictsEl.innerHTML = rows.map((row) => {
+        const c = row.conflict || {};
+        const tier = conflictTierForPath(row.path);
+        const label = syncPathLabel(row.path);
+        return `
+        <div class="settings-note" style="margin-bottom:8px;padding:8px;border:1px solid var(--border, #333);border-radius:6px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <strong>${escHtml(label)}</strong>
+            <span class="pick-chooser-tier-badge tier-${tier}" title="Conflict tier ${tier}">tier ${tier}</span>
           </div>
-        </div>`).join('');
+          <div style="font-family:monospace;font-size:10px;opacity:0.7;margin-top:4px;word-break:break-all">${escHtml(row.path)}</div>
+          <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+            <button class="btn-secondary tiny" type="button" data-conflict-view="${escAttr(row.path)}">View diff</button>
+            <button class="btn-secondary tiny" type="button" data-conflict-path="${escAttr(row.path)}" data-resolution="keep-mine">Keep mine</button>
+            <button class="btn-secondary tiny" type="button" data-conflict-path="${escAttr(row.path)}" data-resolution="keep-theirs">Keep theirs</button>
+          </div>
+        </div>`;
+      }).join('');
       conflictsEl.classList.remove('hidden');
+      conflictsEl.querySelectorAll('[data-conflict-view]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const path = btn.getAttribute('data-conflict-view');
+          const row = rows.find((r) => r.path === path);
+          const c = row?.conflict || {};
+          showJsonModal(`Sync conflict: ${syncPathLabel(path)}`, { mine: c.client ?? null, theirs: c.server ?? null }, 'sync-conflict');
+        });
+      });
       conflictsEl.querySelectorAll('[data-conflict-path]').forEach((btn) => {
         btn.addEventListener('click', async () => {
           const path = btn.getAttribute('data-conflict-path');
@@ -6239,6 +6283,10 @@ function showJsonModal(title, obj, kind) {
   // and we can detect (and reject) id changes that would orphan references.
   modal.dataset.kind = kind ?? '';
   modal.dataset.originalId = obj?.id ?? '';
+  const saveBtn = $('btn-json-modal-save');
+  const readOnly = kind === 'sync-conflict';
+  if (saveBtn) saveBtn.classList.toggle('hidden', readOnly);
+  bodyEl.readOnly = readOnly;
   // Clear any prior error state
   if (errEl) {
     errEl.classList.add('hidden');
@@ -6251,6 +6299,10 @@ function showJsonModal(title, obj, kind) {
 
 function hideJsonModal() {
   const modal = $('json-modal');
+  const bodyEl = $('json-modal-body');
+  const saveBtn = $('btn-json-modal-save');
+  if (bodyEl) bodyEl.readOnly = false;
+  if (saveBtn) saveBtn.classList.remove('hidden');
   if (modal) modal.classList.add('hidden');
 }
 

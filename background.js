@@ -102,7 +102,14 @@ import {
   resetSyncBootstrap,
   resolveSyncConflict,
   runSync,
+  scheduleSyncRun,
 } from './Services/Sync/SyncEngine.js';
+import * as GroundAssetStore from './Services/Storage/GroundAssetStore.js';
+import {
+  getLastSyncAt,
+  getLastSyncResult,
+  getOutboxCount,
+} from './Services/Storage/IndexedDBStore.js';
 
 Logger.setLevel(LOG_LEVEL.DEBUG);
 Logger.setPersist(true);
@@ -203,7 +210,7 @@ function broadcastSyncApplied(applied) {
  * @param {string} [groundId]
  */
 async function deleteRecordWithSync(kind, id, deleteFn, groundId) {
-  await syncBridgeOnStorageChange(kind, id, 'deleted');
+  await syncBridgeOnStorageChange(kind, id, 'deleted', { groundId });
   await deleteFn();
   if (groundId && kind !== 'ground' && kind !== 'workflow') {
     await enqueueGroundManifestSync(groundId);
@@ -212,6 +219,25 @@ async function deleteRecordWithSync(kind, id, deleteFn, groundId) {
   broadcastSyncApplied(syncRes.applied);
   broadcastStorageChanged(kind, id, 'deleted');
   return syncRes;
+}
+
+/** @param {string} groundId @param {{ localeKey?: string, siteMap?: boolean, chrome?: boolean }} assets */
+async function syncGroundAssetsAfterSave(groundId, assets = {}) {
+  if (!groundId) return;
+  const jobs = [];
+  if (assets.localeKey) {
+    jobs.push(syncBridgeOnStorageChange('locale', assets.localeKey, 'saved', { groundId }));
+  }
+  if (assets.siteMap) {
+    jobs.push(syncBridgeOnStorageChange('siteMap', groundId, 'saved', { groundId }));
+  }
+  if (assets.chrome) {
+    jobs.push(syncBridgeOnStorageChange('chrome', groundId, 'saved', { groundId }));
+  }
+  if (jobs.length) {
+    await Promise.all(jobs);
+    scheduleSyncRun();
+  }
 }
 
 _migrationPromise = _migrationPromise.then(() => refreshStoragePort());
@@ -230,6 +256,25 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onStartup?.addListener?.(() => {
   _migrationPromise = _runMigrations()
     .catch(err => Logger.error('background', `migration failed: ${err.message}`));
+  flushSyncIfPending('startup').catch(() => {});
+});
+
+async function flushSyncIfPending(reason) {
+  try {
+    const outbox = await getOutboxCount();
+    if (!outbox && reason !== 'online') return;
+    const ready = await ensureHybridSyncReady();
+    if (!ready.ready) return;
+    const res = await runSync();
+    if (res.ok) broadcastSyncApplied(res.applied);
+    Logger.info('background', `sync flush (${reason}): pushed=${res.pushed ?? 0} pulled=${res.pulled ?? 0} outbox=${res.outboxPending ?? 0}`);
+  } catch (e) {
+    Logger.warn('background', `sync flush (${reason}): ${e.message}`);
+  }
+}
+
+self.addEventListener('online', () => {
+  flushSyncIfPending('online').catch(() => {});
 });
 
 /**
@@ -1120,46 +1165,22 @@ CapabilityAPI.subscribe((event) => {
 // it. (The perspectiveAutoDiscoveryCache + its read/write helpers were removed with
 // the legacy auto-suggest feature.)
 function _normalizeUrlForPerspectiveCache(url) {
-  if (!url || typeof url !== 'string') return '';
-  try {
-    const u = new URL(url);
-    return u.origin + u.pathname;
-  } catch {
-    return url;
-  }
+  return GroundAssetStore.normalizeLocaleKey(url);
 }
 
 // v2.74.427 — #2 P5: the pageStructure artifact cache is retired. The "+ Perspective"
 // depth sweep still runs (EXPLORE_PAGE_STRUCTURE) and its in-memory `structure` is
 // folded into the Locale (mergeDepthFromControls); only the Locale is persisted.
 
-// v2.74.397 — Locale cache (PAGEMODEL_SPEC). Parallel to pageStructureCache and
-// keyed identically (per ground + normalized URL); additive/non-breaking while the
-// old pageStructure artifact is still the live one for resolve/grounding.
-//   key: 'localeCache'
-//   value: { [groundId]: { [normalizedUrl]: { model, url, capturedAt } } }
-const LOCALE_CACHE_KEY = 'localeCache';
-const LOCALE_TTL_MS = 1000 * 60 * 60 * 24 * 7;   // 7 days
+const LOCALE_CACHE_KEY = GroundAssetStore.LOCALE_CACHE_KEY;
+const LOCALE_TTL_MS = GroundAssetStore.LOCALE_TTL_MS;
 
 async function _readLocaleCache(groundId, cacheKey) {
-  if (!groundId || !cacheKey) return null;
-  try {
-    const got = await chrome.storage.local.get(LOCALE_CACHE_KEY);
-    const map = got?.[LOCALE_CACHE_KEY] ?? {};
-    return map[groundId]?.[cacheKey] ?? null;
-  } catch (e) {
-    Logger.warn('background', `localeCache read failed: ${e.message}`);
-    return null;
-  }
+  return GroundAssetStore.readLocale(groundId, cacheKey);
 }
 
 async function _writeLocaleCache(groundId, cacheKey, entry) {
-  if (!groundId || !cacheKey) return;
-  const got = await chrome.storage.local.get(LOCALE_CACHE_KEY);
-  const map = got?.[LOCALE_CACHE_KEY] ?? {};
-  if (!map[groundId]) map[groundId] = {};
-  map[groundId][cacheKey] = entry;
-  await chrome.storage.local.set({ [LOCALE_CACHE_KEY]: map });
+  await GroundAssetStore.writeLocale(groundId, cacheKey, entry);
 }
 
 // v2.74.446 — navigate a tab and resolve when it reports 'complete' (cross-locale
@@ -1197,25 +1218,7 @@ const _outcomesKey = (groundId) => `outcomes:${groundId}`;
 // remove the old aggregate only AFTER (a mid-migration failure never loses data), and never
 // clobber an existing per-ground key (re-runs are no-ops; a concurrent fresh write wins).
 let _storageMigration = null;
-function _ensureStorageMigrated() { return (_storageMigration ??= _migrateAggregates()); }
-async function _migrateAggregates() {
-  try {
-    const got = await chrome.storage.local.get([SITEMAP_CACHE_KEY, OUTCOMES_STREAM_KEY]);
-    for (const [oldKey, keyFn] of [[SITEMAP_CACHE_KEY, _siteMapKey], [OUTCOMES_STREAM_KEY, _outcomesKey]]) {
-      const blob = got?.[oldKey];
-      if (!blob || typeof blob !== 'object') continue;
-      const ids = Object.keys(blob);
-      if (ids.length) {
-        const existing = await chrome.storage.local.get(ids.map(keyFn));
-        const writes = {};
-        for (const id of ids) { const k = keyFn(id); if (existing[k] === undefined) writes[k] = blob[id]; }
-        if (Object.keys(writes).length) await chrome.storage.local.set(writes);
-      }
-      await chrome.storage.local.remove(oldKey);   // only after the per-ground writes succeeded
-      Logger.info('background', `storage migrated: ${oldKey} → ${ids.length} per-ground key(s)`);
-    }
-  } catch (e) { Logger.warn('background', `storage migration skipped: ${e.message}`); }
-}
+function _ensureStorageMigrated() { return (_storageMigration ??= GroundAssetStore.ensureStorageMigrated()); }
 
 async function _appendOutcomes(groundId, events) {
   if (!groundId || !Array.isArray(events) || !events.length) return;
@@ -1247,25 +1250,17 @@ async function _readOutcomes(groundId) {
 // its contribution (a modeled self-node + discovered nav-destination nodes/edges) into it.
 // v2.74.463 — now stored under its own key `siteMap:<groundId>` (was an entry in siteMapCache).
 async function _readSiteMap(groundId) {
-  if (!groundId) return null;
-  await _ensureStorageMigrated();
-  try {
-    const k = _siteMapKey(groundId);
-    const got = await chrome.storage.local.get(k);
-    return got?.[k] ?? null;
-  } catch (e) { Logger.warn('background', `siteMap read failed: ${e.message}`); return null; }
+  return GroundAssetStore.readSiteMap(groundId);
 }
 
 async function _mergeSiteMapForGround(groundId, contribution) {
   if (!groundId || !contribution) return;
   await _ensureStorageMigrated();
   try {
-    const k = _siteMapKey(groundId);
-    const got = await chrome.storage.local.get(k);
-    const merged = SiteMap.mergeSiteMap(got?.[k] ?? null, contribution);
-    await chrome.storage.local.set({ [k]: merged });
+    const existing = await GroundAssetStore.readSiteMap(groundId);
+    const merged = SiteMap.mergeSiteMap(existing ?? null, contribution);
+    await GroundAssetStore.writeSiteMap(groundId, merged);
     const s = SiteMap.siteMapStats(merged);
-    // v2.74.462 — include `stub` (sitemap-only archetypes the crawl hasn't reached).
     Logger.info('explore', `siteMap[${groundId}]: ${s.modeled} modeled · ${s.discovered} discovered · ${s.stub} stub · ${s.edges} edge(s)`);
   } catch (e) { Logger.warn('background', `siteMap merge failed: ${e.message}`); }
 }
@@ -1279,12 +1274,7 @@ async function _mergeSiteMapForGround(groundId, contribution) {
 const _chromeKey = (groundId) => `chrome:${groundId}`;
 
 async function _readGroundChrome(groundId) {
-  if (!groundId) return null;
-  try {
-    const k = _chromeKey(groundId);
-    const got = await chrome.storage.local.get(k);
-    return got?.[k] ?? null;
-  } catch (e) { Logger.warn('background', `Ground.chrome read failed: ${e.message}`); return null; }
+  return GroundAssetStore.readChrome(groundId);
 }
 
 // All modeled Locales of a Ground as [{key, locale}] (key = localeCache cacheKey), the
@@ -1317,7 +1307,7 @@ async function _deriveGroundChrome(groundId) {
     stats: result.stats,
     builtAt: Date.now(),
   };
-  await chrome.storage.local.set({ [_chromeKey(groundId)]: artifact });
+  await GroundAssetStore.writeChrome(groundId, artifact);
   Logger.info('explore', `Ground.chrome[${groundId}]: ${result.stats.promoted} promoted across ${result.stats.locales} Locale(s) (${result.stats.candidates} recurring candidate(s))`);
   return artifact;
 }
@@ -1370,6 +1360,24 @@ async function _knownSelectorsForUrl(groundId, url) {
         // v2.74.447 — other-language labels (cross-locale harvest) so resolve matches any language.
         aliases: f.labelsByLocale ? Object.values(f.labelsByLocale).filter((l) => l && l !== f.label) : [] }));
   } catch (e) { Logger.warn('background', `_knownSelectorsForUrl (locale) failed: ${e.message}`); }
+
+  // v2.74.487 — Augment with Ground.chrome (GROUND_SPEC § 4): the global header/nav/footer
+  // controls hoisted off ALL the ground's Locales. A chrome control modeled once on another
+  // archetype is a verified selector THIS page can resolve against even if its own Locale
+  // missed it — "modeled once, resolves everywhere". Appended after the page's own features so
+  // page-specific context wins; the push() dedup drops any the Locale already supplied. This
+  // page's overrides (e.g. collapsed search) are applied via chromeFeaturesForLocale.
+  try {
+    const gc = await _readGroundChrome(groundId);
+    if (gc && gc.chrome) {
+      const CHROME_PRI = { input: 0, action: 1, collection: 2, navigation: 3, disclosure: 4 };
+      ChromeHoist.chromeFeaturesForLocale(gc, cacheKey)
+        .filter((f) => f?.selector && Object.prototype.hasOwnProperty.call(CHROME_PRI, f.kind))
+        .sort((a, b) => CHROME_PRI[a.kind] - CHROME_PRI[b.kind])
+        .forEach((f) => push({ label: f.label || '', role: f.a11yRole || f.kind, selector: f.selector,
+          aliases: f.labelsByLocale ? Object.values(f.labelsByLocale).filter((l) => l && l !== f.label) : [], chrome: true }));
+    }
+  } catch (e) { Logger.warn('background', `_knownSelectorsForUrl (chrome) failed: ${e.message}`); }
 
   return out.length ? out : null;
 }
@@ -4615,6 +4623,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 // (GROUND_SPEC § 4). Additive/non-destructive this slice. Never fails Explore.
                 try { await _deriveGroundChrome(groundId); }
                 catch (e) { Logger.warn('background', `Ground.chrome derive failed (continuing): ${e.message}`); }
+                await syncGroundAssetsAfterSave(groundId, {
+                  localeKey,
+                  siteMap: true,
+                  chrome: !!(await _readGroundChrome(groundId)),
+                });
               }
               const layerCount = Object.keys(model.layers || {}).length - 1;   // minus the surface layer
               Logger.info('explore', `Locale built alongside Explore: ${Object.keys(model.features).length} feature(s), ${Math.max(0, layerCount)} depth layer(s), ${Object.keys(model.goals || {}).length} goal(s), fidelity ${model.coverage.fidelity}`);
@@ -4698,7 +4711,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const mf = model.features[af.id];   // base feature is from the primary locale → same id
             if (mf && af.labelsByLocale && Object.keys(af.labelsByLocale).length > 1) { mf.labelsByLocale = af.labelsByLocale; enriched++; }
           }
-          if (enriched) await _writeLocaleCache(groundId, localeKey, { ...cached, model });
+          if (enriched) {
+            await _writeLocaleCache(groundId, localeKey, { ...cached, model });
+            await syncGroundAssetsAfterSave(groundId, { localeKey });
+          }
           Logger.info('explore', `locale label harvest: ${Object.keys(byLocale).length} language(s), ${enriched} feature(s) enriched for ${localeKey}`);
           sendResponse({ success: true, enriched, languages: Object.keys(byLocale) });
         } catch (err) {
@@ -5736,6 +5752,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 sitemapTruncated = !!truncated;
                 if (urls.length) {
                   await _mergeSiteMapForGround(groundId, SiteMap.siteMapFromSitemap(urls));
+                  await syncGroundAssetsAfterSave(groundId, { siteMap: true });
                   Logger.info('background', `sitemap seeded ${count} stub archetype URL(s) for ${groundId}`);
                 } else if (blocked) {
                   // v2.74.452/455 — a Cloudflare/WAF challenge blocked the sitemap even via the
@@ -5795,6 +5812,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 const existing = await _readSiteMap(groundId);
                 const rules = (existing && existing.templateRules) || [];
                 await _mergeSiteMapForGround(groundId, SiteMap.siteMapFromCrawl(crawled, { rules }));
+                await syncGroundAssetsAfterSave(groundId, { siteMap: true });
                 const sm = await _readSiteMap(groundId);
                 siteMapStats = sm ? SiteMap.siteMapStats(sm) : null;
                 // v2.74.450 — drift (§8): what changed vs the prior siteMap. The persisted
@@ -5922,8 +5940,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'SYNC_BRIDGE': {
       (async () => {
         try {
-          const { kind, id, action = 'saved' } = payload ?? message;
-          await syncBridgeOnStorageChange(kind, id, action);
+          const { kind, id, action = 'saved', groundId } = payload ?? message;
+          await syncBridgeOnStorageChange(kind, id, action, { groundId });
+          sendResponse({ success: true });
+        } catch (e) {
+          sendResponse({ success: false, error: e.message });
+        }
+      })();
+      return true;
+    }
+
+    case 'DELETE_LOCALE': {
+      (async () => {
+        try {
+          const { groundId, localeKey } = payload ?? {};
+          if (!groundId || !localeKey) {
+            sendResponse({ success: false, error: 'groundId and localeKey required' });
+            return;
+          }
+          await deleteRecordWithSync(
+            'locale',
+            localeKey,
+            () => GroundAssetStore.deleteLocale(groundId, localeKey),
+            groundId,
+          );
           sendResponse({ success: true });
         } catch (e) {
           sendResponse({ success: false, error: e.message });
@@ -5959,8 +5999,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           } catch { /* port not initialized yet */ }
 
           let pendingConflicts = 0;
+          let outboxPending = 0;
+          let lastSyncAt = 0;
+          /** @type {Record<string, unknown>|null} */
+          let lastSyncResult = null;
           try {
             pendingConflicts = (await getSyncConflicts()).length;
+            outboxPending = await getOutboxCount();
+            lastSyncAt = await getLastSyncAt();
+            lastSyncResult = await getLastSyncResult();
           } catch (e) {
             Logger.warn('background', `GET_CLOUD_STATUS conflicts: ${e.message}`);
           }
@@ -5972,6 +6019,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               storageBackend: meta.storageBackend,
               adapterKind: meta.adapterKind,
               pendingConflicts,
+              outboxPending,
+              lastSyncAt,
+              lastSync: lastSyncResult,
             },
           });
         })

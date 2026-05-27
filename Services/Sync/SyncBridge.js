@@ -8,6 +8,7 @@ import { StorageManager } from '../StorageManager.js';
 import { getCloudSession } from '../Cloud/CloudTokenStore.js';
 import { SYNCABLE_KINDS, recordMetaFromPath } from '../Storage/StoragePaths.js';
 import { listCachedObjectPaths } from '../Storage/IndexedDBStore.js';
+import * as GroundAssetStore from '../Storage/GroundAssetStore.js';
 import {
   enqueueRecordWrite,
   enqueueRecordDelete,
@@ -37,13 +38,19 @@ const KIND_ALIASES = {
   strategies: 'strategy',
   workflow: 'workflow',
   workflows: 'workflow',
+  locale: 'locale',
+  locales: 'locale',
+  siteMap: 'siteMap',
+  sitemap: 'siteMap',
+  chrome: 'chrome',
 };
 
 /**
  * @param {SyncKind} kind
  * @param {string} id
+ * @param {{ groundId?: string }} [opts]
  */
-async function loadRecord(kind, id) {
+async function loadRecord(kind, id, opts = {}) {
   switch (kind) {
     case 'ground': return StorageManager.getGround(id);
     case 'fragment': return StorageManager.getFragment(id);
@@ -54,6 +61,24 @@ async function loadRecord(kind, id) {
     case 'landmark': return StorageManager.getLandmark(id);
     case 'strategy': return StorageManager.getStrategy(id);
     case 'workflow': return StorageManager.getWorkflow(id);
+    case 'locale': {
+      if (!opts.groundId) return null;
+      const entry = await GroundAssetStore.readLocale(opts.groundId, id);
+      if (!entry?.model) return null;
+      return GroundAssetStore.localeSyncRecord(opts.groundId, id, entry);
+    }
+    case 'siteMap': {
+      const groundId = opts.groundId || id;
+      const siteMap = await GroundAssetStore.readSiteMap(groundId);
+      if (!siteMap) return null;
+      return GroundAssetStore.siteMapSyncRecord(groundId, siteMap);
+    }
+    case 'chrome': {
+      const groundId = opts.groundId || id;
+      const chrome = await GroundAssetStore.readChrome(groundId);
+      if (!chrome) return null;
+      return GroundAssetStore.chromeSyncRecord(groundId, chrome);
+    }
     default: return null;
   }
 }
@@ -61,10 +86,11 @@ async function loadRecord(kind, id) {
 /**
  * @param {SyncKind} kind
  * @param {string} id
+ * @param {{ groundId?: string }} [opts]
  * @returns {Promise<Record<string, unknown>|null>}
  */
-async function resolveDeleteRecord(kind, id) {
-  const existing = await loadRecord(kind, id);
+async function resolveDeleteRecord(kind, id, opts = {}) {
+  const existing = await loadRecord(kind, id, opts);
   if (existing) return /** @type {Record<string, unknown>} */ (existing);
 
   const paths = await listCachedObjectPaths();
@@ -74,12 +100,15 @@ async function resolveDeleteRecord(kind, id) {
       return {
         id,
         groundId: meta.groundId,
+        localeKey: kind === 'locale' ? id : undefined,
       };
     }
   }
 
   if (kind === 'ground') return { id, groundId: id };
   if (kind === 'workflow') return { id };
+  if (kind === 'siteMap' || kind === 'chrome') return { id, groundId: id };
+  if (kind === 'locale' && opts.groundId) return { id, groundId: opts.groundId, localeKey: id };
   return null;
 }
 
@@ -87,8 +116,9 @@ async function resolveDeleteRecord(kind, id) {
  * @param {string} kind
  * @param {string|null} id
  * @param {'saved'|'deleted'} action
+ * @param {{ groundId?: string, orchardUserId?: string }} [opts]
  */
-export async function syncBridgeOnStorageChange(kind, id, action) {
+export async function syncBridgeOnStorageChange(kind, id, action, opts = {}) {
   if (!(await isHybridSyncActive())) return;
   if (!id) return;
 
@@ -97,27 +127,27 @@ export async function syncBridgeOnStorageChange(kind, id, action) {
 
   try {
     const session = await getCloudSession();
-    const opts = { orchardUserId: session?.orchardUserId };
+    const syncOpts = { orchardUserId: session?.orchardUserId, groundId: opts.groundId };
 
     if (action === 'deleted') {
       if (normalized === 'ground') {
-        await enqueueGroundTreeDelete(id, opts);
+        await enqueueGroundTreeDelete(id, syncOpts);
         return;
       }
-      const record = await resolveDeleteRecord(normalized, id);
+      const record = await resolveDeleteRecord(normalized, id, syncOpts);
       if (!record) {
         Logger.warn('SyncBridge', `delete sync skipped ${kind}/${id}: record not found`);
         return;
       }
-      await enqueueRecordDelete(normalized, record, opts);
+      await enqueueRecordDelete(normalized, record, syncOpts);
       return;
     }
 
     if (action !== 'saved') return;
 
-    const record = await loadRecord(normalized, id);
+    const record = await loadRecord(normalized, id, syncOpts);
     if (!record) return;
-    await enqueueRecordWrite(normalized, /** @type {Record<string, unknown>} */ (record), opts);
+    await enqueueRecordWrite(normalized, /** @type {Record<string, unknown>} */ (record), syncOpts);
   } catch (e) {
     Logger.warn('SyncBridge', `enqueue failed ${kind}/${id}: ${e.message}`);
   }
