@@ -631,7 +631,9 @@ async function handleConflict(conflict) {
   if (action === 'keep-theirs') {
     const server = conflict.server;
     if (server) {
-      await applyRemoteObject(conflict.path, server, '*');
+      // Cache the server's real etag (sent in the 409 body) so the NEXT local edit on this path
+      // pushes with proper optimistic concurrency. Falls back to '*' if absent (pre-deploy lambda).
+      await applyRemoteObject(conflict.path, server, conflict.serverEtag || '*');
     }
     await removeOutboxEntries([conflict.path]);
     return;

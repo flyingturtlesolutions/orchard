@@ -479,6 +479,7 @@ async function checkEtagConflict(orchardUserId, logicalPath, expectedEtag, clien
     error: 'conflict',
     path: logicalPath,
     server: serverBody,
+    serverEtag: normalizeEtag(serverEtag),   // let the client cache the real etag on keep-theirs
     client: clientEnvelope,
     ...meta,
   });
@@ -773,6 +774,7 @@ async function handleBatchWrite(event) {
         error: 'conflict',
         path: item.path,
         server: serverBody,
+        serverEtag: normalizeEtag(serverEtag),   // let the client cache the real etag on keep-theirs
         client: item.envelope,
         ...meta,
       });
