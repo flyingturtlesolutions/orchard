@@ -2572,6 +2572,12 @@ async function _refreshGroundListImpl() {
     const smMap   = siteMapRes?.siteMap ?? null;
     const smStats = siteMapRes?.stats ?? null;
     const hasMap  = !!(smStats && smStats.nodes > 0);
+    // v2.74.484 — Ground.chrome (GROUND_SPEC § 4): the global header/nav/footer controls
+    // hoisted off the per-archetype Locales (modeled once, not per page). Fetched here so the
+    // Chrome section renders inline alongside the Site Map. Best-effort.
+    let chromeRes = null;
+    try { chromeRes = await new Promise(r => chrome.runtime.sendMessage({ type: 'GET_GROUND_CHROME', payload: { groundId: ground.id } }, r)); }
+    catch { chromeRes = null; }
     const fragments = await StorageManager.listFragments(ground.id);
     const strategies = await StorageManager.listStrategies(ground.id);
     const assertions = await StorageManager.listAssertions(ground.id);
@@ -3192,6 +3198,34 @@ async function _refreshGroundListImpl() {
         </div>
         <input type="text" id="cap-intent-${ground.id}" placeholder="What do you want to do? (type to rank)" autocomplete="off" style="width:100%;box-sizing:border-box;margin:2px 0 4px;font-size:12px;padding:3px 6px" />
         <div class="sitemap-nodes" id="cap-results-${ground.id}">${capListHtml(caps.capabilities.slice(0, CAP_SHOWN), true)}</div>` : '';
+      // v2.74.484 — Chrome (GROUND_SPEC § 4): the global controls hoisted off the Locales, shown
+      // once here. Each row: kind, label, the regions it sits in, how many archetypes saw it
+      // (seenIn), a ⊕ depth badge if it carries a reveal layer, and an override count. So the
+      // "modeled once, referenced everywhere" set is inspectable.
+      const chromeObj = chromeRes?.success ? (chromeRes.chrome || {}) : {};
+      const chromeList = Object.values(chromeObj);
+      const CHROME_SHOWN = 14;
+      const ovByUid = {};   // uid -> # of Locales that override it
+      for (const perLocale of Object.values(chromeRes?.overrides || {})) for (const uid of Object.keys(perLocale || {})) ovByUid[uid] = (ovByUid[uid] || 0) + 1;
+      const chromeIcon = { input: '⌨', action: '⏺', navigation: '↗', disclosure: '▾', composite: '▣' };
+      const chromeRow = (f) => {
+        const hasDepth = !!(f.reveals && chromeRes?.chromeLayers?.[f.reveals]);
+        const meta = [
+          (f.regions && f.regions.length) ? f.regions.join('/') : '',
+          (f.seenIn && f.seenIn.length) ? `×${f.seenIn.length}` : '',
+          hasDepth ? '⊕ depth' : '',
+          ovByUid[f.id] ? `${ovByUid[f.id]} override(s)` : '',
+        ].filter(Boolean).join(' · ');
+        return `<div class="sitemap-node" title="${escAttr(f.selector || '')}"><span class="sitemap-node-status">${chromeIcon[f.kind] || '•'}</span><span class="sitemap-node-name">${escHtml(f.label || f.kind || '(chrome)')}</span><span class="sitemap-node-meta">${escHtml(meta)}</span></div>`;
+      };
+      const chromeHtml = chromeList.length ? `
+        <div class="ground-section-head" style="margin-top:8px;border-top:1px solid rgba(127,127,127,.18);padding-top:6px">
+          <span class="ground-section-label">Chrome</span>
+          <span class="ground-section-count">${chromeList.length}</span>
+          <span class="sitemap-node-meta" title="Global header/nav/footer controls hoisted off the per-archetype Locales — captured once, referenced everywhere (GROUND_SPEC §4)">hoisted · ${chromeRes?.stats?.layers || 0} w/ depth</span>
+          <button class="btn-secondary tiny" data-action="json-chrome" data-gid="${ground.id}" title="View the full Ground.chrome (promoted features + depth layers + per-Locale overrides) as JSON">{ }</button>
+        </div>
+        <div class="sitemap-nodes">${chromeList.slice(0, CHROME_SHOWN).map(chromeRow).join('')}${chromeList.length > CHROME_SHOWN ? `<div class="empty-state small">+${chromeList.length - CHROME_SHOWN} more — see JSON</div>` : ''}</div>` : '';
       smRow.innerHTML = `
       <div class="ground-section-head">
         <span class="ground-section-label">Site Map</span>
@@ -3204,7 +3238,7 @@ async function _refreshGroundListImpl() {
         ${nodes.length === 0
           ? `<span class="empty-state small">No site map yet — <strong>Explore</strong> a page to sketch the territory: the current page becomes a <em>modeled</em> node and every same-site nav destination a <em>discovered</em> node + edge.</span>`
           : `${coverageHtml}
-             <div class="sitemap-nodes">${modeled.map(nodeRow).join('')}${discovered.slice(0, 20).map(nodeRow).join('')}${discovered.length > 20 ? `<div class="empty-state small">+${discovered.length - 20} more discovered — see JSON</div>` : ''}${stub.slice(0, 25).map(nodeRow).join('')}${stub.length > 25 ? `<div class="empty-state small">+${stub.length - 25} more stub — see JSON</div>` : ''}</div>${capabilitiesHtml}`
+             <div class="sitemap-nodes">${modeled.map(nodeRow).join('')}${discovered.slice(0, 20).map(nodeRow).join('')}${discovered.length > 20 ? `<div class="empty-state small">+${discovered.length - 20} more discovered — see JSON</div>` : ''}${stub.slice(0, 25).map(nodeRow).join('')}${stub.length > 25 ? `<div class="empty-state small">+${stub.length - 25} more stub — see JSON</div>` : ''}</div>${capabilitiesHtml}${chromeHtml}`
         }
       </div>
       <div class="explore-queue-panel hidden" id="exq-panel-${ground.id}"></div>`;
@@ -3290,6 +3324,12 @@ async function _refreshGroundListImpl() {
     });
     smRow.querySelector('[data-action="json-sitemap"]')?.addEventListener('click', () => {
       showJsonModal(`Site Map: ${ground.name ?? ground.id}`, smMap, 'sitemap');
+    });
+    smRow.querySelector('[data-action="json-chrome"]')?.addEventListener('click', () => {
+      // Re-fetch fresh so the JSON reflects the latest derivation, not the render snapshot.
+      chrome.runtime.sendMessage({ type: 'GET_GROUND_CHROME', payload: { groundId: ground.id } }, (resp) => {
+        showJsonModal(`Ground.chrome: ${ground.name ?? ground.id}`, resp?.success ? resp : (chromeRes || {}), 'ground-chrome');
+      });
     });
     smRow.querySelector('[data-action="json-capabilities"]')?.addEventListener('click', () => {
       showJsonModal(`Capabilities: ${ground.name ?? ground.id}`, siteMapCapabilities(smMap), 'capabilities');
