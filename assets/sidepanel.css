@@ -4731,12 +4731,18 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 /* v2.74.330 — GROUND_SPEC § 9 lifecycle. Dim deprecated Ground cards;
    lifecycle badges next to the name. */
 .ground-card-deprecated,
-.perspective-row-deprecated {
+.perspective-row-deprecated,
+.strategy-row-deprecated,
+.fragment-row-deprecated,
+.analysis-row-deprecated {
   opacity: 0.55;
   transition: opacity .15s;
 }
 .ground-card-deprecated:hover,
-.perspective-row-deprecated:hover {
+.perspective-row-deprecated:hover,
+.strategy-row-deprecated:hover,
+.fragment-row-deprecated:hover,
+.analysis-row-deprecated:hover {
   opacity: 0.85;
 }
 .ground-lifecycle-badge {

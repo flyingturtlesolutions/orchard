@@ -4,7 +4,6 @@
  */
 
 import { getCloudSettings } from '../Cloud/CloudSettings.js';
-import { isCloudSignedIn } from '../Cloud/CloudTokenStore.js';
 import {
   readPartitionRecord,
   listPartitionRecordsForGround,
@@ -14,11 +13,26 @@ import {
 
 /** @typedef {import('./StoragePaths.js').SyncKind} SyncKind */
 
-/** @returns {Promise<boolean>} */
+/**
+ * Whether local reads/writes route through the IndexedDB workspace partition as primary.
+ *
+ * Fresh-start model (no migration / no flat→partition backfill): the partition IS the primary
+ * local store from the moment the hybrid backend is selected. There is nothing to migrate and no
+ * backfill to complete, so gating on a backfill-version flag (which is now never written) would
+ * keep the partition permanently dead — every read/write would silently bypass IndexedDB and stay
+ * on flat chrome.storage. Gate purely on the hybrid backend being selected.
+ *
+ * IMPORTANT: this gates LOCAL STORAGE ROUTING, so it must NOT depend on live auth/token state — a
+ * token expiry must not re-shadow the partition. `settings.storageBackend` is a persisted choice,
+ * not live auth, so it is safe. Reads remain safe even before the partition is populated:
+ * maybeReadPartition falls back to flat when a record is absent, and maybeListPartition guards on
+ * hasPartitionDataForGround; writes dual-write flat as a backup.
+ *
+ * @returns {Promise<boolean>}
+ */
 export async function isPartitionReadEnabled() {
   const settings = await getCloudSettings();
-  if (!settings.enabled || settings.storageBackend !== 'hybrid') return false;
-  return isCloudSignedIn();
+  return Boolean(settings.enabled && settings.storageBackend === 'hybrid');
 }
 
 /**

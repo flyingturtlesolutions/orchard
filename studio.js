@@ -2745,11 +2745,12 @@ async function _refreshGroundListImpl() {
                 ? (fragments.find(x => x.id === f.antecedentFragmentId)?.name ?? '?')
                 : null;
               return `
-            <div class="fragment-row" data-fid="${f.id}">
+            <div class="fragment-row${f.lifecycle === 'deprecated' ? ' fragment-row-deprecated' : ''}" data-fid="${f.id}">
               <div class="fragment-row-main">
                 <span class="fragment-name">${escHtml(f.name ?? 'Unnamed')}</span>
                 <span class="fragment-tier tier-${(f.authoringTier ?? 'T3').toLowerCase()}" title="Authoring tier — ${(f.authoringTier ?? 'T3') === 'T1' ? 'hand-authored' : 'AI-walked'}">${escHtml(f.authoringTier ?? 'T3')}</span>
                 <span class="fragment-health health-${f.healthStatus ?? 'untested'}">${escHtml(f.healthStatus ?? 'untested')}</span>
+                ${f.lifecycle === 'deprecated' ? '<span class="ground-lifecycle-badge ground-lifecycle-deprecated" title="Deprecated (soft-deleted). Kept but excluded from active use; reactivate to restore.">deprecated</span>' : ''}
               </div>
               ${(() => {
                 // v2.74.9 — Description rendered live from rawJson via
@@ -2786,6 +2787,9 @@ async function _refreshGroundListImpl() {
                 <button class="btn-action" data-action="rewalk-fragment" data-fid="${f.id}" title="Re-walk this Fragment (replace its DOM actions)">↻</button>
                 ${f.authoringTier === 'T1' ? `<button class="btn-action" data-action="enhance-fragment" data-fid="${f.id}" title="Auto-insert WAIT/BLUR transition gates between actions (T1 only)">✨</button>` : ``}
                 <button class="btn-action" data-action="json-fragment" data-fid="${f.id}" title="View JSON (read-only, copyable)">{ }</button>
+                ${f.lifecycle === 'deprecated'
+                  ? `<button class="btn-secondary small" data-action="reactivate-fragment" data-fid="${f.id}" title="Reactivate this Fragment (restore to active)">↑</button>`
+                  : `<button class="btn-action" data-action="deprecate-fragment" data-fid="${f.id}" title="Deprecate (soft-delete) — keep but flag as deprecated, reversible">⤓</button>`}
                 <button class="btn-action danger" data-action="delete-fragment" data-fid="${f.id}" title="Delete Fragment">✕</button>
               </div>
             </div>`;
@@ -2839,6 +2843,24 @@ async function _refreshGroundListImpl() {
     });
     fragRow.querySelectorAll('[data-action="delete-fragment"]').forEach(btn => {
       btn.addEventListener('click', () => deleteFragment(btn.dataset.fid));
+    });
+    // v2.74.510 — STORAGE_SCHEMA §9/§10 deprecate (soft-delete) / reactivate.
+    fragRow.querySelectorAll('[data-action="deprecate-fragment"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!confirm('Deprecate this Fragment? It\'s kept but flagged deprecated — reactivate it any time.')) return;
+        const res = await new Promise(r => chrome.runtime.sendMessage(
+          { type: 'DEPRECATE_PRIMITIVE', payload: { kind: 'fragment', id: btn.dataset.fid } }, r));
+        if (res?.success) { toast('Fragment deprecated'); await refreshGroundList(); }
+        else toast(`Failed: ${res?.error ?? 'unknown'}`, 'err');
+      });
+    });
+    fragRow.querySelectorAll('[data-action="reactivate-fragment"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const res = await new Promise(r => chrome.runtime.sendMessage(
+          { type: 'RESTORE_PRIMITIVE', payload: { kind: 'fragment', id: btn.dataset.fid } }, r));
+        if (res?.success) { toast('Fragment reactivated'); await refreshGroundList(); }
+        else toast(`Failed: ${res?.error ?? 'unknown'}`, 'err');
+      });
     });
     card.appendChild(fragRow);
 
@@ -3604,10 +3626,11 @@ async function _refreshGroundListImpl() {
                 metaText = `${opsCount} op${opsCount === 1 ? '' : 's'} · ${paramsCount} param${paramsCount === 1 ? '' : 's'}`;
               }
               return `
-            <div class="analysis-row" data-aid="${escAttr(a.id)}" data-builtin="${a._isBuiltin ? '1' : '0'}">
+            <div class="analysis-row${a.lifecycle === 'deprecated' ? ' analysis-row-deprecated' : ''}" data-aid="${escAttr(a.id)}" data-builtin="${a._isBuiltin ? '1' : '0'}">
               <div class="analysis-row-main">
                 <span class="analysis-name">${escHtml(a.name ?? 'Unnamed')}</span>
                 ${a._isBuiltin ? '<span class="analysis-builtin-badge">built-in</span>' : ''}
+                ${a.lifecycle === 'deprecated' ? '<span class="ground-lifecycle-badge ground-lifecycle-deprecated" title="Deprecated (soft-deleted). Kept but excluded from active use; reactivate to restore.">deprecated</span>' : ''}
               </div>
               ${a.description ? `<div class="analysis-desc">${escHtml(a.description)}</div>` : ''}
               <div class="analysis-row-actions">
@@ -3616,6 +3639,9 @@ async function _refreshGroundListImpl() {
                   ? `<button class="btn-action" data-action="json-analysis" data-aid="${escAttr(a.id)}" title="View JSON (read-only, copyable)">{ }</button>`
                   : `<button class="btn-action" data-action="edit-analysis" data-aid="${escAttr(a.id)}" title="Edit Analysis">✎</button>
                      <button class="btn-action" data-action="json-analysis" data-aid="${escAttr(a.id)}" title="View JSON (read-only, copyable)">{ }</button>
+                     ${a.lifecycle === 'deprecated'
+                       ? `<button class="btn-secondary small" data-action="reactivate-analysis" data-aid="${escAttr(a.id)}" title="Reactivate this Analysis (restore to active)">↑</button>`
+                       : `<button class="btn-action" data-action="deprecate-analysis" data-aid="${escAttr(a.id)}" title="Deprecate (soft-delete) — keep but flag as deprecated, reversible">⤓</button>`}
                      <button class="btn-action danger" data-action="delete-analysis" data-aid="${escAttr(a.id)}" title="Delete Analysis">✕</button>`
                 }
               </div>
@@ -3648,6 +3674,24 @@ async function _refreshGroundListImpl() {
     analysisRow.querySelectorAll('[data-action="delete-analysis"]').forEach(btn => {
       btn.addEventListener('click', () => deleteAnalysis(btn.dataset.aid));
     });
+    // v2.74.510 — STORAGE_SCHEMA §9/§10 deprecate (soft-delete) / reactivate (user analyses only).
+    analysisRow.querySelectorAll('[data-action="deprecate-analysis"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!confirm('Deprecate this Analysis? It\'s kept but flagged deprecated — reactivate it any time.')) return;
+        const res = await new Promise(r => chrome.runtime.sendMessage(
+          { type: 'DEPRECATE_PRIMITIVE', payload: { kind: 'analysis', id: btn.dataset.aid } }, r));
+        if (res?.success) { toast('Analysis deprecated'); await refreshGroundList(); }
+        else toast(`Failed: ${res?.error ?? 'unknown'}`, 'err');
+      });
+    });
+    analysisRow.querySelectorAll('[data-action="reactivate-analysis"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const res = await new Promise(r => chrome.runtime.sendMessage(
+          { type: 'RESTORE_PRIMITIVE', payload: { kind: 'analysis', id: btn.dataset.aid } }, r));
+        if (res?.success) { toast('Analysis reactivated'); await refreshGroundList(); }
+        else toast(`Failed: ${res?.error ?? 'unknown'}`, 'err');
+      });
+    });
     card.appendChild(analysisRow);
 
     // Strategies stub row — wired in Pass C
@@ -3674,11 +3718,15 @@ async function _refreshGroundListImpl() {
               const tierBadge = sTier === 'frontier'
                 ? `<span class="strategy-tier-badge tier-frontier" title="T3 Composer-based — frontier model composes from primitives at runtime. Real per-call cost. Composer ships in Pass 16.">T3</span>`
                 : `<span class="strategy-tier-badge tier-cache" title="T1 Hand-authored — deterministic fragment tree.">T1</span>`;
+              // v2.74.510 — STORAGE_SCHEMA §9/§10 soft-delete (deprecate/reactivate),
+              // mirroring the Perspective pattern. lifecycle drives the deprecated UI.
+              const isDeprecated = s.lifecycle === 'deprecated';
               return `
-            <div class="strategy-row" data-sid="${s.id}">
+            <div class="strategy-row${isDeprecated ? ' strategy-row-deprecated' : ''}" data-sid="${s.id}">
               <div class="strategy-row-main">
                 <span class="strategy-name">${escHtml(s.name ?? 'Unnamed')}</span>
                 ${tierBadge}
+                ${isDeprecated ? '<span class="ground-lifecycle-badge ground-lifecycle-deprecated" title="Deprecated (soft-deleted). Kept but excluded from active use; reactivate to restore.">deprecated</span>' : ''}
                 <span class="strategy-step-count">${sTier === 'frontier' ? 'composed at runtime' : `${stepCount} step${stepCount === 1 ? '' : 's'}`}</span>
               </div>
               ${s.goal ? `<div class="strategy-goal">${escHtml(s.goal)}</div>` : ''}
@@ -3693,6 +3741,9 @@ async function _refreshGroundListImpl() {
                 <button class="btn-action" data-action="run-strategy" data-sid="${s.id}" title="Test-run this Strategy now">▶</button>
                 <button class="btn-action" data-action="edit-strategy" data-sid="${s.id}" title="Edit Strategy">✎</button>
                 <button class="btn-action" data-action="json-strategy" data-sid="${s.id}" title="View JSON (read-only, copyable)">{ }</button>
+                ${isDeprecated
+                  ? `<button class="btn-secondary small" data-action="reactivate-strategy" data-sid="${s.id}" title="Reactivate this Strategy (restore to active)">↑</button>`
+                  : `<button class="btn-action" data-action="deprecate-strategy" data-sid="${s.id}" title="Deprecate (soft-delete) — keep but flag as deprecated, reversible">⤓</button>`}
                 <button class="btn-action danger" data-action="delete-strategy" data-sid="${s.id}" title="Delete Strategy">✕</button>
               </div>
             </div>`;
@@ -3727,6 +3778,25 @@ async function _refreshGroundListImpl() {
     });
     stratRow.querySelectorAll('[data-action="delete-strategy"]').forEach(btn => {
       btn.addEventListener('click', () => deleteStrategy(btn.dataset.sid));
+    });
+    // v2.74.510 — STORAGE_SCHEMA §9/§10 deprecate (soft-delete) / reactivate via the
+    // generic primitive lifecycle ops (background DEPRECATE_PRIMITIVE/RESTORE_PRIMITIVE).
+    stratRow.querySelectorAll('[data-action="deprecate-strategy"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!confirm('Deprecate this Strategy? It\'s kept but flagged deprecated — reactivate it any time.')) return;
+        const res = await new Promise(r => chrome.runtime.sendMessage(
+          { type: 'DEPRECATE_PRIMITIVE', payload: { kind: 'strategy', id: btn.dataset.sid } }, r));
+        if (res?.success) { toast('Strategy deprecated'); await refreshGroundList(); }
+        else toast(`Failed: ${res?.error ?? 'unknown'}`, 'err');
+      });
+    });
+    stratRow.querySelectorAll('[data-action="reactivate-strategy"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const res = await new Promise(r => chrome.runtime.sendMessage(
+          { type: 'RESTORE_PRIMITIVE', payload: { kind: 'strategy', id: btn.dataset.sid } }, r));
+        if (res?.success) { toast('Strategy reactivated'); await refreshGroundList(); }
+        else toast(`Failed: ${res?.error ?? 'unknown'}`, 'err');
+      });
     });
     card.appendChild(stratRow);
 
@@ -5037,7 +5107,11 @@ async function handleCloudSyncNow() {
       const pending = res.outboxPending ? ` · ${res.outboxPending} pending` : '';
       const remote = res.remoteChangeCount ? ` · ${res.remoteChangeCount} remote` : '';
       const msg = `Sync complete · pushed ${res.pushed ?? 0}, pulled ${res.pulled ?? 0}${seed}${pending}${remote}`;
-      if ((res.pushed ?? 0) === 0 && (res.pulled ?? 0) === 0 && (res.outboxPending ?? 0) === 0) {
+      if (res.warning) {
+        toast(res.warning, 'warn');
+        showCloudMsg(res.warning, 'warn');
+      }
+      if ((res.pushed ?? 0) === 0 && (res.pulled ?? 0) === 0 && (res.outboxPending ?? 0) === 0 && !res.warning) {
         toast(`${msg} — already up to date`, 'ok');
         showCloudMsg(`${msg} — already up to date`, 'ok');
       } else if ((res.pushed ?? 0) === 0 && (res.pulled ?? 0) === 0 && (res.outboxPending ?? 0) > 0) {

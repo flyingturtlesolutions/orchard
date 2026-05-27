@@ -65,6 +65,7 @@ import {
 import { listLandmarksForGround, resolveLandmarkRef } from './Services/LandmarkResolver.js';
 import { listActivePerspectives }                          from './Services/PerspectivePredicates.js';
 import { analyzeLandmarkImpact }                      from './Services/LandmarkImpactAnalysis.js';
+import { analyzeDeletionImpact }                     from './Services/Storage/ReferenceStore.js';
 import { emit as emitGroundEvent_bg,
          list as listGroundEvents_bg,
          clear as clearGroundEvents_bg }              from './Services/GroundEventBus.js';
@@ -105,6 +106,7 @@ import {
   resolveSyncConflict,
   runSync,
   scheduleSyncRun,
+  forceResyncRecord,
 } from './Services/Sync/SyncEngine.js';
 import * as GroundAssetStore from './Services/Storage/GroundAssetStore.js';
 import {
@@ -2993,6 +2995,58 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
+    // ── Soft-delete + reference impact (STORAGE_SCHEMA §9/§10) ──────────────
+    // deprecate is the DEFAULT reversible delete: it flips the record's lifecycle
+    // to 'deprecated' and re-saves, so broadcastStorageChanged(...,'saved') both
+    // refreshes the UI and rides it out to cloud as an ordinary update (no tombstone).
+    // Hard delete (DELETE_*) is unchanged. Kinds: ground|fragment|observation|
+    // analysis|assertion|perspective|landmark|strategy.
+    case 'DEPRECATE_PRIMITIVE': {
+      (async () => {
+        try {
+          const { kind, id } = payload;
+          const updated = await StorageManager.deprecatePrimitive(kind, id);
+          if (updated) broadcastStorageChanged(kind, id, 'saved');
+          sendResponse({ success: !!updated, lifecycle: updated?.metadata?.lifecycle ?? updated?.lifecycle ?? null });
+        } catch (err) {
+          Logger.error('background', `DEPRECATE_PRIMITIVE failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    case 'RESTORE_PRIMITIVE': {
+      (async () => {
+        try {
+          const { kind, id } = payload;
+          const updated = await StorageManager.restorePrimitive(kind, id);
+          if (updated) broadcastStorageChanged(kind, id, 'saved');
+          sendResponse({ success: !!updated, lifecycle: updated?.metadata?.lifecycle ?? updated?.lifecycle ?? null });
+        } catch (err) {
+          Logger.error('background', `RESTORE_PRIMITIVE failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // "What breaks if I delete this?" — the §10 pre-hard-delete check for any kind.
+    // Returns { inboundRefs[], cascadeTargets[], blockers[] }; the UI confirms when non-empty.
+    case 'ANALYZE_DELETION_IMPACT': {
+      (async () => {
+        try {
+          const { id, groundId, computeCascade } = payload;
+          const impact = await analyzeDeletionImpact(id, { groundId, computeCascade: computeCascade !== false });
+          sendResponse({ success: true, impact });
+        } catch (err) {
+          Logger.error('background', `ANALYZE_DELETION_IMPACT failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
     // ╔══════════════════════════════════════════════════════════════════════╗
     // ║ Pass M2 — ASSERTION LIBRARY                                          ║
     // ╚══════════════════════════════════════════════════════════════════════╝
@@ -5331,7 +5385,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 const h = health[fid];
                 if (!h) continue;
                 const d = Outcomes.decayFeature(f, h);
-                if (d.changed) { f.confidence = d.confidence; f.lifecycle = d.lifecycle; changed++; }
+                // v2.74.496 — persist lastDecayedAt so age decay is INCREMENTAL across writebacks
+                // (doesn't re-decay the already-decayed value on repeated resolve-runs).
+                if (d.changed) { f.confidence = d.confidence; f.lifecycle = d.lifecycle; f.lastDecayedAt = d.lastDecayedAt; changed++; }
               }
               // v2.74.419 — provenance: stamp `correctedByHuman` ON the catalog
               // Feature the LLM wrongly proposed (OUTCOMES_SPEC § 3 — the gold label
@@ -6161,6 +6217,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         })
         .catch(e => sendResponse({ success: false, ok: false, error: e.message }));
       return true;
+
+    case 'FORCE_RESYNC_SITEMAP': {
+      const groundId = payload?.groundId;
+      if (!groundId) {
+        sendResponse({ success: false, error: 'groundId required' });
+        return true;
+      }
+      (async () => {
+        try {
+          const ready = await ensureHybridSyncReady();
+          if (!ready.ready) {
+            sendResponse({ success: false, error: ready.error });
+            return;
+          }
+          const siteMap = await GroundAssetStore.readSiteMap(groundId);
+          if (!siteMap) {
+            sendResponse({ success: false, error: 'no local siteMap' });
+            return;
+          }
+          const rec = GroundAssetStore.siteMapSyncRecord(groundId, {
+            ...siteMap,
+            updatedAt: Date.now(),
+          });
+          await forceResyncRecord('siteMap', rec);
+          await refreshStoragePort();
+          const res = await runSync();
+          sendResponse({ success: !!res.ok, ...res });
+        } catch (e) {
+          sendResponse({ success: false, error: e.message });
+        }
+      })();
+      return true;
+    }
 
     case 'GET_SYNC_CONFLICTS':
       getSyncConflicts()
