@@ -174,6 +174,26 @@ async function getIndexRecord(orchardUserId, logicalPath) {
   return res.Item || null;
 }
 
+async function removeIndexRecord(orchardUserId, logicalPath) {
+  await ddb.send(new DeleteCommand({
+    TableName: OBJECT_TABLE,
+    Key: objectKeys(orchardUserId, logicalPath),
+  }));
+}
+
+/** @returns {Promise<boolean>} */
+async function s3ObjectExists(orchardUserId, logicalPath) {
+  try {
+    await s3.send(new HeadObjectCommand({
+      Bucket: WORKSPACE_BUCKET,
+      Key: s3Key(orchardUserId, logicalPath),
+    }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function s3Key(orchardUserId, logicalPath) {
   return `users/${orchardUserId}/${logicalPath}`;
 }
@@ -184,6 +204,10 @@ function stagingS3Key(orchardUserId, uploadId) {
 
 const PRESIGN_TTL_SECONDS = 900;
 const INLINE_OBJECT_MAX_BYTES = 256 * 1024;
+// Hard cap on the raw request body, checked before any JSON.parse — bounds the cost/DoS surface
+// (S3 PUT + KMS + DDB per write). Generous enough for a full /objects/batch, well under the
+// API Gateway 10 MB ceiling.
+const MAX_REQUEST_BODY_BYTES = 5 * 1024 * 1024;
 
 function normalizeEtag(etag) {
   if (!etag) return null;
@@ -348,6 +372,11 @@ async function handleGetObject(event) {
   }
 
   const key = s3Key(auth.orchardUserId, logicalPath);
+  if (index && !(await s3ObjectExists(auth.orchardUserId, logicalPath))) {
+    await removeIndexRecord(auth.orchardUserId, logicalPath);
+    return json(404, { error: 'not_found', path: logicalPath, orphan: true });
+  }
+
   const sizeBytes = await resolveObjectSizeBytes(auth.orchardUserId, logicalPath, index);
 
   if (sizeBytes > INLINE_OBJECT_MAX_BYTES) {
@@ -786,6 +815,11 @@ exports.handler = async (event) => {
     const method = event.requestContext?.http?.method || 'GET';
     const path = routePath(event);
 
+    // Reject oversized bodies up front (before any JSON.parse) — cost/DoS guard.
+    if (event.body && Buffer.byteLength(event.body, event.isBase64Encoded ? 'base64' : 'utf8') > MAX_REQUEST_BODY_BYTES) {
+      return json(413, { error: 'payload_too_large', limitBytes: MAX_REQUEST_BODY_BYTES });
+    }
+
     if (method === 'GET' && path === '/identity/me') return handleIdentityMe(event);
     if (method === 'POST' && path === '/identity/bind/challenge') return handleBindChallenge(event);
     if (method === 'POST' && path === '/identity/bind') return handleBind(event);
@@ -800,7 +834,8 @@ exports.handler = async (event) => {
 
     return json(404, { error: 'not_found', method, path });
   } catch (err) {
-    console.error(err);
-    return json(500, { error: 'internal_error', message: err.message });
+    console.error(err);   // full detail to CloudWatch only
+    // Don't leak internal exception text (bucket names, key fragments, SDK internals) to clients.
+    return json(500, { error: 'internal_error', requestId: event.requestContext?.requestId });
   }
 };
