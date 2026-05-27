@@ -262,13 +262,11 @@ export function broadcastStorageChanged(kind, id, action) {
     kind, id, action,
     ts: Date.now(),
   }).catch((err) => {
-    // v2.74.113 — "No receiver" is the common case (broadcasting to sibling
-    // pages; if none are open, that's expected). Surface anything else so a
-    // real channel failure isn't silently dropped. Chrome reports the
-    // no-receiver case with a stable substring; everything else hits the
-    // warn branch.
     const msg = err?.message ?? String(err);
     if (msg.includes('Receiving end does not exist')) return;
     console.warn('[broadcastStorageChanged] failed:', msg);
   });
+  if (id && action === 'saved') {
+    chrome.runtime.sendMessage({ type: 'SYNC_BRIDGE', kind, id, action }).catch(() => {});
+  }
 }

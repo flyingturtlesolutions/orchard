@@ -29,6 +29,7 @@ import * as Locale          from './Core/locale.js';   // v2.74.397 — Perspect
 import * as Outcomes           from './Core/outcomes.js';    // v2.74.413 — OutcomeEvent stream + rollups
 import * as SiteMap            from './Core/siteMap.js';     // v2.74.431 — Ground siteMap (GROUND_SPEC § 7)
 import * as CapabilitySynth    from './Core/capabilitySynth.js';  // v2.74.471 — synthesize capability from a goal
+import * as ChromeHoist        from './Core/chromeHoist.js';  // v2.74.480 — hoist recurring chrome off Locales → Ground.chrome
 import { ExecutionEngine }    from './Services/ExecutionEngine.js';
 import { StorageManager }     from './Services/StorageManager.js';
 import { executeWorkflow }    from './Services/WorkflowExecutor.js';
@@ -94,6 +95,7 @@ import { getIdentitySummary } from './Core/OrchardIdentity.js';
 import { syncBridgeOnStorageChange } from './Services/Sync/SyncBridge.js';
 import {
   enableHybridSync,
+  disableHybridSync,
   ensureHybridSyncReady,
   getSyncConflicts,
   resetSyncBootstrap,
@@ -148,7 +150,11 @@ async function refreshStoragePort() {
   try {
     const settings = await getCloudSettings();
     const signedIn = await isCloudSignedIn();
-    if (settings.enabled && signedIn && settings.storageBackend !== 'hybrid') {
+    if (!settings.enabled) {
+      if (settings.storageBackend !== 'local') {
+        await disableHybridSync();
+      }
+    } else if (signedIn && settings.storageBackend !== 'hybrid') {
       await enableHybridSync();
     }
     const latest = await getCloudSettings();
@@ -227,7 +233,7 @@ function broadcastStorageChanged(kind, id, action) {
     ts: Date.now(),
   }).catch(() => { /* no listeners; fine */ });
 
-  syncBridgeOnStorageChange(kind, id, action).catch((err) => {
+  return syncBridgeOnStorageChange(kind, id, action).catch((err) => {
     Logger.warn('background', `sync bridge: ${err?.message || err}`);
   });
 }
@@ -1238,6 +1244,58 @@ async function _mergeSiteMapForGround(groundId, contribution) {
     // v2.74.462 — include `stub` (sitemap-only archetypes the crawl hasn't reached).
     Logger.info('explore', `siteMap[${groundId}]: ${s.modeled} modeled · ${s.discovered} discovered · ${s.stub} stub · ${s.edges} edge(s)`);
   } catch (e) { Logger.warn('background', `siteMap merge failed: ${e.message}`); }
+}
+
+// v2.74.481 — Ground.chrome (GROUND_SPEC § 4): the global header/nav/footer controls
+// hoisted off the per-archetype Locales so they're modeled ONCE. Per-ground key, mirroring
+// siteMap. DERIVED (re-derivable) from all of a Ground's Locales via Core/chromeHoist. This
+// slice is ADDITIVE — Locales keep their own copies for now; the composing reads + Explore-
+// skip (the actual de-duplication) land in the next slice, so nothing that reads
+// `locale.features` breaks while the canonical set is being established.
+const _chromeKey = (groundId) => `chrome:${groundId}`;
+
+async function _readGroundChrome(groundId) {
+  if (!groundId) return null;
+  try {
+    const k = _chromeKey(groundId);
+    const got = await chrome.storage.local.get(k);
+    return got?.[k] ?? null;
+  } catch (e) { Logger.warn('background', `Ground.chrome read failed: ${e.message}`); return null; }
+}
+
+// All modeled Locales of a Ground as [{key, locale}] (key = localeCache cacheKey), the
+// input hoistChrome tallies UIDs across.
+async function _readAllLocales(groundId) {
+  if (!groundId) return [];
+  try {
+    const got = await chrome.storage.local.get(LOCALE_CACHE_KEY);
+    const byKey = got?.[LOCALE_CACHE_KEY]?.[groundId] ?? {};
+    return Object.entries(byKey)
+      .map(([key, entry]) => ({ key, locale: entry?.model }))
+      .filter((e) => e.locale && e.locale.features);
+  } catch (e) { Logger.warn('background', `localeCache list failed: ${e.message}`); return []; }
+}
+
+// Re-derive Ground.chrome from every current Locale (non-destructive). Best-effort; a UID
+// must recur in ≥2 Locales to promote, so this no-ops below that. Called after each Explore.
+async function _deriveGroundChrome(groundId) {
+  if (!groundId) return null;
+  const locales = await _readAllLocales(groundId);
+  if (locales.length < 2) return null;   // need a 2nd sighting of a UID before anything promotes
+  const result = ChromeHoist.hoistChrome(locales);
+  const artifact = {
+    schema: 1,
+    chrome: result.chrome,
+    overrides: result.overrides,
+    chromeLayers: result.chromeLayers,   // promoted disclosures' depth (reveal Layers)
+    chromeHidden: result.chromeHidden,   // those Layers' hidden child Features
+    promotedIds: result.promotedIds,
+    stats: result.stats,
+    builtAt: Date.now(),
+  };
+  await chrome.storage.local.set({ [_chromeKey(groundId)]: artifact });
+  Logger.info('explore', `Ground.chrome[${groundId}]: ${result.stats.promoted} promoted across ${result.stats.locales} Locale(s) (${result.stats.candidates} recurring candidate(s))`);
+  return artifact;
 }
 
 // Lazy fold-on-read (OUTCOMES_SPEC § 4): recompute the derived rollups from the
@@ -3072,7 +3130,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         try {
           const { perspective } = payload;
           await StorageManager.savePerspective(perspective);
-          broadcastStorageChanged('perspective', perspective.id, 'saved');
+          await broadcastStorageChanged('perspective', perspective.id, 'saved');
           sendResponse({ success: true });
         } catch (err) {
           Logger.error('background', `SAVE_PERSPECTIVE failed: ${err.message}`);
@@ -4327,6 +4385,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const allControls = [];
           let totalNav = 0, cid = 0, aborted = null;
 
+          // v2.74.483 — Chrome-skip (GROUND_SPEC § 4): any chrome disclosure already promoted
+          // (with its depth captured on a prior archetype) need not be RE-poked here. Seed
+          // seenPoked with those selectors so the per-band planner never proposes them and the
+          // poke skips them — saving an LLM plan call + a click+snapshot for every recurring
+          // menu (the header account dropdown, mega-nav, etc.). The depth is grafted back after
+          // the merge (graftChromeDepth) so the Locale still ends up self-contained.
+          let groundChrome = null, chromeSkipped = 0;
+          if (groundId) {
+            try {
+              groundChrome = await _readGroundChrome(groundId);
+              const cl = groundChrome?.chromeLayers || {};
+              for (const base of Object.values(groundChrome?.chrome || {})) {
+                if (base?.kind === 'disclosure' && base.reveals && cl[base.reveals] && base.selector && !seenPoked.has(base.selector)) {
+                  seenPoked.add(base.selector); chromeSkipped++;
+                }
+              }
+              if (chromeSkipped) Logger.info('explore', `chrome-skip: ${chromeSkipped} known chrome disclosure(s) won't be re-poked (depth grafted from Ground.chrome)`);
+            } catch (e) { Logger.warn('background', `chrome-skip load failed (continuing): ${e.message}`); }
+          }
+
           // v2.74.379 — Navigation recovery. A poked control can navigate via a
           // `location.href = …` assignment, which the in-page guard CANNOT
           // intercept. Detect it, go back to pageUrl, re-inject, and continue the
@@ -4472,6 +4550,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               // re-poking. The manual 🗂 catalog stays L0 (it never poked).
               try { Locale.mergeDepthFromControls(model, structure?.controls || []); }
               catch (e) { Logger.warn('background', `mergeDepthFromControls failed (continuing): ${e.message}`); }
+              // v2.74.483 — graft the depth of any chrome disclosure we SKIPPED re-poking
+              // above (chrome-skip), so this Locale ends up self-contained with the menu's
+              // reveal layer + children — without the click+snapshot cost. No-op when nothing
+              // was skipped or the trigger isn't present.
+              if (groundChrome && chromeSkipped) {
+                try { ChromeHoist.graftChromeDepth(model, groundChrome); }
+                catch (e) { Logger.warn('background', `chrome depth graft failed (continuing): ${e.message}`); }
+              }
               // v2.74.408 — L2: synthesize structured Goals from the catalog (LLM)
               // and attach them (feeds intent-grounding + perspective seeding). The
               // manual 🗂 catalog stays L0/L1 (no LLM goals call).
@@ -4498,6 +4584,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   const rules = (existingSm && existingSm.templateRules) || [];
                   await _mergeSiteMapForGround(groundId, SiteMap.siteMapFromLocale(model, { localeKey, rules }));
                 } catch (e) { Logger.warn('background', `siteMap contribution failed (continuing): ${e.message}`); }
+                // v2.74.481 — re-derive Ground.chrome now that one more Locale is modeled
+                // (GROUND_SPEC § 4). Additive/non-destructive this slice. Never fails Explore.
+                try { await _deriveGroundChrome(groundId); }
+                catch (e) { Logger.warn('background', `Ground.chrome derive failed (continuing): ${e.message}`); }
               }
               const layerCount = Object.keys(model.layers || {}).length - 1;   // minus the surface layer
               Logger.info('explore', `Locale built alongside Explore: ${Object.keys(model.features).length} feature(s), ${Math.max(0, layerCount)} depth layer(s), ${Object.keys(model.goals || {}).length} goal(s), fidelity ${model.coverage.fidelity}`);
@@ -4703,6 +4793,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ success: true, capabilityId: records.strategy.id, name: draft.name, runnable: draft.runnable, warnings: draft.warnings, actionCount: draft.actions.length });
         } catch (err) {
           Logger.error('background', `SYNTHESIZE_CAPABILITY failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // v2.74.481 — Ground.chrome (GROUND_SPEC § 4): return the hoisted global chrome set for
+    // a ground (promoted features + per-Locale overrides + stats). Read-only; the artifact is
+    // re-derived after each Explore. If absent (fewer than 2 modeled Locales), derive on demand.
+    case 'GET_GROUND_CHROME': {
+      (async () => {
+        try {
+          const { groundId = null } = payload ?? {};
+          if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
+          const artifact = (await _readGroundChrome(groundId)) || (await _deriveGroundChrome(groundId));
+          if (!artifact) { sendResponse({ success: true, chrome: {}, overrides: {}, chromeLayers: {}, chromeHidden: {}, promotedIds: [], stats: { locales: (await _readAllLocales(groundId)).length, candidates: 0, promoted: 0, layers: 0 }, empty: true }); return; }
+          sendResponse({ success: true, ...artifact });
+        } catch (err) {
+          Logger.error('background', `GET_GROUND_CHROME failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();
@@ -5783,13 +5892,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         .catch(e => sendResponse({ success: false, error: e.message }));
       return true;
 
+    case 'SYNC_BRIDGE': {
+      (async () => {
+        try {
+          const { kind, id, action = 'saved' } = payload ?? message;
+          await syncBridgeOnStorageChange(kind, id, action);
+          sendResponse({ success: true });
+        } catch (e) {
+          sendResponse({ success: false, error: e.message });
+        }
+      })();
+      return true;
+    }
+
     case 'SET_CLOUD_SETTINGS':
-      setCloudSettings(payload.settings || {})
-        .then(async (settings) => {
+      (async () => {
+        try {
+          const patch = { ...(payload.settings || {}) };
+          if (patch.enabled === false) {
+            patch.storageBackend = 'local';
+          }
+          await setCloudSettings(patch);
           await refreshStoragePort();
+          const settings = await getCloudSettings();
           sendResponse({ success: true, settings });
-        })
-        .catch(e => sendResponse({ success: false, error: e.message }));
+        } catch (e) {
+          sendResponse({ success: false, error: e.message });
+        }
+      })();
       return true;
 
     case 'GET_CLOUD_STATUS':
@@ -5825,10 +5955,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       signInToCloud()
         .then(async (result) => {
           if (result.success) {
-            await enableHybridSync();
-            await refreshStoragePort();
-            const syncRes = await runSync().catch(() => null);
-            broadcastSyncApplied(syncRes?.applied);
+            const settings = await getCloudSettings();
+            if (settings.enabled) {
+              await enableHybridSync();
+              await refreshStoragePort();
+              const syncRes = await runSync().catch(() => null);
+              broadcastSyncApplied(syncRes?.applied);
+            }
           }
           sendResponse({ success: result.success, ...result });
         })

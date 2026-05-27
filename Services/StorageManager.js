@@ -577,6 +577,8 @@ export class StorageManager {
       // v2.74.463 — per-ground siteMap + OUTCOMES keys (replaced the single-aggregate scheme).
       `siteMap:${groundId}`,
       `outcomes:${groundId}`,
+      // v2.74.481 — per-ground hoisted chrome set (GROUND_SPEC § 4).
+      `chrome:${groundId}`,
       // Pre-migration cleanup — harmless if already absent
       `paths:index:${groundId}`,
     ];
@@ -592,8 +594,11 @@ export class StorageManager {
     // siteMap (often multi-MB) was therefore left ORPHANED in storage — deleting every ground
     // still left chrome.storage.local full (the bug behind the kQuotaBytes failures). Read-
     // modify-write each aggregate, dropping this ground's entry. Best-effort + key-independent.
+    // v2.74.481 — `localeCache` is the SAME orphan-leak class: it's an aggregate
+    // ({ [groundId]: { [url]: Locale } }) owned by background.js, never pruned here, so a
+    // deleted ground's Locales (the bulk of its model) lingered. Prune it alongside the rest.
     let sitemapPruned = false;
-    for (const aggKey of ['siteMapCache', 'outcomesStream']) {
+    for (const aggKey of ['siteMapCache', 'outcomesStream', 'localeCache']) {
       try {
         const got = await StorageManager.#get([aggKey]);
         const agg = got?.[aggKey];

@@ -4802,7 +4802,8 @@ async function refreshCloudSettings() {
 }
 
 $('chk-cloud-enabled')?.addEventListener('change', async (e) => {
-  const enabled = e.target.checked;
+  const chk = /** @type {HTMLInputElement} */ (e.target);
+  const enabled = chk.checked;
   const res = await cloudMsg('SET_CLOUD_SETTINGS', { settings: { enabled } });
   if (res?.success) {
     toast(enabled ? 'Orchard Cloud enabled' : 'Orchard Cloud disabled');
@@ -4810,7 +4811,7 @@ $('chk-cloud-enabled')?.addEventListener('change', async (e) => {
   } else {
     showCloudMsg(res?.error || 'Failed to update cloud setting', 'err');
     toast(res?.error || 'Failed to update cloud setting', 'err');
-    e.target.checked = !enabled;
+    chk.checked = !enabled;
   }
 });
 
@@ -4857,6 +4858,7 @@ async function handleCloudSignOut() {
 
 // Cloud auth/sync — delegated on the card so clicks always reach handlers.
 document.getElementById('card-orchard-cloud')?.addEventListener('click', (e) => {
+  if (e.target instanceof HTMLElement && e.target.closest('.toggle-switch')) return;
   const t = /** @type {HTMLElement|null} */ (e.target instanceof HTMLElement ? e.target : null);
   if (!t?.id) return;
   e.preventDefault();
@@ -4879,10 +4881,25 @@ async function handleCloudSyncNow() {
   try {
     const res = await cloudMsg('RUN_SYNC');
     if (res?.success || res?.ok) {
+      if (res.error === 'sync_already_running') {
+        toast('Sync already in progress — try again in a moment', 'ok');
+        showCloudMsg('Sync already in progress', 'ok');
+        return;
+      }
       const seed = res.bootstrapped ? ` · seeded ${res.bootstrapped}` : '';
-      const msg = `Sync complete · pushed ${res.pushed ?? 0}, pulled ${res.pulled ?? 0}${seed}`;
-      toast(msg, 'ok');
-      showCloudMsg(msg, 'ok');
+      const pending = res.outboxPending ? ` · ${res.outboxPending} pending` : '';
+      const remote = res.remoteChangeCount ? ` · ${res.remoteChangeCount} remote` : '';
+      const msg = `Sync complete · pushed ${res.pushed ?? 0}, pulled ${res.pulled ?? 0}${seed}${pending}${remote}`;
+      if ((res.pushed ?? 0) === 0 && (res.pulled ?? 0) === 0 && (res.outboxPending ?? 0) === 0) {
+        toast(`${msg} — already up to date`, 'ok');
+        showCloudMsg(`${msg} — already up to date`, 'ok');
+      } else if ((res.pushed ?? 0) === 0 && (res.pulled ?? 0) === 0 && (res.outboxPending ?? 0) > 0) {
+        toast(`${msg} (upload blocked — check service worker console)`, 'err');
+        showCloudMsg(`${msg} — upload blocked`, 'err');
+      } else {
+        toast(msg, 'ok');
+        showCloudMsg(msg, 'ok');
+      }
       refreshGroundList().catch(() => {});
     } else {
       const err = res?.error || 'Sync failed';

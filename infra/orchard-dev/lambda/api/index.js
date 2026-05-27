@@ -263,7 +263,17 @@ async function handleBind(event) {
     return json(401, { error: 'invalid_signature' });
   }
 
-  const orchardUserId = deriveOrchardUserId(b64urlToBuf(publicKey));
+  const existing = await getIdentityRecord(sub);
+  // One workspace per Cognito account — additional devices reuse the same
+  // orchardUserId instead of deriving a new pk_* namespace from each keypair.
+  const orchardUserId = existing?.orchardUserId
+    ?? deriveOrchardUserId(b64urlToBuf(publicKey));
+  const devicePublicKeys = Array.isArray(existing?.devicePublicKeys)
+    ? [...existing.devicePublicKeys]
+    : (existing?.publicKey ? [existing.publicKey] : []);
+  if (!devicePublicKeys.includes(publicKey)) {
+    devicePublicKeys.push(publicKey);
+  }
   const now = Date.now();
 
   await ddb.send(new PutCommand({
@@ -272,8 +282,10 @@ async function handleBind(event) {
       PK: `COGNITO#${sub}`,
       orchardUserId,
       publicKey,
+      devicePublicKeys,
       email: claims.email || null,
-      boundAt: now,
+      boundAt: existing?.boundAt || now,
+      lastBoundAt: now,
     },
   }));
 

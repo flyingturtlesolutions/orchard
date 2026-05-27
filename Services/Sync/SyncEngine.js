@@ -12,6 +12,7 @@ import {
   deleteCloudObject,
   fetchCloudObjectRaw,
   listCloudChanges,
+  getIdentityMe,
   CloudClientError,
 } from '../Cloud/CloudClient.js';
 import {
@@ -25,11 +26,10 @@ import {
   setLastSyncToken,
   setPendingConflicts,
   upsertOutboxEntry,
-  getMeta,
-  setMeta,
+  clearAllSyncData,
 } from '../Storage/IndexedDBStore.js';
 import { logicalPathForRecord, recordMetaFromPath } from '../Storage/StoragePaths.js';
-import { unwrapEnvelope, wrapEnvelope } from '../Storage/StoredEnvelope.js';
+import { unwrapEnvelope, wrapEnvelope, envelopeUpdatedAt } from '../Storage/StoredEnvelope.js';
 import { rebuildRefs } from './RebuildRefs.js';
 import {
   pickAutoResolvedEnvelope,
@@ -166,19 +166,50 @@ async function applyRemoteObject(path, envelope, etag) {
     path,
     envelope,
     etag,
-    updatedAt: Date.now(),
+    updatedAt: envelopeUpdatedAt(envelope) || Date.now(),
   });
 
   return { kind, id };
 }
 
-/** Clear bootstrap flag on sign-out so the next account can seed. */
+/**
+ * @param {import('../Storage/StoragePaths.js').SyncKind} kind
+ * @param {string} id
+ */
+async function localRecordExists(kind, id) {
+  switch (kind) {
+    case 'ground': return !!(await StorageManager.getGround(id));
+    case 'fragment': return !!(await StorageManager.getFragment(id));
+    case 'observation': return !!(await StorageManager.getObservation(id));
+    case 'analysis': return !!(await StorageManager.getAnalysis(id));
+    case 'assertion': return !!(await StorageManager.getAssertion(id));
+    case 'perspective': return !!(await StorageManager.getPerspective(id));
+    case 'landmark': return !!(await StorageManager.getLandmark(id));
+    case 'strategy': return !!(await StorageManager.getStrategy(id));
+    case 'workflow': return !!(await StorageManager.getWorkflow(id));
+    default: return false;
+  }
+}
+
+/** Clear sync cache/outbox on sign-out so the next account can seed cleanly. */
 export async function resetSyncBootstrap() {
-  await setMeta('localWorkspaceSeeded', false);
+  await clearAllSyncData();
 }
 
 /**
- * One-time scan: enqueue all local workspace records not yet in the cloud cache.
+ * @param {Record<string, unknown>} record
+ * @param {import('../Storage/IndexedDBStore.js').CachedObject|undefined} cached
+ */
+function isLocalRecordDirty(record, cached) {
+  if (!cached?.etag) return true;
+  const localAt = Number(record.updatedAt || record.createdAt || 0);
+  const syncedAt = envelopeUpdatedAt(cached.envelope);
+  return localAt > syncedAt;
+}
+
+/**
+ * Scan local workspace and enqueue records not yet synced (or locally newer than cache).
+ * Runs on every sync so saves that happened before hybrid was active still upload.
  * @returns {Promise<number>} records enqueued
  */
 async function bootstrapLocalWorkspace() {
@@ -193,7 +224,7 @@ async function bootstrapLocalWorkspace() {
     const path = logicalPathForRecord(kind, record);
     if (!path) return;
     const cached = await getCachedObject(path);
-    if (cached?.etag) return;
+    if (!isLocalRecordDirty(record, cached)) return;
     await enqueueRecordWrite(kind, record, opts);
     enqueued += 1;
   }
@@ -229,7 +260,6 @@ async function bootstrapLocalWorkspace() {
   if (enqueued > 0) {
     Logger.info('SyncEngine', `bootstrap enqueued ${enqueued} local record(s)`);
   }
-  await setMeta('localWorkspaceSeeded', true);
   return enqueued;
 }
 
@@ -259,7 +289,7 @@ async function pushOutbox() {
             path: entry.path,
             envelope: entry.envelope,
             etag,
-            updatedAt: Date.now(),
+            updatedAt: envelopeUpdatedAt(entry.envelope) || Date.now(),
           });
         }
       }
@@ -323,17 +353,26 @@ async function pullChanges() {
   const since = await getLastSyncToken();
   const feed = await listCloudChanges(since || undefined);
   const changes = feed.changes || [];
+  const session = await getCloudSession();
   if (changes.length === 0) {
+    Logger.info('SyncEngine', `pull: 0 changes (orchardUserId=${session?.orchardUserId || 'none'}, since=${since || 'start'})`);
     if (feed.nextToken) await setLastSyncToken(feed.nextToken);
-    return { pulled: 0, applied: [] };
+    return { pulled: 0, applied: [], remoteChangeCount: 0 };
   }
 
   const applied = [];
+  let skippedCached = 0;
   for (const change of changes) {
     if (!change.path || change.path.endsWith('/_manifest.json')) continue;
 
     const cached = await getCachedObject(change.path);
-    if (cached?.etag && change.etag && cached.etag === change.etag) continue;
+    if (cached?.etag && change.etag && cached.etag === change.etag) {
+      const meta = recordMetaFromPath(change.path);
+      if (meta && await localRecordExists(meta.kind, meta.id)) {
+        skippedCached += 1;
+        continue;
+      }
+    }
 
     const { envelope, etag } = await fetchCloudObjectRaw(change.path);
     const result = await applyRemoteObject(change.path, envelope, etag || change.etag || '');
@@ -344,11 +383,11 @@ async function pullChanges() {
 
   const groundIds = [...new Set(changes.map((c) => c.groundId).filter(Boolean))];
   if (groundIds.length) {
-    const session = await getCloudSession();
     await rebuildRefs(groundIds, { orchardUserId: session?.orchardUserId });
   }
 
-  return { pulled: applied.length, applied };
+  Logger.info('SyncEngine', `pull: ${applied.length} applied, ${changes.length} remote, ${skippedCached} skipped (cached)`);
+  return { pulled: applied.length, applied, remoteChangeCount: changes.length };
 }
 
 /**
@@ -368,29 +407,34 @@ export async function runSync() {
 
   if (_syncInFlight) {
     _syncQueued = true;
-    return { ok: true, error: 'sync_already_running' };
+    return { ok: false, error: 'sync_already_running' };
   }
 
   _syncInFlight = true;
   try {
-    let bootstrapped = 0;
-    if (!(await getMeta('localWorkspaceSeeded'))) {
-      bootstrapped = await bootstrapLocalWorkspace();
-    }
+    const bootstrapped = await bootstrapLocalWorkspace();
     const pushResult = await pushOutbox();
     const pullResult = await pullChanges();
-    Logger.info('SyncEngine', `sync complete pushed=${pushResult.pushed} pulled=${pullResult.pulled} bootstrapped=${bootstrapped}`);
+    const outboxPending = (await listOutboxEntries()).length;
+    Logger.info('SyncEngine', `sync complete pushed=${pushResult.pushed} pulled=${pullResult.pulled} bootstrapped=${bootstrapped} outbox=${outboxPending}`);
     return {
       ok: true,
       pushed: pushResult.pushed,
       pulled: pullResult.pulled,
       bootstrapped,
+      outboxPending,
+      remoteChangeCount: pullResult.remoteChangeCount ?? 0,
       applied: pullResult.applied,
     };
   } catch (e) {
-    const msg = e instanceof CloudClientError && e.status === 404
-      ? 'Sync API not found — deploy P1 CDK stack (infra/orchard-dev) and reload'
-      : e.message;
+    let msg = e.message;
+    if (e instanceof CloudClientError) {
+      if (e.status === 404) {
+        msg = 'Sync API not found — deploy P1 CDK stack (infra/orchard-dev) and reload';
+      } else if (e.status === 403) {
+        msg = 'Cloud identity not bound — sign out and sign in again';
+      }
+    }
     Logger.warn('SyncEngine', `sync failed: ${msg}`);
     return { ok: false, error: msg };
   } finally {
@@ -430,9 +474,17 @@ export async function resolveSyncConflict(path, resolution) {
 
 export async function enableHybridSync() {
   const settings = await getCloudSettings();
+  if (!settings.enabled) return;
   if (settings.storageBackend === 'hybrid') return;
   await setCloudSettings({ storageBackend: 'hybrid' });
   scheduleSyncRun();
+}
+
+/** Revert to local-only storage when cloud is disabled. */
+export async function disableHybridSync() {
+  const settings = await getCloudSettings();
+  if (settings.storageBackend === 'local') return;
+  await setCloudSettings({ storageBackend: 'local' });
 }
 
 /** @returns {Promise<{ ready: boolean, error?: string }>} */
@@ -446,6 +498,16 @@ export async function ensureHybridSyncReady() {
   }
   if (settings.storageBackend !== 'hybrid') {
     await enableHybridSync();
+  }
+  try {
+    const me = await getIdentityMe();
+    if (me && me.bound === false) {
+      return { ready: false, error: 'Identity not bound — sign out and sign in again' };
+    }
+  } catch (e) {
+    if (e instanceof CloudClientError && e.status === 403) {
+      return { ready: false, error: 'Identity not bound — sign out and sign in again' };
+    }
   }
   return { ready: true };
 }
