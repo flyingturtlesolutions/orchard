@@ -36,6 +36,12 @@ import {
 } from '../Storage/IndexedDBStore.js';
 import { logicalPathForRecord, recordMetaFromPath } from '../Storage/StoragePaths.js';
 import * as GroundAssetStore from '../Storage/GroundAssetStore.js';
+import {
+  mirrorToWorkspacePartition,
+  mirrorEnvelopeToWorkspacePartition,
+  removeFromWorkspacePartition,
+  isWorkspacePartitionKind,
+} from '../Storage/WorkspacePartitionStore.js';
 import { unwrapEnvelope, wrapEnvelope, envelopeUpdatedAt } from '../Storage/StoredEnvelope.js';
 import { rebuildRefs } from './RebuildRefs.js';
 import {
@@ -242,6 +248,13 @@ async function applyRemoteDelete(path) {
   }
 
   await removeCachedObject(path);
+  if (meta && isWorkspacePartitionKind(meta.kind)) {
+    await removeFromWorkspacePartition(meta.kind, {
+      id: meta.id,
+      groundId: meta.groundId,
+      ...(meta.kind === 'locale' ? { localeKey: meta.id } : {}),
+    });
+  }
   return { kind, id, groundId: meta.groundId, deleted: true };
 }
 
@@ -327,6 +340,10 @@ async function applyRemoteObject(path, envelope, etag) {
     etag,
     updatedAt: envelopeUpdatedAt(envelope) || Date.now(),
   });
+
+  if (isWorkspacePartitionKind(kind)) {
+    await mirrorEnvelopeToWorkspacePartition(kind, envelope, { id, groundId: meta.groundId });
+  }
 
   return { kind, id };
 }

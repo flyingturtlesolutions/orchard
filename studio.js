@@ -4849,6 +4849,9 @@ async function refreshCloudSettings() {
       const parts = [mode, `conflicts: ${s.pendingConflicts || 0}`];
       if (hybridActive) {
         parts.push(`outbox: ${s.outboxPending || 0}`);
+        if (s.workspacePartitionCount > 0) {
+          parts.push(`partition: ${s.workspacePartitionCount}`);
+        }
         const last = s.lastSync;
         if (last?.ok) {
           parts.push(`last: +${last.pushed || 0}/-${last.pulled || 0}`);
@@ -6245,7 +6248,7 @@ const _GRAPH_NODE_COLOR = {
   input: '#1f6feb', action: '#db61a2', navigation: '#388bfd',
   disclosure: '#d29922', collection: '#6e7681', region: '#484f58', composite: '#8957e5',
 };
-const _GRAPH_EDGE_COLOR = { reveals: '#d29922', contains: '#8b949e', enables: '#3fb950' };
+const _GRAPH_EDGE_COLOR = { reveals: '#d29922', contains: '#8b949e', enables: '#3fb950', partOf: '#58a6ff' };
 
 function showGraphModal(archId, resp) {
   const L = layoutLocaleGraph({ nodes: resp?.nodes || [], edges: resp?.edges || [] });

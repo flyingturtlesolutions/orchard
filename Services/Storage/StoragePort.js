@@ -22,7 +22,7 @@ let _port = null;
 
 /**
  * Returns the active storage port singleton (ChromeStorageAdapter in P0/P1 M1).
- * @returns {import('./ChromeStorageAdapter.js').ChromeStorageAdapter}
+ * @returns {import('./ChromeStorageAdapter.js').ChromeStorageAdapter|import('./IndexedDBAdapter.js').IndexedDBAdapter}
  */
 export function getStoragePort() {
   if (!_port) {

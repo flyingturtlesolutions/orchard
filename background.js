@@ -83,6 +83,7 @@ import { derivationInputsHash, DERIVATION_VERSION }   from './Core/groundDerivat
 // Orchard cloud P0/P1 — StoragePort seam + cloud sync (AWS_INTEGRATION §17).
 import { ChromeStorageAdapter } from './Services/Storage/ChromeStorageAdapter.js';
 import { HybridStorageAdapter } from './Services/Storage/HybridStorageAdapter.js';
+import { backfillWorkspacePartitionFromLegacy } from './Services/Storage/WorkspacePartitionBackfill.js';
 import { initStoragePort, getStoragePortMeta } from './Services/Storage/StoragePort.js';
 import { getCloudSettings, setCloudSettings } from './Services/Cloud/CloudSettings.js';
 import { isCloudSignedIn } from './Services/Cloud/CloudTokenStore.js';
@@ -111,6 +112,7 @@ import {
   getLastSyncResult,
   getOutboxCount,
 } from './Services/Storage/IndexedDBStore.js';
+import { getWorkspacePartitionCount } from './Services/Storage/WorkspacePartitionStore.js';
 
 Logger.setLevel(LOG_LEVEL.DEBUG);
 Logger.setPersist(true);
@@ -169,6 +171,9 @@ async function refreshStoragePort() {
     const latest = await getCloudSettings();
     if (latest.enabled && signedIn && latest.storageBackend === 'hybrid') {
       initStoragePort(new HybridStorageAdapter());
+      backfillWorkspacePartitionFromLegacy().catch((e) => {
+        Logger.warn('background', `workspace partition backfill: ${e.message}`);
+      });
     } else {
       initStoragePort(new ChromeStorageAdapter('local'));
     }
@@ -4601,6 +4606,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 const g = await AnthropicService.synthesizeGoals({ model, url: enr.meta?.url ?? pageUrl, title, affordances: structure.affordances });
                 if (g?.goals?.length) Locale.attachGoals(model, g.goals);
               } catch (e) { Logger.warn('background', `synthesizeGoals failed (continuing): ${e.message}`); }
+              // v2.74.495 — derive within-Locale composites (search box / forms → `parts`) so the
+              // partOf edge is real on the final feature set (post depth + goals). Best-effort.
+              try { Locale.attachComposites(model); } catch (e) { Logger.warn('background', `attachComposites failed (continuing): ${e.message}`); }
               // v2.74.426 — #2 P1: the free-text affordance description lives ON the
               // Locale now (was only on pageStructure). Consumers read locale.affordances.
               if (structure.affordances) model.affordances = structure.affordances;
@@ -6069,12 +6077,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
           let pendingConflicts = 0;
           let outboxPending = 0;
+          let workspacePartitionCount = 0;
           let lastSyncAt = 0;
           /** @type {Record<string, unknown>|null} */
           let lastSyncResult = null;
           try {
             pendingConflicts = (await getSyncConflicts()).length;
             outboxPending = await getOutboxCount();
+            workspacePartitionCount = await getWorkspacePartitionCount();
             lastSyncAt = await getLastSyncAt();
             lastSyncResult = await getLastSyncResult();
           } catch (e) {
@@ -6089,6 +6099,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               adapterKind: meta.adapterKind,
               pendingConflicts,
               outboxPending,
+              workspacePartitionCount,
               lastSyncAt,
               lastSync: lastSyncResult,
             },

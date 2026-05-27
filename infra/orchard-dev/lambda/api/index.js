@@ -183,6 +183,7 @@ function stagingS3Key(orchardUserId, uploadId) {
 }
 
 const PRESIGN_TTL_SECONDS = 900;
+const INLINE_OBJECT_MAX_BYTES = 256 * 1024;
 
 function normalizeEtag(etag) {
   if (!etag) return null;
@@ -308,6 +309,29 @@ async function handleBind(event) {
   return json(200, { orchardUserId, boundAt: now });
 }
 
+async function resolveObjectSizeBytes(orchardUserId, logicalPath, index) {
+  if (typeof index?.sizeBytes === 'number' && index.sizeBytes > 0) {
+    return index.sizeBytes;
+  }
+  try {
+    const head = await s3.send(new HeadObjectCommand({
+      Bucket: WORKSPACE_BUCKET,
+      Key: s3Key(orchardUserId, logicalPath),
+    }));
+    return head.ContentLength || 0;
+  } catch {
+    return 0;
+  }
+}
+
+async function presignedGetUrl(orchardUserId, logicalPath) {
+  const command = new GetObjectCommand({
+    Bucket: WORKSPACE_BUCKET,
+    Key: s3Key(orchardUserId, logicalPath),
+  });
+  return getSignedUrl(s3, command, { expiresIn: PRESIGN_TTL_SECONDS });
+}
+
 async function handleGetObject(event) {
   const auth = await requireOrchardUser(event);
   if (auth.error) return auth.error;
@@ -324,6 +348,22 @@ async function handleGetObject(event) {
   }
 
   const key = s3Key(auth.orchardUserId, logicalPath);
+  const sizeBytes = await resolveObjectSizeBytes(auth.orchardUserId, logicalPath, index);
+
+  if (sizeBytes > INLINE_OBJECT_MAX_BYTES) {
+    const downloadUrl = await presignedGetUrl(auth.orchardUserId, logicalPath);
+    const etag = normalizeEtag(index?.etag || '');
+    return {
+      statusCode: 302,
+      headers: {
+        location: downloadUrl,
+        ...(etag ? { 'x-orchard-etag': etag } : {}),
+        'x-orchard-size-bytes': String(sizeBytes),
+        'access-control-expose-headers': 'location, x-orchard-etag, x-orchard-size-bytes',
+      },
+      body: '',
+    };
+  }
 
   try {
     const obj = await s3.send(new GetObjectCommand({

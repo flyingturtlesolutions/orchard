@@ -114,6 +114,12 @@
  */
 
 import { Logger } from '../Core/Logger.js';
+import { maybeReadPartition, maybeListPartition } from './Storage/PartitionRead.js';
+import {
+  maybeWritePartitionPrimary,
+  maybeRemovePartitionPrimary,
+  maybeClearGroundPartitionPrimary,
+} from './Storage/PartitionWrite.js';
 // v2.74.332 — PERSPECTIVE_SPEC § 3 Layer 2 composition (nodes + flat mirror).
 import { deriveLandmarkNodes, flattenLandmarkNodes } from '../Core/perspectiveComposition.js';
 import { normalizeStrategyParams } from './StrategyTree.js';
@@ -421,6 +427,7 @@ export class StorageManager {
     // writer (Studio form, GroundManager.create, SAVE_GROUND, Discovery)
     // produces a spec-shaped record regardless of what it passed in.
     const normalized = StorageManager.#normalizeGroundRecord(ground);
+    await maybeWritePartitionPrimary('ground', /** @type {Record<string, unknown>} */ (normalized));
     // v2.74.119 — Serialized index add (Ground index).
     await StorageManager.#addToIndex(KEY_GROUND_INDEX, normalized.id);
     await StorageManager.#set({ [`grounds:${normalized.id}`]: normalized });
@@ -438,19 +445,27 @@ export class StorageManager {
    * @returns {Promise<Ground|null>}
    */
   static async getGround(groundId) {
-    const data = await StorageManager.#get(`grounds:${groundId}`);
-    const raw  = data[`grounds:${groundId}`] ?? null;
+    let raw = await maybeReadPartition('ground', groundId);
+    if (!raw) {
+      const data = await StorageManager.#get(`grounds:${groundId}`);
+      raw = data[`grounds:${groundId}`] ?? null;
+    }
     if (!raw) return null;
     const g = StorageManager.#normalizeGroundRecord(raw);
     // v2.74.325 — Populate perspectiveIds (ordered composition) + effective
     // lifecycle from the per-Ground perspectives index. The index is the
     // composition source of truth, so this never drifts.
     let perspectiveIds = [];
-    try {
-      const idxKey  = `perspectives:index:${groundId}`;
-      const idxData = await StorageManager.#get(idxKey);
-      if (Array.isArray(idxData[idxKey])) perspectiveIds = idxData[idxKey];
-    } catch { /* default [] */ }
+    const partitionPerspectives = await maybeListPartition('perspective', groundId);
+    if (partitionPerspectives !== null) {
+      perspectiveIds = partitionPerspectives.map((p) => String(p.id || '')).filter(Boolean);
+    } else {
+      try {
+        const idxKey  = `perspectives:index:${groundId}`;
+        const idxData = await StorageManager.#get(idxKey);
+        if (Array.isArray(idxData[idxKey])) perspectiveIds = idxData[idxKey];
+      } catch { /* default [] */ }
+    }
     g.perspectiveIds = perspectiveIds;
     g.metadata.lifecycle = (g.metadata.lifecycle === 'deprecated')
       ? 'deprecated'
@@ -507,6 +522,7 @@ export class StorageManager {
       metadata: { ...(existing.metadata || {}), ...(patch.metadata || {}), updatedAt: now },
     };
     const updated = StorageManager.#normalizeGroundRecord(mergedRaw);
+    await maybeWritePartitionPrimary('ground', /** @type {Record<string, unknown>} */ (updated));
     await StorageManager.#set({ [`grounds:${groundId}`]: updated });
     Logger.info('StorageManager', `Ground updated: ${groundId}`);
     return StorageManager.getGround(groundId);
@@ -533,6 +549,7 @@ export class StorageManager {
     // orphaned landmarks remain in storage for user-initiated cleanup; no
     // auto-cleanup") — the per-Ground landmark registry
     // (landmarks:index:<groundId> + landmarks:<uid>) is left in place.
+    await maybeClearGroundPartitionPrimary(groundId);
     //
     // (Soft-delete / deprecate lifecycle — GROUND_SPEC § 9 — is a separate
     // deferred slice; this remains a hard delete with a complete cascade.)
@@ -1355,16 +1372,22 @@ export class StorageManager {
     // is name/description/pre/post/params/rawJson — that's the Fragment
     // contract. Internals are opaque.
     const migrated = StorageManager.#migrateFragmentShape(fragment);
+    const toSave = { ...migrated, updatedAt: Date.now() };
+    await maybeWritePartitionPrimary('fragment', toSave);
     // v2.74.119 — Serialized index add.
     const indexKey = `fragments:index:${migrated.groundId}`;
     await StorageManager.#addToIndex(indexKey, migrated.id);
     await StorageManager.#set({
-      [`fragments:${migrated.id}`]: { ...migrated, updatedAt: Date.now() },
+      [`fragments:${migrated.id}`]: toSave,
     });
     Logger.info('StorageManager', `Fragment saved: ${migrated.id} (${migrated.name ?? 'unnamed'}) on ground ${migrated.groundId}`);
   }
 
   static async getFragment(fragmentId) {
+    const fromPartition = await maybeReadPartition('fragment', fragmentId);
+    if (fromPartition) {
+      return StorageManager.#migrateFragmentShape(fromPartition);
+    }
     const data = await StorageManager.#get(`fragments:${fragmentId}`);
     const fragment = data[`fragments:${fragmentId}`] ?? null;
     if (!fragment) return null;
@@ -1373,6 +1396,12 @@ export class StorageManager {
   }
 
   static async listFragments(groundId) {
+    const fromPartition = await maybeListPartition('fragment', groundId);
+    if (fromPartition !== null) {
+      return fromPartition
+        .filter(Boolean)
+        .map((f) => StorageManager.#migrateFragmentShape(f));
+    }
     const indexKey = `fragments:index:${groundId}`;
     const indexData = await StorageManager.#get(indexKey);
     const ids = indexData[indexKey] ?? [];
@@ -1405,6 +1434,7 @@ export class StorageManager {
   static async deleteFragment(fragmentId) {
     const frag = await StorageManager.getFragment(fragmentId);
     if (!frag) return;
+    await maybeRemovePartitionPrimary('fragment', /** @type {Record<string, unknown>} */ (frag));
     // v2.74.119 — Serialized index removal.
     const indexKey = `fragments:index:${frag.groundId}`;
     await StorageManager.#removeFromIndex(indexKey, fragmentId);
@@ -1418,6 +1448,7 @@ export class StorageManager {
     const existing = await StorageManager.getFragment(fragmentId);
     if (!existing) throw new Error(`Fragment ${fragmentId} not found`);
     const updated = { ...existing, ...patch, id: existing.id, groundId: existing.groundId, updatedAt: Date.now() };
+    await maybeWritePartitionPrimary('fragment', updated);
     await StorageManager.#set({ [`fragments:${fragmentId}`]: updated });
     Logger.info('StorageManager', `Fragment updated: ${fragmentId}`);
     return updated;
@@ -1543,19 +1574,29 @@ export class StorageManager {
     // somehow still carry legacy `operations` field; ensures persisted
     // records are always in new shape.
     const migrated = StorageManager.#migrateAnalysisShape(analysis);
+    const toSave = { ...migrated, updatedAt: Date.now() };
+    await maybeWritePartitionPrimary('analysis', toSave);
     await StorageManager.#set({
-      [`analyses:${analysis.id}`]: { ...migrated, updatedAt: Date.now() },
+      [`analyses:${analysis.id}`]: toSave,
     });
     Logger.info('StorageManager', `Analysis saved: ${analysis.id} (${analysis.name ?? 'unnamed'}) on ground ${analysis.groundId}`);
   }
 
   static async getAnalysis(analysisId) {
+    const fromPartition = await maybeReadPartition('analysis', analysisId);
+    if (fromPartition) return StorageManager.#migrateAnalysisShape(fromPartition);
     const data = await StorageManager.#get(`analyses:${analysisId}`);
     const raw = data[`analyses:${analysisId}`] ?? null;
     return raw ? StorageManager.#migrateAnalysisShape(raw) : null;
   }
 
   static async listAnalyses(groundId) {
+    const fromPartition = await maybeListPartition('analysis', groundId);
+    if (fromPartition !== null) {
+      return fromPartition
+        .filter(Boolean)
+        .map((a) => StorageManager.#migrateAnalysisShape(a));
+    }
     const indexKey = `analyses:index:${groundId}`;
     const indexData = await StorageManager.#get(indexKey);
     const ids = indexData[indexKey] ?? [];
@@ -1585,6 +1626,7 @@ export class StorageManager {
   static async deleteAnalysis(analysisId) {
     const analysis = await StorageManager.getAnalysis(analysisId);
     if (!analysis) return;
+    await maybeRemovePartitionPrimary('analysis', /** @type {Record<string, unknown>} */ (analysis));
     // v2.74.119 — Serialized index removal.
     const indexKey = `analyses:index:${analysis.groundId}`;
     await StorageManager.#removeFromIndex(indexKey, analysisId);
@@ -1597,6 +1639,7 @@ export class StorageManager {
     if (!existing) throw new Error(`Analysis ${analysisId} not found`);
     const merged = { ...existing, ...patch, id: existing.id, groundId: existing.groundId, updatedAt: Date.now() };
     const updated = StorageManager.#migrateAnalysisShape(merged);
+    await maybeWritePartitionPrimary('analysis', updated);
     await StorageManager.#set({ [`analyses:${analysisId}`]: updated });
     Logger.info('StorageManager', `Analysis updated: ${analysisId}`);
     return updated;
@@ -1701,22 +1744,32 @@ export class StorageManager {
     // new shape directly, but anything bypassing the form (JSON modal,
     // direct API, migration tool) gets canonicalized here.
     const migrated = StorageManager.#migrateObservationShape(observation);
+    const toSave = { ...migrated, updatedAt: Date.now() };
+    await maybeWritePartitionPrimary('observation', toSave);
     // v2.74.119 — Serialized index add.
     const indexKey = `observations:index:${migrated.groundId}`;
     await StorageManager.#addToIndex(indexKey, migrated.id);
     await StorageManager.#set({
-      [`observations:${migrated.id}`]: { ...migrated, updatedAt: Date.now() },
+      [`observations:${migrated.id}`]: toSave,
     });
     Logger.info('StorageManager', `Observation saved: ${migrated.id} (${migrated.name ?? 'unnamed'}) on ground ${migrated.groundId}`);
   }
 
   static async getObservation(observationId) {
+    const fromPartition = await maybeReadPartition('observation', observationId);
+    if (fromPartition) return StorageManager.#migrateObservationShape(fromPartition);
     const data = await StorageManager.#get(`observations:${observationId}`);
     const raw = data[`observations:${observationId}`] ?? null;
     return raw ? StorageManager.#migrateObservationShape(raw) : null;
   }
 
   static async listObservations(groundId) {
+    const fromPartition = await maybeListPartition('observation', groundId);
+    if (fromPartition !== null) {
+      return fromPartition
+        .map((raw) => (raw ? StorageManager.#migrateObservationShape(raw) : null))
+        .filter(Boolean);
+    }
     const indexKey = `observations:index:${groundId}`;
     const indexData = await StorageManager.#get(indexKey);
     const ids = indexData[indexKey] ?? [];
@@ -1737,6 +1790,7 @@ export class StorageManager {
   static async deleteObservation(observationId) {
     const observation = await StorageManager.getObservation(observationId);
     if (!observation) return;
+    await maybeRemovePartitionPrimary('observation', /** @type {Record<string, unknown>} */ (observation));
     // v2.74.119 — Serialized index removal.
     const indexKey = `observations:index:${observation.groundId}`;
     await StorageManager.#removeFromIndex(indexKey, observationId);
@@ -1799,25 +1853,35 @@ export class StorageManager {
     // explicitly set; the studio Generate path sets 'model' explicitly.
     const authoredBy = (assertion.authoredBy === 'model') ? 'model' : 'human';
     const authoredAt = assertion.authoredAt ?? now;
+    const toSave = {
+      ...assertion,
+      authoredBy,
+      authoredAt,
+      createdAt: assertion.createdAt ?? now,
+      updatedAt: now,
+    };
+    await maybeWritePartitionPrimary('assertion', toSave);
     await StorageManager.#set({
-      [`assertions:${assertion.id}`]: {
-        ...assertion,
-        authoredBy,
-        authoredAt,
-        createdAt: assertion.createdAt ?? now,
-        updatedAt: now,
-      },
+      [`assertions:${assertion.id}`]: toSave,
     });
     Logger.info('StorageManager', `Assertion saved: ${assertion.id} (${assertion.name}) on ground ${assertion.groundId} [${authoredBy}]`);
   }
 
   static async getAssertion(assertionId) {
+    const fromPartition = await maybeReadPartition('assertion', assertionId);
+    if (fromPartition) return StorageManager.#migrateAssertionShape(fromPartition);
     const data = await StorageManager.#get(`assertions:${assertionId}`);
     const pred = data[`assertions:${assertionId}`] ?? null;
     return pred ? StorageManager.#migrateAssertionShape(pred) : null;
   }
 
   static async listAssertions(groundId) {
+    const fromPartition = await maybeListPartition('assertion', groundId);
+    if (fromPartition !== null) {
+      return fromPartition
+        .filter(Boolean)
+        .map((p) => StorageManager.#migrateAssertionShape(p));
+    }
     const indexKey = `assertions:index:${groundId}`;
     const indexData = await StorageManager.#get(indexKey);
     const ids = indexData[indexKey] ?? [];
@@ -1835,6 +1899,7 @@ export class StorageManager {
   static async deleteAssertion(assertionId) {
     const pred = await StorageManager.getAssertion(assertionId);
     if (!pred) return;
+    await maybeRemovePartitionPrimary('assertion', /** @type {Record<string, unknown>} */ (pred));
     // v2.74.119 — Serialized index removal.
     const indexKey = `assertions:index:${pred.groundId}`;
     await StorageManager.#removeFromIndex(indexKey, assertionId);
@@ -1851,6 +1916,7 @@ export class StorageManager {
       createdAt: existing.createdAt,
       updatedAt: Date.now(),
     };
+    await maybeWritePartitionPrimary('assertion', updated);
     await StorageManager.#set({ [`assertions:${assertionId}`]: updated });
     Logger.info('StorageManager', `Assertion updated: ${assertionId}`);
     return updated;
@@ -1930,25 +1996,35 @@ export class StorageManager {
     // + the flat landmarkRefs mirror, regardless of which shape the caller
     // passed (perspective-capture writes landmarkRefs and drops landmarks).
     const composed = StorageManager.#withPerspectiveComposition(perspective);
+    const toSave = {
+      ...composed,
+      authoredBy,
+      authoredAt,
+      createdAt: perspective.createdAt ?? now,
+      updatedAt: now,
+    };
+    await maybeWritePartitionPrimary('perspective', toSave);
     await StorageManager.#set({
-      [`perspectives:${perspective.id}`]: {
-        ...composed,
-        authoredBy,
-        authoredAt,
-        createdAt: perspective.createdAt ?? now,
-        updatedAt: now,
-      },
+      [`perspectives:${perspective.id}`]: toSave,
     });
     Logger.info('StorageManager', `Perspective saved: ${perspective.id} (${perspective.name}) on ground ${perspective.groundId} [${authoredBy}, ${(composed.landmarks ?? []).length} landmark node(s)]`);
   }
 
   static async getPerspective(perspectiveId) {
+    const fromPartition = await maybeReadPartition('perspective', perspectiveId);
+    if (fromPartition) return StorageManager.#migratePerspectiveShape(fromPartition);
     const data = await StorageManager.#get(`perspectives:${perspectiveId}`);
     const loc = data[`perspectives:${perspectiveId}`] ?? null;
     return loc ? StorageManager.#migratePerspectiveShape(loc) : null;
   }
 
   static async listPerspectives(groundId) {
+    const fromPartition = await maybeListPartition('perspective', groundId);
+    if (fromPartition !== null) {
+      return fromPartition
+        .filter(Boolean)
+        .map((l) => StorageManager.#migratePerspectiveShape(l));
+    }
     const indexKey = `perspectives:index:${groundId}`;
     const indexData = await StorageManager.#get(indexKey);
     const ids = indexData[indexKey] ?? [];
@@ -1966,6 +2042,7 @@ export class StorageManager {
   static async deletePerspective(perspectiveId) {
     const loc = await StorageManager.getPerspective(perspectiveId);
     if (!loc) return;
+    await maybeRemovePartitionPrimary('perspective', /** @type {Record<string, unknown>} */ (loc));
     // v2.74.119 — Serialized index removal.
     const indexKey = `perspectives:index:${loc.groundId}`;
     await StorageManager.#removeFromIndex(indexKey, perspectiveId);
@@ -1984,6 +2061,7 @@ export class StorageManager {
       createdAt: existing.createdAt,
       updatedAt: Date.now(),
     });
+    await maybeWritePartitionPrimary('perspective', updated);
     await StorageManager.#set({ [`perspectives:${perspectiveId}`]: updated });
     Logger.info('StorageManager', `Perspective updated: ${perspectiveId}`);
     return updated;
@@ -2032,12 +2110,15 @@ export class StorageManager {
       updatedAt : now,
       lifecycle : landmark.lifecycle ?? existing?.lifecycle ?? 'fresh',
     };
+    await maybeWritePartitionPrimary('landmark', merged);
     await StorageManager.#set({ [`landmarks:${landmark.uid}`]: merged });
     Logger.debug('StorageManager', `Landmark saved: ${landmark.uid} (a11yRole=${landmark.a11yRole ?? '?'}, alias=${landmark.alias ?? '?'}, name="${(landmark.accessibleName ?? '').slice(0, 40)}") on ground ${landmark.groundId}`);
     return merged;
   }
 
   static async getLandmark(uid) {
+    const fromPartition = await maybeReadPartition('landmark', uid);
+    if (fromPartition) return fromPartition;
     const data = await StorageManager.#get(`landmarks:${uid}`);
     return data[`landmarks:${uid}`] ?? null;
   }
@@ -2057,6 +2138,8 @@ export class StorageManager {
   }
 
   static async listLandmarksForGround(groundId) {
+    const fromPartition = await maybeListPartition('landmark', groundId);
+    if (fromPartition !== null) return fromPartition.filter(Boolean);
     const indexKey = `landmarks:index:${groundId}`;
     const indexData = await StorageManager.#get(indexKey);
     const uids = indexData[indexKey] ?? [];
@@ -2073,6 +2156,7 @@ export class StorageManager {
   static async deleteLandmark(uid) {
     const lm = await StorageManager.getLandmark(uid);
     if (!lm) return;
+    await maybeRemovePartitionPrimary('landmark', /** @type {Record<string, unknown>} */ (lm));
     const indexKey = `landmarks:index:${lm.groundId}`;
     await StorageManager.#removeFromIndex(indexKey, uid);
     await StorageManager.#remove([`landmarks:${uid}`]);
@@ -2089,6 +2173,7 @@ export class StorageManager {
       createdAt : existing.createdAt,
       updatedAt : Date.now(),
     };
+    await maybeWritePartitionPrimary('landmark', updated);
     await StorageManager.#set({ [`landmarks:${uid}`]: updated });
     Logger.debug('StorageManager', `Landmark updated: ${uid}`);
     return updated;

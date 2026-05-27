@@ -4,13 +4,27 @@
  * Shared by background.js and the hybrid sync engine.
  */
 
-export const LOCALE_CACHE_KEY = 'localeCache';
+import { maybeReadPartition } from './PartitionRead.js';
+import {
+  maybeWritePartitionPrimary,
+  maybeRemovePartitionPrimary,
+} from './PartitionWrite.js';
+import {
+  LOCALE_CACHE_KEY,
+  siteMapStorageKey,
+  chromeStorageKey,
+  localeSyncRecord,
+  siteMapSyncRecord,
+  chromeSyncRecord,
+} from './GroundAssetSyncRecords.js';
+
 export const LOCALE_TTL_MS = 1000 * 60 * 60 * 24 * 7;
+export { LOCALE_CACHE_KEY, localeSyncRecord, siteMapSyncRecord, chromeSyncRecord };
 
 const OUTCOMES_STREAM_KEY = 'outcomesStream';
 const SITEMAP_CACHE_KEY = 'siteMapCache';
-const _siteMapKey = (groundId) => `siteMap:${groundId}`;
-const _chromeKey = (groundId) => `chrome:${groundId}`;
+const _siteMapKey = siteMapStorageKey;
+const _chromeKey = chromeStorageKey;
 
 /** @param {string} url */
 export function normalizeLocaleKey(url) {
@@ -59,6 +73,14 @@ async function _migrateAggregates() {
 export async function readLocale(groundId, localeKey) {
   if (!groundId || !localeKey) return null;
   try {
+    const fromPartition = await maybeReadPartition('locale', localeKey, { groundId });
+    if (fromPartition?.model) {
+      return {
+        model: fromPartition.model,
+        url: fromPartition.url,
+        capturedAt: fromPartition.capturedAt,
+      };
+    }
     const got = await chrome.storage.local.get(LOCALE_CACHE_KEY);
     return got?.[LOCALE_CACHE_KEY]?.[groundId]?.[localeKey] ?? null;
   } catch {
@@ -73,6 +95,7 @@ export async function readLocale(groundId, localeKey) {
  */
 export async function writeLocale(groundId, localeKey, entry) {
   if (!groundId || !localeKey) return;
+  await maybeWritePartitionPrimary('locale', localeSyncRecord(groundId, localeKey, entry));
   const got = await chrome.storage.local.get(LOCALE_CACHE_KEY);
   const map = got?.[LOCALE_CACHE_KEY] ?? {};
   if (!map[groundId]) map[groundId] = {};
@@ -86,6 +109,7 @@ export async function writeLocale(groundId, localeKey, entry) {
  */
 export async function deleteLocale(groundId, localeKey) {
   if (!groundId || !localeKey) return;
+  await maybeRemovePartitionPrimary('locale', { id: localeKey, groundId, localeKey });
   const got = await chrome.storage.local.get(LOCALE_CACHE_KEY);
   const map = got?.[LOCALE_CACHE_KEY] ?? {};
   if (map[groundId]) {
@@ -122,6 +146,13 @@ export async function readSiteMap(groundId) {
   if (!groundId) return null;
   await ensureStorageMigrated();
   try {
+    const fromPartition = await maybeReadPartition('siteMap', groundId);
+    if (fromPartition) {
+      const rec = { ...fromPartition };
+      delete rec.id;
+      delete rec.groundId;
+      return rec;
+    }
     const k = _siteMapKey(groundId);
     const got = await chrome.storage.local.get(k);
     return got?.[k] ?? null;
@@ -134,6 +165,7 @@ export async function readSiteMap(groundId) {
 export async function writeSiteMap(groundId, siteMap) {
   if (!groundId || !siteMap) return;
   await ensureStorageMigrated();
+  await maybeWritePartitionPrimary('siteMap', siteMapSyncRecord(groundId, siteMap));
   const k = _siteMapKey(groundId);
   await chrome.storage.local.set({ [k]: siteMap });
 }
@@ -142,6 +174,7 @@ export async function writeSiteMap(groundId, siteMap) {
 export async function deleteSiteMap(groundId) {
   if (!groundId) return;
   await ensureStorageMigrated();
+  await maybeRemovePartitionPrimary('siteMap', { id: groundId, groundId });
   await chrome.storage.local.remove(_siteMapKey(groundId));
 }
 
@@ -149,6 +182,13 @@ export async function deleteSiteMap(groundId) {
 export async function readChrome(groundId) {
   if (!groundId) return null;
   try {
+    const fromPartition = await maybeReadPartition('chrome', groundId);
+    if (fromPartition) {
+      const rec = { ...fromPartition };
+      delete rec.id;
+      delete rec.groundId;
+      return rec;
+    }
     const k = _chromeKey(groundId);
     const got = await chrome.storage.local.get(k);
     return got?.[k] ?? null;
@@ -160,58 +200,13 @@ export async function readChrome(groundId) {
 /** @param {string} groundId @param {unknown} artifact */
 export async function writeChrome(groundId, artifact) {
   if (!groundId || !artifact) return;
+  await maybeWritePartitionPrimary('chrome', chromeSyncRecord(groundId, artifact));
   await chrome.storage.local.set({ [_chromeKey(groundId)]: artifact });
 }
 
 /** @param {string} groundId */
 export async function deleteChrome(groundId) {
   if (!groundId) return;
+  await maybeRemovePartitionPrimary('chrome', { id: groundId, groundId });
   await chrome.storage.local.remove(_chromeKey(groundId));
-}
-
-/**
- * Sync envelope body for a locale entry.
- * @param {string} groundId
- * @param {string} localeKey
- * @param {{ model: unknown, url?: string, capturedAt?: number }} entry
- */
-export function localeSyncRecord(groundId, localeKey, entry) {
-  const updatedAt = entry.capturedAt || Date.now();
-  return {
-    id: localeKey,
-    groundId,
-    localeKey,
-    url: entry.url,
-    capturedAt: entry.capturedAt,
-    model: entry.model,
-    updatedAt,
-  };
-}
-
-/**
- * @param {string} groundId
- * @param {unknown} siteMap
- */
-export function siteMapSyncRecord(groundId, siteMap) {
-  const sm = /** @type {Record<string, unknown>} */ (siteMap || {});
-  return {
-    id: groundId,
-    groundId,
-    ...sm,
-    updatedAt: Number(sm.updatedAt || sm.builtAt || Date.now()),
-  };
-}
-
-/**
- * @param {string} groundId
- * @param {unknown} artifact
- */
-export function chromeSyncRecord(groundId, artifact) {
-  const a = /** @type {Record<string, unknown>} */ (artifact || {});
-  return {
-    id: groundId,
-    groundId,
-    ...a,
-    updatedAt: Number(a.builtAt || a.updatedAt || Date.now()),
-  };
 }

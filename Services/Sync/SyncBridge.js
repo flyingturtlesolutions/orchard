@@ -15,6 +15,11 @@ import {
   enqueueGroundTreeDelete,
   isHybridSyncActive,
 } from './SyncEngine.js';
+import {
+  mirrorToWorkspacePartition,
+  removeFromWorkspacePartition,
+  clearWorkspacePartitionForGround,
+} from '../Storage/WorkspacePartitionStore.js';
 
 /** @typedef {import('../Storage/StoragePaths.js').SyncKind} SyncKind */
 
@@ -132,6 +137,7 @@ export async function syncBridgeOnStorageChange(kind, id, action, opts = {}) {
     if (action === 'deleted') {
       if (normalized === 'ground') {
         await enqueueGroundTreeDelete(id, syncOpts);
+        await clearWorkspacePartitionForGround(id);
         return;
       }
       const record = await resolveDeleteRecord(normalized, id, syncOpts);
@@ -140,6 +146,7 @@ export async function syncBridgeOnStorageChange(kind, id, action, opts = {}) {
         return;
       }
       await enqueueRecordDelete(normalized, record, syncOpts);
+      await removeFromWorkspacePartition(normalized, record);
       return;
     }
 
@@ -148,6 +155,12 @@ export async function syncBridgeOnStorageChange(kind, id, action, opts = {}) {
     const record = await loadRecord(normalized, id, syncOpts);
     if (!record) return;
     await enqueueRecordWrite(normalized, /** @type {Record<string, unknown>} */ (record), syncOpts);
+    // Idempotent backup — StorageManager / GroundAssetStore write partition first when hybrid is on.
+    await mirrorToWorkspacePartition(
+      normalized,
+      /** @type {Record<string, unknown>} */ (record),
+      { orchardUserId: session?.orchardUserId },
+    );
   } catch (e) {
     Logger.warn('SyncBridge', `enqueue failed ${kind}/${id}: ${e.message}`);
   }

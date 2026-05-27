@@ -4,7 +4,7 @@
  */
 
 const DB_NAME = 'orchard-storage';
-const DB_VERSION = 1;
+const DB_VERSION = 3;
 
 /** @returns {Promise<IDBDatabase>} */
 function openDb() {
@@ -12,8 +12,9 @@ function openDb() {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onerror = () => reject(req.error);
     req.onsuccess = () => resolve(req.result);
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (event) => {
       const db = req.result;
+      const tx = req.transaction;
       if (!db.objectStoreNames.contains('objects')) {
         db.createObjectStore('objects', { keyPath: 'path' });
       }
@@ -23,6 +24,16 @@ function openDb() {
       }
       if (!db.objectStoreNames.contains('meta')) {
         db.createObjectStore('meta', { keyPath: 'key' });
+      }
+      if (!db.objectStoreNames.contains('workspace')) {
+        const workspace = db.createObjectStore('workspace', { keyPath: 'path' });
+        workspace.createIndex('groundId', 'groundId', { unique: false });
+        workspace.createIndex('lookupKey', 'lookupKey', { unique: true });
+      } else if (event.oldVersion < 3 && tx) {
+        const workspace = tx.objectStore('workspace');
+        if (!workspace.indexNames.contains('lookupKey')) {
+          workspace.createIndex('lookupKey', 'lookupKey', { unique: true });
+        }
       }
     };
   });
@@ -183,10 +194,68 @@ export async function setPendingConflicts(rows) {
 
 export async function clearAllSyncData() {
   const db = await openDb();
-  await Promise.all(['objects', 'outbox', 'meta'].map((store) => new Promise((resolve, reject) => {
+  await Promise.all(['objects', 'outbox', 'meta', 'workspace'].map((store) => new Promise((resolve, reject) => {
     const tx = db.transaction(store, 'readwrite');
     tx.objectStore(store).clear();
     tx.oncomplete = () => resolve(undefined);
     tx.onerror = () => reject(tx.error);
   })));
+}
+
+/**
+ * @typedef {Object} WorkspaceRecord
+ * @property {string} path
+ * @property {string} groundId
+ * @property {string} kind
+ * @property {string} recordId
+ * @property {string} lookupKey
+ * @property {unknown} envelope
+ * @property {number} updatedAt
+ */
+
+/** @param {WorkspaceRecord} row */
+export async function putWorkspaceRecord(row) {
+  await idbRequest('workspace', 'readwrite', (os) => os.put(row));
+}
+
+/** @param {string} path */
+export async function getWorkspaceRecord(path) {
+  return /** @type {Promise<WorkspaceRecord|undefined>} */ (
+    idbRequest('workspace', 'readonly', (os) => os.get(path))
+  );
+}
+
+/** @param {string} path */
+export async function removeWorkspaceRecord(path) {
+  await idbRequest('workspace', 'readwrite', (os) => os.delete(path));
+}
+
+/** @param {string} lookupKey */
+export async function getWorkspaceByLookup(lookupKey) {
+  return /** @type {Promise<WorkspaceRecord|undefined>} */ (
+    idbRequest('workspace', 'readonly', (os) => os.index('lookupKey').get(lookupKey))
+  );
+}
+
+/** @param {string} groundId */
+export async function hasWorkspaceRecordsForGround(groundId) {
+  const rows = await listWorkspaceRecordsForGround(groundId);
+  return rows.length > 0;
+}
+
+/** @param {string} groundId */
+export async function listWorkspaceRecordsForGround(groundId) {
+  return /** @type {Promise<WorkspaceRecord[]>} */ (
+    idbRequest('workspace', 'readonly', (os) => {
+      const idx = os.index('groundId');
+      return idx.getAll(groundId);
+    })
+  );
+}
+
+/** @returns {Promise<number>} */
+export async function countWorkspaceRecords() {
+  return /** @type {Promise<number>} */ (
+    idbRequest('workspace', 'readonly', (os) => os.count())
+  );
 }

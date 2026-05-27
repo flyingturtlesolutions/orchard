@@ -106,8 +106,8 @@ export async function bindIdentity(body) {
  * @returns {Promise<unknown>}
  */
 export async function getCloudObject(logicalPath) {
-  const encoded = logicalPath.split('/').map(encodeURIComponent).join('/');
-  return cloudRequest('GET', `/objects/${encoded}`);
+  const { envelope } = await fetchCloudObjectRaw(logicalPath);
+  return envelope;
 }
 
 /**
@@ -122,9 +122,9 @@ export async function listCloudChanges(sinceToken) {
 
 /**
  * @param {string} logicalPath
- * @returns {Promise<{ envelope: unknown, etag: string }>}
+ * @returns {Promise<Response>}
  */
-export async function fetchCloudObjectRaw(logicalPath) {
+async function fetchObjectResponse(logicalPath) {
   const settings = await getCloudSettings();
   const encoded = logicalPath.split('/').map(encodeURIComponent).join('/');
   const url = new URL(`objects/${encoded}`, settings.apiBaseUrl.endsWith('/')
@@ -136,13 +136,42 @@ export async function fetchCloudObjectRaw(logicalPath) {
     throw new CloudClientError(401, 'Not signed in to Orchard cloud');
   }
 
-  const res = await fetch(url.toString(), {
+  return fetch(url.toString(), {
     method: 'GET',
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${session.idToken}`,
     },
+    redirect: 'manual',
   });
+}
+
+/**
+ * @param {string} logicalPath
+ * @returns {Promise<{ envelope: unknown, etag: string }>}
+ */
+export async function fetchCloudObjectRaw(logicalPath) {
+  const res = await fetchObjectResponse(logicalPath);
+
+  if (res.status === 302 || res.status === 301 || res.status === 307 || res.status === 308) {
+    const downloadUrl = res.headers.get('location');
+    if (!downloadUrl) {
+      throw new CloudClientError(502, 'Large object redirect missing location URL');
+    }
+    const etag = (res.headers.get('x-orchard-etag') || '').replace(/^"|"$/g, '');
+    const s3Res = await fetch(downloadUrl, { method: 'GET' });
+    const text = await s3Res.text();
+    if (!s3Res.ok) {
+      throw new CloudClientError(s3Res.status, 'Presigned S3 download failed', text);
+    }
+    /** @type {unknown} */
+    let data = null;
+    if (text) {
+      try { data = JSON.parse(text); } catch { data = text; }
+    }
+    const s3Etag = (s3Res.headers.get('etag') || '').replace(/^"|"$/g, '');
+    return { envelope: data, etag: etag || s3Etag };
+  }
 
   const text = await res.text();
   /** @type {unknown} */
