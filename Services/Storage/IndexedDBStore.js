@@ -4,7 +4,7 @@
  */
 
 const DB_NAME = 'orchard-storage';
-const DB_VERSION = 3;
+const DB_VERSION = 4;   // v4: + 'tombstones' store (additive — no data migration)
 
 /** @returns {Promise<IDBDatabase>} */
 function openDb() {
@@ -24,6 +24,11 @@ function openDb() {
       }
       if (!db.objectStoreNames.contains('meta')) {
         db.createObjectStore('meta', { keyPath: 'key' });
+      }
+      // v4 — delete tombstones: path → { path, deletedAt }. Lets a delete out-rank a stale
+      // concurrent edit (bootstrap won't resurrect; the server check is authoritative).
+      if (!db.objectStoreNames.contains('tombstones')) {
+        db.createObjectStore('tombstones', { keyPath: 'path' });
       }
       if (!db.objectStoreNames.contains('workspace')) {
         const workspace = db.createObjectStore('workspace', { keyPath: 'path' });
@@ -121,6 +126,54 @@ export async function removeOutboxEntries(paths) {
     tx.oncomplete = () => resolve(undefined);
     tx.onerror = () => reject(tx.error);
   });
+}
+
+/**
+ * Atomic compare-and-delete: remove the outbox entry for `path` ONLY if it's still the one we
+ * pushed (same queuedAt). If a newer op was enqueued on this path DURING the async push, its
+ * queuedAt differs → we leave it for the next drain instead of clobbering it (the lost-op race).
+ * @param {string} path @param {number} queuedAt
+ * @returns {Promise<boolean>} true if removed
+ */
+export async function removeOutboxEntryIfUnchanged(path, queuedAt) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('outbox', 'readwrite');
+    const os = tx.objectStore('outbox');
+    const req = os.get(path);
+    let removed = false;
+    req.onsuccess = () => {
+      const cur = req.result;
+      if (cur && cur.queuedAt === queuedAt) { os.delete(path); removed = true; }
+    };
+    tx.oncomplete = () => resolve(removed);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// ── Delete tombstones (sync delete-vs-edit reconciliation) ───────────────────────
+
+/** @param {string} path @param {number} deletedAt */
+export async function putTombstone(path, deletedAt) {
+  await idbRequest('tombstones', 'readwrite', (os) => os.put({ path, deletedAt }));
+}
+
+/** @param {string} path @returns {Promise<number|undefined>} deletedAt */
+export async function getTombstone(path) {
+  const row = await idbRequest('tombstones', 'readonly', (os) => os.get(path));
+  return row?.deletedAt;
+}
+
+/** @returns {Promise<Array<{ path: string, deletedAt: number }>>} */
+export async function listTombstones() {
+  return /** @type {Promise<Array<{ path: string, deletedAt: number }>>} */ (
+    idbRequest('tombstones', 'readonly', (os) => os.getAll())
+  );
+}
+
+/** @param {string} path */
+export async function removeTombstone(path) {
+  await idbRequest('tombstones', 'readwrite', (os) => os.delete(path));
 }
 
 /** @param {string} key @param {unknown} value */

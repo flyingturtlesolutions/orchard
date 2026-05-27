@@ -28,11 +28,16 @@ import {
   removeCachedObject,
   listCachedObjectPaths,
   removeOutboxEntries,
+  removeOutboxEntryIfUnchanged,
   setLastSyncToken,
   setPendingConflicts,
   setLastSyncResult,
   upsertOutboxEntry,
   clearAllSyncData,
+  putTombstone,
+  getTombstone,
+  listTombstones,
+  removeTombstone,
 } from '../Storage/IndexedDBStore.js';
 import { logicalPathForRecord, recordMetaFromPath } from '../Storage/StoragePaths.js';
 import * as GroundAssetStore from '../Storage/GroundAssetStore.js';
@@ -102,6 +107,20 @@ export function scheduleSyncRun() {
  * @param {Record<string, unknown>} record
  * @param {{ orchardUserId?: string, deferSchedule?: boolean }} [opts]
  */
+/**
+ * Drop sync cache for a record and enqueue a fresh upload (fixes ghost cloud index / missing S3).
+ * @param {import('../Storage/StoragePaths.js').SyncKind} kind
+ * @param {Record<string, unknown>} record
+ * @param {{ orchardUserId?: string }} [opts]
+ */
+export async function forceResyncRecord(kind, record, opts = {}) {
+  if (!(await isHybridSyncActive())) return;
+  const path = logicalPathForRecord(kind, record);
+  if (path) await removeCachedObject(path);
+  await enqueueRecordWrite(kind, record, opts);
+  scheduleSyncRun();
+}
+
 export async function enqueueRecordWrite(kind, record, opts = {}) {
   if (!(await isHybridSyncActive())) return;
 
@@ -144,6 +163,7 @@ export async function enqueueRecordDelete(kind, record, opts = {}) {
   const path = logicalPathForRecord(kind, record);
   if (!path) return;
 
+  await putTombstone(path, Date.now());   // record the delete so a stale concurrent edit can't resurrect it
   const cached = await getCachedObject(path);
   await enqueueSyncWrite(path, cached?.envelope ?? null, {
     op: 'delete',
@@ -247,6 +267,7 @@ async function applyRemoteDelete(path) {
     }
   }
 
+  await putTombstone(path, Date.now());   // tombstone the remote delete locally (bootstrap won't resurrect it)
   await removeCachedObject(path);
   if (meta && isWorkspacePartitionKind(meta.kind)) {
     await removeFromWorkspacePartition(meta.kind, {
@@ -411,6 +432,10 @@ async function bootstrapLocalWorkspace() {
     if (outboxPaths.has(path) || conflictPaths.has(path)) return;
     const cached = await getCachedObject(path);
     if (!isLocalRecordDirty(record, cached)) return;
+    // Don't resurrect a deleted record: if a tombstone is at-or-newer than this record's last
+    // edit, the delete wins. (A genuine re-creation has updatedAt > tombstone → still enqueues.)
+    const tomb = await getTombstone(path);
+    if (tomb && tomb >= Number(record.updatedAt || record.createdAt || 0)) return;
     await enqueueRecordWrite(kind, record, opts);
     outboxPaths.add(path);
     enqueued += 1;
@@ -481,7 +506,7 @@ async function pushOutbox() {
   for (const entry of deleteEntries) {
     try {
       await deleteCloudObject(entry.path);
-      await removeOutboxEntries([entry.path]);
+      await removeOutboxEntryIfUnchanged(entry.path, entry.queuedAt);  // race-safe: keep ops queued mid-push
       await removeCachedObject(entry.path);
       pushed += 1;
       Logger.info('SyncEngine', `pushed delete ${entry.path}`);
@@ -500,15 +525,17 @@ async function pushOutbox() {
   for (const entry of largePuts) {
     try {
       const res = await putCloudObjectAuto(entry.path, entry.envelope, entry.expectedEtag || '*');
-      if (res?.etag) {
-        await putCachedObject({
-          path: entry.path,
-          envelope: entry.envelope,
-          etag: res.etag,
-          updatedAt: envelopeUpdatedAt(entry.envelope) || res.updatedAt || Date.now(),
-        });
+      if (!res?.etag) {
+        Logger.warn('SyncEngine', `large put returned no etag: ${entry.path}`);
+        continue;
       }
-      await removeOutboxEntries([entry.path]);
+      await putCachedObject({
+        path: entry.path,
+        envelope: entry.envelope,
+        etag: res.etag,
+        updatedAt: envelopeUpdatedAt(entry.envelope) || res.updatedAt || Date.now(),
+      });
+      await removeOutboxEntryIfUnchanged(entry.path, entry.queuedAt);  // race-safe: keep ops queued mid-push
       pushed += 1;
     } catch (e) {
       if (e instanceof CloudClientError && e.status === 409 && e.body && typeof e.body === 'object') {
@@ -543,19 +570,29 @@ async function pushBatchChunk(chunk) {
 
     try {
       const res = await batchWriteCloudObjects({ items });
+      const uploaded = [];
       for (const entry of remaining) {
         const etag = res.etags?.[entry.path];
-        if (etag) {
-          await putCachedObject({
-            path: entry.path,
-            envelope: entry.envelope,
-            etag,
-            updatedAt: envelopeUpdatedAt(entry.envelope) || Date.now(),
-          });
+        if (!etag) {
+          Logger.warn('SyncEngine', `batch put missing etag: ${entry.path}`);
+          continue;
         }
+        await putCachedObject({
+          path: entry.path,
+          envelope: entry.envelope,
+          etag,
+          updatedAt: envelopeUpdatedAt(entry.envelope) || Date.now(),
+        });
+        uploaded.push(entry);
       }
-      await removeOutboxEntries(remaining.map((e) => e.path));
-      pushed += remaining.length;
+      if (uploaded.length !== remaining.length) {
+        Logger.warn('SyncEngine', `batch incomplete: ${uploaded.length}/${remaining.length} etags`);
+      }
+      if (uploaded.length) {
+        // race-safe removal: keep any op re-queued on this path during the batch push
+        for (const e of uploaded) await removeOutboxEntryIfUnchanged(e.path, e.queuedAt);
+        pushed += uploaded.length;
+      }
       break;
     } catch (e) {
       if (e instanceof CloudClientError && e.status === 409 && e.body && typeof e.body === 'object') {
@@ -613,6 +650,7 @@ async function pullChanges() {
   let since = await getLastSyncToken();
   const applied = [];
   let skippedCached = 0;
+  let skippedMissing = 0;
   let totalRemote = 0;
   let pages = 0;
 
@@ -654,9 +692,20 @@ async function pullChanges() {
         }
       }
 
-      const { envelope, etag } = await fetchCloudObjectRaw(change.path);
-      const result = await applyRemoteObject(change.path, envelope, etag || change.etag || '');
-      if (result) applied.push(result);
+      try {
+        const { envelope, etag } = await fetchCloudObjectRaw(change.path);
+        const result = await applyRemoteObject(change.path, envelope, etag || change.etag || '');
+        if (result) applied.push(result);
+      } catch (e) {
+        const missing = e instanceof CloudClientError && e.status === 404
+          && typeof e.body === 'object' && e.body && /** @type {{ error?: string }} */ (e.body).error === 'not_found';
+        if (missing) {
+          skippedMissing += 1;
+          Logger.warn('SyncEngine', `pull skip missing cloud object: ${change.path}`);
+          continue;
+        }
+        throw e;
+      }
     }
 
     if (feed.nextToken) {
@@ -674,8 +723,23 @@ async function pullChanges() {
     await enqueueGroundManifestSync(gid, { orchardUserId: session?.orchardUserId });
   }
 
-  Logger.info('SyncEngine', `pull: ${applied.length} applied, ${totalRemote} remote, ${skippedCached} skipped (cached)`);
-  return { pulled: applied.length, applied, remoteChangeCount: totalRemote };
+  Logger.info('SyncEngine',
+    `pull: ${applied.length} applied, ${totalRemote} remote, ${skippedCached} skipped (cached), ${skippedMissing} missing (ghost index)`);
+  return { pulled: applied.length, applied, remoteChangeCount: totalRemote, skippedMissing };
+}
+
+const TOMBSTONE_TTL_MS = 30 * 24 * 3600 * 1000;   // GC delete tombstones after 30d — server has long propagated
+
+/** Drop tombstones past the TTL so the store stays bounded. Best-effort. */
+async function gcTombstones() {
+  try {
+    const now = Date.now();
+    for (const t of await listTombstones()) {
+      if (t && typeof t.deletedAt === 'number' && (now - t.deletedAt) > TOMBSTONE_TTL_MS) {
+        await removeTombstone(t.path);
+      }
+    }
+  } catch (e) { Logger.warn('SyncEngine', `tombstone GC failed: ${e.message}`); }
 }
 
 /**
@@ -704,6 +768,7 @@ export async function runSync() {
     const pushResult = await pushOutbox();
     const pullResult = await pullChanges();
     const outboxPending = (await listOutboxEntries()).length;
+    await gcTombstones();
     Logger.info('SyncEngine', `sync complete pushed=${pushResult.pushed} pulled=${pullResult.pulled} bootstrapped=${bootstrapped} outbox=${outboxPending}`);
     await setLastSyncResult({
       ok: true,
@@ -714,6 +779,7 @@ export async function runSync() {
       outboxPending,
       remoteChangeCount: pullResult.remoteChangeCount ?? 0,
     });
+    const skippedMissing = pullResult.skippedMissing ?? 0;
     return {
       ok: true,
       pushed: pushResult.pushed,
@@ -721,7 +787,11 @@ export async function runSync() {
       bootstrapped,
       outboxPending,
       remoteChangeCount: pullResult.remoteChangeCount ?? 0,
+      skippedMissing,
       applied: pullResult.applied,
+      ...(skippedMissing > 0 ? {
+        warning: `${skippedMissing} cloud index entr${skippedMissing === 1 ? 'y' : 'ies'} had no object body — re-sync on the source device`,
+      } : {}),
     };
   } catch (e) {
     let msg = e.message;
