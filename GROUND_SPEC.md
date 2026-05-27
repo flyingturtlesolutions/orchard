@@ -12,7 +12,12 @@ stats, `reconcileLeadsTo`, capability catalog), `Core/chromeHoist.js` + `backgro
 **Relates to:** `PAGEMODEL_SPEC.md` (Locale / Feature / Layer / Goal),
 `OUTCOMES_SPEC.md` (provenance + training + usage stream), `DESIGN_linked_perspectives.md`
 (cross-Locale flows — the gap it flagged is resolved by § 7 siteMap),
-`DESIGN_resolve_roles.md`, `DESIGN_llm_roles.md`.
+`DESIGN_resolve_roles.md`, `DESIGN_llm_roles.md`,
+`DESIGN_perspective_centric_flow.md` (product story: user acknowledges
+Perspective only; three inference phases),
+`DESIGN_substrate_constrains_agent.md` (thesis),
+`DESIGN_user_action_classifier.md` (observe/classify — not built),
+`DESIGN_user_intent_inference.md` (Phase C — later).
 
 ---
 
