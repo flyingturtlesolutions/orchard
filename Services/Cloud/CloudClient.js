@@ -4,7 +4,7 @@
  */
 
 import { Logger } from '../../Core/Logger.js';
-import { getCloudSettings } from './CloudSettings.js';
+import { getCloudSettings, normalizeApiBaseUrl } from './CloudSettings.js';
 import { getCloudSession } from './CloudTokenStore.js';
 
 export class CloudClientError extends Error {
@@ -24,9 +24,8 @@ export class CloudClientError extends Error {
  */
 export async function cloudRequest(method, path, opts = {}) {
   const settings = await getCloudSettings();
-  const url = new URL(path.replace(/^\//, ''), settings.apiBaseUrl.endsWith('/')
-    ? settings.apiBaseUrl
-    : `${settings.apiBaseUrl}/`);
+  const base = normalizeApiBaseUrl(settings.apiBaseUrl);
+  const url = new URL(path.replace(/^\//, ''), `${base}/`);
 
   if (opts.query) {
     for (const [k, v] of Object.entries(opts.query)) {
@@ -126,10 +125,9 @@ export async function listCloudChanges(sinceToken) {
  */
 async function fetchObjectResponse(logicalPath) {
   const settings = await getCloudSettings();
+  const base = normalizeApiBaseUrl(settings.apiBaseUrl);
   const encoded = logicalPath.split('/').map(encodeURIComponent).join('/');
-  const url = new URL(`objects/${encoded}`, settings.apiBaseUrl.endsWith('/')
-    ? settings.apiBaseUrl
-    : `${settings.apiBaseUrl}/`);
+  const url = new URL(`objects/${encoded}`, `${base}/`);
 
   const session = await getCloudSession();
   if (!session?.idToken) {

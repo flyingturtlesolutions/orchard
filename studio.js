@@ -5064,11 +5064,14 @@ async function handleCloudSyncNow() {
 }
 
 $('btn-save-cloud-config')?.addEventListener('click', async () => {
-  const patch = {
-    apiBaseUrl: $('input-cloud-api-url')?.value.trim() || '',
-    cognitoDomain: $('input-cloud-cognito-domain')?.value.trim() || '',
-    cognitoClientId: $('input-cloud-cognito-client')?.value.trim() || '',
-  };
+  /** @type {Record<string, string>} */
+  const patch = {};
+  const apiUrl = $('input-cloud-api-url')?.value.trim();
+  const cognitoDomain = $('input-cloud-cognito-domain')?.value.trim();
+  const cognitoClientId = $('input-cloud-cognito-client')?.value.trim();
+  if (apiUrl) patch.apiBaseUrl = apiUrl;
+  if (cognitoDomain) patch.cognitoDomain = cognitoDomain;
+  if (cognitoClientId) patch.cognitoClientId = cognitoClientId;
   const res = await cloudMsg('SET_CLOUD_SETTINGS', { settings: patch });
   if (res?.success) {
     showCloudMsg('Cloud config saved', 'ok');

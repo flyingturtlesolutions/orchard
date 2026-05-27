@@ -260,21 +260,24 @@ export function foldConventions(events, prior = null) {
 // ─── Active confidence decay (OUTCOMES_SPEC § 7, GROUND_SPEC § 0.16) ──────────────
 
 /**
- * Confidence decay, returning the proposed next {confidence, lifecycle} + whether anything
- * changed (caller persists). PURE. WITHOUT touching siblings (§ 8 feature-drift). Two halves:
+ * Confidence decay, returning the proposed next {confidence, lifecycle, lastDecayedAt} + whether
+ * anything changed (caller persists). PURE. WITHOUT touching siblings (§ 8 feature-drift). Two halves:
  *
  *  - ACTIVE (miss-driven): observed resolve-misses beyond what successes offset lower confidence
  *    and flip lifecycle toward `stale-suspected`.
  *  - PASSIVE (age-based, GROUND §0.16's previously-deferred half): a Feature unproven for a long
  *    time loses confidence even with no misses. Reference = its last proof (verify, else resolve),
- *    else first observation; exponential half-life past a grace window, COMPOUNDED onto the active
- *    result. Past `staleAfterMs` the lifecycle drifts to `stale-suspected`. Needs a timestamp on
- *    the feature/health — no timestamp ⇒ age decay is a no-op. Disable with `opts.ageDecay:false`.
+ *    else first observation; exponential half-life past a grace window, applied onto the active
+ *    result. INCREMENTAL — it decays only the time since `lastDecayedAt` (persist the returned
+ *    value back onto the feature), so repeated calls don't re-decay the already-decayed value; a
+ *    re-proof advances the reference and restarts the clock. Past `staleAfterMs` the lifecycle
+ *    drifts to `stale-suspected`. No timestamp ⇒ age decay is a no-op. Disable with `opts.ageDecay:false`.
  *
- * @param {object} feature  { confidence?, evidence?{observedAt}, createdAt? }
+ * @param {object} feature  { confidence?, lastDecayedAt?, evidence?{observedAt}, createdAt? }
  * @param {object} health   from foldFeatureHealth: { resolveHits, resolveMisses, lifecycle, lastVerifiedAt, lastResolvedAt }
  * @param {object} opts      { missThreshold=2, decayPerMiss=0.15, floor=0.1,
  *                             ageDecay=true, now=Date.now(), halfLifeMs=30d, graceMs=14d, staleAfterMs=60d }
+ * @returns {{ confidence:number, lifecycle:string, lastDecayedAt:(number|null), changed:boolean }}
  */
 export function decayFeature(feature = {}, health = {}, opts = {}) {
   const missThreshold = opts.missThreshold ?? 2;
@@ -285,6 +288,7 @@ export function decayFeature(feature = {}, health = {}, opts = {}) {
   const prevConf = typeof feature.confidence === 'number' ? feature.confidence : 0.6;
   let confidence = prevConf;
   let lifecycle = health.lifecycle || 'fresh';
+  let lastDecayedAt = feature.lastDecayedAt ?? null;   // carried through unchanged unless age decay fires
 
   // Active (miss-driven) decay. Net misses beyond what successes offset.
   const netMiss = misses - successes;
@@ -295,28 +299,41 @@ export function decayFeature(feature = {}, health = {}, opts = {}) {
     lifecycle = 'verified';
   }
 
-  // Passive (age-based) decay — compounds onto the active result.
+  // Passive (age-based) decay — INCREMENTAL. Decay only the time elapsed SINCE the last
+  // application (`lastDecayedAt`), not since the reference, so repeated writebacks don't
+  // re-decay the already-decayed value (the prior compounding bug). Exponential half-life is
+  // self-consistent under stepwise application: 0.5^(Δt1/H)·0.5^(Δt2/H) = 0.5^((Δt1+Δt2)/H).
+  // A re-proof advances `ref` (and thus the grace window), naturally restarting the clock.
+  // `lastDecayedAt` advances ONLY when the step actually moves confidence at 3dp — so many
+  // tiny increments accumulate instead of being lost to rounding.
   if (opts.ageDecay !== false) {
     const now = opts.now ?? Date.now();
     const DAY = 24 * 3600 * 1000;
     const halfLifeMs = opts.halfLifeMs ?? 30 * DAY;
     const graceMs = opts.graceMs ?? 14 * DAY;
     const staleAfterMs = opts.staleAfterMs ?? 60 * DAY;
+    const r3 = (n) => Math.round(n * 1000) / 1000;
     const ref = health.lastVerifiedAt ?? health.lastResolvedAt
       ?? (feature.evidence && feature.evidence.observedAt) ?? feature.createdAt ?? null;
     if (ref != null && now > ref) {
-      const age = now - ref;
-      if (age > graceMs) {
-        const factor = Math.pow(0.5, (age - graceMs) / halfLifeMs);
-        confidence = Math.max(floor, confidence * factor);
+      const decayStart = ref + graceMs;                 // age decay begins when grace ends
+      if (now > decayStart) {
+        const from = Math.max(decayStart, lastDecayedAt ?? decayStart);
+        const dt = now - from;                           // elapsed since last applied (or grace end)
+        if (dt > 0) {
+          const aged = Math.max(floor, confidence * Math.pow(0.5, dt / halfLifeMs));
+          if (r3(aged) !== r3(confidence)) { confidence = aged; lastDecayedAt = now; }
+        }
       }
-      if (age > staleAfterMs && (lifecycle === 'fresh' || lifecycle === 'verified')) lifecycle = 'stale-suspected';
+      if ((now - ref) > staleAfterMs && (lifecycle === 'fresh' || lifecycle === 'verified')) lifecycle = 'stale-suspected';
     }
   }
 
   confidence = Math.round(confidence * 1000) / 1000;
-  const changed = confidence !== prevConf || lifecycle !== (health.lifecycle || 'fresh');
-  return { confidence, lifecycle, changed };
+  const changed = confidence !== prevConf
+    || lifecycle !== (health.lifecycle || 'fresh')
+    || lastDecayedAt !== (feature.lastDecayedAt ?? null);
+  return { confidence, lifecycle, lastDecayedAt, changed };
 }
 
 // ─── Stream store helpers (caller wires chrome.storage in the wiring slice) ──────

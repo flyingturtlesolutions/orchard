@@ -727,7 +727,15 @@ export async function runSync() {
     let msg = e.message;
     if (e instanceof CloudClientError) {
       if (e.status === 404) {
-        msg = 'Sync API not found — deploy P1 CDK stack (infra/orchard-dev) and reload';
+        const body = /** @type {{ error?: string, path?: string, message?: string }} */ (
+          e.body && typeof e.body === 'object' ? e.body : {}
+        );
+        if (body.error === 'not_found') {
+          msg = `Cloud object missing (${body.path || 'unknown path'}) — re-sync on the source device`;
+        } else {
+          const settings = await getCloudSettings();
+          msg = `Sync API not found — API base URL must end with /v1 (current: ${settings.apiBaseUrl}). Reload extension after saving Cloud config.`;
+        }
       } else if (e.status === 403) {
         msg = 'Cloud identity not bound — sign out and sign in again';
       }
