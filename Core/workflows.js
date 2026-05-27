@@ -14,7 +14,9 @@
 // PURE: no DOM / chrome / storage. Graph ops over the siteMap {nodes, edges}.
 //
 // @module Core/workflows
-// @version 2.74.488
+// @version 2.74.492
+
+import { synthesizeCapabilityDraft } from './capabilitySynth.js';
 
 /** Forward adjacency: archetypeId → [{ to, via, label }] from the siteMap link edges. */
 export function buildAdjacency(map) {
@@ -121,4 +123,107 @@ export function workflowFromPath(map, path) {
 /** Convenience: the workflow skeletons reaching `targetId` (pathsTo → workflowFromPath). */
 export function workflowsTo(map, targetId, opts = {}) {
   return pathsTo(map, targetId, opts).map((p) => workflowFromPath(map, p));
+}
+
+function _normLabel(s) {
+  return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim().replace(/[.!?…]+$/, '').trim();
+}
+
+/**
+ * Stitch a Workflow skeleton + per-step Locale goals into ONE cross-page action sequence — a
+ * best-effort runnable DRAFT (same philosophy as capabilitySynth: review before trusting).
+ *
+ * Sequence: NAVIGATE to the entry page, then per step: run that step's goal (its synthesized
+ * CLICK/TYPE actions, with the goal's own NAVIGATE stripped — the workflow owns navigation),
+ * then move to the next page by CLICKing that step's link control (`via`), falling back to a
+ * direct NAVIGATE to the next page's URL when no link is resolvable. Params from every step's
+ * goal are collected (deduped by name; collisions share a binding and are flagged).
+ *
+ * The output shape matches capabilitySynth's draft, so capabilitySynth.buildCapabilityRecords
+ * turns it into the same { fragment, strategy } the execution engine runs — a workflow is just
+ * a longer, cross-page Fragment.
+ *
+ * @param {object} skeleton  workflowFromPath() output
+ * @param {{localesByArchetype?:Object, goals?:Object, name?:string}} opts
+ *   localesByArchetype: { [archetypeId]: localeModel }  (for via selectors + goal synthesis)
+ *   goals:              { [archetypeId]: goalLabel }     (which goal to perform on each step)
+ * @returns {{ name, goal, navigateUrl, actions, params, steps, warnings, runnable }}
+ */
+export function buildWorkflowDraft(skeleton, { localesByArchetype = {}, goals = {}, name = null } = {}) {
+  const steps = (skeleton && Array.isArray(skeleton.steps)) ? skeleton.steps : [];
+  const actions = [];
+  const params = [];
+  const paramNames = new Set();
+  const warnings = [];
+  const stepSummaries = [];
+  const concreteUrl = (step, locale) =>
+    (step.urlPattern && !/[{]/.test(step.urlPattern)) ? step.urlPattern : (locale?.url || null);
+
+  if (!steps.length) {
+    return { name: name || 'Workflow', goal: '', navigateUrl: null, actions, params, steps: [], warnings: ['empty workflow'], runnable: false };
+  }
+
+  const first = steps[0];
+  const entryUrl = concreteUrl(first, localesByArchetype[first.archetypeId]);
+  if (entryUrl) actions.push({ action: 'NAVIGATE', value: entryUrl });
+  else warnings.push('no concrete entry URL for the first step');
+
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    const locale = localesByArchetype[step.archetypeId];
+    const goalLabel = goals[step.archetypeId];
+
+    // a) this step's goal actions (navigation stripped — the workflow owns it)
+    let stepActionCount = 0, missing = false;
+    if (goalLabel && locale) {
+      const want = _normLabel(goalLabel);
+      const goal = locale.goals ? Object.values(locale.goals).find((g) => g && _normLabel(g.label) === want) : null;
+      if (goal) {
+        const draft = synthesizeCapabilityDraft(goal, locale, { url: null });
+        for (const a of draft.actions) {
+          if (a.action === 'NAVIGATE') continue;
+          actions.push(a); stepActionCount++;
+        }
+        for (const p of (draft.params || [])) {
+          if (paramNames.has(p.name)) { warnings.push(`param "${p.name}" reused across steps — shares one binding`); continue; }
+          paramNames.add(p.name); params.push(p);
+        }
+        if (draft.warnings && draft.warnings.length) warnings.push(`step "${step.name}": ${draft.warnings.join('; ')}`);
+      } else {
+        missing = true;
+        warnings.push(`step "${step.name}": goal "${goalLabel}" not found in its Locale`);
+      }
+    }
+    stepSummaries.push({ archetypeId: step.archetypeId, name: step.name, goal: goalLabel || null, actionCount: stepActionCount, ...(missing ? { missing: true } : {}) });
+
+    // b) navigate INTO the next step: CLICK this step's link control, else direct NAVIGATE
+    if (i < steps.length - 1) {
+      const next = steps[i + 1];
+      const viaFeat = step.via && locale?.features ? locale.features[step.via] : null;
+      if (viaFeat && viaFeat.selector) {
+        actions.push({ action: 'CLICK', selector: viaFeat.selector });
+      } else {
+        const nextUrl = concreteUrl(next, localesByArchetype[next.archetypeId]);
+        if (nextUrl) {
+          actions.push({ action: 'NAVIGATE', value: nextUrl });
+          warnings.push(`"${step.name}" → "${next.name}": no resolvable link control; using a direct NAVIGATE`);
+        } else {
+          warnings.push(`"${step.name}" → "${next.name}": no link and no concrete URL — chain may break here`);
+        }
+      }
+    }
+  }
+
+  const actionable = actions.filter((a) => a.action !== 'NAVIGATE').length;
+  if (!actionable) warnings.push('no actionable steps resolved — draft only navigates');
+  return {
+    name: name || `Workflow: ${first.name} → ${steps[steps.length - 1].name}`.slice(0, 80),
+    goal: `${first.name} → ${steps[steps.length - 1].name}`,
+    navigateUrl: entryUrl,
+    actions,
+    params,
+    steps: stepSummaries,
+    warnings,
+    runnable: actionable > 0,
+  };
 }
