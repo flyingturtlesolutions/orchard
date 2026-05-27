@@ -656,6 +656,7 @@ async function pullChanges() {
   const applied = [];
   let skippedCached = 0;
   let skippedMissing = 0;
+  let skippedErrors = 0;
   let totalRemote = 0;
   let pages = 0;
 
@@ -702,19 +703,22 @@ async function pullChanges() {
         const result = await applyRemoteObject(change.path, envelope, etag || change.etag || '');
         if (result) applied.push(result);
       } catch (e) {
-        // A single unavailable object must NOT wedge the whole sync. If it re-threw, the page never
-        // reaches the token commit below, so the same batch re-pulls every cycle forever. An orphan
-        // (index row present, S3 body gone) surfaces differently by size: inline → lambda 404 JSON
-        // {error:'not_found'}; large → presigned S3 GET returns 403/404 with an XML body. Skip any
-        // gone/inaccessible status regardless of body shape; only transient 5xx/network aborts the
-        // run so a later retry can still make progress.
+        // POISON-MESSAGE INVARIANT: no single change may wedge the whole pull. A re-throw here skips
+        // the per-page cursor commit below, so the same batch re-pulls every cycle forever (the sync
+        // never advances). Skip + log ANY per-object failure and continue; the cursor still advances.
+        //   • 404/403/410  → orphan / gone (index row present, S3 body missing: inline → lambda
+        //                     {error:'not_found'}; large → presigned S3 403/404 XML). Permanent.
+        //   • anything else → log the real status so a persistent failure is diagnosable; still skip
+        //                     so one bad object can't block every other change indefinitely.
         const status = e instanceof CloudClientError ? e.status : 0;
         if (status === 404 || status === 403 || status === 410) {
           skippedMissing += 1;
           Logger.warn('SyncEngine', `pull skip unavailable object (${status}): ${change.path}`);
-          continue;
+        } else {
+          skippedErrors += 1;
+          Logger.warn('SyncEngine', `pull skip errored object (${status || 'network'}: ${e?.message || e}): ${change.path}`);
         }
-        throw e;
+        continue;
       }
     }
 
@@ -734,8 +738,9 @@ async function pullChanges() {
   }
 
   Logger.info('SyncEngine',
-    `pull: ${applied.length} applied, ${totalRemote} remote, ${skippedCached} skipped (cached), ${skippedMissing} missing (ghost index)`);
-  return { pulled: applied.length, applied, remoteChangeCount: totalRemote, skippedMissing };
+    `pull: ${applied.length} applied, ${totalRemote} remote, ${skippedCached} skipped (cached), `
+    + `${skippedMissing} missing (ghost index), ${skippedErrors} errored (skipped)`);
+  return { pulled: applied.length, applied, remoteChangeCount: totalRemote, skippedMissing, skippedErrors };
 }
 
 const TOMBSTONE_TTL_MS = 30 * 24 * 3600 * 1000;   // GC delete tombstones after 30d — server has long propagated
