@@ -3231,6 +3231,19 @@ async function _refreshGroundListImpl() {
           <button class="btn-secondary tiny" data-action="json-chrome" data-gid="${ground.id}" title="View the full Ground.chrome (promoted features + depth layers + per-Locale overrides) as JSON">{ }</button>
         </div>
         <div class="sitemap-nodes">${chromeList.slice(0, CHROME_SHOWN).map(chromeRow).join('')}${chromeList.length > CHROME_SHOWN ? `<div class="empty-state small">+${chromeList.length - CHROME_SHOWN} more — see JSON</div>` : ''}</div>` : '';
+      // v2.74.494 — Workflows (cross-Locale partOf): pick a destination archetype → the
+      // multi-page paths there (GET_WORKFLOWS); each row builds a runnable workflow (BUILD_WORKFLOW).
+      const wfTargets = [...modeled, ...discovered];
+      const workflowsHtml = (wfTargets.length && (smMap?.edges?.length || 0) > 0) ? `
+        <div class="ground-section-head" style="margin-top:8px;border-top:1px solid rgba(127,127,127,.18);padding-top:6px">
+          <span class="ground-section-label">Workflows</span>
+          <span class="sitemap-node-meta" title="Multi-page journeys composed over the site map (partOf): pick a destination to see the paths there, then build a runnable cross-page workflow">multi-page journeys</span>
+        </div>
+        <select id="wf-target-${ground.id}" style="width:100%;box-sizing:border-box;margin:2px 0 4px;font-size:12px;padding:3px 6px">
+          <option value="">Reach which page…</option>
+          ${wfTargets.map(n => `<option value="${escAttr(n.id)}">${escHtml(n.name || shortPath(n.urlPattern))}${n.status !== 'modeled' ? ' (not modeled)' : ''}</option>`).join('')}
+        </select>
+        <div class="sitemap-nodes" id="wf-results-${ground.id}"></div>` : '';
       smRow.innerHTML = `
       <div class="ground-section-head">
         <span class="ground-section-label">Site Map</span>
@@ -3243,7 +3256,7 @@ async function _refreshGroundListImpl() {
         ${nodes.length === 0
           ? `<span class="empty-state small">No site map yet — <strong>Explore</strong> a page to sketch the territory: the current page becomes a <em>modeled</em> node and every same-site nav destination a <em>discovered</em> node + edge.</span>`
           : `${coverageHtml}
-             <div class="sitemap-nodes">${modeled.map(nodeRow).join('')}${discovered.slice(0, 20).map(nodeRow).join('')}${discovered.length > 20 ? `<div class="empty-state small">+${discovered.length - 20} more discovered — see JSON</div>` : ''}${stub.slice(0, 25).map(nodeRow).join('')}${stub.length > 25 ? `<div class="empty-state small">+${stub.length - 25} more stub — see JSON</div>` : ''}</div>${capabilitiesHtml}${chromeHtml}`
+             <div class="sitemap-nodes">${modeled.map(nodeRow).join('')}${discovered.slice(0, 20).map(nodeRow).join('')}${discovered.length > 20 ? `<div class="empty-state small">+${discovered.length - 20} more discovered — see JSON</div>` : ''}${stub.slice(0, 25).map(nodeRow).join('')}${stub.length > 25 ? `<div class="empty-state small">+${stub.length - 25} more stub — see JSON</div>` : ''}</div>${capabilitiesHtml}${chromeHtml}${workflowsHtml}`
         }
       </div>
       <div class="explore-queue-panel hidden" id="exq-panel-${ground.id}"></div>`;
@@ -3303,6 +3316,49 @@ async function _refreshGroundListImpl() {
           } catch (err) {
             toast(`Synthesis failed: ${err?.message || 'error'}`, 'err'); btn.textContent = prev; btn.disabled = false;
           }
+        });
+      }
+      // v2.74.494 — Workflows picker: choose a destination → GET_WORKFLOWS renders the paths
+      // (step chips + via labels + modeled badge); "⚙ build" → BUILD_WORKFLOW persists a runnable
+      // cross-page Fragment+Strategy. In-block so wfRow is in scope; delegated on the results div.
+      const wfSelect = smRow.querySelector(`#wf-target-${ground.id}`);
+      const wfResults = smRow.querySelector(`#wf-results-${ground.id}`);
+      if (wfSelect && wfResults) {
+        const wfRow = (wf) => {
+          const chips = wf.steps.map((s) => `${escHtml(s.name)}${s.terminal ? '' : ` <span style="opacity:.45">${s.viaLabel ? `—${escHtml(s.viaLabel.slice(0, 14))}→` : '→'}</span> `}`).join('');
+          const path = wf.steps.map((s) => s.archetypeId).join(',');
+          const badge = wf.fullyModeled
+            ? '<span style="color:#3fb950" title="every step is a modeled archetype">●</span>'
+            : '<span style="opacity:.55" title="some steps not yet modeled — build navigates but may skip un-modeled steps’ actions">◐</span>';
+          return `<div class="sitemap-node"><span class="sitemap-node-status">${badge}</span><span class="sitemap-node-name" style="font-size:11px">${chips}</span><span class="sitemap-node-meta"><button class="btn-secondary tiny" data-action="build-wf" data-path="${escAttr(path)}" title="Build a runnable cross-page workflow (Fragment + Strategy) for this path — a best-effort draft to review/run">⚙ build</button></span></div>`;
+        };
+        wfSelect.addEventListener('change', async () => {
+          const target = wfSelect.value;
+          if (!target) { wfResults.innerHTML = ''; return; }
+          wfResults.innerHTML = `<div class="empty-state small">Finding paths…</div>`;
+          try {
+            const resp = await new Promise(r => chrome.runtime.sendMessage({ type: 'GET_WORKFLOWS', payload: { groundId: ground.id, target } }, r));
+            if (!resp?.success) { wfResults.innerHTML = `<div class="empty-state small">Failed: ${escHtml(resp?.error || 'unknown')}</div>`; return; }
+            wfResults.innerHTML = (resp.workflows && resp.workflows.length)
+              ? resp.workflows.map(wfRow).join('')
+              : `<div class="empty-state small">No path to that page in the site map (it may be an entry point, or isn't linked from a modeled page).</div>`;
+          } catch (e) { wfResults.innerHTML = `<div class="empty-state small">Failed: ${escHtml(e?.message || 'error')}</div>`; }
+        });
+        wfResults.addEventListener('click', async (e) => {
+          const btn = e.target.closest('[data-action="build-wf"]');
+          if (!btn) return;
+          const path = (btn.getAttribute('data-path') || '').split(',').filter(Boolean);
+          if (!path.length) return;
+          btn.disabled = true; const prev = btn.textContent; btn.textContent = '…';
+          try {
+            const resp = await new Promise(r => chrome.runtime.sendMessage({ type: 'BUILD_WORKFLOW', payload: { groundId: ground.id, path } }, r));
+            if (resp?.success) {
+              const warn = (resp.warnings && resp.warnings.length) ? ` · ${resp.warnings.length} warning(s)` : '';
+              toast(`Built “${resp.name}” — ${resp.runnable ? 'runnable' : 'navigate-only'}, ${resp.actionCount} step(s)${warn}. Review in this Ground's Strategies.`);
+              btn.textContent = '✓ built'; btn.disabled = true;
+              await refreshGroundList();
+            } else { toast(`Build failed: ${resp?.error || 'unknown'}`, 'err'); btn.textContent = prev; btn.disabled = false; }
+          } catch (err) { toast(`Build failed: ${err?.message || 'error'}`, 'err'); btn.textContent = prev; btn.disabled = false; }
         });
       }
     }
