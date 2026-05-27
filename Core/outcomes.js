@@ -312,7 +312,11 @@ export function decayFeature(feature = {}, health = {}, opts = {}) {
     const halfLifeMs = opts.halfLifeMs ?? 30 * DAY;
     const graceMs = opts.graceMs ?? 14 * DAY;
     const staleAfterMs = opts.staleAfterMs ?? 60 * DAY;
-    const r3 = (n) => Math.round(n * 1000) / 1000;
+    // Round at 1e-6, NOT 1e-3: the per-step delta from a short dt (e.g. one hour at a 30-day
+    // half-life ≈ 0.0008) must exceed the rounding grain, or coarse rounding inflates each
+    // increment and the chain over-decays. The change-guard still skips truly imperceptible
+    // steps so their time accumulates instead of advancing `lastDecayedAt` for nothing.
+    const r = (n) => Math.round(n * 1e6) / 1e6;
     const ref = health.lastVerifiedAt ?? health.lastResolvedAt
       ?? (feature.evidence && feature.evidence.observedAt) ?? feature.createdAt ?? null;
     if (ref != null && now > ref) {
@@ -322,14 +326,14 @@ export function decayFeature(feature = {}, health = {}, opts = {}) {
         const dt = now - from;                           // elapsed since last applied (or grace end)
         if (dt > 0) {
           const aged = Math.max(floor, confidence * Math.pow(0.5, dt / halfLifeMs));
-          if (r3(aged) !== r3(confidence)) { confidence = aged; lastDecayedAt = now; }
+          if (r(aged) !== r(confidence)) { confidence = aged; lastDecayedAt = now; }
         }
       }
       if ((now - ref) > staleAfterMs && (lifecycle === 'fresh' || lifecycle === 'verified')) lifecycle = 'stale-suspected';
     }
   }
 
-  confidence = Math.round(confidence * 1000) / 1000;
+  confidence = Math.round(confidence * 1e6) / 1e6;
   const changed = confidence !== prevConf
     || lifecycle !== (health.lifecycle || 'fresh')
     || lastDecayedAt !== (feature.lastDecayedAt ?? null);
