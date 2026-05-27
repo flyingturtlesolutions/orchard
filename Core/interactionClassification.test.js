@@ -1,4 +1,4 @@
-// Core/userActionClassification.test.js — C0 unit tests (node --test)
+// Core/interactionClassification.test.js — C0 unit tests (node --test)
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -9,9 +9,9 @@ import {
   scoreMatch,
   rankMatches,
   classifyResolved,
-  classifyUserAction,
-  validateResolvedUserEvent,
-} from './userActionClassification.js';
+  classifyInteraction,
+  validateResolvedInteraction,
+} from './interactionClassification.js';
 
 function raw(overrides = {}) {
   return {
@@ -186,9 +186,9 @@ describe('classifyResolved', () => {
   });
 });
 
-describe('classifyUserAction', () => {
+describe('classifyInteraction', () => {
   it('returns full event with schema', () => {
-    const ev = classifyUserAction(resolved({
+    const ev = classifyInteraction(resolved({
       resolutionStatus: 'hit',
       matches: [{
         landmarkUid: 'lmk_1',
@@ -201,13 +201,13 @@ describe('classifyUserAction', () => {
     assert.equal(ev.schema, 1);
     assert.equal(ev.classification.tier, 'substrate');
     assert.equal(ev.classification.page.archetypeId, 'arch_search');
-    assert.ok(validateResolvedUserEvent(resolved({
+    assert.ok(validateResolvedInteraction(resolved({
       resolutionStatus: 'hit',
       matches: [{ landmarkUid: 'lmk_1', perspectiveId: 'per_1', selectorUsed: '#x', confidence: 1 }],
     })));
   });
 
   it('throws on invalid resolved', () => {
-    assert.throws(() => classifyUserAction({}));
+    assert.throws(() => classifyInteraction({}));
   });
 });

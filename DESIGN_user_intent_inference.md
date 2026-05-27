@@ -4,7 +4,7 @@
 and entropy-gradient triggers. The **qualified architectural thesis** is in
 `DESIGN_substrate_constrains_agent.md` — read that first.
 **Date:** 2026-05-26
-**Relates to:** `DESIGN_user_action_classifier.md` (**prerequisite** — observation +
+**Relates to:** `DESIGN_interaction_monitoring.md` (**prerequisite** — interaction capture +
 structured classification per event), `DESIGN_perspective_centric_flow.md`
 (product story), `DESIGN_substrate_constrains_agent.md` (thesis),
 `GROUND_SPEC.md`, `PAGEMODEL_SPEC.md`, `OUTCOMES_SPEC.md`, `DESIGN_llm_roles.md`.
@@ -182,7 +182,7 @@ flowchart LR
 
 | Responsibility | Notes |
 |----------------|-------|
-| Observe | Content-script hooks; demand-driven where possible |
+| Track | Content-script hooks; demand-driven where possible |
 | Resolve | Event target → landmark UID(s); record failures |
 | Maintain session trace | Bounded window + summarization; distinct from per-execution traces |
 | Update distribution | Fast local model on substrate features |
@@ -419,19 +419,19 @@ increase; mismatch → redistribute or flag substrate staleness.
 
 Granular consent levels (distinct toggles):
 
-1. **Observe** — capture resolved interaction evidence
-2. **Infer** — maintain interpretation distribution
-3. **Trigger** — invoke Workflows from inference thresholds
+1. **Track** — capture resolved interaction evidence
+2. **Interpret** — maintain interpretation distribution
+3. **Act** — invoke Workflows from inference thresholds
 4. **Share** — contribute anonymized outcomes to training / population priors
 
-**Transparency surfaces (required before Trigger consent):**
+**Transparency surfaces (required before Act consent):**
 
 - Current top activity + confidence + entropy
 - Why (substrate fields contributing)
 - Pause / disable inference
 - Correction: “actually doing X” → immediate session update + training signal
 
-**Defaults:** Observe+Infer local-only; Trigger and Share opt-in.
+**Defaults:** Track+Interpret local-only; Act and Share opt-in.
 
 ---
 

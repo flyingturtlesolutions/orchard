@@ -1,4 +1,8 @@
-# DESIGN — User action classifier (observation foundation)
+# DESIGN — Interaction monitoring (classifier foundation)
+
+**Vocabulary:** **Observation** (Tier-1) = system runs an extract on the page.
+**Interaction** (this doc) = the user did something on the page; we capture,
+resolve, and classify it against substrate.
 
 **Status:** Design lock for v1 foundation. **Inference is out of scope here**
 (belief, entropy, workflow triggers → `DESIGN_user_intent_inference.md`, Phase C).
@@ -6,7 +10,7 @@
 **Relates to:** `DESIGN_perspective_centric_flow.md`, `DESIGN_substrate_constrains_agent.md`,
 `GROUND_SPEC.md`, `PAGEMODEL_SPEC.md`, `OUTCOMES_SPEC.md`, `DESIGN_llm_roles.md`,
 `Services/PerspectivePredicates.js`, `Services/LandmarkResolver.js`,
-`Services/PageClassifier.js` (different problem — precondition failures, not user actions).
+`Services/PageClassifier.js` (different problem — precondition failures, not interactions).
 
 ---
 
@@ -14,7 +18,7 @@
 
 Build a **deterministic, auditable pipeline** that:
 
-1. **Observes** user interactions on monitored pages (with consent).
+1. **Captures** user interactions on monitored pages (with consent).
 2. **Resolves** each interaction to substrate where possible (landmark UID, role,
    Perspective membership).
 3. **Classifies** each interaction into a **bounded, structured record** suitable
@@ -25,7 +29,7 @@ labels?”** — not **“What is the user trying to accomplish?”** (that is i
 
 ```mermaid
 flowchart LR
-  RAW[Raw DOM / browser event] --> OBS[Observer]
+  RAW[Raw DOM / browser event] --> CAP[InteractionCapture]
   OBS --> RES[Resolver]
   RES --> CLS[Classifier]
   CLS --> REC[Recorder]
@@ -45,7 +49,7 @@ flowchart LR
 | `CapabilityAPI.invoke` triggers | Inference + policy |
 | LLM per user event on hot path | Optional residual classifier (v2) |
 | Pre-authored Activity pattern matching | Rejected framing |
-| Observing Orchard UI (Studio/chat) | Surface affordance events (separate) |
+| Monitoring Orchard UI (Studio/chat) | Surface affordance events (separate) |
 | Password field values, clipboard content | Privacy — emit interaction without payload |
 
 ---
@@ -57,17 +61,17 @@ sense; layers 1–2 are prerequisites, layer 4 is persistence.
 
 | Layer | Module (proposed) | Output |
 |-------|-------------------|--------|
-| **L0 Observer** | Content script + background coordinator | `RawUserEvent` |
-| **L1 Resolver** | `UserActionResolver` (new) | `ResolvedUserEvent` |
-| **L2 Classifier** | `UserActionClassifier` (new, pure) | `ClassifiedUserEvent` |
-| **L3 Recorder** | `UserActionTrace` (new) + outcomes adapter | append-only trace |
+| **L0 Capture** | Content script + background coordinator (`InteractionCapture`) | `RawInteraction` |
+| **L1 Resolver** | `InteractionResolver` (new) | `ResolvedInteraction` |
+| **L2 Classifier** | `InteractionClassifier` (new, pure) | `ClassifiedInteraction` |
+| **L3 Recorder** | `InteractionTrace` (new) + outcomes adapter | append-only trace |
 
-**Rule:** L2 is a **pure function** `(ResolvedUserEvent, Context) → ClassifiedUserEvent`.
+**Rule:** L2 is a **pure function** `(ResolvedInteraction, Context) → ClassifiedInteraction`.
 No DOM, no `chrome.*`, no LLM — testable in node like `Core/outcomes.js`.
 
 ---
 
-## 4. Raw observation (L0)
+## 4. Interaction capture (L0)
 
 ### 4.1 Event kinds (medium grain)
 
@@ -88,10 +92,10 @@ Map DOM/browser signals to a **small interaction vocabulary** (not full DOM fide
 **Filtered out at L0:** `mousemove`, `pointermove`, high-frequency `scroll` on
 `document`, events on unmonitored elements when demand-driven wiring is active.
 
-### 4.2 `RawUserEvent`
+### 4.2 `RawInteraction`
 
 ```typescript
-type RawUserEvent = {
+type RawInteraction = {
   id: string;              // evt_* 
   ts: number;
   tabId: number;
@@ -116,15 +120,15 @@ type RawUserEvent = {
 };
 ```
 
-Emitted: content script → background (`USER_ACTION_RAW` message). Background
+Emitted: content script → background (`INTERACTION_RAW` message). Background
 assigns `id`, `url`, enqueues for L1.
 
-### 4.3 Demand-driven observation
+### 4.3 Demand-driven capture
 
-Listeners attach only for landmarks in the **observation demand set**:
+Listeners attach only for landmarks in the **interaction demand set**:
 
 ```typescript
-type ObservationDemand = {
+type InteractionDemand = {
   groundId: string;
   landmarkUid: string;
   interactionKinds: string[];  // e.g. ['click','type']
@@ -134,7 +138,7 @@ type ObservationDemand = {
 
 **v1 demand sources:**
 
-- All landmarks in **accepted** Perspectives on this Ground (when observe consent on).
+- All landmarks in **accepted** Perspectives on this Ground (when **Track** consent on).
 - Explicit debug flag in Studio (engineering).
 
 **Not v1:** dynamic demand from inference matchers (inference not built).
@@ -154,11 +158,11 @@ Reverse map: `event.target` → zero or more `{ landmarkUid, perspectiveId, role
 | `miss` | No landmark; target not in demand set or selector mismatch |
 | `suppressed` | Sensitive field / policy block |
 
-### 5.2 `ResolvedUserEvent`
+### 5.2 `ResolvedInteraction`
 
 ```typescript
-type ResolvedUserEvent = {
-  raw: RawUserEvent;
+type ResolvedInteraction = {
+  raw: RawInteraction;
 
   groundId: string | null;     // GroundMatcher on url
   resolutionStatus: 'hit' | 'ambiguous' | 'miss' | 'suppressed';
@@ -177,7 +181,7 @@ type ResolvedUserEvent = {
 
 ### 5.3 Resolver algorithm (v1, deterministic)
 
-For each `ObservationDemand` on this tab’s Ground:
+For each `InteractionDemand` on this tab’s Ground:
 
 1. Load landmark record (selector, frameUrl).
 2. Test `event.target` against selector (content script or background round-trip).
@@ -185,7 +189,7 @@ For each `ObservationDemand` on this tab’s Ground:
 
 **Reuse:** `LandmarkResolver` (forward), content-script `resolveElement`, frame
 routing from predicate eval, `listActivePerspectives` for context — **new** reverse
-hit-test API (`RESOLVE_USER_EVENT_TARGET`).
+hit-test API (`RESOLVE_INTERACTION_TARGET`).
 
 **Performance:** Bounded by |demand set| per tab, not |all DOM nodes|.
 
@@ -193,12 +197,15 @@ hit-test API (`RESOLVE_USER_EVENT_TARGET`).
 
 ## 6. Classification (L2) — core model
 
+**Normative implementation (C0):** `SPEC_INTERACTION_CLASSIFIER_C0.md`,
+`Core/interactionClassification.js`.
+
 Classification assigns **bounded labels** from substrate context. No LLM on hot path.
 
-### 6.1 `ClassifiedUserEvent`
+### 6.1 `ClassifiedInteraction`
 
 ```typescript
-type ClassifiedUserEvent = {
+type ClassifiedInteraction = {
   id: string;
   ts: number;
   tabId: number;
@@ -207,14 +214,14 @@ type ClassifiedUserEvent = {
   // From raw + resolver
   interactionKind: string;
   resolutionStatus: string;
-  matches: ResolvedUserEvent['matches'];
+  matches: ResolvedInteraction['matches'];
   activePerspectiveIds: string[];
 
   // Classifier output — bounded vocabulary
-  classification: UserActionClassification;
+  classification: InteractionClassification;
 };
 
-type UserActionClassification = {
+type InteractionClassification = {
   // Primary — always populated
   tier: 'substrate' | 'browser' | 'unresolved';
 
@@ -273,7 +280,7 @@ verb from a **small authored table** (Ground- or global-default), extensible per
 PageModel later — not LLM-generated per event.
 
 ```typescript
-// Pure helper — lives in Core/userActionClassification.js
+// Pure helper — lives in Core/interactionClassification.js
 function semanticVerb(interactionKind: string, role?: string): SemanticVerb;
 ```
 
@@ -315,10 +322,10 @@ pattern as `adjudicateStructure`, not hot path.
 Append-only, tab- or session-scoped:
 
 ```typescript
-type UserActionTrace = {
+type InteractionTrace = {
   sessionId: string;
   groundId?: string;
-  events: ClassifiedUserEvent[];  // ring buffer e.g. 500
+  events: ClassifiedInteraction[];  // ring buffer e.g. 500
   stats: {
     total: number;
     substrateHits: number;
@@ -327,11 +334,11 @@ type UserActionTrace = {
 };
 ```
 
-Storage: `runtime/sessions/<sessionId>/userActions.jsonl` (partition-aligned) or
+Storage: `runtime/sessions/<sessionId>/interactions.jsonl` (partition-aligned) or
 chrome.storage session key for v1 prototype.
 
 **Separate from** `GroundEventBus` (substrate health: resolution-degraded,
-effect-drift). User-action trace is **behavior**, not landmark lifecycle.
+effect-drift). Interaction trace is **behavior**, not landmark lifecycle.
 
 ### 7.2 Outcomes stream adapter
 
@@ -339,11 +346,11 @@ Extend `Core/outcomes.js`:
 
 ```typescript
 // New op value
-OPS += 'user-action'
+OPS += 'user-interaction'
 
 makeEvent({
   phase: 'runtime',
-  op: 'user-action',
+  op: 'user-interaction',
   groundId,
   perspectiveId: classification.primary?.perspectiveId,
   featureId: classification.primary?.landmarkUid,
@@ -365,11 +372,11 @@ Enables training and Studio/debug views without building inference.
 
 | Tier | Allows |
 |------|--------|
-| **Observe** (classifier v1) | L0–L3 on permitted hosts |
-| **Infer** (later) | Read trace + belief engine |
-| **Trigger** (later) | Workflows |
+| **Track** (classifier v1) | L0–L3 on permitted hosts |
+| **Interpret** (later) | Read trace + belief engine |
+| **Act** (later) | Workflows |
 
-Classifier implementation ships under **Observe** only.
+Classifier implementation ships under **Track** only.
 
 ---
 
@@ -381,12 +388,12 @@ type ClassificationContext = {
   siteMapNode?: { archetypeId: string; urlPattern: string };
   activePerspectiveIds: string[];
   acceptedPerspectiveIds: string[];  // library on this ground — for scoring only in v1
-  recentEvents: ClassifiedUserEvent[]; // last N for tie-break — optional v1
+  recentEvents: ClassifiedInteraction[]; // last N for tie-break — optional v1
 };
 ```
 
 **Note:** `acceptedPerspectiveIds` affects **disambiguation scoring**, not labels
-for unaccepted Perspectives — do not classify user actions as “in” a Perspective
+for unaccepted Perspectives — do not classify interactions as “in” a Perspective
 the user never accepted unless it appears in `matches` structurally.
 
 ---
@@ -400,7 +407,7 @@ the user never accepted unless it appears in `matches` structurally.
 | Append-only trace | Threshold → trigger |
 | Deterministic, &lt;50ms target | Hot belief + periodic LLM |
 
-**Contract:** Inference engine **subscribes** to `ClassifiedUserEvent` stream; never
+**Contract:** Inference engine **subscribes** to `ClassifiedInteraction` stream; never
 re-parses raw DOM. If inference is wrong, correct **interpretation**, not rewrite
 history of classified events (correction = new outcome event).
 
@@ -410,12 +417,12 @@ history of classified events (correction = new outcome event).
 
 | Slice | Deliverable |
 |-------|-------------|
-| **C0** | `SPEC_USER_ACTION_CLASSIFIER_C0.md` + `Core/userActionClassification.js` + `node --test` |
-| **C1** | `ObservationDemand` registry in background; demand from accepted Perspectives |
-| **C2** | Content-script listeners (click, input debounced, submit, focus) → `USER_ACTION_RAW` |
-| **C3** | `RESOLVE_USER_EVENT_TARGET` in content script + L1 resolver |
+| **C0** | `SPEC_INTERACTION_CLASSIFIER_C0.md` + `Core/interactionClassification.js` + `node --test` |
+| **C1** | `InteractionDemand` registry in background; demand from accepted Perspectives |
+| **C2** | Content-script listeners (click, input debounced, submit, focus) → `INTERACTION_RAW` |
+| **C3** | `RESOLVE_INTERACTION_TARGET` in content script + L1 resolver |
 | **C4** | Background pipeline RAW → RESOLVED → CLASSIFIED → trace append |
-| **C5** | Outcomes `op: 'user-action'` wiring + Studio/debug trace viewer |
+| **C5** | Outcomes `op: 'user-interaction'` wiring + Studio/debug trace viewer |
 | **C6** | Consent gate in extension settings |
 
 **Not in classifier slices:** belief state, interpretation events, Workflow scheduler.
@@ -432,9 +439,9 @@ history of classified events (correction = new outcome event).
 
 | New | Use |
 |-----|-----|
-| `UserActionClassifier` | L2 pure |
-| `UserActionResolver` | L1 |
-| `UserActionObserver` | L0 coordination |
+| `InteractionClassifier` | L2 pure |
+| `InteractionResolver` | L1 |
+| `InteractionCapture` | L0 coordination |
 
 **Do not overload** `PageClassifier.js` — different domain (precondition failures).
 
@@ -454,7 +461,7 @@ history of classified events (correction = new outcome event).
 
 | Question | Read |
 |----------|------|
-| What is classified per event? | §6 `ClassifiedUserEvent` |
+| What is classified per event? | §6 `ClassifiedInteraction` |
 | What is NOT inference? | §2, §10 |
 | Pipeline layers | §3 |
 | Product story (intent-only user) | `DESIGN_perspective_centric_flow.md` |

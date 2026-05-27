@@ -7,7 +7,7 @@ user-acknowledged; see `DESIGN_perspective_centric_flow.md`. Implementation deta
 **Date:** 2026-05-26 (rev. perspective-centric)
 **Relates to:** `DESIGN_perspective_centric_flow.md`, `GROUND_SPEC.md`,
 `PAGEMODEL_SPEC.md`, `OUTCOMES_SPEC.md`, `DESIGN_llm_roles.md`,
-`DESIGN_user_action_classifier.md` (foundation),
+`DESIGN_interaction_monitoring.md` (foundation),
 `DESIGN_user_intent_inference.md` (later).
 
 ---
@@ -255,9 +255,9 @@ Inference is a **stronger** claim than logging DOM events. Defensible minimum:
 
 | Tier | User understands | System may |
 |------|------------------|------------|
-| Observe | “Extension sees my interactions on allowed sites” | Capture + resolve evidence |
-| Infer | “Extension estimates what I’m doing” | Maintain `BeliefSnapshot` |
-| Trigger | “Extension may start workflows on that estimate” | `CapabilityAPI.invoke` |
+| Track | “Extension sees my interactions on allowed sites” | Capture + resolve evidence |
+| Interpret | “Extension estimates what I’m doing” | Maintain `BeliefSnapshot` |
+| Act | “Extension may start workflows on that estimate” | `CapabilityAPI.invoke` |
 | Share | “Anonymized patterns improve models” | Cold-path aggregation |
 
 **Transparency:** current top hypothesis, confidence, contributing substrate

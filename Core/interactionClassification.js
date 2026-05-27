@@ -1,9 +1,9 @@
-// Core/userActionClassification.js — Pure L2 user-action classifier (SPEC C0).
+// Core/interactionClassification.js — Pure L2 interaction classifier (SPEC C0).
 //
-// Observes nothing; resolves nothing. Takes a ResolvedUserEvent + context and
-// returns a ClassifiedUserEvent. See SPEC_USER_ACTION_CLASSIFIER_C0.md.
+// Captures nothing; resolves nothing. Takes a ResolvedInteraction + context and
+// returns a ClassifiedInteraction. See SPEC_INTERACTION_CLASSIFIER_C0.md.
 //
-// @module Core/userActionClassification
+// @module Core/interactionClassification
 
 import { mintEventId } from './outcomes.js';
 
@@ -181,7 +181,7 @@ export function rankMatches(matches, context = {}) {
  * @param {object} raw
  * @returns {boolean}
  */
-export function validateRawUserEvent(raw) {
+export function validateRawInteraction(raw) {
   if (!raw || typeof raw !== 'object') return false;
   if (typeof raw.id !== 'string' || !raw.id) return false;
   if (typeof raw.ts !== 'number') return false;
@@ -194,9 +194,9 @@ export function validateRawUserEvent(raw) {
  * @param {object} resolved
  * @returns {boolean}
  */
-export function validateResolvedUserEvent(resolved) {
+export function validateResolvedInteraction(resolved) {
   if (!resolved || typeof resolved !== 'object') return false;
-  if (!validateRawUserEvent(resolved.raw)) return false;
+  if (!validateRawInteraction(resolved.raw)) return false;
   if (!RESOLUTION_STATUSES.includes(resolved.resolutionStatus)) return false;
   if (!Array.isArray(resolved.matches)) return false;
   if (!Array.isArray(resolved.activePerspectiveIds)) return false;
@@ -238,10 +238,10 @@ function _primaryFromRanked(row) {
 }
 
 /**
- * Classify a resolved user event (L2 only).
- * @param {object} resolved  ResolvedUserEvent
+ * Classify a resolved interaction (L2 only).
+ * @param {object} resolved  ResolvedInteraction
  * @param {object} [context] ClassificationContext
- * @returns {object} UserActionClassification
+ * @returns {object} InteractionClassification
  */
 export function classifyResolved(resolved, context = {}) {
   const groundId = _effectiveGroundId(resolved, context);
@@ -300,11 +300,11 @@ export function classifyResolved(resolved, context = {}) {
  * @param {object} resolved
  * @param {object} [context]
  * @param {{ id?: string }} [opts]
- * @returns {object} ClassifiedUserEvent
+ * @returns {object} ClassifiedInteraction
  */
-export function classifyUserAction(resolved, context = {}, opts = {}) {
-  if (!validateResolvedUserEvent(resolved)) {
-    throw new Error('classifyUserAction: invalid ResolvedUserEvent');
+export function classifyInteraction(resolved, context = {}, opts = {}) {
+  if (!validateResolvedInteraction(resolved)) {
+    throw new Error('classifyInteraction: invalid ResolvedInteraction');
   }
   const classification = classifyResolved(resolved, context);
   const seed = `${resolved.raw.ts}|${resolved.raw.tabId}|${resolved.raw.interactionKind}`;

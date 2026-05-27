@@ -16,7 +16,7 @@ stats, `reconcileLeadsTo`, capability catalog), `Core/chromeHoist.js` + `backgro
 `DESIGN_perspective_centric_flow.md` (product story: user acknowledges
 Perspective only; three inference phases),
 `DESIGN_substrate_constrains_agent.md` (thesis),
-`DESIGN_user_action_classifier.md` (observe/classify — not built),
+`DESIGN_interaction_monitoring.md` (track/classify — not built),
 `DESIGN_user_intent_inference.md` (Phase C — later).
 
 ---

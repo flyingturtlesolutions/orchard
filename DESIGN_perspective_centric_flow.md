@@ -7,7 +7,7 @@ substrate is **system-generated**. Implementation today is **partial** and still
 reflects legacy manual capture (pick / resolve) — not the target loop.
 **Date:** 2026-05-26
 **Relates to:** `DESIGN_substrate_constrains_agent.md` (thesis, revised § 2),
-`DESIGN_user_action_classifier.md` (observe → classify — **build before inference**),
+`DESIGN_interaction_monitoring.md` (track → classify — **build before inference**),
 `DESIGN_user_intent_inference.md` (runtime belief/triggers — later),
 `GROUND_SPEC.md`, `PAGEMODEL_SPEC.md`, `DESIGN_llm_roles.md`,
 `Sidepanel/modes/perspective-capture.js`, `AnthropicService.proposePerspectives`.
@@ -155,7 +155,7 @@ structure, plan) → outcomes stream.
 
 | | |
 |--|--|
-| **When** | User browsing with **Infer** consent; at least one **accepted** Perspective on this Ground |
+| **When** | User browsing with **Interpret** consent; at least one **accepted** Perspective on this Ground |
 | **Input** | Resolved user evidence (landmark interactions), predicate transitions, navigation, optional fresh intent utterance |
 | **Hypothesis set** | **Only accepted Perspectives** on this Ground (small library), not all site activities |
 | **Mechanism** | Hot local belief over `{ perspectiveId, confidence }`; warm LLM elaboration optional |

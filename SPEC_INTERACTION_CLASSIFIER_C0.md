@@ -1,10 +1,10 @@
-# SPEC — User action classifier slice C0 (pure L2)
+# SPEC — Interaction classifier slice C0 (pure L2)
 
 **Status:** Implementation spec for slice C0.  
 **Date:** 2026-05-26  
-**Implements:** `DESIGN_user_action_classifier.md` §6 (L2 only)  
-**Module:** `Core/userActionClassification.js`  
-**Tests:** `Core/userActionClassification.test.js` (`node --test`)
+**Implements:** `DESIGN_interaction_monitoring.md` §6 (L2 only)  
+**Module:** `Core/interactionClassification.js`  
+**Tests:** `Core/interactionClassification.test.js` (`node --test`)
 
 ---
 
@@ -12,14 +12,14 @@
 
 | In C0 | Out of C0 |
 |-------|-----------|
-| Type constants + validation helpers | Content-script observation (C2) |
+| Type constants + validation helpers | Content-script capture (C2) |
 | `semanticVerb(interactionKind, role?)` | Resolver / hit-test (C3) |
 | `classifyResolved(resolved, context)` | Background pipeline (C4) |
-| `classifyUserAction(resolved, context, opts?)` | Outcomes wiring (C5) |
+| `classifyInteraction(resolved, context, opts?)` | Outcomes wiring (C5) |
 | `rankMatches(matches, context)` | Consent UI (C6) |
 | Golden unit tests | Inference |
 
-**Dependency rule:** `Core/userActionClassification.js` imports only `Core/outcomes.js`
+**Dependency rule:** `Core/interactionClassification.js` imports only `Core/outcomes.js`
 (`mintEventId` for event ids). No `chrome`, no `Services/*`.
 
 ---
@@ -42,20 +42,20 @@ export function selectorSpecificityScore(selectorUsed);
 export function scoreMatch(match, context);
 export function rankMatches(matches, context);
 export function classifyResolved(resolved, context);
-export function classifyUserAction(resolved, context, opts);
-export function validateRawUserEvent(raw);
-export function validateResolvedUserEvent(resolved);
+export function classifyInteraction(resolved, context, opts);
+export function validateRawInteraction(raw);
+export function validateResolvedInteraction(resolved);
 ```
 
 ---
 
 ## 3. Input contracts
 
-### 3.1 `ResolvedUserEvent` (from L1 — mocked in tests)
+### 3.1 `ResolvedInteraction` (from L1 — mocked in tests)
 
 | Field | Required | Notes |
 |-------|----------|-------|
-| `raw` | yes | See `RawUserEvent` |
+| `raw` | yes | See `RawInteraction` |
 | `groundId` | no | `null` → `no-ground` |
 | `resolutionStatus` | yes | One of `RESOLUTION_STATUSES` |
 | `matches` | yes | Array (empty allowed) |
@@ -71,7 +71,7 @@ Each match:
 | `confidence` | yes | 0–1 from resolver; used as tie-break fraction |
 | `role` | no |
 
-### 3.2 `RawUserEvent` (minimal for C0)
+### 3.2 `RawInteraction` (minimal for C0)
 
 | Field | Required |
 |-------|----------|
@@ -193,7 +193,7 @@ Heuristic on selector string (0.0–3.0):
 
 ---
 
-## 7. Output: `ClassifiedUserEvent`
+## 7. Output: `ClassifiedInteraction`
 
 ```javascript
 {
@@ -205,7 +205,7 @@ Heuristic on selector string (0.0–3.0):
   resolutionStatus: string,
   matches: [...],          // passthrough
   activePerspectiveIds: [...],
-  classification: UserActionClassification,
+  classification: InteractionClassification,
   schema: 1,
 }
 ```
@@ -247,7 +247,7 @@ Only when `activePerspectiveIds.length > 0` or archetype present.
 ## 9. Run tests
 
 ```bash
-node --test Core/userActionClassification.test.js
+node --test Core/interactionClassification.test.js
 ```
 
 No npm required. CI can add this as a single command.
@@ -260,4 +260,4 @@ No npm required. CI can add this as a single command.
 - [ ] Decision tree §4 matches implementation line-for-line
 - [ ] All tests T1–T12 pass
 - [ ] No imports outside `Core/outcomes.js`
-- [ ] `DESIGN_user_action_classifier.md` §6 references this spec for L2 detail
+- [ ] `DESIGN_interaction_monitoring.md` §6 references this spec for L2 detail
