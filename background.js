@@ -67,6 +67,8 @@ import { listActivePerspectives }                          from './Services/Pers
 import { analyzeLandmarkImpact }                      from './Services/LandmarkImpactAnalysis.js';
 import { analyzeDeletionImpact }                     from './Services/Storage/ReferenceStore.js';
 import { bindPublicIdentity }                        from './Services/Storage/IdentityStore.js';
+import { publishPrimitive, listOutgoingPublications, getOutgoingPublication } from './Services/Storage/PublicationStore.js';
+import { importPublicationPackage, listIncomingPublications } from './Services/Storage/PublicationImport.js';
 import { emit as emitGroundEvent_bg,
          list as listGroundEvents_bg,
          clear as clearGroundEvents_bg }              from './Services/GroundEventBus.js';
@@ -3046,6 +3048,61 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         } catch (err) {
           Logger.error('background', `ANALYZE_DELETION_IMPACT failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // ── Publications (STORAGE_SCHEMA §9) ───────────────────────────────────
+    // Local publish→import round-trip. Registry upload/fetch is a later slice;
+    // IMPORT_PUBLICATION resolves a package by explicit `package`, or by id from
+    // the local outgoing store (same-device round-trip for testing).
+    case 'PUBLISH_PRIMITIVE': {
+      (async () => {
+        try {
+          const { kind, id, details } = payload;
+          const publication = await publishPrimitive(kind, id, details || {});
+          sendResponse({ success: true, publication });
+        } catch (err) {
+          Logger.error('background', `PUBLISH_PRIMITIVE failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    case 'LIST_OUTGOING_PUBLICATIONS': {
+      (async () => {
+        try { sendResponse({ success: true, publications: await listOutgoingPublications() }); }
+        catch (err) { sendResponse({ success: false, error: err.message }); }
+      })();
+      return true;
+    }
+
+    case 'LIST_INCOMING_PUBLICATIONS': {
+      (async () => {
+        try { sendResponse({ success: true, publications: await listIncomingPublications() }); }
+        catch (err) { sendResponse({ success: false, error: err.message }); }
+      })();
+      return true;
+    }
+
+    case 'IMPORT_PUBLICATION': {
+      (async () => {
+        try {
+          const { publicationId, package: pkgArg, targetGroundId } = payload;
+          const pkg = pkgArg || (publicationId ? await getOutgoingPublication(publicationId) : null);
+          if (!pkg?.manifest) { sendResponse({ success: false, error: 'publication package not found' }); return; }
+          const result = await importPublicationPackage(pkg, { targetGroundId });
+          if (result.ok) {
+            // Refresh UI + nudge sync to push the newly-installed primitives (bootstrap also covers it).
+            const groundId = targetGroundId || result.plan?.idMap?.[pkg.manifest.primary.primitiveId];
+            if (groundId) broadcastStorageChanged('ground', groundId, 'saved');
+          }
+          sendResponse({ success: result.ok, ...result });
+        } catch (err) {
+          Logger.error('background', `IMPORT_PUBLICATION failed: ${err.message}`);
+          sendResponse({ success: false, ok: false, error: err.message });
         }
       })();
       return true;
