@@ -96,3 +96,38 @@ export async function signBindChallenge(challengeB64url) {
   const sig = await crypto.subtle.sign({ name: 'Ed25519' }, privateKey, message);
   return bufferToBase64Url(sig);
 }
+
+/**
+ * Sign an arbitrary UTF-8 message with the device key (e.g. a publication bundleHash). §9 trust.
+ * @param {string} text
+ * @returns {Promise<string>} signature base64url
+ */
+export async function signMessage(text) {
+  const stored = await chrome.storage.local.get(STORAGE_KEY);
+  if (!stored[STORAGE_KEY]) throw new Error('No identity keypair — call getOrCreateKeyPair first');
+  const privateKey = await crypto.subtle.importKey(
+    'jwk', stored[STORAGE_KEY].privateKeyJwk, { name: 'Ed25519' }, false, ['sign'],
+  );
+  const sig = await crypto.subtle.sign({ name: 'Ed25519' }, privateKey, new TextEncoder().encode(text));
+  return bufferToBase64Url(sig);
+}
+
+/**
+ * Verify a UTF-8 message signature against a publisher's public key (publication import).
+ * @param {string} publicKeyB64   signer's raw Ed25519 public key, base64url
+ * @param {string} text
+ * @param {string} signatureB64url
+ * @returns {Promise<boolean>}
+ */
+export async function verifyMessage(publicKeyB64, text, signatureB64url) {
+  try {
+    const publicKey = await crypto.subtle.importKey(
+      'raw', base64UrlToBytes(publicKeyB64), { name: 'Ed25519' }, false, ['verify'],
+    );
+    return await crypto.subtle.verify(
+      { name: 'Ed25519' }, publicKey, base64UrlToBytes(signatureB64url), new TextEncoder().encode(text),
+    );
+  } catch {
+    return false;
+  }
+}
