@@ -260,14 +260,21 @@ export function foldConventions(events, prior = null) {
 // ─── Active confidence decay (OUTCOMES_SPEC § 7, GROUND_SPEC § 0.16) ──────────────
 
 /**
- * Active-first decay: observed resolve-misses lower a Feature's confidence and
- * flip its lifecycle toward `stale-suspected` WITHOUT touching siblings (§ 8
- * feature-drift). Pure — returns the proposed next {confidence, lifecycle} +
- * whether anything changed; the caller persists. Age-based passive decay is
- * deferred (§ 8).
- * @param {object} feature  { confidence?, ... }
- * @param {object} health   from foldFeatureHealth: { resolveHits, resolveMisses, lifecycle }
- * @param {object} opts     { missThreshold=2, decayPerMiss=0.15, floor=0.1 }
+ * Confidence decay, returning the proposed next {confidence, lifecycle} + whether anything
+ * changed (caller persists). PURE. WITHOUT touching siblings (§ 8 feature-drift). Two halves:
+ *
+ *  - ACTIVE (miss-driven): observed resolve-misses beyond what successes offset lower confidence
+ *    and flip lifecycle toward `stale-suspected`.
+ *  - PASSIVE (age-based, GROUND §0.16's previously-deferred half): a Feature unproven for a long
+ *    time loses confidence even with no misses. Reference = its last proof (verify, else resolve),
+ *    else first observation; exponential half-life past a grace window, COMPOUNDED onto the active
+ *    result. Past `staleAfterMs` the lifecycle drifts to `stale-suspected`. Needs a timestamp on
+ *    the feature/health — no timestamp ⇒ age decay is a no-op. Disable with `opts.ageDecay:false`.
+ *
+ * @param {object} feature  { confidence?, evidence?{observedAt}, createdAt? }
+ * @param {object} health   from foldFeatureHealth: { resolveHits, resolveMisses, lifecycle, lastVerifiedAt, lastResolvedAt }
+ * @param {object} opts      { missThreshold=2, decayPerMiss=0.15, floor=0.1,
+ *                             ageDecay=true, now=Date.now(), halfLifeMs=30d, graceMs=14d, staleAfterMs=60d }
  */
 export function decayFeature(feature = {}, health = {}, opts = {}) {
   const missThreshold = opts.missThreshold ?? 2;
@@ -278,7 +285,8 @@ export function decayFeature(feature = {}, health = {}, opts = {}) {
   const prevConf = typeof feature.confidence === 'number' ? feature.confidence : 0.6;
   let confidence = prevConf;
   let lifecycle = health.lifecycle || 'fresh';
-  // Net misses beyond what successes offset.
+
+  // Active (miss-driven) decay. Net misses beyond what successes offset.
   const netMiss = misses - successes;
   if (netMiss >= missThreshold) {
     confidence = Math.max(floor, prevConf - decayPerMiss * (netMiss - missThreshold + 1));
@@ -286,6 +294,27 @@ export function decayFeature(feature = {}, health = {}, opts = {}) {
   } else if (successes > 0 && misses === 0 && lifecycle === 'fresh') {
     lifecycle = 'verified';
   }
+
+  // Passive (age-based) decay — compounds onto the active result.
+  if (opts.ageDecay !== false) {
+    const now = opts.now ?? Date.now();
+    const DAY = 24 * 3600 * 1000;
+    const halfLifeMs = opts.halfLifeMs ?? 30 * DAY;
+    const graceMs = opts.graceMs ?? 14 * DAY;
+    const staleAfterMs = opts.staleAfterMs ?? 60 * DAY;
+    const ref = health.lastVerifiedAt ?? health.lastResolvedAt
+      ?? (feature.evidence && feature.evidence.observedAt) ?? feature.createdAt ?? null;
+    if (ref != null && now > ref) {
+      const age = now - ref;
+      if (age > graceMs) {
+        const factor = Math.pow(0.5, (age - graceMs) / halfLifeMs);
+        confidence = Math.max(floor, confidence * factor);
+      }
+      if (age > staleAfterMs && (lifecycle === 'fresh' || lifecycle === 'verified')) lifecycle = 'stale-suspected';
+    }
+  }
+
+  confidence = Math.round(confidence * 1000) / 1000;
   const changed = confidence !== prevConf || lifecycle !== (health.lifecycle || 'fresh');
   return { confidence, lifecycle, changed };
 }

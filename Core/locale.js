@@ -418,6 +418,96 @@ export function attachGoals(model, goals) {
   return model;
 }
 
+// ─── Composites (PAGEMODEL_SPEC § 3 `parts` / the within-Locale `partOf` edge) ──────
+// A composite Feature groups controls that act as ONE capability — the canonical case is a
+// search box (input + submit) or a form (≥2 inputs + submit). The page model doesn't emit
+// composites directly, so we DERIVE them conservatively from the enumerated features: within
+// a spatial group (a depth layer, else a scroll band), pair input(s) with a nearby submit
+// control. Conservative on purpose — only a labelled submit (or, for multi-field forms, any
+// nearby action) forms a composite, so we don't fabricate spurious groupings. PURE.
+
+const _SUBMIT_WORDS = new Set([
+  'go', 'search', 'submit', 'apply', 'find', 'send', 'subscribe', 'save', 'update',
+  'continue', 'next', 'signin', 'login', 'signup', 'register', 'ok', 'enter', 'add',
+]);
+function _isSubmitLabel(label) {
+  const toks = tokens(label);
+  return toks.some((t) => _SUBMIT_WORDS.has(t));
+}
+/** Centre-distance proximity; missing geometry (e.g. modal features) trusts group membership. */
+function _near(a, b, maxPx) {
+  const ra = a && a.location && a.location.absRect, rb = b && b.location && b.location.absRect;
+  if (!ra || !rb) return true;
+  const dx = (ra.x + (ra.w || 0) / 2) - (rb.x + (rb.w || 0) / 2);
+  const dy = (ra.y + (ra.h || 0) / 2) - (rb.y + (rb.h || 0) / 2);
+  return Math.hypot(dx, dy) <= maxPx;
+}
+
+/** Spatial groups to look for composites in: each non-surface layer, plus surface features by band. */
+function _compositeGroups(model) {
+  const features = model.features || {};
+  const layers = model.layers || {};
+  const groups = [];
+  for (const lid of Object.keys(layers)) {
+    if (lid === 'surface') continue;
+    groups.push((layers[lid].features || []).map((fid) => features[fid]).filter(Boolean));
+  }
+  const surface = (layers.surface && layers.surface.features ? layers.surface.features : [])
+    .map((fid) => features[fid]).filter(Boolean);
+  const byBand = new Map();
+  for (const f of surface) {
+    const b = f.location && f.location.band;
+    if (b == null) continue;
+    if (!byBand.has(b)) byBand.set(b, []);
+    byBand.get(b).push(f);
+  }
+  for (const arr of byBand.values()) groups.push(arr);
+  return groups;
+}
+
+/**
+ * v2.74.495 — Derive composite Features (input(s) + submit) and attach them with `parts`,
+ * so the within-Locale `partOf` edge is real (localeEdges emits it). Conservative: a labelled
+ * submit forms a composite with the inputs near it; a multi-input group forms one with any
+ * nearby action. Idempotent (composite id is a stable hash of its sorted parts). Rebuilds the
+ * index. PURE.
+ *
+ * @param {object} model  a Locale (post enumerate / depth merge)
+ * @param {{maxPx?:number}} [opts]  proximity radius in absolute px (default 280)
+ */
+export function attachComposites(model, { maxPx = 280 } = {}) {
+  if (!model || !model.features) return model;
+  const features = model.features;
+  for (const group of _compositeGroups(model)) {
+    const inputs = group.filter((f) => f.kind === 'input');
+    if (!inputs.length) continue;
+    const acts = group.filter((f) => f.kind === 'action');
+    if (!acts.length) continue;
+    // Pick the submit: a labelled-submit action near an input, else (multi-field form) any near action.
+    let submit = acts.find((a) => _isSubmitLabel(a.label) && inputs.some((i) => _near(i, a, maxPx)));
+    if (!submit && inputs.length >= 2) submit = acts.find((a) => inputs.some((i) => _near(i, a, maxPx)));
+    if (!submit) continue;
+    const partInputs = inputs.filter((i) => _near(i, submit, maxPx));
+    if (!partInputs.length) continue;
+    const parts = [...partInputs.map((i) => i.id), submit.id];
+    const id = 'composite_' + hashId(parts.slice().sort().join(','));
+    if (features[id]) continue;   // idempotent
+    const label = (partInputs.length >= 2
+      ? `${submit.label || 'Submit'} form`
+      : (partInputs[0].label || submit.label || 'form')).toString().slice(0, 60);
+    features[id] = {
+      id, kind: 'composite', label, a11yRole: 'group',
+      selector: null, parts,
+      location: partInputs[0].location || submit.location || null,
+      confidence: 0.5,
+      synthesized: true,
+      evidence: { method: 'derived', observedAt: Date.now() },
+    };
+  }
+  model.index = buildIndex(model.features);
+  return model;
+}
+
 // ─── Graph edges (PAGEMODEL_SPEC § 1) ───────────────────────────────────────────
 // A Locale is conceptually "a small graph" — Feature / Layer / Goal nodes joined by
 // typed edges. Storage keeps those edges DENORMALIZED as fields on the nodes they
@@ -453,10 +543,10 @@ function _sameOrigin(base, href) {
  *   - `enables`  feature → a goal it helps achieve (to = goalId)
  *   - `leadsTo`  navigation feature → its destination URL (to = url, `sameOrigin` payload;
  *                also surfaced as a GROUND.siteMap edge — § 1)
- *
- * `partOf` (composite flow) is intentionally NOT emitted: composites are unrealized
- * at the Locale level (no source field), and cross-Locale flows live ABOVE the Locale
- * (Workflows). When composite `parts` get materialized this is where they'd join.
+ *   - `partOf`   composite feature → each of its part features (to = featureId) — the
+ *                within-Locale composite flow (e.g. a search box → its input + submit),
+ *                derived by attachComposites. Cross-Locale flows live ABOVE the Locale
+ *                (Workflows, Core/workflows.js).
  *
  * @param {object} model  a Locale
  * @returns {Array<{from:string, to:(string|null), kind:string}>}
@@ -503,6 +593,13 @@ export function localeEdges(model) {
   for (const f of Object.values(features)) {
     if (f && f.kind === 'navigation' && f.href) {
       edges.push({ from: f.id, to: f.href, kind: 'leadsTo', sameOrigin: _sameOrigin(base, f.href) });
+    }
+  }
+
+  // partOf: composite → each part feature (within-Locale composite flow; attachComposites)
+  for (const f of Object.values(features)) {
+    if (f && f.kind === 'composite' && Array.isArray(f.parts)) {
+      for (const pid of f.parts) if (features[pid]) edges.push({ from: f.id, to: pid, kind: 'partOf' });
     }
   }
 

@@ -43,8 +43,10 @@ degrades from *search* to *selection* (`DESIGN_resolve_roles.md`).
 > siteMap archetypes via `Core/siteMap.js#reconcileLeadsTo` (modeled / discovered /
 > stub / unknown-gap / external). **`partOf` is realized cross-Locale as Workflows**
 > (`Core/workflows.js`): ordered multi-page journeys over the siteMap, each step
-> `partOf` the flow, runnable via `BUILD_WORKFLOW`. The within-Locale composite
-> `parts` field is still unused (no enumerator emits composites yet).
+> `partOf` the flow, runnable via `BUILD_WORKFLOW`. The within-Locale `partOf` edge is
+> also live: `Core/locale.js#attachComposites` conservatively derives composite Features
+> (search box = input + submit; form = ≥2 inputs + submit) and sets their `parts`, which
+> `localeEdges` emits as `composite → part` edges.
 
 ## 2. Locale shape
 

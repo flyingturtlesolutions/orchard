@@ -70,8 +70,11 @@ decision below was confirmed during design and is binding for the build.
 15. **Conventions** (selector-tier histogram, framework, modal-close idiom) are a
     **live rollup learned from the stream** across the Ground's Locales —
     recomputed lazily — and bias resolve/locate on every new archetype.
-16. **Confidence decay is active first** (on observed resolve-misses); age-based
-    decay deferred.
+16. **Confidence decay is active first** (on observed resolve-misses); **age-based
+    passive decay is now also built** — `Core/outcomes.js#decayFeature` compounds an
+    exponential half-life (past a grace window, ref = last verify/resolve else first
+    observation) onto the active result and drifts lifecycle → `stale-suspected` past a
+    staleness horizon. Applied on the resolve-outcome writeback.
 17. The labeled-corpus pipeline is **stubbed** in v1 (schema carries `corpusRef`
     and the event hooks fire) and filled in a later slice.
 
