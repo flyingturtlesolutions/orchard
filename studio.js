@@ -3170,11 +3170,13 @@ async function _refreshGroundListImpl() {
       const capRow = (c) => {
         const ex = (c.archetypes.find(a => a.exemplarUrl) || {}).exemplarUrl || '';
         const meta = [c.count > 1 ? `×${c.count}` : '', c.pageTypes.join(', ')].filter(Boolean).join(' · ');
+        // v2.74.472 — a modeled archetype (has a Locale) can be drafted into a runnable capability.
+        const synthArch = c.archetypes.find(a => a.status === 'modeled') || c.archetypes[0] || null;
         return `
           <div class="sitemap-node" title="${escAttr(c.archetypes.map(a => shortPath(a.urlPattern)).join('\n'))}">
             <span class="sitemap-node-status">★</span>
             <span class="sitemap-node-name">${escHtml(c.goal)}${c.why ? ` <span style="opacity:.6;font-style:italic">— ${escHtml(c.why)}</span>` : ''}</span>
-            <span class="sitemap-node-meta">${escHtml(meta)}${ex ? ` · <a href="${escAttr(ex)}" target="_blank" rel="noopener" title="Open ${escAttr(ex)}">↗</a>` : ''}</span>
+            <span class="sitemap-node-meta">${escHtml(meta)}${ex ? ` · <a href="${escAttr(ex)}" target="_blank" rel="noopener" title="Open ${escAttr(ex)}">↗</a>` : ''}${synthArch ? ` · <button class="btn-secondary tiny" data-action="synth-cap" data-arch="${escAttr(synthArch.id)}" data-goal="${escAttr(c.goal)}" title="Draft a runnable capability (Fragment + Strategy) from this goal — a best-effort draft to review/refine">⚙ draft</button>` : ''}</span>
           </div>`;
       };
       const capListHtml = (list, isDefault) => list.length
@@ -3238,6 +3240,29 @@ async function _refreshGroundListImpl() {
           } catch (e) {
             capResults.innerHTML = `<div class="empty-state small">Match failed: ${escHtml(e?.message || 'error')}</div>`;
           } finally { aiBtn.disabled = false; aiBtn.textContent = prev; }
+        });
+        // v2.74.472 — "⚙ draft" synthesizes a runnable capability from a goal (SYNTHESIZE_CAPABILITY).
+        // Delegated on the (stable) results container so it survives live re-renders. The result
+        // is a DRAFT — toast notes runnable vs navigate-only + any warnings; review in Strategies.
+        capResults.addEventListener('click', async (e) => {
+          const btn = e.target.closest('[data-action="synth-cap"]');
+          if (!btn) return;
+          const archId = btn.getAttribute('data-arch'); const goalLabel = btn.getAttribute('data-goal');
+          if (!archId || !goalLabel) return;
+          btn.disabled = true; const prev = btn.textContent; btn.textContent = '…';
+          try {
+            const resp = await new Promise(r => chrome.runtime.sendMessage({ type: 'SYNTHESIZE_CAPABILITY', payload: { groundId: ground.id, archetypeId: archId, goal: goalLabel } }, r));
+            if (resp?.success) {
+              const warn = (resp.warnings && resp.warnings.length) ? ` · ${resp.warnings.length} warning(s) — refine before running` : '';
+              toast(`Drafted “${resp.name}” — ${resp.runnable ? 'runnable' : 'navigate-only'}, ${resp.actionCount} step(s)${warn}. Review in this Ground's Strategies.`);
+              btn.textContent = '✓ drafted'; btn.disabled = true;
+              await refreshGroundList();
+            } else {
+              toast(`Synthesis failed: ${resp?.error || 'unknown'}`, 'err'); btn.textContent = prev; btn.disabled = false;
+            }
+          } catch (err) {
+            toast(`Synthesis failed: ${err?.message || 'error'}`, 'err'); btn.textContent = prev; btn.disabled = false;
+          }
         });
       }
     }
