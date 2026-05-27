@@ -13,7 +13,8 @@ installGlobalErrorHandlers('chat', window);
 
 import { ChatAPI } from './Services/ChatAPI.js';
 import { ConversationStore } from './Services/ConversationStore.js';
-import { $, escHtml, escAttr, toast } from './shared.js';
+import { $, escHtml, escAttr, toast, relTime } from './shared.js';
+import { isSafeStrategyResultHtml, looksLikeStrategyResultHtml } from './Services/Chat/strategyResultHtml.js';
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 
@@ -167,7 +168,7 @@ async function _renderHistoryList() {
     item.dataset.conversationId = conv.id;
     item.innerHTML = `
       <div class="history-item-title">${escHtml(conv.title)}</div>
-      <div class="history-item-meta">${_relativeTime(conv.updatedAt)}</div>
+      <div class="history-item-meta">${relTime(conv.updatedAt)}</div>
       <button class="history-item-delete" title="Delete">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="3 6 5 6 21 6"/>
@@ -212,17 +213,6 @@ async function _renderHistoryList() {
 
     container.appendChild(item);
   });
-}
-
-/** Format a timestamp as a human-friendly relative string. */
-function _relativeTime(ts) {
-  const diff = Date.now() - ts;
-  const sec  = Math.floor(diff / 1000);
-  if (sec < 60)           return 'just now';
-  if (sec < 3600)         return `${Math.floor(sec / 60)}m ago`;
-  if (sec < 86400)        return `${Math.floor(sec / 3600)}h ago`;
-  if (sec < 604800)       return `${Math.floor(sec / 86400)}d ago`;
-  return new Date(ts).toLocaleDateString();
 }
 
 function _resetConversation() {
@@ -434,14 +424,34 @@ function _setMessageBody(msg, text, { markdown = false, html = false } = {}) {
     body.classList.add('md-rendered');
     wireCodeCopyButtons(body);
   } else if (html) {
-    // Pass C — caller built trusted HTML (strategy result step list with
-    // escHtml on all user-provided text). Set via innerHTML.
-    body.innerHTML = text;
+    if (isSafeStrategyResultHtml(text)) {
+      body.innerHTML = text;
+    } else {
+      console.warn('[chat] blocked unsafe strategy-result HTML; showing plain text');
+      body.textContent = typeof text === 'string' ? text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : '';
+    }
     body.classList.remove('md-rendered');
   } else {
     body.textContent = text;
     body.classList.remove('md-rendered');
   }
+}
+
+/**
+ * @param {HTMLElement} msgEl
+ * @param {{ body: string, markdown?: boolean, html?: boolean, attribution?: string|null, invocationId?: string }} fields
+ */
+async function _finalizeAssistantBubble(msgEl, fields) {
+  msgEl.classList.remove('thinking');
+  await _persistMessageUpdate(msgEl, {
+    role: 'assistant',
+    outcome: null,
+    markdown: false,
+    html: false,
+    attribution: null,
+    invocationId: undefined,
+    ...fields,
+  });
 }
 
 function _addCancelButton(msg, invocationId) {
@@ -715,17 +725,19 @@ async function sendChatMessage() {
   try {
     matches = await ChatAPI.match(text, { limit: 5, minConfidence: 0.2 });
   } catch (err) {
-    thinkingMsg.classList.remove('thinking');
     thinkingMsg.classList.add('error');
-    _setMessageBody(thinkingMsg, err?.message ?? 'Routing failed.');
+    const body = err?.message ?? 'Routing failed.';
+    _setMessageBody(thinkingMsg, body);
+    await _finalizeAssistantBubble(thinkingMsg, { body, attribution: null });
     status.textContent = '';
     status.className = 'input-status';
     return;
   }
 
   if (!matches.length) {
-    thinkingMsg.classList.remove('thinking');
-    _setMessageBody(thinkingMsg, "I don't have a capability that matches your question yet. Try opening Studio to add one, or browse available capabilities.");
+    const body = "I don't have a capability that matches your question yet. Try opening Studio to add one, or browse available capabilities.";
+    _setMessageBody(thinkingMsg, body);
+    await _finalizeAssistantBubble(thinkingMsg, { body, attribution: null });
     status.textContent = '';
     status.className = 'input-status';
     return;
@@ -1769,19 +1781,6 @@ function _formatElapsed(ms) {
 }
 
 /**
- * v2.29.0.2 — Conservative detector for bubbles that were persisted with
- * pre-built HTML but lost their html flag (a bug pre-v2.29.0.2). Matches
- * only the specific Strategy result-card prefix so we don't accidentally
- * interpret a user message starting with "<" as HTML. Any Strategy result
- * body produced by handleInvocationCompleted starts with this exact class.
- */
-function _looksLikeStrategyResultHtml(body) {
-  if (typeof body !== 'string') return false;
-  const trimmed = body.trimStart();
-  return trimmed.startsWith('<div class="strategy-result-headline">');
-}
-
-/**
  * Re-render a persisted conversation into the DOM, preserving message ids
  * and state. Called on init (restore most recent) and when switching
  * conversations via the history sidebar (Pass 2).
@@ -1811,18 +1810,7 @@ async function _rehydrateConversation(conv) {
 
     if (pm.markdown) {
       _setMessageBody(dom, pm.body, { markdown: true });
-    } else if (pm.html || _looksLikeStrategyResultHtml(pm.body)) {
-      // v2.28.5 — Messages persisted with html: true need to be
-      // re-rendered as HTML on rehydrate. Without this branch,
-      // appendMessage's default textContent assignment causes the markup
-      // to display as literal text.
-      //
-      // v2.29.0.2 — Fallback detection for conversations persisted BEFORE
-      // the html flag was correctly saved (pre-v2.29.0.2 the persist path
-      // dropped the flag). Without this, previously-saved Strategy result
-      // bubbles would keep rendering as raw markup forever. The detector
-      // is conservative — only matches the specific Strategy-result card
-      // shape, not arbitrary "<div>" prefixes that a user might have typed.
+    } else if (pm.html || looksLikeStrategyResultHtml(pm.body)) {
       _setMessageBody(dom, pm.body, { html: true });
     }
     if (pm.outcome) {
@@ -1834,27 +1822,3 @@ async function _rehydrateConversation(conv) {
   }
 }
 
-
-
-// ═══════════════════════════════════════════════════════════════════════════
-// v2.72.52 (Stage 3) — Walk-mode + chat-side review panel deleted.
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// Fragment walks are now monitored entirely in the sidepanel via the
-// fragment-walk mode (Sidepanel/modes/fragment-walk.js). Chat is no
-// longer involved in walks: no listener for FRAGMENT_WALK_*, no banner
-// overlay, no chat-side review panel, no REVIEW_CLAIMED_BY_CHAT
-// coordination. The walk-mode <section> in chat.html is also removed.
-//
-// Removed from this file (was lines 1745-2308 prior):
-//   - _activeWalk, _chatReviewDraft state
-//   - _enterWalkMode, _exitWalkMode, _appendWalkLogRow,
-//     _formatWalkProgressEvent, _showPendingStep, _hidePendingStep
-//   - chrome.runtime.onMessage listener for FRAGMENT_WALK_STARTED /
-//     WALK_PROGRESS / STEP_PENDING / FRAGMENT_WALK_COMPLETE /
-//     FRAGMENT_WALK_FAILED / FRAGMENT_WALK_ABORTED
-//   - walk-cancel / walk-btn-play / walk-btn-done event listeners
-//   - _mountChatReviewPanel, _renderChatReviewConditions,
-//     _saveChatReviewedFragment, _chatBuildCondition, _chatConditionValue,
-//     _chatSetConditionValue
-//   - REVIEW_CLAIMED_BY_CHAT / REVIEW_RELEASED_BY_CHAT broadcasts
