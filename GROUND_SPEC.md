@@ -1,8 +1,14 @@
 # GROUND_SPEC — Ground as Site Model
 
-**Status:** Spec (clean-slate architecture; **no migration** — supersedes the flat
-Ground→Locale→Landmark model entirely). Not yet built.
-**Date:** 2026-05-24
+**Status:** BUILT (clean-slate architecture; superseded the flat
+Ground→Locale→Landmark model entirely). This doc now reflects the implementation.
+**Date:** 2026-05-24 · **Synced:** 2026-05-26
+**Implemented in:** `Core/siteMap.js` (§ 7 archetype graph: templating, build/merge,
+stats, `reconcileLeadsTo`, capability catalog), `Core/chromeHoist.js` + `background.js`
+(§ 4 chrome hoisting: derive/persist `Ground.chrome`, depth graft, Explore poke-skip),
+`Core/workflows.js` + `background.js` (cross-Locale Workflows over the siteMap),
+`Core/outcomes.js` (§ 0.12–17 stream + rollups), `Services/StorageManager.js`
+(per-ground keys), `studio.js` (siteMap / coverage / chrome / workflows surfaces).
 **Relates to:** `PAGEMODEL_SPEC.md` (Locale / Feature / Layer / Goal),
 `OUTCOMES_SPEC.md` (provenance + training + usage stream), `DESIGN_linked_perspectives.md`
 (cross-Locale flows — the gap it flagged is resolved by § 7 siteMap),
@@ -74,8 +80,11 @@ decision below was confirmed during design and is binding for the build.
     (same pattern as the grounded-intent editable proposal).
 19. **Auth/session chrome variants** (anonymous vs authenticated) — modeled as a
     future chrome dimension; not built in v1.
-20. **Cross-Locale Workflows / Fragments** (the operational traversal of flows)
-    remain a Tier-2 concern; the siteMap provides their affordance substrate.
+20. **Cross-Locale Workflows / Fragments** (the operational traversal of flows) —
+    **BUILT** (`Core/workflows.js` + `background.js` `GET_WORKFLOWS`/`BUILD_WORKFLOW` +
+    the `studio.js` picker). The siteMap is the affordance substrate: `pathsTo` finds the
+    multi-page paths to a target archetype, `buildWorkflowDraft` stitches navigation + each
+    step's capability-synth goal into one runnable cross-page Fragment + Strategy.
 
 ---
 
@@ -163,6 +172,18 @@ construction (no contradictory page vs site framing).
 
 Global chrome recurs on ~every archetype; capturing it per-Locale is the redundancy
 this architecture exists to remove.
+
+> **Built** (`Core/chromeHoist.js` + `background.js`): `hoistChrome` promotes a Feature
+> to `Ground.chrome` once its UID (`Feature.id` = djb2 of kind|role|label|selector) recurs
+> in ≥ 2 Locales, capturing its reveal-layer DEPTH too (`chromeLayers`/`chromeHidden`);
+> persisted per-ground as `chrome:<id>`, re-derived after each Explore. The Explore poke
+> sweep then SKIPS re-poking a known chrome disclosure and `graftChromeDepth` grafts its
+> depth in — so a recurring menu is poked once, not per archetype. `chromeOverrides`
+> (per-archetype `visibleAtRest`/`hidden` deltas) are applied on read by
+> `chromeFeaturesForLocale`, which also feeds the resolve hint set (`_knownSelectorsForUrl`),
+> so a control modeled once resolves everywhere. Inspectable in `studio.js` (the Chrome
+> section). NOTE: Locales are NOT slimmed — they keep their own copies and graft keeps each
+> self-contained, so no feature reader needs chrome composition.
 
 - **Captured once**, lives in `Ground.chrome`. Locales reference it; they do not
   recapture it.

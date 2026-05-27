@@ -1,9 +1,15 @@
 # PAGEMODEL_SPEC — Locale as Page Capability Model
 
-**Status:** Spec (clean-slate; **no migration**). Not yet built. Defines the
-**Locale** (= PageModel) and the nodes below it: **Feature**, **Layer**, **Goal**,
-**Perspective**, **Landmark**.
-**Date:** 2026-05-24
+**Status:** BUILT (landed across the v2.74.x slices; this doc now reflects the
+implementation). Defines the **Locale** (= PageModel) and the nodes below it:
+**Feature**, **Layer**, **Goal**, **Perspective**, **Landmark**.
+**Date:** 2026-05-24 · **Synced:** 2026-05-26
+**Implemented in:** `Core/locale.js` (builder + query API + `localeEdges`/`edgesFrom`/
+`edgesTo`/`edgesByKind`/`pathToGoal` + L1 depth merge + L2 goal attach),
+`Core/capabilitySynth.js` (goal → runnable draft Fragment+Strategy),
+`Core/graphLayout.js` (graph-viz layout), `ContentScripts/contentScript.js`
+(`ENUMERATE_PAGE` L0 + poke→reveal L1), `background.js` (`BUILD_PAGEMODEL`,
+`LOCALE_GRAPH`, `SYNTHESIZE_CAPABILITY`), `studio.js` (Locale graph viz + capability surfaces).
 **Relates to:** `GROUND_SPEC.md` (site model, inheritance, siteMap, locked
 decisions § 0), `OUTCOMES_SPEC.md` (provenance / health / training stream),
 `DESIGN_resolve_roles.md` (resolve becomes catalog selection), `DESIGN_linked_perspectives.md`.
@@ -29,6 +35,16 @@ not the point. The artifact is a small graph:
 
 Nobody walks the raw artifact — downstream **queries** it (§ 7). Resolve thereby
 degrades from *search* to *selection* (`DESIGN_resolve_roles.md`).
+
+> **Built:** the typed edge set is materialized by `Core/locale.js#localeEdges`
+> (`reveals` / `contains` / `enables` / `leadsTo`), with `edgesFrom` / `edgesTo` /
+> `edgesByKind` selectors and the depth-aware `pathToGoal` traversal; `studio.js`
+> renders it as an SVG node-link graph (`LOCALE_GRAPH`). `leadsTo` reconciles to
+> siteMap archetypes via `Core/siteMap.js#reconcileLeadsTo` (modeled / discovered /
+> stub / unknown-gap / external). **`partOf` is realized cross-Locale as Workflows**
+> (`Core/workflows.js`): ordered multi-page journeys over the siteMap, each step
+> `partOf` the flow, runnable via `BUILD_WORKFLOW`. The within-Locale composite
+> `parts` field is still unused (no enumerator emits composites yet).
 
 ## 2. Locale shape
 
