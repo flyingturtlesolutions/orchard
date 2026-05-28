@@ -12,6 +12,7 @@ const kms = require('aws-cdk-lib/aws-kms');
 const dynamodb = require('aws-cdk-lib/aws-dynamodb');
 const s3 = require('aws-cdk-lib/aws-s3');
 const iam = require('aws-cdk-lib/aws-iam');
+const secretsmanager = require('aws-cdk-lib/aws-secretsmanager');
 
 class P0Stack extends cdk.Stack {
   /** @param {constructs.Construct} scope @param {string} id @param {cdk.StackProps} props */
@@ -119,6 +120,16 @@ class P0Stack extends cdk.Stack {
       autoDeleteObjects: true,
     });
 
+    // App-managed Anthropic key for the LLM proxy (DD-08). CDK creates the secret resource (with a
+    // throwaway generated value); set the REAL key post-deploy:
+    //   aws secretsmanager put-secret-value --secret-id orchard/anthropic-api-key \
+    //     --secret-string '{"ANTHROPIC_API_KEY":"sk-ant-..."}'
+    const anthropicSecret = new secretsmanager.Secret(this, 'AnthropicApiKey', {
+      secretName: 'orchard/anthropic-api-key',
+      description: 'App-managed Anthropic API key proxied by /llm/messages (DD-08). Set the real value post-deploy.',
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
     const apiHandler = new lambda.Function(this, 'ApiHandler', {
       functionName: 'orchard-p0-api',
       runtime: lambda.Runtime.NODEJS_20_X,
@@ -131,6 +142,7 @@ class P0Stack extends cdk.Stack {
         WORKSPACE_BUCKET: workspaceBucket.bucketName,
         PUBLICATIONS_TABLE: publicationTable.tableName,
         PUBLICATIONS_BUCKET: publicationsBucket.bucketName,
+        ANTHROPIC_SECRET_ARN: anthropicSecret.secretArn,
       },
     });
 
@@ -140,6 +152,7 @@ class P0Stack extends cdk.Stack {
     workspaceKey.grantDecrypt(apiHandler);
     publicationTable.grantReadWriteData(apiHandler);
     publicationsBucket.grantReadWrite(apiHandler);
+    anthropicSecret.grantRead(apiHandler);
 
     const httpApi = new apigwv2.HttpApi(this, 'HttpApi', {
       apiName: 'orchard-dev',
@@ -163,6 +176,7 @@ class P0Stack extends cdk.Stack {
     });
 
     new cdk.CfnOutput(this, 'ApiBaseUrl', { value: `${httpApi.apiEndpoint}/v1` });
+    new cdk.CfnOutput(this, 'AnthropicSecretName', { value: anthropicSecret.secretName });
     new cdk.CfnOutput(this, 'UserPoolId', { value: userPool.userPoolId });
     new cdk.CfnOutput(this, 'UserPoolClientId', { value: client.userPoolClientId });
     new cdk.CfnOutput(this, 'CognitoDomain', {

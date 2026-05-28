@@ -18,6 +18,7 @@ const {
   HeadObjectCommand,
 } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
 
 const IDENTITY_TABLE = process.env.IDENTITY_TABLE;
 const OBJECT_TABLE = process.env.OBJECT_TABLE;
@@ -29,6 +30,9 @@ const MAX_BATCH = 10;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const s3 = new S3Client({});
+const sm = new SecretsManagerClient({});
+const ANTHROPIC_SECRET_ARN = process.env.ANTHROPIC_SECRET_ARN;
+let _anthropicKeyCache = null;   // cached across warm invocations
 
 function json(statusCode, body, extraHeaders = {}) {
   return {
@@ -968,6 +972,54 @@ async function handleListPublications(event) {
   return json(200, { publications, registry: REGISTRY_ID });
 }
 
+// ── Managed LLM proxy (DD-08) ──────────────────────────────────────────────────────────
+// The app's Anthropic key lives in Secrets Manager; signed-in clients call this instead of
+// holding a key. v1 is auth-only (any bound user) and BUFFERED (non-streaming). Caches the key
+// across warm invocations to avoid a Secrets Manager call per request.
+async function getAnthropicKey() {
+  if (_anthropicKeyCache) return _anthropicKeyCache;
+  if (!ANTHROPIC_SECRET_ARN) return null;
+  const res = await sm.send(new GetSecretValueCommand({ SecretId: ANTHROPIC_SECRET_ARN }));
+  const raw = res.SecretString || '';
+  let key = raw;
+  try {
+    const parsed = JSON.parse(raw);
+    key = parsed.ANTHROPIC_API_KEY || parsed.apiKey || parsed.key || '';
+  } catch { /* raw string secret */ }
+  _anthropicKeyCache = (key && key.startsWith('sk-ant-')) ? key : null;
+  return _anthropicKeyCache;
+}
+
+async function handleLlmMessages(event) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+
+  let body;
+  try { body = JSON.parse(event.body || '{}'); } catch { return json(400, { error: 'invalid_json' }); }
+  if (!body || !Array.isArray(body.messages) || !body.model) {
+    return json(400, { error: 'missing_model_or_messages' });
+  }
+  delete body.stream;   // proxy is buffered
+
+  const key = await getAnthropicKey();
+  if (!key) return json(503, { error: 'llm_not_configured' });
+
+  let upstream;
+  try {
+    upstream = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    console.error('LLM proxy upstream error', e);
+    return json(502, { error: 'llm_upstream_unreachable' });
+  }
+  // Pass through Anthropic's status + JSON body verbatim (client parses it like a direct call).
+  const text = await upstream.text();
+  return { statusCode: upstream.status, headers: { 'content-type': 'application/json' }, body: text };
+}
+
 exports.handler = async (event) => {
   try {
     const method = event.requestContext?.http?.method || 'GET';
@@ -995,6 +1047,8 @@ exports.handler = async (event) => {
     if (method === 'GET' && path.startsWith('/publications/')) {
       return handleGetPublication(event, decodeURIComponent(path.slice('/publications/'.length)));
     }
+
+    if (method === 'POST' && path === '/llm/messages') return handleLlmMessages(event);
 
     return json(404, { error: 'not_found', method, path });
   } catch (err) {
