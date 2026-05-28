@@ -5094,6 +5094,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         try {
           const { tabId, groundId = null, intent } = payload ?? {};
           if (typeof intent !== 'string' || !intent.trim()) { sendResponse({ success: false, error: 'intent required' }); return; }
+          // SG-1 (Comprehend, SHADOW) — page-INDEPENDENT intent spec, kicked off in parallel with the
+          // page-dependent assessor below. Runs regardless of Explore; the comprehension object is logged
+          // inside comprehendIntent. Surfaced on the response but NOT yet consumed (SG-2 Select will).
+          const intentSpecP = AnthropicService.comprehendIntent({ userIntent: intent })
+            .catch((e) => { Logger.warn('background', `comprehendIntent failed (continuing): ${e.message}`); return null; });
           let url = '', title = '';
           if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); url = t?.url ?? ''; title = t?.title ?? ''; } catch { /* */ } }
           // v2.74.409 — Prefer the Locale's STRUCTURED goals (L2) to anchor the
@@ -5114,13 +5119,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
           if (!affordances && !goals) {
             // Nothing explored → can't ground; pass the intent through so the UI
-            // can still propose (and nudge the user to Explore first).
-            sendResponse({ success: true, achievable: 'unknown', shape: null, completeness: null, note: 'Run Explore on this page to assess the intent against its actual capabilities.', hadAffordance: false });
+            // can still propose (and nudge the user to Explore first). Comprehend is
+            // page-independent, so its spec is still attached.
+            sendResponse({ success: true, achievable: 'unknown', shape: null, completeness: null, note: 'Run Explore on this page to assess the intent against its actual capabilities.', hadAffordance: false, intentSpec: await intentSpecP });
             return;
           }
           const out = await AnthropicService.groundIntent({ userIntent: intent, affordances, goals, url, title });
           if (!out) { sendResponse({ success: false, error: 'Claude returned no grounded intent.' }); return; }
-          sendResponse({ success: true, ...out, hadAffordance: true, hadGoals: !!goals });
+          sendResponse({ success: true, ...out, hadAffordance: true, hadGoals: !!goals, intentSpec: await intentSpecP });
         } catch (err) {
           Logger.error('background', `GROUND_INTENT failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });

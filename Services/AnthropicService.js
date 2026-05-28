@@ -21,6 +21,7 @@ import { SchemaValidator } from './SchemaValidator.js';
 // PB-10 — intent-driven proposal: the rules block is ASSEMBLED from the intent's extracted parameters
 // (shape/completeness/cardinality + must-cover fields) instead of a static minimal-roles prior.
 import { deriveIntentSpec, buildProposeDirective } from '../Core/intentShape.js';
+import { buildIntentSpec } from '../Core/intentSpec.js';   // SG-1 Comprehend contract (page-independent)
 import { selectNecessaryFields, slugMatch } from '../Core/formCoverage.js';
 import { CONDITION_FIELDS, getTypesByFamily } from './ConditionVocabulary.js';
 // C-P3 (DD-08) — managed LLM proxy transport.
@@ -2349,6 +2350,56 @@ Rules:
    * achievability verdict (the page may not serve the intent at all).
    * @returns {Promise<{groundedIntent:string, achievable:'yes'|'partial'|'no', note:string}|null>}
    */
+  /**
+   * SG-1 (Comprehend) — DESIGN_substrate_grounded_capabilities §4.1, §SG-1. The LLM's strongest fit:
+   * turn the user's raw intent into a structured, PAGE-INDEPENDENT IntentSpec WITHOUT seeing any page.
+   * No Locale/affordances/goals in the prompt — the spec must hold for whatever page serves the intent.
+   * Returns the full IntentSpec (via Core/intentSpec.buildIntentSpec, which validates/clamps); on LLM or
+   * parse failure it returns the lexical-fallback spec so callers always get a well-formed object. The
+   * raw comprehension object is LOGGED. groundIntent (below) remains the separate, page-DEPENDENT
+   * assessor; SG-2 Select folds them together.
+   * @param {{userIntent:string}} args
+   * @returns {Promise<object|null>} IntentSpec, or null for empty input.
+   */
+  static async comprehendIntent({ userIntent }) {
+    const intent = (typeof userIntent === 'string' ? userIntent : '').trim();
+    if (!intent) return null;
+    const systemPrompt = `You COMPREHEND a user's web-automation intent into a structured, PAGE-INDEPENDENT plan. You are NOT shown any web page — your output must hold for WHATEVER page ends up serving the intent. Decompose the intent; do not solve it against a specific UI.
+
+Return ONLY a JSON object:
+{
+  "shape": "read" | "act" | "complete" | "navigate",
+  "target": "<the object the intent acts on>",
+  "constraints": { },                  // values/filters STATED IN the intent (e.g. "cheapest" -> {"rank":"min-price"}; a named position/product/amount). {} if none.
+  "dataNeeded": [ ],                   // values the intent does NOT contain but fulfilling it requires (e.g. for "apply for a job": full name, email, resume). [] if none.
+  "subGoals": [ { "id": "<slug>", "label": "<phase>", "shape": "read|act|complete|navigate", "scope": "required" | "optional", "dependsOn": [ "<earlier id>" ] } ],
+  "successCondition": [ { "signal": "url" | "text" | "element" | "value", "match": "<generic observable that proves it's done>" } ],
+  "safety": "benign" | "consequential" | "irreversible"
+}
+Rules:
+- "shape" = the PRIMARY operation; ignore hypothetical/subordinate mentions. read = find/view/extract/compare/understand content. act = ONE discrete action (click/toggle/sign in/like/download). complete = fill/submit a multi-field form (apply, register, check out, book, update details). navigate = go to / reach a place (open the pricing page, go to settings).
+- "subGoals" = the ORDERED phases to accomplish the intent, PAGE-INDEPENDENT (generic phases, NOT specific field names). e.g. "apply for a job" -> [provide identity, provide contact details, provide location, attach resume, answer screening questions, submit]. A single-action intent has ONE subGoal. Use "dependsOn" to order them (the commit/submit depends on the data-entry phases). Mark a phase "optional" only if the intent can still succeed without it.
+- "successCondition" = OBSERVABLE signals that PROVE completion, phrased generically (no specific page): a URL change ("confirmation"/"thank-you"), confirming text ("submitted"/"success"), an element appearing, or a value being set. This is exactly what a trial checks — never vague prose.
+- "constraints" hold ONLY what the intent SAYS; "dataNeeded" names what it does NOT say but fulfilling requires. Do NOT invent values.
+- "safety": benign = read/navigate/reversible. consequential = submits or changes data but reversible. irreversible = purchase, payment, delete, send, or otherwise permanent.`;
+    const userText = `User intent: ${intent}`;
+    Logger.info('AnthropicService', `comprehendIntent — "${intent.slice(0, 80)}"`);
+    try {
+      const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text: userText }], 1024, [], { role: 'describe', operation: 'comprehendIntent' });
+      if (!raw?.success) { Logger.warn('AnthropicService', `comprehendIntent failed: ${raw?.error} — lexical fallback`); return buildIntentSpec(intent, null); }
+      const json = AnthropicService.#firstJsonObject(raw.text);
+      let comprehension = null;
+      try { comprehension = json ? JSON.parse(json) : null; } catch { comprehension = null; }
+      Logger.info('AnthropicService', `comprehendIntent comprehension: ${JSON.stringify(comprehension).slice(0, 1200)}`);
+      const spec = buildIntentSpec(intent, comprehension);
+      Logger.info('AnthropicService', `comprehendIntent spec: shape=${spec.shape} subGoals=${spec.subGoals.length} safety=${spec.safety} decidedBy=${spec.decidedBy}`);
+      return spec;
+    } catch (e) {
+      Logger.warn('AnthropicService', `comprehendIntent error: ${e.message} — lexical fallback`);
+      return buildIntentSpec(intent, null);
+    }
+  }
+
   static async groundIntent({ userIntent, affordances, goals = null, url, title }) {
     const intent = (typeof userIntent === 'string' ? userIntent : '').trim();
     if (!intent) return null;
