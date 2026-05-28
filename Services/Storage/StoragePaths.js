@@ -110,10 +110,16 @@ export function logicalPathForRecord(kind, record) {
 
 /**
  * @param {string} logicalPath
- * @returns {{ kind: SyncKind, id: string, groundId?: string }|null}
+ * @returns {{ kind: SyncKind|'manifest', id: string, groundId?: string }|null}
  */
 export function recordMetaFromPath(logicalPath) {
   let m;
+  // Manifest: a derived per-ground index. Not a savable primitive (pull skips it), but it must
+  // reverse-map to its groundId so write-routing (e.g. team-ground wsId derivation on a keep-mine
+  // conflict re-push) doesn't lose the ground association and mis-route to the personal namespace.
+  m = logicalPath.match(/^workspace\/grounds\/([^/]+)\/_manifest\.json$/);
+  if (m) return { kind: 'manifest', id: m[1], groundId: m[1] };
+
   m = logicalPath.match(/^workspace\/grounds\/([^/]+)\/ground\.json$/);
   if (m) return { kind: 'ground', id: m[1], groundId: m[1] };
 

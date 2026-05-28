@@ -805,7 +805,14 @@ async function pullWorkspaceChanges(wsId) {
     }
 
     for (const change of changes) {
-      if (!change.path || change.path.endsWith('/_manifest.json')) continue;
+      if (!change.path) continue;
+      // Keep the groundId→wsId registry populated for EVERY change carrying a groundId, before any
+      // skip — otherwise an already-cached team ground would lose its tag if the registry were ever
+      // reset, and bootstrap (which runs before pull) would re-push it into the personal namespace.
+      const gid = change.groundId || recordMetaFromPath(change.path)?.groundId;
+      if (gid) await tagGroundWorkspace(gid, wsId);
+
+      if (change.path.endsWith('/_manifest.json')) continue;
       if (change.deleted) {
         const result = await applyRemoteDelete(change.path);
         if (result) applied.push(result);
@@ -819,11 +826,7 @@ async function pullWorkspaceChanges(wsId) {
       try {
         const { envelope, etag } = await fetchWorkspaceObjectRaw(wsId, change.path);
         const result = await applyRemoteObject(change.path, envelope, etag || change.etag || '');
-        if (result) {
-          applied.push(result);
-          const gid = change.groundId || recordMetaFromPath(change.path)?.groundId;
-          if (gid) await tagGroundWorkspace(gid, wsId);
-        }
+        if (result) applied.push(result);
       } catch (e) {
         const status = e instanceof CloudClientError ? e.status : 0;
         Logger.warn('SyncEngine', `ws ${wsId} pull skip (${status || 'network'}): ${change.path}`);
