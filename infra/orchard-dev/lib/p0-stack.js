@@ -110,6 +110,24 @@ class P0Stack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    // Shared workspaces (DD-05 C / AWS_INTEGRATION §6.2). Composite-key table: a `#META` row holds
+    // workspace metadata; one `MEMBER#{orchardUserId}` row per member powers role lookups and the
+    // MemberIndex GSI ("list workspaces this user belongs to"). Team object rows live in the existing
+    // OrchardObjectIndex under PK `WS#{wsId}` (parallel to the personal `USER#{id}` namespace).
+    const sharedWorkspaceTable = new dynamodb.Table(this, 'OrchardSharedWorkspace', {
+      tableName: 'orchard-shared-workspaces-dev',
+      partitionKey: { name: 'PK', type: dynamodb.AttributeType.STRING },   // WS#{workspaceId}
+      sortKey: { name: 'SK', type: dynamodb.AttributeType.STRING },        // #META | MEMBER#{orchardUserId}
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    sharedWorkspaceTable.addGlobalSecondaryIndex({
+      indexName: 'MemberIndex',                                            // list workspaces for a member
+      partitionKey: { name: 'GSI1PK', type: dynamodb.AttributeType.STRING },  // MEMBER#{orchardUserId}
+      sortKey: { name: 'GSI1SK', type: dynamodb.AttributeType.STRING },       // WS#{workspaceId}
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     const publicationsBucket = new s3.Bucket(this, 'PublicationsBucket', {
       bucketName: `dev-orchard-publications-${cdk.Aws.ACCOUNT_ID}`,
       encryption: s3.BucketEncryption.KMS,
@@ -142,6 +160,7 @@ class P0Stack extends cdk.Stack {
         WORKSPACE_BUCKET: workspaceBucket.bucketName,
         PUBLICATIONS_TABLE: publicationTable.tableName,
         PUBLICATIONS_BUCKET: publicationsBucket.bucketName,
+        SHARED_WS_TABLE: sharedWorkspaceTable.tableName,
         ANTHROPIC_SECRET_ARN: anthropicSecret.secretArn,
       },
     });
@@ -152,6 +171,7 @@ class P0Stack extends cdk.Stack {
     workspaceKey.grantDecrypt(apiHandler);
     publicationTable.grantReadWriteData(apiHandler);
     publicationsBucket.grantReadWrite(apiHandler);
+    sharedWorkspaceTable.grantReadWriteData(apiHandler);
     anthropicSecret.grantRead(apiHandler);
 
     const httpApi = new apigwv2.HttpApi(this, 'HttpApi', {
@@ -186,6 +206,7 @@ class P0Stack extends cdk.Stack {
     new cdk.CfnOutput(this, 'WorkspaceBucketName', { value: workspaceBucket.bucketName });
     new cdk.CfnOutput(this, 'IdentityTableName', { value: identityTable.tableName });
     new cdk.CfnOutput(this, 'ObjectTableName', { value: objectTable.tableName });
+    new cdk.CfnOutput(this, 'SharedWorkspaceTableName', { value: sharedWorkspaceTable.tableName });
   }
 }
 

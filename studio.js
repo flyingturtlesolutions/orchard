@@ -5370,11 +5370,105 @@ async function renderRegistryResults(query) {
       </div>`).join('');
 }
 
+// ── Team workspaces (DD-05 C) ───────────────────────────────────────────────
+async function renderWorkspaceDetail(wsId, container) {
+  if (!container) return;
+  const res = await _shareSend('GET_WORKSPACE', { workspaceId: wsId });
+  if (!res?.success) { container.innerHTML = `<span class="settings-note">load failed: ${escHtml(res?.error || '?')}</span>`; return; }
+  const ws = res.workspace || {};
+  const canAdmin = ws.role === 'admin' || ws.role === 'owner';
+  const members = (ws.members || []).map((m) => `
+        <div style="display:flex;gap:6px;align-items:center;justify-content:space-between">
+          <span class="settings-note" style="font-family:monospace;font-size:11px">${escHtml(m.orchardUserId)} · ${escHtml(m.role)}</span>
+          ${canAdmin && m.role !== 'owner'
+            ? `<button class="btn-secondary small" data-act="ws-remove-member" data-ws="${escAttr(wsId)}" data-member="${escAttr(m.orchardUserId)}">Remove</button>`
+            : ''}
+        </div>`).join('');
+  container.innerHTML = `
+      <div class="settings-note" style="margin-top:4px">Members</div>
+      ${members}
+      ${canAdmin ? `
+        <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+          <input type="text" class="ws-invite-id" placeholder="orchardUserId (pk_…)" style="flex:1 1 200px" autocomplete="off" />
+          <select class="ws-invite-role"><option value="editor">editor</option><option value="viewer">viewer</option><option value="admin">admin</option></select>
+          <button class="btn-secondary small" data-act="ws-invite" data-ws="${escAttr(wsId)}">Invite</button>
+        </div>` : ''}`;
+}
+
+async function renderWorkspaces() {
+  const box = $('workspaces-list');
+  if (!box) return;
+  const st = await _shareSend('GET_CLOUD_STATUS');
+  const myId = st?.status?.orchardUserId;
+  const idEl = $('my-orchard-id');
+  if (idEl) idEl.textContent = myId || '(sign in to the cloud)';
+  if (!myId) { box.innerHTML = '<p class="settings-note">Sign in to the cloud to use team workspaces.</p>'; return; }
+
+  const res = await _shareSend('LIST_WORKSPACES');
+  if (!res?.success) { box.innerHTML = `<p class="settings-note">Unavailable (${escHtml(res?.error || '?')}).</p>`; return; }
+  const list = res.workspaces || [];
+  box.innerHTML = list.length
+    ? list.map((w) => `
+        <div class="prompt-item" data-ws="${escAttr(w.workspaceId)}">
+          <div><b>${escHtml(w.name || w.workspaceId)}</b> <span class="settings-note">${escHtml(w.role)}</span></div>
+          <div class="settings-note" style="font-family:monospace;font-size:11px">${escHtml(w.workspaceId)}</div>
+          <div style="margin-top:4px"><button class="btn-secondary small" data-act="ws-manage" data-ws="${escAttr(w.workspaceId)}">Manage</button></div>
+          <div class="ws-detail" style="margin-top:6px"></div>
+        </div>`).join('')
+    : '<p class="settings-note">None yet.</p>';
+}
+
 async function refreshSharing() {
   await _refreshPublishItems();
   await renderOutgoingPublications();
   await renderIncomingPublications();
+  await renderWorkspaces();
 }
+
+$('btn-create-workspace')?.addEventListener('click', async () => {
+  const name = $('ws-new-name').value.trim();
+  if (!name) { _shareMsg('workspace-status', 'Enter a workspace name.', 'warn'); return; }
+  const res = await _shareSend('CREATE_WORKSPACE', { name });
+  if (res?.success) {
+    _shareMsg('workspace-status', `Created ${res.workspace?.workspaceId || ''}.`, 'ok');
+    $('ws-new-name').value = '';
+    renderWorkspaces();
+  } else {
+    _shareMsg('workspace-status', `Failed: ${res?.error || 'unknown error'}`, 'err');
+  }
+});
+
+$('workspaces-list')?.addEventListener('click', async (e) => {
+  const manageBtn = e.target.closest('[data-act="ws-manage"]');
+  if (manageBtn) {
+    const detail = manageBtn.closest('.prompt-item')?.querySelector('.ws-detail');
+    if (!detail) return;
+    if (detail.innerHTML.trim()) { detail.innerHTML = ''; return; }   // toggle closed
+    detail.innerHTML = '<span class="settings-note">loading…</span>';
+    await renderWorkspaceDetail(manageBtn.dataset.ws, detail);
+    return;
+  }
+  const inviteBtn = e.target.closest('[data-act="ws-invite"]');
+  if (inviteBtn) {
+    const wsId = inviteBtn.dataset.ws;
+    const detail = inviteBtn.closest('.ws-detail');
+    const memberId = detail?.querySelector('.ws-invite-id')?.value.trim();
+    const role = detail?.querySelector('.ws-invite-role')?.value || 'editor';
+    if (!memberId) { toast('Enter an orchardUserId to invite.', 'err'); return; }
+    const res = await _shareSend('ADD_WORKSPACE_MEMBER', { workspaceId: wsId, orchardUserId: memberId, role });
+    if (res?.success) { toast('Member added.'); await renderWorkspaceDetail(wsId, detail); }
+    else { toast(`Invite failed: ${res?.error || 'unknown error'}`, 'err'); }
+    return;
+  }
+  const removeBtn = e.target.closest('[data-act="ws-remove-member"]');
+  if (removeBtn) {
+    const wsId = removeBtn.dataset.ws;
+    const detail = removeBtn.closest('.ws-detail');
+    const res = await _shareSend('REMOVE_WORKSPACE_MEMBER', { workspaceId: wsId, orchardUserId: removeBtn.dataset.member });
+    if (res?.success) { toast('Member removed.'); await renderWorkspaceDetail(wsId, detail); }
+    else { toast(`Remove failed: ${res?.error || 'unknown error'}`, 'err'); }
+  }
+});
 
 $('pub-type')?.addEventListener('change', _refreshPublishItems);
 

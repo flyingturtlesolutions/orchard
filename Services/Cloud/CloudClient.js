@@ -134,6 +134,32 @@ export async function requestPublicationImport(publicationId, opts = {}) {
   }));
 }
 
+// ── Shared workspaces (DD-05 C / AWS_INTEGRATION §7.2) ───────────────────────
+/** @param {string} name @returns {Promise<{ workspaceId: string, name: string, role: string }>} */
+export async function createWorkspace(name) {
+  return /** @type {any} */ (cloudRequest('POST', '/workspaces', { body: { name } }));
+}
+/** @returns {Promise<{ workspaces: Array<{ workspaceId: string, name: string, role: string, createdAt: number }> }>} */
+export async function listWorkspaces() {
+  return /** @type {any} */ (cloudRequest('GET', '/workspaces'));
+}
+/** @param {string} wsId @returns {Promise<{ workspaceId: string, name: string, role: string, members: object[] }>} */
+export async function getWorkspace(wsId) {
+  return /** @type {any} */ (cloudRequest('GET', `/workspaces/${encodeURIComponent(wsId)}`));
+}
+/** @param {string} wsId @param {string} name */
+export async function renameWorkspace(wsId, name) {
+  return cloudRequest('PATCH', `/workspaces/${encodeURIComponent(wsId)}`, { body: { name } });
+}
+/** @param {string} wsId @param {string} orchardUserId @param {'viewer'|'editor'|'admin'} [role] */
+export async function addWorkspaceMember(wsId, orchardUserId, role = 'editor') {
+  return cloudRequest('POST', `/workspaces/${encodeURIComponent(wsId)}/members`, { body: { orchardUserId, role } });
+}
+/** @param {string} wsId @param {string} orchardUserId */
+export async function removeWorkspaceMember(wsId, orchardUserId) {
+  return cloudRequest('DELETE', `/workspaces/${encodeURIComponent(wsId)}/members/${encodeURIComponent(orchardUserId)}`);
+}
+
 /**
  * @param {string} logicalPath
  * @returns {Promise<unknown>}

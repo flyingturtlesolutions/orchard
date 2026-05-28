@@ -917,6 +917,17 @@
       <h3 class="card-subheading">Imported</h3>
       <div id="incoming-list" class="prompt-list"><p class="settings-note">None yet.</p></div>
     </div>
+
+    <div class="card">
+      <h3 class="card-subheading">Team workspaces</h3>
+      <p class="settings-note">Shared, mutable workspaces for co-editing Grounds with collaborators (DD-05). Your ID for invites: <code id="my-orchard-id">—</code></p>
+      <div style="display:flex;gap:6px">
+        <input type="text" id="ws-new-name" placeholder="New workspace name" style="flex:1" autocomplete="off" />
+        <button class="btn-secondary" id="btn-create-workspace" style="flex-shrink:0">Create</button>
+      </div>
+      <div id="workspace-status" class="msg hidden"></div>
+      <div id="workspaces-list" class="prompt-list" style="margin-top:10px"><p class="settings-note">None yet.</p></div>
+    </div>
   </section>
 
   <!-- ── Tab: Settings ── -->

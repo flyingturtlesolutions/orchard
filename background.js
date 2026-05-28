@@ -70,6 +70,10 @@ import { bindPublicIdentity }                        from './Services/Storage/Id
 import { publishPrimitive, listOutgoingPublications, getOutgoingPublication } from './Services/Storage/PublicationStore.js';
 import { importPublicationPackage, listIncomingPublications, checkForUpdates, applyUpdate } from './Services/Storage/PublicationImport.js';
 import { fetchPublication, searchPublications } from './Services/Cloud/CloudClient.js';
+import {
+  createWorkspace, listWorkspaces, getWorkspace, renameWorkspace,
+  addWorkspaceMember, removeWorkspaceMember,
+} from './Services/Cloud/CloudClient.js';
 import { emit as emitGroundEvent_bg,
          list as listGroundEvents_bg,
          clear as clearGroundEvents_bg }              from './Services/GroundEventBus.js';
@@ -3164,6 +3168,51 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           Logger.error('background', `APPLY_PUBLICATION_UPDATE failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
+      })();
+      return true;
+    }
+
+    // ── Shared workspaces (DD-05 C / AWS_INTEGRATION §7.2) ─────────────────────
+    // Team workspace management. Object sync into team grounds lands in a later slice.
+    case 'CREATE_WORKSPACE': {
+      (async () => {
+        try { sendResponse({ success: true, workspace: await createWorkspace(payload?.name) }); }
+        catch (err) { Logger.warn('background', `CREATE_WORKSPACE: ${err.message}`); sendResponse({ success: false, error: err.message }); }
+      })();
+      return true;
+    }
+    case 'LIST_WORKSPACES': {
+      (async () => {
+        try { const r = await listWorkspaces(); sendResponse({ success: true, workspaces: r?.workspaces || [] }); }
+        catch (err) { sendResponse({ success: false, error: err.message, workspaces: [] }); }
+      })();
+      return true;
+    }
+    case 'GET_WORKSPACE': {
+      (async () => {
+        try { sendResponse({ success: true, workspace: await getWorkspace(payload?.workspaceId) }); }
+        catch (err) { sendResponse({ success: false, error: err.message }); }
+      })();
+      return true;
+    }
+    case 'RENAME_WORKSPACE': {
+      (async () => {
+        try { await renameWorkspace(payload?.workspaceId, payload?.name); sendResponse({ success: true }); }
+        catch (err) { sendResponse({ success: false, error: err.message }); }
+      })();
+      return true;
+    }
+    case 'ADD_WORKSPACE_MEMBER': {
+      (async () => {
+        try { await addWorkspaceMember(payload?.workspaceId, payload?.orchardUserId, payload?.role); sendResponse({ success: true }); }
+        catch (err) { Logger.warn('background', `ADD_WORKSPACE_MEMBER: ${err.message}`); sendResponse({ success: false, error: err.message }); }
+      })();
+      return true;
+    }
+    case 'REMOVE_WORKSPACE_MEMBER': {
+      (async () => {
+        try { await removeWorkspaceMember(payload?.workspaceId, payload?.orchardUserId); sendResponse({ success: true }); }
+        catch (err) { sendResponse({ success: false, error: err.message }); }
       })();
       return true;
     }

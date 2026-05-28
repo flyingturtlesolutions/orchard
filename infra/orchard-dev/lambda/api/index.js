@@ -9,6 +9,7 @@ const {
   PutCommand,
   DeleteCommand,
   QueryCommand,
+  UpdateCommand,
 } = require('@aws-sdk/lib-dynamodb');
 const {
   S3Client,
@@ -25,8 +26,10 @@ const OBJECT_TABLE = process.env.OBJECT_TABLE;
 const WORKSPACE_BUCKET = process.env.WORKSPACE_BUCKET;
 const PUBLICATIONS_TABLE = process.env.PUBLICATIONS_TABLE;
 const PUBLICATIONS_BUCKET = process.env.PUBLICATIONS_BUCKET;
+const SHARED_WS_TABLE = process.env.SHARED_WS_TABLE;
 const REGISTRY_ID = 'orchard-public';   // v1 single registry (DD-16)
 const MAX_BATCH = 10;
+const ROLE_RANK = { viewer: 1, editor: 2, admin: 3, owner: 4 };   // shared-workspace roles (§6.2)
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const s3 = new S3Client({});
@@ -166,34 +169,41 @@ async function requireOrchardUser(event) {
   return { orchardUserId: record.orchardUserId, claims };
 }
 
-function objectKeys(orchardUserId, logicalPath) {
-  return {
-    PK: `USER#${orchardUserId}`,
-    SK: `PATH#${logicalPath}`,
-  };
+// Object storage is namespaced by a `scope`: personal (`users/{orchardUserId}/` + DDB PK
+// `USER#{id}`) or team (`shared-workspaces/{wsId}/` + DDB PK `WS#{wsId}`, DD-05 C). All object
+// helpers below take a scope so the same code path serves both; handlers build the scope after
+// resolving auth (personal) or workspace role (team).
+/** @typedef {{ s3Prefix: string, ddbId: string }} Scope */
+/** @param {string} orchardUserId @returns {Scope} */
+function userScope(orchardUserId) { return { s3Prefix: `users/${orchardUserId}/`, ddbId: `USER#${orchardUserId}` }; }
+/** @param {string} wsId @returns {Scope} */
+function workspaceScope(wsId) { return { s3Prefix: `shared-workspaces/${wsId}/`, ddbId: `WS#${wsId}` }; }
+
+function objectKeys(scope, logicalPath) {
+  return { PK: scope.ddbId, SK: `PATH#${logicalPath}` };
 }
 
-async function getIndexRecord(orchardUserId, logicalPath) {
+async function getIndexRecord(scope, logicalPath) {
   const res = await ddb.send(new GetCommand({
     TableName: OBJECT_TABLE,
-    Key: objectKeys(orchardUserId, logicalPath),
+    Key: objectKeys(scope, logicalPath),
   }));
   return res.Item || null;
 }
 
-async function removeIndexRecord(orchardUserId, logicalPath) {
+async function removeIndexRecord(scope, logicalPath) {
   await ddb.send(new DeleteCommand({
     TableName: OBJECT_TABLE,
-    Key: objectKeys(orchardUserId, logicalPath),
+    Key: objectKeys(scope, logicalPath),
   }));
 }
 
 /** @returns {Promise<boolean>} */
-async function s3ObjectExists(orchardUserId, logicalPath) {
+async function s3ObjectExists(scope, logicalPath) {
   try {
     await s3.send(new HeadObjectCommand({
       Bucket: WORKSPACE_BUCKET,
-      Key: s3Key(orchardUserId, logicalPath),
+      Key: s3Key(scope, logicalPath),
     }));
     return true;
   } catch {
@@ -201,12 +211,12 @@ async function s3ObjectExists(orchardUserId, logicalPath) {
   }
 }
 
-function s3Key(orchardUserId, logicalPath) {
-  return `users/${orchardUserId}/${logicalPath}`;
+function s3Key(scope, logicalPath) {
+  return `${scope.s3Prefix}${logicalPath}`;
 }
 
-function stagingS3Key(orchardUserId, uploadId) {
-  return `users/${orchardUserId}/_staging/${uploadId}`;
+function stagingS3Key(scope, uploadId) {
+  return `${scope.s3Prefix}_staging/${uploadId}`;
 }
 
 const PRESIGN_TTL_SECONDS = 900;
@@ -340,14 +350,14 @@ async function handleBind(event) {
   return json(200, { orchardUserId, boundAt: now });
 }
 
-async function resolveObjectSizeBytes(orchardUserId, logicalPath, index) {
+async function resolveObjectSizeBytes(scope, logicalPath, index) {
   if (typeof index?.sizeBytes === 'number' && index.sizeBytes > 0) {
     return index.sizeBytes;
   }
   try {
     const head = await s3.send(new HeadObjectCommand({
       Bucket: WORKSPACE_BUCKET,
-      Key: s3Key(orchardUserId, logicalPath),
+      Key: s3Key(scope, logicalPath),
     }));
     return head.ContentLength || 0;
   } catch {
@@ -355,10 +365,10 @@ async function resolveObjectSizeBytes(orchardUserId, logicalPath, index) {
   }
 }
 
-async function presignedGetUrl(orchardUserId, logicalPath) {
+async function presignedGetUrl(scope, logicalPath) {
   const command = new GetObjectCommand({
     Bucket: WORKSPACE_BUCKET,
-    Key: s3Key(orchardUserId, logicalPath),
+    Key: s3Key(scope, logicalPath),
   });
   return getSignedUrl(s3, command, { expiresIn: PRESIGN_TTL_SECONDS });
 }
@@ -373,43 +383,39 @@ function safeDecode(s) { try { return decodeURIComponent(s); } catch { return s;
  * index row. Cannot regress plain ids (raw === decoded); fixes encoded keys (locales).
  * @returns {Promise<{ logicalPath: string, index: object|null }>}
  */
-async function resolveObjectPath(orchardUserId, rawFromUrl) {
+async function resolveObjectPath(scope, rawFromUrl) {
   const candidates = [rawFromUrl];
   try {
     const decoded = decodeURIComponent(rawFromUrl);
     if (decoded !== rawFromUrl) candidates.push(decoded);
   } catch { /* malformed % sequence → only the raw form is usable */ }
   for (const candidate of candidates) {
-    const index = await getIndexRecord(orchardUserId, candidate);
+    const index = await getIndexRecord(scope, candidate);
     if (index) return { logicalPath: candidate, index };
   }
   return { logicalPath: candidates[0], index: null };
 }
 
-async function handleGetObject(event) {
-  const auth = await requireOrchardUser(event);
-  if (auth.error) return auth.error;
-
-  const rawPath = routePath(event).replace(/^\/objects\/?/, '');
+async function getObjectInScope(scope, rawPath) {
   if (!rawPath || isPathDenied(rawPath) || isPathDenied(safeDecode(rawPath))) {
     return json(rawPath ? 403 : 400, { error: rawPath ? 'path_denied' : 'invalid_path' });
   }
-  const { logicalPath, index } = await resolveObjectPath(auth.orchardUserId, rawPath);
+  const { logicalPath, index } = await resolveObjectPath(scope, rawPath);
 
   if (index?.deleted) {
     return json(404, { error: 'not_found', path: logicalPath });
   }
 
-  const key = s3Key(auth.orchardUserId, logicalPath);
-  if (index && !(await s3ObjectExists(auth.orchardUserId, logicalPath))) {
-    await removeIndexRecord(auth.orchardUserId, logicalPath);
+  const key = s3Key(scope, logicalPath);
+  if (index && !(await s3ObjectExists(scope, logicalPath))) {
+    await removeIndexRecord(scope, logicalPath);
     return json(404, { error: 'not_found', path: logicalPath, orphan: true });
   }
 
-  const sizeBytes = await resolveObjectSizeBytes(auth.orchardUserId, logicalPath, index);
+  const sizeBytes = await resolveObjectSizeBytes(scope, logicalPath, index);
 
   if (sizeBytes > INLINE_OBJECT_MAX_BYTES) {
-    const downloadUrl = await presignedGetUrl(auth.orchardUserId, logicalPath);
+    const downloadUrl = await presignedGetUrl(scope, logicalPath);
     const etag = normalizeEtag(index?.etag || '');
     return {
       statusCode: 302,
@@ -445,29 +451,26 @@ async function handleGetObject(event) {
   }
 }
 
-async function handleListObjects(event) {
+async function handleGetObject(event) {
   const auth = await requireOrchardUser(event);
   if (auth.error) return auth.error;
+  const rawPath = routePath(event).replace(/^\/objects\/?/, '');
+  return getObjectInScope(userScope(auth.orchardUserId), rawPath);
+}
 
-  const since = event.queryStringParameters?.since || '';
-  const limit = Math.min(Number(event.queryStringParameters?.limit || '100'), 500);
-
+async function listObjectsInScope(scope, since, limit) {
   const params = {
     TableName: OBJECT_TABLE,
     IndexName: 'ChangeFeed',
     KeyConditionExpression: 'GSI2PK = :pk',
-    ExpressionAttributeValues: {
-      ':pk': `USER#${auth.orchardUserId}`,
-    },
+    ExpressionAttributeValues: { ':pk': scope.ddbId },
     Limit: limit,
     ScanIndexForward: true,
   };
-
   if (since) {
     params.KeyConditionExpression += ' AND GSI2SK > :since';
     params.ExpressionAttributeValues[':since'] = since;
   }
-
   const res = await ddb.send(new QueryCommand(params));
   const changes = (res.Items || []).map((item) => ({
     path: item.path,
@@ -477,16 +480,22 @@ async function handleListObjects(event) {
     primitiveType: item.primitiveType || null,
     deleted: item.deleted === true,
   }));
-
   const nextToken = changes.length > 0 ? res.Items[res.Items.length - 1].GSI2SK : since;
-
   return json(200, { changes, nextToken });
 }
 
-async function checkEtagConflict(orchardUserId, logicalPath, expectedEtag, clientEnvelope = null) {
+async function handleListObjects(event) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+  const since = event.queryStringParameters?.since || '';
+  const limit = Math.min(Number(event.queryStringParameters?.limit || '100'), 500);
+  return listObjectsInScope(userScope(auth.orchardUserId), since, limit);
+}
+
+async function checkEtagConflict(scope, logicalPath, expectedEtag, clientEnvelope = null) {
   if (expectedEtag === '*') return null;
 
-  const existing = await getIndexRecord(orchardUserId, logicalPath);
+  const existing = await getIndexRecord(scope, logicalPath);
   const serverEtag = existing?.etag || null;
   if (!serverEtag || normalizeEtag(expectedEtag) === normalizeEtag(serverEtag)) {
     return null;
@@ -496,7 +505,7 @@ async function checkEtagConflict(orchardUserId, logicalPath, expectedEtag, clien
   try {
     const obj = await s3.send(new GetObjectCommand({
       Bucket: WORKSPACE_BUCKET,
-      Key: s3Key(orchardUserId, logicalPath),
+      Key: s3Key(scope, logicalPath),
     }));
     serverBody = JSON.parse(await obj.Body.transformToString());
   } catch {
@@ -514,11 +523,11 @@ async function checkEtagConflict(orchardUserId, logicalPath, expectedEtag, clien
   });
 }
 
-async function registerObjectIndex(orchardUserId, logicalPath, envelope, etag, sizeBytes, s3VersionId = null) {
+async function registerObjectIndex(scope, logicalPath, envelope, etag, sizeBytes, s3VersionId = null) {
   const updatedAt = envelope.updatedAt || Date.now();
   const indexItem = {
-    ...objectKeys(orchardUserId, logicalPath),
-    GSI2PK: `USER#${orchardUserId}`,
+    ...objectKeys(scope, logicalPath),
+    GSI2PK: scope.ddbId,
     GSI2SK: gsi2Sk(updatedAt, logicalPath),
     path: logicalPath,
     groundId: extractGroundId(logicalPath),
@@ -540,7 +549,7 @@ async function registerObjectIndex(orchardUserId, logicalPath, envelope, etag, s
   return { path: logicalPath, etag, updatedAt };
 }
 
-async function writeOneObject(orchardUserId, item) {
+async function writeOneObject(scope, item) {
   const { path: logicalPath, envelope } = item;
   const expectedEtag = item.expectedEtag ?? '*';
 
@@ -548,20 +557,20 @@ async function writeOneObject(orchardUserId, item) {
     return { error: json(400, { error: 'invalid_item', path: logicalPath }) };
   }
 
-  const conflict = await checkEtagConflict(orchardUserId, logicalPath, expectedEtag, envelope);
+  const conflict = await checkEtagConflict(scope, logicalPath, expectedEtag, envelope);
   if (conflict) return { conflict };
 
   const bodyStr = JSON.stringify(envelope);
   const putRes = await s3.send(new PutObjectCommand({
     Bucket: WORKSPACE_BUCKET,
-    Key: s3Key(orchardUserId, logicalPath),
+    Key: s3Key(scope, logicalPath),
     Body: bodyStr,
     ContentType: 'application/json',
   }));
 
   const etag = normalizeEtag(putRes.ETag || crypto.createHash('md5').update(bodyStr).digest('hex'));
   return registerObjectIndex(
-    orchardUserId,
+    scope,
     logicalPath,
     envelope,
     etag,
@@ -586,12 +595,13 @@ async function handlePresignPut(event) {
     return json(logicalPath ? 403 : 400, { error: logicalPath ? 'path_denied' : 'invalid_path' });
   }
 
+  const scope = userScope(auth.orchardUserId);
   const expectedEtag = body.expectedEtag ?? '*';
-  const conflict = await checkEtagConflict(auth.orchardUserId, logicalPath, expectedEtag);
+  const conflict = await checkEtagConflict(scope, logicalPath, expectedEtag);
   if (conflict) return conflict;
 
   const uploadId = crypto.randomUUID();
-  const stagingKey = stagingS3Key(auth.orchardUserId, uploadId);
+  const stagingKey = stagingS3Key(scope, uploadId);
   const command = new PutObjectCommand({
     Bucket: WORKSPACE_BUCKET,
     Key: stagingKey,
@@ -626,9 +636,10 @@ async function handleCompletePut(event) {
     return json(400, { error: 'path_and_uploadId_required' });
   }
 
+  const scope = userScope(auth.orchardUserId);
   const expectedEtag = body.expectedEtag ?? '*';
-  const stagingKey = stagingS3Key(auth.orchardUserId, uploadId);
-  const finalKey = s3Key(auth.orchardUserId, logicalPath);
+  const stagingKey = stagingS3Key(scope, uploadId);
+  const finalKey = s3Key(scope, logicalPath);
 
   try {
     await s3.send(new HeadObjectCommand({
@@ -653,7 +664,7 @@ async function handleCompletePut(event) {
     return json(400, { error: 'invalid_upload_body', path: logicalPath });
   }
 
-  const conflict = await checkEtagConflict(auth.orchardUserId, logicalPath, expectedEtag, envelope);
+  const conflict = await checkEtagConflict(scope, logicalPath, expectedEtag, envelope);
   if (conflict) {
     try {
       await s3.send(new DeleteObjectCommand({ Bucket: WORKSPACE_BUCKET, Key: stagingKey }));
@@ -675,7 +686,7 @@ async function handleCompletePut(event) {
 
   const etag = normalizeEtag(putRes.ETag || crypto.createHash('md5').update(bodyStr).digest('hex'));
   const result = await registerObjectIndex(
-    auth.orchardUserId,
+    scope,
     logicalPath,
     envelope,
     etag,
@@ -686,53 +697,42 @@ async function handleCompletePut(event) {
   return json(200, { path: result.path, etag: result.etag, updatedAt: result.updatedAt });
 }
 
-async function handlePutObject(event) {
-  const auth = await requireOrchardUser(event);
-  if (auth.error) return auth.error;
-
-  const path = routePath(event);
-  const logicalPath = decodeURIComponent(path.replace(/^\/objects\/?/, ''));
+async function putObjectInScope(scope, logicalPath, envelope, expectedEtag) {
   if (!logicalPath || isPathDenied(logicalPath)) {
     return json(logicalPath ? 403 : 400, { error: logicalPath ? 'path_denied' : 'invalid_path' });
   }
+  if (!envelope) return json(400, { error: 'envelope required' });
+  const result = await writeOneObject(scope, { path: logicalPath, envelope, expectedEtag });
+  if (result.conflict) return result.conflict;
+  if (result.error) return result.error;
+  return json(200, { path: result.path, etag: result.etag, updatedAt: result.updatedAt });
+}
 
+async function handlePutObject(event) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+  const logicalPath = decodeURIComponent(routePath(event).replace(/^\/objects\/?/, ''));
   let envelope;
   try {
     envelope = event.body ? JSON.parse(event.body) : null;
   } catch {
     return json(400, { error: 'invalid_json' });
   }
-  if (!envelope) return json(400, { error: 'envelope required' });
-
-  const expectedEtag = parseIfMatch(event);
-  const result = await writeOneObject(auth.orchardUserId, {
-    path: logicalPath,
-    envelope,
-    expectedEtag,
-  });
-
-  if (result.conflict) return result.conflict;
-  if (result.error) return result.error;
-
-  return json(200, { path: result.path, etag: result.etag, updatedAt: result.updatedAt });
+  return putObjectInScope(userScope(auth.orchardUserId), logicalPath, envelope, parseIfMatch(event));
 }
 
-async function handleDeleteObject(event) {
-  const auth = await requireOrchardUser(event);
-  if (auth.error) return auth.error;
-
-  const rawPath = routePath(event).replace(/^\/objects\/?/, '');
+async function deleteObjectInScope(scope, rawPath) {
   if (!rawPath || isPathDenied(rawPath) || isPathDenied(safeDecode(rawPath))) {
     return json(rawPath ? 403 : 400, { error: rawPath ? 'path_denied' : 'invalid_path' });
   }
   // Resolve to the stored key form (encoding-tolerant) so a locale delete targets the right object.
-  const { logicalPath, index: existing } = await resolveObjectPath(auth.orchardUserId, rawPath);
+  const { logicalPath, index: existing } = await resolveObjectPath(scope, rawPath);
   const updatedAt = Math.max(Date.now(), (existing?.updatedAt || 0) + 1);
 
   try {
     await s3.send(new DeleteObjectCommand({
       Bucket: WORKSPACE_BUCKET,
-      Key: s3Key(auth.orchardUserId, logicalPath),
+      Key: s3Key(scope, logicalPath),
     }));
   } catch (e) {
     if (e.name !== 'NoSuchKey' && e.$metadata?.httpStatusCode !== 404) throw e;
@@ -741,8 +741,8 @@ async function handleDeleteObject(event) {
   await ddb.send(new PutCommand({
     TableName: OBJECT_TABLE,
     Item: {
-      ...objectKeys(auth.orchardUserId, logicalPath),
-      GSI2PK: `USER#${auth.orchardUserId}`,
+      ...objectKeys(scope, logicalPath),
+      GSI2PK: scope.ddbId,
       GSI2SK: gsi2Sk(updatedAt, logicalPath),
       path: logicalPath,
       groundId: extractGroundId(logicalPath),
@@ -756,18 +756,14 @@ async function handleDeleteObject(event) {
   return json(200, { deleted: true, path: logicalPath, updatedAt });
 }
 
-async function handleBatchWrite(event) {
+async function handleDeleteObject(event) {
   const auth = await requireOrchardUser(event);
   if (auth.error) return auth.error;
+  const rawPath = routePath(event).replace(/^\/objects\/?/, '');
+  return deleteObjectInScope(userScope(auth.orchardUserId), rawPath);
+}
 
-  let body = {};
-  try {
-    body = event.body ? JSON.parse(event.body) : {};
-  } catch {
-    return json(400, { error: 'invalid_json' });
-  }
-
-  const items = body.items;
+async function batchWriteInScope(scope, items) {
   if (!Array.isArray(items) || items.length === 0) {
     return json(400, { error: 'items array required' });
   }
@@ -784,14 +780,14 @@ async function handleBatchWrite(event) {
   // Pre-check all etags (all-or-nothing)
   for (const item of items) {
     const expectedEtag = item.expectedEtag ?? '*';
-    const existing = await getIndexRecord(auth.orchardUserId, item.path);
+    const existing = await getIndexRecord(scope, item.path);
     const serverEtag = existing?.etag || null;
     if (expectedEtag !== '*' && serverEtag && normalizeEtag(expectedEtag) !== normalizeEtag(serverEtag)) {
       let serverBody = null;
       try {
         const obj = await s3.send(new GetObjectCommand({
           Bucket: WORKSPACE_BUCKET,
-          Key: s3Key(auth.orchardUserId, item.path),
+          Key: s3Key(scope, item.path),
         }));
         serverBody = JSON.parse(await obj.Body.transformToString());
       } catch {
@@ -814,7 +810,7 @@ async function handleBatchWrite(event) {
 
   try {
     for (const item of items) {
-      const result = await writeOneObject(auth.orchardUserId, item);
+      const result = await writeOneObject(scope, item);
       if (result.conflict) {
         throw Object.assign(new Error('conflict'), { response: result.conflict });
       }
@@ -822,7 +818,7 @@ async function handleBatchWrite(event) {
         throw Object.assign(new Error('write_failed'), { response: result.error });
       }
       written.push(result);
-      s3KeysWritten.push(s3Key(auth.orchardUserId, item.path));
+      s3KeysWritten.push(s3Key(scope, item.path));
     }
   } catch (e) {
     for (const key of s3KeysWritten) {
@@ -838,6 +834,18 @@ async function handleBatchWrite(event) {
   const updatedAt = Math.max(...written.map((w) => w.updatedAt));
 
   return json(200, { etags, updatedAt, count: written.length });
+}
+
+async function handleBatchWrite(event) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+  let body = {};
+  try {
+    body = event.body ? JSON.parse(event.body) : {};
+  } catch {
+    return json(400, { error: 'invalid_json' });
+  }
+  return batchWriteInScope(userScope(auth.orchardUserId), body.items);
 }
 
 // ── Publication registry (STORAGE_SCHEMA §9 / AWS_INTEGRATION §5.2, §6.4, §7.4) ────────
@@ -1043,6 +1051,185 @@ async function handleImportPublication(event, publicationId) {
   return json(200, { publication, manifest, packages, target: 'personal', signatureValid, verified: true });
 }
 
+// ── Shared workspaces (DD-05 C / AWS_INTEGRATION §6.2, §7.2) ─────────────────────────────
+// Composite-key model in SHARED_WS_TABLE: a `#META` row per workspace + one `MEMBER#{id}` row per
+// member (also indexed by MemberIndex GSI for "my workspaces"). Roles: viewer<editor<admin<owner.
+function newWorkspaceId() {
+  return `ws_${crypto.randomBytes(9).toString('base64url')}`;
+}
+
+async function getWorkspaceMeta(wsId) {
+  const res = await ddb.send(new GetCommand({ TableName: SHARED_WS_TABLE, Key: { PK: `WS#${wsId}`, SK: '#META' } }));
+  return res.Item || null;
+}
+
+async function getWorkspaceMember(wsId, orchardUserId) {
+  const res = await ddb.send(new GetCommand({ TableName: SHARED_WS_TABLE, Key: { PK: `WS#${wsId}`, SK: `MEMBER#${orchardUserId}` } }));
+  return res.Item || null;
+}
+
+async function listWorkspaceMembers(wsId) {
+  const res = await ddb.send(new QueryCommand({
+    TableName: SHARED_WS_TABLE,
+    KeyConditionExpression: 'PK = :pk AND begins_with(SK, :m)',
+    ExpressionAttributeValues: { ':pk': `WS#${wsId}`, ':m': 'MEMBER#' },
+  }));
+  return res.Items || [];
+}
+
+// Resolve caller → workspace → their role, enforcing a minimum. Returns { error } or
+// { orchardUserId, claims, role, meta }. Reused by Slice-2 object routes.
+async function requireWorkspaceRole(event, wsId, minRole) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth;
+  const meta = await getWorkspaceMeta(wsId);
+  if (!meta) return { error: json(404, { error: 'workspace_not_found', wsId }) };
+  const member = await getWorkspaceMember(wsId, auth.orchardUserId);
+  const role = member?.role;
+  if (!role || (ROLE_RANK[role] || 0) < (ROLE_RANK[minRole] || 99)) {
+    return { error: json(403, { error: 'insufficient_role', required: minRole, role: role || null }) };
+  }
+  return { orchardUserId: auth.orchardUserId, claims: auth.claims, role, meta };
+}
+
+async function handleCreateWorkspace(event) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+  let body = {};
+  try { body = event.body ? JSON.parse(event.body) : {}; } catch { return json(400, { error: 'invalid_json' }); }
+  const name = String(body.name || '').trim();
+  if (!name) return json(400, { error: 'name_required' });
+  const wsId = newWorkspaceId();
+  const now = Date.now();
+  await ddb.send(new PutCommand({
+    TableName: SHARED_WS_TABLE,
+    Item: { PK: `WS#${wsId}`, SK: '#META', workspaceId: wsId, name, createdBy: auth.orchardUserId, createdAt: now, updatedAt: now },
+  }));
+  await ddb.send(new PutCommand({   // creator → owner
+    TableName: SHARED_WS_TABLE,
+    Item: {
+      PK: `WS#${wsId}`, SK: `MEMBER#${auth.orchardUserId}`,
+      GSI1PK: `MEMBER#${auth.orchardUserId}`, GSI1SK: `WS#${wsId}`,
+      orchardUserId: auth.orchardUserId, role: 'owner', joinedAt: now,
+    },
+  }));
+  return json(200, { workspaceId: wsId, name, role: 'owner', createdAt: now });
+}
+
+async function handleListWorkspaces(event) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+  const res = await ddb.send(new QueryCommand({
+    TableName: SHARED_WS_TABLE, IndexName: 'MemberIndex',
+    KeyConditionExpression: 'GSI1PK = :pk',
+    ExpressionAttributeValues: { ':pk': `MEMBER#${auth.orchardUserId}` },
+  }));
+  const workspaces = [];
+  for (const m of res.Items || []) {
+    const wsId = String(m.GSI1SK || '').replace(/^WS#/, '');
+    const meta = await getWorkspaceMeta(wsId);
+    if (meta) workspaces.push({ workspaceId: wsId, name: meta.name, role: m.role, createdAt: meta.createdAt });
+  }
+  workspaces.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  return json(200, { workspaces });
+}
+
+async function handleGetWorkspace(event, wsId) {
+  const ctx = await requireWorkspaceRole(event, wsId, 'viewer');
+  if (ctx.error) return ctx.error;
+  const members = (await listWorkspaceMembers(wsId)).map((m) => ({ orchardUserId: m.orchardUserId, role: m.role, joinedAt: m.joinedAt }));
+  return json(200, {
+    workspaceId: wsId, name: ctx.meta.name, createdBy: ctx.meta.createdBy,
+    createdAt: ctx.meta.createdAt, role: ctx.role, members,
+  });
+}
+
+async function handlePatchWorkspace(event, wsId) {
+  const ctx = await requireWorkspaceRole(event, wsId, 'admin');
+  if (ctx.error) return ctx.error;
+  let body = {};
+  try { body = event.body ? JSON.parse(event.body) : {}; } catch { return json(400, { error: 'invalid_json' }); }
+  const name = String(body.name || '').trim();
+  if (!name) return json(400, { error: 'name_required' });
+  await ddb.send(new UpdateCommand({
+    TableName: SHARED_WS_TABLE, Key: { PK: `WS#${wsId}`, SK: '#META' },
+    UpdateExpression: 'SET #n = :n, updatedAt = :u',
+    ExpressionAttributeNames: { '#n': 'name' },
+    ExpressionAttributeValues: { ':n': name, ':u': Date.now() },
+  }));
+  return json(200, { workspaceId: wsId, name });
+}
+
+async function handleAddMember(event, wsId) {
+  const ctx = await requireWorkspaceRole(event, wsId, 'admin');
+  if (ctx.error) return ctx.error;
+  let body = {};
+  try { body = event.body ? JSON.parse(event.body) : {}; } catch { return json(400, { error: 'invalid_json' }); }
+  const memberId = String(body.orchardUserId || '').trim();
+  const role = String(body.role || 'editor');
+  if (!memberId) return json(400, { error: 'orchardUserId_required' });
+  if (!ROLE_RANK[role] || role === 'owner') return json(400, { error: 'invalid_role' });   // ownership transfer is separate
+  const now = Date.now();
+  await ddb.send(new PutCommand({
+    TableName: SHARED_WS_TABLE,
+    Item: {
+      PK: `WS#${wsId}`, SK: `MEMBER#${memberId}`,
+      GSI1PK: `MEMBER#${memberId}`, GSI1SK: `WS#${wsId}`,
+      orchardUserId: memberId, role, joinedAt: now, invitedBy: ctx.orchardUserId,
+    },
+  }));
+  return json(200, { workspaceId: wsId, orchardUserId: memberId, role });
+}
+
+async function handleRemoveMember(event, wsId, memberId) {
+  const ctx = await requireWorkspaceRole(event, wsId, 'admin');
+  if (ctx.error) return ctx.error;
+  const target = await getWorkspaceMember(wsId, memberId);
+  if (!target) return json(404, { error: 'member_not_found' });
+  if (target.role === 'owner') return json(409, { error: 'cannot_remove_owner' });
+  await ddb.send(new DeleteCommand({ TableName: SHARED_WS_TABLE, Key: { PK: `WS#${wsId}`, SK: `MEMBER#${memberId}` } }));
+  return json(200, { workspaceId: wsId, removed: memberId });
+}
+
+// Team object routes (§7.2) — reuse the scope-taking object cores with role gating:
+// viewer reads, editor writes primitives, admin+ deletes a Ground.
+async function handleWorkspaceListObjects(event, wsId) {
+  const ctx = await requireWorkspaceRole(event, wsId, 'viewer');
+  if (ctx.error) return ctx.error;
+  const since = event.queryStringParameters?.since || '';
+  const limit = Math.min(Number(event.queryStringParameters?.limit || '100'), 500);
+  return listObjectsInScope(workspaceScope(wsId), since, limit);
+}
+
+async function handleWorkspaceGetObject(event, wsId, rawPath) {
+  const ctx = await requireWorkspaceRole(event, wsId, 'viewer');
+  if (ctx.error) return ctx.error;
+  return getObjectInScope(workspaceScope(wsId), rawPath);
+}
+
+async function handleWorkspacePutObject(event, wsId, rawPath) {
+  const ctx = await requireWorkspaceRole(event, wsId, 'editor');
+  if (ctx.error) return ctx.error;
+  let envelope;
+  try { envelope = event.body ? JSON.parse(event.body) : null; } catch { return json(400, { error: 'invalid_json' }); }
+  return putObjectInScope(workspaceScope(wsId), safeDecode(rawPath), envelope, parseIfMatch(event));
+}
+
+async function handleWorkspaceDeleteObject(event, wsId, rawPath) {
+  const isGround = /\/ground\.json$/.test(safeDecode(rawPath));
+  const ctx = await requireWorkspaceRole(event, wsId, isGround ? 'admin' : 'editor');
+  if (ctx.error) return ctx.error;
+  return deleteObjectInScope(workspaceScope(wsId), rawPath);
+}
+
+async function handleWorkspaceBatchWrite(event, wsId) {
+  const ctx = await requireWorkspaceRole(event, wsId, 'editor');
+  if (ctx.error) return ctx.error;
+  let body = {};
+  try { body = event.body ? JSON.parse(event.body) : {}; } catch { return json(400, { error: 'invalid_json' }); }
+  return batchWriteInScope(workspaceScope(wsId), body.items);
+}
+
 // ── Managed LLM proxy (DD-08) ──────────────────────────────────────────────────────────
 // The app's Anthropic key lives in Secrets Manager; signed-in clients call this instead of
 // holding a key. v1 is auth-only (any bound user) and BUFFERED (non-streaming). Caches the key
@@ -1126,6 +1313,42 @@ exports.handler = async (event) => {
         return handleImportPublication(event, decodeURIComponent(importMatch[1]));
       }
       if (method === 'GET') return handleGetPublication(event, decodeURIComponent(rest));
+    }
+
+    // Shared workspaces (DD-05 C). Object routes under /workspaces/{wsId}/objects land in Slice 2.
+    if (method === 'POST' && path === '/workspaces') return handleCreateWorkspace(event);
+    if (method === 'GET' && path === '/workspaces') return handleListWorkspaces(event);
+    if (path.startsWith('/workspaces/')) {
+      const rest = path.slice('/workspaces/'.length);
+      // Object routes first — batch / list / by-path. {wsId}/objects/batch matches before the
+      // generic {wsId}/objects/(.+) so "batch" isn't treated as a logical path.
+      const objBatchMatch = rest.match(/^([^/]+)\/objects\/batch$/);
+      const objListMatch = rest.match(/^([^/]+)\/objects$/);
+      const objPathMatch = rest.match(/^([^/]+)\/objects\/(.+)$/);
+      if (method === 'POST' && objBatchMatch) return handleWorkspaceBatchWrite(event, decodeURIComponent(objBatchMatch[1]));
+      if (method === 'GET' && objListMatch) return handleWorkspaceListObjects(event, decodeURIComponent(objListMatch[1]));
+      if (objPathMatch && !objBatchMatch) {
+        const wsId = decodeURIComponent(objPathMatch[1]);
+        const rawObjPath = objPathMatch[2];   // raw — resolveObjectPath / safeDecode handle encoding
+        if (method === 'GET') return handleWorkspaceGetObject(event, wsId, rawObjPath);
+        if (method === 'PUT') return handleWorkspacePutObject(event, wsId, rawObjPath);
+        if (method === 'DELETE') return handleWorkspaceDeleteObject(event, wsId, rawObjPath);
+      }
+
+      const memberMatch = rest.match(/^([^/]+)\/members\/([^/]+)$/);
+      const membersMatch = rest.match(/^([^/]+)\/members$/);
+      if (method === 'DELETE' && memberMatch) {
+        return handleRemoveMember(event, decodeURIComponent(memberMatch[1]), decodeURIComponent(memberMatch[2]));
+      }
+      if (method === 'POST' && membersMatch) {
+        return handleAddMember(event, decodeURIComponent(membersMatch[1]));
+      }
+      const idOnly = rest.match(/^([^/]+)$/);
+      if (idOnly) {
+        const wsId = decodeURIComponent(idOnly[1]);
+        if (method === 'GET') return handleGetWorkspace(event, wsId);
+        if (method === 'PATCH') return handlePatchWorkspace(event, wsId);
+      }
     }
 
     if (method === 'POST' && path === '/llm/messages') return handleLlmMessages(event);
