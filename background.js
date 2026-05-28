@@ -29,6 +29,7 @@ import * as Locale          from './Core/locale.js';   // v2.74.397 — Perspect
 import * as Outcomes           from './Core/outcomes.js';    // v2.74.413 — OutcomeEvent stream + rollups
 import * as SiteMap            from './Core/siteMap.js';     // v2.74.431 — Ground siteMap (GROUND_SPEC § 7)
 import * as CapabilitySynth    from './Core/capabilitySynth.js';  // v2.74.471 — synthesize capability from a goal
+import { synthesizeTrialOp, classifyTrialSafety } from './Core/trialSynth.js';  // PB-3/PB-4 — trial op + safety classing
 import * as ChromeHoist        from './Core/chromeHoist.js';  // v2.74.480 — hoist recurring chrome off Locales → Ground.chrome
 import * as Workflows          from './Core/workflows.js';   // v2.74.488 — cross-Locale workflows (partOf) over the siteMap
 import { ExecutionEngine }    from './Services/ExecutionEngine.js';
@@ -5415,6 +5416,54 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ success: true, resolutions, reusedCount: reused.length });
         } catch (err) {
           Logger.error('background', `RESOLVE_PERSPECTIVE_ROLES failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // PB-4 (R8) — run a TRIAL of the resolved bundle as the intent-truth proof. Synthesize a trial
+    // op (Core/trialSynth), safety-class it (an irreversible commit becomes a reachability probe, not
+    // a click), wrap as a THROWAWAY Fragment+Strategy, run via ExecutionEngine, then tear down. The
+    // raw result + extracts go back for PB-5 to score. Not UI-wired yet (PB-6 orchestrates the flow).
+    case 'RUN_PERSPECTIVE_TRIAL': {
+      (async () => {
+        try {
+          const { groundId = null, intent = '', roles, navigateUrl = null } = payload ?? {};
+          if (!groundId || !Array.isArray(roles) || !roles.length) { sendResponse({ success: false, error: 'groundId + roles required' }); return; }
+          let localeModel = null;
+          try { const pm = await _readLocaleCache(groundId, _normalizeUrlForPerspectiveCache(navigateUrl || '')); localeModel = pm?.model || null; } catch { /* */ }
+          const draft0 = synthesizeTrialOp({ groundedIntent: intent, roles, locale: localeModel, navigateUrl });
+          const safety = classifyTrialSafety(intent, draft0);
+          const draft = { ...draft0, actions: safety.actions };
+          // PB-3 wiring: emit the synthesize stage outcome (shape + safety + step count).
+          try {
+            await _appendOutcomes(groundId, [Outcomes.makeStageEvent('synthesize', {
+              groundId, input: { roleOrIntent: String(intent).slice(0, 120) },
+              detail: { shape: draft0.shape, safetyClass: safety.safetyClass, actionCount: draft.actions.length, runnable: draft0.runnable, deferred: safety.deferred.length },
+            })]);
+          } catch (e) { Logger.warn('background', `RUN_PERSPECTIVE_TRIAL synth outcome: ${e.message}`); }
+
+          if (!draft0.runnable) { sendResponse({ success: true, ran: false, reason: 'no actionable steps in the bundle', draft, safetyClass: safety.safetyClass }); return; }
+
+          // Throwaway Fragment+Strategy — built, run once, deleted. Direct StorageManager saves
+          // bypass the sync bridge, so trial artifacts are never enqueued to the cloud.
+          const fragmentId = crypto.randomUUID();
+          const strategyId = crypto.randomUUID();
+          const recs = CapabilitySynth.buildCapabilityRecords(draft, { groundId, fragmentId, strategyId });
+          if (!recs) { sendResponse({ success: false, error: 'failed to build trial op' }); return; }
+          let result = null;
+          try {
+            await StorageManager.saveFragment(recs.fragment);
+            await StorageManager.saveStrategy(recs.strategy);
+            result = await ExecutionEngine.executeStrategy({ strategyId });
+          } finally {
+            try { await StorageManager.deleteStrategy(strategyId); } catch { /* */ }
+            try { await StorageManager.deleteFragment(fragmentId); } catch { /* */ }
+          }
+          sendResponse({ success: true, ran: true, safetyClass: safety.safetyClass, deferred: safety.deferred, draft, result });
+        } catch (err) {
+          Logger.error('background', `RUN_PERSPECTIVE_TRIAL failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();
