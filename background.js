@@ -4549,7 +4549,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // v2.74.350/366 — Enhanced context is now canonical (baseline arm
           // removed). Always gather a screenshot + the Ground's existing
           // perspectives/landmarks and pass them to proposePerspectives.
-          const { tabId, intent, groundId = null, targetGoalId = null } = payload ?? {};
+          const { tabId, intent, groundId = null, targetGoalId = null, intentSpecHint = null } = payload ?? {};
           if (typeof tabId !== 'number') {
             sendResponse({ success: false, error: 'tabId required' });
             return;
@@ -4588,6 +4588,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (!snap?.success) {
             sendResponse({ success: false, error: snap?.error ?? 'DOM snapshot returned no payload' });
             return;
+          }
+
+          // PB-10 — deterministic form oracle: enumerate the page's required-field markers (top frame)
+          // so the intent-driven directive can NAME every field a completion intent must cover. Best-
+          // effort; if it fails the directive degrades to shape-only (still "one perspective, all fields").
+          let formFields = null;
+          try {
+            const ff = await chrome.tabs.sendMessage(tabId, { type: 'ENUMERATE_FORM_FIELDS' }, { frameId: 0 });
+            if (ff?.success && Array.isArray(ff.fields)) formFields = ff.fields;
+          } catch (e) {
+            Logger.warn('background', `PROPOSE_PERSPECTIVES: form enumeration failed (continuing): ${e.message}`);
           }
 
           // ── Enhanced context (best-effort; any failure degrades, not aborts) ──
@@ -4648,6 +4659,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             registryLandmarks,
             locale  : localeForPropose,
             targetGoalId,           // PB-1: goal-anchor the feature reference (optional through-line)
+            formFields,             // PB-10: required-field markers → must-cover list in the directive
+            intentSpecHint,         // PB-10: LLM-emitted {shape, completeness} from groundIntent (primary extractor)
           });
           if (!proposal || !Array.isArray(proposal.options) || proposal.options.length === 0) {
             sendResponse({ success: false, error: 'Claude returned no usable perspectives — try a more specific intent.' });

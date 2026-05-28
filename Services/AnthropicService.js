@@ -18,6 +18,10 @@
 
 import { Logger }          from '../Core/Logger.js';
 import { SchemaValidator } from './SchemaValidator.js';
+// PB-10 — intent-driven proposal: the rules block is ASSEMBLED from the intent's extracted parameters
+// (shape/completeness/cardinality + must-cover fields) instead of a static minimal-roles prior.
+import { deriveIntentSpec, buildProposeDirective } from '../Core/intentShape.js';
+import { missingRoleFields } from '../Core/formCoverage.js';
 import { CONDITION_FIELDS, getTypesByFamily } from './ConditionVocabulary.js';
 // C-P3 (DD-08) — managed LLM proxy transport.
 import { getCloudSettings, normalizeApiBaseUrl } from './Cloud/CloudSettings.js';
@@ -1845,7 +1849,7 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
    * @param {{ intent: string, url?: string, title?: string, domSnapshot?: string, screenshot?: string|null, siblingPerspectives?: Array|null, registryLandmarks?: Array|null }} params
    * @returns {Promise<{ options: Array<{name:string, rationale:string, onPage:boolean, reachedVia:string|null, roles:Array<{role:string,description:string,multiplicity:string}>, predicates:Array<{kind:'urlMatches',pattern:string,mode:string}>}> }|null>}
    */
-  static async proposePerspectives({ intent, url, title, domSnapshot, screenshot = null, siblingPerspectives = null, registryLandmarks = null, locale = null, targetGoalId = null }) {
+  static async proposePerspectives({ intent, url, title, domSnapshot, screenshot = null, siblingPerspectives = null, registryLandmarks = null, locale = null, targetGoalId = null, groundedIntent = null, formFields = null, intentSpecHint = null }) {
     const seed = (typeof intent === 'string' ? intent : '').trim();
     if (!seed) return null;
 
@@ -1853,6 +1857,26 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
     // `featureIndex`. Built below from the Locale catalog; the array index === the number shown to
     // the model, and maps back to a real featureId in the sanitizer (mirrors synthesizeGoals).
     const featureRefList = [];
+
+    // PB-10 — extract the intent's parameters and ASSEMBLE the proposal directive from them (this
+    // replaces the static "minimal roles / 2-4 options" prior, which forced completion intents like
+    // "apply for this job" to shard into sub-region perspectives). `formFields` (the content-script form
+    // oracle, when present) supplies the must-cover REQUIRED-field labels so the directive can name them.
+    const requiredFieldLabels = Array.isArray(formFields)
+      ? formFields.filter((f) => f && f.required && !f.isSubmit).map((f) => f.label).filter(Boolean)
+      : [];
+    const _hasSubmit = Array.isArray(formFields) ? formFields.some((f) => f && f.isSubmit) : false;
+    const intentSpec = deriveIntentSpec(seed, {
+      groundedIntent,
+      requiredFieldCount: requiredFieldLabels.length, hasSubmit: _hasSubmit, requiredFieldLabels,
+      // PB-10 extractor upgrade: LLM-emitted shape/completeness from groundIntent (primary when present).
+      llmShape: intentSpecHint?.shape ?? null,
+      llmCompleteness: intentSpecHint?.completeness ?? null,
+    });
+    const proposeDirective = buildProposeDirective(intentSpec);
+    // Role cap is intent-driven too: a completion form legitimately needs many roles (the old fixed
+    // cap of 10 truncated "apply for this job" mid-form). Minimal intents keep a tight ceiling.
+    const roleCap = intentSpec.completeness === 'exhaustive' ? 60 : 10;
 
     const systemPrompt = `You propose PERSPECTIVE OPTIONS for a web-automation "Perspective" (a reusable "kind of page" view). You are given the user's INTENT (what they want to do) and the current page. Propose 2-3 distinct perspectives that serve the intent on this page.
 
@@ -1880,9 +1904,8 @@ Return ONLY a JSON object:
 }
 
 Rules:
-- 2-4 options. Each must be a COHERENT perspective serving the stated intent — not a grab-bag.
+${proposeDirective}
 - "name" = short kebab-case identifier for the perspective ("search-results", "product-detail", "checkout-form").
-- MINIMAL roles — propose the FEWEST that accomplish the intent: only the elements the user must act on, plus the trigger(s) needed to reach them. Do NOT enumerate every element of a revealed modal/menu/form. Examples: "sign in with Google" → login-trigger + google-signin (≈2 roles), NOT username/password/facebook/close; "search for X" → search-input + submit (+ result-item if the intent is to read results). A focused 2-4 role perspective beats an 8-role grab-bag.
 - "roles" = "role" is a short kebab-case semantic name; "description" says what element fills it (so the user knows what to pick); "multiplicity" is one | many | optional.
 - FEATURE GROUNDING (important): a numbered FEATURE REFERENCE list may be attached below (real page features already enumerated + verified by exploration). For EACH role, set "featureIndex" to the NUMBER of the feature that fills it — the element the user will act on. Use -1 ONLY if no listed feature matches (the role is then unbound and the user picks it manually). A grounded role reuses a real, verified element instead of a guessed selector, so ground every role you can. Hidden roles still get a featureIndex if their revealed element is listed.
 - HIDDEN roles: for a role whose element appears ONLY after an interaction (inside a dropdown menu, a modal, an expanded panel), set "hidden": true and "revealedBy": the role name (within THIS perspective's roles) of the control that reveals it. That revealing control MUST itself be one of the roles (e.g. a "login-trigger" role), and you must list the trigger role BEFORE the role(s) it reveals. This lets the resolver open the trigger and find the hidden element. (On-page trigger + hidden children all stay onPage:true.)
@@ -2015,7 +2038,7 @@ Rules:
       || (Array.isArray(siblingPerspectives) && siblingPerspectives.length)
       || (Array.isArray(registryLandmarks) && registryLandmarks.length);
 
-    Logger.info('AnthropicService', `proposePerspectives [${enhanced ? 'enhanced' : 'baseline'}] — intent="${seed.slice(0, 60)}"`);
+    Logger.info('AnthropicService', `proposePerspectives [${enhanced ? 'enhanced' : 'baseline'}] — intent="${seed.slice(0, 60)}" shape=${intentSpec.shape}/${intentSpec.completeness} via=${intentSpec.decidedBy} cardinality=${intentSpec.cardinality.min}-${intentSpec.cardinality.max} mustCover=${intentSpec.mustCover.length}`);
 
     let parsed;
     try {
@@ -2058,7 +2081,7 @@ Rules:
           // PB-1 — grounded element (resolve-by-reuse target) or null when unmapped.
           featureId,
         });
-        if (roles.length >= 10) break;
+        if (roles.length >= roleCap) break;
       }
       // Drop revealedBy references that don't point to a real role in this option.
       for (const rr of roles) { if (rr.revealedBy && !roles.some(x => x.role === rr.revealedBy)) { rr.revealedBy = null; } }
@@ -2086,6 +2109,33 @@ Rules:
       });
       if (options.length >= 4) break;
     }
+
+    // PB-10 completeness backfill — the form oracle reads the FULL DOM (no viewport/scroll limit), so for
+    // an exhaustive completion intent it is authoritative for the role SET. Append any required field the
+    // LLM omitted — below-the-fold fields it couldn't see in the (viewport-only) screenshot, or fields the
+    // model just dropped — to the primary on-page option. Coverage becomes guaranteed by construction.
+    if (intentSpec.completeness === 'exhaustive' && Array.isArray(formFields) && formFields.length && options.length) {
+      const primary = options.find((o) => o.onPage !== false) || options[0];
+      let added = 0;
+      for (const f of missingRoleFields(formFields, primary.roles.map((r) => r.role))) {
+        if (primary.roles.length >= roleCap) break;
+        if (primary.roles.some((x) => x.role === f.slot)) continue;
+        // De-dup the common resume/CV upload when the file input is unlabeled (slot becomes generic).
+        if (f.kind === 'file' && primary.roles.some((x) => /resume|cv|upload|file|attach/i.test(x.role))) continue;
+        primary.roles.push({
+          role: f.slot.slice(0, 60),
+          description: (f.isSubmit ? `Submit/commit control ("${f.label || 'Submit'}")` : `Required field: ${f.label || f.slot}`).slice(0, 160),
+          multiplicity: 'one',
+          hidden: false,
+          revealedBy: null,
+          featureId: null,
+          oracleBackfill: true,   // provenance: deterministically added from the full-DOM form oracle
+        });
+        added++;
+      }
+      if (added) Logger.info('AnthropicService', `proposePerspectives: oracle backfilled ${added} required field(s) the proposal missed`);
+    }
+
     if (options.length === 0) return null;
     return { options };
   }
@@ -2285,9 +2335,13 @@ Return ONLY a JSON object:
 {
   "groundedIntent": "<refined intent, 1-2 sentences, in this page's terms, SAME goal>",
   "achievable": "yes" | "partial" | "no",${hasGoals ? `\n  "matchedGoal": "<the label of the best-fitting page goal, or \\"\\" if none>",` : ''}
+  "shape": "read" | "act" | "complete",
+  "completeness": "exhaustive" | "minimal",
   "note": "<short: what this page covers / what it can't do for this intent>"
 }
 - "yes" = the page fully supports the intent. "partial" = some of it (note what's missing). "no" = this page can't serve the intent.
+- "shape": classify the OPERATION. "complete" = the user must fill in / submit a form or multi-field input (apply, register, check out, book, update details). "read" = find / view / extract / compare content. "act" = a single discrete action (click, toggle, sign in, like, download).
+- "completeness": for a "complete" intent, is EVERY required field needed, or only a focused subset? "exhaustive" = the whole form must be filled to accomplish the intent ("apply for this job", "fill out the application", "register an account"). "minimal" = only a specific field/control or a single action ("update my phone number", "search for X", "sign in"). read/act intents are virtually always "minimal".
 - groundedIntent stays in the user's voice + goal; concretize using the page's terms, don't replace the goal.`;
     let userText = `User intent: ${intent}\nURL: ${url ?? '(unknown)'}\nTitle: ${title ?? '(unknown)'}`;
     if (hasGoals) {
@@ -2306,11 +2360,19 @@ Return ONLY a JSON object:
       const gi = typeof p.groundedIntent === 'string' ? p.groundedIntent.trim().slice(0, 280) : '';
       if (!gi) return null;
       const ACH = new Set(['yes', 'partial', 'no']);
+      // PB-10 extractor upgrade — the grounding LLM also classifies the intent's SHAPE + COMPLETENESS
+      // (the parameters that drive the proposal directive). The LLM is a far better intent-understander
+      // than the lexical classifier ("update my phone" → complete+minimal; "apply" → complete+exhaustive),
+      // and this is free (same call). deriveIntentSpec consumes these; the lexical path stays as fallback.
+      const SHAPE = new Set(['read', 'act', 'complete']);
+      const CMPL = new Set(['exhaustive', 'minimal']);
       return {
         groundedIntent: gi,
         achievable: ACH.has(p.achievable) ? p.achievable : 'partial',
         note: typeof p.note === 'string' ? p.note.trim().slice(0, 240) : '',
         matchedGoal: typeof p.matchedGoal === 'string' && p.matchedGoal.trim() ? p.matchedGoal.trim().slice(0, 60) : null,
+        shape: SHAPE.has(p.shape) ? p.shape : null,
+        completeness: CMPL.has(p.completeness) ? p.completeness : null,
       };
     } catch (e) { Logger.warn('AnthropicService', `groundIntent error: ${e.message}`); return null; }
   }

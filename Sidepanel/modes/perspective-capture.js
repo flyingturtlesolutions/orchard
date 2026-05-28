@@ -2193,11 +2193,18 @@ async function onProposePerspectives() {
   _perspectiveInFlight = true;
   _renderPerspectivePanel();
   const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  // PB-10 extractor upgrade — when a grounding ran for THIS intent (raw or adopted-grounded), pass its
+  // LLM-emitted {shape, completeness} as the primary extractor; else propose falls back to the lexical
+  // classifier. Match either the raw intent it was grounded for or the grounded text the user adopted.
+  const gi = _groundIntentResult;
+  const intentSpecHint = (gi && (gi.shape || gi.completeness) && (gi.forIntent === intent || gi.groundedIntent === intent))
+    ? { shape: gi.shape || null, completeness: gi.completeness || null }
+    : null;
   let res;
   try {
     res = await new Promise(r => chrome.runtime.sendMessage({
       type: 'PROPOSE_PERSPECTIVES',
-      payload: { tabId: _perspectiveTabId, groundId: _perspectiveGroundId, intent },
+      payload: { tabId: _perspectiveTabId, groundId: _perspectiveGroundId, intent, intentSpecHint },
     }, r));
   } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
   if (!_perspectiveDraft || _perspectiveDraft.id !== draftToken) return;   // unmounted / switched mid-flight
@@ -2346,7 +2353,9 @@ async function onGroundIntent() {
     _renderPerspectivePanel();
     return;
   }
-  _groundIntentResult = { groundedIntent: res.groundedIntent, achievable: res.achievable || 'unknown', note: res.note || '', matchedGoal: res.matchedGoal || null, forIntent: intent };
+  // PB-10 extractor upgrade — keep the LLM-emitted intent SHAPE + COMPLETENESS so propose can pass them
+  // as the primary extractor (the grounding model understands intent better than the lexical fallback).
+  _groundIntentResult = { groundedIntent: res.groundedIntent, achievable: res.achievable || 'unknown', note: res.note || '', matchedGoal: res.matchedGoal || null, forIntent: intent, shape: res.shape || null, completeness: res.completeness || null };
   _renderPerspectivePanel();
   if (res.hadAffordance === false) toast?.('Run Explore to ground the intent in this page');
 }

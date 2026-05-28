@@ -3194,6 +3194,64 @@ function detectRepeatingContentBlocks() {
 // clicking. Self-contained: unlike the poke sweep, enumeration is read-only, so it
 // can scroll the whole page in one call and restore, with no background banding/
 // navigation-recovery orchestration. Returns { success, features, meta }.
+// PB-10 (DESIGN_phaseB_pipeline §5) — deterministic form-field oracle. Reads the page's OWN necessity
+// markers (required / aria-required / .Mui-required label / trailing asterisk) so the proposal can be
+// told exactly which fields a completion intent ("apply for this job") must cover. Mirrors
+// Core/formCoverage.enumerateFormFields — kept here inlined because classic content scripts can't
+// ES-import Core. Runs in the top frame (the message is sent with frameId:0). No visibility filter:
+// required controls are often visually hidden (e.g. a framework's native <select required> at opacity:0)
+// yet still mandatory, so dropping hidden elements would under-count.
+function enumerateFormFields() {
+  const SEL = 'input:not([type=hidden]):not([type=button]):not([type=reset]), select, textarea, button[type="submit"], input[type="submit"]';
+  const strip = (s) => String(s || '').replace(/\s*\*\s*$/, '').replace(/\s{2,}/g, ' ').trim();
+  const labelInfoFor = (el) => {
+    try {
+      const id = el.id;
+      if (id) { const sel = (window.CSS && CSS.escape) ? CSS.escape(id) : id; const f = document.querySelector(`label[for="${sel}"]`); if (f) return { text: f.textContent || '', el: f }; }
+      const c = el.closest && el.closest('label'); if (c) return { text: c.textContent || '', el: c };
+      const al = el.getAttribute('aria-label'); if (al) return { text: al, el: null };
+      const lb = el.getAttribute('aria-labelledby'); if (lb) { const r = document.getElementById(lb); if (r) return { text: r.textContent || '', el: r }; }
+    } catch { /* */ }
+    return { text: '', el: null };
+  };
+  const isReq = (el, li) => {
+    try {
+      if (el.required === true) return true;
+      if (el.getAttribute('aria-required') === 'true') return true;
+      if (el.hasAttribute('required')) return true;
+      const lbl = li && li.el;
+      if (lbl) {
+        if (/required/i.test(String(lbl.className || ''))) return true;          // .Mui-required / .required
+        if (/\*\s*$/.test((lbl.textContent || '').trim())) return true;          // trailing asterisk
+        if (lbl.querySelector && lbl.querySelector('[class*="asterisk"],[class*="required"]')) return true;
+      }
+    } catch { /* */ }
+    return false;
+  };
+  const out = [];
+  let nodes = [];
+  try { nodes = Array.from(document.querySelectorAll(SEL)); } catch { return out; }
+  for (const el of nodes) {
+    try {
+      const tag = (el.tagName || '').toLowerCase();
+      const rawType = el.getAttribute('type') || '';
+      const type = (rawType || (tag === 'textarea' ? 'textarea' : tag === 'select' ? 'select' : 'text')).toLowerCase();
+      const isSubmit = type === 'submit' || (tag === 'button' && el.getAttribute('type') === 'submit');
+      const li = labelInfoFor(el);
+      out.push({
+        tag, type,
+        name: el.getAttribute('name') || '',
+        id: el.id || '',
+        label: strip(li.text),
+        required: isSubmit ? false : isReq(el, li),
+        isSubmit,
+        kind: isSubmit ? 'submit' : (type === 'file' ? 'file' : tag === 'select' ? 'select' : 'input'),
+      });
+    } catch { /* skip this control */ }
+  }
+  return out;
+}
+
 async function enumeratePage() {
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   const vw = window.innerWidth, vh = window.innerHeight;
@@ -5564,6 +5622,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     case 'ENUMERATE_PAGE':
       enumeratePage().then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
       return true;   // async sendResponse
+
+    // PB-10 — deterministic form-field oracle (required-field markers) for intent-driven proposal.
+    case 'ENUMERATE_FORM_FIELDS':
+      try { sendResponse({ success: true, fields: enumerateFormFields() }); }
+      catch (e) { sendResponse({ success: false, error: e.message }); }
+      return false;
 
     // v2.74.353 — Resolve-roles complexity metric (deterministic DOM scan).
     case 'PAGE_COMPLEXITY':
