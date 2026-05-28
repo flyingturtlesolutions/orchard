@@ -1001,6 +1001,15 @@
     </div>
 
     <div class="card">
+      <h3 class="card-subheading">Diagnostics</h3>
+      <p class="settings-note">Upload your most recent test run (scrubbed of URLs/credentials) to the cloud so support can debug it. Opt-in, owner-only, auto-deletes after 90 days (DD-15). Requires cloud sign-in.</p>
+      <div style="display:flex;gap:6px">
+        <button class="btn-secondary" id="btn-archive-run">Upload latest run for support</button>
+      </div>
+      <div id="diagnostics-status" class="msg hidden"></div>
+    </div>
+
+    <div class="card">
       <h3 class="card-subheading">Test Run Behaviour</h3>
       <div class="setting-row">
         <div class="setting-row-text">

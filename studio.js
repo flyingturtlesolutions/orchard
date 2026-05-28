@@ -129,12 +129,26 @@ qsa('.tab-btn').forEach((btn) => {
     if (btn.dataset.tab === 'resolveperf') renderResolvePerf();
     if (btn.dataset.tab === 'llm')         renderLlmAudit();
     if (btn.dataset.tab === 'sharing')     refreshSharing();
+    _setSharingPoll(btn.dataset.tab === 'sharing');
     // v2.74.69 — Workflows tab is a derived view: every visit re-reads
     // strategies + grounds so newly-authored content shows up without a
     // full Studio reload.
     if (btn.dataset.tab === 'workflows') refreshWorkflows();
   });
 });
+
+// 15s team-ground poll boost (DD-04): while the Sharing tab is open, drive faster syncs than the
+// 1-minute background alarm (MV3 alarms can't fire sub-minute, so Studio drives it). Cleared the
+// moment the user navigates away.
+let _sharingPollTimer = null;
+function _setSharingPoll(active) {
+  if (_sharingPollTimer) { clearInterval(_sharingPollTimer); _sharingPollTimer = null; }
+  if (active) {
+    _sharingPollTimer = setInterval(() => {
+      chrome.runtime.sendMessage({ type: 'RUN_SYNC' }, () => void chrome.runtime.lastError);
+    }, 15000);
+  }
+}
 
 // ─── v2.74.69 — Workflows tab ───────────────────────────────────────────────
 //
@@ -5180,6 +5194,18 @@ $('btn-save-api-key').addEventListener('click', async () => {
   }
 });
 
+$('btn-archive-run')?.addEventListener('click', async () => {
+  const el = $('diagnostics-status');
+  const show = (text, type) => { if (el) { el.textContent = text; el.className = `msg ${type}`; el.classList.remove('hidden'); setTimeout(() => el.classList.add('hidden'), 5000); } };
+  const btn = $('btn-archive-run');
+  btn.disabled = true;
+  show('Uploading…', 'ok');
+  const res = await new Promise((r) => chrome.runtime.sendMessage({ type: 'ARCHIVE_EXECUTION' }, r));
+  btn.disabled = false;
+  if (res?.success) show(`Uploaded run ${res.executionId} for support.`, 'ok');
+  else show(`Failed: ${res?.error || 'no recent run / not signed in'}`, 'err');
+});
+
 $('chk-close-tab').addEventListener('change', async (e) => {
   await new Promise(r =>
     chrome.runtime.sendMessage({ type: 'SET_SETTING', payload: { key: 'close_tab_after_run', value: e.target.checked } }, r)
@@ -5384,6 +5410,18 @@ async function renderWorkspaceDetail(wsId, container) {
             ? `<button class="btn-secondary small" data-act="ws-remove-member" data-ws="${escAttr(wsId)}" data-member="${escAttr(m.orchardUserId)}">Remove</button>`
             : ''}
         </div>`).join('');
+
+  // Team grounds synced into this workspace locally (groundId→wsId registry).
+  const [mapRes, grounds] = await Promise.all([
+    _shareSend('GET_GROUND_WORKSPACES'),
+    StorageManager.getAllGrounds(),
+  ]);
+  const map = mapRes?.map || {};
+  const wsGrounds = (grounds || []).filter((g) => map[g.id] === wsId);
+  const groundsHtml = wsGrounds.length
+    ? wsGrounds.map((g) => `<div class="settings-note" style="font-family:monospace;font-size:11px">${escHtml(g.name || g.id)}</div>`).join('')
+    : '<div class="settings-note">No team grounds synced locally yet.</div>';
+
   container.innerHTML = `
       <div class="settings-note" style="margin-top:4px">Members</div>
       ${members}
@@ -5392,7 +5430,9 @@ async function renderWorkspaceDetail(wsId, container) {
           <input type="text" class="ws-invite-id" placeholder="orchardUserId (pk_…)" style="flex:1 1 200px" autocomplete="off" />
           <select class="ws-invite-role"><option value="editor">editor</option><option value="viewer">viewer</option><option value="admin">admin</option></select>
           <button class="btn-secondary small" data-act="ws-invite" data-ws="${escAttr(wsId)}">Invite</button>
-        </div>` : ''}`;
+        </div>` : ''}
+      <div class="settings-note" style="margin-top:8px">Team grounds</div>
+      ${groundsHtml}`;
 }
 
 async function renderWorkspaces() {

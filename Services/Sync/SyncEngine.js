@@ -767,8 +767,8 @@ async function handleConflict(conflict, forceManual = false) {
 // the team object route (Slice 3b) and bootstrap never re-pushes it into the personal namespace.
 // Per-workspace change cursors live under meta key `wsSyncToken:{wsId}`.
 
-/** @returns {Promise<Record<string, string>>} */
-async function getGroundWorkspaceMap() {
+/** @returns {Promise<Record<string, string>>} groundId → wsId for team grounds pulled locally */
+export async function getGroundWorkspaceMap() {
   const m = await getMeta('groundWorkspaceMap');
   return (m && typeof m === 'object') ? /** @type {Record<string, string>} */ (m) : {};
 }

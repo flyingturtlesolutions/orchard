@@ -1230,6 +1230,65 @@ async function handleWorkspaceBatchWrite(event, wsId) {
   return batchWriteInScope(workspaceScope(wsId), body.items);
 }
 
+// ── Runtime trace archive (DD-15 B) — opt-in, not synced ─────────────────────────────────
+// Explicit per-run upload of a (client-scrubbed) execution bundle to users/{id}/runtime-archives/.
+// Objects are tagged orchard-runtime-archive=true so the bucket lifecycle expires them after 90d.
+const RUNTIME_ARCHIVE_TAG = 'orchard-runtime-archive=true';
+
+function archiveKey(orchardUserId, executionId) {
+  return `users/${orchardUserId}/runtime-archives/${executionId}/archive.json`;
+}
+
+function safeExecutionId(raw) {
+  const id = String(raw || '');
+  return /^[A-Za-z0-9_-]{1,128}$/.test(id) ? id : null;
+}
+
+async function handleArchiveExecution(event, rawId) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+  const executionId = safeExecutionId(rawId);
+  if (!executionId) return json(400, { error: 'invalid_execution_id' });
+
+  let body = {};
+  try { body = event.body ? JSON.parse(event.body) : {}; } catch { return json(400, { error: 'invalid_json' }); }
+  const bundle = body.bundle ?? body;   // accept { bundle } or a raw bundle object
+  const archivedAt = Date.now();
+  const payload = JSON.stringify({ executionId, archivedAt, bundle });
+
+  await s3.send(new PutObjectCommand({
+    Bucket: WORKSPACE_BUCKET,
+    Key: archiveKey(auth.orchardUserId, executionId),
+    Body: payload,
+    ContentType: 'application/json',
+    Tagging: RUNTIME_ARCHIVE_TAG,
+  }));
+  return json(200, { ok: true, executionId, archivedAt });
+}
+
+async function handleGetExecutionArchive(event, rawId) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+  const executionId = safeExecutionId(rawId);
+  if (!executionId) return json(400, { error: 'invalid_execution_id' });
+  const obj = await s3GetJson(WORKSPACE_BUCKET, archiveKey(auth.orchardUserId, executionId));
+  if (!obj) return json(404, { error: 'not_found', executionId });
+  return json(200, obj);
+}
+
+async function handleDeleteExecutionArchive(event, rawId) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+  const executionId = safeExecutionId(rawId);
+  if (!executionId) return json(400, { error: 'invalid_execution_id' });
+  try {
+    await s3.send(new DeleteObjectCommand({ Bucket: WORKSPACE_BUCKET, Key: archiveKey(auth.orchardUserId, executionId) }));
+  } catch (e) {
+    if (e.name !== 'NoSuchKey' && e.$metadata?.httpStatusCode !== 404) throw e;
+  }
+  return json(200, { ok: true, deleted: executionId });
+}
+
 // ── Managed LLM proxy (DD-08) ──────────────────────────────────────────────────────────
 // The app's Anthropic key lives in Secrets Manager; signed-in clients call this instead of
 // holding a key. v1 is auth-only (any bound user) and BUFFERED (non-streaming). Caches the key
@@ -1348,6 +1407,17 @@ exports.handler = async (event) => {
         const wsId = decodeURIComponent(idOnly[1]);
         if (method === 'GET') return handleGetWorkspace(event, wsId);
         if (method === 'PATCH') return handlePatchWorkspace(event, wsId);
+      }
+    }
+
+    // Runtime trace archive (DD-15 B): /runtime/executions/{id}/archive
+    if (path.startsWith('/runtime/executions/')) {
+      const m = path.match(/^\/runtime\/executions\/([^/]+)\/archive$/);
+      if (m) {
+        const execId = decodeURIComponent(m[1]);
+        if (method === 'POST') return handleArchiveExecution(event, execId);
+        if (method === 'GET') return handleGetExecutionArchive(event, execId);
+        if (method === 'DELETE') return handleDeleteExecutionArchive(event, execId);
       }
     }
 

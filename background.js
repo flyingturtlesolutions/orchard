@@ -74,6 +74,9 @@ import {
   createWorkspace, listWorkspaces, getWorkspace, renameWorkspace,
   addWorkspaceMember, removeWorkspaceMember,
 } from './Services/Cloud/CloudClient.js';
+import {
+  archiveExecution, getExecutionArchive, deleteExecutionArchive,
+} from './Services/Cloud/CloudClient.js';
 import { emit as emitGroundEvent_bg,
          list as listGroundEvents_bg,
          clear as clearGroundEvents_bg }              from './Services/GroundEventBus.js';
@@ -115,6 +118,7 @@ import {
   runSync,
   scheduleSyncRun,
   forceResyncRecord,
+  getGroundWorkspaceMap,
 } from './Services/Sync/SyncEngine.js';
 import * as GroundAssetStore from './Services/Storage/GroundAssetStore.js';
 import {
@@ -216,6 +220,33 @@ function broadcastSyncApplied(applied) {
       broadcastStorageChanged(row.kind, row.id, row.deleted ? 'deleted' : 'saved');
     }
   }
+}
+
+/**
+ * Scrub a value before uploading a runtime trace archive (DD-15): redact credential-ish fields and
+ * strip URL query/fragments (which can carry tokens/PII). Recursive, depth-bounded. Client-side
+ * defense; archives are owner-only but support staff may view them.
+ * @param {unknown} value @param {number} [depth]
+ */
+function _scrubForArchive(value, depth = 0) {
+  if (depth > 8 || value == null) return value;
+  if (typeof value === 'string') {
+    if (/^https?:\/\//i.test(value)) {
+      try { const u = new URL(value); return `${u.origin}${u.pathname}`; } catch { return value; }
+    }
+    return value;
+  }
+  if (Array.isArray(value)) return value.map((v) => _scrubForArchive(v, depth + 1));
+  if (typeof value === 'object') {
+    /** @type {Record<string, unknown>} */
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (/pass(word)?|secret|token|api[_-]?key|authorization|credential/i.test(k)) { out[k] = '[redacted]'; continue; }
+      out[k] = _scrubForArchive(v, depth + 1);
+    }
+    return out;
+  }
+  return value;
 }
 
 /**
@@ -3212,6 +3243,52 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'REMOVE_WORKSPACE_MEMBER': {
       (async () => {
         try { await removeWorkspaceMember(payload?.workspaceId, payload?.orchardUserId); sendResponse({ success: true }); }
+        catch (err) { sendResponse({ success: false, error: err.message }); }
+      })();
+      return true;
+    }
+    // Local groundId → wsId registry (which grounds are team grounds). UI badges + workspace listing.
+    case 'GET_GROUND_WORKSPACES': {
+      (async () => {
+        try { sendResponse({ success: true, map: await getGroundWorkspaceMap() }); }
+        catch (err) { sendResponse({ success: false, error: err.message, map: {} }); }
+      })();
+      return true;
+    }
+
+    // ── Runtime trace archive (DD-15 B) ────────────────────────────────────────
+    // Opt-in upload of a scrubbed test-run bundle for support/debug. Not part of sync.
+    case 'ARCHIVE_EXECUTION': {
+      (async () => {
+        try {
+          let result = null;
+          if (payload?.jobId) {
+            const recent = await StorageManager.getRecentResults(200);
+            result = recent.find((r) => r.jobId === payload.jobId) || null;
+          } else {
+            result = (await StorageManager.getRecentResults(1))[0] || null;
+          }
+          if (!result) { sendResponse({ success: false, error: 'no test result to archive' }); return; }
+          const executionId = String(result.jobId || `run_${Date.now()}`).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128);
+          const res = await archiveExecution(executionId, _scrubForArchive(result));
+          sendResponse({ success: true, executionId, ...res });
+        } catch (err) {
+          Logger.warn('background', `ARCHIVE_EXECUTION: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+    case 'GET_EXECUTION_ARCHIVE': {
+      (async () => {
+        try { sendResponse({ success: true, archive: await getExecutionArchive(payload?.executionId) }); }
+        catch (err) { sendResponse({ success: false, error: err.message }); }
+      })();
+      return true;
+    }
+    case 'DELETE_EXECUTION_ARCHIVE': {
+      (async () => {
+        try { await deleteExecutionArchive(payload?.executionId); sendResponse({ success: true }); }
         catch (err) { sendResponse({ success: false, error: err.message }); }
       })();
       return true;

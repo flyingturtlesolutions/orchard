@@ -92,6 +92,14 @@ class P0Stack extends cdk.Stack {
         exposedHeaders: ['ETag'],
         maxAge: 3600,
       }],
+      // Opt-in runtime trace archives auto-expire (DD-15 B). Synced workspace objects live under
+      // users/{id}/workspace/ and are untouched by this prefix-scoped rule.
+      lifecycleRules: [{
+        id: 'runtime-archive-expiry',
+        prefix: 'users/',
+        expiration: cdk.Duration.days(90),
+        tagFilters: { 'orchard-runtime-archive': 'true' },
+      }],
     });
 
     // Publication registry (STORAGE_SCHEMA §9 / AWS_INTEGRATION §5.2, §6.4). v1: single

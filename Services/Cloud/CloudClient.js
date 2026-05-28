@@ -383,3 +383,17 @@ export async function deleteWorkspaceObject(wsId, logicalPath) {
 export async function batchWriteWorkspaceObjects(wsId, body) {
   return /** @type {Promise<any>} */ (cloudRequest('POST', `${wsObjectsBase(wsId)}/batch`, { body }));
 }
+
+// ── Runtime trace archive (DD-15 B) ──────────────────────────────────────────
+/** @param {string} executionId @param {unknown} bundle  client-scrubbed trace/result bundle */
+export async function archiveExecution(executionId, bundle) {
+  return cloudRequest('POST', `/runtime/executions/${encodeURIComponent(executionId)}/archive`, { body: { bundle } });
+}
+/** @param {string} executionId */
+export async function getExecutionArchive(executionId) {
+  return /** @type {Promise<any>} */ (cloudRequest('GET', `/runtime/executions/${encodeURIComponent(executionId)}/archive`));
+}
+/** @param {string} executionId */
+export async function deleteExecutionArchive(executionId) {
+  return cloudRequest('DELETE', `/runtime/executions/${encodeURIComponent(executionId)}/archive`);
+}
