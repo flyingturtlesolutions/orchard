@@ -22,6 +22,7 @@ import { SchemaValidator } from './SchemaValidator.js';
 // (shape/completeness/cardinality + must-cover fields) instead of a static minimal-roles prior.
 import { deriveIntentSpec, buildProposeDirective } from '../Core/intentShape.js';
 import { buildIntentSpec } from '../Core/intentSpec.js';   // SG-1 Comprehend contract (page-independent)
+import { selectCandidates, reconcileMatches } from '../Core/select.js';   // SG-2 Select (substrate query)
 import { selectNecessaryFields, slugMatch } from '../Core/formCoverage.js';
 import { CONDITION_FIELDS, getTypesByFamily } from './ConditionVocabulary.js';
 // C-P3 (DD-08) — managed LLM proxy transport.
@@ -2398,6 +2399,51 @@ Rules:
       Logger.warn('AnthropicService', `comprehendIntent error: ${e.message} — lexical fallback`);
       return buildIntentSpec(intent, null);
     }
+  }
+
+  /**
+   * SG-2b (Select, the narrowed-LLM match) — DESIGN §4.2/§SG-2. Map each page-INDEPENDENT subGoal (from
+   * SG-1 Comprehend) to the page's REAL features, by MEANING. The LLM's role is deliberately narrow: it
+   * only proposes the semantic mapping over a pre-filtered candidate set; Core/select.reconcileMatches
+   * then disposes of the facts (validates ids, reconciles scope vs the page's `required` flag, surfaces
+   * orphan required features the prior missed). Returns the reconciled selection; on LLM/parse failure it
+   * still returns a reconciled selection (empty matches → all required features become orphans — honest).
+   * The raw mapping + a reconciliation summary are LOGGED.
+   * @param {{spec:object, locale:object}} args  spec = IntentSpec; locale = the Locale (SG-0.5).
+   */
+  static async matchSubGoals({ spec, locale }) {
+    const subGoals = (spec && Array.isArray(spec.subGoals)) ? spec.subGoals : [];
+    const candidates = selectCandidates(locale, spec);
+    if (!subGoals.length || !candidates.length) {
+      Logger.info('AnthropicService', `matchSubGoals — nothing to match (${subGoals.length} subGoal(s), ${candidates.length} candidate(s)) → boundary-only`);
+      return reconcileMatches(locale, spec, null);
+    }
+    const systemPrompt = `You MATCH the sub-goals of a user's intent to the ACTUAL features of a specific page. You are given the intent's SUB-GOALS (generic, page-independent phases) and a list of the page's real FEATURES (each: id, label, kind, and whether it is required). For each sub-goal, choose the feature id(s) that accomplish it — by MEANING, not word overlap (e.g. "provide identity" → the first/last name inputs; "attach resume" → the file-upload control; "submit" → the submit action).
+
+Rules:
+- A feature serves AT MOST ONE sub-goal. A sub-goal may map to several features, or to NONE (omit it) if the page has no feature for it.
+- Map ONLY to feature ids that appear in the list. NEVER invent an id.
+- Do not force a match. It is correct to leave a sub-goal unmapped, and correct to leave page features unclaimed.
+
+Return ONLY a JSON object:
+{ "matches": { "<subGoalId>": ["<featureId>", ...] } }`;
+    const sgBlock = subGoals.map((s) => `- ${s.id}: ${s.label} (${s.shape}${s.scope ? `, ${s.scope}` : ''})`).join('\n');
+    const featBlock = candidates.slice(0, 80).map((f) => `- ${f.id}: "${(f.label || '').slice(0, 60)}" [${f.kind}${f.fieldType ? `/${f.fieldType}` : ''}${f.required ? ', required' : ''}${f.interaction && f.interaction.effect === 'submit' ? ', submit' : ''}]`).join('\n');
+    const userText = `Sub-goals:\n${sgBlock}\n\nPage features:\n${featBlock}`;
+    Logger.info('AnthropicService', `matchSubGoals — ${subGoals.length} sub-goal(s) over ${candidates.length} feature(s)`);
+    let rawMatches = null;
+    try {
+      const call = await AnthropicService.#call(systemPrompt, [{ type: 'text', text: userText }], 1024, [], { role: 'describe', operation: 'matchSubGoals' });
+      if (call?.success) {
+        const json = AnthropicService.#firstJsonObject(call.text);
+        try { const p = json ? JSON.parse(json) : null; rawMatches = (p && typeof p.matches === 'object') ? p.matches : null; } catch { rawMatches = null; }
+      } else { Logger.warn('AnthropicService', `matchSubGoals failed: ${call?.error}`); }
+    } catch (e) { Logger.warn('AnthropicService', `matchSubGoals error: ${e.message}`); }
+    Logger.info('AnthropicService', `matchSubGoals raw: ${JSON.stringify(rawMatches).slice(0, 1000)}`);
+    const reconciled = reconcileMatches(locale, spec, rawMatches);
+    const changed = reconciled.reconciledSubGoals.filter((s) => s.scopeChanged).length;
+    Logger.info('AnthropicService', `matchSubGoals reconciled: matched=${Object.keys(reconciled.matches).length} orphanRequired=${reconciled.orphanRequired.length} scopeChanged=${changed}`);
+    return reconciled;
   }
 
   static async groundIntent({ userIntent, affordances, goals = null, url, title }) {
