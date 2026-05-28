@@ -18,8 +18,17 @@
 export const OUTCOMES_SCHEMA = 1;
 
 export const PHASES = Object.freeze(['author', 'runtime']);
-export const OPS = Object.freeze(['locate', 'resolve', 'poke', 'profile', 'activate', 'action']);
-export const VERDICTS = Object.freeze(['verified', 'failed', 'abstained', 'corrected']);
+export const OPS = Object.freeze([
+  'locate', 'resolve', 'poke', 'profile', 'activate', 'action',
+  // Phase-B authoring lifecycle (DESIGN_phaseB_pipeline §3 PB-0) — per-stage credit assignment so a
+  // rejected Perspective is attributable to the stage that lost fidelity (hardened thesis §5).
+  'propose', 'synthesize', 'trial', 'accept', 'reject',
+]);
+export const VERDICTS = Object.freeze([
+  'verified', 'failed', 'abstained', 'corrected',
+  // Phase-B verdicts: trial pass/fail + the user's accept/reject decision.
+  'trial-pass', 'trial-fail', 'accepted', 'rejected',
+]);
 export const OUTCOMES = Object.freeze(['success', 'failure']);
 export const PROVENANCE_SOURCES = Object.freeze(['enumeration', 'llm-resolve', 'llm-locate', 'human-pick']);
 export const LIFECYCLE = Object.freeze(['fresh', 'verified', 'stale-suspected', 'stale', 'retired']);
@@ -62,7 +71,13 @@ export function mintCorpusRef(eventId) {
 export function makeEvent(partial = {}) {
   const p = partial || {};
   const phase = PHASES.includes(p.phase) ? p.phase : 'author';
-  const op = OPS.includes(p.op) ? p.op : 'resolve';
+  // Default a MISSING op to 'resolve' (back-compat). But a PROVIDED-but-unknown op must NOT be
+  // silently relabeled 'resolve' — that miscategorizes the signal into the resolve bucket (the
+  // pre-PB-0 bug). Warn and emit it as-is so the event is neither lost nor misattributed.
+  let op;
+  if (p.op == null) op = 'resolve';
+  else if (OPS.includes(p.op)) op = p.op;
+  else { try { console.warn(`[outcomes] unknown op "${p.op}" — emitting as-is (add it to OPS?)`); } catch { /* no console */ } op = p.op; }
   const ts = typeof p.ts === 'number' ? p.ts : Date.now();
   const id = p.id || mintEventId(`${p.groundId || ''}|${op}|${p.featureId || p.role || ''}`);
   const verdict = VERDICTS.includes(p.verdict) ? p.verdict : undefined;
@@ -84,6 +99,18 @@ export function makeEvent(partial = {}) {
   // Authoring events are training pairs → always carry a corpusRef (body stubbed).
   if (phase === 'author') ev.corpusRef = p.corpusRef || mintCorpusRef(id);
   return ev;
+}
+
+/**
+ * Convenience for Phase-B authoring-stage events (propose/synthesize/trial/accept/reject). Stamps
+ * `phase:'author'` and delegates to makeEvent, so emit sites stay terse and the stage vector for a
+ * Perspective build is uniform. (DESIGN_phaseB_pipeline PB-0.)
+ * @param {'propose'|'synthesize'|'trial'|'accept'|'reject'|string} op
+ * @param {object} [partial]  { groundId, perspectiveId, role, featureId, verdict, outcome, detail, llmOutput, input, ts, corpusRef }
+ * @returns {object} OutcomeEvent
+ */
+export function makeStageEvent(op, partial = {}) {
+  return makeEvent({ ...partial, phase: 'author', op });
 }
 
 // ─── Adapters from existing telemetry seeds (OUTCOMES_SPEC § 9) ──────────────────

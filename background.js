@@ -4548,7 +4548,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // v2.74.350/366 — Enhanced context is now canonical (baseline arm
           // removed). Always gather a screenshot + the Ground's existing
           // perspectives/landmarks and pass them to proposePerspectives.
-          const { tabId, intent, groundId = null } = payload ?? {};
+          const { tabId, intent, groundId = null, targetGoalId = null } = payload ?? {};
           if (typeof tabId !== 'number') {
             sendResponse({ success: false, error: 'tabId required' });
             return;
@@ -4646,10 +4646,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             siblingPerspectives,
             registryLandmarks,
             locale  : localeForPropose,
+            targetGoalId,           // PB-1: goal-anchor the feature reference (optional through-line)
           });
           if (!proposal || !Array.isArray(proposal.options) || proposal.options.length === 0) {
             sendResponse({ success: false, error: 'Claude returned no usable perspectives — try a more specific intent.' });
             return;
+          }
+          // PB-1 (R3) — emit the first authoring-stage outcome: how many proposed roles got grounded
+          // to a real page feature (featureId set). This is the front-of-pipeline fidelity signal.
+          if (groundId) {
+            try {
+              let roleCount = 0, groundedCount = 0;
+              for (const o of proposal.options) for (const r of (o.roles || [])) { roleCount++; if (r.featureId) groundedCount++; }
+              await _appendOutcomes(groundId, [Outcomes.makeStageEvent('propose', {
+                groundId,
+                input: { roleOrIntent: intent.slice(0, 120) },
+                detail: { optionCount: proposal.options.length, roleCount, groundedCount, targetGoalId: targetGoalId || null },
+              })]);
+            } catch (e) { Logger.warn('background', `PROPOSE_PERSPECTIVES outcome emit: ${e.message}`); }
           }
           // meta lets the UI label exactly what context this run used. Depth = the
           // Locale's non-surface layers (revealed content).
@@ -5356,22 +5370,49 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             } catch (e) { Logger.warn('background', `RESOLVE_PERSPECTIVE_ROLES: conventions read failed (continuing): ${e.message}`); }
           }
 
-          const out = await AnthropicService.resolveRoles({
-            roles,
-            url        : snap.url   ?? url,
-            title      : snap.title ?? '',
-            domSnapshot: snap.snapshot ?? '',
-            screenshot,
-            registryLandmarks,
-            knownSelectors,
-            conventions,
-            priorAttempt,
-          });
-          if (!out || !Array.isArray(out.resolutions)) {
-            sendResponse({ success: false, error: 'Claude returned no usable resolutions.' });
-            return;
+          // PB-2 (R4) resolve-by-reuse: roles the proposal grounded to a real feature (featureId)
+          // bind directly to that feature's selector — skip the LLM for them. The INSPECT verify in
+          // the sidepanel still runs, so a stale reused selector is caught and can be retried (retry
+          // sends no featureId → LLM repair). Only UNGROUNDED roles hit the LLM here.
+          let localeModel = null;
+          if (groundId) {
+            try { const pm = await _readLocaleCache(groundId, _normalizeUrlForPerspectiveCache(snap.url ?? url)); localeModel = pm?.model || null; }
+            catch (e) { Logger.warn('background', `RESOLVE_PERSPECTIVE_ROLES: locale read for reuse failed (continuing): ${e.message}`); }
           }
-          sendResponse({ success: true, resolutions: out.resolutions });
+          const reused = [];
+          const toResolve = [];
+          for (const r of roles) {
+            const fid = (r && typeof r.featureId === 'string') ? r.featureId : null;
+            const f = (fid && localeModel?.features) ? localeModel.features[fid] : null;
+            if (f && f.selector) {
+              reused.push({ role: r.role, selector: f.selector, confidence: f.selectorVerified ? 0.95 : 0.7, justification: `reuse: feature ${fid}${f.selectorVerified ? ' (verified)' : ''}`, featureId: fid, reuse: true });
+            } else {
+              toResolve.push(r);
+            }
+          }
+          let llmResolutions = [];
+          if (toResolve.length) {
+            const out = await AnthropicService.resolveRoles({
+              roles      : toResolve,
+              url        : snap.url   ?? url,
+              title      : snap.title ?? '',
+              domSnapshot: snap.snapshot ?? '',
+              screenshot,
+              registryLandmarks,
+              knownSelectors,
+              conventions,
+              priorAttempt,
+            });
+            if (out && Array.isArray(out.resolutions)) llmResolutions = out.resolutions;
+            else if (!reused.length) { sendResponse({ success: false, error: 'Claude returned no usable resolutions.' }); return; }
+          }
+          // Merge preserving the original role order (reused first, then LLM).
+          const byRole = new Map();
+          for (const x of reused) byRole.set(x.role, x);
+          for (const x of llmResolutions) if (!byRole.has(x.role)) byRole.set(x.role, x);
+          const resolutions = roles.map(r => byRole.get(r.role) || { role: r.role, selector: null, confidence: 0, justification: 'unresolved' });
+          Logger.info('explore', `RESOLVE_PERSPECTIVE_ROLES: ${reused.length} reused (feature-grounded), ${toResolve.length} via LLM`);
+          sendResponse({ success: true, resolutions, reusedCount: reused.length });
         } catch (err) {
           Logger.error('background', `RESOLVE_PERSPECTIVE_ROLES failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });

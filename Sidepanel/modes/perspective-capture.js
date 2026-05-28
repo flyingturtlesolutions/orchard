@@ -2309,7 +2309,9 @@ async function onResolveRoles(idx) {
   onChoosePerspective(idx);
   const roles = (opt.roles ?? [])
     .filter(r => r && typeof r.role === 'string')
-    .map(r => ({ role: r.role, description: r.description ?? '', multiplicity: r.multiplicity ?? 'one' }));
+    // PB-2 (R4): forward the proposal's featureId so the handler can resolve grounded roles by
+    // reuse (the feature's verified selector) instead of asking the LLM to regenerate one.
+    .map(r => ({ role: r.role, description: r.description ?? '', multiplicity: r.multiplicity ?? 'one', featureId: r.featureId ?? null }));
   if (!roles.length) return;
   _roleResolveNotes = {};   // fresh run — clear prior notes
   await _runResolve({ opt, roles, priorAttempt: null, mode: 'initial', inFlightKey: String(idx) });

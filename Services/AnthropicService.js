@@ -1845,9 +1845,14 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
    * @param {{ intent: string, url?: string, title?: string, domSnapshot?: string, screenshot?: string|null, siblingPerspectives?: Array|null, registryLandmarks?: Array|null }} params
    * @returns {Promise<{ options: Array<{name:string, rationale:string, onPage:boolean, reachedVia:string|null, roles:Array<{role:string,description:string,multiplicity:string}>, predicates:Array<{kind:'urlMatches',pattern:string,mode:string}>}> }|null>}
    */
-  static async proposePerspectives({ intent, url, title, domSnapshot, screenshot = null, siblingPerspectives = null, registryLandmarks = null, locale = null }) {
+  static async proposePerspectives({ intent, url, title, domSnapshot, screenshot = null, siblingPerspectives = null, registryLandmarks = null, locale = null, targetGoalId = null }) {
     const seed = (typeof intent === 'string' ? intent : '').trim();
     if (!seed) return null;
+
+    // PB-1 (DESIGN_phaseB_pipeline R3): ordered list of feature ids the LLM grounds roles to via a
+    // `featureIndex`. Built below from the Locale catalog; the array index === the number shown to
+    // the model, and maps back to a real featureId in the sanitizer (mirrors synthesizeGoals).
+    const featureRefList = [];
 
     const systemPrompt = `You propose PERSPECTIVE OPTIONS for a web-automation "Perspective" (a reusable "kind of page" view). You are given the user's INTENT (what they want to do) and the current page. Propose 2-3 distinct perspectives that serve the intent on this page.
 
@@ -1862,8 +1867,8 @@ Return ONLY a JSON object:
       "onPage": true,
       "reachedVia": null,
       "roles": [
-        { "role": "search-input", "description": "the text box where the query is typed", "multiplicity": "one" },
-        { "role": "result-item",  "description": "a single result row in the list",        "multiplicity": "many" },
+        { "role": "search-input", "description": "the text box where the query is typed", "multiplicity": "one", "featureIndex": 0 },
+        { "role": "result-item",  "description": "a single result row in the list",        "multiplicity": "many", "featureIndex": 4 },
         { "role": "login-trigger", "description": "the 'Log in' button that opens the auth modal", "multiplicity": "one" },
         { "role": "google-signin", "description": "the Google sign-in button inside the modal", "multiplicity": "one", "hidden": true, "revealedBy": "login-trigger" }
       ],
@@ -1879,6 +1884,7 @@ Rules:
 - "name" = short kebab-case identifier for the perspective ("search-results", "product-detail", "checkout-form").
 - MINIMAL roles — propose the FEWEST that accomplish the intent: only the elements the user must act on, plus the trigger(s) needed to reach them. Do NOT enumerate every element of a revealed modal/menu/form. Examples: "sign in with Google" → login-trigger + google-signin (≈2 roles), NOT username/password/facebook/close; "search for X" → search-input + submit (+ result-item if the intent is to read results). A focused 2-4 role perspective beats an 8-role grab-bag.
 - "roles" = "role" is a short kebab-case semantic name; "description" says what element fills it (so the user knows what to pick); "multiplicity" is one | many | optional.
+- FEATURE GROUNDING (important): a numbered FEATURE REFERENCE list may be attached below (real page features already enumerated + verified by exploration). For EACH role, set "featureIndex" to the NUMBER of the feature that fills it — the element the user will act on. Use -1 ONLY if no listed feature matches (the role is then unbound and the user picks it manually). A grounded role reuses a real, verified element instead of a guessed selector, so ground every role you can. Hidden roles still get a featureIndex if their revealed element is listed.
 - HIDDEN roles: for a role whose element appears ONLY after an interaction (inside a dropdown menu, a modal, an expanded panel), set "hidden": true and "revealedBy": the role name (within THIS perspective's roles) of the control that reveals it. That revealing control MUST itself be one of the roles (e.g. a "login-trigger" role), and you must list the trigger role BEFORE the role(s) it reveals. This lets the resolver open the trigger and find the hidden element. (On-page trigger + hidden children all stay onPage:true.)
 - Roles describe FUNCTION, not appearance ("primary-action", "result-item" — not "blue-button", "div-3").
 - "predicates" (optional) = ONLY urlMatches entries that declare where this perspective applies. "pattern" is a URL substring/regex/exact string; "mode" is contains | exact | regex. Do NOT propose landmark-based predicates — the landmarks don't exist yet. Omit predicates if no reliable URL signal.
@@ -1971,6 +1977,26 @@ Rules:
         }).join('\n');
         if (gl) userText += `\n\nPAGE GOALS (outcomes this page supports + the features that achieve each — identify which goal the INTENT targets and build the perspective's roles around THAT goal's features):\n${gl}`;
       }
+      // PB-1 (R3): numbered FEATURE REFERENCE the model grounds each role to via "featureIndex".
+      // Target-goal features lead the list (lowest indices = most relevant), then the rest by kind,
+      // deduped, capped. featureRefList[i] === featureId, so the sanitizer maps featureIndex → id.
+      const seen = new Set();
+      const pushRef = (id) => { if (feats[id] && !seen.has(id)) { seen.add(id); featureRefList.push(id); } };
+      const tgGoal = targetGoalId && locale.goals ? locale.goals[targetGoalId] : null;
+      if (tgGoal && Array.isArray(tgGoal.achievableVia)) tgGoal.achievableVia.forEach(pushRef);
+      for (const k of order) {
+        for (const id of (byKind[k] || [])) { if (featureRefList.length >= 80) break; pushRef(id); }
+      }
+      if (featureRefList.length) {
+        const refLines = featureRefList.map((id, i) => {
+          const f = feats[id];
+          const lbl = (f.label || '(no label)').toString().slice(0, 40);
+          const mem = f.members ? ` ×${f.members.count}` : '';
+          return `${i}. "${lbl}" [${f.kind || '?'}]${mem}`;
+        }).join('\n');
+        const focus = tgGoal ? ` The intent targets goal "${tgGoal.label}" — its features lead the list.` : '';
+        userText += `\n\nFEATURE REFERENCE (set each role's "featureIndex" to a NUMBER below; -1 if none match).${focus}\n${refLines}`;
+      }
     }
 
     // Enhanced — screenshot as the first content block (layout / prominence /
@@ -2018,6 +2044,10 @@ Rules:
         const role = kebab(r?.role);
         if (!role) continue;
         if (roles.some(x => x.role === role)) continue;   // dedup within option
+        // PB-1 (R3): map the model's featureIndex → a real featureId via featureRefList. Out-of-range
+        // / -1 / absent → null (role unbound; resolve falls back to LLM/visual + the user picks).
+        const fi = Number.isInteger(r?.featureIndex) ? r.featureIndex : -1;
+        const featureId = (fi >= 0 && fi < featureRefList.length) ? featureRefList[fi] : null;
         roles.push({
           role,
           description: (typeof r?.description === 'string' ? r.description.trim() : '').slice(0, 160),
@@ -2025,6 +2055,8 @@ Rules:
           // v2.74.381 — depth linkage for reveal-aware resolve.
           hidden: r?.hidden === true,
           revealedBy: (typeof r?.revealedBy === 'string' && r.revealedBy.trim()) ? kebab(r.revealedBy) : null,
+          // PB-1 — grounded element (resolve-by-reuse target) or null when unmapped.
+          featureId,
         });
         if (roles.length >= 10) break;
       }
