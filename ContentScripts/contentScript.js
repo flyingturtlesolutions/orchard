@@ -4856,10 +4856,16 @@ async function explorePageStructure(payload) {
   // PHASE metrics — scroll to the bottom (triggering lazy content) and report
   // the page height so the background can compute the band stops.
   if (phase === 'metrics') {
-    // v2.74.566 — remember the entry scroll BEFORE scrolling to the bottom, so
-    // cleanup can return the page to exactly where the user left it. Explore is an
-    // observation: it should restore the scroll position, not jump to the top.
-    try { window.__ahubEntryScroll = { x: window.scrollX || 0, y: window.scrollY || 0 }; } catch { /* */ }
+    // v2.74.567 — remember the entry scroll BEFORE scrolling, so cleanup can return
+    // the page to where the user left it. Capture BOTH the window AND inner scroll
+    // containers: BambooHR (and many SPA forms) scroll an overflow:auto DIV, not the
+    // window — window.scrollTo is then a no-op, so the poke phase's scrollIntoView
+    // moves an inner container that only a container-level reset can restore.
+    try {
+      const containers = [];
+      for (const el of document.querySelectorAll('*')) { if (el.scrollTop > 0 || el.scrollLeft > 0) containers.push({ el, top: el.scrollTop, left: el.scrollLeft }); }
+      window.__ahubEntryScroll = { x: window.scrollX || 0, y: window.scrollY || 0, containers };
+    } catch { /* */ }
     const vh = window.innerHeight || 800; let lastH = -1, steps = 0;
     for (let i = 1; i <= 16; i++) {
       try { window.scrollTo(0, i * Math.round(vh * 0.9)); } catch { /* */ }
@@ -4910,10 +4916,21 @@ async function explorePageStructure(payload) {
   if (phase === 'cleanup') {
     installGuard();
     try { await closeOverlays(3); } finally { removeGuard(); }
-    // v2.74.566 — restore the entry scroll (captured in the metrics phase). Falls
-    // back to the top only if we never recorded it (e.g. the content script was
-    // re-injected after a navigation recovery, so the page already reloaded).
-    try { const s = window.__ahubEntryScroll; window.scrollTo((s && s.x) || 0, (s && s.y) || 0); } catch { /* */ }
+    // v2.74.567 — restore the entry scroll. The poke phase's scrollIntoView scrolls
+    // whatever the real scroller is — often an inner overflow DIV, not the window
+    // (which is why a plain window.scrollTo "never happened" visibly). So: reset
+    // every element scrolled during the sweep back to the top, then re-apply the
+    // window + any container scroll recorded at entry. Two passes (read all, then
+    // write) to avoid per-element layout thrash. Falls back to top if entry was
+    // never recorded (e.g. content script re-injected after a navigation recovery).
+    try {
+      const s = window.__ahubEntryScroll || {};
+      const scrolled = [];
+      try { for (const el of document.querySelectorAll('*')) { if (el.scrollTop > 0 || el.scrollLeft > 0) scrolled.push(el); } } catch { /* */ }
+      for (const el of scrolled) { try { el.scrollTop = 0; el.scrollLeft = 0; } catch { /* */ } }
+      try { window.scrollTo(s.x || 0, s.y || 0); } catch { /* */ }
+      for (const c of (s.containers || [])) { try { if (c.el && c.el.isConnected) { c.el.scrollTop = c.top; c.el.scrollLeft = c.left; } } catch { /* */ } }
+    } catch { /* */ }
     await sleep(80);
     return { success: true, phase, navAttempts, log };
   }
