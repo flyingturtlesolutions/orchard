@@ -17,6 +17,11 @@ import {
   objectBodyBytes,
   INLINE_OBJECT_MAX_BYTES,
   CloudClientError,
+  listWorkspaces,
+  listWorkspaceChanges,
+  fetchWorkspaceObjectRaw,
+  deleteWorkspaceObject,
+  batchWriteWorkspaceObjects,
 } from '../Cloud/CloudClient.js';
 import {
   getCachedObject,
@@ -38,6 +43,8 @@ import {
   getTombstone,
   listTombstones,
   removeTombstone,
+  getMeta,
+  setMeta,
 } from '../Storage/IndexedDBStore.js';
 import { logicalPathForRecord, recordMetaFromPath } from '../Storage/StoragePaths.js';
 import * as GroundAssetStore from '../Storage/GroundAssetStore.js';
@@ -78,13 +85,20 @@ export async function enqueueSyncWrite(path, envelope, opts = {}) {
   const cached = await getCachedObject(path);
   const deviceId = await getOrCreateDeviceId();
 
+  // Route team-ground writes to the workspace object route: derive the groundId (from opts or the
+  // path) and, if it's a tagged team ground, stamp the entry's wsId so pushOutbox sends it to
+  // /workspaces/{wsId}/objects instead of the personal namespace (DD-05 C).
+  const groundId = opts.groundId ?? recordMetaFromPath(path)?.groundId ?? undefined;
+  const wsId = opts.wsId ?? (groundId ? (await getGroundWorkspaceMap())[groundId] : undefined);
+
   await upsertOutboxEntry({
     path,
     envelope,
     expectedEtag: opts.expectedEtag ?? cached?.etag ?? '*',
     deviceId,
     queuedAt: Date.now(),
-    groundId: opts.groundId,
+    groundId,
+    wsId,
     op: opts.op || 'put',
   });
 
@@ -426,12 +440,18 @@ async function bootstrapLocalWorkspace() {
   const opts = { orchardUserId: session?.orchardUserId, deferSchedule: true };
   const outboxPaths = new Set((await listOutboxEntries()).map((e) => e.path));
   const conflictPaths = new Set((await getPendingConflicts()).map((p) => p.path));
+  const groundWsMap = await getGroundWorkspaceMap();   // team grounds sync via their workspace feed/route
   let enqueued = 0;
 
   /** @param {import('../Storage/StoragePaths.js').SyncKind} kind @param {Record<string, unknown>} record */
   async function maybeEnqueue(kind, record) {
     const path = logicalPathForRecord(kind, record);
     if (!path) return;
+    // Never push a team ground into the personal namespace — it round-trips through /workspaces/{wsId}.
+    const gid = kind === 'ground'
+      ? String(record.id)
+      : (typeof record.groundId === 'string' ? record.groundId : null);
+    if (gid && groundWsMap[gid]) return;
     if (outboxPaths.has(path) || conflictPaths.has(path)) return;
     const cached = await getCachedObject(path);
     if (!isLocalRecordDirty(record, cached)) return;
@@ -492,7 +512,8 @@ async function bootstrapLocalWorkspace() {
 }
 
 async function pushOutbox() {
-  const entries = await listOutboxEntries();
+  // Personal-namespace entries only; team (wsId-tagged) entries push via pushWorkspaceOutbox().
+  const entries = (await listOutboxEntries()).filter((e) => !e.wsId);
   if (entries.length === 0) return { pushed: 0 };
 
   const conflictPaths = new Set((await getPendingConflicts()).map((p) => p.path));
@@ -613,11 +634,102 @@ async function pushBatchChunk(chunk) {
   return pushed;
 }
 
+// ── Team-workspace outbox push (DD-05 C) ─────────────────────────────────────
+// Pushes wsId-tagged entries to /workspaces/{wsId}/objects. Inline + delete + batch only — large
+// team objects are skipped (no team presign route yet). Cross-author 409 → manual merge.
+async function pushWorkspaceOutbox() {
+  const entries = (await listOutboxEntries()).filter((e) => e.wsId);
+  if (entries.length === 0) return 0;
+
+  const conflictPaths = new Set((await getPendingConflicts()).map((p) => p.path));
+  /** @type {Map<string, typeof entries>} */
+  const byWs = new Map();
+  for (const e of entries) {
+    if (!byWs.has(e.wsId)) byWs.set(e.wsId, []);
+    byWs.get(e.wsId).push(e);
+  }
+
+  let pushed = 0;
+  for (const [wsId, group] of byWs) {
+    const deletes = group.filter((e) => e.op === 'delete');
+    const puts = group.filter((e) => e.op !== 'delete' && !conflictPaths.has(e.path));
+
+    for (const entry of deletes) {
+      try {
+        await deleteWorkspaceObject(wsId, entry.path);
+        await removeOutboxEntryIfUnchanged(entry.path, entry.queuedAt);
+        await removeCachedObject(entry.path);
+        pushed += 1;
+      } catch (err) {
+        Logger.warn('SyncEngine', `ws ${wsId} delete failed ${entry.path}: ${err.message}`);
+      }
+    }
+
+    const small = puts.filter((e) => objectBodyBytes(e.envelope) <= INLINE_OBJECT_MAX_BYTES);
+    for (const entry of puts) {
+      if (objectBodyBytes(entry.envelope) > INLINE_OBJECT_MAX_BYTES) {
+        Logger.warn('SyncEngine', `ws ${wsId} skip large object (team presign unsupported): ${entry.path}`);
+      }
+    }
+    for (let i = 0; i < small.length; i += MAX_BATCH) {
+      pushed += await pushWorkspaceBatchChunk(wsId, small.slice(i, i + MAX_BATCH));
+    }
+  }
+  return pushed;
+}
+
+/**
+ * @param {string} wsId
+ * @param {Array<{ path: string, envelope: unknown, expectedEtag?: string, queuedAt: number }>} chunk
+ */
+async function pushWorkspaceBatchChunk(wsId, chunk) {
+  let remaining = chunk;
+  let pushed = 0;
+
+  while (remaining.length > 0) {
+    const items = remaining.map((e) => ({
+      path: e.path,
+      envelope: e.envelope,
+      expectedEtag: e.expectedEtag || '*',
+    }));
+    try {
+      const res = await batchWriteWorkspaceObjects(wsId, { items });
+      const uploaded = [];
+      for (const entry of remaining) {
+        const etag = res.etags?.[entry.path];
+        if (!etag) { Logger.warn('SyncEngine', `ws batch missing etag: ${entry.path}`); continue; }
+        await putCachedObject({
+          path: entry.path,
+          envelope: entry.envelope,
+          etag,
+          updatedAt: envelopeUpdatedAt(entry.envelope) || Date.now(),
+        });
+        uploaded.push(entry);
+      }
+      for (const e of uploaded) await removeOutboxEntryIfUnchanged(e.path, e.queuedAt);
+      pushed += uploaded.length;
+      break;
+    } catch (e) {
+      if (e instanceof CloudClientError && e.status === 409 && e.body && typeof e.body === 'object') {
+        const conflict = /** @type {{ path?: string }} */ (e.body);
+        await handleConflict(/** @type {any} */ (e.body), true);   // team → always manual (DD-03)
+        if (!conflict.path) break;
+        remaining = remaining.filter((entry) => entry.path !== conflict.path);
+        if (remaining.length === 0) break;
+        continue;
+      }
+      throw e;
+    }
+  }
+  return pushed;
+}
+
 /**
  * @param {any} conflict
+ * @param {boolean} [forceManual]  team cross-author 409 → always manual merge (DD-03 shared rule)
  */
-async function handleConflict(conflict) {
-  const action = resolveConflictAction(conflict);
+async function handleConflict(conflict, forceManual = false) {
+  const action = forceManual ? 'manual' : resolveConflictAction(conflict);
 
   if (action === 'auto-lww') {
     const envelope = pickAutoResolvedEnvelope(conflict);
@@ -639,7 +751,7 @@ async function handleConflict(conflict) {
     return;
   }
 
-  if (shouldQueueManualConflict(conflict)) {
+  if (forceManual || shouldQueueManualConflict(conflict)) {
     const pending = await getPendingConflicts();
     if (!pending.some((p) => p.path === conflict.path)) {
       pending.push({ path: conflict.path, conflict });
@@ -648,6 +760,101 @@ async function handleConflict(conflict) {
     }
     await removeOutboxEntries([conflict.path]);
   }
+}
+
+// ── Shared-workspace sync (DD-05 C) ──────────────────────────────────────────
+// A ground that arrives via a workspace feed is tagged `groundId → wsId` so its writes route to
+// the team object route (Slice 3b) and bootstrap never re-pushes it into the personal namespace.
+// Per-workspace change cursors live under meta key `wsSyncToken:{wsId}`.
+
+/** @returns {Promise<Record<string, string>>} */
+async function getGroundWorkspaceMap() {
+  const m = await getMeta('groundWorkspaceMap');
+  return (m && typeof m === 'object') ? /** @type {Record<string, string>} */ (m) : {};
+}
+
+/** @param {string} groundId @param {string} wsId */
+async function tagGroundWorkspace(groundId, wsId) {
+  if (!groundId || !wsId) return;
+  const m = await getGroundWorkspaceMap();
+  if (m[groundId] === wsId) return;
+  m[groundId] = wsId;
+  await setMeta('groundWorkspaceMap', m);
+}
+
+/** Pull one workspace's change feed and apply team objects locally. @param {string} wsId */
+async function pullWorkspaceChanges(wsId) {
+  let since = (await getMeta(`wsSyncToken:${wsId}`)) || '';
+  const applied = [];
+  let pages = 0;
+
+  while (pages < 20) {
+    let feed;
+    try {
+      feed = await listWorkspaceChanges(wsId, since || undefined);
+    } catch (e) {
+      Logger.warn('SyncEngine', `ws ${wsId} feed failed: ${e.message}`);
+      break;
+    }
+    const changes = feed.changes || [];
+    pages += 1;
+
+    if (changes.length === 0) {
+      if (feed.nextToken && feed.nextToken !== since) await setMeta(`wsSyncToken:${wsId}`, feed.nextToken);
+      break;
+    }
+
+    for (const change of changes) {
+      if (!change.path || change.path.endsWith('/_manifest.json')) continue;
+      if (change.deleted) {
+        const result = await applyRemoteDelete(change.path);
+        if (result) applied.push(result);
+        continue;
+      }
+      const cached = await getCachedObject(change.path);
+      if (cached?.etag && change.etag && cached.etag === change.etag) {
+        const meta = recordMetaFromPath(change.path);
+        if (meta && await localRecordExists(meta.kind, meta.id, meta.groundId)) continue;
+      }
+      try {
+        const { envelope, etag } = await fetchWorkspaceObjectRaw(wsId, change.path);
+        const result = await applyRemoteObject(change.path, envelope, etag || change.etag || '');
+        if (result) {
+          applied.push(result);
+          const gid = change.groundId || recordMetaFromPath(change.path)?.groundId;
+          if (gid) await tagGroundWorkspace(gid, wsId);
+        }
+      } catch (e) {
+        const status = e instanceof CloudClientError ? e.status : 0;
+        Logger.warn('SyncEngine', `ws ${wsId} pull skip (${status || 'network'}): ${change.path}`);
+        continue;
+      }
+    }
+
+    if (feed.nextToken) { since = feed.nextToken; await setMeta(`wsSyncToken:${wsId}`, feed.nextToken); }
+    if (changes.length < 100 || !feed.nextToken) break;
+  }
+  return applied;
+}
+
+/** Pull every workspace the signed-in user belongs to. Best-effort; offline uses the cached list. */
+async function pullAllWorkspaces() {
+  let workspaces = [];
+  try {
+    const res = await listWorkspaces();
+    workspaces = res?.workspaces || [];
+    await setMeta('subscribedWorkspaces', workspaces);
+  } catch {
+    workspaces = (await getMeta('subscribedWorkspaces')) || [];
+  }
+  let pulled = 0;
+  for (const ws of workspaces) {
+    if (!ws?.workspaceId) continue;
+    const applied = await pullWorkspaceChanges(ws.workspaceId);
+    pulled += applied.length;
+  }
+  if (pulled > 0) Logger.info('SyncEngine', `workspace pull: ${pulled} applied across ${workspaces.length} workspace(s)`);
+  return pulled;
 }
 
 async function pullChanges() {
@@ -781,10 +988,12 @@ export async function runSync() {
   try {
     const bootstrapped = await bootstrapLocalWorkspace();
     const pushResult = await pushOutbox();
+    const wsPushed = await pushWorkspaceOutbox();   // DD-05 C: push team-ground edits to /workspaces
     const pullResult = await pullChanges();
+    const wsPulled = await pullAllWorkspaces();      // DD-05 C: merge team-workspace feeds
     const outboxPending = (await listOutboxEntries()).length;
     await gcTombstones();
-    Logger.info('SyncEngine', `sync complete pushed=${pushResult.pushed} pulled=${pullResult.pulled} bootstrapped=${bootstrapped} outbox=${outboxPending}`);
+    Logger.info('SyncEngine', `sync complete pushed=${pushResult.pushed} wsPushed=${wsPushed} pulled=${pullResult.pulled} wsPulled=${wsPulled} bootstrapped=${bootstrapped} outbox=${outboxPending}`);
     await setLastSyncResult({
       ok: true,
       at: Date.now(),

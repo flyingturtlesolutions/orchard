@@ -100,6 +100,7 @@ export async function removeCachedObject(path) {
  * @property {string} deviceId
  * @property {number} queuedAt
  * @property {string} [groundId]
+ * @property {string} [wsId]   shared-workspace id — routes the push to /workspaces/{wsId}/objects (DD-05 C)
  * @property {'put'|'delete'} [op]
  */
 

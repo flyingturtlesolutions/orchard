@@ -181,13 +181,14 @@ export async function listCloudChanges(sinceToken) {
 
 /**
  * @param {string} logicalPath
+ * @param {string} [routePrefix]  'objects' (personal) or 'workspaces/{wsId}/objects' (team)
  * @returns {Promise<Response>}
  */
-async function fetchObjectResponse(logicalPath) {
+async function fetchObjectResponse(logicalPath, routePrefix = 'objects') {
   const settings = await getCloudSettings();
   const base = normalizeApiBaseUrl(settings.apiBaseUrl);
   const encoded = logicalPath.split('/').map(encodeURIComponent).join('/');
-  const url = new URL(`objects/${encoded}`, `${base}/`);
+  const url = new URL(`${routePrefix}/${encoded}`, `${base}/`);
 
   const session = await ensureFreshSession();
   if (!session?.idToken) {
@@ -206,10 +207,11 @@ async function fetchObjectResponse(logicalPath) {
 
 /**
  * @param {string} logicalPath
+ * @param {string} [routePrefix]
  * @returns {Promise<{ envelope: unknown, etag: string }>}
  */
-export async function fetchCloudObjectRaw(logicalPath) {
-  const res = await fetchObjectResponse(logicalPath);
+export async function fetchCloudObjectRaw(logicalPath, routePrefix = 'objects') {
+  const res = await fetchObjectResponse(logicalPath, routePrefix);
 
   if (res.status === 302 || res.status === 301 || res.status === 307 || res.status === 308) {
     const downloadUrl = res.headers.get('location');
@@ -346,4 +348,38 @@ export async function batchWriteCloudObjects(body) {
 export async function deleteCloudObject(logicalPath) {
   const encoded = logicalPath.split('/').map(encodeURIComponent).join('/');
   return cloudRequest('DELETE', `/objects/${encoded}`);
+}
+
+// ── Team workspace object I/O (DD-05 C / §7.2) ───────────────────────────────
+// Mirror the personal object calls against /workspaces/{wsId}/objects. Inline only — team large
+// objects (presigned blobs) are deferred; the sync engine routes only small JSON here.
+function wsObjectsBase(wsId) { return `/workspaces/${encodeURIComponent(wsId)}/objects`; }
+
+/** @param {string} wsId @param {string} [sinceToken] */
+export async function listWorkspaceChanges(wsId, sinceToken) {
+  return /** @type {Promise<any>} */ (cloudRequest('GET', wsObjectsBase(wsId), {
+    query: sinceToken ? { since: sinceToken } : {},
+  }));
+}
+
+/** @param {string} wsId @param {string} logicalPath @returns {Promise<{ envelope: unknown, etag: string }>} */
+export async function fetchWorkspaceObjectRaw(wsId, logicalPath) {
+  return fetchCloudObjectRaw(logicalPath, `workspaces/${encodeURIComponent(wsId)}/objects`);
+}
+
+/** @param {string} wsId @param {string} logicalPath @param {unknown} envelope @param {string} [expectedEtag] */
+export async function putWorkspaceObject(wsId, logicalPath, envelope, expectedEtag = '*') {
+  const encoded = logicalPath.split('/').map(encodeURIComponent).join('/');
+  return cloudRequest('PUT', `${wsObjectsBase(wsId)}/${encoded}`, { body: envelope, ifMatch: expectedEtag });
+}
+
+/** @param {string} wsId @param {string} logicalPath */
+export async function deleteWorkspaceObject(wsId, logicalPath) {
+  const encoded = logicalPath.split('/').map(encodeURIComponent).join('/');
+  return cloudRequest('DELETE', `${wsObjectsBase(wsId)}/${encoded}`);
+}
+
+/** @param {string} wsId @param {{ items: Array<{ path: string, envelope: unknown, expectedEtag?: string }> }} body */
+export async function batchWriteWorkspaceObjects(wsId, body) {
+  return /** @type {Promise<any>} */ (cloudRequest('POST', `${wsObjectsBase(wsId)}/batch`, { body }));
 }
