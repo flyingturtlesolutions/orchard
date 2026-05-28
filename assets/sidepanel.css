@@ -4952,6 +4952,50 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 .dbg-perspective-ground-note { color: rgba(148, 163, 184, 0.85); font-size: 10px; font-style: italic; }
 .dbg-perspective-ground-actions { display: flex; gap: 6px; }
 
+/* PB-6b — Trial proof panel: run the resolved bundle, score a fidelity vector. */
+.dbg-perspective-trial {
+  display: flex; flex-direction: column; gap: 6px;
+  font-size: 11px; line-height: 1.4;
+  margin-top: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 5px; padding: 6px 8px;
+  background: rgba(148, 163, 184, 0.04);
+}
+.dbg-perspective-trial-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.dbg-perspective-trial-title { font-weight: 600; color: rgba(226, 232, 240, 0.95); }
+.dbg-perspective-trial-error { color: rgba(254, 202, 202, 0.95); background: rgba(248, 113, 113, 0.08); border-radius: 4px; padding: 4px 6px; }
+.dbg-perspective-trial-skip  { color: rgba(203, 213, 225, 0.85); font-style: italic; }
+.dbg-perspective-trial-verdict { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 4px; }
+.dbg-perspective-trial-verdict.pass { background: rgba(74, 222, 128, 0.1); border: 1px solid rgba(74, 222, 128, 0.4); }
+.dbg-perspective-trial-verdict.fail { background: rgba(248, 113, 113, 0.1); border: 1px solid rgba(248, 113, 113, 0.45); }
+.dbg-perspective-trial-mark { font-weight: 700; }
+.dbg-perspective-trial-verdict.pass .dbg-perspective-trial-mark { color: rgba(167, 243, 208, 0.98); }
+.dbg-perspective-trial-verdict.fail .dbg-perspective-trial-mark { color: rgba(254, 202, 202, 0.98); }
+.dbg-perspective-trial-score { color: rgba(226, 232, 240, 0.9); }
+.dbg-perspective-trial-safety { margin-left: auto; font-size: 10px; padding: 1px 6px; border-radius: 999px; white-space: nowrap; }
+.dbg-perspective-trial-safety.read         { background: rgba(125, 211, 252, 0.15); color: rgba(186, 230, 253, 0.95); }
+.dbg-perspective-trial-safety.reversible   { background: rgba(74, 222, 128, 0.14); color: rgba(167, 243, 208, 0.95); }
+.dbg-perspective-trial-safety.irreversible { background: rgba(250, 204, 21, 0.16); color: rgba(253, 224, 130, 0.95); }
+.dbg-perspective-trial-vector { display: flex; flex-wrap: wrap; gap: 4px; }
+.dbg-perspective-trial-axis { display: flex; align-items: center; gap: 5px; font-size: 10px; padding: 1px 6px; border-radius: 999px; background: rgba(148, 163, 184, 0.12); }
+.dbg-perspective-trial-axis .ax-label { color: rgba(203, 213, 225, 0.9); }
+.dbg-perspective-trial-axis .ax-val { font-weight: 700; color: rgba(226, 232, 240, 0.95); }
+.dbg-perspective-trial-axis.pass    { background: rgba(74, 222, 128, 0.14); }
+.dbg-perspective-trial-axis.partial { background: rgba(250, 204, 21, 0.14); }
+.dbg-perspective-trial-axis.fail    { background: rgba(248, 113, 113, 0.14); }
+.dbg-perspective-trial-evidence { margin: 0; padding-left: 16px; color: rgba(148, 163, 184, 0.9); font-size: 10px; display: flex; flex-direction: column; gap: 1px; }
+.dbg-perspective-trial-deferred { font-size: 10px; color: rgba(253, 224, 130, 0.9); }
+.dbg-perspective-trial-deferred code,
+.dbg-perspective-complete-missing code,
+.dbg-perspective-complete-optional code { font-size: 10px; background: rgba(148, 163, 184, 0.16); border-radius: 3px; padding: 0 3px; }
+.dbg-perspective-trial-completeness { border-top: 1px solid rgba(148, 163, 184, 0.14); padding-top: 5px; display: flex; flex-direction: column; gap: 3px; }
+.dbg-perspective-complete-head { display: flex; align-items: center; gap: 8px; color: rgba(226, 232, 240, 0.9); }
+.dbg-perspective-complete { font-size: 10px; padding: 1px 6px; border-radius: 999px; white-space: nowrap; }
+.dbg-perspective-complete.ok         { background: rgba(74, 222, 128, 0.15); color: rgba(167, 243, 208, 0.95); }
+.dbg-perspective-complete.incomplete { background: rgba(250, 204, 21, 0.16); color: rgba(253, 224, 130, 0.95); }
+.dbg-perspective-complete-missing  { font-size: 10px; color: rgba(254, 202, 202, 0.9); }
+.dbg-perspective-complete-optional { font-size: 10px; color: rgba(148, 163, 184, 0.8); }
+
 /* v2.74.397 — Locale (Perspective capability catalog) inspector (build slice 1) */
 .dbg-perspective-locale {
   display: flex; flex-direction: column; gap: 6px;

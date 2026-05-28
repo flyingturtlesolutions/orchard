@@ -57,6 +57,9 @@ import {
   // (= more stable discriminator).
   classifySelectorTier,
 } from '../../Services/LandmarkProfile.js';
+// PB-6b — pure completeness assessor (proposed-vs-resolved roles). Client-side so the
+// trial panel can show the sufficiency gate without a round-trip. No chrome/DOM/storage.
+import { assessPerspectiveCompleteness } from '../../Core/trialSynth.js';
 
 // ─── Module-local state ───────────────────────────────────────────────────
 //
@@ -116,6 +119,16 @@ let _exploreToken = 0;
 //   _groundInFlight: true while the grounding call round-trips.
 let _groundIntentResult = null;
 let _groundInFlight = false;
+// PB-6b — Trial-run state. The intent-truth proof for the chosen perspective: synthesize
+// the resolved bundle into a runnable op, run it safely, score the fidelity vector.
+//   _trialInFlight: true while RUN_PERSPECTIVE_TRIAL round-trips (one at a time).
+//   _trialResult: the last run's outcome, shaped as one of:
+//     { ran:true, safetyClass, deferred, trial:{verdict,score,vector,evidence}, draft, completeness }
+//     { ran:false, reason, completeness }   — nothing actionable in the bundle
+//     { error, completeness }               — the run itself failed
+//     null                                  — not yet run for this choice
+let _trialInFlight = false;
+let _trialResult = null;
 // v2.74.233 — Per-landmark "refining with Claude" status text. Set on
 // the landmark idx when the picker just captured and Claude is being
 // invoked to refine; cleared when Claude responds (success or fail).
@@ -834,6 +847,8 @@ async function unmount() {
   _exploreToken++;   // invalidate any in-flight sweep landing after unmount
   _groundIntentResult = null;
   _groundInFlight = false;
+  _trialInFlight = false;
+  _trialResult = null;
 
   // Clear DOM refs (no leak — but clarity).
   perspectiveGroundLabelEl = perspectiveTabUrlEl = perspectiveWarningEl = null;
@@ -1958,11 +1973,15 @@ function _renderPerspectivePanel() {
       </div>`;
     }
     html += `</div>`;
+    // PB-6b — trial proof row: run the resolved bundle to prove it accomplishes the intent.
+    html += _renderTrialRow();
   }
 
   perspectiveBody.innerHTML = html;
   perspectiveBody.querySelector('[data-perspective-action="propose-perspectives"]')
     ?.addEventListener('click', () => onProposePerspectives());
+  perspectiveBody.querySelector('[data-perspective-action="run-trial"]')
+    ?.addEventListener('click', () => onRunTrial());
   perspectiveBody.querySelectorAll('[data-perspective-action="choose-perspective"]').forEach(btn =>
     btn.addEventListener('click', () => onChoosePerspective(parseInt(btn.dataset.idx, 10))));
   perspectiveBody.querySelectorAll('[data-perspective-action="resolve-roles"]').forEach(btn =>
@@ -2016,6 +2035,99 @@ function _renderGroundIntentRow(intent) {
   return `<div class="dbg-perspective-ground offer">
       <button class="btn-secondary tiny" data-perspective-action="ground-intent" type="button" ${disabled ? 'disabled' : ''} title="${escAttr(disabled ? 'Write an Intent first.' : 'Refine your Intent against what this page can actually do (uses the explored page affordances).')}">✨ Ground intent in this page</button>
     </div>`;
+}
+
+// PB-6b — Trial row: the intent-truth proof. Once roles are resolved, "Run trial" synthesizes
+// the bundle into a runnable op (Core/trialSynth), runs it SAFELY on the current page (irreversible
+// commits become reachability probes, never fired), and scores a legible fidelity vector. This is
+// the first live exercise of the PB-4/PB-5 path — the answer to "does this perspective actually do
+// what the user asked?", not just "do its selectors resolve?".
+function _renderTrialRow() {
+  if (!_chosenPerspective || !Array.isArray(_chosenPerspective.roles)) return '';
+  const filled = _chosenPerspective.roles.filter(r => r?.role && _perspectiveRoleFilled(r.role)).length;
+  const busy = _perspectiveInFlight || !!_resolveInFlightKey;
+  const canRun = filled > 0 && !busy && !_trialInFlight;
+  const btnLabel = _trialInFlight ? '⏳ Running trial…' : (_trialResult ? '↻ Re-run trial' : '▶ Run trial');
+  const hint = filled === 0
+    ? 'Resolve at least one role first — the trial runs the resolved bundle.'
+    : 'Run the resolved roles as a real operation on this page to prove the intent. Irreversible actions (buy/send/delete) are probed for reachability, never fired.';
+
+  let html = `<div class="dbg-perspective-trial">
+    <div class="dbg-perspective-trial-head">
+      <span class="dbg-perspective-trial-title">Trial — does this perspective accomplish the intent?</span>
+      <button class="btn-secondary tiny" data-perspective-action="run-trial" type="button" ${canRun ? '' : 'disabled'} title="${escAttr(hint)}">${btnLabel}</button>
+    </div>`;
+
+  const t = _trialResult;
+  if (t) {
+    if (t.error) {
+      html += `<div class="dbg-perspective-trial-error">⚠ Trial failed to run: ${escHtml(t.error)}</div>`;
+    } else if (t.ran === false) {
+      html += `<div class="dbg-perspective-trial-skip">∅ Nothing to trial — ${escHtml(t.reason || 'the bundle had no actionable steps')}.</div>`;
+    } else if (t.trial) {
+      const sc = t.trial;
+      const passed = sc.verdict === 'trial-pass';
+      const safetyBadge = t.safetyClass === 'irreversible'
+        ? `<span class="dbg-perspective-trial-safety irreversible" title="Irreversible commit deferred — the terminal action was probed for reachability, not fired.">⚠ irreversible (deferred)</span>`
+        : t.safetyClass === 'read'
+          ? `<span class="dbg-perspective-trial-safety read">read-only</span>`
+          : `<span class="dbg-perspective-trial-safety reversible">reversible</span>`;
+      html += `<div class="dbg-perspective-trial-verdict ${passed ? 'pass' : 'fail'}">
+          <span class="dbg-perspective-trial-mark">${passed ? '✓ trial-pass' : '✗ trial-fail'}</span>
+          <span class="dbg-perspective-trial-score">fidelity ${Math.round((sc.score ?? 0) * 100)}%</span>
+          ${safetyBadge}
+        </div>`;
+      // Fidelity vector — one row per evaluated axis (null axes are N/A for this shape/class).
+      const v = sc.vector || {};
+      const axes = [
+        ['Roles resolved', v.resolvedCompleteness],
+        ['Ran without error', v.effectMatch],
+        ['Postconditions met', v.postconditionMet],
+        ['Content surfaced', v.extractQuality],
+        ['Terminal reachable', v.terminalReachable],
+      ].map(([label, val]) => _renderTrialAxis(label, val)).filter(Boolean).join('');
+      if (axes) html += `<div class="dbg-perspective-trial-vector">${axes}</div>`;
+      // Evidence — the human-readable trail behind the verdict.
+      if (Array.isArray(sc.evidence) && sc.evidence.length) {
+        html += `<ul class="dbg-perspective-trial-evidence">${sc.evidence.map(e => `<li>${escHtml(e)}</li>`).join('')}</ul>`;
+      }
+      if (t.safetyClass === 'irreversible' && Array.isArray(t.deferred) && t.deferred.length) {
+        html += `<div class="dbg-perspective-trial-deferred">Deferred (not fired): <code>${escHtml(t.deferred.join(', '))}</code></div>`;
+      }
+    }
+    // Completeness gate — proposed-vs-resolved sufficiency (always shown when we ran).
+    if (t.completeness) html += _renderCompletenessReport(t.completeness);
+  }
+  html += `</div>`;
+  return html;
+}
+
+// One fidelity-vector axis. null → omitted (not applicable to this intent shape/safety class).
+function _renderTrialAxis(label, val) {
+  if (val == null) return '';
+  const pct = Math.round(val * 100);
+  const cls = val >= 1 ? 'pass' : val > 0 ? 'partial' : 'fail';
+  return `<div class="dbg-perspective-trial-axis ${cls}"><span class="ax-label">${escHtml(label)}</span><span class="ax-val">${pct}%</span></div>`;
+}
+
+// PB-6 completeness gate — every REQUIRED role (multiplicity one|many) must resolve. An incomplete
+// bundle is structurally insufficient regardless of how the trial scored, so this is surfaced as a
+// hard signal next to the verdict.
+function _renderCompletenessReport(c) {
+  const head = c.complete
+    ? `<span class="dbg-perspective-complete ok">✓ complete</span>`
+    : `<span class="dbg-perspective-complete incomplete">⚠ incomplete</span>`;
+  let html = `<div class="dbg-perspective-trial-completeness">
+    <div class="dbg-perspective-complete-head">${head}<span>${c.resolvedCount}/${c.proposedCount} role(s) resolved</span></div>`;
+  if (Array.isArray(c.missingRequired) && c.missingRequired.length) {
+    html += `<div class="dbg-perspective-complete-missing">Missing required: ${c.missingRequired.map(r => `<code>${escHtml(r)}</code>`).join(', ')}</div>`;
+  }
+  const optionalDropped = (c.dropped || []).filter(r => !(c.missingRequired || []).includes(r));
+  if (optionalDropped.length) {
+    html += `<div class="dbg-perspective-complete-optional">Optional unresolved: ${optionalDropped.map(r => `<code>${escHtml(r)}</code>`).join(', ')}</div>`;
+  }
+  html += `</div>`;
+  return html;
 }
 
 // v2.74.368 — Render the depth-exploration row based on _pageStructureStatus.
@@ -2265,6 +2377,7 @@ function onChoosePerspective(idx) {
   if (!opt) return;
   _chosenPerspective = opt;
   _chosenPerspectiveIdx = idx;
+  _trialResult = null;   // PB-6b — a different choice invalidates the prior proof
   // Name → perspective name, but never clobber a name the user already typed.
   if (!(_perspectiveDraft.name ?? '').trim()) {
     _perspectiveDraft.name = _normalizePerspectiveName(opt.name);
@@ -2291,6 +2404,73 @@ function onChoosePerspective(idx) {
   }
   _renderPerspectivePanel();
   updatePerspectiveSaveButtonState();
+}
+
+// PB-6b — Run the intent-truth trial for the chosen perspective. Join the proposal's roles to the
+// resolved landmarks (selector + grounding featureId), then hand the bundle to the background runner
+// (RUN_PERSPECTIVE_TRIAL → synthesize → safety-class → execute → score). Returns a fidelity vector +
+// verdict + the proposed-vs-resolved completeness gate, rendered inline by _renderTrialRow.
+async function onRunTrial() {
+  if (!_perspectiveDraft || !_chosenPerspective || _trialInFlight) return;
+  const intent = (_perspectiveDraft.description ?? '').trim();
+  const landmarks = _perspectiveDraft.landmarks ?? [];
+  // Bundle = every PROPOSED role that resolved to a landmark with a selector. Carry the grounding
+  // featureId (landmark first — it's the verified binding — else the proposal's) so the trial synth
+  // can class the role's kind/verified status from the feature catalog.
+  const roles = [];
+  for (const r of (_chosenPerspective.roles ?? [])) {
+    if (!r?.role) continue;
+    const lm = landmarks.find(l => l?.roleFill === r.role && l?.selector);
+    if (!lm) continue;
+    roles.push({
+      role: r.role,
+      selector: lm.selector,
+      featureId: lm.featureId ?? r.featureId ?? null,
+      multiplicity: r.multiplicity ?? 'one',
+      hidden: r.hidden ?? false,
+      revealedBy: r.revealedBy ?? null,
+    });
+  }
+  // Completeness is computable client-side regardless of whether we can run.
+  const completeness = assessPerspectiveCompleteness(_chosenPerspective.roles ?? [], roles.map(x => x.role));
+  if (!roles.length) {
+    toast('Resolve at least one role before running a trial.', 'warn');
+    _trialResult = { ran: false, reason: 'no resolved roles to trial', completeness };
+    _renderPerspectivePanel();
+    return;
+  }
+  // CRITICAL (PB-6b): the trial MUST run against the CURRENT page — that's where these selectors were
+  // resolved + verified. Falling back to ground.url could load a different page and fail every step
+  // spuriously. Pass the live tab URL as navigateUrl.
+  let navigateUrl = null;
+  try { const tab = await getActiveTab(); navigateUrl = tab?.url ?? null; } catch { /* leave null */ }
+
+  _trialInFlight = true;
+  _trialResult = null;
+  _renderPerspectivePanel();
+  try {
+    const res = await chrome.runtime.sendMessage({
+      type: 'RUN_PERSPECTIVE_TRIAL',
+      payload: {
+        groundId: _perspectiveGroundId,
+        intent,
+        roles,
+        navigateUrl,
+        proposedRoleCount: (_chosenPerspective.roles ?? []).length,
+      },
+    });
+    if (!res?.success) {
+      _trialResult = { error: res?.error || 'the trial runner returned no result', completeness };
+    } else {
+      _trialResult = { ...res, completeness };
+    }
+  } catch (e) {
+    Logger.warn('perspective-capture', `RUN_PERSPECTIVE_TRIAL failed: ${e.message}`);
+    _trialResult = { error: e.message, completeness };
+  } finally {
+    _trialInFlight = false;
+    _renderPerspectivePanel();
+  }
 }
 
 // v2.74.352 — "Resolve roles": adopt the perspective, then ask Claude to
