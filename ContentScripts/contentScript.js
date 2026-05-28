@@ -1995,7 +1995,14 @@ function handleSelect(selector, value) {
 
     // Try matching by value attribute first, then by visible text
     let matched = false;
-    for (const opt of el.options) {
+    // v2.74.580 — trial sentinel (mirrors Core/trialSynth.TRIAL_SELECT_FIRST): pick the first SELECTABLE
+    // option, skipping a leading placeholder (empty value / disabled). Lets a trial exercise a dropdown
+    // without knowing valid option values.
+    if (value === '__ahub_trial_first_option__') {
+      const opt = Array.from(el.options).find((o) => o.value !== '' && !o.disabled) || el.options[0] || null;
+      if (opt) { el.value = opt.value; matched = true; }
+    }
+    if (!matched) for (const opt of el.options) {
       if (opt.value === value || opt.text.trim() === value) {
         el.value = opt.value;
         matched = true;

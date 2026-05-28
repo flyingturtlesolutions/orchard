@@ -19,6 +19,22 @@ const FILL_KINDS = new Set(['input']);
 const ACT_KINDS  = new Set(['action', 'navigation', 'disclosure']);
 const READ_KINDS = new Set(['collection', 'region', 'composite']);
 
+// v2.74.580 — runtime sentinel: SELECT this to pick the first selectable option (handleSelect skips a
+// leading placeholder). Lets a trial EXERCISE a dropdown without knowing valid option values. The literal
+// is mirrored in contentScript.handleSelect (classic content scripts can't import Core).
+export const TRIAL_SELECT_FIRST = '__ahub_trial_first_option__';
+
+// Which fill op a control needs: a <select> → SELECT, a file input → SET_FILE (SG-#81c, not yet
+// executable), everything else (text/textarea/search/email/…) → TYPE. Driven by the SUBSTRATE
+// (feature.fieldType / interaction.pattern), not the role name.
+function _fillOpFor(feature, role) {
+  const ft  = (feature && feature.fieldType) || (role && role.fieldType) || '';
+  const pat = (feature && feature.interaction && feature.interaction.pattern) || '';
+  if (ft === 'file' || pat === 'upload') return 'file';
+  if (ft === 'select' || pat === 'select') return 'select';
+  return 'text';
+}
+
 const READ_VERB = /\b(find|search|show|list|get|see|view|read|browse|capture|extract|check|look|compare|monitor|track|scrape)\b/i;
 
 /** Classify a role's kind: prefer the bound feature's kind, else infer from the role name. */
@@ -66,7 +82,7 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
     .filter((r) => r && typeof r.role === 'string')
     .map((r) => {
       const feature = r.featureId ? features[r.featureId] : null;
-      return { ...r, _kind: inferRoleKind(r.role, feature), _verified: !!(feature && feature.selectorVerified) };
+      return { ...r, _kind: inferRoleKind(r.role, feature), _verified: !!(feature && feature.selectorVerified), _fillOp: _fillOpFor(feature, r) };
     });
 
   const actions = [];
@@ -89,9 +105,17 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
     actions.push({ action: 'CLICK', selector: trig.selector });
   }
 
-  // 2. Fill inputs with concrete trial values (so the trial is self-contained, no param binding).
+  // 2. Fill inputs — by the field's ACTUAL kind, not always TYPE. A <select> needs SELECT; a file input
+  //    needs SET_FILE (SG-#81c — not yet executable, so deferred with a clear reason rather than mis-TYPED);
+  //    text/textarea/etc. get TYPE with a concrete trial value (self-contained run, no param binding).
   for (const r of fills) {
     if (!r.selector) { skipped.push({ role: r.role, why: 'no selector' }); continue; }
+    if (r._fillOp === 'file') { skipped.push({ role: r.role, why: 'file upload — SET_FILE op not yet implemented (SG-#81c)' }); continue; }
+    if (r._fillOp === 'select') {
+      actions.push({ action: 'SELECT', selector: r.selector, value: TRIAL_SELECT_FIRST });
+      trialInputs.push({ role: r.role, selector: r.selector, value: '(first option)', op: 'SELECT' });
+      continue;
+    }
     const value = trialValueFor(r.role, intent);
     actions.push({ action: 'TYPE', selector: r.selector, value });
     trialInputs.push({ role: r.role, selector: r.selector, value });

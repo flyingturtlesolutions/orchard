@@ -30,6 +30,8 @@ import * as Outcomes           from './Core/outcomes.js';    // v2.74.413 — Ou
 import * as SiteMap            from './Core/siteMap.js';     // v2.74.431 — Ground siteMap (GROUND_SPEC § 7)
 import * as CapabilitySynth    from './Core/capabilitySynth.js';  // v2.74.471 — synthesize capability from a goal
 import { synthesizeTrialOp, classifyTrialSafety, scoreTrial } from './Core/trialSynth.js';  // PB-3/4/5 — trial op + safety + scoring
+import { coverComplete }       from './Core/cover.js';      // SG-3 Cover — completeness floor
+import { selectionToTrialRoles } from './Core/bind.js';     // SG-4 Bind — selection → trial roles bundle
 import * as ChromeHoist        from './Core/chromeHoist.js';  // v2.74.480 — hoist recurring chrome off Locales → Ground.chrome
 import * as Workflows          from './Core/workflows.js';   // v2.74.488 — cross-Locale workflows (partOf) over the siteMap
 import { ExecutionEngine }    from './Services/ExecutionEngine.js';
@@ -5135,16 +5137,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             orphanRequired: (sel.orphanRequired || []).map(_projF),
             boundary: { requiredFields: (sel.boundary?.requiredFields || []).map(_projF), successAction: _projF(sel.boundary?.successAction) },
           } : null;
+          // SG-4b (SHADOW) — run the full spine to a synthesized PLAN: Cover (completeness verdict) → Bind
+          // (selection → roles) → synth (fill ops, file deferred) → safety class (irreversible commits
+          // deferred). NON-executing — surfaced + logged so the whole Comprehend→Select→Cover→Bind plan is
+          // observable on a ground. Actually running it is a separate, opt-in step.
+          const planP = Promise.all([intentSpecP, selectionP]).then(([spec, selection]) => {
+            if (!spec || spec.shape !== 'complete' || !selection || !localeModel) return null;
+            try {
+              const cover = coverComplete(spec, selection);
+              const roles = selectionToTrialRoles(spec, selection, localeModel);
+              const draft0 = synthesizeTrialOp({ groundedIntent: intent, roles, locale: localeModel });
+              const safety = classifyTrialSafety(intent, draft0);
+              const acts = Array.isArray(safety.actions) ? safety.actions : [];
+              Logger.info('background', `SG plan: cover=${cover.complete} (req ${cover.completionCount}, orphans ${(cover.orphanRequired || []).length}) runnable=${draft0.runnable} steps=${acts.length} deferred=${safety.deferred.length} skipped=${draft0.skipped.length} safety=${safety.safetyClass}`);
+              return {
+                cover, runnable: draft0.runnable, safetyClass: safety.safetyClass,
+                deferred: safety.deferred, skipped: draft0.skipped,
+                steps: acts.slice(0, 40).map((a) => ({ action: a.action, selector: a.selector ? String(a.selector).slice(0, 60) : undefined, value: a.value })),
+              };
+            } catch (e) { Logger.warn('background', `SG plan failed (continuing): ${e.message}`); return null; }
+          });
           if (!affordances && !goals) {
             // Nothing explored → can't ground; pass the intent through so the UI
             // can still propose (and nudge the user to Explore first). Comprehend is
             // page-independent, so its spec is still attached.
-            sendResponse({ success: true, achievable: 'unknown', shape: null, completeness: null, note: 'Run Explore on this page to assess the intent against its actual capabilities.', hadAffordance: false, intentSpec: await intentSpecP, selection: _projSelection(await selectionP) });
+            sendResponse({ success: true, achievable: 'unknown', shape: null, completeness: null, note: 'Run Explore on this page to assess the intent against its actual capabilities.', hadAffordance: false, intentSpec: await intentSpecP, selection: _projSelection(await selectionP), plan: await planP });
             return;
           }
           const out = await AnthropicService.groundIntent({ userIntent: intent, affordances, goals, url, title });
           if (!out) { sendResponse({ success: false, error: 'Claude returned no grounded intent.' }); return; }
-          sendResponse({ success: true, ...out, hadAffordance: true, hadGoals: !!goals, intentSpec: await intentSpecP, selection: _projSelection(await selectionP) });
+          sendResponse({ success: true, ...out, hadAffordance: true, hadGoals: !!goals, intentSpec: await intentSpecP, selection: _projSelection(await selectionP), plan: await planP });
         } catch (err) {
           Logger.error('background', `GROUND_INTENT failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
