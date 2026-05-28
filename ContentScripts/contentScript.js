@@ -3448,6 +3448,14 @@ async function enumeratePage() {
       if (!fsel) { try { fsel = synthesizeSelector(el, document); } catch { /* */ } }
       if (!fsel) { try { fsel = _synthesizeSelectorForElement(el); } catch { /* */ } }
       if (!fsel) continue;                              // no bindable selector at all
+      // v2.74.576 — TAG-QUALIFY a bare attribute selector so it targets the actual CONTROL, not a
+      // same-attr wrapper: a file widget's real <input aria-label="file-input"> vs a styled
+      // <div aria-label="file-input"> shell both match `[aria-label="file-input"]`, and querySelector
+      // returns the div. `input[aria-label="file-input"]` resolves to the input. Only adopt the tagged
+      // form when it uniquely resolves to THIS element (a no-op for shadow-DOM controls, which need
+      // shadow-aware resolution — flagged separately).
+      if (fsel[0] === '[') {
+        try { const tagged = (el.tagName || '').toLowerCase() + fsel; if (document.querySelector(tagged) === el) fsel = tagged; } catch { /* */ } }
       d.selector = fsel;
       formEls.add(el);
       const fkind = d.isAction ? 'action' : 'input';

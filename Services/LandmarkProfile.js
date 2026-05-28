@@ -117,8 +117,12 @@ function _classifyElementShapes(fp) {
   if (tag === 'textarea')                 shapes.add('input');
   if (fp?.isContentEditable)              shapes.add('input');
 
-  // Input-like but NOT typable (checkbox, radio, file, range, color).
-  if (tag === 'input' && !inputTypeIsText) shapes.add('input-control');
+  // Input-like but NOT typable (checkbox, radio, range, color).
+  if (tag === 'input' && !inputTypeIsText && inputType !== 'file') shapes.add('input-control');
+  // v2.74.576 — File inputs are their OWN shape: not typable, and NOT click-to-fill (clicking the native
+  // control opens an OS picker we can't drive). They're set programmatically (CDP DOM.setFileInputFiles),
+  // so model them as a distinct value control — visibility-agnostic, like TYPE/SELECT.
+  if (tag === 'input' && inputType === 'file') shapes.add('file');
 
   // Button / clickable.
   if (tag === 'button') shapes.add('button');
@@ -195,6 +199,7 @@ export function deriveCapabilities(fp) {
   const isButton    = shapes.has('button');
   const isLink      = shapes.has('link');
   const isSelect    = shapes.has('select');
+  const isFile      = shapes.has('file');
 
   // v2.74.556 — Value-setting (TYPE / SELECT) is VISIBILITY-AGNOSTIC: the runtime sets .value on a
   // present, enabled control programmatically, even when it's visually hidden behind a custom widget
@@ -213,6 +218,11 @@ export function deriveCapabilities(fp) {
 
   // Selectable: select / combobox / listbox, enabled. (Visibility-agnostic — value set programmatically.)
   const selectable = isSelect && enabled;
+
+  // v2.74.576 — File-settable: a file input, enabled. Set via CDP DOM.setFileInputFiles (the runtime op
+  // is SG-#81); visibility-agnostic, since the native control is almost always hidden behind a styled
+  // "Choose File" button. NOT typable and NOT click-to-fill.
+  const fileSettable = isFile && enabled;
 
   const textBearing = shapes.has('text');
   const isContainer = shapes.has('container');
@@ -246,10 +256,10 @@ export function deriveCapabilities(fp) {
   const isImage = shapes.has('image');
 
   return {
-    clickable, typable, selectable,
+    clickable, typable, selectable, fileSettable,
     textBearing, attrBearing,
     isContainer, isListItem,
-    isInput, isButton, isLink, isSelect,
+    isInput, isButton, isLink, isSelect, isFile,
     // v2.74.285 — Container-scope clickability.
     childrenAreClickable,
     // v2.74.286 — Image-direct + common-attr capability.
@@ -470,22 +480,28 @@ export function computeVerificationScore({ fp, capabilities, role, matchedCount 
     issues.push(`selector matches ${matchedCount} elements — downstream will pick the first unless a "_last" shape is used`);
   }
 
-  // Interactability is informational unless the role implies an
-  // interactive element. For text/container roles, non-interactable
-  // is fine.
-  if (!checks.interactable && expected && ['input', 'select', 'button', 'link'].includes(expected.requiredShape)) {
-    issues.push('element is disabled, read-only, or pointer-events:none — interactive ops will fail');
+  // v2.74.575 — VALUE controls (input/select) set their value via the DOM API regardless of visibility
+  // (SG-0.5: a native <select> / file input behind a custom widget is display:none yet fully settable),
+  // so they "fail" only when genuinely DISABLED/read-only — i.e. NOT value-settable. A CLICK control needs
+  // to be interactable (visible + enabled + pointer-events). Mirrors deriveCapabilities' visibility-agnostic
+  // value-setting so capture, capability, and verify all agree.
+  const valueSettable = capabilities?.typable === true || capabilities?.selectable === true || capabilities?.fileSettable === true;
+  const valueRole = expected && (expected.requiredShape === 'input' || expected.requiredShape === 'select');
+  const clickRole = expected && (expected.requiredShape === 'button' || expected.requiredShape === 'link');
+  if (valueRole && !valueSettable) {
+    issues.push('element is disabled or read-only — value ops will fail');
+  } else if (clickRole && !checks.interactable) {
+    issues.push('element is hidden, disabled, or pointer-events:none — click will fail');
   }
 
   // Overall score.
-  // v2.74.342 — A role/type mismatch (e.g. a "button" role resolving to a
-  // clickable <div> / SVG icon) is now a CAVEAT, not a hard mismatch: the
-  // element exists + is visible + resolves, and the capability model gates
-  // ops by ACTUAL capability anyway (a non-clickable element won't be offered
-  // CLICK regardless of the score). Only an absent/invisible element is a
-  // true mismatch. typeMatchesRole=false still records an issue → caveats.
+  // v2.74.342 — A role/type mismatch (e.g. a "button" role resolving to a clickable <div>/SVG icon) is a
+  // CAVEAT, not a hard mismatch — the capability model gates ops by ACTUAL capability anyway.
+  // v2.74.575 — Invisibility is a hard mismatch ONLY for a control that can't be value-set. A hidden VALUE
+  // control (native <select>/input behind a custom widget) still resolves and SELECT/TYPE work on it, so
+  // it's a caveat, not a mismatch — this is exactly what was wrongly failing state/country.
   let score;
-  if (!checks.visible) {
+  if (!checks.visible && !valueSettable) {
     score = 'mismatch';
   } else if (issues.length > 0) {
     score = 'caveats';
