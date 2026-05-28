@@ -2381,7 +2381,9 @@ async function _runResolve({ opt, roles, priorAttempt, mode, inFlightKey }) {
       details.push({ role: r.role, status: 'skipped', reason: 'role already filled' });
       continue;
     }
-    const lmRef = { alias: r.role, selector: r.selector, roleFill: r.role, roleMult: multOf(r.role), verified: null };
+    // PB-2/PB-6: carry the grounding through — a reused resolution names the featureId it bound to,
+    // so the landmark records its provenance (used by the trial's kind classification + acceptance).
+    const lmRef = { alias: r.role, selector: r.selector, roleFill: r.role, roleMult: multOf(r.role), verified: null, featureId: r.featureId ?? null };
     _perspectiveDraft.landmarks.push(lmRef);
     const newIdx = _perspectiveDraft.landmarks.indexOf(lmRef);
     _invalidateStructure();
