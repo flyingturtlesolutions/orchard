@@ -196,16 +196,23 @@ export function deriveCapabilities(fp) {
   const isLink      = shapes.has('link');
   const isSelect    = shapes.has('select');
 
-  // Typable: must be a text-entry element AND not readonly/disabled.
-  const typable = isInput && interactable && !fp?.isReadOnly;
+  // v2.74.556 — Value-setting (TYPE / SELECT) is VISIBILITY-AGNOSTIC: the runtime sets .value on a
+  // present, enabled control programmatically, even when it's visually hidden behind a custom widget
+  // (e.g. a framework's opacity:0 native <select> driving a styled dropdown, or a hidden text input).
+  // Only CLICK needs the element actually visible. Gating TYPE/SELECT on `interactable` (which requires
+  // visibility) wrongly stripped State/Country dropdowns of their SELECT op. So gate value-setting on
+  // `enabled` (present + not disabled) instead.
+  const enabled = !!fp && fp.isDisabled !== true;
 
-  // Clickable: button / link / on-click-attr / role=button etc.
-  // Even disabled buttons satisfy this strictly, but `interactable`
-  // gates it so a disabled button reports clickable=false.
+  // Typable: a text-entry element, enabled, not readonly. (Visibility-agnostic — see above.)
+  const typable = isInput && enabled && !fp?.isReadOnly;
+
+  // Clickable: button / link / on-click-attr / role=button etc. Requires `interactable` (visible +
+  // enabled + pointer-events) — clicking an invisible target is unreliable.
   const clickable = (isButton || isLink || isInputCtrl) && interactable;
 
-  // Selectable: select / combobox / listbox, if interactable.
-  const selectable = isSelect && interactable;
+  // Selectable: select / combobox / listbox, enabled. (Visibility-agnostic — value set programmatically.)
+  const selectable = isSelect && enabled;
 
   const textBearing = shapes.has('text');
   const isContainer = shapes.has('container');
@@ -305,6 +312,13 @@ export function deriveAllowedOperations(caps) {
   // popover trigger, Tab to advance focus, Enter on a button.
   if (caps.interactable && (caps.clickable || caps.typable || caps.selectable)) {
     ops.add('KEY');
+  }
+  // v2.74.557 — ENTER: a real runtime action (EXECUTE_STEP) that was never derived. It sends the Enter
+  // key to the resolved element with an implicit-submit fallback — i.e. type a query then ENTER to submit
+  // a search, or ENTER to activate a focused control. Offer it wherever the element accepts text or is
+  // clickable.
+  if (caps.typable || caps.clickable) {
+    ops.add('ENTER');
   }
   if (caps.textBearing) {
     ops.add('text');

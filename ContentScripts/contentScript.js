@@ -3201,64 +3201,72 @@ function detectRepeatingContentBlocks() {
 // ES-import Core. Runs in the top frame (the message is sent with frameId:0). No visibility filter:
 // required controls are often visually hidden (e.g. a framework's native <select required> at opacity:0)
 // yet still mandatory, so dropping hidden elements would under-count.
+// SG-0.5 — shared form-control descriptor logic, hoisted to module scope so BOTH the oracle
+// (enumerateFormFields) AND the Locale enumerator (enumeratePage) emit completion-grade data: real
+// label[for], required-ness, clean #id/[name] selector. No visibility filter — required controls are
+// often visually hidden (a framework's native <select required> at opacity:0) yet still mandatory.
+const FORM_CONTROL_SEL = 'input:not([type=hidden]):not([type=button]):not([type=reset]), select, textarea, button[type="submit"], input[type="submit"]';
+function _ffStrip(s) { return String(s || '').replace(/\s*\*\s*$/, '').replace(/\s{2,}/g, ' ').trim(); }
+// Concrete selector for the REAL control (not a wrapper): simple #id, else [name="…"] (handles dotted
+// ids), else escaped #id, else null.
+function _ffSelector(id, name) {
+  id = (id || '').trim(); name = (name || '').trim();
+  if (id && /^[A-Za-z][\w-]*$/.test(id)) return `#${id}`;
+  if (name) return `[name="${name.replace(/(["\\])/g, '\\$1')}"]`;
+  if (id) return `#${id.replace(/([^\w-])/g, '\\$1')}`;
+  return null;
+}
+function _ffLabelInfo(el) {
+  try {
+    const id = el.id;
+    if (id) { const sel = (window.CSS && CSS.escape) ? CSS.escape(id) : id; const f = document.querySelector(`label[for="${sel}"]`); if (f) return { text: f.textContent || '', el: f }; }
+    const c = el.closest && el.closest('label'); if (c) return { text: c.textContent || '', el: c };
+    const al = el.getAttribute('aria-label'); if (al) return { text: al, el: null };
+    const lb = el.getAttribute('aria-labelledby'); if (lb) { const r = document.getElementById(lb); if (r) return { text: r.textContent || '', el: r }; }
+  } catch { /* */ }
+  return { text: '', el: null };
+}
+function _ffRequired(el, li) {
+  try {
+    if (el.required === true) return true;
+    if (el.getAttribute('aria-required') === 'true') return true;
+    if (el.hasAttribute('required')) return true;
+    const lbl = li && li.el;
+    if (lbl) {
+      if (/required/i.test(String(lbl.className || ''))) return true;          // .Mui-required / .required
+      if (/\*\s*$/.test((lbl.textContent || '').trim())) return true;          // trailing asterisk
+      if (lbl.querySelector && lbl.querySelector('[class*="asterisk"],[class*="required"]')) return true;
+    }
+  } catch { /* */ }
+  return false;
+}
+/** Per-control descriptor: { tag, type, name, id, label, required, isSubmit, kind, selector } | null. */
+function _describeFormControl(el) {
+  try {
+    const tag = (el.tagName || '').toLowerCase();
+    const rawType = el.getAttribute('type') || '';
+    const type = (rawType || (tag === 'textarea' ? 'textarea' : tag === 'select' ? 'select' : 'text')).toLowerCase();
+    const isSubmit = type === 'submit' || (tag === 'button' && el.getAttribute('type') === 'submit');
+    const li = _ffLabelInfo(el);
+    return {
+      tag, type,
+      name: el.getAttribute('name') || '',
+      id: el.id || '',
+      label: _ffStrip(li.text),
+      required: isSubmit ? false : _ffRequired(el, li),
+      isSubmit,
+      kind: isSubmit ? 'submit' : (type === 'file' ? 'file' : tag === 'select' ? 'select' : 'input'),
+      selector: _ffSelector(el.id, el.getAttribute && el.getAttribute('name')),
+    };
+  } catch { return null; }
+}
+
+// PB-10 — deterministic form-field oracle (ENUMERATE_FORM_FIELDS). Same descriptors the Locale build uses.
 function enumerateFormFields() {
-  const SEL = 'input:not([type=hidden]):not([type=button]):not([type=reset]), select, textarea, button[type="submit"], input[type="submit"]';
-  const strip = (s) => String(s || '').replace(/\s*\*\s*$/, '').replace(/\s{2,}/g, ' ').trim();
-  // PB-10 — concrete selector for the field's REAL control so resolve binds directly (not the wrapper):
-  // simple #id, else [name="…"] (handles dotted ids), else escaped #id, else null.
-  const selectorFor = (id, name) => {
-    id = (id || '').trim(); name = (name || '').trim();
-    if (id && /^[A-Za-z][\w-]*$/.test(id)) return `#${id}`;
-    if (name) return `[name="${name.replace(/(["\\])/g, '\\$1')}"]`;
-    if (id) return `#${id.replace(/([^\w-])/g, '\\$1')}`;
-    return null;
-  };
-  const labelInfoFor = (el) => {
-    try {
-      const id = el.id;
-      if (id) { const sel = (window.CSS && CSS.escape) ? CSS.escape(id) : id; const f = document.querySelector(`label[for="${sel}"]`); if (f) return { text: f.textContent || '', el: f }; }
-      const c = el.closest && el.closest('label'); if (c) return { text: c.textContent || '', el: c };
-      const al = el.getAttribute('aria-label'); if (al) return { text: al, el: null };
-      const lb = el.getAttribute('aria-labelledby'); if (lb) { const r = document.getElementById(lb); if (r) return { text: r.textContent || '', el: r }; }
-    } catch { /* */ }
-    return { text: '', el: null };
-  };
-  const isReq = (el, li) => {
-    try {
-      if (el.required === true) return true;
-      if (el.getAttribute('aria-required') === 'true') return true;
-      if (el.hasAttribute('required')) return true;
-      const lbl = li && li.el;
-      if (lbl) {
-        if (/required/i.test(String(lbl.className || ''))) return true;          // .Mui-required / .required
-        if (/\*\s*$/.test((lbl.textContent || '').trim())) return true;          // trailing asterisk
-        if (lbl.querySelector && lbl.querySelector('[class*="asterisk"],[class*="required"]')) return true;
-      }
-    } catch { /* */ }
-    return false;
-  };
-  const out = [];
   let nodes = [];
-  try { nodes = Array.from(document.querySelectorAll(SEL)); } catch { return out; }
-  for (const el of nodes) {
-    try {
-      const tag = (el.tagName || '').toLowerCase();
-      const rawType = el.getAttribute('type') || '';
-      const type = (rawType || (tag === 'textarea' ? 'textarea' : tag === 'select' ? 'select' : 'text')).toLowerCase();
-      const isSubmit = type === 'submit' || (tag === 'button' && el.getAttribute('type') === 'submit');
-      const li = labelInfoFor(el);
-      out.push({
-        tag, type,
-        name: el.getAttribute('name') || '',
-        id: el.id || '',
-        label: strip(li.text),
-        required: isSubmit ? false : isReq(el, li),
-        isSubmit,
-        kind: isSubmit ? 'submit' : (type === 'file' ? 'file' : tag === 'select' ? 'select' : 'input'),
-        selector: selectorFor(el.id, el.getAttribute && el.getAttribute('name')),
-      });
-    } catch { /* skip this control */ }
-  }
+  try { nodes = Array.from(document.querySelectorAll(FORM_CONTROL_SEL)); } catch { return []; }
+  const out = [];
+  for (const el of nodes) { const d = _describeFormControl(el); if (d) out.push(d); }
   return out;
 }
 
@@ -3387,6 +3395,41 @@ async function enumeratePage() {
     });
   }
 
+  // ── 1.5 Form controls (SG-0.5): completion-grade features — real label[for], `required`, and a clean
+  // #id/[name] selector — INCLUDING functional-but-hidden controls (a custom widget's opacity:0 native
+  // <select>, the file input) the visibility-gated band scan below would drop. Captured once here (no
+  // viewport gate); their elements are recorded so the band scan SKIPS them — no duplicate,
+  // weaker-selector feature for the same control.
+  const formEls = new Set();
+  try {
+    for (const el of document.querySelectorAll(FORM_CONTROL_SEL)) {
+      if (feats.size >= FEATURE_CAP) break;
+      const d = _describeFormControl(el);
+      if (!d || !d.selector) continue;                  // need a bindable selector
+      formEls.add(el);
+      const fkind = d.isSubmit ? 'action' : 'input';
+      const ar = absRect(el);
+      const interaction = d.isSubmit ? { pattern: 'click', effect: 'submit' }
+        : d.kind === 'select' ? { pattern: 'select', effect: 'select' }
+        : d.kind === 'file'   ? { pattern: 'upload', effect: 'none' }
+        :                       { pattern: 'type',   effect: 'none' };
+      add({
+        id: djb2(`${fkind}|${d.label}|${d.selector}`),
+        kind: fkind,
+        label: (d.label || d.name || d.id || '').slice(0, 80),
+        a11yRole: el.getAttribute('role') || null,
+        selector: d.selector, selectorKind: tierOf(d.selector),
+        selectorVerified: /^#[A-Za-z][\w-]*$/.test(d.selector),   // a simple #id resolves by construction
+        required: d.required,        // SG-0.5 — the necessity marker Select/Cover need
+        fieldType: d.type,           // input type → drives the value-op at Bind (TYPE / SELECT / SET_VALUE / upload)
+        location: { band: Math.floor((ar.y || 0) / bandStep), absRect: ar, visibleAtRest: (ar.y + ar.h) > origScrollY && ar.y < origScrollY + vh, scrollToY: Math.max(0, ar.y - Math.round(vh * 0.3)) },
+        interaction,
+        confidence: 0.85,
+        evidence: { method: 'form-enum', observedAt: Date.now() },
+      });
+    }
+  } catch { /* */ }
+
   // ── 2. Interactive controls, band by band (whole page) — skipping anything
   // inside a content card (the collection represents it).
   for (let b = 0; b < bandCount && feats.size < FEATURE_CAP; b++) {
@@ -3396,6 +3439,7 @@ async function enumeratePage() {
     try { els = document.querySelectorAll(INTERACTIVE_SEL); } catch { els = []; }
     for (const el of els) {
       if (feats.size >= FEATURE_CAP) break;
+      if (formEls.has(el)) continue;        // SG-0.5 — already captured as a completion-grade form feature
       if (!vis(el)) continue;
       if (suppressSet.has(el) || insideSuppressed(el)) continue;   // inside a content card → template, not a landmark
       const r = el.getBoundingClientRect();

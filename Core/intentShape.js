@@ -20,14 +20,16 @@
 // PURE: structural evidence is passed in (no DOM read here). Unit-testable like Core/trialSynth.js.
 //
 // @module Core/intentShape
-// @version 2.74.555
+// @version 2.74.558
 
 // Verbs implying production/submission across a SET of fields (→ completion).
 const COMPLETE_VERB = /\b(apply|fill\s*(?:in|out)?|complete|submit|enter|provide|register|sign\s*up|signup|enrol|enroll|subscribe|book|reserve|order|place\s*order|check\s*out|checkout|purchase|buy|pay|rsvp|request|create|compose|draft|update|edit|configure|set\s*up|setup|schedule|onboard|claim|file)\b/i;
 // Nouns implying a multi-field surface (reinforces completion).
 const FORM_NOUN = /\b(form|application|registration|sign[\s-]?up|checkout|survey|questionnaire|profile|account|onboarding|details|information|fields?|questions?|enrol+ment)\b/i;
 // Verbs implying reading/finding content (→ read).
-const READ_VERB = /\b(find|search|show|list|get|see|view|read|browse|look|compare|monitor|track|scrape|extract|check|discover|count|fetch|locate)\b/i;
+// Note: "check" is intentionally excluded — it's ambiguous ("check a box" = act, "check the status" =
+// read) and was misclassifying action intents. The LLM grounding shape handles the nuanced cases.
+const READ_VERB = /\b(find|search|show|list|get|see|view|read|browse|look|compare|monitor|track|scrape|extract|discover|count|fetch|locate|understand)\b/i;
 // Verbs implying a single discrete action (→ act).
 const ACT_VERB = /\b(click|tap|press|toggle|open|select|choose|log\s*in|login|sign\s*in|signin|log\s*out|logout|add|remove|delete|like|favorite|follow|unfollow|share|download|upload|play|pause|dismiss|close|expand|collapse|enable|disable|accept|approve|reject|confirm|cancel)\b/i;
 
@@ -57,6 +59,11 @@ export function classifyIntentShape(intent, evidence = {}) {
   const scores = { complete, read, act };
   const lexTop = Math.max(complete, read, act);
   const hasForm = requiredFieldCount >= 2;     // a genuine multi-field surface (login's 2 fields → see tier-2 note)
+  // PRIMACY: when BOTH a read and a complete verb appear, the EARLIER one is the user's MAIN action.
+  // A subordinate/hypothetical clause ("VIEW the description before deciding whether to apply") must not
+  // flip a read intent to complete — position beats the tie-favors-complete rule.
+  const completeAt = complete > 0 ? text.search(COMPLETE_VERB) : Infinity;
+  const readAt = read > 0 ? text.search(READ_VERB) : Infinity;
 
   let shape, decidedBy;
   if (lexTop === 0) {
@@ -66,8 +73,11 @@ export function classifyIntentShape(intent, evidence = {}) {
     else { shape = 'act'; decidedBy = 'default'; }
   } else {
     decidedBy = 'lexical';
-    // Tier 1: lexical wins. COMPLETE takes ties (a real complete↔read tie is completion).
-    if (complete > 0 && complete >= lexTop) shape = 'complete';
+    if (complete > 0 && read > 0) {
+      // Both fired → the leading verb is the primary action.
+      shape = readAt < completeAt ? 'read' : 'complete';
+      signals.push('primacy');
+    } else if (complete > 0 && complete >= lexTop) shape = 'complete';  // COMPLETE takes ties vs act
     else if (read === lexTop && read >= act) shape = 'read';
     else shape = 'act';
     if (shape === 'complete' && hasForm) signals.push('structural-form');  // reinforces confidence, not the choice

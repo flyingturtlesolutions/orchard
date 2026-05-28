@@ -115,14 +115,15 @@ let _exploreToken = 0;
 // v2.74.393 — Grounded-intent state. The user's raw Intent can be refined
 // against the page's affordances (cached from Explore) into a "grounded intent"
 // they accept/edit before it seeds propose.
-//   _groundIntentResult: { groundedIntent, achievable:'yes'|'partial'|'no'|'unknown', note, forIntent } | null
+//   _groundIntentResult: { achievable:'yes'|'partial'|'no'|'unknown', note, matchedGoal, shape, completeness, forIntent } | null
+//   (ASSESSMENT only — grounding never rewrites the intent; the user's text stays the description.)
 //   _groundInFlight: true while the grounding call round-trips.
 let _groundIntentResult = null;
 let _groundInFlight = false;
 // PB-10 bug-pass — persisted LLM-extracted intent spec from grounding. _groundIntentResult is nulled
 // by "Use it" (to clear the UI card), which previously DROPPED the extractor hint in the common
 // Ground→Use it→Propose flow. This survives adoption so propose still gets the LLM shape/completeness.
-//   { keys:[rawIntent, groundedIntent], shape, completeness } | null
+//   { keys:[rawIntent], shape, completeness } | null
 let _groundedSpec = null;
 // PB-6b — Trial-run state. The intent-truth proof for the chosen perspective: synthesize
 // the resolved bundle into a runnable op, run it safely, score the fidelity vector.
@@ -2008,8 +2009,6 @@ function _renderPerspectivePanel() {
   // v2.74.393 — grounded-intent controls.
   perspectiveBody.querySelector('[data-perspective-action="ground-intent"]')
     ?.addEventListener('click', () => onGroundIntent());
-  perspectiveBody.querySelector('[data-perspective-action="use-grounded-intent"]')
-    ?.addEventListener('click', () => onUseGroundedIntent());
   perspectiveBody.querySelector('[data-perspective-action="dismiss-grounded-intent"]')
     ?.addEventListener('click', () => { _groundIntentResult = null; _renderPerspectivePanel(); });
 }
@@ -2025,21 +2024,22 @@ function _renderGroundIntentRow(intent) {
   if (r && r.forIntent === intent) {
     const ach = r.achievable || 'unknown';
     const achLabel = ach === 'yes' ? '✓ fully supported' : ach === 'partial' ? '◐ partially supported' : ach === 'no' ? '✗ not supported here' : '? not explored';
+    const shapeLabel = r.shape ? `${escHtml(r.shape)}${r.completeness ? ` · ${escHtml(r.completeness)}` : ''}` : null;
+    // Assessment only — no rewrite. Your intent text stays exactly as you wrote it.
     return `<div class="dbg-perspective-ground result ${escAttr(ach)}">
-        <div class="dbg-perspective-ground-head"><span class="dbg-perspective-ground-title">Grounded intent</span><span class="dbg-perspective-ground-ach ${escAttr(ach)}">${achLabel}</span></div>
-        <div class="dbg-perspective-ground-text">${escHtml(r.groundedIntent)}</div>
+        <div class="dbg-perspective-ground-head"><span class="dbg-perspective-ground-title">Intent check</span><span class="dbg-perspective-ground-ach ${escAttr(ach)}">${achLabel}</span></div>
+        ${shapeLabel ? `<div class="dbg-perspective-ground-note">operation: <b>${shapeLabel}</b></div>` : ''}
         ${r.matchedGoal ? `<div class="dbg-perspective-ground-note">↳ matches page goal: <b>${escHtml(r.matchedGoal)}</b></div>` : ''}
         ${r.note ? `<div class="dbg-perspective-ground-note">${escHtml(r.note)}</div>` : ''}
         <div class="dbg-perspective-ground-actions">
-          <button class="btn-secondary tiny" data-perspective-action="use-grounded-intent" type="button" title="Replace your Intent with this grounded version; it then seeds Propose.">Use it</button>
           <button class="btn-secondary tiny" data-perspective-action="dismiss-grounded-intent" type="button">Dismiss</button>
         </div>
       </div>`;
   }
-  // Offer button (disabled until an intent is typed).
+  // Offer button (disabled until an intent is typed). Your intent text is kept verbatim; this only assesses.
   const disabled = intent.length === 0;
   return `<div class="dbg-perspective-ground offer">
-      <button class="btn-secondary tiny" data-perspective-action="ground-intent" type="button" ${disabled ? 'disabled' : ''} title="${escAttr(disabled ? 'Write an Intent first.' : 'Refine your Intent against what this page can actually do (uses the explored page affordances).')}">✨ Ground intent in this page</button>
+      <button class="btn-secondary tiny" data-perspective-action="ground-intent" type="button" ${disabled ? 'disabled' : ''} title="${escAttr(disabled ? 'Write an Intent first.' : 'Check whether this page can serve your intent (uses the explored page capabilities). Your intent text is not changed.')}">✨ Check intent against this page</button>
     </div>`;
 }
 
@@ -2354,40 +2354,20 @@ async function onGroundIntent() {
   } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
   if (!_perspectiveDraft || _perspectiveDraft.id !== draftToken) return;
   _groundInFlight = false;
-  if (!res?.success || !res.groundedIntent) {
-    showPerspectiveWarning(`Ground intent failed: ${res?.error ?? 'no result'}`);
+  if (!res?.success) {
+    showPerspectiveWarning(`Intent check failed: ${res?.error ?? 'no result'}`);
     _renderPerspectivePanel();
     return;
   }
-  // PB-10 extractor upgrade — keep the LLM-emitted intent SHAPE + COMPLETENESS so propose can pass them
-  // as the primary extractor (the grounding model understands intent better than the lexical fallback).
-  _groundIntentResult = { groundedIntent: res.groundedIntent, achievable: res.achievable || 'unknown', note: res.note || '', matchedGoal: res.matchedGoal || null, forIntent: intent, shape: res.shape || null, completeness: res.completeness || null };
-  // Persist the extractor spec keyed by BOTH the raw intent and the grounded text, so the hint survives
-  // "Use it" (which swaps description → groundedIntent and clears _groundIntentResult).
+  // Audit fix — grounding no longer REWRITES the intent (the user's own text is the saved artifact). It
+  // ASSESSES: achievability + the SHAPE/COMPLETENESS that propose uses as its primary extractor (the LLM
+  // understands intent better than the lexical fallback). Keyed by the raw intent — nothing is adopted.
+  _groundIntentResult = { achievable: res.achievable || 'unknown', note: res.note || '', matchedGoal: res.matchedGoal || null, forIntent: intent, shape: res.shape || null, completeness: res.completeness || null };
   _groundedSpec = (res.shape || res.completeness)
-    ? { keys: [intent, res.groundedIntent].filter(Boolean), shape: res.shape || null, completeness: res.completeness || null }
+    ? { keys: [intent], shape: res.shape || null, completeness: res.completeness || null }
     : null;
   _renderPerspectivePanel();
-  if (res.hadAffordance === false) toast?.('Run Explore to ground the intent in this page');
-}
-
-// Accept the grounded intent → it becomes the Intent field + seeds propose.
-function onUseGroundedIntent() {
-  if (!_perspectiveDraft || !_groundIntentResult?.groundedIntent) return;
-  const original = (_perspectiveDraft.description ?? '').trim();
-  _perspectiveDraft.description = _groundIntentResult.groundedIntent;
-  if (perspectiveDescriptionInput) perspectiveDescriptionInput.value = _perspectiveDraft.description;
-  // Record provenance (PERSPECTIVE_SPEC § 6): grounded from the user's original.
-  _perspectiveDraft.authoringMetadata = _perspectiveDraft.authoringMetadata ?? {};
-  _perspectiveDraft.authoringMetadata.description = {
-    ...(_perspectiveDraft.authoringMetadata.description ?? {}),
-    source: 'grounded', authoredBy: 'llm', lastAuthoredAt: Date.now(),
-    originalIntent: original, achievable: _groundIntentResult.achievable,
-  };
-  _groundIntentResult = null;
-  _renderPerspectivePanel();
-  updatePerspectiveSaveButtonState();
-  toast?.('Intent grounded — now Propose perspectives');
+  if (res.hadAffordance === false) toast?.('Run Explore first to assess this intent against the page');
 }
 
 

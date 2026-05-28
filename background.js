@@ -5094,7 +5094,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (!affordances && !goals) {
             // Nothing explored → can't ground; pass the intent through so the UI
             // can still propose (and nudge the user to Explore first).
-            sendResponse({ success: true, groundedIntent: intent.trim(), achievable: 'unknown', note: 'Run Explore on this page to ground the intent in its actual capabilities.', hadAffordance: false });
+            sendResponse({ success: true, achievable: 'unknown', shape: null, completeness: null, note: 'Run Explore on this page to assess the intent against its actual capabilities.', hadAffordance: false });
             return;
           }
           const out = await AnthropicService.groundIntent({ userIntent: intent, affordances, goals, url, title });

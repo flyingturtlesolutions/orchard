@@ -2354,23 +2354,19 @@ Rules:
     if (!intent) return null;
     const goalList = (Array.isArray(goals) ? goals : []).filter(g => g && g.label);
     const hasGoals = goalList.length > 0;
-    const systemPrompt = `You GROUND a user's automation intent in a specific page. You are given the user's RAW intent and what the page actually supports. Produce a single refined "grounded intent" that restates the user's goal in this page's concrete terms — more complete and specific — WITHOUT changing what the user wants.
-
-CRITICAL — preserve the user's goal. Do NOT substitute what the page offers for what the user asked for. If the page cannot serve the user's intent, SAY SO (achievable:"no") and restate their goal faithfully; never warp the intent to fit the page.
+    const systemPrompt = `You ASSESS a user's automation intent against a specific web page. You DO NOT rewrite or restate the intent — the user's own words are kept verbatim. Your only job is the structured assessment: can this page serve the intent, and what SHAPE of operation is it?
 ${hasGoals ? `
 You are given the page's structured GOALS (the distinct outcomes it supports). MATCH the user's intent to the closest goal(s): set "matchedGoal" to the best-fitting goal's label (or "" if none fits), and base "achievable" on goal coverage (full match → yes; the intent spans a goal plus more the page lacks → partial; no goal fits → no).` : ''}
 Return ONLY a JSON object:
 {
-  "groundedIntent": "<refined intent, 1-2 sentences, in this page's terms, SAME goal>",
   "achievable": "yes" | "partial" | "no",${hasGoals ? `\n  "matchedGoal": "<the label of the best-fitting page goal, or \\"\\" if none>",` : ''}
   "shape": "read" | "act" | "complete",
   "completeness": "exhaustive" | "minimal",
   "note": "<short: what this page covers / what it can't do for this intent>"
 }
 - "yes" = the page fully supports the intent. "partial" = some of it (note what's missing). "no" = this page can't serve the intent.
-- "shape": classify the OPERATION. "complete" = the user must fill in / submit a form or multi-field input (apply, register, check out, book, update details). "read" = find / view / extract / compare content. "act" = a single discrete action (click, toggle, sign in, like, download).
-- "completeness": for a "complete" intent, is EVERY required field needed, or only a focused subset? "exhaustive" = the whole form must be filled to accomplish the intent ("apply for this job", "fill out the application", "register an account"). "minimal" = only a specific field/control or a single action ("update my phone number", "search for X", "sign in"). read/act intents are virtually always "minimal".
-- groundedIntent stays in the user's voice + goal; concretize using the page's terms, don't replace the goal.`;
+- "shape": classify the user's PRIMARY action — IGNORE subordinate or hypothetical mentions. "VIEW the job description before deciding whether to apply" is "read" (viewing is the action; applying is hypothetical), NOT "complete". "complete" = the user must fill in / submit a form or multi-field input (apply, register, check out, book, update details). "read" = find / view / extract / compare / understand content. "act" = a single discrete action (click, toggle, sign in, like, download).
+- "completeness": for a "complete" intent, is EVERY required field needed, or only a focused subset? "exhaustive" = the whole form must be filled ("apply for this job", "fill out the application", "register an account"). "minimal" = a specific field/control or a single action ("update my phone number", "search for X", "sign in"). read/act intents are virtually always "minimal".`;
     let userText = `User intent: ${intent}\nURL: ${url ?? '(unknown)'}\nTitle: ${title ?? '(unknown)'}`;
     if (hasGoals) {
       const block = goalList.slice(0, 12).map(g => `- ${g.label}${g.description ? `: ${String(g.description).slice(0, 120)}` : ''}`).join('\n');
@@ -2385,17 +2381,14 @@ Return ONLY a JSON object:
       const json = AnthropicService.#firstJsonObject(raw.text);
       if (!json) return null;
       const p = JSON.parse(json);
-      const gi = typeof p.groundedIntent === 'string' ? p.groundedIntent.trim().slice(0, 280) : '';
-      if (!gi) return null;
       const ACH = new Set(['yes', 'partial', 'no']);
-      // PB-10 extractor upgrade — the grounding LLM also classifies the intent's SHAPE + COMPLETENESS
-      // (the parameters that drive the proposal directive). The LLM is a far better intent-understander
-      // than the lexical classifier ("update my phone" → complete+minimal; "apply" → complete+exhaustive),
-      // and this is free (same call). deriveIntentSpec consumes these; the lexical path stays as fallback.
       const SHAPE = new Set(['read', 'act', 'complete']);
       const CMPL = new Set(['exhaustive', 'minimal']);
+      // ASSESSMENT only — no prose rewrite. The user's own intent text is the saved artifact; this call
+      // just classifies SHAPE/COMPLETENESS (drives the proposal directive) + judges achievability. The
+      // LLM is a far better intent-understander than the lexical classifier ("view X before applying" →
+      // read), and it's free (same call). deriveIntentSpec consumes shape/completeness; lexical is fallback.
       return {
-        groundedIntent: gi,
         achievable: ACH.has(p.achievable) ? p.achievable : 'partial',
         note: typeof p.note === 'string' ? p.note.trim().slice(0, 240) : '',
         matchedGoal: typeof p.matchedGoal === 'string' && p.matchedGoal.trim() ? p.matchedGoal.trim().slice(0, 60) : null,
