@@ -4856,6 +4856,10 @@ async function explorePageStructure(payload) {
   // PHASE metrics — scroll to the bottom (triggering lazy content) and report
   // the page height so the background can compute the band stops.
   if (phase === 'metrics') {
+    // v2.74.566 — remember the entry scroll BEFORE scrolling to the bottom, so
+    // cleanup can return the page to exactly where the user left it. Explore is an
+    // observation: it should restore the scroll position, not jump to the top.
+    try { window.__ahubEntryScroll = { x: window.scrollX || 0, y: window.scrollY || 0 }; } catch { /* */ }
     const vh = window.innerHeight || 800; let lastH = -1, steps = 0;
     for (let i = 1; i <= 16; i++) {
       try { window.scrollTo(0, i * Math.round(vh * 0.9)); } catch { /* */ }
@@ -4902,11 +4906,14 @@ async function explorePageStructure(payload) {
     return { success: true, phase, scrollY: window.scrollY, viewportH: window.innerHeight, url: location.href, title: document.title || '', candidates, surface, log };
   }
 
-  // PHASE cleanup — close any leftover overlay, return scroll to the top.
+  // PHASE cleanup — close any leftover overlay, return scroll to the ENTRY position.
   if (phase === 'cleanup') {
     installGuard();
     try { await closeOverlays(3); } finally { removeGuard(); }
-    try { window.scrollTo(0, 0); } catch { /* */ }
+    // v2.74.566 — restore the entry scroll (captured in the metrics phase). Falls
+    // back to the top only if we never recorded it (e.g. the content script was
+    // re-injected after a navigation recovery, so the page already reloaded).
+    try { const s = window.__ahubEntryScroll; window.scrollTo((s && s.x) || 0, (s && s.y) || 0); } catch { /* */ }
     await sleep(80);
     return { success: true, phase, navAttempts, log };
   }
