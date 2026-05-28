@@ -191,7 +191,7 @@ export function missingRoleFields(fields, existingRoleNames) {
 // associated label is `.Mui-required` / ends with an asterisk (the MUI/Fabric convention this case used).
 
 export const FORM_FIELD_SELECTOR =
-  'input:not([type=hidden]):not([type=button]):not([type=reset]), select, textarea, button[type=submit], input[type=submit]';
+  'input:not([type=hidden]):not([type=button]):not([type=reset]), select, textarea, button';
 
 function labelTextFor(el, scope) {
   // 1) <label for=id>  2) wrapping <label>  3) aria-label / aria-labelledby.
@@ -240,18 +240,39 @@ export function enumerateFormFields(root) {
     const tag = (el.tagName || '').toLowerCase();
     const rawType = (el.getAttribute && el.getAttribute('type')) || '';
     const type = (rawType || (tag === 'textarea' ? 'textarea' : tag === 'select' ? 'select' : 'text')).toLowerCase();
-    const isSubmit = type === 'submit' || (tag === 'button' && (el.getAttribute && el.getAttribute('type')) === 'submit');
+    // Mirrors contentScript._describeFormControl (the live form pass). A button is a
+    // form control only if it PARTICIPATES in the form (explicit submit/reset, image
+    // submit, or a bare <button> default-submit inside a <form>); a type=button is
+    // inert. And not every form button is the SUBMIT — a reset/cancel/clear/back
+    // abandons the form, so tag it as a plain action, never the success target.
+    const isButton = tag === 'button';
+    const btnType = isButton ? ((el.getAttribute && el.getAttribute('type')) || '') : '';
+    const inForm = !!(el.closest && el.closest('form'));
+    const isFormButton = (tag === 'input' && type === 'image')
+      || (isButton && (btnType === 'submit' || btnType === 'reset' || (!btnType && inForm)));
+    if (isButton && !isFormButton) continue;
     const labelInfo = labelTextFor(el, scope);
-    const required = isSubmit ? false : fieldIsRequired(el, labelInfo);
+    let labelStr = stripAsterisk(labelInfo.text);
+    if (!labelStr) {
+      if (isButton) labelStr = stripAsterisk(el.textContent || '');
+      else if (tag === 'input' && type === 'image') labelStr = (el.getAttribute && (el.getAttribute('alt') || el.getAttribute('value'))) || '';
+      else if (tag === 'input' && type === 'submit') labelStr = (el.getAttribute && el.getAttribute('value')) || '';
+    }
+    // SG-2/PROVISIONAL (DESIGN_substrate_grounded_capabilities §4.6) — submit-vs-abandon
+    // is a SEMANTIC verdict owned by Select (LLM). This lexical denylist is the no-LLM
+    // DEFAULT only; do NOT extend per-site. Mirrors contentScript._describeFormControl.
+    const negative = btnType === 'reset' || /^(cancel|reset|clear|close|back|dismiss|skip|previous|prev|discard)\b/i.test(labelStr);
+    const isSubmit = isFormButton && !negative;
     out.push({
       tag,
       type,
       name: (el.getAttribute && el.getAttribute('name')) || '',
       id: el.id || '',
-      label: stripAsterisk(labelInfo.text),
-      required,
+      label: labelStr,
+      required: isFormButton ? false : fieldIsRequired(el, labelInfo),
       isSubmit,
-      kind: isSubmit ? 'submit' : (type === 'file' ? 'file' : tag === 'select' ? 'select' : 'input'),
+      isAction: isFormButton,
+      kind: isFormButton ? (isSubmit ? 'submit' : 'button') : (type === 'file' ? 'file' : tag === 'select' ? 'select' : 'input'),
       selector: selectorForField({ id: el.id || '', name: (el.getAttribute && el.getAttribute('name')) || '' }),
     });
   }

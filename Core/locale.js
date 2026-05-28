@@ -426,6 +426,10 @@ export function attachGoals(model, goals) {
 // control. Conservative on purpose — only a labelled submit (or, for multi-field forms, any
 // nearby action) forms a composite, so we don't fabricate spurious groupings. PURE.
 
+// SG-2/PROVISIONAL (DESIGN_substrate_grounded_capabilities §4.6) — identifying the
+// success action by label words is a SEMANTIC verdict; Select (LLM) is the authority
+// and picks it from the captured {kind,label,effect} facts. This lexical set is the
+// no-LLM DEFAULT for composite derivation only; do NOT extend per-site.
 const _SUBMIT_WORDS = new Set([
   'go', 'search', 'submit', 'apply', 'find', 'send', 'subscribe', 'save', 'update',
   'continue', 'next', 'signin', 'login', 'signup', 'register', 'ok', 'enter', 'add',

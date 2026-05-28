@@ -3250,35 +3250,44 @@ function _describeFormControl(el) {
     const rawType = el.getAttribute('type') || '';
     const type = (rawType || (tag === 'textarea' ? 'textarea' : tag === 'select' ? 'select' : 'text')).toLowerCase();
     const isButton = tag === 'button';
-    // A <button type=submit>, an <input type=submit|image>, OR a bare <button> (no
-    // type) inside a <form> — the HTML default-submit. The page's apply/submit
-    // action is the form's success target, so capture it like any other control.
-    const isSubmit = type === 'submit'
-      || (isButton && el.getAttribute('type') === 'submit')
-      || (isButton && !el.hasAttribute('type') && !!(el.closest && el.closest('form')))
-      || (tag === 'input' && type === 'image');
-    // A non-submit button (nav/toggle/"View Job Description") is NOT a form control —
-    // leave it to the band scan so we don't pollute the form features.
-    if (isButton && !isSubmit) return null;
+    const btnType = isButton ? (el.getAttribute('type') || '') : '';
+    const inForm = !!(el.closest && el.closest('form'));
+    // A button that PARTICIPATES in the form: an explicit submit/reset, an image
+    // submit, or a bare <button> (no type → HTML default-submit) inside a <form>.
+    // A type=button is inert (nav/toggle/"View Job Description") → leave it to the
+    // band scan so we don't pollute the form features.
+    const isFormButton = (tag === 'input' && type === 'image')
+      || (isButton && (btnType === 'submit' || btnType === 'reset' || (!btnType && inForm)));
+    if (isButton && !isFormButton) return null;
     const li = _ffLabelInfo(el);
-    // v2.74.565 — a submit's label is its OWN text (button content / input value /
-    // image alt), not a <label for>. Without this the submit comes through blank,
-    // so the two submit buttons can't be told apart and Bind can't pick the right
-    // one. Fall back to the control's text only when there's no associated label.
+    // v2.74.565 — a button's label is its OWN text (button content / input value /
+    // image alt), not a <label for>. Without this it comes through blank, so the
+    // submit can't be told from the cancel and Bind can't pick the right one.
     let labelText = li.text;
     if (!_ffStrip(labelText)) {
       if (isButton) labelText = el.textContent || '';
       else if (tag === 'input' && type === 'image') labelText = el.getAttribute('alt') || el.getAttribute('value') || '';
-      else if (tag === 'input' && (type === 'submit' || type === 'button')) labelText = el.getAttribute('value') || '';
+      else if (tag === 'input' && type === 'submit') labelText = el.getAttribute('value') || '';
     }
+    const labelStr = _ffStrip(labelText);
+    // SG-2/PROVISIONAL (DESIGN_substrate_grounded_capabilities §4.6) — "which form
+    // button is the SUBMIT vs. an abandon (reset/cancel/clear/back)" is a SEMANTIC
+    // verdict; the authority is Select (LLM), which picks the goal's success action
+    // from the captured {type,label,effect} facts in any language. This lexical
+    // denylist is the no-LLM DEFAULT only — it keeps a cancel (even a type=submit one)
+    // from defaulting to the success action. Capture stays honest; do NOT extend
+    // per-site. Select subsumes this.
+    const negative = btnType === 'reset' || /^(cancel|reset|clear|close|back|dismiss|skip|previous|prev|discard)\b/i.test(labelStr);
+    const isSubmit = isFormButton && !negative;
     return {
       tag, type,
       name: el.getAttribute('name') || '',
       id: el.id || '',
-      label: _ffStrip(labelText),
-      required: isSubmit ? false : _ffRequired(el, li),
+      label: labelStr,
+      required: isFormButton ? false : _ffRequired(el, li),
       isSubmit,
-      kind: isSubmit ? 'submit' : (type === 'file' ? 'file' : tag === 'select' ? 'select' : 'input'),
+      isAction: isFormButton,                  // any form button → a feature of kind 'action'
+      kind: isFormButton ? (isSubmit ? 'submit' : 'button') : (type === 'file' ? 'file' : tag === 'select' ? 'select' : 'input'),
       selector: _ffSelector(el.id, el.getAttribute && el.getAttribute('name')),
     };
   } catch { return null; }
@@ -3441,7 +3450,7 @@ async function enumeratePage() {
       if (!fsel) continue;                              // no bindable selector at all
       d.selector = fsel;
       formEls.add(el);
-      const fkind = d.isSubmit ? 'action' : 'input';
+      const fkind = d.isAction ? 'action' : 'input';
       const ar = absRect(el);
       // v2.74.562 — Capture is INTENT-BLIND: every control is emitted regardless of
       // `required` (a future intent may target an optional field — "fill in my
@@ -3451,9 +3460,13 @@ async function enumeratePage() {
       // left:-9999px spam trap) or labelled "leave blank" — so a completion intent
       // skips it AND a targeted intent that names it can be WARNED, without ever
       // dropping it from the substrate. The decision stays with the query, not capture.
-      const offscreen = ar.x <= -1500 || ar.y <= -1500;
+      const offscreen = ar.x <= -1500 || ar.y <= -1500;   // structural FACT (e.g. left:-9999px) — always emitted
+      // SG-2/PROVISIONAL (DESIGN §4.6) — "is this field a spam-trap the user must not
+      // fill" is a SEMANTIC verdict; Select (LLM) decides it from the `offscreen` +
+      // label facts. This regex is the no-LLM DEFAULT only; do NOT extend per-site.
       const decoy = offscreen || /leave\s+(this|the)?\s*\w*\s*blank|do\s*not\s+(fill|complete)|don'?t\s+fill|honeypot/i.test(d.label || '');
       const interaction = d.isSubmit ? { pattern: 'click', effect: 'submit' }
+        : d.isAction         ? { pattern: 'click', effect: 'none' }   // cancel/reset/other form button — NOT the success action
         : d.kind === 'select' ? { pattern: 'select', effect: 'select' }
         : d.kind === 'file'   ? { pattern: 'upload', effect: 'none' }
         :                       { pattern: 'type',   effect: 'none' };
@@ -4998,6 +5011,9 @@ async function explorePageStructure(payload) {
     // so discard it, mark the control, and try to reverse the swap.
     let vanished = 0;
     for (const el of beforeSet) { if (!visible(el)) vanished++; }
+    // STRUCTURAL signal (not semantic) — "did most of the visible interactive surface
+    // disappear" is measured, not judged, so it stays in capture (DESIGN §4.6). The
+    // threshold is a tuning constant, not a per-site rule.
     const swapAway = beforeSet.size >= 6 && (vanished / beforeSet.size) >= 0.6;
     ctl.vanished = vanished;
     if (swapAway) {
