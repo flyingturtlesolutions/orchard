@@ -4772,6 +4772,11 @@ async function refreshSettings() {
   const keyInput = $('input-api-key');
   keyInput.placeholder = res?.key ? `Current: ${res.key}` : 'sk-ant-…';
   keyInput.value = '';
+  // Optional disclosure: auto-expand only when a local key is already saved so
+  // existing BYO-key users still see/manage it; otherwise keep it collapsed
+  // (the managed proxy is the default path — no key needed).
+  const keyDetails = $('api-key-details');
+  if (keyDetails) keyDetails.open = !!res?.key;
 
   // Load close-tab setting
   const ctRes = await new Promise(r =>

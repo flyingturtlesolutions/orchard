@@ -905,18 +905,25 @@
     </div>
 
     <div class="card">
-      <h3 class="card-subheading">Anthropic API Key</h3>
-      <label>API Key
-        <div style="display:flex;gap:6px">
-          <input type="password" id="input-api-key" placeholder="sk-ant-…" style="flex:1" autocomplete="off" />
-          <button class="btn-primary" id="btn-save-api-key" style="flex-shrink:0">Save</button>
-        </div>
-      </label>
-      <div id="api-key-status" class="msg hidden"></div>
-      <p class="settings-note">
-        Your key is stored locally in <code>chrome.storage.local</code> and sent only to
-        <code>api.anthropic.com</code>. It is never logged or transmitted elsewhere.
-      </p>
+      <details id="api-key-details">
+        <summary class="card-subheading" style="cursor:pointer">Anthropic API Key <span class="settings-note" style="font-weight:400">(optional — only without cloud)</span></summary>
+        <p class="settings-note" style="margin-top:10px">
+          When cloud is enabled and you're signed in, LLM calls use the app-managed key
+          and this field is ignored. Add your own key here only to run without the cloud
+          (or to bill calls to your own Anthropic account).
+        </p>
+        <label style="display:block;margin-top:8px">API Key
+          <div style="display:flex;gap:6px;margin-top:4px">
+            <input type="password" id="input-api-key" placeholder="sk-ant-…" style="flex:1" autocomplete="off" />
+            <button class="btn-secondary" id="btn-save-api-key" style="flex-shrink:0">Save</button>
+          </div>
+        </label>
+        <div id="api-key-status" class="msg hidden"></div>
+        <p class="settings-note">
+          Your key is stored locally in <code>chrome.storage.local</code> and sent only to
+          <code>api.anthropic.com</code>. It is never logged or transmitted elsewhere.
+        </p>
+      </details>
     </div>
 
     <div class="card">
