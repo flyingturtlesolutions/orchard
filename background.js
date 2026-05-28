@@ -5106,10 +5106,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // from Explore.
           let affordances = null;
           let goals = null;
+          let localeModel = null;   // SG-2c — the full Locale (features) for the Select shadow pass
           if (groundId && url) {
             const key = _normalizeUrlForPerspectiveCache(url);
             try {
               const pm = await _readLocaleCache(groundId, key);
+              localeModel = pm?.model ?? null;
               affordances = pm?.model?.affordances ?? null;   // v2.74.426 — #2 P1: from the Locale now
               const gs = pm?.model?.goals ? Object.values(pm.model.goals) : [];
               if (gs.length && (Date.now() - (pm.capturedAt ?? 0)) < LOCALE_TTL_MS) {
@@ -5117,16 +5119,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               }
             } catch { /* */ }
           }
+          // SG-2c (Select, SHADOW) — Comprehend → matchSubGoals over the Locale, gated to `complete`
+          // intents with a captured Locale. The reconciled selection is logged (inside matchSubGoals) and
+          // surfaced on the response, but NOT consumed yet (proposal behavior unchanged). Runs in parallel
+          // with grounding; resolves null when the gate isn't met.
+          const selectionP = intentSpecP.then(async (spec) => {
+            if (!spec || spec.shape !== 'complete' || !localeModel || !localeModel.features) return null;
+            try { return await AnthropicService.matchSubGoals({ spec, locale: localeModel }); }
+            catch (e) { Logger.warn('background', `matchSubGoals failed (continuing): ${e.message}`); return null; }
+          });
+          const _projF = (f) => f ? { id: f.id, label: f.label || '', selector: f.selector || null } : null;
+          const _projSelection = (sel) => sel ? {
+            matches: sel.matches,
+            reconciledSubGoals: (sel.reconciledSubGoals || []).map((s) => ({ id: s.id, label: s.label, effectiveScope: s.effectiveScope, scopeChanged: s.scopeChanged, features: s.features })),
+            orphanRequired: (sel.orphanRequired || []).map(_projF),
+            boundary: { requiredFields: (sel.boundary?.requiredFields || []).map(_projF), successAction: _projF(sel.boundary?.successAction) },
+          } : null;
           if (!affordances && !goals) {
             // Nothing explored → can't ground; pass the intent through so the UI
             // can still propose (and nudge the user to Explore first). Comprehend is
             // page-independent, so its spec is still attached.
-            sendResponse({ success: true, achievable: 'unknown', shape: null, completeness: null, note: 'Run Explore on this page to assess the intent against its actual capabilities.', hadAffordance: false, intentSpec: await intentSpecP });
+            sendResponse({ success: true, achievable: 'unknown', shape: null, completeness: null, note: 'Run Explore on this page to assess the intent against its actual capabilities.', hadAffordance: false, intentSpec: await intentSpecP, selection: _projSelection(await selectionP) });
             return;
           }
           const out = await AnthropicService.groundIntent({ userIntent: intent, affordances, goals, url, title });
           if (!out) { sendResponse({ success: false, error: 'Claude returned no grounded intent.' }); return; }
-          sendResponse({ success: true, ...out, hadAffordance: true, hadGoals: !!goals, intentSpec: await intentSpecP });
+          sendResponse({ success: true, ...out, hadAffordance: true, hadGoals: !!goals, intentSpec: await intentSpecP, selection: _projSelection(await selectionP) });
         } catch (err) {
           Logger.error('background', `GROUND_INTENT failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
