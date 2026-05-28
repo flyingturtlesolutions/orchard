@@ -6117,8 +6117,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
 
     case 'CHECK_API_KEY':
-      AnthropicService.getApiKey()
-        .then(key => sendResponse({ hasKey: !!key }))
+      // hasKey is true if ANY LLM transport works: managed proxy (cloud-enabled
+      // + signed in) OR a local BYO key. Lets a no-key install pass UI guards
+      // once signed into the cloud (C-P3 / DD-08).
+      AnthropicService.hasLlm()
+        .then(ok => sendResponse({ hasKey: !!ok }))
         .catch(() => sendResponse({ hasKey: false }));
       return true;
 

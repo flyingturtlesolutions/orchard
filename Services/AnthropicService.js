@@ -604,8 +604,13 @@ export class AnthropicService {
     };
   }
 
-  /** @returns {Promise<boolean>} true if a managed (signed-in) or local-key transport exists. */
-  static async #hasLlm() {
+  /**
+   * True if any LLM transport is usable: a managed proxy (cloud-enabled +
+   * signed in) OR a local BYO key. UI guards (CHECK_API_KEY) call this instead
+   * of getApiKey() so a no-key install still works once signed into the cloud.
+   * @returns {Promise<boolean>}
+   */
+  static async hasLlm() {
     try { await AnthropicService.#llmTransport(); return true; } catch { return false; }
   }
 
@@ -655,7 +660,7 @@ export class AnthropicService {
   static async #getNextStep_phase1(options) {
     const { aiName, aliases = [], groundUrl, dom, confirmedSteps, turn, maxTurns, lastStepError, uiType } = options;
 
-    if (!(await AnthropicService.#hasLlm())) return { success: false, step: null, error: 'No API key' };
+    if (!(await AnthropicService.hasLlm())) return { success: false, step: null, error: 'No API key' };
 
     const aliasHint = aliases.length
       ? `Known aliases for this AI in the UI: ${aliases.join(', ')}.`
@@ -720,7 +725,7 @@ Return ONLY a single raw JSON object. No prose before or after.
   static async #getNextStep_phase2(options) {
     const { aiName, aliases = [], groundUrl, dom, confirmedSteps, turn, maxTurns, lastStepError, sampleQuestion, handoff, uiType } = options;
 
-    if (!(await AnthropicService.#hasLlm())) return { success: false, step: null, error: 'No API key' };
+    if (!(await AnthropicService.hasLlm())) return { success: false, step: null, error: 'No API key' };
 
     const SAMPLE_Q    = sampleQuestion || 'How can you help me?';
     const aliasHint   = aliases.length
@@ -4269,7 +4274,7 @@ Return ONLY the JSON object.`;
   static async generateTemplate(options) {
     const { groundUrl, aiName, domSnapshot, screenshot } = options;
 
-    if (!(await AnthropicService.#hasLlm())) return { success: false, rawJson: null, steps: null, error: 'No Anthropic API key set. Add it in Settings.' };
+    if (!(await AnthropicService.hasLlm())) return { success: false, rawJson: null, steps: null, error: 'No Anthropic API key set. Add it in Settings.' };
 
     const systemPrompt = `You are a senior browser automation engineer with deep expertise in testing AI agent products.
 

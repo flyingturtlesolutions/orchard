@@ -938,7 +938,7 @@ async function _kickoffDiscovery(groundId) {
     chrome.runtime.sendMessage({ type: 'CHECK_API_KEY' }, resolve);
   });
   if (!keyRes?.hasKey) {
-    toast('Add your Anthropic API key in Studio Settings first', 'err');
+    toast('Sign in to the cloud or add an Anthropic API key in Studio Settings', 'err');
     return;
   }
   const tab = await _getActiveTabForLaunch();

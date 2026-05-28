@@ -3895,7 +3895,7 @@ async function startDiscovery(groundId) {
     chrome.runtime.sendMessage({ type: 'CHECK_API_KEY' }, r => res(r?.hasKey))
   );
   if (!hasKey) {
-    toast('Add your Anthropic API key in Settings first', 'err');
+    toast('Sign in to the cloud or add an Anthropic API key in Settings', 'err');
     qs('[data-tab="settings"]').click();
     return;
   }
@@ -3962,7 +3962,7 @@ async function startExploreQueue(groundId) {
   if (exploreQueueRunning.has(groundId)) return;
 
   const hasKey = await new Promise(res => chrome.runtime.sendMessage({ type: 'CHECK_API_KEY' }, r => res(r?.hasKey)));
-  if (!hasKey) { toast('Add your Anthropic API key in Settings first', 'err'); qs('[data-tab="settings"]')?.click(); return; }
+  if (!hasKey) { toast('Sign in to the cloud or add an Anthropic API key in Settings', 'err'); qs('[data-tab="settings"]')?.click(); return; }
 
   let res = null;
   try { res = await new Promise(r => chrome.runtime.sendMessage({ type: 'GET_SITEMAP', payload: { groundId } }, r)); } catch { res = null; }

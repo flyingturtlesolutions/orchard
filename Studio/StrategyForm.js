@@ -1563,7 +1563,7 @@ export async function testRunStrategy(strategyId) {
   const hasKey = await new Promise(res =>
     chrome.runtime.sendMessage({ type: 'CHECK_API_KEY' }, r => res(r?.hasKey))
   );
-  if (!hasKey) { toast('Add your Anthropic API key in Settings first', 'err'); return; }
+  if (!hasKey) { toast('Sign in to the cloud or add an Anthropic API key in Settings', 'err'); return; }
 
   // v2.74.68 — Studio test-run now uses the shared ParamForm so file uploads,
   // numbers, and booleans collect the same way they do in chat. Params come
