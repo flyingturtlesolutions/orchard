@@ -20,7 +20,7 @@
 // PURE: structural evidence is passed in (no DOM read here). Unit-testable like Core/trialSynth.js.
 //
 // @module Core/intentShape
-// @version 2.74.552
+// @version 2.74.555
 
 // Verbs implying production/submission across a SET of fields (→ completion).
 const COMPLETE_VERB = /\b(apply|fill\s*(?:in|out)?|complete|submit|enter|provide|register|sign\s*up|signup|enrol|enroll|subscribe|book|reserve|order|place\s*order|check\s*out|checkout|purchase|buy|pay|rsvp|request|create|compose|draft|update|edit|configure|set\s*up|setup|schedule|onboard|claim|file)\b/i;
@@ -170,6 +170,7 @@ export function buildProposeDirective(spec = {}) {
     if (mustCover.length) {
       const list = mustCover.slice(0, 60).map((f) => `"${f}"`).join(', ');
       lines.push(`- The page marks these fields as REQUIRED — your single perspective MUST include a role for each: ${list}. Add any further fields the intent needs that are not in this list (the list is a floor, not a ceiling).`);
+      lines.push('- For EACH role that fills one of those required fields, set "field" to that field\'s label COPIED VERBATIM from the list above (exact string). This binds the role to the real control. Omit "field" only for roles that fill no listed field.');
     }
     lines.push('- Fields that are present but NOT required to submit may be included with multiplicity "optional".');
     lines.push('- Give each field role a clear kebab-case name derived from its label (e.g. "first-name", "email", "desired-pay"); the submit control is an action role (e.g. "submit-application").');

@@ -3204,6 +3204,15 @@ function detectRepeatingContentBlocks() {
 function enumerateFormFields() {
   const SEL = 'input:not([type=hidden]):not([type=button]):not([type=reset]), select, textarea, button[type="submit"], input[type="submit"]';
   const strip = (s) => String(s || '').replace(/\s*\*\s*$/, '').replace(/\s{2,}/g, ' ').trim();
+  // PB-10 — concrete selector for the field's REAL control so resolve binds directly (not the wrapper):
+  // simple #id, else [name="…"] (handles dotted ids), else escaped #id, else null.
+  const selectorFor = (id, name) => {
+    id = (id || '').trim(); name = (name || '').trim();
+    if (id && /^[A-Za-z][\w-]*$/.test(id)) return `#${id}`;
+    if (name) return `[name="${name.replace(/(["\\])/g, '\\$1')}"]`;
+    if (id) return `#${id.replace(/([^\w-])/g, '\\$1')}`;
+    return null;
+  };
   const labelInfoFor = (el) => {
     try {
       const id = el.id;
@@ -3246,6 +3255,7 @@ function enumerateFormFields() {
         required: isSubmit ? false : isReq(el, li),
         isSubmit,
         kind: isSubmit ? 'submit' : (type === 'file' ? 'file' : tag === 'select' ? 'select' : 'input'),
+        selector: selectorFor(el.id, el.getAttribute && el.getAttribute('name')),
       });
     } catch { /* skip this control */ }
   }

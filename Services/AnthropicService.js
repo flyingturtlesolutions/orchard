@@ -21,7 +21,7 @@ import { SchemaValidator } from './SchemaValidator.js';
 // PB-10 — intent-driven proposal: the rules block is ASSEMBLED from the intent's extracted parameters
 // (shape/completeness/cardinality + must-cover fields) instead of a static minimal-roles prior.
 import { deriveIntentSpec, buildProposeDirective } from '../Core/intentShape.js';
-import { missingRoleFields } from '../Core/formCoverage.js';
+import { selectNecessaryFields, slugMatch } from '../Core/formCoverage.js';
 import { CONDITION_FIELDS, getTypesByFamily } from './ConditionVocabulary.js';
 // C-P3 (DD-08) — managed LLM proxy transport.
 import { getCloudSettings, normalizeApiBaseUrl } from './Cloud/CloudSettings.js';
@@ -1877,6 +1877,18 @@ REFINING AN EXISTING STRUCTURE (a human has already reviewed your previous propo
     // Role cap is intent-driven too: a completion form legitimately needs many roles (the old fixed
     // cap of 10 truncated "apply for this job" mid-form). Minimal intents keep a tight ceiling.
     const roleCap = intentSpec.completeness === 'exhaustive' ? 60 : 10;
+    // PB-10 binding — map each required-field LABEL → its real control {selector, kind}. A role the LLM
+    // tags with "field":"<label>" binds DIRECTLY to that selector (skips the wrapper-guessing resolver),
+    // so INSPECT lands on the real input → correct TYPE/SELECT/CLICK. Also used to dedup the backfill.
+    const _normLabel = (s) => String(s || '').replace(/\s*\*\s*$/, '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const requiredByLabel = new Map();
+    if (Array.isArray(formFields)) {
+      for (const f of formFields) {
+        if (f && (f.required || f.isSubmit) && f.label) {
+          requiredByLabel.set(_normLabel(f.label), { selector: f.selector || null, kind: f.kind || (f.isSubmit ? 'submit' : 'input') });
+        }
+      }
+    }
 
     const systemPrompt = `You propose PERSPECTIVE OPTIONS for a web-automation "Perspective" (a reusable "kind of page" view). You are given the user's INTENT (what they want to do) and the current page. Propose 2-3 distinct perspectives that serve the intent on this page.
 
@@ -1906,7 +1918,7 @@ Return ONLY a JSON object:
 Rules:
 ${proposeDirective}
 - "name" = short kebab-case identifier for the perspective ("search-results", "product-detail", "checkout-form").
-- "roles" = "role" is a short kebab-case semantic name; "description" says what element fills it (so the user knows what to pick); "multiplicity" is one | many | optional.
+- "roles" = "role" is a short kebab-case semantic name; "description" says what element fills it (so the user knows what to pick); "multiplicity" is one | many | optional. "field" (optional) = the verbatim label of the required form field this role fills, when a required-field list is given below.
 - FEATURE GROUNDING (important): a numbered FEATURE REFERENCE list may be attached below (real page features already enumerated + verified by exploration). For EACH role, set "featureIndex" to the NUMBER of the feature that fills it — the element the user will act on. Use -1 ONLY if no listed feature matches (the role is then unbound and the user picks it manually). A grounded role reuses a real, verified element instead of a guessed selector, so ground every role you can. Hidden roles still get a featureIndex if their revealed element is listed.
 - HIDDEN roles: for a role whose element appears ONLY after an interaction (inside a dropdown menu, a modal, an expanded panel), set "hidden": true and "revealedBy": the role name (within THIS perspective's roles) of the control that reveals it. That revealing control MUST itself be one of the roles (e.g. a "login-trigger" role), and you must list the trigger role BEFORE the role(s) it reveals. This lets the resolver open the trigger and find the hidden element. (On-page trigger + hidden children all stay onPage:true.)
 - Roles describe FUNCTION, not appearance ("primary-action", "result-item" — not "blue-button", "div-3").
@@ -2071,6 +2083,10 @@ ${proposeDirective}
         // / -1 / absent → null (role unbound; resolve falls back to LLM/visual + the user picks).
         const fi = Number.isInteger(r?.featureIndex) ? r.featureIndex : -1;
         const featureId = (fi >= 0 && fi < featureRefList.length) ? featureRefList[fi] : null;
+        // PB-10 — if the role claims a required field ("field":"<label>"), bind it to that field's real
+        // control selector + kind (the oracle), so resolve skips the wrapper-guessing LLM.
+        const fieldTag = (typeof r?.field === 'string' && r.field.trim()) ? r.field.trim().slice(0, 160) : null;
+        const bound = fieldTag ? requiredByLabel.get(_normLabel(fieldTag)) : null;
         roles.push({
           role,
           description: (typeof r?.description === 'string' ? r.description.trim() : '').slice(0, 160),
@@ -2080,6 +2096,10 @@ ${proposeDirective}
           revealedBy: (typeof r?.revealedBy === 'string' && r.revealedBy.trim()) ? kebab(r.revealedBy) : null,
           // PB-1 — grounded element (resolve-by-reuse target) or null when unmapped.
           featureId,
+          // PB-10 — oracle form-field binding (real control) + which required field this role claims.
+          field: fieldTag,
+          selector: bound?.selector || null,
+          fieldKind: bound?.kind || null,
         });
         if (roles.length >= roleCap) break;
       }
@@ -2116,11 +2136,16 @@ ${proposeDirective}
     // model just dropped — to the primary on-page option. Coverage becomes guaranteed by construction.
     if (intentSpec.completeness === 'exhaustive' && Array.isArray(formFields) && formFields.length && options.length) {
       const primary = options.find((o) => o.onPage !== false) || options[0];
+      // Coverage = required labels a role claimed via "field" (EXACT — no fuzzy dup) UNION roles whose
+      // name fuzzily matches the field slot (catches roles that omitted the tag). Both directions guard
+      // against re-adding a field the LLM already covers (the screening-question duplicate bug).
+      const claimed = new Set(primary.roles.map((r) => (r.field ? _normLabel(r.field) : null)).filter(Boolean));
+      const haveNames = primary.roles.map((r) => r.role);
       let added = 0;
-      for (const f of missingRoleFields(formFields, primary.roles.map((r) => r.role))) {
+      for (const f of selectNecessaryFields(formFields)) {
         if (primary.roles.length >= roleCap) break;
+        if (claimed.has(_normLabel(f.label)) || haveNames.some((n) => slugMatch(n, f.slot))) continue;
         if (primary.roles.some((x) => x.role === f.slot)) continue;
-        // De-dup the common resume/CV upload when the file input is unlabeled (slot becomes generic).
         if (f.kind === 'file' && primary.roles.some((x) => /resume|cv|upload|file|attach/i.test(x.role))) continue;
         primary.roles.push({
           role: f.slot.slice(0, 60),
@@ -2129,7 +2154,10 @@ ${proposeDirective}
           hidden: false,
           revealedBy: null,
           featureId: null,
-          oracleBackfill: true,   // provenance: deterministically added from the full-DOM form oracle
+          field: f.label || null,
+          selector: f.selector || null,   // PB-10 — bind backfilled field to its real control too
+          fieldKind: f.kind || null,
+          oracleBackfill: true,
         });
         added++;
       }

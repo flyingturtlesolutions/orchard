@@ -5398,7 +5398,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           for (const r of roles) {
             const fid = (r && typeof r.featureId === 'string') ? r.featureId : null;
             const f = (fid && localeModel?.features) ? localeModel.features[fid] : null;
-            if (f && f.selector) {
+            if (r && typeof r.selector === 'string' && r.selector) {
+              // PB-10 — oracle-bound form field: bind directly to the page's real control selector,
+              // skipping the LLM (which guesses MUI wrappers). INSPECT verify in the sidepanel still runs.
+              reused.push({ role: r.role, selector: r.selector, confidence: 0.9, justification: `oracle: form ${r.fieldKind || 'field'}`, reuse: true });
+            } else if (f && f.selector) {
               reused.push({ role: r.role, selector: f.selector, confidence: f.selectorVerified ? 0.95 : 0.7, justification: `reuse: feature ${fid}${f.selectorVerified ? ' (verified)' : ''}`, featureId: fid, reuse: true });
             } else {
               toResolve.push(r);

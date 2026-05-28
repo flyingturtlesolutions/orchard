@@ -18,7 +18,7 @@
 // only DOM-touching export; everything else operates on plain descriptors.
 //
 // @module Core/formCoverage
-// @version 2.74.553
+// @version 2.74.555
 
 const STOPWORDS = new Set(['the', 'a', 'an', 'your', 'please', 'enter', 'this', 'of', 'to', 'for', 'or', 'and', 'value', 'field', 'optional', 'required']);
 
@@ -44,6 +44,23 @@ function tokens(s) {
 /** Strip a trailing/embedded asterisk required-marker and surrounding whitespace from a label. */
 export function stripAsterisk(label) {
   return String(label || '').replace(/\s*\*\s*$/,'').replace(/\s{2,}/g, ' ').trim();
+}
+
+/**
+ * A concrete CSS selector for the field's REAL control, so resolve can bind directly instead of the
+ * LLM guessing (which lands on MUI wrappers). Prefers a simple `#id`; falls back to a `[name="…"]`
+ * attribute selector (handles dotted ids like `customQuestionAnswers.long_154` with no escaping); last
+ * resort escapes a complex id. Returns null when neither id nor name is present.
+ * @param {{id?:string, name?:string}} d
+ * @returns {string|null}
+ */
+export function selectorForField(d) {
+  const id = String(d?.id || '').trim();
+  const name = String(d?.name || '').trim();
+  if (id && /^[A-Za-z][\w-]*$/.test(id)) return `#${id}`;
+  if (name) return `[name="${name.replace(/(["\\])/g, '\\$1')}"]`;
+  if (id) return `#${id.replace(/([^\w-])/g, '\\$1')}`;
+  return null;
 }
 
 /**
@@ -77,7 +94,7 @@ export function selectNecessaryFields(descriptors) {
     const slot = slotForField(d);
     if (!slot || seen.has(slot)) continue;
     seen.add(slot);
-    out.push({ slot, label: stripAsterisk(d.label || d.name || d.id || ''), kind: d.kind || (d.isSubmit ? 'submit' : 'input'), required: !!d.required, isSubmit: !!d.isSubmit });
+    out.push({ slot, label: stripAsterisk(d.label || d.name || d.id || ''), kind: d.kind || (d.isSubmit ? 'submit' : 'input'), required: !!d.required, isSubmit: !!d.isSubmit, selector: d.selector ?? selectorForField(d) });
   }
   return out;
 }
@@ -235,6 +252,7 @@ export function enumerateFormFields(root) {
       required,
       isSubmit,
       kind: isSubmit ? 'submit' : (type === 'file' ? 'file' : tag === 'select' ? 'select' : 'input'),
+      selector: selectorForField({ id: el.id || '', name: (el.getAttribute && el.getAttribute('name')) || '' }),
     });
   }
   return out;

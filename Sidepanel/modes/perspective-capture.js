@@ -119,6 +119,11 @@ let _exploreToken = 0;
 //   _groundInFlight: true while the grounding call round-trips.
 let _groundIntentResult = null;
 let _groundInFlight = false;
+// PB-10 bug-pass — persisted LLM-extracted intent spec from grounding. _groundIntentResult is nulled
+// by "Use it" (to clear the UI card), which previously DROPPED the extractor hint in the common
+// Ground→Use it→Propose flow. This survives adoption so propose still gets the LLM shape/completeness.
+//   { keys:[rawIntent, groundedIntent], shape, completeness } | null
+let _groundedSpec = null;
 // PB-6b — Trial-run state. The intent-truth proof for the chosen perspective: synthesize
 // the resolved bundle into a runnable op, run it safely, score the fidelity vector.
 //   _trialInFlight: true while RUN_PERSPECTIVE_TRIAL round-trips (one at a time).
@@ -847,6 +852,7 @@ async function unmount() {
   _exploreToken++;   // invalidate any in-flight sweep landing after unmount
   _groundIntentResult = null;
   _groundInFlight = false;
+  _groundedSpec = null;
   _trialInFlight = false;
   _trialResult = null;
 
@@ -2196,9 +2202,9 @@ async function onProposePerspectives() {
   // PB-10 extractor upgrade — when a grounding ran for THIS intent (raw or adopted-grounded), pass its
   // LLM-emitted {shape, completeness} as the primary extractor; else propose falls back to the lexical
   // classifier. Match either the raw intent it was grounded for or the grounded text the user adopted.
-  const gi = _groundIntentResult;
-  const intentSpecHint = (gi && (gi.shape || gi.completeness) && (gi.forIntent === intent || gi.groundedIntent === intent))
-    ? { shape: gi.shape || null, completeness: gi.completeness || null }
+  const gs = _groundedSpec;
+  const intentSpecHint = (gs && (gs.shape || gs.completeness) && Array.isArray(gs.keys) && gs.keys.includes(intent))
+    ? { shape: gs.shape || null, completeness: gs.completeness || null }
     : null;
   let res;
   try {
@@ -2356,6 +2362,11 @@ async function onGroundIntent() {
   // PB-10 extractor upgrade — keep the LLM-emitted intent SHAPE + COMPLETENESS so propose can pass them
   // as the primary extractor (the grounding model understands intent better than the lexical fallback).
   _groundIntentResult = { groundedIntent: res.groundedIntent, achievable: res.achievable || 'unknown', note: res.note || '', matchedGoal: res.matchedGoal || null, forIntent: intent, shape: res.shape || null, completeness: res.completeness || null };
+  // Persist the extractor spec keyed by BOTH the raw intent and the grounded text, so the hint survives
+  // "Use it" (which swaps description → groundedIntent and clears _groundIntentResult).
+  _groundedSpec = (res.shape || res.completeness)
+    ? { keys: [intent, res.groundedIntent].filter(Boolean), shape: res.shape || null, completeness: res.completeness || null }
+    : null;
   _renderPerspectivePanel();
   if (res.hadAffordance === false) toast?.('Run Explore to ground the intent in this page');
 }
@@ -2500,7 +2511,9 @@ async function onResolveRoles(idx) {
     .filter(r => r && typeof r.role === 'string')
     // PB-2 (R4): forward the proposal's featureId so the handler can resolve grounded roles by
     // reuse (the feature's verified selector) instead of asking the LLM to regenerate one.
-    .map(r => ({ role: r.role, description: r.description ?? '', multiplicity: r.multiplicity ?? 'one', featureId: r.featureId ?? null }));
+    // PB-10: forward the oracle's real-control selector + kind (form fields) so the handler binds
+    // directly instead of the LLM guessing a wrapper selector — gives the landmark correct TYPE/CLICK.
+    .map(r => ({ role: r.role, description: r.description ?? '', multiplicity: r.multiplicity ?? 'one', featureId: r.featureId ?? null, selector: r.selector ?? null, fieldKind: r.fieldKind ?? null }));
   if (!roles.length) return;
   _roleResolveNotes = {};   // fresh run — clear prior notes
   await _runResolve({ opt, roles, priorAttempt: null, mode: 'initial', inFlightKey: String(idx) });
