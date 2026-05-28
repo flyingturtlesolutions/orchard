@@ -19,6 +19,9 @@
 import { Logger }          from '../Core/Logger.js';
 import { SchemaValidator } from './SchemaValidator.js';
 import { CONDITION_FIELDS, getTypesByFamily } from './ConditionVocabulary.js';
+// C-P3 (DD-08) — managed LLM proxy transport.
+import { getCloudSettings, normalizeApiBaseUrl } from './Cloud/CloudSettings.js';
+import { ensureFreshSession } from './Cloud/CloudTokenStore.js';
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL             = 'claude-sonnet-4-5';
@@ -567,6 +570,45 @@ export class AnthropicService {
     return data[SETTINGS_KEY] ?? null;
   }
 
+  /**
+   * C-P3 (DD-08) — resolve the LLM transport. When signed in to the cloud, route to the app's
+   * managed proxy (/llm/messages) with the Cognito Bearer token so NO client key is needed.
+   * Otherwise fall back to a direct Anthropic call with the locally-stored key. Throws
+   * 'no-llm-transport' when neither is available. Returns { url, headers } where the caller adds
+   * Content-Type and the request body.
+   * @returns {Promise<{ url: string, headers: Record<string,string> }>}
+   * @private
+   */
+  static async #llmTransport() {
+    try {
+      const settings = await getCloudSettings();
+      if (settings?.enabled) {
+        const session = await ensureFreshSession();
+        if (session?.idToken) {
+          return {
+            url: `${normalizeApiBaseUrl(settings.apiBaseUrl)}/llm/messages`,
+            headers: { 'Authorization': `Bearer ${session.idToken}` },
+          };
+        }
+      }
+    } catch { /* fall through to direct (BYO key) */ }
+    const apiKey = await AnthropicService.getApiKey();
+    if (!apiKey) throw new Error('no-llm-transport');
+    return {
+      url: ANTHROPIC_API_URL,
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+    };
+  }
+
+  /** @returns {Promise<boolean>} true if a managed (signed-in) or local-key transport exists. */
+  static async #hasLlm() {
+    try { await AnthropicService.#llmTransport(); return true; } catch { return false; }
+  }
+
   // ── Recursive walk API ────────────────────────────────────────────────────
 
   /**
@@ -613,8 +655,7 @@ export class AnthropicService {
   static async #getNextStep_phase1(options) {
     const { aiName, aliases = [], groundUrl, dom, confirmedSteps, turn, maxTurns, lastStepError, uiType } = options;
 
-    const apiKey = await AnthropicService.getApiKey();
-    if (!apiKey) return { success: false, step: null, error: 'No API key' };
+    if (!(await AnthropicService.#hasLlm())) return { success: false, step: null, error: 'No API key' };
 
     const aliasHint = aliases.length
       ? `Known aliases for this AI in the UI: ${aliases.join(', ')}.`
@@ -679,8 +720,7 @@ Return ONLY a single raw JSON object. No prose before or after.
   static async #getNextStep_phase2(options) {
     const { aiName, aliases = [], groundUrl, dom, confirmedSteps, turn, maxTurns, lastStepError, sampleQuestion, handoff, uiType } = options;
 
-    const apiKey = await AnthropicService.getApiKey();
-    if (!apiKey) return { success: false, step: null, error: 'No API key' };
+    if (!(await AnthropicService.#hasLlm())) return { success: false, step: null, error: 'No API key' };
 
     const SAMPLE_Q    = sampleQuestion || 'How can you help me?';
     const aliasHint   = aliases.length
@@ -4229,8 +4269,7 @@ Return ONLY the JSON object.`;
   static async generateTemplate(options) {
     const { groundUrl, aiName, domSnapshot, screenshot } = options;
 
-    const apiKey = await AnthropicService.getApiKey();
-    if (!apiKey) return { success: false, rawJson: null, steps: null, error: 'No Anthropic API key set. Add it in Settings.' };
+    if (!(await AnthropicService.#hasLlm())) return { success: false, rawJson: null, steps: null, error: 'No Anthropic API key set. Add it in Settings.' };
 
     const systemPrompt = `You are a senior browser automation engineer with deep expertise in testing AI agent products.
 
@@ -4342,8 +4381,9 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     const model = pickModelForCall(role, operation, hasVision);   // v2.74.360 — role→model policy
     const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
     const t0 = now();
-    const apiKey = await AnthropicService.getApiKey();
-    if (!apiKey) {
+    let _llm;
+    try { _llm = await AnthropicService.#llmTransport(); }
+    catch {
       AnthropicService.#audit({ ts: Date.now(), role, operation, latencyMs: 0, ok: false, outputChars: 0, inTokens: 0, outTokens: 0, costUsd: null, model, error: 'no-api-key' });
       return { success: false, text: '', error: 'No API key' };
     }
@@ -4354,14 +4394,9 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     ];
 
     try {
-      const res = await fetch(ANTHROPIC_API_URL, {
+      const res = await fetch(_llm.url, {
         method : 'POST',
-        headers: {
-          'Content-Type'                             : 'application/json',
-          'x-api-key'                                : apiKey,
-          'anthropic-version'                        : '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
+        headers: { 'Content-Type': 'application/json', ..._llm.headers },
         body: JSON.stringify({
           model,
           max_tokens : maxTokens,
@@ -5364,10 +5399,9 @@ Extract: ${paramNames.join(', ')}`;
     inputItems,
     cacheOutputItems,
   }) {
-    const apiKey = await AnthropicService.getApiKey();
-    if (!apiKey) {
-      return { success: false, items: [], error: 'No API key', latencyMs: 0, tokensIn: 0, tokensOut: 0 };
-    }
+    let _llm;
+    try { _llm = await AnthropicService.#llmTransport(); }
+    catch { return { success: false, items: [], error: 'No API key', latencyMs: 0, tokensIn: 0, tokensOut: 0 }; }
 
     // Hard cap on input list size. Larger lists would blow the prompt and
     // the cost budget; surface a clear error rather than silently truncating.
@@ -5490,14 +5524,9 @@ Identify which input items satisfy the contract. Return their indices in the ord
       `[recover ${analysisName}] USER CONTENT:\n${userContent}`);
 
     try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
+      const res = await fetch(_llm.url, {
         method: 'POST',
-        headers: {
-          'Content-Type'                             : 'application/json',
-          'x-api-key'                                : apiKey,
-          'anthropic-version'                        : '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
+        headers: { 'Content-Type': 'application/json', ..._llm.headers },
         body: JSON.stringify({
           model      : 'claude-sonnet-4-5',
           max_tokens : 4096,
@@ -5663,8 +5692,9 @@ Identify which input items satisfy the contract. Return their indices in the ord
     //   {base64: string, mime: string, label?: string}
     imageInput = null,
   }) {
-    const apiKey = await AnthropicService.getApiKey();
-    if (!apiKey) {
+    let _llm;
+    try { _llm = await AnthropicService.#llmTransport(); }
+    catch {
       return {
         success: false, output: null, confidence: null, rationale: null,
         error: 'No API key',
@@ -5795,14 +5825,9 @@ Produce output that fulfills the description's intent and satisfies the postcond
       `[frontier-primary ${analysisName}] USER CONTENT:\n${userContent}`);
 
     try {
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
+      const res = await fetch(_llm.url, {
         method: 'POST',
-        headers: {
-          'Content-Type'                             : 'application/json',
-          'x-api-key'                                : apiKey,
-          'anthropic-version'                        : '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
+        headers: { 'Content-Type': 'application/json', ..._llm.headers },
         body: JSON.stringify({
           model      : 'claude-sonnet-4-5',
           max_tokens : 4096,
@@ -5946,8 +5971,9 @@ Produce output that fulfills the description's intent and satisfies the postcond
     screenshotBase64,
   }) {
     const t0 = Date.now();
-    const apiKey = await AnthropicService.getApiKey();
-    if (!apiKey) {
+    let _llm;
+    try { _llm = await AnthropicService.#llmTransport(); }
+    catch {
       return {
         success: false, regions: [], confidence: null, rationale: null,
         partialVisibility: null,
@@ -6003,14 +6029,9 @@ Identify the region(s) matching the description in the screenshot below and retu
       `[obs-frontier ${observationName}] USER CONTENT:\n${userTextSpec}`);
 
     try {
-      const res = await fetch(ANTHROPIC_API_URL, {
+      const res = await fetch(_llm.url, {
         method: 'POST',
-        headers: {
-          'Content-Type'                             : 'application/json',
-          'x-api-key'                                : apiKey,
-          'anthropic-version'                        : '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
+        headers: { 'Content-Type': 'application/json', ..._llm.headers },
         body: JSON.stringify({
           // Opus 4.7: pixel-level vision accuracy. No temperature/top_p/top_k —
           // those parameters are unsupported and would produce a 400.
