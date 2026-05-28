@@ -168,3 +168,98 @@ export function classifyTrialSafety(intent, draft) {
   actions[termIdx] = { action: 'EXTRACT', selector: termSel, target: 'TRIAL_TERMINAL' };
   return { safetyClass: 'irreversible', actions, deferred: [termSel] };
 }
+
+// PB-5 (R10) — score a trial RUN into a legible fidelity vector + verdict. This rubric IS the
+// operational definition of an "intent-true" Perspective, so each axis is inspectable evidence, not a
+// hidden number. Axes are 0..1 or null when not applicable to the intent shape. The verdict is
+// shape/class-specific; `score` is the mean of the evaluated axes. PURE.
+//
+// @param {object} args
+// @param {'act'|'read'} [args.shape]
+// @param {'read'|'reversible'|'irreversible'} [args.safetyClass]
+// @param {number} [args.resolvedRoleCount]  roles that filled (the bundle)
+// @param {number} [args.proposedRoleCount]  roles the proposal asked for (≥ resolved)
+// @param {string[]} [args.deferred]          deferred terminal selectors (irreversible)
+// @param {object|null} args.result           ExecutionEngine.executeStrategy result
+// @returns {{ verdict:'trial-pass'|'trial-fail', score:number, vector:object, evidence:string[] }}
+export function scoreTrial({ shape = 'act', safetyClass = 'reversible', resolvedRoleCount = 0, proposedRoleCount = 0, deferred = [], result = null } = {}) {
+  const evidence = [];
+  const stepResults = Array.isArray(result?.stepResults) ? result.stepResults : [];
+  const frag = stepResults[0] || null;
+  const extracted = (result && result.extractedValues) || {};
+  const sizeOf = (v) => Array.isArray(v) ? v.length : (typeof v === 'string' ? v.trim().length : (v ? 1 : 0));
+
+  // resolvedCompleteness — filled / proposed roles.
+  const denom = proposedRoleCount > 0 ? proposedRoleCount : resolvedRoleCount;
+  const resolvedCompleteness = denom > 0 ? Math.min(1, resolvedRoleCount / denom) : null;
+  if (resolvedCompleteness != null) evidence.push(`${resolvedRoleCount}/${denom} role(s) resolved (${Math.round(resolvedCompleteness * 100)}%)`);
+
+  // effectMatch — did the op's steps execute without error? (PB-8 refines with observed-vs-predicted.)
+  const ranOk = frag ? (frag.success !== false) : !!result?.success;
+  const effectMatch = result == null ? null : (ranOk ? 1 : 0);
+  if (result != null) evidence.push(ranOk ? `Ran ${frag?.actionsRun ?? '?'} step(s), no errors` : `Run failed: ${frag?.error || result?.error || 'step error'}`);
+
+  // postconditionMet — only meaningful if conditions existed (trial fragments have none → null).
+  const postFailures = frag?.postFailures;
+  const postconditionMet = Array.isArray(postFailures) ? (postFailures.length === 0 ? 1 : 0) : null;
+  if (Array.isArray(postFailures) && postFailures.length) evidence.push(`${postFailures.length} postcondition(s) failed`);
+
+  // extractQuality — read-intent proof: did the EXTRACT surface content?
+  let extractQuality = null;
+  if (shape === 'read') {
+    const n = sizeOf(extracted.TRIAL_RESULT);
+    extractQuality = n > 0 ? 1 : 0;
+    evidence.push(n > 0 ? `Surfaced content (${Array.isArray(extracted.TRIAL_RESULT) ? extracted.TRIAL_RESULT.length + ' item(s)' : 'non-empty'})` : 'Extract returned nothing');
+  }
+
+  // terminalReachable — irreversible proof: did the deferred terminal probe resolve (not fire)?
+  let terminalReachable = null;
+  if (safetyClass === 'irreversible') {
+    const present = sizeOf(extracted.TRIAL_TERMINAL) > 0;
+    terminalReachable = present ? 1 : 0;
+    evidence.push(present ? `Reached terminal action (${deferred.join(', ') || 'commit'}) — not fired` : `Terminal action not reachable (${deferred.join(', ') || 'commit'})`);
+  }
+
+  let pass;
+  if (safetyClass === 'irreversible') pass = effectMatch === 1 && terminalReachable === 1;
+  else if (shape === 'read') pass = effectMatch === 1 && extractQuality === 1;
+  else pass = effectMatch === 1 && (resolvedCompleteness == null || resolvedCompleteness >= 0.5);
+
+  const vector = { resolvedCompleteness, effectMatch, postconditionMet, extractQuality, terminalReachable };
+  const axes = Object.values(vector).filter((x) => x != null);
+  const score = axes.length ? Math.round((axes.reduce((a, b) => a + b, 0) / axes.length) * 100) / 100 : 0;
+  return { verdict: pass ? 'trial-pass' : 'trial-fail', score, vector, evidence };
+}
+
+// PB-6 (R6) — assess a resolved bundle against the PROPOSED roles. "Complete" = every REQUIRED role
+// (multiplicity one|many) resolved; optional/conditional roles never block. Surfaces the resolution
+// report so the orchestrator can BLOCK accept on a structurally-incomplete Perspective — containment
+// completeness (every survivor kept) ≠ sufficiency (a required role that resolve dropped is missing).
+const REQUIRED_MULT = new Set(['one', 'many']);
+
+/**
+ * @param {Array<{role:string,multiplicity?:string}>} proposedRoles
+ * @param {string[]} filledRoleNames  role names that resolved (the bundle)
+ * @returns {{ proposedCount:number, resolvedCount:number, resolved:string[], dropped:string[],
+ *   missingRequired:string[], complete:boolean }}
+ */
+export function assessPerspectiveCompleteness(proposedRoles, filledRoleNames) {
+  const proposed = (Array.isArray(proposedRoles) ? proposedRoles : []).filter((r) => r && typeof r.role === 'string');
+  const filled = new Set(Array.isArray(filledRoleNames) ? filledRoleNames : []);
+  const resolved = [];
+  const dropped = [];
+  const missingRequired = [];
+  for (const r of proposed) {
+    if (filled.has(r.role)) { resolved.push(r.role); continue; }
+    dropped.push(r.role);
+    if (REQUIRED_MULT.has(r.multiplicity ?? 'one')) missingRequired.push(r.role);
+  }
+  return {
+    proposedCount: proposed.length,
+    resolvedCount: resolved.length,
+    resolved,
+    dropped,
+    missingRequired,
+    complete: missingRequired.length === 0,
+  };
+}

@@ -29,7 +29,7 @@ import * as Locale          from './Core/locale.js';   // v2.74.397 — Perspect
 import * as Outcomes           from './Core/outcomes.js';    // v2.74.413 — OutcomeEvent stream + rollups
 import * as SiteMap            from './Core/siteMap.js';     // v2.74.431 — Ground siteMap (GROUND_SPEC § 7)
 import * as CapabilitySynth    from './Core/capabilitySynth.js';  // v2.74.471 — synthesize capability from a goal
-import { synthesizeTrialOp, classifyTrialSafety } from './Core/trialSynth.js';  // PB-3/PB-4 — trial op + safety classing
+import { synthesizeTrialOp, classifyTrialSafety, scoreTrial } from './Core/trialSynth.js';  // PB-3/4/5 — trial op + safety + scoring
 import * as ChromeHoist        from './Core/chromeHoist.js';  // v2.74.480 — hoist recurring chrome off Locales → Ground.chrome
 import * as Workflows          from './Core/workflows.js';   // v2.74.488 — cross-Locale workflows (partOf) over the siteMap
 import { ExecutionEngine }    from './Services/ExecutionEngine.js';
@@ -5429,7 +5429,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'RUN_PERSPECTIVE_TRIAL': {
       (async () => {
         try {
-          const { groundId = null, intent = '', roles, navigateUrl = null } = payload ?? {};
+          const { groundId = null, intent = '', roles, navigateUrl = null, proposedRoleCount = 0 } = payload ?? {};
           if (!groundId || !Array.isArray(roles) || !roles.length) { sendResponse({ success: false, error: 'groundId + roles required' }); return; }
           let localeModel = null;
           try { const pm = await _readLocaleCache(groundId, _normalizeUrlForPerspectiveCache(navigateUrl || '')); localeModel = pm?.model || null; } catch { /* */ }
@@ -5461,7 +5461,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             try { await StorageManager.deleteStrategy(strategyId); } catch { /* */ }
             try { await StorageManager.deleteFragment(fragmentId); } catch { /* */ }
           }
-          sendResponse({ success: true, ran: true, safetyClass: safety.safetyClass, deferred: safety.deferred, draft, result });
+          // PB-5 (R10): score the run into a fidelity vector + verdict; emit the `trial` outcome.
+          const scored = scoreTrial({
+            shape: draft0.shape, safetyClass: safety.safetyClass,
+            resolvedRoleCount: roles.length, proposedRoleCount,
+            deferred: safety.deferred, result,
+          });
+          try {
+            await _appendOutcomes(groundId, [Outcomes.makeStageEvent('trial', {
+              groundId, verdict: scored.verdict, input: { roleOrIntent: String(intent).slice(0, 120) },
+              detail: { ...scored.vector, score: scored.score, shape: draft0.shape, safetyClass: safety.safetyClass },
+            })]);
+          } catch (e) { Logger.warn('background', `RUN_PERSPECTIVE_TRIAL trial outcome: ${e.message}`); }
+          sendResponse({ success: true, ran: true, safetyClass: safety.safetyClass, deferred: safety.deferred, draft, result, trial: scored });
         } catch (err) {
           Logger.error('background', `RUN_PERSPECTIVE_TRIAL failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
