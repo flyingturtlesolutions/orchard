@@ -3261,11 +3261,21 @@ function _describeFormControl(el) {
     // leave it to the band scan so we don't pollute the form features.
     if (isButton && !isSubmit) return null;
     const li = _ffLabelInfo(el);
+    // v2.74.565 — a submit's label is its OWN text (button content / input value /
+    // image alt), not a <label for>. Without this the submit comes through blank,
+    // so the two submit buttons can't be told apart and Bind can't pick the right
+    // one. Fall back to the control's text only when there's no associated label.
+    let labelText = li.text;
+    if (!_ffStrip(labelText)) {
+      if (isButton) labelText = el.textContent || '';
+      else if (tag === 'input' && type === 'image') labelText = el.getAttribute('alt') || el.getAttribute('value') || '';
+      else if (tag === 'input' && (type === 'submit' || type === 'button')) labelText = el.getAttribute('value') || '';
+    }
     return {
       tag, type,
       name: el.getAttribute('name') || '',
       id: el.id || '',
-      label: _ffStrip(li.text),
+      label: _ffStrip(labelText),
       required: isSubmit ? false : _ffRequired(el, li),
       isSubmit,
       kind: isSubmit ? 'submit' : (type === 'file' ? 'file' : tag === 'select' ? 'select' : 'input'),
@@ -4969,36 +4979,57 @@ async function explorePageStructure(payload) {
     if (swapAway) {
       ctl.revealed = []; ctl.revealCount = 0;   // swapped-in nodes belong to another view — not depth
       ctl.observation = 'destructive-swap';
-      // Reverse the swap so Explore RETURNS THE PAGE TO WHERE IT STARTED — an
-      // observation must not leave the user on a view they didn't choose. (The
-      // captured substrate does NOT depend on this: enumerate-first already has
-      // the entry state.) `restoredFrac` = how much of the entry surface is back.
-      const restoredFrac = () => { let gone = 0; for (const el of beforeSet) if (!visible(el)) gone++; return 1 - gone / Math.max(1, beforeSet.size); };
+      // Reverse the swap so Explore RETURNS THE PAGE TO WHERE IT STARTED. The view
+      // toggle RE-RENDERS (unmounts the form, mounts the description, and vice
+      // versa), so the entry elements are REPLACED by fresh nodes. Two consequences
+      // we must respect: (a) verify restoration by the COUNT of rendered
+      // interactive elements, NOT by old-element identity (the old refs stay
+      // detached, which previously false-negatived AND triggered an extra click
+      // that toggled the view right back); (b) re-query the toggle FRESH each time
+      // — its reference (and even its class selector) changes across the swap.
+      const entryCount = beforeSet.size;
+      const visCount = () => { let n = 0; try { for (const el of document.querySelectorAll(REVEAL_SEL)) if (visible(el)) n++; } catch { /* */ } return n; };
+      const restored = () => visCount() >= 0.8 * entryCount;
+      const reFindToggle = () => {
+        // The same control we already poked (vetted safe). Prefer selector identity;
+        // fall back to the position it occupied (toggles are page chrome — the
+        // content below them swaps, so they stay put).
+        for (const s of [_selector, selector]) { let t = null; try { t = s && document.querySelector(s); } catch { /* */ } if (t && visible(t)) return t; }
+        try {
+          const cx = ctl.rect && (ctl.rect.x + ctl.rect.w / 2), cy = ctl.rect && (ctl.rect.y + ctl.rect.h / 2);
+          if (Number.isFinite(cx) && Number.isFinite(cy)) {
+            const at = document.elementFromPoint(cx, cy);
+            const btn = at && at.closest && at.closest('button,[role="button"],summary');
+            if (btn && visible(btn) && isSafeToClick(btn)) return btn;
+          }
+        } catch { /* */ }
+        return null;
+      };
       let back = false;
       try {
-        // (1) TRUE toggle — re-click the control itself (dropdown/accordion/summary).
-        if (visible(src) && isSafeToClick(src)) { src.click(); await sleep(settleMs); }
-        back = restoredFrac() >= 0.6;
-        // (2) SEGMENTED toggle — re-click did nothing because the entry view is
-        //     reached via a DIFFERENT, complementary control (e.g. "View Job
-        //     Description" hid the form; the form returns by clicking its sibling
-        //     "Apply for This Job"). Click a safe, now-visible sibling button in
-        //     the same control container and re-check.
+        // (1) Re-click the SAME toggle (a 2-state view toggle flips back). Count
+        //     check → if the entry view returned, we're DONE (don't touch anything
+        //     else — that's what previously toggled it back off).
+        const t = reFindToggle();
+        if (t) { try { t.click(); } catch { /* */ } await sleep(settleMs); }
+        back = restored();
+        // (2) Segmented toggle (separate "back" control, e.g. an "Apply" that
+        //     re-shows the form): click a safe sibling, re-check by COUNT after
+        //     each, stop the instant the entry view returns. isSafeToClick excludes
+        //     submits, so this never submits the form.
         if (!back) {
           let container = null;
-          try { container = src.closest('[class*="actions" i],[role="group"],[role="tablist"],[role="toolbar"]') || src.parentElement; } catch { container = src.parentElement; }
-          let sibs = [];
-          try { sibs = Array.from(container ? container.querySelectorAll('button,[role="button"],summary') : []); } catch { sibs = []; }
+          try { const anchor = reFindToggle() || src; container = anchor && (anchor.closest('[class*="actions" i],[role="group"],[role="tablist"],[role="toolbar"]') || anchor.parentElement); } catch { /* */ }
+          let sibs = []; try { sibs = container ? Array.from(container.querySelectorAll('button,[role="button"],summary')).slice(0, 6) : []; } catch { /* */ }
           for (const sib of sibs) {
-            if (sib === src || !visible(sib) || !isSafeToClick(sib)) continue;
-            try { sib.click(); } catch { /* */ }
-            await sleep(settleMs);
-            if (restoredFrac() >= 0.6) { back = true; break; }
+            if (!visible(sib) || !isSafeToClick(sib)) continue;
+            try { sib.click(); } catch { /* */ } await sleep(settleMs);
+            if (restored()) { back = true; break; }
           }
         }
       } catch { /* */ }
       ctl.restored = back;
-      dbg(back ? 'destructive-swap reversed (entry view restored)' : 'destructive-swap NOT reversed (entry view lost — relying on enumerate-first)', { cid: ctl.cid, vanished, before: beforeSet.size });
+      dbg(back ? 'destructive-swap reversed (entry view restored)' : 'destructive-swap NOT reversed (relying on enumerate-first)', { cid: ctl.cid, vanished, entryCount, nowCount: visCount() });
       controls.push(ctl);
       continue;   // skip the additive-reveal restore path below
     }
