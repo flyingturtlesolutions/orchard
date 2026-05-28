@@ -91,7 +91,7 @@ import { HybridStorageAdapter } from './Services/Storage/HybridStorageAdapter.js
 import { backfillWorkspacePartitionFromLegacy } from './Services/Storage/WorkspacePartitionBackfill.js';
 import { initStoragePort, getStoragePortMeta } from './Services/Storage/StoragePort.js';
 import { getCloudSettings, setCloudSettings } from './Services/Cloud/CloudSettings.js';
-import { isCloudSignedIn } from './Services/Cloud/CloudTokenStore.js';
+import { isCloudSignedIn, getCloudSession } from './Services/Cloud/CloudTokenStore.js';
 import {
   getCloudAuthStatus,
   signInToCloud,
@@ -260,7 +260,15 @@ getIdentitySummary()
     // C-P0 — reflect the device's Ed25519 identity onto the §4 LocalUser record (idempotent;
     // independent of cloud sign-in so local-only users still get publicIdentity).
     await bindPublicIdentity({ publicKey: publicKeyB64, publicKeyAlgorithm: 'Ed25519' }).catch(() => {});
-    Logger.info('background', `Orchard identity ready (preview ${orchardUserIdPreview})`);
+    // Prefer the server-authoritative orchardUserId from the cloud session (the namespace all
+    // storage/sync actually use) over the locally-derived preview. They differ after a key rotation
+    // since DD-01 reuses the original orchardUserId across keys — logging the preview alone is
+    // misleading when debugging cloud paths.
+    const session = await getCloudSession().catch(() => null);
+    const boundId = session?.orchardUserId;
+    Logger.info('background', boundId
+      ? `Orchard identity ready (orchardUserId ${boundId}; device key preview ${orchardUserIdPreview})`
+      : `Orchard identity ready (preview ${orchardUserIdPreview}; not bound to cloud)`);
   })
   .catch(err => Logger.warn('background', `Orchard identity init: ${err.message}`));
 

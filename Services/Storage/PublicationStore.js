@@ -17,6 +17,7 @@ import { rebuildReferenceGraph, collectWorkspacePrimitives } from './ReferenceSt
 import { getLocalUserRef } from './IdentityStore.js';
 import { signMessage } from '../../Core/OrchardIdentity.js';
 import { publishToRegistry } from '../Cloud/CloudClient.js';
+import { tryBindIdentity } from '../Cloud/OrchardAuth.js';
 
 const OUT_INDEX_KEY = 'publications:outgoing:index';
 const outKey = (id) => `publications:outgoing:${id}`;
@@ -182,6 +183,14 @@ export async function publishPrimitive(kind, id, details = {}) {
   const pkg = await buildPackage(kind, id, details);
   await signPackage(pkg);
   await persistOutgoing(pkg);
+
+  // Ensure the current device key is registered with the cloud before upload. The registry's
+  // anti-impersonation check requires the package signer key to be a bound device key; the cloud
+  // bind otherwise only runs on explicit sign-in, so a key established/rotated since the last bind
+  // would 403 (publisher_key_mismatch). tryBindIdentity is idempotent and best-effort (offline /
+  // signed-out → skipped, falls through to the local-only save below).
+  try { await tryBindIdentity(); }
+  catch (e) { Logger.warn('PublicationStore', `pre-publish bind: ${e.message}`); }
 
   // Best-effort registry upload (AWS_INTEGRATION §7.4). Requires cloud sign-in + the deployed
   // /publications endpoint; on failure the signed local copy is kept and can be re-uploaded later.

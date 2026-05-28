@@ -878,10 +878,15 @@ async function handlePublishPublication(event) {
   }
   const publicationId = String(publication.publicationId);
 
-  // Anti-impersonation: the signer's public key must match the caller's bound identity (DD-01).
+  // Anti-impersonation: the signer's public key must be one of the caller's bound device keys
+  // (DD-01). The bind handler tracks every device key in `devicePublicKeys`; fall back to the
+  // single `publicKey` for identities bound before that field existed.
   const identity = await getIdentityRecord(auth.claims.sub);
   const signerKey = publication.publishedBy && publication.publishedBy.publicKey;
-  if (!signerKey || (identity && identity.publicKey && signerKey !== identity.publicKey)) {
+  const boundKeys = Array.isArray(identity?.devicePublicKeys) && identity.devicePublicKeys.length
+    ? identity.devicePublicKeys
+    : (identity?.publicKey ? [identity.publicKey] : []);
+  if (!signerKey || (boundKeys.length && !boundKeys.includes(signerKey))) {
     return json(403, { error: 'publisher_key_mismatch' });
   }
   if (!publication.signature) return json(400, { error: 'unsigned_publication' });
