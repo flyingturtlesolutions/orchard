@@ -68,8 +68,8 @@ import { analyzeLandmarkImpact }                      from './Services/LandmarkI
 import { analyzeDeletionImpact }                     from './Services/Storage/ReferenceStore.js';
 import { bindPublicIdentity }                        from './Services/Storage/IdentityStore.js';
 import { publishPrimitive, listOutgoingPublications, getOutgoingPublication } from './Services/Storage/PublicationStore.js';
-import { importPublicationPackage, listIncomingPublications } from './Services/Storage/PublicationImport.js';
-import { fetchPublication } from './Services/Cloud/CloudClient.js';
+import { importPublicationPackage, listIncomingPublications, checkForUpdates, applyUpdate } from './Services/Storage/PublicationImport.js';
+import { fetchPublication, searchPublications } from './Services/Cloud/CloudClient.js';
 import { emit as emitGroundEvent_bg,
          list as listGroundEvents_bg,
          clear as clearGroundEvents_bg }              from './Services/GroundEventBus.js';
@@ -3109,6 +3109,52 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         } catch (err) {
           Logger.error('background', `IMPORT_PUBLICATION failed: ${err.message}`);
           sendResponse({ success: false, ok: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // Registry search/browse (AWS_INTEGRATION §7.4). Returns the registry's public listing.
+    case 'SEARCH_PUBLICATIONS': {
+      (async () => {
+        try {
+          const res = await searchPublications(payload?.query || '');
+          sendResponse({ success: true, publications: res?.publications || [] });
+        } catch (err) {
+          Logger.warn('background', `SEARCH_PUBLICATIONS failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message, publications: [] });
+        }
+      })();
+      return true;
+    }
+
+    // Lineage update check for an imported publication (DD-12 B). Stamps updateNotifications.
+    case 'CHECK_PUBLICATION_UPDATES': {
+      (async () => {
+        try {
+          const { publicationId } = payload;
+          if (!publicationId) { sendResponse({ success: false, error: 'publicationId required' }); return; }
+          const res = await checkForUpdates(publicationId);
+          sendResponse({ success: res.ok, ...res });
+        } catch (err) {
+          Logger.error('background', `CHECK_PUBLICATION_UPDATES failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // Apply an available update: import the newer version as a fresh incoming record (§9).
+    case 'APPLY_PUBLICATION_UPDATE': {
+      (async () => {
+        try {
+          const { fromPublicationId, toPublicationId, targetGroundId } = payload;
+          const res = await applyUpdate(fromPublicationId, toPublicationId, { targetGroundId });
+          if (res.ok && res.installedIds?.length) broadcastStorageChanged('publication', toPublicationId, 'imported');
+          sendResponse({ success: res.ok, ...res });
+        } catch (err) {
+          Logger.error('background', `APPLY_PUBLICATION_UPDATE failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
         }
       })();
       return true;

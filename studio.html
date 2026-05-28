@@ -37,6 +37,7 @@
       <button class="tab-btn"        data-tab="resolveperf">Resolve</button>
       <button class="tab-btn"        data-tab="llm">LLM</button>
       <button class="tab-btn"        data-tab="prompts">Docs</button>
+      <button class="tab-btn"        data-tab="sharing">Sharing</button>
       <button class="tab-btn"        data-tab="settings">Settings</button>
     </nav>
   </header>
@@ -854,6 +855,68 @@
     <div class="section-header"><h2>System Prompts</h2></div>
     <p class="prompts-intro">Built-in prompts sent to the Anthropic API. Each is scoped to a specific purpose in the discovery, profiling, or routing pipeline.</p>
     <div id="prompt-list" class="prompt-list"></div>
+  </section>
+
+  <!-- ── Tab: Sharing (publications — STORAGE_SCHEMA §9 / AWS_INTEGRATION §7.4) ── -->
+  <section class="tab-panel hidden" id="tab-sharing">
+    <div class="section-header"><h2>Sharing</h2></div>
+    <p class="prompts-intro">Publish a Ground, Workflow, or Strategy as a signed package to the Orchard registry, and import packages others have shared. Requires cloud sign-in for registry upload/download.</p>
+
+    <div class="card">
+      <h3 class="card-subheading">Publish</h3>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:end">
+        <label style="flex:0 0 130px">Type
+          <select id="pub-type" style="width:100%;margin-top:4px">
+            <option value="ground">Ground</option>
+            <option value="workflow">Workflow</option>
+            <option value="strategy">Strategy</option>
+          </select>
+        </label>
+        <label style="flex:1 1 240px">Item
+          <select id="pub-item" style="width:100%;margin-top:4px"></select>
+        </label>
+        <label style="flex:0 0 110px">Version
+          <input type="text" id="pub-version" value="1.0.0" style="width:100%;margin-top:4px" autocomplete="off" />
+        </label>
+        <label style="flex:0 0 140px">Visibility
+          <select id="pub-visibility" style="width:100%;margin-top:4px">
+            <option value="unlisted">Unlisted</option>
+            <option value="public">Public</option>
+            <option value="private">Private</option>
+          </select>
+        </label>
+      </div>
+      <label style="display:block;margin-top:8px">Title
+        <input type="text" id="pub-title" placeholder="Short title" style="width:100%;margin-top:4px" autocomplete="off" />
+      </label>
+      <label style="display:block;margin-top:8px">Description
+        <input type="text" id="pub-description" placeholder="What does this do?" style="width:100%;margin-top:4px" autocomplete="off" />
+      </label>
+      <label style="display:block;margin-top:8px">Tags (comma-separated)
+        <input type="text" id="pub-tags" placeholder="amazon, search" style="width:100%;margin-top:4px" autocomplete="off" />
+      </label>
+      <div style="margin-top:10px"><button class="btn-primary" id="btn-publish">Publish</button></div>
+      <div id="publish-status" class="msg hidden"></div>
+    </div>
+
+    <div class="card">
+      <h3 class="card-subheading">My publications</h3>
+      <div id="outgoing-list" class="prompt-list"><p class="settings-note">None yet.</p></div>
+    </div>
+
+    <div class="card">
+      <h3 class="card-subheading">Registry</h3>
+      <div style="display:flex;gap:6px">
+        <input type="text" id="registry-search" placeholder="Search published packages…" style="flex:1" autocomplete="off" />
+        <button class="btn-secondary" id="btn-registry-search" style="flex-shrink:0">Search</button>
+      </div>
+      <div id="registry-list" class="prompt-list" style="margin-top:10px"></div>
+    </div>
+
+    <div class="card">
+      <h3 class="card-subheading">Imported</h3>
+      <div id="incoming-list" class="prompt-list"><p class="settings-note">None yet.</p></div>
+    </div>
   </section>
 
   <!-- ── Tab: Settings ── -->

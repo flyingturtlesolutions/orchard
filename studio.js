@@ -128,6 +128,7 @@ qsa('.tab-btn').forEach((btn) => {
     if (btn.dataset.tab === 'logs')      { refreshLogs(); btn.removeAttribute('data-has-alert'); btn.dataset.badge = '0'; }
     if (btn.dataset.tab === 'resolveperf') renderResolvePerf();
     if (btn.dataset.tab === 'llm')         renderLlmAudit();
+    if (btn.dataset.tab === 'sharing')     refreshSharing();
     // v2.74.69 — Workflows tab is a derived view: every visit re-reads
     // strategies + grounds so newly-authored content shows up without a
     // full Studio reload.
@@ -5275,6 +5276,180 @@ function showApiMsg(text, type) {
   el.classList.remove('hidden');
   setTimeout(() => el.classList.add('hidden'), 3000);
 }
+
+// ─── Sharing / publications (STORAGE_SCHEMA §9 / AWS_INTEGRATION §7.4) ───────────
+// Studio surface for the publication engine: publish a primitive as a signed package, browse +
+// import from the registry, and check/apply lineage updates on imports. Registry calls need cloud
+// sign-in; same-device publish→import also works offline via the local outgoing store.
+// NOTE (Appendix A terminology): publish `kind` here is the storage-layer kind — `ground`,
+// `workflow` (global Tier-2), `strategy` (per-Ground Tier-3) — matching collectWorkspacePrimitives.
+
+function _shareSend(type, payload) {
+  return new Promise((res) => chrome.runtime.sendMessage({ type, payload }, res));
+}
+
+function _shareMsg(id, text, type) {
+  const el = $(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = `msg ${type}`;
+  el.classList.remove('hidden');
+  setTimeout(() => el.classList.add('hidden'), 4000);
+}
+
+async function _refreshPublishItems() {
+  const sel = $('pub-item');
+  if (!sel) return;
+  const type = $('pub-type').value;
+  let items = [];
+  try {
+    if (type === 'ground') items = (await StorageManager.getAllGrounds()).map((g) => ({ id: g.id, label: g.name || g.id }));
+    else if (type === 'strategy') items = (await StorageManager.getAllStrategies()).map((s) => ({ id: s.id, label: s.name || s.id }));
+    else if (type === 'workflow') items = (await StorageManager.listWorkflows()).map((w) => ({ id: w.id, label: w.name || w.id }));
+  } catch { /* list method absent in some builds */ }
+  sel.innerHTML = items.length
+    ? items.map((it) => `<option value="${escAttr(it.id)}">${escHtml(it.label)}</option>`).join('')
+    : '<option value="">(none available)</option>';
+}
+
+async function renderOutgoingPublications() {
+  const box = $('outgoing-list');
+  if (!box) return;
+  const res = await _shareSend('LIST_OUTGOING_PUBLICATIONS');
+  const pubs = res?.publications || [];
+  box.innerHTML = pubs.length
+    ? pubs.map((p) => `
+        <div class="prompt-item">
+          <div><b>${escHtml(p.title || p.publicationId)}</b>
+            <span class="settings-note">v${escHtml(p.version || '1.0.0')} · ${escHtml(p.visibility || 'unlisted')} · ${p.uploaded ? 'uploaded' : 'local-only'}</span></div>
+          <div class="settings-note" style="font-family:monospace;font-size:11px">${escHtml(p.publicationId)}</div>
+        </div>`).join('')
+    : '<p class="settings-note">None yet.</p>';
+}
+
+async function renderIncomingPublications() {
+  const box = $('incoming-list');
+  if (!box) return;
+  const res = await _shareSend('LIST_INCOMING_PUBLICATIONS');
+  const pubs = res?.publications || [];
+  box.innerHTML = pubs.length
+    ? pubs.map((p) => `
+        <div class="prompt-item" data-pub="${escAttr(p.publicationId)}">
+          <div><b>${escHtml(p.title || p.publicationId)}</b> <span class="settings-note">v${escHtml(p.version || '1.0.0')}</span></div>
+          <div class="settings-note" style="font-family:monospace;font-size:11px">${escHtml(p.publicationId)}</div>
+          <div style="margin-top:4px">
+            <button class="btn-secondary small" data-act="check-updates" data-pub="${escAttr(p.publicationId)}">Check updates</button>
+            <span class="share-update-note settings-note"></span>
+          </div>
+        </div>`).join('')
+    : '<p class="settings-note">None yet.</p>';
+}
+
+async function renderRegistryResults(query) {
+  const box = $('registry-list');
+  if (!box) return;
+  box.innerHTML = '<p class="settings-note">Searching…</p>';
+  const res = await _shareSend('SEARCH_PUBLICATIONS', { query: query || '' });
+  if (!res?.success) {
+    box.innerHTML = `<p class="settings-note">Registry unavailable (${escHtml(res?.error || 'sign in to search')}).</p>`;
+    return;
+  }
+  const pubs = res.publications || [];
+  if (!pubs.length) { box.innerHTML = '<p class="settings-note">No results.</p>'; return; }
+  const grounds = await StorageManager.getAllGrounds();
+  const groundOpts = '<option value="">— new/auto (ground packages)</option>'
+    + grounds.map((g) => `<option value="${escAttr(g.id)}">${escHtml(g.name || g.id)}</option>`).join('');
+  box.innerHTML = pubs.map((p) => `
+      <div class="prompt-item">
+        <div><b>${escHtml(p.title || p.publicationId)}</b> <span class="settings-note">v${escHtml(p.version || '1.0.0')}</span></div>
+        ${p.description ? `<div class="settings-note">${escHtml(p.description)}</div>` : ''}
+        <div style="margin-top:4px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <select class="reg-target" data-pub="${escAttr(p.publicationId)}" style="max-width:220px">${groundOpts}</select>
+          <button class="btn-secondary small" data-act="import" data-pub="${escAttr(p.publicationId)}">Import</button>
+        </div>
+      </div>`).join('');
+}
+
+async function refreshSharing() {
+  await _refreshPublishItems();
+  await renderOutgoingPublications();
+  await renderIncomingPublications();
+}
+
+$('pub-type')?.addEventListener('change', _refreshPublishItems);
+
+$('btn-publish')?.addEventListener('click', async () => {
+  const kind = $('pub-type').value;
+  const id = $('pub-item').value;
+  if (!id) { _shareMsg('publish-status', 'Select an item to publish.', 'warn'); return; }
+  const details = {
+    title: $('pub-title').value.trim() || undefined,
+    description: $('pub-description').value.trim() || undefined,
+    version: $('pub-version').value.trim() || '1.0.0',
+    visibility: $('pub-visibility').value,
+    tags: $('pub-tags').value.split(',').map((t) => t.trim()).filter(Boolean),
+  };
+  const btn = $('btn-publish');
+  btn.disabled = true;
+  _shareMsg('publish-status', 'Publishing…', 'ok');
+  const res = await _shareSend('PUBLISH_PRIMITIVE', { kind, id, details });
+  btn.disabled = false;
+  if (res?.success) {
+    const pubId = res.publication?.publicationId || '';
+    _shareMsg('publish-status', `Published ${pubId} (${res.publication?.uploaded ? 'uploaded' : 'local-only'}).`, 'ok');
+    renderOutgoingPublications();
+  } else {
+    _shareMsg('publish-status', `Failed: ${res?.error || 'unknown error'}`, 'err');
+  }
+});
+
+$('btn-registry-search')?.addEventListener('click', () => renderRegistryResults($('registry-search').value.trim()));
+$('registry-search')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') renderRegistryResults($('registry-search').value.trim());
+});
+
+$('registry-list')?.addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-act="import"]');
+  if (!btn) return;
+  const publicationId = btn.dataset.pub;
+  const targetSel = qs(`.reg-target[data-pub="${CSS.escape(publicationId)}"]`);
+  const targetGroundId = targetSel?.value || undefined;
+  btn.disabled = true; btn.textContent = 'Importing…';
+  const res = await _shareSend('IMPORT_PUBLICATION', { publicationId, targetGroundId });
+  btn.disabled = false; btn.textContent = 'Import';
+  if (res?.success) { toast(`Imported ${res.installedIds?.length || 0} primitive(s).`); renderIncomingPublications(); }
+  else { toast(`Import failed: ${res?.error || 'unknown error'}`, 'err'); }
+});
+
+$('incoming-list')?.addEventListener('click', async (e) => {
+  const checkBtn = e.target.closest('[data-act="check-updates"]');
+  if (checkBtn) {
+    const publicationId = checkBtn.dataset.pub;
+    const note = checkBtn.parentElement.querySelector('.share-update-note');
+    checkBtn.disabled = true;
+    const res = await _shareSend('CHECK_PUBLICATION_UPDATES', { publicationId });
+    checkBtn.disabled = false;
+    if (!res?.success) { if (note) note.textContent = ` check failed: ${res?.error || '?'}`; return; }
+    const updates = res.updates || [];
+    if (!updates.length) { if (note) note.textContent = ' up to date'; return; }
+    const latest = updates[updates.length - 1];
+    if (note) {
+      note.innerHTML = ` ${updates.length} update(s) — `
+        + `<button class="btn-primary small" data-act="apply-update" data-from="${escAttr(publicationId)}" data-to="${escAttr(latest.publicationId)}">Apply v${escHtml(latest.version || '?')}</button>`;
+    }
+    return;
+  }
+  const applyBtn = e.target.closest('[data-act="apply-update"]');
+  if (applyBtn) {
+    applyBtn.disabled = true; applyBtn.textContent = 'Applying…';
+    const res = await _shareSend('APPLY_PUBLICATION_UPDATE', {
+      fromPublicationId: applyBtn.dataset.from,
+      toPublicationId: applyBtn.dataset.to,
+    });
+    if (res?.success) { toast('Update applied.'); renderIncomingPublications(); }
+    else { toast(`Update failed: ${res?.error || 'unknown error'}`, 'err'); applyBtn.disabled = false; applyBtn.textContent = 'Apply'; }
+  }
+});
 
 
 // ─── Runtime messages ─────────────────────────────────────────────────────────

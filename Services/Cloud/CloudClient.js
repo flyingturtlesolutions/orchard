@@ -113,6 +113,26 @@ export async function fetchPublication(publicationId) {
 export async function searchPublications(query) {
   return /** @type {any} */ (cloudRequest('GET', '/publications', { query: query ? { query } : {} }));
 }
+/**
+ * Newer versions in the publication's lineage (DD-12 B).
+ * @param {string} publicationId
+ * @returns {Promise<{ publicationId: string, lineageRootId: string, updates: object[] }>}
+ */
+export async function fetchPublicationUpdates(publicationId) {
+  return /** @type {any} */ (cloudRequest('GET', `/publications/${encodeURIComponent(publicationId)}/updates`));
+}
+/**
+ * Server-verified import plan: verifies the signature server-side and returns the package
+ * ({ publication, manifest, packages, signatureValid }). Client still reconciles + installs locally.
+ * @param {string} publicationId
+ * @param {{ target?: 'personal' }} [opts]
+ * @returns {Promise<{ publication: object, manifest: object, packages: object, signatureValid: boolean }>}
+ */
+export async function requestPublicationImport(publicationId, opts = {}) {
+  return /** @type {any} */ (cloudRequest('POST', `/publications/${encodeURIComponent(publicationId)}/import`, {
+    body: { target: opts.target || 'personal' },
+  }));
+}
 
 /**
  * @param {string} logicalPath

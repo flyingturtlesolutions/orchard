@@ -16,6 +16,7 @@ import { buildImportPlan, remapReferences } from '../../Core/publicationImport.j
 import { verifyMessage } from '../../Core/OrchardIdentity.js';
 import { StorageManager } from '../StorageManager.js';
 import { recordExternalUserEncounter } from './IdentityStore.js';
+import { fetchPublicationUpdates, requestPublicationImport, fetchPublication } from '../Cloud/CloudClient.js';
 
 const IN_INDEX_KEY = 'publications:incoming:index';
 const inKey = (id) => `publications:incoming:${id}`;
@@ -185,4 +186,57 @@ export async function listIncomingPublications() {
 /** @param {string} primitiveId @returns {Promise<object|null>} lineage record */
 export async function getLineage(primitiveId) {
   return /** @type {any} */ ((await getKey(lineageKey(primitiveId))) || null);
+}
+
+// ── Update flow (STORAGE_SCHEMA §9 / AWS_INTEGRATION §7.4, DD-12 B) ─────────────────────
+
+/**
+ * Check the registry for newer versions in this publication's lineage and stamp the result on
+ * the incoming record's `updateNotifications`. Returns the newer versions (empty if up to date).
+ * @param {string} publicationId   an imported (incoming) publication id
+ * @returns {Promise<{ ok: boolean, updates?: object[], error?: string }>}
+ */
+export async function checkForUpdates(publicationId) {
+  const rec = /** @type {any} */ (await getKey(inKey(publicationId)));
+  if (!rec?.publication) return { ok: false, error: 'not an imported publication' };
+  let res;
+  try { res = await fetchPublicationUpdates(publicationId); }
+  catch (e) { return { ok: false, error: e.message }; }
+  const updates = Array.isArray(res?.updates) ? res.updates : [];
+  rec.updateNotifications = { checkedAt: Date.now(), updates };
+  await setKey(inKey(publicationId), rec);
+  return { ok: true, updates };
+}
+
+/**
+ * Apply an available update: fetch the newer publication (server-verified), import it as a fresh
+ * incoming record (new local primitives per DD-12 B lineage), and clear the source record's
+ * pending notifications. A field-level merge into the existing import is deferred (§9 future work).
+ * @param {string} fromPublicationId   the currently-imported publication
+ * @param {string} toPublicationId     the newer publication to apply
+ * @param {{ targetGroundId?: string }} [opts]
+ * @returns {Promise<{ ok: boolean, installedIds?: string[], error?: string }>}
+ */
+export async function applyUpdate(fromPublicationId, toPublicationId, opts = {}) {
+  if (!toPublicationId) return { ok: false, error: 'toPublicationId required' };
+  // Prefer the server-verified import endpoint; fall back to a plain fetch.
+  let pkg;
+  try { pkg = await requestPublicationImport(toPublicationId); }
+  catch (e1) {
+    try { pkg = await fetchPublication(toPublicationId); }
+    catch (e2) { return { ok: false, error: `fetch ${toPublicationId}: ${e2.message}` }; }
+  }
+  if (!pkg?.manifest) return { ok: false, error: 'update package not found' };
+
+  const result = await importPublicationPackage(pkg, { targetGroundId: opts.targetGroundId });
+  if (!result.ok) return result;
+
+  // Clear the source record's pending notifications now that a newer version is installed.
+  const rec = /** @type {any} */ (await getKey(inKey(fromPublicationId)));
+  if (rec) {
+    rec.updateNotifications = { checkedAt: Date.now(), updates: [], appliedTo: toPublicationId };
+    await setKey(inKey(fromPublicationId), rec);
+  }
+  Logger.info('PublicationImport', `applied update ${fromPublicationId} → ${toPublicationId}`);
+  return result;
 }

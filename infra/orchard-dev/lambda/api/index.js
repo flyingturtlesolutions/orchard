@@ -972,6 +972,72 @@ async function handleListPublications(event) {
   return json(200, { publications, registry: REGISTRY_ID });
 }
 
+// GET /publications/{id}/updates — newer versions in the same lineage (DD-12 B). Walks the
+// LineageIndex GSI for the publication's lineageRootId and returns rows created after this one.
+async function handlePublicationUpdates(event, publicationId) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+  const row = await getPublicationRow(publicationId);
+  if (!row) return json(404, { error: 'not_found', publicationId });
+  const lineageRootId = row.lineageRootId || publicationId;
+  const res = await ddb.send(new QueryCommand({
+    TableName: PUBLICATIONS_TABLE,
+    IndexName: 'LineageIndex',
+    KeyConditionExpression: 'GSI1PK = :pk',
+    ExpressionAttributeValues: { ':pk': `REGISTRY#${REGISTRY_ID}#ROOT#${lineageRootId}` },
+  }));
+  const thisCreatedAt = row.createdAt || 0;
+  const updates = (res.Items || [])
+    .filter((r) => (r.createdAt || 0) > thisCreatedAt && r.visibility !== 'private')
+    .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+    .map((r) => ({
+      publicationId: r.publicationId, title: r.title, description: r.description,
+      version: r.version, previousVersionId: r.previousVersionId, lineageRootId: r.lineageRootId,
+      publisherUserRef: r.publisherUserRef, bundleHash: r.bundleHash, createdAt: r.createdAt,
+    }));
+  return json(200, { publicationId, lineageRootId, updates, registry: REGISTRY_ID });
+}
+
+// POST /publications/{id}/import — verify signature server-side and return the package as an
+// import plan (§7.4). The client also verifies + performs the local UID reconciliation/install.
+// `target: 'workspace'` (team import bridge) is P2b and not yet implemented.
+async function handleImportPublication(event, publicationId) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+  const row = await getPublicationRow(publicationId);
+  if (!row) return json(404, { error: 'not_found', publicationId });
+  if (row.visibility === 'private') {
+    const identity = await getIdentityRecord(auth.claims.sub);
+    if (!identity || row.publisherPublicKey !== identity.publicKey) return json(403, { error: 'forbidden' });
+  }
+  let body = {};
+  try { body = event.body ? JSON.parse(event.body) : {}; } catch { return json(400, { error: 'invalid_json' }); }
+  if (body.target === 'workspace') return json(501, { error: 'workspace_target_not_implemented' });
+
+  const prefix = row.primaryS3Prefix || pubPrefix(publicationId);
+  const [publication, manifest, packages] = await Promise.all([
+    s3GetJson(PUBLICATIONS_BUCKET, `${prefix}publication.json`),
+    s3GetJson(PUBLICATIONS_BUCKET, `${prefix}manifest.json`),
+    s3GetJson(PUBLICATIONS_BUCKET, `${prefix}packages.json`),
+  ]);
+  if (!publication || !manifest) return json(404, { error: 'package_missing', publicationId });
+
+  // Server-side Ed25519 verification over the bundleHash (matches client signMessage encoding).
+  let signatureValid = false;
+  if (publication.signature && row.publisherPublicKey && manifest.bundleHash) {
+    try {
+      signatureValid = verifyEd25519(
+        row.publisherPublicKey,
+        Buffer.from(String(manifest.bundleHash), 'utf8'),
+        publication.signature,
+      );
+    } catch { signatureValid = false; }
+    if (!signatureValid) return json(422, { error: 'signature_invalid', publicationId });
+  }
+
+  return json(200, { publication, manifest, packages, target: 'personal', signatureValid, verified: true });
+}
+
 // ── Managed LLM proxy (DD-08) ──────────────────────────────────────────────────────────
 // The app's Anthropic key lives in Secrets Manager; signed-in clients call this instead of
 // holding a key. v1 is auth-only (any bound user) and BUFFERED (non-streaming). Caches the key
@@ -1044,8 +1110,17 @@ exports.handler = async (event) => {
 
     if (method === 'POST' && path === '/publications') return handlePublishPublication(event);
     if (method === 'GET' && path === '/publications') return handleListPublications(event);
-    if (method === 'GET' && path.startsWith('/publications/')) {
-      return handleGetPublication(event, decodeURIComponent(path.slice('/publications/'.length)));
+    if (path.startsWith('/publications/')) {
+      const rest = path.slice('/publications/'.length);
+      const updatesMatch = rest.match(/^(.+)\/updates$/);
+      const importMatch = rest.match(/^(.+)\/import$/);
+      if (method === 'GET' && updatesMatch) {
+        return handlePublicationUpdates(event, decodeURIComponent(updatesMatch[1]));
+      }
+      if (method === 'POST' && importMatch) {
+        return handleImportPublication(event, decodeURIComponent(importMatch[1]));
+      }
+      if (method === 'GET') return handleGetPublication(event, decodeURIComponent(rest));
     }
 
     if (method === 'POST' && path === '/llm/messages') return handleLlmMessages(event);
