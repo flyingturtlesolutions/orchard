@@ -483,9 +483,15 @@ export function attachComposites(model, { maxPx = 280 } = {}) {
     if (!inputs.length) continue;
     const acts = group.filter((f) => f.kind === 'action');
     if (!acts.length) continue;
-    // Pick the submit: a labelled-submit action near an input, else (multi-field form) any near action.
-    let submit = acts.find((a) => _isSubmitLabel(a.label) && inputs.some((i) => _near(i, a, maxPx)));
-    if (!submit && inputs.length >= 2) submit = acts.find((a) => inputs.some((i) => _near(i, a, maxPx)));
+    // Pick the submit — a GENUINE submit only: an action the form oracle tagged
+    // effect:'submit', or one with a submit-word label, near an input. v2.74.563 —
+    // we no longer fall back to "any nearby action" for multi-input groups: that
+    // mis-paired a form's inputs with an unrelated toggle (e.g. "View Job
+    // Description") whenever the real submit hadn't been captured. Now that the
+    // form pass captures the default-submit <button> (effect:'submit'), the correct
+    // action is available and the loose fallback is pure risk.
+    const _isSubmitAct = (a) => (a.interaction && a.interaction.effect === 'submit') || _isSubmitLabel(a.label);
+    const submit = acts.find((a) => _isSubmitAct(a) && inputs.some((i) => _near(i, a, maxPx)));
     if (!submit) continue;
     const partInputs = inputs.filter((i) => _near(i, submit, maxPx));
     if (!partInputs.length) continue;

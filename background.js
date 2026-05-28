@@ -4741,6 +4741,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const title = metrics.title || '';
           const pageUrl = metrics.url || url;
 
+          // v2.74.561 — DESTRUCTIVE-MUTATION SAFETY (Part 1): capture the read-only
+          // substrate of the AS-LANDED state BEFORE the poke sweep perturbs the page.
+          // The sweep is additive depth-discovery, but it can also DESTROY the entry
+          // state — an SPA view-swap (a "Job description" ⇄ "Application form" toggle)
+          // changes neither the URL nor fires beforeunload, so the in-page nav guard
+          // can't see it and the page is captured on the WRONG view. Enumerating first
+          // makes the user's deliberate state sacred: the form they navigated to is
+          // captured no matter what poking does afterward. The sweep's revealed depth
+          // is merged into THIS model below (mergeDepthFromControls).
+          let enr = null;
+          try { enr = await chrome.tabs.sendMessage(tabId, { type: 'ENUMERATE_PAGE' }, { frameId: 0 }); }
+          catch (e) { Logger.warn('background', `pre-sweep ENUMERATE_PAGE failed (will retry post-sweep): ${e.message}`); }
+          if (enr?.success) Logger.info('explore', `pre-sweep enumerate: ${(enr.features || []).length} feature(s) captured from entry state`);
+
           // Band stops, BOTTOM-TO-TOP: from (scrollHeight - vh) up to 0.
           const step = Math.max(1, Math.round(vh * 0.85));
           const bandYs = [];
@@ -4911,7 +4925,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // build. Best-effort; never fails the Explore response. The content
           // script is already injected (the sweep used it).
           try {
-            const enr = await chrome.tabs.sendMessage(tabId, { type: 'ENUMERATE_PAGE' }, { frameId: 0 });
+            // v2.74.561 — Prefer the PRE-sweep enumerate (entry state intact, captured
+            // before any poke could swap the view). Only fall back to a fresh post-sweep
+            // pass if the pre-sweep enumerate failed — never overwrite a good entry-state
+            // capture with the (possibly perturbed) post-sweep DOM.
+            if (!enr?.success) {
+              try { enr = await chrome.tabs.sendMessage(tabId, { type: 'ENUMERATE_PAGE' }, { frameId: 0 }); }
+              catch (e) { Logger.warn('background', `post-sweep ENUMERATE_PAGE fallback failed: ${e.message}`); }
+            }
             if (enr?.success) {
               const model = Locale.buildLocale(enr.features, enr.meta);
               // v2.74.404 — L1 depth: merge THIS sweep's poke→reveal data (already

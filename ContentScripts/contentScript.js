@@ -3205,7 +3205,10 @@ function detectRepeatingContentBlocks() {
 // (enumerateFormFields) AND the Locale enumerator (enumeratePage) emit completion-grade data: real
 // label[for], required-ness, clean #id/[name] selector. No visibility filter — required controls are
 // often visually hidden (a framework's native <select required> at opacity:0) yet still mandatory.
-const FORM_CONTROL_SEL = 'input:not([type=hidden]):not([type=button]):not([type=reset]), select, textarea, button[type="submit"], input[type="submit"]';
+// v2.74.563 — includes ALL `button`s (not just [type=submit]): a bare <button> inside a <form> is a
+// default-submit per HTML, and BambooHR-style forms use one. _describeFormControl returns null for
+// non-submit buttons, so nav/toggle buttons stay with the band scan — only the real submit is kept.
+const FORM_CONTROL_SEL = 'input:not([type=hidden]):not([type=button]):not([type=reset]), select, textarea, button';
 function _ffStrip(s) { return String(s || '').replace(/\s*\*\s*$/, '').replace(/\s{2,}/g, ' ').trim(); }
 // Concrete selector for the REAL control (not a wrapper): simple #id, else [name="…"] (handles dotted
 // ids), else escaped #id, else null.
@@ -3246,7 +3249,17 @@ function _describeFormControl(el) {
     const tag = (el.tagName || '').toLowerCase();
     const rawType = el.getAttribute('type') || '';
     const type = (rawType || (tag === 'textarea' ? 'textarea' : tag === 'select' ? 'select' : 'text')).toLowerCase();
-    const isSubmit = type === 'submit' || (tag === 'button' && el.getAttribute('type') === 'submit');
+    const isButton = tag === 'button';
+    // A <button type=submit>, an <input type=submit|image>, OR a bare <button> (no
+    // type) inside a <form> — the HTML default-submit. The page's apply/submit
+    // action is the form's success target, so capture it like any other control.
+    const isSubmit = type === 'submit'
+      || (isButton && el.getAttribute('type') === 'submit')
+      || (isButton && !el.hasAttribute('type') && !!(el.closest && el.closest('form')))
+      || (tag === 'input' && type === 'image');
+    // A non-submit button (nav/toggle/"View Job Description") is NOT a form control —
+    // leave it to the band scan so we don't pollute the form features.
+    if (isButton && !isSubmit) return null;
     const li = _ffLabelInfo(el);
     return {
       tag, type,
@@ -3264,7 +3277,7 @@ function _describeFormControl(el) {
 // PB-10 — deterministic form-field oracle (ENUMERATE_FORM_FIELDS). Same descriptors the Locale build uses.
 function enumerateFormFields() {
   let nodes = [];
-  try { nodes = Array.from(document.querySelectorAll(FORM_CONTROL_SEL)); } catch { return []; }
+  try { nodes = queryAllDeep(FORM_CONTROL_SEL); } catch { return []; }   // v2.74.563 — pierce shadow DOM (upload widgets)
   const out = [];
   for (const el of nodes) { const d = _describeFormControl(el); if (d) out.push(d); }
   return out;
@@ -3402,13 +3415,34 @@ async function enumeratePage() {
   // weaker-selector feature for the same control.
   const formEls = new Set();
   try {
-    for (const el of document.querySelectorAll(FORM_CONTROL_SEL)) {
+    // v2.74.563 — queryAllDeep pierces shadow roots: framework upload widgets (and
+    // other Fabric/web-component controls) hide the real <input type=file> inside a
+    // shadow tree that plain querySelectorAll can't see — that's why the resume
+    // field went missing. Deep query catches it.
+    for (const el of queryAllDeep(FORM_CONTROL_SEL)) {
       if (feats.size >= FEATURE_CAP) break;
       const d = _describeFormControl(el);
-      if (!d || !d.selector) continue;                  // need a bindable selector
+      if (!d) continue;
+      // Prefer the oracle's clean #id/[name]; fall back to synthesis for controls
+      // with neither (submit buttons frequently have no id or name).
+      let fsel = d.selector;
+      if (!fsel) { try { fsel = synthesizeSelector(el, document); } catch { /* */ } }
+      if (!fsel) { try { fsel = _synthesizeSelectorForElement(el); } catch { /* */ } }
+      if (!fsel) continue;                              // no bindable selector at all
+      d.selector = fsel;
       formEls.add(el);
       const fkind = d.isSubmit ? 'action' : 'input';
       const ar = absRect(el);
+      // v2.74.562 — Capture is INTENT-BLIND: every control is emitted regardless of
+      // `required` (a future intent may target an optional field — "fill in my
+      // nickname"). `required` is a downstream annotation Cover uses ONLY for a
+      // completion intent; it is NOT a capture filter. Decoy/honeypot avoidance is a
+      // SEPARATE, honest signal — a control positioned off-canvas (the classic
+      // left:-9999px spam trap) or labelled "leave blank" — so a completion intent
+      // skips it AND a targeted intent that names it can be WARNED, without ever
+      // dropping it from the substrate. The decision stays with the query, not capture.
+      const offscreen = ar.x <= -1500 || ar.y <= -1500;
+      const decoy = offscreen || /leave\s+(this|the)?\s*\w*\s*blank|do\s*not\s+(fill|complete)|don'?t\s+fill|honeypot/i.test(d.label || '');
       const interaction = d.isSubmit ? { pattern: 'click', effect: 'submit' }
         : d.kind === 'select' ? { pattern: 'select', effect: 'select' }
         : d.kind === 'file'   ? { pattern: 'upload', effect: 'none' }
@@ -3419,9 +3453,14 @@ async function enumeratePage() {
         label: (d.label || d.name || d.id || '').slice(0, 80),
         a11yRole: el.getAttribute('role') || null,
         selector: d.selector, selectorKind: tierOf(d.selector),
-        selectorVerified: /^#[A-Za-z][\w-]*$/.test(d.selector),   // a simple #id resolves by construction
-        required: d.required,        // SG-0.5 — the necessity marker Select/Cover need
+        // Verified only if a simple #id that ACTUALLY resolves from document — a
+        // shadow-DOM control's #id matches the regex but won't resolve top-level,
+        // so this stays honest (false) and flags that it needs shadow-aware binding.
+        selectorVerified: /^#[A-Za-z][\w-]*$/.test(d.selector) && (() => { try { return document.querySelector(d.selector) === el; } catch { return false; } })(),
+        required: d.required,        // SG-0.5 — the necessity marker Select/Cover need (annotation, not a filter)
         fieldType: d.type,           // input type → drives the value-op at Bind (TYPE / SELECT / SET_VALUE / upload)
+        ...(offscreen ? { offscreen: true } : {}),   // factual: positioned off the human canvas
+        ...(decoy ? { decoy: true } : {}),           // inferred spam-trap → don't fill unless the intent names it (then warn)
         location: { band: Math.floor((ar.y || 0) / bandStep), absRect: ar, visibleAtRest: (ar.y + ar.h) > origScrollY && ar.y < origScrollY + vh, scrollToY: Math.max(0, ar.y - Math.round(vh * 0.3)) },
         interaction,
         confidence: 0.85,
@@ -4913,12 +4952,60 @@ async function explorePageStructure(payload) {
     try { afterEls = Array.from(document.querySelectorAll(REVEAL_SEL)); } catch { afterEls = []; }
     const novel = [];
     for (const el of afterEls) { if (beforeSet.has(el)) continue; if (!visible(el)) continue; novel.push(el); }
+    const expandedAfter = src.getAttribute('aria-expanded');
+    const ariaOpened = expandedBefore === 'false' && expandedAfter === 'true';
+    // v2.74.561 — DESTRUCTIVE-SWAP guard (Part 2). A benign reveal only ADDS
+    // content; a full-view swap (an SPA toggle between "Application form" and "Job
+    // description", a tab that replaces the page body) also REMOVES the content
+    // the user was on — and it's INVISIBLE to the URL/submit nav guard because
+    // nothing actually navigates. Measure how much of the pre-poke visible
+    // interactive surface VANISHED: a large drop means the poke threw away the
+    // entry state. That's NOT depth to fold in (it belongs to a different view),
+    // so discard it, mark the control, and try to reverse the swap.
+    let vanished = 0;
+    for (const el of beforeSet) { if (!visible(el)) vanished++; }
+    const swapAway = beforeSet.size >= 6 && (vanished / beforeSet.size) >= 0.6;
+    ctl.vanished = vanished;
+    if (swapAway) {
+      ctl.revealed = []; ctl.revealCount = 0;   // swapped-in nodes belong to another view — not depth
+      ctl.observation = 'destructive-swap';
+      // Reverse the swap so Explore RETURNS THE PAGE TO WHERE IT STARTED — an
+      // observation must not leave the user on a view they didn't choose. (The
+      // captured substrate does NOT depend on this: enumerate-first already has
+      // the entry state.) `restoredFrac` = how much of the entry surface is back.
+      const restoredFrac = () => { let gone = 0; for (const el of beforeSet) if (!visible(el)) gone++; return 1 - gone / Math.max(1, beforeSet.size); };
+      let back = false;
+      try {
+        // (1) TRUE toggle — re-click the control itself (dropdown/accordion/summary).
+        if (visible(src) && isSafeToClick(src)) { src.click(); await sleep(settleMs); }
+        back = restoredFrac() >= 0.6;
+        // (2) SEGMENTED toggle — re-click did nothing because the entry view is
+        //     reached via a DIFFERENT, complementary control (e.g. "View Job
+        //     Description" hid the form; the form returns by clicking its sibling
+        //     "Apply for This Job"). Click a safe, now-visible sibling button in
+        //     the same control container and re-check.
+        if (!back) {
+          let container = null;
+          try { container = src.closest('[class*="actions" i],[role="group"],[role="tablist"],[role="toolbar"]') || src.parentElement; } catch { container = src.parentElement; }
+          let sibs = [];
+          try { sibs = Array.from(container ? container.querySelectorAll('button,[role="button"],summary') : []); } catch { sibs = []; }
+          for (const sib of sibs) {
+            if (sib === src || !visible(sib) || !isSafeToClick(sib)) continue;
+            try { sib.click(); } catch { /* */ }
+            await sleep(settleMs);
+            if (restoredFrac() >= 0.6) { back = true; break; }
+          }
+        }
+      } catch { /* */ }
+      ctl.restored = back;
+      dbg(back ? 'destructive-swap reversed (entry view restored)' : 'destructive-swap NOT reversed (entry view lost — relying on enumerate-first)', { cid: ctl.cid, vanished, before: beforeSet.size });
+      controls.push(ctl);
+      continue;   // skip the additive-reveal restore path below
+    }
     for (const el of novel.slice(0, 40)) ctl.revealed.push({ selector: computeUniqueSelector(el), role: roleOf(el), label: accName(el), rect: rectOf(el) });
     ctl.revealCount = novel.length;
     // aria-expanded flipping true is itself evidence the control disclosed,
     // even when the revealed nodes are off-DOM-diff (e.g. CSS-only expansion).
-    const expandedAfter = src.getAttribute('aria-expanded');
-    const ariaOpened = expandedBefore === 'false' && expandedAfter === 'true';
     ctl.observation = (novel.length > 0 || ariaOpened) ? 'reveal' : (navBlocked ? 'navigation-blocked' : 'no-change');
     if (ctl.navBlocked = navBlocked) { /* recorded */ }
     if (ctl.observation === 'reveal') { controlsRevealing++; totalRevealed += novel.length; }
