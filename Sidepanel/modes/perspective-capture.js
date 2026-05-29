@@ -29,7 +29,7 @@ import { toast, getActiveTab, pingContentScript, exitToStudio, requestModeChange
 // v2.74.166 — Frame-aware picker broadcast — same path fragment-author
 // and observation-author use, so perspective landmarks can target same-origin
 // iframes too.
-import { broadcastStartPick, broadcastCancelPick } from '../../shared.js';
+import { broadcastStartPick, broadcastCancelPick, escHtml, escAttr } from '../../shared.js';
 // SG-LM (R5 seed) — SG capability UI extracted to its own modules: the cross-session library and the
 // in-session trial/accept/replay flow.
 import { createSgLibrary } from './perspective-capture/sg-library.js';
@@ -1271,11 +1271,6 @@ function newEmptyPerspectiveDraft(groundId) {
     authoredBy  : 'human',
   };
 }
-
-function escHtml(s) {
-  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-const escAttr = escHtml;
 
 // v2.74.304 — Tiered display-name deriver for the landmark row header.
 // Returns HTML (not a plain string) so each tier can carry its own
