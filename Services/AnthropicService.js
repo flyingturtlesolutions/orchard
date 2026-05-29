@@ -22,7 +22,7 @@ import { SchemaValidator } from './SchemaValidator.js';
 // (shape/completeness/cardinality + must-cover fields) instead of a static minimal-roles prior.
 import { deriveIntentSpec, buildProposeDirective } from '../Core/intentShape.js';
 import { buildIntentSpec } from '../Core/intentSpec.js';   // SG-1 Comprehend contract (page-independent)
-import { selectCandidates, reconcileMatches } from '../Core/select.js';   // SG-2 Select (substrate query)
+import { selectCandidates, rankCandidates, reconcileMatches } from '../Core/select.js';   // SG-2 Select (substrate query)
 import { selectNecessaryFields, slugMatch } from '../Core/formCoverage.js';
 import { CONDITION_FIELDS, getTypesByFamily } from './ConditionVocabulary.js';
 // C-P3 (DD-08) — managed LLM proxy transport.
@@ -2429,7 +2429,10 @@ Rules:
 Return ONLY a JSON object:
 { "matches": { "<subGoalId>": ["<featureId>", ...] } }`;
     const sgBlock = subGoals.map((s) => `- ${s.id}: ${s.label} (${s.shape}${s.scope ? `, ${s.scope}` : ''})`).join('\n');
-    const featBlock = candidates.slice(0, 80).map((f) => `- ${f.id}: "${(f.label || '').slice(0, 60)}" [${f.kind}${f.fieldType ? `/${f.fieldType}` : ''}${f.required ? ', required' : ''}${f.interaction && f.interaction.effect === 'submit' ? ', submit' : ''}]`).join('\n');
+    // Rank by relevance to the intent BEFORE the cap, so the target survives on a feature-dense page (a
+    // nav-heavy site has 100+ candidates; an unranked slice can drop the very control the intent names).
+    const ranked = rankCandidates(candidates, spec);
+    const featBlock = ranked.slice(0, 100).map((f) => `- ${f.id}: "${(f.label || '').slice(0, 60)}" [${f.kind}${f.fieldType ? `/${f.fieldType}` : ''}${f.required ? ', required' : ''}${f.interaction && f.interaction.effect === 'submit' ? ', submit' : ''}]`).join('\n');
     const userText = `Sub-goals:\n${sgBlock}\n\nPage features:\n${featBlock}`;
     Logger.info('AnthropicService', `matchSubGoals — ${subGoals.length} sub-goal(s) over ${candidates.length} feature(s)`);
     let rawMatches = null;

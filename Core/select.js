@@ -68,6 +68,42 @@ export function selectCandidates(locale, spec) {
   return feats.filter((f) => f.kind === 'action' || f.kind === 'navigation' || f.kind === 'disclosure');
 }
 
+// SG-2b retrieval RANK (pure). selectCandidates narrows by KIND; this ORDERS that set by relevance to the
+// intent (its `target` + the subGoal phrasing), so the LLM matcher — which only sees a capped slice — gets
+// the features that actually serve the intent rather than whatever enumerated first. Without it, a nav-heavy
+// page (100+ links) can push the real target past the cap: e.g. a hidden "Continue with Google" poked in
+// LATE lands after position 80 and never reaches the matcher → 0 matches → "not runnable" for a page that
+// plainly supports it. Lexical token overlap over label + href, with an exact-target-phrase boost. Score 0
+// keeps original order (deprioritized, never dropped — the CALLER owns the cap).
+const _RANK_STOP = new Set(['the','a','an','to','of','in','on','at','for','and','or','with','your','my','this','that','it','is','be','as','go','page','section','interface','feature','access','locate','open','show','see','view','find','get','use']);
+function _rankTokens(s) {
+  return String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length > 1 && !_RANK_STOP.has(t));
+}
+/**
+ * @param {object[]} candidates  the kind-narrowed set from selectCandidates
+ * @param {object} spec          IntentSpec ({ target, subGoals[] })
+ * @returns {object[]}           same features, ordered most-relevant first (stable on ties)
+ */
+export function rankCandidates(candidates, spec) {
+  const list = Array.isArray(candidates) ? candidates : [];
+  const q = new Set([
+    ..._rankTokens(spec && spec.target),
+    ...(((spec && Array.isArray(spec.subGoals)) ? spec.subGoals : []).flatMap((s) => _rankTokens(s && s.label))),
+  ]);
+  if (!q.size || list.length < 2) return list.slice();   // nothing to rank by → preserve order
+  const targetLc = String((spec && spec.target) || '').toLowerCase().trim();
+  const scored = list.map((f, i) => {
+    let score = 0;
+    for (const t of _rankTokens(f && f.label)) if (q.has(t)) score += 2;   // label token hit (strongest)
+    for (const t of _rankTokens(f && f.href))  if (q.has(t)) score += 1;   // href path hit (nav targets)
+    const labelLc = String((f && f.label) || '').toLowerCase();
+    if (targetLc.length > 2 && labelLc.includes(targetLc)) score += 4;     // exact target phrase present
+    return { f, i, score };
+  });
+  scored.sort((a, b) => (b.score - a.score) || (a.i - b.i));               // score desc, stable on ties
+  return scored.map((x) => x.f);
+}
+
 /**
  * The (pre-LLM) selection bundle: candidates + boundary. `matches` (subGoal→feature) and scope
  * reconciliation are filled by SG-2b (LLM); Cover (SG-3) gates on `boundary.requiredFields`.

@@ -5351,7 +5351,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
           const out = await AnthropicService.groundIntent({ userIntent: intent, affordances, goals, url, title });
           if (!out) { sendResponse({ success: false, error: 'Claude returned no grounded intent.' }); return; }
-          sendResponse({ success: true, ...out, hadAffordance: true, hadGoals: !!goals, intentSpec: await intentSpecP, selection: _projSelection(await selectionP), plan: await planP });
+          const plan = await planP;
+          // Reconcile the verdict with the catalog-grounded plan. groundIntent sees only the affordance prose
+          // + goal LABELS (lossy: a real feature not bucketed into a goal is invisible to it — e.g. Pixabay's
+          // "Radio" link exists but was assigned to no goal, so the verdict falsely said "not supported"),
+          // while the plan spine matched the FULL Locale catalog. If the spine found a RUNNABLE path, the page
+          // demonstrably serves the intent — so a "no"/"unknown" verdict is a false negative. Upgrade it so the
+          // verdict and the Run button can't contradict on screen (the live regressions).
+          const verdict = { ...out };
+          if (plan && plan.runnable && (out.achievable === 'no' || out.achievable === 'unknown' || !out.achievable)) {
+            verdict.achievable = 'partial';
+            verdict.reconciledByPlan = true;
+            verdict.note = `A runnable path was found on this page (${(plan.steps || []).length} step(s)) — verify it matches your intent.${out.note ? ` (Prior assessment: ${out.note})` : ''}`;
+          }
+          sendResponse({ success: true, ...verdict, hadAffordance: true, hadGoals: !!goals, intentSpec: await intentSpecP, selection: _projSelection(await selectionP), plan });
         } catch (err) {
           Logger.error('background', `GROUND_INTENT failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });

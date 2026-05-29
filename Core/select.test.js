@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { coverageBoundary, selectCandidates, buildSelection, coverGaps, reconcileMatches } from './select.js';
+import { coverageBoundary, selectCandidates, rankCandidates, buildSelection, coverGaps, reconcileMatches } from './select.js';
 
 // A mini Locale modelled on the live BambooHR apply form: required fields, an optional field, a honeypot
 // decoy, the real submit, a Cancel (effect:none after the cancel/reset fix), and non-form features.
@@ -64,6 +64,32 @@ describe('selectCandidates — shape-narrowed retrieval', () => {
     assert.ok(ids.includes('openings'));
     assert.ok(ids.includes('submit'));     // actions included
     assert.ok(!ids.includes('email'));
+  });
+});
+
+describe('rankCandidates — relevance order so the target survives the cap (the Pixabay regression)', () => {
+  // 80 noise nav links, then the real targets LAST (mirrors hidden/poked features enumerated late).
+  const f = (o) => ({ a11yRole: null, kind: 'navigation', ...o });
+  const noise = Array.from({ length: 80 }, (_, i) => f({ id: `n${i}`, label: `Footer link ${i}`, href: `/x/${i}` }));
+  const radio = f({ id: 'radio', label: 'Pixabay Radio', href: 'https://pixabay.com/playlists/' });
+  const google = f({ id: 'google', kind: 'action', label: 'Continue with Google', selector: 'div.g', hidden: true, revealedBy: 'login' });
+  const candidates = [...noise, radio, google];
+
+  it('floats the name-matched target to the front (would otherwise be index 80, past the cap)', () => {
+    const ranked = rankCandidates(candidates, { target: 'Pixabay Radio', subGoals: [{ id: 's', label: 'open the radio interface' }] });
+    assert.equal(ranked[0].id, 'radio');                       // exact-phrase + token hits → rank 1
+    assert.ok(ranked.slice(0, 100).some((c) => c.id === 'radio'));
+  });
+
+  it('floats a Google sign-in action ahead of generic nav by label token', () => {
+    const ranked = rankCandidates(candidates, { target: 'sign in with google', subGoals: [{ id: 's', label: 'click continue with Google' }] });
+    assert.equal(ranked[0].id, 'google');
+  });
+
+  it('is stable + lossless: no query tokens → original order, same membership', () => {
+    const ranked = rankCandidates(candidates, { target: '', subGoals: [] });
+    assert.equal(ranked.length, candidates.length);
+    assert.equal(ranked[0].id, 'n0');                          // preserved order
   });
 });
 
