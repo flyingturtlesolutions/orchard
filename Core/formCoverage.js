@@ -46,19 +46,42 @@ export function stripAsterisk(label) {
   return String(label || '').replace(/\s*\*\s*$/,'').replace(/\s{2,}/g, ' ').trim();
 }
 
+// v2.74.588 — framework render-time ids (Fluent/Fabric "FabricTextField-324", React useId ":r3:",
+// Radix/Headless/MUI counters) REGENERATE on the next mount, so `#id` resolves at capture but breaks
+// on the next load. This Core module can't import contentScript's isStableIdent, so mirror its
+// volatile-id signals here, keeping the Cover-stage selector judgment aligned with capture. A false
+// reject merely prefers [name]/[aria-label] — far cheaper than a stale id.
+function _isVolatileFieldId(id) {
+  if (!id) return false;
+  if (/^:r[0-9a-z]+:$/.test(id)) return true;                  // React 18 useId
+  if (/[0-9]{4,}/.test(id)) return true;                       // long digit run / hash tail
+  if (/^(fab|fluent|radix|headlessui|chakra|mantine|downshift|tippy|popper|floatingui|reach|reakit|react-?select|react-?aria)[a-z0-9_-]*\d/i.test(id)) return true;
+  if (/[a-z][A-Z][A-Za-z]*-?\d{2,3}$/.test(id)) return true;   // ComponentName-324, fieldName12
+  return false;
+}
+
 /**
  * A concrete CSS selector for the field's REAL control, so resolve can bind directly instead of the
- * LLM guessing (which lands on MUI wrappers). Prefers a simple `#id`; falls back to a `[name="…"]`
- * attribute selector (handles dotted ids like `customQuestionAnswers.long_154` with no escaping); last
- * resort escapes a complex id. Returns null when neither id nor name is present.
- * @param {{id?:string, name?:string}} d
+ * LLM guessing (which lands on MUI wrappers). Preference, most→least durable: a STABLE author `#id`
+ * (volatile framework ids rejected) → `[name="…"]` (handles dotted ids like
+ * `customQuestionAnswers.long_154` with no escaping) → a stable accessible attribute (aria-label /
+ * placeholder, which component libraries set even when the id is volatile) → last resort the escaped
+ * id. Returns null when nothing usable is present.
+ * @param {{id?:string, name?:string, ariaLabel?:string, placeholder?:string, tag?:string}} d
  * @returns {string|null}
  */
 export function selectorForField(d) {
   const id = String(d?.id || '').trim();
   const name = String(d?.name || '').trim();
-  if (id && /^[A-Za-z][\w-]*$/.test(id)) return `#${id}`;
-  if (name) return `[name="${name.replace(/(["\\])/g, '\\$1')}"]`;
+  const aria = String(d?.ariaLabel || '').trim();
+  const ph = String(d?.placeholder || '').trim();
+  const tag = String(d?.tag || '').toLowerCase();
+  const q = /^[a-z][a-z0-9]*$/.test(tag) ? tag : '';
+  const esc = (v) => v.replace(/(["\\])/g, '\\$1');
+  if (id && !_isVolatileFieldId(id) && /^[A-Za-z][\w-]*$/.test(id)) return `#${id}`;
+  if (name) return `[name="${esc(name)}"]`;
+  if (aria) return `${q}[aria-label="${esc(aria)}"]`;
+  if (ph) return `${q}[placeholder="${esc(ph)}"]`;
   if (id) return `#${id.replace(/([^\w-])/g, '\\$1')}`;
   return null;
 }
@@ -273,7 +296,13 @@ export function enumerateFormFields(root) {
       isSubmit,
       isAction: isFormButton,
       kind: isFormButton ? (isSubmit ? 'submit' : 'button') : (type === 'file' ? 'file' : tag === 'select' ? 'select' : 'input'),
-      selector: selectorForField({ id: el.id || '', name: (el.getAttribute && el.getAttribute('name')) || '' }),
+      selector: selectorForField({
+        id: el.id || '',
+        name: (el.getAttribute && el.getAttribute('name')) || '',
+        ariaLabel: (el.getAttribute && el.getAttribute('aria-label')) || '',
+        placeholder: (el.getAttribute && el.getAttribute('placeholder')) || '',
+        tag,
+      }),
     });
   }
   return out;

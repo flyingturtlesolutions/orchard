@@ -1294,6 +1294,55 @@ async function _appendOutcomes(groundId, events) {
   }
 }
 
+// SG-4 / PB shared trial EXECUTOR — synth → safety class → throwaway Fragment+Strategy → execute → score.
+// Used by BOTH RUN_PERSPECTIVE_TRIAL (a resolved bundle) and RUN_SG_TRIAL (Comprehend→Select→Cover→Bind).
+// Returns the response object (caller sendResponse()s it). The `irreversible` safety class DEFERS the
+// commit step, so a trial proves fill-ability without actually submitting. PURE side-effect surface: it
+// builds throwaway artifacts (deleted in finally) and runs them — never enqueued to the cloud.
+async function _runTrialBundle({ groundId, intent, roles, localeModel = null, navigateUrl = null, proposedRoleCount = 0, targetTabId = null }) {
+  const draft0 = synthesizeTrialOp({ groundedIntent: intent, roles, locale: localeModel, navigateUrl });
+  const safety = classifyTrialSafety(intent, draft0);
+  const draft = { ...draft0, actions: safety.actions };
+  try {
+    await _appendOutcomes(groundId, [Outcomes.makeStageEvent('synthesize', {
+      groundId, input: { roleOrIntent: String(intent).slice(0, 120) },
+      detail: { shape: draft0.shape, safetyClass: safety.safetyClass, actionCount: draft.actions.length, runnable: draft0.runnable, deferred: safety.deferred.length },
+    })]);
+  } catch (e) { Logger.warn('background', `trial synth outcome: ${e.message}`); }
+
+  if (!draft0.runnable) return { success: true, ran: false, reason: 'no actionable steps in the bundle', draft, safetyClass: safety.safetyClass };
+
+  // Throwaway Fragment+Strategy — built, run once, deleted. Direct StorageManager saves bypass the sync
+  // bridge, so trial artifacts are never enqueued to the cloud.
+  const fragmentId = crypto.randomUUID();
+  const strategyId = crypto.randomUUID();
+  const recs = CapabilitySynth.buildCapabilityRecords(draft, { groundId, fragmentId, strategyId });
+  if (!recs) return { success: false, error: 'failed to build trial op' };
+  let result = null;
+  try {
+    await StorageManager.saveFragment(recs.fragment);
+    await StorageManager.saveStrategy(recs.strategy);
+    // SG/perspective trial: run on the caller's live tab (THIS Locale's page) when given,
+    // instead of opening a fresh tab on ground.url (an entirely different page).
+    result = await ExecutionEngine.executeStrategy({ strategyId, targetTabId });
+  } finally {
+    try { await StorageManager.deleteStrategy(strategyId); } catch { /* */ }
+    try { await StorageManager.deleteFragment(fragmentId); } catch { /* */ }
+  }
+  const scored = scoreTrial({
+    shape: draft0.shape, safetyClass: safety.safetyClass,
+    resolvedRoleCount: roles.length, proposedRoleCount,
+    deferred: safety.deferred, result,
+  });
+  try {
+    await _appendOutcomes(groundId, [Outcomes.makeStageEvent('trial', {
+      groundId, verdict: scored.verdict, input: { roleOrIntent: String(intent).slice(0, 120) },
+      detail: { ...scored.vector, score: scored.score, shape: draft0.shape, safetyClass: safety.safetyClass },
+    })]);
+  } catch (e) { Logger.warn('background', `trial outcome: ${e.message}`); }
+  return { success: true, ran: true, safetyClass: safety.safetyClass, deferred: safety.deferred, draft, result, trial: scored };
+}
+
 async function _readOutcomes(groundId) {
   if (!groundId) return [];
   await _ensureStorageMigrated();
@@ -5517,49 +5566,54 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (!groundId || !Array.isArray(roles) || !roles.length) { sendResponse({ success: false, error: 'groundId + roles required' }); return; }
           let localeModel = null;
           try { const pm = await _readLocaleCache(groundId, _normalizeUrlForPerspectiveCache(navigateUrl || '')); localeModel = pm?.model || null; } catch { /* */ }
-          const draft0 = synthesizeTrialOp({ groundedIntent: intent, roles, locale: localeModel, navigateUrl });
-          const safety = classifyTrialSafety(intent, draft0);
-          const draft = { ...draft0, actions: safety.actions };
-          // PB-3 wiring: emit the synthesize stage outcome (shape + safety + step count).
-          try {
-            await _appendOutcomes(groundId, [Outcomes.makeStageEvent('synthesize', {
-              groundId, input: { roleOrIntent: String(intent).slice(0, 120) },
-              detail: { shape: draft0.shape, safetyClass: safety.safetyClass, actionCount: draft.actions.length, runnable: draft0.runnable, deferred: safety.deferred.length },
-            })]);
-          } catch (e) { Logger.warn('background', `RUN_PERSPECTIVE_TRIAL synth outcome: ${e.message}`); }
-
-          if (!draft0.runnable) { sendResponse({ success: true, ran: false, reason: 'no actionable steps in the bundle', draft, safetyClass: safety.safetyClass }); return; }
-
-          // Throwaway Fragment+Strategy — built, run once, deleted. Direct StorageManager saves
-          // bypass the sync bridge, so trial artifacts are never enqueued to the cloud.
-          const fragmentId = crypto.randomUUID();
-          const strategyId = crypto.randomUUID();
-          const recs = CapabilitySynth.buildCapabilityRecords(draft, { groundId, fragmentId, strategyId });
-          if (!recs) { sendResponse({ success: false, error: 'failed to build trial op' }); return; }
-          let result = null;
-          try {
-            await StorageManager.saveFragment(recs.fragment);
-            await StorageManager.saveStrategy(recs.strategy);
-            result = await ExecutionEngine.executeStrategy({ strategyId });
-          } finally {
-            try { await StorageManager.deleteStrategy(strategyId); } catch { /* */ }
-            try { await StorageManager.deleteFragment(fragmentId); } catch { /* */ }
-          }
-          // PB-5 (R10): score the run into a fidelity vector + verdict; emit the `trial` outcome.
-          const scored = scoreTrial({
-            shape: draft0.shape, safetyClass: safety.safetyClass,
-            resolvedRoleCount: roles.length, proposedRoleCount,
-            deferred: safety.deferred, result,
-          });
-          try {
-            await _appendOutcomes(groundId, [Outcomes.makeStageEvent('trial', {
-              groundId, verdict: scored.verdict, input: { roleOrIntent: String(intent).slice(0, 120) },
-              detail: { ...scored.vector, score: scored.score, shape: draft0.shape, safetyClass: safety.safetyClass },
-            })]);
-          } catch (e) { Logger.warn('background', `RUN_PERSPECTIVE_TRIAL trial outcome: ${e.message}`); }
-          sendResponse({ success: true, ran: true, safetyClass: safety.safetyClass, deferred: safety.deferred, draft, result, trial: scored });
+          sendResponse(await _runTrialBundle({ groundId, intent, roles, localeModel, navigateUrl, proposedRoleCount }));
         } catch (err) {
           Logger.error('background', `RUN_PERSPECTIVE_TRIAL failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // SG-4b — run the whole substrate-grounded spine off a raw intent and EXECUTE the trial:
+    // Comprehend → Select (matchSubGoals) → Cover → Bind (roles) → the shared trial executor. The
+    // irreversible commit is auto-deferred by the safety class, the file input is skipped (SET_FILE
+    // pending), so this fills the form's text/select fields and proves the capability without submitting.
+    case 'RUN_SG_TRIAL': {
+      (async () => {
+        try {
+          const { tabId, groundId = null, intent } = payload ?? {};
+          if (!groundId || typeof intent !== 'string' || !intent.trim()) { sendResponse({ success: false, error: 'groundId + intent required' }); return; }
+          let url = '';
+          if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); url = t?.url ?? ''; } catch { /* */ } }
+          let localeModel = null;
+          let localeCapturedUrl = '';
+          try { const pm = await _readLocaleCache(groundId, _normalizeUrlForPerspectiveCache(url)); localeModel = pm?.model || null; localeCapturedUrl = pm?.url || pm?.model?.url || ''; } catch { /* */ }
+          if (!localeModel || !localeModel.features) { sendResponse({ success: false, error: 'no Locale for this page — run Explore first' }); return; }
+          const spec = await AnthropicService.comprehendIntent({ userIntent: intent });
+          if (!spec) { sendResponse({ success: false, error: 'comprehend returned nothing' }); return; }
+          const selection = await AnthropicService.matchSubGoals({ spec, locale: localeModel });
+          const cover = coverComplete(spec, selection);
+          const roles = selectionToTrialRoles(spec, selection, localeModel);
+          Logger.info('background', `RUN_SG_TRIAL — intent="${intent.slice(0, 60)}" shape=${spec.shape} cover=${cover.complete} roles=${roles.length}`);
+          if (!roles.length) { sendResponse({ success: true, ran: false, reason: 'no bindable roles from the selection', cover, intentShape: spec.shape }); return; }
+          // Precondition: Comprehend+Select take several seconds of LLM calls, during which the page can
+          // navigate away (e.g. an auth redirect to /login). Re-read the live URL and bail with a CLEAR
+          // "wrong page" rather than typing the form's selectors into whatever loaded ("no element matched
+          // #firstName"). The plan is page-specific — it must run on the Locale's page.
+          let liveUrl = url;
+          if (typeof tabId === 'number') { try { const t2 = await chrome.tabs.get(tabId); liveUrl = t2?.url ?? url; } catch { /* */ } }
+          // The captured URL lives on the cache ENTRY ({ model, url }), not on model.url — read the entry url.
+          const localeUrl = localeCapturedUrl || '';
+          if (localeUrl && _normalizeUrlForPerspectiveCache(liveUrl) !== _normalizeUrlForPerspectiveCache(localeUrl)) {
+            Logger.warn('background', `RUN_SG_TRIAL — page drifted to "${liveUrl}" (capability targets "${localeUrl}") — not running`);
+            sendResponse({ success: true, ran: false, reason: `the page is now "${String(liveUrl).slice(0, 80)}" but this capability targets "${String(localeUrl).slice(0, 80)}" — navigate there and re-run`, cover, intentShape: spec.shape });
+            return;
+          }
+          const out = await _runTrialBundle({ groundId, intent, roles, localeModel, navigateUrl: null, proposedRoleCount: roles.length, targetTabId: (typeof tabId === 'number' ? tabId : null) });
+          sendResponse({ ...out, cover, intentShape: spec.shape });
+        } catch (err) {
+          Logger.error('background', `RUN_SG_TRIAL failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();

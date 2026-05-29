@@ -125,6 +125,11 @@ let _groundInFlight = false;
 // Ground→Use it→Propose flow. This survives adoption so propose still gets the LLM shape/completeness.
 //   { keys:[rawIntent], shape, completeness } | null
 let _groundedSpec = null;
+// SG-4b — the synthesized PLAN from the last ground (cover + steps + deferred/skipped, from the
+// GROUND_INTENT response) and the live "▶ Run on page" trial outcome (RUN_SG_TRIAL).
+let _groundPlan = null;
+let _sgTrialInFlight = false;
+let _sgTrialResult = null;
 // PB-6b — Trial-run state. The intent-truth proof for the chosen perspective: synthesize
 // the resolved bundle into a runnable op, run it safely, score the fidelity vector.
 //   _trialInFlight: true while RUN_PERSPECTIVE_TRIAL round-trips (one at a time).
@@ -854,6 +859,9 @@ async function unmount() {
   _groundIntentResult = null;
   _groundInFlight = false;
   _groundedSpec = null;
+  _groundPlan = null;
+  _sgTrialInFlight = false;
+  _sgTrialResult = null;
   _trialInFlight = false;
   _trialResult = null;
 
@@ -2010,12 +2018,34 @@ function _renderPerspectivePanel() {
   perspectiveBody.querySelector('[data-perspective-action="ground-intent"]')
     ?.addEventListener('click', () => onGroundIntent());
   perspectiveBody.querySelector('[data-perspective-action="dismiss-grounded-intent"]')
-    ?.addEventListener('click', () => { _groundIntentResult = null; _renderPerspectivePanel(); });
+    ?.addEventListener('click', () => { _groundIntentResult = null; _groundPlan = null; _sgTrialResult = null; _renderPerspectivePanel(); });
+  perspectiveBody.querySelector('[data-perspective-action="run-sg-trial"]')
+    ?.addEventListener('click', () => onRunSGTrial((_perspectiveDraft?.description ?? '').trim()));
 }
 
 // v2.74.393 — Grounded-intent row: a "✨ Ground intent" action that refines the
 // user's raw Intent against the page's affordances (cached from Explore), shown
 // as an editable proposal (Use it / Dismiss) before it seeds propose.
+// SG-4b — one-line summary of the synthesized plan (Cover verdict + field count + what's deferred).
+function _sgPlanSummary(p) {
+  if (!p || !p.cover) return '';
+  const c = p.cover;
+  const bits = [c.complete ? '✓ complete' : '◐ partial', `${c.completionCount ?? (p.steps || []).length} field(s)`];
+  if (Array.isArray(p.skipped) && p.skipped.length) bits.push(`${p.skipped.length} deferred (file)`);
+  if (Array.isArray(p.deferred) && p.deferred.length) bits.push('submit deferred');
+  return `<div class="dbg-perspective-ground-note">plan: ${escHtml(bits.join(' · '))}</div>`;
+}
+// SG-4b — the live "▶ Run on page" outcome (RUN_SG_TRIAL): verdict + fidelity + safety.
+function _renderSGTrialResult(t) {
+  if (!t) return '';
+  if (t.success === false) return `<div class="dbg-perspective-ground-note">⚠ Run failed: ${escHtml(t.error || 'unknown')}</div>`;
+  if (t.ran === false) return `<div class="dbg-perspective-ground-note">∅ Nothing ran: ${escHtml(t.reason || 'no actionable steps')}</div>`;
+  const v = t.trial || {};
+  const pct = (typeof v.score === 'number') ? ` (${Math.round(v.score * 100)}%)` : '';
+  const def = (Array.isArray(t.deferred) && t.deferred.length) ? ` · ${t.deferred.length} deferred` : '';
+  return `<div class="dbg-perspective-ground-note">▶ ran — verdict <b>${escHtml(String(v.verdict || '?'))}</b>${pct} · safety ${escHtml(String(t.safetyClass || '?'))}${def}</div>`;
+}
+
 function _renderGroundIntentRow(intent) {
   if (_groundInFlight) {
     return `<div class="dbg-perspective-ground building"><span>⏳ Grounding intent in this page…</span></div>`;
@@ -2031,7 +2061,10 @@ function _renderGroundIntentRow(intent) {
         ${shapeLabel ? `<div class="dbg-perspective-ground-note">operation: <b>${shapeLabel}</b></div>` : ''}
         ${r.matchedGoal ? `<div class="dbg-perspective-ground-note">↳ matches page goal: <b>${escHtml(r.matchedGoal)}</b></div>` : ''}
         ${r.note ? `<div class="dbg-perspective-ground-note">${escHtml(r.note)}</div>` : ''}
+        ${_sgPlanSummary(_groundPlan)}
+        ${_renderSGTrialResult(_sgTrialResult)}
         <div class="dbg-perspective-ground-actions">
+          ${(_groundPlan && _groundPlan.runnable && !_sgTrialInFlight) ? `<button class="btn-secondary tiny" data-perspective-action="run-sg-trial" type="button" title="Run the substrate-grounded plan on this page — fills the fields; the irreversible submit is deferred.">▶ Run on page</button>` : (_sgTrialInFlight ? `<button class="btn-secondary tiny" type="button" disabled>⏳ Running…</button>` : '')}
           <button class="btn-secondary tiny" data-perspective-action="dismiss-grounded-intent" type="button">Dismiss</button>
         </div>
       </div>`;
@@ -2366,8 +2399,27 @@ async function onGroundIntent() {
   _groundedSpec = (res.shape || res.completeness)
     ? { keys: [intent], shape: res.shape || null, completeness: res.completeness || null }
     : null;
+  _groundPlan = res.plan || null;   // SG-4b — the synthesized fill plan (cover + steps), if the SG spine ran
+  _sgTrialResult = null;            // a fresh ground invalidates any prior run
   _renderPerspectivePanel();
   if (res.hadAffordance === false) toast?.('Run Explore first to assess this intent against the page');
+}
+
+// SG-4b — run the substrate-grounded plan on the live page (Comprehend→Select→Cover→Bind→execute). The
+// irreversible commit is auto-deferred and the file is skipped, so this fills the form's text/select
+// fields and proves the capability without submitting. Result is rendered inline under the intent check.
+async function onRunSGTrial(intent) {
+  if (_sgTrialInFlight || !intent) return;
+  _sgTrialInFlight = true; _sgTrialResult = null; _renderPerspectivePanel();
+  let res;
+  try {
+    res = await new Promise(r => chrome.runtime.sendMessage({
+      type: 'RUN_SG_TRIAL', payload: { tabId: _perspectiveTabId, groundId: _perspectiveGroundId, intent },
+    }, r));
+  } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
+  _sgTrialInFlight = false;
+  _sgTrialResult = res || { success: false, error: 'no result' };
+  _renderPerspectivePanel();
 }
 
 

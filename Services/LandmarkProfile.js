@@ -315,6 +315,10 @@ export function deriveAllowedOperations(caps) {
   if (caps.selectable) {
     ops.add('SELECT');
   }
+  // v2.74.584 — SG-#81c: a file input is set via DataTransfer (no CDP). Visibility-agnostic, like SELECT.
+  if (caps.fileSettable) {
+    ops.add('SET_FILE');
+  }
   // v2.74.308 — ACTION_SPEC § 3: KEY targets a focusable element
   // (§ 6 step 2 validates focusability). Any interactable element —
   // clickable, typable, or selectable — accepts keyboard events.

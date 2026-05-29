@@ -2034,6 +2034,34 @@ function handleSelect(selector, value) {
 }
 
 /**
+ * SET_FILE (SG-#81c) — set a file <input>'s files WITHOUT CDP. `input.files` rejects a direct value but
+ * accepts a FileList built from a DataTransfer. For a TRIAL we attach a tiny SYNTHETIC file (no real
+ * document is read from disk) so the page's onChange/validation fires — proving the control accepts an
+ * upload. `value` may carry a filename hint (its extension picks the MIME). Visibility-agnostic: the
+ * native input is usually hidden behind a styled "Choose File" button.
+ */
+function handleSetFile(selector, value) {
+  const el = resolveElement(selector);
+  if (!el) return { success: false, error: `SET_FILE: no element matched "${String(selector).slice(0, 120)}"` };
+  if (!(el instanceof HTMLInputElement) || (el.getAttribute('type') || '').toLowerCase() !== 'file') {
+    return { success: false, error: `SET_FILE: element is not <input type=file> ("${String(selector).slice(0, 80)}")` };
+  }
+  try {
+    const hint = (typeof value === 'string' && /\.[a-z0-9]{2,5}$/i.test(value.trim())) ? value.trim() : 'trial-upload.pdf';
+    const isPdf = hint.toLowerCase().endsWith('.pdf');
+    const file = new File([isPdf ? '%PDF-1.4\n% trial upload\n' : 'trial upload'], hint, { type: isPdf ? 'application/pdf' : 'text/plain' });
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    el.files = dt.files;
+    el.dispatchEvent(new Event('input',  { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return { success: true, fileName: hint, fileCount: el.files.length };
+  } catch (e) {
+    return { success: false, error: `SET_FILE: ${e.message}` };
+  }
+}
+
+/**
  * v2.72.91 — CLICK_BY_LABEL: click an option inside a container by its
  * visible label.
  *
@@ -3217,13 +3245,40 @@ function detectRepeatingContentBlocks() {
 // non-submit buttons, so nav/toggle buttons stay with the band scan — only the real submit is kept.
 const FORM_CONTROL_SEL = 'input:not([type=hidden]):not([type=button]):not([type=reset]), select, textarea, button';
 function _ffStrip(s) { return String(s || '').replace(/\s*\*\s*$/, '').replace(/\s{2,}/g, ' ').trim(); }
-// Concrete selector for the REAL control (not a wrapper): simple #id, else [name="…"] (handles dotted
-// ids), else escaped #id, else null.
-function _ffSelector(id, name) {
-  id = (id || '').trim(); name = (name || '').trim();
-  if (id && /^[A-Za-z][\w-]*$/.test(id)) return `#${id}`;
-  if (name) return `[name="${name.replace(/(["\\])/g, '\\$1')}"]`;
-  if (id) return `#${id.replace(/([^\w-])/g, '\\$1')}`;
+// Concrete selector for the REAL control (not a wrapper). Preference order, most→least durable:
+//   1. [name="…"] — the FORM-CANONICAL identifier. It's author-controlled and submitted to the server,
+//      so component libraries (Fluent/Fabric, MUI, …) preserve it across renders while regenerating the
+//      element's #id every mount. Used when it resolves uniquely (bare, then tag-qualified). This makes
+//      capture robust to ANY framework's volatile-id scheme without enumerating prefixes — a named field
+//      binds by name regardless. (Radio groups share a name → non-unique → fall through to #id.)
+//   2. a STABLE author #id (isStableIdent rejects framework render-time ids like FabricTextField-324 /
+//      fab-select356), for nameless controls that carry a real author id.
+//   3. a stable accessible attribute — aria-label / placeholder — set even when the id is volatile.
+//   4. last resort: name (non-unique, e.g. radios), then the escaped #id — a fragile selector beats none.
+// v2.74.588 — takes the element (was id+name) so it can reach aria-label/placeholder.
+// v2.74.589 — name-FIRST (was id-first): generalizes past per-framework volatile-id whack-a-mole.
+function _ffSelector(el) {
+  try {
+    const id = (el.id || '').trim();
+    const name = ((el.getAttribute && el.getAttribute('name')) || '').trim();
+    const tag = (el.tagName || '').toLowerCase();
+    const q = /^[a-z][a-z0-9]*$/.test(tag) ? tag : '';
+    const esc = (v) => String(v).replace(/(["\\])/g, '\\$1');
+    const uniq = (sel) => { try { return queryAllDeep(sel).length === 1; } catch { return false; } };
+    if (name) {
+      const bare = `[name="${esc(name)}"]`;
+      if (uniq(bare)) return bare;
+      const tq = `${q}[name="${esc(name)}"]`;
+      if (q && uniq(tq)) return tq;
+    }
+    if (id && isStableIdent(id) && /^[A-Za-z][\w-]*$/.test(id)) return `#${id}`;
+    const aria = el.getAttribute && el.getAttribute('aria-label');
+    if (aria && aria.trim()) { const sel = `${q}[aria-label="${esc(aria.trim())}"]`; if (uniq(sel)) return sel; }
+    const ph = el.getAttribute && el.getAttribute('placeholder');
+    if (ph && ph.trim()) { const sel = `${q}[placeholder="${esc(ph.trim())}"]`; if (uniq(sel)) return sel; }
+    if (name) return `[name="${esc(name)}"]`;
+    if (id) return /^[A-Za-z][\w-]*$/.test(id) ? `#${id}` : `#${id.replace(/([^\w-])/g, '\\$1')}`;
+  } catch { /* */ }
   return null;
 }
 function _ffLabelInfo(el) {
@@ -3295,7 +3350,7 @@ function _describeFormControl(el) {
       isSubmit,
       isAction: isFormButton,                  // any form button → a feature of kind 'action'
       kind: isFormButton ? (isSubmit ? 'submit' : 'button') : (type === 'file' ? 'file' : tag === 'select' ? 'select' : 'input'),
-      selector: _ffSelector(el.id, el.getAttribute && el.getAttribute('name')),
+      selector: _ffSelector(el),
     };
   } catch { return null; }
 }
@@ -5343,6 +5398,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         case 'CLICK':     result = handleClick(selector, value);              break;
         case 'CLICK_BY_LABEL':  result = handleClickByLabel(selector, value); break;
         case 'SELECT':    result = handleSelect(selector, value);             break;
+        case 'SET_FILE':  result = handleSetFile(selector, value);            break;
         case 'EXTRACT':   result = handleExtract(selector, payload?.fromIndex ?? 0); break;
         case 'FIND_AI':   result = handleFindAI(selector, stepAliases ?? []);           break;
         case 'BLUR':      result = handleBlur(selector);                      break;
@@ -8190,6 +8246,18 @@ function isStableIdent(s) {
   if (/^css-[a-z0-9]{6,}$/.test(s)) return false;         // emotion-style hashes
   if (/[0-9]{4,}/.test(s)) return false;                  // long digit run
   if (/^[a-f0-9]{8,}$/i.test(s)) return false;            // hex-only run
+  // v2.74.588 — component-library ids carry a render-time counter that REGENERATES on
+  // the next mount, so #id breaks across loads. The React useId `:r…:` form is handled
+  // above; this covers the libraries that DON'T use that form and whose counter is SHORT
+  // (1-3 digits, slipping past the `[0-9]{4,}` rule). Two signals, both page-agnostic:
+  //   (a) a distinctive library prefix immediately followed by digits anywhere
+  //       (Fluent/Fabric "FabricTextField-324", Radix, Headless UI, Chakra, Mantine, …);
+  //   (b) a generic camelCase/PascalCase component name ending in a 2-3 digit counter.
+  // Author ids stay safe: "firstName"/"email" have no counter; "addressLine2" ends in a
+  // single digit. A false reject merely falls through to the next (aria/name) tier — far
+  // cheaper than a stale selector that resolves at capture but breaks on the next render.
+  if (/^(fab|fluent|radix|headlessui|chakra|mantine|downshift|tippy|popper|floatingui|reach|reakit|react-?select|react-?aria)[a-z0-9_-]*\d/i.test(s)) return false;
+  if (/[a-z][A-Z][A-Za-z]*-?\d{2,3}$/.test(s)) return false;   // ComponentName-324, fieldName12
   // v2.74.130 — Styled-components / CSS-in-JS bare hash classes.
   // Real-world examples from HubSpot's UI: `kxzAkc`, `ehJYhw`, `bhNrjt`,
   // `gGnXeN` — 6-char mixed-case alphabetical strings emitted by

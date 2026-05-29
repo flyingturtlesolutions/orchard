@@ -110,7 +110,11 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
   //    text/textarea/etc. get TYPE with a concrete trial value (self-contained run, no param binding).
   for (const r of fills) {
     if (!r.selector) { skipped.push({ role: r.role, why: 'no selector' }); continue; }
-    if (r._fillOp === 'file') { skipped.push({ role: r.role, why: 'file upload — SET_FILE op not yet implemented (SG-#81c)' }); continue; }
+    if (r._fillOp === 'file') {
+      actions.push({ action: 'SET_FILE', selector: r.selector, value: 'trial-upload.pdf' });
+      trialInputs.push({ role: r.role, selector: r.selector, value: '(trial file)', op: 'SET_FILE' });
+      continue;
+    }
     if (r._fillOp === 'select') {
       actions.push({ action: 'SELECT', selector: r.selector, value: TRIAL_SELECT_FIRST });
       trialInputs.push({ role: r.role, selector: r.selector, value: '(first option)', op: 'SELECT' });

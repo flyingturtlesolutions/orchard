@@ -120,6 +120,11 @@ export class ExecutionEngine {
     isAborted = () => false,
     onProgress = null,
     debug = null,
+    // v2.74.587 — optional: run against an EXISTING tab instead of opening a fresh
+    // one on ground.url. Used by the SG/perspective trial, whose entry point is THIS
+    // Locale (the tab the user is already standing on), not the Ground's base URL.
+    // When set, the tab is reused as-is and NOT closed at the end (it's the user's).
+    targetTabId = null,
   }) {
     const invId = invocationId || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `inv-${Date.now()}`);
 
@@ -274,14 +279,22 @@ export class ExecutionEngine {
       }
     }
 
-    // 2. Open tab on Ground URL
+    // 2. Open tab on Ground URL — OR reuse the caller's existing tab.
     let tabId = null;
+    let openedTab = false;   // only tabs WE open get closed in finally
     const stepResults = [];
     let overallError = null;
 
     try {
-      tabId = await ExecutionEngine.#openTab(ground.url);
-      await ExecutionEngine.#waitForTabReady(tabId);
+      if (targetTabId !== null && targetTabId !== undefined) {
+        // Reuse the live tab as-is. The page is already loaded (the user is on it);
+        // do NOT navigate to ground.url and do NOT close it afterwards.
+        tabId = targetTabId;
+      } else {
+        tabId = await ExecutionEngine.#openTab(ground.url);
+        openedTab = true;
+        await ExecutionEngine.#waitForTabReady(tabId);
+      }
 
       // v2.72.24 (Pass 13) — Strategy preconditions. Evaluated after the
       // tab is open and reachable but before any nodes run. Both page-family
@@ -402,8 +415,9 @@ export class ExecutionEngine {
       overallError = err.message;
       Logger.error('ExecutionEngine', `executeStrategy threw: ${err.message}`);
     } finally {
-      // 4. Close tab per user preference
-      if (tabId !== null) {
+      // 4. Close tab per user preference — but ONLY if we opened it. A reused
+      // (caller-supplied) tab belongs to the user and must be left untouched.
+      if (tabId !== null && openedTab) {
         const closeSetting = await new Promise(r => {
           chrome.storage.local.get(['settings:close_tab_after_run'], (data) => {
             r(data['settings:close_tab_after_run']);
