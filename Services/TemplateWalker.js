@@ -764,6 +764,14 @@ export class TemplateWalker {
             },
           }, TOP_FRAME_ID);
           if (!res?.success) {
+            // A trial's reachability probe / read proof is marked `optional`: an empty result is the SIGNAL
+            // it exists to capture (terminal not reachable / nothing surfaced), not a crash. Leave the target
+            // UNSET so scoreTrial reads it as empty (terminalReachable=0 / extractQuality=0) — a clean,
+            // legible trial-fail instead of an aborted fragment. (Regular capability EXTRACTs aren't optional.)
+            if (action.optional) {
+              Logger.warn('TemplateWalker', `Optional EXTRACT ${action.selector ?? ''} → ${action.target} found nothing (continuing): ${res?.error ?? 'unknown'}`);
+              continue;
+            }
             return {
               success: false, actionsRun, antecedentActionsRun, lastActions,
               error: `In "${frag.name}", EXTRACT failed: ${res?.error ?? 'unknown'}`,
@@ -778,6 +786,10 @@ export class TemplateWalker {
           actionsRun++;
           await TemplateWalker.#sleep(50);   // brief settle, much shorter than DOM mutations
         } catch (err) {
+          if (action.optional) {
+            Logger.warn('TemplateWalker', `Optional EXTRACT ${action.selector ?? ''} → ${action.target} threw (continuing): ${err.message}`);
+            continue;
+          }
           return {
             success: false, actionsRun, antecedentActionsRun, lastActions,
             error: `In "${frag.name}", EXTRACT threw: ${err.message}`,

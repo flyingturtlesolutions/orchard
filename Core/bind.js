@@ -16,7 +16,7 @@
 //
 // PURE: no DOM/LLM/storage. Unit-testable like the other SG stages.
 // @module Core/bind
-// @version 2.74.599
+// @version 2.74.622
 
 import { featureToProtoLandmark } from './landmark.js';
 
@@ -91,6 +91,36 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
     // read / act / navigate — the matched features (resolved via the locale).
     const ids = new Set();
     for (const arr of Object.values(sel.matches || {})) for (const id of (Array.isArray(arr) ? arr : [])) ids.add(id);
+
+    // GOAL-GROUNDED MEMBERSHIP (v2.74.622, SG-RES-7) — the structural fix for the lossy per-sub-goal
+    // matcher. It under-binds: for "search for jobs" it returns ONLY the Search submit and drops the
+    // q/location inputs, so the trial clicks Search on an EMPTY form and the page reloads to nothing (the
+    // live Indeed regression). But the Locale ALREADY groups features by GOAL — ground truth:
+    // goal_…sae4d "search for jobs" achievableVia = q ∪ location ∪ Search. So we treat the matcher's output
+    // as an ANCHOR, not the membership: any matched feature anchors the goal(s) it belongs to, and we bind
+    // the WHOLE goal membership (its inputs + submit + reveal disclosures, non-decoy). A form is an ATOM —
+    // you can't bind a goal's submit without its inputs (or an input without its submit) because they arrive
+    // together from the goal. Membership comes from the CATALOG; the LLM only says WHICH goal. This
+    // generalizes SG-RES-5's submit→inputs special case to anchor-by-any-kind in BOTH directions. Two
+    // membership sources, UNIONED so it works whether the Locale carries the forward map, the reverse
+    // pointers, or both: forward = locale.goals[g].achievableVia; reverse = features whose f.goals ∋ g.
+    // (Scoped to form essentials — inputs/submit/disclosure — so we complete the form without dragging in
+    // tangential actions/navigation that merely share the goal.)
+    const goalMap = (locale && locale.goals && typeof locale.goals === 'object') ? locale.goals : {};
+    const _formEssential = (f) => !!f && !!f.selector && f.decoy !== true
+      && (f.kind === 'input' || f.kind === 'disclosure' || (f.kind === 'action' && f.interaction && f.interaction.effect === 'submit'));
+    const groundedGoals = new Set();
+    for (const id of ids) { const f = feats[id]; if (f && Array.isArray(f.goals)) for (const g of f.goals) groundedGoals.add(g); }
+    if (groundedGoals.size) {
+      for (const g of groundedGoals) {                                  // forward: achievableVia (ground truth)
+        const via = (goalMap[g] && Array.isArray(goalMap[g].achievableVia)) ? goalMap[g].achievableVia : [];
+        for (const fid of via) if (_formEssential(feats[fid])) ids.add(fid);
+      }
+      for (const f of Object.values(feats)) {                           // reverse: feature → goals pointer
+        if (_formEssential(f) && Array.isArray(f.goals) && f.goals.some((g) => groundedGoals.has(g))) ids.add(f.id);
+      }
+    }
+
     for (const id of ids) push(feats[id]);
     // If the intent FILLS a form (matched ≥1 input) it must also SUBMIT to surface a result — but "submit"
     // isn't a phase the matcher names, so a search trial otherwise types the query and EXTRACTs an

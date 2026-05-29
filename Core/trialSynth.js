@@ -262,7 +262,9 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
     const readRole = reads.find((r) => r.selector);
     // EXTRACT writes to scope under `target` (TemplateWalker), surfacing in the run's extractedValues
     // → the read-intent proof ("did the Perspective actually surface the content?").
-    if (readRole) { _pushNorm(readRole); actions.push({ action: 'EXTRACT', selector: readRole.selector, target: 'TRIAL_RESULT', landmark: _lm(readRole) }); extractRole = readRole.role; }
+    // v2.74.619 (SG-RES-4): `optional` — if the content role surfaces nothing the executor leaves
+    // TRIAL_RESULT unset and the trial scores extractQuality=0 (a clean read-intent fail), not an abort.
+    if (readRole) { _pushNorm(readRole); actions.push({ action: 'EXTRACT', selector: readRole.selector, target: 'TRIAL_RESULT', optional: true, landmark: _lm(readRole) }); extractRole = readRole.role; }
   }
   const shape = extractRole ? 'read' : 'act';
 
@@ -317,9 +319,13 @@ export function classifyTrialSafety(intent, draft) {
   if (!irreversible || termIdx < 0) return { safetyClass: 'reversible', actions, deferred: [] };
 
   // Defer the commit: probe its reachability instead of clicking it. Carry the landmark through so the
-  // reachability probe also self-heals if the commit's selector drifted (SG-LM-3).
+  // reachability probe also self-heals if the commit's selector drifted (SG-LM-3). v2.74.619 (SG-RES-4):
+  // `optional` — an absent
+  // terminal is the SIGNAL this probe captures (not reachable), not a fragment crash: the executor leaves
+  // TRIAL_TERMINAL unset → scoreTrial reads terminalReachable=0 → a clean trial-fail with legible evidence
+  // (e.g. a "sign up with google" whose GSI button lives in a cross-origin iframe we can't reach).
   const termLm = actions[termIdx].landmark;
-  actions[termIdx] = { action: 'EXTRACT', selector: termSel, target: 'TRIAL_TERMINAL', ...(termLm ? { landmark: termLm } : {}) };
+  actions[termIdx] = { action: 'EXTRACT', selector: termSel, target: 'TRIAL_TERMINAL', optional: true, ...(termLm ? { landmark: termLm } : {}) };
   return { safetyClass: 'irreversible', actions, deferred: [termSel] };
 }
 

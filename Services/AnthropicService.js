@@ -2419,16 +2419,30 @@ Rules:
       Logger.info('AnthropicService', `matchSubGoals — nothing to match (${subGoals.length} subGoal(s), ${candidates.length} candidate(s)) → boundary-only`);
       return reconcileMatches(locale, spec, null);
     }
+    // v2.74.621 (SG-RES-6) — prompt hardening. The sub-goals are NOT independent labels: Comprehend emits
+    // them as one ORDERED, dependsOn-linked operation (a single proto-perspective), but the old prompt
+    // matched them one at a time, dropped the dependsOn edges entirely, and explicitly rewarded abstaining
+    // ([]) on the fuzzy ones — so "search for jobs" returned the submit and dropped the inputs, and the
+    // trial clicked Search on an empty form. Fix: (1) render the dependsOn edges (below), (2) frame the
+    // phases as ONE connected operation, (3) add the ATOMICITY invariant (a commit must carry the phases it
+    // depends on, or be omitted), (4) stop biasing toward [] on REQUIRED phases. (Probabilistic floor-raise;
+    // the structural cure is goal-grounded binding off achievableVia — this strengthens the LLM stage.)
     const systemPrompt = `You MATCH the sub-goals of a user's intent to the ACTUAL features of a specific page. You are given the intent's SUB-GOALS (generic, page-independent phases) and a list of the page's real FEATURES (each: id, label, kind, and whether it is required). For each sub-goal, choose the feature id(s) that accomplish it — by MEANING, not word overlap (e.g. "provide identity" → the first/last name inputs; "attach resume" → the file-upload control; "submit" → the submit action).
 
+The sub-goals are NOT independent items to match one at a time — together they form ONE coherent operation. A sub-goal line may carry "depends on: <ids>", meaning it cannot succeed until those earlier phases are done (e.g. a submit depends on the data-entry phases that feed it). Bind the operation as a connected whole.
+
 Rules:
-- A feature serves AT MOST ONE sub-goal. A sub-goal may map to several features, or to NONE (omit it) if the page has no feature for it.
+- A feature serves AT MOST ONE sub-goal. A sub-goal may map to several features.
 - Map ONLY to feature ids that appear in the list. NEVER invent an id.
-- Do not force a match. It is correct to leave a sub-goal unmapped, and correct to leave page features unclaimed.
+- ATOMICITY: if you map a phase that COMMITS or SUBMITS (it lists "depends on", or its feature is marked [submit]), you MUST also map every phase it depends on. A plan that submits or searches a form WITHOUT first entering its data is INVALID and will fail — bind the whole dependency chain, or omit the commit phase entirely.
+- It is correct to leave page features unclaimed (decoys, unrelated controls — don't force them in), and to leave an OPTIONAL sub-goal unmapped when the page truly has no feature for it. But do NOT abstain on a REQUIRED phase that a feature plausibly serves — under-binding a required data-entry phase silently breaks the operation. When unsure between a plausible feature and nothing for a required phase, prefer the plausible feature.
 
 Return ONLY a JSON object:
 { "matches": { "<subGoalId>": ["<featureId>", ...] } }`;
-    const sgBlock = subGoals.map((s) => `- ${s.id}: ${s.label} (${s.shape}${s.scope ? `, ${s.scope}` : ''})`).join('\n');
+    const sgBlock = subGoals.map((s) => {
+      const deps = (Array.isArray(s.dependsOn) && s.dependsOn.length) ? `, depends on: ${s.dependsOn.join(', ')}` : '';
+      return `- ${s.id}: ${s.label} (${s.shape}${s.scope ? `, ${s.scope}` : ''}${deps})`;
+    }).join('\n');
     // Rank by relevance to the intent BEFORE the cap, so the target survives on a feature-dense page (a
     // nav-heavy site has 100+ candidates; an unranked slice can drop the very control the intent names).
     const ranked = rankCandidates(candidates, spec);

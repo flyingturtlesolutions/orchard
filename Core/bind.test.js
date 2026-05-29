@@ -87,6 +87,74 @@ describe('selectionToTrialRoles — hidden field reveal sequencing', () => {
   });
 });
 
+describe('selectionToTrialRoles — goal-grounded membership (SG-RES-7): a matched feature anchors its whole goal', () => {
+  it('binds the goal-sibling inputs when the matcher returns ONLY the submit (Indeed search regression)', () => {
+    // The lossy per-sub-goal matcher returned just the Search button; q + location were dropped, so the
+    // trial used to click Search on an empty form. The Locale's goal grouping is the ground-truth form.
+    const locale = { features: {
+      q:   { id: 'q', label: 'Job title, keywords', kind: 'input', goals: ['g_search'], selector: 'input[name="q"]', interaction: { pattern: 'type', effect: 'none' } },
+      l:   { id: 'l', label: 'Location', kind: 'input', goals: ['g_search'], selector: 'input[name="l"]', interaction: { pattern: 'type', effect: 'none' } },
+      go:  { id: 'go', label: 'Search', kind: 'action', goals: ['g_search'], selector: 'button.search', interaction: { pattern: 'click', effect: 'submit' } },
+      junk:{ id: 'junk', label: 'Clear', kind: 'action', decoy: true, goals: ['g_search'], selector: 'button.clear', interaction: { pattern: 'click', effect: 'none' } },
+    } };
+    const sel = { matches: { 'execute-search': ['go'] } };   // ONLY the submit matched
+    const roles = selectionToTrialRoles({ shape: 'act' }, sel, locale);
+    assert.deepEqual(roles.map((r) => r.featureId).sort(), ['go', 'l', 'q'], 'q + location inputs expanded in from the form goal');
+  });
+
+  it('anchors on an INPUT too: matching just a field pulls in its goal-sibling submit (reverse direction)', () => {
+    // SG-RES-5 only pulled inputs off a matched SUBMIT; SG-RES-7 is symmetric — matching an input anchors
+    // the goal and pulls in the submit (+ the other field), so a half-bound search still runs the form.
+    const locale = { features: {
+      q:   { id: 'q', label: 'Job title, keywords', kind: 'input', goals: ['g_search'], selector: 'input[name="q"]', interaction: { pattern: 'type', effect: 'none' } },
+      l:   { id: 'l', label: 'Location', kind: 'input', goals: ['g_search'], selector: 'input[name="l"]', interaction: { pattern: 'type', effect: 'none' } },
+      go:  { id: 'go', label: 'Search', kind: 'action', goals: ['g_search'], selector: 'button.search', interaction: { pattern: 'click', effect: 'submit' } },
+    } };
+    const sel = { matches: { 'enter-query': ['q'] } };   // ONLY a field matched
+    const roles = selectionToTrialRoles({ shape: 'act' }, sel, locale);
+    assert.deepEqual(roles.map((r) => r.featureId).sort(), ['go', 'l', 'q'], 'submit + sibling field expanded in from the goal');
+  });
+
+  it('binds off the FORWARD achievableVia map even when sibling features carry no reverse goals pointer', () => {
+    // Goal-grounded ground truth lives in locale.goals[g].achievableVia. The matcher anchors a feature that
+    // belongs to a goal (reverse pointer on the anchor only); the rest of achievableVia binds via the map.
+    const locale = {
+      goals: { g_search: { id: 'g_search', label: 'search for jobs', achievableVia: ['q', 'l', 'go'] } },
+      features: {
+        q:  { id: 'q', label: 'Job title', kind: 'input', selector: 'input[name="q"]', interaction: { pattern: 'type', effect: 'none' } },
+        l:  { id: 'l', label: 'Location', kind: 'input', selector: 'input[name="l"]', interaction: { pattern: 'type', effect: 'none' } },
+        go: { id: 'go', label: 'Search', kind: 'action', goals: ['g_search'], selector: 'button.search', interaction: { pattern: 'click', effect: 'submit' } },
+      },
+    };
+    const sel = { matches: { 'execute-search': ['go'] } };   // anchor carries goals: ['g_search']
+    const roles = selectionToTrialRoles({ shape: 'act' }, sel, locale);
+    assert.deepEqual(roles.map((r) => r.featureId).sort(), ['go', 'l', 'q'], 'achievableVia members q + l bound via the forward goal map');
+  });
+
+  it('does not expand when the matched submit has no form-essential siblings (e.g. an Apply button)', () => {
+    const locale = { features: {
+      apply: { id: 'apply', label: 'Apply', kind: 'action', goals: ['g_apply'], selector: 'button.apply', interaction: { pattern: 'click', effect: 'submit' } },
+      save:  { id: 'save', label: 'Save job', kind: 'action', goals: ['g_apply'], selector: 'button.save', interaction: { pattern: 'click', effect: 'none' } },
+    } };
+    const sel = { matches: { 'do-apply': ['apply'] } };
+    const roles = selectionToTrialRoles({ shape: 'act' }, sel, locale);
+    assert.deepEqual(roles.map((r) => r.featureId), ['apply'], 'no inputs/submit siblings in the goal → nothing pulled in (save is effect:none)');
+  });
+
+  it('does not drag in tangential non-form actions that merely share the goal', () => {
+    // achievableVia membership is scoped to FORM ESSENTIALS (input/submit/disclosure). A "Share search"
+    // action sharing the goal is NOT a form field and must not join the trial.
+    const locale = { features: {
+      q:     { id: 'q', label: 'Query', kind: 'input', goals: ['g_search'], selector: '#q', interaction: { pattern: 'type', effect: 'none' } },
+      go:    { id: 'go', label: 'Search', kind: 'action', goals: ['g_search'], selector: '#go', interaction: { pattern: 'click', effect: 'submit' } },
+      share: { id: 'share', label: 'Share search', kind: 'action', goals: ['g_search'], selector: '#share', interaction: { pattern: 'click', effect: 'none' } },
+    } };
+    const sel = { matches: { 'execute-search': ['go'] } };
+    const roles = selectionToTrialRoles({ shape: 'act' }, sel, locale);
+    assert.deepEqual(roles.map((r) => r.featureId).sort(), ['go', 'q'], 'q (input) bound; share (effect:none action) excluded');
+  });
+});
+
 describe('selectionToTrialRoles — read/act intents resolve matched features via the locale', () => {
   it('maps matched featureIds to roles using the locale', () => {
     const locale = { features: {
