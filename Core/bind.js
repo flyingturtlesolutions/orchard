@@ -16,7 +16,9 @@
 //
 // PURE: no DOM/LLM/storage. Unit-testable like the other SG stages.
 // @module Core/bind
-// @version 2.74.579
+// @version 2.74.599
+
+import { featureToProtoLandmark } from './landmark.js';
 
 const _roleName = (f) => (f && typeof f.label === 'string' && f.label.trim()) ? f.label.trim() : (f && f.id) || '';
 
@@ -32,11 +34,15 @@ const _fillType = (f) => {
   if (ft === 'select' || pat === 'select') return 'select';
   return 'text';
 };
-// Annotate a role with the substrate-derived kind + fill-op so it is replayable without the live feature.
+// Annotate a role with the substrate-derived kind + fill-op so it is replayable without the live feature,
+// AND a proto-landmark (recoverable identity: selector + role + accessibleName) so the trial/replay can
+// probe-or-recover instead of hard-failing on a stale selector (SG-LM-2/3).
 const _annotate = (role, f) => {
   if (f && typeof f.kind === 'string' && f.kind) role.kind = f.kind;
   const tok = _fillType(f);
   if (tok === 'file' || tok === 'select') role.fieldType = tok;   // text is the _fillOpFor default; omit it
+  const lm = featureToProtoLandmark(f, role.fieldType);
+  if (lm) role.landmark = lm;
   return role;
 };
 

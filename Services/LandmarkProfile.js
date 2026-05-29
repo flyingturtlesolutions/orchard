@@ -19,80 +19,11 @@
  * @version 2.74.286
  */
 
-// ─── Selector tier classifier (v2.74.288) ──────────────────────────────
-//
-// Mirrors ContentScripts/contentScript.js `synthesizeCandidates` tier
-// system so we can compare two selectors (picker vs. Claude-proposed)
-// on the same stability scale.
-//
-//   Tier 1 — #id (stable id only)
-//   Tier 2 — [data-test-id] / [data-testid] / [data-test] / [data-qa] / [data-cy]
-//   Tier 3 — [aria-label="…"] / tag[name="…"] / [role="…"]
-//   Tier 4 — single stable class (.stableClass)
-//   Tier 5 — multi-class chain
-//   Tier 6 — structural (` > ` combinator chain) / tag-only
-//   Tier 99 — unclassifiable (no recognized discriminator)
-//
-// Lower tier = more stable. Used by the Wave-2 landmark profile flow:
-// the picker's selector is the authority, Claude can only override
-// when its proposal is at a STRICTLY LOWER tier.
-
-// Stability heuristic — mirrors picker's isStableIdent. Kept inline so
-// LandmarkProfile stays a leaf module with no DOM dependencies.
-function _isStableIdent(s) {
-  if (!s || typeof s !== 'string') return false;
-  if (s.length < 2) return false;
-  if (/^\d+$/.test(s)) return false;                          // all numeric
-  if (/__[A-Za-z0-9_-]{3,}$/.test(s)) return false;           // CSS modules suffix
-  if (/^:r[0-9a-z]+:$/.test(s)) return false;                 // React 18 useId
-  if (/^_r\d/.test(s)) return false;                          // emotion underscore prefix
-  if (/^css-[a-z0-9]{6,}$/.test(s)) return false;             // emotion-style hashes
-  if (/[0-9]{4,}/.test(s)) return false;                      // long digit run
-  if (/^[a-f0-9]{8,}$/i.test(s)) return false;                // hex-only run
-  // styled-components hash (6-char mixed-case alpha, low vowel density)
-  if (/^[a-zA-Z]{5,10}$/.test(s) && /[a-z]/.test(s) && /[A-Z]/.test(s)) {
-    const vowels = (s.match(/[aeiouAEIOU]/g) ?? []).length;
-    if (vowels / s.length < 0.25) return false;
-  }
-  return true;
-}
-
-/**
- * Classify a CSS selector by its strongest discriminator.
- *
- * The score is the BEST tier any part of the selector achieves — a
- * selector containing both an `#id` AND a structural chain still
- * scores tier 1 because the `#id` dominates.
- *
- * @param {string} selector
- * @returns {number} tier 1..6, or 99 for unclassifiable / empty input
- */
-export function classifySelectorTier(selector) {
-  if (!selector || typeof selector !== 'string') return 99;
-  const s = selector.trim();
-  if (!s) return 99;
-
-  // Tier 1 — stable #id
-  const idMatch = s.match(/#([\w-]+)/);
-  if (idMatch && _isStableIdent(idMatch[1])) return 1;
-
-  // Tier 2 — test markers
-  if (/\[\s*(data-test-id|data-testid|data-test|data-qa|data-cy)\b/i.test(s)) return 2;
-
-  // Tier 3 — aria-label / name / role / aria-labelledby
-  if (/\[\s*(aria-label|aria-labelledby|name|role)\b/i.test(s)) return 3;
-
-  // Tier 4/5 — stable classes. Filter unstable hash classes so a chain
-  // of all-hash classes doesn't score as tier 5.
-  const classMatches = s.match(/\.[A-Za-z_][\w-]*/g) || [];
-  const stableClasses = classMatches.filter(c => _isStableIdent(c.slice(1)));
-  if (stableClasses.length === 1) return 4;
-  if (stableClasses.length >= 2) return 5;
-
-  // Tier 6 — structural / tag-only (anything else with recognizable
-  // CSS structure). Includes ` > ` chains, `:nth-of-type`, plain tags.
-  return 6;
-}
+// ─── Selector tier classifier ──────────────────────────────────────────
+// v2.74.598 (SG-LM-1) — the tier classifier + its stability heuristic moved to the canonical
+// Core/selectorStability.js so this module no longer carries a (drifting, stale) duplicate. Re-exported
+// here to keep existing importers (Sidepanel/modes/perspective-capture.js) working unchanged.
+export { classifySelectorTier } from '../Core/selectorStability.js';
 
 // ─── Element-shape classification ───────────────────────────────────────
 
