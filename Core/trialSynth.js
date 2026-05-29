@@ -40,7 +40,11 @@ const READ_VERB = /\b(find|search|show|list|get|see|view|read|browse|capture|ext
 /** Classify a role's kind: prefer the bound feature's kind, else infer from the role name. */
 export function inferRoleKind(role, feature) {
   if (feature && typeof feature.kind === 'string' && feature.kind) return feature.kind;
-  const n = String(role || '').toLowerCase();
+  // v2.74.594 — replay path: when the live feature is absent (re-Explore re-keyed featureIds), trust the
+  // kind the bind step copied off the substrate onto the role. Keeps a saved capability's bucketing (fill
+  // vs act) identical to its trial without the live feature. (`role` may be the role object or its name.)
+  if (role && typeof role === 'object' && typeof role.kind === 'string' && role.kind) return role.kind;
+  const n = String((role && typeof role === 'object' ? role.role : role) || '').toLowerCase();
   if (/(input|search|query|email|password|field|textbox|address|phone|quantity|amount|message|comment|keyword|term)/.test(n)) return 'input';
   if (/(result|item|card|row|listing|product|tile|entry|post|cell|article)/.test(n)) return 'collection';
   if (/(submit|button|action|add-to|buy|checkout|send|save|apply|continue|next|confirm|sign-in|signin|login|search-submit)/.test(n)) return 'action';
@@ -82,7 +86,7 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
     .filter((r) => r && typeof r.role === 'string')
     .map((r) => {
       const feature = r.featureId ? features[r.featureId] : null;
-      return { ...r, _kind: inferRoleKind(r.role, feature), _verified: !!(feature && feature.selectorVerified), _fillOp: _fillOpFor(feature, r) };
+      return { ...r, _kind: inferRoleKind(r, feature), _verified: !!(feature && feature.selectorVerified), _fillOp: _fillOpFor(feature, r) };
     });
 
   const actions = [];

@@ -14,11 +14,26 @@ describe('selectionToTrialRoles — complete intent', () => {
     const sel = { boundary: { requiredFields: [field('firstName', 'First Name'), field('email', 'Email')], successAction: submit } };
     const roles = selectionToTrialRoles({ shape: 'complete' }, sel);
     assert.equal(roles.length, 3);
-    assert.deepEqual(roles[0], { role: 'First Name', selector: '#firstName', featureId: 'firstName', multiplicity: 'one' });
+    // v2.74.594 — roles now carry the substrate-derived `kind` (self-contained for replay). A `type`
+    // input has no fieldType (text is the _fillOpFor default → omitted).
+    assert.deepEqual(roles[0], { role: 'First Name', selector: '#firstName', featureId: 'firstName', multiplicity: 'one', kind: 'input' });
     const last = roles[roles.length - 1];
     assert.equal(last.role, 'Submit Application');
     assert.equal(last.featureId, 'submit');
+    assert.equal(last.kind, 'action');
     roles.forEach((r) => assert.ok(r.featureId, 'every role carries featureId for kind lookup'));
+  });
+
+  it('carries kind + fieldType so a select/file role replays without the live feature (self-contained)', () => {
+    const sel = { boundary: { requiredFields: [
+      { id: 'country', label: 'Country', kind: 'input', required: true, selector: 'select[name="c"]', interaction: { pattern: 'select', effect: 'none' } },
+      { id: 'resume', label: 'Resume', kind: 'input', required: true, selector: 'input[name="r"]', interaction: { pattern: 'upload', effect: 'none' } },
+    ], successAction: submit } };
+    const roles = selectionToTrialRoles({ shape: 'complete' }, sel);
+    const byId = Object.fromEntries(roles.map((r) => [r.featureId, r]));
+    assert.equal(byId.country.kind, 'input');
+    assert.equal(byId.country.fieldType, 'select');
+    assert.equal(byId.resume.fieldType, 'file');
   });
 
   it('drops a required field with no selector', () => {

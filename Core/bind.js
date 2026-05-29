@@ -20,6 +20,26 @@
 
 const _roleName = (f) => (f && typeof f.label === 'string' && f.label.trim()) ? f.label.trim() : (f && f.id) || '';
 
+// v2.74.594 — mirror Core/trialSynth._fillOpFor so the bound role carries its own fill-op token. This
+// makes the binding SELF-CONTAINED: a saved capability replays correctly even after the page is
+// re-Explored (featureIds are content-hash-derived, so they change and `features[featureId]` would miss).
+// synthesizeTrialOp is feature-FIRST, role-fallback, so carrying kind + fieldType reproduces the EXACT
+// same bucket (fill vs act) and op (TYPE/SELECT/SET_FILE) the live trial used, with no live feature.
+const _fillType = (f) => {
+  const ft = (f && f.fieldType) || '';
+  const pat = (f && f.interaction && f.interaction.pattern) || '';
+  if (ft === 'file' || pat === 'upload') return 'file';
+  if (ft === 'select' || pat === 'select') return 'select';
+  return 'text';
+};
+// Annotate a role with the substrate-derived kind + fill-op so it is replayable without the live feature.
+const _annotate = (role, f) => {
+  if (f && typeof f.kind === 'string' && f.kind) role.kind = f.kind;
+  const tok = _fillType(f);
+  if (tok === 'file' || tok === 'select') role.fieldType = tok;   // text is the _fillOpFor default; omit it
+  return role;
+};
+
 /**
  * Build the trial `roles` bundle from a Select selection. PURE.
  * @param {object} spec       IntentSpec (SG-1) — uses shape.
@@ -35,12 +55,12 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
 
   const roleFor = (f) => {
     if (!f || !f.selector || seen.has(f.id)) return null;
-    const role = { role: _roleName(f), selector: f.selector, featureId: f.id, multiplicity: 'one' };
+    const role = _annotate({ role: _roleName(f), selector: f.selector, featureId: f.id, multiplicity: 'one' }, f);
     if (f.hidden) {
       // Resolve the trigger feature and include it FIRST, rewriting revealedBy to its role name so the
       // synth's reveal step can find it (it matches revealedBy === a role name).
       const trig = f.revealedBy ? feats[f.revealedBy] : null;
-      if (trig && trig.selector && !seen.has(trig.id)) { seen.add(trig.id); roles.push({ role: _roleName(trig), selector: trig.selector, featureId: trig.id, multiplicity: 'one' }); }
+      if (trig && trig.selector && !seen.has(trig.id)) { seen.add(trig.id); roles.push(_annotate({ role: _roleName(trig), selector: trig.selector, featureId: trig.id, multiplicity: 'one' }, trig)); }
       role.hidden = true;
       role.revealedBy = trig ? _roleName(trig) : null;
     }

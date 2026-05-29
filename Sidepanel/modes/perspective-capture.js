@@ -130,6 +130,14 @@ let _groundedSpec = null;
 let _groundPlan = null;
 let _sgTrialInFlight = false;
 let _sgTrialResult = null;
+// SG-5 / PB-7 — accept/reject of a passing trial: in-flight flag, the saved capability (on accept),
+// and a rejected marker. A fresh ground or re-run clears all three.
+let _sgAcceptInFlight = false;
+let _sgCapabilityResult = null;
+let _sgRejected = false;
+// SG-5 / PB-7 — replay of a saved capability (the cached binding re-runs with NO LLM).
+let _sgReplayInFlight = false;
+let _sgReplayResult = null;
 // PB-6b — Trial-run state. The intent-truth proof for the chosen perspective: synthesize
 // the resolved bundle into a runnable op, run it safely, score the fidelity vector.
 //   _trialInFlight: true while RUN_PERSPECTIVE_TRIAL round-trips (one at a time).
@@ -862,6 +870,11 @@ async function unmount() {
   _groundPlan = null;
   _sgTrialInFlight = false;
   _sgTrialResult = null;
+  _sgAcceptInFlight = false;
+  _sgCapabilityResult = null;
+  _sgRejected = false;
+  _sgReplayInFlight = false;
+  _sgReplayResult = null;
   _trialInFlight = false;
   _trialResult = null;
 
@@ -2018,9 +2031,15 @@ function _renderPerspectivePanel() {
   perspectiveBody.querySelector('[data-perspective-action="ground-intent"]')
     ?.addEventListener('click', () => onGroundIntent());
   perspectiveBody.querySelector('[data-perspective-action="dismiss-grounded-intent"]')
-    ?.addEventListener('click', () => { _groundIntentResult = null; _groundPlan = null; _sgTrialResult = null; _renderPerspectivePanel(); });
+    ?.addEventListener('click', () => { _groundIntentResult = null; _groundPlan = null; _sgTrialResult = null; _sgCapabilityResult = null; _sgRejected = false; _sgAcceptInFlight = false; _sgReplayResult = null; _sgReplayInFlight = false; _renderPerspectivePanel(); });
   perspectiveBody.querySelector('[data-perspective-action="run-sg-trial"]')
     ?.addEventListener('click', () => onRunSGTrial((_perspectiveDraft?.description ?? '').trim()));
+  perspectiveBody.querySelector('[data-perspective-action="accept-sg-trial"]')
+    ?.addEventListener('click', () => onAcceptSGTrial());
+  perspectiveBody.querySelector('[data-perspective-action="reject-sg-trial"]')
+    ?.addEventListener('click', () => onRejectSGTrial());
+  perspectiveBody.querySelector('[data-perspective-action="replay-sg-capability"]')
+    ?.addEventListener('click', () => onReplaySGCapability());
 }
 
 // v2.74.393 — Grounded-intent row: a "✨ Ground intent" action that refines the
@@ -2036,6 +2055,7 @@ function _sgPlanSummary(p) {
   return `<div class="dbg-perspective-ground-note">plan: ${escHtml(bits.join(' · '))}</div>`;
 }
 // SG-4b — the live "▶ Run on page" outcome (RUN_SG_TRIAL): verdict + fidelity + safety.
+// SG-5 / PB-7 — once a trial PASSES (acceptEligible), offer Accept (→ durable capability) / Reject.
 function _renderSGTrialResult(t) {
   if (!t) return '';
   if (t.success === false) return `<div class="dbg-perspective-ground-note">⚠ Run failed: ${escHtml(t.error || 'unknown')}</div>`;
@@ -2043,7 +2063,38 @@ function _renderSGTrialResult(t) {
   const v = t.trial || {};
   const pct = (typeof v.score === 'number') ? ` (${Math.round(v.score * 100)}%)` : '';
   const def = (Array.isArray(t.deferred) && t.deferred.length) ? ` · ${t.deferred.length} deferred` : '';
-  return `<div class="dbg-perspective-ground-note">▶ ran — verdict <b>${escHtml(String(v.verdict || '?'))}</b>${pct} · safety ${escHtml(String(t.safetyClass || '?'))}${def}</div>`;
+  let html = `<div class="dbg-perspective-ground-note">▶ ran — verdict <b>${escHtml(String(v.verdict || '?'))}</b>${pct} · safety ${escHtml(String(t.safetyClass || '?'))}${def}</div>`;
+  if (_sgCapabilityResult) {
+    const cap = _sgCapabilityResult;
+    const n = Array.isArray(cap.binding) ? cap.binding.length : 0;
+    html += `<div class="dbg-perspective-ground-note">✓ saved capability <b>${escHtml(String(cap.id || ''))}</b> — ${n} role(s) bound${cap.cover?.complete ? ' · complete' : ''}</div>`;
+    html += _sgReplayInFlight
+      ? `<div class="dbg-perspective-ground-actions"><button class="btn-secondary tiny" type="button" disabled>⏳ Re-running…</button></div>`
+      : `<div class="dbg-perspective-ground-actions"><button class="btn-secondary tiny" data-perspective-action="replay-sg-capability" type="button" title="Re-run this saved capability on the page — uses the cached binding, so NO LLM (no Comprehend/Select). The irreversible submit stays deferred.">▶ Re-run (no LLM)</button></div>`;
+    if (_sgReplayResult) html += _renderReplayNote(_sgReplayResult);
+  } else if (_sgRejected) {
+    html += `<div class="dbg-perspective-ground-note">✗ trial rejected — not saved</div>`;
+  } else if (t.acceptError) {
+    html += `<div class="dbg-perspective-ground-note">⚠ Not saved: ${escHtml(t.acceptError)}</div>`;
+  } else if (t.acceptEligible) {
+    html += _sgAcceptInFlight
+      ? `<div class="dbg-perspective-ground-actions"><button class="btn-secondary tiny" type="button" disabled>⏳ Saving…</button></div>`
+      : `<div class="dbg-perspective-ground-actions">
+          <button class="btn-secondary tiny" data-perspective-action="accept-sg-trial" type="button" title="Save this as a verified, re-runnable capability. The binding (role → selector) is cached, so re-runs need no LLM.">✓ Accept as capability</button>
+          <button class="btn-secondary tiny" data-perspective-action="reject-sg-trial" type="button" title="Discard this trial — nothing is saved.">✗ Reject</button>
+        </div>`;
+  }
+  return html;
+}
+
+// SG-5 / PB-7 — the no-LLM re-run outcome of a saved capability (REPLAY_SG_CAPABILITY).
+function _renderReplayNote(r) {
+  if (!r) return '';
+  if (r.success === false) return `<div class="dbg-perspective-ground-note">⚠ Re-run failed: ${escHtml(r.error || 'unknown')}</div>`;
+  if (r.ran === false) return `<div class="dbg-perspective-ground-note">∅ Re-run: ${escHtml(r.reason || 'nothing ran')}</div>`;
+  const v = r.trial || {};
+  const pct = (typeof v.score === 'number') ? ` (${Math.round(v.score * 100)}%)` : '';
+  return `<div class="dbg-perspective-ground-note">↻ re-ran with no LLM — verdict <b>${escHtml(String(v.verdict || '?'))}</b>${pct}</div>`;
 }
 
 function _renderGroundIntentRow(intent) {
@@ -2401,6 +2452,7 @@ async function onGroundIntent() {
     : null;
   _groundPlan = res.plan || null;   // SG-4b — the synthesized fill plan (cover + steps), if the SG spine ran
   _sgTrialResult = null;            // a fresh ground invalidates any prior run
+  _sgCapabilityResult = null; _sgRejected = false; _sgAcceptInFlight = false; _sgReplayResult = null; _sgReplayInFlight = false;
   _renderPerspectivePanel();
   if (res.hadAffordance === false) toast?.('Run Explore first to assess this intent against the page');
 }
@@ -2410,7 +2462,9 @@ async function onGroundIntent() {
 // fields and proves the capability without submitting. Result is rendered inline under the intent check.
 async function onRunSGTrial(intent) {
   if (_sgTrialInFlight || !intent) return;
-  _sgTrialInFlight = true; _sgTrialResult = null; _renderPerspectivePanel();
+  // A re-run invalidates any prior accept/reject decision on the previous trial.
+  _sgTrialInFlight = true; _sgTrialResult = null; _sgCapabilityResult = null; _sgRejected = false; _sgAcceptInFlight = false; _sgReplayResult = null; _sgReplayInFlight = false;
+  _renderPerspectivePanel();
   let res;
   try {
     res = await new Promise(r => chrome.runtime.sendMessage({
@@ -2419,6 +2473,58 @@ async function onRunSGTrial(intent) {
   } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
   _sgTrialInFlight = false;
   _sgTrialResult = res || { success: false, error: 'no result' };
+  _renderPerspectivePanel();
+}
+
+// SG-5 / PB-7 — Accept the passing trial: materialize the session draft (held in the background) into a
+// durable, re-runnable capability. Copy-on-accept — no re-run, no LLM; the background gate may still
+// refuse (e.g. an under-covered completion intent), surfaced inline as "Not saved: <reason>".
+async function onAcceptSGTrial() {
+  if (_sgAcceptInFlight || !_perspectiveGroundId) return;
+  _sgAcceptInFlight = true; _renderPerspectivePanel();
+  let res;
+  try {
+    res = await new Promise(r => chrome.runtime.sendMessage({
+      type: 'ACCEPT_SG_TRIAL', payload: { groundId: _perspectiveGroundId },
+    }, r));
+  } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
+  _sgAcceptInFlight = false;
+  if (res?.success && res.accepted) {
+    _sgCapabilityResult = res.capability || null;
+    toast?.('Saved as a verified capability');
+  } else if (_sgTrialResult) {
+    // Keep the trial result; annotate why accept didn't persist (gate reason or error).
+    _sgTrialResult = { ..._sgTrialResult, acceptError: res?.reason || res?.error || 'accept failed' };
+  }
+  _renderPerspectivePanel();
+}
+
+// SG-5 / PB-7 — Reject: drop the draft (background emits a `reject` outcome). Leaves no capability.
+async function onRejectSGTrial() {
+  if (_sgAcceptInFlight || !_perspectiveGroundId) return;
+  try {
+    await new Promise(r => chrome.runtime.sendMessage({
+      type: 'REJECT_SG_TRIAL', payload: { groundId: _perspectiveGroundId },
+    }, r));
+  } catch { /* best-effort */ }
+  _sgRejected = true; _sgCapabilityResult = null;
+  _renderPerspectivePanel();
+}
+
+// SG-5 / PB-7 — Re-run the saved capability on the live page. The PAYOFF: the binding was cached at
+// accept, so this replays with NO LLM (no Comprehend/Select). Proves a verified capability is a cheap,
+// deterministic re-run, not a fresh round-trip.
+async function onReplaySGCapability() {
+  if (_sgReplayInFlight || !_perspectiveGroundId || !_sgCapabilityResult?.id) return;
+  _sgReplayInFlight = true; _sgReplayResult = null; _renderPerspectivePanel();
+  let res;
+  try {
+    res = await new Promise(r => chrome.runtime.sendMessage({
+      type: 'REPLAY_SG_CAPABILITY', payload: { tabId: _perspectiveTabId, groundId: _perspectiveGroundId, capabilityId: _sgCapabilityResult.id },
+    }, r));
+  } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
+  _sgReplayInFlight = false;
+  _sgReplayResult = res || { success: false, error: 'no result' };
   _renderPerspectivePanel();
 }
 

@@ -32,6 +32,7 @@ import * as CapabilitySynth    from './Core/capabilitySynth.js';  // v2.74.471 �
 import { synthesizeTrialOp, classifyTrialSafety, scoreTrial } from './Core/trialSynth.js';  // PB-3/4/5 — trial op + safety + scoring
 import { coverComplete }       from './Core/cover.js';      // SG-3 Cover — completeness floor
 import { selectionToTrialRoles } from './Core/bind.js';     // SG-4 Bind — selection → trial roles bundle
+import { buildAcceptance }     from './Core/accept.js';     // SG-5/PB-7 — passing trial → durable capability + trace
 import * as ChromeHoist        from './Core/chromeHoist.js';  // v2.74.480 — hoist recurring chrome off Locales → Ground.chrome
 import * as Workflows          from './Core/workflows.js';   // v2.74.488 — cross-Locale workflows (partOf) over the siteMap
 import { ExecutionEngine }    from './Services/ExecutionEngine.js';
@@ -1292,6 +1293,51 @@ async function _appendOutcomes(groundId, events) {
   } catch (e) {
     Logger.warn('background', `outcomes append failed: ${e.message}`);
   }
+}
+
+// ── SG-5 / PB-7 acceptance persistence ─────────────────────────────────────────
+// Copy-on-accept (DESIGN_substrate_grounded_capabilities §SG-5): a passing RUN_SG_TRIAL leaves a SESSION
+// DRAFT (in chrome.storage.session, so it survives an MV3 service-worker unload during the user's review);
+// ACCEPT_SG_TRIAL materializes it into a LEAN capability (chrome.storage.local, per-ground, sync-ready by
+// shape) + a HEAVY trialTrace (local, by trialRef — runtime/training, never authoring-synced); REJECT drops
+// the draft. Direct chrome.storage.local writes bypass the sync bridge for now (partition/sync wiring is a
+// later slice); the lean record's shape is already the workspace primitive.
+const _sgCapKey = (groundId) => `sgCapabilities:${groundId}`;
+const _sgTraceKey = (trialRef) => `sgTrialTrace:${trialRef}`;
+const _sgDraftKey = (groundId) => `sgTrialDraft:${groundId}`;
+const SG_CAP_CAP = 200;   // per-ground capability cap (newest kept)
+
+async function _readSgCapabilities(groundId) {
+  if (!groundId) return [];
+  try { const k = _sgCapKey(groundId); const got = await chrome.storage.local.get(k); return Array.isArray(got?.[k]) ? got[k] : []; }
+  catch { return []; }
+}
+// Upsert by capability id (a re-accept of the same (ground,locale,intent) replaces the prior record).
+async function _writeSgCapability(groundId, cap) {
+  if (!groundId || !cap?.id) return;
+  const k = _sgCapKey(groundId);
+  const list = await _readSgCapabilities(groundId);
+  const next = [cap, ...list.filter((c) => c.id !== cap.id)].slice(0, SG_CAP_CAP);
+  await chrome.storage.local.set({ [k]: next });
+}
+async function _writeSgTrace(trace) {
+  if (!trace?.trialRef) return;
+  try { await chrome.storage.local.set({ [_sgTraceKey(trace.trialRef)]: trace }); }
+  catch (e) { Logger.warn('background', `SG trace write failed: ${e.message}`); }
+}
+async function _writeSgDraft(groundId, draft) {
+  if (!groundId || !chrome.storage.session) return;
+  try { await chrome.storage.session.set({ [_sgDraftKey(groundId)]: draft }); }
+  catch (e) { Logger.warn('background', `SG draft write failed: ${e.message}`); }
+}
+async function _readSgDraft(groundId) {
+  if (!groundId || !chrome.storage.session) return null;
+  try { const k = _sgDraftKey(groundId); const got = await chrome.storage.session.get(k); return got?.[k] ?? null; }
+  catch { return null; }
+}
+async function _clearSgDraft(groundId) {
+  if (!groundId || !chrome.storage.session) return;
+  try { await chrome.storage.session.remove(_sgDraftKey(groundId)); } catch { /* */ }
 }
 
 // SG-4 / PB shared trial EXECUTOR — synth → safety class → throwaway Fragment+Strategy → execute → score.
@@ -5611,9 +5657,123 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             return;
           }
           const out = await _runTrialBundle({ groundId, intent, roles, localeModel, navigateUrl: null, proposedRoleCount: roles.length, targetTabId: (typeof tabId === 'number' ? tabId : null) });
-          sendResponse({ ...out, cover, intentShape: spec.shape });
+          // PB-7 copy-on-accept: stash a SESSION DRAFT of everything ACCEPT_SG_TRIAL needs to materialize a
+          // durable capability — so the user can review the result, then accept/reject without re-running.
+          if (out?.ran) {
+            await _writeSgDraft(groundId, { intent, spec, selection, cover, roles, trial: out.trial || null, result: out.result || null, groundId, localeUrl, capturedAt: Date.now() });
+          }
+          const acceptEligible = !!(out?.ran && out.trial?.verdict === 'trial-pass' && (spec.shape !== 'complete' || cover.complete === true));
+          sendResponse({ ...out, cover, intentShape: spec.shape, acceptEligible });
         } catch (err) {
           Logger.error('background', `RUN_SG_TRIAL failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // SG-5 / PB-7 — ACCEPT a passing trial: materialize the session draft into a durable capability.
+    // Copy-on-accept: read the draft (left by RUN_SG_TRIAL), gate+build via Core/accept (blocks a
+    // trial-fail / under-covered completion intent), persist the LEAN capability (per-ground) + the HEAVY
+    // trialTrace (by trialRef), emit an `accept` outcome, clear the draft. Idempotent by capability id.
+    // Payload: { groundId } → { success, accepted, capability?|reason }.
+    case 'ACCEPT_SG_TRIAL': {
+      (async () => {
+        try {
+          const { groundId = null } = payload ?? {};
+          if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
+          const draft = await _readSgDraft(groundId);
+          if (!draft) { sendResponse({ success: true, accepted: false, reason: 'no trial to accept — run the trial first' }); return; }
+          const built = buildAcceptance({
+            intent: draft.intent, spec: draft.spec, cover: draft.cover, roles: draft.roles,
+            trial: draft.trial, result: draft.result, selection: draft.selection,
+            groundId, localeUrl: draft.localeUrl || '', acceptedAt: Date.now(),
+          });
+          if (!built.ok) { sendResponse({ success: true, accepted: false, reason: built.reason }); return; }
+          await _writeSgCapability(groundId, built.capability);
+          await _writeSgTrace(built.trace);
+          await _appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', {
+            groundId, verdict: 'accepted', input: { roleOrIntent: String(draft.intent).slice(0, 120) },
+            detail: { capabilityId: built.capability.id, trialRef: built.capability.trial.trialRef, shape: built.capability.shape, score: built.capability.trial.score },
+          })]);
+          await _clearSgDraft(groundId);
+          Logger.info('background', `ACCEPT_SG_TRIAL — saved ${built.capability.id} (${built.capability.binding.length} bound role(s), trialRef=${built.capability.trial.trialRef})`);
+          sendResponse({ success: true, accepted: true, capability: built.capability });
+        } catch (err) {
+          Logger.error('background', `ACCEPT_SG_TRIAL failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // SG-5 / PB-7 — REJECT a trial: drop the session draft, emit a `reject` outcome (attributable proof
+    // that the user judged the trial insufficient). Leaves zero capability residue. Payload: { groundId }.
+    case 'REJECT_SG_TRIAL': {
+      (async () => {
+        try {
+          const { groundId = null } = payload ?? {};
+          if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
+          const draft = await _readSgDraft(groundId);
+          await _appendOutcomes(groundId, [Outcomes.makeStageEvent('reject', {
+            groundId, verdict: 'rejected', input: { roleOrIntent: String(draft?.intent || '').slice(0, 120) },
+            detail: { shape: draft?.spec?.shape || null, trialVerdict: draft?.trial?.verdict || null },
+          })]);
+          await _clearSgDraft(groundId);
+          sendResponse({ success: true, rejected: true });
+        } catch (err) {
+          Logger.error('background', `REJECT_SG_TRIAL failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // SG-5 / PB-7 — list a ground's accepted substrate-grounded capabilities (for the UI / library).
+    case 'GET_SG_CAPABILITIES': {
+      (async () => {
+        try {
+          const { groundId = null } = payload ?? {};
+          if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
+          sendResponse({ success: true, capabilities: await _readSgCapabilities(groundId) });
+        } catch (err) {
+          Logger.error('background', `GET_SG_CAPABILITIES failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
+    // SG-5 / PB-7 — REPLAY an accepted capability. THE PAYOFF of the acceptance bundle: the binding
+    // (role → durable selector) was cached at accept, so re-running needs NO LLM — no Comprehend, no
+    // Select, no Cover, no Bind. Just read the saved binding, verify the page hasn't drifted, and run the
+    // shared trial executor on the live tab (irreversible commit still deferred by the safety class).
+    // Payload: { tabId, groundId, capabilityId } → the _runTrialBundle result.
+    case 'REPLAY_SG_CAPABILITY': {
+      (async () => {
+        try {
+          const { tabId, groundId = null, capabilityId = null } = payload ?? {};
+          if (!groundId || !capabilityId) { sendResponse({ success: false, error: 'groundId + capabilityId required' }); return; }
+          const cap = (await _readSgCapabilities(groundId)).find((c) => c.id === capabilityId);
+          if (!cap) { sendResponse({ success: false, error: 'capability not found' }); return; }
+          const roles = Array.isArray(cap.binding) ? cap.binding : [];
+          if (!roles.length) { sendResponse({ success: true, ran: false, reason: 'capability has no bound roles' }); return; }
+          let liveUrl = '';
+          if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); liveUrl = t?.url ?? ''; } catch { /* */ } }
+          // The locale (for per-field fill-op kind) is read by the SAME key the capability targets, so a
+          // re-explore that re-keyed featureIds still resolves the current page's features.
+          let localeModel = null;
+          try { const pm = await _readLocaleCache(groundId, _normalizeUrlForPerspectiveCache(cap.localeUrl || liveUrl)); localeModel = pm?.model || null; } catch { /* */ }
+          // Page-drift guard — replay binds the capability's page; refuse to type into whatever else loaded.
+          if (cap.localeUrl && liveUrl && _normalizeUrlForPerspectiveCache(liveUrl) !== _normalizeUrlForPerspectiveCache(cap.localeUrl)) {
+            sendResponse({ success: true, ran: false, reason: `the page is now "${String(liveUrl).slice(0, 80)}" but this capability targets "${String(cap.localeUrl).slice(0, 80)}" — navigate there and re-run` });
+            return;
+          }
+          Logger.info('background', `REPLAY_SG_CAPABILITY — ${cap.id} (${roles.length} bound role(s), NO LLM)`);
+          const out = await _runTrialBundle({ groundId, intent: cap.intent, roles, localeModel, navigateUrl: null, proposedRoleCount: roles.length, targetTabId: (typeof tabId === 'number' ? tabId : null) });
+          sendResponse({ ...out, replayed: true, capabilityId: cap.id });
+        } catch (err) {
+          Logger.error('background', `REPLAY_SG_CAPABILITY failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
       })();
