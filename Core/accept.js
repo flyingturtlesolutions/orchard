@@ -19,6 +19,8 @@
 // PURE — no storage, no chrome, no clock beyond an injected `acceptedAt`. The gate (canAccept) refuses to
 // build on a failing trial / under-covered completion intent.
 
+import { inferRoleKind, fillOpFor } from './trialSynth.js';
+
 export const ACCEPT_SCHEMA = 1;
 
 // djb2 (base36) — same id style as Core/outcomes.js / Core/locale.js.
@@ -155,11 +157,78 @@ function _leanBinding(roles) {
     });
 }
 
+// Required-role multiplicities (mirrors trialSynth.assessPerspectiveCompleteness) — a fillable param is
+// "required" unless its role is optional/conditional.
+const REQUIRED_MULT = new Set(['one', 'many']);
+
+/** Stable, slug-style param key from a role name (unique within a binding). */
+function _paramKey(role) {
+  return String(role || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'param';
+}
+
+/**
+ * SG-INV-1 — derive a UI-ready PARAM SCHEMA from the bound roles. A "param" is a fillable input role
+ * (inferRoleKind === 'input'); the trial filled these with generic values (trialSynth.trialValueFor),
+ * but an INVOCATION supplies the user's real value. Buttons/links/the success action are NOT params.
+ * Each param carries its fill op (text|select|file — the SAME rule the trial synth used), the durable
+ * selector, and the saved Landmark uid when the role is recoverable, so a future invocation can bind a
+ * value to the exact landmark-backed step with NO LLM. Data-only — nothing here runs or fills. PURE.
+ * @returns {Array<{key:string,role:string,label:string,fillOp:string,fieldType:(string|null),selector:(string|null),landmarkUid:(string|null),required:boolean}>}
+ */
+export function buildParamSchema({ roles = [], groundId = '', localeUrl = '' } = {}) {
+  const out = [];
+  const seen = new Set();
+  for (const r of (Array.isArray(roles) ? roles : [])) {
+    if (!r || typeof r.role !== 'string') continue;
+    if (inferRoleKind(r) !== 'input') continue;             // only fillable inputs are params
+    const key = _paramKey(r.role);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const lm = r.landmark;
+    out.push({
+      key,
+      role: r.role,
+      label: (lm && lm.accessibleName) || r.role,
+      fillOp: fillOpFor(null, r),                           // 'text' | 'select' | 'file'
+      fieldType: r.fieldType || null,
+      selector: r.selector || null,
+      landmarkUid: (lm && lm.selector && lm.role) ? mintLandmarkUid(groundId, localeUrl, lm) : null,
+      required: REQUIRED_MULT.has(r.multiplicity ?? 'one'),
+    });
+  }
+  return out;
+}
+
+/**
+ * SG-INV-1 — capture the DEFERRED terminal (the irreversible commit the trial proved REACHABLE but did
+ * NOT fire — classifyTrialSafety swapped its CLICK → an EXTRACT probe). A future invocation can ARM it
+ * (fire the real submit) behind explicit user confirmation. Returns null when nothing was deferred
+ * (read/reversible op). `armed:false` is intrinsic — the data model never arms a submit by default. PURE.
+ * @returns {{role:(string|null),selector:string,safetyClass:string,landmarkUid:(string|null),landmark:(object|null),armed:boolean}|null}
+ */
+export function buildTerminalDescriptor({ roles = [], deferred = [], safetyClass = null, groundId = '', localeUrl = '' } = {}) {
+  const sels = (Array.isArray(deferred) ? deferred : []).filter(Boolean);
+  if (!sels.length) return null;
+  const termSel = sels[sels.length - 1];                    // the last deferred selector = terminal commit
+  const r = (Array.isArray(roles) ? roles : []).find((x) => x && x.selector === termSel) || null;
+  const lm = r && r.landmark;
+  return {
+    role: r ? r.role : null,
+    selector: termSel,
+    safetyClass: safetyClass || 'irreversible',
+    landmarkUid: (lm && lm.selector && lm.role) ? mintLandmarkUid(groundId, localeUrl, lm) : null,
+    landmark: lm ? { role: lm.role || null, accessibleName: lm.accessibleName || null, selector: lm.selector || null } : null,
+    armed: false,                                           // an invocation must explicitly opt in to fire
+  };
+}
+
 /**
  * Build the LEAN CapabilityAcceptance pointer record. PURE. References the saved Perspective + Landmarks
  * (the durable layer); also carries a transitional `binding` for the current replay path (see _leanBinding).
+ * SG-INV-1 adds `params` (fillable inputs an invocation supplies) + `terminal` (the deferred commit it can
+ * arm) — data-only; no invocation path consumes them yet.
  */
-export function buildCapabilityAcceptance({ intent, spec = {}, cover = null, roles = [], trial = null, groundId = '', localeUrl = '', acceptedAt = Date.now(), trialRef = null, perspectiveId = null, landmarkUids = [] } = {}) {
+export function buildCapabilityAcceptance({ intent, spec = {}, cover = null, roles = [], trial = null, groundId = '', localeUrl = '', acceptedAt = Date.now(), trialRef = null, perspectiveId = null, landmarkUids = [], deferred = [], safetyClass = null } = {}) {
   const id = mintCapabilityId(intent, groundId, localeUrl);
   const ref = trialRef || mintTrialRef(id, acceptedAt);
   const subGoals = (Array.isArray(spec.subGoals) ? spec.subGoals : [])
@@ -177,6 +246,8 @@ export function buildCapabilityAcceptance({ intent, spec = {}, cover = null, rol
     perspectiveId: perspectiveId || null,
     landmarkUids: Array.isArray(landmarkUids) ? landmarkUids.slice() : [],
     binding: _leanBinding(roles),   // transitional — replay still reads this until SG-LM-5
+    params: buildParamSchema({ roles, groundId, localeUrl }),                                  // SG-INV-1 — fillable inputs an invocation supplies
+    terminal: buildTerminalDescriptor({ roles, deferred, safetyClass, groundId, localeUrl }),  // SG-INV-1 — the deferred commit it can arm (null when none)
     subGoals,
     cover: _leanCover(cover),
     trial: trial ? { verdict: trial.verdict, score: trial.score ?? null, vector: trial.vector || null, trialRef: ref } : { verdict: 'unknown', score: null, vector: null, trialRef: ref },

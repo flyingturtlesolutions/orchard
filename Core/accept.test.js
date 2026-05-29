@@ -3,7 +3,8 @@
 import assert from 'node:assert';
 import {
   canAccept, buildLandmarkRecords, buildPerspectiveRecord, buildCapabilityAcceptance,
-  buildTrialTrace, buildAcceptance, landmarkRefActions, mintCapabilityId, mintLandmarkUid, mintPerspectiveId, ACCEPT_SCHEMA,
+  buildTrialTrace, buildAcceptance, landmarkRefActions, buildParamSchema, buildTerminalDescriptor,
+  mintCapabilityId, mintLandmarkUid, mintPerspectiveId, ACCEPT_SCHEMA,
 } from './accept.js';
 
 let passed = 0;
@@ -116,6 +117,41 @@ test('landmarkRefActions rewrites inline landmark → registry landmarkRef (uid 
   assert.equal(steps[1].selector, 'input[aria-label="file-input"]');
   assert.equal(steps[2].landmarkRef.uid, mintLandmarkUid('gnd_1', 'u', lm));   // matches the saved landmark uid
   assert.equal(steps[2].target, 'TRIAL_TERMINAL');
+});
+
+// ── SG-INV-1: param schema + deferred-terminal capture (data-only foundation for Invocation) ──
+test('buildParamSchema picks only fillable input roles, with fill op + landmark uid', () => {
+  const params = buildParamSchema({ roles, groundId: 'gnd_1', localeUrl: 'u' });
+  assert.equal(params.length, 2);                                   // firstName + resume; submit (action) excluded
+  const byKey = Object.fromEntries(params.map(p => [p.key, p]));
+  assert.ok(byKey.firstname);
+  assert.equal(byKey.firstname.label, 'First name');                // from the landmark's accessibleName
+  assert.equal(byKey.firstname.fillOp, 'text');
+  assert.equal(byKey.firstname.selector, 'input[name="firstName"]');
+  assert.equal(byKey.firstname.landmarkUid, mintLandmarkUid('gnd_1', 'u', roles[0].landmark));
+  assert.equal(byKey.firstname.required, true);
+  assert.equal(byKey.resume.fillOp, 'file');                        // fieldType:'file' → file op
+  assert.equal(byKey.resume.label, 'resume');                       // no landmark → role name
+  assert.equal(byKey.resume.landmarkUid, null);                     // file input has no recoverable landmark
+});
+test('buildTerminalDescriptor captures the deferred commit (never armed); null when nothing deferred', () => {
+  const t = buildTerminalDescriptor({ roles, deferred: ['button.s'], safetyClass: 'irreversible', groundId: 'gnd_1', localeUrl: 'u' });
+  assert.equal(t.role, 'submit');
+  assert.equal(t.selector, 'button.s');
+  assert.equal(t.safetyClass, 'irreversible');
+  assert.equal(t.armed, false);                                     // data model never arms a submit by default
+  assert.equal(t.landmark.accessibleName, 'Submit Application');
+  assert.equal(t.landmarkUid, mintLandmarkUid('gnd_1', 'u', roles[2].landmark));
+  assert.equal(buildTerminalDescriptor({ roles, deferred: [] }), null);
+});
+test('buildCapabilityAcceptance attaches params + terminal (terminal null without a deferred commit)', () => {
+  const armedCap = buildCapabilityAcceptance({ ...base, deferred: ['button.s'], safetyClass: 'irreversible', perspectiveId: 'p', landmarkUids: [] });
+  assert.equal(armedCap.params.length, 2);
+  assert.equal(armedCap.terminal.role, 'submit');
+  assert.equal(armedCap.terminal.armed, false);
+  const noTermCap = buildCapabilityAcceptance({ ...base, perspectiveId: 'p', landmarkUids: [] });
+  assert.equal(noTermCap.params.length, 2);
+  assert.equal(noTermCap.terminal, null);                           // reversible/read op → no deferred terminal
 });
 
 test('buildAcceptance refuses on a failing trial', () => {

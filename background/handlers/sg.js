@@ -63,7 +63,7 @@ export function createSgMessageHandlers(ctx) {
         // PB-7 copy-on-accept: stash a SESSION DRAFT (incl. the synthesized op, each action carrying its
         // inline landmark) so ACCEPT can materialize a durable, landmark-backed capability without re-running.
         if (out?.ran) {
-          await ctx.writeSgDraft(groundId, { intent, spec, selection, cover, roles, trial: out.trial || null, result: out.result || null, draft: out.draft || null, groundId, localeUrl, capturedAt: Date.now() });
+          await ctx.writeSgDraft(groundId, { intent, spec, selection, cover, roles, trial: out.trial || null, result: out.result || null, draft: out.draft || null, deferred: Array.isArray(out.deferred) ? out.deferred : [], safetyClass: out.safetyClass || null, groundId, localeUrl, capturedAt: Date.now() });
         }
         const acceptEligible = !!(out?.ran && out.trial?.verdict === 'trial-pass' && (spec.shape !== 'complete' || cover.complete === true));
         sendResponse({ ...out, cover, intentShape: spec.shape, acceptEligible });
@@ -84,6 +84,7 @@ export function createSgMessageHandlers(ctx) {
         const built = buildAcceptance({
           intent: draft.intent, spec: draft.spec, cover: draft.cover, roles: draft.roles,
           trial: draft.trial, result: draft.result, selection: draft.selection,
+          deferred: Array.isArray(draft.deferred) ? draft.deferred : [], safetyClass: draft.safetyClass || null,   // SG-INV-1 — terminal capture
           groundId, localeUrl: draft.localeUrl || '', acceptedAt: Date.now(),
         });
         if (!built.ok) { sendResponse({ success: true, accepted: false, reason: built.reason }); return; }

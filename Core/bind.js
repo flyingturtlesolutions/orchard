@@ -22,7 +22,7 @@ import { featureToProtoLandmark } from './landmark.js';
 
 const _roleName = (f) => (f && typeof f.label === 'string' && f.label.trim()) ? f.label.trim() : (f && f.id) || '';
 
-// v2.74.594 — mirror Core/trialSynth._fillOpFor so the bound role carries its own fill-op token. This
+// v2.74.594 — mirror Core/trialSynth.fillOpFor so the bound role carries its own fill-op token. This
 // makes the binding SELF-CONTAINED: a saved capability replays correctly even after the page is
 // re-Explored (featureIds are content-hash-derived, so they change and `features[featureId]` would miss).
 // synthesizeTrialOp is feature-FIRST, role-fallback, so carrying kind + fieldType reproduces the EXACT
@@ -40,7 +40,7 @@ const _fillType = (f) => {
 const _annotate = (role, f) => {
   if (f && typeof f.kind === 'string' && f.kind) role.kind = f.kind;
   const tok = _fillType(f);
-  if (tok === 'file' || tok === 'select') role.fieldType = tok;   // text is the _fillOpFor default; omit it
+  if (tok === 'file' || tok === 'select') role.fieldType = tok;   // text is the fillOpFor default; omit it
   const lm = featureToProtoLandmark(f, role.fieldType);
   if (lm) role.landmark = lm;
   return role;

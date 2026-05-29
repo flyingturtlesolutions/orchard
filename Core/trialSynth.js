@@ -26,8 +26,9 @@ export const TRIAL_SELECT_FIRST = '__ahub_trial_first_option__';
 
 // Which fill op a control needs: a <select> → SELECT, a file input → SET_FILE (SG-#81c, not yet
 // executable), everything else (text/textarea/search/email/…) → TYPE. Driven by the SUBSTRATE
-// (feature.fieldType / interaction.pattern), not the role name.
-function _fillOpFor(feature, role) {
+// (feature.fieldType / interaction.pattern), not the role name. Exported so SG-INV-1 (Core/accept's
+// param-schema builder) classifies a fillable role's input op with the SAME rule — no drift copy.
+export function fillOpFor(feature, role) {
   const ft  = (feature && feature.fieldType) || (role && role.fieldType) || '';
   const pat = (feature && feature.interaction && feature.interaction.pattern) || '';
   if (ft === 'file' || pat === 'upload') return 'file';
@@ -86,7 +87,7 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
     .filter((r) => r && typeof r.role === 'string')
     .map((r) => {
       const feature = r.featureId ? features[r.featureId] : null;
-      return { ...r, _kind: inferRoleKind(r, feature), _verified: !!(feature && feature.selectorVerified), _fillOp: _fillOpFor(feature, r) };
+      return { ...r, _kind: inferRoleKind(r, feature), _verified: !!(feature && feature.selectorVerified), _fillOp: fillOpFor(feature, r) };
     });
 
   const actions = [];
