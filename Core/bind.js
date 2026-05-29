@@ -71,7 +71,15 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
 
   if (spec && spec.shape === 'complete') {
     const b = sel.boundary || {};
+    // The page-`required` fields are the completeness FLOOR (the job-APPLICATION case — every field is
+    // mandatory). But a "minimal" completion — e.g. a job SEARCH — has target fields that AREN'T HTML-
+    // `required`, so the floor alone binds nothing and the plan isn't runnable. v2.74.595 — also bind
+    // whatever Select MATCHED to the sub-goals, so the fields the user actually wants filled are always in
+    // the plan (UNION of required ∪ matched ∪ success action; `seen` dedups). Don't filter by `required`.
     for (const f of (Array.isArray(b.requiredFields) ? b.requiredFields : [])) push(f);
+    const matchedIds = new Set();
+    for (const arr of Object.values(sel.matches || {})) for (const id of (Array.isArray(arr) ? arr : [])) matchedIds.add(id);
+    for (const id of matchedIds) push(feats[id]);
     if (b.successAction) push(b.successAction);     // the commit; safety class defers it if irreversible
   } else {
     // read / act / navigate — the matched features (resolved via the locale).

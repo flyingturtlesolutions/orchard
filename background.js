@@ -5216,12 +5216,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               }
             } catch { /* */ }
           }
-          // SG-2c (Select, SHADOW) — Comprehend → matchSubGoals over the Locale, gated to `complete`
-          // intents with a captured Locale. The reconciled selection is logged (inside matchSubGoals) and
-          // surfaced on the response, but NOT consumed yet (proposal behavior unchanged). Runs in parallel
-          // with grounding; resolves null when the gate isn't met.
+          // SG-2c (Select, SHADOW) — Comprehend → matchSubGoals over the Locale, for ANY shape with a
+          // captured Locale. v2.74.596 — was gated to `complete` only (shadow-mode caution), which
+          // suppressed the plan + run button for the COMMON `act`/`read` "search" intents. The atom is
+          // shape-general (matchSubGoals/Cover/Bind all handle non-complete), so run it for all shapes.
+          // Resolves null when there's no Locale. The reconciled selection is logged + surfaced.
           const selectionP = intentSpecP.then(async (spec) => {
-            if (!spec || spec.shape !== 'complete' || !localeModel || !localeModel.features) return null;
+            if (!spec || !localeModel || !localeModel.features) return null;
             try { return await AnthropicService.matchSubGoals({ spec, locale: localeModel }); }
             catch (e) { Logger.warn('background', `matchSubGoals failed (continuing): ${e.message}`); return null; }
           });
@@ -5237,14 +5238,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // deferred). NON-executing — surfaced + logged so the whole Comprehend→Select→Cover→Bind plan is
           // observable on a ground. Actually running it is a separate, opt-in step.
           const planP = Promise.all([intentSpecP, selectionP]).then(([spec, selection]) => {
-            if (!spec || spec.shape !== 'complete' || !selection || !localeModel) return null;
+            if (!spec || !selection || !localeModel) return null;
             try {
               const cover = coverComplete(spec, selection);
               const roles = selectionToTrialRoles(spec, selection, localeModel);
               const draft0 = synthesizeTrialOp({ groundedIntent: intent, roles, locale: localeModel });
               const safety = classifyTrialSafety(intent, draft0);
               const acts = Array.isArray(safety.actions) ? safety.actions : [];
-              Logger.info('background', `SG plan: cover=${cover.complete} (req ${cover.completionCount}, orphans ${(cover.orphanRequired || []).length}) runnable=${draft0.runnable} steps=${acts.length} deferred=${safety.deferred.length} skipped=${draft0.skipped.length} safety=${safety.safetyClass}`);
+              Logger.info('background', `SG plan (${spec.shape}): cover=${cover.complete} (req ${cover.completionCount ?? '-'}, orphans ${(cover.orphanRequired || []).length}) runnable=${draft0.runnable} steps=${acts.length} deferred=${safety.deferred.length} skipped=${draft0.skipped.length} safety=${safety.safetyClass}`);
               return {
                 cover, runnable: draft0.runnable, safetyClass: safety.safetyClass,
                 deferred: safety.deferred, skipped: draft0.skipped,

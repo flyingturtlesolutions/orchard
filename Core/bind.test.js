@@ -49,6 +49,25 @@ describe('selectionToTrialRoles — complete intent', () => {
   });
 });
 
+describe('selectionToTrialRoles — minimal completion (search): bind matched, not just required', () => {
+  it('binds Select-matched fields even when none are page-required (so the plan is runnable)', () => {
+    // A job SEARCH form: title + location are NOT required; the floor (required fields) is EMPTY.
+    const locale = { features: {
+      title: { id: 'title', label: 'Job title', kind: 'input', required: false, selector: '#title', interaction: { pattern: 'type', effect: 'none' } },
+      loc: { id: 'loc', label: 'Location', kind: 'input', required: false, selector: '#loc', interaction: { pattern: 'type', effect: 'none' } },
+      go: { id: 'go', label: 'Search', kind: 'action', selector: '#search', interaction: { pattern: 'click', effect: 'submit' } },
+    } };
+    const sel = {
+      boundary: { requiredFields: [], successAction: locale.features.go },
+      matches: { 'enter-title': ['title'], 'enter-location': ['loc'] },
+    };
+    const roles = selectionToTrialRoles({ shape: 'complete' }, sel, locale);
+    // required floor is empty, but the matched fields + the search action are bound → runnable
+    assert.deepEqual(roles.map((r) => r.featureId).sort(), ['go', 'loc', 'title']);
+    assert.ok(roles.length >= 2, 'plan has actionable fill steps');
+  });
+});
+
 describe('selectionToTrialRoles — hidden field reveal sequencing', () => {
   it('includes the trigger first and rewrites revealedBy to the trigger ROLE NAME', () => {
     const locale = { features: {

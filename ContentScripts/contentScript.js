@@ -8283,6 +8283,22 @@ function isStableIdent(s) {
     const vowels = (s.match(/[aeiouAEIOU]/g) ?? []).length;
     if (vowels / s.length < 0.25) return false;
   }
+  // v2.74.597 — CSS-modules hashed classes: a `name--hash` segment whose hash REGENERATES per build
+  // (Pixabay: `button--af32y`, `outline--AgP6D`, `light--yqIMf`, `center--aZtxo`). The `__hash` form is
+  // caught by the `__suffix` rule above; this adds the `--hash` form. A real BEM modifier
+  // (`block--primary`, `card--active`) is a WORD — kept; a hash mixes letter+digit, mixes upper+lower
+  // case, or is vowel-poor. Length 4-8 so short modifiers (`--lg`, `--xl`) are left alone. A false reject
+  // just falls through to the structural (nth-of-type) discriminator — honest, and build-stable.
+  {
+    const seg = /--([A-Za-z0-9]{4,8})$/.exec(s);
+    if (seg) {
+      const h = seg[1];
+      const mixedCase = /[a-z]/.test(h) && /[A-Z]/.test(h);
+      const alnum = /\d/.test(h) && /[A-Za-z]/.test(h);
+      const vowelPoor = ((h.match(/[aeiouAEIOU]/g) || []).length / h.length) < 0.25;
+      if (mixedCase || alnum || vowelPoor) return false;
+    }
+  }
   return true;
 }
 
