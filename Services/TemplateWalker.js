@@ -1290,6 +1290,14 @@ export class TemplateWalker {
         const stepFrameId = await TemplateWalker._resolveFrameId(tabId, action.frameUrl);
         const execResult = await TemplateWalker.#executeStep(tabId, action, stepFrameId);
         if (!execResult?.success) {
+          // Best-effort normalizers (SCROLL_TO / WAIT_FOR injected by trial synth) are marked `optional`:
+          // a miss must NOT abort the fragment — the real action step that follows carries the landmark and
+          // does its own probe-or-recover. Without this, a landmark-less SCROLL_TO on a scroll-activated /
+          // stale selector hard-fails at step 0 and pre-empts that recovery.
+          if (action.optional) {
+            Logger.warn('TemplateWalker', `Optional step ${action.action} ${action.selector ?? ''} failed (continuing): ${execResult?.error ?? 'unknown'}`);
+            continue;
+          }
           return {
             success: false, actionsRun, antecedentActionsRun, lastActions,
             error: `In "${frag.name}", step ${action.action} ${action.selector ?? ''} failed: ${execResult?.error ?? 'unknown'}`,
@@ -1333,6 +1341,10 @@ export class TemplateWalker {
         actionsRun++;
         await TemplateWalker.#sleep(200);
       } catch (err) {
+        if (action.optional) {
+          Logger.warn('TemplateWalker', `Optional step ${action.action} ${action.selector ?? ''} threw (continuing): ${err.message}`);
+          continue;
+        }
         return {
           success: false, actionsRun, antecedentActionsRun, lastActions,
           error: `In "${frag.name}", step ${action.action} threw: ${err.message}`,

@@ -15,8 +15,11 @@ describe('selectionToTrialRoles — complete intent', () => {
     const roles = selectionToTrialRoles({ shape: 'complete' }, sel);
     assert.equal(roles.length, 3);
     // v2.74.594 — roles now carry the substrate-derived `kind` (self-contained for replay). A `type`
-    // input has no fieldType (text is the _fillOpFor default → omitted).
-    assert.deepEqual(roles[0], { role: 'First Name', selector: '#firstName', featureId: 'firstName', multiplicity: 'one', kind: 'input' });
+    // input has no fieldType (text is the fillOpFor default → omitted). SG-LM-2 also attaches a proto
+    // `landmark` (recoverable identity), so compare the core fields and assert the landmark separately.
+    const { landmark, ...core0 } = roles[0];
+    assert.deepEqual(core0, { role: 'First Name', selector: '#firstName', featureId: 'firstName', multiplicity: 'one', kind: 'input' });
+    assert.ok(landmark && landmark.selector === '#firstName', 'role carries a proto-landmark (SG-LM-2)');
     const last = roles[roles.length - 1];
     assert.equal(last.role, 'Submit Application');
     assert.equal(last.featureId, 'submit');

@@ -92,6 +92,21 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
     const ids = new Set();
     for (const arr of Object.values(sel.matches || {})) for (const id of (Array.isArray(arr) ? arr : [])) ids.add(id);
     for (const id of ids) push(feats[id]);
+    // If the intent FILLS a form (matched ≥1 input) it must also SUBMIT to surface a result — but "submit"
+    // isn't a phase the matcher names, so a search trial otherwise types the query and EXTRACTs an
+    // UNSUBMITTED page (no results, no search button). Bind the effect:submit control that shares a GOAL
+    // with a filled input — goal membership scopes it to the SAME form when the page has several submits.
+    // Skip if a submit was already matched. (The `complete` branch binds the success action explicitly.)
+    const filledInputIds = [...ids].filter((id) => feats[id] && feats[id].kind === 'input');
+    const alreadyHasSubmit = [...ids].some((id) => feats[id] && feats[id].kind === 'action' && feats[id].interaction && feats[id].interaction.effect === 'submit');
+    if (filledInputIds.length && !alreadyHasSubmit) {
+      const filledGoals = new Set();
+      for (const id of filledInputIds) for (const g of (feats[id].goals || [])) filledGoals.add(g);
+      const submits = Object.values(feats).filter((f) => f && f.kind === 'action' && f.interaction && f.interaction.effect === 'submit' && f.selector && f.decoy !== true);
+      let submit = submits.find((f) => (f.goals || []).some((g) => filledGoals.has(g)));
+      if (!submit && submits.length === 1) submit = submits[0];   // unambiguous page-single submit
+      if (submit) push(submit);
+    }
   }
   return roles;
 }

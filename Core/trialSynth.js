@@ -19,6 +19,15 @@ const FILL_KINDS = new Set(['input']);
 const ACT_KINDS  = new Set(['action', 'navigation', 'disclosure']);
 const READ_KINDS = new Set(['collection', 'region', 'composite']);
 
+// SG normalizing actions — make the synthesized op robust on a real page instead of racing it. After a
+// reveal CLICK the disclosed modal/menu paints asynchronously; the engine's fixed ~200ms post-step settle
+// isn't always enough, so we WAIT_FOR the revealed element to actually appear (WAIT_FOR_ELEM polls and
+// returns the instant it's there — this is the cap, not a fixed sleep). Off-screen targets (long pages:
+// footer links, lower bands) get a SCROLL_TO so the action doesn't fire on an unscrolled element.
+const REVEAL_WAIT_MS = 8000;
+// Steps that move/settle the page rather than fulfilling the intent — excluded from the `runnable` count.
+const _NORMALIZER_ACTIONS = new Set(['NAVIGATE', 'WAIT', 'WAIT_FOR', 'SCROLL_TO']);
+
 // v2.74.580 — runtime sentinel: SELECT this to pick the first selectable option (handleSelect skips a
 // leading placeholder). Lets a trial EXERCISE a dropdown without knowing valid option values. The literal
 // is mirrored in contentScript.handleSelect (classic content scripts can't import Core).
@@ -87,7 +96,8 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
     .filter((r) => r && typeof r.role === 'string')
     .map((r) => {
       const feature = r.featureId ? features[r.featureId] : null;
-      return { ...r, _kind: inferRoleKind(r, feature), _verified: !!(feature && feature.selectorVerified), _fillOp: fillOpFor(feature, r) };
+      const _offscreen = !!(feature && feature.location && feature.location.visibleAtRest === false);
+      return { ...r, _kind: inferRoleKind(r, feature), _verified: !!(feature && feature.selectorVerified), _fillOp: fillOpFor(feature, r), _offscreen, _label: (feature && feature.label) || null, _href: (feature && feature.href) || null };
     });
 
   const actions = [];
@@ -107,24 +117,66 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
   };
 
   const fills = list.filter((r) => FILL_KINDS.has(r._kind));
-  const acts  = list.filter((r) => ACT_KINDS.has(r._kind));
+  let   acts  = list.filter((r) => ACT_KINDS.has(r._kind));
   const reads = list.filter((r) => READ_KINDS.has(r._kind));
 
-  // 1. Reveal hidden controls first (open the trigger that discloses them).
+  // Collapse equivalent act/navigation targets (same destination identity) to ONE, preferring a SURFACE
+  // control over a disclosed (hidden) one. A single-target navigate/act can match several controls that
+  // reach the same place — e.g. Pixabay's footer "Pixabay Radio" link AND the hidden Explore-menu "Pixabay
+  // Radio" link. The FIRST click navigates away, so a second target click then runs on the wrong page and
+  // hard-fails (the live regression). Disclosures are enablers, never collapsed.
+  const _destKey = (r) => String((r.landmark && r.landmark.accessibleName) || r._label || r._href || r.role || '').trim().toLowerCase();
+  {
+    const before = acts.length;
+    const chosenAt = new Map();   // destKey → index into deduped
+    const deduped = [];
+    for (const r of acts) {
+      if (r._kind === 'disclosure') { deduped.push(r); continue; }
+      const key = _destKey(r);
+      if (!key) { deduped.push(r); continue; }
+      const at = chosenAt.get(key);
+      if (at === undefined) { chosenAt.set(key, deduped.length); deduped.push(r); continue; }
+      if (deduped[at].hidden && !r.hidden) deduped[at] = r;   // prefer the surface control; else drop the dup
+    }
+    acts = deduped;
+    if (acts.length < before) warnings.push(`collapsed ${before - acts.length} duplicate target(s) reaching the same destination`);
+  }
+
+  // 1. Reveal hidden controls first (open the trigger that discloses them). Scroll the trigger into view
+  //    first if it sits below the fold, so the disclosure click lands on a real, painted control.
   const revealed = new Set();
   for (const r of [...fills, ...acts]) {
     if (!r.hidden || !r.revealedBy) continue;
     const trig = list.find((c) => c.role === r.revealedBy);
     if (!trig || !trig.selector || revealed.has(trig.selector)) continue;
     revealed.add(trig.selector);
+    if (trig._offscreen) actions.push({ action: 'SCROLL_TO', selector: trig.selector, optional: true });
     actions.push({ action: 'CLICK', selector: trig.selector, landmark: _lm(trig) });
   }
+
+  // Pre-action normalizer for a role we're about to act on: WAIT_FOR a just-revealed element to paint
+  // (only when its disclosure was actually injected above — otherwise the element is unreachable and a
+  // WAIT_FOR would only burn the timeout before the doomed action fails honestly), else SCROLL_TO an
+  // off-screen target into view. Marked `optional` so a miss is BEST-EFFORT, never fatal: the real action
+  // step that follows still carries the landmark and does the probe-or-recover — a landmark-less normalizer
+  // must NOT pre-empt that recovery by hard-failing on a stale/scroll-activated selector. No landmark here:
+  // WAIT_FOR must poll the raw selector until the overlay renders, and SCROLL_TO needs a present element.
+  const _pushNorm = (r) => {
+    if (!r || !r.selector) return;
+    if (r.hidden) {
+      const trig = r.revealedBy ? list.find((c) => c.role === r.revealedBy) : null;
+      if (trig && trig.selector && revealed.has(trig.selector)) actions.push({ action: 'WAIT_FOR', selector: r.selector, value: REVEAL_WAIT_MS, optional: true });
+    } else if (r._offscreen) {
+      actions.push({ action: 'SCROLL_TO', selector: r.selector, optional: true });
+    }
+  };
 
   // 2. Fill inputs — by the field's ACTUAL kind, not always TYPE. A <select> needs SELECT; a file input
   //    needs SET_FILE (SG-#81c — not yet executable, so deferred with a clear reason rather than mis-TYPED);
   //    text/textarea/etc. get TYPE with a concrete trial value (self-contained run, no param binding).
   for (const r of fills) {
     if (!r.selector) { skipped.push({ role: r.role, why: 'no selector' }); continue; }
+    _pushNorm(r);
     if (r._fillOp === 'file') {
       actions.push({ action: 'SET_FILE', selector: r.selector, value: 'trial-upload.pdf', landmark: _lm(r) });
       trialInputs.push({ role: r.role, selector: r.selector, value: '(trial file)', op: 'SET_FILE' });
@@ -144,7 +196,12 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
   for (const r of acts) {
     if (!r.selector) { skipped.push({ role: r.role, why: 'no selector' }); continue; }
     if (revealed.has(r.selector)) continue;
+    _pushNorm(r);
     actions.push({ action: 'CLICK', selector: r.selector, landmark: _lm(r) });
+    // A NAVIGATION click leaves the page — any further on-page action would run on the destination and
+    // hard-fail (the live "click footer Radio → navigate → then try the Explore-menu Radio" failure). A
+    // navigate/act intent is fulfilled by reaching the target, so stop emitting once we've navigated.
+    if (r._kind === 'navigation') break;
   }
 
   // 4. READ-shaped intent: EXTRACT the content/collection role as the proof of what's surfaced.
@@ -155,11 +212,13 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
     const readRole = reads.find((r) => r.selector);
     // EXTRACT writes to scope under `target` (TemplateWalker), surfacing in the run's extractedValues
     // → the read-intent proof ("did the Perspective actually surface the content?").
-    if (readRole) { actions.push({ action: 'EXTRACT', selector: readRole.selector, target: 'TRIAL_RESULT', landmark: _lm(readRole) }); extractRole = readRole.role; }
+    if (readRole) { _pushNorm(readRole); actions.push({ action: 'EXTRACT', selector: readRole.selector, target: 'TRIAL_RESULT', landmark: _lm(readRole) }); extractRole = readRole.role; }
   }
   const shape = extractRole ? 'read' : 'act';
 
-  const actionable = actions.filter((a) => a.action !== 'NAVIGATE').length;
+  // `runnable` reflects REAL operations (fill/click/extract), so a plan isn't deemed runnable on the
+  // normalizing steps alone (NAVIGATE/WAIT/WAIT_FOR/SCROLL_TO never appear without a real action anyway).
+  const actionable = actions.filter((a) => !_NORMALIZER_ACTIONS.has(a.action)).length;
   if (revealed.size) warnings.push(`${revealed.size} reveal step(s) injected to open hidden controls — review step order`);
   const unverified = list.filter((r) => r.selector && r.featureId && !r._verified).length;
   if (unverified) warnings.push(`${unverified} grounded selector(s) not yet page-verified — the trial verifies them`);
