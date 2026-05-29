@@ -3331,7 +3331,11 @@ function _describeFormControl(el) {
     // submit, or a bare <button> (no type → HTML default-submit) inside a <form>.
     // A type=button is inert (nav/toggle/"View Job Description") → leave it to the
     // band scan so we don't pollute the form features.
-    const isFormButton = (tag === 'input' && type === 'image')
+    // v2.74.605 — a CLASSIC `<input type="submit">` (Shopify/Rails-style) is a form button, not a
+    // fillable. Without this it fell through to kind:'input' and the trial TYPE'd a trial value into it —
+    // and typing into an input[type=submit] overwrites its `value`, i.e. its visible label ("Post comment"
+    // → "test"). It also meant the REAL submit was never detected/deferred. type=image already handled.
+    const isFormButton = (tag === 'input' && (type === 'submit' || type === 'image'))
       || (isButton && (btnType === 'submit' || btnType === 'reset' || (!btnType && inForm)));
     if (isButton && !isFormButton) return null;
     const li = _ffLabelInfo(el);
@@ -4759,12 +4763,29 @@ async function explorePageStructure(payload) {
   // Never poke things that navigate or submit (mirror verifyStructure guard).
   // v2.74.370 — also refuse anything that is, or lives inside, a real link:
   // poking nav links is what was transitioning the page mid-sweep.
+  // v2.74.604 — auth/account/menu triggers are very often <a href="/login"> that open a MODAL via JS
+  // (preventDefault), NOT a real navigation — yet the categorical link exclusion below skipped them, so
+  // a login modal's email/password fields were never poked/revealed/captured and "sign in" couldn't be
+  // grounded. Allow a LINK to be a poke candidate when it carries a disclosure signal (aria-haspopup/
+  // expanded/controls, role=button, data-toggle) OR an auth/account label. If it DOES navigate, the
+  // explore nav-guard + ensureOnPage recovery handle it — same as any accidental navigation.
+  const AUTH_TRIGGER = /\b(sign[\s-]?in|log[\s-]?in|log[\s-]?on|sign[\s-]?up|signup|login|register|join|create[\s-]?account|my[\s-]?account|account)\b/i;
+  const isDisclosureLink = (el) => {
+    try {
+      return el.matches('[aria-haspopup], [aria-expanded], [aria-controls], [role="button"], [data-toggle], [data-bs-toggle], [data-state], [data-headlessui-state]')
+          || AUTH_TRIGGER.test(accName(el) || '');
+    } catch { return false; }
+  };
   const isSafeToClick = (el) => {
     if (!el) return false;
     try {
-      if (el.matches('a[href], [type="submit"], input[type="submit"], button[type="submit"], [role="link"], [target="_blank"]')) return false;
-      if (el.closest('a[href], [role="link"]')) return false;                                      // chevron inside a nav link → skip
+      if (el.matches('[type="submit"], input[type="submit"], button[type="submit"]')) return false;   // commits a form
+      const linkish = el.matches('a[href], [role="link"], [target="_blank"]');
+      const discLink = linkish && isDisclosureLink(el);
+      if (linkish && !discLink) return false;                                                      // plain nav link → skip
+      if (!discLink && el.closest('a[href], [role="link"]')) return false;                         // chevron inside a nav link → skip
       if (el.closest('form') && el.matches('button:not([type]), input[type="image"]')) return false;   // default-submit
+      if (discLink) return true;                                                                    // auth/disclosure link → poke (modal opener)
       if (el.matches('button:not([type="submit"]), [role="button"], summary, [aria-haspopup], [aria-expanded], [aria-controls], [role="combobox"], [role="tab"], [role="menuitem"], [data-toggle], [data-bs-toggle], [data-state]')) return true;
       return getComputedStyle(el).cursor === 'pointer';
     } catch { return false; }

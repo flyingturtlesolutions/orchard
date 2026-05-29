@@ -271,7 +271,9 @@ export function enumerateFormFields(root) {
     const isButton = tag === 'button';
     const btnType = isButton ? ((el.getAttribute && el.getAttribute('type')) || '') : '';
     const inForm = !!(el.closest && el.closest('form'));
-    const isFormButton = (tag === 'input' && type === 'image')
+    // v2.74.605 — mirror contentScript: a classic `<input type="submit">` is a form button, not a
+    // fillable (else it's typed into + the real submit is missed). type=image already handled.
+    const isFormButton = (tag === 'input' && (type === 'submit' || type === 'image'))
       || (isButton && (btnType === 'submit' || btnType === 'reset' || (!btnType && inForm)));
     if (isButton && !isFormButton) continue;
     const labelInfo = labelTextFor(el, scope);
