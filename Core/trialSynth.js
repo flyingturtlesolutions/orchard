@@ -63,17 +63,67 @@ export function inferRoleKind(role, feature) {
   return 'action';   // default: treat an unknown role as an actionable control
 }
 
-/** A representative value to type into a free-text input for the trial (self-contained run). */
-export function trialValueFor(role, intent) {
+// A control's value SLOT — what KIND of value it wants — so a search trial fills the LOCATION field with
+// the place and the KEYWORD field with the query, instead of stuffing the same phrase into every text box.
+// Matched first by the input's `name` attribute (exact, reliable), then by its role/label text.
+const _SLOT_NAMES = {
+  email:    new Set(['email', 'e-mail', 'mail', 'useremail']),
+  location: new Set(['l', 'loc', 'location', 'city', 'where', 'region', 'state', 'zip', 'zipcode', 'postal', 'postcode', 'country', 'town']),
+  keyword:  new Set(['q', 'query', 'k', 'kw', 'keyword', 'keywords', 'search', 'what', 'term', 'title', 's']),
+  quantity: new Set(['qty', 'quantity', 'amount', 'count', 'num', 'number']),
+  phone:    new Set(['phone', 'tel', 'telephone', 'mobile']),
+};
+const _SLOT_LABEL = [
+  ['email',    /\be-?mail\b/],
+  ['location', /\b(where|location|city|town|state|province|region|place|near|area|zip|postal|postcode|country)\b/],
+  ['phone',    /\b(phone|tel|mobile|telephone)\b/],
+  ['quantity', /\b(quantity|amount|qty|count|how many|number)\b/],
+  ['name',     /\b(first name|last name|full name|your name|name)\b/],
+  ['keyword',  /\b(what|search|keyword|query|term|title|job|find)\b/],
+];
+function _fieldSlot(label, name) {
+  const n = String(name || '').toLowerCase().trim();
+  if (n) for (const slot of Object.keys(_SLOT_NAMES)) if (_SLOT_NAMES[slot].has(n)) return slot;
+  const h = String(label || '').toLowerCase();
+  for (const [slot, re] of _SLOT_LABEL) if (re.test(h)) return slot;
+  return 'generic';
+}
+// Place after a locative preposition ("… in arizona that were recently posted" → "arizona").
+function _locationIn(intent) {
+  const m = /\b(?:in|near|around|within|at|from)\s+([a-z][a-z .'\-]{1,28}?)(?=\s+(?:that|which|with|and|then|for|posted|recent|recently|over|under|from|to|by|on|near)\b|[,.?!]|$)/i.exec(String(intent || ''));
+  return m ? m[1].trim() : '';
+}
+// Primary query term ("search for software jobs in arizona …" → "software jobs"); also honors a quoted phrase.
+function _keyword(intent) {
   const s = String(intent || '');
-  const q = /["“'']([^"”'']{2,60})["”'']/.exec(s);                       // a quoted phrase
+  const q = /["“'']([^"”'']{2,60})["”'']/.exec(s);
   if (q) return q[1].trim();
-  const m = /\b(?:search(?:\s+for)?|find|look\s+for|enter|type|query)\s+(.{2,40}?)(?:\s+(?:on|in|at|from|and|then|with)\b|[.?!]|$)/i.exec(s);
-  if (m) return m[1].trim();
-  const n = String(role || '').toLowerCase();
-  if (n.includes('email')) return 'test@example.com';
-  if (n.includes('quantity') || n.includes('amount')) return '1';
-  return 'test';                                                          // safe generic
+  const m = /\b(?:search(?:\s+for)?|find|look\s+for|enter|type|query|browse|show\s+me)\s+(.{2,40}?)(?:\s+(?:on|in|at|near|from|and|then|with|that|which)\b|[.?!]|$)/i.exec(s);
+  return m ? m[1].trim() : '';
+}
+// The `name` attribute out of a `[name="…"]` selector — the most reliable field-slot signal (q / l / email).
+function _nameAttr(selector) {
+  const m = /\[name=["']?([^"'\]]+)/.exec(String(selector || ''));
+  return m ? m[1] : '';
+}
+/**
+ * A representative value to type into a free-text input for the trial (self-contained run). FIELD-AWARE:
+ * uses the control's role + label/name to pick the right slice of the intent (keyword vs location vs email
+ * vs …), so a search trial actually exercises the form (a location field gets a place, not the query). Real
+ * per-field values are supplied later at invocation (SG-INV). PURE.
+ * @param {string} role  @param {string} intent  @param {{label?:string,name?:string}|string} [field]
+ */
+export function trialValueFor(role, intent, field = {}) {
+  const f = (typeof field === 'string') ? { label: field } : (field || {});
+  switch (_fieldSlot(`${role || ''} ${f.label || ''}`, f.name)) {
+    case 'email':    return 'test@example.com';
+    case 'quantity': return '1';
+    case 'phone':    return '555-0100';
+    case 'name':     return 'Test User';
+    case 'location': return _locationIn(intent) || 'New York';
+    case 'keyword':  return _keyword(intent) || 'test';
+    default:         return _keyword(intent) || 'test';   // generic free-text
+  }
 }
 
 /**
@@ -187,7 +237,7 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
       trialInputs.push({ role: r.role, selector: r.selector, value: '(first option)', op: 'SELECT' });
       continue;
     }
-    const value = trialValueFor(r.role, intent);
+    const value = trialValueFor(r.role, intent, { label: r._label, name: _nameAttr(r.selector) });
     actions.push({ action: 'TYPE', selector: r.selector, value, landmark: _lm(r) });
     trialInputs.push({ role: r.role, selector: r.selector, value });
   }
