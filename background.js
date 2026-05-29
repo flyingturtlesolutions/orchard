@@ -33,6 +33,8 @@ import { synthesizeTrialOp, classifyTrialSafety, scoreTrial } from './Core/trial
 import { coverComplete }       from './Core/cover.js';      // SG-3 Cover — completeness floor
 import { selectionToTrialRoles } from './Core/bind.js';     // SG-4 Bind — selection → trial roles bundle
 import { buildAcceptance, landmarkRefActions } from './Core/accept.js';     // SG-5/PB-7 — passing trial → durable capability + landmark-backed Fragment/Strategy
+import { deriveCapabilities, deriveAllowedOperations } from './Services/LandmarkProfile.js';  // SG-LM-4b — accept-time landmark profiling
+import { createSgMessageHandlers } from './background/handlers/sg.js';  // R1 seed — SG handlers behind a registry
 import * as ChromeHoist        from './Core/chromeHoist.js';  // v2.74.480 — hoist recurring chrome off Locales → Ground.chrome
 import * as Workflows          from './Core/workflows.js';   // v2.74.488 — cross-Locale workflows (partOf) over the siteMap
 import { ExecutionEngine }    from './Services/ExecutionEngine.js';
@@ -1340,6 +1342,65 @@ async function _clearSgDraft(groundId) {
   try { await chrome.storage.session.remove(_sgDraftKey(groundId)); } catch { /* */ }
 }
 
+// SG-LM-4b — accept-time landmark enrichment. The recoverable landmark is ALREADY saved (selector + role
+// + accessibleName); this DEEPENS it: INSPECT the live element to capture hierarchicalContext (the
+// ancestor anchor LANDMARK_PROBE_OR_RECOVER uses to disambiguate) + capabilities, then generate the rich
+// authored profile (description / aliases / pitfalls / expectedContent). Best-effort + per-landmark — a
+// miss (element gone, LLM error) just leaves the already-saved recoverable record. Runs ASYNC after
+// accept responds, so it never blocks the user; pays the LLM cost only for capabilities that passed.
+async function _enrichSgLandmark(tabId, record) {
+  if (typeof tabId !== 'number' || !record?.selector || !record?.uid) return false;
+  let report = null;
+  try {
+    const r = await chrome.tabs.sendMessage(tabId, { type: 'INSPECT_ELEMENT', payload: { target: record.selector, pickLast: false } }, { frameId: 0 });
+    if (r?.success) report = r.report ?? null;
+  } catch { /* element gone / no content script — keep the recoverable record */ }
+  if (!report) return false;
+  const patch = {};
+  if (report.hierarchicalContext) patch.hierarchicalContext = report.hierarchicalContext;   // the recovery disambiguator
+  let ops = null;
+  try { const caps = deriveCapabilities(report); ops = deriveAllowedOperations(caps); patch.capabilities = caps; patch.allowedOperations = ops; } catch { /* */ }
+  try {
+    const res = await AnthropicService.generateLandmarkProfile({
+      role: (record.alias || record.accessibleName || 'landmark').toString().trim(),
+      currentSelector: record.selector,
+      fingerprint: { tag: report.tag, inputType: report.inputType, ariaRole: report.ariaRole, ariaLabel: report.ariaLabel, capabilities: patch.capabilities },
+      outerHTMLPreview: report.outerHTMLPreview ?? '',
+      parentOuterHTMLPreview: report.parent?.outerHTMLPreview ?? '',
+      frame: report.frame ?? 'top',
+      matchedCount: report.matchCount ?? 1,
+      screenshotDataUrl: null,
+      operationsAllowed: ops,
+    });
+    const p = res?.profile;
+    if (p) {
+      if (typeof p.description === 'string' && p.description.trim()) patch.description = p.description;
+      const aliases = Array.isArray(p.aliases) ? p.aliases.filter((s) => s && s.trim() && s !== record.alias) : [];
+      if (aliases.length) patch.aliases = aliases;
+      if (Array.isArray(p.operationsCommon) && p.operationsCommon.length) patch.operationsCommon = p.operationsCommon;
+      if (Array.isArray(p.pitfalls)) patch.pitfalls = p.pitfalls;
+      if (p.expectedContent !== undefined) patch.expectedContent = p.expectedContent;
+      if (p.effect) patch.effect = p.effect;
+      if (p.interactionPattern) patch.interactionPattern = p.interactionPattern;
+      if (typeof p.confidence === 'number') patch.profileConfidence = p.confidence;
+    }
+  } catch (e) { Logger.warn('background', `enrich generateLandmarkProfile(${record.uid}) failed: ${e.message}`); }
+  if (Object.keys(patch).length) {
+    try { await StorageManager.saveLandmark({ ...record, ...patch }); return true; }
+    catch (e) { Logger.warn('background', `enrich saveLandmark(${record.uid}) failed: ${e.message}`); }
+  }
+  return false;
+}
+// Enrich a promoted capability's landmarks SEQUENTIALLY (no LLM burst → avoids the 503 we saw on the
+// parallel profile path). Fire-and-forget from ACCEPT_SG_TRIAL.
+async function _enrichSgLandmarks(tabId, landmarks) {
+  let n = 0;
+  for (const lm of (Array.isArray(landmarks) ? landmarks : [])) {
+    try { if (await _enrichSgLandmark(tabId, lm?.record)) n++; } catch { /* */ }
+  }
+  if (n) Logger.info('background', `ACCEPT_SG_TRIAL — enriched ${n} landmark profile(s) (async, post-accept)`);
+}
+
 // SG-4 / PB shared trial EXECUTOR — synth → safety class → throwaway Fragment+Strategy → execute → score.
 // Used by BOTH RUN_PERSPECTIVE_TRIAL (a resolved bundle) and RUN_SG_TRIAL (Comprehend→Select→Cover→Bind).
 // Returns the response object (caller sendResponse()s it). The `irreversible` safety class DEFERS the
@@ -1538,9 +1599,37 @@ async function _knownSelectorsForUrl(groundId, url) {
   return out.length ? out : null;
 }
 
+// R1 seed (code_review_2.74.605 §5) — domain message-handler registry. SG handlers live in their own
+// module; new domains register here instead of growing the switch below. ctx supplies the shared
+// background-local helpers the SG handlers need (kept here because non-SG code uses them too).
+const _sgMessageHandlers = createSgMessageHandlers({
+  runTrialBundle       : _runTrialBundle,
+  readLocaleCache      : _readLocaleCache,
+  normalizeUrl         : _normalizeUrlForPerspectiveCache,
+  appendOutcomes       : _appendOutcomes,
+  broadcastStorageChanged,
+  readSgCapabilities   : _readSgCapabilities,
+  readSgDraft          : _readSgDraft,
+  writeSgDraft         : _writeSgDraft,
+  clearSgDraft         : _clearSgDraft,
+  writeSgCapability    : _writeSgCapability,
+  writeSgTrace         : _writeSgTrace,
+  enrichSgLandmarks    : _enrichSgLandmarks,
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const { type, payload } = message;
   Logger.debug('background', `Message: ${type}`);
+
+  // Registry dispatch (R1): SG handlers call sendResponse themselves (verbatim with the old switch); the
+  // `.catch` is a safety net if a handler rejects before responding. Checked before the legacy switch;
+  // both keep the async `return true`. Own-property guard so an odd `type` ('toString', 'constructor', …)
+  // can't match an inherited Object.prototype member.
+  if (typeof type === 'string' && Object.prototype.hasOwnProperty.call(_sgMessageHandlers, type)) {
+    Promise.resolve(_sgMessageHandlers[type](payload, sender, sendResponse))
+      .catch((e) => sendResponse({ success: false, error: e?.message || String(e) }));
+    return true;
+  }
 
   switch (type) {
 
@@ -5622,206 +5711,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
-    // SG-4b — run the whole substrate-grounded spine off a raw intent and EXECUTE the trial:
-    // Comprehend → Select (matchSubGoals) → Cover → Bind (roles) → the shared trial executor. The
-    // irreversible commit is auto-deferred by the safety class, the file input is skipped (SET_FILE
-    // pending), so this fills the form's text/select fields and proves the capability without submitting.
-    case 'RUN_SG_TRIAL': {
-      (async () => {
-        try {
-          const { tabId, groundId = null, intent } = payload ?? {};
-          if (!groundId || typeof intent !== 'string' || !intent.trim()) { sendResponse({ success: false, error: 'groundId + intent required' }); return; }
-          let url = '';
-          if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); url = t?.url ?? ''; } catch { /* */ } }
-          let localeModel = null;
-          let localeCapturedUrl = '';
-          try { const pm = await _readLocaleCache(groundId, _normalizeUrlForPerspectiveCache(url)); localeModel = pm?.model || null; localeCapturedUrl = pm?.url || pm?.model?.url || ''; } catch { /* */ }
-          if (!localeModel || !localeModel.features) { sendResponse({ success: false, error: 'no Locale for this page — run Explore first' }); return; }
-          const spec = await AnthropicService.comprehendIntent({ userIntent: intent });
-          if (!spec) { sendResponse({ success: false, error: 'comprehend returned nothing' }); return; }
-          const selection = await AnthropicService.matchSubGoals({ spec, locale: localeModel });
-          const cover = coverComplete(spec, selection);
-          const roles = selectionToTrialRoles(spec, selection, localeModel);
-          Logger.info('background', `RUN_SG_TRIAL — intent="${intent.slice(0, 60)}" shape=${spec.shape} cover=${cover.complete} roles=${roles.length}`);
-          if (!roles.length) { sendResponse({ success: true, ran: false, reason: 'no bindable roles from the selection', cover, intentShape: spec.shape }); return; }
-          // Precondition: Comprehend+Select take several seconds of LLM calls, during which the page can
-          // navigate away (e.g. an auth redirect to /login). Re-read the live URL and bail with a CLEAR
-          // "wrong page" rather than typing the form's selectors into whatever loaded ("no element matched
-          // #firstName"). The plan is page-specific — it must run on the Locale's page.
-          let liveUrl = url;
-          if (typeof tabId === 'number') { try { const t2 = await chrome.tabs.get(tabId); liveUrl = t2?.url ?? url; } catch { /* */ } }
-          // The captured URL lives on the cache ENTRY ({ model, url }), not on model.url — read the entry url.
-          const localeUrl = localeCapturedUrl || '';
-          if (localeUrl && _normalizeUrlForPerspectiveCache(liveUrl) !== _normalizeUrlForPerspectiveCache(localeUrl)) {
-            Logger.warn('background', `RUN_SG_TRIAL — page drifted to "${liveUrl}" (capability targets "${localeUrl}") — not running`);
-            sendResponse({ success: true, ran: false, reason: `the page is now "${String(liveUrl).slice(0, 80)}" but this capability targets "${String(localeUrl).slice(0, 80)}" — navigate there and re-run`, cover, intentShape: spec.shape });
-            return;
-          }
-          const out = await _runTrialBundle({ groundId, intent, roles, localeModel, navigateUrl: null, proposedRoleCount: roles.length, targetTabId: (typeof tabId === 'number' ? tabId : null) });
-          // PB-7 copy-on-accept: stash a SESSION DRAFT of everything ACCEPT_SG_TRIAL needs to materialize a
-          // durable capability — so the user can review the result, then accept/reject without re-running.
-          if (out?.ran) {
-            // Stash the synthesized DRAFT too (post-safety actions, each carrying its inline landmark) so
-            // Accept can promote it into a persisted, landmark-backed Fragment + Strategy (SG-LM-5).
-            await _writeSgDraft(groundId, { intent, spec, selection, cover, roles, trial: out.trial || null, result: out.result || null, draft: out.draft || null, groundId, localeUrl, capturedAt: Date.now() });
-          }
-          const acceptEligible = !!(out?.ran && out.trial?.verdict === 'trial-pass' && (spec.shape !== 'complete' || cover.complete === true));
-          sendResponse({ ...out, cover, intentShape: spec.shape, acceptEligible });
-        } catch (err) {
-          Logger.error('background', `RUN_SG_TRIAL failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
-
-    // SG-5 / PB-7 — ACCEPT a passing trial: materialize the session draft into a durable capability.
-    // Copy-on-accept: read the draft (left by RUN_SG_TRIAL), gate+build via Core/accept (blocks a
-    // trial-fail / under-covered completion intent), persist the LEAN capability (per-ground) + the HEAVY
-    // trialTrace (by trialRef), emit an `accept` outcome, clear the draft. Idempotent by capability id.
-    // Payload: { groundId } → { success, accepted, capability?|reason }.
-    case 'ACCEPT_SG_TRIAL': {
-      (async () => {
-        try {
-          const { groundId = null } = payload ?? {};
-          if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
-          const draft = await _readSgDraft(groundId);
-          if (!draft) { sendResponse({ success: true, accepted: false, reason: 'no trial to accept — run the trial first' }); return; }
-          const built = buildAcceptance({
-            intent: draft.intent, spec: draft.spec, cover: draft.cover, roles: draft.roles,
-            trial: draft.trial, result: draft.result, selection: draft.selection,
-            groundId, localeUrl: draft.localeUrl || '', acceptedAt: Date.now(),
-          });
-          if (!built.ok) { sendResponse({ success: true, accepted: false, reason: built.reason }); return; }
-          // PROMOTE the proto-landmarks → saved registry Landmarks (recoverable workspace primitives) + a
-          // model-authored Perspective composing them. These sync like hand-authored ones and show in the
-          // Ground library. The lean capability + heavy trace stay local (chrome.storage), linked by ids.
-          let savedLm = 0;
-          for (const { record } of built.landmarks) {
-            try { await StorageManager.saveLandmark(record); savedLm++; }
-            catch (e) { Logger.warn('background', `ACCEPT_SG_TRIAL saveLandmark(${record.uid}) failed: ${e.message}`); }
-          }
-          try { await StorageManager.savePerspective(built.perspective); }
-          catch (e) { Logger.error('background', `ACCEPT_SG_TRIAL savePerspective failed: ${e.message}`); sendResponse({ success: false, error: `perspective save failed: ${e.message}` }); return; }
-          // Promote the proven procedure → a persisted, landmark-backed Fragment + Strategy (reviewable
-          // library entities; replay runs THIS). Each step references a saved Landmark by uid, so the
-          // Strategy resolves + self-heals via the registry recovery path. The submit was already deferred
-          // to a reachability probe at trial, so the saved procedure is the proven-safe one.
-          try {
-            const dr = draft.draft;
-            if (dr && Array.isArray(dr.actions) && dr.actions.length) {
-              const fragmentId = crypto.randomUUID();
-              const strategyId = crypto.randomUUID();
-              const steps = landmarkRefActions(dr.actions, groundId, draft.localeUrl || '');
-              const recs = CapabilitySynth.buildCapabilityRecords({ ...dr, actions: steps, name: built.perspective.name }, { groundId, fragmentId, strategyId });
-              if (recs) {
-                await StorageManager.saveFragment(recs.fragment);
-                await StorageManager.saveStrategy(recs.strategy);
-                built.capability.fragmentId = fragmentId;
-                built.capability.strategyId = strategyId;
-              }
-            }
-          } catch (e) { Logger.warn('background', `ACCEPT_SG_TRIAL fragment/strategy persist failed (continuing): ${e.message}`); }
-          await _writeSgCapability(groundId, built.capability);
-          await _writeSgTrace(built.trace);
-          await _appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', {
-            groundId, verdict: 'accepted', input: { roleOrIntent: String(draft.intent).slice(0, 120) },
-            detail: { capabilityId: built.capability.id, perspectiveId: built.perspective.id, landmarks: savedLm, trialRef: built.capability.trial.trialRef, shape: built.capability.shape, score: built.capability.trial.score },
-          })]);
-          try { await broadcastStorageChanged('perspective', built.perspective.id, 'saved'); } catch { /* */ }
-          await _clearSgDraft(groundId);
-          Logger.info('background', `ACCEPT_SG_TRIAL — promoted ${built.capability.id} → perspective ${built.perspective.id} + ${savedLm} landmark(s) (trialRef=${built.capability.trial.trialRef})`);
-          sendResponse({ success: true, accepted: true, capability: built.capability, perspectiveId: built.perspective.id, landmarkCount: savedLm });
-        } catch (err) {
-          Logger.error('background', `ACCEPT_SG_TRIAL failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
-
-    // SG-5 / PB-7 — REJECT a trial: drop the session draft, emit a `reject` outcome (attributable proof
-    // that the user judged the trial insufficient). Leaves zero capability residue. Payload: { groundId }.
-    case 'REJECT_SG_TRIAL': {
-      (async () => {
-        try {
-          const { groundId = null } = payload ?? {};
-          if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
-          const draft = await _readSgDraft(groundId);
-          await _appendOutcomes(groundId, [Outcomes.makeStageEvent('reject', {
-            groundId, verdict: 'rejected', input: { roleOrIntent: String(draft?.intent || '').slice(0, 120) },
-            detail: { shape: draft?.spec?.shape || null, trialVerdict: draft?.trial?.verdict || null },
-          })]);
-          await _clearSgDraft(groundId);
-          sendResponse({ success: true, rejected: true });
-        } catch (err) {
-          Logger.error('background', `REJECT_SG_TRIAL failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
-
-    // SG-5 / PB-7 — list a ground's accepted substrate-grounded capabilities (for the UI / library).
-    case 'GET_SG_CAPABILITIES': {
-      (async () => {
-        try {
-          const { groundId = null } = payload ?? {};
-          if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
-          sendResponse({ success: true, capabilities: await _readSgCapabilities(groundId) });
-        } catch (err) {
-          Logger.error('background', `GET_SG_CAPABILITIES failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
-
-    // SG-5 / PB-7 — REPLAY an accepted capability. NO LLM (no Comprehend/Select/Cover/Bind). SG-LM-5:
-    // prefer the PROMOTED, landmark-backed Strategy — run it via ExecutionEngine on the current tab; each
-    // step resolves + self-heals through the registry recovery path (applyLandmarkRefToStep →
-    // LANDMARK_PROBE_OR_RECOVER). Pre-LM-5 capabilities (no strategyId) fall back to the lean binding path.
-    // The saved procedure already deferred the submit, so replay re-runs the proven-safe steps.
-    // Payload: { tabId, groundId, capabilityId }.
-    case 'REPLAY_SG_CAPABILITY': {
-      (async () => {
-        try {
-          const { tabId, groundId = null, capabilityId = null } = payload ?? {};
-          if (!groundId || !capabilityId) { sendResponse({ success: false, error: 'groundId + capabilityId required' }); return; }
-          const cap = (await _readSgCapabilities(groundId)).find((c) => c.id === capabilityId);
-          if (!cap) { sendResponse({ success: false, error: 'capability not found' }); return; }
-          let liveUrl = '';
-          if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); liveUrl = t?.url ?? ''; } catch { /* */ } }
-          // Page-drift guard — replay binds the capability's page; refuse to run on whatever else loaded.
-          if (cap.localeUrl && liveUrl && _normalizeUrlForPerspectiveCache(liveUrl) !== _normalizeUrlForPerspectiveCache(cap.localeUrl)) {
-            sendResponse({ success: true, ran: false, reason: `the page is now "${String(liveUrl).slice(0, 80)}" but this capability targets "${String(cap.localeUrl).slice(0, 80)}" — navigate there and re-run` });
-            return;
-          }
-          // Preferred: run the saved, landmark-backed Strategy (the promoted library entity).
-          if (cap.strategyId) {
-            let result = null;
-            try { result = await ExecutionEngine.executeStrategy({ strategyId: cap.strategyId, targetTabId: (typeof tabId === 'number' ? tabId : null) }); }
-            catch (e) { sendResponse({ success: false, error: `replay strategy failed: ${e.message}` }); return; }
-            const ok = !!(result && result.success);
-            Logger.info('background', `REPLAY_SG_CAPABILITY — ${cap.id} via saved strategy ${cap.strategyId} → ${ok ? 'ok' : 'failed'} (NO LLM, landmark recovery)`);
-            sendResponse({ success: true, ran: true, replayed: true, via: 'strategy', capabilityId: cap.id, ok, reason: ok ? undefined : (result?.error || 'a step failed') });
-            return;
-          }
-          // Fallback (pre-LM-5 capability): re-synth from the lean binding (still landmark-backed via LM-3).
-          const roles = Array.isArray(cap.binding) ? cap.binding : [];
-          if (!roles.length) { sendResponse({ success: true, ran: false, reason: 'capability has no saved strategy or binding' }); return; }
-          let localeModel = null;
-          try { const pm = await _readLocaleCache(groundId, _normalizeUrlForPerspectiveCache(cap.localeUrl || liveUrl)); localeModel = pm?.model || null; } catch { /* */ }
-          Logger.info('background', `REPLAY_SG_CAPABILITY — ${cap.id} via binding fallback (${roles.length} role(s), NO LLM)`);
-          const out = await _runTrialBundle({ groundId, intent: cap.intent, roles, localeModel, navigateUrl: null, proposedRoleCount: roles.length, targetTabId: (typeof tabId === 'number' ? tabId : null) });
-          sendResponse({ ...out, replayed: true, via: 'binding', capabilityId: cap.id });
-        } catch (err) {
-          Logger.error('background', `REPLAY_SG_CAPABILITY failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
+    // SG-5 / PB-7 — RUN_SG_TRIAL, ACCEPT_SG_TRIAL, REPLAY_SG_CAPABILITY moved to the registry (background/handlers/sg.js, R1).
 
     // v2.74.381 — Reveal-aware resolve. Roles that live in a hidden layer (a
     // modal/menu) can't resolve against the static DOM. Open the trigger, snapshot

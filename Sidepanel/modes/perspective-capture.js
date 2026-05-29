@@ -30,6 +30,8 @@ import { toast, getActiveTab, pingContentScript, exitToStudio, requestModeChange
 // and observation-author use, so perspective landmarks can target same-origin
 // iframes too.
 import { broadcastStartPick, broadcastCancelPick } from '../../shared.js';
+// SG-LM-6 (R5 seed) — cross-session saved-capability library, extracted to its own module.
+import { createSgLibrary } from './perspective-capture/sg-library.js';
 // v2.74.231 — Auto-generate description from landmarks on save when
 // the author left it blank (mirrors the fragment-author / observation-
 // author pattern). Pure function, no DOM, no I/O.
@@ -138,12 +140,13 @@ let _sgRejected = false;
 // SG-5 / PB-7 — replay of a saved capability (the cached binding re-runs with NO LLM).
 let _sgReplayInFlight = false;
 let _sgReplayResult = null;
-// SG-LM-6 — cross-session library of this Ground's accepted capabilities (GET_SG_CAPABILITIES), each
-// re-runnable. Loaded once per ground; invalidated on a fresh accept.
-let _sgCapabilities = [];
-let _sgCapsLoadedFor = null;   // groundId the list was loaded for
-let _sgCapsLoading = false;
-let _sgLibReplay = {};         // capId → { inFlight:bool, result:object|null }
+// SG-LM-6 — cross-session library of this Ground's accepted capabilities. Extracted into its own module
+// (code_review_2.74.605 R5 seed); this file just hosts + wires it.
+const sgLib = createSgLibrary({
+  getGroundId: () => _perspectiveGroundId,
+  getTabId   : () => _perspectiveTabId,
+  rerender   : () => _renderPerspectivePanel(),
+});
 // PB-6b — Trial-run state. The intent-truth proof for the chosen perspective: synthesize
 // the resolved bundle into a runnable op, run it safely, score the fidelity vector.
 //   _trialInFlight: true while RUN_PERSPECTIVE_TRIAL round-trips (one at a time).
@@ -881,10 +884,7 @@ async function unmount() {
   _sgRejected = false;
   _sgReplayInFlight = false;
   _sgReplayResult = null;
-  _sgCapabilities = [];
-  _sgCapsLoadedFor = null;
-  _sgCapsLoading = false;
-  _sgLibReplay = {};
+  sgLib.reset();
   _trialInFlight = false;
   _trialResult = null;
 
@@ -1940,7 +1940,7 @@ function _renderPerspectivePanel() {
     <div class="dbg-perspective-perspective-buttons">
       <button class="btn-secondary tiny" data-perspective-action="propose-perspectives" type="button" ${canPropose ? '' : 'disabled'} title="${escAttr(intent.length === 0 ? emptyTitle : "Propose perspective options for this intent, using a page screenshot + this Ground's perspectives & landmarks.")}">${label}</button>
     </div>
-    ${_renderSavedCapabilities()}`;
+    ${sgLib.render()}`;
 
   const run = _perspectiveRun;
   if (run) {
@@ -2017,12 +2017,7 @@ function _renderPerspectivePanel() {
   }
 
   perspectiveBody.innerHTML = html;
-  // SG-LM-6 — lazily load this ground's saved capabilities once (the load re-renders when done).
-  if (_perspectiveGroundId && _sgCapsLoadedFor !== _perspectiveGroundId && !_sgCapsLoading) {
-    _loadSgCapabilities(_perspectiveGroundId);
-  }
-  perspectiveBody.querySelectorAll('[data-perspective-action="replay-saved-cap"]').forEach((b) =>
-    b.addEventListener('click', () => onReplaySavedCapability(b.getAttribute('data-cap'))));
+  sgLib.wire(perspectiveBody);   // SG-LM-6 — lazy-load once per ground + wire the per-capability re-run buttons
   perspectiveBody.querySelector('[data-perspective-action="propose-perspectives"]')
     ?.addEventListener('click', () => onProposePerspectives());
   perspectiveBody.querySelector('[data-perspective-action="run-trial"]')
@@ -2118,28 +2113,6 @@ function _renderReplayNote(r) {
   const v = r.trial || {};
   const pct = (typeof v.score === 'number') ? ` (${Math.round(v.score * 100)}%)` : '';
   return `<div class="dbg-perspective-ground-note">↻ re-ran with no LLM — verdict <b>${escHtml(String(v.verdict || '?'))}</b>${pct}</div>`;
-}
-
-// SG-LM-6 — the cross-session library: this Ground's accepted capabilities, each re-runnable on the
-// current page (NO LLM, landmark recovery). Empty string until loaded / when there are none.
-function _renderSavedCapabilities() {
-  if (!_perspectiveGroundId || _sgCapsLoadedFor !== _perspectiveGroundId || !_sgCapabilities.length) return '';
-  let html = `<div class="dbg-perspective-caplib"><div class="dbg-perspective-caplib-title">Saved capabilities (${_sgCapabilities.length})</div>`;
-  for (const cap of _sgCapabilities) {
-    const n = Array.isArray(cap.landmarkUids) ? cap.landmarkUids.length : 0;
-    const verdict = cap.trial?.verdict || '?';
-    const rep = _sgLibReplay[cap.id] || {};
-    const btn = rep.inFlight
-      ? `<button class="btn-secondary tiny" type="button" disabled>⏳ Running…</button>`
-      : `<button class="btn-secondary tiny" data-perspective-action="replay-saved-cap" data-cap="${escAttr(cap.id)}" type="button" title="Re-run this saved capability on the current page — no LLM; landmarks self-heal a stale selector.">▶ Re-run</button>`;
-    html += `<div class="dbg-perspective-caplib-item">
-        <div class="dbg-perspective-caplib-head"><span class="dbg-perspective-caplib-intent">${escHtml(cap.intent || cap.id)}</span>${btn}</div>
-        <div class="dbg-perspective-caplib-meta">${escHtml(cap.shape || 'act')} · ${n} landmark(s) · ${escHtml(String(verdict))}${cap.strategyId ? ' · strategy' : ''}</div>
-        ${_renderReplayNote(rep.result)}
-      </div>`;
-  }
-  html += `</div>`;
-  return html;
 }
 
 function _renderGroundIntentRow(intent) {
@@ -2530,13 +2503,13 @@ async function onAcceptSGTrial() {
   let res;
   try {
     res = await new Promise(r => chrome.runtime.sendMessage({
-      type: 'ACCEPT_SG_TRIAL', payload: { groundId: _perspectiveGroundId },
+      type: 'ACCEPT_SG_TRIAL', payload: { groundId: _perspectiveGroundId, tabId: _perspectiveTabId },
     }, r));
   } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
   _sgAcceptInFlight = false;
   if (res?.success && res.accepted) {
     _sgCapabilityResult = res.capability || null;
-    _sgCapsLoadedFor = null;   // invalidate the library cache so the new capability appears
+    sgLib.invalidate();   // the new capability should appear in the library on next render
     toast?.('Saved as a verified capability');
   } else if (_sgTrialResult) {
     // Keep the trial result; annotate why accept didn't persist (gate reason or error).
@@ -2571,37 +2544,6 @@ async function onReplaySGCapability() {
   } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
   _sgReplayInFlight = false;
   _sgReplayResult = res || { success: false, error: 'no result' };
-  _renderPerspectivePanel();
-}
-
-// SG-LM-6 — load this Ground's saved capabilities once (re-renders when done). Guarded against re-entry
-// and re-load loops by _sgCapsLoading / _sgCapsLoadedFor.
-async function _loadSgCapabilities(groundId) {
-  if (!groundId || _sgCapsLoading) return;
-  _sgCapsLoading = true;
-  let res;
-  try {
-    res = await new Promise(r => chrome.runtime.sendMessage({ type: 'GET_SG_CAPABILITIES', payload: { groundId } }, r));
-  } catch { res = null; }
-  _sgCapsLoading = false;
-  _sgCapsLoadedFor = groundId;
-  _sgCapabilities = (res && res.success && Array.isArray(res.capabilities)) ? res.capabilities : [];
-  _renderPerspectivePanel();
-}
-
-// SG-LM-6 — re-run a saved capability from the library (cross-session). Prefers its saved Strategy
-// (landmark recovery); the background handler is the same REPLAY_SG_CAPABILITY used in-session.
-async function onReplaySavedCapability(capId) {
-  if (!capId || !_perspectiveGroundId) return;
-  if (_sgLibReplay[capId]?.inFlight) return;
-  _sgLibReplay[capId] = { inFlight: true, result: null }; _renderPerspectivePanel();
-  let res;
-  try {
-    res = await new Promise(r => chrome.runtime.sendMessage({
-      type: 'REPLAY_SG_CAPABILITY', payload: { tabId: _perspectiveTabId, groundId: _perspectiveGroundId, capabilityId: capId },
-    }, r));
-  } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
-  _sgLibReplay[capId] = { inFlight: false, result: res || { success: false, error: 'no result' } };
   _renderPerspectivePanel();
 }
 
