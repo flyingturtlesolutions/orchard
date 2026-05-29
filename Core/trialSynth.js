@@ -95,6 +95,16 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
   const warnings = [];
   if (navigateUrl) actions.push({ action: 'NAVIGATE', value: navigateUrl });
 
+  // SG-LM-3 — the recoverable identity (proto-landmark, attached by Core/bind) travels ON each action as
+  // `landmark: { role, accessibleName, hierarchicalContext, selector }`. The engine (TemplateWalker
+  // #executeStep) probes the selector and, on a miss, recovers by role + accessible name — so a stale
+  // selector self-heals instead of hard-failing. undefined when the role has no recoverable identity.
+  const _lm = (r) => {
+    const lm = r && r.landmark;
+    if (!lm || !lm.selector) return undefined;
+    return { role: lm.role || null, accessibleName: lm.accessibleName || null, hierarchicalContext: lm.hierarchicalContext || null, selector: lm.selector };
+  };
+
   const fills = list.filter((r) => FILL_KINDS.has(r._kind));
   const acts  = list.filter((r) => ACT_KINDS.has(r._kind));
   const reads = list.filter((r) => READ_KINDS.has(r._kind));
@@ -106,7 +116,7 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
     const trig = list.find((c) => c.role === r.revealedBy);
     if (!trig || !trig.selector || revealed.has(trig.selector)) continue;
     revealed.add(trig.selector);
-    actions.push({ action: 'CLICK', selector: trig.selector });
+    actions.push({ action: 'CLICK', selector: trig.selector, landmark: _lm(trig) });
   }
 
   // 2. Fill inputs — by the field's ACTUAL kind, not always TYPE. A <select> needs SELECT; a file input
@@ -115,17 +125,17 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
   for (const r of fills) {
     if (!r.selector) { skipped.push({ role: r.role, why: 'no selector' }); continue; }
     if (r._fillOp === 'file') {
-      actions.push({ action: 'SET_FILE', selector: r.selector, value: 'trial-upload.pdf' });
+      actions.push({ action: 'SET_FILE', selector: r.selector, value: 'trial-upload.pdf', landmark: _lm(r) });
       trialInputs.push({ role: r.role, selector: r.selector, value: '(trial file)', op: 'SET_FILE' });
       continue;
     }
     if (r._fillOp === 'select') {
-      actions.push({ action: 'SELECT', selector: r.selector, value: TRIAL_SELECT_FIRST });
+      actions.push({ action: 'SELECT', selector: r.selector, value: TRIAL_SELECT_FIRST, landmark: _lm(r) });
       trialInputs.push({ role: r.role, selector: r.selector, value: '(first option)', op: 'SELECT' });
       continue;
     }
     const value = trialValueFor(r.role, intent);
-    actions.push({ action: 'TYPE', selector: r.selector, value });
+    actions.push({ action: 'TYPE', selector: r.selector, value, landmark: _lm(r) });
     trialInputs.push({ role: r.role, selector: r.selector, value });
   }
 
@@ -133,7 +143,7 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
   for (const r of acts) {
     if (!r.selector) { skipped.push({ role: r.role, why: 'no selector' }); continue; }
     if (revealed.has(r.selector)) continue;
-    actions.push({ action: 'CLICK', selector: r.selector });
+    actions.push({ action: 'CLICK', selector: r.selector, landmark: _lm(r) });
   }
 
   // 4. READ-shaped intent: EXTRACT the content/collection role as the proof of what's surfaced.
@@ -144,7 +154,7 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
     const readRole = reads.find((r) => r.selector);
     // EXTRACT writes to scope under `target` (TemplateWalker), surfacing in the run's extractedValues
     // → the read-intent proof ("did the Perspective actually surface the content?").
-    if (readRole) { actions.push({ action: 'EXTRACT', selector: readRole.selector, target: 'TRIAL_RESULT' }); extractRole = readRole.role; }
+    if (readRole) { actions.push({ action: 'EXTRACT', selector: readRole.selector, target: 'TRIAL_RESULT', landmark: _lm(readRole) }); extractRole = readRole.role; }
   }
   const shape = extractRole ? 'read' : 'act';
 
@@ -196,8 +206,10 @@ export function classifyTrialSafety(intent, draft) {
 
   if (!irreversible || termIdx < 0) return { safetyClass: 'reversible', actions, deferred: [] };
 
-  // Defer the commit: probe its reachability instead of clicking it.
-  actions[termIdx] = { action: 'EXTRACT', selector: termSel, target: 'TRIAL_TERMINAL' };
+  // Defer the commit: probe its reachability instead of clicking it. Carry the landmark through so the
+  // reachability probe also self-heals if the commit's selector drifted (SG-LM-3).
+  const termLm = actions[termIdx].landmark;
+  actions[termIdx] = { action: 'EXTRACT', selector: termSel, target: 'TRIAL_TERMINAL', ...(termLm ? { landmark: termLm } : {}) };
   return { safetyClass: 'irreversible', actions, deferred: [termSel] };
 }
 

@@ -3699,11 +3699,27 @@ export class TemplateWalker {
       // find a candidate, synthesizes a fresh selector, and returns
       // it. The landmark's lifecycle flips to `stale-suspected` on
       // recovery; `stale-confirmed` on full failure.
-      if (step && step.landmarkRef) {
-        try {
-          await applyLandmarkRefToStep(step);
-        } catch (e) {
-          return { success: false, error: `Landmark ref resolution failed: ${e.message}` };
+      if (step && (step.landmarkRef || step.landmark)) {
+        if (step.landmarkRef) {
+          try {
+            await applyLandmarkRefToStep(step);
+          } catch (e) {
+            return { success: false, error: `Landmark ref resolution failed: ${e.message}` };
+          }
+        } else if (step.landmark && !step._resolvedFromLandmark) {
+          // SG-LM-3 — INLINE proto-landmark (no saved registry uid): the SG trial/replay binds a
+          // recoverable identity directly on the step instead of a stored landmarkRef. Stash its
+          // description layer so the probe-or-recover block below self-heals a stale selector by
+          // role + accessible name. uid is null, so the registry-persist + ground-event branches
+          // (all guarded by `desc.uid`) safely no-op.
+          const lm = step.landmark;
+          step._resolvedFromLandmark = {
+            uid: null,
+            a11yRole: lm.role ?? null,
+            accessibleName: lm.accessibleName ?? null,
+            hierarchicalContext: lm.hierarchicalContext ?? null,
+          };
+          if (!step.selector && lm.selector) step.selector = lm.selector;
         }
         // v2.74.246 — Phase 7b of substrate spec: iframe context
         // routing. If the resolved landmark carries an iframeContext,

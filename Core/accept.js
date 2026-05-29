@@ -1,20 +1,23 @@
-// Core/accept.js — PB-7 (R11 + R12): turn a PASSING substrate-grounded trial into a durable capability.
+// Core/accept.js — SG-5 / PB-7 (R11 + R12): turn a PASSING substrate-grounded trial into durable,
+// reviewable, replayable LIBRARY entities — the same primitives a human authors, minted by intent.
 //
-// Per DESIGN_phaseB_pipeline §3 PB-7 + the workspace/runtime split, accept produces TWO artifacts:
+// "Promote/hydrate on accept": the trial materialized proto-landmarks (Core/landmark) + a throwaway
+// fragment/strategy. Accept PROMOTES them — pure builders here produce the saveable records; the
+// background handler persists them via StorageManager:
 //
-//   • CapabilityAcceptance — LEAN, lives on the workspace primitive. The re-runnable capability: the
-//     IntentSpec essence + the binding (subGoal/role → durable selector) + the cover verdict + the trial
-//     verdict + lineage. No raw DOM, no per-step blobs — safe to sync. This is what a later run replays
-//     WITHOUT re-comprehending (Comprehend/Select are cached into the binding).
+//   • Landmark[]  — one per bound role that carries a recoverable identity (selector + role +
+//     accessibleName). Saved to the per-Ground registry (uid-keyed). Recoverable via
+//     LANDMARK_PROBE_OR_RECOVER. (The full generateLandmarkProfile enrichment is a later slice — the
+//     captured fields already make the landmark recoverable.)
+//   • Perspective — the intent-scoped composition: { landmarkRefs: [uid…] }, authoredBy:'model'. Appears
+//     in the Ground library like a hand-authored one. This is SG-5's "Perspective = derived binding layer".
+//   • CapabilityAcceptance — LEAN pointer record: { perspectiveId, landmarkUids[], intent, cover, trial
+//     verdict, trialRef }. References the saved entities rather than re-embedding raw selectors.
+//   • trialTrace — HEAVY proof (runtime/training, by trialRef): full IntentSpec, lean selection, roles,
+//     vector + evidence, compact per-step result.
 //
-//   • trialTrace — HEAVY, lives in runtime/training, referenced by `trialRef`. The full proof: the entire
-//     IntentSpec, the selection, the cover detail, the roles, the trial vector + evidence, and the raw
-//     per-step result. Evidence for §5 credit assignment and the training pipeline; never synced as
-//     authoring data.
-//
-// Copy-on-accept: the caller holds the materialization as a SESSION DRAFT; on accept it persists both
-// artifacts atomically and emits an `accept` outcome; on reject it drops the draft and emits `reject`.
-// These functions are PURE — no storage, no chrome, no clock beyond an injected `acceptedAt`.
+// PURE — no storage, no chrome, no clock beyond an injected `acceptedAt`. The gate (canAccept) refuses to
+// build on a failing trial / under-covered completion intent.
 
 export const ACCEPT_SCHEMA = 1;
 
@@ -26,11 +29,18 @@ function _hash(s) {
   return (h >>> 0).toString(36);
 }
 
-/** Stable-ish capability id from the intent + where it's grounded. */
+/** Stable capability id from the intent + where it's grounded (re-accept upserts the same record). */
 export function mintCapabilityId(intent, groundId, localeUrl) {
   return 'cap_' + _hash(`${groundId || ''}|${localeUrl || ''}|${String(intent || '').trim().toLowerCase()}`);
 }
-
+/** Stable Perspective id for an accepted capability. */
+export function mintPerspectiveId(intent, groundId, localeUrl) {
+  return 'persp_sg_' + _hash(`${groundId || ''}|${localeUrl || ''}|${String(intent || '').trim().toLowerCase()}`);
+}
+/** Stable Landmark uid — same element identity on the same (ground, locale) → same uid (re-accept reuses). */
+export function mintLandmarkUid(groundId, localeUrl, lm) {
+  return 'lmk_sg_' + _hash(`${groundId || ''}|${localeUrl || ''}|${lm?.role || ''}|${lm?.accessibleName || ''}|${lm?.selector || ''}`);
+}
 /** Trial-proof reference id derived from the capability id + accept time (one trace per acceptance). */
 export function mintTrialRef(capabilityId, acceptedAt) {
   return 'trial_' + _hash(`${capabilityId || ''}|${acceptedAt || Date.now()}`);
@@ -39,8 +49,7 @@ export function mintTrialRef(capabilityId, acceptedAt) {
 /**
  * The accept gate. A capability may be accepted ONLY when the trial PASSED, and — for a `complete`
  * intent — only when the completeness floor was met (PB-10: an intent-true library must not save a
- * half-covered form-fill as if it were the whole capability). read/act/navigate accept on a pass alone;
- * their cover floor is the required sub-goals, already reflected in `cover.complete`.
+ * half-covered form-fill as if it were the whole capability). read/act/navigate accept on a pass alone.
  * @returns {{ ok:boolean, reason:string }}
  */
 export function canAccept({ trial = null, cover = null, spec = null } = {}) {
@@ -70,7 +79,66 @@ function _leanCover(cover) {
   return out;
 }
 
-// A binding entry is a role bound to a feature with a durable selector — the replayable essence.
+/**
+ * Build saveable Landmark records from the bound roles' proto-landmarks. PURE. Only roles with a selector
+ * AND a recoverable identity (a derived role) become landmarks — the rest (file/collection) replay by
+ * selector only and don't need a registry entry. Returns [{ role, uid, record }] preserving order,
+ * deduped by uid (same element bound twice → one landmark).
+ */
+export function buildLandmarkRecords({ roles = [], groundId = '', localeUrl = '', acceptedAt = Date.now() } = {}) {
+  const out = [];
+  const seen = new Set();
+  for (const r of (Array.isArray(roles) ? roles : [])) {
+    const lm = r && r.landmark;
+    if (!lm || !lm.selector || !lm.role) continue;   // need a selector + a recoverable role
+    const uid = mintLandmarkUid(groundId, localeUrl, lm);
+    if (seen.has(uid)) continue;
+    seen.add(uid);
+    out.push({
+      role: r.role,
+      uid,
+      record: {
+        uid,
+        groundId: groundId || '',
+        selector: lm.selector,
+        a11yRole: lm.role || null,
+        accessibleName: lm.accessibleName || null,
+        hierarchicalContext: lm.hierarchicalContext || null,
+        alias: r.role || lm.accessibleName || null,
+        lifecycle: 'fresh',
+        source: 'sg-accept',
+        createdAt: acceptedAt,
+      },
+    });
+  }
+  return out;
+}
+
+/**
+ * Build the Perspective record (the intent-scoped composition over the promoted landmarks). PURE.
+ * Saved via StorageManager.savePerspective; #withPerspectiveComposition derives the landmark nodes from
+ * landmarkRefs. authoredBy:'model' marks it as automated (vs. human-picked).
+ */
+export function buildPerspectiveRecord({ intent, spec = {}, groundId = '', localeUrl = '', landmarkUids = [], acceptedAt = Date.now() } = {}) {
+  return {
+    id: mintPerspectiveId(intent, groundId, localeUrl),
+    groundId: groundId || '',
+    name: (String(intent || '').trim() || spec.target || 'capability').slice(0, 80),
+    landmarkRefs: Array.isArray(landmarkUids) ? landmarkUids.slice() : [],
+    authoredBy: 'model',
+    authoredAt: acceptedAt,
+    intent: String(intent || '').trim(),
+    shape: spec.shape || 'act',
+    localeUrl: localeUrl || '',
+    source: 'sg-accept',
+  };
+}
+
+// Lean replay binding: each bound role's durable selector + kind/fieldType + its recoverable landmark.
+// TRANSITIONAL — SG-LM-4 promotes to a Perspective + Landmarks (the durable layer), but the current
+// REPLAY_SG_CAPABILITY still runs off this binding. SG-LM-5 migrates replay to the saved Perspective and
+// drops this field. Until then it's carried so every checkpoint stays runnable; it now includes the
+// `landmark` so even binding-driven replay is recoverable.
 function _leanBinding(roles) {
   return (Array.isArray(roles) ? roles : [])
     .filter((r) => r && typeof r.role === 'string')
@@ -78,31 +146,20 @@ function _leanBinding(roles) {
       const b = { role: r.role, selector: r.selector || null };
       if (r.featureId) b.featureId = r.featureId;
       if (r.multiplicity) b.multiplicity = r.multiplicity;
-      // kind + fieldType make the binding self-contained — replay reproduces the same op without the
-      // live feature (featureIds drift on re-Explore). Carry them through to the saved capability.
       if (r.kind) b.kind = r.kind;
       if (r.fieldType) b.fieldType = r.fieldType;
       if (r.hidden) b.hidden = true;
       if (r.revealedBy) b.revealedBy = r.revealedBy;
+      if (r.landmark) b.landmark = r.landmark;
       return b;
     });
 }
 
 /**
- * Build the LEAN CapabilityAcceptance record. PURE.
- * @param {object} args
- * @param {string} args.intent          raw user intent.
- * @param {object} args.spec            IntentSpec (Comprehend).
- * @param {object} args.cover           cover verdict (Core/cover.js coverComplete).
- * @param {Array}  args.roles           bound roles (Core/bind.js selectionToTrialRoles).
- * @param {object} args.trial           trial score (Core/trialSynth.js scoreTrial).
- * @param {string} args.groundId
- * @param {string} args.localeUrl
- * @param {number} [args.acceptedAt]
- * @param {string} [args.trialRef]      if the caller already minted one (keeps lean↔heavy linked).
- * @returns {object} CapabilityAcceptance
+ * Build the LEAN CapabilityAcceptance pointer record. PURE. References the saved Perspective + Landmarks
+ * (the durable layer); also carries a transitional `binding` for the current replay path (see _leanBinding).
  */
-export function buildCapabilityAcceptance({ intent, spec = {}, cover = null, roles = [], trial = null, groundId = '', localeUrl = '', acceptedAt = Date.now(), trialRef = null } = {}) {
+export function buildCapabilityAcceptance({ intent, spec = {}, cover = null, roles = [], trial = null, groundId = '', localeUrl = '', acceptedAt = Date.now(), trialRef = null, perspectiveId = null, landmarkUids = [] } = {}) {
   const id = mintCapabilityId(intent, groundId, localeUrl);
   const ref = trialRef || mintTrialRef(id, acceptedAt);
   const subGoals = (Array.isArray(spec.subGoals) ? spec.subGoals : [])
@@ -117,8 +174,10 @@ export function buildCapabilityAcceptance({ intent, spec = {}, cover = null, rol
     target: spec.target || '',
     groundId: groundId || '',
     localeUrl: localeUrl || '',
+    perspectiveId: perspectiveId || null,
+    landmarkUids: Array.isArray(landmarkUids) ? landmarkUids.slice() : [],
+    binding: _leanBinding(roles),   // transitional — replay still reads this until SG-LM-5
     subGoals,
-    binding: _leanBinding(roles),
     cover: _leanCover(cover),
     trial: trial ? { verdict: trial.verdict, score: trial.score ?? null, vector: trial.vector || null, trialRef: ref } : { verdict: 'unknown', score: null, vector: null, trialRef: ref },
     decidedBy: spec.decidedBy || 'unknown',
@@ -141,11 +200,10 @@ function _trialSteps(result) {
 }
 
 /**
- * Build the HEAVY trialTrace (runtime/training). PURE.
- * @returns {object} trialTrace — referenced by capability.trial.trialRef.
+ * Build the HEAVY trialTrace (runtime/training). PURE. Referenced by capability.trial.trialRef and links
+ * back to the promoted perspective + landmarks.
  */
-export function buildTrialTrace({ capabilityId, trialRef, intent, spec = {}, selection = null, cover = null, roles = [], trial = null, result = null, groundId = '', localeUrl = '', acceptedAt = Date.now() } = {}) {
-  // Keep selection lean-ish: matches + orphans + boundary ids, not the full feature objects.
+export function buildTrialTrace({ capabilityId, trialRef, intent, spec = {}, selection = null, cover = null, roles = [], trial = null, result = null, groundId = '', localeUrl = '', acceptedAt = Date.now(), perspectiveId = null, landmarkUids = [] } = {}) {
   const leanSelection = selection ? {
     matches: selection.matches || {},
     orphanRequired: Array.isArray(selection.orphanRequired) ? selection.orphanRequired.map((f) => f.id) : [],
@@ -158,6 +216,8 @@ export function buildTrialTrace({ capabilityId, trialRef, intent, spec = {}, sel
     schema: ACCEPT_SCHEMA,
     trialRef: trialRef || mintTrialRef(capabilityId, acceptedAt),
     capabilityId: capabilityId || null,
+    perspectiveId: perspectiveId || null,
+    landmarkUids: Array.isArray(landmarkUids) ? landmarkUids.slice() : [],
     intent: String(intent || '').trim(),
     groundId: groundId || '',
     localeUrl: localeUrl || '',
@@ -172,15 +232,39 @@ export function buildTrialTrace({ capabilityId, trialRef, intent, spec = {}, sel
 }
 
 /**
- * One-call convenience: gate + build both artifacts. Returns { ok, reason } when the gate blocks,
- * else { ok:true, capability, trace }. The background handler persists `capability` (workspace) and
- * `trace` (runtime), links them via `trialRef`, and emits the `accept` outcome.
+ * One-call convenience: gate, then build ALL promotion artifacts. Returns { ok:false, reason } when the
+ * gate blocks, else { ok:true, capability, perspective, landmarks:[{role,uid,record}], trace } — all
+ * linked (capability.perspectiveId === perspective.id, capability.landmarkUids === landmark uids,
+ * capability.trial.trialRef === trace.trialRef). The background handler persists landmarks + perspective
+ * via StorageManager and the lean capability + trace via chrome.storage, then emits the `accept` outcome.
  */
+/**
+ * SG-LM-5 — convert the trial's synthesized actions (which carry an INLINE landmark, used by the trial
+ * before any landmark is saved) into Fragment steps that reference the SAVED registry Landmark by uid
+ * (`landmarkRef: { uid }`). The persisted Strategy then resolves + recovers via the standard registry
+ * path (LandmarkResolver.applyLandmarkRefToStep → LANDMARK_PROBE_OR_RECOVER). Steps whose landmark wasn't
+ * promoted (file/collection — no recoverable role) keep their raw selector. PURE.
+ * @param {Array} actions  draft.actions (post-safety; deferred submit already an EXTRACT probe).
+ */
+export function landmarkRefActions(actions, groundId, localeUrl) {
+  return (Array.isArray(actions) ? actions : []).map((a) => {
+    if (!a || typeof a !== 'object') return a;
+    const { landmark, ...rest } = a;
+    if (landmark && landmark.role && landmark.selector) {
+      return { ...rest, landmarkRef: { uid: mintLandmarkUid(groundId, localeUrl, landmark) } };
+    }
+    return rest;   // no recoverable landmark → plain selector step
+  });
+}
+
 export function buildAcceptance(args = {}) {
   const gate = canAccept(args);
   if (!gate.ok) return { ok: false, reason: gate.reason };
   const acceptedAt = args.acceptedAt || Date.now();
-  const capability = buildCapabilityAcceptance({ ...args, acceptedAt });
-  const trace = buildTrialTrace({ ...args, capabilityId: capability.id, trialRef: capability.trial.trialRef, acceptedAt });
-  return { ok: true, capability, trace };
+  const landmarks = buildLandmarkRecords({ roles: args.roles, groundId: args.groundId, localeUrl: args.localeUrl, acceptedAt });
+  const landmarkUids = landmarks.map((l) => l.uid);
+  const perspective = buildPerspectiveRecord({ intent: args.intent, spec: args.spec, groundId: args.groundId, localeUrl: args.localeUrl, landmarkUids, acceptedAt });
+  const capability = buildCapabilityAcceptance({ ...args, acceptedAt, perspectiveId: perspective.id, landmarkUids });
+  const trace = buildTrialTrace({ ...args, capabilityId: capability.id, trialRef: capability.trial.trialRef, acceptedAt, perspectiveId: perspective.id, landmarkUids });
+  return { ok: true, capability, perspective, landmarks, trace };
 }

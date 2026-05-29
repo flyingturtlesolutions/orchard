@@ -32,7 +32,7 @@ import * as CapabilitySynth    from './Core/capabilitySynth.js';  // v2.74.471 �
 import { synthesizeTrialOp, classifyTrialSafety, scoreTrial } from './Core/trialSynth.js';  // PB-3/4/5 — trial op + safety + scoring
 import { coverComplete }       from './Core/cover.js';      // SG-3 Cover — completeness floor
 import { selectionToTrialRoles } from './Core/bind.js';     // SG-4 Bind — selection → trial roles bundle
-import { buildAcceptance }     from './Core/accept.js';     // SG-5/PB-7 — passing trial → durable capability + trace
+import { buildAcceptance, landmarkRefActions } from './Core/accept.js';     // SG-5/PB-7 — passing trial → durable capability + landmark-backed Fragment/Strategy
 import * as ChromeHoist        from './Core/chromeHoist.js';  // v2.74.480 — hoist recurring chrome off Locales → Ground.chrome
 import * as Workflows          from './Core/workflows.js';   // v2.74.488 — cross-Locale workflows (partOf) over the siteMap
 import { ExecutionEngine }    from './Services/ExecutionEngine.js';
@@ -5661,7 +5661,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // PB-7 copy-on-accept: stash a SESSION DRAFT of everything ACCEPT_SG_TRIAL needs to materialize a
           // durable capability — so the user can review the result, then accept/reject without re-running.
           if (out?.ran) {
-            await _writeSgDraft(groundId, { intent, spec, selection, cover, roles, trial: out.trial || null, result: out.result || null, groundId, localeUrl, capturedAt: Date.now() });
+            // Stash the synthesized DRAFT too (post-safety actions, each carrying its inline landmark) so
+            // Accept can promote it into a persisted, landmark-backed Fragment + Strategy (SG-LM-5).
+            await _writeSgDraft(groundId, { intent, spec, selection, cover, roles, trial: out.trial || null, result: out.result || null, draft: out.draft || null, groundId, localeUrl, capturedAt: Date.now() });
           }
           const acceptEligible = !!(out?.ran && out.trial?.verdict === 'trial-pass' && (spec.shape !== 'complete' || cover.complete === true));
           sendResponse({ ...out, cover, intentShape: spec.shape, acceptEligible });
@@ -5691,15 +5693,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             groundId, localeUrl: draft.localeUrl || '', acceptedAt: Date.now(),
           });
           if (!built.ok) { sendResponse({ success: true, accepted: false, reason: built.reason }); return; }
+          // PROMOTE the proto-landmarks → saved registry Landmarks (recoverable workspace primitives) + a
+          // model-authored Perspective composing them. These sync like hand-authored ones and show in the
+          // Ground library. The lean capability + heavy trace stay local (chrome.storage), linked by ids.
+          let savedLm = 0;
+          for (const { record } of built.landmarks) {
+            try { await StorageManager.saveLandmark(record); savedLm++; }
+            catch (e) { Logger.warn('background', `ACCEPT_SG_TRIAL saveLandmark(${record.uid}) failed: ${e.message}`); }
+          }
+          try { await StorageManager.savePerspective(built.perspective); }
+          catch (e) { Logger.error('background', `ACCEPT_SG_TRIAL savePerspective failed: ${e.message}`); sendResponse({ success: false, error: `perspective save failed: ${e.message}` }); return; }
+          // Promote the proven procedure → a persisted, landmark-backed Fragment + Strategy (reviewable
+          // library entities; replay runs THIS). Each step references a saved Landmark by uid, so the
+          // Strategy resolves + self-heals via the registry recovery path. The submit was already deferred
+          // to a reachability probe at trial, so the saved procedure is the proven-safe one.
+          try {
+            const dr = draft.draft;
+            if (dr && Array.isArray(dr.actions) && dr.actions.length) {
+              const fragmentId = crypto.randomUUID();
+              const strategyId = crypto.randomUUID();
+              const steps = landmarkRefActions(dr.actions, groundId, draft.localeUrl || '');
+              const recs = CapabilitySynth.buildCapabilityRecords({ ...dr, actions: steps, name: built.perspective.name }, { groundId, fragmentId, strategyId });
+              if (recs) {
+                await StorageManager.saveFragment(recs.fragment);
+                await StorageManager.saveStrategy(recs.strategy);
+                built.capability.fragmentId = fragmentId;
+                built.capability.strategyId = strategyId;
+              }
+            }
+          } catch (e) { Logger.warn('background', `ACCEPT_SG_TRIAL fragment/strategy persist failed (continuing): ${e.message}`); }
           await _writeSgCapability(groundId, built.capability);
           await _writeSgTrace(built.trace);
           await _appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', {
             groundId, verdict: 'accepted', input: { roleOrIntent: String(draft.intent).slice(0, 120) },
-            detail: { capabilityId: built.capability.id, trialRef: built.capability.trial.trialRef, shape: built.capability.shape, score: built.capability.trial.score },
+            detail: { capabilityId: built.capability.id, perspectiveId: built.perspective.id, landmarks: savedLm, trialRef: built.capability.trial.trialRef, shape: built.capability.shape, score: built.capability.trial.score },
           })]);
+          try { await broadcastStorageChanged('perspective', built.perspective.id, 'saved'); } catch { /* */ }
           await _clearSgDraft(groundId);
-          Logger.info('background', `ACCEPT_SG_TRIAL — saved ${built.capability.id} (${built.capability.binding.length} bound role(s), trialRef=${built.capability.trial.trialRef})`);
-          sendResponse({ success: true, accepted: true, capability: built.capability });
+          Logger.info('background', `ACCEPT_SG_TRIAL — promoted ${built.capability.id} → perspective ${built.perspective.id} + ${savedLm} landmark(s) (trialRef=${built.capability.trial.trialRef})`);
+          sendResponse({ success: true, accepted: true, capability: built.capability, perspectiveId: built.perspective.id, landmarkCount: savedLm });
         } catch (err) {
           Logger.error('background', `ACCEPT_SG_TRIAL failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
@@ -5745,11 +5777,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
-    // SG-5 / PB-7 — REPLAY an accepted capability. THE PAYOFF of the acceptance bundle: the binding
-    // (role → durable selector) was cached at accept, so re-running needs NO LLM — no Comprehend, no
-    // Select, no Cover, no Bind. Just read the saved binding, verify the page hasn't drifted, and run the
-    // shared trial executor on the live tab (irreversible commit still deferred by the safety class).
-    // Payload: { tabId, groundId, capabilityId } → the _runTrialBundle result.
+    // SG-5 / PB-7 — REPLAY an accepted capability. NO LLM (no Comprehend/Select/Cover/Bind). SG-LM-5:
+    // prefer the PROMOTED, landmark-backed Strategy — run it via ExecutionEngine on the current tab; each
+    // step resolves + self-heals through the registry recovery path (applyLandmarkRefToStep →
+    // LANDMARK_PROBE_OR_RECOVER). Pre-LM-5 capabilities (no strategyId) fall back to the lean binding path.
+    // The saved procedure already deferred the submit, so replay re-runs the proven-safe steps.
+    // Payload: { tabId, groundId, capabilityId }.
     case 'REPLAY_SG_CAPABILITY': {
       (async () => {
         try {
@@ -5757,22 +5790,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (!groundId || !capabilityId) { sendResponse({ success: false, error: 'groundId + capabilityId required' }); return; }
           const cap = (await _readSgCapabilities(groundId)).find((c) => c.id === capabilityId);
           if (!cap) { sendResponse({ success: false, error: 'capability not found' }); return; }
-          const roles = Array.isArray(cap.binding) ? cap.binding : [];
-          if (!roles.length) { sendResponse({ success: true, ran: false, reason: 'capability has no bound roles' }); return; }
           let liveUrl = '';
           if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); liveUrl = t?.url ?? ''; } catch { /* */ } }
-          // The locale (for per-field fill-op kind) is read by the SAME key the capability targets, so a
-          // re-explore that re-keyed featureIds still resolves the current page's features.
-          let localeModel = null;
-          try { const pm = await _readLocaleCache(groundId, _normalizeUrlForPerspectiveCache(cap.localeUrl || liveUrl)); localeModel = pm?.model || null; } catch { /* */ }
-          // Page-drift guard — replay binds the capability's page; refuse to type into whatever else loaded.
+          // Page-drift guard — replay binds the capability's page; refuse to run on whatever else loaded.
           if (cap.localeUrl && liveUrl && _normalizeUrlForPerspectiveCache(liveUrl) !== _normalizeUrlForPerspectiveCache(cap.localeUrl)) {
             sendResponse({ success: true, ran: false, reason: `the page is now "${String(liveUrl).slice(0, 80)}" but this capability targets "${String(cap.localeUrl).slice(0, 80)}" — navigate there and re-run` });
             return;
           }
-          Logger.info('background', `REPLAY_SG_CAPABILITY — ${cap.id} (${roles.length} bound role(s), NO LLM)`);
+          // Preferred: run the saved, landmark-backed Strategy (the promoted library entity).
+          if (cap.strategyId) {
+            let result = null;
+            try { result = await ExecutionEngine.executeStrategy({ strategyId: cap.strategyId, targetTabId: (typeof tabId === 'number' ? tabId : null) }); }
+            catch (e) { sendResponse({ success: false, error: `replay strategy failed: ${e.message}` }); return; }
+            const ok = !!(result && result.success);
+            Logger.info('background', `REPLAY_SG_CAPABILITY — ${cap.id} via saved strategy ${cap.strategyId} → ${ok ? 'ok' : 'failed'} (NO LLM, landmark recovery)`);
+            sendResponse({ success: true, ran: true, replayed: true, via: 'strategy', capabilityId: cap.id, ok, reason: ok ? undefined : (result?.error || 'a step failed') });
+            return;
+          }
+          // Fallback (pre-LM-5 capability): re-synth from the lean binding (still landmark-backed via LM-3).
+          const roles = Array.isArray(cap.binding) ? cap.binding : [];
+          if (!roles.length) { sendResponse({ success: true, ran: false, reason: 'capability has no saved strategy or binding' }); return; }
+          let localeModel = null;
+          try { const pm = await _readLocaleCache(groundId, _normalizeUrlForPerspectiveCache(cap.localeUrl || liveUrl)); localeModel = pm?.model || null; } catch { /* */ }
+          Logger.info('background', `REPLAY_SG_CAPABILITY — ${cap.id} via binding fallback (${roles.length} role(s), NO LLM)`);
           const out = await _runTrialBundle({ groundId, intent: cap.intent, roles, localeModel, navigateUrl: null, proposedRoleCount: roles.length, targetTabId: (typeof tabId === 'number' ? tabId : null) });
-          sendResponse({ ...out, replayed: true, capabilityId: cap.id });
+          sendResponse({ ...out, replayed: true, via: 'binding', capabilityId: cap.id });
         } catch (err) {
           Logger.error('background', `REPLAY_SG_CAPABILITY failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });

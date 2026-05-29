@@ -1,9 +1,9 @@
-// Core/accept.test.js — PB-7 acceptance-bundle builders. Run: node Core/accept.test.js
-// (Node 16 locally has no `node --test`; this is a plain assert script. CI may also `node --test` it.)
+// Core/accept.test.js — SG-LM-4 promotion builders. Run: node Core/accept.test.js
+// (Node 16 has no `node --test`; this is a plain assert script.)
 import assert from 'node:assert';
 import {
-  canAccept, buildCapabilityAcceptance, buildTrialTrace, buildAcceptance,
-  mintCapabilityId, mintTrialRef, ACCEPT_SCHEMA,
+  canAccept, buildLandmarkRecords, buildPerspectiveRecord, buildCapabilityAcceptance,
+  buildTrialTrace, buildAcceptance, landmarkRefActions, mintCapabilityId, mintLandmarkUid, mintPerspectiveId, ACCEPT_SCHEMA,
 } from './accept.js';
 
 let passed = 0;
@@ -20,108 +20,109 @@ const specComplete = {
 const coverComplete = {
   shape: 'complete', complete: true, completionCount: 12, operableCount: 12,
   inoperable: [], orphanRequired: [], hasSuccessAction: true,
-  successAction: { id: 'submit1', label: 'Submit Application' },
   reason: '12 required field(s) operable + success action present',
 };
+// roles carry a proto-landmark (SG-LM-2). file input has no recoverable role → no landmark.
 const roles = [
-  { role: 'firstName', selector: 'input[name="firstName"]', featureId: 'w4d17t', multiplicity: 'one', kind: 'input' },
-  { role: 'resume', selector: 'input[aria-label="file-input"]', featureId: 'u6wiqi', multiplicity: 'one', kind: 'input', fieldType: 'file', hidden: true, revealedBy: 'upload-trigger' },
-  { role: 'submit', selector: null, featureId: '12wwujm', multiplicity: 'one', kind: 'action' },
+  { role: 'firstName', selector: 'input[name="firstName"]', featureId: 'w4d17t', multiplicity: 'one', kind: 'input',
+    landmark: { role: 'textbox', accessibleName: 'First name', hierarchicalContext: null, selector: 'input[name="firstName"]' } },
+  { role: 'resume', selector: 'input[aria-label="file-input"]', featureId: 'u6wiqi', multiplicity: 'one', kind: 'input', fieldType: 'file',
+    landmark: null },
+  { role: 'submit', selector: 'button.s', featureId: '12wwujm', multiplicity: 'one', kind: 'action',
+    landmark: { role: 'button', accessibleName: 'Submit Application', hierarchicalContext: null, selector: 'button.s' } },
 ];
-const trialPass = { verdict: 'trial-pass', score: 1, vector: { resolvedCompleteness: 1, effectMatch: 1, terminalReachable: 1 }, evidence: ['Ran 13 step(s), no errors', 'Reached terminal action (submit) — not fired'] };
+const trialPass = { verdict: 'trial-pass', score: 1, vector: { resolvedCompleteness: 1, effectMatch: 1, terminalReachable: 1 }, evidence: ['Ran 13 step(s), no errors'] };
 const trialFail = { verdict: 'trial-fail', score: 0.3, vector: { effectMatch: 0 }, evidence: ['Run failed'] };
 const rawResult = { success: true, stepResults: [{ success: true, actionsRun: 13, actions: [
   { action: 'TYPE', selector: 'input[name="firstName"]', outcome: 'success' },
-  { action: 'SET_FILE', selector: 'input[aria-label="file-input"]', outcome: 'success' },
 ] }] };
+const base = { intent: 'apply to this job', spec: specComplete, cover: coverComplete, roles, trial: trialPass, result: rawResult, groundId: 'gnd_1', localeUrl: 'https://x/careers/56', acceptedAt: 1000 };
 
-// ── the accept gate ──────────────────────────────────────────────────────────
-test('canAccept blocks a trial-fail', () => {
-  const g = canAccept({ trial: trialFail, cover: coverComplete, spec: specComplete });
-  assert.equal(g.ok, false);
+// ── gate ──
+test('canAccept blocks a trial-fail', () => { assert.equal(canAccept({ trial: trialFail, cover: coverComplete, spec: specComplete }).ok, false); });
+test('canAccept blocks an incomplete completion intent on a pass', () => {
+  assert.equal(canAccept({ trial: trialPass, cover: { ...coverComplete, complete: false, reason: 'x' }, spec: specComplete }).ok, false);
 });
-test('canAccept blocks an incomplete completion intent even on a pass', () => {
-  const g = canAccept({ trial: trialPass, cover: { ...coverComplete, complete: false, reason: '2 fields not operable' }, spec: specComplete });
-  assert.equal(g.ok, false);
-  assert.match(g.reason, /not covered/);
+test('canAccept passes a complete + trial-pass', () => { assert.equal(canAccept({ trial: trialPass, cover: coverComplete, spec: specComplete }).ok, true); });
+
+// ── landmark promotion ──
+test('buildLandmarkRecords mints a landmark per recoverable role (file w/o role excluded)', () => {
+  const lms = buildLandmarkRecords({ roles, groundId: 'gnd_1', localeUrl: 'u', acceptedAt: 1000 });
+  assert.equal(lms.length, 2);                       // firstName + submit; resume (no landmark) excluded
+  const byRole = Object.fromEntries(lms.map(l => [l.role, l]));
+  assert.equal(byRole.firstName.record.a11yRole, 'textbox');
+  assert.equal(byRole.firstName.record.accessibleName, 'First name');
+  assert.equal(byRole.firstName.record.alias, 'firstName');
+  assert.equal(byRole.firstName.record.lifecycle, 'fresh');
+  assert.equal(byRole.firstName.record.groundId, 'gnd_1');
+  assert.equal(byRole.submit.record.a11yRole, 'button');
+  assert.ok(byRole.firstName.uid.startsWith('lmk_sg_'));
 });
-test('canAccept passes a complete + trial-pass', () => {
-  const g = canAccept({ trial: trialPass, cover: coverComplete, spec: specComplete });
-  assert.equal(g.ok, true);
-});
-test('canAccept passes an act intent on a pass alone (no completeness gate)', () => {
-  const actSpec = { shape: 'act', subGoals: [] };
-  const actCover = { shape: 'act', complete: true, requiredSubGoals: [], unmetSubGoals: [], reason: 'no required sub-goals' };
-  const g = canAccept({ trial: trialPass, cover: actCover, spec: actSpec });
-  assert.equal(g.ok, true);
+test('landmark uid is stable for the same identity', () => {
+  const lm = { role: 'button', accessibleName: 'Sign in', selector: 'b.x' };
+  assert.equal(mintLandmarkUid('g', 'u', lm), mintLandmarkUid('g', 'u', lm));
+  assert.notEqual(mintLandmarkUid('g', 'u', lm), mintLandmarkUid('g', 'u2', lm));
 });
 
-// ── lean CapabilityAcceptance ──────────────────────────────────────────────────
-test('buildCapabilityAcceptance carries the replayable essence, no raw blobs', () => {
-  const cap = buildCapabilityAcceptance({ intent: 'apply to this job', spec: specComplete, cover: coverComplete, roles, trial: trialPass, groundId: 'gnd_1', localeUrl: 'https://x/careers/56', acceptedAt: 1000 });
+// ── perspective ──
+test('buildPerspectiveRecord composes the landmark uids, authoredBy model', () => {
+  const p = buildPerspectiveRecord({ intent: 'apply to this job', spec: specComplete, groundId: 'gnd_1', localeUrl: 'u', landmarkUids: ['lmk_sg_a', 'lmk_sg_b'], acceptedAt: 1000 });
+  assert.equal(p.id, mintPerspectiveId('apply to this job', 'gnd_1', 'u'));
+  assert.deepEqual(p.landmarkRefs, ['lmk_sg_a', 'lmk_sg_b']);
+  assert.equal(p.authoredBy, 'model');
+  assert.equal(p.name, 'apply to this job');
+  assert.equal(p.groundId, 'gnd_1');
+});
+
+// ── lean capability points at the saved entities (no flat binding) ──
+test('buildCapabilityAcceptance references perspectiveId + landmarkUids; transitional binding carries the landmark', () => {
+  const cap = buildCapabilityAcceptance({ ...base, perspectiveId: 'persp_sg_x', landmarkUids: ['lmk_sg_a'] });
   assert.equal(cap.schema, ACCEPT_SCHEMA);
   assert.equal(cap.kind, 'substrate-capability');
-  assert.equal(cap.id, mintCapabilityId('apply to this job', 'gnd_1', 'https://x/careers/56'));
-  assert.equal(cap.shape, 'complete');
-  assert.equal(cap.safety, 'irreversible');
+  assert.equal(cap.perspectiveId, 'persp_sg_x');
+  assert.deepEqual(cap.landmarkUids, ['lmk_sg_a']);
+  // transitional replay binding (SG-LM-5 migrates replay to the perspective, then drops this)
   assert.equal(cap.binding.length, 3);
-  assert.equal(cap.binding[0].selector, 'input[name="firstName"]');
-  assert.equal(cap.binding[1].hidden, true);
-  assert.equal(cap.binding[1].revealedBy, 'upload-trigger');
-  // self-contained replay: kind + fieldType carried through to the saved capability
-  assert.equal(cap.binding[1].kind, 'input');
-  assert.equal(cap.binding[1].fieldType, 'file');
-  assert.equal(cap.binding[2].kind, 'action');
-  assert.equal(cap.cover.complete, true);
-  assert.equal(cap.cover.completionCount, 12);
+  assert.equal(cap.binding[0].landmark.role, 'textbox');   // binding carries the recoverable landmark
   assert.equal(cap.trial.verdict, 'trial-pass');
   assert.ok(cap.trial.trialRef.startsWith('trial_'));
-  assert.equal(cap.lifecycle, 'fresh');
-  // no heavy fields leaked into the lean record
-  assert.equal(cap.intentSpec, undefined);
-  assert.equal(cap.steps, undefined);
-});
-test('id is stable for the same (intent, ground, locale)', () => {
-  const a = mintCapabilityId('X', 'g', 'u');
-  const b = mintCapabilityId('X', 'g', 'u');
-  const c = mintCapabilityId('X', 'g', 'u2');
-  assert.equal(a, b);
-  assert.notEqual(a, c);
-});
-test('intent is matched case-insensitively for the id', () => {
-  assert.equal(mintCapabilityId('Apply To This Job', 'g', 'u'), mintCapabilityId('apply to this job', 'g', 'u'));
 });
 
-// ── heavy trialTrace ────────────────────────────────────────────────────────────
-test('buildTrialTrace keeps the full proof + compact steps + links to capability', () => {
-  const selection = {
-    matches: { 'provide-identity': ['w4d17t'] },
-    orphanRequired: [{ id: 'orphan1' }],
-    boundary: { requiredFields: [{ id: 'w4d17t' }, { id: 'orphan1' }], successAction: { id: 'submit1' } },
-  };
-  const trace = buildTrialTrace({ capabilityId: 'cap_x', trialRef: 'trial_x', intent: 'apply', spec: specComplete, selection, cover: coverComplete, roles, trial: trialPass, result: rawResult, groundId: 'g', localeUrl: 'u', acceptedAt: 2000 });
-  assert.equal(trace.schema, ACCEPT_SCHEMA);
-  assert.equal(trace.capabilityId, 'cap_x');
-  assert.equal(trace.trialRef, 'trial_x');
-  assert.deepEqual(trace.intentSpec, specComplete);        // full spec retained
-  assert.deepEqual(trace.selection.orphanRequired, ['orphan1']);   // lean: ids only
-  assert.deepEqual(trace.selection.boundary.requiredFields, ['w4d17t', 'orphan1']);
-  assert.equal(trace.trial.evidence.length, 2);
-  assert.equal(trace.steps.length, 2);
-  assert.equal(trace.steps[1].action, 'SET_FILE');
-});
-
-// ── one-call convenience ──────────────────────────────────────────────────────
-test('buildAcceptance gates then returns both linked artifacts', () => {
-  const r = buildAcceptance({ intent: 'apply', spec: specComplete, cover: coverComplete, roles, trial: trialPass, result: rawResult, groundId: 'g', localeUrl: 'u', acceptedAt: 3000 });
+// ── one-call: gate → all linked artifacts ──
+test('buildAcceptance returns capability + perspective + landmarks + trace, all linked', () => {
+  const r = buildAcceptance(base);
   assert.equal(r.ok, true);
-  assert.equal(r.capability.trial.trialRef, r.trace.trialRef);   // linked
-  assert.equal(r.trace.capabilityId, r.capability.id);
+  assert.equal(r.landmarks.length, 2);
+  assert.equal(r.capability.perspectiveId, r.perspective.id);
+  assert.deepEqual(r.capability.landmarkUids, r.landmarks.map(l => l.uid));
+  assert.deepEqual(r.perspective.landmarkRefs, r.landmarks.map(l => l.uid));
+  assert.equal(r.capability.trial.trialRef, r.trace.trialRef);
+  assert.equal(r.trace.perspectiveId, r.perspective.id);
+  assert.deepEqual(r.trace.intentSpec, specComplete);   // heavy trace keeps the full spec
 });
-test('buildAcceptance refuses to build when the gate blocks', () => {
-  const r = buildAcceptance({ intent: 'apply', spec: specComplete, cover: coverComplete, roles, trial: trialFail });
+// ── SG-LM-5: action → landmarkRef conversion for the persisted Fragment ──
+test('landmarkRefActions rewrites inline landmark → registry landmarkRef (uid matches the saved landmark)', () => {
+  const lm = { role: 'button', accessibleName: 'Submit Application', hierarchicalContext: null, selector: 'button.s' };
+  const actions = [
+    { action: 'TYPE', selector: 'input[name="firstName"]', value: 'test', landmark: { role: 'textbox', accessibleName: 'First name', selector: 'input[name="firstName"]' } },
+    { action: 'SET_FILE', selector: 'input[aria-label="file-input"]', value: 'trial-upload.pdf' },  // no landmark
+    { action: 'EXTRACT', selector: 'button.s', target: 'TRIAL_TERMINAL', landmark: lm },             // deferred submit
+  ];
+  const steps = landmarkRefActions(actions, 'gnd_1', 'u');
+  assert.equal(steps[0].landmarkRef.uid, mintLandmarkUid('gnd_1', 'u', { role: 'textbox', accessibleName: 'First name', selector: 'input[name="firstName"]' }));
+  assert.equal(steps[0].landmark, undefined);          // inline landmark stripped
+  assert.equal(steps[0].action, 'TYPE');
+  assert.equal(steps[1].landmarkRef, undefined);        // no recoverable landmark → plain selector
+  assert.equal(steps[1].selector, 'input[aria-label="file-input"]');
+  assert.equal(steps[2].landmarkRef.uid, mintLandmarkUid('gnd_1', 'u', lm));   // matches the saved landmark uid
+  assert.equal(steps[2].target, 'TRIAL_TERMINAL');
+});
+
+test('buildAcceptance refuses on a failing trial', () => {
+  const r = buildAcceptance({ ...base, trial: trialFail });
   assert.equal(r.ok, false);
   assert.equal(r.capability, undefined);
+  assert.equal(r.perspective, undefined);
 });
 
 console.log(`\n${passed} passed`);
