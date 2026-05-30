@@ -16,7 +16,7 @@
 //
 // PURE: no DOM/LLM/storage. Unit-testable like the other SG stages.
 // @module Core/bind
-// @version 2.74.624
+// @version 2.74.633
 
 import { featureToProtoLandmark } from './landmark.js';
 import { resolveIntentGoals } from './select.js';
@@ -121,25 +121,36 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
     if (groundedGoals.size) {
       // ONE INPUT PER ROLE (v2.74.624, SG-RES-7c) — a page can carry two equivalent fields for the same
       // goal: thepetal.com (Shopify) has a visible header search AND a hidden modal search, BOTH labelled
-      // "Search", both in the search goal's achievableVia. Unfiltered goal expansion bound both; the trial
-      // filled the visible one, then tried the hidden modal box whose selector wasn't resolvable, fell back
-      // to landmark "Search", matched 2 candidates → unresolvable → hard fail. So goal-expanded INPUTS that
-      // duplicate an already-bound role are skipped. The matcher's anchored inputs are added first (above),
-      // so the anchored/visible one wins; DISTINCT roles (q + location) are all still kept.
+      // "Search". Goal-expanded INPUTS that duplicate an already-bound role are skipped (anchored one wins;
+      // distinct roles q + location are all kept).
+      //
+      // OPTION GROUPS (v2.74.633, SG-RES-7d) — a goal WITHOUT a submit commit is a filter/menu "choose-one":
+      // Indeed's pay filter goal = a disclosure + many mutually-exclusive pay brackets ($15+, $20+, …). Its
+      // option INPUTS are ALTERNATIVES, not co-requirements — binding all of them made the fragment try to
+      // select EVERY bracket (the live 8-role "Apply pay filter" node). So for a no-submit goal we bind at
+      // MOST ONE option input (the anchor if present, else the first) PLUS the disclosure to reach it. A goal
+      // WITH a submit is a FORM (search/apply) — bind ALL its inputs (you fill every field). Per-goal so the
+      // form-vs-filter decision is local to each goal the intent touches.
       const _roleKey = (f) => String((f && (f.label || f.id)) || '').trim().toLowerCase();
       const inputRoles = new Set();
       for (const id of ids) { const f = feats[id]; if (f && f.kind === 'input') inputRoles.add(_roleKey(f)); }
-      const _tryAdd = (f) => {
-        if (!_formEssential(f)) return;
-        if (f.kind === 'input') { const k = _roleKey(f); if (inputRoles.has(k)) return; inputRoles.add(k); }
-        ids.add(f.id);
-      };
-      for (const g of groundedGoals) {                                  // forward: achievableVia (ground truth)
-        const via = (goalMap[g] && Array.isArray(goalMap[g].achievableVia)) ? goalMap[g].achievableVia : [];
-        for (const fid of via) _tryAdd(feats[fid]);
-      }
-      for (const f of Object.values(feats)) {                           // reverse: feature → goals pointer
-        if (Array.isArray(f.goals) && f.goals.some((g) => groundedGoals.has(g))) _tryAdd(f);
+      for (const g of groundedGoals) {
+        // Gather goal g's members from BOTH sources: forward achievableVia ∪ reverse (features whose goals∋g).
+        const members = new Map();
+        for (const fid of ((goalMap[g] && Array.isArray(goalMap[g].achievableVia)) ? goalMap[g].achievableVia : [])) { if (feats[fid]) members.set(fid, feats[fid]); }
+        for (const f of Object.values(feats)) { if (f && Array.isArray(f.goals) && f.goals.includes(g)) members.set(f.id, f); }
+        const goalHasSubmit = [...members.values()].some((f) => f.kind === 'action' && f.interaction && f.interaction.effect === 'submit');
+        // Has an input of THIS goal already been bound (e.g. the anchored option)?
+        let goalInputBound = [...ids].some((id) => { const f = feats[id]; return f && f.kind === 'input' && Array.isArray(f.goals) && f.goals.includes(g); });
+        for (const f of members.values()) {
+          if (!_formEssential(f)) continue;
+          if (f.kind === 'input') {
+            if (!goalHasSubmit && goalInputBound) continue;             // SG-RES-7d: option group → at most one input
+            const k = _roleKey(f); if (inputRoles.has(k)) continue;     // SG-RES-7c: one per distinct role
+            inputRoles.add(k); if (!goalHasSubmit) goalInputBound = true;
+          }
+          ids.add(f.id);
+        }
       }
     }
 

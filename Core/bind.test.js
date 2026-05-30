@@ -197,6 +197,50 @@ describe('selectionToTrialRoles — goal-grounded membership (SG-RES-7): a match
     assert.deepEqual(roles.map((r) => r.featureId).sort(), ['go', 'l', 'q'], 'q + location kept; the duplicate "Job title" (q2) deduped');
   });
 
+  it('OPTION GROUP (SG-RES-7d): a no-submit filter goal binds the disclosure + ONE option, not all', () => {
+    // Indeed's pay filter: a disclosure + many mutually-exclusive brackets, NO submit. Goal expansion used
+    // to bind all 8 brackets (the live "Apply pay filter — 8 role(s)" node); now it binds open + one option.
+    const locale = {
+      goals: { g_pay: { id: 'g_pay', label: 'pay filter', achievableVia: ['open', 'o15', 'o20', 'o25'] } },
+      features: {
+        open: { id: 'open', label: 'Pay', kind: 'disclosure', goals: ['g_pay'], selector: '#open', interaction: { pattern: 'click', effect: 'reveal' } },
+        o15:  { id: 'o15', label: '$15+', kind: 'input', goals: ['g_pay'], selector: '#o15', interaction: { pattern: 'type', effect: 'none' } },
+        o20:  { id: 'o20', label: '$20+', kind: 'input', goals: ['g_pay'], selector: '#o20', interaction: { pattern: 'type', effect: 'none' } },
+        o25:  { id: 'o25', label: '$25+', kind: 'input', goals: ['g_pay'], selector: '#o25', interaction: { pattern: 'type', effect: 'none' } },
+      },
+    };
+    const roles = selectionToTrialRoles({ shape: 'act' }, { matches: { 'apply-pay': ['o20'] } }, locale);
+    assert.deepEqual(roles.map((r) => r.featureId).sort(), ['o20', 'open'], 'anchored option + disclosure only — the other brackets dropped');
+  });
+
+  it('OPTION GROUP: anchoring only the disclosure still binds the disclosure + one option', () => {
+    const locale = {
+      goals: { g_pay: { id: 'g_pay', label: 'pay filter', achievableVia: ['open', 'o15', 'o20'] } },
+      features: {
+        open: { id: 'open', label: 'Pay', kind: 'disclosure', goals: ['g_pay'], selector: '#open', interaction: { pattern: 'click', effect: 'reveal' } },
+        o15:  { id: 'o15', label: '$15+', kind: 'input', goals: ['g_pay'], selector: '#o15', interaction: { pattern: 'type', effect: 'none' } },
+        o20:  { id: 'o20', label: '$20+', kind: 'input', goals: ['g_pay'], selector: '#o20', interaction: { pattern: 'type', effect: 'none' } },
+      },
+    };
+    const roles = selectionToTrialRoles({ shape: 'act' }, { matches: { 'open-pay': ['open'] } }, locale);
+    assert.equal(roles.length, 2, 'disclosure + exactly one option');
+    assert.ok(roles.some((r) => r.featureId === 'open'), 'the disclosure is bound');
+    assert.equal(roles.filter((r) => r.featureId !== 'open').length, 1, 'exactly one bracket bound');
+  });
+
+  it('a FORM goal (has submit) still binds ALL its inputs (the option cap only applies to no-submit goals)', () => {
+    const locale = {
+      goals: { g_search: { id: 'g_search', label: 'search', achievableVia: ['q', 'l', 'go'] } },
+      features: {
+        q:  { id: 'q', label: 'Job title', kind: 'input', goals: ['g_search'], selector: '#q', interaction: { pattern: 'type', effect: 'none' } },
+        l:  { id: 'l', label: 'Location', kind: 'input', goals: ['g_search'], selector: '#l', interaction: { pattern: 'type', effect: 'none' } },
+        go: { id: 'go', label: 'Search', kind: 'action', goals: ['g_search'], selector: '#go', interaction: { pattern: 'click', effect: 'submit' } },
+      },
+    };
+    const roles = selectionToTrialRoles({ shape: 'act' }, { matches: { 'go': ['go'] } }, locale);
+    assert.deepEqual(roles.map((r) => r.featureId).sort(), ['go', 'l', 'q'], 'form binds every field + submit');
+  });
+
   it('does not drag in tangential non-form actions that merely share the goal', () => {
     // achievableVia membership is scoped to FORM ESSENTIALS (input/submit/disclosure). A "Share search"
     // action sharing the goal is NOT a form field and must not join the trial.
