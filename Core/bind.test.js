@@ -241,6 +241,35 @@ describe('selectionToTrialRoles — goal-grounded membership (SG-RES-7): a match
     assert.deepEqual(roles.map((r) => r.featureId).sort(), ['go', 'l', 'q'], 'form binds every field + submit');
   });
 
+  it('does NOT expand shared filter-panel disclosures via goal membership (SG-RES-7e)', () => {
+    // Indeed tags every filter dropdown disclosure onto every filter goal; goal expansion used to open all
+    // of them (the live 8-role pay node = 1 option + 7 dropdowns). Now disclosures aren't expanded in bulk.
+    const locale = {
+      goals: { g_filter: { id: 'g_filter', label: 'filters', achievableVia: ['opt', 'd1', 'd2', 'd3'] } },
+      features: {
+        opt: { id: 'opt', label: '$20+', kind: 'action', goals: ['g_filter'], selector: '#opt', interaction: { pattern: 'click', effect: 'none' } },
+        d1: { id: 'd1', label: 'Pay', kind: 'disclosure', goals: ['g_filter'], selector: '#d1', interaction: { pattern: 'click', effect: 'reveal' } },
+        d2: { id: 'd2', label: 'Date', kind: 'disclosure', goals: ['g_filter'], selector: '#d2', interaction: { pattern: 'click', effect: 'reveal' } },
+        d3: { id: 'd3', label: 'Type', kind: 'disclosure', goals: ['g_filter'], selector: '#d3', interaction: { pattern: 'click', effect: 'reveal' } },
+      },
+    };
+    const roles = selectionToTrialRoles({ shape: 'act' }, { matches: { 'apply': ['opt'] } }, locale);
+    assert.deepEqual(roles.map((r) => r.featureId), ['opt'], 'no filter dropdowns dragged in — just the anchored option');
+  });
+
+  it('still binds the SPECIFIC disclosure that reveals a bound hidden feature (via revealedBy, not bulk)', () => {
+    const locale = {
+      goals: { g_filter: { id: 'g_filter', label: 'filters', achievableVia: ['opt', 'd1', 'd2'] } },
+      features: {
+        opt: { id: 'opt', label: '$20+', kind: 'action', goals: ['g_filter'], hidden: true, revealedBy: 'd1', selector: '#opt', interaction: { pattern: 'click', effect: 'none' } },
+        d1: { id: 'd1', label: 'Pay', kind: 'disclosure', goals: ['g_filter'], selector: '#d1', interaction: { pattern: 'click', effect: 'reveal' } },
+        d2: { id: 'd2', label: 'Date', kind: 'disclosure', goals: ['g_filter'], selector: '#d2', interaction: { pattern: 'click', effect: 'reveal' } },
+      },
+    };
+    const roles = selectionToTrialRoles({ shape: 'act' }, { matches: { 'apply': ['opt'] } }, locale);
+    assert.deepEqual(roles.map((r) => r.featureId).sort(), ['d1', 'opt'], 'the pay dropdown (d1) revealed the option; the date dropdown (d2) untouched');
+  });
+
   it('does not drag in tangential non-form actions that merely share the goal', () => {
     // achievableVia membership is scoped to FORM ESSENTIALS (input/submit/disclosure). A "Share search"
     // action sharing the goal is NOT a form field and must not join the trial.

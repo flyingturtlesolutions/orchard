@@ -16,7 +16,7 @@
 //
 // PURE: no DOM/LLM/storage. Unit-testable like the other SG stages.
 // @module Core/bind
-// @version 2.74.633
+// @version 2.74.635
 
 import { featureToProtoLandmark } from './landmark.js';
 import { resolveIntentGoals } from './select.js';
@@ -105,11 +105,19 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
     // generalizes SG-RES-5's submit→inputs special case to anchor-by-any-kind in BOTH directions. Two
     // membership sources, UNIONED so it works whether the Locale carries the forward map, the reverse
     // pointers, or both: forward = locale.goals[g].achievableVia; reverse = features whose f.goals ∋ g.
-    // (Scoped to form essentials — inputs/submit/disclosure — so we complete the form without dragging in
-    // tangential actions/navigation that merely share the goal.)
+    // (Scoped to form essentials — inputs + the submit.)
+    //
+    // NO BLANKET DISCLOSURES (v2.74.633→.635, SG-RES-7e) — a filter PANEL tags many SHARED dropdown
+    // disclosures onto EVERY filter goal: Indeed's pay-filter goal listed 7 filter dropdowns (pay, date,
+    // job-type, remote, …), and the SAME disclosure ids appear in the date-filter goal too. Expanding them
+    // via goal membership opened every dropdown (the live 8-role "Apply pay filter" / 6-role date node). A
+    // disclosure's job is to REVEAL hidden content, so it should be bound only when it is the `revealedBy`
+    // TRIGGER of a bound hidden feature (roleFor injects exactly that one) or when the matcher ANCHORED it
+    // directly (it's in `ids` already, before expansion) — never via blanket goal membership. So
+    // _formEssential covers inputs + the submit only; disclosures are reached precisely, not in bulk.
     const goalMap = (locale && locale.goals && typeof locale.goals === 'object') ? locale.goals : {};
     const _formEssential = (f) => !!f && !!f.selector && f.decoy !== true
-      && (f.kind === 'input' || f.kind === 'disclosure' || (f.kind === 'action' && f.interaction && f.interaction.effect === 'submit'));
+      && (f.kind === 'input' || (f.kind === 'action' && f.interaction && f.interaction.effect === 'submit'));
     const groundedGoals = new Set();
     for (const id of ids) { const f = feats[id]; if (f && Array.isArray(f.goals)) for (const g of f.goals) groundedGoals.add(g); }
     // ZERO-ANCHOR FALLBACK (v2.74.623, SG-RES-7b / slice 2) — the matcher anchored NO goal (it matched
