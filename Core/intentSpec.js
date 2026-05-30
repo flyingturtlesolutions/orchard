@@ -14,7 +14,7 @@
 // it feeds its parsed output in as `comprehension`. Unit-testable like Core/intentShape.js.
 //
 // @module Core/intentSpec
-// @version 2.74.570
+// @version 2.74.629
 
 import { classifyIntentShape } from './intentShape.js';
 
@@ -93,14 +93,18 @@ function _normSubGoals(raw, topShape) {
     ids.add(id);
     const shape = SHAPES.includes(g.shape) ? g.shape : (SHAPES.includes(topShape) ? topShape : 'act');
     const scope = SCOPES.includes(g.scope) ? g.scope : 'required';
-    pass.push({ id, label, shape, scope, _dep: Array.isArray(g.dependsOn) ? g.dependsOn : [] });
+    // SG-T2-5 — a per-subGoal successCondition (the observable that proves THIS phase done) is the LLM
+    // half of decision C; Tier-2 lowering turns it into the phase's fragment postcondition.
+    pass.push({ id, label, shape, scope, _dep: Array.isArray(g.dependsOn) ? g.dependsOn : [], _sc: _normSuccess(g.successCondition) });
     if (pass.length >= 40) break;
   }
   return pass.map((g) => {
     const dependsOn = [];
     for (const d of g._dep) { const dep = _id(d); if (dep && dep !== g.id && ids.has(dep) && !dependsOn.includes(dep)) dependsOn.push(dep); }
-    delete g._dep;
-    return { ...g, dependsOn };
+    const { _dep, _sc, ...rest } = g;
+    const out = { ...rest, dependsOn };
+    if (Array.isArray(_sc) && _sc.length) out.successCondition = _sc;   // omit when empty — keep specs lean
+    return out;
   });
 }
 

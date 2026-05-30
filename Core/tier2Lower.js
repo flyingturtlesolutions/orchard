@@ -21,7 +21,7 @@
 //
 // PURE: no DOM, no LLM, no storage. Unit-testable like the other Core/ stages.
 // @module Core/tier2Lower
-// @version 2.74.628
+// @version 2.74.629
 
 import { selectionToTrialRoles } from './bind.js';
 
@@ -171,11 +171,65 @@ export function topoOrder(subGoals) {
   return order;
 }
 
+// SG-T2-5 — map an IntentSpec successCondition ([{signal,match}]) to runtime condition objects. The LLM
+// half of decision C: a per-subGoal (or intent) success observable becomes a checkable postcondition.
+// Only url/text (and an explicitly-selector-shaped element) map page-independently; prose element/value
+// observables are not statically checkable (no selector) and are dropped — the structural floor covers them.
+export function successToConditions(success) {
+  const arr = Array.isArray(success) ? success : [];
+  const out = [];
+  for (const s of arr) {
+    if (!s || !s.match) continue;
+    const m = String(s.match).trim();
+    if (!m) continue;
+    if (s.signal === 'url') out.push({ type: 'url_matches', pattern: m });
+    else if (s.signal === 'text') out.push({ type: 'text_present', text: m });
+    else if (s.signal === 'element' && /^[#.[]/.test(m)) out.push({ type: 'selector_present', selector: m });
+  }
+  return out;
+}
+
+// Combine the structural floor (SG-T2-2) with LLM-derived conditions (SG-T2-5) into one postcondition.
+// Structural-only is returned UNCHANGED (preserves SG-T2-2 shape: match:'all', source:'structural'). When
+// LLM conditions are present the merged predicate is match:'any' — any positive signal confirms the phase.
+function combinePostcondition(structural, llmConds) {
+  const ll = Array.isArray(llmConds) ? llmConds : [];
+  const hasStruct = !!(structural && Array.isArray(structural.conditions) && structural.conditions.length);
+  if (!hasStruct && !ll.length) return null;
+  if (hasStruct && !ll.length) return structural;
+  const conditions = [];
+  const seen = new Set();
+  const add = (c) => { const k = JSON.stringify(c); if (!seen.has(k)) { seen.add(k); conditions.push(c); } };
+  if (hasStruct) for (const c of structural.conditions) add(c);
+  for (const c of ll) add(c);
+  return { match: 'any', conditions, source: hasStruct ? 'structural+llm' : 'llm' };
+}
+
+// SG-T2-5 — a read phase that TRANSFORMS prior data (rather than just reading it) authors an Analysis.
+const TRANSFORM_HINT = /\b(filter|sort|rank|order|cheapest|priciest|highest|lowest|top|best|worst|select|pick|choose|only|exclude|dedupe|unique|group|count|sum|average|min|max|first|last|nearest|closest)\b/i;
+const _analysisOp = (label) => {
+  const t = String(label || '').toLowerCase();
+  if (/\b(sort|rank|order|cheapest|priciest|highest|lowest|top|best|worst|nearest|closest|first|last)\b/.test(t)) return 'sort';
+  if (/\b(count|sum|average|min|max|unique|dedupe|group)\b/.test(t)) return 'aggregate';
+  return 'filter';
+};
+/**
+ * SG-T2-5 — build an Analysis node for a transform phase: an op over a prior Observation's scope output.
+ * PURE. Returns null when there is no upstream data to transform (caller falls back to an Observation).
+ * @returns {{type:'analysis',subGoalIds:string[],label:string,op:string,over:string}|null}
+ */
+export function buildAnalysisNode(sg, overOutput) {
+  if (!sg || !overOutput) return null;
+  return { type: 'analysis', subGoalIds: [sg.id], label: (sg.label && String(sg.label).trim()) || sg.id, op: _analysisOp(sg.label), over: overOutput };
+}
+
 /**
  * Lower a Comprehend subGoal program into a Tier-2 operation (cache tier).
- *   act/complete → fragment node (SG-T2-1, goal-grounded per phase, form-atomic dedup, postcondition SG-T2-2)
- *   read         → observation node (SG-T2-3)
- *   navigate/transform → later slices (SG-T2-4/5).
+ *   act/complete → fragment node (SG-T2-1, goal-grounded per phase, form-atomic dedup)
+ *   read         → observation node (SG-T2-3), or Analysis if it transforms upstream data (SG-T2-5)
+ *   navigate     → navigate node (SG-T2-4)
+ * Fragment postconditions (SG-T2-2 structural floor + SG-T2-5 per-subGoal successCondition) are attached in
+ * a post-pass; settle waits (SG-T2-4) are interleaved last.
  * @param {object} spec       IntentSpec (uses target + subGoals[].{id,label,shape,dependsOn}).
  * @param {object} selection  Select output — uses `matches` (subGoalId → featureId[]).
  * @param {object} [locale]   Locale (features + goals) — for per-phase goal-grounded binding.
@@ -186,8 +240,10 @@ export function lowerToTier2(spec, selection, locale = null) {
   const matches = (selection && selection.matches && typeof selection.matches === 'object' && !Array.isArray(selection.matches)) ? selection.matches : {};
   const ordered = topoOrder(subGoals);
 
+  const byId = new Map(subGoals.filter((s) => s && s.id).map((s) => [s.id, s]));
   const nodes = [];
   const bySig = new Map();   // role-signature → fragment node (dedup identical forms across phases)
+  let lastObsOutput = null;  // most recent observation's first scope output — the data an Analysis transforms
   for (const sg of ordered) {
     if (!sg) continue;
     if (FRAGMENT_SHAPES.has(sg.shape)) {
@@ -209,21 +265,35 @@ export function lowerToTier2(spec, selection, locale = null) {
       const existing = bySig.get(sig);
       if (existing) { existing.subGoalIds.push(sg.id); continue; }   // same form (fill+submit) → one fragment
       const node = { type: 'fragment', subGoalIds: [sg.id], label: (sg.label && String(sg.label).trim()) || sg.id, shape: sg.shape, roles };
-      // SG-T2-2 — attach the structural-floor postcondition (decision C). Omitted (not null-stamped) when
-      // none is derivable, so the node stays clean for the LLM-refinement pass (SG-T2-5).
-      const pc = deriveStructuralPostcondition(node, locale);
-      if (pc) node.postcondition = pc;
-      bySig.set(sig, node);
+      bySig.set(sig, node);                                 // postcondition attached in the post-pass below
       nodes.push(node);
     } else if (sg.shape === 'read') {
+      // SG-T2-5 — a read that TRANSFORMS upstream data (label hints filter/sort/select) authors an Analysis
+      // over the prior observation's output; otherwise it reads (Observation).
+      if (TRANSFORM_HINT.test(String(sg.label || '')) && lastObsOutput) {
+        const an = buildAnalysisNode(sg, lastObsOutput);
+        if (an) { nodes.push(an); continue; }
+      }
       const obs = buildObservationNode(sg, matches, locale);   // SG-T2-3 — read → Observation
-      if (obs) nodes.push(obs);
+      if (obs) { nodes.push(obs); lastObsOutput = (obs.extracts[0] && obs.extracts[0].output) || lastObsOutput; }
     } else if (sg.shape === 'navigate') {
       const nav = buildNavigateNode(sg, matches, locale);      // SG-T2-4 — navigate → navigate node
       if (nav) nodes.push(nav);
     }
-    // transform phases: SG-T2-5.
   }
+
+  // SG-T2-2 + SG-T2-5 — postcondition post-pass: structural floor ∪ each fragment's subGoals'
+  // successCondition (per-phase LLM refinement, decision C). Done after merges so a fill+submit fragment
+  // gathers ALL its phases' success predicates. Omitted when nothing is derivable (no false floor).
+  for (const node of nodes) {
+    if (node.type !== 'fragment') continue;
+    const structural = deriveStructuralPostcondition(node, locale);
+    const llmConds = [];
+    for (const id of node.subGoalIds) { const sg = byId.get(id); for (const c of successToConditions(sg && sg.successCondition)) llmConds.push(c); }
+    const pc = combinePostcondition(structural, llmConds);
+    if (pc) node.postcondition = pc; else delete node.postcondition;
+  }
+
   // SG-T2-4 — interleave settle waits across transition boundaries (post-pass over the final node list).
   return { tier: 'cache', nodes: insertWaits(nodes, locale) };
 }

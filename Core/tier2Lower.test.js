@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { lowerToTier2, topoOrder, deriveStructuralPostcondition, buildObservationNode, buildNavigateNode, insertWaits } from './tier2Lower.js';
+import { lowerToTier2, topoOrder, deriveStructuralPostcondition, buildObservationNode, buildNavigateNode, insertWaits, successToConditions, buildAnalysisNode } from './tier2Lower.js';
 
 const input = (id, goal, sel) => ({ id, label: id, kind: 'input', goals: [goal], selector: sel, interaction: { pattern: 'type', effect: 'none' } });
 const submit = (id, goal, sel) => ({ id, label: id, kind: 'action', goals: [goal], selector: sel, interaction: { pattern: 'click', effect: 'submit' } });
@@ -234,5 +234,75 @@ describe('navigate node + wait insertion (SG-T2-4)', () => {
     const locale = { features: { a: { kind: 'input', interaction: { effect: 'none' } }, b: { kind: 'input', interaction: { effect: 'none' } } } };
     const out = insertWaits([f1, f2], locale);
     assert.deepEqual(out.map((n) => n.type), ['fragment', 'fragment']);
+  });
+});
+
+describe('LLM-refined postconditions + Analysis (SG-T2-5)', () => {
+  // result region carries the search goal so the structural floor (SG-T2-2) can find it
+  const region = (id, kind, sel) => ({ id, label: id, kind, goals: ['g_search'], selector: sel, interaction: { pattern: 'none', effect: 'none' } });
+
+  it('successToConditions maps url/text/selector observables; drops prose', () => {
+    const conds = successToConditions([
+      { signal: 'url', match: '/jobs' },
+      { signal: 'text', match: 'results found' },
+      { signal: 'element', match: '.result-card' },
+      { signal: 'element', match: 'a list of jobs is visible' },   // prose → dropped
+      { signal: 'value', match: 'whatever' },                       // not statically checkable → dropped
+    ]);
+    assert.deepEqual(conds, [
+      { type: 'url_matches', pattern: '/jobs' },
+      { type: 'text_present', text: 'results found' },
+      { type: 'selector_present', selector: '.result-card' },
+    ]);
+  });
+
+  it('merges a per-subGoal successCondition into the fragment postcondition (match:any, source:structural+llm)', () => {
+    const locale = {
+      goals: { g_search: { id: 'g_search', label: 'search', achievableVia: ['q', 'go'] } },
+      features: { q: input('q', 'g_search', '#q'), go: submit('go', 'g_search', '#go'), results: region('results', 'collection', '.results') },
+    };
+    const spec = { target: 'search', subGoals: [{ id: 's', label: 'search', shape: 'act', dependsOn: [], successCondition: [{ signal: 'url', match: '/jobs' }] }] };
+    const { nodes } = lowerToTier2(spec, { matches: { s: ['go'] } }, locale);
+    const frag = nodes.find((n) => n.type === 'fragment');
+    assert.equal(frag.postcondition.match, 'any');
+    assert.equal(frag.postcondition.source, 'structural+llm');
+    assert.deepEqual(frag.postcondition.conditions, [
+      { type: 'selector_present', selector: '.results' },
+      { type: 'url_matches', pattern: '/jobs' },
+    ]);
+  });
+
+  it('structural-only postcondition is unchanged (match:all, source:structural) when no successCondition', () => {
+    const locale = {
+      goals: { g_search: { id: 'g_search', label: 'search', achievableVia: ['q', 'go'] } },
+      features: { q: input('q', 'g_search', '#q'), go: submit('go', 'g_search', '#go'), results: region('results', 'collection', '.results') },
+    };
+    const { nodes } = lowerToTier2({ target: 'search', subGoals: [{ id: 's', label: 'search', shape: 'act' }] }, { matches: { s: ['go'] } }, locale);
+    const frag = nodes.find((n) => n.type === 'fragment');
+    assert.equal(frag.postcondition.match, 'all');
+    assert.equal(frag.postcondition.source, 'structural');
+  });
+
+  it('buildAnalysisNode returns null with no upstream data, else an analysis over it', () => {
+    assert.equal(buildAnalysisNode({ id: 'a', label: 'cheapest' }, null), null);
+    assert.deepEqual(buildAnalysisNode({ id: 'a', label: 'pick the cheapest' }, 'RESULTS'),
+      { type: 'analysis', subGoalIds: ['a'], label: 'pick the cheapest', op: 'sort', over: 'RESULTS' });
+  });
+
+  it('a transform-hint read AFTER an observation lowers to an Analysis over the observation output', () => {
+    const locale = {
+      goals: { g_search: { id: 'g_search', label: 'search', achievableVia: ['q', 'go'] } },
+      features: { q: input('q', 'g_search', '#q'), go: submit('go', 'g_search', '#go'), results: region('results', 'collection', '.results') },
+    };
+    const spec = { target: 'search cheap', subGoals: [
+      { id: 'search', label: 'search', shape: 'act', dependsOn: [] },
+      { id: 'view', label: 'view results', shape: 'read', dependsOn: ['search'] },
+      { id: 'pick', label: 'keep only the remote ones', shape: 'read', dependsOn: ['view'] },
+    ] };
+    const { nodes } = lowerToTier2(spec, { matches: { search: ['go'], view: ['results'], pick: ['results'] } }, locale);
+    const an = nodes.find((n) => n.type === 'analysis');
+    assert.ok(an, 'transform-hint read became an analysis');
+    assert.equal(an.op, 'filter');   // "only" → filter; (a "cheapest"/"sort" label would be op:'sort')
+    assert.equal(an.over, 'RESULTS');
   });
 });
