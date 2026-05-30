@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { lowerToTier2, topoOrder, deriveStructuralPostcondition, buildObservationNode, buildNavigateNode, insertWaits, successToConditions, buildAnalysisNode } from './tier2Lower.js';
+import { lowerToTier2, topoOrder, deriveStructuralPostcondition, buildObservationNode, buildNavigateNode, insertWaits, successToConditions, buildAnalysisNode, scoreTier2 } from './tier2Lower.js';
 
 const input = (id, goal, sel) => ({ id, label: id, kind: 'input', goals: [goal], selector: sel, interaction: { pattern: 'type', effect: 'none' } });
 const submit = (id, goal, sel) => ({ id, label: id, kind: 'action', goals: [goal], selector: sel, interaction: { pattern: 'click', effect: 'submit' } });
@@ -304,5 +304,36 @@ describe('LLM-refined postconditions + Analysis (SG-T2-5)', () => {
     assert.ok(an, 'transform-hint read became an analysis');
     assert.equal(an.op, 'filter');   // "only" → filter; (a "cheapest"/"sort" label would be op:'sort')
     assert.equal(an.over, 'RESULTS');
+  });
+});
+
+describe('scoreTier2 — per-phase aggregate verdict (SG-T2-6)', () => {
+  it('passes only when every required phase passed', () => {
+    const r = scoreTier2([
+      { type: 'fragment', passed: true },
+      { type: 'wait', passed: false },               // waits not scored
+      { type: 'observation', passed: true },
+    ]);
+    assert.equal(r.verdict, 'tier2-pass');
+    assert.equal(r.phases, 2);
+    assert.equal(r.requiredTotal, 2);
+    assert.equal(r.requiredPassed, 2);
+    assert.equal(r.score, 1);
+  });
+
+  it('fails when a required phase fails; optional phases do not gate', () => {
+    const r = scoreTier2([
+      { type: 'fragment', passed: true },
+      { type: 'fragment', passed: false },           // required, failed → fail
+      { type: 'observation', required: false, passed: false },
+    ]);
+    assert.equal(r.verdict, 'tier2-fail');
+    assert.equal(r.requiredTotal, 2);
+    assert.equal(r.requiredPassed, 1);
+  });
+
+  it('an all-optional / empty op does not spuriously pass', () => {
+    assert.equal(scoreTier2([]).verdict, 'tier2-fail');
+    assert.equal(scoreTier2([{ type: 'observation', required: false, passed: true }]).verdict, 'tier2-fail');
   });
 });

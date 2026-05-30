@@ -13,6 +13,7 @@ import * as Outcomes from '../../Core/outcomes.js';
 import { Logger } from '../../Core/Logger.js';
 import { coverComplete } from '../../Core/cover.js';
 import { selectionToTrialRoles } from '../../Core/bind.js';
+import { lowerToTier2 } from '../../Core/tier2Lower.js';
 import { buildAcceptance, landmarkRefActions } from '../../Core/accept.js';
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { AnthropicService } from '../../Services/AnthropicService.js';
@@ -44,6 +45,16 @@ export function createSgMessageHandlers(ctx) {
         const spec = await AnthropicService.comprehendIntent({ userIntent: intent });
         if (!spec) { sendResponse({ success: false, error: 'comprehend returned nothing' }); return; }
         const selection = await AnthropicService.matchSubGoals({ spec, locale: localeModel });
+        // SG-T2-6 — OPT-IN Tier-2 lowering. When the caller passes tier2:true, lower the subGoal program
+        // into a multi-phase Tier-2 operation (fragment/observation/analysis/navigate/wait nodes) and
+        // return it for inspection. The default (flat single-fragment) trial path below is untouched; the
+        // multi-fragment EXECUTION + accept/replay wiring lands in a follow-up (verified live).
+        if (payload && payload.tier2 === true) {
+          const op = lowerToTier2(spec, selection, localeModel);
+          Logger.info('background', `RUN_SG_TRIAL[tier2] — intent="${intent.slice(0, 60)}" shape=${spec.shape} nodes=${op.nodes.length} [${op.nodes.map((n) => n.type).join(' → ')}]`);
+          sendResponse({ success: true, ran: false, tier2: op, intentShape: spec.shape, reason: `tier-2 plan: ${op.nodes.length} phase node(s) — multi-phase execution wiring pending` });
+          return;
+        }
         const cover = coverComplete(spec, selection);
         const roles = selectionToTrialRoles(spec, selection, localeModel);
         Logger.info('background', `RUN_SG_TRIAL — intent="${intent.slice(0, 60)}" shape=${spec.shape} cover=${cover.complete} roles=${roles.length}`);

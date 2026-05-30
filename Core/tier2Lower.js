@@ -21,7 +21,7 @@
 //
 // PURE: no DOM, no LLM, no storage. Unit-testable like the other Core/ stages.
 // @module Core/tier2Lower
-// @version 2.74.629
+// @version 2.74.630
 
 import { selectionToTrialRoles } from './bind.js';
 
@@ -221,6 +221,24 @@ const _analysisOp = (label) => {
 export function buildAnalysisNode(sg, overOutput) {
   if (!sg || !overOutput) return null;
   return { type: 'analysis', subGoalIds: [sg.id], label: (sg.label && String(sg.label).trim()) || sg.id, op: _analysisOp(sg.label), over: overOutput };
+}
+
+/**
+ * SG-T2-6 — aggregate per-phase outcomes into a Tier-2 verdict. PURE. Each phase node reports whether it
+ * passed (its postcondition held / its observation captured / its analysis produced output). A Tier-2 op
+ * passes iff EVERY required phase passed — the per-phase replacement for the flat trial's single
+ * effectMatch flag. `wait` nodes aren't scored. Optional phases (required:false) don't gate the verdict.
+ * @param {Array<{type:string, required?:boolean, passed?:boolean}>} nodeOutcomes
+ * @returns {{verdict:'tier2-pass'|'tier2-fail', score:number, phases:number, passed:number, requiredTotal:number, requiredPassed:number}}
+ */
+export function scoreTier2(nodeOutcomes) {
+  const considered = (Array.isArray(nodeOutcomes) ? nodeOutcomes : []).filter((n) => n && n.type !== 'wait');
+  const required = considered.filter((n) => n.required !== false);
+  const requiredPassed = required.filter((n) => n.passed === true).length;
+  const passed = considered.filter((n) => n.passed === true).length;
+  const verdict = (required.length > 0 && requiredPassed === required.length) ? 'tier2-pass' : 'tier2-fail';
+  const score = considered.length ? Math.round((passed / considered.length) * 100) / 100 : 0;
+  return { verdict, score, phases: considered.length, passed, requiredTotal: required.length, requiredPassed };
 }
 
 /**
