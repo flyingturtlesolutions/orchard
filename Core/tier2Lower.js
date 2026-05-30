@@ -21,13 +21,43 @@
 //
 // PURE: no DOM, no LLM, no storage. Unit-testable like the other Core/ stages.
 // @module Core/tier2Lower
-// @version 2.74.625
+// @version 2.74.626
 
 import { selectionToTrialRoles } from './bind.js';
 
 // Phases that author a Fragment (a state-transition: fill/click + the navigation it causes). read →
 // Observation and transform → Analysis arrive in later slices; navigate is a Tier-2 control node (SG-T2-4).
 const FRAGMENT_SHAPES = new Set(['act', 'complete']);
+// Content kinds that can serve as a fragment's RESULT region (the observable a commit should surface).
+const READ_KINDS = new Set(['collection', 'region', 'composite']);
+
+/**
+ * SG-T2-2 — derive the STRUCTURAL-FLOOR postcondition for a fragment node (decision C). PURE: no LLM. A
+ * committing fragment (one with an effect:submit role) must produce an observable transition; the strongest
+ * predicate we can assert purely is "the goal's RESULT region is present after the commit." We scope the
+ * result region by GOAL (a collection/region/composite feature sharing the committing control's goal) to
+ * avoid asserting an unrelated region. When none is derivable we return null — an HONEST absence, not a
+ * false floor; the per-subGoal LLM successCondition (SG-T2-5) or effect observation (PB-8) fills the gap.
+ * Fill-only fragments (no submit) have no independent terminal effect → null (verified by the downstream
+ * commit). Postcondition shape matches Fragment pre/post conditions + the UniversalGate `condition` model.
+ * @returns {{match:string, conditions:object[], source:string}|null}
+ */
+export function deriveStructuralPostcondition(node, locale) {
+  const roles = (node && Array.isArray(node.roles)) ? node.roles : [];
+  const feats = (locale && locale.features && typeof locale.features === 'object') ? locale.features : {};
+  let submitGoals = null;
+  for (const r of roles) {
+    const f = feats[r.featureId];
+    if (f && f.kind === 'action' && f.interaction && f.interaction.effect === 'submit' && Array.isArray(f.goals) && f.goals.length) { submitGoals = new Set(f.goals); break; }
+  }
+  if (!submitGoals) return null;   // fill-only / submit carries no goal → no derivable transition
+  for (const f of Object.values(feats)) {
+    if (f && READ_KINDS.has(f.kind) && f.selector && f.decoy !== true && Array.isArray(f.goals) && f.goals.some((g) => submitGoals.has(g))) {
+      return { match: 'all', conditions: [{ type: 'selector_present', selector: f.selector }], source: 'structural' };
+    }
+  }
+  return null;
+}
 
 /**
  * Order subGoals so every phase comes after the phases it `dependsOn`. Stable: original order breaks ties,
@@ -90,6 +120,10 @@ export function lowerToTier2(spec, selection, locale = null) {
     const existing = bySig.get(sig);
     if (existing) { existing.subGoalIds.push(sg.id); continue; }   // same form (fill+submit) → one fragment
     const node = { type: 'fragment', subGoalIds: [sg.id], label: (sg.label && String(sg.label).trim()) || sg.id, shape: sg.shape, roles };
+    // SG-T2-2 — attach the structural-floor postcondition (decision C). Omitted (not null-stamped) when
+    // none is derivable, so the node stays clean for the LLM-refinement pass (SG-T2-5).
+    const pc = deriveStructuralPostcondition(node, locale);
+    if (pc) node.postcondition = pc;
     bySig.set(sig, node);
     nodes.push(node);
   }

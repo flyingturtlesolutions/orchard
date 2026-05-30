@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { lowerToTier2, topoOrder } from './tier2Lower.js';
+import { lowerToTier2, topoOrder, deriveStructuralPostcondition } from './tier2Lower.js';
 
 const input = (id, goal, sel) => ({ id, label: id, kind: 'input', goals: [goal], selector: sel, interaction: { pattern: 'type', effect: 'none' } });
 const submit = (id, goal, sel) => ({ id, label: id, kind: 'action', goals: [goal], selector: sel, interaction: { pattern: 'click', effect: 'submit' } });
@@ -116,5 +116,43 @@ describe('lowerToTier2 — fragment nodes per phase (SG-T2-1)', () => {
   it('returns an empty tier-2 op when there are no fragment phases', () => {
     const { nodes } = lowerToTier2({ target: 'x', subGoals: [{ id: 'r', label: 'read', shape: 'read' }] }, { matches: {} }, searchLocale);
     assert.deepEqual(nodes, []);
+  });
+});
+
+describe('deriveStructuralPostcondition — structural floor (SG-T2-2)', () => {
+  const region = (id, goal, sel) => ({ id, label: id, kind: 'collection', goals: [goal], selector: sel, interaction: { pattern: 'none', effect: 'none' } });
+
+  it('asserts the goal-scoped result region is present after a committing fragment', () => {
+    const locale = {
+      goals: { g_search: { id: 'g_search', label: 'search', achievableVia: ['q', 'go'] } },
+      features: { q: input('q', 'g_search', '#q'), go: submit('go', 'g_search', '#go'), results: region('results', 'g_search', '.results') },
+    };
+    const { nodes } = lowerToTier2({ target: 'search', subGoals: [{ id: 's', label: 'search', shape: 'act', dependsOn: [] }] }, { matches: { s: ['go'] } }, locale);
+    assert.equal(nodes.length, 1);
+    assert.deepEqual(nodes[0].postcondition, { match: 'all', conditions: [{ type: 'selector_present', selector: '.results' }], source: 'structural' });
+  });
+
+  it('omits the postcondition (no false floor) when no result region is derivable', () => {
+    const { nodes } = lowerToTier2({ target: 'search for jobs', subGoals: [{ id: 's', label: 'search', shape: 'act', dependsOn: [] }] }, { matches: { s: ['go'] } }, searchLocale);
+    assert.equal(nodes.length, 1);
+    assert.ok(!('postcondition' in nodes[0]), 'no result region in this locale → no structural floor');
+  });
+
+  it('returns null for a fill-only fragment (no committing transition)', () => {
+    const node = { roles: [{ featureId: 'q' }] };
+    const locale = { features: { q: input('q', 'g', '#q') } };
+    assert.equal(deriveStructuralPostcondition(node, locale), null);
+  });
+
+  it('does not assert a region from a DIFFERENT goal', () => {
+    const locale = {
+      goals: { g_search: { id: 'g_search', label: 'search', achievableVia: ['q', 'go'] } },
+      features: {
+        q: input('q', 'g_search', '#q'), go: submit('go', 'g_search', '#go'),
+        other: region('other', 'g_unrelated', '.unrelated'),   // region of a different goal
+      },
+    };
+    const { nodes } = lowerToTier2({ target: 'search', subGoals: [{ id: 's', label: 'search', shape: 'act' }] }, { matches: { s: ['go'] } }, locale);
+    assert.ok(!('postcondition' in nodes[0]), 'unrelated-goal region must not become the floor');
   });
 });
