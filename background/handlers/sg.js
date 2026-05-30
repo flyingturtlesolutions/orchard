@@ -52,6 +52,16 @@ export function createSgMessageHandlers(ctx) {
         if (payload && payload.tier2 === true) {
           const op = lowerToTier2(spec, selection, localeModel);
           Logger.info('background', `RUN_SG_TRIAL[tier2] — intent="${intent.slice(0, 60)}" shape=${spec.shape} nodes=${op.nodes.length} [${op.nodes.map((n) => n.type).join(' → ')}]`);
+          // v2.74.634 — per-fragment role diagnostic (why a filter node is over-bound): featureId:kind:effect,
+          // plus whether the fragment's goal(s) carry a submit (which makes SG-RES-7d treat it as a form).
+          const _feats = (localeModel && localeModel.features) || {};
+          for (const n of op.nodes) {
+            if (n.type !== 'fragment') continue;
+            const goals = new Set();
+            const detail = (n.roles || []).map((r) => { const f = _feats[r.featureId]; if (f && Array.isArray(f.goals)) for (const g of f.goals) goals.add(g); return `${r.featureId}:${f?.kind || '?'}:${(f?.interaction && f.interaction.effect) || '?'}${f?.fieldType ? `/${f.fieldType}` : ''}`; }).join(', ');
+            const hasSubmit = Object.values(_feats).some((f) => f && f.kind === 'action' && f.interaction && f.interaction.effect === 'submit' && Array.isArray(f.goals) && f.goals.some((g) => goals.has(g)));
+            Logger.info('background', `  [tier2] "${n.label}" (${(n.roles || []).length} roles, goalHasSubmit=${hasSubmit}): ${detail}`);
+          }
           sendResponse({ success: true, ran: false, tier2: op, intentShape: spec.shape, reason: `tier-2 plan: ${op.nodes.length} phase node(s) — multi-phase execution wiring pending` });
           return;
         }
