@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { lowerToTier2, topoOrder, deriveStructuralPostcondition, buildObservationNode, buildNavigateNode, insertWaits, successToConditions, buildAnalysisNode, scoreTier2 } from './tier2Lower.js';
+import { lowerToTier2, topoOrder, deriveStructuralPostcondition, buildObservationNode, buildNavigateNode, insertWaits, successToConditions, buildAnalysisNode, scoreTier2, orderForRun } from './tier2Lower.js';
 
 const input = (id, goal, sel) => ({ id, label: id, kind: 'input', goals: [goal], selector: sel, interaction: { pattern: 'type', effect: 'none' } });
 const submit = (id, goal, sel) => ({ id, label: id, kind: 'action', goals: [goal], selector: sel, interaction: { pattern: 'click', effect: 'submit' } });
@@ -335,5 +335,37 @@ describe('scoreTier2 — per-phase aggregate verdict (SG-T2-6)', () => {
   it('an all-optional / empty op does not spuriously pass', () => {
     assert.equal(scoreTier2([]).verdict, 'tier2-fail');
     assert.equal(scoreTier2([{ type: 'observation', required: false, passed: true }]).verdict, 'tier2-fail');
+  });
+});
+
+describe('orderForRun — result-establishing search runs before filters (SG-T2-7)', () => {
+  const locale = {
+    features: {
+      q:  { id: 'q', kind: 'input', fieldType: 'text', selector: '#q', interaction: { effect: 'none' } },
+      go: { id: 'go', kind: 'action', selector: '#go', interaction: { effect: 'submit' } },
+      payDisc: { id: 'payDisc', kind: 'disclosure', selector: '#pay', interaction: { effect: 'reveal' } },
+      payOpt:  { id: 'payOpt', kind: 'action', selector: '#o', hidden: true, interaction: { effect: 'none' } },
+      minPay:  { id: 'minPay', kind: 'input', fieldType: 'text', hidden: true, selector: '#mp', interaction: { effect: 'none' } },  // hidden → not a "visible search form"
+    },
+  };
+  const searchFrag = { type: 'fragment', label: 'execute search', roles: [{ featureId: 'q' }, { featureId: 'go' }] };
+  const payFrag = { type: 'fragment', label: 'filter by pay', roles: [{ featureId: 'payDisc' }, { featureId: 'payOpt' }, { featureId: 'minPay' }] };
+
+  it('moves the visible-search-form fragment ahead of filter fragments', () => {
+    const ordered = orderForRun([payFrag, searchFrag], locale);   // lowered order has the filter first
+    assert.deepEqual(ordered.map((f) => f.label), ['execute search', 'filter by pay']);
+  });
+
+  it('returns only fragment nodes, preserving order among same-class fragments', () => {
+    const f2 = { type: 'fragment', label: 'filter by date', roles: [{ featureId: 'payDisc' }] };
+    const wait = { type: 'wait' };
+    const ordered = orderForRun([payFrag, wait, f2, searchFrag], locale);
+    assert.deepEqual(ordered.map((f) => f.label), ['execute search', 'filter by pay', 'filter by date']);
+  });
+
+  it('a fragment whose only text input is HIDDEN is not treated as the search form', () => {
+    // the pay filter has a hidden "Minimum base pay" input + no real submit → stays a filter
+    const ordered = orderForRun([payFrag], locale);
+    assert.deepEqual(ordered.map((f) => f.label), ['filter by pay']);
   });
 });

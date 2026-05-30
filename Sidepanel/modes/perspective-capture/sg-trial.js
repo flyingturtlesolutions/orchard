@@ -55,9 +55,12 @@ export function createSgTrial({ getGroundId, getTabId, getIntent, rerender, afte
 
   // The live trial outcome + (once it PASSES) Accept/Reject, or (once accepted) the saved-capability note
   // + ▶ Re-run. Mirrors the former _renderSGTrialResult, reading module state.
-  // SG-T2-6 — render the lowered Tier-2 plan (when the run was made with tier2 inspect on).
-  const _tier2Html = (op) => {
+  // SG-T2-6/7 — render the lowered Tier-2 plan + (when executed) each phase's verdict.
+  const _tier2Html = (t) => {
+    const op = t.tier2;
     if (!op || !Array.isArray(op.nodes)) return '';
+    const byLabel = {};
+    for (const o of (Array.isArray(t.outcomes) ? t.outcomes : [])) byLabel[o.label] = o;
     const detail = (n) => {
       if (n.type === 'fragment') return `${(n.roles || []).length} role(s)${n.postcondition ? ` · postcond(${escHtml(n.postcondition.source || '')})` : ''}`;
       if (n.type === 'observation') return `${(n.extracts || []).length} extract(s)`;
@@ -66,15 +69,20 @@ export function createSgTrial({ getGroundId, getTabId, getIntent, rerender, afte
       if (n.type === 'wait') return 'settle';
       return '';
     };
-    const lines = op.nodes.map((n, i) => `${i + 1}. <b>${escHtml(n.type)}</b> ${escHtml(n.label || '')} — ${detail(n)}`);
-    return `<div class="dbg-perspective-ground-note">⚙ Tier-2 plan (${op.nodes.length} node(s)):<br>${lines.join('<br>')}</div>`;
+    const mark = (n) => { const o = byLabel[n.label]; if (!o) return ''; return o.passed ? '✓ ' : (o.ran ? '✗ ' : '∅ '); };
+    const lines = op.nodes.map((n, i) => `${i + 1}. ${mark(n)}<b>${escHtml(n.type)}</b> ${escHtml(n.label || '')} — ${detail(n)}`);
+    const sc = t.tier2Score;
+    const head = sc
+      ? `⚙ Tier-2 run — verdict <b>${escHtml(String(sc.verdict || '?'))}</b> (${sc.requiredPassed}/${sc.requiredTotal} phases)`
+      : `⚙ Tier-2 plan (${op.nodes.length} node(s))`;
+    return `<div class="dbg-perspective-ground-note">${head}:<br>${lines.join('<br>')}</div>`;
   };
 
   const _trialResultHtml = () => {
     const t = trialResult;
     if (!t) return '';
     if (t.success === false) return `<div class="dbg-perspective-ground-note">⚠ Run failed: ${escHtml(t.error || 'unknown')}</div>`;
-    if (t.tier2) return _tier2Html(t.tier2);   // SG-T2-6 inspect — the lowered plan, not an execution
+    if (t.tier2) return _tier2Html(t);   // SG-T2-6/7 — the lowered plan + per-phase run verdicts
     if (t.ran === false) return `<div class="dbg-perspective-ground-note">∅ Nothing ran: ${escHtml(t.reason || 'no actionable steps')}</div>`;
     const v = t.trial || {};
     const pct = (typeof v.score === 'number') ? ` (${Math.round(v.score * 100)}%)` : '';

@@ -21,7 +21,7 @@
 //
 // PURE: no DOM, no LLM, no storage. Unit-testable like the other Core/ stages.
 // @module Core/tier2Lower
-// @version 2.74.630
+// @version 2.74.639
 
 import { selectionToTrialRoles } from './bind.js';
 
@@ -221,6 +221,29 @@ const _analysisOp = (label) => {
 export function buildAnalysisNode(sg, overOutput) {
   if (!sg || !overOutput) return null;
   return { type: 'analysis', subGoalIds: [sg.id], label: (sg.label && String(sg.label).trim()) || sg.id, op: _analysisOp(sg.label), over: overOutput };
+}
+
+/**
+ * SG-T2-7 — order the fragment nodes for EXECUTION so a RESULT-ESTABLISHING phase (a visible search form:
+ * a non-hidden text input + an effect:submit) runs BEFORE the phases that refine its results (filters). The
+ * comprehension's dependsOn often orders "execute search" LAST (it lists the filters first), which would
+ * filter a results page that doesn't exist yet. Pure, stable: search-form fragments first (in their lowered
+ * order), then the rest (in their lowered order). Only fragment nodes are returned. Needs the locale to read
+ * interaction.effect / hidden (the roles don't carry them).
+ * @returns {object[]} fragment nodes, execution-ordered
+ */
+export function orderForRun(nodes, locale = null) {
+  const feats = (locale && locale.features && typeof locale.features === 'object') ? locale.features : {};
+  const frags = (Array.isArray(nodes) ? nodes : []).filter((n) => n && n.type === 'fragment');
+  const isResultForm = (f) => {
+    const roles = Array.isArray(f.roles) ? f.roles : [];
+    const hasVisibleText = roles.some((r) => { const x = feats[r.featureId]; return x && x.kind === 'input' && !x.hidden && (!x.fieldType || x.fieldType === 'text') && x.interaction && x.interaction.effect === 'none'; });
+    const hasSubmit = roles.some((r) => { const x = feats[r.featureId]; return x && x.kind === 'action' && x.interaction && x.interaction.effect === 'submit'; });
+    return hasVisibleText && hasSubmit;
+  };
+  const search = [], rest = [];
+  for (const f of frags) (isResultForm(f) ? search : rest).push(f);
+  return [...search, ...rest];
 }
 
 /**

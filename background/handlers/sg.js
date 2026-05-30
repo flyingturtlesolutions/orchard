@@ -13,7 +13,7 @@ import * as Outcomes from '../../Core/outcomes.js';
 import { Logger } from '../../Core/Logger.js';
 import { coverComplete } from '../../Core/cover.js';
 import { selectionToTrialRoles } from '../../Core/bind.js';
-import { lowerToTier2 } from '../../Core/tier2Lower.js';
+import { lowerToTier2, orderForRun, scoreTier2 } from '../../Core/tier2Lower.js';
 import { buildAcceptance, landmarkRefActions } from '../../Core/accept.js';
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { AnthropicService } from '../../Services/AnthropicService.js';
@@ -62,7 +62,23 @@ export function createSgMessageHandlers(ctx) {
             const hasSubmit = Object.values(_feats).some((f) => f && f.kind === 'action' && f.interaction && f.interaction.effect === 'submit' && Array.isArray(f.goals) && f.goals.some((g) => goals.has(g)));
             Logger.info('background', `  [tier2] "${n.label}" (${(n.roles || []).length} roles, goalHasSubmit=${hasSubmit}): ${detail}`);
           }
-          sendResponse({ success: true, ran: false, tier2: op, intentShape: spec.shape, reason: `tier-2 plan: ${op.nodes.length} phase node(s) — multi-phase execution wiring pending` });
+          // SG-T2-7 — EXECUTE the Tier-2 op: run each fragment phase in order on the SAME live tab (the
+          // result-establishing search first, then the filters), so the search submits → results page and
+          // the filter phases run against it. Each phase reuses the proven flat runner (runTrialBundle:
+          // synth → safety class → execute → score), and we aggregate per-phase via scoreTier2. (Observation/
+          // navigate/wait nodes are skipped this slice — the live filter intents are all fragments.)
+          const liveTab = (typeof tabId === 'number') ? tabId : null;
+          const phases = orderForRun(op.nodes, localeModel);
+          const outcomes = [];
+          for (const node of phases) {
+            const out = await ctx.runTrialBundle({ groundId, intent: node.label, roles: node.roles, localeModel, navigateUrl: null, proposedRoleCount: node.roles.length, targetTabId: liveTab });
+            const passed = !!(out?.ran && out.trial?.verdict === 'trial-pass');
+            outcomes.push({ type: 'fragment', label: node.label, passed, ran: !!out?.ran, verdict: out?.trial?.verdict || null, score: (out?.trial && typeof out.trial.score === 'number') ? out.trial.score : null, reason: out?.reason || out?.result?.error || null });
+            Logger.info('background', `  [tier2:run] "${node.label}" → ${passed ? 'PASS' : (out?.ran ? 'fail' : 'not-run')}${out?.trial?.verdict ? ` (${out.trial.verdict})` : ''}${out?.reason ? ` — ${String(out.reason).slice(0, 80)}` : ''}`);
+          }
+          const tier2Score = scoreTier2(outcomes.map((o) => ({ type: 'fragment', passed: o.passed })));
+          Logger.info('background', `RUN_SG_TRIAL[tier2:run] — ${tier2Score.verdict} (${tier2Score.requiredPassed}/${tier2Score.requiredTotal} phases passed) score=${tier2Score.score}`);
+          sendResponse({ success: true, ran: outcomes.length > 0, tier2: op, outcomes, tier2Score, intentShape: spec.shape });
           return;
         }
         const cover = coverComplete(spec, selection);
