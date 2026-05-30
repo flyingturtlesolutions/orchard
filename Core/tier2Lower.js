@@ -21,15 +21,46 @@
 //
 // PURE: no DOM, no LLM, no storage. Unit-testable like the other Core/ stages.
 // @module Core/tier2Lower
-// @version 2.74.626
+// @version 2.74.627
 
 import { selectionToTrialRoles } from './bind.js';
 
 // Phases that author a Fragment (a state-transition: fill/click + the navigation it causes). read →
-// Observation and transform → Analysis arrive in later slices; navigate is a Tier-2 control node (SG-T2-4).
+// Observation (SG-T2-3); transform → Analysis (SG-T2-5); navigate is a Tier-2 control node (SG-T2-4).
 const FRAGMENT_SHAPES = new Set(['act', 'complete']);
-// Content kinds that can serve as a fragment's RESULT region (the observable a commit should surface).
+// Content kinds that can serve as a read target / a fragment's RESULT region.
 const READ_KINDS = new Set(['collection', 'region', 'composite']);
+
+// Observation extract shape from the read feature's kind (mapped to the runtime Observation vocabulary at
+// materialization, SG-T2-6): a list of items vs a structured record vs a flat text region.
+const _extractShape = (kind) => (kind === 'collection' ? 'list' : (kind === 'composite' ? 'record' : 'text'));
+// A scope binding name from a feature's identity — UPPER_SNAKE, stable, non-empty.
+const _scopeName = (f) => {
+  const base = String((f && (f.label || f.id)) || '').trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return base || 'RESULT';
+};
+
+/**
+ * SG-T2-3 — build an Observation node for a `read` phase: capture its matched content region(s) into Scope.
+ * PURE. Reads the read subGoal's matched features, keeps the content kinds (collection/region/composite),
+ * and emits one extract per region ({ selector, output, shape }). Returns null when the phase matched no
+ * readable region (nothing to observe) so the caller drops it.
+ * @returns {{type:'observation',subGoalIds:string[],label:string,extracts:object[]}|null}
+ */
+export function buildObservationNode(sg, matches, locale) {
+  const feats = (locale && locale.features && typeof locale.features === 'object') ? locale.features : {};
+  const ids = (sg && matches && Array.isArray(matches[sg.id])) ? matches[sg.id] : [];
+  const extracts = [];
+  const seen = new Set();
+  for (const id of ids) {
+    const f = feats[id];
+    if (!f || !READ_KINDS.has(f.kind) || !f.selector || f.decoy === true || seen.has(id)) continue;
+    seen.add(id);
+    extracts.push({ selector: f.selector, output: _scopeName(f), shape: _extractShape(f.kind) });
+  }
+  if (!extracts.length) return null;
+  return { type: 'observation', subGoalIds: [sg.id], label: (sg.label && String(sg.label).trim()) || sg.id, extracts };
+}
 
 /**
  * SG-T2-2 — derive the STRUCTURAL-FLOOR postcondition for a fragment node (decision C). PURE: no LLM. A
@@ -87,11 +118,14 @@ export function topoOrder(subGoals) {
 }
 
 /**
- * Lower a Comprehend subGoal program into a Tier-2 operation (cache tier). SG-T2-1: fragment nodes only.
+ * Lower a Comprehend subGoal program into a Tier-2 operation (cache tier).
+ *   act/complete → fragment node (SG-T2-1, goal-grounded per phase, form-atomic dedup, postcondition SG-T2-2)
+ *   read         → observation node (SG-T2-3)
+ *   navigate/transform → later slices (SG-T2-4/5).
  * @param {object} spec       IntentSpec (uses target + subGoals[].{id,label,shape,dependsOn}).
  * @param {object} selection  Select output — uses `matches` (subGoalId → featureId[]).
  * @param {object} [locale]   Locale (features + goals) — for per-phase goal-grounded binding.
- * @returns {{tier:string, nodes:Array<{type:'fragment',subGoalIds:string[],label:string,shape:string,roles:object[]}>}}
+ * @returns {{tier:string, nodes:Array<object>}}  nodes in dependency order, mixed fragment/observation.
  */
 export function lowerToTier2(spec, selection, locale = null) {
   const subGoals = (spec && Array.isArray(spec.subGoals)) ? spec.subGoals : [];
@@ -101,31 +135,37 @@ export function lowerToTier2(spec, selection, locale = null) {
   const nodes = [];
   const bySig = new Map();   // role-signature → fragment node (dedup identical forms across phases)
   for (const sg of ordered) {
-    if (!sg || !FRAGMENT_SHAPES.has(sg.shape)) continue;   // SG-T2-1: act/complete → Fragment only
-    const feats = Array.isArray(matches[sg.id]) ? matches[sg.id] : [];
-    // Bind THIS phase in isolation — a mini spec/selection scoped to the single subGoal — so the
-    // goal-grounded binder (SG-RES-7) expands the phase's own goal membership, not the whole intent's.
-    // BIND VIA THE ELSE-PATH for BOTH act AND complete phases: SG-RES-7 goal-grounding (+ the 7b/7c
-    // refinements) lives in bind.js's non-complete branch, and a per-phase mini-selection carries no
-    // page-global `boundary` for the complete branch to read. The phase's matched features ARE its floor;
-    // goal membership expands them to the whole form. So we pass shape:'act' to the BINDER (else-path) and
-    // record the phase's REAL shape on the node. (The complete-branch's required-field net is a page-global
-    // Cover concern, handled at the intent level — not per phase.)
-    const phaseSpec = { shape: 'act', target: (spec && spec.target) || '', subGoals: [{ ...sg, shape: 'act' }] };
-    const phaseSel = { matches: { [sg.id]: feats }, shape: 'act' };
-    const roles = selectionToTrialRoles(phaseSpec, phaseSel, locale);
-    if (!roles.length) continue;                          // nothing bindable for this phase → no node
+    if (!sg) continue;
+    if (FRAGMENT_SHAPES.has(sg.shape)) {
+      const feats = Array.isArray(matches[sg.id]) ? matches[sg.id] : [];
+      // Bind THIS phase in isolation — a mini spec/selection scoped to the single subGoal — so the
+      // goal-grounded binder (SG-RES-7) expands the phase's own goal membership, not the whole intent's.
+      // BIND VIA THE ELSE-PATH for BOTH act AND complete phases: SG-RES-7 goal-grounding (+ the 7b/7c
+      // refinements) lives in bind.js's non-complete branch, and a per-phase mini-selection carries no
+      // page-global `boundary` for the complete branch to read. The phase's matched features ARE its floor;
+      // goal membership expands them to the whole form. So we pass shape:'act' to the BINDER (else-path) and
+      // record the phase's REAL shape on the node. (The complete-branch's required-field net is a page-global
+      // Cover concern, handled at the intent level — not per phase.)
+      const phaseSpec = { shape: 'act', target: (spec && spec.target) || '', subGoals: [{ ...sg, shape: 'act' }] };
+      const phaseSel = { matches: { [sg.id]: feats }, shape: 'act' };
+      const roles = selectionToTrialRoles(phaseSpec, phaseSel, locale);
+      if (!roles.length) continue;                          // nothing bindable for this phase → no node
 
-    const sig = roles.map((r) => r.featureId).sort().join('|');
-    const existing = bySig.get(sig);
-    if (existing) { existing.subGoalIds.push(sg.id); continue; }   // same form (fill+submit) → one fragment
-    const node = { type: 'fragment', subGoalIds: [sg.id], label: (sg.label && String(sg.label).trim()) || sg.id, shape: sg.shape, roles };
-    // SG-T2-2 — attach the structural-floor postcondition (decision C). Omitted (not null-stamped) when
-    // none is derivable, so the node stays clean for the LLM-refinement pass (SG-T2-5).
-    const pc = deriveStructuralPostcondition(node, locale);
-    if (pc) node.postcondition = pc;
-    bySig.set(sig, node);
-    nodes.push(node);
+      const sig = roles.map((r) => r.featureId).sort().join('|');
+      const existing = bySig.get(sig);
+      if (existing) { existing.subGoalIds.push(sg.id); continue; }   // same form (fill+submit) → one fragment
+      const node = { type: 'fragment', subGoalIds: [sg.id], label: (sg.label && String(sg.label).trim()) || sg.id, shape: sg.shape, roles };
+      // SG-T2-2 — attach the structural-floor postcondition (decision C). Omitted (not null-stamped) when
+      // none is derivable, so the node stays clean for the LLM-refinement pass (SG-T2-5).
+      const pc = deriveStructuralPostcondition(node, locale);
+      if (pc) node.postcondition = pc;
+      bySig.set(sig, node);
+      nodes.push(node);
+    } else if (sg.shape === 'read') {
+      const obs = buildObservationNode(sg, matches, locale);   // SG-T2-3 — read → Observation
+      if (obs) nodes.push(obs);
+    }
+    // navigate / transform phases: SG-T2-4 / SG-T2-5.
   }
   return { tier: 'cache', nodes };
 }

@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { lowerToTier2, topoOrder, deriveStructuralPostcondition } from './tier2Lower.js';
+import { lowerToTier2, topoOrder, deriveStructuralPostcondition, buildObservationNode } from './tier2Lower.js';
 
 const input = (id, goal, sel) => ({ id, label: id, kind: 'input', goals: [goal], selector: sel, interaction: { pattern: 'type', effect: 'none' } });
 const submit = (id, goal, sel) => ({ id, label: id, kind: 'action', goals: [goal], selector: sel, interaction: { pattern: 'click', effect: 'submit' } });
@@ -154,5 +154,45 @@ describe('deriveStructuralPostcondition — structural floor (SG-T2-2)', () => {
     };
     const { nodes } = lowerToTier2({ target: 'search', subGoals: [{ id: 's', label: 'search', shape: 'act' }] }, { matches: { s: ['go'] } }, locale);
     assert.ok(!('postcondition' in nodes[0]), 'unrelated-goal region must not become the floor');
+  });
+});
+
+describe('read → Observation node (SG-T2-3)', () => {
+  const region = (id, kind, sel) => ({ id, label: id, kind, selector: sel, interaction: { pattern: 'none', effect: 'none' } });
+  const locale = {
+    goals: { g_search: { id: 'g_search', label: 'search', achievableVia: ['q', 'go'] } },
+    features: {
+      q: input('q', 'g_search', '#q'), go: submit('go', 'g_search', '#go'),
+      results: region('results', 'collection', '.results'),
+    },
+  };
+
+  it('emits an observation with an extract for a matched content region', () => {
+    const obs = buildObservationNode({ id: 'view', label: 'view results' }, { view: ['results'] }, locale);
+    assert.equal(obs.type, 'observation');
+    assert.deepEqual(obs.subGoalIds, ['view']);
+    assert.deepEqual(obs.extracts, [{ selector: '.results', output: 'RESULTS', shape: 'list' }]);
+  });
+
+  it('search → read lowers to [fragment, observation] in dependency order', () => {
+    const spec = { target: 'search', subGoals: [
+      { id: 'search', label: 'search', shape: 'act', dependsOn: [] },
+      { id: 'view', label: 'view results', shape: 'read', dependsOn: ['search'] },
+    ] };
+    const { nodes } = lowerToTier2(spec, { matches: { search: ['go'], view: ['results'] } }, locale);
+    assert.deepEqual(nodes.map((n) => n.type), ['fragment', 'observation']);
+    assert.deepEqual(nodes[1].extracts[0].selector, '.results');
+  });
+
+  it('drops a read phase that matched no readable region (e.g. only an input)', () => {
+    assert.equal(buildObservationNode({ id: 'view', label: 'view' }, { view: ['q'] }, locale), null);
+    const { nodes } = lowerToTier2({ target: 'x', subGoals: [{ id: 'view', label: 'view', shape: 'read' }] }, { matches: { view: ['q'] } }, locale);
+    assert.deepEqual(nodes, []);
+  });
+
+  it('maps kinds to extract shapes (collection→list, composite→record, region→text)', () => {
+    const loc2 = { features: { c: region('c', 'collection', '.c'), r: region('r', 'region', '.r'), m: region('m', 'composite', '.m') } };
+    const obs = buildObservationNode({ id: 'v', label: 'v' }, { v: ['c', 'r', 'm'] }, loc2);
+    assert.deepEqual(obs.extracts.map((e) => e.shape), ['list', 'text', 'record']);
   });
 });
