@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { deriveDisclosureGoals } from './locale.js';
+import { deriveDisclosureGoals, mergeDepthFromControls } from './locale.js';
 
 const disc = (id, label, reveals) => ({ id, kind: 'disclosure', label, selector: `#${id}`, reveals, interaction: { pattern: 'click', effect: 'reveal' } });
 const opt = (id, label, by, kind = 'action') => ({ id, kind, label, selector: `#${id}`, hidden: true, revealedBy: by, interaction: { pattern: kind === 'input' ? 'type' : 'click', effect: 'none' } });
@@ -67,5 +67,27 @@ describe('deriveDisclosureGoals — one goal per disclosure-unit (SG-0.5-F1)', (
   it('returns [] for an empty / malformed model', () => {
     assert.deepEqual(deriveDisclosureGoals(null), []);
     assert.deepEqual(deriveDisclosureGoals({ features: {} }), []);
+  });
+});
+
+describe('mergeDepthFromControls — revealed commit typing (SG-0.5-F3)', () => {
+  it('types a revealed "Update"/"Apply"/"Save" action as effect:submit; Reset/options stay none', () => {
+    const model = { features: { payBtn: { id: 'payBtn', kind: 'action', label: 'Pay filter', selector: '#pay' } }, layers: {} };
+    const controls = [{
+      selector: '#pay', label: 'Pay filter', observation: 'reveal', overlay: true,
+      revealed: [
+        { selector: '#o20', role: 'option', label: '$20+' },
+        { selector: '#upd', role: 'button', label: 'Update' },
+        { selector: '#rst', role: 'button', label: 'Reset' },
+      ],
+    }];
+    mergeDepthFromControls(model, controls);
+    const byLabel = Object.fromEntries(Object.values(model.features).filter((f) => f.hidden).map((f) => [f.label, f]));
+    assert.equal(byLabel['Update'].interaction.effect, 'submit', 'the commit is typed submit');
+    assert.equal(byLabel['Reset'].interaction.effect, 'none', 'reset is not a commit');
+    assert.equal(byLabel['$20+'].interaction.effect, 'none', 'an option is not a commit');
+    // and the disclosure linkage is still intact
+    assert.equal(byLabel['Update'].revealedBy, model.features.payBtn.id);
+    assert.equal(model.features.payBtn.kind, 'disclosure');
   });
 });

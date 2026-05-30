@@ -315,12 +315,18 @@ export function mergeDepthFromControls(model, controls) {
       const cid = hashId('revealed|' + (rv.role || '') + '|' + (rv.label || '') + '|' + rv.selector);
       if (!features[cid]) {
         const kind = revealKindOf(rv.role);
+        // SG-0.5-F3 (v2.74.638) — a revealed ACTION whose label is a COMMIT word (Update/Apply/Done/Save)
+        // IS the panel's commit; capture it as effect:'submit', not 'none'. The reveal pass was typing every
+        // non-nav revealed control 'none', so a filter dropdown's "Update" looked like a plain click — the
+        // filter goal had no submit (goalHasSubmit=false) and goal-grounded binding dropped the commit, so a
+        // filter trial opened + selected but never APPLIED. Reset/Clear aren't submit words → stay 'none'.
+        const revEffect = kind === 'navigation' ? 'navigate' : (kind === 'action' && _isSubmitLabel(rv.label) ? 'submit' : 'none');
         features[cid] = {
           id: cid, kind,
           label: (rv.label || '').toString().slice(0, 80), a11yRole: rv.role || null,
           selector: rv.selector, selectorKind: selectorTier(rv.selector), selectorVerified: true,
           hidden: true, revealedBy: trigger.id,
-          interaction: { pattern: kind === 'input' ? 'type' : 'click', effect: kind === 'navigation' ? 'navigate' : 'none' },
+          interaction: { pattern: kind === 'input' ? 'type' : 'click', effect: revEffect },
           confidence: 0.7, evidence: { method: 'poke', observedAt: Date.now() },
         };
       }
