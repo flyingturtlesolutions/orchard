@@ -23,7 +23,7 @@ import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
 /**
  * @param {object} ctx  background-local helpers (kept in background.js — shared with non-SG code, or
  *   chrome.storage-backed SG stores):
- *   { runTrialBundle, readLocaleCache, normalizeUrl, appendOutcomes, broadcastStorageChanged,
+ *   { runTrialBundle, readLocaleCache, readSgSpec, normalizeUrl, appendOutcomes, broadcastStorageChanged,
  *     readSgCapabilities, readSgDraft, writeSgDraft, clearSgDraft, writeSgCapability, writeSgTrace,
  *     enrichSgLandmarks }
  * @returns {Record<string, (payload:object, sender:object, sendResponse:Function) => Promise<void>>}
@@ -42,9 +42,21 @@ export function createSgMessageHandlers(ctx) {
         let localeCapturedUrl = '';
         try { const pm = await ctx.readLocaleCache(groundId, ctx.normalizeUrl(url)); localeModel = pm?.model || null; localeCapturedUrl = pm?.url || pm?.model?.url || ''; } catch { /* */ }
         if (!localeModel || !localeModel.features) { sendResponse({ success: false, error: 'no Locale for this page — run Explore first' }); return; }
-        const spec = await AnthropicService.comprehendIntent({ userIntent: intent });
-        if (!spec) { sendResponse({ success: false, error: 'comprehend returned nothing' }); return; }
-        const selection = await AnthropicService.matchSubGoals({ spec, locale: localeModel });
+        // C3 (v2.74.641) — REUSE the propose-time spec+selection (cached by GROUND_INTENT on this page) when
+        // present. Re-comprehending here re-rolled the shape (act→read) and re-matched, which on a multi-
+        // filter intent matched filters to inputs and broke the run; the cache makes the trial deterministic,
+        // reuses the GOOD matches, and saves 2 LLM calls. A miss (page navigated / TTL lapsed / never
+        // proposed) falls back to a fresh comprehend+match.
+        let spec, selection;
+        const cachedSpec = (typeof ctx.readSgSpec === 'function') ? ctx.readSgSpec(groundId, url, intent) : null;
+        if (cachedSpec && cachedSpec.spec && cachedSpec.selection) {
+          spec = cachedSpec.spec; selection = cachedSpec.selection;
+          Logger.info('background', `RUN_SG_TRIAL — reusing cached propose spec (shape=${spec.shape}, ${(spec.subGoals || []).length} subGoal(s)) — no re-comprehend`);
+        } else {
+          spec = await AnthropicService.comprehendIntent({ userIntent: intent });
+          if (!spec) { sendResponse({ success: false, error: 'comprehend returned nothing' }); return; }
+          selection = await AnthropicService.matchSubGoals({ spec, locale: localeModel });
+        }
         // SG-T2-6 — OPT-IN Tier-2 lowering. When the caller passes tier2:true, lower the subGoal program
         // into a multi-phase Tier-2 operation (fragment/observation/analysis/navigate/wait nodes) and
         // return it for inspection. The default (flat single-fragment) trial path below is untouched; the

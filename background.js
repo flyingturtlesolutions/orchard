@@ -1602,9 +1602,29 @@ async function _knownSelectorsForUrl(groundId, url) {
 // R1 seed (code_review_2.74.605 §5) — domain message-handler registry. SG handlers live in their own
 // module; new domains register here instead of growing the switch below. ctx supplies the shared
 // background-local helpers the SG handlers need (kept here because non-SG code uses them too).
+// SG spec+selection cache (v2.74.641, audit C3) — the GROUND_INTENT propose flow computes a GOOD spec
+// (matchSubGoals over the page's Locale) at the page-appropriate shape; RUN_SG_TRIAL was re-comprehending
+// from scratch, RE-ROLLING the shape (act→read) and re-matching, which on a multi-filter intent matched
+// the filters to INPUTS (distance→location box, pay→a job-card input) and broke the run. Cache the
+// propose-time { spec, selection } keyed by ground + normalized page URL + normalized intent (short TTL,
+// since the selection is page-state-specific); RUN_SG_TRIAL reuses it — deterministic, the GOOD matches,
+// and 2 fewer LLM calls per run. A miss (page navigated / TTL lapsed / never proposed) re-comprehends.
+const _sgSpecCache = new Map();
+const SG_SPEC_TTL_MS = 5 * 60 * 1000;
+const _sgSpecKey = (groundId, url, intent) => `${groundId || ''}::${_normalizeUrlForPerspectiveCache(url || '')}::${String(intent || '').trim().toLowerCase().slice(0, 300)}`;
+function _cacheSgSpec(groundId, url, intent, spec, selection) {
+  if (!groundId || !spec) return;
+  try { _sgSpecCache.set(_sgSpecKey(groundId, url, intent), { spec, selection: selection || null, at: Date.now() }); } catch { /* */ }
+}
+function _readSgSpec(groundId, url, intent) {
+  try { const e = _sgSpecCache.get(_sgSpecKey(groundId, url, intent)); if (e && (Date.now() - e.at) < SG_SPEC_TTL_MS) return { spec: e.spec, selection: e.selection }; } catch { /* */ }
+  return null;
+}
+
 const _sgMessageHandlers = createSgMessageHandlers({
   runTrialBundle       : _runTrialBundle,
   readLocaleCache      : _readLocaleCache,
+  readSgSpec           : _readSgSpec,
   normalizeUrl         : _normalizeUrlForPerspectiveCache,
   appendOutcomes       : _appendOutcomes,
   broadcastStorageChanged,
@@ -5335,6 +5355,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // observable on a ground. Actually running it is a separate, opt-in step.
           const planP = Promise.all([intentSpecP, selectionP]).then(([spec, selection]) => {
             if (!spec || !selection || !localeModel) return null;
+            // v2.74.641 (C3) — cache the GOOD propose-time spec+selection so RUN_SG_TRIAL reuses it on the
+            // same page instead of re-comprehending (which re-rolls shape + re-matches, breaking filters).
+            _cacheSgSpec(groundId, url, intent, spec, selection);
             try {
               const cover = coverComplete(spec, selection);
               const roles = selectionToTrialRoles(spec, selection, localeModel);
