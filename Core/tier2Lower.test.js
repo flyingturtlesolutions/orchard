@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { lowerToTier2, topoOrder, deriveStructuralPostcondition, buildObservationNode } from './tier2Lower.js';
+import { lowerToTier2, topoOrder, deriveStructuralPostcondition, buildObservationNode, buildNavigateNode, insertWaits } from './tier2Lower.js';
 
 const input = (id, goal, sel) => ({ id, label: id, kind: 'input', goals: [goal], selector: sel, interaction: { pattern: 'type', effect: 'none' } });
 const submit = (id, goal, sel) => ({ id, label: id, kind: 'action', goals: [goal], selector: sel, interaction: { pattern: 'click', effect: 'submit' } });
@@ -66,11 +66,12 @@ describe('lowerToTier2 — fragment nodes per phase (SG-T2-1)', () => {
     ] };
     const selection = { matches: { signin: ['login'], search: ['go'] } };
     const { nodes } = lowerToTier2(spec, selection, locale);
-    assert.equal(nodes.length, 2);
-    assert.deepEqual(nodes[0].subGoalIds, ['signin'], 'signin fragment first (dependency order)');
-    assert.deepEqual(nodes[0].roles.map((r) => r.featureId).sort(), ['login', 'p', 'u']);
-    assert.deepEqual(nodes[1].subGoalIds, ['search']);
-    assert.deepEqual(nodes[1].roles.map((r) => r.featureId).sort(), ['go', 'q']);
+    const frags = nodes.filter((n) => n.type === 'fragment');   // a settle wait sits between the two forms
+    assert.equal(frags.length, 2);
+    assert.deepEqual(frags[0].subGoalIds, ['signin'], 'signin fragment first (dependency order)');
+    assert.deepEqual(frags[0].roles.map((r) => r.featureId).sort(), ['login', 'p', 'u']);
+    assert.deepEqual(frags[1].subGoalIds, ['search']);
+    assert.deepEqual(frags[1].roles.map((r) => r.featureId).sort(), ['go', 'q']);
   });
 
   it('skips read / navigate phases in this slice (fragments only)', () => {
@@ -180,8 +181,8 @@ describe('read → Observation node (SG-T2-3)', () => {
       { id: 'view', label: 'view results', shape: 'read', dependsOn: ['search'] },
     ] };
     const { nodes } = lowerToTier2(spec, { matches: { search: ['go'], view: ['results'] } }, locale);
-    assert.deepEqual(nodes.map((n) => n.type), ['fragment', 'observation']);
-    assert.deepEqual(nodes[1].extracts[0].selector, '.results');
+    assert.deepEqual(nodes.map((n) => n.type), ['fragment', 'wait', 'observation'], 'a settle wait sits across the search→results transition');
+    assert.deepEqual(nodes[2].extracts[0].selector, '.results');
   });
 
   it('drops a read phase that matched no readable region (e.g. only an input)', () => {
@@ -194,5 +195,44 @@ describe('read → Observation node (SG-T2-3)', () => {
     const loc2 = { features: { c: region('c', 'collection', '.c'), r: region('r', 'region', '.r'), m: region('m', 'composite', '.m') } };
     const obs = buildObservationNode({ id: 'v', label: 'v' }, { v: ['c', 'r', 'm'] }, loc2);
     assert.deepEqual(obs.extracts.map((e) => e.shape), ['list', 'text', 'record']);
+  });
+});
+
+describe('navigate node + wait insertion (SG-T2-4)', () => {
+  it('navigate phase with an href → a url navigate node', () => {
+    const locale = { features: { link: { id: 'link', label: 'Pricing', kind: 'navigation', selector: 'a.price', href: '/pricing', interaction: { pattern: 'click', effect: 'navigate' } } } };
+    const nav = buildNavigateNode({ id: 'go', label: 'open pricing' }, { go: ['link'] }, locale);
+    assert.deepEqual(nav, { type: 'navigate', subGoalIds: ['go'], label: 'open pricing', mode: 'url', url: '/pricing' });
+  });
+
+  it('navigate phase with no href → a click navigate node', () => {
+    const locale = { features: { tab: { id: 'tab', label: 'Settings', kind: 'navigation', selector: '#tab', interaction: { pattern: 'click', effect: 'navigate' } } } };
+    const nav = buildNavigateNode({ id: 'go', label: 'open settings' }, { go: ['tab'] }, locale);
+    assert.equal(nav.mode, 'click');
+    assert.equal(nav.selector, '#tab');
+  });
+
+  it('inserts a settle wait after a committing fragment, keyed on the next node first selector', () => {
+    const frag = { type: 'fragment', roles: [{ featureId: 'go', selector: '#go' }] };
+    const obs = { type: 'observation', extracts: [{ selector: '.results' }] };
+    const locale = { features: { go: { id: 'go', kind: 'action', interaction: { effect: 'submit' } } } };
+    const out = insertWaits([frag, obs], locale);
+    assert.deepEqual(out.map((n) => n.type), ['fragment', 'wait', 'observation']);
+    assert.deepEqual(out[1].condition, { type: 'selector_present', selector: '.results' });
+  });
+
+  it('inserts a wait after a navigate node', () => {
+    const nav = { type: 'navigate', mode: 'url', url: '/x' };
+    const frag = { type: 'fragment', roles: [{ featureId: 'a', selector: '#a' }] };
+    const out = insertWaits([nav, frag], { features: { a: { kind: 'input', interaction: { effect: 'none' } } } });
+    assert.deepEqual(out.map((n) => n.type), ['navigate', 'wait', 'fragment']);
+  });
+
+  it('does NOT insert a wait after a non-committing fragment', () => {
+    const f1 = { type: 'fragment', roles: [{ featureId: 'a', selector: '#a' }] };
+    const f2 = { type: 'fragment', roles: [{ featureId: 'b', selector: '#b' }] };
+    const locale = { features: { a: { kind: 'input', interaction: { effect: 'none' } }, b: { kind: 'input', interaction: { effect: 'none' } } } };
+    const out = insertWaits([f1, f2], locale);
+    assert.deepEqual(out.map((n) => n.type), ['fragment', 'fragment']);
   });
 });

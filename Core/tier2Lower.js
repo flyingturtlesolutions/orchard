@@ -21,7 +21,7 @@
 //
 // PURE: no DOM, no LLM, no storage. Unit-testable like the other Core/ stages.
 // @module Core/tier2Lower
-// @version 2.74.627
+// @version 2.74.628
 
 import { selectionToTrialRoles } from './bind.js';
 
@@ -39,6 +39,60 @@ const _scopeName = (f) => {
   const base = String((f && (f.label || f.id)) || '').trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
   return base || 'RESULT';
 };
+
+/**
+ * SG-T2-4 — build a navigate node for a `navigate` phase. PURE. Prefer a direct URL (the matched feature's
+ * href → mode:'url'); otherwise click the matched nav/action control (mode:'click', mapped to a CLICK at
+ * materialization, SG-T2-6). Returns null when the phase has no navigable target.
+ * @returns {{type:'navigate',subGoalIds:string[],label:string,mode:string,url?:string,selector?:string}|null}
+ */
+export function buildNavigateNode(sg, matches, locale) {
+  const feats = (locale && locale.features && typeof locale.features === 'object') ? locale.features : {};
+  const ids = (sg && matches && Array.isArray(matches[sg.id])) ? matches[sg.id] : [];
+  const label = (sg && sg.label && String(sg.label).trim()) || (sg && sg.id) || '';
+  for (const id of ids) {
+    const f = feats[id];
+    if (!f || f.decoy === true) continue;
+    if (f.href) return { type: 'navigate', subGoalIds: [sg.id], label, mode: 'url', url: f.href };
+    if (f.selector && (f.kind === 'navigation' || f.kind === 'action' || f.kind === 'disclosure')) return { type: 'navigate', subGoalIds: [sg.id], label, mode: 'click', selector: f.selector };
+  }
+  return null;
+}
+
+// SG-T2-4 — a node that hands the page to the next state (a committing fragment's submit, or a navigate).
+function _hasSubmitRole(node, locale) {
+  const feats = (locale && locale.features && typeof locale.features === 'object') ? locale.features : {};
+  return !!(node && node.type === 'fragment' && Array.isArray(node.roles) && node.roles.some((r) => {
+    const f = feats[r.featureId]; return f && f.interaction && f.interaction.effect === 'submit';
+  }));
+}
+const _transitions = (node, locale) => !!node && (node.type === 'navigate' || _hasSubmitRole(node, locale));
+function _firstSelector(node) {
+  if (!node) return null;
+  if (node.type === 'fragment' && Array.isArray(node.roles) && node.roles[0]) return node.roles[0].selector || null;
+  if (node.type === 'observation' && Array.isArray(node.extracts) && node.extracts[0]) return node.extracts[0].selector || null;
+  return null;
+}
+
+/**
+ * SG-T2-4 — insert `wait` nodes across TRANSITION boundaries: after a node that hands the page to the next
+ * state (a committing fragment or a navigate), wait for the NEXT node's first selector before proceeding,
+ * so a phase never races a not-yet-loaded page (the executor's mid-trial navigation race). PURE.
+ * @returns {Array} nodes with wait nodes interleaved
+ */
+export function insertWaits(nodes, locale) {
+  const list = Array.isArray(nodes) ? nodes : [];
+  const out = [];
+  for (let i = 0; i < list.length; i++) {
+    out.push(list[i]);
+    const next = list[i + 1];
+    if (next && _transitions(list[i], locale)) {
+      const sel = _firstSelector(next);
+      if (sel) out.push({ type: 'wait', mode: 'condition', condition: { type: 'selector_present', selector: sel }, timeoutMs: 8000, pollIntervalMs: 150, reason: 'settle after transition' });
+    }
+  }
+  return out;
+}
 
 /**
  * SG-T2-3 — build an Observation node for a `read` phase: capture its matched content region(s) into Scope.
@@ -164,8 +218,12 @@ export function lowerToTier2(spec, selection, locale = null) {
     } else if (sg.shape === 'read') {
       const obs = buildObservationNode(sg, matches, locale);   // SG-T2-3 — read → Observation
       if (obs) nodes.push(obs);
+    } else if (sg.shape === 'navigate') {
+      const nav = buildNavigateNode(sg, matches, locale);      // SG-T2-4 — navigate → navigate node
+      if (nav) nodes.push(nav);
     }
-    // navigate / transform phases: SG-T2-4 / SG-T2-5.
+    // transform phases: SG-T2-5.
   }
-  return { tier: 'cache', nodes };
+  // SG-T2-4 — interleave settle waits across transition boundaries (post-pass over the final node list).
+  return { tier: 'cache', nodes: insertWaits(nodes, locale) };
 }
