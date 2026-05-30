@@ -418,6 +418,48 @@ export function attachGoals(model, goals) {
   return model;
 }
 
+/**
+ * SG-0.5-F1 — derive a GOAL per DISCLOSURE-UNIT (a dropdown/menu/filter + the options it reveals). PURE.
+ *
+ * The LLM L2 pass (AnthropicService.synthesizeGoals) mis-models filter panels two ways: it LUMPS many
+ * filter dropdowns into one coarse "filter jobs" goal (the 3-8 goal cap), and it references the dropdown
+ * TRIGGERS, not the options inside them — so a filter goal ends up shared across filters AND missing its
+ * own options + commit (the live Indeed pay-filter goal = 7 dropdown disclosures, no brackets, no Update).
+ *
+ * But the reveal pass already captured the structure deterministically: a disclosure's `reveals` points at
+ * a Layer whose `features` ARE the revealed options (each `hidden`, `revealedBy` = the disclosure). This
+ * walks that structure to emit ONE clean, complete goal per disclosure-unit — achievableVia = the
+ * disclosure + its actionable revealed options (inputs/actions, incl. an in-panel Update/Apply). The caller
+ * merges these into model.goals ALONGSIDE the LLM goals (via attachGoals), giving Select/bind a fine-grained
+ * "filter by pay" / "filter by date" goal to resolve to instead of the coarse lump.
+ *
+ * @param {object} model  a Locale with features + layers (post L1 reveal).
+ * @returns {Array<{label:string, description:string, achievableVia:string[]}>}
+ */
+export function deriveDisclosureGoals(model) {
+  if (!model || !model.features || typeof model.features !== 'object') return [];
+  const feats = model.features;
+  const layers = (model.layers && typeof model.layers === 'object') ? model.layers : {};
+  const out = [];
+  for (const f of Object.values(feats)) {
+    if (!f || f.kind !== 'disclosure' || !f.selector || !f.reveals) continue;
+    const label = (f.label && String(f.label).trim()) || '';
+    if (!label) continue;                                  // an unlabelled dropdown makes no useful goal
+    const layer = layers[f.reveals];
+    const childIds = (layer && Array.isArray(layer.features)) ? layer.features : [];
+    // The actionable options the dropdown reveals — inputs or clickable actions (incl. an in-panel
+    // Update/Apply). Content regions / non-actionable reveals are not part of the operable goal.
+    const options = childIds.filter((cid) => { const c = feats[cid]; return c && c.selector && c.decoy !== true && (c.kind === 'input' || c.kind === 'action'); });
+    if (!options.length) continue;                         // reveals nothing to act on → not a filter/menu goal
+    out.push({
+      label: label.slice(0, 60),
+      description: `Open "${label}" and choose from its options`.slice(0, 200),
+      achievableVia: [f.id, ...options],
+    });
+  }
+  return out;
+}
+
 // ─── Composites (PAGEMODEL_SPEC § 3 `parts` / the within-Locale `partOf` edge) ──────
 // A composite Feature groups controls that act as ONE capability — the canonical case is a
 // search box (input + submit) or a form (≥2 inputs + submit). The page model doesn't emit
