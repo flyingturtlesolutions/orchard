@@ -1,0 +1,120 @@
+// Core/tier2Lower.test.js — SG-T2-1 unit tests (node --test). PURE: synthetic spec/selection/locale.
+
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { lowerToTier2, topoOrder } from './tier2Lower.js';
+
+const input = (id, goal, sel) => ({ id, label: id, kind: 'input', goals: [goal], selector: sel, interaction: { pattern: 'type', effect: 'none' } });
+const submit = (id, goal, sel) => ({ id, label: id, kind: 'action', goals: [goal], selector: sel, interaction: { pattern: 'click', effect: 'submit' } });
+
+describe('topoOrder — dependency ordering, stable, cycle-safe', () => {
+  it('orders a phase after the phases it dependsOn even when listed out of order', () => {
+    const order = topoOrder([
+      { id: 'b', dependsOn: ['a'] },
+      { id: 'a', dependsOn: [] },
+      { id: 'c', dependsOn: ['b'] },
+    ]);
+    assert.deepEqual(order.map((s) => s.id), ['a', 'b', 'c']);
+  });
+
+  it('preserves original order among independent phases', () => {
+    const order = topoOrder([{ id: 'x' }, { id: 'y' }, { id: 'z' }]);
+    assert.deepEqual(order.map((s) => s.id), ['x', 'y', 'z']);
+  });
+
+  it('degrades gracefully on a cycle — flushes the rest in order, drops nothing', () => {
+    const order = topoOrder([{ id: 'a', dependsOn: ['b'] }, { id: 'b', dependsOn: ['a'] }]);
+    assert.deepEqual(order.map((s) => s.id).sort(), ['a', 'b']);
+  });
+});
+
+describe('lowerToTier2 — fragment nodes per phase (SG-T2-1)', () => {
+  const searchLocale = {
+    goals: { g_search: { id: 'g_search', label: 'search for jobs', achievableVia: ['q', 'l', 'go'] } },
+    features: { q: input('q', 'g_search', '#q'), l: input('l', 'g_search', '#l'), go: submit('go', 'g_search', '#go') },
+  };
+
+  it('MERGES a fill phase + a submit phase of the SAME form into ONE fragment (form atomicity)', () => {
+    const spec = { target: 'search for jobs', subGoals: [
+      { id: 'enter', label: 'enter criteria', shape: 'act', dependsOn: [] },
+      { id: 'exec', label: 'execute search', shape: 'act', dependsOn: ['enter'] },
+    ] };
+    const selection = { matches: { enter: ['q'], exec: ['go'] } };
+    const { tier, nodes } = lowerToTier2(spec, selection, searchLocale);
+    assert.equal(tier, 'cache');
+    assert.equal(nodes.length, 1, 'fill+submit collapse to one fragment');
+    assert.deepEqual(nodes[0].subGoalIds.sort(), ['enter', 'exec']);
+    assert.deepEqual(nodes[0].roles.map((r) => r.featureId).sort(), ['go', 'l', 'q']);
+    assert.equal(nodes[0].type, 'fragment');
+  });
+
+  it('keeps TWO distinct forms as TWO fragments, in dependency order', () => {
+    const locale = {
+      goals: {
+        g_login: { id: 'g_login', label: 'sign in', achievableVia: ['u', 'p', 'login'] },
+        g_search: { id: 'g_search', label: 'search', achievableVia: ['q', 'go'] },
+      },
+      features: {
+        u: input('u', 'g_login', '#u'), p: input('p', 'g_login', '#p'), login: submit('login', 'g_login', '#login'),
+        q: input('q', 'g_search', '#q'), go: submit('go', 'g_search', '#go'),
+      },
+    };
+    const spec = { target: 'sign in then search', subGoals: [
+      { id: 'search', label: 'search', shape: 'act', dependsOn: ['signin'] },
+      { id: 'signin', label: 'sign in', shape: 'act', dependsOn: [] },
+    ] };
+    const selection = { matches: { signin: ['login'], search: ['go'] } };
+    const { nodes } = lowerToTier2(spec, selection, locale);
+    assert.equal(nodes.length, 2);
+    assert.deepEqual(nodes[0].subGoalIds, ['signin'], 'signin fragment first (dependency order)');
+    assert.deepEqual(nodes[0].roles.map((r) => r.featureId).sort(), ['login', 'p', 'u']);
+    assert.deepEqual(nodes[1].subGoalIds, ['search']);
+    assert.deepEqual(nodes[1].roles.map((r) => r.featureId).sort(), ['go', 'q']);
+  });
+
+  it('skips read / navigate phases in this slice (fragments only)', () => {
+    const spec = { target: 'search for jobs', subGoals: [
+      { id: 'nav', label: 'go to search', shape: 'navigate', dependsOn: [] },
+      { id: 'fill', label: 'enter criteria', shape: 'act', dependsOn: ['nav'] },
+      { id: 'read', label: 'read results', shape: 'read', dependsOn: ['fill'] },
+    ] };
+    const selection = { matches: { fill: ['q'] } };
+    const { nodes } = lowerToTier2(spec, selection, searchLocale);
+    assert.equal(nodes.length, 1, 'only the act phase becomes a fragment');
+    assert.deepEqual(nodes[0].subGoalIds, ['fill']);
+  });
+
+  it('skips a phase that binds nothing (no matches, no resolvable goal)', () => {
+    const spec = { target: '', subGoals: [
+      { id: 'ghost', label: 'zzz', shape: 'act', dependsOn: [] },
+      { id: 'fill', label: 'enter criteria', shape: 'act', dependsOn: [] },
+    ] };
+    const selection = { matches: { fill: ['q'] } };   // 'ghost' has no matches
+    const { nodes } = lowerToTier2(spec, selection, searchLocale);
+    assert.equal(nodes.length, 1);
+    assert.deepEqual(nodes[0].subGoalIds, ['fill']);
+  });
+
+  it('goal-grounds a COMPLETE-shape phase (binds the whole form, not just the matched field)', () => {
+    // A complete phase matched only one field; goal-grounding must still pull in the rest of the form +
+    // submit. (Regression: bind.js's complete-branch skips SG-RES-7, so we bind via the else-path.)
+    const locale = {
+      goals: { g_apply: { id: 'g_apply', label: 'apply', achievableVia: ['name', 'email', 'send'] } },
+      features: {
+        name: input('name', 'g_apply', '#name'), email: input('email', 'g_apply', '#email'),
+        send: submit('send', 'g_apply', '#send'),
+      },
+    };
+    const spec = { target: 'apply', subGoals: [{ id: 'apply', label: 'fill application', shape: 'complete', dependsOn: [] }] };
+    const { nodes } = lowerToTier2(spec, { matches: { apply: ['name'] } }, locale);
+    assert.equal(nodes.length, 1);
+    assert.equal(nodes[0].shape, 'complete', 'node records the real phase shape');
+    assert.deepEqual(nodes[0].roles.map((r) => r.featureId).sort(), ['email', 'name', 'send'], 'whole form bound via goal membership');
+  });
+
+  it('returns an empty tier-2 op when there are no fragment phases', () => {
+    const { nodes } = lowerToTier2({ target: 'x', subGoals: [{ id: 'r', label: 'read', shape: 'read' }] }, { matches: {} }, searchLocale);
+    assert.deepEqual(nodes, []);
+  });
+});
