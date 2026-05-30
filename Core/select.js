@@ -15,7 +15,7 @@
 // top; SG-3 Cover gates on `boundary.requiredFields`. Unit-testable like Core/intentSpec.js.
 //
 // @module Core/select
-// @version 2.74.572
+// @version 2.74.623
 
 const _features = (locale) =>
   (locale && locale.features && typeof locale.features === 'object') ? Object.values(locale.features) : [];
@@ -102,6 +102,45 @@ export function rankCandidates(candidates, spec) {
   });
   scored.sort((a, b) => (b.score - a.score) || (a.i - b.i));               // score desc, stable on ties
   return scored.map((x) => x.f);
+}
+
+/**
+ * SG-RES-7b (slice 2) — resolve an intent to Locale GOAL id(s) by LABEL match. PURE, no LLM. The matcher
+ * ANCHOR is the primary grounding signal (bind.js SG-RES-7 walks the goal a matched feature belongs to);
+ * this is the ZERO-ANCHOR fallback — when the LLM matched no feature at all, we can still bind the goal the
+ * user NAMED by matching the intent's `target` + subGoal phrasing against the goal labels. Same token-
+ * overlap scoring as rankCandidates, with an exact-phrase boost (either direction). Deliberately
+ * conservative: a wrong fuzzy match would fill the WRONG form, so we (a) require a real signal (>= `min`)
+ * and (b) ABSTAIN when the top goal is not a clear winner (tie at the top → []), preferring an unrunnable
+ * plan over a confidently-wrong one. A human still accepts/rejects the resulting trial. Returns goalIds
+ * best-first capped at `top`; [] when nothing clears the bar or the top is ambiguous.
+ * @param {object} locale  Locale with a `goals` map ({ [id]: { id, label, achievableVia } }).
+ * @param {object} spec    IntentSpec ({ target, subGoals[] }).
+ * @param {{min?:number, top?:number}} [opts]
+ * @returns {string[]}     resolved goal ids, best-first
+ */
+export function resolveIntentGoals(locale, spec, opts = {}) {
+  const min = Number.isFinite(opts.min) ? opts.min : 2;
+  const top = Number.isFinite(opts.top) ? Math.max(1, opts.top) : 1;
+  const goals = (locale && locale.goals && typeof locale.goals === 'object') ? Object.values(locale.goals) : [];
+  if (!goals.length) return [];
+  const q = new Set([
+    ..._rankTokens(spec && spec.target),
+    ...(((spec && Array.isArray(spec.subGoals)) ? spec.subGoals : []).flatMap((s) => _rankTokens(s && s.label))),
+  ]);
+  if (!q.size) return [];
+  const targetLc = String((spec && spec.target) || '').toLowerCase().trim();
+  const scored = goals.map((g) => {
+    let score = 0;
+    for (const t of _rankTokens(g && g.label)) if (q.has(t)) score += 2;       // label token hit
+    const labelLc = String((g && g.label) || '').toLowerCase().trim();
+    if (targetLc.length > 2 && labelLc.length > 2 && (labelLc.includes(targetLc) || targetLc.includes(labelLc))) score += 4;   // phrase containment, either way
+    return { id: g && g.id, score };
+  }).filter((x) => x.id && x.score >= min);
+  scored.sort((a, b) => b.score - a.score);
+  if (!scored.length) return [];
+  if (top === 1 && scored.length > 1 && scored[1].score === scored[0].score) return [];   // ambiguous top → abstain
+  return scored.slice(0, top).map((x) => x.id);
 }
 
 /**

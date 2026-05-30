@@ -141,6 +141,62 @@ describe('selectionToTrialRoles — goal-grounded membership (SG-RES-7): a match
     assert.deepEqual(roles.map((r) => r.featureId), ['apply'], 'no inputs/submit siblings in the goal → nothing pulled in (save is effect:none)');
   });
 
+  it('ZERO-ANCHOR: when the matcher binds nothing, resolves the goal off its label and binds it (SG-RES-7b)', () => {
+    // The matcher returned an empty match (no feature anchored a goal). The intent names "search for jobs",
+    // which resolves to g_search by label → its achievableVia binds, so the plan is still runnable.
+    const locale = {
+      goals: { g_search: { id: 'g_search', label: 'search for jobs', achievableVia: ['q', 'l', 'go'] } },
+      features: {
+        q:  { id: 'q', label: 'Job title', kind: 'input', goals: ['g_search'], selector: '#q', interaction: { pattern: 'type', effect: 'none' } },
+        l:  { id: 'l', label: 'Location', kind: 'input', goals: ['g_search'], selector: '#l', interaction: { pattern: 'type', effect: 'none' } },
+        go: { id: 'go', label: 'Search', kind: 'action', goals: ['g_search'], selector: '#go', interaction: { pattern: 'click', effect: 'submit' } },
+      },
+    };
+    const sel = { matches: {} };   // matcher anchored NOTHING
+    const roles = selectionToTrialRoles({ shape: 'act', target: 'search for jobs', subGoals: [] }, sel, locale);
+    assert.deepEqual(roles.map((r) => r.featureId).sort(), ['go', 'l', 'q'], 'goal resolved by label → achievableVia bound');
+  });
+
+  it('ZERO-ANCHOR abstains on an ambiguous intent → no roles (rather than bind a wrong form)', () => {
+    const locale = {
+      goals: { g1: { id: 'g1', label: 'foo widget', achievableVia: ['a'] }, g2: { id: 'g2', label: 'bar widget', achievableVia: ['b'] } },
+      features: {
+        a: { id: 'a', label: 'A', kind: 'input', goals: ['g1'], selector: '#a', interaction: { pattern: 'type', effect: 'none' } },
+        b: { id: 'b', label: 'B', kind: 'input', goals: ['g2'], selector: '#b', interaction: { pattern: 'type', effect: 'none' } },
+      },
+    };
+    const roles = selectionToTrialRoles({ shape: 'act', target: 'foo bar', subGoals: [] }, { matches: {} }, locale);
+    assert.deepEqual(roles.map((r) => r.featureId), [], 'ambiguous top goal → abstain → unrunnable, not wrong');
+  });
+
+  it('binds ONE input per role: duplicate same-label search boxes are deduped (thepetal regression, SG-RES-7c)', () => {
+    // A header search AND a hidden modal search, both labelled "Search", both in the goal. Binding both made
+    // the trial type into the hidden modal box → landmark "Search" matched 2 candidates → unresolvable.
+    const locale = {
+      goals: { g: { id: 'g', label: 'search', achievableVia: ['s1', 's2'] } },
+      features: {
+        s1: { id: 's1', label: 'Search', kind: 'input', goals: ['g'], selector: '#Search-In-Modal-1', interaction: { pattern: 'type', effect: 'none' } },
+        s2: { id: 's2', label: 'Search', kind: 'input', goals: ['g'], hidden: true, selector: '#Search-In-Modal', interaction: { pattern: 'type', effect: 'none' } },
+      },
+    };
+    const roles = selectionToTrialRoles({ shape: 'read' }, { matches: { 'enter-query': ['s1'] } }, locale);
+    assert.deepEqual(roles.map((r) => r.featureId), ['s1'], 'anchored search input bound; the duplicate "Search" skipped');
+  });
+
+  it('keeps DISTINCT-role inputs while deduping same-role ones (q + location survive, 2nd Search dropped)', () => {
+    const locale = {
+      goals: { g: { id: 'g', label: 'search for jobs', achievableVia: ['q', 'l', 'q2', 'go'] } },
+      features: {
+        q:  { id: 'q', label: 'Job title', kind: 'input', goals: ['g'], selector: '#q', interaction: { pattern: 'type', effect: 'none' } },
+        l:  { id: 'l', label: 'Location', kind: 'input', goals: ['g'], selector: '#l', interaction: { pattern: 'type', effect: 'none' } },
+        q2: { id: 'q2', label: 'Job title', kind: 'input', goals: ['g'], selector: '#q-dupe', interaction: { pattern: 'type', effect: 'none' } },
+        go: { id: 'go', label: 'Search', kind: 'action', goals: ['g'], selector: '#go', interaction: { pattern: 'click', effect: 'submit' } },
+      },
+    };
+    const roles = selectionToTrialRoles({ shape: 'act' }, { matches: { 'enter-query': ['q'] } }, locale);
+    assert.deepEqual(roles.map((r) => r.featureId).sort(), ['go', 'l', 'q'], 'q + location kept; the duplicate "Job title" (q2) deduped');
+  });
+
   it('does not drag in tangential non-form actions that merely share the goal', () => {
     // achievableVia membership is scoped to FORM ESSENTIALS (input/submit/disclosure). A "Share search"
     // action sharing the goal is NOT a form field and must not join the trial.

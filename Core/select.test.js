@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { coverageBoundary, selectCandidates, rankCandidates, buildSelection, coverGaps, reconcileMatches } from './select.js';
+import { coverageBoundary, selectCandidates, rankCandidates, buildSelection, coverGaps, reconcileMatches, resolveIntentGoals } from './select.js';
 
 // A mini Locale modelled on the live BambooHR apply form: required fields, an optional field, a honeypot
 // decoy, the real submit, a Cancel (effect:none after the cancel/reset fix), and non-form features.
@@ -170,5 +170,40 @@ describe('reconcileMatches — LLM proposes, code disposes', () => {
   it('tolerates null/garbage matches — all required become orphans', () => {
     const r3 = reconcileMatches(loc2(), spec, null);
     assert.deepEqual(r3.orphanRequired.map((f) => f.id).sort(), ['city', 'email', 'firstName', 'resume']);
+  });
+});
+
+describe('resolveIntentGoals — zero-anchor goal resolution by label (SG-RES-7b)', () => {
+  const goals = {
+    g_search: { id: 'g_search', label: 'search for jobs', achievableVia: ['q', 'l', 'go'] },
+    g_alerts: { id: 'g_alerts', label: 'manage job alerts', achievableVia: ['a'] },
+    g_saved:  { id: 'g_saved', label: 'view saved searches', achievableVia: ['s'] },
+  };
+
+  it('resolves the clearly-best goal the intent names', () => {
+    const ids = resolveIntentGoals({ goals }, { target: 'search for jobs', subGoals: [] });
+    assert.deepEqual(ids, ['g_search']);   // exact-phrase boost makes it the unambiguous winner
+  });
+
+  it('resolves on token overlap when one goal clearly leads', () => {
+    const ids = resolveIntentGoals({ goals }, { target: 'search jobs', subGoals: [] });
+    assert.deepEqual(ids, ['g_search']);   // "search"+"jobs" → g_search (4); others score 0
+  });
+
+  it('abstains on a token TIE between two plausible goals (job ↔ search)', () => {
+    // "job listings" + "the job search" hits BOTH "manage job alerts" (job) and "search for jobs" (search)
+    // at the same score — genuinely ambiguous, so we abstain rather than guess.
+    const ids = resolveIntentGoals({ goals }, { target: 'job listings', subGoals: [{ id: 's', label: 'locate the job search and run it' }] });
+    assert.deepEqual(ids, []);
+  });
+
+  it('ABSTAINS when the top goal is not a clear winner (tie → [])', () => {
+    const tie = { g1: { id: 'g1', label: 'foo widget' }, g2: { id: 'g2', label: 'bar widget' } };
+    assert.deepEqual(resolveIntentGoals({ goals: tie }, { target: 'foo bar', subGoals: [] }), []);
+  });
+
+  it('returns [] when the Locale has no goals map, or the intent has no usable tokens', () => {
+    assert.deepEqual(resolveIntentGoals({ features: {} }, { target: 'search for jobs' }), []);
+    assert.deepEqual(resolveIntentGoals({ goals }, { target: '', subGoals: [] }), []);
   });
 });

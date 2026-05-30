@@ -16,9 +16,10 @@
 //
 // PURE: no DOM/LLM/storage. Unit-testable like the other SG stages.
 // @module Core/bind
-// @version 2.74.622
+// @version 2.74.624
 
 import { featureToProtoLandmark } from './landmark.js';
+import { resolveIntentGoals } from './select.js';
 
 const _roleName = (f) => (f && typeof f.label === 'string' && f.label.trim()) ? f.label.trim() : (f && f.id) || '';
 
@@ -111,13 +112,34 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
       && (f.kind === 'input' || f.kind === 'disclosure' || (f.kind === 'action' && f.interaction && f.interaction.effect === 'submit'));
     const groundedGoals = new Set();
     for (const id of ids) { const f = feats[id]; if (f && Array.isArray(f.goals)) for (const g of f.goals) groundedGoals.add(g); }
+    // ZERO-ANCHOR FALLBACK (v2.74.623, SG-RES-7b / slice 2) — the matcher anchored NO goal (it matched
+    // nothing, or only features carrying no goal). Resolve the goal the user NAMED directly off the Locale's
+    // goal labels (pure, conservative: abstains on an ambiguous top match) so a goal we can name is still
+    // runnable instead of yielding 0 roles. Anchor grounding above is PREFERRED; this only fills the gap
+    // when there was none, so it never perturbs the already-working anchored path.
+    if (!groundedGoals.size) { for (const g of resolveIntentGoals(locale, spec)) groundedGoals.add(g); }
     if (groundedGoals.size) {
+      // ONE INPUT PER ROLE (v2.74.624, SG-RES-7c) — a page can carry two equivalent fields for the same
+      // goal: thepetal.com (Shopify) has a visible header search AND a hidden modal search, BOTH labelled
+      // "Search", both in the search goal's achievableVia. Unfiltered goal expansion bound both; the trial
+      // filled the visible one, then tried the hidden modal box whose selector wasn't resolvable, fell back
+      // to landmark "Search", matched 2 candidates → unresolvable → hard fail. So goal-expanded INPUTS that
+      // duplicate an already-bound role are skipped. The matcher's anchored inputs are added first (above),
+      // so the anchored/visible one wins; DISTINCT roles (q + location) are all still kept.
+      const _roleKey = (f) => String((f && (f.label || f.id)) || '').trim().toLowerCase();
+      const inputRoles = new Set();
+      for (const id of ids) { const f = feats[id]; if (f && f.kind === 'input') inputRoles.add(_roleKey(f)); }
+      const _tryAdd = (f) => {
+        if (!_formEssential(f)) return;
+        if (f.kind === 'input') { const k = _roleKey(f); if (inputRoles.has(k)) return; inputRoles.add(k); }
+        ids.add(f.id);
+      };
       for (const g of groundedGoals) {                                  // forward: achievableVia (ground truth)
         const via = (goalMap[g] && Array.isArray(goalMap[g].achievableVia)) ? goalMap[g].achievableVia : [];
-        for (const fid of via) if (_formEssential(feats[fid])) ids.add(fid);
+        for (const fid of via) _tryAdd(feats[fid]);
       }
       for (const f of Object.values(feats)) {                           // reverse: feature → goals pointer
-        if (_formEssential(f) && Array.isArray(f.goals) && f.goals.some((g) => groundedGoals.has(g))) ids.add(f.id);
+        if (Array.isArray(f.goals) && f.goals.some((g) => groundedGoals.has(g))) _tryAdd(f);
       }
     }
 
