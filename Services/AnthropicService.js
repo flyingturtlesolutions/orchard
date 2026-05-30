@@ -2387,11 +2387,15 @@ Rules:
     const userText = `User intent: ${intent}`;
     Logger.info('AnthropicService', `comprehendIntent — "${intent.slice(0, 80)}"`);
     try {
-      const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text: userText }], 1024, [], { role: 'describe', operation: 'comprehendIntent' });
+      // v2.74.640 — 4096, not 1024: a multi-phase intent ("search + filter by pay, distance, job type,
+      // experience, date") emits 6+ subGoals, each now carrying its own successCondition (SG-T2-5). At 1024
+      // the JSON TRUNCATED mid-output → parse failed → null → empty lexical spec → 0 phases. (Re-comprehend
+      // determinism / caching the propose-time spec is the deeper fix — audit C3 — but the cap is the bug.)
+      const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text: userText }], 4096, [], { role: 'describe', operation: 'comprehendIntent' });
       if (!raw?.success) { Logger.warn('AnthropicService', `comprehendIntent failed: ${raw?.error} — lexical fallback`); return buildIntentSpec(intent, null); }
       const json = AnthropicService.#firstJsonObject(raw.text);
       let comprehension = null;
-      try { comprehension = json ? JSON.parse(json) : null; } catch { comprehension = null; }
+      try { comprehension = json ? JSON.parse(json) : null; } catch (e) { comprehension = null; Logger.warn('AnthropicService', `comprehendIntent JSON parse failed (${e.message}) — likely truncated; lexical fallback`); }
       Logger.info('AnthropicService', `comprehendIntent comprehension: ${JSON.stringify(comprehension).slice(0, 1200)}`);
       const spec = buildIntentSpec(intent, comprehension);
       Logger.info('AnthropicService', `comprehendIntent spec: shape=${spec.shape} subGoals=${spec.subGoals.length} safety=${spec.safety} decidedBy=${spec.decidedBy}`);
