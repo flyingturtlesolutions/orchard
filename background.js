@@ -5142,6 +5142,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 const g = await AnthropicService.synthesizeGoals({ model, url: enr.meta?.url ?? pageUrl, title, affordances: structure.affordances });
                 if (g?.goals?.length) Locale.attachGoals(model, g.goals);
               } catch (e) { Logger.warn('background', `synthesizeGoals failed (continuing): ${e.message}`); }
+              // v2.74.637 — SG-0.5-F2: derive a goal PER disclosure-unit (PURE, no LLM) and merge it
+              // alongside the LLM goals. synthesizeGoals lumps filter dropdowns (3-8 cap) and references
+              // the triggers not the options; deriveDisclosureGoals walks reveals→layer to give Select/bind
+              // a complete per-filter goal (Pay = dropdown + brackets + Update). Runs unconditionally so the
+              // filter goals exist even if the LLM goals call failed. attachGoals merges (id = label+via).
+              try { const dg = Locale.deriveDisclosureGoals(model); if (dg.length) Locale.attachGoals(model, dg); }
+              catch (e) { Logger.warn('background', `deriveDisclosureGoals failed (continuing): ${e.message}`); }
               // v2.74.495 — derive within-Locale composites (search box / forms → `parts`) so the
               // partOf edge is real on the final feature set (post depth + goals). Best-effort.
               try { Locale.attachComposites(model); } catch (e) { Logger.warn('background', `attachComposites failed (continuing): ${e.message}`); }
