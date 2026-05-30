@@ -3722,7 +3722,8 @@ export class TemplateWalker {
       // recovery (role + accessibleName + hierarchicalContext) to
       // find a candidate, synthesizes a fresh selector, and returns
       // it. The landmark's lifecycle flips to `stale-suspected` on
-      // recovery; `stale-confirmed` on full failure.
+      // recovery OR full failure (v2.74.632 — a single probe miss is
+      // SUSPECTED, not confirmed; only LandmarkVerifier confirms).
       if (step && (step.landmarkRef || step.landmark)) {
         if (step.landmarkRef) {
           try {
@@ -3942,17 +3943,19 @@ export class TemplateWalker {
               }).catch(err => Logger.warn('TemplateWalker', `event emit failed: ${err.message}`));
             }
           } else if (probe && probe.success === false && probe.via === 'fail') {
-            // Both selector + heuristic failed. Mark stale-confirmed
-            // and return a structured error rather than letting the
-            // action fail with a generic "no element" diagnostic.
+            // Both selector + heuristic failed (absent or ambiguous). v2.74.632 — mark stale-SUSPECTED, not
+            // stale-CONFIRMED. A single resolution miss does NOT confirm the landmark is broken: the element
+            // may simply be absent on the CURRENT page (e.g. a results-page filter probed on the homepage,
+            // before the search ran), or ambiguous (present but undisambiguable) — neither is staleness.
+            // Jumping to the terminal `stale-confirmed` on one wrong-page probe POISONED the catalog. The
+            // documented one-way lifecycle is fresh → verified → stale-suspected → stale-confirmed; only
+            // LandmarkVerifier's deliberate verification should CONFIRM. Return a structured error either way
+            // (the step still fails / the trial scores it), but don't permanently condemn the landmark.
             if (desc.uid) {
-              StorageManager.updateLandmark(desc.uid, { lifecycle: 'stale-confirmed' })
+              StorageManager.updateLandmark(desc.uid, { lifecycle: 'stale-suspected' })
                 .catch(err => Logger.warn('TemplateWalker', `landmark lifecycle update failed: ${err.message}`));
             }
-            // v2.74.249 — Phase 8: emit failure event. This is the
-            // strongest "this landmark is broken" signal the substrate
-            // produces — consumers should treat it as actionable
-            // (re-author, replace, or remove).
+            // v2.74.249 — Phase 8: emit failure event (drift telemetry). Softened to stale-suspected per above.
             if (desc.uid && desc.groundId) {
               emitGroundEvent(desc.groundId, {
                 kind   : EVENT_KIND.LANDMARK_RESOLUTION_FAILED,
@@ -3962,13 +3965,13 @@ export class TemplateWalker {
                   a11yRole      : desc.a11yRole,
                   accessibleName: desc.accessibleName,
                   reason        : probe.error ?? probe.reason ?? 'unknown',
-                  newLifecycle  : 'stale-confirmed',
+                  newLifecycle  : 'stale-suspected',
                 },
               }).catch(err => Logger.warn('TemplateWalker', `event emit failed: ${err.message}`));
             }
             return {
               success: false,
-              error: `Landmark "${desc.accessibleName ?? desc.alias ?? desc.uid}" unresolvable: ${probe.error ?? probe.reason} (lifecycle: stale-confirmed)`,
+              error: `Landmark "${desc.accessibleName ?? desc.alias ?? desc.uid}" unresolvable: ${probe.error ?? probe.reason} (lifecycle: stale-suspected)`,
             };
           }
         }
