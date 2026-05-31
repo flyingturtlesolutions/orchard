@@ -16,7 +16,7 @@
 //
 // PURE: no DOM/LLM/storage. Unit-testable like the other SG stages.
 // @module Core/bind
-// @version 2.74.643
+// @version 2.74.644
 
 import { featureToProtoLandmark } from './landmark.js';
 import { resolveIntentGoals } from './select.js';
@@ -180,7 +180,10 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
     // swap the container for one option — IN PLACE so step order (open → choose → commit) is preserved. Prefer
     // a non-default value ("All…/Any…/Clear" are no-ops). No child in the catalog → keep the container (open +
     // default still applies, no regression). The per-phase role log surfaces the swap (option id, not the ul).
-    {
+    // ACT ONLY — a READ intent that matched a listbox wants the WHOLE container (to read every option), so
+    // gate the swap to act (tier2 binds every fragment phase with shape:'act'; the propose path passes the
+    // real shape). A null spec is treated conservatively as non-act (skip).
+    if (spec && spec.shape === 'act') {
       const _role = (f) => String((f && f.a11yRole) || '').toLowerCase().trim();
       const CONTAINER_ROLES = new Set(['listbox', 'menu', 'menubar', 'group', 'radiogroup', 'tree', 'grid', 'combobox']);
       const OPTION_ROLES = new Set(['option', 'menuitem', 'menuitemradio', 'menuitemcheckbox', 'radio', 'checkbox', 'treeitem', 'tab']);
@@ -196,7 +199,8 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
           && !(f.interaction && f.interaction.effect === 'submit') && !CONTAINER_ROLES.has(_role(f)));
         const concrete = siblings.filter((f) => !_isDefaultLabel(f.label));
         const pool = concrete.length ? concrete : siblings;
-        const child = pool.find((f) => OPTION_ROLES.has(_role(f))) || pool[0];
+        // prefer an explicit option role → else a click-action (never TYPE into a stray dropdown search box) → else anything
+        const child = pool.find((f) => OPTION_ROLES.has(_role(f))) || pool.find((f) => f.kind === 'action') || pool[0];
         if (child) { bound.delete(cont.id); bound.add(child.id); ordered[i] = child.id; }
       }
       ids.clear(); for (const id of ordered) ids.add(id);

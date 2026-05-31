@@ -320,6 +320,22 @@ describe('selectionToTrialRoles — goal-grounded membership (SG-RES-7): a match
     assert.deepEqual(ids, ['btn', 'opt7', 'update'], 'open → choose → commit order kept');
   });
 
+  it('CONTAINER→OPTION: does NOT swap for a READ intent (a read of the listbox wants the whole container)', () => {
+    // A read intent that matched the listbox wants to READ every option, not pick one. The swap is gated to
+    // shape:'act' (tier2 binds fragments as act; propose passes the real shape).
+    const locale = {
+      goals: { g_date: { id: 'g_date', label: 'date posted', achievableVia: ['btn', 'list', 'opt7'] } },
+      features: {
+        btn:  { id: 'btn', label: 'Date posted', kind: 'disclosure', goals: ['g_date'], selector: '#btn', interaction: { pattern: 'click', effect: 'reveal' } },
+        list: { id: 'list', label: 'All Dates Last 7 days', a11yRole: 'listbox', kind: 'action', goals: ['g_date'], hidden: true, revealedBy: 'btn', selector: '#btn + ul', interaction: { pattern: 'click', effect: 'none' } },
+        opt7: { id: 'opt7', label: 'Last 7 days', a11yRole: 'option', kind: 'action', goals: ['g_date'], hidden: true, revealedBy: 'btn', selector: '#btn + ul > li:nth-of-type(2)', interaction: { pattern: 'click', effect: 'none' } },
+      },
+    };
+    const ids = selectionToTrialRoles({ shape: 'read' }, { matches: { 'read-dates': ['list'] } }, locale).map((r) => r.featureId);
+    assert.ok(ids.includes('list'), 'read keeps the listbox container (no option swap)');
+    assert.ok(!ids.includes('opt7'), 'read did not collapse to a single option');
+  });
+
   it('CONTAINER→OPTION: keeps the container when the catalog has NO option child (no regression)', () => {
     const locale = {
       goals: { g_f: { id: 'g_f', label: 'filter', achievableVia: ['btn', 'list', 'update'] } },
