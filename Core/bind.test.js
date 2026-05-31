@@ -201,16 +201,19 @@ describe('selectionToTrialRoles — goal-grounded membership (SG-RES-7): a match
     // Indeed's pay filter: a disclosure + many mutually-exclusive brackets, NO submit. Goal expansion used
     // to bind all 8 brackets (the live "Apply pay filter — 8 role(s)" node); now it binds open + one option.
     const locale = {
+      // Real filter brackets are HIDDEN behind their dropdown (revealedBy open); roleFor injects the dropdown
+      // when a hidden option is bound, and 7f admits the sibling brackets because their revealedBy IS the
+      // anchored dropdown (so the 7d cap, not 7f, is what drops o15/o25).
       goals: { g_pay: { id: 'g_pay', label: 'pay filter', achievableVia: ['open', 'o15', 'o20', 'o25'] } },
       features: {
         open: { id: 'open', label: 'Pay', kind: 'disclosure', goals: ['g_pay'], selector: '#open', interaction: { pattern: 'click', effect: 'reveal' } },
-        o15:  { id: 'o15', label: '$15+', kind: 'input', goals: ['g_pay'], selector: '#o15', interaction: { pattern: 'type', effect: 'none' } },
-        o20:  { id: 'o20', label: '$20+', kind: 'input', goals: ['g_pay'], selector: '#o20', interaction: { pattern: 'type', effect: 'none' } },
-        o25:  { id: 'o25', label: '$25+', kind: 'input', goals: ['g_pay'], selector: '#o25', interaction: { pattern: 'type', effect: 'none' } },
+        o15:  { id: 'o15', label: '$15+', kind: 'input', goals: ['g_pay'], hidden: true, revealedBy: 'open', selector: '#o15', interaction: { pattern: 'type', effect: 'none' } },
+        o20:  { id: 'o20', label: '$20+', kind: 'input', goals: ['g_pay'], hidden: true, revealedBy: 'open', selector: '#o20', interaction: { pattern: 'type', effect: 'none' } },
+        o25:  { id: 'o25', label: '$25+', kind: 'input', goals: ['g_pay'], hidden: true, revealedBy: 'open', selector: '#o25', interaction: { pattern: 'type', effect: 'none' } },
       },
     };
     const roles = selectionToTrialRoles({ shape: 'act' }, { matches: { 'apply-pay': ['o20'] } }, locale);
-    assert.deepEqual(roles.map((r) => r.featureId).sort(), ['o20', 'open'], 'anchored option + disclosure only — the other brackets dropped');
+    assert.deepEqual(roles.map((r) => r.featureId).sort(), ['o20', 'open'], 'anchored option + its dropdown only — the other brackets dropped');
   });
 
   it('OPTION GROUP: anchoring only the disclosure still binds the disclosure + one option', () => {
@@ -268,6 +271,28 @@ describe('selectionToTrialRoles — goal-grounded membership (SG-RES-7): a match
     };
     const roles = selectionToTrialRoles({ shape: 'act' }, { matches: { 'apply': ['opt'] } }, locale);
     assert.deepEqual(roles.map((r) => r.featureId).sort(), ['d1', 'opt'], 'the pay dropdown (d1) revealed the option; the date dropdown (d2) untouched');
+  });
+
+  it('REVEAL BOUNDARY (SG-RES-7f): does NOT bind a member hidden behind a DIFFERENT dropdown', () => {
+    // The live pay-filter failure: Indeed's LLM "filter by pay" goal lumped the real Pay-filter dropdown
+    // (payDisc → its Update) with a job-card "missing preference" INPUT (stray) revealed by a DIFFERENT
+    // disclosure (otherDisc). Goal expansion pulled `stray` in, dragging otherDisc into the pay phase, and
+    // the run clicked the wrong widget then failed. 7f: a hidden member is bound only if its revealedBy is
+    // among the anchored disclosures, so the operation stays inside the one dropdown we matched.
+    const locale = {
+      goals: { g_pay: { id: 'g_pay', label: 'pay', achievableVia: ['payDisc', 'update', 'stray'] } },
+      features: {
+        payDisc:   { id: 'payDisc', label: 'Pay filter', kind: 'disclosure', goals: ['g_pay'], selector: '#payDisc', interaction: { pattern: 'click', effect: 'reveal' } },
+        update:    { id: 'update', label: 'Update', kind: 'action', goals: ['g_pay'], hidden: true, revealedBy: 'payDisc', selector: '#update', interaction: { pattern: 'click', effect: 'submit' } },
+        stray:     { id: 'stray', label: 'Minimum base pay', kind: 'input', goals: ['g_pay'], hidden: true, revealedBy: 'otherDisc', selector: '#stray', interaction: { pattern: 'type', effect: 'none' } },
+        otherDisc: { id: 'otherDisc', label: 'missing preference', kind: 'disclosure', goals: ['g_other'], selector: '#otherDisc', interaction: { pattern: 'click', effect: 'reveal' } },
+      },
+    };
+    const roles = selectionToTrialRoles({ shape: 'act' }, { matches: { 'apply-pay': ['payDisc', 'update'] } }, locale);
+    const ids = roles.map((r) => r.featureId).sort();
+    assert.deepEqual(ids, ['payDisc', 'update'], 'real pay dropdown + its Update only');
+    assert.ok(!ids.includes('stray'), 'the input behind a DIFFERENT dropdown is not bound');
+    assert.ok(!ids.includes('otherDisc'), 'the foreign dropdown is not dragged in');
   });
 
   it('does not drag in tangential non-form actions that merely share the goal', () => {

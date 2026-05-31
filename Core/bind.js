@@ -16,7 +16,7 @@
 //
 // PURE: no DOM/LLM/storage. Unit-testable like the other SG stages.
 // @module Core/bind
-// @version 2.74.635
+// @version 2.74.642
 
 import { featureToProtoLandmark } from './landmark.js';
 import { resolveIntentGoals } from './select.js';
@@ -142,6 +142,14 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
       const _roleKey = (f) => String((f && (f.label || f.id)) || '').trim().toLowerCase();
       const inputRoles = new Set();
       for (const id of ids) { const f = feats[id]; if (f && f.kind === 'input') inputRoles.add(_roleKey(f)); }
+      // REVEAL BOUNDARY (v2.74.642, SG-RES-7f) — a goal-expanded member that's HIDDEN behind a disclosure is
+      // bound ONLY if that disclosure is itself anchored, so the operation stays inside ONE dropdown. Indeed's
+      // LLM "filter by pay" goal conflated the real Pay-filter brackets with a job-card "missing preference"
+      // input (h82vi3) revealed by a DIFFERENT disclosure (2m9dnq); pulling it in dragged the wrong widget into
+      // the pay phase and the live run failed. boundDisclosures = matched disclosures ∪ the dropdown each
+      // matched hidden anchor lives in (so a matched OPTION still admits its own dropdown's siblings).
+      const boundDisclosures = new Set();
+      for (const id of ids) { const f = feats[id]; if (!f) continue; if (f.kind === 'disclosure') boundDisclosures.add(id); if (f.hidden && f.revealedBy) boundDisclosures.add(f.revealedBy); }
       for (const g of groundedGoals) {
         // Gather goal g's members from BOTH sources: forward achievableVia ∪ reverse (features whose goals∋g).
         const members = new Map();
@@ -152,6 +160,7 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
         let goalInputBound = [...ids].some((id) => { const f = feats[id]; return f && f.kind === 'input' && Array.isArray(f.goals) && f.goals.includes(g); });
         for (const f of members.values()) {
           if (!_formEssential(f)) continue;
+          if (f.hidden && f.revealedBy && !boundDisclosures.has(f.revealedBy)) continue;   // SG-RES-7f: behind a DIFFERENT dropdown than the one we're operating
           if (f.kind === 'input') {
             if (!goalHasSubmit && goalInputBound) continue;             // SG-RES-7d: option group → at most one input
             const k = _roleKey(f); if (inputRoles.has(k)) continue;     // SG-RES-7c: one per distinct role
