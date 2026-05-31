@@ -295,6 +295,44 @@ describe('selectionToTrialRoles — goal-grounded membership (SG-RES-7): a match
     assert.ok(!ids.includes('otherDisc'), 'the foreign dropdown is not dragged in');
   });
 
+  it('CONTAINER→OPTION (SG-RES-7g): swaps a matched listbox container for one concrete option child', () => {
+    // Indeed's "Date posted" filter: the filter button reveals a <ul role=listbox> ("All Dates Last 24
+    // hours…") + <li role=option> children + an Update. The matcher anchored the LISTBOX CONTAINER, so the
+    // trial clicked the whole <ul> (applying the default). 7g swaps the container for a concrete option
+    // child of the same dropdown, IN PLACE, so the order is button → option → Update, selecting a real value.
+    const locale = {
+      goals: { g_date: { id: 'g_date', label: 'date posted', achievableVia: ['btn', 'list', 'optAll', 'opt7', 'update'] } },
+      features: {
+        btn:    { id: 'btn', label: 'Date posted', kind: 'disclosure', goals: ['g_date'], selector: '#fromAge_filter_button', interaction: { pattern: 'click', effect: 'reveal' } },
+        list:   { id: 'list', label: 'All Dates Last 24 hours Last 7 days', a11yRole: 'listbox', kind: 'action', goals: ['g_date'], hidden: true, revealedBy: 'btn', selector: 'div:nth-of-type(5) > ul', interaction: { pattern: 'click', effect: 'none' } },
+        optAll: { id: 'optAll', label: 'All Dates', a11yRole: 'option', kind: 'action', goals: ['g_date'], hidden: true, revealedBy: 'btn', selector: 'div:nth-of-type(5) > ul > li:nth-of-type(1)', interaction: { pattern: 'click', effect: 'none' } },
+        opt7:   { id: 'opt7', label: 'Last 7 days', a11yRole: 'option', kind: 'action', goals: ['g_date'], hidden: true, revealedBy: 'btn', selector: 'div:nth-of-type(5) > ul > li:nth-of-type(4)', interaction: { pattern: 'click', effect: 'none' } },
+        update: { id: 'update', label: 'Update', kind: 'action', goals: ['g_date'], hidden: true, revealedBy: 'btn', selector: 'div:nth-of-type(5) > button.update', interaction: { pattern: 'click', effect: 'submit' } },
+      },
+    };
+    // matcher anchored: filter button + the LISTBOX CONTAINER + Update (exactly the live shape)
+    const roles = selectionToTrialRoles({ shape: 'act' }, { matches: { 'apply-date': ['btn', 'list', 'update'] } }, locale);
+    const ids = roles.map((r) => r.featureId);
+    assert.ok(!ids.includes('list'), 'the listbox container is swapped out');
+    assert.ok(ids.includes('opt7'), 'a concrete NON-default option (Last 7 days) is bound instead');
+    assert.ok(!ids.includes('optAll'), 'the default "All Dates" option is not chosen');
+    // order preserved: button (reveal) → option → Update (submit)
+    assert.deepEqual(ids, ['btn', 'opt7', 'update'], 'open → choose → commit order kept');
+  });
+
+  it('CONTAINER→OPTION: keeps the container when the catalog has NO option child (no regression)', () => {
+    const locale = {
+      goals: { g_f: { id: 'g_f', label: 'filter', achievableVia: ['btn', 'list', 'update'] } },
+      features: {
+        btn:    { id: 'btn', label: 'Filter', kind: 'disclosure', goals: ['g_f'], selector: '#btn', interaction: { pattern: 'click', effect: 'reveal' } },
+        list:   { id: 'list', label: 'options', a11yRole: 'listbox', kind: 'action', goals: ['g_f'], hidden: true, revealedBy: 'btn', selector: '#btn + ul', interaction: { pattern: 'click', effect: 'none' } },
+        update: { id: 'update', label: 'Update', kind: 'action', goals: ['g_f'], hidden: true, revealedBy: 'btn', selector: '#upd', interaction: { pattern: 'click', effect: 'submit' } },
+      },
+    };
+    const ids = selectionToTrialRoles({ shape: 'act' }, { matches: { 'apply': ['btn', 'list', 'update'] } }, locale).map((r) => r.featureId).sort();
+    assert.deepEqual(ids, ['btn', 'list', 'update'], 'no option child → container kept (open + default still works)');
+  });
+
   it('does not drag in tangential non-form actions that merely share the goal', () => {
     // achievableVia membership is scoped to FORM ESSENTIALS (input/submit/disclosure). A "Share search"
     // action sharing the goal is NOT a form field and must not join the trial.

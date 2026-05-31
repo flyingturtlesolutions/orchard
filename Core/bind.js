@@ -16,7 +16,7 @@
 //
 // PURE: no DOM/LLM/storage. Unit-testable like the other SG stages.
 // @module Core/bind
-// @version 2.74.642
+// @version 2.74.643
 
 import { featureToProtoLandmark } from './landmark.js';
 import { resolveIntentGoals } from './select.js';
@@ -169,6 +169,37 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
           ids.add(f.id);
         }
       }
+    }
+
+    // CONTAINER → ONE OPTION (v2.74.643, SG-RES-7g) — a filter dropdown's selectable VALUES are its
+    // individual options, but the matcher often anchors the LISTBOX/MENU CONTAINER whose accName concatenates
+    // every option ("All Dates Last 24 hours Last 7 days…"). Clicking the container applies the dropdown's
+    // DEFAULT, not a chosen value — and some widgets don't even resolve the container at runtime (Indeed's
+    // Pay "Pay options" listbox). The reveal pass captures each option as its OWN feature (a11yRole 'option',
+    // revealedBy the same trigger), so when a bound feature is a container and a concrete option child exists,
+    // swap the container for one option — IN PLACE so step order (open → choose → commit) is preserved. Prefer
+    // a non-default value ("All…/Any…/Clear" are no-ops). No child in the catalog → keep the container (open +
+    // default still applies, no regression). The per-phase role log surfaces the swap (option id, not the ul).
+    {
+      const _role = (f) => String((f && f.a11yRole) || '').toLowerCase().trim();
+      const CONTAINER_ROLES = new Set(['listbox', 'menu', 'menubar', 'group', 'radiogroup', 'tree', 'grid', 'combobox']);
+      const OPTION_ROLES = new Set(['option', 'menuitem', 'menuitemradio', 'menuitemcheckbox', 'radio', 'checkbox', 'treeitem', 'tab']);
+      const _isDefaultLabel = (s) => /^(all\b|any\b|none\b|clear|reset|default|no\s+(min|max|pref))/i.test(String(s || '').trim());
+      const ordered = [...ids];
+      const bound = new Set(ordered);
+      for (let i = 0; i < ordered.length; i++) {
+        const cont = feats[ordered[i]];
+        if (!cont || !CONTAINER_ROLES.has(_role(cont)) || !cont.revealedBy) continue;
+        const trig = cont.revealedBy;
+        const siblings = Object.values(feats).filter((f) => f && f.id !== cont.id && !bound.has(f.id)
+          && f.selector && f.decoy !== true && f.revealedBy === trig
+          && !(f.interaction && f.interaction.effect === 'submit') && !CONTAINER_ROLES.has(_role(f)));
+        const concrete = siblings.filter((f) => !_isDefaultLabel(f.label));
+        const pool = concrete.length ? concrete : siblings;
+        const child = pool.find((f) => OPTION_ROLES.has(_role(f))) || pool[0];
+        if (child) { bound.delete(cont.id); bound.add(child.id); ordered[i] = child.id; }
+      }
+      ids.clear(); for (const id of ordered) ids.add(id);
     }
 
     for (const id of ids) push(feats[id]);
