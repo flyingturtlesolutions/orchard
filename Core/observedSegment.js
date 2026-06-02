@@ -105,11 +105,14 @@ export function stepToAction(a) {
   return null;   // navigate / submit are boundaries, not steps
 }
 
-/** OBS-3 — turn a segmented op into the per-phase {label, actions} the capability builder consumes. PURE. */
+/** OBS-3 — turn a segmented op into the per-phase {label, url, actions} the capability builder consumes.
+ *  `url` is the page the phase's steps happened on (its `from`) — needed to mint per-page landmark UIDs,
+ *  since a demonstration spans pages (search on the homepage, filter on the results). PURE. */
 export function opToPhases(op) {
   const nodes = (op && Array.isArray(op.nodes)) ? op.nodes : [];
   return nodes.filter((n) => n && n.type === 'fragment').map((n) => ({
     label: n.label,
+    url: n.from || (Array.isArray(n.steps) && n.steps[0] && n.steps[0].url) || '',
     actions: (Array.isArray(n.steps) ? n.steps : []).map(stepToAction).filter(Boolean),
   }));
 }

@@ -70,9 +70,11 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     assert.ok(/done/.test(op.nodes[0].to));
   });
 
-  it('opToPhases maps steps → executable actions carrying inline landmarks (OBS-3)', () => {
+  it('opToPhases maps steps → executable actions carrying inline landmarks + the phase url (OBS-3)', () => {
     const phases = opToPhases(segmentTrace(coalesce(raw)));
     assert.equal(phases.length, 2);
+    assert.ok(typeof phases[0].url === 'string', 'phase carries its page url (for per-page landmark UIDs)');
+    assert.ok(/q=support/.test(phases[1].url), 'date phase url is the post-search page');
     assert.deepEqual(phases[0].actions.map((a) => a.action), ['TYPE', 'TYPE', 'CLICK']);
     assert.equal(phases[0].actions[0].value, 'support');
     assert.equal(phases[0].actions[2].landmark.accessibleName, 'Search');

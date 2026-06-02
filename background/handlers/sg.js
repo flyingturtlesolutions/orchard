@@ -15,7 +15,7 @@ import { coverComplete } from '../../Core/cover.js';
 import { selectionToTrialRoles } from '../../Core/bind.js';
 import { lowerToTier2, orderForRun, scoreTier2 } from '../../Core/tier2Lower.js';
 import { evaluatePostcondition } from '../../Core/postcondition.js';
-import { buildAcceptance, landmarkRefActions } from '../../Core/accept.js';
+import { buildAcceptance, landmarkRefActions, buildLandmarkRecords } from '../../Core/accept.js';
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
@@ -295,8 +295,22 @@ export function createSgMessageHandlers(ctx) {
         const { groundId = null, trace = null, name = null } = payload ?? {};
         if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
         if (!Array.isArray(trace) || !trace.length) { sendResponse({ success: false, error: 'no demonstration trace — record one first' }); return; }
-        const phases = opToPhases(segmentTrace(coalesce(trace))).filter((p) => Array.isArray(p.actions) && p.actions.length);
-        if (!phases.length) { sendResponse({ success: false, error: 'no runnable steps in the demonstration' }); return; }
+        const phasesRaw = opToPhases(segmentTrace(coalesce(trace))).filter((p) => Array.isArray(p.actions) && p.actions.length);
+        if (!phasesRaw.length) { sendResponse({ success: false, error: 'no runnable steps in the demonstration' }); return; }
+        // OBS-3b — DERIVE DURABLE LANDMARKS from the demonstrated elements (your step 3): each step carries an
+        // inline landmark (role + accessibleName + hierarchicalContext + selector); mint a per-Ground Landmark
+        // record per unique identity and convert every step to a `landmarkRef` so the capability is
+        // landmark-backed (registry recovery), NOT raw selectors — same shape the NL-path ACCEPT produces.
+        // Per-page UIDs (mintLandmarkUid uses the phase's url), since a demonstration spans pages.
+        const landmarkRecords = []; const seenUid = new Set();
+        const phases = phasesRaw.map((p) => {
+          const rolesLike = p.actions.filter((a) => a.landmark).map((a) => ({ role: a.landmark.accessibleName, landmark: a.landmark }));
+          for (const { uid, record } of buildLandmarkRecords({ roles: rolesLike, groundId, localeUrl: p.url })) {
+            if (!seenUid.has(uid)) { seenUid.add(uid); landmarkRecords.push(record); }
+          }
+          return { label: p.label, actions: landmarkRefActions(p.actions, groundId, p.url) };
+        });
+        for (const rec of landmarkRecords) { try { await StorageManager.saveLandmark(rec); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED saveLandmark failed: ${e.message}`); } }
         const capName = ((name && name.trim()) || `Recorded: ${phases.map((p) => p.label).join(' → ')}`).slice(0, 80);
         const strategyId = crypto.randomUUID();
         const fragmentIds = phases.map(() => crypto.randomUUID());
@@ -308,13 +322,13 @@ export function createSgMessageHandlers(ctx) {
         const localeUrl = (trace.find((a) => a && a.url) || {}).url || '';
         const capability = {
           id: crypto.randomUUID(), groundId, intent: capName, shape: 'observed', source: 'observed',
-          localeUrl, strategyId, fragmentIds, phases: phases.map((p) => p.label), binding: [], synthesized: true,
+          localeUrl, strategyId, fragmentIds, landmarkUids: [...seenUid], phases: phases.map((p) => p.label), binding: [], synthesized: true,
           createdAt: Date.now(), trial: { score: null, verdict: 'observed', trialRef: null },
         };
         await ctx.writeSgCapability(groundId, capability);
-        try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: capName.slice(0, 120) }, detail: { capabilityId: capability.id, strategyId, fragments: recs.fragments.length, shape: 'observed' } })]); } catch { /* */ }
-        Logger.info('background', `DERIVE_OBSERVED_CAPABILITY — ${capability.id} → strategy ${strategyId} chaining ${recs.fragments.length} fragment(s) [${capability.phases.join(' → ')}]`);
-        sendResponse({ success: true, capability, fragmentCount: recs.fragments.length });
+        try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: capName.slice(0, 120) }, detail: { capabilityId: capability.id, strategyId, fragments: recs.fragments.length, landmarks: landmarkRecords.length, shape: 'observed' } })]); } catch { /* */ }
+        Logger.info('background', `DERIVE_OBSERVED_CAPABILITY — ${capability.id} → strategy ${strategyId} chaining ${recs.fragments.length} fragment(s) + ${landmarkRecords.length} landmark(s) [${capability.phases.join(' → ')}]`);
+        sendResponse({ success: true, capability, fragmentCount: recs.fragments.length, landmarkCount: landmarkRecords.length });
       } catch (err) {
         Logger.error('background', `DERIVE_OBSERVED_CAPABILITY failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
