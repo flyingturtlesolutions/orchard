@@ -106,7 +106,16 @@ export function createSgMessageHandlers(ctx) {
           };
           let navUrl = null;
           try { if (liveTab !== null) { const t = await chrome.tabs.get(liveTab); navUrl = t?.url || null; } } catch { /* */ }
-          for (const node of phases) {
+          for (let i = 0; i < phases.length; i++) {
+            const node = phases[i];
+            // TESTING (v2.74.647) — unconditional 4s pause BETWEEN fragments, to isolate settle/hydration
+            // timing from a structural cause (e.g. a reCAPTCHA interstitial). If a hard gap makes the filter
+            // phases pass, the issue was settle timing; if they still fail, it is NOT timing. Remove once the
+            // inter-phase settle is validated.
+            if (i > 0) {
+              Logger.info('background', `  [tier2:run] testing pause 4000ms before "${node.label}"`);
+              await new Promise((r) => setTimeout(r, 4000));
+            }
             const out = await ctx.runTrialBundle({ groundId, intent: node.label, roles: node.roles, localeModel, navigateUrl: null, proposedRoleCount: node.roles.length, targetTabId: liveTab });
             const passed = !!(out?.ran && out.trial?.verdict === 'trial-pass');
             outcomes.push({ type: 'fragment', label: node.label, passed, ran: !!out?.ran, verdict: out?.trial?.verdict || null, score: (out?.trial && typeof out.trial.score === 'number') ? out.trial.score : null, reason: out?.reason || out?.result?.error || null });
