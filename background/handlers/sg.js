@@ -82,11 +82,36 @@ export function createSgMessageHandlers(ctx) {
           const liveTab = (typeof tabId === 'number') ? tabId : null;
           const phases = orderForRun(op.nodes, localeModel);
           const outcomes = [];
+          // SG-T2-8 (v2.74.646) — SETTLE between phases when a phase NAVIGATED. The runner skips the plan's
+          // wait nodes (above), so a filter phase used to fire the instant the search phase returned — before
+          // the results page and its (portal'd) filter bar had loaded/hydrated, so the dropdown trigger opened
+          // nothing and the option never mounted (the live pay failure). After a phase that changes the URL,
+          // poll tab.status to 'complete' then add a short hydration grace so the next phase acts on a settled
+          // SERP. No navigation → no wait (non-navigating phases run back-to-back as before).
+          const _settleAfterNav = async (tab, prevUrl) => {
+            if (typeof tab !== 'number') return prevUrl;
+            let curUrl = prevUrl;
+            try { const t = await chrome.tabs.get(tab); curUrl = t?.url || prevUrl; } catch { /* */ }
+            if (curUrl === prevUrl) return prevUrl;                          // no navigation — the fragment's own gates sufficed
+            const deadline = Date.now() + 10000;
+            while (Date.now() < deadline) {
+              let status = 'complete';
+              try { const t = await chrome.tabs.get(tab); status = t?.status || 'complete'; } catch { /* */ }
+              if (status === 'complete') break;
+              await new Promise((r) => setTimeout(r, 200));
+            }
+            await new Promise((r) => setTimeout(r, 1800));                   // hydration grace for the SPA filter bar
+            Logger.info('background', `  [tier2:run] settled after navigation → ${String(curUrl).slice(0, 80)}`);
+            return curUrl;
+          };
+          let navUrl = null;
+          try { if (liveTab !== null) { const t = await chrome.tabs.get(liveTab); navUrl = t?.url || null; } } catch { /* */ }
           for (const node of phases) {
             const out = await ctx.runTrialBundle({ groundId, intent: node.label, roles: node.roles, localeModel, navigateUrl: null, proposedRoleCount: node.roles.length, targetTabId: liveTab });
             const passed = !!(out?.ran && out.trial?.verdict === 'trial-pass');
             outcomes.push({ type: 'fragment', label: node.label, passed, ran: !!out?.ran, verdict: out?.trial?.verdict || null, score: (out?.trial && typeof out.trial.score === 'number') ? out.trial.score : null, reason: out?.reason || out?.result?.error || null });
             Logger.info('background', `  [tier2:run] "${node.label}" → ${passed ? 'PASS' : (out?.ran ? 'fail' : 'not-run')}${out?.trial?.verdict ? ` (${out.trial.verdict})` : ''}${out?.reason ? ` — ${String(out.reason).slice(0, 80)}` : ''}`);
+            navUrl = await _settleAfterNav(liveTab, navUrl);                 // settle if THIS phase navigated, before the next phase runs
           }
           const tier2Score = scoreTier2(outcomes.map((o) => ({ type: 'fragment', passed: o.passed })));
           Logger.info('background', `RUN_SG_TRIAL[tier2:run] — ${tier2Score.verdict} (${tier2Score.requiredPassed}/${tier2Score.requiredTotal} phases passed) score=${tier2Score.score}`);
