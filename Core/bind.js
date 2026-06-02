@@ -16,7 +16,7 @@
 //
 // PURE: no DOM/LLM/storage. Unit-testable like the other SG stages.
 // @module Core/bind
-// @version 2.74.644
+// @version 2.74.651
 
 import { featureToProtoLandmark } from './landmark.js';
 import { resolveIntentGoals } from './select.js';
@@ -202,6 +202,27 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
         // prefer an explicit option role → else a click-action (never TYPE into a stray dropdown search box) → else anything
         const child = pool.find((f) => OPTION_ROLES.has(_role(f))) || pool.find((f) => f.kind === 'action') || pool[0];
         if (child) { bound.delete(cont.id); bound.add(child.id); ordered[i] = child.id; }
+      }
+      // ENSURE A VALUE (v2.74.651, SG-RES-7h) — a filter phase sometimes binds only its DISCLOSURE + commit:
+      // the matcher returned no concrete option, and the brackets are action:none so the form-essentials
+      // expansion skips them. Opening the dropdown and clicking Update with NOTHING selected applies the
+      // DEFAULT — a no-op (the live "filter by pay" → disclosure+Update phase). For each bound disclosure that
+      // reveals options, if no value-option of it is bound, pull in ONE concrete option (a revealed child
+      // that isn't the disclosure or a submit), inserted right after its disclosure so order stays
+      // open → choose → commit. Prefer a non-default, option/action child; never add a bare input (those are
+      // handled by the 7d option-cap / form expansion). No option child → leave it (honest no-value phase).
+      for (const did of [...ordered]) {
+        const disc = feats[did];
+        if (!disc || disc.kind !== 'disclosure' || !disc.reveals) continue;
+        const bset = new Set(ordered);
+        const hasValue = ordered.some((id) => { const f = feats[id]; return f && f.id !== did && f.revealedBy === did && !(f.interaction && f.interaction.effect === 'submit') && !CONTAINER_ROLES.has(_role(f)); });
+        if (hasValue) continue;
+        const siblings = Object.values(feats).filter((f) => f && !bset.has(f.id) && f.selector && f.decoy !== true
+          && f.revealedBy === did && !(f.interaction && f.interaction.effect === 'submit') && !CONTAINER_ROLES.has(_role(f)));
+        const concrete = siblings.filter((f) => !_isDefaultLabel(f.label));
+        const pool = concrete.length ? concrete : siblings;
+        const opt = pool.find((f) => OPTION_ROLES.has(_role(f))) || pool.find((f) => f.kind === 'action');   // not a bare input
+        if (opt) { const at = ordered.indexOf(did); ordered.splice(at + 1, 0, opt.id); }
       }
       ids.clear(); for (const id of ordered) ids.add(id);
     }

@@ -216,6 +216,39 @@ describe('selectionToTrialRoles — goal-grounded membership (SG-RES-7): a match
     assert.deepEqual(roles.map((r) => r.featureId).sort(), ['o20', 'open'], 'anchored option + its dropdown only — the other brackets dropped');
   });
 
+  it('ENSURE A VALUE (SG-RES-7h): disclosure+commit only → bind one concrete non-default option', () => {
+    // The live "filter by pay" case: the matcher returned only the Pay dropdown + Update (no bracket), and
+    // the brackets are action:none so form-expansion skips them — so the phase opened the dropdown and
+    // committed the DEFAULT (a no-op). 7h pulls in one concrete option (revealed by the same disclosure) so
+    // the filter selects a real value, inserted open → option → commit.
+    const locale = {
+      goals: { g_pay: { id: 'g_pay', label: 'pay', achievableVia: ['disc', 'optAll', 'opt20', 'update'] } },
+      features: {
+        disc:   { id: 'disc', label: 'Pay filter', kind: 'disclosure', reveals: 'layer_disc', goals: ['g_pay'], selector: '#pay', interaction: { pattern: 'click', effect: 'reveal' } },
+        optAll: { id: 'optAll', label: 'All salaries', a11yRole: 'option', kind: 'action', goals: ['g_pay'], hidden: true, revealedBy: 'disc', selector: '#pay+ul>li:nth-of-type(1)', interaction: { pattern: 'click', effect: 'none' } },
+        opt20:  { id: 'opt20', label: '$20.00+/hour', a11yRole: 'option', kind: 'action', goals: ['g_pay'], hidden: true, revealedBy: 'disc', selector: '#pay+ul>li:nth-of-type(2)', interaction: { pattern: 'click', effect: 'none' } },
+        update: { id: 'update', label: 'Update', kind: 'action', goals: ['g_pay'], hidden: true, revealedBy: 'disc', selector: '#pay-update', interaction: { pattern: 'click', effect: 'submit' } },
+      },
+    };
+    const ids = selectionToTrialRoles({ shape: 'act' }, { matches: { 'apply-pay': ['disc', 'update'] } }, locale).map((r) => r.featureId);
+    assert.ok(ids.includes('opt20') && !ids.includes('optAll'), 'a non-default option ($20+, not "All salaries") is ensured');
+    const iD = ids.indexOf('disc'), iO = ids.indexOf('opt20'), iU = ids.indexOf('update');
+    assert.ok(iD < iO && iO < iU, 'open → option → commit order');
+  });
+
+  it('ENSURE A VALUE: does not fire when a value option is already bound, nor for a disclosure with no reveals', () => {
+    const locale = {
+      goals: { g: { id: 'g', label: 'g', achievableVia: ['d', 'o', 'u'] } },
+      features: {
+        d: { id: 'd', label: 'Disc', kind: 'disclosure', goals: ['g'], selector: '#d', interaction: { pattern: 'click', effect: 'reveal' } },   // no `reveals` layer
+        o: { id: 'o', label: 'Opt', a11yRole: 'option', kind: 'action', goals: ['g'], hidden: true, revealedBy: 'd', selector: '#o', interaction: { pattern: 'click', effect: 'none' } },
+        u: { id: 'u', label: 'Update', kind: 'action', goals: ['g'], hidden: true, revealedBy: 'd', selector: '#u', interaction: { pattern: 'click', effect: 'submit' } },
+      },
+    };
+    const ids = selectionToTrialRoles({ shape: 'act' }, { matches: { 'x': ['d', 'u'] } }, locale).map((r) => r.featureId).sort();
+    assert.deepEqual(ids, ['d', 'u'], 'no reveals layer → nothing to ensure (stays disclosure + commit)');
+  });
+
   it('OPTION GROUP: anchoring only the disclosure still binds the disclosure + one option', () => {
     const locale = {
       goals: { g_pay: { id: 'g_pay', label: 'pay filter', achievableVia: ['open', 'o15', 'o20'] } },
