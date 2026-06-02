@@ -9,9 +9,9 @@
 // Downstream (OBS-2/3): coalesce(trace) → segment into Fragments → buildTier2CapabilityRecords (SG-T2-ACC).
 //
 // @module Core/observedTrace
-// @version 2.74.652
+// @version 2.74.659
 
-export const OBSERVED_KINDS = Object.freeze(['click', 'type', 'select', 'submit', 'navigate']);
+export const OBSERVED_KINDS = Object.freeze(['click', 'type', 'select', 'submit', 'navigate', 'scroll']);
 
 // Field name/type/autocomplete patterns that mark a value SENSITIVE — never store the raw value. The
 // content script ALSO checks this (mirrored) so a sensitive value never leaves the page; this is the
@@ -42,6 +42,7 @@ export function classifyKind(domKind, target) {
   switch (domKind) {
     case 'submit': return 'submit';
     case 'navigate': return 'navigate';
+    case 'scroll': return 'scroll';
     case 'change':
     case 'input': {
       const tag = String((target && target.tagName) || '').toLowerCase();
@@ -81,6 +82,11 @@ export function buildRawAction(parts) {
       accessibleName: target.accessibleName ? String(target.accessibleName).slice(0, 120) : null,
       selector: target.selector || null,
       hierarchicalContext: target.hierarchicalContext || null,
+      // OBS-3b — record-time identity (the NL path profiles live post-accept; a demo can't be re-profiled)
+      rect: target.rect || null,
+      text: target.text ? String(target.text).slice(0, 140) : null,
+      attrs: (target.attrs && typeof target.attrs === 'object') ? target.attrs : null,
+      scrollY: Number.isFinite(target.scrollY) ? target.scrollY : undefined,
     },
   };
   if (kind === 'type' || kind === 'select') action.value = scrubValue(p.value, target);
@@ -104,6 +110,7 @@ export function coalesce(actions) {
       continue;
     }
     if (prev && a.kind === 'navigate' && prev.kind === 'navigate' && a.to === prev.to) continue;   // duplicate nav
+    if (prev && a.kind === 'scroll' && prev.kind === 'scroll') { out[out.length - 1] = { ...a }; continue; }   // collapse a scroll run to the latest
     out.push(a);
   }
   return out.map((a, i) => ({ ...a, seq: i }));

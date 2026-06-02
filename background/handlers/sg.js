@@ -307,8 +307,17 @@ export function createSgMessageHandlers(ctx) {
         const landmarkRecords = []; const seenUid = new Set();
         const phases = phasesRaw.map((p) => {
           const rolesLike = p.actions.filter((a) => a.landmark).map((a) => ({ role: a.landmark.accessibleName, landmark: a.landmark }));
+          const profBySel = new Map();   // selector → the record-time profile captured by the recorder
+          for (const a of p.actions) if (a.landmark && a.landmark.selector) profBySel.set(a.landmark.selector, a.landmark);
           for (const { uid, record } of buildLandmarkRecords({ roles: rolesLike, groundId, localeUrl: p.url })) {
-            if (!seenUid.has(uid)) { seenUid.add(uid); landmarkRecords.push(record); }
+            if (seenUid.has(uid)) continue;
+            seenUid.add(uid);
+            // OBS-3b/#3 — populate the record from the record-time identity (the demo can't be re-profiled).
+            const lm = profBySel.get(record.selector);
+            if (lm) { record.boundingBox = lm.rect || null; record.textContent = lm.text || null; record.attributes = lm.attrs || null; }
+            // OBS-#2 — the DEMONSTRATION is the verification: the user used this exact element successfully.
+            record.lifecycle = 'verified'; record.verifiedBy = 'demonstration'; record.verifiedAt = Date.now(); record.source = 'observed';
+            landmarkRecords.push(record);
           }
           return { label: p.label, actions: landmarkRefActions(p.actions, groundId, p.url) };
         });

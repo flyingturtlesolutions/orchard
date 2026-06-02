@@ -15,7 +15,7 @@
  *
  * @module ContentScripts/contentScript
  * @author Agent HUB
- * @version 2.17.2
+ * @version 2.17.3
  */
 
 'use strict';
@@ -5409,9 +5409,12 @@ async function closeOpenOverlays() {
 let _obsRec = { active: false };
 const _OBS_SENSITIVE = /pass(word|code)|(^|[^a-z])pin([^a-z]|$)|\bssn\b|social.?security|credit.?card|card.?number|(^|[^a-z])cc-?(num|number|csc|cvv|cvc)|security.?code|\bcvv\b|\bcvc\b|account.?number|routing.?number/i;
 
+// OBS-3b — the element IS live when the user acts, so capture a rich identity HERE (the demonstration can't
+// be re-profiled later — it spans pages). rect/text/attributes populate the durable Landmark record so it
+// isn't a bare selector (the NL path fills these via post-accept live profiling; the observed path can't).
 function _obsExtract(el) {
   const out = { tagName: el.tagName || null, role: null, accessibleName: null, selector: null, hierarchicalContext: null,
-    name: null, type: null, autocomplete: null, inputType: null };
+    name: null, type: null, autocomplete: null, inputType: null, rect: null, text: null, attrs: null };
   try { out.selector = computeUniqueSelector(el); } catch { /* */ }
   try { out.role = _computeA11yRole(el); } catch { /* */ }
   try { out.accessibleName = _computeAccessibleName(el); } catch { /* */ }
@@ -5419,6 +5422,9 @@ function _obsExtract(el) {
   try { out.name = el.getAttribute('name') || null; } catch { /* */ }
   try { out.type = el.getAttribute('type') || null; out.inputType = el.type || null; } catch { /* */ }
   try { out.autocomplete = el.getAttribute('autocomplete') || null; } catch { /* */ }
+  try { const r = el.getBoundingClientRect(); if (r && (r.width || r.height)) out.rect = { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }; } catch { /* */ }
+  try { const tx = (el.textContent || '').replace(/\s+/g, ' ').trim(); if (tx) out.text = tx.slice(0, 140); } catch { /* */ }
+  try { const a = {}; for (const k of ['type', 'placeholder', 'href', 'data-testid', 'data-test-id', 'title', 'aria-label', 'value']) { const v = el.getAttribute && el.getAttribute(k); if (v) a[k] = String(v).slice(0, 140); } if (Object.keys(a).length) out.attrs = a; } catch { /* */ }
   return out;
 }
 function _obsResolveClickTarget(el) {
@@ -5439,6 +5445,17 @@ function _obsSend(domKind, el, rawValue) {
 const _obsOnClick  = (e) => { try { const el = _obsResolveClickTarget(e.target); if (el) _obsSend('click', el, null); } catch { /* */ } };
 const _obsOnInput  = (e) => { try { const el = e.target; const tag = el && el.tagName; if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') _obsSend(tag === 'SELECT' ? 'change' : 'input', el, el.value); } catch { /* */ } };
 const _obsOnSubmit = (e) => { try { if (e.target) _obsSend('submit', e.target, null); } catch { /* */ } };
+// OBS-4 — debounced SCROLL capture (not every pixel): record where the viewport settled, so a demonstration
+// that scrolls (to read or reach content) is visible in the trace. Replay reaches elements via SCROLL_TO
+// normalizers, so this is for trace fidelity, not pixel-replay.
+let _obsScrollT = null;
+const _obsOnScroll = () => {
+  if (!_obsRec.active) return;
+  if (_obsScrollT) clearTimeout(_obsScrollT);
+  _obsScrollT = setTimeout(() => {
+    try { chrome.runtime.sendMessage({ type: 'INTERACTION_RECORD', payload: { domKind: 'scroll', target: { scrollY: Math.round(window.scrollY || 0) }, ts: Date.now(), url: location.href } }); } catch { /* */ }
+  }, 450);
+};
 function _obsStart() {
   if (_obsRec.active) return;
   _obsRec = { active: true };
@@ -5446,13 +5463,16 @@ function _obsStart() {
   document.addEventListener('input', _obsOnInput, true);
   document.addEventListener('change', _obsOnInput, true);
   document.addEventListener('submit', _obsOnSubmit, true);
+  window.addEventListener('scroll', _obsOnScroll, { capture: true, passive: true });
 }
 function _obsStop() {
   _obsRec.active = false;
+  if (_obsScrollT) { clearTimeout(_obsScrollT); _obsScrollT = null; }
   document.removeEventListener('click', _obsOnClick, true);
   document.removeEventListener('input', _obsOnInput, true);
   document.removeEventListener('change', _obsOnInput, true);
   document.removeEventListener('submit', _obsOnSubmit, true);
+  window.removeEventListener('scroll', _obsOnScroll, { capture: true });
 }
 
 // ─── Message router ───────────────────────────────────────────────────────────

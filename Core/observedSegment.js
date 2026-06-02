@@ -14,7 +14,7 @@
 //     gives nicer labels later; this keeps it runnable without an LLM.
 //
 // @module Core/observedSegment
-// @version 2.74.658
+// @version 2.74.659
 
 const _DISCLOSURE_HINT = /filter|menu|sort|posted|date|pay|salary|wage|type|level|experience|distance|remote|radius|category|options?|dropdown|expand|more/i;
 
@@ -79,6 +79,7 @@ export function segmentTrace(trace) {
       if (acts[i + 1] && acts[i + 1].kind === 'navigate') continue;
       flush(a.url || ''); fromUrl = a.url || fromUrl; continue;
     }
+    if (a.kind === 'scroll') continue;   // OBS-4 — recorded for trace fidelity, not a step (replay scrolls via SCROLL_TO)
     cur.push(a);
   }
   flush('');   // trailing fragment (a final action with no navigation — e.g. a filter that applied in place)
@@ -95,7 +96,9 @@ export function stepToAction(a) {
   const t = a.target || {};
   const sel = t.selector;
   if (!sel) return null;
-  const lm = (t.role && t.accessibleName) ? { role: t.role, accessibleName: t.accessibleName, hierarchicalContext: t.hierarchicalContext || null, selector: sel } : null;
+  const lm = (t.role && t.accessibleName)
+    ? { role: t.role, accessibleName: t.accessibleName, hierarchicalContext: t.hierarchicalContext || null, selector: sel, rect: t.rect || null, text: t.text || null, attrs: t.attrs || null }
+    : null;
   if (a.kind === 'type') return { action: 'TYPE', selector: sel, value: a.value != null ? a.value : '', ...(lm ? { landmark: lm } : {}) };
   if (a.kind === 'select') {
     if (String(t.tagName || '').toUpperCase() === 'SELECT') return { action: 'SELECT', selector: sel, value: a.value != null ? a.value : '' };
@@ -147,6 +150,11 @@ export function opToPhases(op) {
   return nodes.filter((n) => n && n.type === 'fragment').map((n) => ({
     label: n.label,
     url: n.from || (Array.isArray(n.steps) && n.steps[0] && n.steps[0].url) || '',
-    actions: (Array.isArray(n.steps) ? n.steps : []).map(stepToAction).filter(Boolean),
+    // OBS-4 — prepend an optional SCROLL_TO before each action so replay reaches an element the user had to
+    // scroll to (the demonstration's scrolls don't transfer across viewports; SCROLL_TO is viewport-safe).
+    // A SCROLL_TO on a revealed option runs AFTER its disclosure-open action, so order stays correct; an
+    // optional miss is harmless (a not-yet-present element is skipped).
+    actions: (Array.isArray(n.steps) ? n.steps : []).map(stepToAction).filter(Boolean)
+      .flatMap((a) => (a.selector ? [{ action: 'SCROLL_TO', selector: a.selector, optional: true }, a] : [a])),
   }));
 }

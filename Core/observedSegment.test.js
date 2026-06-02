@@ -70,17 +70,20 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     assert.ok(/done/.test(op.nodes[0].to));
   });
 
-  it('opToPhases maps steps → executable actions carrying inline landmarks + the phase url (OBS-3)', () => {
+  it('opToPhases maps steps → executable actions (SCROLL_TO before each) carrying inline landmarks + url (OBS-3/4)', () => {
     const phases = opToPhases(segmentTrace(coalesce(raw)));
     assert.equal(phases.length, 2);
     assert.ok(typeof phases[0].url === 'string', 'phase carries its page url (for per-page landmark UIDs)');
     assert.ok(/q=support/.test(phases[1].url), 'date phase url is the post-search page');
-    assert.deepEqual(phases[0].actions.map((a) => a.action), ['TYPE', 'TYPE', 'CLICK']);
-    assert.equal(phases[0].actions[0].value, 'support');
-    assert.equal(phases[0].actions[2].landmark.accessibleName, 'Search');
-    // the date option (a clicked <li role=option>) replays as a CLICK on that option
-    assert.deepEqual(phases[1].actions.map((a) => a.action), ['CLICK', 'CLICK']);
-    assert.equal(phases[1].actions[1].landmark.accessibleName, 'Last 3 days');
+    // each real action is preceded by an optional SCROLL_TO (OBS-4)
+    assert.ok(phases[0].actions.every((a, i, arr) => a.action !== 'SCROLL_TO' || (arr[i + 1] && arr[i + 1].selector === a.selector)), 'each SCROLL_TO targets the following action');
+    const real0 = phases[0].actions.filter((a) => a.action !== 'SCROLL_TO');
+    assert.deepEqual(real0.map((a) => a.action), ['TYPE', 'TYPE', 'CLICK']);
+    assert.equal(real0[0].value, 'support');
+    assert.equal(real0[2].landmark.accessibleName, 'Search');
+    const real1 = phases[1].actions.filter((a) => a.action !== 'SCROLL_TO');
+    assert.deepEqual(real1.map((a) => a.action), ['CLICK', 'CLICK']);   // a clicked <li role=option> replays as CLICK
+    assert.equal(real1[1].landmark.accessibleName, 'Last 3 days');
   });
 
   it('stepToAction: a native <select> change → SELECT op with value', () => {
