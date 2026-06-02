@@ -17,6 +17,7 @@ import { lowerToTier2, orderForRun, scoreTier2 } from '../../Core/tier2Lower.js'
 import { evaluatePostcondition } from '../../Core/postcondition.js';
 import { buildAcceptance, landmarkRefActions } from '../../Core/accept.js';
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
+import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
 import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
@@ -137,7 +138,13 @@ export function createSgMessageHandlers(ctx) {
           }
           const tier2Score = scoreTier2(outcomes.map((o) => ({ type: 'fragment', passed: o.passed })));
           Logger.info('background', `RUN_SG_TRIAL[tier2:run] — ${tier2Score.verdict} (${tier2Score.requiredPassed}/${tier2Score.requiredTotal} phases passed) score=${tier2Score.score}`);
-          sendResponse({ success: true, ran: outcomes.length > 0, tier2: op, outcomes, tier2Score, intentShape: spec.shape });
+          // SG-T2-ACC — stash the op so ACCEPT can promote it into a durable, replayable MULTI-fragment
+          // capability. Re-synthesized at accept time WITHOUT the trial's commit-deferral, so a REPLAY APPLIES
+          // the filters for real (the trial only proved reachability). Best-effort; never blocks the response.
+          if (typeof ctx.writeSgDraft === 'function') {
+            try { await ctx.writeSgDraft(groundId, { tier2: true, op, intent, spec, selection, localeUrl: localeCapturedUrl || '', tier2Score, outcomes, groundId, capturedAt: Date.now() }); } catch (e) { Logger.warn('background', `tier2 draft write failed (continuing): ${e.message}`); }
+          }
+          sendResponse({ success: true, ran: outcomes.length > 0, tier2: op, outcomes, tier2Score, intentShape: spec.shape, acceptEligible: outcomes.some((o) => o.passed) });
           return;
         }
         const cover = coverComplete(spec, selection);
@@ -177,6 +184,41 @@ export function createSgMessageHandlers(ctx) {
         if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
         const draft = await ctx.readSgDraft(groundId);
         if (!draft) { sendResponse({ success: true, accepted: false, reason: 'no trial to accept — run the trial first' }); return; }
+        // SG-T2-ACC — promote a TIER-2 op into a durable, replayable MULTI-fragment capability: one Fragment
+        // per phase (re-synthesized WITHOUT the trial's commit-deferral, so the steps include the real commit
+        // CLICK) + one Strategy that chains them via fragmentSteps. Replay runs executeStrategy(strategyId)
+        // for REAL (commits included) — so the filters actually apply, the thesis payoff. Steps keep inline
+        // landmarks (SG-LM-3), so replay self-heals via probe-or-recover without a registry round-trip.
+        if (draft.tier2 && draft.op && Array.isArray(draft.op.nodes)) {
+          let localeModel = null;
+          try { const pm = await ctx.readLocaleCache(groundId, ctx.normalizeUrl(draft.localeUrl || '')); localeModel = pm?.model || null; } catch { /* */ }
+          const phaseNodes = orderForRun(draft.op.nodes, localeModel);
+          const phases = [];
+          for (const node of phaseNodes) {
+            const synth = synthesizeTrialOp({ groundedIntent: node.label, roles: node.roles, locale: localeModel });
+            if (synth && Array.isArray(synth.actions) && synth.actions.length) phases.push({ label: node.label, actions: synth.actions });
+          }
+          if (!phases.length) { sendResponse({ success: true, accepted: false, reason: 'no runnable phases to promote' }); return; }
+          const strategyId = crypto.randomUUID();
+          const fragmentIds = phases.map(() => crypto.randomUUID());
+          const recs = CapabilitySynth.buildTier2CapabilityRecords(phases, { groundId, strategyId, fragmentIds, name: draft.intent, goal: draft.intent });
+          if (!recs) { sendResponse({ success: true, accepted: false, reason: 'could not assemble tier-2 capability records' }); return; }
+          for (const f of recs.fragments) { try { await StorageManager.saveFragment(f); } catch (e) { Logger.warn('background', `ACCEPT_SG_TRIAL[tier2] saveFragment failed: ${e.message}`); } }
+          try { await StorageManager.saveStrategy(recs.strategy); }
+          catch (e) { Logger.error('background', `ACCEPT_SG_TRIAL[tier2] saveStrategy failed: ${e.message}`); sendResponse({ success: false, error: `strategy save failed: ${e.message}` }); return; }
+          const capability = {
+            id: crypto.randomUUID(), groundId, intent: draft.intent, shape: 'tier2',
+            localeUrl: draft.localeUrl || '', strategyId, fragmentIds, phases: phases.map((p) => p.label),
+            binding: [], synthesized: true, createdAt: Date.now(),
+            trial: { score: draft.tier2Score?.score ?? null, verdict: draft.tier2Score?.verdict ?? null, trialRef: null },
+          };
+          await ctx.writeSgCapability(groundId, capability);
+          try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: String(draft.intent).slice(0, 120) }, detail: { capabilityId: capability.id, strategyId, fragments: recs.fragments.length, shape: 'tier2', score: capability.trial.score } })]); } catch { /* */ }
+          await ctx.clearSgDraft(groundId);
+          Logger.info('background', `ACCEPT_SG_TRIAL[tier2] — promoted ${capability.id} → strategy ${strategyId} chaining ${recs.fragments.length} fragment(s) [${capability.phases.join(' → ')}]`);
+          sendResponse({ success: true, accepted: true, capability, fragmentCount: recs.fragments.length, tier2: true });
+          return;
+        }
         const built = buildAcceptance({
           intent: draft.intent, spec: draft.spec, cover: draft.cover, roles: draft.roles,
           trial: draft.trial, result: draft.result, selection: draft.selection,

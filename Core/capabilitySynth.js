@@ -14,7 +14,7 @@
 // PURE: no DOM / chrome / storage / id-minting (the persistence slice mints ids + saves).
 //
 // @module Core/capabilitySynth
-// @version 2.74.475
+// @version 2.74.649
 
 /** Feature kinds that FILL a value (typed first), vs ACT (clicked after). */
 const _FILL_KINDS = new Set(['input']);
@@ -170,4 +170,45 @@ export function buildCapabilityRecords(draft, { groundId, fragmentId, strategyId
   };
 
   return { fragment, strategy };
+}
+
+/**
+ * SG-T2-ACC — assemble a MULTI-fragment capability from a Tier-2 op's ordered phases: ONE Fragment per phase
+ * + ONE Strategy that chains them via `fragmentSteps` (the Strategy model already runs N fragments in order).
+ * Mirrors buildCapabilityRecords but for the multi-phase op. PURE: the CALLER synthesizes each phase's action
+ * list — crucially RE-SYNTHESIZED WITHOUT the trial's commit-deferral, so the persisted fragment includes the
+ * real commit CLICK and a REPLAY actually applies the filter (the trial only proved reachability). Steps keep
+ * their inline `landmark` (SG-LM-3) so replay self-heals via probe-or-recover without a registry round-trip.
+ * @param {Array<{label:string, actions:object[]}>} phases  ordered phases with synthesized action lists
+ * @param {{groundId:string, strategyId:string, fragmentIds:string[], name?:string, goal?:string, now?:number}} ids
+ * @returns {{fragments:object[], strategy:object}|null}  null when nothing is runnable / ids are short
+ */
+export function buildTier2CapabilityRecords(phases, { groundId, strategyId, fragmentIds, name, goal, now } = {}) {
+  const ph = Array.isArray(phases) ? phases.filter((p) => p && Array.isArray(p.actions) && p.actions.length) : [];
+  if (!ph.length || !groundId || !strategyId || !Array.isArray(fragmentIds) || fragmentIds.length < ph.length) return null;
+  const ts = Number.isFinite(now) ? now : Date.now();
+  const fragments = [];
+  const fragmentSteps = [];
+  for (let i = 0; i < ph.length; i++) {
+    const fragmentId = fragmentIds[i];
+    fragments.push({
+      id: fragmentId, groundId,
+      name: `${ph[i].label} — steps`.slice(0, 80),
+      description: ph[i].label || '',
+      rawJson: JSON.stringify(ph[i].actions),
+      params: [],
+      preconditions: { match: 'all', conditions: [] },
+      postconditions: { match: 'all', conditions: [] },
+      healthStatus: 'untested', lastExecutedAt: null, synthesized: true,
+      createdAt: ts, updatedAt: ts,
+    });
+    fragmentSteps.push({ type: 'fragment', fragmentId, paramBindings: {} });
+  }
+  const strategy = {
+    id: strategyId, groundId,
+    name: (name || 'Tier-2 capability').slice(0, 80), goal: goal || '',
+    params: [], fragmentSteps, aliases: [], outcomeSignal: null,
+    synthesized: true, createdAt: ts, updatedAt: ts,
+  };
+  return { fragments, strategy };
 }
