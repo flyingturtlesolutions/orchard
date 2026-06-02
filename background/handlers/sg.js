@@ -15,7 +15,7 @@ import { coverComplete } from '../../Core/cover.js';
 import { selectionToTrialRoles } from '../../Core/bind.js';
 import { lowerToTier2, orderForRun, scoreTier2 } from '../../Core/tier2Lower.js';
 import { evaluatePostcondition } from '../../Core/postcondition.js';
-import { buildAcceptance, landmarkRefActions, buildLandmarkRecords } from '../../Core/accept.js';
+import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord } from '../../Core/accept.js';
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
@@ -312,6 +312,11 @@ export function createSgMessageHandlers(ctx) {
         });
         for (const rec of landmarkRecords) { try { await StorageManager.saveLandmark(rec); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED saveLandmark failed: ${e.message}`); } }
         const capName = ((name && name.trim()) || `Recorded: ${phases.map((p) => p.label).join(' → ')}`).slice(0, 80);
+        const localeUrl = (trace.find((a) => a && a.url) || {}).url || '';
+        // OBS-3c — compose the derived landmarks into a PERSPECTIVE (your step 4 — the intent-scoped grouping
+        // the library shows), authoredBy:'model', exactly like the NL-path ACCEPT. The capability links it.
+        const perspective = buildPerspectiveRecord({ intent: capName, spec: { shape: 'observed', target: capName }, groundId, localeUrl, landmarkUids: [...seenUid] });
+        try { await StorageManager.savePerspective(perspective); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED savePerspective failed: ${e.message}`); }
         const strategyId = crypto.randomUUID();
         const fragmentIds = phases.map(() => crypto.randomUUID());
         const recs = CapabilitySynth.buildTier2CapabilityRecords(phases, { groundId, strategyId, fragmentIds, name: capName, goal: capName });
@@ -319,16 +324,16 @@ export function createSgMessageHandlers(ctx) {
         for (const f of recs.fragments) { try { await StorageManager.saveFragment(f); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED saveFragment failed: ${e.message}`); } }
         try { await StorageManager.saveStrategy(recs.strategy); }
         catch (e) { Logger.error('background', `DERIVE_OBSERVED saveStrategy failed: ${e.message}`); sendResponse({ success: false, error: `strategy save failed: ${e.message}` }); return; }
-        const localeUrl = (trace.find((a) => a && a.url) || {}).url || '';
         const capability = {
           id: crypto.randomUUID(), groundId, intent: capName, shape: 'observed', source: 'observed',
-          localeUrl, strategyId, fragmentIds, landmarkUids: [...seenUid], phases: phases.map((p) => p.label), binding: [], synthesized: true,
+          localeUrl, perspectiveId: perspective.id, strategyId, fragmentIds, landmarkUids: [...seenUid], phases: phases.map((p) => p.label), binding: [], synthesized: true,
           createdAt: Date.now(), trial: { score: null, verdict: 'observed', trialRef: null },
         };
         await ctx.writeSgCapability(groundId, capability);
-        try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: capName.slice(0, 120) }, detail: { capabilityId: capability.id, strategyId, fragments: recs.fragments.length, landmarks: landmarkRecords.length, shape: 'observed' } })]); } catch { /* */ }
-        Logger.info('background', `DERIVE_OBSERVED_CAPABILITY — ${capability.id} → strategy ${strategyId} chaining ${recs.fragments.length} fragment(s) + ${landmarkRecords.length} landmark(s) [${capability.phases.join(' → ')}]`);
-        sendResponse({ success: true, capability, fragmentCount: recs.fragments.length, landmarkCount: landmarkRecords.length });
+        try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: capName.slice(0, 120) }, detail: { capabilityId: capability.id, perspectiveId: perspective.id, strategyId, fragments: recs.fragments.length, landmarks: landmarkRecords.length, shape: 'observed' } })]); } catch { /* */ }
+        try { await ctx.broadcastStorageChanged('perspective', perspective.id, 'saved'); } catch { /* */ }
+        Logger.info('background', `DERIVE_OBSERVED_CAPABILITY — ${capability.id} → perspective ${perspective.id} + strategy ${strategyId} chaining ${recs.fragments.length} fragment(s) + ${landmarkRecords.length} landmark(s) [${capability.phases.join(' → ')}]`);
+        sendResponse({ success: true, capability, perspectiveId: perspective.id, fragmentCount: recs.fragments.length, landmarkCount: landmarkRecords.length });
       } catch (err) {
         Logger.error('background', `DERIVE_OBSERVED_CAPABILITY failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
