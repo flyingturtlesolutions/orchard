@@ -204,16 +204,21 @@ export function createSgTrial({ getGroundId, getTabId, getIntent, rerender, afte
     /** Full clear (session reset / dismiss). */
     reset() { plan = null; _resetTrial(); },
     /** The plan summary + live trial result (+ accept/reject/re-run) for the intent-check row. */
-    renderResult() { return `${_planSummary()}\n        ${_trialResultHtml()}\n        ${_recordHtml()}`; },
+    renderResult() { return `${_planSummary()}\n        ${_trialResultHtml()}`; },
+    /** OBS-1 — independent ● Record demo / ■ Stop control + captured-trace summary. Placed at the
+     *  perspective-capture top level (next to Propose), NOT gated behind the intent check. */
+    renderRecordButton() {
+      const btn = `<button class="btn-secondary tiny" data-perspective-action="toggle-record" type="button" title="OBS-1 — record a demonstration: do the task on the page yourself, then Stop to capture the raw action trace (the basis for deriving a capability, no Comprehend/Select).">${recording ? '■ Stop recording' : '● Record demo'}</button>`;
+      const note = _recordHtml();
+      return note ? `${btn}\n      ${note}` : btn;
+    },
     /** The ▶ Run on page button (or running state) for the row's action area; '' when no runnable plan. */
     renderRunButton() {
       // SG-T2-6 — Tier-2 inspect toggle: when on, ▶ Run returns the lowered multi-phase plan (no execution).
       const toggle = `<button class="btn-secondary tiny" data-perspective-action="toggle-tier2" type="button" title="Tier-2 plan inspect: ▶ Run lowers the intent into its multi-phase plan (fragment/observation/navigate/wait nodes) and shows it, instead of running the flat trial. No execution.">${tier2Inspect ? '◉' : '○'} T2 plan</button>`;
-      // OBS-1 — Record demo (always available; the observed path doesn't need an intent first).
-      const rec = `<button class="btn-secondary tiny" data-perspective-action="toggle-record" type="button" title="OBS-1 — record a demonstration: do the task on the page yourself, then Stop to capture the raw action trace (the basis for deriving a capability, no Comprehend/Select).">${recording ? '■ Stop recording' : '● Record demo'}</button>`;
-      if (plan && plan.runnable && !trialInFlight) return `<button class="btn-secondary tiny" data-perspective-action="run-sg-trial" type="button" title="Run the substrate-grounded plan on this page — fills the fields; the irreversible submit is deferred.">▶ Run on page</button> ${toggle} ${rec}`;
-      if (trialInFlight) return `<button class="btn-secondary tiny" type="button" disabled>⏳ Running…</button> ${rec}`;
-      return `${toggle} ${rec}`;
+      if (plan && plan.runnable && !trialInFlight) return `<button class="btn-secondary tiny" data-perspective-action="run-sg-trial" type="button" title="Run the substrate-grounded plan on this page — fills the fields; the irreversible submit is deferred.">▶ Run on page</button> ${toggle}`;
+      if (trialInFlight) return `<button class="btn-secondary tiny" type="button" disabled>⏳ Running…</button>`;
+      return toggle;
     },
     wire(container) {
       if (!container) return;

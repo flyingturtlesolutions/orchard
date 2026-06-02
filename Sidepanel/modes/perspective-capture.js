@@ -1924,6 +1924,7 @@ function _renderPerspectivePanel() {
     ${_renderGroundIntentRow(intent)}
     <div class="dbg-perspective-perspective-buttons">
       <button class="btn-secondary tiny" data-perspective-action="propose-perspectives" type="button" ${canPropose ? '' : 'disabled'} title="${escAttr(intent.length === 0 ? emptyTitle : "Propose perspective options for this intent, using a page screenshot + this Ground's perspectives & landmarks.")}">${label}</button>
+      ${sgTrial.renderRecordButton()}
     </div>
     ${sgLib.render()}`;
 
