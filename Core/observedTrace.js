@@ -9,9 +9,9 @@
 // Downstream (OBS-2/3): coalesce(trace) → segment into Fragments → buildTier2CapabilityRecords (SG-T2-ACC).
 //
 // @module Core/observedTrace
-// @version 2.74.659
+// @version 2.74.660
 
-export const OBSERVED_KINDS = Object.freeze(['click', 'type', 'select', 'submit', 'navigate', 'scroll']);
+export const OBSERVED_KINDS = Object.freeze(['click', 'type', 'select', 'submit', 'navigate', 'scroll', 'key']);
 
 // Field name/type/autocomplete patterns that mark a value SENSITIVE — never store the raw value. The
 // content script ALSO checks this (mirrored) so a sensitive value never leaves the page; this is the
@@ -43,6 +43,7 @@ export function classifyKind(domKind, target) {
     case 'submit': return 'submit';
     case 'navigate': return 'navigate';
     case 'scroll': return 'scroll';
+    case 'keypress': return 'key';
     case 'change':
     case 'input': {
       const tag = String((target && target.tagName) || '').toLowerCase();
@@ -90,6 +91,7 @@ export function buildRawAction(parts) {
     },
   };
   if (kind === 'type' || kind === 'select') action.value = scrubValue(p.value, target);
+  if (kind === 'key') action.value = p.value ? String(p.value).slice(0, 20) : 'Enter';   // the key name (never sensitive)
   if (p.domKind === 'navigate') { action.from = p.from ? String(p.from) : null; action.to = String(p.url || ''); }
   return action;
 }

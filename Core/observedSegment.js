@@ -14,7 +14,7 @@
 //     gives nicer labels later; this keeps it runnable without an LLM.
 //
 // @module Core/observedSegment
-// @version 2.74.659
+// @version 2.74.660
 
 const _DISCLOSURE_HINT = /filter|menu|sort|posted|date|pay|salary|wage|type|level|experience|distance|remote|radius|category|options?|dropdown|expand|more/i;
 
@@ -105,6 +105,7 @@ export function stepToAction(a) {
     return { action: 'CLICK', selector: sel, ...(lm ? { landmark: lm } : {}) };   // a clicked custom option
   }
   if (a.kind === 'click') return { action: 'CLICK', selector: sel, ...(lm ? { landmark: lm } : {}) };
+  if (a.kind === 'key') return { action: 'KEY', selector: sel, value: a.value || 'Enter', ...(lm ? { landmark: lm } : {}) };   // Enter-to-submit replays via handleKey→handleEnter
   return null;   // navigate / submit are boundaries, not steps
 }
 

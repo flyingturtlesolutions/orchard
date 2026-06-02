@@ -15,7 +15,7 @@
  *
  * @module ContentScripts/contentScript
  * @author Agent HUB
- * @version 2.17.3
+ * @version 2.17.4
  */
 
 'use strict';
@@ -5440,11 +5440,22 @@ function _obsSend(domKind, el, rawValue) {
   let value = null;
   if (domKind === 'input' || domKind === 'change') value = sensitive ? null : (rawValue != null ? String(rawValue).slice(0, 300) : null);
   else if (domKind === 'click') value = sensitive ? null : (target.accessibleName || null);   // used only if it classifies as a select
+  else if (domKind === 'keypress') value = rawValue || 'Enter';                                 // the key (Enter)
   try { chrome.runtime.sendMessage({ type: 'INTERACTION_RECORD', payload: { domKind, target, value, sensitive, ts: Date.now(), url: location.href } }); } catch { /* */ }
 }
 const _obsOnClick  = (e) => { try { const el = _obsResolveClickTarget(e.target); if (el) _obsSend('click', el, null); } catch { /* */ } };
 const _obsOnInput  = (e) => { try { const el = e.target; const tag = el && el.tagName; if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') _obsSend(tag === 'SELECT' ? 'change' : 'input', el, el.value); } catch { /* */ } };
 const _obsOnSubmit = (e) => { try { if (e.target) _obsSend('submit', e.target, null); } catch { /* */ } };
+// OBS — capture ENTER in a field (submit-via-keyboard). Many sites handle Enter with a key listener and
+// never fire a native `submit`, so the search would otherwise go unrecorded. Only Enter on a text field /
+// contenteditable (typing is captured via input; buttons get a click); it replays as a KEY action.
+const _obsOnKey = (e) => {
+  try {
+    if (e.key !== 'Enter' || e.isComposing) return;
+    const el = e.target; const tag = el && el.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || (el && el.isContentEditable)) _obsSend('keypress', el, 'Enter');
+  } catch { /* */ }
+};
 // OBS-4 — debounced SCROLL capture (not every pixel): record where the viewport settled, so a demonstration
 // that scrolls (to read or reach content) is visible in the trace. Replay reaches elements via SCROLL_TO
 // normalizers, so this is for trace fidelity, not pixel-replay.
@@ -5463,6 +5474,7 @@ function _obsStart() {
   document.addEventListener('input', _obsOnInput, true);
   document.addEventListener('change', _obsOnInput, true);
   document.addEventListener('submit', _obsOnSubmit, true);
+  document.addEventListener('keydown', _obsOnKey, true);
   window.addEventListener('scroll', _obsOnScroll, { capture: true, passive: true });
 }
 function _obsStop() {
@@ -5472,6 +5484,7 @@ function _obsStop() {
   document.removeEventListener('input', _obsOnInput, true);
   document.removeEventListener('change', _obsOnInput, true);
   document.removeEventListener('submit', _obsOnSubmit, true);
+  document.removeEventListener('keydown', _obsOnKey, true);
   window.removeEventListener('scroll', _obsOnScroll, { capture: true });
 }
 

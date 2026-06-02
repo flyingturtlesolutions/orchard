@@ -86,6 +86,17 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     assert.equal(real1[1].landmark.accessibleName, 'Last 3 days');
   });
 
+  it('Enter-to-submit is recorded as a KEY step; navigate (or native submit) is the boundary (OBS)', () => {
+    const T = (name, sel, v) => buildRawAction({ domKind: 'input', value: v, url: 'u', target: { tagName: 'INPUT', role: 'textbox', accessibleName: name, selector: sel } });
+    const K = (name, sel) => buildRawAction({ domKind: 'keypress', value: 'Enter', url: 'u', target: { tagName: 'INPUT', role: 'textbox', accessibleName: name, selector: sel } });
+    const op = segmentTrace(coalesce([T('Job title', '#q', 'support'), K('Job title', '#q'), NAV('u/jobs?q=support')]));
+    assert.equal(op.nodes.length, 1);
+    assert.deepEqual(op.nodes[0].steps.map((s) => s.kind), ['type', 'key'], 'Enter is a step, not dropped');
+    const real = opToPhases(op)[0].actions.filter((a) => a.action !== 'SCROLL_TO');
+    assert.deepEqual(real.map((a) => a.action), ['TYPE', 'KEY']);
+    assert.equal(real[1].value, 'Enter');
+  });
+
   it('stepToAction: a native <select> change → SELECT op with value', () => {
     const a = stepToAction(buildRawAction({ domKind: 'change', value: 'CA', target: { tagName: 'SELECT', selector: '#state' } }));
     assert.equal(a.action, 'SELECT');
