@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildRawAction, coalesce } from './observedTrace.js';
-import { segmentTrace, opToPhases, stepToAction } from './observedSegment.js';
+import { segmentTrace, opToPhases, stepToAction, deriveObservedParams } from './observedSegment.js';
 
 // `A` mirrors the real recorder: a click passes its accessibleName as the value (kept only when the click
 // classifies as a `select` — i.e. on an option). role=option is set for the option / pay-bracket labels.
@@ -87,5 +87,17 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     const a = stepToAction(buildRawAction({ domKind: 'change', value: 'CA', target: { tagName: 'SELECT', selector: '#state' } }));
     assert.equal(a.action, 'SELECT');
     assert.equal(a.value, 'CA');
+  });
+
+  it('deriveObservedParams: typed fields + option choices → params (option keyed by its disclosure) (OBS-4)', () => {
+    const ps = deriveObservedParams(segmentTrace(coalesce(raw)));
+    const byKey = Object.fromEntries(ps.map((p) => [p.key, p]));
+    assert.equal(byKey['job-title'].value, 'support');
+    assert.equal(byKey['job-title'].kind, 'text');
+    assert.equal(byKey['edit-location'].value, 'minneapolis');
+    assert.ok(byKey['date-posted-filter'], 'date selection keyed by its disclosure, not "last-3-days"');
+    assert.equal(byKey['date-posted-filter'].value, 'Last 3 days');
+    assert.equal(byKey['date-posted-filter'].kind, 'option');
+    assert.ok(!ps.some((p) => p.value === 'Search'), 'the Search commit is not a param');
   });
 });

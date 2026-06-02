@@ -14,7 +14,7 @@
 //     gives nicer labels later; this keeps it runnable without an LLM.
 //
 // @module Core/observedSegment
-// @version 2.74.654
+// @version 2.74.658
 
 const _DISCLOSURE_HINT = /filter|menu|sort|posted|date|pay|salary|wage|type|level|experience|distance|remote|radius|category|options?|dropdown|expand|more/i;
 
@@ -103,6 +103,40 @@ export function stepToAction(a) {
   }
   if (a.kind === 'click') return { action: 'CLICK', selector: sel, ...(lm ? { landmark: lm } : {}) };
   return null;   // navigate / submit are boundaries, not steps
+}
+
+const _slug = (s) => String(s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+
+/**
+ * OBS-4 — derive a reusable PARAM SCHEMA from a segmented demonstration. PURE. Every captured VALUE is a
+ * candidate param: a typed field (text) and a chosen option (option). An option's key/label come from its
+ * dropdown's DISCLOSURE name (the click that opened it), not the option text — so "Date posted filter →
+ * Last 3 days" yields param `date-posted-filter = Last 3 days`, not `last-3-days`. The demonstrated value is
+ * the param's default. Keys are deduped. (The LLM describeTrace may rename these; this is the deterministic
+ * floor.) Works on the op BEFORE opToPhases (option clicks keep their value here; the executable CLICK drops it).
+ * @returns {Array<{key:string,label:string,kind:'text'|'option',value:string,selector:(string|null)}>}
+ */
+export function deriveObservedParams(op) {
+  const nodes = (op && Array.isArray(op.nodes)) ? op.nodes : [];
+  const out = []; const seen = new Set();
+  const add = (base, label, kind, value, selector) => {
+    let key = _slug(base) || 'param';
+    let k = key; let n = 2; while (seen.has(k)) k = `${key}-${n++}`;
+    seen.add(k);
+    out.push({ key: k, label: label || base || k, kind, value: value != null ? String(value) : '', selector: selector || null });
+  };
+  for (const node of nodes) {
+    if (!node || node.type !== 'fragment') continue;
+    let disclosure = null;
+    for (const s of (Array.isArray(node.steps) ? node.steps : [])) {
+      const name = s.target && s.target.accessibleName;
+      const sel = s.target && s.target.selector;
+      if (s.kind === 'type' && s.value != null && s.value !== '') add(name || 'field', name || 'Field', 'text', s.value, sel);
+      else if (s.kind === 'select' && s.value != null && s.value !== '') add(disclosure || name || 'choice', disclosure || name || 'Choice', 'option', s.value, sel);
+      else if (s.kind === 'click' && _DISCLOSURE_HINT.test(name || '')) disclosure = name;
+    }
+  }
+  return out;
 }
 
 /** OBS-3 — turn a segmented op into the per-phase {label, url, actions} the capability builder consumes.

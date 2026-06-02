@@ -76,7 +76,11 @@ export function createSgTrial({ getGroundId, getTabId, getIntent, rerender, afte
     const dr = deriveResult;
     let action;
     if (dr && dr.pending) action = `<button class="btn-secondary tiny" type="button" disabled>⏳ Saving…</button>`;
-    else if (dr && dr.success && dr.capability) action = `<div class="dbg-perspective-ground-note">✓ saved capability <b>${escHtml(dr.capability.intent || 'recorded')}</b> — ${dr.fragmentCount} fragment(s). Re-run it from the library below (no LLM).</div>`;
+    else if (dr && dr.success && dr.capability) {
+      const ps = Array.isArray(dr.capability.params) ? dr.capability.params : [];
+      const pl = ps.length ? `<br>params: ${ps.map((x) => `<b>${escHtml(x.key)}</b>=${escHtml(String(x.value).slice(0, 24))}`).join(', ')}` : '';
+      action = `<div class="dbg-perspective-ground-note">✓ saved <b>${escHtml(dr.capability.intent || 'recorded')}</b> — ${dr.fragmentCount} fragment(s), ${dr.landmarkCount || 0} landmark(s)${pl}<br>Re-run it from the library below (no LLM).</div>`;
+    }
     else if (dr && dr.success === false) action = `<div class="dbg-perspective-ground-note">⚠ Save failed: ${escHtml(dr.error || 'unknown')}</div>`;
     else action = `<button class="btn-secondary tiny" data-perspective-action="derive-observed" type="button" title="Turn this demonstration into a durable, re-runnable capability — segments it into fragments + a Strategy. Replay runs it for real (no Comprehend/Select).">▣ Save as capability</button>`;
     return `${summary}\n      ${action}`;

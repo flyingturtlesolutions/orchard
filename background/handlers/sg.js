@@ -19,7 +19,7 @@ import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspec
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
-import { segmentTrace, opToPhases } from '../../Core/observedSegment.js';
+import { segmentTrace, opToPhases, deriveObservedParams } from '../../Core/observedSegment.js';
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
 import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
@@ -295,8 +295,10 @@ export function createSgMessageHandlers(ctx) {
         const { groundId = null, trace = null, name = null } = payload ?? {};
         if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
         if (!Array.isArray(trace) || !trace.length) { sendResponse({ success: false, error: 'no demonstration trace — record one first' }); return; }
-        const phasesRaw = opToPhases(segmentTrace(coalesce(trace))).filter((p) => Array.isArray(p.actions) && p.actions.length);
+        const op = segmentTrace(coalesce(trace));
+        const phasesRaw = opToPhases(op).filter((p) => Array.isArray(p.actions) && p.actions.length);
         if (!phasesRaw.length) { sendResponse({ success: false, error: 'no runnable steps in the demonstration' }); return; }
+        const params = deriveObservedParams(op);   // OBS-4 — reusable param schema (typed fields + option choices)
         // OBS-3b — DERIVE DURABLE LANDMARKS from the demonstrated elements (your step 3): each step carries an
         // inline landmark (role + accessibleName + hierarchicalContext + selector); mint a per-Ground Landmark
         // record per unique identity and convert every step to a `landmarkRef` so the capability is
@@ -311,7 +313,14 @@ export function createSgMessageHandlers(ctx) {
           return { label: p.label, actions: landmarkRefActions(p.actions, groundId, p.url) };
         });
         for (const rec of landmarkRecords) { try { await StorageManager.saveLandmark(rec); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED saveLandmark failed: ${e.message}`); } }
-        const capName = ((name && name.trim()) || `Recorded: ${phases.map((p) => p.label).join(' → ')}`).slice(0, 80);
+        // OBS-4 — LLM name/intent (inverse of comprehend), heuristic fallback so it never blocks on the LLM.
+        let described = null;
+        if (!(name && name.trim())) {
+          const summary = op.nodes.filter((n) => n && n.type === 'fragment').map((n, i) => `Phase ${i + 1} (${n.label}): ` + (Array.isArray(n.steps) ? n.steps : []).map((s) => `${s.kind} ${(s.target && (s.target.accessibleName || s.target.selector)) || ''}${s.value ? `="${String(s.value).slice(0, 40)}"` : ''}`).join('; ')).join('\n');
+          try { described = await AnthropicService.describeTrace({ summary }); } catch { /* */ }
+        }
+        const capName = ((name && name.trim()) || (described && described.name) || `Recorded: ${phases.map((p) => p.label).join(' → ')}`).slice(0, 80);
+        const capDescription = (described && described.intent) || capName;
         const localeUrl = (trace.find((a) => a && a.url) || {}).url || '';
         // OBS-3c — compose the derived landmarks into a PERSPECTIVE (your step 4 — the intent-scoped grouping
         // the library shows), authoredBy:'model', exactly like the NL-path ACCEPT. The capability links it.
@@ -325,15 +334,15 @@ export function createSgMessageHandlers(ctx) {
         try { await StorageManager.saveStrategy(recs.strategy); }
         catch (e) { Logger.error('background', `DERIVE_OBSERVED saveStrategy failed: ${e.message}`); sendResponse({ success: false, error: `strategy save failed: ${e.message}` }); return; }
         const capability = {
-          id: crypto.randomUUID(), groundId, intent: capName, shape: 'observed', source: 'observed',
-          localeUrl, perspectiveId: perspective.id, strategyId, fragmentIds, landmarkUids: [...seenUid], phases: phases.map((p) => p.label), binding: [], synthesized: true,
+          id: crypto.randomUUID(), groundId, intent: capName, description: capDescription, shape: 'observed', source: 'observed',
+          localeUrl, perspectiveId: perspective.id, strategyId, fragmentIds, landmarkUids: [...seenUid], params, phases: phases.map((p) => p.label), binding: [], synthesized: true,
           createdAt: Date.now(), trial: { score: null, verdict: 'observed', trialRef: null },
         };
         await ctx.writeSgCapability(groundId, capability);
         try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: capName.slice(0, 120) }, detail: { capabilityId: capability.id, perspectiveId: perspective.id, strategyId, fragments: recs.fragments.length, landmarks: landmarkRecords.length, shape: 'observed' } })]); } catch { /* */ }
         try { await ctx.broadcastStorageChanged('perspective', perspective.id, 'saved'); } catch { /* */ }
-        Logger.info('background', `DERIVE_OBSERVED_CAPABILITY — ${capability.id} → perspective ${perspective.id} + strategy ${strategyId} chaining ${recs.fragments.length} fragment(s) + ${landmarkRecords.length} landmark(s) [${capability.phases.join(' → ')}]`);
-        sendResponse({ success: true, capability, perspectiveId: perspective.id, fragmentCount: recs.fragments.length, landmarkCount: landmarkRecords.length });
+        Logger.info('background', `DERIVE_OBSERVED_CAPABILITY — "${capName}" ${capability.id} → perspective ${perspective.id} + strategy ${strategyId} chaining ${recs.fragments.length} fragment(s) + ${landmarkRecords.length} landmark(s) + ${params.length} param(s) [${capability.phases.join(' → ')}]`);
+        sendResponse({ success: true, capability, perspectiveId: perspective.id, fragmentCount: recs.fragments.length, landmarkCount: landmarkRecords.length, paramCount: params.length });
       } catch (err) {
         Logger.error('background', `DERIVE_OBSERVED_CAPABILITY failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });

@@ -2407,6 +2407,34 @@ Rules:
   }
 
   /**
+   * OBS-4 — NAME a recorded DEMONSTRATION (Path 3; the inverse of comprehendIntent). Given the actions the
+   * user performed (kinds + element names + values, no page), return a short capability NAME + a one-line
+   * INTENT. Post-hoc labelling of ground-truth actions. Returns { name, intent } or null on ANY failure —
+   * the caller falls back to a heuristic name, so the feature never blocks on the LLM.
+   * @param {{summary:string}} args  summary = a compact, per-fragment rendering of the trace
+   */
+  static async describeTrace({ summary } = {}) {
+    const text = (typeof summary === 'string' ? summary : '').trim();
+    if (!text) return null;
+    if (!(await AnthropicService.hasLlm())) return null;
+    const systemPrompt = `You NAME a recorded web-automation demonstration. The user performed a sequence of REAL actions; you are given them (no page is shown). Return ONLY a JSON object:
+{"name":"<=6 words, imperative — what the capability DOES>","intent":"<one sentence describing the task>"}
+Rules:
+- Describe what was ACCOMPLISHED, not each click. e.g. fill a search box + click Search + open a "Date posted" filter + choose "Last 3 days" -> name "Search jobs, filter by date".
+- The name is a short imperative label for a RE-RUNNABLE capability. No trailing punctuation.
+- Typed/chosen values are EXAMPLE inputs, not part of the name — do NOT bake "support"/"minneapolis" into the name.`;
+    try {
+      const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text }], 256, [], { role: 'describe', operation: 'describeTrace' });
+      if (!raw?.success) { Logger.warn('AnthropicService', `describeTrace failed: ${raw?.error}`); return null; }
+      const json = AnthropicService.#firstJsonObject(raw.text);
+      const out = json ? JSON.parse(json) : null;
+      if (!out || !out.name) return null;
+      Logger.info('AnthropicService', `describeTrace -> "${String(out.name).slice(0, 60)}"`);
+      return { name: String(out.name).slice(0, 80), intent: String(out.intent || out.name).slice(0, 200) };
+    } catch (e) { Logger.warn('AnthropicService', `describeTrace error: ${e.message}`); return null; }
+  }
+
+  /**
    * SG-2b (Select, the narrowed-LLM match) — DESIGN §4.2/§SG-2. Map each page-INDEPENDENT subGoal (from
    * SG-1 Comprehend) to the page's REAL features, by MEANING. The LLM's role is deliberately narrow: it
    * only proposes the semantic mapping over a pre-filtered candidate set; Core/select.reconcileMatches
