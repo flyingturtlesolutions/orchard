@@ -137,14 +137,23 @@ export function createSgMessageHandlers(ctx) {
             await _settleAfterNav(liveTab, beforeUrl);                       // settle if THIS phase navigated, before the next phase runs
           }
           const tier2Score = scoreTier2(outcomes.map((o) => ({ type: 'fragment', passed: o.passed })));
-          Logger.info('background', `RUN_SG_TRIAL[tier2:run] — ${tier2Score.verdict} (${tier2Score.requiredPassed}/${tier2Score.requiredTotal} phases passed) score=${tier2Score.score}`);
+          // SG-T2-10 — INTENT-COVERAGE gate for completion intents (PB-10 on the tier2 path). A `complete`-
+          // shape op (a form/application) must COVER the page-required fields AND carry a submit; otherwise
+          // binding ONE incidental field (the SERP's job-alert email matched to "provide contact") reports a
+          // HOLLOW 1/1 pass for an application that never happened — and the form isn't even on this page.
+          // coverComplete is ground truth → downgrade the verdict and BLOCK accept so the run is honest about
+          // what it could not do. (act/navigate ops are governed by their per-phase postconditions above.)
+          const cover = coverComplete(spec, selection);
+          const covered = spec.shape !== 'complete' || cover.complete;
+          const aggVerdict = covered ? tier2Score.verdict : 'tier2-incomplete';
+          Logger.info('background', `RUN_SG_TRIAL[tier2:run] — ${aggVerdict} (${tier2Score.requiredPassed}/${tier2Score.requiredTotal} phases passed) score=${tier2Score.score}${covered ? '' : ` · intent NOT covered — ${cover.reason}`}`);
           // SG-T2-ACC — stash the op so ACCEPT can promote it into a durable, replayable MULTI-fragment
           // capability. Re-synthesized at accept time WITHOUT the trial's commit-deferral, so a REPLAY APPLIES
           // the filters for real (the trial only proved reachability). Best-effort; never blocks the response.
           if (typeof ctx.writeSgDraft === 'function') {
-            try { await ctx.writeSgDraft(groundId, { tier2: true, op, intent, spec, selection, localeUrl: localeCapturedUrl || '', tier2Score, outcomes, groundId, capturedAt: Date.now() }); } catch (e) { Logger.warn('background', `tier2 draft write failed (continuing): ${e.message}`); }
+            try { await ctx.writeSgDraft(groundId, { tier2: true, op, intent, spec, selection, localeUrl: localeCapturedUrl || '', tier2Score: { ...tier2Score, verdict: aggVerdict }, cover, outcomes, groundId, capturedAt: Date.now() }); } catch (e) { Logger.warn('background', `tier2 draft write failed (continuing): ${e.message}`); }
           }
-          sendResponse({ success: true, ran: outcomes.length > 0, tier2: op, outcomes, tier2Score, intentShape: spec.shape, acceptEligible: outcomes.some((o) => o.passed) });
+          sendResponse({ success: true, ran: outcomes.length > 0, tier2: op, outcomes, tier2Score: { ...tier2Score, verdict: aggVerdict }, cover, intentShape: spec.shape, acceptEligible: covered && outcomes.some((o) => o.passed) });
           return;
         }
         const cover = coverComplete(spec, selection);
@@ -190,6 +199,11 @@ export function createSgMessageHandlers(ctx) {
         // for REAL (commits included) — so the filters actually apply, the thesis payoff. Steps keep inline
         // landmarks (SG-LM-3), so replay self-heals via probe-or-recover without a registry round-trip.
         if (draft.tier2 && draft.op && Array.isArray(draft.op.nodes)) {
+          // SG-T2-10 — refuse to promote an uncovered completion op (the job-alert-email false pass): the
+          // acceptEligible flag already hides the button, but guard here too so a stale draft can't be promoted.
+          if (draft.spec && draft.spec.shape === 'complete' && draft.cover && draft.cover.complete === false) {
+            sendResponse({ success: true, accepted: false, reason: `intent not covered — ${draft.cover.reason || 'required fields/submit missing'}` }); return;
+          }
           let localeModel = null;
           try { const pm = await ctx.readLocaleCache(groundId, ctx.normalizeUrl(draft.localeUrl || '')); localeModel = pm?.model || null; } catch { /* */ }
           const phaseNodes = orderForRun(draft.op.nodes, localeModel);
