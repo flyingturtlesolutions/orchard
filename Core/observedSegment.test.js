@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildRawAction, coalesce } from './observedTrace.js';
-import { segmentTrace } from './observedSegment.js';
+import { segmentTrace, opToPhases, stepToAction } from './observedSegment.js';
 
 // `A` mirrors the real recorder: a click passes its accessibleName as the value (kept only when the click
 // classifies as a `select` — i.e. on an option). role=option is set for the option / pay-bracket labels.
@@ -68,5 +68,22 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     assert.equal(op.nodes.length, 1);
     assert.equal(op.nodes[0].steps.length, 1);
     assert.ok(/done/.test(op.nodes[0].to));
+  });
+
+  it('opToPhases maps steps → executable actions carrying inline landmarks (OBS-3)', () => {
+    const phases = opToPhases(segmentTrace(coalesce(raw)));
+    assert.equal(phases.length, 2);
+    assert.deepEqual(phases[0].actions.map((a) => a.action), ['TYPE', 'TYPE', 'CLICK']);
+    assert.equal(phases[0].actions[0].value, 'support');
+    assert.equal(phases[0].actions[2].landmark.accessibleName, 'Search');
+    // the date option (a clicked <li role=option>) replays as a CLICK on that option
+    assert.deepEqual(phases[1].actions.map((a) => a.action), ['CLICK', 'CLICK']);
+    assert.equal(phases[1].actions[1].landmark.accessibleName, 'Last 3 days');
+  });
+
+  it('stepToAction: a native <select> change → SELECT op with value', () => {
+    const a = stepToAction(buildRawAction({ domKind: 'change', value: 'CA', target: { tagName: 'SELECT', selector: '#state' } }));
+    assert.equal(a.action, 'SELECT');
+    assert.equal(a.value, 'CA');
   });
 });

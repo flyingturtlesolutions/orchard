@@ -84,3 +84,32 @@ export function segmentTrace(trace) {
   flush('');   // trailing fragment (a final action with no navigation — e.g. a filter that applied in place)
   return { tier: 'observed', nodes };
 }
+
+// OBS-3 — map a recorded RawAction to the EXECUTABLE action shape (what TemplateWalker runs + what
+// buildTier2CapabilityRecords persists). Each step keeps its inline `landmark` (role + accessibleName +
+// hierarchicalContext + selector) so replay self-heals via probe-or-recover (SG-LM-3), no registry round
+// trip. A `select` that was a click on a custom option (role=option, not a <select>) replays as a CLICK on
+// that option; a native <select> change replays as SELECT. PURE.
+export function stepToAction(a) {
+  if (!a) return null;
+  const t = a.target || {};
+  const sel = t.selector;
+  if (!sel) return null;
+  const lm = (t.role && t.accessibleName) ? { role: t.role, accessibleName: t.accessibleName, hierarchicalContext: t.hierarchicalContext || null, selector: sel } : null;
+  if (a.kind === 'type') return { action: 'TYPE', selector: sel, value: a.value != null ? a.value : '', ...(lm ? { landmark: lm } : {}) };
+  if (a.kind === 'select') {
+    if (String(t.tagName || '').toUpperCase() === 'SELECT') return { action: 'SELECT', selector: sel, value: a.value != null ? a.value : '' };
+    return { action: 'CLICK', selector: sel, ...(lm ? { landmark: lm } : {}) };   // a clicked custom option
+  }
+  if (a.kind === 'click') return { action: 'CLICK', selector: sel, ...(lm ? { landmark: lm } : {}) };
+  return null;   // navigate / submit are boundaries, not steps
+}
+
+/** OBS-3 — turn a segmented op into the per-phase {label, actions} the capability builder consumes. PURE. */
+export function opToPhases(op) {
+  const nodes = (op && Array.isArray(op.nodes)) ? op.nodes : [];
+  return nodes.filter((n) => n && n.type === 'fragment').map((n) => ({
+    label: n.label,
+    actions: (Array.isArray(n.steps) ? n.steps : []).map(stepToAction).filter(Boolean),
+  }));
+}

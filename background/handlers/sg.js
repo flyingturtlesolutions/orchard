@@ -18,6 +18,8 @@ import { evaluatePostcondition } from '../../Core/postcondition.js';
 import { buildAcceptance, landmarkRefActions } from '../../Core/accept.js';
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { synthesizeTrialOp } from '../../Core/trialSynth.js';
+import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
+import { segmentTrace, opToPhases } from '../../Core/observedSegment.js';
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
 import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
@@ -279,6 +281,42 @@ export function createSgMessageHandlers(ctx) {
         if (typeof tabId === 'number') ctx.enrichSgLandmarks(tabId, built.landmarks).catch((e) => Logger.warn('background', `ACCEPT_SG_TRIAL enrichment failed (continuing): ${e.message}`));
       } catch (err) {
         Logger.error('background', `ACCEPT_SG_TRIAL failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // OBS-3 — DERIVE a durable, replayable capability from a recorded DEMONSTRATION (Path 3). NO LLM, no
+    // Comprehend/Select: the user already did the task, so the steps are ground truth. Segment the trace into
+    // Fragments (OBS-2), map each step → an executable action carrying its inline landmark (SG-LM-3), and
+    // assemble N fragments + a chaining Strategy via buildTier2CapabilityRecords (the same records ACCEPT
+    // produces). Replay runs executeStrategy for REAL — the demonstration repeats, commits included.
+    DERIVE_OBSERVED_CAPABILITY: async (payload, _sender, sendResponse) => {
+      try {
+        const { groundId = null, trace = null, name = null } = payload ?? {};
+        if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
+        if (!Array.isArray(trace) || !trace.length) { sendResponse({ success: false, error: 'no demonstration trace — record one first' }); return; }
+        const phases = opToPhases(segmentTrace(coalesce(trace))).filter((p) => Array.isArray(p.actions) && p.actions.length);
+        if (!phases.length) { sendResponse({ success: false, error: 'no runnable steps in the demonstration' }); return; }
+        const capName = ((name && name.trim()) || `Recorded: ${phases.map((p) => p.label).join(' → ')}`).slice(0, 80);
+        const strategyId = crypto.randomUUID();
+        const fragmentIds = phases.map(() => crypto.randomUUID());
+        const recs = CapabilitySynth.buildTier2CapabilityRecords(phases, { groundId, strategyId, fragmentIds, name: capName, goal: capName });
+        if (!recs) { sendResponse({ success: false, error: 'could not assemble capability records' }); return; }
+        for (const f of recs.fragments) { try { await StorageManager.saveFragment(f); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED saveFragment failed: ${e.message}`); } }
+        try { await StorageManager.saveStrategy(recs.strategy); }
+        catch (e) { Logger.error('background', `DERIVE_OBSERVED saveStrategy failed: ${e.message}`); sendResponse({ success: false, error: `strategy save failed: ${e.message}` }); return; }
+        const localeUrl = (trace.find((a) => a && a.url) || {}).url || '';
+        const capability = {
+          id: crypto.randomUUID(), groundId, intent: capName, shape: 'observed', source: 'observed',
+          localeUrl, strategyId, fragmentIds, phases: phases.map((p) => p.label), binding: [], synthesized: true,
+          createdAt: Date.now(), trial: { score: null, verdict: 'observed', trialRef: null },
+        };
+        await ctx.writeSgCapability(groundId, capability);
+        try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: capName.slice(0, 120) }, detail: { capabilityId: capability.id, strategyId, fragments: recs.fragments.length, shape: 'observed' } })]); } catch { /* */ }
+        Logger.info('background', `DERIVE_OBSERVED_CAPABILITY — ${capability.id} → strategy ${strategyId} chaining ${recs.fragments.length} fragment(s) [${capability.phases.join(' → ')}]`);
+        sendResponse({ success: true, capability, fragmentCount: recs.fragments.length });
+      } catch (err) {
+        Logger.error('background', `DERIVE_OBSERVED_CAPABILITY failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },

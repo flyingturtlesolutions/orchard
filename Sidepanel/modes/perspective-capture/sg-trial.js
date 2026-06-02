@@ -35,12 +35,13 @@ export function createSgTrial({ getGroundId, getTabId, getIntent, rerender, afte
   let recording = false;
   let recordTrace = null;
   let recordCount = 0;
+  let deriveResult = null;   // OBS-3 — DERIVE_OBSERVED_CAPABILITY outcome
   let _recPoll = null;
   const _recStopPoll = () => { if (_recPoll) { clearInterval(_recPoll); _recPoll = null; } };
   const onRecordToggle = async () => {
     if (!recording) {
       try { await new Promise((r) => chrome.runtime.sendMessage({ type: 'RECORD_START_SESSION', payload: { tabId: getTabId?.() } }, r)); } catch { /* */ }
-      recording = true; recordCount = 0; recordTrace = null;
+      recording = true; recordCount = 0; recordTrace = null; deriveResult = null;
       _recStopPoll();
       _recPoll = setInterval(() => {
         chrome.runtime.sendMessage({ type: 'GET_RECORDING' }, (res) => { if (res && typeof res.count === 'number' && res.count !== recordCount) { recordCount = res.count; rerender?.(); } });
@@ -54,16 +55,31 @@ export function createSgTrial({ getGroundId, getTabId, getIntent, rerender, afte
       rerender?.();
     }
   };
+  const onDeriveObserved = async () => {
+    const groundId = getGroundId?.();
+    if (!groundId || !recordTrace || !recordTrace.length) return;
+    deriveResult = { pending: true }; rerender?.();
+    let res = null;
+    try { res = await new Promise((r) => chrome.runtime.sendMessage({ type: 'DERIVE_OBSERVED_CAPABILITY', payload: { groundId, trace: recordTrace } }, r)); } catch (e) { res = { success: false, error: e?.message }; }
+    deriveResult = res || { success: false, error: 'no response' };
+    if (deriveResult.success) { try { afterAccept?.(); } catch { /* */ } }   // refresh the capability library
+    rerender?.();
+  };
   const _recordHtml = () => {
     if (recording) return `<div class="dbg-perspective-ground-note">● recording demonstration — ${recordCount} action(s) captured…</div>`;
-    if (recordTrace && recordTrace.length) {
-      const kinds = recordTrace.reduce((m, a) => { m[a.kind] = (m[a.kind] || 0) + 1; return m; }, {});
-      const sum = Object.entries(kinds).map(([k, n]) => `${n} ${k}`).join(', ');
-      const lines = recordTrace.slice(0, 12).map((a, i) => `${i + 1}. <b>${escHtml(a.kind)}</b> ${escHtml(a.target?.accessibleName || a.target?.selector || a.to || '')}${a.value != null ? ` = ${escHtml(String(a.value).slice(0, 40))}` : ''}`);
-      const more = recordTrace.length > 12 ? `<br>… +${recordTrace.length - 12} more` : '';
-      return `<div class="dbg-perspective-ground-note">▣ demonstration captured — ${recordTrace.length} action(s) (${escHtml(sum)}):<br>${lines.join('<br>')}${more}</div>`;
-    }
-    return '';
+    if (!recordTrace || !recordTrace.length) return '';
+    const kinds = recordTrace.reduce((m, a) => { m[a.kind] = (m[a.kind] || 0) + 1; return m; }, {});
+    const sum = Object.entries(kinds).map(([k, n]) => `${n} ${k}`).join(', ');
+    const lines = recordTrace.slice(0, 12).map((a, i) => `${i + 1}. <b>${escHtml(a.kind)}</b> ${escHtml(a.target?.accessibleName || a.target?.selector || a.to || '')}${a.value != null ? ` = ${escHtml(String(a.value).slice(0, 40))}` : ''}`);
+    const more = recordTrace.length > 12 ? `<br>… +${recordTrace.length - 12} more` : '';
+    const summary = `<div class="dbg-perspective-ground-note">▣ demonstration captured — ${recordTrace.length} action(s) (${escHtml(sum)}):<br>${lines.join('<br>')}${more}</div>`;
+    const dr = deriveResult;
+    let action;
+    if (dr && dr.pending) action = `<button class="btn-secondary tiny" type="button" disabled>⏳ Saving…</button>`;
+    else if (dr && dr.success && dr.capability) action = `<div class="dbg-perspective-ground-note">✓ saved capability <b>${escHtml(dr.capability.intent || 'recorded')}</b> — ${dr.fragmentCount} fragment(s). Re-run it from the library below (no LLM).</div>`;
+    else if (dr && dr.success === false) action = `<div class="dbg-perspective-ground-note">⚠ Save failed: ${escHtml(dr.error || 'unknown')}</div>`;
+    else action = `<button class="btn-secondary tiny" data-perspective-action="derive-observed" type="button" title="Turn this demonstration into a durable, re-runnable capability — segments it into fragments + a Strategy. Replay runs it for real (no Comprehend/Select).">▣ Save as capability</button>`;
+    return `${summary}\n      ${action}`;
   };
 
   const _resetTrial = () => { trialInFlight = false; trialResult = null; acceptInFlight = false; capabilityResult = null; rejected = false; replayInFlight = false; replayResult = null; };
@@ -225,6 +241,7 @@ export function createSgTrial({ getGroundId, getTabId, getIntent, rerender, afte
       container.querySelector('[data-perspective-action="run-sg-trial"]')?.addEventListener('click', () => onRun());
       container.querySelector('[data-perspective-action="toggle-tier2"]')?.addEventListener('click', () => { tier2Inspect = !tier2Inspect; rerender?.(); });
       container.querySelector('[data-perspective-action="toggle-record"]')?.addEventListener('click', () => onRecordToggle());
+      container.querySelector('[data-perspective-action="derive-observed"]')?.addEventListener('click', () => onDeriveObserved());
       container.querySelector('[data-perspective-action="accept-sg-trial"]')?.addEventListener('click', () => onAccept());
       container.querySelector('[data-perspective-action="reject-sg-trial"]')?.addEventListener('click', () => onReject());
       container.querySelector('[data-perspective-action="replay-sg-capability"]')?.addEventListener('click', () => onReplay());
