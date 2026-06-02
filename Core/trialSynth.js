@@ -13,7 +13,7 @@
 // PURE: no chrome / DOM / storage. Unit-testable like Core/locale.js + Core/outcomes.js.
 //
 // @module Core/trialSynth
-// @version 2.74.541
+// @version 2.74.645
 
 const FILL_KINDS = new Set(['input']);
 const ACT_KINDS  = new Set(['action', 'navigation', 'disclosure']);
@@ -215,7 +215,17 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
     if (!r || !r.selector) return;
     if (r.hidden) {
       const trig = r.revealedBy ? list.find((c) => c.role === r.revealedBy) : null;
-      if (trig && trig.selector && revealed.has(trig.selector)) actions.push({ action: 'WAIT_FOR', selector: r.selector, value: REVEAL_WAIT_MS, optional: true });
+      if (trig && trig.selector && revealed.has(trig.selector)) {
+        // SG-RES-2b (v2.74.645) — wait by IDENTITY, not only the positional selector. A revealed option's
+        // page-absolute selector is captured INSIDE the disclosure's subtree, but many popovers render in a
+        // body PORTAL (Indeed's pay/date filters), so that selector never matches → the wait burned its full
+        // 8s timeout and the dropdown dismissed during the stall, starving the CLICK's role+name recovery
+        // that follows. Carry the role + accessibleName so the wait returns the instant the option MOUNTS by
+        // identity (selector OR description — either wins), keeping the popover open for the action.
+        const lm = _lm(r);
+        const wf = (lm && lm.role && lm.accessibleName) ? { role: lm.role, accessibleName: lm.accessibleName } : null;
+        actions.push({ action: 'WAIT_FOR', selector: r.selector, value: REVEAL_WAIT_MS, optional: true, ...(wf ? { waitFor: wf } : {}) });
+      }
     } else if (r._offscreen) {
       actions.push({ action: 'SCROLL_TO', selector: r.selector, optional: true });
     }

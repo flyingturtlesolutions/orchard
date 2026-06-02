@@ -22,7 +22,7 @@
  *
  * @module Services/TemplateWalker
  * @author Agent HUB
- * @version 2.19.0
+ * @version 2.19.1
  */
 
 import { Logger }           from '../Core/Logger.js';
@@ -4003,7 +4003,10 @@ export class TemplateWalker {
         const timeoutMs = Math.max(1000, parseInt(step.value, 10) || 10000);
         const res = await TemplateWalker.#msg(tabId, {
           type    : 'WAIT_FOR_ELEM',
-          payload : { selector: step.selector, timeoutMs },
+          // SG-RES-2b (v2.74.645) — carry the optional identity (role + accessibleName) so a revealed
+          // option that mounts in a body PORTAL satisfies the wait by description even when its captured
+          // positional selector never matches. handleWaitFor succeeds on selector OR description (either wins).
+          payload : { selector: step.selector, timeoutMs, description: step.waitFor || null },
         }, frameId);
         return res ?? { success: false, error: 'WAIT_FOR_ELEM returned no response' };
       }

@@ -15,7 +15,7 @@
  *
  * @module ContentScripts/contentScript
  * @author Agent HUB
- * @version 2.17.0
+ * @version 2.17.1
  */
 
 'use strict';
@@ -2710,19 +2710,46 @@ function handleFindAI(selector = '', aliases = []) {
 // ─── WAIT_FOR ─────────────────────────────────────────────────────────────────
 
 /**
- * Polls until selector resolves or timeout. Responds asynchronously.
+ * Polls until the target resolves or timeout. Responds asynchronously.
+ *
+ * SG-RES-2b (v2.74.645) — a revealed element can be satisfied by EITHER its positional `selector` OR a
+ * description `{role, accessibleName}`. A filter popover often renders in a body PORTAL, so the option's
+ * captured (subtree-relative) selector never matches; the description match returns the instant the option
+ * MOUNTS by identity, so the wait no longer burns its full timeout (which let the dropdown dismiss). The
+ * description path runs only when provided, and tries the cheap explicit-role query before any full walk.
+ *
  * @param {string}   selector
  * @param {number}   timeoutMs
  * @param {Function} sendResponse
+ * @param {{role:string, accessibleName:string}|null} [description]
  */
-function handleWaitFor(selector, timeoutMs, sendResponse) {
+function handleWaitFor(selector, timeoutMs, sendResponse, description = null) {
   const start = Date.now();
+  const desc = (description && description.role && description.accessibleName) ? description : null;
+
+  // Cheap identity probe: explicit [role] elements whose accessible name contains the authored name.
+  // Avoids the full document walk on every tick; the precise match happens in LANDMARK_PROBE_OR_RECOVER.
+  const descPresent = () => {
+    if (!desc) return false;
+    try {
+      const wantLc = String(desc.accessibleName).toLowerCase();
+      const nodes = document.querySelectorAll(`[role="${desc.role}"]`);
+      for (const el of nodes) {
+        const r = el.getBoundingClientRect();
+        if (!(r && r.width > 0 && r.height > 0)) continue;     // must be visibly rendered (popover open)
+        const n = _computeAccessibleName(el);
+        if (n && n.toLowerCase().includes(wantLc)) return true;
+      }
+    } catch { /* invalid role string for a selector — treat as absent */ }
+    return false;
+  };
 
   function attempt() {
-    const el      = resolveElement(selector);
+    const el      = selector ? resolveElement(selector) : null;
     const elapsed = Date.now() - start;
-    if (el)                 return sendResponse({ success: true,  elapsed });
-    if (elapsed >= timeoutMs) return sendResponse({ success: false, elapsed, error: `WAIT_FOR timeout after ${timeoutMs}ms: "${selector.slice(0,100)}"` });
+    if (el)        return sendResponse({ success: true, elapsed, via: 'selector' });
+    if (descPresent()) return sendResponse({ success: true, elapsed, via: 'description' });
+    if (elapsed >= timeoutMs) return sendResponse({ success: false, elapsed, error: `WAIT_FOR timeout after ${timeoutMs}ms: "${(selector || (desc && `${desc.role}/${desc.accessibleName}`) || '').slice(0,100)}"` });
     setTimeout(attempt, 200);
   }
 
@@ -5479,8 +5506,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
 
     case 'WAIT_FOR_ELEM': {
-      const { selector, timeoutMs } = payload ?? {};
-      handleWaitFor(selector, timeoutMs ?? 10000, sendResponse);
+      const { selector, timeoutMs, description } = payload ?? {};
+      handleWaitFor(selector, timeoutMs ?? 10000, sendResponse, description);
       return true; // async
     }
 
