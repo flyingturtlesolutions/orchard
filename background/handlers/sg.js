@@ -14,6 +14,7 @@ import { Logger } from '../../Core/Logger.js';
 import { coverComplete } from '../../Core/cover.js';
 import { selectionToTrialRoles } from '../../Core/bind.js';
 import { lowerToTier2, orderForRun, scoreTier2 } from '../../Core/tier2Lower.js';
+import { evaluatePostcondition } from '../../Core/postcondition.js';
 import { buildAcceptance, landmarkRefActions } from '../../Core/accept.js';
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { AnthropicService } from '../../Services/AnthropicService.js';
@@ -104,8 +105,6 @@ export function createSgMessageHandlers(ctx) {
             Logger.info('background', `  [tier2:run] settled after navigation → ${String(curUrl).slice(0, 80)}`);
             return curUrl;
           };
-          let navUrl = null;
-          try { if (liveTab !== null) { const t = await chrome.tabs.get(liveTab); navUrl = t?.url || null; } } catch { /* */ }
           for (let i = 0; i < phases.length; i++) {
             const node = phases[i];
             // TESTING (v2.74.647) — unconditional 4s pause BETWEEN fragments, to isolate settle/hydration
@@ -116,11 +115,25 @@ export function createSgMessageHandlers(ctx) {
               Logger.info('background', `  [tier2:run] testing pause 4000ms before "${node.label}"`);
               await new Promise((r) => setTimeout(r, 4000));
             }
+            let beforeUrl = null;
+            try { if (liveTab !== null) { const t = await chrome.tabs.get(liveTab); beforeUrl = t?.url || null; } } catch { /* */ }
             const out = await ctx.runTrialBundle({ groundId, intent: node.label, roles: node.roles, localeModel, navigateUrl: null, proposedRoleCount: node.roles.length, targetTabId: liveTab });
-            const passed = !!(out?.ran && out.trial?.verdict === 'trial-pass');
-            outcomes.push({ type: 'fragment', label: node.label, passed, ran: !!out?.ran, verdict: out?.trial?.verdict || null, score: (out?.trial && typeof out.trial.score === 'number') ? out.trial.score : null, reason: out?.reason || out?.result?.error || null });
-            Logger.info('background', `  [tier2:run] "${node.label}" → ${passed ? 'PASS' : (out?.ran ? 'fail' : 'not-run')}${out?.trial?.verdict ? ` (${out.trial.verdict})` : ''}${out?.reason ? ` — ${String(out.reason).slice(0, 80)}` : ''}`);
-            navUrl = await _settleAfterNav(liveTab, navUrl);                 // settle if THIS phase navigated, before the next phase runs
+            const trialPassed = !!(out?.ran && out.trial?.verdict === 'trial-pass');
+            // SG-T2-9 — POSTCONDITION verification: a phase only PASSES when its intended effect is observable
+            // (the comprehension's url/text successCondition, or the structural result floor), not merely "the
+            // steps ran". Catches the no-op filter — dropdown opened, commit deferred for safety → URL
+            // unchanged → a hollow trial-pass. URL is the discriminator (gathered here); selector/text floors
+            // evaluate only when their presence is passed in (fast-follow). No checkable condition → the phase
+            // falls back to the trial verdict (we never make an honest pass worse).
+            let afterUrl = beforeUrl;
+            try { if (liveTab !== null) { const t = await chrome.tabs.get(liveTab); afterUrl = t?.url || beforeUrl; } } catch { /* */ }
+            const post = evaluatePostcondition(node.postcondition, { beforeUrl, afterUrl, selectorsPresent: {} });
+            const passed = trialPassed && (post.checked ? post.held === true : true);
+            outcomes.push({ type: 'fragment', label: node.label, passed, ran: !!out?.ran, trialPassed, verdict: out?.trial?.verdict || null, postcondition: post.checked ? { held: post.held, basis: post.basis } : null, score: (out?.trial && typeof out.trial.score === 'number') ? out.trial.score : null, reason: out?.reason || out?.result?.error || null });
+            const status = passed ? 'PASS' : (out?.ran ? (trialPassed ? 'INCOMPLETE (steps ran, effect not observed)' : 'fail') : 'not-run');
+            const postTag = post.checked ? ` · postcondition ${post.held ? 'HELD' : 'NOT-HELD'} (${post.basis})` : '';
+            Logger.info('background', `  [tier2:run] "${node.label}" → ${status}${out?.trial?.verdict ? ` (${out.trial.verdict})` : ''}${postTag}${out?.reason ? ` — ${String(out.reason).slice(0, 80)}` : ''}`);
+            await _settleAfterNav(liveTab, beforeUrl);                       // settle if THIS phase navigated, before the next phase runs
           }
           const tier2Score = scoreTier2(outcomes.map((o) => ({ type: 'fragment', passed: o.passed })));
           Logger.info('background', `RUN_SG_TRIAL[tier2:run] — ${tier2Score.verdict} (${tier2Score.requiredPassed}/${tier2Score.requiredTotal} phases passed) score=${tier2Score.score}`);
