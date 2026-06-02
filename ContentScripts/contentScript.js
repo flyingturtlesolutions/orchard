@@ -15,7 +15,7 @@
  *
  * @module ContentScripts/contentScript
  * @author Agent HUB
- * @version 2.17.1
+ * @version 2.17.2
  */
 
 'use strict';
@@ -5399,12 +5399,72 @@ async function closeOpenOverlays() {
   return { success: true, closed, remaining: openOverlays().length };
 }
 
+// ─── OBS-1: demonstration recorder ──────────────────────────────────────────
+// Open-capture mode for Path 3 (observed perspectives). While a record session is active, capture-phase
+// listeners observe the user's REAL interactions and post each (with the acted element's identity) to the
+// background, which buffers the trace. Reuses the existing identity helpers (computeUniqueSelector /
+// _computeA11yRole / _computeAccessibleName / _computeHierarchicalContext). Sensitive values NEVER leave the
+// page — a local gate redacts password/payment fields before sending. Pure scrub/classify lives in
+// Core/observedTrace.js (the background applies it); this side only extracts DOM identity.
+let _obsRec = { active: false };
+const _OBS_SENSITIVE = /pass(word|code)|(^|[^a-z])pin([^a-z]|$)|\bssn\b|social.?security|credit.?card|card.?number|(^|[^a-z])cc-?(num|number|csc|cvv|cvc)|security.?code|\bcvv\b|\bcvc\b|account.?number|routing.?number/i;
+
+function _obsExtract(el) {
+  const out = { tagName: el.tagName || null, role: null, accessibleName: null, selector: null, hierarchicalContext: null,
+    name: null, type: null, autocomplete: null, inputType: null };
+  try { out.selector = computeUniqueSelector(el); } catch { /* */ }
+  try { out.role = _computeA11yRole(el); } catch { /* */ }
+  try { out.accessibleName = _computeAccessibleName(el); } catch { /* */ }
+  try { out.hierarchicalContext = _computeHierarchicalContext(el); } catch { /* */ }
+  try { out.name = el.getAttribute('name') || null; } catch { /* */ }
+  try { out.type = el.getAttribute('type') || null; out.inputType = el.type || null; } catch { /* */ }
+  try { out.autocomplete = el.getAttribute('autocomplete') || null; } catch { /* */ }
+  return out;
+}
+function _obsResolveClickTarget(el) {
+  if (!el || el === document || el === document.documentElement || el === document.body) return null;
+  try { return el.closest('a[href],button,[role="button"],[role="option"],[role="menuitem"],[role="menuitemradio"],[role="tab"],[role="radio"],[role="checkbox"],[role="switch"],input,select,textarea,summary,[role]') || el; }
+  catch { return el; }
+}
+function _obsSend(domKind, el, rawValue) {
+  if (!_obsRec.active || !el) return;
+  const target = _obsExtract(el);
+  const sensitive = String(target.inputType || target.type || '').toLowerCase() === 'password'
+    || _OBS_SENSITIVE.test([target.name, target.id, target.accessibleName, target.autocomplete].filter(Boolean).join(' '));
+  let value = null;
+  if (domKind === 'input' || domKind === 'change') value = sensitive ? null : (rawValue != null ? String(rawValue).slice(0, 300) : null);
+  else if (domKind === 'click') value = sensitive ? null : (target.accessibleName || null);   // used only if it classifies as a select
+  try { chrome.runtime.sendMessage({ type: 'INTERACTION_RECORD', payload: { domKind, target, value, sensitive, ts: Date.now(), url: location.href } }); } catch { /* */ }
+}
+const _obsOnClick  = (e) => { try { const el = _obsResolveClickTarget(e.target); if (el) _obsSend('click', el, null); } catch { /* */ } };
+const _obsOnInput  = (e) => { try { const el = e.target; const tag = el && el.tagName; if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') _obsSend(tag === 'SELECT' ? 'change' : 'input', el, el.value); } catch { /* */ } };
+const _obsOnSubmit = (e) => { try { if (e.target) _obsSend('submit', e.target, null); } catch { /* */ } };
+function _obsStart() {
+  if (_obsRec.active) return;
+  _obsRec = { active: true };
+  document.addEventListener('click', _obsOnClick, true);
+  document.addEventListener('input', _obsOnInput, true);
+  document.addEventListener('change', _obsOnInput, true);
+  document.addEventListener('submit', _obsOnSubmit, true);
+}
+function _obsStop() {
+  _obsRec.active = false;
+  document.removeEventListener('click', _obsOnClick, true);
+  document.removeEventListener('input', _obsOnInput, true);
+  document.removeEventListener('change', _obsOnInput, true);
+  document.removeEventListener('submit', _obsOnSubmit, true);
+}
+
 // ─── Message router ───────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const { type, payload } = message;
 
   switch (type) {
+
+    case 'RECORD_START': { _obsStart(); sendResponse({ success: true, active: true }); return false; }
+    case 'RECORD_STOP':  { _obsStop();  sendResponse({ success: true, active: false }); return false; }
+
 
     // v2.72.43 (Pass 17g iter) — readiness probe. Used by debugger's perspective
     // capture flow to verify the content script is reachable before sending

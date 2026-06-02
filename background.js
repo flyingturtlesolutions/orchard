@@ -35,6 +35,7 @@ import { selectionToTrialRoles } from './Core/bind.js';     // SG-4 Bind — sel
 import { buildAcceptance, landmarkRefActions } from './Core/accept.js';     // SG-5/PB-7 — passing trial → durable capability + landmark-backed Fragment/Strategy
 import { deriveCapabilities, deriveAllowedOperations } from './Services/LandmarkProfile.js';  // SG-LM-4b — accept-time landmark profiling
 import { createSgMessageHandlers } from './background/handlers/sg.js';  // R1 seed — SG handlers behind a registry
+import { buildRawAction, coalesce } from './Core/observedTrace.js';     // OBS-1 — observed demonstration recorder
 import * as ChromeHoist        from './Core/chromeHoist.js';  // v2.74.480 — hoist recurring chrome off Locales → Ground.chrome
 import * as Workflows          from './Core/workflows.js';   // v2.74.488 — cross-Locale workflows (partOf) over the siteMap
 import { ExecutionEngine }    from './Services/ExecutionEngine.js';
@@ -1637,6 +1638,26 @@ const _sgMessageHandlers = createSgMessageHandlers({
   enrichSgLandmarks    : _enrichSgLandmarks,
 });
 
+// ── OBS-1: demonstration recording session ───────────────────────────────────
+// One active session at a time. The content script captures user interactions (INTERACTION_RECORD); we
+// buffer them into a raw trace, assigning seq + frameId. Navigations are captured here (the content script
+// is replaced on each page) and we RE-ARM the content-script listeners on the freshly-loaded page so a
+// multi-page demonstration (search → job → apply) records as ONE trace. coalesce() runs on read.
+let _obsSession = null;   // { tabId, startedAt, seq, trace: RawAction[], lastUrl }
+function _obsArm(tabId) { try { chrome.tabs.sendMessage(tabId, { type: 'RECORD_START' }, () => void chrome.runtime.lastError); } catch { /* */ } }
+function _obsDisarm(tabId) { try { chrome.tabs.sendMessage(tabId, { type: 'RECORD_STOP' }, () => void chrome.runtime.lastError); } catch { /* */ } }
+chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+  if (!_obsSession || tabId !== _obsSession.tabId) return;
+  if (info.status === 'complete') {
+    const url = (tab && tab.url) || info.url || '';
+    if (url && url !== _obsSession.lastUrl) {
+      _obsSession.trace.push(buildRawAction({ seq: _obsSession.seq++, ts: Date.now(), url, from: _obsSession.lastUrl, frameId: 0, domKind: 'navigate' }));
+      _obsSession.lastUrl = url;
+    }
+    _obsArm(tabId);   // the page reloaded → re-install the capture listeners on the new content script
+  }
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const { type, payload } = message;
   Logger.debug('background', `Message: ${type}`);
@@ -1652,6 +1673,47 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   switch (type) {
+
+    // ── OBS-1: demonstration recorder ────────────────────────────────────────
+    case 'RECORD_START_SESSION': {
+      (async () => {
+        try {
+          let tabId = payload && typeof payload.tabId === 'number' ? payload.tabId : null;
+          if (tabId == null) { const [t] = await chrome.tabs.query({ active: true, currentWindow: true }); tabId = t?.id ?? null; }
+          if (tabId == null) { sendResponse({ success: false, error: 'no active tab' }); return; }
+          let url = ''; try { const t = await chrome.tabs.get(tabId); url = t?.url || ''; } catch { /* */ }
+          _obsSession = { tabId, startedAt: Date.now(), seq: 0, trace: [], lastUrl: url };
+          _obsArm(tabId);
+          Logger.info('background', `RECORD_START_SESSION — recording tab ${tabId} @ ${String(url).slice(0, 80)}`);
+          sendResponse({ success: true, recording: true, tabId, url });
+        } catch (e) { sendResponse({ success: false, error: e.message }); }
+      })();
+      return true;
+    }
+    case 'INTERACTION_RECORD': {
+      try {
+        if (_obsSession && sender?.tab?.id === _obsSession.tabId) {
+          const p = payload || {};
+          _obsSession.trace.push(buildRawAction({ seq: _obsSession.seq++, ts: p.ts || Date.now(), url: p.url || _obsSession.lastUrl, frameId: sender.frameId | 0, domKind: p.domKind, target: p.target, value: p.sensitive ? null : p.value }));
+        }
+      } catch (e) { Logger.warn('background', `INTERACTION_RECORD drop: ${e.message}`); }
+      sendResponse({ success: true });
+      return false;
+    }
+    case 'GET_RECORDING': {
+      const t = _obsSession ? coalesce(_obsSession.trace) : [];
+      sendResponse({ success: true, recording: !!_obsSession, count: t.length, trace: t, tabId: _obsSession?.tabId ?? null });
+      return false;
+    }
+    case 'RECORD_STOP_SESSION': {
+      const sess = _obsSession;
+      if (sess) { _obsDisarm(sess.tabId); }
+      const trace = sess ? coalesce(sess.trace) : [];
+      _obsSession = null;
+      Logger.info('background', `RECORD_STOP_SESSION — ${trace.length} action(s) captured`);
+      sendResponse({ success: true, recording: false, count: trace.length, trace });
+      return false;
+    }
 
     // ── CapabilityAPI surface ────────────────────────────────────────────────
     case 'CAPABILITY_LIST': {

@@ -30,6 +30,42 @@ export function createSgTrial({ getGroundId, getTabId, getIntent, rerender, afte
   let replayInFlight = false;
   let replayResult = null;
 
+  // OBS-1 — demonstration recorder (Path 3): independent of the intent plan. Record a session, stop, see the
+  // raw action trace (the basis for deriving a capability in OBS-3). Polls a live count while recording.
+  let recording = false;
+  let recordTrace = null;
+  let recordCount = 0;
+  let _recPoll = null;
+  const _recStopPoll = () => { if (_recPoll) { clearInterval(_recPoll); _recPoll = null; } };
+  const onRecordToggle = async () => {
+    if (!recording) {
+      try { await new Promise((r) => chrome.runtime.sendMessage({ type: 'RECORD_START_SESSION', payload: { tabId: getTabId?.() } }, r)); } catch { /* */ }
+      recording = true; recordCount = 0; recordTrace = null;
+      _recStopPoll();
+      _recPoll = setInterval(() => {
+        chrome.runtime.sendMessage({ type: 'GET_RECORDING' }, (res) => { if (res && typeof res.count === 'number' && res.count !== recordCount) { recordCount = res.count; rerender?.(); } });
+      }, 1500);
+      rerender?.();
+    } else {
+      _recStopPoll();
+      let res = null;
+      try { res = await new Promise((r) => chrome.runtime.sendMessage({ type: 'RECORD_STOP_SESSION' }, r)); } catch { /* */ }
+      recording = false; recordTrace = (res && Array.isArray(res.trace)) ? res.trace : []; recordCount = recordTrace.length;
+      rerender?.();
+    }
+  };
+  const _recordHtml = () => {
+    if (recording) return `<div class="dbg-perspective-ground-note">● recording demonstration — ${recordCount} action(s) captured…</div>`;
+    if (recordTrace && recordTrace.length) {
+      const kinds = recordTrace.reduce((m, a) => { m[a.kind] = (m[a.kind] || 0) + 1; return m; }, {});
+      const sum = Object.entries(kinds).map(([k, n]) => `${n} ${k}`).join(', ');
+      const lines = recordTrace.slice(0, 12).map((a, i) => `${i + 1}. <b>${escHtml(a.kind)}</b> ${escHtml(a.target?.accessibleName || a.target?.selector || a.to || '')}${a.value != null ? ` = ${escHtml(String(a.value).slice(0, 40))}` : ''}`);
+      const more = recordTrace.length > 12 ? `<br>… +${recordTrace.length - 12} more` : '';
+      return `<div class="dbg-perspective-ground-note">▣ demonstration captured — ${recordTrace.length} action(s) (${escHtml(sum)}):<br>${lines.join('<br>')}${more}</div>`;
+    }
+    return '';
+  };
+
   const _resetTrial = () => { trialInFlight = false; trialResult = null; acceptInFlight = false; capabilityResult = null; rejected = false; replayInFlight = false; replayResult = null; };
 
   const _planSummary = () => {
@@ -168,19 +204,22 @@ export function createSgTrial({ getGroundId, getTabId, getIntent, rerender, afte
     /** Full clear (session reset / dismiss). */
     reset() { plan = null; _resetTrial(); },
     /** The plan summary + live trial result (+ accept/reject/re-run) for the intent-check row. */
-    renderResult() { return `${_planSummary()}\n        ${_trialResultHtml()}`; },
+    renderResult() { return `${_planSummary()}\n        ${_trialResultHtml()}\n        ${_recordHtml()}`; },
     /** The ▶ Run on page button (or running state) for the row's action area; '' when no runnable plan. */
     renderRunButton() {
       // SG-T2-6 — Tier-2 inspect toggle: when on, ▶ Run returns the lowered multi-phase plan (no execution).
       const toggle = `<button class="btn-secondary tiny" data-perspective-action="toggle-tier2" type="button" title="Tier-2 plan inspect: ▶ Run lowers the intent into its multi-phase plan (fragment/observation/navigate/wait nodes) and shows it, instead of running the flat trial. No execution.">${tier2Inspect ? '◉' : '○'} T2 plan</button>`;
-      if (plan && plan.runnable && !trialInFlight) return `<button class="btn-secondary tiny" data-perspective-action="run-sg-trial" type="button" title="Run the substrate-grounded plan on this page — fills the fields; the irreversible submit is deferred.">▶ Run on page</button> ${toggle}`;
-      if (trialInFlight) return `<button class="btn-secondary tiny" type="button" disabled>⏳ Running…</button>`;
-      return toggle;
+      // OBS-1 — Record demo (always available; the observed path doesn't need an intent first).
+      const rec = `<button class="btn-secondary tiny" data-perspective-action="toggle-record" type="button" title="OBS-1 — record a demonstration: do the task on the page yourself, then Stop to capture the raw action trace (the basis for deriving a capability, no Comprehend/Select).">${recording ? '■ Stop recording' : '● Record demo'}</button>`;
+      if (plan && plan.runnable && !trialInFlight) return `<button class="btn-secondary tiny" data-perspective-action="run-sg-trial" type="button" title="Run the substrate-grounded plan on this page — fills the fields; the irreversible submit is deferred.">▶ Run on page</button> ${toggle} ${rec}`;
+      if (trialInFlight) return `<button class="btn-secondary tiny" type="button" disabled>⏳ Running…</button> ${rec}`;
+      return `${toggle} ${rec}`;
     },
     wire(container) {
       if (!container) return;
       container.querySelector('[data-perspective-action="run-sg-trial"]')?.addEventListener('click', () => onRun());
       container.querySelector('[data-perspective-action="toggle-tier2"]')?.addEventListener('click', () => { tier2Inspect = !tier2Inspect; rerender?.(); });
+      container.querySelector('[data-perspective-action="toggle-record"]')?.addEventListener('click', () => onRecordToggle());
       container.querySelector('[data-perspective-action="accept-sg-trial"]')?.addEventListener('click', () => onAccept());
       container.querySelector('[data-perspective-action="reject-sg-trial"]')?.addEventListener('click', () => onReject());
       container.querySelector('[data-perspective-action="replay-sg-capability"]')?.addEventListener('click', () => onReplay());
