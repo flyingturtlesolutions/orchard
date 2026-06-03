@@ -17,7 +17,7 @@
 // PURE: no DOM / chrome / LLM (the LLM refines classification + locates the region live; this is the floor).
 //
 // @module Core/observe
-// @version 2.74.686
+// @version 2.74.709
 
 // A leading ACTION verb makes the ask a COMMAND, not a standalone read — even when it embeds a selection clause
 // ("download the CHEAPEST gif" is observe+analyze+fragment, which the COMPILER decomposes, not a pure read). This
@@ -89,7 +89,11 @@ const _outName = (s) => _slugUpper(s).split('_').slice(0, 3).join('_') || 'VALUE
  * groundId, reversible, params}, so an Observation needs only those fields to be matched + ranked unchanged. The
  * `observe` body + `outputType` are what the read-runner and the compiler consume.
  *   - effect:'read' + reversible:true  → a read has no side effect; the chat can run it without a confirm gate.
- *   - observe.extracts[{selector, output, shape, landmark}] → how the runtime EXTRACTs (selector + self-healing lmk).
+ *   - observe.extracts[{selector, output, shape, landmark, archetype}] → how the runtime EXTRACTs:
+ *       • archetype {selector,index} → PREFERRED for list items: a value-independent selector matching the
+ *         analogous element in every sibling, + the picked index ("the first/Nth"). Survives the list changing.
+ *       • selector → the unique/structural fallback when the element isn't part of a repeat.
+ *       • landmark → description-layer self-heal (role + accessibleName) when the selector breaks.
  *   - outputType → the compiler's control-flow connection (list→foreach, scalar→binding, predicate→gate, count→loop).
  * @returns {object} Observation capability record
  */
@@ -101,6 +105,11 @@ export function buildObservationCapability(input) {
   const shape = ex.shape || (lmk ? inferExtractShape(lmk) : 'text');
   const outputType = i.outputType || reconcileOutputType(classifyReadAsk(i.ask || intent).outputType, shape);
   const selector = ex.selector || (lmk && lmk.selector) || null;
+  // Positional/archetype selector (value-independent list-item read). Accepted only when well-formed so a
+  // malformed pick can't poison the record; the runtime tries it first, then falls back to selector + landmark.
+  const arch = (ex.archetype && typeof ex.archetype === 'object' && ex.archetype.selector)
+    ? { selector: String(ex.archetype.selector), index: Number.isInteger(ex.archetype.index) ? ex.archetype.index : 0 }
+    : null;
   return {
     id: i.id || null,
     kind: 'observation',
@@ -117,10 +126,54 @@ export function buildObservationCapability(input) {
         selector,
         output: ex.output || _outName(intent),
         shape,
+        ...(arch ? { archetype: arch } : {}),
         ...(lmk ? { landmark: lmk } : {}),
       }],
     },
     params: Array.isArray(i.params) ? i.params : [],
     synthesized: true,
   };
+}
+
+// ── OBS-READ bridge: reach the user's MANUAL (Studio-authored) Observations from chat ─────────────────────────
+// The chat's ORCH matcher only sees lightweight CAPTURED observations (sgCapabilities). A user who AUTHORED a
+// rich Observation in Studio (multi-extract, gates, attributes) lives in a DIFFERENT store (StorageManager) and
+// would be ignored — the chat would offer to capture a new, often more-brittle one instead. This pure scorer
+// lets the read path consult that manual store and PREFER a confident match. LEXICAL floor: token recall of the
+// ask against the observation's name + description + extract output names, with substring credit so a glued
+// output like "FIRSTJOB" still covers "first"/"job".
+
+const _OBS_STOP = new Set(['the', 'a', 'an', 'of', 'for', 'to', 'is', 'are', 'am', 'be', 'was', 'were', 'what', 'which', 'show', 'tell', 'get', 'read', 'me', 'my', 'it', 'this', 'that', 'on', 'in', 'at', 'please', 'can', 'you', 'i', 'do', 'does', 'there', 'here']);
+
+const _obsTokens = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').split(/\s+/).filter((t) => t && t.length >= 2 && !_OBS_STOP.has(t));
+
+/** The searchable text of a manual Observation record: name + description + each extract's output name. PURE. */
+export function observationSearchText(observation) {
+  const o = observation || {};
+  const parts = [o.name, o.description, o.goal, o.intent];
+  const impl = Array.isArray(o.implementations) ? o.implementations[0] : null;
+  const extracts = (impl && Array.isArray(impl.extracts)) ? impl.extracts : [];
+  for (const ex of extracts) { if (ex && ex.output) parts.push(ex.output); }
+  if (Array.isArray(o.aliases)) parts.push(...o.aliases);
+  return parts.filter(Boolean).join(' ');
+}
+
+/**
+ * Score a read-ask against a manual Observation in [0,1] — token recall of the ask's content words against the
+ * observation's searchable text, with substring credit (a glued name like "FIRSTJOB" covers "first"/"job"). PURE.
+ * @param {string} ask
+ * @param {object} observation
+ * @returns {number}
+ */
+export function scoreObservationMatch(ask, observation) {
+  const askToks = _obsTokens(ask);
+  if (!askToks.length) return 0;
+  const obsToks = _obsTokens(observationSearchText(observation));
+  if (!obsToks.length) return 0;
+  let covered = 0;
+  for (const a of askToks) {
+    const hit = obsToks.some((t) => t === a || (a.length >= 3 && t.includes(a)) || (t.length >= 3 && a.includes(t)));
+    if (hit) covered++;
+  }
+  return covered / askToks.length;
 }

@@ -789,9 +789,12 @@ async function _orchFeedbackFlow(msg, { kind = '', text = '' } = {}) {
   if (kind === 'retract' || res.applied?.includes('retract')) _lastOrch = null;
 }
 
-// A thumbs-down / remove bar shown after a run completes, so a wrong action is correctable IN CHAT (no Studio).
+// A 👍 / 👎 / remove bar shown after a run completes, so the action is reinforceable OR correctable IN CHAT (no
+// Studio). 👍 (affirm) is symmetric to 👎: it confirms the ask→capability alias and emits a POSITIVE outcome that
+// feedbackLearn turns into a relevance boost for similar future asks — the flywheel, made explicit.
 function _orchFeedbackBar(msg) {
   const bar = _orchActionBar(msg);
+  bar.appendChild(_mkBtn('👍 Right', () => { _orchFeedbackFlow(appendMessage({ role: 'assistant', body: '' }), { kind: 'affirm' }); }));
   bar.appendChild(_mkBtn('👎 Wrong', () => { _orchFeedbackFlow(appendMessage({ role: 'assistant', body: '' }), { kind: 'reject_run' }); }));
   bar.appendChild(_mkBtn('🗑 Remove', () => { _orchFeedbackFlow(appendMessage({ role: 'assistant', body: '' }), { kind: 'retract' }); }));
 }
@@ -921,7 +924,13 @@ async function _orchObserveCapture(msg, { groundId, tabId, ask }) {
   // Prefer the VALUE-INDEPENDENT structural selector so the read is positional ("the first job"), not pinned to
   // this instance's text (Indeed's aria-label selector matched only that one job title and broke on the next page).
   const selector = picked.structuralSelector || picked.selector;
-  const res = await _orchReq('OBSERVE_CAPTURE', { tabId, groundId, ask, selector, label: picked.label || '', outputType: classifyReadAsk(ask).outputType });
+  // Carry the picker's landmark identity (role + accessibleName + hierarchicalContext) so the saved
+  // observation can self-heal at run time (LANDMARK_PROBE_OR_RECOVER) when this selector later breaks.
+  const lmk = (picked.landmark && typeof picked.landmark === 'object') ? picked.landmark : null;
+  // Carry the positional/archetype selector when the picked value is one item in a repeating list — it's the
+  // robust path for "the first/Nth …" reads (value-independent; survives the list reordering).
+  const archetype = (picked.archetype && typeof picked.archetype === 'object') ? picked.archetype : null;
+  const res = await _orchReq('OBSERVE_CAPTURE', { tabId, groundId, ask, selector, label: picked.label || '', role: (lmk && lmk.role) || '', landmark: lmk, archetype, outputType: classifyReadAsk(ask).outputType });
   _setMessageBody(msg, (res && res.success && res.capability)
     ? `Got it — I’ll read that for “${ask}”. Ask again and I’ll fetch the value.`
     : `Couldn’t set that up${res && res.error ? ` — ${res.error}` : ''}.`);
@@ -936,6 +945,10 @@ async function _orchRunObservation(msg, { groundId, tabId, capabilityId, intent,
   const v = String(res.value || '').trim();
   _setMessageBody(msg, v ? v.slice(0, 800) : '(nothing found there)');
   if (ask) _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId, phrase: ask });   // confirm → flywheel
+  // ORCH-FB — a read is correctable/affirmable IN CHAT too: 👍 reinforces "this is the right value to read",
+  // 👎/🗑 demote or retract a wrong read. Setting _lastOrch also lets a typed "yes/that's wrong" land on it.
+  _lastOrch = { groundId, capabilityId, tabId, ask, intent, bindings: {}, params: null };
+  _orchFeedbackBar(msg);
 }
 
 // ── ORCH-ADMIN — management commands from chat ──────────────────────────────────────────────────────────────
@@ -1084,6 +1097,18 @@ async function _tryGroundedTurn(text) {
   }
 
   const thinking = appendMessage({ role: 'thinking', body: 'Checking this page…' });
+  // OBS-READ bridge — a QUESTION first consults the user's MANUAL (Studio-authored) Observations, which live in a
+  // DIFFERENT store than the ORCH matcher's lightweight captured ones. Without this the chat ignores a rich
+  // hand-authored read and offers to capture a new (often more brittle) one. A confident match RUNS and shows the
+  // value — reads are reversible, so auto-running is safe — preferring the authored read over a fresh capture.
+  if (classifyReadAsk(text).isRead) {
+    const mo = await _orchReq('RUN_BEST_OBSERVATION', { tabId: tab.id, ask: text });
+    if (mo && mo.matched && mo.ok && String(mo.value || '').trim()) {
+      thinking.classList.remove('thinking'); thinking.classList.add('assistant');
+      _setMessageBody(thinking, String(mo.value).trim().slice(0, 800));
+      return true;
+    }
+  }
   const m = await _orchReq('ORCH_MATCH', { tabId: tab.id, ask: text });
   if (!m || m.success === false) { thinking.remove(); return false; }
   // No Ground for this page → the site isn't in the library; let the legacy matcher try. A grounded MISS

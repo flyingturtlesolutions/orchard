@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { classifyReadAsk, inferExtractShape, reconcileOutputType, buildObservationCapability } from './observe.js';
+import { classifyReadAsk, inferExtractShape, reconcileOutputType, buildObservationCapability, scoreObservationMatch, observationSearchText } from './observe.js';
 
 describe('observe — the pure floor for observations (OBS-READ-1)', () => {
   it('classifyReadAsk: a count question → outputType count', () => {
@@ -87,5 +87,46 @@ describe('observe — the pure floor for observations (OBS-READ-1)', () => {
     });
     assert.equal(cap.observe.extracts[0].shape, 'list', 'a repeated region is a list extract');
     assert.equal(cap.outputType, 'list');
+  });
+
+  it('buildObservationCapability: a well-formed archetype rides the extract (positional list read)', () => {
+    const cap = buildObservationCapability({
+      id: 'o', ask: "what's the title of the first job?", groundId: 'g',
+      landmark: { role: 'link', accessibleName: 'ITOM Developer', selector: 'div.result a.jobTitle' },
+      extract: { selector: 'div.result a.jobTitle', archetype: { selector: 'a.jobTitle', index: 0 } },
+    });
+    const ex = cap.observe.extracts[0];
+    assert.deepEqual(ex.archetype, { selector: 'a.jobTitle', index: 0 }, 'archetype {selector,index} is stored');
+    assert.equal(ex.selector, 'div.result a.jobTitle', 'the unique selector is kept as the fallback');
+    assert.ok(ex.landmark, 'the landmark is kept for description-layer recovery');
+  });
+
+  it('buildObservationCapability: a malformed archetype is dropped (selector required; index defaults to 0)', () => {
+    const noSel = buildObservationCapability({ ask: 'x?', groundId: 'g', extract: { selector: '.s', archetype: { index: 2 } } });
+    assert.equal(noSel.observe.extracts[0].archetype, undefined, 'no archetype.selector → not stored');
+    const noIdx = buildObservationCapability({ ask: 'x?', groundId: 'g', extract: { selector: '.s', archetype: { selector: '.a' } } });
+    assert.deepEqual(noIdx.observe.extracts[0].archetype, { selector: '.a', index: 0 }, 'missing index defaults to 0');
+  });
+
+  it('observationSearchText: name + description + extract output names form the searchable text', () => {
+    const obs = { name: 'First job title', description: 'reads the top result', implementations: [{ tier: 'cache', extracts: [{ shape: 'text', target: '.x', output: 'FIRSTJOB' }] }] };
+    const t = observationSearchText(obs).toLowerCase();
+    assert.ok(t.includes('first job title') && t.includes('top result') && t.includes('firstjob'));
+  });
+
+  it('scoreObservationMatch: a read-ask matches a well-named manual observation', () => {
+    const named = { name: 'First job title', implementations: [{ tier: 'cache', extracts: [{ shape: 'text', target: '.x', output: 'TITLE' }] }] };
+    assert.ok(scoreObservationMatch("what's the title of the first job?", named) >= 0.99, 'all content tokens covered');
+  });
+
+  it('scoreObservationMatch: substring credit lets a glued output name ("FIRSTJOB") still match', () => {
+    const glued = { name: 'FIRSTJOB', implementations: [{ tier: 'cache', extracts: [{ shape: 'text', target: '.x', output: 'FIRSTJOB' }] }] };
+    // ask tokens: [title, first, job] — "firstjob" covers first + job (substring), title not present → 2/3
+    assert.ok(scoreObservationMatch("what's the title of the first job?", glued) >= 0.66);
+  });
+
+  it('scoreObservationMatch: an unrelated observation scores below the run threshold', () => {
+    const other = { name: 'Salary range filter', implementations: [{ tier: 'cache', extracts: [{ shape: 'text', target: '.x', output: 'SALARY' }] }] };
+    assert.ok(scoreObservationMatch("what's the title of the first job?", other) < 0.5);
   });
 });
