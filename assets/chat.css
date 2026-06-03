@@ -875,6 +875,10 @@ textarea {
   color: var(--c-text);
 }
 
+/* ORCH-C — grounded-turn action buttons (confirm / disambiguate) inside an assistant bubble. */
+.orch-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.orch-actions .btn-secondary { cursor: pointer; }
+
 /* ── Toast ───────────────────────────────────────────────────────────────── */
 .toast {
   position: fixed;

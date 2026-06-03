@@ -381,21 +381,33 @@ export function createSgMessageHandlers(ctx) {
     ORCH_MATCH: async (payload, _sender, sendResponse) => {
       try {
         const { tabId, groundId = null, ask = '' } = payload ?? {};
-        if (!groundId || typeof ask !== 'string' || !ask.trim()) { sendResponse({ success: false, error: 'groundId + ask required' }); return; }
+        if (typeof ask !== 'string' || !ask.trim()) { sendResponse({ success: false, error: 'ask required' }); return; }
         let url = '';
         if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); url = t?.url ?? ''; } catch { /* */ } }
         const localeUrl = ctx.normalizeUrl(url);
-        const caps = await ctx.readSgCapabilities(groundId);
+        // ORCH-C — resolve the Ground from the live page when the caller (chat) only knows the tab. Match by
+        // origin against the saved Grounds. No matching Ground → a clean "no-ground" miss (the chat falls back).
+        let gid = groundId;
+        if (!gid && url) {
+          try {
+            const origin = new URL(url).origin;
+            const grounds = await StorageManager.getAllGrounds();
+            const g = (Array.isArray(grounds) ? grounds : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } });
+            gid = g ? g.id : null;
+          } catch { /* */ }
+        }
+        if (!gid) { sendResponse({ success: true, decision: 'miss', reason: 'no-ground', candidate: null, capabilityId: null, bindings: {}, gaps: [], alternatives: [], scoped: { here: 0, reachable: 0, off: 0 }, localeUrl }); return; }
+        const caps = await ctx.readSgCapabilities(gid);
         const sameLocale = (a, b) => ctx.normalizeUrl(a) === ctx.normalizeUrl(b);
         // ORCH-G — read the confirmation stream once; per-candidate health graduates the auto-fire bar.
         let outcomeStream = [];
-        try { if (typeof ctx.readOutcomes === 'function') outcomeStream = (await ctx.readOutcomes(groundId)) || []; } catch { /* */ }
+        try { if (typeof ctx.readOutcomes === 'function') outcomeStream = (await ctx.readOutcomes(gid)) || []; } catch { /* */ }
         const projected = (Array.isArray(caps) ? caps : []).map((c) => {
           const cand = toCandidate(c);
           if (cand) cand.health = tallyCapabilityConfirmations(outcomeStream, cand.id);
           return cand;
         }).filter(Boolean);
-        const parts = scopeAndPartition(projected, { currentGroundId: groundId, currentLocaleUrl: localeUrl, sameLocale });
+        const parts = scopeAndPartition(projected, { currentGroundId: gid, currentLocaleUrl: localeUrl, sameLocale });
         // ORCH-M — smart scorer over the runnable-here set. Cheap paths skip the LLM: an exact-alias short-circuit
         // (deterministic hit) and an empty here-set. Otherwise one structured select+bind call; if the LLM is
         // unavailable/fails, `scorer` stays undefined and rankAndDecide uses the lexical default.
@@ -422,7 +434,7 @@ export function createSgMessageHandlers(ctx) {
           capabilityId: decision.candidate ? decision.candidate.id : null,
           bindings, gaps,                        // ORCH-M — validated param values + out-of-vocab gaps
           rationale: llm ? llm.rationale : '',
-          via,
+          via, groundId: gid,                    // ORCH-C — the resolved Ground (chat passes it back to REPLAY / RECORD_ALIAS)
           alternatives: (decision.alternatives || []).map((a) => ({ id: a.id, intent: a.intent })),
           scoped, localeUrl,
         });

@@ -17,6 +17,7 @@ import { $, escHtml, escAttr, toast, relTime } from './shared.js';
 import { isSafeStrategyResultHtml, looksLikeStrategyResultHtml } from './Services/Chat/strategyResultHtml.js';
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
+import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
 
 // ─── Conversation state ──────────────────────────────────────────────────────
 // `_currentConversationId` is null before the first user message of a new
@@ -690,6 +691,127 @@ async function _executeTask(cap, paramValues) {
 
 // ─── Send chat message — routed via match() unless target is set ────────────
 
+// ── ORCH-C — grounded conversational turn ───────────────────────────────────────────────────────────────
+// Page-scoped HIT/MISS over the DEMONSTRATED library (Core/orchMatch via ORCH_MATCH). Tried BEFORE the legacy
+// ChatAPI.match: on a grounded HIT we run/confirm/disambiguate here; on any MISS or error we return false and
+// the existing routed flow takes over unchanged. The grounded substrate and the legacy capabilities coexist.
+const _orchReq = (type, payload) => new Promise((resolve) => {
+  let done = false;
+  const timer = setTimeout(() => { if (!done) { done = true; resolve(null); } }, 120000);
+  try {
+    chrome.runtime.sendMessage({ type, payload }, (res) => {
+      if (done) return; done = true; clearTimeout(timer);
+      resolve(chrome.runtime.lastError ? null : res);
+    });
+  } catch { if (!done) { done = true; clearTimeout(timer); resolve(null); } }
+});
+
+async function _orchActiveTab() {
+  try { const tabs = await chrome.tabs.query({ active: true, currentWindow: true }); return (tabs && tabs[0]) || null; }
+  catch { return null; }
+}
+
+// REPLAY a grounded capability and report the outcome in `msg`. On success, records the ask as a confirmation
+// (ORCH-D/G flywheel: alias accretion + health → future auto-fire). NO LLM in this path.
+async function _orchRun(msg, { groundId, capabilityId, intent, paramValues, tabId, ask }) {
+  _setMessageBody(msg, `Running “${intent || 'it'}”…`);
+  const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId, capabilityId, paramValues });
+  if (!res || res.success === false) {
+    _setMessageBody(msg, `That didn’t run${res && res.error ? ` — ${res.error}` : ''}.`);
+  } else if (res.ran === false) {
+    _setMessageBody(msg, res.reason || 'Couldn’t run on this page — make sure you’re on the right page.');
+  } else if (res.ok) {
+    _setMessageBody(msg, `Done — ran “${intent || 'it'}”.`);
+    _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId, phrase: ask });   // confirm → flywheel
+  } else {
+    _setMessageBody(msg, `That didn’t work as expected${res.reason ? ` — ${res.reason}` : ''}. Want to show me again?`);
+  }
+}
+
+function _orchActionBar(msg) {
+  const bar = document.createElement('div');
+  bar.className = 'orch-actions';
+  msg.querySelector('.message-content').appendChild(bar);
+  return bar;
+}
+
+// Returns true if the grounded library handled the turn (HIT); false to fall through to the legacy matcher.
+async function _tryGroundedTurn(text) {
+  const tab = await _orchActiveTab();
+  if (!tab || typeof tab.id !== 'number') return false;
+  const thinking = appendMessage({ role: 'thinking', body: 'Checking this page…' });
+  const m = await _orchReq('ORCH_MATCH', { tabId: tab.id, ask: text });
+  if (!m || m.success === false) { thinking.remove(); return false; }
+  // No Ground for this page → the site isn't in the library; let the legacy matcher try. A grounded MISS
+  // (the page IS known, just no capability for this ask) falls through to the "show me?" record offer below.
+  if (m.decision === 'miss' && !m.groundId) { thinking.remove(); return false; }
+
+  const turn = planAssistantTurn(m);
+  const ctx = { groundId: m.groundId, tabId: tab.id, ask: text, intent: m.candidate && m.candidate.intent, paramValues: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {} };
+  thinking.classList.remove('thinking');
+  thinking.classList.add('assistant');
+  _setMessageBody(thinking, turn.say);
+
+  if (turn.action === 'run') {
+    await _orchRun(thinking, { ...ctx, capabilityId: m.capabilityId });
+    return true;
+  }
+  if (turn.action === 'confirm') {
+    const bar = _orchActionBar(thinking);
+    const yes = document.createElement('button'); yes.className = 'btn-secondary tiny'; yes.type = 'button'; yes.textContent = turn.irreversible ? 'Yes, go ahead' : 'Run it';
+    const no  = document.createElement('button'); no.className  = 'btn-secondary tiny'; no.type  = 'button'; no.textContent = 'Not that';
+    bar.appendChild(yes); bar.appendChild(no);
+    yes.addEventListener('click', () => { bar.remove(); _orchRun(thinking, { ...ctx, capabilityId: m.capabilityId }); });
+    no.addEventListener('click', () => { bar.remove(); _setMessageBody(thinking, 'Okay — never mind.'); });
+    return true;
+  }
+  if (turn.action === 'disambiguate') {
+    const bar = _orchActionBar(thinking);
+    for (const opt of (turn.options || [])) {
+      const b = document.createElement('button'); b.className = 'btn-secondary tiny'; b.type = 'button'; b.textContent = opt.intent || opt.id;
+      b.addEventListener('click', () => { bar.remove(); _orchRun(thinking, { ...ctx, capabilityId: opt.id, intent: opt.intent, paramValues: {} }); });
+      bar.appendChild(b);
+    }
+    return true;
+  }
+  if (turn.action === 'record') {
+    // Grounded MISS — offer to learn it by demonstration (the "show me" path).
+    const bar = _orchActionBar(thinking);
+    const rec = document.createElement('button'); rec.className = 'btn-secondary tiny'; rec.type = 'button'; rec.textContent = '● Show me';
+    bar.appendChild(rec);
+    rec.addEventListener('click', () => { bar.remove(); _orchRecordFlow(thinking, { groundId: m.groundId, tabId: tab.id, ask: text }); });
+    return true;
+  }
+  if (turn.action === 'navigate') return true;   // just the hint — nothing to run or record on this page
+  thinking.remove();
+  return false;
+}
+
+// ORCH-C — record a demonstration from chat (MISS → "show me"), reusing the OBS recorder handlers, then derive
+// a durable capability. On success, seeds the original ask as an alias so the next ask HITS. NO LLM grounding.
+async function _orchRecordFlow(msg, { groundId, tabId, ask }) {
+  const start = await _orchReq('RECORD_START_SESSION', { tabId });
+  if (!start || start.success === false) { _setMessageBody(msg, 'Couldn’t start recording on this page.'); return; }
+  _setMessageBody(msg, 'Recording — do the task on the page, then click Stop & save.');
+  const bar = _orchActionBar(msg);
+  const stop = document.createElement('button'); stop.className = 'btn-secondary tiny'; stop.type = 'button'; stop.textContent = '■ Stop & save';
+  bar.appendChild(stop);
+  stop.addEventListener('click', async () => {
+    stop.disabled = true; bar.remove();
+    _setMessageBody(msg, 'Saving what you showed me…');
+    const stopped = await _orchReq('RECORD_STOP_SESSION', { tabId });
+    const trace = (stopped && Array.isArray(stopped.trace)) ? stopped.trace : null;
+    if (!trace || !trace.length) { _setMessageBody(msg, 'I didn’t capture any actions — try again.'); return; }
+    const res = await _orchReq('DERIVE_OBSERVED_CAPABILITY', { groundId, trace });
+    if (res && res.success && res.capability) {
+      _setMessageBody(msg, `Got it — I learned “${res.capability.intent}”. Ask me again and I’ll do it.`);
+      _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId: res.capability.id, phrase: ask });   // so the next ask hits
+    } else {
+      _setMessageBody(msg, `I couldn’t turn that into a capability${res && res.error ? ` — ${res.error}` : ''}.`);
+    }
+  });
+}
+
 async function sendChatMessage() {
   const input    = $('chat-input');
   const text     = input.value.trim();
@@ -713,6 +835,12 @@ async function sendChatMessage() {
     await _invokeAssistant({ id: targetId, name: targetName }, text);
     return;
   }
+
+  // ORCH-C — grounded pre-check: does the demonstrated, page-grounded library already cover this? On a HIT we
+  // run/confirm/disambiguate here; on a MISS or any error we fall through to the legacy ChatAPI.match below.
+  try {
+    if (await _tryGroundedTurn(text)) { $('btn-chat-send').disabled = false; return; }
+  } catch (e) { try { console.warn('[chat] grounded pre-check fell through:', e?.message); } catch { /* */ } }
 
   // Routed flow — semantic match then invoke
   const status = $('input-status');
