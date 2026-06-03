@@ -21,6 +21,8 @@ import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
 import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved, describeTraceInput } from '../../Core/observedSegment.js';
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A
+import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/orchFeedback.js';   // ORCH-FB — corrective actions
+import { feedbackExamples } from '../../Core/feedbackLearn.js';   // ORCH-FB-2 — relevance shaping from feedback history
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
 import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
@@ -398,6 +400,14 @@ export function createSgMessageHandlers(ctx) {
         }
         if (!gid) { sendResponse({ success: true, decision: 'miss', reason: 'no-ground', candidate: null, capabilityId: null, bindings: {}, gaps: [], alternatives: [], scoped: { here: 0, reachable: 0, off: 0 }, localeUrl }); return; }
         const caps = await ctx.readSgCapabilities(gid);
+        // ORCH — a capability whose backing Strategy was deleted is an ORPHAN: it must be INVISIBLE to the
+        // conversation (deletion is an implementation detail — the ask is just a fresh request). Build the set of
+        // live Strategy ids once and exclude any capability that points at a missing one. Non-destructive (the
+        // admin delete + REPLAY self-heal handle storage cleanup); only skipped when the read fails (liveIds=null
+        // → no filtering, never a false mass-hide). An observation capability has no strategyId → always kept.
+        let liveStrategyIds = null;
+        try { liveStrategyIds = new Set((await StorageManager.listStrategies(gid)).map((s) => s && s.id).filter(Boolean)); } catch { /* read failed → don't filter */ }
+        const _orphan = (c) => !!(c && c.strategyId && liveStrategyIds && !liveStrategyIds.has(c.strategyId));
         // ORCH — scope "here" by SITE (origin), not the demo's exact path. Many capabilities (a global search
         // bar, site nav) work from ANY page of the Ground, so pinning them to the demo URL wrongly hides them
         // ("search vectors" lived on another page than "search music", though both are search options
@@ -408,7 +418,7 @@ export function createSgMessageHandlers(ctx) {
         // ORCH-G — read the confirmation stream once; per-candidate health graduates the auto-fire bar.
         let outcomeStream = [];
         try { if (typeof ctx.readOutcomes === 'function') outcomeStream = (await ctx.readOutcomes(gid)) || []; } catch { /* */ }
-        const projected = (Array.isArray(caps) ? caps : []).map((c) => {
+        const projected = (Array.isArray(caps) ? caps : []).filter((c) => isActiveCapability(c) && !_orphan(c)).map((c) => {   // ORCH-FB retracted + orphan (deleted strategy) → invisible
           const cand = toCandidate(c);
           if (cand) cand.health = tallyCapabilityConfirmations(outcomeStream, cand.id);
           return cand;
@@ -424,13 +434,16 @@ export function createSgMessageHandlers(ctx) {
         // captured (demonstrate "Vectors" → re-bind "Illustrations" because the page confirms it exists).
         let affordances = [];
         try { const pm = await ctx.readLocaleCache(gid, localeUrl); affordances = localeAffordanceLabels(pm && pm.model); } catch { /* */ }
+        // ORCH-FB-2 — this Ground's confirm/reject history. Used BOTH ways: (1) as few-shot examples in the LLM
+        // matcher (generalize corrections), and (2) as a deterministic relevance shaper in rankAndDecide below.
+        const feedback = feedbackExamples(outcomeStream);
         let scorer; let llm = null;
         const aliasHit = candidates.some((c) => (c.aliases || []).some((al) => normalizeAliasPhrase(al) === normalizeAliasPhrase(ask)));
         if (candidates.length && !aliasHit) {
-          try { llm = await AnthropicService.matchCapability({ ask, candidates, affordances }); } catch { /* */ }
+          try { llm = await AnthropicService.matchCapability({ ask, candidates, affordances, examples: feedback }); } catch { /* */ }
           if (llm) scorer = scoresToScorer(llm.scores);
         }
-        const decision = rankAndDecide(ask, candidates, { ...(scorer ? { score: scorer } : {}), now: Date.now() });
+        const decision = rankAndDecide(ask, candidates, { ...(scorer ? { score: scorer } : {}), now: Date.now(), feedback });
         // ORCH-M/A — validate the LLM's option bindings against the candidate's captured vocabulary OR a label
         // the LIVE PAGE catalogs (affordances): in-set values snap + return as `bindings`; misses → `gaps`.
         let bindings = {}; let gaps = [];
@@ -500,6 +513,122 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // ORCH-FB — the corrective-feedback handler. The chat sends a corrective KIND (from a 👎 button or
+    // classifyFeedback/interpretFeedback over free text) + the last action's context; planCorrection turns it
+    // into persistent ops applied HERE, so a wrong match/run/capability is corrected WITHOUT a Studio trip:
+    //   de_alias → removeAlias (strip the wrong ask) · demote → a rejected OUTCOME (nets down health) ·
+    //   retract → applyRetraction (soft-delete; isActiveCapability hides it) · confirm_alias → accrete + confirm.
+    // Returns the `say` + `followup` so the chat can render the result and offer the next step (record / rerun).
+    ORCH_FEEDBACK: async (payload, _sender, sendResponse) => {
+      try {
+        const { groundId = null, capabilityId = null, ask = '', text = '', context = null } = payload ?? {};
+        let { kind = '', correction = null } = payload ?? {};
+        // LLM WRAPPER — refine free-text feedback into a precise corrective kind (+ a wrong_value correction).
+        // A button-click passes a fixed `kind` and no `text`, so no LLM call is made there.
+        if (text) {
+          try {
+            const r = await AnthropicService.interpretFeedback({ text, context: context || { intent: '', ask } });
+            if (r && r.kind && r.kind !== 'none') { kind = r.kind; if (r.correction) correction = r.correction; }
+          } catch { /* fall back to the lexical kind */ }
+        }
+        if (!kind) { sendResponse({ success: false, error: 'kind required' }); return; }
+        const plan = planCorrection(kind, { capabilityId, groundId, ask, correction });
+        const applied = [];
+        const now = Date.now();
+        for (const op of (Array.isArray(plan.ops) ? plan.ops : [])) {
+          try {
+            if (!op || !op.capabilityId || !groundId) continue;
+            const cap = (await ctx.readSgCapabilities(groundId)).find((c) => c.id === op.capabilityId);
+            if (op.op === 'retract') {
+              if (cap) { await ctx.writeSgCapability(groundId, applyRetraction(cap, { now })); applied.push('retract'); }
+            } else if (op.op === 'de_alias' && op.phrase) {
+              if (cap && Array.isArray(cap.aliases)) {
+                const pruned = removeAlias(cap.aliases, op.phrase);
+                if (pruned.length !== cap.aliases.length) { cap.aliases = pruned; await ctx.writeSgCapability(groundId, cap); }
+                applied.push('de_alias');
+              }
+            } else if (op.op === 'demote') {
+              await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'rejected', outcome: 'failure', detail: { capabilityId: op.capabilityId, rejected: true, reason: op.reason || kind, phrase: String(ask).slice(0, 120) } })]);
+              applied.push('demote');
+            } else if (op.op === 'confirm_alias' && op.phrase) {
+              if (cap) {
+                cap.aliases = accreteAlias(cap.aliases, op.phrase, { intent: cap.intent || '' });
+                await ctx.writeSgCapability(groundId, cap);
+                await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', outcome: 'success', detail: { capabilityId: cap.id, confirmed: true, phrase: String(op.phrase).slice(0, 120) } })]);
+                applied.push('confirm_alias');
+              }
+            }
+          } catch (e) { Logger.warn('background', `ORCH_FEEDBACK op ${op && op.op} failed: ${e.message}`); }
+        }
+        Logger.info('background', `ORCH_FEEDBACK ▸ ${kind} cap=${String(capabilityId).slice(0, 8)} applied=[${applied.join(',')}] ask="${String(ask).slice(0, 50)}"`);
+        sendResponse({ success: true, kind, correction, say: plan.say, followup: plan.followup, applied });
+      } catch (err) {
+        Logger.error('background', `ORCH_FEEDBACK failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // ORCH-ADMIN — bulk library management from chat: COUNT or hard-DELETE artifacts, scoped to the current
+    // Ground (resolved from the tab) or ALL grounds. Uses the SAME StorageManager list/delete primitives Studio
+    // uses (partition-safe, cascading) — no invention. op:'count' powers the chat's confirmation; op:'delete'
+    // executes it (the chat ALWAYS counts + confirms first, since this is a hard delete).
+    ORCH_ADMIN: async (payload, _sender, sendResponse) => {
+      try {
+        const { tabId, groundId = null, op = 'count', kinds = [], scope = 'ground' } = payload ?? {};
+        // 'strategies' and 'observations' are MATCHER-FACING entities — they live in the sgCapabilities store the
+        // chat matches against (a strategy/action capability has no `kind`; an observation has kind:'observation').
+        // Deleting only the Tier-1 `strategies:*` record left the sgCapability orphaned → it still matched, then
+        // REPLAY failed "Strategy not found". So these clear the matcher store AND cascade to the Tier-1 record.
+        // 'fragments' / 'perspectives' are Tier-1-only (not in the matcher store).
+        const TIER1 = { fragments: ['listFragments', 'deleteFragment'], perspectives: ['listPerspectives', 'deletePerspective'] };
+        const CAP_KINDS = { strategies: 'deleteStrategy', observations: 'deleteObservation' };
+        const want = (Array.isArray(kinds) ? kinds : []).filter((k) => TIER1[k] || CAP_KINDS[k]);
+        if (!want.length) { sendResponse({ success: false, error: 'no valid kinds' }); return; }
+        // Resolve target Ground(s): all grounds, or the one for the active tab's origin.
+        const allGrounds = (await StorageManager.getAllGrounds()) || [];
+        let grounds = [];
+        if (scope === 'all') grounds = allGrounds.map((g) => g.id).filter(Boolean);
+        else {
+          let gid = groundId;
+          if (!gid && typeof tabId === 'number') {
+            try { const t = await chrome.tabs.get(tabId); const origin = new URL(t.url).origin; const g = allGrounds.find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } catch { /* */ }
+          }
+          if (gid) grounds = [gid];
+        }
+        if (!grounds.length) { sendResponse({ success: true, op, counts: {}, total: 0, grounds: 0, scope }); return; }
+        const _isObs = (c) => !!c && c.kind === 'observation';
+        const counts = {}; let total = 0;
+        for (const k of want) {
+          let n = 0;
+          for (const gid of grounds) {
+            if (CAP_KINDS[k]) {
+              // Matcher store is the source of truth for what the chat sees. Filter by kind, cascade to Tier-1.
+              const caps = await ctx.readSgCapabilities(gid);
+              const mine = (Array.isArray(caps) ? caps : []).filter((c) => (k === 'observations') ? _isObs(c) : !_isObs(c));
+              n += mine.length;
+              if (op === 'delete') {
+                for (const c of mine) { const sid = c.strategyId || c.id; try { await StorageManager[CAP_KINDS[k]](sid); } catch (e) { Logger.warn('background', `ORCH_ADMIN ${CAP_KINDS[k]}(${sid}) failed: ${e.message}`); } }
+                try { await ctx.removeSgCapabilities(gid, (c) => (k === 'observations') ? _isObs(c) : !_isObs(c)); } catch (e) { Logger.warn('background', `ORCH_ADMIN prune sgCapabilities (${k}) failed: ${e.message}`); }
+              }
+            } else {
+              const [listFn, delFn] = TIER1[k];
+              let recs = [];
+              try { recs = await StorageManager[listFn](gid); } catch (e) { Logger.warn('background', `ORCH_ADMIN ${listFn}(${gid}) failed: ${e.message}`); }
+              const ids = (Array.isArray(recs) ? recs : []).map((r) => r && r.id).filter(Boolean);
+              n += ids.length;
+              if (op === 'delete') for (const id of ids) { try { await StorageManager[delFn](id); } catch (e) { Logger.warn('background', `ORCH_ADMIN ${delFn}(${id}) failed: ${e.message}`); } }
+            }
+          }
+          counts[k] = n; total += n;
+        }
+        Logger.info('background', `ORCH_ADMIN ▸ ${op} kinds=[${want.join(',')}] scope=${scope} grounds=${grounds.length} counts=${JSON.stringify(counts)}`);
+        sendResponse({ success: true, op, counts, total, grounds: grounds.length, scope });
+      } catch (err) {
+        Logger.error('background', `ORCH_ADMIN failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
     // SG-5 / PB-7 — REPLAY an accepted capability. NO LLM. Prefer the promoted landmark-backed Strategy
     // (registry recovery via applyLandmarkRefToStep → LANDMARK_PROBE_OR_RECOVER); fall back to the binding.
     REPLAY_SG_CAPABILITY: async (payload, _sender, sendResponse) => {
@@ -535,6 +664,17 @@ export function createSgMessageHandlers(ctx) {
           try { result = await ExecutionEngine.executeStrategy({ strategyId: cap.strategyId, strategyParamValues, targetTabId: (typeof tabId === 'number' ? tabId : null) }); }
           catch (e) { sendResponse({ success: false, error: `replay strategy failed: ${e.message}` }); return; }
           const ok = !!(result && result.success);
+          const err = String(result?.error || '');
+          // SELF-HEAL — the matcher-facing capability outlived its Strategy (e.g. the Strategy was deleted but the
+          // sgCapability lingered → "Strategy <id> not found"). Prune the orphan so it stops matching instead of
+          // failing on every run. This recovers a drifted store without a Studio trip.
+          if (!ok && /not found|no such strategy|missing strategy|does not exist/i.test(err)) {
+            try { const pruned = await ctx.removeSgCapabilities(groundId, (c) => c.id === cap.id); if (pruned) Logger.info('background', `REPLAY_SG_CAPABILITY — pruned orphaned capability ${cap.id} (strategy ${cap.strategyId} missing)`); } catch { /* */ }
+            // Deletion is invisible to the conversation: signal a clean MISS so the chat treats this as a NEW
+            // request (offer to record), NOT an announcement that something was removed.
+            sendResponse({ success: true, ran: false, pruned: true });
+            return;
+          }
           const pv = Object.keys(strategyParamValues);
           Logger.info('background', `REPLAY_SG_CAPABILITY — ${cap.id} via saved strategy ${cap.strategyId} → ${ok ? 'ok' : 'failed'} (NO LLM, landmark recovery${pv.length ? `, params: ${pv.join(', ')}` : ''})`);
           sendResponse({ success: true, ran: true, replayed: true, via: 'strategy', capabilityId: cap.id, ok, reason: ok ? undefined : (result?.error || 'a step failed') });

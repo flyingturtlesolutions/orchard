@@ -180,6 +180,19 @@ describe('orchMatch — ORCH-M0 HIT/MISS matcher core', () => {
     assert.equal(h.lastOkAt, 30);
   });
 
+  it('ORCH-FB: a rejection nets against confirmations → the auto-fire boost drops', () => {
+    const events = [
+      { detail: { capabilityId: 'c1', confirmed: true }, ts: 10 },
+      { detail: { capabilityId: 'c1', confirmed: true }, ts: 20 },
+      { detail: { capabilityId: 'c1', rejected: true }, ts: 30 },   // user flagged a wrong run
+    ];
+    const h = tallyCapabilityConfirmations(events, 'c1');
+    assert.equal(h.successes, 2);
+    assert.equal(h.rejections, 1);
+    assert.ok(Math.abs(promotionBonus(h) - 0.06) < 1e-9, '2 confirms − 1 reject = 1 net → 0.06 bonus');
+    assert.equal(promotionBonus({ successes: 2, rejections: 5 }), 0, 'more rejections than confirms → no boost');
+  });
+
   it('rankAndDecide: confirmations promote a propose → auto; reversibility veto still wins (ORCH-G)', () => {
     const fixed = (rel) => () => ({ relevance: rel, isExact: false, effectEligible: true });
     const fresh = toCandidate(dateF);

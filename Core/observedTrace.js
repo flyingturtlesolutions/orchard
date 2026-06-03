@@ -9,7 +9,7 @@
 // Downstream (OBS-2/3): coalesce(trace) → segment into Fragments → buildTier2CapabilityRecords (SG-T2-ACC).
 //
 // @module Core/observedTrace
-// @version 2.74.677
+// @version 2.74.684
 
 export const OBSERVED_KINDS = Object.freeze(['click', 'type', 'select', 'submit', 'navigate', 'scroll', 'key']);
 
@@ -90,9 +90,15 @@ export function buildRawAction(parts) {
       scrollY: Number.isFinite(target.scrollY) ? target.scrollY : undefined,
       // ORCH-V — the dropdown's full option vocabulary (only set on an option click / native <select> change).
       options: Array.isArray(target.options) ? target.options.slice(0, 60).map((s) => String(s).slice(0, 80)) : undefined,
+      // B — the SELECTOR of the container the peer group was found in (the nav/listbox), so CLICK_BY_LABEL
+      // re-binds by searching the whole set, not the single demonstrated item's li (which holds only one label).
+      optionContainer: target.optionContainer ? String(target.optionContainer).slice(0, 400) : undefined,
     },
   };
   if (kind === 'type' || kind === 'select') action.value = scrubValue(p.value, target);
+  // A click that carries a captured peer GROUP (category nav / tablist) keeps its label as the value, so
+  // deriveObservedParams can lift it into a re-bindable option (B: parameterize the category from the group).
+  if (kind === 'click' && Array.isArray(target.options) && target.options.length >= 3) action.value = scrubValue(p.value != null ? p.value : target.accessibleName, target);
   if (kind === 'key') action.value = p.value ? String(p.value).slice(0, 20) : 'Enter';   // the key name (never sensitive)
   if (p.domKind === 'navigate') { action.from = p.from ? String(p.from) : null; action.to = String(p.url || ''); }
   return action;

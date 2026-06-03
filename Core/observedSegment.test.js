@@ -100,14 +100,22 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     assert.equal(real[1].value, 'Enter');
   });
 
-  it('OBS — Enter is a boundary: an action AFTER the Enter starts a NEW fragment (post-submit page)', () => {
-    const T = (sel, v, ts) => buildRawAction({ domKind: 'input', value: v, ts, url: 'u', target: { tagName: 'INPUT', role: 'textbox', accessibleName: 'Search', selector: sel } });
-    const K = (sel, ts) => buildRawAction({ domKind: 'keypress', value: 'Enter', ts, url: 'u', target: { tagName: 'INPUT', role: 'textbox', accessibleName: 'Search', selector: sel } });
-    // type → Enter (submits/navigates) → a stray re-type captured on the results page before the nav registered
-    const op = segmentTrace(coalesce([T('#q', 'gifs', 1), K('#q', 2), T('#q', 'gifs', 3)]));
+  const _T = (sel, v, ts) => buildRawAction({ domKind: 'input', value: v, ts, url: 'u', target: { tagName: 'INPUT', role: 'textbox', accessibleName: 'Search', selector: sel } });
+  const _K = (sel, ts) => buildRawAction({ domKind: 'keypress', value: 'Enter', ts, url: 'u', target: { tagName: 'INPUT', role: 'textbox', accessibleName: 'Search', selector: sel } });
+
+  it('OBS — Enter is a boundary: a NEW-value action AFTER the Enter starts a NEW fragment (post-submit page)', () => {
+    // type → Enter (submits/navigates) → a genuine NEW typed value on the results page (a refinement, not a dup)
+    const op = segmentTrace(coalesce([_T('#q', 'gifs', 1), _K('#q', 2), _T('#q2', 'cats', 3)]));
     assert.equal(op.nodes.length, 2, 'Enter splits the trace so the post-Enter action is not stranded on a dead page');
     assert.deepEqual(op.nodes[0].steps.map((s) => s.kind), ['type', 'key'], 'the search (type + Enter) is fragment 1');
-    assert.deepEqual(op.nodes[1].steps.map((s) => s.kind), ['type'], 'the post-Enter re-type is its own fragment');
+    assert.deepEqual(op.nodes[1].steps.map((s) => s.kind), ['type'], 'the new-value post-Enter type is its own fragment');
+  });
+
+  it('OBS — a redundant re-type after Enter is DROPPED (the results page re-shows the query; do not type twice)', () => {
+    // type "gifs" → Enter → results page re-shows "gifs" in its search box → recorder captures a 2nd identical type
+    const op = segmentTrace(coalesce([_T('#q', 'gifs', 1), _K('#q', 2), _T('#q', 'gifs', 3)]));
+    assert.equal(op.nodes.length, 1, 'the redundant re-type fragment is dropped — only the real search remains');
+    assert.deepEqual(op.nodes[0].steps.map((s) => s.kind), ['type', 'key'], 'one type + Enter, no second type');
   });
 
   it('stepToAction: a native <select> change → SELECT op with value', () => {
@@ -215,6 +223,40 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
       buildRawAction({ domKind: 'navigate', url: 'u/2', from: 'u' }),
     ])));
     assert.ok(!('vocabulary' in (lone.find((p) => p.kind === 'option') || {})), 'a lone option is not a vocabulary');
+  });
+
+  it('B — a category-nav CLICK carrying a peer group → a re-bindable CATEGORY option (one capability, N categories)', () => {
+    // A LINK category (Pixabay's <a href="/music/">) classifies as a plain click; the recorder attaches the
+    // sibling category labels as `options` AND the nav container as `optionContainer`. buildRawAction keeps the
+    // demonstrated label as the value, and threads the container through so CLICK_BY_LABEL searches the whole set.
+    const cats = ['Photos', 'Illustrations', 'Vectors', 'Videos', 'Music', 'Sound Effects', 'GIFs'];
+    const click = buildRawAction({
+      domKind: 'click', value: 'Music', url: 'https://pixabay.com',
+      target: { role: 'link', accessibleName: 'Music', selector: 'nav > ul > li:nth-of-type(5) > a', options: cats, optionContainer: 'nav.cats' },
+    });
+    assert.equal(click.value, 'Music', 'a grouped click keeps its label as the value');
+    const nav = buildRawAction({ domKind: 'navigate', url: 'https://pixabay.com/music/', from: 'https://pixabay.com' });
+    const op = segmentTrace(coalesce([click, nav]));
+    const params = deriveObservedParams(op);
+    const cat = params.find((p) => p.kind === 'option');
+    assert.ok(cat, 'the category click became an OPTION param');
+    assert.equal(cat.value, 'Music', 'demonstrated category is the default');
+    assert.ok(cat.vocabulary.includes('Vectors') && cat.vocabulary.includes('GIFs'), 'the whole category set is the vocabulary');
+    assert.equal(cat.containerHint, 'nav.cats', 'the record-time nav container is carried as a hint');
+    // and it lowers to a CLICK_BY_LABEL on the NAV (not the single li) so "search for vectors" re-binds CATEGORY
+    const { phases, params: named } = parameterizeObserved(opToPhases(op), params);
+    const np = named.find((p) => p.kind === 'option');
+    assert.equal(np.used, true, 'category option is templated');
+    const byLabel = phases[0].actions.filter((a) => a.action !== 'SCROLL_TO').find((a) => a.action === 'CLICK_BY_LABEL');
+    assert.ok(byLabel, 'category click lowered to CLICK_BY_LABEL');
+    assert.equal(byLabel.selector, 'nav.cats', 'CLICK_BY_LABEL targets the whole nav, so any category label resolves');
+    assert.equal(byLabel.value, `{{${np.name}}}`, 'category is the placeholder');
+    // a short peer group below the floor (<3) is NOT lifted (avoids parameterizing an ordinary link click)
+    const lone = deriveObservedParams(segmentTrace(coalesce([
+      buildRawAction({ domKind: 'click', value: 'Home', url: 'u', target: { role: 'link', accessibleName: 'Home', selector: '#a', options: ['Home', 'About'] } }),
+      buildRawAction({ domKind: 'navigate', url: 'u/2', from: 'u' }),
+    ])));
+    assert.ok(!lone.some((p) => p.kind === 'option'), 'a 2-item nav is below the category floor');
   });
 
   it('describeTraceInput: structure-derived summary (phases as step kinds + params as example inputs) (ORCH-D)', () => {

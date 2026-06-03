@@ -2458,18 +2458,23 @@ Rules:
    * @param {{ask:string, context?:string, candidates:object[]}} args  candidates = projected Candidates (here-set)
    * @returns {Promise<{scores:object[], topId:(string|null), bindings:object, rationale:string}|null>}
    */
-  static async matchCapability({ ask, context = '', candidates = [], affordances = [] } = {}) {
+  static async matchCapability({ ask, context = '', candidates = [], affordances = [], examples = null } = {}) {
     const list = Array.isArray(candidates) ? candidates : [];
     if (!ask || typeof ask !== 'string' || !ask.trim() || !list.length) return null;
     if (!(await AnthropicService.hasLlm())) return null;
+    const conf = (examples && examples.confirmed) || {};
+    const rej = (examples && examples.rejected) || {};
     const lean = list.map((c) => ({
       id: c.id, intent: c.intent || '', aliases: (c.aliases || []).slice(0, 8),
       params: (Array.isArray(c.params) ? c.params : []).filter((p) => p && p.used).map((p) => ({
         name: p.name, kind: p.kind, ...(Array.isArray(p.vocabulary) ? { options: p.vocabulary.slice(0, 12) } : {}),
       })),
+      // ORCH-FB-2 (option 1) — past corrections for THIS capability, so the model generalizes from them.
+      ...(Array.isArray(conf[c.id]) && conf[c.id].length ? { confirmedAsks: conf[c.id].slice(0, 5) } : {}),
+      ...(Array.isArray(rej[c.id]) && rej[c.id].length ? { rejectedAsks: rej[c.id].slice(0, 5) } : {}),
     }));
     const aff = (Array.isArray(affordances) ? affordances : []).slice(0, 60);
-    const systemPrompt = `You match a user's ASK to grounded capabilities on the current page. Each CANDIDATE is already runnable here. For EACH candidate, judge whether its effect plausibly ACHIEVES the ask (effectEligible) and its relevance (0..1). Then for your single best candidate, BIND the ask's values to its params. For an "option" param, the value SHOULD be one of that param's given options — but if the ask names a DIFFERENT option that appears in PAGE_AFFORDANCES (the controls the page actually has), you MAY bind that instead (the page confirms it exists). e.g. a "search by category" capability demonstrated for "Vectors" can be re-bound to "Illustrations" when Illustrations is in PAGE_AFFORDANCES. Other params take a value extracted from the ask. Be CONSERVATIVE — rate relevance high only when the capability clearly does what's asked; never invent an option the page doesn't have. Return ONLY JSON:
+    const systemPrompt = `You match a user's ASK to grounded capabilities on the current page. Each CANDIDATE is already runnable here. For EACH candidate, judge whether its effect plausibly ACHIEVES the ask (effectEligible) and its relevance (0..1). Then for your single best candidate, BIND the ask's values to its params. For an "option" param, the value SHOULD be one of that param's given options — but if the ask names a DIFFERENT option that appears in PAGE_AFFORDANCES (the controls the page actually has), you MAY bind that instead (the page confirms it exists). e.g. a "search by category" capability demonstrated for "Vectors" can be re-bound to "Illustrations" when Illustrations is in PAGE_AFFORDANCES. Other params take a value extracted from the ask. A candidate may carry confirmedAsks (asks the USER previously CONFIRMED this capability handles — strong evidence it fits SIMILAR asks) and rejectedAsks (asks the user previously said this capability is WRONG for — strong evidence to rate it LOW for similar asks). Weight these corrections heavily. Be CONSERVATIVE — rate relevance high only when the capability clearly does what's asked; never invent an option the page doesn't have. Return ONLY JSON:
 {"scores":[{"id":"<id>","relevance":<0..1>,"effectEligible":<true|false>}],"topId":"<best id or null>","bindings":{"<PARAM>":"<value>"},"rationale":"<one short sentence>"}`;
     const user = `ASK: ${ask}\n${context ? `CONTEXT: ${String(context).slice(0, 400)}\n` : ''}${aff.length ? `PAGE_AFFORDANCES: ${JSON.stringify(aff)}\n` : ''}CANDIDATES:\n${JSON.stringify(lean)}`;
     try {
@@ -2490,6 +2495,40 @@ Rules:
         rationale: String(out.rationale || '').slice(0, 200),
       };
     } catch (e) { Logger.warn('AnthropicService', `matchCapability — EXCEPTION: ${e.message}`); return null; }
+  }
+
+  /**
+   * ORCH-FB — the LLM WRAPPER for free-text corrective feedback. Maps the user's correction about the LAST action
+   * into a structured corrective intent the chat applies via ORCH_FEEDBACK. Beyond the lexical floor
+   * (Core/orchFeedback.classifyFeedback): it disambiguates "wrong category, should be Vectors" → wrong_value with
+   * {CATEGORY:'Vectors'}. Returns null on no-LLM / parse failure (caller falls back to the lexical kind).
+   * @param {{text:string, context:object}} args  context = { intent, ask, bindings, params }
+   * @returns {Promise<{kind:string, correction:(object|null), confidence:number}|null>}
+   */
+  static async interpretFeedback({ text, context = {} } = {}) {
+    if (!text || typeof text !== 'string' || !text.trim()) return null;
+    if (!(await AnthropicService.hasLlm())) return null;
+    const KINDS = ['reject_match', 'reject_run', 'wrong_value', 'retract', 'undo', 'affirm', 'none'];
+    const lean = {
+      intent: context.intent || '', ask: context.ask || '',
+      bindings: (context.bindings && typeof context.bindings === 'object') ? context.bindings : {},
+      params: (Array.isArray(context.params) ? context.params : []).filter((p) => p && p.used).map((p) => ({ name: p.name, kind: p.kind, ...(Array.isArray(p.vocabulary) ? { options: p.vocabulary.slice(0, 12) } : {}) })),
+    };
+    const systemPrompt = `You interpret a user's CORRECTIVE FEEDBACK about an automated action just taken in a browser-automation chat. Classify it into ONE corrective intent; if they gave a corrected value, extract it.
+KINDS: reject_match (wrong capability chosen) · reject_run (it ran but did the wrong thing) · wrong_value (RIGHT capability, WRONG parameter value — extract the corrected value) · retract (the capability is broken — delete it) · undo (revert) · affirm (it was correct) · none (not actually feedback).
+For wrong_value, map the corrected value to one of LAST_ACTION.params by name (use its options when given). Otherwise correction is null.
+Reply ONLY with JSON: {"kind":"<one of ${KINDS.join('|')}>","correction":{"<PARAM>":"<value>"}|null,"confidence":<0..1>}`;
+    const user = `FEEDBACK: ${text}\nLAST_ACTION: ${JSON.stringify(lean)}`;
+    try {
+      const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text: user }], 256, [], { role: 'match', operation: 'interpretFeedback' });
+      if (!raw?.success) { Logger.warn('AnthropicService', `interpretFeedback — LLM call FAILED: ${raw?.error}`); return null; }
+      const json = AnthropicService.#firstJsonObject(raw.text);
+      if (!json) return null;
+      let out; try { out = JSON.parse(json); } catch { return null; }
+      if (!out || !KINDS.includes(out.kind)) return null;
+      Logger.info('AnthropicService', `interpretFeedback -> ${out.kind}${out.correction ? ` ${JSON.stringify(out.correction)}` : ''}`);
+      return { kind: out.kind, correction: (out.correction && typeof out.correction === 'object') ? out.correction : null, confidence: Number(out.confidence) || 0.6 };
+    } catch (e) { Logger.warn('AnthropicService', `interpretFeedback — EXCEPTION: ${e.message}`); return null; }
   }
 
   /**

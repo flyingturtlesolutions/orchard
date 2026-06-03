@@ -17,7 +17,9 @@
 // See docs/DESIGN_intent_orchestration.md §4–§6.
 //
 // @module Core/orchMatch
-// @version 2.74.681
+// @version 2.74.695
+
+import { feedbackAdjustment } from './feedbackLearn.js';   // ORCH-FB-2 — relevance shaping from confirm/reject history
 
 // Irreversibility heuristic (skeleton — the real classifier is PB-4's safety classing). Conservative by
 // design: over-flagging just forces a confirm (safe). Reversibility is a HARD VETO on auto-fire.
@@ -106,21 +108,25 @@ export const DEFAULT_THRESHOLDS = Object.freeze({ auto: 0.6, propose: 0.2, margi
 // to AUTO. Per-capability for v1 (alias accretion already captures ask-pattern granularity — a confirmed ask
 // becomes an alias → exact hit). The reversibility veto and the propose floor still bound it. See §4.
 
-/** Tally a capability's CONFIRMATIONS from an OUTCOMES event stream. PURE. Counts only events explicitly tagged
- *  `detail.confirmed === true` for this capability (so the DERIVE-time 'accept' event doesn't inflate health).
- *  @returns {{successes:number, lastOkAt:number}} */
+/** Tally a capability's CONFIRMATIONS from an OUTCOMES event stream. PURE. Counts events tagged
+ *  `detail.confirmed === true` for this capability (so the DERIVE-time 'accept' event doesn't inflate health), and
+ *  nets out `detail.rejected === true` events (ORCH-FB — a user-flagged wrong match/run cancels a confirmation).
+ *  @returns {{successes:number, rejections:number, lastOkAt:number}} */
 export function tallyCapabilityConfirmations(events, capabilityId) {
-  let successes = 0, lastOkAt = 0;
+  let successes = 0, rejections = 0, lastOkAt = 0;
   const id = String(capabilityId == null ? '' : capabilityId);
-  if (!id) return { successes, lastOkAt };
+  if (!id) return { successes, rejections, lastOkAt };
   for (const e of (Array.isArray(events) ? events : [])) {
-    if (!e || !e.detail || e.detail.confirmed !== true) continue;
-    if (String(e.detail.capabilityId || '') !== id) continue;
-    successes++;
-    const ts = Number(e.ts || e.timestamp || 0);
-    if (ts > lastOkAt) lastOkAt = ts;
+    if (!e || !e.detail || String(e.detail.capabilityId || '') !== id) continue;
+    if (e.detail.confirmed === true) {
+      successes++;
+      const ts = Number(e.ts || e.timestamp || 0);
+      if (ts > lastOkAt) lastOkAt = ts;
+    } else if (e.detail.rejected === true) {
+      rejections++;
+    }
   }
-  return { successes, lastOkAt };
+  return { successes, rejections, lastOkAt };
 }
 
 /** Auto-fire bonus from a capability's health: more confirmations → lower the AUTO bar. PURE. Precision-first:
@@ -129,7 +135,8 @@ export function tallyCapabilityConfirmations(events, capabilityId) {
  *  Ramps to `max` by ~4 confirmations. Pass `now` (ms) to decay the bonus by recency (half-life ~30d); `now=0`
  *  (the default, e.g. inside the pure gate) skips recency and uses the count alone. */
 export function promotionBonus(health, { max = 0.2, now = 0, halfLifeMs = 2592000000 } = {}) {
-  const successes = Math.max(0, Number(health && health.successes) || 0);
+  // Net rejections against confirmations — a flagged-wrong capability loses its auto-fire boost (ORCH-FB).
+  const successes = Math.max(0, (Number(health && health.successes) || 0) - (Number(health && health.rejections) || 0));
   if (!successes) return 0;
   let bonus = Math.min(max, 0.06 * Math.min(successes, 5));
   if (now && health && health.lastOkAt) bonus *= Math.pow(0.5, Math.max(0, now - health.lastOkAt) / halfLifeMs);
@@ -143,10 +150,16 @@ export function promotionBonus(health, { max = 0.2, now = 0, halfLifeMs = 259200
  * @returns {{decision:'auto'|'propose'|'miss', candidate:(object|null), reason:string, score?:number,
  *            isExact?:boolean, margin?:number, runnerUp?:(object|null), alternatives:object[]}}
  */
-export function rankAndDecide(ask, scoped, { score = lexicalScore, thresholds = DEFAULT_THRESHOLDS, now = 0 } = {}) {
+export function rankAndDecide(ask, scoped, { score = lexicalScore, thresholds = DEFAULT_THRESHOLDS, now = 0, feedback = null } = {}) {
   const here = Array.isArray(scoped) ? scoped : [];
   const t = { ...DEFAULT_THRESHOLDS, ...(thresholds || {}) };
-  const scored = here.map((c) => ({ candidate: c, ...score(ask, c) })).filter((s) => s.effectEligible);
+  const scored = here.map((c) => {
+    const s = score(ask, c);
+    // ORCH-FB-2 — shape relevance by feedback history: a NEAR-confirmed ask is boosted, a NEAR-rejected one
+    // penalized (the penalty heavier). Deterministic, no LLM. 0 when there's no relevant history.
+    if (feedback) { const adj = feedbackAdjustment(ask, c && c.id, feedback); if (adj) s.relevance = Math.max(0, Math.min(1, (Number(s.relevance) || 0) + adj)); }
+    return { candidate: c, ...s };
+  }).filter((s) => s.effectEligible);
   scored.sort((a, b) => (b.relevance - a.relevance) || ((b.isExact ? 1 : 0) - (a.isExact ? 1 : 0)));
 
   if (!scored.length) {

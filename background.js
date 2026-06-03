@@ -1323,6 +1323,21 @@ async function _writeSgCapability(groundId, cap) {
   const next = [cap, ...list.filter((c) => c.id !== cap.id)].slice(0, SG_CAP_CAP);
   await chrome.storage.local.set({ [k]: next });
 }
+// Remove matcher-facing capabilities matching a predicate (ORCH-ADMIN bulk delete + REPLAY self-heal of an
+// orphan whose underlying Strategy is gone). Returns how many were removed. The `sgCapabilities:<ground>` store
+// is what the matcher reads, SEPARATE from the Tier-1 `strategies:*` records — so it must be pruned in lockstep.
+async function _removeSgCapabilities(groundId, predicate) {
+  if (!groundId || typeof predicate !== 'function') return 0;
+  const k = _sgCapKey(groundId);
+  const list = await _readSgCapabilities(groundId);
+  const keep = list.filter((c) => !predicate(c));
+  const removed = list.length - keep.length;
+  if (removed > 0) {
+    if (keep.length) await chrome.storage.local.set({ [k]: keep });
+    else await chrome.storage.local.remove(k);
+  }
+  return removed;
+}
 async function _writeSgTrace(trace) {
   if (!trace?.trialRef) return;
   try { await chrome.storage.local.set({ [_sgTraceKey(trace.trialRef)]: trace }); }
@@ -1635,6 +1650,7 @@ const _sgMessageHandlers = createSgMessageHandlers({
   writeSgDraft         : _writeSgDraft,
   clearSgDraft         : _clearSgDraft,
   writeSgCapability    : _writeSgCapability,
+  removeSgCapabilities : _removeSgCapabilities,   // ORCH-ADMIN / self-heal — prune matcher-facing capabilities
   writeSgTrace         : _writeSgTrace,
   enrichSgLandmarks    : _enrichSgLandmarks,
 });
@@ -1683,7 +1699,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           if (tabId == null) { const [t] = await chrome.tabs.query({ active: true, currentWindow: true }); tabId = t?.id ?? null; }
           if (tabId == null) { sendResponse({ success: false, error: 'no active tab' }); return; }
           let url = ''; try { const t = await chrome.tabs.get(tabId); url = t?.url || ''; } catch { /* */ }
-          _obsSession = { tabId, startedAt: Date.now(), seq: 0, trace: [], lastUrl: url };
+          _obsSession = { tabId, startedAt: Date.now(), seq: 0, trace: [], lastUrl: url, seenUids: new Set() };
           _obsArm(tabId);
           Logger.info('background', `RECORD_START_SESSION — recording tab ${tabId} @ ${String(url).slice(0, 80)}`);
           sendResponse({ success: true, recording: true, tabId, url });
@@ -1695,6 +1711,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try {
         if (_obsSession && sender?.tab?.id === _obsSession.tabId) {
           const p = payload || {};
+          // Dedup: an action delivered LIVE and again via the pre-nav sessionStorage flush shares a `uid` — count once.
+          if (p.uid) { if (_obsSession.seenUids.has(p.uid)) { sendResponse({ success: true, dup: true }); return false; } _obsSession.seenUids.add(p.uid); }
+          // B-DIAG — surface why a category click did/didn't become a re-bindable CATEGORY group (see contentScript).
+          if (p.domKind === 'click' && p.target && p.target.navDiag) Logger.info('background', `OBS click "${String(p.target.accessibleName || p.target.selector || '').slice(0, 40)}" navDiag: ${JSON.stringify(p.target.navDiag)} ${p.uid ? '(flushed)' : ''}`);
           _obsSession.trace.push(buildRawAction({ seq: _obsSession.seq++, ts: p.ts || Date.now(), url: p.url || _obsSession.lastUrl, frameId: sender.frameId | 0, domKind: p.domKind, target: p.target, value: p.sensitive ? null : p.value }));
         }
       } catch (e) { Logger.warn('background', `INTERACTION_RECORD drop: ${e.message}`); }

@@ -15,7 +15,7 @@
  *
  * @module ContentScripts/contentScript
  * @author Agent HUB
- * @version 2.17.5
+ * @version 2.17.8
  */
 
 'use strict';
@@ -5436,33 +5436,81 @@ function _obsResolveClickTarget(el) {
 // picked), not just the one clicked. This closed set makes re-choosing safe: the binder classifies an ask
 // against real labels (no hallucinated value) and replay's CLICK_BY_LABEL is guaranteed to find one. Native
 // <select> → its <option>s; a custom listbox/menu → the option-like descendants of the tightest container.
-function _obsOptionVocabulary(domKind, el) {
+function _obsOptionVocabulary(domKind, el, target) {
   try {
     if ((domKind === 'change' || domKind === 'input') && el.tagName === 'SELECT') {
       const opts = Array.from(el.options || []).map((o) => (o.label || o.textContent || o.value || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
       return opts.length ? Array.from(new Set(opts)).slice(0, 60).map((s) => s.slice(0, 80)) : null;
     }
     if (domKind === 'click') {
+      const _lbl = (n) => { let t = ''; try { t = _computeAccessibleName(n) || n.textContent || ''; } catch { t = n.textContent || ''; } return String(t).replace(/\s+/g, ' ').trim(); };
       const OPT = '[role="option"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="radio"]';
       let role = ''; try { role = String(_computeA11yRole(el) || '').toLowerCase(); } catch { /* */ }
       const isOpt = /^(option|menuitem|menuitemradio|menuitemcheckbox|radio)$/.test(role) || (el.matches && el.matches(OPT));
-      if (!isOpt) return null;
-      // Climb to the SMALLEST ancestor holding ≥2 option-like descendants (the dropdown container).
-      let container = el.parentElement, found = null;
-      for (let i = 0; i < 6 && container; i++) {
-        const sibs = container.querySelectorAll(OPT);
-        if (sibs.length >= 2) { found = sibs; break; }
-        container = container.parentElement;
+      // B-DIAG — attach a small diagnostic so the background log shows WHY a category click did/didn't become a
+      // re-bindable CATEGORY group (role, classification, the container climb). Lets us fix the heuristic precisely.
+      const diag = { role, tag: el.tagName, href: !!(el.getAttribute && el.getAttribute('href')), isOpt, isNav: false, levels: [], captured: 0 };
+      if (target) target.navDiag = diag;
+      if (isOpt) {
+        // Climb to the SMALLEST ancestor holding ≥2 option-like descendants (the dropdown container).
+        let container = el.parentElement, found = null;
+        for (let i = 0; i < 6 && container; i++) {
+          const sibs = container.querySelectorAll(OPT);
+          if (sibs.length >= 2) { found = sibs; break; }
+          container = container.parentElement;
+        }
+        if (!found) { diag.reason = 'option: no ≥2 group'; return null; }
+        const labels = Array.from(found).map(_lbl).filter(Boolean);
+        const out = labels.length ? Array.from(new Set(labels)).slice(0, 60).map((s) => s.slice(0, 80)) : null;
+        diag.via = 'option'; diag.captured = out ? out.length : 0;
+        return out;
       }
-      if (!found) return null;
-      const labels = Array.from(found).map((n) => {
-        let t = ''; try { t = _computeAccessibleName(n) || n.textContent || ''; } catch { t = n.textContent || ''; }
-        return String(t).replace(/\s+/g, ' ').trim();
-      }).filter(Boolean);
-      return labels.length ? Array.from(new Set(labels)).slice(0, 60).map((s) => s.slice(0, 80)) : null;
+      // B — a category/tab NAV item (a link or tab that switches a view). Capture its PEER GROUP — the small set
+      // of sibling links/tabs in the tightest enclosing nav — so the demo's category click becomes a re-bindable
+      // CATEGORY option (one "search by category" instead of one capability per category). Conservative: only
+      // links/tabs, peers must be short labels (≤30 chars), and the group must be 3–18 (a category set, not a
+      // result list). The clicked item's own label is in the set (it matches the selector), so it stays bindable.
+      const isNavItem = role === 'tab' || role === 'link' || (el.tagName === 'A' && el.getAttribute && el.getAttribute('href'));
+      diag.isNav = isNavItem;
+      if (isNavItem) {
+        const NAV = 'a[href],[role="tab"],[role="link"],button,[role="button"]';
+        let c = el.parentElement;
+        for (let i = 0; i < 6 && c; i++) {
+          const uniq = Array.from(new Set(Array.from(c.querySelectorAll(NAV)).map(_lbl).filter((t) => t && t.length <= 30)));
+          diag.levels.push({ tag: c.tagName + (c.id ? `#${c.id}` : ''), n: uniq.length });
+          if (uniq.length >= 3 && uniq.length <= 18) {
+            try { if (target && c) target.optionContainer = computeUniqueSelector(c); } catch { /* */ }   // B — the nav container, so CLICK_BY_LABEL re-binds across the whole set
+            diag.via = 'nav'; diag.captured = uniq.length; diag.sample = uniq.slice(0, 10);
+            return uniq.slice(0, 18).map((s) => s.slice(0, 80));
+          }
+          c = c.parentElement;
+        }
+        diag.reason = 'nav: no 3–18 group in 6 levels';
+      } else {
+        diag.reason = `not a nav item (role=${role || '∅'})`;
+      }
+      return null;
     }
   } catch { /* */ }
   return null;
+}
+// OBS pre-nav buffer — a click/Enter that NAVIGATES loses its in-flight INTERACTION_RECORD when the page unloads
+// (the worker stays alive via the keepalive, but the unloading page still drops the message — this is why the
+// category click vanished from the trace). Persist navigating actions to sessionStorage SYNCHRONOUSLY (it
+// survives a same-origin navigation); the next page flushes them on re-arm. The background dedups by `uid`, so a
+// live-delivered action and its buffered copy never double-count.
+let _obsClientSeq = 0;
+const _OBS_BUF_KEY = '__ahub_obs_navbuf';
+function _obsBufferAction(payload) {
+  try { const buf = JSON.parse(sessionStorage.getItem(_OBS_BUF_KEY) || '[]'); buf.push(payload); sessionStorage.setItem(_OBS_BUF_KEY, JSON.stringify(buf.slice(-50))); } catch { /* */ }
+}
+function _obsFlushBuffer() {
+  try {
+    const raw = sessionStorage.getItem(_OBS_BUF_KEY);
+    if (!raw) return;
+    sessionStorage.removeItem(_OBS_BUF_KEY);
+    for (const p of (JSON.parse(raw) || [])) { try { chrome.runtime.sendMessage({ type: 'INTERACTION_RECORD', payload: p }); } catch { /* */ } }
+  } catch { /* */ }
 }
 function _obsSend(domKind, el, rawValue) {
   if (!_obsRec.active || !el) return;
@@ -5473,8 +5521,10 @@ function _obsSend(domKind, el, rawValue) {
   if (domKind === 'input' || domKind === 'change') value = sensitive ? null : (rawValue != null ? String(rawValue).slice(0, 300) : null);
   else if (domKind === 'click') value = sensitive ? null : (target.accessibleName || null);   // used only if it classifies as a select
   else if (domKind === 'keypress') value = rawValue || 'Enter';                                 // the key (Enter)
-  if (!sensitive) { const vocab = _obsOptionVocabulary(domKind, el); if (vocab && vocab.length > 1) target.options = vocab; }   // ORCH-V — dropdown vocabulary
-  try { chrome.runtime.sendMessage({ type: 'INTERACTION_RECORD', payload: { domKind, target, value, sensitive, ts: Date.now(), url: location.href } }); } catch { /* */ }
+  if (!sensitive) { const vocab = _obsOptionVocabulary(domKind, el, target); if (vocab && vocab.length > 1) target.options = vocab; }   // ORCH-V — dropdown vocabulary (+B nav container)
+  const payload = { domKind, target, value, sensitive, ts: Date.now(), url: location.href, uid: `${_obsClientSeq++}-${Date.now()}` };
+  if (domKind === 'click' || domKind === 'keypress') _obsBufferAction(payload);   // navigating-prone → survive a page unload
+  try { chrome.runtime.sendMessage({ type: 'INTERACTION_RECORD', payload }); } catch { /* */ }
 }
 const _obsOnClick  = (e) => { try { const el = _obsResolveClickTarget(e.target); if (el) _obsSend('click', el, null); } catch { /* */ } };
 const _obsOnInput  = (e) => { try { const el = e.target; const tag = el && el.tagName; if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') _obsSend(tag === 'SELECT' ? 'change' : 'input', el, el.value); } catch { /* */ } };
@@ -5503,6 +5553,7 @@ const _obsOnScroll = () => {
 function _obsStart() {
   if (_obsRec.active) return;
   _obsRec = { active: true };
+  _obsFlushBuffer();   // deliver any navigating actions buffered on the PREVIOUS page before it navigated here
   document.addEventListener('click', _obsOnClick, true);
   document.addEventListener('input', _obsOnInput, true);
   document.addEventListener('change', _obsOnInput, true);
@@ -5512,6 +5563,7 @@ function _obsStart() {
 }
 function _obsStop() {
   _obsRec.active = false;
+  try { sessionStorage.removeItem(_OBS_BUF_KEY); } catch { /* */ }   // don't leak a buffer into a later session
   if (_obsScrollT) { clearTimeout(_obsScrollT); _obsScrollT = null; }
   document.removeEventListener('click', _obsOnClick, true);
   document.removeEventListener('input', _obsOnInput, true);

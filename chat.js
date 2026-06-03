@@ -18,6 +18,9 @@ import { isSafeStrategyResultHtml, looksLikeStrategyResultHtml } from './Service
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
+import { decomposeAsk } from './Core/orchChain.js';        // ORCH-X — split a compound ask into chainable clauses
+import { classifyFeedback } from './Core/orchFeedback.js'; // ORCH-FB — recognize corrective feedback (LLM refines)
+import { parseAdminCommand } from './Core/orchAdmin.js';    // ORCH-ADMIN — management commands (clear/delete)
 
 // ─── Conversation state ──────────────────────────────────────────────────────
 // `_currentConversationId` is null before the first user message of a new
@@ -713,17 +716,24 @@ async function _orchActiveTab() {
 
 // REPLAY a grounded capability and report the outcome in `msg`. On success, records the ask as a confirmation
 // (ORCH-D/G flywheel: alias accretion + health → future auto-fire). NO LLM in this path.
-async function _orchRun(msg, { groundId, capabilityId, intent, paramValues, tabId, ask }) {
+async function _orchRun(msg, { groundId, capabilityId, intent, paramValues, tabId, ask, params }) {
   _setMessageBody(msg, `Running “${intent || 'it'}”…`);
   const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId, capabilityId, paramValues });
   if (!res || res.success === false) {
     _setMessageBody(msg, `That didn’t run${res && res.error ? ` — ${res.error}` : ''}.`);
     _orchOfferRecord(msg, { groundId, tabId, ask, label: '● Show me the right way' });
   } else if (res.ran === false) {
-    _setMessageBody(msg, res.reason || 'Couldn’t run on this page — make sure you’re on the right page.');
+    if (res.pruned) {   // the matched capability turned out orphaned → treat as a NEW request, not "it was deleted"
+      _setMessageBody(msg, `I don’t have a way to do that here yet — want to show me?`);
+      _orchOfferRecord(msg, { groundId, tabId, ask, label: '● Show me how' });
+    } else {
+      _setMessageBody(msg, res.reason || 'Couldn’t run on this page — make sure you’re on the right page.');
+    }
   } else if (res.ok) {
     _setMessageBody(msg, `Done — ran “${intent || 'it'}”.`);
     _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId, phrase: ask });   // confirm → flywheel
+    _lastOrch = { groundId, capabilityId, tabId, ask, intent, bindings: paramValues || {}, params: params || null };
+    _orchFeedbackBar(msg);   // ORCH-FB — 👎 / Remove: correct a wrong run in chat, no Studio
   } else {
     _setMessageBody(msg, `That didn’t work as expected${res.reason ? ` — ${res.reason}` : ''}.`);
     _orchOfferRecord(msg, { groundId, tabId, ask, label: '● Show me the right way' });
@@ -735,6 +745,117 @@ function _orchActionBar(msg) {
   bar.className = 'orch-actions';
   msg.querySelector('.message-content').appendChild(bar);
   return bar;
+}
+
+// ── ORCH-FB — corrective feedback ───────────────────────────────────────────────────────────────────────────
+// The LAST grounded action, so free-text feedback ("not that" / "that's wrong" / "delete it" / "wrong category,
+// should be Vectors") and the 👎 controls know WHAT to correct. Set on every confirm/run; cleared after retract.
+let _lastOrch = null;
+const _mkBtn = (label, fn) => { const b = document.createElement('button'); b.className = 'btn-secondary tiny'; b.type = 'button'; b.textContent = label; b.addEventListener('click', fn); return b; };
+
+// Apply a correction to the last action (button → fixed `kind`; typed → `text` for the LLM wrapper to interpret),
+// render the result, and offer the right next step. de_alias/demote/retract are persisted in the background.
+async function _orchFeedbackFlow(msg, { kind = '', text = '' } = {}) {
+  const ctx = _lastOrch;
+  if (!ctx) { _setMessageBody(msg, 'Nothing recent to correct — ask me something first.'); return; }
+  _setMessageBody(msg, 'Noting that…');
+  const res = await _orchReq('ORCH_FEEDBACK', { groundId: ctx.groundId, capabilityId: ctx.capabilityId, ask: ctx.ask, kind, text, context: { intent: ctx.intent, ask: ctx.ask, bindings: ctx.bindings, params: ctx.params } });
+  if (!res || res.success === false) { _setMessageBody(msg, `Couldn’t apply that${res && res.error ? ` — ${res.error}` : ''}.`); return; }
+  _setMessageBody(msg, res.say || 'Done.');
+  const fu = res.followup;
+  if (fu === 'rerun' && res.correction) {                       // wrong_value → re-run with the corrected binding
+    await _orchRun(appendMessage({ role: 'assistant', body: '' }), { groundId: ctx.groundId, tabId: ctx.tabId, capabilityId: ctx.capabilityId, intent: ctx.intent, ask: ctx.ask, paramValues: { ...(ctx.bindings || {}), ...res.correction } });
+  } else if (fu === 'fix_or_retract') {
+    const bar = _orchActionBar(msg);
+    bar.appendChild(_mkBtn('● Show me the right way', () => { bar.remove(); _orchRecordFlow(msg, { groundId: ctx.groundId, tabId: ctx.tabId, ask: ctx.ask }); }));
+    bar.appendChild(_mkBtn('🗑 Remove it', () => { bar.remove(); _orchFeedbackFlow(appendMessage({ role: 'assistant', body: '' }), { kind: 'retract' }); }));
+  } else if (fu === 'record' || fu === 'alternatives') {
+    _orchOfferRecord(msg, { groundId: ctx.groundId, tabId: ctx.tabId, ask: ctx.ask, label: '● Show me the right way' });
+  }
+  if (kind === 'retract' || res.applied?.includes('retract')) _lastOrch = null;
+}
+
+// A thumbs-down / remove bar shown after a run completes, so a wrong action is correctable IN CHAT (no Studio).
+function _orchFeedbackBar(msg) {
+  const bar = _orchActionBar(msg);
+  bar.appendChild(_mkBtn('👎 Wrong', () => { _orchFeedbackFlow(appendMessage({ role: 'assistant', body: '' }), { kind: 'reject_run' }); }));
+  bar.appendChild(_mkBtn('🗑 Remove', () => { _orchFeedbackFlow(appendMessage({ role: 'assistant', body: '' }), { kind: 'retract' }); }));
+}
+
+// ── ORCH-ADMIN — management commands from chat ──────────────────────────────────────────────────────────────
+// "clear chat" resets the current conversation view (history is kept, non-destructive). A bulk DELETE always
+// COUNTS first and shows an explicit confirm — these are hard, cascading deletes (the same ones Studio runs).
+function _orchClearChat() {
+  try { const m = $('messages'); if (m) m.innerHTML = ''; } catch { /* */ }
+  _clearCurrentConversation();   // start fresh on the next message; the old conversation stays in history
+  _lastOrch = null;
+  appendMessage({ role: 'assistant', body: 'Chat cleared. (Past conversations are still in history.)' });
+}
+
+async function _orchAdminFlow(admin) {
+  const tab = await _orchActiveTab();
+  const msg = appendMessage({ role: 'assistant', body: 'Checking the library…' });
+  const c = await _orchReq('ORCH_ADMIN', { tabId: tab && tab.id, op: 'count', kinds: admin.kinds, scope: admin.scope });
+  if (!c || c.success === false) { _setMessageBody(msg, `Couldn’t read the library${c && c.error ? ` — ${c.error}` : ''}.`); return; }
+  const present = Object.entries(c.counts || {}).filter(([, n]) => n > 0);
+  if (!present.length) {
+    _setMessageBody(msg, admin.scope === 'all'
+      ? `Nothing to delete — no ${admin.kinds.join(' / ')} in any ground.`
+      : `Nothing to delete here — no ${admin.kinds.join(' / ')} on this site${c.grounds ? '' : ' (this page isn’t in the library)'}.`);
+    return;
+  }
+  const parts = present.map(([k, n]) => `${n} ${k}`).join(', ');
+  const where = admin.scope === 'all' ? `across ALL ${c.grounds} ground(s)` : 'on this site';
+  _setMessageBody(msg, `⚠️ This will permanently delete ${parts} ${where}. This can’t be undone.`);
+  const bar = _orchActionBar(msg);
+  bar.appendChild(_mkBtn(`Delete ${c.total}`, async () => {
+    bar.remove(); _setMessageBody(msg, 'Deleting…');
+    const d = await _orchReq('ORCH_ADMIN', { tabId: tab && tab.id, op: 'delete', kinds: admin.kinds, scope: admin.scope });
+    if (d && d.success) { const dp = Object.entries(d.counts || {}).filter(([, n]) => n > 0).map(([k, n]) => `${n} ${k}`).join(', '); _setMessageBody(msg, `Deleted ${dp || 'nothing'}.`); _lastOrch = null; }
+    else _setMessageBody(msg, `Delete failed${d && d.error ? ` — ${d.error}` : ''}.`);
+  }));
+  bar.appendChild(_mkBtn('Cancel', () => { bar.remove(); _setMessageBody(msg, 'Cancelled — nothing was deleted.'); }));
+}
+
+// ORCH-X — confirm a COMPOUND ask as an ordered chain, then run it. One confirmation covers the whole chain.
+function _orchConfirmChain(msg, { tabId, clauses, firstMatch }) {
+  const list = clauses.map((c, i) => `${i + 1}. ${c.text}`).join('\n');
+  _setMessageBody(msg, `That’s a few steps — I’ll do them in order:\n${list}`);
+  const bar = _orchActionBar(msg);
+  const go = document.createElement('button'); go.className = 'btn-secondary tiny'; go.type = 'button'; go.textContent = `Run all ${clauses.length}`;
+  const cancel = document.createElement('button'); cancel.className = 'btn-secondary tiny'; cancel.type = 'button'; cancel.textContent = 'Cancel';
+  bar.appendChild(go); bar.appendChild(cancel);
+  go.addEventListener('click', () => { bar.remove(); _orchRunChain(msg, { tabId, clauses, firstMatch }); });
+  cancel.addEventListener('click', () => { bar.remove(); _setMessageBody(msg, 'Okay — cancelled.'); });
+}
+
+// Run a decomposed chain JIT: match EACH clause against the page state AT THAT POINT (so a clause on the
+// post-navigation page resolves correctly), REPLAY it, settle, next. A mid-chain MISS/failure pauses and offers
+// to record just that clause. The first clause reuses the match already computed to probe the Ground (no re-LLM).
+async function _orchRunChain(msg, { tabId, clauses, firstMatch }) {
+  const total = clauses.length;
+  for (let i = 0; i < total; i++) {
+    const clause = clauses[i];
+    _setMessageBody(msg, `Step ${i + 1} of ${total}: “${clause.text}”…`);
+    const m = (i === 0 && firstMatch) ? firstMatch : await _orchReq('ORCH_MATCH', { tabId, ask: clause.text });
+    if (!m || !m.capabilityId || m.decision === 'miss') {
+      _setMessageBody(msg, i > 0
+        ? `Ran ${i} of ${total}. I don’t know how to “${clause.text}” on this page yet.`
+        : `I don’t know how to “${clause.text}” on this page yet.`);
+      _orchOfferRecord(msg, { groundId: m && m.groundId, tabId, ask: clause.text, label: '● Show me this step' });
+      return;
+    }
+    const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId: m.groundId, capabilityId: m.capabilityId, paramValues: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {} });
+    if (!res || res.success === false || res.ran === false || res.ok === false) {
+      const why = (res && (res.error || res.reason)) ? ` — ${res.error || res.reason}` : '';
+      _setMessageBody(msg, `Step ${i + 1} (“${clause.text}”) didn’t run${why}.`);
+      _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me the right way' });
+      return;
+    }
+    _orchReq('ORCH_RECORD_ALIAS', { groundId: m.groundId, capabilityId: m.capabilityId, phrase: clause.text });   // flywheel per clause
+    await new Promise((r) => setTimeout(r, 800));   // settle between steps (navigation / render)
+  }
+  _setMessageBody(msg, `Done — ran all ${total} steps.`);
 }
 
 // A "show me" record button (offered on a grounded MISS or after a failed run). No groundId → no-op.
@@ -751,9 +872,42 @@ const _ORCH_FILLER = /^(y|n|yes|no|ok|okay|sure|yep|yeah|nope|nah|thanks|thank y
 
 // Returns true if the grounded library handled the turn (HIT); false to fall through to the legacy matcher.
 async function _tryGroundedTurn(text) {
+  // ORCH-FB — a corrective reply about the LAST action ("not that" / "nope" / "that's wrong" / "delete it" /
+  // "wrong category, should be Vectors") wins OVER the filler guard, so a bare "nope"/"nah" after a run is a
+  // rejection, not swallowed as chit-chat. Only when there's a last action to correct; the background's LLM
+  // wrapper (interpretFeedback) refines the kind + extracts any wrong_value (lexical kind is the fallback).
+  const _fb = classifyFeedback(text);
+  if (_lastOrch && _fb.isFeedback) {
+    await _orchFeedbackFlow(appendMessage({ role: 'assistant', body: '' }), { text, kind: _fb.kind });
+    return true;
+  }
   if (_ORCH_FILLER.test(String(text).trim())) return false;   // "yes"/"ok"/… → conversation, not a page task
+
+  // ORCH-ADMIN — management commands ("clear chat", "delete all fragments on this ground") run BEFORE matching.
+  // A bulk delete counts + confirms first. "delete that" (singular) is NOT admin → it falls to the feedback path.
+  const admin = parseAdminCommand(text);
+  if (admin.isAdmin) {
+    if (admin.command === 'clear_chat') _orchClearChat();
+    else await _orchAdminFlow(admin);
+    return true;
+  }
+
   const tab = await _orchActiveTab();
   if (!tab || typeof tab.id !== 'number') return false;
+
+  // ORCH-X — a COMPOUND ask ("search for x AND filter by y") is DECOMPOSED and CHAINED over existing
+  // capabilities, instead of being matched as one (unfindable) atomic intent. We probe the Ground with the
+  // first clause (reused as step 1's match); no Ground → fall through to the legacy matcher.
+  const clauses = decomposeAsk(text);
+  if (clauses.length > 1) {
+    const probe = appendMessage({ role: 'thinking', body: 'Checking this page…' });
+    const m0 = await _orchReq('ORCH_MATCH', { tabId: tab.id, ask: clauses[0].text });
+    if (!m0 || !m0.groundId) { probe.remove(); return false; }
+    probe.classList.remove('thinking'); probe.classList.add('assistant');
+    _orchConfirmChain(probe, { tabId: tab.id, clauses, firstMatch: m0 });
+    return true;
+  }
+
   const thinking = appendMessage({ role: 'thinking', body: 'Checking this page…' });
   const m = await _orchReq('ORCH_MATCH', { tabId: tab.id, ask: text });
   if (!m || m.success === false) { thinking.remove(); return false; }
@@ -762,7 +916,7 @@ async function _tryGroundedTurn(text) {
   if (m.decision === 'miss' && !m.groundId) { thinking.remove(); return false; }
 
   const turn = planAssistantTurn(m);
-  const ctx = { groundId: m.groundId, tabId: tab.id, ask: text, intent: m.candidate && m.candidate.intent, paramValues: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {} };
+  const ctx = { groundId: m.groundId, tabId: tab.id, ask: text, intent: m.candidate && m.candidate.intent, paramValues: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {}, params: m.candidate && m.candidate.params };
   thinking.classList.remove('thinking');
   thinking.classList.add('assistant');
 
@@ -780,9 +934,11 @@ async function _tryGroundedTurn(text) {
     const yes = document.createElement('button'); yes.className = 'btn-secondary tiny'; yes.type = 'button'; yes.textContent = turn.irreversible ? 'Yes, go ahead' : 'Run it';
     const no  = document.createElement('button'); no.className  = 'btn-secondary tiny'; no.type  = 'button'; no.textContent = 'Not that';
     bar.appendChild(yes); bar.appendChild(no);
+    _lastOrch = { groundId: m.groundId, capabilityId: m.capabilityId, tabId: tab.id, ask: text, intent: (m.candidate && m.candidate.intent), bindings: ctx.paramValues, params: m.candidate && m.candidate.params };
     yes.addEventListener('click', () => { bar.remove(); _orchRun(thinking, { ...ctx, capabilityId: m.capabilityId }); });
-    // "Not that" → the match was wrong; offer to teach the right thing instead.
-    no.addEventListener('click', () => { bar.remove(); _setMessageBody(thinking, 'Okay — not that. Want to show me the right way?'); _orchOfferRecord(thinking, { groundId: m.groundId, tabId: tab.id, ask: text }); });
+    // "Not that" → ORCH-FB reject_match: de-alias the wrong ask + demote the capability (it stops being suggested
+    // for this), then offer to teach the right thing. No more orphaned wrong matches needing a Studio delete.
+    no.addEventListener('click', () => { bar.remove(); _orchFeedbackFlow(thinking, { kind: 'reject_match' }); });
     return true;
   }
   if (turn.action === 'disambiguate') {
@@ -811,10 +967,22 @@ async function _orchRecordFlow(msg, { groundId, tabId, ask }) {
   const start = await _orchReq('RECORD_START_SESSION', { tabId });
   if (!start || start.success === false) { _setMessageBody(msg, 'Couldn’t start recording on this page.'); return; }
   _setMessageBody(msg, 'Recording — do the task on the page, then click Stop & save.');
+  // KEEP THE SERVICE WORKER ALIVE for the duration of the demo — the SAME mechanism the proven sg-trial
+  // recorder uses. Without it the MV3 background idles between actions; a click that NAVIGATES then loses its
+  // in-flight INTERACTION_RECORD when Chrome has to wake the SW (the unloading page drops it). That is exactly
+  // why the chat record "invariably skipped" the navigating category step while the polled recorder never did.
+  // Cap the keepalive so an ABANDONED demo (panel closed / navigated away without Stop) can't pin the worker
+  // awake forever — auto-stops after ~10 min of pings.
+  let _kaTicks = 0;
+  const _keepAlive = setInterval(() => {
+    if (++_kaTicks > 400) { clearInterval(_keepAlive); return; }
+    try { chrome.runtime.sendMessage({ type: 'GET_RECORDING' }, () => void chrome.runtime.lastError); } catch { /* */ }
+  }, 1500);
   const bar = _orchActionBar(msg);
   const stop = document.createElement('button'); stop.className = 'btn-secondary tiny'; stop.type = 'button'; stop.textContent = '■ Stop & save';
   bar.appendChild(stop);
   stop.addEventListener('click', async () => {
+    clearInterval(_keepAlive);
     stop.disabled = true; bar.remove();
     _setMessageBody(msg, 'Saving what you showed me…');
     const stopped = await _orchReq('RECORD_STOP_SESSION', { tabId });

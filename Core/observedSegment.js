@@ -14,7 +14,7 @@
 //     gives nicer labels later; this keeps it runnable without an LLM.
 //
 // @module Core/observedSegment
-// @version 2.74.682
+// @version 2.74.685
 
 const _DISCLOSURE_HINT = /filter|menu|sort|posted|date|pay|salary|wage|type|level|experience|distance|remote|radius|category|options?|dropdown|expand|more/i;
 
@@ -89,7 +89,26 @@ export function segmentTrace(trace) {
     cur.push(a);   // includes 'scroll' — kept so a PURE-scroll demo has a step; opToPhases drops INCIDENTAL scrolls
   }
   flush('');   // trailing fragment (a final action with no navigation — e.g. a filter that applied in place)
-  return { tier: 'observed', nodes };
+  return { tier: 'observed', nodes: _dropRedundantRetype(nodes) };
+}
+
+// A search demo typically ends by submitting (Enter) and landing on a results page that RE-SHOWS the query in
+// its own search box — which the recorder captures as a SECOND TYPE of the SAME value. The Enter-boundary split
+// puts that re-type in its own fragment; replaying it just re-types the query into the results-page box (the
+// "type runs twice" the user saw). Drop a fragment that is ONLY type step(s) re-typing a value an EARLIER
+// fragment already typed — it reproduces nothing. A type with a NEW value (a genuine next-page field) is kept.
+function _dropRedundantRetype(nodes) {
+  const out = []; const typed = new Set();
+  for (const node of (Array.isArray(nodes) ? nodes : [])) {
+    const steps = (node && Array.isArray(node.steps)) ? node.steps : [];
+    const meaningful = steps.filter((s) => s && s.kind !== 'scroll');
+    const types = meaningful.filter((s) => s.kind === 'type' && s.value != null && s.value !== '');
+    const onlyTypes = meaningful.length > 0 && meaningful.every((s) => s.kind === 'type');
+    if (onlyTypes && types.length > 0 && types.every((s) => typed.has(String(s.value)))) continue;   // redundant re-type
+    for (const s of types) typed.add(String(s.value));
+    out.push(node);
+  }
+  return out;
 }
 
 // OBS-3 — map a recorded RawAction to the EXECUTABLE action shape (what TemplateWalker runs + what
@@ -134,12 +153,12 @@ const _slug = (s) => String(s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g,
 export function deriveObservedParams(op) {
   const nodes = (op && Array.isArray(op.nodes)) ? op.nodes : [];
   const out = []; const seen = new Set();
-  const add = (base, label, kind, value, selector, vocabulary) => {
+  const add = (base, label, kind, value, selector, vocabulary, containerHint) => {
     let key = _slug(base) || 'param';
     let k = key; let n = 2; while (seen.has(k)) k = `${key}-${n++}`;
     seen.add(k);
     const vocab = (Array.isArray(vocabulary) ? vocabulary.map(String).filter(Boolean) : []);
-    out.push({ key: k, label: label || base || k, kind, value: value != null ? String(value) : '', selector: selector || null, ...(vocab.length > 1 ? { vocabulary: Array.from(new Set(vocab)) } : {}) });
+    out.push({ key: k, label: label || base || k, kind, value: value != null ? String(value) : '', selector: selector || null, ...(vocab.length > 1 ? { vocabulary: Array.from(new Set(vocab)) } : {}), ...(containerHint ? { containerHint: String(containerHint) } : {}) });
   };
   for (const node of nodes) {
     if (!node || node.type !== 'fragment') continue;
@@ -151,7 +170,13 @@ export function deriveObservedParams(op) {
       // against + the datalist the re-run form offers); a typed field has no vocabulary.
       const vocab = s.target && s.target.options;
       if (s.kind === 'type' && s.value != null && s.value !== '') add(name || 'field', name || 'Field', 'text', s.value, sel);
-      else if (s.kind === 'select' && s.value != null && s.value !== '') add(disclosure || name || 'choice', disclosure || name || 'Choice', 'option', s.value, sel, vocab);
+      else if (s.kind === 'select' && s.value != null && s.value !== '') add(disclosure || name || 'choice', disclosure || name || 'Choice', 'option', s.value, sel, vocab, s.target && s.target.optionContainer);
+      // B — a CLICK that carries a captured peer GROUP (a category nav / tablist: ≥3 sibling links/tabs) is a
+      // re-bindable OPTION, not a fixed click. The demonstrated label ("Music") is the default; the group is the
+      // vocabulary. This collapses N per-category capabilities ("Search for music/vectors/gifs") into ONE with a
+      // CATEGORY param. The clicked item is included in `vocab` so the default replay validates.
+      else if (s.kind === 'click' && Array.isArray(vocab) && vocab.length >= 3 && s.value != null && s.value !== '')
+        add('category', 'Category', 'option', s.value, sel, vocab.includes(s.value) ? vocab : [s.value, ...vocab], s.target && s.target.optionContainer);
       else if (s.kind === 'click' && _DISCLOSURE_HINT.test(name || '')) disclosure = name;
     }
   }
@@ -231,8 +256,10 @@ export function parameterizeObserved(phases, params) {
           p.used = true;
           return { ...a, value: `{{${p.name}}}` };
         }
-        if (a.action === 'CLICK') {                   // custom dropdown — find-by-label in the open container
-          const container = optionContainerSelector(p.selector);
+        if (a.action === 'CLICK') {                   // custom dropdown / category nav — find-by-label in the container
+          // Prefer the record-time container (the nav/listbox the peer group was found in); fall back to deriving
+          // it from the option selector (works when options are direct children, e.g. an Indeed filter list).
+          const container = p.containerHint || optionContainerSelector(p.selector);
           if (container) { p.container = container; p.used = true; return { action: 'CLICK_BY_LABEL', selector: container, value: `{{${p.name}}}` }; }
         }
       }
