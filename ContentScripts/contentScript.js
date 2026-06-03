@@ -15,7 +15,7 @@
  *
  * @module ContentScripts/contentScript
  * @author Agent HUB
- * @version 2.17.4
+ * @version 2.17.5
  */
 
 'use strict';
@@ -5432,6 +5432,38 @@ function _obsResolveClickTarget(el) {
   try { return el.closest('a[href],button,[role="button"],[role="option"],[role="menuitem"],[role="menuitemradio"],[role="tab"],[role="radio"],[role="checkbox"],[role="switch"],input,select,textarea,summary,[role]') || el; }
   catch { return el; }
 }
+// ORCH-V — when an OPTION is chosen, capture the dropdown's whole VOCABULARY (the labels the user could have
+// picked), not just the one clicked. This closed set makes re-choosing safe: the binder classifies an ask
+// against real labels (no hallucinated value) and replay's CLICK_BY_LABEL is guaranteed to find one. Native
+// <select> → its <option>s; a custom listbox/menu → the option-like descendants of the tightest container.
+function _obsOptionVocabulary(domKind, el) {
+  try {
+    if ((domKind === 'change' || domKind === 'input') && el.tagName === 'SELECT') {
+      const opts = Array.from(el.options || []).map((o) => (o.label || o.textContent || o.value || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+      return opts.length ? Array.from(new Set(opts)).slice(0, 60).map((s) => s.slice(0, 80)) : null;
+    }
+    if (domKind === 'click') {
+      const OPT = '[role="option"],[role="menuitem"],[role="menuitemradio"],[role="menuitemcheckbox"],[role="radio"]';
+      let role = ''; try { role = String(_computeA11yRole(el) || '').toLowerCase(); } catch { /* */ }
+      const isOpt = /^(option|menuitem|menuitemradio|menuitemcheckbox|radio)$/.test(role) || (el.matches && el.matches(OPT));
+      if (!isOpt) return null;
+      // Climb to the SMALLEST ancestor holding ≥2 option-like descendants (the dropdown container).
+      let container = el.parentElement, found = null;
+      for (let i = 0; i < 6 && container; i++) {
+        const sibs = container.querySelectorAll(OPT);
+        if (sibs.length >= 2) { found = sibs; break; }
+        container = container.parentElement;
+      }
+      if (!found) return null;
+      const labels = Array.from(found).map((n) => {
+        let t = ''; try { t = _computeAccessibleName(n) || n.textContent || ''; } catch { t = n.textContent || ''; }
+        return String(t).replace(/\s+/g, ' ').trim();
+      }).filter(Boolean);
+      return labels.length ? Array.from(new Set(labels)).slice(0, 60).map((s) => s.slice(0, 80)) : null;
+    }
+  } catch { /* */ }
+  return null;
+}
 function _obsSend(domKind, el, rawValue) {
   if (!_obsRec.active || !el) return;
   const target = _obsExtract(el);
@@ -5441,6 +5473,7 @@ function _obsSend(domKind, el, rawValue) {
   if (domKind === 'input' || domKind === 'change') value = sensitive ? null : (rawValue != null ? String(rawValue).slice(0, 300) : null);
   else if (domKind === 'click') value = sensitive ? null : (target.accessibleName || null);   // used only if it classifies as a select
   else if (domKind === 'keypress') value = rawValue || 'Enter';                                 // the key (Enter)
+  if (!sensitive) { const vocab = _obsOptionVocabulary(domKind, el); if (vocab && vocab.length > 1) target.options = vocab; }   // ORCH-V — dropdown vocabulary
   try { chrome.runtime.sendMessage({ type: 'INTERACTION_RECORD', payload: { domKind, target, value, sensitive, ts: Date.now(), url: location.href } }); } catch { /* */ }
 }
 const _obsOnClick  = (e) => { try { const el = _obsResolveClickTarget(e.target); if (el) _obsSend('click', el, null); } catch { /* */ } };

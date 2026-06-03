@@ -9,7 +9,7 @@
 // Downstream (OBS-2/3): coalesce(trace) → segment into Fragments → buildTier2CapabilityRecords (SG-T2-ACC).
 //
 // @module Core/observedTrace
-// @version 2.74.660
+// @version 2.74.666
 
 export const OBSERVED_KINDS = Object.freeze(['click', 'type', 'select', 'submit', 'navigate', 'scroll', 'key']);
 
@@ -88,6 +88,8 @@ export function buildRawAction(parts) {
       text: target.text ? String(target.text).slice(0, 140) : null,
       attrs: (target.attrs && typeof target.attrs === 'object') ? target.attrs : null,
       scrollY: Number.isFinite(target.scrollY) ? target.scrollY : undefined,
+      // ORCH-V — the dropdown's full option vocabulary (only set on an option click / native <select> change).
+      options: Array.isArray(target.options) ? target.options.slice(0, 60).map((s) => String(s).slice(0, 80)) : undefined,
     },
   };
   if (kind === 'type' || kind === 'select') action.value = scrubValue(p.value, target);

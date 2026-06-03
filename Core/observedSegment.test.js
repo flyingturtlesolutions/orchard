@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildRawAction, coalesce } from './observedTrace.js';
-import { segmentTrace, opToPhases, stepToAction, deriveObservedParams, parameterizeObserved, obsParamName, optionContainerSelector } from './observedSegment.js';
+import { segmentTrace, opToPhases, stepToAction, deriveObservedParams, parameterizeObserved, obsParamName, optionContainerSelector, describeTraceInput } from './observedSegment.js';
 import { buildTier2CapabilityRecords } from './capabilitySynth.js';
 
 // `A` mirrors the real recorder: a click passes its accessibleName as the value (kept only when the click
@@ -183,6 +183,44 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     assert.ok(!stateP.container, 'a native select has no container (value substitution, not find-by-label)');
     const selAct = phases[0].actions.filter((a) => a.action !== 'SCROLL_TO').find((a) => a.action === 'SELECT');
     assert.equal(selAct.value, `{{${stateP.name}}}`, 'SELECT value rewritten to the placeholder');
+  });
+
+  it('ORCH-V: an option click carrying its dropdown vocabulary → param.vocabulary; parameterizeObserved preserves it', () => {
+    const disc = buildRawAction({ domKind: 'click', value: 'Date posted filter', url: 'u', target: { role: 'button', accessibleName: 'Date posted filter', selector: '#fa' } });
+    const opt = buildRawAction({ domKind: 'click', value: 'Last 3 days', url: 'u', target: { role: 'option', accessibleName: 'Last 3 days', selector: '#date>li:nth-of-type(3)', options: ['Today', 'Last 3 days', 'Last 7 days', 'Last 14 days'] } });
+    const nav = buildRawAction({ domKind: 'navigate', url: 'u/jobs?fromage=3', from: 'u' });
+    const op = segmentTrace(coalesce([disc, opt, nav]));
+    const params = deriveObservedParams(op);
+    const optP = params.find((p) => p.kind === 'option');
+    assert.ok(optP, 'option param derived');
+    assert.deepEqual(optP.vocabulary, ['Today', 'Last 3 days', 'Last 7 days', 'Last 14 days'], 'full dropdown vocabulary captured');
+    // parameterizeObserved keeps the vocabulary on the templated param (for the binder + the re-run datalist)
+    const { params: named } = parameterizeObserved(opToPhases(op), params);
+    const np = named.find((p) => p.kind === 'option');
+    assert.deepEqual(np.vocabulary, ['Today', 'Last 3 days', 'Last 7 days', 'Last 14 days']);
+    assert.equal(np.used, true, 'still templated to CLICK_BY_LABEL');
+    // a single-option (or no-vocab) capture is dropped (needs ≥2 to be a real choice)
+    const lone = deriveObservedParams(segmentTrace(coalesce([
+      buildRawAction({ domKind: 'click', value: 'X', url: 'u', target: { role: 'option', accessibleName: 'X', selector: '#o', options: ['X'] } }),
+      buildRawAction({ domKind: 'navigate', url: 'u/2', from: 'u' }),
+    ])));
+    assert.ok(!('vocabulary' in (lone.find((p) => p.kind === 'option') || {})), 'a lone option is not a vocabulary');
+  });
+
+  it('describeTraceInput: structure-derived summary (phases as step kinds + params as example inputs) (ORCH-D)', () => {
+    const op = segmentTrace(coalesce(raw));
+    const { phases, params } = parameterizeObserved(opToPhases(op), deriveObservedParams(op));
+    const di = describeTraceInput(phases, params);
+    assert.equal(di.phases.length, 2);
+    assert.equal(di.phases[0].label, 'Search');
+    // steps are described by KIND (no SCROLL_TO, no literal demo values in the templated steps)
+    assert.ok(di.phases[0].steps.some((s) => /^type into/.test(s)), 'a typed field reads as "type into …"');
+    assert.ok(di.phases[1].steps.some((s) => /^choose an option/.test(s)), 'the option reads as "choose an option …"');
+    assert.ok(!JSON.stringify(di.phases).includes('SCROLL_TO'));
+    // params surface as example inputs (used only); the option carries its label + kind
+    assert.ok(di.params.length >= 2);
+    const optP = di.params.find((p) => p.kind === 'option');
+    assert.ok(optP && optP.example === 'Last 3 days', 'demonstrated value is an EXAMPLE input');
   });
 
   it('buildTier2CapabilityRecords wires params: per-fragment bindings from real placeholders + strategy.params union (OBS-4b)', () => {

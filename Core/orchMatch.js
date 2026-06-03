@@ -17,7 +17,7 @@
 // See docs/DESIGN_intent_orchestration.md §4–§6.
 //
 // @module Core/orchMatch
-// @version 2.74.663
+// @version 2.74.668
 
 // Irreversibility heuristic (skeleton — the real classifier is PB-4's safety classing). Conservative by
 // design: over-flagging just forces a confirm (safe). Reversibility is a HARD VETO on auto-fire.
@@ -147,4 +147,78 @@ export function matchAsk(ask, candidates, ctx = {}) {
   const parts = scopeAndPartition(projected, ctx);
   const decision = rankAndDecide(ask, parts.here, ctx);
   return { ...decision, scoped: { here: parts.here.length, reachable: parts.reachable.length, off: parts.off.length } };
+}
+
+// ── ORCH-D — aliases: the use-accreted synonym set ───────────────────────────────────────────────────────
+// A capability's description is a one-shot guess; its aliases grow from the asks that successfully match it.
+// Each confirmed phrasing becomes an alias → next time it's an exact hit (and alias coverage helps promote
+// propose → auto-fire). See docs/DESIGN_intent_orchestration.md §5.
+
+export function normalizeAliasPhrase(s) {
+  return String(s == null ? '' : s).toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 80);
+}
+
+/**
+ * Accrete a confirmed ask phrasing into a capability's aliases. PURE — returns a NEW array.
+ * Rules: normalize; drop empties / too-short; dedup (case-insensitive); SKIP a phrase already covered by the
+ * intent (its tokens ⊆ the intent's — the description already says it); cap to the most-recent `max`.
+ * @param {string[]} aliases  existing aliases
+ * @param {string} phrase     the ask that matched
+ * @param {{intent?:string, max?:number}} [opts]
+ */
+export function accreteAlias(aliases, phrase, { intent = '', max = 12 } = {}) {
+  const list = (Array.isArray(aliases) ? aliases : []).filter((a) => typeof a === 'string' && a.trim()).map(normalizeAliasPhrase);
+  const norm = normalizeAliasPhrase(phrase);
+  if (!norm || norm.length < 2) return list.slice();
+  if (list.includes(norm)) return list.slice();
+  const pTok = _tokens(norm), iTok = new Set(_tokens(intent));
+  if (pTok.length && pTok.every((t) => iTok.has(t))) return list.slice();   // intent already covers it
+  return [...list, norm].slice(-Math.max(1, max));
+}
+
+// ── ORCH-M — LLM select+bind adapters ────────────────────────────────────────────────────────────────────
+// The smart matcher does ONE call over the scoped set (AnthropicService.matchCapability) returning per-candidate
+// {relevance, effectEligible} + param bindings for its top pick. These PURE adapters turn that into the injected
+// `score` the deterministic gate consumes (so the gate — margin, reversibility veto, bands — stays unchanged),
+// and VALIDATE option bindings against the captured vocabulary — the anti-hallucination check.
+
+/** Build a `score(ask, candidate)` from the LLM's per-candidate ratings. PURE. A candidate the LLM didn't rate
+ *  scores 0 / not-eligible. `isExact` stays DETERMINISTIC (alias match) so an exact alias still short-circuits
+ *  even if the model under-rates it; relevance is clamped to [0,1]. */
+export function scoresToScorer(scores) {
+  const byId = new Map((Array.isArray(scores) ? scores : []).filter((s) => s && s.id != null).map((s) => [String(s.id), s]));
+  return (ask, candidate) => {
+    const isExact = !!(candidate && (candidate.aliases || []).some((al) => normalizeAliasPhrase(al) === normalizeAliasPhrase(ask)));
+    const s = byId.get(String(candidate && candidate.id));
+    if (!s) return { relevance: isExact ? 1 : 0, isExact, effectEligible: isExact };
+    let rel = Number(s.relevance);
+    rel = Number.isFinite(rel) ? Math.max(0, Math.min(1, rel)) : 0;
+    return { relevance: isExact ? Math.max(rel, 1) : rel, isExact, effectEligible: s.effectEligible !== false };
+  };
+}
+
+/**
+ * Validate the LLM's param bindings against a candidate's param schema. PURE — the structured anti-hallucination
+ * gate. Text params accept any value; OPTION params must resolve to a member of the captured vocabulary
+ * (case-insensitive) and are SNAPPED to the exact captured label. A value with no vocabulary match becomes a
+ * GAP (surfaced, never applied). An unsupplied param is left to its demonstrated default.
+ * @returns {{bound:Object, gaps:Array<{name,requested,reason}>}}
+ */
+export function validateBindings(bindings, candidate) {
+  const out = { bound: {}, gaps: [] };
+  const params = (candidate && Array.isArray(candidate.params)) ? candidate.params : [];
+  const supplied = (bindings && typeof bindings === 'object') ? bindings : {};
+  for (const p of params) {
+    if (!p || !p.name) continue;
+    const v = supplied[p.name];
+    if (v == null || v === '') continue;   // unbound → demonstrated default
+    if (p.kind === 'option' && Array.isArray(p.vocabulary) && p.vocabulary.length) {
+      const hit = p.vocabulary.find((o) => normalizeAliasPhrase(o) === normalizeAliasPhrase(v));
+      if (hit) out.bound[p.name] = hit;
+      else out.gaps.push({ name: p.name, requested: String(v), reason: 'not-in-vocabulary' });
+    } else {
+      out.bound[p.name] = String(v);
+    }
+  }
+  return out;
 }

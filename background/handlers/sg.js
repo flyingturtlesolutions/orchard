@@ -19,8 +19,8 @@ import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspec
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
-import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved } from '../../Core/observedSegment.js';
-import { matchAsk } from '../../Core/orchMatch.js';                      // ORCH-M0 — HIT/MISS matcher core
+import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved, describeTraceInput } from '../../Core/observedSegment.js';
+import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias } from '../../Core/orchMatch.js';   // ORCH-M0/D/M
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
 import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
@@ -323,35 +323,40 @@ export function createSgMessageHandlers(ctx) {
           return { label: p.label, actions: landmarkRefActions(p.actions, groundId, p.url) };
         });
         for (const rec of landmarkRecords) { try { await StorageManager.saveLandmark(rec); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED saveLandmark failed: ${e.message}`); } }
-        // OBS-4 — LLM name/intent (inverse of comprehend), heuristic fallback so it never blocks on the LLM.
-        let described = null;
-        if (!(name && name.trim())) {
-          const summary = op.nodes.filter((n) => n && n.type === 'fragment').map((n, i) => `Phase ${i + 1} (${n.label}): ` + (Array.isArray(n.steps) ? n.steps : []).map((s) => `${s.kind} ${(s.target && (s.target.accessibleName || s.target.selector)) || ''}${s.value ? `="${String(s.value).slice(0, 40)}"` : ''}`).join('; ')).join('\n');
-          try { described = await AnthropicService.describeTrace({ summary }); } catch { /* */ }
-        }
-        const capName = ((name && name.trim()) || (described && described.name) || `Recorded: ${phases.map((p) => p.label).join(' → ')}`).slice(0, 80);
-        const capDescription = (described && described.intent) || capName;
-        const localeUrl = (trace.find((a) => a && a.url) || {}).url || '';
-        // OBS-3c — compose the derived landmarks into a PERSPECTIVE (your step 4 — the intent-scoped grouping
-        // the library shows), authoredBy:'model', exactly like the NL-path ACCEPT. The capability links it.
-        const perspective = buildPerspectiveRecord({ intent: capName, spec: { shape: 'observed', target: capName }, groundId, localeUrl, landmarkUids: [...seenUid] });
-        try { await StorageManager.savePerspective(perspective); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED savePerspective failed: ${e.message}`); }
-        // OBS-4b — PARAMETERIZE: rewrite each demonstrated text input to a `{{NAME}}` placeholder so the
-        // capability re-runs with NEW values. The demonstrated value rides along as the param's default, so a
-        // no-override replay reproduces the demo. (Option choices stay literal in v1 — find-by-label = OBS-4c.)
+        // OBS-4b — PARAMETERIZE first (so the description + records read the TEMPLATED structure): rewrite each
+        // demonstrated input to a `{{NAME}}` placeholder (text → value, option → CLICK_BY_LABEL/SELECT); the
+        // demonstrated value rides along as the param default, so a no-override replay reproduces the demo.
         const paramz = parameterizeObserved(phases, params);
         const runPhases = paramz.phases;
         const namedParams = paramz.params;
+        // ORCH-D — describe FROM the structure (phases of step-kinds + params with example values + vocab), not
+        // a loose transcript: a faithful projection + seed aliases. Heuristic fallback so it never blocks on LLM.
+        let described = null;
+        if (!(name && name.trim())) {
+          try { described = await AnthropicService.describeTrace({ structure: describeTraceInput(runPhases, namedParams) }); } catch { /* */ }
+        }
+        const capName = ((name && name.trim()) || (described && described.name) || `Recorded: ${phases.map((p) => p.label).join(' → ')}`).slice(0, 80);
+        const capDescription = (described && described.intent) || capName;
+        // ORCH-D — seed the capability's aliases from the model's suggestions; the flywheel later accretes
+        // confirmed asks (ORCH_RECORD_ALIAS). accreteAlias dedups + drops phrasings the intent already covers.
+        let seedAliases = [];
+        for (const a of (described && Array.isArray(described.aliases) ? described.aliases : [])) seedAliases = accreteAlias(seedAliases, a, { intent: capName });
+        const localeUrl = (trace.find((a) => a && a.url) || {}).url || '';
+        // OBS-3c — compose the derived landmarks into a PERSPECTIVE (the intent-scoped grouping the library
+        // shows), authoredBy:'model', exactly like the NL-path ACCEPT. The capability links it.
+        const perspective = buildPerspectiveRecord({ intent: capName, spec: { shape: 'observed', target: capName }, groundId, localeUrl, landmarkUids: [...seenUid] });
+        try { await StorageManager.savePerspective(perspective); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED savePerspective failed: ${e.message}`); }
         const strategyId = crypto.randomUUID();
         const fragmentIds = runPhases.map(() => crypto.randomUUID());
         const recs = CapabilitySynth.buildTier2CapabilityRecords(runPhases, { groundId, strategyId, fragmentIds, name: capName, goal: capName, params: namedParams });
         if (!recs) { sendResponse({ success: false, error: 'could not assemble capability records' }); return; }
+        if (seedAliases.length) recs.strategy.aliases = seedAliases.slice();   // ORCH-D — strategy carries them too
         for (const f of recs.fragments) { try { await StorageManager.saveFragment(f); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED saveFragment failed: ${e.message}`); } }
         try { await StorageManager.saveStrategy(recs.strategy); }
         catch (e) { Logger.error('background', `DERIVE_OBSERVED saveStrategy failed: ${e.message}`); sendResponse({ success: false, error: `strategy save failed: ${e.message}` }); return; }
         const capability = {
           id: crypto.randomUUID(), groundId, intent: capName, description: capDescription, shape: 'observed', source: 'observed',
-          localeUrl, perspectiveId: perspective.id, strategyId, fragmentIds, landmarkUids: [...seenUid], params: namedParams, phases: phases.map((p) => p.label), binding: [], synthesized: true,
+          localeUrl, perspectiveId: perspective.id, strategyId, fragmentIds, landmarkUids: [...seenUid], params: namedParams, aliases: seedAliases, phases: phases.map((p) => p.label), binding: [], synthesized: true,
           createdAt: Date.now(), trial: { score: null, verdict: 'observed', trialRef: null },
         };
         await ctx.writeSgCapability(groundId, capability);
@@ -381,25 +386,62 @@ export function createSgMessageHandlers(ctx) {
         if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); url = t?.url ?? ''; } catch { /* */ } }
         const localeUrl = ctx.normalizeUrl(url);
         const caps = await ctx.readSgCapabilities(groundId);
-        const result = matchAsk(ask, Array.isArray(caps) ? caps : [], {
-          currentGroundId: groundId,
-          currentLocaleUrl: localeUrl,
-          sameLocale: (a, b) => ctx.normalizeUrl(a) === ctx.normalizeUrl(b),
-        });
+        const sameLocale = (a, b) => ctx.normalizeUrl(a) === ctx.normalizeUrl(b);
+        const projected = (Array.isArray(caps) ? caps : []).map((c) => toCandidate(c)).filter(Boolean);
+        const parts = scopeAndPartition(projected, { currentGroundId: groundId, currentLocaleUrl: localeUrl, sameLocale });
+        // ORCH-M — smart scorer over the runnable-here set. Cheap paths skip the LLM: an exact-alias short-circuit
+        // (deterministic hit) and an empty here-set. Otherwise one structured select+bind call; if the LLM is
+        // unavailable/fails, `scorer` stays undefined and rankAndDecide uses the lexical default.
+        let scorer; let llm = null;
+        const aliasHit = parts.here.some((c) => (c.aliases || []).some((al) => normalizeAliasPhrase(al) === normalizeAliasPhrase(ask)));
+        if (parts.here.length && !aliasHit) {
+          try { llm = await AnthropicService.matchCapability({ ask, candidates: parts.here }); } catch { /* */ }
+          if (llm) scorer = scoresToScorer(llm.scores);
+        }
+        const decision = rankAndDecide(ask, parts.here, scorer ? { score: scorer } : {});
+        // ORCH-M — validate the LLM's option bindings against the chosen candidate's captured vocabulary
+        // (anti-hallucination): in-vocab values are snapped + returned as `bindings`; misses surface as `gaps`.
+        let bindings = {}; let gaps = [];
+        if (decision.candidate && llm && llm.bindings) { const v = validateBindings(llm.bindings, decision.candidate); bindings = v.bound; gaps = v.gaps; }
         const lean = (c) => (c ? { id: c.id, intent: c.intent, strategyId: c.strategyId, reversible: c.reversible, params: c.params } : null);
-        Logger.info('background', `ORCH_MATCH — "${String(ask).slice(0, 60)}" @ ${localeUrl || '(no url)'} → ${result.decision}/${result.reason}${result.candidate ? ` (${result.candidate.id})` : ''} [here ${result.scoped.here}, reachable ${result.scoped.reachable}, off ${result.scoped.off}]`);
+        const scoped = { here: parts.here.length, reachable: parts.reachable.length, off: parts.off.length };
+        const via = llm ? 'llm' : (aliasHit ? 'alias' : 'lexical');
+        Logger.info('background', `ORCH_MATCH — "${String(ask).slice(0, 60)}" @ ${localeUrl || '(no url)'} → ${decision.decision}/${decision.reason}${decision.candidate ? ` (${decision.candidate.id})` : ''} [${via}; here ${scoped.here}, reachable ${scoped.reachable}, off ${scoped.off}]`);
         sendResponse({
           success: true,
-          decision: result.decision,            // 'auto' | 'propose' | 'miss'
-          reason: result.reason,                // doubles as the assistant's explanation copy
-          candidate: lean(result.candidate),
-          capabilityId: result.candidate ? result.candidate.id : null,
-          alternatives: (result.alternatives || []).map((a) => ({ id: a.id, intent: a.intent })),
-          scoped: result.scoped,
-          localeUrl,
+          decision: decision.decision,          // 'auto' | 'propose' | 'miss'
+          reason: decision.reason,              // doubles as the assistant's explanation copy
+          candidate: lean(decision.candidate),
+          capabilityId: decision.candidate ? decision.candidate.id : null,
+          bindings, gaps,                        // ORCH-M — validated param values + out-of-vocab gaps
+          rationale: llm ? llm.rationale : '',
+          via,
+          alternatives: (decision.alternatives || []).map((a) => ({ id: a.id, intent: a.intent })),
+          scoped, localeUrl,
         });
       } catch (err) {
         Logger.error('background', `ORCH_MATCH failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // ORCH-D — the aliases flywheel (write side). When a match is CONFIRMED (the user accepts a propose, or a
+    // run succeeds), the chat records the ask phrasing here; it accretes onto the capability's aliases so next
+    // time it's an exact hit (and richer alias coverage promotes propose → auto-fire). The matcher reads
+    // capability.aliases (toCandidate), so updating it closes the loop. PURE accreteAlias does the dedup/cap.
+    ORCH_RECORD_ALIAS: async (payload, _sender, sendResponse) => {
+      try {
+        const { groundId = null, capabilityId = null, phrase = '' } = payload ?? {};
+        if (!groundId || !capabilityId || typeof phrase !== 'string' || !phrase.trim()) { sendResponse({ success: false, error: 'groundId + capabilityId + phrase required' }); return; }
+        const cap = (await ctx.readSgCapabilities(groundId)).find((c) => c.id === capabilityId);
+        if (!cap) { sendResponse({ success: false, error: 'capability not found' }); return; }
+        const before = Array.isArray(cap.aliases) ? cap.aliases.length : 0;
+        cap.aliases = accreteAlias(cap.aliases, phrase, { intent: cap.intent || '' });
+        await ctx.writeSgCapability(groundId, cap);
+        Logger.info('background', `ORCH_RECORD_ALIAS — "${String(phrase).slice(0, 40)}" → ${cap.id} (${before}→${cap.aliases.length} alias)`);
+        sendResponse({ success: true, aliases: cap.aliases, added: cap.aliases.length > before });
+      } catch (err) {
+        Logger.error('background', `ORCH_RECORD_ALIAS failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },

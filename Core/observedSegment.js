@@ -14,7 +14,7 @@
 //     gives nicer labels later; this keeps it runnable without an LLM.
 //
 // @module Core/observedSegment
-// @version 2.74.662
+// @version 2.74.667
 
 const _DISCLOSURE_HINT = /filter|menu|sort|posted|date|pay|salary|wage|type|level|experience|distance|remote|radius|category|options?|dropdown|expand|more/i;
 
@@ -123,11 +123,12 @@ const _slug = (s) => String(s || '').toLowerCase().trim().replace(/[^a-z0-9]+/g,
 export function deriveObservedParams(op) {
   const nodes = (op && Array.isArray(op.nodes)) ? op.nodes : [];
   const out = []; const seen = new Set();
-  const add = (base, label, kind, value, selector) => {
+  const add = (base, label, kind, value, selector, vocabulary) => {
     let key = _slug(base) || 'param';
     let k = key; let n = 2; while (seen.has(k)) k = `${key}-${n++}`;
     seen.add(k);
-    out.push({ key: k, label: label || base || k, kind, value: value != null ? String(value) : '', selector: selector || null });
+    const vocab = (Array.isArray(vocabulary) ? vocabulary.map(String).filter(Boolean) : []);
+    out.push({ key: k, label: label || base || k, kind, value: value != null ? String(value) : '', selector: selector || null, ...(vocab.length > 1 ? { vocabulary: Array.from(new Set(vocab)) } : {}) });
   };
   for (const node of nodes) {
     if (!node || node.type !== 'fragment') continue;
@@ -135,8 +136,11 @@ export function deriveObservedParams(op) {
     for (const s of (Array.isArray(node.steps) ? node.steps : [])) {
       const name = s.target && s.target.accessibleName;
       const sel = s.target && s.target.selector;
+      // ORCH-V — an option choice carries its dropdown's full vocabulary (the closed set the binder classifies
+      // against + the datalist the re-run form offers); a typed field has no vocabulary.
+      const vocab = s.target && s.target.options;
       if (s.kind === 'type' && s.value != null && s.value !== '') add(name || 'field', name || 'Field', 'text', s.value, sel);
-      else if (s.kind === 'select' && s.value != null && s.value !== '') add(disclosure || name || 'choice', disclosure || name || 'Choice', 'option', s.value, sel);
+      else if (s.kind === 'select' && s.value != null && s.value !== '') add(disclosure || name || 'choice', disclosure || name || 'Choice', 'option', s.value, sel, vocab);
       else if (s.kind === 'click' && _DISCLOSURE_HINT.test(name || '')) disclosure = name;
     }
   }
@@ -225,6 +229,39 @@ export function parameterizeObserved(phases, params) {
     }),
   }));
   return { phases: outPhases, params: ps };
+}
+
+/**
+ * ORCH-D — assemble the STRUCTURED input describeTrace consumes, so the description is a faithful projection of
+ * the capability's STRUCTURE (its phases, the kind of each step, and its params with example values + option
+ * vocabularies) rather than a loose text guess. PURE. Feeding structure (not a transcript) minimizes drift and
+ * lets the model treat the demonstrated values as EXAMPLE inputs, not fixed text. Runs on the parameterized
+ * phases (so a templated step reads as "choose an option" / "type a value", not the literal demo value).
+ * @param {Array<{label:string, actions:object[]}>} phases  parameterized phases (post-parameterizeObserved)
+ * @param {Array<{label,name,kind,value,vocabulary?,used}>} params
+ * @returns {{phases:Array<{phase:number,label:string,steps:string[]}>, params:Array}}
+ */
+export function describeTraceInput(phases, params) {
+  const ph = (Array.isArray(phases) ? phases : []).map((p, i) => ({
+    phase: i + 1,
+    label: (p && p.label) || '',
+    steps: (Array.isArray(p && p.actions) ? p.actions : []).filter((a) => a && a.action !== 'SCROLL_TO').map((a) => {
+      const at = (a.landmark && a.landmark.accessibleName) || a.selector || '';
+      switch (a.action) {
+        case 'TYPE': return `type into “${at}”`;
+        case 'CLICK_BY_LABEL': return `choose an option in “${a.selector}”`;
+        case 'SELECT': return `select a value in “${at}”`;
+        case 'CLICK': return `click “${at}”`;
+        case 'KEY': return `press ${a.value || 'Enter'}`;
+        default: return String(a.action || '');
+      }
+    }),
+  }));
+  const ps = (Array.isArray(params) ? params : []).filter((p) => p && p.used).map((p) => ({
+    label: p.label || p.name, kind: p.kind, example: p.value,
+    ...(Array.isArray(p.vocabulary) && p.vocabulary.length ? { options: p.vocabulary } : {}),
+  }));
+  return { phases: ph, params: ps };
 }
 
 /** OBS-3 — turn a segmented op into the per-phase {label, url, actions} the capability builder consumes.

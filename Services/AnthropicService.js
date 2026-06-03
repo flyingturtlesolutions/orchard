@@ -2413,25 +2413,78 @@ Rules:
    * the caller falls back to a heuristic name, so the feature never blocks on the LLM.
    * @param {{summary:string}} args  summary = a compact, per-fragment rendering of the trace
    */
-  static async describeTrace({ summary } = {}) {
-    const text = (typeof summary === 'string' ? summary : '').trim();
+  static async describeTrace({ summary, structure } = {}) {
+    // ORCH-D — describe FROM the capability's STRUCTURE (phases of step-kinds + params with example values +
+    // option vocabularies) when available, so the description is a faithful projection, not a loose transcript
+    // guess. Falls back to a plain `summary` string for older callers. Also yields seed `aliases`.
+    let text = '';
+    if (structure && Array.isArray(structure.phases)) {
+      const ph = structure.phases.map((p) => `Phase ${p.phase} (${p.label}): ${(Array.isArray(p.steps) ? p.steps : []).join('; ')}`).join('\n');
+      const ps = (Array.isArray(structure.params) ? structure.params : []).map((p) => `- ${p.label} [${p.kind}]${Array.isArray(p.options) ? ` options: ${p.options.slice(0, 8).join(', ')}` : ''} (example: ${p.example})`).join('\n');
+      text = `PHASES:\n${ph}${ps ? `\nINPUTS:\n${ps}` : ''}`;
+    } else if (typeof summary === 'string') {
+      text = summary;
+    }
+    text = text.trim();
     if (!text) return null;
     if (!(await AnthropicService.hasLlm())) return null;
-    const systemPrompt = `You NAME a recorded web-automation demonstration. The user performed a sequence of REAL actions; you are given them (no page is shown). Return ONLY a JSON object:
-{"name":"<=6 words, imperative — what the capability DOES>","intent":"<one sentence describing the task>"}
+    const systemPrompt = `You describe a recorded web-automation capability from its STRUCTURE (phases of steps + the inputs it takes). No page is shown. Return ONLY a JSON object:
+{"name":"<=6 words, imperative — what it DOES>","intent":"<one sentence: what the capability is FOR>","aliases":["<2-5 short phrasings a user might type to ask for it>"]}
 Rules:
-- Describe what was ACCOMPLISHED, not each click. e.g. fill a search box + click Search + open a "Date posted" filter + choose "Last 3 days" -> name "Search jobs, filter by date".
+- Describe what is ACCOMPLISHED, not each click. e.g. fill a search box + click Search + open a "Date posted" filter + choose an option -> name "Search jobs, filter by date".
 - The name is a short imperative label for a RE-RUNNABLE capability. No trailing punctuation.
-- Typed/chosen values are EXAMPLE inputs, not part of the name — do NOT bake "support"/"minneapolis" into the name.`;
+- Example input values are EXAMPLES — never bake them into name/intent/aliases (no "support"/"minneapolis"/"Last 3 days").
+- aliases are natural ways to ASK for this — short, lowercase, no values (e.g. "search jobs", "find roles", "filter by date").`;
     try {
-      const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text }], 256, [], { role: 'describe', operation: 'describeTrace' });
+      const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text }], 320, [], { role: 'describe', operation: 'describeTrace' });
       if (!raw?.success) { Logger.warn('AnthropicService', `describeTrace failed: ${raw?.error}`); return null; }
       const json = AnthropicService.#firstJsonObject(raw.text);
       const out = json ? JSON.parse(json) : null;
       if (!out || !out.name) return null;
-      Logger.info('AnthropicService', `describeTrace -> "${String(out.name).slice(0, 60)}"`);
-      return { name: String(out.name).slice(0, 80), intent: String(out.intent || out.name).slice(0, 200) };
+      const aliases = Array.isArray(out.aliases) ? out.aliases.map((a) => String(a).toLowerCase().trim()).filter(Boolean).slice(0, 6) : [];
+      Logger.info('AnthropicService', `describeTrace -> "${String(out.name).slice(0, 60)}" (${aliases.length} alias)`);
+      return { name: String(out.name).slice(0, 80), intent: String(out.intent || out.name).slice(0, 200), aliases };
     } catch (e) { Logger.warn('AnthropicService', `describeTrace error: ${e.message}`); return null; }
+  }
+
+  /**
+   * ORCH-M — the smart HIT/MISS scorer. ONE call over the SCOPED, runnable-here candidates (the grounded funnel
+   * already filtered by Ground/Locale + executability, so the choice set is small and every option is real —
+   * the only regime where LLM matching is trustworthy). For EACH candidate it judges effect-eligibility +
+   * relevance; for its single best pick it BINDS the ask's values to the params (option params chosen from the
+   * given vocabulary, never invented). Returns raw ratings + bindings; Core/orchMatch.scoresToScorer feeds the
+   * deterministic gate and validateBindings enforces the vocabulary. Conservative by construction (precision-
+   * first). Returns null on no-LLM / failure so the caller falls back to the lexical scorer.
+   * @param {{ask:string, context?:string, candidates:object[]}} args  candidates = projected Candidates (here-set)
+   * @returns {Promise<{scores:object[], topId:(string|null), bindings:object, rationale:string}|null>}
+   */
+  static async matchCapability({ ask, context = '', candidates = [] } = {}) {
+    const list = Array.isArray(candidates) ? candidates : [];
+    if (!ask || typeof ask !== 'string' || !ask.trim() || !list.length) return null;
+    if (!(await AnthropicService.hasLlm())) return null;
+    const lean = list.map((c) => ({
+      id: c.id, intent: c.intent || '', aliases: (c.aliases || []).slice(0, 8),
+      params: (Array.isArray(c.params) ? c.params : []).filter((p) => p && p.used).map((p) => ({
+        name: p.name, kind: p.kind, ...(Array.isArray(p.vocabulary) ? { options: p.vocabulary.slice(0, 12) } : {}),
+      })),
+    }));
+    const systemPrompt = `You match a user's ASK to grounded capabilities on the current page. Each CANDIDATE is already runnable here. For EACH candidate, judge whether its effect plausibly ACHIEVES the ask (effectEligible) and its relevance (0..1). Then for your single best candidate, BIND the ask's values to its params: an "option" param value MUST be one of that param's given options (omit it if none fits); other params take a value extracted from the ask. Be CONSERVATIVE — rate relevance high only when the capability clearly does what's asked; prefer omitting a binding to guessing. Return ONLY JSON:
+{"scores":[{"id":"<id>","relevance":<0..1>,"effectEligible":<true|false>}],"topId":"<best id or null>","bindings":{"<PARAM>":"<value>"},"rationale":"<one short sentence>"}`;
+    const user = `ASK: ${ask}\n${context ? `CONTEXT: ${String(context).slice(0, 400)}\n` : ''}CANDIDATES:\n${JSON.stringify(lean)}`;
+    try {
+      const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text: user }], 512, [], { role: 'match', operation: 'matchCapability' });
+      if (!raw?.success) { Logger.warn('AnthropicService', `matchCapability failed: ${raw?.error}`); return null; }
+      const json = AnthropicService.#firstJsonObject(raw.text);
+      const out = json ? JSON.parse(json) : null;
+      if (!out) return null;
+      const scores = Array.isArray(out.scores) ? out.scores.filter((s) => s && s.id != null) : [];
+      Logger.info('AnthropicService', `matchCapability -> top ${out.topId || '(none)'} over ${list.length} candidate(s)`);
+      return {
+        scores, topId: out.topId != null ? String(out.topId) : null,
+        bindings: (out.bindings && typeof out.bindings === 'object') ? out.bindings : {},
+        rationale: String(out.rationale || '').slice(0, 200),
+      };
+    } catch (e) { Logger.warn('AnthropicService', `matchCapability error: ${e.message}`); return null; }
   }
 
   /**

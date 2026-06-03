@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { toCandidate, scopeAndPartition, lexicalScore, rankAndDecide, matchAsk, DEFAULT_THRESHOLDS } from './orchMatch.js';
+import { toCandidate, scopeAndPartition, lexicalScore, rankAndDecide, matchAsk, DEFAULT_THRESHOLDS, accreteAlias, normalizeAliasPhrase, scoresToScorer, validateBindings } from './orchMatch.js';
 
 // A realistic mini-library for indeed.com results page.
 const G = 'ground-indeed';
@@ -92,6 +92,55 @@ describe('orchMatch — ORCH-M0 HIT/MISS matcher core', () => {
     assert.equal(r.decision, 'propose');
     assert.equal(r.reason, 'ambiguous');
     assert.ok(r.runnerUp, 'carries the runner-up for the disambiguation copy');
+  });
+
+  it('accreteAlias: confirmed phrasings accrete; dedup, skip-if-in-intent, cap (ORCH-D)', () => {
+    const intent = 'Filter by date posted';
+    let a = [];
+    a = accreteAlias(a, 'posted today', { intent });
+    assert.deepEqual(a, ['posted today']);
+    a = accreteAlias(a, 'Posted Today', { intent });            // dedup (case-insensitive, normalized)
+    assert.deepEqual(a, ['posted today']);
+    a = accreteAlias(a, 'filter by date', { intent });          // tokens ⊆ intent → skip (already covered)
+    assert.deepEqual(a, ['posted today']);
+    a = accreteAlias(a, 'recent postings', { intent });
+    assert.deepEqual(a, ['posted today', 'recent postings']);
+    a = accreteAlias(a, '', { intent });                        // empty → no-op
+    assert.equal(a.length, 2);
+    // cap keeps the most-recent `max`
+    let big = [];
+    for (let i = 0; i < 15; i++) big = accreteAlias(big, `phrase number ${i}`, { intent, max: 5 });
+    assert.equal(big.length, 5);
+    assert.equal(big[big.length - 1], 'phrase number 14');
+    assert.equal(normalizeAliasPhrase('  Posted   TODAY '), 'posted today');
+  });
+
+  it('scoresToScorer: LLM ratings drive relevance; unrated → 0; exact alias still pins to 1 (ORCH-M)', () => {
+    const scorer = scoresToScorer([{ id: 'cap-date', relevance: 0.8, effectEligible: true }, { id: 'cap-pay', relevance: 0.2, effectEligible: false }]);
+    assert.equal(scorer('x', toCandidate(dateF)).relevance, 0.8);
+    assert.equal(scorer('x', toCandidate(payF)).effectEligible, false, 'LLM can disqualify on effect');
+    assert.equal(scorer('x', toCandidate(search)).relevance, 0, 'an unrated candidate scores 0');
+    // an exact alias pins to 1 even if the model under-rated it
+    const low = scoresToScorer([{ id: 'cap-date', relevance: 0.1, effectEligible: true }]);
+    const r = low('posted today', toCandidate(dateF));
+    assert.equal(r.isExact, true);
+    assert.equal(r.relevance, 1);
+  });
+
+  it('validateBindings: option must resolve in vocabulary (snap exact); text accepted; misses → gaps (ORCH-M)', () => {
+    const cand = { id: 'c', params: [
+      { name: 'KEYWORD', kind: 'text', used: true },
+      { name: 'DATE', kind: 'option', used: true, vocabulary: ['Today', 'Last 3 days', 'Last 7 days'] },
+    ] };
+    const ok = validateBindings({ KEYWORD: 'developer', DATE: 'last 3 days' }, cand);
+    assert.equal(ok.bound.KEYWORD, 'developer');
+    assert.equal(ok.bound.DATE, 'Last 3 days', 'snapped to the exact captured label (case-insensitive match)');
+    assert.equal(ok.gaps.length, 0);
+    const bad = validateBindings({ DATE: 'last hour' }, cand);
+    assert.ok(!('DATE' in bad.bound), 'an out-of-vocabulary option is NOT applied');
+    assert.deepEqual(bad.gaps, [{ name: 'DATE', requested: 'last hour', reason: 'not-in-vocabulary' }]);
+    const empty = validateBindings({ KEYWORD: '' }, cand);
+    assert.equal(Object.keys(empty.bound).length, 0, 'an empty value is left to its default');
   });
 
   it('matchAsk: end-to-end funnel scopes to here then decides, with scoped counts', () => {

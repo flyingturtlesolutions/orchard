@@ -79,8 +79,14 @@ export function createSgLibrary({ getGroundId, getTabId, rerender } = {}) {
     for (const p of editable) {
       const isOpt = p.kind === 'option';
       const ttl = isOpt ? ' title="Re-choose by label — type any option shown in this dropdown"' : '';
+      // ORCH-V — when the option's vocabulary was captured at demo time, offer it as a datalist so re-choosing
+      // picks from the page's REAL options (not a guessed label).
+      const vocab = (isOpt && Array.isArray(p.vocabulary)) ? p.vocabulary : [];
+      const listId = vocab.length ? `dl-${escAttr(cap.id)}-${escAttr(p.name)}` : '';
+      const listAttr = listId ? ` list="${listId}"` : '';
+      const datalist = listId ? `<datalist id="${listId}">${vocab.map((o) => `<option value="${escAttr(o)}"></option>`).join('')}</datalist>` : '';
       h += `<label class="dbg-perspective-caplib-param"><span>${escHtml(p.label || p.name)}${isOpt ? ' ▾' : ''}</span>`
-        + `<input type="text" data-cap-param="${escAttr(cap.id)}" data-param-name="${escAttr(p.name)}" value="${escAttr(p.value ?? '')}" placeholder="${escAttr(p.value ?? '')}"${ttl} /></label>`;
+        + `<input type="text" data-cap-param="${escAttr(cap.id)}" data-param-name="${escAttr(p.name)}" value="${escAttr(p.value ?? '')}" placeholder="${escAttr(p.value ?? '')}"${listAttr}${ttl} />${datalist}</label>`;
     }
     for (const p of fixed) {
       h += `<div class="dbg-perspective-caplib-param-fixed">${escHtml(p.label || p.name)}: <b>${escHtml(String(p.value))}</b> <span class="dbg-perspective-ground-note">(fixed)</span></div>`;
