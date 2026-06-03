@@ -1,7 +1,7 @@
 /**
  * @file ConversationStore.js
  * @module ConversationStore
- * @version 2.19.0
+ * @version 2.19.1
  *
  * Persistence for chat conversations. Each conversation is stored as
  * `conv:<id>` in chrome.storage.local. A separate `conv:index` maintains
@@ -229,5 +229,20 @@ export const ConversationStore = {
     // clobber the delete with its own snapshot-based write.
     await chrome.storage.local.remove(convKey(id));
     await _removeFromIndex(id);
+  },
+
+  /**
+   * Delete ALL conversations and clear the index. Runs on the serialized index chain so it can't race a
+   * concurrent add/touch/title-update. Returns how many were removed.
+   * @returns {Promise<number>}
+   */
+  async deleteAll() {
+    return _serializeIndexOp(async () => {
+      const index = await _readIndex();
+      const ids = (Array.isArray(index) ? index : []).map((e) => e && e.id).filter(Boolean);
+      if (ids.length) await chrome.storage.local.remove(ids.map(convKey));
+      await _writeIndex([]);
+      return ids.length;
+    });
   },
 };

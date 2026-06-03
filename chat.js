@@ -145,6 +145,19 @@ $('btn-history').addEventListener('click', async () => {
 $('btn-close-history').addEventListener('click', _closeHistory);
 $('history-overlay').addEventListener('click', _closeHistory);
 
+// Delete ALL conversations from the history menu (confirm first; this can't be undone). Wipes the active
+// conversation too, then resets to the empty state — mirrors the per-item delete's active-conversation path.
+$('btn-delete-all-conversations').addEventListener('click', async () => {
+  const list = await ConversationStore.list();
+  if (!list.length) return;
+  if (!confirm(`Delete all ${list.length} conversation${list.length === 1 ? '' : 's'}? This can't be undone.`)) return;
+  await ConversationStore.deleteAll();
+  _clearCurrentConversation();
+  _resetConversation();
+  await renderSuggestionCards();
+  await _renderHistoryList();
+});
+
 async function _openHistory() {
   $('history-sidebar').classList.remove('hidden');
   $('history-overlay').classList.remove('hidden');
