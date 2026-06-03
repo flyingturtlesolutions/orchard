@@ -882,6 +882,17 @@ async function _orchNlFallback(msg, { tabId, groundId, ask }) {
 // by POINTING at the value (the picker); running it EXTRACTs + returns the value inline. A read has no side
 // effect, so it auto-runs without a confirm gate.
 
+// Heal a stale-tab content-script port (the tab's been open since an extension reload) by PING-then-reinject,
+// so START_PICK / EXTRACT actually reach the page instead of being silently dropped (the picker not appearing).
+async function _orchEnsureCS(tabId) {
+  if (typeof tabId !== 'number') return false;
+  const ping = () => new Promise((r) => { try { chrome.tabs.sendMessage(tabId, { type: 'PING' }, (p) => { void chrome.runtime.lastError; r(!!(p && (p.ready || p.success))); }); } catch { r(false); } });
+  if (await ping()) return true;
+  try { await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['ContentScripts/contentScript.js'] }); } catch { /* */ }
+  for (let i = 0; i < 6; i++) { await new Promise((r) => setTimeout(r, 250)); if (await ping()) return true; }
+  return false;
+}
+
 // Activate the element picker and resolve with the user's PICK_RESULT (or null on cancel/timeout).
 function _orchPickOnce({ tabId }) {
   return new Promise((resolve) => {
@@ -891,10 +902,13 @@ function _orchPickOnce({ tabId }) {
     const onMsg = (m) => { if (m && m.type === 'PICK_RESULT' && m.sessionId === sessionId) finish(m); };
     const timer = setTimeout(() => finish(null), 120000);
     // PICK_RESULT arrives back over runtime.onMessage (a content script can only runtime.sendMessage to the
-    // extension); but START_PICK must be delivered TO the content script, which is tabs.sendMessage, not runtime.
+    // extension); START_PICK must be delivered TO the content script (tabs.sendMessage) — and the script must be
+    // ALIVE (re-injected if the tab is stale), or the message is dropped and the picker silently never appears.
     chrome.runtime.onMessage.addListener(onMsg);
-    try { chrome.tabs.sendMessage(tabId, { type: 'START_PICK', payload: { sessionId, mode: 'target' } }, () => void chrome.runtime.lastError); }
-    catch { finish(null); }
+    _orchEnsureCS(tabId).then(() => {
+      try { chrome.tabs.sendMessage(tabId, { type: 'START_PICK', payload: { sessionId, mode: 'target' } }, () => void chrome.runtime.lastError); }
+      catch { finish(null); }
+    });
   });
 }
 
@@ -904,7 +918,10 @@ async function _orchObserveCapture(msg, { groundId, tabId, ask }) {
   const picked = await _orchPickOnce({ tabId });
   if (!picked || !picked.selector || picked.error) { _setMessageBody(msg, `Didn’t catch that${picked && picked.error ? ` (${picked.error})` : ''} — ask again to retry.`); return; }
   _setMessageBody(msg, 'Saving what to read…');
-  const res = await _orchReq('OBSERVE_CAPTURE', { tabId, groundId, ask, selector: picked.selector, label: picked.label || '', outputType: classifyReadAsk(ask).outputType });
+  // Prefer the VALUE-INDEPENDENT structural selector so the read is positional ("the first job"), not pinned to
+  // this instance's text (Indeed's aria-label selector matched only that one job title and broke on the next page).
+  const selector = picked.structuralSelector || picked.selector;
+  const res = await _orchReq('OBSERVE_CAPTURE', { tabId, groundId, ask, selector, label: picked.label || '', outputType: classifyReadAsk(ask).outputType });
   _setMessageBody(msg, (res && res.success && res.capability)
     ? `Got it — I’ll read that for “${ask}”. Ask again and I’ll fetch the value.`
     : `Couldn’t set that up${res && res.error ? ` — ${res.error}` : ''}.`);

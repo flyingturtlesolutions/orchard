@@ -667,6 +667,7 @@ export function createSgMessageHandlers(ctx) {
         if (!cap || cap.kind !== 'observation') { sendResponse({ success: false, error: 'observation not found' }); return; }
         const ex = (cap.observe && Array.isArray(cap.observe.extracts) && cap.observe.extracts[0]) || null;
         if (!ex || !ex.selector) { sendResponse({ success: false, error: 'observation has no extract selector' }); return; }
+        try { await ctx.ensureContentScript(tabId); } catch { /* */ }   // heal a stale-tab port before EXTRACT
         let res = null;
         try { res = await new Promise((r) => chrome.tabs.sendMessage(tabId, { type: 'EXECUTE_STEP', payload: { action: 'EXTRACT', selector: ex.selector } }, (x) => { void chrome.runtime.lastError; r(x); })); }
         catch (e) { sendResponse({ success: false, error: `extract failed: ${e.message}` }); return; }

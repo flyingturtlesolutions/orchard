@@ -15,7 +15,7 @@
  *
  * @module ContentScripts/contentScript
  * @author Agent HUB
- * @version 2.17.8
+ * @version 2.17.9
  */
 
 'use strict';
@@ -7923,10 +7923,16 @@ function startPicker(sessionId, opts = {}) {
     // verification uses IoU against pickedRect alone — UID match was
     // always a redundant signal and (as v2.74.299's log showed) could be
     // wrong anyway when sourced from INSPECT on an ambiguous selector.
+    // OBS-READ — a VALUE-INDEPENDENT structural selector (tag + STABLE class + :nth-of-type, never the
+    // aria-label/text that synthesizeSelector may fall back to on obfuscated markup). An OBSERVATION of "the first
+    // job title" wants the POSITION, not this instance's title text — so the read survives the list changing.
+    let structuralSelector = null;
+    try { structuralSelector = computeUniqueSelector(synthesisTarget) || null; } catch { /* */ }
     chrome.runtime.sendMessage({
       type: 'PICK_RESULT',
       sessionId: __pickerSessionId,
       selector,
+      structuralSelector,
       tagName: synthesisTarget.tagName.toLowerCase(),
       // v2.72.87 — Human-readable label extracted from the picked element.
       // v2.72.93 — Container-mode label is a comma-list of option labels.
