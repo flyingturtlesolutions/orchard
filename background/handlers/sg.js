@@ -20,6 +20,7 @@ import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
 import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved } from '../../Core/observedSegment.js';
+import { matchAsk } from '../../Core/orchMatch.js';                      // ORCH-M0 — HIT/MISS matcher core
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
 import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
@@ -361,6 +362,44 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, capability, perspectiveId: perspective.id, fragmentCount: recs.fragments.length, landmarkCount: landmarkRecords.length, paramCount: namedParams.length });
       } catch (err) {
         Logger.error('background', `DERIVE_OBSERVED_CAPABILITY failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // ORCH-M0 — the HIT/MISS bridge: given the user's ask + the live page, decide whether the grounded
+    // library already covers it (HIT → the caller REPLAYs that capability) or not (MISS → the caller asks for
+    // a demonstration). DECISION-ONLY: it never executes — execution reuses REPLAY_SG_CAPABILITY. The funnel
+    // (scope by Ground/Locale → rank → three-way gate w/ reversibility veto) is pure (Core/orchMatch.js); this
+    // handler just supplies the live page context + the library. Lexical scorer for now (the LLM select+bind
+    // call is ORCH-M); live precondition eval (the runnableHere seam, funnel stage 1) lands with ORCH-M too —
+    // here the Locale scope is the executability proxy. See docs/DESIGN_intent_orchestration.md §4.
+    ORCH_MATCH: async (payload, _sender, sendResponse) => {
+      try {
+        const { tabId, groundId = null, ask = '' } = payload ?? {};
+        if (!groundId || typeof ask !== 'string' || !ask.trim()) { sendResponse({ success: false, error: 'groundId + ask required' }); return; }
+        let url = '';
+        if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); url = t?.url ?? ''; } catch { /* */ } }
+        const localeUrl = ctx.normalizeUrl(url);
+        const caps = await ctx.readSgCapabilities(groundId);
+        const result = matchAsk(ask, Array.isArray(caps) ? caps : [], {
+          currentGroundId: groundId,
+          currentLocaleUrl: localeUrl,
+          sameLocale: (a, b) => ctx.normalizeUrl(a) === ctx.normalizeUrl(b),
+        });
+        const lean = (c) => (c ? { id: c.id, intent: c.intent, strategyId: c.strategyId, reversible: c.reversible, params: c.params } : null);
+        Logger.info('background', `ORCH_MATCH — "${String(ask).slice(0, 60)}" @ ${localeUrl || '(no url)'} → ${result.decision}/${result.reason}${result.candidate ? ` (${result.candidate.id})` : ''} [here ${result.scoped.here}, reachable ${result.scoped.reachable}, off ${result.scoped.off}]`);
+        sendResponse({
+          success: true,
+          decision: result.decision,            // 'auto' | 'propose' | 'miss'
+          reason: result.reason,                // doubles as the assistant's explanation copy
+          candidate: lean(result.candidate),
+          capabilityId: result.candidate ? result.candidate.id : null,
+          alternatives: (result.alternatives || []).map((a) => ({ id: a.id, intent: a.intent })),
+          scoped: result.scoped,
+          localeUrl,
+        });
+      } catch (err) {
+        Logger.error('background', `ORCH_MATCH failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },
