@@ -803,17 +803,17 @@ function _orchFeedbackBar(msg) {
 function _orchConfirmPlan(msg, { tabId, groundId, steps, gaps = [] }) {
   const fmt = (b) => Object.keys(b || {}).length ? ` (${Object.entries(b).map(([k, v]) => `${k}=${v}`).join(', ')})` : '';
   const list = steps.map((s, i) => `${i + 1}. ${s.intent}${fmt(s.bindings)}`).join('\n');
-  const head = steps.length ? `I’ll do ${steps.length} step${steps.length > 1 ? 's' : ''} in order:\n${list}` : 'I don’t have a capability for this yet.';
-  // HONEST partial coverage — name the constraints no capability covers, instead of silently dropping them.
-  const gapNote = gaps.length ? `\n\n⚠ I don’t have: ${gaps.join(', ')} — I’ll skip ${gaps.length > 1 ? 'them' : 'it'} (or show me).` : '';
+  const head = steps.length ? `I’ll do ${steps.length} step${steps.length > 1 ? 's' : ''} in order:\n${list}` : 'I don’t have a saved capability for this yet — I can try to work it out from the page.';
+  // HONEST partial coverage — name the constraints no capability covers; we'll TRY them via the NL fallback after.
+  const gapNote = gaps.length ? `\n\n⚠ Not saved yet: ${gaps.join(', ')} — I’ll try ${gaps.length > 1 ? 'these' : 'this'} from the page after.` : '';
   _setMessageBody(msg, head + gapNote);
   const bar = _orchActionBar(msg);
-  if (steps.length) bar.appendChild(_mkBtn(steps.length > 1 ? `Run all ${steps.length}` : 'Run it', () => { bar.remove(); _orchRunPlan(msg, { tabId, groundId, steps }); }));
-  for (const g of gaps.slice(0, 2)) bar.appendChild(_mkBtn(`● Show me: ${g.length > 22 ? g.slice(0, 22) + '…' : g}`, () => { bar.remove(); _orchRecordFlow(msg, { groundId, tabId, ask: g }); }));
+  if (steps.length) bar.appendChild(_mkBtn(steps.length > 1 ? `Run all ${steps.length}` : 'Run it', () => { bar.remove(); _orchRunPlan(msg, { tabId, groundId, steps, gaps }); }));
+  else if (gaps.length) bar.appendChild(_mkBtn('✨ Try to work it out', () => { bar.remove(); _orchTryGaps(msg, { tabId, groundId, gaps }); }));
   bar.appendChild(_mkBtn('Cancel', () => { bar.remove(); _setMessageBody(msg, 'Okay — cancelled.'); }));
 }
 
-async function _orchRunPlan(msg, { tabId, groundId, steps }) {
+async function _orchRunPlan(msg, { tabId, groundId, steps, gaps = [] }) {
   const total = steps.length;
   for (let i = 0; i < total; i++) {
     const s = steps[i];
@@ -828,7 +828,53 @@ async function _orchRunPlan(msg, { tabId, groundId, steps }) {
     _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId: s.capabilityId, phrase: s.clause || s.intent });   // flywheel per step
     await new Promise((r) => setTimeout(r, 800));   // settle between steps (navigation / render)
   }
+  // NL FALLBACK — the parts no saved capability covered now run through the NL pipeline ON THE RESULTING PAGE
+  // (where the filters live). Offer rather than auto-run (precision-first: an unproven plan touching the page).
+  if (gaps.length) {
+    _setMessageBody(msg, `${total ? `Ran ${total} step${total > 1 ? 's' : ''}. ` : ''}I haven’t saved: ${gaps.join(', ')} — try to work ${gaps.length > 1 ? 'them' : 'it'} out from the page?`);
+    const bar = _orchActionBar(msg);
+    bar.appendChild(_mkBtn(`✨ Try ${gaps.length > 1 ? 'them' : 'it'}`, () => { bar.remove(); _orchTryGaps(appendMessage({ role: 'assistant', body: '' }), { tabId, groundId, gaps }); }));
+    bar.appendChild(_mkBtn('● Show me instead', () => { bar.remove(); _orchRecordFlow(appendMessage({ role: 'assistant', body: '' }), { groundId, tabId, ask: gaps[0] }); }));
+    return;
+  }
   _setMessageBody(msg, `Done — ran all ${total} steps.`);
+}
+
+// ── ORCH-X NL FALLBACK — resolve a gap fresh from the page (the NL pipeline), promote it on a verified pass ─────
+// A gap (a constraint with no saved capability) runs through RUN_SG_TRIAL[tier2] = comprehend → match to the
+// Locale → bind → execute on the live tab → POSTCONDITION-verify. On a verified pass we ACCEPT it (promote to a
+// durable capability), so next time it's a CACHE HIT. On any failure (no Locale / unmatched / postcondition not
+// held) it falls to "show me the right way". This is the "capabilities as cache, NL as compiler" loop closing.
+async function _orchTryGaps(msg, { tabId, groundId, gaps }) {
+  for (let i = 0; i < gaps.length; i++) {
+    const m = i === 0 ? msg : appendMessage({ role: 'assistant', body: '' });
+    await _orchNlFallback(m, { tabId, groundId, ask: gaps[i] });
+  }
+}
+
+async function _orchNlFallback(msg, { tabId, groundId, ask }) {
+  _setMessageBody(msg, `Working out “${ask}” from the page…`);
+  const res = await _orchReq('RUN_SG_TRIAL', { tabId, groundId, intent: ask, tier2: true });
+  if (!res || res.success === false) {
+    _setMessageBody(msg, `I couldn’t work out “${ask}”${res && res.error ? ` — ${res.error}` : ''}.`);
+    _orchOfferRecord(msg, { groundId, tabId, ask, label: '● Show me the right way' });
+    return false;
+  }
+  const passed = !!(res.tier2Score && res.tier2Score.verdict === 'tier2-pass' && res.acceptEligible);
+  if (!passed) {
+    _setMessageBody(msg, `I tried, but couldn’t confirm “${ask}” worked here — want to show me?`);
+    _orchOfferRecord(msg, { groundId, tabId, ask, label: '● Show me the right way' });
+    return false;
+  }
+  // Verified pass → PROMOTE to a durable capability (cache fill) + seed the alias so the next ask is instant.
+  let saved = '';
+  try {
+    const acc = await _orchReq('ACCEPT_SG_TRIAL', { groundId, tabId });
+    const capId = acc && acc.success && acc.accepted && ((acc.capability && acc.capability.id) || acc.capabilityId);
+    if (capId) { _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId: capId, phrase: ask }); saved = ' — saved for next time'; }
+  } catch { /* */ }
+  _setMessageBody(msg, `Done — worked out “${ask}” from the page${saved}.`);
+  return true;
 }
 
 // ── OBS-READ — observations (the KNOW half) ─────────────────────────────────────────────────────────────────
@@ -1079,8 +1125,12 @@ async function _tryGroundedTurn(text) {
       bar.appendChild(_mkBtn('● Show me actions instead', () => { bar.remove(); _orchRecordFlow(thinking, { groundId: m.groundId, tabId: tab.id, ask: text }); }));
       return true;
     }
-    _setMessageBody(thinking, turn.say);
-    _orchOfferRecord(thinking, { groundId: m.groundId, tabId: tab.id, ask: text });   // grounded MISS → "show me"
+    // ORCH-X NL fallback — no saved capability, but the page is Explored: offer to work it out FRESH from the
+    // page (RUN_SG_TRIAL) before falling to "show me". Precision-first: the user opts in (an unproven plan).
+    _setMessageBody(thinking, `I don’t have that saved here. I can try to work it out from the page, or you can show me.`);
+    const rbar = _orchActionBar(thinking);
+    rbar.appendChild(_mkBtn('✨ Try it from the page', () => { rbar.remove(); _orchNlFallback(thinking, { groundId: m.groundId, tabId: tab.id, ask: text }); }));
+    rbar.appendChild(_mkBtn('● Show me', () => { rbar.remove(); _orchRecordFlow(thinking, { groundId: m.groundId, tabId: tab.id, ask: text }); }));
     return true;
   }
   if (turn.action === 'navigate') { _setMessageBody(thinking, turn.say); return true; }
