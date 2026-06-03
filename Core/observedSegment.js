@@ -14,7 +14,7 @@
 //     gives nicer labels later; this keeps it runnable without an LLM.
 //
 // @module Core/observedSegment
-// @version 2.74.661
+// @version 2.74.662
 
 const _DISCLOSURE_HINT = /filter|menu|sort|posted|date|pay|salary|wage|type|level|experience|distance|remote|radius|category|options?|dropdown|expand|more/i;
 
@@ -150,34 +150,76 @@ export function obsParamName(key) {
   return n || 'PARAM';
 }
 
+/** OBS-4c — the CONTAINER selector for an option click: the option's parent (strip the last TOP-LEVEL CSS
+ *  combinator — `>` `+` `~` or a descendant space, ignoring combinators inside `[…]` / `(…)`). CLICK_BY_LABEL
+ *  searches this container for a role=option/menuitem/interactive descendant whose label matches, so
+ *  re-choosing works by LABEL, not by the demonstrated element's fragile position. Returns null for a single
+ *  simple selector (no derivable container → the option stays literal, no regression). PURE.
+ *  e.g. '#date>li:nth-of-type(3)' → '#date'; '.menu .item' → '.menu'; '#solo' → null. */
+export function optionContainerSelector(selector) {
+  const s = String(selector || '').trim();
+  if (!s) return null;
+  let depth = 0, cut = -1;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '[' || c === '(') depth++;
+    else if (c === ']' || c === ')') depth = Math.max(0, depth - 1);
+    else if (depth === 0 && (c === '>' || c === '+' || c === '~' || c === ' ')) cut = i;
+  }
+  if (cut <= 0) return null;
+  const head = s.slice(0, cut).replace(/[>+~\s]+$/, '').trim();
+  return head || null;
+}
+
 /**
- * OBS-4b — parameterize a demonstration's TEXT inputs so it RE-RUNS with NEW values (a demo becomes a
- * reusable template, not a one-shot). PURE. For each text param, the TYPE action that typed its demonstrated
- * value (matched by selector) has its `value` rewritten to `{{NAME}}` — TemplateWalker substitutes that from
- * the strategy param at replay (via InjectionService.injectParams). The demonstrated value stays on the param
- * as its DEFAULT, so a no-override replay reproduces the demonstration exactly. Option params are left literal
- * in v1: a chosen <li role=option> is encoded by WHICH element is clicked (selector), not a typed value — so
- * re-choosing needs find-by-label at replay (deferred to OBS-4c); the param is still surfaced (read-only).
- * Returns NEW phases (originals untouched) and the params enriched with a unique `name` and a `used` flag.
+ * OBS-4b/4c — parameterize a demonstration's INPUTS so it RE-RUNS with NEW values (a demo becomes a reusable
+ * template, not a one-shot). PURE. Two kinds of input are templated, each gaining a `{{NAME}}` the strategy
+ * param fills at replay (via InjectionService.injectParams):
+ *   • TEXT (OBS-4b) — the TYPE action that typed the value (matched by selector) gets `value` → `{{NAME}}`.
+ *   • OPTION (OBS-4c) — two dropdown styles. A custom <li role=option> CLICK becomes a CLICK_BY_LABEL scoped
+ *     to the dropdown CONTAINER (the option selector's parent) with `value` → `{{NAME}}`: re-choosing finds the
+ *     option by LABEL in the open container (the landmarkRef is dropped — the target is the label). A native
+ *     <select> SELECT just gets `value` → `{{NAME}}`, like a text input. An option whose CLICK has no derivable
+ *     container stays literal (param `used:false`, surfaced fixed).
+ * The demonstrated value stays on each param as its DEFAULT, so a no-override replay reproduces the demo.
+ * Returns NEW phases (originals untouched) and the params enriched with a unique `name`, a `used` flag, and
+ * (for templated options) the `container` selector.
  * @param {Array<{label:string, actions:object[]}>} phases
  * @param {Array<{key:string,label:string,kind:string,value:string,selector:(string|null)}>} params
- * @returns {{phases:Array, params:Array<{key,label,kind,value,selector,name,used}>}}
+ * @returns {{phases:Array, params:Array<{key,label,kind,value,selector,name,used,container?}>}}
  */
 export function parameterizeObserved(phases, params) {
   const ps = (Array.isArray(params) ? params : []).map((p) => ({ ...p, name: obsParamName(p.key), used: false }));
   // Dedupe placeholder names (two fields could slug to the same NAME) — append _2, _3…
   const seenName = new Set();
   for (const p of ps) { let nm = p.name, n = 2; while (seenName.has(nm)) nm = `${p.name}_${n++}`; seenName.add(nm); p.name = nm; }
-  // Index TEXT params by selector — the TYPE action whose selector matches gets templated.
+  // Index params by selector: TEXT → TYPE substitution; OPTION → CLICK_BY_LABEL (custom) or SELECT-value
+  // (native). The container is derived per-action, only for the CLICK (custom dropdown) case.
   const textBySel = new Map();
-  for (const p of ps) if (p.kind === 'text' && p.selector) textBySel.set(p.selector, p);
+  const optBySel = new Map();
+  for (const p of ps) {
+    if (!p.selector) continue;
+    if (p.kind === 'text') textBySel.set(p.selector, p);
+    else if (p.kind === 'option') optBySel.set(p.selector, p);
+  }
   const outPhases = (Array.isArray(phases) ? phases : []).map((ph) => ({
     ...ph,
     actions: (Array.isArray(ph.actions) ? ph.actions : []).map((a) => {
-      if (a && a.action === 'TYPE' && a.selector && textBySel.has(a.selector)) {
-        const p = textBySel.get(a.selector);
-        p.used = true;
+      if (!a || !a.selector) return a;
+      if (a.action === 'TYPE' && textBySel.has(a.selector)) {
+        const p = textBySel.get(a.selector); p.used = true;
         return { ...a, value: `{{${p.name}}}` };
+      }
+      if (optBySel.has(a.selector)) {
+        const p = optBySel.get(a.selector);
+        if (a.action === 'SELECT') {                  // native <select> — substitute the value
+          p.used = true;
+          return { ...a, value: `{{${p.name}}}` };
+        }
+        if (a.action === 'CLICK') {                   // custom dropdown — find-by-label in the open container
+          const container = optionContainerSelector(p.selector);
+          if (container) { p.container = container; p.used = true; return { action: 'CLICK_BY_LABEL', selector: container, value: `{{${p.name}}}` }; }
+        }
       }
       return a;
     }),

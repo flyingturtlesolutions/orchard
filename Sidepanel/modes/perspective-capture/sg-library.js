@@ -66,18 +66,21 @@ export function createSgLibrary({ getGroundId, getTabId, rerender } = {}) {
     rerender?.();
   }
 
-  /** OBS-4b — the inline "re-run with values" form for a parameterized observed capability. Text params are
-   *  editable (pre-filled with the demonstrated value); option choices are shown read-only (v1 — re-choosing
-   *  an option needs find-by-label at replay, OBS-4c). Returns '' when the capability has no params. */
+  /** OBS-4b/4c — the inline "re-run with values" form for a parameterized observed capability. Every templated
+   *  param is editable, pre-filled with the demonstrated value: text inputs (OBS-4b) and option choices
+   *  re-chosen by label (OBS-4c — type any label from that dropdown). An option whose container couldn't be
+   *  derived stays read-only (fixed). Returns '' when the capability has no params. */
   const renderParamForm = (cap) => {
     const ps = Array.isArray(cap.params) ? cap.params : [];
-    const text = ps.filter((p) => p && p.used && p.kind === 'text');
+    const editable = ps.filter((p) => p && p.used);
     const fixed = ps.filter((p) => p && !p.used && p.value);
-    if (!text.length && !fixed.length) return '';
+    if (!editable.length && !fixed.length) return '';
     let h = `<div class="dbg-perspective-caplib-params">`;
-    for (const p of text) {
-      h += `<label class="dbg-perspective-caplib-param"><span>${escHtml(p.label || p.name)}</span>`
-        + `<input type="text" data-cap-param="${escAttr(cap.id)}" data-param-name="${escAttr(p.name)}" value="${escAttr(p.value ?? '')}" placeholder="${escAttr(p.value ?? '')}" /></label>`;
+    for (const p of editable) {
+      const isOpt = p.kind === 'option';
+      const ttl = isOpt ? ' title="Re-choose by label — type any option shown in this dropdown"' : '';
+      h += `<label class="dbg-perspective-caplib-param"><span>${escHtml(p.label || p.name)}${isOpt ? ' ▾' : ''}</span>`
+        + `<input type="text" data-cap-param="${escAttr(cap.id)}" data-param-name="${escAttr(p.name)}" value="${escAttr(p.value ?? '')}" placeholder="${escAttr(p.value ?? '')}"${ttl} /></label>`;
     }
     for (const p of fixed) {
       h += `<div class="dbg-perspective-caplib-param-fixed">${escHtml(p.label || p.name)}: <b>${escHtml(String(p.value))}</b> <span class="dbg-perspective-ground-note">(fixed)</span></div>`;

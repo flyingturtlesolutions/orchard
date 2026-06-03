@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildRawAction, coalesce } from './observedTrace.js';
-import { segmentTrace, opToPhases, stepToAction, deriveObservedParams, parameterizeObserved, obsParamName } from './observedSegment.js';
+import { segmentTrace, opToPhases, stepToAction, deriveObservedParams, parameterizeObserved, obsParamName, optionContainerSelector } from './observedSegment.js';
 import { buildTier2CapabilityRecords } from './capabilitySynth.js';
 
 // `A` mirrors the real recorder: a click passes its accessibleName as the value (kept only when the click
@@ -125,7 +125,7 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     assert.equal(obsParamName(''), 'PARAM');
   });
 
-  it('parameterizeObserved: text inputs → {{NAME}} placeholders; option choices stay literal (OBS-4b)', () => {
+  it('parameterizeObserved: text inputs → {{NAME}} placeholders, input phases untouched (OBS-4b)', () => {
     const op = segmentTrace(coalesce(raw));
     const phasesRaw = opToPhases(op);
     const { phases, params } = parameterizeObserved(phasesRaw, deriveObservedParams(op));
@@ -135,12 +135,54 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     // the TYPE action now carries the placeholder, not the literal value
     const qType = phases[0].actions.filter((a) => a.action !== 'SCROLL_TO').find((a) => a.action === 'TYPE' && a.selector === '#q');
     assert.equal(qType.value, `{{${qP.name}}}`, 'TYPE value rewritten to the placeholder');
-    // the option choice is left literal (a CLICK), its param unused (find-by-label deferred to OBS-4c)
-    const optP = params.find((p) => p.kind === 'option');
-    assert.equal(optP.used, false, 'option params are not templated in v1');
-    // purity — the input phases are untouched
+    // purity — the input phases are untouched (no in-place mutation of TYPE value or option CLICK)
     const origQ = phasesRaw[0].actions.filter((a) => a.action !== 'SCROLL_TO').find((a) => a.action === 'TYPE' && a.selector === '#q');
     assert.equal(origQ.value, 'support', 'parameterizeObserved does not mutate its input');
+    assert.ok(phasesRaw[1].actions.some((a) => a.action === 'CLICK' && a.selector === '#date>li:nth-of-type(3)'), 'original option CLICK preserved on the input');
+  });
+
+  it('optionContainerSelector: strips the last top-level combinator to the dropdown container (OBS-4c)', () => {
+    assert.equal(optionContainerSelector('#date>li:nth-of-type(3)'), '#date');
+    assert.equal(optionContainerSelector('#date > li:nth-of-type(3)'), '#date');
+    assert.equal(optionContainerSelector('.menu .item'), '.menu');
+    assert.equal(optionContainerSelector("div[data-id='a>b'] > li"), "div[data-id='a>b']");
+    assert.equal(optionContainerSelector('#solo'), null, 'a single simple selector has no derivable container');
+    assert.equal(optionContainerSelector(''), null);
+  });
+
+  it('parameterizeObserved: an option choice → CLICK_BY_LABEL scoped to its container, label = {{NAME}} (OBS-4c)', () => {
+    const op = segmentTrace(coalesce(raw));
+    const { phases, params } = parameterizeObserved(opToPhases(op), deriveObservedParams(op));
+    const optP = params.find((p) => p.kind === 'option');
+    assert.ok(optP && optP.used === true, 'the date option is now templated (re-choosable)');
+    assert.equal(optP.value, 'Last 3 days', 'demonstrated label preserved as default');
+    assert.equal(optP.container, '#date', 'container derived from the option selector');
+    // the date-filter phase's option CLICK became a CLICK_BY_LABEL within #date with the placeholder
+    const dateReal = phases[1].actions.filter((a) => a.action !== 'SCROLL_TO');
+    const byLabel = dateReal.find((a) => a.action === 'CLICK_BY_LABEL');
+    assert.ok(byLabel, 'option click lowered to CLICK_BY_LABEL');
+    assert.equal(byLabel.selector, '#date', 'CLICK_BY_LABEL targets the container');
+    assert.equal(byLabel.value, `{{${optP.name}}}`, 'label is the placeholder');
+    assert.ok(!byLabel.landmarkRef && !byLabel.landmark, 'no per-option landmark on a by-label click');
+    // the disclosure-open CLICK ("Date posted filter") is untouched (not a param)
+    assert.ok(dateReal.some((a) => a.action === 'CLICK'), 'the disclosure-open click stays a literal CLICK');
+  });
+
+  it('parameterizeObserved: a native <select> option → SELECT value templated to {{NAME}} (OBS-4c)', () => {
+    const sel = [
+      buildRawAction({ domKind: 'change', value: 'CA', url: 'u', target: { tagName: 'SELECT', role: 'combobox', accessibleName: 'State', selector: '#state' } }),
+      buildRawAction({ domKind: 'click', value: 'Go', url: 'u', target: { role: 'button', accessibleName: 'Go', selector: '#go' } }),
+      buildRawAction({ domKind: 'submit', url: 'u', target: { selector: '#f' } }),
+      buildRawAction({ domKind: 'navigate', url: 'u/done', from: 'u' }),
+    ];
+    const op = segmentTrace(coalesce(sel));
+    const { phases, params } = parameterizeObserved(opToPhases(op), deriveObservedParams(op));
+    const stateP = params.find((p) => p.selector === '#state');
+    assert.ok(stateP && stateP.kind === 'option' && stateP.used === true, 'native select option is templated');
+    assert.equal(stateP.value, 'CA', 'demonstrated value preserved as default');
+    assert.ok(!stateP.container, 'a native select has no container (value substitution, not find-by-label)');
+    const selAct = phases[0].actions.filter((a) => a.action !== 'SCROLL_TO').find((a) => a.action === 'SELECT');
+    assert.equal(selAct.value, `{{${stateP.name}}}`, 'SELECT value rewritten to the placeholder');
   });
 
   it('buildTier2CapabilityRecords wires params: per-fragment bindings from real placeholders + strategy.params union (OBS-4b)', () => {
@@ -148,12 +190,15 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     const { phases, params } = parameterizeObserved(opToPhases(op), deriveObservedParams(op));
     const recs = buildTier2CapabilityRecords(phases, { groundId: 'g1', strategyId: 's1', fragmentIds: ['f1', 'f2'], name: 'cap', goal: 'cap', params });
     const qName = params.find((p) => p.selector === '#q').name;
-    // fragment 0 (search) declares the templated params it actually uses; fragment 1 (date filter) declares none
+    const optName = params.find((p) => p.kind === 'option').name;
+    // fragment 0 (search) declares its text params; fragment 1 (date filter) declares the OBS-4c option param
     assert.ok(recs.fragments[0].params.includes(qName), 'search fragment declares its templated param');
-    assert.deepEqual(recs.fragments[1].params, [], 'literal (option-only) fragment declares no params');
+    assert.ok(recs.fragments[1].params.includes(optName), 'date-filter fragment declares its CLICK_BY_LABEL option param (OBS-4c)');
     assert.deepEqual(recs.strategy.fragmentSteps[0].paramBindings[qName], { kind: 'strategy_param', name: qName });
-    assert.deepEqual(recs.strategy.fragmentSteps[1].paramBindings, {});
+    assert.deepEqual(recs.strategy.fragmentSteps[1].paramBindings[optName], { kind: 'strategy_param', name: optName });
     const sp = recs.strategy.params.find((p) => p.name === qName);
     assert.ok(sp && sp.kind === 'scalar' && sp.required === false && sp.default === 'support', 'strategy param: scalar, optional, demonstrated default');
+    const op2 = recs.strategy.params.find((p) => p.name === optName);
+    assert.equal(op2.default, 'Last 3 days', 'option strategy param carries the demonstrated label as default');
   });
 });
