@@ -398,7 +398,13 @@ export function createSgMessageHandlers(ctx) {
         }
         if (!gid) { sendResponse({ success: true, decision: 'miss', reason: 'no-ground', candidate: null, capabilityId: null, bindings: {}, gaps: [], alternatives: [], scoped: { here: 0, reachable: 0, off: 0 }, localeUrl }); return; }
         const caps = await ctx.readSgCapabilities(gid);
-        const sameLocale = (a, b) => ctx.normalizeUrl(a) === ctx.normalizeUrl(b);
+        // ORCH — scope "here" by SITE (origin), not the demo's exact path. Many capabilities (a global search
+        // bar, site nav) work from ANY page of the Ground, so pinning them to the demo URL wrongly hides them
+        // ("search vectors" lived on another page than "search music", though both are search options
+        // everywhere). Landmark recovery + confirm-first + graceful failure handle a capability that genuinely
+        // needs a different page. Off-Ground was already filtered, so same-origin ≈ same Ground.
+        const _origin = (u) => { try { return new URL(u).origin; } catch { return ''; } };
+        const sameLocale = (a, b) => { const oa = _origin(a), ob = _origin(b); return (oa && ob) ? oa === ob : ctx.normalizeUrl(a) === ctx.normalizeUrl(b); };
         // ORCH-G — read the confirmation stream once; per-candidate health graduates the auto-fire bar.
         let outcomeStream = [];
         try { if (typeof ctx.readOutcomes === 'function') outcomeStream = (await ctx.readOutcomes(gid)) || []; } catch { /* */ }
@@ -408,22 +414,25 @@ export function createSgMessageHandlers(ctx) {
           return cand;
         }).filter(Boolean);
         const parts = scopeAndPartition(projected, { currentGroundId: gid, currentLocaleUrl: localeUrl, sameLocale });
-        // ORCH-M — smart scorer over the runnable-here set. Cheap paths skip the LLM: an exact-alias short-circuit
-        // (deterministic hit) and an empty here-set. Otherwise one structured select+bind call; if the LLM is
-        // unavailable/fails, `scorer` stays undefined and rankAndDecide uses the lexical default.
+        // ORCH — rank over ALL same-Ground capabilities (here + reachable). The exact-locale "here vs reachable"
+        // split produced "go to another page" dead-ends for site-wide affordances (search, login, join) and
+        // hid real matches; relevance ranking + confirm-first + the origin-relaxed REPLAY drift guard + landmark
+        // recovery decide whether it runs. Off-Ground stays excluded.
+        const candidates = [...parts.here, ...parts.reachable];
         let scorer; let llm = null;
-        const aliasHit = parts.here.some((c) => (c.aliases || []).some((al) => normalizeAliasPhrase(al) === normalizeAliasPhrase(ask)));
-        if (parts.here.length && !aliasHit) {
-          try { llm = await AnthropicService.matchCapability({ ask, candidates: parts.here }); } catch { /* */ }
+        const aliasHit = candidates.some((c) => (c.aliases || []).some((al) => normalizeAliasPhrase(al) === normalizeAliasPhrase(ask)));
+        if (candidates.length && !aliasHit) {
+          try { llm = await AnthropicService.matchCapability({ ask, candidates }); } catch { /* */ }
           if (llm) scorer = scoresToScorer(llm.scores);
         }
-        const decision = rankAndDecide(ask, parts.here, { ...(scorer ? { score: scorer } : {}), now: Date.now() });
+        const decision = rankAndDecide(ask, candidates, { ...(scorer ? { score: scorer } : {}), now: Date.now() });
         // ORCH-M — validate the LLM's option bindings against the chosen candidate's captured vocabulary
         // (anti-hallucination): in-vocab values are snapped + returned as `bindings`; misses surface as `gaps`.
         let bindings = {}; let gaps = [];
         if (decision.candidate && llm && llm.bindings) { const v = validateBindings(llm.bindings, decision.candidate); bindings = v.bound; gaps = v.gaps; }
         const lean = (c) => (c ? { id: c.id, intent: c.intent, strategyId: c.strategyId, reversible: c.reversible, params: c.params } : null);
-        const scoped = { here: parts.here.length, reachable: parts.reachable.length, off: parts.off.length };
+        // reachable folded into here → the chat never says "go to another page" (planAssistantTurn keys navigate off reachable>0).
+        const scoped = { here: candidates.length, reachable: 0, off: parts.off.length };
         const via = llm ? 'llm' : (aliasHit ? 'alias' : 'lexical');
         Logger.info('background', `ORCH_MATCH — "${String(ask).slice(0, 60)}" @ ${localeUrl || '(no url)'} → ${decision.decision}/${decision.reason}${decision.candidate ? ` (${decision.candidate.id})` : ''} [${via}; here ${scoped.here}, reachable ${scoped.reachable}, off ${scoped.off}]`);
         sendResponse({
@@ -488,9 +497,13 @@ export function createSgMessageHandlers(ctx) {
         }
         let liveUrl = '';
         if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); liveUrl = t?.url ?? ''; } catch { /* */ } }
-        // Page-drift guard — replay binds the capability's page; refuse to run on whatever else loaded.
-        if (cap.localeUrl && liveUrl && ctx.normalizeUrl(liveUrl) !== ctx.normalizeUrl(cap.localeUrl)) {
-          sendResponse({ success: true, ran: false, reason: `the page is now "${String(liveUrl).slice(0, 80)}" but this capability targets "${String(cap.localeUrl).slice(0, 80)}" — navigate there and re-run` });
+        // Page-drift guard — refuse only on a different SITE (origin), not a different path. A demonstrated
+        // capability often works site-wide (a global search bar, nav); landmark recovery finds the controls
+        // wherever they are, and a step that genuinely needs another page fails gracefully. Cross-origin is the
+        // real "wrong place" — that we still refuse.
+        const _orig = (u) => { try { return new URL(u).origin; } catch { return ''; } };
+        if (cap.localeUrl && liveUrl && _orig(liveUrl) && _orig(cap.localeUrl) && _orig(liveUrl) !== _orig(cap.localeUrl)) {
+          sendResponse({ success: true, ran: false, reason: `this capability is for ${_orig(cap.localeUrl)} but you're on ${_orig(liveUrl)} — go there and re-run` });
           return;
         }
         // Preferred: run the saved, landmark-backed Strategy (the promoted library entity).

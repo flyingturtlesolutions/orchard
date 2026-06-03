@@ -14,7 +14,7 @@
 //     gives nicer labels later; this keeps it runnable without an LLM.
 //
 // @module Core/observedSegment
-// @version 2.74.667
+// @version 2.74.678
 
 const _DISCLOSURE_HINT = /filter|menu|sort|posted|date|pay|salary|wage|type|level|experience|distance|remote|radius|category|options?|dropdown|expand|more/i;
 
@@ -79,8 +79,7 @@ export function segmentTrace(trace) {
       if (acts[i + 1] && acts[i + 1].kind === 'navigate') continue;
       flush(a.url || ''); fromUrl = a.url || fromUrl; continue;
     }
-    if (a.kind === 'scroll') continue;   // OBS-4 — recorded for trace fidelity, not a step (replay scrolls via SCROLL_TO)
-    cur.push(a);
+    cur.push(a);   // includes 'scroll' — kept so a PURE-scroll demo has a step; opToPhases drops INCIDENTAL scrolls
   }
   flush('');   // trailing fragment (a final action with no navigation — e.g. a filter that applied in place)
   return { tier: 'observed', nodes };
@@ -94,6 +93,11 @@ export function segmentTrace(trace) {
 export function stepToAction(a) {
   if (!a) return null;
   const t = a.target || {};
+  // A page SCROLL replays as a window SCROLL_TO to where the viewport settled (no selector → window scroll).
+  if (a.kind === 'scroll') {
+    const y = t.scrollY;
+    return { action: 'SCROLL_TO', value: Number.isFinite(y) ? `${Math.round(y)}px` : 'bottom' };
+  }
   const sel = t.selector;
   if (!sel) return null;
   const lm = (t.role && t.accessibleName)
@@ -269,14 +273,21 @@ export function describeTraceInput(phases, params) {
  *  since a demonstration spans pages (search on the homepage, filter on the results). PURE. */
 export function opToPhases(op) {
   const nodes = (op && Array.isArray(op.nodes)) ? op.nodes : [];
-  return nodes.filter((n) => n && n.type === 'fragment').map((n) => ({
-    label: n.label,
-    url: n.from || (Array.isArray(n.steps) && n.steps[0] && n.steps[0].url) || '',
-    // OBS-4 — prepend an optional SCROLL_TO before each action so replay reaches an element the user had to
-    // scroll to (the demonstration's scrolls don't transfer across viewports; SCROLL_TO is viewport-safe).
-    // A SCROLL_TO on a revealed option runs AFTER its disclosure-open action, so order stays correct; an
-    // optional miss is harmless (a not-yet-present element is skipped).
-    actions: (Array.isArray(n.steps) ? n.steps : []).map(stepToAction).filter(Boolean)
-      .flatMap((a) => (a.selector ? [{ action: 'SCROLL_TO', selector: a.selector, optional: true }, a] : [a])),
-  }));
+  return nodes.filter((n) => n && n.type === 'fragment').map((n) => {
+    const all = Array.isArray(n.steps) ? n.steps : [];
+    // A scroll is INCIDENTAL when the phase also has real actions (you scrolled to reach a control — replay
+    // reaches it via the per-action SCROLL_TO). But a PURE-scroll phase ("scroll down the page") IS the scroll,
+    // so keep it. (deriveObservedParams + landmark build ignore scroll steps.)
+    const nonScroll = all.filter((s) => s && s.kind !== 'scroll');
+    const steps = nonScroll.length ? nonScroll : all;
+    return {
+      label: n.label,
+      url: n.from || (all[0] && all[0].url) || '',
+      // OBS-4 — prepend an optional SCROLL_TO before each ELEMENT action so replay reaches a control the user
+      // had to scroll to (viewport-safe; an optional miss is harmless). A window SCROLL_TO (no selector) emits
+      // as-is.
+      actions: steps.map(stepToAction).filter(Boolean)
+        .flatMap((a) => (a.selector ? [{ action: 'SCROLL_TO', selector: a.selector, optional: true }, a] : [a])),
+    };
+  });
 }

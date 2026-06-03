@@ -718,13 +718,15 @@ async function _orchRun(msg, { groundId, capabilityId, intent, paramValues, tabI
   const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId, capabilityId, paramValues });
   if (!res || res.success === false) {
     _setMessageBody(msg, `That didn’t run${res && res.error ? ` — ${res.error}` : ''}.`);
+    _orchOfferRecord(msg, { groundId, tabId, ask, label: '● Show me the right way' });
   } else if (res.ran === false) {
     _setMessageBody(msg, res.reason || 'Couldn’t run on this page — make sure you’re on the right page.');
   } else if (res.ok) {
     _setMessageBody(msg, `Done — ran “${intent || 'it'}”.`);
     _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId, phrase: ask });   // confirm → flywheel
   } else {
-    _setMessageBody(msg, `That didn’t work as expected${res.reason ? ` — ${res.reason}` : ''}. Want to show me again?`);
+    _setMessageBody(msg, `That didn’t work as expected${res.reason ? ` — ${res.reason}` : ''}.`);
+    _orchOfferRecord(msg, { groundId, tabId, ask, label: '● Show me the right way' });
   }
 }
 
@@ -735,8 +737,21 @@ function _orchActionBar(msg) {
   return bar;
 }
 
+// A "show me" record button (offered on a grounded MISS or after a failed run). No groundId → no-op.
+function _orchOfferRecord(msg, { groundId, tabId, ask, label = '● Show me' }) {
+  if (!groundId) return;
+  const bar = _orchActionBar(msg);
+  const rec = document.createElement('button'); rec.className = 'btn-secondary tiny'; rec.type = 'button'; rec.textContent = label;
+  bar.appendChild(rec);
+  rec.addEventListener('click', () => { bar.remove(); _orchRecordFlow(msg, { groundId, tabId, ask }); });
+}
+
+// Conversational fillers are never page tasks — skip the grounded matcher so "yes"/"ok" don't match a capability.
+const _ORCH_FILLER = /^(y|n|yes|no|ok|okay|sure|yep|yeah|nope|nah|thanks|thank you|ty|hi|hello|hey|nvm|never ?mind|stop|cancel|wait|done)\b[\s!.?]*$/i;
+
 // Returns true if the grounded library handled the turn (HIT); false to fall through to the legacy matcher.
 async function _tryGroundedTurn(text) {
+  if (_ORCH_FILLER.test(String(text).trim())) return false;   // "yes"/"ok"/… → conversation, not a page task
   const tab = await _orchActiveTab();
   if (!tab || typeof tab.id !== 'number') return false;
   const thinking = appendMessage({ role: 'thinking', body: 'Checking this page…' });
@@ -750,22 +765,28 @@ async function _tryGroundedTurn(text) {
   const ctx = { groundId: m.groundId, tabId: tab.id, ask: text, intent: m.candidate && m.candidate.intent, paramValues: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {} };
   thinking.classList.remove('thinking');
   thinking.classList.add('assistant');
-  _setMessageBody(thinking, turn.say);
 
-  if (turn.action === 'run') {
+  // PRECISION-FIRST (v1): only a previously-confirmed EXACT-ALIAS match runs without asking. Every other hit
+  // CONFIRMS first — a wrong match is one tap from "Not that", never a silent action on the page.
+  if (turn.action === 'run' && turn.reason === 'alias-exact') {
+    _setMessageBody(thinking, turn.say);
     await _orchRun(thinking, { ...ctx, capabilityId: m.capabilityId });
     return true;
   }
-  if (turn.action === 'confirm') {
+  if (turn.action === 'run' || turn.action === 'confirm') {
+    const name = (m.candidate && m.candidate.intent) || 'that';
+    _setMessageBody(thinking, (turn.action === 'confirm' && turn.irreversible) ? turn.say : `I think “${name}” covers this — want me to run it?`);
     const bar = _orchActionBar(thinking);
     const yes = document.createElement('button'); yes.className = 'btn-secondary tiny'; yes.type = 'button'; yes.textContent = turn.irreversible ? 'Yes, go ahead' : 'Run it';
     const no  = document.createElement('button'); no.className  = 'btn-secondary tiny'; no.type  = 'button'; no.textContent = 'Not that';
     bar.appendChild(yes); bar.appendChild(no);
     yes.addEventListener('click', () => { bar.remove(); _orchRun(thinking, { ...ctx, capabilityId: m.capabilityId }); });
-    no.addEventListener('click', () => { bar.remove(); _setMessageBody(thinking, 'Okay — never mind.'); });
+    // "Not that" → the match was wrong; offer to teach the right thing instead.
+    no.addEventListener('click', () => { bar.remove(); _setMessageBody(thinking, 'Okay — not that. Want to show me the right way?'); _orchOfferRecord(thinking, { groundId: m.groundId, tabId: tab.id, ask: text }); });
     return true;
   }
   if (turn.action === 'disambiguate') {
+    _setMessageBody(thinking, turn.say);
     const bar = _orchActionBar(thinking);
     for (const opt of (turn.options || [])) {
       const b = document.createElement('button'); b.className = 'btn-secondary tiny'; b.type = 'button'; b.textContent = opt.intent || opt.id;
@@ -775,14 +796,11 @@ async function _tryGroundedTurn(text) {
     return true;
   }
   if (turn.action === 'record') {
-    // Grounded MISS — offer to learn it by demonstration (the "show me" path).
-    const bar = _orchActionBar(thinking);
-    const rec = document.createElement('button'); rec.className = 'btn-secondary tiny'; rec.type = 'button'; rec.textContent = '● Show me';
-    bar.appendChild(rec);
-    rec.addEventListener('click', () => { bar.remove(); _orchRecordFlow(thinking, { groundId: m.groundId, tabId: tab.id, ask: text }); });
+    _setMessageBody(thinking, turn.say);
+    _orchOfferRecord(thinking, { groundId: m.groundId, tabId: tab.id, ask: text });   // grounded MISS → "show me"
     return true;
   }
-  if (turn.action === 'navigate') return true;   // just the hint — nothing to run or record on this page
+  if (turn.action === 'navigate') { _setMessageBody(thinking, turn.say); return true; }
   thinking.remove();
   return false;
 }

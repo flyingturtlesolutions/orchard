@@ -3317,14 +3317,30 @@ export class TemplateWalker {
    * @throws {Error} If content script is unreachable.
    */
   static #msg(tabId, message, frameId = TOP_FRAME_ID) {
-    return new Promise((resolve, reject) => {
+    // A content script that hasn't (re)injected yet — typically right after a fragment NAVIGATES and the page
+    // reloads — rejects with "Receiving end does not exist" / "Could not establish connection". That error
+    // means the message was NEVER delivered, so the action did NOT run → retrying is safe (no double-execute).
+    // The content script auto-injects on navigation (manifest content_scripts), so a short backoff lets it come
+    // up. We retry ONLY these connection errors; any other error is surfaced immediately (it may have run).
+    const RETRYABLE = /Receiving end does not exist|Could not establish connection|message channel closed before a response/i;
+    const sendOnce = () => new Promise((resolve, reject) => {
       chrome.tabs.sendMessage(tabId, message, { frameId }, (response) => {
-        if (chrome.runtime.lastError) {
-          return reject(new Error(chrome.runtime.lastError.message));
-        }
+        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
         resolve(response);
       });
     });
+    return (async () => {
+      let lastErr;
+      for (let attempt = 0; attempt < 6; attempt++) {
+        try { return await sendOnce(); }
+        catch (e) {
+          lastErr = e;
+          if (!RETRYABLE.test(String(e && e.message))) throw e;
+          await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));   // 200,400,…,1000ms — let the CS (re)inject
+        }
+      }
+      throw lastErr;
+    })();
   }
 
   /**

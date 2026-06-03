@@ -9,7 +9,7 @@
 // Downstream (OBS-2/3): coalesce(trace) → segment into Fragments → buildTier2CapabilityRecords (SG-T2-ACC).
 //
 // @module Core/observedTrace
-// @version 2.74.666
+// @version 2.74.677
 
 export const OBSERVED_KINDS = Object.freeze(['click', 'type', 'select', 'submit', 'navigate', 'scroll', 'key']);
 
@@ -102,9 +102,18 @@ export function buildRawAction(parts) {
  * Coalesce CONSECUTIVE `type` actions on the SAME element into one (keeping the final value) — debounce a
  * burst of keystrokes into a single TYPE — and drop a navigate that merely repeats the prior URL. PURE;
  * returns a NEW array, re-sequenced.
+ *
+ * ORDER FIX: actions are first STABLE-SORTED by `ts` (the event timestamp the content script stamps when the
+ * event fires) — NOT by the background's arrival order. `chrome.runtime.sendMessage` doesn't guarantee delivery
+ * order, so a keydown(Enter) fired right after the final input keystroke can RACE ahead of the input message
+ * and be sequenced first → "Enter before type" → the capability submits before it fills the field. Sorting by
+ * event time restores the true order; ties keep arrival order (stable).
  */
 export function coalesce(actions) {
-  const arr = Array.isArray(actions) ? actions.filter(Boolean) : [];
+  const arr = (Array.isArray(actions) ? actions.filter(Boolean) : [])
+    .map((a, i) => ({ a, i }))
+    .sort((x, y) => ((x.a.ts || 0) - (y.a.ts || 0)) || (x.i - y.i))
+    .map((x) => x.a);
   const out = [];
   for (const a of arr) {
     const prev = out[out.length - 1];

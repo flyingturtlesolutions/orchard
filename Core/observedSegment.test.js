@@ -223,6 +223,22 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     assert.ok(optP && optP.example === 'Last 3 days', 'demonstrated value is an EXAMPLE input');
   });
 
+  it('OBS — a pure-scroll demo → a window SCROLL_TO; an incidental scroll in an action demo is dropped', () => {
+    const scroll = (y) => buildRawAction({ domKind: 'scroll', url: 'u', ts: y, target: { scrollY: y } });
+    // pure scroll (consecutive scrolls coalesce to the final position), no other action
+    const pure = opToPhases(segmentTrace(coalesce([scroll(300), scroll(1500)])));
+    assert.equal(pure.length, 1, 'a pure-scroll demo yields one runnable phase (no longer dropped)');
+    assert.deepEqual(pure[0].actions.map((x) => x.action), ['SCROLL_TO']);
+    assert.equal(pure[0].actions[0].value, '1500px', 'scrolls to where the viewport settled');
+    assert.ok(!pure[0].actions[0].selector, 'a window scroll has no selector');
+    // incidental scroll mixed with a real action → the scroll is dropped (replay reaches the control via SCROLL_TO)
+    const mixed = opToPhases(segmentTrace(coalesce([
+      scroll(200),
+      buildRawAction({ domKind: 'input', value: 'hi', ts: 300, target: { tagName: 'INPUT', role: 'textbox', accessibleName: 'q', selector: '#q' } }),
+    ])));
+    assert.deepEqual(mixed[0].actions.filter((x) => x.action !== 'SCROLL_TO').map((x) => x.action), ['TYPE'], 'incidental scroll dropped; TYPE kept');
+  });
+
   it('buildTier2CapabilityRecords wires params: per-fragment bindings from real placeholders + strategy.params union (OBS-4b)', () => {
     const op = segmentTrace(coalesce(raw));
     const { phases, params } = parameterizeObserved(opToPhases(op), deriveObservedParams(op));
