@@ -1628,6 +1628,7 @@ const _sgMessageHandlers = createSgMessageHandlers({
   readSgSpec           : _readSgSpec,
   normalizeUrl         : _normalizeUrlForPerspectiveCache,
   appendOutcomes       : _appendOutcomes,
+  readOutcomes         : _readOutcomes,                 // ORCH-G — gate promotion reads confirmation health
   broadcastStorageChanged,
   readSgCapabilities   : _readSgCapabilities,
   readSgDraft          : _readSgDraft,

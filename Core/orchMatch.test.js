@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { toCandidate, scopeAndPartition, lexicalScore, rankAndDecide, matchAsk, DEFAULT_THRESHOLDS, accreteAlias, normalizeAliasPhrase, scoresToScorer, validateBindings } from './orchMatch.js';
+import { toCandidate, scopeAndPartition, lexicalScore, rankAndDecide, matchAsk, DEFAULT_THRESHOLDS, accreteAlias, normalizeAliasPhrase, scoresToScorer, validateBindings, promotionBonus, tallyCapabilityConfirmations } from './orchMatch.js';
 
 // A realistic mini-library for indeed.com results page.
 const G = 'ground-indeed';
@@ -141,6 +141,39 @@ describe('orchMatch — ORCH-M0 HIT/MISS matcher core', () => {
     assert.deepEqual(bad.gaps, [{ name: 'DATE', requested: 'last hour', reason: 'not-in-vocabulary' }]);
     const empty = validateBindings({ KEYWORD: '' }, cand);
     assert.equal(Object.keys(empty.bound).length, 0, 'an empty value is left to its default');
+  });
+
+  it('promotionBonus + tallyCapabilityConfirmations: confirmations accrue, decay, cap (ORCH-G)', () => {
+    assert.equal(promotionBonus({ successes: 0 }), 0);
+    assert.ok(Math.abs(promotionBonus({ successes: 1 }) - 0.06) < 1e-9);
+    assert.equal(promotionBonus({ successes: 5 }), 0.2, 'capped at max (0.2 — precision-first)');
+    assert.equal(promotionBonus({ successes: 50 }), 0.2, 'capped at max');
+    const now = 100 * 2592000000;
+    assert.ok(Math.abs(promotionBonus({ successes: 5, lastOkAt: now - 2592000000 }, { now }) - 0.1) < 1e-6, 'one half-life → half');
+    // tally counts ONLY confirmed:true for the id (the DERIVE-time accept doesn't inflate health)
+    const events = [
+      { detail: { capabilityId: 'c1', confirmed: true }, ts: 10 },
+      { detail: { capabilityId: 'c1' } },
+      { detail: { capabilityId: 'c2', confirmed: true }, ts: 5 },
+      { detail: { capabilityId: 'c1', confirmed: true }, ts: 30 },
+    ];
+    const h = tallyCapabilityConfirmations(events, 'c1');
+    assert.equal(h.successes, 2);
+    assert.equal(h.lastOkAt, 30);
+  });
+
+  it('rankAndDecide: confirmations promote a propose → auto; reversibility veto still wins (ORCH-G)', () => {
+    const fixed = (rel) => () => ({ relevance: rel, isExact: false, effectEligible: true });
+    const fresh = toCandidate(dateF);
+    assert.equal(rankAndDecide('x', [fresh], { score: fixed(0.45) }).decision, 'propose', 'fresh @0.45 → propose');
+    const seasoned = { ...toCandidate(dateF), health: { successes: 5, lastOkAt: 0 } };
+    const r2 = rankAndDecide('x', [seasoned], { score: fixed(0.45) });
+    assert.equal(r2.decision, 'auto');
+    assert.equal(r2.reason, 'promoted', 'health lowered the auto bar → auto-fire');
+    const irr = { ...toCandidate(apply), health: { successes: 9, lastOkAt: 0 } };
+    const r3 = rankAndDecide('x', [irr], { score: fixed(0.9) });
+    assert.equal(r3.decision, 'propose');
+    assert.equal(r3.reason, 'irreversible-confirm', 'an irreversible capability never autos, however confirmed');
   });
 
   it('matchAsk: end-to-end funnel scopes to here then decides, with scoped counts', () => {

@@ -17,7 +17,7 @@
 // See docs/DESIGN_intent_orchestration.md §4–§6.
 //
 // @module Core/orchMatch
-// @version 2.74.668
+// @version 2.74.669
 
 // Irreversibility heuristic (skeleton — the real classifier is PB-4's safety classing). Conservative by
 // design: over-flagging just forces a confirm (safe). Reversibility is a HARD VETO on auto-fire.
@@ -94,8 +94,43 @@ export function lexicalScore(ask, candidate) {
   return { relevance, isExact, effectEligible: true };
 }
 
-// Skeleton bands. The real gate (ORCH-G) makes these per-(fragment, ask-pattern), graduated by OUTCOMES.
+// Base bands. ORCH-G graduates the AUTO bar down per-capability as confirmations accrue (promotionBonus).
 export const DEFAULT_THRESHOLDS = Object.freeze({ auto: 0.6, propose: 0.2, margin: 0.12 });
+
+// ── ORCH-G — confidence promotion from outcome health ────────────────────────────────────────────────────
+// Confirmations train the auto-fire threshold: a capability the user keeps confirming graduates from PROPOSE
+// to AUTO. Per-capability for v1 (alias accretion already captures ask-pattern granularity — a confirmed ask
+// becomes an alias → exact hit). The reversibility veto and the propose floor still bound it. See §4.
+
+/** Tally a capability's CONFIRMATIONS from an OUTCOMES event stream. PURE. Counts only events explicitly tagged
+ *  `detail.confirmed === true` for this capability (so the DERIVE-time 'accept' event doesn't inflate health).
+ *  @returns {{successes:number, lastOkAt:number}} */
+export function tallyCapabilityConfirmations(events, capabilityId) {
+  let successes = 0, lastOkAt = 0;
+  const id = String(capabilityId == null ? '' : capabilityId);
+  if (!id) return { successes, lastOkAt };
+  for (const e of (Array.isArray(events) ? events : [])) {
+    if (!e || !e.detail || e.detail.confirmed !== true) continue;
+    if (String(e.detail.capabilityId || '') !== id) continue;
+    successes++;
+    const ts = Number(e.ts || e.timestamp || 0);
+    if (ts > lastOkAt) lastOkAt = ts;
+  }
+  return { successes, lastOkAt };
+}
+
+/** Auto-fire bonus from a capability's health: more confirmations → lower the AUTO bar. PURE. Precision-first:
+ *  `max` is small (0.2) so a fully-confirmed capability still needs a MODERATE match to auto-fire (auto 0.6 −
+ *  0.2 = 0.4 floor), never a weak one; capped so it can't breach the reversibility veto or the propose floor.
+ *  Ramps to `max` by ~4 confirmations. Pass `now` (ms) to decay the bonus by recency (half-life ~30d); `now=0`
+ *  (the default, e.g. inside the pure gate) skips recency and uses the count alone. */
+export function promotionBonus(health, { max = 0.2, now = 0, halfLifeMs = 2592000000 } = {}) {
+  const successes = Math.max(0, Number(health && health.successes) || 0);
+  if (!successes) return 0;
+  let bonus = Math.min(max, 0.06 * Math.min(successes, 5));
+  if (now && health && health.lastOkAt) bonus *= Math.pow(0.5, Math.max(0, now - health.lastOkAt) / halfLifeMs);
+  return bonus;
+}
 
 /**
  * Funnel stage 2 + the three-way gate. Effect-qualify → rank → decide auto / propose / miss, with the
@@ -104,7 +139,7 @@ export const DEFAULT_THRESHOLDS = Object.freeze({ auto: 0.6, propose: 0.2, margi
  * @returns {{decision:'auto'|'propose'|'miss', candidate:(object|null), reason:string, score?:number,
  *            isExact?:boolean, margin?:number, runnerUp?:(object|null), alternatives:object[]}}
  */
-export function rankAndDecide(ask, scoped, { score = lexicalScore, thresholds = DEFAULT_THRESHOLDS } = {}) {
+export function rankAndDecide(ask, scoped, { score = lexicalScore, thresholds = DEFAULT_THRESHOLDS, now = 0 } = {}) {
   const here = Array.isArray(scoped) ? scoped : [];
   const t = { ...DEFAULT_THRESHOLDS, ...(thresholds || {}) };
   const scored = here.map((c) => ({ candidate: c, ...score(ask, c) })).filter((s) => s.effectEligible);
@@ -117,8 +152,12 @@ export function rankAndDecide(ask, scoped, { score = lexicalScore, thresholds = 
   const runnerUp = scored[1] || null;
   const margin = top.relevance - (runnerUp ? runnerUp.relevance : 0);
   const irreversible = top.candidate.reversible === false;
+  // ORCH-G — confirmations lower the AUTO bar for this capability (never below the propose floor). `now` (the
+  // caller's clock — pure tests pass 0) enables recency decay of stale confirmations.
+  const bonus = promotionBonus(top.candidate && top.candidate.health, { now });
+  const autoT = Math.max(t.propose, t.auto - bonus);
   const base = {
-    candidate: top.candidate, score: top.relevance, isExact: !!top.isExact, margin,
+    candidate: top.candidate, score: top.relevance, isExact: !!top.isExact, margin, bonus,
     runnerUp: runnerUp ? runnerUp.candidate : null,
     alternatives: scored.slice(0, 3).map((s) => ({ id: s.candidate.id, intent: s.candidate.intent, relevance: s.relevance })),
   };
@@ -126,9 +165,12 @@ export function rankAndDecide(ask, scoped, { score = lexicalScore, thresholds = 
   if (top.relevance < t.propose) return { ...base, decision: 'miss', reason: 'below-floor' };
   // Two close, non-exact contenders → disambiguate rather than guess.
   if (runnerUp && margin < t.margin && !top.isExact) return { ...base, decision: 'propose', reason: 'ambiguous' };
-  const strong = top.isExact || top.relevance >= t.auto;
+  const strong = top.isExact || top.relevance >= autoT;
   // Strong + clear + reversible → auto-fire; irreversible NEVER autos (safety veto) → confirm.
-  if (strong && !irreversible) return { ...base, decision: 'auto', reason: top.isExact ? 'alias-exact' : 'confident' };
+  if (strong && !irreversible) {
+    const reason = top.isExact ? 'alias-exact' : (top.relevance < t.auto ? 'promoted' : 'confident');
+    return { ...base, decision: 'auto', reason };
+  }
   if (strong && irreversible) return { ...base, decision: 'propose', reason: 'irreversible-confirm' };
   return { ...base, decision: 'propose', reason: 'low-confidence' };
 }

@@ -20,7 +20,7 @@ import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
 import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved, describeTraceInput } from '../../Core/observedSegment.js';
-import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias } from '../../Core/orchMatch.js';   // ORCH-M0/D/M
+import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, tallyCapabilityConfirmations } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
 import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
@@ -387,7 +387,14 @@ export function createSgMessageHandlers(ctx) {
         const localeUrl = ctx.normalizeUrl(url);
         const caps = await ctx.readSgCapabilities(groundId);
         const sameLocale = (a, b) => ctx.normalizeUrl(a) === ctx.normalizeUrl(b);
-        const projected = (Array.isArray(caps) ? caps : []).map((c) => toCandidate(c)).filter(Boolean);
+        // ORCH-G — read the confirmation stream once; per-candidate health graduates the auto-fire bar.
+        let outcomeStream = [];
+        try { if (typeof ctx.readOutcomes === 'function') outcomeStream = (await ctx.readOutcomes(groundId)) || []; } catch { /* */ }
+        const projected = (Array.isArray(caps) ? caps : []).map((c) => {
+          const cand = toCandidate(c);
+          if (cand) cand.health = tallyCapabilityConfirmations(outcomeStream, cand.id);
+          return cand;
+        }).filter(Boolean);
         const parts = scopeAndPartition(projected, { currentGroundId: groundId, currentLocaleUrl: localeUrl, sameLocale });
         // ORCH-M — smart scorer over the runnable-here set. Cheap paths skip the LLM: an exact-alias short-circuit
         // (deterministic hit) and an empty here-set. Otherwise one structured select+bind call; if the LLM is
@@ -398,7 +405,7 @@ export function createSgMessageHandlers(ctx) {
           try { llm = await AnthropicService.matchCapability({ ask, candidates: parts.here }); } catch { /* */ }
           if (llm) scorer = scoresToScorer(llm.scores);
         }
-        const decision = rankAndDecide(ask, parts.here, scorer ? { score: scorer } : {});
+        const decision = rankAndDecide(ask, parts.here, { ...(scorer ? { score: scorer } : {}), now: Date.now() });
         // ORCH-M — validate the LLM's option bindings against the chosen candidate's captured vocabulary
         // (anti-hallucination): in-vocab values are snapped + returned as `bindings`; misses surface as `gaps`.
         let bindings = {}; let gaps = [];
@@ -438,7 +445,10 @@ export function createSgMessageHandlers(ctx) {
         const before = Array.isArray(cap.aliases) ? cap.aliases.length : 0;
         cap.aliases = accreteAlias(cap.aliases, phrase, { intent: cap.intent || '' });
         await ctx.writeSgCapability(groundId, cap);
-        Logger.info('background', `ORCH_RECORD_ALIAS — "${String(phrase).slice(0, 40)}" → ${cap.id} (${before}→${cap.aliases.length} alias)`);
+        // ORCH-G — record the confirmation so the capability's health accrues (gate promotion). `confirmed:true`
+        // distinguishes a match-confirmation from the DERIVE-time 'accept' so creation doesn't inflate health.
+        try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', outcome: 'success', detail: { capabilityId: cap.id, confirmed: true, phrase: String(phrase).slice(0, 120) } })]); } catch { /* */ }
+        Logger.info('background', `ORCH_RECORD_ALIAS — "${String(phrase).slice(0, 40)}" → ${cap.id} (${before}→${cap.aliases.length} alias, +1 confirmation)`);
         sendResponse({ success: true, aliases: cap.aliases, added: cap.aliases.length > before });
       } catch (err) {
         Logger.error('background', `ORCH_RECORD_ALIAS failed: ${err.message}`);
