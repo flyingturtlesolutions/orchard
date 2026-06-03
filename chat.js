@@ -18,9 +18,10 @@ import { isSafeStrategyResultHtml, looksLikeStrategyResultHtml } from './Service
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
-import { decomposeAsk } from './Core/orchChain.js';        // ORCH-X — split a compound ask into chainable clauses
+import { decomposeAsk, looksComplex } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate for the LLM planner
 import { classifyFeedback } from './Core/orchFeedback.js'; // ORCH-FB — recognize corrective feedback (LLM refines)
 import { parseAdminCommand } from './Core/orchAdmin.js';    // ORCH-ADMIN — management commands (clear/delete)
+import { classifyReadAsk } from './Core/observe.js';        // OBS-READ — is the ask a question (a read)?
 
 // ─── Conversation state ──────────────────────────────────────────────────────
 // `_currentConversationId` is null before the first user message of a new
@@ -795,6 +796,85 @@ function _orchFeedbackBar(msg) {
   bar.appendChild(_mkBtn('🗑 Remove', () => { _orchFeedbackFlow(appendMessage({ role: 'assistant', body: '' }), { kind: 'retract' }); }));
 }
 
+// ── ORCH-X — semantic plan over capabilities ────────────────────────────────────────────────────────────────
+// A complex single sentence ("search SWE jobs in minneapolis posted last 7 days") is decomposed by the LLM into
+// ORDERED capability-routed steps WITH bindings (ORCH_PLAN), then confirmed + run. Unlike the lexical chain, the
+// steps are already resolved (capabilityId + bindings) — no per-step re-match.
+function _orchConfirmPlan(msg, { tabId, groundId, steps, gaps = [] }) {
+  const fmt = (b) => Object.keys(b || {}).length ? ` (${Object.entries(b).map(([k, v]) => `${k}=${v}`).join(', ')})` : '';
+  const list = steps.map((s, i) => `${i + 1}. ${s.intent}${fmt(s.bindings)}`).join('\n');
+  const head = steps.length ? `I’ll do ${steps.length} step${steps.length > 1 ? 's' : ''} in order:\n${list}` : 'I don’t have a capability for this yet.';
+  // HONEST partial coverage — name the constraints no capability covers, instead of silently dropping them.
+  const gapNote = gaps.length ? `\n\n⚠ I don’t have: ${gaps.join(', ')} — I’ll skip ${gaps.length > 1 ? 'them' : 'it'} (or show me).` : '';
+  _setMessageBody(msg, head + gapNote);
+  const bar = _orchActionBar(msg);
+  if (steps.length) bar.appendChild(_mkBtn(steps.length > 1 ? `Run all ${steps.length}` : 'Run it', () => { bar.remove(); _orchRunPlan(msg, { tabId, groundId, steps }); }));
+  for (const g of gaps.slice(0, 2)) bar.appendChild(_mkBtn(`● Show me: ${g.length > 22 ? g.slice(0, 22) + '…' : g}`, () => { bar.remove(); _orchRecordFlow(msg, { groundId, tabId, ask: g }); }));
+  bar.appendChild(_mkBtn('Cancel', () => { bar.remove(); _setMessageBody(msg, 'Okay — cancelled.'); }));
+}
+
+async function _orchRunPlan(msg, { tabId, groundId, steps }) {
+  const total = steps.length;
+  for (let i = 0; i < total; i++) {
+    const s = steps[i];
+    _setMessageBody(msg, `Step ${i + 1} of ${total}: “${s.intent}”…`);
+    const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId, capabilityId: s.capabilityId, paramValues: (s.bindings && typeof s.bindings === 'object') ? s.bindings : {} });
+    if (!res || res.success === false || res.ran === false || res.ok === false) {
+      const why = (res && (res.error || res.reason)) ? ` — ${res.error || res.reason}` : '';
+      _setMessageBody(msg, `Step ${i + 1} (“${s.intent}”) didn’t run${why}.`);
+      _orchOfferRecord(msg, { groundId, tabId, ask: s.clause || s.intent, label: '● Show me the right way' });
+      return;
+    }
+    _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId: s.capabilityId, phrase: s.clause || s.intent });   // flywheel per step
+    await new Promise((r) => setTimeout(r, 800));   // settle between steps (navigation / render)
+  }
+  _setMessageBody(msg, `Done — ran all ${total} steps.`);
+}
+
+// ── OBS-READ — observations (the KNOW half) ─────────────────────────────────────────────────────────────────
+// A question ("how many results?") is answered by READING the page, not acting on it. You author an observation
+// by POINTING at the value (the picker); running it EXTRACTs + returns the value inline. A read has no side
+// effect, so it auto-runs without a confirm gate.
+
+// Activate the element picker and resolve with the user's PICK_RESULT (or null on cancel/timeout).
+function _orchPickOnce({ tabId }) {
+  return new Promise((resolve) => {
+    const sessionId = `obs-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; clearTimeout(timer); chrome.runtime.onMessage.removeListener(onMsg); resolve(v); };
+    const onMsg = (m) => { if (m && m.type === 'PICK_RESULT' && m.sessionId === sessionId) finish(m); };
+    const timer = setTimeout(() => finish(null), 120000);
+    // PICK_RESULT arrives back over runtime.onMessage (a content script can only runtime.sendMessage to the
+    // extension); but START_PICK must be delivered TO the content script, which is tabs.sendMessage, not runtime.
+    chrome.runtime.onMessage.addListener(onMsg);
+    try { chrome.tabs.sendMessage(tabId, { type: 'START_PICK', payload: { sessionId, mode: 'target' } }, () => void chrome.runtime.lastError); }
+    catch { finish(null); }
+  });
+}
+
+// Capture an observation: point at the value → persist it for this read-ask.
+async function _orchObserveCapture(msg, { groundId, tabId, ask }) {
+  _setMessageBody(msg, '◎ Point at the value I should read on the page…');
+  const picked = await _orchPickOnce({ tabId });
+  if (!picked || !picked.selector || picked.error) { _setMessageBody(msg, `Didn’t catch that${picked && picked.error ? ` (${picked.error})` : ''} — ask again to retry.`); return; }
+  _setMessageBody(msg, 'Saving what to read…');
+  const res = await _orchReq('OBSERVE_CAPTURE', { tabId, groundId, ask, selector: picked.selector, label: picked.label || '', outputType: classifyReadAsk(ask).outputType });
+  _setMessageBody(msg, (res && res.success && res.capability)
+    ? `Got it — I’ll read that for “${ask}”. Ask again and I’ll fetch the value.`
+    : `Couldn’t set that up${res && res.error ? ` — ${res.error}` : ''}.`);
+}
+
+// Run an observation: EXTRACT + show the value inline.
+async function _orchRunObservation(msg, { groundId, tabId, capabilityId, intent, ask }) {
+  _setMessageBody(msg, `Reading “${intent || 'it'}”…`);
+  const res = await _orchReq('RUN_OBSERVATION', { tabId, groundId, capabilityId });
+  if (!res || res.success === false) { _setMessageBody(msg, `Couldn’t read that${res && res.error ? ` — ${res.error}` : ''}.`); return; }
+  if (res.ok === false) { _setMessageBody(msg, res.reason || 'Couldn’t read that on this page.'); return; }
+  const v = String(res.value || '').trim();
+  _setMessageBody(msg, v ? v.slice(0, 800) : '(nothing found there)');
+  if (ask) _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId, phrase: ask });   // confirm → flywheel
+}
+
 // ── ORCH-ADMIN — management commands from chat ──────────────────────────────────────────────────────────────
 // "clear chat" resets the current conversation view (history is kept, non-destructive). A bulk DELETE always
 // COUNTS first and shows an explicit confirm — these are hard, cascading deletes (the same ones Studio runs).
@@ -921,6 +1001,25 @@ async function _tryGroundedTurn(text) {
     return true;
   }
 
+  // ORCH-X — a COMPLEX single sentence ("search SWE jobs in minneapolis posted last 7 days") spans multiple
+  // capabilities with no connective for decomposeAsk to split on. Ask the LLM PLANNER to route it over the
+  // recorded capabilities; if it decomposes into >1 step, confirm + chain. 0–1 steps → fall through to the
+  // single matcher (so simple asks pay no extra LLM call — the looksComplex gate guards it).
+  if (looksComplex(text)) {
+    const probe = appendMessage({ role: 'thinking', body: 'Working out the steps…' });
+    const plan = await _orchReq('ORCH_PLAN', { tabId: tab.id, ask: text });
+    const pSteps = (plan && plan.success && Array.isArray(plan.steps)) ? plan.steps : [];
+    const pGaps = (plan && Array.isArray(plan.gaps)) ? plan.gaps : [];
+    // Take over when it's genuinely multi-step, OR when it's one step but the ask has constraints no capability
+    // covers (so we surface the gap honestly instead of an over-confident "covers this" single match).
+    if (pSteps.length > 1 || (pSteps.length === 1 && pGaps.length > 0)) {
+      probe.classList.remove('thinking'); probe.classList.add('assistant');
+      _orchConfirmPlan(probe, { tabId: tab.id, groundId: plan.groundId, steps: pSteps, gaps: pGaps });
+      return true;
+    }
+    probe.remove();
+  }
+
   const thinking = appendMessage({ role: 'thinking', body: 'Checking this page…' });
   const m = await _orchReq('ORCH_MATCH', { tabId: tab.id, ask: text });
   if (!m || m.success === false) { thinking.remove(); return false; }
@@ -932,6 +1031,12 @@ async function _tryGroundedTurn(text) {
   const ctx = { groundId: m.groundId, tabId: tab.id, ask: text, intent: m.candidate && m.candidate.intent, paramValues: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {}, params: m.candidate && m.candidate.params };
   thinking.classList.remove('thinking');
   thinking.classList.add('assistant');
+
+  // OBS-READ — an OBSERVATION hit just READS the page (no side effect) → auto-run and show the value inline.
+  if (m.candidate && m.candidate.kind === 'observation') {
+    await _orchRunObservation(thinking, { groundId: m.groundId, tabId: tab.id, capabilityId: m.capabilityId, intent: m.candidate.intent, ask: text });
+    return true;
+  }
 
   // PRECISION-FIRST (v1): only a previously-confirmed EXACT-ALIAS match runs without asking. Every other hit
   // CONFIRMS first — a wrong match is one tap from "Not that", never a silent action on the page.
@@ -965,6 +1070,15 @@ async function _tryGroundedTurn(text) {
     return true;
   }
   if (turn.action === 'record') {
+    // OBS-READ — a QUESTION with no observation yet: offer to capture one by POINTING at the value, instead of
+    // (or alongside) recording an action demonstration.
+    if (classifyReadAsk(text).isRead) {
+      _setMessageBody(thinking, 'I can read that for you — point me at it on the page.');
+      const bar = _orchActionBar(thinking);
+      bar.appendChild(_mkBtn('◎ Point me at it', () => { bar.remove(); _orchObserveCapture(thinking, { groundId: m.groundId, tabId: tab.id, ask: text }); }));
+      bar.appendChild(_mkBtn('● Show me actions instead', () => { bar.remove(); _orchRecordFlow(thinking, { groundId: m.groundId, tabId: tab.id, ask: text }); }));
+      return true;
+    }
     _setMessageBody(thinking, turn.say);
     _orchOfferRecord(thinking, { groundId: m.groundId, tabId: tab.id, ask: text });   // grounded MISS → "show me"
     return true;

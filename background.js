@@ -1326,6 +1326,19 @@ async function _writeSgCapability(groundId, cap) {
 // Remove matcher-facing capabilities matching a predicate (ORCH-ADMIN bulk delete + REPLAY self-heal of an
 // orphan whose underlying Strategy is gone). Returns how many were removed. The `sgCapabilities:<ground>` store
 // is what the matcher reads, SEPARATE from the Tier-1 `strategies:*` records — so it must be pruned in lockstep.
+// A tab open since BEFORE an extension reload keeps a stale content-script port → "Receiving end does not exist"
+// on every message. PING the tab; if dead, RE-INJECT the content script (the module-load guard makes a re-inject
+// of a live script a no-op) and re-PING. Returns true if reachable. Called before a REPLAY so a stale tab heals
+// instead of failing the whole run.
+async function _ensureContentScript(tabId) {
+  if (typeof tabId !== 'number') return false;
+  const ping = async () => { try { const p = await chrome.tabs.sendMessage(tabId, { type: 'PING' }); return !!(p && (p.ready || p.success)); } catch { return false; } };
+  if (await ping()) return true;
+  try { await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['ContentScripts/contentScript.js'] }); } catch { /* */ }
+  for (let i = 0; i < 8; i++) { await new Promise((r) => setTimeout(r, 250)); if (await ping()) return true; }
+  return false;
+}
+
 async function _removeSgCapabilities(groundId, predicate) {
   if (!groundId || typeof predicate !== 'function') return 0;
   const k = _sgCapKey(groundId);
@@ -1651,6 +1664,7 @@ const _sgMessageHandlers = createSgMessageHandlers({
   clearSgDraft         : _clearSgDraft,
   writeSgCapability    : _writeSgCapability,
   removeSgCapabilities : _removeSgCapabilities,   // ORCH-ADMIN / self-heal — prune matcher-facing capabilities
+  ensureContentScript  : _ensureContentScript,    // heal a stale-tab content-script port before REPLAY
   writeSgTrace         : _writeSgTrace,
   enrichSgLandmarks    : _enrichSgLandmarks,
 });

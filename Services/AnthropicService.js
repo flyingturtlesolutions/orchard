@@ -2532,6 +2532,39 @@ Reply ONLY with JSON: {"kind":"<one of ${KINDS.join('|')}>","correction":{"<PARA
   }
 
   /**
+   * ORCH-X compiler front-end — SEMANTICALLY decompose a complex ASK into an ORDERED plan over the user's recorded
+   * CAPABILITIES, binding each step's params from the ask. This is what the lexical decomposeAsk can't do: turn
+   * "search SWE jobs in minneapolis posted last 7 days" into [Search jobs {title, location} → Filter by date
+   * {when}]. Most asks are ONE step (caller falls back to the single matcher then). Returns null on no-LLM/parse fail.
+   * @param {{ask:string, candidates:object[], affordances:string[]}} args
+   * @returns {Promise<{steps:Array<{id:string,bindings:object,clause:string}>, rationale:string}|null>}
+   */
+  static async planAskOverCapabilities({ ask, candidates = [], affordances = [] } = {}) {
+    const list = Array.isArray(candidates) ? candidates : [];
+    if (!ask || typeof ask !== 'string' || !ask.trim() || !list.length) return null;
+    if (!(await AnthropicService.hasLlm())) return null;
+    const lean = list.map((c) => ({
+      id: c.id, intent: c.intent || '',
+      params: (Array.isArray(c.params) ? c.params : []).filter((p) => p && p.used).map((p) => ({ name: p.name, kind: p.kind, ...(Array.isArray(p.vocabulary) ? { options: p.vocabulary.slice(0, 12) } : {}) })),
+    }));
+    const aff = (Array.isArray(affordances) ? affordances : []).slice(0, 60);
+    const systemPrompt = `Decompose the ASK into an ORDERED sequence of STEPS, each accomplished by exactly ONE of the CANDIDATES (the user's recorded capabilities). MOST asks are ONE step; a COMPLEX ask spans several — e.g. "search SWE jobs in minneapolis posted last 7 days" = a SEARCH step (title+location) THEN a FILTER-by-date step. ORDER matters: a step that operates on results comes AFTER the step that produces them (search before filter/sort). Bind each step's params from the ask: an "option" param's value SHOULD be one of that param's options, or a label in PAGE_AFFORDANCES; other params take a value extracted from the ask. Use ONLY real candidate ids. If a part of the ASK has NO matching candidate — a constraint/filter the user clearly wants but no capability performs (e.g. "remote", "salary over $90000", "sorted by newest") — do NOT force a wrong step; instead list it in "uncovered" as a short imperative phrase ("filter by remote", "filter by salary over $90000"). Be conservative — don't invent steps. Return ONLY JSON:
+{"steps":[{"id":"<candidate id>","bindings":{"<PARAM>":"<value>"},"clause":"<the part of the ask this step covers>"}],"uncovered":["<a constraint no candidate covers>"],"rationale":"<one short sentence>"}`;
+    const user = `ASK: ${ask}\n${aff.length ? `PAGE_AFFORDANCES: ${JSON.stringify(aff)}\n` : ''}CANDIDATES:\n${JSON.stringify(lean)}`;
+    try {
+      const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text: user }], 1500, [], { role: 'match', operation: 'planAskOverCapabilities' });
+      if (!raw?.success) { Logger.warn('AnthropicService', `planAskOverCapabilities — LLM call FAILED: ${raw?.error}`); return null; }
+      const json = AnthropicService.#firstJsonObject(raw.text);
+      if (!json) return null;
+      let out; try { out = JSON.parse(json); } catch { return null; }
+      const steps = (out && Array.isArray(out.steps) ? out.steps : []).filter((s) => s && s.id != null).map((s) => ({ id: String(s.id), bindings: (s.bindings && typeof s.bindings === 'object') ? s.bindings : {}, clause: String(s.clause || '').slice(0, 160) }));
+      const uncovered = (out && Array.isArray(out.uncovered) ? out.uncovered : []).map((u) => String(u || '').slice(0, 80)).filter(Boolean).slice(0, 4);
+      Logger.info('AnthropicService', `planAskOverCapabilities -> ${steps.length} step(s), ${uncovered.length} uncovered, over ${list.length} candidate(s)`);
+      return { steps, uncovered, rationale: String(out.rationale || '').slice(0, 200) };
+    } catch (e) { Logger.warn('AnthropicService', `planAskOverCapabilities — EXCEPTION: ${e.message}`); return null; }
+  }
+
+  /**
    * SG-2b (Select, the narrowed-LLM match) — DESIGN §4.2/§SG-2. Map each page-INDEPENDENT subGoal (from
    * SG-1 Comprehend) to the page's REAL features, by MEANING. The LLM's role is deliberately narrow: it
    * only proposes the semantic mapping over a pre-filtered candidate set; Core/select.reconcileMatches

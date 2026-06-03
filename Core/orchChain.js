@@ -15,7 +15,7 @@
 // dogs" stays one clause) and the parts are rejoined with their original text.
 //
 // @module Core/orchChain
-// @version 2.74.687
+// @version 2.74.701
 
 import { planStep, validatePlan } from './orchPlan.js';
 
@@ -60,6 +60,26 @@ export function decomposeAsk(ask) {
 /** Is this ask compound (more than one intent clause)? PURE. */
 export function isCompoundAsk(ask) {
   return decomposeAsk(ask).length > 1;
+}
+
+/**
+ * A cheap gate for "this single sentence may span MULTIPLE capabilities" — worth an LLM PLAN (semantic
+ * decomposition) rather than a single match. PURE. Lexical decompose only catches explicit connectives; a
+ * sentence like "search SWE jobs in minneapolis posted last 7 days" has none, yet needs search THEN filter. We
+ * flag it when it's long enough AND carries a constraint/qualifier signal (a second intent often hides there).
+ * @param {string} ask
+ * @returns {boolean}
+ */
+export function looksComplex(ask) {
+  const s = String(ask || '').trim();
+  if (!s) return false;
+  // STRONG markers — a salary/range/work-type/sort/date constraint almost always implies a SECOND capability
+  // (a filter/sort) beyond the core verb, even in a SHORT ask ("remote software jobs $90000+" = search + 2 filters).
+  if (/\$\s?\d|\b\d+\s?k\b|\bremote\b|\bon-?site\b|\bhybrid\b|\bsort(?:ed)?\b|\bnewest\b|\boldest\b|\bcheapest\b|\bhighest\b|\blowest\b|\bposted\b|\bunder\b|\bover\b|\bbetween\b|\bwithin\b|\bpast\b|\blast\b|\bfilter(?:ed)?\b/i.test(s)) return true;
+  // Otherwise a LONG sentence with a constraint preposition may still span capabilities.
+  const words = s.split(/\s+/).filter(Boolean).length;
+  if (words < 7) return false;
+  return /\b(in|near|with|by|for|from|priced|rated|then|also)\b/i.test(s);
 }
 
 /**

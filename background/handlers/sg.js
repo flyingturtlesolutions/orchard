@@ -23,6 +23,7 @@ import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved, d
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A
 import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/orchFeedback.js';   // ORCH-FB — corrective actions
 import { feedbackExamples } from '../../Core/feedbackLearn.js';   // ORCH-FB-2 — relevance shaping from feedback history
+import { buildObservationCapability } from '../../Core/observe.js';   // OBS-READ — observation capability records
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
 import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
@@ -448,7 +449,7 @@ export function createSgMessageHandlers(ctx) {
         // the LIVE PAGE catalogs (affordances): in-set values snap + return as `bindings`; misses → `gaps`.
         let bindings = {}; let gaps = [];
         if (decision.candidate && llm && llm.bindings) { const v = validateBindings(llm.bindings, decision.candidate, affordances); bindings = v.bound; gaps = v.gaps; }
-        const lean = (c) => (c ? { id: c.id, intent: c.intent, strategyId: c.strategyId, reversible: c.reversible, params: c.params } : null);
+        const lean = (c) => (c ? { id: c.id, intent: c.intent, strategyId: c.strategyId, reversible: c.reversible, params: c.params, kind: c.kind } : null);
         // reachable folded into here → the chat never says "go to another page" (planAssistantTurn keys navigate off reachable>0).
         const scoped = { here: candidates.length, reachable: 0, off: parts.off.length };
         const via = llm ? 'llm' : (aliasHit ? 'alias' : 'lexical');
@@ -629,6 +630,98 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // OBS-READ — capture an OBSERVATION. The chat runs the picker (START_PICK → PICK_RESULT) and sends the picked
+    // selector + the read-ask here; we build a matcher-compatible observation capability (no side effect) and
+    // persist it to the SAME sgCapabilities store the chat matches against, seeding the ask as an alias.
+    OBSERVE_CAPTURE: async (payload, _sender, sendResponse) => {
+      try {
+        const { tabId, groundId = null, ask = '', selector = null, label = '', role = '', outputType = null, shape = null } = payload ?? {};
+        if (!ask || !selector) { sendResponse({ success: false, error: 'ask + selector required' }); return; }
+        let gid = groundId, localeUrl = '';
+        if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); localeUrl = t?.url || ''; if (!gid && localeUrl) { const origin = new URL(localeUrl).origin; const gs = await StorageManager.getAllGrounds(); const g = (Array.isArray(gs) ? gs : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } } catch { /* */ } }
+        if (!gid) { sendResponse({ success: false, error: 'no ground for this page' }); return; }
+        const cap = buildObservationCapability({
+          id: crypto.randomUUID(), ask, intent: ask, goal: ask, groundId: gid, outputType,
+          landmark: { selector, role: role || 'region', accessibleName: label || ask },
+          extract: shape ? { selector, shape } : { selector },
+        });
+        cap.localeUrl = localeUrl; cap.createdAt = Date.now();
+        cap.aliases = accreteAlias(cap.aliases, ask, { intent: cap.intent });
+        await ctx.writeSgCapability(gid, cap);
+        try { await ctx.appendOutcomes(gid, [Outcomes.makeStageEvent('accept', { groundId: gid, verdict: 'accepted', input: { roleOrIntent: ask.slice(0, 120) }, detail: { capabilityId: cap.id, shape: 'observation', outputType: cap.outputType, selector } })]); } catch { /* */ }
+        Logger.info('background', `OBSERVE_CAPTURE — "${ask.slice(0, 50)}" ${cap.id} → ${cap.outputType} extract "${selector}" on ${gid}`);
+        sendResponse({ success: true, capability: { id: cap.id, intent: cap.intent, outputType: cap.outputType, kind: 'observation' } });
+      } catch (err) {
+        Logger.error('background', `OBSERVE_CAPTURE failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // OBS-READ — RUN an observation: EXTRACT its region from the live page and return the value. NO LLM, NO side
+    // effect (a read is always safe to auto-run). The chat shows the value inline; the compiler outputType rides along.
+    RUN_OBSERVATION: async (payload, _sender, sendResponse) => {
+      try {
+        const { tabId, groundId = null, capabilityId = null } = payload ?? {};
+        if (typeof tabId !== 'number' || !groundId || !capabilityId) { sendResponse({ success: false, error: 'tabId + groundId + capabilityId required' }); return; }
+        const cap = (await ctx.readSgCapabilities(groundId)).find((c) => c.id === capabilityId);
+        if (!cap || cap.kind !== 'observation') { sendResponse({ success: false, error: 'observation not found' }); return; }
+        const ex = (cap.observe && Array.isArray(cap.observe.extracts) && cap.observe.extracts[0]) || null;
+        if (!ex || !ex.selector) { sendResponse({ success: false, error: 'observation has no extract selector' }); return; }
+        let res = null;
+        try { res = await new Promise((r) => chrome.tabs.sendMessage(tabId, { type: 'EXECUTE_STEP', payload: { action: 'EXTRACT', selector: ex.selector } }, (x) => { void chrome.runtime.lastError; r(x); })); }
+        catch (e) { sendResponse({ success: false, error: `extract failed: ${e.message}` }); return; }
+        if (!res || res.success === false) { sendResponse({ success: true, ran: true, ok: false, reason: (res && res.error) || 'couldn’t read that here — make sure you’re on the right page' }); return; }
+        const value = res.extractedValue != null ? String(res.extractedValue) : '';
+        Logger.info('background', `RUN_OBSERVATION — ${cap.id} (${cap.outputType}) → "${value.slice(0, 60)}"`);
+        sendResponse({ success: true, ran: true, ok: true, outputType: cap.outputType || 'scalar', value, intent: cap.intent });
+      } catch (err) {
+        Logger.error('background', `RUN_OBSERVATION failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // ORCH-X compiler front-end — SEMANTICALLY decompose a complex ask into an ORDERED plan over the user's
+    // recorded capabilities, with per-step param bindings (the NL path's job, applied to capabilities-as-substrate).
+    // The lexical decomposeAsk only catches "and/then" boundaries; this catches "search X in Y posted last week"
+    // = search THEN filter-by-date. Returns the ordered steps; the chat confirms + chains them. >1 step is the win;
+    // 0–1 steps → the chat falls back to the single matcher.
+    ORCH_PLAN: async (payload, _sender, sendResponse) => {
+      try {
+        const { tabId, groundId = null, ask = '' } = payload ?? {};
+        if (typeof ask !== 'string' || !ask.trim()) { sendResponse({ success: false, error: 'ask required' }); return; }
+        let url = ''; if (typeof tabId === 'number') { try { url = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
+        let gid = groundId;
+        if (!gid && url) { try { const origin = new URL(url).origin; const grounds = await StorageManager.getAllGrounds(); const g = (Array.isArray(grounds) ? grounds : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } catch { /* */ } }
+        if (!gid) { sendResponse({ success: true, groundId: null, steps: [] }); return; }
+        const localeUrl = ctx.normalizeUrl(url);
+        let liveStrategyIds = null;
+        try { liveStrategyIds = new Set((await StorageManager.listStrategies(gid)).map((s) => s && s.id).filter(Boolean)); } catch { /* */ }
+        const _orphan = (c) => !!(c && c.strategyId && liveStrategyIds && !liveStrategyIds.has(c.strategyId));
+        const caps = (await ctx.readSgCapabilities(gid)).filter((c) => isActiveCapability(c) && !_orphan(c));
+        const candidates = (Array.isArray(caps) ? caps : []).map((c) => toCandidate(c)).filter(Boolean);
+        if (candidates.length < 2) { sendResponse({ success: true, groundId: gid, steps: [] }); return; }   // <2 caps → nothing to compose
+        let affordances = [];
+        try { const pm = await ctx.readLocaleCache(gid, localeUrl); affordances = localeAffordanceLabels(pm && pm.model); } catch { /* */ }
+        let plan = null;
+        try { plan = await AnthropicService.planAskOverCapabilities({ ask, candidates, affordances }); } catch { /* */ }
+        if (!plan || !Array.isArray(plan.steps) || !plan.steps.length) { sendResponse({ success: true, groundId: gid, steps: [] }); return; }
+        const byId = new Map(candidates.map((c) => [String(c.id), c]));
+        const steps = [];
+        for (const s of plan.steps) {
+          const cand = byId.get(String(s && s.id)); if (!cand) continue;
+          let bindings = {};
+          if (s.bindings && Object.keys(s.bindings).length) { try { bindings = validateBindings(s.bindings, cand, affordances).bound; } catch { /* */ } }
+          steps.push({ capabilityId: cand.id, intent: cand.intent, bindings, clause: s.clause || '' });
+        }
+        const gaps = Array.isArray(plan.uncovered) ? plan.uncovered : [];
+        Logger.info('background', `ORCH_PLAN ▸ ask="${String(ask).slice(0, 70)}" → ${steps.length} step(s): ${steps.map((s) => `"${s.intent}"${Object.keys(s.bindings).length ? `[${JSON.stringify(s.bindings)}]` : ''}`).join(' → ') || '(none)'}${gaps.length ? ` | uncovered: ${JSON.stringify(gaps)}` : ''}`);
+        sendResponse({ success: true, groundId: gid, steps, gaps, rationale: plan.rationale || '' });
+      } catch (err) {
+        Logger.error('background', `ORCH_PLAN failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
     // SG-5 / PB-7 — REPLAY an accepted capability. NO LLM. Prefer the promoted landmark-backed Strategy
     // (registry recovery via applyLandmarkRefToStep → LANDMARK_PROBE_OR_RECOVER); fall back to the binding.
     REPLAY_SG_CAPABILITY: async (payload, _sender, sendResponse) => {
@@ -661,15 +754,22 @@ export function createSgMessageHandlers(ctx) {
         // Preferred: run the saved, landmark-backed Strategy (the promoted library entity).
         if (cap.strategyId) {
           let result = null;
+          // Heal a stale-tab content-script port (tab open since an extension reload) BEFORE running, so the
+          // strategy doesn't fail every step with "Receiving end does not exist".
+          if (typeof tabId === 'number') { try { await ctx.ensureContentScript(tabId); } catch { /* */ } }
           try { result = await ExecutionEngine.executeStrategy({ strategyId: cap.strategyId, strategyParamValues, targetTabId: (typeof tabId === 'number' ? tabId : null) }); }
           catch (e) { sendResponse({ success: false, error: `replay strategy failed: ${e.message}` }); return; }
           const ok = !!(result && result.success);
           const err = String(result?.error || '');
-          // SELF-HEAL — the matcher-facing capability outlived its Strategy (e.g. the Strategy was deleted but the
-          // sgCapability lingered → "Strategy <id> not found"). Prune the orphan so it stops matching instead of
-          // failing on every run. This recovers a drifted store without a Studio trip.
-          if (!ok && /not found|no such strategy|missing strategy|does not exist/i.test(err)) {
-            try { const pruned = await ctx.removeSgCapabilities(groundId, (c) => c.id === cap.id); if (pruned) Logger.info('background', `REPLAY_SG_CAPABILITY — pruned orphaned capability ${cap.id} (strategy ${cap.strategyId} missing)`); } catch { /* */ }
+          // SELF-HEAL — only when the Strategy RECORD is genuinely gone (the sgCapability outlived its Strategy).
+          // The error string is NOT trustworthy — a CONTENT-SCRIPT failure "Receiving end does not exist" contains
+          // "does not exist" and was wrongly pruning healthy capabilities. So require a strategy-missing-shaped
+          // error AND VERIFY the record is actually absent before deleting anything.
+          const looksMissing = /\bstrateg(?:y|ies)\b[^\n]*\bnot found\b|\bno such strategy\b|\bmissing strategy\b/i.test(err);
+          let trulyMissing = false;
+          if (!ok && looksMissing) { try { trulyMissing = !(await StorageManager.getStrategy(cap.strategyId)); } catch { trulyMissing = false; } }
+          if (!ok && looksMissing && trulyMissing) {
+            try { const pruned = await ctx.removeSgCapabilities(groundId, (c) => c.id === cap.id); if (pruned) Logger.info('background', `REPLAY_SG_CAPABILITY — pruned orphaned capability ${cap.id} (strategy ${cap.strategyId} confirmed missing)`); } catch { /* */ }
             // Deletion is invisible to the conversation: signal a clean MISS so the chat treats this as a NEW
             // request (offer to record), NOT an announcement that something was removed.
             sendResponse({ success: true, ran: false, pruned: true });

@@ -17,7 +17,7 @@
 // See docs/DESIGN_intent_orchestration.md §4–§6.
 //
 // @module Core/orchMatch
-// @version 2.74.695
+// @version 2.74.698
 
 import { feedbackAdjustment } from './feedbackLearn.js';   // ORCH-FB-2 — relevance shaping from confirm/reject history
 
@@ -63,6 +63,7 @@ export function toCandidate(capability, strategy = null) {
     groundId: capability.groundId || (strategy && strategy.groundId) || null,
     localeUrl: capability.localeUrl || '',
     intent, aliases, params, effect, reversible,
+    kind: capability.kind || null,         // OBS-READ — 'observation' capabilities run via EXTRACT, not REPLAY
     strategyId: capability.strategyId || (strategy && strategy.id) || null,
     health: capability.health || null,    // {successes, failures, lastOkAt} — populated by ORCH-G (OUTCOMES)
     raw: capability,

@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decomposeAsk, isCompoundAsk, assembleSequentialPlan } from './orchChain.js';
+import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex } from './orchChain.js';
 
 describe('orchChain — decompose a compound ask + assemble a sequential plan (ORCH-X)', () => {
   it('decomposeAsk: a single intent stays one clause', () => {
@@ -46,6 +46,15 @@ describe('orchChain — decompose a compound ask + assemble a sequential plan (O
   it('isCompoundAsk: reflects clause count', () => {
     assert.equal(isCompoundAsk('search for music'), false);
     assert.equal(isCompoundAsk('search for music and filter by date'), true);
+  });
+
+  it('looksComplex: a long single sentence with a constraint signal → worth an LLM plan; short asks aren’t', () => {
+    assert.equal(looksComplex('search for jobs'), false, 'short → single match');
+    assert.equal(looksComplex('search for software engineers'), false, 'short → single match');
+    assert.equal(looksComplex('search for software engineering jobs in minneapolis posted in the last 7 days'), true);
+    assert.equal(looksComplex('find remote python developer roles sorted by newest'), true);
+    assert.equal(looksComplex('search for remote software jobs $90000+'), true, 'short but a salary + work-type constraint');
+    assert.equal(looksComplex('show me cheap flights under $200'), true, 'short but a price constraint');
   });
 
   it('assembleSequentialPlan: matched clauses → ordered fragment steps, validated', () => {
