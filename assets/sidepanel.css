@@ -4952,6 +4952,17 @@ input[type="checkbox"] { accent-color: var(--acc); width: 13px; height: 13px; cu
 .dbg-perspective-ground-note { color: rgba(148, 163, 184, 0.85); font-size: 10px; font-style: italic; }
 .dbg-perspective-ground-actions { display: flex; gap: 6px; }
 
+/* OBS-4b — re-run an observed capability with new values: inline param form on a saved capability. */
+.dbg-perspective-caplib-params { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 2px; }
+.dbg-perspective-caplib-param { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.dbg-perspective-caplib-param > span { flex: 0 0 38%; color: rgba(203, 213, 225, 0.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dbg-perspective-caplib-param > input {
+  flex: 1 1 auto; min-width: 0; font-size: 11px; padding: 2px 6px; border-radius: 4px;
+  border: 1px solid rgba(148, 163, 184, 0.35); background: rgba(15, 23, 42, 0.6); color: rgba(226, 232, 240, 0.95);
+}
+.dbg-perspective-caplib-param > input:focus { outline: none; border-color: rgba(96, 165, 250, 0.7); }
+.dbg-perspective-caplib-param-fixed { font-size: 10px; color: rgba(148, 163, 184, 0.85); }
+
 /* PB-6b — Trial proof panel: run the resolved bundle, score a fidelity vector. */
 .dbg-perspective-trial {
   display: flex; flex-direction: column; gap: 6px;

@@ -14,7 +14,7 @@
 //     gives nicer labels later; this keeps it runnable without an LLM.
 //
 // @module Core/observedSegment
-// @version 2.74.660
+// @version 2.74.661
 
 const _DISCLOSURE_HINT = /filter|menu|sort|posted|date|pay|salary|wage|type|level|experience|distance|remote|radius|category|options?|dropdown|expand|more/i;
 
@@ -141,6 +141,48 @@ export function deriveObservedParams(op) {
     }
   }
   return out;
+}
+
+/** OBS-4b — placeholder NAME for a param key: UPPER_SNAKE, [A-Z0-9_], bounded — matches the `{{NAME}}` regex
+ *  TemplateWalker/InjectionService use (`/\{\{([A-Z0-9_]+)\}\}/`). 'date-posted-filter' → 'DATE_POSTED_FILTER'. */
+export function obsParamName(key) {
+  const n = String(key || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
+  return n || 'PARAM';
+}
+
+/**
+ * OBS-4b — parameterize a demonstration's TEXT inputs so it RE-RUNS with NEW values (a demo becomes a
+ * reusable template, not a one-shot). PURE. For each text param, the TYPE action that typed its demonstrated
+ * value (matched by selector) has its `value` rewritten to `{{NAME}}` — TemplateWalker substitutes that from
+ * the strategy param at replay (via InjectionService.injectParams). The demonstrated value stays on the param
+ * as its DEFAULT, so a no-override replay reproduces the demonstration exactly. Option params are left literal
+ * in v1: a chosen <li role=option> is encoded by WHICH element is clicked (selector), not a typed value — so
+ * re-choosing needs find-by-label at replay (deferred to OBS-4c); the param is still surfaced (read-only).
+ * Returns NEW phases (originals untouched) and the params enriched with a unique `name` and a `used` flag.
+ * @param {Array<{label:string, actions:object[]}>} phases
+ * @param {Array<{key:string,label:string,kind:string,value:string,selector:(string|null)}>} params
+ * @returns {{phases:Array, params:Array<{key,label,kind,value,selector,name,used}>}}
+ */
+export function parameterizeObserved(phases, params) {
+  const ps = (Array.isArray(params) ? params : []).map((p) => ({ ...p, name: obsParamName(p.key), used: false }));
+  // Dedupe placeholder names (two fields could slug to the same NAME) — append _2, _3…
+  const seenName = new Set();
+  for (const p of ps) { let nm = p.name, n = 2; while (seenName.has(nm)) nm = `${p.name}_${n++}`; seenName.add(nm); p.name = nm; }
+  // Index TEXT params by selector — the TYPE action whose selector matches gets templated.
+  const textBySel = new Map();
+  for (const p of ps) if (p.kind === 'text' && p.selector) textBySel.set(p.selector, p);
+  const outPhases = (Array.isArray(phases) ? phases : []).map((ph) => ({
+    ...ph,
+    actions: (Array.isArray(ph.actions) ? ph.actions : []).map((a) => {
+      if (a && a.action === 'TYPE' && a.selector && textBySel.has(a.selector)) {
+        const p = textBySel.get(a.selector);
+        p.used = true;
+        return { ...a, value: `{{${p.name}}}` };
+      }
+      return a;
+    }),
+  }));
+  return { phases: outPhases, params: ps };
 }
 
 /** OBS-3 — turn a segmented op into the per-phase {label, url, actions} the capability builder consumes.

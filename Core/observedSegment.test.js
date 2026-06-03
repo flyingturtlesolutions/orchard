@@ -6,15 +6,18 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildRawAction, coalesce } from './observedTrace.js';
-import { segmentTrace, opToPhases, stepToAction, deriveObservedParams } from './observedSegment.js';
+import { segmentTrace, opToPhases, stepToAction, deriveObservedParams, parameterizeObserved, obsParamName } from './observedSegment.js';
+import { buildTier2CapabilityRecords } from './capabilitySynth.js';
 
 // `A` mirrors the real recorder: a click passes its accessibleName as the value (kept only when the click
-// classifies as a `select` — i.e. on an option). role=option is set for the option / pay-bracket labels.
+// classifies as a `select` — i.e. on an option). The recorder captures a `role` for EVERY element, so the
+// helper does too: option/pay-bracket labels → 'option'; typed fields → 'textbox'; everything else → 'button'.
+// That role is what stepToAction needs to attach an inline landmark.
 const A = (domKind, name, selector, value) => buildRawAction({
   domKind,
   value: value !== undefined ? value : (domKind === 'click' ? name : undefined),
   url: 'https://www.indeed.com',
-  target: { role: /Last 3 days|\$/.test(name || '') ? 'option' : null, accessibleName: name, selector },
+  target: { role: /Last 3 days|\$/.test(name || '') ? 'option' : (domKind === 'input' ? 'textbox' : 'button'), accessibleName: name, selector },
 });
 const NAV = (to) => buildRawAction({ domKind: 'navigate', url: to, from: 'https://www.indeed.com' });
 
@@ -106,12 +109,51 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
   it('deriveObservedParams: typed fields + option choices → params (option keyed by its disclosure) (OBS-4)', () => {
     const ps = deriveObservedParams(segmentTrace(coalesce(raw)));
     const byKey = Object.fromEntries(ps.map((p) => [p.key, p]));
-    assert.equal(byKey['job-title'].value, 'support');
-    assert.equal(byKey['job-title'].kind, 'text');
+    // key = slug of the field's full accessibleName (the real #q label), bounded at 40 chars
+    assert.equal(byKey['job-title-keywords-or-company'].value, 'support');
+    assert.equal(byKey['job-title-keywords-or-company'].kind, 'text');
     assert.equal(byKey['edit-location'].value, 'minneapolis');
     assert.ok(byKey['date-posted-filter'], 'date selection keyed by its disclosure, not "last-3-days"');
     assert.equal(byKey['date-posted-filter'].value, 'Last 3 days');
     assert.equal(byKey['date-posted-filter'].kind, 'option');
     assert.ok(!ps.some((p) => p.value === 'Search'), 'the Search commit is not a param');
+  });
+
+  it('obsParamName: key → UPPER_SNAKE placeholder name (matches the {{NAME}} regex) (OBS-4b)', () => {
+    assert.equal(obsParamName('date-posted-filter'), 'DATE_POSTED_FILTER');
+    assert.equal(obsParamName('a--b__c'), 'A_B_C');
+    assert.equal(obsParamName(''), 'PARAM');
+  });
+
+  it('parameterizeObserved: text inputs → {{NAME}} placeholders; option choices stay literal (OBS-4b)', () => {
+    const op = segmentTrace(coalesce(raw));
+    const phasesRaw = opToPhases(op);
+    const { phases, params } = parameterizeObserved(phasesRaw, deriveObservedParams(op));
+    const qP = params.find((p) => p.selector === '#q');
+    assert.ok(qP && qP.kind === 'text' && qP.used === true, '#q is a templated text param');
+    assert.equal(qP.value, 'support', 'demonstrated value preserved as the default');
+    // the TYPE action now carries the placeholder, not the literal value
+    const qType = phases[0].actions.filter((a) => a.action !== 'SCROLL_TO').find((a) => a.action === 'TYPE' && a.selector === '#q');
+    assert.equal(qType.value, `{{${qP.name}}}`, 'TYPE value rewritten to the placeholder');
+    // the option choice is left literal (a CLICK), its param unused (find-by-label deferred to OBS-4c)
+    const optP = params.find((p) => p.kind === 'option');
+    assert.equal(optP.used, false, 'option params are not templated in v1');
+    // purity — the input phases are untouched
+    const origQ = phasesRaw[0].actions.filter((a) => a.action !== 'SCROLL_TO').find((a) => a.action === 'TYPE' && a.selector === '#q');
+    assert.equal(origQ.value, 'support', 'parameterizeObserved does not mutate its input');
+  });
+
+  it('buildTier2CapabilityRecords wires params: per-fragment bindings from real placeholders + strategy.params union (OBS-4b)', () => {
+    const op = segmentTrace(coalesce(raw));
+    const { phases, params } = parameterizeObserved(opToPhases(op), deriveObservedParams(op));
+    const recs = buildTier2CapabilityRecords(phases, { groundId: 'g1', strategyId: 's1', fragmentIds: ['f1', 'f2'], name: 'cap', goal: 'cap', params });
+    const qName = params.find((p) => p.selector === '#q').name;
+    // fragment 0 (search) declares the templated params it actually uses; fragment 1 (date filter) declares none
+    assert.ok(recs.fragments[0].params.includes(qName), 'search fragment declares its templated param');
+    assert.deepEqual(recs.fragments[1].params, [], 'literal (option-only) fragment declares no params');
+    assert.deepEqual(recs.strategy.fragmentSteps[0].paramBindings[qName], { kind: 'strategy_param', name: qName });
+    assert.deepEqual(recs.strategy.fragmentSteps[1].paramBindings, {});
+    const sp = recs.strategy.params.find((p) => p.name === qName);
+    assert.ok(sp && sp.kind === 'scalar' && sp.required === false && sp.default === 'support', 'strategy param: scalar, optional, demonstrated default');
   });
 });

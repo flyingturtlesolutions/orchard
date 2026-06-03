@@ -14,7 +14,7 @@
 // PURE: no DOM / chrome / storage / id-minting (the persistence slice mints ids + saves).
 //
 // @module Core/capabilitySynth
-// @version 2.74.649
+// @version 2.74.661
 
 /** Feature kinds that FILL a value (typed first), vs ACT (clicked after). */
 const _FILL_KINDS = new Set(['input']);
@@ -179,35 +179,58 @@ export function buildCapabilityRecords(draft, { groundId, fragmentId, strategyId
  * list — crucially RE-SYNTHESIZED WITHOUT the trial's commit-deferral, so the persisted fragment includes the
  * real commit CLICK and a REPLAY actually applies the filter (the trial only proved reachability). Steps keep
  * their inline `landmark` (SG-LM-3) so replay self-heals via probe-or-recover without a registry round-trip.
+ * OBS-4b — `params` (optional) declares reusable inputs: any action `value`/`selector` carrying a `{{NAME}}`
+ * placeholder is wired through. Each fragment's `params` + `paramBindings` are derived by SCANNING that
+ * fragment's actions for the placeholders that actually appear (so bindings match real templates, never a
+ * stale list); `strategy.params` is the union, each `{kind:'strategy_param', name}` so the value flows
+ * scope → fragment → InjectionService.injectParams at replay. When `params` is empty, behaviour is unchanged
+ * (all-literal actions, no bindings — the prior contract).
+ *
  * @param {Array<{label:string, actions:object[]}>} phases  ordered phases with synthesized action lists
- * @param {{groundId:string, strategyId:string, fragmentIds:string[], name?:string, goal?:string, now?:number}} ids
+ * @param {{groundId:string, strategyId:string, fragmentIds:string[], name?:string, goal?:string, now?:number,
+ *          params?:Array<{name:string,label?:string,value?:string}>}} ids
  * @returns {{fragments:object[], strategy:object}|null}  null when nothing is runnable / ids are short
  */
-export function buildTier2CapabilityRecords(phases, { groundId, strategyId, fragmentIds, name, goal, now } = {}) {
+export function buildTier2CapabilityRecords(phases, { groundId, strategyId, fragmentIds, name, goal, now, params } = {}) {
   const ph = Array.isArray(phases) ? phases.filter((p) => p && Array.isArray(p.actions) && p.actions.length) : [];
   if (!ph.length || !groundId || !strategyId || !Array.isArray(fragmentIds) || fragmentIds.length < ph.length) return null;
   const ts = Number.isFinite(now) ? now : Date.now();
+  const declared = new Map((Array.isArray(params) ? params : []).filter((p) => p && p.name).map((p) => [p.name, p]));
+  const PLACEHOLDER = /\{\{([A-Z0-9_]+)\}\}/g;
   const fragments = [];
   const fragmentSteps = [];
+  const usedNames = new Set();   // union across fragments → strategy.params
   for (let i = 0; i < ph.length; i++) {
     const fragmentId = fragmentIds[i];
+    const rawJson = JSON.stringify(ph[i].actions);
+    // Wire only the params whose placeholders actually appear in THIS fragment's actions.
+    const names = new Set();
+    let m; PLACEHOLDER.lastIndex = 0;
+    while ((m = PLACEHOLDER.exec(rawJson))) if (declared.has(m[1])) names.add(m[1]);
+    const paramBindings = {};
+    for (const nm of names) { paramBindings[nm] = { kind: 'strategy_param', name: nm }; usedNames.add(nm); }
     fragments.push({
       id: fragmentId, groundId,
       name: `${ph[i].label} — steps`.slice(0, 80),
       description: ph[i].label || '',
-      rawJson: JSON.stringify(ph[i].actions),
-      params: [],
+      rawJson,
+      params: [...names],
       preconditions: { match: 'all', conditions: [] },
       postconditions: { match: 'all', conditions: [] },
       healthStatus: 'untested', lastExecutedAt: null, synthesized: true,
       createdAt: ts, updatedAt: ts,
     });
-    fragmentSteps.push({ type: 'fragment', fragmentId, paramBindings: {} });
+    fragmentSteps.push({ type: 'fragment', fragmentId, paramBindings });
   }
   const strategy = {
     id: strategyId, groundId,
     name: (name || 'Tier-2 capability').slice(0, 80), goal: goal || '',
-    params: [], fragmentSteps, aliases: [], outcomeSignal: null,
+    // required:false — replay always supplies the demonstrated default, so a missing value never hard-blocks.
+    params: [...usedNames].map((nm) => {
+      const d = declared.get(nm);
+      return { name: nm, kind: 'scalar', type: 'string', required: false, label: (d && d.label) || nm, default: (d && d.value != null) ? String(d.value) : '' };
+    }),
+    fragmentSteps, aliases: [], outcomeSignal: null,
     synthesized: true, createdAt: ts, updatedAt: ts,
   };
   return { fragments, strategy };

@@ -19,7 +19,7 @@ import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspec
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
-import { segmentTrace, opToPhases, deriveObservedParams } from '../../Core/observedSegment.js';
+import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved } from '../../Core/observedSegment.js';
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
 import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
@@ -335,23 +335,30 @@ export function createSgMessageHandlers(ctx) {
         // the library shows), authoredBy:'model', exactly like the NL-path ACCEPT. The capability links it.
         const perspective = buildPerspectiveRecord({ intent: capName, spec: { shape: 'observed', target: capName }, groundId, localeUrl, landmarkUids: [...seenUid] });
         try { await StorageManager.savePerspective(perspective); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED savePerspective failed: ${e.message}`); }
+        // OBS-4b — PARAMETERIZE: rewrite each demonstrated text input to a `{{NAME}}` placeholder so the
+        // capability re-runs with NEW values. The demonstrated value rides along as the param's default, so a
+        // no-override replay reproduces the demo. (Option choices stay literal in v1 — find-by-label = OBS-4c.)
+        const paramz = parameterizeObserved(phases, params);
+        const runPhases = paramz.phases;
+        const namedParams = paramz.params;
         const strategyId = crypto.randomUUID();
-        const fragmentIds = phases.map(() => crypto.randomUUID());
-        const recs = CapabilitySynth.buildTier2CapabilityRecords(phases, { groundId, strategyId, fragmentIds, name: capName, goal: capName });
+        const fragmentIds = runPhases.map(() => crypto.randomUUID());
+        const recs = CapabilitySynth.buildTier2CapabilityRecords(runPhases, { groundId, strategyId, fragmentIds, name: capName, goal: capName, params: namedParams });
         if (!recs) { sendResponse({ success: false, error: 'could not assemble capability records' }); return; }
         for (const f of recs.fragments) { try { await StorageManager.saveFragment(f); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED saveFragment failed: ${e.message}`); } }
         try { await StorageManager.saveStrategy(recs.strategy); }
         catch (e) { Logger.error('background', `DERIVE_OBSERVED saveStrategy failed: ${e.message}`); sendResponse({ success: false, error: `strategy save failed: ${e.message}` }); return; }
         const capability = {
           id: crypto.randomUUID(), groundId, intent: capName, description: capDescription, shape: 'observed', source: 'observed',
-          localeUrl, perspectiveId: perspective.id, strategyId, fragmentIds, landmarkUids: [...seenUid], params, phases: phases.map((p) => p.label), binding: [], synthesized: true,
+          localeUrl, perspectiveId: perspective.id, strategyId, fragmentIds, landmarkUids: [...seenUid], params: namedParams, phases: phases.map((p) => p.label), binding: [], synthesized: true,
           createdAt: Date.now(), trial: { score: null, verdict: 'observed', trialRef: null },
         };
         await ctx.writeSgCapability(groundId, capability);
         try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: capName.slice(0, 120) }, detail: { capabilityId: capability.id, perspectiveId: perspective.id, strategyId, fragments: recs.fragments.length, landmarks: landmarkRecords.length, shape: 'observed' } })]); } catch { /* */ }
         try { await ctx.broadcastStorageChanged('perspective', perspective.id, 'saved'); } catch { /* */ }
-        Logger.info('background', `DERIVE_OBSERVED_CAPABILITY — "${capName}" ${capability.id} → perspective ${perspective.id} + strategy ${strategyId} chaining ${recs.fragments.length} fragment(s) + ${landmarkRecords.length} landmark(s) + ${params.length} param(s) [${capability.phases.join(' → ')}]`);
-        sendResponse({ success: true, capability, perspectiveId: perspective.id, fragmentCount: recs.fragments.length, landmarkCount: landmarkRecords.length, paramCount: params.length });
+        const tmplCount = namedParams.filter((p) => p.used).length;
+        Logger.info('background', `DERIVE_OBSERVED_CAPABILITY — "${capName}" ${capability.id} → perspective ${perspective.id} + strategy ${strategyId} chaining ${recs.fragments.length} fragment(s) + ${landmarkRecords.length} landmark(s) + ${namedParams.length} param(s) (${tmplCount} templated for re-run) [${capability.phases.join(' → ')}]`);
+        sendResponse({ success: true, capability, perspectiveId: perspective.id, fragmentCount: recs.fragments.length, landmarkCount: landmarkRecords.length, paramCount: namedParams.length });
       } catch (err) {
         Logger.error('background', `DERIVE_OBSERVED_CAPABILITY failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
@@ -362,10 +369,20 @@ export function createSgMessageHandlers(ctx) {
     // (registry recovery via applyLandmarkRefToStep → LANDMARK_PROBE_OR_RECOVER); fall back to the binding.
     REPLAY_SG_CAPABILITY: async (payload, _sender, sendResponse) => {
       try {
-        const { tabId, groundId = null, capabilityId = null } = payload ?? {};
+        const { tabId, groundId = null, capabilityId = null, paramValues = null } = payload ?? {};
         if (!groundId || !capabilityId) { sendResponse({ success: false, error: 'groundId + capabilityId required' }); return; }
         const cap = (await ctx.readSgCapabilities(groundId)).find((c) => c.id === capabilityId);
         if (!cap) { sendResponse({ success: false, error: 'capability not found' }); return; }
+        // OBS-4b — an observed capability is parameterized: seed EVERY templated param with its demonstrated
+        // default, then overlay user-supplied NEW values. Always seeding defaults is REQUIRED — executeStrategy
+        // does NOT auto-apply param defaults, so an unseeded `{{NAME}}` would type/route the literal placeholder.
+        const strategyParamValues = {};
+        for (const p of (Array.isArray(cap.params) ? cap.params : [])) {
+          if (p && p.name && p.used) strategyParamValues[p.name] = p.value != null ? String(p.value) : '';
+        }
+        if (paramValues && typeof paramValues === 'object') {
+          for (const [k, v] of Object.entries(paramValues)) if (k && strategyParamValues[k] !== undefined) strategyParamValues[k] = String(v ?? '');
+        }
         let liveUrl = '';
         if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); liveUrl = t?.url ?? ''; } catch { /* */ } }
         // Page-drift guard — replay binds the capability's page; refuse to run on whatever else loaded.
@@ -376,10 +393,11 @@ export function createSgMessageHandlers(ctx) {
         // Preferred: run the saved, landmark-backed Strategy (the promoted library entity).
         if (cap.strategyId) {
           let result = null;
-          try { result = await ExecutionEngine.executeStrategy({ strategyId: cap.strategyId, targetTabId: (typeof tabId === 'number' ? tabId : null) }); }
+          try { result = await ExecutionEngine.executeStrategy({ strategyId: cap.strategyId, strategyParamValues, targetTabId: (typeof tabId === 'number' ? tabId : null) }); }
           catch (e) { sendResponse({ success: false, error: `replay strategy failed: ${e.message}` }); return; }
           const ok = !!(result && result.success);
-          Logger.info('background', `REPLAY_SG_CAPABILITY — ${cap.id} via saved strategy ${cap.strategyId} → ${ok ? 'ok' : 'failed'} (NO LLM, landmark recovery)`);
+          const pv = Object.keys(strategyParamValues);
+          Logger.info('background', `REPLAY_SG_CAPABILITY — ${cap.id} via saved strategy ${cap.strategyId} → ${ok ? 'ok' : 'failed'} (NO LLM, landmark recovery${pv.length ? `, params: ${pv.join(', ')}` : ''})`);
           sendResponse({ success: true, ran: true, replayed: true, via: 'strategy', capabilityId: cap.id, ok, reason: ok ? undefined : (result?.error || 'a step failed') });
           return;
         }

@@ -49,19 +49,42 @@ export function createSgLibrary({ getGroundId, getTabId, rerender } = {}) {
     rerender?.();
   }
 
-  async function onReplay(capId) {
+  // OBS-4b — re-run an observed capability with NEW values. `paramValues` (keyed by placeholder NAME) is
+  // read from the inline form; the background seeds each templated param's demonstrated default first, then
+  // overlays these, so a blank/unchanged field just reproduces the demonstration.
+  async function onReplay(capId, paramValues = null) {
     const groundId = getGroundId?.();
     if (!capId || !groundId || replay[capId]?.inFlight) return;
     replay[capId] = { inFlight: true, result: null }; rerender?.();
     let res;
     try {
       res = await new Promise((r) => chrome.runtime.sendMessage({
-        type: 'REPLAY_SG_CAPABILITY', payload: { tabId: getTabId?.(), groundId, capabilityId: capId },
+        type: 'REPLAY_SG_CAPABILITY', payload: { tabId: getTabId?.(), groundId, capabilityId: capId, paramValues },
       }, r));
     } catch (e) { res = { success: false, error: e?.message ?? 'unknown' }; }
     replay[capId] = { inFlight: false, result: res || { success: false, error: 'no result' } };
     rerender?.();
   }
+
+  /** OBS-4b — the inline "re-run with values" form for a parameterized observed capability. Text params are
+   *  editable (pre-filled with the demonstrated value); option choices are shown read-only (v1 — re-choosing
+   *  an option needs find-by-label at replay, OBS-4c). Returns '' when the capability has no params. */
+  const renderParamForm = (cap) => {
+    const ps = Array.isArray(cap.params) ? cap.params : [];
+    const text = ps.filter((p) => p && p.used && p.kind === 'text');
+    const fixed = ps.filter((p) => p && !p.used && p.value);
+    if (!text.length && !fixed.length) return '';
+    let h = `<div class="dbg-perspective-caplib-params">`;
+    for (const p of text) {
+      h += `<label class="dbg-perspective-caplib-param"><span>${escHtml(p.label || p.name)}</span>`
+        + `<input type="text" data-cap-param="${escAttr(cap.id)}" data-param-name="${escAttr(p.name)}" value="${escAttr(p.value ?? '')}" placeholder="${escAttr(p.value ?? '')}" /></label>`;
+    }
+    for (const p of fixed) {
+      h += `<div class="dbg-perspective-caplib-param-fixed">${escHtml(p.label || p.name)}: <b>${escHtml(String(p.value))}</b> <span class="dbg-perspective-ground-note">(fixed)</span></div>`;
+    }
+    h += `</div>`;
+    return h;
+  };
 
   return {
     /** Clear all state (host session reset / unmount). */
@@ -77,12 +100,18 @@ export function createSgLibrary({ getGroundId, getTabId, rerender } = {}) {
         const n = Array.isArray(cap.landmarkUids) ? cap.landmarkUids.length : 0;
         const verdict = cap.trial?.verdict || '?';
         const rep = replay[cap.id] || {};
+        const tmpl = (Array.isArray(cap.params) ? cap.params : []).filter((p) => p && p.used).length;
+        const btnLabel = tmpl ? '▶ Re-run with values' : '▶ Re-run';
+        const btnTitle = tmpl
+          ? 'Re-run this demonstration with the values below — no LLM; a blank field reuses the demonstrated value.'
+          : 'Re-run this saved capability on the current page — no LLM; landmarks self-heal a stale selector.';
         const btn = rep.inFlight
           ? `<button class="btn-secondary tiny" type="button" disabled>⏳ Running…</button>`
-          : `<button class="btn-secondary tiny" data-perspective-action="replay-saved-cap" data-cap="${escAttr(cap.id)}" type="button" title="Re-run this saved capability on the current page — no LLM; landmarks self-heal a stale selector.">▶ Re-run</button>`;
+          : `<button class="btn-secondary tiny" data-perspective-action="replay-saved-cap" data-cap="${escAttr(cap.id)}" type="button" title="${escAttr(btnTitle)}">${btnLabel}</button>`;
         html += `<div class="dbg-perspective-caplib-item">
             <div class="dbg-perspective-caplib-head"><span class="dbg-perspective-caplib-intent">${escHtml(cap.intent || cap.id)}</span>${btn}</div>
-            <div class="dbg-perspective-caplib-meta">${escHtml(cap.shape || 'act')} · ${n} landmark(s) · ${escHtml(String(verdict))}${cap.strategyId ? ' · strategy' : ''}</div>
+            <div class="dbg-perspective-caplib-meta">${escHtml(cap.shape || 'act')} · ${n} landmark(s) · ${escHtml(String(verdict))}${cap.strategyId ? ' · strategy' : ''}${tmpl ? ` · ${tmpl} input(s)` : ''}</div>
+            ${renderParamForm(cap)}
             ${renderReplayNote(rep.result)}
           </div>`;
       }
@@ -95,7 +124,17 @@ export function createSgLibrary({ getGroundId, getTabId, rerender } = {}) {
       const groundId = getGroundId?.();
       if (groundId && loadedFor !== groundId && !loading) load();
       container.querySelectorAll('[data-perspective-action="replay-saved-cap"]').forEach((b) =>
-        b.addEventListener('click', () => onReplay(b.getAttribute('data-cap'))));
+        b.addEventListener('click', () => {
+          const capId = b.getAttribute('data-cap');
+          // OBS-4b — collect THIS capability's inline param inputs (scoped to its item, keyed by placeholder
+          // NAME). No inputs (non-parameterized cap) → null, so the background just replays the demo.
+          const item = b.closest('.dbg-perspective-caplib-item');
+          let paramValues = null;
+          item?.querySelectorAll('[data-cap-param]').forEach((inp) => {
+            (paramValues ??= {})[inp.getAttribute('data-param-name')] = inp.value;
+          });
+          onReplay(capId, paramValues);
+        }));
     },
   };
 }
