@@ -2458,7 +2458,7 @@ Rules:
    * @param {{ask:string, context?:string, candidates:object[]}} args  candidates = projected Candidates (here-set)
    * @returns {Promise<{scores:object[], topId:(string|null), bindings:object, rationale:string}|null>}
    */
-  static async matchCapability({ ask, context = '', candidates = [] } = {}) {
+  static async matchCapability({ ask, context = '', candidates = [], affordances = [] } = {}) {
     const list = Array.isArray(candidates) ? candidates : [];
     if (!ask || typeof ask !== 'string' || !ask.trim() || !list.length) return null;
     if (!(await AnthropicService.hasLlm())) return null;
@@ -2468,23 +2468,28 @@ Rules:
         name: p.name, kind: p.kind, ...(Array.isArray(p.vocabulary) ? { options: p.vocabulary.slice(0, 12) } : {}),
       })),
     }));
-    const systemPrompt = `You match a user's ASK to grounded capabilities on the current page. Each CANDIDATE is already runnable here. For EACH candidate, judge whether its effect plausibly ACHIEVES the ask (effectEligible) and its relevance (0..1). Then for your single best candidate, BIND the ask's values to its params: an "option" param value MUST be one of that param's given options (omit it if none fits); other params take a value extracted from the ask. Be CONSERVATIVE — rate relevance high only when the capability clearly does what's asked; prefer omitting a binding to guessing. Return ONLY JSON:
+    const aff = (Array.isArray(affordances) ? affordances : []).slice(0, 60);
+    const systemPrompt = `You match a user's ASK to grounded capabilities on the current page. Each CANDIDATE is already runnable here. For EACH candidate, judge whether its effect plausibly ACHIEVES the ask (effectEligible) and its relevance (0..1). Then for your single best candidate, BIND the ask's values to its params. For an "option" param, the value SHOULD be one of that param's given options — but if the ask names a DIFFERENT option that appears in PAGE_AFFORDANCES (the controls the page actually has), you MAY bind that instead (the page confirms it exists). e.g. a "search by category" capability demonstrated for "Vectors" can be re-bound to "Illustrations" when Illustrations is in PAGE_AFFORDANCES. Other params take a value extracted from the ask. Be CONSERVATIVE — rate relevance high only when the capability clearly does what's asked; never invent an option the page doesn't have. Return ONLY JSON:
 {"scores":[{"id":"<id>","relevance":<0..1>,"effectEligible":<true|false>}],"topId":"<best id or null>","bindings":{"<PARAM>":"<value>"},"rationale":"<one short sentence>"}`;
-    const user = `ASK: ${ask}\n${context ? `CONTEXT: ${String(context).slice(0, 400)}\n` : ''}CANDIDATES:\n${JSON.stringify(lean)}`;
+    const user = `ASK: ${ask}\n${context ? `CONTEXT: ${String(context).slice(0, 400)}\n` : ''}${aff.length ? `PAGE_AFFORDANCES: ${JSON.stringify(aff)}\n` : ''}CANDIDATES:\n${JSON.stringify(lean)}`;
     try {
-      const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text: user }], 512, [], { role: 'match', operation: 'matchCapability' });
-      if (!raw?.success) { Logger.warn('AnthropicService', `matchCapability failed: ${raw?.error}`); return null; }
+      // 1500 output tokens — a 10-candidate scores[] + bindings can exceed 512 and truncate → JSON parse fail.
+      const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text: user }], 1500, [], { role: 'match', operation: 'matchCapability' });
+      if (!raw?.success) { Logger.warn('AnthropicService', `matchCapability — LLM call FAILED: ${raw?.error}`); return null; }
       const json = AnthropicService.#firstJsonObject(raw.text);
-      const out = json ? JSON.parse(json) : null;
+      if (!json) { Logger.warn('AnthropicService', `matchCapability — no JSON in response: "${String(raw.text).slice(0, 240)}"`); return null; }
+      let out;
+      try { out = JSON.parse(json); }
+      catch (pe) { Logger.warn('AnthropicService', `matchCapability — JSON parse FAILED (${pe.message}): "${String(json).slice(0, 240)}"`); return null; }
       if (!out) return null;
       const scores = Array.isArray(out.scores) ? out.scores.filter((s) => s && s.id != null) : [];
-      Logger.info('AnthropicService', `matchCapability -> top ${out.topId || '(none)'} over ${list.length} candidate(s)`);
+      Logger.info('AnthropicService', `matchCapability -> top ${out.topId || '(none)'} over ${list.length} candidate(s), ${scores.length} scored`);
       return {
         scores, topId: out.topId != null ? String(out.topId) : null,
         bindings: (out.bindings && typeof out.bindings === 'object') ? out.bindings : {},
         rationale: String(out.rationale || '').slice(0, 200),
       };
-    } catch (e) { Logger.warn('AnthropicService', `matchCapability error: ${e.message}`); return null; }
+    } catch (e) { Logger.warn('AnthropicService', `matchCapability — EXCEPTION: ${e.message}`); return null; }
   }
 
   /**

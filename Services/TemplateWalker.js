@@ -3322,7 +3322,7 @@ export class TemplateWalker {
     // means the message was NEVER delivered, so the action did NOT run → retrying is safe (no double-execute).
     // The content script auto-injects on navigation (manifest content_scripts), so a short backoff lets it come
     // up. We retry ONLY these connection errors; any other error is surfaced immediately (it may have run).
-    const RETRYABLE = /Receiving end does not exist|Could not establish connection|message channel closed before a response/i;
+    const RETRYABLE = /Receiving end does not exist|Could not establish connection|message channel.*closed|back\/forward cache/i;
     const sendOnce = () => new Promise((resolve, reject) => {
       chrome.tabs.sendMessage(tabId, message, { frameId }, (response) => {
         if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));

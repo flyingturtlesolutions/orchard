@@ -20,7 +20,7 @@ import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
 import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved, describeTraceInput } from '../../Core/observedSegment.js';
-import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, tallyCapabilityConfirmations } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G
+import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
 import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
@@ -419,22 +419,35 @@ export function createSgMessageHandlers(ctx) {
         // hid real matches; relevance ranking + confirm-first + the origin-relaxed REPLAY drift guard + landmark
         // recovery decide whether it runs. Off-Ground stays excluded.
         const candidates = [...parts.here, ...parts.reachable];
+        // ORCH-A — the Explore-built Locale catalogs the page's affordance labels (category tabs, filters,
+        // buttons). Surfaced to the binder, an option can resolve to a page-known label the recorder never
+        // captured (demonstrate "Vectors" → re-bind "Illustrations" because the page confirms it exists).
+        let affordances = [];
+        try { const pm = await ctx.readLocaleCache(gid, localeUrl); affordances = localeAffordanceLabels(pm && pm.model); } catch { /* */ }
         let scorer; let llm = null;
         const aliasHit = candidates.some((c) => (c.aliases || []).some((al) => normalizeAliasPhrase(al) === normalizeAliasPhrase(ask)));
         if (candidates.length && !aliasHit) {
-          try { llm = await AnthropicService.matchCapability({ ask, candidates }); } catch { /* */ }
+          try { llm = await AnthropicService.matchCapability({ ask, candidates, affordances }); } catch { /* */ }
           if (llm) scorer = scoresToScorer(llm.scores);
         }
         const decision = rankAndDecide(ask, candidates, { ...(scorer ? { score: scorer } : {}), now: Date.now() });
-        // ORCH-M — validate the LLM's option bindings against the chosen candidate's captured vocabulary
-        // (anti-hallucination): in-vocab values are snapped + returned as `bindings`; misses surface as `gaps`.
+        // ORCH-M/A — validate the LLM's option bindings against the candidate's captured vocabulary OR a label
+        // the LIVE PAGE catalogs (affordances): in-set values snap + return as `bindings`; misses → `gaps`.
         let bindings = {}; let gaps = [];
-        if (decision.candidate && llm && llm.bindings) { const v = validateBindings(llm.bindings, decision.candidate); bindings = v.bound; gaps = v.gaps; }
+        if (decision.candidate && llm && llm.bindings) { const v = validateBindings(llm.bindings, decision.candidate, affordances); bindings = v.bound; gaps = v.gaps; }
         const lean = (c) => (c ? { id: c.id, intent: c.intent, strategyId: c.strategyId, reversible: c.reversible, params: c.params } : null);
         // reachable folded into here → the chat never says "go to another page" (planAssistantTurn keys navigate off reachable>0).
         const scoped = { here: candidates.length, reachable: 0, off: parts.off.length };
         const via = llm ? 'llm' : (aliasHit ? 'alias' : 'lexical');
-        Logger.info('background', `ORCH_MATCH — "${String(ask).slice(0, 60)}" @ ${localeUrl || '(no url)'} → ${decision.decision}/${decision.reason}${decision.candidate ? ` (${decision.candidate.id})` : ''} [${via}; here ${scoped.here}, reachable ${scoped.reachable}, off ${scoped.off}]`);
+        // ── ORCH_MATCH diagnostics — full visibility into a match decision ──
+        const _capLine = (c) => { const u = (c.params || []).filter((p) => p && p.used); return `${String(c.id).slice(0, 8)}:"${c.intent}"${u.length ? `[${u.map((p) => `${p.name}/${p.kind}${Array.isArray(p.vocabulary) ? `(${p.vocabulary.length}:${p.vocabulary.slice(0, 6).join('|')})` : ''}`).join(', ')}]` : ''}`; };
+        Logger.info('background', `ORCH_MATCH ▸ ask="${String(ask).slice(0, 90)}" @ ${localeUrl || '(no url)'} ground=${gid}`);
+        Logger.info('background', `  affordances(${affordances.length}): ${JSON.stringify(affordances.slice(0, 40))}`);
+        Logger.info('background', `  candidates(${candidates.length}): ${candidates.map(_capLine).join('  |  ') || '(none)'}`);
+        if (llm) Logger.info('background', `  llm: top=${llm.topId} bindings=${JSON.stringify(llm.bindings)} rationale="${llm.rationale}" scores=${JSON.stringify(llm.scores)}`);
+        else Logger.info('background', `  llm: ${aliasHit ? 'skipped (alias-exact)' : candidates.length ? 'unavailable/failed → lexical scorer' : 'no candidates'}`);
+        Logger.info('background', `  → ${decision.decision}/${decision.reason}${decision.candidate ? ` "${decision.candidate.intent}" score=${(decision.score || 0).toFixed(2)} margin=${(decision.margin || 0).toFixed(2)}` : ''} bindings=${JSON.stringify(bindings)}${gaps.length ? ` gaps=${JSON.stringify(gaps)}` : ''} [via=${via}; here=${parts.here.length} reach=${parts.reachable.length} off=${parts.off.length}]`);
+        if (decision.alternatives && decision.alternatives.length > 1) Logger.info('background', `  alternatives: ${decision.alternatives.map((a) => `"${a.intent}"=${(a.relevance || 0).toFixed(2)}`).join(', ')}`);
         sendResponse({
           success: true,
           decision: decision.decision,          // 'auto' | 'propose' | 'miss'
@@ -463,9 +476,19 @@ export function createSgMessageHandlers(ctx) {
         if (!groundId || !capabilityId || typeof phrase !== 'string' || !phrase.trim()) { sendResponse({ success: false, error: 'groundId + capabilityId + phrase required' }); return; }
         const cap = (await ctx.readSgCapabilities(groundId)).find((c) => c.id === capabilityId);
         if (!cap) { sendResponse({ success: false, error: 'capability not found' }); return; }
+        const all = await ctx.readSgCapabilities(groundId);
         const before = Array.isArray(cap.aliases) ? cap.aliases.length : 0;
         cap.aliases = accreteAlias(cap.aliases, phrase, { intent: cap.intent || '' });
         await ctx.writeSgCapability(groundId, cap);
+        // DE-POISON — this ask now belongs to `cap`; strip it from any OTHER capability that accreted it from a
+        // prior WRONG confirmation (the cause of "search for sound effects" sticking to "Search for music").
+        let depoisoned = 0;
+        for (const other of (Array.isArray(all) ? all : [])) {
+          if (!other || other.id === cap.id || !Array.isArray(other.aliases) || !other.aliases.length) continue;
+          const pruned = removeAlias(other.aliases, phrase);
+          if (pruned.length !== other.aliases.length) { other.aliases = pruned; try { await ctx.writeSgCapability(groundId, other); depoisoned++; } catch { /* */ } }
+        }
+        if (depoisoned) Logger.info('background', `ORCH_RECORD_ALIAS — de-poisoned "${String(phrase).slice(0, 40)}" from ${depoisoned} other capability(ies)`);
         // ORCH-G — record the confirmation so the capability's health accrues (gate promotion). `confirmed:true`
         // distinguishes a match-confirmation from the DERIVE-time 'accept' so creation doesn't inflate health.
         try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', outcome: 'success', detail: { capabilityId: cap.id, confirmed: true, phrase: String(phrase).slice(0, 120) } })]); } catch { /* */ }

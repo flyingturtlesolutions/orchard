@@ -14,7 +14,7 @@
 //     gives nicer labels later; this keeps it runnable without an LLM.
 //
 // @module Core/observedSegment
-// @version 2.74.678
+// @version 2.74.682
 
 const _DISCLOSURE_HINT = /filter|menu|sort|posted|date|pay|salary|wage|type|level|experience|distance|remote|radius|category|options?|dropdown|expand|more/i;
 
@@ -78,6 +78,13 @@ export function segmentTrace(trace) {
       // in-place submit (no navigation) and we flush here.
       if (acts[i + 1] && acts[i + 1].kind === 'navigate') continue;
       flush(a.url || ''); fromUrl = a.url || fromUrl; continue;
+    }
+    if (a.kind === 'key') {
+      // Enter is a step AND a boundary: it submits/navigates, so anything captured AFTER it belongs to the
+      // NEXT page (a re-type the user did on the results page would otherwise sit in this fragment and fail
+      // when Enter has already torn the page down). Include the Enter, then flush. A navigate that follows
+      // (its real target URL) just flushes an already-empty buffer.
+      cur.push(a); flush(a.url || ''); fromUrl = a.url || fromUrl; continue;
     }
     cur.push(a);   // includes 'scroll' — kept so a PURE-scroll demo has a step; opToPhases drops INCIDENTAL scrolls
   }

@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { toCandidate, scopeAndPartition, lexicalScore, rankAndDecide, matchAsk, DEFAULT_THRESHOLDS, accreteAlias, normalizeAliasPhrase, scoresToScorer, validateBindings, promotionBonus, tallyCapabilityConfirmations } from './orchMatch.js';
+import { toCandidate, scopeAndPartition, lexicalScore, rankAndDecide, matchAsk, DEFAULT_THRESHOLDS, accreteAlias, removeAlias, normalizeAliasPhrase, scoresToScorer, validateBindings, promotionBonus, tallyCapabilityConfirmations, localeAffordanceLabels } from './orchMatch.js';
 
 // A realistic mini-library for indeed.com results page.
 const G = 'ground-indeed';
@@ -50,10 +50,26 @@ describe('orchMatch — ORCH-M0 HIT/MISS matcher core', () => {
     assert.deepEqual(reachable.map((c) => c.id), ['cap-pay'], 'precondition-failing candidate is not runnable here');
   });
 
-  it('lexicalScore: exact alias → 1; else token overlap', () => {
+  it('lexicalScore: intent-exact → 1 beats alias-exact → 0.95 (the intent is the authority)', () => {
+    assert.equal(lexicalScore('filter by date posted', toCandidate(dateF)).relevance, 1, 'intent-exact');
+    assert.equal(lexicalScore('posted today', toCandidate(dateF)).relevance, 0.95, 'alias-exact (< intent)');
     assert.equal(lexicalScore('posted today', toCandidate(dateF)).isExact, true);
-    assert.equal(lexicalScore('posted today', toCandidate(dateF)).relevance, 1);
-    assert.ok(lexicalScore('filter by pay', toCandidate(payF)).relevance > 0.4);
+    assert.ok(lexicalScore('show recent stuff', toCandidate(dateF)).relevance < 0.95, 'fuzzy < exact');
+  });
+
+  it('rankAndDecide: an intent-exact capability beats one POISONED with the ask as an alias (the live bug)', () => {
+    // "Search for music" wrongly accreted "search for sound effects" as an alias; "Search for sound effects" is real.
+    const music = toCandidate({ id: 'music', groundId: G, localeUrl: RESULTS, intent: 'Search for music', aliases: ['search for sound effects'], params: [] });
+    const sfx = toCandidate({ id: 'sfx', groundId: G, localeUrl: RESULTS, intent: 'Search for sound effects', aliases: [], params: [] });
+    const r = rankAndDecide('search for sound effects', [music, sfx]);
+    assert.equal(r.candidate.id, 'sfx', 'the correctly-named capability wins over the poisoned alias');
+    assert.equal(r.decision, 'auto');
+  });
+
+  it('removeAlias: strips a phrase case-insensitively (de-poison)', () => {
+    assert.deepEqual(removeAlias(['search for sound effects', 'find music'], 'Search For Sound Effects'), ['find music']);
+    assert.deepEqual(removeAlias(['a'], 'b'), ['a']);
+    assert.deepEqual(removeAlias(null, 'x'), []);
   });
 
   it('rankAndDecide: an exact alias on a reversible capability → AUTO (alias-exact)', () => {
@@ -122,9 +138,11 @@ describe('orchMatch — ORCH-M0 HIT/MISS matcher core', () => {
     assert.equal(scorer('x', toCandidate(search)).relevance, 0, 'an unrated candidate scores 0');
     // an exact alias pins to 1 even if the model under-rated it
     const low = scoresToScorer([{ id: 'cap-date', relevance: 0.1, effectEligible: true }]);
-    const r = low('posted today', toCandidate(dateF));
+    const r = low('posted today', toCandidate(dateF));   // alias-exact pins to ≥0.95 even if the LLM under-rated
     assert.equal(r.isExact, true);
-    assert.equal(r.relevance, 1);
+    assert.equal(r.relevance, 0.95);
+    // intent-exact pins to 1 regardless of LLM
+    assert.equal(low('filter by date posted', toCandidate(dateF)).relevance, 1);
   });
 
   it('validateBindings: option must resolve in vocabulary (snap exact); text accepted; misses → gaps (ORCH-M)', () => {
@@ -174,6 +192,36 @@ describe('orchMatch — ORCH-M0 HIT/MISS matcher core', () => {
     const r3 = rankAndDecide('x', [irr], { score: fixed(0.9) });
     assert.equal(r3.decision, 'propose');
     assert.equal(r3.reason, 'irreversible-confirm', 'an irreversible capability never autos, however confirmed');
+  });
+
+  it('localeAffordanceLabels: extracts the Locale catalog labels (ORCH-A)', () => {
+    const locale = { features: {
+      f1: { label: 'Illustrations', kind: 'navigation', selector: '#ill' },
+      f2: { label: 'Vectors', kind: 'navigation', selector: '#vec' },
+      f3: { label: 'Search', kind: 'input', selector: '#q' },
+      f4: { label: '', selector: '#x' },              // no label → skipped
+      f5: { kind: 'content' },                        // no label, no selector → skipped
+      f6: { label: 'Illustrations', selector: '#dup' }, // dup label → skipped
+    } };
+    const labels = localeAffordanceLabels(locale);
+    assert.ok(labels.includes('Illustrations') && labels.includes('Vectors') && labels.includes('Search'));
+    assert.equal(labels.filter((l) => l === 'Illustrations').length, 1, 'deduped');
+    assert.deepEqual(localeAffordanceLabels(null), []);
+  });
+
+  it('validateBindings + Locale: an option the captured vocab missed but the PAGE catalogs is accepted (ORCH-A)', () => {
+    // capability demonstrated for "Vectors" — its captured vocab never saw "Illustrations"
+    const cand = { id: 'c', params: [{ name: 'CATEGORY', kind: 'option', used: true, vocabulary: ['Vectors', 'Videos'] }] };
+    // without the Locale → a gap (anti-hallucination holds)
+    const noLocale = validateBindings({ CATEGORY: 'Illustrations' }, cand);
+    assert.deepEqual(noLocale.gaps, [{ name: 'CATEGORY', requested: 'Illustrations', reason: 'not-in-vocabulary' }]);
+    assert.ok(!('CATEGORY' in noLocale.bound));
+    // WITH the Locale confirming "Illustrations" is a real affordance → bound (snapped to the Locale's casing)
+    const withLocale = validateBindings({ CATEGORY: 'illustrations' }, cand, ['Photos', 'Illustrations', 'Vectors', 'Videos', 'Music']);
+    assert.equal(withLocale.bound.CATEGORY, 'Illustrations');
+    assert.equal(withLocale.gaps.length, 0);
+    // a value the page does NOT have is still a gap
+    assert.ok(validateBindings({ CATEGORY: 'Sculptures' }, cand, ['Photos', 'Vectors']).gaps.length === 1);
   });
 
   it('matchAsk: end-to-end funnel scopes to here then decides, with scoped counts', () => {

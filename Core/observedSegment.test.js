@@ -100,6 +100,16 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     assert.equal(real[1].value, 'Enter');
   });
 
+  it('OBS — Enter is a boundary: an action AFTER the Enter starts a NEW fragment (post-submit page)', () => {
+    const T = (sel, v, ts) => buildRawAction({ domKind: 'input', value: v, ts, url: 'u', target: { tagName: 'INPUT', role: 'textbox', accessibleName: 'Search', selector: sel } });
+    const K = (sel, ts) => buildRawAction({ domKind: 'keypress', value: 'Enter', ts, url: 'u', target: { tagName: 'INPUT', role: 'textbox', accessibleName: 'Search', selector: sel } });
+    // type → Enter (submits/navigates) → a stray re-type captured on the results page before the nav registered
+    const op = segmentTrace(coalesce([T('#q', 'gifs', 1), K('#q', 2), T('#q', 'gifs', 3)]));
+    assert.equal(op.nodes.length, 2, 'Enter splits the trace so the post-Enter action is not stranded on a dead page');
+    assert.deepEqual(op.nodes[0].steps.map((s) => s.kind), ['type', 'key'], 'the search (type + Enter) is fragment 1');
+    assert.deepEqual(op.nodes[1].steps.map((s) => s.kind), ['type'], 'the post-Enter re-type is its own fragment');
+  });
+
   it('stepToAction: a native <select> change → SELECT op with value', () => {
     const a = stepToAction(buildRawAction({ domKind: 'change', value: 'CA', target: { tagName: 'SELECT', selector: '#state' } }));
     assert.equal(a.action, 'SELECT');

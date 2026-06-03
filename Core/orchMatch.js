@@ -17,7 +17,7 @@
 // See docs/DESIGN_intent_orchestration.md §4–§6.
 //
 // @module Core/orchMatch
-// @version 2.74.669
+// @version 2.74.681
 
 // Irreversibility heuristic (skeleton — the real classifier is PB-4's safety classing). Conservative by
 // design: over-flagging just forces a confirm (safe). Reversibility is a HARD VETO on auto-fire.
@@ -85,13 +85,17 @@ export function scopeAndPartition(candidates, { currentGroundId = null, currentL
   return { here, reachable, off };
 }
 
-/** Default lexical scorer — the SKELETON stand-in for the LLM select+bind call. Exact alias → relevance 1;
- *  else token Jaccard over intent+aliases. `effectEligible` is true here (lexical can't reason about effect);
- *  the LLM scorer makes it a real qualifier. PURE. */
+/** Default lexical scorer — the SKELETON stand-in for the LLM select+bind call. PURE. PRIORITY: a capability
+ *  whose INTENT exactly matches the ask wins (1.0) over one that merely has the ask as a learned ALIAS (0.95) —
+ *  the intent is the authority; an alias can be a wrong association the flywheel accreted. Else token Jaccard.
+ *  `effectEligible` is true here (lexical can't reason about effect); the LLM scorer makes it a real qualifier. */
 export function lexicalScore(ask, candidate) {
-  const isExact = (candidate.aliases || []).some((al) => _norm(al) === _norm(ask));
-  const relevance = isExact ? 1 : _jaccard(_tokens(ask), _tokens([candidate.intent, ...(candidate.aliases || [])].join(' ')));
-  return { relevance, isExact, effectEligible: true };
+  const n = _norm(ask);
+  const aliases = (candidate && Array.isArray(candidate.aliases)) ? candidate.aliases : [];
+  if (n && _norm(candidate && candidate.intent) === n) return { relevance: 1, isExact: true, effectEligible: true };
+  if (aliases.some((al) => _norm(al) === n)) return { relevance: 0.95, isExact: true, effectEligible: true };
+  const relevance = _jaccard(_tokens(ask), _tokens([(candidate && candidate.intent) || '', ...aliases].join(' ')));
+  return { relevance, isExact: false, effectEligible: true };
 }
 
 // Base bands. ORCH-G graduates the AUTO bar down per-capability as confirmations accrue (promotionBonus).
@@ -218,6 +222,13 @@ export function accreteAlias(aliases, phrase, { intent = '', max = 12 } = {}) {
   return [...list, norm].slice(-Math.max(1, max));
 }
 
+/** Remove a phrase from an alias list (case-insensitive). PURE. Used to DE-POISON: an ask belongs to exactly
+ *  one capability, so confirming it on the right one strips it from any other that accreted it by a wrong match. */
+export function removeAlias(aliases, phrase) {
+  const n = normalizeAliasPhrase(phrase);
+  return (Array.isArray(aliases) ? aliases : []).filter((a) => typeof a === 'string' && normalizeAliasPhrase(a) !== n);
+}
+
 // ── ORCH-M — LLM select+bind adapters ────────────────────────────────────────────────────────────────────
 // The smart matcher does ONE call over the scoped set (AnthropicService.matchCapability) returning per-candidate
 // {relevance, effectEligible} + param bindings for its top pick. These PURE adapters turn that into the injected
@@ -230,26 +241,35 @@ export function accreteAlias(aliases, phrase, { intent = '', max = 12 } = {}) {
 export function scoresToScorer(scores) {
   const byId = new Map((Array.isArray(scores) ? scores : []).filter((s) => s && s.id != null).map((s) => [String(s.id), s]));
   return (ask, candidate) => {
-    const isExact = !!(candidate && (candidate.aliases || []).some((al) => normalizeAliasPhrase(al) === normalizeAliasPhrase(ask)));
+    const n = normalizeAliasPhrase(ask);
+    // Intent-exact pins to 1.0 (the authority) regardless of the LLM; alias-exact to ≥0.95 (a learned match,
+    // possibly wrong). So a correctly-NAMED capability beats one that merely accreted the ask as an alias.
+    if (n && normalizeAliasPhrase(candidate && candidate.intent) === n) return { relevance: 1, isExact: true, effectEligible: true };
+    const aliasExact = !!(candidate && (candidate.aliases || []).some((al) => normalizeAliasPhrase(al) === n));
     const s = byId.get(String(candidate && candidate.id));
-    if (!s) return { relevance: isExact ? 1 : 0, isExact, effectEligible: isExact };
+    if (!s) return { relevance: aliasExact ? 0.95 : 0, isExact: aliasExact, effectEligible: aliasExact };
     let rel = Number(s.relevance);
     rel = Number.isFinite(rel) ? Math.max(0, Math.min(1, rel)) : 0;
-    return { relevance: isExact ? Math.max(rel, 1) : rel, isExact, effectEligible: s.effectEligible !== false };
+    if (aliasExact) return { relevance: Math.max(rel, 0.95), isExact: true, effectEligible: s.effectEligible !== false };
+    return { relevance: rel, isExact: false, effectEligible: s.effectEligible !== false };
   };
 }
 
 /**
  * Validate the LLM's param bindings against a candidate's param schema. PURE — the structured anti-hallucination
  * gate. Text params accept any value; OPTION params must resolve to a member of the captured vocabulary
- * (case-insensitive) and are SNAPPED to the exact captured label. A value with no vocabulary match becomes a
- * GAP (surfaced, never applied). An unsupplied param is left to its demonstrated default.
+ * (case-insensitive, SNAPPED to the captured label) OR — ORCH-A — to a label the LIVE PAGE catalogs in its
+ * Locale (`knownLabels`). The Locale source means a capability demonstrated for one category (e.g. "Vectors")
+ * can be re-bound to a sibling the recorder never captured (e.g. "Illustrations") because the page confirms it
+ * exists; CLICK_BY_LABEL then finds it at replay. A value matched by neither is a GAP (surfaced, never applied).
+ * @param {string[]} [knownLabels]  affordance labels from the current Locale (localeAffordanceLabels)
  * @returns {{bound:Object, gaps:Array<{name,requested,reason}>}}
  */
-export function validateBindings(bindings, candidate) {
+export function validateBindings(bindings, candidate, knownLabels = []) {
   const out = { bound: {}, gaps: [] };
   const params = (candidate && Array.isArray(candidate.params)) ? candidate.params : [];
   const supplied = (bindings && typeof bindings === 'object') ? bindings : {};
+  const known = new Map((Array.isArray(knownLabels) ? knownLabels : []).filter((s) => typeof s === 'string').map((s) => [normalizeAliasPhrase(s), s]));
   for (const p of params) {
     if (!p || !p.name) continue;
     const v = supplied[p.name];
@@ -257,10 +277,36 @@ export function validateBindings(bindings, candidate) {
     if (p.kind === 'option' && Array.isArray(p.vocabulary) && p.vocabulary.length) {
       const hit = p.vocabulary.find((o) => normalizeAliasPhrase(o) === normalizeAliasPhrase(v));
       if (hit) out.bound[p.name] = hit;
+      else if (known.has(normalizeAliasPhrase(v))) out.bound[p.name] = known.get(normalizeAliasPhrase(v));   // ORCH-A — the page confirms it
       else out.gaps.push({ name: p.name, requested: String(v), reason: 'not-in-vocabulary' });
     } else {
       out.bound[p.name] = String(v);
     }
+  }
+  return out;
+}
+
+/**
+ * ORCH-A — extract the clickable/fillable affordance LABELS the Explore-built Locale catalogs (its `features`).
+ * PURE. These are the page's known controls (category tabs, buttons, filters, inputs) by accessible label —
+ * the "all the labels Explore captured" the matcher can bind/recognize against even when no demonstration
+ * covered them. Deduped (case-insensitive), bounded.
+ * @param {{features?:Object}} localeModel
+ * @returns {string[]}
+ */
+export function localeAffordanceLabels(localeModel) {
+  const features = (localeModel && localeModel.features && typeof localeModel.features === 'object') ? localeModel.features : {};
+  const out = []; const seen = new Set();
+  for (const id of Object.keys(features)) {
+    const f = features[id];
+    const label = (f && f.label != null) ? String(f.label).replace(/\s+/g, ' ').trim() : '';
+    if (!label || label.length > 60) continue;
+    if (!(f.selector || f.kind)) continue;                 // a real affordance, not a bare content node
+    const k = label.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(label);
+    if (out.length >= 80) break;
   }
   return out;
 }
