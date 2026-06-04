@@ -48,6 +48,27 @@ describe('orch_predicate — the converge DETECT condition', () => {
     assert.equal(evaluateDataCondition(cond('S', c), scopeOf({ S: { kind: 'scalar', value: 'On-site only' } })).ok, false);
   });
 
+  it('list of RECORD-tagged items (what the converge actually materializes) — contains + value-threshold read item text', () => {
+    // ExecutionEngine wraps list_of_records as record({value:'…'}); a naive String() would be "[object Object]".
+    const jobs = { kind: 'list', items: [{ kind: 'record', fields: { value: 'Remote — San Francisco' } }, { kind: 'record', fields: { value: 'On-site NYC' } }] };
+    assert.equal(evaluateDataCondition(cond('J', JSON.stringify({ op: 'contains', term: 'remote' })), scopeOf({ J: jobs })).ok, true, 'contains reads the record field text, not "[object Object]"');
+    assert.equal(evaluateDataCondition(cond('J', JSON.stringify({ op: 'exists' })), scopeOf({ J: jobs })).ok, true);
+    // value-threshold over record items: first item's number parsed from its text
+    const salaries = { kind: 'list', items: [{ kind: 'record', fields: { value: '$38,000' } }] };
+    assert.equal(evaluateDataCondition(cond('S', JSON.stringify({ op: 'lt', value: 40000 })), scopeOf({ S: salaries })).ok, true, 'under $40k → holds');
+    assert.equal(evaluateDataCondition(cond('S', JSON.stringify({ op: 'gt', value: 40000 })), scopeOf({ S: salaries })).ok, false);
+    // the also-supported OBSERVE_LIST {record:{…}} item shape
+    const raw = { kind: 'list', items: [{ record: { value: 'has Remote tag' } }] };
+    assert.equal(evaluateDataCondition(cond('R', JSON.stringify({ op: 'contains', term: 'remote' })), scopeOf({ R: raw })).ok, true);
+  });
+
+  it('record / image tagged values — PRESENT means exists holds (not inverted to none)', () => {
+    assert.equal(evaluateDataCondition(cond('REC', exists), scopeOf({ REC: { kind: 'record', fields: { a: 1, b: 2 } } })).ok, true);
+    assert.equal(evaluateDataCondition(cond('REC', JSON.stringify({ op: 'none' })), scopeOf({ REC: { kind: 'record', fields: { a: 1 } } })).ok, false);
+    assert.equal(evaluateDataCondition(cond('IMG', exists), scopeOf({ IMG: { kind: 'image', src: 'data:...' } })).ok, true);
+    assert.equal(evaluateDataCondition(cond('REC', JSON.stringify({ op: 'contains', term: 'remote' })), scopeOf({ REC: { kind: 'record', fields: { loc: 'Remote' } } })).ok, true);
+  });
+
   it('FAILS CLOSED — unbound binding, bad JSON spec → ok:false (never opens a gate by accident)', () => {
     assert.equal(evaluateDataCondition(cond('MISSING', exists), scopeOf({})).ok, false);
     assert.equal(evaluateDataCondition(cond('X', '{not json'), scopeOf({ X: { kind: 'list', items: ['a'] } })).ok, false);

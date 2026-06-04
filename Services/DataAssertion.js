@@ -33,14 +33,36 @@ import {
 // DETECT and the ORCH walkPlan gate compute identical truth over the same bound value.
 import { evaluatePredicate, predicateLabel } from '../Core/orchAnalyze.js';
 
+// Flatten a tagged list ITEM to text, so a `contains` / value-threshold predicate works over a list whose items
+// are record-tagged (the converge materializes list_of_records → ExecutionEngine wraps each match as
+// record({value:'…'}); a naive String() would yield "[object Object]"). Count predicates only use length, so this
+// is harmless for them. Handles scalar-tagged, record-tagged ({fields}), the OBSERVE_LIST {record} shape, and plain values.
+function _itemText(it) {
+  if (it == null) return '';
+  if (typeof it !== 'object') return String(it);
+  if (it.kind === 'scalar') return String(it.value ?? '');
+  if (it.kind === 'record' && it.fields && typeof it.fields === 'object') return Object.values(it.fields).map((x) => String(x ?? '')).join(' ');
+  if (it.record && typeof it.record === 'object') return Object.values(it.record).map((x) => String(x ?? '')).join(' ');
+  const rec = itemToRecord(it);
+  if (rec && typeof rec === 'object') return Object.values(rec).map((x) => String(x ?? '')).join(' ');
+  if (it.value != null) return String(it.value);
+  return String(it);
+}
+
 // Coerce a tagged scope value → the {count, items, value} shape evaluatePredicate expects.
-// list → count/items; scalar/document → value (its _countFromValue parses "0 jobs"/"none" → 0).
+//   list → count + items-as-text (so exists/none/count use length; contains/value-threshold read item text);
+//   scalar/document → value (its _countFromValue parses "0 jobs"/"none" → 0);
+//   record/section/image → PRESENT means count 1 (so exists is true / none is false for real data, not inverted),
+//     with best-effort text for contains.
 function _coerceForPredicate(v) {
   if (v == null) return null;
-  if (v.kind === 'list')     { const items = Array.isArray(v.items) ? v.items : []; return { items, count: items.length }; }
+  if (v.kind === 'list')     { const items = (Array.isArray(v.items) ? v.items : []).map(_itemText); return { items, count: items.length }; }
   if (v.kind === 'scalar')   return { value: v.value };
   if (v.kind === 'document') return { value: v.content ?? '' };
-  return { value: (v.value != null ? v.value : (v.content != null ? v.content : '')) };  // record/other → best-effort value
+  if (v.kind === 'record')   { const f = (v.fields && typeof v.fields === 'object') ? v.fields : {}; return { value: Object.values(f).map((x) => String(x ?? '')).join(' '), count: 1 }; }
+  if (v.kind === 'section')  return { value: v.text ?? v.markdown ?? '', count: 1 };
+  if (v.kind === 'image')    return { value: v.src ?? v.dataUrl ?? '', count: 1 };
+  return { value: (v.value != null ? v.value : (v.content != null ? v.content : '')) };  // unknown kind → best-effort value
 }
 
 /**

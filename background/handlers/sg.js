@@ -1208,12 +1208,15 @@ export function createSgMessageHandlers(ctx) {
           const fs = (strat && Array.isArray(strat.fragmentSteps)) ? strat.fragmentSteps : null;
           return (fs && fs.length) ? { fragmentSteps: fs } : null;
         };
+        // STAGE observation records — don't persist until the WHOLE promote succeeds, so a later unresolved leaf or
+        // a validation miss never leaves orphaned Observation records (phantoms in the Studio library).
+        const stagedObs = [];
         const resolveObserveCap = async (cid, step) => {
           const c = caps.find((x) => x.id === cid);
           const obsId = crypto.randomUUID();
           const rec = buildConvergeObservationRecord(c, step.id, { observationId: obsId, now });
           if (!rec) return null;                          // visual / no selector → unresolvable → fail closed (R7)
-          await StorageManager.saveObservation(rec);
+          stagedObs.push(rec);
           return { observationId: obsId };
         };
 
@@ -1222,8 +1225,9 @@ export function createSgMessageHandlers(ctx) {
         if (!r.ok) {
           Logger.info('background', `PROMOTE_COMPOSITE_STRATEGY — ${capabilityId} NOT promoted (stays matcher-only via walkPlan, R7): ${r.errors.join('; ')}`);
           sendResponse({ success: true, promoted: false, errors: r.errors });
-          return;
+          return;   // stagedObs discarded unsaved — no orphans
         }
+        for (const rec of stagedObs) await StorageManager.saveObservation(rec);   // commit reads only on success
         await StorageManager.saveStrategy(r.strategy);
         cap.strategyId = strategyId; cap.promotedAt = now;   // back-reference: the composite now points at its canonical Strategy
         await ctx.writeSgCapability(gid, cap);
