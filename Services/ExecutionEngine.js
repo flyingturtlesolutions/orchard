@@ -115,6 +115,10 @@ export class ExecutionEngine {
    */
   static async executeStrategy({
     strategyId,
+    // v2.74.752 — optional INLINE strategy object. When provided, it is used AS-IS instead of loading by id from
+    // storage. Lets a bare T1 (a Fragment) run via a synthetic one-step wrapper that is NEVER persisted (so it
+    // never appears in the library as a phantom Strategy). Default null → load by strategyId, exactly as before.
+    strategy: inlineStrategy = null,
     strategyParamValues = {},
     invocationId = null,
     isAborted = () => false,
@@ -153,8 +157,8 @@ export class ExecutionEngine {
       }
     };
 
-    // 1. Load Strategy
-    const strategy = await StorageManager.getStrategy(strategyId);
+    // 1. Load Strategy — or use the inline synthetic one (a bare-Fragment run-time wrapper, never persisted).
+    const strategy = inlineStrategy || await StorageManager.getStrategy(strategyId);
     if (!strategy) {
       emit({ type: 'error', message: `Strategy ${strategyId} not found` });
       return { success: false, strategyId, invocationId: invId, stepResults: [], error: `Strategy ${strategyId} not found` };

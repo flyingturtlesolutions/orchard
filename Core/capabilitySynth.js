@@ -235,3 +235,34 @@ export function buildTier2CapabilityRecords(phases, { groundId, strategyId, frag
   };
   return { fragments, strategy };
 }
+
+/**
+ * T1-as-first-class (v2.74.752) — wrap a SAVED Fragment into a SYNTHETIC one-step Strategy object so it can run
+ * through ExecutionEngine.executeStrategy WITHOUT being persisted as a Strategy. PURE. This is the keystone of
+ * "a single T1 is saved as itself, not a Strategy": the SAVE path stays wrapper-free (just the Fragment); the
+ * wrapper is built at RUN time and thrown away. The synthetic id is `fragment:<id>` — never written to storage,
+ * so listCapabilities never sees a phantom Strategy. Fragment params are NAME strings → strategy_param bindings
+ * (so the fragment's {{NAME}} placeholders fill from the run's param values), declared as scalar/string.
+ * @param {{id:string, groundId?:string, name?:string, description?:string, params?:string[], preconditions?:object, postconditions?:object}} fragment
+ * @param {{strategyId?:string, now?:number}} [opts]
+ * @returns {object|null} a synthetic Strategy (pass as executeStrategy's inline `strategy`), or null if no fragment
+ */
+export function wrapFragmentAsStrategy(fragment, { strategyId = null, now } = {}) {
+  if (!fragment || !fragment.id) return null;
+  const ts = Number.isFinite(now) ? now : 0;
+  const paramNames = (Array.isArray(fragment.params) ? fragment.params : []).filter((p) => typeof p === 'string' && p);
+  const paramBindings = {};
+  for (const nm of paramNames) paramBindings[nm] = { kind: 'strategy_param', name: nm };
+  return {
+    id: strategyId || `fragment:${fragment.id}`,
+    groundId: fragment.groundId || null,
+    name: fragment.name || 'Fragment',
+    goal: fragment.description || fragment.name || '',
+    params: paramNames.map((nm) => ({ name: nm, kind: 'scalar', type: 'string', required: false })),
+    fragmentSteps: [{ type: 'fragment', fragmentId: fragment.id, paramBindings }],
+    preconditions: (fragment.preconditions && typeof fragment.preconditions === 'object') ? fragment.preconditions : { match: 'all', conditions: [] },
+    postconditions: (fragment.postconditions && typeof fragment.postconditions === 'object') ? fragment.postconditions : { match: 'all', conditions: [] },
+    synthetic: true,                 // run-time wrapper, NOT a persisted artifact
+    createdAt: ts, updatedAt: ts,
+  };
+}

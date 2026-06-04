@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildTier2CapabilityRecords, buildCapabilityRecords } from './capabilitySynth.js';
+import { buildTier2CapabilityRecords, buildCapabilityRecords, wrapFragmentAsStrategy } from './capabilitySynth.js';
 
 const phases = [
   { label: 'Initiate job search', actions: [{ action: 'TYPE', selector: '#q', value: 'test' }, { action: 'CLICK', selector: '#go' }] },
@@ -42,5 +42,38 @@ describe('buildTier2CapabilityRecords — multi-fragment capability (SG-T2-ACC)'
     const r = buildCapabilityRecords({ name: 'x', goal: 'x', actions: [{ action: 'CLICK', selector: '#a' }], params: [] }, { groundId: 'g', fragmentId: 'f', strategyId: 's' });
     assert.ok(r && r.fragment && r.strategy);
     assert.equal(r.strategy.fragmentSteps.length, 1);
+  });
+});
+
+describe('wrapFragmentAsStrategy — run a bare T1 Fragment without persisting a Strategy (T1-as-first-class)', () => {
+  const fragment = {
+    id: 'frag-1', groundId: 'g', name: 'Search jobs', description: 'search the job board',
+    rawJson: JSON.stringify([{ action: 'TYPE', selector: '#q', value: '{{KEYWORD}}' }, { action: 'CLICK', selector: '#go' }]),
+    params: ['KEYWORD'],
+    preconditions: { match: 'all', conditions: [] }, postconditions: { match: 'all', conditions: [{ type: 'selector_present', selector: '.results' }] },
+  };
+
+  it('wraps a Fragment into a synthetic one-step strategy tree (the shape executeStrategy runs)', () => {
+    const s = wrapFragmentAsStrategy(fragment, { now: 5 });
+    assert.equal(s.synthetic, true, 'flagged as a run-time wrapper, not a persisted artifact');
+    assert.equal(s.id, 'fragment:frag-1', 'synthetic id is never written to storage');
+    assert.equal(s.groundId, 'g');
+    assert.equal(s.fragmentSteps.length, 1);
+    assert.equal(s.fragmentSteps[0].type, 'fragment');
+    assert.equal(s.fragmentSteps[0].fragmentId, 'frag-1');
+    // the fragment's postconditions ride onto the wrapper so the run still verifies the effect
+    assert.deepEqual(s.postconditions.conditions[0], { type: 'selector_present', selector: '.results' });
+  });
+
+  it('fragment param NAMES become strategy_param bindings (so {{NAME}} placeholders fill at run time)', () => {
+    const s = wrapFragmentAsStrategy(fragment, {});
+    assert.deepEqual(s.params.map((p) => p.name), ['KEYWORD']);
+    assert.equal(s.params[0].kind, 'scalar');
+    assert.deepEqual(s.fragmentSteps[0].paramBindings.KEYWORD, { kind: 'strategy_param', name: 'KEYWORD' });
+  });
+
+  it('null / id-less input → null (fail safe)', () => {
+    assert.equal(wrapFragmentAsStrategy(null, {}), null);
+    assert.equal(wrapFragmentAsStrategy({ name: 'no id' }, {}), null);
   });
 });

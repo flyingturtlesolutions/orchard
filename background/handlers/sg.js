@@ -1298,6 +1298,25 @@ export function createSgMessageHandlers(ctx) {
           sendResponse({ success: true, ran: true, replayed: true, via: 'strategy', capabilityId: cap.id, ok, reason: ok ? undefined : (result?.error || 'a step failed') });
           return;
         }
+        // T1-as-first-class (v2.74.752) — a bare T1 capability saved as a FRAGMENT (no Strategy wrapper, the
+        // ≥2-T1 taxonomy fix): run it by wrapping the Fragment in a SYNTHETIC one-step strategy AT RUN TIME and
+        // executing that inline (never persisted, so it stays a Fragment in the library). Same ExecutionEngine
+        // path as a saved strategy — only the wrapper is synthetic. Today no cap is fragment-only (all carry a
+        // strategyId, handled above), so this is inert until the accept guard starts saving bare T1s.
+        if (cap.fragmentId) {
+          if (typeof tabId === 'number') { try { await ctx.ensureContentScript(tabId); } catch { /* */ } }
+          let frag = null; try { frag = await StorageManager.getFragment(cap.fragmentId); } catch { /* */ }
+          if (frag) {
+            const synthetic = CapabilitySynth.wrapFragmentAsStrategy(frag, { strategyId: `fragment:${frag.id}`, now: Date.now() });
+            let result = null;
+            try { result = await ExecutionEngine.executeStrategy({ strategyId: synthetic.id, strategy: synthetic, strategyParamValues, targetTabId: (typeof tabId === 'number' ? tabId : null) }); }
+            catch (e) { sendResponse({ success: false, error: `replay fragment failed: ${e.message}` }); return; }
+            const ok = !!(result && result.success);
+            Logger.info('background', `REPLAY_SG_CAPABILITY — ${cap.id} via bare FRAGMENT ${cap.fragmentId} (T1, wrapped at run time, NO LLM)`);
+            sendResponse({ success: true, ran: true, replayed: true, via: 'fragment', capabilityId: cap.id, ok, reason: ok ? undefined : (result?.error || 'a step failed') });
+            return;
+          }
+        }
         // Fallback (pre-LM-5 capability): re-synth from the lean binding (still landmark-backed via LM-3).
         const roles = Array.isArray(cap.binding) ? cap.binding : [];
         if (!roles.length) { sendResponse({ success: true, ran: false, reason: 'capability has no saved strategy or binding' }); return; }
