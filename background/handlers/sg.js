@@ -25,6 +25,9 @@ import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/
 import { feedbackExamples } from '../../Core/feedbackLearn.js';   // ORCH-FB-2 — relevance shaping from feedback history
 import { buildObservationCapability, scoreObservationMatch, classifyReadAsk } from '../../Core/observe.js';   // OBS-READ — observation records + manual-obs match + read/action effect scoping
 import { buildCompositeCapability, liftControlFlow, liftConditional } from '../../Core/orchChain.js';   // ORCH-X T2 — composite promotion + ORCH-L control-flow lift + ORCH-A conditional lift
+import { bindShape, lexicalScore } from '../../Core/orchBind.js';   // ORCH-CB — per-slot effect-scoped binder (lexical floor)
+import { comprehend } from '../../Core/orchComprehend.js';   // ORCH-CB — substrate-free shape comprehension (shadow)
+import { shadowCompare } from '../../Core/orchShadow.js';   // ORCH-CB — LLM-plan vs comprehend→bind divergence log
 import { validatePlan } from '../../Core/orchPlan.js';   // ORCH-L — structural guard for a lifted (foreach/gate) plan
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
@@ -1005,9 +1008,48 @@ export function createSgMessageHandlers(ctx) {
           } catch (e) { Logger.warn('background', `ORCH_PLAN conditional lift failed (kept flat): ${e.message}`); }
         }
         Logger.info('background', `ORCH_PLAN ▸ ask="${String(ask).slice(0, 70)}" → ${steps.length} step(s): ${steps.map((s) => `"${s.intent}"${Object.keys(s.bindings).length ? `[${JSON.stringify(s.bindings)}]` : ''}`).join(' → ') || '(none)'}${gaps.length ? ` | uncovered: ${JSON.stringify(gaps)}` : ''}`);
+        // ORCH-CB SHADOW — comprehend→bind alongside the LLM plan; LOG the divergence (observational, NO response
+        // change, no LLM). Measures how much of the WARM case the deterministic floor already covers → informs the
+        // warm-path swap. Best-effort: never affects the result.
+        try {
+          const comp = comprehend(ask);
+          const _lean = (c) => ({ id: c.id, intent: c.intent || '', name: c.name || '', aliases: Array.isArray(c.aliases) ? c.aliases : [] });
+          const sPools = { read: caps.filter((c) => c.kind === 'observation').map(_lean), act: caps.filter((c) => c.kind !== 'observation').map(_lean) };
+          const cb = bindShape(comp, sPools, { score: lexicalScore, threshold: 0.5 });
+          const cmp = shadowCompare(outSteps, cb.steps);
+          Logger.info('background', `ORCH_PLAN shadow ▸ llm=${cmp.llmShape}(${cmp.llmBound}b) cb=${cmp.cbShape}(${cmp.cbBound}b) shapeMatch=${cmp.shapeMatch} agree=${cmp.agreeCount}/${cmp.llmBound}${comp.escalate ? ' esc' : ''}`);
+        } catch (e) { Logger.warn('background', `ORCH_PLAN shadow failed (ignored): ${e.message}`); }
         sendResponse({ success: true, groundId: gid, steps: outSteps, gaps, rationale: plan.rationale || '' });
       } catch (err) {
         Logger.error('background', `ORCH_PLAN failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // ORCH-CB — BIND a comprehended PlanShape against THIS ground's substrates, PER SLOT, scoped by EFFECT (a read
+    // slot only sees observations; an act slot only non-observations). Lexical floor only — NO LLM: it binds the
+    // WARM/cached slots (intent/alias-exact, token recall) and leaves novel slots as GAPS. The chat comprehends the
+    // shape (substrate-free), then asks this to fill it; a fully-bound shape can run, a partial one shows gaps.
+    ORCH_BIND: async (payload, _sender, sendResponse) => {
+      try {
+        const { tabId, groundId = null, shape = null } = payload ?? {};
+        const steps = (shape && Array.isArray(shape.steps)) ? shape.steps : (Array.isArray(shape) ? shape : []);
+        if (!steps.length) { sendResponse({ success: true, groundId: groundId || null, steps: [], gaps: [] }); return; }
+        let gid = groundId, url = '';
+        if (typeof tabId === 'number') { try { url = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
+        if (!gid && url) { try { const origin = new URL(url).origin; const gs = await StorageManager.getAllGrounds(); const g = (Array.isArray(gs) ? gs : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } catch { /* */ } }
+        let caps = [];
+        if (gid) { try { caps = (await ctx.readSgCapabilities(gid)).filter((c) => isActiveCapability(c) && c.kind !== 'composite'); } catch { /* */ } }
+        const lean = (c) => ({ id: c.id, intent: c.intent || '', name: c.name || '', aliases: Array.isArray(c.aliases) ? c.aliases : [] });
+        const pools = {
+          read: caps.filter((c) => c.kind === 'observation').map(lean),   // EFFECT partition: reads ← observations
+          act: caps.filter((c) => c.kind !== 'observation').map(lean),    //                  acts  ← everything else
+        };
+        const r = bindShape({ steps }, pools, { score: lexicalScore, threshold: 0.5 });
+        Logger.info('background', `ORCH_BIND — ${steps.length} slot(s) over ${caps.length} cap(s) → ${r.gaps.length} gap(s)${r.bound ? ' (fully bound)' : ''} on ${gid || '(no ground)'}`);
+        sendResponse({ success: true, groundId: gid, steps: r.steps, gaps: r.gaps, bound: r.bound });
+      } catch (err) {
+        Logger.error('background', `ORCH_BIND failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },

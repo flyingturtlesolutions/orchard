@@ -1322,12 +1322,19 @@ async function _tryGroundedTurn(text) {
       return true;
     }
     // ORCH-CB — the planner found nothing to bind (a COLD ground), but a STRUCTURED ask still decomposes.
-    // Comprehend the shape from the ask alone so it doesn't collapse to one unmatched blob — every part a gap to
-    // learn. Substrate-free, so it works even with zero capabilities recorded.
+    // Comprehend the shape from the ask alone (substrate-free), then BIND it against whatever's recorded via the
+    // lexical floor (ORCH_BIND, no LLM). Fully bound → confirm + run (the floor recovered matches the conservative
+    // planner missed); partial / empty → show the structure as a plan-to-learn, every missing part a gap.
     const comp = comprehend(text);
     if (comp && Array.isArray(comp.steps) && comp.steps.length > 1) {
+      const bound = await _orchReq('ORCH_BIND', { tabId: tab.id, groundId: (plan && plan.groundId) || null, shape: comp });
+      const bgid = (bound && bound.groundId) || (plan && plan.groundId) || null;
       probe.classList.remove('thinking'); probe.classList.add('assistant');
-      _orchOfferComprehended(probe, { tabId: tab.id, groundId: (plan && plan.groundId) || null, ask: text, comp });
+      if (bound && bound.success && bound.bound && Array.isArray(bound.steps) && !comp.escalate) {
+        _orchConfirmPlan(probe, { tabId: tab.id, groundId: bgid, steps: bound.steps, gaps: [], ask: text });   // fully bound → run
+      } else {
+        _orchOfferComprehended(probe, { tabId: tab.id, groundId: bgid, ask: text, comp: (bound && Array.isArray(bound.steps) && bound.steps.length) ? { steps: bound.steps } : comp });
+      }
       return true;
     }
     probe.remove();

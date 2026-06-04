@@ -12,22 +12,28 @@
 //     opts  = { score?(clause, candidate)->0..1, threshold? }
 //
 // @module Core/orchBind
-// @version 2.74.736
+// @version 2.74.737
 
 import { effectForKind } from './orchPlan.js';
 
 const _norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
 const _toks = (s) => new Set(_norm(s).split(' ').filter((w) => w.length > 2));
 
-/** A cheap lexical relevance (token recall of the clause covered by the candidate's intent). PURE. The default
- *  scorer; the live binder injects a `rankAndDecide`-backed one. */
+/** A cheap lexical relevance for a clause against a candidate. PURE. Mirrors the matcher's authority order:
+ *  intent-EXACT pins to 1.0, an alias-EXACT to 0.97 (a learned match), otherwise token recall. The DEFAULT
+ *  scorer — enough to bind a WARM/cached slot with no LLM; a novel slot falls below threshold → a gap. */
 export function lexicalScore(clause, candidate) {
+  const nc = _norm(clause);
+  const ni = _norm((candidate && (candidate.intent || candidate.name)) || '');
+  if (nc && ni && nc === ni) return 1;                                       // intent-exact — the authority
+  const aliases = (candidate && Array.isArray(candidate.aliases)) ? candidate.aliases : [];
+  if (nc) for (const al of aliases) if (_norm(al) === nc) return 0.97;       // alias-exact — a learned match
   const a = _toks(clause);
-  const b = _toks((candidate && (candidate.intent || candidate.name)) || '');
+  const b = _toks(ni);
   if (!a.size || !b.size) return 0;
   let hit = 0;
   for (const t of a) if (b.has(t)) hit++;
-  return hit / a.size;
+  return hit / a.size;                                                       // token-recall floor
 }
 
 function _best(clause, pool, score) {

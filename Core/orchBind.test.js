@@ -8,6 +8,14 @@ import { bindShape, lexicalScore } from './orchBind.js';
 import { comprehend } from './orchComprehend.js';
 
 describe('orchBind — per-slot effect+scope binding (ORCH-CB)', () => {
+  it('lexicalScore mirrors the matcher authority: intent-exact 1.0, alias-exact 0.97, else token recall', () => {
+    assert.equal(lexicalScore('sort by date', { intent: 'sort by date' }), 1, 'intent-exact');
+    assert.equal(lexicalScore('newest first', { intent: 'sort by date', aliases: ['newest first', 'sort newest'] }), 0.97, 'alias-exact');
+    const recall = lexicalScore('sort the jobs by date', { intent: 'sort by date' });
+    assert.ok(recall > 0 && recall < 0.97, 'partial token overlap is a floor, below the exact bands');
+    assert.equal(lexicalScore('totally unrelated', { intent: 'sort by date' }), 0);
+  });
+
   it('binds every slot when the right-effect pools cover the clauses → 0 gaps', () => {
     const shape = comprehend('search for jobs and filter by date');   // 2 act slots
     const pools = { read: [], act: [
