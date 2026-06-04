@@ -30,6 +30,7 @@ import { comprehend } from '../../Core/orchComprehend.js';   // ORCH-CB — subs
 import { shadowCompare } from '../../Core/orchShadow.js';   // ORCH-CB — LLM-plan vs comprehend→bind divergence log
 import { performImageFull } from '../../Services/ImageReadCapture.js';   // ORCH-CB — visual observation (screenshot)
 import { buildVisualObservation, isVisualObservation, visualToInput, describeForCondition, withCriteria } from '../../Core/orchVisual.js';   // ORCH-CB — visual observation floor
+import { buildCompositeTemplate, matchTemplate, rebindSteps } from '../../Core/orchTemplate.js';   // ORCH-X T2 — cross-argument composite rebind
 import { validatePlan } from '../../Core/orchPlan.js';   // ORCH-L — structural guard for a lifted (foreach/gate) plan
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
@@ -1119,9 +1120,17 @@ export function createSgMessageHandlers(ctx) {
           ? { id: crypto.randomUUID(), ask, groundId: gid, plan: (plan && Array.isArray(plan.steps)) ? plan : { steps }, name }   // intent DERIVED (param-abstracted)
           : { id: crypto.randomUUID(), ask, intent: ask, goal: ask, groundId: gid, steps: usable, name });
         cap.localeUrl = localeUrl; cap.createdAt = Date.now();
-        // The raw ASK accretes as an alias so the SAME ask is a lexical T2 cache hit next time (the derived intent
-        // is the generalized phrase, not the literal ask). Cross-argument rebinding is a later slice.
+        // The raw ASK accretes as an alias so the SAME ask is a lexical T2 cache hit next time. The TEMPLATE
+        // generalizes it across arguments: each bound value that appears in the ask becomes a {PARAM} hole, so
+        // "search for software jobs and if any, sort" rebinds this "android" composite instead of saving its own.
         cap.aliases = accreteAlias(cap.aliases, ask, { intent: cap.intent });
+        try {
+          const _allBindings = {};
+          const _cbind = (steps) => { for (const s of (steps || [])) { if (s && s.kind === 'fragment' && s.bindings) Object.assign(_allBindings, s.bindings); if (s && Array.isArray(s.body)) _cbind(s.body); } };
+          _cbind(cap.steps);
+          const tmpl = buildCompositeTemplate(ask, _allBindings);
+          if (tmpl.slots.length) { cap.template = tmpl.template; cap.templateSlots = tmpl.slots; }
+        } catch { /* template is best-effort; the exact-alias hit still works */ }
         await ctx.writeSgCapability(gid, cap);
         try { await ctx.appendOutcomes(gid, [Outcomes.makeStageEvent('accept', { groundId: gid, verdict: 'accepted', input: { roleOrIntent: ask.slice(0, 120) }, detail: { capabilityId: cap.id, shape: isCF ? 'composite-cf' : 'composite', steps: cap.steps.length } })]); } catch { /* */ }
         Logger.info('background', `ACCEPT_COMPOUND — "${ask.slice(0, 50)}" ${cap.id} → T2 ${isCF ? 'control-flow ' : ''}composite of ${cap.steps.length} step(s) [${cap.steps.map((s) => s.kind || 'action').join(' → ')}]${isCF ? ` intent="${cap.intent}" params=[${(cap.params || []).join(', ')}] → ${cap.output ? `${cap.output.name}:${cap.output.type}` : '?'}` : ''} on ${gid}`);
@@ -1146,10 +1155,22 @@ export function createSgMessageHandlers(ctx) {
         if (!gid) { sendResponse({ success: true, matched: false }); return; }
         const want = normalizeAliasPhrase(ask);
         const caps = (await ctx.readSgCapabilities(gid)).filter((c) => c && c.kind === 'composite' && isActiveCapability(c) && Array.isArray(c.steps) && c.steps.length);
-        const hit = caps.find((c) => normalizeAliasPhrase(c.intent || '') === want || (Array.isArray(c.aliases) && c.aliases.some((a) => normalizeAliasPhrase(a) === want)));
+        // (1) EXACT — the same ask (or a learned alias) → run the stored steps as-is.
+        let hit = caps.find((c) => normalizeAliasPhrase(c.intent || '') === want || (Array.isArray(c.aliases) && c.aliases.some((a) => normalizeAliasPhrase(a) === want)));
+        let steps = hit ? hit.steps : null;
+        let rebind = null;
+        // (2) TEMPLATE — a DIFFERENT argument, same shape: fit the ask to a composite's template, capture the new
+        // value(s), and REBIND the IR. "search for software jobs and if any, sort" → the "android" composite.
+        if (!hit) {
+          for (const c of caps) {
+            if (!c.template) continue;
+            const nb = matchTemplate(ask, c.template);
+            if (nb) { hit = c; rebind = nb; steps = rebindSteps(c.steps, nb); break; }
+          }
+        }
         if (!hit) { sendResponse({ success: true, matched: false }); return; }
-        Logger.info('background', `MATCH_COMPOSITE — T2 cache HIT "${ask.slice(0, 50)}" → ${hit.controlFlow ? 'control-flow ' : ''}composite ${hit.id} (${hit.steps.length} step(s))`);
-        sendResponse({ success: true, matched: true, groundId: gid, capabilityId: hit.id, intent: hit.intent, steps: hit.steps, controlFlow: !!hit.controlFlow });
+        Logger.info('background', `MATCH_COMPOSITE — T2 cache HIT "${ask.slice(0, 50)}" → ${hit.controlFlow ? 'control-flow ' : ''}composite ${hit.id} (${steps.length} step(s))${rebind ? ` REBOUND ${JSON.stringify(rebind)}` : ''}`);
+        sendResponse({ success: true, matched: true, groundId: gid, capabilityId: hit.id, intent: hit.intent, steps, controlFlow: !!hit.controlFlow, rebound: rebind || null });
       } catch (err) {
         Logger.error('background', `MATCH_COMPOSITE failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
