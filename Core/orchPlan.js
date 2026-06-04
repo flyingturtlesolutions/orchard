@@ -14,7 +14,7 @@
 // PURE: no DOM / chrome / LLM — the plan is data; the LLM produces it, the runtime consumes it.
 //
 // @module Core/orchPlan
-// @version 2.74.719
+// @version 2.74.734
 
 /** Analysis OUTPUT TYPE → the control-flow construct it compiles to (§6). The fragment that consumes the
  *  analysis is wired accordingly. */
@@ -34,7 +34,25 @@ export function connectionForOutputType(outputType) {
   return OUTPUT_CONNECTION[String(outputType || '').toLowerCase()] || 'binding';
 }
 
-export const STEP_KINDS = Object.freeze(['fragment', 'observe', 'analyze', 'foreach', 'loop', 'gate']);
+export const STEP_KINDS = Object.freeze(['fragment', 'observe', 'analyze', 'foreach', 'loop', 'gate', 'wait']);
+
+// ORCH-CB (comprehension/binding split) — descriptive tags a COMPREHENDER sets on a leaf SLOT and a BINDER reads.
+// They don't change control flow; they say what KIND of work a slot is and how WIDE to bind it (docs/
+// DESIGN_comprehension_split.md). PURE metadata — optional, validated only when present.
+//   • effect — the irreducible work-kind: read (Observation), act (Fragment), reason (Analysis). Total over leaves.
+//   • scope  — how wide to bind: locale (T1, this page) / ground (T2, this site) / global (T3, cross-ground).
+//   • role   — the slot's structural role in its shape (for rendering / debugging); permissive (any non-empty string).
+export const STEP_EFFECTS = Object.freeze(['read', 'act', 'reason']);
+export const STEP_SCOPES = Object.freeze(['locale', 'ground', 'global']);
+export const STEP_ROLES = Object.freeze(['step', 'head', 'driver', 'condition', 'consequent', 'body']);   // reference set
+
+const _EFFECT_BY_KIND = Object.freeze({ observe: 'read', fragment: 'act', analyze: 'reason' });
+
+/** The default work-kind for a leaf step kind (a control-flow node has none). PURE. Comprehension may set `effect`
+ *  explicitly on a slot; this is the fallback derivation when it doesn't. */
+export function effectForKind(kind) {
+  return _EFFECT_BY_KIND[String(kind || '')] || null;
+}
 
 // A fragment's legacy connection FIELD (single-fragment form) → the analysis-output connection it requires.
 const _CONNECTION_FIELD = Object.freeze({ forEach: 'foreach', gatedBy: 'gate', loopUntil: 'loop' });
@@ -90,6 +108,12 @@ function _validateScope(steps, enclosing, allSet, errors) {
   for (const s of steps) {
     if (!s || s.id == null || s.id === '') { errors.push('step: missing id'); continue; }
     if (!STEP_KINDS.includes(s.kind)) errors.push(`step "${s.id}": unknown kind "${s.kind}"`);
+    // ORCH-CB slot tags — optional comprehension metadata; a FALSY value (absent / '') is ignored, a truthy one is
+    // validated. A plan without them is still well-formed (additive; the runtime ignores unknowns).
+    if (s.effect && !STEP_EFFECTS.includes(s.effect)) errors.push(`step "${s.id}": effect must be one of ${STEP_EFFECTS.join('/')} (got "${s.effect}")`);
+    if (s.scope && !STEP_SCOPES.includes(s.scope)) errors.push(`step "${s.id}": scope must be one of ${STEP_SCOPES.join('/')} (got "${s.scope}")`);
+    if (s.role && (typeof s.role !== 'string' || !s.role.trim())) errors.push(`step "${s.id}": role must be a non-empty string`);
+    if (s.ground && (typeof s.ground !== 'string' || !s.ground.trim())) errors.push(`step "${s.id}": ground must be a non-empty string`);
     const ref = (refId, label) => {
       if (refId == null) return null;
       if (visible.has(refId)) return visible.get(refId);
@@ -128,6 +152,12 @@ function _validateScope(steps, enclosing, allSet, errors) {
         const inner = new Map(visible); inner.set(s.id, s);   // the body sees enclosing-earlier steps + this node
         _validateScope(s.body, inner, allSet, errors);
       }
+    } else if (s.kind === 'wait') {
+      // A PACING LEAF — a settle between an action and the read that observes its effect (live pages load the
+      // detail pane / inline content async after a click). No `over`, no body: it produces nothing, it just lets
+      // the page quiesce. `ms` = a fixed settle floor; `forSelector` = an optional poll-until-present signal.
+      if (s.ms != null && (!Number.isFinite(s.ms) || s.ms < 0)) errors.push(`wait "${s.id}".ms must be a non-negative number`);
+      if (s.forSelector != null && (typeof s.forSelector !== 'string' || !s.forSelector.trim())) errors.push(`wait "${s.id}".forSelector must be a non-empty selector`);
     }
     visible.set(s.id, s);   // visible to LATER steps in THIS scope (body steps are NOT promoted to the outer scope)
   }
@@ -144,4 +174,7 @@ export const planStep = {
   foreach: (id, over, body = [], extra = {}) => ({ kind: 'foreach', id, over, itemVar: 'item', body, ...extra }),
   loop: (id, over, body = [], extra = {}) => ({ kind: 'loop', id, over, body, ...extra }),
   gate: (id, over, body = [], extra = {}) => ({ kind: 'gate', id, over, body, ...extra }),
+  // PACING LEAF — a settle node. `ms` is a fixed floor (live pages need time after a click); `forSelector` (in
+  // `extra`) optionally polls until a signal appears, so the wait is adaptive rather than a blind delay.
+  wait: (id, extra = {}) => ({ kind: 'wait', id, ms: 800, ...extra }),
 };

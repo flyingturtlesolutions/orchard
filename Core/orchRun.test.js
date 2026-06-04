@@ -5,14 +5,16 @@ import assert from 'node:assert/strict';
 
 import { walkPlan, gatePasses } from './orchRun.js';
 import { planStep } from './orchPlan.js';
+import { evaluatePredicate } from './orchAnalyze.js';
 
 // A mock executor that records calls and returns canned results keyed by step id (or a per-scope function).
-function mockExec({ fragment, observe, analyze } = {}) {
+function mockExec({ fragment, observe, analyze, wait } = {}) {
   const calls = [];
   return {
     calls,
     fragment: async (s, sc) => { calls.push({ kind: 'fragment', id: s.id, index: sc.index }); return fragment ? fragment(s, sc) : { ok: true }; },
     observe: async (s, sc) => { calls.push({ kind: 'observe', id: s.id, index: sc.index }); return observe ? observe(s, sc) : { ok: true, value: null }; },
+    wait: async (s, sc) => { calls.push({ kind: 'wait', id: s.id, ms: s.ms, index: sc.index }); if (wait) return wait(s, sc); },
     ...(analyze ? { analyze: async (s, over, sc) => { calls.push({ kind: 'analyze', id: s.id }); return analyze(s, over, sc); } } : {}),
   };
 }
@@ -92,6 +94,55 @@ describe('orchRun — the pure control-flow interpreter (ORCH-L)', () => {
     const r = await walkPlan(plan, exec);
     assert.equal(r.ok, true);
     assert.equal(exec.calls.filter((c) => c.id === 'tick').length, 3);
+  });
+
+  it('a WAIT node delegates to exec.wait, paces between click and read, and never fails the plan', async () => {
+    // click-in-place shape: per item → click → SETTLE → fixed re-read. The wait sits between the action and read.
+    const plan = { steps: [
+      planStep.observe('jobs', { outputType: 'list' }),
+      planStep.foreach('each', 'jobs', [
+        planStep.fragment('click', null, { clickItem: true }),
+        planStep.wait('settle', { ms: 900 }),
+        planStep.observe('salary', { outputType: 'scalar', fixed: true }),
+      ], { collect: 'SALARIES' }),
+    ] };
+    // Even if exec.wait THROWS (a slow/aborted settle), the plan completes — a settle is advisory.
+    const exec = mockExec({
+      observe: (s, sc) => s.id === 'jobs' ? { ok: true, items: ['a', 'b'] } : { ok: true, value: `S${sc.index}` },
+      wait: () => { throw new Error('settle interrupted'); },
+    });
+    const r = await walkPlan(plan, exec);
+    assert.equal(r.ok, true, 'a thrown settle is swallowed — the plan still completes');
+    assert.deepEqual(r.outputs.SALARIES, ['S0', 'S1']);
+    // the wait ran once per item, IN ORDER: click → wait → salary
+    const ids = exec.calls.map((c) => c.id);
+    assert.equal(exec.calls.filter((c) => c.kind === 'wait').length, 2, 'settle once per item');
+    assert.ok(ids.indexOf('click') < ids.indexOf('settle') && ids.indexOf('settle') < ids.indexOf('salary'), 'click → settle → read order');
+    assert.ok(r.trace.some((t) => t.kind === 'wait' && t.ms === 900), 'the wait is traced with its ms');
+  });
+
+  it('PREDICATE → GATE end-to-end: the analysis opens the gate only when the condition holds (ORCH-A §6)', async () => {
+    // observe(condition list) → analyze(exists) → gate{ action } — the canonical "if there are any X, do Y".
+    const plan = { steps: [
+      planStep.observe('cond', { outputType: 'list' }),
+      planStep.analyze('pred', 'cond', 'predicate', { predicate: { op: 'exists' } }),
+      planStep.gate('g', 'pred', [planStep.fragment('act', 'cap-save')]),
+    ] };
+    const mk = (items) => {
+      const m = mockExec({ observe: () => ({ ok: true, items }) });
+      m.analyze = async (s, over) => { m.calls.push({ kind: 'analyze', id: s.id }); return { ok: true, value: evaluatePredicate(s.predicate, { value: over && over.value, items: over && over.items }) }; };
+      return m;
+    };
+    const open = mk(['j0', 'j1']);                              // condition holds → gate opens → action runs
+    const ro = await walkPlan(plan, open);
+    assert.equal(ro.ok, true);
+    assert.equal(open.calls.some((c) => c.id === 'act'), true, 'predicate true → gate open → action runs');
+
+    const closed = mk([]);                                      // empty → gate closed → action skipped (NOT a failure)
+    const rc = await walkPlan(plan, closed);
+    assert.equal(rc.ok, true, 'a closed gate is a skip, not a failure');
+    assert.equal(closed.calls.some((c) => c.id === 'act'), false, 'predicate false → gate closed → action skipped');
+    assert.ok(rc.trace.some((t) => t.kind === 'gate' && t.pass === false), 'the gate decision is traced');
   });
 
   it('a SEQUENCE aborts on the first failure (later steps do not run)', async () => {

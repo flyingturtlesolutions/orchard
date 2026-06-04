@@ -17,7 +17,7 @@
 // PURE: no DOM / chrome / LLM (the LLM refines classification + locates the region live; this is the floor).
 //
 // @module Core/observe
-// @version 2.74.709
+// @version 2.74.727
 
 // A leading ACTION verb makes the ask a COMMAND, not a standalone read — even when it embeds a selection clause
 // ("download the CHEAPEST gif" is observe+analyze+fragment, which the COMPILER decomposes, not a pure read). This
@@ -29,6 +29,15 @@ const _COUNT = /\bhow many\b|\bnumber of\b|\bcount (of|the)\b|\bhow many .* are\
 const _PREDICATE = /\b(is|are)\s+there\b|\bin stock\b|\b(is|are|it)\b[^?]*\b(available|present|listed|enabled|free|sold ?out)\b|\bdoes\b[^?]*\b(have|exist|include|offer|support)\b|\bcan i\b/i;
 const _LIST = /\blist\b|\bwhat are\b|\ball (of )?(the|them)\b|\bevery\b|\bwhich\b|\bnames? of\b|\bshow (me )?all\b|\btitles? of\b/i;
 const _SCALAR = /\bwhat('s| is| are)?\b|\bhow much\b|\b(price|value|title|name|cost|rating|score|total|count) of\b|\bthe (first|top|last|cheapest|highest|lowest|best|latest)\b/i;
+// A leading READ verb ("show / display / extract / read the salary") → a value read. (These are NOT in _COMMAND,
+// so they don't short-circuit to action.)
+const _READVERB = /^\s*(please\s+|can you\s+|could you\s+)?(show|display|read|extract|grab|fetch|get|see|view|tell\s+me|give\s+me)\b/i;
+// A bare determiner-led NOUN PHRASE ("the salary", "the job title", "its rating") with no action verb → a value
+// read (scalar). Requires a leading determiner so a search term ("nurse jobs") isn't mistaken for a read.
+const _NOUNPHRASE = /^\s*(the|a|an|its|their|this|that|each|every)\s+[a-z][\w-]*(?:\s+[a-z][\w-]*){0,3}\??\s*$/i;
+// Does the phrase END in a plural noun ("the result titles", "the salaries") → a LIST read, vs singular → scalar.
+// Excludes the singular -ss/-us/-is endings (address, status, analysis).
+const _pluralTail = (s) => { const m = String(s).toLowerCase().replace(/\?+\s*$/, '').trim().match(/([a-z]+)\s*$/); return !!(m && m[1].length >= 4 && /s$/.test(m[1]) && !/(ss|us|is)$/.test(m[1])); };
 
 /**
  * Classify an ask as a READ (a question) and infer the OUTPUT TYPE it wants. PURE. The lexical floor; the LLM
@@ -46,6 +55,8 @@ export function classifyReadAsk(ask) {
   else if (_PREDICATE.test(s)) outputType = 'predicate';
   else if (_LIST.test(s)) outputType = 'list';
   else if (_SCALAR.test(s)) outputType = 'scalar';
+  else if (_READVERB.test(s)) outputType = (/\b(list|all|each|every)\b/i.test(s) || _pluralTail(s)) ? 'list' : 'scalar';
+  else if (_NOUNPHRASE.test(s)) outputType = _pluralTail(s) ? 'list' : 'scalar';
   const isRead = !!outputType || q;
   // A matched pattern is a strong signal; a bare "?" with no pattern is a weak read (default scalar).
   const confidence = outputType ? (q ? 0.9 : 0.75) : (q ? 0.4 : 0);

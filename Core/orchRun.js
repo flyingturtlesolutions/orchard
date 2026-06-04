@@ -12,6 +12,7 @@
 //   exec.fragment(step, scope)            run an action capability      → { ok, error? }
 //   exec.observe(step, scope)             run a read                    → { ok, value, items? }   // items[] for a list driver
 //   exec.analyze(step, overResult, scope) reason over an observation    → { ok, value, items? }   // optional; default = passthrough of `over`
+//   exec.wait(step, scope)                let the page settle           → ignored                 // optional; a no-op when absent
 //
 //   `scope` = { vars, item, index } — the current foreach element + bound vars; the runtime uses it to target the
 //   Nth item (e.g. a per-item selector) when running a body step.
@@ -22,13 +23,15 @@
 //                 skipped, the rest continue — "the salaries of EACH" shouldn't abort because one row lacks one).
 //   • loop      — `over` produced a count; run `body` that many times.
 //   • gate      — `over` produced a predicate; run `body` iff truthy (a closed gate is a SKIP, not a failure).
+//   • wait      — a settle LEAF; delegate to exec.wait (let the page quiesce) and continue. A settle is
+//                 best-effort — it NEVER fails the plan (a slow page shouldn't abort "read each salary").
 //   • collect   — a foreach/loop with `collect:'NAME'` accumulates each iteration's result (the body's
 //                 `collectFrom` step, else its LAST observe/analyze) into outputs[NAME].
 //
 // PURE: no DOM / chrome / LLM. Deterministic given a deterministic exec.
 //
 // @module Core/orchRun
-// @version 2.74.720
+// @version 2.74.728
 
 const _AFFIRMATIVE = /^\s*(yes|true|y|present|available|in ?stock|enabled|on|1)\s*$/i;
 
@@ -155,6 +158,13 @@ async function _walkStep(s, exec, env, scope) {
       env.trace.push({ id: s.id, kind: 'gate', pass });
       if (!pass) return { ok: true };   // closed gate → SKIP body, not a failure
       return _walk(s.body, exec, env, scope);
+    }
+    case 'wait': {
+      // A settle is best-effort: delegate to the runtime (real delay / poll), or no-op under a mock exec. It
+      // NEVER fails the (sub)plan — a page that's slow to settle shouldn't abort the iteration.
+      if (typeof exec.wait === 'function') { try { await exec.wait(s, scope); } catch (_e) { /* settle is advisory */ } }
+      env.trace.push({ id: s.id, kind: 'wait', ms: s.ms || 0 });
+      return { ok: true };
     }
     default:
       return { ok: true };   // unknown kind — validatePlan already flags it; the walker no-ops

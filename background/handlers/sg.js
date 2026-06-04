@@ -24,7 +24,7 @@ import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validate
 import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/orchFeedback.js';   // ORCH-FB — corrective actions
 import { feedbackExamples } from '../../Core/feedbackLearn.js';   // ORCH-FB-2 — relevance shaping from feedback history
 import { buildObservationCapability, scoreObservationMatch, classifyReadAsk } from '../../Core/observe.js';   // OBS-READ — observation records + manual-obs match + read/action effect scoping
-import { buildCompositeCapability, liftControlFlow } from '../../Core/orchChain.js';   // ORCH-X T2 — composite promotion + ORCH-L control-flow lift
+import { buildCompositeCapability, liftControlFlow, liftConditional } from '../../Core/orchChain.js';   // ORCH-X T2 — composite promotion + ORCH-L control-flow lift + ORCH-A conditional lift
 import { validatePlan } from '../../Core/orchPlan.js';   // ORCH-L — structural guard for a lifted (foreach/gate) plan
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
@@ -734,7 +734,7 @@ export function createSgMessageHandlers(ctx) {
     // effect (a read is always safe to auto-run). The chat shows the value inline; the compiler outputType rides along.
     RUN_OBSERVATION: async (payload, _sender, sendResponse) => {
       try {
-        const { tabId, groundId = null, capabilityId = null, fromIndex = null } = payload ?? {};   // fromIndex: per-item override for a FOREACH body read (ORCH-L)
+        const { tabId, groundId = null, capabilityId = null, fromIndex = null, fixed = false } = payload ?? {};   // fromIndex: per-item override for a FOREACH body read; fixed: re-read the single selector, NOT the archetype (ORCH-L)
         if (typeof tabId !== 'number' || !groundId || !capabilityId) { sendResponse({ success: false, error: 'tabId + groundId + capabilityId required' }); return; }
         const cap = (await ctx.readSgCapabilities(groundId)).find((c) => c.id === capabilityId);
         if (!cap || cap.kind !== 'observation') { sendResponse({ success: false, error: 'observation not found' }); return; }
@@ -744,7 +744,7 @@ export function createSgMessageHandlers(ctx) {
         // LIST read ("list the title of EACH job") — a `list` observation reads ALL its archetype items in ONE
         // pass and returns the list, NOT a single positional value. (A per-item foreach read passes fromIndex and
         // skips this — it wants the Nth.) COUNT_ELEMENTS with a text field captures every match's text at once.
-        if (cap.outputType === 'list' && !Number.isInteger(fromIndex) && ex.archetype && ex.archetype.selector) {
+        if (cap.outputType === 'list' && !fixed && !Number.isInteger(fromIndex) && ex.archetype && ex.archetype.selector) {
           const lr = await new Promise((r) => { try { chrome.tabs.sendMessage(tabId, { type: 'COUNT_ELEMENTS', payload: { selector: ex.archetype.selector, fields: [{ name: 'text', source: '', type: 'string' }], max: 200 } }, { frameId: 0 }, (x) => { void chrome.runtime.lastError; r(x); }); } catch (e) { r({ success: false, error: e.message }); } });
           const recs = (lr && lr.success !== false && Array.isArray(lr.records)) ? lr.records : [];
           const items = recs.map((rec) => String((rec && rec.text) || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
@@ -777,7 +777,12 @@ export function createSgMessageHandlers(ctx) {
         const arch = ex.archetype;
         // A FOREACH body read overrides the captured index with the iteration's index (read the Nth item).
         const readIdx = Number.isInteger(fromIndex) ? fromIndex : (arch && Number.isInteger(arch.index) ? arch.index : 0);
-        if (arch && arch.selector) {
+        // FIXED re-read (click-in-place foreach): the per-item click updated a detail pane IN PLACE, so the value
+        // is at the observation's single selector — NOT the archetype index, which is frozen at one list row (that
+        // froze every read to the same "Slightly"). Skip the positional path entirely; read the single selector.
+        if (fixed) {
+          Logger.info('background', `RUN_OBSERVATION — ${cap.id} fixed re-read: single selector (skipping archetype${arch && arch.selector ? `[idx ${readIdx}]` : ''})`);
+        } else if (arch && arch.selector) {
           const ar = await _read(arch.selector, { positional: true, fromIndex: readIdx });
           if (ar && ar.success !== false) { res = ar; via = 'archetype'; }
           else Logger.info('background', `RUN_OBSERVATION — archetype "${arch.selector}"[idx ${readIdx}] miss: ${(ar && ar.error) || 'no value'} — falling back to the single selector (OBSERVE_RAW_TEXT)`);
@@ -853,13 +858,32 @@ export function createSgMessageHandlers(ctx) {
         const selector = (ex && ex.archetype && ex.archetype.selector) || (ex && ex.selector) || null;
         if (!selector) { sendResponse({ success: false, error: 'observation has no list/archetype selector' }); return; }
         try { await ctx.ensureContentScript(tabId); } catch { /* */ }
-        const res = await new Promise((r) => { try { chrome.tabs.sendMessage(tabId, { type: 'COUNT_ELEMENTS', payload: { selector, max } }, { frameId: 0 }, (x) => { void chrome.runtime.lastError; r(x); }); } catch (e) { r({ success: false, error: e.message }); } });
+        // withSelectors → a UNIQUE per-item selector for each match, so a FOREACH body can CLICK the Nth item.
+        const res = await new Promise((r) => { try { chrome.tabs.sendMessage(tabId, { type: 'COUNT_ELEMENTS', payload: { selector, max, withSelectors: true } }, { frameId: 0 }, (x) => { void chrome.runtime.lastError; r(x); }); } catch (e) { r({ success: false, error: e.message }); } });
         const count = (res && res.success !== false && Number.isFinite(res.count)) ? Math.min(res.count, max) : 0;
-        const items = Array.from({ length: count }, (_, i) => ({ index: i }));
-        Logger.info('background', `RUN_OBSERVATION_LIST — ${cap.id} "${selector}" → ${count} item(s)`);
+        const sels = (res && Array.isArray(res.selectors)) ? res.selectors : [];
+        const items = Array.from({ length: count }, (_, i) => ({ index: i, selector: sels[i] || null }));
+        Logger.info('background', `RUN_OBSERVATION_LIST — ${cap.id} "${selector}" → ${count} item(s)${sels.length ? ' (+selectors)' : ''}`);
         sendResponse({ success: true, ok: count > 0, count, items, intent: cap.intent });
       } catch (err) {
         Logger.error('background', `RUN_OBSERVATION_LIST failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // ORCH-L — CLICK a specific selector: the per-item action of a click-in-place FOREACH (click item[i] → a
+    // detail panel updates → the body re-reads it). Reuses the content-script CLICK; settle is the caller's job.
+    CLICK_SELECTOR: async (payload, _sender, sendResponse) => {
+      try {
+        const { tabId, selector = null } = payload ?? {};
+        if (typeof tabId !== 'number' || !selector) { sendResponse({ success: false, error: 'tabId + selector required' }); return; }
+        try { await ctx.ensureContentScript(tabId); } catch { /* */ }
+        const res = await new Promise((r) => { try { chrome.tabs.sendMessage(tabId, { type: 'EXECUTE_STEP', payload: { action: 'CLICK', selector } }, { frameId: 0 }, (x) => { void chrome.runtime.lastError; r(x); }); } catch (e) { r({ success: false, error: e.message }); } });
+        const ok = !!(res && res.success !== false);
+        if (!ok) Logger.info('background', `CLICK_SELECTOR — "${String(selector).slice(0, 80)}" miss: ${(res && res.error) || 'no response'}`);
+        sendResponse({ success: true, ok, error: res && res.error });
+      } catch (err) {
+        Logger.error('background', `CLICK_SELECTOR failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },
@@ -967,6 +991,19 @@ export function createSgMessageHandlers(ctx) {
             else Logger.warn('background', `ORCH_PLAN ▸ lift rejected (kept flat): ${v.errors.join('; ')}`);
           }
         } catch (e) { Logger.warn('background', `ORCH_PLAN lift failed (kept flat): ${e.message}`); }
+        // ORCH-A — a CONDITIONAL ask ("if there are any remote jobs, save the search") lifts to a predicate → gate:
+        // the consequent action runs only when the analysis of the condition observation holds. Tried only when the
+        // foreach lift didn't fire (the two shapes are distinct). Kept only if structurally well-formed.
+        if (outSteps === steps) {
+          try {
+            const cl = liftConditional(steps, ask);
+            if (cl.lifted) {
+              const v = validatePlan({ steps: cl.steps });
+              if (v.ok) { outSteps = cl.steps; Logger.info('background', `ORCH_PLAN ▸ lifted to conditional: gate on predicate (${cl.predicate && cl.predicate.op}${cl.predicate && cl.predicate.value != null ? ` ${cl.predicate.value}` : ''}${cl.predicate && cl.predicate.negate ? ', negated' : ''})`); }
+              else Logger.warn('background', `ORCH_PLAN ▸ conditional lift rejected (kept flat): ${v.errors.join('; ')}`);
+            }
+          } catch (e) { Logger.warn('background', `ORCH_PLAN conditional lift failed (kept flat): ${e.message}`); }
+        }
         Logger.info('background', `ORCH_PLAN ▸ ask="${String(ask).slice(0, 70)}" → ${steps.length} step(s): ${steps.map((s) => `"${s.intent}"${Object.keys(s.bindings).length ? `[${JSON.stringify(s.bindings)}]` : ''}`).join(' → ') || '(none)'}${gaps.length ? ` | uncovered: ${JSON.stringify(gaps)}` : ''}`);
         sendResponse({ success: true, groundId: gid, steps: outSteps, gaps, rationale: plan.rationale || '' });
       } catch (err) {
@@ -981,19 +1018,27 @@ export function createSgMessageHandlers(ctx) {
     // accreteAlias + writeSgCapability — no new composition engine. The steps are references to the T1 artifacts.
     ACCEPT_COMPOUND: async (payload, _sender, sendResponse) => {
       try {
-        const { tabId, groundId = null, ask = '', steps = [], name = '' } = payload ?? {};
+        const { tabId, groundId = null, ask = '', steps = [], plan = null, name = '' } = payload ?? {};
+        // CONTROL-FLOW composite (a quantified T2 artifact) — the plan carries foreach/loop/gate nodes; its IR is
+        // stored intact + a param-abstracted intent is DERIVED. A FLAT composite needs ≥2 capability-backed steps.
+        const _hasCF = (arr) => Array.isArray(arr) && arr.some((s) => s && (s.kind === 'foreach' || s.kind === 'loop' || s.kind === 'gate'));
+        const isCF = _hasCF(plan && plan.steps) || _hasCF(steps);
         const usable = (Array.isArray(steps) ? steps : []).filter((s) => s && s.capabilityId);
-        if (!ask || usable.length < 2) { sendResponse({ success: false, error: 'ask + ≥2 steps with capabilityId required' }); return; }
+        if (!ask || (!isCF && usable.length < 2)) { sendResponse({ success: false, error: 'ask + ≥2 steps with capabilityId required' }); return; }
         let gid = groundId, localeUrl = '';
         if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); localeUrl = t?.url || ''; if (!gid && localeUrl) { const origin = new URL(localeUrl).origin; const gs = await StorageManager.getAllGrounds(); const g = (Array.isArray(gs) ? gs : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } } catch { /* */ } }
         if (!gid) { sendResponse({ success: false, error: 'no ground for this page' }); return; }
-        const cap = buildCompositeCapability({ id: crypto.randomUUID(), ask, intent: ask, goal: ask, groundId: gid, steps: usable, name });
+        const cap = buildCompositeCapability(isCF
+          ? { id: crypto.randomUUID(), ask, groundId: gid, plan: (plan && Array.isArray(plan.steps)) ? plan : { steps }, name }   // intent DERIVED (param-abstracted)
+          : { id: crypto.randomUUID(), ask, intent: ask, goal: ask, groundId: gid, steps: usable, name });
         cap.localeUrl = localeUrl; cap.createdAt = Date.now();
+        // The raw ASK accretes as an alias so the SAME ask is a lexical T2 cache hit next time (the derived intent
+        // is the generalized phrase, not the literal ask). Cross-argument rebinding is a later slice.
         cap.aliases = accreteAlias(cap.aliases, ask, { intent: cap.intent });
         await ctx.writeSgCapability(gid, cap);
-        try { await ctx.appendOutcomes(gid, [Outcomes.makeStageEvent('accept', { groundId: gid, verdict: 'accepted', input: { roleOrIntent: ask.slice(0, 120) }, detail: { capabilityId: cap.id, shape: 'composite', steps: cap.steps.length } })]); } catch { /* */ }
-        Logger.info('background', `ACCEPT_COMPOUND — "${ask.slice(0, 50)}" ${cap.id} → T2 composite of ${cap.steps.length} step(s) [${cap.steps.map((s) => s.kind || 'action').join(' → ')}] on ${gid}`);
-        sendResponse({ success: true, capability: { id: cap.id, intent: cap.intent, kind: 'composite', steps: cap.steps.length } });
+        try { await ctx.appendOutcomes(gid, [Outcomes.makeStageEvent('accept', { groundId: gid, verdict: 'accepted', input: { roleOrIntent: ask.slice(0, 120) }, detail: { capabilityId: cap.id, shape: isCF ? 'composite-cf' : 'composite', steps: cap.steps.length } })]); } catch { /* */ }
+        Logger.info('background', `ACCEPT_COMPOUND — "${ask.slice(0, 50)}" ${cap.id} → T2 ${isCF ? 'control-flow ' : ''}composite of ${cap.steps.length} step(s) [${cap.steps.map((s) => s.kind || 'action').join(' → ')}]${isCF ? ` intent="${cap.intent}" params=[${(cap.params || []).join(', ')}] → ${cap.output ? `${cap.output.name}:${cap.output.type}` : '?'}` : ''} on ${gid}`);
+        sendResponse({ success: true, capability: { id: cap.id, intent: cap.intent, kind: 'composite', controlFlow: cap.controlFlow, steps: cap.steps.length, params: cap.params, output: cap.output || null } });
       } catch (err) {
         Logger.error('background', `ACCEPT_COMPOUND failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
@@ -1016,8 +1061,8 @@ export function createSgMessageHandlers(ctx) {
         const caps = (await ctx.readSgCapabilities(gid)).filter((c) => c && c.kind === 'composite' && isActiveCapability(c) && Array.isArray(c.steps) && c.steps.length);
         const hit = caps.find((c) => normalizeAliasPhrase(c.intent || '') === want || (Array.isArray(c.aliases) && c.aliases.some((a) => normalizeAliasPhrase(a) === want)));
         if (!hit) { sendResponse({ success: true, matched: false }); return; }
-        Logger.info('background', `MATCH_COMPOSITE — T2 cache HIT "${ask.slice(0, 50)}" → composite ${hit.id} (${hit.steps.length} step(s))`);
-        sendResponse({ success: true, matched: true, groundId: gid, capabilityId: hit.id, intent: hit.intent, steps: hit.steps });
+        Logger.info('background', `MATCH_COMPOSITE — T2 cache HIT "${ask.slice(0, 50)}" → ${hit.controlFlow ? 'control-flow ' : ''}composite ${hit.id} (${hit.steps.length} step(s))`);
+        sendResponse({ success: true, matched: true, groundId: gid, capabilityId: hit.id, intent: hit.intent, steps: hit.steps, controlFlow: !!hit.controlFlow });
       } catch (err) {
         Logger.error('background', `MATCH_COMPOSITE failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });

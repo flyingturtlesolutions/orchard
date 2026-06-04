@@ -33,8 +33,22 @@ describe('observe — the pure floor for observations (OBS-READ-1)', () => {
     assert.equal(classifyReadAsk('download the cheapest gif').isRead, false);
   });
 
+  it('classifyReadAsk: a bare noun phrase ("the salary") is a scalar read', () => {
+    assert.equal(classifyReadAsk('the salary').isRead, true);
+    assert.equal(classifyReadAsk('the salary').outputType, 'scalar');
+    assert.equal(classifyReadAsk('the job title').outputType, 'scalar');
+    assert.equal(classifyReadAsk('nurse jobs').isRead, false, 'no determiner → not mistaken for a read (it\'s a search term)');
+  });
+
+  it('classifyReadAsk: a read VERB ("show / extract the salary") is a read; list markers → list', () => {
+    assert.equal(classifyReadAsk('show the job salary').outputType, 'scalar');
+    assert.equal(classifyReadAsk('extract the job salary').outputType, 'scalar');
+    assert.equal(classifyReadAsk('read the rating').outputType, 'scalar');
+    assert.equal(classifyReadAsk('show all the salaries').outputType, 'list');
+  });
+
   it('classifyReadAsk: a bare trailing "?" is a weak read (default scalar)', () => {
-    const r = classifyReadAsk('the membership price?');
+    const r = classifyReadAsk('any luck?');   // a "?" that matches NO read pattern → weak read
     assert.equal(r.isRead, true);
     assert.equal(r.outputType, 'scalar');
     assert.ok(r.confidence < 0.75, 'a pattern-less "?" is low confidence');

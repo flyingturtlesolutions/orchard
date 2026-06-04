@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow } from './orchChain.js';
+import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional } from './orchChain.js';
 import { validatePlan } from './orchPlan.js';
 
 describe('orchChain — decompose a compound ask + assemble a sequential plan (ORCH-X)', () => {
@@ -105,6 +105,60 @@ describe('orchChain — decompose a compound ask + assemble a sequential plan (O
     assert.deepEqual(cap.steps.map((s) => s.capabilityId), ['a', 'b']);
   });
 
+  // ── T2 intent derivation (a control-flow composite's identity) ───────────────────────────────────────────────
+  const _cfFlat = () => [
+    { capabilityId: 'cap-search', intent: 'Search jobs by title and location', bindings: { SEARCH_JOB_TITLE_KEYWORDS_OR_COMPANY: 'nurse', EDIT_LOCATION: 'minneapolis' }, clause: 'search nurse jobs' },
+    { capabilityId: 'obs-jobs', intent: 'the list of jobs', kind: 'observation', outputType: 'list', clause: 'each job' },
+    { capabilityId: 'obs-salary', intent: 'the salary', kind: 'observation', outputType: 'scalar', clause: 'read the salary' },
+  ];
+  const _cfAsk = 'search nurse jobs, click each job and read the salary';
+
+  it('deriveCompositeSignature: params = union of fragment bindings (with a sample); output = the collected list', () => {
+    const { steps } = liftControlFlow(_cfFlat(), _cfAsk);
+    const sig = deriveCompositeSignature(steps);
+    assert.deepEqual(sig.params.map((p) => p.name), ['SEARCH_JOB_TITLE_KEYWORDS_OR_COMPANY', 'EDIT_LOCATION']);
+    assert.equal(sig.params[0].sample, 'nurse', 'a sample argument rides along (it is NOT the identity)');
+    assert.deepEqual(sig.output, { name: 'THE_SALARY', type: 'list' }, 'the foreach collect names the list output');
+  });
+
+  it('deriveCompositeIntent: a param-ABSTRACTED phrase (composition under the quantifier, no arguments baked in)', () => {
+    const { steps } = liftControlFlow(_cfFlat(), _cfAsk);
+    const intent = deriveCompositeIntent(steps, _cfAsk);
+    assert.match(intent, /Search jobs by title and location/, 'the head action intent');
+    assert.match(intent, /the salary/, 'the per-item read');
+    assert.match(intent, /for each result/, 'the collection quantifier');
+    assert.ok(!/nurse|minneapolis/i.test(intent), 'arguments are NOT in the intent — it generalizes across them');
+  });
+
+  it('buildCompositeCapability: a CONTROL-FLOW plan → a quantified T2 artifact (IR intact + derived signature/intent)', () => {
+    const { steps } = liftControlFlow(_cfFlat(), _cfAsk);
+    const cap = buildCompositeCapability({ id: 'cf1', ask: _cfAsk, groundId: 'g', plan: { steps } });
+    assert.equal(cap.kind, 'composite');
+    assert.equal(cap.controlFlow, true);
+    // the IR survives the round-trip so replay runs through the interpreter
+    const fe = cap.steps.find((s) => s.kind === 'foreach');
+    assert.ok(fe, 'the foreach node is preserved in the stored steps');
+    assert.ok(fe.body.some((b) => b.kind === 'wait'), 'the settle node survives');
+    assert.ok(fe.body.some((b) => b.kind === 'observe' && b.fixed), 'the fixed re-read survives');
+    // the derived, generalized identity
+    assert.deepEqual(cap.params, ['SEARCH_JOB_TITLE_KEYWORDS_OR_COMPANY', 'EDIT_LOCATION']);
+    assert.deepEqual(cap.output, { name: 'THE_SALARY', type: 'list' });
+    assert.match(cap.intent, /for each result/);
+    assert.ok(!/nurse/i.test(cap.intent), 'the intent is param-abstracted, not the raw ask');
+    assert.deepEqual(validatePlan({ steps: cap.steps }).errors, [], 'the stored IR re-validates as a runnable plan');
+  });
+
+  it('buildCompositeCapability: the FLAT (legacy) path is unchanged — intent = ask, flat refs, controlFlow false', () => {
+    const cap = buildCompositeCapability({ id: 'f1', ask: 'search x and the first title', groundId: 'g', steps: [
+      { capabilityId: 'a', bindings: { K: 'x' }, kind: null, clause: 'search x', intent: 'Search' },
+      { capabilityId: 'b', bindings: {}, kind: 'observation', clause: 'the first title', intent: 'the first title' },
+    ] });
+    assert.equal(cap.controlFlow, false);
+    assert.equal(cap.intent, 'search x and the first title', 'a flat composite intent is the ask (legacy behavior)');
+    assert.equal(cap.steps.length, 2);
+    assert.deepEqual(cap.params, []);
+  });
+
   it('liftControlFlow: "the salaries of EACH job" → a foreach over the list, body = the trailing read; it validates', () => {
     const flat = [
       { capabilityId: 'cap-search', intent: 'search jobs', kind: null, clause: 'search recent jobs in japan' },
@@ -124,6 +178,36 @@ describe('orchChain — decompose a compound ask + assemble a sequential plan (O
     assert.deepEqual(validatePlan({ steps }).errors, [], 'the lifted plan is well-formed');
   });
 
+  it('liftControlFlow: "click EACH job and read the salary" → foreach { clickItem, WAIT settle, observe(fixed) }', () => {
+    const flat = [
+      { capabilityId: 'cap-search', intent: 'search jobs', kind: null, clause: 'search nurse jobs' },
+      { capabilityId: 'obs-jobs', intent: 'the job list', kind: 'observation', outputType: 'list', clause: 'each job' },
+      { capabilityId: 'obs-salary', intent: 'the salary', kind: 'observation', outputType: 'scalar', clause: 'read the salary' },
+    ];
+    const { steps, lifted, clickEach } = liftControlFlow(flat, 'search nurse jobs, click each job and read the salary');
+    assert.equal(lifted, true);
+    assert.equal(clickEach, true);
+    const fe = steps[2];
+    assert.equal(fe.kind, 'foreach');
+    assert.equal(fe.body.length, 3, 'click → SETTLE → read');
+    assert.equal(fe.body[0].clickItem, true, 'the per-item click comes first');
+    assert.equal(fe.body[1].kind, 'wait', 'a settle node paces the live page between the click and the read');
+    assert.ok(fe.body[1].ms > 0, 'the settle has a non-zero floor');
+    assert.equal(fe.body[2].kind, 'observe');
+    assert.equal(fe.body[2].fixed, true, 'the click-then-read is a FIXED panel re-read (single selector, not the frozen archetype index)');
+    assert.notEqual(fe.body[2].positional, true, 'a fixed re-read is NOT positional');
+    assert.deepEqual(validatePlan({ steps }).errors, [], 'the click-each plan (with the wait node) is well-formed');
+  });
+
+  it('liftControlFlow: read-collection (no click) marks the body read POSITIONAL', () => {
+    const flat = [
+      { capabilityId: 'obs-jobs', kind: 'observation', outputType: 'list', clause: 'each job' },
+      { capabilityId: 'obs-title', kind: 'observation', outputType: 'scalar', clause: 'the title of each' },
+    ];
+    const { steps } = liftControlFlow(flat, 'the title of each job');
+    assert.equal(steps[1].body[0].positional, true, 'no click → the per-item read is positional (Nth item)');
+  });
+
   it('liftControlFlow: no quantifier, or no list step → returned FLAT (unchanged)', () => {
     const flat = [
       { capabilityId: 'a', kind: null, clause: 'search' },
@@ -136,5 +220,83 @@ describe('orchChain — decompose a compound ask + assemble a sequential plan (O
       { capabilityId: 'b', kind: 'observation', outputType: 'scalar', clause: 'the title of each' },
     ];
     assert.equal(liftControlFlow(noList, 'search and the title of each').lifted, false, 'no list-output step → flat');
+  });
+
+  // ── ORCH-A: conditional lift (predicate → gate) ──────────────────────────────────────────────────────────────
+  it('liftConditional: "if there are any remote jobs, save the search" → observe → analyze(exists) → gate{action}', () => {
+    const flat = [
+      { capabilityId: 'obs-remote', intent: 'remote jobs', kind: 'observation', outputType: 'list', clause: 'any remote jobs' },
+      { capabilityId: 'cap-save', intent: 'save the search', kind: null, clause: 'save the search' },
+    ];
+    const { steps, lifted, predicate } = liftConditional(flat, 'if there are any remote jobs, save the search');
+    assert.equal(lifted, true);
+    assert.equal(predicate.op, 'exists');
+    assert.equal(steps.length, 3);
+    assert.equal(steps[0].kind, 'observe');
+    assert.equal(steps[1].kind, 'analyze');
+    assert.equal(steps[1].over, steps[0].id, 'the analysis reads the condition observation');
+    assert.equal(steps[1].outputType, 'predicate');
+    assert.deepEqual(steps[1].predicate, predicate);
+    assert.equal(steps[2].kind, 'gate');
+    assert.equal(steps[2].over, steps[1].id, 'the gate is driven by the predicate analysis');
+    assert.equal(steps[2].body[0].intent, 'save the search', 'the consequent action is the gated body');
+    assert.deepEqual(validatePlan({ steps }).errors, [], 'the conditional plan is well-formed (predicate → gate)');
+  });
+
+  it('liftConditional: "unless" negates the predicate; the observation is hoisted ahead of the action', () => {
+    const flat = [
+      { capabilityId: 'cap-apply', intent: 'apply to the job', kind: null, clause: 'apply' },
+      { capabilityId: 'obs-taken', intent: 'taken label', kind: 'observation', outputType: 'count', clause: 'it is taken' },
+    ];
+    const { steps, lifted, predicate } = liftConditional(flat, 'apply unless it is taken');
+    assert.equal(lifted, true);
+    assert.equal(predicate.negate, true, 'unless negates the predicate');
+    assert.equal(steps[0].kind, 'observe', 'the condition observe is hoisted to the front');
+    assert.equal(steps[2].kind, 'gate');
+    assert.equal(steps[2].body[0].intent, 'apply to the job');
+    assert.deepEqual(validatePlan({ steps }).errors, []);
+  });
+
+  it('liftConditional: a threshold condition keeps the observation scalar (parses the value at runtime)', () => {
+    const flat = [
+      { capabilityId: 'obs-top', intent: 'the top salary', kind: 'observation', outputType: 'scalar', clause: 'the top result' },
+      { capabilityId: 'cap-skip', intent: 'skip it', kind: null, clause: 'skip' },
+    ];
+    const { steps, predicate } = liftConditional(flat, 'if the top result is under $40k, skip it');
+    assert.equal(predicate.op, 'lt');
+    assert.equal(predicate.value, 40000);
+    assert.equal(steps[0].outputType, 'scalar', 'a threshold reads the scalar value, not a count');
+  });
+
+  it('liftConditional: a GUARDED SEQUENCE runs the leading action UNGATED, then gates only what follows the condition', () => {
+    const flat = [
+      { capabilityId: 'cap-search', intent: 'Search jobs by title and location', kind: null, clause: 'search for jobs' },
+      { capabilityId: 'obs-jobs', intent: 'the list of jobs', kind: 'observation', outputType: 'list', clause: 'if there are any jobs' },
+      { capabilityId: 'cap-sort', intent: 'Sort by date', kind: null, clause: 'sort by date' },
+    ];
+    const { steps, lifted } = liftConditional(flat, 'search for jobs and if there are any jobs, sort by date');
+    assert.equal(lifted, true);
+    assert.equal(steps.length, 4, 'search(head) · observe · analyze · gate');
+    assert.equal(steps[0].kind, 'fragment');
+    assert.equal(steps[0].capabilityId, 'cap-search', 'the leading search runs UNCONDITIONALLY (not gated)');
+    assert.equal(steps[1].kind, 'observe');
+    assert.equal(steps[2].kind, 'analyze');
+    assert.equal(steps[3].kind, 'gate');
+    assert.equal(steps[3].body.length, 1, 'ONLY the sort is gated');
+    assert.equal(steps[3].body[0].capabilityId, 'cap-sort');
+    assert.deepEqual(validatePlan({ steps }).errors, [], 'the guarded-sequence plan is well-formed');
+  });
+
+  it('liftConditional: no conditional keyword, or no observation/action → returned FLAT', () => {
+    const noKw = [
+      { capabilityId: 'a', kind: null, clause: 'search' },
+      { capabilityId: 'b', kind: 'observation', outputType: 'list', clause: 'the jobs' },
+    ];
+    assert.equal(liftConditional(noKw, 'search jobs and list them').lifted, false, 'no if/when/unless → flat');
+    const noObs = [
+      { capabilityId: 'a', kind: null, clause: 'save' },
+      { capabilityId: 'b', kind: null, clause: 'apply' },
+    ];
+    assert.equal(liftConditional(noObs, 'if it works, save and apply').lifted, false, 'no observation to test → flat');
   });
 });

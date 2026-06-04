@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { connectionForOutputType, validatePlan, planStep, OUTPUT_CONNECTION, STEP_KINDS } from './orchPlan.js';
+import { connectionForOutputType, validatePlan, planStep, OUTPUT_CONNECTION, STEP_KINDS, STEP_EFFECTS, STEP_SCOPES, effectForKind } from './orchPlan.js';
 
 describe('orchPlan — ORCH-X compiler spine', () => {
   it('connectionForOutputType: list→foreach, scalar→binding, predicate→gate, count→loop (§6)', () => {
@@ -136,5 +136,67 @@ describe('orchPlan — ORCH-X compiler spine', () => {
       planStep.foreach('each', 'x', [planStep.observe('x', { outputType: 'scalar' })]),
     ] };
     assert.ok(validatePlan(plan).errors.some((e) => /duplicate step id "x"/.test(e)));
+  });
+
+  // ── WAIT (pacing leaf) ───────────────────────────────────────────────────────────────────────────────────────
+  it('validatePlan: a click-in-place foreach with a WAIT settle between click and read passes', () => {
+    assert.ok(STEP_KINDS.includes('wait'));
+    const plan = { goal: 'salary of each (click in place)', steps: [
+      planStep.fragment('search', 'cap-search'),
+      planStep.observe('jobs', { outputType: 'list' }),
+      planStep.foreach('each', 'jobs', [
+        planStep.fragment('click', null, { clickItem: true }),
+        planStep.wait('settle', { ms: 900 }),
+        planStep.observe('salary', { outputType: 'scalar', fixed: true }),
+      ], { collect: 'SALARIES' }),
+    ] };
+    const r = validatePlan(plan);
+    assert.deepEqual(r.errors, []);
+    assert.equal(r.ok, true);
+    assert.equal(planStep.wait('w').ms, 800, 'the wait constructor carries a sensible default floor');
+  });
+
+  it('validatePlan: a malformed wait (negative ms / empty forSelector) is rejected', () => {
+    const negMs = { steps: [planStep.observe('o', { outputType: 'list' }), planStep.foreach('e', 'o', [planStep.wait('w', { ms: -5 })])] };
+    assert.ok(validatePlan(negMs).errors.some((e) => /wait "w"\.ms must be a non-negative number/.test(e)));
+    const badSel = { steps: [planStep.wait('w', { forSelector: '   ' })] };
+    assert.ok(validatePlan(badSel).errors.some((e) => /wait "w"\.forSelector must be a non-empty selector/.test(e)));
+  });
+
+  // ── ORCH-CB slot tags (effect / role / scope / ground) ───────────────────────────────────────────────────────
+  it('effectForKind: a leaf maps to its work-kind (read/act/reason); a control-flow node has none', () => {
+    assert.equal(effectForKind('observe'), 'read');
+    assert.equal(effectForKind('fragment'), 'act');
+    assert.equal(effectForKind('analyze'), 'reason');
+    assert.equal(effectForKind('foreach'), null);
+    assert.equal(effectForKind('wait'), null);
+    assert.deepEqual([...STEP_EFFECTS], ['read', 'act', 'reason']);
+    assert.deepEqual([...STEP_SCOPES], ['locale', 'ground', 'global']);
+  });
+
+  it('validatePlan: a plan WITH slot tags (effect/role/scope/ground) validates; a plan WITHOUT them still does', () => {
+    const tagged = { steps: [
+      planStep.fragment('search', 'cap-search', { effect: 'act', scope: 'ground', role: 'head' }),
+      planStep.observe('cond', { outputType: 'list', effect: 'read', scope: 'ground', role: 'condition' }),
+      planStep.fragment('book', 'cap-book', { effect: 'act', scope: 'global', ground: 'calendar.google.com', role: 'consequent' }),
+    ] };
+    assert.deepEqual(validatePlan(tagged).errors, [], 'tags are accepted (additive)');
+    // the SAME plan without tags is equally valid — the tags are optional
+    const untagged = { steps: [planStep.fragment('search', 'cap-search'), planStep.observe('cond', { outputType: 'list' }), planStep.fragment('book', 'cap-book')] };
+    assert.deepEqual(validatePlan(untagged).errors, []);
+  });
+
+  it('validatePlan: an unknown effect / scope, or an empty role / ground, is rejected', () => {
+    const badEffect = { steps: [planStep.fragment('f', 'c', { effect: 'do' })] };
+    assert.ok(validatePlan(badEffect).errors.some((e) => /effect must be one of read\/act\/reason/.test(e)));
+    const badScope = { steps: [planStep.fragment('f', 'c', { scope: 'site' })] };
+    assert.ok(validatePlan(badScope).errors.some((e) => /scope must be one of locale\/ground\/global/.test(e)));
+    const badRole = { steps: [planStep.fragment('f', 'c', { role: '  ' })] };
+    assert.ok(validatePlan(badRole).errors.some((e) => /role must be a non-empty string/.test(e)));
+    const badGround = { steps: [planStep.fragment('f', 'c', { ground: '' })] };
+    // ground: '' is falsy → not flagged (treated as absent); a whitespace ground IS flagged
+    assert.deepEqual(validatePlan(badGround).errors, [], 'an empty-string ground is treated as absent');
+    const wsGround = { steps: [planStep.fragment('f', 'c', { ground: '   ' })] };
+    assert.ok(validatePlan(wsGround).errors.some((e) => /ground must be a non-empty string/.test(e)));
   });
 });

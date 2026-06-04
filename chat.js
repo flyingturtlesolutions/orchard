@@ -18,8 +18,10 @@ import { isSafeStrategyResultHtml, looksLikeStrategyResultHtml } from './Service
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
-import { decomposeAsk, isCompoundAsk, looksComplex } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate for the LLM planner + T2 cache
+import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing
 import { walkPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate)
+import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   // ORCH-A — predicate → gate (conditional routing + the analysis)
+import { comprehend } from './Core/orchComprehend.js';   // ORCH-CB — substrate-free shape comprehension (cold-ground decompose)
 import { classifyFeedback } from './Core/orchFeedback.js'; // ORCH-FB — recognize corrective feedback (LLM refines)
 import { parseAdminCommand } from './Core/orchAdmin.js';    // ORCH-ADMIN — management commands (clear/delete)
 import { classifyReadAsk } from './Core/observe.js';        // OBS-READ — is the ask a question (a read)?
@@ -806,20 +808,35 @@ function _orchFeedbackBar(msg) {
 // steps are already resolved (capabilityId + bindings) — no per-step re-match.
 function _orchConfirmPlan(msg, { tabId, groundId, steps, gaps = [], ask = '', savedComposite = false }) {
   const fmt = (b) => Object.keys(b || {}).length ? ` (${Object.entries(b).map(([k, v]) => `${k}=${v}`).join(', ')})` : '';
-  const list = steps.map((s, i) => {
-    if (s && (s.kind === 'foreach' || s.kind === 'loop')) {
-      const inner = (s.body || []).map((b) => b.intent || b.clause || b.kind).filter(Boolean).join(' → ');
-      return `${i + 1}. for each item: ${inner}${s.collect ? ` (collect ${s.collect})` : ''}`;
+  const label = (b) => b.kind === 'wait' ? `let it settle (${Math.round((b.ms || 0) / 100) / 10}s)` : (b.intent || b.clause || b.kind);
+  const byId = new Map((steps || []).map((s) => [s && s.id, s]));
+  // A gate's CONDITION machinery (the observe it tests + the analyze that judges it) is shown INLINE on the gate
+  // line, not as its own numbered steps — so a conditional reads as one "if … : …" rather than three.
+  const consumed = new Set();
+  for (const s of (steps || [])) { if (s && s.kind === 'gate') { const an = byId.get(s.over); if (an) { consumed.add(an.id); if (an.over) consumed.add(an.over); } } }
+  let n = 0;
+  const lines = [];
+  for (const s of (steps || [])) {
+    if (!s || consumed.has(s.id)) continue;
+    n++;
+    if (s.kind === 'foreach' || s.kind === 'loop') {
+      lines.push(`${n}. for each item: ${(s.body || []).map(label).filter(Boolean).join(' → ')}${s.collect ? ` (collect ${s.collect})` : ''}`);
+    } else if (s.kind === 'gate') {
+      const an = byId.get(s.over);
+      const cond = (an && (an.intent || an.clause)) || 'it applies';
+      lines.push(`${n}. if ${cond}: ${(s.body || []).map((b) => b.intent || b.clause).filter(Boolean).join(' → ')}`);
+    } else {
+      lines.push(`${n}. ${s.intent || s.clause || s.kind || 'step'}${fmt(s.bindings)}`);
     }
-    if (s && s.kind === 'gate') return `${i + 1}. if it applies: ${(s.body || []).map((b) => b.intent || b.clause).filter(Boolean).join(' → ')}`;
-    return `${i + 1}. ${s.intent || s.clause || s.kind || 'step'}${fmt(s.bindings)}`;
-  }).join('\n');
-  const head = steps.length ? `${savedComposite ? 'Saved as one — ' : ''}I’ll do ${steps.length} step${steps.length > 1 ? 's' : ''} in order:\n${list}` : 'I don’t have a saved capability for this yet — I can try to work it out from the page.';
+  }
+  const list = lines.join('\n');
+  const shown = n;   // the number of USER-VISIBLE steps (gate machinery folded in)
+  const head = steps.length ? `${savedComposite ? 'Saved as one — ' : ''}I’ll do ${shown} step${shown > 1 ? 's' : ''} in order:\n${list}` : 'I don’t have a saved capability for this yet — I can try to work it out from the page.';
   // HONEST partial coverage — name the constraints no capability covers; we'll TRY them via the NL fallback after.
   const gapNote = gaps.length ? `\n\n⚠ Not saved yet: ${gaps.join(', ')} — I’ll try ${gaps.length > 1 ? 'these' : 'this'} from the page after.` : '';
   _setMessageBody(msg, head + gapNote);
   const bar = _orchActionBar(msg);
-  if (steps.length) bar.appendChild(_mkBtn(steps.length > 1 ? `Run all ${steps.length}` : 'Run it', () => { bar.remove(); _orchRunPlan(msg, { tabId, groundId, steps, gaps, ask, savedComposite }); }));
+  if (steps.length) bar.appendChild(_mkBtn(shown > 1 ? `Run all ${shown}` : 'Run it', () => { bar.remove(); _orchRunPlan(msg, { tabId, groundId, steps, gaps, ask, savedComposite }); }));
   else if (gaps.length) bar.appendChild(_mkBtn('✨ Try to work it out', () => { bar.remove(); _orchTryGaps(msg, { tabId, groundId, gaps }); }));
   bar.appendChild(_mkBtn('Cancel', () => { bar.remove(); _setMessageBody(msg, 'Okay — cancelled.'); }));
 }
@@ -849,9 +866,16 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan }) {
   _scan(plan && plan.steps);
   const exec = {
     fragment: async (step, scope) => {
-      // Pass the step's OWN bindings only (string values). Per-item binding ($item / a per-row selector) is the
-      // navigation-foreach follow-up — do NOT spread the raw scope.vars item object, which executeStrategy would
-      // try to template as a string.
+      // clickItem — the per-item ACTION of a click-in-place foreach: CLICK the current item's selector. The SETTLE
+      // is a separate `wait` node (lifted right after this), so the panel/inline content loads before the body's
+      // read — pacing is a first-class node, not a sleep buried in the click. (A normal fragment REPLAYs its cap.)
+      if (step.clickItem) {
+        const sel = scope && scope.item && scope.item.selector;
+        if (!sel) return { ok: false, error: 'no per-item selector to click (re-capture the list by pointing at one item)' };
+        const res = await _orchReq('CLICK_SELECTOR', { tabId, selector: sel });
+        return { ok: !!(res && res.success !== false && res.ok !== false), error: res && res.error };
+      }
+      // A normal fragment passes its OWN bindings (string values) — never the raw scope item object.
       const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId, capabilityId: step.capabilityId, paramValues: (step.bindings && typeof step.bindings === 'object') ? step.bindings : {} });
       return { ok: !!(res && res.success !== false && res.ran !== false && res.ok !== false), error: res && (res.error || res.reason) };
     },
@@ -860,18 +884,50 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan }) {
         const res = await _orchReq('RUN_OBSERVATION_LIST', { tabId, groundId, capabilityId: step.capabilityId });
         return { ok: !!(res && res.success !== false), items: (res && res.items) || [], value: (res && res.count) || 0, error: res && res.error };
       }
-      const res = await _orchReq('RUN_OBSERVATION', { tabId, groundId, capabilityId: step.capabilityId, ...(Number.isInteger(scope.index) ? { fromIndex: scope.index } : {}) });
+      // Three read modes: POSITIONAL → the Nth list item (read-collection, archetype + index=iteration). FIXED →
+      // re-read the observation's single selector (click-in-place: the per-item click updated a panel IN PLACE, so
+      // the value is at a fixed location, NOT the frozen archetype index). Plain → the captured read as-is.
+      const override = (step.positional && Number.isInteger(scope.index)) ? { fromIndex: scope.index }
+        : (step.fixed ? { fixed: true } : {});
+      const res = await _orchReq('RUN_OBSERVATION', { tabId, groundId, capabilityId: step.capabilityId, ...override });
       const ok = !!(res && res.success !== false && res.ok !== false);
-      return { ok, value: ok ? String(res.value || '').trim() : null, error: res && (res.reason || res.error) };
+      // Carry items (a list/count condition observation) so a downstream predicate analysis can test the real set.
+      return { ok, value: ok ? String(res.value || '').trim() : null, items: (res && Array.isArray(res.items)) ? res.items : undefined, error: res && (res.reason || res.error) };
+    },
+    // PREDICATE analysis (ORCH-A) — evaluate the condition over the upstream observation's result. Deterministic
+    // (the §6 connection: a predicate output drives a gate). `over` = the produced observe result.
+    analyze: async (step, over) => {
+      const input = { value: over && over.value, items: over && over.items, count: (over && Array.isArray(over.items)) ? over.items.length : undefined };
+      const value = step.predicate ? evaluatePredicate(step.predicate, input) : !!(over && over.value);
+      return { ok: true, value };
+    },
+    // A SETTLE node — let the live page quiesce after a click before the read fires (the detail pane / inline
+    // content loads async). A fixed floor from the node's `ms`. (`forSelector` is reserved for an adaptive
+    // poll-until-present; it needs a content-script round-trip the chat path doesn't have yet, so the floor stands.)
+    wait: async (step) => {
+      const ms = Number.isFinite(step.ms) ? Math.max(0, step.ms) : 800;
+      await new Promise((r) => setTimeout(r, ms));
+      return { ok: true };
     },
   };
   _setMessageBody(msg, 'Running…');
   const env = await walkPlan(plan, exec);
   const outs = (env && env.outputs) ? Object.entries(env.outputs) : [];
+  const gate = (env && Array.isArray(env.trace)) ? env.trace.find((t) => t.kind === 'gate') : null;
   if (outs.length) {
     _setMessageBody(msg, outs.map(([k, v]) => Array.isArray(v) ? `${k} (${v.length}):\n${v.map((x, i) => `  ${i + 1}. ${x}`).join('\n')}` : `${k}: ${v}`).join('\n\n'));
+  } else if (gate) {
+    // PREDICATE → GATE: report the analysis decision — did the conditional action run, or was it skipped?
+    _setMessageBody(msg, !(env && env.ok) ? `Couldn’t complete that${env && env.error ? ` — ${env.error}` : ''}.`
+      : gate.pass ? 'The condition held — I ran it.' : 'The condition didn’t hold — I left it alone.');
   } else {
     _setMessageBody(msg, (env && env.ok) ? 'Done.' : `Couldn’t complete that${env && env.error ? ` — ${env.error}` : ''}.`);
+  }
+  // T2 — a control-flow run (a collection foreach OR a conditional gate) can be PROMOTED to a durable composite.
+  // Offer the save on the same message. (Skipped on a replay of an already-saved composite — plan.savedComposite.)
+  const hasCF = (plan && Array.isArray(plan.steps)) && plan.steps.some((s) => s && (s.kind === 'foreach' || s.kind === 'loop' || s.kind === 'gate'));
+  if (env && env.ok && (outs.length || hasCF) && !(plan && plan.savedComposite)) {
+    _orchOfferSaveCompound(msg, { tabId, groundId, ask: (plan && plan.goal) || '', steps: plan && plan.steps, plan });
   }
   return env;
 }
@@ -879,7 +935,7 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan }) {
 async function _orchRunPlan(msg, { tabId, groundId, steps, gaps = [], ask = '', savedComposite = false }) {
   // ORCH-L — a plan carrying control-flow nodes runs through the interpreter, not the flat sequence runner.
   if (Array.isArray(steps) && steps.some((s) => s && (s.kind === 'foreach' || s.kind === 'loop' || s.kind === 'gate'))) {
-    return _orchRunPlanIR(msg, { tabId, groundId, plan: { goal: ask, steps } });
+    return _orchRunPlanIR(msg, { tabId, groundId, plan: { goal: ask, steps, savedComposite } });
   }
   const total = steps.length;
   const readouts = [];
@@ -1153,16 +1209,44 @@ function _orchOfferRecord(msg, { groundId, tabId, ask, label = '● Show me' }) 
 // ORCH-X T2 — after a compound ask runs successfully, offer to PROMOTE it into a durable composite (a T2
 // artifact) so the SAME ask is a one-step cache hit next time (ACCEPT_COMPOUND). Reuses the saved-step list — no
 // re-record. ≥2 steps + a known ground required.
-function _orchOfferSaveCompound(msg, { tabId, groundId, ask, steps }) {
+function _orchOfferSaveCompound(msg, { tabId, groundId, ask, steps, plan = null }) {
   if (!groundId || !ask) return;
-  const usable = (Array.isArray(steps) ? steps : []).filter((s) => s && s.capabilityId);
-  if (usable.length < 2) return;
+  // A CONTROL-FLOW run (foreach/loop/gate) is savable as a quantified T2 artifact — its IR steps go up whole (the
+  // foreach node has no capabilityId, so the legacy ≥2-capability filter doesn't apply). A FLAT compound needs ≥2
+  // capability-backed steps.
+  const cf = Array.isArray(steps) && steps.some((s) => s && (s.kind === 'foreach' || s.kind === 'loop' || s.kind === 'gate'));
+  const usable = cf ? steps : (Array.isArray(steps) ? steps : []).filter((s) => s && s.capabilityId);
+  if (!cf && usable.length < 2) return;
+  const label = cf ? '💾 Remember this (for each…)' : '💾 Remember these steps';
   const bar = _orchActionBar(msg);
-  bar.appendChild(_mkBtn('💾 Remember these steps', async () => {
+  bar.appendChild(_mkBtn(label, async () => {
     bar.remove();
-    const r = await _orchReq('ACCEPT_COMPOUND', { tabId, groundId, ask, steps: usable });
+    const r = await _orchReq('ACCEPT_COMPOUND', { tabId, groundId, ask, steps: usable, ...(cf && plan ? { plan } : {}) });
     appendMessage({ role: 'assistant', body: (r && r.success && r.capability) ? `Saved — next time “${ask}” runs in one step.` : `Couldn’t save${r && r.error ? ` — ${r.error}` : ''}.` });
   }));
+}
+
+// ORCH-CB — COLD ground: the LLM planner couldn't bind a plan, but a STRUCTURED ask still has shape. Comprehend it
+// from the ask ALONE (substrate-free) and show it as a plan-to-learn — every part a gap — instead of collapsing to
+// one unmatched blob. Renders the conditional/foreach structure; offers to work it out from the page or be shown.
+function _orchOfferComprehended(msg, { tabId, groundId, ask, comp }) {
+  const steps = (comp && Array.isArray(comp.steps)) ? comp.steps : [];
+  const byId = new Map(steps.map((s) => [s && s.id, s]));
+  const consumed = new Set();   // a gate's condition machinery renders INLINE on the gate line
+  for (const s of steps) if (s && s.kind === 'gate') { const an = byId.get(s.over); if (an) { consumed.add(an.id); if (an.over) consumed.add(an.over); } }
+  let n = 0;
+  const lines = [];
+  for (const s of steps) {
+    if (!s || consumed.has(s.id)) continue;
+    n++;
+    if (s.kind === 'gate') { const an = byId.get(s.over); lines.push(`${n}. if ${(an && an.intent) || 'it applies'}: ${(s.body || []).map((b) => b.intent || b.clause).filter(Boolean).join(' → ')}`); }
+    else if (s.kind === 'foreach' || s.kind === 'loop') { lines.push(`${n}. for each item: ${(s.body || []).map((b) => b.intent || b.clause).filter(Boolean).join(' → ')}`); }
+    else lines.push(`${n}. ${s.intent || s.clause || s.kind}`);
+  }
+  _setMessageBody(msg, `Here’s how I read that — I don’t have ${lines.length > 1 ? 'these steps' : 'this'} saved on this page yet:\n${lines.join('\n')}`);
+  const bar = _orchActionBar(msg);
+  bar.appendChild(_mkBtn('✨ Try it from the page', () => { bar.remove(); _orchTryGaps(appendMessage({ role: 'assistant', body: '' }), { tabId, groundId, gaps: [ask] }); }));
+  bar.appendChild(_mkBtn('● Show me', () => { bar.remove(); _orchRecordFlow(appendMessage({ role: 'assistant', body: '' }), { groundId, tabId, ask }); }));
 }
 
 // Conversational fillers are never page tasks — skip the grounded matcher so "yes"/"ok" don't match a capability.
@@ -1209,8 +1293,10 @@ async function _tryGroundedTurn(text) {
   // ORCH-X — a COMPOUND ask ("search for x AND filter by y") is DECOMPOSED and CHAINED over existing
   // capabilities, instead of being matched as one (unfindable) atomic intent. We probe the Ground with the
   // first clause (reused as step 1's match); no Ground → fall through to the legacy matcher.
+  // A FOREACH ask ("…of each", "click each result…") is NOT a flat chain — it routes to the LLM planner so
+  // liftControlFlow can lift it into a foreach. Skip the lexical chain for these.
   const clauses = decomposeAsk(text);
-  if (clauses.length > 1) {
+  if (clauses.length > 1 && !isForeachAsk(text) && !isConditionalAsk(text)) {
     const probe = appendMessage({ role: 'thinking', body: 'Checking this page…' });
     const m0 = await _orchReq('ORCH_MATCH', { tabId: tab.id, ask: clauses[0].text });
     if (!m0 || !m0.groundId) { probe.remove(); return false; }
@@ -1223,7 +1309,7 @@ async function _tryGroundedTurn(text) {
   // capabilities with no connective for decomposeAsk to split on. Ask the LLM PLANNER to route it over the
   // recorded capabilities; if it decomposes into >1 step, confirm + chain. 0–1 steps → fall through to the
   // single matcher (so simple asks pay no extra LLM call — the looksComplex gate guards it).
-  if (looksComplex(text)) {
+  if (looksComplex(text) || isForeachAsk(text) || isConditionalAsk(text)) {
     const probe = appendMessage({ role: 'thinking', body: 'Working out the steps…' });
     const plan = await _orchReq('ORCH_PLAN', { tabId: tab.id, ask: text });
     const pSteps = (plan && plan.success && Array.isArray(plan.steps)) ? plan.steps : [];
@@ -1233,6 +1319,15 @@ async function _tryGroundedTurn(text) {
     if (pSteps.length > 1 || (pSteps.length === 1 && pGaps.length > 0)) {
       probe.classList.remove('thinking'); probe.classList.add('assistant');
       _orchConfirmPlan(probe, { tabId: tab.id, groundId: plan.groundId, steps: pSteps, gaps: pGaps, ask: text });
+      return true;
+    }
+    // ORCH-CB — the planner found nothing to bind (a COLD ground), but a STRUCTURED ask still decomposes.
+    // Comprehend the shape from the ask alone so it doesn't collapse to one unmatched blob — every part a gap to
+    // learn. Substrate-free, so it works even with zero capabilities recorded.
+    const comp = comprehend(text);
+    if (comp && Array.isArray(comp.steps) && comp.steps.length > 1) {
+      probe.classList.remove('thinking'); probe.classList.add('assistant');
+      _orchOfferComprehended(probe, { tabId: tab.id, groundId: (plan && plan.groundId) || null, ask: text, comp });
       return true;
     }
     probe.remove();
