@@ -245,24 +245,33 @@ export function createSgMessageHandlers(ctx) {
             if (synth && Array.isArray(synth.actions) && synth.actions.length) phases.push({ label: node.label, actions: synth.actions });
           }
           if (!phases.length) { sendResponse({ success: true, accepted: false, reason: 'no runnable phases to promote' }); return; }
+          // T1-as-first-class taxonomy fix — a fragment is gated by page-state change, so each segmented phase IS a
+          // T1 Fragment. ≥2 phases chain into a Strategy (T2); a SINGLE phase is saved AS the Fragment, with NO
+          // Strategy wrapper (the cap points at fragmentId, not strategyId). Replay runs a bare fragment by wrapping
+          // it at run time (REPLAY_SG_CAPABILITY fragment path); listCapabilities surfaces it standalone.
+          const isSingleT1 = phases.length === 1;
           const strategyId = crypto.randomUUID();
           const fragmentIds = phases.map(() => crypto.randomUUID());
           const recs = CapabilitySynth.buildTier2CapabilityRecords(phases, { groundId, strategyId, fragmentIds, name: draft.intent, goal: draft.intent });
           if (!recs) { sendResponse({ success: true, accepted: false, reason: 'could not assemble tier-2 capability records' }); return; }
           for (const f of recs.fragments) { try { await StorageManager.saveFragment(f); } catch (e) { Logger.warn('background', `ACCEPT_SG_TRIAL[tier2] saveFragment failed: ${e.message}`); } }
-          try { await StorageManager.saveStrategy(recs.strategy); }
-          catch (e) { Logger.error('background', `ACCEPT_SG_TRIAL[tier2] saveStrategy failed: ${e.message}`); sendResponse({ success: false, error: `strategy save failed: ${e.message}` }); return; }
+          if (!isSingleT1) {
+            try { await StorageManager.saveStrategy(recs.strategy); }
+            catch (e) { Logger.error('background', `ACCEPT_SG_TRIAL[tier2] saveStrategy failed: ${e.message}`); sendResponse({ success: false, error: `strategy save failed: ${e.message}` }); return; }
+          }
           const capability = {
-            id: crypto.randomUUID(), groundId, intent: draft.intent, shape: 'tier2',
-            localeUrl: draft.localeUrl || '', strategyId, fragmentIds, phases: phases.map((p) => p.label),
+            id: crypto.randomUUID(), groundId, intent: draft.intent, shape: isSingleT1 ? 'tier1' : 'tier2',
+            localeUrl: draft.localeUrl || '',
+            ...(isSingleT1 ? { fragmentId: fragmentIds[0] } : { strategyId }), fragmentIds,
+            phases: phases.map((p) => p.label),
             binding: [], synthesized: true, createdAt: Date.now(),
             trial: { score: draft.tier2Score?.score ?? null, verdict: draft.tier2Score?.verdict ?? null, trialRef: null },
           };
           await ctx.writeSgCapability(groundId, capability);
-          try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: String(draft.intent).slice(0, 120) }, detail: { capabilityId: capability.id, strategyId, fragments: recs.fragments.length, shape: 'tier2', score: capability.trial.score } })]); } catch { /* */ }
+          try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: String(draft.intent).slice(0, 120) }, detail: { capabilityId: capability.id, ...(isSingleT1 ? { fragmentId: fragmentIds[0] } : { strategyId }), fragments: recs.fragments.length, shape: capability.shape, score: capability.trial.score } })]); } catch { /* */ }
           await ctx.clearSgDraft(groundId);
-          Logger.info('background', `ACCEPT_SG_TRIAL[tier2] — promoted ${capability.id} → strategy ${strategyId} chaining ${recs.fragments.length} fragment(s) [${capability.phases.join(' → ')}]`);
-          sendResponse({ success: true, accepted: true, capability, fragmentCount: recs.fragments.length, tier2: true });
+          Logger.info('background', `ACCEPT_SG_TRIAL[${isSingleT1 ? 'tier1' : 'tier2'}] — promoted ${capability.id} → ${isSingleT1 ? `bare Fragment ${fragmentIds[0]} (no Strategy wrapper)` : `strategy ${strategyId} chaining ${recs.fragments.length} fragment(s)`} [${capability.phases.join(' → ')}]`);
+          sendResponse({ success: true, accepted: true, capability, fragmentCount: recs.fragments.length, tier2: !isSingleT1 });
           return;
         }
         const built = buildAcceptance({
@@ -1203,10 +1212,15 @@ export function createSgMessageHandlers(ctx) {
         // Leaf resolution (the ONLY I/O the pure promoter needs) — injected so the brain stays mockable/tested.
         const resolveFragmentCap = async (cid) => {
           const c = caps.find((x) => x.id === cid);
-          if (!c || !c.strategyId) return null;
-          const strat = await StorageManager.getStrategy(c.strategyId);
-          const fs = (strat && Array.isArray(strat.fragmentSteps)) ? strat.fragmentSteps : null;
-          return (fs && fs.length) ? { fragmentSteps: fs } : null;
+          if (!c) return null;
+          if (c.strategyId) {
+            const strat = await StorageManager.getStrategy(c.strategyId);
+            const fs = (strat && Array.isArray(strat.fragmentSteps)) ? strat.fragmentSteps : null;
+            return (fs && fs.length) ? { fragmentSteps: fs } : null;
+          }
+          // T1-as-first-class — a bare-Fragment leaf cap (no Strategy wrapper): its single fragment node IS the splice.
+          if (c.fragmentId) return { fragmentSteps: [{ type: 'fragment', fragmentId: c.fragmentId, paramBindings: {} }] };
+          return null;
         };
         // STAGE observation records — don't persist until the WHOLE promote succeeds, so a later unresolved leaf or
         // a validation miss never leaves orphaned Observation records (phantoms in the Studio library).
