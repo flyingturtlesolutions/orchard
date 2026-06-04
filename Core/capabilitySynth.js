@@ -302,6 +302,27 @@ export function buildTier2CapabilityRecords(phases, { groundId, strategyId, frag
 }
 
 /**
+ * T1-as-first-class taxonomy guard (v2.74.762) — decide + shape the records for an accepted op. The ONE place the
+ * rule lives, so the SG-trial accept and the demonstration accept can't drift: a SINGLE page-state-bounded phase
+ * becomes a bare Fragment (NO Strategy wrapper); ≥2 phases chain into a Strategy. PURE — the caller mints the ids
+ * and does the saves. `fragmentName`/`fragmentDescription` (optional) override the lone Fragment's name/description
+ * (the demo path has an LLM-polished name); `aliases` (optional) ride onto the Strategy in the ≥2-phase case.
+ * @returns {{ok:boolean, error?:string, isSingleT1?:boolean, fragments?:object[], strategy?:(object|null)}}
+ */
+export function prepareTier1or2Records(phases, { groundId, strategyId, fragmentIds, name, goal, params, now, aliases, fragmentName, fragmentDescription } = {}) {
+  const recs = buildTier2CapabilityRecords(phases, { groundId, strategyId, fragmentIds, name, goal, params, now });
+  if (!recs) return { ok: false, error: 'could not assemble capability records' };
+  const isSingleT1 = recs.fragments.length === 1;
+  if (isSingleT1) {
+    if (fragmentName) recs.fragments[0].name = String(fragmentName).slice(0, 80);
+    if (fragmentDescription) recs.fragments[0].description = String(fragmentDescription);
+  } else if (Array.isArray(aliases) && aliases.length) {
+    recs.strategy.aliases = aliases.slice();
+  }
+  return { ok: true, isSingleT1, fragments: recs.fragments, strategy: isSingleT1 ? null : recs.strategy };
+}
+
+/**
  * T1-as-first-class (v2.74.753) — collect every fragmentId + observationId referenced as a STEP anywhere in a set
  * of Strategy / Workflow trees (recursing fragmentSteps, detect branches + defaults, foreach/loop/gate bodies, the
  * top-level composition steps, and the implementations envelope). PURE. A primitive IN this set is a building

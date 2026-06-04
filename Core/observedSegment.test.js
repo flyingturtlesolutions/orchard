@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildRawAction, coalesce } from './observedTrace.js';
-import { segmentTrace, opToPhases, stepToAction, deriveObservedParams, parameterizeObserved, obsParamName, optionContainerSelector, describeTraceInput } from './observedSegment.js';
+import { segmentTrace, opToPhases, stepToAction, deriveObservedParams, parameterizeObserved, obsParamName, optionContainerSelector, describeTraceInput, derivePhasePostcondition, reconcileObservedLandmarks } from './observedSegment.js';
 import { buildTier2CapabilityRecords } from './capabilitySynth.js';
 
 // `A` mirrors the real recorder: a click passes its accessibleName as the value (kept only when the click
@@ -89,6 +89,92 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     assert.equal(op.nodes.length, 2, 'two fragments despite zero navigations');
     assert.deepEqual(op.nodes[0].steps.map((s) => s.kind), ['type', 'click'], 'fragment 1 = the search commit');
     assert.deepEqual(op.nodes[1].steps.map((s) => s.kind), ['click', 'click'], 'fragment 2 = open + choose the filter');
+  });
+
+  // OBS (v2.74.763) — an IN-PLACE swap marker carries the swapped-in container's selector; the segmenter threads
+  // it onto the node (node.settle) and opToPhases surfaces it as settleSelector → an in-place success signal.
+  const SCsel = (url, selector) => buildRawAction({ domKind: 'state_change', url: url || 'https://spa.example/search', target: { selector } });
+  it('an SPA swap carries its container selector onto the fragment (node.settle → settleSelector)', () => {
+    // A real in-place swap fires its marker on the SAME url as the page (no navigation) — match the A() helper url.
+    const trace = [A('input', 'Search', '#q', 'halo'), A('click', 'Search', '#searchbtn'), SCsel('https://www.indeed.com', '#results')];
+    const op = segmentTrace(coalesce(trace));
+    assert.equal(op.nodes.length, 1);
+    assert.deepEqual(op.nodes[0].settle, { selector: '#results' }, 'the swapped-in container rides on the node');
+    const ph = opToPhases(op)[0];
+    assert.equal(ph.settleSelector, '#results', 'opToPhases surfaces it as settleSelector');
+    assert.equal(ph.to, ph.url, 'in-place: no URL change (to === url)');
+    assert.equal(derivePhasePostcondition(ph).source, 'spa-settle', 'so the phase yields a selector_present postcondition');
+  });
+
+  it('a state_change with no target selector → no settle (the fragment is unaffected)', () => {
+    const op = segmentTrace(coalesce([A('click', 'Apply', '#apply'), SC('https://spa.example/x')]));
+    assert.equal(op.nodes.length, 1);
+    assert.ok(!('settle' in op.nodes[0]), 'no selector → no settle key');
+    assert.equal(opToPhases(op)[0].settleSelector, '', 'settleSelector defaults to empty');
+  });
+
+  it('derivePhasePostcondition: NAVIGATION → url_matches on the destination path (source url-nav)', () => {
+    const pc = derivePhasePostcondition({ url: 'https://x/search', to: 'https://x/jobs?q=a' });
+    assert.equal(pc.source, 'url-nav');
+    assert.equal(pc.match, 'all');
+    assert.deepEqual(pc.conditions, [{ type: 'url_matches', pattern: '/jobs' }]);
+  });
+
+  it('derivePhasePostcondition: IN-PLACE swap → selector_present on the swapped-in container (source spa-settle)', () => {
+    const pc = derivePhasePostcondition({ url: 'https://x/search', to: 'https://x/search', settleSelector: '#results' });
+    assert.equal(pc.source, 'spa-settle');
+    assert.deepEqual(pc.conditions, [{ type: 'selector_present', selector: '#results' }]);
+  });
+
+  it('derivePhasePostcondition: a NAV wins over a settle; a root / destination or no signal → null', () => {
+    // a real nav with a settle selector present → still the url_matches (the page changed; the selector is post-nav noise)
+    const navWins = derivePhasePostcondition({ url: 'https://x/a', to: 'https://x/b', settleSelector: '#r' });
+    assert.equal(navWins.source, 'url-nav');
+    assert.equal(derivePhasePostcondition({ url: 'https://x/a', to: 'https://x/' }), null, 'a root-path destination tells us nothing');
+    assert.equal(derivePhasePostcondition({ url: 'https://x/a', to: 'https://x/a' }), null, 'in-place but no settle selector → null');
+    assert.equal(derivePhasePostcondition({}), null, 'nothing → null');
+  });
+
+  // OBS (v2.74.764) — reconcile demonstrated landmarks to the grounded Locale so the observed path stops minting
+  // duplicate landmarks for elements Explore already catalogued (the dedup the SG/NL path gets via the Locale).
+  const LOC = (url, feats) => ({ url, features: feats });
+  const SEARCH_FEAT = { id: 'feat_search', selector: '#searchbtn', a11yRole: 'button', label: 'Search', kind: 'action' };
+  const phaseWith = (url, lm) => ({ url, actions: [{ action: 'CLICK', selector: lm.selector, landmark: { ...lm } }] });
+
+  it('reconcileObservedLandmarks: exact-selector match adopts the feature identity + stamps featureId', () => {
+    const phases = [phaseWith('https://x/jobs', { role: 'button', accessibleName: 'Search', selector: '#searchbtn' })];
+    const r = reconcileObservedLandmarks(phases, [LOC('https://x/jobs', { feat_search: SEARCH_FEAT })]);
+    assert.equal(r.reconciled, 1);
+    assert.equal(r.phases[0].actions[0].landmark.featureId, 'feat_search');
+    assert.equal(r.phases[0].actions[0].landmark.selector, '#searchbtn');
+  });
+
+  it('reconcileObservedLandmarks: role+name match across SELECTOR DRIFT upgrades to the grounded selector', () => {
+    // the demo captured a different (positional) selector than Explore did — same element by role+name
+    const phases = [phaseWith('https://x/jobs', { role: 'button', accessibleName: 'Search', selector: 'div > button:nth-child(3)' })];
+    const r = reconcileObservedLandmarks(phases, [LOC('https://x/jobs', [SEARCH_FEAT])]);   // features as ARRAY too
+    assert.equal(r.reconciled, 1);
+    assert.equal(r.phases[0].actions[0].landmark.selector, '#searchbtn', 'demo selector → grounded feature selector → same uid as the catalog');
+    assert.equal(r.phases[0].actions[0].landmark.featureId, 'feat_search');
+  });
+
+  it('reconcileObservedLandmarks: a same-path locale matches despite query/hash; the action selector is untouched', () => {
+    const phases = [phaseWith('https://x/jobs?q=dev#top', { role: 'button', accessibleName: 'Search', selector: 'b.x' })];
+    const r = reconcileObservedLandmarks(phases, [LOC('https://x/jobs', { feat_search: SEARCH_FEAT })]);
+    assert.equal(r.reconciled, 1, 'query/hash ignored — same path reconciles');
+    assert.equal(r.phases[0].actions[0].selector, 'b.x', 'the OPERATIONAL action selector is left alone (params match on it)');
+    assert.equal(r.phases[0].localeUrl, 'https://x/jobs', 'mint url canonicalized to the grounded Locale url (no query noise → stable uid)');
+    assert.equal(r.phases[0].url, 'https://x/jobs?q=dev#top', 'the phase url itself is untouched (postcondition derivation reads it)');
+  });
+
+  it('reconcileObservedLandmarks: no matching feature / different page / no locale → unchanged, no featureId', () => {
+    const phases = [phaseWith('https://x/jobs', { role: 'button', accessibleName: 'Cancel', selector: '#cancel' })];
+    const noMatch = reconcileObservedLandmarks(phases, [LOC('https://x/jobs', { feat_search: SEARCH_FEAT })]);
+    assert.equal(noMatch.reconciled, 0);
+    assert.ok(!('featureId' in noMatch.phases[0].actions[0].landmark), 'unmatched element keeps the demo identity, no featureId');
+    const wrongPage = reconcileObservedLandmarks([phaseWith('https://x/other', { role: 'button', accessibleName: 'Search', selector: '#searchbtn' })], [LOC('https://x/jobs', { feat_search: SEARCH_FEAT })]);
+    assert.equal(wrongPage.total, 0, 'no same-path locale → that phase is skipped entirely (no cross-page mis-bind)');
+    assert.equal(reconcileObservedLandmarks(phases, []).reconciled, 0, 'no locales → unchanged');
   });
 
   it('a state_change marker right after an Enter/nav boundary mints NO empty fragment', () => {

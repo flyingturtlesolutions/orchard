@@ -18,6 +18,8 @@
 // @module Core/observedSegment
 // @version 2.74.750
 
+import { featureToProtoLandmark } from './landmark.js';   // OBS (v2.74.764) — reconcile demonstrated elements to grounded Locale features
+
 const _DISCLOSURE_HINT = /filter|menu|sort|posted|date|pay|salary|wage|type|level|experience|distance|remote|radius|category|options?|dropdown|expand|more/i;
 
 function _named(a) {
@@ -59,16 +61,23 @@ function _preclean(acts) {
 /**
  * Segment a coalesced demonstration trace into Fragments. PURE.
  * @param {object[]} trace  RawAction[] (already coalesced by Core/observedTrace.coalesce)
- * @returns {{tier:'observed', nodes:Array<{type:'fragment', label:string, steps:object[], from:string, to:string}>}}
+ * @returns {{tier:'observed', nodes:Array<{type:'fragment', label:string, steps:object[], from:string, to:string, settle?:{selector:string}}>}}
  */
 export function segmentTrace(trace) {
   const acts = _preclean(Array.isArray(trace) ? trace.filter(Boolean) : []);
   const nodes = [];
   let cur = [];
   let fromUrl = acts.length ? (acts[0].url || '') : '';
-  const flush = (toUrl) => {
+  const flush = (toUrl, settle) => {
     if (!cur.length) return;
-    nodes.push({ type: 'fragment', label: _label(cur), steps: cur, from: fromUrl, to: toUrl || (cur[cur.length - 1] && cur[cur.length - 1].url) || '' });
+    nodes.push({
+      type: 'fragment', label: _label(cur), steps: cur, from: fromUrl,
+      to: toUrl || (cur[cur.length - 1] && cur[cur.length - 1].url) || '',
+      // OBS — an IN-PLACE (SPA) boundary carries the swapped-in container's selector (the recorder's `state_change`
+      // marker target). It's the in-place success signal: with no URL change there is no `url_matches`, so the
+      // settle selector becomes a `selector_present` postcondition (derivePhasePostcondition).
+      ...(settle && settle.selector ? { settle: { selector: String(settle.selector) } } : {}),
+    });
     cur = [];
   };
   for (let i = 0; i < acts.length; i++) {
@@ -77,7 +86,7 @@ export function segmentTrace(trace) {
     // LOGICAL boundary (SPA): the intent's content landmark changed + settled after a commit, with NO navigation.
     // The steps accumulated since the last boundary CAUSED this change → flush them as a Fragment. An empty buffer
     // (a marker right after an Enter/nav boundary) is a no-op, so redundant markers never mint empty fragments.
-    if (a.kind === 'state_change') { const u = a.url || (cur.length ? cur[cur.length - 1].url : '') || fromUrl; flush(u); fromUrl = u; continue; }
+    if (a.kind === 'state_change') { const u = a.url || (cur.length ? cur[cur.length - 1].url : '') || fromUrl; const sel = a.target && a.target.selector; flush(u, sel ? { selector: sel } : null); fromUrl = u; continue; }
     if (a.kind === 'submit') {
       // A submit fires BEFORE the navigation it causes, so its URL is stale. When a navigate follows
       // immediately, let THAT be the boundary (it carries the real target URL); otherwise this is an
@@ -324,6 +333,7 @@ export function opToPhases(op) {
       label: n.label,
       url: n.from || (all[0] && all[0].url) || '',
       to: n.to || '',   // the post-phase URL — a NAVIGATING phase's success signal (→ a url_matches postcondition)
+      settleSelector: (n.settle && n.settle.selector) || '',   // an IN-PLACE phase's signal (→ a selector_present postcondition)
       // OBS-4 — prepend an optional SCROLL_TO before each ELEMENT action so replay reaches a control the user
       // had to scroll to (viewport-safe; an optional miss is harmless). A window SCROLL_TO (no selector) emits
       // as-is.
@@ -331,4 +341,125 @@ export function opToPhases(op) {
         .flatMap((a) => (a.selector ? [{ action: 'SCROLL_TO', selector: a.selector, optional: true }, a] : [a])),
     };
   });
+}
+
+const _RX_META = /[.*+?^${}()|[\]\\]/g;   // escape a literal path so it's a safe url_matches regex
+
+/**
+ * OBS (v2.74.763) — derive a Fragment's success POSTCONDITION from its page-state boundary. PURE. A Fragment is
+ * gated by a page-state change, and that change IS the observable success signal the structural floor often can't
+ * see (the result region lives past the boundary):
+ *   • NAVIGATION (to ≠ url) → the destination PATH is reliable → a `url_matches` postcondition (source 'url-nav').
+ *   • IN-PLACE SPA swap (no URL change, but the recorder captured the swapped-in container) → assert that
+ *     container is present → a `selector_present` postcondition (source 'spa-settle') — the in-place analog.
+ *   • Otherwise → null (the demo's structural floor / any LLM-refined postcondition still applies).
+ * Returns the envelope { match:'all', conditions:[…], source } (the array shape ExecutionEngine reads) or null.
+ * Shared by the demonstration accept (DERIVE_OBSERVED) so the nav and in-place rules can't drift.
+ * @param {{url?:string, to?:string, settleSelector?:string}} phase
+ * @returns {({match:'all', conditions:object[], source:string})|null}
+ */
+export function derivePhasePostcondition(phase) {
+  const url = (phase && phase.url) || '';
+  const to = (phase && phase.to) || '';
+  const settleSelector = (phase && phase.settleSelector) || '';
+  // A real navigation: the destination path is the signal. A '/' (or unparseable) destination tells us nothing.
+  if (to && url && to !== url) {
+    try {
+      const navPath = new URL(to).pathname;
+      if (navPath && navPath !== '/') {
+        return { match: 'all', conditions: [{ type: 'url_matches', pattern: navPath.replace(_RX_META, '\\$&') }], source: 'url-nav' };
+      }
+    } catch { /* unparseable destination → no url signal */ }
+    return null;   // navigated, but no usable path → don't fall through to a settle selector (there is none post-nav)
+  }
+  // In-place (SPA) commit: no URL change, but the swapped-in results container settled → assert its presence.
+  if (settleSelector && typeof settleSelector === 'string') {
+    return { match: 'all', conditions: [{ type: 'selector_present', selector: settleSelector }], source: 'spa-settle' };
+  }
+  return null;
+}
+
+// Same page (origin + pathname), ignoring query/hash — the demo's phase url may carry session/query noise the
+// grounded Locale url doesn't. A bad parse fails closed (no reconciliation rather than a wrong match).
+function _sameLocalePath(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  try { const ua = new URL(a), ub = new URL(b); return ua.origin === ub.origin && ua.pathname === ub.pathname; }
+  catch { return false; }
+}
+function _localeFeatureList(loc) {
+  const f = loc && loc.features;
+  return Array.isArray(f) ? f.filter(Boolean) : (f && typeof f === 'object' ? Object.values(f).filter(Boolean) : []);
+}
+// Match a demonstrated landmark to a grounded feature: exact selector first (page-specific, strongest), then
+// role + accessibleName (identity-robust — survives selector drift between the recorder and Explore captures).
+function _matchLocaleFeature(lm, feats) {
+  const sel = lm && lm.selector;
+  if (sel) { const bySel = feats.find((f) => f.selector && f.selector === sel); if (bySel) return bySel; }
+  const role = String((lm && lm.role) || '').toLowerCase();
+  const name = String((lm && lm.accessibleName) || '').trim().toLowerCase();
+  if (role && name) return feats.find((f) => String(f.a11yRole || '').toLowerCase() === role && String(f.label || '').trim().toLowerCase() === name) || null;
+  return null;
+}
+
+/**
+ * OBS (v2.74.764) — RECONCILE demonstrated landmarks to the grounded Locale catalog. PURE.
+ *
+ * The observed/chat path derives each landmark's identity from the RAW demonstration (the recorder's
+ * runtime selector + captured role/name). That identity is content-addressed into the landmark uid
+ * (mintLandmarkUid hashes ground|locale|role|name|selector), so a run-to-run selector difference, OR a
+ * difference from the selector Explore already grounded for the SAME element, mints a DIFFERENT uid → a
+ * DUPLICATE landmark for one logical element (silent registry fragmentation). The SG-trial/NL path avoids
+ * this because it sources identity from the Locale feature (bind.js → featureToProtoLandmark); the observed
+ * path is the only one that bypasses the Locale. This pass closes that gap: for each demonstrated landmark
+ * that matches a grounded feature on the SAME page, adopt the feature's canonical identity (the vetted
+ * Explore selector + role + name, via featureToProtoLandmark) and stamp its `featureId`. Downstream uid
+ * minting (buildLandmarkRecords + landmarkRefActions) then collides on the catalog identity → reuse, not a
+ * duplicate. Elements the Locale doesn't know (e.g. a results region never enumerated) keep the demo identity.
+ *
+ * Conservative: only reconciles within a Locale whose url is the SAME page (origin+pathname) as the phase, so
+ * a "Search" button on page A can't be mis-bound to one on page B. No locale for the page → that phase is left
+ * untouched (no regression — just no dedup).
+ *
+ * @param {Array<{url?:string, actions?:object[]}>} phases  opToPhases output (actions carry inline `landmark`)
+ * @param {Array<{url?:string, features?:(object|object[])}>} locales  grounded Locales: { url, features }
+ * @returns {{ phases:object[], reconciled:number, total:number }}
+ */
+export function reconcileObservedLandmarks(phases, locales) {
+  const phaseList = Array.isArray(phases) ? phases : [];
+  const locList = Array.isArray(locales) ? locales.filter(Boolean) : [];
+  if (!locList.length) return { phases: phaseList, reconciled: 0, total: 0 };
+  let reconciled = 0, total = 0;
+  const out = phaseList.map((ph) => {
+    const loc = locList.find((l) => _sameLocalePath(l.url, ph && ph.url));
+    if (!loc) return ph;
+    const feats = _localeFeatureList(loc);
+    if (!feats.length) return ph;
+    const actions = (Array.isArray(ph.actions) ? ph.actions : []).map((a) => {
+      if (!a || !a.landmark) return a;
+      total++;
+      const feat = _matchLocaleFeature(a.landmark, feats);
+      if (!feat) return a;
+      const canon = featureToProtoLandmark(feat);
+      if (!canon || !canon.selector || !canon.role) return a;   // not recoverable → leave the demo identity
+      reconciled++;
+      return {
+        ...a,
+        landmark: {
+          ...a.landmark,
+          role: canon.role,
+          accessibleName: canon.accessibleName,
+          selector: canon.selector,
+          hierarchicalContext: canon.hierarchicalContext || a.landmark.hierarchicalContext || null,
+          featureId: feat.id || null,   // explicit catalog link (future exact-dedup + traceability)
+        },
+      };
+    });
+    // Canonicalize the MINT url to the grounded Locale url (no query/hash noise): mintLandmarkUid also hashes the
+    // localeUrl, so two demos of the same element on /jobs?q=a vs /jobs?q=b would otherwise fork the uid. `localeUrl`
+    // is consumed only by uid minting (buildLandmarkRecords / landmarkRefActions); the phase's `url`/`to` stay raw
+    // for postcondition derivation.
+    return { ...ph, localeUrl: loc.url || ph.url, actions };
+  });
+  return { phases: out, reconciled, total };
 }

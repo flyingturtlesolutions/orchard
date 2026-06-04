@@ -5622,6 +5622,9 @@ function _obsSend(domKind, el, rawValue) {
   const payload = { domKind, target, value, sensitive, ts: Date.now(), url: location.href, uid: `${_obsClientSeq++}-${Date.now()}` };
   if (domKind === 'click' || domKind === 'keypress') _obsBufferAction(payload);   // navigating-prone → survive a page unload
   try { chrome.runtime.sendMessage({ type: 'INTERACTION_RECORD', payload }); } catch { /* */ }
+  // OBS — after an unambiguous commit (Enter, native submit, or a commit-named button) that may swap results in
+  // place, watch for the SPA boundary so an XHR filter/search is segmented and gets an in-place postcondition.
+  if (domKind === 'keypress' || domKind === 'submit' || (domKind === 'click' && _obsIsCommitClick(el, target))) _obsArmSwapWatch();
 }
 const _obsOnClick  = (e) => { try { const el = _obsResolveClickTarget(e.target); if (el) _obsSend('click', el, null); } catch { /* */ } };
 const _obsOnInput  = (e) => { try { const el = e.target; const tag = el && el.tagName; if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') _obsSend(tag === 'SELECT' ? 'change' : 'input', el, el.value); } catch { /* */ } };
@@ -5647,6 +5650,73 @@ const _obsOnScroll = () => {
     try { chrome.runtime.sendMessage({ type: 'INTERACTION_RECORD', payload: { domKind: 'scroll', target: { scrollY: Math.round(window.scrollY || 0) }, ts: Date.now(), url: location.href } }); } catch { /* */ }
   }, 450);
 };
+// OBS (v2.74.763) — IN-PLACE (SPA) boundary detector. A search/filter that commits via XHR (no navigation) still
+// changes the page state — that IS the logical Fragment boundary (the SPA half of the page-state-change rule).
+// After a commit-prone action that does NOT navigate, watch the DOM settle and emit ONE `state_change` marker
+// carrying the swapped-in container's selector, so the segmenter splits here and the persisted Fragment gets a
+// `selector_present` postcondition (the in-place analog of url_matches). Conservative: armed only for unambiguous
+// commits (Enter / native submit / a commit-named button), fires only on a SIGNIFICANT swap, and bails if a
+// navigation happened first (the nav boundary already split there).
+let _obsSwapObs = null, _obsSwapSettleT = null, _obsSwapCapT = null, _obsSwapUrl = '', _obsSwapAdds = null;
+const _OBS_SWAP_MIN_NODES = 5;   // a results swap adds many nodes; a spinner / class-toggle / focus ring does not
+function _obsArmSwapWatch() {
+  if (!_obsRec.active || typeof MutationObserver !== 'function' || !document.body) return;
+  _obsDisarmSwapWatch();
+  _obsSwapUrl = location.href;
+  _obsSwapAdds = new Map();   // candidate container element → count of added descendant elements
+  try {
+    _obsSwapObs = new MutationObserver((records) => {
+      for (const r of records) {
+        if (!r.addedNodes) continue;
+        for (const n of r.addedNodes) {
+          if (!n || n.nodeType !== 1) continue;
+          const host = (r.target && r.target.nodeType === 1) ? r.target : (n.parentElement || null);
+          if (!host || host === document.documentElement || host === document.body) continue;
+          const cnt = 1 + (n.querySelectorAll ? n.querySelectorAll('*').length : 0);
+          _obsSwapAdds.set(host, (_obsSwapAdds.get(host) || 0) + cnt);
+        }
+      }
+      if (_obsSwapSettleT) clearTimeout(_obsSwapSettleT);
+      _obsSwapSettleT = setTimeout(_obsFireSwap, 500);   // settle: mutations stopped for 500ms
+    });
+    _obsSwapObs.observe(document.body, { childList: true, subtree: true });
+    _obsSwapCapT = setTimeout(_obsFireSwap, 3000);       // hard cap: fire with whatever accumulated
+  } catch { _obsDisarmSwapWatch(); }
+}
+function _obsFireSwap() {
+  const adds = _obsSwapAdds, armedUrl = _obsSwapUrl;
+  _obsDisarmSwapWatch();
+  if (!_obsRec.active || !adds) return;
+  if (location.href !== armedUrl) return;   // a navigation already split here → not an in-place boundary
+  let best = null, bestCnt = 0;
+  for (const [el, cnt] of adds) { if (cnt > bestCnt && el && el.isConnected) { best = el; bestCnt = cnt; } }
+  if (!best || bestCnt < _OBS_SWAP_MIN_NODES) return;   // trivial mutation, not a content swap
+  let selector = null; try { selector = computeUniqueSelector(best); } catch { /* */ }
+  if (!selector) return;
+  try { chrome.runtime.sendMessage({ type: 'INTERACTION_RECORD', payload: { domKind: 'state_change', target: { selector }, ts: Date.now(), url: location.href } }); } catch { /* */ }
+}
+function _obsDisarmSwapWatch() {
+  if (_obsSwapSettleT) { clearTimeout(_obsSwapSettleT); _obsSwapSettleT = null; }
+  if (_obsSwapCapT) { clearTimeout(_obsSwapCapT); _obsSwapCapT = null; }
+  if (_obsSwapObs) { try { _obsSwapObs.disconnect(); } catch { /* */ } _obsSwapObs = null; }
+  _obsSwapAdds = null; _obsSwapUrl = '';
+}
+// A click is a COMMIT (worth watching for an in-place swap) when it's a submit-typed control or a button whose
+// label reads like "search / apply / update / filter / show results …". This keeps dropdown-open and option
+// clicks (which add option nodes and would otherwise look like a swap) from minting spurious boundaries.
+function _obsIsCommitClick(el, target) {
+  try {
+    const type = String((target && target.type) || '').toLowerCase();
+    if (type === 'submit') return true;
+    const role = String((target && target.role) || '').toLowerCase();
+    const tag = String((el && el.tagName) || '');
+    const isButton = role === 'button' || tag === 'BUTTON' || (tag === 'INPUT' && /^(submit|button)$/.test(type))
+      || !!(el && el.closest && el.closest('button,[role="button"],[type="submit"]'));
+    if (!isButton) return false;
+    const name = String((target && (target.accessibleName || target.text)) || '').toLowerCase();
+    return /\b(search|appl(y|ied)|update|filter|go|done|save|submit|results|find|refine)\b/.test(name);
+  } catch { return false; }
+}
 function _obsStart() {
   if (_obsRec.active) return;
   _obsRec = { active: true };
@@ -5662,6 +5732,7 @@ function _obsStop() {
   _obsRec.active = false;
   try { sessionStorage.removeItem(_OBS_BUF_KEY); } catch { /* */ }   // don't leak a buffer into a later session
   if (_obsScrollT) { clearTimeout(_obsScrollT); _obsScrollT = null; }
+  _obsDisarmSwapWatch();   // tear down any pending in-place swap watcher
   document.removeEventListener('click', _obsOnClick, true);
   document.removeEventListener('input', _obsOnInput, true);
   document.removeEventListener('change', _obsOnInput, true);

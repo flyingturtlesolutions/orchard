@@ -19,7 +19,8 @@ import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspec
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
-import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved, describeTraceInput } from '../../Core/observedSegment.js';
+import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved, describeTraceInput, derivePhasePostcondition, reconcileObservedLandmarks } from '../../Core/observedSegment.js';
+import { listLocales } from '../../Services/Storage/GroundAssetStore.js';   // OBS (v2.74.764) — reconcile observed landmarks to grounded Locale features
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A
 import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/orchFeedback.js';   // ORCH-FB — corrective actions
 import { feedbackExamples } from '../../Core/feedbackLearn.js';   // ORCH-FB-2 — relevance shaping from feedback history
@@ -52,6 +53,28 @@ function _observeMessageForExtract(ex) {
     case 'scalar':    return { type: 'OBSERVE_SCALAR',   payload: { target: ex.target, extract: ex.extract ?? { kind: 'text' } } };
     default:          return null;
   }
+}
+
+// T1-as-first-class (v2.74.762) — the SINGLE persist path for an accepted op, shared by BOTH the SG-trial accept
+// (ACCEPT_SG_TRIAL[tier2]) and the demonstration accept (DERIVE_OBSERVED_CAPABILITY), so the taxonomy guard
+// (a single page-state-bounded phase → a bare Fragment; ≥2 → a Strategy) and the save logic can't drift between
+// them. Mints the ids, shapes the records via the pure prepareTier1or2Records, saves the fragment(s) + (only for
+// ≥2 phases) the strategy. Returns the ids the caller needs to build the sgCapability (fragmentId vs strategyId).
+async function persistTier1or2(phases, { groundId, name, goal, params = null, aliases = null, fragmentName = null, fragmentDescription = null } = {}) {
+  const strategyId = crypto.randomUUID();
+  const fragmentIds = (Array.isArray(phases) ? phases : []).map(() => crypto.randomUUID());
+  const prep = CapabilitySynth.prepareTier1or2Records(phases, {
+    groundId, strategyId, fragmentIds, name, goal,
+    ...(params ? { params } : {}), ...(aliases ? { aliases } : {}),
+    ...(fragmentName ? { fragmentName } : {}), ...(fragmentDescription ? { fragmentDescription } : {}),
+  });
+  if (!prep.ok) return { ok: false, reason: prep.error };
+  for (const f of prep.fragments) { try { await StorageManager.saveFragment(f); } catch (e) { Logger.warn('background', `persistTier1or2 saveFragment failed: ${e.message}`); } }
+  if (!prep.isSingleT1) {
+    try { await StorageManager.saveStrategy(prep.strategy); }
+    catch (e) { return { ok: false, reason: `strategy save failed: ${e.message}`, fatal: true }; }
+  }
+  return { ok: true, isSingleT1: prep.isSingleT1, fragmentIds, strategyId: prep.isSingleT1 ? null : strategyId, fragmentCount: prep.fragments.length };
 }
 
 /**
@@ -265,20 +288,12 @@ export function createSgMessageHandlers(ctx) {
             if (synth && Array.isArray(synth.actions) && synth.actions.length) phases.push({ label: node.label, actions: synth.actions, postcondition: node.postcondition || null });
           }
           if (!phases.length) { sendResponse({ success: true, accepted: false, reason: 'no runnable phases to promote' }); return; }
-          // T1-as-first-class taxonomy fix — a fragment is gated by page-state change, so each segmented phase IS a
-          // T1 Fragment. ≥2 phases chain into a Strategy (T2); a SINGLE phase is saved AS the Fragment, with NO
-          // Strategy wrapper (the cap points at fragmentId, not strategyId). Replay runs a bare fragment by wrapping
-          // it at run time (REPLAY_SG_CAPABILITY fragment path); listCapabilities surfaces it standalone.
-          const isSingleT1 = phases.length === 1;
-          const strategyId = crypto.randomUUID();
-          const fragmentIds = phases.map(() => crypto.randomUUID());
-          const recs = CapabilitySynth.buildTier2CapabilityRecords(phases, { groundId, strategyId, fragmentIds, name: draft.intent, goal: draft.intent });
-          if (!recs) { sendResponse({ success: true, accepted: false, reason: 'could not assemble tier-2 capability records' }); return; }
-          for (const f of recs.fragments) { try { await StorageManager.saveFragment(f); } catch (e) { Logger.warn('background', `ACCEPT_SG_TRIAL[tier2] saveFragment failed: ${e.message}`); } }
-          if (!isSingleT1) {
-            try { await StorageManager.saveStrategy(recs.strategy); }
-            catch (e) { Logger.error('background', `ACCEPT_SG_TRIAL[tier2] saveStrategy failed: ${e.message}`); sendResponse({ success: false, error: `strategy save failed: ${e.message}` }); return; }
-          }
+          // T1-as-first-class — the shared persist path applies the taxonomy guard (single page-state-bounded phase
+          // → a bare Fragment, no Strategy wrapper; ≥2 → a Strategy). Replay runs a bare fragment via the run-time
+          // wrapper; listCapabilities surfaces it standalone.
+          const persisted = await persistTier1or2(phases, { groundId, name: draft.intent, goal: draft.intent });
+          if (!persisted.ok) { sendResponse(persisted.fatal ? { success: false, error: persisted.reason } : { success: true, accepted: false, reason: persisted.reason }); return; }
+          const { isSingleT1, strategyId, fragmentIds, fragmentCount } = persisted;
           const capability = {
             id: crypto.randomUUID(), groundId, intent: draft.intent, shape: isSingleT1 ? 'tier1' : 'tier2',
             localeUrl: draft.localeUrl || '',
@@ -288,10 +303,10 @@ export function createSgMessageHandlers(ctx) {
             trial: { score: draft.tier2Score?.score ?? null, verdict: draft.tier2Score?.verdict ?? null, trialRef: null },
           };
           await ctx.writeSgCapability(groundId, capability);
-          try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: String(draft.intent).slice(0, 120) }, detail: { capabilityId: capability.id, ...(isSingleT1 ? { fragmentId: fragmentIds[0] } : { strategyId }), fragments: recs.fragments.length, shape: capability.shape, score: capability.trial.score } })]); } catch { /* */ }
+          try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: String(draft.intent).slice(0, 120) }, detail: { capabilityId: capability.id, ...(isSingleT1 ? { fragmentId: fragmentIds[0] } : { strategyId }), fragments: fragmentCount, shape: capability.shape, score: capability.trial.score } })]); } catch { /* */ }
           await ctx.clearSgDraft(groundId);
-          Logger.info('background', `ACCEPT_SG_TRIAL[${isSingleT1 ? 'tier1' : 'tier2'}] — promoted ${capability.id} → ${isSingleT1 ? `bare Fragment ${fragmentIds[0]} (no Strategy wrapper)` : `strategy ${strategyId} chaining ${recs.fragments.length} fragment(s)`} [${capability.phases.join(' → ')}]`);
-          sendResponse({ success: true, accepted: true, capability, fragmentCount: recs.fragments.length, tier2: !isSingleT1 });
+          Logger.info('background', `ACCEPT_SG_TRIAL[${isSingleT1 ? 'tier1' : 'tier2'}] — promoted ${capability.id} → ${isSingleT1 ? `bare Fragment ${fragmentIds[0]} (no Strategy wrapper)` : `strategy ${strategyId} chaining ${fragmentCount} fragment(s)`} [${capability.phases.join(' → ')}]`);
+          sendResponse({ success: true, accepted: true, capability, fragmentCount, tier2: !isSingleT1 });
           return;
         }
         const built = buildAcceptance({
@@ -357,6 +372,17 @@ export function createSgMessageHandlers(ctx) {
         const op = segmentTrace(coalesce(trace));
         const phasesRaw = opToPhases(op).filter((p) => Array.isArray(p.actions) && p.actions.length);
         if (!phasesRaw.length) { sendResponse({ success: false, error: 'no runnable steps in the demonstration' }); return; }
+        // OBS (v2.74.764) — RECONCILE-BEFORE-MINT: the observed path is the only authoring path that sources
+        // landmark identity from the RAW demo (not the grounded Locale), so a selector that differs from the one
+        // Explore catalogued mints a DUPLICATE landmark for the same element. Adopt the matching Locale feature's
+        // canonical identity first (resolve-by-reuse, PB-2, applied to the demonstration path) so downstream uid
+        // minting collides with the catalog instead of forking. Best-effort: no Locale → unchanged (no regression).
+        let reconLocales = [];
+        try { reconLocales = (await listLocales(groundId)).map((e) => ({ url: e.url, features: e.model && e.model.features })); }
+        catch (e) { Logger.warn('background', `DERIVE_OBSERVED listLocales failed: ${e.message}`); }
+        const recon = reconcileObservedLandmarks(phasesRaw, reconLocales);
+        if (recon.total) Logger.info('background', `DERIVE_OBSERVED — reconciled ${recon.reconciled}/${recon.total} demonstrated landmark(s) to grounded Locale features`);
+        const phasesGrounded = recon.phases;
         const params = deriveObservedParams(op);   // OBS-4 — reusable param schema (typed fields + option choices)
         // OBS-3b — DERIVE DURABLE LANDMARKS from the demonstrated elements (your step 3): each step carries an
         // inline landmark (role + accessibleName + hierarchicalContext + selector); mint a per-Ground Landmark
@@ -364,11 +390,14 @@ export function createSgMessageHandlers(ctx) {
         // landmark-backed (registry recovery), NOT raw selectors — same shape the NL-path ACCEPT produces.
         // Per-page UIDs (mintLandmarkUid uses the phase's url), since a demonstration spans pages.
         const landmarkRecords = []; const seenUid = new Set();
-        const phases = phasesRaw.map((p) => {
+        const phases = phasesGrounded.map((p) => {
+          // OBS (v2.74.764) — mint uids against the grounded Locale url when this phase reconciled to one (no query
+          // noise → stable, catalog-aligned uids); fall back to the raw phase url otherwise.
+          const mintUrl = p.localeUrl || p.url;
           const rolesLike = p.actions.filter((a) => a.landmark).map((a) => ({ role: a.landmark.accessibleName, landmark: a.landmark }));
           const profBySel = new Map();   // selector → the record-time profile captured by the recorder
           for (const a of p.actions) if (a.landmark && a.landmark.selector) profBySel.set(a.landmark.selector, a.landmark);
-          for (const { uid, record } of buildLandmarkRecords({ roles: rolesLike, groundId, localeUrl: p.url })) {
+          for (const { uid, record } of buildLandmarkRecords({ roles: rolesLike, groundId, localeUrl: mintUrl })) {
             if (seenUid.has(uid)) continue;
             seenUid.add(uid);
             // OBS-3b/#3 — populate the record from the record-time identity (the demo can't be re-profiled).
@@ -378,7 +407,7 @@ export function createSgMessageHandlers(ctx) {
             record.lifecycle = 'verified'; record.verifiedBy = 'demonstration'; record.verifiedAt = Date.now(); record.source = 'observed';
             landmarkRecords.push(record);
           }
-          return { label: p.label, url: p.url, to: p.to, actions: landmarkRefActions(p.actions, groundId, p.url) };
+          return { label: p.label, url: p.url, to: p.to, settleSelector: p.settleSelector || '', actions: landmarkRefActions(p.actions, groundId, mintUrl) };
         });
         for (const rec of landmarkRecords) { try { await StorageManager.saveLandmark(rec); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED saveLandmark failed: ${e.message}`); } }
         // OBS-4b — PARAMETERIZE first (so the description + records read the TEMPLATED structure): rewrite each
@@ -386,14 +415,12 @@ export function createSgMessageHandlers(ctx) {
         // demonstrated value rides along as the param default, so a no-override replay reproduces the demo.
         const paramz = parameterizeObserved(phases, params);
         const runPhases = paramz.phases;
-        // SG-T2 (v2.74.761) — a NAVIGATING demo phase's reliable success signal is its destination PATH (the next
-        // page it reached). Derive a `url_matches` postcondition from it so the persisted Fragment asserts that on
-        // replay — the structural floor can't see a result region that lives on the destination page. buildTier2-
-        // CapabilityRecords carries phase.postcondition → fragment.postconditions (array shape).
-        for (const rp of runPhases) {
-          if (!rp || !rp.to || !rp.url || rp.to === rp.url) continue;
-          try { const navPath = new URL(rp.to).pathname; if (navPath && navPath !== '/') rp.postcondition = { match: 'all', conditions: [{ type: 'url_matches', pattern: navPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }], source: 'url-nav' }; } catch { /* */ }
-        }
+        // SG-T2 (v2.74.761) / OBS (v2.74.763) — derive each phase's success postcondition from its page-state
+        // boundary (the signal the structural floor often can't see): a NAVIGATION → `url_matches` on the
+        // destination path; an IN-PLACE SPA swap → `selector_present` on the swapped-in container. One pure rule
+        // (derivePhasePostcondition) so nav and in-place can't drift. buildTier2CapabilityRecords carries
+        // phase.postcondition → fragment.postconditions (array shape).
+        for (const rp of runPhases) { const pc = derivePhasePostcondition(rp); if (pc) rp.postcondition = pc; }
         const namedParams = paramz.params;
         // ORCH-D — describe FROM the structure (phases of step-kinds + params with example values + vocab), not
         // a loose transcript: a faithful projection + seed aliases. Heuristic fallback so it never blocks on LLM.
@@ -415,19 +442,11 @@ export function createSgMessageHandlers(ctx) {
         // T1-as-first-class taxonomy fix — a demonstration that segments to a SINGLE page-state-bounded phase is
         // one Fragment, NOT a Strategy (same rule as the SG-trial accept). ≥2 phases still chain into a Strategy.
         // The lone Fragment IS the capability — give it the LLM-polished name/description (not "<label> — steps").
-        // The sgCapability carries the aliases either way, so the chat matcher is unaffected.
-        const isSingleT1 = runPhases.length === 1;
-        const strategyId = crypto.randomUUID();
-        const fragmentIds = runPhases.map(() => crypto.randomUUID());
-        const recs = CapabilitySynth.buildTier2CapabilityRecords(runPhases, { groundId, strategyId, fragmentIds, name: capName, goal: capName, params: namedParams });
-        if (!recs) { sendResponse({ success: false, error: 'could not assemble capability records' }); return; }
-        if (isSingleT1) { recs.fragments[0].name = capName.slice(0, 80); recs.fragments[0].description = capDescription; }
-        else if (seedAliases.length) recs.strategy.aliases = seedAliases.slice();   // ORCH-D — strategy carries them too
-        for (const f of recs.fragments) { try { await StorageManager.saveFragment(f); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED saveFragment failed: ${e.message}`); } }
-        if (!isSingleT1) {
-          try { await StorageManager.saveStrategy(recs.strategy); }
-          catch (e) { Logger.error('background', `DERIVE_OBSERVED saveStrategy failed: ${e.message}`); sendResponse({ success: false, error: `strategy save failed: ${e.message}` }); return; }
-        }
+        // The sgCapability carries the aliases either way, so the chat matcher is unaffected. Shared persist path
+        // (persistTier1or2) applies the same taxonomy guard + record shaping as the SG-trial accept.
+        const persisted = await persistTier1or2(runPhases, { groundId, name: capName, goal: capName, params: namedParams, aliases: seedAliases, fragmentName: capName, fragmentDescription: capDescription });
+        if (!persisted.ok) { sendResponse({ success: false, error: persisted.reason }); return; }
+        const { isSingleT1, strategyId, fragmentIds, fragmentCount } = persisted;
         const capability = {
           id: crypto.randomUUID(), groundId, intent: capName, description: capDescription, shape: 'observed', source: 'observed',
           localeUrl, perspectiveId: perspective.id,
@@ -436,11 +455,11 @@ export function createSgMessageHandlers(ctx) {
           createdAt: Date.now(), trial: { score: null, verdict: 'observed', trialRef: null },
         };
         await ctx.writeSgCapability(groundId, capability);
-        try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: capName.slice(0, 120) }, detail: { capabilityId: capability.id, perspectiveId: perspective.id, strategyId, fragments: recs.fragments.length, landmarks: landmarkRecords.length, shape: 'observed' } })]); } catch { /* */ }
+        try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: capName.slice(0, 120) }, detail: { capabilityId: capability.id, perspectiveId: perspective.id, strategyId, fragments: fragmentCount, landmarks: landmarkRecords.length, shape: 'observed' } })]); } catch { /* */ }
         try { await ctx.broadcastStorageChanged('perspective', perspective.id, 'saved'); } catch { /* */ }
         const tmplCount = namedParams.filter((p) => p.used).length;
-        Logger.info('background', `DERIVE_OBSERVED_CAPABILITY — "${capName}" ${capability.id} → perspective ${perspective.id} + ${isSingleT1 ? `bare Fragment ${fragmentIds[0]} (no Strategy wrapper)` : `strategy ${strategyId} chaining ${recs.fragments.length} fragment(s)`} + ${landmarkRecords.length} landmark(s) + ${namedParams.length} param(s) (${tmplCount} templated for re-run) [${capability.phases.join(' → ')}]`);
-        sendResponse({ success: true, capability, perspectiveId: perspective.id, fragmentCount: recs.fragments.length, landmarkCount: landmarkRecords.length, paramCount: namedParams.length });
+        Logger.info('background', `DERIVE_OBSERVED_CAPABILITY — "${capName}" ${capability.id} → perspective ${perspective.id} + ${isSingleT1 ? `bare Fragment ${fragmentIds[0]} (no Strategy wrapper)` : `strategy ${strategyId} chaining ${fragmentCount} fragment(s)`} + ${landmarkRecords.length} landmark(s) + ${namedParams.length} param(s) (${tmplCount} templated for re-run) [${capability.phases.join(' → ')}]`);
+        sendResponse({ success: true, capability, perspectiveId: perspective.id, fragmentCount, landmarkCount: landmarkRecords.length, paramCount: namedParams.length });
       } catch (err) {
         Logger.error('background', `DERIVE_OBSERVED_CAPABILITY failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });

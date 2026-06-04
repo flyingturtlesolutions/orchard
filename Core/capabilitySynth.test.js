@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildTier2CapabilityRecords, buildCapabilityRecords, wrapFragmentAsStrategy, collectReferencedPrimitiveIds } from './capabilitySynth.js';
+import { buildTier2CapabilityRecords, buildCapabilityRecords, wrapFragmentAsStrategy, collectReferencedPrimitiveIds, prepareTier1or2Records } from './capabilitySynth.js';
 
 const phases = [
   { label: 'Initiate job search', actions: [{ action: 'TYPE', selector: '#q', value: 'test' }, { action: 'CLICK', selector: '#go' }] },
@@ -87,6 +87,24 @@ describe('buildTier2CapabilityRecords — synthesis quality: description as inte
     assert.equal(waits.length, 3, 'one WAIT per interactive action (2 TYPE + 1 CLICK)');
     assert.ok(waits.every((w) => Number(w.value) > 0 && Number(w.jitter) > 0), 'each WAIT carries base + jitter (runtime randomizes)');
     assert.ok(acts.some((a) => a.action === 'SCROLL_TO'), 'SCROLL_TO reach-normalizers are preserved');
+  });
+
+  it('prepareTier1or2Records — ONE phase → a bare Fragment (no Strategy), with name/description override', () => {
+    const r = prepareTier1or2Records([searchPhase], { groundId: 'g', strategyId: 's', fragmentIds: ['f1'], name: 'x', goal: 'x', fragmentName: 'Search jobs by title and location', fragmentDescription: 'Find roles by keyword + place' });
+    assert.equal(r.ok, true);
+    assert.equal(r.isSingleT1, true);
+    assert.equal(r.strategy, null, 'no Strategy wrapper for a single T1');
+    assert.equal(r.fragments.length, 1);
+    assert.equal(r.fragments[0].name, 'Search jobs by title and location', 'the lone Fragment gets the polished name');
+    assert.equal(r.fragments[0].description, 'Find roles by keyword + place');
+  });
+
+  it('prepareTier1or2Records — TWO phases → a Strategy chaining them, carrying the aliases', () => {
+    const r = prepareTier1or2Records([searchPhase, filterPhase], { groundId: 'g', strategyId: 's', fragmentIds: ['f1', 'f2'], name: 'x', goal: 'x', aliases: ['find jobs', 'look for roles'] });
+    assert.equal(r.isSingleT1, false);
+    assert.ok(r.strategy, 'a Strategy is produced for ≥2 phases');
+    assert.deepEqual(r.strategy.aliases, ['find jobs', 'look for roles']);
+    assert.equal(r.strategy.fragmentSteps.length, 2);
   });
 
   it('a CLICK with no landmark name (landmarkRef only) → a readable selector hint, not "the control"', () => {
