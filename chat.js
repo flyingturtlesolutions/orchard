@@ -1249,7 +1249,21 @@ function _orchOfferSaveCompound(msg, { tabId, groundId, ask, steps, plan = null 
   bar.appendChild(_mkBtn(label, async () => {
     bar.remove();
     const r = await _orchReq('ACCEPT_COMPOUND', { tabId, groundId, ask, steps: usable, ...(cf && plan ? { plan } : {}) });
-    appendMessage({ role: 'assistant', body: (r && r.success && r.capability) ? `Saved — next time “${ask}” runs in one step.` : `Couldn’t save${r && r.error ? ` — ${r.error}` : ''}.` });
+    if (!(r && r.success && r.capability)) { appendMessage({ role: 'assistant', body: `Couldn’t save${r && r.error ? ` — ${r.error}` : ''}.` }); return; }
+    // CONVERGE — a control-flow composite ALSO promotes to a CANONICAL Strategy: Studio-visible, ParamForm-
+    // launchable, run by the one ExecutionEngine. Best-effort + additive — a promote miss (visual condition,
+    // unresolved leaf) leaves the chat composite exactly as-is (it still runs via the ORCH interpreter).
+    let extra = '';
+    if (r.capability.controlFlow && r.capability.id) {
+      try {
+        const p = await _orchReq('PROMOTE_COMPOSITE_STRATEGY', { tabId, groundId, capabilityId: r.capability.id });
+        if (p && p.success && p.promoted && !p.alreadyPromoted) {
+          const ps = (Array.isArray(p.params) ? p.params : []).map((x) => x && x.name).filter(Boolean);
+          extra = `\n\n📚 Also saved as a Strategy — review & launch it in Studio${ps.length ? ` (${ps.length} param${ps.length > 1 ? 's' : ''}: ${ps.join(', ')})` : ''}.`;
+        }
+      } catch { /* promote is best-effort; the composite still runs regardless */ }
+    }
+    appendMessage({ role: 'assistant', body: `Saved — next time “${ask}” runs in one step.${extra}` });
   }));
 }
 
