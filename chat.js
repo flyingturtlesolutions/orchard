@@ -891,6 +891,10 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan }) {
         : (step.fixed ? { fixed: true } : {});
       const res = await _orchReq('RUN_OBSERVATION', { tabId, groundId, capabilityId: step.capabilityId, ...override });
       const ok = !!(res && res.success !== false && res.ok !== false);
+      // FAIL-SAFE gate condition: an `optional` read (a gate's condition) that can't read anything means "nothing
+      // found" — return an EMPTY result (count 0) so the predicate is false and the gate stays CLOSED, rather than
+      // aborting the plan. (A condition you can't observe is NOT a met condition — e.g. a zero-results search.)
+      if (!ok && step.optional) return { ok: true, value: '', items: [], empty: true };
       // Carry items (a list/count condition observation) so a downstream predicate analysis can test the real set.
       return { ok, value: ok ? String(res.value || '').trim() : null, items: (res && Array.isArray(res.items)) ? res.items : undefined, error: res && (res.reason || res.error) };
     },

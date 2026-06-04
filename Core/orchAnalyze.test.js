@@ -59,6 +59,16 @@ describe('orchAnalyze — the pure predicate floor (ORCH-A, predicate → gate)'
     assert.equal(evaluatePredicate({ op: 'none' }, { items: ['x'] }), false);
   });
 
+  it('evaluatePredicate: a zero-count TEXT ("0 jobs" / "No results") is 0 — the gate STAYS CLOSED (the bug)', () => {
+    assert.equal(evaluatePredicate({ op: 'exists' }, { value: '0 jobs' }), false, '"0 jobs" → 0 present, not 1');
+    assert.equal(evaluatePredicate({ op: 'exists' }, { value: 'No results found' }), false);
+    assert.equal(evaluatePredicate({ op: 'exists' }, { value: 'no matching jobs' }), false);
+    assert.equal(evaluatePredicate({ op: 'none' }, { value: '0 jobs' }), true, 'zero results → "none" holds');
+    assert.equal(evaluatePredicate({ op: 'exists' }, { value: '31 jobs' }), true, 'a real count still reads present');
+    assert.equal(evaluatePredicate({ op: 'exists' }, { value: '1,234 results' }), true);
+    assert.equal(evaluatePredicate({ op: 'exists' }, { value: 'Software Engineer\nNurse' }), true, 'a 2-row list → 2');
+  });
+
   it('evaluatePredicate: a VALUE threshold parses the observed value money-aware (target defaults to value)', () => {
     assert.equal(evaluatePredicate({ op: 'lt', value: 40000 }, { value: '$27.36 an hour' }), true, '27.36 < 40000');
     assert.equal(evaluatePredicate({ op: 'lt', value: 40 }, { value: '$46.32 - $74.81 an hour' }), false, 'first number 46.32 ≮ 40');

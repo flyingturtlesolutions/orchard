@@ -17,7 +17,7 @@
 // PURE: no DOM / chrome / LLM. Deterministic.
 //
 // @module Core/orchAnalyze
-// @version 2.74.731
+// @version 2.74.739
 
 /** The predicate operations over an observation's {value, items, count}. */
 export const PREDICATE_OPS = Object.freeze(['exists', 'none', 'gt', 'gte', 'lt', 'lte', 'eq', 'contains', 'not_contains']);
@@ -89,13 +89,19 @@ export function conditionIsUnless(ask) { return _UNLESS.test(String(ask || ''));
 // ── evaluate a predicate over an observation result ──────────────────────────────────────────────────────────
 function _countFromValue(value) {
   if (value == null) return 0;
-  if (typeof value === 'number') return value > 0 || value < 0 ? value : 0;
+  if (typeof value === 'number') return Number.isFinite(value) ? Math.trunc(value) : 0;
   if (Array.isArray(value)) return value.length;
   const s = String(value).trim();
   if (!s) return 0;
-  if (/^-?\d+$/.test(s)) return parseInt(s, 10);            // a bare integer string IS the count
   const lines = s.split('\n').map((x) => x.trim()).filter(Boolean);
-  return lines.length || 1;                                  // multiline → row count; any non-empty text → 1
+  if (lines.length > 1) return lines.length;                 // a multiline blob → row count (a joined list)
+  // A single line that STARTS with a number IS the count — "0 jobs" → 0, "31 results" → 31, "1,234 matches" → 1234.
+  // CRITICAL: a zero-results page reads "0 jobs" / "No results", which MUST count as 0 so an existence gate STAYS
+  // CLOSED (the bug: "0 jobs" was counted as 1 → exists → the gated action ran on an empty page).
+  const m = s.match(/^-?\d[\d,]*/);
+  if (m) return parseInt(m[0].replace(/,/g, ''), 10);
+  if (/^(no|none|zero|nothing|n\/?a)\b/i.test(s)) return 0;  // "No results", "none found", "no matching jobs" → 0
+  return 1;                                                  // any other single non-empty value → present (1)
 }
 function _count(input) {
   if (!input) return 0;

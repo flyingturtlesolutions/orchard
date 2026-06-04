@@ -15,7 +15,7 @@
 // dogs" stays one clause) and the parts are rejoined with their original text.
 //
 // @module Core/orchChain
-// @version 2.74.733
+// @version 2.74.739
 
 import { planStep, validatePlan } from './orchPlan.js';
 import { parsePredicate, conditionIsUnless, isConditionalAsk, predicateLabel } from './orchAnalyze.js';   // ORCH-A — predicate → gate
@@ -275,7 +275,10 @@ export function liftConditional(steps, ask) {
   // scalar; existence / a COUNT threshold ("more than 10 results") reads the list/count. Fixed ids (no collision
   // among head / observe / gated body steps).
   const valueThreshold = ['gt', 'gte', 'lt', 'lte', 'eq'].includes(spec.op) && spec.target === 'value';
-  const observe = { kind: 'observe', id: 'cond', outputType: valueThreshold ? (cond.outputType || 'scalar') : (cond.outputType === 'list' ? 'list' : 'count'), capabilityId: cond.capabilityId || null, bindings: _bind(cond), intent: cond.intent || '', clause: cond.clause || '' };
+  // `optional` — a gate CONDITION read is FAIL-SAFE: if it can't read (no element on the page, e.g. a zero-results
+  // search), the runtime treats it as "nothing found" (predicate false → the gate stays CLOSED) instead of aborting
+  // the plan or letting the gated action run. A condition you can't observe is NOT a met condition.
+  const observe = { kind: 'observe', id: 'cond', optional: true, outputType: valueThreshold ? (cond.outputType || 'scalar') : (cond.outputType === 'list' ? 'list' : 'count'), capabilityId: cond.capabilityId || null, bindings: _bind(cond), intent: cond.intent || '', clause: cond.clause || '' };
   const analyze = { kind: 'analyze', id: 'pred', over: 'cond', outputType: 'predicate', predicate: spec, intent: predicateLabel(spec), clause: spec.raw };
   const body = gatedSteps.map((s, j) => ({ kind: 'fragment', id: `act${j}`, capabilityId: s.capabilityId || null, bindings: _bind(s), intent: s.intent || '', clause: s.clause || '' }));
   const gate = { kind: 'gate', id: 'gate', over: 'pred', body };
