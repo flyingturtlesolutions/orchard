@@ -194,6 +194,18 @@ export function buildCapabilityRecords(draft, { groundId, fragmentId, strategyId
 // Humanize an UPPER_SNAKE param name into words. SEARCH_JOB_TITLE_KEYWORDS_OR_COMPANY → "search job title keywords or company".
 function _humanizeParam(n) { return String(n || '').toLowerCase().replace(/_/g, ' ').replace(/\s+/g, ' ').trim(); }
 
+// A readable hint for a CLICK target when no landmark name is available (the action carries a landmarkRef instead
+// of an inline landmark, or the control had no accessible name). Recognizes common commit buttons; else humanizes
+// the selector's last id/class token. "button.yosegi-…-primaryButton" → "the primary button".
+function _selectorHint(selector) {
+  const s = String(selector || '');
+  if (/\b(primary|submit|search|find|apply|go|continue|next)\b/i.test(s) || /btn-primary|primaryButton/i.test(s)) return 'the primary button';
+  if (/\bbutton\b|\bbtn\b/i.test(s)) return 'the button';
+  const m = s.match(/[#.]([A-Za-z][\w-]*)\s*$/);
+  if (m) { const w = _humanizeParam(m[1].replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/-/g, '_')); if (w) return `"${w}"`; }
+  return 'the control';
+}
+
 // A readable "expression of intent" for a Fragment — the bare subGoal label (e.g. "Search") plus a plain-language
 // summary of what its actions DO ("enter keywords, enter location, click Find jobs"). Normalizer actions
 // (SCROLL_TO / WAIT / WAIT_FOR / NAVIGATE) are skipped; a {{PARAM}} TYPE reads as its humanized param; a CLICK
@@ -207,7 +219,7 @@ function _describeFragmentActions(label, actions) {
     if (a.action === 'TYPE')          steps.push(`enter ${pm ? _humanizeParam(pm[1]) : (lm ? lm.toLowerCase() : 'a value')}`);
     else if (a.action === 'SELECT')   steps.push(`choose ${pm ? _humanizeParam(pm[1]) : (lm ? lm.toLowerCase() : 'an option')}`);
     else if (a.action === 'SET_FILE') steps.push('attach a file');
-    else if (a.action === 'CLICK')    steps.push(`click ${lm || 'the control'}`);
+    else if (a.action === 'CLICK')    steps.push(`click ${lm || _selectorHint(a.selector)}`);
     else if (a.action === 'KEY')      steps.push(`press ${a.value || 'Enter'}`);
   }
   const base = String(label || '').trim();

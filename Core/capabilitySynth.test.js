@@ -88,6 +88,13 @@ describe('buildTier2CapabilityRecords — synthesis quality: description as inte
     assert.ok(waits.every((w) => Number(w.value) > 0 && Number(w.jitter) > 0), 'each WAIT carries base + jitter (runtime randomizes)');
     assert.ok(acts.some((a) => a.action === 'SCROLL_TO'), 'SCROLL_TO reach-normalizers are preserved');
   });
+
+  it('a CLICK with no landmark name (landmarkRef only) → a readable selector hint, not "the control"', () => {
+    const phase = { label: 'Search', actions: [{ action: 'CLICK', selector: 'button.yosegi-InlineWhatWhere-primaryButton', landmarkRef: { uid: 'lmk_x' } }] };
+    const r = buildTier2CapabilityRecords([phase, filterPhase], { groundId: 'g', strategyId: 's', fragmentIds: ['f1', 'f2'] });
+    assert.match(r.fragments[0].description, /the primary button/, 'recognizes a commit button from the selector');
+    assert.ok(!/the control/.test(r.fragments[0].description));
+  });
 });
 
 describe('wrapFragmentAsStrategy — run a bare T1 Fragment without persisting a Strategy (T1-as-first-class)', () => {

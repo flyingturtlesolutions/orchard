@@ -161,6 +161,23 @@ export function createSgMessageHandlers(ctx) {
             let afterUrl = beforeUrl;
             try { if (liveTab !== null) { const t = await chrome.tabs.get(liveTab); afterUrl = t?.url || beforeUrl; } } catch { /* */ }
             const post = evaluatePostcondition(node.postcondition, { beforeUrl, afterUrl, selectorsPresent: {} });
+            // SG-T2 (v2.74.759) — a NAVIGATING phase has a reliable success signal the structural floor CAN'T see
+            // on the pre-nav locale (the result region lives on the destination page): the destination PATH itself.
+            // Derive a `url_matches` postcondition from it and attach to the op node (which is stashed → carried to
+            // the persisted Fragment), so a search that "reaches its /jobs results page" actually asserts that on
+            // replay instead of having no postcondition at all. Attached AFTER the trial check above, so the trial
+            // verdict stays honest (it isn't graded against a predicate derived from its own result).
+            if (afterUrl && beforeUrl && afterUrl !== beforeUrl) {
+              try {
+                const navPath = new URL(afterUrl).pathname;
+                if (navPath && navPath !== '/') {
+                  const existing = (node.postcondition && Array.isArray(node.postcondition.conditions)) ? node.postcondition.conditions : [];
+                  if (!existing.some((c) => c && c.type === 'url_matches')) {
+                    node.postcondition = { match: 'all', conditions: [...existing, { type: 'url_matches', pattern: navPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }], source: `${(node.postcondition && node.postcondition.source) ? node.postcondition.source + '+' : ''}url-nav` };
+                  }
+                }
+              } catch { /* */ }
+            }
             const passed = trialPassed && (post.checked ? post.held === true : true);
             outcomes.push({ type: 'fragment', label: node.label, passed, ran: !!out?.ran, trialPassed, verdict: out?.trial?.verdict || null, postcondition: post.checked ? { held: post.held, basis: post.basis } : null, score: (out?.trial && typeof out.trial.score === 'number') ? out.trial.score : null, reason: out?.reason || out?.result?.error || null });
             const status = passed ? 'PASS' : (out?.ran ? (trialPassed ? 'INCOMPLETE (steps ran, effect not observed)' : 'fail') : 'not-run');
