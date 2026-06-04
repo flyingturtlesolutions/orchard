@@ -1180,30 +1180,41 @@ function _orchConfirmChain(msg, { tabId, clauses, firstMatch, ask = '' }) {
 }
 
 // Run a decomposed chain JIT: match EACH clause against the page state AT THAT POINT (so a clause on the
-// post-navigation page resolves correctly), REPLAY it, settle, next. A mid-chain MISS/failure pauses and offers
-// to record just that clause. The first clause reuses the match already computed to probe the Ground (no re-LLM).
-async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '' }) {
+// post-navigation page resolves correctly), REPLAY it, settle, next.
+//
+// AUTHOR-AS-YOU-GO (Option 1): a mid-chain MISS or failed run no longer ABANDONS the chain. It offers
+// "● Show me this step"; a successful demo PERFORMS that clause live (so the page is already in its post-state),
+// records it for promotion, and RESUMES the chain from the NEXT clause. So a fully-cold compound becomes a guided
+// sequence — demo, continue, demo, continue — and ends with a runnable, promotable whole. The demonstrated clause
+// is NOT re-run on resume (that would double-apply a toggle like a filter); we trust the demo left the page settled.
+// `startIndex`/`state` carry the resume point + accumulated readouts/ranSteps across demos; the first clause reuses
+// the match already computed to probe the Ground (no re-LLM).
+async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startIndex = 0, state = null }) {
   const total = clauses.length;
-  const readouts = [];
-  const ranSteps = [];   // T2 — the resolved {capabilityId, bindings, kind, clause, intent} per step, for promotion
-  let chainGroundId = null;
-  const _record = (m, clause, kind) => { ranSteps.push({ capabilityId: m.capabilityId, bindings: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {}, kind: kind || (m.candidate && m.candidate.kind) || null, clause: clause.text, intent: (m.candidate && m.candidate.intent) || clause.text }); chainGroundId = m.groundId; };
-  for (let i = 0; i < total; i++) {
+  const st = state || { readouts: [], ranSteps: [], chainGroundId: null };   // T2 — resolved steps for promotion
+  const _record = (m, clause, kind) => { st.ranSteps.push({ capabilityId: m.capabilityId, bindings: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {}, kind: kind || (m.candidate && m.candidate.kind) || null, clause: clause.text, intent: (m.candidate && m.candidate.intent) || clause.text }); st.chainGroundId = m.groundId; };
+  // The demo of clause i performed it live → record the new capability for promotion, then continue from i+1.
+  const _resumeAfterDemo = (i, clause, gid) => (cap) => {
+    if (cap && cap.id) st.ranSteps.push({ capabilityId: cap.id, bindings: {}, kind: cap.kind || null, clause: clause.text, intent: cap.intent || clause.text });
+    if (gid) st.chainGroundId = gid;
+    _orchRunChain(appendMessage({ role: 'assistant', body: '' }), { tabId, clauses, firstMatch: null, ask, startIndex: i + 1, state: st });
+  };
+  for (let i = startIndex; i < total; i++) {
     const clause = clauses[i];
     _setMessageBody(msg, `Step ${i + 1} of ${total}: “${clause.text}”…`);
     const m = (i === 0 && firstMatch) ? firstMatch : await _orchReq('ORCH_MATCH', { tabId, ask: clause.text });
     if (!m || !m.capabilityId || m.decision === 'miss') {
-      _setMessageBody(msg, i > 0
-        ? `Ran ${i} of ${total}. I don’t know how to “${clause.text}” on this page yet.`
-        : `I don’t know how to “${clause.text}” on this page yet.`);
-      _orchOfferRecord(msg, { groundId: m && m.groundId, tabId, ask: clause.text, label: '● Show me this step' });
+      const gid = (m && m.groundId) || st.chainGroundId;
+      if (!gid) { _setMessageBody(msg, `Ran ${i} of ${total}. I don’t know how to “${clause.text}” here, and I don’t have this site mapped to learn it.`); return; }
+      _setMessageBody(msg, `Step ${i + 1} of ${total}: I don’t know how to “${clause.text}” on this page yet — show me this step and I’ll keep going.`);
+      _orchOfferRecord(msg, { groundId: gid, tabId, ask: clause.text, label: '● Show me this step', onAuthored: _resumeAfterDemo(i, clause, gid) });
       return;
     }
     // A READ clause (observation) returns a VALUE — run it through the observation read path, not REPLAY.
     if (m.candidate && m.candidate.kind === 'observation') {
       const val = await _orchReadValue({ tabId, groundId: m.groundId, ask: clause.text, capabilityId: m.capabilityId });
-      if (val == null) { _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t read “${clause.text}” here.`); _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me this step' }); return; }
-      readouts.push(val); _record(m, clause, 'observation');
+      if (val == null) { _setMessageBody(msg, `Step ${i + 1} of ${total}: couldn’t read “${clause.text}” here — show me this step and I’ll keep going.`); _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me this step', onAuthored: _resumeAfterDemo(i, clause, m.groundId) }); return; }
+      st.readouts.push(val); _record(m, clause, 'observation');
       _orchReq('ORCH_RECORD_ALIAS', { groundId: m.groundId, capabilityId: m.capabilityId, phrase: clause.text });
       await new Promise((r) => setTimeout(r, 400));
       continue;
@@ -1211,26 +1222,28 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '' }) {
     const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId: m.groundId, capabilityId: m.capabilityId, paramValues: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {} });
     if (!res || res.success === false || res.ran === false || res.ok === false) {
       const why = (res && (res.error || res.reason)) ? ` — ${res.error || res.reason}` : '';
-      _setMessageBody(msg, `Step ${i + 1} (“${clause.text}”) didn’t run${why}.`);
-      _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me the right way' });
+      _setMessageBody(msg, `Step ${i + 1} (“${clause.text}”) didn’t run${why} — show me the right way and I’ll keep going.`);
+      _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me the right way', onAuthored: _resumeAfterDemo(i, clause, m.groundId) });
       return;
     }
     _record(m, clause);
     _orchReq('ORCH_RECORD_ALIAS', { groundId: m.groundId, capabilityId: m.capabilityId, phrase: clause.text });   // flywheel per clause
     await new Promise((r) => setTimeout(r, 800));   // settle between steps (navigation / render)
   }
-  _setMessageBody(msg, readouts.length ? readouts.join('\n') : `Done — ran all ${total} steps.`);
+  _setMessageBody(msg, st.readouts.length ? st.readouts.join('\n') : `Done — ran all ${total} steps.`);
   // T2 — the whole compound ran cleanly → offer to promote it to a durable composite (cache hit next time).
-  _orchOfferSaveCompound(msg, { tabId, groundId: chainGroundId, ask, steps: ranSteps });
+  _orchOfferSaveCompound(msg, { tabId, groundId: st.chainGroundId, ask, steps: st.ranSteps });
 }
 
 // A "show me" record button (offered on a grounded MISS or after a failed run). No groundId → no-op.
-function _orchOfferRecord(msg, { groundId, tabId, ask, label = '● Show me' }) {
+// `onAuthored` (optional) fires with the derived capability after a successful demo — the chain runner uses it to
+// RESUME a cold compound from the next clause instead of dead-ending at the gap.
+function _orchOfferRecord(msg, { groundId, tabId, ask, label = '● Show me', onAuthored = null }) {
   if (!groundId) return;
   const bar = _orchActionBar(msg);
   const rec = document.createElement('button'); rec.className = 'btn-secondary tiny'; rec.type = 'button'; rec.textContent = label;
   bar.appendChild(rec);
-  rec.addEventListener('click', () => { bar.remove(); _orchRecordFlow(msg, { groundId, tabId, ask }); });
+  rec.addEventListener('click', () => { bar.remove(); _orchRecordFlow(msg, { groundId, tabId, ask, onAuthored }); });
 }
 
 // ORCH-X T2 — after a compound ask runs successfully, offer to PROMOTE it into a durable composite (a T2
@@ -1470,7 +1483,7 @@ async function _tryGroundedTurn(text) {
 
 // ORCH-C — record a demonstration from chat (MISS → "show me"), reusing the OBS recorder handlers, then derive
 // a durable capability. On success, seeds the original ask as an alias so the next ask HITS. NO LLM grounding.
-async function _orchRecordFlow(msg, { groundId, tabId, ask }) {
+async function _orchRecordFlow(msg, { groundId, tabId, ask, onAuthored = null }) {
   const start = await _orchReq('RECORD_START_SESSION', { tabId });
   if (!start || start.success === false) { _setMessageBody(msg, 'Couldn’t start recording on this page.'); return; }
   _setMessageBody(msg, 'Recording — do the task on the page, then click Stop & save.');
@@ -1497,8 +1510,15 @@ async function _orchRecordFlow(msg, { groundId, tabId, ask }) {
     if (!trace || !trace.length) { _setMessageBody(msg, 'I didn’t capture any actions — try again.'); return; }
     const res = await _orchReq('DERIVE_OBSERVED_CAPABILITY', { groundId, trace });
     if (res && res.success && res.capability) {
-      _setMessageBody(msg, `Got it — I learned “${res.capability.intent}”. Ask me again and I’ll do it.`);
       _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId: res.capability.id, phrase: ask });   // so the next ask hits
+      // When a caller wants to CONTINUE after the demo (the chain runner resuming a cold compound), hand back the
+      // derived capability instead of the dead-end "ask me again" copy — the chain picks up from the next clause.
+      if (typeof onAuthored === 'function') {
+        _setMessageBody(msg, `Got it — learned “${res.capability.intent}”. Continuing…`);
+        onAuthored(res.capability);
+      } else {
+        _setMessageBody(msg, `Got it — I learned “${res.capability.intent}”. Ask me again and I’ll do it.`);
+      }
     } else {
       _setMessageBody(msg, `I couldn’t turn that into a capability${res && res.error ? ` — ${res.error}` : ''}.`);
     }
