@@ -741,6 +741,21 @@ export function createSgMessageHandlers(ctx) {
         const ex = (cap.observe && Array.isArray(cap.observe.extracts) && cap.observe.extracts[0]) || null;
         if (!ex || !ex.selector) { sendResponse({ success: false, error: 'observation has no extract selector' }); return; }
         try { await ctx.ensureContentScript(tabId); } catch { /* */ }   // heal a stale-tab port before the read
+        // LIST read ("list the title of EACH job") — a `list` observation reads ALL its archetype items in ONE
+        // pass and returns the list, NOT a single positional value. (A per-item foreach read passes fromIndex and
+        // skips this — it wants the Nth.) COUNT_ELEMENTS with a text field captures every match's text at once.
+        if (cap.outputType === 'list' && !Number.isInteger(fromIndex) && ex.archetype && ex.archetype.selector) {
+          const lr = await new Promise((r) => { try { chrome.tabs.sendMessage(tabId, { type: 'COUNT_ELEMENTS', payload: { selector: ex.archetype.selector, fields: [{ name: 'text', source: '', type: 'string' }], max: 200 } }, { frameId: 0 }, (x) => { void chrome.runtime.lastError; r(x); }); } catch (e) { r({ success: false, error: e.message }); } });
+          const recs = (lr && lr.success !== false && Array.isArray(lr.records)) ? lr.records : [];
+          const items = recs.map((rec) => String((rec && rec.text) || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+          if (items.length > 1) {
+            Logger.info('background', `RUN_OBSERVATION — ${cap.id} (list) → ${items.length} item(s) via archetype "${ex.archetype.selector}"`);
+            sendResponse({ success: true, ran: true, ok: true, outputType: 'list', value: items.join('\n'), items, intent: cap.intent, readVia: 'list' });
+            return;
+          }
+          // ≤1 item (the archetype isn't per-item — e.g. it points at the container) → fall through to the single read.
+          Logger.info('background', `RUN_OBSERVATION — ${cap.id} (list) archetype "${ex.archetype.selector}" matched ${items.length} — not a per-item selector; falling back to single read`);
+        }
         // READ via the SAME path Studio's Verify uses: a single selector → OBSERVE_RAW_TEXT (plain querySelector +
         // textContent, NO visibility filter), on the TOP frame. The archetype's Nth-item read needs EXTRACT's
         // positional mode. BOTH pin frameId:0 — broadcasting to all frames let an Indeed ad/recaptcha iframe answer

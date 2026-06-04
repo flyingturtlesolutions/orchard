@@ -998,9 +998,21 @@ function _orchPickOnce({ tabId }) {
 
 // Capture an observation: point at the value → persist it for this read-ask.
 async function _orchObserveCapture(msg, { groundId, tabId, ask }) {
-  _setMessageBody(msg, '◎ Point at the value I should read on the page…');
+  // For a LIST read ("the title of each…"), the pick must be ONE ITEM (so its archetype matches every item) — NOT
+  // the surrounding container. Guide the user accordingly; otherwise the capture reads the whole list as one blob.
+  const _isList = classifyReadAsk(ask).outputType === 'list';
+  _setMessageBody(msg, _isList ? '◎ Point at ONE of them (e.g. the FIRST) — I’ll read them all.' : '◎ Point at the value I should read on the page…');
   const picked = await _orchPickOnce({ tabId });
   if (!picked || !picked.selector || picked.error) { _setMessageBody(msg, `Didn’t catch that${picked && picked.error ? ` (${picked.error})` : ''} — ask again to retry.`); return; }
+  // A LIST read needs a per-ITEM pick. If the click landed on a list CONTAINER (ul/ol/table…), reading it gives
+  // the whole list as one blob (and the archetype matches sibling containers, not items) — re-prompt for a single
+  // item rather than capture a coarse observation.
+  if (_isList && new Set(['ul', 'ol', 'table', 'tbody', 'thead', 'dl', 'select', 'nav', 'main']).has(String(picked.tagName || '').toLowerCase())) {
+    _setMessageBody(msg, 'That landed on the whole list — point at just ONE item (e.g. the first job’s TITLE link) and I’ll read them all.');
+    const bar = _orchActionBar(msg);
+    bar.appendChild(_mkBtn('◎ Try again', () => { bar.remove(); _orchObserveCapture(msg, { groundId, tabId, ask }); }));
+    return;
+  }
   _setMessageBody(msg, 'Saving what to read…');
   const lmk = (picked.landmark && typeof picked.landmark === 'object') ? picked.landmark : null;
   // Positional/archetype selector for list-item reads ("the first/Nth …"), when present.
@@ -1291,7 +1303,9 @@ async function _tryGroundedTurn(text) {
     // OBS-READ — a QUESTION with no observation yet: offer to capture one by POINTING at the value, instead of
     // (or alongside) recording an action demonstration.
     if (classifyReadAsk(text).isRead) {
-      _setMessageBody(thinking, 'I can read that for you — point me at it on the page.');
+      _setMessageBody(thinking, classifyReadAsk(text).outputType === 'list'
+        ? 'I can read those — point me at ONE of them (the first) and I’ll read them all.'
+        : 'I can read that for you — point me at it on the page.');
       const bar = _orchActionBar(thinking);
       bar.appendChild(_mkBtn('◎ Point me at it', () => { bar.remove(); _orchObserveCapture(thinking, { groundId: m.groundId, tabId: tab.id, ask: text }); }));
       bar.appendChild(_mkBtn('● Show me actions instead', () => { bar.remove(); _orchRecordFlow(thinking, { groundId: m.groundId, tabId: tab.id, ask: text }); }));
