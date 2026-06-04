@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildTier2CapabilityRecords, buildCapabilityRecords, wrapFragmentAsStrategy } from './capabilitySynth.js';
+import { buildTier2CapabilityRecords, buildCapabilityRecords, wrapFragmentAsStrategy, collectReferencedPrimitiveIds } from './capabilitySynth.js';
 
 const phases = [
   { label: 'Initiate job search', actions: [{ action: 'TYPE', selector: '#q', value: 'test' }, { action: 'CLICK', selector: '#go' }] },
@@ -75,5 +75,36 @@ describe('wrapFragmentAsStrategy — run a bare T1 Fragment without persisting a
   it('null / id-less input → null (fail safe)', () => {
     assert.equal(wrapFragmentAsStrategy(null, {}), null);
     assert.equal(wrapFragmentAsStrategy({ name: 'no id' }, {}), null);
+  });
+});
+
+describe('collectReferencedPrimitiveIds — which fragments/observations are STEPS of a composite (T1-as-first-class)', () => {
+  it('collects fragmentIds + observationIds across fragmentSteps, detect branches, and foreach bodies', () => {
+    const strat = {
+      fragmentSteps: [
+        { type: 'fragment', fragmentId: 'f-search' },
+        { type: 'observation', observationId: 'o-jobs' },
+        { type: 'detect', branches: [{ condition: {}, body: [{ type: 'fragment', fragmentId: 'f-sort' }] }], default: [{ type: 'fragment', fragmentId: 'f-default' }] },
+        { type: 'foreach', body: [{ type: 'fragment', fragmentId: 'f-open' }, { type: 'observation', observationId: 'o-salary' }] },
+      ],
+    };
+    const { fragmentIds, observationIds } = collectReferencedPrimitiveIds([strat]);
+    assert.deepEqual([...fragmentIds].sort(), ['f-default', 'f-open', 'f-search', 'f-sort']);
+    assert.deepEqual([...observationIds].sort(), ['o-jobs', 'o-salary']);
+  });
+
+  it('also walks the implementations envelope (body.tree.fragmentSteps) and top-level composition steps', () => {
+    const wrapped = { implementations: [{ tier: 'cache', body: { tree: { fragmentSteps: [{ type: 'fragment', fragmentId: 'f-impl' }] } } }] };
+    const workflow = { steps: [{ type: 'fragment', fragmentId: 'f-compose' }] };
+    const { fragmentIds } = collectReferencedPrimitiveIds([wrapped, workflow]);
+    assert.ok(fragmentIds.has('f-impl') && fragmentIds.has('f-compose'));
+  });
+
+  it('a STANDALONE fragment (not a step of any tree) is NOT collected → it surfaces as its own capability', () => {
+    const strat = { fragmentSteps: [{ type: 'fragment', fragmentId: 'f-step' }] };
+    const { fragmentIds } = collectReferencedPrimitiveIds([strat]);
+    assert.ok(fragmentIds.has('f-step'));
+    assert.ok(!fragmentIds.has('f-standalone'), 'a fragment no tree references stays standalone');
+    assert.deepEqual(collectReferencedPrimitiveIds([]), collectReferencedPrimitiveIds(null), 'empty/null → empty sets, no throw');
   });
 });

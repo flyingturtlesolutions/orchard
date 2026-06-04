@@ -37,6 +37,7 @@ import { SchemaValidator } from './SchemaValidator.js';
 import { InjectionService } from './InjectionService.js';
 import { AnthropicService } from './AnthropicService.js';
 import { normalizeStrategyBody, countExecutableNodes, normalizeStrategyParams } from './StrategyTree.js';
+import { collectReferencedPrimitiveIds } from '../Core/capabilitySynth.js';   // T1-as-first-class — standalone-primitive detection
 // v2.74.82 — Top-level Strategy entity (storage kind: 'workflow') dispatches
 // through its own runtime. CapabilityAPI now exposes BOTH Workflows
 // (Ground-scoped, the historical "Strategy") and Strategies (top-level
@@ -136,6 +137,22 @@ export class CapabilityAPI {
     const strategies = await StorageManager.listWorkflows();
     for (const strategy of strategies) {
       const desc = CapabilityAPI.#buildStrategyEntityDescriptor(strategy);
+      if (!desc) continue;
+      if (filter.kinds?.length && !filter.kinds.includes(desc.kind))   continue;
+      if (filter.status && desc.status !== filter.status)              continue;
+      descriptors.push(desc);
+    }
+
+    // T1-as-first-class (v2.74.753) — surface STANDALONE Fragments: a discrete intent whose whole capability is a
+    // single Fragment (the taxonomy fix — a single T1 is saved as itself, not wrapped in a Strategy). A Fragment
+    // that IS a step of some Strategy/Workflow is a building block, NOT a capability, so it's excluded (no double
+    // listing). Today every Fragment is strategy-referenced → this adds nothing; it activates when the accept
+    // guard starts saving bare T1s. (Observations are surfaced in a follow-up — they need per-Ground iteration.)
+    const referenced = collectReferencedPrimitiveIds([...workflows, ...strategies]);
+    const fragments = await StorageManager.getAllFragments();
+    for (const fragment of fragments) {
+      if (!fragment || referenced.fragmentIds.has(fragment.id)) continue;
+      const desc = CapabilityAPI.#buildFragmentDescriptor(fragment);
       if (!desc) continue;
       if (filter.kinds?.length && !filter.kinds.includes(desc.kind))   continue;
       if (filter.status && desc.status !== filter.status)              continue;
@@ -373,6 +390,41 @@ export class CapabilityAPI {
       // Workflow results render.
       resultTemplate: typeof strategy.resultTemplate === 'string' ? strategy.resultTemplate : '',
       status,
+    };
+  }
+
+  /**
+   * T1-as-first-class (v2.74.753) — descriptor for a STANDALONE Fragment (a discrete intent that is its own
+   * capability, not a step of any Strategy). `entityKind:'fragment'` is the discriminator (so a consumer can show
+   * a "primitive" badge); `kind:'task'` keeps it a first-class, routable/invocable peer of Strategies. Params are
+   * NAME strings on a Fragment → a {{NAME}} parameters map. Status 'ready' when the action tree is non-empty.
+   * @private
+   */
+  static #buildFragmentDescriptor(fragment) {
+    if (!fragment || !fragment.id) return null;
+    const paramNames = (Array.isArray(fragment.params) ? fragment.params : []).filter((p) => typeof p === 'string' && p);
+    const parameters = {};
+    for (const name of paramNames) {
+      parameters[name] = { type: 'string', kind: 'scalar', description: name.replace(/_/g, ' ').toLowerCase(), required: false };
+    }
+    let stepCount = 0;
+    try { const acts = JSON.parse(fragment.rawJson || '[]'); stepCount = Array.isArray(acts) ? acts.length : 0; } catch { stepCount = 0; }
+    return {
+      id          : fragment.id,
+      name        : fragment.name ?? 'Untitled Fragment',
+      kind        : 'task',
+      entityKind  : 'fragment',
+      version     : fragment.updatedAt ? new Date(fragment.updatedAt).toISOString() : null,
+      summary     : fragment.description ?? '',
+      description : fragment.description ?? '',
+      domains     : [],
+      triggers    : Array.isArray(fragment.aliases) ? fragment.aliases : [],
+      parameters,
+      capabilities: [],
+      limitations : [],
+      outcomeSignal : null,
+      resultTemplate: typeof fragment.resultTemplate === 'string' ? fragment.resultTemplate : '',
+      status      : stepCount > 0 ? 'ready' : 'draft',
     };
   }
 

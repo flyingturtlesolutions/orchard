@@ -237,6 +237,38 @@ export function buildTier2CapabilityRecords(phases, { groundId, strategyId, frag
 }
 
 /**
+ * T1-as-first-class (v2.74.753) — collect every fragmentId + observationId referenced as a STEP anywhere in a set
+ * of Strategy / Workflow trees (recursing fragmentSteps, detect branches + defaults, foreach/loop/gate bodies, the
+ * top-level composition steps, and the implementations envelope). PURE. A primitive IN this set is a building
+ * block of a composite; one NOT in it is a STANDALONE T1 — a discrete intent that is its own capability, surfaced
+ * first-class by listCapabilities (so a single Fragment isn't double-listed as both a step and a capability).
+ * @param {object[]} trees  strategy/workflow records (each may carry fragmentSteps / steps / implementations)
+ * @returns {{fragmentIds:Set<string>, observationIds:Set<string>}}
+ */
+export function collectReferencedPrimitiveIds(trees) {
+  const fragmentIds = new Set();
+  const observationIds = new Set();
+  const walk = (nodes) => {
+    for (const n of (Array.isArray(nodes) ? nodes : [])) {
+      if (!n || typeof n !== 'object') continue;
+      if (n.type === 'fragment' && n.fragmentId) fragmentIds.add(n.fragmentId);
+      if (n.type === 'observation' && n.observationId) observationIds.add(n.observationId);
+      if (Array.isArray(n.body)) walk(n.body);
+      if (Array.isArray(n.default)) walk(n.default);
+      if (Array.isArray(n.branches)) for (const b of n.branches) walk(b && b.body);
+    }
+  };
+  for (const t of (Array.isArray(trees) ? trees : [])) {
+    if (!t || typeof t !== 'object') continue;
+    if (Array.isArray(t.fragmentSteps)) walk(t.fragmentSteps);
+    if (Array.isArray(t.steps)) walk(t.steps);
+    const impl0 = Array.isArray(t.implementations) && t.implementations[0];
+    if (impl0 && impl0.body && impl0.body.tree && Array.isArray(impl0.body.tree.fragmentSteps)) walk(impl0.body.tree.fragmentSteps);
+  }
+  return { fragmentIds, observationIds };
+}
+
+/**
  * T1-as-first-class (v2.74.752) — wrap a SAVED Fragment into a SYNTHETIC one-step Strategy object so it can run
  * through ExecutionEngine.executeStrategy WITHOUT being persisted as a Strategy. PURE. This is the keystone of
  * "a single T1 is saved as itself, not a Strategy": the SAVE path stays wrapper-free (just the Fragment); the
