@@ -378,7 +378,7 @@ export function createSgMessageHandlers(ctx) {
             record.lifecycle = 'verified'; record.verifiedBy = 'demonstration'; record.verifiedAt = Date.now(); record.source = 'observed';
             landmarkRecords.push(record);
           }
-          return { label: p.label, actions: landmarkRefActions(p.actions, groundId, p.url) };
+          return { label: p.label, url: p.url, to: p.to, actions: landmarkRefActions(p.actions, groundId, p.url) };
         });
         for (const rec of landmarkRecords) { try { await StorageManager.saveLandmark(rec); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED saveLandmark failed: ${e.message}`); } }
         // OBS-4b — PARAMETERIZE first (so the description + records read the TEMPLATED structure): rewrite each
@@ -386,6 +386,14 @@ export function createSgMessageHandlers(ctx) {
         // demonstrated value rides along as the param default, so a no-override replay reproduces the demo.
         const paramz = parameterizeObserved(phases, params);
         const runPhases = paramz.phases;
+        // SG-T2 (v2.74.761) — a NAVIGATING demo phase's reliable success signal is its destination PATH (the next
+        // page it reached). Derive a `url_matches` postcondition from it so the persisted Fragment asserts that on
+        // replay — the structural floor can't see a result region that lives on the destination page. buildTier2-
+        // CapabilityRecords carries phase.postcondition → fragment.postconditions (array shape).
+        for (const rp of runPhases) {
+          if (!rp || !rp.to || !rp.url || rp.to === rp.url) continue;
+          try { const navPath = new URL(rp.to).pathname; if (navPath && navPath !== '/') rp.postcondition = { match: 'all', conditions: [{ type: 'url_matches', pattern: navPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }], source: 'url-nav' }; } catch { /* */ }
+        }
         const namedParams = paramz.params;
         // ORCH-D — describe FROM the structure (phases of step-kinds + params with example values + vocab), not
         // a loose transcript: a faithful projection + seed aliases. Heuristic fallback so it never blocks on LLM.

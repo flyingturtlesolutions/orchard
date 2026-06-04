@@ -110,6 +110,8 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     assert.equal(phases.length, 2);
     assert.ok(typeof phases[0].url === 'string', 'phase carries its page url (for per-page landmark UIDs)');
     assert.ok(/q=support/.test(phases[1].url), 'date phase url is the post-search page');
+    assert.ok(/q=support/.test(phases[0].to), 'phase carries its destination url (to) — the navigating search → results, for a url postcondition');
+    assert.ok(/fromage=3/.test(phases[1].to), 'the date filter phase reached the filtered URL');
     // each real action is preceded by an optional SCROLL_TO (OBS-4)
     assert.ok(phases[0].actions.every((a, i, arr) => a.action !== 'SCROLL_TO' || (arr[i + 1] && arr[i + 1].selector === a.selector)), 'each SCROLL_TO targets the following action');
     const real0 = phases[0].actions.filter((a) => a.action !== 'SCROLL_TO');

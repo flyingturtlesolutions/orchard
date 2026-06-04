@@ -323,6 +323,7 @@ export function opToPhases(op) {
     return {
       label: n.label,
       url: n.from || (all[0] && all[0].url) || '',
+      to: n.to || '',   // the post-phase URL — a NAVIGATING phase's success signal (→ a url_matches postcondition)
       // OBS-4 — prepend an optional SCROLL_TO before each ELEMENT action so replay reaches a control the user
       // had to scroll to (viewport-safe; an optional miss is harmless). A window SCROLL_TO (no selector) emits
       // as-is.
