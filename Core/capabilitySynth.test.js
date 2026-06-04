@@ -29,7 +29,8 @@ describe('buildTier2CapabilityRecords — multi-fragment capability (SG-T2-ACC)'
     const recs = buildTier2CapabilityRecords(phases, { groundId: 'g', strategyId: 's', fragmentIds: ['a', 'b'], now: 1 });
     const payActions = JSON.parse(recs.fragments[1].rawJson);
     assert.ok(payActions.some((a) => a.action === 'CLICK' && a.selector === '#update'), 'Update commit present (not deferred)');
-    assert.ok(payActions[0].landmark, 'inline landmark kept for probe-or-recover');
+    // the inline landmark survives on the CLICK (a pacing WAIT now precedes it, so it isn't at index 0)
+    assert.ok(payActions.find((a) => a.action === 'CLICK' && a.selector === '#update')?.landmark, 'inline landmark kept for probe-or-recover');
   });
 
   it('returns null when nothing is runnable or fragmentIds are short', () => {
@@ -75,6 +76,17 @@ describe('buildTier2CapabilityRecords — synthesis quality: description as inte
     assert.deepEqual(r.fragments[0].postconditions, [{ type: 'selector_present', selector: '.results' }]);
     assert.ok(Array.isArray(r.fragments[0].preconditions) && r.fragments[0].preconditions.length === 0);
     assert.deepEqual(r.fragments[1].postconditions, [], 'a phase with no node postcondition → empty array, not an envelope');
+  });
+
+  it('anti-bot pacing: a human-cadence WAIT (base+jitter) precedes each interactive action; SCROLL_TO preserved', () => {
+    const r = buildTier2CapabilityRecords([searchPhase, filterPhase], { groundId: 'g', strategyId: 's', fragmentIds: ['f1', 'f2'] });
+    const acts = JSON.parse(r.fragments[0].rawJson);
+    const firstType = acts.findIndex((a) => a.action === 'TYPE');
+    assert.ok(firstType > 0 && acts[firstType - 1].action === 'WAIT', 'a WAIT precedes the first TYPE');
+    const waits = acts.filter((a) => a.action === 'WAIT');
+    assert.equal(waits.length, 3, 'one WAIT per interactive action (2 TYPE + 1 CLICK)');
+    assert.ok(waits.every((w) => Number(w.value) > 0 && Number(w.jitter) > 0), 'each WAIT carries base + jitter (runtime randomizes)');
+    assert.ok(acts.some((a) => a.action === 'SCROLL_TO'), 'SCROLL_TO reach-normalizers are preserved');
   });
 });
 

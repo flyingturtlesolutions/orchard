@@ -217,6 +217,23 @@ function _describeFragmentActions(label, actions) {
   return (base ? `${base} — ${cap}` : cap).slice(0, 280);
 }
 
+// Anti-bot pacing — interactive actions that need a human-like pause before firing.
+const _INTERACTIVE_ACTIONS = new Set(['TYPE', 'SELECT', 'CLICK', 'SET_FILE', 'KEY']);
+
+// Insert a human-cadence WAIT before each interactive action so a replay isn't a rapid-fire burst (the pattern
+// bot-detection flags). The WAIT carries base + jitter: the runtime sleeps base + random(0..jitter) ms, so EACH
+// replay's timing differs (a constant delay is itself a fingerprint). TYPE is already per-keystroke jittered
+// (40–350ms) in the content script, so this only adds the INTER-action gaps. SCROLL_TO / WAIT_FOR (reach/settle)
+// are preserved. Applied at the PERSIST boundary so the saved Fragment is paced while the trial stays fast. PURE.
+function _paceActions(actions) {
+  const out = [];
+  for (const a of (Array.isArray(actions) ? actions : [])) {
+    if (a && _INTERACTIVE_ACTIONS.has(a.action)) out.push({ action: 'WAIT', value: 350, jitter: 750 });
+    out.push(a);
+  }
+  return out;
+}
+
 // Fragment pre/postconditions are read at runtime as ARRAYS (ExecutionEngine: `Array.isArray(fragment.postconditions)`)
 // — an envelope-shaped value is silently SKIPPED. A node's postcondition (SG-T2-2 structural ∪ SG-T2-5 LLM) is a
 // {match, conditions} envelope, so extract its conditions ARRAY to actually carry the phase's success predicate(s). PURE.
@@ -237,7 +254,8 @@ export function buildTier2CapabilityRecords(phases, { groundId, strategyId, frag
   const usedNames = new Set();   // union across fragments → strategy.params
   for (let i = 0; i < ph.length; i++) {
     const fragmentId = fragmentIds[i];
-    const rawJson = JSON.stringify(ph[i].actions);
+    const pacedActions = _paceActions(ph[i].actions);   // anti-bot: human-cadence WAIT before each interactive action
+    const rawJson = JSON.stringify(pacedActions);
     // Wire only the params whose placeholders actually appear in THIS fragment's actions.
     const names = new Set();
     let m; PLACEHOLDER.lastIndex = 0;

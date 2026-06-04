@@ -93,6 +93,10 @@ describe('orchPromote — composite → canonical Strategy', () => {
     assert.equal(ex.target, 'a.jcs-JobTitle', 'prefers the per-item archetype selector');
     assert.ok(Array.isArray(ex.fields) && ex.fields.length > 0, 'fields MUST be non-empty (OBSERVE_LIST rejects empty)');
     assert.equal(ex.output, 's2');
+    // hardened like fragments: conditions are ARRAYS (runtime reads arrays; an envelope is silently skipped),
+    // and the description is an expression of intent, not the bare intent string.
+    assert.ok(Array.isArray(rec.preconditions) && Array.isArray(rec.postconditions), 'conditions are arrays, not envelopes');
+    assert.match(rec.description, /Read the list of jobs/, 'description expresses what it reads');
   });
 
   it('buildConvergeObservationRecord — a visual observation, or one with no selector, → null (fail closed)', () => {

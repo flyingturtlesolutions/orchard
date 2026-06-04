@@ -2965,9 +2965,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             return;
           }
 
-          // WAIT: server-side sleep.
+          // WAIT: server-side sleep. v2.74.758 — optional `jitter` adds a random 0..jitter ms so a paced replay's
+          // cadence differs each run (a constant delay is itself a bot-detection signature). No jitter → exact.
           if (step.action === 'WAIT') {
-            const ms = Number(step.value) || 0;
+            const base = Number(step.value) || 0;
+            const jitter = Number(step.jitter) || 0;
+            const ms = base + (jitter > 0 ? Math.floor(Math.random() * jitter) : 0);
             await new Promise(r => setTimeout(r, ms));
             sendResponse({ success: true, info: `waited ${ms}ms` });
             return;

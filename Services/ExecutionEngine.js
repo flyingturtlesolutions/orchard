@@ -45,6 +45,16 @@ import { performImageSnap, performImageFull, performImageRead }
 /** How long (ms) to wait for a new tab to reach "complete" load status. @constant {number} */
 const TAB_LOAD_TIMEOUT_MS = 30_000;
 
+// v2.74.758 — Normalize a Fragment/Observation conditions field to a flat ARRAY, tolerating BOTH a plain array
+// AND a {match, conditions} envelope (mirrors the Analysis path, EE:1585). Fragment/Observation conditions were
+// read with a bare `Array.isArray(...)`, which SILENTLY SKIPPED an envelope-shaped value — so a synthesized
+// artifact whose conditions were stored as `{match:'all', conditions:[…]}` never enforced them. This makes the
+// runtime tolerant of either shape for every artifact, so a condition is never dropped on a shape mismatch. PURE.
+function _condList(x) {
+  if (x && Array.isArray(x.conditions)) return x.conditions;
+  return Array.isArray(x) ? x : [];
+}
+
 // ─── ExecutionEngine class ────────────────────────────────────────────────────
 
 /**
@@ -741,8 +751,9 @@ export class ExecutionEngine {
     // a FOREACH body. Top-level calls (iteration === null) keep the
     // original skip-check for their backward-compat benefit.
     const insideForeach = iteration !== null;
-    if (!insideForeach && Array.isArray(fragment.postconditions) && fragment.postconditions.length > 0) {
-      const preProbe = await TemplateWalker.checkConditions({ tabId, conditions: fragment.postconditions });
+    const _fragPostSkip = _condList(fragment.postconditions);
+    if (!insideForeach && _fragPostSkip.length > 0) {
+      const preProbe = await TemplateWalker.checkConditions({ tabId, conditions: _fragPostSkip });
       if (preProbe.ok) {
         Logger.info('ExecutionEngine', `${displayName} — postconditions already hold; skipping`);
         stepResults.push({
@@ -919,9 +930,10 @@ export class ExecutionEngine {
     // iteration as failed. Passes immediately when conditions already hold,
     // only waits as long as needed.
     let postFailures = [];
-    if (Array.isArray(fragment.postconditions) && fragment.postconditions.length > 0) {
+    const _fragPost = _condList(fragment.postconditions);
+    if (_fragPost.length > 0) {
       const probe = await TemplateWalker.checkConditions({
-        tabId, conditions: fragment.postconditions,
+        tabId, conditions: _fragPost,
         timeoutMs: 5000, pollIntervalMs: 100,
       });
       postFailures = probe.failures;
@@ -3720,7 +3732,7 @@ export class ExecutionEngine {
     };
 
     // Preconditions (page-level).
-    const preconds = Array.isArray(obsForConds.preconditions) ? obsForConds.preconditions : [];
+    const preconds = _condList(obsForConds.preconditions);
     if (preconds.length > 0) {
       const preProbe = await TemplateWalker.checkConditions({
         tabId,
@@ -4293,7 +4305,7 @@ export class ExecutionEngine {
     }
 
     // Postconditions (page-level — same condition vocab as preconditions).
-    const postconds = Array.isArray(obsForConds.postconditions) ? obsForConds.postconditions : [];
+    const postconds = _condList(obsForConds.postconditions);
     if (postconds.length > 0) {
       const postProbe = await TemplateWalker.checkConditions({
         tabId,
@@ -4452,7 +4464,7 @@ export class ExecutionEngine {
     };
 
     // ── 4. Preconditions against the live page ────────────────────────
-    const preconds = Array.isArray(obs.preconditions) ? obs.preconditions : [];
+    const preconds = _condList(obs.preconditions);
     if (preconds.length > 0) {
       const preProbe = await TemplateWalker.checkConditions({
         tabId, conditions: preconds, scope,
@@ -4618,7 +4630,7 @@ export class ExecutionEngine {
     const preDescr = preconds.length > 0
       ? preconds.map(c => `- ${c.type}${c.selector ? ` "${c.selector}"` : ''}${c.value !== undefined ? ` (value: ${JSON.stringify(c.value)})` : ''}`).join('\n')
       : '';
-    const postArr = Array.isArray(obs.postconditions) ? obs.postconditions : [];
+    const postArr = _condList(obs.postconditions);
     const postDescr = postArr.length > 0
       ? postArr.map(c => `- ${c.type}${c.value !== undefined ? ` (value: ${JSON.stringify(c.value)})` : ''}`).join('\n')
       : '';

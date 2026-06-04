@@ -44,12 +44,15 @@ export function buildConvergeObservationRecord(cap, outputName, { observationId,
     id: observationId,
     groundId: cap.groundId || null,
     name: `${cap.intent || cap.name || 'observation'} — converged`.slice(0, 80),
-    description: cap.intent || '',
+    // An expression of intent (what it READS), not the bare intent string.
+    description: `Read ${cap.intent || cap.name || 'a list'} — the items matching "${String(selector)}"`.slice(0, 280),
     output: outputName,
     shape: 'list',
     params: [],
-    preconditions: { match: 'all', conditions: [] },
-    postconditions: { match: 'all', conditions: [] },
+    // ARRAY shape — the runtime reads observation conditions as arrays (an envelope is silently skipped); kept
+    // consistent with authored observations + fragments. Empty here (a converge read has no gate of its own).
+    preconditions: [],
+    postconditions: [],
     implementations: [{
       tier: 'cache',
       // target = plain selector string; fields non-empty (value unused for a count gate, but the guard requires it).
