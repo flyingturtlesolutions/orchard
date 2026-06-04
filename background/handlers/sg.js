@@ -23,10 +23,29 @@ import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved, d
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A
 import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/orchFeedback.js';   // ORCH-FB — corrective actions
 import { feedbackExamples } from '../../Core/feedbackLearn.js';   // ORCH-FB-2 — relevance shaping from feedback history
-import { buildObservationCapability, scoreObservationMatch } from '../../Core/observe.js';   // OBS-READ — observation capability records + manual-obs match
+import { buildObservationCapability, scoreObservationMatch, classifyReadAsk } from '../../Core/observe.js';   // OBS-READ — observation records + manual-obs match + read/action effect scoping
+import { buildCompositeCapability, liftControlFlow } from '../../Core/orchChain.js';   // ORCH-X T2 — composite promotion + ORCH-L control-flow lift
+import { validatePlan } from '../../Core/orchPlan.js';   // ORCH-L — structural guard for a lifted (foreach/gate) plan
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
 import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
+
+// OBS-READ bridge — map a manual Observation extract to the EXACT OBSERVE_* message Studio's "Verify" button
+// dispatches (Sidepanel/modes/observation-author.js `_observeMsgFor`). We reuse the proven runtime path verbatim
+// instead of reimplementing it, so a chat read behaves identically to the author's Verify. Returns null for
+// shapes that need extra context (images/sections/gates) — the bridge skips those for now.
+function _observeMessageForExtract(ex) {
+  if (!ex || !ex.target) return null;
+  switch (ex.shape) {
+    case 'text':      return { type: 'OBSERVE_RAW_TEXT', payload: { target: ex.target } };
+    case 'text_last': return { type: 'OBSERVE_RAW_TEXT', payload: { target: ex.target, pickLast: true } };
+    case 'raw_text':  return { type: 'OBSERVE_RAW_TEXT', payload: { target: ex.target } };
+    case 'raw_html':  return { type: 'OBSERVE_RAW_HTML', payload: { target: ex.target } };
+    case 'attribute': return { type: 'OBSERVE_SCALAR',   payload: { target: ex.target, extract: { kind: 'attribute', name: ex.attribute } } };
+    case 'scalar':    return { type: 'OBSERVE_SCALAR',   payload: { target: ex.target, extract: ex.extract ?? { kind: 'text' } } };
+    default:          return null;
+  }
+}
 
 /**
  * @param {object} ctx  background-local helpers (kept in background.js — shared with non-SG code, or
@@ -419,12 +438,24 @@ export function createSgMessageHandlers(ctx) {
         // ORCH-G — read the confirmation stream once; per-candidate health graduates the auto-fire bar.
         let outcomeStream = [];
         try { if (typeof ctx.readOutcomes === 'function') outcomeStream = (await ctx.readOutcomes(gid)) || []; } catch { /* */ }
-        const projected = (Array.isArray(caps) ? caps : []).filter((c) => isActiveCapability(c) && !_orphan(c)).map((c) => {   // ORCH-FB retracted + orphan (deleted strategy) → invisible
+        const projected = (Array.isArray(caps) ? caps : []).filter((c) => isActiveCapability(c) && !_orphan(c) && c.kind !== 'composite').map((c) => {   // ORCH-FB retracted + orphan invisible; composites (T2) run atomically via MATCH_COMPOSITE, not as per-clause candidates
           const cand = toCandidate(c);
           if (cand) cand.health = tallyCapabilityConfirmations(outcomeStream, cand.id);
           return cand;
         }).filter(Boolean);
-        const parts = scopeAndPartition(projected, { currentGroundId: gid, currentLocaleUrl: localeUrl, sameLocale });
+        // ORCH — EFFECT SCOPING: a QUESTION ("what's the title?") wants a READ; an ACTION ("search jobs") wants a
+        // fragment. The pool is otherwise effect-agnostic, so a read got ranked against irreversible actions —
+        // noise, wasted LLM tokens, and a tail risk of a read landing on an action. classifyReadAsk is the SAME
+        // read/action oracle the chat already uses to choose picker-vs-record. Read → observations only (none →
+        // a clean miss, and the chat offers to capture one). Action → non-observations, falling back to the full
+        // pool only when there are NO actions (guards an ask the read-classifier under-called as not-a-read).
+        const _isReadCand = (c) => !!c && (c.kind === 'observation' || c.effect === 'read');
+        const _askIsRead = classifyReadAsk(ask).isRead;
+        let pool;
+        if (_askIsRead) pool = projected.filter(_isReadCand);
+        else { const _acts = projected.filter((c) => !_isReadCand(c)); pool = _acts.length ? _acts : projected; }
+        Logger.info('background', `ORCH_MATCH scope ▸ ask=${_askIsRead ? 'READ' : 'ACTION'} → ${pool.length}/${projected.length} candidate(s) (effect-scoped${_askIsRead ? ', observations only' : ', actions only'})`);
+        const parts = scopeAndPartition(pool, { currentGroundId: gid, currentLocaleUrl: localeUrl, sameLocale });
         // ORCH — rank over ALL same-Ground capabilities (here + reachable). The exact-locale "here vs reachable"
         // split produced "go to another page" dead-ends for site-wide affordances (search, login, join) and
         // hid real matches; relevance ranking + confirm-first + the origin-relaxed REPLAY drift guard + landmark
@@ -635,37 +666,64 @@ export function createSgMessageHandlers(ctx) {
     // persist it to the SAME sgCapabilities store the chat matches against, seeding the ask as an alias.
     OBSERVE_CAPTURE: async (payload, _sender, sendResponse) => {
       try {
-        const { tabId, groundId = null, ask = '', selector = null, label = '', role = '', landmark = null, archetype = null, outputType = null, shape = null } = payload ?? {};
+        const { tabId, groundId = null, ask = '', selector = null, structuralSelector = null, label = '', role = '', landmark = null, archetype = null, outputType = null, shape = null } = payload ?? {};
         if (!ask || !selector) { sendResponse({ success: false, error: 'ask + selector required' }); return; }
         let gid = groundId, localeUrl = '';
         if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); localeUrl = t?.url || ''; if (!gid && localeUrl) { const origin = new URL(localeUrl).origin; const gs = await StorageManager.getAllGrounds(); const g = (Array.isArray(gs) ? gs : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } } catch { /* */ } }
         if (!gid) { sendResponse({ success: false, error: 'no ground for this page' }); return; }
-        // Prefer the picker's REAL description layer (role + accessibleName + hierarchicalContext) so run-time
-        // recovery is role-gated on a true a11y role (e.g. 'link'/'heading'), not the generic 'region' default.
-        const lmk = (landmark && typeof landmark === 'object')
-          ? {
-              selector,
-              role: landmark.role || role || 'region',
-              accessibleName: landmark.accessibleName || label || ask,
-              ...(landmark.hierarchicalContext ? { hierarchicalContext: landmark.hierarchicalContext } : {}),
-            }
-          : { selector, role: role || 'region', accessibleName: label || ask };
-        // Positional/archetype selector (value-independent list-item read) rides on the extract; the runtime
-        // tries it FIRST, then falls back to the unique selector + landmark recovery.
-        const arch = (archetype && typeof archetype === 'object' && archetype.selector)
+        const arch0 = (archetype && typeof archetype === 'object' && archetype.selector)
           ? { selector: String(archetype.selector), index: Number.isInteger(archetype.index) ? archetype.index : 0 }
           : null;
+        // SELF-CORRECTING CAPTURE — the picker offers up to 3 ways to re-find the value: the positional ARCHETYPE,
+        // the synthesized SELECTOR (often a stable [aria-label=…], what Studio stores), and the STRUCTURAL
+        // class-chain (brittle — Indeed mutates those classes, so it can fail even on an IMMEDIATE re-read). We
+        // VERIFY each on the live page NOW and STORE the first that actually reproduces a value — never persist a
+        // selector that can't even re-read at capture time. This is the prior bug's root cause: the chat stored the
+        // structural chain and discarded the stable synthesized one.
+        Logger.info('background', `OBSERVE_CAPTURE pick ▸ tag="${payload?.tagName || '?'}" label="${String(label).slice(0, 100)}" a11yName="${String((landmark && landmark.accessibleName) || '').slice(0, 100)}" | synth="${selector}" structural="${structuralSelector || '(none)'}" archetype=${arch0 ? `"${arch0.selector}"[${arch0.index}]` : 'none'}`);
+        let chosenSelector = selector, chosenArch = arch0, verifiedValue = '', via = 'unverified';
+        try {
+          await ctx.ensureContentScript(tabId);
+          // Same read path as RUN_OBSERVATION / Studio Verify: single selector → OBSERVE_RAW_TEXT (no visibility
+          // filter); positional → EXTRACT; both on frameId:0. Normalized to {success, value}.
+          const _vx = (sel, opts = {}) => new Promise((r) => {
+            const msg = opts.positional
+              ? { type: 'EXECUTE_STEP', payload: { action: 'EXTRACT', selector: sel, positional: true, fromIndex: opts.fromIndex || 0 } }
+              : { type: 'OBSERVE_RAW_TEXT', payload: { target: sel } };
+            try { chrome.tabs.sendMessage(tabId, msg, { frameId: 0 }, (x) => { void chrome.runtime.lastError; r(x); }); } catch (e) { r({ success: false, error: e.message }); }
+          }).then((x) => (x && x.success !== false) ? { success: true, value: (x.value != null ? x.value : x.extractedValue) } : { success: false, error: x && x.error });
+          const cands = [];
+          if (arch0) cands.push({ kind: 'archetype', sel: arch0.selector, opts: { positional: true, fromIndex: arch0.index } });
+          if (selector) cands.push({ kind: 'synth', sel: selector });
+          if (structuralSelector && structuralSelector !== selector) cands.push({ kind: 'structural', sel: structuralSelector });
+          let won = null;
+          for (const c of cands) {
+            const v = await _vx(c.sel, c.opts || {});
+            const val = (v && v.success !== false && v.value != null) ? String(v.value) : '';
+            Logger.info('background', `OBSERVE_CAPTURE verify[${c.kind}] "${String(c.sel).slice(0, 80)}"${c.opts ? `[idx ${c.opts.fromIndex}]` : ''} → ${val.trim() ? `"${val.slice(0, 80)}" ✓` : `MISS (${(v && v.error) || 'empty'})`}`);
+            if (val.trim()) { won = c; verifiedValue = val; break; }
+          }
+          if (won) {
+            via = won.kind;
+            if (won.kind === 'archetype') { chosenArch = arch0; chosenSelector = selector || structuralSelector; }
+            else { chosenSelector = won.sel; chosenArch = null; }   // a single-element selector verified → drop the (failed) archetype
+          } else { chosenSelector = selector || structuralSelector; chosenArch = arch0; }   // nothing verified — keep best guess
+          Logger.info('background', `OBSERVE_CAPTURE verify RESULT — picker SAW "${String(label).slice(0, 80)}"; STORING via ${via} → ${verifiedValue ? `"${verifiedValue.slice(0, 80)}" ✓` : "NOTHING ✗ (no candidate selector re-reads on this page)"}`);
+        } catch (e) { Logger.warn('background', `OBSERVE_CAPTURE verify-at-capture failed: ${e.message}`); }
+        const lmk = (landmark && typeof landmark === 'object')
+          ? { selector: chosenSelector, role: landmark.role || role || 'region', accessibleName: landmark.accessibleName || label || ask, ...(landmark.hierarchicalContext ? { hierarchicalContext: landmark.hierarchicalContext } : {}) }
+          : { selector: chosenSelector, role: role || 'region', accessibleName: label || ask };
         const cap = buildObservationCapability({
           id: crypto.randomUUID(), ask, intent: ask, goal: ask, groundId: gid, outputType,
           landmark: lmk,
-          extract: { selector, ...(shape ? { shape } : {}), ...(arch ? { archetype: arch } : {}) },
+          extract: { selector: chosenSelector, ...(shape ? { shape } : {}), ...(chosenArch ? { archetype: chosenArch } : {}) },
         });
         cap.localeUrl = localeUrl; cap.createdAt = Date.now();
         cap.aliases = accreteAlias(cap.aliases, ask, { intent: cap.intent });
         await ctx.writeSgCapability(gid, cap);
-        try { await ctx.appendOutcomes(gid, [Outcomes.makeStageEvent('accept', { groundId: gid, verdict: 'accepted', input: { roleOrIntent: ask.slice(0, 120) }, detail: { capabilityId: cap.id, shape: 'observation', outputType: cap.outputType, selector } })]); } catch { /* */ }
-        Logger.info('background', `OBSERVE_CAPTURE — "${ask.slice(0, 50)}" ${cap.id} → ${cap.outputType} ${arch ? `archetype "${arch.selector}"[idx ${arch.index}]` : `extract "${selector}"`} on ${gid}`);
-        sendResponse({ success: true, capability: { id: cap.id, intent: cap.intent, outputType: cap.outputType, kind: 'observation' } });
+        try { await ctx.appendOutcomes(gid, [Outcomes.makeStageEvent('accept', { groundId: gid, verdict: 'accepted', input: { roleOrIntent: ask.slice(0, 120) }, detail: { capabilityId: cap.id, shape: 'observation', outputType: cap.outputType, selector: chosenSelector } })]); } catch { /* */ }
+        Logger.info('background', `OBSERVE_CAPTURE — "${ask.slice(0, 50)}" ${cap.id} → ${cap.outputType} stored via ${via}: ${chosenArch ? `archetype "${chosenArch.selector}"[${chosenArch.index}]` : `selector "${String(chosenSelector).slice(0, 80)}"`} on ${gid}`);
+        sendResponse({ success: true, capability: { id: cap.id, intent: cap.intent, outputType: cap.outputType, kind: 'observation' }, sawText: String(label || ''), verifiedValue, via });
       } catch (err) {
         Logger.error('background', `OBSERVE_CAPTURE failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
@@ -676,30 +734,45 @@ export function createSgMessageHandlers(ctx) {
     // effect (a read is always safe to auto-run). The chat shows the value inline; the compiler outputType rides along.
     RUN_OBSERVATION: async (payload, _sender, sendResponse) => {
       try {
-        const { tabId, groundId = null, capabilityId = null } = payload ?? {};
+        const { tabId, groundId = null, capabilityId = null, fromIndex = null } = payload ?? {};   // fromIndex: per-item override for a FOREACH body read (ORCH-L)
         if (typeof tabId !== 'number' || !groundId || !capabilityId) { sendResponse({ success: false, error: 'tabId + groundId + capabilityId required' }); return; }
         const cap = (await ctx.readSgCapabilities(groundId)).find((c) => c.id === capabilityId);
         if (!cap || cap.kind !== 'observation') { sendResponse({ success: false, error: 'observation not found' }); return; }
         const ex = (cap.observe && Array.isArray(cap.observe.extracts) && cap.observe.extracts[0]) || null;
         if (!ex || !ex.selector) { sendResponse({ success: false, error: 'observation has no extract selector' }); return; }
-        try { await ctx.ensureContentScript(tabId); } catch { /* */ }   // heal a stale-tab port before EXTRACT
-        // EXTRACT off the live page → the raw {success, extractedValue, error} response. `opts` can carry a
-        // positional read ({positional:true, fromIndex}) — that's how the archetype path selects the Nth item.
-        const _extract = (selector, opts = {}) => new Promise((r) => {
-          try { chrome.tabs.sendMessage(tabId, { type: 'EXECUTE_STEP', payload: { action: 'EXTRACT', selector, ...opts } }, (x) => { void chrome.runtime.lastError; r(x); }); }
+        try { await ctx.ensureContentScript(tabId); } catch { /* */ }   // heal a stale-tab port before the read
+        // READ via the SAME path Studio's Verify uses: a single selector → OBSERVE_RAW_TEXT (plain querySelector +
+        // textContent, NO visibility filter), on the TOP frame. The archetype's Nth-item read needs EXTRACT's
+        // positional mode. BOTH pin frameId:0 — broadcasting to all frames let an Indeed ad/recaptcha iframe answer
+        // "no match" first, and a visually-HIDDEN a11y link ("full details of …") is READ by OBSERVE_RAW_TEXT but
+        // DROPPED by EXTRACT's visible-only filter — that was the chat-vs-Verify divergence. Normalized return.
+        const _read = (selector, opts = {}) => new Promise((r) => {
+          const msg = opts.positional
+            ? { type: 'EXECUTE_STEP', payload: { action: 'EXTRACT', selector, positional: true, fromIndex: opts.fromIndex || 0 } }
+            : { type: 'OBSERVE_RAW_TEXT', payload: { target: selector } };
+          try { chrome.tabs.sendMessage(tabId, msg, { frameId: 0 }, (x) => { void chrome.runtime.lastError; r(x); }); }
           catch (e) { r({ success: false, error: e.message }); }
-        });
+        }).then((x) => (x && x.success !== false)
+          ? { success: true, extractedValue: (x.extractedValue != null ? x.extractedValue : x.value) }
+          : { success: false, error: x && x.error });
         // (1) PREFERRED — the positional/archetype read: a value-independent selector matching one element per
         //     list item + the captured index ("the first/Nth"). Survives the list reordering / re-skinning.
         let res = null;
         let via = 'selector';
         const arch = ex.archetype;
+        // A FOREACH body read overrides the captured index with the iteration's index (read the Nth item).
+        const readIdx = Number.isInteger(fromIndex) ? fromIndex : (arch && Number.isInteger(arch.index) ? arch.index : 0);
         if (arch && arch.selector) {
-          const ar = await _extract(arch.selector, { positional: true, fromIndex: Number.isInteger(arch.index) ? arch.index : 0 });
+          const ar = await _read(arch.selector, { positional: true, fromIndex: readIdx });
           if (ar && ar.success !== false) { res = ar; via = 'archetype'; }
+          else Logger.info('background', `RUN_OBSERVATION — archetype "${arch.selector}"[idx ${readIdx}] miss: ${(ar && ar.error) || 'no value'} — falling back to the single selector (OBSERVE_RAW_TEXT)`);
+        } else if (Number.isInteger(fromIndex)) {
+          // A per-item (FOREACH) read on an observation with NO archetype can't target the Nth element — the
+          // single selector reads the same one every iteration. Surface it rather than returning silent dupes.
+          Logger.warn('background', `RUN_OBSERVATION — per-item fromIndex=${fromIndex} requested but ${cap.id} has no archetype selector; the single selector reads the SAME element each iteration (re-capture with a positional pick for per-item reads)`);
         }
-        // (2) Unique/structural selector — the fallback, and the path for non-list (single-value) reads.
-        if (!res || res.success === false) res = await _extract(ex.selector);
+        // (2) Single selector — the fallback, and the path for non-list reads. Read via OBSERVE_RAW_TEXT (Verify path).
+        if (!res || res.success === false) res = await _read(ex.selector);
         let recovered = null;
         // (3) Both selectors MISSED → self-heal via the captured landmark's description layer, the SAME
         //     LANDMARK_PROBE_OR_RECOVER path fragments use. The structural selector survives the list
@@ -712,13 +785,13 @@ export function createSgMessageHandlers(ctx) {
               chrome.tabs.sendMessage(tabId, {
                 type: 'LANDMARK_PROBE_OR_RECOVER',
                 payload: { selector: ex.selector, fallback: { role: lmk.role || lmk.a11yRole || null, accessibleName: lmk.accessibleName || null, hierarchicalContext: lmk.hierarchicalContext || null } },
-              }, (x) => { void chrome.runtime.lastError; r(x); });
+              }, { frameId: 0 }, (x) => { void chrome.runtime.lastError; r(x); });
             } catch (e) { r({ success: false, error: e.message }); }
           });
           if (probe && probe.success && probe.selector) {
-            // Recovered a (possibly identical) selector — retry EXTRACT against it. via:'selector' means the
-            // stored selector actually resolves to one visible element (the first miss was transient).
-            const retry = await _extract(probe.selector);
+            // Recovered a (possibly identical) selector — retry the read against it. via:'selector' means the
+            // stored selector actually resolves to one element (the first miss was transient).
+            const retry = await _read(probe.selector);
             if (retry && retry.success !== false) {
               res = retry;
               if (probe.via === 'heuristic' && probe.selector !== ex.selector) {
@@ -752,12 +825,37 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
-    // OBS-READ bridge — match a read-ask against the user's MANUAL (Studio-authored) Observations and RUN the
-    // best one. These live in a DIFFERENT store (StorageManager.listObservations) than the lightweight captured
-    // observations the ORCH matcher sees, so without this a rich hand-authored read is invisible to chat and the
-    // user gets offered a fresh (more brittle) capture instead. Reuses the SAME EXTRACT_VALUE path Studio's
-    // "Verify" button uses. A read is reversible → safe to auto-run on a confident match. {matched:false} → the
-    // chat falls through to its own observation/capture flow unchanged.
+    // ORCH-L — COUNT a list observation's items: the FOREACH DRIVER. A list observation's archetype selector
+    // matches one element per item, so COUNT_ELEMENTS over it gives N; the interpreter then runs the body per
+    // index, and each body read uses RUN_OBSERVATION {fromIndex} to read the Nth. Returns items:[{index}]. NO LLM.
+    RUN_OBSERVATION_LIST: async (payload, _sender, sendResponse) => {
+      try {
+        const { tabId, groundId = null, capabilityId = null, max = 200 } = payload ?? {};
+        if (typeof tabId !== 'number' || !groundId || !capabilityId) { sendResponse({ success: false, error: 'tabId + groundId + capabilityId required' }); return; }
+        const cap = (await ctx.readSgCapabilities(groundId)).find((c) => c.id === capabilityId);
+        if (!cap || cap.kind !== 'observation') { sendResponse({ success: false, error: 'observation not found' }); return; }
+        const ex = (cap.observe && Array.isArray(cap.observe.extracts) && cap.observe.extracts[0]) || null;
+        const selector = (ex && ex.archetype && ex.archetype.selector) || (ex && ex.selector) || null;
+        if (!selector) { sendResponse({ success: false, error: 'observation has no list/archetype selector' }); return; }
+        try { await ctx.ensureContentScript(tabId); } catch { /* */ }
+        const res = await new Promise((r) => { try { chrome.tabs.sendMessage(tabId, { type: 'COUNT_ELEMENTS', payload: { selector, max } }, { frameId: 0 }, (x) => { void chrome.runtime.lastError; r(x); }); } catch (e) { r({ success: false, error: e.message }); } });
+        const count = (res && res.success !== false && Number.isFinite(res.count)) ? Math.min(res.count, max) : 0;
+        const items = Array.from({ length: count }, (_, i) => ({ index: i }));
+        Logger.info('background', `RUN_OBSERVATION_LIST — ${cap.id} "${selector}" → ${count} item(s)`);
+        sendResponse({ success: true, ok: count > 0, count, items, intent: cap.intent });
+      } catch (err) {
+        Logger.error('background', `RUN_OBSERVATION_LIST failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // OBS-READ bridge — run the user's MANUAL (Studio-authored) Observation for a read-ask. These live in a
+    // DIFFERENT store (StorageManager.listObservations) than the captured observations the ORCH matcher sees, so
+    // without this a hand-authored read is invisible to chat. SELECTION is deliberately simple: a SINGLE authored
+    // observation is used as-is (don't gate the user's one working read behind a fuzzy score); with several, the
+    // best-named lexical match above a LOW floor. EXECUTION reuses the EXACT OBSERVE_* message Studio's "Verify"
+    // button dispatches (_observeMessageForExtract) — NOT a reimplementation. A read is reversible → safe to
+    // auto-run. {matched:false} → the chat falls through to its own observation/capture flow unchanged.
     RUN_BEST_OBSERVATION: async (payload, _sender, sendResponse) => {
       try {
         const { tabId, groundId = null, ask = '' } = payload ?? {};
@@ -765,31 +863,43 @@ export function createSgMessageHandlers(ctx) {
         let gid = groundId, url = '';
         try { url = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ }
         if (!gid && url) { try { const origin = new URL(url).origin; const gs = await StorageManager.getAllGrounds(); const g = (Array.isArray(gs) ? gs : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } catch { /* */ } }
-        if (!gid) { sendResponse({ success: true, matched: false }); return; }
+        if (!gid) { Logger.info('background', `RUN_BEST_OBSERVATION — no ground for ${url}`); sendResponse({ success: true, matched: false }); return; }
         let observations = [];
-        try { observations = (await StorageManager.listObservations(gid)) || []; } catch { /* */ }
-        if (!Array.isArray(observations) || !observations.length) { sendResponse({ success: true, matched: false }); return; }
-        const THRESHOLD = 0.5;   // ≥ half the ask's content tokens must appear in the observation's text
-        let best = null, bestScore = 0;
-        for (const o of observations) { const s = scoreObservationMatch(ask, o); if (s > bestScore) { best = o; bestScore = s; } }
-        if (!best || bestScore < THRESHOLD) { sendResponse({ success: true, matched: false }); return; }
-        // Run its PRIMARY text/attribute extract via the same EXTRACT_VALUE path Studio's Verify uses.
+        try { observations = (await StorageManager.listObservations(gid)) || []; } catch (e) { Logger.warn('background', `RUN_BEST_OBSERVATION listObservations failed: ${e.message}`); }
+        if (!Array.isArray(observations) || !observations.length) {
+          // DIAGNOSTIC — distinguish "never Saved" from "Saved under a DIFFERENT ground" (e.g. indeed.com vs
+          // www.indeed.com → different origin → different ground). Count observations on every OTHER ground.
+          let elsewhere = [];
+          try { for (const g of ((await StorageManager.getAllGrounds()) || [])) { if (!g || g.id === gid) continue; const obs = await StorageManager.listObservations(g.id); if (Array.isArray(obs) && obs.length) elsewhere.push(`${g.id}@${g.url || '?'}(${obs.length})`); } } catch { /* */ }
+          Logger.info('background', `RUN_BEST_OBSERVATION — 0 manual observations on ${gid}${elsewhere.length ? ` — BUT found on other ground(s): ${elsewhere.join(', ')} → origin/ground MISMATCH (author + ask are on different origins)` : ' — and NONE on any other ground either → the observation was never Saved (Verify ≠ Save)'}`);
+          sendResponse({ success: true, matched: false }); return;
+        }
+        // SELECTION — a SINGLE authored observation is used as-is (nothing to disambiguate; don't gate the user's
+        // one working read behind a fuzzy score). With several, pick the best-named lexical match above a LOW floor.
+        let best = null, bestScore = 1;
+        if (observations.length === 1) { best = observations[0]; }
+        else {
+          bestScore = 0;
+          for (const o of observations) { const s = scoreObservationMatch(ask, o); if (s > bestScore) { best = o; bestScore = s; } }
+          if (!best || bestScore < 0.25) { Logger.info('background', `RUN_BEST_OBSERVATION — ${observations.length} obs, best "${best && best.name}" score ${bestScore.toFixed(2)} < 0.25 → no match`); sendResponse({ success: true, matched: false }); return; }
+        }
+        // Pick the primary runnable (text/attribute/scalar) extract.
         const impl = Array.isArray(best.implementations) ? best.implementations[0] : null;
         const extracts = (impl && Array.isArray(impl.extracts)) ? impl.extracts : [];
-        const ex = extracts.find((e) => e && e.target && (e.shape === 'text' || e.shape === 'text_last' || e.shape === 'attribute' || e.shape === 'scalar' || e.shape === 'raw_text'))
-                || extracts.find((e) => e && e.target) || null;
-        if (!ex || !ex.target) { sendResponse({ success: true, matched: true, ok: false, name: best.name, observationId: best.id, reason: 'no_runnable_extract' }); return; }
+        const ex = extracts.find((e) => _observeMessageForExtract(e)) || null;
+        if (!ex) { Logger.info('background', `RUN_BEST_OBSERVATION — "${best.name}" has no text/attribute extract runnable from chat (shapes: ${extracts.map((e) => e && e.shape).join(', ')})`); sendResponse({ success: true, matched: true, ok: false, name: best.name, observationId: best.id, reason: 'no_runnable_extract' }); return; }
         try { await ctx.ensureContentScript(tabId); } catch { /* */ }
-        const attribute = ex.shape === 'attribute' ? (ex.attribute || 'text')
-                        : (ex.shape === 'scalar' && ex.extract && ex.extract.kind === 'attribute' ? (ex.extract.attr || 'text') : 'text');
-        const res = await new Promise((r) => { try { chrome.tabs.sendMessage(tabId, { type: 'EXTRACT_VALUE', payload: { selector: ex.target, attribute } }, { frameId: 0 }, (x) => { void chrome.runtime.lastError; r(x); }); } catch (e) { r({ success: false, error: e.message }); } });
-        if (!res || res.success === false || res.value == null || String(res.value).trim() === '') {
-          Logger.info('background', `RUN_BEST_OBSERVATION — matched "${best.name}" (${bestScore.toFixed(2)}) but extract "${ex.output}" miss: ${(res && res.error) || 'no value'}`);
+        // RUN via the EXACT OBSERVE_* message Studio's Verify uses (top frame, the author's default) — no reimpl.
+        const msg = _observeMessageForExtract(ex);
+        const res = await new Promise((r) => { try { chrome.tabs.sendMessage(tabId, msg, { frameId: 0 }, (x) => { void chrome.runtime.lastError; r(x); }); } catch (e) { r({ success: false, error: e.message }); } });
+        const value = (res && res.success !== false && res.value != null) ? String(res.value) : '';
+        if (!res || res.success === false || !value.trim()) {
+          Logger.info('background', `RUN_BEST_OBSERVATION — "${best.name}" extract "${ex.output}" (${ex.shape} via ${msg.type}) miss: ${(res && res.error) || 'no value'}`);
           sendResponse({ success: true, matched: true, ok: false, name: best.name, observationId: best.id, output: ex.output });
           return;
         }
-        Logger.info('background', `RUN_BEST_OBSERVATION — "${ask.slice(0, 50)}" → manual obs "${best.name}" (${bestScore.toFixed(2)}) ${best.id} → "${String(res.value).slice(0, 60)}"`);
-        sendResponse({ success: true, matched: true, ok: true, value: String(res.value), name: best.name, observationId: best.id, output: ex.output, score: bestScore });
+        Logger.info('background', `RUN_BEST_OBSERVATION — "${ask.slice(0, 50)}" → manual obs "${best.name}" ${best.id} via ${msg.type} (score ${typeof bestScore === 'number' ? bestScore.toFixed(2) : '1.00'}) → "${value.slice(0, 60)}"`);
+        sendResponse({ success: true, matched: true, ok: true, value, name: best.name, observationId: best.id, output: ex.output });
       } catch (err) {
         Logger.error('background', `RUN_BEST_OBSERVATION failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
@@ -813,7 +923,7 @@ export function createSgMessageHandlers(ctx) {
         let liveStrategyIds = null;
         try { liveStrategyIds = new Set((await StorageManager.listStrategies(gid)).map((s) => s && s.id).filter(Boolean)); } catch { /* */ }
         const _orphan = (c) => !!(c && c.strategyId && liveStrategyIds && !liveStrategyIds.has(c.strategyId));
-        const caps = (await ctx.readSgCapabilities(gid)).filter((c) => isActiveCapability(c) && !_orphan(c));
+        const caps = (await ctx.readSgCapabilities(gid)).filter((c) => isActiveCapability(c) && !_orphan(c) && c.kind !== 'composite');   // composites (T2) aren't plan STEPS — don't nest
         const candidates = (Array.isArray(caps) ? caps : []).map((c) => toCandidate(c)).filter(Boolean);
         if (candidates.length < 2) { sendResponse({ success: true, groundId: gid, steps: [] }); return; }   // <2 caps → nothing to compose
         let affordances = [];
@@ -827,13 +937,74 @@ export function createSgMessageHandlers(ctx) {
           const cand = byId.get(String(s && s.id)); if (!cand) continue;
           let bindings = {};
           if (s.bindings && Object.keys(s.bindings).length) { try { bindings = validateBindings(s.bindings, cand, affordances).bound; } catch { /* */ } }
-          steps.push({ capabilityId: cand.id, intent: cand.intent, bindings, clause: s.clause || '' });
+          steps.push({ capabilityId: cand.id, intent: cand.intent, bindings, clause: s.clause || '', kind: cand.kind || null, outputType: (cand.raw && cand.raw.outputType) || null });
         }
         const gaps = Array.isArray(plan.uncovered) ? plan.uncovered : [];
+        // ORCH-L — when the ask QUANTIFIES over a collection ("the salaries of EACH job"), lift the flat plan into
+        // a control-flow plan (a foreach over the list observe). Keep it only if it's structurally well-formed;
+        // otherwise fall back to the flat sequence (honest degradation, never a broken plan).
+        let outSteps = steps;
+        try {
+          const lift = liftControlFlow(steps, ask);
+          if (lift.lifted) {
+            const v = validatePlan({ steps: lift.steps });
+            if (v.ok) { outSteps = lift.steps; Logger.info('background', `ORCH_PLAN ▸ lifted to control-flow: foreach over the list${lift.collect ? ` → collect ${lift.collect}` : ''}`); }
+            else Logger.warn('background', `ORCH_PLAN ▸ lift rejected (kept flat): ${v.errors.join('; ')}`);
+          }
+        } catch (e) { Logger.warn('background', `ORCH_PLAN lift failed (kept flat): ${e.message}`); }
         Logger.info('background', `ORCH_PLAN ▸ ask="${String(ask).slice(0, 70)}" → ${steps.length} step(s): ${steps.map((s) => `"${s.intent}"${Object.keys(s.bindings).length ? `[${JSON.stringify(s.bindings)}]` : ''}`).join(' → ') || '(none)'}${gaps.length ? ` | uncovered: ${JSON.stringify(gaps)}` : ''}`);
-        sendResponse({ success: true, groundId: gid, steps, gaps, rationale: plan.rationale || '' });
+        sendResponse({ success: true, groundId: gid, steps: outSteps, gaps, rationale: plan.rationale || '' });
       } catch (err) {
         Logger.error('background', `ORCH_PLAN failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // ORCH-X T2 — PROMOTE a verified compound run into a durable COMPOSITE capability. A discrete intent durably
+    // becomes a T1 capability; a compound intent durably becomes a T2 composite, so the next time the SAME ask is a
+    // cache hit (matched atomically) instead of re-decomposed. Rides the same sgCapabilities matcher store; reuses
+    // accreteAlias + writeSgCapability — no new composition engine. The steps are references to the T1 artifacts.
+    ACCEPT_COMPOUND: async (payload, _sender, sendResponse) => {
+      try {
+        const { tabId, groundId = null, ask = '', steps = [], name = '' } = payload ?? {};
+        const usable = (Array.isArray(steps) ? steps : []).filter((s) => s && s.capabilityId);
+        if (!ask || usable.length < 2) { sendResponse({ success: false, error: 'ask + ≥2 steps with capabilityId required' }); return; }
+        let gid = groundId, localeUrl = '';
+        if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); localeUrl = t?.url || ''; if (!gid && localeUrl) { const origin = new URL(localeUrl).origin; const gs = await StorageManager.getAllGrounds(); const g = (Array.isArray(gs) ? gs : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } } catch { /* */ } }
+        if (!gid) { sendResponse({ success: false, error: 'no ground for this page' }); return; }
+        const cap = buildCompositeCapability({ id: crypto.randomUUID(), ask, intent: ask, goal: ask, groundId: gid, steps: usable, name });
+        cap.localeUrl = localeUrl; cap.createdAt = Date.now();
+        cap.aliases = accreteAlias(cap.aliases, ask, { intent: cap.intent });
+        await ctx.writeSgCapability(gid, cap);
+        try { await ctx.appendOutcomes(gid, [Outcomes.makeStageEvent('accept', { groundId: gid, verdict: 'accepted', input: { roleOrIntent: ask.slice(0, 120) }, detail: { capabilityId: cap.id, shape: 'composite', steps: cap.steps.length } })]); } catch { /* */ }
+        Logger.info('background', `ACCEPT_COMPOUND — "${ask.slice(0, 50)}" ${cap.id} → T2 composite of ${cap.steps.length} step(s) [${cap.steps.map((s) => s.kind || 'action').join(' → ')}] on ${gid}`);
+        sendResponse({ success: true, capability: { id: cap.id, intent: cap.intent, kind: 'composite', steps: cap.steps.length } });
+      } catch (err) {
+        Logger.error('background', `ACCEPT_COMPOUND failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // ORCH-X T2 — the cheap (NO LLM) cache lookup: does a SAVED composite cover this exact compound ask? Lexical
+    // alias/intent match over composite capabilities on the page's Ground. Hit → return its steps so the chat runs
+    // them via the existing plan runner; miss → the chat decomposes fresh (and can re-promote). Called only for
+    // compound-ish asks, so simple asks pay nothing.
+    MATCH_COMPOSITE: async (payload, _sender, sendResponse) => {
+      try {
+        const { tabId, groundId = null, ask = '' } = payload ?? {};
+        if (typeof ask !== 'string' || !ask.trim()) { sendResponse({ success: true, matched: false }); return; }
+        let gid = groundId, url = '';
+        try { url = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ }
+        if (!gid && url) { try { const origin = new URL(url).origin; const gs = await StorageManager.getAllGrounds(); const g = (Array.isArray(gs) ? gs : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } catch { /* */ } }
+        if (!gid) { sendResponse({ success: true, matched: false }); return; }
+        const want = normalizeAliasPhrase(ask);
+        const caps = (await ctx.readSgCapabilities(gid)).filter((c) => c && c.kind === 'composite' && isActiveCapability(c) && Array.isArray(c.steps) && c.steps.length);
+        const hit = caps.find((c) => normalizeAliasPhrase(c.intent || '') === want || (Array.isArray(c.aliases) && c.aliases.some((a) => normalizeAliasPhrase(a) === want)));
+        if (!hit) { sendResponse({ success: true, matched: false }); return; }
+        Logger.info('background', `MATCH_COMPOSITE — T2 cache HIT "${ask.slice(0, 50)}" → composite ${hit.id} (${hit.steps.length} step(s))`);
+        sendResponse({ success: true, matched: true, groundId: gid, capabilityId: hit.id, intent: hit.intent, steps: hit.steps });
+      } catch (err) {
+        Logger.error('background', `MATCH_COMPOSITE failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },

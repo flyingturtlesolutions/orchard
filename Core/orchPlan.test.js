@@ -59,4 +59,82 @@ describe('orchPlan — ORCH-X compiler spine', () => {
     assert.ok(validatePlan(dup).errors.some((e) => /duplicate step id/.test(e)));
     assert.equal(validatePlan({ steps: [] }).ok, false, 'an empty plan is invalid');
   });
+
+  // ── Control-flow NODES (body-carrying foreach / loop / gate) ─────────────────────────────────────────────────
+  it('validatePlan: the canonical FOREACH plan passes — search → observe(list) → foreach{ open; observe salary }', () => {
+    // "search recently-posted jobs in japan, check each job and let me know the salaries of each"
+    const plan = { goal: 'salaries of each job', steps: [
+      planStep.fragment('search', 'cap-search', { bindings: { recency: 'recent', location: 'japan' } }),
+      planStep.observe('jobs', { outputType: 'list' }),
+      planStep.foreach('each', 'jobs', [
+        planStep.fragment('open', 'cap-open-job'),
+        planStep.observe('salary', { outputType: 'scalar' }),
+      ], { collect: 'SALARIES' }),
+    ] };
+    const r = validatePlan(plan);
+    assert.deepEqual(r.errors, []);
+    assert.equal(r.ok, true);
+  });
+
+  it('validatePlan: gate over a predicate and loop over a count pass; a foreach over a scalar is rejected', () => {
+    const gate = { steps: [planStep.observe('o', { outputType: 'predicate' }), planStep.gate('g', 'o', [planStep.fragment('f', 'c')])] };
+    assert.equal(validatePlan(gate).ok, true);
+    const loop = { steps: [planStep.observe('o', { outputType: 'count' }), planStep.loop('l', 'o', [planStep.fragment('f', 'c')])] };
+    assert.equal(validatePlan(loop).ok, true);
+    const bad = { steps: [planStep.observe('o', { outputType: 'scalar' }), planStep.foreach('each', 'o', [planStep.fragment('f', 'c')])] };
+    const rb = validatePlan(bad);
+    assert.equal(rb.ok, false);
+    assert.ok(rb.errors.some((e) => /foreach "each"\.over needs an output connecting via "foreach"/.test(e)));
+  });
+
+  it('validatePlan: a foreach node requires a non-empty body', () => {
+    const r = validatePlan({ steps: [planStep.observe('o', { outputType: 'list' }), planStep.foreach('e', 'o', [])] });
+    assert.equal(r.ok, false);
+    assert.ok(r.errors.some((e) => /foreach "e"\.body required/.test(e)));
+  });
+
+  it('validatePlan: a body step sees an ENCLOSING-earlier step (lexical scope)', () => {
+    // gate inside the loop body references `cond` declared before the foreach — visible.
+    const plan = { steps: [
+      planStep.observe('cond', { outputType: 'predicate' }),
+      planStep.observe('jobs', { outputType: 'list' }),
+      planStep.foreach('each', 'jobs', [
+        planStep.gate('g', 'cond', [planStep.fragment('f', 'c')]),
+      ]),
+    ] };
+    assert.equal(validatePlan(plan).ok, true);
+  });
+
+  it('validatePlan: a forward reference INSIDE a body is rejected', () => {
+    const plan = { steps: [
+      planStep.observe('jobs', { outputType: 'list' }),
+      planStep.foreach('each', 'jobs', [
+        planStep.fragment('f', 'c', { forEach: 'later' }),   // refs a later body step
+        planStep.observe('ob', { outputType: 'list' }),
+        planStep.analyze('later', 'ob', 'list'),
+      ]),
+    ] };
+    const r = validatePlan(plan);
+    assert.equal(r.ok, false);
+    assert.ok(r.errors.some((e) => /forward reference/.test(e)));
+  });
+
+  it('validatePlan: an OUTER step cannot reference a BODY step (body ids do not leak out)', () => {
+    const plan = { steps: [
+      planStep.observe('jobs', { outputType: 'list' }),
+      planStep.foreach('each', 'jobs', [planStep.analyze('inner', 'jobs', 'list')]),
+      planStep.fragment('f', 'c', { forEach: 'inner' }),   // 'inner' lives in the body — out of scope here
+    ] };
+    const r = validatePlan(plan);
+    assert.equal(r.ok, false);
+    assert.ok(r.errors.some((e) => /forward reference/.test(e)));
+  });
+
+  it('validatePlan: a duplicate id ACROSS scopes (outer vs body) is caught', () => {
+    const plan = { steps: [
+      planStep.observe('x', { outputType: 'list' }),
+      planStep.foreach('each', 'x', [planStep.observe('x', { outputType: 'scalar' })]),
+    ] };
+    assert.ok(validatePlan(plan).errors.some((e) => /duplicate step id "x"/.test(e)));
+  });
 });

@@ -18,7 +18,8 @@ import { isSafeStrategyResultHtml, looksLikeStrategyResultHtml } from './Service
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
-import { decomposeAsk, looksComplex } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate for the LLM planner
+import { decomposeAsk, isCompoundAsk, looksComplex } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate for the LLM planner + T2 cache
+import { walkPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate)
 import { classifyFeedback } from './Core/orchFeedback.js'; // ORCH-FB — recognize corrective feedback (LLM refines)
 import { parseAdminCommand } from './Core/orchAdmin.js';    // ORCH-ADMIN — management commands (clear/delete)
 import { classifyReadAsk } from './Core/observe.js';        // OBS-READ — is the ask a question (a read)?
@@ -803,24 +804,98 @@ function _orchFeedbackBar(msg) {
 // A complex single sentence ("search SWE jobs in minneapolis posted last 7 days") is decomposed by the LLM into
 // ORDERED capability-routed steps WITH bindings (ORCH_PLAN), then confirmed + run. Unlike the lexical chain, the
 // steps are already resolved (capabilityId + bindings) — no per-step re-match.
-function _orchConfirmPlan(msg, { tabId, groundId, steps, gaps = [] }) {
+function _orchConfirmPlan(msg, { tabId, groundId, steps, gaps = [], ask = '', savedComposite = false }) {
   const fmt = (b) => Object.keys(b || {}).length ? ` (${Object.entries(b).map(([k, v]) => `${k}=${v}`).join(', ')})` : '';
-  const list = steps.map((s, i) => `${i + 1}. ${s.intent}${fmt(s.bindings)}`).join('\n');
-  const head = steps.length ? `I’ll do ${steps.length} step${steps.length > 1 ? 's' : ''} in order:\n${list}` : 'I don’t have a saved capability for this yet — I can try to work it out from the page.';
+  const list = steps.map((s, i) => {
+    if (s && (s.kind === 'foreach' || s.kind === 'loop')) {
+      const inner = (s.body || []).map((b) => b.intent || b.clause || b.kind).filter(Boolean).join(' → ');
+      return `${i + 1}. for each item: ${inner}${s.collect ? ` (collect ${s.collect})` : ''}`;
+    }
+    if (s && s.kind === 'gate') return `${i + 1}. if it applies: ${(s.body || []).map((b) => b.intent || b.clause).filter(Boolean).join(' → ')}`;
+    return `${i + 1}. ${s.intent || s.clause || s.kind || 'step'}${fmt(s.bindings)}`;
+  }).join('\n');
+  const head = steps.length ? `${savedComposite ? 'Saved as one — ' : ''}I’ll do ${steps.length} step${steps.length > 1 ? 's' : ''} in order:\n${list}` : 'I don’t have a saved capability for this yet — I can try to work it out from the page.';
   // HONEST partial coverage — name the constraints no capability covers; we'll TRY them via the NL fallback after.
   const gapNote = gaps.length ? `\n\n⚠ Not saved yet: ${gaps.join(', ')} — I’ll try ${gaps.length > 1 ? 'these' : 'this'} from the page after.` : '';
   _setMessageBody(msg, head + gapNote);
   const bar = _orchActionBar(msg);
-  if (steps.length) bar.appendChild(_mkBtn(steps.length > 1 ? `Run all ${steps.length}` : 'Run it', () => { bar.remove(); _orchRunPlan(msg, { tabId, groundId, steps, gaps }); }));
+  if (steps.length) bar.appendChild(_mkBtn(steps.length > 1 ? `Run all ${steps.length}` : 'Run it', () => { bar.remove(); _orchRunPlan(msg, { tabId, groundId, steps, gaps, ask, savedComposite }); }));
   else if (gaps.length) bar.appendChild(_mkBtn('✨ Try to work it out', () => { bar.remove(); _orchTryGaps(msg, { tabId, groundId, gaps }); }));
   bar.appendChild(_mkBtn('Cancel', () => { bar.remove(); _setMessageBody(msg, 'Okay — cancelled.'); }));
 }
 
-async function _orchRunPlan(msg, { tabId, groundId, steps, gaps = [] }) {
+// Run a READ step the SAME way the single-ask path does — REUSE the stable observation read backends, don't
+// reimplement: the manual Studio observation (RUN_BEST_OBSERVATION) first, then the captured one
+// (RUN_OBSERVATION). Returns the value string, or null when nothing read.
+async function _orchReadValue({ tabId, groundId, ask, capabilityId }) {
+  if (ask) {
+    const mo = await _orchReq('RUN_BEST_OBSERVATION', { tabId, ask });
+    if (mo && mo.matched && mo.ok && String(mo.value || '').trim()) return String(mo.value).trim();
+  }
+  if (capabilityId) {
+    const r = await _orchReq('RUN_OBSERVATION', { tabId, groundId, capabilityId });
+    if (r && r.success !== false && r.ok !== false && String(r.value || '').trim()) return String(r.value).trim();
+  }
+  return null;
+}
+
+// ORCH-L — run a plan IR with CONTROL-FLOW nodes (foreach/loop/gate) via the pure interpreter (walkPlan). The
+// executor is thin glue over the EXISTING handlers — no new runtime: a fragment → REPLAY_SG_CAPABILITY; a
+// foreach/loop DRIVER observe → RUN_OBSERVATION_LIST (count the list's items); a leaf read → RUN_OBSERVATION with
+// a positional `fromIndex` for the Nth item. Collected outputs (the per-iteration lists) are shown inline.
+async function _orchRunPlanIR(msg, { tabId, groundId, plan }) {
+  const driverIds = new Set();   // observe ids a foreach/loop iterates over → must return items, not a scalar
+  const _scan = (steps) => { for (const s of (steps || [])) { if (s && (s.kind === 'foreach' || s.kind === 'loop') && s.over) driverIds.add(s.over); if (s && Array.isArray(s.body)) _scan(s.body); } };
+  _scan(plan && plan.steps);
+  const exec = {
+    fragment: async (step, scope) => {
+      // Pass the step's OWN bindings only (string values). Per-item binding ($item / a per-row selector) is the
+      // navigation-foreach follow-up — do NOT spread the raw scope.vars item object, which executeStrategy would
+      // try to template as a string.
+      const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId, capabilityId: step.capabilityId, paramValues: (step.bindings && typeof step.bindings === 'object') ? step.bindings : {} });
+      return { ok: !!(res && res.success !== false && res.ran !== false && res.ok !== false), error: res && (res.error || res.reason) };
+    },
+    observe: async (step, scope) => {
+      if (driverIds.has(step.id)) {
+        const res = await _orchReq('RUN_OBSERVATION_LIST', { tabId, groundId, capabilityId: step.capabilityId });
+        return { ok: !!(res && res.success !== false), items: (res && res.items) || [], value: (res && res.count) || 0, error: res && res.error };
+      }
+      const res = await _orchReq('RUN_OBSERVATION', { tabId, groundId, capabilityId: step.capabilityId, ...(Number.isInteger(scope.index) ? { fromIndex: scope.index } : {}) });
+      const ok = !!(res && res.success !== false && res.ok !== false);
+      return { ok, value: ok ? String(res.value || '').trim() : null, error: res && (res.reason || res.error) };
+    },
+  };
+  _setMessageBody(msg, 'Running…');
+  const env = await walkPlan(plan, exec);
+  const outs = (env && env.outputs) ? Object.entries(env.outputs) : [];
+  if (outs.length) {
+    _setMessageBody(msg, outs.map(([k, v]) => Array.isArray(v) ? `${k} (${v.length}):\n${v.map((x, i) => `  ${i + 1}. ${x}`).join('\n')}` : `${k}: ${v}`).join('\n\n'));
+  } else {
+    _setMessageBody(msg, (env && env.ok) ? 'Done.' : `Couldn’t complete that${env && env.error ? ` — ${env.error}` : ''}.`);
+  }
+  return env;
+}
+
+async function _orchRunPlan(msg, { tabId, groundId, steps, gaps = [], ask = '', savedComposite = false }) {
+  // ORCH-L — a plan carrying control-flow nodes runs through the interpreter, not the flat sequence runner.
+  if (Array.isArray(steps) && steps.some((s) => s && (s.kind === 'foreach' || s.kind === 'loop' || s.kind === 'gate'))) {
+    return _orchRunPlanIR(msg, { tabId, groundId, plan: { goal: ask, steps } });
+  }
   const total = steps.length;
+  const readouts = [];
   for (let i = 0; i < total; i++) {
     const s = steps[i];
     _setMessageBody(msg, `Step ${i + 1} of ${total}: “${s.intent}”…`);
+    // A READ step (observation) returns a VALUE — run it through the observation read path, not REPLAY (an
+    // observation has no strategy, so REPLAY errors "no saved strategy or binding").
+    if (s.kind === 'observation') {
+      const val = await _orchReadValue({ tabId, groundId, ask: s.clause || s.intent, capabilityId: s.capabilityId });
+      if (val == null) { _setMessageBody(msg, `Step ${i + 1} (“${s.intent}”) couldn’t read a value here.`); _orchOfferRecord(msg, { groundId, tabId, ask: s.clause || s.intent, label: '● Show me this step' }); return; }
+      readouts.push(val);
+      _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId: s.capabilityId, phrase: s.clause || s.intent });
+      await new Promise((r) => setTimeout(r, 400));
+      continue;
+    }
     const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId, capabilityId: s.capabilityId, paramValues: (s.bindings && typeof s.bindings === 'object') ? s.bindings : {} });
     if (!res || res.success === false || res.ran === false || res.ok === false) {
       const why = (res && (res.error || res.reason)) ? ` — ${res.error || res.reason}` : '';
@@ -834,13 +909,15 @@ async function _orchRunPlan(msg, { tabId, groundId, steps, gaps = [] }) {
   // NL FALLBACK — the parts no saved capability covered now run through the NL pipeline ON THE RESULTING PAGE
   // (where the filters live). Offer rather than auto-run (precision-first: an unproven plan touching the page).
   if (gaps.length) {
-    _setMessageBody(msg, `${total ? `Ran ${total} step${total > 1 ? 's' : ''}. ` : ''}I haven’t saved: ${gaps.join(', ')} — try to work ${gaps.length > 1 ? 'them' : 'it'} out from the page?`);
+    _setMessageBody(msg, `${readouts.length ? readouts.join('\n') + '\n\n' : ''}${total ? `Ran ${total} step${total > 1 ? 's' : ''}. ` : ''}I haven’t saved: ${gaps.join(', ')} — try to work ${gaps.length > 1 ? 'them' : 'it'} out from the page?`);
     const bar = _orchActionBar(msg);
     bar.appendChild(_mkBtn(`✨ Try ${gaps.length > 1 ? 'them' : 'it'}`, () => { bar.remove(); _orchTryGaps(appendMessage({ role: 'assistant', body: '' }), { tabId, groundId, gaps }); }));
     bar.appendChild(_mkBtn('● Show me instead', () => { bar.remove(); _orchRecordFlow(appendMessage({ role: 'assistant', body: '' }), { groundId, tabId, ask: gaps[0] }); }));
     return;
   }
-  _setMessageBody(msg, `Done — ran all ${total} steps.`);
+  _setMessageBody(msg, readouts.length ? readouts.join('\n') : `Done — ran all ${total} steps.`);
+  // T2 — a fresh compound that ran cleanly (no gaps) can be PROMOTED to a durable composite (cache hit next time).
+  if (!savedComposite && !gaps.length) _orchOfferSaveCompound(msg, { tabId, groundId, ask, steps });
 }
 
 // ── ORCH-X NL FALLBACK — resolve a gap fresh from the page (the NL pipeline), promote it on a verified pass ─────
@@ -909,7 +986,11 @@ function _orchPickOnce({ tabId }) {
     // ALIVE (re-injected if the tab is stale), or the message is dropped and the picker silently never appears.
     chrome.runtime.onMessage.addListener(onMsg);
     _orchEnsureCS(tabId).then(() => {
-      try { chrome.tabs.sendMessage(tabId, { type: 'START_PICK', payload: { sessionId, mode: 'target' } }, () => void chrome.runtime.lastError); }
+      // Use the EXACT pick payload Studio's observation-author sends (Sidepanel/modes/ObservationAuthor/picker.js
+      // startPick). The missing `labelMode:'single'` was the whole bug: without it the picker WALKS UP to the card
+      // CONTAINER and synthesizes a brittle `div.cardOutline…` selector, instead of staying on the exact element
+      // clicked and producing the stable `[aria-label=…]` selector Studio gets. Same click, different element.
+      try { chrome.tabs.sendMessage(tabId, { type: 'START_PICK', payload: { sessionId, mode: 'target', containerSelector: '', multiCandidate: false, labelMode: 'single' } }, () => void chrome.runtime.lastError); }
       catch { finish(null); }
     });
   });
@@ -921,19 +1002,24 @@ async function _orchObserveCapture(msg, { groundId, tabId, ask }) {
   const picked = await _orchPickOnce({ tabId });
   if (!picked || !picked.selector || picked.error) { _setMessageBody(msg, `Didn’t catch that${picked && picked.error ? ` (${picked.error})` : ''} — ask again to retry.`); return; }
   _setMessageBody(msg, 'Saving what to read…');
-  // Prefer the VALUE-INDEPENDENT structural selector so the read is positional ("the first job"), not pinned to
-  // this instance's text (Indeed's aria-label selector matched only that one job title and broke on the next page).
-  const selector = picked.structuralSelector || picked.selector;
-  // Carry the picker's landmark identity (role + accessibleName + hierarchicalContext) so the saved
-  // observation can self-heal at run time (LANDMARK_PROBE_OR_RECOVER) when this selector later breaks.
   const lmk = (picked.landmark && typeof picked.landmark === 'object') ? picked.landmark : null;
-  // Carry the positional/archetype selector when the picked value is one item in a repeating list — it's the
-  // robust path for "the first/Nth …" reads (value-independent; survives the list reordering).
+  // Positional/archetype selector for list-item reads ("the first/Nth …"), when present.
   const archetype = (picked.archetype && typeof picked.archetype === 'object') ? picked.archetype : null;
-  const res = await _orchReq('OBSERVE_CAPTURE', { tabId, groundId, ask, selector, label: picked.label || '', role: (lmk && lmk.role) || '', landmark: lmk, archetype, outputType: classifyReadAsk(ask).outputType });
-  _setMessageBody(msg, (res && res.success && res.capability)
-    ? `Got it — I’ll read that for “${ask}”. Ask again and I’ll fetch the value.`
-    : `Couldn’t set that up${res && res.error ? ` — ${res.error}` : ''}.`);
+  // Send BOTH the synthesized selector (often a stable [aria-label=…], the one Studio keeps) AND the positional
+  // structural class-chain. OBSERVE_CAPTURE VERIFIES each on the live page at capture and STORES whichever
+  // actually re-reads — so we never persist a selector that can't reproduce the value the picker just held
+  // (Indeed mutates the structural classes, so that one fails even on an immediate re-read; the aria-label one
+  // survives). This replaces the old "always prefer structural" choice that stored the brittle one.
+  const res = await _orchReq('OBSERVE_CAPTURE', { tabId, groundId, ask, selector: picked.selector || picked.structuralSelector, structuralSelector: picked.structuralSelector || null, label: picked.label || '', role: (lmk && lmk.role) || '', landmark: lmk, archetype, tagName: picked.tagName || '', outputType: classifyReadAsk(ask).outputType });
+  // VERIFY-AT-CAPTURE — surface the value the picker SAW right now (the same re-read the next ask will do). If the
+  // stored selector reproduces it → show it immediately. If not → say so plainly instead of silently deferring a
+  // read that will return nothing (this is the "the text should be visible somewhere" instinct, made real).
+  if (res && res.success && res.capability) {
+    if (res.verifiedValue) _setMessageBody(msg, `Got it — I read “${String(res.verifiedValue).slice(0, 300)}”. Ask again and I’ll fetch it live.`);
+    else _setMessageBody(msg, `Saved — but when I re-read it just now I got nothing back. The picker saw ${res.sawText ? `“${String(res.sawText).slice(0, 120)}”` : 'a value'}, but the stored selector can’t reproduce it on this page (details in the log). Point me at it again, or use a Studio observation for a stable selector.`);
+  } else {
+    _setMessageBody(msg, `Couldn’t set that up${res && res.error ? ` — ${res.error}` : ''}.`);
+  }
 }
 
 // Run an observation: EXTRACT + show the value inline.
@@ -987,22 +1073,26 @@ async function _orchAdminFlow(admin) {
 }
 
 // ORCH-X — confirm a COMPOUND ask as an ordered chain, then run it. One confirmation covers the whole chain.
-function _orchConfirmChain(msg, { tabId, clauses, firstMatch }) {
+function _orchConfirmChain(msg, { tabId, clauses, firstMatch, ask = '' }) {
   const list = clauses.map((c, i) => `${i + 1}. ${c.text}`).join('\n');
   _setMessageBody(msg, `That’s a few steps — I’ll do them in order:\n${list}`);
   const bar = _orchActionBar(msg);
   const go = document.createElement('button'); go.className = 'btn-secondary tiny'; go.type = 'button'; go.textContent = `Run all ${clauses.length}`;
   const cancel = document.createElement('button'); cancel.className = 'btn-secondary tiny'; cancel.type = 'button'; cancel.textContent = 'Cancel';
   bar.appendChild(go); bar.appendChild(cancel);
-  go.addEventListener('click', () => { bar.remove(); _orchRunChain(msg, { tabId, clauses, firstMatch }); });
+  go.addEventListener('click', () => { bar.remove(); _orchRunChain(msg, { tabId, clauses, firstMatch, ask }); });
   cancel.addEventListener('click', () => { bar.remove(); _setMessageBody(msg, 'Okay — cancelled.'); });
 }
 
 // Run a decomposed chain JIT: match EACH clause against the page state AT THAT POINT (so a clause on the
 // post-navigation page resolves correctly), REPLAY it, settle, next. A mid-chain MISS/failure pauses and offers
 // to record just that clause. The first clause reuses the match already computed to probe the Ground (no re-LLM).
-async function _orchRunChain(msg, { tabId, clauses, firstMatch }) {
+async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '' }) {
   const total = clauses.length;
+  const readouts = [];
+  const ranSteps = [];   // T2 — the resolved {capabilityId, bindings, kind, clause, intent} per step, for promotion
+  let chainGroundId = null;
+  const _record = (m, clause, kind) => { ranSteps.push({ capabilityId: m.capabilityId, bindings: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {}, kind: kind || (m.candidate && m.candidate.kind) || null, clause: clause.text, intent: (m.candidate && m.candidate.intent) || clause.text }); chainGroundId = m.groundId; };
   for (let i = 0; i < total; i++) {
     const clause = clauses[i];
     _setMessageBody(msg, `Step ${i + 1} of ${total}: “${clause.text}”…`);
@@ -1014,6 +1104,15 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch }) {
       _orchOfferRecord(msg, { groundId: m && m.groundId, tabId, ask: clause.text, label: '● Show me this step' });
       return;
     }
+    // A READ clause (observation) returns a VALUE — run it through the observation read path, not REPLAY.
+    if (m.candidate && m.candidate.kind === 'observation') {
+      const val = await _orchReadValue({ tabId, groundId: m.groundId, ask: clause.text, capabilityId: m.capabilityId });
+      if (val == null) { _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t read “${clause.text}” here.`); _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me this step' }); return; }
+      readouts.push(val); _record(m, clause, 'observation');
+      _orchReq('ORCH_RECORD_ALIAS', { groundId: m.groundId, capabilityId: m.capabilityId, phrase: clause.text });
+      await new Promise((r) => setTimeout(r, 400));
+      continue;
+    }
     const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId: m.groundId, capabilityId: m.capabilityId, paramValues: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {} });
     if (!res || res.success === false || res.ran === false || res.ok === false) {
       const why = (res && (res.error || res.reason)) ? ` — ${res.error || res.reason}` : '';
@@ -1021,10 +1120,13 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch }) {
       _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me the right way' });
       return;
     }
+    _record(m, clause);
     _orchReq('ORCH_RECORD_ALIAS', { groundId: m.groundId, capabilityId: m.capabilityId, phrase: clause.text });   // flywheel per clause
     await new Promise((r) => setTimeout(r, 800));   // settle between steps (navigation / render)
   }
-  _setMessageBody(msg, `Done — ran all ${total} steps.`);
+  _setMessageBody(msg, readouts.length ? readouts.join('\n') : `Done — ran all ${total} steps.`);
+  // T2 — the whole compound ran cleanly → offer to promote it to a durable composite (cache hit next time).
+  _orchOfferSaveCompound(msg, { tabId, groundId: chainGroundId, ask, steps: ranSteps });
 }
 
 // A "show me" record button (offered on a grounded MISS or after a failed run). No groundId → no-op.
@@ -1034,6 +1136,21 @@ function _orchOfferRecord(msg, { groundId, tabId, ask, label = '● Show me' }) 
   const rec = document.createElement('button'); rec.className = 'btn-secondary tiny'; rec.type = 'button'; rec.textContent = label;
   bar.appendChild(rec);
   rec.addEventListener('click', () => { bar.remove(); _orchRecordFlow(msg, { groundId, tabId, ask }); });
+}
+
+// ORCH-X T2 — after a compound ask runs successfully, offer to PROMOTE it into a durable composite (a T2
+// artifact) so the SAME ask is a one-step cache hit next time (ACCEPT_COMPOUND). Reuses the saved-step list — no
+// re-record. ≥2 steps + a known ground required.
+function _orchOfferSaveCompound(msg, { tabId, groundId, ask, steps }) {
+  if (!groundId || !ask) return;
+  const usable = (Array.isArray(steps) ? steps : []).filter((s) => s && s.capabilityId);
+  if (usable.length < 2) return;
+  const bar = _orchActionBar(msg);
+  bar.appendChild(_mkBtn('💾 Remember these steps', async () => {
+    bar.remove();
+    const r = await _orchReq('ACCEPT_COMPOUND', { tabId, groundId, ask, steps: usable });
+    appendMessage({ role: 'assistant', body: (r && r.success && r.capability) ? `Saved — next time “${ask}” runs in one step.` : `Couldn’t save${r && r.error ? ` — ${r.error}` : ''}.` });
+  }));
 }
 
 // Conversational fillers are never page tasks — skip the grounded matcher so "yes"/"ok" don't match a capability.
@@ -1064,6 +1181,19 @@ async function _tryGroundedTurn(text) {
   const tab = await _orchActiveTab();
   if (!tab || typeof tab.id !== 'number') return false;
 
+  // ORCH-X T2 CACHE — a COMPOUND ask the user already saved as a composite (a T2 artifact) runs ATOMICALLY: no
+  // re-decompose, no per-clause re-match. Cheap lexical lookup (NO LLM), gated to compound-ish asks so a simple
+  // ask pays nothing. This is "compound intents are T2 artifacts" — a discrete intent is a T1 cache hit; a
+  // compound intent, once promoted, is a T2 cache hit.
+  if (isCompoundAsk(text) || looksComplex(text)) {
+    const mc = await _orchReq('MATCH_COMPOSITE', { tabId: tab.id, ask: text });
+    if (mc && mc.matched && Array.isArray(mc.steps) && mc.steps.length) {
+      const probe = appendMessage({ role: 'assistant', body: '' });
+      _orchConfirmPlan(probe, { tabId: tab.id, groundId: mc.groundId, steps: mc.steps, gaps: [], ask: text, savedComposite: true });
+      return true;
+    }
+  }
+
   // ORCH-X — a COMPOUND ask ("search for x AND filter by y") is DECOMPOSED and CHAINED over existing
   // capabilities, instead of being matched as one (unfindable) atomic intent. We probe the Ground with the
   // first clause (reused as step 1's match); no Ground → fall through to the legacy matcher.
@@ -1073,7 +1203,7 @@ async function _tryGroundedTurn(text) {
     const m0 = await _orchReq('ORCH_MATCH', { tabId: tab.id, ask: clauses[0].text });
     if (!m0 || !m0.groundId) { probe.remove(); return false; }
     probe.classList.remove('thinking'); probe.classList.add('assistant');
-    _orchConfirmChain(probe, { tabId: tab.id, clauses, firstMatch: m0 });
+    _orchConfirmChain(probe, { tabId: tab.id, clauses, firstMatch: m0, ask: text });
     return true;
   }
 
@@ -1090,7 +1220,7 @@ async function _tryGroundedTurn(text) {
     // covers (so we surface the gap honestly instead of an over-confident "covers this" single match).
     if (pSteps.length > 1 || (pSteps.length === 1 && pGaps.length > 0)) {
       probe.classList.remove('thinking'); probe.classList.add('assistant');
-      _orchConfirmPlan(probe, { tabId: tab.id, groundId: plan.groundId, steps: pSteps, gaps: pGaps });
+      _orchConfirmPlan(probe, { tabId: tab.id, groundId: plan.groundId, steps: pSteps, gaps: pGaps, ask: text });
       return true;
     }
     probe.remove();

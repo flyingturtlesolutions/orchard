@@ -14,7 +14,7 @@
 // PURE: no DOM / chrome / LLM — the plan is data; the LLM produces it, the runtime consumes it.
 //
 // @module Core/orchPlan
-// @version 2.74.670
+// @version 2.74.719
 
 /** Analysis OUTPUT TYPE → the control-flow construct it compiles to (§6). The fragment that consumes the
  *  analysis is wired accordingly. */
@@ -34,64 +34,103 @@ export function connectionForOutputType(outputType) {
   return OUTPUT_CONNECTION[String(outputType || '').toLowerCase()] || 'binding';
 }
 
-export const STEP_KINDS = Object.freeze(['fragment', 'observe', 'analyze']);
+export const STEP_KINDS = Object.freeze(['fragment', 'observe', 'analyze', 'foreach', 'loop', 'gate']);
 
-// A plan step's connection field → the analysis-output connection it requires.
+// A fragment's legacy connection FIELD (single-fragment form) → the analysis-output connection it requires.
 const _CONNECTION_FIELD = Object.freeze({ forEach: 'foreach', gatedBy: 'gate', loopUntil: 'loop' });
 
+// A CONTROL-FLOW NODE kind → the connection its driving `over` step's output type must map to. This is the
+// body-carrying form: a sub-plan run per-item (foreach), repeatedly (loop), or conditionally (gate). The body is
+// what makes "check each job → read its salary → collect" expressible (a single connection field can't hold a
+// sub-pipeline). The connection is still DERIVED from the producer's output type, never authored.
+const _NODE_CONNECTION = Object.freeze({ foreach: 'foreach', loop: 'loop', gate: 'gate' });
+
+/** Collect every step id in the plan TREE (pre-order, descending into bodies). PURE — used for global id
+ *  uniqueness AND to tell an UNKNOWN ref from a FORWARD / out-of-scope one. */
+function _collectIds(steps, out) {
+  for (const s of (Array.isArray(steps) ? steps : [])) {
+    if (s && s.id != null && s.id !== '') out.push(s.id);
+    if (s && Array.isArray(s.body)) _collectIds(s.body, out);
+  }
+}
+
 /**
- * Validate a plan IR — the structural guard the compiler runs before the runtime emits Strategy constructs.
- * PURE. A plan is `{ goal?, steps: Step[] }`. Step kinds: 'fragment' (a grounded capability invocation, with
- * `bindings` and an optional connection to an analysis), 'observe' (a grounded read), 'analyze' (reasoning over
- * an observation, producing a typed output). Checks:
- *   - every step has a unique id and a known kind
- *   - analyze.over references an EARLIER observe step
- *   - a fragment's connection (forEach / gatedBy / loopUntil) references an EARLIER analyze step whose output
- *     type maps to the matching connection (list↔forEach, predicate↔gatedBy, count↔loopUntil) — a list can't
- *     gate, a predicate can't iterate
- *   - no forward references (a connection must point to an already-produced step)
+ * Validate a plan IR — the structural guard the compiler runs before the runtime emits Strategy constructs. PURE.
+ * A plan is `{ goal?, steps: Step[] }`. Step kinds:
+ *   - 'fragment' — a grounded capability invocation (`bindings`, optional legacy connection field).
+ *   - 'observe'  — a grounded read (carries an `outputType`).
+ *   - 'analyze'  — reasoning over an observe, producing a typed output.
+ *   - 'foreach' / 'loop' / 'gate' — CONTROL-FLOW NODES: a `body` (sub-plan) run per-item / repeatedly /
+ *     conditionally, driven by an `over` ref to an EARLIER observe/analyze whose outputType maps to the node's
+ *     connection (list↔foreach, count↔loop, predicate↔gate). Optional `collect` names the list the body's
+ *     per-iteration reads accumulate into.
+ * Checks: unique ids (whole tree); known kinds; analyze.over → an earlier observe; a fragment's legacy connection
+ * field → an earlier analyze whose output type matches; a control-flow node's `over` → an earlier observe/analyze
+ * whose output type matches the node; a non-empty body; no forward / out-of-scope refs. Scope is LEXICAL: a ref in
+ * a body sees its enclosing-earlier steps + its own earlier steps — never later steps, nor a sibling body's steps.
  * @returns {{ok:boolean, errors:string[]}}
  */
 export function validatePlan(plan) {
   const errors = [];
   const steps = (plan && Array.isArray(plan.steps)) ? plan.steps : [];
   if (!steps.length) return { ok: false, errors: ['plan has no steps'] };
+  const allIds = [];
+  _collectIds(steps, allIds);
+  const seen = new Set();
+  for (const id of allIds) { if (seen.has(id)) errors.push(`duplicate step id "${id}"`); seen.add(id); }
+  _validateScope(steps, new Map(), new Set(allIds), errors);
+  return { ok: errors.length === 0, errors };
+}
 
-  const idx = new Map();   // id → position
-  steps.forEach((s, i) => {
-    if (!s || s.id == null || s.id === '') { errors.push(`step ${i}: missing id`); return; }
-    if (idx.has(s.id)) errors.push(`duplicate step id "${s.id}"`);
-    else idx.set(s.id, i);
-    if (!STEP_KINDS.includes(s && s.kind)) errors.push(`step "${s && s.id}": unknown kind "${s && s.kind}"`);
-  });
-
-  const earlierRef = (id, fromIdx, label) => {
-    if (id == null) return null;
-    if (!idx.has(id)) { errors.push(`${label} → unknown step "${id}"`); return null; }
-    if (idx.get(id) >= fromIdx) { errors.push(`${label} → "${id}" is not an earlier step (forward reference)`); return null; }
-    return steps[idx.get(id)];
-  };
-
-  steps.forEach((s, i) => {
-    if (!s) return;
+// Validate one scope. `enclosing` (Map id→step) = steps visible from enclosing scopes (lexically before this
+// node). `allSet` = every id in the tree (to distinguish an unknown ref from a forward/out-of-scope one). PURE
+// apart from pushing into `errors`. Body steps are validated in their own child scope and are NOT promoted out.
+function _validateScope(steps, enclosing, allSet, errors) {
+  const visible = new Map(enclosing);
+  for (const s of steps) {
+    if (!s || s.id == null || s.id === '') { errors.push('step: missing id'); continue; }
+    if (!STEP_KINDS.includes(s.kind)) errors.push(`step "${s.id}": unknown kind "${s.kind}"`);
+    const ref = (refId, label) => {
+      if (refId == null) return null;
+      if (visible.has(refId)) return visible.get(refId);
+      if (allSet.has(refId)) errors.push(`${label} → "${refId}" is not an earlier step (forward reference)`);
+      else errors.push(`${label} → unknown step "${refId}"`);
+      return null;
+    };
     if (s.kind === 'analyze') {
-      const over = earlierRef(s.over, i, `analyze "${s.id}".over`);
+      const over = ref(s.over, `analyze "${s.id}".over`);
       if (over && over.kind !== 'observe') errors.push(`analyze "${s.id}".over must reference an observe step (got "${over.kind}")`);
-    }
-    if (s.kind === 'fragment') {
+    } else if (s.kind === 'fragment') {
       for (const field of Object.keys(_CONNECTION_FIELD)) {
         if (s[field] == null) continue;
-        const a = earlierRef(s[field], i, `fragment "${s.id}".${field}`);
+        const a = ref(s[field], `fragment "${s.id}".${field}`);
         if (!a) continue;
         if (a.kind !== 'analyze') { errors.push(`fragment "${s.id}".${field} must reference an analyze step`); continue; }
         const want = _CONNECTION_FIELD[field];
         const got = connectionForOutputType(a.outputType);
         if (got !== want) errors.push(`fragment "${s.id}".${field} needs an analyze whose output connects via "${want}", but "${a.id}" (${a.outputType}) connects via "${got}"`);
       }
+    } else if (_NODE_CONNECTION[s.kind]) {
+      const over = ref(s.over, `${s.kind} "${s.id}".over`);
+      if (over) {
+        if (over.kind !== 'observe' && over.kind !== 'analyze') {
+          errors.push(`${s.kind} "${s.id}".over must reference an observe or analyze step (got "${over.kind}")`);
+        } else {
+          const want = _NODE_CONNECTION[s.kind];
+          const got = connectionForOutputType(over.outputType);
+          if (got !== want) errors.push(`${s.kind} "${s.id}".over needs an output connecting via "${want}", but "${over.id}" (${over.outputType}) connects via "${got}"`);
+        }
+      }
+      if (s.collect != null && (typeof s.collect !== 'string' || !s.collect.trim())) errors.push(`${s.kind} "${s.id}".collect must be a non-empty output name`);
+      if (!Array.isArray(s.body) || s.body.length === 0) {
+        errors.push(`${s.kind} "${s.id}".body required (non-empty array of steps)`);
+      } else {
+        const inner = new Map(visible); inner.set(s.id, s);   // the body sees enclosing-earlier steps + this node
+        _validateScope(s.body, inner, allSet, errors);
+      }
     }
-  });
-
-  return { ok: errors.length === 0, errors };
+    visible.set(s.id, s);   // visible to LATER steps in THIS scope (body steps are NOT promoted to the outer scope)
+  }
 }
 
 /** Step constructors — keep the plan IR consistent. PURE. */
@@ -99,4 +138,10 @@ export const planStep = {
   fragment: (id, capabilityId, extra = {}) => ({ kind: 'fragment', id, capabilityId, bindings: {}, ...extra }),
   observe: (id, extra = {}) => ({ kind: 'observe', id, ...extra }),
   analyze: (id, over, outputType, extra = {}) => ({ kind: 'analyze', id, over, outputType, ...extra }),
+  // CONTROL-FLOW NODES — a `body` (sub-plan) driven by an earlier observe/analyze (`over`). `extra` may carry
+  // `collect` (the output list the body's per-iteration reads accumulate into), `itemVar` (foreach; default
+  // 'item' — how a body step names the current element in its bindings), and `until` (a loop-bound override).
+  foreach: (id, over, body = [], extra = {}) => ({ kind: 'foreach', id, over, itemVar: 'item', body, ...extra }),
+  loop: (id, over, body = [], extra = {}) => ({ kind: 'loop', id, over, body, ...extra }),
+  gate: (id, over, body = [], extra = {}) => ({ kind: 'gate', id, over, body, ...extra }),
 };

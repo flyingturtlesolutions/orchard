@@ -4,7 +4,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex } from './orchChain.js';
+import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow } from './orchChain.js';
+import { validatePlan } from './orchPlan.js';
 
 describe('orchChain — decompose a compound ask + assemble a sequential plan (ORCH-X)', () => {
   it('decomposeAsk: a single intent stays one clause', () => {
@@ -79,5 +80,61 @@ describe('orchChain — decompose a compound ask + assemble a sequential plan (O
     assert.equal(gaps.length, 1);
     assert.equal(gaps[0].text, 'filter by date');
     assert.equal(gaps[0].index, 1);
+  });
+
+  it('buildCompositeCapability: a verified compound → a durable T2 artifact riding the matcher rails', () => {
+    const cap = buildCompositeCapability({
+      id: 'cmp1', ask: 'search support jobs in minneapolis and tell me the first title', groundId: 'gnd_x',
+      steps: [
+        { capabilityId: 'cap_search', bindings: { KEYWORD: 'support', LOCATION: 'minneapolis' }, kind: null, clause: 'search support jobs in minneapolis', intent: 'Search jobs' },
+        { capabilityId: 'obs_title', bindings: {}, kind: 'observation', clause: 'tell me the first title', intent: "what's the first title" },
+      ],
+    });
+    assert.equal(cap.kind, 'composite');
+    assert.equal(cap.effect, 'composite');
+    assert.equal(cap.reversible, false, 'may contain an irreversible action → confirm-first');
+    assert.equal(cap.groundId, 'gnd_x');
+    assert.equal(cap.steps.length, 2);
+    assert.equal(cap.steps[0].capabilityId, 'cap_search');
+    assert.deepEqual(cap.steps[0].bindings, { KEYWORD: 'support', LOCATION: 'minneapolis' });
+    assert.equal(cap.steps[1].kind, 'observation', 'the read step keeps its kind for the runner');
+  });
+
+  it('buildCompositeCapability: steps without a capabilityId are dropped', () => {
+    const cap = buildCompositeCapability({ ask: 'x and y', groundId: 'g', steps: [{ capabilityId: 'a' }, { clause: 'gap' }, { capabilityId: 'b' }] });
+    assert.deepEqual(cap.steps.map((s) => s.capabilityId), ['a', 'b']);
+  });
+
+  it('liftControlFlow: "the salaries of EACH job" → a foreach over the list, body = the trailing read; it validates', () => {
+    const flat = [
+      { capabilityId: 'cap-search', intent: 'search jobs', kind: null, clause: 'search recent jobs in japan' },
+      { capabilityId: 'obs-jobs', intent: 'the job list', kind: 'observation', outputType: 'list', clause: 'each job' },
+      { capabilityId: 'obs-salary', intent: 'the salary', kind: 'observation', outputType: 'scalar', clause: 'the salaries of each' },
+    ];
+    const { steps, lifted, collect } = liftControlFlow(flat, 'search recent jobs in japan, the salaries of each job');
+    assert.equal(lifted, true);
+    assert.equal(steps.length, 3);                                  // search(fragment) · jobs(observe list) · foreach
+    assert.equal(steps[0].kind, 'fragment');
+    assert.equal(steps[1].kind, 'observe');
+    assert.equal(steps[2].kind, 'foreach');
+    assert.equal(steps[2].over, steps[1].id, 'the foreach iterates the list observe');
+    assert.equal(steps[2].body.length, 1);
+    assert.equal(steps[2].body[0].kind, 'observe', 'the per-item salary read is the body');
+    assert.equal(collect, 'THE_SALARY');
+    assert.deepEqual(validatePlan({ steps }).errors, [], 'the lifted plan is well-formed');
+  });
+
+  it('liftControlFlow: no quantifier, or no list step → returned FLAT (unchanged)', () => {
+    const flat = [
+      { capabilityId: 'a', kind: null, clause: 'search' },
+      { capabilityId: 'b', kind: 'observation', outputType: 'list', clause: 'the jobs' },
+      { capabilityId: 'c', kind: 'observation', outputType: 'scalar', clause: 'the first salary' },
+    ];
+    assert.equal(liftControlFlow(flat, 'search jobs and the first salary').lifted, false, 'no quantifier → flat');
+    const noList = [
+      { capabilityId: 'a', kind: null, clause: 'search' },
+      { capabilityId: 'b', kind: 'observation', outputType: 'scalar', clause: 'the title of each' },
+    ];
+    assert.equal(liftControlFlow(noList, 'search and the title of each').lifted, false, 'no list-output step → flat');
   });
 });

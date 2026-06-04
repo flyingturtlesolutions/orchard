@@ -15,7 +15,7 @@
 // dogs" stays one clause) and the parts are rejoined with their original text.
 //
 // @module Core/orchChain
-// @version 2.74.701
+// @version 2.74.722
 
 import { planStep, validatePlan } from './orchPlan.js';
 
@@ -104,4 +104,80 @@ export function assembleSequentialPlan(clauseMatches, opts = {}) {
   const plan = { goal: String(opts.goal || ''), steps };
   const v = validatePlan(plan);
   return { plan, valid: v.ok, errors: v.errors, gaps };
+}
+
+/**
+ * Build a durable COMPOSITE capability (a Tier-2 artifact) from a VERIFIED compound run: an ordered list of
+ * T1-capability references + their bindings. PURE (the caller stamps id/time). The record rides the SAME matcher
+ * rails as a T1 capability (the matcher normalizes any candidate to {id, intent, aliases, effect, groundId,
+ * reversible, params}); a composite adds `kind:'composite'` + `steps[]`. This is the tiering made literal: a
+ * DISCRETE intent durably becomes a T1 capability; a COMPOUND intent durably becomes a T2 composite, matched
+ * ATOMICALLY next time (a T2 cache hit) instead of re-decomposed. Running it = run each step in order, reusing the
+ * existing per-step runner (REPLAY for action steps, the observation read for read steps).
+ *   - effect:'composite' + reversible:false → a composite may contain irreversible actions → confirm-first.
+ *   - steps[{capabilityId, bindings, kind, clause, intent}] → references to the T1 artifacts it composes.
+ * @returns {object} composite capability record
+ */
+export function buildCompositeCapability(input) {
+  const i = input || {};
+  const intent = String(i.intent || i.ask || '').slice(0, 200);
+  const steps = (Array.isArray(i.steps) ? i.steps : [])
+    .filter((s) => s && s.capabilityId)
+    .map((s) => ({
+      capabilityId: String(s.capabilityId),
+      bindings: (s.bindings && typeof s.bindings === 'object') ? s.bindings : {},
+      kind: s.kind || null,
+      clause: String(s.clause || '').slice(0, 200),
+      intent: String(s.intent || s.clause || '').slice(0, 200),
+    }));
+  return {
+    id: i.id || null,
+    kind: 'composite',
+    effect: 'composite',
+    reversible: false,
+    intent,
+    goal: String(i.goal || intent).slice(0, 200),
+    name: String(i.name || intent).slice(0, 120),
+    aliases: Array.isArray(i.aliases) ? i.aliases.filter(Boolean).slice(0, 12) : [],
+    groundId: i.groundId || null,
+    steps,
+    params: [],
+    synthesized: true,
+  };
+}
+
+// A QUANTIFIER over a collection — "the salaries of EACH job", "open EVERY result", "per row". The signal that a
+// compound's tail should run PER ITEM (a foreach), not once.
+const _QUANTIFIER = /\b(each|every|for each|of each|all of (?:the|them)|per (?:item|result|job|row|one))\b/i;
+const _slugUp = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').split('_').filter(Boolean).slice(0, 3).join('_');
+
+/**
+ * Lift a FLAT compound plan into a CONTROL-FLOW plan when the ask quantifies over a collection. PURE — the
+ * comprehension floor (the LLM may refine; this is the deterministic lift). The collection = the FIRST
+ * list-output observation step; everything AFTER it becomes a `foreach` BODY run per item, collecting the body's
+ * last read into a named list. Returned unchanged (flat) when there's no quantifier, no list step, or nothing
+ * after it. Steps are remapped to the INTERPRETER kinds (observation→observe, anything else→fragment) so
+ * orchRun.walkPlan can drive them; the result is meant to pass validatePlan.
+ * @param {Array<{capabilityId?,intent?,bindings?,clause?,kind?,outputType?,id?}>} steps  flat ORCH_PLAN steps
+ * @param {string} ask
+ * @returns {{steps:object[], lifted:boolean, collect:(string|null)}}
+ */
+export function liftControlFlow(steps, ask) {
+  const flat = Array.isArray(steps) ? steps : [];
+  if (flat.length < 2 || !_QUANTIFIER.test(String(ask || ''))) return { steps: flat, lifted: false, collect: null };
+  // The DRIVER is the first list-producing observation; the steps after it iterate per item.
+  const dIdx = flat.findIndex((s) => s && s.kind === 'observation' && String(s.outputType || '').toLowerCase() === 'list');
+  if (dIdx < 0 || dIdx >= flat.length - 1) return { steps: flat, lifted: false, collect: null };
+  const ir = (s, i) => {
+    const base = { id: s.id || `s${i}`, capabilityId: s.capabilityId || null, bindings: (s.bindings && typeof s.bindings === 'object') ? s.bindings : {}, intent: s.intent || '', clause: s.clause || '' };
+    return (s.kind === 'observation') ? { kind: 'observe', outputType: s.outputType || 'scalar', ...base } : { kind: 'fragment', ...base };
+  };
+  const head = flat.slice(0, dIdx).map(ir);
+  const d = flat[dIdx];
+  const driver = { kind: 'observe', outputType: 'list', id: d.id || `s${dIdx}`, capabilityId: d.capabilityId || null, bindings: {}, intent: d.intent || '', clause: d.clause || '' };
+  const body = flat.slice(dIdx + 1).map((s, j) => ir(s, dIdx + 1 + j));
+  const lastRead = [...body].reverse().find((s) => s.kind === 'observe');
+  const collect = lastRead ? (_slugUp(lastRead.intent || lastRead.clause) || 'RESULTS') : null;
+  const node = { kind: 'foreach', id: `each_${driver.id}`, over: driver.id, itemVar: 'item', body, ...(collect ? { collect } : {}) };
+  return { steps: [...head, driver, node], lifted: true, collect };
 }
