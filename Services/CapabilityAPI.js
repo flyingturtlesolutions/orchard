@@ -37,7 +37,7 @@ import { SchemaValidator } from './SchemaValidator.js';
 import { InjectionService } from './InjectionService.js';
 import { AnthropicService } from './AnthropicService.js';
 import { normalizeStrategyBody, countExecutableNodes, normalizeStrategyParams } from './StrategyTree.js';
-import { collectReferencedPrimitiveIds } from '../Core/capabilitySynth.js';   // T1-as-first-class — standalone-primitive detection
+import { collectReferencedPrimitiveIds, wrapFragmentAsStrategy } from '../Core/capabilitySynth.js';   // T1-as-first-class — standalone-primitive detection + run-time wrapper
 // v2.74.82 — Top-level Strategy entity (storage kind: 'workflow') dispatches
 // through its own runtime. CapabilityAPI now exposes BOTH Workflows
 // (Ground-scoped, the historical "Strategy") and Strategies (top-level
@@ -176,6 +176,9 @@ export class CapabilityAPI {
     if (workflow) return CapabilityAPI.#buildDescriptor(workflow);
     const strategy = await StorageManager.getWorkflow(capabilityId);
     if (strategy) return CapabilityAPI.#buildStrategyEntityDescriptor(strategy);
+    // T1-as-first-class — a standalone Fragment is its own capability.
+    const fragment = await StorageManager.getFragment(capabilityId);
+    if (fragment) return CapabilityAPI.#buildFragmentDescriptor(fragment);
     return null;
   }
 
@@ -460,10 +463,19 @@ export class CapabilityAPI {
       totalSteps = (workflow.fragmentSteps ?? []).length;
     } else {
       const strategy = await StorageManager.getWorkflow(capabilityId);
-      if (!strategy) throw new Error(`Capability not found: ${capabilityId}`);
-      entity = strategy; entityKind = 'strategy';
-      capabilityName = strategy.name ?? 'Unnamed Strategy';
-      totalSteps = (strategy.steps ?? []).length;
+      if (strategy) {
+        entity = strategy; entityKind = 'strategy';
+        capabilityName = strategy.name ?? 'Unnamed Strategy';
+        totalSteps = (strategy.steps ?? []).length;
+      } else {
+        // T1-as-first-class — a standalone Fragment capability (no Strategy wrapper). #startInvocation runs it by
+        // wrapping the Fragment in a synthetic strategy at run time (mirrors REPLAY_SG_CAPABILITY's fragment path).
+        const fragment = await StorageManager.getFragment(capabilityId);
+        if (!fragment) throw new Error(`Capability not found: ${capabilityId}`);
+        entity = fragment; entityKind = 'fragment';
+        capabilityName = fragment.name ?? 'Unnamed Fragment';
+        try { const a = JSON.parse(fragment.rawJson || '[]'); totalSteps = Array.isArray(a) ? a.length : 0; } catch { totalSteps = 0; }
+      }
     }
 
     const invocationId = options.invocationId
@@ -785,8 +797,15 @@ export class CapabilityAPI {
         return;
       }
 
-      // capabilityId === strategyId (Workflow entity id)
-      const strategy = await StorageManager.getStrategy(rec.capabilityId);
+      // capabilityId === strategyId (Workflow entity id) — OR a fragmentId (T1-as-first-class). A bare Fragment is
+      // wrapped in a SYNTHETIC one-step strategy at run time and run inline (never persisted), so the rest of this
+      // path — emit / executeStrategy / completion — is identical to a saved strategy.
+      let strategy = await StorageManager.getStrategy(rec.capabilityId);
+      let inlineStrategy = null;
+      if (!strategy && rec.entityKind === 'fragment') {
+        const fragment = await StorageManager.getFragment(rec.capabilityId);
+        if (fragment) { inlineStrategy = wrapFragmentAsStrategy(fragment, { strategyId: `fragment:${fragment.id}` }); strategy = inlineStrategy; }
+      }
       if (!strategy) throw new Error(`Workflow not found: ${rec.capabilityId}`);
       const ground = await StorageManager.getGround(strategy.groundId);
       if (!ground) throw new Error(`Parent ground ${strategy.groundId} not found for workflow ${strategy.id}`);
@@ -811,6 +830,7 @@ export class CapabilityAPI {
       // its events into CapabilityAPI events).
       ExecutionEngine.executeStrategy({
         strategyId          : rec.capabilityId,
+        ...(inlineStrategy ? { strategy: inlineStrategy } : {}),   // T1-as-first-class — run the synthetic wrapper inline
         strategyParamValues,
         invocationId        : rec.invocationId,
         isAborted           : () => rec.status === STATUS.CANCELLED,

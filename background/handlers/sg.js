@@ -655,7 +655,20 @@ export function createSgMessageHandlers(ctx) {
               const mine = (Array.isArray(caps) ? caps : []).filter((c) => (k === 'observations') ? _isObs(c) : !_isObs(c));
               n += mine.length;
               if (op === 'delete') {
-                for (const c of mine) { const sid = c.strategyId || c.id; try { await StorageManager[CAP_KINDS[k]](sid); } catch (e) { Logger.warn('background', `ORCH_ADMIN ${CAP_KINDS[k]}(${sid}) failed: ${e.message}`); } }
+                for (const c of mine) {
+                  try {
+                    if (k === 'strategies') {
+                      // Delete the backing entity: a Strategy, OR — for a bare-T1 cap (T1-as-first-class, no
+                      // strategyId) — just its Fragment. Either way SWEEP the cap's fragment(s) so none orphan into
+                      // a phantom standalone capability (which listCapabilities would otherwise surface).
+                      if (c.strategyId) await StorageManager.deleteStrategy(c.strategyId);
+                      const fids = new Set([c.fragmentId, ...(Array.isArray(c.fragmentIds) ? c.fragmentIds : [])].filter(Boolean));
+                      for (const fid of fids) { try { await StorageManager.deleteFragment(fid); } catch { /* */ } }
+                    } else {
+                      await StorageManager[CAP_KINDS[k]](c.strategyId || c.id);
+                    }
+                  } catch (e) { Logger.warn('background', `ORCH_ADMIN delete (${k}) failed: ${e.message}`); }
+                }
                 try { await ctx.removeSgCapabilities(gid, (c) => (k === 'observations') ? _isObs(c) : !_isObs(c)); } catch (e) { Logger.warn('background', `ORCH_ADMIN prune sgCapabilities (${k}) failed: ${e.message}`); }
               }
             } else {
