@@ -404,24 +404,34 @@ export function createSgMessageHandlers(ctx) {
         // shows), authoredBy:'model', exactly like the NL-path ACCEPT. The capability links it.
         const perspective = buildPerspectiveRecord({ intent: capName, spec: { shape: 'observed', target: capName }, groundId, localeUrl, landmarkUids: [...seenUid] });
         try { await StorageManager.savePerspective(perspective); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED savePerspective failed: ${e.message}`); }
+        // T1-as-first-class taxonomy fix — a demonstration that segments to a SINGLE page-state-bounded phase is
+        // one Fragment, NOT a Strategy (same rule as the SG-trial accept). ≥2 phases still chain into a Strategy.
+        // The lone Fragment IS the capability — give it the LLM-polished name/description (not "<label> — steps").
+        // The sgCapability carries the aliases either way, so the chat matcher is unaffected.
+        const isSingleT1 = runPhases.length === 1;
         const strategyId = crypto.randomUUID();
         const fragmentIds = runPhases.map(() => crypto.randomUUID());
         const recs = CapabilitySynth.buildTier2CapabilityRecords(runPhases, { groundId, strategyId, fragmentIds, name: capName, goal: capName, params: namedParams });
         if (!recs) { sendResponse({ success: false, error: 'could not assemble capability records' }); return; }
-        if (seedAliases.length) recs.strategy.aliases = seedAliases.slice();   // ORCH-D — strategy carries them too
+        if (isSingleT1) { recs.fragments[0].name = capName.slice(0, 80); recs.fragments[0].description = capDescription; }
+        else if (seedAliases.length) recs.strategy.aliases = seedAliases.slice();   // ORCH-D — strategy carries them too
         for (const f of recs.fragments) { try { await StorageManager.saveFragment(f); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED saveFragment failed: ${e.message}`); } }
-        try { await StorageManager.saveStrategy(recs.strategy); }
-        catch (e) { Logger.error('background', `DERIVE_OBSERVED saveStrategy failed: ${e.message}`); sendResponse({ success: false, error: `strategy save failed: ${e.message}` }); return; }
+        if (!isSingleT1) {
+          try { await StorageManager.saveStrategy(recs.strategy); }
+          catch (e) { Logger.error('background', `DERIVE_OBSERVED saveStrategy failed: ${e.message}`); sendResponse({ success: false, error: `strategy save failed: ${e.message}` }); return; }
+        }
         const capability = {
           id: crypto.randomUUID(), groundId, intent: capName, description: capDescription, shape: 'observed', source: 'observed',
-          localeUrl, perspectiveId: perspective.id, strategyId, fragmentIds, landmarkUids: [...seenUid], params: namedParams, aliases: seedAliases, phases: phases.map((p) => p.label), binding: [], synthesized: true,
+          localeUrl, perspectiveId: perspective.id,
+          ...(isSingleT1 ? { fragmentId: fragmentIds[0] } : { strategyId }), fragmentIds,
+          landmarkUids: [...seenUid], params: namedParams, aliases: seedAliases, phases: phases.map((p) => p.label), binding: [], synthesized: true,
           createdAt: Date.now(), trial: { score: null, verdict: 'observed', trialRef: null },
         };
         await ctx.writeSgCapability(groundId, capability);
         try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: capName.slice(0, 120) }, detail: { capabilityId: capability.id, perspectiveId: perspective.id, strategyId, fragments: recs.fragments.length, landmarks: landmarkRecords.length, shape: 'observed' } })]); } catch { /* */ }
         try { await ctx.broadcastStorageChanged('perspective', perspective.id, 'saved'); } catch { /* */ }
         const tmplCount = namedParams.filter((p) => p.used).length;
-        Logger.info('background', `DERIVE_OBSERVED_CAPABILITY — "${capName}" ${capability.id} → perspective ${perspective.id} + strategy ${strategyId} chaining ${recs.fragments.length} fragment(s) + ${landmarkRecords.length} landmark(s) + ${namedParams.length} param(s) (${tmplCount} templated for re-run) [${capability.phases.join(' → ')}]`);
+        Logger.info('background', `DERIVE_OBSERVED_CAPABILITY — "${capName}" ${capability.id} → perspective ${perspective.id} + ${isSingleT1 ? `bare Fragment ${fragmentIds[0]} (no Strategy wrapper)` : `strategy ${strategyId} chaining ${recs.fragments.length} fragment(s)`} + ${landmarkRecords.length} landmark(s) + ${namedParams.length} param(s) (${tmplCount} templated for re-run) [${capability.phases.join(' → ')}]`);
         sendResponse({ success: true, capability, perspectiveId: perspective.id, fragmentCount: recs.fragments.length, landmarkCount: landmarkRecords.length, paramCount: namedParams.length });
       } catch (err) {
         Logger.error('background', `DERIVE_OBSERVED_CAPABILITY failed: ${err.message}`);
