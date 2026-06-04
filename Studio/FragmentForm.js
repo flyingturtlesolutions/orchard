@@ -358,25 +358,38 @@ export async function enhanceFragment(fragmentId) {
  * titling and affordances adjust.
  */
 export async function editFragment(fragmentId) {
-  const existing = await StorageManager.getFragment(fragmentId);
-  if (!existing) { toast('Fragment not found', 'err'); return; }
+  try {
+    const existing = await StorageManager.getFragment(fragmentId);
+    if (!existing) { toast('Fragment not found', 'err'); return; }
 
-  // Build a mutable payload from the stored Fragment in the shape the
-  // review panel expects (preconditions/postconditions/params arrays
-  // owned by the panel). The `isEdit` flag adjusts titling and copy.
-  const payload = {
-    ...existing,
-    preconditions : Array.isArray(existing.preconditions)  ? existing.preconditions.map(c => ({ ...c }))  : [],
-    postconditions: Array.isArray(existing.postconditions) ? existing.postconditions.map(c => ({ ...c })) : [],
-    params        : Array.isArray(existing.params) ? [...existing.params] : [],
-    isEdit        : true,    // signals the review panel to switch title/copy
-    isRewalk      : false,   // distinguish from rewalk save path
-  };
+    // Build a mutable payload from the stored Fragment in the shape the
+    // review panel expects (preconditions/postconditions ARRAYS owned by the
+    // panel). A SYNTHESIZED fragment (capabilitySynth — now editable as a
+    // first-class T1) stores conditions as a {match, conditions} ENVELOPE,
+    // while an authored fragment stores a plain array; unwrap EITHER so the
+    // editor opens correctly for both. params: an authored fragment carries
+    // {name,…} objects, a synthesized one carries plain name strings — both
+    // are kept as-is (the panel only reads .length / re-derives from actions).
+    const _condArr = (c) => Array.isArray(c) ? c : (c && Array.isArray(c.conditions) ? c.conditions : []);
+    const payload = {
+      ...existing,
+      preconditions : _condArr(existing.preconditions).map(c => ({ ...c })),
+      postconditions: _condArr(existing.postconditions).map(c => ({ ...c })),
+      params        : Array.isArray(existing.params) ? [...existing.params] : [],
+      isEdit        : true,    // signals the review panel to switch title/copy
+      isRewalk      : false,   // distinguish from rewalk save path
+    };
 
-  let actions = [];
-  try { actions = JSON.parse(existing.rawJson ?? '[]'); } catch { /* keep empty */ }
+    let actions = [];
+    try { actions = JSON.parse(existing.rawJson ?? '[]'); } catch { /* keep empty */ }
 
-  showFragmentReviewPanel(payload, actions);
+    showFragmentReviewPanel(payload, actions);
+  } catch (e) {
+    // Never fail SILENTLY — a throw here used to leave the edit icon doing
+    // "nothing"; surface it so the user (and the logs) see what broke.
+    try { console.error('[editFragment]', e); } catch { /* */ }
+    toast(`Couldn't open the fragment editor: ${e && e.message ? e.message : e}`, 'err');
+  }
 }
 
 
@@ -517,6 +530,9 @@ export function showFragmentReviewPanel(fragment, actions) {
 
   const list = $('ground-list');
   list.insertBefore(panel, list.firstChild);
+  // The panel mounts at the TOP of the ground list — if the edited fragment's Ground is scrolled down, the panel
+  // would appear off-screen and the edit click would look like it "did nothing". Bring it into view.
+  try { panel.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch { /* */ }
 
   // Initial render of condition rows
   renderReviewConditions(fragment.id, 'pre');
