@@ -22,6 +22,7 @@ import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk } from './Core/
 import { walkPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate)
 import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   // ORCH-A — predicate → gate (conditional routing + the analysis)
 import { comprehend } from './Core/orchComprehend.js';   // ORCH-CB — substrate-free shape comprehension (cold-ground decompose)
+import { renderCriteria } from './Core/orchVisual.js';   // ORCH-CB — search params → criteria for a visual condition's prompt
 import { classifyFeedback } from './Core/orchFeedback.js'; // ORCH-FB — recognize corrective feedback (LLM refines)
 import { parseAdminCommand } from './Core/orchAdmin.js';    // ORCH-ADMIN — management commands (clear/delete)
 import { classifyReadAsk } from './Core/observe.js';        // OBS-READ — is the ask a question (a read)?
@@ -864,6 +865,12 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan }) {
   const driverIds = new Set();   // observe ids a foreach/loop iterates over → must return items, not a scalar
   const _scan = (steps) => { for (const s of (steps || [])) { if (s && (s.kind === 'foreach' || s.kind === 'loop') && s.over) driverIds.add(s.over); if (s && Array.isArray(s.body)) _scan(s.body); } };
   _scan(plan && plan.steps);
+  // ORCH-CB — the plan's search PARAMS (upstream fragment bindings) become the CRITERIA a VISUAL condition uses to
+  // judge MATCH ("are there jobs matching 'osidndhdnd'?"), not mere presence. Ignored by DOM reads.
+  const _planBindings = {};
+  const _collectBindings = (steps) => { for (const s of (steps || [])) { if (!s) continue; if (s.kind === 'fragment' && s.bindings && typeof s.bindings === 'object') Object.assign(_planBindings, s.bindings); if (Array.isArray(s.body)) _collectBindings(s.body); } };
+  _collectBindings(plan && plan.steps);
+  const _criteria = renderCriteria(_planBindings);
   const exec = {
     fragment: async (step, scope) => {
       // clickItem — the per-item ACTION of a click-in-place foreach: CLICK the current item's selector. The SETTLE
@@ -889,19 +896,21 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan }) {
       // the value is at a fixed location, NOT the frozen archetype index). Plain → the captured read as-is.
       const override = (step.positional && Number.isInteger(scope.index)) ? { fromIndex: scope.index }
         : (step.fixed ? { fixed: true } : {});
-      const res = await _orchReq('RUN_OBSERVATION', { tabId, groundId, capabilityId: step.capabilityId, ...override });
+      const res = await _orchReq('RUN_OBSERVATION', { tabId, groundId, capabilityId: step.capabilityId, ...override, ...(_criteria ? { criteria: _criteria } : {}) });
       const ok = !!(res && res.success !== false && res.ok !== false);
       // FAIL-SAFE gate condition: an `optional` read (a gate's condition) that can't read anything means "nothing
       // found" — return an EMPTY result (count 0) so the predicate is false and the gate stays CLOSED, rather than
       // aborting the plan. (A condition you can't observe is NOT a met condition — e.g. a zero-results search.)
-      if (!ok && step.optional) return { ok: true, value: '', items: [], empty: true };
-      // Carry items (a list/count condition observation) so a downstream predicate analysis can test the real set.
-      return { ok, value: ok ? String(res.value || '').trim() : null, items: (res && Array.isArray(res.items)) ? res.items : undefined, error: res && (res.reason || res.error) };
+      if (!ok && step.optional) return { ok: true, value: '', items: [], count: 0, empty: true };
+      // Carry items + an explicit count (a list/count/VISUAL condition observation) so a downstream predicate
+      // analysis tests the real set — a VISUAL read returns the model's count, which must win over items.length
+      // (its single "0" item means zero results, not one).
+      return { ok, value: ok ? String(res.value || '').trim() : null, items: (res && Array.isArray(res.items)) ? res.items : undefined, count: (res && Number.isInteger(res.count)) ? res.count : undefined, error: res && (res.reason || res.error) };
     },
     // PREDICATE analysis (ORCH-A) — evaluate the condition over the upstream observation's result. Deterministic
     // (the §6 connection: a predicate output drives a gate). `over` = the produced observe result.
     analyze: async (step, over) => {
-      const input = { value: over && over.value, items: over && over.items, count: (over && Array.isArray(over.items)) ? over.items.length : undefined };
+      const input = { value: over && over.value, items: over && over.items, count: (over && Number.isInteger(over.count)) ? over.count : ((over && Array.isArray(over.items)) ? over.items.length : undefined) };
       const value = step.predicate ? evaluatePredicate(step.predicate, input) : !!(over && over.value);
       return { ok: true, value };
     },
@@ -1092,6 +1101,20 @@ async function _orchObserveCapture(msg, { groundId, tabId, ask }) {
   } else {
     _setMessageBody(msg, `Couldn’t set that up${res && res.error ? ` — ${res.error}` : ''}.`);
   }
+}
+
+// ORCH-CB — capture a VISUAL observation: screenshot the page + a vision description, so a SEMANTIC read (one a
+// selector can't answer — "are there ACTUAL results, or just suggestions / a 'no matches' banner?") is grounded in
+// what Claude SEES. Reused as a gate CONDITION: ground "are there any jobs" visually once, and the gate reads it
+// correctly even when decoys share the archetype. (A DOM read stays the default for precise per-item values.)
+async function _orchVisualCapture(msg, { groundId, tabId, ask }) {
+  _setMessageBody(msg, '📷 Looking at the page…');
+  const outputType = classifyReadAsk(ask).outputType === 'list' ? 'list' : 'count';
+  const res = await _orchReq('CAPTURE_VISUAL_OBSERVATION', { tabId, groundId, ask, outputType });
+  if (!res || res.success === false || !res.capability) { _setMessageBody(msg, `Couldn’t set up a visual read${res && res.error ? ` — ${res.error}` : ''}.`); return; }
+  const v = res.verify;
+  _setMessageBody(msg, `Saved a visual read — I’ll look at the page to answer this.${v ? ` (Right now I see ${v.count}.)` : ''}`);
+  _orchFeedbackBar(msg);
 }
 
 // Run an observation: EXTRACT + show the value inline.
@@ -1414,6 +1437,7 @@ async function _tryGroundedTurn(text) {
         : 'I can read that for you — point me at it on the page.');
       const bar = _orchActionBar(thinking);
       bar.appendChild(_mkBtn('◎ Point me at it', () => { bar.remove(); _orchObserveCapture(thinking, { groundId: m.groundId, tabId: tab.id, ask: text }); }));
+      bar.appendChild(_mkBtn('📷 Let me look at it', () => { bar.remove(); _orchVisualCapture(thinking, { groundId: m.groundId, tabId: tab.id, ask: text }); }));
       bar.appendChild(_mkBtn('● Show me actions instead', () => { bar.remove(); _orchRecordFlow(thinking, { groundId: m.groundId, tabId: tab.id, ask: text }); }));
       return true;
     }

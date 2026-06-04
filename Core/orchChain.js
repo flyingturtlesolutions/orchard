@@ -15,7 +15,7 @@
 // dogs" stays one clause) and the parts are rejoined with their original text.
 //
 // @module Core/orchChain
-// @version 2.74.739
+// @version 2.74.743
 
 import { planStep, validatePlan } from './orchPlan.js';
 import { parsePredicate, conditionIsUnless, isConditionalAsk, predicateLabel } from './orchAnalyze.js';   // ORCH-A — predicate → gate
@@ -282,7 +282,12 @@ export function liftConditional(steps, ask) {
   const analyze = { kind: 'analyze', id: 'pred', over: 'cond', outputType: 'predicate', predicate: spec, intent: predicateLabel(spec), clause: spec.raw };
   const body = gatedSteps.map((s, j) => ({ kind: 'fragment', id: `act${j}`, capabilityId: s.capabilityId || null, bindings: _bind(s), intent: s.intent || '', clause: s.clause || '' }));
   const gate = { kind: 'gate', id: 'gate', over: 'pred', body };
-  return { steps: [...head, observe, analyze, gate], lifted: true, predicate: spec };
+  // SETTLE — when a HEAD action precedes the condition (a guarded sequence: "search … and if there are any …"),
+  // that action usually NAVIGATES; the condition must read the SETTLED results, not the pre-navigation page. Without
+  // this, the read (DOM or visual) fires ~250ms after the search CLICK — before the new results render — and a
+  // populated search reads as empty (a false negative). No head ⇒ the condition reads the current page ⇒ no wait.
+  const settle = head.length ? [{ kind: 'wait', id: 'settle_cond', ms: 1800, reason: 'settle after the leading action before reading the condition' }] : [];
+  return { steps: [...head, ...settle, observe, analyze, gate], lifted: true, predicate: spec };
 }
 
 // ── T2 INTENT DERIVATION — what a control-flow composite IS, derived from its plan IR ─────────────────────────────

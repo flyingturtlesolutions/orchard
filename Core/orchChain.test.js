@@ -276,14 +276,16 @@ describe('orchChain — decompose a compound ask + assemble a sequential plan (O
     ];
     const { steps, lifted } = liftConditional(flat, 'search for jobs and if there are any jobs, sort by date');
     assert.equal(lifted, true);
-    assert.equal(steps.length, 4, 'search(head) · observe · analyze · gate');
+    assert.equal(steps.length, 5, 'search(head) · SETTLE · observe · analyze · gate');
     assert.equal(steps[0].kind, 'fragment');
     assert.equal(steps[0].capabilityId, 'cap-search', 'the leading search runs UNCONDITIONALLY (not gated)');
-    assert.equal(steps[1].kind, 'observe');
-    assert.equal(steps[2].kind, 'analyze');
-    assert.equal(steps[3].kind, 'gate');
-    assert.equal(steps[3].body.length, 1, 'ONLY the sort is gated');
-    assert.equal(steps[3].body[0].capabilityId, 'cap-sort');
+    assert.equal(steps[1].kind, 'wait', 'a settle between the navigating search and the condition read');
+    assert.ok(steps[1].ms > 0, 'the settle has a non-zero floor');
+    assert.equal(steps[2].kind, 'observe');
+    assert.equal(steps[3].kind, 'analyze');
+    assert.equal(steps[4].kind, 'gate');
+    assert.equal(steps[4].body.length, 1, 'ONLY the sort is gated');
+    assert.equal(steps[4].body[0].capabilityId, 'cap-sort');
     assert.deepEqual(validatePlan({ steps }).errors, [], 'the guarded-sequence plan is well-formed');
   });
 

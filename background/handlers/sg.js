@@ -28,6 +28,8 @@ import { buildCompositeCapability, liftControlFlow, liftConditional } from '../.
 import { bindShape, lexicalScore } from '../../Core/orchBind.js';   // ORCH-CB — per-slot effect-scoped binder (lexical floor)
 import { comprehend } from '../../Core/orchComprehend.js';   // ORCH-CB — substrate-free shape comprehension (shadow)
 import { shadowCompare } from '../../Core/orchShadow.js';   // ORCH-CB — LLM-plan vs comprehend→bind divergence log
+import { performImageFull } from '../../Services/ImageReadCapture.js';   // ORCH-CB — visual observation (screenshot)
+import { buildVisualObservation, isVisualObservation, visualToInput, describeForCondition, withCriteria } from '../../Core/orchVisual.js';   // ORCH-CB — visual observation floor
 import { validatePlan } from '../../Core/orchPlan.js';   // ORCH-L — structural guard for a lifted (foreach/gate) plan
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
@@ -737,10 +739,26 @@ export function createSgMessageHandlers(ctx) {
     // effect (a read is always safe to auto-run). The chat shows the value inline; the compiler outputType rides along.
     RUN_OBSERVATION: async (payload, _sender, sendResponse) => {
       try {
-        const { tabId, groundId = null, capabilityId = null, fromIndex = null, fixed = false } = payload ?? {};   // fromIndex: per-item override for a FOREACH body read; fixed: re-read the single selector, NOT the archetype (ORCH-L)
+        const { tabId, groundId = null, capabilityId = null, fromIndex = null, fixed = false, criteria = '' } = payload ?? {};   // fromIndex: per-item FOREACH override; fixed: re-read the single selector (ORCH-L); criteria: search params for a VISUAL read's prompt (ORCH-CB)
         if (typeof tabId !== 'number' || !groundId || !capabilityId) { sendResponse({ success: false, error: 'tabId + groundId + capabilityId required' }); return; }
         const cap = (await ctx.readSgCapabilities(groundId)).find((c) => c.id === capabilityId);
         if (!cap || cap.kind !== 'observation') { sendResponse({ success: false, error: 'observation not found' }); return; }
+        // VISUAL observation (ORCH-CB) — read by SEEING, not a selector: screenshot the page → Claude vision with
+        // the stored description. The right instrument for a SEMANTIC condition a selector can't answer (e.g. "are
+        // there ACTUAL results, or just suggestions / a 'no matches' banner?"). Returns a typed count/value.
+        if (isVisualObservation(cap)) {
+          try { await ctx.ensureContentScript(tabId); } catch { /* */ }
+          const shot = await performImageFull({ tabId });
+          if (!shot || shot.success === false || !shot.dataUrl) { sendResponse({ success: true, ran: true, ok: false, reason: 'I couldn’t capture the page to look at it.' }); return; }
+          // Inject the run-time CRITERIA (the upstream search params) so the model judges MATCH, not mere presence.
+          const vdesc = withCriteria(cap.observe.visual.description, criteria);
+          const llm = await AnthropicService.readImage({ description: vdesc, imageDataUrl: shot.dataUrl });
+          if (!llm) { sendResponse({ success: true, ran: true, ok: false, reason: 'I couldn’t read that from the page.' }); return; }
+          const inp = visualToInput(llm, cap.outputType);
+          Logger.info('background', `RUN_OBSERVATION — ${cap.id} (visual/${cap.outputType || 'count'}) → count=${inp.count} items=${inp.items.length} conf=${llm.confidence ?? '?'}`);
+          sendResponse({ success: true, ran: true, ok: true, outputType: cap.outputType || 'count', value: inp.value, items: inp.items, count: inp.count, readVia: 'visual', confidence: llm.confidence ?? null });
+          return;
+        }
         const ex = (cap.observe && Array.isArray(cap.observe.extracts) && cap.observe.extracts[0]) || null;
         if (!ex || !ex.selector) { sendResponse({ success: false, error: 'observation has no extract selector' }); return; }
         try { await ctx.ensureContentScript(tabId); } catch { /* */ }   // heal a stale-tab port before the read
@@ -844,6 +862,33 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, ran: true, ok: true, outputType: cap.outputType || 'scalar', value, intent: cap.intent, readVia: via, recovered: recovered ? { via: recovered.via, matchMethod: recovered.matchMethod } : null });
       } catch (err) {
         Logger.error('background', `RUN_OBSERVATION failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // ORCH-CB — CAPTURE a VISUAL observation: screenshot the page + a vision description (what to count/read), so a
+    // SEMANTIC condition is grounded in what Claude SEES, not a selector. Verifies once at capture (reads it) so we
+    // store a working read. The condition phrase auto-derives a "count the REAL items, decoys = zero" description.
+    CAPTURE_VISUAL_OBSERVATION: async (payload, _sender, sendResponse) => {
+      try {
+        const { tabId, groundId = null, ask = '', description = '', outputType = 'count' } = payload ?? {};
+        if (typeof tabId !== 'number') { sendResponse({ success: false, error: 'tabId required' }); return; }
+        let gid = groundId, localeUrl = '';
+        try { const t = await chrome.tabs.get(tabId); localeUrl = t?.url || ''; if (!gid && localeUrl) { const origin = new URL(localeUrl).origin; const gs = await StorageManager.getAllGrounds(); const g = (Array.isArray(gs) ? gs : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } } catch { /* */ }
+        if (!gid) { sendResponse({ success: false, error: 'no ground for this page' }); return; }
+        const desc = String(description || '').trim() || describeForCondition(ask);
+        const shot = await performImageFull({ tabId });   // verify the capture works + read once
+        if (!shot || shot.success === false || !shot.dataUrl) { sendResponse({ success: false, error: 'couldn’t capture the page' }); return; }
+        const llm = await AnthropicService.readImage({ description: desc, imageDataUrl: shot.dataUrl });
+        const inp = llm ? visualToInput(llm, outputType) : null;
+        const cap = buildVisualObservation({ id: crypto.randomUUID(), ask, intent: ask, groundId: gid, description: desc, outputType });
+        cap.localeUrl = localeUrl; cap.createdAt = Date.now();
+        cap.aliases = accreteAlias(cap.aliases, ask, { intent: cap.intent });
+        await ctx.writeSgCapability(gid, cap);
+        Logger.info('background', `CAPTURE_VISUAL_OBSERVATION — "${String(ask).slice(0, 50)}" ${cap.id} → ${cap.outputType} (verify count=${inp ? inp.count : '?'}) on ${gid}`);
+        sendResponse({ success: true, capability: { id: cap.id, intent: cap.intent, kind: 'observation', via: 'visual', outputType: cap.outputType }, verify: inp ? { count: inp.count, value: inp.value } : null });
+      } catch (err) {
+        Logger.error('background', `CAPTURE_VISUAL_OBSERVATION failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },
