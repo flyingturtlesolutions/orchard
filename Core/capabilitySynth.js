@@ -141,8 +141,8 @@ export function buildCapabilityRecords(draft, { groundId, fragmentId, strategyId
     description: draft.goal || '',
     rawJson: JSON.stringify(Array.isArray(draft.actions) ? draft.actions : []),
     params: paramNames,
-    preconditions: { match: 'all', conditions: [] },
-    postconditions: { match: 'all', conditions: [] },
+    preconditions: [],    // ARRAY shape — the runtime reads fragment conditions as arrays (an envelope is silently skipped)
+    postconditions: [],
     healthStatus: 'untested',
     lastExecutedAt: null,
     synthesized: true,                 // provenance: auto-authored from a goal, not hand-built
@@ -191,6 +191,41 @@ export function buildCapabilityRecords(draft, { groundId, fragmentId, strategyId
  *          params?:Array<{name:string,label?:string,value?:string}>}} ids
  * @returns {{fragments:object[], strategy:object}|null}  null when nothing is runnable / ids are short
  */
+// Humanize an UPPER_SNAKE param name into words. SEARCH_JOB_TITLE_KEYWORDS_OR_COMPANY → "search job title keywords or company".
+function _humanizeParam(n) { return String(n || '').toLowerCase().replace(/_/g, ' ').replace(/\s+/g, ' ').trim(); }
+
+// A readable "expression of intent" for a Fragment — the bare subGoal label (e.g. "Search") plus a plain-language
+// summary of what its actions DO ("enter keywords, enter location, click Find jobs"). Normalizer actions
+// (SCROLL_TO / WAIT / WAIT_FOR / NAVIGATE) are skipped; a {{PARAM}} TYPE reads as its humanized param; a CLICK
+// reads its landmark name. Falls back to the label when nothing summarizes. PURE.
+function _describeFragmentActions(label, actions) {
+  const steps = [];
+  for (const a of (Array.isArray(actions) ? actions : [])) {
+    if (!a || !a.action || a.action === 'SCROLL_TO' || a.action === 'WAIT' || a.action === 'WAIT_FOR' || a.action === 'NAVIGATE') continue;
+    const lm = (a.landmark && a.landmark.accessibleName) || '';
+    const pm = /\{\{([A-Z0-9_]+)\}\}/.exec(String(a.value || ''));
+    if (a.action === 'TYPE')          steps.push(`enter ${pm ? _humanizeParam(pm[1]) : (lm ? lm.toLowerCase() : 'a value')}`);
+    else if (a.action === 'SELECT')   steps.push(`choose ${pm ? _humanizeParam(pm[1]) : (lm ? lm.toLowerCase() : 'an option')}`);
+    else if (a.action === 'SET_FILE') steps.push('attach a file');
+    else if (a.action === 'CLICK')    steps.push(`click ${lm || 'the control'}`);
+    else if (a.action === 'KEY')      steps.push(`press ${a.value || 'Enter'}`);
+  }
+  const base = String(label || '').trim();
+  if (!steps.length) return base;
+  const summary = steps.join(', ');
+  const cap = summary.charAt(0).toUpperCase() + summary.slice(1);
+  return (base ? `${base} — ${cap}` : cap).slice(0, 280);
+}
+
+// Fragment pre/postconditions are read at runtime as ARRAYS (ExecutionEngine: `Array.isArray(fragment.postconditions)`)
+// — an envelope-shaped value is silently SKIPPED. A node's postcondition (SG-T2-2 structural ∪ SG-T2-5 LLM) is a
+// {match, conditions} envelope, so extract its conditions ARRAY to actually carry the phase's success predicate(s). PURE.
+function _conditionsArray(envelopeOrArray) {
+  if (Array.isArray(envelopeOrArray)) return envelopeOrArray;
+  if (envelopeOrArray && Array.isArray(envelopeOrArray.conditions)) return envelopeOrArray.conditions;
+  return [];
+}
+
 export function buildTier2CapabilityRecords(phases, { groundId, strategyId, fragmentIds, name, goal, now, params } = {}) {
   const ph = Array.isArray(phases) ? phases.filter((p) => p && Array.isArray(p.actions) && p.actions.length) : [];
   if (!ph.length || !groundId || !strategyId || !Array.isArray(fragmentIds) || fragmentIds.length < ph.length) return null;
@@ -212,11 +247,11 @@ export function buildTier2CapabilityRecords(phases, { groundId, strategyId, frag
     fragments.push({
       id: fragmentId, groundId,
       name: `${ph[i].label} — steps`.slice(0, 80),
-      description: ph[i].label || '',
+      description: _describeFragmentActions(ph[i].label, ph[i].actions),   // an expression of intent, not the bare label
       rawJson,
       params: [...names],
-      preconditions: { match: 'all', conditions: [] },
-      postconditions: { match: 'all', conditions: [] },
+      preconditions: [],                                       // ARRAY shape — the runtime + editor read fragment conditions as arrays
+      postconditions: _conditionsArray(ph[i].postcondition),   // SG-T2-2/5 — carry the phase's success predicate(s) (was dropped)
       healthStatus: 'untested', lastExecutedAt: null, synthesized: true,
       createdAt: ts, updatedAt: ts,
     });

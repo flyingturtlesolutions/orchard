@@ -242,7 +242,10 @@ export function createSgMessageHandlers(ctx) {
           const phases = [];
           for (const node of phaseNodes) {
             const synth = synthesizeTrialOp({ groundedIntent: node.label, roles: node.roles, locale: localeModel });
-            if (synth && Array.isArray(synth.actions) && synth.actions.length) phases.push({ label: node.label, actions: synth.actions });
+            // Carry the node's postcondition (SG-T2-2 structural ∪ SG-T2-5 LLM) onto the phase so the persisted
+            // Fragment keeps its success predicate(s) — previously dropped, leaving every synthesized fragment
+            // with empty postconditions.
+            if (synth && Array.isArray(synth.actions) && synth.actions.length) phases.push({ label: node.label, actions: synth.actions, postcondition: node.postcondition || null });
           }
           if (!phases.length) { sendResponse({ success: true, accepted: false, reason: 'no runnable phases to promote' }); return; }
           // T1-as-first-class taxonomy fix — a fragment is gated by page-state change, so each segmented phase IS a

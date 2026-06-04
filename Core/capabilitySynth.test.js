@@ -42,6 +42,39 @@ describe('buildTier2CapabilityRecords — multi-fragment capability (SG-T2-ACC)'
     const r = buildCapabilityRecords({ name: 'x', goal: 'x', actions: [{ action: 'CLICK', selector: '#a' }], params: [] }, { groundId: 'g', fragmentId: 'f', strategyId: 's' });
     assert.ok(r && r.fragment && r.strategy);
     assert.equal(r.strategy.fragmentSteps.length, 1);
+    assert.ok(Array.isArray(r.fragment.preconditions) && Array.isArray(r.fragment.postconditions), 'conditions are ARRAYS, not envelopes');
+  });
+});
+
+describe('buildTier2CapabilityRecords — synthesis quality: description as intent + carried postconditions', () => {
+  const searchPhase = {
+    label: 'Search',
+    actions: [
+      { action: 'SCROLL_TO', selector: '#what', optional: true },
+      { action: 'TYPE', selector: '#what', value: '{{SEARCH_KEYWORDS}}', landmark: { accessibleName: 'Job title' } },
+      { action: 'TYPE', selector: '#where', value: '{{EDIT_LOCATION}}' },
+      { action: 'CLICK', selector: '#go', landmark: { accessibleName: 'Find jobs' } },
+    ],
+    postcondition: { match: 'any', conditions: [{ type: 'selector_present', selector: '.results' }], source: 'structural' },
+  };
+  const filterPhase = { label: 'Filter', actions: [{ action: 'CLICK', selector: '#f' }] };   // no postcondition
+
+  it('the description is an expression of intent (label + action summary), not the bare label', () => {
+    const r = buildTier2CapabilityRecords([searchPhase, filterPhase], { groundId: 'g', strategyId: 's', fragmentIds: ['f1', 'f2'], params: [{ name: 'SEARCH_KEYWORDS' }] });
+    const desc = r.fragments[0].description;
+    assert.match(desc, /^Search — /, 'keeps the label, adds a summary');
+    assert.match(desc, /search keywords/, 'a {{PARAM}} TYPE reads as its humanized param, not the bare token');
+    assert.match(desc, /edit location/);
+    assert.match(desc, /click Find jobs/, 'a CLICK reads its landmark name');
+    assert.ok(!/SCROLL_TO/.test(desc), 'normalizer actions are not described');
+  });
+
+  it('the node postcondition (envelope) is carried onto the fragment as an ARRAY (runtime reads arrays)', () => {
+    const r = buildTier2CapabilityRecords([searchPhase, filterPhase], { groundId: 'g', strategyId: 's', fragmentIds: ['f1', 'f2'] });
+    assert.ok(Array.isArray(r.fragments[0].postconditions), 'an ARRAY → Array.isArray true → actually evaluated at runtime');
+    assert.deepEqual(r.fragments[0].postconditions, [{ type: 'selector_present', selector: '.results' }]);
+    assert.ok(Array.isArray(r.fragments[0].preconditions) && r.fragments[0].preconditions.length === 0);
+    assert.deepEqual(r.fragments[1].postconditions, [], 'a phase with no node postcondition → empty array, not an envelope');
   });
 });
 
