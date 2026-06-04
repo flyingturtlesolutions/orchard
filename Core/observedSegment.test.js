@@ -73,6 +73,38 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     assert.ok(/done/.test(op.nodes[0].to));
   });
 
+  // LOGICAL boundary (SPA): a search + a filter that BOTH swap results via XHR — NO navigations at all. Without a
+  // state_change marker these collapse into one fragment; with it they split exactly as an MPA reload would.
+  const SC = (url) => buildRawAction({ domKind: 'state_change', url: url || 'https://spa.example/search' });
+  it('an SPA search + filter (no navigation) splits into two fragments on state_change markers', () => {
+    const trace = [
+      A('input', 'Search', '#q', 'halo sound effects'),
+      A('click', 'Search', '#searchbtn'),
+      SC(),                                         // results swapped in place → boundary 1
+      A('click', 'Recently added filter', '#sort'),
+      A('click', 'Recently added', '#sort>li:1'),
+      SC(),                                         // results re-swapped → boundary 2
+    ];
+    const op = segmentTrace(coalesce(trace));
+    assert.equal(op.nodes.length, 2, 'two fragments despite zero navigations');
+    assert.deepEqual(op.nodes[0].steps.map((s) => s.kind), ['type', 'click'], 'fragment 1 = the search commit');
+    assert.deepEqual(op.nodes[1].steps.map((s) => s.kind), ['click', 'click'], 'fragment 2 = open + choose the filter');
+  });
+
+  it('a state_change marker right after an Enter/nav boundary mints NO empty fragment', () => {
+    const K = (sel) => buildRawAction({ domKind: 'keypress', value: 'Enter', url: 'u', target: { tagName: 'INPUT', role: 'textbox', accessibleName: 'q', selector: sel } });
+    const op = segmentTrace(coalesce([A('input', 'q', '#q', 'jobs'), K('#q'), SC('u/jobs'), A('click', 'Filter', '#f'), A('click', 'Opt', '#f>li:1'), SC('u/jobs')]));
+    assert.equal(op.nodes.length, 2, 'the post-Enter marker is a no-op; the filter is its own fragment');
+    assert.deepEqual(op.nodes[0].steps.map((s) => s.kind), ['type', 'key']);
+  });
+
+  it('a trace with NO state_change markers segments exactly as before (backward compatible)', () => {
+    const op = segmentTrace(coalesce(raw));   // the navigation-based Indeed trace
+    assert.equal(op.nodes.length, 2);
+    assert.equal(op.nodes[0].label, 'Search');
+    assert.equal(op.nodes[1].label, 'Date posted filter');
+  });
+
   it('opToPhases maps steps → executable actions (SCROLL_TO before each) carrying inline landmarks + url (OBS-3/4)', () => {
     const phases = opToPhases(segmentTrace(coalesce(raw)));
     assert.equal(phases.length, 2);

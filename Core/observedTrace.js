@@ -9,9 +9,12 @@
 // Downstream (OBS-2/3): coalesce(trace) → segment into Fragments → buildTier2CapabilityRecords (SG-T2-ACC).
 //
 // @module Core/observedTrace
-// @version 2.74.684
+// @version 2.74.750
 
-export const OBSERVED_KINDS = Object.freeze(['click', 'type', 'select', 'submit', 'navigate', 'scroll', 'key']);
+// `state_change` is a LOGICAL boundary marker (not a user action): the recorder emits it when the intent's
+// content landmark changes + settles after a commit with NO navigation (an SPA XHR swap). The segmenter treats
+// it like a navigation — so search↔filter splits into two Fragments on an SPA exactly as a reload does on an MPA.
+export const OBSERVED_KINDS = Object.freeze(['click', 'type', 'select', 'submit', 'navigate', 'scroll', 'key', 'state_change']);
 
 // Field name/type/autocomplete patterns that mark a value SENSITIVE — never store the raw value. The
 // content script ALSO checks this (mirrored) so a sensitive value never leaves the page; this is the
@@ -42,6 +45,7 @@ export function classifyKind(domKind, target) {
   switch (domKind) {
     case 'submit': return 'submit';
     case 'navigate': return 'navigate';
+    case 'state_change': return 'state_change';   // logical (SPA) boundary marker
     case 'scroll': return 'scroll';
     case 'keypress': return 'key';
     case 'change':
@@ -129,6 +133,8 @@ export function coalesce(actions) {
       continue;
     }
     if (prev && a.kind === 'navigate' && prev.kind === 'navigate' && a.to === prev.to) continue;   // duplicate nav
+    if (prev && a.kind === 'state_change' && prev.kind === 'state_change') continue;   // one boundary per settle, not per mutation
+    if (prev && a.kind === 'state_change' && (prev.kind === 'navigate' || prev.kind === 'submit')) continue;   // a nav already split here — the swap marker is redundant
     if (prev && a.kind === 'scroll' && prev.kind === 'scroll') { out[out.length - 1] = { ...a }; continue; }   // collapse a scroll run to the latest
     out.push(a);
   }

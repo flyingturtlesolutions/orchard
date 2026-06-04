@@ -7,14 +7,16 @@
 // Rules, validated against a live Indeed demonstration (search "support" in Minneapolis, filter by date):
 //  1. PRE-CLEAN — drop focus-noise: redundant consecutive clicks on the same element, and a click that is
 //     immediately superseded by a type/select on that SAME element (you click a field, then type in it).
-//  2. BOUNDARY — `navigate` and `submit` are TRANSITION markers, not steps. A Fragment = the steps that
-//     accumulated before a boundary (the actions that CAUSED the transition — the T2 "fragment is a
-//     transition" rule). Consecutive boundaries (click-Search → submit → navigate) coalesce into one.
+//  2. BOUNDARY — `navigate`, `submit`, and `state_change` are TRANSITION markers, not steps. A Fragment = the
+//     steps that accumulated before a boundary (the actions that CAUSED the transition — the T2 "fragment is a
+//     transition" rule). The boundary is LOGICAL, not physical: a `state_change` marker (the recorder fires it
+//     when the intent's content landmark changes + settles after a commit) splits an SPA's search↔filter into
+//     two Fragments with NO navigation, exactly as a reload splits an MPA. Consecutive boundaries coalesce.
 //  3. LABEL — a heuristic name (disclosure-open name → commit name → first step). OBS-4's describeTrace
 //     gives nicer labels later; this keeps it runnable without an LLM.
 //
 // @module Core/observedSegment
-// @version 2.74.685
+// @version 2.74.750
 
 const _DISCLOSURE_HINT = /filter|menu|sort|posted|date|pay|salary|wage|type|level|experience|distance|remote|radius|category|options?|dropdown|expand|more/i;
 
@@ -43,7 +45,7 @@ function _preclean(acts) {
       for (let j = i + 1; j < acts.length; j++) {
         const b = acts[j];
         const bsel = b.target && b.target.selector;
-        if (b.kind === 'navigate' || b.kind === 'submit') break;           // boundary — keep this click (it's the commit)
+        if (b.kind === 'navigate' || b.kind === 'submit' || b.kind === 'state_change') break;   // boundary — keep this click (it's the commit)
         if (bsel === sel && (b.kind === 'click' || b.kind === 'type' || b.kind === 'select')) { drop = true; break; }
         if (bsel !== sel) break;                                            // a different element intervened — keep
       }
@@ -72,6 +74,10 @@ export function segmentTrace(trace) {
   for (let i = 0; i < acts.length; i++) {
     const a = acts[i];
     if (a.kind === 'navigate') { flush(a.to || a.url || ''); fromUrl = a.to || a.url || fromUrl; continue; }
+    // LOGICAL boundary (SPA): the intent's content landmark changed + settled after a commit, with NO navigation.
+    // The steps accumulated since the last boundary CAUSED this change → flush them as a Fragment. An empty buffer
+    // (a marker right after an Enter/nav boundary) is a no-op, so redundant markers never mint empty fragments.
+    if (a.kind === 'state_change') { const u = a.url || (cur.length ? cur[cur.length - 1].url : '') || fromUrl; flush(u); fromUrl = u; continue; }
     if (a.kind === 'submit') {
       // A submit fires BEFORE the navigation it causes, so its URL is stale. When a navigate follows
       // immediately, let THAT be the boundary (it carries the real target URL); otherwise this is an
