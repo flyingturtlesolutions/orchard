@@ -1686,6 +1686,15 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
       _obsSession.lastUrl = url;
     }
     _obsArm(tabId);   // the page reloaded → re-install the capture listeners on the new content script
+  } else if (info.url && info.url !== _obsSession.lastUrl) {
+    // SOFT navigation (SPA pushState/replaceState): the URL changed with NO reload — a LOGICAL page-state change
+    // (search → results, then filter → re-filtered results), the SPA half of the fragment-boundary rule. Chrome
+    // fires onUpdated with changeInfo.url but no status cycle for History API changes, so the `complete` branch
+    // never sees it. Record it as a `navigate` boundary so the segmenter splits the fragment here exactly as a
+    // hard reload would. The content script is still alive (no reload) → no re-arm. (A URL-less client-side filter
+    // emits no onUpdated and still needs the content-script content-diff `state_change` marker — separate slice.)
+    _obsSession.trace.push(buildRawAction({ seq: _obsSession.seq++, ts: Date.now(), url: info.url, from: _obsSession.lastUrl, frameId: 0, domKind: 'navigate' }));
+    _obsSession.lastUrl = info.url;
   }
 });
 
