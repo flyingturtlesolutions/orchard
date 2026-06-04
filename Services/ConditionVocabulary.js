@@ -76,6 +76,12 @@ export const CONDITION_TYPES = Object.freeze([
   'scalar_number_range',
   'scalar_in_set',
 
+  // ── Scope family — ORCH predicate (converge: T2 composite → Strategy) ────
+  // Synthetic, programmatically-authored: an ORCH gate becomes a DETECT with
+  // this condition; at runtime it parses `specJson` and calls the SAME
+  // evaluatePredicate the chat interpreter uses (identical truth).
+  'orch_predicate',
+
   // ── Scope family — tagged-value kind checks (Pass 7c) ───────────────────
   // Defensive type checks for the newer typed scope kinds. Used in pre/post
   // contracts where the author wants to assert "this binding is a section,
@@ -174,6 +180,16 @@ export const CONDITION_FIELDS = Object.freeze({
   scalar_equals:                    { family: 'scope', subfamily: 'scalar', fields: ['binding', 'value'],                 required: ['binding', 'value'] },
   scalar_number_range:              { family: 'scope', subfamily: 'scalar', fields: ['binding', 'min', 'max'],            required: ['binding', 'min', 'max'] },
   scalar_in_set:                    { family: 'scope', subfamily: 'scalar', fields: ['binding', 'values'],                required: ['binding', 'values'] },
+
+  // ── Scope family — ORCH predicate (converge: T2 composite → Strategy) ────
+  // v2.74.745 — A synthetic, programmatically-authored condition: the gate of an
+  // ORCH conditional composite becomes a DETECT whose condition is this type. It
+  // does NOT re-implement the predicate — at runtime it parses `specJson` and calls
+  // the SAME evaluatePredicate (Core/orchAnalyze) over the bound value, so the gate's
+  // truth is identical to the chat interpreter's. `specJson` is a JSON-encoded predicate
+  // spec ({op, target, negate, ...}); it rides as a STRING because the canonical
+  // normalizer String()-ifies every field (an object would become "[object Object]").
+  orch_predicate:                   { family: 'scope', subfamily: 'predicate', fields: ['binding', 'specJson'], required: ['binding', 'specJson'] },
 
   // ── Scope family — tagged-value kind checks (Pass 7c) ───────────────────
   binding_is_section:               { family: 'scope', subfamily: 'tagged-value', fields: ['binding'],                    required: ['binding'] },

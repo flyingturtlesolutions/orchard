@@ -28,6 +28,21 @@ import {
   itemToRecord,
 } from './ConditionVocabulary.js';
 
+// v2.74.745 (converge) — the `orch_predicate` condition does NOT re-implement the gate's
+// predicate; it calls the SAME evaluator the chat interpreter uses, so a promoted Strategy's
+// DETECT and the ORCH walkPlan gate compute identical truth over the same bound value.
+import { evaluatePredicate, predicateLabel } from '../Core/orchAnalyze.js';
+
+// Coerce a tagged scope value → the {count, items, value} shape evaluatePredicate expects.
+// list → count/items; scalar/document → value (its _countFromValue parses "0 jobs"/"none" → 0).
+function _coerceForPredicate(v) {
+  if (v == null) return null;
+  if (v.kind === 'list')     { const items = Array.isArray(v.items) ? v.items : []; return { items, count: items.length }; }
+  if (v.kind === 'scalar')   return { value: v.value };
+  if (v.kind === 'document') return { value: v.content ?? '' };
+  return { value: (v.value != null ? v.value : (v.content != null ? v.content : '')) };  // record/other → best-effort value
+}
+
 /**
  * Scope-family condition types. Subset of the canonical CONDITION_TYPES.
  * Existing consumers (studio.js, ExecutionEngine, BuiltinAnalyses validation)
@@ -477,6 +492,24 @@ export function evaluateDataCondition(cond, scope) {
       return { ok: true, reason: '' };
     }
 
+    case 'orch_predicate': {
+      // The converge gate: parse the JSON-encoded predicate spec and run the SAME evaluatePredicate
+      // the chat interpreter uses. Fails CLOSED — unbound binding, bad JSON, or a throw → ok:false —
+      // so a promoted Strategy never opens a gate the ORCH matcher would have kept shut (R5).
+      const v = scope?.get?.(cond.binding);
+      if (v == null) return { ok: false, reason: `binding "${cond.binding}" is unbound (orch_predicate fails closed)` };
+      let spec;
+      try { spec = JSON.parse(cond.specJson || '{}'); }
+      catch { return { ok: false, reason: `orch_predicate specJson is not valid JSON (fails closed)` }; }
+      const input = _coerceForPredicate(v);
+      try {
+        const held = !!evaluatePredicate(spec, input);
+        return { ok: held, reason: held ? '' : `orch_predicate(${spec && spec.op ? spec.op : '?'}) did not hold over "${cond.binding}"` };
+      } catch (e) {
+        return { ok: false, reason: `orch_predicate threw: ${e && e.message ? e.message : e} (fails closed)` };
+      }
+    }
+
     default:
       return { ok: false, reason: `unknown data-condition type "${t}"` };
   }
@@ -728,6 +761,13 @@ export function describeDataCondition(cond) {
     // Document assertions (Pass 7c)
     case 'document_min_length':            return `${cond.binding || '?'}.content.length >= ${cond.min || '?'}`;
     case 'document_contains':              return `${cond.binding || '?'}.content contains "${cond.value || '?'}"`;
+
+    // ORCH predicate (converge) — render via the same label the chat surface shows
+    case 'orch_predicate': {
+      let spec = null; try { spec = JSON.parse(cond.specJson || '{}'); } catch { /* fall through */ }
+      const lbl = spec ? predicateLabel(spec) : (cond.specJson || '?');
+      return `${cond.binding || '?'}: ${lbl}`;
+    }
 
     default: return cond.type;
   }
