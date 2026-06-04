@@ -32,7 +32,7 @@ import { performImageFull } from '../../Services/ImageReadCapture.js';   // ORCH
 import { buildVisualObservation, isVisualObservation, visualToInput, describeForCondition, withCriteria } from '../../Core/orchVisual.js';   // ORCH-CB — visual observation floor
 import { buildCompositeTemplate, matchTemplate, rebindSteps } from '../../Core/orchTemplate.js';   // ORCH-X T2 — cross-argument composite rebind
 import { validatePlan } from '../../Core/orchPlan.js';   // ORCH-L — structural guard for a lifted (foreach/gate) plan
-import { promoteComposite } from '../../Core/orchPromote.js';   // CONVERGE — T2 composite IR → canonical runnable Strategy (Studio-visible)
+import { promoteComposite, buildConvergeObservationRecord } from '../../Core/orchPromote.js';   // CONVERGE — T2 composite IR → canonical runnable Strategy (Studio-visible)
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
 import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
@@ -52,41 +52,6 @@ function _observeMessageForExtract(ex) {
     case 'scalar':    return { type: 'OBSERVE_SCALAR',   payload: { target: ex.target, extract: ex.extract ?? { kind: 'text' } } };
     default:          return null;
   }
-}
-
-// CONVERGE (v2.74.745) — materialize a CANONICAL Observation record from an ORCH observation sgCapability, so a
-// promoted Strategy's {type:'observation'} node reads the SAME element the chat interpreter does.
-//   • output = the observe STEP id → the downstream orch_predicate condition (binding = step id) reads exactly
-//     this scope value, so the converged gate and the walkPlan gate compute identical truth.
-//   • shape 'list_of_records' is COUNT-SAFE: it ALWAYS tags as a list (0 matches → list([]) → count 0), avoiding
-//     the image_read 0→scalar('') collapse that would mis-OPEN an "if there are any …" gate (the bug the user hit).
-//   • a VISUAL observation (no selector) → null: the promote then fails closed and the composite stays
-//     matcher-only, running via the ORCH walkPlan interpreter exactly as before (R7).
-// NOTE: the `target` descriptor shape is the live content-script OBSERVE_LIST protocol — verified live on promote.
-function _canonicalObservationFromOrchCap(cap, outputName, { observationId, now } = {}) {
-  if (!cap || cap.kind !== 'observation') return null;
-  if (isVisualObservation(cap)) return null;
-  const ex0 = (cap.observe && Array.isArray(cap.observe.extracts) && cap.observe.extracts[0]) || null;
-  const selector = ex0 && ((ex0.archetype && ex0.archetype.selector) || ex0.selector);
-  if (!selector) return null;
-  const ts = Number.isFinite(now) ? now : Date.now();
-  return {
-    id: observationId,
-    groundId: cap.groundId || null,
-    name: `${cap.intent || cap.name || 'observation'} — converged`.slice(0, 80),
-    description: cap.intent || '',
-    output: outputName,                 // top-level binding name
-    shape: 'list',
-    params: [],
-    preconditions: { match: 'all', conditions: [] },
-    postconditions: { match: 'all', conditions: [] },
-    implementations: [{
-      tier: 'cache',
-      extracts: [{ shape: 'list_of_records', target: { selector: String(selector) }, fields: [], output: outputName }],
-    }],
-    synthesized: true,
-    createdAt: ts, updatedAt: ts,
-  };
 }
 
 /**
@@ -1246,7 +1211,7 @@ export function createSgMessageHandlers(ctx) {
         const resolveObserveCap = async (cid, step) => {
           const c = caps.find((x) => x.id === cid);
           const obsId = crypto.randomUUID();
-          const rec = _canonicalObservationFromOrchCap(c, step.id, { observationId: obsId, now });
+          const rec = buildConvergeObservationRecord(c, step.id, { observationId: obsId, now });
           if (!rec) return null;                          // visual / no selector → unresolvable → fail closed (R7)
           await StorageManager.saveObservation(rec);
           return { observationId: obsId };

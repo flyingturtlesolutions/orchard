@@ -5,7 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { promoteComposite, validateTranslatedTree, assembleStrategy } from './orchPromote.js';
+import { promoteComposite, validateTranslatedTree, assembleStrategy, buildConvergeObservationRecord } from './orchPromote.js';
 import { buildCompositeCapability } from './orchChain.js';
 import { liftConditional } from './orchChain.js';
 
@@ -79,6 +79,26 @@ describe('orchPromote — composite → canonical Strategy', () => {
     assert.equal(validateTranslatedTree([{ type: 'detect', branches: [{ condition: { conditions: [{ type: 'orch_predicate', binding: 'b', specJson: '{bad' }] }, body: [] }], default: [] }]).ok, false, 'specJson must parse');
     // a well-formed tree passes
     assert.equal(validateTranslatedTree([{ type: 'fragment', fragmentId: 'f', paramBindings: { X: { kind: 'literal', value: 'v' } } }]).ok, true);
+  });
+
+  it('buildConvergeObservationRecord — count-safe list_of_records, STRING target, non-empty fields, output = step id', () => {
+    const cap = { kind: 'observation', groundId: 'g', intent: 'the list of jobs',
+      observe: { extracts: [{ selector: 'div.job', output: 'THE_JOBS', archetype: { selector: 'a.jcs-JobTitle', index: 0 } }] } };
+    const rec = buildConvergeObservationRecord(cap, 's2', { observationId: 'obs-1', now: 5 });
+    assert.equal(rec.id, 'obs-1');
+    assert.equal(rec.output, 's2', 'output = the observe step id (what the orch_predicate binding reads)');
+    const ex = rec.implementations[0].extracts[0];
+    assert.equal(ex.shape, 'list_of_records', 'count-safe shape (0 matches → list([]) → count 0)');
+    assert.equal(typeof ex.target, 'string', 'target is a SELECTOR STRING (OBSERVE_LIST does querySelectorAll(target))');
+    assert.equal(ex.target, 'a.jcs-JobTitle', 'prefers the per-item archetype selector');
+    assert.ok(Array.isArray(ex.fields) && ex.fields.length > 0, 'fields MUST be non-empty (OBSERVE_LIST rejects empty)');
+    assert.equal(ex.output, 's2');
+  });
+
+  it('buildConvergeObservationRecord — a visual observation, or one with no selector, → null (fail closed)', () => {
+    assert.equal(buildConvergeObservationRecord({ kind: 'observation', observe: { visual: { description: 'are there jobs' } } }, 's', {}), null);
+    assert.equal(buildConvergeObservationRecord({ kind: 'observation', observe: { extracts: [{ output: 'X' }] } }, 's', {}), null, 'no selector → null');
+    assert.equal(buildConvergeObservationRecord({ kind: 'fragment' }, 's', {}), null, 'not an observation → null');
   });
 
   it('assembleStrategy mirrors the canonical Tier-2 strategy shape (scalar params, fragmentSteps, synthesized)', () => {

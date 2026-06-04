@@ -16,8 +16,49 @@
 // @version 2.74.745
 
 import { translatePlan } from './orchTranslate.js';
+import { isVisualObservation } from './orchVisual.js';
 
 const _NODE_TYPES = new Set(['fragment', 'wait', 'observation', 'detect']);
+
+/**
+ * Materialize a CANONICAL Observation record from an ORCH observation sgCapability, for the converge. PURE.
+ * The shape is VERIFIED against the live protocol:
+ *   • cache-tier `list_of_records` extract → content script OBSERVE_LIST does `querySelectorAll(target)` (one
+ *     record per match) → ExecutionEngine tags it `list(...)`. ALWAYS a list, so 0 matches → list([]) → count 0,
+ *     sidestepping the image_read 0→scalar('') collapse that would mis-open an "if there are any …" gate.
+ *   • `target` is a SELECTOR STRING (NOT {selector}) — OBSERVE_LIST indexes it directly.
+ *   • `fields` MUST be non-empty (OBSERVE_LIST rejects an empty fields array); the field VALUE is irrelevant for a
+ *     count/exists gate — each matched container still yields one item — so a trivial descendant field suffices.
+ *   • `output` = the observe STEP id, so the downstream orch_predicate condition (binding = step id) reads it.
+ * Returns null for a VISUAL observation or one with no selector → the promote fails closed → matcher-only (R7).
+ * @returns {object|null}
+ */
+export function buildConvergeObservationRecord(cap, outputName, { observationId, now } = {}) {
+  if (!cap || cap.kind !== 'observation') return null;
+  if (isVisualObservation(cap)) return null;
+  const ex0 = (cap.observe && Array.isArray(cap.observe.extracts) && cap.observe.extracts[0]) || null;
+  const selector = ex0 && ((ex0.archetype && ex0.archetype.selector) || ex0.selector);
+  if (!selector) return null;
+  const ts = Number.isFinite(now) ? now : 0;
+  return {
+    id: observationId,
+    groundId: cap.groundId || null,
+    name: `${cap.intent || cap.name || 'observation'} — converged`.slice(0, 80),
+    description: cap.intent || '',
+    output: outputName,
+    shape: 'list',
+    params: [],
+    preconditions: { match: 'all', conditions: [] },
+    postconditions: { match: 'all', conditions: [] },
+    implementations: [{
+      tier: 'cache',
+      // target = plain selector string; fields non-empty (value unused for a count gate, but the guard requires it).
+      extracts: [{ shape: 'list_of_records', target: String(selector), fields: [{ name: 'value', selector: '*' }], output: outputName }],
+    }],
+    synthesized: true,
+    createdAt: ts, updatedAt: ts,
+  };
+}
 const _BIND_KINDS = new Set(['literal', 'strategy_param', 'iteration_variable']);
 
 /**
