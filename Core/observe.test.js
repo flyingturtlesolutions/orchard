@@ -122,6 +122,28 @@ describe('observe — the pure floor for observations (OBS-READ-1)', () => {
     assert.deepEqual(noIdx.observe.extracts[0].archetype, { selector: '.a', index: 0 }, 'missing index defaults to 0');
   });
 
+  // T3X-DF (v2.74.790) — capture-time antecedent: the prerequisite ACTION (the search) the cross-Ground dispatch
+  // replays before this read. An Observation carries its OWN antecedent (logical linkage independent of strategy
+  // membership). Only stamped when actually known; absent ⇒ the read runs on the base URL.
+  it('buildObservationCapability: a known antecedent + its param bindings ride onto the record', () => {
+    const cap = buildObservationCapability({
+      id: 'o', ask: 'the top job title', groundId: 'g',
+      landmark: { selector: 'a.jobTitle' }, extract: { selector: 'a.jobTitle' },
+      antecedentFragmentId: 'frag_search', antecedentParamBindings: { SEARCH: 'react' },
+    });
+    assert.equal(cap.antecedentFragmentId, 'frag_search', 'the prerequisite search Fragment is carried');
+    assert.deepEqual(cap.antecedentParamBindings, { SEARCH: 'react' }, 'the values that search ran with are carried');
+  });
+
+  it('buildObservationCapability: no antecedent / empty bindings → fields omitted (clean record)', () => {
+    const none = buildObservationCapability({ id: 'o', ask: 'x?', groundId: 'g', extract: { selector: '.s' } });
+    assert.equal(none.antecedentFragmentId, undefined, 'no antecedent → field absent (not null)');
+    assert.equal(none.antecedentParamBindings, undefined, 'no bindings → field absent');
+    const emptyBinds = buildObservationCapability({ id: 'o', ask: 'x?', groundId: 'g', extract: { selector: '.s' }, antecedentFragmentId: 'f', antecedentParamBindings: {} });
+    assert.equal(emptyBinds.antecedentFragmentId, 'f', 'antecedent fragment still rides without bindings (a search with no params)');
+    assert.equal(emptyBinds.antecedentParamBindings, undefined, 'an EMPTY bindings object is omitted, not stored as {}');
+  });
+
   it('observationSearchText: name + description + extract output names form the searchable text', () => {
     const obs = { name: 'First job title', description: 'reads the top result', implementations: [{ tier: 'cache', extracts: [{ shape: 'text', target: '.x', output: 'FIRSTJOB' }] }] };
     const t = observationSearchText(obs).toLowerCase();

@@ -1099,8 +1099,12 @@ async function _orchObserveCapture(msg, { groundId, tabId, ask }) {
   // stored selector reproduces it → show it immediately. If not → say so plainly instead of silently deferring a
   // read that will return nothing (this is the "the text should be visible somewhere" instinct, made real).
   if (res && res.success && res.capability) {
-    if (res.verifiedValue) _setMessageBody(msg, `Got it — I read “${String(res.verifiedValue).slice(0, 300)}”. Ask again and I’ll fetch it live.`);
-    else _setMessageBody(msg, `Saved — but when I re-read it just now I got nothing back. The picker saw ${res.sawText ? `“${String(res.sawText).slice(0, 120)}”` : 'a value'}, but the stored selector can’t reproduce it on this page (details in the log). Point me at it again, or use a Studio observation for a stable selector.`);
+    // T3X-DF — surface the inferred ANTECEDENT (the search the user just ran here, now this read's prerequisite). So
+    // when this read is reused on ANOTHER Ground (a cross-Ground workflow), the user knows it'll re-run that step first.
+    const ante = (res.capability && res.capability.antecedent) || null;
+    const anteNote = ante ? ` (When I use this read on another site, I’ll re-run your last step here first${ante.label ? ` — “${String(ante.label).slice(0, 60)}”` : ''}.)` : '';
+    if (res.verifiedValue) _setMessageBody(msg, `Got it — I read “${String(res.verifiedValue).slice(0, 300)}”. Ask again and I’ll fetch it live.${anteNote}`);
+    else _setMessageBody(msg, `Saved — but when I re-read it just now I got nothing back. The picker saw ${res.sawText ? `“${String(res.sawText).slice(0, 120)}”` : 'a value'}, but the stored selector can’t reproduce it on this page (details in the log). Point me at it again, or use a Studio observation for a stable selector.${anteNote}`);
   } else {
     _setMessageBody(msg, `Couldn’t set that up${res && res.error ? ` — ${res.error}` : ''}.`);
   }

@@ -156,6 +156,33 @@ async function persistTier1or2(phases, { groundId, name, goal, params = null, al
  * @returns {Record<string, (payload:object, sender:object, sendResponse:Function) => Promise<void>>}
  */
 export function createSgMessageHandlers(ctx) {
+  // T3X-DF (v2.74.790) — CAPTURE-TIME ANTECEDENT INFERENCE. The LAST action capability the chat REPLAYED on a
+  // Ground this SW-lifetime, keyed by groundId: { capabilityId, bindings }. REPLAY_SG_CAPABILITY is the single
+  // chokepoint for every chat-run action (standalone ask / compound chain / matcher), so recording here captures
+  // "the search that drove this Ground's state". OBSERVE_CAPTURE reads it to stamp a freshly-captured READ's
+  // antecedent — the prerequisite the cross-Ground dispatch (_runObservationStep) replays before reading. The user
+  // chose this inference path (vs an explicit picker / bind-time auto-link). In-memory only — re-derived as the
+  // user works; never persisted (a stale entry just means a base-URL read, which fails cleanly).
+  const _lastGroundAction = new Map();
+
+  // Resolve a remembered action capability to a SINGLE antecedent Fragment id. The antecedent primitive is a
+  // Fragment (TemplateWalker.executeFragment replays it + its own chain); a bare-Fragment cap maps directly, a
+  // Strategy cap ONLY when it wraps exactly ONE Fragment (an unambiguous single-phase search). A multi-fragment
+  // Strategy DECLINES (null) rather than guess which fragment is "the search" — that read then runs antecedent-less
+  // (the safe degraded path) instead of replaying a wrong/partial prerequisite.
+  const _antecedentFragmentIdFor = async (cap) => {
+    if (!cap) return null;
+    if (cap.fragmentId) return cap.fragmentId;
+    if (cap.strategyId) {
+      try {
+        const strat = await StorageManager.getStrategy(cap.strategyId);
+        const { fragmentIds } = CapabilitySynth.collectReferencedPrimitiveIds([strat]);
+        if (fragmentIds && fragmentIds.size === 1) return [...fragmentIds][0];
+      } catch { /* */ }
+    }
+    return null;
+  };
+
   return {
     // SG-4b — run the substrate-grounded plan on the live page (Comprehend→Select→Cover→Bind→execute) and
     // stash a session draft so the result can be accepted without re-running.
@@ -1092,17 +1119,36 @@ export function createSgMessageHandlers(ctx) {
         const lmk = (landmark && typeof landmark === 'object')
           ? { selector: chosenSelector, role: landmark.role || role || 'region', accessibleName: landmark.accessibleName || label || ask, ...(landmark.hierarchicalContext ? { hierarchicalContext: landmark.hierarchicalContext } : {}) }
           : { selector: chosenSelector, role: role || 'region', accessibleName: label || ask };
+        // T3X-DF — CAPTURE-TIME ANTECEDENT: the last action the chat ran on THIS Ground (the search that set up this
+        // page) becomes this read's prerequisite, replayed by the cross-Ground dispatch before reading. Resolved to a
+        // single Fragment id; declines (→ antecedent-less, base-URL read) when it can't map cleanly. Best-effort.
+        let antecedentFragmentId = null, antecedentParamBindings = null, antecedentLabel = '';
+        try {
+          const last = _lastGroundAction.get(gid);
+          if (last && last.capabilityId) {
+            const lastCap = (await ctx.readSgCapabilities(gid)).find((c) => c.id === last.capabilityId);
+            antecedentFragmentId = await _antecedentFragmentIdFor(lastCap);
+            if (antecedentFragmentId) {
+              antecedentLabel = String((lastCap && (lastCap.intent || lastCap.name)) || '').slice(0, 60);
+              if (last.bindings && typeof last.bindings === 'object' && Object.keys(last.bindings).length) {
+                antecedentParamBindings = last.bindings;
+              }
+            }
+          }
+        } catch (e) { Logger.warn('background', `OBSERVE_CAPTURE antecedent inference failed (continuing): ${e.message}`); }
         const cap = buildObservationCapability({
           id: crypto.randomUUID(), ask, intent: ask, goal: ask, groundId: gid, outputType,
           landmark: lmk,
           extract: { selector: chosenSelector, ...(shape ? { shape } : {}), ...(chosenArch ? { archetype: chosenArch } : {}) },
+          ...(antecedentFragmentId ? { antecedentFragmentId } : {}),
+          ...(antecedentParamBindings ? { antecedentParamBindings } : {}),
         });
         cap.localeUrl = localeUrl; cap.createdAt = Date.now();
         cap.aliases = accreteAlias(cap.aliases, ask, { intent: cap.intent });
         await ctx.writeSgCapability(gid, cap);
         try { await ctx.appendOutcomes(gid, [Outcomes.makeStageEvent('accept', { groundId: gid, verdict: 'accepted', input: { roleOrIntent: ask.slice(0, 120) }, detail: { capabilityId: cap.id, shape: 'observation', outputType: cap.outputType, selector: chosenSelector } })]); } catch { /* */ }
-        Logger.info('background', `OBSERVE_CAPTURE — "${ask.slice(0, 50)}" ${cap.id} → ${cap.outputType} stored via ${via}: ${chosenArch ? `archetype "${chosenArch.selector}"[${chosenArch.index}]` : `selector "${String(chosenSelector).slice(0, 80)}"`} on ${gid}`);
-        sendResponse({ success: true, capability: { id: cap.id, intent: cap.intent, outputType: cap.outputType, kind: 'observation' }, sawText: String(label || ''), verifiedValue, via });
+        Logger.info('background', `OBSERVE_CAPTURE — "${ask.slice(0, 50)}" ${cap.id} → ${cap.outputType} stored via ${via}: ${chosenArch ? `archetype "${chosenArch.selector}"[${chosenArch.index}]` : `selector "${String(chosenSelector).slice(0, 80)}"`} on ${gid}${antecedentFragmentId ? ` · antecedent=${antecedentFragmentId}${antecedentParamBindings ? ` (${Object.keys(antecedentParamBindings).join(',')})` : ''}` : ' · no antecedent inferred'}`);
+        sendResponse({ success: true, capability: { id: cap.id, intent: cap.intent, outputType: cap.outputType, kind: 'observation', antecedent: antecedentFragmentId ? { fragmentId: antecedentFragmentId, label: antecedentLabel } : null }, sawText: String(label || ''), verifiedValue, via });
       } catch (err) {
         Logger.error('background', `OBSERVE_CAPTURE failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
@@ -1671,6 +1717,9 @@ export function createSgMessageHandlers(ctx) {
             return;
           }
           const pv = Object.keys(strategyParamValues);
+          // T3X-DF — a clean run drove this Ground's state → remember it as a candidate ANTECEDENT for a later READ
+          // capture here (the search-before-the-read). Only on ok (a failed run left the page in an uncertain state).
+          if (ok) { try { _lastGroundAction.set(groundId, { capabilityId: cap.id, bindings: { ...strategyParamValues } }); } catch { /* */ } }
           Logger.info('background', `REPLAY_SG_CAPABILITY — ${cap.id} via saved strategy ${cap.strategyId} → ${ok ? 'ok' : 'failed'} (NO LLM, landmark recovery${pv.length ? `, params: ${pv.join(', ')}` : ''})`);
           sendResponse({ success: true, ran: true, replayed: true, via: 'strategy', capabilityId: cap.id, ok, reason: ok ? undefined : (result?.error || 'a step failed') });
           return;
@@ -1689,6 +1738,7 @@ export function createSgMessageHandlers(ctx) {
             try { result = await ExecutionEngine.executeStrategy({ strategyId: synthetic.id, strategy: synthetic, strategyParamValues, targetTabId: (typeof tabId === 'number' ? tabId : null) }); }
             catch (e) { sendResponse({ success: false, error: `replay fragment failed: ${e.message}` }); return; }
             const ok = !!(result && result.success);
+            if (ok) { try { _lastGroundAction.set(groundId, { capabilityId: cap.id, bindings: { ...strategyParamValues } }); } catch { /* */ } }   // T3X-DF — candidate antecedent for a later READ capture on this Ground
             Logger.info('background', `REPLAY_SG_CAPABILITY — ${cap.id} via bare FRAGMENT ${cap.fragmentId} (T1, wrapped at run time, NO LLM)`);
             sendResponse({ success: true, ran: true, replayed: true, via: 'fragment', capabilityId: cap.id, ok, reason: ok ? undefined : (result?.error || 'a step failed') });
             return;
