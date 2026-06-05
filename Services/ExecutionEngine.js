@@ -17,6 +17,7 @@
  */
 
 import { Logger }                 from '../Core/Logger.js';
+import { dropWeakInputPresence }  from '../Core/postcondition.js';   // v2.74.783 — filter precondition-shaped "input present" postconditions out of the skip gate
 import { StorageManager }         from './StorageManager.js';
 import { TemplateWalker }         from './TemplateWalker.js';
 import { Scope, scalar, list, record, image, section, document, asString } from './Scope.js';
@@ -751,7 +752,12 @@ export class ExecutionEngine {
     // a FOREACH body. Top-level calls (iteration === null) keep the
     // original skip-check for their backward-compat benefit.
     const insideForeach = iteration !== null;
-    const _fragPostSkip = _condList(fragment.postconditions);
+    // v2.74.783 — a postcondition that merely asserts a FILLABLE INPUT is present (e.g. the search box
+    // `input[name="q"]`) is precondition-shaped: true BEFORE and AFTER the action. It must NOT gate the skip, or a
+    // parameterized search whose box is always present can never re-run with a new query (the reported bug). Drop
+    // those weak checks; skip only when a STRONG success signal (a results region, a url match, …) remains and holds.
+    // This keeps the legitimate skips (login already-logged-in, etc.) whose postcondition is a real state landmark.
+    const _fragPostSkip = dropWeakInputPresence(_condList(fragment.postconditions));
     if (!insideForeach && _fragPostSkip.length > 0) {
       const preProbe = await TemplateWalker.checkConditions({ tabId, conditions: _fragPostSkip });
       if (preProbe.ok) {

@@ -26,6 +26,7 @@
  */
 
 import { Logger }           from '../Core/Logger.js';
+import { dropWeakInputPresence } from '../Core/postcondition.js';   // v2.74.783 — keep precondition-shaped "input present" checks from gating the antecedent skip
 import { AnthropicService } from './AnthropicService.js';
 import { StorageManager }   from './StorageManager.js';
 import { InjectionService } from './InjectionService.js';
@@ -497,8 +498,12 @@ export class TemplateWalker {
       // change the URL, re-typing a filtered search may clear results). Same
       // principle as strategy-step skipping: Fragment = state goal, not blind
       // action replay.
-      if (Array.isArray(frag.postconditions) && frag.postconditions.length > 0) {
-        const preProbe = await TemplateWalker.checkConditions({ tabId, conditions: frag.postconditions });
+      // v2.74.783 — drop precondition-shaped "fillable input present" postconditions (e.g. a search box) so a
+      // parameterized antecedent (a re-search) isn't skipped on its ever-present input; a real state postcondition
+      // (logged-in indicator, results region) still gates the skip. Mirrors the ExecutionEngine #runFragmentStep fix.
+      const _antePost = dropWeakInputPresence(frag.postconditions);
+      if (_antePost.length > 0) {
+        const preProbe = await TemplateWalker.checkConditions({ tabId, conditions: _antePost });
         if (preProbe.ok) {
           Logger.info('TemplateWalker', `Antecedent "${frag.name}" — postconditions already hold; skipping`);
           TemplateWalker.#broadcast(broadcastKey, {

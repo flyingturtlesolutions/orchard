@@ -4,8 +4,25 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional } from './orchChain.js';
+import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites } from './orchChain.js';
 import { validatePlan } from './orchPlan.js';
+
+describe('orchChain — namesMultipleSites (cross-site pre-filter, T3X)', () => {
+  it('fires on two DISTINCT site references (the bug ask + the data-handoff ask)', () => {
+    assert.equal(namesMultipleSites('search for jobs on indeed then search for flying turtles on pixabay'), true);
+    assert.equal(namesMultipleSites('find a job on linkedin and save it to notion'), true);
+    assert.equal(namesMultipleSites('post it to twitter and also to mastodon'), true);
+  });
+  it('does NOT fire on a within-site compound (no second site)', () => {
+    assert.equal(namesMultipleSites('search jobs and filter by date'), false);
+    assert.equal(namesMultipleSites('search remote react jobs and sort by newest'), false);
+    assert.equal(namesMultipleSites('search SWE jobs in minneapolis posted last 7 days'), false, 'a single location ref is not two sites');
+  });
+  it('does NOT fire on one site mentioned twice, or on pronoun/article destinations', () => {
+    assert.equal(namesMultipleSites('search indeed then open indeed again'), false, 'same site twice = one distinct token');
+    assert.equal(namesMultipleSites('save it to me and send it to the top'), false, 'pronoun/article tokens are dropped');
+  });
+});
 
 describe('orchChain — decompose a compound ask + assemble a sequential plan (ORCH-X)', () => {
   it('decomposeAsk: a single intent stays one clause', () => {

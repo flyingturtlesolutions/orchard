@@ -18,7 +18,7 @@ import { isSafeStrategyResultHtml, looksLikeStrategyResultHtml } from './Service
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
-import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing
+import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, namesMultipleSites } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; namesMultipleSites — cross-site pre-filter (T3X)
 import { walkPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate)
 import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   // ORCH-A — predicate → gate (conditional routing + the analysis)
 import { comprehend } from './Core/orchComprehend.js';   // ORCH-CB — substrate-free shape comprehension (cold-ground decompose)
@@ -1303,8 +1303,83 @@ function _orchOfferComprehended(msg, { tabId, groundId, ask, comp }) {
   bar.appendChild(_mkBtn('● Show me', () => { bar.remove(); _orchRecordFlow(appendMessage({ role: 'assistant', body: '' }), { groundId, tabId, ask }); }));
 }
 
+// ── T3X — cross-Ground WORKFLOW proposal ────────────────────────────────────────────────────────────────────
+// Render a comprehended cross-site Workflow (COMPREHEND_CROSS_GROUND): the per-site steps (✓ bound / ⚠ a gap),
+// any GAPS (Q3 repairs — what to teach and where) and ASSUMPTIONS (Q2 ambiguities the resolver had to guess), then
+// Run / Save controls. Precision-first: nothing runs or persists until the user acts.
+const _wfSite = (r) => (r && (r.groundName || r.groundId)) || '';
+function _orchOfferWorkflow(msg, { ask, res }) {
+  const wf = (res && res.workflow) || {};
+  const resolved = Array.isArray(res && res.resolved) ? res.resolved : [];
+  const repairs = Array.isArray(res && res.repairs) ? res.repairs : [];
+  const ambiguities = Array.isArray(res && res.ambiguities) ? res.ambiguities : [];
+
+  const lines = resolved.map((r, i) => {
+    const site = _wfSite(r);
+    const mark = r && r.capabilityId ? '' : '⚠ ';
+    return `${i + 1}. ${mark}${(r && r.clause) || 'do it'}${site ? ` · on ${site}` : ''}`;
+  });
+  const sites = Array.from(new Set(resolved.map(_wfSite).filter(Boolean)));
+  let body = `This spans ${sites.length} site${sites.length === 1 ? '' : 's'}${sites.length ? ` (${sites.join(' → ')})` : ''}:\n${lines.join('\n')}`;
+  if (repairs.length) body += `\n\nI can’t do ${repairs.length === 1 ? 'one part' : `${repairs.length} parts`} yet:\n` + repairs.map((p) => `• ${p.message}`).join('\n');
+  if (ambiguities.length) body += `\n\nAssumed: ` + ambiguities.map((a) => `“${a.clause}” → ${(a.candidates && a.candidates[0] && a.candidates[0].name) || 'a site'}`).join('; ');
+  _setMessageBody(msg, body);
+
+  const bar = _orchActionBar(msg);
+  if (res && res.runnable && wf.id) {
+    bar.appendChild(_mkBtn('▶ Run it', () => { bar.remove(); _orchRunWorkflow(appendMessage({ role: 'assistant', body: '' }), { workflow: wf, ask }); }));
+    bar.appendChild(_mkBtn('🔖 Save for later', () => { bar.remove(); _orchSaveWorkflow(appendMessage({ role: 'assistant', body: '' }), { workflow: wf }); }));
+  } else {
+    // Non-runnable: the gaps above say exactly what to teach. Acknowledge; teaching happens on each site’s page.
+    bar.appendChild(_mkBtn('Got it', () => { bar.remove(); }));
+  }
+}
+
+// SAVE the previewed Workflow (the exact record shown — no re-decompose), so it can be re-run anytime.
+async function _orchSaveWorkflow(msg, { workflow }) {
+  _setMessageBody(msg, 'Saving…');
+  const saved = await _orchReq('SAVE_WORKFLOW', { workflow });
+  _setMessageBody(msg, (saved && saved.success !== false && saved.workflow)
+    ? `Saved “${workflow.name || 'workflow'}” — you can run it anytime.`
+    : `Couldn’t save${saved && saved.error ? ` — ${saved.error}` : ''}.`);
+}
+
+// SAVE then RUN the previewed Workflow: persist the exact shown record (INVOKE_WORKFLOW runs by id), then invoke
+// it. Reports the outcome; surfaces saga COMPENSATION (Q5) when a mid-journey failure rolled committed steps back.
+async function _orchRunWorkflow(msg, { workflow, ask }) {
+  _setMessageBody(msg, 'Saving the workflow…');
+  const saved = await _orchReq('SAVE_WORKFLOW', { workflow });
+  const wfId = saved && saved.workflow && saved.workflow.id;
+  if (!saved || saved.success === false || !wfId) {
+    _setMessageBody(msg, `Couldn’t save the workflow${saved && saved.error ? ` — ${saved.error}` : ''}.`);
+    return;
+  }
+  _setMessageBody(msg, 'Running across your sites…');
+  const res = await _orchReq('INVOKE_WORKFLOW', { workflowId: wfId });
+  if (res === null) {   // _orchReq timed out — the run may still be going (cross-site runs can be long)
+    _setMessageBody(msg, 'Still working on it — this one’s taking a while. I’ll leave it running; check the tabs it opened.');
+    return;
+  }
+  if (res.success === false) {
+    let m = `That didn’t finish${res.error ? ` — ${res.error}` : ''}.`;
+    if (Array.isArray(res.compensation) && res.compensation.length) {
+      const undone = res.compensation.filter((c) => c && c.success).length;
+      m += ` Rolled back ${undone}/${res.compensation.length} completed step${res.compensation.length === 1 ? '' : 's'}.`;
+    }
+    _setMessageBody(msg, m);
+    return;
+  }
+  const n = Array.isArray(workflow.groundIds) ? workflow.groundIds.length : 0;
+  _setMessageBody(msg, `Done — ran “${workflow.name || ask || 'the workflow'}”${n ? ` across ${n} site${n === 1 ? '' : 's'}` : ''}.`);
+}
+
 // Conversational fillers are never page tasks — skip the grounded matcher so "yes"/"ok" don't match a capability.
 const _ORCH_FILLER = /^(y|n|yes|no|ok|okay|sure|yep|yeah|nope|nah|thanks|thank you|ty|hi|hello|hey|nvm|never ?mind|stop|cancel|wait|done)\b[\s!.?]*$/i;
+
+// T3X — a cross-SITE handoff cue: a connective + a transfer verb + a destination preposition ("… and save it TO
+// Notion"). A cheap precision gate so only plausibly cross-Ground asks pay the COMPREHEND_CROSS_GROUND LLM call;
+// the background still confirms the ask resolves to ≥2 distinct Grounds before the chat commits the turn.
+const _CROSS_SITE_CUE = /\b(?:and|then|&|,)\b[\s\S]*\b(?:save|add|post|send|put|create|share|copy|paste|export|sync|log|record|store|bookmark|email|message|dm|tweet|publish|upload|attach|schedule|draft)\b[\s\S]*\b(?:to|into|onto|on|in)\b/i;
 
 // Returns true if the grounded library handled the turn (HIT); false to fall through to the legacy matcher.
 async function _tryGroundedTurn(text) {
@@ -1342,6 +1417,25 @@ async function _tryGroundedTurn(text) {
       _orchConfirmPlan(probe, { tabId: tab.id, groundId: mc.groundId, steps: mc.steps, gaps: [], ask: text, savedComposite: true });
       return true;
     }
+  }
+
+  // T3X — a CROSS-SITE intent spans MULTIPLE Grounds, so it can't bind to the active page. Two shapes trigger it:
+  // a DATA HANDOFF ("find a job on LinkedIn and save it to Notion" — _CROSS_SITE_CUE) AND an independent SEQUENCE
+  // ("search Indeed then search Pixabay" — namesMultipleSites: a connective + ≥2 distinct site references, which
+  // the transfer-verb cue misses). Either way we comprehend it into a WORKFLOW that composes one Strategy per
+  // Ground (COMPREHEND_CROSS_GROUND, T3). We COMMIT the turn only when it resolves to ≥2 distinct Grounds — a
+  // single-Ground result (or the within-task multi-phase fallback) falls through to the within-Ground cascade
+  // unchanged, so a wrongly-triggered ask costs one comprehend and is harmless. Save:false — this is a PREVIEW.
+  if (isCompoundAsk(text) && (_CROSS_SITE_CUE.test(text) || namesMultipleSites(text))) {
+    const probe = appendMessage({ role: 'thinking', body: 'Looking across your sites…' });
+    const cg = await _orchReq('COMPREHEND_CROSS_GROUND', { ask: text });
+    const grounds = new Set(((cg && Array.isArray(cg.resolved)) ? cg.resolved : []).map((r) => r && r.groundId).filter(Boolean));
+    if (cg && cg.success && grounds.size >= 2) {
+      probe.classList.remove('thinking'); probe.classList.add('assistant');
+      _orchOfferWorkflow(probe, { ask: text, res: cg });
+      return true;
+    }
+    probe.remove();   // not cross-Ground → let the within-Ground cascade handle it unchanged
   }
 
   // ORCH-X — a COMPOUND ask ("search for x AND filter by y") is DECOMPOSED and CHAINED over existing

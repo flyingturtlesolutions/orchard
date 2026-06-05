@@ -500,6 +500,11 @@ export function createSgMessageHandlers(ctx) {
         for (let i = 0; i < runPhases.length; i++) {
           const rp = runPhases[i];
           if (!rp || !rp.outcomeUid) continue;
+          // v2.74.783 — never build an OUTCOME perspective (→ perspective_ref postcondition) from an OPERATIVE
+          // control. If the "outcome" landmark is one of the demonstrated input/button uids it is precondition-
+          // shaped (present before AND after the action), so a perspective_ref to it is an always-true success
+          // check — the perspective_ref analog of the search-box bug. Leave the honest derived postcondition.
+          if (protoLandmarkUids.includes(rp.outcomeUid)) continue;
           const out = buildOutcomePerspective({ intent: capName, groundId, localeUrl: rp.localeUrl || rp.url, resultsUid: rp.outcomeUid, discriminator: String(i) });
           if (!out) continue;
           try { await StorageManager.savePerspective(out.perspective); rp.postcondition = out.postcondition; }
@@ -939,6 +944,7 @@ export function createSgMessageHandlers(ctx) {
           const g = chosenGroundId ? byId.get(chosenGroundId) : null;
           resolved.push({
             id: si.id || `s${i}`, clause, groundId: chosenGroundId,
+            groundName: g ? (g.name || g.site || g.id || null) : null,   // friendly site label for the chat proposal card
             groundUrl: g ? (g.url || (Array.isArray(g.urlPatterns) ? g.urlPatterns[0] : null)) : null,
             capabilityId: bound ? bound.capabilityId : null,
             capabilityName: bound ? bound.capabilityName : '',

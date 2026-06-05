@@ -19,6 +19,7 @@
 // @version 2.74.750
 
 import { featureToProtoLandmark } from './landmark.js';   // OBS (v2.74.764) — reconcile demonstrated elements to grounded Locale features
+import { isFillableInputSelector } from './postcondition.js';   // v2.74.783 — never synthesize a presence postcondition on a fillable input (precondition-shaped, always-true)
 
 const _DISCLOSURE_HINT = /filter|menu|sort|posted|date|pay|salary|wage|type|level|experience|distance|remote|radius|category|options?|dropdown|expand|more/i;
 
@@ -382,7 +383,12 @@ export function derivePhasePostcondition(phase) {
     return null;   // navigated, but no usable path → don't fall through to a settle selector (there is none post-nav)
   }
   // In-place (SPA) commit: no URL change, but the swapped-in results container settled → assert its presence.
-  if (settleSelector && typeof settleSelector === 'string') {
+  // v2.74.783 — UNLESS the recorder's "settle" container resolved to a FILLABLE INPUT (e.g. on Indeed the most-
+  // changed subtree was the search box itself). A presence check on an input is precondition-shaped — true before
+  // AND after the search — so it would make the Fragment un-repeatable (the runtime skips when it "already holds").
+  // In that case emit NO postcondition (null): the structural floor / any LLM-refined success signal applies, and
+  // the runtime never wrongly short-circuits a re-search.
+  if (settleSelector && typeof settleSelector === 'string' && !isFillableInputSelector(settleSelector)) {
     return { match: 'all', conditions: [{ type: 'selector_present', selector: settleSelector }], source: 'spa-settle' };
   }
   return null;

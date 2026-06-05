@@ -41,6 +41,40 @@ const _STOP = new Set([
 // Query params that are pure navigation NOISE — they change on most navigations and never indicate a filter.
 const _NOISE_PARAMS = new Set(['vjk', 'g-recaptcha-response', 'gclid', 'utm_source', 'utm_medium', 'utm_campaign', '_ga']);
 
+/**
+ * Does a CSS selector target a FILLABLE INPUT control (input/textarea/select/contenteditable)? PURE. A presence
+ * check on such a control is PRECONDITION-shaped — the box exists before AND after the action — so it is a useless
+ * (always-true) success POSTCONDITION for an effect-bearing action (e.g. a search box is present whether or not the
+ * search ran). Used to (a) reject such a postcondition at synthesis and (b) ignore it at the runtime skip gate so a
+ * parameterized search is never short-circuited. Conservative: only fires when the selector's target element is
+ * clearly an input; a results/region selector (".results", "#out") returns false.
+ * @param {string} selector
+ * @returns {boolean}
+ */
+export function isFillableInputSelector(selector) {
+  const s = String(selector || '').trim();
+  if (!s) return false;
+  // the LAST simple selector (after the final combinator) is the matched element — test its tag/attrs
+  const last = s.split(/\s*[>+~]\s*|\s+/).filter(Boolean).pop() || s;
+  if (/^(?:input|textarea|select)\b/i.test(last)) return true;          // input[name="q"], textarea#bio, select.x
+  if (/\[(?:type|name|placeholder|value)\s*[~|^$*]?=/i.test(last) && /^(?:\*|\[)/.test(last)) return true;  // [name="q"], [placeholder=…]
+  if (/\bcontenteditable\b/i.test(last)) return true;
+  return false;
+}
+
+/**
+ * Drop WEAK presence-on-input conditions from a condition list (the precondition-shaped checks above). PURE. The
+ * runtime "skip-when-postconditions-already-hold" optimization must not treat such a condition as a satisfied goal,
+ * or a parameterized search whose box is always present can never re-run. Returns only the STRONG conditions; an
+ * empty result means "no real success signal → do not skip".
+ * @param {object[]} conditions
+ * @returns {object[]}
+ */
+export function dropWeakInputPresence(conditions) {
+  return (Array.isArray(conditions) ? conditions : [])
+    .filter((c) => !(c && c.type === 'selector_present' && isFillableInputSelector(c.selector)));
+}
+
 /** Pull domain keywords (≥3 chars, non-filler) from a prose/substring match. PURE. */
 export function extractKeywords(prose, { min = 3 } = {}) {
   const toks = String(prose || '').toLowerCase().match(/[a-z0-9_]+/g) || [];

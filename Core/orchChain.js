@@ -63,6 +63,32 @@ export function isCompoundAsk(ask) {
   return decomposeAsk(ask).length > 1;
 }
 
+// Tokens that follow a destination preposition but are NOT site names (pronouns/articles/relative places). Keeps
+// "save it to me" / "go to the top" from counting as a site reference.
+const _SITE_STOP = new Set(['it', 'me', 'them', 'us', 'you', 'him', 'her', 'the', 'a', 'an', 'my', 'your', 'our',
+  'their', 'his', 'this', 'that', 'these', 'those', 'here', 'there', 'home', 'top', 'bottom', 'left', 'right',
+  'one', 'each', 'all', 'both', 'page', 'site', 'list', 'side', 'end', 'start']);
+
+/**
+ * Does this ask reference TWO OR MORE DISTINCT sites? PURE. A cheap lexical pre-filter for a CROSS-GROUND ask: a
+ * destination preposition (on/to/into/onto/at/from) followed by a non-pronoun token is a site reference (e.g.
+ * "...on indeed ... on pixabay", "...on linkedin ... to notion"). Two DISTINCT such tokens → likely cross-site.
+ * Deliberately conservative — the authoritative test is the background resolving the ask to ≥2 real Grounds; this
+ * only gates whether that (LLM) comprehension is worth attempting, so a single site mentioned twice does NOT fire.
+ * @param {string} ask
+ * @returns {boolean}
+ */
+export function namesMultipleSites(ask) {
+  const re = /\b(?:on|onto|to|into|at|from)\s+([a-z][a-z0-9.&'-]{1,})/ig;
+  const seen = new Set();
+  let m;
+  while ((m = re.exec(String(ask || ''))) !== null) {
+    const tok = m[1].toLowerCase();
+    if (!_SITE_STOP.has(tok)) seen.add(tok);
+  }
+  return seen.size >= 2;
+}
+
 /**
  * A cheap gate for "this single sentence may span MULTIPLE capabilities" — worth an LLM PLAN (semantic
  * decomposition) rather than a single match. PURE. Lexical decompose only catches explicit connectives; a

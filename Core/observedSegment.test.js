@@ -129,6 +129,13 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     assert.deepEqual(pc.conditions, [{ type: 'selector_present', selector: '#results' }]);
   });
 
+  it('derivePhasePostcondition: IN-PLACE settle on a FILLABLE INPUT → null (v2.74.783, the re-search bug)', () => {
+    // On Indeed the recorder picked the search box as the most-changed subtree. A presence check on it is always-
+    // true (precondition-shaped), so emitting it as a postcondition makes the search un-repeatable. Emit nothing.
+    assert.equal(derivePhasePostcondition({ url: 'https://www.indeed.com', to: 'https://www.indeed.com', settleSelector: 'input[name="q"]' }), null);
+    assert.equal(derivePhasePostcondition({ url: 'https://x/s', to: 'https://x/s', settleSelector: 'textarea#bio' }), null);
+  });
+
   it('derivePhasePostcondition: a NAV wins over a settle; a root / destination or no signal → null', () => {
     // a real nav with a settle selector present → still the url_matches (the page changed; the selector is post-nav noise)
     const navWins = derivePhasePostcondition({ url: 'https://x/a', to: 'https://x/b', settleSelector: '#r' });
