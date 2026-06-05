@@ -76,6 +76,7 @@
  */
 
 import { StorageManager } from './StorageManager.js';
+import { wrapFragmentAsStrategy } from '../Core/capabilitySynth.js';   // v2.74.786 — wrap a bare T1 Fragment cross-Ground step into a synthetic Strategy at run time
 import { ExecutionEngine } from './ExecutionEngine.js';
 import { parseFileValue, isFileValue } from './FileParsers.js';
 import { Scope, scalar, list, isKind } from './Scope.js';
@@ -366,6 +367,22 @@ async function executeWorkflowStep(step, stepIndex, paramValues, workflowScope, 
   // kind=`strategy` — the renamed-at-v2.74.142 internal identifier kept
   // for back-compat with stored records).
   //
+  // v2.74.786 — A cross-Ground step may bind a bare T1 FRAGMENT (the user's library is
+  // Fragment-based, not Strategy-based). A Fragment can't be loaded as a Strategy by id, so
+  // wrap it at run time into a synthetic single-fragment Strategy (the SAME path REPLAY_SG_CAPABILITY
+  // and CapabilityAPI use) and pass it as the inline `strategy`. `capabilityKind` defaults to
+  // 'strategy' for older records, so existing Workflows are unaffected.
+  let inlineStrategy = null;
+  if (step.capabilityKind === 'fragment') {
+    let frag = null;
+    try { frag = await StorageManager.getFragment(step.workflowId); } catch { /* */ }
+    if (!frag) {
+      ctx.emit({ type: 'strategy_step_done', stepIndex, stepType: 'workflow', success: false, error: `Fragment ${step.workflowId} not found`, message: `Step ${stepIndex + 1}: Fragment not found` });
+      return { success: false, error: `Fragment ${step.workflowId} not found` };
+    }
+    inlineStrategy = wrapFragmentAsStrategy(frag, { strategyId: `fragment:${frag.id}` });
+  }
+  //
   // v2.74.151 — Propagate the Workflow-tier debug envelope so the inner
   // Strategy runtime also runs in debug mode when the outer Workflow is
   // being debugged. The debug envelope is what gates the page overlay
@@ -373,7 +390,8 @@ async function executeWorkflowStep(step, stepIndex, paramValues, workflowScope, 
   // forwarding, an inner Strategy step inside a workflow-debug session
   // would behave as if debug were off and skip those visual aids.
   const result = await ExecutionEngine.executeStrategy({
-    strategyId: step.workflowId,
+    strategyId: inlineStrategy ? inlineStrategy.id : step.workflowId,
+    strategy: inlineStrategy,   // null → load the Strategy by id; the synthetic wrap runs a bare T1 Fragment
     strategyParamValues: innerParams,
     invocationId: `${ctx.invocationId}::step${stepIndex}`,
     isAborted: ctx.isAborted,

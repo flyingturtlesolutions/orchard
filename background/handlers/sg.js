@@ -44,23 +44,40 @@ import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
 // (toCandidate → rankAndDecide) over that Ground's matcher-store capabilities, scoped to Strategies (a `workflow`
 // step dispatches a Strategy by id). Returns { capabilityId, capabilityName, params } or null (a gap). Async I/O
 // glue over the tested pure cores (groundCatalog/tier3); not unit-tested (LLM/storage path — verify live).
+// A friendly site label for the chat card: the Ground's stored name UNLESS it is generic/empty ("Ground"), in which
+// case derive it from the host ("indeed.com" → "Indeed"). The cross-Ground card was unreadable ("· on Ground" for
+// every step) when grounding never named the site. PURE.
+function _groundLabel(g) {
+  if (!g) return null;
+  const name = String(g.name || g.site || '').trim();
+  if (name && !/^ground$/i.test(name)) return name;
+  const url = g.url || (Array.isArray(g.urlPatterns) ? g.urlPatterns[0] : '') || '';
+  try { const core = new URL(url).hostname.replace(/^www\./, '').split('.')[0]; if (core) return core.charAt(0).toUpperCase() + core.slice(1); } catch { /* */ }
+  return name || g.id || g.groundId || null;
+}
+
 async function _bindStrategyOnGround(ctx, clause, groundId) {
   let caps = [];
   try { caps = await ctx.readSgCapabilities(groundId); } catch { return null; }
   const candidates = (Array.isArray(caps) ? caps : [])
-    .filter((c) => c && c.kind !== 'observation' && c.strategyId)   // a Strategy on this Ground (has a strategyId)
+    .filter((c) => c && c.kind !== 'observation' && (c.strategyId || c.fragmentId))   // any RUNNABLE capability — a T2 Strategy OR a bare T1 Fragment
     .map((c) => toCandidate(c));
   if (!candidates.length) return null;
   const decision = rankAndDecide(clause, candidates, { now: Date.now() });
   const cand = decision && decision.candidate;
   if (!cand || decision.decision === 'miss') return null;
-  const strategyId = cand.strategyId || cand.id;
-  // the Strategy's DECLARED outputs feed downstream scopeReads (the cross-Ground data flow — wireCrossGroundData)
+  const cap = (cand.raw && typeof cand.raw === 'object') ? cand.raw : {};
+  const isStrategy = !!cap.strategyId;
+  // the DISPATCH id the Workflow step runs: a Strategy id (executeStrategy by id) OR a Fragment id (wrapped at run
+  // time — capabilityKind tells the executor to wrap it). Only a T2 Strategy declares outputs (cross-Ground data
+  // flow via wireCrossGroundData); a bare T1 Fragment has none.
+  const dispatchId = cap.strategyId || cap.fragmentId || cand.id;
   let outputs = [];
-  try { const strat = await StorageManager.getStrategy(strategyId); outputs = (Array.isArray(strat && strat.outputs) ? strat.outputs : []).map((o) => (typeof o === 'string' ? o : (o && o.name))).filter(Boolean); } catch { /* */ }
+  if (isStrategy) { try { const strat = await StorageManager.getStrategy(cap.strategyId); outputs = (Array.isArray(strat && strat.outputs) ? strat.outputs : []).map((o) => (typeof o === 'string' ? o : (o && o.name))).filter(Boolean); } catch { /* */ } }
   return {
-    capabilityId: strategyId,
-    capabilityName: cand.intent || '',
+    capabilityId: dispatchId,
+    capabilityKind: isStrategy ? 'strategy' : 'fragment',
+    capabilityName: cand.intent || cap.name || '',
     params: (cand.params || []).map((p) => (typeof p === 'string' ? p : (p && p.name))).filter(Boolean),
     outputs,
   };
@@ -871,13 +888,14 @@ export function createSgMessageHandlers(ctx) {
         const { ask = '', save = false } = payload ?? {};
         if (!String(ask).trim()) { sendResponse({ success: false, error: 'empty ask' }); return; }
 
-        // 1. The global Ground catalog — every Ground + its Strategies' goal labels (the T3X-1 substrate).
+        // 1. The global Ground catalog — every Ground + the goal labels of ALL its capabilities (T2 Strategies AND
+        //    bare T1 Fragments) so ground-resolution works on a Fragment-only Ground (the T3X-1 substrate).
         const grounds = (await StorageManager.getAllGrounds()) || [];
         if (!grounds.length) { sendResponse({ success: false, error: 'no Grounds to compose across' }); return; }
         const capLabelsByGround = {};
         for (const g of grounds) {
           const gid = g && (g.id || g.groundId); if (!gid) continue;
-          try { const strs = await StorageManager.listStrategies(gid); capLabelsByGround[gid] = (Array.isArray(strs) ? strs : []).map((s) => (s && (s.name || s.goal)) || '').filter(Boolean); } catch { /* */ }
+          try { const caps = await ctx.readSgCapabilities(gid); capLabelsByGround[gid] = (Array.isArray(caps) ? caps : []).filter((c) => c && c.kind !== 'observation').map((c) => (c.intent || c.name || '')).filter(Boolean); } catch { /* */ }
         }
         const catalog = buildGroundCatalog(grounds, capLabelsByGround);
         const byId = new Map(grounds.map((g) => [g && (g.id || g.groundId), g]).filter(([k]) => k));
@@ -944,9 +962,10 @@ export function createSgMessageHandlers(ctx) {
           const g = chosenGroundId ? byId.get(chosenGroundId) : null;
           resolved.push({
             id: si.id || `s${i}`, clause, groundId: chosenGroundId,
-            groundName: g ? (g.name || g.site || g.id || null) : null,   // friendly site label for the chat proposal card
+            groundName: _groundLabel(g),   // host-derived when the stored name is generic ("Ground") — readable card
             groundUrl: g ? (g.url || (Array.isArray(g.urlPatterns) ? g.urlPatterns[0] : null)) : null,
             capabilityId: bound ? bound.capabilityId : null,
+            capabilityKind: bound ? bound.capabilityKind : null,   // 'strategy' | 'fragment' — how the Workflow step dispatches it
             capabilityName: bound ? bound.capabilityName : '',
             params: bound ? bound.params : [],
             outputs: bound ? bound.outputs : [],

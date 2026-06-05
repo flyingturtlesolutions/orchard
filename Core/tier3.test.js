@@ -54,6 +54,16 @@ describe('tier3 — T3X-2 buildWorkflowRecord (cross-Ground recursion lowering)'
     assert.equal(buildWorkflowRecord({ id: '', resolved }).workflow, null);
     assert.equal(buildWorkflowRecord({ id: 'wf', resolved: [] }).workflow, null);
   });
+
+  it('a T1 FRAGMENT sub-intent → step.capabilityKind "fragment"; an absent kind defaults to "strategy"', () => {
+    const r = buildWorkflowRecord({ id: 'wf', intent: 'x', resolved: [
+      { id: 's0', clause: 'search jobs on indeed', groundId: 'gnd_li', capabilityId: 'frag_1', capabilityKind: 'fragment', params: [] },
+      { id: 's1', clause: 'save it to notion',     groundId: 'gnd_no', capabilityId: 'strat_2', params: [] },   // no kind → default
+    ] });
+    assert.equal(r.workflow.steps[0].capabilityKind, 'fragment', 'a bare T1 Fragment step is flagged for run-time wrap');
+    assert.equal(r.workflow.steps[0].workflowId, 'frag_1', 'the dispatch id is the Fragment id');
+    assert.equal(r.workflow.steps[1].capabilityKind, 'strategy', 'absent capabilityKind → strategy (back-compat with old records)');
+  });
 });
 
 describe('tier3 — T3X wireCrossGroundData (cross-Ground data-flow floor)', () => {
