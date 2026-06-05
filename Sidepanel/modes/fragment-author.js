@@ -1155,22 +1155,28 @@ async function mount(payload, mountEl) {
       ? _payload.prefilledPreconditions : null;
     const hydratedPost = Array.isArray(_payload?.prefilledPostconditions)
       ? _payload.prefilledPostconditions : null;
-    if (hydratedPre && hydratedPre.length > 0) {
+    // v2.74.769 — When the pencil-edit / rewalk flow carries the SAVED conditions (either array, even EMPTY), the
+    // saved record is authoritative for BOTH sides. The earlier fix only locked the NON-EMPTY side, so a
+    // saved-EMPTY precondition fell through to _capturePreconditions and was replaced by live-derived phantoms
+    // (visible in this side-panel editor but absent from the saved record / Studio), and capture churn around the
+    // rewalk's navigations could blank a saved postcondition — the exact pre-here / post-there split between the
+    // two editors. Lock BOTH whenever the edit flow supplied conditions, so auto-capture never clobbers them.
+    const isConditionEdit = hydratedPre !== null || hydratedPost !== null;
+    if (hydratedPre) {
       _preconditions = hydratedPre.map(c => ({ ...c }));
-      _preSource = 'loaded from saved fragment';
-      _preUserModified = true;
+      _preSource = hydratedPre.length ? 'loaded from saved fragment' : 'saved fragment has no preconditions';
     } else {
       _preconditions = [];
       _preSource = '—';
     }
-    if (hydratedPost && hydratedPost.length > 0) {
+    if (hydratedPost) {
       _postconditions = hydratedPost.map(c => ({ ...c }));
-      _postSource = 'loaded from saved fragment';
-      _postUserModified = true;
+      _postSource = hydratedPost.length ? 'loaded from saved fragment' : 'saved fragment has no postconditions';
     } else {
       _postconditions = [];
       _postSource = '—';
     }
+    if (isConditionEdit) { _preUserModified = true; _postUserModified = true; }
   }
 
   if (!_payload.fragmentId) {

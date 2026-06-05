@@ -15,7 +15,7 @@ import { coverComplete } from '../../Core/cover.js';
 import { selectionToTrialRoles } from '../../Core/bind.js';
 import { lowerToTier2, orderForRun, scoreTier2 } from '../../Core/tier2Lower.js';
 import { evaluatePostcondition } from '../../Core/postcondition.js';
-import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord, buildResultsLandmarkRecord } from '../../Core/accept.js';
+import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord, buildResultsLandmarkRecord, buildOutcomePerspective } from '../../Core/accept.js';
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
@@ -410,12 +410,13 @@ export function createSgMessageHandlers(ctx) {
           // b5 (v2.74.766) — promote an in-place (SPA) success region to a verified Perspective Landmark so the
           // success state is tracked substrate (monitor-visible, self-healing-eligible), not a free-floating
           // selector. seenUid → buildPerspectiveRecord, so it joins the perspective's activation predicate (b3).
+          let outcomeUid = null;
           if (p.settleSelector) {
             const sl = p.settleLandmark || {};
             const outcome = buildResultsLandmarkRecord({ settleSelector: p.settleSelector, role: sl.role, accessibleName: sl.accessibleName, text: sl.text, groundId, localeUrl: mintUrl });
-            if (outcome && !seenUid.has(outcome.uid)) { seenUid.add(outcome.uid); landmarkRecords.push(outcome); }
+            if (outcome) { outcomeUid = outcome.uid; if (!seenUid.has(outcome.uid)) { seenUid.add(outcome.uid); landmarkRecords.push(outcome); } }
           }
-          return { label: p.label, url: p.url, to: p.to, settleSelector: p.settleSelector || '', actions: landmarkRefActions(p.actions, groundId, mintUrl) };
+          return { label: p.label, url: p.url, to: p.to, settleSelector: p.settleSelector || '', localeUrl: mintUrl, outcomeUid, actions: landmarkRefActions(p.actions, groundId, mintUrl) };
         });
         for (const rec of landmarkRecords) { try { await StorageManager.saveLandmark(rec); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED saveLandmark failed: ${e.message}`); } }
         // OBS-4b — PARAMETERIZE first (so the description + records read the TEMPLATED structure): rewrite each
@@ -447,6 +448,19 @@ export function createSgMessageHandlers(ctx) {
         // shows), authoredBy:'model', exactly like the NL-path ACCEPT. The capability links it.
         const perspective = buildPerspectiveRecord({ intent: capName, spec: { shape: 'observed', target: capName }, groundId, localeUrl, landmarkUids: [...seenUid] });
         try { await StorageManager.savePerspective(perspective); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED savePerspective failed: ${e.message}`); }
+        // b5c (v2.74.768) — give each IN-PLACE (SPA) phase a distinct OUTCOME Perspective (its results region) and
+        // point the fragment's postcondition at perspective_ref(it): the success check expressed as substrate, not a
+        // raw selector. perspective_ref over a single results landmark expands to selector_present on that selector,
+        // so behaviour is unchanged; the gain is a monitor-visible outcome perspective + a self-healing reference.
+        // Nav phases keep their url_matches (derivePhasePostcondition); only in-place phases (with an outcomeUid) switch.
+        for (let i = 0; i < runPhases.length; i++) {
+          const rp = runPhases[i];
+          if (!rp || !rp.outcomeUid) continue;
+          const out = buildOutcomePerspective({ intent: capName, groundId, localeUrl: rp.localeUrl || rp.url, resultsUid: rp.outcomeUid, discriminator: String(i) });
+          if (!out) continue;
+          try { await StorageManager.savePerspective(out.perspective); rp.postcondition = out.postcondition; }
+          catch (e) { Logger.warn('background', `DERIVE_OBSERVED outcome perspective save failed: ${e.message}`); }
+        }
         // T1-as-first-class taxonomy fix — a demonstration that segments to a SINGLE page-state-bounded phase is
         // one Fragment, NOT a Strategy (same rule as the SG-trial accept). ≥2 phases still chain into a Strategy.
         // The lone Fragment IS the capability — give it the LLM-polished name/description (not "<label> — steps").

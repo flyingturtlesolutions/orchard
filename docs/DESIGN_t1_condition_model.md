@@ -134,7 +134,8 @@ question.
 | **b4** | T1 fragment gate via `perspective_ref(P)` | **prototyped + backed out** — see note |
 | **b5a** | Promote the SPA settle-region to a **verified outcome Landmark** in the Perspective (`buildResultsLandmarkRecord`) — success state is now tracked substrate (monitor-visible), no fatal-condition change | **landed** v2.74.766 |
 | **b5b** | Recorder captures the swap region's **identity** (role + accessibleName + text, via `_obsExtract`), threaded through `node.settle`/`settleLandmark` → the outcome Landmark is **recoverable** (probe-or-recover by role+name), not selector-only | **landed** v2.74.767 |
-| **b5c** | A SAFE T1 substrate gate (non-fatal, or anchor-landmark); a postcondition → a distinct **outcome Perspective** (per SPA phase — the operative one is a snapshot); route the nav-URL edge to the owning T2 | pending |
+| **b5c** | A distinct **outcome Perspective** per in-place (SPA) phase (`buildOutcomePerspective`) + the fragment postcondition → `perspective_ref(outcome)` — the success check expressed as substrate, not a raw selector. Behaviourally ≡ the prior `selector_present` (1-landmark perspective_ref expands to it); the gain is a monitor-visible outcome perspective | **landed** v2.74.768 |
+| **b6** | (deferred, low value) a SAFE T1 substrate *gate* (non-fatal, or anchor-landmark); route the nav-URL edge fact to the owning T2 | pending |
 
 > **Why postconditions can't just become `perspective_ref`:** a failed postcondition is also FATAL
 > (`ExecutionEngine` "fail the whole Strategy if any fragment's postconditions fail"), and `perspective_ref`

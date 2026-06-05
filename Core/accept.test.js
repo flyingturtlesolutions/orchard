@@ -2,7 +2,7 @@
 // (Node 16 has no `node --test`; this is a plain assert script.)
 import assert from 'node:assert';
 import {
-  canAccept, buildLandmarkRecords, buildPerspectiveRecord, buildPerspectivePredicates, buildResultsLandmarkRecord, buildCapabilityAcceptance,
+  canAccept, buildLandmarkRecords, buildPerspectiveRecord, buildPerspectivePredicates, buildResultsLandmarkRecord, buildOutcomePerspective, buildCapabilityAcceptance,
   buildTrialTrace, buildAcceptance, landmarkRefActions, buildParamSchema, buildTerminalDescriptor,
   mintCapabilityId, mintLandmarkUid, mintPerspectiveId, ACCEPT_SCHEMA,
 } from './accept.js';
@@ -71,13 +71,23 @@ test('buildPerspectiveRecord composes the landmark uids, authoredBy model', () =
   assert.equal(p.id, mintPerspectiveId('apply to this job', 'gnd_1', 'u'));
   assert.deepEqual(p.landmarkRefs, ['lmk_sg_a', 'lmk_sg_b']);
   assert.equal(p.authoredBy, 'model');
-  assert.equal(p.name, 'apply to this job');
+  // a Perspective is the substrate SELECTION, not the Fragment — its name is distinct (· landmarks), not the bare intent
+  assert.equal(p.name, 'apply to this job · landmarks');
+  assert.equal(p.intent, 'apply to this job', 'the intent field stays the bare intent (used for the id/matching)');
   assert.equal(p.groundId, 'gnd_1');
   // b3 — the perspective carries an activation predicate tree (else it would be vacuously always-active)
   assert.ok(Array.isArray(p.predicates) && p.predicates.length === 1, 'predicates synthesized');
   assert.equal(p.predicates[0].operator, 'and');
   assert.equal(p.predicates[0].children[0].kind, 'urlMatches');
   assert.deepEqual(p.predicates[0].children[1].children.map((c) => c.target), ['lmk_sg_a', 'lmk_sg_b']);
+});
+
+test('buildPerspectiveRecord — query noise in the localeUrl does NOT fork the perspective id (dedup)', () => {
+  const a = buildPerspectiveRecord({ intent: 'search jobs', groundId: 'g', localeUrl: 'https://x.com/jobs?q=writer&l=remote&vjk=abc', landmarkUids: ['u1'] });
+  const b = buildPerspectiveRecord({ intent: 'search jobs', groundId: 'g', localeUrl: 'https://x.com/jobs?q=philosopher&l=mpls&vjk=def', landmarkUids: ['u1'] });
+  assert.equal(a.id, b.id, 'same intent + ground + PAGE → one perspective id regardless of query string');
+  assert.equal(a.localeUrl, 'https://x.com/jobs', 'stored localeUrl is canonical (origin+pathname), not a query instance');
+  assert.equal(a.name, 'search jobs · landmarks', 'distinct from the fragment name');
 });
 
 // ── b3: perspective activation predicate ──
@@ -115,6 +125,19 @@ test('buildResultsLandmarkRecord — verified outcome landmark; selector-only AN
   assert.notEqual(rec.uid, bare.uid, 'identity-keyed uid differs from the selector-only one');
   assert.equal(buildResultsLandmarkRecord({ settleSelector: '   ', groundId: 'g' }), null, 'blank selector → null');
   assert.equal(buildResultsLandmarkRecord({}), null, 'no settle region → null');
+});
+
+test('buildOutcomePerspective — a distinct outcome perspective + a perspective_ref postcondition', () => {
+  const r = buildOutcomePerspective({ intent: 'search jobs', groundId: 'g', localeUrl: 'https://x/jobs', resultsUid: 'lmk_sg_results', discriminator: '0', acceptedAt: 1000 });
+  assert.deepEqual(r.perspective.landmarkRefs, ['lmk_sg_results'], 'outcome perspective = just the results landmark');
+  assert.ok(/results/.test(r.perspective.name), 'named as the results perspective');
+  assert.notEqual(r.perspective.id, mintPerspectiveId('search jobs', 'g', 'https://x/jobs'), 'distinct id from the operative perspective');
+  // the postcondition is perspective_ref(outcome) in a match:'all' envelope (which perspective_ref requires);
+  // for a single landmark it expands to selector_present on that selector → behaviourally the prior check
+  assert.deepEqual(r.postcondition, { match: 'all', conditions: [{ type: 'perspective_ref', perspectiveId: r.perspective.id }], source: 'outcome-perspective' });
+  // and the outcome perspective carries a b3 activation predicate (urlMatches scope ∧ landmarkExists results)
+  assert.ok(Array.isArray(r.perspective.predicates) && r.perspective.predicates.length === 1);
+  assert.equal(buildOutcomePerspective({ intent: 'x', groundId: 'g' }), null, 'no results uid → null');
 });
 
 // ── lean capability points at the saved entities (no flat binding) ──

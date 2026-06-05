@@ -31,13 +31,21 @@ function _hash(s) {
   return (h >>> 0).toString(36);
 }
 
+// Canonical PAGE scope: origin + pathname, query/hash stripped (the page-archetype, not a specific instance).
+// Bad parse → the raw string. Keys the Perspective id on the PAGE so query noise (?q=writer vs ?q=philosopher on
+// the SAME /jobs page) never forks a duplicate; also the urlMatches scope rung (b3).
+function _urlScopePattern(localeUrl) {
+  try { const u = new URL(localeUrl); return u.origin + u.pathname; } catch { return String(localeUrl || ''); }
+}
+
 /** Stable capability id from the intent + where it's grounded (re-accept upserts the same record). */
 export function mintCapabilityId(intent, groundId, localeUrl) {
   return 'cap_' + _hash(`${groundId || ''}|${localeUrl || ''}|${String(intent || '').trim().toLowerCase()}`);
 }
-/** Stable Perspective id for an accepted capability. */
+/** Stable Perspective id — keyed on the canonical PAGE (origin+pathname), so two searches with different query
+ *  strings on the same page reuse ONE perspective instead of forking duplicates (the raw localeUrl query WAS the bug). */
 export function mintPerspectiveId(intent, groundId, localeUrl) {
-  return 'persp_sg_' + _hash(`${groundId || ''}|${localeUrl || ''}|${String(intent || '').trim().toLowerCase()}`);
+  return 'persp_sg_' + _hash(`${groundId || ''}|${_urlScopePattern(localeUrl)}|${String(intent || '').trim().toLowerCase()}`);
 }
 /** Stable Landmark uid — same element identity on the same (ground, locale) → same uid (re-accept reuses). */
 export function mintLandmarkUid(groundId, localeUrl, lm) {
@@ -116,12 +124,6 @@ export function buildLandmarkRecords({ roles = [], groundId = '', localeUrl = ''
   return out;
 }
 
-// b3 (v2.74.765) — the page-scope rung: a contains-match on origin+pathname (query/hash stripped, like the
-// Locale urlPattern). Bad parse → the raw string (still a usable contains pattern).
-function _urlScopePattern(localeUrl) {
-  try { const u = new URL(localeUrl); return u.origin + u.pathname; } catch { return String(localeUrl || ''); }
-}
-
 /**
  * b5 (v2.74.766) — mint a VERIFIED outcome Landmark for an in-place (SPA) success region: the swapped-in
  * container the recorder captured as a Fragment's settle selector (b1). PURE. The user demonstrably saw this
@@ -182,23 +184,47 @@ export function buildPerspectivePredicates({ localeUrl = '', landmarkUids = [] }
 }
 
 /**
+ * b5c (v2.74.768) — build a distinct OUTCOME Perspective (the success-state substrate of ONE in-place phase) plus
+ * the fragment postcondition that points at it. PURE. The OPERATIVE perspective is a snapshot of the controls
+ * (some are gone post-action), so the success check needs its OWN perspective — just the results landmark(s).
+ * `perspective_ref` requires a match:'all' envelope and expands (flattenAssertion) to `selector_present` per
+ * landmark; for a single results landmark that's exactly the prior `selector_present` check, so behaviour is
+ * unchanged. The gain is a monitor-visible outcome perspective + a substrate-grounded (self-healing-eligible)
+ * reference instead of a raw selector buried in the postcondition. `discriminator` keeps each in-place phase's
+ * outcome-perspective id distinct. Returns null when there is no results landmark.
+ * @returns {{perspective:object, postcondition:object}|null}
+ */
+export function buildOutcomePerspective({ intent, groundId = '', localeUrl = '', resultsUid, discriminator = '', acceptedAt = Date.now() } = {}) {
+  if (!resultsUid) return null;
+  const base = (String(intent || '').trim()) || 'capability';
+  const outIntent = `${base} · results${discriminator ? ` · ${discriminator}` : ''}`.slice(0, 80);
+  const perspective = buildPerspectiveRecord({ intent: outIntent, name: `${base} · results`, spec: { shape: 'observed', target: outIntent }, groundId, localeUrl, landmarkUids: [resultsUid], acceptedAt });
+  const postcondition = { match: 'all', conditions: [{ type: 'perspective_ref', perspectiveId: perspective.id }], source: 'outcome-perspective' };
+  return { perspective, postcondition };
+}
+
+/**
  * Build the Perspective record (the intent-scoped composition over the promoted landmarks). PURE.
  * Saved via StorageManager.savePerspective; #withPerspectiveComposition derives the landmark nodes from
  * landmarkRefs. authoredBy:'model' marks it as automated (vs. human-picked). b3 — carries an activation
  * `predicates` tree so the perspective is a real condition (gate + monitor), not vacuously always-active.
  */
-export function buildPerspectiveRecord({ intent, spec = {}, groundId = '', localeUrl = '', landmarkUids = [], acceptedAt = Date.now() } = {}) {
+export function buildPerspectiveRecord({ intent, name = null, spec = {}, groundId = '', localeUrl = '', landmarkUids = [], acceptedAt = Date.now() } = {}) {
+  const baseIntent = String(intent || '').trim() || spec.target || 'capability';
   return {
     id: mintPerspectiveId(intent, groundId, localeUrl),
     groundId: groundId || '',
-    name: (String(intent || '').trim() || spec.target || 'capability').slice(0, 80),
+    // A Perspective is the intent's substrate SELECTION (GROUND_SPEC §3 — a purpose-scoped, intent-driven selection
+    // of a Locale's Features bound to roles), NOT the Fragment (the action). So it must not share the fragment's
+    // display name: default to "<intent> · landmarks"; callers (the outcome perspective) override the qualifier.
+    name: ((name && String(name).trim()) || `${baseIntent} · landmarks`).slice(0, 80),
     landmarkRefs: Array.isArray(landmarkUids) ? landmarkUids.slice() : [],
     predicates: buildPerspectivePredicates({ localeUrl, landmarkUids }),   // b3 — substrate activation condition
     authoredBy: 'model',
     authoredAt: acceptedAt,
     intent: String(intent || '').trim(),
     shape: spec.shape || 'act',
-    localeUrl: localeUrl || '',
+    localeUrl: _urlScopePattern(localeUrl) || '',   // canonical PAGE (origin+pathname) — the page-archetype scope, not a query instance
     source: 'sg-accept',
   };
 }
