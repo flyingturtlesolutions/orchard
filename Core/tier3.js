@@ -12,7 +12,7 @@
 // skeleton handoff; typed cross-schema mapping is T3X-4. PURE — no DOM / chrome / storage / LLM.
 //
 // @module Core/tier3
-// @version 2.74.780
+// @version 2.74.781
 
 // The executor's Strategy-invocation step kind. NB: WorkflowExecutor names it 'workflow' for legacy storage
 // reasons, but it DISPATCHES a Tier-2 Strategy (see docs/TIER_MODEL.md — the inner 'workflow' step = a Strategy).
@@ -95,6 +95,7 @@ export function buildWorkflowRecord({ id, intent = '', name = null, resolved = [
       groundUrl: si.groundUrl || null,    // entry url for the cross-Ground hop (consumed by the executor, T3X-3)
       label: si.clause || si.capabilityName || '',
       paramBindings: bindings,
+      ...(si.compensateWith ? { compensateWith: si.compensateWith } : {}),   // Q5 — a Strategy that UNDOES this step
     });
   }
 
@@ -167,4 +168,57 @@ export function wireCrossGroundData(resolved) {
     }
   }
   return list;
+}
+
+/**
+ * Q3 — turn the UNBOUND sub-intents (gaps: no Strategy matched on their Ground) into actionable REPAIR hints. PURE.
+ * The cross-Ground gap→capture seam: a gap is not a dead end — it tells the chat exactly what to author and where.
+ * Two kinds: `author-strategy` (a Ground resolved but has no Strategy for this sub-intent → record one there) and
+ * `resolve-ground` (no site could be determined at all). The chat/UI offers "teach me this on <site>".
+ * @param {ResolvedSubIntent[]} resolved
+ * @param {Map|object} groundsById   groundId → ground record (for the display name)
+ * @returns {{subIntentId,clause,groundId,groundName,kind,message}[]}
+ */
+export function buildGapRepairs(resolved, groundsById) {
+  const byId = groundsById instanceof Map ? groundsById : new Map(Object.entries(groundsById || {}));
+  const repairs = [];
+  for (const si of (Array.isArray(resolved) ? resolved : [])) {
+    if (!si || si.capabilityId) continue;   // bound → not a gap
+    const g = si.groundId ? byId.get(si.groundId) : null;
+    const groundName = (g && (g.name || g.site)) || si.groundId || null;
+    const hasGround = !!si.groundId;
+    repairs.push({
+      subIntentId: si.id || null,
+      clause: si.clause || '',
+      groundId: si.groundId || null,
+      groundName,
+      kind: hasGround ? 'author-strategy' : 'resolve-ground',
+      message: hasGround
+        ? `No saved capability for "${si.clause}" on ${groundName} — record one there, then re-run.`
+        : `Couldn't determine which site handles "${si.clause}".`,
+    });
+  }
+  return repairs;
+}
+
+/**
+ * Q5 — plan COMPENSATION for a cross-Ground Workflow that failed mid-journey. PURE. Given the Workflow steps and
+ * the indices of steps that COMMITTED before the failure, returns the undo plan: each completed step that declares
+ * a `compensateWith` Strategy, in REVERSE order (undo the most recent commit first — saga semantics). Steps with no
+ * declared compensation are left as-is (their effect stands; the failure report surfaces them). The executor runs
+ * this plan on abort. A Workflow whose steps declare no `compensateWith` yields an empty plan (no-op — back-compat).
+ * @param {object[]} steps             the Workflow's steps
+ * @param {number[]} committedIndices  indices of steps that succeeded before the failure
+ * @returns {{stepIndex:number, workflowId:string, undoes:(string|null), groundId:(string|null)}[]}
+ */
+export function planCompensation(steps, committedIndices) {
+  const list = Array.isArray(steps) ? steps : [];
+  const done = new Set((Array.isArray(committedIndices) ? committedIndices : []).map(Number));
+  const plan = [];
+  for (let i = list.length - 1; i >= 0; i--) {   // reverse — undo most-recent commit first
+    const s = list[i];
+    if (!s || !done.has(i) || !s.compensateWith) continue;
+    plan.push({ stepIndex: i, workflowId: s.compensateWith, undoes: s.workflowId || null, groundId: s.groundId || null });
+  }
+  return plan;
 }

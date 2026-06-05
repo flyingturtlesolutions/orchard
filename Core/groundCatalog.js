@@ -10,7 +10,7 @@
 // confidence band (resolved / ambiguous → "which site?" / miss). PURE — no DOM / chrome / storage / LLM.
 //
 // @module Core/groundCatalog
-// @version 2.74.779
+// @version 2.74.781
 
 const _STOP = new Set(['the', 'a', 'an', 'to', 'of', 'for', 'and', 'or', 'on', 'in', 'at', 'my', 'me', 'it', 'this', 'that', 'with', 'from', 'by', 'is', 'are', 'find', 'get', 'do', 'then', 'all']);
 const _TLD = new Set(['com', 'org', 'net', 'io', 'co', 'www', 'app', 'gov', 'edu', 'ai', 'so', 'dev']);
@@ -99,4 +99,19 @@ export function resolveGround(subIntent, catalog, { margin = 0.34 } = {}) {
   const gap = ranked[0].score - ranked[1].score;
   const decision = gap >= margin ? 'resolved' : 'ambiguous';
   return { decision, groundId: ranked[0].groundId, candidates: ranked, margin: gap };
+}
+
+/**
+ * Q2 — snap an LLM-chosen Ground to a REAL catalog entry (closed-set selection; never invent). PURE. The ground
+ * resolver's LLM escalation: for an ABSTRACT sub-intent that names no site, the lexical floor (`resolveGround`) is
+ * uncertain, so the handler asks the LLM to pick among the catalog and validates the pick HERE — mirroring how the
+ * within-Ground matcher snaps an LLM option to the page's real vocabulary. Returns the id if present, else null.
+ * @param {string} chosenGroundId
+ * @param {ReturnType<typeof buildGroundCatalog>} catalog
+ * @returns {string|null}
+ */
+export function pickValidGround(chosenGroundId, catalog) {
+  const id = chosenGroundId == null ? '' : String(chosenGroundId).trim();
+  if (!id || id === 'null') return null;
+  return (Array.isArray(catalog) ? catalog : []).some((e) => e && e.groundId === id) ? id : null;
 }

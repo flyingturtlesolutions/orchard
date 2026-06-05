@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildGroundCatalog, matchGrounds, resolveGround } from './groundCatalog.js';
+import { buildGroundCatalog, matchGrounds, resolveGround, pickValidGround } from './groundCatalog.js';
 
 const GROUNDS = [
   { id: 'gnd_linkedin', name: 'LinkedIn', aliases: ['jobs'], url: 'https://www.linkedin.com/', derivedDescription: 'professional network; find and apply to jobs' },
@@ -57,5 +57,14 @@ describe('groundCatalog — T3X-1 ground resolution (intent → which site)', ()
       { name: 'no id — skipped' },
     ]);
     assert.deepEqual(c.map((e) => e.groundId), ['g1', 'g2'], 'null + id-less entries skipped');
+  });
+
+  it('Q2 pickValidGround snaps an LLM choice to a real Ground (closed-set; never invents)', () => {
+    assert.equal(pickValidGround('gnd_notion', cat), 'gnd_notion');
+    assert.equal(pickValidGround('gnd_hallucinated', cat), null, 'an invented id → null');
+    assert.equal(pickValidGround('null', cat), null, 'the literal "null" → null');
+    assert.equal(pickValidGround('', cat), null);
+    assert.equal(pickValidGround(null, cat), null);
+    assert.equal(pickValidGround('gnd_notion', []), null, 'empty catalog → null');
   });
 });

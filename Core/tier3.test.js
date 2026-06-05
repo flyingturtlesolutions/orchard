@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildWorkflowRecord, wireCrossGroundData } from './tier3.js';
+import { buildWorkflowRecord, wireCrossGroundData, buildGapRepairs, planCompensation } from './tier3.js';
 
 describe('tier3 — T3X-2 buildWorkflowRecord (cross-Ground recursion lowering)', () => {
   const resolved = [
@@ -111,5 +111,77 @@ describe('tier3 — T3X wireCrossGroundData (cross-Ground data-flow floor)', () 
       { id: 's1', params: ['LINK'], dependsOn: ['s0'] },
     ]);
     assert.deepEqual(r[1].scopeReads, { LINK: 'job_url' }, 'lone reference output → bound');
+  });
+});
+
+describe('tier3 — Q3 buildGapRepairs (unbound sub-intent → actionable repair hint)', () => {
+  const groundsById = { gnd_li: { name: 'LinkedIn' }, gnd_notion: { site: 'Notion' } };
+
+  it('a Ground resolved but NO Strategy matched → an author-strategy repair on that Ground', () => {
+    const repairs = buildGapRepairs(
+      [{ id: 's1', clause: 'save it to notion', groundId: 'gnd_notion' }],   // no capabilityId → gap
+      groundsById,
+    );
+    assert.equal(repairs.length, 1);
+    assert.equal(repairs[0].kind, 'author-strategy');
+    assert.equal(repairs[0].groundName, 'Notion');
+    assert.match(repairs[0].message, /record one there/);
+  });
+
+  it('NO Ground at all → a resolve-ground repair', () => {
+    const repairs = buildGapRepairs([{ id: 's2', clause: 'do the abstract thing' }], groundsById);
+    assert.equal(repairs[0].kind, 'resolve-ground');
+    assert.equal(repairs[0].groundId, null);
+    assert.match(repairs[0].message, /which site/);
+  });
+
+  it('BOUND sub-intents are not gaps (no repair emitted)', () => {
+    const repairs = buildGapRepairs(
+      [{ id: 's0', clause: 'a', groundId: 'gnd_li', capabilityId: 'strat_x' }],
+      groundsById,
+    );
+    assert.deepEqual(repairs, []);
+  });
+
+  it('accepts a Map for groundsById; tolerates empty / non-array', () => {
+    const repairs = buildGapRepairs(
+      [{ id: 's1', clause: 'x', groundId: 'gnd_li' }],
+      new Map([['gnd_li', { name: 'LinkedIn' }]]),
+    );
+    assert.equal(repairs[0].groundName, 'LinkedIn');
+    assert.deepEqual(buildGapRepairs(null, {}), []);
+    assert.deepEqual(buildGapRepairs([{ id: 's', groundId: 'gnd_unknown' }], {})[0].groundName, 'gnd_unknown', 'falls back to the id when no record');
+  });
+});
+
+describe('tier3 — Q5 planCompensation (saga undo for a failed cross-Ground Workflow)', () => {
+  const steps = [
+    { workflowId: 'strat_create_order', groundId: 'gnd_shop', compensateWith: 'strat_cancel_order' },
+    { workflowId: 'strat_reserve_seat', groundId: 'gnd_air',  compensateWith: 'strat_release_seat' },
+    { workflowId: 'strat_notify',       groundId: 'gnd_mail' },   // no compensation declared
+  ];
+
+  it('undoes COMMITTED steps in REVERSE order; skips steps with no compensateWith', () => {
+    const plan = planCompensation(steps, [0, 1]);   // steps 0 and 1 committed, then step 2 failed
+    assert.deepEqual(plan, [
+      { stepIndex: 1, workflowId: 'strat_release_seat', undoes: 'strat_reserve_seat', groundId: 'gnd_air' },
+      { stepIndex: 0, workflowId: 'strat_cancel_order', undoes: 'strat_create_order', groundId: 'gnd_shop' },
+    ]);
+  });
+
+  it('only the committed steps are compensated (an uncommitted step has no effect to undo)', () => {
+    const plan = planCompensation(steps, [0]);   // only step 0 committed
+    assert.deepEqual(plan.map((p) => p.stepIndex), [0]);
+  });
+
+  it('a step that committed but declares no compensation is left as-is (its effect stands)', () => {
+    const plan = planCompensation(steps, [0, 1, 2]);   // all three committed
+    assert.deepEqual(plan.map((p) => p.stepIndex), [1, 0], 'step 2 has no compensateWith → not in the plan');
+  });
+
+  it('no compensable steps → empty plan (back-compat: a Workflow with no saga is a no-op)', () => {
+    assert.deepEqual(planCompensation([{ workflowId: 'a' }, { workflowId: 'b' }], [0, 1]), []);
+    assert.deepEqual(planCompensation(steps, []), [], 'nothing committed → nothing to undo');
+    assert.deepEqual(planCompensation(null, null), []);
   });
 });

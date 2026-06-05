@@ -82,6 +82,7 @@ import { Scope, scalar, list, isKind } from './Scope.js';
 import { normalizeStrategyParams } from './StrategyTree.js';
 import { evaluateDataCondition, describeDataCondition } from './DataAssertion.js';
 import { Logger } from '../Core/Logger.js';
+import { planCompensation } from '../Core/tier3.js';   // Q5 — saga compensation plan for a failed cross-Ground Workflow
 
 /**
  * Unwrap a tagged Scope value into a form suitable for handing to
@@ -395,6 +396,40 @@ async function executeWorkflowStep(step, stepIndex, paramValues, workflowScope, 
 }
 
 /**
+ * v2.74.781 — Q5 — run the SAGA COMPENSATION plan for a cross-Ground Workflow that failed mid-journey. Best-effort: dispatches
+ * each COMMITTED step's declared `compensateWith` Strategy in REVERSE order to undo its effect (saga semantics —
+ * the analog, one tier up, of a try/recover Fragment). ADDITIVE + GUARDED: `planCompensation` returns an empty plan
+ * unless steps declare `compensateWith`, so this is a pure no-op for every Workflow that opts out (all existing
+ * ones — zero behaviour change until compensating Strategies are authored). Runs with ABORT SUPPRESSED: a user
+ * cancel is exactly when the already-committed steps most need undoing, so the cleanup must complete. Per-undo
+ * failures are logged, not thrown — a partial rollback still beats none. Returns the executed plan (possibly []).
+ */
+async function runCompensation(steps, stepResults, paramValues, workflowScope, ctx) {
+  const committed = (Array.isArray(stepResults) ? stepResults : [])
+    .filter((r) => r && r.success && r.stepType === 'workflow')
+    .map((r) => r.stepIndex);
+  const plan = planCompensation(steps, committed);
+  if (!plan.length) return [];   // no step declares compensation → nothing to undo (the common case)
+
+  ctx.emit({ type: 'workflow_compensation_start', message: `Rolling back ${plan.length} committed step(s)`, plan });
+  // Abort-suppressed ctx clone — compensation must run to completion even when the failure WAS a user abort.
+  const compCtx = { ...ctx, isAborted: () => false };
+  const done = [];
+  for (const entry of plan) {
+    const compStep = { type: 'workflow', workflowId: entry.workflowId, groundId: entry.groundId || null };
+    try {
+      const r = await executeWorkflowStep(compStep, entry.stepIndex, paramValues, workflowScope, compCtx);
+      done.push({ ...entry, success: !!(r && r.success), error: (r && r.error) || null });
+    } catch (e) {
+      done.push({ ...entry, success: false, error: e.message });
+      Logger.warn('WorkflowExecutor', `compensation (undo ${entry.undoes}) threw: ${e.message}`);
+    }
+  }
+  ctx.emit({ type: 'workflow_compensation_done', message: `Rollback finished (${done.filter((d) => d.success).length}/${done.length} undone)`, results: done });
+  return done;
+}
+
+/**
  * Top-level Strategy execution entry point. Iterates steps and dispatches
  * each to its handler. Returns a summary envelope.
  *
@@ -480,14 +515,21 @@ export async function executeWorkflow(workflow, paramValues = {}, options = {}) 
   );
 
   if (overallError) {
+    // Q5 — saga compensation: undo the steps that committed before the failure. No-op (empty plan) unless steps
+    // declare `compensateWith`, so existing Workflows are unaffected. Runs BEFORE the failure is reported so the
+    // event carries the rollback outcome.
+    let compensation = [];
+    try { compensation = await runCompensation(steps, stepResults, resolvedParamValues, workflowScope, ctx); }
+    catch (e) { Logger.warn('WorkflowExecutor', `compensation pass failed: ${e.message}`); }
+
     // v2.74.93 — Final scope snapshot for the debugger, mirroring the
     // per-step emit above. The strategy_failed event also carries
     // extractedValues for non-debug consumers (chat result rendering).
     if (ctx.debug) {
       ctx.emit({ type: 'strategy_scope_snapshot', stepIndex: -1, snapshot: { ...workflowScope } });
     }
-    ctx.emit({ type: 'strategy_failed', message: overallError, stepResults, extractedValues: workflowScope });
-    return { success: false, error: overallError, stepResults, extractedValues: workflowScope };
+    ctx.emit({ type: 'strategy_failed', message: overallError, stepResults, extractedValues: workflowScope, compensation });
+    return { success: false, error: overallError, stepResults, extractedValues: workflowScope, compensation };
   }
 
   if (ctx.debug) {

@@ -34,8 +34,8 @@ import { buildVisualObservation, isVisualObservation, visualToInput, describeFor
 import { buildCompositeTemplate, matchTemplate, rebindSteps } from '../../Core/orchTemplate.js';   // ORCH-X T2 — cross-argument composite rebind
 import { validatePlan } from '../../Core/orchPlan.js';   // ORCH-L — structural guard for a lifted (foreach/gate) plan
 import { promoteComposite, buildConvergeObservationRecord } from '../../Core/orchPromote.js';   // CONVERGE — T2 composite IR → canonical runnable Strategy (Studio-visible)
-import { buildGroundCatalog, resolveGround } from '../../Core/groundCatalog.js';   // T3X-1 — the global Ground catalog + ground resolution (intent → which site)
-import { buildWorkflowRecord, wireCrossGroundData } from '../../Core/tier3.js';   // T3X-2 — cross-Ground lowering + the data-flow floor (literals/scopeReads)
+import { buildGroundCatalog, resolveGround, pickValidGround } from '../../Core/groundCatalog.js';   // T3X-1 — the global Ground catalog + ground resolution (intent → which site); pickValidGround validates the LLM escalation (Q2)
+import { buildWorkflowRecord, wireCrossGroundData, buildGapRepairs } from '../../Core/tier3.js';   // T3X-2 — cross-Ground lowering + the data-flow floor (literals/scopeReads); buildGapRepairs turns unbound sub-intents into repair hints (Q3)
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
 import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
@@ -899,16 +899,46 @@ export function createSgMessageHandlers(ctx) {
         // 3. Per sub-intent (IN ORDER): resolve its Ground (T3X-1) + bind a Strategy (with its declared outputs).
         const resolved = [];
         const ambiguities = [];
+        // The site list the LLM ground resolver (Q2) picks from — name + purpose, closed set.
+        const llmGrounds = catalog.map((e) => {
+          const g = byId.get(e.groundId);
+          const d = g && (g.derivedDescription || (g.description && (g.description.identity || g.description.category)) || (typeof g.description === 'string' ? g.description : ''));
+          return { groundId: e.groundId, name: e.name, description: typeof d === 'string' ? d : '' };
+        });
         for (let i = 0; i < ordered.length; i++) {
           const si = ordered[i] || {};
           const clause = si.clause || si.label || ask;
           const gr = resolveGround(clause, catalog);
-          if (gr.decision === 'ambiguous') ambiguities.push({ subIntentId: si.id || `s${i}`, clause, candidates: gr.candidates });
-          const groundId = gr.groundId || null;
-          const g = groundId ? byId.get(groundId) : null;
-          const bound = groundId ? await _bindStrategyOnGround(ctx, clause, groundId) : null;
+
+          // Q2 — ABSTRACT sub-intent (no site named): the lexical floor is a MISS or AMBIGUOUS. Escalate to the LLM
+          // ground resolver (closed-set selection by site PURPOSE), then re-validate its pick against the catalog
+          // (pickValidGround — never invent). A confident lexical 'resolved' is kept as-is (no LLM round-trip).
+          let groundId = gr.decision === 'resolved' ? gr.groundId : null;
+          if (!groundId) {
+            let picked = null;
+            try {
+              const m = await AnthropicService.matchGround({ clause, grounds: llmGrounds });
+              picked = m ? pickValidGround(m.groundId, catalog) : null;
+            } catch (e) { Logger.warn('background', `matchGround unavailable: ${e.message}`); }
+            groundId = picked || gr.groundId || null;   // LLM pick → else the lexical top (ambiguous winner) → else null
+            if (gr.decision === 'ambiguous' && !picked) ambiguities.push({ subIntentId: si.id || `s${i}`, clause, candidates: gr.candidates });
+          }
+
+          // Bind a Strategy on the chosen Ground. Q3 — on a bind MISS, try the resolver's RUNNER-UP Grounds before
+          // giving up: a different site may hold a saved Strategy for this sub-intent (the gap→alternate fallback).
+          let chosenGroundId = groundId;
+          let bound = chosenGroundId ? await _bindStrategyOnGround(ctx, clause, chosenGroundId) : null;
+          if (chosenGroundId && (!bound || !bound.capabilityId)) {
+            const alternates = (Array.isArray(gr.candidates) ? gr.candidates : []).map((c) => c.groundId).filter((gid) => gid && gid !== chosenGroundId);
+            for (const altId of alternates) {
+              const altBound = await _bindStrategyOnGround(ctx, clause, altId);
+              if (altBound && altBound.capabilityId) { chosenGroundId = altId; bound = altBound; break; }
+            }
+          }
+
+          const g = chosenGroundId ? byId.get(chosenGroundId) : null;
           resolved.push({
-            id: si.id || `s${i}`, clause, groundId,
+            id: si.id || `s${i}`, clause, groundId: chosenGroundId,
             groundUrl: g ? (g.url || (Array.isArray(g.urlPatterns) ? g.urlPatterns[0] : null)) : null,
             capabilityId: bound ? bound.capabilityId : null,
             capabilityName: bound ? bound.capabilityName : '',
@@ -924,13 +954,17 @@ export function createSgMessageHandlers(ctx) {
         const wfId = `wf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         const built = buildWorkflowRecord({ id: wfId, intent: ask, name: String(ask).slice(0, 60), resolved });
 
+        // Q3 — the UNBOUND sub-intents become actionable REPAIR hints (author a Strategy on site X / pick a site),
+        // so a non-runnable Workflow tells the chat exactly what to teach next instead of dead-ending.
+        const repairs = buildGapRepairs(resolved, byId);
+
         // 5. Save only when asked AND fully runnable (the chat freezes a reviewed Workflow).
         let saved = false;
         if (save && built.workflow && built.runnable) {
           try { await StorageManager.saveWorkflow(built.workflow); saved = true; } catch (e) { Logger.warn('background', `COMPREHEND_CROSS_GROUND save failed: ${e.message}`); }
         }
-        Logger.info('background', `COMPREHEND_CROSS_GROUND ▸ "${String(ask).slice(0, 60)}" → ${resolved.length} sub-intent(s), ${((built.workflow && built.workflow.steps) || []).length} step(s) across ${((built.workflow && built.workflow.groundIds) || []).length} Ground(s), runnable=${built.runnable}${saved ? ', saved' : ''}`);
-        sendResponse({ success: true, workflow: built.workflow, runnable: built.runnable, gaps: built.gaps, resolved, ambiguities, saved });
+        Logger.info('background', `COMPREHEND_CROSS_GROUND ▸ "${String(ask).slice(0, 60)}" → ${resolved.length} sub-intent(s), ${((built.workflow && built.workflow.steps) || []).length} step(s) across ${((built.workflow && built.workflow.groundIds) || []).length} Ground(s), runnable=${built.runnable}, ${repairs.length} repair(s)${saved ? ', saved' : ''}`);
+        sendResponse({ success: true, workflow: built.workflow, runnable: built.runnable, gaps: built.gaps, repairs, resolved, ambiguities, saved });
       } catch (err) {
         Logger.error('background', `COMPREHEND_CROSS_GROUND failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });

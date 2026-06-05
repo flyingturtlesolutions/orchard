@@ -2461,6 +2461,49 @@ Rules:
   }
 
   /**
+   * Q2 — RESOLVE which Ground an ABSTRACT sub-intent runs on, by CLOSED-SET selection over the user's sites.
+   * The LLM escalation for the ground resolver: when the lexical floor (groundCatalog.resolveGround) is a MISS or
+   * AMBIGUOUS — e.g. "save this for later" names no site — the handler asks here for the best site by MEANING, not
+   * lexical overlap. The model MUST pick one of the given groundIds or null; the caller re-validates with
+   * pickValidGround (closed-set; never invents). This is the cross-Ground analog of the within-Ground matcher
+   * snapping an LLM option to the page's real vocabulary. Returns { groundId|null } or null on any failure.
+   * @param {{ clause:string, grounds?:{groundId:string,name:string,description?:string}[] }} opts
+   * @returns {Promise<{groundId:(string|null)}|null>}
+   */
+  static async matchGround({ clause, grounds = [] }) {
+    const ask = (typeof clause === 'string' ? clause : '').trim();
+    const list = (Array.isArray(grounds) ? grounds : []).filter((g) => g && g.groundId);
+    if (!ask || !list.length) return null;
+    if (!(await AnthropicService.hasLlm())) return null;
+    const siteLines = list.map((g) => `- ${g.groundId} — ${g.name || g.groundId}${g.description ? `: ${String(g.description).slice(0, 120)}` : ''}`).join('\n');
+    const systemPrompt = `You choose which SITE a single web-automation sub-intent should run on. You are shown the user's known sites (id — name: what it's for). Pick the ONE site whose purpose best fits the sub-intent by MEANING, even when the sub-intent names no site (e.g. "save this for later" -> a notes/bookmark site).
+
+The user's sites:
+${siteLines}
+
+Return ONLY a JSON object: {"groundId":"<one id from the list, EXACTLY as written, or null if none fits>"}
+Rules:
+- groundId MUST be copied verbatim from the list above, or null. NEVER invent an id or a site.
+- Choose null when no listed site plausibly performs the sub-intent — do not force a poor fit.
+- Decide by what the site is FOR, not by shared words.`;
+    Logger.info('AnthropicService', `matchGround — "${ask.slice(0, 60)}" over ${list.length} site(s)`);
+    try {
+      const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text: `Sub-intent: ${ask}` }], 64, [], { role: 'describe', operation: 'matchGround' });
+      if (!raw?.success) { Logger.warn('AnthropicService', `matchGround failed: ${raw?.error}`); return null; }
+      const json = AnthropicService.#firstJsonObject(raw.text);
+      let out = null;
+      try { out = json ? JSON.parse(json) : null; } catch (e) { Logger.warn('AnthropicService', `matchGround JSON parse failed (${e.message})`); return null; }
+      if (!out) return null;
+      const gid = out.groundId == null ? null : String(out.groundId).trim();
+      Logger.info('AnthropicService', `matchGround → ${gid || 'null'}`);
+      return { groundId: gid && gid !== 'null' ? gid : null };
+    } catch (e) {
+      Logger.warn('AnthropicService', `matchGround error: ${e.message}`);
+      return null;
+    }
+  }
+
+  /**
    * OBS-4 — NAME a recorded DEMONSTRATION (Path 3; the inverse of comprehendIntent). Given the actions the
    * user performed (kinds + element names + values, no page), return a short capability NAME + a one-line
    * INTENT. Post-hoc labelling of ground-truth actions. Returns { name, intent } or null on ANY failure —
