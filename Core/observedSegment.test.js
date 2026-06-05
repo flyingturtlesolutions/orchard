@@ -91,17 +91,20 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     assert.deepEqual(op.nodes[1].steps.map((s) => s.kind), ['click', 'click'], 'fragment 2 = open + choose the filter');
   });
 
-  // OBS (v2.74.763) — an IN-PLACE swap marker carries the swapped-in container's selector; the segmenter threads
-  // it onto the node (node.settle) and opToPhases surfaces it as settleSelector → an in-place success signal.
-  const SCsel = (url, selector) => buildRawAction({ domKind: 'state_change', url: url || 'https://spa.example/search', target: { selector } });
-  it('an SPA swap carries its container selector onto the fragment (node.settle → settleSelector)', () => {
+  // OBS (v2.74.763/b5b) — an IN-PLACE swap marker carries the swapped-in container's IDENTITY (selector + optional
+  // role/accessibleName/text); the segmenter threads it onto node.settle and opToPhases surfaces it as
+  // settleSelector (the postcondition signal) + settleLandmark (identity for a recoverable outcome landmark).
+  const SCsel = (url, selector, extra = {}) => buildRawAction({ domKind: 'state_change', url: url || 'https://spa.example/search', target: { selector, ...extra } });
+  it('an SPA swap carries its container identity onto the fragment (node.settle → settleSelector + settleLandmark)', () => {
     // A real in-place swap fires its marker on the SAME url as the page (no navigation) — match the A() helper url.
-    const trace = [A('input', 'Search', '#q', 'halo'), A('click', 'Search', '#searchbtn'), SCsel('https://www.indeed.com', '#results')];
+    const trace = [A('input', 'Search', '#q', 'halo'), A('click', 'Search', '#searchbtn'),
+      SCsel('https://www.indeed.com', '#results', { role: 'region', accessibleName: 'Search results', text: '120 jobs' })];
     const op = segmentTrace(coalesce(trace));
     assert.equal(op.nodes.length, 1);
-    assert.deepEqual(op.nodes[0].settle, { selector: '#results' }, 'the swapped-in container rides on the node');
+    assert.deepEqual(op.nodes[0].settle, { selector: '#results', role: 'region', accessibleName: 'Search results', text: '120 jobs' }, 'the swapped-in container identity rides on the node');
     const ph = opToPhases(op)[0];
-    assert.equal(ph.settleSelector, '#results', 'opToPhases surfaces it as settleSelector');
+    assert.equal(ph.settleSelector, '#results', 'opToPhases surfaces the selector');
+    assert.equal(ph.settleLandmark.accessibleName, 'Search results', 'and the identity for a recoverable outcome landmark');
     assert.equal(ph.to, ph.url, 'in-place: no URL change (to === url)');
     assert.equal(derivePhasePostcondition(ph).source, 'spa-settle', 'so the phase yields a selector_present postcondition');
   });

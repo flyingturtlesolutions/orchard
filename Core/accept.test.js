@@ -2,7 +2,7 @@
 // (Node 16 has no `node --test`; this is a plain assert script.)
 import assert from 'node:assert';
 import {
-  canAccept, buildLandmarkRecords, buildPerspectiveRecord, buildPerspectivePredicates, buildCapabilityAcceptance,
+  canAccept, buildLandmarkRecords, buildPerspectiveRecord, buildPerspectivePredicates, buildResultsLandmarkRecord, buildCapabilityAcceptance,
   buildTrialTrace, buildAcceptance, landmarkRefActions, buildParamSchema, buildTerminalDescriptor,
   mintCapabilityId, mintLandmarkUid, mintPerspectiveId, ACCEPT_SCHEMA,
 } from './accept.js';
@@ -92,6 +92,29 @@ test('buildPerspectivePredicates: and(urlMatches, or(landmarkExists)) with url-o
   assert.deepEqual(buildPerspectivePredicates({ localeUrl: 'https://x/jobs', landmarkUids: [] }),
     [{ kind: 'urlMatches', pattern: 'https://x/jobs', mode: 'contains' }], 'no substrate → url-only bootstrap rung');
   assert.deepEqual(buildPerspectivePredicates({}), [], 'nothing grounded → empty (always-active back-compat)');
+});
+
+// ── b5: outcome (SPA results region) landmark ──
+test('buildResultsLandmarkRecord — verified outcome landmark; selector-only AND recoverable (role+name) variants', () => {
+  // b5a — selector-only (a bare results <div>): tracked + verified, uid keyed on selector with null role/name
+  const bare = buildResultsLandmarkRecord({ settleSelector: '#results', groundId: 'g', localeUrl: 'u', acceptedAt: 1000 });
+  assert.equal(bare.selector, '#results');
+  assert.equal(bare.lifecycle, 'verified');
+  assert.equal(bare.verifiedBy, 'demonstration');
+  assert.equal(bare.outcome, true);
+  assert.equal(bare.a11yRole, null);
+  assert.equal(bare.alias, 'results region');
+  assert.equal(bare.uid, mintLandmarkUid('g', 'u', { role: null, accessibleName: null, selector: '#results' }));
+  // b5b — recoverable (role + accessibleName captured): probe-or-recover identity, alias from the name
+  const rec = buildResultsLandmarkRecord({ settleSelector: '#results', role: 'region', accessibleName: 'Search results', text: '120 jobs', groundId: 'g', localeUrl: 'u', acceptedAt: 1000 });
+  assert.equal(rec.a11yRole, 'region');
+  assert.equal(rec.accessibleName, 'Search results');
+  assert.equal(rec.textContent, '120 jobs');
+  assert.equal(rec.alias, 'Search results', 'recoverable → alias from the accessible name');
+  assert.equal(rec.uid, mintLandmarkUid('g', 'u', { role: 'region', accessibleName: 'Search results', selector: '#results' }));
+  assert.notEqual(rec.uid, bare.uid, 'identity-keyed uid differs from the selector-only one');
+  assert.equal(buildResultsLandmarkRecord({ settleSelector: '   ', groundId: 'g' }), null, 'blank selector → null');
+  assert.equal(buildResultsLandmarkRecord({}), null, 'no settle region → null');
 });
 
 // ── lean capability points at the saved entities (no flat binding) ──

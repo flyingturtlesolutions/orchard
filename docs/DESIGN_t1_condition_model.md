@@ -132,7 +132,16 @@ question.
 | **b2** | Merge-on-save for perspectives + landmarks — predicates/profile/effects survive re-author | **landed** v2.74.765 |
 | **b3** | Synthesize `perspective.predicates` (`buildPerspectivePredicates`) from grounded landmarks → the perspective is a real (monitorable) condition via `isPerspectiveActive` | **landed** v2.74.765 |
 | **b4** | T1 fragment gate via `perspective_ref(P)` | **prototyped + backed out** — see note |
-| **b5** | A SAFE T1 substrate gate (non-fatal, or anchor-landmark) for the precondition, **and** a T1 **postcondition** → an OUTCOME perspective (results region promoted to a landmark); route the nav-URL edge fact to the owning T2 | pending |
+| **b5a** | Promote the SPA settle-region to a **verified outcome Landmark** in the Perspective (`buildResultsLandmarkRecord`) — success state is now tracked substrate (monitor-visible), no fatal-condition change | **landed** v2.74.766 |
+| **b5b** | Recorder captures the swap region's **identity** (role + accessibleName + text, via `_obsExtract`), threaded through `node.settle`/`settleLandmark` → the outcome Landmark is **recoverable** (probe-or-recover by role+name), not selector-only | **landed** v2.74.767 |
+| **b5c** | A SAFE T1 substrate gate (non-fatal, or anchor-landmark); a postcondition → a distinct **outcome Perspective** (per SPA phase — the operative one is a snapshot); route the nav-URL edge to the owning T2 | pending |
+
+> **Why postconditions can't just become `perspective_ref`:** a failed postcondition is also FATAL
+> (`ExecutionEngine` "fail the whole Strategy if any fragment's postconditions fail"), and `perspective_ref`
+> = *all* the perspective's landmarks present. The **operative** perspective is a snapshot of the controls — on a
+> nav fragment those controls are gone post-navigation, so `perspective_ref` would fail. The post-state needs a
+> **separate outcome perspective** (the results-state landmarks), which is why b5a only *registers* the outcome
+> landmark and b5b (the outcome-perspective postcondition) waits on recorder identity-capture.
 
 ### b4 backout note (bug pass, v2.74.765)
 

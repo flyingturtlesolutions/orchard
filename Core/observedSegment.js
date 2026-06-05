@@ -73,10 +73,11 @@ export function segmentTrace(trace) {
     nodes.push({
       type: 'fragment', label: _label(cur), steps: cur, from: fromUrl,
       to: toUrl || (cur[cur.length - 1] && cur[cur.length - 1].url) || '',
-      // OBS — an IN-PLACE (SPA) boundary carries the swapped-in container's selector (the recorder's `state_change`
-      // marker target). It's the in-place success signal: with no URL change there is no `url_matches`, so the
-      // settle selector becomes a `selector_present` postcondition (derivePhasePostcondition).
-      ...(settle && settle.selector ? { settle: { selector: String(settle.selector) } } : {}),
+      // OBS — an IN-PLACE (SPA) boundary carries the swapped-in container's IDENTITY (the recorder's `state_change`
+      // marker target: selector + optional role/accessibleName/text — b5b). It's the in-place success signal: with
+      // no URL change there is no `url_matches`, so the settle selector becomes a `selector_present` postcondition
+      // (derivePhasePostcondition), and the identity lets accept mint a recoverable outcome landmark (b5).
+      ...(settle && settle.selector ? { settle } : {}),
     });
     cur = [];
   };
@@ -86,7 +87,14 @@ export function segmentTrace(trace) {
     // LOGICAL boundary (SPA): the intent's content landmark changed + settled after a commit, with NO navigation.
     // The steps accumulated since the last boundary CAUSED this change → flush them as a Fragment. An empty buffer
     // (a marker right after an Enter/nav boundary) is a no-op, so redundant markers never mint empty fragments.
-    if (a.kind === 'state_change') { const u = a.url || (cur.length ? cur[cur.length - 1].url : '') || fromUrl; const sel = a.target && a.target.selector; flush(u, sel ? { selector: sel } : null); fromUrl = u; continue; }
+    if (a.kind === 'state_change') {
+      const u = a.url || (cur.length ? cur[cur.length - 1].url : '') || fromUrl;
+      const t = a.target;
+      const settle = (t && t.selector)
+        ? { selector: String(t.selector), role: t.role || null, accessibleName: t.accessibleName || null, text: t.text || null }
+        : null;
+      flush(u, settle); fromUrl = u; continue;
+    }
     if (a.kind === 'submit') {
       // A submit fires BEFORE the navigation it causes, so its URL is stale. When a navigate follows
       // immediately, let THAT be the boundary (it carries the real target URL); otherwise this is an
@@ -334,6 +342,7 @@ export function opToPhases(op) {
       url: n.from || (all[0] && all[0].url) || '',
       to: n.to || '',   // the post-phase URL — a NAVIGATING phase's success signal (→ a url_matches postcondition)
       settleSelector: (n.settle && n.settle.selector) || '',   // an IN-PLACE phase's signal (→ a selector_present postcondition)
+      settleLandmark: n.settle || null,                        // b5b — the swap region's identity (selector + role/name/text) for a recoverable outcome landmark
       // OBS-4 — prepend an optional SCROLL_TO before each ELEMENT action so replay reaches a control the user
       // had to scroll to (viewport-safe; an optional miss is harmless). A window SCROLL_TO (no selector) emits
       // as-is.

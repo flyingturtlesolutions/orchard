@@ -5691,9 +5691,13 @@ function _obsFireSwap() {
   let best = null, bestCnt = 0;
   for (const [el, cnt] of adds) { if (cnt > bestCnt && el && el.isConnected) { best = el; bestCnt = cnt; } }
   if (!best || bestCnt < _OBS_SWAP_MIN_NODES) return;   // trivial mutation, not a content swap
-  let selector = null; try { selector = computeUniqueSelector(best); } catch { /* */ }
-  if (!selector) return;
-  try { chrome.runtime.sendMessage({ type: 'INTERACTION_RECORD', payload: { domKind: 'state_change', target: { selector }, ts: Date.now(), url: location.href } }); } catch { /* */ }
+  // b5b (v2.74.767) — capture the swapped-in region's full IDENTITY (role + accessibleName + text + selector via
+  // _obsExtract), not just its selector, so the accept can mint a RECOVERABLE outcome landmark (probe-or-recover
+  // by role+name) instead of a selector-only one. Falls back to selector-only when the container has no a11y role/
+  // name (a bare results <div>), which is still better than nothing.
+  let target = null; try { target = _obsExtract(best); } catch { /* */ }
+  if (!target || !target.selector) return;
+  try { chrome.runtime.sendMessage({ type: 'INTERACTION_RECORD', payload: { domKind: 'state_change', target, ts: Date.now(), url: location.href } }); } catch { /* */ }
 }
 function _obsDisarmSwapWatch() {
   if (_obsSwapSettleT) { clearTimeout(_obsSwapSettleT); _obsSwapSettleT = null; }

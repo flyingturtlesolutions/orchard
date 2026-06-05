@@ -123,6 +123,38 @@ function _urlScopePattern(localeUrl) {
 }
 
 /**
+ * b5 (v2.74.766) — mint a VERIFIED outcome Landmark for an in-place (SPA) success region: the swapped-in
+ * container the recorder captured as a Fragment's settle selector (b1). PURE. The user demonstrably saw this
+ * region appear, so it is verified-by-demonstration. Identity is selector-only for now (the swap marker carried
+ * no role/name) → recovery is selector-based until a later capture profiles it. Promoting it to a registry
+ * Landmark (and into the Perspective) makes the SUCCESS STATE part of the capability's substrate — monitor-visible
+ * via isPerspectiveActive and self-healing-eligible — instead of a free-floating selector in the postcondition.
+ * `outcome:true` marks it as a success-state landmark (vs an operative control) for the future outcome-perspective.
+ * Returns null when there is no settle region.
+ * @returns {object|null}
+ */
+export function buildResultsLandmarkRecord({ settleSelector, role = null, accessibleName = null, text = null, groundId = '', localeUrl = '', acceptedAt = Date.now() } = {}) {
+  const selector = (typeof settleSelector === 'string' && settleSelector.trim()) ? settleSelector.trim() : '';
+  if (!selector) return null;
+  // b5b — when the recorder captured a11y role/name (e.g. role="region" aria-label="Search results"), the landmark
+  // is RECOVERABLE (probe-or-recover by role+name on selector drift). A bare results <div> has neither → selector-
+  // only (still a tracked, verified registry entity). uid is keyed on the recoverable identity so re-observing the
+  // same region reuses the slot.
+  const a11yRole = (typeof role === 'string' && role.trim()) ? role.trim() : null;
+  const name = (typeof accessibleName === 'string' && accessibleName.trim()) ? accessibleName.trim() : null;
+  const uid = mintLandmarkUid(groundId, localeUrl, { role: a11yRole, accessibleName: name, selector });
+  return {
+    uid, groundId: groundId || '',
+    selector,
+    a11yRole, accessibleName: name, hierarchicalContext: null,
+    textContent: (typeof text === 'string' && text.trim()) ? text.trim().slice(0, 140) : null,
+    alias: name || 'results region', outcome: true,
+    lifecycle: 'verified', verifiedBy: 'demonstration', verifiedAt: acceptedAt,
+    source: 'observed', createdAt: acceptedAt,
+  };
+}
+
+/**
  * b3 (v2.74.765) — synthesize a Perspective ACTIVATION PREDICATE tree from the grounded substrate. PURE.
  * A Perspective IS a condition: `isPerspectiveActive` evaluates `predicates` (and/or tree over substrate leaves),
  * and the InteractionMonitor reads the same via `listActivePerspectives`. Without predicates a perspective is

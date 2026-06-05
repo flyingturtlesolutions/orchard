@@ -15,7 +15,7 @@ import { coverComplete } from '../../Core/cover.js';
 import { selectionToTrialRoles } from '../../Core/bind.js';
 import { lowerToTier2, orderForRun, scoreTier2 } from '../../Core/tier2Lower.js';
 import { evaluatePostcondition } from '../../Core/postcondition.js';
-import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord } from '../../Core/accept.js';
+import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord, buildResultsLandmarkRecord } from '../../Core/accept.js';
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
@@ -406,6 +406,14 @@ export function createSgMessageHandlers(ctx) {
             // OBS-#2 — the DEMONSTRATION is the verification: the user used this exact element successfully.
             record.lifecycle = 'verified'; record.verifiedBy = 'demonstration'; record.verifiedAt = Date.now(); record.source = 'observed';
             landmarkRecords.push(record);
+          }
+          // b5 (v2.74.766) — promote an in-place (SPA) success region to a verified Perspective Landmark so the
+          // success state is tracked substrate (monitor-visible, self-healing-eligible), not a free-floating
+          // selector. seenUid → buildPerspectiveRecord, so it joins the perspective's activation predicate (b3).
+          if (p.settleSelector) {
+            const sl = p.settleLandmark || {};
+            const outcome = buildResultsLandmarkRecord({ settleSelector: p.settleSelector, role: sl.role, accessibleName: sl.accessibleName, text: sl.text, groundId, localeUrl: mintUrl });
+            if (outcome && !seenUid.has(outcome.uid)) { seenUid.add(outcome.uid); landmarkRecords.push(outcome); }
           }
           return { label: p.label, url: p.url, to: p.to, settleSelector: p.settleSelector || '', actions: landmarkRefActions(p.actions, groundId, mintUrl) };
         });
