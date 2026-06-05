@@ -394,3 +394,34 @@ export function wrapFragmentAsStrategy(fragment, { strategyId = null, now } = {}
     createdAt: ts, updatedAt: ts,
   };
 }
+
+/**
+ * DF (v2.74.788) — wrap an OBSERVATION (read) as a synthetic single-node Strategy for run-time dispatch. PURE. The
+ * cross-Ground analog of wrapFragmentAsStrategy: a read sub-intent's step carries `observe.extracts` (selector +
+ * output + shape per value); this builds a Strategy whose one `observation` node runs them via the existing
+ * #executeObservationNode path, EXTRACTing each `output` into scope → extractedValues → workflowScope, where a
+ * downstream write consumes it by `scope_binding`. The synthetic id is `observation:<id>` — never persisted. A read
+ * produces values, takes no inputs (params: []). Returns null when there are no extracts.
+ * @param {{id:string, groundId?:string, name?:string, intent?:string, observe?:{extracts:object[]}}} observation
+ * @param {{strategyId?:string, now?:number}} [opts]
+ * @returns {object|null}
+ */
+export function wrapObservationAsStrategy(observation, { strategyId = null, now } = {}) {
+  if (!observation || !observation.id) return null;
+  const extracts = (observation.observe && Array.isArray(observation.observe.extracts)) ? observation.observe.extracts.filter(Boolean) : [];
+  if (!extracts.length) return null;
+  const ts = Number.isFinite(now) ? now : 0;
+  const label = observation.intent || observation.name || 'read';
+  return {
+    id: strategyId || `observation:${observation.id}`,
+    groundId: observation.groundId || null,
+    name: observation.name || observation.intent || 'Observation',
+    goal: observation.intent || observation.name || '',
+    params: [],
+    fragmentSteps: [{ type: 'observation', subGoalIds: [observation.id], label, extracts }],
+    preconditions: { match: 'all', conditions: [] },
+    postconditions: { match: 'all', conditions: [] },
+    synthetic: true,                 // run-time wrapper, NOT a persisted artifact
+    createdAt: ts, updatedAt: ts,
+  };
+}

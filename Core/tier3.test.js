@@ -122,6 +122,25 @@ describe('tier3 — T3X wireCrossGroundData (cross-Ground data-flow floor)', () 
     ]);
     assert.deepEqual(r[1].scopeReads, { LINK: 'job_url' }, 'lone reference output → bound');
   });
+
+  // DF read→write — the CONTRACT the data-flow binder (DF-1) must feed: an upstream READ whose only product is a
+  // declared output (no params, e.g. an observation exposing `cap.output`) + a downstream WRITE with a reference
+  // param ⇒ the lowered Workflow's write step gets a scope_binding and surfaces NO Workflow input for it.
+  // (docs/DESIGN_t3_dataflow_gap.md §3. The runtime + this wiring are ready; only the binder must surface outputs.)
+  it('DF read→write: an upstream read output → the write step is a scope_binding (no Workflow input)', () => {
+    const resolved = [
+      { id: 's0', clause: 'get the top job link on linkedin', groundId: 'gnd_li', capabilityId: 'obs_top_job', capabilityKind: 'observation', params: [], outputs: ['job_url'], observe: { extracts: [{ selector: 'a.job', output: 'job_url', shape: 'attribute' }] } },
+      { id: 's1', clause: 'save it to notion',                 groundId: 'gnd_no', capabilityId: 'strat_save', capabilityKind: 'strategy', params: ['URL'], dependsOn: ['s0'] },
+    ];
+    wireCrossGroundData(resolved);
+    assert.deepEqual(resolved[1].scopeReads, { URL: 'job_url' }, 'the write consumes the read’s output by reference');
+    const { workflow, runnable } = buildWorkflowRecord({ id: 'wf', intent: 'x', resolved });
+    assert.equal(runnable, true);
+    assert.equal(workflow.steps[0].capabilityKind, 'observation', 'the read step dispatches as an observation (wrapped at run time)');
+    assert.deepEqual(workflow.steps[0].observe.extracts[0].output, 'job_url', 'the read’s extracts ride on the step so the executor can run them with no storage lookup');
+    assert.deepEqual(workflow.steps[1].paramBindings.URL, { kind: 'scope_binding', name: 'job_url' }, 'URL flows from the upstream read, not from the user');
+    assert.deepEqual(workflow.params, [], 'no URL Workflow input — the value comes across Grounds');
+  });
 });
 
 describe('tier3 — Q3 buildGapRepairs (unbound sub-intent → actionable repair hint)', () => {

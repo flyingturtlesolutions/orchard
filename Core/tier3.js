@@ -12,7 +12,7 @@
 // skeleton handoff; typed cross-schema mapping is T3X-4. PURE — no DOM / chrome / storage / LLM.
 //
 // @module Core/tier3
-// @version 2.74.786
+// @version 2.74.788
 
 // The executor's Strategy-invocation step kind. NB: WorkflowExecutor names it 'workflow' for legacy storage
 // reasons, but it DISPATCHES a Tier-2 Strategy (see docs/TIER_MODEL.md — the inner 'workflow' step = a Strategy).
@@ -90,13 +90,14 @@ export function buildWorkflowRecord({ id, intent = '', name = null, resolved = [
     }
     steps.push({
       type: STRATEGY_STEP,
-      workflowId: si.capabilityId,        // dispatch id: a Strategy id, OR a Fragment id when capabilityKind==='fragment'
-      capabilityKind: si.capabilityKind || 'strategy',   // how the executor runs it (a bare T1 Fragment is wrapped at run time)
+      workflowId: si.capabilityId,        // dispatch id: a Strategy id, a Fragment id, or an Observation id by kind
+      capabilityKind: si.capabilityKind || 'strategy',   // 'strategy' | 'fragment' | 'observation' — how the executor runs it
       groundId: si.groundId || null,
       groundUrl: si.groundUrl || null,    // entry url for the cross-Ground hop (consumed by the executor, T3X-3)
       label: si.clause || si.capabilityName || '',
       paramBindings: bindings,
-      ...(si.compensateWith ? { compensateWith: si.compensateWith } : {}),   // Q5 — a Strategy that UNDOES this step
+      ...(si.observe ? { observe: si.observe } : {}),                       // DF — a read step's extracts (executor wraps+runs them)
+      ...(si.compensateWith ? { compensateWith: si.compensateWith } : {}),  // Q5 — a Strategy that UNDOES this step
     });
   }
 

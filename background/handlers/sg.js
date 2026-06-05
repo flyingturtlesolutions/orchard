@@ -56,17 +56,37 @@ function _groundLabel(g) {
   return name || g.id || g.groundId || null;
 }
 
-async function _bindStrategyOnGround(ctx, clause, groundId) {
+async function _bindStrategyOnGround(ctx, clause, groundId, effect = 'action') {
   let caps = [];
   try { caps = await ctx.readSgCapabilities(groundId); } catch { return null; }
+  // DF-1 — EFFECT-scoped pool (mirrors the within-Ground matcher, sg.js ORCH_MATCH): a READ sub-intent binds an
+  // OBSERVATION (the only capability that PRODUCES a value for a downstream Ground); an ACTION binds a T2 Strategy
+  // or a bare T1 Fragment.
+  const isRead = effect === 'read';
   const candidates = (Array.isArray(caps) ? caps : [])
-    .filter((c) => c && c.kind !== 'observation' && (c.strategyId || c.fragmentId))   // any RUNNABLE capability — a T2 Strategy OR a bare T1 Fragment
+    .filter((c) => c && (isRead ? c.kind === 'observation' : (c.kind !== 'observation' && (c.strategyId || c.fragmentId))))
     .map((c) => toCandidate(c));
   if (!candidates.length) return null;
   const decision = rankAndDecide(clause, candidates, { now: Date.now() });
   const cand = decision && decision.candidate;
   if (!cand || decision.decision === 'miss') return null;
   const cap = (cand.raw && typeof cand.raw === 'object') ? cand.raw : {};
+  if (isRead) {
+    // an OBSERVATION read: it EXTRACTs cap.observe.extracts[*].output into scope → workflowScope → a downstream
+    // write consumes it via scope_binding (the cross-Ground DATA FLOW). `observe` travels on the step so the
+    // executor can wrap + run it (DF-3) with no storage lookup; the extract's landmark self-heals the selector.
+    const extracts = (cap.observe && Array.isArray(cap.observe.extracts)) ? cap.observe.extracts : [];
+    const outputs = extracts.map((e) => e && e.output).filter(Boolean);
+    if (!outputs.length) return null;   // a read producing no named output can't feed data flow
+    return {
+      capabilityId: cap.id,
+      capabilityKind: 'observation',
+      capabilityName: cand.intent || cap.intent || cap.name || '',
+      params: [],
+      outputs,
+      observe: cap.observe,
+    };
+  }
   const isStrategy = !!cap.strategyId;
   // the DISPATCH id the Workflow step runs: a Strategy id (executeStrategy by id) OR a Fragment id (wrapped at run
   // time — capabilityKind tells the executor to wrap it). Only a T2 Strategy declares outputs (cross-Ground data
@@ -947,14 +967,17 @@ export function createSgMessageHandlers(ctx) {
             if (gr.decision === 'ambiguous' && !picked) ambiguities.push({ subIntentId: si.id || `s${i}`, clause, candidates: gr.candidates });
           }
 
-          // Bind a Strategy on the chosen Ground. Q3 — on a bind MISS, try the resolver's RUNNER-UP Grounds before
-          // giving up: a different site may hold a saved Strategy for this sub-intent (the gap→alternate fallback).
+          // DF-2 — read-vs-action effect (same oracle the chat uses to choose picker-vs-record): a READ clause
+          // ("get the top job's link") binds an Observation that PRODUCES a value; an ACTION binds a strategy/fragment.
+          const effect = classifyReadAsk(clause).isRead ? 'read' : 'action';
+          // Bind on the chosen Ground. Q3 — on a bind MISS, try the resolver's RUNNER-UP Grounds before giving up:
+          // a different site may hold a capability for this sub-intent (the gap→alternate fallback).
           let chosenGroundId = groundId;
-          let bound = chosenGroundId ? await _bindStrategyOnGround(ctx, clause, chosenGroundId) : null;
+          let bound = chosenGroundId ? await _bindStrategyOnGround(ctx, clause, chosenGroundId, effect) : null;
           if (chosenGroundId && (!bound || !bound.capabilityId)) {
             const alternates = (Array.isArray(gr.candidates) ? gr.candidates : []).map((c) => c.groundId).filter((gid) => gid && gid !== chosenGroundId);
             for (const altId of alternates) {
-              const altBound = await _bindStrategyOnGround(ctx, clause, altId);
+              const altBound = await _bindStrategyOnGround(ctx, clause, altId, effect);
               if (altBound && altBound.capabilityId) { chosenGroundId = altId; bound = altBound; break; }
             }
           }
@@ -977,10 +1000,11 @@ export function createSgMessageHandlers(ctx) {
             groundName: _groundLabel(g),   // host-derived when the stored name is generic ("Ground") — readable card
             groundUrl: g ? (g.url || (Array.isArray(g.urlPatterns) ? g.urlPatterns[0] : null)) : null,
             capabilityId: bound ? bound.capabilityId : null,
-            capabilityKind: bound ? bound.capabilityKind : null,   // 'strategy' | 'fragment' — how the Workflow step dispatches it
+            capabilityKind: bound ? bound.capabilityKind : null,   // 'strategy' | 'fragment' | 'observation' — how the Workflow step dispatches it
             capabilityName: bound ? bound.capabilityName : '',
             params: bound ? bound.params : [],
             outputs: bound ? bound.outputs : [],
+            observe: bound ? (bound.observe || null) : null,   // DF — an observation step's extracts, embedded so the executor can wrap+run it
             dependsOn: Array.isArray(si.dependsOn) ? si.dependsOn : [],
             stated: boundStated,   // comprehender's stated ∪ the LLM-bound clause values (exact param names → literals)
           });

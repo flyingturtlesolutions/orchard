@@ -76,7 +76,7 @@
  */
 
 import { StorageManager } from './StorageManager.js';
-import { wrapFragmentAsStrategy } from '../Core/capabilitySynth.js';   // v2.74.786 — wrap a bare T1 Fragment cross-Ground step into a synthetic Strategy at run time
+import { wrapFragmentAsStrategy, wrapObservationAsStrategy } from '../Core/capabilitySynth.js';   // v2.74.786/788 — wrap a bare T1 Fragment / an Observation cross-Ground step into a synthetic Strategy at run time
 import { ExecutionEngine } from './ExecutionEngine.js';
 import { parseFileValue, isFileValue } from './FileParsers.js';
 import { Scope, scalar, list, isKind } from './Scope.js';
@@ -381,6 +381,14 @@ async function executeWorkflowStep(step, stepIndex, paramValues, workflowScope, 
       return { success: false, error: `Fragment ${step.workflowId} not found` };
     }
     inlineStrategy = wrapFragmentAsStrategy(frag, { strategyId: `fragment:${frag.id}` });
+  } else if (step.capabilityKind === 'observation') {
+    // DF — a READ step (cross-Ground data producer). Its extracts ride on the step; wrap them as a single-node
+    // observation Strategy and run it via the same hop machinery — each `output` lands in scope → workflowScope.
+    inlineStrategy = wrapObservationAsStrategy({ id: step.workflowId, groundId: step.groundId, intent: step.label, observe: step.observe }, { strategyId: `observation:${step.workflowId}` });
+    if (!inlineStrategy) {
+      ctx.emit({ type: 'strategy_step_done', stepIndex, stepType: 'workflow', success: false, error: `Observation ${step.workflowId} has no extracts`, message: `Step ${stepIndex + 1}: read step has nothing to extract` });
+      return { success: false, error: `Observation ${step.workflowId} has no extracts` };
+    }
   }
   //
   // v2.74.151 — Propagate the Workflow-tier debug envelope so the inner
