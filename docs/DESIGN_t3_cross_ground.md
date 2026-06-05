@@ -104,4 +104,10 @@ The recursion makes most of this reuse. Slices, dependency-ordered:
 | **integration** | `COMPREHEND_CROSS_GROUND` handler (`sg.js`): catalog → `comprehendIntent` → `resolveGround` → bind Strategy → `buildWorkflowRecord` → `saveWorkflow` | ◐ wired, syntax‑clean — **runtime‑unverified** (LLM/storage path; needs live test) |
 | **T3X‑4 / ‑5** | typed cross‑schema data mapping · saga | ⏳ deferred (the hard semantic parts) |
 
-**Pending wiring (next):** the chat UI sends `COMPREHEND_CROSS_GROUND` (the ORCH‑C trigger) + renders the proposed Workflow for review/run. A **T3‑framed `comprehendIntent` prompt** (sub‑intents that span *sites*, not within‑task phases) is the obvious refinement (§6.3). The deferred internal‑identifier rename (`TIER_MODEL.md §4`) would also rename the `workflow` step kind/messages.
+### Correct comprehension (v2.74.780)
+The trace (`docs/TRACE_t3_example.md`) exposed that the handler emitted *all* params as Workflow inputs — no `job_url` data flow, no `dependsOn` ordering. Closed:
+- **Data flow** — `tier3.js#wireCrossGroundData` (pure, unit‑tested): `literals` from each sub‑intent's STATED values; `scopeReads` from an upstream Strategy's declared **output** matched to a downstream reference‑type param (URL ← `job_url`, shared‑token first, else the lone reference output). `_bindStrategyOnGround` now returns the Strategy's `outputs`.
+- **Order** — the handler `topoOrder`s sub‑intents by `dependsOn` (reusing the T2 sort) so search precedes save and the data flow is well‑founded.
+- **T3‑framed comprehension** — `AnthropicService.comprehendCrossGround({ask, grounds})` decomposes a cross‑SITE journey into ordered sub‑intents + `stated`, fed the Ground catalog; the handler prefers it, falls back to `comprehendIntent`.
+
+**Pending wiring (next):** the chat UI sends `COMPREHEND_CROSS_GROUND` (the ORCH‑C trigger) + renders the proposed Workflow for review/run. Still open from the 6‑question review: **Δa** an LLM tier on the *ground* resolver for abstract intents (no site named); **gap→repair** loop (today gaps only report); **Δd** saga/compensation for a mid‑journey failure. The deferred internal‑identifier rename (`TIER_MODEL.md §4`) would also rename the `workflow` step kind/messages.

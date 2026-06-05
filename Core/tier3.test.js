@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildWorkflowRecord } from './tier3.js';
+import { buildWorkflowRecord, wireCrossGroundData } from './tier3.js';
 
 describe('tier3 — T3X-2 buildWorkflowRecord (cross-Ground recursion lowering)', () => {
   const resolved = [
@@ -53,5 +53,63 @@ describe('tier3 — T3X-2 buildWorkflowRecord (cross-Ground recursion lowering)'
   it('no id / no sub-intents → null', () => {
     assert.equal(buildWorkflowRecord({ id: '', resolved }).workflow, null);
     assert.equal(buildWorkflowRecord({ id: 'wf', resolved: [] }).workflow, null);
+  });
+});
+
+describe('tier3 — T3X wireCrossGroundData (cross-Ground data-flow floor)', () => {
+  it('a downstream reference param binds to an upstream output (URL ← job_url)', () => {
+    const r = wireCrossGroundData([
+      { id: 's0', params: ['KEYWORD'], outputs: ['job_url'] },
+      { id: 's1', params: ['URL', 'TITLE'], dependsOn: ['s0'] },
+    ]);
+    assert.deepEqual(r[1].scopeReads, { URL: 'job_url' }, 'URL is reference-type + shares "url" with job_url');
+    assert.equal(r[1].scopeReads.TITLE, undefined, 'TITLE is not a reference param → stays a Workflow input');
+    assert.deepEqual(r[0].scopeReads, {}, 's0 has no upstream → no reads');
+  });
+
+  it('a STATED value becomes a literal (matched by name / shared token)', () => {
+    const r = wireCrossGroundData([{ id: 's0', params: ['KEYWORD'], stated: { keyword: 'senior software engineer' }, outputs: ['job_url'] }]);
+    assert.deepEqual(r[0].literals, { KEYWORD: 'senior software engineer' });
+  });
+
+  it('end-to-end: wire → buildWorkflowRecord emits literal + scope_binding + the one true Workflow input', () => {
+    const resolved = [
+      { id: 's0', clause: 'find a senior job on linkedin', groundId: 'gnd_li', capabilityId: 'strat_li', params: ['KEYWORD'], stated: { keyword: 'senior software engineer' }, outputs: ['job_url'] },
+      { id: 's1', clause: 'save it to notion', groundId: 'gnd_no', capabilityId: 'strat_no', params: ['URL', 'TITLE'], dependsOn: ['s0'] },
+    ];
+    wireCrossGroundData(resolved);
+    const { workflow } = buildWorkflowRecord({ id: 'wf', intent: 'x', resolved });
+    assert.deepEqual(workflow.steps[0].paramBindings.KEYWORD, { kind: 'literal', value: 'senior software engineer' });
+    assert.deepEqual(workflow.steps[1].paramBindings.URL, { kind: 'scope_binding', name: 'job_url' });
+    assert.deepEqual(workflow.steps[1].paramBindings.TITLE, { kind: 'strategy_param', name: 'TITLE' });
+    assert.deepEqual(workflow.params.map((p) => p.name), ['TITLE'], 'only TITLE remains a Workflow input');
+  });
+
+  it('no upstream output → a reference param stays unbound (a Workflow input)', () => {
+    assert.deepEqual(wireCrossGroundData([{ id: 's0', params: ['URL'] }])[0].scopeReads, {});
+  });
+
+  it('a shared-token producer wins over an unrelated reference output', () => {
+    const r = wireCrossGroundData([
+      { id: 's0', params: [], outputs: ['user_id', 'job_url'] },
+      { id: 's1', params: ['URL'], dependsOn: ['s0'] },
+    ]);
+    assert.deepEqual(r[1].scopeReads, { URL: 'job_url' }, 'URL matches job_url by token, not user_id');
+  });
+
+  it('AMBIGUOUS: a ref param + TWO unrelated ref outputs (no shared token) → no guess', () => {
+    const r = wireCrossGroundData([
+      { id: 's0', params: [], outputs: ['user_id', 'order_number'] },
+      { id: 's1', params: ['EMAIL'], dependsOn: ['s0'] },
+    ]);
+    assert.equal(r[1].scopeReads.EMAIL, undefined, 'two ref outputs, none token-matching EMAIL → unbound, not a wrong guess');
+  });
+
+  it('a SINGLE unambiguous reference output binds a ref param with no token overlap', () => {
+    const r = wireCrossGroundData([
+      { id: 's0', params: [], outputs: ['job_url'] },
+      { id: 's1', params: ['LINK'], dependsOn: ['s0'] },
+    ]);
+    assert.deepEqual(r[1].scopeReads, { LINK: 'job_url' }, 'lone reference output → bound');
   });
 });

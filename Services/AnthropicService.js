@@ -2407,6 +2407,60 @@ Rules:
   }
 
   /**
+   * T3X — COMPREHEND a CROSS-GROUND (cross-site) intent into ORDERED SUB-INTENTS, each a whole task on ONE site.
+   * The T3 analog of comprehendIntent ("intents all the way down"), one tier up: comprehendIntent splits an intent
+   * into within-task PHASES; this splits a cross-SITE journey into SUB-INTENTS (each a saved-Strategy-sized task),
+   * with `dependsOn` ordering and `stated` values (what the ask gives for that sub-intent → literal step params).
+   * Given the user's known sites so it can phrase sub-intents around real Grounds. Returns null on failure (the
+   * caller falls back to comprehendIntent). PAGE-INDEPENDENT; the matcher binds each sub-intent to a Strategy.
+   * @param {{ ask:string, grounds?:{groundId:string,name:string}[] }} opts
+   * @returns {Promise<{subIntents:{id:string,clause:string,dependsOn:string[],stated:object}[]}|null>}
+   */
+  static async comprehendCrossGround({ ask, grounds = [] }) {
+    const intent = (typeof ask === 'string' ? ask : '').trim();
+    if (!intent) return null;
+    const siteList = (Array.isArray(grounds) ? grounds : []).map((g) => `- ${(g && (g.name || g.groundId)) || ''}`).filter((s) => s.length > 2).join('\n') || '(none known yet)';
+    const systemPrompt = `You COMPREHEND a CROSS-SITE web-automation intent into ORDERED SUB-INTENTS, each a whole task performed on ONE site. You are NOT shown any page. Split the journey by SITE / task boundary — NOT into within-task field-by-field phases. e.g. "find a job on LinkedIn and save it to Notion" -> [ {find a job on LinkedIn}, {save it to Notion} ]. A single-site intent yields ONE sub-intent.
+
+The user's known sites:
+${siteList}
+
+Return ONLY a JSON object:
+{
+  "subIntents": [
+    { "id": "<slug>", "clause": "<the sub-intent, self-contained, naming its site when the ask does>",
+      "dependsOn": [ "<earlier id whose RESULT this one needs>" ],
+      "stated": { "<paramHint>": "<value the ASK gives for this sub-intent>" } }
+  ]
+}
+Rules:
+- Each sub-intent is ONE task on ONE site (search, save, post, buy, …) — the unit a saved Strategy performs.
+- "dependsOn": list an earlier sub-intent ONLY when this one consumes its RESULT (e.g. "save the JOB you found" depends on the find). This both orders execution AND wires the data hand-off.
+- "stated": values the ASK explicitly provides for THIS sub-intent, keyed by a guessable param name (e.g. "find senior SWE jobs" -> {"keyword":"senior software engineer"}). {} if the ask states none — do NOT invent.
+- Phrase each clause so it stands alone and names its site when the user did. Keep the ORIGINAL order of mention.`;
+    Logger.info('AnthropicService', `comprehendCrossGround — "${intent.slice(0, 80)}" (${(grounds || []).length} known sites)`);
+    try {
+      const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text: `Cross-site intent: ${intent}` }], 2048, [], { role: 'describe', operation: 'comprehendCrossGround' });
+      if (!raw?.success) { Logger.warn('AnthropicService', `comprehendCrossGround failed: ${raw?.error}`); return null; }
+      const json = AnthropicService.#firstJsonObject(raw.text);
+      let out = null;
+      try { out = json ? JSON.parse(json) : null; } catch (e) { Logger.warn('AnthropicService', `comprehendCrossGround JSON parse failed (${e.message})`); return null; }
+      if (!out || !Array.isArray(out.subIntents) || !out.subIntents.length) return null;
+      out.subIntents = out.subIntents.map((s, i) => ({
+        id: (s && s.id) || `s${i}`,
+        clause: (s && (s.clause || s.label)) || intent,
+        dependsOn: Array.isArray(s && s.dependsOn) ? s.dependsOn : [],
+        stated: (s && s.stated && typeof s.stated === 'object') ? s.stated : {},
+      }));
+      Logger.info('AnthropicService', `comprehendCrossGround → ${out.subIntents.length} sub-intent(s): ${out.subIntents.map((s) => s.clause.slice(0, 40)).join(' | ')}`);
+      return out;
+    } catch (e) {
+      Logger.warn('AnthropicService', `comprehendCrossGround error: ${e.message}`);
+      return null;
+    }
+  }
+
+  /**
    * OBS-4 — NAME a recorded DEMONSTRATION (Path 3; the inverse of comprehendIntent). Given the actions the
    * user performed (kinds + element names + values, no page), return a short capability NAME + a one-line
    * INTENT. Post-hoc labelling of ground-truth actions. Returns { name, intent } or null on ANY failure —

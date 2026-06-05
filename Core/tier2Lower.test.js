@@ -8,6 +8,15 @@ import { lowerToTier2, topoOrder, deriveStructuralPostcondition, buildObservatio
 const input = (id, goal, sel) => ({ id, label: id, kind: 'input', goals: [goal], selector: sel, interaction: { pattern: 'type', effect: 'none' } });
 const submit = (id, goal, sel) => ({ id, label: id, kind: 'action', goals: [goal], selector: sel, interaction: { pattern: 'click', effect: 'submit' } });
 
+// Module-scope shared fixture: a search Locale with NO result region (the structural floor derives no
+// postcondition from it). Hoisted to module scope so BOTH the lowerToTier2 AND deriveStructuralPostcondition
+// describe blocks can reference it — the latter referenced it out-of-scope (ReferenceError), the long-standing
+// 1-test failure. lowerToTier2 is pure (reads the locale, never mutates), so sharing one fixture is safe.
+const searchLocale = {
+  goals: { g_search: { id: 'g_search', label: 'search for jobs', achievableVia: ['q', 'l', 'go'] } },
+  features: { q: input('q', 'g_search', '#q'), l: input('l', 'g_search', '#l'), go: submit('go', 'g_search', '#go') },
+};
+
 describe('topoOrder — dependency ordering, stable, cycle-safe', () => {
   it('orders a phase after the phases it dependsOn even when listed out of order', () => {
     const order = topoOrder([
@@ -30,11 +39,6 @@ describe('topoOrder — dependency ordering, stable, cycle-safe', () => {
 });
 
 describe('lowerToTier2 — fragment nodes per phase (SG-T2-1)', () => {
-  const searchLocale = {
-    goals: { g_search: { id: 'g_search', label: 'search for jobs', achievableVia: ['q', 'l', 'go'] } },
-    features: { q: input('q', 'g_search', '#q'), l: input('l', 'g_search', '#l'), go: submit('go', 'g_search', '#go') },
-  };
-
   it('MERGES a fill phase + a submit phase of the SAME form into ONE fragment (form atomicity)', () => {
     const spec = { target: 'search for jobs', subGoals: [
       { id: 'enter', label: 'enter criteria', shape: 'act', dependsOn: [] },

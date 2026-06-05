@@ -12,7 +12,7 @@
 // skeleton handoff; typed cross-schema mapping is T3X-4. PURE — no DOM / chrome / storage / LLM.
 //
 // @module Core/tier3
-// @version 2.74.779
+// @version 2.74.780
 
 // The executor's Strategy-invocation step kind. NB: WorkflowExecutor names it 'workflow' for legacy storage
 // reasons, but it DISPATCHES a Tier-2 Strategy (see docs/TIER_MODEL.md — the inner 'workflow' step = a Strategy).
@@ -55,6 +55,9 @@ function _stepParamBindings(si) {
  * @property {string} capabilityId  the bound Strategy id (null/absent ⇒ a gap)
  * @property {string} [capabilityName]
  * @property {Array}  [params]      the Strategy's params (names or {name})
+ * @property {string[]} [dependsOn] ids of sub-intents this one depends on (drives topo order + data flow)
+ * @property {Array}  [outputs]     the bound Strategy's declared outputs (names or {name}) — feed downstream scopeReads
+ * @property {object} [stated]      { paramHint: value } — values the intent STATED for this sub-intent → literals
  * @property {object} [literals]    { paramName: value } — constraints stated in the intent
  * @property {object} [scopeReads]  { paramName: upstreamScopeName } — cross-step data flow
  */
@@ -110,4 +113,58 @@ export function buildWorkflowRecord({ id, intent = '', name = null, resolved = [
     synthesized: true,
   };
   return { workflow, gaps, runnable };
+}
+
+// Reference-type param/output families — a param named like one of these is a candidate for cross-step data flow
+// (it consumes an identifier/locator produced upstream), e.g. URL / job_url / email / user_id.
+const _REF = /(?:url|uri|link|href|email|address|phone|handle|username|account|number|\bid\b)/i;
+const _normName = (s) => String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const _nameTokens = (s) => _normName(s).split(' ').filter(Boolean);
+function _shareToken(a, b) { const A = new Set(_nameTokens(a)); return _nameTokens(b).some((t) => A.has(t)); }
+
+/**
+ * Wire the cross-Ground DATA FLOW across TOPO-ORDERED sub-intents (deterministic floor; LLM mapping = the Δc
+ * upgrade seam). PURE. Walks `resolved` in order (so earlier sub-intents' outputs are available to later ones) and
+ * fills each entry's `literals` + `scopeReads`, which buildWorkflowRecord then lowers to `literal` / `scope_binding`
+ * step bindings (anything left unbound stays a Workflow input). Per param, in priority order:
+ *   1. LITERAL  — the sub-intent STATED a value for it (`si.stated`, keyed by a param-ish name).
+ *   2. SCOPE_BINDING — it's a reference-type param (url/id/email/…) fed by an UPSTREAM declared output: prefer a
+ *      shared-token match (URL ← job_url), else the single unambiguous reference output upstream.
+ *   3. else — left unbound (→ a Workflow input).
+ * Mutates + returns the same array. Input MUST be topo-ordered by dependsOn (the caller does that via topoOrder).
+ * @param {ResolvedSubIntent[]} resolved
+ * @returns {ResolvedSubIntent[]}
+ */
+export function wireCrossGroundData(resolved) {
+  const list = Array.isArray(resolved) ? resolved : [];
+  const upstream = [];   // {name, fromId} declared outputs available from EARLIER sub-intents, in order
+  for (const si of list) {
+    if (!si) continue;
+    const params = (Array.isArray(si.params) ? si.params : []).map((p) => (typeof p === 'string' ? p : (p && p.name))).filter(Boolean);
+    const stated = (si.stated && typeof si.stated === 'object') ? si.stated : {};
+    const literals = { ...(si.literals || {}) };
+    const scopeReads = { ...(si.scopeReads || {}) };
+    for (const p of params) {
+      if (Object.prototype.hasOwnProperty.call(literals, p) || scopeReads[p]) continue;   // already decided
+      // 1) literal — a value the sub-intent stated, matched to this param by normalized name / shared token
+      const statedKey = Object.keys(stated).find((k) => _normName(k) === _normName(p) || _shareToken(k, p));
+      if (statedKey != null) { literals[p] = stated[statedKey]; continue; }
+      // 2) scope_binding — a reference param fed by an upstream output (specific shared-token first, then a single
+      //    unambiguous reference output). Latest match wins (the most recent producer).
+      if (_REF.test(_normName(p)) && upstream.length) {
+        let match = null;
+        for (const o of upstream) if (_shareToken(o.name, p)) match = o;          // 2a specific
+        if (!match) { const refs = upstream.filter((o) => _REF.test(_normName(o.name))); if (refs.length === 1) match = refs[0]; }   // 2b single ref
+        if (match) { scopeReads[p] = match.name; continue; }
+      }
+      // 3) else: unbound → buildWorkflowRecord surfaces it as a Workflow input
+    }
+    si.literals = literals;
+    si.scopeReads = scopeReads;
+    for (const o of (Array.isArray(si.outputs) ? si.outputs : [])) {
+      const name = typeof o === 'string' ? o : (o && o.name);
+      if (name) upstream.push({ name, fromId: si.id });
+    }
+  }
+  return list;
 }

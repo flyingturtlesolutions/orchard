@@ -13,7 +13,7 @@ import * as Outcomes from '../../Core/outcomes.js';
 import { Logger } from '../../Core/Logger.js';
 import { coverComplete } from '../../Core/cover.js';
 import { selectionToTrialRoles } from '../../Core/bind.js';
-import { lowerToTier2, orderForRun, scoreTier2 } from '../../Core/tier2Lower.js';
+import { lowerToTier2, orderForRun, scoreTier2, topoOrder } from '../../Core/tier2Lower.js';
 import { evaluatePostcondition } from '../../Core/postcondition.js';
 import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord, buildResultsLandmarkRecord, buildOutcomePerspective, findMatchingPerspective, buildPerspectiveGate, buildDestinationPerspective, pickDestinationLandmark } from '../../Core/accept.js';
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
@@ -35,7 +35,7 @@ import { buildCompositeTemplate, matchTemplate, rebindSteps } from '../../Core/o
 import { validatePlan } from '../../Core/orchPlan.js';   // ORCH-L — structural guard for a lifted (foreach/gate) plan
 import { promoteComposite, buildConvergeObservationRecord } from '../../Core/orchPromote.js';   // CONVERGE — T2 composite IR → canonical runnable Strategy (Studio-visible)
 import { buildGroundCatalog, resolveGround } from '../../Core/groundCatalog.js';   // T3X-1 — the global Ground catalog + ground resolution (intent → which site)
-import { buildWorkflowRecord } from '../../Core/tier3.js';   // T3X-2 — cross-Ground comprehension lowering (resolved sub-intents → a Workflow record)
+import { buildWorkflowRecord, wireCrossGroundData } from '../../Core/tier3.js';   // T3X-2 — cross-Ground lowering + the data-flow floor (literals/scopeReads)
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
 import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
@@ -54,10 +54,15 @@ async function _bindStrategyOnGround(ctx, clause, groundId) {
   const decision = rankAndDecide(clause, candidates, { now: Date.now() });
   const cand = decision && decision.candidate;
   if (!cand || decision.decision === 'miss') return null;
+  const strategyId = cand.strategyId || cand.id;
+  // the Strategy's DECLARED outputs feed downstream scopeReads (the cross-Ground data flow — wireCrossGroundData)
+  let outputs = [];
+  try { const strat = await StorageManager.getStrategy(strategyId); outputs = (Array.isArray(strat && strat.outputs) ? strat.outputs : []).map((o) => (typeof o === 'string' ? o : (o && o.name))).filter(Boolean); } catch { /* */ }
   return {
-    capabilityId: cand.strategyId || cand.id,
+    capabilityId: strategyId,
     capabilityName: cand.intent || '',
     params: (cand.params || []).map((p) => (typeof p === 'string' ? p : (p && p.name))).filter(Boolean),
+    outputs,
   };
 }
 
@@ -872,33 +877,52 @@ export function createSgMessageHandlers(ctx) {
         const catalog = buildGroundCatalog(grounds, capLabelsByGround);
         const byId = new Map(grounds.map((g) => [g && (g.id || g.groundId), g]).filter(([k]) => k));
 
-        // 2. Decompose into sub-intents (the page-independent comprehender; a T3-framed prompt is a refinement).
-        const spec = await AnthropicService.comprehendIntent({ userIntent: ask });
-        const subGoals = (spec && Array.isArray(spec.subGoals) && spec.subGoals.length) ? spec.subGoals : [{ id: 's0', label: ask }];
+        // 2. Decompose into sub-intents. Prefer the T3-framed comprehender (fed the Ground catalog → cross-SITE
+        //    sub-intents + per-sub-intent STATED values that become literals); fall back to the page-independent
+        //    comprehendIntent (no stated values → those params become Workflow inputs).
+        let subIntents = [];
+        try {
+          const x = await AnthropicService.comprehendCrossGround({ ask, grounds: catalog.map((e) => ({ groundId: e.groundId, name: e.name })) });
+          if (x && Array.isArray(x.subIntents) && x.subIntents.length) {
+            subIntents = x.subIntents.map((s, i) => ({ id: s.id || `s${i}`, clause: s.clause || s.label || ask, dependsOn: Array.isArray(s.dependsOn) ? s.dependsOn : [], stated: (s.stated && typeof s.stated === 'object') ? s.stated : {} }));
+          }
+        } catch (e) { Logger.warn('background', `comprehendCrossGround unavailable, falling back: ${e.message}`); }
+        if (!subIntents.length) {
+          const spec = await AnthropicService.comprehendIntent({ userIntent: ask });
+          const subGoals = (spec && Array.isArray(spec.subGoals) && spec.subGoals.length) ? spec.subGoals : [{ id: 's0', label: ask }];
+          subIntents = subGoals.map((sg, i) => ({ id: sg.id || `s${i}`, clause: sg.label || sg.clause || ask, dependsOn: Array.isArray(sg.dependsOn) ? sg.dependsOn : [], stated: {} }));
+        }
+        // ORDER by dependsOn so "search → save" precedes its consumer (and the data flow is well-founded). topoOrder
+        // is the same dependency sort the within-Ground (T2) lowering uses — reused one tier up.
+        const ordered = topoOrder(subIntents);
 
-        // 3. Per sub-intent: resolve its Ground (T3X-1) + bind a Strategy on it (the existing matcher).
+        // 3. Per sub-intent (IN ORDER): resolve its Ground (T3X-1) + bind a Strategy (with its declared outputs).
         const resolved = [];
         const ambiguities = [];
-        for (let i = 0; i < subGoals.length; i++) {
-          const sgi = subGoals[i] || {};
-          const clause = sgi.label || sgi.clause || ask;
+        for (let i = 0; i < ordered.length; i++) {
+          const si = ordered[i] || {};
+          const clause = si.clause || si.label || ask;
           const gr = resolveGround(clause, catalog);
-          if (gr.decision === 'ambiguous') ambiguities.push({ subIntentId: sgi.id || `s${i}`, clause, candidates: gr.candidates });
+          if (gr.decision === 'ambiguous') ambiguities.push({ subIntentId: si.id || `s${i}`, clause, candidates: gr.candidates });
           const groundId = gr.groundId || null;
           const g = groundId ? byId.get(groundId) : null;
           const bound = groundId ? await _bindStrategyOnGround(ctx, clause, groundId) : null;
           resolved.push({
-            id: sgi.id || `s${i}`, clause, groundId,
+            id: si.id || `s${i}`, clause, groundId,
             groundUrl: g ? (g.url || (Array.isArray(g.urlPatterns) ? g.urlPatterns[0] : null)) : null,
             capabilityId: bound ? bound.capabilityId : null,
             capabilityName: bound ? bound.capabilityName : '',
             params: bound ? bound.params : [],
+            outputs: bound ? bound.outputs : [],
+            dependsOn: Array.isArray(si.dependsOn) ? si.dependsOn : [],
+            stated: (si.stated && typeof si.stated === 'object') ? si.stated : {},
           });
         }
 
-        // 4. Lower → a runnable cross-Ground Workflow record (T3X-2).
+        // 4. Wire the cross-Ground DATA FLOW (literals ← stated; scopeReads ← upstream outputs), then lower (T3X-2).
+        wireCrossGroundData(resolved);
         const wfId = `wf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        const built = buildWorkflowRecord({ id: wfId, intent: (spec && spec.target) || ask, name: String(ask).slice(0, 60), resolved });
+        const built = buildWorkflowRecord({ id: wfId, intent: ask, name: String(ask).slice(0, 60), resolved });
 
         // 5. Save only when asked AND fully runnable (the chat freezes a reviewed Workflow).
         let saved = false;
