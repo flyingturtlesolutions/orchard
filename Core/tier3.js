@@ -12,7 +12,7 @@
 // skeleton handoff; typed cross-schema mapping is T3X-4. PURE — no DOM / chrome / storage / LLM.
 //
 // @module Core/tier3
-// @version 2.74.788
+// @version 2.74.789
 
 // The executor's Strategy-invocation step kind. NB: WorkflowExecutor names it 'workflow' for legacy storage
 // reasons, but it DISPATCHES a Tier-2 Strategy (see docs/TIER_MODEL.md — the inner 'workflow' step = a Strategy).
@@ -44,6 +44,16 @@ function _stepParamBindings(si) {
     }
   }
   return { bindings, workflowParams };
+}
+
+/**
+ * The scope key a READ step's value lands under (so a downstream step's scope_binding can consume it). The
+ * observation's first declared output name; falls back to 'value'. PURE.
+ */
+function _outputName(si) {
+  const outs = Array.isArray(si.outputs) ? si.outputs : [];
+  for (const o of outs) { const n = typeof o === 'string' ? o : (o && o.name); if (n) return n; }
+  return 'value';
 }
 
 /**
@@ -88,6 +98,7 @@ export function buildWorkflowRecord({ id, intent = '', name = null, resolved = [
       wfParamNames.add(pn);
       wfParams.push({ name: pn, type: 'string', kind: 'scalar', required: true });
     }
+    const isObservation = (si.capabilityKind || 'strategy') === 'observation';
     steps.push({
       type: STRATEGY_STEP,
       workflowId: si.capabilityId,        // dispatch id: a Strategy id, a Fragment id, or an Observation id by kind
@@ -96,7 +107,15 @@ export function buildWorkflowRecord({ id, intent = '', name = null, resolved = [
       groundUrl: si.groundUrl || null,    // entry url for the cross-Ground hop (consumed by the executor, T3X-3)
       label: si.clause || si.capabilityName || '',
       paramBindings: bindings,
-      ...(si.observe ? { observe: si.observe } : {}),                       // DF — a read step's extracts (executor wraps+runs them)
+      // DF — a READ step (observation-native dispatch): the executor HOPS to the Ground, replays the antecedent
+      // Fragment (the prerequisite ACTION, e.g. the search), runs the Observation (RUN_OBSERVATION), and emits the
+      // value under `outputName` so a downstream scope_binding can consume it. The antecedent is logical linkage
+      // independent of strategy membership; the read itself is NOT wrapped as a Strategy (that conflated act+read).
+      ...(isObservation ? {
+        outputName: _outputName(si),
+        ...(si.antecedentFragmentId ? { antecedentFragmentId: si.antecedentFragmentId } : {}),
+        ...(si.antecedentParamBindings && typeof si.antecedentParamBindings === 'object' ? { antecedentParamBindings: si.antecedentParamBindings } : {}),
+      } : {}),
       ...(si.compensateWith ? { compensateWith: si.compensateWith } : {}),  // Q5 — a Strategy that UNDOES this step
     });
   }

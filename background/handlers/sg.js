@@ -72,9 +72,12 @@ async function _bindStrategyOnGround(ctx, clause, groundId, effect = 'action') {
   if (!cand || decision.decision === 'miss') return null;
   const cap = (cand.raw && typeof cand.raw === 'object') ? cand.raw : {};
   if (isRead) {
-    // an OBSERVATION read: it EXTRACTs cap.observe.extracts[*].output into scope → workflowScope → a downstream
-    // write consumes it via scope_binding (the cross-Ground DATA FLOW). `observe` travels on the step so the
-    // executor can wrap + run it (DF-3) with no storage lookup; the extract's landmark self-heals the selector.
+    // an OBSERVATION read: it READS cap.observe.extracts[*].output → workflowScope → a downstream write consumes
+    // it via scope_binding (the cross-Ground DATA FLOW). The executor runs the read via the OBSERVATION-NATIVE
+    // dispatch (RUN_OBSERVATION) — NOT by wrapping it as a Strategy — so we surface the capability id plus its
+    // ANTECEDENT Fragment (the prerequisite ACTION, e.g. the search, replayed before the read) rather than the
+    // embedded `observe`. This keeps the load-bearing act/read split: Fragments ACT, Observations READ. The
+    // antecedent is logical linkage independent of strategy membership — an observation carries its own.
     const extracts = (cap.observe && Array.isArray(cap.observe.extracts)) ? cap.observe.extracts : [];
     const outputs = extracts.map((e) => e && e.output).filter(Boolean);
     if (!outputs.length) return null;   // a read producing no named output can't feed data flow
@@ -84,7 +87,8 @@ async function _bindStrategyOnGround(ctx, clause, groundId, effect = 'action') {
       capabilityName: cand.intent || cap.intent || cap.name || '',
       params: [],
       outputs,
-      observe: cap.observe,
+      ...(cap.antecedentFragmentId ? { antecedentFragmentId: cap.antecedentFragmentId } : {}),
+      ...(cap.antecedentParamBindings && typeof cap.antecedentParamBindings === 'object' ? { antecedentParamBindings: cap.antecedentParamBindings } : {}),
     };
   }
   const isStrategy = !!cap.strategyId;
@@ -1004,7 +1008,11 @@ export function createSgMessageHandlers(ctx) {
             capabilityName: bound ? bound.capabilityName : '',
             params: bound ? bound.params : [],
             outputs: bound ? bound.outputs : [],
-            observe: bound ? (bound.observe || null) : null,   // DF — an observation step's extracts, embedded so the executor can wrap+run it
+            // DF — a READ step's prerequisite ACTION: the antecedent Fragment (e.g. the search) the executor
+            // replays before the observation read. NOT the embedded `observe` (that was the wrap-as-Strategy
+            // route, removed in v2.74.789) — the read runs observation-native via RUN_OBSERVATION.
+            ...(bound && bound.antecedentFragmentId ? { antecedentFragmentId: bound.antecedentFragmentId } : {}),
+            ...(bound && bound.antecedentParamBindings ? { antecedentParamBindings: bound.antecedentParamBindings } : {}),
             dependsOn: Array.isArray(si.dependsOn) ? si.dependsOn : [],
             stated: boundStated,   // comprehender's stated ∪ the LLM-bound clause values (exact param names → literals)
           });

@@ -4150,6 +4150,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               invocationId: invId,
               isAborted: () => _workflowCancellations.has(invId),
               debug,
+              // v2.74.789 — In-SW capabilities a cross-Ground READ step needs but the executor
+              // can't import (they close over the background storage ctx). RUN_OBSERVATION is the
+              // observation-native READ; a SW→SW sendMessage wouldn't re-enter our own onMessage,
+              // so we hand the handler in directly and bridge its sendResponse to a Promise (with
+              // the same reject-safety net the registry dispatch uses).
+              runObservation: (obsPayload) => new Promise((resolve) => {
+                try {
+                  Promise.resolve(_sgMessageHandlers.RUN_OBSERVATION(obsPayload, null, (r) => resolve(r || null)))
+                    .catch((e) => resolve({ success: false, error: e?.message || String(e) }));
+                } catch (e) { resolve({ success: false, error: e.message }); }
+              }),
+              ensureContentScript: _ensureContentScript,   // heal a freshly-opened hop tab's content-script port before the read
             });
             sendResponse({ success: !!result.success, invocationId: invId, ...result });
           } finally {

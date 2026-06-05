@@ -76,7 +76,8 @@
  */
 
 import { StorageManager } from './StorageManager.js';
-import { wrapFragmentAsStrategy, wrapObservationAsStrategy } from '../Core/capabilitySynth.js';   // v2.74.786/788 — wrap a bare T1 Fragment / an Observation cross-Ground step into a synthetic Strategy at run time
+import { wrapFragmentAsStrategy } from '../Core/capabilitySynth.js';   // v2.74.786 — wrap a bare T1 Fragment cross-Ground step into a synthetic Strategy at run time
+import { TemplateWalker } from './TemplateWalker.js';   // v2.74.788 — replay a cross-Ground READ step's antecedent Fragment (the prerequisite action)
 import { ExecutionEngine } from './ExecutionEngine.js';
 import { parseFileValue, isFileValue } from './FileParsers.js';
 import { Scope, scalar, list, isKind } from './Scope.js';
@@ -352,6 +353,19 @@ async function executeWorkflowStep(step, stepIndex, paramValues, workflowScope, 
   if (!step.workflowId) {
     return { success: false, error: 'Workflow step has no workflowId picked yet' };
   }
+
+  // v2.74.789 — A cross-Ground READ step (capabilityKind='observation') is NOT a Strategy
+  // and must NOT be wrapped as one (the prior wrapObservationAsStrategy route mis-dispatched
+  // it through #executeObservationNode, which needs a getObservation entity by id and crashed
+  // with "OBSERVATION: observationId missing"). It runs the observation-native dispatch
+  // instead: open the Ground tab → replay the antecedent Fragment (the prerequisite ACTION,
+  // e.g. the search) → run the Observation (the READ, via RUN_OBSERVATION) → emit its value
+  // into workflowScope. This preserves the load-bearing act/read split — Fragments ACT,
+  // Observations READ — rather than co-opting one to do the other's job.
+  if (step.capabilityKind === 'observation') {
+    return _runObservationStep(step, stepIndex, paramValues, workflowScope, ctx);
+  }
+
   const innerParams = resolveWorkflowStepParams(step, paramValues, workflowScope, ctx);
 
   ctx.emit({
@@ -381,14 +395,6 @@ async function executeWorkflowStep(step, stepIndex, paramValues, workflowScope, 
       return { success: false, error: `Fragment ${step.workflowId} not found` };
     }
     inlineStrategy = wrapFragmentAsStrategy(frag, { strategyId: `fragment:${frag.id}` });
-  } else if (step.capabilityKind === 'observation') {
-    // DF — a READ step (cross-Ground data producer). Its extracts ride on the step; wrap them as a single-node
-    // observation Strategy and run it via the same hop machinery — each `output` lands in scope → workflowScope.
-    inlineStrategy = wrapObservationAsStrategy({ id: step.workflowId, groundId: step.groundId, intent: step.label, observe: step.observe }, { strategyId: `observation:${step.workflowId}` });
-    if (!inlineStrategy) {
-      ctx.emit({ type: 'strategy_step_done', stepIndex, stepType: 'workflow', success: false, error: `Observation ${step.workflowId} has no extracts`, message: `Step ${stepIndex + 1}: read step has nothing to extract` });
-      return { success: false, error: `Observation ${step.workflowId} has no extracts` };
-    }
   }
   //
   // v2.74.151 — Propagate the Workflow-tier debug envelope so the inner
@@ -419,6 +425,153 @@ async function executeWorkflowStep(step, stepIndex, paramValues, workflowScope, 
   });
 
   return result;
+}
+
+/**
+ * v2.74.789 — Resolve the antecedent Fragment's param bindings against the live Workflow
+ * scope + inputs, mirroring resolveWorkflowStepParams for a Strategy step. The antecedent is
+ * the READ's prerequisite ACTION (e.g. a search), so its param (the search term) follows the
+ * SAME binding vocabulary as any step param: literal / strategy_param / scope_binding /
+ * iteration_variable. Entries that are already raw resolved values (not {kind} bindings) pass
+ * through unchanged — older records may store the captured value directly.
+ */
+function _resolveAntecedentBindings(antecedentParamBindings, paramValues, workflowScope, ctx) {
+  const out = {};
+  const src = (antecedentParamBindings && typeof antecedentParamBindings === 'object') ? antecedentParamBindings : {};
+  for (const [k, b] of Object.entries(src)) {
+    if (b && typeof b === 'object' && typeof b.kind === 'string') {
+      const v = resolveBinding(b, paramValues, workflowScope, ctx);
+      if (v !== undefined) out[k] = v;
+    } else if (b !== undefined && b !== null) {
+      out[k] = b;   // already a resolved value
+    }
+  }
+  return out;
+}
+
+/**
+ * v2.74.789 — Resolve once a hop tab finishes loading (status==='complete'), or after a
+ * timeout (best-effort — the antecedent Fragment's own WAIT_FOR actions handle finer settling).
+ * Checks the current status first (the load may already be done by the time we listen), then
+ * subscribes. The listener is always removed exactly once.
+ */
+function _waitTabComplete(tabId, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      try { chrome.tabs.onUpdated.removeListener(onUpdated); } catch (_) { /* */ }
+      resolve();
+    };
+    const onUpdated = (id, info) => { if (id === tabId && info.status === 'complete') finish(); };
+    try { chrome.tabs.onUpdated.addListener(onUpdated); } catch (_) { /* */ }
+    try { chrome.tabs.get(tabId, (t) => { void chrome.runtime.lastError; if (t && t.status === 'complete') finish(); }); } catch (_) { /* */ }
+    setTimeout(finish, Math.max(0, timeoutMs));
+  });
+}
+
+/**
+ * v2.74.789 — Execute a cross-Ground READ step (capabilityKind==='observation').
+ *
+ * The observation-native dispatch — the load-bearing act/read split made concrete. A read is
+ * NOT a Strategy and must NOT be wrapped as one; it composes a Fragment (which ACTS) with an
+ * Observation (which READS):
+ *   1. HOP   — open a tab on the step's Ground (groundUrl), wait for load, heal its port.
+ *   2. ACT   — replay the antecedent Fragment (the prerequisite, e.g. the search) via
+ *              TemplateWalker.executeFragment. Its own antecedent chain (login, go-home)
+ *              replays automatically. This is a Fragment: it has side effects.
+ *   3. READ  — run the Observation via the EXACT RUN_OBSERVATION handler (ctx.runObservation),
+ *              reusing its selector/archetype/landmark healing + list/visual modes. No side
+ *              effect: it extracts a value.
+ *   4. EMIT  — land the value in workflowScope under `outputName` so a downstream step's
+ *              scope_binding can consume it (the cross-Ground data flow).
+ *   5. CLOSE — best-effort cleanup of the hop tab.
+ *
+ * Returns the same { success, extractedValues?, error? } envelope a Strategy step returns, so
+ * executeSteps merges its outputs into workflowScope identically.
+ */
+async function _runObservationStep(step, stepIndex, paramValues, workflowScope, ctx) {
+  ctx.emit({
+    type: 'strategy_step_start',
+    stepIndex,
+    stepType: 'workflow',
+    workflowId: step.workflowId,
+    message: `Step ${stepIndex + 1}: reading${step.label ? ` "${step.label}"` : ''} on the other Ground`,
+  });
+
+  const fail = (error) => {
+    ctx.emit({ type: 'strategy_step_done', stepIndex, stepType: 'workflow', success: false, error, message: `Step ${stepIndex + 1}: ${error}` });
+    return { success: false, error };
+  };
+
+  if (typeof ctx.runObservation !== 'function') {
+    return fail('Cross-Ground read needs the in-SW observation runner (runObservation), which isn’t wired into this invocation');
+  }
+
+  // 1. HOP — open the Ground tab in the background (not focused, so the user isn't yanked away).
+  let tab = null;
+  try {
+    tab = await new Promise((resolve) => {
+      try { chrome.tabs.create({ url: step.groundUrl || undefined, active: false }, (t) => { void chrome.runtime.lastError; resolve(t || null); }); }
+      catch (_) { resolve(null); }
+    });
+  } catch (_) { tab = null; }
+  if (!tab || typeof tab.id !== 'number') {
+    return fail('Could not open the Ground page to read from');
+  }
+  const tabId = tab.id;
+
+  try {
+    await _waitTabComplete(tabId);
+    if (typeof ctx.ensureContentScript === 'function') { try { await ctx.ensureContentScript(tabId); } catch (_) { /* heal best-effort */ } }
+    if (ctx.isAborted?.()) return { success: false, error: 'Aborted' };
+
+    // 2. ACT — replay the prerequisite Fragment (the search). Fragments ACT; the antecedent is
+    //    "logical linkage independent of strategy membership" — the read can't run until this has.
+    if (step.antecedentFragmentId) {
+      const antBindings = _resolveAntecedentBindings(step.antecedentParamBindings, paramValues, workflowScope, ctx);
+      const ar = await TemplateWalker.executeFragment({
+        tabId,
+        fragmentId: step.antecedentFragmentId,
+        paramBindings: antBindings,
+        broadcastKey: `${ctx.invocationId}::obs${stepIndex}`,
+        isAborted: ctx.isAborted,
+      });
+      if (ar && ar.aborted) return { success: false, error: 'Aborted' };
+      if (!ar || ar.success === false) {
+        return fail(`The read prerequisite didn’t complete: ${(ar && ar.error) || 'unknown'}`);
+      }
+    }
+    if (ctx.isAborted?.()) return { success: false, error: 'Aborted' };
+
+    // 3. READ — the Observation. Observations READ (no side effect). Reuses the full RUN_OBSERVATION
+    //    machinery (positional/archetype read, landmark self-heal, list + visual modes).
+    const obs = await ctx.runObservation({ tabId, groundId: step.groundId, capabilityId: step.workflowId });
+    if (!obs || obs.success === false) {
+      return fail(`Couldn’t read on the other Ground: ${(obs && obs.error) || 'no response'}`);
+    }
+    if (obs.ok === false) {
+      return fail(obs.reason || 'the value wasn’t found on the page');
+    }
+
+    // 4. EMIT — tag the value and surface it under outputName for downstream scope_binding.
+    const outName = step.outputName || 'value';
+    const tagged = (obs.outputType === 'list' && Array.isArray(obs.items))
+      ? list(obs.items.map((it) => scalar(String(it ?? ''))))
+      : scalar(String(obs.value ?? ''));
+    ctx.emit({
+      type: 'strategy_step_done',
+      stepIndex,
+      stepType: 'workflow',
+      success: true,
+      message: `Step ${stepIndex + 1}: read "${String(obs.value ?? '').slice(0, 60)}" → ${outName}`,
+    });
+    return { success: true, extractedValues: { [outName]: tagged } };
+  } finally {
+    // 5. CLOSE — remove the hop tab (best-effort; a leaked tab is a nuisance, not a failure).
+    try { await new Promise((resolve) => { try { chrome.tabs.remove(tabId, () => { void chrome.runtime.lastError; resolve(); }); } catch (_) { resolve(); } }); } catch (_) { /* */ }
+  }
 }
 
 /**
@@ -479,7 +632,18 @@ export async function executeWorkflow(workflow, paramValues = {}, options = {}) 
   // non-debug callers (chat, Studio without debug mode) behave unchanged.
   const debug = options.debug ?? null;
 
-  const ctx = { emit: onProgress, isAborted, invocationId, debug };
+  // v2.74.789 — Cross-Ground READ steps need two in-SW capabilities the executor can't
+  // import directly (they close over the background's storage ctx): `runObservation` (the
+  // RUN_OBSERVATION handler, the READ) and `ensureContentScript` (heal a fresh hop tab's
+  // port). background.js's INVOKE_WORKFLOW threads both in. A SW→SW chrome.runtime.sendMessage
+  // does NOT re-enter the SW's own onMessage, so a self-message would hang — the injected
+  // invoker is the correct in-process path. Absent (older callers) → observation steps fail
+  // with a clear message rather than hanging.
+  const ctx = {
+    emit: onProgress, isAborted, invocationId, debug,
+    runObservation: options.runObservation ?? null,
+    ensureContentScript: options.ensureContentScript ?? null,
+  };
   ctx.emit({ type: 'strategy_start', strategyId: workflow.id, message: `Running ${workflow.name ?? workflow.id}` });
 
   // v2.74.76 — Pre-resolve file-typed params. ParamForm hands files in as

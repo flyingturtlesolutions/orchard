@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildTier2CapabilityRecords, buildCapabilityRecords, wrapFragmentAsStrategy, wrapObservationAsStrategy, collectReferencedPrimitiveIds, prepareTier1or2Records } from './capabilitySynth.js';
+import { buildTier2CapabilityRecords, buildCapabilityRecords, wrapFragmentAsStrategy, collectReferencedPrimitiveIds, prepareTier1or2Records } from './capabilitySynth.js';
 
 const phases = [
   { label: 'Initiate job search', actions: [{ action: 'TYPE', selector: '#q', value: 'test' }, { action: 'CLICK', selector: '#go' }] },
@@ -174,29 +174,11 @@ describe('wrapFragmentAsStrategy — run a bare T1 Fragment without persisting a
   });
 });
 
-describe('wrapObservationAsStrategy — run a READ as a synthetic observation Strategy (DF cross-Ground data producer)', () => {
-  const observation = {
-    id: 'obs-1', groundId: 'g', intent: 'get the top job link', kind: 'observation',
-    observe: { extracts: [{ selector: 'a.job-link', output: 'job_url', shape: 'attribute', attribute: 'href' }] },
-  };
-
-  it('wraps an observation into a one-node observation Strategy (the shape executeStrategy runs via #executeObservationNode)', () => {
-    const s = wrapObservationAsStrategy(observation, { now: 9 });
-    assert.equal(s.synthetic, true);
-    assert.equal(s.id, 'observation:obs-1', 'synthetic id, never persisted');
-    assert.equal(s.groundId, 'g');
-    assert.equal(s.params.length, 0, 'a read takes no inputs');
-    assert.equal(s.fragmentSteps.length, 1);
-    assert.equal(s.fragmentSteps[0].type, 'observation');
-    assert.deepEqual(s.fragmentSteps[0].extracts, observation.observe.extracts, 'the extracts (selector + output) ride onto the node → scope.set(output) at run time');
-  });
-
-  it('an observation with no extracts → null (nothing to read = no data to feed)', () => {
-    assert.equal(wrapObservationAsStrategy({ id: 'x', observe: { extracts: [] } }, {}), null);
-    assert.equal(wrapObservationAsStrategy({ id: 'x' }, {}), null);
-    assert.equal(wrapObservationAsStrategy(null, {}), null);
-  });
-});
+// NOTE (v2.74.789) — the `wrapObservationAsStrategy` describe block was REMOVED with the function. A cross-Ground
+// READ no longer wraps the observation as a synthetic Strategy (that route ran through #executeObservationNode,
+// which needs a persisted getObservation entity and crashed with "OBSERVATION: observationId missing", and it
+// conflated the act/read split). The read now runs observation-native in WorkflowExecutor._runObservationStep
+// (HOP → replay antecedent Fragment → RUN_OBSERVATION → emit). Its contract is exercised live, not here.
 
 describe('collectReferencedPrimitiveIds — which fragments/observations are STEPS of a composite (T1-as-first-class)', () => {
   it('collects fragmentIds + observationIds across fragmentSteps, detect branches, and foreach bodies', () => {
