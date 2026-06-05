@@ -17,7 +17,6 @@
  */
 
 import { Logger }                 from '../Core/Logger.js';
-import { dropWeakInputPresence }  from '../Core/postcondition.js';   // v2.74.783 — filter precondition-shaped "input present" postconditions out of the skip gate
 import { StorageManager }         from './StorageManager.js';
 import { TemplateWalker }         from './TemplateWalker.js';
 import { Scope, scalar, list, record, image, section, document, asString } from './Scope.js';
@@ -735,47 +734,19 @@ export class ExecutionEngine {
       Logger.info('ExecutionEngine', `${displayName} — bindings: ${summary || '(none)'}`);
     }
 
-    // v2.29.4 (Pass E2-5) — Skip-when-already-done is DISABLED inside
-    // FOREACH bodies. Reasoning:
-    //
-    // Postconditions typically describe page-level state ("`.job-submitted`
-    // visible"). Iteration 1 of a FOREACH body achieves that state; now
-    // iteration 2's pre-check sees the state present → wrongly concludes
-    // "already done" and skips the iteration. That silently drops work.
-    //
-    // Inside a FOREACH each iteration is semantically different (different
-    // target item), so re-running is the right default. Users who want
-    // idempotent skip behavior can still rely on the post-check catching
-    // legitimate "nothing happened" failures after execution.
-    //
-    // The `iteration` param being non-null is the signal that we're inside
-    // a FOREACH body. Top-level calls (iteration === null) keep the
-    // original skip-check for their backward-compat benefit.
-    const insideForeach = iteration !== null;
-    // v2.74.783 — a postcondition that merely asserts a FILLABLE INPUT is present (e.g. the search box
-    // `input[name="q"]`) is precondition-shaped: true BEFORE and AFTER the action. It must NOT gate the skip, or a
-    // parameterized search whose box is always present can never re-run with a new query (the reported bug). Drop
-    // those weak checks; skip only when a STRONG success signal (a results region, a url match, …) remains and holds.
-    // This keeps the legitimate skips (login already-logged-in, etc.) whose postcondition is a real state landmark.
-    const _fragPostSkip = dropWeakInputPresence(_condList(fragment.postconditions));
-    if (!insideForeach && _fragPostSkip.length > 0) {
-      const preProbe = await TemplateWalker.checkConditions({ tabId, conditions: _fragPostSkip });
-      if (preProbe.ok) {
-        Logger.info('ExecutionEngine', `${displayName} — postconditions already hold; skipping`);
-        stepResults.push({
-          fragmentId: step.fragmentId, fragmentName: displayName,
-          skipped: true, success: true, actionsRun: 0, error: null,
-          skipReason: 'postconditions already satisfied',
-        });
-        emit({
-          type: 'fragment_skipped', stepIdx: topLevelIndex, totalSteps: topLevelTotal,
-          fragmentId: step.fragmentId, fragmentName: displayName,
-          message: `${displayName} — skipped (already done)`,
-        });
-        completedFragmentIds.add(step.fragmentId);
-        return { status: 'ok' };
-      }
-    }
+    // v2.74.785 — A DIRECT INVOCATION never skips on its EFFECT. A Fragment runs iff it was CALLED and its
+    // PRECONDITIONS hold (gated below); POSTCONDITIONS are the END signal — verified AFTER it runs — never a
+    // start-time gate. The retired "postconditions already hold → skip" pre-probe conflated "the effect is present"
+    // with "there is nothing to do", which made a parameterized action (a re-search) un-repeatable: its results /
+    // input are present from a PRIOR run, so it wrongly concluded "already done". Idempotency now lives where it
+    // belongs:
+    //   • resume within THIS invocation → `completedFragmentIds` (a step that already RAN this run is skipped in
+    //     TemplateWalker.executeFragment) — orthogonal to postconditions;
+    //   • prerequisite satisfaction ("don't re-login if already logged in") → the ANTECEDENT path
+    //     (TemplateWalker, Pass Cα), which legitimately checks "is this prereq met"; a DIRECT call does not;
+    //   • "nothing to act on" for a direct call → express it as a PRECONDITION (the target affordance is absent),
+    //     not as a postcondition.
+    // See docs/DESIGN_division_of_labor.md §6 (Observability / idempotency-is-a-precondition).
 
     emit({
       type: 'fragment_start', stepIdx: topLevelIndex, totalSteps: topLevelTotal,

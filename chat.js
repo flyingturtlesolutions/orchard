@@ -1001,28 +1001,31 @@ async function _orchTryGaps(msg, { tabId, groundId, gaps }) {
   }
 }
 
-async function _orchNlFallback(msg, { tabId, groundId, ask }) {
+async function _orchNlFallback(msg, { tabId, groundId, ask, onAuthored = null }) {
   _setMessageBody(msg, `Working out “${ask}” from the page…`);
   const res = await _orchReq('RUN_SG_TRIAL', { tabId, groundId, intent: ask, tier2: true });
   if (!res || res.success === false) {
     _setMessageBody(msg, `I couldn’t work out “${ask}”${res && res.error ? ` — ${res.error}` : ''}.`);
-    _orchOfferRecord(msg, { groundId, tabId, ask, label: '● Show me the right way' });
+    _orchOfferRecord(msg, { groundId, tabId, ask, label: '● Show me the right way', onAuthored });
     return false;
   }
   const passed = !!(res.tier2Score && res.tier2Score.verdict === 'tier2-pass' && res.acceptEligible);
   if (!passed) {
     _setMessageBody(msg, `I tried, but couldn’t confirm “${ask}” worked here — want to show me?`);
-    _orchOfferRecord(msg, { groundId, tabId, ask, label: '● Show me the right way' });
+    _orchOfferRecord(msg, { groundId, tabId, ask, label: '● Show me the right way', onAuthored });
     return false;
   }
   // Verified pass → PROMOTE to a durable capability (cache fill) + seed the alias so the next ask is instant.
   let saved = '';
+  let capId = null;
   try {
     const acc = await _orchReq('ACCEPT_SG_TRIAL', { groundId, tabId });
-    const capId = acc && acc.success && acc.accepted && ((acc.capability && acc.capability.id) || acc.capabilityId);
+    capId = acc && acc.success && acc.accepted && ((acc.capability && acc.capability.id) || acc.capabilityId);
     if (capId) { _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId: capId, phrase: ask }); saved = ' — saved for next time'; }
   } catch { /* */ }
   _setMessageBody(msg, `Done — worked out “${ask}” from the page${saved}.`);
+  // A caller (e.g. the cross-Ground gap→teach flow) folds back here once a Strategy is authored on this Ground.
+  if (typeof onAuthored === 'function' && capId) { try { onAuthored({ capabilityId: capId, groundId, ask, via: 'trial' }); } catch { /* */ } }
   return true;
 }
 
@@ -1329,10 +1332,22 @@ function _orchOfferWorkflow(msg, { ask, res }) {
   if (res && res.runnable && wf.id) {
     bar.appendChild(_mkBtn('▶ Run it', () => { bar.remove(); _orchRunWorkflow(appendMessage({ role: 'assistant', body: '' }), { workflow: wf, ask }); }));
     bar.appendChild(_mkBtn('🔖 Save for later', () => { bar.remove(); _orchSaveWorkflow(appendMessage({ role: 'assistant', body: '' }), { workflow: wf }); }));
-  } else {
-    // Non-runnable: the gaps above say exactly what to teach. Acknowledge; teaching happens on each site’s page.
-    bar.appendChild(_mkBtn('Got it', () => { bar.remove(); }));
+    return;
   }
+  // Not runnable → each AUTHOR-STRATEGY gap becomes a "teach it on that site" action (Q3 gap→capture): teaching the
+  // Strategy there, then folding back, can make the workflow runnable. A RESOLVE-GROUND gap (no site) stays text.
+  const subById = new Map(resolved.map((r) => [r && r.id, r]));
+  let taught = 0;
+  for (const p of repairs) {
+    if (!p || p.kind !== 'author-strategy' || !p.groundId) continue;
+    const sub = subById.get(p.subIntentId);
+    const groundUrl = sub && sub.groundUrl;
+    if (!groundUrl) continue;   // no entry url → can’t open the site; the repair stays guidance text above
+    taught++;
+    bar.appendChild(_mkBtn(`● Teach “${(p.clause || 'this').slice(0, 32)}” on ${p.groundName || 'that site'}`,
+      () => _orchTeachGap(appendMessage({ role: 'assistant', body: '' }), { groundId: p.groundId, groundName: p.groundName, groundUrl, clause: p.clause, ask })));
+  }
+  bar.appendChild(_mkBtn(taught ? 'Not now' : 'Got it', () => { bar.remove(); }));
 }
 
 // SAVE the previewed Workflow (the exact record shown — no re-decompose), so it can be re-run anytime.
@@ -1371,6 +1386,55 @@ async function _orchRunWorkflow(msg, { workflow, ask }) {
   }
   const n = Array.isArray(workflow.groundIds) ? workflow.groundIds.length : 0;
   _setMessageBody(msg, `Done — ran “${workflow.name || ask || 'the workflow'}”${n ? ` across ${n} site${n === 1 ? '' : 's'}` : ''}.`);
+}
+
+// Resolve once the new tab finishes loading (so a trial doesn't fire on a blank page). Proceeds anyway after a cap.
+function _orchWaitTabReady(tabId, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const tick = () => {
+      try {
+        chrome.tabs.get(tabId, (t) => {
+          if (chrome.runtime.lastError || !t) return resolve(false);
+          if (t.status === 'complete') return resolve(true);
+          if (Date.now() - start > timeoutMs) return resolve(true);
+          setTimeout(tick, 300);
+        });
+      } catch { resolve(false); }
+    };
+    tick();
+  });
+}
+
+// Q3 gap→capture — TEACH the missing Strategy on its own Ground, then FOLD BACK into the cross-site workflow.
+// Opens the gap's site in a new tab, tries to synthesize the capability from the page (NL-trial), and falls back to
+// "show me" (manual demo). EITHER success path fires onAuthored → re-comprehends the ORIGINAL ask so the freshly
+// authored Strategy closes the gap and the workflow re-renders (now bound, maybe runnable). A manual ↻ button is the
+// safety net for a demo the user finishes later.
+async function _orchTeachGap(msg, { groundId, groundName, groundUrl, clause, ask }) {
+  _setMessageBody(msg, `Opening ${groundName || 'the site'} to learn “${clause}”…`);
+  let tab = null;
+  try { tab = await chrome.tabs.create({ url: groundUrl, active: true }); } catch { /* */ }
+  if (!tab || typeof tab.id !== 'number') { _setMessageBody(msg, `Couldn’t open ${groundName || 'that site'}.`); return; }
+  await _orchWaitTabReady(tab.id);
+  _setMessageBody(msg, `On ${groundName || 'the site'} — learning “${clause}”. I’ll re-check the workflow once it’s saved.`);
+  const recheck = () => _orchRecheckWorkflow(ask, groundName, clause);
+  // NL-trial first (synthesize from the page); on failure it offers manual record. Both author-paths fold back.
+  await _orchNlFallback(appendMessage({ role: 'assistant', body: '' }), { tabId: tab.id, groundId, ask: clause, onAuthored: recheck });
+  const bar = _orchActionBar(msg);
+  bar.appendChild(_mkBtn('↻ Re-check workflow', () => { bar.remove(); recheck(); }));
+}
+
+// Re-comprehend the original cross-site ask after a gap was taught; render the updated card. The new Strategy is now
+// in the catalog, so the previously-⚠ step should bind. PURE re-run of COMPREHEND_CROSS_GROUND (save:false preview).
+async function _orchRecheckWorkflow(ask, groundName = '', clause = '') {
+  const msg = appendMessage({ role: 'assistant', body: 'Re-checking the workflow…' });
+  const cg = await _orchReq('COMPREHEND_CROSS_GROUND', { ask });
+  if (!cg || cg.success === false) { _setMessageBody(msg, `Couldn’t re-check${cg && cg.error ? ` — ${cg.error}` : ''}.`); return; }
+  const stillGaps = Array.isArray(cg.repairs) && cg.repairs.length > 0;
+  const head = clause ? `Learned “${clause}”${groundName ? ` on ${groundName}` : ''}. ` : '';
+  _setMessageBody(msg, head + (cg.runnable ? 'The workflow’s ready now.' : (stillGaps ? 'One step still needs teaching:' : 'Here’s the updated plan:')));
+  _orchOfferWorkflow(appendMessage({ role: 'assistant', body: '' }), { ask, res: cg });
 }
 
 // Conversational fillers are never page tasks — skip the grounded matcher so "yes"/"ok" don't match a capability.
