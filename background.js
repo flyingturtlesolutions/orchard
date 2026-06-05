@@ -1869,6 +1869,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             // 'ground-view' = back to the Ground sidepanel; otherwise
             // exitToStudio is used (the original behavior).
             returnTo = null,
+            // v2.74.774 — Carry the saved pre/post conditions into the editor on a re-walk / pencil-edit. The SEND
+            // side was fixed in v2.74.185 (ground-view.js) but THIS relay never destructured or forwarded the
+            // fields, so they were silently dropped before the fragment-author mode ever saw them — the editor
+            // opened with an empty condition list (and pre-771 auto-captured phantoms over the saved record). The
+            // 769/771 hydration locks were written to CONSUME exactly these. Mirrors BEGIN_OBSERVATION_AUTHOR
+            // (v2.74.149), which already forwards them.
+            prefilledPreconditions  = null,
+            prefilledPostconditions = null,
           } = payload ?? {};
           // v2.72.62 — T1 authors name+description IN the sidepanel mode,
           // so the form sends empty strings. Don't validate them here.
@@ -1903,6 +1911,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             existingTabId,
             setupPhase: antecedentFragmentId ? 'antecedent' : 'opening',
             returnTo,
+            // v2.74.774 — Forward the saved conditions so the 769/771 hydration locks load them (see destructure).
+            prefilledPreconditions,
+            prefilledPostconditions,
           });
 
           // v2.72.62 — Use TemplateWalker.prepareTabForAuthoring. This

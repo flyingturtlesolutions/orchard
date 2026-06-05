@@ -2,8 +2,9 @@
 // (Node 16 has no `node --test`; this is a plain assert script.)
 import assert from 'node:assert';
 import {
-  canAccept, buildLandmarkRecords, buildPerspectiveRecord, buildPerspectivePredicates, buildResultsLandmarkRecord, buildOutcomePerspective, buildCapabilityAcceptance,
+  canAccept, buildLandmarkRecords, buildPerspectiveRecord, buildPerspectivePredicates, buildResultsLandmarkRecord, buildOutcomePerspective, findMatchingPerspective, buildCapabilityAcceptance,
   buildTrialTrace, buildAcceptance, landmarkRefActions, buildParamSchema, buildTerminalDescriptor,
+  buildPerspectiveGate, buildDestinationPerspective, pickDestinationLandmark,
   mintCapabilityId, mintLandmarkUid, mintPerspectiveId, ACCEPT_SCHEMA,
 } from './accept.js';
 
@@ -138,6 +139,50 @@ test('buildOutcomePerspective — a distinct outcome perspective + a perspective
   // and the outcome perspective carries a b3 activation predicate (urlMatches scope ∧ landmarkExists results)
   assert.ok(Array.isArray(r.perspective.predicates) && r.perspective.predicates.length === 1);
   assert.equal(buildOutcomePerspective({ intent: 'x', groundId: 'g' }), null, 'no results uid → null');
+});
+
+test('findMatchingPerspective — reuse a perspective with the SAME landmark set on the same page (intent-agnostic dedup)', () => {
+  const existing = [
+    { id: 'persp_A', localeUrl: 'https://x.com/jobs', landmarkRefs: ['l1', 'l2', 'l3'], name: 'search jobs by title · landmarks' },
+    { id: 'persp_B', localeUrl: 'https://x.com/other', landmarkRefs: ['l1', 'l2', 'l3'] },                 // wrong page
+    { id: 'persp_C', localeUrl: 'https://x.com/jobs', landmarkRefs: ['l1', 'l2'] },                        // different set
+    { id: 'persp_D', localeUrl: 'https://x.com/jobs', landmarkRefs: ['l1', 'l2', 'l3'], lifecycle: 'deprecated' }, // deprecated
+  ];
+  // a re-phrased intent ("by keyword") with the SAME landmark set + same page (query noise, different order) → reuse A
+  const m = findMatchingPerspective(existing, { localeUrl: 'https://x.com/jobs?q=writer&vjk=abc', landmarkUids: ['l3', 'l1', 'l2'] });
+  assert.equal(m?.id, 'persp_A', 'matched by substrate (page + landmark set), independent of intent/query/order');
+  assert.equal(findMatchingPerspective(existing, { localeUrl: 'https://x.com/jobs', landmarkUids: ['l1', 'l9'] }), null, 'different landmark set → no reuse → mint new');
+  assert.equal(findMatchingPerspective(existing, { localeUrl: 'https://x.com/jobs', landmarkUids: [] }), null, 'no substrate to match on → null');
+});
+
+test('buildPerspectiveGate — a NON-FATAL advisory perspective_ref precondition (b6a)', () => {
+  const g = buildPerspectiveGate('persp_sg_abc');
+  assert.deepEqual(g, [{ type: 'perspective_ref', perspectiveId: 'persp_sg_abc', advisory: true }], 'advisory perspective_ref array (one predicate, three consumers — gated non-fatally via isPerspectiveActive)');
+  assert.deepEqual(buildPerspectiveGate(''), [], 'no perspective → empty (preconditions stay empty, back-compat)');
+  assert.deepEqual(buildPerspectiveGate(null), [], 'null → empty');
+  assert.deepEqual(buildPerspectiveGate('  '), [], 'blank → empty');
+});
+
+test('buildDestinationPerspective — a navigating fragment’s url_matches → a destination perspective_ref (b6b)', () => {
+  const r = buildDestinationPerspective({ intent: 'search jobs', groundId: 'g', destLocaleUrl: 'https://x.com/jobs?q=writer', destLandmarkUid: 'lmk_dest', discriminator: '2', acceptedAt: 1000 });
+  assert.deepEqual(r.perspective.landmarkRefs, ['lmk_dest'], 'destination perspective = the single arrival landmark');
+  assert.ok(/destination/.test(r.perspective.name), 'named as the destination perspective');
+  assert.equal(r.perspective.localeUrl, 'https://x.com/jobs', 'scoped to the canonical DESTINATION page (query noise stripped)');
+  assert.deepEqual(r.postcondition, { match: 'all', conditions: [{ type: 'perspective_ref', perspectiveId: r.perspective.id }], source: 'destination-perspective' }, 'postcondition = perspective_ref(destination), not url_matches');
+  assert.ok(Array.isArray(r.perspective.predicates) && r.perspective.predicates.length === 1, 'carries a b3 activation predicate (urlMatches(dest) ∧ landmarkExists(arrival))');
+  assert.equal(buildDestinationPerspective({ intent: 'x', groundId: 'g', destLocaleUrl: 'https://x/jobs' }), null, 'no destination landmark → null (caller keeps url_matches — the bootstrap rung)');
+});
+
+test('pickDestinationLandmark — first grounded landmark on the SAME destination page; null when ungrounded (b6b)', () => {
+  const existing = [
+    { id: 'p_home', localeUrl: 'https://x.com/',     landmarkRefs: ['l_search'] },                 // wrong (origin) page
+    { id: 'p_jobs', localeUrl: 'https://x.com/jobs',  landmarkRefs: ['l_results', 'l_filter'] },     // the destination
+    { id: 'p_dep',  localeUrl: 'https://x.com/jobs',  landmarkRefs: ['l_x'], lifecycle: 'deprecated' },
+  ];
+  assert.equal(pickDestinationLandmark(existing, 'https://x.com/jobs?q=writer&vjk=abc'), 'l_results', 'matches the destination page (query noise stripped) → its first landmark');
+  assert.equal(pickDestinationLandmark(existing, 'https://x.com/about'), null, 'destination not grounded → null (keep url_matches)');
+  assert.equal(pickDestinationLandmark([{ id: 'p', localeUrl: 'https://x.com/jobs', landmarkRefs: [] }], 'https://x.com/jobs'), null, 'grounded but landmark-less → null');
+  assert.equal(pickDestinationLandmark(existing, ''), null, 'no destination url → null');
 });
 
 // ── lean capability points at the saved entities (no flat binding) ──

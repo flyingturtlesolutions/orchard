@@ -12,15 +12,16 @@
 // current Ground; "everywhere / all grounds / globally" widens it to every Ground.
 //
 // @module Core/orchAdmin
-// @version 2.74.690
+// @version 2.74.773
 
 const _CLEAR_CHAT = /^\s*(?:please\s+)?(clear|reset|wipe)\s+(?:the\s+|this\s+)?(chat|conversation|messages|message history|history|screen|window|transcript)\b/i;
 const _DEL_VERB   = /\b(delete|remove|wipe|purge|drop|erase|nuke|clear)\b/i;
 
-// PLURAL artifact nouns only — a bulk command targets a class, not one item. "capabilities" ≈ strategies (the
-// user-facing capability is a Strategy with fragment steps).
+// PLURAL artifact nouns only — a bulk command targets a class, not one item. "capabilities" is the umbrella for
+// the ACTIONABLE capability kinds — a bare-T1 Fragment AND a multi-step Strategy (a user-facing capability can be
+// either, T1-as-first-class) — so it matches BOTH (not just strategies, which would skip every bare Fragment).
 const _KIND_PATTERNS = [
-  { kind: 'fragments',    re: /\bfragments\b/i },
+  { kind: 'fragments',    re: /\b(fragments|capabilities)\b/i },
   { kind: 'strategies',   re: /\b(strategies|capabilities)\b/i },
   { kind: 'observations', re: /\bobservations\b/i },
   { kind: 'perspectives', re: /\bperspectives\b/i },

@@ -22,7 +22,7 @@ describe('orchAdmin — parse admin/management commands (ORCH-ADMIN)', () => {
     assert.equal(f.scope, 'ground');
     assert.deepEqual(parseAdminCommand('delete all strategies').kinds, ['strategies']);
     assert.deepEqual(parseAdminCommand('remove all observations').kinds, ['observations']);
-    assert.deepEqual(parseAdminCommand('delete all capabilities').kinds, ['strategies'], 'capabilities ≈ strategies');
+    assert.deepEqual(parseAdminCommand('delete all capabilities').kinds, ['fragments', 'strategies'], 'capabilities = both actionable kinds (bare Fragment + multi-step Strategy), not just strategies');
   });
 
   it('scope widens to all grounds on "everywhere" / "all grounds"', () => {

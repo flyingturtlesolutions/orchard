@@ -171,6 +171,10 @@ export async function rewalkFragment(fragmentId) {
       antecedentFragmentId    : existing.antecedentFragmentId    ?? null,
       antecedentParamBindings : existing.antecedentParamBindings ?? null,
       prefilledActions,
+      // v2.74.774 — Carry saved pre/post conditions into the editor (parity with ground-view.js v2.74.185 + the
+      // BEGIN_FRAGMENT_AUTHOR relay forwarding). Without these the Studio ↻ re-walk opened with an empty list.
+      prefilledPreconditions  : Array.isArray(existing.preconditions)  ? existing.preconditions  : [],
+      prefilledPostconditions : Array.isArray(existing.postconditions) ? existing.postconditions : [],
       rewalkName       : existing.name,
       rewalkDescription: existing.description,
     },

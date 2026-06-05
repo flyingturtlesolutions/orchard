@@ -909,6 +909,21 @@ async function mount(payload, mountEl) {
     if (typeof _restoredState.anteRunMode === 'string')            _anteRunMode           = _restoredState.anteRunMode;
   }
 
+  // v2.74.771 — A REWALK / edit of a SAVED fragment keeps the saved CONDITIONS authoritative even across a
+  // suspend/resume. The init-hydration (769) runs only on a fresh open (!_restoredState); on resume the restore
+  // overlay above brings back whatever was last in module state (a prior auto-capture's PHANTOM preconditions +
+  // empty postconditions), NOT the saved record. So re-hydrate conditions from the payload for the rewalk flow,
+  // overriding the restore, and lock both sides so _capturePre/Postconditions can't clobber them.
+  {
+    const _pfPre  = Array.isArray(_payload?.prefilledPreconditions)  ? _payload.prefilledPreconditions  : null;
+    const _pfPost = Array.isArray(_payload?.prefilledPostconditions) ? _payload.prefilledPostconditions : null;
+    if (_payload?.isRewalk && (_pfPre !== null || _pfPost !== null)) {
+      if (_pfPre  !== null) { _preconditions  = _pfPre.map(c => ({ ...c }));  _preSource  = _pfPre.length  ? 'loaded from saved fragment' : 'saved fragment has no preconditions'; }
+      if (_pfPost !== null) { _postconditions = _pfPost.map(c => ({ ...c })); _postSource = _pfPost.length ? 'loaded from saved fragment' : 'saved fragment has no postconditions'; }
+      _preUserModified = true; _postUserModified = true;
+    }
+  }
+
   // v2.72.82 — Pre-populate action list on re-walk. The Studio
   // FragmentForm sends prefilledActions (parsed rawJson) when
   // re-walking. Each gets a fresh row id, verified=null (page state
@@ -5201,6 +5216,11 @@ function _hideWarning() {
  */
 async function _capturePreconditions() {
   if (!_payload) return;
+  // v2.74.771 — On a REWALK / edit of a SAVED fragment the saved record is authoritative — never auto-capture
+  // (or inherit) conditions over it. Auto-capture was injecting PHANTOM preconditions into the editor (a live
+  // url_matches with the raw query URL + a perspective_ref — the very FATAL all-landmarks gate b4 backed out)
+  // that don't match the saved []; the suspend/resume path bypassed the 769 init-lock. Manual + Add still works.
+  if (_payload.isRewalk) return;
   // v2.74.24 — Once the author has touched the preconditions list,
   // auto-capture stops overwriting it. Otherwise re-capturing after
   // an antecedent Run would silently undo the author's manual edits.
@@ -5293,6 +5313,8 @@ async function _capturePreconditions() {
  */
 async function _capturePostconditions() {
   if (!_payload) return;
+  // v2.74.771 — saved record is authoritative on a rewalk/edit; never auto-capture over it (see _capturePreconditions).
+  if (_payload.isRewalk) return;
   // v2.74.24 — Skip auto-capture once the author has manually edited
   // the postconditions list (mirrors the precondition path).
   if (_postUserModified) return;

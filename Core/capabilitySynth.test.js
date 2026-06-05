@@ -44,6 +44,14 @@ describe('buildTier2CapabilityRecords — multi-fragment capability (SG-T2-ACC)'
     assert.ok(r && r.fragment && r.strategy);
     assert.equal(r.strategy.fragmentSteps.length, 1);
     assert.ok(Array.isArray(r.fragment.preconditions) && Array.isArray(r.fragment.postconditions), 'conditions are ARRAYS, not envelopes');
+    assert.deepEqual(r.fragment.preconditions, [], 'no entryGate → empty preconditions (back-compat)');
+  });
+
+  it('b6a — buildCapabilityRecords gates the fragment when an entryGate is passed (SG-trial accept parity)', () => {
+    const gate = [{ type: 'perspective_ref', perspectiveId: 'persp_sg_y', advisory: true }];
+    const r = buildCapabilityRecords({ name: 'x', goal: 'x', actions: [{ action: 'CLICK', selector: '#a' }], params: [] }, { groundId: 'g', fragmentId: 'f', strategyId: 's', entryGate: gate });
+    assert.deepEqual(r.fragment.preconditions, gate, 'the promoted perspective gates the fragment (non-fatal advisory)');
+    assert.notEqual(r.fragment.preconditions, gate, 'sliced copy, not the caller reference');
   });
 });
 
@@ -107,10 +115,22 @@ describe('buildTier2CapabilityRecords — synthesis quality: description as inte
     assert.equal(r.strategy.fragmentSteps.length, 2);
   });
 
-  it('fragment preconditions stay EMPTY — a perspective_ref gate was backed out (fatal + all-landmarks; see b5)', () => {
+  it('no entryGate → preconditions stay EMPTY (back-compat: b4 fatal perspective_ref gate not re-introduced)', () => {
     const r = buildTier2CapabilityRecords([searchPhase, filterPhase], { groundId: 'g', strategyId: 's', fragmentIds: ['f1', 'f2'] });
     assert.deepEqual(r.fragments[0].preconditions, []);
     assert.deepEqual(r.fragments[1].preconditions, []);
+  });
+
+  it('b6a — an entryGate binds ONLY the entry fragment (non-fatal advisory perspective_ref); inner phases stay empty', () => {
+    const gate = [{ type: 'perspective_ref', perspectiveId: 'persp_sg_x', advisory: true }];
+    const r = buildTier2CapabilityRecords([searchPhase, filterPhase], { groundId: 'g', strategyId: 's', fragmentIds: ['f1', 'f2'], entryGate: gate });
+    assert.deepEqual(r.fragments[0].preconditions, gate, 'entry fragment carries the advisory perspective gate');
+    assert.deepEqual(r.fragments[1].preconditions, [], 'inner phases run post-transition → no entry gate');
+    // a COPY, not the caller's array (mutating the fragment must not mutate the source gate)
+    assert.notEqual(r.fragments[0].preconditions, gate, 'sliced copy, not the same reference');
+    // single-phase capability: the lone fragment IS the entry → it gets the gate
+    const one = prepareTier1or2Records([searchPhase], { groundId: 'g', strategyId: 's', fragmentIds: ['f1'], entryGate: gate });
+    assert.deepEqual(one.fragments[0].preconditions, gate, 'a bare T1 fragment carries the entry gate too');
   });
 
   it('a CLICK with no landmark name (landmarkRef only) → a readable selector hint, not "the control"', () => {

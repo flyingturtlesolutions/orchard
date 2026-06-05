@@ -135,7 +135,9 @@ question.
 | **b5a** | Promote the SPA settle-region to a **verified outcome Landmark** in the Perspective (`buildResultsLandmarkRecord`) — success state is now tracked substrate (monitor-visible), no fatal-condition change | **landed** v2.74.766 |
 | **b5b** | Recorder captures the swap region's **identity** (role + accessibleName + text, via `_obsExtract`), threaded through `node.settle`/`settleLandmark` → the outcome Landmark is **recoverable** (probe-or-recover by role+name), not selector-only | **landed** v2.74.767 |
 | **b5c** | A distinct **outcome Perspective** per in-place (SPA) phase (`buildOutcomePerspective`) + the fragment postcondition → `perspective_ref(outcome)` — the success check expressed as substrate, not a raw selector. Behaviourally ≡ the prior `selector_present` (1-landmark perspective_ref expands to it); the gain is a monitor-visible outcome perspective | **landed** v2.74.768 |
-| **b6** | (deferred, low value) a SAFE T1 substrate *gate* (non-fatal, or anchor-landmark); route the nav-URL edge fact to the owning T2 | pending |
+| **b6a** | A SAFE T1 substrate **precondition gate**: the entry fragment carries `[{type:'perspective_ref', perspectiveId, advisory:true}]` (`buildPerspectiveGate`), evaluated by `PreconditionGate` via **`isPerspectiveActive`** (the monitor's own `or`-over-landmarks predicate — drift-tolerant, fail-closed) and **NEVER fatal**. Sidesteps b4 entirely: the advisory path bypasses the `flattenAssertion` all-landmarks/fatal route, so the fragment↔perspective link is restored without converting working caps into gate failures. Both accept paths (demonstration + SG-trial) gate uniformly. | **landed** v2.74.775 |
+| **b6b** | A navigating fragment's `url_matches` postcondition → a **destination perspective** `perspective_ref` when the destination page is already grounded (`pickDestinationLandmark` + `buildDestinationPerspective`): the success "reached a new node" expressed as substrate (monitor-visible), not an edge URL. Ungrounded destination keeps `url_matches` (the honest bootstrap rung). | **landed** v2.74.775 |
+| **b6c** | Recorder captures a stable **landing landmark** after a navigation settles, so a pure nav-to-ungrounded-page fragment (no post-nav substrate) can also get a destination `perspective_ref` (today it stays `url_matches`). The recorder identity-capture b5b/b6b "wait on". | pending |
 
 > **Why postconditions can't just become `perspective_ref`:** a failed postcondition is also FATAL
 > (`ExecutionEngine` "fail the whole Strategy if any fragment's postconditions fail"), and `perspective_ref`
@@ -158,9 +160,13 @@ converting working capabilities into gate failures. Since preconditions were emp
 regression. The perspective is *still* the monitorable condition (b3, via `isPerspectiveActive`, which is read-only
 with graceful fallbacks — over-strictness there is harmless); only the **fatal fragment gate** is deferred.
 
-**b5** should wire the gate with the right semantics: a **non-fatal** advisory check, OR reference only the
-fragment's **anchor** landmark (present before acting) rather than all of them — and add the postcondition→OUTCOME-
-perspective half (results region promoted to a registry landmark; the nav-URL edge fact routed to the owning T2).
+**b6a (landed, v2.74.775)** wired the gate with the right semantics — the **non-fatal advisory** option: the entry
+fragment carries `perspective_ref(P, advisory:true)`, which `PreconditionGate` evaluates via `isPerspectiveActive`
+(the perspective's own `and(urlMatches, or(landmarkExists…))` predicate) and which can only WARN, never abort. This
+is the "one predicate, three consumers" convergence — the gate reads the same predicate the monitor does, instead
+of the fatal `flattenAssertion` all-landmarks route. **b6b (landed)** added the postcondition→destination-perspective
+half for grounded nav destinations; the nav-URL fact is retained only as the bootstrap rung for ungrounded targets
+(to be closed by **b6c**, recorder landing-landmark capture).
 
 ## 7. Open decisions
 

@@ -204,6 +204,68 @@ export function buildOutcomePerspective({ intent, groundId = '', localeUrl = '',
 }
 
 /**
+ * b6a (v2.74.775) — the NON-FATAL substrate PRECONDITION for a Fragment: a `perspective_ref` to the entry
+ * perspective, tagged `advisory:true`. PURE. This is the SAFE gate b4 was missing. b4's perspective_ref
+ * precondition was backed out because it was evaluated FATALLY and flattened (Assertion.flattenAssertion) to
+ * "ALL the perspective's landmarks present" — which blocks any multi-fragment capability (landmarks span pages)
+ * and any render-on-open reveal. The advisory gate is evaluated INSTEAD by PreconditionGate via
+ * `isPerspectiveActive` — the SAME predicate the monitor reads: `and(urlMatches, or(landmarkExists…))`, an OR
+ * over landmarks (drift-tolerant) that is fail-closed and NEVER aborts the run; a miss surfaces as an advisory
+ * the monitor + editor can read. This is the "one predicate, three consumers" convergence: the gate now reads
+ * the perspective's own predicate rather than inventing a fatal all-landmarks check. ARRAY shape (the runtime +
+ * editor read fragment conditions as arrays). Returns [] when no perspective is bound (preconditions stay empty).
+ * @param {string} perspectiveId
+ * @returns {Array<object>}
+ */
+export function buildPerspectiveGate(perspectiveId) {
+  const id = (typeof perspectiveId === 'string' && perspectiveId.trim()) ? perspectiveId.trim() : '';
+  return id ? [{ type: 'perspective_ref', perspectiveId: id, advisory: true }] : [];
+}
+
+/**
+ * b6b (v2.74.775) — build the DESTINATION perspective for a NAVIGATING Fragment, plus the fragment postcondition
+ * that points at it. PURE. A navigating fragment's success is reaching a new NODE (page); the legacy device
+ * asserts it as `url_matches` on the destination path — an EDGE fact mis-applied as a node postcondition
+ * (DESIGN_t1_condition_model §1). This expresses the same success as SUBSTRATE: a `perspective_ref` to a
+ * destination perspective whose single landmark asserts "we reached the destination page-state" (monitor-visible,
+ * self-healing-eligible). Mirrors buildOutcomePerspective; `destLandmarkUid` is a grounded landmark ON the
+ * destination locale (sourced from the destination's existing grounded perspective — pickDestinationLandmark).
+ * Returns null without one (caller keeps `url_matches` — the bootstrap rung — until the destination is grounded
+ * or captured, b6c).
+ * @returns {{perspective:object, postcondition:object}|null}
+ */
+export function buildDestinationPerspective({ intent, groundId = '', destLocaleUrl = '', destLandmarkUid, discriminator = '', acceptedAt = Date.now() } = {}) {
+  if (!destLandmarkUid) return null;
+  const base = (String(intent || '').trim()) || 'capability';
+  const outIntent = `${base} · destination${discriminator ? ` · ${discriminator}` : ''}`.slice(0, 80);
+  const perspective = buildPerspectiveRecord({ intent: outIntent, name: `${base} · destination`, spec: { shape: 'observed', target: outIntent }, groundId, localeUrl: destLocaleUrl, landmarkUids: [destLandmarkUid], acceptedAt });
+  const postcondition = { match: 'all', conditions: [{ type: 'perspective_ref', perspectiveId: perspective.id }], source: 'destination-perspective' };
+  return { perspective, postcondition };
+}
+
+/**
+ * b6b (v2.74.775) — choose a grounded landmark ON the destination page to anchor a navigating fragment's
+ * destination perspective. PURE. Scans existing perspectives for one on the SAME canonical page (origin+pathname)
+ * as `destLocaleUrl` that carries ≥1 landmark, and returns its first landmarkRef — a landmark Explore/authoring
+ * already grounded on the destination, so "it is present" is a real "we arrived" signal (no new capture needed).
+ * Returns null when the destination isn't grounded yet (caller keeps url_matches). Skips deprecated perspectives.
+ * @param {object[]} existing  perspectives on the ground (StorageManager.listPerspectives)
+ * @param {string} destLocaleUrl  the navigation destination url
+ * @returns {string|null}
+ */
+export function pickDestinationLandmark(existing, destLocaleUrl) {
+  const scope = _urlScopePattern(destLocaleUrl);
+  if (!scope) return null;
+  for (const p of (Array.isArray(existing) ? existing : [])) {
+    if (!p || p.lifecycle === 'deprecated') continue;
+    if (_urlScopePattern(p.localeUrl) !== scope) continue;   // must be the SAME destination page
+    const refs = (Array.isArray(p.landmarkRefs) ? p.landmarkRefs : []).filter(Boolean);
+    if (refs.length) return refs[0];
+  }
+  return null;
+}
+
+/**
  * Build the Perspective record (the intent-scoped composition over the promoted landmarks). PURE.
  * Saved via StorageManager.savePerspective; #withPerspectiveComposition derives the landmark nodes from
  * landmarkRefs. authoredBy:'model' marks it as automated (vs. human-picked). b3 — carries an activation
@@ -227,6 +289,30 @@ export function buildPerspectiveRecord({ intent, name = null, spec = {}, groundI
     localeUrl: _urlScopePattern(localeUrl) || '',   // canonical PAGE (origin+pathname) — the page-archetype scope, not a query instance
     source: 'sg-accept',
   };
+}
+
+/**
+ * v2.74.772 — qualify a proto-perspective against EXISTING perspectives on the same locale, to dedup by SUBSTRATE
+ * instead of the (volatile, LLM-phrased) intent string. A Perspective IS the landmark SELECTION on a page
+ * (GROUND_SPEC §3), so an existing perspective on the SAME canonical page (origin+pathname) with the SAME landmark
+ * SET is the same perspective — reuse it. ("Search jobs by title" and "…by keyword" select identical landmarks →
+ * ONE perspective, not two.) The intent becomes a label, not the identity key. PURE. Returns the matching
+ * perspective (caller reuses its id) or null. Exact-set match for now; overlap tolerance is a future refinement.
+ * @param {object[]} existing  perspectives on the ground (StorageManager.listPerspectives)
+ * @param {{localeUrl?:string, landmarkUids?:string[]}} proto
+ * @returns {object|null}
+ */
+export function findMatchingPerspective(existing, { localeUrl = '', landmarkUids = [] } = {}) {
+  const scope = _urlScopePattern(localeUrl);
+  const wanted = new Set((Array.isArray(landmarkUids) ? landmarkUids : []).filter(Boolean));
+  if (!scope || wanted.size === 0) return null;   // no page or no substrate to match on → can't qualify
+  for (const p of (Array.isArray(existing) ? existing : [])) {
+    if (!p || p.lifecycle === 'deprecated') continue;
+    if (_urlScopePattern(p.localeUrl) !== scope) continue;   // must be the SAME page
+    const have = new Set((Array.isArray(p.landmarkRefs) ? p.landmarkRefs : []).filter(Boolean));
+    if (have.size === wanted.size && [...wanted].every((u) => have.has(u))) return p;   // identical landmark SET
+  }
+  return null;
 }
 
 // Lean replay binding: each bound role's durable selector + kind/fieldType + its recoverable landmark.

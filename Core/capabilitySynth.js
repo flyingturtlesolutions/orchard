@@ -14,7 +14,7 @@
 // PURE: no DOM / chrome / storage / id-minting (the persistence slice mints ids + saves).
 //
 // @module Core/capabilitySynth
-// @version 2.74.661
+// @version 2.74.775
 
 /** Feature kinds that FILL a value (typed first), vs ACT (clicked after). */
 const _FILL_KINDS = new Set(['input']);
@@ -129,7 +129,7 @@ export function synthesizeCapabilityDraft(goal, locale, { groundId = null, url =
  * @param {{groundId:string, fragmentId:string, strategyId:string}} ids
  * @returns {{ fragment:object, strategy:object } | null}
  */
-export function buildCapabilityRecords(draft, { groundId, fragmentId, strategyId } = {}) {
+export function buildCapabilityRecords(draft, { groundId, fragmentId, strategyId, entryGate } = {}) {
   if (!draft || !groundId || !fragmentId || !strategyId) return null;
   const now = Date.now();
   const paramNames = (Array.isArray(draft.params) ? draft.params : []).map((p) => p.name);
@@ -141,7 +141,9 @@ export function buildCapabilityRecords(draft, { groundId, fragmentId, strategyId
     description: draft.goal || '',
     rawJson: JSON.stringify(Array.isArray(draft.actions) ? draft.actions : []),
     params: paramNames,
-    preconditions: [],    // ARRAY shape — the runtime reads fragment conditions as arrays (an envelope is silently skipped)
+    // b6a — the NON-FATAL substrate gate (advisory perspective_ref) when the caller binds one; [] otherwise (the
+    // SG-trial accept passes buildPerspectiveGate(perspective.id)). ARRAY shape — the runtime reads conditions as arrays.
+    preconditions: Array.isArray(entryGate) ? entryGate.slice() : [],
     postconditions: [],
     healthStatus: 'untested',
     lastExecutedAt: null,
@@ -255,7 +257,7 @@ function _conditionsArray(envelopeOrArray) {
   return [];
 }
 
-export function buildTier2CapabilityRecords(phases, { groundId, strategyId, fragmentIds, name, goal, now, params } = {}) {
+export function buildTier2CapabilityRecords(phases, { groundId, strategyId, fragmentIds, name, goal, now, params, entryGate } = {}) {
   const ph = Array.isArray(phases) ? phases.filter((p) => p && Array.isArray(p.actions) && p.actions.length) : [];
   if (!ph.length || !groundId || !strategyId || !Array.isArray(fragmentIds) || fragmentIds.length < ph.length) return null;
   const ts = Number.isFinite(now) ? now : Date.now();
@@ -280,13 +282,15 @@ export function buildTier2CapabilityRecords(phases, { groundId, strategyId, frag
       description: _describeFragmentActions(ph[i].label, ph[i].actions),   // an expression of intent, not the bare label
       rawJson,
       params: [...names],
-      // Preconditions stay EMPTY for now. A substrate gate via perspective_ref(P) was prototyped (b4) but backed
-      // out: perspective_ref expands to "ALL the perspective's landmarks present" and PreconditionGate failure is
-      // FATAL, so it blocks any multi-fragment capability (landmarks span pages) and any render-on-open reveal —
-      // converting working capabilities into gate failures. The perspective is still the monitorable condition
-      // (b3, via isPerspectiveActive, which is non-fatal); the FRAGMENT gate is deferred to b5 (anchor-landmark or
-      // non-fatal eval). ARRAY shape — the runtime + editor read fragment conditions as arrays.
-      preconditions: [],
+      // b6a (v2.74.775) — the ENTRY fragment carries a NON-FATAL substrate gate: a perspective_ref(entry) tagged
+      // advisory:true (Core/accept.buildPerspectiveGate, passed in as `entryGate`). b4's fatal perspective_ref was
+      // backed out because it flattened to "ALL landmarks present" and PreconditionGate failure is FATAL — blocking
+      // multi-fragment caps + render-on-open reveals. The advisory gate is evaluated by isPerspectiveActive (the
+      // monitor's own or-over-landmarks predicate, drift-tolerant, fail-closed) and NEVER aborts — it only warns,
+      // so the perspective becomes the fragment's visible, monitorable precondition without the b4 brittleness.
+      // Only the FIRST fragment gates (it owns the capability's entry page); inner phases run post-transition.
+      // ARRAY shape — the runtime + editor read fragment conditions as arrays.
+      preconditions: (i === 0 && Array.isArray(entryGate)) ? entryGate.slice() : [],
       postconditions: _conditionsArray(ph[i].postcondition),   // SG-T2-2/5 — carry the phase's success predicate(s) (was dropped)
       healthStatus: 'untested', lastExecutedAt: null, synthesized: true,
       createdAt: ts, updatedAt: ts,
@@ -315,8 +319,8 @@ export function buildTier2CapabilityRecords(phases, { groundId, strategyId, frag
  * (the demo path has an LLM-polished name); `aliases` (optional) ride onto the Strategy in the ≥2-phase case.
  * @returns {{ok:boolean, error?:string, isSingleT1?:boolean, fragments?:object[], strategy?:(object|null)}}
  */
-export function prepareTier1or2Records(phases, { groundId, strategyId, fragmentIds, name, goal, params, now, aliases, fragmentName, fragmentDescription } = {}) {
-  const recs = buildTier2CapabilityRecords(phases, { groundId, strategyId, fragmentIds, name, goal, params, now });
+export function prepareTier1or2Records(phases, { groundId, strategyId, fragmentIds, name, goal, params, now, aliases, fragmentName, fragmentDescription, entryGate } = {}) {
+  const recs = buildTier2CapabilityRecords(phases, { groundId, strategyId, fragmentIds, name, goal, params, now, entryGate });
   if (!recs) return { ok: false, error: 'could not assemble capability records' };
   const isSingleT1 = recs.fragments.length === 1;
   if (isSingleT1) {

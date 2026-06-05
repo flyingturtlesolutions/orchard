@@ -15,7 +15,7 @@ import { coverComplete } from '../../Core/cover.js';
 import { selectionToTrialRoles } from '../../Core/bind.js';
 import { lowerToTier2, orderForRun, scoreTier2 } from '../../Core/tier2Lower.js';
 import { evaluatePostcondition } from '../../Core/postcondition.js';
-import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord, buildResultsLandmarkRecord, buildOutcomePerspective } from '../../Core/accept.js';
+import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord, buildResultsLandmarkRecord, buildOutcomePerspective, findMatchingPerspective, buildPerspectiveGate, buildDestinationPerspective, pickDestinationLandmark } from '../../Core/accept.js';
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
@@ -60,13 +60,14 @@ function _observeMessageForExtract(ex) {
 // (a single page-state-bounded phase → a bare Fragment; ≥2 → a Strategy) and the save logic can't drift between
 // them. Mints the ids, shapes the records via the pure prepareTier1or2Records, saves the fragment(s) + (only for
 // ≥2 phases) the strategy. Returns the ids the caller needs to build the sgCapability (fragmentId vs strategyId).
-async function persistTier1or2(phases, { groundId, name, goal, params = null, aliases = null, fragmentName = null, fragmentDescription = null } = {}) {
+async function persistTier1or2(phases, { groundId, name, goal, params = null, aliases = null, fragmentName = null, fragmentDescription = null, entryGate = null } = {}) {
   const strategyId = crypto.randomUUID();
   const fragmentIds = (Array.isArray(phases) ? phases : []).map(() => crypto.randomUUID());
   const prep = CapabilitySynth.prepareTier1or2Records(phases, {
     groundId, strategyId, fragmentIds, name, goal,
     ...(params ? { params } : {}), ...(aliases ? { aliases } : {}),
     ...(fragmentName ? { fragmentName } : {}), ...(fragmentDescription ? { fragmentDescription } : {}),
+    ...(entryGate ? { entryGate } : {}),   // b6a — non-fatal perspective gate on the entry fragment
   });
   if (!prep.ok) return { ok: false, reason: prep.error };
   for (const f of prep.fragments) { try { await StorageManager.saveFragment(f); } catch (e) { Logger.warn('background', `persistTier1or2 saveFragment failed: ${e.message}`); } }
@@ -331,7 +332,8 @@ export function createSgMessageHandlers(ctx) {
             const fragmentId = crypto.randomUUID();
             const strategyId = crypto.randomUUID();
             const steps = landmarkRefActions(dr.actions, groundId, draft.localeUrl || '');
-            const recs = CapabilitySynth.buildCapabilityRecords({ ...dr, actions: steps, name: built.perspective.name }, { groundId, fragmentId, strategyId });
+            // b6a — gate the fragment on its promoted perspective (non-fatal advisory perspective_ref), uniform with the demonstration path.
+            const recs = CapabilitySynth.buildCapabilityRecords({ ...dr, actions: steps, name: built.perspective.name }, { groundId, fragmentId, strategyId, entryGate: buildPerspectiveGate(built.perspective.id) });
             if (recs) {
               await StorageManager.saveFragment(recs.fragment);
               await StorageManager.saveStrategy(recs.strategy);
@@ -444,10 +446,24 @@ export function createSgMessageHandlers(ctx) {
         let seedAliases = [];
         for (const a of (described && Array.isArray(described.aliases) ? described.aliases : [])) seedAliases = accreteAlias(seedAliases, a, { intent: capName });
         const localeUrl = (trace.find((a) => a && a.url) || {}).url || '';
-        // OBS-3c — compose the derived landmarks into a PERSPECTIVE (the intent-scoped grouping the library
-        // shows), authoredBy:'model', exactly like the NL-path ACCEPT. The capability links it.
-        const perspective = buildPerspectiveRecord({ intent: capName, spec: { shape: 'observed', target: capName }, groundId, localeUrl, landmarkUids: [...seenUid] });
-        try { await StorageManager.savePerspective(perspective); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED savePerspective failed: ${e.message}`); }
+        const protoLandmarkUids = [...seenUid];
+        // OBS-3c / dedup (v2.74.772) — compose the derived landmarks into a PERSPECTIVE (the intent-scoped grouping
+        // the library shows). QUALIFY against existing perspectives ON THIS LOCALE first: a Perspective IS the
+        // landmark SELECTION (GROUND_SPEC §3), so an existing one on the same page with the SAME landmark set IS
+        // this perspective — reuse it instead of forking on the (volatile, LLM-phrased) intent ("by title" vs "by
+        // keyword"). The intent is a LABEL; the substrate is the identity.
+        let existingPersps = [];
+        try { existingPersps = await StorageManager.listPerspectives(groundId); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED listPerspectives failed: ${e.message}`); }
+        const matchedPersp = findMatchingPerspective(existingPersps, { localeUrl, landmarkUids: protoLandmarkUids });
+        let perspectiveId;
+        if (matchedPersp) {
+          perspectiveId = matchedPersp.id;
+          Logger.info('background', `DERIVE_OBSERVED — reusing perspective ${matchedPersp.id} ("${matchedPersp.name}") — same ${protoLandmarkUids.length}-landmark selection on this page; "${capName}" is a re-phrasing of its intent`);
+        } else {
+          const perspective = buildPerspectiveRecord({ intent: capName, spec: { shape: 'observed', target: capName }, groundId, localeUrl, landmarkUids: protoLandmarkUids });
+          try { await StorageManager.savePerspective(perspective); } catch (e) { Logger.warn('background', `DERIVE_OBSERVED savePerspective failed: ${e.message}`); }
+          perspectiveId = perspective.id;
+        }
         // b5c (v2.74.768) — give each IN-PLACE (SPA) phase a distinct OUTCOME Perspective (its results region) and
         // point the fragment's postcondition at perspective_ref(it): the success check expressed as substrate, not a
         // raw selector. perspective_ref over a single results landmark expands to selector_present on that selector,
@@ -461,27 +477,51 @@ export function createSgMessageHandlers(ctx) {
           try { await StorageManager.savePerspective(out.perspective); rp.postcondition = out.postcondition; }
           catch (e) { Logger.warn('background', `DERIVE_OBSERVED outcome perspective save failed: ${e.message}`); }
         }
+        // b6b (v2.74.775) — a NAVIGATING phase's success is reaching a new page (a NODE); derivePhasePostcondition
+        // expressed that as url_matches on the destination path — an EDGE fact mis-applied as a node postcondition.
+        // When the DESTINATION page is already GROUNDED (an existing perspective there carries a landmark), express
+        // the success as SUBSTRATE instead: a perspective_ref to a destination perspective (monitor-visible, self-
+        // healing). Ungrounded destination → keep url_matches (the bootstrap rung) until the page is grounded or the
+        // recorder captures a landing landmark (b6c). SPA phases (outcomeUid) already switched above — skip them.
+        for (let i = 0; i < runPhases.length; i++) {
+          const rp = runPhases[i];
+          if (!rp || rp.outcomeUid) continue;
+          if (!rp.to || !rp.postcondition || rp.postcondition.source !== 'url-nav') continue;
+          const destUid = pickDestinationLandmark(existingPersps, rp.to);
+          if (!destUid) continue;   // destination not grounded yet → keep url_matches
+          const dest = buildDestinationPerspective({ intent: capName, groundId, destLocaleUrl: rp.to, destLandmarkUid: destUid, discriminator: String(i) });
+          if (!dest) continue;
+          try {
+            await StorageManager.savePerspective(dest.perspective);
+            rp.postcondition = dest.postcondition;
+            Logger.info('background', `DERIVE_OBSERVED — nav phase ${i} postcondition → destination perspective ${dest.perspective.id} (was url_matches on ${rp.to})`);
+          } catch (e) { Logger.warn('background', `DERIVE_OBSERVED destination perspective save failed: ${e.message}`); }
+        }
         // T1-as-first-class taxonomy fix — a demonstration that segments to a SINGLE page-state-bounded phase is
         // one Fragment, NOT a Strategy (same rule as the SG-trial accept). ≥2 phases still chain into a Strategy.
         // The lone Fragment IS the capability — give it the LLM-polished name/description (not "<label> — steps").
         // The sgCapability carries the aliases either way, so the chat matcher is unaffected. Shared persist path
         // (persistTier1or2) applies the same taxonomy guard + record shaping as the SG-trial accept.
-        const persisted = await persistTier1or2(runPhases, { groundId, name: capName, goal: capName, params: namedParams, aliases: seedAliases, fragmentName: capName, fragmentDescription: capDescription });
+        // b6a — bind the operative perspective onto the ENTRY fragment as a NON-FATAL substrate gate (advisory
+        // perspective_ref, evaluated via isPerspectiveActive). The fragment is no longer disconnected from the
+        // perspective we built: it's the fragment's visible, monitorable precondition.
+        const entryGate = buildPerspectiveGate(perspectiveId);
+        const persisted = await persistTier1or2(runPhases, { groundId, name: capName, goal: capName, params: namedParams, aliases: seedAliases, fragmentName: capName, fragmentDescription: capDescription, entryGate });
         if (!persisted.ok) { sendResponse({ success: false, error: persisted.reason }); return; }
         const { isSingleT1, strategyId, fragmentIds, fragmentCount } = persisted;
         const capability = {
           id: crypto.randomUUID(), groundId, intent: capName, description: capDescription, shape: 'observed', source: 'observed',
-          localeUrl, perspectiveId: perspective.id,
+          localeUrl, perspectiveId,
           ...(isSingleT1 ? { fragmentId: fragmentIds[0] } : { strategyId }), fragmentIds,
           landmarkUids: [...seenUid], params: namedParams, aliases: seedAliases, phases: phases.map((p) => p.label), binding: [], synthesized: true,
           createdAt: Date.now(), trial: { score: null, verdict: 'observed', trialRef: null },
         };
         await ctx.writeSgCapability(groundId, capability);
-        try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: capName.slice(0, 120) }, detail: { capabilityId: capability.id, perspectiveId: perspective.id, strategyId, fragments: fragmentCount, landmarks: landmarkRecords.length, shape: 'observed' } })]); } catch { /* */ }
-        try { await ctx.broadcastStorageChanged('perspective', perspective.id, 'saved'); } catch { /* */ }
+        try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: capName.slice(0, 120) }, detail: { capabilityId: capability.id, perspectiveId, strategyId, fragments: fragmentCount, landmarks: landmarkRecords.length, shape: 'observed' } })]); } catch { /* */ }
+        try { await ctx.broadcastStorageChanged('perspective', perspectiveId, 'saved'); } catch { /* */ }
         const tmplCount = namedParams.filter((p) => p.used).length;
-        Logger.info('background', `DERIVE_OBSERVED_CAPABILITY — "${capName}" ${capability.id} → perspective ${perspective.id} + ${isSingleT1 ? `bare Fragment ${fragmentIds[0]} (no Strategy wrapper)` : `strategy ${strategyId} chaining ${fragmentCount} fragment(s)`} + ${landmarkRecords.length} landmark(s) + ${namedParams.length} param(s) (${tmplCount} templated for re-run) [${capability.phases.join(' → ')}]`);
-        sendResponse({ success: true, capability, perspectiveId: perspective.id, fragmentCount, landmarkCount: landmarkRecords.length, paramCount: namedParams.length });
+        Logger.info('background', `DERIVE_OBSERVED_CAPABILITY — "${capName}" ${capability.id} → perspective ${perspectiveId} + ${isSingleT1 ? `bare Fragment ${fragmentIds[0]} (no Strategy wrapper)` : `strategy ${strategyId} chaining ${fragmentCount} fragment(s)`} + ${landmarkRecords.length} landmark(s) + ${namedParams.length} param(s) (${tmplCount} templated for re-run) [${capability.phases.join(' → ')}]`);
+        sendResponse({ success: true, capability, perspectiveId, fragmentCount, landmarkCount: landmarkRecords.length, paramCount: namedParams.length });
       } catch (err) {
         Logger.error('background', `DERIVE_OBSERVED_CAPABILITY failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
@@ -702,14 +742,22 @@ export function createSgMessageHandlers(ctx) {
     ORCH_ADMIN: async (payload, _sender, sendResponse) => {
       try {
         const { tabId, groundId = null, op = 'count', kinds = [], scope = 'ground' } = payload ?? {};
-        // 'strategies' and 'observations' are MATCHER-FACING entities — they live in the sgCapabilities store the
-        // chat matches against (a strategy/action capability has no `kind`; an observation has kind:'observation').
-        // Deleting only the Tier-1 `strategies:*` record left the sgCapability orphaned → it still matched, then
-        // REPLAY failed "Strategy not found". So these clear the matcher store AND cascade to the Tier-1 record.
-        // 'fragments' / 'perspectives' are Tier-1-only (not in the matcher store).
-        const TIER1 = { fragments: ['listFragments', 'deleteFragment'], perspectives: ['listPerspectives', 'deletePerspective'] };
-        const CAP_KINDS = { strategies: 'deleteStrategy', observations: 'deleteObservation' };
-        const want = (Array.isArray(kinds) ? kinds : []).filter((k) => TIER1[k] || CAP_KINDS[k]);
+        // Chat thinks in CAPABILITIES — all three live in the sgCapabilities matcher store, distinguished by shape:
+        //   strategy   = a multi-step capability (has a strategyId)
+        //   fragment   = a single-step / bare-T1 capability (NO strategyId — T1-as-first-class)
+        //   observation = a read capability (kind:'observation')
+        // Deleting one CASCADES to its backing Tier-1 record(s) — the Strategy + its Fragments, or the bare Fragment —
+        // and prunes the matcher record so it doesn't orphan (still match, then REPLAY-fail "not found"). Previously
+        // 'strategies' matched ALL non-observation caps, so a bare Fragment cap was mis-counted as a strategy AND its
+        // delete swept the Fragment — so a follow-up "delete fragments" found nothing. 'perspectives' is Tier-1-only.
+        const _isObs = (c) => !!c && c.kind === 'observation';
+        const CAP_PRED = {
+          observations: (c) => _isObs(c),
+          strategies:   (c) => !_isObs(c) && !!c.strategyId,
+          fragments:    (c) => !_isObs(c) && !c.strategyId,
+        };
+        const TIER1 = { perspectives: ['listPerspectives', 'deletePerspective'] };
+        const want = (Array.isArray(kinds) ? kinds : []).filter((k) => CAP_PRED[k] || TIER1[k]);
         if (!want.length) { sendResponse({ success: false, error: 'no valid kinds' }); return; }
         // Resolve target Ground(s): all grounds, or the one for the active tab's origin.
         const allGrounds = (await StorageManager.getAllGrounds()) || [];
@@ -723,32 +771,32 @@ export function createSgMessageHandlers(ctx) {
           if (gid) grounds = [gid];
         }
         if (!grounds.length) { sendResponse({ success: true, op, counts: {}, total: 0, grounds: 0, scope }); return; }
-        const _isObs = (c) => !!c && c.kind === 'observation';
         const counts = {}; let total = 0;
         for (const k of want) {
           let n = 0;
           for (const gid of grounds) {
-            if (CAP_KINDS[k]) {
-              // Matcher store is the source of truth for what the chat sees. Filter by kind, cascade to Tier-1.
+            const pred = CAP_PRED[k];
+            if (pred) {
+              // The sgCapabilities matcher store is the source of truth for what the chat sees. Match by the kind's
+              // predicate; on delete, cascade to the backing Tier-1 record(s), then prune the matched caps.
               const caps = await ctx.readSgCapabilities(gid);
-              const mine = (Array.isArray(caps) ? caps : []).filter((c) => (k === 'observations') ? _isObs(c) : !_isObs(c));
+              const mine = (Array.isArray(caps) ? caps : []).filter(pred);
               n += mine.length;
               if (op === 'delete') {
                 for (const c of mine) {
                   try {
-                    if (k === 'strategies') {
-                      // Delete the backing entity: a Strategy, OR — for a bare-T1 cap (T1-as-first-class, no
-                      // strategyId) — just its Fragment. Either way SWEEP the cap's fragment(s) so none orphan into
-                      // a phantom standalone capability (which listCapabilities would otherwise surface).
-                      if (c.strategyId) await StorageManager.deleteStrategy(c.strategyId);
+                    if (k === 'observations') {
+                      await StorageManager.deleteObservation(c.strategyId || c.id);
+                    } else {
+                      // strategy OR bare-fragment cap: delete its backing Strategy (if any) + SWEEP its Fragment(s)
+                      // so none orphan into a phantom standalone capability (listCapabilities would surface it).
+                      if (c.strategyId) { try { await StorageManager.deleteStrategy(c.strategyId); } catch { /* */ } }
                       const fids = new Set([c.fragmentId, ...(Array.isArray(c.fragmentIds) ? c.fragmentIds : [])].filter(Boolean));
                       for (const fid of fids) { try { await StorageManager.deleteFragment(fid); } catch { /* */ } }
-                    } else {
-                      await StorageManager[CAP_KINDS[k]](c.strategyId || c.id);
                     }
                   } catch (e) { Logger.warn('background', `ORCH_ADMIN delete (${k}) failed: ${e.message}`); }
                 }
-                try { await ctx.removeSgCapabilities(gid, (c) => (k === 'observations') ? _isObs(c) : !_isObs(c)); } catch (e) { Logger.warn('background', `ORCH_ADMIN prune sgCapabilities (${k}) failed: ${e.message}`); }
+                try { await ctx.removeSgCapabilities(gid, pred); } catch (e) { Logger.warn('background', `ORCH_ADMIN prune sgCapabilities (${k}) failed: ${e.message}`); }
               }
             } else {
               const [listFn, delFn] = TIER1[k];
