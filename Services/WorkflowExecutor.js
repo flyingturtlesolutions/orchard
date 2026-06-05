@@ -77,7 +77,6 @@
 
 import { StorageManager } from './StorageManager.js';
 import { wrapFragmentAsStrategy } from '../Core/capabilitySynth.js';   // v2.74.786 — wrap a bare T1 Fragment cross-Ground step into a synthetic Strategy at run time
-import { TemplateWalker } from './TemplateWalker.js';   // v2.74.788 — replay a cross-Ground READ step's antecedent Fragment (the prerequisite action)
 import { ExecutionEngine } from './ExecutionEngine.js';
 import { parseFileValue, isFileValue } from './FileParsers.js';
 import { Scope, scalar, list, isKind } from './Scope.js';
@@ -483,9 +482,10 @@ function _waitTabComplete(tabId, timeoutMs = 15000) {
  * NOT a Strategy and must NOT be wrapped as one; it composes a Fragment (which ACTS) with an
  * Observation (which READS):
  *   1. HOP   — open a tab on the step's Ground (groundUrl), wait for load, heal its port.
- *   2. ACT   — replay the antecedent Fragment (the prerequisite, e.g. the search) via
- *              TemplateWalker.executeFragment. Its own antecedent chain (login, go-home)
- *              replays automatically. This is a Fragment: it has side effects.
+ *   2. ACT   — replay the antecedent CAPABILITY (the prerequisite, e.g. the search) via
+ *              ctx.runCapability — the EXACT REPLAY_SG_CAPABILITY path the chat ran it through,
+ *              so a multi-fragment Strategy and a bare Fragment search both work, reproducing the
+ *              original run. This is an action: it has side effects.
  *   3. READ  — run the Observation via the EXACT RUN_OBSERVATION handler (ctx.runObservation),
  *              reusing its selector/archetype/landmark healing + list/visual modes. No side
  *              effect: it extracts a value.
@@ -515,7 +515,7 @@ async function _runObservationStep(step, stepIndex, paramValues, workflowScope, 
   }
   // No Ground URL AND no antecedent to navigate there → nothing would put a real page in the tab; the read would
   // run against about:blank. Fail with a legible reason instead of a mystifying empty read.
-  if (!step.groundUrl && !step.antecedentFragmentId) {
+  if (!step.groundUrl && !step.antecedentCapabilityId) {
     return fail('this read has no Ground URL and no prerequisite step to reach its page');
   }
 
@@ -537,26 +537,24 @@ async function _runObservationStep(step, stepIndex, paramValues, workflowScope, 
     if (typeof ctx.ensureContentScript === 'function') { try { await ctx.ensureContentScript(tabId); } catch (_) { /* heal best-effort */ } }
     if (ctx.isAborted?.()) return { success: false, error: 'Aborted' };
 
-    // 2. ACT — replay the prerequisite Fragment (the search). Fragments ACT; the antecedent is
-    //    "logical linkage independent of strategy membership" — the read can't run until this has.
-    if (step.antecedentFragmentId) {
-      const antBindings = _resolveAntecedentBindings(step.antecedentParamBindings, paramValues, workflowScope, ctx);
-      const ar = await TemplateWalker.executeFragment({
-        tabId,
-        fragmentId: step.antecedentFragmentId,
-        paramBindings: antBindings,
-        broadcastKey: `${ctx.invocationId}::obs${stepIndex}`,
-        isAborted: ctx.isAborted,
-      });
-      if (ar && ar.aborted) return { success: false, error: 'Aborted' };
-      if (!ar || ar.success === false) {
-        return fail(`The read prerequisite didn’t complete: ${(ar && ar.error) || 'unknown'}`);
+    // 2. ACT — replay the prerequisite CAPABILITY (the search) the way the chat ran it. An action has side
+    //    effects; the antecedent is "logical linkage independent of strategy membership" — the read can't run
+    //    until this has. runCapability is REPLAY_SG_CAPABILITY: it dispatches a Strategy (multi-fragment) OR a
+    //    bare Fragment uniformly, so a multi-step search works as the prerequisite, not just a single-fragment one.
+    if (step.antecedentCapabilityId) {
+      if (typeof ctx.runCapability !== 'function') {
+        return fail('the read prerequisite needs the in-SW capability runner (runCapability), which isn’t wired into this invocation');
       }
-      // SETTLE — the search typically NAVIGATED (form submit → results) or updated in place. executeFragment
-      // returns when its actions DISPATCH, not when the results SETTLE, so reading immediately races the render and
-      // comes back empty (the chat chain settles between steps for exactly this reason). Re-wait for load (catches a
-      // hard nav; returns at once if already complete) + a short render delay. RUN_OBSERVATION re-heals the
-      // post-nav content-script port itself, so no ensureContentScript needed here.
+      const antBindings = _resolveAntecedentBindings(step.antecedentParamBindings, paramValues, workflowScope, ctx);
+      const ar = await ctx.runCapability({ tabId, groundId: step.groundId, capabilityId: step.antecedentCapabilityId, paramValues: antBindings });
+      if (!ar || ar.success === false) return fail(`The read prerequisite didn’t run: ${(ar && ar.error) || 'no response'}`);
+      if (ar.ran === false)          return fail(`The read prerequisite couldn’t run here${ar.reason ? ` — ${ar.reason}` : ''}`);
+      if (ar.ok === false)           return fail(`The read prerequisite failed${ar.reason ? ` — ${ar.reason}` : ''}`);
+      // SETTLE — the search typically NAVIGATED (form submit → results) or updated in place. The capability returns
+      // when its actions DISPATCH, not when the results SETTLE, so reading immediately races the render and comes
+      // back empty (the chat chain settles between steps for exactly this reason). Re-wait for load (catches a hard
+      // nav; returns at once if already complete) + a short render delay. RUN_OBSERVATION re-heals the post-nav
+      // content-script port itself, so no ensureContentScript needed here.
       await _waitTabComplete(tabId);
       await new Promise((r) => setTimeout(r, SETTLE_AFTER_ANTECEDENT_MS));
     }
@@ -659,6 +657,7 @@ export async function executeWorkflow(workflow, paramValues = {}, options = {}) 
   const ctx = {
     emit: onProgress, isAborted, invocationId, debug,
     runObservation: options.runObservation ?? null,
+    runCapability: options.runCapability ?? null,   // v2.74.792 — replay a cross-Ground READ's antecedent (the search) as the exact capability the chat ran
     ensureContentScript: options.ensureContentScript ?? null,
   };
   ctx.emit({ type: 'strategy_start', strategyId: workflow.id, message: `Running ${workflow.name ?? workflow.id}` });

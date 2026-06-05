@@ -142,12 +142,13 @@ export function buildObservationCapability(input) {
       }],
     },
     params: Array.isArray(i.params) ? i.params : [],
-    // T3X-DF (v2.74.790) — the cross-Ground READ's prerequisite ACTION: the antecedent Fragment (e.g. the search)
-    // the executor replays before this read. "Logical linkage independent of strategy membership" — an Observation
+    // T3X-DF (v2.74.790/792) — the cross-Ground READ's prerequisite ACTION: the antecedent CAPABILITY (e.g. the
+    // search) the executor REPLAYS before this read, via REPLAY_SG_CAPABILITY — so a multi-fragment Strategy search
+    // works, not only a single Fragment. "Logical linkage independent of strategy membership" — an Observation
     // carries its OWN antecedent (it isn't a property of any enclosing Strategy). Inferred at capture time from the
     // last action run on this Ground (the search the user just did); antecedentParamBindings are the values that
     // action ran with. Only stamped when an antecedent is actually known — absent ⇒ the read runs on the base URL.
-    ...(i.antecedentFragmentId ? { antecedentFragmentId: String(i.antecedentFragmentId) } : {}),
+    ...(i.antecedentCapabilityId ? { antecedentCapabilityId: String(i.antecedentCapabilityId) } : {}),
     ...(i.antecedentParamBindings && typeof i.antecedentParamBindings === 'object' && Object.keys(i.antecedentParamBindings).length
       ? { antecedentParamBindings: i.antecedentParamBindings } : {}),
     synthesized: true,

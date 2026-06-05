@@ -4161,6 +4161,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     .catch((e) => resolve({ success: false, error: e?.message || String(e) }));
                 } catch (e) { resolve({ success: false, error: e.message }); }
               }),
+              // v2.74.792 — replay a cross-Ground READ's ANTECEDENT (the search) as the exact capability the chat ran
+              // it through (REPLAY_SG_CAPABILITY), so a multi-fragment Strategy search works as the prerequisite, not
+              // only a single-fragment one. Same in-SW handoff + reject-safety net as runObservation.
+              runCapability: (capPayload) => new Promise((resolve) => {
+                try {
+                  Promise.resolve(_sgMessageHandlers.REPLAY_SG_CAPABILITY(capPayload, null, (r) => resolve(r || null)))
+                    .catch((e) => resolve({ success: false, error: e?.message || String(e) }));
+                } catch (e) { resolve({ success: false, error: e.message }); }
+              }),
               ensureContentScript: _ensureContentScript,   // heal a freshly-opened hop tab's content-script port before the read
             });
             sendResponse({ success: !!result.success, invocationId: invId, ...result });

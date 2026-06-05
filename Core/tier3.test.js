@@ -127,12 +127,13 @@ describe('tier3 — T3X wireCrossGroundData (cross-Ground data-flow floor)', () 
   // output (no params, e.g. an observation exposing `cap.output`) + a downstream WRITE with a reference param ⇒ the
   // lowered Workflow's write step gets a scope_binding and surfaces NO Workflow input for it.
   // (docs/DESIGN_t3_dataflow_gap.md §3. The runtime + this wiring are ready; the binder surfaces outputs + antecedent.)
-  // v2.74.789 — the READ step is OBSERVATION-NATIVE: it carries `outputName` (the scope key the value lands under)
-  // and its `antecedentFragmentId` (the prerequisite ACTION — the search — the executor replays before the read).
-  // It does NOT carry `observe` anymore (the wrap-as-Strategy route was removed); the read runs via RUN_OBSERVATION.
+  // v2.74.789/792 — the READ step is OBSERVATION-NATIVE: it carries `outputName` (the scope key the value lands
+  // under) and its `antecedentCapabilityId` (the prerequisite ACTION — the search — the executor REPLAYS, as a
+  // capability, before the read). It does NOT carry `observe` (the wrap-as-Strategy route was removed); the read
+  // runs via RUN_OBSERVATION and the antecedent via REPLAY_SG_CAPABILITY.
   it('DF read→write: an upstream read output → the write step is a scope_binding (no Workflow input)', () => {
     const resolved = [
-      { id: 's0', clause: 'get the top job link on linkedin', groundId: 'gnd_li', capabilityId: 'obs_top_job', capabilityKind: 'observation', params: [], outputs: ['job_url'], antecedentFragmentId: 'frag_search_jobs', antecedentParamBindings: { SEARCH: { kind: 'literal', value: 'react' } } },
+      { id: 's0', clause: 'get the top job link on linkedin', groundId: 'gnd_li', capabilityId: 'obs_top_job', capabilityKind: 'observation', params: [], outputs: ['job_url'], antecedentCapabilityId: 'cap_search_jobs', antecedentParamBindings: { SEARCH: { kind: 'literal', value: 'react' } } },
       { id: 's1', clause: 'save it to notion',                 groundId: 'gnd_no', capabilityId: 'strat_save', capabilityKind: 'strategy', params: ['URL'], dependsOn: ['s0'] },
     ];
     wireCrossGroundData(resolved);
@@ -141,7 +142,7 @@ describe('tier3 — T3X wireCrossGroundData (cross-Ground data-flow floor)', () 
     assert.equal(runnable, true);
     assert.equal(workflow.steps[0].capabilityKind, 'observation', 'the read step dispatches observation-native');
     assert.equal(workflow.steps[0].outputName, 'job_url', 'the read emits its value under outputName for downstream scope_binding');
-    assert.equal(workflow.steps[0].antecedentFragmentId, 'frag_search_jobs', 'the prerequisite ACTION (the search) the executor replays before the read');
+    assert.equal(workflow.steps[0].antecedentCapabilityId, 'cap_search_jobs', 'the prerequisite ACTION (the search) the executor replays before the read');
     assert.deepEqual(workflow.steps[0].antecedentParamBindings, { SEARCH: { kind: 'literal', value: 'react' } }, 'the antecedent’s own param bindings ride on the step');
     assert.equal(workflow.steps[0].observe, undefined, 'no embedded observe — the read runs via RUN_OBSERVATION, not a wrapped Strategy');
     assert.deepEqual(workflow.steps[1].paramBindings.URL, { kind: 'scope_binding', name: 'job_url' }, 'URL flows from the upstream read, not from the user');

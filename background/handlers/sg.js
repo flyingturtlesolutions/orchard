@@ -75,9 +75,9 @@ async function _bindStrategyOnGround(ctx, clause, groundId, effect = 'action') {
     // an OBSERVATION read: it READS cap.observe.extracts[*].output → workflowScope → a downstream write consumes
     // it via scope_binding (the cross-Ground DATA FLOW). The executor runs the read via the OBSERVATION-NATIVE
     // dispatch (RUN_OBSERVATION) — NOT by wrapping it as a Strategy — so we surface the capability id plus its
-    // ANTECEDENT Fragment (the prerequisite ACTION, e.g. the search, replayed before the read) rather than the
-    // embedded `observe`. This keeps the load-bearing act/read split: Fragments ACT, Observations READ. The
-    // antecedent is logical linkage independent of strategy membership — an observation carries its own.
+    // ANTECEDENT capability (the prerequisite ACTION, e.g. the search, REPLAYED before the read) rather than the
+    // embedded `observe`. This keeps the load-bearing act/read split: actions ACT, Observations READ. The antecedent
+    // is logical linkage independent of strategy membership — an observation carries its own (a Strategy or Fragment).
     const extracts = (cap.observe && Array.isArray(cap.observe.extracts)) ? cap.observe.extracts : [];
     const outputs = extracts.map((e) => e && e.output).filter(Boolean);
     if (!outputs.length) return null;   // a read producing no named output can't feed data flow
@@ -87,7 +87,7 @@ async function _bindStrategyOnGround(ctx, clause, groundId, effect = 'action') {
       capabilityName: cand.intent || cap.intent || cap.name || '',
       params: [],
       outputs,
-      ...(cap.antecedentFragmentId ? { antecedentFragmentId: cap.antecedentFragmentId } : {}),
+      ...(cap.antecedentCapabilityId ? { antecedentCapabilityId: cap.antecedentCapabilityId } : {}),
       ...(cap.antecedentParamBindings && typeof cap.antecedentParamBindings === 'object' ? { antecedentParamBindings: cap.antecedentParamBindings } : {}),
     };
   }
@@ -156,32 +156,15 @@ async function persistTier1or2(phases, { groundId, name, goal, params = null, al
  * @returns {Record<string, (payload:object, sender:object, sendResponse:Function) => Promise<void>>}
  */
 export function createSgMessageHandlers(ctx) {
-  // T3X-DF (v2.74.790) — CAPTURE-TIME ANTECEDENT INFERENCE. The LAST action capability the chat REPLAYED on a
+  // T3X-DF (v2.74.790/792) — CAPTURE-TIME ANTECEDENT INFERENCE. The LAST action capability the chat REPLAYED on a
   // Ground this SW-lifetime, keyed by groundId: { capabilityId, bindings }. REPLAY_SG_CAPABILITY is the single
   // chokepoint for every chat-run action (standalone ask / compound chain / matcher), so recording here captures
-  // "the search that drove this Ground's state". OBSERVE_CAPTURE reads it to stamp a freshly-captured READ's
-  // antecedent — the prerequisite the cross-Ground dispatch (_runObservationStep) replays before reading. The user
-  // chose this inference path (vs an explicit picker / bind-time auto-link). In-memory only — re-derived as the
-  // user works; never persisted (a stale entry just means a base-URL read, which fails cleanly).
+  // "the search that drove this Ground's state". OBSERVE_CAPTURE stamps it as a freshly-captured READ's antecedent —
+  // the prerequisite the cross-Ground dispatch (_runObservationStep) REPLAYS (as this same capability) before
+  // reading. The antecedent is a CAPABILITY ref, replayed via REPLAY_SG_CAPABILITY, so a multi-fragment Strategy
+  // search works as the prerequisite — not only a single Fragment. In-memory only — re-derived as the user works;
+  // never persisted (a stale entry just means a base-URL read, which fails cleanly).
   const _lastGroundAction = new Map();
-
-  // Resolve a remembered action capability to a SINGLE antecedent Fragment id. The antecedent primitive is a
-  // Fragment (TemplateWalker.executeFragment replays it + its own chain); a bare-Fragment cap maps directly, a
-  // Strategy cap ONLY when it wraps exactly ONE Fragment (an unambiguous single-phase search). A multi-fragment
-  // Strategy DECLINES (null) rather than guess which fragment is "the search" — that read then runs antecedent-less
-  // (the safe degraded path) instead of replaying a wrong/partial prerequisite.
-  const _antecedentFragmentIdFor = async (cap) => {
-    if (!cap) return null;
-    if (cap.fragmentId) return cap.fragmentId;
-    if (cap.strategyId) {
-      try {
-        const strat = await StorageManager.getStrategy(cap.strategyId);
-        const { fragmentIds } = CapabilitySynth.collectReferencedPrimitiveIds([strat]);
-        if (fragmentIds && fragmentIds.size === 1) return [...fragmentIds][0];
-      } catch { /* */ }
-    }
-    return null;
-  };
 
   return {
     // SG-4b — run the substrate-grounded plan on the live page (Comprehend→Select→Cover→Bind→execute) and
@@ -1035,10 +1018,11 @@ export function createSgMessageHandlers(ctx) {
             capabilityName: bound ? bound.capabilityName : '',
             params: bound ? bound.params : [],
             outputs: bound ? bound.outputs : [],
-            // DF — a READ step's prerequisite ACTION: the antecedent Fragment (e.g. the search) the executor
-            // replays before the observation read. NOT the embedded `observe` (that was the wrap-as-Strategy
-            // route, removed in v2.74.789) — the read runs observation-native via RUN_OBSERVATION.
-            ...(bound && bound.antecedentFragmentId ? { antecedentFragmentId: bound.antecedentFragmentId } : {}),
+            // DF — a READ step's prerequisite ACTION: the antecedent CAPABILITY (e.g. the search) the executor
+            // REPLAYS (via REPLAY_SG_CAPABILITY — a Strategy or Fragment) before the observation read. NOT the
+            // embedded `observe` (that wrap-as-Strategy route was removed in v2.74.789) — the read runs
+            // observation-native via RUN_OBSERVATION.
+            ...(bound && bound.antecedentCapabilityId ? { antecedentCapabilityId: bound.antecedentCapabilityId } : {}),
             ...(bound && bound.antecedentParamBindings ? { antecedentParamBindings: bound.antecedentParamBindings } : {}),
             dependsOn: Array.isArray(si.dependsOn) ? si.dependsOn : [],
             stated: boundStated,   // comprehender's stated ∪ the LLM-bound clause values (exact param names → literals)
@@ -1120,19 +1104,18 @@ export function createSgMessageHandlers(ctx) {
           ? { selector: chosenSelector, role: landmark.role || role || 'region', accessibleName: landmark.accessibleName || label || ask, ...(landmark.hierarchicalContext ? { hierarchicalContext: landmark.hierarchicalContext } : {}) }
           : { selector: chosenSelector, role: role || 'region', accessibleName: label || ask };
         // T3X-DF — CAPTURE-TIME ANTECEDENT: the last action the chat ran on THIS Ground (the search that set up this
-        // page) becomes this read's prerequisite, replayed by the cross-Ground dispatch before reading. Resolved to a
-        // single Fragment id; declines (→ antecedent-less, base-URL read) when it can't map cleanly. Best-effort.
-        let antecedentFragmentId = null, antecedentParamBindings = null, antecedentLabel = '';
+        // page) becomes this read's prerequisite, REPLAYED (as that same capability) by the cross-Ground dispatch
+        // before reading. A capability ref — a Strategy or a Fragment, run uniformly via REPLAY_SG_CAPABILITY — so no
+        // single-fragment resolution / decline is needed. Best-effort; absent ⇒ the read runs on the base URL.
+        let antecedentCapabilityId = null, antecedentParamBindings = null, antecedentLabel = '';
         try {
           const last = _lastGroundAction.get(gid);
           if (last && last.capabilityId) {
+            antecedentCapabilityId = last.capabilityId;
             const lastCap = (await ctx.readSgCapabilities(gid)).find((c) => c.id === last.capabilityId);
-            antecedentFragmentId = await _antecedentFragmentIdFor(lastCap);
-            if (antecedentFragmentId) {
-              antecedentLabel = String((lastCap && (lastCap.intent || lastCap.name)) || '').slice(0, 60);
-              if (last.bindings && typeof last.bindings === 'object' && Object.keys(last.bindings).length) {
-                antecedentParamBindings = last.bindings;
-              }
+            antecedentLabel = String((lastCap && (lastCap.intent || lastCap.name)) || '').slice(0, 60);
+            if (last.bindings && typeof last.bindings === 'object' && Object.keys(last.bindings).length) {
+              antecedentParamBindings = last.bindings;
             }
           }
         } catch (e) { Logger.warn('background', `OBSERVE_CAPTURE antecedent inference failed (continuing): ${e.message}`); }
@@ -1140,15 +1123,15 @@ export function createSgMessageHandlers(ctx) {
           id: crypto.randomUUID(), ask, intent: ask, goal: ask, groundId: gid, outputType,
           landmark: lmk,
           extract: { selector: chosenSelector, ...(shape ? { shape } : {}), ...(chosenArch ? { archetype: chosenArch } : {}) },
-          ...(antecedentFragmentId ? { antecedentFragmentId } : {}),
+          ...(antecedentCapabilityId ? { antecedentCapabilityId } : {}),
           ...(antecedentParamBindings ? { antecedentParamBindings } : {}),
         });
         cap.localeUrl = localeUrl; cap.createdAt = Date.now();
         cap.aliases = accreteAlias(cap.aliases, ask, { intent: cap.intent });
         await ctx.writeSgCapability(gid, cap);
         try { await ctx.appendOutcomes(gid, [Outcomes.makeStageEvent('accept', { groundId: gid, verdict: 'accepted', input: { roleOrIntent: ask.slice(0, 120) }, detail: { capabilityId: cap.id, shape: 'observation', outputType: cap.outputType, selector: chosenSelector } })]); } catch { /* */ }
-        Logger.info('background', `OBSERVE_CAPTURE — "${ask.slice(0, 50)}" ${cap.id} → ${cap.outputType} stored via ${via}: ${chosenArch ? `archetype "${chosenArch.selector}"[${chosenArch.index}]` : `selector "${String(chosenSelector).slice(0, 80)}"`} on ${gid}${antecedentFragmentId ? ` · antecedent=${antecedentFragmentId}${antecedentParamBindings ? ` (${Object.keys(antecedentParamBindings).join(',')})` : ''}` : ' · no antecedent inferred'}`);
-        sendResponse({ success: true, capability: { id: cap.id, intent: cap.intent, outputType: cap.outputType, kind: 'observation', antecedent: antecedentFragmentId ? { fragmentId: antecedentFragmentId, label: antecedentLabel } : null }, sawText: String(label || ''), verifiedValue, via });
+        Logger.info('background', `OBSERVE_CAPTURE — "${ask.slice(0, 50)}" ${cap.id} → ${cap.outputType} stored via ${via}: ${chosenArch ? `archetype "${chosenArch.selector}"[${chosenArch.index}]` : `selector "${String(chosenSelector).slice(0, 80)}"`} on ${gid}${antecedentCapabilityId ? ` · antecedent=${antecedentCapabilityId}${antecedentParamBindings ? ` (${Object.keys(antecedentParamBindings).join(',')})` : ''}` : ' · no antecedent inferred'}`);
+        sendResponse({ success: true, capability: { id: cap.id, intent: cap.intent, outputType: cap.outputType, kind: 'observation', antecedent: antecedentCapabilityId ? { capabilityId: antecedentCapabilityId, label: antecedentLabel } : null }, sawText: String(label || ''), verifiedValue, via });
       } catch (err) {
         Logger.error('background', `OBSERVE_CAPTURE failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
