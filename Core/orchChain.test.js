@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites } from './orchChain.js';
+import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites, namesAnySite } from './orchChain.js';
 import { validatePlan } from './orchPlan.js';
 
 describe('orchChain — namesMultipleSites (cross-site pre-filter, T3X)', () => {
@@ -21,6 +21,20 @@ describe('orchChain — namesMultipleSites (cross-site pre-filter, T3X)', () => 
   it('does NOT fire on one site mentioned twice, or on pronoun/article destinations', () => {
     assert.equal(namesMultipleSites('search indeed then open indeed again'), false, 'same site twice = one distinct token');
     assert.equal(namesMultipleSites('save it to me and send it to the top'), false, 'pronoun/article tokens are dropped');
+  });
+});
+
+describe('orchChain — namesAnySite (single-Ground fallback gate, T3X live-fix)', () => {
+  it('fires when the ask names ANY destination site (the off-Indeed bug)', () => {
+    assert.equal(namesAnySite('search react jobs on indeed'), true);
+    assert.equal(namesAnySite('log in to gmail'), true);
+    assert.equal(namesAnySite('search for jobs on indeed then search on pixabay'), true, 'also true when ≥2 sites');
+  });
+  it('does NOT fire when no site is named (so a plain miss does not pay an LLM round-trip)', () => {
+    assert.equal(namesAnySite('filter by remote'), false, 'no destination preposition + site');
+    assert.equal(namesAnySite('search jobs and sort by newest'), false);
+    assert.equal(namesAnySite('click on the top result'), false, 'pronoun/article destinations are dropped');
+    assert.equal(namesAnySite(''), false);
   });
 });
 

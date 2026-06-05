@@ -18,7 +18,7 @@ import { isSafeStrategyResultHtml, looksLikeStrategyResultHtml } from './Service
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
-import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, namesMultipleSites } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; namesMultipleSites — cross-site pre-filter (T3X)
+import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, namesMultipleSites, namesAnySite } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X)
 import { walkPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate)
 import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   // ORCH-A — predicate → gate (conditional routing + the analysis)
 import { comprehend } from './Core/orchComprehend.js';   // ORCH-CB — substrate-free shape comprehension (cold-ground decompose)
@@ -1311,6 +1311,24 @@ function _orchOfferComprehended(msg, { tabId, groundId, ask, comp }) {
 }
 
 // ── T3X — cross-Ground WORKFLOW proposal ────────────────────────────────────────────────────────────────────
+// T3X live-fix (v2.74.793) — SINGLE-Ground fallback for a site-named ask the within-Ground cascade couldn't run
+// (the side panel is on a different site / a blank tab than the named Ground). Resolves the ask the cross-Ground way
+// (COMPREHEND_CROSS_GROUND HOPS to the named Ground at run time) and OFFERS the workflow ONLY when it's runnable —
+// so "search react jobs on indeed" works off-Indeed, while a named site with no matching capability declines and
+// falls through to the normal "show me" / record offer. Returns true iff it took over (appended a workflow offer).
+async function _tryCrossGroundFallback(ask, existingMsg = null) {
+  // Reuse the caller's in-flight bubble (so there's a spinner during the LLM call + no empty double-bubble); else
+  // append a fresh one. On a decline we DON'T remove a reused bubble — the caller falls through and overwrites it.
+  const probe = existingMsg || appendMessage({ role: 'thinking', body: 'Looking across your sites…' });
+  probe.classList.remove('assistant'); probe.classList.add('thinking'); _setMessageBody(probe, 'Looking across your sites…');
+  let cg = null;
+  try { cg = await _orchReq('COMPREHEND_CROSS_GROUND', { ask }); } catch { if (!existingMsg) probe.remove(); return false; }
+  if (!cg || cg.success === false || !cg.runnable || !cg.workflow) { if (!existingMsg) probe.remove(); return false; }
+  probe.classList.remove('thinking'); probe.classList.add('assistant');
+  _orchOfferWorkflow(probe, { ask, res: cg });
+  return true;
+}
+
 // Render a comprehended cross-site Workflow (COMPREHEND_CROSS_GROUND): the per-site steps (✓ bound / ⚠ a gap),
 // any GAPS (Q3 repairs — what to teach and where) and ASSUMPTIONS (Q2 ambiguities the resolver had to guess), then
 // Run / Save controls. Precision-first: nothing runs or persists until the user acts.
@@ -1516,9 +1534,13 @@ async function _tryGroundedTurn(text) {
   // Ground (COMPREHEND_CROSS_GROUND, T3). We COMMIT the turn only when it resolves to ≥2 distinct Grounds — a
   // single-Ground result (or the within-task multi-phase fallback) falls through to the within-Ground cascade
   // unchanged, so a wrongly-triggered ask costs one comprehend and is harmless. Save:false — this is a PREVIEW.
+  // T3X live-fix (v2.74.793) — track whether the cross-Ground comprehension already ran this turn, so the
+  // single-Ground fallback at the bottom doesn't redundantly re-attempt (and re-pay the LLM) what just failed here.
+  let _xgTried = false;
   if (isCompoundAsk(text) && (_CROSS_SITE_CUE.test(text) || namesMultipleSites(text))) {
     const probe = appendMessage({ role: 'thinking', body: 'Looking across your sites…' });
     const cg = await _orchReq('COMPREHEND_CROSS_GROUND', { ask: text });
+    _xgTried = true;
     const grounds = new Set(((cg && Array.isArray(cg.resolved)) ? cg.resolved : []).map((r) => r && r.groundId).filter(Boolean));
     if (cg && cg.success && grounds.size >= 2) {
       probe.classList.remove('thinking'); probe.classList.add('assistant');
@@ -1537,7 +1559,12 @@ async function _tryGroundedTurn(text) {
   if (clauses.length > 1 && !isForeachAsk(text) && !isConditionalAsk(text)) {
     const probe = appendMessage({ role: 'thinking', body: 'Checking this page…' });
     const m0 = await _orchReq('ORCH_MATCH', { tabId: tab.id, ask: clauses[0].text });
-    if (!m0 || !m0.groundId) { probe.remove(); return false; }
+    if (!m0 || !m0.groundId) {
+      // T3X live-fix (v2.74.793) — the FIRST clause names a Ground we're not on ("search react jobs on indeed, …"),
+      // so the within-Ground chain can't even start. Resolve the whole ask the cross-Ground way before giving up.
+      if (namesAnySite(text) && !_xgTried && await _tryCrossGroundFallback(text, probe)) return true;
+      probe.remove(); return false;
+    }
     probe.classList.remove('thinking'); probe.classList.add('assistant');
     _orchConfirmChain(probe, { tabId: tab.id, clauses, firstMatch: m0, ask: text });
     return true;
@@ -1583,7 +1610,11 @@ async function _tryGroundedTurn(text) {
   // DIFFERENT store than the ORCH matcher's lightweight captured ones. Without this the chat ignores a rich
   // hand-authored read and offers to capture a new (often more brittle) one. A confident match RUNS and shows the
   // value — reads are reversible, so auto-running is safe — preferring the authored read over a fresh capture.
-  if (classifyReadAsk(text).isRead) {
+  // T3X live-fix (v2.74.793) — only short-circuit to a single read for a SIMPLE read ask. A COMPOUND ask ("search
+  // …, take the top title, and search …") contains a read CLAUSE but is a multi-step ACTION sequence — answering it
+  // with one stale observation value (the bug: a 3-site ask returned a lone job title) is wrong. Let it fall through
+  // to the chain / cross-Ground fallback instead.
+  if (classifyReadAsk(text).isRead && !isCompoundAsk(text)) {
     const mo = await _orchReq('RUN_BEST_OBSERVATION', { tabId: tab.id, ask: text });
     if (mo && mo.matched && mo.ok && String(mo.value || '').trim()) {
       thinking.classList.remove('thinking'); thinking.classList.add('assistant');
@@ -1592,10 +1623,20 @@ async function _tryGroundedTurn(text) {
     }
   }
   const m = await _orchReq('ORCH_MATCH', { tabId: tab.id, ask: text });
-  if (!m || m.success === false) { thinking.remove(); return false; }
+  if (!m || m.success === false) {
+    if (namesAnySite(text) && !_xgTried && await _tryCrossGroundFallback(text, thinking)) return true;   // T3X — "…on indeed" off-Indeed: resolve + run there
+    thinking.remove();
+    return false;
+  }
   // No Ground for this page → the site isn't in the library; let the legacy matcher try. A grounded MISS
   // (the page IS known, just no capability for this ask) falls through to the "show me?" record offer below.
-  if (m.decision === 'miss' && !m.groundId) { thinking.remove(); return false; }
+  // T3X live-fix (v2.74.793) — BUT if the ask NAMES a site (e.g. the side panel is on a blank tab and the user
+  // says "search react jobs on indeed"), resolve it to that Ground and run there before giving up.
+  if (m.decision === 'miss' && !m.groundId) {
+    if (namesAnySite(text) && !_xgTried && await _tryCrossGroundFallback(text, thinking)) return true;
+    thinking.remove();
+    return false;
+  }
 
   const turn = planAssistantTurn(m);
   const ctx = { groundId: m.groundId, tabId: tab.id, ask: text, intent: m.candidate && m.candidate.intent, paramValues: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {}, params: m.candidate && m.candidate.params };
@@ -1640,6 +1681,11 @@ async function _tryGroundedTurn(text) {
     return true;
   }
   if (turn.action === 'record') {
+    // T3X live-fix (v2.74.793) — this page is a Ground but has no capability for the ask. If the ask NAMES a site
+    // (e.g. you're on LinkedIn and say "search react jobs on indeed"), resolve it to THAT Ground and run there,
+    // rather than offering to record it here on the wrong site. Falls through to the record offers (which overwrite
+    // this bubble) if it can't.
+    if (namesAnySite(text) && !_xgTried && await _tryCrossGroundFallback(text, thinking)) return true;
     // OBS-READ — a QUESTION with no observation yet: offer to capture one by POINTING at the value, instead of
     // (or alongside) recording an action demonstration.
     if (classifyReadAsk(text).isRead) {

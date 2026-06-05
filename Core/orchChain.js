@@ -78,7 +78,7 @@ const _SITE_STOP = new Set(['it', 'me', 'them', 'us', 'you', 'him', 'her', 'the'
  * @param {string} ask
  * @returns {boolean}
  */
-export function namesMultipleSites(ask) {
+function _siteRefs(ask) {
   const re = /\b(?:on|onto|to|into|at|from)\s+([a-z][a-z0-9.&'-]{1,})/ig;
   const seen = new Set();
   let m;
@@ -86,8 +86,21 @@ export function namesMultipleSites(ask) {
     const tok = m[1].toLowerCase();
     if (!_SITE_STOP.has(tok)) seen.add(tok);
   }
-  return seen.size >= 2;
+  return seen;
 }
+
+export function namesMultipleSites(ask) { return _siteRefs(ask).size >= 2; }
+
+/**
+ * Does this ask name AT LEAST ONE destination site ("…on indeed", "…to gmail")? PURE. The ≥1 sibling of
+ * namesMultipleSites. Gates the SINGLE-Ground fallback (T3X live-fix v2.74.793): a "search jobs on indeed" typed
+ * while the side panel is on ANOTHER site should still resolve to Indeed and run there — not dead-end because the
+ * current tab's Ground (or no Ground) has no such capability. Conservative — the authoritative test is the
+ * background resolving the ask to a real runnable Ground; this only gates whether that (LLM) attempt is worth it.
+ * @param {string} ask
+ * @returns {boolean}
+ */
+export function namesAnySite(ask) { return _siteRefs(ask).size >= 1; }
 
 /**
  * A cheap gate for "this single sentence may span MULTIPLE capabilities" — worth an LLM PLAN (semantic
