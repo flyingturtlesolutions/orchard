@@ -449,6 +449,11 @@ function _resolveAntecedentBindings(antecedentParamBindings, paramValues, workfl
   return out;
 }
 
+// v2.74.791 — Render-settle delay after the antecedent search dispatches, before the read. Matches the chat
+// chain's inter-step settle (~800ms): enough for SPA results to paint / a post-submit list to populate, without
+// stalling the workflow. The preceding _waitTabComplete already covers a hard navigation; this covers the render.
+const SETTLE_AFTER_ANTECEDENT_MS = 800;
+
 /**
  * v2.74.789 — Resolve once a hop tab finishes loading (status==='complete'), or after a
  * timeout (best-effort — the antecedent Fragment's own WAIT_FOR actions handle finer settling).
@@ -508,6 +513,11 @@ async function _runObservationStep(step, stepIndex, paramValues, workflowScope, 
   if (typeof ctx.runObservation !== 'function') {
     return fail('Cross-Ground read needs the in-SW observation runner (runObservation), which isn’t wired into this invocation');
   }
+  // No Ground URL AND no antecedent to navigate there → nothing would put a real page in the tab; the read would
+  // run against about:blank. Fail with a legible reason instead of a mystifying empty read.
+  if (!step.groundUrl && !step.antecedentFragmentId) {
+    return fail('this read has no Ground URL and no prerequisite step to reach its page');
+  }
 
   // 1. HOP — open the Ground tab in the background (not focused, so the user isn't yanked away).
   let tab = null;
@@ -542,6 +552,13 @@ async function _runObservationStep(step, stepIndex, paramValues, workflowScope, 
       if (!ar || ar.success === false) {
         return fail(`The read prerequisite didn’t complete: ${(ar && ar.error) || 'unknown'}`);
       }
+      // SETTLE — the search typically NAVIGATED (form submit → results) or updated in place. executeFragment
+      // returns when its actions DISPATCH, not when the results SETTLE, so reading immediately races the render and
+      // comes back empty (the chat chain settles between steps for exactly this reason). Re-wait for load (catches a
+      // hard nav; returns at once if already complete) + a short render delay. RUN_OBSERVATION re-heals the
+      // post-nav content-script port itself, so no ensureContentScript needed here.
+      await _waitTabComplete(tabId);
+      await new Promise((r) => setTimeout(r, SETTLE_AFTER_ANTECEDENT_MS));
     }
     if (ctx.isAborted?.()) return { success: false, error: 'Aborted' };
 
