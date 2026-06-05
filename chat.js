@@ -1311,6 +1311,8 @@ function _orchOfferComprehended(msg, { tabId, groundId, ask, comp }) {
 // any GAPS (Q3 repairs — what to teach and where) and ASSUMPTIONS (Q2 ambiguities the resolver had to guess), then
 // Run / Save controls. Precision-first: nothing runs or persists until the user acts.
 const _wfSite = (r) => (r && (r.groundName || r.groundId)) || '';
+// "SEARCH_JOB_TITLE_KEYWORDS_OR_COMPANY" → "Search job title keywords or company" — a readable field label.
+const _humanizeParam = (n) => String(n || '').replace(/_/g, ' ').trim().toLowerCase().replace(/^\w/, (c) => c.toUpperCase());
 function _orchOfferWorkflow(msg, { ask, res }) {
   const wf = (res && res.workflow) || {};
   const resolved = Array.isArray(res && res.resolved) ? res.resolved : [];
@@ -1330,7 +1332,25 @@ function _orchOfferWorkflow(msg, { ask, res }) {
 
   const bar = _orchActionBar(msg);
   if (res && res.runnable && wf.id) {
-    bar.appendChild(_mkBtn('▶ Run it', () => { bar.remove(); _orchRunWorkflow(appendMessage({ role: 'assistant', body: '' }), { workflow: wf, ask }); }));
+    // Editable inputs for the Workflow's still-UNBOUND params (values the binder bound from the clause are already
+    // step LITERALS and aren't shown here). Prefilled empty; whatever's typed is passed as paramValues on Run, so a
+    // run can't silently search empty. If the LLM value-binder was unavailable, EVERY param shows here as a fallback.
+    const content = msg.querySelector('.message-content');
+    const pinputs = [];
+    for (const p of (Array.isArray(wf.params) ? wf.params : [])) {
+      const name = p && p.name; if (!name) continue;
+      const row = document.createElement('div'); row.className = 'orch-wf-param'; row.style.cssText = 'display:flex;align-items:center;gap:6px;margin:4px 0;';
+      const lab = document.createElement('span'); lab.textContent = _humanizeParam(name); lab.style.cssText = 'font-size:11px;opacity:0.75;min-width:96px;';
+      const inp = document.createElement('input'); inp.type = 'text'; inp.placeholder = _humanizeParam(name); inp.style.cssText = 'flex:1;font-size:12px;padding:2px 6px;';
+      row.appendChild(lab); row.appendChild(inp); content.insertBefore(row, bar);
+      pinputs.push({ name, inp, row });
+    }
+    bar.appendChild(_mkBtn('▶ Run it', () => {
+      const paramValues = {};
+      for (const { name, inp } of pinputs) { const v = inp.value.trim(); if (v) paramValues[name] = v; }
+      bar.remove(); pinputs.forEach(({ row }) => row.remove());
+      _orchRunWorkflow(appendMessage({ role: 'assistant', body: '' }), { workflow: wf, ask, paramValues });
+    }));
     bar.appendChild(_mkBtn('🔖 Save for later', () => { bar.remove(); _orchSaveWorkflow(appendMessage({ role: 'assistant', body: '' }), { workflow: wf }); }));
     return;
   }
@@ -1361,7 +1381,7 @@ async function _orchSaveWorkflow(msg, { workflow }) {
 
 // SAVE then RUN the previewed Workflow: persist the exact shown record (INVOKE_WORKFLOW runs by id), then invoke
 // it. Reports the outcome; surfaces saga COMPENSATION (Q5) when a mid-journey failure rolled committed steps back.
-async function _orchRunWorkflow(msg, { workflow, ask }) {
+async function _orchRunWorkflow(msg, { workflow, ask, paramValues = {} }) {
   _setMessageBody(msg, 'Saving the workflow…');
   const saved = await _orchReq('SAVE_WORKFLOW', { workflow });
   const wfId = saved && saved.workflow && saved.workflow.id;
@@ -1370,7 +1390,9 @@ async function _orchRunWorkflow(msg, { workflow, ask }) {
     return;
   }
   _setMessageBody(msg, 'Running across your sites…');
-  const res = await _orchReq('INVOKE_WORKFLOW', { workflowId: wfId });
+  // paramValues fill the Workflow's still-unbound inputs (the editable card); the binder's clause literals are
+  // already baked into the steps, so a run uses the right keyword even when paramValues is empty.
+  const res = await _orchReq('INVOKE_WORKFLOW', { workflowId: wfId, paramValues: (paramValues && typeof paramValues === 'object') ? paramValues : {} });
   if (res === null) {   // _orchReq timed out — the run may still be going (cross-site runs can be long)
     _setMessageBody(msg, 'Still working on it — this one’s taking a while. I’ll leave it running; check the tabs it opened.');
     return;

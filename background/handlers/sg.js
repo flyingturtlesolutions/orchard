@@ -959,6 +959,18 @@ export function createSgMessageHandlers(ctx) {
             }
           }
 
+          // BIND the clause's explicit input VALUES to the bound capability's REAL params (an LLM maps "search for
+          // game developer jobs on Indeed" → {SEARCH_JOB_TITLE_KEYWORDS_OR_COMPANY:"game developer jobs"}). Without
+          // it the binder only PICKS the capability and the search box runs EMPTY. Keyed by EXACT param names so
+          // wireCrossGroundData lowers them to step LITERALS; the comprehender's `stated` is the fallback.
+          let boundStated = (si.stated && typeof si.stated === 'object') ? { ...si.stated } : {};
+          if (bound && bound.capabilityId && Array.isArray(bound.params) && bound.params.length) {
+            try {
+              const bp = await AnthropicService.bindClauseParams({ clause, params: bound.params });
+              if (bp && bp.values && typeof bp.values === 'object') boundStated = { ...boundStated, ...bp.values };
+            } catch (e) { Logger.warn('background', `bindClauseParams unavailable: ${e.message}`); }
+          }
+
           const g = chosenGroundId ? byId.get(chosenGroundId) : null;
           resolved.push({
             id: si.id || `s${i}`, clause, groundId: chosenGroundId,
@@ -970,7 +982,7 @@ export function createSgMessageHandlers(ctx) {
             params: bound ? bound.params : [],
             outputs: bound ? bound.outputs : [],
             dependsOn: Array.isArray(si.dependsOn) ? si.dependsOn : [],
-            stated: (si.stated && typeof si.stated === 'object') ? si.stated : {},
+            stated: boundStated,   // comprehender's stated ∪ the LLM-bound clause values (exact param names → literals)
           });
         }
 

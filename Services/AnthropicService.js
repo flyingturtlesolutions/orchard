@@ -2504,6 +2504,53 @@ Rules:
   }
 
   /**
+   * T3X — BIND the input VALUES a cross-Ground sub-intent's clause explicitly states to the bound capability's REAL
+   * (UI-derived) param NAMES. The cross-Ground binder PICKS the capability but doesn't extract what to TYPE; without
+   * this the search box runs EMPTY (every param stays a Workflow input). e.g. "search for game developer jobs on
+   * Indeed" + ["SEARCH_JOB_TITLE_KEYWORDS_OR_COMPANY","EDIT_LOCATION"] -> {"SEARCH_JOB_TITLE_KEYWORDS_OR_COMPANY":
+   * "game developer jobs"} (location omitted — the clause states none). Keys are EXACT param names so
+   * wireCrossGroundData lowers them straight to step LITERALS. Returns { values:{} } or null on any failure
+   * (the caller falls back to the comprehender's `stated`).
+   * @param {{ clause:string, params?:(string|{name:string})[] }} opts
+   * @returns {Promise<{values:object}|null>}
+   */
+  static async bindClauseParams({ clause, params = [] }) {
+    const ask = (typeof clause === 'string' ? clause : '').trim();
+    const names = (Array.isArray(params) ? params : []).map((p) => (typeof p === 'string' ? p : (p && p.name))).filter(Boolean);
+    if (!ask || !names.length) return null;
+    if (!(await AnthropicService.hasLlm())) return null;
+    const systemPrompt = `You extract the input VALUES a one-line request explicitly provides, for a saved web capability whose input parameter NAMES are given (UI-derived, e.g. SEARCH_JOB_TITLE_KEYWORDS_OR_COMPANY).
+
+Parameters:
+${names.map((n) => `- ${n}`).join('\n')}
+
+Return ONLY a JSON object: {"values": {"<EXACT_PARAM_NAME>": "<value from the request>"}}
+Rules:
+- Use the EXACT parameter name as the key, copied verbatim from the list above.
+- Include a param ONLY when the request explicitly states a value for it. OMIT any param the request does not specify — never invent a location, date, category, etc.
+- Strip the leading verb and the site name: "search for game developer jobs on Indeed" → the keyword/search param gets "game developer jobs" (not "search for…" and not "…on Indeed").
+- {} if the request states nothing bindable.`;
+    Logger.info('AnthropicService', `bindClauseParams — "${ask.slice(0, 60)}" over ${names.length} param(s)`);
+    try {
+      const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text: `Request: ${ask}` }], 256, [], { role: 'describe', operation: 'bindClauseParams' });
+      if (!raw?.success) { Logger.warn('AnthropicService', `bindClauseParams failed: ${raw?.error}`); return null; }
+      const json = AnthropicService.#firstJsonObject(raw.text);
+      let out = null;
+      try { out = json ? JSON.parse(json) : null; } catch (e) { Logger.warn('AnthropicService', `bindClauseParams JSON parse failed (${e.message})`); return null; }
+      const vals = (out && out.values && typeof out.values === 'object') ? out.values : {};
+      // Keep ONLY exact-name keys with non-empty string values (the model is told to copy names verbatim).
+      const nameSet = new Set(names);
+      const values = {};
+      for (const [k, v] of Object.entries(vals)) { if (nameSet.has(k) && v != null && String(v).trim() !== '') values[k] = String(v); }
+      Logger.info('AnthropicService', `bindClauseParams → ${Object.keys(values).length} value(s): ${Object.keys(values).join(', ') || '(none)'}`);
+      return { values };
+    } catch (e) {
+      Logger.warn('AnthropicService', `bindClauseParams error: ${e.message}`);
+      return null;
+    }
+  }
+
+  /**
    * OBS-4 — NAME a recorded DEMONSTRATION (Path 3; the inverse of comprehendIntent). Given the actions the
    * user performed (kinds + element names + values, no page), return a short capability NAME + a one-line
    * INTENT. Post-hoc labelling of ground-truth actions. Returns { name, intent } or null on ANY failure —
