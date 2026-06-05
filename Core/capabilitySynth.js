@@ -280,7 +280,13 @@ export function buildTier2CapabilityRecords(phases, { groundId, strategyId, frag
       description: _describeFragmentActions(ph[i].label, ph[i].actions),   // an expression of intent, not the bare label
       rawJson,
       params: [...names],
-      preconditions: [],                                       // ARRAY shape — the runtime + editor read fragment conditions as arrays
+      // Preconditions stay EMPTY for now. A substrate gate via perspective_ref(P) was prototyped (b4) but backed
+      // out: perspective_ref expands to "ALL the perspective's landmarks present" and PreconditionGate failure is
+      // FATAL, so it blocks any multi-fragment capability (landmarks span pages) and any render-on-open reveal —
+      // converting working capabilities into gate failures. The perspective is still the monitorable condition
+      // (b3, via isPerspectiveActive, which is non-fatal); the FRAGMENT gate is deferred to b5 (anchor-landmark or
+      // non-fatal eval). ARRAY shape — the runtime + editor read fragment conditions as arrays.
+      preconditions: [],
       postconditions: _conditionsArray(ph[i].postcondition),   // SG-T2-2/5 — carry the phase's success predicate(s) (was dropped)
       healthStatus: 'untested', lastExecutedAt: null, synthesized: true,
       createdAt: ts, updatedAt: ts,

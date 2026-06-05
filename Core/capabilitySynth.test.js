@@ -107,6 +107,12 @@ describe('buildTier2CapabilityRecords — synthesis quality: description as inte
     assert.equal(r.strategy.fragmentSteps.length, 2);
   });
 
+  it('fragment preconditions stay EMPTY — a perspective_ref gate was backed out (fatal + all-landmarks; see b5)', () => {
+    const r = buildTier2CapabilityRecords([searchPhase, filterPhase], { groundId: 'g', strategyId: 's', fragmentIds: ['f1', 'f2'] });
+    assert.deepEqual(r.fragments[0].preconditions, []);
+    assert.deepEqual(r.fragments[1].preconditions, []);
+  });
+
   it('a CLICK with no landmark name (landmarkRef only) → a readable selector hint, not "the control"', () => {
     const phase = { label: 'Search', actions: [{ action: 'CLICK', selector: 'button.yosegi-InlineWhatWhere-primaryButton', landmarkRef: { uid: 'lmk_x' } }] };
     const r = buildTier2CapabilityRecords([phase, filterPhase], { groundId: 'g', strategyId: 's', fragmentIds: ['f1', 'f2'] });

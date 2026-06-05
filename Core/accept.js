@@ -116,10 +116,44 @@ export function buildLandmarkRecords({ roles = [], groundId = '', localeUrl = ''
   return out;
 }
 
+// b3 (v2.74.765) — the page-scope rung: a contains-match on origin+pathname (query/hash stripped, like the
+// Locale urlPattern). Bad parse → the raw string (still a usable contains pattern).
+function _urlScopePattern(localeUrl) {
+  try { const u = new URL(localeUrl); return u.origin + u.pathname; } catch { return String(localeUrl || ''); }
+}
+
+/**
+ * b3 (v2.74.765) — synthesize a Perspective ACTIVATION PREDICATE tree from the grounded substrate. PURE.
+ * A Perspective IS a condition: `isPerspectiveActive` evaluates `predicates` (and/or tree over substrate leaves),
+ * and the InteractionMonitor reads the same via `listActivePerspectives`. Without predicates a perspective is
+ * "always active" (vacuous) — useless as a gate and invisible to the monitor. We emit:
+ *
+ *   and( urlMatches(scope, 'contains'),    // bootstrap scope rung — cheap page pre-filter
+ *        or(landmarkExists(uid)…) )         // substrate truth — ≥1 operative landmark present (drift-tolerant)
+ *
+ * (There is no k_of_n operator — `or` over the operative landmarks is the available drift-tolerant form.) The
+ * result is the `predicates` ARRAY (implicit top-level AND that `isPerspectiveActive` understands). url-only when
+ * no landmarks are grounded yet (the bootstrap state); empty → the perspective stays always-active (back-compat).
+ * @returns {Array<object>}
+ */
+export function buildPerspectivePredicates({ localeUrl = '', landmarkUids = [] } = {}) {
+  const scope = _urlScopePattern(localeUrl);
+  const urlLeaf = scope ? { kind: 'urlMatches', pattern: scope, mode: 'contains' } : null;
+  const lmLeaves = (Array.isArray(landmarkUids) ? landmarkUids : [])
+    .filter(Boolean)
+    .map((uid) => ({ kind: 'landmarkExists', target: uid }));
+  const substrate = lmLeaves.length === 0 ? null : (lmLeaves.length === 1 ? lmLeaves[0] : { operator: 'or', children: lmLeaves });
+  if (urlLeaf && substrate) return [{ operator: 'and', children: [urlLeaf, substrate] }];
+  if (substrate) return [substrate];
+  if (urlLeaf) return [urlLeaf];   // bootstrap: url-only scope until substrate is grounded
+  return [];
+}
+
 /**
  * Build the Perspective record (the intent-scoped composition over the promoted landmarks). PURE.
  * Saved via StorageManager.savePerspective; #withPerspectiveComposition derives the landmark nodes from
- * landmarkRefs. authoredBy:'model' marks it as automated (vs. human-picked).
+ * landmarkRefs. authoredBy:'model' marks it as automated (vs. human-picked). b3 — carries an activation
+ * `predicates` tree so the perspective is a real condition (gate + monitor), not vacuously always-active.
  */
 export function buildPerspectiveRecord({ intent, spec = {}, groundId = '', localeUrl = '', landmarkUids = [], acceptedAt = Date.now() } = {}) {
   return {
@@ -127,6 +161,7 @@ export function buildPerspectiveRecord({ intent, spec = {}, groundId = '', local
     groundId: groundId || '',
     name: (String(intent || '').trim() || spec.target || 'capability').slice(0, 80),
     landmarkRefs: Array.isArray(landmarkUids) ? landmarkUids.slice() : [],
+    predicates: buildPerspectivePredicates({ localeUrl, landmarkUids }),   // b3 — substrate activation condition
     authoredBy: 'model',
     authoredAt: acceptedAt,
     intent: String(intent || '').trim(),

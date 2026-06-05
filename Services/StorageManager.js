@@ -2012,12 +2012,21 @@ export class StorageManager {
     // + the flat landmarkRefs mirror, regardless of which shape the caller
     // passed (perspective-capture writes landmarkRefs and drops landmarks).
     const composed = StorageManager.#withPerspectiveComposition(perspective);
+    // v2.74.765 (b2) — merge-on-save on a LOCAL accept: preserve accrued substrate the new record omits
+    // (iframeContexts, lifecycle, and — once a human edits them — predicates). Spread EXISTING first; the new
+    // composition wins per-key. Two guards protect manual authoring from a model re-accept: never downgrade
+    // authoredBy human→model, and keep HUMAN-authored predicates rather than overwriting them with auto-synthesized
+    // ones (b3). A SYNC-DOWN (opts.fromRemote) stays remote-authoritative — no field-merge, no guards.
+    const local = !opts.fromRemote;
+    const keepHumanPredicates = local && existing?.authoredBy === 'human' && Array.isArray(existing.predicates) && existing.predicates.length > 0;
     const toSave = {
+      ...(local ? (existing || {}) : {}),
       ...composed,
-      authoredBy,
+      authoredBy: (local && existing?.authoredBy === 'human') ? 'human' : authoredBy,
       authoredAt,
-      createdAt: perspective.createdAt ?? now,
+      createdAt: perspective.createdAt ?? existing?.createdAt ?? now,
       updatedAt: StorageManager.#persistedUpdatedAt(perspective, opts),
+      ...(keepHumanPredicates ? { predicates: existing.predicates } : {}),
     };
     await maybeWritePartitionPrimary('perspective', toSave);
     await StorageManager.#set({
@@ -2121,6 +2130,13 @@ export class StorageManager {
     await StorageManager.#addToIndex(indexKey, landmark.uid);
     const now = Date.now();
     const merged = {
+      // v2.74.765 (b2) — merge-on-save: on a LOCAL accept, spread EXISTING first so accrued state the incoming
+      // record omits (profile enrichment, verifiedAt history, effects, boundingBox) survives a re-author; the
+      // incoming record then wins per-key. Previously only createdAt was carried over, so each re-accept clobbered
+      // the landmark (the reuse invariant the substrate-condition model needs — DESIGN_t1_condition_model § 5).
+      // A SYNC-DOWN (opts.fromRemote) stays remote-authoritative: NO field-merge, so a field deleted upstream
+      // doesn't linger locally (preserves the pre-b2 sync overwrite semantics).
+      ...(opts.fromRemote ? {} : (existing || {})),
       ...landmark,
       createdAt : existing?.createdAt ?? landmark.createdAt ?? now,
       updatedAt : StorageManager.#persistedUpdatedAt(landmark, opts),

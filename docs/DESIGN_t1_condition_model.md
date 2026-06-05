@@ -114,8 +114,10 @@ rebuilding and clobbering it.** Two seams in the current code violate this:
    the new record omits (profile, `verifiedAt`, effects, and — critically — `perspective.predicates`)
    is wiped on re-author. Synthesizing predicates at accept is therefore unstable: a second
    demonstration of the same intent erases them.
-   - **Fix (slice b2, pending):** merge-on-save (spread `...existing` first, let the new record update
-     only what it owns) **or** read-before-build at accept, so substrate predicates survive.
+   - **Fix (slice b2, landed v2.74.765):** merge-on-save — `saveLandmark`/`savePerspective` spread `...existing`
+     first so accrued state the new record omits (profile, `verifiedAt`, effects, predicates) survives a
+     re-author. Two guards protect manual authoring: a model re-accept never downgrades `authoredBy` human→model,
+     and never overwrites HUMAN-authored `predicates` with auto-synthesized ones.
 
 Flagged for later: `mintLandmarkUid` keys on the *recoverable* `selector` (identity should be
 role + accessibleName + hierarchicalContext; selector is the mutable part). And the manual Pick path
@@ -127,13 +129,28 @@ question.
 | Slice | Deliverable | Status |
 |---|---|---|
 | **b1** | `reconcileObservedLandmarks` — observed-accept reconciles to the Locale (no off-catalog dupes) | **landed** v2.74.764 |
-| **b2** | Merge-on-save (or read-before-build) for perspectives + landmarks — predicates/profile survive re-author | pending |
-| **b3** | Synthesize `perspective.predicates` at observed-accept from grounded landmarks (incl. the success-state leaf) | pending — needs b2 |
-| **b4** | Point T1 postconditions at `perspective_ref`; demote `url_matches` to the bootstrap rung; route nav-URL to the T2 edge | pending |
+| **b2** | Merge-on-save for perspectives + landmarks — predicates/profile/effects survive re-author | **landed** v2.74.765 |
+| **b3** | Synthesize `perspective.predicates` (`buildPerspectivePredicates`) from grounded landmarks → the perspective is a real (monitorable) condition via `isPerspectiveActive` | **landed** v2.74.765 |
+| **b4** | T1 fragment gate via `perspective_ref(P)` | **prototyped + backed out** — see note |
+| **b5** | A SAFE T1 substrate gate (non-fatal, or anchor-landmark) for the precondition, **and** a T1 **postcondition** → an OUTCOME perspective (results region promoted to a landmark); route the nav-URL edge fact to the owning T2 | pending |
 
-`derivePhasePostcondition` (v2.74.763) is the current T1 postcondition synthesizer; its `url-nav`
-branch is the edge fact slated to move to T2 in b4, and its `spa-settle` branch should reference a
-landmark/perspective ref (b3) rather than a raw selector.
+### b4 backout note (bug pass, v2.74.765)
+
+b4 prototyped an entry-fragment precondition `[{type:'perspective_ref', perspectiveId}]`, then **backed it out**.
+Two facts make it unsafe as a *fatal* gate:
+
+1. `perspective_ref` expands (Assertion.js) to "**all** the perspective's landmarks present" (requires `match:'all'`).
+2. `PreconditionGate` failure is **fatal** — `ExecutionEngine` returns `{status:'failed'}` and emits `fragment_failed`.
+
+So the gate would block any **multi-fragment** capability (its perspective's landmarks span pages, so "all present"
+can never hold on the entry page) and any **render-on-open reveal** (the option isn't in the DOM until opened) —
+converting working capabilities into gate failures. Since preconditions were empty before, shipping it is a net
+regression. The perspective is *still* the monitorable condition (b3, via `isPerspectiveActive`, which is read-only
+with graceful fallbacks — over-strictness there is harmless); only the **fatal fragment gate** is deferred.
+
+**b5** should wire the gate with the right semantics: a **non-fatal** advisory check, OR reference only the
+fragment's **anchor** landmark (present before acting) rather than all of them — and add the postcondition→OUTCOME-
+perspective half (results region promoted to a registry landmark; the nav-URL edge fact routed to the owning T2).
 
 ## 7. Open decisions
 

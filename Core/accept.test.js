@@ -2,7 +2,7 @@
 // (Node 16 has no `node --test`; this is a plain assert script.)
 import assert from 'node:assert';
 import {
-  canAccept, buildLandmarkRecords, buildPerspectiveRecord, buildCapabilityAcceptance,
+  canAccept, buildLandmarkRecords, buildPerspectiveRecord, buildPerspectivePredicates, buildCapabilityAcceptance,
   buildTrialTrace, buildAcceptance, landmarkRefActions, buildParamSchema, buildTerminalDescriptor,
   mintCapabilityId, mintLandmarkUid, mintPerspectiveId, ACCEPT_SCHEMA,
 } from './accept.js';
@@ -73,6 +73,25 @@ test('buildPerspectiveRecord composes the landmark uids, authoredBy model', () =
   assert.equal(p.authoredBy, 'model');
   assert.equal(p.name, 'apply to this job');
   assert.equal(p.groundId, 'gnd_1');
+  // b3 — the perspective carries an activation predicate tree (else it would be vacuously always-active)
+  assert.ok(Array.isArray(p.predicates) && p.predicates.length === 1, 'predicates synthesized');
+  assert.equal(p.predicates[0].operator, 'and');
+  assert.equal(p.predicates[0].children[0].kind, 'urlMatches');
+  assert.deepEqual(p.predicates[0].children[1].children.map((c) => c.target), ['lmk_sg_a', 'lmk_sg_b']);
+});
+
+// ── b3: perspective activation predicate ──
+test('buildPerspectivePredicates: and(urlMatches, or(landmarkExists)) with url-only + single-landmark + empty variants', () => {
+  const full = buildPerspectivePredicates({ localeUrl: 'https://x/jobs?q=a#top', landmarkUids: ['u1', 'u2'] });
+  assert.equal(full[0].operator, 'and');
+  assert.equal(full[0].children[0].kind, 'urlMatches');
+  assert.equal(full[0].children[0].pattern, 'https://x/jobs', 'url scope strips query/hash');
+  assert.equal(full[0].children[1].operator, 'or');
+  const one = buildPerspectivePredicates({ localeUrl: 'https://x/jobs', landmarkUids: ['u1'] });
+  assert.equal(one[0].children[1].kind, 'landmarkExists', 'single landmark → bare leaf, not an or');
+  assert.deepEqual(buildPerspectivePredicates({ localeUrl: 'https://x/jobs', landmarkUids: [] }),
+    [{ kind: 'urlMatches', pattern: 'https://x/jobs', mode: 'contains' }], 'no substrate → url-only bootstrap rung');
+  assert.deepEqual(buildPerspectivePredicates({}), [], 'nothing grounded → empty (always-active back-compat)');
 });
 
 // ── lean capability points at the saved entities (no flat binding) ──
