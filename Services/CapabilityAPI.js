@@ -120,7 +120,7 @@ export class CapabilityAPI {
   static async listCapabilities(filter = {}) {
     const descriptors = [];
 
-    // Ground-scoped Workflows (the historical "Strategy"; entityKind='workflow').
+    // Tier-2 STRATEGIES — within-Ground fragment trees (getAllStrategies → strategies:*; entityKind='strategy').
     const workflows = await StorageManager.getAllStrategies();
     for (const workflow of workflows) {
       const desc = await CapabilityAPI.#buildDescriptor(workflow);
@@ -130,10 +130,9 @@ export class CapabilityAPI {
       descriptors.push(desc);
     }
 
-    // v2.74.82 — Top-level Strategy entities (entityKind='strategy').
-    // These don't belong to a Ground; their bodies are composition steps
-    // (Workflow / Analysis invocations + control flow). Invocation routes
-    // through WorkflowExecutor instead of ExecutionEngine.executeStrategy.
+    // v2.74.82 — Tier-3 WORKFLOWS — top-level, cross-Ground orchestrations (listWorkflows →
+    // workflows:*; entityKind='workflow'). Their bodies are composition steps (Strategy / Analysis
+    // invocations + control flow); invocation routes through WorkflowExecutor, not executeStrategy.
     const strategies = await StorageManager.listWorkflows();
     for (const strategy of strategies) {
       const desc = CapabilityAPI.#buildStrategyEntityDescriptor(strategy);
@@ -310,13 +309,12 @@ export class CapabilityAPI {
 
     return {
       id          : strategy.id,
-      name        : strategy.name ?? 'Untitled Workflow',
+      name        : strategy.name ?? 'Untitled Strategy',
       kind        : 'task',
-      // v2.74.82 — entityKind discriminator. Workflows = the Ground-scoped
-      // fragment-tree primitive. Strategies (entityKind='strategy') are
-      // top-level orchestrations built atop Workflows + Analyses; their
-      // descriptor is built by #buildStrategyEntityDescriptor.
-      entityKind  : 'workflow',
+      // entityKind discriminator (v2.74.82; tier labels corrected v2.74.778). This is a Tier-2
+      // STRATEGY — the within-Ground fragment tree. Tier-3 WORKFLOWS (entityKind='workflow') are the
+      // cross-Ground orchestrations built atop Strategies + Analyses (#buildStrategyEntityDescriptor).
+      entityKind  : 'strategy',
       version     : strategy.updatedAt ? new Date(strategy.updatedAt).toISOString() : null,
       summary     : strategy.goal ?? '',
       description : strategy.goal ?? '',
@@ -369,9 +367,9 @@ export class CapabilityAPI {
 
     return {
       id          : strategy.id,
-      name        : strategy.name ?? 'Untitled Strategy',
+      name        : strategy.name ?? 'Untitled Workflow',
       kind        : 'task',
-      entityKind  : 'strategy',
+      entityKind  : 'workflow',
       version     : strategy.updatedAt ? new Date(strategy.updatedAt).toISOString() : null,
       summary     : strategy.description ?? '',
       description : strategy.description ?? '',
@@ -452,20 +450,20 @@ export class CapabilityAPI {
    * @returns {Promise<{ invocationId: string, status: string }>}
    */
   static async invoke(capabilityId, input = {}, options = {}) {
-    // v2.74.82 — Resolve the capability across both stores. The historical
-    // Workflow store (StorageManager.getStrategy) wins on UUID collision —
+    // v2.74.82 — Resolve the capability across both stores. The Tier-2 Strategy
+    // store (StorageManager.getStrategy) wins on UUID collision —
     // see getCapability for the same precedence.
     let entity, entityKind, capabilityName, totalSteps;
     const workflow = await StorageManager.getStrategy(capabilityId);
     if (workflow) {
-      entity = workflow; entityKind = 'workflow';
-      capabilityName = workflow.name ?? 'Unnamed Workflow';
+      entity = workflow; entityKind = 'strategy';
+      capabilityName = workflow.name ?? 'Unnamed Strategy';
       totalSteps = (workflow.fragmentSteps ?? []).length;
     } else {
       const strategy = await StorageManager.getWorkflow(capabilityId);
       if (strategy) {
-        entity = strategy; entityKind = 'strategy';
-        capabilityName = strategy.name ?? 'Unnamed Strategy';
+        entity = strategy; entityKind = 'workflow';
+        capabilityName = strategy.name ?? 'Unnamed Workflow';
         totalSteps = (strategy.steps ?? []).length;
       } else {
         // T1-as-first-class — a standalone Fragment capability (no Strategy wrapper). #startInvocation runs it by
@@ -789,15 +787,15 @@ export class CapabilityAPI {
     rec.startedAt = Date.now();
 
     try {
-      // v2.74.82 — Route by entityKind. Workflow entities (the historical
-      // Ground-scoped Strategy) go through ExecutionEngine.executeStrategy.
-      // Top-level Strategy entities go through executeWorkflow.
-      if (rec.entityKind === 'strategy') {
+      // Route by entityKind (tier labels corrected v2.74.778). Tier-3 WORKFLOW entities (cross-Ground
+      // orchestrations) go through executeWorkflow; Tier-2 STRATEGY entities go through
+      // ExecutionEngine.executeStrategy.
+      if (rec.entityKind === 'workflow') {
         await CapabilityAPI.#startStrategyInvocation(rec);
         return;
       }
 
-      // capabilityId === strategyId (Workflow entity id) — OR a fragmentId (T1-as-first-class). A bare Fragment is
+      // capabilityId === strategyId (Tier-2 Strategy entity id) — OR a fragmentId (T1-as-first-class). A bare Fragment is
       // wrapped in a SYNTHETIC one-step strategy at run time and run inline (never persisted), so the rest of this
       // path — emit / executeStrategy / completion — is identical to a saved strategy.
       let strategy = await StorageManager.getStrategy(rec.capabilityId);
@@ -806,7 +804,7 @@ export class CapabilityAPI {
         const fragment = await StorageManager.getFragment(rec.capabilityId);
         if (fragment) { inlineStrategy = wrapFragmentAsStrategy(fragment, { strategyId: `fragment:${fragment.id}` }); strategy = inlineStrategy; }
       }
-      if (!strategy) throw new Error(`Workflow not found: ${rec.capabilityId}`);
+      if (!strategy) throw new Error(`Strategy not found: ${rec.capabilityId}`);
       const ground = await StorageManager.getGround(strategy.groundId);
       if (!ground) throw new Error(`Parent ground ${strategy.groundId} not found for workflow ${strategy.id}`);
 

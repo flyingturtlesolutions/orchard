@@ -244,23 +244,33 @@ export function buildDestinationPerspective({ intent, groundId = '', destLocaleU
 }
 
 /**
- * b6b (v2.74.775) — choose a grounded landmark ON the destination page to anchor a navigating fragment's
- * destination perspective. PURE. Scans existing perspectives for one on the SAME canonical page (origin+pathname)
- * as `destLocaleUrl` that carries ≥1 landmark, and returns its first landmarkRef — a landmark Explore/authoring
- * already grounded on the destination, so "it is present" is a real "we arrived" signal (no new capture needed).
- * Returns null when the destination isn't grounded yet (caller keeps url_matches). Skips deprecated perspectives.
+ * b6b (v2.74.775; guarded v2.74.776) — choose a grounded landmark ON the destination page to anchor a navigating
+ * fragment's destination perspective. PURE. Returns a landmarkRef Explore/authoring already grounded on the
+ * destination (so "it is present" is a real "we arrived" signal), or null when there's nothing safe to anchor on
+ * (caller keeps url_matches). Two guards keep b6b from minting degenerate / duplicate destination perspectives:
+ *
+ *   1. CROSS-PAGE only — if `opts.sourceUrl` is the SAME canonical page (origin+pathname) as the destination, this
+ *      is a same-page change (e.g. re-searching ON the results page, query/hash only), NOT a new node → null. (A
+ *      destination perspective there would just echo the operative perspective — the "odd duplicate" b6b produced.)
+ *   2. NOT an operative control — skip any landmark in `opts.excludeUids` (this capability's own operative set), so
+ *      the arrival anchor is never one of the controls the fragment itself drives (which persist across the nav).
+ *
  * @param {object[]} existing  perspectives on the ground (StorageManager.listPerspectives)
  * @param {string} destLocaleUrl  the navigation destination url
+ * @param {{sourceUrl?:string, excludeUids?:string[]}} [opts]
  * @returns {string|null}
  */
-export function pickDestinationLandmark(existing, destLocaleUrl) {
+export function pickDestinationLandmark(existing, destLocaleUrl, { sourceUrl = '', excludeUids = [] } = {}) {
   const scope = _urlScopePattern(destLocaleUrl);
   if (!scope) return null;
+  if (sourceUrl && _urlScopePattern(sourceUrl) === scope) return null;   // guard 1 — same page, not a new node
+  const exclude = new Set((Array.isArray(excludeUids) ? excludeUids : []).filter(Boolean));
   for (const p of (Array.isArray(existing) ? existing : [])) {
     if (!p || p.lifecycle === 'deprecated') continue;
-    if (_urlScopePattern(p.localeUrl) !== scope) continue;   // must be the SAME destination page
+    if (_urlScopePattern(p.localeUrl) !== scope) continue;       // a perspective grounded ON the destination page
     const refs = (Array.isArray(p.landmarkRefs) ? p.landmarkRefs : []).filter(Boolean);
-    if (refs.length) return refs[0];
+    const pick = refs.find((u) => !exclude.has(u));              // guard 2 — not one of THIS capability's operative controls
+    if (pick) return pick;
   }
   return null;
 }

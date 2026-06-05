@@ -3268,13 +3268,14 @@ async function _refreshGroundListImpl() {
           <button class="btn-secondary tiny" data-action="json-chrome" data-gid="${ground.id}" title="View the full Ground.chrome (promoted features + depth layers + per-Locale overrides) as JSON">{ }</button>
         </div>
         <div class="sitemap-nodes">${chromeList.slice(0, CHROME_SHOWN).map(chromeRow).join('')}${chromeList.length > CHROME_SHOWN ? `<div class="empty-state small">+${chromeList.length - CHROME_SHOWN} more — see JSON</div>` : ''}</div>` : '';
-      // v2.74.494 — Workflows (cross-Locale partOf): pick a destination archetype → the
-      // multi-page paths there (GET_WORKFLOWS); each row builds a runnable workflow (BUILD_WORKFLOW).
+      // v2.74.494 — within-Ground cross-Locale STRATEGIES (partOf; a multi-page journey within ONE
+      // Ground is a Tier-2 Strategy — docs/TIER_MODEL.md): pick a destination archetype → the multi-page
+      // paths there (GET_WORKFLOWS); each row builds a runnable Strategy (BUILD_WORKFLOW; legacy msg name).
       const wfTargets = [...modeled, ...discovered];
       const workflowsHtml = (wfTargets.length && (smMap?.edges?.length || 0) > 0) ? `
         <div class="ground-section-head" style="margin-top:8px;border-top:1px solid rgba(127,127,127,.18);padding-top:6px">
-          <span class="ground-section-label">Workflows</span>
-          <span class="sitemap-node-meta" title="Multi-page journeys composed over the site map (partOf): pick a destination to see the paths there, then build a runnable cross-page workflow">multi-page journeys</span>
+          <span class="ground-section-label">Strategies</span>
+          <span class="sitemap-node-meta" title="Multi-page journeys composed over the site map (partOf): pick a destination to see the paths there, then build a runnable cross-page Strategy (a multi-page journey within this Ground)">multi-page journeys</span>
         </div>
         <select id="wf-target-${ground.id}" style="width:100%;box-sizing:border-box;margin:2px 0 4px;font-size:12px;padding:3px 6px">
           <option value="">Reach which page…</option>
@@ -3367,7 +3368,7 @@ async function _refreshGroundListImpl() {
           const badge = wf.fullyModeled
             ? '<span style="color:#3fb950" title="every step is a modeled archetype">●</span>'
             : '<span style="opacity:.55" title="some steps not yet modeled — build navigates but may skip un-modeled steps’ actions">◐</span>';
-          return `<div class="sitemap-node"><span class="sitemap-node-status">${badge}</span><span class="sitemap-node-name" style="font-size:11px">${chips}</span><span class="sitemap-node-meta"><button class="btn-secondary tiny" data-action="build-wf" data-path="${escAttr(path)}" title="Build a runnable cross-page workflow (Fragment + Strategy) for this path — a best-effort draft to review/run">⚙ build</button></span></div>`;
+          return `<div class="sitemap-node"><span class="sitemap-node-status">${badge}</span><span class="sitemap-node-name" style="font-size:11px">${chips}</span><span class="sitemap-node-meta"><button class="btn-secondary tiny" data-action="build-wf" data-path="${escAttr(path)}" title="Build a runnable cross-page Strategy (persisted as a Fragment + Strategy) for this path — a best-effort draft to review/run">⚙ build</button></span></div>`;
         };
         wfSelect.addEventListener('change', async () => {
           const target = wfSelect.value;

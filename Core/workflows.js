@@ -1,20 +1,29 @@
-// Core/workflows.js — cross-Locale Workflows: the `partOf` layer ABOVE the Locale.
+// Core/workflows.js — builds cross-Locale **Tier-2 STRATEGIES**: ordered multi-page journeys
+// WITHIN ONE GROUND, composed over the Ground siteMap.
 //
-// A Locale models ONE page archetype; a Workflow is a multi-page JOURNEY composed over the
-// Ground siteMap — an ordered path through archetypes, following the nav (`leadsTo`/`link`)
-// edges that connect them (e.g. home → category → product → cart → checkout). PAGEMODEL_SPEC
-// §1 lists `partOf` (composite flow) as the one deferred edge type; this is its cross-Locale
-// realization: each archetype on the path is `partOf` the workflow.
+// ⚠ TIER NAMING — canonical: docs/TIER_MODEL.md. A cross-Locale journey within ONE Ground is a
+// **Tier-2 Strategy** (a Ground IS many Locales; crossing them is a `navigate` step INSIDE the
+// Strategy, not a higher tier). The "Workflow" noun throughout this module — and its messages
+// (GET_WORKFLOWS / BUILD_WORKFLOW) and the Studio picker — is the LEGACY MISLABEL: a Tier-3
+// Workflow is the CROSS-GROUND composition of Strategies, which this module never reaches. The
+// identifier/message/UI rename is the coordinated step-3 pass (with the entityKind/storage swap);
+// this header is the conceptual correction at the source.
 //
-// This module supplies the NAVIGATION BACKBONE — which pages, in what order, via which control
-// — as pure graph operations over the siteMap. The per-step page actions come from each
-// Locale's capability synthesis (Core/capabilitySynth); a runnable workflow stitches the two:
-// for each step, NAVIGATE via the prior step's link control, then run that archetype's goal.
+// A Locale models ONE page archetype; this builds a multi-page JOURNEY over the Ground siteMap —
+// an ordered path through archetypes, following the nav (`leadsTo`/`link`) edges that connect them
+// (e.g. home → category → product → cart → checkout). PAGEMODEL_SPEC §1 lists `partOf` (composite
+// flow) as the one deferred edge type; this is its cross-Locale realization: each archetype on the
+// path is `partOf` the Strategy.
+//
+// This module supplies the NAVIGATION BACKBONE — which pages, in what order, via which control —
+// as pure graph operations over the siteMap. The per-step page actions come from each Locale's
+// capability synthesis (Core/capabilitySynth); a runnable Strategy stitches the two: for each step,
+// NAVIGATE via the prior step's link control, then run that archetype's goal.
 //
 // PURE: no DOM / chrome / storage. Graph ops over the siteMap {nodes, edges}.
 //
 // @module Core/workflows
-// @version 2.74.492
+// @version 2.74.777
 
 import { synthesizeCapabilityDraft } from './capabilitySynth.js';
 
@@ -139,9 +148,11 @@ function _normLabel(s) {
  * direct NAVIGATE to the next page's URL when no link is resolvable. Params from every step's
  * goal are collected (deduped by name; collisions share a binding and are flagged).
  *
- * The output shape matches capabilitySynth's draft, so capabilitySynth.buildCapabilityRecords
- * turns it into the same { fragment, strategy } the execution engine runs — a workflow is just
- * a longer, cross-page Fragment.
+ * The output shape matches capabilitySynth's draft. ⚠ TIER-COLLAPSE (TIER_MODEL.md worklist #2,
+ * deferred): this currently flattens the WHOLE multi-page path into ONE Fragment via
+ * capabilitySynth.buildCapabilityRecords, instead of authoring a Tier-2 Strategy that composes ONE
+ * Fragment PER PAGE (with `navigate` steps between). Per DESIGN_tier2_lowering.md the per-page-fragment
+ * Strategy tree is the correct shape; the flatten is a known structural defect for a separate slice.
  *
  * @param {object} skeleton  workflowFromPath() output
  * @param {{localesByArchetype?:Object, goals?:Object, name?:string}} opts

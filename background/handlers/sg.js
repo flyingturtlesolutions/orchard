@@ -487,8 +487,18 @@ export function createSgMessageHandlers(ctx) {
           const rp = runPhases[i];
           if (!rp || rp.outcomeUid) continue;
           if (!rp.to || !rp.postcondition || rp.postcondition.source !== 'url-nav') continue;
-          const destUid = pickDestinationLandmark(existingPersps, rp.to);
-          if (!destUid) continue;   // destination not grounded yet → keep url_matches
+          // v2.74.776 — guarded: CROSS-PAGE only (a same-canonical-page query change is not a new node) and never
+          // anchored on this capability's own operative controls (protoLandmarkUids). Both guards stop b6b minting
+          // a destination perspective that just echoes the operative one (the "odd duplicate" on a re-search).
+          const destUid = pickDestinationLandmark(existingPersps, rp.to, { sourceUrl: rp.localeUrl || rp.url || '', excludeUids: protoLandmarkUids });
+          if (!destUid) continue;   // same-page change / ungrounded / only operative controls → keep url_matches
+          // dedup — reuse an existing destination perspective with the SAME arrival landmark on this page (don't fork)
+          const existingDest = findMatchingPerspective(existingPersps, { localeUrl: rp.to, landmarkUids: [destUid] });
+          if (existingDest) {
+            rp.postcondition = { match: 'all', conditions: [{ type: 'perspective_ref', perspectiveId: existingDest.id }], source: 'destination-perspective' };
+            Logger.info('background', `DERIVE_OBSERVED — nav phase ${i} postcondition → reused destination perspective ${existingDest.id}`);
+            continue;
+          }
           const dest = buildDestinationPerspective({ intent: capName, groundId, destLocaleUrl: rp.to, destLandmarkUid: destUid, discriminator: String(i) });
           if (!dest) continue;
           try {

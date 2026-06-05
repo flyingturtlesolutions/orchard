@@ -173,7 +173,7 @@ test('buildDestinationPerspective — a navigating fragment’s url_matches → 
   assert.equal(buildDestinationPerspective({ intent: 'x', groundId: 'g', destLocaleUrl: 'https://x/jobs' }), null, 'no destination landmark → null (caller keeps url_matches — the bootstrap rung)');
 });
 
-test('pickDestinationLandmark — first grounded landmark on the SAME destination page; null when ungrounded (b6b)', () => {
+test('pickDestinationLandmark — grounded arrival landmark; cross-page + non-operative guards (b6b, guarded v2.74.776)', () => {
   const existing = [
     { id: 'p_home', localeUrl: 'https://x.com/',     landmarkRefs: ['l_search'] },                 // wrong (origin) page
     { id: 'p_jobs', localeUrl: 'https://x.com/jobs',  landmarkRefs: ['l_results', 'l_filter'] },     // the destination
@@ -183,6 +183,12 @@ test('pickDestinationLandmark — first grounded landmark on the SAME destinatio
   assert.equal(pickDestinationLandmark(existing, 'https://x.com/about'), null, 'destination not grounded → null (keep url_matches)');
   assert.equal(pickDestinationLandmark([{ id: 'p', localeUrl: 'https://x.com/jobs', landmarkRefs: [] }], 'https://x.com/jobs'), null, 'grounded but landmark-less → null');
   assert.equal(pickDestinationLandmark(existing, ''), null, 'no destination url → null');
+  // guard 1 — a SAME-canonical-page change (re-search on the results page; query differs) is not a new node → null
+  assert.equal(pickDestinationLandmark(existing, 'https://x.com/jobs?q=new', { sourceUrl: 'https://x.com/jobs?q=old' }), null, 'same page (query-only change) → no destination perspective (the odd-duplicate fix)');
+  assert.equal(pickDestinationLandmark(existing, 'https://x.com/jobs', { sourceUrl: 'https://x.com/' }), 'l_results', 'a genuine cross-page nav still resolves');
+  // guard 2 — never anchor on THIS capability's own operative controls
+  assert.equal(pickDestinationLandmark(existing, 'https://x.com/jobs', { excludeUids: ['l_results'] }), 'l_filter', 'skips an operative landmark → next non-operative one');
+  assert.equal(pickDestinationLandmark(existing, 'https://x.com/jobs', { excludeUids: ['l_results', 'l_filter'] }), null, 'only operative controls on the destination → null (keep url_matches, no echo perspective)');
 });
 
 // ── lean capability points at the saved entities (no flat binding) ──
