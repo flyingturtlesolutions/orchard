@@ -17,7 +17,7 @@
 // See docs/DESIGN_intent_orchestration.md §4–§6.
 //
 // @module Core/orchMatch
-// @version 2.74.698
+// @version 2.74.779
 
 import { feedbackAdjustment } from './feedbackLearn.js';   // ORCH-FB-2 — relevance shaping from confirm/reject history
 
@@ -73,15 +73,25 @@ export function toCandidate(capability, strategy = null) {
 /**
  * Funnel stages 0–1: scope candidates to the current Ground/Locale and partition by executability. PURE.
  * `sameLocale` (URL equality — inject normalizeUrl-based) and `runnableHere` (live precondition check) are
- * injected; defaults make it a pure exact-match + always-runnable. Off-Ground candidates are dropped.
- * @returns {{here:object[], reachable:object[], off:object[]}}  here = runnable now; reachable = same Ground,
- *          another Locale (needs a navigate); off = different Ground (not a candidate).
+ * injected; defaults make it a pure exact-match + always-runnable.
+ *
+ * Scope tiers (docs/DESIGN_comprehension_split.md §4): the default (T1/T2) keeps the within-Ground funnel —
+ * off-Ground candidates are DROPPED to `off`. `crossGround:true` (T3X / global scope) instead keeps a different-
+ * Ground candidate as `reachable` — it's reachable via a Ground HOP (the cross-Ground analog of a Locale navigate),
+ * so the matcher ranks across Grounds rather than discarding them. This is the only partition change T3 needs.
+ * @returns {{here:object[], reachable:object[], off:object[]}}  here = runnable now; reachable = needs a navigate
+ *          (same Ground other Locale, OR — when crossGround — a different Ground); off = excluded.
  */
-export function scopeAndPartition(candidates, { currentGroundId = null, currentLocaleUrl = '', sameLocale = (a, b) => a === b, runnableHere = () => true } = {}) {
+export function scopeAndPartition(candidates, { currentGroundId = null, currentLocaleUrl = '', sameLocale = (a, b) => a === b, runnableHere = () => true, crossGround = false } = {}) {
   const here = [], reachable = [], off = [];
   for (const c of (Array.isArray(candidates) ? candidates : [])) {
     if (!c) continue;
-    if (currentGroundId && c.groundId && c.groundId !== currentGroundId) { off.push(c); continue; }
+    if (currentGroundId && c.groundId && c.groundId !== currentGroundId) {
+      // T3X (global scope): a different-Ground capability is still a candidate, reachable via a Ground hop.
+      // Default (within-Ground): off-Ground is not a candidate — dropped.
+      if (crossGround) reachable.push(c); else off.push(c);
+      continue;
+    }
     if (c.localeUrl && currentLocaleUrl && sameLocale(c.localeUrl, currentLocaleUrl) && runnableHere(c)) here.push(c);
     else reachable.push(c);
   }

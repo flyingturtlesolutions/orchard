@@ -13,7 +13,7 @@
 // floor still returns a best-effort flat decomposition so an empty ground can show gaps either way.
 //
 // @module Core/orchComprehend
-// @version 2.74.736
+// @version 2.74.779
 
 import { decomposeAsk, liftConditional } from './orchChain.js';
 import { classifyReadAsk } from './observe.js';
@@ -69,20 +69,23 @@ function _roleFromId(id) {
   return 'step';
 }
 
-// Tag every leaf with effect (read/act/reason) + scope (default ground; slice 4+ may widen) + role. Recurses into
-// control-flow bodies. Mutates in place (the steps are freshly built). PURE apart from that mutation.
-function _tag(steps) {
+// Tag every leaf with effect (read/act/reason) + scope + role. Recurses into control-flow bodies. `defaultScope`
+// is the scope a leaf gets when it doesn't PRE-carry one — 'ground' for the within-Ground (T2) pass, 'global' for
+// the cross-Ground (T3X) pass where each sub-intent binds to a Strategy on its own (later-resolved) Ground. A leaf
+// that pre-sets its own scope is respected (the seam is additive). The `ground` field stays empty here — it's
+// filled by ground RESOLUTION (T3X-1), not at comprehend time. Mutates in place. PURE apart from that mutation.
+function _tag(steps, defaultScope = 'ground') {
   for (const s of (Array.isArray(steps) ? steps : [])) {
     if (!s) continue;
     if (s.kind === 'foreach' || s.kind === 'loop' || s.kind === 'gate') {
-      s.scope = s.scope || 'ground';
-      if (Array.isArray(s.body)) _tag(s.body);
+      s.scope = s.scope || defaultScope;
+      if (Array.isArray(s.body)) _tag(s.body, defaultScope);
     } else if (s.kind === 'wait') {
       // structural pacing — no effect/scope
     } else {
       const eff = effectForKind(s.kind);
       if (eff) s.effect = s.effect || eff;
-      s.scope = s.scope || 'ground';
+      s.scope = s.scope || defaultScope;
       s.role = s.role || _roleFromId(s.id);
     }
   }
@@ -108,10 +111,14 @@ function _comprehendSequence(ask) {
 /**
  * Comprehend an ask into a PlanShape (unbound, effect-tagged slots). PURE — substrate-free. Reuses liftConditional
  * for the conditional shape; foreach escalates (semantic body split) with a best-effort flat decomposition.
+ * `opts.defaultScope` is the tier of the bind: 'ground' (T2, default — bind sub-goals to Fragments within a Ground)
+ * or 'global' (T3X — bind sub-intents to Strategies across Grounds). The SHAPE decomposition is identical at every
+ * tier ("intents all the way down"); only the scope tag (and therefore the pool the binder draws from) differs.
  * @param {string} ask
+ * @param {{defaultScope?:('ground'|'global')}} [opts]
  * @returns {{shape:string, steps:object[], escalate:boolean}}
  */
-export function comprehend(ask) {
+export function comprehend(ask, { defaultScope = 'ground' } = {}) {
   const { shape } = routeShape(ask);
   let steps = null;
   let escalate = false;
@@ -127,5 +134,5 @@ export function comprehend(ask) {
   } else {
     steps = [_leaf(String(ask || ''), 's0', false)];
   }
-  return { shape, steps: _tag(steps), escalate };
+  return { shape, steps: _tag(steps, defaultScope), escalate };
 }

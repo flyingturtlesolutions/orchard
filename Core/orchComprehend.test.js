@@ -91,3 +91,33 @@ describe('orchComprehend — ask → a PlanShape of unbound, effect-tagged slots
     assert.equal(a.steps.every((s) => JSON.stringify(s).includes('"capabilityId":null') || s.kind === 'analyze' || s.kind === 'gate'), true);
   });
 });
+
+describe('orchComprehend — T3X global scope (the cross-Ground recursion harness)', () => {
+  // every leaf carries scope === expected (recurses into control-flow bodies)
+  function assertScope(steps, expected) {
+    for (const s of steps) {
+      if (s.kind === 'foreach' || s.kind === 'loop' || s.kind === 'gate') { assert.equal(s.scope, expected); assertScope(s.body || [], expected); }
+      else if (s.kind === 'wait') { /* structural */ }
+      else { assert.equal(s.scope, expected, `${s.kind} scope`); }
+    }
+  }
+
+  it('defaultScope omitted → every leaf ground-scoped (T2, unchanged)', () => {
+    assertScope(comprehend('search for jobs and apply').steps, 'ground');
+    assertScope(comprehend('the salary').steps, 'ground');
+  });
+
+  it("defaultScope:'global' → every leaf global-scoped (T3X); ground stays unresolved", () => {
+    const c = comprehend('find a job on linkedin and save it to notion', { defaultScope: 'global' });
+    assertScope(c.steps, 'global');
+    assert.equal(c.steps.every((s) => s.ground == null), true, 'ground is filled later by resolution, not at comprehend time');
+    // intents all the way down: the SHAPE is identical to the ground pass — only the scope tag differs.
+    const g = comprehend('find a job on linkedin and save it to notion');
+    assert.deepEqual(c.steps.map((s) => s.kind), g.steps.map((s) => s.kind));
+  });
+
+  it('a global-tagged plan still validates (the IR seam was always there)', () => {
+    const c = comprehend('research a topic then post a summary', { defaultScope: 'global' });
+    assert.deepEqual(validatePlan({ steps: c.steps }).errors, [], 'global scope is a valid plan');
+  });
+});

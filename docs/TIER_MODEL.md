@@ -53,8 +53,12 @@ The system is correct and consistent without these; do as one coordinated pass w
 - `StorageManager` breakpoint accessors `getStrategyBreakpoints` / `saveStrategyBreakpoints` (keyed by a `workflowId`, used by the T3 debugger); `workflow-debug.js` `strategy_*` event names (shared "Bucket E" vocab).
 - **Remote sync paths** (`StoragePaths.js`): a T2 `strategies:*` record writes to a `/workflows/` path and a T3 `workflows:*` to `workspace/strategies/` — internally consistent + round‑trips, but a future path rename would be a *remote* (Orchard) migration, distinct from local storage.
 
-### Needs your read — possibly a different axis (not touched)
-- `studio.html:286‑289` + `Studio/StrategyForm.js:1505‑1506` label a frontier/composer Strategy variant **"T3"** ("Frontier (Composer‑based, T3)" / "T3 Strategies cannot run yet"). This may be an *authoring‑method* tier (hand‑authored vs composer‑built), NOT the composition tier — left as‑is pending your call.
+### Two axes of "tier" — both legitimate (confirmed)
+"Tier" is used in **two independent ways**; do not conflate them (conflating them is what made the frontier label look inverted):
+1. **Composition tier** (this doc) — groups *primitives* by what composes what: T1 Fragment/Observation/Analysis → T2 Strategy → T3 Workflow → Intent.
+2. **Decision / prediction‑path tier** — how a capability's path was *produced* (its provenance/confidence): **T1 = cache** (hand‑authored, deterministic) · **T2 = (intermediate)** · **T3 = frontier** (composer / LLM‑built) · **T4 = human**.
+
+So `Studio/StrategyForm.js:1505‑1506` "Frontier (Composer‑based, **T3**)" and `studio.html:286‑289` "T3 Strategies cannot run yet" are **correct** — that "T3" is the *decision‑path* axis (a frontier‑built Strategy), NOT the composition T3 (Workflow). Left as‑is, intentionally.
 
 ## 5. The one‑sentence test
 

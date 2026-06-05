@@ -34,9 +34,32 @@ import { buildVisualObservation, isVisualObservation, visualToInput, describeFor
 import { buildCompositeTemplate, matchTemplate, rebindSteps } from '../../Core/orchTemplate.js';   // ORCH-X T2 — cross-argument composite rebind
 import { validatePlan } from '../../Core/orchPlan.js';   // ORCH-L — structural guard for a lifted (foreach/gate) plan
 import { promoteComposite, buildConvergeObservationRecord } from '../../Core/orchPromote.js';   // CONVERGE — T2 composite IR → canonical runnable Strategy (Studio-visible)
+import { buildGroundCatalog, resolveGround } from '../../Core/groundCatalog.js';   // T3X-1 — the global Ground catalog + ground resolution (intent → which site)
+import { buildWorkflowRecord } from '../../Core/tier3.js';   // T3X-2 — cross-Ground comprehension lowering (resolved sub-intents → a Workflow record)
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
 import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
+
+// T3X-2 — bind a cross-Ground sub-intent to a STRATEGY on its resolved Ground. Reuses the within-Ground matcher
+// (toCandidate → rankAndDecide) over that Ground's matcher-store capabilities, scoped to Strategies (a `workflow`
+// step dispatches a Strategy by id). Returns { capabilityId, capabilityName, params } or null (a gap). Async I/O
+// glue over the tested pure cores (groundCatalog/tier3); not unit-tested (LLM/storage path — verify live).
+async function _bindStrategyOnGround(ctx, clause, groundId) {
+  let caps = [];
+  try { caps = await ctx.readSgCapabilities(groundId); } catch { return null; }
+  const candidates = (Array.isArray(caps) ? caps : [])
+    .filter((c) => c && c.kind !== 'observation' && c.strategyId)   // a Strategy on this Ground (has a strategyId)
+    .map((c) => toCandidate(c));
+  if (!candidates.length) return null;
+  const decision = rankAndDecide(clause, candidates, { now: Date.now() });
+  const cand = decision && decision.candidate;
+  if (!cand || decision.decision === 'miss') return null;
+  return {
+    capabilityId: cand.strategyId || cand.id,
+    capabilityName: cand.intent || '',
+    params: (cand.params || []).map((p) => (typeof p === 'string' ? p : (p && p.name))).filter(Boolean),
+  };
+}
 
 // OBS-READ bridge — map a manual Observation extract to the EXACT OBSERVE_* message Studio's "Verify" button
 // dispatches (Sidepanel/modes/observation-author.js `_observeMsgFor`). We reuse the proven runtime path verbatim
@@ -823,6 +846,69 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, op, counts, total, grounds: grounds.length, scope });
       } catch (err) {
         Logger.error('background', `ORCH_ADMIN failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // T3X — CROSS-GROUND COMPREHENSION. The recursion one tier up (docs/DESIGN_t3_cross_ground.md): decompose a
+    // cross-Ground ask into sub-intents (the SAME page-independent comprehendIntent — "intents all the way down"),
+    // resolve which Ground each runs on (T3X-1 ground catalog), bind a Strategy on it (the existing matcher), and
+    // lower the result into a runnable WORKFLOW that composes those Strategies (T3X-2). The Workflow runs on the
+    // existing runtime — executeStrategy opens each step's Ground tab, data flows via workflowScope. Read-only
+    // unless save:true (the chat reviews first). Integration glue over the unit-tested pure cores — verify live.
+    COMPREHEND_CROSS_GROUND: async (payload, _sender, sendResponse) => {
+      try {
+        const { ask = '', save = false } = payload ?? {};
+        if (!String(ask).trim()) { sendResponse({ success: false, error: 'empty ask' }); return; }
+
+        // 1. The global Ground catalog — every Ground + its Strategies' goal labels (the T3X-1 substrate).
+        const grounds = (await StorageManager.getAllGrounds()) || [];
+        if (!grounds.length) { sendResponse({ success: false, error: 'no Grounds to compose across' }); return; }
+        const capLabelsByGround = {};
+        for (const g of grounds) {
+          const gid = g && (g.id || g.groundId); if (!gid) continue;
+          try { const strs = await StorageManager.listStrategies(gid); capLabelsByGround[gid] = (Array.isArray(strs) ? strs : []).map((s) => (s && (s.name || s.goal)) || '').filter(Boolean); } catch { /* */ }
+        }
+        const catalog = buildGroundCatalog(grounds, capLabelsByGround);
+        const byId = new Map(grounds.map((g) => [g && (g.id || g.groundId), g]).filter(([k]) => k));
+
+        // 2. Decompose into sub-intents (the page-independent comprehender; a T3-framed prompt is a refinement).
+        const spec = await AnthropicService.comprehendIntent({ userIntent: ask });
+        const subGoals = (spec && Array.isArray(spec.subGoals) && spec.subGoals.length) ? spec.subGoals : [{ id: 's0', label: ask }];
+
+        // 3. Per sub-intent: resolve its Ground (T3X-1) + bind a Strategy on it (the existing matcher).
+        const resolved = [];
+        const ambiguities = [];
+        for (let i = 0; i < subGoals.length; i++) {
+          const sgi = subGoals[i] || {};
+          const clause = sgi.label || sgi.clause || ask;
+          const gr = resolveGround(clause, catalog);
+          if (gr.decision === 'ambiguous') ambiguities.push({ subIntentId: sgi.id || `s${i}`, clause, candidates: gr.candidates });
+          const groundId = gr.groundId || null;
+          const g = groundId ? byId.get(groundId) : null;
+          const bound = groundId ? await _bindStrategyOnGround(ctx, clause, groundId) : null;
+          resolved.push({
+            id: sgi.id || `s${i}`, clause, groundId,
+            groundUrl: g ? (g.url || (Array.isArray(g.urlPatterns) ? g.urlPatterns[0] : null)) : null,
+            capabilityId: bound ? bound.capabilityId : null,
+            capabilityName: bound ? bound.capabilityName : '',
+            params: bound ? bound.params : [],
+          });
+        }
+
+        // 4. Lower → a runnable cross-Ground Workflow record (T3X-2).
+        const wfId = `wf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const built = buildWorkflowRecord({ id: wfId, intent: (spec && spec.target) || ask, name: String(ask).slice(0, 60), resolved });
+
+        // 5. Save only when asked AND fully runnable (the chat freezes a reviewed Workflow).
+        let saved = false;
+        if (save && built.workflow && built.runnable) {
+          try { await StorageManager.saveWorkflow(built.workflow); saved = true; } catch (e) { Logger.warn('background', `COMPREHEND_CROSS_GROUND save failed: ${e.message}`); }
+        }
+        Logger.info('background', `COMPREHEND_CROSS_GROUND ▸ "${String(ask).slice(0, 60)}" → ${resolved.length} sub-intent(s), ${((built.workflow && built.workflow.steps) || []).length} step(s) across ${((built.workflow && built.workflow.groundIds) || []).length} Ground(s), runnable=${built.runnable}${saved ? ', saved' : ''}`);
+        sendResponse({ success: true, workflow: built.workflow, runnable: built.runnable, gaps: built.gaps, resolved, ambiguities, saved });
+      } catch (err) {
+        Logger.error('background', `COMPREHEND_CROSS_GROUND failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },

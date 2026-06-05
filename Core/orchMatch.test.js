@@ -250,3 +250,29 @@ describe('orchMatch — ORCH-M0 HIT/MISS matcher core', () => {
     assert.ok(r2.scoped.reachable >= 1, 'the date filter is reachable from another Locale, not a true no-capability');
   });
 });
+
+describe('orchMatch — T3X crossGround partition (global scope)', () => {
+  const G2 = 'ground-notion';
+  const save = { id: 'cap-save', groundId: G2, localeUrl: 'https://www.notion.so', intent: 'Save a page', strategyId: 's5', params: [], aliases: ['save to notion'] };
+
+  it('default (within-Ground) DROPS off-Ground candidates to off', () => {
+    const cands = [dateF, save].map((x) => toCandidate(x));
+    const { here, reachable, off } = scopeAndPartition(cands, { currentGroundId: G, currentLocaleUrl: RESULTS });
+    assert.deepEqual(off.map((c) => c.id), ['cap-save'], 'the off-Ground Notion cap is dropped (T1/T2)');
+    assert.deepEqual(here.map((c) => c.id), ['cap-date']);
+    assert.equal(reachable.length, 0);
+  });
+
+  it('crossGround:true KEEPS the off-Ground candidate as reachable (a Ground hop)', () => {
+    const cands = [dateF, save].map((x) => toCandidate(x));
+    const { here, reachable, off } = scopeAndPartition(cands, { currentGroundId: G, currentLocaleUrl: RESULTS, crossGround: true });
+    assert.equal(off.length, 0, 'nothing dropped under global scope');
+    assert.ok(reachable.some((c) => c.id === 'cap-save'), 'the Notion cap is reachable via a Ground hop');
+    assert.deepEqual(here.map((c) => c.id), ['cap-date'], 'same-Ground same-Locale still runnable here');
+  });
+
+  it('no currentGroundId → nothing is off (the cross-Ground catalog ranks everything)', () => {
+    const cands = [dateF, save].map((x) => toCandidate(x));
+    assert.equal(scopeAndPartition(cands, { crossGround: true }).off.length, 0);
+  });
+});
