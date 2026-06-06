@@ -740,6 +740,96 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // T3X-IND (v2.74.795) — MATCH ACROSS ALL GROUNDS. The chat panel is INDEPENDENT of the current tab: a GENERAL
+    // request ("search jazz singer jobs") that misses on the current page is matched against EVERY Ground's
+    // capabilities (LEXICAL floor — no per-Ground LLM, so it's cheap across N Grounds), returning the Grounds whose
+    // best candidate is a HIT. The chat then ACTS on a single hit (run it there) or SAYS SO on several (the user
+    // picks — we don't guess which site). `excludeGroundId` skips the current Ground (ORCH_MATCH already tried it).
+    // A smarter disambiguation than "list them" is the follow-up; this is the independence floor.
+    ORCH_MATCH_GLOBAL: async (payload, _sender, sendResponse) => {
+      try {
+        const { ask = '', excludeGroundId = null } = payload ?? {};
+        if (typeof ask !== 'string' || !ask.trim()) { sendResponse({ success: false, error: 'ask required' }); return; }
+        const askIsRead = classifyReadAsk(ask).isRead;
+        const _isReadCand = (c) => !!c && (c.kind === 'observation' || c.effect === 'read');
+        const grounds = (await StorageManager.getAllGrounds()) || [];
+        const hits = [];
+        for (const g of grounds) {
+          const gid = g && (g.id || g.groundId);
+          if (!gid || gid === excludeGroundId) continue;
+          let caps = [];
+          try { caps = await ctx.readSgCapabilities(gid); } catch { continue; }
+          if (!Array.isArray(caps) || !caps.length) continue;
+          // Orphan filter (a capability whose backing Strategy was deleted is invisible) — mirrors ORCH_MATCH.
+          let liveIds = null;
+          try { liveIds = new Set((await StorageManager.listStrategies(gid)).map((s) => s && s.id).filter(Boolean)); } catch { /* read failed → don't filter */ }
+          const _orphan = (c) => !!(c && c.strategyId && liveIds && !liveIds.has(c.strategyId));
+          const projected = caps.filter((c) => isActiveCapability(c) && !_orphan(c) && c.kind !== 'composite').map((c) => toCandidate(c)).filter(Boolean);
+          // Effect-scope like ORCH_MATCH: a READ ask ranks observations; an ACTION ranks non-observations.
+          const pool = askIsRead ? projected.filter(_isReadCand)
+            : (projected.filter((c) => !_isReadCand(c)).length ? projected.filter((c) => !_isReadCand(c)) : projected);
+          if (!pool.length) continue;
+          const decision = rankAndDecide(ask, pool, { now: Date.now() });   // LEXICAL floor (no LLM scorer) — cheap across N Grounds
+          if (decision && decision.candidate && decision.decision !== 'miss') {
+            const c = decision.candidate;
+            const raw = (c.raw && typeof c.raw === 'object') ? c.raw : c;
+            hits.push({
+              groundId: gid,
+              groundName: _groundLabel(g),
+              groundUrl: g.url || (Array.isArray(g.urlPatterns) ? g.urlPatterns[0] : null) || null,
+              capabilityId: c.id,
+              capabilityName: c.intent || raw.name || '',
+              capabilityKind: raw.strategyId ? 'strategy' : (raw.fragmentId ? 'fragment' : 'strategy'),
+              effect: _isReadCand(c) ? 'read' : 'action',
+            });
+          }
+        }
+        Logger.info('background', `ORCH_MATCH_GLOBAL ▸ "${String(ask).slice(0, 60)}" → ${hits.length} Ground(s): ${hits.map((h) => h.groundName).join(', ') || '(none)'}`);
+        sendResponse({ success: true, hits });
+      } catch (err) {
+        Logger.error('background', `ORCH_MATCH_GLOBAL failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // T3X-IND (v2.74.795) — BUILD a runnable 1-step Workflow that runs ONE capability on ANOTHER Ground (the chosen
+    // global-match hit). Binds the ask's values to the capability's params (the SAME LLM binder ORCH_MATCH uses), then
+    // lowers a single resolved sub-intent via the tested tier3 + WorkflowExecutor path — so the run reuses ALL the
+    // cross-Ground hop/run wiring (executeStrategy opens the Ground tab) with NO new runtime. Returns the record; the
+    // chat SAVES + INVOKEs it (the existing _orchRunWorkflow path), so "run it on another site" is just a tiny Workflow.
+    BUILD_SG_ON_GROUND_WORKFLOW: async (payload, _sender, sendResponse) => {
+      try {
+        const { ask = '', groundId = null, capabilityId = null } = payload ?? {};
+        if (typeof ask !== 'string' || !ask.trim() || !groundId || !capabilityId) { sendResponse({ success: false, error: 'ask + groundId + capabilityId required' }); return; }
+        const g = ((await StorageManager.getAllGrounds()) || []).find((x) => (x && (x.id || x.groundId)) === groundId);
+        if (!g) { sendResponse({ success: false, error: 'ground not found' }); return; }
+        const cap = (await ctx.readSgCapabilities(groundId)).find((c) => c.id === capabilityId);
+        if (!cap) { sendResponse({ success: false, error: 'capability not found' }); return; }
+        const params = (Array.isArray(cap.params) ? cap.params : []).map((p) => (typeof p === 'string' ? p : (p && p.name))).filter(Boolean);
+        let stated = {};
+        if (params.length) {
+          try { const bp = await AnthropicService.bindClauseParams({ clause: ask, params }); if (bp && bp.values && typeof bp.values === 'object') stated = bp.values; }
+          catch (e) { Logger.warn('background', `BUILD_SG_ON_GROUND_WORKFLOW bindClauseParams unavailable: ${e.message}`); }
+        }
+        const groundUrl = g.url || (Array.isArray(g.urlPatterns) ? g.urlPatterns[0] : null) || null;
+        // The DISPATCH id the Workflow step runs is the backing Strategy/Fragment id — NOT the sgCapability matcher id
+        // (executeStrategy loads by strategyId; a bare Fragment is wrapped by id). Same precedence the cross-Ground
+        // binder uses (_bindStrategyOnGround). `capabilityId` (the param) is the matcher id we looked the cap up by.
+        const dispatchId = cap.strategyId || cap.fragmentId || cap.id;
+        const capabilityKind = cap.strategyId ? 'strategy' : (cap.fragmentId ? 'fragment' : 'strategy');
+        const resolved = [{ id: 's0', clause: ask, groundId, groundName: _groundLabel(g), groundUrl, capabilityId: dispatchId, capabilityKind, capabilityName: cap.intent || cap.name || '', params, stated }];
+        wireCrossGroundData(resolved);   // STATED → step literals (so the search runs with the asked value, not empty)
+        const wfId = `wf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const built = buildWorkflowRecord({ id: wfId, intent: ask, name: String(ask).slice(0, 60), resolved });
+        if (!built || !built.workflow || !Array.isArray(built.workflow.steps) || !built.workflow.steps.length) { sendResponse({ success: false, error: 'could not build a runnable step for that capability' }); return; }
+        Logger.info('background', `BUILD_SG_ON_GROUND_WORKFLOW — "${String(ask).slice(0, 50)}" → ${capabilityKind} ${capabilityId} on ${_groundLabel(g)} (params: ${Object.keys(stated).join(',') || 'none'})`);
+        sendResponse({ success: true, workflow: built.workflow, runnable: built.runnable });
+      } catch (err) {
+        Logger.error('background', `BUILD_SG_ON_GROUND_WORKFLOW failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
     // ORCH-D — the aliases flywheel (write side). When a match is CONFIRMED (the user accepts a propose, or a
     // run succeeds), the chat records the ask phrasing here; it accretes onto the capability's aliases so next
     // time it's an exact hit (and richer alias coverage promotes propose → auto-fire). The matcher reads

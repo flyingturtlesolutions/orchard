@@ -1316,6 +1316,17 @@ function _orchOfferComprehended(msg, { tabId, groundId, ask, comp }) {
 // (COMPREHEND_CROSS_GROUND HOPS to the named Ground at run time) and OFFERS the workflow ONLY when it's runnable —
 // so "search react jobs on indeed" works off-Indeed, while a named site with no matching capability declines and
 // falls through to the normal "show me" / record offer. Returns true iff it took over (appended a workflow offer).
+// T3X live-fix (v2.74.794) — a cross-Ground comprehension is WORTH SHOWING when ≥1 sub-intent actually BOUND to a
+// capability (the workflow has a runnable step), even if others are gaps — the offer renders ✓/⚠ per step and turns
+// each gap into a "teach it there" action. An all-gap result (nothing bound) is NOT worth a workflow card; it falls
+// through to the normal record offer. PURE.
+function _xgHasBoundStep(cg) {
+  return !!(cg && cg.success !== false && cg.workflow && Array.isArray(cg.workflow.steps) && cg.workflow.steps.length >= 1);
+}
+function _xgHasGap(cg) {
+  return !!((Array.isArray(cg && cg.gaps) && cg.gaps.length) || (Array.isArray(cg && cg.repairs) && cg.repairs.length));
+}
+
 async function _tryCrossGroundFallback(ask, existingMsg = null) {
   // Reuse the caller's in-flight bubble (so there's a spinner during the LLM call + no empty double-bubble); else
   // append a fresh one. On a decline we DON'T remove a reused bubble — the caller falls through and overwrites it.
@@ -1323,10 +1334,55 @@ async function _tryCrossGroundFallback(ask, existingMsg = null) {
   probe.classList.remove('assistant'); probe.classList.add('thinking'); _setMessageBody(probe, 'Looking across your sites…');
   let cg = null;
   try { cg = await _orchReq('COMPREHEND_CROSS_GROUND', { ask }); } catch { if (!existingMsg) probe.remove(); return false; }
-  if (!cg || cg.success === false || !cg.runnable || !cg.workflow) { if (!existingMsg) probe.remove(); return false; }
+  // Offer a runnable workflow OR an honest PARTIAL (some steps bound + a gap to teach) — not only the fully-bound case.
+  if (!_xgHasBoundStep(cg)) { if (!existingMsg) probe.remove(); return false; }
   probe.classList.remove('thinking'); probe.classList.add('assistant');
   _orchOfferWorkflow(probe, { ask, res: cg });
   return true;
+}
+
+// T3X-IND (v2.74.795) — the ask points at the CURRENT page/site ("filter remote jobs HERE"), so it should stay
+// scoped to this tab — don't fan out to other Grounds. PURE lexical guard for the global-match gate.
+function _isPageReferential(ask) {
+  return /\b(here|this page|this site|on this page|on this site|current page|on screen|on the page)\b/i.test(String(ask || ''));
+}
+
+// T3X-IND (v2.74.795) — MAKE THE CHAT INDEPENDENT of the current tab. A GENERAL request that didn't match the
+// current page is matched across ALL Grounds (ORCH_MATCH_GLOBAL). 1 Ground → offer to run it there; ≥2 → SAY SO and
+// let the user pick (we don't guess which site). 0 → fall through to the normal record offer. Reuses the caller's
+// in-flight bubble. Returns true iff it took over.
+async function _tryGlobalMatch(ask, existingMsg = null) {
+  const probe = existingMsg || appendMessage({ role: 'thinking', body: 'Checking your other sites…' });
+  probe.classList.remove('assistant'); probe.classList.add('thinking'); _setMessageBody(probe, 'Checking your other sites…');
+  let r = null;
+  try { r = await _orchReq('ORCH_MATCH_GLOBAL', { ask }); } catch { if (!existingMsg) probe.remove(); return false; }
+  const hits = (r && Array.isArray(r.hits)) ? r.hits : [];
+  if (!hits.length) { if (!existingMsg) probe.remove(); return false; }
+  probe.classList.remove('thinking'); probe.classList.add('assistant');
+  if (hits.length === 1) {
+    const h = hits[0];
+    const name = h.groundName || 'another site';
+    _setMessageBody(probe, `Not on this page — but I can do that on ${name}. Run it there?`);
+    const bar = _orchActionBar(probe);
+    bar.appendChild(_mkBtn(`▶ Run on ${name}`, () => { bar.remove(); _orchRunOnGround(appendMessage({ role: 'assistant', body: '' }), { ask, hit: h }); }));
+    bar.appendChild(_mkBtn('Not now', () => { bar.remove(); }));
+    return true;
+  }
+  // ≥2 — SAY SO (per the interim spec: surface the ambiguity, don't pick). One button per site → run on the chosen one.
+  _setMessageBody(probe, `That works on a few of your sites — ${hits.map((h) => h.groundName).join(', ')}. Which one?`);
+  const bar = _orchActionBar(probe);
+  for (const h of hits) bar.appendChild(_mkBtn(h.groundName || 'that site', () => { bar.remove(); _orchRunOnGround(appendMessage({ role: 'assistant', body: '' }), { ask, hit: h }); }));
+  return true;
+}
+
+// T3X-IND — run a globally-matched capability on its (non-current) Ground: build a 1-step Workflow on that Ground
+// (BUILD_SG_ON_GROUND_WORKFLOW binds the ask's values + lowers it), then save+invoke it via the existing run path
+// (which HOPS to the Ground and runs). So "search jazz singer jobs" off-Indeed runs on Indeed without leaving chat.
+async function _orchRunOnGround(msg, { ask, hit }) {
+  _setMessageBody(msg, `Setting up on ${hit.groundName}…`);
+  const b = await _orchReq('BUILD_SG_ON_GROUND_WORKFLOW', { ask, groundId: hit.groundId, capabilityId: hit.capabilityId });
+  if (!b || b.success === false || !b.workflow) { _setMessageBody(msg, `Couldn’t set that up${b && b.error ? ` — ${b.error}` : ''}.`); return; }
+  _orchRunWorkflow(msg, { workflow: b.workflow, ask });
 }
 
 // Render a comprehended cross-site Workflow (COMPREHEND_CROSS_GROUND): the per-site steps (✓ bound / ⚠ a gap),
@@ -1542,12 +1598,16 @@ async function _tryGroundedTurn(text) {
     const cg = await _orchReq('COMPREHEND_CROSS_GROUND', { ask: text });
     _xgTried = true;
     const grounds = new Set(((cg && Array.isArray(cg.resolved)) ? cg.resolved : []).map((r) => r && r.groundId).filter(Boolean));
-    if (cg && cg.success && grounds.size >= 2) {
+    // Commit to the cross-Ground card for a real multi-Ground plan (≥2 Grounds), OR a PARTIAL one worth showing
+    // (≥1 step bound + a gap to teach — e.g. Indeed ✓ but Pixabay not a Ground yet): surface the honest plan with
+    // the gap + repair instead of a flat "no capability". A single fully-bound Ground with no gap still falls
+    // through to the within-Ground cascade so a within-site ask isn't hijacked.
+    if (_xgHasBoundStep(cg) && (grounds.size >= 2 || _xgHasGap(cg))) {
       probe.classList.remove('thinking'); probe.classList.add('assistant');
       _orchOfferWorkflow(probe, { ask: text, res: cg });
       return true;
     }
-    probe.remove();   // not cross-Ground → let the within-Ground cascade handle it unchanged
+    probe.remove();   // nothing bound / no gap to show → let the within-Ground cascade handle it unchanged
   }
 
   // ORCH-X — a COMPOUND ask ("search for x AND filter by y") is DECOMPOSED and CHAINED over existing
@@ -1634,6 +1694,9 @@ async function _tryGroundedTurn(text) {
   // says "search react jobs on indeed"), resolve it to that Ground and run there before giving up.
   if (m.decision === 'miss' && !m.groundId) {
     if (namesAnySite(text) && !_xgTried && await _tryCrossGroundFallback(text, thinking)) return true;
+    // T3X-IND — no Ground for this tab + a GENERAL request → match across ALL Grounds (independent chat): 1 → run
+    // there, ≥2 → ask which. A page-referential or site-named ask is handled above; this is the "do it anywhere" case.
+    if (!namesAnySite(text) && !_isPageReferential(text) && await _tryGlobalMatch(text, thinking)) return true;
     thinking.remove();
     return false;
   }
@@ -1686,6 +1749,10 @@ async function _tryGroundedTurn(text) {
     // rather than offering to record it here on the wrong site. Falls through to the record offers (which overwrite
     // this bubble) if it can't.
     if (namesAnySite(text) && !_xgTried && await _tryCrossGroundFallback(text, thinking)) return true;
+    // T3X-IND — this page is a Ground but can't do the ask, and it's a GENERAL request (not page-referential): the
+    // chat is independent of the tab, so match across your OTHER Grounds before offering to record it here. 1 → run
+    // there, ≥2 → ask which. Falls through to the record offers (which overwrite this bubble) if nothing matches.
+    if (!namesAnySite(text) && !_isPageReferential(text) && await _tryGlobalMatch(text, thinking)) return true;
     // OBS-READ — a QUESTION with no observation yet: offer to capture one by POINTING at the value, instead of
     // (or alongside) recording an action demonstration.
     if (classifyReadAsk(text).isRead) {
