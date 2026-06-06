@@ -21,7 +21,11 @@ import { planStep, validatePlan } from './orchPlan.js';
 import { parsePredicate, conditionIsUnless, isConditionalAsk, predicateLabel } from './orchAnalyze.js';   // ORCH-A — predicate → gate
 
 // Verbs / question-words that mark the START of a new intent clause. After a connective, one of these → boundary.
-const _VERB = /^(?:please\s+|also\s+|then\s+|now\s+)?(search|find|filter|sort|order|open|close|add|remove|delete|clear|select|choose|pick|download|upload|show|list|count|check|get|fetch|go|navigate|visit|play|pause|set|enable|disable|toggle|apply|view|browse|look|read|tell|click|tap|press|book|reserve|subscribe|follow|share|save|edit|update|create|sign|log|register|scroll|what|which|how|is|are|does|do|when|where|who|why|can|could|should)\b/i;
+// v2.74.798 — added the read/extract verbs (retrieve|grab|extract|obtain) so a compound ACTION+READ ask like
+// "search jazz singer jobs AND retrieve the first title" splits into two clauses. Without "retrieve" here the whole
+// thing stayed one clause → never recognized as compound → never routed as a chain (live trace 21:03). Deliberately
+// excludes "pull"/"copy" (would false-split "pull-up bars", "copy editor").
+const _VERB = /^(?:please\s+|also\s+|then\s+|now\s+)?(search|find|filter|sort|order|open|close|add|remove|delete|clear|select|choose|pick|download|upload|show|list|count|check|get|fetch|retrieve|grab|extract|obtain|go|navigate|visit|play|pause|set|enable|disable|toggle|apply|view|browse|look|read|tell|click|tap|press|book|reserve|subscribe|follow|share|save|edit|update|create|sign|log|register|scroll|what|which|how|is|are|does|do|when|where|who|why|can|could|should)\b/i;
 
 // Connectives that MAY separate intents — kept as split delimiters (one capturing group) so a non-boundary
 // connective can be rejoined with its original text. A comma/semicolon is only a boundary when a verb follows.

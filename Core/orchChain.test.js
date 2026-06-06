@@ -75,6 +75,17 @@ describe('orchChain — decompose a compound ask + assemble a sequential plan (O
     assert.deepEqual(c.map((x) => x.text), ['search for gifs', 'how many results are there']);
   });
 
+  it('decomposeAsk: read/extract verbs split a compound (v2.74.798 — the "and retrieve" live-trace bug)', () => {
+    assert.deepEqual(
+      decomposeAsk('search for jazz singer jobs in new york and retrieve the first title').map((x) => x.text),
+      ['search for jazz singer jobs in new york', 'retrieve the first title'],
+    );
+    assert.deepEqual(decomposeAsk('search react jobs then grab the top result').map((x) => x.text), ['search react jobs', 'grab the top result']);
+    assert.deepEqual(decomposeAsk('find a flight and extract the price').map((x) => x.text), ['find a flight', 'extract the price']);
+    // excluded verbs ("pull"/"copy") do NOT split — guards against false splits on "pull-up", "copy editor"
+    assert.deepEqual(decomposeAsk('search bars and pull up the routine').map((x) => x.text), ['search bars and pull up the routine']);
+  });
+
   it('isCompoundAsk: reflects clause count', () => {
     assert.equal(isCompoundAsk('search for music'), false);
     assert.equal(isCompoundAsk('search for music and filter by date'), true);

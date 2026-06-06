@@ -1385,6 +1385,65 @@ async function _orchRunOnGround(msg, { ask, hit }) {
   _orchRunWorkflow(msg, { workflow: b.workflow, ask });
 }
 
+// T3X-IND (v2.74.798) — open a Ground in a foreground tab and wait for it to settle, so a chain can run there.
+function _openGroundTab(url) {
+  return new Promise((resolve) => {
+    if (!url) { resolve(null); return; }
+    let tab = null;
+    try { chrome.tabs.create({ url, active: true }, (t) => { void chrome.runtime.lastError; tab = t || null; afterCreate(); }); }
+    catch { resolve(null); return; }
+    function afterCreate() {
+      if (!tab || typeof tab.id !== 'number') { resolve(null); return; }
+      let done = false;
+      const finish = () => {
+        if (done) return; done = true;
+        try { chrome.tabs.onUpdated.removeListener(onU); } catch (_) { /* */ }
+        // brief settle so the page's JS initializes before the chain starts typing
+        setTimeout(() => resolve(tab), 600);
+      };
+      const onU = (id, info) => { if (id === tab.id && info.status === 'complete') finish(); };
+      try { chrome.tabs.onUpdated.addListener(onU); } catch (_) { /* */ }
+      try { chrome.tabs.get(tab.id, (t) => { void chrome.runtime.lastError; if (t && t.status === 'complete') finish(); }); } catch (_) { /* */ }
+      setTimeout(finish, 15000);
+    }
+  });
+}
+
+// T3X-IND (v2.74.798) — COMPOUND off-Ground ask ("search jazz singer jobs … AND retrieve the first title", asked
+// when the side panel is on a non-Ground page). The first clause can't run on the current tab, so resolve its Ground
+// globally (on the PRIMARY/action clause) and run the WHOLE chain THERE: open the Ground in a foreground tab, then
+// _orchRunChain on it (which runs clauses sequentially on one tab — preserving the search→results→read page state).
+// 1 Ground → offer; ≥2 → the user picks. 0 → fall through. Reuses the caller's in-flight bubble.
+async function _tryGlobalChain(ask, clauses, existingMsg = null) {
+  const probe = existingMsg || appendMessage({ role: 'thinking', body: 'Checking your other sites…' });
+  probe.classList.remove('assistant'); probe.classList.add('thinking'); _setMessageBody(probe, 'Checking your other sites…');
+  let r = null;
+  try { r = await _orchReq('ORCH_MATCH_GLOBAL', { ask: clauses[0].text }); } catch { if (!existingMsg) probe.remove(); return false; }
+  const hits = (r && Array.isArray(r.hits)) ? r.hits : [];
+  if (!hits.length) { if (!existingMsg) probe.remove(); return false; }
+  probe.classList.remove('thinking'); probe.classList.add('assistant');
+  const stepList = clauses.map((c, i) => `${i + 1}. ${c.text}`).join('\n');
+  const run = async (hit) => {
+    const name = hit.groundName || 'that site';
+    _setMessageBody(probe, `Opening ${name} and running ${clauses.length} steps…`);
+    const tab = await _openGroundTab(hit.groundUrl);
+    if (!tab) { _setMessageBody(probe, `Couldn’t open ${name}.`); return; }
+    _orchRunChain(probe, { tabId: tab.id, clauses, firstMatch: null, ask });
+  };
+  if (hits.length === 1) {
+    const h = hits[0]; const name = h.groundName || 'another site';
+    _setMessageBody(probe, `That’s ${clauses.length} steps I can do on ${name}:\n${stepList}\nOpen ${name} and run them?`);
+    const bar = _orchActionBar(probe);
+    bar.appendChild(_mkBtn(`▶ Run on ${name}`, () => { bar.remove(); run(h); }));
+    bar.appendChild(_mkBtn('Not now', () => { bar.remove(); }));
+    return true;
+  }
+  _setMessageBody(probe, `A few of your sites can do this:\n${stepList}\n— ${hits.map((h) => h.groundName).join(', ')}. Which one?`);
+  const bar = _orchActionBar(probe);
+  for (const h of hits) bar.appendChild(_mkBtn(h.groundName || 'that site', () => { bar.remove(); run(h); }));
+  return true;
+}
+
 // Render a comprehended cross-site Workflow (COMPREHEND_CROSS_GROUND): the per-site steps (✓ bound / ⚠ a gap),
 // any GAPS (Q3 repairs — what to teach and where) and ASSUMPTIONS (Q2 ambiguities the resolver had to guess), then
 // Run / Save controls. Precision-first: nothing runs or persists until the user acts.
@@ -1623,6 +1682,10 @@ async function _tryGroundedTurn(text) {
       // T3X live-fix (v2.74.793) — the FIRST clause names a Ground we're not on ("search react jobs on indeed, …"),
       // so the within-Ground chain can't even start. Resolve the whole ask the cross-Ground way before giving up.
       if (namesAnySite(text) && !_xgTried && await _tryCrossGroundFallback(text, probe)) return true;
+      // T3X-IND (v2.74.798) — COMPOUND off-Ground, no site named ("search jazz singer jobs … and retrieve the first
+      // title" from a non-Ground tab): resolve the Ground globally (on the first/action clause) and run the whole
+      // chain there. This is the "compound + independence" case.
+      if (!namesAnySite(text) && !_isPageReferential(text) && await _tryGlobalChain(text, clauses, probe)) return true;
       probe.remove(); return false;
     }
     probe.classList.remove('thinking'); probe.classList.add('assistant');
