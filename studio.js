@@ -5793,6 +5793,45 @@ $('btn-copy-logs').addEventListener('click', async () => {
   }
 });
 
+// ── Download logs (since the last extension reload) ───────────────────────────
+// v2.74.797 — download the WHOLE current session as a .txt, so a trace can be handed off without copy-pasting.
+// "Current session" = from the LAST service-worker start marker ('Agent HUB service worker starting', logged on
+// every reload/SW start, background.js) to now. If that marker has aged out of the 500-entry ring buffer (a long
+// session), fall back to everything we have. The Logger scrubs PII before persisting, so the file is safe to share.
+function findLastReloadStart() {
+  for (let i = allLogEntries.length - 1; i >= 0; i--) {
+    if ((allLogEntries[i].message ?? '').includes('service worker starting')) return i;
+  }
+  return 0;   // no reload marker in the buffer → download everything we have
+}
+
+$('btn-download-logs').addEventListener('click', async () => {
+  // Re-pull the full persisted store first so the file is complete even for entries that arrived while the Logs
+  // tab wasn't focused (live LOG_ENTRY broadcasts only land when a view is listening).
+  await refreshLogs();
+  if (allLogEntries.length === 0) { toast('No logs to download', 'warn'); return; }
+
+  const startIdx = findLastReloadStart();
+  const entries  = allLogEntries.slice(startIdx);
+  const text     = entries.map(formatLogEntryAsText).join('\n');
+
+  // Filename stamped with local date-time: orchard-logs-YYYYMMDD-HHMMSS.txt
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = `orchard-logs-${stamp}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast(`Downloaded ${entries.length} log lines${startIdx > 0 ? ' (since last reload)' : ''}`);
+});
+
 // ── Clear logs ────────────────────────────────────────────────────────────────
 
 $('btn-clear-logs').addEventListener('click', async () => {
