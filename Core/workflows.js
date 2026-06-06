@@ -1,7 +1,7 @@
 // Core/workflows.js — builds cross-Locale **Tier-2 STRATEGIES**: ordered multi-page journeys
 // WITHIN ONE GROUND, composed over the Ground siteMap.
 //
-// ⚠ TIER NAMING — canonical: docs/TIER_MODEL.md. A cross-Locale journey within ONE Ground is a
+// ⚠ TIER NAMING — canonical: specs/TIER_MODEL.md. A cross-Locale journey within ONE Ground is a
 // **Tier-2 Strategy** (a Ground IS many Locales; crossing them is a `navigate` step INSIDE the
 // Strategy, not a higher tier). The "Workflow" noun throughout this module — and its messages
 // (GET_WORKFLOWS / BUILD_WORKFLOW) and the Studio picker — is the LEGACY MISLABEL: a Tier-3

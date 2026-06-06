@@ -14,7 +14,7 @@
 //   • `runnableHere(candidate) -> bool` — the live precondition evaluation (TemplateWalker.checkConditions)
 //     supplies this; defaults to true.
 //
-// See docs/DESIGN_intent_orchestration.md §4–§6.
+// See specs/DESIGN_intent_orchestration.md §4–§6.
 //
 // @module Core/orchMatch
 // @version 2.74.779
@@ -75,7 +75,7 @@ export function toCandidate(capability, strategy = null) {
  * `sameLocale` (URL equality — inject normalizeUrl-based) and `runnableHere` (live precondition check) are
  * injected; defaults make it a pure exact-match + always-runnable.
  *
- * Scope tiers (docs/DESIGN_comprehension_split.md §4): the default (T1/T2) keeps the within-Ground funnel —
+ * Scope tiers (specs/DESIGN_comprehension_split.md §4): the default (T1/T2) keeps the within-Ground funnel —
  * off-Ground candidates are DROPPED to `off`. `crossGround:true` (T3X / global scope) instead keeps a different-
  * Ground candidate as `reachable` — it's reachable via a Ground HOP (the cross-Ground analog of a Locale navigate),
  * so the matcher ranks across Grounds rather than discarding them. This is the only partition change T3 needs.
@@ -222,7 +222,7 @@ export function matchAsk(ask, candidates, ctx = {}) {
 // ── ORCH-D — aliases: the use-accreted synonym set ───────────────────────────────────────────────────────
 // A capability's description is a one-shot guess; its aliases grow from the asks that successfully match it.
 // Each confirmed phrasing becomes an alias → next time it's an exact hit (and alias coverage helps promote
-// propose → auto-fire). See docs/DESIGN_intent_orchestration.md §5.
+// propose → auto-fire). See specs/DESIGN_intent_orchestration.md §5.
 
 export function normalizeAliasPhrase(s) {
   return String(s == null ? '' : s).toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 80);

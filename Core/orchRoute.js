@@ -3,7 +3,7 @@
 // Comprehension splits into SHAPE (syntactic, stable → here, deterministic) and MEANING (semantic, novel → the
 // LLM / intent-driven pipeline, later). This module owns the SHAPE half: given an ask, decide its OUTERMOST
 // structure and hand a comprehender (slice 3) the precomputed signals so it never re-derives them ("don't
-// re-derive what you already know"). PURE — no DOM / chrome / LLM. See docs/DESIGN_comprehension_split.md §1, §5.
+// re-derive what you already know"). PURE — no DOM / chrome / LLM. See specs/DESIGN_comprehension_split.md §1, §5.
 //
 //   routeShape(ask) → { shape, signals }
 //

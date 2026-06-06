@@ -5,7 +5,7 @@
 // or records a GAP. The matcher (rankAndDecide) runs PER SLOT, not once on the whole ask — which is the only place
 // effect-scoping is correct (a mixed-effect intent's read condition and act consequent bind against different
 // pools). PURE: the caller fetches the pools (effect-partitioned, scope-filtered) and supplies a scorer; this
-// module is just the walk + the decision. See docs/DESIGN_comprehension_split.md §1, §5.
+// module is just the walk + the decision. See specs/DESIGN_comprehension_split.md §1, §5.
 //
 //   bindShape(shape, pools, opts?) → { steps, gaps, bound }
 //     pools = { read: Candidate[], act: Candidate[] }   // already scoped to the slot's tier (locale/ground/global)

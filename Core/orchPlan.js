@@ -5,7 +5,7 @@
 //   • THIS spine (pure)       — the plan IR shape, the §6 output-type → control-flow mapping, the validator
 //   • back-end (runtime, later) — emit Strategy constructs (FOREACH / ACTION_GATE / paramBindings) from a plan
 //
-// The compiler's leverage (docs/DESIGN_intent_orchestration.md §6): you DEMONSTRATE one pass; the ANALYSIS
+// The compiler's leverage (specs/DESIGN_intent_orchestration.md §6): you DEMONSTRATE one pass; the ANALYSIS
 // supplies the quantifier; the compiler FUSES them. The connection an analysis makes to the fragment(s) that
 // consume it is decided by the analysis OUTPUT TYPE — list→FOREACH, scalar→a single binding, predicate→a gate,
 // count→a loop. This module encodes that mapping + the structural guard that a plan is well-formed before it is

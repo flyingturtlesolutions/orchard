@@ -501,7 +501,7 @@ export class TemplateWalker {
       // This is the PREREQUISITE-satisfaction path (Pass Cα), where skip-if-already-satisfied is LEGITIMATE: an
       // antecedent is a precondition for a later step ("be logged in"), so re-running it when the state already
       // holds is wasteful. (A DIRECT invocation, by contrast, never skips on its effect — see
-      // ExecutionEngine.#runFragmentStep, v2.74.785, and docs/DESIGN_division_of_labor.md §6.)
+      // ExecutionEngine.#runFragmentStep, v2.74.785, and specs/DESIGN_division_of_labor.md §6.)
       // v2.74.783 — still drop precondition-shaped "fillable input present" postconditions (e.g. a search box) so a
       // parameterized antecedent (a re-search) isn't skipped on its ever-present input; a real state postcondition
       // (logged-in indicator, results region) still gates the skip.

@@ -628,7 +628,7 @@ export function createSgMessageHandlers(ctx) {
     // (scope by Ground/Locale → rank → three-way gate w/ reversibility veto) is pure (Core/orchMatch.js); this
     // handler just supplies the live page context + the library. Lexical scorer for now (the LLM select+bind
     // call is ORCH-M); live precondition eval (the runnableHere seam, funnel stage 1) lands with ORCH-M too —
-    // here the Locale scope is the executability proxy. See docs/DESIGN_intent_orchestration.md §4.
+    // here the Locale scope is the executability proxy. See specs/DESIGN_intent_orchestration.md §4.
     ORCH_MATCH: async (payload, _sender, sendResponse) => {
       try {
         const { tabId, groundId = null, ask = '' } = payload ?? {};
@@ -753,38 +753,56 @@ export function createSgMessageHandlers(ctx) {
         const askIsRead = classifyReadAsk(ask).isRead;
         const _isReadCand = (c) => !!c && (c.kind === 'observation' || c.effect === 'read');
         const grounds = (await StorageManager.getAllGrounds()) || [];
-        const hits = [];
+        // Collect every effect-scoped, ACTIVE, non-orphan candidate across ALL Grounds, tagged with its Ground.
+        const tagged = [];   // { cand, gid, g }
         for (const g of grounds) {
           const gid = g && (g.id || g.groundId);
           if (!gid || gid === excludeGroundId) continue;
           let caps = [];
           try { caps = await ctx.readSgCapabilities(gid); } catch { continue; }
           if (!Array.isArray(caps) || !caps.length) continue;
-          // Orphan filter (a capability whose backing Strategy was deleted is invisible) — mirrors ORCH_MATCH.
           let liveIds = null;
           try { liveIds = new Set((await StorageManager.listStrategies(gid)).map((s) => s && s.id).filter(Boolean)); } catch { /* read failed → don't filter */ }
           const _orphan = (c) => !!(c && c.strategyId && liveIds && !liveIds.has(c.strategyId));
           const projected = caps.filter((c) => isActiveCapability(c) && !_orphan(c) && c.kind !== 'composite').map((c) => toCandidate(c)).filter(Boolean);
-          // Effect-scope like ORCH_MATCH: a READ ask ranks observations; an ACTION ranks non-observations.
           const pool = askIsRead ? projected.filter(_isReadCand)
             : (projected.filter((c) => !_isReadCand(c)).length ? projected.filter((c) => !_isReadCand(c)) : projected);
-          if (!pool.length) continue;
-          const decision = rankAndDecide(ask, pool, { now: Date.now() });   // LEXICAL floor (no LLM scorer) — cheap across N Grounds
-          if (decision && decision.candidate && decision.decision !== 'miss') {
-            const c = decision.candidate;
-            const raw = (c.raw && typeof c.raw === 'object') ? c.raw : c;
-            hits.push({
-              groundId: gid,
-              groundName: _groundLabel(g),
-              groundUrl: g.url || (Array.isArray(g.urlPatterns) ? g.urlPatterns[0] : null) || null,
-              capabilityId: c.id,
-              capabilityName: c.intent || raw.name || '',
-              capabilityKind: raw.strategyId ? 'strategy' : (raw.fragmentId ? 'fragment' : 'strategy'),
-              effect: _isReadCand(c) ? 'read' : 'action',
-            });
-          }
+          for (const c of pool) tagged.push({ cand: c, gid, g });
         }
-        Logger.info('background', `ORCH_MATCH_GLOBAL ▸ "${String(ask).slice(0, 60)}" → ${hits.length} Ground(s): ${hits.map((h) => h.groundName).join(', ') || '(none)'}`);
+        if (!tagged.length) { Logger.info('background', `ORCH_MATCH_GLOBAL ▸ "${String(ask).slice(0, 60)}" → no candidates across Grounds`); sendResponse({ success: true, hits: [] }); return; }
+        // ONE LLM matchCapability pass over the COMBINED pool — the lexical floor is too weak for cross-Ground intent
+        // (live trace: "search jazz singer jobs" missed lexically but the LLM scored "Search jobs by title and
+        // location" 0.95). Scores are per-candidate, so we keep every Ground whose best candidate clears the floor →
+        // 1 = run it there, ≥2 = the user picks. matchCapability handles a multi-Ground candidate list (it scores
+        // intent relevance, Ground-agnostic). On API failure: degrade to the lexical floor (better than nothing).
+        let scores = null;
+        try {
+          const llm = await AnthropicService.matchCapability({ ask, candidates: tagged.map((t) => t.cand) });
+          if (llm && Array.isArray(llm.scores)) scores = new Map(llm.scores.map((s) => [s.id, s]));
+        } catch (e) { Logger.warn('background', `ORCH_MATCH_GLOBAL matchCapability unavailable → lexical fallback: ${e.message}`); }
+        const THRESH = 0.6;   // confident-match floor (the on-page hit scored 0.95; a weaker but real match still clears 0.6)
+        const bestByGround = new Map();   // gid → { relevance, hit }
+        for (const t of tagged) {
+          let rel = 0, eligible = true;
+          if (scores) { const s = scores.get(t.cand.id); if (s) { rel = Number(s.relevance) || 0; eligible = s.effectEligible !== false; } }
+          else { const d = rankAndDecide(ask, [t.cand], { now: Date.now() }); rel = (d && d.candidate && d.decision !== 'miss') ? (d.score || 0.5) : 0; }
+          if (!eligible || rel < THRESH) continue;
+          const prev = bestByGround.get(t.gid);
+          if (prev && prev.relevance >= rel) continue;
+          const c = t.cand; const raw = (c.raw && typeof c.raw === 'object') ? c.raw : c;
+          bestByGround.set(t.gid, { relevance: rel, hit: {
+            groundId: t.gid,
+            groundName: _groundLabel(t.g),
+            groundUrl: t.g.url || (Array.isArray(t.g.urlPatterns) ? t.g.urlPatterns[0] : null) || null,
+            capabilityId: c.id,
+            capabilityName: c.intent || raw.name || '',
+            capabilityKind: raw.strategyId ? 'strategy' : (raw.fragmentId ? 'fragment' : 'strategy'),
+            effect: _isReadCand(c) ? 'read' : 'action',
+            relevance: rel,
+          } });
+        }
+        const hits = [...bestByGround.values()].sort((a, b) => b.relevance - a.relevance).map((x) => x.hit);
+        Logger.info('background', `ORCH_MATCH_GLOBAL ▸ "${String(ask).slice(0, 60)}" → ${hits.length} Ground(s) [${scores ? 'LLM' : 'lexical'} over ${tagged.length} cand]: ${hits.map((h) => `${h.groundName}(${h.relevance.toFixed(2)})`).join(', ') || '(none)'}`);
         sendResponse({ success: true, hits });
       } catch (err) {
         Logger.error('background', `ORCH_MATCH_GLOBAL failed: ${err.message}`);
@@ -1001,7 +1019,7 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
-    // T3X — CROSS-GROUND COMPREHENSION. The recursion one tier up (docs/DESIGN_t3_cross_ground.md): decompose a
+    // T3X — CROSS-GROUND COMPREHENSION. The recursion one tier up (specs/DESIGN_t3_cross_ground.md): decompose a
     // cross-Ground ask into sub-intents (the SAME page-independent comprehendIntent — "intents all the way down"),
     // resolve which Ground each runs on (T3X-1 ground catalog), bind a Strategy on it (the existing matcher), and
     // lower the result into a runnable WORKFLOW that composes those Strategies (T3X-2). The Workflow runs on the

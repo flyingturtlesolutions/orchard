@@ -4,7 +4,7 @@
 // decision into { what to SAY, what ACTION the shell should take }. The shell renders `say` and wires the
 // `action` (run a grounded capability, confirm an irreversible/low-confidence one, disambiguate, suggest a
 // navigate, or ask for a demonstration). The matcher's `reason` codes drive BOTH the copy and the action —
-// the funnel's internals are directly the UX (docs/DESIGN_intent_orchestration.md §3–§4).
+// the funnel's internals are directly the UX (specs/DESIGN_intent_orchestration.md §3–§4).
 //
 // Keeping this pure means the assistant's conversational logic is unit-testable without a live page or DOM,
 // and any chat surface (the existing chat.js, a future mode) consumes the same brain.

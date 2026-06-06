@@ -4465,7 +4465,10 @@ Return ONLY the JSON array. No explanation, no markdown.`;
 
     Logger.info('AnthropicService', `matchQuestionToGround — "${question.slice(0, 60)}" against ${groundProfiles.length} ground(s)`);
 
-    const raw = await AnthropicService.#call(systemPrompt, userContent, 512, [
+    // v2.74.796 — maxTokens 2048 (was 512). This returns ONE object per Ground; with a real library (the live
+    // trace had 31 Grounds) the array overran 512 tokens and truncated mid-string → "Unterminated string in JSON"
+    // parse error, dropping the whole ranking. 2048 fits ~40–50 ranked Grounds with margin.
+    const raw = await AnthropicService.#call(systemPrompt, userContent, 2048, [
       { role: 'assistant', content: '[' },
     ]);
 

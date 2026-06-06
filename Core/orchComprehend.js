@@ -4,7 +4,7 @@
 // top-level shape; a per-shape comprehender builds the slot tree, REUSING the proven lifts (liftConditional) by
 // feeding them effect-classified clause-slots instead of LLM-bound steps. Every leaf is tagged with its work-kind
 // (read/act/reason) and bind scope (locale/ground/global), and carries `capabilityId:null` (a gap until BIND fills
-// it — slice 4). PURE — no DOM / chrome / LLM. See docs/DESIGN_comprehension_split.md §1, §3, §5.
+// it — slice 4). PURE — no DOM / chrome / LLM. See specs/DESIGN_comprehension_split.md §1, §3, §5.
 //
 //   comprehend(ask) → { shape, steps:Slot[], escalate:boolean }
 //

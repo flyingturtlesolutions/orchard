@@ -23,7 +23,7 @@ A Ground **is** many Locales, so `home → category → product → cart → che
 
 A chain becomes a **Workflow** only when it composes **whole Strategies across different Grounds**. There is **no separate "journey" tier**; a multi‑locale chain does not get promoted out of Strategy merely for spanning pages.
 
-**Scope‑tier alignment.** The comprehension‑split scope axis (`docs/DESIGN_comprehension_split.md` §4: `T1 locale / T2 ground / T3 global`) is the **same** stratification in a second vocabulary: T2 Strategy = ground scope; T3 Workflow = global / cross‑ground scope. One axis, two names.
+**Scope‑tier alignment.** The comprehension‑split scope axis (`specs/DESIGN_comprehension_split.md` §4: `T1 locale / T2 ground / T3 global`) is the **same** stratification in a second vocabulary: T2 Strategy = ground scope; T3 Workflow = global / cross‑ground scope. One axis, two names.
 
 ## 3. The inversion — what's wrong, and where
 

@@ -746,7 +746,7 @@ export class ExecutionEngine {
     //     (TemplateWalker, Pass Cα), which legitimately checks "is this prereq met"; a DIRECT call does not;
     //   • "nothing to act on" for a direct call → express it as a PRECONDITION (the target affordance is absent),
     //     not as a postcondition.
-    // See docs/DESIGN_division_of_labor.md §6 (Observability / idempotency-is-a-precondition).
+    // See specs/DESIGN_division_of_labor.md §6 (Observability / idempotency-is-a-precondition).
 
     emit({
       type: 'fragment_start', stepIdx: topLevelIndex, totalSteps: topLevelTotal,

@@ -5,7 +5,7 @@
 // instrument for a SEMANTIC condition a selector can't answer — "are there actual results, or just suggestions /
 // a 'no matches' banner?" — because the distinction lives in headings/layout, not the markup the selector sees.
 // This module is the PURE floor: turn a condition into a vision prompt, and a vision result into a predicate input.
-// No DOM / chrome / network. See docs/DESIGN_intent_orchestration.md (grounding=mechanism, the LLM=meaning).
+// No DOM / chrome / network. See specs/DESIGN_intent_orchestration.md (grounding=mechanism, the LLM=meaning).
 //
 // @module Core/orchVisual
 // @version 2.74.742
