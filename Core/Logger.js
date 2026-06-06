@@ -42,6 +42,29 @@ const STORAGE_KEY = 'logger:entries';
 /** Maximum number of entries kept in storage (ring-buffer behaviour). @constant {number} */
 const MAX_STORED  = 500;
 
+/**
+ * chrome.storage.local key for the never-evicted WARN+ERROR sidecar.
+ * v2.74.799 — DEBUG/INFO volume (every chrome message + postcondition polling)
+ * blows past MAX_STORED in a busy session, evicting early entries from the main
+ * ring before they can be downloaded. Errors are exactly what a shared trace
+ * needs, so WARN+ERROR are mirrored into this separate, longer-lived ring and
+ * merged back on read — an error survives even if it aged out of the main ring.
+ * @constant {string}
+ */
+const PROBLEMS_KEY = 'logger:problems';
+
+/** Max WARN+ERROR entries kept in the sidecar ring. @constant {number} */
+const MAX_PROBLEMS = 300;
+
+/**
+ * chrome.storage.local key marking the start of the current session. Stamped on
+ * a REAL extension reload / browser startup (onInstalled / onStartup), NOT on an
+ * idle service-worker wake — so the Logs download can slice "everything since the
+ * last reload" reliably across the SW idle-restarts that happen mid-session.
+ * @constant {string}
+ */
+export const SESSION_START_KEY = 'logger:sessionStart';
+
 // ─── Logger ───────────────────────────────────────────────────────────────────
 
 /**
@@ -151,21 +174,75 @@ export class Logger {
    */
   static async getPersistedLogs() {
     try {
-      const result = await chrome.storage.local.get(STORAGE_KEY);
-      return result[STORAGE_KEY] ?? [];
+      const result   = await chrome.storage.local.get([STORAGE_KEY, PROBLEMS_KEY]);
+      const main      = result[STORAGE_KEY]  ?? [];
+      const problems  = result[PROBLEMS_KEY] ?? [];
+      // Fast path — nothing in the sidecar, return the main ring as-is.
+      if (problems.length === 0) return main;
+      // Merge in any WARN+ERROR entries that aged out of the main ring so a
+      // shared trace never silently drops a failure.
+      return Logger.#mergeProblems(main, problems);
     } catch {
       return [];
     }
   }
 
   /**
-   * Removes all persisted log entries from chrome.storage.local.
+   * Union the main ring with the never-evicted WARN+ERROR sidecar, de-duplicating
+   * entries present in both (same timestamp+source+message) and returning the
+   * result oldest-first. ISO-8601 timestamps sort lexically == chronologically.
+   *
+   * @private
+   * @param {LogEntry[]} main
+   * @param {LogEntry[]} problems
+   * @returns {LogEntry[]}
+   */
+  static #mergeProblems(main, problems) {
+    const keyOf  = (e) => `${e.timestamp}|${e.source}|${e.message}`;
+    const seen   = new Set(main.map(keyOf));
+    const merged = main.slice();
+    for (const p of problems) {
+      const k = keyOf(p);
+      if (!seen.has(k)) { seen.add(k); merged.push(p); }
+    }
+    merged.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
+    return merged;
+  }
+
+  /**
+   * Removes all persisted log entries (main ring + WARN+ERROR sidecar).
    * @returns {Promise<void>}
    */
   static async clearLogs() {
     try {
-      await chrome.storage.local.remove(STORAGE_KEY);
+      await chrome.storage.local.remove([STORAGE_KEY, PROBLEMS_KEY]);
     } catch { /* ignore */ }
+  }
+
+  /**
+   * Stamp the start of a new session. Called from background.js on a REAL
+   * extension reload / browser startup (chrome.runtime.onInstalled / onStartup)
+   * — deliberately NOT on idle service-worker wake, so the boundary survives the
+   * SW idle-restarts that happen mid-session. The Logs download slices from this
+   * timestamp, making "everything since the last reload" reliable.
+   * @returns {Promise<void>}
+   */
+  static async markSessionStart() {
+    try {
+      await chrome.storage.local.set({ [SESSION_START_KEY]: new Date().toISOString() });
+    } catch { /* ignore */ }
+  }
+
+  /**
+   * @returns {Promise<string|null>} ISO timestamp of the current session start, or null if unset.
+   */
+  static async getSessionStart() {
+    try {
+      const r = await chrome.storage.local.get(SESSION_START_KEY);
+      return r[SESSION_START_KEY] ?? null;
+    } catch {
+      return null;
+    }
   }
 
   // ── Private implementation ─────────────────────────────────────────────────
@@ -254,16 +331,31 @@ export class Logger {
     // reads is always current. Errors in one persist don't break the
     // chain — the catch resets it to a resolved promise so future calls
     // can proceed.
+    // WARN+ERROR are additionally mirrored into the never-evicted sidecar
+    // (PROBLEMS_KEY) so a failure isn't pushed out of the main ring by DEBUG/INFO
+    // volume before it can be downloaded. DEBUG/INFO take the cheap single-write
+    // path — the extra read+write only happens on the (rare) problem entries.
+    const isProblem = (entry.levelNum ?? LOG_LEVEL.INFO) >= LOG_LEVEL.WARN;
+
     const nextTail = Logger.#persistTail
       .then(async () => {
         // ── Write to storage ────────────────────────────────────────────────
-        const result  = await chrome.storage.local.get(STORAGE_KEY);
+        const result  = await chrome.storage.local.get(isProblem ? [STORAGE_KEY, PROBLEMS_KEY] : STORAGE_KEY);
         const entries = result[STORAGE_KEY] ?? [];
         entries.push(safeEntry);
         if (entries.length > MAX_STORED) {
           entries.splice(0, entries.length - MAX_STORED);
         }
-        await chrome.storage.local.set({ [STORAGE_KEY]: entries });
+        if (isProblem) {
+          const problems = result[PROBLEMS_KEY] ?? [];
+          problems.push(safeEntry);
+          if (problems.length > MAX_PROBLEMS) {
+            problems.splice(0, problems.length - MAX_PROBLEMS);
+          }
+          await chrome.storage.local.set({ [STORAGE_KEY]: entries, [PROBLEMS_KEY]: problems });
+        } else {
+          await chrome.storage.local.set({ [STORAGE_KEY]: entries });
+        }
 
         // ── Broadcast to side panel (best-effort) ─────────────────────────
         try {

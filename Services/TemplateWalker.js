@@ -1520,7 +1520,7 @@ export class TemplateWalker {
       return false;
     };
 
-    const runOnce = async () => {
+    const runOnce = async (attemptNum) => {
       const failures = [];
       const passed   = [];
       // v2.70.0 — Evaluate scope conditions first (cheap, in-memory; no DOM
@@ -1550,27 +1550,38 @@ export class TemplateWalker {
         let res = null;
         try {
           condFrameId = await TemplateWalker._resolveFrameId(tabId, cond.frameUrl);
-          Logger.info('TemplateWalker', `checkConditions probing "${cond.type}"`, {
-            condFrameUrl   : cond.frameUrl ?? null,
-            resolvedFrameId: condFrameId,
-            selector       : cond.selector ?? null,
-            text           : cond.text ?? null,
-            pattern        : cond.pattern ?? null,
-          });
+          // v2.74.799 — Only the first probe logs the routing intent. The poll
+          // loop can run dozens of attempts; logging each one flooded the ring
+          // buffer (a 24-attempt wait was ~48 lines, evicting earlier entries).
+          // DEBUG-tier — the caller logs the final pass/fail summary at INFO.
+          if (attemptNum === 1) {
+            Logger.debug('TemplateWalker', `checkConditions probing "${cond.type}"`, {
+              condFrameUrl   : cond.frameUrl ?? null,
+              resolvedFrameId: condFrameId,
+              selector       : cond.selector ?? null,
+              text           : cond.text ?? null,
+              pattern        : cond.pattern ?? null,
+            });
+          }
           res = await TemplateWalker.#msg(tabId, {
             type: 'CHECK_CONDITION',
             payload: { condition: cond },
           }, condFrameId);
           matched = !!(res && res.matched === true);
           if (!matched) reason = res?.error ?? 'condition not met';
-          Logger.info('TemplateWalker', `checkConditions result for "${cond.type}" (frameId=${condFrameId}):`, {
-            matched,
-            reason         : matched ? null : reason,
-            elementFound   : res?.elementFound,
-            snippet        : res?.snippet,
-            snippetSource  : res?.snippetSource,
-            pageContainsSearched: res?.pageContainsSearched,
-          });
+          // Log the result on the first probe (baseline) and whenever it matches
+          // (the transition worth seeing). Intermediate "still not matched" probes
+          // stay silent — the caller logs the final timeout summary + last reasons.
+          if (attemptNum === 1 || matched) {
+            Logger.debug('TemplateWalker', `checkConditions result for "${cond.type}" (frameId=${condFrameId}):`, {
+              matched,
+              reason         : matched ? null : reason,
+              elementFound   : res?.elementFound,
+              snippet        : res?.snippet,
+              snippetSource  : res?.snippetSource,
+              pageContainsSearched: res?.pageContainsSearched,
+            });
+          }
         } catch (err) {
           matched = false;
           reason  = err.message;
@@ -1593,16 +1604,14 @@ export class TemplateWalker {
 
     const started = Date.now();
     let attempts = 0;
-    let res = await runOnce();
-    attempts++;
+    let res = await runOnce(++attempts);   // attempt 1
 
     let ok = okOf(res);
 
     // Retry loop — only engaged when timeoutMs > 0
     while (!ok && Date.now() - started < timeoutMs) {
       await TemplateWalker.#sleep(pollIntervalMs);
-      res = await runOnce();
-      attempts++;
+      res = await runOnce(++attempts);
       ok = okOf(res);
     }
 

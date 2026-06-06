@@ -315,10 +315,14 @@ getIdentitySummary()
   .catch(err => Logger.warn('background', `Orchard identity init: ${err.message}`));
 
 chrome.runtime.onInstalled.addListener(() => {
+  // v2.74.799 — mark the session boundary on a REAL reload/install (not idle SW
+  // wake) so the Logs download can reliably slice "everything since the reload".
+  Logger.markSessionStart();
   _migrationPromise = _runMigrations()
     .catch(err => Logger.error('background', `migration failed: ${err.message}`));
 });
 chrome.runtime.onStartup?.addListener?.(() => {
+  Logger.markSessionStart();   // v2.74.799 — browser launch is a new session too
   _migrationPromise = _runMigrations()
     .catch(err => Logger.error('background', `migration failed: ${err.message}`));
   flushSyncIfPending('startup').catch(() => {});

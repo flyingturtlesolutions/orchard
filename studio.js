@@ -5795,9 +5795,11 @@ $('btn-copy-logs').addEventListener('click', async () => {
 
 // ── Download logs (since the last extension reload) ───────────────────────────
 // v2.74.797 — download the WHOLE current session as a .txt, so a trace can be handed off without copy-pasting.
-// "Current session" = from the LAST service-worker start marker ('Agent HUB service worker starting', logged on
-// every reload/SW start, background.js) to now. If that marker has aged out of the 500-entry ring buffer (a long
-// session), fall back to everything we have. The Logger scrubs PII before persisting, so the file is safe to share.
+// v2.74.799 — the primary boundary is now the persisted session-start stamp (see the handler below); this marker
+// scan is the FALLBACK for when no stamp exists. It finds the LAST 'service worker starting' marker — note that
+// fires on idle-wake too, so on its own it can clip pre-idle-restart errors; the stamp is preferred precisely
+// because it doesn't. If no marker is in the buffer either, download everything. The Logger scrubs PII before
+// persisting (and never-evicts WARN+ERROR), so the file is safe to share and won't silently drop failures.
 function findLastReloadStart() {
   for (let i = allLogEntries.length - 1; i >= 0; i--) {
     if ((allLogEntries[i].message ?? '').includes('service worker starting')) return i;
@@ -5811,9 +5813,24 @@ $('btn-download-logs').addEventListener('click', async () => {
   await refreshLogs();
   if (allLogEntries.length === 0) { toast('No logs to download', 'warn'); return; }
 
-  const startIdx = findLastReloadStart();
-  const entries  = allLogEntries.slice(startIdx);
-  const text     = entries.map(formatLogEntryAsText).join('\n');
+  // v2.74.799 — Slice "since the last reload" by the persisted session-start
+  // stamp (set on a real reload/startup, NOT an idle SW wake), so an error that
+  // happened before a mid-session SW idle-restart is still included rather than
+  // sliced off at the idle-restart's marker. refreshLogs → GET_LOGS →
+  // getPersistedLogs() already merges the never-evicted WARN+ERROR sidecar, so a
+  // failure that aged out of the 500-entry main ring is back in allLogEntries.
+  // Fall back to the SW-start marker (then to everything) if the session was
+  // never stamped (installed before this shipped and not reloaded since).
+  let entries;
+  const sess = await chrome.storage.local.get('logger:sessionStart');   // Logger.SESSION_START_KEY
+  const sessionStart = sess?.['logger:sessionStart'] ?? null;
+  if (sessionStart) {
+    entries = allLogEntries.filter(e => (e.timestamp ?? '') >= sessionStart);
+    if (entries.length === 0) entries = allLogEntries.slice(findLastReloadStart());
+  } else {
+    entries = allLogEntries.slice(findLastReloadStart());
+  }
+  const text = entries.map(formatLogEntryAsText).join('\n');
 
   // Filename stamped with local date-time: orchard-logs-YYYYMMDD-HHMMSS.txt
   const d = new Date();
