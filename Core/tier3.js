@@ -167,20 +167,36 @@ export function wireCrossGroundData(resolved) {
     const stated = (si.stated && typeof si.stated === 'object') ? si.stated : {};
     const literals = { ...(si.literals || {}) };
     const scopeReads = { ...(si.scopeReads || {}) };
+    const dependsOn = Array.isArray(si.dependsOn) ? si.dependsOn : [];
+    // Outputs from the EARLIER sub-intents THIS one explicitly consumes (dependsOn) — the asked data hand-off.
+    const depOutputs = upstream.filter((o) => dependsOn.includes(o.fromId));
+
+    // Pass 1 — assign STATED literals (matched by name / shared token); collect the params still OPEN.
+    const open = [];
     for (const p of params) {
       if (Object.prototype.hasOwnProperty.call(literals, p) || scopeReads[p]) continue;   // already decided
-      // 1) literal — a value the sub-intent stated, matched to this param by normalized name / shared token
       const statedKey = Object.keys(stated).find((k) => _normName(k) === _normName(p) || _shareToken(k, p));
       if (statedKey != null) { literals[p] = stated[statedKey]; continue; }
-      // 2) scope_binding — a reference param fed by an upstream output (specific shared-token first, then a single
-      //    unambiguous reference output). Latest match wins (the most recent producer).
-      if (_REF.test(_normName(p)) && upstream.length) {
-        let match = null;
-        for (const o of upstream) if (_shareToken(o.name, p)) match = o;          // 2a specific
-        if (!match) { const refs = upstream.filter((o) => _REF.test(_normName(o.name))); if (refs.length === 1) match = refs[0]; }   // 2b single ref
-        if (match) { scopeReads[p] = match.name; continue; }
+      open.push(p);
+    }
+    // Pass 2 — bind the OPEN params from upstream outputs (else they surface as Workflow inputs). Two routes:
+    const usedDep = new Set();   // an upstream output binds at most one param
+    for (const p of open) {
+      let match = null;
+      // (a) DATA HAND-OFF (v2.74.803) — a producer THIS sub-intent dependsOn. Works for ANY param type, not only
+      //     url/email/id refs: "search Pixabay for the TITLE you read" → the plain search box ← the read's output.
+      //     Prefer a shared-token producer; else the SOLE dep output ↔ the SOLE open slot (unambiguous hand-off).
+      if (depOutputs.length) {
+        for (const o of depOutputs) if (!usedDep.has(o.name) && _shareToken(o.name, p)) { match = o; break; }
+        if (!match) { const free = depOutputs.filter((o) => !usedDep.has(o.name)); if (free.length === 1 && open.length === 1) match = free[0]; }
       }
-      // 3) else: unbound → buildWorkflowRecord surfaces it as a Workflow input
+      // (b) REFERENCE hand-off — a _REF-typed param (url/email/id/…) fed by ANY upstream ref output, even with no
+      //     explicit dependsOn: specific shared-token first, then a SINGLE unambiguous reference output.
+      if (!match && _REF.test(_normName(p)) && upstream.length) {
+        for (const o of upstream) if (_shareToken(o.name, p)) match = o;
+        if (!match) { const refs = upstream.filter((o) => _REF.test(_normName(o.name))); if (refs.length === 1) match = refs[0]; }
+      }
+      if (match) { scopeReads[p] = match.name; usedDep.add(match.name); }
     }
     si.literals = literals;
     si.scopeReads = scopeReads;

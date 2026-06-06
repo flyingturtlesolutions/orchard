@@ -148,6 +148,35 @@ describe('tier3 — T3X wireCrossGroundData (cross-Ground data-flow floor)', () 
     assert.deepEqual(workflow.steps[1].paramBindings.URL, { kind: 'scope_binding', name: 'job_url' }, 'URL flows from the upstream read, not from the user');
     assert.deepEqual(workflow.params, [], 'no URL Workflow input — the value comes across Grounds');
   });
+
+  // v2.74.803 (Step 2b) — the cross-Ground data hand-off must bind a PLAIN param (a search box), not only url/email/id
+  // refs: "search Pixabay for the title you read" → the read's output flows into Pixabay's search param.
+  it('DF read→search: a NON-ref search param binds the sole upstream output it dependsOn', () => {
+    const r = wireCrossGroundData([
+      { id: 's0', params: [], outputs: ['top_job_title'] },                                  // the Indeed read
+      { id: 's1', params: ['SEARCH_FOR_FREE_IMAGES_VIDEOS_MUSIC_MORE'], dependsOn: ['s0'] },  // the Pixabay search
+    ]);
+    assert.deepEqual(r[1].scopeReads, { SEARCH_FOR_FREE_IMAGES_VIDEOS_MUSIC_MORE: 'top_job_title' },
+      'the search box consumes the read output across Grounds, though it is not a url/email/id ref');
+  });
+
+  it('DF read→search: a stated literal on the consumer still wins over the hand-off (explicit value beats the read)', () => {
+    const r = wireCrossGroundData([
+      { id: 's0', params: [], outputs: ['top_job_title'] },
+      { id: 's1', params: ['SEARCH'], dependsOn: ['s0'], stated: { search: 'cats' } },
+    ]);
+    assert.deepEqual(r[1].literals, { SEARCH: 'cats' }, 'a stated value is a literal');
+    assert.equal(r[1].scopeReads.SEARCH, undefined, 'no scope_binding when the user gave an explicit value');
+  });
+
+  it('DF read→search: AMBIGUOUS (2 dep outputs, 2 open plain params, no shared token) → no blind guess', () => {
+    const r = wireCrossGroundData([
+      { id: 's0', params: [], outputs: ['title', 'company'] },
+      { id: 's1', params: ['SEARCH', 'CATEGORY'], dependsOn: ['s0'] },
+    ]);
+    assert.equal(r[1].scopeReads.SEARCH, undefined, 'sole-dep guard (1 dep ↔ 1 slot) does not fire → no guess');
+    assert.equal(r[1].scopeReads.CATEGORY, undefined);
+  });
 });
 
 describe('tier3 — Q3 buildGapRepairs (unbound sub-intent → actionable repair hint)', () => {

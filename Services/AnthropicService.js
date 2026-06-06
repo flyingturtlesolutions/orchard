@@ -2422,6 +2422,9 @@ Rules:
     const siteList = (Array.isArray(grounds) ? grounds : []).map((g) => `- ${(g && (g.name || g.groundId)) || ''}`).filter((s) => s.length > 2).join('\n') || '(none known yet)';
     const systemPrompt = `You COMPREHEND a CROSS-SITE web-automation intent into ORDERED SUB-INTENTS, each a whole task performed on ONE site. You are NOT shown any page. Split the journey by SITE / task boundary — NOT into within-task field-by-field phases. e.g. "find a job on LinkedIn and save it to Notion" -> [ {find a job on LinkedIn}, {save it to Notion} ]. A single-site intent yields ONE sub-intent.
 
+DATA HAND-OFF READ (the one exception to "don't split within a site"): when the user READS / EXTRACTS a value — get / grab / copy / take / retrieve the title, price, link, email, first result, … — and a LATER sub-intent USES that value, the read is ALWAYS its OWN sub-intent, EVEN on the same site as the step before it, because it PRODUCES the data the hand-off carries. NEVER fold "…and get the X" into the preceding action. The consuming sub-intent lists the read's id in dependsOn.
+e.g. "search jazz singer jobs on Indeed, get the top title, and look it up on Pixabay" -> [ {search jazz singer jobs on Indeed}, {get the top job title} dependsOn the search, {look that title up on Pixabay} dependsOn the read ]  (THREE sub-intents — the read is NOT merged into the Indeed search).
+
 The user's known sites:
 ${siteList}
 
@@ -2434,10 +2437,10 @@ Return ONLY a JSON object:
   ]
 }
 Rules:
-- Each sub-intent is ONE task on ONE site (search, save, post, buy, …) — the unit a saved Strategy performs.
-- "dependsOn": list an earlier sub-intent ONLY when this one consumes its RESULT (e.g. "save the JOB you found" depends on the find). This both orders execution AND wires the data hand-off.
-- "stated": values the ASK explicitly provides for THIS sub-intent, keyed by a guessable param name (e.g. "find senior SWE jobs" -> {"keyword":"senior software engineer"}). {} if the ask states none — do NOT invent.
-- Phrase each clause so it stands alone and names its site when the user did. Keep the ORIGINAL order of mention.`;
+- Each sub-intent is ONE task on ONE site (search, save, post, buy, …) — the unit a saved Strategy performs — WITH the data-hand-off read exception above (a producing read is its own sub-intent).
+- "dependsOn": list an earlier sub-intent ONLY when this one consumes its RESULT (e.g. "save the JOB you found" / "search Pixabay for the TITLE you read" depends on the find/read). This both orders execution AND wires the data hand-off.
+- "stated": values the ASK explicitly provides for THIS sub-intent, keyed by a guessable param name (e.g. "find senior SWE jobs" -> {"keyword":"senior software engineer"}). For a sub-intent whose input COMES FROM an upstream read (it dependsOn it), leave that input OUT of stated — it's filled at run time from the read, NOT a literal. {} if the ask states none — do NOT invent.
+- Phrase each clause so it stands alone and NAMES ITS SITE when the user did (the consumer of a read still names its own site, e.g. "…on Pixabay"). Keep the ORIGINAL order of mention.`;
     Logger.info('AnthropicService', `comprehendCrossGround — "${intent.slice(0, 80)}" (${(grounds || []).length} known sites)`);
     try {
       const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text: `Cross-site intent: ${intent}` }], 2048, [], { role: 'describe', operation: 'comprehendCrossGround' });
@@ -2476,7 +2479,7 @@ Rules:
     if (!ask || !list.length) return null;
     if (!(await AnthropicService.hasLlm())) return null;
     const siteLines = list.map((g) => `- ${g.groundId} — ${g.name || g.groundId}${g.description ? `: ${String(g.description).slice(0, 120)}` : ''}`).join('\n');
-    const systemPrompt = `You choose which SITE a single web-automation sub-intent should run on. You are shown the user's known sites (id — name: what it's for). Pick the ONE site whose purpose best fits the sub-intent by MEANING, even when the sub-intent names no site (e.g. "save this for later" -> a notes/bookmark site).
+    const systemPrompt = `You choose which SITE a single web-automation sub-intent should run on. You are shown the user's known sites (id — name: what it's for). If the sub-intent NAMES a site, pick THAT one. Otherwise pick the ONE site whose purpose best fits by MEANING (e.g. "save this for later" -> a notes/bookmark site).
 
 The user's sites:
 ${siteLines}
@@ -2484,8 +2487,9 @@ ${siteLines}
 Return ONLY a JSON object: {"groundId":"<one id from the list, EXACTLY as written, or null if none fits>"}
 Rules:
 - groundId MUST be copied verbatim from the list above, or null. NEVER invent an id or a site.
-- Choose null when no listed site plausibly performs the sub-intent — do not force a poor fit.
-- Decide by what the site is FOR, not by shared words.`;
+- NAMED SITE WINS: if the sub-intent explicitly names a site ("…on Pixabay", "search Pixabay …", "save it to Notion"), pick THAT site — the named site is AUTHORITATIVE, even when the DATA it carries (a job title, a price, an email) sounds like another site's domain. e.g. "search for the job title on Pixabay" -> the Pixabay site (NOT a job board, despite the words "job title").
+- Only when NO site is named: choose by what each site is FOR, not by shared words.
+- Choose null when no listed site plausibly performs the sub-intent — do not force a poor fit.`;
     Logger.info('AnthropicService', `matchGround — "${ask.slice(0, 60)}" over ${list.length} site(s)`);
     try {
       const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text: `Sub-intent: ${ask}` }], 64, [], { role: 'describe', operation: 'matchGround' });
