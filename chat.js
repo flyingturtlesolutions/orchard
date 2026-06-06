@@ -1351,12 +1351,13 @@ function _isPageReferential(ask) {
 // current page is matched across ALL Grounds (ORCH_MATCH_GLOBAL). 1 Ground → offer to run it there; ≥2 → SAY SO and
 // let the user pick (we don't guess which site). 0 → fall through to the normal record offer. Reuses the caller's
 // in-flight bubble. Returns true iff it took over.
-async function _tryGlobalMatch(ask, existingMsg = null) {
+async function _tryGlobalMatch(ask, existingMsg = null, excludeGroundId = null) {
   const probe = existingMsg || appendMessage({ role: 'thinking', body: 'Checking your other sites…' });
   probe.classList.remove('assistant'); probe.classList.add('thinking'); _setMessageBody(probe, 'Checking your other sites…');
   let r = null;
   try { r = await _orchReq('ORCH_MATCH_GLOBAL', { ask }); } catch { if (!existingMsg) probe.remove(); return false; }
-  const hits = (r && Array.isArray(r.hits)) ? r.hits : [];
+  let hits = (r && Array.isArray(r.hits)) ? r.hits : [];
+  if (excludeGroundId) hits = hits.filter((h) => h && h.groundId !== excludeGroundId);   // v2.74.801 — never offer to run on the Ground that just missed
   if (!hits.length) { if (!existingMsg) probe.remove(); return false; }
   probe.classList.remove('thinking'); probe.classList.add('assistant');
   if (hits.length === 1) {
@@ -1763,6 +1764,14 @@ async function _tryGroundedTurn(text) {
     thinking.remove();
     return false;
   }
+
+  // v2.74.801 — a GROUNDED miss whose ask NAMES another of your Grounds ("search pixabay for X" while on Indeed):
+  // match that other site and offer to run it THERE, instead of offering to teach it on THIS (wrong) site. The
+  // background sets m.otherGround ONLY when the ask references a DIFFERENT known Ground, so a generic "show me here"
+  // miss is untouched. Confirm-first; _isPageReferential keeps "…here" on this tab; the current Ground is excluded
+  // from the offer. Falls through to the teach-here record offer below if nothing matches on the named site.
+  if (m.decision === 'miss' && m.otherGround && !_isPageReferential(text)
+      && await _tryGlobalMatch(text, thinking, m.groundId)) return true;
 
   const turn = planAssistantTurn(m);
   const ctx = { groundId: m.groundId, tabId: tab.id, ask: text, intent: m.candidate && m.candidate.intent, paramValues: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {}, params: m.candidate && m.candidate.params };

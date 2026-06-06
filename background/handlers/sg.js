@@ -56,6 +56,29 @@ function _groundLabel(g) {
   return name || g.id || g.groundId || null;
 }
 
+// v2.74.801 — Does the ask NAME a different known Ground than the one we're on? ("search pixabay for X" while on
+// Indeed.) Used to route a GROUNDED miss to the named site instead of offering to teach it on the wrong one. PURE.
+// Matches a Ground by its distinctive tokens — the host SLD ("pixabay.com" → "pixabay") and a non-generic stored
+// name — as whole words in the ask. A small stoplist drops generic SLDs ("jobs", "app") that aren't real site names,
+// so the signal stays precise; it only fires on a miss and is confirm-first downstream, so a stray match is harmless.
+const _GROUND_TOKEN_STOP = new Set(['www', 'app', 'web', 'home', 'jobs', 'job', 'search', 'mail', 'login', 'account', 'site', 'page', 'shop', 'store', 'my', 'go', 'get']);
+function _askNamesOtherGround(ask, grounds, currentGid) {
+  const text = String(ask || '');
+  if (!text.trim()) return null;
+  for (const g of (Array.isArray(grounds) ? grounds : [])) {
+    if (!g || g.id === currentGid) continue;
+    const toks = [];
+    const url = g.url || (Array.isArray(g.urlPatterns) ? g.urlPatterns[0] : '') || '';
+    try { const sld = new URL(url).hostname.replace(/^www\./, '').split('.')[0]; if (sld && sld.length >= 4 && !_GROUND_TOKEN_STOP.has(sld.toLowerCase())) toks.push(sld); } catch { /* */ }
+    const nm = String(g.name || g.site || '').trim();
+    if (nm && nm.length >= 4 && !/^ground$/i.test(nm) && !_GROUND_TOKEN_STOP.has(nm.toLowerCase())) toks.push(nm);
+    for (const t of toks) {
+      try { if (new RegExp('\\b' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i').test(text)) return { groundId: g.id, groundName: _groundLabel(g), groundUrl: url || null }; } catch { /* */ }
+    }
+  }
+  return null;
+}
+
 async function _bindStrategyOnGround(ctx, clause, groundId, effect = 'action') {
   let caps = [];
   try { caps = await ctx.readSgCapabilities(groundId); } catch { return null; }
@@ -639,11 +662,12 @@ export function createSgMessageHandlers(ctx) {
         // ORCH-C — resolve the Ground from the live page when the caller (chat) only knows the tab. Match by
         // origin against the saved Grounds. No matching Ground → a clean "no-ground" miss (the chat falls back).
         let gid = groundId;
+        let allGrounds = null;   // v2.74.801 — kept for the otherGround hint below (avoids a 2nd getAllGrounds when resolved here)
         if (!gid && url) {
           try {
+            allGrounds = await StorageManager.getAllGrounds();
             const origin = new URL(url).origin;
-            const grounds = await StorageManager.getAllGrounds();
-            const g = (Array.isArray(grounds) ? grounds : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } });
+            const g = (Array.isArray(allGrounds) ? allGrounds : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } });
             gid = g ? g.id : null;
           } catch { /* */ }
         }
@@ -720,6 +744,13 @@ export function createSgMessageHandlers(ctx) {
         // the LIVE PAGE catalogs (affordances): in-set values snap + return as `bindings`; misses → `gaps`.
         let bindings = {}; let gaps = [];
         if (decision.candidate && llm && llm.bindings) { const v = validateBindings(llm.bindings, decision.candidate, affordances); bindings = v.bound; gaps = v.gaps; }
+        // v2.74.801 — on a MISS, flag whether the ask references ANOTHER known Ground ("search pixabay for X" while on
+        // Indeed). The chat uses this to offer running it THERE instead of teaching it on the wrong (current) site.
+        // Computed only on a miss (a hit already belongs here), and only the named other Ground — a generic miss is null.
+        let otherGround = null;
+        if (decision.decision === 'miss') {
+          try { if (!allGrounds) allGrounds = await StorageManager.getAllGrounds(); otherGround = _askNamesOtherGround(ask, allGrounds, gid); } catch { /* */ }
+        }
         const lean = (c) => (c ? { id: c.id, intent: c.intent, strategyId: c.strategyId, reversible: c.reversible, params: c.params, kind: c.kind } : null);
         // reachable folded into here → the chat never says "go to another page" (planAssistantTurn keys navigate off reachable>0).
         const scoped = { here: candidates.length, reachable: 0, off: parts.off.length };
@@ -742,6 +773,7 @@ export function createSgMessageHandlers(ctx) {
           bindings, gaps,                        // ORCH-M — validated param values + out-of-vocab gaps
           rationale: llm ? llm.rationale : '',
           via, groundId: gid,                    // ORCH-C — the resolved Ground (chat passes it back to REPLAY / RECORD_ALIAS)
+          otherGround,                            // v2.74.801 — {groundId,groundName,groundUrl} when a MISS's ask names a DIFFERENT Ground
           alternatives: (decision.alternatives || []).map((a) => ({ id: a.id, intent: a.intent })),
           scoped, localeUrl,
         });
