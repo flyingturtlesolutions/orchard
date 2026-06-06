@@ -699,10 +699,21 @@ export function createSgMessageHandlers(ctx) {
         // matcher (generalize corrections), and (2) as a deterministic relevance shaper in rankAndDecide below.
         const feedback = feedbackExamples(outcomeStream);
         let scorer; let llm = null;
-        const aliasHit = candidates.some((c) => (c.aliases || []).some((al) => normalizeAliasPhrase(al) === normalizeAliasPhrase(ask)));
-        if (candidates.length && !aliasHit) {
+        // An exact ALIAS hit identifies WHICH capability without the LLM (the warm, cost-saving path). But an alias
+        // is the ask PHRASING, not its PARAM VALUES — "search jazz singer jobs in new york" and "search police
+        // officer jobs in minneapolis" hit the SAME alias yet need DIFFERENT bindings. So a PARAMETERIZED alias-hit
+        // candidate STILL needs the LLM bind pass to extract THIS ask's values; without it the executor replays the
+        // Strategy's stale demonstrated defaults (v2.74.800 — the "ran a police-officer search for a jazz-singer
+        // ask" bug). Parameterless alias hits stay fully LLM-free.
+        const _aliasOf = (c) => (c.aliases || []).some((al) => normalizeAliasPhrase(al) === normalizeAliasPhrase(ask));
+        const aliasHit = candidates.some(_aliasOf);
+        const aliasHitNeedsBind = candidates.some((c) => _aliasOf(c) && (c.params || []).some((p) => p && p.used));
+        if (candidates.length && (!aliasHit || aliasHitNeedsBind)) {
           try { llm = await AnthropicService.matchCapability({ ask, candidates, affordances, examples: feedback }); } catch { /* */ }
-          if (llm) scorer = scoresToScorer(llm.scores);
+          // On a NON-alias match the LLM also SCORES (it selects). On an alias-hit we already KNOW the capability —
+          // the LLM ran ONLY to extract param values, so DON'T let it re-score: keep the deterministic alias-exact
+          // decision that always fires (its bindings are still consumed below). Decouples binding from selection.
+          if (llm && !aliasHit) scorer = scoresToScorer(llm.scores);
         }
         const decision = rankAndDecide(ask, candidates, { ...(scorer ? { score: scorer } : {}), now: Date.now(), feedback });
         // ORCH-M/A — validate the LLM's option bindings against the candidate's captured vocabulary OR a label
@@ -712,7 +723,7 @@ export function createSgMessageHandlers(ctx) {
         const lean = (c) => (c ? { id: c.id, intent: c.intent, strategyId: c.strategyId, reversible: c.reversible, params: c.params, kind: c.kind } : null);
         // reachable folded into here → the chat never says "go to another page" (planAssistantTurn keys navigate off reachable>0).
         const scoped = { here: candidates.length, reachable: 0, off: parts.off.length };
-        const via = llm ? 'llm' : (aliasHit ? 'alias' : 'lexical');
+        const via = scorer ? 'llm' : (aliasHit ? 'alias' : 'lexical');   // alias-hit may bind via LLM but is alias-DECIDED
         // ── ORCH_MATCH diagnostics — full visibility into a match decision ──
         const _capLine = (c) => { const u = (c.params || []).filter((p) => p && p.used); return `${String(c.id).slice(0, 8)}:"${c.intent}"${u.length ? `[${u.map((p) => `${p.name}/${p.kind}${Array.isArray(p.vocabulary) ? `(${p.vocabulary.length}:${p.vocabulary.slice(0, 6).join('|')})` : ''}`).join(', ')}]` : ''}`; };
         Logger.info('background', `ORCH_MATCH ▸ ask="${String(ask).slice(0, 90)}" @ ${localeUrl || '(no url)'} ground=${gid}`);
