@@ -365,6 +365,12 @@ export class InjectionService {
             val = parts.join(String(replacement ?? ''));
           }
         }
+        // v2.74.809 — an UNFILLED param (its name absent from paramValues) must not be TYPED verbatim — a cross-Ground
+        // workflow with an unstated optional input typed the literal "{{EDIT_LOCATION}}" into the search box. After
+        // substituting known params, blank any REMAINING canonical {{PARAM_NAME}} token in a TYPED field so the unset
+        // input is EMPTY. Selectors keep their token (a malformed selector fails loudly; emptying could match a wrong
+        // node). USER_QUESTION is filled by a separate injection pass — exclude it.
+        if (field !== 'selector') val = val.replace(/\{\{(?!USER_QUESTION\}\})[A-Z0-9_]+\}\}/g, '');
         obj[field] = val;
       }
     };

@@ -1158,12 +1158,12 @@ export function createSgMessageHandlers(ctx) {
             if (gr.decision === 'ambiguous' && !picked) ambiguities.push({ subIntentId: si.id || `s${i}`, clause, candidates: gr.candidates });
           }
           // v2.74.805 — diagnostic: HOW each sub-intent resolved + the chosen Ground's host (reveals a mis-resolution
-          // OR a data issue, e.g. a Ground named "Pixabay" whose URL is a different site). INFO temporarily.
+          // OR a data issue, e.g. a Ground named "Pixabay" whose URL is a different site). DEBUG cross-Ground audit.
           try {
             const _g = byId.get(groundId); let _host = '';
             try { _host = (_g && _g.url) ? new URL(_g.url).hostname.replace(/^www\./, '') : ''; } catch { /* */ }
             const _cands = (gr.candidates || []).slice(0, 3).map((c) => `${String(c.groundId).slice(-6)}:${(Number(c.score) || 0).toFixed(2)}${c.hostHit ? '*' : ''}`).join(', ');
-            Logger.info('background', `T3X resolve ▸ "${String(clause).slice(0, 50)}" → ${groundId ? String(groundId).slice(-6) : 'none'} (${_host || '?'}) [via=${_via}; lexical=${gr.decision || 'n/a'} {${_cands}}]`);
+            Logger.debug('background', `T3X resolve ▸ "${String(clause).slice(0, 50)}" → ${groundId ? String(groundId).slice(-6) : 'none'} (${_host || '?'}) [via=${_via}; lexical=${gr.decision || 'n/a'} {${_cands}}]`);
           } catch { /* */ }
 
           // DF-2 — read-vs-action effect (same oracle the chat uses to choose picker-vs-record): a READ clause
@@ -1184,11 +1184,11 @@ export function createSgMessageHandlers(ctx) {
               if (altBound && altBound.capabilityId) { chosenGroundId = altId; bound = altBound; break; }
             }
           }
-          // v2.74.806 — diagnostic: did the bind land a capability on the chosen Ground, or is it a gap? (INFO, temp.)
+          // v2.74.806 — diagnostic: did the bind land a capability on the chosen Ground, or is it a gap? (DEBUG audit)
           try {
             const _bg = byId.get(chosenGroundId); let _bh = '';
             try { _bh = (_bg && _bg.url) ? new URL(_bg.url).hostname.replace(/^www\./, '') : ''; } catch { /* */ }
-            Logger.info('background', `T3X bind ▸ "${String(clause).slice(0, 40)}" on ${chosenGroundId ? String(chosenGroundId).slice(-6) : 'none'}(${_bh || '?'}) → ${bound && bound.capabilityId ? `"${bound.capabilityName || bound.capabilityId}" [${bound.capabilityKind}]` : 'MISS → gap'}`);
+            Logger.debug('background', `T3X bind ▸ "${String(clause).slice(0, 40)}" on ${chosenGroundId ? String(chosenGroundId).slice(-6) : 'none'}(${_bh || '?'}) → ${bound && bound.capabilityId ? `"${bound.capabilityName || bound.capabilityId}" [${bound.capabilityKind}]` : 'MISS → gap'}`);
           } catch { /* */ }
 
           // BIND the clause's explicit input VALUES to the bound capability's REAL params (an LLM maps "search for
