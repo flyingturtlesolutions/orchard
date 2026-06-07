@@ -2533,6 +2533,7 @@ Rules:
 - Use the EXACT parameter name as the key, copied verbatim from the list above.
 - Include a param ONLY when the request explicitly states a value for it. OMIT any param the request does not specify — never invent a location, date, category, etc.
 - Strip the leading verb and the site name: "search for game developer jobs on Indeed" → the keyword/search param gets "game developer jobs" (not "search for…" and not "…on Indeed").
+- A PRONOUN / back-reference is NOT a stated value — OMIT it: if the value would be "it", "that", "them", "this", "the one", "the first result", or "the title/price/link you found/read", the input comes from an EARLIER step's result, not this request (it's filled at run time, not typed).
 - {} if the request states nothing bindable.`;
     Logger.info('AnthropicService', `bindClauseParams — "${ask.slice(0, 60)}" over ${names.length} param(s)`);
     try {

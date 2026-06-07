@@ -79,6 +79,12 @@ function _askNamesOtherGround(ask, grounds, currentGid) {
   return null;
 }
 
+// v2.74.808 — A PRONOUN / back-reference value ("it", "that", "the title", "the first result") is a DATA HAND-OFF
+// reference to an UPSTREAM step's result, NOT a literal to type. Used to drop it from a dependsOn-consumer's stated
+// values so wireCrossGroundData binds the param to the upstream output (scope_binding) instead of typing "it". PURE.
+const _PRONOUN_REF = /^(it|its|that|this|them|they|those|these|one|the (one|title|price|link|url|result|name|value|item|first|top|job|post|page))$/i;
+function _isPronounRef(v) { return _PRONOUN_REF.test(String(v == null ? '' : v).trim()); }
+
 async function _bindStrategyOnGround(ctx, clause, groundId, effect = 'action') {
   let caps = [];
   try { caps = await ctx.readSgCapabilities(groundId); } catch { return null; }
@@ -89,8 +95,18 @@ async function _bindStrategyOnGround(ctx, clause, groundId, effect = 'action') {
   const candidates = (Array.isArray(caps) ? caps : [])
     .filter((c) => c && (isRead ? c.kind === 'observation' : (c.kind !== 'observation' && (c.strategyId || c.fragmentId))))
     .map((c) => toCandidate(c));
+  Logger.debug('background', `_bind ▸ "${String(clause).slice(0, 36)}" @${String(groundId).slice(-6)}: ${candidates.length} ${effect} cand`);   // v2.74.807 — cross-Ground bind-pool size (DEBUG audit)
   if (!candidates.length) return null;
-  const decision = rankAndDecide(clause, candidates, { now: Date.now() });
+  // Lexical floor first (cheap). On a MISS, escalate to the LLM matcher — a vague cross-Ground clause ("search for IT
+  // on Pixabay", where "it" is a data placeholder with no lexical signal) under-scores the site's search lexically,
+  // but the LLM matches it (the same matchCapability that bound "search pixabay for cats" within-Ground). v2.74.807.
+  let decision = rankAndDecide(clause, candidates, { now: Date.now() });
+  if (!decision || decision.decision === 'miss') {
+    try {
+      const llm = await AnthropicService.matchCapability({ ask: clause, candidates });
+      if (llm && Array.isArray(llm.scores)) decision = rankAndDecide(clause, candidates, { score: scoresToScorer(llm.scores), now: Date.now() });
+    } catch { /* LLM unavailable → keep the lexical miss */ }
+  }
   const cand = decision && decision.candidate;
   if (!cand || decision.decision === 'miss') return null;
   const cap = (cand.raw && typeof cand.raw === 'object') ? cand.raw : {};
@@ -1111,17 +1127,26 @@ export function createSgMessageHandlers(ctx) {
         const llmGrounds = catalog.map((e) => {
           const g = byId.get(e.groundId);
           const d = g && (g.derivedDescription || (g.description && (g.description.identity || g.description.category)) || (typeof g.description === 'string' ? g.description : ''));
-          return { groundId: e.groundId, name: e.name, description: typeof d === 'string' ? d : '' };
+          // v2.74.804 (2c) — the HOST-derived label (pixabay.com → "Pixabay") so a clause that NAMES a site
+          // ("…on Pixabay") can match even when the stored name is generic/blank — else matchGround never sees "Pixabay".
+          return { groundId: e.groundId, name: _groundLabel(g) || e.name, description: typeof d === 'string' ? d : '' };
         });
         for (let i = 0; i < ordered.length; i++) {
           const si = ordered[i] || {};
           const clause = si.clause || si.label || ask;
           const gr = resolveGround(clause, catalog);
 
-          // Q2 — ABSTRACT sub-intent (no site named): the lexical floor is a MISS or AMBIGUOUS. Escalate to the LLM
-          // ground resolver (closed-set selection by site PURPOSE), then re-validate its pick against the catalog
-          // (pickValidGround — never invent). A confident lexical 'resolved' is kept as-is (no LLM round-trip).
-          let groundId = gr.decision === 'resolved' ? gr.groundId : null;
+          // v2.74.805 (2c) — DOMAIN match is AUTHORITATIVE and runs FIRST. A clause that NAMES a Ground by its host
+          // ("…on Pixabay" → pixabay.com) wins over BOTH the lexical floor and the LLM. (.804 placed it after the
+          // lexical 'resolved' check — but resolveGround can RESOLVE a named site to the WRONG Ground, e.g. a
+          // "…on Pixabay" clause carrying a job title lexically resolved to a flower shop, which skipped the domain
+          // check.) Reuses the .801 URL-host detector (currentGid=null → consider ANY named Ground). No LLM, no tie.
+          let groundId = null; let _via = 'none';
+          const named = _askNamesOtherGround(clause, grounds, null);
+          if (named && named.groundId) { groundId = named.groundId; _via = 'domain'; }
+          // Q2 — else the lexical floor; a confident 'resolved' is kept (no LLM round-trip).
+          if (!groundId && gr.decision === 'resolved') { groundId = gr.groundId; _via = 'lexical'; }
+          // Else escalate to the LLM ground resolver (closed-set selection by PURPOSE), re-validated vs the catalog.
           if (!groundId) {
             let picked = null;
             try {
@@ -1129,8 +1154,17 @@ export function createSgMessageHandlers(ctx) {
               picked = m ? pickValidGround(m.groundId, catalog) : null;
             } catch (e) { Logger.warn('background', `matchGround unavailable: ${e.message}`); }
             groundId = picked || gr.groundId || null;   // LLM pick → else the lexical top (ambiguous winner) → else null
+            _via = picked ? 'llm' : (gr.groundId ? 'lexical-fallback' : 'none');
             if (gr.decision === 'ambiguous' && !picked) ambiguities.push({ subIntentId: si.id || `s${i}`, clause, candidates: gr.candidates });
           }
+          // v2.74.805 — diagnostic: HOW each sub-intent resolved + the chosen Ground's host (reveals a mis-resolution
+          // OR a data issue, e.g. a Ground named "Pixabay" whose URL is a different site). INFO temporarily.
+          try {
+            const _g = byId.get(groundId); let _host = '';
+            try { _host = (_g && _g.url) ? new URL(_g.url).hostname.replace(/^www\./, '') : ''; } catch { /* */ }
+            const _cands = (gr.candidates || []).slice(0, 3).map((c) => `${String(c.groundId).slice(-6)}:${(Number(c.score) || 0).toFixed(2)}${c.hostHit ? '*' : ''}`).join(', ');
+            Logger.info('background', `T3X resolve ▸ "${String(clause).slice(0, 50)}" → ${groundId ? String(groundId).slice(-6) : 'none'} (${_host || '?'}) [via=${_via}; lexical=${gr.decision || 'n/a'} {${_cands}}]`);
+          } catch { /* */ }
 
           // DF-2 — read-vs-action effect (same oracle the chat uses to choose picker-vs-record): a READ clause
           // ("get the top job's link") binds an Observation that PRODUCES a value; an ACTION binds a strategy/fragment.
@@ -1139,13 +1173,23 @@ export function createSgMessageHandlers(ctx) {
           // a different site may hold a capability for this sub-intent (the gap→alternate fallback).
           let chosenGroundId = groundId;
           let bound = chosenGroundId ? await _bindStrategyOnGround(ctx, clause, chosenGroundId, effect) : null;
-          if (chosenGroundId && (!bound || !bound.capabilityId)) {
+          // v2.74.806 — a DOMAIN-named Ground is AUTHORITATIVE: do NOT hop to an alternate site on a bind miss. The
+          // gap→alternate fallback ran the flower shop's "search for orchids" for a "…on Pixabay" clause, undoing the
+          // named-site decision. When the user named the site, a bind miss stays a GAP on THAT Ground (the card offers
+          // to teach it there) — never a silent run on a different site. Non-named (lexical/LLM) Grounds still hop.
+          if (chosenGroundId && (!bound || !bound.capabilityId) && _via !== 'domain') {
             const alternates = (Array.isArray(gr.candidates) ? gr.candidates : []).map((c) => c.groundId).filter((gid) => gid && gid !== chosenGroundId);
             for (const altId of alternates) {
               const altBound = await _bindStrategyOnGround(ctx, clause, altId, effect);
               if (altBound && altBound.capabilityId) { chosenGroundId = altId; bound = altBound; break; }
             }
           }
+          // v2.74.806 — diagnostic: did the bind land a capability on the chosen Ground, or is it a gap? (INFO, temp.)
+          try {
+            const _bg = byId.get(chosenGroundId); let _bh = '';
+            try { _bh = (_bg && _bg.url) ? new URL(_bg.url).hostname.replace(/^www\./, '') : ''; } catch { /* */ }
+            Logger.info('background', `T3X bind ▸ "${String(clause).slice(0, 40)}" on ${chosenGroundId ? String(chosenGroundId).slice(-6) : 'none'}(${_bh || '?'}) → ${bound && bound.capabilityId ? `"${bound.capabilityName || bound.capabilityId}" [${bound.capabilityKind}]` : 'MISS → gap'}`);
+          } catch { /* */ }
 
           // BIND the clause's explicit input VALUES to the bound capability's REAL params (an LLM maps "search for
           // game developer jobs on Indeed" → {SEARCH_JOB_TITLE_KEYWORDS_OR_COMPANY:"game developer jobs"}). Without
@@ -1157,6 +1201,13 @@ export function createSgMessageHandlers(ctx) {
               const bp = await AnthropicService.bindClauseParams({ clause, params: bound.params });
               if (bp && bp.values && typeof bp.values === 'object') boundStated = { ...boundStated, ...bp.values };
             } catch (e) { Logger.warn('background', `bindClauseParams unavailable: ${e.message}`); }
+          }
+          // v2.74.808 — a sub-intent that dependsOn an upstream producer consumes its RESULT: a PRONOUN value ("search
+          // for IT on Pixabay") is the hand-off reference, NOT a literal. Drop it so wireCrossGroundData binds the param
+          // to the upstream output (scope_binding) — else the literal "it" wins and the Pixabay search types "it"
+          // instead of the read's title. Deterministic floor; bindClauseParams' prompt also omits these.
+          if (Array.isArray(si.dependsOn) && si.dependsOn.length) {
+            for (const k of Object.keys(boundStated)) if (_isPronounRef(boundStated[k])) { delete boundStated[k]; }
           }
 
           const g = chosenGroundId ? byId.get(chosenGroundId) : null;
