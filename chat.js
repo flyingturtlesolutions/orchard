@@ -1517,20 +1517,16 @@ async function _orchSaveWorkflow(msg, { workflow }) {
     : `Couldn’t save${saved && saved.error ? ` — ${saved.error}` : ''}.`);
 }
 
-// SAVE then RUN the previewed Workflow: persist the exact shown record (INVOKE_WORKFLOW runs by id), then invoke
-// it. Reports the outcome; surfaces saga COMPENSATION (Q5) when a mid-journey failure rolled committed steps back.
+// RUN the previewed Workflow EPHEMERALLY (v2.74.810): invoke the workflow INLINE — no SAVE — so a one-off Run doesn't
+// leave a duplicate library record (every Run used to persist a fresh wf_ because INVOKE_WORKFLOW ran by id). The user
+// keeps a workflow explicitly via "Save for later". INVOKE_WORKFLOW runs the inline object — its steps dispatch
+// already-saved capabilities. Reports the outcome; surfaces saga COMPENSATION (Q5) when a mid-journey failure rolled
+// committed steps back.
 async function _orchRunWorkflow(msg, { workflow, ask, paramValues = {} }) {
-  _setMessageBody(msg, 'Saving the workflow…');
-  const saved = await _orchReq('SAVE_WORKFLOW', { workflow });
-  const wfId = saved && saved.workflow && saved.workflow.id;
-  if (!saved || saved.success === false || !wfId) {
-    _setMessageBody(msg, `Couldn’t save the workflow${saved && saved.error ? ` — ${saved.error}` : ''}.`);
-    return;
-  }
   _setMessageBody(msg, 'Running across your sites…');
   // paramValues fill the Workflow's still-unbound inputs (the editable card); the binder's clause literals are
   // already baked into the steps, so a run uses the right keyword even when paramValues is empty.
-  const res = await _orchReq('INVOKE_WORKFLOW', { workflowId: wfId, paramValues: (paramValues && typeof paramValues === 'object') ? paramValues : {} });
+  const res = await _orchReq('INVOKE_WORKFLOW', { workflow, paramValues: (paramValues && typeof paramValues === 'object') ? paramValues : {} });
   if (res === null) {   // _orchReq timed out — the run may still be going (cross-site runs can be long)
     _setMessageBody(msg, 'Still working on it — this one’s taking a while. I’ll leave it running; check the tabs it opened.');
     return;

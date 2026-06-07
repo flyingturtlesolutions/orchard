@@ -4055,15 +4055,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // overlay in ExecutionEngine, the PAUSE-node guard, etc.)
           // can tell whether they're in a debug session. Defaults to
           // false (non-debug) to preserve old callers' behavior.
-          const { workflowId, paramValues, invocationId, debug: debugRun = false } = payload;
-          if (!workflowId) {
-            sendResponse({ success: false, error: 'INVOKE_WORKFLOW requires workflowId' });
-            return;
-          }
-          const workflow = await StorageManager.getWorkflow(workflowId);
+          const { workflowId, workflow: inlineWorkflow, paramValues, invocationId, debug: debugRun = false } = payload;
+          // v2.74.810 — accept an INLINE workflow (run it WITHOUT persisting). The chat's preview Run passes the
+          // workflow object directly so a one-off run doesn't leave a duplicate library record (only "Save for later"
+          // persists). A saved workflowId still loads from storage (Studio ▶/Debug, breakpoints). Either way the
+          // executor runs the workflow OBJECT; its steps dispatch already-saved capabilities, so the workflow record
+          // itself needn't be stored to run.
+          let workflow = (inlineWorkflow && typeof inlineWorkflow === 'object') ? inlineWorkflow : null;
           if (!workflow) {
-            sendResponse({ success: false, error: `Workflow not found: ${workflowId}` });
-            return;
+            if (!workflowId) {
+              sendResponse({ success: false, error: 'INVOKE_WORKFLOW requires workflowId or workflow' });
+              return;
+            }
+            workflow = await StorageManager.getWorkflow(workflowId);
+            if (!workflow) {
+              sendResponse({ success: false, error: `Workflow not found: ${workflowId}` });
+              return;
+            }
           }
           const invId = invocationId
             ?? (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `winv-${Date.now()}`);
@@ -4090,18 +4098,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           // v2.74.98 — Remember the Strategy id so SET/CLEAR/TOGGLE
           // breakpoint handlers can persist their changes against the
           // Strategy record (not the per-invocation throwaway state).
-          debugState.workflowId = workflowId;
+          debugState.workflowId = workflowId ?? null;
 
           // v2.74.98 — Load persisted breakpoints into the live set
           // BEFORE executor starts. Broadcast once after load so the
           // workflow-debug sidepanel (which mounts before this point)
           // sees the gutter dots immediately.
-          try {
-            const saved = await StorageManager.getStrategyBreakpoints(workflowId);
-            for (const idx of saved) debugState.breakpoints.add(idx);
-            if (saved.length > 0) _broadcastWorkflowBreakpoints(invId, debugState.breakpoints, workflowId);
-          } catch (e) {
-            Logger.warn('background', `breakpoint load failed: ${e.message}`);
+          // v2.74.810 — only for a SAVED workflowId; an inline (unsaved) Run has no persisted breakpoints.
+          if (workflowId) {
+            try {
+              const saved = await StorageManager.getStrategyBreakpoints(workflowId);
+              for (const idx of saved) debugState.breakpoints.add(idx);
+              if (saved.length > 0) _broadcastWorkflowBreakpoints(invId, debugState.breakpoints, workflowId);
+            } catch (e) {
+              Logger.warn('background', `breakpoint load failed: ${e.message}`);
+            }
           }
 
           const debug = {
