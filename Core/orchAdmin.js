@@ -54,5 +54,25 @@ export function parseAdminCommand(text) {
   return { isAdmin: true, command: 'delete', kinds: Array.from(new Set(kinds)), scope, confidence: 0.9 };
 }
 
+/**
+ * Recognize a "find / merge duplicate Grounds" request. The same logical site can spawn multiple Grounds —
+ * subdomain variants (app.x.com + www.x.com) or a brand under two TLDs (notion.com + notion.so) — splitting
+ * capabilities and breaking active-tab-scoped delete. PURE: the chat detects, lists the clusters, and merges
+ * only on explicit confirm. Requires a Ground/site noun; "merge/find" need an explicit duplicate word, while
+ * "dedupe/consolidate" imply it. ("merge grounds" alone is left ambiguous — not hijacked.)
+ * @param {string} text
+ * @returns {{isDedup:boolean, confidence?:number}}
+ */
+export function parseDedupCommand(text) {
+  const s = String(text || '').trim();
+  if (!s) return { isDedup: false };
+  if (!/\b(grounds?|sites?|domains?|locales?)\b/i.test(s)) return { isDedup: false };
+  if (/\b(dedupe|de-dupe|deduplicate|consolidate)\b/i.test(s)) return { isDedup: true, confidence: 0.95 };
+  if (/\b(merge|combine|unify|find|show|list)\b/i.test(s) && /\b(duplicate|duplicates|dupes?|redundant)\b/i.test(s)) {
+    return { isDedup: true, confidence: 0.9 };
+  }
+  return { isDedup: false };
+}
+
 /** The artifact kinds a bulk delete can target (the matcher/storage entity names). PURE constant. */
 export const ADMIN_KINDS = _ALL_KINDS;

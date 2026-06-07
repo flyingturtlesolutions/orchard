@@ -635,6 +635,67 @@ export class StorageManager {
       `landmarks preserved per GROUND_SPEC § 11)`);
   }
 
+  /**
+   * v2.74.817 — Merge one Ground's artifacts into another, then delete the (now-empty) source. The storage floor
+   * for Ground DEDUP (Core/groundDedup): one logical site split across Grounds (subdomain variants, or a brand
+   * under two TLDs like notion.com + notion.so) is consolidated onto one canonical Ground.
+   *
+   * LOW-LEVEL by necessity: re-keys the flat `<kind>:index:<gid>` + `<kind>:<id>` stores DIRECTLY, intentionally
+   * bypassing saveStrategy/saveFragment's B1 cross-Ground guard (a merge is the one legitimate cross-Ground move).
+   * ADDITIVE-FIRST per kind — re-point the records, dedup-ADD their ids to the target index, THEN empty the source
+   * index — so deleteGround's cascade can't reach the moved records and a mid-failure leaves at worst a recoverable
+   * duplicate, never a loss. Moves the 6 cascade kinds + landmarks; the source's exploration cache (siteMap /
+   * locale / outcomes / chrome) is re-derivable and drops with the source Ground. Does NOT touch sgCapabilities
+   * (a background.js store) — the caller (MERGE_GROUNDS) moves those.
+   *
+   * @param {string} fromGroundId  source (absorbed) Ground
+   * @param {string} toGroundId    target (canonical) Ground
+   * @param {{urlPatterns?:Array, name?:string}} [canonicalPatch]  applied to the target (unioned patterns/name)
+   * @returns {Promise<{moved:Object<string,number>, total:number}>}
+   */
+  static async mergeGround(fromGroundId, toGroundId, canonicalPatch = {}) {
+    if (!fromGroundId || !toGroundId || fromGroundId === toGroundId) {
+      throw new Error('mergeGround requires two distinct Ground ids');
+    }
+    if (!(await StorageManager.getGround(toGroundId))) throw new Error(`mergeGround target ${toGroundId} not found`);
+    // landmarks key their index on `uid`, the 6 cascade kinds on `id`; both the record key and a top-level
+    // groundId field follow the same `<kind>:<idOrUid>` / groundId convention, so one loop covers all.
+    const KINDS = ['fragments', 'strategies', 'perspectives', 'observations', 'analyses', 'assertions', 'landmarks'];
+    const moved = {};
+    for (const kind of KINDS) {
+      const fromIdxKey = `${kind}:index:${fromGroundId}`;
+      const idxData = await StorageManager.#get(fromIdxKey);
+      const ids = Array.isArray(idxData[fromIdxKey]) ? idxData[fromIdxKey].slice() : [];
+      moved[kind] = 0;
+      if (!ids.length) continue;
+      // 1. re-point each record's groundId → target (records are keyed by global id/uid, not by Ground)
+      for (const id of ids) {
+        const recKey = `${kind}:${id}`;
+        const got = await StorageManager.#get(recKey);
+        const rec = got[recKey];
+        if (rec && typeof rec === 'object') { rec.groundId = toGroundId; await StorageManager.#set({ [recKey]: rec }); }
+      }
+      // 2. ADD ids to the target index (dedup), THEN 3. EMPTY the source index → deleteGround skips these records
+      for (const id of ids) await StorageManager.#addToIndex(`${kind}:index:${toGroundId}`, id);
+      await StorageManager.#set({ [fromIdxKey]: [] });
+      moved[kind] = ids.length;
+    }
+    // 4. apply the canonical patch (unioned urlPatterns / name) to the target Ground
+    const patch = {};
+    if (Array.isArray(canonicalPatch.urlPatterns) && canonicalPatch.urlPatterns.length) patch.urlPatterns = canonicalPatch.urlPatterns;
+    if (canonicalPatch.name) patch.name = canonicalPatch.name;
+    if (Object.keys(patch).length) {
+      try { await StorageManager.updateGround(toGroundId, patch); }
+      catch (e) { Logger.warn('StorageManager', `mergeGround: updateGround(${toGroundId}) failed: ${e.message}`); }
+    }
+    // 5. delete the now-empty source — its artifact indices are empty so the cascade removes no real records; it
+    //    cleans the source's own Ground record, partition, and exploration cache.
+    await StorageManager.deleteGround(fromGroundId);
+    const total = Object.values(moved).reduce((a, b) => a + b, 0);
+    Logger.info('StorageManager', `mergeGround ${fromGroundId} → ${toGroundId}: moved ${total} artifact(s) (${Object.entries(moved).filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(', ') || 'none'}); source deleted`);
+    return { moved, total };
+  }
+
   // ── Paths ─────────────────────────────────────────────────────────────────
   //
   // A Path is a named capability on a Ground. One Ground has many Paths.

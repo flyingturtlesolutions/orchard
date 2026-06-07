@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseAdminCommand, ADMIN_KINDS } from './orchAdmin.js';
+import { parseAdminCommand, parseDedupCommand, ADMIN_KINDS } from './orchAdmin.js';
 
 describe('orchAdmin — parse admin/management commands (ORCH-ADMIN)', () => {
   it('clear chat: several phrasings', () => {
@@ -58,5 +58,27 @@ describe('orchAdmin — parse admin/management commands (ORCH-ADMIN)', () => {
     assert.equal(parseAdminCommand('search for music').isAdmin, false);
     assert.equal(parseAdminCommand('how many results are there').isAdmin, false);
     assert.equal(parseAdminCommand('').isAdmin, false);
+  });
+});
+
+describe('orchAdmin — parseDedupCommand (find/merge duplicate Grounds)', () => {
+  it('recognizes dedupe/consolidate phrasings (imply duplicates)', () => {
+    for (const t of ['dedupe grounds', 'de-dupe my sites', 'deduplicate grounds', 'consolidate grounds', 'consolidate duplicate sites']) {
+      assert.equal(parseDedupCommand(t).isDedup, true, t);
+    }
+  });
+  it('recognizes merge/find ONLY with an explicit duplicate word', () => {
+    assert.equal(parseDedupCommand('merge duplicate grounds').isDedup, true);
+    assert.equal(parseDedupCommand('find duplicate sites').isDedup, true);
+    assert.equal(parseDedupCommand('combine redundant grounds').isDedup, true);
+    assert.equal(parseDedupCommand('merge grounds').isDedup, false, '"merge grounds" alone is ambiguous → not hijacked');
+  });
+  it('requires a Ground/site noun', () => {
+    assert.equal(parseDedupCommand('dedupe the database').isDedup, false);
+    assert.equal(parseDedupCommand('merge duplicate fragments').isDedup, false);
+  });
+  it('an ordinary ask / empty is not a dedup command', () => {
+    assert.equal(parseDedupCommand('search jazz singer jobs on indeed').isDedup, false);
+    assert.equal(parseDedupCommand('').isDedup, false);
   });
 });

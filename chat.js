@@ -24,7 +24,7 @@ import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   /
 import { comprehend } from './Core/orchComprehend.js';   // ORCH-CB — substrate-free shape comprehension (cold-ground decompose)
 import { renderCriteria } from './Core/orchVisual.js';   // ORCH-CB — search params → criteria for a visual condition's prompt
 import { classifyFeedback } from './Core/orchFeedback.js'; // ORCH-FB — recognize corrective feedback (LLM refines)
-import { parseAdminCommand } from './Core/orchAdmin.js';    // ORCH-ADMIN — management commands (clear/delete)
+import { parseAdminCommand, parseDedupCommand } from './Core/orchAdmin.js';    // ORCH-ADMIN — management commands (clear/delete); dedup — find duplicate Grounds
 import { classifyReadAsk } from './Core/observe.js';        // OBS-READ — is the ask a question (a read)?
 
 // ─── Conversation state ──────────────────────────────────────────────────────
@@ -1174,6 +1174,39 @@ async function _orchAdminFlow(admin) {
   bar.appendChild(_mkBtn('Cancel', () => { bar.remove(); _setMessageBody(msg, 'Cancelled — nothing was deleted.'); }));
 }
 
+// DEDUP — detect Grounds that are the SAME site (subdomain variants, or a brand under two TLDs like
+// notion.com + notion.so), list them with where capabilities live, and offer a per-cluster confirmed Merge
+// (MERGE_GROUNDS → move capabilities + artifacts onto one Ground, drop the empty sibling; nothing is lost).
+async function _orchDedupFlow() {
+  const msg = appendMessage({ role: 'assistant', body: 'Scanning your Grounds for duplicates…' });
+  const r = await _orchReq('DETECT_DUPLICATE_GROUNDS', {});
+  if (!r || r.success === false) { _setMessageBody(msg, `Couldn’t scan Grounds${r && r.error ? ` — ${r.error}` : ''}.`); return; }
+  const clusters = Array.isArray(r.clusters) ? r.clusters : [];
+  if (!clusters.length) {
+    _setMessageBody(msg, `No duplicates — your ${r.groundCount || 0} Ground${r.groundCount === 1 ? '' : 's'} are all distinct sites.`);
+    return;
+  }
+  const lines = clusters.map((c, i) => {
+    const tag = c.confidence === 'host' ? 'same site' : 'same brand — confirm';
+    const gs = c.grounds.map((g) => `${g.host || g.name}${g.capabilityCount ? ` · ${g.capabilityCount} cap${g.capabilityCount === 1 ? '' : 's'}` : ' · empty'}`).join('  +  ');
+    return `${i + 1}. “${c.key}” (${tag})\n   ${gs}`;
+  });
+  _setMessageBody(msg, `Found ${clusters.length} duplicate cluster${clusters.length === 1 ? '' : 's'} across ${r.groundCount} Ground${r.groundCount === 1 ? '' : 's'}:\n\n${lines.join('\n')}\n\nMerge consolidates a cluster onto one Ground — moves the capabilities, drops the empty sibling. Nothing is lost.`);
+  const bar = _orchActionBar(msg);
+  clusters.forEach((c) => {
+    bar.appendChild(_mkBtn(`Merge “${c.key}”`, async () => {
+      const m2 = appendMessage({ role: 'assistant', body: `Merging “${c.key}” onto one Ground…` });
+      const res = await _orchReq('MERGE_GROUNDS', { groundIds: c.grounds.map((g) => g.id) });
+      if (res && res.success) {
+        _setMessageBody(m2, `✓ Merged “${c.key}” → ${res.canonicalHost || 'one Ground'}: moved ${res.movedCapabilities} capabilit${res.movedCapabilities === 1 ? 'y' : 'ies'}, removed ${res.absorbed} duplicate Ground${res.absorbed === 1 ? '' : 's'}.`);
+      } else {
+        _setMessageBody(m2, `Couldn’t merge “${c.key}”${res && res.error ? ` — ${res.error}` : ''}.`);
+      }
+    }));
+  });
+  bar.appendChild(_mkBtn('Not now', () => { bar.remove(); }));
+}
+
 // ORCH-X — confirm a COMPOUND ask as an ordered chain, then run it. One confirmation covers the whole chain.
 function _orchConfirmChain(msg, { tabId, clauses, firstMatch, ask = '' }) {
   const list = clauses.map((c, i) => `${i + 1}. ${c.text}`).join('\n');
@@ -1628,6 +1661,9 @@ async function _tryGroundedTurn(text) {
     else await _orchAdminFlow(admin);
     return true;
   }
+
+  // DEDUP — "dedupe grounds" / "merge duplicate sites": detect Grounds that are the same site (read-only).
+  if (parseDedupCommand(text).isDedup) { await _orchDedupFlow(); return true; }
 
   const tab = await _orchActiveTab();
   if (!tab || typeof tab.id !== 'number') return false;

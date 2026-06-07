@@ -22,6 +22,7 @@ import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3
 import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved, describeTraceInput, derivePhasePostcondition, reconcileObservedLandmarks } from '../../Core/observedSegment.js';
 import { listLocales } from '../../Services/Storage/GroundAssetStore.js';   // OBS (v2.74.764) — reconcile observed landmarks to grounded Locale features
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A
+import { findDuplicateGroundGroups, planGroundMerge, primaryHost } from '../../Core/groundDedup.js';   // v2.74.816/.817 — duplicate-Ground detect + merge
 import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/orchFeedback.js';   // ORCH-FB — corrective actions
 import { feedbackExamples } from '../../Core/feedbackLearn.js';   // ORCH-FB-2 — relevance shaping from feedback history
 import { buildObservationCapability, scoreObservationMatch, classifyReadAsk } from '../../Core/observe.js';   // OBS-READ — observation records + manual-obs match + read/action effect scoping
@@ -869,6 +870,76 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, hits });
       } catch (err) {
         Logger.error('background', `ORCH_MATCH_GLOBAL failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // v2.74.816 — DEDUP (read-only): surface clusters of Grounds that look like the SAME site. One logical site
+    // spawns multiple Grounds — subdomain variants (app.x.com + www.x.com) or a brand under two TLDs (notion.com +
+    // notion.so) — splitting capabilities; the GLOBAL matcher reads them all, but active-tab-scoped delete can't
+    // clear the sibling. This DETECTS the clusters (stamping each Ground's capability count, so the user sees where
+    // caps live + a merge can pick the richest canonical). MERGE_GROUNDS (separate, confirmed) consolidates them.
+    DETECT_DUPLICATE_GROUNDS: async (_payload, _sender, sendResponse) => {
+      try {
+        const grounds = (await StorageManager.getAllGrounds()) || [];
+        const withCounts = [];
+        for (const g of (Array.isArray(grounds) ? grounds : [])) {
+          const gid = g && (g.id || g.groundId);
+          if (!gid) continue;
+          let n = 0;
+          try { n = ((await ctx.readSgCapabilities(gid)) || []).length; } catch { /* */ }
+          withCounts.push({ ...g, capabilityCount: n });
+        }
+        const clusters = findDuplicateGroundGroups(withCounts).map((cl) => ({
+          key: cl.key,
+          confidence: cl.confidence,
+          registrables: cl.registrables,
+          grounds: cl.grounds.map((g) => ({ id: g.id, name: _groundLabel(g), host: primaryHost(g), capabilityCount: g.capabilityCount || 0 })),
+        }));
+        Logger.info('background', `DETECT_DUPLICATE_GROUNDS ▸ ${withCounts.length} ground(s) → ${clusters.length} cluster(s): ${clusters.map((c) => `${c.key}[${c.confidence}]×${c.grounds.length}`).join(', ') || '(none)'}`);
+        sendResponse({ success: true, clusters, groundCount: withCounts.length });
+      } catch (err) {
+        Logger.error('background', `DETECT_DUPLICATE_GROUNDS failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // v2.74.817 — DEDUP merge (mutation; the chat confirms before calling). Consolidate a cluster of duplicate
+    // Grounds onto ONE canonical: move sgCapabilities (here) + the per-Ground artifacts (StorageManager.mergeGround),
+    // union the urlPatterns, delete the empty siblings. The canonical is DERIVED server-side (planGroundMerge picks
+    // the richest by live capability count) — the client sends only the cluster's Ground ids, so it can't mis-target.
+    MERGE_GROUNDS: async (payload, _sender, sendResponse) => {
+      try {
+        const groundIds = Array.isArray(payload && payload.groundIds) ? payload.groundIds.filter(Boolean) : [];
+        if (groundIds.length < 2) { sendResponse({ success: false, error: 'need ≥2 ground ids to merge' }); return; }
+        const all = (await StorageManager.getAllGrounds()) || [];
+        const byId = new Map((Array.isArray(all) ? all : []).map((g) => [g.id || g.groundId, g]));
+        const cluster = [];
+        for (const id of groundIds) {
+          const g = byId.get(id); if (!g) continue;
+          let n = 0; try { n = ((await ctx.readSgCapabilities(id)) || []).length; } catch { /* */ }
+          cluster.push({ ...g, capabilityCount: n });
+        }
+        if (cluster.length < 2) { sendResponse({ success: false, error: 'fewer than 2 of those grounds exist' }); return; }
+        const plan = planGroundMerge(cluster);
+        if (!plan) { sendResponse({ success: false, error: 'could not plan a merge' }); return; }
+        const { canonicalId, absorbedIds, urlPatterns, name } = plan;
+        let movedCaps = 0;
+        for (const fromId of absorbedIds) {
+          // 1. move sgCapabilities source→canonical (re-key groundId; writeSgCapability upserts by id → dedups),
+          //    then drop the source store (deleteGround does NOT cascade sgCapabilities, so prune it explicitly).
+          try {
+            const caps = (await ctx.readSgCapabilities(fromId)) || [];
+            for (const c of caps) { if (c && c.id) { await ctx.writeSgCapability(canonicalId, { ...c, groundId: canonicalId }); movedCaps++; } }
+            await ctx.removeSgCapabilities(fromId, () => true);
+          } catch (e) { Logger.warn('background', `MERGE_GROUNDS sgCapabilities move (${fromId}→${canonicalId}) failed: ${e.message}`); }
+          // 2. move the per-Ground artifacts + delete the now-empty source (StorageManager owns the flat-key re-key).
+          await StorageManager.mergeGround(fromId, canonicalId, { urlPatterns, name });
+        }
+        Logger.info('background', `MERGE_GROUNDS ▸ ${absorbedIds.length} ground(s) → ${String(canonicalId).slice(-6)} (${_groundLabel(byId.get(canonicalId) || {})}); moved ${movedCaps} capabilit${movedCaps === 1 ? 'y' : 'ies'}`);
+        sendResponse({ success: true, canonicalId, canonicalHost: primaryHost(byId.get(canonicalId) || {}), absorbed: absorbedIds.length, movedCapabilities: movedCaps });
+      } catch (err) {
+        Logger.error('background', `MERGE_GROUNDS failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },
