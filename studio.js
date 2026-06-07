@@ -5807,20 +5807,23 @@ function findLastReloadStart() {
   return 0;   // no reload marker in the buffer → download everything we have
 }
 
-$('btn-download-logs').addEventListener('click', async () => {
-  // Re-pull the full persisted store first so the file is complete even for entries that arrived while the Logs
-  // tab wasn't focused (live LOG_ENTRY broadcasts only land when a view is listening).
+// v2.74.812 — a "decision/outcome" line: the SIGNAL a gl review wants (routing / match / bind / read / the run
+// frame / param bindings) plus every problem (WARN/ERROR). Excludes per-action mechanics + DEBUG, so the Decisions
+// download reads as the story: ▶ RUN … → comprehend → resolve → bind → bindings → read → ✓ RUN.
+const _DECISION_RE = /(▶ RUN |[✓✗] RUN |COMPREHEND_CROSS_GROUND ▸|T3X resolve ▸|T3X bind ▸|ORCH_MATCH ▸|ORCH_MATCH_GLOBAL ▸|→ (?:auto|propose|miss)\/|RUN_OBSERVATION|RUN_BEST_OBSERVATION|ORCH_RECORD_ALIAS|ORCH_ADMIN ▸|REPLAY_SG_CAPABILITY —|— bindings:|CLICK caused navigation)/;
+function _isDecisionLine(entry) {
+  if (!entry) return false;
+  if (entry.level === 'WARN' || entry.level === 'ERROR') return true;
+  return _DECISION_RE.test(String(entry.message ?? ''));
+}
+
+// Shared by the Download (full) + Decisions (signal-only) buttons. Slices "since the last reload" by the persisted
+// session-start stamp (set on a real reload/startup, NOT an idle SW wake), so an error before a mid-session SW
+// idle-restart is still included. refreshLogs → getPersistedLogs() merges the never-evicted WARN+ERROR sidecar.
+// Falls back to the SW-start marker (then to everything) if the session was never stamped. PII is scrubbed at persist.
+async function _downloadLogs(decisionsOnly = false) {
   await refreshLogs();
   if (allLogEntries.length === 0) { toast('No logs to download', 'warn'); return; }
-
-  // v2.74.799 — Slice "since the last reload" by the persisted session-start
-  // stamp (set on a real reload/startup, NOT an idle SW wake), so an error that
-  // happened before a mid-session SW idle-restart is still included rather than
-  // sliced off at the idle-restart's marker. refreshLogs → GET_LOGS →
-  // getPersistedLogs() already merges the never-evicted WARN+ERROR sidecar, so a
-  // failure that aged out of the 500-entry main ring is back in allLogEntries.
-  // Fall back to the SW-start marker (then to everything) if the session was
-  // never stamped (installed before this shipped and not reloaded since).
   let entries;
   const sess = await chrome.storage.local.get('logger:sessionStart');   // Logger.SESSION_START_KEY
   const sessionStart = sess?.['logger:sessionStart'] ?? null;
@@ -5830,9 +5833,11 @@ $('btn-download-logs').addEventListener('click', async () => {
   } else {
     entries = allLogEntries.slice(findLastReloadStart());
   }
+  if (decisionsOnly) entries = entries.filter(_isDecisionLine);
+  if (entries.length === 0) { toast(decisionsOnly ? 'No decision lines this session' : 'No logs to download', 'warn'); return; }
   const text = entries.map(formatLogEntryAsText).join('\n');
 
-  // Filename stamped with local date-time: orchard-logs-YYYYMMDD-HHMMSS.txt
+  // Filename stamped with local date-time: orchard-logs[-decisions]-YYYYMMDD-HHMMSS.txt
   const d = new Date();
   const p = (n) => String(n).padStart(2, '0');
   const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
@@ -5841,13 +5846,15 @@ $('btn-download-logs').addEventListener('click', async () => {
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
   a.href = url;
-  a.download = `orchard-logs-${stamp}.txt`;
+  a.download = `orchard-logs${decisionsOnly ? '-decisions' : ''}-${stamp}.txt`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   setTimeout(() => URL.revokeObjectURL(url), 1000);
-  toast(`Downloaded ${entries.length} log lines${startIdx > 0 ? ' (since last reload)' : ''}`);
-});
+  toast(`Downloaded ${entries.length} ${decisionsOnly ? 'decision' : 'log'} line(s) (since last reload)`);
+}
+$('btn-download-logs').addEventListener('click', () => _downloadLogs(false));
+$('btn-download-decisions')?.addEventListener('click', () => _downloadLogs(true));
 
 // ── Clear logs ────────────────────────────────────────────────────────────────
 

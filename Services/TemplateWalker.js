@@ -3732,7 +3732,16 @@ export class TemplateWalker {
         outcome       : res?.success === true ? 'success' : 'failure',
         error         : res?.success === true ? null : (res?.error ?? null),
       };
-      Logger.info('ActionTrace', `${trace.kind} → ${trace.outcome}`, trace);
+      // v2.74.812 — one-line ActionTrace: kind → outcome "value" @ selector (landmark) [src/frame] — error. The old
+      // 18-field object (mostly null) bloated shared traces ~10×; this keeps the signal-bearing fields (incl.
+      // targetSource + frameId for iframe/landmark debugging) on one line. No separate DEBUG object — at the SW's
+      // DEBUG level that would just re-emit the bulk we're trimming.
+      const _v    = (trace.value != null && trace.value !== '') ? ` "${String(trace.value).slice(0, 60)}"` : '';
+      const _sel  = trace.resolvedSelector || (typeof trace.target === 'string' ? trace.target : '');
+      const _lm   = trace.landmarkAlias ? ` (${String(trace.landmarkAlias).slice(0, 40)})` : '';
+      const _meta = `${trace.targetSource && trace.targetSource !== 'none' ? trace.targetSource : ''}${trace.frameId ? `${trace.targetSource && trace.targetSource !== 'none' ? '/' : ''}f${trace.frameId}` : ''}`;
+      const _err  = (trace.outcome !== 'success' && trace.error) ? ` — ${String(trace.error).slice(0, 100)}` : '';
+      Logger.info('ActionTrace', `${trace.kind} → ${trace.outcome}${_v}${_sel ? ` @ ${_sel}` : ''}${_lm}${_meta ? ` [${_meta}]` : ''}${_err}`);
     } catch (e) {
       // Trace emission must never break execution.
       Logger.debug?.('TemplateWalker', `action-trace emit failed: ${e.message}`);

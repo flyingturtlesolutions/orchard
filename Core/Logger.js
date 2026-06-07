@@ -392,11 +392,15 @@ export class Logger {
       return s
         // Email addresses
         .replace(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g, '[email]')
-        // Phone numbers (various formats)
-        .replace(/(\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/g, '[phone]')
-        // UUIDs
+        // Phone numbers (various formats). v2.74.812 — the lookaround guards stop this from eating a digit run
+        // EMBEDDED in an identifier (e.g. `gnd_1748849017_07fxcu` → was `gnd_[phone]…`, which broke Ground
+        // correlation in shared traces). A real phone is bounded by non-identifier chars; an artifact-id's digits
+        // are flanked by `_`/alnum, so the `(?<![\w.@-])` / `(?![\w])` boundaries skip them while still redacting
+        // standalone numbers like "555-123-4567".
+        .replace(/(?<![\w.@-])(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?![\w])/g, '[phone]')
+        // UUIDs (free-standing; an artifact id is prefixed so `gnd_…`/`wf_…` survive)
         .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '[id]')
-        // HubSpot numeric record IDs (8+ digits standalone)
+        // HubSpot numeric record IDs (8+ digits standalone — \b already skips `_`-flanked id digits)
         .replace(/\b\d{8,}\b/g, '[id]');
     }
 

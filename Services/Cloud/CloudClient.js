@@ -69,7 +69,11 @@ export async function cloudRequest(method, path, opts = {}) {
     const msg = typeof data === 'object' && data && 'error' in data
       ? String(data.error)
       : res.statusText || 'Request failed';
-    Logger.warn('CloudClient', `${method} ${path} → ${res.status}: ${msg}`);
+    // v2.74.812 — a 404/501 is an EXPECTED "endpoint/feature not provisioned" (e.g. GET /workspaces on a basic cloud)
+    // — it recurs on every SW start and is handled upstream (OrchardAuth treats 404/501 as absent), so log it at DEBUG
+    // to keep shared traces quiet. Genuine failures (5xx, auth, other 4xx) stay at WARN.
+    const _expectedAbsent = res.status === 404 || res.status === 501;
+    Logger[_expectedAbsent ? 'debug' : 'warn']('CloudClient', `${method} ${path} → ${res.status}: ${msg}`);
     throw new CloudClientError(res.status, msg, data);
   }
 

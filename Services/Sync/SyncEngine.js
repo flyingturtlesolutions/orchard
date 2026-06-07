@@ -877,7 +877,7 @@ async function pullChanges() {
 
     if (changes.length === 0) {
       if (pages === 1) {
-        Logger.info('SyncEngine', `pull: 0 changes (orchardUserId=${session?.orchardUserId || 'none'}, since=${since || 'start'})`);
+        Logger.debug('SyncEngine', `pull: 0 changes (orchardUserId=${session?.orchardUserId || 'none'}, since=${since || 'start'})`);   // v2.74.812 — DEBUG: fires every idle SW start with nothing to report
       }
       if (feed.nextToken && feed.nextToken !== since) {
         await setLastSyncToken(feed.nextToken);

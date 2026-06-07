@@ -539,6 +539,10 @@ const _workflowCancellations = new Set();
 // additive for the debugger pass.
 const _workflowDebugStates = new Map();
 
+// v2.74.812 — short per-run id for the gl-trace START/FOOTER frame. A counter (not the scrubbed invocation UUID),
+// so it stays legible in a shared trace. Resets on SW restart; timestamps disambiguate across restarts.
+let _runSeq = 0;
+
 function _getWorkflowDebugState(invId) {
   let s = _workflowDebugStates.get(invId);
   if (!s) {
@@ -4159,6 +4163,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             isBreakpoint: (stepPath) => debugState.breakpoints.has(String(stepPath)),
           };
 
+          // v2.74.812 — per-run START/FOOTER frame so a downloaded trace reads as a story: a short run-id brackets the
+          // run; the resolve/bind/action/read lines in between belong to it. (run-id is a counter, not the scrubbed
+          // invocation UUID, so it survives PII-scrub legibly.)
+          const _runId = `r_${(++_runSeq).toString(36)}`;
+          const _runT0 = Date.now();
+          const _wfSteps = Array.isArray(workflow.steps) ? workflow.steps.length : 0;
+          const _wfGrounds = Array.isArray(workflow.groundIds) ? workflow.groundIds.length : 0;
+          Logger.info('background', `▶ RUN ${_runId} "${String(workflow.name || workflow.intent || 'workflow').slice(0, 60)}" (${_wfSteps} step${_wfSteps === 1 ? '' : 's'}${_wfGrounds ? `, ${_wfGrounds} ground${_wfGrounds === 1 ? '' : 's'}` : ''}${inlineWorkflow ? ', ephemeral' : ''})`);
+
           try {
             const result = await executeWorkflow(workflow, paramValues ?? {}, {
               onProgress,
@@ -4187,6 +4200,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               }),
               ensureContentScript: _ensureContentScript,   // heal a freshly-opened hop tab's content-script port before the read
             });
+            // v2.74.812 — run FOOTER: outcome + step/error/duration. stepResults shape varies, so read defensively.
+            const _sr = Array.isArray(result.results) ? result.results : (Array.isArray(result.stepResults) ? result.stepResults : null);
+            const _ran = _sr ? _sr.length : _wfSteps;
+            const _errs = _sr ? _sr.filter((r) => r && r.success === false).length : (result.success ? 0 : 1);
+            Logger.info('background', `${result.success ? '✓' : '✗'} RUN ${_runId} — ${result.success ? 'ok' : (result.error ? String(result.error).slice(0, 80) : 'failed')} · ${_ran}/${_wfSteps} step(s) · ${_errs} error(s) · ${Date.now() - _runT0}ms`);
             sendResponse({ success: !!result.success, invocationId: invId, ...result });
           } finally {
             // Always cleanup — leaving stale ids in either map would
