@@ -143,6 +143,10 @@ async function _bindStrategyOnGround(ctx, clause, groundId, effect = 'action') {
     capabilityName: cand.intent || cap.name || '',
     params: (cand.params || []).map((p) => (typeof p === 'string' ? p : (p && p.name))).filter(Boolean),
     outputs,
+    // Carry the consumer's reversibility (toCandidate derives it from intent/aliases via _IRREVERSIBLE). A cross-Ground
+    // WRITE consumer (apply/submit/post/buy) must be surfaced + confirmed in the workflow card — the single card-confirm
+    // can't silently authorize an irreversible step the way an explicit "Yes, go ahead" does on the single-ask path.
+    reversible: cand.reversible !== false,
   };
 }
 
@@ -894,7 +898,10 @@ export function createSgMessageHandlers(ctx) {
         // binder uses (_bindStrategyOnGround). `capabilityId` (the param) is the matcher id we looked the cap up by.
         const dispatchId = cap.strategyId || cap.fragmentId || cap.id;
         const capabilityKind = cap.strategyId ? 'strategy' : (cap.fragmentId ? 'fragment' : 'strategy');
-        const resolved = [{ id: 's0', clause: ask, groundId, groundName: _groundLabel(g), groundUrl, capabilityId: dispatchId, capabilityKind, capabilityName: cap.intent || cap.name || '', params, stated }];
+        // v2.74.813 — stamp reversibility (toCandidate derives it from intent/aliases) so an irreversible single-Ground
+        // capability run via the workflow path carries the same 🔒 floor the cross-Ground steps do (executor/saved re-run gate).
+        const reversible = toCandidate(cap).reversible !== false;
+        const resolved = [{ id: 's0', clause: ask, groundId, groundName: _groundLabel(g), groundUrl, capabilityId: dispatchId, capabilityKind, capabilityName: cap.intent || cap.name || '', params, stated, reversible }];
         wireCrossGroundData(resolved);   // STATED → step literals (so the search runs with the asked value, not empty)
         const wfId = `wf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         const built = buildWorkflowRecord({ id: wfId, intent: ask, name: String(ask).slice(0, 60), resolved });
@@ -1237,6 +1244,10 @@ export function createSgMessageHandlers(ctx) {
             capabilityName: bound ? bound.capabilityName : '',
             params: bound ? bound.params : [],
             outputs: bound ? bound.outputs : [],
+            // Reversibility floor: a bound observation has none (reads are always reversible → undefined→true); a bound
+            // action carries its derived flag; an unbound gap stays reversible (nothing runs until it's taught). Only a
+            // bound IRREVERSIBLE action (reversible===false) makes the card warn + require an explicit run-anyway.
+            reversible: bound ? (bound.reversible !== false) : true,
             // DF — a READ step's prerequisite ACTION: the antecedent CAPABILITY (e.g. the search) the executor
             // REPLAYS (via REPLAY_SG_CAPABILITY — a Strategy or Fragment) before the observation read. NOT the
             // embedded `observe` (that wrap-as-Strategy route was removed in v2.74.789) — the read runs

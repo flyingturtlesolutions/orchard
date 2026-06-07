@@ -914,8 +914,21 @@ export class ExecutionEngine {
         timeoutMs: 5000, pollIntervalMs: 100,
       });
       postFailures = probe.failures;
-      if (!probe.ok) {
-        const reasonSummary = probe.failures.map(f => ExecutionEngine.#formatConditionFailure(f)).join('; ');
+      // v2.74.815 — nav-aware postcondition relaxation. A fragment whose own terminal CLICK NAVIGATES (executeFragment
+      // surfaces execResult.navigated) invalidates an auto-derived url_matches that asserted the page it LEFT — the
+      // assertion held until the click's own navigation away. Drop ONLY such a failure (pattern matched the pre-nav URL
+      // but NOT the post-nav URL), so a "click that opens a page/panel" capability isn't scored failed for doing its job.
+      // A url_matches that targets a THIRD page (matched neither) stays a real failure; one targeting the post-nav page
+      // already passed (we're there) and was never in failures.
+      const _nav = execResult && execResult.navigated;
+      if (postFailures.length && _nav && _nav.from) {
+        const _hit = (pat, url) => { try { return new RegExp(pat).test(String(url || '')); } catch { return false; } };
+        const _before = postFailures.length;
+        postFailures = postFailures.filter((f) => !(f && f.type === 'url_matches' && f.pattern && _hit(f.pattern, _nav.from) && !_hit(f.pattern, _nav.to)));
+        if (postFailures.length < _before) Logger.info('ExecutionEngine', `${displayName} — relaxed ${_before - postFailures.length} stale url_matches post-failure(s): the fragment's own CLICK navigated "${String(_nav.from).slice(0, 44)}" → "${String(_nav.to).slice(0, 44)}"`);
+      }
+      if (postFailures.length > 0) {
+        const reasonSummary = postFailures.map(f => ExecutionEngine.#formatConditionFailure(f)).join('; ');
         Logger.info('ExecutionEngine',
           `${displayName} — postconditions failed after ${probe.elapsedMs}ms, ${probe.attempts} attempt(s): ${reasonSummary}`);
         stepResults.push({
@@ -935,7 +948,7 @@ export class ExecutionEngine {
         } catch { /* tab closed */ }
         emit({
           type: 'fragment_post_failed', stepIdx: topLevelIndex,
-          fragmentId: step.fragmentId, fragmentName: displayName, failures: probe.failures,
+          fragmentId: step.fragmentId, fragmentName: displayName, failures: postFailures,
           scopeSnapshot: scope.asResultObject(),
           url: failureUrl,
         });

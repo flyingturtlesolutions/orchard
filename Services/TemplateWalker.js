@@ -689,6 +689,9 @@ export class TemplateWalker {
     const substitutedActions = substituted.steps ?? actions;
 
     let actionsRun = 0;
+    // v2.74.815 — last in-fragment navigation (a mutating action that left the page). Surfaced in the fragment
+    // return so ExecutionEngine can relax a stale url_matches postcondition that asserted the page we just left.
+    let fragNavigated = null;
     // v2.36.0 (J1) — Ring buffer of the last few successful actions. Kept
     // small (cap 3) so failures carry just enough context to see "we were
     // mid-fragment, got past steps A B C, then D failed" without shipping
@@ -1355,6 +1358,7 @@ export class TemplateWalker {
                 `— the click succeeded at the DOM level but the tab left the page. ` +
                 `Subsequent steps will run against the new page.`);
               execResult.navigated = { from: urlBefore, to: urlAfter };
+              fragNavigated = execResult.navigated;   // v2.74.815 — surface the terminal navigation to the fragment return
             }
           } catch { /* tab closed — fine */ }
         }
@@ -1376,7 +1380,7 @@ export class TemplateWalker {
     // Let the page settle after the fragment finishes
     await TemplateWalker.#waitForPageIdle(tabId, TOP_FRAME_ID).catch(() => {});
 
-    return { success: true, actionsRun, antecedentActionsRun, lastActions, error: null };
+    return { success: true, actionsRun, antecedentActionsRun, lastActions, error: null, navigated: fragNavigated };
   }
 
   /**

@@ -1457,13 +1457,19 @@ function _orchOfferWorkflow(msg, { ask, res }) {
   const repairs = Array.isArray(res && res.repairs) ? res.repairs : [];
   const ambiguities = Array.isArray(res && res.ambiguities) ? res.ambiguities : [];
 
+  // v2.74.813 — a bound IRREVERSIBLE consumer (apply/submit/post/buy — reversible===false from the cross-Ground bind)
+  // can't ride the single card-confirm silently the way a search/read can. Mark it 🔒 in the step list, warn in the
+  // body, and make the run an EXPLICIT "includes a 🔒 step" click — the workflow-card parallel to single-ask "Yes, go ahead".
+  const _irr = (r) => !!(r && r.capabilityId && r.reversible === false);
+  const irreversible = resolved.filter(_irr);
   const lines = resolved.map((r, i) => {
     const site = _wfSite(r);
-    const mark = r && r.capabilityId ? '' : '⚠ ';
+    const mark = (r && r.capabilityId) ? (_irr(r) ? '🔒 ' : '') : '⚠ ';
     return `${i + 1}. ${mark}${(r && r.clause) || 'do it'}${site ? ` · on ${site}` : ''}`;
   });
   const sites = Array.from(new Set(resolved.map(_wfSite).filter(Boolean)));
   let body = `This spans ${sites.length} site${sites.length === 1 ? '' : 's'}${sites.length ? ` (${sites.join(' → ')})` : ''}:\n${lines.join('\n')}`;
+  if (irreversible.length) body += `\n\n🔒 ${irreversible.length === 1 ? 'One step can’t' : `${irreversible.length} steps can’t`} be undone (submit/apply/post). Review before you run.`;
   if (repairs.length) body += `\n\nI can’t do ${repairs.length === 1 ? 'one part' : `${repairs.length} parts`} yet:\n` + repairs.map((p) => `• ${p.message}`).join('\n');
   if (ambiguities.length) body += `\n\nAssumed: ` + ambiguities.map((a) => `“${a.clause}” → ${(a.candidates && a.candidates[0] && a.candidates[0].name) || 'a site'}`).join('; ');
   _setMessageBody(msg, body);
@@ -1483,7 +1489,7 @@ function _orchOfferWorkflow(msg, { ask, res }) {
       row.appendChild(lab); row.appendChild(inp); content.insertBefore(row, bar);
       pinputs.push({ name, inp, row });
     }
-    bar.appendChild(_mkBtn('▶ Run it', () => {
+    bar.appendChild(_mkBtn(irreversible.length ? '▶ Run (includes a 🔒 step)' : '▶ Run it', () => {
       const paramValues = {};
       for (const { name, inp } of pinputs) { const v = inp.value.trim(); if (v) paramValues[name] = v; }
       bar.remove(); pinputs.forEach(({ row }) => row.remove());

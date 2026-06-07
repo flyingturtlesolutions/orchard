@@ -2061,8 +2061,16 @@ function handleClick(selector, _value) {
       ariaPressedBefore: el.getAttribute?.('aria-pressed') ?? null,
     };
     el.scrollIntoView({ block: 'center', behavior: 'instant' });
-    el.focus();
-    el.click();
+    try { el.focus?.(); } catch { /* not every target is focusable (e.g. <svg>) — don't let it abort the click */ }
+    if (typeof el.click === 'function') {
+      el.click();
+    } else {
+      // v2.74.814 — SVG and other non-HTMLElement targets have no .click() method, so a captured icon glyph
+      // (e.g. Notion's "+" <svg.plusSmall>) threw "el.click is not a function". Dispatch a bubbling synthetic
+      // MouseEvent instead: it reaches the page's listener on an ancestor (React onClick / event delegation).
+      clickedInfo.via = 'synthetic';
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    }
     return { success: true, clicked: clickedInfo };
   } catch (e) {
     return { success: false, error: `CLICK: ${e.message}` };

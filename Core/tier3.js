@@ -118,6 +118,10 @@ export function buildWorkflowRecord({ id, intent = '', name = null, resolved = [
         ...(si.antecedentParamBindings && typeof si.antecedentParamBindings === 'object' ? { antecedentParamBindings: si.antecedentParamBindings } : {}),
       } : {}),
       ...(si.compensateWith ? { compensateWith: si.compensateWith } : {}),  // Q5 — a Strategy that UNDOES this step
+      // Reversibility floor on the durable record — only stamped when IRREVERSIBLE (apply/submit/post/buy), so a saved
+      // workflow re-run (which skips the live comprehend card) and the executor can still gate the 🔒 step. Default
+      // (absent) = reversible; reads/searches never set it.
+      ...(si.reversible === false ? { reversible: false } : {}),
     });
   }
 

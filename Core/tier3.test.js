@@ -64,6 +64,17 @@ describe('tier3 — T3X-2 buildWorkflowRecord (cross-Ground recursion lowering)'
     assert.equal(r.workflow.steps[0].workflowId, 'frag_1', 'the dispatch id is the Fragment id');
     assert.equal(r.workflow.steps[1].capabilityKind, 'strategy', 'absent capabilityKind → strategy (back-compat with old records)');
   });
+
+  it('an IRREVERSIBLE consumer (reversible:false) stamps the step; reversible/absent leaves it off', () => {
+    const r = buildWorkflowRecord({ id: 'wf', intent: 'x', resolved: [
+      { id: 's0', clause: 'search jazz singer jobs', groundId: 'gnd_in', capabilityId: 'frag_1', params: [], reversible: true },
+      { id: 's1', clause: 'apply to the top job',    groundId: 'gnd_in', capabilityId: 'strat_2', params: [], reversible: false },
+      { id: 's2', clause: 'save it to notion',       groundId: 'gnd_no', capabilityId: 'strat_3', params: [] },   // no flag
+    ] });
+    assert.equal(r.workflow.steps[0].reversible, undefined, 'a reversible step carries no flag (lean record)');
+    assert.equal(r.workflow.steps[1].reversible, false, 'the irreversible apply step is stamped so a saved re-run/executor can gate it');
+    assert.equal(r.workflow.steps[2].reversible, undefined, 'an absent flag defaults to reversible (no stamp)');
+  });
 });
 
 describe('tier3 — T3X wireCrossGroundData (cross-Ground data-flow floor)', () => {
