@@ -25,6 +25,11 @@ const _KIND_PATTERNS = [
   { kind: 'strategies',   re: /\b(strategies|capabilities)\b/i },
   { kind: 'observations', re: /\bobservations\b/i },
   { kind: 'perspectives', re: /\bperspectives\b/i },
+  // v2.74.811 — workflows are CROSS-Ground (saved cross-site recipes). Recognized explicitly ("delete all workflows")
+  // and deleted GLOBALLY by the handler. Deliberately NOT in _ALL_KINDS, so "wipe the ground"/"everything" — a
+  // per-Ground sweep — does NOT also nuke every cross-Ground workflow. Plural only (a singular "delete that workflow"
+  // is a corrective reference, not a bulk command).
+  { kind: 'workflows',    re: /\bworkflows\b/i },
 ];
 const _ALL_KINDS  = Object.freeze(['fragments', 'strategies', 'observations', 'perspectives']);
 const _EVERYTHING = /\b(everything|all artifacts|the (whole|entire) (ground|library|lot)|wipe (the )?(ground|library)|all of it)\b/i;

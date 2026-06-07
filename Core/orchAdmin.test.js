@@ -41,6 +41,13 @@ describe('orchAdmin — parse admin/management commands (ORCH-ADMIN)', () => {
     assert.deepEqual(parseAdminCommand('wipe the ground').kinds.sort(), [...ADMIN_KINDS].sort());
   });
 
+  it('workflows (v2.74.811): bulk-delete recognized + GLOBAL (excluded from "everything")', () => {
+    assert.deepEqual(parseAdminCommand('delete all workflows').kinds, ['workflows']);
+    assert.deepEqual(parseAdminCommand('clear all workflows on this site').kinds, ['workflows']);
+    assert.equal(parseAdminCommand('delete that workflow').isAdmin, false, 'singular reference is not a bulk command');
+    assert.ok(!parseAdminCommand('delete everything').kinds.includes('workflows'), 'cross-Ground workflows are NOT swept by a per-Ground "everything"');
+  });
+
   it('a SINGULAR reference is NOT a bulk command (→ corrective feedback handles "delete that")', () => {
     assert.equal(parseAdminCommand('delete that').isAdmin, false);
     assert.equal(parseAdminCommand('delete that fragment').isAdmin, false, 'singular "fragment" ≠ bulk');

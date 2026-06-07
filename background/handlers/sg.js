@@ -1018,9 +1018,25 @@ export function createSgMessageHandlers(ctx) {
           fragments:    (c) => !_isObs(c) && !c.strategyId,
         };
         const TIER1 = { perspectives: ['listPerspectives', 'deletePerspective'] };
-        const want = (Array.isArray(kinds) ? kinds : []).filter((k) => CAP_PRED[k] || TIER1[k]);
+        // v2.74.811 — 'workflows' is GLOBAL (cross-Ground; listWorkflows() has no Ground arg), handled separately below.
+        const want = (Array.isArray(kinds) ? kinds : []).filter((k) => CAP_PRED[k] || TIER1[k] || k === 'workflows');
         if (!want.length) { sendResponse({ success: false, error: 'no valid kinds' }); return; }
-        // Resolve target Ground(s): all grounds, or the one for the active tab's origin.
+        const counts = {}; let total = 0;
+
+        // WORKFLOWS — GLOBAL: count/delete ONCE, independent of Ground scope (so "delete all workflows" works from any
+        // tab). A saved Workflow spans Grounds, so it isn't a per-Ground artifact like a capability/perspective.
+        if (want.includes('workflows')) {
+          let wfs = [];
+          try { wfs = (await StorageManager.listWorkflows()) || []; } catch (e) { Logger.warn('background', `ORCH_ADMIN listWorkflows failed: ${e.message}`); }
+          const ids = (Array.isArray(wfs) ? wfs : []).map((w) => w && w.id).filter(Boolean);
+          if (op === 'delete') for (const id of ids) { try { await StorageManager.deleteWorkflow(id); } catch (e) { Logger.warn('background', `ORCH_ADMIN deleteWorkflow(${id}) failed: ${e.message}`); } }
+          counts.workflows = ids.length; total += ids.length;
+        }
+
+        // PER-GROUND kinds (capabilities / perspectives). Resolve target Ground(s): all, or the active tab's origin.
+        const groundKinds = want.filter((k) => k !== 'workflows');
+        let groundCount = 0;
+        if (groundKinds.length) {
         const allGrounds = (await StorageManager.getAllGrounds()) || [];
         let grounds = [];
         if (scope === 'all') grounds = allGrounds.map((g) => g.id).filter(Boolean);
@@ -1031,9 +1047,8 @@ export function createSgMessageHandlers(ctx) {
           }
           if (gid) grounds = [gid];
         }
-        if (!grounds.length) { sendResponse({ success: true, op, counts: {}, total: 0, grounds: 0, scope }); return; }
-        const counts = {}; let total = 0;
-        for (const k of want) {
+        groundCount = grounds.length;
+        for (const k of groundKinds) {
           let n = 0;
           for (const gid of grounds) {
             const pred = CAP_PRED[k];
@@ -1070,8 +1085,10 @@ export function createSgMessageHandlers(ctx) {
           }
           counts[k] = n; total += n;
         }
-        Logger.info('background', `ORCH_ADMIN ▸ ${op} kinds=[${want.join(',')}] scope=${scope} grounds=${grounds.length} counts=${JSON.stringify(counts)}`);
-        sendResponse({ success: true, op, counts, total, grounds: grounds.length, scope });
+        }   // end if (groundKinds.length)
+
+        Logger.info('background', `ORCH_ADMIN ▸ ${op} kinds=[${want.join(',')}] scope=${scope} grounds=${groundCount} counts=${JSON.stringify(counts)}`);
+        sendResponse({ success: true, op, counts, total, grounds: groundCount, scope });
       } catch (err) {
         Logger.error('background', `ORCH_ADMIN failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
