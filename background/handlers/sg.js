@@ -22,7 +22,7 @@ import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3
 import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved, describeTraceInput, derivePhasePostcondition, reconcileObservedLandmarks } from '../../Core/observedSegment.js';
 import { listLocales } from '../../Services/Storage/GroundAssetStore.js';   // OBS (v2.74.764) — reconcile observed landmarks to grounded Locale features
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A
-import { findDuplicateGroundGroups, planGroundMerge, primaryHost } from '../../Core/groundDedup.js';   // v2.74.816/.817 — duplicate-Ground detect + merge
+import { findDuplicateGroundGroups, planGroundMerge, primaryHost, siteIdentity } from '../../Core/groundDedup.js';   // v2.74.816/.817 — duplicate-Ground detect + merge; .835 — registrable brand for site-name matching
 import { matchGroundForUrl } from '../../Core/GroundMatcher.js';   // v2.74.823 — canonical URL→Ground matcher (honors urlPatterns, incl. the sibling hosts a dedup merge unions)
 import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/orchFeedback.js';   // ORCH-FB — corrective actions
 import { feedbackExamples } from '../../Core/feedbackLearn.js';   // ORCH-FB-2 — relevance shaping from feedback history
@@ -55,7 +55,7 @@ function _groundLabel(g) {
   const name = String(g.name || g.site || '').trim();
   if (name && !/^ground$/i.test(name)) return name;
   const url = g.url || (Array.isArray(g.urlPatterns) ? g.urlPatterns[0] : '') || '';
-  try { const core = new URL(url).hostname.replace(/^www\./, '').split('.')[0]; if (core) return core.charAt(0).toUpperCase() + core.slice(1); } catch { /* */ }
+  try { const core = siteIdentity(url).brand || new URL(url).hostname.replace(/^www\./, '').split('.')[0]; if (core) return core.charAt(0).toUpperCase() + core.slice(1); } catch { /* */ }   // v2.74.835 — brand (bamboohr), not the subdomain (malbek)
   return name || g.id || g.groundId || null;
 }
 
@@ -73,6 +73,10 @@ function _askNamesOtherGround(ask, grounds, currentGid) {
     const toks = [];
     const url = g.url || (Array.isArray(g.urlPatterns) ? g.urlPatterns[0] : '') || '';
     try { const sld = new URL(url).hostname.replace(/^www\./, '').split('.')[0]; if (sld && sld.length >= 4 && !_GROUND_TOKEN_STOP.has(sld.toLowerCase())) toks.push(sld); } catch { /* */ }
+    // v2.74.835 — ALSO the REGISTRABLE BRAND (groundDedup.siteIdentity): malbek.bamboohr.com → "bamboohr", so "on
+    // BambooHR" resolves a SUBDOMAIN ground by its brand, not just its leading subdomain label ("malbek" — which
+    // matched nothing, so resolution fell to a weak lexical pick and the whole data chain landed on the wrong site).
+    try { const brand = siteIdentity(url).brand; if (brand && brand.length >= 4 && !_GROUND_TOKEN_STOP.has(brand.toLowerCase())) toks.push(brand); } catch { /* */ }
     const nm = String(g.name || g.site || '').trim();
     if (nm && nm.length >= 4 && !/^ground$/i.test(nm) && !_GROUND_TOKEN_STOP.has(nm.toLowerCase())) toks.push(nm);
     for (const t of toks) {
