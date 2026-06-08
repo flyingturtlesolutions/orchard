@@ -1073,7 +1073,7 @@ function _orchPickOnce({ tabId }) {
 }
 
 // Capture an observation: point at the value → persist it for this read-ask.
-async function _orchObserveCapture(msg, { groundId, tabId, ask }) {
+async function _orchObserveCapture(msg, { groundId, tabId, ask, onAuthored = null }) {
   // For a LIST read ("the title of each…"), the pick must be ONE ITEM (so its archetype matches every item) — NOT
   // the surrounding container. Guide the user accordingly; otherwise the capture reads the whole list as one blob.
   const _isList = classifyReadAsk(ask).outputType === 'list';
@@ -1086,7 +1086,7 @@ async function _orchObserveCapture(msg, { groundId, tabId, ask }) {
   if (_isList && new Set(['ul', 'ol', 'table', 'tbody', 'thead', 'dl', 'select', 'nav', 'main']).has(String(picked.tagName || '').toLowerCase())) {
     _setMessageBody(msg, 'That landed on the whole list — point at just ONE item (e.g. the first job’s TITLE link) and I’ll read them all.');
     const bar = _orchActionBar(msg);
-    bar.appendChild(_mkBtn('◎ Try again', () => { bar.remove(); _orchObserveCapture(msg, { groundId, tabId, ask }); }));
+    bar.appendChild(_mkBtn('◎ Try again', () => { bar.remove(); _orchObserveCapture(msg, { groundId, tabId, ask, onAuthored }); }));
     return;
   }
   _setMessageBody(msg, 'Saving what to read…');
@@ -1109,6 +1109,9 @@ async function _orchObserveCapture(msg, { groundId, tabId, ask }) {
     const anteNote = ante ? ` (When I use this read on another site, I’ll re-run your last step here first${ante.label ? ` — “${String(ante.label).slice(0, 60)}”` : ''}.)` : '';
     if (res.verifiedValue) _setMessageBody(msg, `Got it — I read “${String(res.verifiedValue).slice(0, 300)}”. Ask again and I’ll fetch it live.${anteNote}`);
     else _setMessageBody(msg, `Saved — but when I re-read it just now I got nothing back. The picker saw ${res.sawText ? `“${String(res.sawText).slice(0, 120)}”` : 'a value'}, but the stored selector can’t reproduce it on this page (details in the log). Point me at it again, or use a Studio observation for a stable selector.${anteNote}`);
+    // v2.74.830 — fold back to the cross-Ground gap→teach loop (advance + re-check) once the observation is saved,
+    // the same way the action trial/record paths do via onAuthored.
+    if (typeof onAuthored === 'function') { try { onAuthored({ capabilityId: res.capability.id, groundId, ask, via: 'observe' }); } catch { /* */ } }
   } else {
     _setMessageBody(msg, `Couldn’t set that up${res && res.error ? ` — ${res.error}` : ''}.`);
   }
@@ -1725,10 +1728,20 @@ async function _orchTeachGap(msg, { groundId, groundName, groundUrl, clause, ask
     return;
   }
   await _orchWaitTabReady(tab.id);
-  _setMessageBody(msg, `On ${groundName || 'the site'} — learning “${clause}”.${advance ? '' : ' I’ll re-check the workflow once it’s saved.'}`);
+  // v2.74.830 — a READ gap ("read the company", "note its price") is an OBSERVATION — point at the VALUE to read, NOT
+  // a "do the task" recording. Honor the SAME classifyReadAsk oracle comprehension used to set the step's effect, so
+  // the teach matches the gap's KIND. (Was: every gap went to the action trial+record, demanding an action even for a
+  // read — the brittleness the user hit.)
+  const isRead = classifyReadAsk(clause).isRead;
   const onAuthored = advance ? go : (() => _orchRecheckWorkflow(ask, groundName, clause));
-  // NL-trial first (synthesize from the page); on failure it offers manual record. Both author-paths fold back.
-  await _orchNlFallback(appendMessage({ role: 'assistant', body: '' }), { tabId: tab.id, groundId, ask: clause, onAuthored });
+  _setMessageBody(msg, `On ${groundName || 'the site'} — ${isRead ? 'point at the value to read for' : 'learning'} “${clause}”.${advance ? '' : ' I’ll re-check the workflow once it’s saved.'}`);
+  if (isRead) {
+    // OBSERVATION teach — point at the value on the page; saving the observation makes the read step bindable.
+    await _orchObserveCapture(appendMessage({ role: 'assistant', body: '' }), { groundId, tabId: tab.id, ask: clause, onAuthored });
+  } else {
+    // ACTION teach — NL-trial first (synthesize from the page); on failure it offers manual record. Both fold back.
+    await _orchNlFallback(appendMessage({ role: 'assistant', body: '' }), { tabId: tab.id, groundId, ask: clause, onAuthored });
+  }
   if (advance) {
     if (!advanced) { const bar = _orchActionBar(msg); bar.appendChild(_mkBtn('Next step ▸', () => { bar.remove(); go(); })); }   // manual advance when the synth didn't author
   } else {

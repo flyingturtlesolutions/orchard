@@ -29,9 +29,11 @@ const _COUNT = /\bhow many\b|\bnumber of\b|\bcount (of|the)\b|\bhow many .* are\
 const _PREDICATE = /\b(is|are)\s+there\b|\bin stock\b|\b(is|are|it)\b[^?]*\b(available|present|listed|enabled|free|sold ?out)\b|\bdoes\b[^?]*\b(have|exist|include|offer|support)\b|\bcan i\b/i;
 const _LIST = /\blist\b|\bwhat are\b|\ball (of )?(the|them)\b|\bevery\b|\bwhich\b|\bnames? of\b|\bshow (me )?all\b|\btitles? of\b/i;
 const _SCALAR = /\bwhat('s| is| are)?\b|\bhow much\b|\b(price|value|title|name|cost|rating|score|total|count) of\b|\bthe (first|top|last|cheapest|highest|lowest|best|latest)\b/i;
-// A leading READ verb ("show / display / extract / read the salary") → a value read. (These are NOT in _COMMAND,
-// so they don't short-circuit to action.)
-const _READVERB = /^\s*(please\s+|can you\s+|could you\s+)?(show|display|read|extract|grab|fetch|get|see|view|tell\s+me|give\s+me)\b/i;
+// A leading READ verb ("show / display / extract / read / note the salary") → a value read. (These are NOT in
+// _COMMAND, so they don't short-circuit to action.) v2.74.830 — added the "write-down-a-VALUE" verbs note/jot/
+// record/copy: "note its name and price" / "copy the link" / "record the title" READ a value to capture it, so they
+// must classify as observations everywhere (comprehension effect AND the teach flow), not as actions to demonstrate.
+const _READVERB = /^\s*(please\s+|can you\s+|could you\s+)?(show|display|read|extract|grab|fetch|get|see|view|note|jot|record|copy|tell\s+me|give\s+me)\b/i;
 // A bare determiner-led NOUN PHRASE ("the salary", "the job title", "its rating") with no action verb → a value
 // read (scalar). Requires a leading determiner so a search term ("nurse jobs") isn't mistaken for a read.
 const _NOUNPHRASE = /^\s*(the|a|an|its|their|this|that|each|every)\s+[a-z][\w-]*(?:\s+[a-z][\w-]*){0,3}\??\s*$/i;

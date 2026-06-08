@@ -47,6 +47,18 @@ describe('observe — the pure floor for observations (OBS-READ-1)', () => {
     assert.equal(classifyReadAsk('show all the salaries').outputType, 'list');
   });
 
+  it('classifyReadAsk: write-down-a-VALUE verbs note/jot/record/copy → read (v2.74.830)', () => {
+    // The cross-Ground "note its name and price" reads — must classify as observations, not actions to demonstrate.
+    assert.equal(classifyReadAsk('note its name').isRead, true);
+    assert.equal(classifyReadAsk('note its price').isRead, true);
+    assert.equal(classifyReadAsk('read the top result\'s company').isRead, true);
+    assert.equal(classifyReadAsk('read the top result\'s link').isRead, true);
+    assert.equal(classifyReadAsk('copy the link').outputType, 'scalar');
+    assert.equal(classifyReadAsk('record the title').outputType, 'scalar');
+    // "save" stays a COMMAND (action) — "save it to Notion" is a write, not a read.
+    assert.equal(classifyReadAsk('save it to notion').isRead, false);
+  });
+
   it('classifyReadAsk: a bare trailing "?" is a weak read (default scalar)', () => {
     const r = classifyReadAsk('any luck?');   // a "?" that matches NO read pattern → weak read
     assert.equal(r.isRead, true);
