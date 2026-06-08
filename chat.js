@@ -1623,17 +1623,21 @@ function _orchOfferWorkflow(msg, { ask, res }) {
   // Not runnable → each AUTHOR-STRATEGY gap becomes a "teach it on that site" action (Q3 gap→capture): teaching the
   // Strategy there, then folding back, can make the workflow runnable. A RESOLVE-GROUND gap (no site) stays text.
   const subById = new Map(resolved.map((r) => [r && r.id, r]));
-  let taught = 0;
+  // v2.74.828 — collect the teachable gaps, then offer ONE flow that walks them IN TURN (teach step 1 → next → … →
+  // re-check), instead of N disconnected buttons where teaching one stranded the rest (which read as "the run ended").
+  const teachable = [];
   for (const p of repairs) {
     if (!p || p.kind !== 'author-strategy' || !p.groundId) continue;
     const sub = subById.get(p.subIntentId);
     const groundUrl = sub && sub.groundUrl;
     if (!groundUrl) continue;   // no entry url → can’t open the site; the repair stays guidance text above
-    taught++;
-    bar.appendChild(_mkBtn(`● Teach “${(p.clause || 'this').slice(0, 32)}” on ${p.groundName || 'that site'}`,
-      () => _orchTeachGap(appendMessage({ role: 'assistant', body: '' }), { groundId: p.groundId, groundName: p.groundName, groundUrl, clause: p.clause, ask })));
+    teachable.push({ groundId: p.groundId, groundName: p.groundName, groundUrl, clause: p.clause });
   }
-  bar.appendChild(_mkBtn(taught ? 'Not now' : 'Got it', () => { bar.remove(); }));
+  if (teachable.length) {
+    bar.appendChild(_mkBtn(`● Teach the ${teachable.length === 1 ? 'missing step' : `${teachable.length} missing steps`}`,
+      () => { bar.remove(); _orchTeachGapsInTurn(teachable, { ask, total: teachable.length }); }));
+  }
+  bar.appendChild(_mkBtn(teachable.length ? 'Not now' : 'Got it', () => { bar.remove(); }));
 }
 
 // SAVE the previewed Workflow (the exact record shown — no re-decompose), so it can be re-run anytime.
@@ -1695,18 +1699,42 @@ function _orchWaitTabReady(tabId, timeoutMs = 15000) {
 // "show me" (manual demo). EITHER success path fires onAuthored → re-comprehends the ORIGINAL ask so the freshly
 // authored Strategy closes the gap and the workflow re-renders (now bound, maybe runnable). A manual ↻ button is the
 // safety net for a demo the user finishes later.
-async function _orchTeachGap(msg, { groundId, groundName, groundUrl, clause, ask }) {
+// v2.74.828 — TEACH EACH MISSING STEP IN TURN. Walk the gap queue: teach the head; the user advances ("Next step ▸",
+// or auto-advance when the NL synth authors) regardless of whether THIS gap actually saved — so one hard gap can't
+// strand the rest (the "run ends after one teach" report). After the last, re-check the WHOLE workflow once.
+async function _orchTeachGapsInTurn(queue, { ask, total }) {
+  if (!queue.length) { await _orchRecheckWorkflow(ask); return; }
+  const step = (total || queue.length) - queue.length + 1;
+  const g = queue[0];
+  const m = appendMessage({ role: 'assistant', body: '' });
+  _setMessageBody(m, `Teaching step ${step} of ${total || queue.length}: “${g.clause}” on ${g.groundName || 'the site'}.`);
+  await _orchTeachGap(m, { ...g, ask, advance: () => _orchTeachGapsInTurn(queue.slice(1), { ask, total }) });
+}
+
+async function _orchTeachGap(msg, { groundId, groundName, groundUrl, clause, ask, advance = null }) {
   _setMessageBody(msg, `Opening ${groundName || 'the site'} to learn “${clause}”…`);
+  // v2.74.828 — in SEQUENCE mode (advance set) move on ONCE whether the NL synth authored, a manual demo saved, or the
+  // user skips; idempotent so an auto-advance and a button click can't double-step.
+  let advanced = false;
+  const go = () => { if (advanced || !advance) return; advanced = true; advance(); };
   let tab = null;
   try { tab = await chrome.tabs.create({ url: groundUrl, active: true }); } catch { /* */ }
-  if (!tab || typeof tab.id !== 'number') { _setMessageBody(msg, `Couldn’t open ${groundName || 'that site'}.`); return; }
+  if (!tab || typeof tab.id !== 'number') {
+    _setMessageBody(msg, `Couldn’t open ${groundName || 'that site'}.`);
+    if (advance) { const b = _orchActionBar(msg); b.appendChild(_mkBtn('Skip → next step', () => { b.remove(); go(); })); }
+    return;
+  }
   await _orchWaitTabReady(tab.id);
-  _setMessageBody(msg, `On ${groundName || 'the site'} — learning “${clause}”. I’ll re-check the workflow once it’s saved.`);
-  const recheck = () => _orchRecheckWorkflow(ask, groundName, clause);
+  _setMessageBody(msg, `On ${groundName || 'the site'} — learning “${clause}”.${advance ? '' : ' I’ll re-check the workflow once it’s saved.'}`);
+  const onAuthored = advance ? go : (() => _orchRecheckWorkflow(ask, groundName, clause));
   // NL-trial first (synthesize from the page); on failure it offers manual record. Both author-paths fold back.
-  await _orchNlFallback(appendMessage({ role: 'assistant', body: '' }), { tabId: tab.id, groundId, ask: clause, onAuthored: recheck });
-  const bar = _orchActionBar(msg);
-  bar.appendChild(_mkBtn('↻ Re-check workflow', () => { bar.remove(); recheck(); }));
+  await _orchNlFallback(appendMessage({ role: 'assistant', body: '' }), { tabId: tab.id, groundId, ask: clause, onAuthored });
+  if (advance) {
+    if (!advanced) { const bar = _orchActionBar(msg); bar.appendChild(_mkBtn('Next step ▸', () => { bar.remove(); go(); })); }   // manual advance when the synth didn't author
+  } else {
+    const bar = _orchActionBar(msg);
+    bar.appendChild(_mkBtn('↻ Re-check workflow', () => { bar.remove(); _orchRecheckWorkflow(ask, groundName, clause); }));
+  }
 }
 
 // Re-comprehend the original cross-site ask after a gap was taught; render the updated card. The new Strategy is now
