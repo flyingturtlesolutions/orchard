@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { toCandidate, scopeAndPartition, lexicalScore, rankAndDecide, matchAsk, DEFAULT_THRESHOLDS, accreteAlias, removeAlias, normalizeAliasPhrase, scoresToScorer, validateBindings, promotionBonus, tallyCapabilityConfirmations, localeAffordanceLabels } from './orchMatch.js';
+import { toCandidate, scopeAndPartition, lexicalScore, rankAndDecide, matchAsk, DEFAULT_THRESHOLDS, accreteAlias, removeAlias, normalizeAliasPhrase, scoresToScorer, validateBindings, promotionBonus, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability } from './orchMatch.js';
 
 // A realistic mini-library for indeed.com results page.
 const G = 'ground-indeed';
@@ -274,5 +274,31 @@ describe('orchMatch — T3X crossGround partition (global scope)', () => {
   it('no currentGroundId → nothing is off (the cross-Ground catalog ranks everything)', () => {
     const cands = [dateF, save].map((x) => toCandidate(x));
     assert.equal(scopeAndPartition(cands, { crossGround: true }).off.length, 0);
+  });
+});
+
+describe('orchMatch — isOrphanCapability (backing Tier-1 record deleted)', () => {
+  const liveStrategyIds = new Set(['strat-live']);
+  const liveFragmentIds = new Set(['frag-live']);
+  it('STRATEGY-cap: orphan iff its strategyId is gone', () => {
+    assert.equal(isOrphanCapability({ strategyId: 'strat-live' }, { liveStrategyIds, liveFragmentIds }), false, 'live strategy → not orphan');
+    assert.equal(isOrphanCapability({ strategyId: 'strat-dead' }, { liveStrategyIds, liveFragmentIds }), true, 'deleted strategy → orphan');
+  });
+  it('FRAGMENT-cap: orphan iff its fragmentId is gone (THE FIX — was unchecked)', () => {
+    assert.equal(isOrphanCapability({ fragmentId: 'frag-live' }, { liveStrategyIds, liveFragmentIds }), false, 'live fragment → not orphan');
+    assert.equal(isOrphanCapability({ fragmentId: 'frag-dead' }, { liveStrategyIds, liveFragmentIds }), true, 'deleted fragment → orphan');
+  });
+  it('strategyId is checked FIRST (a strategy-cap that also names an entry fragment)', () => {
+    // live strategy but its fragmentId is NOT in the live set → still NOT an orphan (identity = the Strategy).
+    assert.equal(isOrphanCapability({ strategyId: 'strat-live', fragmentId: 'frag-dead' }, { liveStrategyIds, liveFragmentIds }), false);
+  });
+  it('NULL live-set (failed read) → NOT an orphan (precision-first, never hide a real cap)', () => {
+    assert.equal(isOrphanCapability({ strategyId: 'strat-dead' }, { liveStrategyIds: null, liveFragmentIds }), false);
+    assert.equal(isOrphanCapability({ fragmentId: 'frag-dead' }, { liveStrategyIds, liveFragmentIds: null }), false);
+    assert.equal(isOrphanCapability({ fragmentId: 'frag-dead' }), false, 'no live-sets at all → not orphan');
+  });
+  it('a cap with NEITHER id (e.g. an Observation) is never an orphan', () => {
+    assert.equal(isOrphanCapability({ kind: 'observation', observe: {} }, { liveStrategyIds, liveFragmentIds }), false);
+    assert.equal(isOrphanCapability(null, { liveStrategyIds, liveFragmentIds }), false);
   });
 });

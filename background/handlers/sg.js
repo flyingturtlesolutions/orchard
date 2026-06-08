@@ -21,7 +21,7 @@ import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
 import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved, describeTraceInput, derivePhasePostcondition, reconcileObservedLandmarks } from '../../Core/observedSegment.js';
 import { listLocales } from '../../Services/Storage/GroundAssetStore.js';   // OBS (v2.74.764) — reconcile observed landmarks to grounded Locale features
-import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A
+import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A
 import { findDuplicateGroundGroups, planGroundMerge, primaryHost } from '../../Core/groundDedup.js';   // v2.74.816/.817 — duplicate-Ground detect + merge
 import { matchGroundForUrl } from '../../Core/GroundMatcher.js';   // v2.74.823 — canonical URL→Ground matcher (honors urlPatterns, incl. the sibling hosts a dedup merge unions)
 import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/orchFeedback.js';   // ORCH-FB — corrective actions
@@ -117,6 +117,17 @@ function _groundIdForUrl(url, grounds) {
   return null;
 }
 
+// v2.74.827 — load a Ground's live backing-record ids (Strategies + Fragments) for the orphan filter, shared by every
+// matcher site (so the strategyId/fragmentId check can't drift between them — that drift WAS the bug: only strategyId
+// was checked, so a Fragment-cap whose Fragment was deleted still matched, then REPLAY-failed "not found"). A FAILED
+// read for a kind → null (NOT empty) → isOrphanCapability won't flag that kind (precision-first).
+async function _liveBackingIds(groundId) {
+  let liveStrategyIds = null, liveFragmentIds = null;
+  try { liveStrategyIds = new Set((await StorageManager.listStrategies(groundId)).map((x) => x && x.id).filter(Boolean)); } catch { liveStrategyIds = null; }
+  try { liveFragmentIds = new Set((await StorageManager.listFragments(groundId)).map((x) => x && x.id).filter(Boolean)); } catch { liveFragmentIds = null; }
+  return { liveStrategyIds, liveFragmentIds };
+}
+
 async function _bindStrategyOnGround(ctx, clause, groundId, effect = 'action') {
   let caps = [];
   try { caps = await ctx.readSgCapabilities(groundId); } catch { return null; }
@@ -124,11 +135,10 @@ async function _bindStrategyOnGround(ctx, clause, groundId, effect = 'action') {
   // retracted/disabled caps AND strategy-caps whose Strategy was deleted (an orphan) — so a cross-Ground step could
   // bind a PAUSED or DANGLING capability that then dies at REPLAY ("strategy not found"). The global matcher already
   // filters both (isActiveCapability + !orphan); mirror it. Orphan = a strategy-cap whose strategyId isn't among the
-  // Ground's live Strategies; a FAILED listStrategies read → liveStrat=null → DON'T orphan-filter (precision-first:
-  // never wrongly orphan a real cap on a transient read error).
-  let liveStrat = null;
-  try { liveStrat = new Set((await StorageManager.listStrategies(groundId)).map((s) => s && s.id).filter(Boolean)); } catch { liveStrat = null; }
-  const _orphan = (c) => !!(c && c.strategyId && liveStrat && !liveStrat.has(c.strategyId));
+  // Ground's live Strategies — OR a bare Fragment-cap whose Fragment is gone (v2.74.827, via the shared predicate); a
+  // FAILED read → null → DON'T orphan-filter that kind (precision-first: never wrongly orphan a real cap on a transient error).
+  const { liveStrategyIds, liveFragmentIds } = await _liveBackingIds(groundId);
+  const _orphan = (c) => isOrphanCapability(c, { liveStrategyIds, liveFragmentIds });
   // DF-1 — EFFECT-scoped pool (mirrors the within-Ground matcher, sg.js ORCH_MATCH): a READ sub-intent binds an
   // OBSERVATION (the only capability that PRODUCES a value for a downstream Ground); an ACTION binds a T2 Strategy
   // or a bare T1 Fragment.
@@ -748,9 +758,8 @@ export function createSgMessageHandlers(ctx) {
         // live Strategy ids once and exclude any capability that points at a missing one. Non-destructive (the
         // admin delete + REPLAY self-heal handle storage cleanup); only skipped when the read fails (liveIds=null
         // → no filtering, never a false mass-hide). An observation capability has no strategyId → always kept.
-        let liveStrategyIds = null;
-        try { liveStrategyIds = new Set((await StorageManager.listStrategies(gid)).map((s) => s && s.id).filter(Boolean)); } catch { /* read failed → don't filter */ }
-        const _orphan = (c) => !!(c && c.strategyId && liveStrategyIds && !liveStrategyIds.has(c.strategyId));
+        const { liveStrategyIds, liveFragmentIds } = await _liveBackingIds(gid);   // v2.74.827 — Strategy AND Fragment liveness
+        const _orphan = (c) => isOrphanCapability(c, { liveStrategyIds, liveFragmentIds });
         // ORCH — scope "here" by SITE (origin), not the demo's exact path. Many capabilities (a global search
         // bar, site nav) work from ANY page of the Ground, so pinning them to the demo URL wrongly hides them
         // ("search vectors" lived on another page than "search music", though both are search options
@@ -877,9 +886,8 @@ export function createSgMessageHandlers(ctx) {
           roster.push(`${_groundLabel(g)}(${String(gid).slice(-6)},${Array.isArray(caps) ? caps.length : 0}c)`);
           if (gid === excludeGroundId) continue;
           if (!Array.isArray(caps) || !caps.length) continue;
-          let liveIds = null;
-          try { liveIds = new Set((await StorageManager.listStrategies(gid)).map((s) => s && s.id).filter(Boolean)); } catch { /* read failed → don't filter */ }
-          const _orphan = (c) => !!(c && c.strategyId && liveIds && !liveIds.has(c.strategyId));
+          const { liveStrategyIds, liveFragmentIds } = await _liveBackingIds(gid);   // v2.74.827 — Strategy AND Fragment liveness (per-Ground in the global sweep)
+          const _orphan = (c) => isOrphanCapability(c, { liveStrategyIds, liveFragmentIds });
           const projected = caps.filter((c) => isActiveCapability(c) && !_orphan(c) && c.kind !== 'composite').map((c) => toCandidate(c)).filter(Boolean);
           const pool = askIsRead ? projected.filter(_isReadCand)
             : (projected.filter((c) => !_isReadCand(c)).length ? projected.filter((c) => !_isReadCand(c)) : projected);
@@ -1135,8 +1143,8 @@ export function createSgMessageHandlers(ctx) {
           const gid = g && (g.id || g.groundId); if (!gid) continue;
           let caps = []; try { caps = (await ctx.readSgCapabilities(gid)) || []; } catch { /* */ }
           capabilities += caps.length;
-          let liveStrat = null; try { liveStrat = new Set((await StorageManager.listStrategies(gid)).map((x) => x && x.id).filter(Boolean)); } catch { liveStrat = null; }
-          if (liveStrat) orphans += caps.filter((c) => c && c.strategyId && !liveStrat.has(c.strategyId)).length;   // failed read → don't over-count
+          const { liveStrategyIds, liveFragmentIds } = await _liveBackingIds(gid);   // v2.74.827 — count BOTH Strategy- and Fragment-orphans
+          orphans += caps.filter((c) => isOrphanCapability(c, { liveStrategyIds, liveFragmentIds })).length;   // null live-set → not counted (precision-first)
         }
         let workflows = 0; try { workflows = ((await StorageManager.listWorkflows()) || []).length; } catch { /* */ }
         Logger.info('background', `STATS ▸ ${all.length} ground(s), ${capabilities} capabilit${capabilities === 1 ? 'y' : 'ies'} (${orphans} orphan), ${workflows} workflow(s)`);
@@ -1951,9 +1959,8 @@ export function createSgMessageHandlers(ctx) {
         if (!gid && url) { try { const grounds = await StorageManager.getAllGrounds(); gid = _groundIdForUrl(url, grounds); } catch { /* */ } }   // v2.74.824 — urlPatterns-aware (a merged sibling host resolves)
         if (!gid) { sendResponse({ success: true, groundId: null, steps: [] }); return; }
         const localeUrl = ctx.normalizeUrl(url);
-        let liveStrategyIds = null;
-        try { liveStrategyIds = new Set((await StorageManager.listStrategies(gid)).map((s) => s && s.id).filter(Boolean)); } catch { /* */ }
-        const _orphan = (c) => !!(c && c.strategyId && liveStrategyIds && !liveStrategyIds.has(c.strategyId));
+        const { liveStrategyIds, liveFragmentIds } = await _liveBackingIds(gid);   // v2.74.827 — Strategy AND Fragment liveness
+        const _orphan = (c) => isOrphanCapability(c, { liveStrategyIds, liveFragmentIds });
         const caps = (await ctx.readSgCapabilities(gid)).filter((c) => isActiveCapability(c) && !_orphan(c) && c.kind !== 'composite');   // composites (T2) aren't plan STEPS — don't nest
         const candidates = (Array.isArray(caps) ? caps : []).map((c) => toCandidate(c)).filter(Boolean);
         if (candidates.length < 2) { sendResponse({ success: true, groundId: gid, steps: [] }); return; }   // <2 caps → nothing to compose

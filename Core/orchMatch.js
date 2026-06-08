@@ -155,6 +155,24 @@ export function promotionBonus(health, { max = 0.2, now = 0, halfLifeMs = 259200
 }
 
 /**
+ * Is a capability an ORPHAN — its backing Tier-1 record deleted out from under it? PURE. A STRATEGY-cap is orphaned
+ * when its strategyId isn't among the Ground's live Strategy ids; a bare T1 FRAGMENT-cap when its fragmentId isn't
+ * among the live Fragment ids. strategyId is checked FIRST (a strategy-cap's identity IS its Strategy, even when it
+ * also names an entry fragment). A NULL live-set means the storage read FAILED — "don't know" → NOT an orphan
+ * (precision-first: never hide a real cap on a transient error). A cap with neither id (e.g. an Observation) is
+ * never an orphan. An orphan still MATCHES today but REPLAY-fails "not found", so the matcher must filter it out.
+ * @param {object} cap
+ * @param {{liveStrategyIds?:(Set<string>|null), liveFragmentIds?:(Set<string>|null)}} [live]
+ * @returns {boolean}
+ */
+export function isOrphanCapability(cap, { liveStrategyIds = null, liveFragmentIds = null } = {}) {
+  if (!cap) return false;
+  if (cap.strategyId) return liveStrategyIds ? !liveStrategyIds.has(cap.strategyId) : false;
+  if (cap.fragmentId) return liveFragmentIds ? !liveFragmentIds.has(cap.fragmentId) : false;
+  return false;
+}
+
+/**
  * Funnel stage 2 + the three-way gate. Effect-qualify → rank → decide auto / propose / miss, with the
  * reversibility hard veto. PURE. `score` defaults to lexicalScore; inject the LLM scorer to upgrade.
  * The `reason` strings double as the assistant's explanation copy (the funnel order IS the UX copy).
