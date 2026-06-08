@@ -908,7 +908,7 @@ function _normalizeWhitespace(s) {
  * and counts siblings sharing the element's own role within that
  * ancestor. Falls back to body when no distinguishing ancestor found.
  */
-function _computeHierarchicalContext(el) {
+function _computeHierarchicalContext(el, opts = {}) {
   const DISTINGUISHING_ROLES = new Set([
     'banner', 'navigation', 'main', 'complementary', 'contentinfo',
     'region', 'form', 'search', 'article', 'dialog',
@@ -924,7 +924,10 @@ function _computeHierarchicalContext(el) {
       // share `el`'s role, which index is `el`. Stable across cosmetic
       // changes because it counts by role, not by tag.
       let siblingPosition = 0;
-      if (myRole) {
+      // v2.74.838 — siblingPosition needs an O(descendants) querySelectorAll('*') scan per element. Callers that only
+      // need ancestorRole+ancestorName (e.g. enumeratePage building 100s of features) pass {siblingPosition:false} to
+      // skip it; recovery (_findLandmarkCandidatesByDescription) compares ancestorRole/Name only, so 0 is safe there.
+      if (myRole && opts.siblingPosition !== false) {
         try {
           const all = cur.querySelectorAll('*');
           let idx = 0;
@@ -3537,6 +3540,12 @@ async function enumeratePage() {
     return '';
   };
   const absRect = (el) => { try { const r = el.getBoundingClientRect(); return { x: Math.round(r.left + window.scrollX), y: Math.round(r.top + window.scrollY), w: Math.round(r.width), h: Math.round(r.height) }; } catch { return { x: 0, y: 0, w: 0, h: 0 }; } };
+  // v2.74.838 (Win 3) — hierarchical context (ancestorRole + ancestorName) per feature so a DRIFTED selector can be
+  // recovered by ancestor disambiguation (_findLandmarkCandidatesByDescription distinguishes two same-named controls
+  // by their landmark ancestor). featureToProtoLandmark (Core/landmark.js:53) reads feature.hierarchicalContext — it
+  // was always null on the auto-build path, leaving that recovery branch dead. siblingPosition skipped (unused by
+  // recovery; avoids an O(descendants) scan ×N features). null is harmless (same as before).
+  const hctxOf = (el) => { try { return _computeHierarchicalContext(el, { siblingPosition: false }); } catch { return null; } };
   const tierOf = (sel) => {
     if (!sel) return 'positional';
     if (/(^|\s|>)#[A-Za-z]/.test(sel)) return 'id';
@@ -3694,6 +3703,7 @@ async function enumeratePage() {
         kind: fkind,
         label: (d.label || d.name || d.id || '').slice(0, 80),
         a11yRole: el.getAttribute('role') || null,
+        hierarchicalContext: hctxOf(el),   // v2.74.838 — ancestor disambiguator for selector recovery
         selector: d.selector, selectorKind: tierOf(d.selector),
         // Verified only if a simple #id that ACTUALLY resolves from document — a
         // shadow-DOM control's #id matches the regex but won't resolve top-level,
@@ -3748,6 +3758,7 @@ async function enumeratePage() {
         id, kind, label, a11yRole: el.getAttribute('role') || null,
         selector, selectorKind: tierOf(selector), selectorVerified: false,
         ...(href ? { href } : {}),
+        hierarchicalContext: hctxOf(el),   // v2.74.838 — ancestor disambiguator for selector recovery
         location: { band: b, absRect: ar, visibleAtRest: (ar.y + ar.h) > origScrollY && ar.y < origScrollY + vh, scrollToY: Math.max(0, ar.y - Math.round(vh * 0.3)) },
         interaction: interactionOf(kind, el),
         confidence: 0.6,
@@ -3773,6 +3784,7 @@ async function enumeratePage() {
       const id = djb2(`region|${el.getAttribute('role') || el.tagName.toLowerCase()}|${label}|${selector}`);
       add({
         id, kind: 'region', label, a11yRole: el.getAttribute('role') || el.tagName.toLowerCase(),
+        hierarchicalContext: hctxOf(el),   // v2.74.838 — ancestor disambiguator for selector recovery
         selector, selectorKind: tierOf(selector), selectorVerified: false,
         location: { band: Math.floor(ar.y / bandStep), absRect: ar, visibleAtRest: (ar.y + ar.h) > origScrollY && ar.y < origScrollY + vh, scrollToY: Math.max(0, ar.y - Math.round(vh * 0.3)) },
         interaction: { pattern: 'none', effect: 'none' },
