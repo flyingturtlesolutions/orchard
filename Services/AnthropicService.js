@@ -2425,6 +2425,9 @@ Rules:
 DATA HAND-OFF READ (the one exception to "don't split within a site"): when the user READS / EXTRACTS a value — get / grab / copy / take / retrieve the title, price, link, email, first result, … — and a LATER sub-intent USES that value, the read is ALWAYS its OWN sub-intent, EVEN on the same site as the step before it, because it PRODUCES the data the hand-off carries. NEVER fold "…and get the X" into the preceding action. The consuming sub-intent lists the read's id in dependsOn.
 e.g. "search jazz singer jobs on Indeed, get the top title, and look it up on Pixabay" -> [ {search jazz singer jobs on Indeed}, {get the top job title} dependsOn the search, {look that title up on Pixabay} dependsOn the read ]  (THREE sub-intents — the read is NOT merged into the Indeed search).
 
+ONE READ PER DISTINCT VALUE: if the user reads SEVERAL distinct values in one breath — "get the title, company, AND link" / "note its name and price" — emit a SEPARATE read sub-intent for EACH value (one output apiece), each dependsOn the same producer. Each is its own extraction that binds its own read capability and may feed a different consumer; NO single capability reads them all, so a merged "read the title, company, and link" clause matches nothing cleanly (it is a borderline partial match that binds unreliably). Do NOT merge distinct reads.
+e.g. "get the top job's title, company, and link" -> [ {get the top job's title} dependsOn the search, {get the top job's company} dependsOn the search, {get the top job's link} dependsOn the search ]  (THREE reads, NOT one "title, company, and link" clause).
+
 The user's known sites:
 ${siteList}
 
