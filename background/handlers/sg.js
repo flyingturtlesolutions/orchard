@@ -2208,7 +2208,10 @@ export function createSgMessageHandlers(ctx) {
       try {
         const { tabId, groundId = null, capabilityId = null, paramValues = null } = payload ?? {};
         if (!groundId || !capabilityId) { sendResponse({ success: false, error: 'groundId + capabilityId required' }); return; }
-        const cap = (await ctx.readSgCapabilities(groundId)).find((c) => c.id === capabilityId);
+        // v2.74.833 — accept the cap's OWN id OR its DISPATCH id (strategyId/fragmentId). The cross-Ground bind
+        // (_bindStrategyOnGround) returns the DISPATCH id for an action step, so the in-order walk passed THAT to
+        // REPLAY and the by-`id`-only lookup missed → "capability not found" (success=false → the "indeed opens, nothing").
+        const cap = (await ctx.readSgCapabilities(groundId)).find((c) => c && (c.id === capabilityId || c.strategyId === capabilityId || c.fragmentId === capabilityId));
         if (!cap) { sendResponse({ success: false, error: 'capability not found' }); return; }
         // OBS-4b — an observed capability is parameterized: seed EVERY templated param with its demonstrated
         // default, then overlay user-supplied NEW values. Always seeding defaults is REQUIRED — executeStrategy

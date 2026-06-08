@@ -1724,7 +1724,7 @@ async function _walkStep(steps, i, st, ask) {
       } else {
         const r = await _orchReq('REPLAY_SG_CAPABILITY', { tabId: tab, groundId: si.groundId, capabilityId: si.capabilityId, paramValues: _walkResolveParams(si, st.scope) });
         if (r && r.ok) { _orchLog(`WALK ▸ step ${i + 1} · ran OK`); _setMessageBody(m, `Step ${i + 1}/${st.total} · ran “${si.capabilityName || si.clause}”.`); advance(); }
-        else { _orchLog(`WALK ▸ step ${i + 1} · run FAIL [${r ? `success=${r.success} ran=${r.ran} ok=${r.ok}${r.reason ? ` ${String(r.reason).slice(0, 40)}` : ''}` : 'null/timeout'}]`); _setMessageBody(m, `Step ${i + 1}/${st.total} · “${si.capabilityName || si.clause}” didn’t complete${r && r.reason ? ` (${r.reason})` : ''}.`); _walkReteach(m, si, st, next); }
+        else { _orchLog(`WALK ▸ step ${i + 1} · run FAIL [${r ? `success=${r.success} ran=${r.ran} ok=${r.ok}${r.error ? ` err="${String(r.error).slice(0, 50)}"` : ''}${r.reason ? ` ${String(r.reason).slice(0, 40)}` : ''}` : 'null/timeout'}]`); _setMessageBody(m, `Step ${i + 1}/${st.total} · “${si.capabilityName || si.clause}” didn’t complete${r && (r.error || r.reason) ? ` (${r.error || r.reason})` : ''}.`); _walkReteach(m, si, st, next); }
       }
     } else {
       // ── GAP → TEACH it in place (the prior steps warmed the page) ──
