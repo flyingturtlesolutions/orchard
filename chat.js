@@ -1236,10 +1236,25 @@ async function _orchListFlow(admin) {
     _setMessageBody(msg, admin.scope === 'all' ? 'No capabilities anywhere yet — teach one by demonstrating it.' : 'No capabilities on this site yet — teach one, or try “list capabilities everywhere”.');
     return;
   }
-  const byHost = {};
-  for (const c of items) { const h = c.host || '?'; if (!byHost[h]) byHost[h] = []; byHost[h].push(c); }
-  const blocks = Object.entries(byHost).map(([host, caps]) => `${host}:\n${caps.map((c) => `   • ${c.intent} (${c.kind})`).join('\n')}`);
-  _setMessageBody(msg, `${items.length} capabilit${items.length === 1 ? 'y' : 'ies'}${admin.scope === 'all' ? ' across all sites' : ' here'}:\n${blocks.join('\n')}`);
+  // v2.74.820 — a header + a row per capability with an Enable/Disable toggle (the matcher excludes a disabled one).
+  _setMessageBody(msg, `${items.length} capabilit${items.length === 1 ? 'y' : 'ies'}${admin.scope === 'all' ? ' across all sites' : ' here'}:`);
+  const content = msg.querySelector('.message-content');
+  const bar = _orchActionBar(msg);
+  const _fmt = (c) => `${c.intent} · ${c.kind}${c.host && admin.scope === 'all' ? ` · ${c.host}` : ''}${c.disabled ? '  (disabled)' : ''}`;
+  for (const c of items) {
+    const row = document.createElement('div'); row.style.cssText = 'display:flex;align-items:center;gap:8px;margin:3px 0;font-size:12px;';
+    const label = document.createElement('span');
+    const restyle = () => { label.style.cssText = 'flex:1;' + (c.disabled ? 'opacity:0.5;text-decoration:line-through;' : ''); label.textContent = _fmt(c); };
+    restyle();
+    const btn = _mkBtn(c.disabled ? 'Enable' : 'Disable', async () => {
+      btn.disabled = true;
+      const r = await _orchReq('SET_CAPABILITY_ACTIVE', { groundId: c.groundId, capabilityId: c.id, active: !!c.disabled });
+      if (r && r.success) { c.disabled = r.disabled; restyle(); btn.textContent = c.disabled ? 'Enable' : 'Disable'; }
+      btn.disabled = false;
+    });
+    row.appendChild(label); row.appendChild(btn); content.insertBefore(row, bar);
+  }
+  bar.appendChild(_mkBtn('Done', () => { bar.remove(); }));
 }
 
 // RENAME (v2.74.819) — name the active-tab Ground. The name comes from the command ("…to X") or a prompt.

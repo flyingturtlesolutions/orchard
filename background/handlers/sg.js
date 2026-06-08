@@ -1000,8 +1000,8 @@ export function createSgMessageHandlers(ctx) {
           const g = all.find((x) => (x.id || x.groundId) === gid) || {};
           let caps = []; try { caps = (await ctx.readSgCapabilities(gid)) || []; } catch { /* */ }
           for (const c of caps) {
-            if (!c || !isActiveCapability(c)) continue;
-            items.push({ id: c.id, intent: c.intent || c.name || '(unnamed)', kind: c.kind === 'observation' ? 'read' : (c.strategyId ? 'strategy' : 'fragment'), host: primaryHost(g) });
+            if (!c || c.id == null || c.retracted === true) continue;   // v2.74.820 — show active + DISABLED (the toggle target); hide retracted (feedback-removed, Studio-restorable)
+            items.push({ id: c.id, groundId: gid, intent: c.intent || c.name || '(unnamed)', kind: c.kind === 'observation' ? 'read' : (c.strategyId ? 'strategy' : 'fragment'), host: primaryHost(g), disabled: c.disabled === true });
           }
         }
         Logger.info('background', `ORCH_LIST ▸ capabilities scope=${scope} → ${items.length} cap(s) across ${gids.length} ground(s)`);
@@ -1076,6 +1076,21 @@ export function createSgMessageHandlers(ctx) {
         Logger.info('background', `STATS ▸ ${all.length} ground(s), ${capabilities} capabilit${capabilities === 1 ? 'y' : 'ies'} (${orphans} orphan), ${workflows} workflow(s)`);
         sendResponse({ success: true, grounds: all.length, capabilities, orphans, workflows });
       } catch (err) { Logger.error('background', `STATS failed: ${err.message}`); sendResponse({ success: false, error: err.message }); }
+    },
+
+    // v2.74.820 — SET_CAPABILITY_ACTIVE: enable/disable a capability WITHOUT deleting it. The matcher excludes a
+    // `disabled` cap via isActiveCapability, so a flaky one can be PAUSED (and re-enabled) — distinct from `retracted`
+    // (the broken-it feedback verdict). Toggled from the per-capability buttons in `list capabilities`.
+    SET_CAPABILITY_ACTIVE: async (payload, _sender, sendResponse) => {
+      try {
+        const { groundId = null, capabilityId = null, active = true } = payload ?? {};
+        if (!groundId || !capabilityId) { sendResponse({ success: false, error: 'groundId + capabilityId required' }); return; }
+        const cap = ((await ctx.readSgCapabilities(groundId)) || []).find((c) => c && c.id === capabilityId);
+        if (!cap) { sendResponse({ success: false, error: 'capability not found on this Ground' }); return; }
+        await ctx.writeSgCapability(groundId, { ...cap, disabled: active === false });
+        Logger.info('background', `SET_CAPABILITY_ACTIVE ▸ "${cap.intent || cap.name || capabilityId}" → ${active === false ? 'DISABLED' : 'enabled'}`);
+        sendResponse({ success: true, capabilityId, disabled: active === false });
+      } catch (err) { Logger.error('background', `SET_CAPABILITY_ACTIVE failed: ${err.message}`); sendResponse({ success: false, error: err.message }); }
     },
 
     // T3X-IND (v2.74.795) — BUILD a runnable 1-step Workflow that runs ONE capability on ANOTHER Ground (the chosen
