@@ -727,6 +727,10 @@ const _orchReq = (type, payload) => new Promise((resolve) => {
   } catch { if (!done) { done = true; clearTimeout(timer); resolve(null); } }
 });
 
+// v2.74.818 — write a decision line (e.g. the ROUTE a turn took + its cues) into the background's PERSISTED ring
+// buffer, so a chat-side routing decision shows in the downloaded trace (the sidepanel's own console isn't logged).
+const _orchLog = (line) => { try { _orchReq('ORCH_LOG', { line: String(line) }); } catch { /* never let a log break a turn */ } };
+
 async function _orchActiveTab() {
   try { const tabs = await chrome.tabs.query({ active: true, currentWindow: true }); return (tabs && tabs[0]) || null; }
   catch { return null; }
@@ -1207,6 +1211,76 @@ async function _orchDedupFlow() {
   bar.appendChild(_mkBtn('Not now', () => { bar.remove(); }));
 }
 
+// LIST (v2.74.819) — the READ complement to delete: show what's in the library — Grounds (host + cap count),
+// capabilities (intent + kind, this site or everywhere), or saved cross-Ground workflows.
+async function _orchListFlow(admin) {
+  const tab = await _orchActiveTab();
+  const msg = appendMessage({ role: 'assistant', body: 'Reading your library…' });
+  const r = await _orchReq('ORCH_LIST', { target: admin.target, scope: admin.scope, tabId: tab && tab.id });
+  if (!r || r.success === false) { _setMessageBody(msg, `Couldn’t read the library${r && r.error ? ` — ${r.error}` : ''}.`); return; }
+  const items = Array.isArray(r.items) ? r.items : [];
+  if (admin.target === 'grounds') {
+    if (!items.length) { _setMessageBody(msg, 'No Grounds yet — explore a site to create one.'); return; }
+    const lines = items.map((g, i) => `${i + 1}. ${g.host || g.name} — ${g.capabilityCount} cap${g.capabilityCount === 1 ? '' : 's'}`);
+    _setMessageBody(msg, `${items.length} Ground${items.length === 1 ? '' : 's'}:\n${lines.join('\n')}`);
+    return;
+  }
+  if (admin.target === 'workflows') {
+    if (!items.length) { _setMessageBody(msg, 'No saved workflows yet.'); return; }
+    const lines = items.map((w, i) => `${i + 1}. ${w.name} — ${w.steps} step${w.steps === 1 ? '' : 's'}${w.grounds > 1 ? `, ${w.grounds} sites` : ''}`);
+    _setMessageBody(msg, `${items.length} saved workflow${items.length === 1 ? '' : 's'}:\n${lines.join('\n')}`);
+    return;
+  }
+  // capabilities — grouped by host
+  if (!items.length) {
+    _setMessageBody(msg, admin.scope === 'all' ? 'No capabilities anywhere yet — teach one by demonstrating it.' : 'No capabilities on this site yet — teach one, or try “list capabilities everywhere”.');
+    return;
+  }
+  const byHost = {};
+  for (const c of items) { const h = c.host || '?'; if (!byHost[h]) byHost[h] = []; byHost[h].push(c); }
+  const blocks = Object.entries(byHost).map(([host, caps]) => `${host}:\n${caps.map((c) => `   • ${c.intent} (${c.kind})`).join('\n')}`);
+  _setMessageBody(msg, `${items.length} capabilit${items.length === 1 ? 'y' : 'ies'}${admin.scope === 'all' ? ' across all sites' : ' here'}:\n${blocks.join('\n')}`);
+}
+
+// RENAME (v2.74.819) — name the active-tab Ground. The name comes from the command ("…to X") or a prompt.
+async function _orchRenameFlow(admin) {
+  const tab = await _orchActiveTab();
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  const doRename = async (name) => {
+    _setMessageBody(msg, 'Renaming…');
+    const r = await _orchReq('RENAME_GROUND', { name, tabId: tab && tab.id });
+    _setMessageBody(msg, (r && r.success) ? `✓ Renamed this Ground to “${r.name}”.` : `Couldn’t rename${r && r.error ? ` — ${r.error}` : ''}.`);
+  };
+  if (admin.name) { await doRename(admin.name); return; }
+  _setMessageBody(msg, 'What should I name this Ground?');
+  const bar = _orchActionBar(msg);
+  const content = msg.querySelector('.message-content');
+  const inp = document.createElement('input'); inp.type = 'text'; inp.placeholder = 'e.g. Work Notion'; inp.style.cssText = 'flex:1;font-size:12px;padding:2px 6px;';
+  const row = document.createElement('div'); row.style.cssText = 'display:flex;gap:6px;margin:4px 0;'; row.appendChild(inp); content.insertBefore(row, bar);
+  bar.appendChild(_mkBtn('Rename', async () => { const v = inp.value.trim(); if (!v) return; bar.remove(); row.remove(); await doRename(v); }));
+  bar.appendChild(_mkBtn('Cancel', () => { bar.remove(); row.remove(); _setMessageBody(msg, 'Okay — not renamed.'); }));
+}
+
+// PRUNE (v2.74.819) — remove orphaned capabilities (dead — their backing Strategy/Fragment is gone). Safe cleanup.
+async function _orchPruneFlow(admin) {
+  const tab = await _orchActiveTab();
+  const msg = appendMessage({ role: 'assistant', body: 'Pruning orphaned capabilities…' });
+  const r = await _orchReq('PRUNE_ORPHANS', { scope: admin.scope, tabId: tab && tab.id });
+  if (r && r.success) {
+    _setMessageBody(msg, r.removed
+      ? `✓ Removed ${r.removed} orphaned capabilit${r.removed === 1 ? 'y' : 'ies'} (their backing strategy was gone)${admin.scope === 'all' ? ' across all sites' : ' here'}.`
+      : `No orphaned capabilities${admin.scope === 'all' ? '' : ' here'} — nothing to prune.`);
+  } else _setMessageBody(msg, `Couldn’t prune${r && r.error ? ` — ${r.error}` : ''}.`);
+}
+
+// STATS (v2.74.819) — a one-glance library overview.
+async function _orchStatsFlow() {
+  const msg = appendMessage({ role: 'assistant', body: 'Tallying your library…' });
+  const r = await _orchReq('STATS', {});
+  if (!r || r.success === false) { _setMessageBody(msg, `Couldn’t read the library${r && r.error ? ` — ${r.error}` : ''}.`); return; }
+  _setMessageBody(msg, `Library: ${r.grounds} Ground${r.grounds === 1 ? '' : 's'} · ${r.capabilities} capabilit${r.capabilities === 1 ? 'y' : 'ies'}${r.orphans ? ` (${r.orphans} orphaned — try “prune orphans”)` : ''} · ${r.workflows} saved workflow${r.workflows === 1 ? '' : 's'}.`);
+}
+
 // ORCH-X — confirm a COMPOUND ask as an ordered chain, then run it. One confirmation covers the whole chain.
 function _orchConfirmChain(msg, { tabId, clauses, firstMatch, ask = '' }) {
   const list = clauses.map((c, i) => `${i + 1}. ${c.text}`).join('\n');
@@ -1657,16 +1731,24 @@ async function _tryGroundedTurn(text) {
   // A bulk delete counts + confirms first. "delete that" (singular) is NOT admin → it falls to the feedback path.
   const admin = parseAdminCommand(text);
   if (admin.isAdmin) {
+    _orchLog(`ROUTE ▸ "${String(text).slice(0, 50)}" → admin/${admin.command}`);   // v2.74.818
     if (admin.command === 'clear_chat') _orchClearChat();
+    else if (admin.command === 'list') await _orchListFlow(admin);     // v2.74.819 — read complement to delete
+    else if (admin.command === 'rename') await _orchRenameFlow(admin); // v2.74.819 — name a Ground
+    else if (admin.command === 'prune') await _orchPruneFlow(admin);   // v2.74.819 — remove orphaned capabilities
+    else if (admin.command === 'stats') await _orchStatsFlow();        // v2.74.819 — library overview
     else await _orchAdminFlow(admin);
     return true;
   }
 
   // DEDUP — "dedupe grounds" / "merge duplicate sites": detect Grounds that are the same site (read-only).
-  if (parseDedupCommand(text).isDedup) { await _orchDedupFlow(); return true; }
+  if (parseDedupCommand(text).isDedup) { _orchLog(`ROUTE ▸ "${String(text).slice(0, 50)}" → dedup`); await _orchDedupFlow(); return true; }   // v2.74.818
 
   const tab = await _orchActiveTab();
   if (!tab || typeof tab.id !== 'number') return false;
+  // v2.74.818 — the grounded route + active-tab Ground host; the downstream COMPREHEND_CROSS_GROUND / ORCH_MATCH(_GLOBAL)
+  // line then shows which grounded sub-path ran, so a turn's full route reads in two lines.
+  _orchLog(`ROUTE ▸ "${String(text).slice(0, 50)}" → grounded [tab=${(() => { try { return new URL(tab.url).hostname; } catch { return '?'; } })()}]`);
 
   // ORCH-X T2 CACHE — a COMPOUND ask the user already saved as a composite (a T2 artifact) runs ATOMICALLY: no
   // re-decompose, no per-clause re-match. Cheap lexical lookup (NO LLM), gated to compound-ish asks so a simple

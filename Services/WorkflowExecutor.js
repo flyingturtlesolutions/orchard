@@ -175,7 +175,11 @@ function resolveBinding(binding, paramValues, workflowScope, ctx) {
       Logger.warn('WorkflowExecutor', `scope_binding "${binding.name}" not found in Strategy scope (no upstream step has emitted it yet)`);
       return undefined;
     }
-    return unwrapTagged(tagged);
+    const _v = unwrapTagged(tagged);
+    // v2.74.818 — make the cross-Ground HAND-OFF visible: an upstream output (a read value) flowing into this
+    // step's param. This is the data flow that was previously logged only at the read end (RUN_OBSERVATION).
+    Logger.info('WorkflowExecutor', `HANDOFF ▸ scope_binding "${binding.name}" = ${JSON.stringify(typeof _v === 'string' ? _v.slice(0, 60) : _v)}`);
+    return _v;
   }
   if (binding.kind === 'iteration_variable') {
     // v2.74.79 — Resolve against the iteration stack. Innermost FOREACH

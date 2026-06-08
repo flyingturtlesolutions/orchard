@@ -82,3 +82,53 @@ describe('orchAdmin — parseDedupCommand (find/merge duplicate Grounds)', () =>
     assert.equal(parseDedupCommand('').isDedup, false);
   });
 });
+
+describe('orchAdmin — parseAdminCommand LIST (the read complement to delete)', () => {
+  const list = (t) => parseAdminCommand(t);
+  it('lists grounds', () => {
+    for (const t of ['list grounds', 'show my sites', 'what grounds do I have', 'what sites do I have']) {
+      const r = list(t); assert.equal(r.command, 'list', t); assert.equal(r.target, 'grounds', t);
+    }
+  });
+  it('lists capabilities (incl. "what can you do")', () => {
+    for (const t of ['list capabilities', 'show capabilities', 'what can you do', 'what can you do here', 'what capabilities do I have']) {
+      const r = list(t); assert.equal(r.command, 'list', t); assert.equal(r.target, 'capabilities', t);
+    }
+  });
+  it('lists workflows', () => {
+    for (const t of ['list workflows', 'show my workflows', 'show saved recipes']) {
+      const r = list(t); assert.equal(r.command, 'list', t); assert.equal(r.target, 'workflows', t);
+    }
+  });
+  it('scope widens with "everywhere / all grounds"', () => {
+    assert.equal(list('list capabilities everywhere').scope, 'all');
+    assert.equal(list('list capabilities').scope, 'ground');
+  });
+  it('does NOT hijack a SEARCH or a DELETE', () => {
+    assert.equal(list('what sites have jazz singer jobs').isAdmin, false, 'search, not a library list');
+    assert.equal(list('delete all fragments').command, 'delete', 'delete still routes to delete');
+    assert.equal(list('search pixabay for cats').isAdmin, false);
+  });
+});
+
+describe('orchAdmin — parseAdminCommand rename / prune / stats', () => {
+  const p = (t) => parseAdminCommand(t);
+  it('rename a Ground (name from "to/as"; empty → chat prompts)', () => {
+    const r = p('rename this ground to My Notion');
+    assert.equal(r.command, 'rename'); assert.equal(r.target, 'ground'); assert.equal(r.name, 'My Notion');
+    assert.equal(p('rename this site').name, '', 'no name → empty (chat prompts)');
+    assert.equal(p('rename the fragment').isAdmin, false, 'rename needs a ground/site noun');
+  });
+  it('prune orphaned capabilities — incl. "remove/delete dead" (NOT a delete-all)', () => {
+    assert.equal(p('prune orphaned capabilities').command, 'prune');
+    assert.equal(p('clean up dead capabilities').command, 'prune');
+    assert.equal(p('remove orphaned capabilities').command, 'prune', '"remove orphans" prunes, not delete-all');
+    assert.equal(p('delete broken capabilities').command, 'prune');
+    assert.equal(p('delete all capabilities').command, 'delete', 'no orphan word → a real delete-all');
+  });
+  it('stats / library overview', () => {
+    assert.equal(p('stats').command, 'stats');
+    assert.equal(p('library overview').command, 'stats');
+    assert.equal(p('show me the cats').isAdmin, false);
+  });
+});

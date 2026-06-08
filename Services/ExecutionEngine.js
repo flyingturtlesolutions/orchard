@@ -923,9 +923,14 @@ export class ExecutionEngine {
       const _nav = execResult && execResult.navigated;
       if (postFailures.length && _nav && _nav.from) {
         const _hit = (pat, url) => { try { return new RegExp(pat).test(String(url || '')); } catch { return false; } };
-        const _before = postFailures.length;
-        postFailures = postFailures.filter((f) => !(f && f.type === 'url_matches' && f.pattern && _hit(f.pattern, _nav.from) && !_hit(f.pattern, _nav.to)));
-        if (postFailures.length < _before) Logger.info('ExecutionEngine', `${displayName} — relaxed ${_before - postFailures.length} stale url_matches post-failure(s): the fragment's own CLICK navigated "${String(_nav.from).slice(0, 44)}" → "${String(_nav.to).slice(0, 44)}"`);
+        postFailures = postFailures.filter((f) => {
+          if (!(f && f.type === 'url_matches' && f.pattern)) return true;
+          const relax = _hit(f.pattern, _nav.from) && !_hit(f.pattern, _nav.to);   // held pre-nav, broke on the click's own nav
+          // v2.74.818 — log the .815 reasoning EITHER way (relax vs keep), so a "ran but postconditions failed" is
+          // explicable at a glance (the 17:46 Notion case kept it because the pattern was a THIRD page, not from/to).
+          Logger.info('ExecutionEngine', `postcond ▸ url_matches("${String(f.pattern).slice(0, 30)}") failed; CLICK navigated "…${String(_nav.from).slice(-28)}" → "…${String(_nav.to).slice(-28)}" → ${relax ? 'RELAXED (assertion held until the nav)' : 'KEPT (pattern matches neither from nor to — a third page)'}`);
+          return !relax;
+        });
       }
       if (postFailures.length > 0) {
         const reasonSummary = postFailures.map(f => ExecutionEngine.#formatConditionFailure(f)).join('; ');

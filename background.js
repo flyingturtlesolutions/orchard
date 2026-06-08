@@ -314,17 +314,36 @@ getIdentitySummary()
   })
   .catch(err => Logger.warn('background', `Orchard identity init: ${err.message}`));
 
+// v2.74.818 — log the Ground inventory at session start. The duplicate/sibling-Ground class of bug (a cap on a
+// host the active-tab-scoped delete can't reach — e.g. app.notion.com vs notion.so) is invisible without a roster
+// of every Ground + its capability count. One `GROUNDS ▸` line at startup makes it obvious.
+async function _logGroundInventory(reason) {
+  try {
+    const grounds = (await StorageManager.getAllGrounds()) || [];
+    const parts = [];
+    for (const g of (Array.isArray(grounds) ? grounds : [])) {
+      const gid = g && (g.id || g.groundId); if (!gid) continue;
+      let n = 0; try { n = ((await _readSgCapabilities(gid)) || []).length; } catch { /* */ }
+      let host = g && g.name; try { if (g && g.url) host = new URL(g.url).hostname; } catch { /* */ }
+      parts.push(`${host || gid}(${String(gid).slice(-6)},${n}c)`);
+    }
+    Logger.info('background', `GROUNDS ▸ ${parts.length} ground(s) [${reason}]: ${parts.join(' · ') || '(none)'}`);
+  } catch (e) { Logger.warn('background', `ground inventory log failed: ${e.message}`); }
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   // v2.74.799 — mark the session boundary on a REAL reload/install (not idle SW
   // wake) so the Logs download can reliably slice "everything since the reload".
   Logger.markSessionStart();
   _migrationPromise = _runMigrations()
-    .catch(err => Logger.error('background', `migration failed: ${err.message}`));
+    .catch(err => Logger.error('background', `migration failed: ${err.message}`))
+    .finally(() => _logGroundInventory('install/reload').catch(() => {}));   // v2.74.818
 });
 chrome.runtime.onStartup?.addListener?.(() => {
   Logger.markSessionStart();   // v2.74.799 — browser launch is a new session too
   _migrationPromise = _runMigrations()
-    .catch(err => Logger.error('background', `migration failed: ${err.message}`));
+    .catch(err => Logger.error('background', `migration failed: ${err.message}`))
+    .finally(() => _logGroundInventory('startup').catch(() => {}));   // v2.74.818
   flushSyncIfPending('startup').catch(() => {});
 });
 

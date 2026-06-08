@@ -96,20 +96,28 @@ async function _bindStrategyOnGround(ctx, clause, groundId, effect = 'action') {
   const candidates = (Array.isArray(caps) ? caps : [])
     .filter((c) => c && (isRead ? c.kind === 'observation' : (c.kind !== 'observation' && (c.strategyId || c.fragmentId))))
     .map((c) => toCandidate(c));
-  Logger.debug('background', `_bind ▸ "${String(clause).slice(0, 36)}" @${String(groundId).slice(-6)}: ${candidates.length} ${effect} cand`);   // v2.74.807 — cross-Ground bind-pool size (DEBUG audit)
-  if (!candidates.length) return null;
+  const _bindTag = `"${String(clause).slice(0, 36)}" @${String(groundId).slice(-6)}`;
+  Logger.debug('background', `_bind ▸ ${_bindTag}: ${candidates.length} ${effect} cand`);   // v2.74.807 — cross-Ground bind-pool size (DEBUG audit)
+  if (!candidates.length) { Logger.info('background', `_bind ▸ ${_bindTag} → MISS [pool=0 ${effect} — nothing of this kind captured on this Ground]`); return null; }   // v2.74.818
   // Lexical floor first (cheap). On a MISS, escalate to the LLM matcher — a vague cross-Ground clause ("search for IT
   // on Pixabay", where "it" is a data placeholder with no lexical signal) under-scores the site's search lexically,
   // but the LLM matches it (the same matchCapability that bound "search pixabay for cats" within-Ground). v2.74.807.
   let decision = rankAndDecide(clause, candidates, { now: Date.now() });
+  let llmState = 'skip';   // v2.74.818 — did the LLM escalation run? distinguishes a lexical-only miss from an LLM miss
   if (!decision || decision.decision === 'miss') {
     try {
       const llm = await AnthropicService.matchCapability({ ask: clause, candidates });
+      llmState = 'ran';
       if (llm && Array.isArray(llm.scores)) decision = rankAndDecide(clause, candidates, { score: scoresToScorer(llm.scores), now: Date.now() });
-    } catch { /* LLM unavailable → keep the lexical miss */ }
+    } catch { llmState = 'err'; /* LLM unavailable → keep the lexical miss */ }
   }
   const cand = decision && decision.candidate;
-  if (!cand || decision.decision === 'miss') return null;
+  if (!cand || decision.decision === 'miss') {
+    // v2.74.818 — log WHY the bind missed: pool size + the top (almost-matched) candidate + its score + LLM state.
+    const _top = (decision && decision.candidate) ? `"${String(decision.candidate.intent || decision.candidate.name || '').slice(0, 30)}" ${Number(decision.score || 0).toFixed(2)}` : 'none';
+    Logger.info('background', `_bind ▸ ${_bindTag} → MISS [pool=${candidates.length} ${effect}, top=${_top}, llm=${llmState}]`);
+    return null;
+  }
   const cap = (cand.raw && typeof cand.raw === 'object') ? cand.raw : {};
   if (isRead) {
     // an OBSERVATION read: it READS cap.observe.extracts[*].output → workflowScope → a downstream write consumes
@@ -819,11 +827,14 @@ export function createSgMessageHandlers(ctx) {
         const grounds = (await StorageManager.getAllGrounds()) || [];
         // Collect every effect-scoped, ACTIVE, non-orphan candidate across ALL Grounds, tagged with its Ground.
         const tagged = [];   // { cand, gid, g }
+        const roster = [];   // v2.74.818 — FULL Ground inventory (incl. EMPTY grounds + the excluded active-tab one) — makes duplicate/sibling Grounds (e.g. app.notion.com + notion.so) obvious at a glance
         for (const g of grounds) {
           const gid = g && (g.id || g.groundId);
-          if (!gid || gid === excludeGroundId) continue;
+          if (!gid) continue;
           let caps = [];
-          try { caps = await ctx.readSgCapabilities(gid); } catch { continue; }
+          try { caps = await ctx.readSgCapabilities(gid); } catch { caps = []; }
+          roster.push(`${_groundLabel(g)}(${String(gid).slice(-6)},${Array.isArray(caps) ? caps.length : 0}c)`);
+          if (gid === excludeGroundId) continue;
           if (!Array.isArray(caps) || !caps.length) continue;
           let liveIds = null;
           try { liveIds = new Set((await StorageManager.listStrategies(gid)).map((s) => s && s.id).filter(Boolean)); } catch { /* read failed → don't filter */ }
@@ -833,6 +844,7 @@ export function createSgMessageHandlers(ctx) {
             : (projected.filter((c) => !_isReadCand(c)).length ? projected.filter((c) => !_isReadCand(c)) : projected);
           for (const c of pool) tagged.push({ cand: c, gid, g });
         }
+        Logger.info('background', `GROUNDS ▸ ${roster.length} ground(s): ${roster.join(' · ') || '(none)'}`);   // v2.74.818 — the inventory blind-spot: host(id,Ncap) for every Ground
         if (!tagged.length) { Logger.info('background', `ORCH_MATCH_GLOBAL ▸ "${String(ask).slice(0, 60)}" → no candidates across Grounds`); sendResponse({ success: true, hits: [] }); return; }
         // ONE LLM matchCapability pass over the COMBINED pool — the lexical floor is too weak for cross-Ground intent
         // (live trace: "search jazz singer jobs" missed lexically but the LLM scored "Search jobs by title and
@@ -936,12 +948,134 @@ export function createSgMessageHandlers(ctx) {
           // 2. move the per-Ground artifacts + delete the now-empty source (StorageManager owns the flat-key re-key).
           await StorageManager.mergeGround(fromId, canonicalId, { urlPatterns, name });
         }
-        Logger.info('background', `MERGE_GROUNDS ▸ ${absorbedIds.length} ground(s) → ${String(canonicalId).slice(-6)} (${_groundLabel(byId.get(canonicalId) || {})}); moved ${movedCaps} capabilit${movedCaps === 1 ? 'y' : 'ies'}`);
+        // v2.74.818 — name the canonical + absorbed Ground ids + the sync implication, so a later SyncEngine 409 on
+        // one of these ground.json files is traceable back to THIS merge (the merge↔sync conflict from the 17:46 trace).
+        Logger.info('background', `MERGE_GROUNDS ▸ ${absorbedIds.length} ground(s) → canonical ${String(canonicalId).slice(-6)} (${_groundLabel(byId.get(canonicalId) || {})}); moved ${movedCaps} capabilit${movedCaps === 1 ? 'y' : 'ies'}; absorbed [${absorbedIds.map((x) => String(x).slice(-6)).join(', ')}] deleted → SyncEngine reconciles these Grounds (cloud conflicts expected if synced)`);
         sendResponse({ success: true, canonicalId, canonicalHost: primaryHost(byId.get(canonicalId) || {}), absorbed: absorbedIds.length, movedCapabilities: movedCaps });
       } catch (err) {
         Logger.error('background', `MERGE_GROUNDS failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
+    },
+
+    // v2.74.818 — ORCH_LOG: a thin pass-through so the SIDEPANEL (chat.js) can write a decision line (e.g. the ROUTE
+    // a turn took + its cues) into the SAME persisted ring buffer the background uses — the sidepanel's own console
+    // isn't ring-buffered, so a chat-side decision was previously invisible in the downloaded trace.
+    ORCH_LOG: async (payload, _sender, sendResponse) => {
+      try { const line = payload && payload.line; if (typeof line === 'string' && line) Logger.info('background', line.slice(0, 300)); } catch { /* never let a log break the turn */ }
+      sendResponse({ success: true });
+    },
+
+    // v2.74.819 — ORCH_LIST: the READ complement to ORCH_ADMIN's delete. Returns the library's contents so the chat
+    // can SHOW what you have — grounds (host + cap count), capabilities (intent + kind, active-tab Ground or all), or
+    // saved cross-Ground workflows. Read-only.
+    ORCH_LIST: async (payload, _sender, sendResponse) => {
+      try {
+        const { target = 'capabilities', scope = 'ground', tabId = null } = payload ?? {};
+        const all = (await StorageManager.getAllGrounds()) || [];
+        if (target === 'grounds') {
+          const items = [];
+          for (const g of (Array.isArray(all) ? all : [])) {
+            const gid = g && (g.id || g.groundId); if (!gid) continue;
+            let n = 0; try { n = ((await ctx.readSgCapabilities(gid)) || []).length; } catch { /* */ }
+            items.push({ id: gid, name: _groundLabel(g), host: primaryHost(g), capabilityCount: n });
+          }
+          Logger.info('background', `ORCH_LIST ▸ grounds → ${items.length} ground(s)`);
+          sendResponse({ success: true, target, items }); return;
+        }
+        if (target === 'workflows') {
+          let wfs = []; try { wfs = (await StorageManager.listWorkflows()) || []; } catch { /* */ }
+          const items = (Array.isArray(wfs) ? wfs : []).map((w) => ({ id: w.id, name: w.name || w.intent || w.id, steps: (Array.isArray(w.steps) ? w.steps.length : 0), grounds: (Array.isArray(w.groundIds) ? w.groundIds.length : 0) }));
+          Logger.info('background', `ORCH_LIST ▸ workflows → ${items.length} workflow(s)`);
+          sendResponse({ success: true, target, items }); return;
+        }
+        // capabilities — the active-tab Ground (default) or every Ground (scope=all)
+        let gids = [];
+        if (scope === 'all') gids = all.map((g) => g.id || g.groundId).filter(Boolean);
+        else if (typeof tabId === 'number') {
+          try { const t = await chrome.tabs.get(tabId); const origin = new URL(t.url).origin; const g = all.find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); if (g) gids = [g.id || g.groundId]; } catch { /* */ }
+        }
+        const items = [];
+        for (const gid of gids) {
+          const g = all.find((x) => (x.id || x.groundId) === gid) || {};
+          let caps = []; try { caps = (await ctx.readSgCapabilities(gid)) || []; } catch { /* */ }
+          for (const c of caps) {
+            if (!c || !isActiveCapability(c)) continue;
+            items.push({ id: c.id, intent: c.intent || c.name || '(unnamed)', kind: c.kind === 'observation' ? 'read' : (c.strategyId ? 'strategy' : 'fragment'), host: primaryHost(g) });
+          }
+        }
+        Logger.info('background', `ORCH_LIST ▸ capabilities scope=${scope} → ${items.length} cap(s) across ${gids.length} ground(s)`);
+        sendResponse({ success: true, target, items, scope, grounds: gids.length });
+      } catch (err) {
+        Logger.error('background', `ORCH_LIST failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // v2.74.819 — RENAME_GROUND: give the active-tab Ground a readable name (Grounds often carry a generic "Ground").
+    RENAME_GROUND: async (payload, _sender, sendResponse) => {
+      try {
+        const { name = '', groundId = null, tabId = null } = payload ?? {};
+        const nm = String(name || '').trim();
+        if (!nm) { sendResponse({ success: false, error: 'a name is required' }); return; }
+        let gid = groundId;
+        if (!gid && typeof tabId === 'number') {
+          try { const t = await chrome.tabs.get(tabId); const origin = new URL(t.url).origin; const gs = (await StorageManager.getAllGrounds()) || []; const g = gs.find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? (g.id || g.groundId) : null; } catch { /* */ }
+        }
+        if (!gid) { sendResponse({ success: false, error: 'no Ground for this tab (this page isn’t in the library)' }); return; }
+        await StorageManager.updateGround(gid, { name: nm.slice(0, 80) });
+        Logger.info('background', `RENAME_GROUND ▸ ${String(gid).slice(-6)} → "${nm.slice(0, 60)}"`);
+        sendResponse({ success: true, groundId: gid, name: nm.slice(0, 80) });
+      } catch (err) { Logger.error('background', `RENAME_GROUND failed: ${err.message}`); sendResponse({ success: false, error: err.message }); }
+    },
+
+    // v2.74.819 — PRUNE_ORPHANS: remove matcher capabilities whose backing Strategy/Fragment is GONE (they still
+    // MATCH, then REPLAY-fail "not found"). Closes the orphan-cap gap. Reads are skipped (no backing artifact).
+    PRUNE_ORPHANS: async (payload, _sender, sendResponse) => {
+      try {
+        const { scope = 'all', tabId = null } = payload ?? {};
+        const all = (await StorageManager.getAllGrounds()) || [];
+        let gids = (scope === 'all') ? all.map((g) => g.id || g.groundId).filter(Boolean) : [];
+        if (scope !== 'all' && typeof tabId === 'number') {
+          try { const t = await chrome.tabs.get(tabId); const origin = new URL(t.url).origin; const g = all.find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); if (g) gids = [g.id || g.groundId]; } catch { /* */ }
+        }
+        let removed = 0;
+        for (const gid of gids) {
+          // SAFETY: a FAILED list read → null (NOT an empty Set), so we DON'T prune that kind — otherwise a transient
+          // storage error would flag every cap as orphaned and wipe the library. An empty-but-SUCCESSFUL read is a
+          // real signal (the backing artifacts are genuinely gone → those caps ARE orphans).
+          let liveStrat = null; let liveFrag = null;
+          try { liveStrat = new Set((await StorageManager.listStrategies(gid)).map((x) => x && x.id).filter(Boolean)); } catch { liveStrat = null; }
+          try { liveFrag = new Set((await StorageManager.listFragments(gid)).map((x) => x && x.id).filter(Boolean)); } catch { liveFrag = null; }
+          const isOrphan = (c) => {
+            if (!c || c.kind === 'observation') return false;
+            if (c.strategyId) return liveStrat ? !liveStrat.has(c.strategyId) : false;   // read failed → leave it alone
+            if (c.fragmentId) return liveFrag ? !liveFrag.has(c.fragmentId) : false;
+            return false;
+          };
+          try { removed += (await ctx.removeSgCapabilities(gid, isOrphan)) || 0; } catch { /* */ }
+        }
+        Logger.info('background', `PRUNE_ORPHANS ▸ scope=${scope} → removed ${removed} orphan(s) across ${gids.length} ground(s)`);
+        sendResponse({ success: true, removed, grounds: gids.length });
+      } catch (err) { Logger.error('background', `PRUNE_ORPHANS failed: ${err.message}`); sendResponse({ success: false, error: err.message }); }
+    },
+
+    // v2.74.819 — STATS: a one-glance library overview (grounds · capabilities · orphans · workflows).
+    STATS: async (_payload, _sender, sendResponse) => {
+      try {
+        const all = (await StorageManager.getAllGrounds()) || [];
+        let capabilities = 0; let orphans = 0;
+        for (const g of (Array.isArray(all) ? all : [])) {
+          const gid = g && (g.id || g.groundId); if (!gid) continue;
+          let caps = []; try { caps = (await ctx.readSgCapabilities(gid)) || []; } catch { /* */ }
+          capabilities += caps.length;
+          let liveStrat = null; try { liveStrat = new Set((await StorageManager.listStrategies(gid)).map((x) => x && x.id).filter(Boolean)); } catch { liveStrat = null; }
+          if (liveStrat) orphans += caps.filter((c) => c && c.strategyId && !liveStrat.has(c.strategyId)).length;   // failed read → don't over-count
+        }
+        let workflows = 0; try { workflows = ((await StorageManager.listWorkflows()) || []).length; } catch { /* */ }
+        Logger.info('background', `STATS ▸ ${all.length} ground(s), ${capabilities} capabilit${capabilities === 1 ? 'y' : 'ies'} (${orphans} orphan), ${workflows} workflow(s)`);
+        sendResponse({ success: true, grounds: all.length, capabilities, orphans, workflows });
+      } catch (err) { Logger.error('background', `STATS failed: ${err.message}`); sendResponse({ success: false, error: err.message }); }
     },
 
     // T3X-IND (v2.74.795) — BUILD a runnable 1-step Workflow that runs ONE capability on ANOTHER Ground (the chosen
@@ -2004,7 +2138,7 @@ export function createSgMessageHandlers(ctx) {
           // T3X-DF — a clean run drove this Ground's state → remember it as a candidate ANTECEDENT for a later READ
           // capture here (the search-before-the-read). Only on ok (a failed run left the page in an uncertain state).
           if (ok) { try { _lastGroundAction.set(groundId, { capabilityId: cap.id, bindings: { ...strategyParamValues } }); } catch { /* */ } }
-          Logger.info('background', `REPLAY_SG_CAPABILITY — ${cap.id} via saved strategy ${cap.strategyId} → ${ok ? 'ok' : 'failed'} (NO LLM, landmark recovery${pv.length ? `, params: ${pv.join(', ')}` : ''})`);
+          Logger.info('background', `REPLAY_SG_CAPABILITY — "${cap.intent || cap.name || '?'}" ${cap.id} via saved strategy ${cap.strategyId} → ${ok ? 'ok' : 'failed'} (NO LLM, landmark recovery${pv.length ? `, params: ${pv.join(', ')}` : ''})`);
           sendResponse({ success: true, ran: true, replayed: true, via: 'strategy', capabilityId: cap.id, ok, reason: ok ? undefined : (result?.error || 'a step failed') });
           return;
         }
@@ -2023,7 +2157,7 @@ export function createSgMessageHandlers(ctx) {
             catch (e) { sendResponse({ success: false, error: `replay fragment failed: ${e.message}` }); return; }
             const ok = !!(result && result.success);
             if (ok) { try { _lastGroundAction.set(groundId, { capabilityId: cap.id, bindings: { ...strategyParamValues } }); } catch { /* */ } }   // T3X-DF — candidate antecedent for a later READ capture on this Ground
-            Logger.info('background', `REPLAY_SG_CAPABILITY — ${cap.id} via bare FRAGMENT ${cap.fragmentId} (T1, wrapped at run time, NO LLM)`);
+            Logger.info('background', `REPLAY_SG_CAPABILITY — "${cap.intent || cap.name || '?'}" ${cap.id} via bare FRAGMENT ${cap.fragmentId} (T1, wrapped at run time, NO LLM)`);
             sendResponse({ success: true, ran: true, replayed: true, via: 'fragment', capabilityId: cap.id, ok, reason: ok ? undefined : (result?.error || 'a step failed') });
             return;
           }
@@ -2033,7 +2167,7 @@ export function createSgMessageHandlers(ctx) {
         if (!roles.length) { sendResponse({ success: true, ran: false, reason: 'capability has no saved strategy or binding' }); return; }
         let localeModel = null;
         try { const pm = await ctx.readLocaleCache(groundId, ctx.normalizeUrl(cap.localeUrl || liveUrl)); localeModel = pm?.model || null; } catch { /* */ }
-        Logger.info('background', `REPLAY_SG_CAPABILITY — ${cap.id} via binding fallback (${roles.length} role(s), NO LLM)`);
+        Logger.info('background', `REPLAY_SG_CAPABILITY — "${cap.intent || cap.name || '?'}" ${cap.id} via binding fallback (${roles.length} role(s), NO LLM)`);
         const out = await ctx.runTrialBundle({ groundId, intent: cap.intent, roles, localeModel, navigateUrl: null, proposedRoleCount: roles.length, targetTabId: (typeof tabId === 'number' ? tabId : null) });
         sendResponse({ ...out, replayed: true, via: 'binding', capabilityId: cap.id });
       } catch (err) {
