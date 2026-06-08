@@ -2330,6 +2330,55 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // GA-3 (Win 1) — RE-VERIFY a saved capability: re-run its trial from the saved binding on the LIVE page and write
+    // a FRESH health verdict back. A capability is born `healthStatus:'untested'` and never re-proven (the trial runs
+    // once, at accept); unattended, trust silently decays as the site drifts. This re-runs the SAME scored machinery
+    // the REPLAY binding-fallback uses (ctx.runTrialBundle) — irreversible terminals stay DEFERRED by
+    // classifyTrialSafety, so re-verify never fires a submit/apply, it only re-proves reachability. Lazy /
+    // Studio-triggered (no scheduler): trial-pass → healthStatus 'ready'; trial-fail → 'broken'. The verdict vector
+    // becomes the capability's live trust score (consumed by GA-4's pending-review / arm gate).
+    REVERIFY_SG_CAPABILITY: async (payload, _sender, sendResponse) => {
+      try {
+        const { tabId = null, groundId = null, capabilityId = null } = payload ?? {};
+        if (!groundId || !capabilityId) { sendResponse({ success: false, error: 'groundId + capabilityId required' }); return; }
+        const cap = (await ctx.readSgCapabilities(groundId)).find((c) => c && (c.id === capabilityId || c.strategyId === capabilityId || c.fragmentId === capabilityId));
+        if (!cap) { sendResponse({ success: false, error: 'capability not found' }); return; }
+        const roles = Array.isArray(cap.binding) ? cap.binding : [];
+        if (!roles.length) { sendResponse({ success: true, reverified: false, reason: 'capability has no saved binding to re-trial' }); return; }
+        // DRIFT GUARD — never trial the wrong page (mirrors RUN_SG_TRIAL): the live tab must match the capability's
+        // Locale URL, or the trial would type this capability's selectors into whatever else loaded.
+        let liveUrl = '';
+        if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); liveUrl = t?.url || ''; } catch { /* */ } }
+        const targetUrl = cap.localeUrl || '';
+        if (targetUrl && liveUrl && ctx.normalizeUrl(liveUrl) !== ctx.normalizeUrl(targetUrl)) {
+          sendResponse({ success: true, reverified: false, reason: `the page is "${String(liveUrl).slice(0, 80)}" but this capability targets "${String(targetUrl).slice(0, 80)}" — navigate there and re-verify` });
+          return;
+        }
+        let localeModel = null;
+        try { const pm = await ctx.readLocaleCache(groundId, ctx.normalizeUrl(targetUrl || liveUrl)); localeModel = pm?.model || null; } catch { /* */ }
+        const out = await ctx.runTrialBundle({ groundId, intent: cap.intent, roles, localeModel, navigateUrl: null, proposedRoleCount: roles.length, targetTabId: (typeof tabId === 'number' ? tabId : null) });
+        if (!out || !out.ran) { sendResponse({ success: true, reverified: false, reason: (out && out.reason) || 'trial did not run' }); return; }
+        const prev = (cap.trial && cap.trial.verdict) || 'unknown';
+        const verdict = (out.trial && out.trial.verdict) || 'unknown';
+        const score = (out.trial && out.trial.score != null) ? out.trial.score : null;
+        const vector = (out.trial && out.trial.vector) || null;
+        const now = Date.now();
+        // WRITE health back to the backing Fragment / Strategy (the records minted `untested`, never advanced). A
+        // partial patch (StorageManager spreads existing → safe). healthStatus enum: 'ready'|'stale'|'broken'|'untested'.
+        const health = { healthStatus: verdict === 'trial-pass' ? 'ready' : 'broken', lastExecutedAt: now, lastVerifiedAt: now };
+        try { if (cap.fragmentId) await StorageManager.updateFragment(cap.fragmentId, health); } catch (e) { Logger.warn('background', `REVERIFY fragment ${cap.fragmentId} patch failed: ${e.message}`); }
+        try { if (cap.strategyId) await StorageManager.updateStrategy(cap.strategyId, health); } catch (e) { Logger.warn('background', `REVERIFY strategy ${cap.strategyId} patch failed: ${e.message}`); }
+        // Refresh the capability's own trust stamp (its trial verdict + a re-verify timestamp).
+        try { await ctx.writeSgCapability(groundId, { ...cap, trial: { verdict, score, vector, trialRef: (cap.trial && cap.trial.trialRef) || null }, lastVerifiedAt: now }); } catch { /* */ }
+        try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('reverify', { groundId, verdict, input: { roleOrIntent: String(cap.intent || '').slice(0, 120) }, detail: { capabilityId: cap.id, previousVerdict: prev, newVerdict: verdict, score, healthStatus: health.healthStatus } })]); } catch { /* */ }
+        Logger.info('background', `REVERIFY_SG_CAPABILITY — "${String(cap.intent || cap.name || '?').slice(0, 50)}" ${cap.id} → ${verdict} (score=${score}) health=${health.healthStatus} [was ${prev}]`);
+        sendResponse({ success: true, reverified: true, capabilityId: cap.id, previousVerdict: prev, verdict, score, vector, healthStatus: health.healthStatus });
+      } catch (err) {
+        Logger.error('background', `REVERIFY_SG_CAPABILITY failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
     // SG-5 / PB-7 — list a ground's accepted substrate-grounded capabilities (UI library).
     GET_SG_CAPABILITIES: async (payload, _sender, sendResponse) => {
       try {
