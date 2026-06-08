@@ -2728,7 +2728,7 @@ Bind each step's params from the ask: an "option" param's value SHOULD be one of
    * The raw mapping + a reconciliation summary are LOGGED.
    * @param {{spec:object, locale:object}} args  spec = IntentSpec; locale = the Locale (SG-0.5).
    */
-  static async matchSubGoals({ spec, locale }) {
+  static async matchSubGoals({ spec, locale, conventions = null }) {
     const subGoals = (spec && Array.isArray(spec.subGoals)) ? spec.subGoals : [];
     const candidates = selectCandidates(locale, spec);
     if (!subGoals.length || !candidates.length) {
@@ -2761,7 +2761,7 @@ Return ONLY a JSON object:
     }).join('\n');
     // Rank by relevance to the intent BEFORE the cap, so the target survives on a feature-dense page (a
     // nav-heavy site has 100+ candidates; an unranked slice can drop the very control the intent names).
-    const ranked = rankCandidates(candidates, spec);
+    const ranked = rankCandidates(candidates, spec, { conventions });   // GA-5 — Ground's selector-tier history breaks ranking ties
     const featBlock = ranked.slice(0, 100).map((f) => `- ${f.id}: "${(f.label || '').slice(0, 60)}" [${f.kind}${f.fieldType ? `/${f.fieldType}` : ''}${f.required ? ', required' : ''}${f.interaction && f.interaction.effect === 'submit' ? ', submit' : ''}]`).join('\n');
     const userText = `Sub-goals:\n${sgBlock}\n\nPage features:\n${featBlock}`;
     Logger.info('AnthropicService', `matchSubGoals — ${subGoals.length} sub-goal(s) over ${candidates.length} feature(s)`);

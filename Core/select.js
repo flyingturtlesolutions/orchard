@@ -82,9 +82,10 @@ function _rankTokens(s) {
 /**
  * @param {object[]} candidates  the kind-narrowed set from selectCandidates
  * @param {object} spec          IntentSpec ({ target, subGoals[] })
+ * @param {{conventions?:{selectorTierHistogram?:Object<string,number>}}} [opts]  GA-5 — per-Ground selector-tier convention histogram (tie-break only)
  * @returns {object[]}           same features, ordered most-relevant first (stable on ties)
  */
-export function rankCandidates(candidates, spec) {
+export function rankCandidates(candidates, spec, opts = {}) {
   const list = Array.isArray(candidates) ? candidates : [];
   const q = new Set([
     ..._rankTokens(spec && spec.target),
@@ -92,6 +93,12 @@ export function rankCandidates(candidates, spec) {
   ]);
   if (!q.size || list.length < 2) return list.slice();   // nothing to rank by → preserve order
   const targetLc = String((spec && spec.target) || '').toLowerCase().trim();
+  // v2.74.841 (GA-5) — a per-Ground selector-tier convention histogram ({tier: weight}) breaks TIES among equal-score
+  // candidates toward the tier this Ground's accepted/corrected selectors have favored, so the durable ones survive
+  // the downstream top-100 cap. Additive: a candidate's own match score always dominates; conventions only order
+  // equals. No-op when the histogram is absent/empty (every weight 0 → falls back to the stable original index).
+  const _convHist = (opts && opts.conventions && opts.conventions.selectorTierHistogram) ? opts.conventions.selectorTierHistogram : null;
+  const _convPref = (f) => (_convHist && f && f.selectorKind && typeof _convHist[f.selectorKind] === 'number') ? _convHist[f.selectorKind] : 0;
   const scored = list.map((f, i) => {
     let score = 0;
     for (const t of _rankTokens(f && f.label)) if (q.has(t)) score += 2;   // label token hit (strongest)
@@ -100,7 +107,7 @@ export function rankCandidates(candidates, spec) {
     if (targetLc.length > 2 && labelLc.includes(targetLc)) score += 4;     // exact target phrase present
     return { f, i, score };
   });
-  scored.sort((a, b) => (b.score - a.score) || (a.i - b.i));               // score desc, stable on ties
+  scored.sort((a, b) => (b.score - a.score) || (_convPref(b.f) - _convPref(a.f)) || (a.i - b.i));   // score desc · Ground's favored selector tier (GA-5) · stable on ties
   return scored.map((x) => x.f);
 }
 

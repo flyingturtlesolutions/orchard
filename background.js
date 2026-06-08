@@ -1684,6 +1684,7 @@ const _sgMessageHandlers = createSgMessageHandlers({
   normalizeUrl         : _normalizeUrlForPerspectiveCache,
   appendOutcomes       : _appendOutcomes,
   readOutcomes         : _readOutcomes,                 // ORCH-G — gate promotion reads confirmation health
+  outcomeRollups       : _outcomeRollups,               // GA-5 — per-Ground conventions histogram for the Select tie-break
   broadcastStorageChanged,
   readSgCapabilities   : _readSgCapabilities,
   readSgDraft          : _readSgDraft,

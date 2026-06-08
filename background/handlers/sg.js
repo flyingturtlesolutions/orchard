@@ -301,7 +301,10 @@ export function createSgMessageHandlers(ctx) {
         } else {
           spec = await AnthropicService.comprehendIntent({ userIntent: intent });
           if (!spec) { sendResponse({ success: false, error: 'comprehend returned nothing' }); return; }
-          selection = await AnthropicService.matchSubGoals({ spec, locale: localeModel });
+          // GA-5 — bias Select's tie-break toward this Ground's historically-durable selector tiers (only with signal).
+          let _conv = null;
+          try { const r = await ctx.outcomeRollups(groundId); if (r && r.conventions && r.conventions.total >= 5) _conv = r.conventions; } catch { /* */ }
+          selection = await AnthropicService.matchSubGoals({ spec, locale: localeModel, conventions: _conv });
         }
         // SG-T2-6 — OPT-IN Tier-2 lowering. When the caller passes tier2:true, lower the subGoal program
         // into a multi-phase Tier-2 operation (fragment/observation/analysis/navigate/wait nodes) and

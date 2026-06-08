@@ -93,6 +93,38 @@ describe('rankCandidates — relevance order so the target survives the cap (the
   });
 });
 
+describe('rankCandidates — GA-5 conventions tie-break (per-Ground selector-tier history)', () => {
+  // Two features that score IDENTICALLY on label match, differing only in selectorKind.
+  const cands = [
+    { kind: 'action', label: 'Search jobs', selectorKind: 'positional' },  // index 0
+    { kind: 'action', label: 'Search jobs', selectorKind: 'id' },          // index 1
+  ].map((o, i) => ({ id: `c${i}`, ...o }));
+  const spec = { target: 'search jobs', subGoals: [] };
+
+  it('without conventions → stable original order (the score tie keeps index 0 first)', () => {
+    assert.equal(rankCandidates(cands, spec)[0].id, 'c0');
+  });
+
+  it('breaks the score tie toward the tier the Ground has historically favored', () => {
+    const conv = { conventions: { selectorTierHistogram: { id: 0.8, positional: 0.2 } } };
+    assert.equal(rankCandidates(cands, spec, conv)[0].id, 'c1', 'id-tier candidate wins the tie');
+  });
+
+  it('is a no-op for an empty/absent histogram (falls back to stable index)', () => {
+    assert.equal(rankCandidates(cands, spec, { conventions: { selectorTierHistogram: {} } })[0].id, 'c0');
+    assert.equal(rankCandidates(cands, spec, {})[0].id, 'c0');
+  });
+
+  it('is strictly additive: a real match-score lead always dominates conventions', () => {
+    const mixed = [
+      { id: 'low',  kind: 'action', label: 'jobs',                 selectorKind: 'id' },         // 1 token
+      { id: 'high', kind: 'action', label: 'search jobs careers',  selectorKind: 'positional' }, // 2 tokens + phrase
+    ];
+    const conv = { conventions: { selectorTierHistogram: { id: 1.0 } } };  // strongly favors 'low'
+    assert.equal(rankCandidates(mixed, spec, conv)[0].id, 'high', 'higher label-score wins regardless of conventions');
+  });
+});
+
 describe('buildSelection + coverGaps — the Cover seed', () => {
   const loc = fixture();
   const sel = buildSelection(loc, { shape: 'complete' });
