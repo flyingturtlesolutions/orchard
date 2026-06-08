@@ -1436,8 +1436,8 @@ export function createSgMessageHandlers(ctx) {
         // is the same dependency sort the within-Ground (T2) lowering uses — reused one tier up.
         const ordered = topoOrder(subIntents);
 
-        // 3. Per sub-intent (IN ORDER): resolve its Ground (T3X-1) + bind a Strategy (with its declared outputs).
-        const resolved = [];
+        // 3. Per sub-intent: resolve its Ground (T3X-1, IN ORDER for inherit) → then bind a Strategy IN PARALLEL.
+        const prepared = [];   // v2.74.829 — Phase A fills this (resolved Ground per sub-intent); Phase B binds in parallel
         const ambiguities = [];
         // v2.74.824 — track each sub-intent's resolved Ground (id → groundId) so a DEPENDENT clause can INHERIT its
         // producer's Ground (below). topoOrder guarantees a producer resolves before its consumer, so the map is
@@ -1509,6 +1509,14 @@ export function createSgMessageHandlers(ctx) {
           // DF-2 — read-vs-action effect (same oracle the chat uses to choose picker-vs-record): a READ clause
           // ("get the top job's link") binds an Observation that PRODUCES a value; an ACTION binds a strategy/fragment.
           const effect = classifyReadAsk(clause).isRead ? 'read' : 'action';
+          prepared.push({ si, i, clause, gr, groundId, _via, effect });
+        }
+
+        // 3b. v2.74.829 — BIND each resolved sub-intent IN PARALLEL. The bind (matchCapability) + alternate-hop +
+        // clause-param bind are INDEPENDENT once the Ground is resolved, so 10 serial LLM round-trips (~50s for a
+        // 10-step ask) become concurrent (~the slowest single bind). Resolution (Phase A above) stays ORDERED because
+        // INHERIT reads each producer's resolved Ground. Promise.all preserves order → `resolved` is still topo-sorted.
+        const resolved = await Promise.all(prepared.map(async ({ si, i, clause, gr, groundId, _via, effect }) => {
           // Bind on the chosen Ground. Q3 — on a bind MISS, try the resolver's RUNNER-UP Grounds before giving up:
           // a different site may hold a capability for this sub-intent (the gap→alternate fallback).
           let chosenGroundId = groundId;
@@ -1554,7 +1562,7 @@ export function createSgMessageHandlers(ctx) {
           }
 
           const g = chosenGroundId ? byId.get(chosenGroundId) : null;
-          resolved.push({
+          return {
             id: si.id || `s${i}`, clause, groundId: chosenGroundId,
             groundName: _groundLabel(g),   // host-derived when the stored name is generic ("Ground") — readable card
             groundUrl: g ? (g.url || (Array.isArray(g.urlPatterns) ? g.urlPatterns[0] : null)) : null,
@@ -1575,8 +1583,8 @@ export function createSgMessageHandlers(ctx) {
             ...(bound && bound.antecedentParamBindings ? { antecedentParamBindings: bound.antecedentParamBindings } : {}),
             dependsOn: Array.isArray(si.dependsOn) ? si.dependsOn : [],
             stated: boundStated,   // comprehender's stated ∪ the LLM-bound clause values (exact param names → literals)
-          });
-        }
+          };
+        }));
 
         // 4. Wire the cross-Ground DATA FLOW (literals ← stated; scopeReads ← upstream outputs), then lower (T3X-2).
         wireCrossGroundData(resolved);
