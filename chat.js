@@ -1077,7 +1077,14 @@ async function _orchObserveCapture(msg, { groundId, tabId, ask, onAuthored = nul
   // For a LIST read ("the title of each…"), the pick must be ONE ITEM (so its archetype matches every item) — NOT
   // the surrounding container. Guide the user accordingly; otherwise the capture reads the whole list as one blob.
   const _isList = classifyReadAsk(ask).outputType === 'list';
-  _setMessageBody(msg, _isList ? '◎ Point at ONE of them (e.g. the FIRST) — I’ll read them all.' : '◎ Point at the value I should read on the page…');
+  // v2.74.834 — echo WHAT to point at (strip the read verb) so a re-teach for "read the company" says "point at the
+  // COMPANY" — not a generic "point at the value" that led to picking the wrong element (the title). Falls back to the
+  // generic prompt for count/predicate questions where a single noun label doesn't fit.
+  const _what = String(ask || '').trim().replace(/^\s*(please\s+|can you\s+|could you\s+)?(read|get|grab|fetch|note|jot|record|copy|show(?:\s+me)?|display|extract|see|view|tell\s+me|give\s+me)\s+/i, '').replace(/[?.!]+$/, '').trim();
+  const _ptLabel = (_what && !/^(how|what|which|is|are|does|do|can|could|will|when|where|why)\b/i.test(_what))
+    ? (/^(the|its|their|a|an|this|that)\b/i.test(_what) ? _what : `the ${_what}`)
+    : 'the value to read';
+  _setMessageBody(msg, _isList ? `◎ Point at ONE of ${_ptLabel} (e.g. the FIRST) — I’ll read them all.` : `◎ Point at ${_ptLabel} on the page…`);
   const picked = await _orchPickOnce({ tabId });
   if (!picked || !picked.selector || picked.error) { _setMessageBody(msg, `Didn’t catch that${picked && picked.error ? ` (${picked.error})` : ''} — ask again to retry.`); return; }
   // A LIST read needs a per-ITEM pick. If the click landed on a list CONTAINER (ul/ol/table…), reading it gives
