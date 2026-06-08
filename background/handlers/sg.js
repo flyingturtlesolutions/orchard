@@ -40,6 +40,7 @@ import { buildWorkflowRecord, wireCrossGroundData, buildGapRepairs } from '../..
 import { AnthropicService } from '../../Services/AnthropicService.js';
 import { StorageManager } from '../../Services/StorageManager.js';
 import { ExecutionEngine } from '../../Services/ExecutionEngine.js';
+import { isHybridSyncActive, forceResyncRecord, enqueueGroundTreeDelete, scheduleSyncRun } from '../../Services/Sync/SyncEngine.js';   // v2.74.822 — merge↔cloud-sync reconciliation (force-push canonical, tombstone absorbed)
 
 // T3X-2 — bind a cross-Ground sub-intent to a STRATEGY on its resolved Ground. Reuses the within-Ground matcher
 // (toCandidate → rankAndDecide) over that Ground's matcher-store capabilities, scoped to Strategies (a `workflow`
@@ -89,27 +90,39 @@ function _isPronounRef(v) { return _PRONOUN_REF.test(String(v == null ? '' : v).
 async function _bindStrategyOnGround(ctx, clause, groundId, effect = 'action') {
   let caps = [];
   try { caps = await ctx.readSgCapabilities(groundId); } catch { return null; }
+  // v2.74.821 — PARITY with ORCH_MATCH_GLOBAL: bind only ACTIVE, non-ORPHAN caps. This path used to include
+  // retracted/disabled caps AND strategy-caps whose Strategy was deleted (an orphan) — so a cross-Ground step could
+  // bind a PAUSED or DANGLING capability that then dies at REPLAY ("strategy not found"). The global matcher already
+  // filters both (isActiveCapability + !orphan); mirror it. Orphan = a strategy-cap whose strategyId isn't among the
+  // Ground's live Strategies; a FAILED listStrategies read → liveStrat=null → DON'T orphan-filter (precision-first:
+  // never wrongly orphan a real cap on a transient read error).
+  let liveStrat = null;
+  try { liveStrat = new Set((await StorageManager.listStrategies(groundId)).map((s) => s && s.id).filter(Boolean)); } catch { liveStrat = null; }
+  const _orphan = (c) => !!(c && c.strategyId && liveStrat && !liveStrat.has(c.strategyId));
   // DF-1 — EFFECT-scoped pool (mirrors the within-Ground matcher, sg.js ORCH_MATCH): a READ sub-intent binds an
   // OBSERVATION (the only capability that PRODUCES a value for a downstream Ground); an ACTION binds a T2 Strategy
   // or a bare T1 Fragment.
   const isRead = effect === 'read';
   const candidates = (Array.isArray(caps) ? caps : [])
-    .filter((c) => c && (isRead ? c.kind === 'observation' : (c.kind !== 'observation' && (c.strategyId || c.fragmentId))))
+    .filter((c) => c && isActiveCapability(c) && !_orphan(c) && (isRead ? c.kind === 'observation' : (c.kind !== 'observation' && (c.strategyId || c.fragmentId))))
     .map((c) => toCandidate(c));
   const _bindTag = `"${String(clause).slice(0, 36)}" @${String(groundId).slice(-6)}`;
   Logger.debug('background', `_bind ▸ ${_bindTag}: ${candidates.length} ${effect} cand`);   // v2.74.807 — cross-Ground bind-pool size (DEBUG audit)
-  if (!candidates.length) { Logger.info('background', `_bind ▸ ${_bindTag} → MISS [pool=0 ${effect} — nothing of this kind captured on this Ground]`); return null; }   // v2.74.818
-  // Lexical floor first (cheap). On a MISS, escalate to the LLM matcher — a vague cross-Ground clause ("search for IT
-  // on Pixabay", where "it" is a data placeholder with no lexical signal) under-scores the site's search lexically,
-  // but the LLM matches it (the same matchCapability that bound "search pixabay for cats" within-Ground). v2.74.807.
+  if (!candidates.length) { Logger.info('background', `_bind ▸ ${_bindTag} → MISS [pool=0 ${effect} — no active ${effect} capability on this Ground]`); return null; }   // v2.74.818/.821
+  // Lexical floor first (cheap). Escalate to the LLM matcher whenever the floor isn't a CONFIDENT hit — not only on a
+  // hard miss (v2.74.821). ORCH_MATCH_GLOBAL ALWAYS consults the LLM and HIT a vague cross-Ground clause ("save it to
+  // Notion" / "search for IT on Pixabay" — the content is a data placeholder with no lexical signal) that this
+  // lexical-first path MISSED; a weak/ambiguous lexical 'propose' on such a clause is exactly where the LLM's stronger
+  // signal must arbitrate (the same matchCapability that bound "search pixabay for cats" within-Ground). On an LLM
+  // result the LLM verdict WINS — a vague clause the LLM rejects is an honest GAP on the named Ground, not a guess.
   let decision = rankAndDecide(clause, candidates, { now: Date.now() });
   let llmState = 'skip';   // v2.74.818 — did the LLM escalation run? distinguishes a lexical-only miss from an LLM miss
-  if (!decision || decision.decision === 'miss') {
+  if (!decision || decision.decision !== 'auto') {
     try {
       const llm = await AnthropicService.matchCapability({ ask: clause, candidates });
       llmState = 'ran';
       if (llm && Array.isArray(llm.scores)) decision = rankAndDecide(clause, candidates, { score: scoresToScorer(llm.scores), now: Date.now() });
-    } catch { llmState = 'err'; /* LLM unavailable → keep the lexical miss */ }
+    } catch { llmState = 'err'; /* LLM unavailable → keep the lexical decision */ }
   }
   const cand = decision && decision.candidate;
   if (!cand || decision.decision === 'miss') {
@@ -948,10 +961,32 @@ export function createSgMessageHandlers(ctx) {
           // 2. move the per-Ground artifacts + delete the now-empty source (StorageManager owns the flat-key re-key).
           await StorageManager.mergeGround(fromId, canonicalId, { urlPatterns, name });
         }
-        // v2.74.818 — name the canonical + absorbed Ground ids + the sync implication, so a later SyncEngine 409 on
-        // one of these ground.json files is traceable back to THIS merge (the merge↔sync conflict from the 17:46 trace).
-        Logger.info('background', `MERGE_GROUNDS ▸ ${absorbedIds.length} ground(s) → canonical ${String(canonicalId).slice(-6)} (${_groundLabel(byId.get(canonicalId) || {})}); moved ${movedCaps} capabilit${movedCaps === 1 ? 'y' : 'ies'}; absorbed [${absorbedIds.map((x) => String(x).slice(-6)).join(', ')}] deleted → SyncEngine reconciles these Grounds (cloud conflicts expected if synced)`);
-        sendResponse({ success: true, canonicalId, canonicalHost: primaryHost(byId.get(canonicalId) || {}), absorbed: absorbedIds.length, movedCapabilities: movedCaps });
+        // v2.74.822 — CLOUD-SYNC RECONCILIATION (the merge↔sync 409 from the 17:46 trace). mergeGround mutates LOCAL
+        // storage only: updateGround(canonical,{urlPatterns}) DIVERGES the canonical's ground.json from its cloud copy
+        // (the periodic reconcile then re-pushes it with a STALE etag → 409), and deleteGround(absorbed) drops each
+        // sibling LOCALLY but leaves its CLOUD copy (which pullChanges re-syncs back → resurrection). So drive the
+        // cloud explicitly here:
+        //   • FORCE-push the canonical ground — merge is AUTHORITATIVE, so forceResyncRecord clears the stale cache →
+        //     enqueues with expectedEtag '*' → overwrites the cloud copy, no 409 (the re-keyed CHILDREN reconcile on
+        //     their own via runSync's bootstrap dirty-scan, since they now sit at fresh paths under the canonical).
+        //   • TOMBSTONE each absorbed Ground's whole tree — cloud-side delete + a local tombstone that blocks bootstrap
+        //     from resurrecting it on the next pull.
+        // Every SyncEngine call no-ops when hybrid sync is off (isHybridSyncActive gate), so a local-only user is
+        // unaffected; a cloud failure is non-fatal (the merge is already LOCAL-complete and reconciles on a later run).
+        let synced = false;
+        try {
+          if (await isHybridSyncActive()) {
+            const canonical = (await StorageManager.getGround(canonicalId)) || byId.get(canonicalId);
+            if (canonical) await forceResyncRecord('ground', { ...canonical, id: canonicalId });
+            for (const fromId of absorbedIds) await enqueueGroundTreeDelete(fromId);
+            scheduleSyncRun();
+            synced = true;
+          }
+        } catch (e) { Logger.warn('background', `MERGE_GROUNDS cloud reconciliation failed (merge is local-complete): ${e.message}`); }
+        // name the canonical + absorbed Ground ids + whether the cloud was reconciled, so a later SyncEngine line on
+        // one of these ground.json paths is traceable back to THIS merge (the merge↔sync conflict from the 17:46 trace).
+        Logger.info('background', `MERGE_GROUNDS ▸ ${absorbedIds.length} ground(s) → canonical ${String(canonicalId).slice(-6)} (${_groundLabel(byId.get(canonicalId) || {})}); moved ${movedCaps} capabilit${movedCaps === 1 ? 'y' : 'ies'}; absorbed [${absorbedIds.map((x) => String(x).slice(-6)).join(', ')}] deleted${synced ? ' → cloud: canonical force-pushed + absorbed trees tombstoned' : ' (local-only; sync off)'}`);
+        sendResponse({ success: true, canonicalId, canonicalHost: primaryHost(byId.get(canonicalId) || {}), absorbed: absorbedIds.length, movedCapabilities: movedCaps, synced });
       } catch (err) {
         Logger.error('background', `MERGE_GROUNDS failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
