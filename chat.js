@@ -1606,7 +1606,8 @@ function _orchOfferWorkflow(msg, { ask, res }) {
   if (resolved.length) {
     bar.appendChild(_mkBtn('▶ Run & teach in order', () => {
       bar.remove(); msg.querySelectorAll('.orch-wf-param').forEach((r) => r.remove());
-      _orchWalkWorkflow(resolved, { ask });
+      _orchLog(`WALK ▸ start — ${resolved.length} step(s)`);   // v2.74.832
+      _orchWalkWorkflow(resolved, { ask }).catch((e) => _orchLog(`WALK ▸ start ERROR: ${(e && e.message) || e}`));   // surface a swallowed rejection
     }));
   }
   if (res && res.runnable && wf.id) {
@@ -1689,44 +1690,55 @@ async function _orchWalkWorkflow(resolved, { ask = '' } = {}) {
 async function _walkStep(steps, i, st, ask) {
   const next = () => _walkStep(steps, i + 1, st, ask);
   if (i >= steps.length) {
+    _orchLog(`WALK ▸ done — ${st.total} step(s)`);   // v2.74.832
     _setMessageBody(appendMessage({ role: 'assistant', body: '' }), `✓ Finished — walked all ${st.total} step${st.total === 1 ? '' : 's'} in order.`);
     return;
   }
   const si = steps[i];
   const isRead = (si.capabilityKind === 'observation') || (!si.capabilityId && classifyReadAsk(si.clause || '').isRead);
   const m = appendMessage({ role: 'assistant', body: '' });
-  const verb = si.capabilityId ? (isRead ? 'reading' : 'running') : 'teaching';
-  _setMessageBody(m, `Step ${i + 1}/${st.total} · ${verb} “${si.clause || 'this'}”${si.groundName ? ` on ${si.groundName}` : ''}…`);
+  // v2.74.832 — TRACE the walk to the ring buffer (the .818 ORCH_LOG pass-through) so a `gl` can SEE the
+  // doing→teach→doing sequence, AND a try/catch surfaces a throw that would otherwise die silently (the un-awaited
+  // _orchWalkWorkflow rejection = the "indeed opens and nothing" report).
+  try {
+    const kind = si.capabilityId ? (isRead ? 'read' : 'run') : 'teach';
+    _orchLog(`WALK ▸ step ${i + 1}/${st.total} · ${kind} "${String(si.clause || '').slice(0, 40)}" on ${si.groundName || '?'} (cap=${si.capabilityId ? String(si.capabilityId).slice(-6) : 'gap'})`);
+    const verb = si.capabilityId ? (isRead ? 'reading' : 'running') : 'teaching';
+    _setMessageBody(m, `Step ${i + 1}/${st.total} · ${verb} “${si.clause || 'this'}”${si.groundName ? ` on ${si.groundName}` : ''}…`);
 
-  const tab = await _walkEnsureTab(st, si);
-  // capture this step's produced value into scope, then advance.
-  const advance = (value) => { if (value != null && value !== '') for (const o of _wfNames(si.outputs)) st.scope[o] = value; next(); };
-  if (tab == null) {
-    _setMessageBody(m, `Step ${i + 1}/${st.total} · couldn’t open ${si.groundName || 'the site'}.`);
-    const bar = _orchActionBar(m); bar.appendChild(_mkBtn('Skip ▸', () => { bar.remove(); next(); })); bar.appendChild(_mkBtn('Stop', () => { bar.remove(); }));
-    return;
-  }
-
-  if (si.capabilityId) {
-    // ── BOUND → RUN it ──
-    if (isRead) {
-      const r = await _orchReq('RUN_OBSERVATION', { tabId: tab, groundId: si.groundId, capabilityId: si.capabilityId });
-      if (r && r.ok && r.value != null) { _setMessageBody(m, `Step ${i + 1}/${st.total} · read “${si.clause}” → “${String(r.value).slice(0, 160)}”.`); advance(r.value); }
-      else { _setMessageBody(m, `Step ${i + 1}/${st.total} · couldn’t read “${si.clause}” here${r && r.reason ? ` (${r.reason})` : ''}.`); _walkReteach(m, si, st, next); }
-    } else {
-      const r = await _orchReq('REPLAY_SG_CAPABILITY', { tabId: tab, groundId: si.groundId, capabilityId: si.capabilityId, paramValues: _walkResolveParams(si, st.scope) });
-      if (r && r.ok) { _setMessageBody(m, `Step ${i + 1}/${st.total} · ran “${si.capabilityName || si.clause}”.`); advance(); }
-      else { _setMessageBody(m, `Step ${i + 1}/${st.total} · “${si.capabilityName || si.clause}” didn’t complete${r && r.reason ? ` (${r.reason})` : ''}.`); _walkReteach(m, si, st, next); }
+    const tab = await _walkEnsureTab(st, si);
+    const advance = (value) => { if (value != null && value !== '') for (const o of _wfNames(si.outputs)) st.scope[o] = value; next(); };
+    if (tab == null) {
+      _orchLog(`WALK ▸ step ${i + 1} · NO TAB for ${si.groundName || '?'}`);
+      _setMessageBody(m, `Step ${i + 1}/${st.total} · couldn’t open ${si.groundName || 'the site'}.`);
+      const bar = _orchActionBar(m); bar.appendChild(_mkBtn('Skip ▸', () => { bar.remove(); next(); })); bar.appendChild(_mkBtn('Stop', () => { bar.remove(); }));
+      return;
     }
-  } else {
-    // ── GAP → TEACH it in place (the prior steps warmed the page) ──
-    _setMessageBody(m, `Step ${i + 1}/${st.total} · ${isRead ? '◎ point at the value to read for' : '● show me how to'} “${si.clause}” on ${si.groundName || 'the site'}.`);
-    let done = false; const finish = (value) => { if (done) return; done = true; advance(value); };
-    if (isRead) _orchObserveCapture(appendMessage({ role: 'assistant', body: '' }), { groundId: si.groundId, tabId: tab, ask: si.clause, onAuthored: (r) => finish(r && r.value) });
-    else _orchNlFallback(appendMessage({ role: 'assistant', body: '' }), { tabId: tab, groundId: si.groundId, ask: si.clause, onAuthored: () => finish() });
-    const bar = _orchActionBar(m);
-    bar.appendChild(_mkBtn('Skip ▸', () => { bar.remove(); finish(); }));
-    bar.appendChild(_mkBtn('Stop', () => { bar.remove(); done = true; }));
+
+    if (si.capabilityId) {
+      // ── BOUND → RUN it ──
+      if (isRead) {
+        const r = await _orchReq('RUN_OBSERVATION', { tabId: tab, groundId: si.groundId, capabilityId: si.capabilityId });
+        if (r && r.ok && r.value != null) { _orchLog(`WALK ▸ step ${i + 1} · read OK → "${String(r.value).slice(0, 40)}"`); _setMessageBody(m, `Step ${i + 1}/${st.total} · read “${si.clause}” → “${String(r.value).slice(0, 160)}”.`); advance(r.value); }
+        else { _orchLog(`WALK ▸ step ${i + 1} · read MISS [${r ? `ran=${r.ran} ok=${r.ok}${r.reason ? ` ${String(r.reason).slice(0, 40)}` : ''}` : 'null/timeout'}]`); _setMessageBody(m, `Step ${i + 1}/${st.total} · couldn’t read “${si.clause}” here${r && r.reason ? ` (${r.reason})` : ''}.`); _walkReteach(m, si, st, next); }
+      } else {
+        const r = await _orchReq('REPLAY_SG_CAPABILITY', { tabId: tab, groundId: si.groundId, capabilityId: si.capabilityId, paramValues: _walkResolveParams(si, st.scope) });
+        if (r && r.ok) { _orchLog(`WALK ▸ step ${i + 1} · ran OK`); _setMessageBody(m, `Step ${i + 1}/${st.total} · ran “${si.capabilityName || si.clause}”.`); advance(); }
+        else { _orchLog(`WALK ▸ step ${i + 1} · run FAIL [${r ? `success=${r.success} ran=${r.ran} ok=${r.ok}${r.reason ? ` ${String(r.reason).slice(0, 40)}` : ''}` : 'null/timeout'}]`); _setMessageBody(m, `Step ${i + 1}/${st.total} · “${si.capabilityName || si.clause}” didn’t complete${r && r.reason ? ` (${r.reason})` : ''}.`); _walkReteach(m, si, st, next); }
+      }
+    } else {
+      // ── GAP → TEACH it in place (the prior steps warmed the page) ──
+      _setMessageBody(m, `Step ${i + 1}/${st.total} · ${isRead ? '◎ point at the value to read for' : '● show me how to'} “${si.clause}” on ${si.groundName || 'the site'}.`);
+      let done = false; const finish = (value) => { if (done) return; done = true; _orchLog(`WALK ▸ step ${i + 1} · taught (${isRead ? 'observe' : 'action'})`); advance(value); };
+      if (isRead) _orchObserveCapture(appendMessage({ role: 'assistant', body: '' }), { groundId: si.groundId, tabId: tab, ask: si.clause, onAuthored: (r) => finish(r && r.value) });
+      else _orchNlFallback(appendMessage({ role: 'assistant', body: '' }), { tabId: tab, groundId: si.groundId, ask: si.clause, onAuthored: () => finish() });
+      const bar = _orchActionBar(m);
+      bar.appendChild(_mkBtn('Skip ▸', () => { bar.remove(); finish(); }));
+      bar.appendChild(_mkBtn('Stop', () => { bar.remove(); done = true; }));
+    }
+  } catch (e) {
+    _orchLog(`WALK ▸ step ${i + 1} ERROR: ${(e && e.message) || e}`);   // v2.74.832 — was dying silently
+    try { _setMessageBody(m, `Step ${i + 1}/${st.total} hit an error: ${(e && e.message) || e}. Stopped — re-run to retry.`); } catch { /* */ }
   }
 }
 
