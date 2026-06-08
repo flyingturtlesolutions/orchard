@@ -1111,7 +1111,7 @@ async function _orchObserveCapture(msg, { groundId, tabId, ask, onAuthored = nul
     else _setMessageBody(msg, `Saved — but when I re-read it just now I got nothing back. The picker saw ${res.sawText ? `“${String(res.sawText).slice(0, 120)}”` : 'a value'}, but the stored selector can’t reproduce it on this page (details in the log). Point me at it again, or use a Studio observation for a stable selector.${anteNote}`);
     // v2.74.830 — fold back to the cross-Ground gap→teach loop (advance + re-check) once the observation is saved,
     // the same way the action trial/record paths do via onAuthored.
-    if (typeof onAuthored === 'function') { try { onAuthored({ capabilityId: res.capability.id, groundId, ask, via: 'observe' }); } catch { /* */ } }
+    if (typeof onAuthored === 'function') { try { onAuthored({ capabilityId: res.capability.id, groundId, ask, via: 'observe', value: res.verifiedValue }); } catch { /* */ } }
   } else {
     _setMessageBody(msg, `Couldn’t set that up${res && res.error ? ` — ${res.error}` : ''}.`);
   }
@@ -1600,6 +1600,15 @@ function _orchOfferWorkflow(msg, { ask, res }) {
   _setMessageBody(msg, body);
 
   const bar = _orchActionBar(msg);
+  // v2.74.831 — PRIMARY: walk the plan IN ORDER on one foreground tab — run bound steps, teach gaps IN PLACE on the
+  // warm page the prior steps left (so a read gap has a result to point at), narrating each. Handles a partial plan
+  // (some gaps) without the cold "teach all first, then run" detour. The atomic Run/Save below stay as options.
+  if (resolved.length) {
+    bar.appendChild(_mkBtn('▶ Run & teach in order', () => {
+      bar.remove(); msg.querySelectorAll('.orch-wf-param').forEach((r) => r.remove());
+      _orchWalkWorkflow(resolved, { ask });
+    }));
+  }
   if (res && res.runnable && wf.id) {
     // Editable inputs for the Workflow's still-UNBOUND params (values the binder bound from the clause are already
     // step LITERALS and aren't shown here). Prefilled empty; whatever's typed is passed as paramValues on Run, so a
@@ -1641,6 +1650,99 @@ function _orchOfferWorkflow(msg, { ask, res }) {
       () => { bar.remove(); _orchTeachGapsInTurn(teachable, { ask, total: teachable.length }); }));
   }
   bar.appendChild(_mkBtn(teachable.length ? 'Not now' : 'Got it', () => { bar.remove(); }));
+}
+
+// ── v2.74.831 — IN-ORDER "run-or-teach" WALK ───────────────────────────────────────────────────────────────────
+// The fix for "teach is out of context + no feedback": instead of "teach all gaps cold, then run", walk the resolved
+// sub-intents in TOPO order on ONE foreground tab (reused per Ground), narrating each step. A BOUND step RUNS (a read's
+// value flows into the chat-side `scope` for downstream steps); a GAP is TAUGHT IN PLACE — on the warm page the prior
+// steps left, so "read the company" has a search result to point at. Continuation-style (each step advances the next on
+// completion) so an interactive teach fits the same flow as an automatic run. Data hand-off uses the literals/scopeReads
+// wireCrossGroundData already filled. Foreground so the user can see + demonstrate.
+const _wfNames = (arr) => (Array.isArray(arr) ? arr : []).map((p) => (typeof p === 'string' ? p : (p && p.name))).filter(Boolean);
+
+// Open the step's Ground in a FOREGROUND tab; REUSE it across consecutive steps on the same Ground (the warm page).
+async function _walkEnsureTab(st, si) {
+  if (st.tabId != null && st.ground === si.groundId) { try { await chrome.tabs.update(st.tabId, { active: true }); } catch { /* */ } return st.tabId; }
+  try { const t = await chrome.tabs.create({ url: si.groundUrl || undefined, active: true }); st.tabId = (t && typeof t.id === 'number') ? t.id : null; st.ground = si.groundId; }
+  catch { st.tabId = null; }
+  if (st.tabId != null) await _orchWaitTabReady(st.tabId);
+  return st.tabId;
+}
+
+// Resolve a step's params from the chat-side scope: a STATED literal, else an upstream output via scopeReads (the hand-off).
+function _walkResolveParams(si, scope) {
+  const out = {};
+  for (const p of _wfNames(si.params)) {
+    if (si.literals && si.literals[p] != null && si.literals[p] !== '') out[p] = si.literals[p];
+    else if (si.scopeReads && si.scopeReads[p] && scope[si.scopeReads[p]] != null) out[p] = scope[si.scopeReads[p]];
+  }
+  return out;
+}
+
+async function _orchWalkWorkflow(resolved, { ask = '' } = {}) {
+  const steps = (Array.isArray(resolved) ? resolved : []).filter(Boolean);
+  if (!steps.length) return;
+  await _walkStep(steps, 0, { scope: {}, tabId: null, ground: null, total: steps.length }, ask);
+}
+
+async function _walkStep(steps, i, st, ask) {
+  const next = () => _walkStep(steps, i + 1, st, ask);
+  if (i >= steps.length) {
+    _setMessageBody(appendMessage({ role: 'assistant', body: '' }), `✓ Finished — walked all ${st.total} step${st.total === 1 ? '' : 's'} in order.`);
+    return;
+  }
+  const si = steps[i];
+  const isRead = (si.capabilityKind === 'observation') || (!si.capabilityId && classifyReadAsk(si.clause || '').isRead);
+  const m = appendMessage({ role: 'assistant', body: '' });
+  const verb = si.capabilityId ? (isRead ? 'reading' : 'running') : 'teaching';
+  _setMessageBody(m, `Step ${i + 1}/${st.total} · ${verb} “${si.clause || 'this'}”${si.groundName ? ` on ${si.groundName}` : ''}…`);
+
+  const tab = await _walkEnsureTab(st, si);
+  // capture this step's produced value into scope, then advance.
+  const advance = (value) => { if (value != null && value !== '') for (const o of _wfNames(si.outputs)) st.scope[o] = value; next(); };
+  if (tab == null) {
+    _setMessageBody(m, `Step ${i + 1}/${st.total} · couldn’t open ${si.groundName || 'the site'}.`);
+    const bar = _orchActionBar(m); bar.appendChild(_mkBtn('Skip ▸', () => { bar.remove(); next(); })); bar.appendChild(_mkBtn('Stop', () => { bar.remove(); }));
+    return;
+  }
+
+  if (si.capabilityId) {
+    // ── BOUND → RUN it ──
+    if (isRead) {
+      const r = await _orchReq('RUN_OBSERVATION', { tabId: tab, groundId: si.groundId, capabilityId: si.capabilityId });
+      if (r && r.ok && r.value != null) { _setMessageBody(m, `Step ${i + 1}/${st.total} · read “${si.clause}” → “${String(r.value).slice(0, 160)}”.`); advance(r.value); }
+      else { _setMessageBody(m, `Step ${i + 1}/${st.total} · couldn’t read “${si.clause}” here${r && r.reason ? ` (${r.reason})` : ''}.`); _walkReteach(m, si, st, next); }
+    } else {
+      const r = await _orchReq('REPLAY_SG_CAPABILITY', { tabId: tab, groundId: si.groundId, capabilityId: si.capabilityId, paramValues: _walkResolveParams(si, st.scope) });
+      if (r && r.ok) { _setMessageBody(m, `Step ${i + 1}/${st.total} · ran “${si.capabilityName || si.clause}”.`); advance(); }
+      else { _setMessageBody(m, `Step ${i + 1}/${st.total} · “${si.capabilityName || si.clause}” didn’t complete${r && r.reason ? ` (${r.reason})` : ''}.`); _walkReteach(m, si, st, next); }
+    }
+  } else {
+    // ── GAP → TEACH it in place (the prior steps warmed the page) ──
+    _setMessageBody(m, `Step ${i + 1}/${st.total} · ${isRead ? '◎ point at the value to read for' : '● show me how to'} “${si.clause}” on ${si.groundName || 'the site'}.`);
+    let done = false; const finish = (value) => { if (done) return; done = true; advance(value); };
+    if (isRead) _orchObserveCapture(appendMessage({ role: 'assistant', body: '' }), { groundId: si.groundId, tabId: tab, ask: si.clause, onAuthored: (r) => finish(r && r.value) });
+    else _orchNlFallback(appendMessage({ role: 'assistant', body: '' }), { tabId: tab, groundId: si.groundId, ask: si.clause, onAuthored: () => finish() });
+    const bar = _orchActionBar(m);
+    bar.appendChild(_mkBtn('Skip ▸', () => { bar.remove(); finish(); }));
+    bar.appendChild(_mkBtn('Stop', () => { bar.remove(); done = true; }));
+  }
+}
+
+// A bound step that didn't run/read → re-teach it IN PLACE (the page is already in the right state), skip, or stop.
+function _walkReteach(m, si, st, next) {
+  const isRead = (si.capabilityKind === 'observation') || classifyReadAsk(si.clause || '').isRead;
+  let done = false; const fin = (v) => { if (done) return; done = true; if (v != null && v !== '') for (const o of _wfNames(si.outputs)) st.scope[o] = v; next(); };
+  const bar = _orchActionBar(m);
+  bar.appendChild(_mkBtn(isRead ? '◎ Re-teach the read' : '● Re-teach it', () => {
+    bar.remove();
+    if (isRead) _orchObserveCapture(appendMessage({ role: 'assistant', body: '' }), { groundId: si.groundId, tabId: st.tabId, ask: si.clause, onAuthored: (r) => fin(r && r.value) });
+    else _orchNlFallback(appendMessage({ role: 'assistant', body: '' }), { tabId: st.tabId, groundId: si.groundId, ask: si.clause, onAuthored: () => fin() });
+    const b2 = _orchActionBar(m); b2.appendChild(_mkBtn('Skip ▸', () => { b2.remove(); fin(); }));
+  }));
+  bar.appendChild(_mkBtn('Skip ▸', () => { bar.remove(); next(); }));
+  bar.appendChild(_mkBtn('Stop', () => { bar.remove(); }));
 }
 
 // SAVE the previewed Workflow (the exact record shown — no re-decompose), so it can be re-run anytime.
