@@ -1431,6 +1431,10 @@ export function createSgMessageHandlers(ctx) {
         // 3. Per sub-intent (IN ORDER): resolve its Ground (T3X-1) + bind a Strategy (with its declared outputs).
         const resolved = [];
         const ambiguities = [];
+        // v2.74.824 — track each sub-intent's resolved Ground (id → groundId) so a DEPENDENT clause can INHERIT its
+        // producer's Ground (below). topoOrder guarantees a producer resolves before its consumer, so the map is
+        // populated by the time a consumer reads it.
+        const groundBySubIntent = new Map();
         // The site list the LLM ground resolver (Q2) picks from — name + purpose, closed set.
         const llmGrounds = catalog.map((e) => {
           const g = byId.get(e.groundId);
@@ -1454,6 +1458,25 @@ export function createSgMessageHandlers(ctx) {
           if (named && named.groundId) { groundId = named.groundId; _via = 'domain'; }
           // Q2 — else the lexical floor; a confident 'resolved' is kept (no LLM round-trip).
           if (!groundId && gr.decision === 'resolved') { groundId = gr.groundId; _via = 'lexical'; }
+          // v2.74.824 — INHERIT the producer's Ground for a DEPENDENT clause that NAMES NO SITE. A read that consumes
+          // an upstream step ("note its name and price" after "find a bouquet on thepetal") reads on the SAME Ground
+          // its producer ran on — but with no site-name + a weak lexical signal it otherwise fell to the LLM
+          // matchGround, which mis-pulled "note…" → Notion (the VERB, not the site). When every dependency resolved to
+          // ONE Ground, use it — BEFORE the LLM guess. (domain-named + confident-lexical still win; this only pre-empts
+          // the LLM, and DEFERS when deps span multiple Grounds — a NAMED write like "add to Notion" resolves by domain.)
+          if (!groundId && Array.isArray(si.dependsOn) && si.dependsOn.length) {
+            const depGrounds = [...new Set(si.dependsOn.map((d) => groundBySubIntent.get(d)).filter(Boolean))];
+            if (depGrounds.length === 1) { groundId = depGrounds[0]; _via = 'inherit'; }
+          }
+          // Fallback when the comprehender DIDN'T emit a dependsOn link: a BACK-REFERENCE clause ("note ITS name",
+          // "read THAT") with no site refers to the most-recent producer → inherit the immediately-preceding
+          // sub-intent's Ground. Fires only after domain + lexical + dependsOn all came up empty (where the LLM would
+          // otherwise guess), so worst case it's no worse than that guess — and for a true back-ref, far better.
+          if (!groundId && i > 0 && /\b(it|its|that|this|them|they|those|these)\b/i.test(String(clause))) {
+            const prev = ordered[i - 1];
+            const prevGround = prev && groundBySubIntent.get(prev.id);
+            if (prevGround) { groundId = prevGround; _via = 'inherit-ref'; }
+          }
           // Else escalate to the LLM ground resolver (closed-set selection by PURPOSE), re-validated vs the catalog.
           if (!groundId) {
             let picked = null;
@@ -1473,6 +1496,7 @@ export function createSgMessageHandlers(ctx) {
             const _cands = (gr.candidates || []).slice(0, 3).map((c) => `${String(c.groundId).slice(-6)}:${(Number(c.score) || 0).toFixed(2)}${c.hostHit ? '*' : ''}`).join(', ');
             Logger.debug('background', `T3X resolve ▸ "${String(clause).slice(0, 50)}" → ${groundId ? String(groundId).slice(-6) : 'none'} (${_host || '?'}) [via=${_via}; lexical=${gr.decision || 'n/a'} {${_cands}}]`);
           } catch { /* */ }
+          groundBySubIntent.set(si.id, groundId);   // v2.74.824 — record so any downstream consumer can INHERIT this Ground
 
           // DF-2 — read-vs-action effect (same oracle the chat uses to choose picker-vs-record): a READ clause
           // ("get the top job's link") binds an Observation that PRODUCES a value; an ACTION binds a strategy/fragment.
@@ -1485,7 +1509,10 @@ export function createSgMessageHandlers(ctx) {
           // gap→alternate fallback ran the flower shop's "search for orchids" for a "…on Pixabay" clause, undoing the
           // named-site decision. When the user named the site, a bind miss stays a GAP on THAT Ground (the card offers
           // to teach it there) — never a silent run on a different site. Non-named (lexical/LLM) Grounds still hop.
-          if (chosenGroundId && (!bound || !bound.capabilityId) && _via !== 'domain') {
+          // v2.74.825 — an INHERITED Ground (via=inherit / inherit-ref) is authoritative for the SAME reason: a
+          // dependent read reads where its PRODUCER ran (the data lives there) — hopping to a runner-up would read the
+          // wrong site. So suppress the hop for inherit too; only a lexical/LLM GUESS still hops.
+          if (chosenGroundId && (!bound || !bound.capabilityId) && _via !== 'domain' && _via !== 'inherit' && _via !== 'inherit-ref') {
             const alternates = (Array.isArray(gr.candidates) ? gr.candidates : []).map((c) => c.groundId).filter((gid) => gid && gid !== chosenGroundId);
             for (const altId of alternates) {
               const altBound = await _bindStrategyOnGround(ctx, clause, altId, effect);
@@ -1866,7 +1893,7 @@ export function createSgMessageHandlers(ctx) {
         if (typeof tabId !== 'number' || typeof ask !== 'string' || !ask.trim()) { sendResponse({ success: true, matched: false }); return; }
         let gid = groundId, url = '';
         try { url = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ }
-        if (!gid && url) { try { const origin = new URL(url).origin; const gs = await StorageManager.getAllGrounds(); const g = (Array.isArray(gs) ? gs : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } catch { /* */ } }
+        if (!gid && url) { try { const gs = await StorageManager.getAllGrounds(); gid = _groundIdForUrl(url, gs); } catch { /* */ } }   // v2.74.824 — urlPatterns-aware (a merged sibling host resolves)
         if (!gid) { Logger.info('background', `RUN_BEST_OBSERVATION — no ground for ${url}`); sendResponse({ success: true, matched: false }); return; }
         let observations = [];
         try { observations = (await StorageManager.listObservations(gid)) || []; } catch (e) { Logger.warn('background', `RUN_BEST_OBSERVATION listObservations failed: ${e.message}`); }
@@ -1921,7 +1948,7 @@ export function createSgMessageHandlers(ctx) {
         if (typeof ask !== 'string' || !ask.trim()) { sendResponse({ success: false, error: 'ask required' }); return; }
         let url = ''; if (typeof tabId === 'number') { try { url = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
         let gid = groundId;
-        if (!gid && url) { try { const origin = new URL(url).origin; const grounds = await StorageManager.getAllGrounds(); const g = (Array.isArray(grounds) ? grounds : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } catch { /* */ } }
+        if (!gid && url) { try { const grounds = await StorageManager.getAllGrounds(); gid = _groundIdForUrl(url, grounds); } catch { /* */ } }   // v2.74.824 — urlPatterns-aware (a merged sibling host resolves)
         if (!gid) { sendResponse({ success: true, groundId: null, steps: [] }); return; }
         const localeUrl = ctx.normalizeUrl(url);
         let liveStrategyIds = null;
@@ -1999,7 +2026,7 @@ export function createSgMessageHandlers(ctx) {
         if (!steps.length) { sendResponse({ success: true, groundId: groundId || null, steps: [], gaps: [] }); return; }
         let gid = groundId, url = '';
         if (typeof tabId === 'number') { try { url = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
-        if (!gid && url) { try { const origin = new URL(url).origin; const gs = await StorageManager.getAllGrounds(); const g = (Array.isArray(gs) ? gs : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } catch { /* */ } }
+        if (!gid && url) { try { const gs = await StorageManager.getAllGrounds(); gid = _groundIdForUrl(url, gs); } catch { /* */ } }   // v2.74.824 — urlPatterns-aware (a merged sibling host resolves)
         let caps = [];
         if (gid) { try { caps = (await ctx.readSgCapabilities(gid)).filter((c) => isActiveCapability(c) && c.kind !== 'composite'); } catch { /* */ } }
         const lean = (c) => ({ id: c.id, intent: c.intent || '', name: c.name || '', aliases: Array.isArray(c.aliases) ? c.aliases : [] });
@@ -2067,7 +2094,7 @@ export function createSgMessageHandlers(ctx) {
         if (typeof ask !== 'string' || !ask.trim()) { sendResponse({ success: true, matched: false }); return; }
         let gid = groundId, url = '';
         try { url = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ }
-        if (!gid && url) { try { const origin = new URL(url).origin; const gs = await StorageManager.getAllGrounds(); const g = (Array.isArray(gs) ? gs : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } catch { /* */ } }
+        if (!gid && url) { try { const gs = await StorageManager.getAllGrounds(); gid = _groundIdForUrl(url, gs); } catch { /* */ } }   // v2.74.824 — urlPatterns-aware (a merged sibling host resolves)
         if (!gid) { sendResponse({ success: true, matched: false }); return; }
         const want = normalizeAliasPhrase(ask);
         const caps = (await ctx.readSgCapabilities(gid)).filter((c) => c && c.kind === 'composite' && isActiveCapability(c) && Array.isArray(c.steps) && c.steps.length);
@@ -2106,7 +2133,7 @@ export function createSgMessageHandlers(ctx) {
         const { tabId, groundId = null, capabilityId = null } = payload ?? {};
         let gid = groundId, url = '';
         try { url = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ }
-        if (!gid && url) { try { const origin = new URL(url).origin; const gs = await StorageManager.getAllGrounds(); const g = (Array.isArray(gs) ? gs : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } catch { /* */ } }
+        if (!gid && url) { try { const gs = await StorageManager.getAllGrounds(); gid = _groundIdForUrl(url, gs); } catch { /* */ } }   // v2.74.824 — urlPatterns-aware (a merged sibling host resolves)
         if (!gid || !capabilityId) { sendResponse({ success: false, error: 'groundId + capabilityId required' }); return; }
 
         const caps = await ctx.readSgCapabilities(gid);
