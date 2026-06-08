@@ -23,6 +23,7 @@ import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved, d
 import { listLocales } from '../../Services/Storage/GroundAssetStore.js';   // OBS (v2.74.764) — reconcile observed landmarks to grounded Locale features
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A
 import { findDuplicateGroundGroups, planGroundMerge, primaryHost } from '../../Core/groundDedup.js';   // v2.74.816/.817 — duplicate-Ground detect + merge
+import { matchGroundForUrl } from '../../Core/GroundMatcher.js';   // v2.74.823 — canonical URL→Ground matcher (honors urlPatterns, incl. the sibling hosts a dedup merge unions)
 import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/orchFeedback.js';   // ORCH-FB — corrective actions
 import { feedbackExamples } from '../../Core/feedbackLearn.js';   // ORCH-FB-2 — relevance shaping from feedback history
 import { buildObservationCapability, scoreObservationMatch, classifyReadAsk } from '../../Core/observe.js';   // OBS-READ — observation records + manual-obs match + read/action effect scoping
@@ -86,6 +87,35 @@ function _askNamesOtherGround(ask, grounds, currentGid) {
 // values so wireCrossGroundData binds the param to the upstream output (scope_binding) instead of typing "it". PURE.
 const _PRONOUN_REF = /^(it|its|that|this|them|they|those|these|one|the (one|title|price|link|url|result|name|value|item|first|top|job|post|page))$/i;
 function _isPronounRef(v) { return _PRONOUN_REF.test(String(v == null ? '' : v).trim()); }
+
+// v2.74.823 — resolve the active TAB's Ground the SAME way the RUNTIME does: match the tab URL against each Ground's
+// urlPatterns (Core/GroundMatcher — the matcher that honors the patterns a dedup MERGE unions, e.g. app.notion.com +
+// www.notion.so → ONE Ground), with a `.url`-origin FALLBACK for legacy Grounds that carry no urlPatterns. The admin
+// resolvers (ORCH_ADMIN count/delete, ORCH_LIST, RENAME_GROUND) used bare origin equality against the single `.url`
+// field, so a SIBLING host of a merged Ground (an app.notion.com tab on the notion.so Ground) resolved to NOTHING —
+// the surprising "no capabilities on this site" / grounds=0 the user hit AFTER a successful dedup. Returns id|null.
+async function _groundIdForTab(tabId, grounds) {
+  if (typeof tabId !== 'number') return null;
+  let url = '';
+  try { url = (await chrome.tabs.get(tabId))?.url || ''; } catch { return null; }
+  if (!url) return null;
+  return _groundIdForUrl(url, grounds);
+}
+
+// v2.74.824 — the URL→Ground half of _groundIdForTab, for the MATCH and RUN/REPLAY paths that ALREADY hold a URL
+// string (so they skip the chrome.tabs.get). Strictly MORE PERMISSIVE than the bare-`.url`-origin equality those
+// paths used to do: it finds the merged SIBLING host (an app.notion.com URL on the www.notion.so Ground) where
+// origin-only found nothing, and is IDENTICAL for unmerged Grounds (the origin fallback). Pure (no chrome.*), so it
+// works wherever a url is in hand. Returns id|null.
+function _groundIdForUrl(url, grounds) {
+  if (typeof url !== 'string' || !url) return null;
+  const list = Array.isArray(grounds) ? grounds : [];
+  // 1) urlPatterns match (the runtime's matcher) — resolves merged/multi-host Grounds, most-specific wins.
+  try { const m = matchGroundForUrl(url, list); if (m && m.ground) return m.ground.id || m.ground.groundId || null; } catch { /* */ }
+  // 2) fallback: legacy single-`.url` origin equality (a Ground saved with no urlPatterns).
+  try { const origin = new URL(url).origin; const g = list.find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); if (g) return g.id || g.groundId || null; } catch { /* */ }
+  return null;
+}
 
 async function _bindStrategyOnGround(ctx, clause, groundId, effect = 'action') {
   let caps = [];
@@ -708,9 +738,7 @@ export function createSgMessageHandlers(ctx) {
         if (!gid && url) {
           try {
             allGrounds = await StorageManager.getAllGrounds();
-            const origin = new URL(url).origin;
-            const g = (Array.isArray(allGrounds) ? allGrounds : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } });
-            gid = g ? g.id : null;
+            gid = _groundIdForUrl(url, allGrounds);   // v2.74.824 — urlPatterns-aware (a merged sibling host resolves), origin fallback inside
           } catch { /* */ }
         }
         if (!gid) { sendResponse({ success: true, decision: 'miss', reason: 'no-ground', candidate: null, capabilityId: null, bindings: {}, gaps: [], alternatives: [], scoped: { here: 0, reachable: 0, off: 0 }, localeUrl }); return; }
@@ -1027,8 +1055,9 @@ export function createSgMessageHandlers(ctx) {
         // capabilities — the active-tab Ground (default) or every Ground (scope=all)
         let gids = [];
         if (scope === 'all') gids = all.map((g) => g.id || g.groundId).filter(Boolean);
-        else if (typeof tabId === 'number') {
-          try { const t = await chrome.tabs.get(tabId); const origin = new URL(t.url).origin; const g = all.find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); if (g) gids = [g.id || g.groundId]; } catch { /* */ }
+        else {
+          const gid = await _groundIdForTab(tabId, all);   // v2.74.823 — urlPatterns-aware tab→Ground (merged sibling hosts resolve)
+          if (gid) gids = [gid];
         }
         const items = [];
         for (const gid of gids) {
@@ -1055,7 +1084,8 @@ export function createSgMessageHandlers(ctx) {
         if (!nm) { sendResponse({ success: false, error: 'a name is required' }); return; }
         let gid = groundId;
         if (!gid && typeof tabId === 'number') {
-          try { const t = await chrome.tabs.get(tabId); const origin = new URL(t.url).origin; const gs = (await StorageManager.getAllGrounds()) || []; const g = gs.find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? (g.id || g.groundId) : null; } catch { /* */ }
+          const gs = (await StorageManager.getAllGrounds()) || [];
+          gid = await _groundIdForTab(tabId, gs);   // v2.74.823 — urlPatterns-aware tab→Ground (merged sibling hosts resolve)
         }
         if (!gid) { sendResponse({ success: false, error: 'no Ground for this tab (this page isn’t in the library)' }); return; }
         await StorageManager.updateGround(gid, { name: nm.slice(0, 80) });
@@ -1071,8 +1101,9 @@ export function createSgMessageHandlers(ctx) {
         const { scope = 'all', tabId = null } = payload ?? {};
         const all = (await StorageManager.getAllGrounds()) || [];
         let gids = (scope === 'all') ? all.map((g) => g.id || g.groundId).filter(Boolean) : [];
-        if (scope !== 'all' && typeof tabId === 'number') {
-          try { const t = await chrome.tabs.get(tabId); const origin = new URL(t.url).origin; const g = all.find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); if (g) gids = [g.id || g.groundId]; } catch { /* */ }
+        if (scope !== 'all') {
+          const gid = await _groundIdForTab(tabId, all);   // v2.74.823 — urlPatterns-aware tab→Ground (merged sibling hosts resolve)
+          if (gid) gids = [gid];
         }
         let removed = 0;
         for (const gid of gids) {
@@ -1304,9 +1335,7 @@ export function createSgMessageHandlers(ctx) {
         if (scope === 'all') grounds = allGrounds.map((g) => g.id).filter(Boolean);
         else {
           let gid = groundId;
-          if (!gid && typeof tabId === 'number') {
-            try { const t = await chrome.tabs.get(tabId); const origin = new URL(t.url).origin; const g = allGrounds.find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } catch { /* */ }
-          }
+          if (!gid) gid = await _groundIdForTab(tabId, allGrounds);   // v2.74.823 — urlPatterns-aware tab→Ground (a merged sibling host resolves), origin fallback inside
           if (gid) grounds = [gid];
         }
         groundCount = grounds.length;
@@ -1544,7 +1573,7 @@ export function createSgMessageHandlers(ctx) {
         const { tabId, groundId = null, ask = '', selector = null, structuralSelector = null, label = '', role = '', landmark = null, archetype = null, outputType = null, shape = null } = payload ?? {};
         if (!ask || !selector) { sendResponse({ success: false, error: 'ask + selector required' }); return; }
         let gid = groundId, localeUrl = '';
-        if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); localeUrl = t?.url || ''; if (!gid && localeUrl) { const origin = new URL(localeUrl).origin; const gs = await StorageManager.getAllGrounds(); const g = (Array.isArray(gs) ? gs : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } } catch { /* */ } }
+        if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); localeUrl = t?.url || ''; if (!gid && localeUrl) { const gs = await StorageManager.getAllGrounds(); gid = _groundIdForUrl(localeUrl, gs); } } catch { /* */ } }   // v2.74.824 — urlPatterns-aware (a merged sibling host resolves)
         if (!gid) { sendResponse({ success: false, error: 'no ground for this page' }); return; }
         const arch0 = (archetype && typeof archetype === 'object' && archetype.selector)
           ? { selector: String(archetype.selector), index: Number.isInteger(archetype.index) ? archetype.index : 0 }
@@ -1762,7 +1791,7 @@ export function createSgMessageHandlers(ctx) {
         const { tabId, groundId = null, ask = '', description = '', outputType = 'count' } = payload ?? {};
         if (typeof tabId !== 'number') { sendResponse({ success: false, error: 'tabId required' }); return; }
         let gid = groundId, localeUrl = '';
-        try { const t = await chrome.tabs.get(tabId); localeUrl = t?.url || ''; if (!gid && localeUrl) { const origin = new URL(localeUrl).origin; const gs = await StorageManager.getAllGrounds(); const g = (Array.isArray(gs) ? gs : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } } catch { /* */ }
+        try { const t = await chrome.tabs.get(tabId); localeUrl = t?.url || ''; if (!gid && localeUrl) { const gs = await StorageManager.getAllGrounds(); gid = _groundIdForUrl(localeUrl, gs); } } catch { /* */ }   // v2.74.824 — urlPatterns-aware (a merged sibling host resolves)
         if (!gid) { sendResponse({ success: false, error: 'no ground for this page' }); return; }
         const desc = String(description || '').trim() || describeForCondition(ask);
         const shot = await performImageFull({ tabId });   // verify the capture works + read once
@@ -2001,7 +2030,7 @@ export function createSgMessageHandlers(ctx) {
         const usable = (Array.isArray(steps) ? steps : []).filter((s) => s && s.capabilityId);
         if (!ask || (!isCF && usable.length < 2)) { sendResponse({ success: false, error: 'ask + ≥2 steps with capabilityId required' }); return; }
         let gid = groundId, localeUrl = '';
-        if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); localeUrl = t?.url || ''; if (!gid && localeUrl) { const origin = new URL(localeUrl).origin; const gs = await StorageManager.getAllGrounds(); const g = (Array.isArray(gs) ? gs : []).find((x) => { try { return x && x.url && new URL(x.url).origin === origin; } catch { return false; } }); gid = g ? g.id : null; } } catch { /* */ } }
+        if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); localeUrl = t?.url || ''; if (!gid && localeUrl) { const gs = await StorageManager.getAllGrounds(); gid = _groundIdForUrl(localeUrl, gs); } } catch { /* */ } }   // v2.74.824 — urlPatterns-aware (a merged sibling host resolves)
         if (!gid) { sendResponse({ success: false, error: 'no ground for this page' }); return; }
         const cap = buildCompositeCapability(isCF
           ? { id: crypto.randomUUID(), ask, groundId: gid, plan: (plan && Array.isArray(plan.steps)) ? plan : { steps }, name }   // intent DERIVED (param-abstracted)
