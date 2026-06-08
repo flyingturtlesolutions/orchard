@@ -115,3 +115,24 @@ export function classifySelectorTier(selector) {
   if (stableClasses.length >= 2) return 5;
   return 6;
 }
+
+/**
+ * v2.74.839 (GA-2) — choose the most DURABLE selector from candidates that ALL uniquely resolve the SAME element
+ * (e.g. each successively-deeper prefix of an ascending selector build). Picks the lowest classifySelectorTier (the
+ * strongest discriminator), ties broken by shortest length (fewer ancestors ⇒ fewer things that can drift). PURE.
+ * The selector builder uses this to avoid greedily returning a purely-structural shortest-unique (a bare
+ * `div > div:nth-of-type(3)`, tier 6) when a one-level-deeper prefix gains a stable `#id`/class anchor.
+ * @param {string[]} candidates
+ * @returns {string} the most durable candidate, or '' for an empty/invalid set
+ */
+export function selectMostDurableUnique(candidates) {
+  const list = (Array.isArray(candidates) ? candidates : []).filter((s) => typeof s === 'string' && s.trim());
+  if (!list.length) return '';
+  let best = list[0];
+  let bestTier = classifySelectorTier(best);
+  for (let i = 1; i < list.length; i++) {
+    const t = classifySelectorTier(list[i]);
+    if (t < bestTier || (t === bestTier && list[i].length < best.length)) { best = list[i]; bestTier = t; }
+  }
+  return best;
+}
