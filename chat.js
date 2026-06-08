@@ -865,7 +865,20 @@ async function _orchReadValue({ tabId, groundId, ask, capabilityId }) {
 // executor is thin glue over the EXISTING handlers — no new runtime: a fragment → REPLAY_SG_CAPABILITY; a
 // foreach/loop DRIVER observe → RUN_OBSERVATION_LIST (count the list's items); a leaf read → RUN_OBSERVATION with
 // a positional `fromIndex` for the Nth item. Collected outputs (the per-iteration lists) are shown inline.
-async function _orchRunPlanIR(msg, { tabId, groundId, plan }) {
+// ORCH-L (open-each) — the foreach DRIVER observe that still needs a list observation TAUGHT (it carries `teachList`
+// and has no capabilityId yet, and a foreach/loop iterates over it). Returns the (mutable) step, or null. PURE scan.
+function _findUntaughtListDriver(plan) {
+  const steps = (plan && Array.isArray(plan.steps)) ? plan.steps : [];
+  const driven = new Set();
+  const scan = (ss) => { for (const s of (ss || [])) { if (s && (s.kind === 'foreach' || s.kind === 'loop') && s.over) driven.add(s.over); if (s && Array.isArray(s.body)) scan(s.body); } };
+  scan(steps);
+  let found = null;
+  const walk = (ss) => { for (const s of (ss || [])) { if (found) return; if (s && s.kind === 'observe' && s.teachList && !s.capabilityId && driven.has(s.id)) { found = s; return; } if (s && Array.isArray(s.body)) walk(s.body); } };
+  walk(steps);
+  return found;
+}
+
+async function _orchRunPlanIR(msg, { tabId, groundId, plan, _headRan = false }) {
   const driverIds = new Set();   // observe ids a foreach/loop iterates over → must return items, not a scalar
   const _scan = (steps) => { for (const s of (steps || [])) { if (s && (s.kind === 'foreach' || s.kind === 'loop') && s.over) driverIds.add(s.over); if (s && Array.isArray(s.body)) _scan(s.body); } };
   _scan(plan && plan.steps);
@@ -877,6 +890,15 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan }) {
   const _criteria = renderCriteria(_planBindings);
   const exec = {
     fragment: async (step, scope) => {
+      // openItem — the per-item ACTION of an "open each <item>" foreach: open the current item's LINK in a NEW
+      // background tab (so the result list the loop iterates stays put for the next item). Needs the row's href —
+      // captured by the driver's list observation when the user pointed at a result LINK.
+      if (step.openItem) {
+        const href = scope && scope.item && scope.item.href;
+        if (!href) return { ok: false, error: 'no link captured for this item — re-teach the list by pointing at a result’s LINK (e.g. the job title)' };
+        const res = await _orchReq('OPEN_URL_NEW_TAB', { url: href });
+        return { ok: !!(res && res.success !== false && res.ok !== false), error: res && res.error };
+      }
       // clickItem — the per-item ACTION of a click-in-place foreach: CLICK the current item's selector. The SETTLE
       // is a separate `wait` node (lifted right after this), so the panel/inline content loads before the body's
       // read — pacing is a first-class node, not a sleep buried in the click. (A normal fragment REPLAYs its cap.)
@@ -927,12 +949,59 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan }) {
       return { ok: true };
     },
   };
+  // ORCH-L (open-each) — a foreach whose DRIVER is an untaught list observation. Run the HEAD (the search) FIRST so
+  // the items to point at are ON the page, THEN teach the driver (point at one → a list observation), THEN run the
+  // tail (driver + foreach). The search runs ONCE; the captured observation persists, so re-running the whole ask
+  // later skips the teach. Reuses the same exec + walkPlan + observe-capture — no new runtime.
+  const _ud = _headRan ? null : _findUntaughtListDriver(plan);
+  if (_ud) {
+    const allSteps = (plan && Array.isArray(plan.steps)) ? plan.steps : [];
+    const drvIdx = allSteps.indexOf(_ud);
+    const head = drvIdx > 0 ? allSteps.slice(0, drvIdx) : [];
+    const noun = _ud.teachNoun || 'item';
+    if (head.length) {
+      _setMessageBody(msg, 'Running the search…');
+      _orchLog(`LOOP ▸ run head (${head.length} step${head.length === 1 ? '' : 's'}) before teaching the "${noun}" list`);
+      try { await walkPlan({ goal: (plan && plan.goal) || '', steps: head }, exec); } catch (e) { _orchLog(`LOOP ▸ head error: ${e && e.message}`); }
+      await new Promise((r) => setTimeout(r, 1400));   // settle after the search navigates, before reading/teaching
+    }
+    _orchLog(`LOOP ▸ teach list driver "${noun}" (point-at-one) on the results`);
+    _setMessageBody(msg, `To open each ${noun}, point me at one ${noun} (e.g. the first) on the results — I’ll open them all.`);
+    _orchObserveCapture(appendMessage({ role: 'assistant', body: '' }), {
+      groundId, tabId, ask: `the ${noun} links`,
+      onAuthored: ({ capabilityId } = {}) => {
+        if (!capabilityId) { _setMessageBody(msg, `I couldn’t capture the ${noun} list — point at one ${noun}’s link and try again.`); return; }
+        _ud.capabilityId = capabilityId;
+        _orchLog(`LOOP ▸ driver taught (cap=${String(capabilityId).slice(0, 8)}) — opening each ${noun}`);
+        _orchRunPlanIR(msg, { tabId, groundId, plan, _headRan: true });   // head already ran → run driver + loop only
+      },
+    });
+    return;
+  }
+  // When the head already ran (post-teach), walk only the tail (the driver onward) so the search doesn't repeat —
+  // but the SAVE offer below still uses the WHOLE `plan` so a saved composite includes the search.
+  let runPlan = plan;
+  if (_headRan) {
+    const steps = (plan && Array.isArray(plan.steps)) ? plan.steps : [];
+    const feNode = steps.find((s) => s && s.kind === 'foreach');
+    const di = feNode ? steps.findIndex((s) => s && s.id === feNode.over) : -1;
+    if (di > 0) runPlan = { ...plan, steps: steps.slice(di) };   // [driver, foreach, …]
+  }
   _setMessageBody(msg, 'Running…');
-  const env = await walkPlan(plan, exec);
+  const env = await walkPlan(runPlan, exec);
   const outs = (env && env.outputs) ? Object.entries(env.outputs) : [];
   const gate = (env && Array.isArray(env.trace)) ? env.trace.find((t) => t.kind === 'gate') : null;
+  // ORCH-L — the foreach outcome (how many items the loop ran). For an OPEN-each loop (a body that opens each item,
+  // collecting nothing) this IS the result the user wants reported: "Opened N pages."
+  const fe = (env && Array.isArray(env.trace)) ? env.trace.find((t) => t && t.kind === 'foreach') : null;
+  const openEach = (plan && Array.isArray(plan.steps)) && plan.steps.some((s) => s && s.kind === 'foreach' && Array.isArray(s.body) && s.body.some((b) => b && b.openItem));
+  if (fe) _orchLog(`LOOP ▸ foreach done — ${fe.done}/${fe.items} opened${fe.skipped ? `, ${fe.skipped} skipped` : ''}`);
   if (outs.length) {
     _setMessageBody(msg, outs.map(([k, v]) => Array.isArray(v) ? `${k} (${v.length}):\n${v.map((x, i) => `  ${i + 1}. ${x}`).join('\n')}` : `${k}: ${v}`).join('\n\n'));
+  } else if (openEach && fe) {
+    _setMessageBody(msg, (env && env.ok)
+      ? `Opened ${fe.done} ${fe.done === 1 ? 'page' : 'pages'} in new tabs${fe.skipped ? ` (${fe.skipped} had no link to open)` : ''}.`
+      : `Opened ${fe.done} before stopping${env && env.error ? ` — ${env.error}` : ''}.`);
   } else if (gate) {
     // PREDICATE → GATE: report the analysis decision — did the conditional action run, or was it skipped?
     _setMessageBody(msg, !(env && env.ok) ? `Couldn’t complete that${env && env.error ? ` — ${env.error}` : ''}.`

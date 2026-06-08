@@ -6208,6 +6208,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const sel = payload?.selector;
       const max = Number.isFinite(payload?.max) ? Math.max(0, Math.floor(payload.max)) : null;
       const withSelectors = payload?.withSelectors === true;
+      // v2.74.836 (ORCH-L) — per-item LINK capture for an "open each <item>" loop: the absolute href of each match's
+      // own anchor (or its nearest ancestor / descendant a[href]). The foreach body opens each in a new tab.
+      const withHrefs = payload?.withHrefs === true;
       // v2.46.0 (Pass O1) — optional per-item field capture. Each entry is
       // { name, source, type } where source is a CSS selector RELATIVE to
       // each matched item, and type is one of: string | presence | number |
@@ -6232,6 +6235,29 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             selectors.push(computeUniqueSelector(elements[i]));
           }
           response.selectors = selectors;
+        }
+        if (withHrefs) {
+          // v2.74.837 (ORCH-L) — pick each row's CONTENT link: gather the element's own / ancestor / descendant
+          // anchors and prefer a NON-ad-redirect href (skip …/pagead/clk, …/aclk, ?ad=… wrappers) when one exists,
+          // so "open each" opens the job page itself rather than the ad-click redirect. Falls back to the first
+          // usable anchor (a sponsored card whose only link IS the redirect still opens — it just redirects).
+          const _isAdLink = (h) => /\/(?:pagead\/clk|aclk)\b|[?&]ad=/i.test(h);
+          const hrefs = [];
+          for (let i = 0; i < effectiveCount; i++) {
+            const el = elements[i];
+            let href = null;
+            try {
+              const cands = [];
+              if (el.matches && el.matches('a[href]')) cands.push(el);
+              const anc = el.closest && el.closest('a[href]'); if (anc) cands.push(anc);
+              if (el.querySelectorAll) for (const d of el.querySelectorAll('a[href]')) cands.push(d);
+              // `.href` resolves to an absolute URL; keep only real http(s) links (drop javascript:/#/mailto:).
+              const abs = cands.map((x) => x && x.href).filter((h) => typeof h === 'string' && /^https?:\/\//i.test(h));
+              href = abs.find((h) => !_isAdLink(h)) || abs[0] || null;
+            } catch { href = null; }
+            hrefs.push(href);
+          }
+          response.hrefs = hrefs;
         }
 
         // v2.46.0 — per-item field capture. Runs after the count to keep

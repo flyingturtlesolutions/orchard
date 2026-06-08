@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 
 import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites, namesAnySite } from './orchChain.js';
 import { validatePlan } from './orchPlan.js';
+import { walkPlan } from './orchRun.js';   // ORCH-L — the pure interpreter, to RUN the lifted open-each loop end-to-end
 
 describe('orchChain — namesMultipleSites (cross-site pre-filter, T3X)', () => {
   it('fires on two DISTINCT site references (the bug ask + the data-handoff ask)', () => {
@@ -262,6 +263,112 @@ describe('orchChain — decompose a compound ask + assemble a sequential plan (O
       { capabilityId: 'b', kind: 'observation', outputType: 'scalar', clause: 'the title of each' },
     ];
     assert.equal(liftControlFlow(noList, 'search and the title of each').lifted, false, 'no list-output step → flat');
+  });
+
+  // ── ORCH-L: open-each lift (implicit collection — no explicit list READ in the plan) ─────────────────────────────
+  it('liftControlFlow (open-each): "search jobs AND open each job" with NO list step → [search, driver(teach list), foreach{openItem}]', () => {
+    const flat = [
+      { capabilityId: 'cap-search', intent: 'search jobs', kind: 'fragment', clause: 'search for remote support jobs' },
+      { capabilityId: 'cap-openjob', intent: 'open each job', kind: 'fragment', clause: 'open each job on a new page' },
+    ];
+    const { steps, lifted, openEach, teachNoun } = liftControlFlow(flat, 'search for remote support jobs and open each job on a new page');
+    assert.equal(lifted, true);
+    assert.equal(openEach, true);
+    assert.equal(teachNoun, 'job', 'the collection noun is "job" — not "new"/"page" (a structural stop-word)');
+    assert.equal(steps.length, 3);                                  // search(fragment) · driver(observe list) · foreach
+    assert.equal(steps[0].kind, 'fragment');
+    assert.equal(steps[1].kind, 'observe');
+    assert.equal(steps[1].outputType, 'list');
+    assert.equal(steps[1].teachList, true, 'the driver is a list observation taught at run time');
+    assert.equal(steps[1].capabilityId, null, 'no capability bound yet — taught by pointing at one item');
+    assert.equal(steps[2].kind, 'foreach');
+    assert.equal(steps[2].over, steps[1].id, 'the foreach iterates the taught list driver');
+    assert.equal(steps[2].body.length, 1);
+    assert.equal(steps[2].body[0].openItem, true, 'the per-item action OPENS each item (new tab)');
+    assert.deepEqual(validatePlan({ steps }).errors, [], 'the open-each plan validates (untaught driver + openItem body are well-formed)');
+  });
+
+  it('liftControlFlow (open-each): a READ-each with no list step does NOT open-each lift (stays flat)', () => {
+    const flat = [
+      { capabilityId: 'a', kind: 'fragment', clause: 'search' },
+      { capabilityId: 'b', kind: 'observation', outputType: 'scalar', clause: 'the title of each' },
+    ];
+    // "the title of each job" reads each (no open/click verb) — it is NOT an open-each, so no driver is synthesized.
+    assert.equal(liftControlFlow(flat, 'search and the title of each job').lifted, false);
+  });
+
+  it('liftControlFlow (open-each): "open every result" → singularized teachNoun "result"; openItem body validates', () => {
+    const flat = [
+      { capabilityId: 'cap-search', kind: 'fragment', clause: 'search listings' },
+      { capabilityId: 'cap-open', kind: 'fragment', clause: 'open every result' },
+    ];
+    const { steps, lifted, openEach, teachNoun } = liftControlFlow(flat, 'search listings and open every result');
+    assert.equal(lifted, true);
+    assert.equal(openEach, true);
+    assert.equal(teachNoun, 'result');
+    assert.deepEqual(validatePlan({ steps }).errors, []);
+  });
+
+  it('buildCompositeCapability: an open-each loop round-trips through the IR sanitizer (openItem + teachList survive)', () => {
+    const flat = [
+      { capabilityId: 'cap-search', kind: 'fragment', clause: 'search jobs' },
+      { capabilityId: 'cap-open', kind: 'fragment', clause: 'open each job' },
+    ];
+    const { steps } = liftControlFlow(flat, 'search jobs and open each job');
+    steps[1].capabilityId = 'obs-taught';                            // simulate the driver having been taught at run time
+    const comp = buildCompositeCapability({ plan: { steps }, ask: 'search jobs and open each job', groundId: 'g1' });
+    const fe = comp.steps.find((s) => s.kind === 'foreach');
+    assert.ok(fe, 'the foreach survives');
+    assert.equal(fe.body[0].openItem, true, 'the openItem flag survives the sanitizer (so a saved loop still opens each item)');
+    assert.equal(comp.controlFlow, true);
+  });
+
+  // The END-TO-END proof: the lifted open-each IR, run through the REAL interpreter (walkPlan) with a mock exec that
+  // mirrors the chat runtime (openItem opens scope.item.href), actually LOOPS — opening every row that has a link,
+  // in order, and leniently SKIPPING a link-less row instead of aborting. This is what "open each job" should do.
+  it('open-each RUNS end-to-end: lift → walkPlan opens each row’s href, in order, skipping a link-less row', async () => {
+    const flat = [
+      { capabilityId: 'cap-search', kind: 'fragment', clause: 'search remote support jobs', bindings: { Q: 'remote support' } },
+      { capabilityId: 'cap-open', kind: 'fragment', clause: 'open each job on a new page' },
+    ];
+    const { steps } = liftControlFlow(flat, 'search remote support jobs and open each job on a new page');
+    const driver = steps.find((s) => s.teachList);
+    driver.capabilityId = 'obs-jobs';                         // simulate the list driver having been taught at run time
+
+    const ran = [];                                           // head (action) steps that executed
+    const opened = [];                                        // hrefs the open-each body opened (one "tab" each)
+    const exec = {
+      // Mirrors chat.js _orchRunPlanIR.exec.fragment: openItem opens the current item's captured href, or fails
+      // (→ the foreach skips it) when the row carries no link.
+      fragment: async (step, scope) => {
+        if (step.openItem) {
+          const href = scope && scope.item && scope.item.href;
+          if (!href) return { ok: false, error: 'no link captured for this item' };
+          opened.push(href);
+          return { ok: true };
+        }
+        ran.push(step.id);
+        return { ok: true };
+      },
+      // The driver observe returns the enumerated rows (selector + href per row), like RUN_OBSERVATION_LIST. The
+      // third row has no link → it must be skipped, not abort the loop.
+      observe: async (step) => step.teachList
+        ? { ok: true, items: [
+            { index: 0, selector: 'a.r1', href: 'https://indeed.test/job/1' },
+            { index: 1, selector: 'a.r2', href: 'https://indeed.test/job/2' },
+            { index: 2, selector: 'a.r3', href: null },
+          ] }
+        : { ok: true, value: '' },
+    };
+
+    const env = await walkPlan({ goal: 'search remote support jobs and open each job on a new page', steps }, exec);
+    assert.equal(env.ok, true, 'the loop completes (a link-less row is lenient, not fatal)');
+    assert.equal(ran.length, 1, 'the search head ran exactly once (before the loop)');
+    assert.deepEqual(opened, ['https://indeed.test/job/1', 'https://indeed.test/job/2'], 'opened every row that HAS a link, in order');
+    const trace = env.trace.find((t) => t.kind === 'foreach');
+    assert.equal(trace.items, 3, 'the driver produced 3 rows');
+    assert.equal(trace.done, 2, 'two rows opened');
+    assert.equal(trace.skipped, 1, 'the link-less row was skipped (drives the "1 had no link to open" message)');
   });
 
   // ── ORCH-A: conditional lift (predicate → gate) ──────────────────────────────────────────────────────────────

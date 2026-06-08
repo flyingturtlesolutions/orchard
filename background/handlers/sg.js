@@ -1871,12 +1871,20 @@ export function createSgMessageHandlers(ctx) {
         if (!selector) { sendResponse({ success: false, error: 'observation has no list/archetype selector' }); return; }
         try { await ctx.ensureContentScript(tabId); } catch { /* */ }
         // withSelectors → a UNIQUE per-item selector for each match, so a FOREACH body can CLICK the Nth item.
-        const res = await new Promise((r) => { try { chrome.tabs.sendMessage(tabId, { type: 'COUNT_ELEMENTS', payload: { selector, max, withSelectors: true } }, { frameId: 0 }, (x) => { void chrome.runtime.lastError; r(x); }); } catch (e) { r({ success: false, error: e.message }); } });
+        // withHrefs → each match's own link (ORCH-L "open each <item>" opens the row's href in a new tab).
+        const res = await new Promise((r) => { try { chrome.tabs.sendMessage(tabId, { type: 'COUNT_ELEMENTS', payload: { selector, max, withSelectors: true, withHrefs: true } }, { frameId: 0 }, (x) => { void chrome.runtime.lastError; r(x); }); } catch (e) { r({ success: false, error: e.message }); } });
         const count = (res && res.success !== false && Number.isFinite(res.count)) ? Math.min(res.count, max) : 0;
         const sels = (res && Array.isArray(res.selectors)) ? res.selectors : [];
-        const items = Array.from({ length: count }, (_, i) => ({ index: i, selector: sels[i] || null }));
-        Logger.info('background', `RUN_OBSERVATION_LIST — ${cap.id} "${selector}" → ${count} item(s)${sels.length ? ' (+selectors)' : ''}`);
-        sendResponse({ success: true, ok: count > 0, count, items, intent: cap.intent });
+        const hrefs = (res && Array.isArray(res.hrefs)) ? res.hrefs : [];
+        const rawItems = Array.from({ length: count }, (_, i) => ({ index: i, selector: sels[i] || null, href: hrefs[i] || null }));
+        // v2.74.837 (ORCH-L) — DEDUP by href so "open each <item>" opens each unique link ONCE (sites repeat rows —
+        // Indeed lists some sponsored jobs twice). Rows with NO href are kept as-is (a click-each body wants each row;
+        // a same-link pair is never worth opening/clicking twice).
+        const _seen = new Set();
+        const items = rawItems.filter((it) => { if (!it.href) return true; if (_seen.has(it.href)) return false; _seen.add(it.href); return true; });
+        const uniq = items.length;
+        Logger.info('background', `RUN_OBSERVATION_LIST — ${cap.id} "${selector}" → ${count} item(s)${count !== uniq ? ` → ${uniq} unique by link` : ''}${sels.length ? ' (+selectors)' : ''}${hrefs.filter(Boolean).length ? ` (+${hrefs.filter(Boolean).length} hrefs)` : ''}`);
+        sendResponse({ success: true, ok: uniq > 0, count: uniq, items, intent: cap.intent });
       } catch (err) {
         Logger.error('background', `RUN_OBSERVATION_LIST failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
@@ -1896,6 +1904,24 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, ok, error: res && res.error });
       } catch (err) {
         Logger.error('background', `CLICK_SELECTOR failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // ORCH-L (open-each) — open a URL in a NEW BACKGROUND tab: the per-item action of an "open each <item>" loop.
+    // A new tab (not an in-place click) so the result list the loop iterates over stays put for the next item, and
+    // `active:false` so the loop doesn't yank focus away from the side panel on every iteration. http(s) only.
+    OPEN_URL_NEW_TAB: async (payload, _sender, sendResponse) => {
+      try {
+        const { url = null } = payload ?? {};
+        if (!url || !/^https?:\/\//i.test(String(url))) { sendResponse({ success: false, error: 'a http(s) url is required' }); return; }
+        const tab = await new Promise((r) => { try { chrome.tabs.create({ url: String(url), active: false }, (t) => { void chrome.runtime.lastError; r(t || null); }); } catch (e) { r(null); } });
+        const ok = !!(tab && typeof tab.id === 'number');
+        if (ok) Logger.info('background', `OPEN_URL_NEW_TAB — "${String(url).slice(0, 80)}" → tab ${tab.id} (background)`);
+        else Logger.info('background', `OPEN_URL_NEW_TAB — "${String(url).slice(0, 80)}" failed to open`);
+        sendResponse({ success: true, ok, error: ok ? null : 'tab did not open' });
+      } catch (err) {
+        Logger.error('background', `OPEN_URL_NEW_TAB failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },
@@ -1998,7 +2024,7 @@ export function createSgMessageHandlers(ctx) {
           const lift = liftControlFlow(steps, ask);
           if (lift.lifted) {
             const v = validatePlan({ steps: lift.steps });
-            if (v.ok) { outSteps = lift.steps; Logger.info('background', `ORCH_PLAN ▸ lifted to control-flow: foreach over the list${lift.collect ? ` → collect ${lift.collect}` : ''}`); }
+            if (v.ok) { outSteps = lift.steps; Logger.info('background', `ORCH_PLAN ▸ lifted to control-flow: foreach over the list${lift.collect ? ` → collect ${lift.collect}` : ''}${lift.openEach ? ` (open-each "${lift.teachNoun}" — teach the list on run)` : ''}`); }
             else Logger.warn('background', `ORCH_PLAN ▸ lift rejected (kept flat): ${v.errors.join('; ')}`);
           }
         } catch (e) { Logger.warn('background', `ORCH_PLAN lift failed (kept flat): ${e.message}`); }

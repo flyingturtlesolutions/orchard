@@ -221,7 +221,50 @@ export function buildCompositeCapability(input) {
 const _QUANTIFIER = /\b(each|every|for each|of each|all of (?:the|them)|per (?:item|result|job|row|one))\b/i;
 // A per-item ACTION ("click each", "open every result", "save each") — the body clicks the item BEFORE reading.
 const _CLICK_EACH = /\b(click|open|select|tap|press|expand|save|apply|view)(\s+(?:on|into))?\s+(each|every|all)\b|\b(each|every|all)\b[^.]*\b(click|open|select|expand|view)\b/i;
+// The COLLECTION NOUN in an "…each/every/all <noun>" phrase ("open each JOB" → "job"). Stops at structural words so
+// "open each job on a NEW PAGE" reads the job, not the page.
+const _EACH_NOUN = /\b(?:each|every|all)\s+(?:of\s+)?(?:the\s+)?([a-z][a-z-]{1,30})\b/i;
+const _NOUN_STOP = new Set(['new', 'same', 'one', 'other', 'these', 'those', 'page', 'tab', 'window', 'time', 'item', 'them', 'it']);
 const _slugUp = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').split('_').filter(Boolean).slice(0, 3).join('_');
+const _bindOf = (s) => (s && s.bindings && typeof s.bindings === 'object') ? s.bindings : {};
+
+/**
+ * ORCH-L (open-each) — lift "…AND open/visit/view EACH <noun>" when the plan carries NO explicit list READ to drive
+ * the loop (the collection is IMPLICIT — the results the head action produced). PURE. Synthesizes:
+ *   [ head…(the search) , driver: observe(list, TAUGHT on demand) , foreach{ openItem } ]
+ * The driver's `capabilityId` is null — the runtime teaches it once (point at one item → a list observation) and
+ * fills it, then runs the SAME foreach IR the explicit-list path uses. The body OPENS each row's link in a new tab
+ * (a per-item navigation that mustn't lose the result list — so a new tab, not an in-place click). `teachList`
+ * flags the driver as the one to teach; `teachNoun` labels the prompt. Returns null when the ask isn't open-each.
+ * @param {Array<object>} flat  flat ORCH_PLAN steps
+ * @param {string} ask
+ * @returns {({steps:object[], lifted:boolean, collect:null, openEach:true, teachNoun:string}|null)}
+ */
+function _liftOpenEach(flat, ask) {
+  const a = String(ask || '');
+  if (!_CLICK_EACH.test(a)) return null;
+  // The per-item action = the LAST step whose clause/intent carries the quantifier; else the tail action.
+  let actIdx = -1;
+  for (let i = flat.length - 1; i >= 0; i--) {
+    const t = `${(flat[i] && flat[i].clause) || ''} ${(flat[i] && flat[i].intent) || ''}`;
+    if (_QUANTIFIER.test(t)) { actIdx = i; break; }
+  }
+  if (actIdx < 0) actIdx = flat.length - 1;
+  if (actIdx < 1) return null;                       // need a HEAD (the list-producing action) before the loop
+  const act = flat[actIdx] || {};
+  const aid = act.id || `s${actIdx}`;
+  const m = `${act.clause || ''} ${act.intent || ''} ${a}`.match(_EACH_NOUN);
+  let noun = (m && m[1] && !_NOUN_STOP.has(m[1].toLowerCase())) ? m[1].toLowerCase() : 'result';
+  noun = noun.replace(/s$/, '') || noun;             // singularize a plural noun for the prompt ("jobs" → "job")
+  const head = flat.slice(0, actIdx).map((s, i) => (s && s.kind === 'observation')
+    ? { kind: 'observe', outputType: (s && s.outputType) || 'scalar', id: (s && s.id) || `h${i}`, capabilityId: (s && s.capabilityId) || null, bindings: _bindOf(s), intent: (s && s.intent) || '', clause: (s && s.clause) || '' }
+    : { kind: 'fragment', id: (s && s.id) || `h${i}`, capabilityId: (s && s.capabilityId) || null, bindings: _bindOf(s), intent: (s && s.intent) || '', clause: (s && s.clause) || '' });
+  const driverId = `src_${aid}`;
+  const driver = { kind: 'observe', outputType: 'list', id: driverId, capabilityId: null, bindings: {}, teachList: true, teachNoun: noun, intent: `the ${noun} links`, clause: `each ${noun}` };
+  const body = [{ kind: 'fragment', id: `open_${aid}`, openItem: true, capabilityId: null, bindings: {}, intent: act.intent || `open each ${noun}`, clause: act.clause || `open each ${noun}` }];
+  const node = { kind: 'foreach', id: `each_${aid}`, over: driverId, itemVar: 'item', body };
+  return { steps: [...head, driver, node], lifted: true, collect: null, openEach: true, teachNoun: noun };
+}
 
 /** Does the ask QUANTIFY over a collection ("…of each", "every…")? PURE. The chat routes a foreach ask through the
  *  LLM planner (so liftControlFlow can lift it), not the flat lexical chain. */
@@ -248,6 +291,9 @@ export function liftControlFlow(steps, ask) {
   if (flat.length < 2 || !_QUANTIFIER.test(String(ask || ''))) return { steps: flat, lifted: false, collect: null };
   // The DRIVER is the first list-producing observation; the steps after it iterate per item.
   const dIdx = flat.findIndex((s) => s && s.kind === 'observation' && String(s.outputType || '').toLowerCase() === 'list');
+  // No explicit list READ to iterate? An OPEN/CLICK-each over an IMPLICIT collection ("search jobs AND open each
+  // job") still lifts — synthesize a taught list-observation driver + an open-each-in-new-tab body (ORCH-L).
+  if (dIdx < 0) { const oe = _liftOpenEach(flat, ask); if (oe) return oe; }
   if (dIdx < 0 || dIdx >= flat.length - 1) return { steps: flat, lifted: false, collect: null };
   // CLICK-each ("click/open each result") → the body CLICKS the item, then re-reads a FIXED panel that updated
   // (not a positional list read). Read-collection ("the salary of each", no click) → the body read is POSITIONAL.
@@ -370,8 +416,8 @@ function _irStep(s) {
   if (!s || typeof s !== 'object' || !s.kind) return null;
   const base = { id: String(s.id || ''), kind: s.kind };
   switch (s.kind) {
-    case 'fragment': return { ...base, capabilityId: s.capabilityId || null, bindings: _obj(s.bindings), intent: _str(s.intent), clause: _str(s.clause), ...(s.clickItem ? { clickItem: true } : {}) };
-    case 'observe': return { ...base, capabilityId: s.capabilityId || null, outputType: s.outputType || 'scalar', intent: _str(s.intent), clause: _str(s.clause), ...(s.positional ? { positional: true } : {}), ...(s.fixed ? { fixed: true } : {}) };
+    case 'fragment': return { ...base, capabilityId: s.capabilityId || null, bindings: _obj(s.bindings), intent: _str(s.intent), clause: _str(s.clause), ...(s.clickItem ? { clickItem: true } : {}), ...(s.openItem ? { openItem: true } : {}) };
+    case 'observe': return { ...base, capabilityId: s.capabilityId || null, outputType: s.outputType || 'scalar', intent: _str(s.intent), clause: _str(s.clause), ...(s.positional ? { positional: true } : {}), ...(s.fixed ? { fixed: true } : {}), ...(s.teachList ? { teachList: true, teachNoun: _str(s.teachNoun) } : {}) };
     case 'analyze': return { ...base, over: s.over || null, outputType: s.outputType || 'scalar', intent: _str(s.intent), clause: _str(s.clause) };
     case 'wait': return { ...base, ms: Number.isFinite(s.ms) ? s.ms : 800, ...(s.forSelector ? { forSelector: String(s.forSelector) } : {}), ...(s.reason ? { reason: _str(s.reason) } : {}) };
     case 'foreach': case 'loop': case 'gate': return { ...base, over: s.over || null, ...(s.itemVar ? { itemVar: s.itemVar } : {}), ...(s.collect ? { collect: s.collect } : {}), body: (Array.isArray(s.body) ? s.body : []).map(_irStep).filter(Boolean) };
