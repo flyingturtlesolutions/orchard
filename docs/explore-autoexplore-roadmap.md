@@ -2,6 +2,8 @@
 
 *Multi-session effort. Goal: make EXPLORE produce a trustworthy, complete-enough substrate, and make **auto-explore** (ask → auto-ground → auto-explore relevant page → auto-Locale → auto-build) safe + reliable **unattended**.*
 
+> **⏸ PAUSED at v2.74.855** — EX-1..5,7 + EX-6a + the full G1 foundation shipped; **EX-6b (the unattended runner) is on hold**. Priority shifted to **grounding quality** (the demand-driven **G2** two-speed model) before automating. Consolidated record: `docs/automation-arc-status.md`.
+
 Source: ultracode workflow `wf_8ffe1fd8-62b` — 8 Explore dimensions mapped, 41 improvements adversarially verified, **23 confirmed**, + a completeness critic. Builds on (assumes, doesn't restate) the shipped **GA-1..GA-8** authoring hardening and the **G1** grounding foundation (auto-ground entrypoint, identity-at-creation, Locale↔Ground binding, readiness gate).
 
 ---
