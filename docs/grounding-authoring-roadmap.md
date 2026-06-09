@@ -70,10 +70,9 @@ Levers 1, 2, 6 below form one missing subsystem: **the post-accept lifecycle** (
 ---
 
 ## G1 foundation (Review A — assumed by this roadmap)
-- `ensureGroundForUrl(url)` — the auto-ground entrypoint (today the no-Ground path dead-ends, sg.js:758).
-- Identity-at-creation (dedup-before-mint; today create-then-merge).
-- Bind the Locale to its Ground (today `buildLocale` carries no `groundId`).
-- A Ground **readiness** gate (`empty|preparing|capable|rich`).
+- [x] **G1-1** — `ensureGroundForUrl(url)` auto-ground entrypoint + identity-at-creation (dedup-BEFORE-mint via `_groundIdForUrl` → `GroundManager.create` only on miss; `ENSURE_GROUND_FOR_URL` handler; pure `groundNameForUrl`/`planEnsureGround`) — `2c101f9` (v2.74.851). *Closes the sg.js:758 no-Ground dead-end.*
+- [ ] **G1-2** — Bind the Locale to its Ground (today `buildLocale` carries no `groundId`) → the Locale→capability dependency edge EX-9 drift-propagation needs.
+- [ ] **G1-3** — A Ground **readiness** gate (`empty|preparing|capable|rich`).
 
 ## File anchors
 `Core/accept.js`, `Core/trialSynth.js`, `Core/capabilitySynth.js`, `Core/selectorStability.js`, `ContentScripts/contentScript.js` (`enumeratePage` + the two selector builders + `_computeHierarchicalContext`), `Core/landmark.js`, `Core/outcomes.js`, `Core/select.js`, `background/handlers/sg.js`.
