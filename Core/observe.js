@@ -65,6 +65,24 @@ export function classifyReadAsk(ask) {
   return { isRead, outputType: outputType || (isRead ? 'scalar' : null), confidence };
 }
 
+// READ-SINGULARIZATION (v2.74.883) — the 0-based list index a SINGULAR / ORDINAL ask wants: "the first" → 0,
+// "the 2nd" / "second" → 1, "the last" → -1, "top" → 0. null when the ask names no single position. Used at
+// read-INVOCATION: when a singular ask matched a LIST observation (the live "what is the first video title?" →
+// 145 titles gap), return the asked item, not all N. Conservative: a PLURAL-tailed ask ("the titles", "top
+// results") wants the list → null; a numeric needs its ordinal suffix ("3rd", not the "3" in "3 bedrooms"); and
+// the CALLER still gates on actually having a list result, so a scalar "first name" FIELD read is untouched.
+const _ORDINAL_WORD = { first: 0, second: 1, third: 2, fourth: 3, fifth: 4, sixth: 5, seventh: 6, eighth: 7, ninth: 8, tenth: 9 };
+export function askListIndex(ask) {
+  const s = String(ask || '').toLowerCase().replace(/\?+\s*$/, '').trim();
+  if (!s || _pluralTail(s)) return null;                         // a plural-tailed ask wants the whole LIST
+  if (/\b(?:the\s+)?(?:last|final)\b/.test(s)) return -1;        // the last item
+  for (const w of Object.keys(_ORDINAL_WORD)) { if (new RegExp(`\\b${w}\\b`).test(s)) return _ORDINAL_WORD[w]; }
+  if (/\btop\b/.test(s)) return 0;                               // "the top result"
+  const mn = s.match(/\b(\d{1,3})(?:st|nd|rd|th)\b/);            // ordinal suffix REQUIRED ("3rd" not "3 bedrooms")
+  if (mn) { const n = parseInt(mn[1], 10); if (n >= 1 && n <= 200) return n - 1; }
+  return null;
+}
+
 /**
  * Infer the EXTRACT SHAPE — what physically comes off the page — from the picked region's context. PURE. Mirrors
  * tier2Lower's feature-kind → shape mapping (collection→list, composite→record, region→text). The content script

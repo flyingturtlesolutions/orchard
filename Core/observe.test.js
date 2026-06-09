@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { classifyReadAsk, inferExtractShape, reconcileOutputType, buildObservationCapability, scoreObservationMatch, observationSearchText } from './observe.js';
+import { classifyReadAsk, inferExtractShape, reconcileOutputType, buildObservationCapability, scoreObservationMatch, observationSearchText, askListIndex } from './observe.js';
 
 describe('observe — the pure floor for observations (OBS-READ-1)', () => {
   it('classifyReadAsk: a count question → outputType count', () => {
@@ -177,5 +177,39 @@ describe('observe — the pure floor for observations (OBS-READ-1)', () => {
   it('scoreObservationMatch: an unrelated observation scores below the run threshold', () => {
     const other = { name: 'Salary range filter', implementations: [{ tier: 'cache', extracts: [{ shape: 'text', target: '.x', output: 'SALARY' }] }] };
     assert.ok(scoreObservationMatch("what's the title of the first job?", other) < 0.5);
+  });
+});
+
+describe('askListIndex — singular/ordinal read → list index (v2.74.883)', () => {
+  it('the first / top / 1st → 0', () => {
+    assert.equal(askListIndex('what is the first video title'), 0);
+    assert.equal(askListIndex('the top result'), 0);
+    assert.equal(askListIndex('read the 1st job'), 0);
+  });
+  it('ordinal words second..tenth → N-1', () => {
+    assert.equal(askListIndex('the second result'), 1);
+    assert.equal(askListIndex('the third title'), 2);
+    assert.equal(askListIndex('the fifth one'), 4);
+  });
+  it('numeric ordinals need the suffix → N-1', () => {
+    assert.equal(askListIndex('the 2nd result'), 1);
+    assert.equal(askListIndex('show me the 4th item'), 3);
+  });
+  it('the last / final → -1', () => {
+    assert.equal(askListIndex('the last video'), -1);
+    assert.equal(askListIndex('the final entry'), -1);
+  });
+  it('a PLURAL-tailed ask wants the LIST → null (not a single item)', () => {
+    assert.equal(askListIndex('what are the titles'), null);
+    assert.equal(askListIndex('list the top results'), null);
+    assert.equal(askListIndex('the first few videos'), null);
+  });
+  it('no positional word → null (the caller leaves the read as-is)', () => {
+    assert.equal(askListIndex('the video title'), null);
+    assert.equal(askListIndex('what is the price'), null);
+  });
+  it('a bare number that is NOT an ordinal does not slice → null', () => {
+    assert.equal(askListIndex('search for 3 bedroom apartments'), null);   // plural tail + no ordinal suffix
+    assert.equal(askListIndex('the 3 bedroom listing'), null);             // singular but "3" has no ordinal suffix
   });
 });

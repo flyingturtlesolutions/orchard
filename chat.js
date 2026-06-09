@@ -25,7 +25,7 @@ import { comprehend } from './Core/orchComprehend.js';   // ORCH-CB — substrat
 import { renderCriteria } from './Core/orchVisual.js';   // ORCH-CB — search params → criteria for a visual condition's prompt
 import { classifyFeedback } from './Core/orchFeedback.js'; // ORCH-FB — recognize corrective feedback (LLM refines)
 import { parseAdminCommand, parseDedupCommand } from './Core/orchAdmin.js';    // ORCH-ADMIN — management commands (clear/delete); dedup — find duplicate Grounds
-import { classifyReadAsk } from './Core/observe.js';        // OBS-READ — is the ask a question (a read)?
+import { classifyReadAsk, askListIndex } from './Core/observe.js';   // OBS-READ — is the ask a question (a read)? + the index a singular/ordinal read wants
 
 // ─── Conversation state ──────────────────────────────────────────────────────
 // `_currentConversationId` is null before the first user message of a new
@@ -1213,7 +1213,12 @@ async function _orchRunObservation(msg, { groundId, tabId, capabilityId, intent,
   const res = await _orchReq('RUN_OBSERVATION', { tabId, groundId, capabilityId });
   if (!res || res.success === false) { _setMessageBody(msg, `Couldn’t read that${res && res.error ? ` — ${res.error}` : ''}.`); return; }
   if (res.ok === false) { _setMessageBody(msg, res.reason || 'Couldn’t read that on this page.'); return; }
-  const v = String(res.value || '').trim();
+  // READ-SINGULARIZATION (v2.74.883) — a singular/ordinal ask ("the FIRST video", "the 2nd result", "the last")
+  // that matched a LIST observation gets the asked ITEM, not all N. The list run returns items[]; slice to the
+  // asked index. Gated on an actual list result, so a scalar field read (incl. a literal "first name") is untouched.
+  const _idx = askListIndex(ask);
+  const _picked = (_idx != null && Array.isArray(res.items) && res.items.length) ? res.items.at(_idx) : null;
+  const v = (_picked != null ? String(_picked) : String(res.value || '')).trim();
   _setMessageBody(msg, v ? v.slice(0, 800) : '(nothing found there)');
   if (ask) _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId, phrase: ask });   // confirm → flywheel
   // ORCH-FB — a read is correctable/affirmable IN CHAT too: 👍 reinforces "this is the right value to read",

@@ -698,11 +698,16 @@ export class ExecutionEngine {
 
     const fragment = await StorageManager.getFragment(step.fragmentId);
     if (!fragment) {
-      const err = `Step ${topLevelIndex + 1}: Fragment ${step.fragmentId} not found`;
+      // v2.74.884 — a missing backing fragment means the capability is BROKEN: its step was deleted, or a
+      // partial/conflicted sync left the strategy without its fragment (the live "Fragment <uuid> not found" run
+      // from this session's delete/re-create churn). Surface an ACTIONABLE message (the chat + run summary show
+      // this) instead of a raw internal id, so the user knows to RE-TEACH it rather than seeing a cryptic failure.
+      // The short id stays for log/gl diagnosis; `missingFragmentId` carries the full id for any caller repair.
+      const err = `Step ${topLevelIndex + 1}: this capability is missing a step (fragment ${String(step.fragmentId).slice(0, 8)}…) — re-teach it to fix`;
       stepResults.push({
         fragmentId: step.fragmentId,
         fragmentName: iterationLabel ? `? ${iterationLabel}` : '?',
-        success: false, actionsRun: 0, error: err,
+        success: false, actionsRun: 0, error: err, missingFragmentId: step.fragmentId,
         ...(iteration ? { iteration } : {}),
       });
       return { status: 'failed', error: err };
