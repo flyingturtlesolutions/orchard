@@ -151,6 +151,39 @@ export function resolveIntentGoals(locale, spec, opts = {}) {
 }
 
 /**
+ * GA-7 — AUTHORING COVERAGE: which of a Locale's goals already have an authored capability, and which don't. PURE.
+ * This is the STOPPING CONDITION for an unattended author — without it the build loop has no notion of "done", can't
+ * prioritize the unauthored goals, and re-grinds goals it already covers. A goal is COVERED when some capability's
+ * intent token-overlaps the goal label by >= `min` (approximate — a canonical intent signature would sharpen it).
+ * Read-only; never mutates.
+ * @param {Array<{id:string,label?:string}>} goals  the Locale's goals (Object.values(locale.goals))
+ * @param {Array<{id?:string,capabilityId?:string,intent?:string,name?:string}>} capabilities  the Ground's capabilities
+ * @param {{min?:number}} [opts]
+ * @returns {{authored:Array<{goalId:string,label:string,capabilityId:(string|null),score:number}>, unauthored:Array<{goalId:string,label:string}>, total:number, authoredCount:number, coveragePct:number}}
+ */
+export function authoringCoverage(goals, capabilities, opts = {}) {
+  const min = Number.isFinite(opts.min) ? opts.min : 2;
+  const caps = (Array.isArray(capabilities) ? capabilities : [])
+    .map((c) => ({ id: (c && (c.id || c.capabilityId)) || null, toks: new Set(_rankTokens((c && (c.intent || c.name)) || '')) }))
+    .filter((c) => c.toks.size);
+  const authored = [];
+  const unauthored = [];
+  for (const g of (Array.isArray(goals) ? goals : [])) {
+    if (!g || g.id == null) continue;
+    const gtoks = _rankTokens(g.label || '');
+    let best = null, bestScore = 0;
+    if (gtoks.length) for (const c of caps) {
+      let s = 0; for (const t of gtoks) if (c.toks.has(t)) s++;
+      if (s > bestScore) { bestScore = s; best = c; }
+    }
+    if (best && bestScore >= min) authored.push({ goalId: g.id, label: g.label || '', capabilityId: best.id, score: bestScore });
+    else unauthored.push({ goalId: g.id, label: g.label || '' });
+  }
+  const total = authored.length + unauthored.length;
+  return { authored, unauthored, total, authoredCount: authored.length, coveragePct: total ? Math.round((authored.length / total) * 100) : 0 };
+}
+
+/**
  * The (pre-LLM) selection bundle: candidates + boundary. `matches` (subGoal→feature) and scope
  * reconciliation are filled by SG-2b (LLM); Cover (SG-3) gates on `boundary.requiredFields`.
  */

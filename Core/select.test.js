@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { coverageBoundary, selectCandidates, rankCandidates, buildSelection, coverGaps, reconcileMatches, resolveIntentGoals } from './select.js';
+import { coverageBoundary, selectCandidates, rankCandidates, buildSelection, coverGaps, reconcileMatches, resolveIntentGoals, authoringCoverage } from './select.js';
 
 // A mini Locale modelled on the live BambooHR apply form: required fields, an optional field, a honeypot
 // decoy, the real submit, a Cancel (effect:none after the cancel/reset fix), and non-form features.
@@ -122,6 +122,45 @@ describe('rankCandidates — GA-5 conventions tie-break (per-Ground selector-tie
     ];
     const conv = { conventions: { selectorTierHistogram: { id: 1.0 } } };  // strongly favors 'low'
     assert.equal(rankCandidates(mixed, spec, conv)[0].id, 'high', 'higher label-score wins regardless of conventions');
+  });
+});
+
+describe('authoringCoverage — GA-7 Locale→capability "done" signal', () => {
+  const goals = [
+    { id: 'g_search', label: 'search for jobs' },
+    { id: 'g_filter', label: 'filter by salary' },
+    { id: 'g_apply',  label: 'apply to a job' },
+  ];
+
+  it('marks a goal authored when a capability intent token-overlaps it; the rest are unauthored', () => {
+    const caps = [
+      { id: 'cap1', intent: 'search jobs by title and location' },   // covers g_search (search + jobs)
+      { id: 'cap2', intent: 'read the salary' },                     // overlaps no goal at >= min
+    ];
+    const cov = authoringCoverage(goals, caps);
+    assert.equal(cov.total, 3);
+    assert.equal(cov.authoredCount, 1);
+    assert.equal(cov.authored[0].goalId, 'g_search');
+    assert.equal(cov.authored[0].capabilityId, 'cap1');
+    assert.deepEqual(cov.unauthored.map((u) => u.goalId).sort(), ['g_apply', 'g_filter']);
+    assert.equal(cov.coveragePct, 33);
+  });
+
+  it('100% when every goal is covered; 0% with no capabilities', () => {
+    const caps = [
+      { id: 'a', intent: 'search jobs' },
+      { id: 'b', intent: 'filter salary range' },
+      { id: 'c', intent: 'apply to job' },
+    ];
+    assert.equal(authoringCoverage(goals, caps).coveragePct, 100);
+    assert.equal(authoringCoverage(goals, []).coveragePct, 0);
+    assert.equal(authoringCoverage(goals, []).authoredCount, 0);
+  });
+
+  it('empty goals → 0 total, 0%', () => {
+    const cov = authoringCoverage([], [{ id: 'a', intent: 'whatever' }]);
+    assert.equal(cov.total, 0);
+    assert.equal(cov.coveragePct, 0);
   });
 });
 

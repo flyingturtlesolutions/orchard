@@ -16,6 +16,7 @@ import { selectionToTrialRoles } from '../../Core/bind.js';
 import { lowerToTier2, orderForRun, scoreTier2, topoOrder } from '../../Core/tier2Lower.js';
 import { evaluatePostcondition } from '../../Core/postcondition.js';
 import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord, buildResultsLandmarkRecord, buildOutcomePerspective, findMatchingPerspective, buildPerspectiveGate, buildDestinationPerspective, pickDestinationLandmark, validateConditionRefs } from '../../Core/accept.js';
+import { authoringCoverage } from '../../Core/select.js';   // GA-7 — Locale→capability "done" signal
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
@@ -2403,6 +2404,27 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, capabilities: await ctx.readSgCapabilities(groundId) });
       } catch (err) {
         Logger.error('background', `GET_SG_CAPABILITIES failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // GA-7 — AUTHORING COVERAGE: which of the current page's Locale goals already have an authored capability on this
+    // Ground, and which don't. The "done" signal for an unattended author (prioritize the unauthored, know when a
+    // Ground is fully authored). READ-ONLY; approximate (intent↔goal token-overlap) until a canonical intent lands.
+    GROUND_AUTHORING_COVERAGE: async (payload, _sender, sendResponse) => {
+      try {
+        const { tabId = null, groundId = null } = payload ?? {};
+        if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
+        let url = '';
+        if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); url = t?.url || ''; } catch { /* */ } }
+        let goals = [];
+        try { const pm = await ctx.readLocaleCache(groundId, ctx.normalizeUrl(url)); const m = pm && pm.model; if (m && m.goals && typeof m.goals === 'object') goals = Object.values(m.goals); } catch { /* */ }
+        const caps = (await ctx.readSgCapabilities(groundId)) || [];
+        const coverage = authoringCoverage(goals, caps);
+        Logger.info('background', `GROUND_AUTHORING_COVERAGE — ${String(groundId).slice(-6)}: ${coverage.authoredCount}/${coverage.total} goal(s) authored (${coverage.coveragePct}%)`);
+        sendResponse({ success: true, coverage });
+      } catch (err) {
+        Logger.error('background', `GROUND_AUTHORING_COVERAGE failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },
