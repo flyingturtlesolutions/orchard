@@ -2203,8 +2203,14 @@ export class StorageManager {
       updatedAt : StorageManager.#persistedUpdatedAt(landmark, opts),
       lifecycle : landmark.lifecycle ?? existing?.lifecycle ?? 'fresh',
     };
-    await maybeWritePartitionPrimary('landmark', merged);
+    // v2.74.870 — the flat record is the durable SSOT (the partition is a best-effort dual-write mirror).
+    // Write the flat record FIRST, then make the partition mirror non-fatal. Previously the order was
+    // index(#addToIndex above) → partition → record, so a partition write that THREW (a hybrid-sync edge)
+    // left the index pointing at a uid whose record was never written → listLandmarksForGround saw
+    // "N indexed uids, 0 records" → the Ground showed 0 landmarks even though the accept built + saved them.
     await StorageManager.#set({ [`landmarks:${landmark.uid}`]: merged });
+    try { await maybeWritePartitionPrimary('landmark', merged); }
+    catch (e) { Logger.warn('StorageManager', `saveLandmark: partition mirror failed for ${landmark.uid} (kept flat): ${e.message}`); }
     Logger.debug('StorageManager', `Landmark saved: ${landmark.uid} (a11yRole=${landmark.a11yRole ?? '?'}, alias=${landmark.alias ?? '?'}, name="${(landmark.accessibleName ?? '').slice(0, 40)}") on ground ${landmark.groundId}`);
     return merged;
   }
@@ -2231,19 +2237,27 @@ export class StorageManager {
   }
 
   static async listLandmarksForGround(groundId) {
-    const fromPartition = await maybeListPartition('landmark', groundId);
-    if (fromPartition !== null) return fromPartition.filter(Boolean);
+    // v2.74.870 — read the FLAT registry ALWAYS, then UNION the partition list on top (partition wins on
+    // conflict). Previously this returned partition-OR-flat: when hybrid-sync's partition list came back
+    // empty/incomplete it MASKED the flat records that saveLandmark reliably writes → the Ground showed 0
+    // landmarks. Flat is the durable SSOT and the partition is a mirror, so the union only adds coverage.
     const indexKey = `landmarks:index:${groundId}`;
     const indexData = await StorageManager.#get(indexKey);
     const uids = indexData[indexKey] ?? [];
-    if (uids.length === 0) return [];
-    const keys = uids.map(u => `landmarks:${u}`);
-    const data = await new Promise(res => chrome.storage.local.get(keys, res));
-    const missing = uids.filter(u => !data[`landmarks:${u}`]);
-    if (missing.length > 0) {
-      Logger.warn('StorageManager', `listLandmarksForGround(${groundId}): index has ${missing.length} uid(s) with no matching record`);
+    let flat = [];
+    if (uids.length > 0) {
+      const keys = uids.map(u => `landmarks:${u}`);
+      const data = await new Promise(res => chrome.storage.local.get(keys, res));
+      flat = uids.map(u => data[`landmarks:${u}`]).filter(Boolean);
+      const missing = uids.length - flat.length;
+      if (missing > 0) Logger.warn('StorageManager', `listLandmarksForGround(${groundId}): index has ${missing} uid(s) with no matching record`);
     }
-    return uids.map(u => data[`landmarks:${u}`]).filter(Boolean);
+    const fromPartition = await maybeListPartition('landmark', groundId);
+    if (fromPartition === null) return flat;
+    const byUid = new Map();
+    for (const r of flat) if (r?.uid) byUid.set(r.uid, r);
+    for (const r of fromPartition.filter(Boolean)) if (r?.uid) byUid.set(r.uid, r);   // partition authoritative on conflict
+    return [...byUid.values()];
   }
 
   static async deleteLandmark(uid) {

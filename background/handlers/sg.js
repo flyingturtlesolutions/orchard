@@ -30,6 +30,7 @@ import { buildInteractionDemand } from '../../Core/interactionDemand.js';   // C
 import { makeRawInteraction, toCaptureTargets } from '../../Core/interactionCapture.js';   // C2 — shape/validate raw interaction; enrich demand w/ selectors
 import { withTrack, MONITOR_CONSENT_DEFAULT, canTrack } from '../../Core/monitorConsent.js';   // C6 — Track consent gate (default-deny)
 import { resolveInteraction } from '../../Core/interactionResolve.js';   // C3 — assemble the ResolvedInteraction (L1)
+import { classifyResolved } from '../../Core/interactionClassification.js';   // C4-lite — classify for the live feed verb
 import { listActivePerspectives } from '../../Services/PerspectivePredicates.js';   // C3 — active-perspective context for resolution
 import { listLandmarksForGround } from '../../Services/LandmarkResolver.js';   // C1 — accepted-Perspective landmarks (+ a11yRole)
 import { matchGroundForUrl } from '../../Core/GroundMatcher.js';   // v2.74.823 — canonical URL→Ground matcher (honors urlPatterns, incl. the sibling hosts a dedup merge unions)
@@ -836,12 +837,15 @@ export function createSgMessageHandlers(ctx) {
         if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
         let landmarks = [];
         try { landmarks = await listLandmarksForGround(groundId); } catch { landmarks = []; }
-        // Only landmarks LINKED to an accepted Perspective (perspectiveId set) are in demand; the
-        // registry's a11yRole is the watch-kind signal. buildInteractionDemand dedups by uid, so one
-        // flat pseudo-perspective is sufficient (mismatched landmarks are already excluded upstream).
-        const linked = (Array.isArray(landmarks) ? landmarks : []).filter((l) => l && l.uid && l.perspectiveId);
-        const demand = buildInteractionDemand([{ landmarks: linked.map((l) => ({ landmarkUid: l.uid, role: l.a11yRole })) }], { groundId });
-        Logger.info('background', `GET_INTERACTION_DEMAND: ${demand.length} landmark(s) in the demand set for ${groundId} (from ${linked.length} accepted-Perspective landmark(s))`);
+        // v2.74.865 — "capture all, then resolve": the demand set is a MATCHING HINT, not a filter.
+        // Watch EVERY known registry landmark for this Ground (selector present) — NOT only those a
+        // saved Perspective references. perspectiveId rides along as annotation (null = registry
+        // landmark not yet linked to a Perspective). The old `l.perspectiveId` filter made a
+        // freshly-explored Ground resolve every interaction to 'miss' (empty demand). a11yRole is the
+        // watch-kind signal; buildInteractionDemand dedups by uid (mismatched landmarks excluded upstream).
+        const watch = (Array.isArray(landmarks) ? landmarks : []).filter((l) => l && l.uid && l.selector);
+        const demand = buildInteractionDemand([{ landmarks: watch.map((l) => ({ landmarkUid: l.uid, role: l.a11yRole })) }], { groundId });
+        Logger.info('background', `GET_INTERACTION_DEMAND: ${demand.length} landmark(s) in the demand set for ${groundId} (from ${watch.length}/${(landmarks || []).length} registry landmark(s) with a selector)`);
         sendResponse({ success: true, demand });
       } catch (err) {
         Logger.error('background', `GET_INTERACTION_DEMAND failed: ${err.message}`);
@@ -879,7 +883,18 @@ export function createSgMessageHandlers(ctx) {
           matches: Array.isArray(payload?.matches) ? payload.matches : [],
           activePerspectiveIds, groundId, sensitive: !!payload?.sensitive,
         });
-        Logger.info('monitor', `INTERACTION ${resolved.resolutionStatus} ${raw.interactionKind} → [${resolved.matches.map((m) => m.landmarkUid).join(',') || '—'}] (${activePerspectiveIds.length} active) @ ${raw.url}`);
+        // C4-lite — classify (C0) for the semantic verb, then broadcast a compact event to the Ground
+        // panel's LIVE FEED (raw interaction → matched landmark(s) → resolved verb). The full
+        // ClassifiedInteraction trace persistence is C4 proper.
+        let verb = raw.interactionKind, tier = 'unresolved';
+        try { const cls = classifyResolved(resolved, { groundId, activePerspectiveIds }); tier = cls?.tier || 'unresolved'; verb = cls?.primary?.semanticVerb || cls?.candidates?.[0]?.semanticVerb || raw.interactionKind; } catch { /* */ }
+        Logger.info('monitor', `INTERACTION ${resolved.resolutionStatus} ${raw.interactionKind} (${verb}) → [${resolved.matches.map((m) => m.landmarkUid).join(',') || '—'}] (${activePerspectiveIds.length} active) @ ${raw.url}`);
+        try {
+          chrome.runtime.sendMessage({ type: 'INTERACTION_FEED', payload: {
+            groundId, ts: raw.ts, kind: raw.interactionKind, status: resolved.resolutionStatus, tier, verb,
+            landmarks: resolved.matches.map((m) => m.landmarkUid), name: raw.target?.accessibleName || '', tag: raw.target?.tagName || '', url: raw.url,
+          } }, () => void chrome.runtime.lastError);
+        } catch { /* no listener (panel closed) */ }
         sendResponse({ success: true, id: raw.id, status: resolved.resolutionStatus });
       } catch (err) {
         Logger.error('background', `INTERACTION_RAW failed: ${err.message}`);
@@ -934,10 +949,14 @@ export function createSgMessageHandlers(ctx) {
           sendResponse({ success: false, error: 'no-consent', host }); return;
         }
         let landmarks = []; try { landmarks = await listLandmarksForGround(groundId); } catch { landmarks = []; }
-        const linked = (Array.isArray(landmarks) ? landmarks : []).filter((l) => l && l.uid && l.perspectiveId);
-        const demand = buildInteractionDemand([{ landmarks: linked.map((l) => ({ landmarkUid: l.uid, role: l.a11yRole })) }], { groundId });
+        // v2.74.865 — "capture all, then resolve": watch EVERY registry landmark with a selector, not
+        // only Perspective-linked ones. The old `l.perspectiveId` filter emptied the demand on any Ground
+        // whose registry landmarks weren't referenced by a saved Perspective → every interaction missed.
+        // perspectiveId is now annotation only (null = unlinked registry landmark).
+        const watch = (Array.isArray(landmarks) ? landmarks : []).filter((l) => l && l.uid && l.selector);
+        const demand = buildInteractionDemand([{ landmarks: watch.map((l) => ({ landmarkUid: l.uid, role: l.a11yRole })) }], { groundId });
         const selectorByUid = {}; const metaByUid = {};
-        for (const l of linked) { selectorByUid[l.uid] = l.selector; metaByUid[l.uid] = { perspectiveId: l.perspectiveId ?? null, role: l.a11yRole ?? null }; }
+        for (const l of watch) { selectorByUid[l.uid] = l.selector; metaByUid[l.uid] = { perspectiveId: l.perspectiveId ?? null, role: l.a11yRole ?? null }; }
         // C3 — stamp perspectiveId + role on each capture target so the matched event needs NO per-event registry lookup.
         const targets = toCaptureTargets(demand, selectorByUid).map((t) => ({ ...t, ...(metaByUid[t.landmarkUid] || {}) }));
         _interactionSessions.set(tabId, { groundId, host });   // C3 — resolve a captured event's Ground by its tab
@@ -947,7 +966,7 @@ export function createSgMessageHandlers(ctx) {
           try { await chrome.scripting.executeScript({ target: { tabId }, files: ['ContentScripts/contentScript.js'] }); } catch { /* restricted page / already injecting */ }
           started = await _sendStart();
         }
-        Logger.info('background', `INTERACTION_MONITOR_START: ${targets.length} target(s) on ${host} (consent ok, started=${started === true})`);
+        Logger.info('background', `INTERACTION_MONITOR_START: ${targets.length} target(s) on ${host} (from ${watch.length}/${(landmarks || []).length} registry landmark(s); consent ok, started=${started === true})`);
         sendResponse({ success: true, host, targets: targets.length, started });
       } catch (err) {
         Logger.error('background', `INTERACTION_MONITOR_START failed: ${err.message}`);

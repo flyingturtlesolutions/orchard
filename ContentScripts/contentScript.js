@@ -5851,14 +5851,26 @@ function _imDescriptor(el) {
 // C3 — return ALL matching demand targets (a target may sit under >1 landmark → 'ambiguous').
 // Each target carries the perspectiveId + role the START handler stamped, so the background L1
 // resolver needs no per-event registry lookup.
-function _imMatchAll(target, kind) {
+// v2.74.865 — "capture all, then resolve": match by ELEMENT IDENTITY (the interacted element is
+// within the landmark's selector), NOT by interaction kind. The demand's per-role interactionKinds
+// are an expectation/annotation, not a resolution filter — gating on them made a click on a search
+// box (textbox → expects focus/type) or a focus on a link (→ expects click) resolve to 'miss' even
+// though the element IS a known landmark. raw.interactionKind still rides the event for the verb.
+function _imMatchAll(target) {
   const out = [];
   for (const t of _imTargets) {
-    if (!t || !t.selector || !Array.isArray(t.interactionKinds) || !t.interactionKinds.includes(kind)) continue;
+    if (!t || !t.selector) continue;
     let hit = null; try { hit = target.closest(t.selector); } catch { hit = null; }
     if (hit) out.push({ el: hit, t });
   }
-  return out;
+  if (out.length <= 1) return out;
+  // v2.74.871 — prefer the INNERMOST landmark. Every matched el is an ancestor-or-self of `target`,
+  // so the matches lie on ONE containment chain; an outer match (its el contains another match's el)
+  // is the less-specific CONTAINER. Drop containers so a nested pair (e.g. form-field inside a form
+  // landmark) resolves to a single HIT instead of 'ambiguous'. Two landmarks on the SAME element
+  // (genuine overlap — same el, different selectors) are kept → still 'ambiguous', which is correct.
+  const innermost = out.filter((m) => !out.some((o) => o !== m && o.el !== m.el && m.el.contains(o.el)));
+  return innermost.length ? innermost : out;
 }
 function _imMatchesPayload(hits) {
   return hits.map((h) => ({ landmarkUid: h.t.landmarkUid, perspectiveId: h.t.perspectiveId ?? null, role: h.t.role ?? null, selectorUsed: h.t.selector }));
@@ -5871,7 +5883,7 @@ function _imHandle(domType, evt) {
   // GENERAL capture: EVERY interaction is captured (general intent); the demand match (if any) just
   // ANNOTATES which landmark(s) it hit — an empty match resolves to a 'miss', not a drop. The descriptor
   // describes the actual interacted element.
-  const matches = _imMatchesPayload(_imMatchAll(el, kind));
+  const matches = _imMatchesPayload(_imMatchAll(el));
   if (kind === 'type') {
     const inputType = evt.inputType || '';   // capture primitives now; the event is recycled before the debounce fires
     const sensitive = _imSensitive(el);

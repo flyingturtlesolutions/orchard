@@ -53,6 +53,9 @@ const _siteMapCache = new Map();
 const _discoveryRunning = new Set();
 // v2.74.42 — Collapse state for the matched-Ground header card.
 const _collapsedHeader = new Set();
+// v2.74.866 — Collapse state for the Landmarks card (monitoring registry view),
+// keyed by groundId. Ephemeral; lost on unmount. Default collapsed=false.
+const _collapsedLandmarks = new Set();
 // v2.74.29 — Tab-change listeners. Hold references so unmount can detach
 // them cleanly. _refreshTimer coalesces bursts (SPA navigations fire many
 // tabs.onUpdated events in quick succession).
@@ -71,6 +74,17 @@ async function mount(_payload, mountEl) {
         <span class="gv-header-title">Ground</span>
         <span class="gv-header-sub">author fragments, observations &amp; more</span>
       </div>
+      <div class="gv-feed" data-gv="feed">
+        <div class="gv-feed-head">
+          <span class="gv-feed-dot" data-gv="feed-dot"></span>
+          <span class="gv-feed-title">Live interactions</span>
+          <span class="gv-feed-status" data-gv="feed-status">off</span>
+          <button class="gv-feed-clear" data-gv="feed-clear" type="button">clear</button>
+        </div>
+        <ul class="gv-feed-list" data-gv="feed-list">
+          <li class="gv-feed-empty">Enable live monitoring in Studio → Settings, then interact with this page.</li>
+        </ul>
+      </div>
       <div class="gv-list" data-gv="list">
         <div class="gv-loading">Loading…</div>
       </div>
@@ -85,7 +99,48 @@ async function mount(_payload, mountEl) {
     _windowId = null;
   }
   _wireTabListeners();
+  _wireFeed();
   await _renderList();
+}
+
+// ── Live interaction feed (monitoring) ───────────────────────────────────────
+const _IM_FEED_CAP = 60;
+function _imFeedRow(p) {
+  if (!_mountEl || !p) return;
+  const list = _mountEl.querySelector('[data-gv="feed-list"]'); if (!list) return;
+  const empty = list.querySelector('.gv-feed-empty'); if (empty) empty.remove();
+  const dot = _mountEl.querySelector('[data-gv="feed-dot"]'); if (dot) dot.classList.add('gv-feed-dot--live');
+  const status = _mountEl.querySelector('[data-gv="feed-status"]'); if (status && status.textContent !== 'monitoring') status.textContent = 'monitoring';
+  const lm = (Array.isArray(p.landmarks) && p.landmarks.length) ? p.landmarks[0] : null;
+  let t = '';
+  try { const d = new Date(p.ts); t = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`; } catch {}
+  const what = lm ? escHtml(lm) : (p.name ? '&ldquo;' + escHtml(p.name) + '&rdquo;' : '&lsaquo;' + escHtml(p.tag || '?') + '&rsaquo;');
+  const li = document.createElement('li');
+  li.className = `gv-feed-row gv-feed-row--${escAttr(p.status || 'miss')}`;
+  li.innerHTML =
+    `<span class="gv-feed-verb">${escHtml(p.verb || p.kind || '')}</span>` +
+    `<span class="gv-feed-arrow">→</span>` +
+    `<span class="gv-feed-what">${what}</span>` +
+    `<span class="gv-feed-badge">${escHtml(p.status || '')}</span>` +
+    `<span class="gv-feed-time">${escHtml(t)}</span>`;
+  list.insertBefore(li, list.firstChild);
+  while (list.children.length > _IM_FEED_CAP) list.removeChild(list.lastChild);
+}
+async function _wireFeed() {
+  if (!_mountEl) return;
+  const clear = _mountEl.querySelector('[data-gv="feed-clear"]');
+  if (clear) clear.addEventListener('click', () => {
+    const list = _mountEl?.querySelector('[data-gv="feed-list"]');
+    if (list) list.innerHTML = '<li class="gv-feed-empty">Cleared — interact with the page for live events.</li>';
+  });
+  try {
+    const res = await new Promise((r) => chrome.runtime.sendMessage({ type: 'GET_MONITOR_CONSENT' }, (x) => r(x)));
+    const on = !!(res?.success && res.trackEnabled);
+    const dot = _mountEl?.querySelector('[data-gv="feed-dot"]');
+    const status = _mountEl?.querySelector('[data-gv="feed-status"]');
+    if (dot) dot.classList.toggle('gv-feed-dot--live', on);
+    if (status) status.textContent = on ? 'monitoring' : 'off';
+  } catch {}
 }
 
 async function unmount() {
@@ -98,6 +153,7 @@ async function unmount() {
   _siteMapCache.clear();
   _discoveryRunning.clear();
   _collapsedHeader.clear();
+  _collapsedLandmarks.clear();
 }
 
 // v2.74.29 — Wire tab listeners so the panel re-renders whenever the
@@ -151,6 +207,7 @@ function handleEvent(message) {
   // Refresh on relevant storage broadcasts so newly authored entries
   // (saved Fragment, Observation, etc.) appear without a manual reload.
   if (!message) return;
+  if (message.type === 'INTERACTION_FEED') { _imFeedRow(message.payload); return; }   // live monitoring feed
   if (message.type === 'STORAGE_CHANGED') {
     _renderList().catch(() => {});
     return;
@@ -264,20 +321,37 @@ async function _renderList() {
     // re-render the viewer without another GET_GROUND_LIBRARY trip.
     if (matched.siteMap) _siteMapCache.set(matched.ground.id, matched.siteMap);
     const hasMap = !!(matched.siteMapStats && matched.siteMapStats.nodes > 0);
+    // v2.74.866 — Fetch the Ground's registry landmarks (the set live
+    // monitoring resolves interactions against — NOT carried by
+    // GET_GROUND_LIBRARY). Rendered as a Landmarks card in every matched
+    // path so a 0-landmark Ground visibly explains why monitoring misses.
+    const landmarks = await _fetchLandmarks(matched.ground.id);
+    // v2.74.867 — proposed-landmark tally across the Ground's Perspectives
+    // (each Perspective's landmarks[] is a node tree of {ref:uid} pointers).
+    // These are PROPOSALS — the verified registry records monitoring resolves
+    // against are minted only at Resolve→Accept. Surfacing the gap (verified 0
+    // vs proposed N) is what answers "perspectives show landmarks but the card
+    // shows 0": they're unverified pointers, not verified registry entries.
+    const proposedLm = (matched.perspectives || []).reduce(
+      (s, p) => s + (Array.isArray(p.landmarks) ? p.landmarks.length : 0), 0);
+    const lmHtml = _renderLandmarksCard(landmarks, matched.ground.id, proposedLm);
     // v2.74.42 — Section list is gated on a mapped Ground (siteMap present).
     // While discovery is in flight, show the indeterminate loading
     // indicator. When a Ground exists but has no map yet, show a
     // Discover prompt instead of empty section cards.
     if (_discoveryRunning.has(matched.ground.id)) {
-      list.innerHTML = _renderHeaderOnly(matched) + _renderDiscoveringBlock();
+      list.innerHTML = _renderHeaderOnly(matched) + lmHtml + _renderDiscoveringBlock();
       _wireHeaderHandlers(matched);
+      _wireLandmarksCard();
     } else if (hasMap) {
-      list.innerHTML = _renderGroundCard(matched);
+      list.innerHTML = _renderGroundCard(matched, lmHtml);
       _wireHandlers([matched]);
+      _wireLandmarksCard();
     } else {
-      list.innerHTML = _renderHeaderOnly(matched) + _renderUndiscoveredBlock(matched.ground.id);
+      list.innerHTML = _renderHeaderOnly(matched) + lmHtml + _renderUndiscoveredBlock(matched.ground.id);
       _wireHeaderHandlers(matched);
       _wireDiscoverPromptHandler(matched.ground);
+      _wireLandmarksCard();
     }
   } else {
     list.innerHTML = _renderNewGroundCard(tabUrl);
@@ -478,7 +552,7 @@ function _wireNewGroundHandlers(_tabUrl) {
 // v2.74.434 — Header card surfaces a 🗺 siteMap node-count badge + alias tags,
 // mirroring Studio's ground header. The badge is a clickable button that toggles
 // an inline siteMap viewer (node list) beneath the header.
-function _renderGroundCard(entry) {
+function _renderGroundCard(entry, landmarksHtml = '') {
   const { ground, fragments, assertions, perspectives, observations, analyses } = entry;
   // v2.74.42 — Header card is now collapsible; the chevron + body
   // logic was hoisted into _renderHeaderOnly so the discovering /
@@ -486,6 +560,8 @@ function _renderGroundCard(entry) {
   const headerHtml = _renderHeaderOnly(entry);
   return `
     ${headerHtml}
+
+    ${landmarksHtml}
 
     ${_renderSection({
       key: 'fragments',
@@ -732,6 +808,92 @@ function _renderAnalysisEntry(a) {
         <span class="analysis-meta">${escHtml(metaText)}</span>
       </div>
     </div>`;
+}
+
+// ─── Landmarks card (monitoring registry view) ───────────────────────────
+// v2.74.866 — The Ground's registry landmarks are the set live monitoring
+// resolves interactions against (LandmarkResolver.listLandmarksForGround —
+// every saved landmark with a selector). They are NOT carried by
+// GET_GROUND_LIBRARY (which returns Fragments / Perspectives / …), so the
+// panel fetches them on demand via LIST_LANDMARKS_FOR_GROUND. A 0-landmark
+// Ground is the usual reason every monitored interaction resolves to 'miss'.
+
+async function _fetchLandmarks(groundId) {
+  try {
+    const res = await new Promise((r) =>
+      chrome.runtime.sendMessage({ type: 'LIST_LANDMARKS_FOR_GROUND', payload: { groundId } }, r));
+    return Array.isArray(res?.landmarks) ? res.landmarks : [];
+  } catch {
+    return [];
+  }
+}
+
+function _renderLandmarksCard(landmarks, groundId, proposedCount = 0) {
+  const list = Array.isArray(landmarks) ? landmarks : [];
+  const collapsed = _collapsedLandmarks.has(groundId);
+  const collapsedClass = collapsed ? ' gv-section-card-collapsed' : '';
+  const glyph = collapsed ? '▸' : '▾';
+  const emptyMsg = proposedCount > 0
+    ? `<strong>0 verified</strong> landmarks — but this Ground's Perspectives reference <strong>${proposedCount}</strong> <em>proposed</em> landmark${proposedCount === 1 ? '' : 's'}. Those are unverified <code>{ref}</code> pointers; the selectors monitoring needs are minted only when you <strong>Resolve → Accept</strong> a Perspective. Verify one and this card (and the feed) start filling in.`
+    : `No landmarks in this Ground's registry yet. Live monitoring resolves interactions against saved landmarks — until one exists here, every interaction is a <strong>miss</strong>. Run <strong>Explore → Resolve</strong> on a page, then <strong>Accept</strong> a Perspective, to populate it.`;
+  const body = list.length === 0
+    ? `<span class="empty-state small gv-lm-empty">${emptyMsg}</span>`
+    : list.map(_renderLandmarkEntry).join('');
+  return `
+    <section class="gv-section-card gv-lm-card${collapsedClass}" data-gv-lm-card="${escAttr(groundId)}">
+      <div class="gv-section-card-head">
+        <button class="gv-section-collapse-toggle" type="button"
+                data-gv-lm-toggle="${escAttr(groundId)}"
+                title="Collapse / expand landmarks"
+                aria-expanded="${collapsed ? 'false' : 'true'}">
+          <span class="gv-section-collapse-chevron">${glyph}</span>
+        </button>
+        <span class="ground-section-label">Landmarks</span>
+        <span class="ground-section-count">${list.length}</span>
+      </div>
+      <div class="gv-section-card-body">${body}</div>
+    </section>
+  `;
+}
+
+function _renderLandmarkEntry(l) {
+  const role = l.a11yRole || l.alias || '—';
+  const name = l.accessibleName || (Array.isArray(l.aliases) && l.aliases[0]) || '';
+  const score = l.score || '';
+  const scoreClass = score === 'ready' ? 'ready' : (score === 'mismatch' ? 'mismatch' : 'unknown');
+  const sel = l.selector || '';
+  const unlinked = l.perspectiveId ? '' : `<span class="gv-lm-tag" title="not referenced by a saved Perspective — still watched by monitoring">unlinked</span>`;
+  return `
+    <div class="gv-lm-row gv-entry">
+      <div class="gv-lm-row-main">
+        <span class="gv-lm-role">${escHtml(role)}</span>
+        ${name ? `<span class="gv-lm-name">${escHtml(name)}</span>` : ''}
+        ${score ? `<span class="gv-lm-score gv-lm-score--${scoreClass}">${escHtml(score)}</span>` : ''}
+        ${unlinked}
+      </div>
+      ${sel ? `<div class="gv-lm-sel" title="${escAttr(sel)}">${escHtml(sel)}</div>` : ''}
+    </div>`;
+}
+
+// Wires the Landmarks card's collapse chevron. Dedicated attribute
+// (data-gv-lm-toggle) so it never collides with the generic section-toggle
+// wiring in _wireHandlers — called in every matched render path.
+function _wireLandmarksCard() {
+  if (!_mountEl) return;
+  _mountEl.querySelectorAll('[data-gv-lm-toggle]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const gid = btn.dataset.gvLmToggle;
+      const card = btn.closest('.gv-lm-card');
+      if (!card) return;
+      const collapsed = card.classList.toggle('gv-section-card-collapsed');
+      if (collapsed) _collapsedLandmarks.add(gid);
+      else            _collapsedLandmarks.delete(gid);
+      btn.setAttribute('aria-expanded', String(!collapsed));
+      const chev = btn.querySelector('.gv-section-collapse-chevron');
+      if (chev) chev.textContent = collapsed ? '▸' : '▾';
+    });
+  });
 }
 
 // ─── Handlers ────────────────────────────────────────────────────────────
