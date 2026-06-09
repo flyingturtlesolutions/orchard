@@ -27,6 +27,7 @@ import { findDuplicateGroundGroups, planGroundMerge, primaryHost, siteIdentity, 
 import { GroundManager } from '../../Core/GroundManager.js';   // G1 — auto-ground mint (dedup-before-mint entrypoint)
 import { groundReadiness } from '../../Core/groundReadiness.js';   // G1-3 — Ground readiness (empty|preparing|capable|rich)
 import { buildInteractionDemand } from '../../Core/interactionDemand.js';   // C1 — monitoring demand set (which landmarks/kinds to watch)
+import { makeRawInteraction } from '../../Core/interactionCapture.js';   // C2 — shape/validate the L0 raw interaction (privacy-enforced)
 import { listLandmarksForGround } from '../../Services/LandmarkResolver.js';   // C1 — accepted-Perspective landmarks (+ a11yRole)
 import { matchGroundForUrl } from '../../Core/GroundMatcher.js';   // v2.74.823 — canonical URL→Ground matcher (honors urlPatterns, incl. the sibling hosts a dedup merge unions)
 import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/orchFeedback.js';   // ORCH-FB — corrective actions
@@ -836,6 +837,29 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, demand });
       } catch (err) {
         Logger.error('background', `GET_INTERACTION_DEMAND failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // C2 (v2.74.857) — L0 capture SINK. A content-script listener (C2b, demand-scoped) posts a raw DOM
+    // interaction; this shapes/validates it via the PURE makeRawInteraction (which enforces the privacy
+    // invariant — a RawInteraction NEVER carries a typed value) and stamps the canonical url + a stable
+    // id (from the SENDER, not the page's claim). C2 stops at capture: L1 resolve (C3) + classify/trace
+    // (C4) consume the RawInteraction next. Dormant until C2b's listeners exist + a session is started.
+    INTERACTION_RAW: async (payload, sender, sendResponse) => {
+      try {
+        const raw = makeRawInteraction({
+          ...(payload || {}),
+          tabId: sender?.tab?.id ?? (payload && payload.tabId) ?? -1,
+          frameId: sender?.frameId ?? 0,
+          url: ctx.normalizeUrl((sender && sender.url) || (payload && payload.url) || ''),
+          ts: Date.now(),
+        });
+        if (!raw) { sendResponse({ success: false, error: 'unknown interactionKind' }); return; }
+        Logger.debug('monitor', `INTERACTION_RAW ${raw.interactionKind} <${raw.target.tagName}${raw.target.role ? ' ' + raw.target.role : ''}> @ ${raw.url}`);
+        sendResponse({ success: true, id: raw.id });
+      } catch (err) {
+        Logger.error('background', `INTERACTION_RAW failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },
