@@ -35,17 +35,18 @@ Invariants: **L2 is pure** `(ResolvedInteraction, Context) → ClassifiedInterac
 - **C0 (L2 classifier)** — `Core/interactionClassification.js` (+ `.test.js`). **Conformance-audited against `SPEC_INTERACTION_CLASSIFIER_C0.md` §2–§10: FULLY CONFORMANT** — all 8 exports + constants; decision tree §4 in order line-for-line; `semanticVerb` algorithm + role map; scoring (+1000 active / +0–300 selector / +0–100 confidence / +50 recency, tie-break by `landmarkUid`); `ClassifiedInteraction` output + `page` enrichment; dependency rule (imports only `Core/outcomes.js`). Green in the Core suite. **DORMANT** — nothing produces a `ResolvedInteraction` to feed it yet.
 - **C1 (InteractionDemand registry)** — `Core/interactionDemand.js` (pure) + `GET_INTERACTION_DEMAND` handler — `5dbbf63` (v2.74.856). `buildInteractionDemand(perspectives,{groundId,reason})` → demand rows (one per landmark, kinds unioned, sorted); role→kinds map covers Layer-2 *and* a11y roles; handler reuses `listLandmarksForGround` (accepted Perspectives × registry). +11 tests. *Note: C1 emits the demand SET; it does not itself feed C0.*
 - **C2a (pure capture core + sink)** — `Core/interactionCapture.js` + `INTERACTION_RAW` handler — `52b2d66` (v2.74.857). `makeRawInteraction` shapes/validates the §4.2 record with the **privacy invariant enforced structurally** (NEVER a typed value — only inputType + lengthDelta, lengthDelta withheld for sensitive fields); `domEventToKind`, `isSensitiveTarget`, `toCaptureTargets` (enrich C1 demand with selectors). The `INTERACTION_RAW` background sink shapes incoming events + stamps url/id from the SENDER. +12 tests. **Dormant** until C2b feeds it.
+- **C6-core (Track consent gate)** — `Core/monitorConsent.js` + `GET/SET_MONITOR_CONSENT` — `3810f7f` (v2.74.858). DEFAULT-DENY: `canTrack(consent,{host})` false unless explicitly granted (scope `all`|`hosts`); `withTrack` pure updater; persisted (`monitor:consent`). +7 tests. C2b's capture START will gate on `canTrack`. *Landed before the live listeners so capture can never run without consent.*
 - **All four reuse dependencies exist** (the monitor consumes, doesn't reinvent): `PerspectivePredicates.listActivePerspectives` (active-perspective context), `GroundMatcher.matchGroundForUrl` (`groundId` from URL), `LandmarkResolver`/registry (forward selectors for the reverse test), `Core/outcomes.makeEvent` (recording).
 
-## ⏳ Outstanding — C2b → C6 (wiring over existing primitives, not new substrate)
-- **C2b — content-script listeners (VERIFY-LIVE)** — delegated capture-phase listeners on the C1 demand set → `INTERACTION_RAW`; inert-by-default (attach only on `START_INTERACTION_CAPTURE`), value-free. + `INTERACTION_MONITOR_START/STOP` handlers. **NEXT — needs a live browser run; ideally land C6 consent first.**
+## ⏳ Outstanding — the live wiring (C2b, C3, C4, C5, C6-UI)
+- **C2b — content-script listeners (VERIFY-LIVE)** — delegated capture-phase listeners on the C1 demand set → `INTERACTION_RAW`; inert-by-default (attach only on `START_INTERACTION_CAPTURE`), value-free, **gated on `canTrack` (C6-core, in place)**. + `INTERACTION_MONITOR_START/STOP` handlers. **NEXT — needs a live browser run.**
 - **C3** — `RESOLVE_INTERACTION_TARGET` reverse hit-test + `InteractionResolver` → `ResolvedInteraction` (this is what first **feeds C0**).
 - **C4** — background pipeline `RAW → RESOLVED → CLASSIFIED → trace` append.
 - **C5** — outcomes `op:'user-interaction'` wiring + Studio/debug trace viewer.
-- **C6** — **Track** consent gate in settings.
+- **C6-UI** — the consent toggle in settings (the gate model + storage shipped as C6-core; this is the user-facing grant control).
 - *(Above this phase: Interpret + Act — the inference engine. Deferred until the classified stream exists.)*
 
-**One-line state:** the monitor's pure **brain** (C0) is built and conformance-proven; its **senses** (C1–C3), **pipeline** (C4), **recording** (C5), and **consent** (C6) are not — and every dependency they need already exists.
+**One-line state:** four of the seven slices' cores are built + tested (C0 classifier, C1 demand, C2a capture-core, C6-core consent); what remains is the **verify-live wiring** — the content-script capture listeners (C2b), the reverse resolver (C3), the pipeline (C4), the trace viewer (C5), and the consent toggle (C6-UI) — every one over primitives that already exist.
 
 ---
 
