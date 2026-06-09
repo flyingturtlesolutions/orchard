@@ -5053,6 +5053,32 @@ $('chk-cloud-enabled')?.addEventListener('change', async (e) => {
   }
 });
 
+// ── Live monitoring (Track) — global toggle ──────────────────────────────────
+async function refreshMonitorSetting() {
+  const chk = $('chk-monitor-enabled');
+  const line = $('monitor-status-line');
+  const res = await cloudMsg('GET_MONITOR_CONSENT', {});
+  const enabled = !!(res?.success && res.trackEnabled);
+  if (chk) chk.checked = enabled;
+  const excl = (res?.consent?.track?.excludeHosts) || [];
+  if (line) line.textContent = enabled
+    ? `On — capturing interactions on every site${excl.length ? `, except ${excl.length} excluded page(s)` : ''}.`
+    : 'Off — nothing is captured.';
+}
+$('chk-monitor-enabled')?.addEventListener('change', async (e) => {
+  const chk = /** @type {HTMLInputElement} */ (e.target);
+  const enabled = chk.checked;
+  const res = await cloudMsg('SET_MONITOR_CONSENT', { enabled });
+  if (res?.success) {
+    toast(enabled ? 'Live monitoring enabled' : 'Live monitoring disabled');
+    await refreshMonitorSetting();
+  } else {
+    toast(res?.error || 'Failed to update monitoring', 'err');
+    chk.checked = !enabled;
+  }
+});
+refreshMonitorSetting();
+
 async function handleCloudSignIn() {
   const btn = $('btn-cloud-sign-in');
   if (btn) btn.disabled = true;

@@ -71,6 +71,7 @@ import {
 // startup is already paying for many other imports.
 import { listLandmarksForGround, resolveLandmarkRef } from './Services/LandmarkResolver.js';
 import { listActivePerspectives }                          from './Services/PerspectivePredicates.js';
+import { canTrack }                                        from './Core/monitorConsent.js';   // C2b — auto-monitor eligibility (global enable ∧ host not excluded)
 import { analyzeLandmarkImpact }                      from './Services/LandmarkImpactAnalysis.js';
 import { analyzeDeletionImpact }                     from './Services/Storage/ReferenceStore.js';
 import { bindPublicIdentity }                        from './Services/Storage/IdentityStore.js';
@@ -1696,6 +1697,34 @@ const _sgMessageHandlers = createSgMessageHandlers({
   ensureContentScript  : _ensureContentScript,    // heal a stale-tab content-script port before REPLAY
   writeSgTrace         : _writeSgTrace,
   enrichSgLandmarks    : _enrichSgLandmarks,
+});
+
+// ── C2b auto-monitor orchestration ───────────────────────────────────────────
+// With GLOBAL live-monitoring on, capture FOLLOWS the user: every eligible tab (canTrack: enabled ∧
+// host not excluded) auto-starts a capture session; toggling off / excluding a host stops the affected
+// tabs. No per-page opt-in. onUpdated/onActivated are START-only (a fresh page's content script defaults
+// to off); a consent change re-evaluates every open tab (START eligible, STOP ineligible).
+const _autoMonitorBusy = new Set();
+async function _autoMonitorTab(tabId, { stopIfIneligible = false } = {}) {
+  if (typeof tabId !== 'number' || _autoMonitorBusy.has(tabId)) return;
+  _autoMonitorBusy.add(tabId);
+  try {
+    let url = ''; try { url = (await chrome.tabs.get(tabId))?.url || ''; } catch { return; }
+    if (!/^https?:/i.test(url)) return;
+    let host = ''; try { host = new URL(url).host; } catch { /* */ }
+    let consent = null; try { consent = (await chrome.storage.local.get('monitor:consent'))?.['monitor:consent'] || null; } catch { /* */ }
+    if (canTrack(consent, { host })) {
+      await new Promise((res) => { try { _sgMessageHandlers.INTERACTION_MONITOR_START({ tabId }, null, () => res()); } catch { res(); } });
+    } else if (stopIfIneligible) {
+      await new Promise((res) => { try { _sgMessageHandlers.INTERACTION_MONITOR_STOP({ tabId }, null, () => res()); } catch { res(); } });
+    }
+  } catch { /* */ } finally { _autoMonitorBusy.delete(tabId); }
+}
+chrome.tabs.onUpdated.addListener((tabId, info) => { if (info && info.status === 'complete') _autoMonitorTab(tabId); });
+chrome.tabs.onActivated.addListener((a) => { if (a && typeof a.tabId === 'number') _autoMonitorTab(a.tabId); });
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !changes || !changes['monitor:consent']) return;
+  try { chrome.tabs.query({}, (tabs) => { for (const t of (tabs || [])) if (typeof t.id === 'number') _autoMonitorTab(t.id, { stopIfIneligible: true }); }); } catch { /* */ }
 });
 
 // ── OBS-1: demonstration recording session ───────────────────────────────────

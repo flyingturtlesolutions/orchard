@@ -5867,10 +5867,11 @@ function _imPost(payload) { try { chrome.runtime.sendMessage({ type: 'INTERACTIO
 function _imHandle(domType, evt) {
   if (!_imOn) return;
   const kind = _IM_EVENT_KIND[domType]; if (!kind) return;
-  const target = evt.target; if (!target || !target.closest) return;
-  const hits = _imMatchAll(target, kind); if (!hits.length) return;
-  const el = hits[0].el;
-  const matches = _imMatchesPayload(hits);
+  const el = evt.target; if (!el || el.nodeType !== 1 || typeof el.closest !== 'function') return;
+  // GENERAL capture: EVERY interaction is captured (general intent); the demand match (if any) just
+  // ANNOTATES which landmark(s) it hit — an empty match resolves to a 'miss', not a drop. The descriptor
+  // describes the actual interacted element.
+  const matches = _imMatchesPayload(_imMatchAll(el, kind));
   if (kind === 'type') {
     const inputType = evt.inputType || '';   // capture primitives now; the event is recycled before the debounce fires
     const sensitive = _imSensitive(el);
@@ -5915,8 +5916,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     case 'START_INTERACTION_CAPTURE': {
       try {
         _imTargets = Array.isArray(payload?.targets) ? payload.targets : [];
-        _imOn = _imTargets.length > 0;
-        if (_imOn) _imAttach(); else _imDetach();
+        _imOn = true;                    // GENERAL capture: on regardless of demand-target count (targets are match hints)
+        _imAttach();
         sendResponse({ success: true, on: _imOn, targets: _imTargets.length });
       } catch (e) { sendResponse({ success: false, error: e.message }); }
       return false;
