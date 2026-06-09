@@ -70,6 +70,13 @@ export function buildIndex(features) {
     for (const g of f.goals || []) (byGoal[g] ||= []).push(f.id);
     if (f.kind === 'disclosure' && f.reveals) triggers.push({ featureId: f.id, revealsLayerId: f.reveals });
   }
+  // EX-2 (v2.74.846) — DETERMINISTIC ordering. Features arrive in Object.values insertion order, which varies run-to-run
+  // (lazy-load + band-scan timing), and synthesizeGoals SLICES these arrays — so an unsorted index yields a different
+  // goal catalog (→ different goals) for the SAME page. Sort every index array by id so two enumerations of an unchanged
+  // page produce an identical index → identical goals: the precondition for cache-replay (EX-4) and honest drift.
+  for (const arr of Object.values(byKind)) arr.sort();
+  for (const arr of Object.values(byGoal)) arr.sort();
+  triggers.sort((a, b) => (a.featureId < b.featureId ? -1 : a.featureId > b.featureId ? 1 : 0));
   return { byKind, byGoal, triggers };
 }
 

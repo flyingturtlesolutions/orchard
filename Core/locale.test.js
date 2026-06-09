@@ -3,7 +3,24 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { deriveDisclosureGoals, mergeDepthFromControls } from './locale.js';
+import { deriveDisclosureGoals, mergeDepthFromControls, buildIndex } from './locale.js';
+
+describe('buildIndex — EX-2 deterministic ordering (insertion-order independent)', () => {
+  const F = (id, kind, goals = []) => ({ id, kind, goals, label: id });
+  const a = { f3: F('f3', 'action', ['g2']), f1: F('f1', 'action', ['g1']), f2: F('f2', 'input', ['g1']) };  // insertion: f3,f1,f2
+  const b = { f1: F('f1', 'action', ['g1']), f2: F('f2', 'input', ['g1']), f3: F('f3', 'action', ['g2']) };  // insertion: f1,f2,f3
+  it('byKind + byGoal arrays are sorted by id → identical index regardless of feature insertion order', () => {
+    const ia = buildIndex(a), ib = buildIndex(b);
+    assert.deepEqual(ia.byKind, ib.byKind);
+    assert.deepEqual(ia.byGoal, ib.byGoal);
+    assert.deepEqual(ia.byKind.action, ['f1', 'f3']);   // sorted, not insertion order (f3 inserted first in `a`)
+    assert.deepEqual(ia.byGoal.g1, ['f1', 'f2']);
+  });
+  it('triggers are sorted by featureId', () => {
+    const m = { d2: { id: 'd2', kind: 'disclosure', reveals: 'L2', goals: [] }, d1: { id: 'd1', kind: 'disclosure', reveals: 'L1', goals: [] } };
+    assert.deepEqual(buildIndex(m).triggers.map((t) => t.featureId), ['d1', 'd2']);
+  });
+});
 
 const disc = (id, label, reveals) => ({ id, kind: 'disclosure', label, selector: `#${id}`, reveals, interaction: { pattern: 'click', effect: 'reveal' } });
 const opt = (id, label, by, kind = 'action') => ({ id, kind, label, selector: `#${id}`, hidden: true, revealedBy: by, interaction: { pattern: kind === 'input' ? 'type' : 'click', effect: 'none' } });
