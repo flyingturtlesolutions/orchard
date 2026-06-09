@@ -2260,6 +2260,31 @@ async function _orchRecordFlow(msg, { groundId, tabId, ask, onAuthored = null })
   });
 }
 
+// R-4 (DESIGN_llm_front_door.md) — only a CLEAR navigation phrasing is eligible for the auto-nav fast-path.
+// v1 conservatism: the router resolves the URL by world knowledge, but this gate ensures a non-nav ask (e.g.
+// "search pixabay for cats") can NEVER be hijacked into a bare navigation. R-4-full dispatches all decision
+// types and drops this gate.
+const _NAV_RE = /^\s*(?:go(?:\s+(?:to|back))?|open|navigate(?:\s+to)?|take me to|visit|back to|return to|head\s+(?:to|back))\b/i;
+
+// R-4 (v1) — the LLM front-door router as a NAVIGATION fast-path. On a nav-phrased ask, ROUTE_ASK runs the
+// full cascade; we act ONLY on a confident OPEN_URL primitive (the one self-contained primitive — "go to
+// pixabay home" → https://pixabay.com via world knowledge) and navigate. Anything else (replay / demonstrate /
+// decompose / clarify / low-confidence) returns false → the caller falls through to the existing flow
+// UNCHANGED. Never throws out (caller guards). Zero risk to the current chat behaviour.
+async function _tryRouterNav(text) {
+  if (!_NAV_RE.test(text)) return false;
+  const res = await _orchReq('ROUTE_ASK', { ask: text });
+  const d = res && res.success && res.decision;
+  if (!d || d.action !== 'primitive' || !d.tool || d.tool.op !== 'OPEN_URL' || d.lowConfidence) return false;
+  const url = (d.params && typeof d.params.url === 'string') ? d.params.url.trim() : '';
+  if (!/^https?:\/\//i.test(url)) return false;
+  let host = url; try { host = new URL(url).host.replace(/^www\./, ''); } catch { /* */ }
+  const msg = appendMessage({ role: 'assistant', body: `Opening ${host}…` });
+  const r = await _orchReq('OPEN_URL_NEW_TAB', { url });
+  _setMessageBody(msg, (r && r.success !== false) ? `Opened ${host}.` : `Couldn't open ${url}.`);
+  return true;
+}
+
 async function sendChatMessage() {
   const input    = $('chat-input');
   const text     = input.value.trim();
@@ -2283,6 +2308,14 @@ async function sendChatMessage() {
     await _invokeAssistant({ id: targetId, name: targetName }, text);
     return;
   }
+
+  // R-4 — LLM front-door NAVIGATION fast-path (runs FIRST). A bare "go to <site>" resolves to OPEN_URL via the
+  // router's world knowledge and just navigates — the deterministic pipeline mis-escalated these into a
+  // workflow card. ADDITIVE: on anything other than a confident OPEN_URL it returns false and we fall through
+  // to the existing flow untouched, so nothing that works today changes.
+  try {
+    if (await _tryRouterNav(text)) { $('btn-chat-send').disabled = false; return; }
+  } catch (e) { try { console.warn('[chat] router nav fast-path fell through:', e?.message); } catch { /* */ } }
 
   // ORCH-C — grounded pre-check: does the demonstrated, page-grounded library already cover this? On a HIT we
   // run/confirm/disambiguate here; on a MISS or any error we fall through to the legacy ChatAPI.match below.

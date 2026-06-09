@@ -28,6 +28,7 @@ import { CONDITION_FIELDS, getTypesByFamily } from './ConditionVocabulary.js';
 // C-P3 (DD-08) — managed LLM proxy transport.
 import { getCloudSettings, normalizeApiBaseUrl } from './Cloud/CloudSettings.js';
 import { ensureFreshSession } from './Cloud/CloudTokenStore.js';
+import { buildRouterMessages, parseRouterOutput } from '../Core/routerPrompt.js';   // R-3 — front-door router prompt (no DOM; fenced catalog)
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL             = 'claude-sonnet-4-5';
@@ -93,6 +94,7 @@ const ROLE_MODEL_POLICY = Object.freeze({
   ops: {
     generateConversationTitle: MODEL_FAST,
     generateSampleQuestion:    MODEL_FAST,
+    'route-ask':               MODEL_FAST,   // R-6 — the front-door router is a small/fast classification (DESIGN_llm_front_door.md §3.6); Haiku, not Sonnet
   },
 });
 function pickModelForCall(role, operation, hasVision) {
@@ -4985,6 +4987,24 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
       Logger.error('AnthropicService', `API call failed [${role}/${operation}]: ${err.message}`);
       return { success: false, text: '', error: err.message };
     }
+  }
+
+  /**
+   * R-3 — the front-door ROUTER call (DESIGN_llm_front_door.md §3.1; DESIGN_injection_boundary.md §3). Builds
+   * the fenced-catalog messages (NO live DOM is ever included), asks the model to select ONE tool + params
+   * (or signal demonstrate / decompose), and parses the structured reply into the contract Core/route.js
+   * consumes. PURE prompt + parse live in Core/routerPrompt.js; this is the thin transport.
+   * @param {{ ask:string, tools:Array<object> }} args
+   * @returns {Promise<{tool:(string|null),params:object,confidence:number,needs_decompose:boolean,needs_demonstration:boolean,subAsks:string[],reason:string}>}
+   */
+  static async routeAsk({ ask, tools } = {}) {
+    const { system, user } = buildRouterMessages(ask, Array.isArray(tools) ? tools : []);
+    // v1 uses the default policy model; R-6 (model tiering) routes operation 'route-ask' -> MODEL_FAST (Haiku).
+    const res = await AnthropicService.#call(system, user, 1024, [], { role: 'routing', operation: 'route-ask' });
+    if (!res || res.success === false) {
+      return { ...parseRouterOutput(null), reason: 'router-unavailable' };   // fail safe; reason lets chat fall back
+    }
+    return parseRouterOutput(res.text);
   }
 
   /**

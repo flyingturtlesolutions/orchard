@@ -38,6 +38,8 @@ import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/
 import { feedbackExamples } from '../../Core/feedbackLearn.js';   // ORCH-FB-2 — relevance shaping from feedback history
 import { buildObservationCapability, scoreObservationMatch, classifyReadAsk } from '../../Core/observe.js';   // OBS-READ — observation records + manual-obs match + read/action effect scoping
 import { buildCompositeCapability, liftControlFlow, liftConditional } from '../../Core/orchChain.js';   // ORCH-X T2 — composite promotion + ORCH-L control-flow lift + ORCH-A conditional lift
+import { route } from '../../Core/route.js';   // R-1 — front-door router cascade (alias → retrieve → LLM → trial)
+import { retrieveTools } from '../../Core/toolRetrieval.js';   // R-2 — tool-RAG candidate palette (+ sanitize/provenance)
 import { bindShape, lexicalScore } from '../../Core/orchBind.js';   // ORCH-CB — per-slot effect-scoped binder (lexical floor)
 import { comprehend } from '../../Core/orchComprehend.js';   // ORCH-CB — substrate-free shape comprehension (shadow)
 import { shadowCompare } from '../../Core/orchShadow.js';   // ORCH-CB — LLM-plan vs comprehend→bind divergence log
@@ -303,6 +305,34 @@ export function createSgMessageHandlers(ctx) {
   const _lastGroundAction = new Map();
 
   return {
+    // R-3/R-4a — the LLM front-door ROUTER (DESIGN_llm_front_door.md). ISOLATED + console-testable: resolve the
+    // Ground, retrieve a small candidate palette (R-2), let the router LLM (R-3) select+parameterize ONE tool,
+    // and return the RouteDecision via the pure cascade (R-1). Does NOT yet replace the chat entry (that is R-4b);
+    // call it directly to verify e.g. "go to pixabay home page" -> { action:'primitive', tool: OPEN_URL, params:{url} }.
+    ROUTE_ASK: async (payload, _sender, sendResponse) => {
+      try {
+        const ask = String(payload?.ask ?? '').trim();
+        if (!ask) { sendResponse({ success: false, error: 'ask required' }); return; }
+        let { tabId, groundId } = payload ?? {};
+        if (!groundId && typeof tabId === 'number') {
+          try { const url = (await chrome.tabs.get(tabId))?.url || ''; if (url) groundId = _groundIdForUrl(url, await StorageManager.getAllGrounds()); } catch { /* */ }
+        }
+        let caps = [];
+        if (groundId) { try { caps = ((await ctx.readSgCapabilities(groundId)) || []).filter((c) => c && isActiveCapability(c) && c.kind !== 'composite'); } catch { caps = []; } }
+        const candidates = retrieveTools(ask, { capabilities: caps });
+        const decision = await route(ask, {
+          retrieveTools: async () => candidates,                                       // R-2 candidates (precomputed)
+          callRouter:    async ({ ask: a, tools }) => AnthropicService.routeAsk({ ask: a, tools }),   // R-3 LLM
+        });
+        const t = decision.tool;
+        Logger.info('route', `ROUTE_ASK "${ask.slice(0, 60)}" → ${decision.action}${t ? ` ${t.op || t.capabilityId || ''}` : ''} (conf ${decision.confidence}, ${candidates.length} cand, ground ${groundId || '—'})`);
+        sendResponse({ success: true, decision, groundId: groundId || null, candidateCount: candidates.length });
+      } catch (err) {
+        Logger.error('background', `ROUTE_ASK failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
     // SG-4b — run the substrate-grounded plan on the live page (Comprehend→Select→Cover→Bind→execute) and
     // stash a session draft so the result can be accepted without re-running.
     RUN_SG_TRIAL: async (payload, _sender, sendResponse) => {

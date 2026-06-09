@@ -2277,10 +2277,11 @@ function handleClickByLabel(selector, value) {
   // Normalized target label for matching.
   const target = _normalizeLabelForMatch(value);
   if (!target) {
-    return {
-      success: false,
-      error: `CLICK_BY_LABEL: empty label value (selector: "${selector.slice(0, 80)}")`,
-    };
+    // v2.74.877 — an UNRESOLVED / empty label (an optional filter the ask didn't specify, or an unfilled
+    // {{PARAM}}) is a NO-OP, not a failure: there is nothing to click, so SKIP the step instead of aborting
+    // the whole run. Generalizes the .809 placeholder fix (unset TYPE → blank) to label-bound clicks — e.g.
+    // "search pixabay for videos about fable" with no CATEGORY no longer dies on the category-select click.
+    return { success: true, skipped: true, info: 'CLICK_BY_LABEL: empty label — skipped (no option to select)' };
   }
 
   // Find candidates in priority order, return first match.
