@@ -55,6 +55,7 @@ export function buildLocale(rawFeatures, meta = {}) {
       lastExploredAt: meta.enumeratedAt ?? Date.now(),
       bands: meta.bands ?? null,
       featureCount: surfaceFeatureIds.length,
+      capped: meta.capped ?? false,   // EX-3 — enumeration hit FEATURE_CAP (catalog is truncated/incomplete)
     },
   };
 }

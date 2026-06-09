@@ -3,7 +3,14 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { deriveDisclosureGoals, mergeDepthFromControls, buildIndex } from './locale.js';
+import { deriveDisclosureGoals, mergeDepthFromControls, buildIndex, buildLocale } from './locale.js';
+
+describe('buildLocale — EX-3 coverage.capped passthrough', () => {
+  it('stamps coverage.capped from meta.capped (default false)', () => {
+    assert.equal(buildLocale([], { capped: true }).coverage.capped, true);
+    assert.equal(buildLocale([], {}).coverage.capped, false);
+  });
+});
 
 describe('buildIndex — EX-2 deterministic ordering (insertion-order independent)', () => {
   const F = (id, kind, goals = []) => ({ id, kind, goals, label: id });

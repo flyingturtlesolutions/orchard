@@ -3673,7 +3673,7 @@ async function enumeratePage() {
     add({
       id, kind: 'collection', label, a11yRole: 'list',
       selector: blk.selector, selectorKind: 'class', selectorVerified: true,
-      members: { itemSelector: blk.selector, count: blk.count, sampleLabels: blk.sampleText ? [blk.sampleText] : [] },
+      members: { itemSelector: blk.selector, count: blk.count, sampleLabels: blk.sampleText ? [blk.sampleText] : [], medInteractive: blk.medInteractive ?? null },   // EX-3 — median per-item interactive count (already computed; was dropped)
       location: { band: Math.floor(absY / bandStep), absRect: { x: 0, y: absY, w: vw, h: 0 }, visibleAtRest: absY >= origScrollY && absY < origScrollY + vh, scrollToY: Math.max(0, absY - Math.round(vh * 0.3)) },
       interaction: { pattern: 'none', effect: 'none' },
       confidence: 0.7,
@@ -3832,7 +3832,10 @@ async function enumeratePage() {
   return {
     success: true,
     features: [...feats.values()],
-    meta: { url: location.href, title: document.title || '', viewport: { w: vw, h: vh }, scrollHeight: docH, bands: bandCount, enumeratedAt: Date.now() },
+    // EX-3 (v2.74.847) — HONEST truncation signal: enumeratePage stops adding at FEATURE_CAP (500), so a dense page is
+    // silently incomplete. `capped` (the map filled to the cap) lets buildLocale stamp coverage.capped — the data the
+    // "good-enough-to-build-on" gate (EX-6) reads to decide retry-with-higher-cap vs proceed. Pure observability.
+    meta: { url: location.href, title: document.title || '', viewport: { w: vw, h: vh }, scrollHeight: docH, bands: bandCount, capped: feats.size >= FEATURE_CAP, enumeratedAt: Date.now() },
   };
 }
 
