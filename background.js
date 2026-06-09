@@ -5423,6 +5423,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               // v2.74.426 — #2 P1: the free-text affordance description lives ON the
               // Locale now (was only on pageStructure). Consumers read locale.affordances.
               if (structure.affordances) model.affordances = structure.affordances;
+              // EX-5 (critic #4, v2.74.849) — score the Locale's trustworthiness for
+              // authoring (pure, from coverage + structure.stats) and STAMP the tier on
+              // coverage so it travels with the cached Locale. The auto-explore
+              // orchestrator (EX-6) will gate on this; a MANUAL Explore never blocks
+              // (the user asked for it) — here it's advisory: persist + warn.
+              try {
+                const trust = Locale.localeTrust(model, structure);
+                model.coverage.trust = trust.tier;
+                model.coverage.trustScore = trust.score;
+                if (trust.tier === 'trusted') Logger.info('explore', `locale-trust: trusted (score ${trust.score}, ${trust.signals.featureCount} feature(s), ${trust.signals.goalCount} goal(s))`);
+                else Logger.warn('explore', `locale-trust: ${trust.tier} (score ${trust.score}) — ${trust.reasons.map(r => r.code).join(', ')}`);
+              } catch (e) { Logger.warn('background', `localeTrust failed (continuing): ${e.message}`); }
               const localeKey = _normalizeUrlForPerspectiveCache(enr.meta?.url ?? pageUrl);
               if (groundId) await _writeLocaleCache(groundId, localeKey, { model, url: enr.meta?.url ?? pageUrl, capturedAt: model.coverage.lastExploredAt });
               // v2.74.431 — Ground siteMap (GROUND_SPEC § 7): merge this Locale's

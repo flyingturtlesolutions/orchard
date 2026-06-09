@@ -253,6 +253,58 @@ export function driftHashFromRaw(rawFeatures) {
   return driftHash(features);
 }
 
+/**
+ * EX-5 (critic #4) — score how TRUSTWORTHY a freshly-built Locale is to author
+ * capabilities from, PURELY from already-captured data (no LLM, no DOM). The
+ * auto-explore orchestrator (EX-6) gates on this so an UNATTENDED run never mints
+ * capabilities at scale from a page that was half-explored, truncated, aborted,
+ * or barely enumerated (the failure the critic flagged: `aborted` is recorded but
+ * never gates; null goals are swallowed silently).
+ *
+ * Inputs (both optional; degrades gracefully):
+ *   model      — the built Locale (reads coverage.{capped,fidelity,featureCount},
+ *                features, goals)
+ *   structure  — the sweep artifact (reads stats.{aborted,candidates,controlsTried})
+ *
+ * Returns { score:0..1, tier:'trusted'|'partial'|'untrusted', safeToAuthor:boolean,
+ *           reasons:[{code,severity,detail}], signals:{…} }. Deterministic.
+ * `safeToAuthor` is the gate: false only for 'untrusted' — 'partial' is allowed
+ * but the reasons say why, so a caller can choose to be stricter.
+ */
+export function localeTrust(model, structure = null) {
+  if (!model || typeof model !== 'object') {
+    return {
+      score: 0, tier: 'untrusted', safeToAuthor: false,
+      reasons: [{ code: 'no-model', severity: 'fatal', detail: 'no Locale model' }],
+      signals: { featureCount: 0, goalCount: 0, fidelity: 'L0', capped: false, aborted: null, candidates: null, controlsTried: null },
+    };
+  }
+  const cov = model.coverage || {};
+  const stats = (structure && structure.stats) || {};
+  const featureCount = Number.isFinite(cov.featureCount) ? cov.featureCount : Object.keys(model.features || {}).length;
+  const goalCount = Object.keys(model.goals || {}).length;
+  const fidelity = cov.fidelity || 'L0';
+  const capped = !!cov.capped;
+  const aborted = stats.aborted || null;
+
+  const reasons = [];
+  let score = 1;
+  const penalize = (amount, code, severity, detail) => { score -= amount; reasons.push({ code, severity, detail }); };
+
+  if (aborted)          penalize(0.5, 'sweep-aborted',   'high',   `depth sweep aborted (${aborted}) — page only partially explored`);
+  if (capped)           penalize(0.3, 'enumerate-capped','high',   'enumeration hit the feature cap — catalog is truncated');
+  if (featureCount < 3) penalize(0.4, 'too-few-features','high',   `only ${featureCount} feature(s) enumerated — page may be blank/loading/error`);
+  if (goalCount === 0)  penalize(0.3, 'no-goals',        'medium', 'no goals synthesized — nothing for authoring to target');
+  if (fidelity === 'L0')penalize(0.1, 'no-depth',        'low',    'fidelity L0 — no disclosure depth explored (flat page or sweep skipped)');
+
+  score = Math.max(0, Math.min(1, round2(score)));
+  const tier = score >= 0.7 ? 'trusted' : score >= 0.4 ? 'partial' : 'untrusted';
+  return {
+    score, tier, safeToAuthor: tier !== 'untrusted', reasons,
+    signals: { featureCount, goalCount, fidelity, capped, aborted, candidates: stats.candidates ?? null, controlsTried: stats.controlsTried ?? null },
+  };
+}
+
 function hashId(s) {
   const str = String(s);
   let h = 5381;

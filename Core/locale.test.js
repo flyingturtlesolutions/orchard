@@ -3,7 +3,64 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { deriveDisclosureGoals, mergeDepthFromControls, buildIndex, buildLocale, driftHashFromRaw } from './locale.js';
+import { deriveDisclosureGoals, mergeDepthFromControls, buildIndex, buildLocale, driftHashFromRaw, localeTrust } from './locale.js';
+
+describe('localeTrust — EX-5 pure authoring-trust gate', () => {
+  // A healthy, fully-explored Locale: many features, goals, depth, not capped, not aborted.
+  const healthy = () => ({
+    features: Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`f${i}`, { id: `f${i}`, kind: 'action' }])),
+    goals: { g1: {}, g2: {} },
+    coverage: { fidelity: 'L2', capped: false, featureCount: 8 },
+  });
+  const structOk = { stats: { aborted: null, candidates: 12, controlsTried: 5 } };
+
+  it('a healthy fully-explored Locale is trusted + safeToAuthor', () => {
+    const t = localeTrust(healthy(), structOk);
+    assert.equal(t.tier, 'trusted');
+    assert.equal(t.safeToAuthor, true);
+    assert.equal(t.score, 1);
+    assert.deepEqual(t.reasons, []);
+  });
+  it('an ABORTED sweep drops trust (high-severity reason) and is no longer trusted', () => {
+    const t = localeTrust(healthy(), { stats: { aborted: 'navigation-unrecovered' } });
+    assert.ok(t.score <= 0.5);
+    assert.notEqual(t.tier, 'trusted');
+    assert.ok(t.reasons.some((r) => r.code === 'sweep-aborted' && r.severity === 'high'));
+  });
+  it('aborted + capped + no goals stacks into untrusted / not safeToAuthor', () => {
+    const m = healthy(); m.goals = {}; m.coverage.capped = true;
+    const t = localeTrust(m, { stats: { aborted: 'navigation-unrecovered' } });
+    assert.equal(t.tier, 'untrusted');
+    assert.equal(t.safeToAuthor, false);
+    assert.ok(t.reasons.some((r) => r.code === 'enumerate-capped'));
+    assert.ok(t.reasons.some((r) => r.code === 'no-goals'));
+  });
+  it('a barely-enumerated page (<3 features) is penalized for too-few-features', () => {
+    const t = localeTrust({ features: { a: { id: 'a' } }, goals: { g: {} }, coverage: { fidelity: 'L2', featureCount: 1 } }, structOk);
+    assert.ok(t.reasons.some((r) => r.code === 'too-few-features'));
+    assert.notEqual(t.tier, 'trusted');
+  });
+  it('a flat (L0, no depth) page with goals stays trusted — depth is only a mild signal', () => {
+    const m = healthy(); m.coverage.fidelity = 'L0';
+    const t = localeTrust(m, structOk);
+    assert.ok(t.reasons.some((r) => r.code === 'no-depth' && r.severity === 'low'));
+    assert.equal(t.tier, 'trusted');   // 1 - 0.1 = 0.9 ≥ 0.7
+  });
+  it('falls back to counting model.features when coverage.featureCount is absent', () => {
+    const m = healthy(); delete m.coverage.featureCount;
+    assert.equal(localeTrust(m, structOk).signals.featureCount, 8);
+  });
+  it('degrades gracefully: null model → untrusted/no-model, missing structure tolerated', () => {
+    const nm = localeTrust(null);
+    assert.equal(nm.tier, 'untrusted');
+    assert.equal(nm.safeToAuthor, false);
+    assert.equal(nm.reasons[0].code, 'no-model');
+    // structure omitted entirely (aborted unknown) — still scores the model
+    const t = localeTrust(healthy());
+    assert.equal(t.tier, 'trusted');
+    assert.equal(t.signals.aborted, null);
+  });
+});
 
 describe('driftHashFromRaw — EX-4 pre-sweep fingerprint ≡ buildLocale stamp', () => {
   const raw = [
