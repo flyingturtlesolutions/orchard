@@ -78,12 +78,14 @@ Levers 1, 2, 6 below form one missing subsystem: **the post-accept lifecycle** (
 ## File anchors
 `Core/accept.js`, `Core/trialSynth.js`, `Core/capabilitySynth.js`, `Core/selectorStability.js`, `ContentScripts/contentScript.js` (`enumeratePage` + the two selector builders + `_computeHierarchicalContext`), `Core/landmark.js`, `Core/outcomes.js`, `Core/select.js`, `background/handlers/sg.js`.
 
-## Status
-- [x] **GA-1 / Win 3** — `hierarchicalContext` at enumerate — *built (v2.74.838); wants a live `gl` to confirm recovery improvement*
-- [ ] GA-2 / Win 4 — selector durability floor
-- [ ] GA-3 / Win 1 — `reverifyCapability` trust score
-- [ ] GA-4 / Win 2 — `pending-review` lifecycle + arm guard
-- [ ] GA-5 / Win 5 — conventions → SG Select tie-breaker
-- [ ] GA-6 / critic #4 — capability structural dedup
-- [ ] GA-7 / critic #8 — Locale→capability coverage signal
-- [ ] GA-8 / critic #7 — write-time referential integrity
+## Status — 7 of 8 shipped (GA-4 deferred)
+- [x] **GA-1 / Win 3** — `hierarchicalContext` at enumerate — `7c59dcb` (v2.74.838)
+- [x] **GA-2 / Win 4** — selector durability floor (`selectMostDurableUnique`, +8 tests) — `365434a` (v2.74.839)
+- [x] **GA-3 / Win 1** — `REVERIFY_SG_CAPABILITY` re-trial trust score — `5954cdd` (v2.74.840)
+- [ ] **GA-4 / Win 2** — `pending-review` + arm guard — **DEFERRED**: verified the terminal descriptor is data-only (`armed:false`, "no invocation path consumes them yet", accept.js:418) — there is no terminal-fire path to guard. Build it alongside the irreversible-terminal arming feature. Pure guard primitives (`canArmTerminal`/`isPendingReview`/`promoteIfVerified`) + minting `pending-review` for irreversible-terminal model caps + Studio surface (see task #146).
+- [x] **GA-5 / Win 5** — conventions → SG Select tie-breaker (+4 tests) — `3a122cb` (v2.74.841)
+- [x] **GA-8 / critic #7** — write-time referential-integrity diagnostic (+3 tests) — `6cda6d1` (v2.74.842)
+- [x] **GA-7 / critic #8** — Locale→capability coverage / "done" signal (+3 tests) — `e852b1e` (v2.74.843)
+- [x] **GA-6 / critic #4** — structural-twin capability dedup, **detection** (+5 tests) — `ef04a39` (v2.74.844). Auto-merge / upsert-at-mint + cross-URL-archetype twins are the deliberate follow-ups.
+
+Core suite 471 → 491 green across the run; accept.test.js 21 → 24. Every slice bug-passed + pushed.
