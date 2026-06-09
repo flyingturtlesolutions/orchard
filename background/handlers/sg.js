@@ -907,7 +907,7 @@ export function createSgMessageHandlers(ctx) {
         const current = got?.['monitor:consent'] || MONITOR_CONSENT_DEFAULT;
         const next = withTrack(current, payload || {});
         await chrome.storage.local.set({ 'monitor:consent': next });
-        Logger.info('background', `SET_MONITOR_CONSENT: Track ${next.track.enabled ? 'ENABLED' : 'disabled'} (scope ${next.track.scope}, ${next.track.hosts.length} host(s))`);
+        Logger.info('background', `SET_MONITOR_CONSENT: Track ${next.track.enabled ? 'ENABLED' : 'disabled'} (${(next.track.excludeHosts || []).length} excluded host(s))`);
         sendResponse({ success: true, consent: next });
       } catch (err) {
         Logger.error('background', `SET_MONITOR_CONSENT failed: ${err.message}`);
@@ -941,10 +941,13 @@ export function createSgMessageHandlers(ctx) {
         // C3 — stamp perspectiveId + role on each capture target so the matched event needs NO per-event registry lookup.
         const targets = toCaptureTargets(demand, selectorByUid).map((t) => ({ ...t, ...(metaByUid[t.landmarkUid] || {}) }));
         _interactionSessions.set(tabId, { groundId, host });   // C3 — resolve a captured event's Ground by its tab
-        let started = false;
-        try { const r = await chrome.tabs.sendMessage(tabId, { type: 'START_INTERACTION_CAPTURE', payload: { targets } }, { frameId: 0 }); started = !!r?.success; }
-        catch (e) { Logger.warn('background', `START_INTERACTION_CAPTURE send failed: ${e.message}`); }
-        Logger.info('background', `INTERACTION_MONITOR_START: ${targets.length} target(s) on ${host} (consent ok, started=${started})`);
+        const _sendStart = async () => { try { const r = await chrome.tabs.sendMessage(tabId, { type: 'START_INTERACTION_CAPTURE', payload: { targets } }, { frameId: 0 }); return !!r?.success; } catch { return null; } };
+        let started = await _sendStart();
+        if (started === null) {   // no content-script receiver (e.g. a tab open before the extension reloaded) — inject ONCE, then retry
+          try { await chrome.scripting.executeScript({ target: { tabId }, files: ['ContentScripts/contentScript.js'] }); } catch { /* restricted page / already injecting */ }
+          started = await _sendStart();
+        }
+        Logger.info('background', `INTERACTION_MONITOR_START: ${targets.length} target(s) on ${host} (consent ok, started=${started === true})`);
         sendResponse({ success: true, host, targets: targets.length, started });
       } catch (err) {
         Logger.error('background', `INTERACTION_MONITOR_START failed: ${err.message}`);
