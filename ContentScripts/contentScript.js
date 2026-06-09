@@ -4947,6 +4947,12 @@ async function explorePageStructure(payload) {
   // grounded. Allow a LINK to be a poke candidate when it carries a disclosure signal (aria-haspopup/
   // expanded/controls, role=button, data-toggle) OR an auth/account label. If it DOES navigate, the
   // explore nav-guard + ensureOnPage recovery handle it — same as any accidental navigation.
+  // EX-1 (v2.74.845) — DESTRUCTIVE label lexicon (a mirror + extension of Services/DiscoveryService.DANGEROUS_LINK_TEXT;
+  // a classic content script can't import it). The poke sweep must NEVER ACTIVATE a control that mutates server/session
+  // state — delete a resource, log the user out, empty a cart, fire an irreversible commit or a purchase — while running
+  // UNATTENDED in a live session. Verb-led + word-boundaried so safe controls survive (a bare "Cancel" dismiss or a
+  // "Remove filter" chip is NOT vetoed — only the irreversible verbs + the destructive phrasings).
+  const DESTRUCTIVE_LABEL = /\b(delete|deactivate|destroy|unsubscribe|publish|withdraw|log\s?out|sign\s?out|logout)\b|\b(empty|clear)\s+(cart|basket)\b|\b(cancel|close|delete|deactivate|remove)\s+(account|order|subscription|plan|membership|payment|profile)\b|\b(place|confirm)\s+(order|payment|purchase)\b|\b(buy|checkout|pay)\b/i;
   const AUTH_TRIGGER = /\b(sign[\s-]?in|log[\s-]?in|log[\s-]?on|sign[\s-]?up|signup|login|register|join|create[\s-]?account|my[\s-]?account|account)\b/i;
   const isDisclosureLink = (el) => {
     try {
@@ -4957,6 +4963,11 @@ async function explorePageStructure(payload) {
   const isSafeToClick = (el) => {
     if (!el) return false;
     try {
+      // EX-1 — SEMANTIC destructive veto, FIRST. A "Log out" / "Delete account" / "Empty cart" / "Buy" control must
+      // never be activated by the unattended sweep, however it's marked up (a destructive BUTTON otherwise reaches the
+      // generic button allowance below and gets poked). Runs BEFORE the disclosure/auth allowances so a destructive
+      // label can't benefit from the auth/disclosure opt-in (closes the AUTH_TRIGGER hole for "log out"/"close account").
+      if (DESTRUCTIVE_LABEL.test(accName(el) || '')) return false;
       if (el.matches('[type="submit"], input[type="submit"], button[type="submit"]')) return false;   // commits a form
       const linkish = el.matches('a[href], [role="link"], [target="_blank"]');
       const discLink = linkish && isDisclosureLink(el);
