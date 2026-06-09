@@ -31,13 +31,13 @@ Invariants: **L2 is pure** `(ResolvedInteraction, Context) → ClassifiedInterac
 
 ---
 
-## ✅ Completed — exactly one slice (C0), and it's solid
-- **C0 (L2 classifier)** — `Core/interactionClassification.js` (+ `.test.js`). **Conformance-audited against `SPEC_INTERACTION_CLASSIFIER_C0.md` §2–§10: FULLY CONFORMANT** — all 8 exports + constants; decision tree §4 in order line-for-line; `semanticVerb` algorithm + role map; scoring (+1000 active / +0–300 selector / +0–100 confidence / +50 recency, tie-break by `landmarkUid`); `ClassifiedInteraction` output + `page` enrichment; dependency rule (imports only `Core/outcomes.js`). Green in the Core suite. **DORMANT** — nothing produces a `ResolvedInteraction` to feed it.
+## ✅ Completed — C0 + C1
+- **C0 (L2 classifier)** — `Core/interactionClassification.js` (+ `.test.js`). **Conformance-audited against `SPEC_INTERACTION_CLASSIFIER_C0.md` §2–§10: FULLY CONFORMANT** — all 8 exports + constants; decision tree §4 in order line-for-line; `semanticVerb` algorithm + role map; scoring (+1000 active / +0–300 selector / +0–100 confidence / +50 recency, tie-break by `landmarkUid`); `ClassifiedInteraction` output + `page` enrichment; dependency rule (imports only `Core/outcomes.js`). Green in the Core suite. **DORMANT** — nothing produces a `ResolvedInteraction` to feed it yet.
+- **C1 (InteractionDemand registry)** — `Core/interactionDemand.js` (pure) + `GET_INTERACTION_DEMAND` handler — `5dbbf63` (v2.74.856). `buildInteractionDemand(perspectives,{groundId,reason})` → demand rows (one per landmark, kinds unioned, sorted); role→kinds map covers Layer-2 *and* a11y roles; handler reuses `listLandmarksForGround` (accepted Perspectives × registry). +11 tests. *Note: C1 emits the demand SET; it does not itself feed C0.*
 - **All four reuse dependencies exist** (the monitor consumes, doesn't reinvent): `PerspectivePredicates.listActivePerspectives` (active-perspective context), `GroundMatcher.matchGroundForUrl` (`groundId` from URL), `LandmarkResolver`/registry (forward selectors for the reverse test), `Core/outcomes.makeEvent` (recording).
 
-## ⏳ Outstanding — C1 → C6 (wiring over existing primitives, not new substrate)
-- **C1 — `InteractionDemand` registry** (demand from accepted Perspectives). **NEXT — scoped below.**
-- **C2** — content-script listeners (click, input-debounced, submit, focus) → `INTERACTION_RAW`.
+## ⏳ Outstanding — C2 → C6 (wiring over existing primitives, not new substrate)
+- **C2 — content-script listeners** (click, input-debounced, submit, focus) on the C1 demand set → `INTERACTION_RAW`. **NEXT.**
 - **C3** — `RESOLVE_INTERACTION_TARGET` reverse hit-test + `InteractionResolver` → `ResolvedInteraction` (this is what first **feeds C0**).
 - **C4** — background pipeline `RAW → RESOLVED → CLASSIFIED → trace` append.
 - **C5** — outcomes `op:'user-interaction'` wiring + Studio/debug trace viewer.
@@ -48,7 +48,7 @@ Invariants: **L2 is pure** `(ResolvedInteraction, Context) → ClassifiedInterac
 
 ---
 
-## C1 — concrete scope (the next slice)
+## C1 — scope (SHIPPED, `5dbbf63` / v2.74.856)
 **Goal:** produce the **demand set** — *which landmarks to watch, and for which interaction kinds* — derived from a Ground's **accepted** Perspectives. This is the gate that makes capture demand-driven (perf bound = |demand set| per tab, not |all DOM|), and the policy home for "accepted Perspective → what we watch."
 
 **Data contract** (spec §4.3):
