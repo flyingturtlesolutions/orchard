@@ -93,6 +93,14 @@ describe('buildLocale — EX-3 coverage.capped passthrough', () => {
   });
 });
 
+describe('buildLocale — G1-2 groundId binding', () => {
+  it('stamps groundId from meta (default null)', () => {
+    assert.equal(buildLocale([], { groundId: 'gnd_abc' }).groundId, 'gnd_abc');
+    assert.equal(buildLocale([], {}).groundId, null);
+    assert.equal(buildLocale([]).groundId, null);
+  });
+});
+
 describe('buildIndex — EX-2 deterministic ordering (insertion-order independent)', () => {
   const F = (id, kind, goals = []) => ({ id, kind, goals, label: id });
   const a = { f3: F('f3', 'action', ['g2']), f1: F('f1', 'action', ['g1']), f2: F('f2', 'input', ['g1']) };  // insertion: f3,f1,f2

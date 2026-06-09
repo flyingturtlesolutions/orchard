@@ -5388,7 +5388,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               catch (e) { Logger.warn('background', `post-sweep ENUMERATE_PAGE fallback failed: ${e.message}`); }
             }
             if (enr?.success) {
-              const model = Locale.buildLocale(enr.features, enr.meta);
+              const model = Locale.buildLocale(enr.features, { ...enr.meta, groundId });   // G1-2 — bind the Locale to its Ground
               // v2.74.404 — L1 depth: merge THIS sweep's poke→reveal data (already
               // captured in `structure.controls`) into the model as Layers, so
               // disclosures (Explore / All images) become resolvable triggers — no

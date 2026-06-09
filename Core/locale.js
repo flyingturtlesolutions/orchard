@@ -42,6 +42,12 @@ export function buildLocale(rawFeatures, meta = {}) {
     schema: LOCALE_SCHEMA,
     url: meta.url ?? '',
     urlPattern: meta.urlPattern ?? meta.url ?? '',
+    // G1-2 — bind the Locale to its Ground. Previously a Locale model was anonymous
+    // about its Ground (the binding was implicit in the cache PARTITION key only), so a
+    // model passed around in memory couldn't say where it belonged. Stamping it makes the
+    // Locale→Ground edge explicit + durable — the dependency edge drift→re-verify (EX-9)
+    // walks. Default null (the manual catalog / tests don't supply one).
+    groundId: meta.groundId ?? null,
     title: meta.title ?? '',
     viewport: meta.viewport ?? null,
     scrollHeight: meta.scrollHeight ?? null,
