@@ -223,6 +223,47 @@ export function buildPerspectiveGate(perspectiveId) {
 }
 
 /**
+ * GA-8 — collect every SUBSTRATE REFERENCE a condition tree makes: the landmark uids of `landmarkExists` leaves and
+ * the perspective ids of `perspective_ref` leaves. PURE. Walks arrays, `and`/`or` {operator,children}, and
+ * {match,conditions} envelopes. The basis for validateConditionRefs — catching a postcondition that points at a
+ * landmark/perspective that was never persisted (a dangling ref "looks broken on every re-trial for a reason no one
+ * diagnoses", DESIGN — write-time integrity).
+ * @param {*} node
+ * @param {{landmarks:string[], perspectives:string[]}} [acc]
+ * @returns {{landmarks:string[], perspectives:string[]}}
+ */
+export function collectConditionRefs(node, acc = { landmarks: [], perspectives: [] }) {
+  if (!node) return acc;
+  if (Array.isArray(node)) { for (const n of node) collectConditionRefs(n, acc); return acc; }
+  if (typeof node !== 'object') return acc;
+  if (node.kind === 'landmarkExists' && node.target) acc.landmarks.push(String(node.target));
+  if (node.type === 'perspective_ref' && node.perspectiveId) acc.perspectives.push(String(node.perspectiveId));
+  if (Array.isArray(node.children)) collectConditionRefs(node.children, acc);
+  if (Array.isArray(node.conditions)) collectConditionRefs(node.conditions, acc);
+  return acc;
+}
+
+/**
+ * GA-8 — validate that every substrate ref across `conditionTrees` resolves to a KNOWN landmark uid / perspective id.
+ * PURE — the caller supplies the known sets (the records being persisted); an unresolved ref is then confirmed
+ * against storage by the caller BEFORE it's reported, so a ref to a pre-existing record isn't false-flagged. Returns
+ * the unresolved refs. FAIL-SOFT by design (a diagnostic the builder/editor can act on, never a hard reject).
+ * @param {*} conditionTrees  one tree, or an array of condition trees (predicates / pre / postconditions)
+ * @param {{landmarkUids?:string[], perspectiveIds?:string[]}} [known]
+ * @returns {{ok:boolean, missing:Array<{kind:('landmark'|'perspective'),id:string}>}}
+ */
+export function validateConditionRefs(conditionTrees, { landmarkUids = [], perspectiveIds = [] } = {}) {
+  const knownLm = new Set((Array.isArray(landmarkUids) ? landmarkUids : []).map(String));
+  const knownPv = new Set((Array.isArray(perspectiveIds) ? perspectiveIds : []).map(String));
+  const refs = { landmarks: [], perspectives: [] };
+  for (const t of (Array.isArray(conditionTrees) ? conditionTrees : [conditionTrees])) collectConditionRefs(t, refs);
+  const missing = [];
+  for (const uid of new Set(refs.landmarks)) if (!knownLm.has(uid)) missing.push({ kind: 'landmark', id: uid });
+  for (const pid of new Set(refs.perspectives)) if (!knownPv.has(pid)) missing.push({ kind: 'perspective', id: pid });
+  return { ok: missing.length === 0, missing };
+}
+
+/**
  * b6b (v2.74.775) — build the DESTINATION perspective for a NAVIGATING Fragment, plus the fragment postcondition
  * that points at it. PURE. A navigating fragment's success is reaching a new NODE (page); the legacy device
  * asserts it as `url_matches` on the destination path — an EDGE fact mis-applied as a node postcondition

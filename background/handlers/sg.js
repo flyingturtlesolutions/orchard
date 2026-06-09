@@ -15,7 +15,7 @@ import { coverComplete } from '../../Core/cover.js';
 import { selectionToTrialRoles } from '../../Core/bind.js';
 import { lowerToTier2, orderForRun, scoreTier2, topoOrder } from '../../Core/tier2Lower.js';
 import { evaluatePostcondition } from '../../Core/postcondition.js';
-import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord, buildResultsLandmarkRecord, buildOutcomePerspective, findMatchingPerspective, buildPerspectiveGate, buildDestinationPerspective, pickDestinationLandmark } from '../../Core/accept.js';
+import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord, buildResultsLandmarkRecord, buildOutcomePerspective, findMatchingPerspective, buildPerspectiveGate, buildDestinationPerspective, pickDestinationLandmark, validateConditionRefs } from '../../Core/accept.js';
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
@@ -517,6 +517,7 @@ export function createSgMessageHandlers(ctx) {
         try { await StorageManager.savePerspective(built.perspective); }
         catch (e) { Logger.error('background', `ACCEPT_SG_TRIAL savePerspective failed: ${e.message}`); sendResponse({ success: false, error: `perspective save failed: ${e.message}` }); return; }
         // Promote the proven procedure → a persisted, landmark-backed Fragment + Strategy (replay runs THIS).
+        let _refMissing = [];   // GA-8 — fail-soft ref-integrity diagnostic (filled below; never blocks accept)
         try {
           const dr = draft.draft;
           if (dr && Array.isArray(dr.actions) && dr.actions.length) {
@@ -530,6 +531,18 @@ export function createSgMessageHandlers(ctx) {
               await StorageManager.saveStrategy(recs.strategy);
               built.capability.fragmentId = fragmentId;
               built.capability.strategyId = strategyId;
+              // GA-8 — every landmarkExists / perspective_ref we just persisted must resolve to a saved landmark/
+              // perspective (or one already in storage). Surface a dangling ref instead of letting it silently fail
+              // every re-trial. Confirm against storage before reporting (no false positive on a pre-existing ref).
+              try {
+                const _v = validateConditionRefs([built.perspective.predicates, recs.fragment.preconditions, recs.fragment.postconditions], { landmarkUids: built.landmarks.map((l) => l.uid), perspectiveIds: [built.perspective.id] });
+                for (const m of _v.missing) {
+                  let _exists = false;
+                  try { _exists = (m.kind === 'perspective') ? !!(await StorageManager.getPerspective(m.id)) : !!(await StorageManager.getLandmark(m.id)); } catch { /* */ }
+                  if (!_exists) _refMissing.push(m);
+                }
+                if (_refMissing.length) Logger.warn('background', `ACCEPT_SG_TRIAL ref-integrity — ${_refMissing.length} dangling ref(s): ${_refMissing.map((m) => `${m.kind}:${String(m.id).slice(0, 8)}`).join(', ')}`);
+              } catch { /* diagnostic only — never blocks accept */ }
             }
           }
         } catch (e) { Logger.warn('background', `ACCEPT_SG_TRIAL fragment/strategy persist failed (continuing): ${e.message}`); }
@@ -542,7 +555,7 @@ export function createSgMessageHandlers(ctx) {
         try { await ctx.broadcastStorageChanged('perspective', built.perspective.id, 'saved'); } catch { /* */ }
         await ctx.clearSgDraft(groundId);
         Logger.info('background', `ACCEPT_SG_TRIAL — promoted ${built.capability.id} → perspective ${built.perspective.id} + ${savedLm} landmark(s) (trialRef=${built.capability.trial.trialRef})`);
-        sendResponse({ success: true, accepted: true, capability: built.capability, perspectiveId: built.perspective.id, landmarkCount: savedLm });
+        sendResponse({ success: true, accepted: true, capability: built.capability, perspectiveId: built.perspective.id, landmarkCount: savedLm, refValidation: { ok: _refMissing.length === 0, missing: _refMissing } });
         // SG-LM-4b — deepen the saved (already recoverable) landmarks asynchronously: hierarchicalContext
         // + the rich profile. Fire-and-forget so accept stays instant; the tab is still on the page. Best-effort.
         if (typeof tabId === 'number') ctx.enrichSgLandmarks(tabId, built.landmarks).catch((e) => Logger.warn('background', `ACCEPT_SG_TRIAL enrichment failed (continuing): ${e.message}`));

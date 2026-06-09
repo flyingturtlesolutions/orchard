@@ -6,6 +6,7 @@ import {
   buildTrialTrace, buildAcceptance, landmarkRefActions, buildParamSchema, buildTerminalDescriptor,
   buildPerspectiveGate, buildDestinationPerspective, pickDestinationLandmark,
   mintCapabilityId, mintLandmarkUid, mintPerspectiveId, ACCEPT_SCHEMA,
+  collectConditionRefs, validateConditionRefs,
 } from './accept.js';
 
 let passed = 0;
@@ -275,6 +276,41 @@ test('buildAcceptance refuses on a failing trial', () => {
   assert.equal(r.ok, false);
   assert.equal(r.capability, undefined);
   assert.equal(r.perspective, undefined);
+});
+
+// GA-8 — write-time referential integrity
+test('collectConditionRefs gathers landmarkExists + perspective_ref across a nested tree', () => {
+  const tree = [
+    { operator: 'and', children: [
+      { kind: 'urlMatches', pattern: 'x' },
+      { operator: 'or', children: [
+        { kind: 'landmarkExists', target: 'lm_a' },
+        { kind: 'landmarkExists', target: 'lm_b' },
+      ] },
+    ] },
+    { match: 'all', conditions: [{ type: 'perspective_ref', perspectiveId: 'pv_1' }] },
+  ];
+  const refs = collectConditionRefs(tree);
+  assert.deepEqual(refs.landmarks.sort(), ['lm_a', 'lm_b']);
+  assert.deepEqual(refs.perspectives, ['pv_1']);
+});
+test('validateConditionRefs passes when every ref is known, flags the dangling ones', () => {
+  const trees = [
+    [{ kind: 'landmarkExists', target: 'lm_a' }],
+    { match: 'all', conditions: [{ type: 'perspective_ref', perspectiveId: 'pv_1' }] },
+  ];
+  assert.equal(validateConditionRefs(trees, { landmarkUids: ['lm_a'], perspectiveIds: ['pv_1'] }).ok, true);
+  const bad = validateConditionRefs(trees, { landmarkUids: [], perspectiveIds: [] });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.missing.length, 2);
+  assert.ok(bad.missing.some((m) => m.kind === 'landmark' && m.id === 'lm_a'));
+  assert.ok(bad.missing.some((m) => m.kind === 'perspective' && m.id === 'pv_1'));
+});
+test('validateConditionRefs — the real ACCEPT bundle predicates resolve to its own landmarks', () => {
+  const r = buildAcceptance({ ...base, perspectiveId: 'p' });
+  assert.equal(r.ok, true);
+  const v = validateConditionRefs([r.perspective.predicates], { landmarkUids: r.landmarks.map((l) => l.uid), perspectiveIds: [r.perspective.id] });
+  assert.equal(v.ok, true, 'the bundle is self-consistent by construction');
 });
 
 console.log(`\n${passed} passed`);
