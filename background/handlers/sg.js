@@ -23,7 +23,8 @@ import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3
 import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved, describeTraceInput, derivePhasePostcondition, reconcileObservedLandmarks } from '../../Core/observedSegment.js';
 import { listLocales } from '../../Services/Storage/GroundAssetStore.js';   // OBS (v2.74.764) — reconcile observed landmarks to grounded Locale features
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability, findDuplicateCapabilities } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A; GA-6 dedup
-import { findDuplicateGroundGroups, planGroundMerge, primaryHost, siteIdentity } from '../../Core/groundDedup.js';   // v2.74.816/.817 — duplicate-Ground detect + merge; .835 — registrable brand for site-name matching
+import { findDuplicateGroundGroups, planGroundMerge, primaryHost, siteIdentity, planEnsureGround } from '../../Core/groundDedup.js';   // v2.74.816/.817 — duplicate-Ground detect + merge; .835 — registrable brand for site-name matching; G1 — dedup-before-mint plan
+import { GroundManager } from '../../Core/GroundManager.js';   // G1 — auto-ground mint (dedup-before-mint entrypoint)
 import { matchGroundForUrl } from '../../Core/GroundMatcher.js';   // v2.74.823 — canonical URL→Ground matcher (honors urlPatterns, incl. the sibling hosts a dedup merge unions)
 import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/orchFeedback.js';   // ORCH-FB — corrective actions
 import { feedbackExamples } from '../../Core/feedbackLearn.js';   // ORCH-FB-2 — relevance shaping from feedback history
@@ -744,6 +745,38 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, capability, perspectiveId, fragmentCount, landmarkCount: landmarkRecords.length, paramCount: namedParams.length });
       } catch (err) {
         Logger.error('background', `DERIVE_OBSERVED_CAPABILITY failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // G1-1 (v2.74.851) — the AUTO-GROUND entrypoint. Today an ask on a site with no Ground
+    // dead-ends (ORCH_MATCH → 'no-ground' miss); the auto-explore orchestrator (EX-6) needs to
+    // be able to MINT a Ground on demand. ensureGroundForUrl is IDENTITY-AT-CREATION
+    // (dedup-BEFORE-mint): resolve an existing Ground via the canonical urlPatterns matcher
+    // FIRST (so a sibling/merged host REUSES, never creating a duplicate), and mint only when
+    // there is genuinely no match. The reuse-vs-mint decision + the site-name derivation are
+    // pure (Core/groundDedup.planEnsureGround, reusing siteIdentity().brand); this handler
+    // supplies the live ground list + performs the create. READ-ONLY when a Ground exists.
+    ENSURE_GROUND_FOR_URL: async (payload, _sender, sendResponse) => {
+      try {
+        const { url = '' } = payload ?? {};
+        if (typeof url !== 'string' || !url.trim()) { sendResponse({ success: false, error: 'url required' }); return; }
+        let grounds = [];
+        try { grounds = await StorageManager.getAllGrounds(); } catch { grounds = []; }
+        const existingId = _groundIdForUrl(url, grounds);
+        const plan = planEnsureGround({ url, existingGroundId: existingId });
+        if (plan.action === 'reuse') {
+          let ground = null; try { ground = await StorageManager.getGround(existingId); } catch { /* */ }
+          Logger.info('background', `ensureGroundForUrl: reuse Ground ${existingId} for ${url} (dedup-before-mint hit)`);
+          sendResponse({ success: true, groundId: existingId, created: false, ground });
+          return;
+        }
+        if (plan.action === 'invalid') { sendResponse({ success: false, error: `cannot derive a Ground from url: ${url}` }); return; }
+        const ground = await GroundManager.create({ name: plan.name, url: plan.url });
+        Logger.info('background', `ensureGroundForUrl: MINTED Ground ${ground?.id} "${plan.name}" for ${url} (no existing match)`);
+        sendResponse({ success: true, groundId: ground?.id ?? null, created: true, ground });
+      } catch (err) {
+        Logger.error('background', `ENSURE_GROUND_FOR_URL failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },

@@ -2,7 +2,49 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { extractHost, siteIdentity, groundHosts, primaryHost, findDuplicateGroundGroups, planGroundMerge } from './groundDedup.js';
+import { extractHost, siteIdentity, groundHosts, primaryHost, findDuplicateGroundGroups, planGroundMerge, groundNameForUrl, planEnsureGround } from './groundDedup.js';
+
+describe('groundDedup — groundNameForUrl (G1 auto-ground naming)', () => {
+  it('derives the registrable brand, Title-Cased, ignoring subdomains + TLD', () => {
+    assert.equal(groundNameForUrl('https://app.notion.so/p/x'), 'Notion');
+    assert.equal(groundNameForUrl('https://careers.google.com'), 'Google');
+    assert.equal(groundNameForUrl('https://www.indeed.com/jobs'), 'Indeed');
+    assert.equal(groundNameForUrl('https://jobs.lever.co/acme'), 'Lever');
+  });
+  it('handles multi-part suffixes (co.uk) via siteIdentity', () => {
+    assert.equal(groundNameForUrl('https://shop.example.co.uk/cart'), 'Example');
+  });
+  it('falls back to the host for single-label hosts, then Site only for an empty host', () => {
+    assert.equal(groundNameForUrl('http://localhost:3000'), 'Localhost');
+    assert.equal(groundNameForUrl(''), 'Site');
+    assert.equal(groundNameForUrl('   '), 'Site');
+    assert.equal(groundNameForUrl('/relative/path'), 'Site');   // no host → Site (the real-tab url path always has one)
+  });
+});
+
+describe('groundDedup — planEnsureGround (G1 dedup-before-mint)', () => {
+  it('REUSES when a resolver already matched an existing Ground (never mints a duplicate)', () => {
+    const p = planEnsureGround({ url: 'https://notion.so/x', existingGroundId: 'gnd_abc' });
+    assert.deepEqual(p, { action: 'reuse', groundId: 'gnd_abc', name: null, url: 'https://notion.so/x' });
+  });
+  it('MINTS with a derived name when there is no existing match', () => {
+    const p = planEnsureGround({ url: 'https://www.indeed.com/jobs' });
+    assert.equal(p.action, 'mint');
+    assert.equal(p.groundId, null);
+    assert.equal(p.name, 'Indeed');
+    assert.equal(p.url, 'https://www.indeed.com/jobs');
+  });
+  it('reports INVALID when the url yields no host (nothing to ground)', () => {
+    assert.equal(planEnsureGround({ url: '' }).action, 'invalid');
+    assert.equal(planEnsureGround({ url: '   ' }).action, 'invalid');
+    assert.equal(planEnsureGround({ url: '/relative/path' }).action, 'invalid');
+    assert.equal(planEnsureGround({}).action, 'invalid');
+    assert.equal(planEnsureGround().action, 'invalid');
+  });
+  it('an existing id wins even on a junk url (resolver is authoritative)', () => {
+    assert.equal(planEnsureGround({ url: '', existingGroundId: 'gnd_x' }).action, 'reuse');
+  });
+});
 
 describe('groundDedup — extractHost', () => {
   it('strips scheme, path, query, fragment, port', () => {

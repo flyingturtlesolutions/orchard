@@ -82,6 +82,37 @@ export function siteIdentity(urlOrHost) {
   return { host, registrable, brand, suffix };
 }
 
+/**
+ * G1 — a human-friendly Ground display name derived from a URL: the registrable
+ * BRAND label (siteIdentity), Title-Cased. 'https://app.notion.so/x' → 'Notion',
+ * 'careers.google.com' → 'Google', 'example.co.uk' → 'Example'. Falls back to the
+ * host, then 'Site'. Pure — the name a minted Ground gets when auto-grounded.
+ * @param {string} url
+ * @returns {string}
+ */
+export function groundNameForUrl(url) {
+  const { brand, host } = siteIdentity(url);
+  const pick = brand || host || '';
+  if (!pick) return 'Site';
+  return pick.charAt(0).toUpperCase() + pick.slice(1);
+}
+
+/**
+ * G1 — the IDENTITY-AT-CREATION decision for auto-ground: dedup BEFORE mint. Given a
+ * url and the Ground id an existing-Ground resolver already found for it (or null),
+ * decide whether to REUSE that Ground or MINT a fresh one — never both. PURE; the
+ * caller supplies the resolved id (the live urlPatterns match) and performs the
+ * actual create. 'invalid' when the url yields no host (nothing to ground).
+ * @param {{ url?:string, existingGroundId?:string|null }} [args]
+ * @returns {{ action:'reuse'|'mint'|'invalid', groundId:string|null, name:string|null, url:string }}
+ */
+export function planEnsureGround({ url = '', existingGroundId = null } = {}) {
+  const u = String(url || '');
+  if (existingGroundId) return { action: 'reuse', groundId: existingGroundId, name: null, url: u };
+  if (!extractHost(u)) return { action: 'invalid', groundId: null, name: null, url: u };
+  return { action: 'mint', groundId: null, name: groundNameForUrl(u), url: u };
+}
+
 /** Every host a Ground claims — from its url + its urlPatterns. */
 export function groundHosts(ground) {
   const hosts = new Set();
