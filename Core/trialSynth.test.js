@@ -6,7 +6,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { synthesizeTrialOp } from './trialSynth.js';
+import { synthesizeTrialOp, classifyTrialSafety } from './trialSynth.js';
 
 describe('synthesizeTrialOp — revealed-option WAIT_FOR carries identity (SG-RES-2b)', () => {
   // Indeed pay: the filter button reveals a <ul role=listbox> popover in a BODY PORTAL; the option's captured
@@ -57,5 +57,91 @@ describe('synthesizeTrialOp — revealed-option WAIT_FOR carries identity (SG-RE
     assert.equal(waits.length, 1);
     assert.equal(waits[0].selector, '#menu + ul > li');
     assert.equal(waits[0].waitFor, undefined);
+  });
+});
+
+describe('synthesizeTrialOp — Enter-submits a filled search form with no submit button (v2.74.879)', () => {
+  // Pixabay-style search: a text input that commits on Enter, with NO submit <button>. Core/bind finds no
+  // effect:submit feature to add, so without this the op TYPEs the query and never sends it — the live
+  // "type 'fable' → stay on '/' → url_matches('/videos/') fails" gap from the decisions trace.
+  const searchLocale = { features: {
+    q: { id: 'q', kind: 'input', label: 'Search', selector: 'input#search', fieldType: 'text', interaction: { pattern: 'type', effect: 'none' } },
+  } };
+  const searchRoles = [
+    { role: 'Search', featureId: 'q', selector: 'input#search', kind: 'input', landmark: { role: 'searchbox', accessibleName: 'Search', selector: 'input#search' } },
+  ];
+
+  it('appends ONE ENTER on the last text input when no submit control was bound', () => {
+    const op = synthesizeTrialOp({ groundedIntent: 'search for videos about fable', roles: searchRoles, locale: searchLocale });
+    const seq = op.actions.map((a) => a.action);
+    assert.ok(seq.includes('TYPE'), `expected a TYPE, got ${seq.join(',')}`);
+    const enters = op.actions.filter((a) => a.action === 'ENTER');
+    assert.equal(enters.length, 1, `expected exactly one ENTER, got ${seq.join(',')}`);
+    assert.equal(enters[0].selector, 'input#search');
+    assert.ok(seq.lastIndexOf('ENTER') > seq.indexOf('TYPE'), `ENTER must follow the TYPE, got ${seq.join(',')}`);
+    assert.equal(enters[0].landmark.accessibleName, 'Search');   // carries identity for probe-or-recover
+  });
+
+  it('does NOT append ENTER when a real submit button was bound (the button commits)', () => {
+    const locale = { features: {
+      q:   { id: 'q', kind: 'input', label: 'Search', selector: 'input#search', fieldType: 'text', interaction: { pattern: 'type', effect: 'none' } },
+      btn: { id: 'btn', kind: 'action', label: 'Search', selector: 'button#go', interaction: { pattern: 'click', effect: 'submit' } },
+    } };
+    const roles = [
+      { role: 'Search', featureId: 'q', selector: 'input#search', kind: 'input' },
+      { role: 'Go', featureId: 'btn', selector: 'button#go', kind: 'action' },
+    ];
+    const op = synthesizeTrialOp({ groundedIntent: 'search for videos', roles, locale });
+    assert.equal(op.actions.filter((a) => a.action === 'ENTER').length, 0);
+    assert.ok(op.actions.some((a) => a.action === 'CLICK' && a.selector === 'button#go'));
+  });
+
+  it('does NOT append ENTER when the act navigates away (no form to submit)', () => {
+    const locale = { features: {
+      q:   { id: 'q', kind: 'input', label: 'Search', selector: 'input#search', fieldType: 'text', interaction: { pattern: 'type', effect: 'none' } },
+      nav: { id: 'nav', kind: 'navigation', label: 'Videos', selector: 'a#videos', href: '/videos/', interaction: { pattern: 'click', effect: 'navigate' } },
+    } };
+    const roles = [
+      { role: 'Search', featureId: 'q', selector: 'input#search', kind: 'input' },
+      { role: 'Videos', featureId: 'nav', selector: 'a#videos', kind: 'navigation' },
+    ];
+    const op = synthesizeTrialOp({ groundedIntent: 'go to videos', roles, locale });
+    assert.equal(op.actions.filter((a) => a.action === 'ENTER').length, 0);
+  });
+
+  it('does NOT append ENTER for a select-only fill (Enter is not a dropdown submit)', () => {
+    const locale = { features: {
+      sel: { id: 'sel', kind: 'input', label: 'Category', selector: 'select#cat', fieldType: 'select', interaction: { pattern: 'select', effect: 'none' } },
+    } };
+    const roles = [ { role: 'Category', featureId: 'sel', selector: 'select#cat', kind: 'input', fieldType: 'select' } ];
+    const op = synthesizeTrialOp({ groundedIntent: 'choose category', roles, locale });
+    assert.equal(op.actions.filter((a) => a.action === 'ENTER').length, 0);
+    assert.ok(op.actions.some((a) => a.action === 'SELECT'));
+  });
+});
+
+describe('classifyTrialSafety — a terminal ENTER is the commit (v2.74.879)', () => {
+  it('defers an irreversible Enter-submit (swaps the ENTER for a reachability EXTRACT)', () => {
+    const draft = { actions: [
+      { action: 'TYPE', selector: 'input#email', value: 'x' },
+      { action: 'ENTER', selector: 'input#email', landmark: { role: 'textbox', accessibleName: 'Email', selector: 'input#email' } },
+    ] };
+    const res = classifyTrialSafety('subscribe to the newsletter', draft);
+    assert.equal(res.safetyClass, 'irreversible');
+    assert.deepEqual(res.deferred, ['input#email']);
+    assert.equal(res.actions.filter((a) => a.action === 'ENTER').length, 0, 'the ENTER must be deferred, not fired');
+    const probe = res.actions.find((a) => a.target === 'TRIAL_TERMINAL');
+    assert.ok(probe && probe.action === 'EXTRACT' && probe.selector === 'input#email');
+  });
+
+  it('keeps a reversible search Enter-submit (runs in full)', () => {
+    const draft = { actions: [
+      { action: 'TYPE', selector: 'input#q', value: 'fable' },
+      { action: 'ENTER', selector: 'input#q' },
+    ] };
+    const res = classifyTrialSafety('search for videos about fable', draft);
+    assert.equal(res.safetyClass, 'reversible');
+    assert.deepEqual(res.deferred, []);
+    assert.equal(res.actions.filter((a) => a.action === 'ENTER').length, 1, 'a reversible Enter-submit is kept');
   });
 });

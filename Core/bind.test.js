@@ -409,3 +409,36 @@ describe('selectionToTrialRoles — read/act intents resolve matched features vi
     assert.ok(roles.every((r) => r.selector));
   });
 });
+
+describe('selectionToTrialRoles — dedup duplicate ANCHORED inputs (SG-RES-7c+, v2.74.880)', () => {
+  it('collapses two same-role inputs BOTH anchored to one, keeping the visible field', () => {
+    // Pixabay-style: a header search AND an in-page search, both role "Search videos", BOTH anchored by the
+    // matcher → without this the op TYPEs the keyword twice (the SEARCH_FOR_VIDEOS + _2 duplicate). Keep one.
+    const locale = { goals: { g: { id: 'g', label: 'search videos', achievableVia: ['s1', 's2'] } }, features: {
+      s1: { id: 's1', label: 'Search videos', kind: 'input', goals: ['g'], selector: '#hdr-search', selectorVerified: true, interaction: { pattern: 'type', effect: 'none' } },
+      s2: { id: 's2', label: 'Search videos', kind: 'input', goals: ['g'], selector: '#modal-search', hidden: true, interaction: { pattern: 'type', effect: 'none' } },
+    } };
+    const roles = selectionToTrialRoles({ shape: 'act' }, { matches: { q: ['s1', 's2'] } }, locale);
+    const inputs = roles.filter((r) => r.kind === 'input');
+    assert.equal(inputs.length, 1, `expected one input, got ${roles.map((r) => r.featureId).join(',')}`);
+    assert.equal(inputs[0].featureId, 's1', 'kept the visible header search, dropped the hidden twin');
+  });
+
+  it('keeps DISTINCT roles (keyword + location) — only same-role dups collapse', () => {
+    const locale = { goals: { g: { id: 'g', label: 'search jobs', achievableVia: ['q', 'loc'] } }, features: {
+      q:   { id: 'q', label: 'Keyword', kind: 'input', goals: ['g'], selector: '#q', interaction: { pattern: 'type', effect: 'none' } },
+      loc: { id: 'loc', label: 'Location', kind: 'input', goals: ['g'], selector: '#loc', interaction: { pattern: 'type', effect: 'none' } },
+    } };
+    const ids = selectionToTrialRoles({ shape: 'act' }, { matches: { f: ['q', 'loc'] } }, locale).map((r) => r.featureId).sort();
+    assert.deepEqual(ids, ['loc', 'q'], 'distinct-role inputs are both kept');
+  });
+
+  it('prefers a selector-verified field over an unverified same-role twin', () => {
+    const locale = { goals: { g: { id: 'g', label: 'search', achievableVia: ['a', 'b'] } }, features: {
+      a: { id: 'a', label: 'Search', kind: 'input', goals: ['g'], selector: '#a', interaction: { pattern: 'type', effect: 'none' } },
+      b: { id: 'b', label: 'Search', kind: 'input', goals: ['g'], selector: '#b', selectorVerified: true, interaction: { pattern: 'type', effect: 'none' } },
+    } };
+    const ids = selectionToTrialRoles({ shape: 'act' }, { matches: { q: ['a', 'b'] } }, locale).map((r) => r.featureId);
+    assert.deepEqual(ids, ['b'], 'kept the selector-verified field');
+  });
+});

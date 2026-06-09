@@ -171,6 +171,29 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
       }
     }
 
+    // ONE INPUT PER ROLE — anchored too (v2.74.880, SG-RES-7c+). 7c skips only inputs added by goal
+    // EXPANSION; two equivalent inputs the matcher BOTH anchored (a site's header search AND its in-page
+    // search, both role "Search") are already in `ids`, so they bypass that gate — the op then TYPEs the
+    // keyword twice (the SEARCH_FOR_VIDEOS + _2 duplicate from the live trace) and Enter-submits an arbitrary
+    // one. Collapse bound INPUTs that share a role key to ONE, keeping the field a user actually sees + uses:
+    // visible > non-decoy > selector-verified, ties keep the first (anchor-first order). Distinct roles
+    // (q + location) keep their own slots. Inputs only — actions/disclosures dedup elsewhere (_destKey / 7e).
+    {
+      const _inKey = (f) => String((f && (f.label || f.id)) || '').trim().toLowerCase();
+      const _score = (f) => (f.hidden ? 0 : 4) + (f.decoy === true ? 0 : 2) + (f.selectorVerified ? 1 : 0);
+      const keepByRole = new Map();
+      for (const id of [...ids]) {
+        const f = feats[id];
+        if (!f || f.kind !== 'input') continue;
+        const k = _inKey(f); if (!k) continue;
+        const prev = keepByRole.get(k);
+        if (!prev) { keepByRole.set(k, f); continue; }
+        const win = _score(f) > _score(prev) ? f : prev;     // tie → prev (first-bound) wins
+        keepByRole.set(k, win);
+        ids.delete((win === prev ? f : prev).id);
+      }
+    }
+
     // CONTAINER → ONE OPTION (v2.74.643, SG-RES-7g) — a filter dropdown's selectable VALUES are its
     // individual options, but the matcher often anchors the LISTBOX/MENU CONTAINER whose accName concatenates
     // every option ("All Dates Last 24 hours Last 7 days…"). Clicking the container applies the dropdown's

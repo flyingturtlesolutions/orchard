@@ -1467,10 +1467,14 @@ export function createSgMessageHandlers(ctx) {
         if (!g) { sendResponse({ success: false, error: 'ground not found' }); return; }
         const cap = (await ctx.readSgCapabilities(groundId)).find((c) => c.id === capabilityId);
         if (!cap) { sendResponse({ success: false, error: 'capability not found' }); return; }
-        const params = (Array.isArray(cap.params) ? cap.params : []).map((p) => (typeof p === 'string' ? p : (p && p.name))).filter(Boolean);
+        const richParams = Array.isArray(cap.params) ? cap.params : [];
+        const params = richParams.map((p) => (typeof p === 'string' ? p : (p && p.name))).filter(Boolean);
         let stated = {};
         if (params.length) {
-          try { const bp = await AnthropicService.bindClauseParams({ clause: ask, params }); if (bp && bp.values && typeof bp.values === 'object') stated = bp.values; }
+          // v2.74.881 — pass the RICH params (incl. option vocabulary), not bare names, so an OPTION param like
+          // CATEGORY binds to its catalog value off-page (no live affordances cross-Ground) instead of dropping to
+          // UNRESOLVED → skipped → an unscoped search (the "search pixabay for videos…" → wrong page gap).
+          try { const bp = await AnthropicService.bindClauseParams({ clause: ask, params: richParams }); if (bp && bp.values && typeof bp.values === 'object') stated = bp.values; }
           catch (e) { Logger.warn('background', `BUILD_SG_ON_GROUND_WORKFLOW bindClauseParams unavailable: ${e.message}`); }
         }
         const groundUrl = g.url || (Array.isArray(g.urlPatterns) ? g.urlPatterns[0] : null) || null;

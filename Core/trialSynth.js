@@ -231,6 +231,10 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
     }
   };
 
+  // Track the LAST free-text fill: a search form that commits on Enter (no submit button) needs an Enter
+  // press to send it (step 3b). file/select fills don't submit-on-Enter, so they never set this.
+  let lastTextFill = null;
+
   // 2. Fill inputs — by the field's ACTUAL kind, not always TYPE. A <select> needs SELECT; a file input
   //    needs SET_FILE (SG-#81c — not yet executable, so deferred with a clear reason rather than mis-TYPED);
   //    text/textarea/etc. get TYPE with a concrete trial value (self-contained run, no param binding).
@@ -250,18 +254,34 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
     const value = trialValueFor(r.role, intent, { label: r._label, name: _nameAttr(r.selector) });
     actions.push({ action: 'TYPE', selector: r.selector, value, landmark: _lm(r) });
     trialInputs.push({ role: r.role, selector: r.selector, value });
+    lastTextFill = r;   // a free-text fill → eligible for the Enter-submit fallback (3b)
   }
 
   // 3. Click action controls (skip any already clicked as a reveal trigger).
+  let committedOrNavigated = false;   // a real submit button OR a navigation already sends the form → no Enter needed
   for (const r of acts) {
     if (!r.selector) { skipped.push({ role: r.role, why: 'no selector' }); continue; }
     if (revealed.has(r.selector)) continue;
     _pushNorm(r);
     actions.push({ action: 'CLICK', selector: r.selector, landmark: _lm(r) });
+    const _af = r.featureId ? features[r.featureId] : null;
+    if (r._kind === 'navigation' || (_af && _af.interaction && _af.interaction.effect === 'submit')) committedOrNavigated = true;
     // A NAVIGATION click leaves the page — any further on-page action would run on the destination and
     // hard-fail (the live "click footer Radio → navigate → then try the Explore-menu Radio" failure). A
     // navigate/act intent is fulfilled by reaching the target, so stop emitting once we've navigated.
     if (r._kind === 'navigation') break;
+  }
+
+  // 3b. (v2.74.879) Submit a filled search form that has NO bindable submit button. Many search bars commit
+  //     on Enter with no visible submit control, so Core/bind finds no effect:submit feature to add (its
+  //     "FILLS a form must also SUBMIT" block) and the form is TYPED but never sent — the live "type 'fable',
+  //     stay on '/', postcondition url_matches('/videos/') fails" gap. When we typed a free-text field, did
+  //     NOT navigate away, and emitted no submit/commit CLICK, press Enter on the last text input: the runtime
+  //     handleEnter dispatches the key AND calls form.requestSubmit() (implicit submit), mirroring a real user.
+  //     classifyTrialSafety treats this terminal ENTER like a terminal CLICK, so an IRREVERSIBLE Enter-submit
+  //     is still deferred (probed, never fired) in the trial.
+  if (lastTextFill && lastTextFill.selector && !committedOrNavigated) {
+    actions.push({ action: 'ENTER', selector: lastTextFill.selector, landmark: _lm(lastTextFill) });
   }
 
   // 4. READ-shaped intent: EXTRACT the content/collection role as the proof of what's surfaced.
@@ -316,12 +336,14 @@ const IRREVERSIBLE_SELECTORHINT = /(buy|purchase|order|pay|checkout|place-?order
  */
 export function classifyTrialSafety(intent, draft) {
   const actions = (Array.isArray(draft?.actions) ? draft.actions : []).map((a) => ({ ...a }));
-  const mutates = actions.some((a) => a.action === 'TYPE' || a.action === 'CLICK');
+  const mutates = actions.some((a) => a.action === 'TYPE' || a.action === 'CLICK' || a.action === 'ENTER');
   if (!mutates) return { safetyClass: 'read', actions, deferred: [] };
 
-  // Find the terminal commit = the LAST CLICK in the op.
+  // Find the terminal commit = the LAST CLICK or ENTER in the op. v2.74.879 — a search/no-button form
+  // submits on Enter; treat that terminal ENTER exactly like a terminal CLICK so an irreversible Enter-submit
+  // is deferred (swapped for a reachability EXTRACT probe) rather than fired during the trial.
   let termIdx = -1;
-  for (let i = actions.length - 1; i >= 0; i--) { if (actions[i].action === 'CLICK') { termIdx = i; break; } }
+  for (let i = actions.length - 1; i >= 0; i--) { const act = actions[i].action; if (act === 'CLICK' || act === 'ENTER') { termIdx = i; break; } }
   const termSel = termIdx >= 0 ? actions[termIdx].selector : null;
   const irreversible = IRREVERSIBLE_INTENT.test(String(intent || ''))
     || (termSel && IRREVERSIBLE_SELECTORHINT.test(String(termSel)));

@@ -2525,18 +2525,37 @@ Rules:
    */
   static async bindClauseParams({ clause, params = [] }) {
     const ask = (typeof clause === 'string' ? clause : '').trim();
-    const names = (Array.isArray(params) ? params : []).map((p) => (typeof p === 'string' ? p : (p && p.name))).filter(Boolean);
+    // v2.74.881 — accept RICH params ({name, kind, vocabulary/options, fillOp}) so an OPTION param binds to its
+    // catalog value. The cross-Ground binder runs OFF the target page (no live affordances), so the captured option
+    // vocabulary is the only signal that e.g. "videos" is the CATEGORY value, not part of the search text — without
+    // it the model folded "search for videos about fable" into one keyword and OMITTED CATEGORY (the live
+    // "CATEGORY=UNRESOLVED → category step skipped → search unscoped" gap). Backward-compatible: a bare-name (string)
+    // param renders exactly as before, so name-only callers are unchanged.
+    const list = (Array.isArray(params) ? params : [])
+      .map((p) => (typeof p === 'string' ? { name: p } : (p || {})))
+      .filter((p) => p && p.name);
+    const names = list.map((p) => p.name);
     if (!ask || !names.length) return null;
     if (!(await AnthropicService.hasLlm())) return null;
-    const systemPrompt = `You extract the input VALUES a one-line request explicitly provides, for a saved web capability whose input parameter NAMES are given (UI-derived, e.g. SEARCH_JOB_TITLE_KEYWORDS_OR_COMPANY).
+    const _opts = (p) => (Array.isArray(p.vocabulary) ? p.vocabulary : (Array.isArray(p.options) ? p.options : [])).filter(Boolean);
+    const _isChoice = (p) => _opts(p).length > 0 || p.kind === 'option' || p.fillOp === 'select' || p.fieldType === 'select';
+    const hasChoice = list.some(_isChoice);
+    const renderParam = (p) => {
+      const opts = _opts(p);
+      if (opts.length) return `- ${p.name} — pick ONE of: ${opts.slice(0, 12).join(', ')}`;
+      if (_isChoice(p)) return `- ${p.name} [choose one]`;
+      return `- ${p.name}`;
+    };
+    const systemPrompt = `You extract the input VALUES a one-line request explicitly provides, for a saved web capability whose input parameters are given (UI-derived names, e.g. SEARCH_JOB_TITLE_KEYWORDS_OR_COMPANY).
 
 Parameters:
-${names.map((n) => `- ${n}`).join('\n')}
+${list.map(renderParam).join('\n')}
 
 Return ONLY a JSON object: {"values": {"<EXACT_PARAM_NAME>": "<value from the request>"}}
 Rules:
 - Use the EXACT parameter name as the key, copied verbatim from the list above.
-- Include a param ONLY when the request explicitly states a value for it. OMIT any param the request does not specify — never invent a location, date, category, etc.
+- Include a param ONLY when the request explicitly states a value for it. OMIT any param the request does not specify — never invent a location, date, category, etc.${hasChoice ? `
+- A param marked "pick ONE of …" / "[choose one]" is a CHOICE: if the request names one of its options (e.g. "videos" → "Videos"), that IS a stated value — bind it using the option's EXACT spelling, and do NOT fold that word into another param's text.` : ''}
 - Strip the leading verb and the site name: "search for game developer jobs on Indeed" → the keyword/search param gets "game developer jobs" (not "search for…" and not "…on Indeed").
 - A PRONOUN / back-reference is NOT a stated value — OMIT it: if the value would be "it", "that", "them", "this", "the one", "the first result", or "the title/price/link you found/read", the input comes from an EARLIER step's result, not this request (it's filled at run time, not typed).
 - {} if the request states nothing bindable.`;
