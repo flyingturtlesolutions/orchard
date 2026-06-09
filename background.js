@@ -1687,6 +1687,7 @@ const _sgMessageHandlers = createSgMessageHandlers({
   outcomeRollups       : _outcomeRollups,               // GA-5 — per-Ground conventions histogram for the Select tie-break
   broadcastStorageChanged,
   readSgCapabilities   : _readSgCapabilities,
+  readSiteMap          : _readSiteMap,              // G1-3 — siteMap node count for Ground readiness
   readSgDraft          : _readSgDraft,
   writeSgDraft         : _writeSgDraft,
   clearSgDraft         : _clearSgDraft,

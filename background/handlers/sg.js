@@ -25,6 +25,7 @@ import { listLocales } from '../../Services/Storage/GroundAssetStore.js';   // O
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability, findDuplicateCapabilities } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A; GA-6 dedup
 import { findDuplicateGroundGroups, planGroundMerge, primaryHost, siteIdentity, planEnsureGround } from '../../Core/groundDedup.js';   // v2.74.816/.817 — duplicate-Ground detect + merge; .835 — registrable brand for site-name matching; G1 — dedup-before-mint plan
 import { GroundManager } from '../../Core/GroundManager.js';   // G1 — auto-ground mint (dedup-before-mint entrypoint)
+import { groundReadiness } from '../../Core/groundReadiness.js';   // G1-3 — Ground readiness (empty|preparing|capable|rich)
 import { matchGroundForUrl } from '../../Core/GroundMatcher.js';   // v2.74.823 — canonical URL→Ground matcher (honors urlPatterns, incl. the sibling hosts a dedup merge unions)
 import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/orchFeedback.js';   // ORCH-FB — corrective actions
 import { feedbackExamples } from '../../Core/feedbackLearn.js';   // ORCH-FB-2 — relevance shaping from feedback history
@@ -132,6 +133,18 @@ async function _liveBackingIds(groundId) {
   try { liveStrategyIds = new Set((await StorageManager.listStrategies(groundId)).map((x) => x && x.id).filter(Boolean)); } catch { liveStrategyIds = null; }
   try { liveFragmentIds = new Set((await StorageManager.listFragments(groundId)).map((x) => x && x.id).filter(Boolean)); } catch { liveFragmentIds = null; }
   return { liveStrategyIds, liveFragmentIds };
+}
+
+// G1-3 — a Ground's readiness from its LIVE substrate counts: Locales modeled
+// (listLocales), ACTIVE capabilities authored (readSgCapabilities + isActiveCapability),
+// and siteMap nodes discovered (ctx.readSiteMap). Best-effort — a failed read for any
+// signal counts as 0, never throws. Classification is pure (Core/groundReadiness).
+async function _readinessForGround(ctx, groundId) {
+  let localeCount = 0, capabilityCount = 0, siteMapNodeCount = 0;
+  try { localeCount = (await listLocales(groundId) || []).length; } catch { /* */ }
+  try { const caps = await ctx.readSgCapabilities(groundId); capabilityCount = (Array.isArray(caps) ? caps : []).filter((c) => c && isActiveCapability(c)).length; } catch { /* */ }
+  try { const sm = ctx.readSiteMap ? await ctx.readSiteMap(groundId) : null; siteMapNodeCount = sm && sm.nodes ? Object.keys(sm.nodes).length : 0; } catch { /* */ }
+  return { ...groundReadiness({ localeCount, capabilityCount, siteMapNodeCount }), counts: { localeCount, capabilityCount, siteMapNodeCount } };
 }
 
 async function _bindStrategyOnGround(ctx, clause, groundId, effect = 'action') {
@@ -767,16 +780,34 @@ export function createSgMessageHandlers(ctx) {
         const plan = planEnsureGround({ url, existingGroundId: existingId });
         if (plan.action === 'reuse') {
           let ground = null; try { ground = await StorageManager.getGround(existingId); } catch { /* */ }
-          Logger.info('background', `ensureGroundForUrl: reuse Ground ${existingId} for ${url} (dedup-before-mint hit)`);
-          sendResponse({ success: true, groundId: existingId, created: false, ground });
+          const r = await _readinessForGround(ctx, existingId);   // G1-3 — the orchestrator wants the Ground's state up front
+          Logger.info('background', `ensureGroundForUrl: reuse Ground ${existingId} for ${url} (dedup-before-mint hit; readiness ${r.state})`);
+          sendResponse({ success: true, groundId: existingId, created: false, ground, readiness: r.state, counts: r.counts });
           return;
         }
         if (plan.action === 'invalid') { sendResponse({ success: false, error: `cannot derive a Ground from url: ${url}` }); return; }
         const ground = await GroundManager.create({ name: plan.name, url: plan.url });
-        Logger.info('background', `ensureGroundForUrl: MINTED Ground ${ground?.id} "${plan.name}" for ${url} (no existing match)`);
-        sendResponse({ success: true, groundId: ground?.id ?? null, created: true, ground });
+        const r = await _readinessForGround(ctx, ground?.id);   // a freshly-minted Ground reads back 'empty'
+        Logger.info('background', `ensureGroundForUrl: MINTED Ground ${ground?.id} "${plan.name}" for ${url} (no existing match; readiness ${r.state})`);
+        sendResponse({ success: true, groundId: ground?.id ?? null, created: true, ground, readiness: r.state, counts: r.counts });
       } catch (err) {
         Logger.error('background', `ENSURE_GROUND_FOR_URL failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // G1-3 (v2.74.853) — a Ground's READINESS for unattended use: empty | preparing | capable | rich,
+    // from live substrate counts (Locales modeled, active capabilities, siteMap nodes). The auto-explore
+    // orchestrator gates on this (an empty Ground must be explored first; a capable one can replay an
+    // existing capability). Pure classifier (Core/groundReadiness); this handler just supplies the counts.
+    GET_GROUND_READINESS: async (payload, _sender, sendResponse) => {
+      try {
+        const { groundId } = payload ?? {};
+        if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
+        const r = await _readinessForGround(ctx, groundId);
+        sendResponse({ success: true, groundId, readiness: r.state, rank: r.rank, counts: r.counts });
+      } catch (err) {
+        Logger.error('background', `GET_GROUND_READINESS failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },
