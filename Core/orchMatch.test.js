@@ -4,7 +4,40 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { toCandidate, scopeAndPartition, lexicalScore, rankAndDecide, matchAsk, DEFAULT_THRESHOLDS, accreteAlias, removeAlias, normalizeAliasPhrase, scoresToScorer, validateBindings, promotionBonus, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability } from './orchMatch.js';
+import { toCandidate, scopeAndPartition, lexicalScore, rankAndDecide, matchAsk, DEFAULT_THRESHOLDS, accreteAlias, removeAlias, normalizeAliasPhrase, scoresToScorer, validateBindings, promotionBonus, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability, capabilitySignature, findDuplicateCapabilities } from './orchMatch.js';
+
+describe('orchMatch — GA-6 structural-twin capability dedup (detection)', () => {
+  const mk = (id, intent, sel, shape = 'act', url = 'https://x.com/p') => ({ id, intent, shape, localeUrl: url, binding: sel.map((s) => ({ selector: s })) });
+  it('capabilitySignature is value-independent: same binding + shape + page → same signature regardless of intent/order', () => {
+    assert.equal(capabilitySignature(mk('a', 'search for remote jobs', ['#kw', '#loc'])),
+                 capabilitySignature(mk('b', 'find jobs near me',      ['#loc', '#kw'])));
+  });
+  it('different page, shape, or targets → different signature', () => {
+    const a = mk('a', 'search', ['#kw']);
+    assert.notEqual(capabilitySignature(a), capabilitySignature(mk('b', 'search', ['#kw'], 'read')));        // shape differs
+    assert.notEqual(capabilitySignature(a), capabilitySignature(mk('c', 'search', ['#kw'], 'act', '/q')));   // page differs
+    assert.notEqual(capabilitySignature(a), capabilitySignature(mk('d', 'search', ['#other'])));             // target differs
+  });
+  it('a landmark selector wins over the raw selector for the fingerprint', () => {
+    const a = { id: 'a', shape: 'act', localeUrl: 'u', binding: [{ selector: 'div:nth-child(3)', landmark: { selector: '#kw' } }] };
+    const b = { id: 'b', shape: 'act', localeUrl: 'u', binding: [{ selector: '#kw' }] };
+    assert.equal(capabilitySignature(a), capabilitySignature(b));
+  });
+  it('no fingerprintable binding → empty signature → never twinned', () => {
+    assert.equal(capabilitySignature({ id: 'a', shape: 'act', binding: [] }), '');
+    assert.equal(capabilitySignature({ id: 'b', shape: 'act' }), '');
+  });
+  it('findDuplicateCapabilities groups twins (>=2), ignores singletons + unfingerprintable', () => {
+    const groups = findDuplicateCapabilities([
+      mk('a', 'search for jobs', ['#kw']),
+      mk('b', 'find jobs',       ['#kw']),            // twin of a
+      mk('c', 'read salary',     ['#sal'], 'read'),   // singleton
+      { id: 'd', shape: 'act', binding: [] },         // unfingerprintable
+    ]);
+    assert.equal(groups.length, 1);
+    assert.deepEqual(groups[0].capabilities.map((c) => c.id).sort(), ['a', 'b']);
+  });
+});
 
 // A realistic mini-library for indeed.com results page.
 const G = 'ground-indeed';

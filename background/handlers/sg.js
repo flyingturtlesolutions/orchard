@@ -22,7 +22,7 @@ import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
 import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved, describeTraceInput, derivePhasePostcondition, reconcileObservedLandmarks } from '../../Core/observedSegment.js';
 import { listLocales } from '../../Services/Storage/GroundAssetStore.js';   // OBS (v2.74.764) — reconcile observed landmarks to grounded Locale features
-import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A
+import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability, findDuplicateCapabilities } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A; GA-6 dedup
 import { findDuplicateGroundGroups, planGroundMerge, primaryHost, siteIdentity } from '../../Core/groundDedup.js';   // v2.74.816/.817 — duplicate-Ground detect + merge; .835 — registrable brand for site-name matching
 import { matchGroundForUrl } from '../../Core/GroundMatcher.js';   // v2.74.823 — canonical URL→Ground matcher (honors urlPatterns, incl. the sibling hosts a dedup merge unions)
 import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/orchFeedback.js';   // ORCH-FB — corrective actions
@@ -2425,6 +2425,28 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, coverage });
       } catch (err) {
         Logger.error('background', `GROUND_AUTHORING_COVERAGE failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // GA-6 — DETECT duplicate (structural-twin) capabilities on a Ground: caps that bind the SAME elements with the
+    // same shape on the same page, differing only in intent phrasing (a reworded ask re-authored the same procedure —
+    // library bloat once auto-explore templates archetypes). READ-ONLY detection, mirroring DETECT_DUPLICATE_GROUNDS;
+    // the caller surfaces clusters for confirm-then-merge. Auto-merge / upsert-at-mint is a deliberate follow-up.
+    DETECT_DUPLICATE_CAPABILITIES: async (payload, _sender, sendResponse) => {
+      try {
+        const { groundId = null } = payload ?? {};
+        if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
+        const caps = (await ctx.readSgCapabilities(groundId)) || [];
+        const groups = findDuplicateCapabilities(caps).map((g) => ({
+          signature: g.signature,
+          capabilities: g.capabilities.map((c) => ({ id: c.id, intent: c.intent || c.name || '', shape: c.shape || null })),
+        }));
+        const dupes = groups.reduce((n, g) => n + (g.capabilities.length - 1), 0);
+        Logger.info('background', `DETECT_DUPLICATE_CAPABILITIES — ${String(groundId).slice(-6)}: ${groups.length} twin cluster(s), ${dupes} redundant cap(s)`);
+        sendResponse({ success: true, groups, duplicateCount: dupes });
+      } catch (err) {
+        Logger.error('background', `DETECT_DUPLICATE_CAPABILITIES failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },

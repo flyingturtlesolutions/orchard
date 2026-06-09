@@ -173,6 +173,49 @@ export function isOrphanCapability(cap, { liveStrategyIds = null, liveFragmentId
 }
 
 /**
+ * GA-6 — the value-INDEPENDENT structural signature of a capability: `shape | scope | sorted bound targets`. PURE.
+ * Two capabilities with the same signature are STRUCTURAL TWINS — the same procedure over the same elements on the
+ * same page, differing only in intent PHRASING or typed VALUES (a reworded ask re-authored over the same binding —
+ * the library bloat the critic flagged once auto-explore templates archetypes). Targets are the bound elements'
+ * selectors (a landmark's selector wins over the raw one), NOT the typed values, so "search X" and "search Y" share
+ * a signature. `scope` is the localeUrl (exact-page twins only; cross-URL archetype twins are a follow-up). Empty
+ * when there's no binding to fingerprint (then it's never a twin).
+ * @param {object} cap  an sgCapability ({ shape, localeUrl, groundId, binding:[{selector, landmark}] })
+ * @returns {string}
+ */
+export function capabilitySignature(cap) {
+  if (!cap) return '';
+  const roles = Array.isArray(cap.binding) ? cap.binding : [];
+  const targets = roles
+    .map((r) => String((r && ((r.landmark && r.landmark.selector) || r.selector)) || '').trim())
+    .filter(Boolean)
+    .sort();
+  if (!targets.length) return '';                                  // nothing structural to fingerprint → never a twin
+  return `${String(cap.shape || '')}|${String(cap.localeUrl || cap.groundId || '')}|${targets.join('•')}`;
+}
+
+/**
+ * GA-6 — group a Ground's capabilities into STRUCTURAL-TWIN clusters (≥2 sharing a signature). PURE. Read-only
+ * DETECTION, mirroring findDuplicateGroundGroups — the caller surfaces clusters for confirm-then-merge; nothing is
+ * mutated here (auto-merge / upsert-at-mint is a deliberate follow-up). Caps with no fingerprintable binding are
+ * skipped (never falsely twinned).
+ * @param {object[]} capabilities
+ * @returns {Array<{signature:string, capabilities:object[]}>}
+ */
+export function findDuplicateCapabilities(capabilities) {
+  const bySig = new Map();
+  for (const c of (Array.isArray(capabilities) ? capabilities : [])) {
+    const sig = capabilitySignature(c);
+    if (!sig) continue;
+    if (!bySig.has(sig)) bySig.set(sig, []);
+    bySig.get(sig).push(c);
+  }
+  const groups = [];
+  for (const [signature, caps] of bySig) if (caps.length >= 2) groups.push({ signature, capabilities: caps.slice() });
+  return groups;
+}
+
+/**
  * Funnel stage 2 + the three-way gate. Effect-qualify → rank → decide auto / propose / miss, with the
  * reversibility hard veto. PURE. `score` defaults to lexicalScore; inject the LLM scorer to upgrade.
  * The `reason` strings double as the assistant's explanation copy (the funnel order IS the UX copy).
