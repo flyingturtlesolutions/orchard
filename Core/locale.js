@@ -233,6 +233,26 @@ export function driftHash(features) {
   return (h >>> 0).toString(36);
 }
 
+/**
+ * EX-4 (Win C) — drift hash computed directly from a RAW enumerate feature LIST
+ * (the array `enumeratePage` returns), identical to what
+ * `buildLocale(rawFeatures).coverage.driftHash` stamps. Lets the Explore handler
+ * fingerprint a cheap pre-sweep enumerate and compare it against a cached
+ * Locale's stored hash WITHOUT building the whole model — the precondition for
+ * the freshness short-circuit (skip the poke sweep + LLM goal synthesis when the
+ * page's feature id-set is unchanged). Feature ids are content hashes of
+ * kind|label|selector, so this is a real change detector, not a count. Mirrors
+ * buildLocale's id extraction (valid string `id` only, last-wins dedup) EXACTLY
+ * so the pre-check hash and the stamped hash can never diverge.
+ */
+export function driftHashFromRaw(rawFeatures) {
+  const features = {};
+  for (const f of Array.isArray(rawFeatures) ? rawFeatures : []) {
+    if (f && typeof f.id === 'string' && f.id) features[f.id] = f;
+  }
+  return driftHash(features);
+}
+
 function hashId(s) {
   const str = String(s);
   let h = 5381;

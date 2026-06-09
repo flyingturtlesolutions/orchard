@@ -5155,6 +5155,60 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           catch (e) { Logger.warn('background', `pre-sweep ENUMERATE_PAGE failed (will retry post-sweep): ${e.message}`); }
           if (enr?.success) Logger.info('explore', `pre-sweep enumerate: ${(enr.features || []).length} feature(s) captured from entry state`);
 
+          // EX-4 (Win C, v2.74.848) — FRESHNESS SHORT-CIRCUIT. The banded poke
+          // sweep (per-band LLM plan + click+snapshot) and synthesizeGoals are the
+          // entire cost of Explore; on a page we've already modeled that hasn't
+          // materially changed, re-running all of it just reproduces the cached
+          // Locale. The pre-sweep enumerate above is a cheap, deterministic content
+          // fingerprint (feature ids are content hashes of kind|label|selector → a
+          // real change detector, not a count). If it matches the cached Locale's
+          // coverage.driftHash AND the cache is recent AND the cache is a real
+          // Explore product (fidelity past L0 — never a shallow manual catalog),
+          // return the cache and skip the sweep + goals entirely.
+          if (groundId && enr?.success && Array.isArray(enr.features)) {
+            try {
+              const freshHash = Locale.driftHashFromRaw(enr.features);
+              const freshKey  = _normalizeUrlForPerspectiveCache(enr.meta?.url ?? pageUrl);
+              const cached    = await _readLocaleCache(groundId, freshKey);
+              const cm        = cached?.model || null;
+              const cov       = cm?.coverage || {};
+              const cachedAt  = Number(cached?.capturedAt ?? cov.lastExploredAt ?? 0);
+              const ageMs     = Date.now() - cachedAt;
+              const FRESH_TTL_MS = 12 * 60 * 60 * 1000;   // 12h — re-explored within the day ⇒ fresh
+              const isExploreProduct = cov.fidelity && cov.fidelity !== 'L0';   // not a manual L0 catalog
+              if (cm && cov.driftHash && cov.driftHash === freshHash && cachedAt > 0 && ageMs < FRESH_TTL_MS && isExploreProduct) {
+                // Reconstruct lightweight reveal-controls from the cached model's
+                // disclosure layers so the sidepanel chip reports the SAME depth the
+                // prior sweep found ("N control(s) reveal hidden content") without
+                // re-poking. Pure derivation from the cache.
+                const synthControls = [];
+                for (const f of Object.values(cm.features || {})) {
+                  if (f?.kind === 'disclosure' && f.reveals) {
+                    const layer = (cm.layers || {})[f.reveals];
+                    const revCount = Array.isArray(layer?.features) ? layer.features.length : 0;
+                    synthControls.push({ selector: f.selector, role: f.a11yRole || 'button', label: f.label || '', observation: 'reveal', revealCount: revCount, revealed: [] });
+                  }
+                }
+                const reuseStructure = {
+                  version: 1, url: cm.url || pageUrl, title: cm.title || title,
+                  capturedAt: cachedAt, driftHash: cov.driftHash, fresh: true,
+                  viewport: cm.viewport || { w: Number(metrics.viewportW) || tabInfo.width || 0, h: vh },
+                  surface: [], controls: synthControls, planned: true,
+                  ...(cm.affordances ? { affordances: cm.affordances } : {}),
+                  stats: {
+                    candidates: cov.featureCount ?? Object.keys(cm.features || {}).length,
+                    controlsTried: synthControls.length, controlsRevealing: synthControls.length,
+                    totalRevealed: synthControls.reduce((n, c) => n + c.revealCount, 0),
+                    navAttempts: 0, bands: 0, aborted: null, freshSkip: true,
+                  },
+                };
+                Logger.info('explore', `locale-fresh-skip: cached Locale matches current enumerate (driftHash ${freshHash}, age ${Math.round(ageMs / 60000)}m, ${Object.keys(cm.features || {}).length} feature(s), ${synthControls.length} disclosure(s)) — skipped poke sweep + goal synthesis`);
+                sendResponse({ success: true, structure: reuseStructure, cacheKey: freshKey, fresh: true });
+                return;
+              }
+            } catch (e) { Logger.warn('background', `locale-fresh-skip check failed (continuing with full sweep): ${e.message}`); }
+          }
+
           // Band stops, BOTTOM-TO-TOP: from (scrollHeight - vh) up to 0.
           const step = Math.max(1, Math.round(vh * 0.85));
           const bandYs = [];

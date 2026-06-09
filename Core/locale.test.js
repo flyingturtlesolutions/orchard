@@ -3,7 +3,31 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { deriveDisclosureGoals, mergeDepthFromControls, buildIndex, buildLocale } from './locale.js';
+import { deriveDisclosureGoals, mergeDepthFromControls, buildIndex, buildLocale, driftHashFromRaw } from './locale.js';
+
+describe('driftHashFromRaw — EX-4 pre-sweep fingerprint ≡ buildLocale stamp', () => {
+  const raw = [
+    { id: 'a1', kind: 'action', label: 'Search', selector: '#s' },
+    { id: 'b2', kind: 'input', label: 'Keywords', selector: '#k' },
+  ];
+  it('equals buildLocale(...).coverage.driftHash for the same raw features (the freshness contract)', () => {
+    // If these ever diverge the short-circuit silently never fires (or fires wrongly).
+    assert.equal(driftHashFromRaw(raw), buildLocale(raw, {}).coverage.driftHash);
+  });
+  it('is insertion-order independent (same id-set → same hash)', () => {
+    assert.equal(driftHashFromRaw(raw), driftHashFromRaw([raw[1], raw[0]]));
+  });
+  it('changes when the feature id-set changes (real content drift, not just count)', () => {
+    const drifted = [raw[0], { id: 'c3', kind: 'input', label: 'Location', selector: '#loc' }];  // same length, different id
+    assert.notEqual(driftHashFromRaw(raw), driftHashFromRaw(drifted));
+  });
+  it('ignores malformed entries (missing / non-string id) exactly like buildLocale', () => {
+    assert.equal(driftHashFromRaw([...raw, { kind: 'x' }, null, { id: 42 }]), driftHashFromRaw(raw));
+  });
+  it('returns a stable hash for empty / null input', () => {
+    assert.equal(driftHashFromRaw([]), driftHashFromRaw(null));
+  });
+});
 
 describe('buildLocale — EX-3 coverage.capped passthrough', () => {
   it('stamps coverage.capped from meta.capped (default false)', () => {
