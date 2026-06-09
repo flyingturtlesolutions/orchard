@@ -879,7 +879,7 @@ export function createSgMessageHandlers(ctx) {
           matches: Array.isArray(payload?.matches) ? payload.matches : [],
           activePerspectiveIds, groundId, sensitive: !!payload?.sensitive,
         });
-        Logger.debug('monitor', `INTERACTION ${resolved.resolutionStatus} ${raw.interactionKind} → [${resolved.matches.map((m) => m.landmarkUid).join(',') || '—'}] (${activePerspectiveIds.length} active) @ ${raw.url}`);
+        Logger.info('monitor', `INTERACTION ${resolved.resolutionStatus} ${raw.interactionKind} → [${resolved.matches.map((m) => m.landmarkUid).join(',') || '—'}] (${activePerspectiveIds.length} active) @ ${raw.url}`);
         sendResponse({ success: true, id: raw.id, status: resolved.resolutionStatus });
       } catch (err) {
         Logger.error('background', `INTERACTION_RAW failed: ${err.message}`);
@@ -921,9 +921,12 @@ export function createSgMessageHandlers(ctx) {
     // but ONLY after canTrack() passes for the tab's host. No consent → no listeners attach (default-deny).
     INTERACTION_MONITOR_START: async (payload, _sender, sendResponse) => {
       try {
-        const { tabId, groundId } = payload ?? {};
-        if (typeof tabId !== 'number' || !groundId) { sendResponse({ success: false, error: 'tabId + groundId required' }); return; }
-        let host = ''; try { host = new URL((await chrome.tabs.get(tabId))?.url || '').host; } catch { /* */ }
+        let { tabId, groundId } = payload ?? {};
+        if (typeof tabId !== 'number') { sendResponse({ success: false, error: 'tabId required' }); return; }
+        let host = '', url = '';
+        try { url = (await chrome.tabs.get(tabId))?.url || ''; host = new URL(url).host; } catch { /* */ }
+        if (!groundId && url) { try { groundId = _groundIdForUrl(url, await StorageManager.getAllGrounds()); } catch { /* */ } }   // resolve from the tab so the UI only needs a tabId
+        if (!groundId) { sendResponse({ success: false, error: 'no-ground', host }); return; }
         let consent = MONITOR_CONSENT_DEFAULT;
         try { consent = (await chrome.storage.local.get('monitor:consent'))?.['monitor:consent'] || MONITOR_CONSENT_DEFAULT; } catch { /* */ }
         if (!canTrack(consent, { host })) {
