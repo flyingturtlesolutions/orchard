@@ -29,6 +29,8 @@ import { groundReadiness } from '../../Core/groundReadiness.js';   // G1-3 — G
 import { buildInteractionDemand } from '../../Core/interactionDemand.js';   // C1 — monitoring demand set (which landmarks/kinds to watch)
 import { makeRawInteraction, toCaptureTargets } from '../../Core/interactionCapture.js';   // C2 — shape/validate raw interaction; enrich demand w/ selectors
 import { withTrack, MONITOR_CONSENT_DEFAULT, canTrack } from '../../Core/monitorConsent.js';   // C6 — Track consent gate (default-deny)
+import { resolveInteraction } from '../../Core/interactionResolve.js';   // C3 — assemble the ResolvedInteraction (L1)
+import { listActivePerspectives } from '../../Services/PerspectivePredicates.js';   // C3 — active-perspective context for resolution
 import { listLandmarksForGround } from '../../Services/LandmarkResolver.js';   // C1 — accepted-Perspective landmarks (+ a11yRole)
 import { matchGroundForUrl } from '../../Core/GroundMatcher.js';   // v2.74.823 — canonical URL→Ground matcher (honors urlPatterns, incl. the sibling hosts a dedup merge unions)
 import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/orchFeedback.js';   // ORCH-FB — corrective actions
@@ -57,6 +59,11 @@ import { isHybridSyncActive, forceResyncRecord, enqueueGroundTreeDelete, schedul
 // A friendly site label for the chat card: the Ground's stored name UNLESS it is generic/empty ("Ground"), in which
 // case derive it from the host ("indeed.com" → "Indeed"). The cross-Ground card was unreadable ("· on Ground" for
 // every step) when grounding never named the site. PURE.
+// C2b/C3 — active interaction-monitor sessions: tabId → { groundId }. Set by INTERACTION_MONITOR_START,
+// read by INTERACTION_RAW (to resolve the captured event's Ground without a per-event getAllGrounds),
+// cleared by STOP. Module-scope so it survives across handler invocations.
+const _interactionSessions = new Map();
+
 function _groundLabel(g) {
   if (!g) return null;
   const name = String(g.name || g.site || '').trim();
@@ -849,16 +856,31 @@ export function createSgMessageHandlers(ctx) {
     // (C4) consume the RawInteraction next. Dormant until C2b's listeners exist + a session is started.
     INTERACTION_RAW: async (payload, sender, sendResponse) => {
       try {
+        const tabId = sender?.tab?.id ?? (payload && payload.tabId) ?? -1;
         const raw = makeRawInteraction({
           ...(payload || {}),
-          tabId: sender?.tab?.id ?? (payload && payload.tabId) ?? -1,
+          tabId,
           frameId: sender?.frameId ?? 0,
           url: ctx.normalizeUrl((sender && sender.url) || (payload && payload.url) || ''),
           ts: Date.now(),
         });
         if (!raw) { sendResponse({ success: false, error: 'unknown interactionKind' }); return; }
-        Logger.debug('monitor', `INTERACTION_RAW ${raw.interactionKind} <${raw.target.tagName}${raw.target.role ? ' ' + raw.target.role : ''}> @ ${raw.url}`);
-        sendResponse({ success: true, id: raw.id });
+        // C3 (L1) — assemble the ResolvedInteraction. Ground from the per-tab session map (no per-event
+        // getAllGrounds); active perspectives read live for the classifier's context (C4 next).
+        const groundId = _interactionSessions.get(tabId)?.groundId ?? null;
+        let activePerspectiveIds = [];
+        try {
+          if (groundId) {
+            const aps = await listActivePerspectives(groundId, { tabUrl: raw.url, tabId });
+            activePerspectiveIds = (Array.isArray(aps) ? aps : []).map((p) => p && (p.id || p.perspectiveId)).filter(Boolean);
+          }
+        } catch { /* */ }
+        const resolved = resolveInteraction(raw, {
+          matches: Array.isArray(payload?.matches) ? payload.matches : [],
+          activePerspectiveIds, groundId, sensitive: !!payload?.sensitive,
+        });
+        Logger.debug('monitor', `INTERACTION ${resolved.resolutionStatus} ${raw.interactionKind} → [${resolved.matches.map((m) => m.landmarkUid).join(',') || '—'}] (${activePerspectiveIds.length} active) @ ${raw.url}`);
+        sendResponse({ success: true, id: raw.id, status: resolved.resolutionStatus });
       } catch (err) {
         Logger.error('background', `INTERACTION_RAW failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
@@ -911,8 +933,11 @@ export function createSgMessageHandlers(ctx) {
         let landmarks = []; try { landmarks = await listLandmarksForGround(groundId); } catch { landmarks = []; }
         const linked = (Array.isArray(landmarks) ? landmarks : []).filter((l) => l && l.uid && l.perspectiveId);
         const demand = buildInteractionDemand([{ landmarks: linked.map((l) => ({ landmarkUid: l.uid, role: l.a11yRole })) }], { groundId });
-        const selectorByUid = {}; for (const l of linked) selectorByUid[l.uid] = l.selector;
-        const targets = toCaptureTargets(demand, selectorByUid);
+        const selectorByUid = {}; const metaByUid = {};
+        for (const l of linked) { selectorByUid[l.uid] = l.selector; metaByUid[l.uid] = { perspectiveId: l.perspectiveId ?? null, role: l.a11yRole ?? null }; }
+        // C3 — stamp perspectiveId + role on each capture target so the matched event needs NO per-event registry lookup.
+        const targets = toCaptureTargets(demand, selectorByUid).map((t) => ({ ...t, ...(metaByUid[t.landmarkUid] || {}) }));
+        _interactionSessions.set(tabId, { groundId, host });   // C3 — resolve a captured event's Ground by its tab
         let started = false;
         try { const r = await chrome.tabs.sendMessage(tabId, { type: 'START_INTERACTION_CAPTURE', payload: { targets } }, { frameId: 0 }); started = !!r?.success; }
         catch (e) { Logger.warn('background', `START_INTERACTION_CAPTURE send failed: ${e.message}`); }
@@ -926,7 +951,7 @@ export function createSgMessageHandlers(ctx) {
     INTERACTION_MONITOR_STOP: async (payload, _sender, sendResponse) => {
       try {
         const { tabId } = payload ?? {};
-        if (typeof tabId === 'number') { try { await chrome.tabs.sendMessage(tabId, { type: 'STOP_INTERACTION_CAPTURE' }, { frameId: 0 }); } catch { /* */ } }
+        if (typeof tabId === 'number') { _interactionSessions.delete(tabId); try { await chrome.tabs.sendMessage(tabId, { type: 'STOP_INTERACTION_CAPTURE' }, { frameId: 0 }); } catch { /* */ } }
         sendResponse({ success: true });
       } catch (err) {
         Logger.error('background', `INTERACTION_MONITOR_STOP failed: ${err.message}`);

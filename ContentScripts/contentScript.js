@@ -5848,31 +5848,41 @@ function _imDescriptor(el) {
   const n = _imName(el); if (n) d.accessibleName = n;
   return d;
 }
-function _imMatch(target, kind) {
+// C3 — return ALL matching demand targets (a target may sit under >1 landmark → 'ambiguous').
+// Each target carries the perspectiveId + role the START handler stamped, so the background L1
+// resolver needs no per-event registry lookup.
+function _imMatchAll(target, kind) {
+  const out = [];
   for (const t of _imTargets) {
     if (!t || !t.selector || !Array.isArray(t.interactionKinds) || !t.interactionKinds.includes(kind)) continue;
     let hit = null; try { hit = target.closest(t.selector); } catch { hit = null; }
-    if (hit) return hit;
+    if (hit) out.push({ el: hit, t });
   }
-  return null;
+  return out;
+}
+function _imMatchesPayload(hits) {
+  return hits.map((h) => ({ landmarkUid: h.t.landmarkUid, perspectiveId: h.t.perspectiveId ?? null, role: h.t.role ?? null, selectorUsed: h.t.selector }));
 }
 function _imPost(payload) { try { chrome.runtime.sendMessage({ type: 'INTERACTION_RAW', payload }, () => void chrome.runtime.lastError); } catch { /* */ } }
 function _imHandle(domType, evt) {
   if (!_imOn) return;
   const kind = _IM_EVENT_KIND[domType]; if (!kind) return;
   const target = evt.target; if (!target || !target.closest) return;
-  const el = _imMatch(target, kind); if (!el) return;
+  const hits = _imMatchAll(target, kind); if (!hits.length) return;
+  const el = hits[0].el;
+  const matches = _imMatchesPayload(hits);
   if (kind === 'type') {
     const inputType = evt.inputType || '';   // capture primitives now; the event is recycled before the debounce fires
+    const sensitive = _imSensitive(el);
     clearTimeout(_imTypeTimer);
     _imTypeTimer = setTimeout(() => {
       const t = {}; if (inputType) t.inputType = inputType;
-      if (!_imSensitive(el)) { let len = 0; try { len = (el.value || '').length; } catch { len = 0; } const prev = _imLen.get(el) || 0; t.lengthDelta = len - prev; _imLen.set(el, len); }
-      _imPost({ interactionKind: 'type', url: location.href, target: _imDescriptor(el), type: t });
+      if (!sensitive) { let len = 0; try { len = (el.value || '').length; } catch { len = 0; } const prev = _imLen.get(el) || 0; t.lengthDelta = len - prev; _imLen.set(el, len); }
+      _imPost({ interactionKind: 'type', url: location.href, target: _imDescriptor(el), type: t, matches, sensitive });
     }, 400);
     return;
   }
-  const payload = { interactionKind: kind, url: location.href, target: _imDescriptor(el) };
+  const payload = { interactionKind: kind, url: location.href, target: _imDescriptor(el), matches };
   if (kind === 'click' || kind === 'dblclick') {
     const m = []; if (evt.shiftKey) m.push('shift'); if (evt.ctrlKey) m.push('ctrl'); if (evt.altKey) m.push('alt'); if (evt.metaKey) m.push('meta');
     payload.click = { button: evt.button || 0, clientX: Math.round(evt.clientX || 0), clientY: Math.round(evt.clientY || 0), modifiers: m };
