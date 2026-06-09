@@ -28,6 +28,7 @@ import { GroundManager } from '../../Core/GroundManager.js';   // G1 — auto-gr
 import { groundReadiness } from '../../Core/groundReadiness.js';   // G1-3 — Ground readiness (empty|preparing|capable|rich)
 import { buildInteractionDemand } from '../../Core/interactionDemand.js';   // C1 — monitoring demand set (which landmarks/kinds to watch)
 import { makeRawInteraction } from '../../Core/interactionCapture.js';   // C2 — shape/validate the L0 raw interaction (privacy-enforced)
+import { withTrack, MONITOR_CONSENT_DEFAULT } from '../../Core/monitorConsent.js';   // C6 — Track consent gate (default-deny)
 import { listLandmarksForGround } from '../../Services/LandmarkResolver.js';   // C1 — accepted-Perspective landmarks (+ a11yRole)
 import { matchGroundForUrl } from '../../Core/GroundMatcher.js';   // v2.74.823 — canonical URL→Ground matcher (honors urlPatterns, incl. the sibling hosts a dedup merge unions)
 import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/orchFeedback.js';   // ORCH-FB — corrective actions
@@ -860,6 +861,34 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, id: raw.id });
       } catch (err) {
         Logger.error('background', `INTERACTION_RAW failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // C6 (v2.74.858) — monitoring CONSENT gate (Track tier). DEFAULT-DENY: capture (C2b) must check
+    // canTrack(host) and never attaches a listener without an explicit grant. The decision is pure
+    // (Core/monitorConsent.canTrack); these handlers read/write the persisted record. The Studio/popup
+    // toggle (C6-UI) drives SET; Interpret/Act are later consent tiers.
+    GET_MONITOR_CONSENT: async (_payload, _sender, sendResponse) => {
+      try {
+        const got = await chrome.storage.local.get('monitor:consent');
+        const consent = got?.['monitor:consent'] || MONITOR_CONSENT_DEFAULT;
+        sendResponse({ success: true, consent, trackEnabled: consent?.track?.enabled === true });
+      } catch (err) {
+        Logger.error('background', `GET_MONITOR_CONSENT failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+    SET_MONITOR_CONSENT: async (payload, _sender, sendResponse) => {
+      try {
+        const got = await chrome.storage.local.get('monitor:consent');
+        const current = got?.['monitor:consent'] || MONITOR_CONSENT_DEFAULT;
+        const next = withTrack(current, payload || {});
+        await chrome.storage.local.set({ 'monitor:consent': next });
+        Logger.info('background', `SET_MONITOR_CONSENT: Track ${next.track.enabled ? 'ENABLED' : 'disabled'} (scope ${next.track.scope}, ${next.track.hosts.length} host(s))`);
+        sendResponse({ success: true, consent: next });
+      } catch (err) {
+        Logger.error('background', `SET_MONITOR_CONSENT failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },
