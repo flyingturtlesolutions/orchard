@@ -77,7 +77,8 @@ The three gates (safety / idempotence / good-enough) ARE the point of "unattende
 - [x] **EX-3 / Win B** — `capped` completeness signal — `00de0f8` (v2.74.847)
 - [x] **EX-4 / Win C** — `driftHash` freshness-skip (`locale-fresh-skip`) — `c50b581` (v2.74.848)
 - [x] **EX-5 / critic #4** — pure `localeTrust()` gate (stamped on `coverage.trust`) — `0dd6ad7` (v2.74.849)
-- [ ] **EX-6 / Win E** — auto-explore orchestrator shell (Phase 2) — **UNBLOCKED** (G1-1 shipped; assembles G1-1 + EX-7 + EX-4 + EX-1 + EX-3/EX-5)
+- [x] **EX-6a / Win E (brain)** — pure `planAutoExplore` + `autoExploreVerdict` (`Core/autoExplore.js`) — `f5deedd` (v2.74.854)
+- [ ] **EX-6b / Win E (glue)** — verify-live `AUTO_EXPLORE` handler: `ensureGroundForUrl` → `planAutoExplore` (read siteMap) → navigate tab → `EXPLORE_PAGE_STRUCTURE` → `autoExploreVerdict`. Needs a live browser run to verify (navigates the tab + runs the sweep unattended); requires making `EXPLORE_PAGE_STRUCTURE` internally callable.
 - [x] **EX-7 / critic #2** — `pagesForAsk(siteMap, ask)` relevance selection — `0e01a44` (v2.74.850)
 - [x] **G1-1** — `ensureGroundForUrl` auto-ground entrypoint (dedup-before-mint) — `2c101f9` (v2.74.851)
 - [ ] **EX-8 / critic #5+#7** — archetype-keyed Locale + goal reuse / per-run LLM budget (Phase 3)
