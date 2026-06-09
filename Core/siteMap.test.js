@@ -98,3 +98,46 @@ describe('pagesForAsk — EX-7 ask → page selection', () => {
     assert.match(hits[0].urlPattern, /\/jobs\/search$/);
   });
 });
+
+describe('siteMapFromLocale — self-derived locale collapse (multi-language fix, v2.74.855)', () => {
+  const nav = (id, href, label) => ({ id, kind: 'navigation', href, label });
+
+  it('collapses language variants into ONE /{locale}/… archetype from the page nav, with NO external rules', () => {
+    // An /en/jobs page whose language switcher links /de/jobs + /fr/jobs (and en/de about).
+    const locale = {
+      url: 'https://acme.com/en/jobs', title: 'Jobs', goals: {},
+      features: {
+        n1: nav('n1', 'https://acme.com/de/jobs', 'Deutsch'),
+        n2: nav('n2', 'https://acme.com/fr/jobs', 'Français'),
+        n3: nav('n3', 'https://acme.com/en/about', 'About'),
+        n4: nav('n4', 'https://acme.com/de/about', 'Über'),
+      },
+    };
+    const sm = siteMapFromLocale(locale, { localeKey: 'k' });
+    // the modeled self node collapsed to /{locale}/jobs (NOT /en/jobs)
+    const self = Object.values(sm.nodes).find((n) => n.status === 'modeled');
+    assert.match(self.urlPattern, /\/\{locale\}\/jobs$/);
+    // /de/jobs + /fr/jobs did NOT become separate archetypes — exactly ONE …/jobs node
+    assert.equal(Object.values(sm.nodes).filter((n) => /\/jobs$/.test(n.urlPattern)).length, 1);
+    // the derived {locale} rule is returned so the merge can persist it (accumulation)
+    assert.ok(sm.templateRules.some((r) => /\{locale\}/.test(r)));
+  });
+
+  it('preserves passed-in rules (accumulation) and tolerates a nav-less page', () => {
+    const sm = siteMapFromLocale({ url: 'https://x.com/a', features: {} }, { rules: ['https://x.com/{locale}/foo'] });
+    assert.ok(sm.templateRules.includes('https://x.com/{locale}/foo'));   // authoritative rule kept
+    assert.equal(Object.values(sm.nodes).length, 1);                       // the page itself, no crash
+  });
+
+  it('does NOT over-collapse a single-language page (no false {locale})', () => {
+    const locale = {
+      url: 'https://acme.com/en/jobs', title: 'Jobs', goals: {},
+      features: { n1: nav('n1', 'https://acme.com/en/about', 'About'), n2: nav('n2', 'https://acme.com/en/teams', 'Teams') },
+    };
+    const sm = siteMapFromLocale(locale, { localeKey: 'k' });
+    // only one locale present → no mirroring → 'en' stays literal, no {locale} rule
+    const self = Object.values(sm.nodes).find((n) => n.status === 'modeled');
+    assert.match(self.urlPattern, /\/en\/jobs$/);
+    assert.ok(!sm.templateRules.some((r) => /\{locale\}/.test(r)));
+  });
+});

@@ -469,16 +469,34 @@ function makeNode(pattern, { status, name = null, localeId = null, pageType = nu
 export function siteMapFromLocale(locale, { localeKey = null, rules = null } = {}) {
   const nodes = {};
   const edges = [];
-  if (!locale || !locale.url) return { nodes, edges };
-  const inst = makeInstanceTracker(rules);
-  const selfPattern = templatePattern(locale.url, rules);
-  const selfId = archetypeId(selfPattern);
+  if (!locale || !locale.url) return { nodes, edges, templateRules: Array.isArray(rules) ? rules : [] };
   const host = hostOf(locale.url);
+  const feats = locale.features ? Object.values(locale.features) : [];
+  // v2.74.855 — SELF-DERIVE corpus template rules from THIS page's URL + its same-site
+  // navigation hrefs (a language switcher links the SAME page in other languages:
+  // /en/jobs ⇄ /de/jobs ⇄ /fr/jobs), exactly as siteMapFromCrawl does from its harvested
+  // URLs. Before this, an Explore contribution templated ONLY with rules from a prior
+  // crawl/sitemap — so an Explore-FIRST ground (no crawl) had EMPTY rules and every
+  // language variant became its own archetype (the duplication + redundant-Explore bug).
+  // Union: passed-in rules FIRST (authoritative sitemap/crawl wins match order), then the
+  // page-derived rules. RETURNED so the merge persists them → later Explores align onto
+  // the same /{locale}/… archetype.
+  const corpus = [locale.url];
+  for (const f of feats) {
+    if (f && f.kind === 'navigation' && f.href && (!host || hostOf(f.href) === host)) corpus.push(f.href);
+  }
+  const seenRule = new Set();
+  const effRules = [];
+  for (const r of [...(Array.isArray(rules) ? rules : []), ...deriveTemplateRules(corpus)]) {
+    if (!seenRule.has(r)) { seenRule.add(r); effRules.push(r); }
+  }
+  const inst = makeInstanceTracker(effRules);
+  const selfPattern = templatePattern(locale.url, effRules);
+  const selfId = archetypeId(selfPattern);
   const goalLabels = locale.goals ? Object.values(locale.goals).map((g) => g && g.label).filter(Boolean) : [];
   nodes[selfId] = makeNode(selfPattern, { status: 'modeled', name: locale.title || selfPattern, localeId: localeKey ?? null });
   nodes[selfId].goals = goalLabels;
   inst.note(selfId, locale.url);
-  const feats = locale.features ? Object.values(locale.features) : [];
   // Dedup edges by ARCHETYPE PAIR (from→to), not by feature id — otherwise a grid of
   // N nav cards that all collapse to one /product/{id} archetype emits N parallel
   // edges. `via` records the FIRST linking feature as representative provenance.
@@ -486,7 +504,7 @@ export function siteMapFromLocale(locale, { localeKey = null, rules = null } = {
   for (const f of feats) {
     if (!f || f.kind !== 'navigation' || !f.href) continue;
     if (host && hostOf(f.href) !== host) continue;        // same-site territory only
-    const pat = templatePattern(f.href, rules);
+    const pat = templatePattern(f.href, effRules);
     if (!pat || pat === selfPattern) continue;            // self / in-page / same-archetype anchor
     const nid = archetypeId(pat);
     if (!nodes[nid]) nodes[nid] = makeNode(pat, { status: 'discovered', name: f.label || pat });
@@ -498,7 +516,7 @@ export function siteMapFromLocale(locale, { localeKey = null, rules = null } = {
     }
   }
   inst.apply(nodes);
-  return { nodes, edges };
+  return { nodes, edges, templateRules: effRules };
 }
 
 /**
