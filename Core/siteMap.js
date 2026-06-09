@@ -832,6 +832,82 @@ export function applyCapabilityRanking(capabilities, ranking) {
   return out;
 }
 
+// ── Ask → page selection (EX-7, critic #2) ───────────────────────────────────
+// matchSiteCapabilities answers "which GOAL" but only over MODELED nodes (those
+// that already have synthesized goals). The auto-explore orchestrator needs the
+// complementary question — "which PAGE should I navigate to and explore for this
+// ask" — which must ALSO rank DISCOVERED / STUB nodes that have no goals yet (the
+// whole point of auto-explore is to pick an unexplored page). pagesForAsk ranks
+// the typed siteMap NODES by lexical overlap of the ask against each node's
+// searchable surface — synthesized goals (strongest: what you can DO there) >
+// name/title ≈ url path segments > pageType — so unexplored nodes are selectable
+// via their url + name alone. PURE + deterministic; reuses the _matchTokens
+// tokenizer (+ its stopword set) shared with matchSiteCapabilities.
+
+const _SEG_PLACEHOLDER = /\{[a-z]+\}/gi;   // {id} {slug} {uuid} {hash} {locale}
+
+/** Path-only content tokens of a urlPattern (origin/host + {placeholders} stripped). */
+function _patternTokens(urlPattern) {
+  let path = String(urlPattern || '');
+  try { path = new URL(path).pathname; } catch { path = path.replace(/^[a-z]+:\/\/[^/]+/i, ''); }
+  return _matchTokens(path.replace(_SEG_PLACEHOLDER, ' '));
+}
+
+/** Strongest field-weight per matched ask-token (goal 3 > name/url 2 > pageType 1). */
+function _nodeMatch(node, wantSet) {
+  const goalToks = new Set();
+  for (const g of (Array.isArray(node.goals) ? node.goals : [])) for (const t of _matchTokens(g)) goalToks.add(t);
+  const fields = [
+    [3, goalToks],
+    [2, new Set(_matchTokens(node.name))],
+    [2, new Set(_patternTokens(node.urlPattern))],
+    [1, new Set(_matchTokens(node.pageType))],
+  ];
+  let score = 0; const matched = [];
+  for (const t of wantSet) {
+    let best = 0;
+    for (const [w, bag] of fields) if (w > best && bag.has(t)) best = w;
+    if (best > 0) { score += best; matched.push(t); }
+  }
+  matched.sort();
+  return { score, matched, intentCover: wantSet.size ? +(matched.length / wantSet.size).toFixed(4) : 0 };
+}
+
+function _statusRank(s) { return s === 'modeled' ? 0 : s === 'discovered' ? 1 : s === 'stub' ? 2 : 3; }
+
+/**
+ * Rank the siteMap's page archetypes against a free-text ask. Pure, deterministic.
+ * @param {{nodes:Object}} siteMap
+ * @param {string} ask  free-text intent ("find data engineer jobs")
+ * @param {{limit?:number, minScore?:number, status?:string|null}} [opts]
+ *        status — restrict to one node status (e.g. 'discovered' to pick an UNEXPLORED page)
+ * @returns {Array<{id,urlPattern,name,exemplarUrl,status,pageType,score,intentCover,matched:string[]}>}  best first
+ */
+export function pagesForAsk(siteMap, ask, opts = {}) {
+  const { limit = 5, minScore = 1, status = null } = opts;
+  const nodes = (siteMap && siteMap.nodes) ? Object.values(siteMap.nodes) : [];
+  const wantSet = new Set(_matchTokens(ask));
+  if (!wantSet.size) return [];
+  const rows = [];
+  for (const n of nodes) {
+    if (!n || (status && n.status !== status)) continue;
+    const m = _nodeMatch(n, wantSet);
+    if (m.score < minScore) continue;
+    rows.push({
+      id: n.id, urlPattern: n.urlPattern, name: n.name || n.urlPattern,
+      exemplarUrl: n.exemplarUrl || (Array.isArray(n.instances) && n.instances[0]) || null,
+      status: n.status, pageType: n.pageType ?? null,
+      score: m.score, intentCover: m.intentCover, matched: m.matched,
+    });
+  }
+  rows.sort((a, b) =>
+    b.score - a.score ||
+    b.intentCover - a.intentCover ||
+    _statusRank(a.status) - _statusRank(b.status) ||
+    (a.urlPattern < b.urlPattern ? -1 : a.urlPattern > b.urlPattern ? 1 : 0));
+  return rows.slice(0, Math.max(0, limit));
+}
+
 // ── Drift & re-discovery (GROUND_SPEC § 8) ───────────────────────────────────
 
 /**
