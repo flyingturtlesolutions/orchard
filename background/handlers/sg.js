@@ -26,6 +26,8 @@ import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validate
 import { findDuplicateGroundGroups, planGroundMerge, primaryHost, siteIdentity, planEnsureGround } from '../../Core/groundDedup.js';   // v2.74.816/.817 — duplicate-Ground detect + merge; .835 — registrable brand for site-name matching; G1 — dedup-before-mint plan
 import { GroundManager } from '../../Core/GroundManager.js';   // G1 — auto-ground mint (dedup-before-mint entrypoint)
 import { groundReadiness } from '../../Core/groundReadiness.js';   // G1-3 — Ground readiness (empty|preparing|capable|rich)
+import { buildInteractionDemand } from '../../Core/interactionDemand.js';   // C1 — monitoring demand set (which landmarks/kinds to watch)
+import { listLandmarksForGround } from '../../Services/LandmarkResolver.js';   // C1 — accepted-Perspective landmarks (+ a11yRole)
 import { matchGroundForUrl } from '../../Core/GroundMatcher.js';   // v2.74.823 — canonical URL→Ground matcher (honors urlPatterns, incl. the sibling hosts a dedup merge unions)
 import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/orchFeedback.js';   // ORCH-FB — corrective actions
 import { feedbackExamples } from '../../Core/feedbackLearn.js';   // ORCH-FB-2 — relevance shaping from feedback history
@@ -808,6 +810,32 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, groundId, readiness: r.state, rank: r.rank, counts: r.counts });
       } catch (err) {
         Logger.error('background', `GET_GROUND_READINESS failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // C1 (v2.74.856) — the MONITORING demand set (Track phase). Given a Ground, return which
+    // landmarks to watch and for which interaction kinds, derived from the landmarks referenced by
+    // the Ground's ACCEPTED Perspectives (listLandmarksForGround joins perspectives × registry — a
+    // set perspectiveId means linked/accepted). The role→kinds policy is pure
+    // (Core/interactionDemand.buildInteractionDemand); this handler just supplies the landmarks +
+    // their a11yRole. Demand-driven capture (C2) will attach listeners ONLY to this set, scoping
+    // cost to |demand set| per tab, not |all DOM|. READ-ONLY — captures nothing.
+    GET_INTERACTION_DEMAND: async (payload, _sender, sendResponse) => {
+      try {
+        const { groundId } = payload ?? {};
+        if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
+        let landmarks = [];
+        try { landmarks = await listLandmarksForGround(groundId); } catch { landmarks = []; }
+        // Only landmarks LINKED to an accepted Perspective (perspectiveId set) are in demand; the
+        // registry's a11yRole is the watch-kind signal. buildInteractionDemand dedups by uid, so one
+        // flat pseudo-perspective is sufficient (mismatched landmarks are already excluded upstream).
+        const linked = (Array.isArray(landmarks) ? landmarks : []).filter((l) => l && l.uid && l.perspectiveId);
+        const demand = buildInteractionDemand([{ landmarks: linked.map((l) => ({ landmarkUid: l.uid, role: l.a11yRole })) }], { groundId });
+        Logger.info('background', `GET_INTERACTION_DEMAND: ${demand.length} landmark(s) in the demand set for ${groundId} (from ${linked.length} accepted-Perspective landmark(s))`);
+        sendResponse({ success: true, demand });
+      } catch (err) {
+        Logger.error('background', `GET_INTERACTION_DEMAND failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },
