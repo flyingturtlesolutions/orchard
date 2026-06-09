@@ -5815,6 +5815,84 @@ function _obsStop() {
 
 // ─── Message router ───────────────────────────────────────────────────────────
 
+// ── C2b (v2.74.859): interaction-monitoring capture (Track phase) ────────────────
+// Demand-scoped, VALUE-FREE DOM capture. INERT until START_INTERACTION_CAPTURE — and the
+// background gates THAT message on canTrack consent (C6). Mirrors Core/interactionCapture's
+// DOM_EVENT_KIND + sensitivity verbatim (a classic content script can't import Core). NEVER reads a
+// field's .value; a `type` carries inputType + a length DELTA only, withheld entirely for sensitive
+// fields. Listeners are attached capture-phase + wrapped so a bug can never break the host page.
+const _IM_EVENT_KIND = { click: 'click', auxclick: 'click', dblclick: 'dblclick', input: 'type', submit: 'submit', focusin: 'focus' };
+let _imOn = false;
+let _imTargets = [];
+let _imAttached = false;
+let _imTypeTimer = null;
+const _imLen = new WeakMap();
+const _imListeners = {};
+
+function _imSensitive(el) {
+  try {
+    if ((el.getAttribute('type') || '').toLowerCase() === 'password') return true;
+    if (/\b(one-time-code|current-password|new-password|cc-number|cc-csc|cc-exp)\b/.test((el.getAttribute('autocomplete') || '').toLowerCase())) return true;
+  } catch { /* */ }
+  return false;
+}
+function _imName(el) {
+  try { return (el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('placeholder') || (el.textContent || '')).trim().replace(/\s+/g, ' ').slice(0, 120); } catch { return ''; }
+}
+function _imDescriptor(el) {
+  const d = { tagName: (el.tagName || '').toLowerCase() };
+  try { if (el.id) d.id = String(el.id).slice(0, 64); } catch { /* */ }
+  try { const cl = el.classList ? Array.from(el.classList).slice(0, 8) : []; if (cl.length) d.classList = cl; } catch { /* */ }
+  try { const r = el.getAttribute('role'); if (r) d.role = String(r).slice(0, 40); } catch { /* */ }
+  try { const ty = el.getAttribute('type'); if (ty) d.type = String(ty).toLowerCase(); } catch { /* */ }
+  const n = _imName(el); if (n) d.accessibleName = n;
+  return d;
+}
+function _imMatch(target, kind) {
+  for (const t of _imTargets) {
+    if (!t || !t.selector || !Array.isArray(t.interactionKinds) || !t.interactionKinds.includes(kind)) continue;
+    let hit = null; try { hit = target.closest(t.selector); } catch { hit = null; }
+    if (hit) return hit;
+  }
+  return null;
+}
+function _imPost(payload) { try { chrome.runtime.sendMessage({ type: 'INTERACTION_RAW', payload }, () => void chrome.runtime.lastError); } catch { /* */ } }
+function _imHandle(domType, evt) {
+  if (!_imOn) return;
+  const kind = _IM_EVENT_KIND[domType]; if (!kind) return;
+  const target = evt.target; if (!target || !target.closest) return;
+  const el = _imMatch(target, kind); if (!el) return;
+  if (kind === 'type') {
+    const inputType = evt.inputType || '';   // capture primitives now; the event is recycled before the debounce fires
+    clearTimeout(_imTypeTimer);
+    _imTypeTimer = setTimeout(() => {
+      const t = {}; if (inputType) t.inputType = inputType;
+      if (!_imSensitive(el)) { let len = 0; try { len = (el.value || '').length; } catch { len = 0; } const prev = _imLen.get(el) || 0; t.lengthDelta = len - prev; _imLen.set(el, len); }
+      _imPost({ interactionKind: 'type', url: location.href, target: _imDescriptor(el), type: t });
+    }, 400);
+    return;
+  }
+  const payload = { interactionKind: kind, url: location.href, target: _imDescriptor(el) };
+  if (kind === 'click' || kind === 'dblclick') {
+    const m = []; if (evt.shiftKey) m.push('shift'); if (evt.ctrlKey) m.push('ctrl'); if (evt.altKey) m.push('alt'); if (evt.metaKey) m.push('meta');
+    payload.click = { button: evt.button || 0, clientX: Math.round(evt.clientX || 0), clientY: Math.round(evt.clientY || 0), modifiers: m };
+  }
+  _imPost(payload);
+}
+function _imAttach() {
+  if (_imAttached) return;
+  for (const dt of ['click', 'auxclick', 'dblclick', 'input', 'submit', 'focusin']) {
+    const fn = (e) => { try { _imHandle(dt, e); } catch { /* never break the page */ } };
+    _imListeners[dt] = fn;
+    try { document.addEventListener(dt, fn, true); } catch { /* */ }
+  }
+  _imAttached = true;
+}
+function _imDetach() {
+  for (const dt of Object.keys(_imListeners)) { try { document.removeEventListener(dt, _imListeners[dt], true); } catch { /* */ } }
+  _imAttached = false; clearTimeout(_imTypeTimer);
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const { type, payload } = message;
 
@@ -5822,6 +5900,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     case 'RECORD_START': { _obsStart(); sendResponse({ success: true, active: true }); return false; }
     case 'RECORD_STOP':  { _obsStop();  sendResponse({ success: true, active: false }); return false; }
+
+    // C2b — interaction-monitoring capture session (demand-scoped; background already consent-gated this START).
+    case 'START_INTERACTION_CAPTURE': {
+      try {
+        _imTargets = Array.isArray(payload?.targets) ? payload.targets : [];
+        _imOn = _imTargets.length > 0;
+        if (_imOn) _imAttach(); else _imDetach();
+        sendResponse({ success: true, on: _imOn, targets: _imTargets.length });
+      } catch (e) { sendResponse({ success: false, error: e.message }); }
+      return false;
+    }
+    case 'STOP_INTERACTION_CAPTURE': {
+      _imOn = false; _imTargets = []; _imDetach();
+      sendResponse({ success: true, on: false });
+      return false;
+    }
 
 
     // v2.72.43 (Pass 17g iter) — readiness probe. Used by debugger's perspective

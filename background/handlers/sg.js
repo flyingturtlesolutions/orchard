@@ -27,8 +27,8 @@ import { findDuplicateGroundGroups, planGroundMerge, primaryHost, siteIdentity, 
 import { GroundManager } from '../../Core/GroundManager.js';   // G1 — auto-ground mint (dedup-before-mint entrypoint)
 import { groundReadiness } from '../../Core/groundReadiness.js';   // G1-3 — Ground readiness (empty|preparing|capable|rich)
 import { buildInteractionDemand } from '../../Core/interactionDemand.js';   // C1 — monitoring demand set (which landmarks/kinds to watch)
-import { makeRawInteraction } from '../../Core/interactionCapture.js';   // C2 — shape/validate the L0 raw interaction (privacy-enforced)
-import { withTrack, MONITOR_CONSENT_DEFAULT } from '../../Core/monitorConsent.js';   // C6 — Track consent gate (default-deny)
+import { makeRawInteraction, toCaptureTargets } from '../../Core/interactionCapture.js';   // C2 — shape/validate raw interaction; enrich demand w/ selectors
+import { withTrack, MONITOR_CONSENT_DEFAULT, canTrack } from '../../Core/monitorConsent.js';   // C6 — Track consent gate (default-deny)
 import { listLandmarksForGround } from '../../Services/LandmarkResolver.js';   // C1 — accepted-Perspective landmarks (+ a11yRole)
 import { matchGroundForUrl } from '../../Core/GroundMatcher.js';   // v2.74.823 — canonical URL→Ground matcher (honors urlPatterns, incl. the sibling hosts a dedup merge unions)
 import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/orchFeedback.js';   // ORCH-FB — corrective actions
@@ -889,6 +889,47 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, consent: next });
       } catch (err) {
         Logger.error('background', `SET_MONITOR_CONSENT failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // C2b (v2.74.859) — start/stop a demand-scoped interaction-capture session on a tab. START is the
+    // CONSENT CHOKEPOINT: it computes the C1 demand (accepted-Perspective landmarks), enriches it with
+    // selectors (toCaptureTargets), and sends START_INTERACTION_CAPTURE to the tab's content script —
+    // but ONLY after canTrack() passes for the tab's host. No consent → no listeners attach (default-deny).
+    INTERACTION_MONITOR_START: async (payload, _sender, sendResponse) => {
+      try {
+        const { tabId, groundId } = payload ?? {};
+        if (typeof tabId !== 'number' || !groundId) { sendResponse({ success: false, error: 'tabId + groundId required' }); return; }
+        let host = ''; try { host = new URL((await chrome.tabs.get(tabId))?.url || '').host; } catch { /* */ }
+        let consent = MONITOR_CONSENT_DEFAULT;
+        try { consent = (await chrome.storage.local.get('monitor:consent'))?.['monitor:consent'] || MONITOR_CONSENT_DEFAULT; } catch { /* */ }
+        if (!canTrack(consent, { host })) {
+          Logger.info('background', `INTERACTION_MONITOR_START DENIED — no Track consent for ${host}`);
+          sendResponse({ success: false, error: 'no-consent', host }); return;
+        }
+        let landmarks = []; try { landmarks = await listLandmarksForGround(groundId); } catch { landmarks = []; }
+        const linked = (Array.isArray(landmarks) ? landmarks : []).filter((l) => l && l.uid && l.perspectiveId);
+        const demand = buildInteractionDemand([{ landmarks: linked.map((l) => ({ landmarkUid: l.uid, role: l.a11yRole })) }], { groundId });
+        const selectorByUid = {}; for (const l of linked) selectorByUid[l.uid] = l.selector;
+        const targets = toCaptureTargets(demand, selectorByUid);
+        let started = false;
+        try { const r = await chrome.tabs.sendMessage(tabId, { type: 'START_INTERACTION_CAPTURE', payload: { targets } }, { frameId: 0 }); started = !!r?.success; }
+        catch (e) { Logger.warn('background', `START_INTERACTION_CAPTURE send failed: ${e.message}`); }
+        Logger.info('background', `INTERACTION_MONITOR_START: ${targets.length} target(s) on ${host} (consent ok, started=${started})`);
+        sendResponse({ success: true, host, targets: targets.length, started });
+      } catch (err) {
+        Logger.error('background', `INTERACTION_MONITOR_START failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+    INTERACTION_MONITOR_STOP: async (payload, _sender, sendResponse) => {
+      try {
+        const { tabId } = payload ?? {};
+        if (typeof tabId === 'number') { try { await chrome.tabs.sendMessage(tabId, { type: 'STOP_INTERACTION_CAPTURE' }, { frameId: 0 }); } catch { /* */ } }
+        sendResponse({ success: true });
+      } catch (err) {
+        Logger.error('background', `INTERACTION_MONITOR_STOP failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },
