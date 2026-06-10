@@ -17,7 +17,6 @@
  */
 
 import { Logger }                 from '../Core/Logger.js';
-import { urlMatchesWithParams }   from '../Core/urlPostcondition.js';   // v2.74.885 — param-aware url_matches relax
 import { StorageManager }         from './StorageManager.js';
 import { TemplateWalker }         from './TemplateWalker.js';
 import { Scope, scalar, list, record, image, section, document, asString } from './Scope.js';
@@ -913,7 +912,12 @@ export class ExecutionEngine {
     // iteration as failed. Passes immediately when conditions already hold,
     // only waits as long as needed.
     let postFailures = [];
-    const _fragPost = _condList(fragment.postconditions);
+    // v2.74.888 — substitute {{PARAM}} into the fragment's postconditions from its resolved param values BEFORE
+    // checking. Tier-2 url postconditions are now parameterized at authoring (capabilitySynth) as e.g.
+    // url_matches("/{{CATEGORY}}/"), so a capability reused with a DIFFERENT bound value verifies against the page
+    // it navigated to. Other fragment-exec paths already substitute post-conditions; THIS one (#executeFragmentNode)
+    // did not — a templated postcondition would otherwise reach the evaluator as the literal "{{CATEGORY}}".
+    const _fragPost = ExecutionEngine.#substituteAnalysisParams(_condList(fragment.postconditions), fragmentParamValues || {});
     if (_fragPost.length > 0) {
       const probe = await TemplateWalker.checkConditions({
         tabId, conditions: _fragPost,
@@ -937,26 +941,6 @@ export class ExecutionEngine {
           Logger.info('ExecutionEngine', `postcond ▸ url_matches("${String(f.pattern).slice(0, 30)}") failed; CLICK navigated "…${String(_nav.from).slice(-28)}" → "…${String(_nav.to).slice(-28)}" → ${relax ? 'RELAXED (assertion held until the nav)' : 'KEPT (pattern matches neither from nor to — a third page)'}`);
           return !relax;
         });
-      }
-      // v2.74.885 — PARAM-AWARE url_matches relaxation (Core/urlPostcondition). A postcondition baked with the
-      // DEMO param value — "/videos/", authored when CATEGORY=Videos — false-fails when the SAME capability runs
-      // with a different bound value (CATEGORY=Vectors → the fragment correctly lands on /vectors/; the live
-      // "search pixabay for cool vectors" gap). If swapping a mismatching pattern segment for a BOUND param's slug
-      // makes it match the URL the fragment LANDED on, the navigation reached the page the param NAMES → relax.
-      // The WHAT/WHERE already generalize across param values; this lets the VERIFY do the same, with NO re-author.
-      const _landedUrl = _nav && _nav.to;
-      if (postFailures.length && _landedUrl) {
-        const _boundVals = Object.values(fragmentParamValues || {})
-          .map((v) => (v && typeof v === 'object') ? v.value : v)
-          .filter((x) => typeof x === 'string' && x.trim());
-        if (_boundVals.length) {
-          postFailures = postFailures.filter((f) => {
-            if (!(f && f.type === 'url_matches' && f.pattern)) return true;
-            const ok = urlMatchesWithParams(String(f.pattern), String(_landedUrl), _boundVals);
-            if (ok) Logger.info('ExecutionEngine', `postcond ▸ url_matches("${String(f.pattern).slice(0, 30)}") failed but a bound param value explains the landed path "…${String(_landedUrl).slice(-28)}" → RELAXED (param-parameterized navigation)`);
-            return !ok;
-          });
-        }
       }
       if (postFailures.length > 0) {
         const reasonSummary = postFailures.map(f => ExecutionEngine.#formatConditionFailure(f)).join('; ');

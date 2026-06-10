@@ -107,16 +107,23 @@ function readFileAsDataUrl(file) {
 
 // ─── Per-param control HTML ────────────────────────────────────────────────
 function renderField(param, cls, prefilled) {
-  const id = `pf-${param.name}`;
+  // v2.74.890 — Normalize the name to a string up front. Legacy capabilities
+  // can deliver a param whose `name` is itself an object (when object param
+  // descriptors leak through the EXTRACT_STRATEGY_PARAMS boundary); the old
+  // `param.name.replace(...)` then threw "replace is not a function" and took
+  // down the whole missing-param prompt. Deriving every name-keyed bit of
+  // markup from `pname` keeps the form renderable no matter what slips in.
+  const pname = String(param && param.name != null ? param.name : '');
+  const id = `pf-${pname}`;
   const required = param.required ? ' aria-required="true"' : '';
-  const seedVal = prefilled[param.name];
+  const seedVal = prefilled[pname];
 
   // Common label markup
-  const label = `<label class="${cls}-label" for="${esc(id)}">${esc(param.name)}${param.required ? ' <span class="' + cls + '-req">*</span>' : ''}</label>`;
+  const label = `<label class="${cls}-label" for="${esc(id)}">${esc(pname)}${param.required ? ' <span class="' + cls + '-req">*</span>' : ''}</label>`;
 
   // Per-type control
   let control = '';
-  const hint = param.name.replace(/_/g, ' ').toLowerCase();
+  const hint = pname.replace(/_/g, ' ').toLowerCase();
 
   // v2.74.68 — list-kind STRING params render as a one-per-line textarea
   // (Studio's historical UI for list inputs). Submit time splits on newlines.
@@ -126,7 +133,7 @@ function renderField(param, cls, prefilled) {
     const seedText = Array.isArray(seedVal) ? seedVal.join('\n') : (typeof seedVal === 'string' ? seedVal : '');
     control = `
       <textarea id="${esc(id)}" class="${cls}-input ${cls}-input-list" rows="5"
-                data-param="${esc(param.name)}" data-type="string" data-kind="list"
+                data-param="${esc(pname)}" data-type="string" data-kind="list"
                 placeholder="${esc(hint)}&#10;${esc(hint)}&#10;…"${required}>${esc(seedText)}</textarea>
       <span class="${cls}-list-hint">one value per line</span>`;
     return `
@@ -138,26 +145,26 @@ function renderField(param, cls, prefilled) {
 
   if (param.type === 'boolean') {
     const checked = (seedVal === true || seedVal === 'true') ? ' checked' : (param.default === true ? ' checked' : '');
-    control = `<input type="checkbox" id="${esc(id)}" class="${cls}-input ${cls}-input-checkbox" data-param="${esc(param.name)}" data-type="boolean"${checked}${required} />`;
+    control = `<input type="checkbox" id="${esc(id)}" class="${cls}-input ${cls}-input-checkbox" data-param="${esc(pname)}" data-type="boolean"${checked}${required} />`;
   }
   else if (param.type === 'number') {
     const val = (seedVal !== undefined && seedVal !== null)
       ? esc(seedVal)
       : (Number.isFinite(param.default) ? esc(param.default) : '');
-    control = `<input type="number" id="${esc(id)}" class="${cls}-input" data-param="${esc(param.name)}" data-type="number" inputmode="decimal" value="${val}" placeholder="${esc(hint)}"${required} />`;
+    control = `<input type="number" id="${esc(id)}" class="${cls}-input" data-param="${esc(pname)}" data-type="number" inputmode="decimal" value="${val}" placeholder="${esc(hint)}"${required} />`;
   }
   else if (param.type === 'file') {
     const accept = param.accept ? ` accept="${esc(param.accept)}"` : '';
     const acceptHint = param.accept ? `<span class="${cls}-file-accept">${esc(param.accept)}</span>` : '';
     control = `
-      <input type="file" id="${esc(id)}" class="${cls}-input ${cls}-input-file" data-param="${esc(param.name)}" data-type="file"${accept}${required} />
+      <input type="file" id="${esc(id)}" class="${cls}-input ${cls}-input-file" data-param="${esc(pname)}" data-type="file"${accept}${required} />
       ${acceptHint}`;
   }
   else { // 'string' (default)
     const val = (seedVal !== undefined && seedVal !== null && seedVal !== '')
       ? esc(seedVal)
       : (typeof param.default === 'string' ? esc(param.default) : '');
-    control = `<input type="text" id="${esc(id)}" class="${cls}-input" data-param="${esc(param.name)}" data-type="string" value="${val}" placeholder="${esc(hint)}"${required} />`;
+    control = `<input type="text" id="${esc(id)}" class="${cls}-input" data-param="${esc(pname)}" data-type="string" value="${val}" placeholder="${esc(hint)}"${required} />`;
   }
 
   // Layout differs for checkbox (control before label reads better) —

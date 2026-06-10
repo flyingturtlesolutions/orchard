@@ -4748,7 +4748,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ success: false, error: 'Strategy not found' });
             return;
           }
-          const paramNames = Array.isArray(strategy.params) ? strategy.params : [];
+          // v2.74.890 — Coerce to string param names. Legacy capabilities
+          // store strategy.params as object descriptors ({ name, kind, type,
+          // ... }) rather than bare strings; passing those objects straight
+          // through made extractStrategyParams key parsed[<object>] (→ every
+          // param fell into `missing` AS AN OBJECT), which later crashed
+          // ParamForm.renderField. Normalize at the boundary.
+          const paramNames = (Array.isArray(strategy.params) ? strategy.params : [])
+            .map(p => (typeof p === 'string' ? p : p && p.name))
+            .filter(Boolean);
           const result = await AnthropicService.extractStrategyParams({
             question,
             strategyName : strategy.name ?? '',

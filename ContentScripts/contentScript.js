@@ -6117,8 +6117,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
             break;
           }
           case 'url_matches': {
-            const re = new RegExp(cond.pattern);
-            matched = re.test(window.location.href);
+            // v2.74.888 — regex test, then an ADDITIVE slug-tolerant fallback: decode + slug-normalize BOTH sides
+            // and contains-check. A postcondition parameterized as "/{{CATEGORY}}/" substitutes to the RAW bound
+            // value ("/Vectors/"), which the regex misses on case ("/vectors/") AND on %20-encoded multi-word values
+            // ("/halo%203/"). The regex runs FIRST, so existing url_matches behaviour is unchanged — this only ADDS.
+            try { matched = new RegExp(cond.pattern).test(window.location.href); } catch (e) { matched = false; }
+            if (!matched) {
+              const _slugU = (s) => { let d = String(s || ''); try { d = decodeURIComponent(d); } catch (e2) { /* malformed % */ } return d.toLowerCase().replace(/[^a-z0-9/]+/g, '-'); };
+              matched = _slugU(window.location.href).includes(_slugU(cond.pattern));
+            }
             break;
           }
           case 'text_present': {

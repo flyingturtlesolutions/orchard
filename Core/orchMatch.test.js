@@ -335,3 +335,33 @@ describe('orchMatch — isOrphanCapability (backing Tier-1 record deleted)', () 
     assert.equal(isOrphanCapability(null, { liveStrategyIds, liveFragmentIds }), false);
   });
 });
+
+describe('orchMatch — isOrphanCapability DEEP (live strategy, but a CONSTITUENT fragment was deleted) [v2.74.889]', () => {
+  // The "missing a step" surprise: the Strategy RECORD still exists, so the shallow strategyId check passes,
+  // but one of the fragments it chains was deleted in Studio / a side panel / a bulk ORCH_ADMIN purge.
+  // strategyFragments maps strategyId → its constituent fragmentIds (via collectReferencedPrimitiveIds).
+  const liveStrategyIds = new Set(['strat-whole', 'strat-broken']);
+  const liveFragmentIds = new Set(['frag-A', 'frag-B']); // frag-C was deleted
+  const strategyFragments = new Map([
+    ['strat-whole', ['frag-A', 'frag-B']],  // every constituent still live
+    ['strat-broken', ['frag-A', 'frag-C']], // frag-C is gone
+  ]);
+  it('all constituents live → NOT an orphan', () => {
+    assert.equal(isOrphanCapability({ strategyId: 'strat-whole' }, { liveStrategyIds, liveFragmentIds, strategyFragments }), false);
+  });
+  it('a deleted constituent fragment → ORPHAN (THE deletion-gap fix — was silently HIT, then died "missing a step")', () => {
+    assert.equal(isOrphanCapability({ strategyId: 'strat-broken' }, { liveStrategyIds, liveFragmentIds, strategyFragments }), true);
+  });
+  it('a deleted STRATEGY record still wins (shallow check fires before the deep one)', () => {
+    assert.equal(isOrphanCapability({ strategyId: 'strat-gone' }, { liveStrategyIds, liveFragmentIds, strategyFragments }), true);
+  });
+  it('liveFragmentIds null (failed fragment read) → deep check SKIPPED, not an orphan (precision-first)', () => {
+    assert.equal(isOrphanCapability({ strategyId: 'strat-broken' }, { liveStrategyIds, liveFragmentIds: null, strategyFragments }), false);
+  });
+  it('no strategyFragments map (legacy caller) → deep check SKIPPED, falls back to strategyId-only', () => {
+    assert.equal(isOrphanCapability({ strategyId: 'strat-broken' }, { liveStrategyIds, liveFragmentIds }), false);
+  });
+  it('strategy with no constituent entry (undefined in the map) → NOT an orphan (nothing to check)', () => {
+    assert.equal(isOrphanCapability({ strategyId: 'strat-whole' }, { liveStrategyIds, liveFragmentIds, strategyFragments: new Map() }), false);
+  });
+});

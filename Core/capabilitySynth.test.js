@@ -210,3 +210,37 @@ describe('collectReferencedPrimitiveIds — which fragments/observations are STE
     assert.deepEqual(collectReferencedPrimitiveIds([]), collectReferencedPrimitiveIds(null), 'empty/null → empty sets, no throw');
   });
 });
+
+describe('buildTier2CapabilityRecords — url postcondition parameterization (v2.74.888)', () => {
+  it('templates a url_matches postcondition by the params demo values + wires the param', () => {
+    const phases = [
+      { label: 'Videos', actions: [{ action: 'CLICK_BY_LABEL', selector: '#cat', value: '{{CATEGORY}}' }],
+        postcondition: { match: 'all', conditions: [{ type: 'url_matches', pattern: '/videos/' }] } },
+      { label: 'Search', actions: [{ action: 'TYPE', selector: '#q', value: '{{SEARCH}}' }],
+        postcondition: { match: 'all', conditions: [{ type: 'url_matches', pattern: '/videos/search/fable/' }] } },
+    ];
+    const params = [{ name: 'CATEGORY', value: 'Videos', label: 'Category' }, { name: 'SEARCH', value: 'fable', label: 'Search' }];
+    const recs = buildTier2CapabilityRecords(phases, { groundId: 'g', strategyId: 's', fragmentIds: ['f0', 'f1'], name: 'x', goal: 'x', params });
+    assert.ok(recs && recs.fragments.length === 2);
+    // phase 0 (category select) → /{{CATEGORY}}/, CATEGORY wired as a param
+    assert.equal(recs.fragments[0].postconditions[0].pattern, '/{{CATEGORY}}/');
+    assert.ok(recs.fragments[0].params.includes('CATEGORY'));
+    // phase 1 (search) → templates BOTH the earlier-phase category AND its own search; both params wired
+    assert.equal(recs.fragments[1].postconditions[0].pattern, '/{{CATEGORY}}/search/{{SEARCH}}/');
+    assert.ok(recs.fragments[1].params.includes('SEARCH') && recs.fragments[1].params.includes('CATEGORY'),
+      'the postcondition-only CATEGORY is wired so the runtime can substitute it');
+  });
+  it('multi-word category slug-matches ("Sound Effects" → /sound-effects/ → {{CATEGORY}})', () => {
+    const phases = [{ label: 'SE', actions: [{ action: 'CLICK', selector: '#cat', value: '{{CATEGORY}}' }],
+      postcondition: { match: 'all', conditions: [{ type: 'url_matches', pattern: '/sound-effects/' }] } }];
+    const params = [{ name: 'CATEGORY', value: 'Sound Effects', label: 'Category' }];
+    const recs = buildTier2CapabilityRecords(phases, { groundId: 'g', strategyId: 's', fragmentIds: ['f0'], name: 'x', goal: 'x', params });
+    assert.equal(recs.fragments[0].postconditions[0].pattern, '/{{CATEGORY}}/');
+  });
+  it('leaves postconditions untouched when no param values are provided (no over-templating)', () => {
+    const phases = [{ label: 'Go', actions: [{ action: 'CLICK', selector: '#go' }],
+      postcondition: { match: 'all', conditions: [{ type: 'url_matches', pattern: '/videos/' }] } }];
+    const recs = buildTier2CapabilityRecords(phases, { groundId: 'g', strategyId: 's', fragmentIds: ['f0'], name: 'x', goal: 'x' });
+    assert.equal(recs.fragments[0].postconditions[0].pattern, '/videos/');
+  });
+});

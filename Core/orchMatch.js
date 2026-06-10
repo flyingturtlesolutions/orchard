@@ -162,12 +162,22 @@ export function promotionBonus(health, { max = 0.2, now = 0, halfLifeMs = 259200
  * (precision-first: never hide a real cap on a transient error). A cap with neither id (e.g. an Observation) is
  * never an orphan. An orphan still MATCHES today but REPLAY-fails "not found", so the matcher must filter it out.
  * @param {object} cap
- * @param {{liveStrategyIds?:(Set<string>|null), liveFragmentIds?:(Set<string>|null)}} [live]
+ * @param {{liveStrategyIds?:(Set<string>|null), liveFragmentIds?:(Set<string>|null), strategyFragments?:(Map<string,string[]>|null)}} [live]
+ *        strategyFragments — strategyId → its constituent fragmentIds; enables the DEEP/transitive check (v2.74.889).
  * @returns {boolean}
  */
-export function isOrphanCapability(cap, { liveStrategyIds = null, liveFragmentIds = null } = {}) {
+export function isOrphanCapability(cap, { liveStrategyIds = null, liveFragmentIds = null, strategyFragments = null } = {}) {
   if (!cap) return false;
-  if (cap.strategyId) return liveStrategyIds ? !liveStrategyIds.has(cap.strategyId) : false;
+  if (cap.strategyId) {
+    if (liveStrategyIds && !liveStrategyIds.has(cap.strategyId)) return true;   // the Strategy itself was deleted
+    // v2.74.889 — DEEP: a LIVE strategy whose CONSTITUENT fragment was deleted still breaks at run ("missing a
+    // step"). When the strategy→fragmentIds closure is supplied, orphan the cap if any referenced fragment is gone.
+    if (liveFragmentIds && strategyFragments) {
+      const fids = strategyFragments.get(cap.strategyId);
+      if (Array.isArray(fids) && fids.some((fid) => !liveFragmentIds.has(fid))) return true;
+    }
+    return false;
+  }
   if (cap.fragmentId) return liveFragmentIds ? !liveFragmentIds.has(cap.fragmentId) : false;
   return false;
 }

@@ -257,6 +257,39 @@ function _conditionsArray(envelopeOrArray) {
   return [];
 }
 
+// v2.74.888 — URL slug of a value: lowercase, non-alphanumeric runs → '-', trimmed. "Videos"→"videos",
+// "Sound Effects"→"sound-effects" — so a postcondition's "/videos/" segment is recognized as slug(a CATEGORY value).
+const _urlSlug = (s) => String(s == null ? '' : s).toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+
+// v2.74.888 — parameterize a postcondition's url_matches patterns by the params' DEMO values: replace any path
+// SEGMENT equal to slug(param.value) with {{PARAM}} (slug("Videos")="videos" → the "/videos/" segment → {{CATEGORY}}).
+// So a capability reused with a DIFFERENT bound value VERIFIES against the page it navigates to — the runtime
+// substitutes the bound value (+ a slug-tolerant url_matches eval). Longest demo value first so a multi-word value
+// wins over a sub-match. PURE. No demo values (empty params) → returned unchanged.
+function _parameterizeUrlConditions(postcondition, params) {
+  const subs = (Array.isArray(params) ? params : [])
+    .filter((p) => p && p.name && p.value != null && String(p.value).trim())
+    .map((p) => ({ slug: _urlSlug(p.value), name: p.name }))
+    .filter((x) => x.slug.length >= 2)
+    .sort((a, b) => b.slug.length - a.slug.length);
+  if (!subs.length || !postcondition) return postcondition;
+  const tmpl = (c) => {
+    if (!c || c.type !== 'url_matches' || typeof c.pattern !== 'string') return c;
+    let changed = false;
+    const pattern = c.pattern.split('/').map((seg) => {
+      const segSlug = _urlSlug(seg);
+      if (!segSlug) return seg;
+      const hit = subs.find((s) => s.slug === segSlug);
+      if (hit) { changed = true; return `{{${hit.name}}}`; }
+      return seg;
+    }).join('/');
+    return changed ? { ...c, pattern } : c;
+  };
+  if (Array.isArray(postcondition)) return postcondition.map(tmpl);
+  if (Array.isArray(postcondition.conditions)) return { ...postcondition, conditions: postcondition.conditions.map(tmpl) };
+  return postcondition;
+}
+
 export function buildTier2CapabilityRecords(phases, { groundId, strategyId, fragmentIds, name, goal, now, params, entryGate } = {}) {
   const ph = Array.isArray(phases) ? phases.filter((p) => p && Array.isArray(p.actions) && p.actions.length) : [];
   if (!ph.length || !groundId || !strategyId || !Array.isArray(fragmentIds) || fragmentIds.length < ph.length) return null;
@@ -270,10 +303,14 @@ export function buildTier2CapabilityRecords(phases, { groundId, strategyId, frag
     const fragmentId = fragmentIds[i];
     const pacedActions = _paceActions(ph[i].actions);   // anti-bot: human-cadence WAIT before each interactive action
     const rawJson = JSON.stringify(pacedActions);
-    // Wire only the params whose placeholders actually appear in THIS fragment's actions.
+    // v2.74.888 — parameterize this phase's url postconditions by ALL params' demo values FIRST (a postcondition
+    // url can name a param an EARLIER phase set — e.g. the category), THEN wire the params whose {{NAME}} appears
+    // in this fragment's actions OR its templated postconditions, so the runtime binds + substitutes them.
+    const postcondArr = _conditionsArray(_parameterizeUrlConditions(ph[i].postcondition, [...declared.values()]));
     const names = new Set();
     let m; PLACEHOLDER.lastIndex = 0;
-    while ((m = PLACEHOLDER.exec(rawJson))) if (declared.has(m[1])) names.add(m[1]);
+    const scanText = `${rawJson} ${JSON.stringify(postcondArr)}`;
+    while ((m = PLACEHOLDER.exec(scanText))) if (declared.has(m[1])) names.add(m[1]);
     const paramBindings = {};
     for (const nm of names) { paramBindings[nm] = { kind: 'strategy_param', name: nm }; usedNames.add(nm); }
     fragments.push({
@@ -291,7 +328,7 @@ export function buildTier2CapabilityRecords(phases, { groundId, strategyId, frag
       // Only the FIRST fragment gates (it owns the capability's entry page); inner phases run post-transition.
       // ARRAY shape — the runtime + editor read fragment conditions as arrays.
       preconditions: (i === 0 && Array.isArray(entryGate)) ? entryGate.slice() : [],
-      postconditions: _conditionsArray(ph[i].postcondition),   // SG-T2-2/5 — carry the phase's success predicate(s) (was dropped)
+      postconditions: postcondArr,   // SG-T2-2/5 — carry the phase's success predicate(s); .886 url params templated
       healthStatus: 'untested', lastExecutedAt: null, synthesized: true,
       createdAt: ts, updatedAt: ts,
     });

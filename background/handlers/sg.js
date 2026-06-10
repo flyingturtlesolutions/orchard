@@ -143,10 +143,22 @@ function _groundIdForUrl(url, grounds) {
 // was checked, so a Fragment-cap whose Fragment was deleted still matched, then REPLAY-failed "not found"). A FAILED
 // read for a kind → null (NOT empty) → isOrphanCapability won't flag that kind (precision-first).
 async function _liveBackingIds(groundId) {
-  let liveStrategyIds = null, liveFragmentIds = null;
-  try { liveStrategyIds = new Set((await StorageManager.listStrategies(groundId)).map((x) => x && x.id).filter(Boolean)); } catch { liveStrategyIds = null; }
+  let liveStrategyIds = null, liveFragmentIds = null, strategyFragments = null;
+  try {
+    const strategies = (await StorageManager.listStrategies(groundId)) || [];
+    liveStrategyIds = new Set(strategies.map((x) => x && x.id).filter(Boolean));
+    // v2.74.889 — strategy → its constituent fragmentIds (incl. detect/foreach bodies, via the canonical
+    // collectReferencedPrimitiveIds), so the orphan check catches a LIVE strategy whose fragment was DELETED
+    // (the "missing a step" orphan that survives a Studio/panel/bulk fragment-delete).
+    strategyFragments = new Map();
+    for (const s of strategies) {
+      if (!s || !s.id) continue;
+      const { fragmentIds } = CapabilitySynth.collectReferencedPrimitiveIds([s]);
+      if (fragmentIds && fragmentIds.size) strategyFragments.set(s.id, [...fragmentIds]);
+    }
+  } catch { liveStrategyIds = null; strategyFragments = null; }
   try { liveFragmentIds = new Set((await StorageManager.listFragments(groundId)).map((x) => x && x.id).filter(Boolean)); } catch { liveFragmentIds = null; }
-  return { liveStrategyIds, liveFragmentIds };
+  return { liveStrategyIds, liveFragmentIds, strategyFragments };
 }
 
 // G1-3 — a Ground's readiness from its LIVE substrate counts: Locales modeled
@@ -170,8 +182,8 @@ async function _bindStrategyOnGround(ctx, clause, groundId, effect = 'action') {
   // filters both (isActiveCapability + !orphan); mirror it. Orphan = a strategy-cap whose strategyId isn't among the
   // Ground's live Strategies — OR a bare Fragment-cap whose Fragment is gone (v2.74.827, via the shared predicate); a
   // FAILED read → null → DON'T orphan-filter that kind (precision-first: never wrongly orphan a real cap on a transient error).
-  const { liveStrategyIds, liveFragmentIds } = await _liveBackingIds(groundId);
-  const _orphan = (c) => isOrphanCapability(c, { liveStrategyIds, liveFragmentIds });
+  const { liveStrategyIds, liveFragmentIds, strategyFragments } = await _liveBackingIds(groundId);
+  const _orphan = (c) => isOrphanCapability(c, { liveStrategyIds, liveFragmentIds, strategyFragments });
   // DF-1 — EFFECT-scoped pool (mirrors the within-Ground matcher, sg.js ORCH_MATCH): a READ sub-intent binds an
   // OBSERVATION (the only capability that PRODUCES a value for a downstream Ground); an ACTION binds a T2 Strategy
   // or a bare T1 Fragment.
@@ -1045,8 +1057,8 @@ export function createSgMessageHandlers(ctx) {
         // live Strategy ids once and exclude any capability that points at a missing one. Non-destructive (the
         // admin delete + REPLAY self-heal handle storage cleanup); only skipped when the read fails (liveIds=null
         // → no filtering, never a false mass-hide). An observation capability has no strategyId → always kept.
-        const { liveStrategyIds, liveFragmentIds } = await _liveBackingIds(gid);   // v2.74.827 — Strategy AND Fragment liveness
-        const _orphan = (c) => isOrphanCapability(c, { liveStrategyIds, liveFragmentIds });
+        const { liveStrategyIds, liveFragmentIds, strategyFragments } = await _liveBackingIds(gid);   // v2.74.827 — Strategy AND Fragment liveness
+        const _orphan = (c) => isOrphanCapability(c, { liveStrategyIds, liveFragmentIds, strategyFragments });
         // ORCH — scope "here" by SITE (origin), not the demo's exact path. Many capabilities (a global search
         // bar, site nav) work from ANY page of the Ground, so pinning them to the demo URL wrongly hides them
         // ("search vectors" lived on another page than "search music", though both are search options
@@ -1173,8 +1185,8 @@ export function createSgMessageHandlers(ctx) {
           roster.push(`${_groundLabel(g)}(${String(gid).slice(-6)},${Array.isArray(caps) ? caps.length : 0}c)`);
           if (gid === excludeGroundId) continue;
           if (!Array.isArray(caps) || !caps.length) continue;
-          const { liveStrategyIds, liveFragmentIds } = await _liveBackingIds(gid);   // v2.74.827 — Strategy AND Fragment liveness (per-Ground in the global sweep)
-          const _orphan = (c) => isOrphanCapability(c, { liveStrategyIds, liveFragmentIds });
+          const { liveStrategyIds, liveFragmentIds, strategyFragments } = await _liveBackingIds(gid);   // v2.74.827 — Strategy AND Fragment liveness (per-Ground in the global sweep)
+          const _orphan = (c) => isOrphanCapability(c, { liveStrategyIds, liveFragmentIds, strategyFragments });
           const projected = caps.filter((c) => isActiveCapability(c) && !_orphan(c) && c.kind !== 'composite').map((c) => toCandidate(c)).filter(Boolean);
           const pool = askIsRead ? projected.filter(_isReadCand)
             : (projected.filter((c) => !_isReadCand(c)).length ? projected.filter((c) => !_isReadCand(c)) : projected);
@@ -1430,8 +1442,8 @@ export function createSgMessageHandlers(ctx) {
           const gid = g && (g.id || g.groundId); if (!gid) continue;
           let caps = []; try { caps = (await ctx.readSgCapabilities(gid)) || []; } catch { /* */ }
           capabilities += caps.length;
-          const { liveStrategyIds, liveFragmentIds } = await _liveBackingIds(gid);   // v2.74.827 — count BOTH Strategy- and Fragment-orphans
-          orphans += caps.filter((c) => isOrphanCapability(c, { liveStrategyIds, liveFragmentIds })).length;   // null live-set → not counted (precision-first)
+          const { liveStrategyIds, liveFragmentIds, strategyFragments } = await _liveBackingIds(gid);   // v2.74.827 — count BOTH Strategy- and Fragment-orphans
+          orphans += caps.filter((c) => isOrphanCapability(c, { liveStrategyIds, liveFragmentIds, strategyFragments })).length;   // null live-set → not counted (precision-first)
         }
         let workflows = 0; try { workflows = ((await StorageManager.listWorkflows()) || []).length; } catch { /* */ }
         Logger.info('background', `STATS ▸ ${all.length} ground(s), ${capabilities} capabilit${capabilities === 1 ? 'y' : 'ies'} (${orphans} orphan), ${workflows} workflow(s)`);
@@ -2284,8 +2296,8 @@ export function createSgMessageHandlers(ctx) {
         if (!gid && url) { try { const grounds = await StorageManager.getAllGrounds(); gid = _groundIdForUrl(url, grounds); } catch { /* */ } }   // v2.74.824 — urlPatterns-aware (a merged sibling host resolves)
         if (!gid) { sendResponse({ success: true, groundId: null, steps: [] }); return; }
         const localeUrl = ctx.normalizeUrl(url);
-        const { liveStrategyIds, liveFragmentIds } = await _liveBackingIds(gid);   // v2.74.827 — Strategy AND Fragment liveness
-        const _orphan = (c) => isOrphanCapability(c, { liveStrategyIds, liveFragmentIds });
+        const { liveStrategyIds, liveFragmentIds, strategyFragments } = await _liveBackingIds(gid);   // v2.74.827 — Strategy AND Fragment liveness
+        const _orphan = (c) => isOrphanCapability(c, { liveStrategyIds, liveFragmentIds, strategyFragments });
         const caps = (await ctx.readSgCapabilities(gid)).filter((c) => isActiveCapability(c) && !_orphan(c) && c.kind !== 'composite');   // composites (T2) aren't plan STEPS — don't nest
         const candidates = (Array.isArray(caps) ? caps : []).map((c) => toCandidate(c)).filter(Boolean);
         if (candidates.length < 2) { sendResponse({ success: true, groundId: gid, steps: [] }); return; }   // <2 caps → nothing to compose

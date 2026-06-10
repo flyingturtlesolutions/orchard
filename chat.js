@@ -2437,9 +2437,17 @@ function _promptForMissingParams(strategyName, missing, paramsDict = {}) {
   // historical behavior for untyped strategies).
   const full = _descriptorParamsToArray(paramsDict);
   const byName = new Map(full.map(p => [p.name, p]));
-  const params = missing.map(name => byName.get(name) || {
-    name, kind: 'scalar', type: 'string', required: true,
-  });
+  // v2.74.890 — Coerce each entry to a string name first. The happy path hands
+  // us string names, but a legacy-shaped caller can pass object descriptors
+  // ({ name, kind, ... }); keying the descriptor Map (or ParamForm) off a raw
+  // object name misses the lookup and ultimately threw in renderField. Pull
+  // `.name` out so the lookup hits and the fallback carries a string `name`.
+  const params = missing.map((entry) => {
+    const name = typeof entry === 'string' ? entry : (entry && entry.name);
+    return byName.get(name) || {
+      name: String(name ?? ''), kind: 'scalar', type: 'string', required: true,
+    };
+  }).filter(p => p.name);
 
   return promptForParams(params, {
     title: `${strategyName} needs a bit more info`,
