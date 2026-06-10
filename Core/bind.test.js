@@ -468,3 +468,39 @@ describe('selectionToTrialRoles — destructive-label veto on goal expansion (EX
     assert.deepEqual(ids, ['del'], 'matcher-anchored destructive feature is untouched');
   });
 });
+
+describe('selectionToTrialRoles — typeable disclosures pass the fill gates (CR-B1, v2.74.924)', () => {
+  // .913 made a combobox (kind=disclosure + fieldType:'text') a FILL in the synth, but bind's six
+  // kind==='input' gates were not extended — re-opening the empty-q submit via the expansion path.
+  const combo = (id, label, sel, extra = {}) =>
+    ({ id, label, kind: 'disclosure', fieldType: 'text', selector: sel, interaction: { pattern: 'reveal', effect: 'reveal' }, ...extra });
+
+  it('goal expansion ADMITS a combobox member when only the submit anchored', () => {
+    const locale = { goals: { g: { id: 'g', label: 'search for jobs', achievableVia: ['q', 'go'] } }, features: {
+      q:  combo('q', 'Job title, keywords, or company', 'input[name="q"]', { goals: ['g'] }),
+      go: { id: 'go', label: 'Search', kind: 'action', goals: ['g'], selector: '#go', interaction: { pattern: 'click', effect: 'submit' } },
+    } };
+    const ids = selectionToTrialRoles({ shape: 'act' }, { matches: { 'submit-search': ['go'] } }, locale).map((r) => r.featureId).sort();
+    assert.deepEqual(ids, ['go', 'q'], 'the combobox keyword field rode in via form atomicity');
+  });
+
+  it('two same-label comboboxes BOTH anchored collapse to one (.880 reach)', () => {
+    const locale = { goals: { g: { id: 'g', label: 'search', achievableVia: ['c1', 'c2'] } }, features: {
+      c1: combo('c1', 'Search', '#hdr-search', { goals: ['g'], selectorVerified: true }),
+      c2: combo('c2', 'Search', '#modal-search', { goals: ['g'], hidden: true }),
+    } };
+    const roles = selectionToTrialRoles({ shape: 'act' }, { matches: { q: ['c1', 'c2'] } }, locale);
+    const fills = roles.filter((r) => r.kind === 'disclosure');
+    assert.equal(fills.length, 1, `expected one combobox, got ${roles.map((r) => r.featureId).join(',')}`);
+    assert.equal(fills[0].featureId, 'c1', 'kept the visible, selector-verified twin');
+  });
+
+  it('a combobox-only selection on a submit goal still pulls the submit (FILLS-must-SUBMIT)', () => {
+    const locale = { goals: { g: { id: 'g', label: 'search for jobs', achievableVia: ['q', 'go'] } }, features: {
+      q:  combo('q', 'Job title keywords', 'input[name="q"]', { goals: ['g'] }),
+      go: { id: 'go', label: 'Search', kind: 'action', goals: ['g'], selector: '#go', interaction: { pattern: 'click', effect: 'submit' } },
+    } };
+    const ids = selectionToTrialRoles({ shape: 'act' }, { matches: { 'enter-keyword': ['q'] } }, locale).map((r) => r.featureId).sort();
+    assert.deepEqual(ids, ['go', 'q'], 'the submit rode in for the combobox fill');
+  });
+});

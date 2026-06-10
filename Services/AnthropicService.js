@@ -5019,8 +5019,11 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     });
   }
 
-  // `meta` (optional) = { role, operation } — the call's declared role
+  // `meta` (optional) = { role, operation, signal } — the call's declared role
   // (DESIGN_llm_roles.md § 2). Absent → audited as 'unclassified'.
+  // v2.74.920 (CR-S4) — `meta.signal` (an AbortSignal) cancels the fetch mid-flight so a user cancel
+  // doesn't ride out a ~29s proxy call. Callers adopt as they gain a cancel surface (CR-E5/CR-D6 thread
+  // the invocation's controller through; today only abort-aware paths pass it).
   static async #call(systemPrompt, userContent, maxTokens, extraMessages = [], meta = null) {
     const role = meta?.role ?? 'unclassified';
     const operation = meta?.operation ?? 'unknown';
@@ -5050,6 +5053,7 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
           system     : systemPrompt,
           messages,
         }),
+        ...(meta && meta.signal ? { signal: meta.signal } : {}),   // v2.74.920 (CR-S4)
       });
 
       if (!res.ok) {

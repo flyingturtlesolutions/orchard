@@ -432,7 +432,39 @@ export function prepareHeteroTier2Records(nodes, { groundId, strategyId, fragmen
   }
   recs.strategy.fragmentSteps = steps;
   if (Array.isArray(aliases) && aliases.length) recs.strategy.aliases = aliases.slice();
-  return { ok: true, isSingleT1: false, fragments: recs.fragments, strategy: recs.strategy, observations };
+
+  // HS-2 (v2.74.916) — SCOPE-WIRED params. The walker binds every observation extract to scope under its
+  // `output` name BEFORE later steps run (ExecutionEngine #executeObservationNode), and a fragment's
+  // `strategy_param` binding resolves through that SAME scope (#resolveFragmentBindings) — so a param whose
+  // name an EARLIER observation provides is fed by the READ at runtime, not by the user. Drop such params
+  // from the strategy's user-facing list (the invocation form must not ask for what the capability reads
+  // itself); the fragment-step bindings stay, the scope write wins by step order. A param ALSO consumed by
+  // a fragment BEFORE the providing read keeps its user-facing slot (no time travel).
+  const wiredParams = [];
+  {
+    const byObsId = new Map(observations.map((o) => [o.id, o]));
+    const provideAt = new Map();   // output name → first step index that provides it
+    const firstBindAt = new Map(); // param name → first step index that consumes it
+    steps.forEach((st, idx) => {
+      if (st.type === 'observation') {
+        const o = byObsId.get(st.observationId);
+        for (const e of (o && o.implementations && o.implementations[0] && o.implementations[0].extracts) || []) {
+          if (e.output && !provideAt.has(e.output)) provideAt.set(e.output, idx);
+        }
+      } else if (st.type === 'fragment' && st.paramBindings) {
+        for (const [nm, b] of Object.entries(st.paramBindings)) {
+          if (b && b.kind === 'strategy_param' && !firstBindAt.has(nm)) firstBindAt.set(nm, idx);
+        }
+      }
+    });
+    for (const [nm, bindIdx] of firstBindAt) {
+      if (provideAt.has(nm) && provideAt.get(nm) < bindIdx) wiredParams.push(nm);
+    }
+    if (wiredParams.length && Array.isArray(recs.strategy.params)) {
+      recs.strategy.params = recs.strategy.params.filter((p) => !wiredParams.includes(p.name));
+    }
+  }
+  return { ok: true, isSingleT1: false, fragments: recs.fragments, strategy: recs.strategy, observations, wiredParams };
 }
 
 /**

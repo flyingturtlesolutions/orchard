@@ -1482,6 +1482,12 @@ async function _runTrialBundle({ groundId, intent, roles, localeModel = null, na
   const strategyId = crypto.randomUUID();
   const recs = CapabilitySynth.buildCapabilityRecords(draft, { groundId, fragmentId, strategyId });
   if (!recs) return { success: false, error: 'failed to build trial op' };
+  // v2.74.923 (CR-M2) — the trial's clicks are engine activity: mark INSIDE the shared helper so BOTH
+  // entry points are covered (RUN_PERSPECTIVE_TRIAL — the un-migrated twin that silently missed the
+  // .912 handler-level fix — and RUN_SG_TRIAL, whose own mark now just nests on the CR-M1 refcount).
+  // When targetTabId is null the engine opens its own tab — that id isn't visible here (known gap;
+  // closes when trial tab handling centralizes in the CR-X3 migration).
+  if (typeof targetTabId === 'number') markEngineBusy(targetTabId, true);
   let result = null;
   try {
     await StorageManager.saveFragment(recs.fragment);
@@ -1490,6 +1496,7 @@ async function _runTrialBundle({ groundId, intent, roles, localeModel = null, na
     // instead of opening a fresh tab on ground.url (an entirely different page).
     result = await ExecutionEngine.executeStrategy({ strategyId, targetTabId });
   } finally {
+    if (typeof targetTabId === 'number') markEngineBusy(targetTabId, false);   // v2.74.923 (CR-M2)
     try { await StorageManager.deleteStrategy(strategyId); } catch { /* */ }
     try { await StorageManager.deleteFragment(fragmentId); } catch { /* */ }
   }
@@ -5154,6 +5161,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const { tabId, groundId = null, bandBudget = 8 } = payload ?? {};
           if (typeof tabId !== 'number') { sendResponse({ success: false, error: 'tabId required' }); return; }
           markEngineBusy(tabId, true);   // v2.74.911 — the poke sweep's clicks must not be monitored as user interactions
+          let _exploreCounts = null;   // v2.74.925 (CR-T2) — {featureCount, goalCount} once the Locale builds; the chat verb narrates them (the response's `structure` never carried features/goals — the .910 counts were silently null)
           let tabInfo;
           try { tabInfo = await chrome.tabs.get(tabId); }
           catch (e) { sendResponse({ success: false, error: `Tab not found: ${e.message}` }); return; }
@@ -5242,7 +5250,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   },
                 };
                 Logger.info('explore', `locale-fresh-skip: cached Locale matches current enumerate (driftHash ${freshHash}, age ${Math.round(ageMs / 60000)}m, ${Object.keys(cm.features || {}).length} feature(s), ${synthControls.length} disclosure(s)) — skipped poke sweep + goal synthesis`);
-                sendResponse({ success: true, structure: reuseStructure, cacheKey: freshKey, fresh: true });
+                sendResponse({ success: true, structure: reuseStructure, cacheKey: freshKey, fresh: true, featureCount: Object.keys(cm.features || {}).length, goalCount: Object.keys(cm.goals || {}).length });   // v2.74.925 (CR-T2) — counts for the chat explore narration
                 return;
               }
             } catch (e) { Logger.warn('background', `locale-fresh-skip check failed (continuing with full sweep): ${e.message}`); }
@@ -5501,6 +5509,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 });
               }
               const layerCount = Object.keys(model.layers || {}).length - 1;   // minus the surface layer
+              _exploreCounts = { featureCount: Object.keys(model.features).length, goalCount: Object.keys(model.goals || {}).length };   // v2.74.925 (CR-T2)
               Logger.info('explore', `Locale built alongside Explore: ${Object.keys(model.features).length} feature(s), ${Math.max(0, layerCount)} depth layer(s), ${Object.keys(model.goals || {}).length} goal(s), fidelity ${model.coverage.fidelity}`);
 
               // v2.74.417 — OUTCOMES: poke-reveal events (OUTCOMES_SPEC § 5). A
@@ -5535,7 +5544,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             }
           } catch (e) { Logger.warn('background', `Locale build during Explore failed (continuing): ${e.message}`); }
 
-          sendResponse({ success: true, structure, cacheKey });
+          sendResponse({ success: true, structure, cacheKey, ...(_exploreCounts || {}) });   // v2.74.925 (CR-T2)
         } catch (err) {
           Logger.error('background', `EXPLORE_PAGE_STRUCTURE failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });

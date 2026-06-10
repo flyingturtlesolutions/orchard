@@ -271,11 +271,21 @@ export class Logger {
     };
 
     // ── Console output ──────────────────────────────────────────────────────
+    // v2.74.921 (CR-T1) — hold ErrorCapture's reentrancy guard across the mirror. The console patch only
+    // set the guard on the console→Logger direction, so every DIRECT Logger.warn/error was re-ingested by
+    // the patch as a SECOND persisted entry whose "source" was the [timestamp] prefix (the duplicate WARN
+    // lines in every live trace, doubling ring churn). Save/restore (not set/clear) so a console→Logger→
+    // console nesting can't drop an outer wrapper's guard early. The guard global is the contract between
+    // the two modules — ErrorCapture.patchConsoleMethod checks exactly this name.
     const prefix = `[${entry.timestamp}] [${entry.level}] [${source}]`;
-    if      (level === LOG_LEVEL.ERROR) console.error(prefix, message, data ?? '');
-    else if (level === LOG_LEVEL.WARN)  console.warn (prefix, message, data ?? '');
-    else if (level === LOG_LEVEL.DEBUG) console.debug(prefix, message, data ?? '');
-    else                                console.log  (prefix, message, data ?? '');
+    const _prevGuard = globalThis.__agentHubInsideLogger;
+    globalThis.__agentHubInsideLogger = true;
+    try {
+      if      (level === LOG_LEVEL.ERROR) console.error(prefix, message, data ?? '');
+      else if (level === LOG_LEVEL.WARN)  console.warn (prefix, message, data ?? '');
+      else if (level === LOG_LEVEL.DEBUG) console.debug(prefix, message, data ?? '');
+      else                                console.log  (prefix, message, data ?? '');
+    } finally { globalThis.__agentHubInsideLogger = _prevGuard; }
 
     // ── Persist + broadcast ─────────────────────────────────────────────────
     if (Logger.#persistEnabled) {

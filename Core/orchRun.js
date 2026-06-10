@@ -87,10 +87,35 @@ function _collectValue(node, produced) {
  * @returns {Promise<{ok:boolean, error:(string|null), outputs:object, produced:Map, trace:object[]}>}
  */
 export async function walkPlan(plan, exec, opts = {}) {
-  const env = { produced: new Map(), outputs: {}, trace: [] };
+  // v2.74.915 — FOREACH/LOOP SAFETY BUDGET. The 22:58 runaway replayed a 5-tab-opening body 13× with no
+  // bound (a tab bomb stopped only by the page dying). Two layers, both interpreter-side so EVERY caller
+  // gets them: (1) maxIterations HARD-CAPS any single foreach/loop (default 25 — above any intended list
+  // walk, far below a pathological driver); (2) when the body contains a FRAGMENT (engine actions that
+  // multiply per iteration) and the count exceeds confirmAbove (default 8), the optional exec.confirmLoop
+  // hook is asked FIRST — the chat runner renders Continue/Stop; a missing hook proceeds (headless replay).
+  const env = {
+    produced: new Map(), outputs: {}, trace: [],
+    maxIterations: Math.max(1, (opts.maxIterations | 0) || 25),
+    confirmAbove: Math.max(1, (opts.confirmAbove | 0) || 8),
+  };
   const steps = (plan && Array.isArray(plan.steps)) ? plan.steps : [];
   const r = await _walk(steps, exec, env, { vars: {}, item: null, index: null });
-  return { ok: r.ok, error: r.ok ? null : (r.error || 'plan failed'), outputs: env.outputs, produced: env.produced, trace: env.trace };
+  // v2.74.918 (CR-S2) — `aborted` distinguishes a user STOP from a step failure: callers report "stopped"
+  // (with partial results) instead of "couldn't complete", and a wrapping walk knows to end with its recap.
+  return { ok: r.ok, aborted: !!r.aborted, error: r.ok ? null : (r.error || 'plan failed'), outputs: env.outputs, produced: env.produced, trace: env.trace };
+}
+
+// v2.74.915 — the shared budget gate for foreach/loop: cap the count, then (when the body multiplies
+// engine actions) put the user in front of a big run via exec.confirmLoop. Returns { n, capped, declined }.
+async function _loopBudget(s, total, exec, env) {
+  const capped = total > env.maxIterations ? total - env.maxIterations : 0;
+  const n = Math.min(total, env.maxIterations);
+  const bodyActs = (Array.isArray(s.body) ? s.body : []).some((b) => b && b.kind === 'fragment');
+  if (bodyActs && n > env.confirmAbove && typeof exec.confirmLoop === 'function') {
+    const c = await exec.confirmLoop({ id: s.id, kind: s.kind, iterations: n, total, capped });
+    if (!c || c.ok === false) return { n, capped, declined: true };
+  }
+  return { n, capped, declined: false };
 }
 
 async function _walk(steps, exec, env, scope) {
@@ -107,12 +132,13 @@ async function _walkStep(s, exec, env, scope) {
     case 'fragment': {
       const r = await exec.fragment(s, scope);
       env.trace.push({ id: s.id, kind: 'fragment', ok: !!(r && r.ok) });
-      return (r && r.ok) ? { ok: true } : { ok: false, error: (r && r.error) || `fragment "${s.id}" failed` };
+      // v2.74.918 (CR-S2) — carry `aborted` (a user STOP) so loops propagate it OUT instead of lenient-skipping.
+      return (r && r.ok) ? { ok: true } : { ok: false, ...(r && r.aborted ? { aborted: true } : {}), error: (r && r.error) || `fragment "${s.id}" failed` };
     }
     case 'observe': {
       const r = await exec.observe(s, scope);
       env.trace.push({ id: s.id, kind: 'observe', ok: !!(r && r.ok), value: r && r.value });
-      if (!r || r.ok === false) return { ok: false, error: (r && r.error) || `observe "${s.id}" failed` };
+      if (!r || r.ok === false) return { ok: false, ...(r && r.aborted ? { aborted: true } : {}), error: (r && r.error) || `observe "${s.id}" failed` };   // v2.74.918 (CR-S2)
       env.produced.set(s.id, r);
       return { ok: true };
     }
@@ -126,30 +152,42 @@ async function _walkStep(s, exec, env, scope) {
     }
     case 'foreach': {
       const items = _itemsOf(env.produced.get(s.over));
+      const budget = await _loopBudget(s, items.length, exec, env);   // v2.74.915 — cap + confirm
+      if (budget.declined) { env.trace.push({ id: s.id, kind: 'foreach', items: items.length, declined: true }); return { ok: false, error: 'loop declined by user' }; }
       const collected = [];
       let done = 0, skipped = 0;
-      for (let i = 0; i < items.length; i++) {
+      for (let i = 0; i < budget.n; i++) {
         const childScope = { vars: { ...(scope.vars || {}), [s.itemVar || 'item']: items[i] }, item: items[i], index: i };
         const r = await _walk(s.body, exec, env, childScope);
+        // v2.74.918 (CR-S2) — a user STOP is NOT a per-item failure: before this, the lenient skip below
+        // consumed the abort as "one item didn't work" and ran the remaining N-1 iterations anyway (one
+        // "stop" skipped one item of a 25-tab loop). An aborted child ends the WHOLE loop, keeping partials.
+        if (r.aborted) {
+          if (s.collect) env.outputs[s.collect] = collected;
+          env.trace.push({ id: s.id, kind: 'foreach', items: items.length, done, skipped, aborted: true, collect: s.collect || null });
+          return r;
+        }
         if (!r.ok) { skipped++; continue; }   // LENIENT: one item's failure doesn't abort the loop
         done++;
         if (s.collect) { const cv = _collectValue(s, env.produced); if (cv !== undefined) collected.push(cv); }
       }
       if (s.collect) env.outputs[s.collect] = collected;
-      env.trace.push({ id: s.id, kind: 'foreach', items: items.length, done, skipped, collect: s.collect || null });
+      env.trace.push({ id: s.id, kind: 'foreach', items: items.length, done, skipped, collect: s.collect || null, ...(budget.capped ? { capped: budget.capped } : {}) });
       return { ok: true };
     }
     case 'loop': {
-      const n = _countOf(env.produced.get(s.over));
+      const total = _countOf(env.produced.get(s.over));
+      const budget = await _loopBudget(s, total, exec, env);   // v2.74.915 — cap + confirm
+      if (budget.declined) { env.trace.push({ id: s.id, kind: 'loop', count: total, declined: true }); return { ok: false, error: 'loop declined by user' }; }
       const collected = [];
-      for (let i = 0; i < n; i++) {
+      for (let i = 0; i < budget.n; i++) {
         const childScope = { vars: { ...(scope.vars || {}), [s.itemVar || 'i']: i }, item: null, index: i };
         const r = await _walk(s.body, exec, env, childScope);
         if (!r.ok) return r;   // a loop is deterministic — abort on body failure
         if (s.collect) { const cv = _collectValue(s, env.produced); if (cv !== undefined) collected.push(cv); }
       }
       if (s.collect) env.outputs[s.collect] = collected;
-      env.trace.push({ id: s.id, kind: 'loop', count: n, collect: s.collect || null });
+      env.trace.push({ id: s.id, kind: 'loop', count: total, collect: s.collect || null, ...(budget.capped ? { capped: budget.capped } : {}) });
       return { ok: true };
     }
     case 'gate': {

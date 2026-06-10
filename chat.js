@@ -900,7 +900,12 @@ function _findUntaughtListDriver(plan) {
   return found;
 }
 
-async function _orchRunPlanIR(msg, { tabId, groundId, plan, _headRan = false }) {
+async function _orchRunPlanIR(msg, { tabId, groundId, plan, _headRan = false, maxIterations = null }) {   // v2.74.916 — callers can bound the loop ("top 5" → 5)
+  // v2.74.917 (CR-S1) — a fresh plan run clears any stale stop (mirror of the walk's .907 clear) and counts
+  // itself live so the STOP keyword reaches it. try/finally because the teach-driver branch returns early.
+  _walkAbortFlag.requested = false;
+  _planLive++;
+  try {
   const driverIds = new Set();   // observe ids a foreach/loop iterates over → must return items, not a scalar
   const _scan = (steps) => { for (const s of (steps || [])) { if (s && (s.kind === 'foreach' || s.kind === 'loop') && s.over) driverIds.add(s.over); if (s && Array.isArray(s.body)) _scan(s.body); } };
   _scan(plan && plan.steps);
@@ -912,16 +917,20 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan, _headRan = false }) 
   const _criteria = renderCriteria(_planBindings);
   // v2.74.908 — the STOP keyword reaches the plan interpreter: every per-node callback bails before
   // dispatching, so a runaway foreach (the 22:58 trace — 13 sequential REPLAYs of a 5-tab opener, ~45s,
-  // unstoppable) halts at the next node. The flag is the same one the walk consumes.
+  // unstoppable) halts at the next node.
+  // v2.74.918 (CR-S2) — NON-consuming: clearing on first hit let the foreach's lenient skip swallow the
+  // abort as "one item failed" and run the remaining N-1 iterations. The flag stays armed for the whole
+  // run (every subsequent node bails too → the abort propagates OUT of the loop); a wrapping WALK's
+  // boundary check then consumes it, and a fresh run's entry-clear handles the standalone case.
+  let _stopLogged = false;
   const _stopHit = () => {
     if (!_walkAbortFlag.requested) return false;
-    _walkAbortFlag.requested = false;
-    _orchLog('STOP ▸ plan halted between nodes');
+    if (!_stopLogged) { _stopLogged = true; _orchLog('STOP ▸ plan halted between nodes'); }
     return true;
   };
   const exec = {
     fragment: async (step, scope) => {
-      if (_stopHit()) return { ok: false, error: 'stopped by user' };
+      if (_stopHit()) return { ok: false, aborted: true, error: 'stopped by user' };
       // openItem — the per-item ACTION of an "open each <item>" foreach: open the current item's LINK in a NEW
       // background tab (so the result list the loop iterates stays put for the next item). Needs the row's href —
       // captured by the driver's list observation when the user pointed at a result LINK.
@@ -944,8 +953,22 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan, _headRan = false }) 
       const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId, capabilityId: step.capabilityId, paramValues: (step.bindings && typeof step.bindings === 'object') ? step.bindings : {} });
       return { ok: !!(res && res.success !== false && res.ran !== false && res.ok !== false), error: res && (res.error || res.reason) };
     },
+    // v2.74.915 — the loop-budget CONFIRM (walkPlan's exec.confirmLoop): a foreach/loop whose body runs
+    // engine actions (fragments) more than ~8× pauses for an explicit Continue/Stop before any iteration
+    // runs. The 22:58 runaway replayed a 5-tab opener 13× with no human in front of it — this is the gate
+    // that was missing. Declining aborts the loop node honestly ("loop declined by user").
+    confirmLoop: async ({ iterations, total, capped }) => {
+      const q = appendMessage({ role: 'assistant', body: '' });
+      _setMessageBody(q, `This loop will run ${iterations} time${iterations === 1 ? '' : 's'}${capped ? ` (capped from ${total} for safety)` : ''} — each pass runs page actions. Continue?`);
+      _orchLog(`LOOP ▸ confirm — ${iterations} iteration(s)${capped ? ` (capped from ${total})` : ''}`);
+      return await new Promise((resolve) => {
+        const bar = _orchActionBar(q);
+        bar.appendChild(_mkBtn(`▶ Run ${iterations}×`, () => { bar.remove(); resolve({ ok: true }); }));
+        bar.appendChild(_mkBtn('Stop', () => { bar.remove(); _setMessageBody(q, 'Stopped before the loop ran.'); resolve({ ok: false }); }));
+      });
+    },
     observe: async (step, scope) => {
-      if (_stopHit()) return { ok: false, error: 'stopped by user' };
+      if (_stopHit()) return { ok: false, aborted: true, error: 'stopped by user' };   // v2.74.918 (CR-S2)
       if (driverIds.has(step.id)) {
         const res = await _orchReq('RUN_OBSERVATION_LIST', { tabId, groundId, capabilityId: step.capabilityId });
         return { ok: !!(res && res.success !== false), items: (res && res.items) || [], value: (res && res.count) || 0, error: res && res.error };
@@ -998,6 +1021,8 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan, _headRan = false }) 
       try { await walkPlan({ goal: (plan && plan.goal) || '', steps: head }, exec); } catch (e) { _orchLog(`LOOP ▸ head error: ${e && e.message}`); }
       await new Promise((r) => setTimeout(r, 1400));   // settle after the search navigates, before reading/teaching
     }
+    // v2.74.918 (CR-S2) — a stop during the head must not roll into the teach prompt.
+    if (_walkAbortFlag.requested) { _setMessageBody(msg, '⏹ Stopped.'); _orchLog('STOP ▸ plan halted before the list teach'); return; }
     _orchLog(`LOOP ▸ teach list driver "${noun}" (point-at-one) on the results`);
     _setMessageBody(msg, `To open each ${noun}, point me at one ${noun} (e.g. the first) on the results — I’ll open them all.`);
     _orchObserveCapture(appendMessage({ role: 'assistant', body: '' }), {
@@ -1021,20 +1046,21 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan, _headRan = false }) 
     if (di > 0) runPlan = { ...plan, steps: steps.slice(di) };   // [driver, foreach, …]
   }
   _setMessageBody(msg, 'Running…');
-  const env = await walkPlan(runPlan, exec);
+  const env = await walkPlan(runPlan, exec, (maxIterations && maxIterations > 0) ? { maxIterations } : {});   // v2.74.916 — "top N" bounds the loop (the .915 cap/confirm still applies)
   const outs = (env && env.outputs) ? Object.entries(env.outputs) : [];
   const gate = (env && Array.isArray(env.trace)) ? env.trace.find((t) => t.kind === 'gate') : null;
   // ORCH-L — the foreach outcome (how many items the loop ran). For an OPEN-each loop (a body that opens each item,
   // collecting nothing) this IS the result the user wants reported: "Opened N pages."
   const fe = (env && Array.isArray(env.trace)) ? env.trace.find((t) => t && t.kind === 'foreach') : null;
   const openEach = (plan && Array.isArray(plan.steps)) && plan.steps.some((s) => s && s.kind === 'foreach' && Array.isArray(s.body) && s.body.some((b) => b && b.openItem));
-  if (fe) _orchLog(`LOOP ▸ foreach done — ${fe.done}/${fe.items} opened${fe.skipped ? `, ${fe.skipped} skipped` : ''}`);
+  if (fe) _orchLog(`LOOP ▸ foreach done — ${fe.done}/${fe.items} opened${fe.skipped ? `, ${fe.skipped} skipped` : ''}${fe.aborted ? ' (stopped by user)' : ''}`);
+  const _stopped = !!(env && env.aborted);   // v2.74.918 (CR-S2) — a user stop reports as STOPPED, never "couldn't complete"
   if (outs.length) {
-    _setMessageBody(msg, outs.map(([k, v]) => Array.isArray(v) ? `${k} (${v.length}):\n${v.map((x, i) => `  ${i + 1}. ${x}`).join('\n')}` : `${k}: ${v}`).join('\n\n'));
+    _setMessageBody(msg, (_stopped ? '⏹ Stopped early — partial results:\n\n' : '') + outs.map(([k, v]) => Array.isArray(v) ? `${k} (${v.length}):\n${v.map((x, i) => `  ${i + 1}. ${x}`).join('\n')}` : `${k}: ${v}`).join('\n\n'));
   } else if (openEach && fe) {
     _setMessageBody(msg, (env && env.ok)
-      ? `Opened ${fe.done} ${fe.done === 1 ? 'page' : 'pages'} in new tabs${fe.skipped ? ` (${fe.skipped} had no link to open)` : ''}.`
-      : `Opened ${fe.done} before stopping${env && env.error ? ` — ${env.error}` : ''}.`);
+      ? `Opened ${fe.done} ${fe.done === 1 ? 'page' : 'pages'} in new tabs${fe.skipped ? ` (${fe.skipped} had no link to open)` : ''}${fe.capped ? ` — capped at ${fe.done + fe.skipped} of ${fe.items} for safety` : ''}.`
+      : `Opened ${fe.done} before stopping${env && env.error && !_stopped ? ` — ${env.error}` : ''}.`);
   } else if (gate) {
     // PREDICATE → GATE: report the analysis decision — did the conditional action run, or was it skipped?
     _setMessageBody(msg, !(env && env.ok) ? `Couldn’t complete that${env && env.error ? ` — ${env.error}` : ''}.`
@@ -1049,6 +1075,7 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan, _headRan = false }) 
     _orchOfferSaveCompound(msg, { tabId, groundId, ask: (plan && plan.goal) || '', steps: plan && plan.steps, plan });
   }
   return env;
+  } finally { _planLive = Math.max(0, _planLive - 1); }   // v2.74.917 (CR-S1)
 }
 
 async function _orchRunPlan(msg, { tabId, groundId, steps, gaps = [], ask = '', savedComposite = false }) {
@@ -1801,9 +1828,15 @@ function _walkResolveParams(si, scope) {
 const _STOP_RE = /^\s*(?:stop|end|cancel|abort|halt)(?:\s+(?:it|that|this|everything|the\s+run|the\s+walk))?\s*[.!]?\s*$/i;
 const _walkAbortFlag = { requested: false };
 let _walkLive = false;
+// v2.74.917 (CR-S1) — plan-IR interpreter runs in flight. The .907 stop only armed the flag when a WALK was
+// live, but a foreach/loop plan launched directly (confirm-card ▶ Run — the exact 22:58 runaway path) runs
+// with _walkLive=false: "stop" replied "Nothing is running" while tabs kept opening. A counter (the teach
+// continuation re-enters _orchRunPlanIR) makes plan runs first-class stop targets.
+let _planLive = 0;
 async function _stopLongRunning() {
   const notes = [];
   if (_walkLive) { _walkAbortFlag.requested = true; notes.push('stopping the walk at the current step'); }
+  if (_planLive > 0) { _walkAbortFlag.requested = true; notes.push(`stopping the running plan at the next step`); }   // v2.74.917 (CR-S1)
   const live = [..._activeInvocations];
   for (const id of live) { try { await ChatAPI.cancel(id); } catch { /* already finished */ } }
   if (live.length) notes.push(`cancelled ${live.length} running capabilit${live.length === 1 ? 'y' : 'ies'}`);
@@ -1812,31 +1845,58 @@ async function _stopLongRunning() {
   _orchLog(`STOP ▸ ${notes.length ? notes.join('; ') : 'nothing running'}`);
 }
 
-async function _orchWalkWorkflow(resolved, { ask = '', tabId = null, groundId = null } = {}) {
+async function _orchWalkWorkflow(resolved, { ask = '', tabId = null, groundId = null, preSkipped = 0 } = {}) {
   const steps = (Array.isArray(resolved) ? resolved : []).filter(Boolean);
   if (!steps.length) return;
+  // v2.74.919 (CR-S3) — one walk at a time: the abort flag + liveness are shared module state and cannot
+  // serve two interleaved walks (the first finishing would mark the second "not running").
+  if (_walkLive) {
+    _setMessageBody(appendMessage({ role: 'assistant', body: '' }), 'A walk is already running — say “stop” first, then start this one again.');
+    return;
+  }
   // v2.74.906 — callers may SEED the walk with the current tab+ground (a same-Ground rich-intent walk
   // reuses the page the user is on instead of opening a fresh tab). Cross-Ground callers pass nothing.
   _walkAbortFlag.requested = false;   // v2.74.907 — a new walk clears any stale stop
   _walkLive = true;
-  await _walkStep(steps, 0, { scope: {}, tabId: tabId ?? null, ground: groundId ?? null, total: steps.length }, ask);
+  // v2.74.914 — per-step OUTCOME ledger (ran/read/taught/skipped/failed/error) so the end-of-walk summary
+  // accounts for EVERY step instead of claiming "walked all N" (the live walk said "1 skipped" up front and
+  // then step 4 just vanished — nothing reported what actually happened to each step).
+  await _walkStep(steps, 0, { scope: {}, tabId: tabId ?? null, ground: groundId ?? null, total: steps.length, results: [], preSkipped: preSkipped | 0 }, ask);
+}
+
+// v2.74.914 — render the walk's outcome ledger: chat gets the counts, the ring gets the per-step detail.
+function _walkRecap(st) {
+  const rs = Array.isArray(st.results) ? st.results : [];
+  const counts = new Map();
+  for (let i = 0; i < st.total; i++) { const o = (rs[i] && rs[i].outcome) || 'unreached'; counts.set(o, (counts.get(o) || 0) + 1); }
+  const chat = [...counts.entries()].map(([o, n]) => `${o} ${n}`).join(' · ') + (st.preSkipped ? ` · not walkable ${st.preSkipped}` : '');
+  const ring = Array.from({ length: st.total }, (_, i) => `${i + 1}:${(rs[i] && rs[i].outcome) || 'unreached'}`).join(' ');
+  return { chat, ring };
+}
+
+// v2.74.919 (CR-S3) — ONE exit for every way a walk ends. Before this, the three Stop buttons and the
+// step-level catch just removed their UI: no recap ever rendered, _walkLive stayed true forever (a later
+// "stop" claimed to be stopping a dead walk, and the stale flag insta-aborted the NEXT plan run).
+function _endWalk(st, i, reason) {
+  _walkLive = false;
+  _walkAbortFlag.requested = false;
+  const rec = _walkRecap(st);
+  const done = reason === 'done';
+  const where = done ? '' : ` at step ${Math.min(i + 1, st.total)} of ${st.total}`;
+  _orchLog(`WALK ▸ ${done ? 'done' : reason}${where} — ${st.total} step(s) [${rec.ring}]${st.preSkipped ? ` +${st.preSkipped} not-walkable` : ''}`);
+  _setMessageBody(appendMessage({ role: 'assistant', body: '' }), done
+    ? `✓ Walk finished — ${st.total} step${st.total === 1 ? '' : 's'}: ${rec.chat}.`
+    : `⏹ ${reason === 'errored' ? 'Walk stopped on an error' : 'Stopped the walk'}${where} — ${rec.chat}. Steps already completed stay done.`);
 }
 
 async function _walkStep(steps, i, st, ask) {
   const next = () => _walkStep(steps, i + 1, st, ask);
-  if (_walkAbortFlag.requested) {   // v2.74.907 — the "stop" keyword halts at the next step boundary
-    _walkLive = false; _walkAbortFlag.requested = false;
-    _orchLog(`WALK ▸ stopped by user at step ${i + 1}/${st.total}`);
-    _setMessageBody(appendMessage({ role: 'assistant', body: '' }), `⏹ Stopped the walk at step ${i + 1} of ${st.total}. Steps already completed stay done.`);
-    return;
-  }
-  if (i >= steps.length) {
-    _walkLive = false;   // v2.74.907
-    _orchLog(`WALK ▸ done — ${st.total} step(s)`);   // v2.74.832
-    _setMessageBody(appendMessage({ role: 'assistant', body: '' }), `✓ Finished — walked all ${st.total} step${st.total === 1 ? '' : 's'} in order.`);
-    return;
-  }
+  // v2.74.919 (CR-S3) — done BEFORE abort: a stop typed while the LAST step runs is a finish ("Walk
+  // finished"), not "Stopped at step N+1 of N". Both exits route through the one _endWalk.
+  if (i >= steps.length) { _endWalk(st, i, 'done'); return; }
+  if (_walkAbortFlag.requested) { _endWalk(st, i, 'stopped by user'); return; }   // v2.74.907 — the "stop" keyword halts at the step boundary
   const si = steps[i];
+  const mark = (outcome) => { if (st.results) st.results[i] = { clause: String(si.clause || '').slice(0, 60), outcome }; };   // v2.74.914
   const isRead = (si.capabilityKind === 'observation') || (!si.capabilityId && classifyReadAsk(si.clause || '').isRead);
   const m = appendMessage({ role: 'assistant', body: '' });
   // v2.74.832 — TRACE the walk to the ring buffer (the .818 ORCH_LOG pass-through) so a `gl` can SEE the
@@ -1851,52 +1911,84 @@ async function _walkStep(steps, i, st, ask) {
     const tab = await _walkEnsureTab(st, si);
     const advance = (value) => { if (value != null && value !== '') for (const o of _wfNames(si.outputs)) st.scope[o] = value; next(); };
     if (tab == null) {
+      mark('no-tab');   // v2.74.914
       _orchLog(`WALK ▸ step ${i + 1} · NO TAB for ${si.groundName || '?'}`);
       _setMessageBody(m, `Step ${i + 1}/${st.total} · couldn’t open ${si.groundName || 'the site'}.`);
-      const bar = _orchActionBar(m); bar.appendChild(_mkBtn('Skip ▸', () => { bar.remove(); next(); })); bar.appendChild(_mkBtn('Stop', () => { bar.remove(); }));
+      const bar = _orchActionBar(m); bar.appendChild(_mkBtn('Skip ▸', () => { bar.remove(); mark('skipped'); next(); })); bar.appendChild(_mkBtn('Stop', () => { bar.remove(); mark('stopped'); _endWalk(st, i, 'stopped'); }));   // v2.74.919 (CR-S3)
       return;
+    }
+
+    // v2.74.916 (HS-2) — a FOREACH step COMPOSES instead of teaching a blob: drive the open-each plan with
+    // the read walked BEFORE it (cited at compose time, or taught moments ago — the teach path stashes its
+    // new capabilityId on the step). The live 23:34 walk taught "read job listing titles" in step 2 and then
+    // tried to TEACH "iterate top 5 matching jobs" as an opaque action — the composition was already in hand.
+    // "top/first N" caps the loop via walkPlan's maxIterations; the .915 budget/confirm still applies.
+    if (si._foreach) {
+      const prior = steps.slice(0, i).reverse().find((p) => p && p.capabilityId && p.capabilityKind === 'observation');
+      if (prior) {
+        const n = (si._foreach.n > 0) ? si._foreach.n : null;
+        _orchLog(`WALK ▸ step ${i + 1} · foreach over "${String(prior.clause || '').slice(0, 40)}" (cap=${String(prior.capabilityId).slice(-6)}${n ? `, top ${n}` : ''})`);
+        _setMessageBody(m, `Step ${i + 1}/${st.total} · running “${si.clause}” over the “${prior.clause}” list${n ? ` (top ${n})` : ''}…`);
+        const plan = { goal: si.clause || '', steps: [
+          { kind: 'observe', outputType: 'list', id: 'rows', capabilityId: prior.capabilityId, bindings: {}, intent: prior.clause || '', clause: prior.clause || '' },
+          { kind: 'foreach', id: 'each', over: 'rows', itemVar: 'item', body: [{ kind: 'fragment', id: 'open', openItem: true, capabilityId: null, bindings: {}, intent: si.clause || '', clause: si.clause || '' }] },
+        ] };
+        const env = await _orchRunPlanIR(appendMessage({ role: 'assistant', body: '' }), { tabId: tab, groundId: si.groundId, plan, _headRan: true, maxIterations: n });
+        // v2.74.919 (CR-S3) — a stop during the nested plan ends the WALK with its recap (the non-consumed
+        // flag would trip the next boundary anyway; ending here keeps the ledger mark honest).
+        if (env && env.aborted) { mark('stopped'); _endWalk(st, i, 'stopped by user'); return; }
+        mark(env && env.ok === false ? 'failed' : 'ran (foreach)');   // v2.74.919 — a declined/failed loop isn't "ran"
+        advance();
+        return;
+      }
+      // no prior read to drive the loop → fall through to the teach path (the pre-.916 behavior)
     }
 
     if (si.capabilityId) {
       // ── BOUND → RUN it ──
       if (isRead) {
         const r = await _orchReq('RUN_OBSERVATION', { tabId: tab, groundId: si.groundId, capabilityId: si.capabilityId });
-        if (r && r.ok && r.value != null) { _orchLog(`WALK ▸ step ${i + 1} · read OK → "${String(r.value).slice(0, 40)}"`); _setMessageBody(m, `Step ${i + 1}/${st.total} · read “${si.clause}” → “${String(r.value).slice(0, 160)}”.`); advance(r.value); }
-        else { _orchLog(`WALK ▸ step ${i + 1} · read MISS [${r ? `ran=${r.ran} ok=${r.ok}${r.reason ? ` ${String(r.reason).slice(0, 40)}` : ''}` : 'null/timeout'}]`); _setMessageBody(m, `Step ${i + 1}/${st.total} · couldn’t read “${si.clause}” here${r && r.reason ? ` (${r.reason})` : ''}.`); _walkReteach(m, si, st, next); }
+        if (r && r.ok && r.value != null) { mark('read'); _orchLog(`WALK ▸ step ${i + 1} · read OK → "${String(r.value).slice(0, 40)}"`); _setMessageBody(m, `Step ${i + 1}/${st.total} · read “${si.clause}” → “${String(r.value).slice(0, 160)}”.`); advance(r.value); }
+        else { mark('failed'); _orchLog(`WALK ▸ step ${i + 1} · read MISS [${r ? `ran=${r.ran} ok=${r.ok}${r.reason ? ` ${String(r.reason).slice(0, 40)}` : ''}` : 'null/timeout'}]`); _setMessageBody(m, `Step ${i + 1}/${st.total} · couldn’t read “${si.clause}” here${r && r.reason ? ` (${r.reason})` : ''}.`); _walkReteach(m, si, st, next, mark, i); }
       } else {
         const r = await _orchReq('REPLAY_SG_CAPABILITY', { tabId: tab, groundId: si.groundId, capabilityId: si.capabilityId, paramValues: _walkResolveParams(si, st.scope) });
-        if (r && r.ok) { _orchLog(`WALK ▸ step ${i + 1} · ran OK`); _setMessageBody(m, `Step ${i + 1}/${st.total} · ran “${si.capabilityName || si.clause}”.`); advance(); }
-        else { _orchLog(`WALK ▸ step ${i + 1} · run FAIL [${r ? `success=${r.success} ran=${r.ran} ok=${r.ok}${r.error ? ` err="${String(r.error).slice(0, 50)}"` : ''}${r.reason ? ` ${String(r.reason).slice(0, 40)}` : ''}` : 'null/timeout'}]`); _setMessageBody(m, `Step ${i + 1}/${st.total} · “${si.capabilityName || si.clause}” didn’t complete${r && (r.error || r.reason) ? ` (${r.error || r.reason})` : ''}.`); _walkReteach(m, si, st, next); }
+        if (r && r.ok) { mark('ran'); _orchLog(`WALK ▸ step ${i + 1} · ran OK`); _setMessageBody(m, `Step ${i + 1}/${st.total} · ran “${si.capabilityName || si.clause}”.`); advance(); }
+        else { mark('failed'); _orchLog(`WALK ▸ step ${i + 1} · run FAIL [${r ? `success=${r.success} ran=${r.ran} ok=${r.ok}${r.error ? ` err="${String(r.error).slice(0, 50)}"` : ''}${r.reason ? ` ${String(r.reason).slice(0, 40)}` : ''}` : 'null/timeout'}]`); _setMessageBody(m, `Step ${i + 1}/${st.total} · “${si.capabilityName || si.clause}” didn’t complete${r && (r.error || r.reason) ? ` (${r.error || r.reason})` : ''}.`); _walkReteach(m, si, st, next, mark, i); }
       }
     } else {
       // ── GAP → TEACH it in place (the prior steps warmed the page) ──
       _setMessageBody(m, `Step ${i + 1}/${st.total} · ${isRead ? '◎ point at the value to read for' : '● show me how to'} “${si.clause}” on ${si.groundName || 'the site'}.`);
-      let done = false; const finish = (value) => { if (done) return; done = true; _orchLog(`WALK ▸ step ${i + 1} · taught (${isRead ? 'observe' : 'action'})`); advance(value); };
-      if (isRead) _orchObserveCapture(appendMessage({ role: 'assistant', body: '' }), { groundId: si.groundId, tabId: tab, ask: si.clause, onAuthored: (r) => finish(r && r.value) });
+      let done = false; const finish = (value, outcome) => { if (done) return; done = true; mark(outcome || 'taught'); _orchLog(`WALK ▸ step ${i + 1} · ${outcome || `taught (${isRead ? 'observe' : 'action'})`}`); advance(value); };
+      if (isRead) _orchObserveCapture(appendMessage({ role: 'assistant', body: '' }), { groundId: si.groundId, tabId: tab, ask: si.clause, onAuthored: (r) => { if (r && r.capabilityId) { si.capabilityId = r.capabilityId; si.capabilityKind = 'observation'; } finish(r && r.value); } });   // v2.74.916 — stash the taught read's id so a later foreach can drive on it
       else _orchNlFallback(appendMessage({ role: 'assistant', body: '' }), { tabId: tab, groundId: si.groundId, ask: si.clause, onAuthored: () => finish() });
       const bar = _orchActionBar(m);
-      bar.appendChild(_mkBtn('Skip ▸', () => { bar.remove(); finish(); }));
-      bar.appendChild(_mkBtn('Stop', () => { bar.remove(); done = true; }));
+      bar.appendChild(_mkBtn('Skip ▸', () => { bar.remove(); finish(undefined, 'skipped'); }));
+      bar.appendChild(_mkBtn('Stop', () => { bar.remove(); done = true; mark('stopped'); _endWalk(st, i, 'stopped'); }));   // v2.74.919 (CR-S3)
     }
   } catch (e) {
+    mark('error');   // v2.74.914
     _orchLog(`WALK ▸ step ${i + 1} ERROR: ${(e && e.message) || e}`);   // v2.74.832 — was dying silently
-    try { _setMessageBody(m, `Step ${i + 1}/${st.total} hit an error: ${(e && e.message) || e}. Stopped — re-run to retry.`); } catch { /* */ }
+    try { _setMessageBody(m, `Step ${i + 1}/${st.total} hit an error: ${(e && e.message) || e}.`); } catch { /* */ }
+    _endWalk(st, i, 'errored');   // v2.74.919 (CR-S3) — an error ends the walk WITH its recap (was: silent stall, _walkLive stuck true)
   }
 }
 
 // A bound step that didn't run/read → re-teach it IN PLACE (the page is already in the right state), skip, or stop.
-function _walkReteach(m, si, st, next) {
+// v2.74.914 — `mark` records the step's FINAL outcome in the walk ledger (a re-teach upgrades the 'failed' mark).
+// v2.74.919 (CR-S3) — `stepIndex` so its Stop ends the walk through _endWalk (was: removed the bar and stalled).
+function _walkReteach(m, si, st, next, mark = null, stepIndex = 0) {
   const isRead = (si.capabilityKind === 'observation') || classifyReadAsk(si.clause || '').isRead;
-  let done = false; const fin = (v) => { if (done) return; done = true; if (v != null && v !== '') for (const o of _wfNames(si.outputs)) st.scope[o] = v; next(); };
+  const _mk = (o) => { try { if (mark) mark(o); } catch { /* */ } };
+  let done = false; const fin = (v, outcome) => { if (done) return; done = true; _mk(outcome || 'taught'); if (v != null && v !== '') for (const o of _wfNames(si.outputs)) st.scope[o] = v; next(); };
   const bar = _orchActionBar(m);
   bar.appendChild(_mkBtn(isRead ? '◎ Re-teach the read' : '● Re-teach it', () => {
     bar.remove();
     if (isRead) _orchObserveCapture(appendMessage({ role: 'assistant', body: '' }), { groundId: si.groundId, tabId: st.tabId, ask: si.clause, onAuthored: (r) => fin(r && r.value) });
     else _orchNlFallback(appendMessage({ role: 'assistant', body: '' }), { tabId: st.tabId, groundId: si.groundId, ask: si.clause, onAuthored: () => fin() });
-    const b2 = _orchActionBar(m); b2.appendChild(_mkBtn('Skip ▸', () => { b2.remove(); fin(); }));
+    const b2 = _orchActionBar(m); b2.appendChild(_mkBtn('Skip ▸', () => { b2.remove(); fin(undefined, 'skipped'); }));
   }));
-  bar.appendChild(_mkBtn('Skip ▸', () => { bar.remove(); next(); }));
-  bar.appendChild(_mkBtn('Stop', () => { bar.remove(); }));
+  bar.appendChild(_mkBtn('Skip ▸', () => { bar.remove(); _mk('skipped'); next(); }));
+  bar.appendChild(_mkBtn('Stop', () => { bar.remove(); done = true; _mk('stopped'); _endWalk(st, stepIndex, 'stopped'); }));   // v2.74.919 (CR-S3)
 }
 
 // SAVE the previewed Workflow (the exact record shown — no re-decompose), so it can be re-run anytime.
@@ -2375,9 +2467,11 @@ async function _chatExplore({ thenMenu = false } = {}) {
   _setMessageBody(msg, `Exploring ${host} — this takes a few seconds (I'll poke around the page to map what it offers)…`);
   const res = await _orchReq('EXPLORE_PAGE_STRUCTURE', { tabId: tab.id, groundId: g.groundId });
   if (!res?.success) { _setMessageBody(msg, `Explore didn't finish${res && res.error ? ` — ${res.error}` : ' (it may still be running — check the page)'}.`); return false; }
-  const s = res.structure || {};
-  const nFeat = s.features && typeof s.features === 'object' ? Object.keys(s.features).length : null;
-  const nGoals = s.goals && typeof s.goals === 'object' ? Object.keys(s.goals).length : null;
+  // v2.74.925 (CR-T2) — the response's `structure` is the sweep artifact ({surface, controls, stats…});
+  // it never carried features/goals, so the .910 counts were silently null. The handler now attaches the
+  // LOCALE's counts (featureCount/goalCount) on both the full-build and fresh-skip paths.
+  const nFeat = Number.isFinite(res.featureCount) ? res.featureCount : null;
+  const nGoals = Number.isFinite(res.goalCount) ? res.goalCount : null;
   _setMessageBody(msg, `✓ Explored ${host}${res.fresh ? ' (already fresh — reused the map)' : ''}${nFeat != null ? ` — ${nFeat} feature${nFeat === 1 ? '' : 's'}` : ''}${nGoals != null ? `, ${nGoals} goal${nGoals === 1 ? '' : 's'}` : ''}.${thenMenu ? '' : ' Ask “what can I do here?” to see what I can put together now.'}`);
   if (thenMenu) { try { await _tryIntentMenu('what can I do here?'); } catch { /* */ } }
   return true;
@@ -2468,12 +2562,19 @@ async function _sendRichIntent(it) {
       capabilityId: s.capabilityId || null, capabilityKind: s.capabilityKind || null, capabilityName: s.ref || '',
       params: Object.keys(literals), literals, scopeReads: null, outputs: [],
     });
+    // v2.74.916 (HS-2) — a FOREACH step is not a teachable blob: it COMPOSES over the read walked before it
+    // (run the read as a list driver → open each row). Mark it; _walkStep compiles the open-each plan when a
+    // prior read step is bound (cited at compose time, or taught two steps ago). "top/first N" caps the loop.
+    if (s.kind === 'foreach') {
+      const tm = clause.match(/\b(?:top|first)\s+(\d{1,2})\b/i);
+      sis[sis.length - 1]._foreach = { n: tm ? parseInt(tm[1], 10) : null };
+    }
   }
   if (g && g.groundId && sis.length >= 2 && sis.some((x) => !x.capabilityId)) {
     appendMessage({ role: 'user', body: ask });
     if (skipped) appendMessage({ role: 'assistant', body: `(${skipped} advanced step${skipped === 1 ? '' : 's'} — filter/branch/loop — ${skipped === 1 ? 'isn’t' : 'aren’t'} walkable yet; running the rest in order.)` });
     _orchLog(`WALK ▸ start (rich intent) — ${sis.length} step(s)${skipped ? `, ${skipped} skipped` : ''}`);
-    _orchWalkWorkflow(sis, { ask, tabId: g.tabId ?? null, groundId: g.groundId }).catch((e) => _orchLog(`WALK ▸ start ERROR: ${(e && e.message) || e}`));
+    _orchWalkWorkflow(sis, { ask, tabId: g.tabId ?? null, groundId: g.groundId, preSkipped: skipped }).catch((e) => _orchLog(`WALK ▸ start ERROR: ${(e && e.message) || e}`));   // v2.74.914 — the recap names the not-walkable steps too
     return;
   }
   $('chat-input').value = ask;

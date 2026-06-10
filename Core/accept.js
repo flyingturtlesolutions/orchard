@@ -19,7 +19,7 @@
 // PURE — no storage, no chrome, no clock beyond an injected `acceptedAt`. The gate (canAccept) refuses to
 // build on a failing trial / under-covered completion intent.
 
-import { inferRoleKind, fillOpFor } from './trialSynth.js';
+import { inferRoleKind, fillOpFor, isTypeableDisclosure } from './trialSynth.js';
 
 export const ACCEPT_SCHEMA = 1;
 
@@ -410,7 +410,7 @@ export function buildParamSchema({ roles = [], groundId = '', localeUrl = '' } =
   const seen = new Set();
   for (const r of (Array.isArray(roles) ? roles : [])) {
     if (!r || typeof r.role !== 'string') continue;
-    if (inferRoleKind(r) !== 'input') continue;             // only fillable inputs are params
+    if (inferRoleKind(r) !== 'input' && !isTypeableDisclosure(r)) continue;   // fillable inputs + typeable disclosures (combobox, v2.74.913) are params
     const key = _paramKey(r.role);
     if (seen.has(key)) continue;
     seen.add(key);

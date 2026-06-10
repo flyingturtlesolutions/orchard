@@ -922,6 +922,7 @@ export class ExecutionEngine {
       const probe = await TemplateWalker.checkConditions({
         tabId, conditions: _fragPost,
         timeoutMs: 5000, pollIntervalMs: 100,
+        isAborted,   // v2.74.920 (CR-S4) — a cancel doesn't ride out the 5s post-probe
       });
       postFailures = probe.failures;
       // v2.74.815 — nav-aware postcondition relaxation. A fragment whose own terminal CLICK NAVIGATES (executeFragment
@@ -1191,6 +1192,7 @@ export class ExecutionEngine {
       });
       const probe = await TemplateWalker.checkConditions({
         tabId, conditions: cond, scope, timeoutMs, pollIntervalMs,
+        isAborted,   // v2.74.920 (CR-S4) — a cancelled run exits the WAIT-condition poll at the next tick
       });
       if (!probe.ok) {
         const reason = probe.failures[0]?.reason ?? 'condition not met';
@@ -3825,6 +3827,7 @@ export class ExecutionEngine {
           conditions: [probedCond],
           scope,
           timeoutMs: gateWaitTimeout,
+          isAborted,   // v2.74.920 (CR-S4) — a cancel exits a long extract-gate wait (up to 30s) at the next tick
         });
         satisfied = !!probe?.ok;
       } catch (err) {

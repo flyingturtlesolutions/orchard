@@ -97,13 +97,19 @@ const _richIntentCache = new Map();   // fingerprint → { intents, rejected, at
 // flood (evicted every decision line) and, worse, the C5 flush would credit BOT actions to landmark "usage".
 // REPLAY marks its tab busy for the run's duration; INTERACTION_RAW drops busy-tab events. (Sequential
 // loops re-add/delete the same id — a plain Set suffices; overlapping runs on one tab don't happen today.)
-const _engineBusyTabs = new Set();
+// v2.74.922 (CR-M1) — REFCOUNTED (was a plain Set): the chat stays interactive during a minutes-long
+// EXPLORE, so an alias-hit REPLAY on the same tab could finish first and its unmark re-enabled monitor
+// capture for the REST of the sweep — the .908/.911/.912 self-capture bug re-opened by overlap. Map
+// tabId → depth; the tab is engine-busy while depth > 0; increments/decrements are symmetric so nested
+// marking (e.g. RUN_SG_TRIAL wrapping _runTrialBundle, both marked) is correct by construction.
+const _engineBusyTabs = new Map();
 
 // v2.74.911 — shared with background.js: the EXPLORE poke sweep is engine activity too (the 23:29 trace
 // captured the sweep's own pokes as user interactions #1-#4 on the freshly minted Indeed ground).
 export function markEngineBusy(tabId, busy) {
   if (typeof tabId !== 'number') return;
-  if (busy) _engineBusyTabs.add(tabId); else _engineBusyTabs.delete(tabId);
+  const depth = (_engineBusyTabs.get(tabId) || 0) + (busy ? 1 : -1);
+  if (depth > 0) _engineBusyTabs.set(tabId, depth); else _engineBusyTabs.delete(tabId);
 }
 async function _flushInteractionOutcomes(ctx, { force = false } = {}) {
   if (_traceFlushing) return;
@@ -439,13 +445,13 @@ export function createSgMessageHandlers(ctx) {
       if (_busyTab != null) markEngineBusy(_busyTab, true);
       try {
         const { tabId, groundId = null, intent } = payload ?? {};
-        if (!groundId || typeof intent !== 'string' || !intent.trim()) { sendResponse({ success: false, error: 'groundId + intent required' }); return; }
+        if (!groundId || typeof intent !== 'string' || !intent.trim()) { Logger.info('background', 'RUN_SG_TRIAL ▸ EXIT — groundId + intent required'); sendResponse({ success: false, error: 'groundId + intent required' }); return; }   // v2.74.914 — every exit logs a verdict (the live "iterate top 5" dead-ended silently)
         let url = '';
         if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); url = t?.url ?? ''; } catch { /* */ } }
         let localeModel = null;
         let localeCapturedUrl = '';
         try { const pm = await ctx.readLocaleCache(groundId, ctx.normalizeUrl(url)); localeModel = pm?.model || null; localeCapturedUrl = pm?.url || pm?.model?.url || ''; } catch { /* */ }
-        if (!localeModel || !localeModel.features) { sendResponse({ success: false, error: 'no Locale for this page — run Explore first' }); return; }
+        if (!localeModel || !localeModel.features) { Logger.info('background', `RUN_SG_TRIAL ▸ EXIT — no Locale for ${ctx.normalizeUrl(url) || url || 'this page'} (ground ${groundId}) — run Explore first`); sendResponse({ success: false, error: 'no Locale for this page — run Explore first' }); return; }   // v2.74.914
         // C3 (v2.74.641) — REUSE the propose-time spec+selection (cached by GROUND_INTENT on this page) when
         // present. Re-comprehending here re-rolled the shape (act→read) and re-matched, which on a multi-
         // filter intent matched filters to inputs and broke the run; the cache makes the trial deterministic,
@@ -458,7 +464,7 @@ export function createSgMessageHandlers(ctx) {
           Logger.info('background', `RUN_SG_TRIAL — reusing cached propose spec (shape=${spec.shape}, ${(spec.subGoals || []).length} subGoal(s)) — no re-comprehend`);
         } else {
           spec = await AnthropicService.comprehendIntent({ userIntent: intent });
-          if (!spec) { sendResponse({ success: false, error: 'comprehend returned nothing' }); return; }
+          if (!spec) { Logger.info('background', `RUN_SG_TRIAL ▸ EXIT — comprehend returned nothing for "${intent.slice(0, 60)}"`); sendResponse({ success: false, error: 'comprehend returned nothing' }); return; }   // v2.74.914
           // GA-5 — bias Select's tie-break toward this Ground's historically-durable selector tiers (only with signal).
           let _conv = null;
           try { const r = await ctx.outcomeRollups(groundId); if (r && r.conventions && r.conventions.total >= 5) _conv = r.conventions; } catch { /* */ }
@@ -513,14 +519,9 @@ export function createSgMessageHandlers(ctx) {
           };
           for (let i = 0; i < phases.length; i++) {
             const node = phases[i];
-            // TESTING (v2.74.647) — unconditional 4s pause BETWEEN fragments, to isolate settle/hydration
-            // timing from a structural cause (e.g. a reCAPTCHA interstitial). If a hard gap makes the filter
-            // phases pass, the issue was settle timing; if they still fail, it is NOT timing. Remove once the
-            // inter-phase settle is validated.
-            if (i > 0) {
-              Logger.info('background', `  [tier2:run] testing pause 4000ms before "${node.label}"`);
-              await new Promise((r) => setTimeout(r, 4000));
-            }
+            // v2.74.925 (CR-T2) — removed the "TESTING (v2.74.647)" unconditional 4s inter-phase pause: it
+            // was a timing-isolation experiment that shipped ~280 patches and taxed every multi-phase trial
+            // 4s×(phases−1); the navigation-aware `_settleAfterNav` below (SG-T2-8) is the real settle.
             let beforeUrl = null;
             try { if (liveTab !== null) { const t = await chrome.tabs.get(liveTab); beforeUrl = t?.url || null; } } catch { /* */ }
             const out = await ctx.runTrialBundle({ groundId, intent: node.label, roles: node.roles, localeModel, navigateUrl: null, proposedRoleCount: node.roles.length, targetTabId: liveTab });
@@ -581,7 +582,7 @@ export function createSgMessageHandlers(ctx) {
         const cover = coverComplete(spec, selection);
         const roles = selectionToTrialRoles(spec, selection, localeModel);
         Logger.info('background', `RUN_SG_TRIAL — intent="${intent.slice(0, 60)}" shape=${spec.shape} cover=${cover.complete} roles=${roles.length}`);
-        if (!roles.length) { sendResponse({ success: true, ran: false, reason: 'no bindable roles from the selection', cover, intentShape: spec.shape }); return; }
+        if (!roles.length) { Logger.info('background', `RUN_SG_TRIAL ▸ EXIT — no bindable roles from the selection for "${intent.slice(0, 60)}"`); sendResponse({ success: true, ran: false, reason: 'no bindable roles from the selection', cover, intentShape: spec.shape }); return; }   // v2.74.925 (CR-T2) — the .914 every-exit-logs invariant missed this one
         // Precondition: Comprehend+Select take several seconds of LLM calls, during which the page can
         // navigate away (e.g. an auth redirect to /login). Re-read the live URL and bail with a CLEAR
         // "wrong page" rather than typing the form's selectors into whatever loaded.
@@ -589,7 +590,7 @@ export function createSgMessageHandlers(ctx) {
         if (typeof tabId === 'number') { try { const t2 = await chrome.tabs.get(tabId); liveUrl = t2?.url ?? url; } catch { /* */ } }
         const localeUrl = localeCapturedUrl || '';
         if (localeUrl && ctx.normalizeUrl(liveUrl) !== ctx.normalizeUrl(localeUrl)) {
-          Logger.warn('background', `RUN_SG_TRIAL — page drifted to "${liveUrl}" (capability targets "${localeUrl}") — not running`);
+          Logger.warn('background', `RUN_SG_TRIAL ▸ EXIT — page drifted to "${liveUrl}" (capability targets "${localeUrl}") — not running`);   // v2.74.925 (CR-T2) — marker so the decisions story shows the exit
           sendResponse({ success: true, ran: false, reason: `the page is now "${String(liveUrl).slice(0, 80)}" but this capability targets "${String(localeUrl).slice(0, 80)}" — navigate there and re-run`, cover, intentShape: spec.shape });
           return;
         }
@@ -2434,6 +2435,8 @@ export function createSgMessageHandlers(ctx) {
     // ORCH-L — CLICK a specific selector: the per-item action of a click-in-place FOREACH (click item[i] → a
     // detail panel updates → the body re-reads it). Reuses the content-script CLICK; settle is the caller's job.
     CLICK_SELECTOR: async (payload, _sender, sendResponse) => {
+      const _busyTab = (typeof payload?.tabId === 'number') ? payload.tabId : null;   // v2.74.923 (CR-M2) — the per-item click of a click-in-place foreach is engine activity (N synthetic clicks per loop)
+      if (_busyTab != null) markEngineBusy(_busyTab, true);
       try {
         const { tabId, selector = null } = payload ?? {};
         if (typeof tabId !== 'number' || !selector) { sendResponse({ success: false, error: 'tabId + selector required' }); return; }
@@ -2445,6 +2448,8 @@ export function createSgMessageHandlers(ctx) {
       } catch (err) {
         Logger.error('background', `CLICK_SELECTOR failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
+      } finally {
+        if (_busyTab != null) markEngineBusy(_busyTab, false);   // v2.74.923 (CR-M2)
       }
     },
 
@@ -2462,7 +2467,7 @@ export function createSgMessageHandlers(ctx) {
         if (ok && active && typeof tab.windowId === 'number') { try { await chrome.windows.update(tab.windowId, { focused: true }); } catch { /* */ } }
         if (ok) Logger.info('background', `OPEN_URL_NEW_TAB — "${String(url).slice(0, 80)}" → tab ${tab.id} (${active ? 'focused' : 'background'})`);
         else Logger.info('background', `OPEN_URL_NEW_TAB — "${String(url).slice(0, 80)}" failed to open`);
-        sendResponse({ success: true, ok, tabId: ok ? tab.id : null, error: ok ? null : 'tab did not open' });
+        sendResponse({ success: ok, ok, tabId: ok ? tab.id : null, error: ok ? null : 'tab did not open' });   // v2.74.925 (CR-T2) — a failed open is success:false (the nav verb rendered "Opened host." on failures)
       } catch (err) {
         Logger.error('background', `OPEN_URL_NEW_TAB failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
@@ -2779,7 +2784,7 @@ export function createSgMessageHandlers(ctx) {
     // (registry recovery via applyLandmarkRefToStep → LANDMARK_PROBE_OR_RECOVER); fall back to the binding.
     REPLAY_SG_CAPABILITY: async (payload, _sender, sendResponse) => {
       const _busyTab = (typeof payload?.tabId === 'number') ? payload.tabId : null;   // v2.74.908 — monitor self-capture suppression
-      if (_busyTab != null) _engineBusyTabs.add(_busyTab);
+      if (_busyTab != null) markEngineBusy(_busyTab, true);   // v2.74.922 (CR-M1) — via the refcount
       try {
         const { tabId, groundId = null, capabilityId = null, paramValues = null } = payload ?? {};
         if (!groundId || !capabilityId) { sendResponse({ success: false, error: 'groundId + capabilityId required' }); return; }
@@ -2872,7 +2877,7 @@ export function createSgMessageHandlers(ctx) {
       } catch (err) {
         Logger.error('background', `REPLAY_SG_CAPABILITY failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
-      } finally { if (_busyTab != null) _engineBusyTabs.delete(_busyTab); }   // v2.74.908
+      } finally { if (_busyTab != null) markEngineBusy(_busyTab, false); }   // v2.74.908; via the refcount since v2.74.922 (CR-M1)
     },
 
     // GA-3 (Win 1) — RE-VERIFY a saved capability: re-run its trial from the saved binding on the LIVE page and write

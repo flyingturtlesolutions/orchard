@@ -63,6 +63,32 @@ export function inferRoleKind(role, feature) {
   return 'action';   // default: treat an unknown role as an actionable control
 }
 
+// v2.74.913 — a TYPEABLE DISCLOSURE: a combobox/searchbox — a text-entry control the Explore classed as
+// `disclosure` because focusing it reveals suggestions (Indeed's q/l fields: kind=disclosure,
+// fieldType='text', a11y combobox). The live 23:32 trial proved the gap: bucketed as an ACT it was only
+// CLICKED — the whole "search by keyword and location" op ran with ZERO TYPE steps and submitted q= empty.
+// Such a control is a FILL that happens to also reveal: signal = explicit substrate fieldType 'text'
+// (never the fillOpFor default), or the role's stamped fieldType (replay path, bind._annotate), or a
+// combobox/searchbox accessibility role on the feature/landmark. Shared with Core/accept.buildParamSchema
+// so the typed value generalizes into a param exactly like a plain input's.
+export function isTypeableDisclosure(role, feature = null) {
+  if (inferRoleKind(role, feature) !== 'disclosure') return false;
+  const r = (role && typeof role === 'object') ? role : null;
+  if ((feature && feature.fieldType) === 'text' || (r && r.fieldType === 'text')) return true;
+  const a11y = String((feature && feature.a11yRole) || (r && r.landmark && r.landmark.role) || '');
+  return /^(combobox|searchbox)$/i.test(a11y);
+}
+
+// v2.74.924 (CR-B1) — the FILL class as a single FEATURE predicate: a plain input OR a typeable
+// disclosure. .913 made the combobox a fill in the SYNTH but bind.js's six `kind === 'input'` gates
+// (form-essential expansion, the one-input-per-role seeds, the .880 same-label collapse, and the
+// FILLS-must-SUBMIT pull) were not extended — so on a combobox site, expansion couldn't admit the
+// keyword field, two same-label comboboxes deduped NOWHERE (TYPEd twice), and a combobox-only fill
+// never pulled its submit. One predicate, used by synth and bind alike, ends the divergence.
+export function isFillableFeature(f) {
+  return !!f && (f.kind === 'input' || isTypeableDisclosure(null, f));
+}
+
 // A control's value SLOT — what KIND of value it wants — so a search trial fills the LOCATION field with
 // the place and the KEYWORD field with the query, instead of stuffing the same phrase into every text box.
 // Matched first by the input's `name` attribute (exact, reliable), then by its role/label text.
@@ -147,7 +173,7 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
     .map((r) => {
       const feature = r.featureId ? features[r.featureId] : null;
       const _offscreen = !!(feature && feature.location && feature.location.visibleAtRest === false);
-      return { ...r, _kind: inferRoleKind(r, feature), _verified: !!(feature && feature.selectorVerified), _fillOp: fillOpFor(feature, r), _offscreen, _label: (feature && feature.label) || null, _href: (feature && feature.href) || null };
+      return { ...r, _kind: inferRoleKind(r, feature), _typeable: isTypeableDisclosure(r, feature), _verified: !!(feature && feature.selectorVerified), _fillOp: fillOpFor(feature, r), _offscreen, _label: (feature && feature.label) || null, _href: (feature && feature.href) || null };
     });
 
   const actions = [];
@@ -166,8 +192,10 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
     return { role: lm.role || null, accessibleName: lm.accessibleName || null, hierarchicalContext: lm.hierarchicalContext || null, selector: lm.selector };
   };
 
-  const fills = list.filter((r) => FILL_KINDS.has(r._kind));
-  let   acts  = list.filter((r) => ACT_KINDS.has(r._kind));
+  // v2.74.913 — a typeable disclosure (combobox/searchbox) is a FILL, not an act: it gets a TYPE with a
+  // field-aware trial value instead of a bare CLICK (the 23:32 Indeed op had zero TYPE steps and ran q= empty).
+  const fills = list.filter((r) => FILL_KINDS.has(r._kind) || r._typeable);
+  let   acts  = list.filter((r) => ACT_KINDS.has(r._kind) && !r._typeable);
   const reads = list.filter((r) => READ_KINDS.has(r._kind));
 
   // Collapse equivalent act/navigation targets (same destination identity) to ONE, preferring a SURFACE
@@ -190,6 +218,21 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
     }
     acts = deduped;
     if (acts.length < before) warnings.push(`collapsed ${before - acts.length} duplicate target(s) reaching the same destination`);
+  }
+
+  // v2.74.913 — a TYPED combobox's popover content is VOLATILE: its suggestions/recent-search rows were
+  // captured at Explore time from an EMPTY box, so once the trial TYPEs a value the popover re-renders and
+  // those identities are gone (the live 23:32 run burned two 8s WAIT_FORs on stale rows, then hard-failed
+  // clicking an autocomplete option that no longer existed). Typing IS the value entry — drop every hidden
+  // member revealed by a combobox we're about to type into.
+  {
+    const typed = new Set(list.filter((r) => r._typeable && r.selector).map((r) => r.role));
+    if (typed.size) {
+      const volatile = (r) => r.hidden && r.revealedBy && typed.has(r.revealedBy);
+      for (const r of [...fills, ...acts]) if (volatile(r)) skipped.push({ role: r.role, why: 'combobox suggestion — volatile once a value is typed' });
+      for (let i = fills.length - 1; i >= 0; i--) if (volatile(fills[i])) fills.splice(i, 1);
+      acts = acts.filter((r) => !volatile(r));
+    }
   }
 
   // 1. Reveal hidden controls first (open the trigger that discloses them). Scroll the trigger into view

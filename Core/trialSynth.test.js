@@ -145,3 +145,59 @@ describe('classifyTrialSafety — a terminal ENTER is the commit (v2.74.879)', (
     assert.equal(res.actions.filter((a) => a.action === 'ENTER').length, 1, 'a reversible Enter-submit is kept');
   });
 });
+
+describe('synthesizeTrialOp — typeable disclosure = combobox gets a TYPE (v2.74.913)', () => {
+  // The live 23:32 Indeed walk: q/l are comboboxes the Explore classed kind=disclosure (focusing them
+  // reveals suggestions) with substrate fieldType 'text'. Bucketed as ACTs they were only CLICKED — the
+  // whole "search by keyword and location" op had ZERO TYPE steps and submitted q= empty; the bound
+  // suggestion rows (captured from an EMPTY box) were stale after typing and hard-failed the fragment.
+  const locale = { features: {
+    q:    { id: 'q', kind: 'disclosure', label: 'Job title, keywords, or company', selector: 'input[name="q"]', fieldType: 'text', interaction: { pattern: 'reveal', effect: 'reveal' } },
+    sug:  { id: 'sug', kind: 'action', label: 'application support', selector: '#what-autocomplete-suggestions--0', hidden: true, revealedBy: 'q', interaction: { pattern: 'click', effect: 'none' } },
+    go:   { id: 'go', kind: 'action', label: 'Search', selector: 'button.search', interaction: { pattern: 'click', effect: 'submit' } },
+  } };
+  const roles = [
+    { role: 'search: Job title, keywords, or company', featureId: 'q', selector: 'input[name="q"]', landmark: { role: 'combobox', accessibleName: 'search: Job title, keywords, or company', selector: 'input[name="q"]' } },
+    { role: 'application support', featureId: 'sug', selector: '#what-autocomplete-suggestions--0', hidden: true, revealedBy: 'search: Job title, keywords, or company', landmark: { role: 'option', accessibleName: 'application support', selector: '#what-autocomplete-suggestions--0' } },
+    { role: 'Search', featureId: 'go', selector: 'button.search', landmark: { role: 'button', accessibleName: 'Search', selector: 'button.search' } },
+  ];
+
+  it('TYPEs a field-aware value into the combobox instead of bare-clicking it', () => {
+    const op = synthesizeTrialOp({ groundedIntent: 'search for engineer jobs', roles, locale });
+    const types = op.actions.filter((a) => a.action === 'TYPE');
+    assert.equal(types.length, 1, `expected one TYPE, got: ${op.actions.map((a) => a.action).join(' | ')}`);
+    assert.equal(types[0].selector, 'input[name="q"]');
+    assert.ok(types[0].value && types[0].value.length > 0, 'TYPE carries a trial value');
+    assert.ok(op.trialInputs.some((t) => t.selector === 'input[name="q"]'), 'the typed combobox is a trial input (param-generalizable)');
+  });
+
+  it('drops the combobox\'s captured suggestion rows (volatile once a value is typed)', () => {
+    const op = synthesizeTrialOp({ groundedIntent: 'search for engineer jobs', roles, locale });
+    assert.ok(!op.actions.some((a) => a.selector === '#what-autocomplete-suggestions--0'), 'no CLICK/WAIT_FOR on the stale suggestion');
+    assert.ok(op.skipped.some((s) => s.role === 'application support'), 'the suggestion is skipped with a reason');
+  });
+
+  it('keeps the form flow: TYPE → submit CLICK (no Enter fallback needed)', () => {
+    const op = synthesizeTrialOp({ groundedIntent: 'search for engineer jobs', roles, locale });
+    const seq = op.actions.map((a) => a.action);
+    const iType = seq.indexOf('TYPE');
+    const iClick = op.actions.findIndex((a) => a.action === 'CLICK' && a.selector === 'button.search');
+    assert.ok(iType >= 0 && iClick > iType, `expected TYPE before submit CLICK, got ${seq.join(' | ')}`);
+    assert.ok(!seq.includes('ENTER'), 'a bound submit means no Enter fallback');
+  });
+
+  it('replay path: a role stamped kind=disclosure + fieldType=text TYPEs without the live feature', () => {
+    const op = synthesizeTrialOp({ groundedIntent: 'search for plumber jobs', roles: [
+      { role: 'keyword box', kind: 'disclosure', fieldType: 'text', selector: 'input[name="q"]', landmark: { role: 'combobox', accessibleName: 'keyword box', selector: 'input[name="q"]' } },
+    ], locale: null });
+    assert.ok(op.actions.some((a) => a.action === 'TYPE' && a.selector === 'input[name="q"]'), 'role-stamped combobox still fills');
+  });
+
+  it('a plain filter-dropdown disclosure (no fieldType) is NOT typed — still an act', () => {
+    const op = synthesizeTrialOp({ groundedIntent: 'filter by pay', roles: [
+      { role: 'Pay filter', kind: 'disclosure', selector: '#pay', landmark: { role: 'button', accessibleName: 'Pay', selector: '#pay' } },
+    ], locale: null });
+    assert.ok(!op.actions.some((a) => a.action === 'TYPE'), 'no TYPE on a button disclosure');
+    assert.ok(op.actions.some((a) => a.action === 'CLICK' && a.selector === '#pay'), 'still clicked as an act');
+  });
+});

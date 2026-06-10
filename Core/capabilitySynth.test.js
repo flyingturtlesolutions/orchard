@@ -331,3 +331,32 @@ describe('shieldedFragmentIds — keep shared fragments out of a delete sweep (v
     assert.equal(shieldedFragmentIds(['frag-shared'], null).size, 0);
   });
 });
+
+describe('prepareHeteroTier2Records — HS-2 scope-wired params (v2.74.916)', () => {
+  // The walker binds observation extracts to scope BEFORE later steps run, and strategy_param bindings
+  // resolve through that same scope — so a param an earlier READ provides is fed by the capability itself.
+  // It must not be asked of the user at invocation.
+  const obsTitle = { kind: 'observation', label: 'Read top result title', extracts: [{ selector: '.r .title', output: 'TOP_RESULT_TITLE', shape: 'text' }] };
+  const actUse = { kind: 'action', label: 'Search the title', actions: [{ action: 'TYPE', selector: '#q', value: '{{TOP_RESULT_TITLE}}' }, { action: 'TYPE', selector: '#l', value: '{{LOCATION}}' }, { action: 'CLICK', selector: '#go' }] };
+  const params = [{ name: 'TOP_RESULT_TITLE', value: 'demo title', label: 'Title' }, { name: 'LOCATION', value: 'NYC', label: 'Where' }];
+
+  it('a param provided by an EARLIER observation output is wired: dropped from user-facing params, binding kept', () => {
+    const r = prepareHeteroTier2Records([obsTitle, actUse], {
+      groundId: 'g', strategyId: 's', fragmentIds: ['f0'], observationIds: ['ob0'], name: 'n', goal: 'g', params, now: 5,
+    });
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.wiredParams, ['TOP_RESULT_TITLE']);
+    assert.deepEqual(r.strategy.params.map((p) => p.name), ['LOCATION'], 'the read-fed param is not asked of the user');
+    const frag = r.strategy.fragmentSteps.find((s) => s.type === 'fragment');
+    assert.deepEqual(frag.paramBindings.TOP_RESULT_TITLE, { kind: 'strategy_param', name: 'TOP_RESULT_TITLE' }, 'the binding survives — scope feeds it at run time');
+  });
+
+  it('no time travel: a fragment BEFORE the providing read keeps its user-facing param', () => {
+    const r = prepareHeteroTier2Records([actUse, obsTitle], {
+      groundId: 'g', strategyId: 's', fragmentIds: ['f0'], observationIds: ['ob0'], name: 'n', goal: 'g', params, now: 5,
+    });
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.wiredParams, [], 'the read runs after the consumer — nothing wired');
+    assert.deepEqual(r.strategy.params.map((p) => p.name).sort(), ['LOCATION', 'TOP_RESULT_TITLE']);
+  });
+});

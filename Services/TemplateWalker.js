@@ -574,7 +574,7 @@ export class TemplateWalker {
         if (i === lastDispatchableIdx) action._isTerminal = true;
 
         try {
-          const execResult = await TemplateWalker.#executeStep(tabId, action, TOP_FRAME_ID);
+          const execResult = await TemplateWalker.#executeStep(tabId, action, TOP_FRAME_ID, isAborted);   // v2.74.920 (CR-S4)
           if (!execResult?.success) {
             return {
               success: false, fragmentsRun, fragmentsSkipped, actionsRun,
@@ -1034,6 +1034,7 @@ export class TemplateWalker {
             conditions: [gateCondition],
             scope,
             timeoutMs: gateWaitTimeout,
+            isAborted,   // v2.74.920 (CR-S4) — a cancel exits the gate's retry window at the next tick
           });
         } catch (err) {
           Logger.error('TemplateWalker', `ACTION_GATE condition check threw: ${err.message ?? err}`);
@@ -1107,7 +1108,7 @@ export class TemplateWalker {
             // v2.74.163 — Same-origin iframe support for gate body
             // sub-actions. Each sub carries its own optional frameUrl.
             const bodyFrameId = await TemplateWalker._resolveFrameId(tabId, bodyAction.frameUrl);
-            bodyResult = await TemplateWalker.#executeStep(tabId, bodyAction, bodyFrameId);
+            bodyResult = await TemplateWalker.#executeStep(tabId, bodyAction, bodyFrameId, isAborted);   // v2.74.920 (CR-S4)
           } catch (err) {
             return {
               success: false, actionsRun, antecedentActionsRun, lastActions,
@@ -1192,7 +1193,7 @@ export class TemplateWalker {
         // per-branch but v1 doesn't surface that.
         const chainFrameId = await TemplateWalker._resolveFrameId(tabId, action.frameUrl);
         try {
-          headResult = await TemplateWalker.#executeStep(tabId, headStep, chainFrameId);
+          headResult = await TemplateWalker.#executeStep(tabId, headStep, chainFrameId, isAborted);   // v2.74.920 (CR-S4)
         } catch (err) {
           return {
             success: false, actionsRun, antecedentActionsRun, lastActions,
@@ -1257,7 +1258,7 @@ export class TemplateWalker {
         try {
           // v2.74.163 — Branch dispatches in the same frame as the
           // head (chainFrameId was resolved above).
-          branchResult = await TemplateWalker.#executeStep(tabId, branchStep, chainFrameId);
+          branchResult = await TemplateWalker.#executeStep(tabId, branchStep, chainFrameId, isAborted);   // v2.74.920 (CR-S4)
         } catch (err) {
           return {
             success: false, actionsRun, antecedentActionsRun, lastActions,
@@ -1312,7 +1313,7 @@ export class TemplateWalker {
         // resolver re-matches by URL each time because frame ids
         // aren't stable across reloads.
         const stepFrameId = await TemplateWalker._resolveFrameId(tabId, action.frameUrl);
-        const execResult = await TemplateWalker.#executeStep(tabId, action, stepFrameId);
+        const execResult = await TemplateWalker.#executeStep(tabId, action, stepFrameId, isAborted);   // v2.74.920 (CR-S4)
         if (!execResult?.success) {
           // Best-effort normalizers (SCROLL_TO / WAIT_FOR injected by trial synth) are marked `optional`:
           // a miss must NOT abort the fragment — the real action step that follows carries the landmark and
@@ -1406,7 +1407,7 @@ export class TemplateWalker {
    * @param {number} [opts.pollIntervalMs=100] - poll cadence during retry
    * @returns {Promise<{ ok: boolean, failures: Array<Object>, elapsedMs: number, attempts: number }>}
    */
-  static async checkConditions({ tabId, conditions, scope = null, timeoutMs = 0, pollIntervalMs = 100 }) {
+  static async checkConditions({ tabId, conditions, scope = null, timeoutMs = 0, pollIntervalMs = 100, isAborted = null }) {   // v2.74.920 (CR-S4) — optional abort hook, checked each poll tick
     // v2.41.0 (Pass M1) — accept either a legacy array OR a Assertion.
     // Both flow through normalizeAssertion to a canonical { match, conditions }.
     let assertion = TemplateWalker.#asAssertion(conditions);
@@ -1606,14 +1607,21 @@ export class TemplateWalker {
       return false;
     };
 
+    // v2.74.920 (CR-S4) — a cancelled run must not ride out the poll window: before this, a user cancel
+    // waited out gate retries and 5s postcondition probes in full (isAborted was only checked BETWEEN
+    // steps). Checked at entry and on every tick; the distinct `aborted` shape lets callers score the
+    // run cancelled, not failed.
+    const _abortRes = (started, attempts) => ({ ok: false, aborted: true, failures: [{ condition: { type: 'aborted' }, reason: 'cancelled by user' }], elapsedMs: Date.now() - started, attempts });
     const started = Date.now();
     let attempts = 0;
+    if (typeof isAborted === 'function' && isAborted()) return _abortRes(started, attempts);
     let res = await runOnce(++attempts);   // attempt 1
 
     let ok = okOf(res);
 
     // Retry loop — only engaged when timeoutMs > 0
     while (!ok && Date.now() - started < timeoutMs) {
+      if (typeof isAborted === 'function' && isAborted()) return _abortRes(started, attempts);   // v2.74.920 (CR-S4)
       await TemplateWalker.#sleep(pollIntervalMs);
       res = await runOnce(++attempts);
       ok = okOf(res);
@@ -3752,7 +3760,7 @@ export class TemplateWalker {
     }
   }
 
-  static async #executeStep(tabId, step, frameId = TOP_FRAME_ID) {
+  static async #executeStep(tabId, step, frameId = TOP_FRAME_ID, isAborted = null) {   // v2.74.920 (CR-S4) — abort hook for the sliced WAIT
     try {
       // v2.74.236 — Wave 3 of the landmark SSOT project. If the step
       // carries a `landmarkRef`, resolve it to a concrete selector +
@@ -4042,7 +4050,14 @@ export class TemplateWalker {
       }
 
       if (step.action === 'WAIT') {
-        await TemplateWalker.#sleep(Math.max(0, parseInt(step.value, 10) || 1000));
+        // v2.74.920 (CR-S4) — sliced (mirrors the engine WAIT node's 100ms loop) so a cancel doesn't ride
+        // out an authored wait. Early exit returns success; the caller's between-steps isAborted check then
+        // ends the run through the EXISTING aborted path (no new failure shape).
+        const _total = Math.max(0, parseInt(step.value, 10) || 1000);
+        for (let _waited = 0; _waited < _total; _waited += 100) {
+          if (typeof isAborted === 'function' && isAborted()) break;
+          await TemplateWalker.#sleep(Math.min(100, _total - _waited));
+        }
         return { success: true };
       }
 

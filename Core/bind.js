@@ -19,6 +19,7 @@
 // @version 2.74.651
 
 import { featureToProtoLandmark } from './landmark.js';
+import { isFillableFeature } from './trialSynth.js';   // v2.74.924 (CR-B1) — input OR typeable disclosure (combobox); one fill class everywhere
 import { resolveIntentGoals } from './select.js';
 
 const _roleName = (f) => (f && typeof f.label === 'string' && f.label.trim()) ? f.label.trim() : (f && f.id) || '';
@@ -50,6 +51,10 @@ const _annotate = (role, f) => {
   if (f && typeof f.kind === 'string' && f.kind) role.kind = f.kind;
   const tok = _fillType(f);
   if (tok === 'file' || tok === 'select') role.fieldType = tok;   // text is the fillOpFor default; omit it
+  // v2.74.913 — EXCEPT on a typeable disclosure (combobox: kind=disclosure + substrate fieldType 'text'):
+  // there 'text' is the FILL signal itself (trialSynth.isTypeableDisclosure), so the replay/accept path
+  // (no live feature) must still see it. A plain filter-dropdown disclosure has no fieldType — unaffected.
+  if (f && f.kind === 'disclosure' && f.fieldType === 'text') role.fieldType = 'text';
   const lm = featureToProtoLandmark(f, role.fieldType);
   if (lm) role.landmark = lm;
   return role;
@@ -125,7 +130,7 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
     // _formEssential covers inputs + the submit only; disclosures are reached precisely, not in bulk.
     const goalMap = (locale && locale.goals && typeof locale.goals === 'object') ? locale.goals : {};
     const _formEssential = (f) => !!f && !!f.selector && f.decoy !== true
-      && (f.kind === 'input' || (f.kind === 'action' && f.interaction && f.interaction.effect === 'submit'));
+      && (isFillableFeature(f) || (f.kind === 'action' && f.interaction && f.interaction.effect === 'submit'));   // v2.74.924 (CR-B1) — comboboxes are form-essential fills
     const groundedGoals = new Set();
     for (const id of ids) { const f = feats[id]; if (f && Array.isArray(f.goals)) for (const g of f.goals) groundedGoals.add(g); }
     // ZERO-ANCHOR FALLBACK (v2.74.623, SG-RES-7b / slice 2) — the matcher anchored NO goal (it matched
@@ -149,7 +154,7 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
       // form-vs-filter decision is local to each goal the intent touches.
       const _roleKey = (f) => String((f && (f.label || f.id)) || '').trim().toLowerCase();
       const inputRoles = new Set();
-      for (const id of ids) { const f = feats[id]; if (f && f.kind === 'input') inputRoles.add(_roleKey(f)); }
+      for (const id of ids) { const f = feats[id]; if (isFillableFeature(f)) inputRoles.add(_roleKey(f)); }   // v2.74.924 (CR-B1)
       // REVEAL BOUNDARY (v2.74.642, SG-RES-7f) — a goal-expanded member that's HIDDEN behind a disclosure is
       // bound ONLY if that disclosure is itself anchored, so the operation stays inside ONE dropdown. Indeed's
       // LLM "filter by pay" goal conflated the real Pay-filter brackets with a job-card "missing preference"
@@ -165,12 +170,12 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
         for (const f of Object.values(feats)) { if (f && Array.isArray(f.goals) && f.goals.includes(g)) members.set(f.id, f); }
         const goalHasSubmit = [...members.values()].some((f) => f.kind === 'action' && f.interaction && f.interaction.effect === 'submit');
         // Has an input of THIS goal already been bound (e.g. the anchored option)?
-        let goalInputBound = [...ids].some((id) => { const f = feats[id]; return f && f.kind === 'input' && Array.isArray(f.goals) && f.goals.includes(g); });
+        let goalInputBound = [...ids].some((id) => { const f = feats[id]; return isFillableFeature(f) && Array.isArray(f.goals) && f.goals.includes(g); });   // v2.74.924 (CR-B1)
         for (const f of members.values()) {
           if (!_formEssential(f)) continue;
           if (!ids.has(f.id) && DESTRUCTIVE_LABEL.test(String(f.label || ''))) continue;   // EX-1 at bind (v2.74.912): expansion never admits a destroyer (anchored ids untouched)
           if (f.hidden && f.revealedBy && !boundDisclosures.has(f.revealedBy)) continue;   // SG-RES-7f: behind a DIFFERENT dropdown than the one we're operating
-          if (f.kind === 'input') {
+          if (isFillableFeature(f)) {   // v2.74.924 (CR-B1)
             if (!goalHasSubmit && goalInputBound) continue;             // SG-RES-7d: option group → at most one input
             const k = _roleKey(f); if (inputRoles.has(k)) continue;     // SG-RES-7c: one per distinct role
             inputRoles.add(k); if (!goalHasSubmit) goalInputBound = true;
@@ -193,7 +198,7 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
       const keepByRole = new Map();
       for (const id of [...ids]) {
         const f = feats[id];
-        if (!f || f.kind !== 'input') continue;
+        if (!isFillableFeature(f)) continue;   // v2.74.924 (CR-B1) — two same-label comboboxes collapse like inputs (was: deduped nowhere, TYPEd twice)
         const k = _inKey(f); if (!k) continue;
         const prev = keepByRole.get(k);
         if (!prev) { keepByRole.set(k, f); continue; }
@@ -265,7 +270,7 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
     // UNSUBMITTED page (no results, no search button). Bind the effect:submit control that shares a GOAL
     // with a filled input — goal membership scopes it to the SAME form when the page has several submits.
     // Skip if a submit was already matched. (The `complete` branch binds the success action explicitly.)
-    const filledInputIds = [...ids].filter((id) => feats[id] && feats[id].kind === 'input');
+    const filledInputIds = [...ids].filter((id) => isFillableFeature(feats[id]));   // v2.74.924 (CR-B1) — a combobox-only fill still pulls its submit
     const alreadyHasSubmit = [...ids].some((id) => feats[id] && feats[id].kind === 'action' && feats[id].interaction && feats[id].interaction.effect === 'submit');
     if (filledInputIds.length && !alreadyHasSubmit) {
       const filledGoals = new Set();

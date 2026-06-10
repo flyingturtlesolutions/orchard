@@ -154,3 +154,127 @@ describe('orchRun — the pure control-flow interpreter (ORCH-L)', () => {
     assert.equal(exec.calls.some((c) => c.id === 'c2'), false, 'the step after the failure never runs');
   });
 });
+
+describe('orchRun — foreach/loop SAFETY BUDGET (v2.74.915)', () => {
+  // The 22:58 runaway: a foreach replayed a 5-tab-opening fragment body 13× with no bound and no human
+  // in front of it. The interpreter now (1) hard-caps iterations and (2) asks exec.confirmLoop before a
+  // body with engine actions runs more than confirmAbove times.
+  const bigForeach = (n) => ({ steps: [
+    planStep.observe('rows', { outputType: 'list' }),
+    planStep.foreach('each', 'rows', [planStep.fragment('open', 'cap-open')]),
+  ] });
+
+  it('hard-caps a foreach at maxIterations and records the cap in the trace', async () => {
+    const exec = mockExec({ observe: () => ({ ok: true, items: Array.from({ length: 30 }, (_, i) => `r${i}`) }) });
+    const env = await walkPlan(bigForeach(30), exec, { maxIterations: 10, confirmAbove: 99 });
+    assert.equal(env.ok, true);
+    const opens = exec.calls.filter((c) => c.kind === 'fragment').length;
+    assert.equal(opens, 10, 'only the capped count ran');
+    const fe = env.trace.find((t) => t.kind === 'foreach');
+    assert.equal(fe.capped, 20, 'trace records what was cut');
+    assert.equal(fe.items, 30, 'trace still reports the full driver size');
+  });
+
+  it('asks confirmLoop before a big acting loop; DECLINE aborts with zero iterations run', async () => {
+    let asked = null;
+    const exec = mockExec({ observe: () => ({ ok: true, items: Array.from({ length: 13 }, (_, i) => i) }) });
+    exec.confirmLoop = async (q) => { asked = q; return { ok: false }; };
+    const env = await walkPlan(bigForeach(13), exec, {});
+    assert.equal(env.ok, false);
+    assert.match(env.error, /declined/);
+    assert.equal(asked.iterations, 13, 'the confirm names the real count');
+    assert.equal(exec.calls.filter((c) => c.kind === 'fragment').length, 0, 'nothing ran before the decline');
+  });
+
+  it('confirmLoop ACCEPT runs the loop; a small loop never asks; a read-only body never asks', async () => {
+    let asks = 0;
+    const items = (n) => ({ ok: true, items: Array.from({ length: n }, (_, i) => i) });
+    // accept path
+    const e1 = mockExec({ observe: () => items(12) });
+    e1.confirmLoop = async () => { asks++; return { ok: true }; };
+    const r1 = await walkPlan(bigForeach(12), e1, {});
+    assert.equal(r1.ok, true);
+    assert.equal(e1.calls.filter((c) => c.kind === 'fragment').length, 12);
+    // small loop — under confirmAbove (8) → no ask
+    const e2 = mockExec({ observe: () => items(5) });
+    e2.confirmLoop = async () => { asks++; return { ok: true }; };
+    await walkPlan(bigForeach(5), e2, {});
+    // read-only body (observe, no fragment) → no ask however big
+    const e3 = mockExec({ observe: (s) => s.id === 'rows' ? items(20) : { ok: true, value: 'x' } });
+    e3.confirmLoop = async () => { asks++; return { ok: true }; };
+    const readPlan = { steps: [
+      planStep.observe('rows', { outputType: 'list' }),
+      planStep.foreach('each', 'rows', [planStep.observe('val', { outputType: 'scalar' })], { collect: 'VALS' }),
+    ] };
+    const r3 = await walkPlan(readPlan, e3, {});
+    assert.equal(r3.ok, true);
+    assert.equal(asks, 1, 'only the 12× acting loop asked');
+  });
+
+  it('a missing confirmLoop hook proceeds (headless replay) — cap still applies', async () => {
+    const exec = mockExec({ observe: () => ({ ok: true, items: Array.from({ length: 40 }, (_, i) => i) }) });
+    const env = await walkPlan(bigForeach(40), exec, {});
+    assert.equal(env.ok, true);
+    assert.equal(exec.calls.filter((c) => c.kind === 'fragment').length, 25, 'default maxIterations=25');
+  });
+
+  it('LOOP (count driver) gets the same cap', async () => {
+    const plan = { steps: [
+      planStep.observe('n', { outputType: 'count' }),
+      planStep.loop('rep', 'n', [planStep.fragment('act', 'cap-act')]),
+    ] };
+    const exec = mockExec({ observe: () => ({ ok: true, value: 100 }) });
+    const env = await walkPlan(plan, exec, { maxIterations: 7, confirmAbove: 99 });
+    assert.equal(env.ok, true);
+    assert.equal(exec.calls.filter((c) => c.kind === 'fragment').length, 7);
+    const lp = env.trace.find((t) => t.kind === 'loop');
+    assert.equal(lp.capped, 93);
+  });
+});
+
+describe('walkPlan — abort propagates OUT of loops (CR-S2, v2.74.918)', () => {
+  // The live 22:58-class failure: a user STOP inside a foreach was consumed as ONE item's lenient skip and
+  // the remaining N-1 iterations ran anyway. An `aborted:true` exec result must end the WHOLE plan.
+  const openEachPlan = (n) => ({ steps: [
+    planStep.observe('rows', { outputType: 'list' }),
+    planStep.foreach('each', 'rows', [planStep.fragment('open', 'cap-open')], { collect: 'OUT' }),
+  ] });
+
+  it('an aborted fragment ends the foreach immediately, keeping partials', async () => {
+    let runs = 0;
+    const exec = mockExec({
+      observe: () => ({ ok: true, items: Array.from({ length: 5 }, (_, i) => `r${i}`) }),
+      fragment: () => { runs++; return runs >= 2 ? { ok: false, aborted: true, error: 'stopped by user' } : { ok: true }; },
+    });
+    const env = await walkPlan(openEachPlan(5), exec, {});
+    assert.equal(env.ok, false);
+    assert.equal(env.aborted, true, 'walkPlan surfaces aborted');
+    assert.equal(runs, 2, 'no further iterations after the abort');
+    const fe = env.trace.find((t) => t.kind === 'foreach');
+    assert.equal(fe.aborted, true);
+    assert.equal(fe.done, 1, 'one iteration completed before the stop');
+    assert.ok(!('skipped' in fe) || fe.skipped === 0, `abort is not a lenient skip (got skipped=${fe.skipped})`);
+  });
+
+  it('a plain per-item failure still lenient-skips (regression: leniency unchanged)', async () => {
+    let runs = 0;
+    const exec = mockExec({
+      observe: () => ({ ok: true, items: ['a', 'b', 'c'] }),
+      fragment: () => { runs++; return runs === 2 ? { ok: false, error: 'flaky item' } : { ok: true }; },
+    });
+    const env = await walkPlan(openEachPlan(3), exec, {});
+    assert.equal(env.ok, true);
+    assert.equal(env.aborted, false);
+    assert.equal(runs, 3, 'all iterations attempted');
+    const fe = env.trace.find((t) => t.kind === 'foreach');
+    assert.equal(fe.done, 2);
+    assert.equal(fe.skipped, 1);
+  });
+
+  it('an aborted observe in a sequence surfaces aborted on the env', async () => {
+    const exec = mockExec({ observe: () => ({ ok: false, aborted: true, error: 'stopped by user' }) });
+    const env = await walkPlan({ steps: [planStep.observe('r1', { outputType: 'scalar' })] }, exec, {});
+    assert.equal(env.ok, false);
+    assert.equal(env.aborted, true);
+  });
+});
