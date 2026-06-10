@@ -1,6 +1,6 @@
 # Monitoring Phase — Status & Plan
 
-*The **interaction-monitoring (Track)** phase: the deterministic sensor that turns the authored substrate into a live, classified evidence stream. Snapshot as of **v2.74.855**.*
+*The **interaction-monitoring (Track)** phase: the deterministic sensor that turns the authored substrate into a live, classified evidence stream. Snapshot as of **v2.74.892** (originally drafted at .855; the ✅/⏳ sections below are updated through C4).*
 
 ---
 
@@ -40,14 +40,21 @@ Invariants: **L2 is pure** `(ResolvedInteraction, Context) → ClassifiedInterac
 - **C3 (L1 reverse resolver)** — `Core/interactionResolve.js` + `INTERACTION_RAW` upgrade — `c482ca2` (v2.74.860). `resolveInteraction(raw,…)` → §5.2 `ResolvedInteraction`: dedups matches, sets resolutionStatus (suppressed/miss/ambiguous/hit), enriches with perspectiveId/role/confidence, carries groundId + live `activePerspectiveIds`. The content-script match (C2b) IS the hit-test, so no re-resolve; per-tab session map resolves the Ground without a per-event `getAllGrounds`. +9 tests **incl. an integration test proving a resolved hit classifies as `substrate` via C0** (the C3→C0 contract). *The classifier is now FEEDABLE.*
 - **All four reuse dependencies exist** (the monitor consumes, doesn't reinvent): `PerspectivePredicates.listActivePerspectives` (active-perspective context), `GroundMatcher.matchGroundForUrl` (`groundId` from URL), `LandmarkResolver`/registry (forward selectors for the reverse test), `Core/outcomes.makeEvent` (recording).
 
-## ⏳ Outstanding — C4 → C5 + C6-UI (+ a live run of C2b/C3)
-- **C4 — classify + trace** — at `INTERACTION_RAW`, run `classifyResolved` (C0) on the `ResolvedInteraction` and append the `ClassifiedInteraction` to an append-only session trace (ring buffer ~500). **NEXT — completes the L0→L3 pipeline; produces the stream inference subscribes to.**
-- **C5** — outcomes `op:'user-interaction'` wiring + Studio/debug trace viewer.
-- **C6-UI** — the consent toggle in settings (the gate model + storage shipped as C6-core; this is the user-facing grant control).
-- **Live verification of C2b/C3** — load the build, grant Track consent (`SET_MONITOR_CONSENT`), `INTERACTION_MONITOR_START`, interact, confirm `INTERACTION <status>` lines appear (value-free).
-- *(Above this phase: Interpret + Act — the inference engine. Deferred until the classified stream exists.)*
+## ✅ Landed after the original snapshot (.855 → .892)
+- **C6-UI** — Track-consent toggle (settings/Studio) + the `SET_MONITOR_CONSENT` crash fix and START's ensure-content-script heal (the 2026-06-08 23:33 trace bugs). Live: every recent trace shows `INTERACTION_MONITOR_START: … consent ok, started=true`.
+- **C2b/C3 LIVE-VERIFIED** — capture sessions start against the registry demand set (`from 7/7 registry landmark(s)`) after the landmark-registry write/read fix; the resolve path runs per event in `INTERACTION_RAW`.
+- **C5-feed** — live interaction feed card on the Ground side panel (`INTERACTION_FEED` broadcast) + the landmarks/monitoring registry card.
+- **C4 — classify + RECORD (v2.74.892)** — `Core/interactionTrace.js` (+ `.test.js`): pure session ring (cap 500, monotonic `seq` across trims, snapshot filters tabId/groundId/sinceSeq/limit, traceStats). `INTERACTION_RAW` now appends the FULL `ClassifiedInteraction` per event (was C4-lite: classify → keep only tier/verb for the feed → drop); `GET_INTERACTION_TRACE` reads the stream. The `INTERACTION` log line carries the trace seq (`#N`). **This completes L0→L3** — the classified stream Interpret subscribes to EXISTS. In-memory v1: cleared on a SW restart; durable persistence = C5's outcomes adapter.
 
-**One-line state:** the pipeline is wired **L0 → L1** end-to-end (C1 demand → C2b consent-gated capture → C2a shape → C3 resolve), and C3's output is a proven-valid C0 input — pending a live run. Six slice-cores done (C0, C1, C2a, C2b, C3, C6-core); remaining: **C4** (classify + trace — the last pipeline step), C5 (viewer), C6-UI (toggle).
+- **C5-outcomes — durable usage signal (v2.74.893)** — `'user-interaction'` joined the OPS enum; `Core/interactionTrace.eventsFromEntries` AGGREGATES substrate-tier entries per (groundId, landmarkUid, verb) into ONE runtime OutcomeEvent each (count + ts span; lifts the primary's perspectiveId so perspective-usage rollups see real activity; browser/unresolved tiers stay in-memory only). `sg.js _flushInteractionOutcomes` batches: every 25 interactions (fire-and-forget after the `INTERACTION_RAW` ack — chrome.storage is never written per keystroke) + force-drain on `INTERACTION_MONITOR_STOP`; high-water mark = the trace seq, so a SW restart loses at most one unflushed batch. Logs `INTERACTION_OUTCOMES ▸ flushed N…`.
+
+- **C5-viewer (v2.74.894)** — "Session trace" inspector inside Studio's Live-monitoring card (settings): expand-to-load + Refresh over `GET_INTERACTION_TRACE` (last 50, newest first — seq, time, verb, tier, landmark, ground) with the ring stats line (`N/cap recorded — substrate n, …`), so "is the recorder running?" is answerable at a glance.
+
+## ⏳ Outstanding — live run only (the Track BUILD is complete)
+- **Live verification of C4/C5** — turn monitoring on, interact on a Ground with accepted Perspectives, then: (a) Studio ▸ settings ▸ Live monitoring ▸ Session trace shows entries + stats; (b) the full log trace shows `INTERACTION … #N` seq stamps; (c) after ~25 events or a STOP, `INTERACTION_OUTCOMES ▸ flushed …` and `op:'user-interaction'` events in the Ground's outcomes stream. NB per-event `INTERACTION` lines log on the `monitor` channel at INFO and are NOT in `_DECISION_RE` (by design — they'd flood the signal-only view); use the FULL trace download.
+- *(Above this phase: Interpret + Act — the inference engine. Now UNBLOCKED: the classified stream exists, durable, with a viewer.)*
+
+**One-line state:** **the Track phase build is COMPLETE** — L0 → L3 wired, durable, and inspectable (C1 demand → C2b consent-gated capture → C2a shape → C3 resolve → C0 classify → C4 record → C5 outcomes flush + viewer); remaining: a live run to verify C4/C5, then the phase hands off to Interpret.
 
 ---
 

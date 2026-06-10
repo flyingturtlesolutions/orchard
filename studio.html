@@ -994,6 +994,15 @@
         </label>
       </div>
       <p id="monitor-status-line" class="settings-note" style="margin-top:8px">Off.</p>
+      <!-- C5-viewer (v2.74.894) — the session trace inspector over GET_INTERACTION_TRACE (L3) -->
+      <details id="monitor-trace-details" style="margin-top:10px">
+        <summary class="card-subheading" style="cursor:pointer; font-size:13px">Session trace <span class="settings-note" style="font-weight:400">(classified, value-free; in-memory — clears with the extension worker)</span></summary>
+        <div style="margin:8px 0; display:flex; gap:8px; align-items:center">
+          <button id="btn-monitor-trace-refresh" class="btn-secondary tiny" type="button">Refresh</button>
+          <span id="monitor-trace-stats" class="settings-note"></span>
+        </div>
+        <div id="monitor-trace-list" class="settings-note" style="font-family:monospace; font-size:11px; line-height:1.6; max-height:260px; overflow:auto"></div>
+      </details>
     </div>
 
     <div class="card">

@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildTier2CapabilityRecords, buildCapabilityRecords, wrapFragmentAsStrategy, collectReferencedPrimitiveIds, prepareTier1or2Records } from './capabilitySynth.js';
+import { buildTier2CapabilityRecords, buildCapabilityRecords, wrapFragmentAsStrategy, collectReferencedPrimitiveIds, prepareTier1or2Records, shieldedFragmentIds } from './capabilitySynth.js';
 
 const phases = [
   { label: 'Initiate job search', actions: [{ action: 'TYPE', selector: '#q', value: 'test' }, { action: 'CLICK', selector: '#go' }] },
@@ -242,5 +242,37 @@ describe('buildTier2CapabilityRecords — url postcondition parameterization (v2
       postcondition: { match: 'all', conditions: [{ type: 'url_matches', pattern: '/videos/' }] } }];
     const recs = buildTier2CapabilityRecords(phases, { groundId: 'g', strategyId: 's', fragmentIds: ['f0'], name: 'x', goal: 'x' });
     assert.equal(recs.fragments[0].postconditions[0].pattern, '/videos/');
+  });
+});
+
+describe('shieldedFragmentIds — keep shared fragments out of a delete sweep (v2.74.891)', () => {
+  // The 184507 dangling-ref factory: an admin sweep of a cap's backing fragments deletes a fragment a
+  // SURVIVING strategy still chains → that strategy dies "missing a step" at run. The shield keeps it.
+  const strategies = [
+    { id: 'strat-1', fragmentSteps: [{ type: 'fragment', fragmentId: 'frag-shared' }, { type: 'fragment', fragmentId: 'frag-own' }] },
+    { id: 'strat-2', fragmentSteps: [{ type: 'fragment', fragmentId: 'frag-2only' }] },
+  ];
+  it('a fragment referenced by a surviving strategy is SHIELDED', () => {
+    const s = shieldedFragmentIds(['frag-shared', 'frag-loose'], strategies);
+    assert.ok(s.has('frag-shared'), 'shared → kept');
+    assert.ok(!s.has('frag-loose'), 'unreferenced → sweepable');
+  });
+  it('refs from a strategy being deleted in the SAME op do NOT shield (full cascade still works)', () => {
+    const s = shieldedFragmentIds(['frag-shared', 'frag-own'], strategies, new Set(['strat-1']));
+    assert.equal(s.size, 0, 'only strat-1 referenced these; it is being deleted → sweep both');
+  });
+  it('a fragment shared by a deleted AND a surviving strategy stays shielded', () => {
+    const both = [...strategies, { id: 'strat-3', fragmentSteps: [{ type: 'fragment', fragmentId: 'frag-shared' }] }];
+    const s = shieldedFragmentIds(['frag-shared'], both, new Set(['strat-1']));
+    assert.ok(s.has('frag-shared'), 'strat-3 survives and still needs it');
+  });
+  it('refs inside the implementations envelope count (migrated strategy shape)', () => {
+    const migrated = [{ id: 'strat-m', implementations: [{ body: { tree: { fragmentSteps: [{ type: 'fragment', fragmentId: 'frag-m' }] } } }] }];
+    assert.ok(shieldedFragmentIds(['frag-m'], migrated).has('frag-m'));
+  });
+  it('empty/null inputs → empty set, no throw', () => {
+    assert.equal(shieldedFragmentIds([], strategies).size, 0);
+    assert.equal(shieldedFragmentIds(null, strategies).size, 0);
+    assert.equal(shieldedFragmentIds(['frag-shared'], null).size, 0);
   });
 });

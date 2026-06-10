@@ -30,7 +30,8 @@ import { buildInteractionDemand } from '../../Core/interactionDemand.js';   // C
 import { makeRawInteraction, toCaptureTargets } from '../../Core/interactionCapture.js';   // C2 — shape/validate raw interaction; enrich demand w/ selectors
 import { withTrack, MONITOR_CONSENT_DEFAULT, canTrack } from '../../Core/monitorConsent.js';   // C6 — Track consent gate (default-deny)
 import { resolveInteraction } from '../../Core/interactionResolve.js';   // C3 — assemble the ResolvedInteraction (L1)
-import { classifyResolved } from '../../Core/interactionClassification.js';   // C4-lite — classify for the live feed verb
+import { classifyResolved } from '../../Core/interactionClassification.js';   // C0 — classify the ResolvedInteraction (L2)
+import * as InteractionTrace from '../../Core/interactionTrace.js';   // C4 — L3 recorder (session ring of ClassifiedInteractions)
 import { listActivePerspectives } from '../../Services/PerspectivePredicates.js';   // C3 — active-perspective context for resolution
 import { listLandmarksForGround } from '../../Services/LandmarkResolver.js';   // C1 — accepted-Perspective landmarks (+ a11yRole)
 import { matchGroundForUrl } from '../../Core/GroundMatcher.js';   // v2.74.823 — canonical URL→Ground matcher (honors urlPatterns, incl. the sibling hosts a dedup merge unions)
@@ -66,6 +67,39 @@ import { isHybridSyncActive, forceResyncRecord, enqueueGroundTreeDelete, schedul
 // read by INTERACTION_RAW (to resolve the captured event's Ground without a per-event getAllGrounds),
 // cleared by STOP. Module-scope so it survives across handler invocations.
 const _interactionSessions = new Map();
+
+// C4 (v2.74.892) — the session interaction TRACE (L3): every classified event appends here (ring, cap 500).
+// THE stream the monitoring phase exists to produce — Interpret subscribes to this, never the DOM. Read via
+// GET_INTERACTION_TRACE. In-memory by design (v1): cleared on an MV3 SW restart; durable persistence is the
+// C5 outcomes adapter's job. Value-free end-to-end (the C2a privacy invariant holds through C0).
+const _interactionTrace = InteractionTrace.makeTrace();
+
+// C5 (v2.74.893) — durable OUTCOMES flush. Substrate-tier usage flows to the per-Ground outcomes stream as
+// AGGREGATED `op:'user-interaction'` events (eventsFromEntries) — batched every FLUSH_EVERY interactions so
+// chrome.storage isn't written per keystroke, force-flushed on INTERACTION_MONITOR_STOP. The high-water mark
+// is the trace seq (monotonic across ring trims). A SW restart loses at most one unflushed batch (v1).
+const TRACE_FLUSH_EVERY = 25;
+let _traceFlushedSeq = 0;
+let _traceFlushing = false;
+async function _flushInteractionOutcomes(ctx, { force = false } = {}) {
+  if (_traceFlushing) return;
+  const pending = _interactionTrace.seq - _traceFlushedSeq;
+  if (pending <= 0 || (!force && pending < TRACE_FLUSH_EVERY)) return;
+  _traceFlushing = true;
+  try {
+    const entries = InteractionTrace.snapshot(_interactionTrace, { sinceSeq: _traceFlushedSeq });
+    _traceFlushedSeq = _interactionTrace.seq;   // claim the range up-front so a concurrent call can't double-emit
+    const events = InteractionTrace.eventsFromEntries(entries);
+    if (events.length) {
+      const byGround = new Map();
+      for (const ev of events) { if (!byGround.has(ev.groundId)) byGround.set(ev.groundId, []); byGround.get(ev.groundId).push(ev); }
+      for (const [gid, evs] of byGround) { try { await ctx.appendOutcomes(gid, evs); } catch { /* per-ground append failure → drop, ring still holds them */ } }
+      Logger.info('monitor', `INTERACTION_OUTCOMES ▸ flushed ${events.length} usage event(s) from ${entries.length} interaction(s)`);
+    }
+  } catch (e) {
+    Logger.warn('background', `interaction outcomes flush failed: ${e.message}`);
+  } finally { _traceFlushing = false; }
+}
 
 function _groundLabel(g) {
   if (!g) return null;
@@ -925,12 +959,19 @@ export function createSgMessageHandlers(ctx) {
           matches: Array.isArray(payload?.matches) ? payload.matches : [],
           activePerspectiveIds, groundId, sensitive: !!payload?.sensitive,
         });
-        // C4-lite — classify (C0) for the semantic verb, then broadcast a compact event to the Ground
-        // panel's LIVE FEED (raw interaction → matched landmark(s) → resolved verb). The full
-        // ClassifiedInteraction trace persistence is C4 proper.
-        let verb = raw.interactionKind, tier = 'unresolved';
-        try { const cls = classifyResolved(resolved, { groundId, activePerspectiveIds }); tier = cls?.tier || 'unresolved'; verb = cls?.primary?.semanticVerb || cls?.candidates?.[0]?.semanticVerb || raw.interactionKind; } catch { /* */ }
-        Logger.info('monitor', `INTERACTION ${resolved.resolutionStatus} ${raw.interactionKind} (${verb}) → [${resolved.matches.map((m) => m.landmarkUid).join(',') || '—'}] (${activePerspectiveIds.length} active) @ ${raw.url}`);
+        // C4 (v2.74.892) — classify (C0) then RECORD: append the full ClassifiedInteraction to the session
+        // ring (_interactionTrace) — completes the L0→L3 pipeline; the feed broadcast below stays a UI
+        // side-channel, the trace is the system of record (GET_INTERACTION_TRACE). Classify/record failures
+        // never block the capture ack.
+        let verb = raw.interactionKind, tier = 'unresolved', seq = null;
+        try {
+          const cls = classifyResolved(resolved, { groundId, activePerspectiveIds });
+          tier = cls?.tier || 'unresolved';
+          verb = cls?.primary?.semanticVerb || cls?.candidates?.[0]?.semanticVerb || raw.interactionKind;
+          const entry = InteractionTrace.appendEntry(_interactionTrace, cls, { ts: raw.ts, tabId, groundId });
+          seq = entry ? entry.seq : null;
+        } catch { /* */ }
+        Logger.info('monitor', `INTERACTION ${resolved.resolutionStatus} ${raw.interactionKind} (${verb}) → [${resolved.matches.map((m) => m.landmarkUid).join(',') || '—'}] (${activePerspectiveIds.length} active) #${seq ?? '—'} @ ${raw.url}`);
         try {
           chrome.runtime.sendMessage({ type: 'INTERACTION_FEED', payload: {
             groundId, ts: raw.ts, kind: raw.interactionKind, status: resolved.resolutionStatus, tier, verb,
@@ -938,8 +979,23 @@ export function createSgMessageHandlers(ctx) {
           } }, () => void chrome.runtime.lastError);
         } catch { /* no listener (panel closed) */ }
         sendResponse({ success: true, id: raw.id, status: resolved.resolutionStatus });
+        void _flushInteractionOutcomes(ctx);   // C5 — threshold-batched durable flush; never delays the ack
       } catch (err) {
         Logger.error('background', `INTERACTION_RAW failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // C4 (v2.74.892) — read the recorded session trace (the L3 classified stream Interpret consumes).
+    // Filters compose: tabId / groundId exact-match, sinceSeq for incremental pulls (pass the last seq you
+    // saw — seq is monotonic across ring trims), limit = the most-recent tail. Entries are value-free by
+    // construction. Empty until a monitor session has captured interactions (or after a SW restart — v1).
+    GET_INTERACTION_TRACE: async (payload, _sender, sendResponse) => {
+      try {
+        const { tabId = null, groundId = null, sinceSeq = null, limit = null } = payload || {};
+        const entries = InteractionTrace.snapshot(_interactionTrace, { tabId, groundId, sinceSeq, limit });
+        sendResponse({ success: true, entries, stats: InteractionTrace.traceStats(_interactionTrace) });
+      } catch (err) {
         sendResponse({ success: false, error: err.message });
       }
     },
@@ -1019,6 +1075,7 @@ export function createSgMessageHandlers(ctx) {
       try {
         const { tabId } = payload ?? {};
         if (typeof tabId === 'number') { _interactionSessions.delete(tabId); try { await chrome.tabs.sendMessage(tabId, { type: 'STOP_INTERACTION_CAPTURE' }, { frameId: 0 }); } catch { /* */ } }
+        try { await _flushInteractionOutcomes(ctx, { force: true }); } catch { /* */ }   // C5 — session end = drain the tail below the batch threshold
         sendResponse({ success: true });
       } catch (err) {
         Logger.error('background', `INTERACTION_MONITOR_STOP failed: ${err.message}`);
@@ -1661,6 +1718,19 @@ export function createSgMessageHandlers(ctx) {
               const mine = (Array.isArray(caps) ? caps : []).filter(pred);
               n += mine.length;
               if (op === 'delete') {
+                // v2.74.891 — SHIELD shared fragments from the sweep. A cap's backing Fragment can ALSO be a
+                // constituent of a SURVIVING strategy (dedup/promotion share them); sweeping it left that strategy
+                // with a dangling ref — the "missing a step" orphan (184507) the deep check (.889) detects. Keep any
+                // fragment a non-deleted strategy still references; the cap ROW is still pruned below (the user asked
+                // for the capability gone, not the surviving strategy's leg). A failed read → empty shield → legacy sweep.
+                let _shield = new Set();
+                if (k !== 'observations') {
+                  try {
+                    const deletingStrategyIds = new Set(mine.map((c) => c && c.strategyId).filter(Boolean));
+                    const allFids = [...new Set(mine.flatMap((c) => [c.fragmentId, ...(Array.isArray(c.fragmentIds) ? c.fragmentIds : [])]).filter(Boolean))];
+                    if (allFids.length) _shield = CapabilitySynth.shieldedFragmentIds(allFids, (await StorageManager.listStrategies(gid)) || [], deletingStrategyIds);
+                  } catch { _shield = new Set(); }
+                }
                 for (const c of mine) {
                   try {
                     if (k === 'observations') {
@@ -1670,10 +1740,11 @@ export function createSgMessageHandlers(ctx) {
                       // so none orphan into a phantom standalone capability (listCapabilities would surface it).
                       if (c.strategyId) { try { await StorageManager.deleteStrategy(c.strategyId); } catch { /* */ } }
                       const fids = new Set([c.fragmentId, ...(Array.isArray(c.fragmentIds) ? c.fragmentIds : [])].filter(Boolean));
-                      for (const fid of fids) { try { await StorageManager.deleteFragment(fid); } catch { /* */ } }
+                      for (const fid of fids) { if (_shield.has(fid)) continue; try { await StorageManager.deleteFragment(fid); } catch { /* */ } }
                     }
                   } catch (e) { Logger.warn('background', `ORCH_ADMIN delete (${k}) failed: ${e.message}`); }
                 }
+                if (_shield.size) Logger.info('background', `ORCH_ADMIN ▸ shield: kept ${_shield.size} fragment(s) still referenced by a surviving strategy`);
                 try { await ctx.removeSgCapabilities(gid, pred); } catch (e) { Logger.warn('background', `ORCH_ADMIN prune sgCapabilities (${k}) failed: ${e.message}`); }
               }
             } else {

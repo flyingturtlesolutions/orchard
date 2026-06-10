@@ -402,6 +402,30 @@ export function collectReferencedPrimitiveIds(trees) {
 }
 
 /**
+ * v2.74.891 — which of `fragmentIds` must be KEPT (shielded) from a delete sweep: any fragment a SURVIVING
+ * strategy still references. A bare-fragment cap can SHARE its backing Fragment with a T2 Strategy
+ * (dedup/promotion), so an admin sweep of the cap's fragments would otherwise leave the strategy with a
+ * dangling ref — the "missing a step" orphan the deep check (v2.74.889) DETECTS; this prevents the state
+ * from FORMING. Refs are collected via collectReferencedPrimitiveIds (fragmentSteps + detect/foreach bodies
+ * + the implementations envelope). PURE.
+ * @param {string[]} fragmentIds          sweep candidates
+ * @param {object[]} strategies           the Ground's live Strategy records
+ * @param {Set<string>} [deletingStrategyIds]  strategies being deleted in the SAME op (their refs don't shield)
+ * @returns {Set<string>} the subset of fragmentIds to KEEP
+ */
+export function shieldedFragmentIds(fragmentIds, strategies, deletingStrategyIds = new Set()) {
+  const want = new Set((Array.isArray(fragmentIds) ? fragmentIds : []).filter(Boolean));
+  const shielded = new Set();
+  if (!want.size) return shielded;
+  for (const s of (Array.isArray(strategies) ? strategies : [])) {
+    if (!s || !s.id || (deletingStrategyIds && deletingStrategyIds.has(s.id))) continue;
+    const { fragmentIds: refs } = collectReferencedPrimitiveIds([s]);
+    for (const fid of want) if (refs.has(fid)) shielded.add(fid);
+  }
+  return shielded;
+}
+
+/**
  * T1-as-first-class (v2.74.752) — wrap a SAVED Fragment into a SYNTHETIC one-step Strategy object so it can run
  * through ExecutionEngine.executeStrategy WITHOUT being persisted as a Strategy. PURE. This is the keystone of
  * "a single T1 is saved as itself, not a Strategy": the SAVE path stays wrapper-free (just the Fragment); the

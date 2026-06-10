@@ -23,6 +23,9 @@ export const OPS = Object.freeze([
   // Phase-B authoring lifecycle (DESIGN_phaseB_pipeline §3 PB-0) — per-stage credit assignment so a
   // rejected Perspective is attributable to the stage that lost fidelity (hardened thesis §5).
   'propose', 'synthesize', 'trial', 'accept', 'reject',
+  // C5 (v2.74.893) — monitoring L3 → durable usage signal: substrate-tier interactions AGGREGATED per
+  // (landmark, verb) by Core/interactionTrace.eventsFromEntries. Runtime phase; feeds perspective-usage.
+  'user-interaction',
 ]);
 export const VERDICTS = Object.freeze([
   'verified', 'failed', 'abstained', 'corrected',

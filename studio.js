@@ -5079,6 +5079,36 @@ $('chk-monitor-enabled')?.addEventListener('change', async (e) => {
 });
 refreshMonitorSetting();
 
+// C5-viewer (v2.74.894) — session trace inspector over GET_INTERACTION_TRACE: the recorded L3 stream
+// (classified, value-free), newest first. Loads on expand + Refresh; shows the ring stats so "is the
+// recorder running?" is answerable at a glance. Empty after an SW restart by design (in-memory v1).
+async function refreshMonitorTrace() {
+  const list = $('monitor-trace-list'); const statsEl = $('monitor-trace-stats');
+  if (!list) return;
+  const res = await cloudMsg('GET_INTERACTION_TRACE', { limit: 50 });
+  if (!res?.success) { list.innerHTML = `<em>${escHtml(res?.error || 'Trace unavailable.')}</em>`; return; }
+  const entries = Array.isArray(res.entries) ? res.entries : [];
+  const stats = res.stats || {};
+  if (statsEl) {
+    const tiers = stats.byTier && Object.keys(stats.byTier).length
+      ? ` — ${Object.entries(stats.byTier).map(([t, n]) => `${t} ${n}`).join(', ')}` : '';
+    statsEl.textContent = `${stats.size ?? 0}/${stats.cap ?? 0} recorded${tiers}`;
+  }
+  if (!entries.length) {
+    list.innerHTML = '<em>No interactions recorded this session — turn monitoring on, then interact with a page that has accepted Perspectives.</em>';
+    return;
+  }
+  list.innerHTML = entries.slice().reverse().map((e) => {
+    const t = Number.isFinite(e.ts) ? new Date(e.ts).toLocaleTimeString() : '—';
+    const c = e.classified || {};
+    const lm = c.primary && c.primary.landmarkUid ? ` → ${c.primary.landmarkUid}` : '';
+    const gid = e.groundId ? ` · ${String(e.groundId).slice(-6)}` : '';
+    return `<div>#${e.seq} ${escHtml(t)} <strong>${escHtml(e.verb || '?')}</strong> <span style="opacity:.7">[${escHtml(e.tier || '—')}]</span>${escHtml(lm + gid)}</div>`;
+  }).join('');
+}
+$('btn-monitor-trace-refresh')?.addEventListener('click', refreshMonitorTrace);
+$('monitor-trace-details')?.addEventListener('toggle', (e) => { if (e.target.open) refreshMonitorTrace(); });
+
 async function handleCloudSignIn() {
   const btn = $('btn-cloud-sign-in');
   if (btn) btn.disabled = true;
