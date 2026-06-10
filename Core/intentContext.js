@@ -248,6 +248,7 @@ export function validateRichIntents(proposals, pack, { max = 6 } = {}) {
       // grounded floor below still guards substance).
       if (!RICH_INTENT_STEP_KINDS.includes(kind)) continue;
       const ref = _clean(s?.ref, 120);
+      const extra = {};   // v2.74.906 — executable refs (capabilityId/kind) so a clicked intent can WALK its plan
       if (_GROUNDED_KINDS.has(kind)) {
         // v2.74.899 — KIND-TOLERANT grounding. The first live run rejected 10/10 intents because the model
         // filed real GOAL labels ("browse media galleries") under kind 'read' (the Ground had no taught
@@ -277,6 +278,10 @@ export function validateRichIntents(proposals, pack, { max = 6 } = {}) {
           kind = hit[0];
           grounded++;
           if (kind === 'goal' && hit[1].covered === false) teachable = true;
+          // v2.74.906 — carry the matched artifact's id so the chat-side WALK can RUN bound steps directly
+          // (REPLAY/RUN_OBSERVATION) and only TEACH the genuine gaps, instead of re-comprehending the ask.
+          if (kind === 'capability' && hit[1].id) extra.capabilityId = hit[1].id;
+          else if (kind === 'read' && hit[1].id) { extra.capabilityId = hit[1].id; extra.capabilityKind = 'observation'; }
         }
       }
       // v2.74.900 — vocab violations REPAIR to a {placeholder} instead of rejecting: the composition is
@@ -292,7 +297,7 @@ export function validateRichIntents(proposals, pack, { max = 6 } = {}) {
           }
         }
       }
-      normSteps.push({ kind, ref, ...(params ? { params } : {}) });
+      normSteps.push({ kind, ref, ...extra, ...(params ? { params } : {}) });
     }
     if (!reason && !grounded) reason = 'no step cites a capability/read/goal/page — orchestration alone is not an intent';
     if (!reason && normSteps.length < 2) reason = 'fewer than 2 usable steps after normalization';

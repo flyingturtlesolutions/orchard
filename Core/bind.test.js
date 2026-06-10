@@ -442,3 +442,29 @@ describe('selectionToTrialRoles — dedup duplicate ANCHORED inputs (SG-RES-7c+,
     assert.deepEqual(ids, ['b'], 'kept the selector-verified field');
   });
 });
+
+describe('selectionToTrialRoles — destructive-label veto on goal expansion (EX-1 at bind, v2.74.912)', () => {
+  it('goal expansion never admits a destructive-labeled member (the live "delete recent search" click)', () => {
+    // Live repro (Indeed, 23:32): "Enter job keyword" anchored the keyword field; the goal's membership
+    // also carried the recent-search list's "delete recent search …" buttons (classed action effect:submit)
+    // — and the trial CLICKED one, destroying a saved search. Expansion is the system GUESSING; it must
+    // never admit a destroyer.
+    const locale = { goals: { g: { id: 'g', label: 'search for jobs', achievableVia: ['kw', 'go', 'del1'] } }, features: {
+      kw:   { id: 'kw', label: 'Job title keywords', kind: 'input', goals: ['g'], selector: '#q', interaction: { pattern: 'type', effect: 'none' } },
+      go:   { id: 'go', label: 'Search', kind: 'action', goals: ['g'], selector: '#go', interaction: { pattern: 'click', effect: 'submit' } },
+      del1: { id: 'del1', label: 'delete recent search open marketing roles', kind: 'action', goals: ['g'], selector: '#del1', interaction: { pattern: 'click', effect: 'submit' } },
+    } };
+    const ids = selectionToTrialRoles({ shape: 'act' }, { matches: { 'enter-keyword': ['kw'] } }, locale).map((r) => r.featureId).sort();
+    assert.deepEqual(ids, ['go', 'kw'], 'delete button vetoed; input + real submit kept');
+  });
+
+  it('an explicitly ANCHORED destructive control still binds (veto is expansion-only)', () => {
+    // A genuine "delete my account"-style intent anchors the destructive control DIRECTLY via the matcher;
+    // the veto must not strip it — only guessed membership is gated.
+    const locale = { goals: {}, features: {
+      del: { id: 'del', label: 'Delete account', kind: 'action', selector: '#del', interaction: { pattern: 'click', effect: 'submit' } },
+    } };
+    const ids = selectionToTrialRoles({ shape: 'act' }, { matches: { 'delete-account': ['del'] } }, locale).map((r) => r.featureId);
+    assert.deepEqual(ids, ['del'], 'matcher-anchored destructive feature is untouched');
+  });
+});

@@ -118,6 +118,10 @@ describe('buildIntentContext — curate the Ground into a bounded composer pack'
     assert.equal(intents[0].badge, 'ready', 'all-taught steps → ready');
     assert.equal(intents[1].badge, 'teachable', 'uncovered goal step → teachable');
     assert.equal(intents[0].params[0].name, 'topic');
+    // v2.74.906 — executable refs ride the validated steps (the chat-side WALK runs bound steps directly)
+    assert.equal(intents[0].steps[0].capabilityId, 'cap1', 'capability step carries its id');
+    assert.equal(intents[0].steps[1].capabilityId, 'obs1', 'cited read carries its observation-capability id');
+    assert.equal(intents[0].steps[1].capabilityKind, 'observation');
   });
 
   it('validateRichIntents — rejects only what cannot ground; REPAIRS vocab; tolerates the full library', () => {

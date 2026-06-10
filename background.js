@@ -34,7 +34,7 @@ import { coverComplete }       from './Core/cover.js';      // SG-3 Cover — co
 import { selectionToTrialRoles } from './Core/bind.js';     // SG-4 Bind — selection → trial roles bundle
 import { buildAcceptance, landmarkRefActions } from './Core/accept.js';     // SG-5/PB-7 — passing trial → durable capability + landmark-backed Fragment/Strategy
 import { deriveCapabilities, deriveAllowedOperations } from './Services/LandmarkProfile.js';  // SG-LM-4b — accept-time landmark profiling
-import { createSgMessageHandlers } from './background/handlers/sg.js';  // R1 seed — SG handlers behind a registry
+import { createSgMessageHandlers, markEngineBusy } from './background/handlers/sg.js';  // R1 seed — SG handlers behind a registry; markEngineBusy v2.74.911
 import { buildRawAction, coalesce } from './Core/observedTrace.js';     // OBS-1 — observed demonstration recorder
 import * as ChromeHoist        from './Core/chromeHoist.js';  // v2.74.480 — hoist recurring chrome off Locales → Ground.chrome
 import * as Workflows          from './Core/workflows.js';   // v2.74.488 — cross-Locale workflows (partOf) over the siteMap
@@ -5153,6 +5153,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         try {
           const { tabId, groundId = null, bandBudget = 8 } = payload ?? {};
           if (typeof tabId !== 'number') { sendResponse({ success: false, error: 'tabId required' }); return; }
+          markEngineBusy(tabId, true);   // v2.74.911 — the poke sweep's clicks must not be monitored as user interactions
           let tabInfo;
           try { tabInfo = await chrome.tabs.get(tabId); }
           catch (e) { sendResponse({ success: false, error: `Tab not found: ${e.message}` }); return; }
@@ -5539,7 +5540,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           Logger.error('background', `EXPLORE_PAGE_STRUCTURE failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
-      })();
+      })().finally(() => { if (typeof payload?.tabId === 'number') markEngineBusy(payload.tabId, false); });   // v2.74.911
       return true;
     }
 

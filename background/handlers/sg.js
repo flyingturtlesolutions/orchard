@@ -91,6 +91,20 @@ let _traceFlushing = false;
 // FIFO; in-memory (a SW restart re-composes once).
 const RICH_INTENT_CACHE_CAP = 24;
 const _richIntentCache = new Map();   // fingerprint → { intents, rejected, at }
+
+// v2.74.908 — tabs with an ENGINE RUN in flight. The Track monitor must not record the bot's OWN synthetic
+// clicks as user interactions: the 22:58 trace logged 46+ INTERACTION events from a 13× replay loop — ring
+// flood (evicted every decision line) and, worse, the C5 flush would credit BOT actions to landmark "usage".
+// REPLAY marks its tab busy for the run's duration; INTERACTION_RAW drops busy-tab events. (Sequential
+// loops re-add/delete the same id — a plain Set suffices; overlapping runs on one tab don't happen today.)
+const _engineBusyTabs = new Set();
+
+// v2.74.911 — shared with background.js: the EXPLORE poke sweep is engine activity too (the 23:29 trace
+// captured the sweep's own pokes as user interactions #1-#4 on the freshly minted Indeed ground).
+export function markEngineBusy(tabId, busy) {
+  if (typeof tabId !== 'number') return;
+  if (busy) _engineBusyTabs.add(tabId); else _engineBusyTabs.delete(tabId);
+}
 async function _flushInteractionOutcomes(ctx, { force = false } = {}) {
   if (_traceFlushing) return;
   const pending = _interactionTrace.seq - _traceFlushedSeq;
@@ -421,6 +435,8 @@ export function createSgMessageHandlers(ctx) {
     // SG-4b — run the substrate-grounded plan on the live page (Comprehend→Select→Cover→Bind→execute) and
     // stash a session draft so the result can be accepted without re-running.
     RUN_SG_TRIAL: async (payload, _sender, sendResponse) => {
+      const _busyTab = (typeof payload?.tabId === 'number') ? payload.tabId : null;   // v2.74.912 — trial clicks are engine activity (the 23:32 trace logged them as user-interaction misses)
+      if (_busyTab != null) markEngineBusy(_busyTab, true);
       try {
         const { tabId, groundId = null, intent } = payload ?? {};
         if (!groundId || typeof intent !== 'string' || !intent.trim()) { sendResponse({ success: false, error: 'groundId + intent required' }); return; }
@@ -588,6 +604,8 @@ export function createSgMessageHandlers(ctx) {
       } catch (err) {
         Logger.error('background', `RUN_SG_TRIAL failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
+      } finally {
+        if (_busyTab != null) markEngineBusy(_busyTab, false);   // v2.74.912
       }
     },
 
@@ -1082,6 +1100,10 @@ export function createSgMessageHandlers(ctx) {
     INTERACTION_RAW: async (payload, sender, sendResponse) => {
       try {
         const tabId = sender?.tab?.id ?? (payload && payload.tabId) ?? -1;
+        // v2.74.908 — the bot's own actions are NOT user interactions: drop events from a tab with an
+        // engine run in flight (see _engineBusyTabs). Keeps the trace ring, the C4 stream, and the C5
+        // outcomes flush USER-only.
+        if (typeof tabId === 'number' && _engineBusyTabs.has(tabId)) { sendResponse({ success: true, dropped: 'engine-run' }); return; }
         const raw = makeRawInteraction({
           ...(payload || {}),
           tabId,
@@ -1721,6 +1743,9 @@ export function createSgMessageHandlers(ctx) {
       try {
         const { groundId = null, capabilityId = null, phrase = '' } = payload ?? {};
         if (!groundId || !capabilityId || typeof phrase !== 'string' || !phrase.trim()) { sendResponse({ success: false, error: 'groundId + capabilityId + phrase required' }); return; }
+        // v2.74.905 — a TEMPLATE phrase ({placeholder}) is never an alias: the 22:38 run accreted
+        // "Search for {query} across all media types" with a confirmation. Aliases are real user phrasings.
+        if (/\{[a-zA-Z0-9_]+\}/.test(phrase)) { sendResponse({ success: true, skipped: 'template phrase — not accreted' }); return; }
         const cap = (await ctx.readSgCapabilities(groundId)).find((c) => c.id === capabilityId);
         if (!cap) { sendResponse({ success: false, error: 'capability not found' }); return; }
         const all = await ctx.readSgCapabilities(groundId);
@@ -2428,13 +2453,16 @@ export function createSgMessageHandlers(ctx) {
     // `active:false` so the loop doesn't yank focus away from the side panel on every iteration. http(s) only.
     OPEN_URL_NEW_TAB: async (payload, _sender, sendResponse) => {
       try {
-        const { url = null } = payload ?? {};
+        const { url = null, active = false } = payload ?? {};
         if (!url || !/^https?:\/\//i.test(String(url))) { sendResponse({ success: false, error: 'a http(s) url is required' }); return; }
-        const tab = await new Promise((r) => { try { chrome.tabs.create({ url: String(url), active: false }, (t) => { void chrome.runtime.lastError; r(t || null); }); } catch (e) { r(null); } });
+        // v2.74.909 — `active` opt-in: a NAV ask ("go to pixabay") should TRANSFER FOCUS, not just open the
+        // page; bulk openers (the foreach open-each) keep the background default so the result list stays put.
+        const tab = await new Promise((r) => { try { chrome.tabs.create({ url: String(url), active: !!active }, (t) => { void chrome.runtime.lastError; r(t || null); }); } catch (e) { r(null); } });
         const ok = !!(tab && typeof tab.id === 'number');
-        if (ok) Logger.info('background', `OPEN_URL_NEW_TAB — "${String(url).slice(0, 80)}" → tab ${tab.id} (background)`);
+        if (ok && active && typeof tab.windowId === 'number') { try { await chrome.windows.update(tab.windowId, { focused: true }); } catch { /* */ } }
+        if (ok) Logger.info('background', `OPEN_URL_NEW_TAB — "${String(url).slice(0, 80)}" → tab ${tab.id} (${active ? 'focused' : 'background'})`);
         else Logger.info('background', `OPEN_URL_NEW_TAB — "${String(url).slice(0, 80)}" failed to open`);
-        sendResponse({ success: true, ok, error: ok ? null : 'tab did not open' });
+        sendResponse({ success: true, ok, tabId: ok ? tab.id : null, error: ok ? null : 'tab did not open' });
       } catch (err) {
         Logger.error('background', `OPEN_URL_NEW_TAB failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
@@ -2750,6 +2778,8 @@ export function createSgMessageHandlers(ctx) {
     // SG-5 / PB-7 — REPLAY an accepted capability. NO LLM. Prefer the promoted landmark-backed Strategy
     // (registry recovery via applyLandmarkRefToStep → LANDMARK_PROBE_OR_RECOVER); fall back to the binding.
     REPLAY_SG_CAPABILITY: async (payload, _sender, sendResponse) => {
+      const _busyTab = (typeof payload?.tabId === 'number') ? payload.tabId : null;   // v2.74.908 — monitor self-capture suppression
+      if (_busyTab != null) _engineBusyTabs.add(_busyTab);
       try {
         const { tabId, groundId = null, capabilityId = null, paramValues = null } = payload ?? {};
         if (!groundId || !capabilityId) { sendResponse({ success: false, error: 'groundId + capabilityId required' }); return; }
@@ -2842,7 +2872,7 @@ export function createSgMessageHandlers(ctx) {
       } catch (err) {
         Logger.error('background', `REPLAY_SG_CAPABILITY failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
-      }
+      } finally { if (_busyTab != null) _engineBusyTabs.delete(_busyTab); }   // v2.74.908
     },
 
     // GA-3 (Win 1) — RE-VERIFY a saved capability: re-run its trial from the saved binding on the LIVE page and write

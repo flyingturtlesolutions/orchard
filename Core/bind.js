@@ -23,6 +23,14 @@ import { resolveIntentGoals } from './select.js';
 
 const _roleName = (f) => (f && typeof f.label === 'string' && f.label.trim()) ? f.label.trim() : (f && f.id) || '';
 
+// EX-1 at BIND (v2.74.912) — destructive-label veto on goal-EXPANDED members. Mirror of the poke sweep's
+// DESTRUCTIVE_LABEL lexicon (contentScript EX-1, v2.74.845; keep the verbs in sync). The 23:32 Indeed walk
+// proved the gap: "Enter job keyword" goal-expanded to the recent-search list's "delete recent search …"
+// buttons (classed action:submit) and the trial CLICKED one — destroying real user data. Expansion is the
+// system GUESSING membership, so it must never admit a destroyer; an explicitly MATCHER-ANCHORED feature is
+// untouched (a genuine "delete my account" intent anchors the delete control directly and still binds).
+const DESTRUCTIVE_LABEL = /\b(delete|deactivate|destroy|unsubscribe|publish|withdraw|log\s?out|sign\s?out|logout)\b|\b(empty|clear)\s+(cart|basket)\b|\b(cancel|close|delete|deactivate|remove)\s+(account|order|subscription|plan|membership|payment|profile)\b|\b(place|confirm)\s+(order|payment|purchase)\b|\b(buy|checkout|pay)\b/i;
+
 // v2.74.594 — mirror Core/trialSynth.fillOpFor so the bound role carries its own fill-op token. This
 // makes the binding SELF-CONTAINED: a saved capability replays correctly even after the page is
 // re-Explored (featureIds are content-hash-derived, so they change and `features[featureId]` would miss).
@@ -160,6 +168,7 @@ export function selectionToTrialRoles(spec, selection, locale = null) {
         let goalInputBound = [...ids].some((id) => { const f = feats[id]; return f && f.kind === 'input' && Array.isArray(f.goals) && f.goals.includes(g); });
         for (const f of members.values()) {
           if (!_formEssential(f)) continue;
+          if (!ids.has(f.id) && DESTRUCTIVE_LABEL.test(String(f.label || ''))) continue;   // EX-1 at bind (v2.74.912): expansion never admits a destroyer (anchored ids untouched)
           if (f.hidden && f.revealedBy && !boundDisclosures.has(f.revealedBy)) continue;   // SG-RES-7f: behind a DIFFERENT dropdown than the one we're operating
           if (f.kind === 'input') {
             if (!goalHasSubmit && goalInputBound) continue;             // SG-RES-7d: option group → at most one input

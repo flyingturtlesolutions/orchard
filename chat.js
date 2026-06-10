@@ -519,18 +519,15 @@ async function renderSuggestionCards() {
       const res = tab ? await _orchReq('PROPOSE_RICH_INTENTS', { tabId: tab.id, url: tab.url || null, cachedOnly: true }) : null;
       const intents = res?.success ? (Array.isArray(res.intents) ? res.intents : []) : [];
       if (intents.length) {
+        let host = ''; try { host = new URL(tab?.url || '').hostname.replace(/^www\./, ''); } catch { /* */ }
+        for (const it of intents) it._ground = { groundId: res.groundId, tabId: tab?.id ?? null, groundUrl: tab?.url || null, groundName: host };   // v2.74.906 — walk context
         subtitle.textContent = 'Things I can put together on this site — or describe what you need:';
         intents.slice(0, 4).forEach((it) => {
           const card = document.createElement('button');
           card.className = 'suggestion-card';
           card.title = (Array.isArray(it.steps) ? it.steps : []).map((s) => s.ref || s.kind).join('  →  ');
           card.innerHTML = `<div class="suggestion-card-name">${it.badge === 'ready' ? '✓ ' : '◇ '}${escHtml(it.title)}</div>`;
-          card.addEventListener('click', () => {
-            const inp = $('chat-input');
-            inp.value = it.ask;
-            if (/\{[^}]*\}/.test(it.ask)) { inp.focus(); inp.setSelectionRange(0, inp.value.length); }
-            else sendChatMessage();
-          });
+          card.addEventListener('click', () => { void _sendRichIntent(it); });
           container.appendChild(card);
         });
         return;
@@ -913,8 +910,18 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan, _headRan = false }) 
   const _collectBindings = (steps) => { for (const s of (steps || [])) { if (!s) continue; if (s.kind === 'fragment' && s.bindings && typeof s.bindings === 'object') Object.assign(_planBindings, s.bindings); if (Array.isArray(s.body)) _collectBindings(s.body); } };
   _collectBindings(plan && plan.steps);
   const _criteria = renderCriteria(_planBindings);
+  // v2.74.908 — the STOP keyword reaches the plan interpreter: every per-node callback bails before
+  // dispatching, so a runaway foreach (the 22:58 trace — 13 sequential REPLAYs of a 5-tab opener, ~45s,
+  // unstoppable) halts at the next node. The flag is the same one the walk consumes.
+  const _stopHit = () => {
+    if (!_walkAbortFlag.requested) return false;
+    _walkAbortFlag.requested = false;
+    _orchLog('STOP ▸ plan halted between nodes');
+    return true;
+  };
   const exec = {
     fragment: async (step, scope) => {
+      if (_stopHit()) return { ok: false, error: 'stopped by user' };
       // openItem — the per-item ACTION of an "open each <item>" foreach: open the current item's LINK in a NEW
       // background tab (so the result list the loop iterates stays put for the next item). Needs the row's href —
       // captured by the driver's list observation when the user pointed at a result LINK.
@@ -938,6 +945,7 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan, _headRan = false }) 
       return { ok: !!(res && res.success !== false && res.ran !== false && res.ok !== false), error: res && (res.error || res.reason) };
     },
     observe: async (step, scope) => {
+      if (_stopHit()) return { ok: false, error: 'stopped by user' };
       if (driverIds.has(step.id)) {
         const res = await _orchReq('RUN_OBSERVATION_LIST', { tabId, groundId, capabilityId: step.capabilityId });
         return { ok: !!(res && res.success !== false), items: (res && res.items) || [], value: (res && res.count) || 0, error: res && res.error };
@@ -1787,15 +1795,43 @@ function _walkResolveParams(si, scope) {
   return out;
 }
 
-async function _orchWalkWorkflow(resolved, { ask = '' } = {}) {
+// v2.74.907 — global STOP for long-running chat operations. Typing "stop" / "end" / "cancel" (full-match)
+// halts the walk at the next step boundary AND cancels every live capability invocation (ChatAPI.cancel →
+// the engine's isAborted). A mid-step REPLAY finishes its current action; the walk never advances past it.
+const _STOP_RE = /^\s*(?:stop|end|cancel|abort|halt)(?:\s+(?:it|that|this|everything|the\s+run|the\s+walk))?\s*[.!]?\s*$/i;
+const _walkAbortFlag = { requested: false };
+let _walkLive = false;
+async function _stopLongRunning() {
+  const notes = [];
+  if (_walkLive) { _walkAbortFlag.requested = true; notes.push('stopping the walk at the current step'); }
+  const live = [..._activeInvocations];
+  for (const id of live) { try { await ChatAPI.cancel(id); } catch { /* already finished */ } }
+  if (live.length) notes.push(`cancelled ${live.length} running capabilit${live.length === 1 ? 'y' : 'ies'}`);
+  _setMessageBody(appendMessage({ role: 'assistant', body: '' }),
+    notes.length ? `⏹ Stopped — ${notes.join('; ')}.` : 'Nothing is running right now.');
+  _orchLog(`STOP ▸ ${notes.length ? notes.join('; ') : 'nothing running'}`);
+}
+
+async function _orchWalkWorkflow(resolved, { ask = '', tabId = null, groundId = null } = {}) {
   const steps = (Array.isArray(resolved) ? resolved : []).filter(Boolean);
   if (!steps.length) return;
-  await _walkStep(steps, 0, { scope: {}, tabId: null, ground: null, total: steps.length }, ask);
+  // v2.74.906 — callers may SEED the walk with the current tab+ground (a same-Ground rich-intent walk
+  // reuses the page the user is on instead of opening a fresh tab). Cross-Ground callers pass nothing.
+  _walkAbortFlag.requested = false;   // v2.74.907 — a new walk clears any stale stop
+  _walkLive = true;
+  await _walkStep(steps, 0, { scope: {}, tabId: tabId ?? null, ground: groundId ?? null, total: steps.length }, ask);
 }
 
 async function _walkStep(steps, i, st, ask) {
   const next = () => _walkStep(steps, i + 1, st, ask);
+  if (_walkAbortFlag.requested) {   // v2.74.907 — the "stop" keyword halts at the next step boundary
+    _walkLive = false; _walkAbortFlag.requested = false;
+    _orchLog(`WALK ▸ stopped by user at step ${i + 1}/${st.total}`);
+    _setMessageBody(appendMessage({ role: 'assistant', body: '' }), `⏹ Stopped the walk at step ${i + 1} of ${st.total}. Steps already completed stay done.`);
+    return;
+  }
   if (i >= steps.length) {
+    _walkLive = false;   // v2.74.907
     _orchLog(`WALK ▸ done — ${st.total} step(s)`);   // v2.74.832
     _setMessageBody(appendMessage({ role: 'assistant', body: '' }), `✓ Finished — walked all ${st.total} step${st.total === 1 ? '' : 's'} in order.`);
     return;
@@ -2294,7 +2330,7 @@ async function _orchRecordFlow(msg, { groundId, tabId, ask, onAuthored = null })
 // v1 conservatism: the router resolves the URL by world knowledge, but this gate ensures a non-nav ask (e.g.
 // "search pixabay for cats") can NEVER be hijacked into a bare navigation. R-4-full dispatches all decision
 // types and drops this gate.
-const _NAV_RE = /^\s*(?:go(?:\s+(?:to|back))?|open|navigate(?:\s+to)?|take me to|visit|back to|return to|head\s+(?:to|back))\b/i;
+const _NAV_RE = /^\s*(?:go(?:\s+(?:to|back))?|got\s+to|open|navigate(?:\s+to)?|take me to|visit|back to|return to|head\s+(?:to|back))\b/i;   // v2.74.911 — "got to" = common "go to" typo (23:28 trace: it fell through the whole legacy cascade, ~14.5s)
 
 // R-4 (v1) — the LLM front-door router as a NAVIGATION fast-path. On a nav-phrased ask, ROUTE_ASK runs the
 // full cascade; we act ONLY on a confident OPEN_URL primitive (the one self-contained primitive — "go to
@@ -2310,7 +2346,7 @@ async function _tryRouterNav(text) {
   if (!/^https?:\/\//i.test(url)) return false;
   let host = url; try { host = new URL(url).host.replace(/^www\./, ''); } catch { /* */ }
   const msg = appendMessage({ role: 'assistant', body: `Opening ${host}…` });
-  const r = await _orchReq('OPEN_URL_NEW_TAB', { url });
+  const r = await _orchReq('OPEN_URL_NEW_TAB', { url, active: true });   // v2.74.909 — a NAV ask transfers focus
   _setMessageBody(msg, (r && r.success !== false) ? `Opened ${host}.` : `Couldn't open ${url}.`);
   return true;
 }
@@ -2319,6 +2355,39 @@ async function _tryRouterNav(text) {
 // page must not fall into capability matching (it would miss and offer to teach "what can i do"). The menu is
 // anchored full-match so a real ask ("what can I do about my resume") is never hijacked.
 const _MENU_RE = /^\s*(?:what\s+can\s+(?:i|you|we)\s+do(?:\s+(?:here|on\s+this\s+(?:page|site)))?|what(?:'s|\s+is)\s+possible(?:\s+here)?|show\s+me\s+what(?:'s|\s+is)\s+possible|what\s+do\s+you\s+know\s+how\s+to\s+do(?:\s+here)?|capabilities)\s*\??\s*$/i;
+// v2.74.910 — "explore locale" AS A CHAT VERB: the panel's Explore button, moved to chat. The MINIMUM
+// grounding is one ENSURE_GROUND_FOR_URL (G1-1 mint-or-reuse — milliseconds, no crawling); then the SAME
+// EXPLORE_PAGE_STRUCTURE handler the button dispatches runs on the current tab (poke sweep, Locale build,
+// siteMap merge — EX-1 veto + EX-4 freshness-skip included). Exploring busts the intent-context
+// fingerprint, so the menu recomposes over the new goals.
+const _EXPLORE_RE = /^\s*(?:explore(?:\s+(?:this|the|current))?(?:\s+(?:page|site|locale))?|(?:map|learn)\s+(?:this|the|current)?\s*(?:page|site|locale))\s*[.!]?\s*$/i;
+async function _chatExplore({ thenMenu = false } = {}) {
+  const tab = await _orchActiveTab();
+  if (!tab || typeof tab.id !== 'number' || !/^https?:/i.test(tab.url || '')) {
+    _setMessageBody(appendMessage({ role: 'assistant', body: '' }), 'I can only explore a normal web page — switch to the tab you want mapped and ask again.');
+    return false;
+  }
+  let host = 'this page'; try { host = new URL(tab.url).hostname.replace(/^www\./, ''); } catch { /* */ }
+  const msg = appendMessage({ role: 'assistant', body: `Grounding ${host}…` });
+  const g = await _orchReq('ENSURE_GROUND_FOR_URL', { url: tab.url });
+  if (!g?.success || !g.groundId) { _setMessageBody(msg, `Couldn't ground this page${g && g.error ? ` — ${g.error}` : ''}.`); return false; }
+  _orchLog(`EXPLORE ▸ chat ask → ground ${g.groundId} (${g.created ? 'minted' : 'reused'}; readiness ${g.readiness || '?'})`);
+  _setMessageBody(msg, `Exploring ${host} — this takes a few seconds (I'll poke around the page to map what it offers)…`);
+  const res = await _orchReq('EXPLORE_PAGE_STRUCTURE', { tabId: tab.id, groundId: g.groundId });
+  if (!res?.success) { _setMessageBody(msg, `Explore didn't finish${res && res.error ? ` — ${res.error}` : ' (it may still be running — check the page)'}.`); return false; }
+  const s = res.structure || {};
+  const nFeat = s.features && typeof s.features === 'object' ? Object.keys(s.features).length : null;
+  const nGoals = s.goals && typeof s.goals === 'object' ? Object.keys(s.goals).length : null;
+  _setMessageBody(msg, `✓ Explored ${host}${res.fresh ? ' (already fresh — reused the map)' : ''}${nFeat != null ? ` — ${nFeat} feature${nFeat === 1 ? '' : 's'}` : ''}${nGoals != null ? `, ${nGoals} goal${nGoals === 1 ? '' : 's'}` : ''}.${thenMenu ? '' : ' Ask “what can I do here?” to see what I can put together now.'}`);
+  if (thenMenu) { try { await _tryIntentMenu('what can I do here?'); } catch { /* */ } }
+  return true;
+}
+async function _tryExplore(text) {
+  if (!_EXPLORE_RE.test(text)) return false;
+  await _chatExplore();
+  return true;
+}
+
 // v2.74.900 — RICH-ONLY in chat: atomic goal/capability chips are NOT surfaced ("search for images" is a
 // feature description, not an intent). "what can I do here?" answers with COMPOSED multi-step intents only
 // (PROPOSE_RICH_INTENTS: pack → composer → cite-or-reject gate; cached by substrate fingerprint). The
@@ -2330,11 +2399,85 @@ async function _tryIntentMenu(text) {
   let res = null;
   try { res = await _orchReq('PROPOSE_RICH_INTENTS', { tabId: tab?.id ?? null, url: tab?.url || null }); } catch { /* */ }
   if (!res?.success) { _setMessageBody(msg, "I couldn't inspect this page."); return true; }
-  if (!res.groundId) { _setMessageBody(msg, "I don't know this site yet — run Explore from the page's panel to map what it offers, or just ask for what you want and I'll learn it by demonstration."); return true; }
+  // v2.74.910 — the cold-ground dead ends become an EXPLORE OFFER: one click grounds + maps the page,
+  // then re-composes the menu over the fresh goals (the fingerprint busts on explore).
+  if (!res.groundId) {
+    _setMessageBody(msg, "I don't know this site yet — I can explore it right now (a few seconds), then show you what I can put together.");
+    const bar = _orchActionBar(msg);
+    bar.appendChild(_mkBtn('● Explore this page', () => { bar.remove(); void _chatExplore({ thenMenu: true }); }));
+    bar.appendChild(_mkBtn('Not now', () => bar.remove()));
+    return true;
+  }
   const intents = Array.isArray(res.intents) ? res.intents : [];
-  if (!intents.length) { _setMessageBody(msg, "I couldn't compose anything rich here yet — explore more of the site (each explored page adds material), or just ask for what you want and I'll learn it."); return true; }
+  if (!intents.length) {
+    _setMessageBody(msg, "I couldn't compose anything rich here yet — exploring this page would give me more material, or just ask for what you want and I'll learn it.");
+    const bar = _orchActionBar(msg);
+    bar.appendChild(_mkBtn('● Explore this page', () => { bar.remove(); void _chatExplore({ thenMenu: true }); }));
+    bar.appendChild(_mkBtn('Not now', () => bar.remove()));
+    return true;
+  }
+  // v2.74.906 — stash the ground context so a clicked intent can WALK its plan on THIS tab
+  let host = ''; try { host = new URL(tab?.url || '').hostname.replace(/^www\./, ''); } catch { /* */ }
+  for (const it of intents) it._ground = { groundId: res.groundId, tabId: tab?.id ?? null, groundUrl: tab?.url || null, groundName: host };
   _renderRichIntents(msg, intents);
   return true;
+}
+// v2.74.905 — a chip whose ask carries {placeholders} prompts for the values (the existing ParamForm) and
+// substitutes BEFORE sending. The 22:38 live run sent "{query}" literally — it TYPED "{query}" into the
+// search box and accreted the template as an alias. A template never reaches the route.
+async function _sendRichIntent(it) {
+  let ask = String(it.ask || it.title || '').trim();
+  const names = [...new Set([...ask.matchAll(/\{([a-zA-Z0-9_]+)\}/g)].map((m) => m[1]))];
+  let values = null;
+  if (names.length) {
+    const byName = new Map((Array.isArray(it.params) ? it.params : []).map((p) => [p.name, p]));
+    values = await promptForParams(
+      names.map((n) => ({ name: n, kind: 'scalar', type: 'string', required: true })),
+      {
+        title: it.title || 'Fill in the details',
+        hint: names.map((n) => byName.get(n)?.example ? `${n} — e.g. “${byName.get(n).example}”` : null).filter(Boolean).join(' · ') || 'Fill in the values to run this.',
+        submitLabel: 'Run',
+      },
+    );
+    if (!values) return;   // cancelled
+    for (const n of names) ask = ask.split(`{${n}}`).join(String(values[n] ?? '').trim());
+  }
+  if (!ask || /\{[a-zA-Z0-9_]+\}/.test(ask)) return;   // defensive: never send a template
+
+  // v2.74.906 — PLAN-SEEDED execution. A teachable intent WALKS its VALIDATED steps in order on the
+  // current tab (run bound capabilities via REPLAY/RUN_OBSERVATION, teach described reads/goals IN PLACE
+  // on the warm page) — reusing the .831 walk runner — instead of re-comprehending the ask text, which
+  // dropped the read/loop tail to a silent miss (the 22:38 trace). Pure-capability intents keep the
+  // normal route (alias warm path). sieve/detect/loop/try/wait steps aren't walkable yet — skipped with
+  // a note; foreach/open walk as teachable actions (the open-each teach path).
+  const g = it._ground || null;
+  const subText = (t) => { let s = String(t || ''); for (const n of names) s = s.split(`{${n}}`).join(String((values && values[n]) ?? '').trim() || `{${n}}`); return s; };
+  const WALKABLE = new Set(['capability', 'read', 'goal', 'foreach', 'open']);
+  const sis = []; let skipped = 0;
+  for (const s of (Array.isArray(it.steps) ? it.steps : [])) {
+    if (!s) continue;
+    if (!WALKABLE.has(s.kind)) { skipped++; continue; }
+    let clause = subText(s.ref || '');
+    if (!clause) { skipped++; continue; }
+    if (s.kind === 'read' && !s.capabilityId && !/^(read|get|list|extract|collect)\b/i.test(clause)) clause = `read ${clause}`;   // bias the gap toward the observe-teach
+    const literals = {};
+    for (const [k, v] of Object.entries(s.params || {})) { const sv = subText(v); if (sv && !/\{[a-zA-Z0-9_]+\}/.test(sv)) literals[k] = sv; }
+    sis.push({
+      clause,
+      groundId: g?.groundId || null, groundName: g?.groundName || '', groundUrl: g?.groundUrl || null,
+      capabilityId: s.capabilityId || null, capabilityKind: s.capabilityKind || null, capabilityName: s.ref || '',
+      params: Object.keys(literals), literals, scopeReads: null, outputs: [],
+    });
+  }
+  if (g && g.groundId && sis.length >= 2 && sis.some((x) => !x.capabilityId)) {
+    appendMessage({ role: 'user', body: ask });
+    if (skipped) appendMessage({ role: 'assistant', body: `(${skipped} advanced step${skipped === 1 ? '' : 's'} — filter/branch/loop — ${skipped === 1 ? 'isn’t' : 'aren’t'} walkable yet; running the rest in order.)` });
+    _orchLog(`WALK ▸ start (rich intent) — ${sis.length} step(s)${skipped ? `, ${skipped} skipped` : ''}`);
+    _orchWalkWorkflow(sis, { ask, tabId: g.tabId ?? null, groundId: g.groundId }).catch((e) => _orchLog(`WALK ▸ start ERROR: ${(e && e.message) || e}`));
+    return;
+  }
+  $('chat-input').value = ask;
+  sendChatMessage();
 }
 function _renderRichIntents(msg, intents) {
   _setMessageBody(msg, '');   // v2.74.904 — just the results: no preamble line above the chips
@@ -2345,12 +2488,7 @@ function _renderRichIntents(msg, intents) {
     chip.className = 'suggestion-card intent-chip';
     chip.title = (Array.isArray(it.steps) ? it.steps : []).map((s) => s.ref || s.kind).join('  →  ');
     chip.innerHTML = `<div class="suggestion-card-name">${it.badge === 'ready' ? '✓ ' : '◇ '}${escHtml(it.title)}</div>`;
-    chip.addEventListener('click', () => {
-      const inp = $('chat-input');
-      inp.value = it.ask;
-      if (/\{[^}]*\}/.test(it.ask)) { inp.focus(); inp.setSelectionRange(0, inp.value.length); }
-      else sendChatMessage();
-    });
+    chip.addEventListener('click', () => { void _sendRichIntent(it); });
     wrap.appendChild(chip);
   }
   msg.appendChild(wrap);
@@ -2360,6 +2498,27 @@ async function sendChatMessage() {
   const input    = $('chat-input');
   const text     = input.value.trim();
   if (!text) return;
+
+  // v2.74.905 — a TEMPLATE ask never routes: the 22:38 live run sent "{query}" literally — it typed
+  // "{query}" into the page and accreted the template as an alias. Keep it in the input with the first
+  // placeholder selected so typing replaces it.
+  const _ph = text.match(/\{([a-zA-Z0-9_]+)\}/);
+  if (_ph) {
+    const i = text.indexOf(_ph[0]);
+    input.focus();
+    try { input.setSelectionRange(i, i + _ph[0].length); } catch { /* */ }
+    return;
+  }
+
+  // v2.74.907 — STOP keyword: "stop"/"end"/"cancel" (full-match — a real ask like "stop showing ads on X"
+  // falls through) halts the walk + cancels live invocations. Runs BEFORE any routing.
+  if (_STOP_RE.test(text)) {
+    input.value = '';
+    _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    await _stopLongRunning();
+    return;
+  }
 
   // Was this composed against a specific assistant capability via focusForAssistant?
   const targetId   = input.dataset.targetCapabilityId;
@@ -2385,6 +2544,12 @@ async function sendChatMessage() {
   try {
     if (await _tryIntentMenu(text)) { $('btn-chat-send').disabled = false; return; }
   } catch (e) { try { console.warn('[chat] intent-menu fast-path fell through:', e?.message); } catch { /* */ } }
+
+  // v2.74.910 — explore fast-path: "explore (this page/site/locale)" = the panel's Explore button as a
+  // chat verb (ground-if-needed + EXPLORE_PAGE_STRUCTURE on the current tab).
+  try {
+    if (await _tryExplore(text)) { $('btn-chat-send').disabled = false; return; }
+  } catch (e) { try { console.warn('[chat] explore fast-path fell through:', e?.message); } catch { /* */ } }
 
   // R-4 — LLM front-door NAVIGATION fast-path (runs FIRST). A bare "go to <site>" resolves to OPEN_URL via the
   // router's world knowledge and just navigates — the deterministic pipeline mis-escalated these into a
