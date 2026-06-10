@@ -26,6 +26,8 @@ import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validate
 import { findDuplicateGroundGroups, planGroundMerge, primaryHost, siteIdentity, planEnsureGround } from '../../Core/groundDedup.js';   // v2.74.816/.817 — duplicate-Ground detect + merge; .835 — registrable brand for site-name matching; G1 — dedup-before-mint plan
 import { GroundManager } from '../../Core/GroundManager.js';   // G1 — auto-ground mint (dedup-before-mint entrypoint)
 import { groundReadiness } from '../../Core/groundReadiness.js';   // G1-3 — Ground readiness (empty|preparing|capable|rich)
+import { buildIntentMenu } from '../../Core/intentMenu.js';   // IM-1 — "what can I do here?" menu (taught + teachable + cold)
+import { siteMapCapabilities } from '../../Core/siteMap.js';   // IM-2 — site-wide goal catalog (prevalence) for the menu
 import { buildInteractionDemand } from '../../Core/interactionDemand.js';   // C1 — monitoring demand set (which landmarks/kinds to watch)
 import { makeRawInteraction, toCaptureTargets } from '../../Core/interactionCapture.js';   // C2 — shape/validate raw interaction; enrich demand w/ selectors
 import { withTrack, MONITOR_CONSENT_DEFAULT, canTrack } from '../../Core/monitorConsent.js';   // C6 — Track consent gate (default-deny)
@@ -896,6 +898,41 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, groundId, readiness: r.state, rank: r.rank, counts: r.counts });
       } catch (err) {
         Logger.error('background', `GET_GROUND_READINESS failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // IM-2 (v2.74.895) — the INTENT MENU: "what can I do here?" answered from the substrate. ZERO LLM —
+    // taught capabilities (active + non-orphan, the .889 deep filter), the Ground's Locale GOALS (union
+    // across explored pages), the siteMap goal catalog (prevalence), and G1-3 readiness, composed by the
+    // pure buildIntentMenu into ranked run-now / teachable / explore-first entries. A clicked entry's `ask`
+    // re-enters the NORMAL chat route — run-now hits the alias warm path, teachable lands in teach/trial.
+    GET_INTENT_MENU: async (payload, _sender, sendResponse) => {
+      try {
+        const { tabId = null, url: urlIn = null, limit = 5 } = payload ?? {};
+        let url = (typeof urlIn === 'string' && urlIn) ? urlIn : null;
+        if (!url && typeof tabId === 'number') { try { url = (await chrome.tabs.get(tabId))?.url || null; } catch { /* */ } }
+        let gid = null;
+        try { const grounds = await StorageManager.getAllGrounds(); gid = url ? _groundIdForUrl(url, grounds) : null; } catch { /* */ }
+        if (!gid) { sendResponse({ success: true, groundId: null, menu: buildIntentMenu({ readiness: 'empty', limit }) }); return; }
+        const { liveStrategyIds, liveFragmentIds, strategyFragments } = await _liveBackingIds(gid);
+        const _orphan = (c) => isOrphanCapability(c, { liveStrategyIds, liveFragmentIds, strategyFragments });
+        let caps = [];
+        try { caps = ((await ctx.readSgCapabilities(gid)) || []).filter((c) => isActiveCapability(c) && !_orphan(c)); } catch { /* */ }
+        let goals = [];
+        try {
+          const locs = (await listLocales(gid)) || [];
+          for (const e of locs.slice(0, 8)) for (const g of Object.values(e?.model?.goals || {})) if (g && g.label) goals.push({ id: g.id || g.label, label: g.label });
+        } catch { /* */ }
+        let siteCatalog = null;
+        try { const sm = ctx.readSiteMap ? await ctx.readSiteMap(gid) : null; if (sm) siteCatalog = siteMapCapabilities(sm); } catch { /* */ }
+        let readiness = null;
+        try { readiness = (await _readinessForGround(ctx, gid)).state; } catch { /* */ }
+        const menu = buildIntentMenu({ caps, goals, siteCatalog, readiness, limit });
+        Logger.info('background', `INTENT_MENU ▸ ${menu.entries.length} entr${menu.entries.length === 1 ? 'y' : 'ies'} (${menu.counts.taught} taught, ${menu.counts.teachable} teachable, ${menu.counts.goals} goal(s); readiness=${readiness || '—'}) [${String(gid).slice(-6)}]`);
+        sendResponse({ success: true, groundId: gid, menu });
+      } catch (err) {
+        Logger.error('background', `GET_INTENT_MENU failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },

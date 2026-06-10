@@ -511,6 +511,27 @@ async function renderSuggestionCards() {
   const capabilities = await ChatAPI.listCapabilities({ status: 'ready' });
 
   if (capabilities.length === 0) {
+    // IM-3 (v2.74.895) — page-aware empty state: before punting to Studio, offer the CURRENT page's intent
+    // menu (taught + teachable, substrate-derived, zero LLM). A fresh user on an explored site sees real,
+    // clickable intents instead of a dead end; clicking sends the ask through the normal route (teach/trial).
+    try {
+      const tab = await _orchActiveTab();
+      const res = tab ? await _orchReq('GET_INTENT_MENU', { tabId: tab.id, url: tab.url || null }) : null;
+      const entries = res?.success ? (res.menu?.entries || []).filter((e) => e && e.ask) : [];
+      if (entries.length) {
+        subtitle.textContent = (res.menu.counts?.taught || 0)
+          ? 'Here’s what I can do on this page — or describe what you need.'
+          : 'I haven’t been taught this page yet, but it offers these — pick one and I’ll learn it:';
+        entries.slice(0, 4).forEach((e) => {
+          const card = document.createElement('button');
+          card.className = 'suggestion-card';
+          card.innerHTML = `<div class="suggestion-card-name">${e.kind === 'run-now' ? '✓ ' : '◇ '}${escHtml(e.label)}</div>`;
+          card.addEventListener('click', () => { $('chat-input').value = e.ask; sendChatMessage(); });
+          container.appendChild(card);
+        });
+        return;
+      }
+    } catch { /* fall through to the Studio hint */ }
     subtitle.innerHTML = 'No capabilities available yet. Open Studio to set up your first Ground and author a Fragment. ' +
       '<button class="inline-studio-btn" id="btn-empty-open-studio">Open Studio →</button>';
     // Wire the inline button to trigger the same launcher as the header icon
@@ -2290,6 +2311,42 @@ async function _tryRouterNav(text) {
   return true;
 }
 
+// IM-3 (v2.74.895) — "what can I do here?" → the INTENT MENU. A meta-ask about the APP's abilities on this
+// page must not fall into capability matching (it would miss and offer to teach "what can i do"). The menu is
+// substrate-derived and ZERO-LLM (GET_INTENT_MENU): taught capabilities run now (✓), uncovered Locale/site
+// goals are teachable (◇ — clicking sends the goal label as a normal ask, landing in the teach/trial path).
+const _MENU_RE = /^\s*(?:what\s+can\s+(?:i|you|we)\s+do(?:\s+(?:here|on\s+this\s+(?:page|site)))?|what(?:'s|\s+is)\s+possible(?:\s+here)?|show\s+me\s+what(?:'s|\s+is)\s+possible|what\s+do\s+you\s+know\s+how\s+to\s+do(?:\s+here)?|capabilities)\s*\??\s*$/i;
+async function _tryIntentMenu(text) {
+  if (!_MENU_RE.test(text)) return false;
+  const tab = await _orchActiveTab();
+  const msg = appendMessage({ role: 'assistant', body: 'Looking at what this page offers…' });
+  const res = await _orchReq('GET_INTENT_MENU', { tabId: tab?.id ?? null, url: tab?.url || null });
+  if (!res?.success) { _setMessageBody(msg, "I couldn't inspect this page."); return true; }
+  _renderIntentMenu(msg, res.menu);
+  return true;
+}
+function _renderIntentMenu(msg, menu) {
+  const entries = (menu && Array.isArray(menu.entries) ? menu.entries : []).filter((e) => e && e.ask);
+  if (!entries.length) {
+    _setMessageBody(msg, "I don't know this site yet — run Explore from the page's panel to map what it offers, or just ask for what you want and I'll learn it by demonstration.");
+    return;
+  }
+  const taught = menu.counts?.taught || 0;
+  _setMessageBody(msg, taught
+    ? 'Here’s what I can do on this site — ✓ runs now, ◇ I’ll learn on first run:'
+    : 'I haven’t been taught this site yet, but its pages offer these — pick one and I’ll learn it:');
+  const wrap = document.createElement('div');
+  wrap.className = 'intent-menu';
+  for (const e of entries) {
+    const chip = document.createElement('button');
+    chip.className = 'suggestion-card intent-chip';
+    chip.innerHTML = `<div class="suggestion-card-name">${e.kind === 'run-now' ? '✓ ' : '◇ '}${escHtml(e.label)}</div>`;
+    chip.addEventListener('click', () => { $('chat-input').value = e.ask; sendChatMessage(); });
+    wrap.appendChild(chip);
+  }
+  msg.appendChild(wrap);
+}
+
 async function sendChatMessage() {
   const input    = $('chat-input');
   const text     = input.value.trim();
@@ -2313,6 +2370,12 @@ async function sendChatMessage() {
     await _invokeAssistant({ id: targetId, name: targetName }, text);
     return;
   }
+
+  // IM-3 (v2.74.895) — intent-menu fast-path: "what can I do here?" is a meta-ask about the APP, never a
+  // capability ask — answer it from the substrate (zero LLM) instead of letting it miss in the matcher.
+  try {
+    if (await _tryIntentMenu(text)) { $('btn-chat-send').disabled = false; return; }
+  } catch (e) { try { console.warn('[chat] intent-menu fast-path fell through:', e?.message); } catch { /* */ } }
 
   // R-4 — LLM front-door NAVIGATION fast-path (runs FIRST). A bare "go to <site>" resolves to OPEN_URL via the
   // router's world knowledge and just navigates — the deterministic pipeline mis-escalated these into a
