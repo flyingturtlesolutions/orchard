@@ -370,6 +370,72 @@ export function prepareTier1or2Records(phases, { groundId, strategyId, fragmentI
 }
 
 /**
+ * HS-1 (v2.74.898) — HETEROGENEOUS Tier-2 persist: lower the IR's observation/navigate nodes INTO the
+ * Strategy instead of dropping them at ACCEPT. The engine's strategy walker has dispatched
+ * `type:'observation'|'navigate'` steps all along (ExecutionEngine 596-618) — only the auto-authoring
+ * persist path was fragments-only, which is why a taught "act → read → act" flow could never survive as
+ * ONE capability. PURE.
+ *
+ * Node kinds: `action` ({label, actions, postcondition?}) → Fragment record + fragment step (the existing
+ * builder, postcondition templating included); `observation` ({label, extracts:[{selector,output,shape}]})
+ * → a cache-tier Observation record (`implementations[0].extracts[{shape,target,output}]` — the engine's
+ * post-Ship-A schema) + an `{type:'observation', observationId}` step; `navigate` ({mode:'url', url}) → a
+ * `{type:'navigate', mode:'url', url:{kind:'literal'}}` step (click-mode navs are NOT lowered — the click
+ * lives in the adjacent fragment's actions). Steps keep the nodes' ORIGINAL order.
+ *
+ * Pure-action input falls through to prepareTier1or2Records unchanged (bare-T1 taxonomy guard included);
+ * any observation/navigate present forces a Strategy (those steps need the walker). At least one action
+ * node is required — a capability must DO something.
+ *
+ * @param {Array<{kind:string}>} nodes
+ * @param {object} opts  prepareTier1or2Records opts + observationIds?: string[] (minted per observation node)
+ * @returns {{ok:boolean, error?:string, isSingleT1?:boolean, fragments?:object[], strategy?:object|null, observations?:object[]}}
+ */
+export function prepareHeteroTier2Records(nodes, { groundId, strategyId, fragmentIds, observationIds, name, goal, params, now, aliases, fragmentName, fragmentDescription, entryGate } = {}) {
+  const list = (Array.isArray(nodes) ? nodes : []).filter((n) => n && typeof n === 'object');
+  const actions = list.filter((n) => n.kind === 'action' && Array.isArray(n.actions) && n.actions.length);
+  const hetero = list.some((n) => (n.kind === 'observation' && Array.isArray(n.extracts) && n.extracts.length)
+    || (n.kind === 'navigate' && n.mode === 'url' && n.url));
+  if (!actions.length) return { ok: false, error: 'no runnable action phases' };
+  if (!hetero) {
+    const prep = prepareTier1or2Records(actions, { groundId, strategyId, fragmentIds, name, goal, params, now, aliases, fragmentName, fragmentDescription, entryGate });
+    return prep.ok ? { ...prep, observations: [] } : prep;
+  }
+  const recs = buildTier2CapabilityRecords(actions, { groundId, strategyId, fragmentIds, name, goal, params, now, entryGate });
+  if (!recs) return { ok: false, error: 'could not assemble capability records' };
+  const ts = Number.isFinite(now) ? now : Date.now();
+  const observations = [];
+  const steps = [];
+  let ai = 0, oi = 0;
+  for (const n of list) {
+    if (n.kind === 'action') {
+      if (!(Array.isArray(n.actions) && n.actions.length)) continue;
+      const st = recs.strategy.fragmentSteps[ai++];
+      if (st) steps.push(st);
+    } else if (n.kind === 'observation') {
+      if (!(Array.isArray(n.extracts) && n.extracts.length)) continue;
+      const observationId = (Array.isArray(observationIds) && observationIds[oi]) || `obs_${strategyId}_${oi}`;
+      oi++;
+      observations.push({
+        id: observationId,
+        name: String(n.label || 'Read').slice(0, 120),
+        groundId,
+        implementations: [{ tier: 'cache', extracts: n.extracts.filter((e) => e && e.selector).map((e) => ({ shape: e.shape || 'text', target: e.selector, output: e.output || 'value' })) }],
+        params: [], preconditions: [], postconditions: [],
+        synthesized: true, createdAt: ts, updatedAt: ts,
+      });
+      steps.push({ type: 'observation', observationId });
+    } else if (n.kind === 'navigate' && n.mode === 'url') {
+      const url = typeof n.url === 'string' ? n.url : (n.url && n.url.value);
+      if (url) steps.push({ type: 'navigate', mode: 'url', url: { kind: 'literal', value: String(url) } });
+    }
+  }
+  recs.strategy.fragmentSteps = steps;
+  if (Array.isArray(aliases) && aliases.length) recs.strategy.aliases = aliases.slice();
+  return { ok: true, isSingleT1: false, fragments: recs.fragments, strategy: recs.strategy, observations };
+}
+
+/**
  * T1-as-first-class (v2.74.753) — collect every fragmentId + observationId referenced as a STEP anywhere in a set
  * of Strategy / Workflow trees (recursing fragmentSteps, detect branches + defaults, foreach/loop/gate bodies, the
  * top-level composition steps, and the implementations envelope). PURE. A primitive IN this set is a building

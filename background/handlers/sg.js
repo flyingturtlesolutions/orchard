@@ -27,6 +27,7 @@ import { findDuplicateGroundGroups, planGroundMerge, primaryHost, siteIdentity, 
 import { GroundManager } from '../../Core/GroundManager.js';   // G1 — auto-ground mint (dedup-before-mint entrypoint)
 import { groundReadiness } from '../../Core/groundReadiness.js';   // G1-3 — Ground readiness (empty|preparing|capable|rich)
 import { buildIntentMenu } from '../../Core/intentMenu.js';   // IM-1 — "what can I do here?" menu (taught + teachable + cold)
+import { buildIntentContext, renderIntentContext, intentContextFingerprint, validateRichIntents } from '../../Core/intentContext.js';   // RI-1/2 — composer context pack + cite-or-reject gate
 import { siteMapCapabilities } from '../../Core/siteMap.js';   // IM-2 — site-wide goal catalog (prevalence) for the menu
 import { buildInteractionDemand } from '../../Core/interactionDemand.js';   // C1 — monitoring demand set (which landmarks/kinds to watch)
 import { makeRawInteraction, toCaptureTargets } from '../../Core/interactionCapture.js';   // C2 — shape/validate raw interaction; enrich demand w/ selectors
@@ -83,6 +84,13 @@ const _interactionTrace = InteractionTrace.makeTrace();
 const TRACE_FLUSH_EVERY = 25;
 let _traceFlushedSeq = 0;
 let _traceFlushing = false;
+
+// RI-2 (v2.74.897) — composed rich-intent cache, keyed by the PACK FINGERPRINT (hash of the rendered
+// prompt context). The key only changes when the PROMPT-VISIBLE substrate changes (new capability/goal/
+// vocab/coverage), so the LLM composes once per substrate state — the menu stays warm-path cheap. Bounded
+// FIFO; in-memory (a SW restart re-composes once).
+const RICH_INTENT_CACHE_CAP = 24;
+const _richIntentCache = new Map();   // fingerprint → { intents, rejected, at }
 async function _flushInteractionOutcomes(ctx, { force = false } = {}) {
   if (_traceFlushing) return;
   const pending = _interactionTrace.seq - _traceFlushedSeq;
@@ -333,6 +341,35 @@ async function persistTier1or2(phases, { groundId, name, goal, params = null, al
   return { ok: true, isSingleT1: prep.isSingleT1, fragmentIds, strategyId: prep.isSingleT1 ? null : strategyId, fragmentCount: prep.fragments.length };
 }
 
+// HS-1 (v2.74.898) — heterogeneous persist: ACCEPT hands HETERO nodes (action/observation/navigate) and the
+// strategy keeps them as ORDERED steps the engine's walker already executes. Saves Fragments + the lowered
+// Observation records + the Strategy. Pure-action input behaves exactly like persistTier1or2 (incl. the
+// bare-T1 guard) via the builder's fall-through.
+async function persistHeteroTier2(nodes, { groundId, name, goal, params = null, aliases = null, entryGate = null } = {}) {
+  const strategyId = crypto.randomUUID();
+  const list = Array.isArray(nodes) ? nodes : [];
+  const fragmentIds = list.filter((n) => n && n.kind === 'action').map(() => crypto.randomUUID());
+  const observationIds = list.filter((n) => n && n.kind === 'observation').map(() => crypto.randomUUID());
+  const prep = CapabilitySynth.prepareHeteroTier2Records(list, {
+    groundId, strategyId, fragmentIds, observationIds, name, goal,
+    ...(params ? { params } : {}), ...(aliases ? { aliases } : {}),
+    ...(entryGate ? { entryGate } : {}),
+  });
+  if (!prep.ok) return { ok: false, reason: prep.error };
+  for (const f of prep.fragments) { try { await StorageManager.saveFragment(f); } catch (e) { Logger.warn('background', `persistHeteroTier2 saveFragment failed: ${e.message}`); } }
+  for (const o of (prep.observations || [])) { try { await StorageManager.saveObservation(o); } catch (e) { Logger.warn('background', `persistHeteroTier2 saveObservation failed: ${e.message}`); } }
+  if (!prep.isSingleT1) {
+    try { await StorageManager.saveStrategy(prep.strategy); }
+    catch (e) { return { ok: false, reason: `strategy save failed: ${e.message}`, fatal: true }; }
+  }
+  return {
+    ok: true, isSingleT1: prep.isSingleT1, fragmentIds,
+    observationIds: (prep.observations || []).map((o) => o.id),
+    strategyId: prep.isSingleT1 ? null : strategyId,
+    fragmentCount: prep.fragments.length, observationCount: (prep.observations || []).length,
+  };
+}
+
 /**
  * @param {object} ctx  background-local helpers (kept in background.js — shared with non-SG code, or
  *   chrome.storage-backed SG stores):
@@ -576,33 +613,47 @@ export function createSgMessageHandlers(ctx) {
           let localeModel = null;
           try { const pm = await ctx.readLocaleCache(groundId, ctx.normalizeUrl(draft.localeUrl || '')); localeModel = pm?.model || null; } catch { /* */ }
           const phaseNodes = orderForRun(draft.op.nodes, localeModel);
-          const phases = [];
+          // HS-1 (v2.74.898) — keep the IR's HETEROGENEITY through accept. Observation nodes (the trial
+          // already executed their extracts) and url-mode navigate nodes persist as STRATEGY STEPS the
+          // engine's walker natively runs; only action nodes go through action synthesis. Pre-HS, EVERY
+          // node was forced through synthesizeTrialOp and non-action nodes were silently dropped — a
+          // taught "act → read → act" flow lost its read. (Analysis + click-mode navigate nodes are still
+          // not lowered — HS-2+; the click usually lives in the adjacent fragment's actions anyway.)
+          const nodes = [];
           for (const node of phaseNodes) {
+            if (node.type === 'observation' && Array.isArray(node.extracts) && node.extracts.length) {
+              nodes.push({ kind: 'observation', label: node.label, extracts: node.extracts });
+              continue;
+            }
+            if (node.type === 'navigate' && node.mode === 'url' && node.url) {
+              nodes.push({ kind: 'navigate', label: node.label, mode: 'url', url: node.url });
+              continue;
+            }
             const synth = synthesizeTrialOp({ groundedIntent: node.label, roles: node.roles, locale: localeModel });
             // Carry the node's postcondition (SG-T2-2 structural ∪ SG-T2-5 LLM) onto the phase so the persisted
             // Fragment keeps its success predicate(s) — previously dropped, leaving every synthesized fragment
             // with empty postconditions.
-            if (synth && Array.isArray(synth.actions) && synth.actions.length) phases.push({ label: node.label, actions: synth.actions, postcondition: node.postcondition || null });
+            if (synth && Array.isArray(synth.actions) && synth.actions.length) nodes.push({ kind: 'action', label: node.label, actions: synth.actions, postcondition: node.postcondition || null });
           }
-          if (!phases.length) { sendResponse({ success: true, accepted: false, reason: 'no runnable phases to promote' }); return; }
-          // T1-as-first-class — the shared persist path applies the taxonomy guard (single page-state-bounded phase
-          // → a bare Fragment, no Strategy wrapper; ≥2 → a Strategy). Replay runs a bare fragment via the run-time
-          // wrapper; listCapabilities surfaces it standalone.
-          const persisted = await persistTier1or2(phases, { groundId, name: draft.intent, goal: draft.intent });
+          if (!nodes.some((n) => n.kind === 'action')) { sendResponse({ success: true, accepted: false, reason: 'no runnable phases to promote' }); return; }
+          // T1-as-first-class — the persist path applies the taxonomy guard (a single pure-action phase →
+          // a bare Fragment, no Strategy wrapper); any observation/navigate step forces a Strategy.
+          const persisted = await persistHeteroTier2(nodes, { groundId, name: draft.intent, goal: draft.intent });
           if (!persisted.ok) { sendResponse(persisted.fatal ? { success: false, error: persisted.reason } : { success: true, accepted: false, reason: persisted.reason }); return; }
-          const { isSingleT1, strategyId, fragmentIds, fragmentCount } = persisted;
+          const { isSingleT1, strategyId, fragmentIds, fragmentCount, observationIds = [], observationCount = 0 } = persisted;
           const capability = {
             id: crypto.randomUUID(), groundId, intent: draft.intent, shape: isSingleT1 ? 'tier1' : 'tier2',
             localeUrl: draft.localeUrl || '',
             ...(isSingleT1 ? { fragmentId: fragmentIds[0] } : { strategyId }), fragmentIds,
-            phases: phases.map((p) => p.label),
+            ...(observationIds.length ? { observationIds } : {}),
+            phases: nodes.map((n) => n.label),
             binding: [], synthesized: true, createdAt: Date.now(),
             trial: { score: draft.tier2Score?.score ?? null, verdict: draft.tier2Score?.verdict ?? null, trialRef: null },
           };
           await ctx.writeSgCapability(groundId, capability);
-          try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: String(draft.intent).slice(0, 120) }, detail: { capabilityId: capability.id, ...(isSingleT1 ? { fragmentId: fragmentIds[0] } : { strategyId }), fragments: fragmentCount, shape: capability.shape, score: capability.trial.score } })]); } catch { /* */ }
+          try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: String(draft.intent).slice(0, 120) }, detail: { capabilityId: capability.id, ...(isSingleT1 ? { fragmentId: fragmentIds[0] } : { strategyId }), fragments: fragmentCount, ...(observationCount ? { observations: observationCount } : {}), shape: capability.shape, score: capability.trial.score } })]); } catch { /* */ }
           await ctx.clearSgDraft(groundId);
-          Logger.info('background', `ACCEPT_SG_TRIAL[${isSingleT1 ? 'tier1' : 'tier2'}] — promoted ${capability.id} → ${isSingleT1 ? `bare Fragment ${fragmentIds[0]} (no Strategy wrapper)` : `strategy ${strategyId} chaining ${fragmentCount} fragment(s)`} [${capability.phases.join(' → ')}]`);
+          Logger.info('background', `ACCEPT_SG_TRIAL[${isSingleT1 ? 'tier1' : 'tier2'}] — promoted ${capability.id} → ${isSingleT1 ? `bare Fragment ${fragmentIds[0]} (no Strategy wrapper)` : `strategy ${strategyId} chaining ${fragmentCount} fragment(s)${observationCount ? ` + ${observationCount} observation step(s)` : ''}`} [${capability.phases.join(' → ')}]`);
           sendResponse({ success: true, accepted: true, capability, fragmentCount, tier2: !isSingleT1 });
           return;
         }
@@ -933,6 +984,63 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, groundId: gid, menu });
       } catch (err) {
         Logger.error('background', `GET_INTENT_MENU failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // RI-2 (v2.74.897) — COMPOSE rich, multi-step intents from the whole Ground: the substrate is curated
+    // into a bounded context pack (RI-1 buildIntentContext — taught caps + verified vocab, observations,
+    // goals + coverage, the archetype graph, the runtime's composition primitives), ONE LLM call composes
+    // user-language intents over it, and the PURE cite-or-reject gate drops any intent whose step doesn't
+    // ground in the pack (no hallucinated capabilities/options — substrate-constrains-generation). Cached
+    // by pack fingerprint: the LLM runs once per substrate STATE, not per ask.
+    PROPOSE_RICH_INTENTS: async (payload, _sender, sendResponse) => {
+      try {
+        const { tabId = null, url: urlIn = null, count = 8, force = false, cachedOnly = false } = payload ?? {};
+        let url = (typeof urlIn === 'string' && urlIn) ? urlIn : null;
+        if (!url && typeof tabId === 'number') { try { url = (await chrome.tabs.get(tabId))?.url || null; } catch { /* */ } }
+        let gid = null, ground = null;
+        try {
+          const grounds = await StorageManager.getAllGrounds();
+          gid = url ? _groundIdForUrl(url, grounds) : null;
+          ground = gid ? (grounds.find((g) => g && (g.id === gid || g.groundId === gid)) || null) : null;
+        } catch { /* */ }
+        if (!gid) { sendResponse({ success: true, groundId: null, intents: [], reason: 'no ground for this page' }); return; }
+        const { liveStrategyIds, liveFragmentIds, strategyFragments } = await _liveBackingIds(gid);
+        const _orphan = (c) => isOrphanCapability(c, { liveStrategyIds, liveFragmentIds, strategyFragments });
+        let caps = [];
+        try { caps = ((await ctx.readSgCapabilities(gid)) || []).filter((c) => isActiveCapability(c) && !_orphan(c)); } catch { /* */ }
+        let locales = [];
+        try { locales = (await listLocales(gid)) || []; } catch { /* */ }
+        let siteMap = null;
+        try { siteMap = ctx.readSiteMap ? await ctx.readSiteMap(gid) : null; } catch { /* */ }
+        let readiness = null;
+        try { readiness = (await _readinessForGround(ctx, gid)).state; } catch { /* */ }
+        const pack = buildIntentContext({ ground, locales, siteMap, caps, readiness });
+        const fp = intentContextFingerprint(pack);
+        const hit = !force && _richIntentCache.get(fp);
+        if (hit) { sendResponse({ success: true, groundId: gid, fingerprint: fp, cached: true, intents: hit.intents, rejectedCount: hit.rejected.length }); return; }
+        // v2.74.900 — cachedOnly: a cheap probe for surfaces that must stay instant (the chat empty state).
+        // Never triggers a compose; the meta-ask path does the first (and usually only) LLM call.
+        if (cachedOnly) { sendResponse({ success: true, groundId: gid, fingerprint: fp, cached: false, intents: [], reason: 'not composed yet' }); return; }
+        const raw = await AnthropicService.proposeRichIntents({ packText: renderIntentContext(pack), count });
+        if (!raw || !Array.isArray(raw.intents)) {
+          Logger.warn('background', `RICH_INTENTS ▸ composer returned nothing parseable [${String(gid).slice(-6)} fp=${fp}] — see AnthropicService warns`);   // v2.74.901 — the 21:53 silent-vanish
+          sendResponse({ success: true, groundId: gid, fingerprint: fp, intents: [], reason: 'composer unavailable' }); return;
+        }
+        const { intents, rejected } = validateRichIntents(raw.intents, pack);
+        // v2.74.899 — never cache an EMPTY compose: the 21:23 live run cached "0 accepted" under the
+        // fingerprint, so a re-ask kept serving nothing until an SW restart even after the gate was fixed.
+        // An empty result is a failure state to retry, not a substrate fact to memoize.
+        if (intents.length) {
+          _richIntentCache.set(fp, { intents, rejected, at: Date.now() });
+          while (_richIntentCache.size > RICH_INTENT_CACHE_CAP) _richIntentCache.delete(_richIntentCache.keys().next().value);
+        }
+        for (const r of rejected) Logger.info('background', `RICH_INTENTS ▸ rejected "${r.title.slice(0, 50)}" — ${r.reason}`);
+        Logger.info('background', `RICH_INTENTS ▸ ${intents.length} accepted, ${rejected.length} rejected (cite-or-reject) [${String(gid).slice(-6)} fp=${fp}]`);
+        sendResponse({ success: true, groundId: gid, fingerprint: fp, cached: false, intents, rejectedCount: rejected.length });
+      } catch (err) {
+        Logger.error('background', `PROPOSE_RICH_INTENTS failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },

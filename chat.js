@@ -511,22 +511,26 @@ async function renderSuggestionCards() {
   const capabilities = await ChatAPI.listCapabilities({ status: 'ready' });
 
   if (capabilities.length === 0) {
-    // IM-3 (v2.74.895) — page-aware empty state: before punting to Studio, offer the CURRENT page's intent
-    // menu (taught + teachable, substrate-derived, zero LLM). A fresh user on an explored site sees real,
-    // clickable intents instead of a dead end; clicking sends the ask through the normal route (teach/trial).
+    // v2.74.900 — page-aware empty state, RICH-ONLY (atomic goal chips are not surfaced in chat): show the
+    // CACHED composed intents for this page when a compose already ran (cachedOnly keeps the empty state
+    // instant — it never triggers an LLM call itself; "what can I do here?" does the first compose).
     try {
       const tab = await _orchActiveTab();
-      const res = tab ? await _orchReq('GET_INTENT_MENU', { tabId: tab.id, url: tab.url || null }) : null;
-      const entries = res?.success ? (res.menu?.entries || []).filter((e) => e && e.ask) : [];
-      if (entries.length) {
-        subtitle.textContent = (res.menu.counts?.taught || 0)
-          ? 'Here’s what I can do on this page — or describe what you need.'
-          : 'I haven’t been taught this page yet, but it offers these — pick one and I’ll learn it:';
-        entries.slice(0, 4).forEach((e) => {
+      const res = tab ? await _orchReq('PROPOSE_RICH_INTENTS', { tabId: tab.id, url: tab.url || null, cachedOnly: true }) : null;
+      const intents = res?.success ? (Array.isArray(res.intents) ? res.intents : []) : [];
+      if (intents.length) {
+        subtitle.textContent = 'Things I can put together on this site — or describe what you need:';
+        intents.slice(0, 4).forEach((it) => {
           const card = document.createElement('button');
           card.className = 'suggestion-card';
-          card.innerHTML = `<div class="suggestion-card-name">${e.kind === 'run-now' ? '✓ ' : '◇ '}${escHtml(e.label)}</div>`;
-          card.addEventListener('click', () => { $('chat-input').value = e.ask; sendChatMessage(); });
+          card.title = (Array.isArray(it.steps) ? it.steps : []).map((s) => s.ref || s.kind).join('  →  ');
+          card.innerHTML = `<div class="suggestion-card-name">${it.badge === 'ready' ? '✓ ' : '◇ '}${escHtml(it.title)}</div>`;
+          card.addEventListener('click', () => {
+            const inp = $('chat-input');
+            inp.value = it.ask;
+            if (/\{[^}]*\}/.test(it.ask)) { inp.focus(); inp.setSelectionRange(0, inp.value.length); }
+            else sendChatMessage();
+          });
           container.appendChild(card);
         });
         return;
@@ -2313,35 +2317,40 @@ async function _tryRouterNav(text) {
 
 // IM-3 (v2.74.895) — "what can I do here?" → the INTENT MENU. A meta-ask about the APP's abilities on this
 // page must not fall into capability matching (it would miss and offer to teach "what can i do"). The menu is
-// substrate-derived and ZERO-LLM (GET_INTENT_MENU): taught capabilities run now (✓), uncovered Locale/site
-// goals are teachable (◇ — clicking sends the goal label as a normal ask, landing in the teach/trial path).
+// anchored full-match so a real ask ("what can I do about my resume") is never hijacked.
 const _MENU_RE = /^\s*(?:what\s+can\s+(?:i|you|we)\s+do(?:\s+(?:here|on\s+this\s+(?:page|site)))?|what(?:'s|\s+is)\s+possible(?:\s+here)?|show\s+me\s+what(?:'s|\s+is)\s+possible|what\s+do\s+you\s+know\s+how\s+to\s+do(?:\s+here)?|capabilities)\s*\??\s*$/i;
+// v2.74.900 — RICH-ONLY in chat: atomic goal/capability chips are NOT surfaced ("search for images" is a
+// feature description, not an intent). "what can I do here?" answers with COMPOSED multi-step intents only
+// (PROPOSE_RICH_INTENTS: pack → composer → cite-or-reject gate; cached by substrate fingerprint). The
+// atomic menu (GET_INTENT_MENU) remains backend infrastructure — the pack consumes goals/coverage.
 async function _tryIntentMenu(text) {
   if (!_MENU_RE.test(text)) return false;
   const tab = await _orchActiveTab();
-  const msg = appendMessage({ role: 'assistant', body: 'Looking at what this page offers…' });
-  const res = await _orchReq('GET_INTENT_MENU', { tabId: tab?.id ?? null, url: tab?.url || null });
+  const msg = appendMessage({ role: 'assistant', body: 'Composing what I can do on this site…' });
+  let res = null;
+  try { res = await _orchReq('PROPOSE_RICH_INTENTS', { tabId: tab?.id ?? null, url: tab?.url || null }); } catch { /* */ }
   if (!res?.success) { _setMessageBody(msg, "I couldn't inspect this page."); return true; }
-  _renderIntentMenu(msg, res.menu);
+  if (!res.groundId) { _setMessageBody(msg, "I don't know this site yet — run Explore from the page's panel to map what it offers, or just ask for what you want and I'll learn it by demonstration."); return true; }
+  const intents = Array.isArray(res.intents) ? res.intents : [];
+  if (!intents.length) { _setMessageBody(msg, "I couldn't compose anything rich here yet — explore more of the site (each explored page adds material), or just ask for what you want and I'll learn it."); return true; }
+  _renderRichIntents(msg, intents);
   return true;
 }
-function _renderIntentMenu(msg, menu) {
-  const entries = (menu && Array.isArray(menu.entries) ? menu.entries : []).filter((e) => e && e.ask);
-  if (!entries.length) {
-    _setMessageBody(msg, "I don't know this site yet — run Explore from the page's panel to map what it offers, or just ask for what you want and I'll learn it by demonstration.");
-    return;
-  }
-  const taught = menu.counts?.taught || 0;
-  _setMessageBody(msg, taught
-    ? 'Here’s what I can do on this site — ✓ runs now, ◇ I’ll learn on first run:'
-    : 'I haven’t been taught this site yet, but its pages offer these — pick one and I’ll learn it:');
+function _renderRichIntents(msg, intents) {
+  _setMessageBody(msg, '');   // v2.74.904 — just the results: no preamble line above the chips
   const wrap = document.createElement('div');
-  wrap.className = 'intent-menu';
-  for (const e of entries) {
+  wrap.className = 'intent-menu intent-menu-rich';
+  for (const it of intents) {
     const chip = document.createElement('button');
     chip.className = 'suggestion-card intent-chip';
-    chip.innerHTML = `<div class="suggestion-card-name">${e.kind === 'run-now' ? '✓ ' : '◇ '}${escHtml(e.label)}</div>`;
-    chip.addEventListener('click', () => { $('chat-input').value = e.ask; sendChatMessage(); });
+    chip.title = (Array.isArray(it.steps) ? it.steps : []).map((s) => s.ref || s.kind).join('  →  ');
+    chip.innerHTML = `<div class="suggestion-card-name">${it.badge === 'ready' ? '✓ ' : '◇ '}${escHtml(it.title)}</div>`;
+    chip.addEventListener('click', () => {
+      const inp = $('chat-input');
+      inp.value = it.ask;
+      if (/\{[^}]*\}/.test(it.ask)) { inp.focus(); inp.setSelectionRange(0, inp.value.length); }
+      else sendChatMessage();
+    });
     wrap.appendChild(chip);
   }
   msg.appendChild(wrap);

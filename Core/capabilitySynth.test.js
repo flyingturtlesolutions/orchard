@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildTier2CapabilityRecords, buildCapabilityRecords, wrapFragmentAsStrategy, collectReferencedPrimitiveIds, prepareTier1or2Records, shieldedFragmentIds } from './capabilitySynth.js';
+import { buildTier2CapabilityRecords, buildCapabilityRecords, wrapFragmentAsStrategy, collectReferencedPrimitiveIds, prepareTier1or2Records, prepareHeteroTier2Records, shieldedFragmentIds } from './capabilitySynth.js';
 
 const phases = [
   { label: 'Initiate job search', actions: [{ action: 'TYPE', selector: '#q', value: 'test' }, { action: 'CLICK', selector: '#go' }] },
@@ -242,6 +242,61 @@ describe('buildTier2CapabilityRecords — url postcondition parameterization (v2
       postcondition: { match: 'all', conditions: [{ type: 'url_matches', pattern: '/videos/' }] } }];
     const recs = buildTier2CapabilityRecords(phases, { groundId: 'g', strategyId: 's', fragmentIds: ['f0'], name: 'x', goal: 'x' });
     assert.equal(recs.fragments[0].postconditions[0].pattern, '/videos/');
+  });
+});
+
+describe('prepareHeteroTier2Records — heterogeneous strategies survive ACCEPT (HS-1, v2.74.898)', () => {
+  const act = (label) => ({ kind: 'action', label, actions: [{ action: 'CLICK', selector: '#x' }] });
+  const obs = (label) => ({ kind: 'observation', label, extracts: [{ selector: '.title', output: 'TITLE', shape: 'text' }] });
+
+  it('act → read → act persists as ONE strategy with ordered fragment/observation steps', () => {
+    const nodes = [act('Search'), obs('Read the top title'), act('Open result')];
+    const r = prepareHeteroTier2Records(nodes, {
+      groundId: 'g', strategyId: 's1', fragmentIds: ['f0', 'f1'], observationIds: ['ob0'], name: 'mixed', goal: 'mixed', now: 5,
+    });
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.isSingleT1, false, 'hetero always persists as a Strategy');
+    assert.equal(r.fragments.length, 2);
+    assert.equal(r.observations.length, 1);
+    assert.deepEqual(r.strategy.fragmentSteps.map((s) => s.type), ['fragment', 'observation', 'fragment'], 'original order kept');
+    assert.equal(r.strategy.fragmentSteps[1].observationId, 'ob0');
+    // the Observation record matches the engine's post-Ship-A cache schema
+    const rec = r.observations[0];
+    assert.equal(rec.groundId, 'g');
+    assert.deepEqual(rec.implementations[0], { tier: 'cache', extracts: [{ shape: 'text', target: '.title', output: 'TITLE' }] });
+    // the .889/.891 walkers SEE the new step (orphan-detection + shield machinery extends for free)
+    const refs = collectReferencedPrimitiveIds([r.strategy]);
+    assert.ok(refs.observationIds.has('ob0'));
+    assert.equal(refs.fragmentIds.size, 2);
+  });
+
+  it('navigate(url) lowers to the engine literal-url node; click-mode is not lowered', () => {
+    const nodes = [act('Search'), { kind: 'navigate', mode: 'url', url: 'https://x.com/results', label: 'go' },
+      { kind: 'navigate', mode: 'click', selector: '#nav', label: 'skip me' }, obs('Read')];
+    const r = prepareHeteroTier2Records(nodes, { groundId: 'g', strategyId: 's2', fragmentIds: ['f0'], name: 'n', goal: 'n' });
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.strategy.fragmentSteps.map((s) => s.type), ['fragment', 'navigate', 'observation']);
+    assert.deepEqual(r.strategy.fragmentSteps[1].url, { kind: 'literal', value: 'https://x.com/results' });
+  });
+
+  it('pure-action input falls through to the existing builder (bare-T1 taxonomy guard intact)', () => {
+    const one = prepareHeteroTier2Records([act('Solo')], { groundId: 'g', strategyId: 's3', fragmentIds: ['f0'], name: 'solo', goal: 'solo' });
+    assert.equal(one.ok, true);
+    assert.equal(one.isSingleT1, true, 'single action phase → bare Fragment, no Strategy wrapper');
+    assert.deepEqual(one.observations, []);
+  });
+
+  it('no action node → not a capability (reads alone stay separate Observations)', () => {
+    const r = prepareHeteroTier2Records([obs('Read only')], { groundId: 'g', strategyId: 's4', fragmentIds: [], name: 'x', goal: 'x' });
+    assert.equal(r.ok, false);
+  });
+
+  it('unreadable observation node (no extracts) is dropped, not fatal', () => {
+    const nodes = [act('Search'), { kind: 'observation', label: 'empty', extracts: [] }, act('Open')];
+    const r = prepareHeteroTier2Records(nodes, { groundId: 'g', strategyId: 's5', fragmentIds: ['f0', 'f1'], name: 'n', goal: 'n' });
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.strategy.fragmentSteps.map((s) => s.type), ['fragment', 'fragment']);
+    assert.equal(r.observations.length, 0);
   });
 });
 

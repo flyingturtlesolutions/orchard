@@ -95,6 +95,7 @@ const ROLE_MODEL_POLICY = Object.freeze({
     generateConversationTitle: MODEL_FAST,
     generateSampleQuestion:    MODEL_FAST,
     'route-ask':               MODEL_FAST,   // R-6 — the front-door router is a small/fast classification (DESIGN_llm_front_door.md §3.6); Haiku, not Sonnet
+    proposeRichIntents:        MODEL_FAST,   // v2.74.902 — the managed proxy (API Gateway) hard-caps ~29s; the default tier streams 3-4k tokens too slowly (28-29s observed → 500s). Composition over a CURATED pack + the cite-or-reject gate suits the fast tier.
   },
 });
 function pickModelForCall(role, operation, hasVision) {
@@ -2848,6 +2849,77 @@ Return ONLY a JSON object:
         completeness: CMPL.has(p.completeness) ? p.completeness : null,
       };
     } catch (e) { Logger.warn('AnthropicService', `groundIntent error: ${e.message}`); return null; }
+  }
+
+  /**
+   * RI-2 (v2.74.897) — compose RICH, multi-step intents from the substrate context pack
+   * (Core/intentContext.renderIntentContext). The model writes user-language intents but may compose ONLY
+   * the listed resources — every step cites an exact resource string, and the PURE cite-or-reject gate
+   * (Core/intentContext.validateRichIntents) drops anything that doesn't ground. Returns { intents: [...] }
+   * (RAW — caller MUST validate) or null on no-LLM/failure. Results are cacheable by the pack fingerprint.
+   * @param {{packText:string, count?:number}} args
+   */
+  static async proposeRichIntents({ packText, count = 8 }) {
+    const ctxText = (typeof packText === 'string' ? packText : '').trim();
+    if (!ctxText) return null;
+    if (!(await AnthropicService.hasLlm())) return null;
+    const n = Math.max(3, Math.min(10, Number(count) || 8));
+    const systemPrompt = `You design RICH, multi-step automations a user could run on ONE website, composing ONLY the resources provided (taught capabilities, readable data, page goals, option vocabulary, page types, composition primitives). The value is COMPOSITION — an action plus a read, a loop, a filter, a branch — never a single click ("search for images" is useless; "find the newest vector illustrations of {topic} and open the top 5" is the bar).
+
+USE THE FULL COMPOSITION LIBRARY where it genuinely helps: "foreach" to iterate a result list, "sieve" to filter it by a condition, "detect" to branch on what the page shows, "loop" for pagination/repeat-until, "try" for a fallback, "open" for new tabs, "wait" for settling, "handoff" to feed a read value into a later step. The runtime executes ALL of these natively.
+
+HARD RULES:
+- Every step's "ref" is an EXACT string COPIED from the resources: kind "capability" → a TAUGHT CAPABILITIES intent; "read" → a READABLE DATA intent; "goal" → a PAGE GOALS label; "navigate" → a PAGE TYPES pattern. Orchestration kinds ("foreach"|"sieve"|"detect"|"loop"|"try"|"open"|"wait"|"handoff") take short free-text refs describing the loop/filter/branch/etc.
+- A parameter listed under OPTION VOCABULARY must use one of its exact tokens; user-supplied values use a {placeholder} and appear in "params".
+- "read" steps: cite a READABLE DATA intent when one fits; otherwise DESCRIBE the data to extract in short plain words ("result titles and links", "trending search terms") — it will be taught on first run. Reads alone are not enough: every intent still needs a cited capability/goal step.
+- 2-7 steps per intent; at least one capability/goal/read step; prefer intents that END with something the user HAS (open tabs, collected data, a comparison, a filtered set) — outcome-framed titles in plain language, never UI-speak.
+- Do NOT invent capabilities, pages, options, or data the resources don't list.
+
+Return ONLY JSON:
+{"intents":[{"title":"<outcome-framed, may use {placeholders}>","ask":"<one-line imperative the user could send>","steps":[{"kind":"capability|read|goal|navigate|foreach|sieve|detect|loop|try|open|wait|handoff","ref":"<exact resource string or short orchestration text>","params":{"NAME":"<vocab token or {placeholder}>"}}],"params":[{"name":"topic","example":"sunset"}]}]}`;
+    const userText = `${ctxText}\n\nPropose ${n} rich intents. JSON only.`;
+    Logger.info('AnthropicService', `proposeRichIntents — pack ${ctxText.length} chars, ${n} asked`);
+    try {
+      // v2.74.901 — 4000 output tokens: 8 intents × up-to-7 steps ran ~8.3k chars and the old 2400 cap
+      // TRUNCATED the JSON mid-stream (both 21:53 live composes hit exactly 2400 → zero parseable intents).
+      const raw = await AnthropicService.#call(systemPrompt, [{ type: 'text', text: userText }], 4000, [], { role: 'describe', operation: 'proposeRichIntents' });
+      if (!raw?.success) { Logger.warn('AnthropicService', `proposeRichIntents failed: ${raw?.error}`); return null; }
+      const json = AnthropicService.#firstJsonObject(raw.text);
+      if (json) {
+        try { const p = JSON.parse(json); if (Array.isArray(p?.intents)) return { intents: p.intents }; } catch { /* fall through to salvage */ }
+      }
+      // v2.74.901 — SALVAGE a truncated/imperfect response: a cap-hit should yield the N COMPLETE intents,
+      // not zero. And never fail silently again — the 21:53 traces showed two full composes vanish without
+      // a single log line.
+      const salvaged = AnthropicService.#salvageIntents(raw.text);
+      if (salvaged) { Logger.warn('AnthropicService', `proposeRichIntents — salvaged ${salvaged.intents.length} intent(s) from truncated/imperfect output`); return salvaged; }
+      Logger.warn('AnthropicService', `proposeRichIntents — no parseable intents in ${String(raw.text || '').length} chars (truncated? raise maxTokens)`);
+      return null;
+    } catch (e) { Logger.warn('AnthropicService', `proposeRichIntents error: ${e.message}`); return null; }
+  }
+
+  /**
+   * v2.74.901 — recover the COMPLETE intent objects from a truncated `{"intents":[…` stream: brace-depth
+   * scan (string/escape-aware) over the array, JSON.parse-ing each balanced top-level object; a malformed
+   * member is skipped, the rest survive. Returns { intents } or null.
+   */
+  static #salvageIntents(text) {
+    const s = String(text || '');
+    const key = s.indexOf('"intents"');
+    if (key < 0) return null;
+    const arr = s.indexOf('[', key);
+    if (arr < 0) return null;
+    const out = [];
+    let depth = 0, start = -1, inStr = false, esc = false;
+    for (let i = arr + 1; i < s.length; i++) {
+      const c = s[i];
+      if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+      if (c === '"') { inStr = true; continue; }
+      if (c === '{') { if (depth === 0) start = i; depth++; }
+      else if (c === '}') { depth--; if (depth === 0 && start >= 0) { try { out.push(JSON.parse(s.slice(start, i + 1))); } catch { /* skip malformed member */ } start = -1; } }
+      else if (c === ']' && depth === 0) break;
+    }
+    return out.length ? { intents: out } : null;
   }
 
   /**
