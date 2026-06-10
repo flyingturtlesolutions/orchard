@@ -111,6 +111,12 @@ export function markEngineBusy(tabId, busy) {
   const depth = (_engineBusyTabs.get(tabId) || 0) + (busy ? 1 : -1);
   if (depth > 0) _engineBusyTabs.set(tabId, depth); else _engineBusyTabs.delete(tabId);
 }
+
+// v2.74.933 (CR-M3) — a closed tab never leaves stale entries (Chrome recycles tab ids, so a stale
+// session could mis-ground a NEW tab's events, and a stale busy depth could mute a new tab's monitor).
+try {
+  chrome.tabs.onRemoved.addListener((tabId) => { _interactionSessions.delete(tabId); _engineBusyTabs.delete(tabId); });
+} catch { /* non-extension context (unit tests import this module's siblings only) */ }
 async function _flushInteractionOutcomes(ctx, { force = false } = {}) {
   if (_traceFlushing) return;
   const pending = _interactionTrace.seq - _traceFlushedSeq;
@@ -1115,7 +1121,21 @@ export function createSgMessageHandlers(ctx) {
         if (!raw) { sendResponse({ success: false, error: 'unknown interactionKind' }); return; }
         // C3 (L1) — assemble the ResolvedInteraction. Ground from the per-tab session map (no per-event
         // getAllGrounds); active perspectives read live for the classifier's context (C4 next).
-        const groundId = _interactionSessions.get(tabId)?.groundId ?? null;
+        let groundId = _interactionSessions.get(tabId)?.groundId ?? null;
+        // v2.74.933 (CR-M3) — an MV3 idle restart wipes the session map while the tab's content-script
+        // listeners keep posting: events resolved groundId:null and their C5 usage outcomes were silently
+        // dropped at the null-ground guard until the next tab event re-ran _autoMonitorTab. On a miss,
+        // fall back to URL→ground (one getAllGrounds — restart-rare) and RE-SEED the map.
+        if (!groundId && raw.url) {
+          try {
+            groundId = _groundIdForUrl(raw.url, await StorageManager.getAllGrounds()) || null;
+            if (groundId) {
+              let host = ''; try { host = new URL(raw.url).host; } catch { /* */ }
+              _interactionSessions.set(tabId, { groundId, host });
+              Logger.info('background', `INTERACTION_RAW ▸ session re-seeded after SW restart (tab ${tabId} → ${groundId})`);
+            }
+          } catch { /* */ }
+        }
         let activePerspectiveIds = [];
         try {
           if (groundId) {
@@ -1746,10 +1766,12 @@ export function createSgMessageHandlers(ctx) {
         if (!groundId || !capabilityId || typeof phrase !== 'string' || !phrase.trim()) { sendResponse({ success: false, error: 'groundId + capabilityId + phrase required' }); return; }
         // v2.74.905 — a TEMPLATE phrase ({placeholder}) is never an alias: the 22:38 run accreted
         // "Search for {query} across all media types" with a confirmation. Aliases are real user phrasings.
-        if (/\{[a-zA-Z0-9_]+\}/.test(phrase)) { sendResponse({ success: true, skipped: 'template phrase — not accreted' }); return; }
-        const cap = (await ctx.readSgCapabilities(groundId)).find((c) => c.id === capabilityId);
+        // v2.74.932 (CR-ST2) — broadened: the old class missed SPACED placeholders ("{job title}"), the
+        // exact poisoning vector half-closed by .905. Any braced token ≤40 chars is a template marker.
+        if (/\{[^}]{1,40}\}/.test(phrase)) { sendResponse({ success: true, skipped: 'template phrase — not accreted' }); return; }
+        const all = await ctx.readSgCapabilities(groundId);   // v2.74.932 (CR-ST2) — one read serves both lookups (was two back-to-back)
+        const cap = (Array.isArray(all) ? all : []).find((c) => c.id === capabilityId);
         if (!cap) { sendResponse({ success: false, error: 'capability not found' }); return; }
-        const all = await ctx.readSgCapabilities(groundId);
         const before = Array.isArray(cap.aliases) ? cap.aliases.length : 0;
         cap.aliases = accreteAlias(cap.aliases, phrase, { intent: cap.intent || '' });
         await ctx.writeSgCapability(groundId, cap);

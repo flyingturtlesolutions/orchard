@@ -24,6 +24,7 @@
 // @version 2.74.639
 
 import { selectionToTrialRoles } from './bind.js';
+import { slugUpper } from './slug.js';   // v2.74.940 (CR-D2)
 
 // Phases that author a Fragment (a state-transition: fill/click + the navigation it causes). read →
 // Observation (SG-T2-3); transform → Analysis (SG-T2-5); navigate is a Tier-2 control node (SG-T2-4).
@@ -35,10 +36,10 @@ const READ_KINDS = new Set(['collection', 'region', 'composite']);
 // materialization, SG-T2-6): a list of items vs a structured record vs a flat text region.
 const _extractShape = (kind) => (kind === 'collection' ? 'list' : (kind === 'composite' ? 'record' : 'text'));
 // A scope binding name from a feature's identity — UPPER_SNAKE, stable, non-empty.
-const _scopeName = (f) => {
-  const base = String((f && (f.label || f.id)) || '').trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-  return base || 'RESULT';
-};
+// v2.74.940 (CR-D2) — via the shared builder, PINNED to the same options as capabilitySynth._paramName:
+// HS-2 wires observation OUTPUT -> fragment PARAM by string equality, so these two sites must round
+// identically (the old uncapped copy diverged from the 40-char param cap on long labels).
+const _scopeName = (f) => slugUpper((f && (f.label || f.id)) || '', { maxLen: 40, fallback: 'RESULT' });
 
 /**
  * SG-T2-4 — build a navigate node for a `navigate` phase. PURE. Prefer a direct URL (the matched feature's

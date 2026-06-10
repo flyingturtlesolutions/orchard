@@ -278,3 +278,39 @@ describe('walkPlan — abort propagates OUT of loops (CR-S2, v2.74.918)', () => 
     assert.equal(env.aborted, true);
   });
 });
+
+describe('_loopBudget — nested fragments trigger the confirm (CR-E4, v2.74.930)', () => {
+  it('foreach → gate → fragment asks confirmLoop (the direct-children check missed it)', async () => {
+    let asked = 0;
+    const exec = mockExec({
+      observe: (s) => s.id === 'rows'
+        ? { ok: true, items: Array.from({ length: 9 }, (_, i) => `r${i}`) }
+        : { ok: true, value: 'yes' },
+    });
+    exec.confirmLoop = async () => { asked++; return { ok: true }; };
+    const plan = { steps: [
+      planStep.observe('rows', { outputType: 'list' }),
+      { kind: 'foreach', id: 'each', over: 'rows', itemVar: 'item', body: [
+        planStep.observe('chk', { outputType: 'scalar' }),
+        { kind: 'gate', id: 'g', over: 'chk', body: [planStep.fragment('act', 'cap-act')] },
+      ] },
+    ] };
+    const env = await walkPlan(plan, exec, {});
+    assert.equal(env.ok, true);
+    assert.equal(asked, 1, 'the nested fragment makes the loop an ACTING loop — confirm required');
+  });
+
+  it('a pure-read nested body still skips the confirm', async () => {
+    let asked = 0;
+    const exec = mockExec({ observe: () => ({ ok: true, items: Array.from({ length: 9 }, (_, i) => i), value: 'v' }) });
+    exec.confirmLoop = async () => { asked++; return { ok: true }; };
+    const plan = { steps: [
+      planStep.observe('rows', { outputType: 'list' }),
+      { kind: 'foreach', id: 'each', over: 'rows', itemVar: 'item', body: [
+        { kind: 'gate', id: 'g', over: 'rows', body: [planStep.observe('val', { outputType: 'scalar' })] },
+      ] },
+    ] };
+    await walkPlan(plan, exec, {});
+    assert.equal(asked, 0, 'no fragments anywhere in the nested body — reads need no confirm');
+  });
+});

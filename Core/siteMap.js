@@ -17,6 +17,8 @@
 // (how many real pages it represents). SLUG templates (/blog/my-post) need the full
 // URL corpus to detect; that refinement folds in with sitemap.xml ingestion (slice 2).
 
+import { pageKey } from './pageKey.js';   // v2.74.941 (CR-D1)
+
 export const SITEMAP_SCHEMA = 2;
 
 /** Max sample of concrete instance URLs kept per archetype node (for exemplar + display). */
@@ -36,13 +38,7 @@ function hashId(s) {
  * refinement (id-segment templating) is a later slice.
  */
 export function normalizePattern(url) {
-  try {
-    const u = new URL(url);
-    const p = (u.origin + u.pathname).replace(/\/+$/, '');
-    return p || u.origin;
-  } catch {
-    return String(url || '').split(/[?#]/)[0].replace(/\/+$/, '');
-  }
+  return pageKey(url);   // v2.74.941 (CR-D1) — the shared comparison-time page identity (same semantics)
 }
 
 export function archetypeId(pattern) { return 'arch_' + hashId(pattern); }

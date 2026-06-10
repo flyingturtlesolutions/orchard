@@ -16,15 +16,16 @@
 // @module Core/capabilitySynth
 // @version 2.74.775
 
+import { slugUpper } from './slug.js';   // v2.74.940 (CR-D2)
+
 /** Feature kinds that FILL a value (typed first), vs ACT (clicked after). */
 const _FILL_KINDS = new Set(['input']);
 const _ACT_KINDS  = new Set(['action', 'navigation', 'disclosure']);
 
 /** A param name from a feature label: UPPER_SNAKE, bounded, never empty. */
-function _paramName(label) {
-  const n = String(label || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
-  return n || 'INPUT';
-}
+// v2.74.940 (CR-D2) — via the shared builder; options PINNED equal to tier2Lower._scopeName (HS-2
+// wires output->param by string equality; slug.test.js asserts the round-trip).
+function _paramName(label) { return slugUpper(label, { maxLen: 40, fallback: 'INPUT' }); }
 
 /**
  * Synthesize a draft capability (ordered actions + params) from a goal and its Locale.

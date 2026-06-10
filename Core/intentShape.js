@@ -29,7 +29,11 @@ const FORM_NOUN = /\b(form|application|registration|sign[\s-]?up|checkout|survey
 // Verbs implying reading/finding content (→ read).
 // Note: "check" is intentionally excluded — it's ambiguous ("check a box" = act, "check the status" =
 // read) and was misclassifying action intents. The LLM grounding shape handles the nuanced cases.
-const READ_VERB = /\b(find|search|show|list|get|see|view|read|browse|look|compare|monitor|track|scrape|extract|discover|count|fetch|locate|understand)\b/i;
+// v2.74.939 (CR-D3) — EXPORTED as the single read-verb lexicon: trialSynth kept a same-tier fork (knew
+// capture/check, lacked discover/count/fetch/locate/understand), so "count the results" was read-shaped
+// at SG-1 but earned no proof EXTRACT at synth. Union adds `capture`; `check` stays out on BOTH sides
+// for the documented reason above.
+export const READ_VERB = /\b(find|search|show|list|get|see|view|read|browse|look|compare|monitor|track|scrape|extract|discover|count|fetch|locate|understand|capture)\b/i;
 // Verbs implying a single discrete action (→ act).
 const ACT_VERB = /\b(click|tap|press|toggle|open|select|choose|log\s*in|login|sign\s*in|signin|log\s*out|logout|add|remove|delete|like|favorite|follow|unfollow|share|download|upload|play|pause|dismiss|close|expand|collapse|enable|disable|accept|approve|reject|confirm|cancel)\b/i;
 

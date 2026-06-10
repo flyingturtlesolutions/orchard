@@ -1333,6 +1333,8 @@ async function _appendOutcomes(groundId, events) {
 // shape) + a HEAVY trialTrace (local, by trialRef — runtime/training, never authoring-synced); REJECT drops
 // the draft. Direct chrome.storage.local writes bypass the sync bridge for now (partition/sync wiring is a
 // later slice); the lean record's shape is already the workspace primitive.
+// v2.74.936 (CR-U2) — tabs with an EXPLORE sweep in flight (one per tab; see EXPLORE_PAGE_STRUCTURE).
+const _exploreInFlight = new Set();
 const _sgCapKey = (groundId) => `sgCapabilities:${groundId}`;
 const _sgTraceKey = (trialRef) => `sgTrialTrace:${trialRef}`;
 const _sgDraftKey = (groundId) => `sgTrialDraft:${groundId}`;
@@ -1343,13 +1345,28 @@ async function _readSgCapabilities(groundId) {
   try { const k = _sgCapKey(groundId); const got = await chrome.storage.local.get(k); return Array.isArray(got?.[k]) ? got[k] : []; }
   catch { return []; }
 }
+// v2.74.932 (CR-ST2) — per-ground WRITE CHAIN for the sgCapabilities array. Every writer rewrites the
+// whole array from a private read: the chat fires ORCH_RECORD_ALIAS unawaited per walk step while REPLAY's
+// self-heal prunes — an alias write whose snapshot predated the prune RESURRECTED the just-deleted orphan.
+// Chained per ground (the Logger #persistTail pattern); reads inside the chain see the prior write.
+const _sgCapChains = new Map();
+function _sgCapChained(groundId, fn) {
+  const tail = _sgCapChains.get(groundId) || Promise.resolve();
+  const next = tail.then(() => fn());
+  const stored = next.catch(() => {});
+  _sgCapChains.set(groundId, stored);
+  stored.then(() => { if (_sgCapChains.get(groundId) === stored) _sgCapChains.delete(groundId); });
+  return next;
+}
 // Upsert by capability id (a re-accept of the same (ground,locale,intent) replaces the prior record).
 async function _writeSgCapability(groundId, cap) {
   if (!groundId || !cap?.id) return;
-  const k = _sgCapKey(groundId);
-  const list = await _readSgCapabilities(groundId);
-  const next = [cap, ...list.filter((c) => c.id !== cap.id)].slice(0, SG_CAP_CAP);
-  await chrome.storage.local.set({ [k]: next });
+  return _sgCapChained(groundId, async () => {   // v2.74.932 (CR-ST2)
+    const k = _sgCapKey(groundId);
+    const list = await _readSgCapabilities(groundId);
+    const next = [cap, ...list.filter((c) => c.id !== cap.id)].slice(0, SG_CAP_CAP);
+    await chrome.storage.local.set({ [k]: next });
+  });
 }
 // Remove matcher-facing capabilities matching a predicate (ORCH-ADMIN bulk delete + REPLAY self-heal of an
 // orphan whose underlying Strategy is gone). Returns how many were removed. The `sgCapabilities:<ground>` store
@@ -1369,15 +1386,17 @@ async function _ensureContentScript(tabId) {
 
 async function _removeSgCapabilities(groundId, predicate) {
   if (!groundId || typeof predicate !== 'function') return 0;
-  const k = _sgCapKey(groundId);
-  const list = await _readSgCapabilities(groundId);
-  const keep = list.filter((c) => !predicate(c));
-  const removed = list.length - keep.length;
-  if (removed > 0) {
-    if (keep.length) await chrome.storage.local.set({ [k]: keep });
-    else await chrome.storage.local.remove(k);
-  }
-  return removed;
+  return _sgCapChained(groundId, async () => {   // v2.74.932 (CR-ST2) — prunes serialize against alias/accept writes
+    const k = _sgCapKey(groundId);
+    const list = await _readSgCapabilities(groundId);
+    const keep = list.filter((c) => !predicate(c));
+    const removed = list.length - keep.length;
+    if (removed > 0) {
+      if (keep.length) await chrome.storage.local.set({ [k]: keep });
+      else await chrome.storage.local.remove(k);
+    }
+    return removed;
+  });
 }
 async function _writeSgTrace(trace) {
   if (!trace?.trialRef) return;
@@ -5156,10 +5175,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // from navigating. The artifact is assembled here from the per-band results.
     // Payload: { tabId, groundId?, bandBudget? } → { success, structure, cacheKey }.
     case 'EXPLORE_PAGE_STRUCTURE': {
+      let _ownsExplore = false;   // v2.74.936 (CR-U2) — only the invocation that ACQUIRED the flags releases them (a refused duplicate must not clear the live sweep's)
       (async () => {
         try {
           const { tabId, groundId = null, bandBudget = 8 } = payload ?? {};
           if (typeof tabId !== 'number') { sendResponse({ success: false, error: 'tabId required' }); return; }
+          // v2.74.936 (CR-U2) — one sweep per tab: a full sweep can outlive the chat's 120s timeout, whose
+          // "didn't finish" reply invited a SECOND "explore" that interleaved scrolls/pokes with the first
+          // and double-wrote the Locale. A repeat ask gets an honest in-progress reply instead.
+          if (_exploreInFlight.has(tabId)) { Logger.info('background', `EXPLORE ▸ already running on tab ${tabId} — second request refused`); sendResponse({ success: false, error: 'an explore is already running on this tab — it may take a couple of minutes; ask again when it finishes' }); return; }
+          _exploreInFlight.add(tabId);
+          _ownsExplore = true;
           markEngineBusy(tabId, true);   // v2.74.911 — the poke sweep's clicks must not be monitored as user interactions
           let _exploreCounts = null;   // v2.74.925 (CR-T2) — {featureCount, goalCount} once the Locale builds; the chat verb narrates them (the response's `structure` never carried features/goals — the .910 counts were silently null)
           let tabInfo;
@@ -5549,7 +5575,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           Logger.error('background', `EXPLORE_PAGE_STRUCTURE failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
         }
-      })().finally(() => { if (typeof payload?.tabId === 'number') markEngineBusy(payload.tabId, false); });   // v2.74.911
+      })().finally(() => { if (_ownsExplore && typeof payload?.tabId === 'number') { markEngineBusy(payload.tabId, false); _exploreInFlight.delete(payload.tabId); } });   // v2.74.911; ownership-gated v2.74.936 (CR-U2)
       return true;
     }
 

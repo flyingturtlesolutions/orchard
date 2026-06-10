@@ -5044,17 +5044,55 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     ];
 
     try {
-      const res = await fetch(_llm.url, {
-        method : 'POST',
-        headers: { 'Content-Type': 'application/json', ..._llm.headers },
-        body: JSON.stringify({
-          model,
-          max_tokens : maxTokens,
-          system     : systemPrompt,
-          messages,
-        }),
-        ...(meta && meta.signal ? { signal: meta.signal } : {}),   // v2.74.920 (CR-S4)
-      });
+      // v2.74.934 (CR-E5) — transport hardening, in ONE place for every #call user:
+      //   • TIMEOUT: an own AbortController (default 60s, meta.timeoutMs to tighten) — a stalled
+      //     connection used to hang the invocation until the browser gave up, with no abort path.
+      //   • CANCEL: meta.signal (CR-S4) merges into the same controller, so a user cancel and the
+      //     timeout share one abort.
+      //   • RETRY: ONE bounded retry (~0.8–1.5s jittered) on 429 / 5xx / network failure — a transient
+      //     overload no longer fails a whole strategy/walk turn. Never retries an abort (user cancel or
+      //     timeout) or a non-429 4xx. NB the managed proxy's hard ~29s ceiling: one retry at most keeps
+      //     worst-case wall-clock bounded on the walk path.
+      const timeoutMs = (meta && Number.isFinite(meta.timeoutMs) && meta.timeoutMs > 0) ? meta.timeoutMs : 60000;
+      const _requestBody = JSON.stringify({ model, max_tokens: maxTokens, system: systemPrompt, messages });
+      const _attempt = async () => {
+        const ac = new AbortController();
+        const onCallerAbort = () => { try { ac.abort(); } catch { /* */ } };
+        if (meta && meta.signal) {
+          if (meta.signal.aborted) ac.abort();
+          else meta.signal.addEventListener('abort', onCallerAbort, { once: true });
+        }
+        const timer = setTimeout(() => { try { ac.abort(); } catch { /* */ } }, timeoutMs);
+        try {
+          return await fetch(_llm.url, {
+            method : 'POST',
+            headers: { 'Content-Type': 'application/json', ..._llm.headers },
+            body   : _requestBody,
+            signal : ac.signal,
+          });
+        } finally {
+          clearTimeout(timer);
+          if (meta && meta.signal) { try { meta.signal.removeEventListener('abort', onCallerAbort); } catch { /* */ } }
+        }
+      };
+      const _retryable = (resOrErr) => {
+        if (resOrErr instanceof Response) return resOrErr.status === 429 || resOrErr.status >= 500;
+        return !(resOrErr && resOrErr.name === 'AbortError') && !(meta && meta.signal && meta.signal.aborted);
+      };
+      let res;
+      try {
+        res = await _attempt();
+        if (!res.ok && _retryable(res)) {
+          Logger.warn('AnthropicService', `HTTP ${res.status} [${role}/${operation}] — one retry`);
+          await new Promise((r) => setTimeout(r, 800 + Math.floor(Math.random() * 700)));
+          res = await _attempt();
+        }
+      } catch (e) {
+        if (!_retryable(e)) throw e;
+        Logger.warn('AnthropicService', `fetch failed (${String(e && e.message).slice(0, 60)}) [${role}/${operation}] — one retry`);
+        await new Promise((r) => setTimeout(r, 800 + Math.floor(Math.random() * 700)));
+        res = await _attempt();
+      }
 
       if (!res.ok) {
         const body = await res.text();
@@ -5062,7 +5100,9 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
       }
 
       const data = await res.json();
-      const text = data?.content?.[0]?.text ?? '';
+      // v2.74.934 (CR-E5) — find the first TEXT block: content[0] isn't guaranteed text on multi-block
+      // responses (the old read returned '' → a misleading "Empty response from Claude").
+      const text = (Array.isArray(data?.content) ? data.content.find((b) => b && b.type === 'text')?.text : data?.content?.[0]?.text) ?? '';
       if (!text) throw new Error('Empty response from Claude');
 
       // v2.74.154 — Expose token usage to callers so LLM observation

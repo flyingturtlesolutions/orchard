@@ -26,6 +26,7 @@
  */
 
 import { Logger }           from '../Core/Logger.js';
+import { isRetryableChannelError, isAmbiguousChannelClosed } from '../Core/channelRetry.js';   // v2.74.928 (CR-E2)
 import { dropWeakInputPresence } from '../Core/postcondition.js';   // v2.74.783 — keep precondition-shaped "input present" checks from gating the antecedent skip
 import { AnthropicService } from './AnthropicService.js';
 import { StorageManager }   from './StorageManager.js';
@@ -3352,7 +3353,11 @@ export class TemplateWalker {
     // means the message was NEVER delivered, so the action did NOT run → retrying is safe (no double-execute).
     // The content script auto-injects on navigation (manifest content_scripts), so a short backoff lets it come
     // up. We retry ONLY these connection errors; any other error is surfaced immediately (it may have run).
-    const RETRYABLE = /Receiving end does not exist|Could not establish connection|message channel.*closed|back\/forward cache/i;
+    // v2.74.928 (CR-E2) — "message channel closed" is NOT a never-delivered error: the listener may have
+    // RECEIVED and EXECUTED the step, then torn down (a CLICK's own navigation) before responding. Retrying
+    // re-fired the step on the new page — a double-submit hazard for apply/send/buy terminals. The split
+    // policy lives in Core/channelRetry (tested): never-delivered errors retry for ANY type; the ambiguous
+    // channel-closed retries only for idempotent read/probe types (EXECUTE_STEP surfaces it distinctly).
     const sendOnce = () => new Promise((resolve, reject) => {
       chrome.tabs.sendMessage(tabId, message, { frameId }, (response) => {
         if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
@@ -3365,7 +3370,12 @@ export class TemplateWalker {
         try { return await sendOnce(); }
         catch (e) {
           lastErr = e;
-          if (!RETRYABLE.test(String(e && e.message))) throw e;
+          if (!isRetryableChannelError(e && e.message, message && message.type)) {
+            if (isAmbiguousChannelClosed(e && e.message)) {
+              throw new Error(`channel closed mid-${(message && message.type) || 'message'} — the page may have navigated; not retried (the step may already have executed)`);
+            }
+            throw e;
+          }
           await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));   // 200,400,…,1000ms — let the CS (re)inject
         }
       }

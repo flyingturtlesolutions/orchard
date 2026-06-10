@@ -203,3 +203,17 @@ describe('buildIntentContext — curate the Ground into a bounded composer pack'
     assert.equal(renderIntentContext(null), '');
   });
 });
+
+describe('vocab repair — placeholder shape tightened (CR-D8, v2.74.942)', () => {
+  it('a spaced brace token is NOT a placeholder: it repairs into a real fillable slot', () => {
+    const pack = buildIntentContext(FIXTURE());
+    // Old /\{[^}]*\}/ accepted "{any value}" as already-a-placeholder and skipped the repair — the token
+    // then reached execution literally (the chat's extractor only fills {[a-zA-Z0-9_]+} slots).
+    const rep = validateRichIntents([{ title: 'Spaced token', steps: [
+      { kind: 'capability', ref: 'Search media by category', params: { CATEGORY: '{any value}' } },
+      { kind: 'read', ref: 'get the top result title' },
+    ] }], pack);
+    assert.equal(rep.intents.length, 1, JSON.stringify(rep.rejected));
+    assert.equal(rep.intents[0].steps[0].params.CATEGORY, '{category}', 'repaired to the narrow fillable shape');
+  });
+});

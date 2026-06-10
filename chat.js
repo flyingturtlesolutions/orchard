@@ -264,7 +264,18 @@ function _cancelOpenParamForms() {
   document.querySelectorAll('.param-form, .param-modal').forEach((form) => {
     form.querySelector('[data-action="cancel"]')?.click();
   });
+  // v2.74.937 (CR-U3) — ALSO settle promise-backed orch action bars (confirmLoop et al.): a chat wipe
+  // removed their buttons with the promise pending, so walkPlan (and the awaiting plan/walk) hung forever.
+  for (const fn of [..._pendingBarCancels]) { try { fn(); } catch { /* */ } }
+  _pendingBarCancels.clear();
+  // And release a live walk: its bars are gone (no Skip/Stop will ever fire), so without this the .919
+  // one-walk-at-a-time guard would refuse every future walk. The armed flag makes any LATE continuation
+  // end through _endWalk instead of walking steps into the fresh conversation.
+  if (_walkLive) { _walkLive = false; _walkAbortFlag.requested = true; }
 }
+// v2.74.937 (CR-U3) — cancellers for promise-returning action bars; drained by _cancelOpenParamForms.
+const _pendingBarCancels = new Set();
+function _registerBarCancel(fn) { _pendingBarCancels.add(fn); return () => _pendingBarCancels.delete(fn); }
 
 function _enterConversation() {
   $('empty-state').classList.add('hidden');
@@ -791,6 +802,20 @@ function _orchActionBar(msg) {
   return bar;
 }
 
+// v2.74.938 (CR-U1) — persist a grounded-path assistant bubble at its TERMINAL text. appendMessage only
+// auto-persists role:'user'; every ORCH reply (run results, read values, walk recaps, plan summaries,
+// explore results, intent menus) was DOM-only — a panel reload rehydrated a user-half-only transcript.
+// Upserts by the bubble's stable messageId (safe to call again when a reteach upgrades the text); never
+// touches the legacy invocation path, which has its own finalize.
+function _orchFinalize(msg, { outcome = null } = {}) {
+  try {
+    if (!msg || !msg.dataset || !msg.dataset.messageId) return;
+    const body = msg.querySelector('.message-body')?.textContent ?? '';
+    if (!body.trim()) return;
+    _persistMessageUpdate(msg, { role: 'assistant', body, ...(outcome ? { outcome } : {}) }).catch(() => { /* persistence must never break the flow */ });
+  } catch { /* */ }
+}
+
 // ── ORCH-FB — corrective feedback ───────────────────────────────────────────────────────────────────────────
 // The LAST grounded action, so free-text feedback ("not that" / "that's wrong" / "delete it" / "wrong category,
 // should be Vectors") and the 👎 controls know WHAT to correct. Set on every confirm/run; cleared after retract.
@@ -963,8 +988,11 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan, _headRan = false, ma
       _orchLog(`LOOP ▸ confirm — ${iterations} iteration(s)${capped ? ` (capped from ${total})` : ''}`);
       return await new Promise((resolve) => {
         const bar = _orchActionBar(q);
-        bar.appendChild(_mkBtn(`▶ Run ${iterations}×`, () => { bar.remove(); resolve({ ok: true }); }));
-        bar.appendChild(_mkBtn('Stop', () => { bar.remove(); _setMessageBody(q, 'Stopped before the loop ran.'); resolve({ ok: false }); }));
+        // v2.74.937 (CR-U3) — registered so a chat wipe settles this promise (decline) instead of hanging walkPlan.
+        const unreg = _registerBarCancel(() => { try { bar.remove(); } catch { /* */ } resolve({ ok: false, cancelled: true }); });
+        const settle = (v) => { unreg(); resolve(v); };
+        bar.appendChild(_mkBtn(`▶ Run ${iterations}×`, () => { bar.remove(); settle({ ok: true }); }));
+        bar.appendChild(_mkBtn('Stop', () => { bar.remove(); _setMessageBody(q, 'Stopped before the loop ran.'); settle({ ok: false }); }));
       });
     },
     observe: async (step, scope) => {
@@ -1068,6 +1096,7 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan, _headRan = false, ma
   } else {
     _setMessageBody(msg, (env && env.ok) ? 'Done.' : `Couldn’t complete that${env && env.error ? ` — ${env.error}` : ''}.`);
   }
+  _orchFinalize(msg);   // v2.74.938 (CR-U1) — the plan's terminal summary survives reload
   // T2 — a control-flow run (a collection foreach OR a conditional gate) can be PROMOTED to a durable composite.
   // Offer the save on the same message. (Skipped on a replay of an already-saved composite — plan.savedComposite.)
   const hasCF = (plan && Array.isArray(plan.steps)) && plan.steps.some((s) => s && (s.kind === 'foreach' || s.kind === 'loop' || s.kind === 'gate'));
@@ -1183,7 +1212,13 @@ function _orchPickOnce({ tabId }) {
   return new Promise((resolve) => {
     const sessionId = `obs-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     let done = false;
-    const finish = (v) => { if (done) return; done = true; clearTimeout(timer); chrome.runtime.onMessage.removeListener(onMsg); resolve(v); };
+    const finish = (v) => {
+      if (done) return; done = true; clearTimeout(timer); chrome.runtime.onMessage.removeListener(onMsg);
+      // v2.74.937 (CR-U3) — an ABANDONED pick (timeout / walk stopped) disarms the page picker: it used to
+      // stay armed until the user's next click, which then emitted a PICK_RESULT nobody consumed.
+      if (v == null) { try { chrome.tabs.sendMessage(tabId, { type: 'CANCEL_PICK' }, () => void chrome.runtime.lastError); } catch { /* */ } }
+      resolve(v);
+    };
     const onMsg = (m) => { if (m && m.type === 'PICK_RESULT' && m.sessionId === sessionId) finish(m); };
     const timer = setTimeout(() => finish(null), 120000);
     // PICK_RESULT arrives back over runtime.onMessage (a content script can only runtime.sendMessage to the
@@ -1805,7 +1840,13 @@ const _wfNames = (arr) => (Array.isArray(arr) ? arr : []).map((p) => (typeof p =
 
 // Open the step's Ground in a FOREGROUND tab; REUSE it across consecutive steps on the same Ground (the warm page).
 async function _walkEnsureTab(st, si) {
-  if (st.tabId != null && st.ground === si.groundId) { try { await chrome.tabs.update(st.tabId, { active: true }); } catch { /* */ } return st.tabId; }
+  // v2.74.936 (CR-U2) — verify the seeded tab still EXISTS before reusing it: intent chips stamp the tab
+  // id at render time and stay clickable long after that tab closes; the old swallow-and-return fed every
+  // REPLAY/RUN_OBSERVATION a dead id (a confusing per-step failure instead of a fresh tab).
+  if (st.tabId != null && st.ground === si.groundId) {
+    try { await chrome.tabs.update(st.tabId, { active: true }); return st.tabId; }
+    catch { st.tabId = null; /* tab is gone — fall through to create */ }
+  }
   try { const t = await chrome.tabs.create({ url: si.groundUrl || undefined, active: true }); st.tabId = (t && typeof t.id === 'number') ? t.id : null; st.ground = si.groundId; }
   catch { st.tabId = null; }
   if (st.tabId != null) await _orchWaitTabReady(st.tabId);
@@ -1884,9 +1925,11 @@ function _endWalk(st, i, reason) {
   const done = reason === 'done';
   const where = done ? '' : ` at step ${Math.min(i + 1, st.total)} of ${st.total}`;
   _orchLog(`WALK ▸ ${done ? 'done' : reason}${where} — ${st.total} step(s) [${rec.ring}]${st.preSkipped ? ` +${st.preSkipped} not-walkable` : ''}`);
-  _setMessageBody(appendMessage({ role: 'assistant', body: '' }), done
+  const _recapMsg = appendMessage({ role: 'assistant', body: '' });
+  _setMessageBody(_recapMsg, done
     ? `✓ Walk finished — ${st.total} step${st.total === 1 ? '' : 's'}: ${rec.chat}.`
     : `⏹ ${reason === 'errored' ? 'Walk stopped on an error' : 'Stopped the walk'}${where} — ${rec.chat}. Steps already completed stay done.`);
+  _orchFinalize(_recapMsg);   // v2.74.938 (CR-U1)
 }
 
 async function _walkStep(steps, i, st, ask) {
@@ -1948,12 +1991,12 @@ async function _walkStep(steps, i, st, ask) {
       // ── BOUND → RUN it ──
       if (isRead) {
         const r = await _orchReq('RUN_OBSERVATION', { tabId: tab, groundId: si.groundId, capabilityId: si.capabilityId });
-        if (r && r.ok && r.value != null) { mark('read'); _orchLog(`WALK ▸ step ${i + 1} · read OK → "${String(r.value).slice(0, 40)}"`); _setMessageBody(m, `Step ${i + 1}/${st.total} · read “${si.clause}” → “${String(r.value).slice(0, 160)}”.`); advance(r.value); }
-        else { mark('failed'); _orchLog(`WALK ▸ step ${i + 1} · read MISS [${r ? `ran=${r.ran} ok=${r.ok}${r.reason ? ` ${String(r.reason).slice(0, 40)}` : ''}` : 'null/timeout'}]`); _setMessageBody(m, `Step ${i + 1}/${st.total} · couldn’t read “${si.clause}” here${r && r.reason ? ` (${r.reason})` : ''}.`); _walkReteach(m, si, st, next, mark, i); }
+        if (r && r.ok && r.value != null) { mark('read'); _orchLog(`WALK ▸ step ${i + 1} · read OK → "${String(r.value).slice(0, 40)}"`); _setMessageBody(m, `Step ${i + 1}/${st.total} · read “${si.clause}” → “${String(r.value).slice(0, 160)}”.`); _orchFinalize(m); advance(r.value); }
+        else { mark('failed'); _orchLog(`WALK ▸ step ${i + 1} · read MISS [${r ? `ran=${r.ran} ok=${r.ok}${r.reason ? ` ${String(r.reason).slice(0, 40)}` : ''}` : 'null/timeout'}]`); _setMessageBody(m, `Step ${i + 1}/${st.total} · couldn’t read “${si.clause}” here${r && r.reason ? ` (${r.reason})` : ''}.`); _orchFinalize(m); _walkReteach(m, si, st, next, mark, i); }
       } else {
         const r = await _orchReq('REPLAY_SG_CAPABILITY', { tabId: tab, groundId: si.groundId, capabilityId: si.capabilityId, paramValues: _walkResolveParams(si, st.scope) });
-        if (r && r.ok) { mark('ran'); _orchLog(`WALK ▸ step ${i + 1} · ran OK`); _setMessageBody(m, `Step ${i + 1}/${st.total} · ran “${si.capabilityName || si.clause}”.`); advance(); }
-        else { mark('failed'); _orchLog(`WALK ▸ step ${i + 1} · run FAIL [${r ? `success=${r.success} ran=${r.ran} ok=${r.ok}${r.error ? ` err="${String(r.error).slice(0, 50)}"` : ''}${r.reason ? ` ${String(r.reason).slice(0, 40)}` : ''}` : 'null/timeout'}]`); _setMessageBody(m, `Step ${i + 1}/${st.total} · “${si.capabilityName || si.clause}” didn’t complete${r && (r.error || r.reason) ? ` (${r.error || r.reason})` : ''}.`); _walkReteach(m, si, st, next, mark, i); }
+        if (r && r.ok) { mark('ran'); _orchLog(`WALK ▸ step ${i + 1} · ran OK`); _setMessageBody(m, `Step ${i + 1}/${st.total} · ran “${si.capabilityName || si.clause}”.`); _orchFinalize(m); advance(); }
+        else { mark('failed'); _orchLog(`WALK ▸ step ${i + 1} · run FAIL [${r ? `success=${r.success} ran=${r.ran} ok=${r.ok}${r.error ? ` err="${String(r.error).slice(0, 50)}"` : ''}${r.reason ? ` ${String(r.reason).slice(0, 40)}` : ''}` : 'null/timeout'}]`); _setMessageBody(m, `Step ${i + 1}/${st.total} · “${si.capabilityName || si.clause}” didn’t complete${r && (r.error || r.reason) ? ` (${r.error || r.reason})` : ''}.`); _orchFinalize(m); _walkReteach(m, si, st, next, mark, i); }
       }
     } else {
       // ── GAP → TEACH it in place (the prior steps warmed the page) ──
@@ -2473,6 +2516,7 @@ async function _chatExplore({ thenMenu = false } = {}) {
   const nFeat = Number.isFinite(res.featureCount) ? res.featureCount : null;
   const nGoals = Number.isFinite(res.goalCount) ? res.goalCount : null;
   _setMessageBody(msg, `✓ Explored ${host}${res.fresh ? ' (already fresh — reused the map)' : ''}${nFeat != null ? ` — ${nFeat} feature${nFeat === 1 ? '' : 's'}` : ''}${nGoals != null ? `, ${nGoals} goal${nGoals === 1 ? '' : 's'}` : ''}.${thenMenu ? '' : ' Ask “what can I do here?” to see what I can put together now.'}`);
+  _orchFinalize(msg);   // v2.74.938 (CR-U1)
   if (thenMenu) { try { await _tryIntentMenu('what can I do here?'); } catch { /* */ } }
   return true;
 }
@@ -2582,6 +2626,9 @@ async function _sendRichIntent(it) {
 }
 function _renderRichIntents(msg, intents) {
   _setMessageBody(msg, '');   // v2.74.904 — just the results: no preamble line above the chips
+  // v2.74.938 (CR-U1) — persist the menu as TEXT (titles): the chips are session-only buttons, but the
+  // transcript should still show WHAT was offered after a reload.
+  try { _persistMessageUpdate(msg, { role: 'assistant', body: (Array.isArray(intents) ? intents : []).map((it) => `${it.badge === 'ready' ? '✓' : '◇'} ${it.title}`).join('\n') }).catch(() => { /* */ }); } catch { /* */ }
   const wrap = document.createElement('div');
   wrap.className = 'intent-menu intent-menu-rich';
   for (const it of intents) {

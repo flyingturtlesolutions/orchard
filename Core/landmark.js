@@ -19,7 +19,12 @@
 // falls back to selector-only, which is still better than a hard fail).
 function _roleFromKind(kind, fieldType) {
   switch (kind) {
-    case 'submit': case 'action': case 'button': case 'disclosure': return 'button';
+    // v2.74.935 (CR-B2) — a TYPEABLE disclosure (combobox: kind=disclosure + fieldType 'text', the .913
+    // fill class) recovers as a COMBOBOX, not a button: probe-or-recover was hunting a button named like
+    // a text box for exactly the control .913 made central. Only reached when no explicit a11yRole was
+    // captured (an explicit role always wins in featureToProtoLandmark).
+    case 'disclosure': return fieldType === 'text' ? 'combobox' : 'button';
+    case 'submit': case 'action': case 'button': return 'button';
     case 'navigation': return 'link';
     case 'select':   return 'combobox';
     case 'file':     return null;                 // file inputs have no stable recoverable role

@@ -201,3 +201,23 @@ describe('synthesizeTrialOp — typeable disclosure = combobox gets a TYPE (v2.7
     assert.ok(op.actions.some((a) => a.action === 'CLICK' && a.selector === '#pay'), 'still clicked as an act');
   });
 });
+
+describe('volatile combobox suggestions — reads dropped too (CR-B2, v2.74.935)', () => {
+  it('a read revealed by the typed combobox is skipped, not kept as the EXTRACT target', () => {
+    const locale = { features: {
+      q:    { id: 'q', kind: 'disclosure', label: 'Search box', selector: 'input[name="q"]', fieldType: 'text', interaction: { pattern: 'reveal', effect: 'reveal' } },
+      sugg: { id: 'sugg', kind: 'collection', label: 'suggestion list', selector: '#suggestions', hidden: true, revealedBy: 'q', interaction: { pattern: 'none', effect: 'none' } },
+      res:  { id: 'res', kind: 'collection', label: 'results list', selector: '.results', interaction: { pattern: 'none', effect: 'none' } },
+    } };
+    const roles = [
+      { role: 'Search box', featureId: 'q', selector: 'input[name="q"]', landmark: { role: 'combobox', accessibleName: 'Search box', selector: 'input[name="q"]' } },
+      { role: 'suggestion list', featureId: 'sugg', selector: '#suggestions', hidden: true, revealedBy: 'Search box' },
+      { role: 'results list', featureId: 'res', selector: '.results' },
+    ];
+    const op = synthesizeTrialOp({ groundedIntent: 'list the results for plumber', roles, locale });
+    const extract = op.actions.find((a) => a.action === 'EXTRACT');
+    assert.ok(extract, 'an EXTRACT still emits');
+    assert.equal(extract.selector, '.results', 'the STABLE read won; the volatile suggestion list did not');
+    assert.ok(op.skipped.some((s) => s.role === 'suggestion list'), 'the volatile read is accounted for');
+  });
+});

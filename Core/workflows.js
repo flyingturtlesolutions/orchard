@@ -26,6 +26,7 @@
 // @version 2.74.777
 
 import { synthesizeCapabilityDraft } from './capabilitySynth.js';
+import { normalizeGoalLabel } from './siteMap.js';   // v2.74.942 (CR-D8)
 
 /** Forward adjacency: archetypeId → [{ to, via, label }] from the siteMap link edges. */
 export function buildAdjacency(map) {
@@ -134,9 +135,9 @@ export function workflowsTo(map, targetId, opts = {}) {
   return pathsTo(map, targetId, opts).map((p) => workflowFromPath(map, p));
 }
 
-function _normLabel(s) {
-  return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim().replace(/[.!?…]+$/, '').trim();
-}
+// v2.74.942 (CR-D8) — siteMap exports normalizeGoalLabel EXACTLY so consumers re-find catalog goals the
+// way the catalog deduped them; this file kept a byte-copy anyway. The alias keeps call sites unchanged.
+const _normLabel = normalizeGoalLabel;
 
 /**
  * Stitch a Workflow skeleton + per-step Locale goals into ONE cross-page action sequence — a

@@ -17,6 +17,7 @@
  */
 
 import { Logger }                 from '../Core/Logger.js';
+import { relaxNavPostFailures }   from '../Core/postcondition.js';   // v2.74.927 (CR-E1) — nav-aware relax, pure + tested
 import { StorageManager }         from './StorageManager.js';
 import { TemplateWalker }         from './TemplateWalker.js';
 import { Scope, scalar, list, record, image, section, document, asString } from './Scope.js';
@@ -931,17 +932,22 @@ export class ExecutionEngine {
       // but NOT the post-nav URL), so a "click that opens a page/panel" capability isn't scored failed for doing its job.
       // A url_matches that targets a THIRD page (matched neither) stays a real failure; one targeting the post-nav page
       // already passed (we're there) and was never in failures.
+      // v2.74.927 (CR-E1) — the .815 filter read `f.type`, but checkConditions emits {condition, reason}
+      // envelopes: `f.type` was always undefined, so the relax NEVER fired (and its .818 explainer log was
+      // unreachable) — "click that navigates is failed by its own url_matches" persisted since .815.
+      // The rule now lives PURE + tested in Core/postcondition.relaxNavPostFailures; this consumes it.
       const _nav = execResult && execResult.navigated;
       if (postFailures.length && _nav && _nav.from) {
-        const _hit = (pat, url) => { try { return new RegExp(pat).test(String(url || '')); } catch { return false; } };
-        postFailures = postFailures.filter((f) => {
-          if (!(f && f.type === 'url_matches' && f.pattern)) return true;
-          const relax = _hit(f.pattern, _nav.from) && !_hit(f.pattern, _nav.to);   // held pre-nav, broke on the click's own nav
-          // v2.74.818 — log the .815 reasoning EITHER way (relax vs keep), so a "ran but postconditions failed" is
-          // explicable at a glance (the 17:46 Notion case kept it because the pattern was a THIRD page, not from/to).
-          Logger.info('ExecutionEngine', `postcond ▸ url_matches("${String(f.pattern).slice(0, 30)}") failed; CLICK navigated "…${String(_nav.from).slice(-28)}" → "…${String(_nav.to).slice(-28)}" → ${relax ? 'RELAXED (assertion held until the nav)' : 'KEPT (pattern matches neither from nor to — a third page)'}`);
-          return !relax;
-        });
+        const { kept, relaxed } = relaxNavPostFailures(postFailures, _nav);
+        for (const f of relaxed) {
+          const c = (f && f.condition) || f || {};
+          Logger.info('ExecutionEngine', `postcond ▸ url_matches("${String(c.pattern).slice(0, 30)}") failed; CLICK navigated "…${String(_nav.from).slice(-28)}" → "…${String(_nav.to).slice(-28)}" → RELAXED (assertion held until the nav)`);
+        }
+        for (const f of kept) {
+          const c = (f && f.condition) || f || {};
+          if (c.type === 'url_matches' && c.pattern) Logger.info('ExecutionEngine', `postcond ▸ url_matches("${String(c.pattern).slice(0, 30)}") failed; CLICK navigated "…${String(_nav.from).slice(-28)}" → "…${String(_nav.to).slice(-28)}" → KEPT (pattern matches neither from nor to — a third page)`);
+        }
+        postFailures = kept;
       }
       if (postFailures.length > 0) {
         const reasonSummary = postFailures.map(f => ExecutionEngine.#formatConditionFailure(f)).join('; ');
@@ -1036,6 +1042,21 @@ export class ExecutionEngine {
     }
 
     const items = Array.isArray(source.items) ? source.items : [];
+
+    // v2.74.930 (CR-E4) — iteration budget. LOOP self-caps at 100 and the chat plan interpreter gained
+    // the .915 cap/confirm, but the engine FOREACH was unbounded: a 500-row ENUMERATE meant 500 full
+    // fragment chains (clicks, navigations, observations). Authors can raise/lower via node.maxItems;
+    // exceeding the bound FAILS LOUDLY (mirroring LOOP's max_exceeded) rather than silently truncating —
+    // a strategy that genuinely needs more states its intent in the node.
+    const FOREACH_DEFAULT_MAX = 200;
+    const maxItems = (Number.isFinite(node.maxItems) && node.maxItems > 0) ? node.maxItems : FOREACH_DEFAULT_MAX;
+    if (items.length > maxItems) {
+      const errMsg = `Step ${topLevelIndex + 1}: FOREACH over ${node.over} has ${items.length} item(s), exceeding the ${maxItems}-iteration budget` +
+        `${Number.isFinite(node.maxItems) ? '' : ` (engine default — set node.maxItems to raise)`}`;
+      Logger.error('ExecutionEngine', errMsg);
+      return { status: 'failed', error: errMsg };
+    }
+
     Logger.info('ExecutionEngine',
       `FOREACH over ${node.over} as ${node.as} — ${items.length} iteration(s)`);
 
@@ -4884,15 +4905,20 @@ export class ExecutionEngine {
     // comes up in practice we'll relax the filter. Strict for now.
     const NEW_TAB_TIMEOUT_MS = 5000;
     let onCreatedListener = null;
+    // v2.74.930 (CR-E4) — the timer is held OUTSIDE the executor and the promise gets a no-op catch:
+    // the three early returns below (trigger threw/aborted/failed) used to remove only the listener,
+    // leaving the 5s timer live and its rejection unawaited — an unhandled-rejection log in the SW on
+    // every trigger failure.
+    let _newTabTimer = null;
     const newTabPromise = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      _newTabTimer = setTimeout(() => {
         if (onCreatedListener) chrome.tabs.onCreated.removeListener(onCreatedListener);
         reject(new Error(`IN_NEW_TAB: trigger did not open a new tab within ${NEW_TAB_TIMEOUT_MS}ms`));
       }, NEW_TAB_TIMEOUT_MS);
 
       onCreatedListener = (tab) => {
         if (tab.openerTabId === outerTab) {
-          clearTimeout(timer);
+          clearTimeout(_newTabTimer);
           chrome.tabs.onCreated.removeListener(onCreatedListener);
           onCreatedListener = null;
           resolve(tab.id);
@@ -4902,6 +4928,8 @@ export class ExecutionEngine {
       };
       chrome.tabs.onCreated.addListener(onCreatedListener);
     });
+    newTabPromise.catch(() => { /* settled-but-unconsumed on early returns — see above */ });
+    const _dropNewTabWait = () => { clearTimeout(_newTabTimer); if (onCreatedListener) { chrome.tabs.onCreated.removeListener(onCreatedListener); onCreatedListener = null; } };
 
     // Execute the trigger on the outer tab. The trigger can be any single
     // node — typically a fragment with a CLICK, but NAVIGATE or even a
@@ -4912,17 +4940,16 @@ export class ExecutionEngine {
         topLevelIndex, iterationLabel, iteration,
       });
     } catch (err) {
-      // Clean up listener if trigger threw before it could fire
-      if (onCreatedListener) chrome.tabs.onCreated.removeListener(onCreatedListener);
+      _dropNewTabWait();   // v2.74.930 (CR-E4) — listener AND timer
       return { status: 'failed', error: `IN_NEW_TAB trigger threw: ${err.message ?? err}` };
     }
 
     if (triggerResult.status === 'aborted') {
-      if (onCreatedListener) chrome.tabs.onCreated.removeListener(onCreatedListener);
+      _dropNewTabWait();   // v2.74.930 (CR-E4)
       return triggerResult;
     }
     if (triggerResult.status === 'failed') {
-      if (onCreatedListener) chrome.tabs.onCreated.removeListener(onCreatedListener);
+      _dropNewTabWait();   // v2.74.930 (CR-E4)
       return { status: 'failed', error: `IN_NEW_TAB trigger failed: ${triggerResult.error}` };
     }
 

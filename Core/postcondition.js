@@ -150,3 +150,34 @@ export function evaluatePostcondition(postcondition, observed = {}) {
   if (otherConds.length) return { checked: true, held: combine(otherConds), basis: 'element', match, evaluated };
   return { checked: false, held: null, basis: null, match, evaluated, reason: 'no checkable condition' };
 }
+
+/**
+ * CR-E1 (v2.74.927) — nav-aware postcondition relaxation, extracted PURE from ExecutionEngine so the
+ * envelope contract is testable. The .815 in-engine filter read `f.type`/`f.pattern`, but
+ * TemplateWalker.checkConditions emits failures as `{ condition, reason }` envelopes — `f.type` was
+ * always undefined, the early-return kept every failure, and the relax branch (plus its .818 explainer
+ * log) was UNREACHABLE since it shipped: a fragment whose own terminal CLICK navigates was still scored
+ * failed by its auto-derived url_matches asserting the page it LEFT.
+ *
+ * Rule (unchanged from .815): a url_matches failure is RELAXED iff its pattern matched the pre-nav URL
+ * and stopped matching on the click's own navigation (the assertion held until the action did its job);
+ * a pattern matching NEITHER side (a third page) stays a real failure. Tolerates both the envelope shape
+ * ({condition:{type,pattern}, reason}) and a legacy bare condition, mirroring the engine's formatter.
+ *
+ * @param {Array<object>} failures  checkConditions failures (envelopes or bare conditions)
+ * @param {{from?:string, to?:string}|null} nav  executeFragment's `navigated` record
+ * @returns {{kept: Array<object>, relaxed: Array<object>}}
+ */
+export function relaxNavPostFailures(failures, nav) {
+  const list = Array.isArray(failures) ? failures : [];
+  if (!nav || !nav.from) return { kept: list, relaxed: [] };
+  const hit = (pat, url) => { try { return new RegExp(pat).test(String(url || '')); } catch { return false; } };
+  const kept = [], relaxed = [];
+  for (const f of list) {
+    const c = (f && typeof f === 'object' && f.condition && typeof f.condition === 'object') ? f.condition : (f || {});
+    if (!(c.type === 'url_matches' && c.pattern)) { kept.push(f); continue; }
+    const relax = hit(c.pattern, nav.from) && !hit(c.pattern, nav.to);
+    (relax ? relaxed : kept).push(f);
+  }
+  return { kept, relaxed };
+}

@@ -69,3 +69,14 @@ test('selectionToTrialRoles carries role.landmark with derived role + accessible
 });
 
 console.log(`\n${passed} passed`);
+
+
+// CR-B2 (v2.74.935) — typeable disclosure recovers as combobox
+test('disclosure + fieldType text → role "combobox" (CR-B2)', () => {
+  const lm = featureToProtoLandmark({ selector: 'input[name="q"]', label: 'Job title keywords', kind: 'disclosure' }, 'text');
+  assert.equal(lm.role, 'combobox');
+});
+test('plain disclosure stays "button"; explicit a11yRole always wins (CR-B2)', () => {
+  assert.equal(featureToProtoLandmark({ selector: '#pay', label: 'Pay', kind: 'disclosure' }, null).role, 'button');
+  assert.equal(featureToProtoLandmark({ selector: '#x', label: 'X', kind: 'disclosure', a11yRole: 'searchbox' }, 'text').role, 'searchbox');
+});

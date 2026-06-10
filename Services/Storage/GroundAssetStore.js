@@ -27,6 +27,8 @@ const _siteMapKey = siteMapStorageKey;
 const _chromeKey = chromeStorageKey;
 
 /** @param {string} url */
+// v2.74.941 (CR-D1) — STAYS slash-keeping: these are PERSISTED Locale-cache keys; changing the bytes
+// orphans every stored Locale. Comparison-time identity lives in Core/pageKey (slash-insensitive).
 export function normalizeLocaleKey(url) {
   if (!url || typeof url !== 'string') return '';
   try {

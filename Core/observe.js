@@ -19,6 +19,8 @@
 // @module Core/observe
 // @version 2.74.727
 
+import { slugUpper } from './slug.js';   // v2.74.940 (CR-D2)
+
 // A leading ACTION verb makes the ask a COMMAND, not a standalone read — even when it embeds a selection clause
 // ("download the CHEAPEST gif" is observe+analyze+fragment, which the COMPILER decomposes, not a pure read). This
 // guard runs first so a superlative inside a command doesn't get mis-read as a value question.
@@ -111,8 +113,8 @@ export function reconcileOutputType(askOutputType, shape) {
   return shape === 'list' ? 'list' : 'scalar';   // no explicit ask → the shape decides
 }
 
-const _slugUpper = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
-const _outName = (s) => _slugUpper(s).split('_').slice(0, 3).join('_') || 'VALUE';
+// v2.74.940 (CR-D2) — via the shared builder (same 40-char base, first 3 words).
+const _outName = (s) => slugUpper(s, { maxLen: 40, maxWords: 3, fallback: 'VALUE' });
 
 /**
  * Build a durable, MATCHER-COMPATIBLE Observation capability. PURE (the caller stamps id/time). The record rides

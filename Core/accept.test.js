@@ -314,3 +314,16 @@ test('validateConditionRefs — the real ACCEPT bundle predicates resolve to its
 });
 
 console.log(`\n${passed} passed`);
+
+
+// CR-D1 (v2.74.941) — slash-insensitive page match
+test('findMatchingPerspective — a /jobs/ stored perspective matches a /jobs ask (CR-D1)', () => {
+  const stored = [{ id: 'p1', localeUrl: 'https://x.com/jobs/', landmarkRefs: ['u1', 'u2'], lifecycle: 'active' }];
+  const hit = findMatchingPerspective(stored, { localeUrl: 'https://x.com/jobs?q=writer', landmarkUids: ['u1', 'u2'] });
+  assert.ok(hit, 'the slash variant must not fork a duplicate');
+  assert.equal(hit.id, 'p1');
+});
+test('findMatchingPerspective — a different page still misses (CR-D1)', () => {
+  const stored = [{ id: 'p1', localeUrl: 'https://x.com/jobs/', landmarkRefs: ['u1'], lifecycle: 'active' }];
+  assert.equal(findMatchingPerspective(stored, { localeUrl: 'https://x.com/login', landmarkUids: ['u1'] }), null);
+});

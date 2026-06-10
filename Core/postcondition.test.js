@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { evaluatePostcondition, extractKeywords, urlParamsChanged, isFillableInputSelector, dropWeakInputPresence } from './postcondition.js';
+import { evaluatePostcondition, extractKeywords, urlParamsChanged, isFillableInputSelector, dropWeakInputPresence, relaxNavPostFailures } from './postcondition.js';
 
 describe('postcondition — weak input-presence (the re-search skip bug, v2.74.783)', () => {
   it('isFillableInputSelector: true for input/textarea/select targets, false for regions', () => {
@@ -91,5 +91,44 @@ describe('postcondition — evaluate (SG-T2-9)', () => {
   it('null / empty postcondition → not checked', () => {
     assert.equal(evaluatePostcondition(null, {}).checked, false);
     assert.equal(evaluatePostcondition({ conditions: [] }, {}).checked, false);
+  });
+});
+
+describe('relaxNavPostFailures — nav-aware relax reads the REAL failure envelope (CR-E1, v2.74.927)', () => {
+  // checkConditions emits failures as {condition, reason}. The in-engine .815 filter read f.type directly,
+  // so it NEVER fired — these tests pin the envelope contract the engine consumes now.
+  const nav = { from: 'https://x.com/jobs?q=a', to: 'https://x.com/viewjob?id=1' };
+  const env = (type, pattern) => ({ condition: { type, pattern }, reason: 'condition not met' });
+
+  it('relaxes a url_matches that held pre-nav and broke on the click own nav (envelope shape)', () => {
+    const { kept, relaxed } = relaxNavPostFailures([env('url_matches', '/jobs')], nav);
+    assert.equal(relaxed.length, 1);
+    assert.equal(kept.length, 0);
+  });
+
+  it('keeps a third-page pattern (matched neither side)', () => {
+    const { kept, relaxed } = relaxNavPostFailures([env('url_matches', '/login')], nav);
+    assert.equal(relaxed.length, 0);
+    assert.equal(kept.length, 1);
+  });
+
+  it('keeps non-url failures untouched and tolerates the legacy bare-condition shape', () => {
+    const bare = { type: 'url_matches', pattern: '/jobs' };   // legacy shape — still relaxes
+    const other = { condition: { type: 'selector_present', selector: '#r' }, reason: 'missing' };
+    const { kept, relaxed } = relaxNavPostFailures([bare, other], nav);
+    assert.equal(relaxed.length, 1, 'bare legacy shape relaxes too');
+    assert.deepEqual(kept, [other]);
+  });
+
+  it('no nav (or no from) → everything kept', () => {
+    const fs = [env('url_matches', '/jobs')];
+    assert.deepEqual(relaxNavPostFailures(fs, null), { kept: fs, relaxed: [] });
+    assert.deepEqual(relaxNavPostFailures(fs, { to: 'x' }), { kept: fs, relaxed: [] });
+  });
+
+  it('an invalid regex pattern is kept (never throws)', () => {
+    const { kept, relaxed } = relaxNavPostFailures([env('url_matches', '([')], nav);
+    assert.equal(relaxed.length, 0);
+    assert.equal(kept.length, 1);
   });
 });

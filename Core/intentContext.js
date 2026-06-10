@@ -207,7 +207,12 @@ export function intentContextFingerprint(pack) {
 // free-text refs; only the four GROUNDED kinds must cite the pack.
 export const RICH_INTENT_STEP_KINDS = Object.freeze(['capability', 'read', 'goal', 'navigate', 'foreach', 'sieve', 'detect', 'loop', 'try', 'open', 'wait', 'handoff']);
 const _GROUNDED_KINDS = new Set(['capability', 'read', 'goal', 'navigate']);
-const _PLACEHOLDER_RE = /\{[^}]*\}/;
+// v2.74.942 (CR-D8) — TIGHTENED to the FILLABLE slot shape: the old /\{[^}]*\}/ accepted `{}` and
+// `{two words}` as "a placeholder", so a vocab violation could repair into a slot the chat's extractor
+// (/\{([a-zA-Z0-9_]+)\}/) would never surface for filling — the token reached execution literally.
+// Deliberate ASYMMETRY with the alias-accretion GUARD (sg.js, /\{[^}]{1,40}\}/): the guard stays BROAD
+// (anything braced must never become an alias); this repair-target stays NARROW (only real fillable slots).
+const _PLACEHOLDER_RE = /\{[a-zA-Z0-9_]+\}/;
 
 /**
  * @param {Array} proposals  the raw LLM intents ({title, ask, steps:[{kind,ref,params?}], params?})

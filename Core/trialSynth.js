@@ -15,6 +15,8 @@
 // @module Core/trialSynth
 // @version 2.74.645
 
+import { READ_VERB } from './intentShape.js';   // v2.74.939 (CR-D3) — the single read-verb lexicon
+
 const FILL_KINDS = new Set(['input']);
 const ACT_KINDS  = new Set(['action', 'navigation', 'disclosure']);
 const READ_KINDS = new Set(['collection', 'region', 'composite']);
@@ -45,7 +47,9 @@ export function fillOpFor(feature, role) {
   return 'text';
 }
 
-const READ_VERB = /\b(find|search|show|list|get|see|view|read|browse|capture|extract|check|look|compare|monitor|track|scrape)\b/i;
+// v2.74.939 (CR-D3) — READ_VERB now imported from intentShape (see the import at top): the same-tier fork
+// had drifted — this copy lacked discover/count/fetch/locate/understand, so "count the results" earned no
+// proof EXTRACT; it also carried `check`, which intentShape deliberately excludes ("check a box" is an act).
 
 /** Classify a role's kind: prefer the bound feature's kind, else infer from the role name. */
 export function inferRoleKind(role, feature) {
@@ -229,8 +233,13 @@ export function synthesizeTrialOp({ groundedIntent, roles, locale = null, naviga
     const typed = new Set(list.filter((r) => r._typeable && r.selector).map((r) => r.role));
     if (typed.size) {
       const volatile = (r) => r.hidden && r.revealedBy && typed.has(r.revealedBy);
-      for (const r of [...fills, ...acts]) if (volatile(r)) skipped.push({ role: r.role, why: 'combobox suggestion — volatile once a value is typed' });
+      // v2.74.935 (CR-B2) — the drop covers READS too: a collection/region revealed by the typed combobox
+      // was captured from the EMPTY box, so keeping it as the EXTRACT proof target guaranteed
+      // extractQuality=0 against the re-rendered popover. With it dropped, the EXTRACT falls back to a
+      // stable read or the op honestly reports nothing to read.
+      for (const r of [...fills, ...acts, ...reads]) if (volatile(r)) skipped.push({ role: r.role, why: 'combobox suggestion — volatile once a value is typed' });
       for (let i = fills.length - 1; i >= 0; i--) if (volatile(fills[i])) fills.splice(i, 1);
+      for (let i = reads.length - 1; i >= 0; i--) if (volatile(reads[i])) reads.splice(i, 1);
       acts = acts.filter((r) => !volatile(r));
     }
   }

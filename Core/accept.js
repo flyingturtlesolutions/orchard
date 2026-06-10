@@ -20,6 +20,7 @@
 // build on a failing trial / under-covered completion intent.
 
 import { inferRoleKind, fillOpFor, isTypeableDisclosure } from './trialSynth.js';
+import { pageKey } from './pageKey.js';   // v2.74.941 (CR-D1) — comparison-time page identity
 
 export const ACCEPT_SCHEMA = 1;
 
@@ -34,6 +35,9 @@ function _hash(s) {
 // Canonical PAGE scope: origin + pathname, query/hash stripped (the page-archetype, not a specific instance).
 // Bad parse → the raw string. Keys the Perspective id on the PAGE so query noise (?q=writer vs ?q=philosopher on
 // the SAME /jobs page) never forks a duplicate; also the urlMatches scope rung (b3).
+// v2.74.941 (CR-D1) — STAYS slash-keeping: this string is HASHED into mintPerspectiveId, so changing its
+// bytes would orphan every existing perspective. Comparisons go through Core/pageKey (slash-insensitive)
+// instead — see findMatchingPerspective.
 function _urlScopePattern(localeUrl) {
   try { const u = new URL(localeUrl); return u.origin + u.pathname; } catch { return String(localeUrl || ''); }
 }
@@ -354,12 +358,14 @@ export function buildPerspectiveRecord({ intent, name = null, spec = {}, groundI
  * @returns {object|null}
  */
 export function findMatchingPerspective(existing, { localeUrl = '', landmarkUids = [] } = {}) {
-  const scope = _urlScopePattern(localeUrl);
+  // v2.74.941 (CR-D1) — compare via pageKey (slash-insensitive): /jobs and /jobs/ are ONE page, but the
+  // slash-keeping mint pattern made them miss each other here and fork duplicate perspectives.
+  const scope = pageKey(localeUrl);
   const wanted = new Set((Array.isArray(landmarkUids) ? landmarkUids : []).filter(Boolean));
   if (!scope || wanted.size === 0) return null;   // no page or no substrate to match on → can't qualify
   for (const p of (Array.isArray(existing) ? existing : [])) {
     if (!p || p.lifecycle === 'deprecated') continue;
-    if (_urlScopePattern(p.localeUrl) !== scope) continue;   // must be the SAME page
+    if (pageKey(p.localeUrl) !== scope) continue;   // must be the SAME page
     const have = new Set((Array.isArray(p.landmarkRefs) ? p.landmarkRefs : []).filter(Boolean));
     if (have.size === wanted.size && [...wanted].every((u) => have.has(u))) return p;   // identical landmark SET
   }

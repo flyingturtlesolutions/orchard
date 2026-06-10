@@ -290,6 +290,23 @@ export class StorageManager {
     return next;
   }
 
+  // v2.74.931 (CR-ST1) — PER-KEY chains for RECORD-level read-modify-writes. The v2.74.119 fix serialized
+  // INDEX ops only; updateLandmark/updateFragment/saveLandmark still did unserialized get→merge→set, and
+  // landmarks have THREE live concurrent writers (TemplateWalker's mid-run recovered-selector persist is
+  // fire-and-forget while accept-time profile enrichment and the verifier patch the same uid) — whichever
+  // read first silently clobbered the other's fields (lifecycle, profile, recovered selector). Per-key (not
+  // one global chain) so unrelated records don't serialize against each other; the map entry is pruned when
+  // its op is still the tail at settle time, so the map stays bounded by in-flight keys.
+  static #recordChains = new Map();
+  static #serializeRecordOp(key, fn) {
+    const tail = StorageManager.#recordChains.get(key) || Promise.resolve();
+    const next = tail.then(() => fn());
+    const stored = next.catch(() => {});
+    StorageManager.#recordChains.set(key, stored);
+    stored.then(() => { if (StorageManager.#recordChains.get(key) === stored) StorageManager.#recordChains.delete(key); });
+    return next;
+  }
+
   /**
    * Add `id` to the array stored at `key` if not already present.
    * Atomic read-modify-write through the serialized chain.
@@ -1522,13 +1539,16 @@ export class StorageManager {
   }
 
   static async updateFragment(fragmentId, patch) {
-    const existing = await StorageManager.getFragment(fragmentId);
-    if (!existing) throw new Error(`Fragment ${fragmentId} not found`);
-    const updated = { ...existing, ...patch, id: existing.id, groundId: existing.groundId, updatedAt: Date.now() };
-    await maybeWritePartitionPrimary('fragment', updated);
-    await StorageManager.#set({ [`fragments:${fragmentId}`]: updated });
-    Logger.info('StorageManager', `Fragment updated: ${fragmentId}`);
-    return updated;
+    // v2.74.931 (CR-ST1) — serialized per id (same lost-update class as updateLandmark).
+    return StorageManager.#serializeRecordOp(`fragments:${fragmentId}`, async () => {
+      const existing = await StorageManager.getFragment(fragmentId);
+      if (!existing) throw new Error(`Fragment ${fragmentId} not found`);
+      const updated = { ...existing, ...patch, id: existing.id, groundId: existing.groundId, updatedAt: Date.now() };
+      await maybeWritePartitionPrimary('fragment', updated);
+      await StorageManager.#set({ [`fragments:${fragmentId}`]: updated });
+      Logger.info('StorageManager', `Fragment updated: ${fragmentId}`);
+      return updated;
+    });
   }
 
   // ── Analyses (v2.62.0 — data-ops library) ────────────────────────────────
@@ -2168,6 +2188,10 @@ export class StorageManager {
   static async saveLandmark(landmark, opts = {}) {
     if (!landmark?.uid)      throw new Error('saveLandmark requires { uid }');
     if (!landmark?.groundId) throw new Error('saveLandmark requires { groundId }');
+    // v2.74.931 (CR-ST1) — the merge-on-save (get → spread-existing → set) serializes against
+    // updateLandmark on the SAME uid: a mid-run recovery patch landing between this read and write
+    // was silently clobbered by the accept's merge.
+    return StorageManager.#serializeRecordOp(`landmarks:${landmark.uid}`, async () => {
     const existing = await StorageManager.getLandmark(landmark.uid);
     if (existing && existing.groundId !== landmark.groundId) {
       // v2.74.341 — Canonical UIDs are global (same element → same UID), but
@@ -2213,6 +2237,7 @@ export class StorageManager {
     catch (e) { Logger.warn('StorageManager', `saveLandmark: partition mirror failed for ${landmark.uid} (kept flat): ${e.message}`); }
     Logger.debug('StorageManager', `Landmark saved: ${landmark.uid} (a11yRole=${landmark.a11yRole ?? '?'}, alias=${landmark.alias ?? '?'}, name="${(landmark.accessibleName ?? '').slice(0, 40)}") on ground ${landmark.groundId}`);
     return merged;
+    });   // v2.74.931 (CR-ST1) — end of the per-uid serialized section
   }
 
   static async getLandmark(uid) {
@@ -2271,19 +2296,23 @@ export class StorageManager {
   }
 
   static async updateLandmark(uid, patch) {
-    const existing = await StorageManager.getLandmark(uid);
-    if (!existing) throw new Error(`Landmark ${uid} not found`);
-    const updated = {
-      ...existing, ...patch,
-      uid       : existing.uid,
-      groundId  : existing.groundId,
-      createdAt : existing.createdAt,
-      updatedAt : Date.now(),
-    };
-    await maybeWritePartitionPrimary('landmark', updated);
-    await StorageManager.#set({ [`landmarks:${uid}`]: updated });
-    Logger.debug('StorageManager', `Landmark updated: ${uid}`);
-    return updated;
+    // v2.74.931 (CR-ST1) — serialized per uid: three concurrent live writers (recovery persist, profile
+    // enrichment, verifier) raced this get→merge→set and lost updates.
+    return StorageManager.#serializeRecordOp(`landmarks:${uid}`, async () => {
+      const existing = await StorageManager.getLandmark(uid);
+      if (!existing) throw new Error(`Landmark ${uid} not found`);
+      const updated = {
+        ...existing, ...patch,
+        uid       : existing.uid,
+        groundId  : existing.groundId,
+        createdAt : existing.createdAt,
+        updatedAt : Date.now(),
+      };
+      await maybeWritePartitionPrimary('landmark', updated);
+      await StorageManager.#set({ [`landmarks:${uid}`]: updated });
+      Logger.debug('StorageManager', `Landmark updated: ${uid}`);
+      return updated;
+    });
   }
 
   /**

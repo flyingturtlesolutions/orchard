@@ -110,7 +110,10 @@ export async function walkPlan(plan, exec, opts = {}) {
 async function _loopBudget(s, total, exec, env) {
   const capped = total > env.maxIterations ? total - env.maxIterations : 0;
   const n = Math.min(total, env.maxIterations);
-  const bodyActs = (Array.isArray(s.body) ? s.body : []).some((b) => b && b.kind === 'fragment');
+  // v2.74.930 (CR-E4) — RECURSIVE: the direct-children check missed `foreach → gate → fragment` (a sieve
+  // composition is exactly a gate-wrapped per-item action), letting a tab-opening loop skip the confirm.
+  const _hasFragment = (arr) => (Array.isArray(arr) ? arr : []).some((b) => b && (b.kind === 'fragment' || _hasFragment(b.body)));
+  const bodyActs = _hasFragment(s.body);
   if (bodyActs && n > env.confirmAbove && typeof exec.confirmLoop === 'function') {
     const c = await exec.confirmLoop({ id: s.id, kind: s.kind, iterations: n, total, capped });
     if (!c || c.ok === false) return { n, capped, declined: true };

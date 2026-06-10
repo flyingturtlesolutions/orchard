@@ -18,6 +18,7 @@
 // @version 2.74.743
 
 import { planStep, validatePlan } from './orchPlan.js';
+import { slugUpper } from './slug.js';   // v2.74.940 (CR-D2)
 import { parsePredicate, conditionIsUnless, isConditionalAsk, predicateLabel } from './orchAnalyze.js';   // ORCH-A — predicate → gate
 
 // Verbs / question-words that mark the START of a new intent clause. After a connective, one of these → boundary.
@@ -225,7 +226,7 @@ const _CLICK_EACH = /\b(click|open|select|tap|press|expand|save|apply|view)(\s+(
 // "open each job on a NEW PAGE" reads the job, not the page.
 const _EACH_NOUN = /\b(?:each|every|all)\s+(?:of\s+)?(?:the\s+)?([a-z][a-z-]{1,30})\b/i;
 const _NOUN_STOP = new Set(['new', 'same', 'one', 'other', 'these', 'those', 'page', 'tab', 'window', 'time', 'item', 'them', 'it']);
-const _slugUp = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').split('_').filter(Boolean).slice(0, 3).join('_');
+const _slugUp = (s) => slugUpper(s, { maxWords: 3 });   // v2.74.940 (CR-D2) — shared builder
 const _bindOf = (s) => (s && s.bindings && typeof s.bindings === 'object') ? s.bindings : {};
 
 /**

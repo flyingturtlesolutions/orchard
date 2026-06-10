@@ -505,9 +505,15 @@ function resolveElement(selector) {
   }
 
   // XPath — light DOM only (shadow DOM XPath not supported)
+  // v2.74.929 (CR-E3) — guarded: document.evaluate throws SyntaxError synchronously on malformed XPath
+  // (LLM-authored selectors starting with "/" are a real input class). Unguarded, the throw escaped into
+  // WAIT_FOR_ELEM's setTimeout poll (killing the loop with sendResponse never called — the caller hung to
+  // its full timeout) and killed the sync FOCUS_CHECK/CHECK_ELEM listeners with a bare port-closed error.
   if (selector.startsWith('/') || selector.startsWith('./')) {
-    const r = document.evaluate(selector, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
-    return r.singleNodeValue;
+    try {
+      const r = document.evaluate(selector, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+      return r.singleNodeValue;
+    } catch { return null; }
   }
 
   const candidates = selector.split(/,(?![^\[]*\])/).map(s => s.trim()).filter(Boolean);
@@ -2893,12 +2899,18 @@ function handleWaitFor(selector, timeoutMs, sendResponse, description = null) {
   };
 
   function attempt() {
-    const el      = selector ? resolveElement(selector) : null;
-    const elapsed = Date.now() - start;
-    if (el)        return sendResponse({ success: true, elapsed, via: 'selector' });
-    if (descPresent()) return sendResponse({ success: true, elapsed, via: 'description' });
-    if (elapsed >= timeoutMs) return sendResponse({ success: false, elapsed, error: `WAIT_FOR timeout after ${timeoutMs}ms: "${(selector || (desc && `${desc.role}/${desc.accessibleName}`) || '').slice(0,100)}"` });
-    setTimeout(attempt, 200);
+    // v2.74.929 (CR-E3) — a throw inside this setTimeout poll used to kill the loop with sendResponse
+    // never called: the caller's open channel hung to ITS timeout. Any throw now answers structurally.
+    try {
+      const el      = selector ? resolveElement(selector) : null;
+      const elapsed = Date.now() - start;
+      if (el)        return sendResponse({ success: true, elapsed, via: 'selector' });
+      if (descPresent()) return sendResponse({ success: true, elapsed, via: 'description' });
+      if (elapsed >= timeoutMs) return sendResponse({ success: false, elapsed, error: `WAIT_FOR timeout after ${timeoutMs}ms: "${(selector || (desc && `${desc.role}/${desc.accessibleName}`) || '').slice(0,100)}"` });
+      setTimeout(attempt, 200);
+    } catch (e) {
+      try { sendResponse({ success: false, elapsed: Date.now() - start, error: `WAIT_FOR probe threw: ${(e && e.message) || e}` }); } catch { /* channel already gone */ }
+    }
   }
 
   attempt();
@@ -3095,14 +3107,25 @@ function handleKey(selector, keyName, repeat) {
  * Installs a MutationObserver that sets window.__agentHubMutated on any change.
  */
 function handleObserveStart() {
+  // v2.74.929 (CR-E3) — two guards: (a) document.body is null at document_start / in XML docs, making
+  // observe(null) a sync TypeError that killed the listener before sendResponse; (b) a run that aborts
+  // between START and READ used to leave a whole-body attributes+subtree observer attached for the page's
+  // lifetime — a 60s auto-disconnect backstops it (READ/next START clears the timer first in normal flow).
+  if (!document.body) return { success: false, error: 'no document.body to observe (pre-parse or non-HTML document)' };
   window.__agentHubMutated = false;
   if (window.__agentHubObserver) window.__agentHubObserver.disconnect();
+  if (window.__agentHubObserverTtl) { clearTimeout(window.__agentHubObserverTtl); delete window.__agentHubObserverTtl; }
   window.__agentHubObserver = new MutationObserver(() => {
     window.__agentHubMutated = true;
   });
   window.__agentHubObserver.observe(document.body, {
     childList: true, subtree: true, attributes: true, characterData: false,
   });
+  window.__agentHubObserverTtl = setTimeout(() => {
+    try { window.__agentHubObserver?.disconnect(); } catch { /* */ }
+    delete window.__agentHubObserver;
+    delete window.__agentHubObserverTtl;
+  }, 60000);
   return { success: true };
 }
 
@@ -3113,6 +3136,7 @@ function handleObserveStart() {
 function handleObserveRead() {
   const mutated = window.__agentHubMutated ?? false;
   window.__agentHubObserver?.disconnect();
+  if (window.__agentHubObserverTtl) { clearTimeout(window.__agentHubObserverTtl); delete window.__agentHubObserverTtl; }   // v2.74.929 (CR-E3)
   delete window.__agentHubObserver;
   delete window.__agentHubMutated;
   return { success: true, mutated };

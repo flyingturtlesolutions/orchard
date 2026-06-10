@@ -116,15 +116,24 @@ export async function emit(groundId, event) {
     details: event.details ?? null,
   };
   const key  = _key(groundId);
-  const buf  = (await _get(key)) ?? [];
-  const next = Array.isArray(buf) ? buf.slice() : [];
-  next.push(entry);
-  // Ring buffer: drop oldest beyond MAX_EVENTS.
-  while (next.length > MAX_EVENTS) next.shift();
-  await _set(key, next);
-  Logger.debug('GroundEventBus', `emit ${entry.kind} on ${groundId} uid=${entry.uid ?? '-'}`);
-  return entry;
+  // v2.74.932 (CR-ST2) — serialized: emit is fire-and-forget at every call site (TemplateWalker's landmark
+  // probes emit on adjacent steps), so two concurrent emits snapshotted the same buffer and the second _set
+  // clobbered the first's event — the same lost-update class StorageManager fixed in v2.74.119. One module
+  // chain (events are low-volume; per-ground granularity isn't worth a map).
+  const run = _emitChain.then(async () => {
+    const buf  = (await _get(key)) ?? [];
+    const next = Array.isArray(buf) ? buf.slice() : [];
+    next.push(entry);
+    // Ring buffer: drop oldest beyond MAX_EVENTS.
+    while (next.length > MAX_EVENTS) next.shift();
+    await _set(key, next);
+    Logger.debug('GroundEventBus', `emit ${entry.kind} on ${groundId} uid=${entry.uid ?? '-'}`);
+    return entry;
+  });
+  _emitChain = run.catch(() => {});
+  return run;
 }
+let _emitChain = Promise.resolve();   // v2.74.932 (CR-ST2)
 
 /**
  * Read events for a ground with optional filtering. Returns

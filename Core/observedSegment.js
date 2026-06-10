@@ -19,6 +19,7 @@
 // @version 2.74.750
 
 import { featureToProtoLandmark } from './landmark.js';   // OBS (v2.74.764) — reconcile demonstrated elements to grounded Locale features
+import { slugUpper } from './slug.js';   // v2.74.940 (CR-D2)
 import { isFillableInputSelector } from './postcondition.js';   // v2.74.783 — never synthesize a presence postcondition on a fillable input (precondition-shaped, always-true)
 
 const _DISCLOSURE_HINT = /filter|menu|sort|posted|date|pay|salary|wage|type|level|experience|distance|remote|radius|category|options?|dropdown|expand|more/i;
@@ -210,8 +211,7 @@ export function deriveObservedParams(op) {
 /** OBS-4b — placeholder NAME for a param key: UPPER_SNAKE, [A-Z0-9_], bounded — matches the `{{NAME}}` regex
  *  TemplateWalker/InjectionService use (`/\{\{([A-Z0-9_]+)\}\}/`). 'date-posted-filter' → 'DATE_POSTED_FILTER'. */
 export function obsParamName(key) {
-  const n = String(key || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
-  return n || 'PARAM';
+  return slugUpper(key, { maxLen: 40, fallback: 'PARAM' });   // v2.74.940 (CR-D2) — shared builder
 }
 
 /** OBS-4c — the CONTAINER selector for an option click: the option's parent (strip the last TOP-LEVEL CSS
