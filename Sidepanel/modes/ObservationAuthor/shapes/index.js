@@ -25,7 +25,6 @@
  * index pulls them all together and exposes lookup helpers.
  *
  * @module Sidepanel/modes/ObservationAuthor/shapes/index
- * @version 2.74.16
  */
 
 import { scalar }         from './scalar.js';

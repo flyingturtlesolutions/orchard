@@ -58,7 +58,6 @@
  *
  * @module Studio/AnalysisForm
  * @author Agent HUB
- * @version 2.72.35
  */
 
 import { StorageManager } from '../Services/StorageManager.js';

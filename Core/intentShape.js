@@ -20,7 +20,6 @@
 // PURE: structural evidence is passed in (no DOM read here). Unit-testable like Core/trialSynth.js.
 //
 // @module Core/intentShape
-// @version 2.74.558
 
 // Verbs implying production/submission across a SET of fields (→ completion).
 const COMPLETE_VERB = /\b(apply|fill\s*(?:in|out)?|complete|submit|enter|provide|register|sign\s*up|signup|enrol|enroll|subscribe|book|reserve|order|place\s*order|check\s*out|checkout|purchase|buy|pay|rsvp|request|create|compose|draft|update|edit|configure|set\s*up|setup|schedule|onboard|claim|file)\b/i;

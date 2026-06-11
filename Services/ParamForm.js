@@ -1,7 +1,6 @@
 /**
  * @file Services/ParamForm.js
  * @module ParamForm
- * @version 2.74.65
  *
  * Shared invocation-time parameter collection UI. Renders one control per
  * normalized strategy param and resolves with a values dictionary on submit.

@@ -11,7 +11,6 @@
  *   - "Strategy"  : storage kind=`strategy`, per-Ground fragment tree.
  *                   Authored from the Ground card's "+ Strategy" button.
  *
- * @version 2.74.142
  */
 
 import { installGlobalErrorHandlers } from './Core/ErrorCapture.js';
@@ -2422,20 +2421,21 @@ async function launchPerspectiveCapture(groundId) {
 // cheap (one storage read) and catches all the relevant kinds (grounds,
 // fragments, strategies all live inside ground accordions).
 //
-// Debounces a burst of changes via microtask so cascading deletes don't
-// trigger a storm of refreshes.
-let _pendingStorageRefresh = false;
+// v2.74.954 (CR-X4b) — debounce bursts with a 150ms TRAILING timer. The old microtask flag only
+// collapsed same-tick messages; a cascading delete arrives as N sequential MACROTASK messages, so the
+// full Ground list re-rendered N times. The timer resets on every message and fires once, 150ms after
+// the burst ends. (Direct refreshGroundList() callers are unaffected — they await the single-flight
+// render as before; only this listener coalesces.)
+let _storageRefreshTimer = null;
 chrome.runtime.onMessage.addListener((msg, _sender, _sendResponse) => {
   if (msg?.type === 'STORAGE_CHANGED') {
-    if (_pendingStorageRefresh) return false;
-    _pendingStorageRefresh = true;
-    queueMicrotask(async () => {
-      _pendingStorageRefresh = false;
+    clearTimeout(_storageRefreshTimer);
+    _storageRefreshTimer = setTimeout(async () => {
       try { await refreshGroundList(); } catch (_) { /* ignore */ }
       // v2.74.69 — keep the Workflows tab in sync; cheap re-derive from
       // storage, no UI flicker since the tab listens only when visible.
       try { await refreshWorkflows(); } catch (_) { /* ignore */ }
-    });
+    }, 150);
   }
   return false;
 });
@@ -2579,6 +2579,17 @@ async function _refreshGroundListImpl() {
   list.innerHTML = '';
 
   for (const ground of grounds) {
+    await _renderGroundCard(ground, { list, localeMap });   // v2.74.954 (CR-X4b) — one card per ground
+  }
+}
+
+// v2.74.954 (CR-X4b) — ONE Ground's accordion card, extracted whole from the 1,261-line
+// _refreshGroundListImpl (which is now a fetch + a loop). The section blocks (Fragments /
+// Assertions / Perspectives / Locales / Observations / Strategies / Site Map / Chrome / ...)
+// remain inline within this builder, in their original order and indentation — the per-section
+// split is deferred until the studio sections gain a live-smoke harness (it pairs with the
+// CR-D8-deferred shared.js moves). Body is byte-identical to the old loop body.
+async function _renderGroundCard(ground, { list, localeMap }) {
     // v2.74.434 — Ground siteMap (GROUND_SPEC § 7) replaces the retired
     // GroundMap. Fetched once here and reused by the header badge / Discover
     // label AND the Site Map section below (single GET_SITEMAP round trip).
@@ -2633,7 +2644,7 @@ async function _refreshGroundListImpl() {
     const groupHeader = document.createElement('div');
     groupHeader.className = 'ground-group-header';
     groupHeader.innerHTML = `
-      <button class="ground-card-collapse-toggle" data-action="toggle-collapse" data-gid="${ground.id}" title="Collapse / expand this Ground card" aria-label="Collapse Ground card" aria-expanded="true">
+      <button class="ground-card-collapse-toggle" data-action="toggle-collapse" data-gid="${escAttr(ground.id)}" title="Collapse / expand this Ground card" aria-label="Collapse Ground card" aria-expanded="true">
         <span class="ground-card-collapse-chevron" aria-hidden="true">▾</span>
       </button>
       <div class="ground-group-info">
@@ -2650,8 +2661,8 @@ async function _refreshGroundListImpl() {
             ${descKind === 'override' ? `<span class="ground-desc-tag ground-desc-tag-override" title="Custom description (override). Clear it to fall back to the auto-derived one.">overridden</span>` : (descKind === 'derived' ? `<span class="ground-desc-tag" title="Auto-derived from this Ground's Perspectives (GROUND_SPEC § 5).">derived</span>` : '')}
             ${descStale ? `<span class="ground-desc-tag ground-desc-tag-stale" title="Perspectives changed since this was derived — click ↻ to refresh.">stale</span>` : ''}
           </span>
-          <button class="btn-action ground-desc-refresh" data-action="derive-desc" data-gid="${ground.id}" title="Derive / refresh the description from this Ground's Perspectives (calls the LLM)" ${perspectives.length === 0 ? 'disabled' : ''}>↻</button>
-          <button class="btn-action ground-desc-override-btn" data-action="override-desc" data-gid="${ground.id}" title="${ground.descriptionOverride ? 'Edit or clear the custom description' : 'Write a custom description (overrides the derived one)'}">✎</button>
+          <button class="btn-action ground-desc-refresh" data-action="derive-desc" data-gid="${escAttr(ground.id)}" title="Derive / refresh the description from this Ground's Perspectives (calls the LLM)" ${perspectives.length === 0 ? 'disabled' : ''}>↻</button>
+          <button class="btn-action ground-desc-override-btn" data-action="override-desc" data-gid="${escAttr(ground.id)}" title="${ground.descriptionOverride ? 'Edit or clear the custom description' : 'Write a custom description (overrides the derived one)'}">✎</button>
         </div>
         <div class="ground-group-meta">
           ${mapBadge}
@@ -2659,14 +2670,14 @@ async function _refreshGroundListImpl() {
         </div>
       </div>
       <div class="ground-group-actions">
-        <button class="btn-secondary small" data-action="discover"     data-gid="${ground.id}" title="${hasMap ? 'Re-discover' : 'Discover structural map of this Ground (read-only crawl)'}">${hasMap ? '↻ Rediscover' : '🔍 Discover'}</button>
-        <button class="btn-action" data-action="edit-ground"           data-gid="${ground.id}" title="Edit Ground">✎</button>
+        <button class="btn-secondary small" data-action="discover"     data-gid="${escAttr(ground.id)}" title="${hasMap ? 'Re-discover' : 'Discover structural map of this Ground (read-only crawl)'}">${hasMap ? '↻ Rediscover' : '🔍 Discover'}</button>
+        <button class="btn-action" data-action="edit-ground"           data-gid="${escAttr(ground.id)}" title="Edit Ground">✎</button>
         ${ground.metadata?.lifecycle === 'deprecated'
-          ? `<button class="btn-secondary small" data-action="reactivate-ground" data-gid="${ground.id}" title="Reactivate this Ground (restore to active)">↑ Reactivate</button>`
-          : `<button class="btn-action" data-action="deprecate-ground" data-gid="${ground.id}" title="Deprecate (soft-delete) — hide from active use, reversible">⤓</button>`}
-        <button class="btn-action danger" data-action="delete-ground"  data-gid="${ground.id}" title="Delete Ground permanently (and everything on it)">✕</button>
+          ? `<button class="btn-secondary small" data-action="reactivate-ground" data-gid="${escAttr(ground.id)}" title="Reactivate this Ground (restore to active)">↑ Reactivate</button>`
+          : `<button class="btn-action" data-action="deprecate-ground" data-gid="${escAttr(ground.id)}" title="Deprecate (soft-delete) — hide from active use, reversible">⤓</button>`}
+        <button class="btn-action danger" data-action="delete-ground"  data-gid="${escAttr(ground.id)}" title="Delete Ground permanently (and everything on it)">✕</button>
       </div>
-      <div class="ground-discovery-panel hidden" id="discovery-panel-${ground.id}"></div>`;
+      <div class="ground-discovery-panel hidden" id="discovery-panel-${escAttr(ground.id)}"></div>`;
 
     // v2.74.8 — Collapse toggle. Hides all the .ground-section-row children
     // (Fragments, Assertions, Perspectives, Observations, Analyses, Strategies)
@@ -2749,9 +2760,9 @@ async function _refreshGroundListImpl() {
       <div class="ground-section-head">
         <span class="ground-section-label">Fragments</span>
         <span class="ground-section-count">${fragments.length}</span>
-        <button class="btn-secondary tiny" data-action="add-fragment" data-gid="${ground.id}" title="Record a new Fragment">+ Fragment</button>
+        <button class="btn-secondary tiny" data-action="add-fragment" data-gid="${escAttr(ground.id)}" title="Record a new Fragment">+ Fragment</button>
       </div>
-      <div class="ground-section-body" id="fragments-body-${ground.id}">
+      <div class="ground-section-body" id="fragments-body-${escAttr(ground.id)}">
         ${fragments.length === 0
           ? `<span class="empty-state small">No Fragments yet — record page-state transitions as reusable units.</span>`
           : fragments.map(f => {
@@ -2888,9 +2899,9 @@ async function _refreshGroundListImpl() {
       <div class="ground-section-head">
         <span class="ground-section-label">Assertions</span>
         <span class="ground-section-count">${assertions.length}</span>
-        <button class="btn-secondary tiny" data-action="add-assertion" data-gid="${ground.id}" title="Create a new named assertion">+ Assertion</button>
+        <button class="btn-secondary tiny" data-action="add-assertion" data-gid="${escAttr(ground.id)}" title="Create a new named assertion">+ Assertion</button>
       </div>
-      <div class="ground-section-body" id="assertions-body-${ground.id}">
+      <div class="ground-section-body" id="assertions-body-${escAttr(ground.id)}">
         ${assertions.length === 0
           ? `<span class="empty-state small">No assertions yet — assertions are <strong>vocabulary</strong>, not primitives. They're saved condition expressions referenced from primitive pre/post envelopes (DETECT branches, LOOP exit checks, Analysis preconditions, etc.) via assertion_ref.</span>`
           : assertions.map(p => {
@@ -2902,7 +2913,7 @@ async function _refreshGroundListImpl() {
                 : mode === 'k_of_n' ? `${p.body?.count ?? '?'} of ${cs.length} conditions`
                 : `${cs.length} conditions ${mode === 'any' ? 'OR' : 'AND'}`;
               return `
-            <div class="assertion-row" data-pid="${p.id}">
+            <div class="assertion-row" data-pid="${escAttr(p.id)}">
               <div class="assertion-row-main">
                 <span class="assertion-name">${escHtml(p.name ?? 'Unnamed')}</span>
                 ${p.authoredBy === 'model' ? `<span class="assertion-generated-badge" title="Authored by model — generated from a description, then saved as a regular T1 artifact. Edit freely.">⚡</span>` : ''}
@@ -2910,9 +2921,9 @@ async function _refreshGroundListImpl() {
               </div>
               ${p.description ? `<div class="assertion-desc">${escHtml(p.description)}</div>` : ''}
               <div class="assertion-row-actions">
-                <button class="btn-action" data-action="edit-assertion" data-pid="${p.id}" title="Edit assertion">✎</button>
-                <button class="btn-action" data-action="json-assertion" data-pid="${p.id}" title="View JSON (read-only, copyable)">{ }</button>
-                <button class="btn-action danger" data-action="delete-assertion" data-pid="${p.id}" title="Delete assertion">✕</button>
+                <button class="btn-action" data-action="edit-assertion" data-pid="${escAttr(p.id)}" title="Edit assertion">✎</button>
+                <button class="btn-action" data-action="json-assertion" data-pid="${escAttr(p.id)}" title="View JSON (read-only, copyable)">{ }</button>
+                <button class="btn-action danger" data-action="delete-assertion" data-pid="${escAttr(p.id)}" title="Delete assertion">✕</button>
               </div>
             </div>`;
           }).join('')
@@ -2946,9 +2957,9 @@ async function _refreshGroundListImpl() {
       <div class="ground-section-head">
         <span class="ground-section-label">Perspectives</span>
         <span class="ground-section-count">${perspectives.length}</span>
-        <button class="btn-secondary tiny" data-action="add-perspective" data-gid="${ground.id}" title="Author a new Perspective (verified DOM landmarks for a kind of page)">+ Perspective</button>
+        <button class="btn-secondary tiny" data-action="add-perspective" data-gid="${escAttr(ground.id)}" title="Author a new Perspective (verified DOM landmarks for a kind of page)">+ Perspective</button>
       </div>
-      <div class="ground-section-body" id="perspectives-body-${ground.id}">
+      <div class="ground-section-body" id="perspectives-body-${escAttr(ground.id)}">
         ${perspectives.length === 0
           ? `<span class="empty-state small">No Perspectives yet — Perspectives are <strong>vocabulary</strong>: verified DOM landmark records. Author one when you have a "kind of page" (e.g. search-results, job-detail) whose structural elements multiple primitives will need.</span>`
           : perspectives.map(l => {
@@ -3037,7 +3048,7 @@ async function _refreshGroundListImpl() {
         <span class="ground-section-label">Locales</span>
         <span class="ground-section-count">${localeEntries.length}</span>
       </div>
-      <div class="ground-section-body" id="locales-body-${ground.id}">
+      <div class="ground-section-body" id="locales-body-${escAttr(ground.id)}">
         ${localeEntries.length === 0
           ? `<span class="empty-state small">No Locales yet — a <strong>Locale</strong> is the page's capability catalog (every Feature on the page, with selectors + scroll positions), built read-only by Explore or the side panel's "🗂 Build Locale".</span>`
           : localeEntries.map(([key, entry]) => {
@@ -3143,10 +3154,10 @@ async function _refreshGroundListImpl() {
       <div class="ground-section-head">
         <span class="ground-section-label">Outcomes</span>
         <span class="ground-section-count">${oCount}</span>
-        ${oCount ? `<button class="btn-secondary tiny" data-action="json-outcomes" data-gid="${ground.id}" title="View the full rollups (Feature health · Perspective usage · conventions histogram) as JSON">{ }</button>
-        <button class="btn-secondary tiny danger" data-action="clear-outcomes" data-gid="${ground.id}" title="Clear this ground's outcome stream (rollups recompute empty)">✕</button>` : ''}
+        ${oCount ? `<button class="btn-secondary tiny" data-action="json-outcomes" data-gid="${escAttr(ground.id)}" title="View the full rollups (Feature health · Perspective usage · conventions histogram) as JSON">{ }</button>
+        <button class="btn-secondary tiny danger" data-action="clear-outcomes" data-gid="${escAttr(ground.id)}" title="Clear this ground's outcome stream (rollups recompute empty)">✕</button>` : ''}
       </div>
-      <div class="ground-section-body" id="outcomes-body-${ground.id}">
+      <div class="ground-section-body" id="outcomes-body-${escAttr(ground.id)}">
         ${oCount === 0
           ? `<span class="empty-state small">No outcomes yet — the append-only stream fills as you <strong>⚡ Resolve roles</strong> (each verdict becomes a training pair; verified selectors build the site's <em>conventions histogram</em>).</span>`
           : `${summaryBits.length ? `<div class="outcomes-summary">${escHtml(summaryBits.join('  ·  '))}</div>` : ''}
@@ -3235,11 +3246,11 @@ async function _refreshGroundListImpl() {
         <div class="ground-section-head" style="margin-top:8px;border-top:1px solid rgba(127,127,127,.18);padding-top:6px">
           <span class="ground-section-label">Can do</span>
           <span class="ground-section-count">${caps.totals.distinct}</span>
-          <button class="btn-secondary tiny" data-action="ai-rank" data-gid="${ground.id}" title="Rank the catalog against your typed intent with AI (semantic / synonym match, e.g. &quot;buy&quot; → &quot;checkout&quot;)">✨</button>
-          <button class="btn-secondary tiny" data-action="json-capabilities" data-gid="${ground.id}" title="View the full site capability catalog (goals × archetypes) as JSON">{ }</button>
+          <button class="btn-secondary tiny" data-action="ai-rank" data-gid="${escAttr(ground.id)}" title="Rank the catalog against your typed intent with AI (semantic / synonym match, e.g. &quot;buy&quot; → &quot;checkout&quot;)">✨</button>
+          <button class="btn-secondary tiny" data-action="json-capabilities" data-gid="${escAttr(ground.id)}" title="View the full site capability catalog (goals × archetypes) as JSON">{ }</button>
         </div>
-        <input type="text" id="cap-intent-${ground.id}" placeholder="What do you want to do? (type to rank)" autocomplete="off" style="width:100%;box-sizing:border-box;margin:2px 0 4px;font-size:12px;padding:3px 6px" />
-        <div class="sitemap-nodes" id="cap-results-${ground.id}">${capListHtml(caps.capabilities.slice(0, CAP_SHOWN), true)}</div>` : '';
+        <input type="text" id="cap-intent-${escAttr(ground.id)}" placeholder="What do you want to do? (type to rank)" autocomplete="off" style="width:100%;box-sizing:border-box;margin:2px 0 4px;font-size:12px;padding:3px 6px" />
+        <div class="sitemap-nodes" id="cap-results-${escAttr(ground.id)}">${capListHtml(caps.capabilities.slice(0, CAP_SHOWN), true)}</div>` : '';
       // v2.74.484 — Chrome (GROUND_SPEC § 4): the global controls hoisted off the Locales, shown
       // once here. Each row: kind, label, the regions it sits in, how many archetypes saw it
       // (seenIn), a ⊕ depth badge if it carries a reveal layer, and an override count. So the
@@ -3265,7 +3276,7 @@ async function _refreshGroundListImpl() {
           <span class="ground-section-label">Chrome</span>
           <span class="ground-section-count">${chromeList.length}</span>
           <span class="sitemap-node-meta" title="Global header/nav/footer controls hoisted off the per-archetype Locales — captured once, referenced everywhere (GROUND_SPEC §4)">hoisted · ${chromeRes?.stats?.layers || 0} w/ depth</span>
-          <button class="btn-secondary tiny" data-action="json-chrome" data-gid="${ground.id}" title="View the full Ground.chrome (promoted features + depth layers + per-Locale overrides) as JSON">{ }</button>
+          <button class="btn-secondary tiny" data-action="json-chrome" data-gid="${escAttr(ground.id)}" title="View the full Ground.chrome (promoted features + depth layers + per-Locale overrides) as JSON">{ }</button>
         </div>
         <div class="sitemap-nodes">${chromeList.slice(0, CHROME_SHOWN).map(chromeRow).join('')}${chromeList.length > CHROME_SHOWN ? `<div class="empty-state small">+${chromeList.length - CHROME_SHOWN} more — see JSON</div>` : ''}</div>` : '';
       // v2.74.494 — within-Ground cross-Locale STRATEGIES (partOf; a multi-page journey within ONE
@@ -3277,27 +3288,27 @@ async function _refreshGroundListImpl() {
           <span class="ground-section-label">Strategies</span>
           <span class="sitemap-node-meta" title="Multi-page journeys composed over the site map (partOf): pick a destination to see the paths there, then build a runnable cross-page Strategy (a multi-page journey within this Ground)">multi-page journeys</span>
         </div>
-        <select id="wf-target-${ground.id}" style="width:100%;box-sizing:border-box;margin:2px 0 4px;font-size:12px;padding:3px 6px">
+        <select id="wf-target-${escAttr(ground.id)}" style="width:100%;box-sizing:border-box;margin:2px 0 4px;font-size:12px;padding:3px 6px">
           <option value="">Reach which page…</option>
           ${wfTargets.map(n => `<option value="${escAttr(n.id)}">${escHtml(n.name || shortPath(n.urlPattern))}${n.status !== 'modeled' ? ' (not modeled)' : ''}</option>`).join('')}
         </select>
-        <div class="sitemap-nodes" id="wf-results-${ground.id}"></div>` : '';
+        <div class="sitemap-nodes" id="wf-results-${escAttr(ground.id)}"></div>` : '';
       smRow.innerHTML = `
       <div class="ground-section-head">
         <span class="ground-section-label">Site Map</span>
         <span class="ground-section-count">${nodes.length}</span>
-        ${modelable.length ? `<button class="btn-secondary tiny" data-action="explore-queue" data-gid="${ground.id}" title="Auto-Explore every un-modeled archetype (opens a background tab; one Explore per template → modeled). Slow (~15–30s each); Abort anytime.">▶ Model ${modelable.length}</button>` : ''}
-        ${nodes.length ? `<button class="btn-secondary tiny" data-action="json-sitemap" data-gid="${ground.id}" title="View the full siteMap (nodes + edges) as JSON">{ }</button>
-        <button class="btn-secondary tiny danger" data-action="clear-sitemap" data-gid="${ground.id}" title="Clear this ground's site map (rebuilds on next Explore)">✕</button>` : ''}
+        ${modelable.length ? `<button class="btn-secondary tiny" data-action="explore-queue" data-gid="${escAttr(ground.id)}" title="Auto-Explore every un-modeled archetype (opens a background tab; one Explore per template → modeled). Slow (~15–30s each); Abort anytime.">▶ Model ${modelable.length}</button>` : ''}
+        ${nodes.length ? `<button class="btn-secondary tiny" data-action="json-sitemap" data-gid="${escAttr(ground.id)}" title="View the full siteMap (nodes + edges) as JSON">{ }</button>
+        <button class="btn-secondary tiny danger" data-action="clear-sitemap" data-gid="${escAttr(ground.id)}" title="Clear this ground's site map (rebuilds on next Explore)">✕</button>` : ''}
       </div>
-      <div class="ground-section-body" id="sitemap-body-${ground.id}">
+      <div class="ground-section-body" id="sitemap-body-${escAttr(ground.id)}">
         ${nodes.length === 0
           ? `<span class="empty-state small">No site map yet — <strong>Explore</strong> a page to sketch the territory: the current page becomes a <em>modeled</em> node and every same-site nav destination a <em>discovered</em> node + edge.</span>`
           : `${coverageHtml}
              <div class="sitemap-nodes">${modeled.map(nodeRow).join('')}${discovered.slice(0, 20).map(nodeRow).join('')}${discovered.length > 20 ? `<div class="empty-state small">+${discovered.length - 20} more discovered — see JSON</div>` : ''}${stub.slice(0, 25).map(nodeRow).join('')}${stub.length > 25 ? `<div class="empty-state small">+${stub.length - 25} more stub — see JSON</div>` : ''}</div>${capabilitiesHtml}${chromeHtml}${workflowsHtml}`
         }
       </div>
-      <div class="explore-queue-panel hidden" id="exq-panel-${ground.id}"></div>`;
+      <div class="explore-queue-panel hidden" id="exq-panel-${escAttr(ground.id)}"></div>`;
       // v2.74.467 — live intent ranking: type → matchSiteCapabilities re-ranks the "Can do"
       // list; empty input restores the default prevalence-ordered catalog. Pure client-side,
       // no LLM. Attached here (inside the block) so caps/capListHtml/CAP_SHOWN are in scope.
@@ -3464,9 +3475,9 @@ async function _refreshGroundListImpl() {
       <div class="ground-section-head">
         <span class="ground-section-label">Observations</span>
         <span class="ground-section-count">${observations.length}</span>
-        <button class="btn-secondary tiny" data-action="add-observation" data-gid="${ground.id}" title="Author a new Observation (page → data extraction)">+ Observation</button>
+        <button class="btn-secondary tiny" data-action="add-observation" data-gid="${escAttr(ground.id)}" title="Author a new Observation (page → data extraction)">+ Observation</button>
       </div>
-      <div class="ground-section-body" id="observations-body-${ground.id}">
+      <div class="ground-section-body" id="observations-body-${escAttr(ground.id)}">
         ${observations.length === 0
           ? `<span class="empty-state small">No Observations yet — these read page state into named scope bindings (page → data primitive).</span>`
           : observations.map(o => {
@@ -3614,9 +3625,9 @@ async function _refreshGroundListImpl() {
       <div class="ground-section-head">
         <span class="ground-section-label">Analyses</span>
         <span class="ground-section-count">${allAnalyses.length}</span>
-        <button class="btn-secondary tiny" data-action="add-analysis" data-gid="${ground.id}" title="Author a new Analysis">+ Analysis</button>
+        <button class="btn-secondary tiny" data-action="add-analysis" data-gid="${escAttr(ground.id)}" title="Author a new Analysis">+ Analysis</button>
       </div>
-      <div class="ground-section-body" id="analyses-body-${ground.id}">
+      <div class="ground-section-body" id="analyses-body-${escAttr(ground.id)}">
         ${allAnalyses.length === 0
           ? `<span class="empty-state small">No Analyses yet — define reusable data operations (filter / sort / take) here.</span>`
           : allAnalyses.map(a => {
@@ -3717,9 +3728,9 @@ async function _refreshGroundListImpl() {
       <div class="ground-section-head">
         <span class="ground-section-label">Strategies</span>
         <span class="ground-section-count">${strategies.length}</span>
-        <button class="btn-secondary tiny" data-action="add-strategy" data-gid="${ground.id}" title="Author a new Strategy">+ Strategy</button>
+        <button class="btn-secondary tiny" data-action="add-strategy" data-gid="${escAttr(ground.id)}" title="Author a new Strategy">+ Strategy</button>
       </div>
-      <div class="ground-section-body" id="strategies-body-${ground.id}">
+      <div class="ground-section-body" id="strategies-body-${escAttr(ground.id)}">
         ${strategies.length === 0
           ? `<span class="empty-state small">No Strategies yet — compose goal-directed plans from Fragments.</span>`
           : strategies.map(s => {
@@ -3818,7 +3829,6 @@ async function _refreshGroundListImpl() {
 
     // Finally append the fully-assembled card to the list
     list.appendChild(card);
-  }
 }
 
 function openGroundForm(ground = null) {
@@ -5875,7 +5885,7 @@ function findLastReloadStart() {
 // v2.74.906 — + the rich-intent arc (INTENT_MENU/RICH_INTENTS), the teach promotion (ACCEPT_SG_TRIAL —
 // incl. HS-1's "+ N observation step(s)"), the C5 monitoring flush, and the EX/G1 leftovers (#165) — every
 // decision marker shipped since .882 that a decisions gl was structurally blind to.
-const _DECISION_RE = /(▶ RUN |[✓✗] RUN |COMPREHEND_CROSS_GROUND ▸|T3X resolve ▸|T3X bind ▸|_bind ▸|GROUNDS ▸|ROUTE ▸|HANDOFF ▸|postcond ▸|ORCH_MATCH ▸|ORCH_MATCH_GLOBAL ▸|DETECT_DUPLICATE_GROUNDS ▸|MERGE_GROUNDS ▸|mergeGround |Ground saved:|Ground deleted:|→ (?:auto|propose|miss)\/|RUN_OBSERVATION|RUN_BEST_OBSERVATION|ORCH_RECORD_ALIAS|ORCH_ADMIN ▸|REPLAY_SG_CAPABILITY —|— bindings:|CLICK caused navigation|WALK ▸|LOOP ▸|ORCH_PLAN ▸|OPEN_URL_NEW_TAB —|REVERIFY_SG_CAPABILITY —|ROUTE_ASK "|bindClauseParams →|locale-fresh-skip|locale-trust:|EXPLORE_PAGE_STRUCTURE done|RUN_SG_TRIAL|INTERACTION_MONITOR_START|INTENT_MENU ▸|RICH_INTENTS ▸|ACCEPT_SG_TRIAL|INTERACTION_OUTCOMES ▸|proposeRichIntents —|ensureGroundForUrl|GET_GROUND_READINESS|EXPLORE ▸|STOP ▸)/;
+const _DECISION_RE = /(▶ RUN |[✓✗] RUN |COMPREHEND_CROSS_GROUND ▸|T3X resolve ▸|T3X bind ▸|_bind ▸|GROUNDS ▸|ROUTE ▸|HANDOFF ▸|postcond ▸|ORCH_MATCH ▸|ORCH_MATCH_GLOBAL ▸|DETECT_DUPLICATE_GROUNDS ▸|MERGE_GROUNDS ▸|mergeGround |Ground saved:|Ground deleted:|→ (?:auto|propose|miss)\/|RUN_OBSERVATION|RUN_BEST_OBSERVATION|ORCH_RECORD_ALIAS|ORCH_ADMIN ▸|REPLAY_SG_CAPABILITY —|— bindings:|CLICK caused navigation|WALK ▸|LOOP ▸|ORCH_PLAN ▸|OPEN_URL_NEW_TAB —|REVERIFY_SG_CAPABILITY —|ROUTE_ASK "|bindClauseParams →|locale-fresh-skip|locale-trust:|EXPLORE_PAGE_STRUCTURE done|RUN_SG_TRIAL|INTERACTION_MONITOR_START|INTENT_MENU ▸|RICH_INTENTS ▸|ACCEPT_SG_TRIAL|INTERACTION_OUTCOMES ▸|proposeRichIntents —|ensureGroundForUrl|EXPLORE ▸|STOP ▸)/;
 function _isDecisionLine(entry) {
   if (!entry) return false;
   if (entry.level === 'WARN' || entry.level === 'ERROR') return true;

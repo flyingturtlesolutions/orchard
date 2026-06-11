@@ -13,7 +13,6 @@
 // the ORCH walkPlan interpreter exactly as before (R7). Nothing the converge adds can break a working composite.
 //
 // @module Core/orchPromote
-// @version 2.74.745
 
 import { translatePlan } from './orchTranslate.js';
 import { isVisualObservation } from './orchVisual.js';

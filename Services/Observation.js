@@ -26,7 +26,6 @@
  * just confirm the state didn't drift during the read).
  *
  * @module Services/Observation
- * @version 2.74.15
  */
 
 /**

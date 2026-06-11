@@ -38,7 +38,6 @@
  *     errors need capturing. Skipped for now.
  *
  * @module Core/ErrorCapture
- * @version 2.74.188
  */
 
 import { Logger } from './Logger.js';

@@ -12,7 +12,6 @@
 //     opts  = { score?(clause, candidate)->0..1, threshold? }
 //
 // @module Core/orchBind
-// @version 2.74.737
 
 import { effectForKind } from './orchPlan.js';
 

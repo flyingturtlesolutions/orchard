@@ -13,7 +13,6 @@
  *
  * @module Services/AnthropicService
  * @author Agent HUB
- * @version 2.19.0
  */
 
 import { Logger }          from '../Core/Logger.js';
@@ -1215,8 +1214,8 @@ INCORRECT: Multi-line JSON, code fences, or any text before/after the JSON objec
     if (!raw.success) return { success: false, error: raw.error };
 
     try {
-      const parsed = JSON.parse(AnthropicService.#extractJson(
-        AnthropicService.#stripFences(raw.text ?? '')
+      const parsed = JSON.parse(AnthropicService.#firstJsonObject(
+        AnthropicService.#stripFences(raw.text ?? ''), { bestEffort: true }
       ));
       if (!parsed.action) throw new Error('No action field');
       return { success: true, step: { ...parsed, selector: parsed.selector ?? '', value: parsed.value ?? '' } };
@@ -1422,7 +1421,7 @@ Return ONLY the JSON object. No explanation, no markdown.`;
     }
 
     try {
-      const parsed = JSON.parse(AnthropicService.#extractJson(AnthropicService.#stripFences(raw.text ?? '')));
+      const parsed = JSON.parse(AnthropicService.#firstJsonObject(AnthropicService.#stripFences(raw.text ?? ''), { bestEffort: true }));
       if (!parsed.summary) throw new Error('No summary field');
       Logger.info('AnthropicService', `generateTaskProfile complete — "${parsed.summary.slice(0, 80)}"`);
       return { ...parsed, groundType: 'task', generatedAt: Date.now() };
@@ -4975,13 +4974,17 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    * Robust to trailing prose, markdown fences, and braces in surrounding text
    * — unlike `slice(indexOf('{'), lastIndexOf('}'))`, which over-captures any
    * trailing `}` and makes JSON.parse throw "non-whitespace after JSON".
+   * v2.74.945 (CR-D6) — absorbed #extractJson (the second, near-identical scanner): `bestEffort`
+   * reproduces its lenient tails — no brace → the original text, unbalanced → the open slice —
+   * so callers that feed JSON.parse inside a try/catch get a parse error, not a null TypeError.
    * @param {string} text
-   * @returns {string|null} the JSON substring, or null if none/unbalanced
+   * @param {{bestEffort?: boolean}} [opts]
+   * @returns {string|null} the JSON substring; null (or the best-effort text) if none/unbalanced
    */
-  static #firstJsonObject(text) {
+  static #firstJsonObject(text, { bestEffort = false } = {}) {
     const s = String(text ?? '');
     const start = s.indexOf('{');
-    if (start < 0) return null;
+    if (start < 0) return bestEffort ? s : null;
     let depth = 0, inStr = false, esc = false;
     for (let i = start; i < s.length; i++) {
       const ch = s[i];
@@ -4995,7 +4998,7 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
       else if (ch === '{') depth++;
       else if (ch === '}') { depth--; if (depth === 0) return s.slice(start, i + 1); }
     }
-    return null;   // unbalanced — truncated output
+    return bestEffort ? s.slice(start) : null;   // unbalanced — truncated output
   }
 
   // ─── v2.74.358 — LLM-call audit (DESIGN_llm_roles.md § 4) ─────────────────
@@ -5017,6 +5020,97 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
         await new Promise(r => chrome.storage.local.set({ [KEY]: list }, r));
       } catch { /* audit is best-effort */ }
     });
+  }
+
+  // v2.74.945 (CR-D6) — THE transport core (extracted from #call's E5 hardening) so every request shape
+  // shares ONE timeout/cancel/retry implementation: TIMEOUT via an own AbortController (default 60s,
+  // meta.timeoutMs to tighten); CANCEL via meta.signal merged into the same controller (CR-S4); ONE
+  // bounded jittered retry (~0.8–1.5s) on 429/5xx/network — never on an abort or a non-429 4xx (the
+  // managed proxy's ~29s ceiling makes more retries wall-clock-hostile).
+  static async #post(_llm, bodyObj, meta, logTag) {
+    const timeoutMs = (meta && Number.isFinite(meta.timeoutMs) && meta.timeoutMs > 0) ? meta.timeoutMs : 60000;
+    const _requestBody = JSON.stringify(bodyObj);
+    const _attempt = async () => {
+      const ac = new AbortController();
+      const onCallerAbort = () => { try { ac.abort(); } catch { /* */ } };
+      if (meta && meta.signal) {
+        if (meta.signal.aborted) ac.abort();
+        else meta.signal.addEventListener('abort', onCallerAbort, { once: true });
+      }
+      const timer = setTimeout(() => { try { ac.abort(); } catch { /* */ } }, timeoutMs);
+      try {
+        return await fetch(_llm.url, {
+          method : 'POST',
+          headers: { 'Content-Type': 'application/json', ..._llm.headers },
+          body   : _requestBody,
+          signal : ac.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+        if (meta && meta.signal) { try { meta.signal.removeEventListener('abort', onCallerAbort); } catch { /* */ } }
+      }
+    };
+    const _retryable = (resOrErr) => {
+      if (resOrErr instanceof Response) return resOrErr.status === 429 || resOrErr.status >= 500;
+      return !(resOrErr && resOrErr.name === 'AbortError') && !(meta && meta.signal && meta.signal.aborted);
+    };
+    let res;
+    try {
+      res = await _attempt();
+      if (!res.ok && _retryable(res)) {
+        Logger.warn('AnthropicService', `HTTP ${res.status} [${logTag}] — one retry`);
+        await new Promise((r) => setTimeout(r, 800 + Math.floor(Math.random() * 700)));
+        res = await _attempt();
+      }
+    } catch (e) {
+      if (!_retryable(e)) throw e;
+      Logger.warn('AnthropicService', `fetch failed (${String(e && e.message).slice(0, 60)}) [${logTag}] — one retry`);
+      await new Promise((r) => setTimeout(r, 800 + Math.floor(Math.random() * 700)));
+      res = await _attempt();
+    }
+    return res;
+  }
+
+  // v2.74.945 (CR-D6) — the TOOL-FORCED sibling of #call: same transport core (#post: timeout, cancel,
+  // retry) and the SAME audit ring (these were the three most expensive calls in the product, and they
+  // were invisible to #audit/cost logging because each hand-rolled its own fetch). Returns the raw
+  // response `data` — tool_use extraction stays with the caller (each tool's schema is its own).
+  // `userContent` may be a string or a content-blocks array (multimodal).
+  static async #callTool(systemPrompt, userContent, maxTokens, { tools, tool_choice, model, meta = null } = {}) {
+    const role = meta?.role ?? 'frontier';
+    const operation = meta?.operation ?? 'tool-call';
+    const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    const t0 = now();
+    let _llm;
+    try { _llm = await AnthropicService.#llmTransport(); }
+    catch {
+      AnthropicService.#audit({ ts: Date.now(), role, operation, latencyMs: 0, ok: false, outputChars: 0, inTokens: 0, outTokens: 0, costUsd: null, model: model || null, error: 'no-api-key' });
+      return { success: false, error: 'No API key', latencyMs: 0, usage: { inputTokens: 0, outputTokens: 0 } };
+    }
+    try {
+      const res = await AnthropicService.#post(_llm, {
+        model, max_tokens: maxTokens, system: systemPrompt, tools, tool_choice,
+        messages: [{ role: 'user', content: userContent }],
+      }, meta, `${role}/${operation}`);
+      const latencyMs = Math.round(now() - t0);
+      if (!res.ok) {
+        const body = await res.text();
+        AnthropicService.#audit({ ts: Date.now(), role, operation, latencyMs, ok: false, outputChars: 0, inTokens: 0, outTokens: 0, costUsd: null, model, error: `HTTP ${res.status}` });
+        return { success: false, error: `HTTP ${res.status}: ${body.slice(0, 200)}`, httpStatus: res.status, httpBody: body, latencyMs, usage: { inputTokens: 0, outputTokens: 0 } };
+      }
+      const data = await res.json();
+      const usage = {
+        inputTokens : Number(data?.usage?.input_tokens  ?? 0),
+        outputTokens: Number(data?.usage?.output_tokens ?? 0),
+      };
+      AnthropicService.#audit({ ts: Date.now(), role, operation, latencyMs, ok: true, outputChars: JSON.stringify(data?.content ?? '').length, inTokens: usage.inputTokens, outTokens: usage.outputTokens, costUsd: estimateCostUSD(model, usage)?.total ?? null, model });
+      return { success: true, data, usage, latencyMs };
+    } catch (err) {
+      const latencyMs = Math.round(now() - t0);
+      AnthropicService.#audit({ ts: Date.now(), role, operation, latencyMs, ok: false, outputChars: 0, inTokens: 0, outTokens: 0, costUsd: null, model, error: String(err.message).slice(0, 120) });
+      Logger.error('AnthropicService', `tool call failed [${role}/${operation}]: ${err.message}`);
+      return { success: false, error: err.message, latencyMs, usage: { inputTokens: 0, outputTokens: 0 } };
+    }
   }
 
   // `meta` (optional) = { role, operation, signal } — the call's declared role
@@ -5044,55 +5138,7 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     ];
 
     try {
-      // v2.74.934 (CR-E5) — transport hardening, in ONE place for every #call user:
-      //   • TIMEOUT: an own AbortController (default 60s, meta.timeoutMs to tighten) — a stalled
-      //     connection used to hang the invocation until the browser gave up, with no abort path.
-      //   • CANCEL: meta.signal (CR-S4) merges into the same controller, so a user cancel and the
-      //     timeout share one abort.
-      //   • RETRY: ONE bounded retry (~0.8–1.5s jittered) on 429 / 5xx / network failure — a transient
-      //     overload no longer fails a whole strategy/walk turn. Never retries an abort (user cancel or
-      //     timeout) or a non-429 4xx. NB the managed proxy's hard ~29s ceiling: one retry at most keeps
-      //     worst-case wall-clock bounded on the walk path.
-      const timeoutMs = (meta && Number.isFinite(meta.timeoutMs) && meta.timeoutMs > 0) ? meta.timeoutMs : 60000;
-      const _requestBody = JSON.stringify({ model, max_tokens: maxTokens, system: systemPrompt, messages });
-      const _attempt = async () => {
-        const ac = new AbortController();
-        const onCallerAbort = () => { try { ac.abort(); } catch { /* */ } };
-        if (meta && meta.signal) {
-          if (meta.signal.aborted) ac.abort();
-          else meta.signal.addEventListener('abort', onCallerAbort, { once: true });
-        }
-        const timer = setTimeout(() => { try { ac.abort(); } catch { /* */ } }, timeoutMs);
-        try {
-          return await fetch(_llm.url, {
-            method : 'POST',
-            headers: { 'Content-Type': 'application/json', ..._llm.headers },
-            body   : _requestBody,
-            signal : ac.signal,
-          });
-        } finally {
-          clearTimeout(timer);
-          if (meta && meta.signal) { try { meta.signal.removeEventListener('abort', onCallerAbort); } catch { /* */ } }
-        }
-      };
-      const _retryable = (resOrErr) => {
-        if (resOrErr instanceof Response) return resOrErr.status === 429 || resOrErr.status >= 500;
-        return !(resOrErr && resOrErr.name === 'AbortError') && !(meta && meta.signal && meta.signal.aborted);
-      };
-      let res;
-      try {
-        res = await _attempt();
-        if (!res.ok && _retryable(res)) {
-          Logger.warn('AnthropicService', `HTTP ${res.status} [${role}/${operation}] — one retry`);
-          await new Promise((r) => setTimeout(r, 800 + Math.floor(Math.random() * 700)));
-          res = await _attempt();
-        }
-      } catch (e) {
-        if (!_retryable(e)) throw e;
-        Logger.warn('AnthropicService', `fetch failed (${String(e && e.message).slice(0, 60)}) [${role}/${operation}] — one retry`);
-        await new Promise((r) => setTimeout(r, 800 + Math.floor(Math.random() * 700)));
-        res = await _attempt();
-      }
+      const res = await AnthropicService.#post(_llm, { model, max_tokens: maxTokens, system: systemPrompt, messages }, meta, `${role}/${operation}`);
 
       if (!res.ok) {
         const body = await res.text();
@@ -5152,30 +5198,7 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     return text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
   }
 
-  /**
-   * Extracts the first complete balanced JSON object from a string.
-   * Handles: leading prose, trailing prose, code fences, prefill continuations.
-   * @private
-   * @param {string} text - Raw response text, may include non-JSON content.
-   * @returns {string} The first {...} substring, or the original text if no braces found.
-   */
-  static #extractJson(text) {
-    const start = text.indexOf('{');
-    if (start === -1) return text;
-    let depth = 0;
-    let inString = false;
-    let escape = false;
-    for (let i = start; i < text.length; i++) {
-      const ch = text[i];
-      if (escape)          { escape = false; continue; }
-      if (ch === '\\')     { escape = true;  continue; }
-      if (ch === '"')      { inString = !inString; continue; }
-      if (inString)        continue;
-      if (ch === '{')      depth++;
-      else if (ch === '}') { depth--; if (depth === 0) return text.slice(start, i + 1); }
-    }
-    return text.slice(start); // unclosed — best effort
-  }
+  // (#extractJson lived here until v2.74.945 — CR-D6 folded it into #firstJsonObject{bestEffort}.)
 
   // ── Prompts registry ──────────────────────────────────────────────────────
 
@@ -6108,9 +6131,11 @@ Extract: ${paramNames.join(', ')}`;
     inputItems,
     cacheOutputItems,
   }) {
-    let _llm;
-    try { _llm = await AnthropicService.#llmTransport(); }
-    catch { return { success: false, items: [], error: 'No API key', latencyMs: 0, tokensIn: 0, tokensOut: 0 }; }
+    // v2.74.945 (CR-D6) -- early no-key guard kept (skips prompt build + logging); the transport
+    // itself now lives in #callTool. (`items: []` preserved -- this envelope predates `indices`.)
+    if (!(await AnthropicService.hasLlm())) {
+      return { success: false, items: [], error: 'No API key', latencyMs: 0, tokensIn: 0, tokensOut: 0 };
+    }
 
     // Hard cap on input list size. Larger lists would blow the prompt and
     // the cost budget; surface a clear error rather than silently truncating.
@@ -6233,31 +6258,24 @@ Identify which input items satisfy the contract. Return their indices in the ord
       `[recover ${analysisName}] USER CONTENT:\n${userContent}`);
 
     try {
-      const res = await fetch(_llm.url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ..._llm.headers },
-        body: JSON.stringify({
-          model      : 'claude-sonnet-4-5',
-          max_tokens : 4096,
-          system     : systemPrompt,
-          tools,
-          // Force the model to call the tool, not produce free text.
-          tool_choice: { type: 'tool', name: 'produce_recovered_output' },
-          messages   : [{ role: 'user', content: userContent }],
-        }),
+      // v2.74.945 (CR-D6) -- via #callTool: the shared transport (timeout/cancel/one-retry) + the
+      // #audit ring these hand-rolled fetches bypassed. The hardcoded model string
+      // was a shadow of MODEL.
+      const call = await AnthropicService.#callTool(systemPrompt, userContent, 4096, {
+        tools, tool_choice: { type: 'tool', name: 'produce_recovered_output' }, model: MODEL,
+        meta: { role: 'frontier', operation: 'analysis-recovery' },
       });
-      const latencyMs = Date.now() - t0;
+      const latencyMs = call.latencyMs;
 
-      if (!res.ok) {
-        const body = await res.text();
+      if (!call.success) {
         Logger.info('AnthropicService',
-          `[recover ${analysisName}] HTTP ${res.status} ERROR:\n${body.slice(0, 1000)}`);
-        throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+          `[recover ${analysisName}] TRANSPORT ERROR:\n${String(call.httpBody ?? call.error).slice(0, 1000)}`);
+        throw new Error(call.error);
       }
 
-      const data = await res.json();
-      const tokensIn  = data?.usage?.input_tokens  ?? 0;
-      const tokensOut = data?.usage?.output_tokens ?? 0;
+      const data = call.data;
+      const tokensIn  = call.usage.inputTokens;
+      const tokensOut = call.usage.outputTokens;
 
       // Find the tool_use content block. With tool_choice forced, there
       // should be exactly one. Defensive: handle absence as recovery
@@ -6401,9 +6419,9 @@ Identify which input items satisfy the contract. Return their indices in the ord
     //   {base64: string, mime: string, label?: string}
     imageInput = null,
   }) {
-    let _llm;
-    try { _llm = await AnthropicService.#llmTransport(); }
-    catch {
+    // v2.74.945 (CR-D6) -- early no-key guard kept (skips prompt build + logging); the transport
+    // itself now lives in #callTool.
+    if (!(await AnthropicService.hasLlm())) {
       return {
         success: false, output: null, confidence: null, rationale: null,
         error: 'No API key',
@@ -6534,47 +6552,37 @@ Produce output that fulfills the description's intent and satisfies the postcond
       `[frontier-primary ${analysisName}] USER CONTENT:\n${userContent}`);
 
     try {
-      const res = await fetch(_llm.url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ..._llm.headers },
-        body: JSON.stringify({
-          model      : 'claude-sonnet-4-5',
-          max_tokens : 4096,
-          system     : systemPrompt,
-          tools,
-          tool_choice: { type: 'tool', name: 'produce_analysis_output' },
-          messages   : [{
-            role: 'user',
-            // v2.72.21 (Pass 11) — Multimodal when imageInput present;
-            // text-only otherwise (existing path).
-            content: imageInput
-              ? [
-                  {
-                    type: 'image',
-                    source: {
-                      type      : 'base64',
-                      media_type: imageInput.mime || 'image/png',
-                      data      : imageInput.base64 || '',
-                    },
-                  },
-                  { type: 'text', text: userContent },
-                ]
-              : userContent,
-          }],
-        }),
+      // v2.74.945 (CR-D6) -- via #callTool (shared transport + #audit). Multimodal when imageInput
+      // present (v2.72.21 Pass 11); text-only otherwise. The hardcoded model string
+      // was a shadow of MODEL.
+      const _content = imageInput
+        ? [
+            {
+              type: 'image',
+              source: {
+                type      : 'base64',
+                media_type: imageInput.mime || 'image/png',
+                data      : imageInput.base64 || '',
+              },
+            },
+            { type: 'text', text: userContent },
+          ]
+        : userContent;
+      const call = await AnthropicService.#callTool(systemPrompt, _content, 4096, {
+        tools, tool_choice: { type: 'tool', name: 'produce_analysis_output' }, model: MODEL,
+        meta: { role: 'frontier', operation: 'analysis-primary' },
       });
-      const latencyMs = Date.now() - t0;
+      const latencyMs = call.latencyMs;
 
-      if (!res.ok) {
-        const body = await res.text();
+      if (!call.success) {
         Logger.info('AnthropicService',
-          `[frontier-primary ${analysisName}] HTTP ${res.status} ERROR:\n${body.slice(0, 1000)}`);
-        throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+          `[frontier-primary ${analysisName}] TRANSPORT ERROR:\n${String(call.httpBody ?? call.error).slice(0, 1000)}`);
+        throw new Error(call.error);
       }
 
-      const data = await res.json();
-      const tokensIn  = data?.usage?.input_tokens  ?? 0;
-      const tokensOut = data?.usage?.output_tokens ?? 0;
+      const data = call.data;
+      const tokensIn  = call.usage.inputTokens;
+      const tokensOut = call.usage.outputTokens;
 
       const toolUse = Array.isArray(data?.content)
         ? data.content.find(b => b?.type === 'tool_use' && b?.name === 'produce_analysis_output')
@@ -6680,9 +6688,9 @@ Produce output that fulfills the description's intent and satisfies the postcond
     screenshotBase64,
   }) {
     const t0 = Date.now();
-    let _llm;
-    try { _llm = await AnthropicService.#llmTransport(); }
-    catch {
+    // v2.74.945 (CR-D6) -- early no-key guard kept (skips prompt build + logging); the transport
+    // itself now lives in #callTool.
+    if (!(await AnthropicService.hasLlm())) {
       return {
         success: false, regions: [], confidence: null, rationale: null,
         partialVisibility: null,
@@ -6738,50 +6746,45 @@ Identify the region(s) matching the description in the screenshot below and retu
       `[obs-frontier ${observationName}] USER CONTENT:\n${userTextSpec}`);
 
     try {
-      const res = await fetch(_llm.url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ..._llm.headers },
-        body: JSON.stringify({
-          // Opus 4.7: pixel-level vision accuracy. No temperature/top_p/top_k —
-          // those parameters are unsupported and would produce a 400.
-          model      : MODEL_OBSERVATION_FRONTIER,
-          max_tokens : 2048,
-          system     : OBSERVATION_FRONTIER_VISION_SYSTEM_PROMPT,
+      // v2.74.945 (CR-D6) -- via #callTool (shared transport + #audit). Model stays
+      // MODEL_OBSERVATION_FRONTIER (pixel-level vision); no temperature/top_p/top_k -- those
+      // parameters are unsupported and would produce a 400.
+      const call = await AnthropicService.#callTool(
+        OBSERVATION_FRONTIER_VISION_SYSTEM_PROMPT,
+        [
+          {
+            type: 'image',
+            source: {
+              type      : 'base64',
+              media_type: 'image/png',
+              data      : screenshotBase64,
+            },
+          },
+          { type: 'text', text: userTextSpec },
+        ],
+        2048,
+        {
           tools      : [OBSERVATION_FRONTIER_LOCATE_TOOL],
           tool_choice: { type: 'tool', name: 'locate_regions' },
-          messages   : [{
-            role: 'user',
-            content: [
-              {
-                type: 'image',
-                source: {
-                  type      : 'base64',
-                  media_type: 'image/png',
-                  data      : screenshotBase64,
-                },
-              },
-              { type: 'text', text: userTextSpec },
-            ],
-          }],
-        }),
-      });
-      const latencyMs = Date.now() - t0;
+          model      : MODEL_OBSERVATION_FRONTIER,
+          meta       : { role: 'frontier', operation: 'observation-locate' },
+        });
+      const latencyMs = call.latencyMs;
 
-      if (!res.ok) {
-        const body = await res.text();
+      if (!call.success) {
         Logger.info('AnthropicService',
-          `[obs-frontier ${observationName}] HTTP ${res.status} ERROR:\n${body.slice(0, 1000)}`);
+          `[obs-frontier ${observationName}] TRANSPORT ERROR:\n${String(call.httpBody ?? call.error).slice(0, 1000)}`);
         return {
           success: false, regions: [], confidence: null, rationale: null,
           partialVisibility: null,
-          error: `HTTP ${res.status}: ${body.slice(0, 200)}`,
+          error: call.error,
           latencyMs, tokensIn: 0, tokensOut: 0,
         };
       }
 
-      const data = await res.json();
-      const tokensIn  = data?.usage?.input_tokens  ?? 0;
-      const tokensOut = data?.usage?.output_tokens ?? 0;
+      const data = call.data;
+      const tokensIn  = call.usage.inputTokens;
+      const tokensOut = call.usage.outputTokens;
 
       // Find the locate_regions tool_use block. With tool_choice forced,
       // there should be exactly one. Defensive: missing or malformed →

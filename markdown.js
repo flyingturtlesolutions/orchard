@@ -1,7 +1,6 @@
 /**
  * @file markdown.js
  * @module markdown
- * @version 2.11.0
  *
  * Minimal, security-first markdown renderer for assistant message bodies.
  *

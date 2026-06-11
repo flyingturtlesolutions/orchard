@@ -16,7 +16,6 @@
  * no I/O. Safe to call in any context.
  *
  * @module Services/LandmarkProfile
- * @version 2.74.286
  */
 
 // ─── Selector tier classifier ──────────────────────────────────────────

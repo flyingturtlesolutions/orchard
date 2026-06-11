@@ -17,7 +17,6 @@
 // PURE: no DOM / chrome / LLM (the LLM refines classification + locates the region live; this is the floor).
 //
 // @module Core/observe
-// @version 2.74.727
 
 import { slugUpper } from './slug.js';   // v2.74.940 (CR-D2)
 

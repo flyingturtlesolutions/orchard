@@ -23,7 +23,6 @@
 // PURE: no DOM / chrome / storage. Graph ops over the siteMap {nodes, edges}.
 //
 // @module Core/workflows
-// @version 2.74.777
 
 import { synthesizeCapabilityDraft } from './capabilitySynth.js';
 import { normalizeGoalLabel } from './siteMap.js';   // v2.74.942 (CR-D8)

@@ -110,7 +110,6 @@
  *
  * @module Services/StorageManager
  * @author Agent HUB
- * @version 2.72.28
  */
 
 import { Logger } from '../Core/Logger.js';

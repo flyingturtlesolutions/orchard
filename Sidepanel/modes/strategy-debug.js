@@ -30,7 +30,6 @@
  *
  * @module Sidepanel/modes/strategy-debug
  * @author Agent HUB
- * @version 2.72.51
  */
 
 import { ChatAPI } from '../../Services/ChatAPI.js';

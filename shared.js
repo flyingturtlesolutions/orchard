@@ -1,7 +1,6 @@
 /**
  * @file shared.js
  * @module shared
- * @version 2.9.1
  *
  * Utilities shared between all extension UI surfaces (Lab side panel, Chat
  * side panel, and future entry points). Pure helpers — no DOM state beyond

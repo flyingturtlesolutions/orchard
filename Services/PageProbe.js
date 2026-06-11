@@ -31,10 +31,10 @@
  *
  * @module Services/PageProbe
  * @author Agent HUB
- * @version 2.72.29
  */
 
 import { Logger } from '../Core/Logger.js';
+import { waitForTabComplete } from './TabUtils.js';   // v2.74.944 (CR-D5)
 
 // ─── Tab management ─────────────────────────────────────────────────────
 
@@ -121,31 +121,8 @@ export async function findOrOpenTab(urlPattern) {
  * @private
  */
 async function waitForTabReady(tabId, timeoutMs = 15000) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      try { chrome.tabs.onUpdated.removeListener(listener); } catch { /* ok */ }
-      clearTimeout(timer);
-      resolve(result);
-    };
-    const listener = (changedTabId, changeInfo) => {
-      if (changedTabId === tabId && changeInfo.status === 'complete') {
-        finish({ ok: true });
-      }
-    };
-    chrome.tabs.onUpdated.addListener(listener);
-    // Also check immediately in case the tab is already ready.
-    chrome.tabs.get(tabId, (tab) => {
-      if (chrome.runtime.lastError) {
-        finish({ ok: false, error: chrome.runtime.lastError.message });
-        return;
-      }
-      if (tab?.status === 'complete') finish({ ok: true });
-    });
-    const timer = setTimeout(() => finish({ ok: false, error: `Tab ${tabId} did not reach 'complete' within ${timeoutMs}ms` }), timeoutMs);
-  });
+  // v2.74.944 (CR-D5) — via TabUtils (one waiter); identical {ok, error} contract.
+  return waitForTabComplete(tabId, { timeoutMs });
 }
 
 /**

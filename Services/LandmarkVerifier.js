@@ -59,7 +59,6 @@
  *                       Lifecycle untouched.
  *
  * @module Services/LandmarkVerifier
- * @version 2.74.252
  */
 
 import { StorageManager }                  from './StorageManager.js';

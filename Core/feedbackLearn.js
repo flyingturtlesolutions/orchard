@@ -12,7 +12,6 @@
 // so they shape ranking without overriding the reversibility veto or a strong exact match.
 //
 // @module Core/feedbackLearn
-// @version 2.74.695
 
 const _STOP = new Set(['the', 'a', 'an', 'to', 'for', 'of', 'on', 'in', 'my', 'me', 'i', 'please', 'and', 'with', 'this', 'that', 'it', 'is', 'are', 'show', 'find']);
 function _tok(s) {

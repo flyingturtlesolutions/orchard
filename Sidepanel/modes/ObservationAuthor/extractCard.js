@@ -12,7 +12,6 @@
  * gives the author an exact preview, not a stand-in.
  *
  * @module Sidepanel/modes/ObservationAuthor/extractCard
- * @version 2.74.16
  */
 
 import { getShape, cacheShapes, freeExtractShapes } from './shapes/index.js';

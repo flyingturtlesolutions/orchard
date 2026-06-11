@@ -8,7 +8,6 @@
  * and the Studio surface agree without drifting.
  *
  * @module Core/groundDerivation
- * @version 2.74.329
  */
 
 // Bump when the derivation prompt template changes so stored derivations are

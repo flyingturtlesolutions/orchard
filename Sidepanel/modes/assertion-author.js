@@ -15,7 +15,6 @@
  *     the Ground sidepanel (returnTo === 'ground-view')
  *
  * @module Sidepanel/modes/assertion-author
- * @version 2.74.53
  */
 
 import { toast, exitToStudio, requestModeChange } from '../shell-api.js';

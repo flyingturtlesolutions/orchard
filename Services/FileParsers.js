@@ -1,7 +1,6 @@
 /**
  * @file Services/FileParsers.js
  * @module FileParsers
- * @version 2.74.66
  *
  * Parse a file value collected by ParamForm into a Scope-tagged binding
  * ready to seed into a Strategy invocation's scope.

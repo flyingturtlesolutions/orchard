@@ -26,7 +26,6 @@
 // PURE: no DOM, no chrome, no LLM. The runtime gathers `observed` and calls evaluatePostcondition.
 //
 // @module Core/postcondition
-// @version 2.74.648
 
 // Prose fillers to drop so "pay or salary parameter in query string" → ['pay','salary']. Kept deliberately
 // small — only words that describe the OBSERVATION mechanism, never domain terms (pay, salary, date, remote…).
@@ -180,4 +179,17 @@ export function relaxNavPostFailures(failures, nav) {
     (relax ? relaxed : kept).push(f);
   }
   return { kept, relaxed };
+}
+
+/**
+ * v2.74.758 (moved here in v2.74.949 / CR-X2) — Normalize a Fragment/Observation conditions field to a
+ * flat ARRAY, tolerating BOTH a plain array AND a {match, conditions} envelope (mirrors the Analysis
+ * path). Conditions were read with a bare `Array.isArray(...)`, which SILENTLY SKIPPED an envelope-shaped
+ * value — a synthesized artifact whose conditions were stored as `{match:'all', conditions:[...]}` never
+ * enforced them. Tolerant of either shape for every artifact, so a condition is never dropped on a shape
+ * mismatch. Shared by ExecutionEngine + the extracted ObservationExecutor. PURE.
+ */
+export function condList(x) {
+  if (x && Array.isArray(x.conditions)) return x.conditions;
+  return Array.isArray(x) ? x : [];
 }

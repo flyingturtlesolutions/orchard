@@ -13,7 +13,6 @@
 // floor still returns a best-effort flat decomposition so an empty ground can show gaps either way.
 //
 // @module Core/orchComprehend
-// @version 2.74.779
 
 import { decomposeAsk, liftConditional } from './orchChain.js';
 import { classifyReadAsk } from './observe.js';

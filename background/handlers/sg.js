@@ -396,15 +396,35 @@ async function persistHeteroTier2(nodes, { groundId, name, goal, params = null, 
   };
 }
 
+// v2.74.950 (CR-X3a) — THE ctx seam contract. background.js builds this object; a missing key used to
+// surface as a TypeError deep inside whichever handler first touched it (and the JSDoc had drifted to 13
+// of the 18 actual keys — the review's smell). Listed ONCE here, asserted at wiring time.
+const REQUIRED_CTX_KEYS = Object.freeze([
+  'runTrialBundle', 'readLocaleCache', 'readSgSpec', 'normalizeUrl', 'appendOutcomes', 'readOutcomes',
+  'outcomeRollups', 'broadcastStorageChanged', 'readSgCapabilities', 'readSiteMap', 'readSgDraft',
+  'writeSgDraft', 'clearSgDraft', 'writeSgCapability', 'removeSgCapabilities', 'ensureContentScript',
+  'writeSgTrace', 'enrichSgLandmarks',
+]);
+
+/** Throw (at SW startup) if the seam object is missing any contract key — names every gap at once. */
+export function assertCtx(ctx) {
+  const missing = REQUIRED_CTX_KEYS.filter((k) => typeof ctx?.[k] !== 'function');
+  if (missing.length) throw new Error(`createSgMessageHandlers: ctx is missing [${missing.join(', ')}] — the background wiring and the sg.js contract have drifted`);
+  return ctx;
+}
+
 /**
  * @param {object} ctx  background-local helpers (kept in background.js — shared with non-SG code, or
- *   chrome.storage-backed SG stores):
- *   { runTrialBundle, readLocaleCache, readSgSpec, normalizeUrl, appendOutcomes, broadcastStorageChanged,
- *     readSgCapabilities, readSgDraft, writeSgDraft, clearSgDraft, writeSgCapability, writeSgTrace,
+ *   chrome.storage-backed SG stores). The full 18-key contract lives in REQUIRED_CTX_KEYS above and is
+ *   asserted at wiring time:
+ *   { runTrialBundle, readLocaleCache, readSgSpec, normalizeUrl, appendOutcomes, readOutcomes,
+ *     outcomeRollups, broadcastStorageChanged, readSgCapabilities, readSiteMap, readSgDraft, writeSgDraft,
+ *     clearSgDraft, writeSgCapability, removeSgCapabilities, ensureContentScript, writeSgTrace,
  *     enrichSgLandmarks }
  * @returns {Record<string, (payload:object, sender:object, sendResponse:Function) => Promise<void>>}
  */
 export function createSgMessageHandlers(ctx) {
+  assertCtx(ctx);   // v2.74.950 (CR-X3a) — fail at WIRING time, not deep inside the first handler to touch a gap
   // T3X-DF (v2.74.790/792) — CAPTURE-TIME ANTECEDENT INFERENCE. The LAST action capability the chat REPLAYED on a
   // Ground this SW-lifetime, keyed by groundId: { capabilityId, bindings }. REPLAY_SG_CAPABILITY is the single
   // chokepoint for every chat-run action (standalone ask / compound chain / matcher), so recording here captures
@@ -440,6 +460,23 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, decision, groundId: groundId || null, candidateCount: candidates.length });
       } catch (err) {
         Logger.error('background', `ROUTE_ASK failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // PB-4 (R8) — run a TRIAL of an already-RESOLVED bundle (Studio's resolve flow) as the intent-truth
+    // proof. v2.74.950 (CR-X3) — migrated from the legacy background switch: this was the un-migrated
+    // TWIN of RUN_SG_TRIAL that silently missed the .912 handler-level fix; it now lives beside its twin
+    // and shares ctx.runTrialBundle (whose internal busy-marking covers both entries).
+    RUN_PERSPECTIVE_TRIAL: async (payload, _sender, sendResponse) => {
+      try {
+        const { groundId = null, intent = '', roles, navigateUrl = null, proposedRoleCount = 0 } = payload ?? {};
+        if (!groundId || !Array.isArray(roles) || !roles.length) { sendResponse({ success: false, error: 'groundId + roles required' }); return; }
+        let localeModel = null;
+        try { const pm = await ctx.readLocaleCache(groundId, ctx.normalizeUrl(navigateUrl || '')); localeModel = pm?.model || null; } catch { /* */ }
+        sendResponse(await ctx.runTrialBundle({ groundId, intent, roles, localeModel, navigateUrl, proposedRoleCount }));
+      } catch (err) {
+        Logger.error('background', `RUN_PERSPECTIVE_TRIAL failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },

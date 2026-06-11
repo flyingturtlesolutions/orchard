@@ -3,7 +3,6 @@
  * @description Agent HUB — Chat consumer interface.
  * Pure consumer of CapabilityAPI via ChatAPI. Drives the empty state,
  * message rendering, capability drawer, and progress indicators.
- * @version 2.13.0
  */
 
 import { installGlobalErrorHandlers } from './Core/ErrorCapture.js';
@@ -19,10 +18,11 @@ import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
 import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, namesMultipleSites, namesAnySite } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X)
-import { walkPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate)
+import { walkPlan, scanPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate); scanPlan — THE recursive plan walker (CR-D7)
 import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   // ORCH-A — predicate → gate (conditional routing + the analysis)
 import { comprehend } from './Core/orchComprehend.js';   // ORCH-CB — substrate-free shape comprehension (cold-ground decompose)
-import { renderCriteria } from './Core/orchVisual.js';   // ORCH-CB — search params → criteria for a visual condition's prompt
+import { renderCriteria, renderPlanLines } from './Core/orchVisual.js';   // ORCH-CB — search params → criteria for a visual condition's prompt; renderPlanLines — the confirm-card plan renderer (CR-D7)
+import { walkBoundary, walkEndLines } from './Core/walkLedger.js';   // CR-D7 — the walk's outcome ledger (recap/boundary/end lines), pure + tested
 import { classifyFeedback } from './Core/orchFeedback.js'; // ORCH-FB — recognize corrective feedback (LLM refines)
 import { parseAdminCommand, parseDedupCommand } from './Core/orchAdmin.js';    // ORCH-ADMIN — management commands (clear/delete); dedup — find duplicate Grounds
 import { classifyReadAsk, askListIndex } from './Core/observe.js';   // OBS-READ — is the ask a question (a read)? + the index a singular/ordinal read wants
@@ -859,30 +859,10 @@ function _orchFeedbackBar(msg) {
 // ORDERED capability-routed steps WITH bindings (ORCH_PLAN), then confirmed + run. Unlike the lexical chain, the
 // steps are already resolved (capabilityId + bindings) — no per-step re-match.
 function _orchConfirmPlan(msg, { tabId, groundId, steps, gaps = [], ask = '', savedComposite = false }) {
-  const fmt = (b) => Object.keys(b || {}).length ? ` (${Object.entries(b).map(([k, v]) => `${k}=${v}`).join(', ')})` : '';
-  const label = (b) => b.kind === 'wait' ? `let it settle (${Math.round((b.ms || 0) / 100) / 10}s)` : (b.intent || b.clause || b.kind);
-  const byId = new Map((steps || []).map((s) => [s && s.id, s]));
-  // A gate's CONDITION machinery (the observe it tests + the analyze that judges it) is shown INLINE on the gate
-  // line, not as its own numbered steps — so a conditional reads as one "if … : …" rather than three.
-  const consumed = new Set();
-  for (const s of (steps || [])) { if (s && s.kind === 'gate') { const an = byId.get(s.over); if (an) { consumed.add(an.id); if (an.over) consumed.add(an.over); } } }
-  let n = 0;
-  const lines = [];
-  for (const s of (steps || [])) {
-    if (!s || consumed.has(s.id)) continue;
-    n++;
-    if (s.kind === 'foreach' || s.kind === 'loop') {
-      lines.push(`${n}. for each item: ${(s.body || []).map(label).filter(Boolean).join(' → ')}${s.collect ? ` (collect ${s.collect})` : ''}`);
-    } else if (s.kind === 'gate') {
-      const an = byId.get(s.over);
-      const cond = (an && (an.intent || an.clause)) || 'it applies';
-      lines.push(`${n}. if ${cond}: ${(s.body || []).map((b) => b.intent || b.clause).filter(Boolean).join(' → ')}`);
-    } else {
-      lines.push(`${n}. ${s.intent || s.clause || s.kind || 'step'}${fmt(s.bindings)}`);
-    }
-  }
+  // v2.74.946 (CR-D7) — the gate-folding renderer lives in Core/orchVisual (was verbatim-duplicated here
+  // and in _orchOfferComprehended). `shown` = USER-VISIBLE steps (gate machinery folded inline).
+  const { lines, shown } = renderPlanLines(steps);
   const list = lines.join('\n');
-  const shown = n;   // the number of USER-VISIBLE steps (gate machinery folded in)
   const head = steps.length ? `${savedComposite ? 'Saved as one — ' : ''}I’ll do ${shown} step${shown > 1 ? 's' : ''} in order:\n${list}` : 'I don’t have a saved capability for this yet — I can try to work it out from the page.';
   // HONEST partial coverage — name the constraints no capability covers; we'll TRY them via the NL fallback after.
   const gapNote = gaps.length ? `\n\n⚠ Not saved yet: ${gaps.join(', ')} — I’ll try ${gaps.length > 1 ? 'these' : 'this'} from the page after.` : '';
@@ -917,11 +897,9 @@ async function _orchReadValue({ tabId, groundId, ask, capabilityId }) {
 function _findUntaughtListDriver(plan) {
   const steps = (plan && Array.isArray(plan.steps)) ? plan.steps : [];
   const driven = new Set();
-  const scan = (ss) => { for (const s of (ss || [])) { if (s && (s.kind === 'foreach' || s.kind === 'loop') && s.over) driven.add(s.over); if (s && Array.isArray(s.body)) scan(s.body); } };
-  scan(steps);
+  scanPlan(steps, (s) => { if ((s.kind === 'foreach' || s.kind === 'loop') && s.over) driven.add(s.over); });   // v2.74.946 (CR-D7) — the shared walker
   let found = null;
-  const walk = (ss) => { for (const s of (ss || [])) { if (found) return; if (s && s.kind === 'observe' && s.teachList && !s.capabilityId && driven.has(s.id)) { found = s; return; } if (s && Array.isArray(s.body)) walk(s.body); } };
-  walk(steps);
+  scanPlan(steps, (s) => { if (s.kind === 'observe' && s.teachList && !s.capabilityId && driven.has(s.id)) { found = s; return false; } });   // find-first: early-exit
   return found;
 }
 
@@ -932,13 +910,11 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan, _headRan = false, ma
   _planLive++;
   try {
   const driverIds = new Set();   // observe ids a foreach/loop iterates over → must return items, not a scalar
-  const _scan = (steps) => { for (const s of (steps || [])) { if (s && (s.kind === 'foreach' || s.kind === 'loop') && s.over) driverIds.add(s.over); if (s && Array.isArray(s.body)) _scan(s.body); } };
-  _scan(plan && plan.steps);
+  scanPlan(plan && plan.steps, (s) => { if ((s.kind === 'foreach' || s.kind === 'loop') && s.over) driverIds.add(s.over); });   // v2.74.946 (CR-D7) — the shared walker
   // ORCH-CB — the plan's search PARAMS (upstream fragment bindings) become the CRITERIA a VISUAL condition uses to
   // judge MATCH ("are there jobs matching 'osidndhdnd'?"), not mere presence. Ignored by DOM reads.
   const _planBindings = {};
-  const _collectBindings = (steps) => { for (const s of (steps || [])) { if (!s) continue; if (s.kind === 'fragment' && s.bindings && typeof s.bindings === 'object') Object.assign(_planBindings, s.bindings); if (Array.isArray(s.body)) _collectBindings(s.body); } };
-  _collectBindings(plan && plan.steps);
+  scanPlan(plan && plan.steps, (s) => { if (s.kind === 'fragment' && s.bindings && typeof s.bindings === 'object') Object.assign(_planBindings, s.bindings); });
   const _criteria = renderCriteria(_planBindings);
   // v2.74.908 — the STOP keyword reaches the plan interpreter: every per-node callback bails before
   // dispatching, so a runaway foreach (the 22:58 trace — 13 sequential REPLAYs of a 5-tab opener, ~45s,
@@ -1107,6 +1083,29 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan, _headRan = false, ma
   } finally { _planLive = Math.max(0, _planLive - 1); }   // v2.74.917 (CR-S1)
 }
 
+// v2.74.946 (CR-D7) — THE resolved-step runner shared by the flat plan runner and the lexical chain runner
+// (their ~40-line copies had already drifted). A READ runs through the observation read path — an observation
+// has no strategy, so REPLAY errors "no saved strategy or binding"; an ACTION through REPLAY_SG_CAPABILITY.
+// Both record the ask→capability alias on success (the flywheel) and settle before the next step (render /
+// navigation). Messaging, offer-record affordances, and promotion bookkeeping are CALLER deltas — they stay
+// at the call sites. Returns { ok, value? (reads), why? (the failure suffix, actions) }.
+async function _runResolvedStep({ tabId, groundId, ask, capabilityId, bindings = null, isRead = false }) {
+  if (isRead) {
+    const value = await _orchReadValue({ tabId, groundId, ask, capabilityId });
+    if (value == null) return { ok: false, value: null };
+    _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId, phrase: ask });
+    await new Promise((r) => setTimeout(r, 400));
+    return { ok: true, value };
+  }
+  const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId, capabilityId, paramValues: (bindings && typeof bindings === 'object') ? bindings : {} });
+  if (!res || res.success === false || res.ran === false || res.ok === false) {
+    return { ok: false, why: (res && (res.error || res.reason)) ? ` — ${res.error || res.reason}` : '' };
+  }
+  _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId, phrase: ask });   // flywheel per step
+  await new Promise((r) => setTimeout(r, 800));   // settle between steps (navigation / render)
+  return { ok: true };
+}
+
 async function _orchRunPlan(msg, { tabId, groundId, steps, gaps = [], ask = '', savedComposite = false }) {
   // ORCH-L — a plan carrying control-flow nodes runs through the interpreter, not the flat sequence runner.
   if (Array.isArray(steps) && steps.some((s) => s && (s.kind === 'foreach' || s.kind === 'loop' || s.kind === 'gate'))) {
@@ -1117,25 +1116,18 @@ async function _orchRunPlan(msg, { tabId, groundId, steps, gaps = [], ask = '', 
   for (let i = 0; i < total; i++) {
     const s = steps[i];
     _setMessageBody(msg, `Step ${i + 1} of ${total}: “${s.intent}”…`);
-    // A READ step (observation) returns a VALUE — run it through the observation read path, not REPLAY (an
-    // observation has no strategy, so REPLAY errors "no saved strategy or binding").
     if (s.kind === 'observation') {
-      const val = await _orchReadValue({ tabId, groundId, ask: s.clause || s.intent, capabilityId: s.capabilityId });
-      if (val == null) { _setMessageBody(msg, `Step ${i + 1} (“${s.intent}”) couldn’t read a value here.`); _orchOfferRecord(msg, { groundId, tabId, ask: s.clause || s.intent, label: '● Show me this step' }); return; }
-      readouts.push(val);
-      _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId: s.capabilityId, phrase: s.clause || s.intent });
-      await new Promise((r) => setTimeout(r, 400));
+      const r = await _runResolvedStep({ tabId, groundId, ask: s.clause || s.intent, capabilityId: s.capabilityId, isRead: true });
+      if (!r.ok) { _setMessageBody(msg, `Step ${i + 1} (“${s.intent}”) couldn’t read a value here.`); _orchOfferRecord(msg, { groundId, tabId, ask: s.clause || s.intent, label: '● Show me this step' }); return; }
+      readouts.push(r.value);
       continue;
     }
-    const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId, capabilityId: s.capabilityId, paramValues: (s.bindings && typeof s.bindings === 'object') ? s.bindings : {} });
-    if (!res || res.success === false || res.ran === false || res.ok === false) {
-      const why = (res && (res.error || res.reason)) ? ` — ${res.error || res.reason}` : '';
-      _setMessageBody(msg, `Step ${i + 1} (“${s.intent}”) didn’t run${why}.`);
+    const r = await _runResolvedStep({ tabId, groundId, ask: s.clause || s.intent, capabilityId: s.capabilityId, bindings: s.bindings });
+    if (!r.ok) {
+      _setMessageBody(msg, `Step ${i + 1} (“${s.intent}”) didn’t run${r.why}.`);
       _orchOfferRecord(msg, { groundId, tabId, ask: s.clause || s.intent, label: '● Show me the right way' });
       return;
     }
-    _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId: s.capabilityId, phrase: s.clause || s.intent });   // flywheel per step
-    await new Promise((r) => setTimeout(r, 800));   // settle between steps (navigation / render)
   }
   // NL FALLBACK — the parts no saved capability covered now run through the NL pipeline ON THE RESULTING PAGE
   // (where the filters live). Offer rather than auto-run (precision-first: an unproven plan touching the page).
@@ -1519,24 +1511,21 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
       return;
     }
     // A READ clause (observation) returns a VALUE — run it through the observation read path, not REPLAY.
+    // v2.74.946 (CR-D7) — both branches via _runResolvedStep (the shared read/REPLAY/alias/settle runner);
+    // the chain's deltas (resume-after-demo, promotion bookkeeping via _record) stay here.
     if (m.candidate && m.candidate.kind === 'observation') {
-      const val = await _orchReadValue({ tabId, groundId: m.groundId, ask: clause.text, capabilityId: m.capabilityId });
-      if (val == null) { _setMessageBody(msg, `Step ${i + 1} of ${total}: couldn’t read “${clause.text}” here — show me this step and I’ll keep going.`); _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me this step', onAuthored: _resumeAfterDemo(i, clause, m.groundId) }); return; }
-      st.readouts.push(val); _record(m, clause, 'observation');
-      _orchReq('ORCH_RECORD_ALIAS', { groundId: m.groundId, capabilityId: m.capabilityId, phrase: clause.text });
-      await new Promise((r) => setTimeout(r, 400));
+      const r = await _runResolvedStep({ tabId, groundId: m.groundId, ask: clause.text, capabilityId: m.capabilityId, isRead: true });
+      if (!r.ok) { _setMessageBody(msg, `Step ${i + 1} of ${total}: couldn’t read “${clause.text}” here — show me this step and I’ll keep going.`); _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me this step', onAuthored: _resumeAfterDemo(i, clause, m.groundId) }); return; }
+      st.readouts.push(r.value); _record(m, clause, 'observation');
       continue;
     }
-    const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId: m.groundId, capabilityId: m.capabilityId, paramValues: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {} });
-    if (!res || res.success === false || res.ran === false || res.ok === false) {
-      const why = (res && (res.error || res.reason)) ? ` — ${res.error || res.reason}` : '';
-      _setMessageBody(msg, `Step ${i + 1} (“${clause.text}”) didn’t run${why} — show me the right way and I’ll keep going.`);
+    const r = await _runResolvedStep({ tabId, groundId: m.groundId, ask: clause.text, capabilityId: m.capabilityId, bindings: m.bindings });
+    if (!r.ok) {
+      _setMessageBody(msg, `Step ${i + 1} (“${clause.text}”) didn’t run${r.why} — show me the right way and I’ll keep going.`);
       _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me the right way', onAuthored: _resumeAfterDemo(i, clause, m.groundId) });
       return;
     }
     _record(m, clause);
-    _orchReq('ORCH_RECORD_ALIAS', { groundId: m.groundId, capabilityId: m.capabilityId, phrase: clause.text });   // flywheel per clause
-    await new Promise((r) => setTimeout(r, 800));   // settle between steps (navigation / render)
   }
   _setMessageBody(msg, st.readouts.length ? st.readouts.join('\n') : `Done — ran all ${total} steps.`);
   // T2 — the whole compound ran cleanly → offer to promote it to a durable composite (cache hit next time).
@@ -1593,18 +1582,9 @@ function _orchOfferSaveCompound(msg, { tabId, groundId, ask, steps, plan = null 
 // one unmatched blob. Renders the conditional/foreach structure; offers to work it out from the page or be shown.
 function _orchOfferComprehended(msg, { tabId, groundId, ask, comp }) {
   const steps = (comp && Array.isArray(comp.steps)) ? comp.steps : [];
-  const byId = new Map(steps.map((s) => [s && s.id, s]));
-  const consumed = new Set();   // a gate's condition machinery renders INLINE on the gate line
-  for (const s of steps) if (s && s.kind === 'gate') { const an = byId.get(s.over); if (an) { consumed.add(an.id); if (an.over) consumed.add(an.over); } }
-  let n = 0;
-  const lines = [];
-  for (const s of steps) {
-    if (!s || consumed.has(s.id)) continue;
-    n++;
-    if (s.kind === 'gate') { const an = byId.get(s.over); lines.push(`${n}. if ${(an && an.intent) || 'it applies'}: ${(s.body || []).map((b) => b.intent || b.clause).filter(Boolean).join(' → ')}`); }
-    else if (s.kind === 'foreach' || s.kind === 'loop') { lines.push(`${n}. for each item: ${(s.body || []).map((b) => b.intent || b.clause).filter(Boolean).join(' → ')}`); }
-    else lines.push(`${n}. ${s.intent || s.clause || s.kind}`);
-  }
+  // v2.74.946 (CR-D7) — the shared gate-folding renderer (Core/orchVisual). Comprehended steps carry no
+  // bindings/collect/wait, so the superset renderer degrades to exactly the lines this card drew inline.
+  const { lines } = renderPlanLines(steps);
   _setMessageBody(msg, `Here’s how I read that — I don’t have ${lines.length > 1 ? 'these steps' : 'this'} saved on this page yet:\n${lines.join('\n')}`);
   const bar = _orchActionBar(msg);
   bar.appendChild(_mkBtn('✨ Try it from the page', () => { bar.remove(); _orchTryGaps(appendMessage({ role: 'assistant', body: '' }), { tabId, groundId, gaps: [ask] }); }));
@@ -1905,39 +1885,28 @@ async function _orchWalkWorkflow(resolved, { ask = '', tabId = null, groundId = 
   await _walkStep(steps, 0, { scope: {}, tabId: tabId ?? null, ground: groundId ?? null, total: steps.length, results: [], preSkipped: preSkipped | 0 }, ask);
 }
 
-// v2.74.914 — render the walk's outcome ledger: chat gets the counts, the ring gets the per-step detail.
-function _walkRecap(st) {
-  const rs = Array.isArray(st.results) ? st.results : [];
-  const counts = new Map();
-  for (let i = 0; i < st.total; i++) { const o = (rs[i] && rs[i].outcome) || 'unreached'; counts.set(o, (counts.get(o) || 0) + 1); }
-  const chat = [...counts.entries()].map(([o, n]) => `${o} ${n}`).join(' · ') + (st.preSkipped ? ` · not walkable ${st.preSkipped}` : '');
-  const ring = Array.from({ length: st.total }, (_, i) => `${i + 1}:${(rs[i] && rs[i].outcome) || 'unreached'}`).join(' ');
-  return { chat, ring };
-}
-
 // v2.74.919 (CR-S3) — ONE exit for every way a walk ends. Before this, the three Stop buttons and the
 // step-level catch just removed their UI: no recap ever rendered, _walkLive stayed true forever (a later
 // "stop" claimed to be stopping a dead walk, and the stale flag insta-aborted the NEXT plan run).
+// v2.74.946 (CR-D7) — the recap/wording composition moved to Core/walkLedger (pure + tested); this is
+// the impure shell: flags, the ring logger, the chat message.
 function _endWalk(st, i, reason) {
   _walkLive = false;
   _walkAbortFlag.requested = false;
-  const rec = _walkRecap(st);
-  const done = reason === 'done';
-  const where = done ? '' : ` at step ${Math.min(i + 1, st.total)} of ${st.total}`;
-  _orchLog(`WALK ▸ ${done ? 'done' : reason}${where} — ${st.total} step(s) [${rec.ring}]${st.preSkipped ? ` +${st.preSkipped} not-walkable` : ''}`);
+  const lines = walkEndLines(st, i, reason);
+  _orchLog(`WALK ▸ ${lines.log}`);
   const _recapMsg = appendMessage({ role: 'assistant', body: '' });
-  _setMessageBody(_recapMsg, done
-    ? `✓ Walk finished — ${st.total} step${st.total === 1 ? '' : 's'}: ${rec.chat}.`
-    : `⏹ ${reason === 'errored' ? 'Walk stopped on an error' : 'Stopped the walk'}${where} — ${rec.chat}. Steps already completed stay done.`);
+  _setMessageBody(_recapMsg, lines.chat);
   _orchFinalize(_recapMsg);   // v2.74.938 (CR-U1)
 }
 
 async function _walkStep(steps, i, st, ask) {
   const next = () => _walkStep(steps, i + 1, st, ask);
   // v2.74.919 (CR-S3) — done BEFORE abort: a stop typed while the LAST step runs is a finish ("Walk
-  // finished"), not "Stopped at step N+1 of N". Both exits route through the one _endWalk.
-  if (i >= steps.length) { _endWalk(st, i, 'done'); return; }
-  if (_walkAbortFlag.requested) { _endWalk(st, i, 'stopped by user'); return; }   // v2.74.907 — the "stop" keyword halts at the step boundary
+  // finished"), not "Stopped at step N+1 of N". The ordering lives in walkBoundary (CR-D7, tested);
+  // both exits route through the one _endWalk.
+  const boundary = walkBoundary({ index: i, total: steps.length, abortRequested: _walkAbortFlag.requested });
+  if (boundary) { _endWalk(st, i, boundary); return; }
   const si = steps[i];
   const mark = (outcome) => { if (st.results) st.results[i] = { clause: String(si.clause || '').slice(0, 60), outcome }; };   // v2.74.914
   const isRead = (si.capabilityKind === 'observation') || (!si.capabilityId && classifyReadAsk(si.clause || '').isRead);

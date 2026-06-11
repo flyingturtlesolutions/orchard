@@ -28,7 +28,6 @@
  *
  * @module Sidepanel/shell
  * @author Agent HUB
- * @version 2.72.50
  */
 
 import { installGlobalErrorHandlers } from '../Core/ErrorCapture.js';

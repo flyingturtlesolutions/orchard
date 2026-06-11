@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { evaluatePostcondition, extractKeywords, urlParamsChanged, isFillableInputSelector, dropWeakInputPresence, relaxNavPostFailures } from './postcondition.js';
+import { evaluatePostcondition, extractKeywords, urlParamsChanged, isFillableInputSelector, dropWeakInputPresence, relaxNavPostFailures, condList } from './postcondition.js';
 
 describe('postcondition — weak input-presence (the re-search skip bug, v2.74.783)', () => {
   it('isFillableInputSelector: true for input/textarea/select targets, false for regions', () => {
@@ -130,5 +130,19 @@ describe('relaxNavPostFailures — nav-aware relax reads the REAL failure envelo
     const { kept, relaxed } = relaxNavPostFailures([env('url_matches', '([')], nav);
     assert.equal(relaxed.length, 0);
     assert.equal(kept.length, 1);
+  });
+});
+
+describe('condList — the conditions shape-normalizer (CR-X2 move)', () => {
+  it('tolerates both the plain array and the {match, conditions} envelope', () => {
+    const arr = [{ type: 'selector_present', selector: '#a' }];
+    assert.deepEqual(condList(arr), arr);
+    assert.deepEqual(condList({ match: 'all', conditions: arr }), arr);
+  });
+  it('null / undefined / scalar / empty envelope degrade to []', () => {
+    assert.deepEqual(condList(null), []);
+    assert.deepEqual(condList(undefined), []);
+    assert.deepEqual(condList('x'), []);
+    assert.deepEqual(condList({ match: 'all' }), []);
   });
 });

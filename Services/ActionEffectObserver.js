@@ -61,7 +61,6 @@
  *   Caller can override per call (terminal steps may want longer).
  *
  * @module Services/ActionEffectObserver
- * @version 2.74.250
  */
 
 import { Logger } from '../Core/Logger.js';

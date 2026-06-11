@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { describeForCondition, visualToInput, buildVisualObservation, isVisualObservation, renderCriteria, withCriteria } from './orchVisual.js';
+import { describeForCondition, visualToInput, buildVisualObservation, isVisualObservation, renderCriteria, withCriteria, renderPlanLines } from './orchVisual.js';
 import { evaluatePredicate } from './orchAnalyze.js';
 
 describe('orchVisual — visual observation floor (ORCH-CB)', () => {
@@ -66,5 +66,52 @@ describe('orchVisual — visual observation floor (ORCH-CB)', () => {
     assert.match(cap.observe.visual.description, /ACTUAL jobs/);
     assert.equal(isVisualObservation(cap), true);
     assert.equal(isVisualObservation({ observe: { extracts: [{ selector: '.x' }] } }), false, 'a DOM observation is not visual');
+  });
+});
+
+describe('renderPlanLines — the confirm-card plan renderer (CR-D7)', () => {
+  it('numbers plain steps and appends bindings', () => {
+    const { lines, shown } = renderPlanLines([
+      { kind: 'fragment', id: 'a', intent: 'search jobs', bindings: { keyword: 'swe' } },
+      { kind: 'fragment', id: 'b', clause: 'open filters' },
+    ]);
+    assert.equal(shown, 2);
+    assert.deepEqual(lines, ['1. search jobs (keyword=swe)', '2. open filters']);
+  });
+
+  it('folds the gate condition machinery inline — the observe + analyze are not numbered steps', () => {
+    const steps = [
+      { kind: 'observe', id: 'o1', intent: 'count results' },
+      { kind: 'analyze', id: 'a1', over: 'o1', intent: 'there are any results' },
+      { kind: 'gate', id: 'g1', over: 'a1', body: [{ kind: 'fragment', intent: 'open the first one' }] },
+    ];
+    const { lines, shown } = renderPlanLines(steps);
+    assert.equal(shown, 1, 'three IR steps render as ONE user-visible conditional');
+    assert.deepEqual(lines, ['1. if there are any results: open the first one']);
+  });
+
+  it('foreach renders its body labels, the wait affordance, and the collect suffix', () => {
+    const { lines } = renderPlanLines([
+      { kind: 'foreach', id: 'each', over: 'rows', collect: 'titles', body: [
+        { kind: 'fragment', intent: 'open item' },
+        { kind: 'wait', ms: 1500 },
+        { kind: 'observe', intent: 'read the title' },
+      ] },
+    ]);
+    assert.deepEqual(lines, ['1. for each item: open item → let it settle (1.5s) → read the title (collect titles)']);
+  });
+
+  it('degrades for comprehended steps (no bindings/collect/wait) to the bare numbered lines', () => {
+    const { lines, shown } = renderPlanLines([
+      { kind: 'fragment', id: 's1', intent: 'search remote jobs' },
+      { kind: 'foreach', id: 'f', over: 'x', body: [{ intent: 'open each' }] },
+    ]);
+    assert.equal(shown, 2);
+    assert.deepEqual(lines, ['1. search remote jobs', '2. for each item: open each']);
+  });
+
+  it('empty/null steps -> no lines, zero shown', () => {
+    assert.deepEqual(renderPlanLines([]), { lines: [], shown: 0 });
+    assert.deepEqual(renderPlanLines(null), { lines: [], shown: 0 });
   });
 });

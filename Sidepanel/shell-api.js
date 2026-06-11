@@ -16,7 +16,6 @@
  *
  * @module Sidepanel/shell-api
  * @author Agent HUB
- * @version 2.72.50
  */
 
 import { toast as _toast } from '../shared.js';

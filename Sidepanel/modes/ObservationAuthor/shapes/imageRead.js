@@ -16,7 +16,6 @@
  *   }
  *
  * @module Sidepanel/modes/ObservationAuthor/shapes/imageRead
- * @version 2.74.62
  */
 
 const escAttr = (s) => String(s ?? '').replace(/"/g, '&quot;');

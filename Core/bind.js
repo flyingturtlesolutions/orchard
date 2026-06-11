@@ -16,7 +16,6 @@
 //
 // PURE: no DOM/LLM/storage. Unit-testable like the other SG stages.
 // @module Core/bind
-// @version 2.74.651
 
 import { featureToProtoLandmark } from './landmark.js';
 import { isFillableFeature, fillOpFor } from './trialSynth.js';   // v2.74.924 (CR-B1) fill class; fillOpFor since v2.74.942 (CR-D8) — its export comment promised "no drift copy", yet this file kept one

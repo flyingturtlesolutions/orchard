@@ -15,7 +15,6 @@
 // persists `Ground.chrome`, grafts depth onto skipped Locales, and skips re-poking known chrome.
 //
 // @module Core/chromeHoist
-// @version 2.74.480
 
 /** Fields that legitimately VARY per archetype for the same chrome control → captured as an
  *  override (e.g. "search collapsed until scroll-top" → visibleAtRest:false on that archetype).

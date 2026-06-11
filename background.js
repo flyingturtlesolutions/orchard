@@ -20,7 +20,6 @@
  *
  * @module background
  * @author Agent HUB
- * @version 2.19.0
  */
 
 import { Logger, LOG_LEVEL }  from './Core/Logger.js';
@@ -35,17 +34,17 @@ import { selectionToTrialRoles } from './Core/bind.js';     // SG-4 Bind — sel
 import { buildAcceptance, landmarkRefActions } from './Core/accept.js';     // SG-5/PB-7 — passing trial → durable capability + landmark-backed Fragment/Strategy
 import { deriveCapabilities, deriveAllowedOperations } from './Services/LandmarkProfile.js';  // SG-LM-4b — accept-time landmark profiling
 import { createSgMessageHandlers, markEngineBusy } from './background/handlers/sg.js';  // R1 seed — SG handlers behind a registry; markEngineBusy v2.74.911
+import { createExploreHandlers } from './background/handlers/explore.js';  // v2.74.951 (CR-X3a) — the explore domain
+import { createDiscoveryHandlers } from './background/handlers/discovery.js';  // v2.74.952 (CR-X3b) — the discovery domain
+import { createWorkflowDebugHandlers } from './background/handlers/workflowDebug.js';  // v2.74.953 (CR-X3c) — the workflow + debugger domain
 import { buildRawAction, coalesce } from './Core/observedTrace.js';     // OBS-1 — observed demonstration recorder
 import * as ChromeHoist        from './Core/chromeHoist.js';  // v2.74.480 — hoist recurring chrome off Locales → Ground.chrome
 import * as Workflows          from './Core/workflows.js';   // v2.74.488 — cross-Locale workflows (partOf) over the siteMap
 import { ExecutionEngine }    from './Services/ExecutionEngine.js';
 import { StorageManager }     from './Services/StorageManager.js';
-import { executeWorkflow }    from './Services/WorkflowExecutor.js';
 import { AnthropicService }   from './Services/AnthropicService.js';
 import { CapabilityAPI, EVENT as CAP_EVENT } from './Services/CapabilityAPI.js';
 import { TemplateWalker }     from './Services/TemplateWalker.js';
-import { DiscoveryService }   from './Services/DiscoveryService.js';
-import * as SitemapService    from './Services/SitemapService.js';  // v2.74.438 — sitemap.xml ingestion
 import { PageClassifier }     from './Services/PageClassifier.js';
 // v2.71.4 — ConversationStore for background-side terminal-event persistence.
 // Lets chat-launched invocations write their result back to the conversation
@@ -409,12 +408,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // v2.74.22 — walkAbortFlags + stepApprovalResolvers removed; only the
 // AI-walked path used them and that path is gone.
 
-/**
- * Active Discovery abort flags keyed by groundId (Pass 4).
- * Set to true when ABORT_DISCOVERY is received; checked between page visits
- * in DiscoveryService.
- */
-const discoveryAbortFlags = new Map();
+// (discoveryAbortFlags lived here until v2.74.952 — CR-X3b moved it with the discovery domain.)
 
 /**
  * v2.74.23 — Resolve the URL the antecedent fragment should start from.
@@ -540,70 +534,7 @@ CapabilityAPI.subscribe((event) => {
 const __activeInvocations = new Set();
 let __keepAliveInterval = null;
 
-// v2.74.84 — Per-invocation cancellation set for Strategy runs dispatched
-// through INVOKE_WORKFLOW. Studio populates this via CANCEL_WORKFLOW; the
-// executor's isAborted closure polls membership between steps and in WAIT
-// slices. Cleared on completion (success / failure / abort alike).
-const _workflowCancellations = new Set();
-
-// v2.74.91 — Per-invocation debug control map. Tracks both:
-//   - paused: boolean, polled by the executor's isPaused closure between
-//             steps and during PAUSE-step yields. Studio toggles via
-//             PAUSE_WORKFLOW / RESUME_WORKFLOW; the executor flips it
-//             true on its own when a PAUSE step executes.
-//   - listenerInvocations: kept for symmetry with future fields (e.g.
-//             breakpoints) — currently unused.
-//
-// Cancellation isn't moved into this map (yet) because the historical
-// _workflowCancellations Set is referenced elsewhere; this map is purely
-// additive for the debugger pass.
-const _workflowDebugStates = new Map();
-
-// v2.74.812 — short per-run id for the gl-trace START/FOOTER frame. A counter (not the scrubbed invocation UUID),
-// so it stays legible in a shared trace. Resets on SW restart; timestamps disambiguate across restarts.
-let _runSeq = 0;
-
-function _getWorkflowDebugState(invId) {
-  let s = _workflowDebugStates.get(invId);
-  if (!s) {
-    // v2.74.94 — stepRequested flag. STEP_WORKFLOW sets it; the executor
-    // consumes it after the next step completes and re-pauses. RESUME
-    // clears it so a Resume-after-Step semantically means "continue freely
-    // from here" rather than "step once".
-    // v2.74.95 — breakpoints: Set<number> of top-level step indices to
-    // halt before. SET/CLEAR_BREAKPOINT_WORKFLOW mutate. Executor checks
-    // isBreakpoint(stepIndex) before each top-level step runs.
-    // v2.74.101 — stepOverPrefix: when set, consumeStepRequest only fires
-    // in an executeSteps loop whose pathPrefix matches. Enables Step Over
-    // semantics — Step Into has no prefix constraint and consumes at the
-    // first step boundary at any depth (which for control-flow steps
-    // descends into the body).
-    s = { paused: false, stepRequested: false, stepOverPrefix: null, breakpoints: new Set() };
-    _workflowDebugStates.set(invId, s);
-  }
-  return s;
-}
-
-function _broadcastWorkflowPauseState(invId, paused) {
-  try {
-    chrome.runtime.sendMessage({
-      type: 'WORKFLOW_PAUSE_STATE',
-      payload: { invocationId: invId, paused: !!paused },
-    }, () => { void chrome.runtime.lastError; /* ignore "no receiver" */ });
-  } catch (_) { /* ignore */ }
-}
-
-function _broadcastWorkflowBreakpoints(invId, set, workflowId) {
-  try {
-    chrome.runtime.sendMessage({
-      type: 'WORKFLOW_BREAKPOINTS',
-      // v2.74.99 — Carry BOTH ids so the sidepanel can filter on either.
-      // Pre-invocation toggles broadcast with invocationId=null, only
-      // workflowId set. Post-invocation toggles set both.
-      payload: { invocationId: invId ?? null, workflowId: workflowId ?? null, breakpoints: [...set] },
-    }, () => { void chrome.runtime.lastError; /* ignore */ });
-  } catch (_) { /* ignore */ }
-}
+// (the workflow cancellation/debug state + broadcasts lived here until v2.74.953 — CR-X3c moved them with the domain.)
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║ v2.72.41 (Pass 17g) — Pending perspective capture session.                    ║
@@ -778,59 +709,7 @@ async function __waitForTabComplete(tabId, timeoutMs = 8000) {
   });
 }
 
-/**
- * v2.74.455 — Read a site's sitemap from an IN-TAB content-script context. A
- * Cloudflare/WAF-gated sitemap 403s a service-worker fetch even when credentialed (the
- * request lacks a real navigation's fingerprint and the challenge JS can't run in a
- * worker). A tab navigated to the origin auto-solves the managed challenge, after which a
- * content-script fetch is a genuine first-party request (carries cf_clearance + real
- * UA/TLS fingerprint + Sec-Fetch-* headers) and Cloudflare serves the XML. This is the
- * authoritative URL set that powers removal detection (drift §8) — a budgeted crawl can't
- * prove a page is GONE — so it's worth a short-lived tab.
- *
- * Opens a background tab on `origin`, runs SitemapService's same walk (index fan-out,
- * caps, origin filtering, block detection) over a content-script-backed fetcher, and
- * ALWAYS closes the tab. Returns the fetchSitemapUrls result, or null on failure.
- *
- * @param {string} origin
- * @param {() => boolean} [isAborted]
- * @returns {Promise<object|null>}
- */
-async function _fetchSitemapViaTab(origin, isAborted = () => false) {
-  let tab = null;
-  try { tab = await chrome.tabs.create({ url: origin, active: false }); }
-  catch (e) { Logger.warn('background', `sitemap in-tab: tab open failed: ${e.message}`); return null; }
-  const tabId = tab.id;
-  try {
-    await __waitForTabComplete(tabId, 15000);
-    // Settle: let Cloudflare's managed challenge auto-solve + reload to the real page.
-    await new Promise(r => setTimeout(r, 3000));
-    // Poll content-script readiness (re-injected at document_start on each navigation).
-    let ready = false;
-    const deadline = Date.now() + 10000;
-    while (Date.now() < deadline) {
-      if (isAborted()) return null;
-      try {
-        const pong = await chrome.tabs.sendMessage(tabId, { type: 'PING' });
-        if (pong?.ready || pong?.success) { ready = true; break; }
-      } catch { /* not injected yet — retry */ }
-      await new Promise(r => setTimeout(r, 400));
-    }
-    if (!ready) { Logger.warn('background', `sitemap in-tab: content script not ready on ${origin}`); return null; }
-    const tabFetch = async (url) => {
-      try {
-        const res = await chrome.tabs.sendMessage(tabId, { type: 'FETCH_URL_TEXT', payload: { url } });
-        return { text: res?.ok ? (res.text ?? null) : null, status: res?.status ?? 0 };
-      } catch { return { text: null, status: 0 }; }
-    };
-    return await SitemapService.fetchSitemapUrls(origin, { fetchText: tabFetch });
-  } catch (e) {
-    Logger.warn('background', `sitemap in-tab fetch failed: ${e.message}`);
-    return null;
-  } finally {
-    try { await chrome.tabs.remove(tabId); } catch { /* best-effort */ }
-  }
-}
+// (the in-tab sitemap fetcher lived here until v2.74.952 — CR-X3b moved it with the discovery domain.)
 
 /**
  * v2.72.72 — Execute a CLICK action with navigation/new-tab observation.
@@ -1333,8 +1212,6 @@ async function _appendOutcomes(groundId, events) {
 // shape) + a HEAVY trialTrace (local, by trialRef — runtime/training, never authoring-synced); REJECT drops
 // the draft. Direct chrome.storage.local writes bypass the sync bridge for now (partition/sync wiring is a
 // later slice); the lean record's shape is already the workspace primitive.
-// v2.74.936 (CR-U2) — tabs with an EXPLORE sweep in flight (one per tab; see EXPLORE_PAGE_STRUCTURE).
-const _exploreInFlight = new Set();
 const _sgCapKey = (groundId) => `sgCapabilities:${groundId}`;
 const _sgTraceKey = (trialRef) => `sgTrialTrace:${trialRef}`;
 const _sgDraftKey = (groundId) => `sgTrialDraft:${groundId}`;
@@ -1704,7 +1581,27 @@ function _readSgSpec(groundId, url, intent) {
   return null;
 }
 
-const _sgMessageHandlers = createSgMessageHandlers({
+// v2.74.951 (CR-X3a) — domain handler maps merge here; the dispatch + _invokeSgHandler serve them all.
+const _sgMessageHandlers = {
+  ...createWorkflowDebugHandlers({
+    invokeSgHandler    : _invokeSgHandler,
+    ensureContentScript: _ensureContentScript,
+  }),
+  ...createDiscoveryHandlers({
+    readSiteMap          : _readSiteMap,
+    mergeSiteMapForGround: _mergeSiteMapForGround,
+  }),
+  ...createExploreHandlers({
+    readLocaleCache      : _readLocaleCache,
+    writeLocaleCache     : _writeLocaleCache,
+    normalizeUrl         : _normalizeUrlForPerspectiveCache,
+    readSiteMap          : _readSiteMap,
+    mergeSiteMapForGround: _mergeSiteMapForGround,
+    readGroundChrome     : _readGroundChrome,
+    deriveGroundChrome   : _deriveGroundChrome,
+    appendOutcomes       : _appendOutcomes,
+  }),
+  ...createSgMessageHandlers({
   runTrialBundle       : _runTrialBundle,
   readLocaleCache      : _readLocaleCache,
   readSgSpec           : _readSgSpec,
@@ -1723,7 +1620,23 @@ const _sgMessageHandlers = createSgMessageHandlers({
   ensureContentScript  : _ensureContentScript,    // heal a stale-tab content-script port before REPLAY
   writeSgTrace         : _writeSgTrace,
   enrichSgLandmarks    : _enrichSgLandmarks,
-});
+  }),
+};
+
+// v2.74.950 (CR-X3b) — THE sendResponse->Promise bridge. Registry handlers reply via sendResponse;
+// every in-SW caller that needs the result AS A VALUE used to hand-roll this wrap (auto-monitor x2,
+// the workflow executor's runObservation/runCapability handoffs) — with drifting safety nets (one
+// HUNG forever if the handler rejected before responding). One implementation, never rejects.
+function _invokeSgHandler(type, payload) {
+  return new Promise((resolve) => {
+    const h = _sgMessageHandlers[type];
+    if (typeof h !== 'function') { resolve({ success: false, error: `no SG handler: ${type}` }); return; }
+    try {
+      Promise.resolve(h(payload, null, (r) => resolve(r ?? null)))
+        .catch((e) => resolve({ success: false, error: e?.message || String(e) }));
+    } catch (e) { resolve({ success: false, error: e.message }); }
+  });
+}
 
 // ── C2b auto-monitor orchestration ───────────────────────────────────────────
 // With GLOBAL live-monitoring on, capture FOLLOWS the user: every eligible tab (canTrack: enabled ∧
@@ -1740,9 +1653,9 @@ async function _autoMonitorTab(tabId, { stopIfIneligible = false } = {}) {
     let host = ''; try { host = new URL(url).host; } catch { /* */ }
     let consent = null; try { consent = (await chrome.storage.local.get('monitor:consent'))?.['monitor:consent'] || null; } catch { /* */ }
     if (canTrack(consent, { host })) {
-      await new Promise((res) => { try { _sgMessageHandlers.INTERACTION_MONITOR_START({ tabId }, null, () => res()); } catch { res(); } });
+      await _invokeSgHandler('INTERACTION_MONITOR_START', { tabId });   // v2.74.950 (CR-X3b) — the one bridge
     } else if (stopIfIneligible) {
-      await new Promise((res) => { try { _sgMessageHandlers.INTERACTION_MONITOR_STOP({ tabId }, null, () => res()); } catch { res(); } });
+      await _invokeSgHandler('INTERACTION_MONITOR_STOP', { tabId });   // v2.74.950 (CR-X3b) — the one bridge
     }
   } catch { /* */ } finally { _autoMonitorBusy.delete(tabId); }
 }
@@ -4066,487 +3979,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
-    // ╔══════════════════════════════════════════════════════════════════════╗
-    // ║ v2.74.70 — WORKFLOW AUTHORING                                        ║
-    // ╚══════════════════════════════════════════════════════════════════════╝
-    //
-    // Workflows are a new top-level entity (no parent Ground). Same broadcast
-    // pattern as Strategies — saves emit STORAGE_CHANGED so any Studio tab
-    // currently rendering a workflow list re-renders. CapabilityAPI is NOT
-    // notified yet: Workflows aren't capability-eligible until the
-    // composition layer lands (a Workflow's invocation surface is undefined
-    // until steps[] is populated, which the form doesn't yet do).
-
-    case 'SAVE_WORKFLOW': {
-      (async () => {
-        try {
-          const { workflow } = payload;
-          if (!workflow?.id) {
-            sendResponse({ success: false, error: 'Workflow requires { id }' });
-            return;
-          }
-          const saved = await StorageManager.saveWorkflow(workflow);
-          broadcastStorageChanged('workflow', saved.id, 'saved');
-          // v2.74.82 — Strategy entities are capabilities now; notify the
-          // CapabilityAPI registry so chat suggestion cards refresh. Match
-          // the pattern SAVE_STRATEGY uses for Workflow entities.
-          CapabilityAPI.notifyRegistryChange('updated', saved.id);
-          sendResponse({ success: true, workflow: saved });
-        } catch (err) {
-          Logger.error('background', `SAVE_WORKFLOW failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
-
-    case 'DELETE_WORKFLOW': {
-      (async () => {
-        try {
-          const { workflowId } = payload;
-          await deleteRecordWithSync('workflow', workflowId, () => StorageManager.deleteWorkflow(workflowId));
-          CapabilityAPI.notifyRegistryChange('removed', workflowId);
-          sendResponse({ success: true });
-        } catch (err) {
-          Logger.error('background', `DELETE_WORKFLOW failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
-
-    // v2.74.76 — Top-level Strategy invocation. Loads the Strategy record,
-    // resolves typed-input file params, walks its `steps` array through
-    // the WorkflowExecutor. Progress events stream back through a per-tab
-    // runtime message channel keyed by invocationId so the calling Studio
-    // tab can render toasts as steps complete. The handler acks once with
-    // the final summary; intermediate events are fire-and-forget broadcasts.
-    //
-    // v2.74.84 — Mid-run cancellation: each invocation's id is tracked in
-    // a module-level Set when cancelled; the executor's isAborted closure
-    // polls membership. Cleared on completion regardless of outcome.
-    case 'INVOKE_WORKFLOW': {
-      (async () => {
-        try {
-          // v2.74.158 — `debug` payload flag distinguishes Studio's
-          // Debug (◐) invocation from the plain Run (▶) / chat-routed
-          // invocation. The constructed envelope below sets `pauseMode`
-          // accordingly so downstream runtime gates (the OBSERVATION
-          // overlay in ExecutionEngine, the PAUSE-node guard, etc.)
-          // can tell whether they're in a debug session. Defaults to
-          // false (non-debug) to preserve old callers' behavior.
-          const { workflowId, workflow: inlineWorkflow, paramValues, invocationId, debug: debugRun = false } = payload;
-          // v2.74.810 — accept an INLINE workflow (run it WITHOUT persisting). The chat's preview Run passes the
-          // workflow object directly so a one-off run doesn't leave a duplicate library record (only "Save for later"
-          // persists). A saved workflowId still loads from storage (Studio ▶/Debug, breakpoints). Either way the
-          // executor runs the workflow OBJECT; its steps dispatch already-saved capabilities, so the workflow record
-          // itself needn't be stored to run.
-          let workflow = (inlineWorkflow && typeof inlineWorkflow === 'object') ? inlineWorkflow : null;
-          if (!workflow) {
-            if (!workflowId) {
-              sendResponse({ success: false, error: 'INVOKE_WORKFLOW requires workflowId or workflow' });
-              return;
-            }
-            workflow = await StorageManager.getWorkflow(workflowId);
-            if (!workflow) {
-              sendResponse({ success: false, error: `Workflow not found: ${workflowId}` });
-              return;
-            }
-          }
-          const invId = invocationId
-            ?? (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `winv-${Date.now()}`);
-
-          // Stream progress via broadcast — the Studio listener filters by
-          // invocationId. We don't await each send; it's a fire-and-forget
-          // channel that the receiver is free to ignore.
-          const onProgress = (event) => {
-            try {
-              chrome.runtime.sendMessage({
-                type: 'WORKFLOW_PROGRESS',
-                payload: { invocationId: invId, event },
-              }, () => { void chrome.runtime.lastError; /* ignore "no receiver" */ });
-            } catch (_) { /* ignore */ }
-          };
-
-          // v2.74.91 — Debug envelope. `paused` lives in
-          // _workflowDebugStates; PAUSE_WORKFLOW / RESUME_WORKFLOW
-          // toggle it; the executor polls isPaused() between every step.
-          // requestPause is invoked by PAUSE step nodes to halt the run
-          // without external action — flips paused true AND broadcasts so
-          // Studio's UI reacts immediately.
-          const debugState = _getWorkflowDebugState(invId);
-          // v2.74.98 — Remember the Strategy id so SET/CLEAR/TOGGLE
-          // breakpoint handlers can persist their changes against the
-          // Strategy record (not the per-invocation throwaway state).
-          debugState.workflowId = workflowId ?? null;
-
-          // v2.74.98 — Load persisted breakpoints into the live set
-          // BEFORE executor starts. Broadcast once after load so the
-          // workflow-debug sidepanel (which mounts before this point)
-          // sees the gutter dots immediately.
-          // v2.74.810 — only for a SAVED workflowId; an inline (unsaved) Run has no persisted breakpoints.
-          if (workflowId) {
-            try {
-              const saved = await StorageManager.getStrategyBreakpoints(workflowId);
-              for (const idx of saved) debugState.breakpoints.add(idx);
-              if (saved.length > 0) _broadcastWorkflowBreakpoints(invId, debugState.breakpoints, workflowId);
-            } catch (e) {
-              Logger.warn('background', `breakpoint load failed: ${e.message}`);
-            }
-          }
-
-          const debug = {
-            // v2.74.158 — pauseMode signal. `'off'` for non-debug runs
-            // (plain Studio ▶ / chat invocations) so downstream gates
-            // — notably the OBSERVATION overlay in ExecutionEngine —
-            // can suppress debug-only side effects. `'after-node'`
-            // when the caller marked the run as a debug session.
-            pauseMode: debugRun ? 'after-node' : 'off',
-            isPaused: () => debugState.paused,
-            requestPause: () => {
-              debugState.paused = true;
-              _broadcastWorkflowPauseState(invId, true);
-            },
-            onPauseStateChange: (state) => {
-              _broadcastWorkflowPauseState(invId, !!state.paused);
-            },
-            // v2.74.94 — Step-through. The executor calls this after every
-            // step completes; if true, the executor immediately re-pauses
-            // (via requestPause above) so the next step waits for another
-            // Step / Resume click. Single-shot consumption — STEP_*_WORKFLOW
-            // re-arms the flag each time the user clicks.
-            //
-            // v2.74.101 — Depth-aware. The executor passes its current
-            // pathPrefix; if stepOverPrefix is set, consume only when
-            // they match (Step Over semantics — runs control-flow steps
-            // as a single unit). If stepOverPrefix is null, consume at
-            // any depth (Step Into — first step boundary wins).
-            consumeStepRequest: (pathPrefix) => {
-              if (!debugState.stepRequested) return false;
-              if (debugState.stepOverPrefix != null && debugState.stepOverPrefix !== (pathPrefix ?? '')) {
-                return false;
-              }
-              debugState.stepRequested = false;
-              debugState.stepOverPrefix = null;
-              return true;
-            },
-            // v2.74.95 — Breakpoints. Executor calls before each step;
-            // if true, the step pauses before running.
-            // v2.74.100 — Path-keyed: argument is a dot-notation step
-            // path (e.g. "2", "2.body.1", "3.branches.0.body.0"). Numeric
-            // top-level indices coerce to strings naturally so legacy
-            // top-level breakpoints work unchanged.
-            isBreakpoint: (stepPath) => debugState.breakpoints.has(String(stepPath)),
-          };
-
-          // v2.74.812 — per-run START/FOOTER frame so a downloaded trace reads as a story: a short run-id brackets the
-          // run; the resolve/bind/action/read lines in between belong to it. (run-id is a counter, not the scrubbed
-          // invocation UUID, so it survives PII-scrub legibly.)
-          const _runId = `r_${(++_runSeq).toString(36)}`;
-          const _runT0 = Date.now();
-          const _wfSteps = Array.isArray(workflow.steps) ? workflow.steps.length : 0;
-          const _wfGrounds = Array.isArray(workflow.groundIds) ? workflow.groundIds.length : 0;
-          Logger.info('background', `▶ RUN ${_runId} "${String(workflow.name || workflow.intent || 'workflow').slice(0, 60)}" (${_wfSteps} step${_wfSteps === 1 ? '' : 's'}${_wfGrounds ? `, ${_wfGrounds} ground${_wfGrounds === 1 ? '' : 's'}` : ''}${inlineWorkflow ? ', ephemeral' : ''})`);
-
-          try {
-            const result = await executeWorkflow(workflow, paramValues ?? {}, {
-              onProgress,
-              invocationId: invId,
-              isAborted: () => _workflowCancellations.has(invId),
-              debug,
-              // v2.74.789 — In-SW capabilities a cross-Ground READ step needs but the executor
-              // can't import (they close over the background storage ctx). RUN_OBSERVATION is the
-              // observation-native READ; a SW→SW sendMessage wouldn't re-enter our own onMessage,
-              // so we hand the handler in directly and bridge its sendResponse to a Promise (with
-              // the same reject-safety net the registry dispatch uses).
-              runObservation: (obsPayload) => new Promise((resolve) => {
-                try {
-                  Promise.resolve(_sgMessageHandlers.RUN_OBSERVATION(obsPayload, null, (r) => resolve(r || null)))
-                    .catch((e) => resolve({ success: false, error: e?.message || String(e) }));
-                } catch (e) { resolve({ success: false, error: e.message }); }
-              }),
-              // v2.74.792 — replay a cross-Ground READ's ANTECEDENT (the search) as the exact capability the chat ran
-              // it through (REPLAY_SG_CAPABILITY), so a multi-fragment Strategy search works as the prerequisite, not
-              // only a single-fragment one. Same in-SW handoff + reject-safety net as runObservation.
-              runCapability: (capPayload) => new Promise((resolve) => {
-                try {
-                  Promise.resolve(_sgMessageHandlers.REPLAY_SG_CAPABILITY(capPayload, null, (r) => resolve(r || null)))
-                    .catch((e) => resolve({ success: false, error: e?.message || String(e) }));
-                } catch (e) { resolve({ success: false, error: e.message }); }
-              }),
-              ensureContentScript: _ensureContentScript,   // heal a freshly-opened hop tab's content-script port before the read
-            });
-            // v2.74.812 — run FOOTER: outcome + step/error/duration. stepResults shape varies, so read defensively.
-            const _sr = Array.isArray(result.results) ? result.results : (Array.isArray(result.stepResults) ? result.stepResults : null);
-            const _ran = _sr ? _sr.length : _wfSteps;
-            const _errs = _sr ? _sr.filter((r) => r && r.success === false).length : (result.success ? 0 : 1);
-            Logger.info('background', `${result.success ? '✓' : '✗'} RUN ${_runId} — ${result.success ? 'ok' : (result.error ? String(result.error).slice(0, 80) : 'failed')} · ${_ran}/${_wfSteps} step(s) · ${_errs} error(s) · ${Date.now() - _runT0}ms`);
-            sendResponse({ success: !!result.success, invocationId: invId, ...result });
-          } finally {
-            // Always cleanup — leaving stale ids in either map would
-            // silently poison the next invocation that recycles the id.
-            _workflowCancellations.delete(invId);
-            _workflowDebugStates.delete(invId);
-          }
-        } catch (err) {
-          Logger.error('background', `INVOKE_WORKFLOW failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
-
-    // v2.74.84 — Cancel an in-flight Strategy invocation. The id is added
-    // to _workflowCancellations; the executor's next isAborted poll picks
-    // it up (between steps and in WAIT slices). The original INVOKE_WORKFLOW
-    // handler resolves with `{error: 'Aborted'}` shortly after and cleans
-    // the set in its finally block.
-    //
-    // No-op (and success-true response) if the id isn't an active invocation:
-    // it's possible the run completed before the cancel reached us, which
-    // is fine — caller doesn't need to know the difference.
-    case 'CANCEL_WORKFLOW': {
-      (async () => {
-        try {
-          const { invocationId } = payload;
-          if (!invocationId) {
-            sendResponse({ success: false, error: 'CANCEL_WORKFLOW requires invocationId' });
-            return;
-          }
-          _workflowCancellations.add(invocationId);
-          // v2.74.91 — Cancel-while-paused: also flip the pause flag off
-          // so the executor's _yieldIfPaused loop wakes up immediately and
-          // sees the abort, instead of waiting for the next 100ms poll
-          // tick. (The yield loop checks isAborted on every iteration so
-          // this is belt-and-suspenders.)
-          const state = _workflowDebugStates.get(invocationId);
-          if (state) {
-            // v2.74.101 — Clear pending step requests so a cancel can't
-            // accidentally re-pause the executor on its way out.
-            state.stepRequested = false;
-            state.stepOverPrefix = null;
-            if (state.paused) {
-              state.paused = false;
-              _broadcastWorkflowPauseState(invocationId, false);
-            }
-          }
-          Logger.info('background', `CANCEL_WORKFLOW queued for invocation ${invocationId}`);
-          sendResponse({ success: true });
-        } catch (err) {
-          Logger.error('background', `CANCEL_WORKFLOW failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
-
-    // v2.74.91 — Pause / resume control for in-flight Strategy invocations.
-    // The executor's debug.isPaused() closure polls _workflowDebugStates;
-    // these two handlers flip the flag and broadcast WORKFLOW_PAUSE_STATE
-    // so Studio's UI swaps its ▶ / ■ / ⏸ buttons in real time.
-    case 'PAUSE_WORKFLOW': {
-      (async () => {
-        try {
-          const { invocationId } = payload;
-          if (!invocationId) {
-            sendResponse({ success: false, error: 'PAUSE_WORKFLOW requires invocationId' });
-            return;
-          }
-          const state = _getWorkflowDebugState(invocationId);
-          state.paused = true;
-          _broadcastWorkflowPauseState(invocationId, true);
-          Logger.info('background', `PAUSE_WORKFLOW for invocation ${invocationId}`);
-          sendResponse({ success: true });
-        } catch (err) {
-          Logger.error('background', `PAUSE_WORKFLOW failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
-    case 'RESUME_WORKFLOW': {
-      (async () => {
-        try {
-          const { invocationId } = payload;
-          if (!invocationId) {
-            sendResponse({ success: false, error: 'RESUME_WORKFLOW requires invocationId' });
-            return;
-          }
-          const state = _getWorkflowDebugState(invocationId);
-          state.paused = false;
-          // v2.74.94 — Resume-after-Step semantically means "continue
-          // freely from here". Clearing the flag prevents an immediate
-          // re-pause after the next step completes.
-          // v2.74.101 — Also clear Step Over's depth pin.
-          state.stepRequested = false;
-          state.stepOverPrefix = null;
-          _broadcastWorkflowPauseState(invocationId, false);
-          Logger.info('background', `RESUME_WORKFLOW for invocation ${invocationId}`);
-          sendResponse({ success: true });
-        } catch (err) {
-          Logger.error('background', `RESUME_WORKFLOW failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
-
-    // v2.74.94 — Step (advance one step, then re-pause). Sets the flag the
-    // executor consumes after every step completes, unpauses so the
-    // current yield loop exits, and broadcasts so the sidepanel UI flips
-    // out of paused state until the next step boundary.
-    case 'STEP_WORKFLOW': {
-      (async () => {
-        try {
-          const { invocationId } = payload;
-          if (!invocationId) {
-            sendResponse({ success: false, error: 'STEP_WORKFLOW requires invocationId' });
-            return;
-          }
-          const state = _getWorkflowDebugState(invocationId);
-          state.stepRequested = true;
-          // v2.74.101 — Step Into: no prefix constraint, so the first
-          // step-boundary at any depth consumes the request.
-          state.stepOverPrefix = null;
-          state.paused = false;
-          _broadcastWorkflowPauseState(invocationId, false);
-          Logger.info('background', `STEP_WORKFLOW (into) for invocation ${invocationId}`);
-          sendResponse({ success: true });
-        } catch (err) {
-          Logger.error('background', `STEP_WORKFLOW failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
-
-    // v2.74.101 — Step Over: run the current step as a single unit
-    // (including all body iterations of a control-flow step) and pause
-    // at the next sibling step at the same depth. Implementation pins
-    // consumeStepRequest's matching pathPrefix to the parent of the
-    // currently-paused step's path.
-    case 'STEP_OVER_WORKFLOW': {
-      (async () => {
-        try {
-          const { invocationId, stepPath } = payload;
-          if (!invocationId) {
-            sendResponse({ success: false, error: 'STEP_OVER_WORKFLOW requires invocationId' });
-            return;
-          }
-          const state = _getWorkflowDebugState(invocationId);
-          state.stepRequested = true;
-          // Derive parent prefix from the paused step's path. For "2",
-          // parent prefix is "" (top-level loop). For "2.body.1", parent
-          // prefix is "2.body".
-          const lastDot = typeof stepPath === 'string' ? stepPath.lastIndexOf('.') : -1;
-          state.stepOverPrefix = lastDot >= 0 ? stepPath.slice(0, lastDot) : '';
-          state.paused = false;
-          _broadcastWorkflowPauseState(invocationId, false);
-          Logger.info('background', `STEP_OVER_WORKFLOW for invocation ${invocationId} (prefix="${state.stepOverPrefix}")`);
-          sendResponse({ success: true });
-        } catch (err) {
-          Logger.error('background', `STEP_OVER_WORKFLOW failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
-
-    // v2.74.95 — Breakpoint management. SET adds; CLEAR removes; TOGGLE
-    // flips. Top-level step indices only in this pass (path-based
-    // breakpoints for nested steps come later). All three broadcast
-    // WORKFLOW_BREAKPOINTS so the sidepanel UI re-renders its indicators.
-    case 'SET_BREAKPOINT_WORKFLOW':
-    case 'CLEAR_BREAKPOINT_WORKFLOW':
-    case 'TOGGLE_BREAKPOINT_WORKFLOW': {
-      (async () => {
-        try {
-          // v2.74.100 — Path-based addressing. Accept `stepPath` (the
-          // canonical form) or `stepIndex` (legacy top-level). Both
-          // coerce to a string path that matches the executor's
-          // isBreakpoint argument.
-          const { invocationId, workflowId } = payload;
-          let stepPath = payload?.stepPath;
-          if (!stepPath && Number.isFinite(payload?.stepIndex)) {
-            stepPath = String(payload.stepIndex);
-          }
-          if (typeof stepPath !== 'string' || !stepPath) {
-            sendResponse({ success: false, error: 'breakpoint message requires stepPath' });
-            return;
-          }
-
-          // v2.74.99 — Two paths:
-          //   1. invocationId present → mutate the live debug state for
-          //      the in-flight run; persist on the side so the next run
-          //      starts with the same breakpoints.
-          //   2. workflowId only → pre-invocation toggle. Mutates the
-          //      persisted set directly without an active debug state.
-          //
-          // Both paths broadcast WORKFLOW_BREAKPOINTS so any open
-          // workflow-debug sidepanel re-renders.
-
-          if (invocationId) {
-            const state = _getWorkflowDebugState(invocationId);
-            if (msg.type === 'SET_BREAKPOINT_WORKFLOW')   state.breakpoints.add(stepPath);
-            if (msg.type === 'CLEAR_BREAKPOINT_WORKFLOW') state.breakpoints.delete(stepPath);
-            if (msg.type === 'TOGGLE_BREAKPOINT_WORKFLOW') {
-              if (state.breakpoints.has(stepPath)) state.breakpoints.delete(stepPath);
-              else                                 state.breakpoints.add(stepPath);
-            }
-            _broadcastWorkflowBreakpoints(invocationId, state.breakpoints, state.workflowId);
-            if (state.workflowId) {
-              try { await StorageManager.saveStrategyBreakpoints(state.workflowId, [...state.breakpoints]); }
-              catch (e) { Logger.warn('background', `breakpoint persist failed: ${e.message}`); }
-            }
-            sendResponse({ success: true, breakpoints: [...state.breakpoints] });
-            return;
-          }
-
-          if (workflowId) {
-            // Pre-invocation path — load → mutate → save.
-            const current = await StorageManager.getStrategyBreakpoints(workflowId);
-            const set = new Set(current);
-            if (msg.type === 'SET_BREAKPOINT_WORKFLOW')   set.add(stepPath);
-            if (msg.type === 'CLEAR_BREAKPOINT_WORKFLOW') set.delete(stepPath);
-            if (msg.type === 'TOGGLE_BREAKPOINT_WORKFLOW') {
-              if (set.has(stepPath)) set.delete(stepPath);
-              else                   set.add(stepPath);
-            }
-            await StorageManager.saveStrategyBreakpoints(workflowId, [...set]);
-            _broadcastWorkflowBreakpoints(null, set, workflowId);
-            sendResponse({ success: true, breakpoints: [...set] });
-            return;
-          }
-
-          sendResponse({ success: false, error: 'breakpoint message requires { invocationId } OR { workflowId }' });
-        } catch (err) {
-          Logger.error('background', `${msg.type} failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
-
-    // v2.74.99 — Fetch persisted breakpoints for a Strategy. The
-    // workflow-debug sidepanel calls this on mount so gutter dots paint
-    // the saved breakpoints before any invocation runs.
-    case 'GET_WORKFLOW_BREAKPOINTS': {
-      (async () => {
-        try {
-          const { workflowId } = payload;
-          if (!workflowId) {
-            sendResponse({ success: false, error: 'GET_WORKFLOW_BREAKPOINTS requires workflowId' });
-            return;
-          }
-          const list = await StorageManager.getStrategyBreakpoints(workflowId);
-          sendResponse({ success: true, breakpoints: list });
-        } catch (err) {
-          Logger.error('background', `GET_WORKFLOW_BREAKPOINTS failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
+    // (the WORKFLOW domain — SAVE/DELETE/INVOKE/CANCEL/PAUSE/RESUME/STEP/STEP_OVER/BREAKPOINTSx3/
+    // GET_WORKFLOW_BREAKPOINTS — lived here until v2.74.953; CR-X3c migrated it, with its state, to
+    // background/handlers/workflowDebug.js.)
 
     // v2.27.0 — Ground CUD through background.js. Previously sidepanel.js
     // saved Grounds directly via StorageManager; Studio uses the same pattern.
@@ -5174,410 +4609,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // plan, and the planner only poking what it CHOSE is what keeps the sweep
     // from navigating. The artifact is assembled here from the per-band results.
     // Payload: { tabId, groundId?, bandBudget? } → { success, structure, cacheKey }.
-    case 'EXPLORE_PAGE_STRUCTURE': {
-      let _ownsExplore = false;   // v2.74.936 (CR-U2) — only the invocation that ACQUIRED the flags releases them (a refused duplicate must not clear the live sweep's)
-      (async () => {
-        try {
-          const { tabId, groundId = null, bandBudget = 8 } = payload ?? {};
-          if (typeof tabId !== 'number') { sendResponse({ success: false, error: 'tabId required' }); return; }
-          // v2.74.936 (CR-U2) — one sweep per tab: a full sweep can outlive the chat's 120s timeout, whose
-          // "didn't finish" reply invited a SECOND "explore" that interleaved scrolls/pokes with the first
-          // and double-wrote the Locale. A repeat ask gets an honest in-progress reply instead.
-          if (_exploreInFlight.has(tabId)) { Logger.info('background', `EXPLORE ▸ already running on tab ${tabId} — second request refused`); sendResponse({ success: false, error: 'an explore is already running on this tab — it may take a couple of minutes; ask again when it finishes' }); return; }
-          _exploreInFlight.add(tabId);
-          _ownsExplore = true;
-          markEngineBusy(tabId, true);   // v2.74.911 — the poke sweep's clicks must not be monitored as user interactions
-          let _exploreCounts = null;   // v2.74.925 (CR-T2) — {featureCount, goalCount} once the Locale builds; the chat verb narrates them (the response's `structure` never carried features/goals — the .910 counts were silently null)
-          let tabInfo;
-          try { tabInfo = await chrome.tabs.get(tabId); }
-          catch (e) { sendResponse({ success: false, error: `Tab not found: ${e.message}` }); return; }
-          const url = tabInfo?.url ?? '';
-          if (!/^https?:/i.test(url)) {
-            sendResponse({ success: false, error: 'This page does not allow content scripts (chrome://, extension page, or restricted URL).' });
-            return;
-          }
-          try { await chrome.scripting.executeScript({ target: { tabId }, files: ['ContentScripts/contentScript.js'] }); }
-          catch (e) { Logger.warn('background', `EXPLORE_PAGE_STRUCTURE: inject failed (continuing): ${e.message}`); }
-
-          const emitLog = (lines, tag) => { for (const ln of Array.isArray(lines) ? lines : []) Logger.info('explore', `[${tag}] ${ln}`); };
-          // frameId:0 = TOP frame only (else sendMessage fans out to ad/about:blank iframes).
-          const cs = (phasePayload) => chrome.tabs.sendMessage(tabId, { type: 'EXPLORE_PAGE_STRUCTURE', payload: phasePayload }, { frameId: 0 });
-
-          // 1) metrics — scroll to the bottom (trigger lazy content), measure height.
-          let metrics;
-          try { metrics = await cs({ phase: 'metrics' }); }
-          catch (e) { sendResponse({ success: false, error: `Page structure metrics failed: ${e.message}` }); return; }
-          if (!metrics?.success) { sendResponse({ success: false, error: metrics?.error ?? 'metrics returned nothing' }); return; }
-          emitLog(metrics.log, 'metrics');
-          const vh = Number(metrics.viewportH) || 800;
-          const scrollHeight = Number(metrics.scrollHeight) || vh;
-          const title = metrics.title || '';
-          const pageUrl = metrics.url || url;
-
-          // v2.74.561 — DESTRUCTIVE-MUTATION SAFETY (Part 1): capture the read-only
-          // substrate of the AS-LANDED state BEFORE the poke sweep perturbs the page.
-          // The sweep is additive depth-discovery, but it can also DESTROY the entry
-          // state — an SPA view-swap (a "Job description" ⇄ "Application form" toggle)
-          // changes neither the URL nor fires beforeunload, so the in-page nav guard
-          // can't see it and the page is captured on the WRONG view. Enumerating first
-          // makes the user's deliberate state sacred: the form they navigated to is
-          // captured no matter what poking does afterward. The sweep's revealed depth
-          // is merged into THIS model below (mergeDepthFromControls).
-          let enr = null;
-          try { enr = await chrome.tabs.sendMessage(tabId, { type: 'ENUMERATE_PAGE' }, { frameId: 0 }); }
-          catch (e) { Logger.warn('background', `pre-sweep ENUMERATE_PAGE failed (will retry post-sweep): ${e.message}`); }
-          if (enr?.success) Logger.info('explore', `pre-sweep enumerate: ${(enr.features || []).length} feature(s) captured from entry state`);
-
-          // EX-4 (Win C, v2.74.848) — FRESHNESS SHORT-CIRCUIT. The banded poke
-          // sweep (per-band LLM plan + click+snapshot) and synthesizeGoals are the
-          // entire cost of Explore; on a page we've already modeled that hasn't
-          // materially changed, re-running all of it just reproduces the cached
-          // Locale. The pre-sweep enumerate above is a cheap, deterministic content
-          // fingerprint (feature ids are content hashes of kind|label|selector → a
-          // real change detector, not a count). If it matches the cached Locale's
-          // coverage.driftHash AND the cache is recent AND the cache is a real
-          // Explore product (fidelity past L0 — never a shallow manual catalog),
-          // return the cache and skip the sweep + goals entirely.
-          if (groundId && enr?.success && Array.isArray(enr.features)) {
-            try {
-              const freshHash = Locale.driftHashFromRaw(enr.features);
-              const freshKey  = _normalizeUrlForPerspectiveCache(enr.meta?.url ?? pageUrl);
-              const cached    = await _readLocaleCache(groundId, freshKey);
-              const cm        = cached?.model || null;
-              const cov       = cm?.coverage || {};
-              const cachedAt  = Number(cached?.capturedAt ?? cov.lastExploredAt ?? 0);
-              const ageMs     = Date.now() - cachedAt;
-              const FRESH_TTL_MS = 12 * 60 * 60 * 1000;   // 12h — re-explored within the day ⇒ fresh
-              const isExploreProduct = cov.fidelity && cov.fidelity !== 'L0';   // not a manual L0 catalog
-              if (cm && cov.driftHash && cov.driftHash === freshHash && cachedAt > 0 && ageMs < FRESH_TTL_MS && isExploreProduct) {
-                // Reconstruct lightweight reveal-controls from the cached model's
-                // disclosure layers so the sidepanel chip reports the SAME depth the
-                // prior sweep found ("N control(s) reveal hidden content") without
-                // re-poking. Pure derivation from the cache.
-                const synthControls = [];
-                for (const f of Object.values(cm.features || {})) {
-                  if (f?.kind === 'disclosure' && f.reveals) {
-                    const layer = (cm.layers || {})[f.reveals];
-                    const revCount = Array.isArray(layer?.features) ? layer.features.length : 0;
-                    synthControls.push({ selector: f.selector, role: f.a11yRole || 'button', label: f.label || '', observation: 'reveal', revealCount: revCount, revealed: [] });
-                  }
-                }
-                const reuseStructure = {
-                  version: 1, url: cm.url || pageUrl, title: cm.title || title,
-                  capturedAt: cachedAt, driftHash: cov.driftHash, fresh: true,
-                  viewport: cm.viewport || { w: Number(metrics.viewportW) || tabInfo.width || 0, h: vh },
-                  surface: [], controls: synthControls, planned: true,
-                  ...(cm.affordances ? { affordances: cm.affordances } : {}),
-                  stats: {
-                    candidates: cov.featureCount ?? Object.keys(cm.features || {}).length,
-                    controlsTried: synthControls.length, controlsRevealing: synthControls.length,
-                    totalRevealed: synthControls.reduce((n, c) => n + c.revealCount, 0),
-                    navAttempts: 0, bands: 0, aborted: null, freshSkip: true,
-                  },
-                };
-                Logger.info('explore', `locale-fresh-skip: cached Locale matches current enumerate (driftHash ${freshHash}, age ${Math.round(ageMs / 60000)}m, ${Object.keys(cm.features || {}).length} feature(s), ${synthControls.length} disclosure(s)) — skipped poke sweep + goal synthesis`);
-                sendResponse({ success: true, structure: reuseStructure, cacheKey: freshKey, fresh: true, featureCount: Object.keys(cm.features || {}).length, goalCount: Object.keys(cm.goals || {}).length });   // v2.74.925 (CR-T2) — counts for the chat explore narration
-                return;
-              }
-            } catch (e) { Logger.warn('background', `locale-fresh-skip check failed (continuing with full sweep): ${e.message}`); }
-          }
-
-          // Band stops, BOTTOM-TO-TOP: from (scrollHeight - vh) up to 0.
-          const step = Math.max(1, Math.round(vh * 0.85));
-          const bandYs = [];
-          for (let y = Math.max(0, scrollHeight - vh); y > 0; y -= step) bandYs.push(y);
-          bandYs.push(0);   // always include the top band
-          Logger.info('explore', `EXPLORE_PAGE_STRUCTURE: banded walk — height ${scrollHeight}, vh ${vh}, ${bandYs.length} band(s), bandBudget ${bandBudget}`);
-
-          const seenCand = new Set();   // all enumerated selectors (for the count)
-          const seenPoked = new Set();  // selectors already poked (cross-band dedup)
-          const surfSeen = new Set();
-          const allSurface = [];
-          const allControls = [];
-          let totalNav = 0, cid = 0, aborted = null;
-
-          // v2.74.483 — Chrome-skip (GROUND_SPEC § 4): any chrome disclosure already promoted
-          // (with its depth captured on a prior archetype) need not be RE-poked here. Seed
-          // seenPoked with those selectors so the per-band planner never proposes them and the
-          // poke skips them — saving an LLM plan call + a click+snapshot for every recurring
-          // menu (the header account dropdown, mega-nav, etc.). The depth is grafted back after
-          // the merge (graftChromeDepth) so the Locale still ends up self-contained.
-          let groundChrome = null, chromeSkipped = 0;
-          if (groundId) {
-            try {
-              groundChrome = await _readGroundChrome(groundId);
-              const cl = groundChrome?.chromeLayers || {};
-              for (const base of Object.values(groundChrome?.chrome || {})) {
-                if (base?.kind === 'disclosure' && base.reveals && cl[base.reveals] && base.selector && !seenPoked.has(base.selector)) {
-                  seenPoked.add(base.selector); chromeSkipped++;
-                }
-              }
-              if (chromeSkipped) Logger.info('explore', `chrome-skip: ${chromeSkipped} known chrome disclosure(s) won't be re-poked (depth grafted from Ground.chrome)`);
-            } catch (e) { Logger.warn('background', `chrome-skip load failed (continuing): ${e.message}`); }
-          }
-
-          // v2.74.379 — Navigation recovery. A poked control can navigate via a
-          // `location.href = …` assignment, which the in-page guard CANNOT
-          // intercept. Detect it, go back to pageUrl, re-inject, and continue the
-          // remaining bands (the navigator is already in seenPoked → not
-          // re-poked). Capped to avoid nav loops eating the whole run.
-          const norm = (u) => _normalizeUrlForPerspectiveCache(u || '');
-          let recoveries = 0;
-          const waitForTabLoad = async (timeoutMs = 8000) => {
-            const t1 = Date.now();
-            while (Date.now() - t1 < timeoutMs) {
-              let info; try { info = await chrome.tabs.get(tabId); } catch { return false; }
-              if (info && info.status === 'complete') return true;
-              await new Promise(r => setTimeout(r, 200));
-            }
-            return true;
-          };
-          const ensureOnPage = async () => {
-            let cur; try { cur = await chrome.tabs.get(tabId); } catch { return false; }
-            if (norm(cur?.url) === norm(pageUrl)) return true;
-            if (recoveries >= 3) { Logger.warn('explore', `recovery limit reached (stuck at ${cur?.url})`); return false; }
-            recoveries++;
-            Logger.warn('explore', `navigated away to ${cur?.url} — returning to ${pageUrl} (recovery ${recoveries}/3)`);
-            try {
-              await chrome.tabs.update(tabId, { url: pageUrl });
-              await waitForTabLoad();
-              await new Promise(r => setTimeout(r, 400));
-              try { await chrome.scripting.executeScript({ target: { tabId }, files: ['ContentScripts/contentScript.js'] }); } catch { /* */ }
-              return true;
-            } catch (e) { Logger.warn('explore', `recovery failed: ${e.message}`); return false; }
-          };
-
-          for (const y of bandYs) {
-            // Recover first if a prior poke navigated the tab away.
-            if (!(await ensureOnPage())) { aborted = aborted || 'navigation-unrecovered'; break; }
-
-            // a) content-script enumerates the candidates VISIBLE in this band.
-            let band;
-            try { band = await cs({ phase: 'band', scrollY: y }); }
-            catch (e) { Logger.warn('background', `band y=${y} enumerate failed: ${e.message}`); continue; }
-            if (!band?.success) continue;
-            emitLog(band.log, 'band');
-            for (const s of Array.isArray(band.surface) ? band.surface : []) {
-              const k = `${s.role}|${s.label}|${s.rect?.x},${s.rect?.y}`;
-              if (!surfSeen.has(k)) { surfSeen.add(k); if (allSurface.length < 400) allSurface.push(s); }
-            }
-            // Carry-forward: dedup on what's been POKED, not enumerated — a
-            // candidate the planner skipped in an earlier (overlapping) band
-            // reappears here and gets another chance when it's more central.
-            for (const c of Array.isArray(band.candidates) ? band.candidates : []) { if (c?.selector) seenCand.add(c.selector); }
-            const bandCands = (Array.isArray(band.candidates) ? band.candidates : []).filter(c => c?.selector && !seenPoked.has(c.selector));
-            if (!bandCands.length) continue;
-
-            // b) screenshot THIS band (matches the candidates exactly).
-            let shot = null;
-            if (tabInfo.active) {
-              try { shot = await chrome.tabs.captureVisibleTab(tabInfo.windowId, { format: 'jpeg', quality: 55 }); }
-              catch (e) { Logger.warn('background', `band y=${y} screenshot failed: ${e.message}`); }
-            }
-            // c) LLM plans which of THIS band's candidates to poke.
-            let planSels = [];
-            try {
-              const planned = await AnthropicService.planPageExploration({ url: pageUrl, title, candidates: bandCands, screenshot: shot, maxPokes: bandBudget });
-              if (planned && Array.isArray(planned.plan)) planSels = planned.plan;
-            } catch (e) { Logger.warn('background', `band y=${y} planner failed: ${e.message}`); }
-            planSels = planSels.filter(s => s && !seenPoked.has(s));
-            for (const s of planSels) seenPoked.add(s);   // mark BEFORE poking → a navigator is never re-poked
-            Logger.info('explore', `band y=${y}: ${bandCands.length} candidate(s) (poke-deduped), planned ${planSels.length}`);
-            if (!planSels.length) continue;
-
-            // d) content-script pokes ONLY the planned controls, verifying each.
-            let pk = null;
-            try { pk = await cs({ phase: 'poke', selectors: planSels, cidStart: cid }); }
-            catch (e) { Logger.warn('background', `band y=${y} poke failed (likely navigation) — will recover next band: ${e.message}`); }
-            if (pk?.success) {
-              emitLog(pk.log, 'poke');
-              for (const c of Array.isArray(pk.controls) ? pk.controls : []) allControls.push(c);
-              cid += (pk.controls?.length || 0);
-              totalNav += pk.navAttempts || 0;
-              if (pk.aborted === 'navigation') Logger.warn('explore', `band y=${y}: a poke navigated — recovering on next band`);
-            }
-            // If pk failed, the frame likely navigated; ensureOnPage (next iter) recovers.
-          }
-
-          // Restore AFTER the loop (UNconditionally — bypasses the recovery cap):
-          // a navigation in the LAST band has no "next band" to heal it, so
-          // without this the user's tab is left on the navigated-to page.
-          try {
-            const cur = await chrome.tabs.get(tabId);
-            if (norm(cur?.url) !== norm(pageUrl)) {
-              Logger.warn('explore', `restoring tab to ${pageUrl} (was ${cur?.url})`);
-              await chrome.tabs.update(tabId, { url: pageUrl });
-              await waitForTabLoad();
-              await new Promise(r => setTimeout(r, 400));
-              try { await chrome.scripting.executeScript({ target: { tabId }, files: ['ContentScripts/contentScript.js'] }); } catch { /* */ }
-            }
-          } catch (e) { Logger.warn('explore', `final restore failed: ${e.message}`); }
-
-          // cleanup — close any leftover overlay, scroll to top.
-          try { const cl = await cs({ phase: 'cleanup' }); emitLog(cl?.log, 'cleanup'); }
-          catch (e) { Logger.warn('background', `cleanup failed: ${e.message}`); }
-
-          // Assemble the artifact from the per-band results.
-          const controlsRevealing = allControls.filter(c => c?.observation === 'reveal').length;
-          const totalRevealed = allControls.reduce((n, c) => n + (Number(c?.revealCount) || 0), 0);
-          const fp = `${scrollHeight}#${seenCand.size}#${pageUrl}#` + allControls.map(c => `${c.role}:${(c.label || '').slice(0, 16)}`).sort().join('|');
-          let hsh = 5381; for (let i = 0; i < fp.length; i++) hsh = ((hsh << 5) + hsh + fp.charCodeAt(i)) | 0;
-          const structure = {
-            version: 1, url: pageUrl, title, capturedAt: Date.now(), driftHash: (hsh >>> 0).toString(36),
-            viewport: { w: Number(metrics.viewportW) || tabInfo.width || 0, h: vh },
-            surface: allSurface, controls: allControls, planned: true,
-            stats: { candidates: seenCand.size, controlsTried: allControls.length, controlsRevealing, totalRevealed, navAttempts: totalNav, bands: bandYs.length, aborted },
-          };
-          Logger.info('explore', `EXPLORE_PAGE_STRUCTURE done: ${bandYs.length} band(s), poked ${allControls.length}, revealed ${controlsRevealing}, navAttempts ${totalNav}${aborted ? `, aborted=${aborted}` : ''}`);
-
-          // v2.74.393 — Page-affordance description (intent-independent "what
-          // goals can be accomplished here"), cached on the artifact so the
-          // grounded-intent step can reuse it without recomputing per intent.
-          try {
-            let affShot = null;
-            if (tabInfo.active) { try { affShot = await chrome.tabs.captureVisibleTab(tabInfo.windowId, { format: 'jpeg', quality: 55 }); } catch { /* */ } }
-            const affordances = await AnthropicService.describePageAffordances({ url: pageUrl, title, surface: allSurface, controls: allControls, screenshot: affShot });
-            if (affordances) { structure.affordances = affordances; Logger.info('explore', `affordances described (${affordances.length} chars)`); }
-          } catch (e) { Logger.warn('background', `describePageAffordances failed (continuing): ${e.message}`); }
-
-          // v2.74.427 — #2 P5: pageStructure is no longer persisted as its own
-          // artifact. The sweep's `structure` stays in-memory — folded into the
-          // Locale below (mergeDepthFromControls) + returned for the sidepanel's
-          // post-Explore chip; only the Locale is cached.
-          const cacheKey = _normalizeUrlForPerspectiveCache(pageUrl);
-
-          // v2.74.399 — Also build the Locale catalog (L0) from a read-only
-          // enumerate pass, so the two artifacts stay in sync and Resolve's catalog
-          // consumer (_knownSelectorsForUrl) has data without a separate manual
-          // build. Best-effort; never fails the Explore response. The content
-          // script is already injected (the sweep used it).
-          try {
-            // v2.74.561 — Prefer the PRE-sweep enumerate (entry state intact, captured
-            // before any poke could swap the view). Only fall back to a fresh post-sweep
-            // pass if the pre-sweep enumerate failed — never overwrite a good entry-state
-            // capture with the (possibly perturbed) post-sweep DOM.
-            if (!enr?.success) {
-              try { enr = await chrome.tabs.sendMessage(tabId, { type: 'ENUMERATE_PAGE' }, { frameId: 0 }); }
-              catch (e) { Logger.warn('background', `post-sweep ENUMERATE_PAGE fallback failed: ${e.message}`); }
-            }
-            if (enr?.success) {
-              const model = Locale.buildLocale(enr.features, { ...enr.meta, groundId });   // G1-2 — bind the Locale to its Ground
-              // v2.74.404 — L1 depth: merge THIS sweep's poke→reveal data (already
-              // captured in `structure.controls`) into the model as Layers, so
-              // disclosures (Explore / All images) become resolvable triggers — no
-              // re-poking. The manual 🗂 catalog stays L0 (it never poked).
-              try { Locale.mergeDepthFromControls(model, structure?.controls || []); }
-              catch (e) { Logger.warn('background', `mergeDepthFromControls failed (continuing): ${e.message}`); }
-              // v2.74.483 — graft the depth of any chrome disclosure we SKIPPED re-poking
-              // above (chrome-skip), so this Locale ends up self-contained with the menu's
-              // reveal layer + children — without the click+snapshot cost. No-op when nothing
-              // was skipped or the trigger isn't present.
-              if (groundChrome && chromeSkipped) {
-                try { ChromeHoist.graftChromeDepth(model, groundChrome); }
-                catch (e) { Logger.warn('background', `chrome depth graft failed (continuing): ${e.message}`); }
-              }
-              // v2.74.408 — L2: synthesize structured Goals from the catalog (LLM)
-              // and attach them (feeds intent-grounding + perspective seeding). The
-              // manual 🗂 catalog stays L0/L1 (no LLM goals call).
-              try {
-                const g = await AnthropicService.synthesizeGoals({ model, url: enr.meta?.url ?? pageUrl, title, affordances: structure.affordances });
-                if (g?.goals?.length) Locale.attachGoals(model, g.goals);
-              } catch (e) { Logger.warn('background', `synthesizeGoals failed (continuing): ${e.message}`); }
-              // v2.74.637 — SG-0.5-F2: derive a goal PER disclosure-unit (PURE, no LLM) and merge it
-              // alongside the LLM goals. synthesizeGoals lumps filter dropdowns (3-8 cap) and references
-              // the triggers not the options; deriveDisclosureGoals walks reveals→layer to give Select/bind
-              // a complete per-filter goal (Pay = dropdown + brackets + Update). Runs unconditionally so the
-              // filter goals exist even if the LLM goals call failed. attachGoals merges (id = label+via).
-              try { const dg = Locale.deriveDisclosureGoals(model); if (dg.length) Locale.attachGoals(model, dg); }
-              catch (e) { Logger.warn('background', `deriveDisclosureGoals failed (continuing): ${e.message}`); }
-              // v2.74.495 — derive within-Locale composites (search box / forms → `parts`) so the
-              // partOf edge is real on the final feature set (post depth + goals). Best-effort.
-              try { Locale.attachComposites(model); } catch (e) { Logger.warn('background', `attachComposites failed (continuing): ${e.message}`); }
-              // v2.74.426 — #2 P1: the free-text affordance description lives ON the
-              // Locale now (was only on pageStructure). Consumers read locale.affordances.
-              if (structure.affordances) model.affordances = structure.affordances;
-              // EX-5 (critic #4, v2.74.849) — score the Locale's trustworthiness for
-              // authoring (pure, from coverage + structure.stats) and STAMP the tier on
-              // coverage so it travels with the cached Locale. The auto-explore
-              // orchestrator (EX-6) will gate on this; a MANUAL Explore never blocks
-              // (the user asked for it) — here it's advisory: persist + warn.
-              try {
-                const trust = Locale.localeTrust(model, structure);
-                model.coverage.trust = trust.tier;
-                model.coverage.trustScore = trust.score;
-                if (trust.tier === 'trusted') Logger.info('explore', `locale-trust: trusted (score ${trust.score}, ${trust.signals.featureCount} feature(s), ${trust.signals.goalCount} goal(s))`);
-                else Logger.warn('explore', `locale-trust: ${trust.tier} (score ${trust.score}) — ${trust.reasons.map(r => r.code).join(', ')}`);
-              } catch (e) { Logger.warn('background', `localeTrust failed (continuing): ${e.message}`); }
-              const localeKey = _normalizeUrlForPerspectiveCache(enr.meta?.url ?? pageUrl);
-              if (groundId) await _writeLocaleCache(groundId, localeKey, { model, url: enr.meta?.url ?? pageUrl, capturedAt: model.coverage.lastExploredAt });
-              // v2.74.431 — Ground siteMap (GROUND_SPEC § 7): merge this Locale's
-              // contribution — a modeled node for this page + discovered nodes/edges
-              // for every same-site nav destination it surfaced. One Explore sketches
-              // the whole territory; a later Explore of a discovered page upgrades its
-              // node modeled.
-              if (groundId) {
-                try {
-                  // v2.74.438 — template through any persisted corpus rules (from sitemap
-                  // ingestion) so this modeled node lands on the SAME archetype as the
-                  // crawl/stub it upgrades.
-                  const existingSm = await _readSiteMap(groundId);
-                  const rules = (existingSm && existingSm.templateRules) || [];
-                  await _mergeSiteMapForGround(groundId, SiteMap.siteMapFromLocale(model, { localeKey, rules }));
-                } catch (e) { Logger.warn('background', `siteMap contribution failed (continuing): ${e.message}`); }
-                // v2.74.481 — re-derive Ground.chrome now that one more Locale is modeled
-                // (GROUND_SPEC § 4). Additive/non-destructive this slice. Never fails Explore.
-                try { await _deriveGroundChrome(groundId); }
-                catch (e) { Logger.warn('background', `Ground.chrome derive failed (continuing): ${e.message}`); }
-                await syncGroundAssetsAfterSave(groundId, {
-                  localeKey,
-                  siteMap: true,
-                  chrome: !!(await _readGroundChrome(groundId)),
-                });
-              }
-              const layerCount = Object.keys(model.layers || {}).length - 1;   // minus the surface layer
-              _exploreCounts = { featureCount: Object.keys(model.features).length, goalCount: Object.keys(model.goals || {}).length };   // v2.74.925 (CR-T2)
-              Logger.info('explore', `Locale built alongside Explore: ${Object.keys(model.features).length} feature(s), ${Math.max(0, layerCount)} depth layer(s), ${Object.keys(model.goals || {}).length} goal(s), fidelity ${model.coverage.fidelity}`);
-
-              // v2.74.417 — OUTCOMES: poke-reveal events (OUTCOMES_SPEC § 5). A
-              // poke that REVEALED is a free, deterministic "this element IS a
-              // disclosure" label — confirm the disclosure Feature's health and
-              // bank a positive training pair. Only revealing pokes are emitted:
-              // a control that (correctly) opens nothing must NOT log a poke-miss,
-              // which foldFeatureHealth would count as a resolve-miss and decay a
-              // perfectly healthy action button.
-              try {
-                if (groundId && model.features) {
-                  const selToFid = new Map();
-                  for (const f of Object.values(model.features)) if (f?.selector && f?.id && !selToFid.has(f.selector)) selToFid.set(f.selector, f.id);
-                  const pokeEvents = [];
-                  for (const c of structure?.controls || []) {
-                    if (!c?.selector || c.observation !== 'reveal') continue;
-                    const revealed = Array.isArray(c.revealed) ? c.revealed : [];
-                    if (!revealed.length) continue;
-                    pokeEvents.push(Outcomes.makeEvent({
-                      phase: 'author', op: 'poke',
-                      groundId, perspectiveId: enr.meta?.url ?? pageUrl,
-                      featureId: selToFid.get(c.selector) ?? null,
-                      input: { roleOrIntent: c.label || c.role || '' },
-                      llmOutput: { selector: c.selector, operation: 'explore-poke' },
-                      verdict: 'verified',
-                      detail: { matchedCount: revealed.length, reason: c.overlay ? 'overlay-reveal' : 'inline-reveal' },
-                    }));
-                  }
-                  if (pokeEvents.length) { await _appendOutcomes(groundId, pokeEvents); Logger.info('outcomes', `explore poke-reveal → ${pokeEvents.length} disclosure confirmation(s)`); }
-                }
-              } catch (e) { Logger.warn('background', `poke-reveal outcomes emit failed (continuing): ${e.message}`); }
-            }
-          } catch (e) { Logger.warn('background', `Locale build during Explore failed (continuing): ${e.message}`); }
-
-          sendResponse({ success: true, structure, cacheKey, ...(_exploreCounts || {}) });   // v2.74.925 (CR-T2)
-        } catch (err) {
-          Logger.error('background', `EXPLORE_PAGE_STRUCTURE failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })().finally(() => { if (_ownsExplore && typeof payload?.tabId === 'number') { markEngineBusy(payload.tabId, false); _exploreInFlight.delete(payload.tabId); } });   // v2.74.911; ownership-gated v2.74.936 (CR-U2)
-      return true;
-    }
+    // (EXPLORE_PAGE_STRUCTURE lived here until v2.74.951 — CR-X3a migrated the explore domain, with
+    // its in-flight set, to background/handlers/explore.js.)
 
     // v2.74.446 — Cross-locale label harvest (language-agnostic resolution, slice 3b).
     // For a just-modeled archetype with multiple locales, enumerate its OTHER-language
@@ -6068,25 +5101,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
-    // PB-4 (R8) — run a TRIAL of the resolved bundle as the intent-truth proof. Synthesize a trial
-    // op (Core/trialSynth), safety-class it (an irreversible commit becomes a reachability probe, not
-    // a click), wrap as a THROWAWAY Fragment+Strategy, run via ExecutionEngine, then tear down. The
-    // raw result + extracts go back for PB-5 to score. Not UI-wired yet (PB-6 orchestrates the flow).
-    case 'RUN_PERSPECTIVE_TRIAL': {
-      (async () => {
-        try {
-          const { groundId = null, intent = '', roles, navigateUrl = null, proposedRoleCount = 0 } = payload ?? {};
-          if (!groundId || !Array.isArray(roles) || !roles.length) { sendResponse({ success: false, error: 'groundId + roles required' }); return; }
-          let localeModel = null;
-          try { const pm = await _readLocaleCache(groundId, _normalizeUrlForPerspectiveCache(navigateUrl || '')); localeModel = pm?.model || null; } catch { /* */ }
-          sendResponse(await _runTrialBundle({ groundId, intent, roles, localeModel, navigateUrl, proposedRoleCount }));
-        } catch (err) {
-          Logger.error('background', `RUN_PERSPECTIVE_TRIAL failed: ${err.message}`);
-          sendResponse({ success: false, error: err.message });
-        }
-      })();
-      return true;
-    }
+    // (RUN_PERSPECTIVE_TRIAL lived here until v2.74.950 — CR-X3 migrated it into the registry beside
+    // its twin RUN_SG_TRIAL in background/handlers/sg.js.)
 
     // SG-5 / PB-7 — RUN_SG_TRIAL, ACCEPT_SG_TRIAL, REPLAY_SG_CAPABILITY moved to the registry (background/handlers/sg.js, R1).
 
@@ -6787,188 +5803,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // ── Template JSON edit (paste-and-save from UI) ───────────────────────────
 
 
-    case 'START_DISCOVERY': {
-      (async () => {
-        // v2.74.41 — existingTabId lets the Ground sidepanel run
-        // discovery against the user's current tab instead of opening
-        // a dedicated background tab.
-        const { groundId, existingTabId = null } = payload;
-        if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
-        if (discoveryAbortFlags.has(groundId)) {
-          sendResponse({ success: false, error: 'Discovery already running for this ground' });
-          return;
-        }
-        discoveryAbortFlags.set(groundId, false);
-        Logger.info('background', `START_DISCOVERY — ground ${groundId}${existingTabId != null ? ` (reuse tab ${existingTabId})` : ''}`);
-
-        // Fire-and-forget: broadcast progress and final result; return immediately
-        sendResponse({ success: true, started: true });
-        (async () => {
-          try {
-            // v2.74.450 — drift (§8 slice 2): snapshot the prior siteMap BEFORE any merge,
-            // so we can report what this (re-)discovery changed.
-            const prevSiteMap = await _readSiteMap(groundId);
-            let sitemapUrls = [];   // v2.74.451 — kept for removal detection (authoritative set)
-            let sitemapTruncated = false;   // v2.74.458 — was that set CAPPED (MAX_URLS)? then it's NOT authoritative
-            // v2.74.438 — Completeness slice 2b: sitemap.xml is the authoritative page
-            // set (the bounded crawl can't reach the whole site). Fetch it FIRST → fold
-            // as `stub` archetypes + persist the corpus template rules, so the crawl
-            // below templates through the SAME rules and upgrades these stubs in place
-            // (stub → discovered). Best-effort; on any failure the crawl runs crawl-only.
-            try {
-              const g = await StorageManager.getGround(groundId);
-              const origin = g?.url ? new URL(g.url).origin : null;
-              if (origin && discoveryAbortFlags.get(groundId) !== true) {
-                chrome.runtime.sendMessage({ type: 'DISCOVERY_PROGRESS', payload: { groundId, visited: 0, total: 0, currentUrl: 'Reading sitemap.xml…', currentPageType: 'sitemap' } }).catch(() => {});
-                let { urls, count, blocked, status, reason, truncated } = await SitemapService.fetchSitemapUrls(origin);
-                // v2.74.455 — the SW fetch was blocked by a bot-challenge (Cloudflare 403, or a
-                // 200 "Just a moment…" interstitial). Retry over an IN-TAB content-script fetch:
-                // a tab on the origin auto-solves the challenge and the content-script fetch rides
-                // the user's first-party session, so the sitemap is reachable. This recovers the
-                // authoritative URL set — the source of removal detection (drift §8) that the
-                // crawl alone can't provide.
-                if (blocked && !urls.length && discoveryAbortFlags.get(groundId) !== true) {
-                  Logger.info('background', `sitemap[${groundId}] SW fetch BLOCKED (${reason}) — retrying via in-tab fetch…`);
-                  chrome.runtime.sendMessage({ type: 'DISCOVERY_PROGRESS', payload: { groundId, visited: 0, total: 0, currentUrl: 'Reading sitemap.xml (in-tab)…', currentPageType: 'sitemap' } }).catch(() => {});
-                  const viaTab = await _fetchSitemapViaTab(origin, () => discoveryAbortFlags.get(groundId) === true);
-                  if (viaTab && Array.isArray(viaTab.urls) && viaTab.urls.length) {
-                    ({ urls, count, blocked, status, reason, truncated } = viaTab);
-                    Logger.info('background', `sitemap[${groundId}] in-tab fetch recovered ${count} URL(s)`);
-                  } else if (viaTab) {
-                    ({ blocked, status, reason } = viaTab);   // still blocked — keep the diagnostic
-                  }
-                }
-                sitemapUrls = Array.isArray(urls) ? urls : [];
-                sitemapTruncated = !!truncated;
-                if (urls.length) {
-                  await _mergeSiteMapForGround(groundId, SiteMap.siteMapFromSitemap(urls));
-                  await syncGroundAssetsAfterSave(groundId, { siteMap: true });
-                  Logger.info('background', `sitemap seeded ${count} stub archetype URL(s) for ${groundId}`);
-                } else if (blocked) {
-                  // v2.74.452/455 — a Cloudflare/WAF challenge blocked the sitemap even via the
-                  // in-tab fetch: removal detection is unavailable this run (the crawl can't prove
-                  // absence). Templating still works — siteMapFromCrawl derives locale/slug rules
-                  // from the crawl's own URLs (v453). Surface WHY so it's never a silent degrade.
-                  Logger.warn('background', `sitemap[${groundId}] BLOCKED (${reason}) — even in-tab fetch could not reach it; removal detection off, templating from crawl corpus this run`);
-                }
-              }
-            } catch (e) { Logger.warn('background', `sitemap ingestion skipped: ${e.message}`); }
-
-            // v2.74.440 — Architecture crawl (slice 3): seed the crawl from the persisted
-            // siteMap — corpus rules (so the crawl groups URLs by archetype) + one exemplar
-            // URL per known archetype (so coverage spans the architecture, not just what's
-            // link-reachable from the homepage). The crawl visits one representative per
-            // archetype, upgrading stubs → discovered.
-            let templateRules = [];
-            let seedUrls = [];
-            try {
-              const sm = await _readSiteMap(groundId);
-              if (sm) {
-                templateRules = sm.templateRules || [];
-                seedUrls = sm.nodes ? Object.values(sm.nodes).map((n) => n.exemplarUrl).filter(Boolean) : [];
-              }
-            } catch (e) { Logger.warn('background', `siteMap seed read failed: ${e.message}`); }
-
-            const { pages, error, aborted } = await DiscoveryService.discover({
-              groundId,
-              existingTabId,
-              templateRules,
-              seedUrls,
-              onProgress: (progress) => {
-                chrome.runtime.sendMessage({
-                  type: 'DISCOVERY_PROGRESS',
-                  payload: { groundId, ...progress },
-                }).catch(() => {});
-              },
-              isAborted: () => discoveryAbortFlags.get(groundId) === true,
-            });
-            if (error) {
-              chrome.runtime.sendMessage({
-                type: 'DISCOVERY_FAILED',
-                payload: { groundId, error },
-              }).catch(() => {});
-            } else {
-              // v2.74.432 — Ground arc: the multi-page crawl IS the siteMap's breadth
-              // source (GROUND_SPEC § 9). Fold every crawled page → a node (with
-              // pageType) and every same-site outgoing link → an edge. A later Explore
-              // upgrades a page's node to `modeled`. v2.74.434 — the siteMap is now the
-              // ONLY persisted structural record (the GroundMap was retired).
-              const crawled = pages || [];
-              let siteMapStats = null;
-              let drift = null;
-              try {
-                // v2.74.438 — template the crawl through the corpus rules the sitemap
-                // ingestion persisted, so crawl nodes align with the stub archetypes.
-                const existing = await _readSiteMap(groundId);
-                const rules = (existing && existing.templateRules) || [];
-                await _mergeSiteMapForGround(groundId, SiteMap.siteMapFromCrawl(crawled, { rules }));
-                await syncGroundAssetsAfterSave(groundId, { siteMap: true });
-                const sm = await _readSiteMap(groundId);
-                siteMapStats = sm ? SiteMap.siteMapStats(sm) : null;
-                // v2.74.450 — drift (§8): what changed vs the prior siteMap. The persisted
-                // map is cumulative (merge is additive), so the diff gives `added` (NEW
-                // archetypes) + `statusChanged` (upgrades, e.g. stub→discovered).
-                // v2.74.451 — `removed` is computed separately against the AUTHORITATIVE
-                // current sitemap URL set (a prior archetype absent from it is gone) —
-                // only when a sitemap was found, since a budgeted crawl alone can't prove
-                // absence. Report-only (no pruning yet).
-                // v2.74.458 — …AND only when that set is COMPLETE. A truncated sitemap (capped
-                // at MAX_URLS — pixabay returns 5000 of millions) is just a window, not the full
-                // page set, so a prior stub's absence from it does NOT prove removal — it may
-                // simply have fallen outside the cap (or the window shifted, e.g. pixabay's
-                // dynamic search-keyword sitemap). Computing `removed` against a partial set
-                // false-positives en masse, so suppress it when truncated.
-                let removalSkipped = false;
-                if (sm) {
-                  try {
-                    const d = SiteMap.diffSiteMap(prevSiteMap, sm).counts;
-                    let removed = 0;
-                    if (sitemapUrls.length && !sitemapTruncated && prevSiteMap?.nodes) {
-                      const r2 = sm.templateRules || rules || [];
-                      const runIds = new Set(sitemapUrls.map((u) => { try { return SiteMap.archetypeId(SiteMap.templatePattern(u, r2)); } catch { return null; } }));
-                      // Only `stub` nodes are sitemap-ONLY (never crawled/modeled): a stub that
-                      // vanished from the current sitemap is a confident removal. Crawl-discovered
-                      // / Explore-modeled nodes legitimately live outside the sitemap (homepage,
-                      // link-only pages) — judging them by sitemap membership false-positives.
-                      removed = Object.values(prevSiteMap.nodes).filter((n) => n.status === 'stub' && !runIds.has(n.id)).length;
-                    } else if (sitemapUrls.length && sitemapTruncated && prevSiteMap?.nodes) {
-                      removalSkipped = true;   // had a sitemap + prior map, but the set was capped
-                    }
-                    drift = { ...d, removed, removalSkipped };
-                  } catch { /* */ }
-                }
-              } catch (e) { Logger.warn('background', `siteMap from crawl failed (continuing): ${e.message}`); }
-              if (drift) Logger.info('explore', `discovery drift[${groundId}]: +${drift.added} new · ${drift.statusChanged} status-changed · ${drift.removalSkipped ? 'removal n/a (sitemap truncated)' : `${drift.removed || 0} removed`} · ${drift.unchanged} unchanged`);
-              chrome.runtime.sendMessage({
-                type: 'DISCOVERY_COMPLETE',
-                payload: { groundId, pageCount: crawled.length, siteMapStats, drift, aborted: !!aborted },
-              }).catch(() => {});
-            }
-          } catch (err) {
-            Logger.error('background', `Discovery unhandled: ${err.message}`);
-            chrome.runtime.sendMessage({
-              type: 'DISCOVERY_FAILED',
-              payload: { groundId, error: err.message },
-            }).catch(() => {});
-          } finally {
-            discoveryAbortFlags.delete(groundId);
-          }
-        })();
-      })();
-      return true;
-    }
-
-    case 'ABORT_DISCOVERY': {
-      const { groundId: abortId } = payload;
-      if (discoveryAbortFlags.has(abortId)) {
-        discoveryAbortFlags.set(abortId, true);
-        Logger.info('background', `Discovery abort requested for ground ${abortId}`);
-        sendResponse({ success: true });
-      } else {
-        sendResponse({ success: false, error: 'No active discovery for this ground' });
-      }
-      return false;
-    }
+    // (START_DISCOVERY + ABORT_DISCOVERY lived here until v2.74.952 — CR-X3b migrated the discovery
+    // domain, with its abort-flag map + in-tab sitemap fetcher, to background/handlers/discovery.js.)
 
     case 'GET_SETTING': {
       const { key, defaultValue } = payload;

@@ -22,7 +22,6 @@
  *
  * @module Sidepanel/modes/perspective-capture
  * @author Agent HUB
- * @version 2.72.50
  */
 
 import { toast, getActiveTab, pingContentScript, exitToStudio, requestModeChange } from '../shell-api.js';

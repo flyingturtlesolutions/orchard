@@ -10,7 +10,6 @@
 // and any chat surface (the existing chat.js, a future mode) consumes the same brain.
 //
 // @module Core/orchTurn
-// @version 2.74.665
 
 const _q = (s) => `“${String(s == null ? 'that' : s).trim() || 'that'}”`;   // “…”
 

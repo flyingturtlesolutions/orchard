@@ -16,7 +16,6 @@
  * kept alongside for back-compat consumers during the transition.
  *
  * @module Core/perspectiveComposition
- * @version 2.74.332
  */
 
 /**

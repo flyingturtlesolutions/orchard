@@ -20,7 +20,6 @@
 // "you searched the wrong category, should be Vectors" → {kind:'wrong_value', correction:{CATEGORY:'Vectors'}}.
 //
 // @module Core/orchFeedback
-// @version 2.74.688
 
 export const CORRECTIVE_KINDS = Object.freeze(['reject_match', 'reject_run', 'wrong_value', 'retract', 'undo', 'affirm']);
 

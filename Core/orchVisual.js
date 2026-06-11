@@ -8,7 +8,6 @@
 // No DOM / chrome / network. See specs/DESIGN_intent_orchestration.md (grounding=mechanism, the LLM=meaning).
 //
 // @module Core/orchVisual
-// @version 2.74.742
 
 /**
  * Turn a CONDITION phrase into a vision-read description that COUNTS the real items and treats empty/decoy states as
@@ -132,4 +131,37 @@ export function withCriteria(description, criteria) {
   const d = String(description || '');
   if (!c) return d;
   return `${d}\n- The page should be showing RESULTS for the user's search: ${c}. A visible item that does NOT match that search — a suggestion, recommendation, "popular"/"similar" item, or anything unrelated to the criteria — counts as 0, even if it looks like the same kind of item.`;
+}
+
+/**
+ * v2.74.946 (CR-D7) — render a plan's steps as the numbered confirm-card lines. Was verbatim-duplicated in
+ * chat's two confirm cards (_orchConfirmPlan vs _orchOfferComprehended); this is the SUPERSET version — the
+ * comprehended card's steps simply lack bindings/collect/wait, so those affordances render as ''. A gate's
+ * CONDITION machinery (the observe it tests + the analyze that judges it) is shown INLINE on the gate line,
+ * not as its own numbered steps — a conditional reads as one "if … : …" rather than three. PURE.
+ * @param {object[]} steps  plan IR steps ({kind, id, over?, body?, intent?, clause?, bindings?, collect?, ms?})
+ * @returns {{lines: string[], shown: number}}  shown = USER-VISIBLE step count (gate machinery folded in)
+ */
+export function renderPlanLines(steps) {
+  const fmt = (b) => Object.keys(b || {}).length ? ` (${Object.entries(b).map(([k, v]) => `${k}=${v}`).join(', ')})` : '';
+  const label = (b) => b.kind === 'wait' ? `let it settle (${Math.round((b.ms || 0) / 100) / 10}s)` : (b.intent || b.clause || b.kind);
+  const byId = new Map((steps || []).map((s) => [s && s.id, s]));
+  const consumed = new Set();
+  for (const s of (steps || [])) { if (s && s.kind === 'gate') { const an = byId.get(s.over); if (an) { consumed.add(an.id); if (an.over) consumed.add(an.over); } } }
+  let n = 0;
+  const lines = [];
+  for (const s of (steps || [])) {
+    if (!s || consumed.has(s.id)) continue;
+    n++;
+    if (s.kind === 'foreach' || s.kind === 'loop') {
+      lines.push(`${n}. for each item: ${(s.body || []).map(label).filter(Boolean).join(' → ')}${s.collect ? ` (collect ${s.collect})` : ''}`);
+    } else if (s.kind === 'gate') {
+      const an = byId.get(s.over);
+      const cond = (an && (an.intent || an.clause)) || 'it applies';
+      lines.push(`${n}. if ${cond}: ${(s.body || []).map((b) => b.intent || b.clause).filter(Boolean).join(' → ')}`);
+    } else {
+      lines.push(`${n}. ${s.intent || s.clause || s.kind || 'step'}${fmt(s.bindings)}`);
+    }
+  }
+  return { lines, shown: n };
 }

@@ -15,7 +15,6 @@
 // fail Cover (the field is covered; "what value to enter" is a fulfillment/data concern) — they're surfaced.
 //
 // @module Core/cover
-// @version 2.74.578
 
 const VALUE_PATTERNS = new Set(['type', 'select', 'upload']);
 

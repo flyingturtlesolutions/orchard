@@ -42,7 +42,6 @@
  *   long-term telemetry should subscribe and persist independently.
  *
  * @module Services/GroundEventBus
- * @version 2.74.249
  */
 
 import { Logger } from '../Core/Logger.js';

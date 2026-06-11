@@ -17,7 +17,6 @@
 // PURE: no DOM / chrome / LLM. Deterministic.
 //
 // @module Core/orchAnalyze
-// @version 2.74.739
 
 /** The predicate operations over an observation's {value, items, count}. */
 export const PREDICATE_OPS = Object.freeze(['exists', 'none', 'gt', 'gte', 'lt', 'lte', 'eq', 'contains', 'not_contains']);

@@ -14,7 +14,6 @@
 // PURE: no DOM / chrome / LLM — the plan is data; the LLM produces it, the runtime consumes it.
 //
 // @module Core/orchPlan
-// @version 2.74.734
 
 /** Analysis OUTPUT TYPE → the control-flow construct it compiles to (§6). The fragment that consumes the
  *  analysis is wired accordingly. */

@@ -14,6 +14,10 @@
 // Locale's "small graph" (PAGEMODEL_SPEC § 1) becomes traversable, not just per-kind
 // queryable. (Build slice 1 baseline: schema + builder + query API + L0 assembly.)
 
+// v2.74.955 (CR-H1) — the unconsumed query API (featuresForRole / knownSelectors / scrollTargetFor /
+// collections / disclosureFor / goals / edgesFrom / edgesTo) was DELETED (zero importers since task #22;
+// git has it). featuresByKind was demoted to module-private (in-module callers only). The LIVE exports
+// are the builders + localeEdges / edgesByKind / pathToGoal (background reconciles leadsTo via them).
 export const LOCALE_SCHEMA = 2;
 
 export const FEATURE_KINDS = Object.freeze([
@@ -91,76 +95,8 @@ export function buildIndex(features) {
 // Downstream SELECTS from the catalog; it never walks the raw artifact.
 
 /** All features of a kind. */
-export function featuresByKind(model, kind) {
+function featuresByKind(model, kind) {
   return (model?.index?.byKind?.[kind] || []).map((id) => model.features[id]).filter(Boolean);
-}
-
-/**
- * Rank features that could fill a named role (fuzzy: label/role/kind token overlap
- * + kind affinity). Returns selection-ready rows, best first.
- */
-export function featuresForRole(model, role, { kind = null } = {}) {
-  const want = tokens(role);
-  const affinity = kindAffinityForRole(role);
-  const pool = Object.values(model?.features || {}).filter((f) => f && (!kind || f.kind === kind));
-  return pool
-    .map((f) => ({ f, score: matchScore(want, affinity, f) }))
-    .filter((x) => x.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .map((x) => ({
-      id: x.f.id,
-      kind: x.f.kind,
-      label: x.f.label,
-      selector: x.f.selector,
-      location: x.f.location ?? null,
-      scrollToY: x.f.location?.scrollToY ?? null,
-      verified: !!x.f.selectorVerified,
-      score: round2(x.score),
-    }));
-}
-
-/**
- * Flat verified-selector hints over the WHOLE page (not just poked controls).
- * Back-compat shape for resolveRoles' KNOWN VERIFIED SELECTORS block.
- */
-export function knownSelectors(model) {
-  return Object.values(model?.features || {})
-    .filter((f) => f && f.selector)
-    .map((f) => ({
-      label: f.label || '', role: f.a11yRole || f.kind, selector: f.selector, verified: !!f.selectorVerified,
-      // v2.74.447 — other-language labels (cross-locale harvest) so resolve matches any language.
-      aliases: f.labelsByLocale ? Object.values(f.labelsByLocale).filter((l) => l && l !== f.label) : [],
-    }));
-}
-
-/** Scroll offset to bring a feature into view (kills "viewport = canonical"). */
-export function scrollTargetFor(model, featureId) {
-  return model?.features?.[featureId]?.location?.scrollToY ?? null;
-}
-
-/** Content collections (cards/tiles/rows) — the repeating-block features. */
-export function collections(model) {
-  return featuresByKind(model, 'collection');
-}
-
-/** Best disclosure feature matching a trigger label (reveal-resolve). */
-export function disclosureFor(model, triggerLabel) {
-  const want = tokens(triggerLabel);
-  const pool = featuresByKind(model, 'disclosure');
-  let best = null;
-  let bestScore = 0;
-  for (const f of pool) {
-    const s = overlap(want, labelTokens(f));   // any-language trigger label
-    if (s > bestScore) { bestScore = s; best = f; }
-  }
-  if (!best) return null;
-  const layer = best.reveals ? model.layers?.[best.reveals] ?? null : null;
-  return { trigger: best, layer, close: layer?.close ?? null };
-}
-
-/** Structured goals (composed elsewhere; here just the local goals). */
-export function goals(model) {
-  return Object.values(model?.goals || {});
 }
 
 // ─── Internals ──────────────────────────────────────────────────────────────
@@ -748,16 +684,6 @@ export function localeEdges(model) {
   }
 
   return edges;
-}
-
-/** Edges leaving a node id (feature or layer). Pass precomputed `edges` to avoid recompute. */
-export function edgesFrom(model, nodeId, edges = null) {
-  return (edges || localeEdges(model)).filter((e) => e.from === nodeId);
-}
-
-/** Edges entering a node id (feature, layer, goal, or URL). Pass precomputed `edges` to avoid recompute. */
-export function edgesTo(model, nodeId, edges = null) {
-  return (edges || localeEdges(model)).filter((e) => e.to === nodeId);
 }
 
 /** All edges of one kind. Pass precomputed `edges` to avoid recompute. */

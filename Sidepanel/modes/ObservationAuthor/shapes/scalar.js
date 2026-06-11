@@ -7,7 +7,6 @@
  * input that's enabled only when kind='attribute'.
  *
  * @module Sidepanel/modes/ObservationAuthor/shapes/scalar
- * @version 2.74.16
  */
 
 const escAttr = (s) => String(s ?? '').replace(/"/g, '&quot;');

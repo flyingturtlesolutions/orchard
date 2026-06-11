@@ -22,7 +22,6 @@
  *
  * @module Services/TemplateWalker
  * @author Agent HUB
- * @version 2.19.1
  */
 
 import { Logger }           from '../Core/Logger.js';

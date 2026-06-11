@@ -1,7 +1,6 @@
 /**
  * @file Services/ImageReadCapture.js
  * @module ImageCapture
- * @version 2.74.146
  *
  * Shared helpers for the three image-capture observation shapes:
  *   - image_snap  : scroll → captureVisibleTab → crop to rect

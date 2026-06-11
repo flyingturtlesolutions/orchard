@@ -15,7 +15,6 @@
 // counted. Output carries absolute coords + a viewBox. PURE, no DOM. Deterministic.
 //
 // @module Core/graphLayout
-// @version 2.74.478
 
 const FEATURE_KIND_RANK = Object.freeze({
   region: 0, navigation: 1, input: 2, action: 3, disclosure: 4, collection: 5, composite: 6,

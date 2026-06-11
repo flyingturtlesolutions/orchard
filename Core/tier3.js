@@ -12,7 +12,6 @@
 // skeleton handoff; typed cross-schema mapping is T3X-4. PURE — no DOM / chrome / storage / LLM.
 //
 // @module Core/tier3
-// @version 2.74.792
 
 // The executor's Strategy-invocation step kind. NB: WorkflowExecutor names it 'workflow' for legacy storage
 // reasons, but it DISPATCHES a Tier-2 Strategy (see specs/TIER_MODEL.md — the inner 'workflow' step = a Strategy).

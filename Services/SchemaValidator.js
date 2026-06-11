@@ -12,7 +12,6 @@
  *
  * @module Services/SchemaValidator
  * @author Agent HUB
- * @version 2.19.0
  */
 
 import { Logger } from '../Core/Logger.js';

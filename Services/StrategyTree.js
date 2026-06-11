@@ -200,6 +200,8 @@
  */
 
 import { normalizeAssertion, validateAssertion, CONDITION_TYPES } from './Assertion.js';
+import { NODE_TYPES, childLists } from './Engine/nodeRegistry.js';   // v2.74.948 (CR-X1c) — the node-type single source
+import { Logger } from '../Core/Logger.js';   // v2.74.948 (CR-X1c) — normalize warns on dropped unknown types
 
 /**
  * Normalize a strategy's body (fragmentSteps) into the E2 tree shape.
@@ -671,7 +673,10 @@ function normalizeNode(node) {
     };
   }
 
-  // Unknown type — skip (caller may want to warn; we don't throw).
+  // Unknown type — null-with-warn (v2.74.948 / CR-X1c, the unified policy: normalize=null-with-warn,
+  // validate=error, execute=fail-loud). The walkers skip nulls, so the node is dropped from the run —
+  // the warning is the only trace of WHAT was dropped.
+  Logger.warn('StrategyTree', `normalizeNode: unknown node type "${node.type}" — dropped`);
   return null;
 }
 
@@ -737,27 +742,11 @@ export function walkNodes(body, visitor, depth = 0, parent = null) {
   for (const node of body) {
     if (!node) continue;
     visitor(node, depth, parent);
-    if (node.type === 'foreach') {
-      walkNodes(node.body, visitor, depth + 1, node);
-    } else if (node.type === 'detect') {
-      // Pass G2 — descend into every branch body AND the default.
-      for (const branch of node.branches ?? []) {
-        walkNodes(branch?.body, visitor, depth + 1, node);
-      }
-      walkNodes(node.default, visitor, depth + 1, node);
-    } else if (node.type === 'loop') {
-      // Pass H1 — descend into loop body.
-      walkNodes(node.body, visitor, depth + 1, node);
-    } else if (node.type === 'try') {
-      // Pass H2 — descend into both body and recover.
-      walkNodes(node.body, visitor, depth + 1, node);
-      walkNodes(node.recover, visitor, depth + 1, node);
-    } else if (node.type === 'in_new_tab') {
-      // Pass J2 — descend into trigger (as a one-element list) and body.
-      // The trigger is one node; the body is a list. Both count as
-      // children of this node at depth+1.
-      if (node.trigger) walkNodes([node.trigger], visitor, depth + 1, node);
-      walkNodes(node.body, visitor, depth + 1, node);
+    // v2.74.948 (CR-X1c) — descend via the registry's childLists: the ONE statement of where
+    // children live (foreach/loop bodies, detect branches + default, try body + recover,
+    // in_new_tab [trigger] + body). Same pre-order, same depth+1 for every child list.
+    for (const list of childLists(node)) {
+      walkNodes(list, visitor, depth + 1, node);
     }
   }
 }
@@ -775,32 +764,15 @@ export function computeIterationScopes(body) {
       if (!node) continue;
       scopes.set(node, new Set(active));
       if (node.type === 'foreach') {
+        // FOREACH is the ONE scope-introducing container: its body sees `as`.
         const nested = new Set(active);
         if (node.as) nested.add(node.as);
         visit(node.body, nested);
-      } else if (node.type === 'detect') {
-        // Pass G2 — DETECT is scope-transparent. Branch bodies + default
-        // see the same iteration variables their enclosing scope sees.
-        for (const branch of node.branches ?? []) {
-          visit(branch?.body, active);
-        }
-        visit(node.default, active);
-      } else if (node.type === 'loop') {
-        // Pass H1 — LOOP is scope-transparent. Body sees the same iteration
-        // variables the enclosing scope sees. LOOP introduces no new
-        // iteration variable of its own.
-        visit(node.body, active);
-      } else if (node.type === 'try') {
-        // Pass H2 — TRY is scope-transparent. Both body AND recover see
-        // the same iteration variables the enclosing scope sees.
-        visit(node.body, active);
-        visit(node.recover, active);
-      } else if (node.type === 'in_new_tab') {
-        // Pass J2 — IN_NEW_TAB is scope-transparent. Trigger and body
-        // both see the enclosing iteration variables. Bindings written
-        // in body persist into outer scope (scope is tab-agnostic).
-        if (node.trigger) visit([node.trigger], active);
-        visit(node.body, active);
+      } else {
+        // v2.74.948 (CR-X1c) — every other container (detect branches + default, loop body,
+        // try body + recover, in_new_tab trigger + body) is SCOPE-TRANSPARENT: children see the
+        // enclosing iteration variables unchanged. Descend via the registry's childLists.
+        for (const list of childLists(node)) visit(list, active);
       }
     }
   };
@@ -1077,6 +1049,10 @@ export function validateStrategyBody(body, options = {}) {
       if (typeof node.closeOnExit !== 'boolean') {
         errors.push('IN_NEW_TAB closeOnExit must be boolean');
       }
+    } else if (!NODE_TYPES.includes(node.type)) {
+      // v2.74.948 (CR-X1c) — unknown-type policy at VALIDATE is error (normalize would have nulled
+      // it; an unknown type reaching validation means a hand-authored/imported body with a typo).
+      errors.push(`Unknown node type "${node.type}"`);
     }
   });
 

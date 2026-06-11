@@ -16,7 +16,6 @@
  *
  * @module Core/Logger
  * @author Agent HUB
- * @version 1.9.7
  */
 
 // ─── Constants ───────────────────────────────────────────────────────────────

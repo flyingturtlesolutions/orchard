@@ -14,7 +14,6 @@
  * everything else is delegated to the extractCard frame.
  *
  * @module Sidepanel/modes/ObservationAuthor/shapes/text
- * @version 2.74.131
  */
 
 export const text = Object.freeze({

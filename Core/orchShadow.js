@@ -6,7 +6,6 @@
 // safe; low → the swap needs LLM-backed binding for the slots the floor misses. No DOM / chrome / LLM.
 //
 // @module Core/orchShadow
-// @version 2.74.738
 
 /** A coarse shape label for a plan's steps (bound or not). PURE. */
 export function planShapeLabel(steps) {

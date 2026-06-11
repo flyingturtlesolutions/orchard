@@ -16,7 +16,6 @@
  *
  * @module Studio/assertionFamilyCheck
  * @author Agent HUB
- * @version 2.72.36
  */
 
 import { StorageManager } from '../Services/StorageManager.js';

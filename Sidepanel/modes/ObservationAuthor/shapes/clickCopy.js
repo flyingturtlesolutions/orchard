@@ -46,7 +46,6 @@
  *     attribute when clipboard is empty.
  *
  * @module Sidepanel/modes/ObservationAuthor/shapes/clickCopy
- * @version 2.74.219
  */
 
 export const clickCopy = Object.freeze({

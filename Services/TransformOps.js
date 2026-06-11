@@ -55,7 +55,6 @@
  * needed. Number / coercion ops are an obvious follow-on family.
  *
  * @module Services/TransformOps
- * @version 2.74.132
  */
 
 import { scalar, list, isKind } from './Scope.js';

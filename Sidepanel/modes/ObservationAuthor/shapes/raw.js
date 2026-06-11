@@ -5,7 +5,6 @@
  * target + output binding.
  *
  * @module Sidepanel/modes/ObservationAuthor/shapes/raw
- * @version 2.74.16
  */
 
 export const rawText = Object.freeze({

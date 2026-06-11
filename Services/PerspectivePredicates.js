@@ -55,7 +55,6 @@
  * combined with any tree-form `predicates` via AND.
  *
  * @module Services/PerspectivePredicates
- * @version 2.74.248
  */
 
 import { StorageManager } from './StorageManager.js';

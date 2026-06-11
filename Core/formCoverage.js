@@ -18,7 +18,6 @@
 // only DOM-touching export; everything else operates on plain descriptors.
 //
 // @module Core/formCoverage
-// @version 2.74.555
 
 const STOPWORDS = new Set(['the', 'a', 'an', 'your', 'please', 'enter', 'this', 'of', 'to', 'for', 'or', 'and', 'value', 'field', 'optional', 'required']);
 

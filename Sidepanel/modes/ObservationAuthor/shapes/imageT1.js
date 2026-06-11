@@ -18,7 +18,6 @@
  * the container can be any element.
  *
  * @module Sidepanel/modes/ObservationAuthor/shapes/imageT1
- * @version 2.74.16
  */
 
 export const imageT1 = Object.freeze({

@@ -52,7 +52,6 @@
  *
  * @module Studio/ObservationForm
  * @author Agent HUB
- * @version 2.74.21
  */
 
 import { StorageManager } from '../Services/StorageManager.js';

@@ -10,7 +10,6 @@
 // confidence band (resolved / ambiguous → "which site?" / miss). PURE — no DOM / chrome / storage / LLM.
 //
 // @module Core/groundCatalog
-// @version 2.74.781
 
 const _STOP = new Set(['the', 'a', 'an', 'to', 'of', 'for', 'and', 'or', 'on', 'in', 'at', 'my', 'me', 'it', 'this', 'that', 'with', 'from', 'by', 'is', 'are', 'find', 'get', 'do', 'then', 'all']);
 const _TLD = new Set(['com', 'org', 'net', 'io', 'co', 'www', 'app', 'gov', 'edu', 'ai', 'so', 'dev']);

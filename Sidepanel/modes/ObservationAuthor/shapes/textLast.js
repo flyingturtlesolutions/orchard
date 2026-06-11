@@ -25,7 +25,6 @@
  * `text` shape continues to use textContent for back-compat.
  *
  * @module Sidepanel/modes/ObservationAuthor/shapes/textLast
- * @version 2.74.216
  */
 
 export const textLast = Object.freeze({

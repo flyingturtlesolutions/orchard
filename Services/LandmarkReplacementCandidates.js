@@ -67,7 +67,6 @@
  *   < 0.40   weak (returned only when limit not yet hit)
  *
  * @module Services/LandmarkReplacementCandidates
- * @version 2.74.255
  */
 
 import { StorageManager } from './StorageManager.js';

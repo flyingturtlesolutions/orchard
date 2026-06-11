@@ -20,7 +20,6 @@
  * sendMessage broadcast.
  *
  * @module offscreen
- * @version 2.74.220
  */
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

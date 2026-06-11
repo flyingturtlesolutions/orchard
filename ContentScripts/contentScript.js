@@ -15,7 +15,6 @@
  *
  * @module ContentScripts/contentScript
  * @author Agent HUB
- * @version 2.17.12
  */
 
 'use strict';
@@ -27,12 +26,23 @@
 // we're already loaded, bail at top so re-registration is a no-op
 // (double-registered onMessage listeners would cause double responses).
 //
-// We use a global flag on `window` so the second injection sees it.
-// Throw to abort module-load — chrome.scripting.executeScript catches
-// thrown errors and doesn't crash; the existing instance keeps running.
+// We use a global flag on `window` so the second injection sees it. A classic script can't
+// `return` at top level, so the abort is still a THROW %s but v2.74.955 (CR-H5) registers a one-shot
+// window error handler first that preventDefault()s exactly this error, so the redundant injection
+// no longer prints an uncaught-error line in every frame's console. chrome.scripting.executeScript
+// catches the throw either way; the existing instance keeps running.
 if (window.__agentHubContentScriptLoaded === true) {
-  // Already loaded — abort re-injection.
-  throw new Error('agent-hub content script already loaded; skipping re-injection');
+  const _swallowReinject = (e) => {
+    if (e && e.error && e.error.__ahubReinjectAbort === true) {
+      e.preventDefault();
+      window.removeEventListener('error', _swallowReinject);
+      return true;
+    }
+  };
+  window.addEventListener('error', _swallowReinject);
+  const _abort = new Error('agent-hub content script already loaded; skipping re-injection');
+  _abort.__ahubReinjectAbort = true;
+  throw _abort;
 }
 window.__agentHubContentScriptLoaded = true;
 
@@ -5695,6 +5705,7 @@ function _obsOptionVocabulary(domKind, el, target) {
 // survives a same-origin navigation); the next page flushes them on re-arm. The background dedups by `uid`, so a
 // live-delivered action and its buffered copy never double-count.
 let _obsClientSeq = 0;
+const _obsFrameSalt = Math.random().toString(36).slice(2, 8);   // v2.74.955 (CR-H5) — two frames share seq ranges AND can stamp the same Date.now(); the salt keeps cross-frame uids collision-free
 const _OBS_BUF_KEY = '__ahub_obs_navbuf';
 function _obsBufferAction(payload) {
   try { const buf = JSON.parse(sessionStorage.getItem(_OBS_BUF_KEY) || '[]'); buf.push(payload); sessionStorage.setItem(_OBS_BUF_KEY, JSON.stringify(buf.slice(-50))); } catch { /* */ }
@@ -5717,7 +5728,7 @@ function _obsSend(domKind, el, rawValue) {
   else if (domKind === 'click') value = sensitive ? null : (target.accessibleName || null);   // used only if it classifies as a select
   else if (domKind === 'keypress') value = rawValue || 'Enter';                                 // the key (Enter)
   if (!sensitive) { const vocab = _obsOptionVocabulary(domKind, el, target); if (vocab && vocab.length > 1) target.options = vocab; }   // ORCH-V — dropdown vocabulary (+B nav container)
-  const payload = { domKind, target, value, sensitive, ts: Date.now(), url: location.href, uid: `${_obsClientSeq++}-${Date.now()}` };
+  const payload = { domKind, target, value, sensitive, ts: Date.now(), url: location.href, uid: `${_obsFrameSalt}-${_obsClientSeq++}-${Date.now()}` };
   if (domKind === 'click' || domKind === 'keypress') _obsBufferAction(payload);   // navigating-prone → survive a page unload
   try { chrome.runtime.sendMessage({ type: 'INTERACTION_RECORD', payload }); } catch { /* */ }
   // OBS — after an unambiguous commit (Enter, native submit, or a commit-named button) that may swap results in
@@ -5857,7 +5868,11 @@ const _IM_EVENT_KIND = { click: 'click', auxclick: 'click', dblclick: 'dblclick'
 let _imOn = false;
 let _imTargets = [];
 let _imAttached = false;
-let _imTypeTimer = null;
+// v2.74.955 (CR-H5) — per-ELEMENT type-debounce timers. One shared timer meant fast field-to-field
+// typing (<400ms) cancelled the first field's pending event entirely. WeakMap keys the timer by element;
+// the companion Set tracks pending elements so detach can clear them (a WeakMap is not iterable).
+const _imTypeTimers = new WeakMap();
+const _imTypePending = new Set();
 const _imLen = new WeakMap();
 const _imListeners = {};
 
@@ -5920,12 +5935,14 @@ function _imHandle(domType, evt) {
   if (kind === 'type') {
     const inputType = evt.inputType || '';   // capture primitives now; the event is recycled before the debounce fires
     const sensitive = _imSensitive(el);
-    clearTimeout(_imTypeTimer);
-    _imTypeTimer = setTimeout(() => {
+    clearTimeout(_imTypeTimers.get(el));
+    const _t = setTimeout(() => {
+      _imTypeTimers.delete(el); _imTypePending.delete(el);
       const t = {}; if (inputType) t.inputType = inputType;
       if (!sensitive) { let len = 0; try { len = (el.value || '').length; } catch { len = 0; } const prev = _imLen.get(el) || 0; t.lengthDelta = len - prev; _imLen.set(el, len); }
       _imPost({ interactionKind: 'type', url: location.href, target: _imDescriptor(el), type: t, matches, sensitive });
     }, 400);
+    _imTypeTimers.set(el, _t); _imTypePending.add(el);
     return;
   }
   const payload = { interactionKind: kind, url: location.href, target: _imDescriptor(el), matches };
@@ -5935,6 +5952,10 @@ function _imHandle(domType, evt) {
   }
   _imPost(payload);
 }
+// v2.74.955 (CR-H5) — DELIBERATE top-frame-only scope: INTERACTION_MONITOR_START is delivered to
+// frameId 0 (background sends without allFrames), so iframe interactions are not monitored. That is the
+// intended privacy/noise posture — the substrate models the top document; embedded third-party frames
+// (ads, widgets) would flood the demand matcher with foreign-origin landmarks.
 function _imAttach() {
   if (_imAttached) return;
   for (const dt of ['click', 'auxclick', 'dblclick', 'input', 'submit', 'focusin']) {
@@ -5946,19 +5967,33 @@ function _imAttach() {
 }
 function _imDetach() {
   for (const dt of Object.keys(_imListeners)) { try { document.removeEventListener(dt, _imListeners[dt], true); } catch { /* */ } }
-  _imAttached = false; clearTimeout(_imTypeTimer);
+  _imAttached = false; for (const el of _imTypePending) clearTimeout(_imTypeTimers.get(el)); _imTypePending.clear();   // v2.74.955 (CR-H5)
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  const { type, payload } = message;
+// v2.74.954 (CR-X4a) — THE message router. The onMessage surface was ONE anonymous listener
+// wrapping a ~2,066-line switch over ~65 message types (the file header named 6 of them). Each
+// type is now a key in MESSAGE_HANDLERS — findable by name — and the listener is a six-line
+// dispatcher. Handler bodies are BYTE-IDENTICAL to the old case bodies: each opens with the same
+// `const { type, payload }` destructure the listener performed, block-style cases keep their own
+// braces (block scoping preserved), and the return value keeps the sendResponse channel open
+// exactly as the case's `return true` did. Unknown types return false (the old default).
+const MESSAGE_HANDLERS = {
 
-  switch (type) {
+  'RECORD_START': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    _obsStart(); sendResponse({ success: true, active: true }); return false;
+  },
 
-    case 'RECORD_START': { _obsStart(); sendResponse({ success: true, active: true }); return false; }
-    case 'RECORD_STOP':  { _obsStop();  sendResponse({ success: true, active: false }); return false; }
+  'RECORD_STOP': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    _obsStop();  sendResponse({ success: true, active: false }); return false;
+  },
+
 
     // C2b — interaction-monitoring capture session (demand-scoped; background already consent-gated this START).
-    case 'START_INTERACTION_CAPTURE': {
+  'START_INTERACTION_CAPTURE': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         _imTargets = Array.isArray(payload?.targets) ? payload.targets : [];
         _imOn = true;                    // GENERAL capture: on regardless of demand-target count (targets are match hints)
@@ -5967,23 +6002,35 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       } catch (e) { sendResponse({ success: false, error: e.message }); }
       return false;
     }
-    case 'STOP_INTERACTION_CAPTURE': {
+  },
+
+  'STOP_INTERACTION_CAPTURE': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       _imOn = false; _imTargets = []; _imDetach();
       sendResponse({ success: true, on: false });
       return false;
     }
+  },
+
 
 
     // v2.72.43 (Pass 17g iter) — readiness probe. Used by debugger's perspective
     // capture flow to verify the content script is reachable before sending
     // START_PICK / DOM_SNAPSHOT_FULL. Cheap; no side effects. Returns sync.
-    case 'PING': {
+  'PING': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       sendResponse({ success: true, ready: true });
       return false;
     }
+  },
+
 
     // v2.74.46 — Perspective-capture verification overlays.
-    case 'SHOW_PERSPECTIVE_OVERLAYS': {
+  'SHOW_PERSPECTIVE_OVERLAYS': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try { showPerspectiveOverlays(payload?.landmarks); } catch (e) {
         sendResponse({ success: false, error: e.message });
         return false;
@@ -5991,7 +6038,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ success: true, count: __perspectiveOverlays.length });
       return false;
     }
-    case 'CLEAR_PERSPECTIVE_OVERLAYS': {
+  },
+
+  'CLEAR_PERSPECTIVE_OVERLAYS': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try { clearPerspectiveOverlays(); } catch (e) {
         sendResponse({ success: false, error: e.message });
         return false;
@@ -5999,8 +6050,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ success: true });
       return false;
     }
+  },
 
-    case 'agent_hub_scroll': {
+
+  'agent_hub_scroll': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       // v2.71.0 — Smooth scroll the window by N viewports (signed).
       // Waits for scrollend (or 2s fallback timeout). Returns success when
       // the scroll completes. Engine has its own 4s safety timeout above
@@ -6010,8 +6065,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         .catch(err => sendResponse({ success: false, error: `SCROLL: ${err.message}` }));
       return true;   // keep channel open for async response
     }
+  },
 
-    case 'EXECUTE_STEP': {
+
+  'EXECUTE_STEP': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       const { action, selector, value, aliases: stepAliases, smoothScroll } = payload ?? {};
       // v2.40.0 — TYPE is async (paced character-by-character). All other
       // actions remain synchronous. We special-case TYPE to keep the
@@ -6046,8 +6105,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse(result);
       return false;
     }
+  },
 
-    case 'FOCUS_CHECK': {
+
+  'FOCUS_CHECK': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       // Checks whether the matched element can receive focus — used as the
       // Phase 1 termination condition. An element that accepts focus is
       // interactive and ready for input.
@@ -6072,14 +6135,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
 
-    case 'WAIT_FOR_ELEM': {
+
+  'WAIT_FOR_ELEM': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       const { selector, timeoutMs, description } = payload ?? {};
       handleWaitFor(selector, timeoutMs ?? 10000, sendResponse, description);
       return true; // async
     }
+  },
 
-    case 'CHECK_ELEM': {
+
+  'CHECK_ELEM': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       // Lightweight single-check — returns immediately with found:true/false.
       // Used by ExecutionEngine's WAIT_FOR polling loop to avoid holding the
       // message channel open for long timeouts.
@@ -6087,8 +6158,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ found });
       return false;
     }
+  },
 
-    case 'CHECK_OUTCOME': {
+
+  'CHECK_OUTCOME': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       // Layer 3 outcome verification. Checks whether the final page state
       // matches a success signal (CSS selector OR "text:..." pattern).
       // Returns { found, matchedElement?, snippet? } so ExecutionEngine can
@@ -6121,6 +6196,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ found, snippet });
       return false;
     }
+  },
+
 
     // Used by DETECT branches to evaluate whether a given condition holds
     // against current page state. Five condition types:
@@ -6129,7 +6206,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     //   url_matches       — current window.location matches a regex
     //   text_present      — substring appears in body text (case-insensitive)
     //   attribute_equals  — element's attribute has a specific value
-    case 'CHECK_CONDITION': {
+  'CHECK_CONDITION': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       const cond = payload?.condition ?? {};
       let matched = false;
       // v2.74.172 — Diagnostic metadata returned alongside `matched` for
@@ -6346,6 +6425,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
+
 
     // ── Pass E1 (v2.26.0) ──────────────────────────────────────────────────
     // EXTRACT_VALUE — read a value from the live page and return it as a
@@ -6366,7 +6447,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     //
     // Truncates to 5000 chars to bound payload size; selectors that grab the
     // whole page body (mistakenly) won't blow up message-passing limits.
-    case 'EXTRACT_VALUE': {
+  'EXTRACT_VALUE': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       const sel  = payload?.selector;
       const attr = payload?.attribute || 'text';
       if (!sel) {
@@ -6401,6 +6484,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
+
 
     // v2.29.1 (Pass E2-2) — COUNT_ELEMENTS: returns the number of elements
     // matching a CSS selector on the live page. Used by the ENUMERATE action
@@ -6421,7 +6506,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // script computes stable document-unique selectors once, and each
     // FOREACH iteration resolves the k-th item's selector freshly at CLICK
     // or EXTRACT time.
-    case 'COUNT_ELEMENTS': {
+  'COUNT_ELEMENTS': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       const sel = payload?.selector;
       const max = Number.isFinite(payload?.max) ? Math.max(0, Math.floor(payload.max)) : null;
       const withSelectors = payload?.withSelectors === true;
@@ -6501,20 +6588,30 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
 
-    case 'OBSERVE_START':
+
+  'OBSERVE_START': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
       sendResponse(handleObserveStart());
       return false;
+  },
 
-    case 'OBSERVE_READ':
+
+  'OBSERVE_READ': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
       sendResponse(handleObserveRead());
       return false;
+  },
+
 
     // v2.72.29 (Pass 17) — PROBE_SELECTOR returns count + sample HTML for
     // perspective landmark verification. Mirrors COUNT_ELEMENTS in spirit but
     // includes the first match's outerHTML truncated to a budget. Used by
     // Services/PageProbe.js → probeSelector.
-    case 'PROBE_SELECTOR': {
+  'PROBE_SELECTOR': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       const sel = payload?.selector;
       const sampleMax = Number.isFinite(payload?.sampleHtmlMax)
         ? Math.max(0, Math.floor(payload.sampleHtmlMax)) : 400;
@@ -6538,76 +6635,119 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
 
-    case 'DOM_SNAPSHOT':
+
+  'DOM_SNAPSHOT': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
       sendResponse(handleDomSnapshot());
       return false;
+  },
 
-    case 'DOM_SNAPSHOT_RICH':
+
+  'DOM_SNAPSHOT_RICH': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
       sendResponse(handleDomSnapshotRich(message.payload?.prevSigs ?? [], { includeContentBlocks: !!message.payload?.includeContentBlocks }));
       return false;
+  },
+
 
     // v2.74.433 — Deterministic outgoing-link extraction for Ground discovery.
-    case 'EXTRACT_LINKS':
+  'EXTRACT_LINKS': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
       try { sendResponse(extractPageLinks()); }
       catch (e) { sendResponse({ success: false, links: [], error: e.message }); }
       return false;
+  },
+
 
     // v2.74.455 — in-tab first-party fetch (sitemap behind a Cloudflare/WAF challenge).
-    case 'FETCH_URL_TEXT':
+  'FETCH_URL_TEXT': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
       fetchUrlText(payload?.url).then(sendResponse).catch(e => sendResponse({ ok: false, status: 0, text: null, error: e.message }));
       return true;   // async sendResponse
+  },
+
 
     // v2.74.396 — Resolve Tier-2 visual pick: normalized box → best-IoU element.
-    case 'LOCATE_PICK':
+  'LOCATE_PICK': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
       locatePick(payload).then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
       return true;   // async sendResponse
+  },
+
 
     // v2.74.397 — L0 page enumeration (read-only) → raw Feature list for a Locale.
-    case 'ENUMERATE_PAGE':
+  'ENUMERATE_PAGE': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
       enumeratePage().then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
       return true;   // async sendResponse
+  },
+
 
     // PB-10 — deterministic form-field oracle (required-field markers) for intent-driven proposal.
-    case 'ENUMERATE_FORM_FIELDS':
+  'ENUMERATE_FORM_FIELDS': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
       try { sendResponse({ success: true, fields: enumerateFormFields() }); }
       catch (e) { sendResponse({ success: false, error: e.message }); }
       return false;
+  },
+
 
     // v2.74.353 — Resolve-roles complexity metric (deterministic DOM scan).
-    case 'PAGE_COMPLEXITY':
+  'PAGE_COMPLEXITY': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
       try { sendResponse(computePageComplexity()); }
       catch (e) { sendResponse({ success: false, error: e.message }); }
       return false;
+  },
+
 
     // v2.74.362 — Auto-verify a Perspective's structured composition (async: poke).
-    case 'VERIFY_STRUCTURE':
+  'VERIFY_STRUCTURE': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
       verifyStructure(payload).then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
       return true;   // async sendResponse
+  },
+
 
     // v2.74.367 — pageStructure depth sweep (async: poke→observe→restore).
-    case 'EXPLORE_PAGE_STRUCTURE':
+  'EXPLORE_PAGE_STRUCTURE': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
       explorePageStructure(payload).then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
       return true;   // async sendResponse
+  },
+
 
     // v2.74.381 — Reveal-aware resolve: open a trigger (modal/menu) and return a
     // rich DOM snapshot of the REVEALED state, leaving it open so the caller can
     // resolve + verify hidden-layer roles against it. Pair with CLOSE_OVERLAYS.
-    case 'POKE_AND_SNAPSHOT':
+  'POKE_AND_SNAPSHOT': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
       pokeAndSnapshot(payload).then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
       return true;   // async sendResponse
+  },
+
 
     // v2.74.381 — Close any open overlay (modal/dialog) — used after a
     // reveal-aware resolve to restore the page.
-    case 'CLOSE_OVERLAYS':
+  'CLOSE_OVERLAYS': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
       closeOpenOverlays().then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
       return true;   // async sendResponse
+  },
 
-    case 'DOM_SNAPSHOT_FULL':
+
+  'DOM_SNAPSHOT_FULL': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
       sendResponse(handleDomSnapshotFull());
       return false;
+  },
 
-    case 'GET_BASELINE_SIGS': {
+
+  'GET_BASELINE_SIGS': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       // Capture a set of element signatures from the current DOM state.
       // Called before TYPE so we can identify which elements appeared after send.
       const SEL = ['[data-test-id]','[data-testid]','div[id]','[role]','[aria-label]'].join(',');
@@ -6624,12 +6764,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ sigs });
       return false;
     }
+  },
 
-    case 'DOM_SNAPSHOT_POST_SEND':
+
+  'DOM_SNAPSHOT_POST_SEND': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
       sendResponse(handleDomSnapshotPostSend(message.payload?.baselineSigs ?? [], message.payload?.typedQuestion ?? ''));
       return false;
+  },
 
-    case 'CHECK_ELEMENT': {
+
+  'CHECK_ELEMENT': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       // Returns attributes of the matched element useful for verdict decisions.
       // Used by TemplateWalker to determine whether a CLICK target is a
       // contenteditable/editor that won't produce a DOM mutation on focus.
@@ -6648,8 +6795,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       });
       return false;
     }
+  },
 
-    case 'GET_LAST_ELEMENT_TEXT': {
+
+  'GET_LAST_ELEMENT_TEXT': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       const { selector: ltSel } = payload ?? {};
       if (!ltSel) { sendResponse({ text: '', found: false }); return false; }
       try {
@@ -6667,8 +6818,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
 
-    case 'GET_ELEMENTS_TEXT_FROM': {
+
+  'GET_ELEMENTS_TEXT_FROM': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       // Collects innerText from all visible elements matching selector,
       // starting from fromIndex (0-based). Used to extract all new AI
       // response blocks added since baseline — handles multi-block responses
@@ -6692,10 +6847,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
 
-    case 'PAGE_IDLE':
+
+  'PAGE_IDLE': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
       sendResponse({ idle: handlePageIdle(payload?.idleMs ?? 600) });
       return false;
+  },
+
 
     // v2.72.3 (Pass 4) — Observation extraction. One handler per shape.
     // All handlers are synchronous: querySelector/All + DOM reads have no
@@ -6715,7 +6875,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     //   { success: true, rect: {x, y, width, height},
     //     devicePixelRatio, viewportWidth, viewportHeight }
     //   { success: false, error: string }
-    case 'GET_ELEMENT_RECT': {
+  'GET_ELEMENT_RECT': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         const { target } = payload ?? {};
         if (!target || typeof target !== 'string') {
@@ -6743,8 +6905,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
 
-    case 'OBSERVE_SCALAR': {
+
+  'OBSERVE_SCALAR': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         const { target, extract } = payload ?? {};
         const el = document.querySelector(target);
@@ -6770,8 +6936,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
 
-    case 'OBSERVE_LIST': {
+
+  'OBSERVE_LIST': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         const { target, fields } = payload ?? {};
         if (!Array.isArray(fields) || fields.length === 0) {
@@ -6807,6 +6977,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
+
 
     // v2.74.213 — INSPECT_ELEMENT: authoring-time diagnostic. Resolves
     // the selector and returns a structured report of WHAT was matched
@@ -6874,7 +7046,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // are called from the Perspective predicate evaluator (PerspectivePredicates.js)
     // when determining whether a perspective is active for the current page
     // state.
-    case 'EVALUATE_PREDICATE_VISIBLE': {
+  'EVALUATE_PREDICATE_VISIBLE': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         const { selector } = payload ?? {};
         if (!selector || typeof selector !== 'string') {
@@ -6922,8 +7096,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
 
-    case 'EVALUATE_PREDICATE_HAS_TEXT': {
+
+  'EVALUATE_PREDICATE_HAS_TEXT': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         const { selector, value, caseSensitive } = payload ?? {};
         if (!selector || typeof selector !== 'string') {
@@ -6958,10 +7136,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
+
 
     // v2.74.331 — PERSPECTIVE_SPEC § 4 attributeEquals predicate. Element's
     // attribute === expected value (string compare; absent attr never matches).
-    case 'EVALUATE_PREDICATE_ATTRIBUTE_EQUALS': {
+  'EVALUATE_PREDICATE_ATTRIBUTE_EQUALS': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         const { selector, attribute, value } = payload ?? {};
         if (!selector || typeof selector !== 'string') {
@@ -6991,10 +7173,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
+
 
     // v2.74.331 — PERSPECTIVE_SPEC § 4 landmarkExists predicate. The selector
     // resolves to an element in the DOM (present; visibility not required).
-    case 'EVALUATE_PREDICATE_EXISTS': {
+  'EVALUATE_PREDICATE_EXISTS': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         const { selector } = payload ?? {};
         if (!selector || typeof selector !== 'string') {
@@ -7013,8 +7199,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
 
-    case 'RESOLVE_IFRAME_BY_PREDICATE': {
+
+  'RESOLVE_IFRAME_BY_PREDICATE': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         const { predicate } = payload ?? {};
         if (!predicate || typeof predicate !== 'object' || !predicate.kind) {
@@ -7106,6 +7296,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
+
 
     // v2.74.250 — Phase 6.5 substrate spec: runtime action effect
     // observation. Deviation from spec: we do NOT observe every action
@@ -7121,7 +7313,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     //
     // Single in-flight observation per content script (one tab/frame
     // executes one step at a time). Module-scope state is fine.
-    case 'OBSERVE_ACTION_BEGIN': {
+  'OBSERVE_ACTION_BEGIN': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         // If a prior observation never got END'd (engine threw mid-step),
         // discard it so we don't leak the MutationObserver.
@@ -7165,8 +7359,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
 
-    case 'OBSERVE_ACTION_END': {
+
+  'OBSERVE_ACTION_END': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         const obs = __ahubActionObservation;
         if (!obs) {
@@ -7186,8 +7384,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
 
-    case 'IDENTIFY_IFRAME_ELEMENT': {
+
+  'IDENTIFY_IFRAME_ELEMENT': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         const { frameUrl } = payload ?? {};
         if (!frameUrl || typeof frameUrl !== 'string') {
@@ -7281,8 +7483,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
 
-    case 'LANDMARK_PROBE_OR_RECOVER': {
+
+  'LANDMARK_PROBE_OR_RECOVER': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         const { selector, fallback } = payload ?? {};
         // (1) Probe the stored selector. Multiple matches → ambiguous
@@ -7351,8 +7557,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         return false;
       }
     }
+  },
 
-    case 'INSPECT_ELEMENT': {
+
+  'INSPECT_ELEMENT': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       // v2.74.239 — Async handler so we can await the accessibility
       // profile computation (Web Crypto for the UID hash). Returns
       // true and resolves sendResponse from inside the async IIFE.
@@ -7391,6 +7601,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       })();
       return true;
     }
+  },
+
 
     // v2.74.219 — OBSERVE_CLICK_COPY: format-agnostic chat reply
     // extraction. Clicks a copy-to-clipboard button (HubSpot/ChatGPT/
@@ -7403,7 +7615,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // Requires "clipboardRead" permission in manifest (added v2.74.219).
     // Async: returns `true` from the listener so the message port
     // stays open while we wait + read.
-    case 'OBSERVE_CLICK_COPY': {
+  'OBSERVE_CLICK_COPY': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       (async () => {
         try {
           const { target, waitAfterClick, pickLast } = payload ?? {};
@@ -7682,8 +7896,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       })();
       return true;   // keep the message port open for async response
     }
+  },
 
-    case 'OBSERVE_RAW_TEXT': {
+
+  'OBSERVE_RAW_TEXT': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         const { target, pickLast } = payload ?? {};
         // v2.74.214 — pickLast:true → read the LAST querySelectorAll
@@ -7736,8 +7954,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
 
-    case 'OBSERVE_RAW_HTML': {
+
+  'OBSERVE_RAW_HTML': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         const { target } = payload ?? {};
         const el = document.querySelector(target);
@@ -7751,6 +7973,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
+
 
     // v2.72.14 (Pass 6) — OBSERVE_SECTION: capture a region as a structured
     // section value. Walks the target's DOM subtree producing:
@@ -7769,7 +7993,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // Source URL and timestamp are added engine-side, not here — the
     // content script doesn't know the canonical tab URL (window.location
     // works but the engine has chrome.tabs.get for canonical answers).
-    case 'OBSERVE_SECTION': {
+  'OBSERVE_SECTION': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         const { target } = payload ?? {};
         const el = document.querySelector(target);
@@ -7790,6 +8016,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
+
 
     // v2.72.14 (Pass 6) — OBSERVE_IMAGE_REFS: capture all <img> descendants
     // of the target as a list of records. Each record carries the URL
@@ -7800,7 +8028,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     //
     // Returns:
     //   { success: true, images: [{ src, alt, width, height, currentSrc, srcset }, ...] }
-    case 'OBSERVE_IMAGE_REFS': {
+  'OBSERVE_IMAGE_REFS': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         const { target } = payload ?? {};
         const el = document.querySelector(target);
@@ -7814,6 +8044,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
+
 
     // v2.74.15 (Ship A) — T1 image capture: target must resolve to an
     // <img> element. Returns its src/alt/width/height for binding as a
@@ -7821,7 +8053,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // from OBSERVE_SCALAR with extract.kind='attribute' (which returns
     // a plain string) and from OBSERVE_IMAGE_REFS (which returns a list
     // of <img> records under a container).
-    case 'OBSERVE_IMAGE_T1': {
+  'OBSERVE_IMAGE_T1': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         const { target } = payload ?? {};
         const el = document.querySelector(target);
@@ -7847,6 +8081,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
+
 
     // v2.74.15 (Ship A) — T1 image_list capture: target resolves to a
     // container; engine queries `target.querySelectorAll('img')` and
@@ -7854,7 +8090,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // wraps each as a tagged image scope value, then a tagged list of
     // those. Distinct from OBSERVE_IMAGE_REFS (which produces a list of
     // RECORDS — list-of-records-shape — not a list of image-tagged values).
-    case 'OBSERVE_IMAGE_LIST_T1': {
+  'OBSERVE_IMAGE_LIST_T1': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         const { target } = payload ?? {};
         const el = document.querySelector(target);
@@ -7868,6 +8106,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
+
 
     // v2.72.2 (Pass 3c.0) — Live-page selector picker.
     // START_PICK: activate hover-highlight + click-capture mode.
@@ -7881,7 +8121,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     //   Sends an PICK_RESULT message back via runtime.sendMessage when
     //   the user clicks (or PICK_CANCELLED on ESC).
     // CANCEL_PICK: tear down picker without capture.
-    case 'START_PICK': {
+  'START_PICK': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         // v2.74.163 — Same-origin frame gate.
         // v2.74.164 — Diagnostic logging so the picker's activation
@@ -7938,7 +8180,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
-    case 'CANCEL_PICK': {
+  },
+
+  'CANCEL_PICK': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         console.info('[Agent HUB picker] CANCEL_PICK received', {
           isTop: window.top === window.self,
@@ -7952,11 +8198,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
+
 
     // v2.74.19 — Snap (free-extract): click-and-drag rectangle on the
     // page. mousedown begins the rect, drag updates it, mouseup commits
     // and posts SNAP_RESULT to the runtime. ESC cancels.
-    case 'START_SNAP': {
+  'START_SNAP': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         startSnap(payload?.sessionId ?? '');
         sendResponse({ success: true });
@@ -7965,7 +8215,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
-    case 'CANCEL_SNAP': {
+  },
+
+  'CANCEL_SNAP': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         stopSnap(/* notify */ false);
         sendResponse({ success: true });
@@ -7974,13 +8228,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
+
 
     // v2.74.20 — Brief visual flash on the page after a snap-verify
     // capture, so the author sees the capture occurred. The capture
     // itself is invisible (chrome.tabs.captureVisibleTab is a no-op
     // from the page's perspective); without this, "verify" feels like
     // it does nothing. Sent by background after capture completes.
-    case 'SHOW_CAPTURE_FLASH': {
+  'SHOW_CAPTURE_FLASH': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         showCaptureFlash(payload?.rect ?? null);
         sendResponse({ success: true });
@@ -7989,11 +8247,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
+
 
     // v2.74.151 — Debug-mode observation overlay. ExecutionEngine sends
     // these around each OBSERVATION step so the watcher sees what's
     // being captured. Cheap fire-and-forget — never blocks runtime.
-    case 'SHOW_OBSERVATION_OVERLAY': {
+  'SHOW_OBSERVATION_OVERLAY': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         showObservationOverlay(payload ?? {});
         sendResponse({ success: true });
@@ -8002,7 +8264,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
-    case 'HIDE_OBSERVATION_OVERLAY': {
+  },
+
+  'HIDE_OBSERVATION_OVERLAY': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    {
       try {
         hideObservationOverlay();
         sendResponse({ success: true });
@@ -8011,10 +8277,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       return false;
     }
+  },
 
-    default:
-      return false;
-  }
+};
+
+// The six-line dispatcher (CR-X4a). To add a message type: add a key above — nothing else.
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  const handler = MESSAGE_HANDLERS[message?.type];
+  if (!handler) return false;   // unknown type — the legacy switch's default
+  return handler(message, _sender, sendResponse);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

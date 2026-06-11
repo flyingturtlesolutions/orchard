@@ -5,7 +5,6 @@
  * Distinct from `image_list` which produces tagged image values.
  *
  * @module Sidepanel/modes/ObservationAuthor/shapes/imageRefs
- * @version 2.74.16
  */
 
 export const imageRefs = Object.freeze({

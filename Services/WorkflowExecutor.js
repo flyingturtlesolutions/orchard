@@ -1,7 +1,6 @@
 /**
  * @file Services/WorkflowExecutor.js
  * @module WorkflowExecutor
- * @version 2.74.142
  *
  * Top-level Workflow execution dispatcher (storage kind=`workflow`, UI label
  * "Workflow" since the v2.74.142 relabel — labels now match storage kinds
@@ -76,6 +75,7 @@
  */
 
 import { StorageManager } from './StorageManager.js';
+import { waitForTabComplete } from './TabUtils.js';   // v2.74.944 (CR-D5)
 import { wrapFragmentAsStrategy } from '../Core/capabilitySynth.js';   // v2.74.786 — wrap a bare T1 Fragment cross-Ground step into a synthetic Strategy at run time
 import { ExecutionEngine } from './ExecutionEngine.js';
 import { parseFileValue, isFileValue } from './FileParsers.js';
@@ -161,6 +161,10 @@ function unwrapTagged(v) {
  * @param {Object} [ctx]         - { iterStack? } — FOREACH iteration frames
  * @returns {*}
  */
+// v2.74.943 (CR-D4) — DELIBERATELY not folded into Core/bindingResolve: this resolver reads a THREE-source
+// chain (invocation paramValues -> accumulated workflow scope -> ctx.iterStack innermost-first) rather than
+// one Scope, and its unwrapTagged coercion is workflow-specific. The shared module covers the engine's
+// fragment/sieve/navigate sites; if a fourth Scope-backed site appears, adopt there — not here.
 function resolveBinding(binding, paramValues, workflowScope, ctx) {
   if (!binding || typeof binding !== 'object') return undefined;
   if (binding.kind === 'literal') return binding.value ?? '';
@@ -463,20 +467,9 @@ const SETTLE_AFTER_ANTECEDENT_MS = 800;
  * Checks the current status first (the load may already be done by the time we listen), then
  * subscribes. The listener is always removed exactly once.
  */
-function _waitTabComplete(tabId, timeoutMs = 15000) {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      try { chrome.tabs.onUpdated.removeListener(onUpdated); } catch (_) { /* */ }
-      resolve();
-    };
-    const onUpdated = (id, info) => { if (id === tabId && info.status === 'complete') finish(); };
-    try { chrome.tabs.onUpdated.addListener(onUpdated); } catch (_) { /* */ }
-    try { chrome.tabs.get(tabId, (t) => { void chrome.runtime.lastError; if (t && t.status === 'complete') finish(); }); } catch (_) { /* */ }
-    setTimeout(finish, Math.max(0, timeoutMs));
-  });
+async function _waitTabComplete(tabId, timeoutMs = 15000) {
+  // v2.74.944 (CR-D5) — via TabUtils (one waiter). This caller's contract: resolve void either way.
+  await waitForTabComplete(tabId, { timeoutMs });
 }
 
 /**

@@ -12,7 +12,6 @@
  *   }
  *
  * @module Sidepanel/modes/ObservationAuthor/picker
- * @version 2.74.166
  */
 
 // v2.74.166 — Frame-aware picker. Same broadcast helpers fragment-author

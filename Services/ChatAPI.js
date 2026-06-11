@@ -1,7 +1,6 @@
 /**
  * @file ChatAPI.js
  * @module Services/ChatAPI
- * @version 2.19.0
  *
  * Client-side wrapper around the CapabilityAPI message contract.
  * The chat UI calls these methods instead of touching StorageManager

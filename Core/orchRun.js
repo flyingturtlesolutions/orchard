@@ -31,7 +31,6 @@
 // PURE: no DOM / chrome / LLM. Deterministic given a deterministic exec.
 //
 // @module Core/orchRun
-// @version 2.74.728
 
 const _AFFIRMATIVE = /^\s*(yes|true|y|present|available|in ?stock|enabled|on|1)\s*$/i;
 
@@ -44,6 +43,24 @@ export function gatePasses(value) {
   if (Array.isArray(value)) return value.length > 0;
   if (typeof value === 'string') return _AFFIRMATIVE.test(value);
   return !!value;
+}
+
+/**
+ * v2.74.946 (CR-D7) — THE recursive plan walker. Chat had grown three hand-rolled copies of this exact
+ * pre-order descent (driver-id scans ×2 + a bindings collector) and a fourth find-first variant; they
+ * differ ONLY in the visitor. Visits each step, then its `body` children. The visitor returning `false`
+ * stops the whole scan (find-first); any other return continues. Null steps are skipped. PURE.
+ * @param {object[]} steps
+ * @param {(step:object) => (boolean|void)} visitor
+ * @returns {boolean} false iff the visitor early-exited
+ */
+export function scanPlan(steps, visitor) {
+  for (const s of (steps || [])) {
+    if (!s) continue;
+    if (visitor(s) === false) return false;
+    if (Array.isArray(s.body) && scanPlan(s.body, visitor) === false) return false;
+  }
+  return true;
 }
 
 /** Coerce a loop/foreach driver result into an iterable list of items + a count. PURE. */

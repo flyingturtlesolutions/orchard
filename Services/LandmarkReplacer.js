@@ -54,7 +54,6 @@
  *   `errors[]` so the caller can retry the failed subset.
  *
  * @module Services/LandmarkReplacer
- * @version 2.74.254
  */
 
 import { StorageManager } from './StorageManager.js';

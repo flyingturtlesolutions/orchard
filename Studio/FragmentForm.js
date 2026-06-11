@@ -50,7 +50,6 @@
  *
  * @module Studio/FragmentForm
  * @author Agent HUB
- * @version 2.74.22
  */
 
 import { StorageManager } from '../Services/StorageManager.js';

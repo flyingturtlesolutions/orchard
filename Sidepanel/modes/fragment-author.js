@@ -39,7 +39,6 @@
  *
  * @module Sidepanel/modes/fragment-author
  * @author Agent HUB
- * @version 2.72.60
  */
 
 import { toast, exitToStudio, requestModeChange } from '../shell-api.js';

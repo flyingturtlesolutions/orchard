@@ -9,7 +9,6 @@
 // Downstream (OBS-2/3): coalesce(trace) → segment into Fragments → buildTier2CapabilityRecords (SG-T2-ACC).
 //
 // @module Core/observedTrace
-// @version 2.74.750
 
 // `state_change` is a LOGICAL boundary marker (not a user action): the recorder emits it when the intent's
 // content landmark changes + settles after a commit with NO navigation (an SPA XHR swap). The segmenter treats

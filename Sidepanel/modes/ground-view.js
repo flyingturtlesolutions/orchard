@@ -20,7 +20,6 @@
  *   unmount — drop the mount element's contents, clear listeners.
  *
  * @module Sidepanel/modes/ground-view
- * @version 2.74.27
  */
 
 import { toast } from '../shell-api.js';

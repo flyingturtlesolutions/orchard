@@ -17,7 +17,6 @@
 // See specs/DESIGN_intent_orchestration.md §4–§6.
 //
 // @module Core/orchMatch
-// @version 2.74.779
 
 import { feedbackAdjustment } from './feedbackLearn.js';   // ORCH-FB-2 — relevance shaping from confirm/reject history
 

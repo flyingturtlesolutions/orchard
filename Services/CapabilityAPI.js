@@ -1,7 +1,6 @@
 /**
  * @file CapabilityAPI.js
  * @module Services/CapabilityAPI
- * @version 2.19.0
  *
  * Stable contract between the Grounding Lab (capability provider) and any
  * interface that consumes capabilities (chat UI, future web app, CLI, etc).

@@ -12,7 +12,6 @@
 // here first, then is copied there. PURE — no DOM, no I/O.
 //
 // @module Core/selectorStability
-// @version 2.74.706
 
 /**
  * Is `s` a STABLE identifier — safe to use as a durable selector discriminator (#id, .class, [name])?

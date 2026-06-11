@@ -20,7 +20,6 @@
  * produces same output. Safe to call at render time on every list refresh.
  *
  * @module Services/FragmentDescription
- * @version 2.74.9
  */
 
 /**

@@ -16,7 +16,6 @@
  * support for relative-to-row selectors is a Ship D polish item.)
  *
  * @module Sidepanel/modes/ObservationAuthor/shapes/list
- * @version 2.74.16
  */
 
 const escAttr = (s) => String(s ?? '').replace(/"/g, '&quot;');

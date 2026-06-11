@@ -12,7 +12,6 @@
  * migrated on read by StorageManager.#migrateObservationShape.
  *
  * @module Sidepanel/modes/ObservationAuthor/shapes/attribute
- * @version 2.74.131
  */
 
 const escAttr = (s) => String(s ?? '').replace(/"/g, '&quot;');

@@ -14,7 +14,6 @@
 // PURE: no DOM / chrome / storage / id-minting (the persistence slice mints ids + saves).
 //
 // @module Core/capabilitySynth
-// @version 2.74.775
 
 import { slugUpper } from './slug.js';   // v2.74.940 (CR-D2)
 

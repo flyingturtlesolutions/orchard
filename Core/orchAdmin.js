@@ -12,7 +12,6 @@
 // current Ground; "everywhere / all grounds / globally" widens it to every Ground.
 //
 // @module Core/orchAdmin
-// @version 2.74.773
 
 const _CLEAR_CHAT = /^\s*(?:please\s+)?(clear|reset|wipe)\s+(?:the\s+|this\s+)?(chat|conversation|messages|message history|history|screen|window|transcript)\b/i;
 const _DEL_VERB   = /\b(delete|remove|wipe|purge|drop|erase|nuke|clear)\b/i;

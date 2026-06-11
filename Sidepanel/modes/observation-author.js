@@ -23,7 +23,6 @@
  *   - All extracts verified successfully
  *
  * @module Sidepanel/modes/observation-author
- * @version 2.74.16
  */
 
 import { toast, exitToStudio, requestModeChange } from '../shell-api.js';

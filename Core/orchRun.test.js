@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { walkPlan, gatePasses } from './orchRun.js';
+import { walkPlan, gatePasses, scanPlan } from './orchRun.js';
 import { planStep } from './orchPlan.js';
 import { evaluatePredicate } from './orchAnalyze.js';
 
@@ -312,5 +312,45 @@ describe('_loopBudget — nested fragments trigger the confirm (CR-E4, v2.74.930
     ] };
     await walkPlan(plan, exec, {});
     assert.equal(asked, 0, 'no fragments anywhere in the nested body — reads need no confirm');
+  });
+});
+
+describe('scanPlan — THE recursive plan walker (CR-D7)', () => {
+  const PLAN = [
+    { kind: 'observe', id: 'rows' },
+    { kind: 'foreach', id: 'each', over: 'rows', body: [
+      { kind: 'fragment', id: 'open', bindings: { a: '1' } },
+      null,
+      { kind: 'gate', id: 'g', over: 'cond', body: [{ kind: 'fragment', id: 'inner', bindings: { b: '2' } }] },
+    ] },
+    { kind: 'fragment', id: 'last', bindings: { c: '3' } },
+  ];
+
+  it('visits every non-null step pre-order, descending into body', () => {
+    const seen = [];
+    const completed = scanPlan(PLAN, (s) => { seen.push(s.id); });
+    assert.equal(completed, true);
+    assert.deepEqual(seen, ['rows', 'each', 'open', 'g', 'inner', 'last']);
+  });
+
+  it('a visitor returning false stops the whole scan (find-first)', () => {
+    const seen = [];
+    const completed = scanPlan(PLAN, (s) => { seen.push(s.id); if (s.id === 'open') return false; });
+    assert.equal(completed, false);
+    assert.deepEqual(seen, ['rows', 'each', 'open'], 'nothing after the hit — not even siblings of an ancestor');
+  });
+
+  it('the chat adopters compose on it: driver-id scan + bindings collect', () => {
+    const driven = new Set();
+    scanPlan(PLAN, (s) => { if ((s.kind === 'foreach' || s.kind === 'loop') && s.over) driven.add(s.over); });
+    assert.deepEqual([...driven], ['rows']);
+    const bindings = {};
+    scanPlan(PLAN, (s) => { if (s.kind === 'fragment' && s.bindings && typeof s.bindings === 'object') Object.assign(bindings, s.bindings); });
+    assert.deepEqual(bindings, { a: '1', b: '2', c: '3' }, 'nested fragment bindings included');
+  });
+
+  it('tolerates null/undefined steps lists', () => {
+    assert.equal(scanPlan(null, () => false), true, 'no steps -> nothing visited -> completed');
+    assert.equal(scanPlan([null, undefined], () => false), true);
   });
 });

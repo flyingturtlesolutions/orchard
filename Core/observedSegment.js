@@ -16,7 +16,6 @@
 //     gives nicer labels later; this keeps it runnable without an LLM.
 //
 // @module Core/observedSegment
-// @version 2.74.750
 
 import { featureToProtoLandmark } from './landmark.js';   // OBS (v2.74.764) — reconcile demonstrated elements to grounded Locale features
 import { slugUpper } from './slug.js';   // v2.74.940 (CR-D2)

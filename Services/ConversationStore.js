@@ -1,7 +1,6 @@
 /**
  * @file ConversationStore.js
  * @module ConversationStore
- * @version 2.19.1
  *
  * Persistence for chat conversations. Each conversation is stored as
  * `conv:<id>` in chrome.storage.local. A separate `conv:index` maintains

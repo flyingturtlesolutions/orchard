@@ -21,7 +21,6 @@
 //
 // PURE: no DOM, no LLM, no storage. Unit-testable like the other Core/ stages.
 // @module Core/tier2Lower
-// @version 2.74.639
 
 import { selectionToTrialRoles } from './bind.js';
 import { slugUpper } from './slug.js';   // v2.74.940 (CR-D2)

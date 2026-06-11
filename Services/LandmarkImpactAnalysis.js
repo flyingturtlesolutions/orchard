@@ -21,7 +21,6 @@
  *   - Observations: same as fragments.
  *
  * @module Services/LandmarkImpactAnalysis
- * @version 2.74.243
  */
 
 import { StorageManager } from './StorageManager.js';

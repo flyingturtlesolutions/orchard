@@ -1,7 +1,6 @@
 /**
  * @file ProcedureBuilder.js
  * @module Services/ProcedureBuilder
- * @version 2.19.0
  *
  * Transforms a Trace (Layer 1 — raw walk output) into a Procedure (Layer 2 —
  * runtime-executable step list). Applies deterministic refactoring rules:

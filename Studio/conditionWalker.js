@@ -13,7 +13,6 @@
  *
  * @module Studio/conditionWalker
  * @author Agent HUB
- * @version 2.72.32
  */
 
 /**

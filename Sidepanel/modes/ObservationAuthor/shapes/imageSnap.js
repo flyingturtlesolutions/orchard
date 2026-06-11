@@ -28,7 +28,6 @@
  * MediaRecorder-driven capture) is reserved as a sibling shape.
  *
  * @module Sidepanel/modes/ObservationAuthor/shapes/imageSnap
- * @version 2.74.19
  */
 
 const escAttr = (s) => String(s ?? '').replace(/"/g, '&quot;');

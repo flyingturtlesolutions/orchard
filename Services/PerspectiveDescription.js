@@ -19,7 +19,6 @@
  * always produces same output.
  *
  * @module Services/PerspectiveDescription
- * @version 2.74.231
  */
 
 /**

@@ -40,7 +40,6 @@
  *
  * @module Services/UniversalGate
  * @author Agent HUB
- * @version 2.72.69
  */
 
 import { Logger } from '../Core/Logger.js';

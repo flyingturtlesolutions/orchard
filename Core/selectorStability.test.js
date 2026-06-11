@@ -1,5 +1,4 @@
 // Core/selectorStability.test.js — selector durability classification + most-durable-unique choice (GA-2).
-// @version 2.74.839
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';

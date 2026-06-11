@@ -17,7 +17,6 @@
  * Snap button and enable Verify immediately.
  *
  * @module Sidepanel/modes/ObservationAuthor/shapes/imageFull
- * @version 2.74.51
  */
 
 export const imageFull = Object.freeze({

@@ -13,7 +13,6 @@
  * Pure I/O helpers wrapping StorageManager. No DOM, no UI.
  *
  * @module Services/LandmarkResolver
- * @version 2.74.236
  */
 
 import { StorageManager }                from './StorageManager.js';

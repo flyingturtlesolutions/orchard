@@ -17,7 +17,6 @@
  * an empty set and the crawl proceeds crawl-only.
  *
  * @module Services/SitemapService
- * @version 2.74.457
  */
 
 import { Logger } from '../Core/Logger.js';

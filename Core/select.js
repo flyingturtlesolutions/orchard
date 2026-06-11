@@ -15,7 +15,6 @@
 // top; SG-3 Cover gates on `boundary.requiredFields`. Unit-testable like Core/intentSpec.js.
 //
 // @module Core/select
-// @version 2.74.623
 
 const _features = (locale) =>
   (locale && locale.features && typeof locale.features === 'object') ? Object.values(locale.features) : [];

@@ -15,7 +15,6 @@
 // capabilityId → a Strategy ref (the StorageManager reads) and passes `resolved` in, so this stays a pure mapper.
 //
 // @module Core/orchTranslate
-// @version 2.74.745
 
 // A param binding is `strategy_param` (shown in the ParamForm, rebindable) when its name is a declared param of the
 // composite; otherwise a frozen `literal`. The launched Strategy thus exposes exactly the rebindable arguments.

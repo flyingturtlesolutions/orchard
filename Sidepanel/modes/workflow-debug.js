@@ -36,7 +36,6 @@
  *     only at the top-level step granularity for now)
  *
  * @module Sidepanel/modes/workflow-debug
- * @version 2.74.142
  */
 
 import { toast, exitToStudio } from '../shell-api.js';

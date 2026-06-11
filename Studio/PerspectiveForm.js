@@ -21,7 +21,6 @@
  *
  * @module Studio/PerspectiveForm
  * @author Agent HUB
- * @version 2.72.45
  */
 
 import { StorageManager } from '../Services/StorageManager.js';

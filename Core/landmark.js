@@ -12,7 +12,6 @@
 //   elements carry no explicit role attribute, so we derive the implicit ARIA role HTML-AAM would assign.
 //
 // @module Core/landmark
-// @version 2.74.599
 
 // Implicit ARIA role from the Locale `kind` (+ optional fill `fieldType`) when no explicit role was
 // captured. Conservative: only the cases where the role is unambiguous; otherwise null (recovery then

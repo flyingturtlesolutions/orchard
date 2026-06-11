@@ -14,7 +14,6 @@
 // it feeds its parsed output in as `comprehension`. Unit-testable like Core/intentShape.js.
 //
 // @module Core/intentSpec
-// @version 2.74.629
 
 import { classifyIntentShape } from './intentShape.js';
 

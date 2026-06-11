@@ -13,7 +13,6 @@
  * back the active-Ground-per-thread tracker (GROUND_SPEC § 8) when that lands.
  *
  * @module Core/GroundMatcher
- * @version 2.74.326
  */
 
 // Session / tracking query params stripped during canonicalization

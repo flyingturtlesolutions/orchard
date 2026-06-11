@@ -44,7 +44,6 @@
  *
  * @module Studio/AssertionForm
  * @author Agent HUB
- * @version 2.72.33
  */
 
 import { StorageManager } from '../Services/StorageManager.js';

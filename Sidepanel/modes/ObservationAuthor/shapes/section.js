@@ -18,7 +18,6 @@
  * card (parallel to how image_snap thumbnails appear).
  *
  * @module Sidepanel/modes/ObservationAuthor/shapes/section
- * @version 2.74.61
  */
 
 const escHtml = (s) => String(s ?? '')

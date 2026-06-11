@@ -19,7 +19,6 @@
  * list refresh.
  *
  * @module Services/ObservationDescription
- * @version 2.74.21
  */
 
 /**

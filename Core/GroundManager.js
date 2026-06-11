@@ -3,7 +3,6 @@
  * @description Business-logic layer for Ground CRUD. Delegates persistence to
  * StorageManager and enforces domain rules (e.g. URL validation).
  * @module Core/GroundManager
- * @version 1.0.0
  */
 
 import { Logger }         from './Logger.js';

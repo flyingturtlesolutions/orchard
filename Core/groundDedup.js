@@ -22,7 +22,6 @@
  * removes the now-empty absorbed Ground shell.
  *
  * @module Core/groundDedup
- * @version 2.74.816
  */
 
 // Compact list of two-label public suffixes (eTLD with a ccTLD SLD). NOT the

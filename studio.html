@@ -283,7 +283,7 @@
             <span class="analysis-tier-choice-tier">Cache (T1)</span>
             <span class="analysis-tier-choice-desc">Fragment-step tree authored by you. Deterministic, fast. The current Strategy form. Use for known flows.</span>
           </button>
-          <button class="analysis-tier-choice" id="btn-strategy-tier-frontier" type="button">
+          <button class="analysis-tier-choice" id="btn-strategy-tier-frontier" type="button" disabled title="Composer-based (T3) strategies cannot run yet — the runtime composer is unimplemented (stubbed since v2.72.27). Authoring is disabled until it lands; existing T3 records remain readable.">
             <span class="analysis-tier-choice-title">Composer-based</span>
             <span class="analysis-tier-choice-tier">Frontier (T3)</span>
             <span class="analysis-tier-choice-desc">Frontier model composes a Strategy from primitives at runtime, given the goal + contract. Real per-call cost. Best for novel goals or when no T1 Strategy exists. <strong>Composer ships in a future pass — T3 Strategies cannot run yet.</strong></span>

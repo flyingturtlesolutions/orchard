@@ -13,7 +13,6 @@
 // PURE: no DOM / chrome / LLM. A T2 cache hit that survives a changed argument.
 //
 // @module Core/orchTemplate
-// @version 2.74.744
 
 const _esc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 

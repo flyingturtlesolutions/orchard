@@ -36,7 +36,6 @@
  * authorable in Studio's full Analysis form.
  *
  * @module Sidepanel/modes/analysis-author
- * @version 2.74.63
  */
 
 import { toast, exitToStudio, requestModeChange } from '../shell-api.js';

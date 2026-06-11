@@ -17,10 +17,10 @@
  *
  * @module Services/DiscoveryService
  * @author Agent HUB
- * @version 2.19.0
  */
 
 import { Logger }           from '../Core/Logger.js';
+import { waitForTabComplete } from './TabUtils.js';   // v2.74.944 (CR-D5)
 import { StorageManager }   from './StorageManager.js';
 import { AnthropicService } from './AnthropicService.js';
 import { templatePattern }  from '../Core/siteMap.js';   // v2.74.440 — archetype-driven crawl
@@ -303,21 +303,11 @@ export class DiscoveryService {
   /** Navigate a tab to a URL, waiting for the 'complete' status. */
   static async #navigate(tabId, url) {
     await chrome.tabs.update(tabId, { url });
-    // Wait for the tab to report 'complete'
-    await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        chrome.tabs.onUpdated.removeListener(listener);
-        reject(new Error('navigation timeout'));
-      }, PAGE_READY_TIMEOUT_MS);
-      const listener = (updatedTabId, changeInfo) => {
-        if (updatedTabId === tabId && changeInfo.status === 'complete') {
-          clearTimeout(timeout);
-          chrome.tabs.onUpdated.removeListener(listener);
-          resolve();
-        }
-      };
-      chrome.tabs.onUpdated.addListener(listener);
-    });
+    // v2.74.944 (CR-D5) — via TabUtils (one waiter); this caller's contract: REJECT on not-complete.
+    // Also GAINS the already-complete poll the inline copy was missing (a cached/instant load could
+    // complete before the listener attached and burn the full timeout).
+    const r = await waitForTabComplete(tabId, { timeoutMs: PAGE_READY_TIMEOUT_MS });
+    if (!r.ok) throw new Error('navigation timeout');
   }
 
   /** Wait for content script readiness by polling a simple DOM query. */

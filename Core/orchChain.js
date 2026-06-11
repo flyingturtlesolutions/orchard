@@ -15,7 +15,6 @@
 // dogs" stays one clause) and the parts are rejoined with their original text.
 //
 // @module Core/orchChain
-// @version 2.74.743
 
 import { planStep, validatePlan } from './orchPlan.js';
 import { slugUpper } from './slug.js';   // v2.74.940 (CR-D2)

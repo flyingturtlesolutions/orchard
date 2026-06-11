@@ -13,7 +13,6 @@
 // PURE: no chrome / DOM / storage. Unit-testable like Core/locale.js + Core/outcomes.js.
 //
 // @module Core/trialSynth
-// @version 2.74.645
 
 import { READ_VERB } from './intentShape.js';   // v2.74.939 (CR-D3) — the single read-verb lexicon
 
