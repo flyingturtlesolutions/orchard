@@ -85,6 +85,8 @@ before irreversible actions** (submits/purchases/deletes). [Stagehand; Anthropic
   tasks — but up-front plans are brittle in dynamic web settings, so allow replanning + keep the
   per-substep trial gate). [LLMCompiler ICML 2024; arXiv 2505.08477 / 2509.03581]
 
+> **Status (v2.74.956-.958):** R-4 wired (head nav fast-path + T3X decompose gate + dead-end full dispatch; all replays confirm-first). R-5 closed (palette carries `reversible` via the one toCandidate deriver; router prompt marks [IRREVERSIBLE]; dispatcher uses the can't-be-undone confirm). R-6: Tier-0 = the cascade placement (alias/ORCH_MATCH run before any router call); Tier-1 = routeAsk on MODEL_FAST; Tier-2 = the existing ORCH_PLAN/chain machinery on the complex branch (the plan-and-replan A/B stays an open spike); §3.4 cache = ROUTE_ASK's decision cache (ask+ground+fuzzy pageKey, 5-min TTL, never caches the miss class). R-7 (retire orchComprehend/orchRoute) gated on live proof of this path.
+
 ## 4. Migration (keep / demote / delete)
 - `orchComprehend` (substrate-free decomposition) → **delete/demote** — root cause of the mis-escalation.
 - The LLM → **promote** from escalation-fallback to **primary cold-path router**.

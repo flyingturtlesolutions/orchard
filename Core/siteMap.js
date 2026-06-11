@@ -632,6 +632,88 @@ export function siteMapFromSitemap(urls) {
 // via a nav link, which outranks a stub (known from a sitemap, never visited).
 const STATUS_RANK = { stub: 0, discovered: 1, modeled: 2 };
 
+/** The node UNION (one archetype, two contributions): winner-by-status for status/name, instance-sample
+ *  union (capped; MAX instanceCount %s sitemap.xml's count is authoritative), locale-set union with stable
+ *  per-locale exemplars. Shared by mergeSiteMap and the v2.74.959 split-heal. PURE. */
+function _unionNodes(id, cur, n, freshWins) {
+  const winner = freshWins ? n : cur;
+  const instances = [...(cur.instances || [])];
+  for (const u of (n.instances || [])) if (!instances.includes(u) && instances.length < INSTANCE_SAMPLE_CAP) instances.push(u);
+  return {
+    id,
+    urlPattern: cur.urlPattern || n.urlPattern,
+    localeId: n.localeId ?? cur.localeId ?? null,
+    name: winner.name || cur.name || n.name,
+    goals: (n.goals && n.goals.length) ? n.goals : (cur.goals || []),
+    status: freshWins ? n.status : cur.status,
+    pageType: n.pageType ?? cur.pageType ?? null,        // crawl supplies pageType; Locale doesn't
+    visitedAt: n.visitedAt ?? cur.visitedAt ?? null,
+    exemplarUrl: cur.exemplarUrl || n.exemplarUrl || null,
+    instances,
+    instanceCount: Math.max(cur.instanceCount || 0, n.instanceCount || 0, instances.length),
+    locales: [...new Set([...(cur.locales || []), ...(n.locales || [])])].sort(),
+    exemplarByLocale: { ...(n.exemplarByLocale || {}), ...(cur.exemplarByLocale || {}) },
+  };
+}
+
+/**
+ * v2.74.959 (task #164) — SELF-HEAL split archetypes. Nodes built BEFORE the corpus template rules existed
+ * (or with weaker ones) sit keyed by their per-URL pattern — one node per concrete page (/blog/my-post,
+ * /blog/other-post) where the rules say ONE archetype (/blog/{slug}). New contributions template correctly,
+ * but the old split nodes lingered forever: duplicated archetypes, inflated coverage stats, nav edges
+ * pointing at ghosts. This pass re-templates every node's CONCRETE exemplar (exemplarUrl, else the first
+ * instance sample) through the map's CURRENT rules; a node whose rules-derived id differs is merged into its
+ * consolidated archetype (the same union mergeSiteMap uses; status winner by rank) and its edges remapped.
+ * Pattern-only nodes (no concrete URL to re-template) are left untouched. Idempotent on a healthy map;
+ * a no-op when the map has no rules. PURE (mutates + returns the map mergeSiteMap just built).
+ * @param {{nodes?:Object, edges?:Array, templateRules?:string[]}} map
+ * @returns {object} the same map, healed
+ */
+export function healSplitNodes(map) {
+  const rules = (map && map.templateRules) || [];
+  if (!rules.length || !map || !map.nodes) return map;
+  const moves = [];   // { oldId, newId, pattern } — newId is rules-terminal, so moves never chain
+  for (const [id, n] of Object.entries(map.nodes)) {
+    const url = (n && (n.exemplarUrl || (Array.isArray(n.instances) && n.instances[0]))) || null;
+    if (!url) continue;
+    const pattern = templatePattern(url, rules);
+    const newId = archetypeId(pattern);
+    if (newId !== id) moves.push({ oldId: id, newId, pattern });
+  }
+  if (!moves.length) return map;
+  const remap = {};
+  for (const { oldId, newId, pattern } of moves) {
+    const split = map.nodes[oldId];
+    const target = map.nodes[newId];
+    if (!target) {
+      map.nodes[newId] = { ...split, id: newId, urlPattern: pattern };
+    } else {
+      const freshWins = STATUS_RANK[split.status] >= STATUS_RANK[target.status];
+      const merged = _unionNodes(newId, target, split, freshWins);
+      merged.urlPattern = pattern;   // the consolidated archetype's pattern, not the split's concrete one
+      map.nodes[newId] = merged;
+    }
+    delete map.nodes[oldId];
+    remap[oldId] = newId;
+  }
+  // Remap + dedup edges. A cross-split edge that collapses into a self-loop is dropped (it described the
+  // SAME archetype linking to itself only because the nodes were wrongly split); deliberate self-loops
+  // (from === to before the remap) are kept.
+  const seen = new Set();
+  const edges = [];
+  for (const e of (map.edges || [])) {
+    const from = remap[e.from] || e.from;
+    const to = remap[e.to] || e.to;
+    if (from === to && e.from !== e.to) continue;
+    const k = from + '->' + to + '|' + e.via;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    edges.push((from === e.from && to === e.to) ? e : { ...e, from, to });
+  }
+  map.edges = edges;
+  return map;
+}
+
 /**
  * Merge a fresh contribution into an existing siteMap. Upgrades node status
  * (stub < discovered < modeled), keeps the richer (modeled) metadata, and dedups
@@ -650,36 +732,15 @@ export function mergeSiteMap(existing, fresh) {
     const cur = map.nodes[id];
     if (!cur) { map.nodes[id] = { ...n }; continue; }
     const freshWins = STATUS_RANK[n.status] >= STATUS_RANK[cur.status];
-    const winner = freshWins ? n : cur;
-    // Union the concrete-instance samples (capped); instanceCount is best-effort —
-    // sitemap.xml supplies the authoritative count (slice 2), so MAX dominates,
-    // while disjoint small crawl/Locale samples still aggregate via the union size.
-    const instances = [...(cur.instances || [])];
-    for (const u of (n.instances || [])) if (!instances.includes(u) && instances.length < INSTANCE_SAMPLE_CAP) instances.push(u);
-    map.nodes[id] = {
-      id,
-      urlPattern: cur.urlPattern || n.urlPattern,
-      localeId: n.localeId ?? cur.localeId ?? null,
-      name: winner.name || cur.name || n.name,
-      goals: (n.goals && n.goals.length) ? n.goals : (cur.goals || []),
-      status: freshWins ? n.status : cur.status,
-      pageType: n.pageType ?? cur.pageType ?? null,        // crawl supplies pageType; Locale doesn't
-      visitedAt: n.visitedAt ?? cur.visitedAt ?? null,
-      exemplarUrl: cur.exemplarUrl || n.exemplarUrl || null,
-      instances,
-      instanceCount: Math.max(cur.instanceCount || 0, n.instanceCount || 0, instances.length),
-      // Language dimension: union the locale sets; keep existing per-locale exemplars
-      // (stable) and fill any the fresh contribution adds.
-      locales: [...new Set([...(cur.locales || []), ...(n.locales || [])])].sort(),
-      exemplarByLocale: { ...(n.exemplarByLocale || {}), ...(cur.exemplarByLocale || {}) },
-    };
+    map.nodes[id] = _unionNodes(id, cur, n, freshWins);
   }
   const seen = new Set(map.edges.map((e) => e.from + '->' + e.to + '|' + e.via));
   for (const e of fresh.edges || []) {
     const k = e.from + '->' + e.to + '|' + e.via;
     if (!seen.has(k)) { seen.add(k); map.edges.push(e); }
   }
-  return map;
+  // v2.74.959 (task #164) — self-heal split archetypes against the (possibly just-arrived) rules.
+  return healSplitNodes(map);
 }
 
 /**

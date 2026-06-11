@@ -650,6 +650,7 @@ export class TemplateWalker {
     }
 
     let antecedentActionsRun = 0;
+    const effects = [];   // PB-8 (v2.74.960) — per-bracketed-action {action, severity, declared, observed} for the trial scorer
 
     // 1. Replay the antecedent chain, if the Fragment has one
     if (frag.antecedentFragmentId) {
@@ -1314,6 +1315,7 @@ export class TemplateWalker {
         // aren't stable across reloads.
         const stepFrameId = await TemplateWalker._resolveFrameId(tabId, action.frameUrl);
         const execResult = await TemplateWalker.#executeStep(tabId, action, stepFrameId, isAborted);   // v2.74.920 (CR-S4)
+        if (execResult?._effect) effects.push(execResult._effect);   // PB-8 (v2.74.960) — bracketed action's drift verdict
         if (!execResult?.success) {
           // Best-effort normalizers (SCROLL_TO / WAIT_FOR injected by trial synth) are marked `optional`:
           // a miss must NOT abort the fragment — the real action step that follows carries the landmark and
@@ -1324,7 +1326,7 @@ export class TemplateWalker {
             continue;
           }
           return {
-            success: false, actionsRun, antecedentActionsRun, lastActions,
+            success: false, actionsRun, antecedentActionsRun, lastActions, effects,
             error: `In "${frag.name}", step ${action.action} ${action.selector ?? ''} failed: ${execResult?.error ?? 'unknown'}`,
           };
         }
@@ -1381,7 +1383,7 @@ export class TemplateWalker {
     // Let the page settle after the fragment finishes
     await TemplateWalker.#waitForPageIdle(tabId, TOP_FRAME_ID).catch(() => {});
 
-    return { success: true, actionsRun, antecedentActionsRun, lastActions, error: null, navigated: fragNavigated };
+    return { success: true, actionsRun, antecedentActionsRun, lastActions, effects, error: null, navigated: fragNavigated };
   }
 
   /**
@@ -4151,12 +4153,21 @@ export class TemplateWalker {
       const { actionResult, observation } = await observeActionBracket(tabId, frameId, dispatchAction);
       const res = actionResult ?? { success: false, error: 'EXECUTE_STEP returned no response' };
 
+      // PB-8 (R5, v2.74.960) — drift classification is HOISTED out of the persisted-landmark guard:
+      // trial protos often lack a uid/groundId (pre-accept), so their bracketed actions never
+      // classified at all — and the trial scorer is exactly who needs the verdict. The per-action
+      // record rides the action result into executeFragment's effects[] for scoreTrial.
+      let driftSeverity = null;
+      if (observation) {
+        driftSeverity = classifyEffectDrift(declaredEffect, observation.observedEffect);
+        res._effect = {
+          action  : step.action,
+          severity: driftSeverity,
+          declared: declaredEffect?.kind ?? null,
+          observed: observation.observedEffect ?? null,
+        };
+      }
       if (observation && descForObs?.uid && descForObs?.groundId) {
-        // v2.74.305 — classifyEffectDrift returns severity string per
-        // ACTION_SPEC § 8: 'expected-missing' | 'unexpected' |
-        // 'parameter-mismatch' | null (match). isEffectDrift still works
-        // as boolean back-compat.
-        const driftSeverity = classifyEffectDrift(declaredEffect, observation.observedEffect);
         emitGroundEvent(descForObs.groundId, {
           kind   : EVENT_KIND.LANDMARK_EFFECT_OBSERVED,
           uid    : descForObs.uid,

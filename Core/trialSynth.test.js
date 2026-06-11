@@ -6,7 +6,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { synthesizeTrialOp, classifyTrialSafety } from './trialSynth.js';
+import { synthesizeTrialOp, classifyTrialSafety, scoreTrial } from './trialSynth.js';
 
 describe('synthesizeTrialOp — revealed-option WAIT_FOR carries identity (SG-RES-2b)', () => {
   // Indeed pay: the filter button reveals a <ul role=listbox> popover in a BODY PORTAL; the option's captured
@@ -219,5 +219,45 @@ describe('volatile combobox suggestions — reads dropped too (CR-B2, v2.74.935)
     assert.ok(extract, 'an EXTRACT still emits');
     assert.equal(extract.selector, '.results', 'the STABLE read won; the volatile suggestion list did not');
     assert.ok(op.skipped.some((s) => s.role === 'suggestion list'), 'the volatile read is accounted for');
+  });
+});
+
+describe('scoreTrial — effect reconciliation (PB-8 / R5, v2.74.960)', () => {
+  const run = (effects) => ({ success: true, stepResults: [{ success: true, actionsRun: 3, error: null, effects }], extractedValues: {} });
+
+  it('no bracketed actions — the ran-without-error boolean exactly as before (PB-5)', () => {
+    const ok = scoreTrial({ shape: 'act', resolvedRoleCount: 2, proposedRoleCount: 2, result: run([]) });
+    assert.equal(ok.vector.effectMatch, 1);
+    assert.equal(ok.verdict, 'trial-pass');
+    const bad = scoreTrial({ shape: 'act', result: { success: false, stepResults: [{ success: false, error: 'boom' }] } });
+    assert.equal(bad.vector.effectMatch, 0);
+    assert.equal(bad.verdict, 'trial-fail');
+  });
+
+  it('all observed effects match the declared — effectMatch 1 + affirmative evidence', () => {
+    const r = scoreTrial({ shape: 'act', resolvedRoleCount: 2, proposedRoleCount: 2,
+      result: run([{ action: 'CLICK', severity: null, declared: 'triggers-navigation', observed: 'navigation' }]) });
+    assert.equal(r.vector.effectMatch, 1);
+    assert.equal(r.verdict, 'trial-pass');
+    assert.ok(r.evidence.some((e) => /matched the declared effects/.test(e)));
+  });
+
+  it('SOFT drift lowers the score but still passes (declared effects all landed)', () => {
+    const r = scoreTrial({ shape: 'act', resolvedRoleCount: 2, proposedRoleCount: 2,
+      result: run([
+        { action: 'CLICK', severity: null, declared: 'triggers-navigation', observed: 'navigation' },
+        { action: 'TYPE', severity: 'unexpected', declared: null, observed: 'dom-mutation' },
+      ]) });
+    assert.equal(r.vector.effectMatch, 0.75);
+    assert.equal(r.verdict, 'trial-pass');
+    assert.ok(r.evidence.some((e) => /Effect drift \(unexpected\) on TYPE/.test(e)));
+  });
+
+  it('HARD drift (expected-missing: the declared effect did NOT happen) fails the trial', () => {
+    const r = scoreTrial({ shape: 'act', resolvedRoleCount: 2, proposedRoleCount: 2,
+      result: run([{ action: 'CLICK', severity: 'expected-missing', declared: 'triggers-navigation', observed: 'none' }]) });
+    assert.equal(r.vector.effectMatch, 0);
+    assert.equal(r.verdict, 'trial-fail');
+    assert.ok(r.evidence.some((e) => /Effect drift \(expected-missing\) on CLICK/.test(e)));
   });
 });

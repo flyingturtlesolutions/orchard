@@ -106,6 +106,18 @@ const _engineBusyTabs = new Map();
 
 // v2.74.911 — shared with background.js: the EXPLORE poke sweep is engine activity too (the 23:29 trace
 // captured the sweep's own pokes as user interactions #1-#4 on the freshly minted Indeed ground).
+// R-6 (v2.74.958) — the ROUTE_ASK warm-path decision cache (DESIGN_llm_front_door §3.4): key =
+// normalized ask + groundId + the FUZZY page key (origin+path via ctx.normalizeUrl — deliberately NOT an
+// exact DOM hash). Only CONFIDENT actionable decisions (primitive/replay/decompose) are stored;
+// demonstrate/clarify are NEVER cached, so a just-taught capability is never masked by a stale miss. A
+// cached selection gone wrong fails loudly downstream — §3.5: don't force the cache; the trial gate owns
+// wrongness. SW-lifetime (a worker restart clears it — acceptable), short TTL, bounded size.
+const _routeCache = new Map();
+const ROUTE_CACHE_TTL_MS = 5 * 60 * 1000;   // the C3 spec-cache precedent: page-state-specific, minutes not hours
+const ROUTE_CACHE_MAX = 200;
+const _routeCacheKey = (ask, groundId, pageKey) =>
+  `${String(ask).trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 300)}::${groundId || ''}::${pageKey || ''}`;
+
 export function markEngineBusy(tabId, busy) {
   if (typeof tabId !== 'number') return;
   const depth = (_engineBusyTabs.get(tabId) || 0) + (busy ? 1 : -1);
@@ -445,8 +457,16 @@ export function createSgMessageHandlers(ctx) {
         const ask = String(payload?.ask ?? '').trim();
         if (!ask) { sendResponse({ success: false, error: 'ask required' }); return; }
         let { tabId, groundId } = payload ?? {};
-        if (!groundId && typeof tabId === 'number') {
-          try { const url = (await chrome.tabs.get(tabId))?.url || ''; if (url) groundId = _groundIdForUrl(url, await StorageManager.getAllGrounds()); } catch { /* */ }
+        let tabUrl = '';
+        if (typeof tabId === 'number') { try { tabUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
+        if (!groundId && tabUrl) { try { groundId = _groundIdForUrl(tabUrl, await StorageManager.getAllGrounds()); } catch { /* */ } }
+        // R-6 (v2.74.958) — warm-path cache check (see _routeCache above).
+        const cacheKey = _routeCacheKey(ask, groundId, tabUrl ? ctx.normalizeUrl(tabUrl) : '');
+        const hit = _routeCache.get(cacheKey);
+        if (hit && (Date.now() - hit.at) < ROUTE_CACHE_TTL_MS) {
+          Logger.info('route', `ROUTE_ASK "${ask.slice(0, 60)}" -> ${hit.decision.action} (CACHE HIT, age ${Math.round((Date.now() - hit.at) / 1000)}s)`);
+          sendResponse({ success: true, decision: hit.decision, groundId: groundId || null, candidateCount: hit.candidateCount, cached: true });
+          return;
         }
         let caps = [];
         if (groundId) { try { caps = ((await ctx.readSgCapabilities(groundId)) || []).filter((c) => c && isActiveCapability(c) && c.kind !== 'composite'); } catch { caps = []; } }
@@ -455,6 +475,11 @@ export function createSgMessageHandlers(ctx) {
           retrieveTools: async () => candidates,                                       // R-2 candidates (precomputed)
           callRouter:    async ({ ask: a, tools }) => AnthropicService.routeAsk({ ask: a, tools }),   // R-3 LLM
         });
+        // R-6 (v2.74.958) — store only confident, actionable decisions (never the miss class).
+        if (!decision.lowConfidence && (decision.action === 'primitive' || decision.action === 'replay' || decision.action === 'decompose')) {
+          _routeCache.set(cacheKey, { decision, candidateCount: candidates.length, at: Date.now() });
+          if (_routeCache.size > ROUTE_CACHE_MAX) { _routeCache.delete(_routeCache.keys().next().value); }
+        }
         const t = decision.tool;
         Logger.info('route', `ROUTE_ASK "${ask.slice(0, 60)}" → ${decision.action}${t ? ` ${t.op || t.capabilityId || ''}` : ''} (conf ${decision.confidence}, ${candidates.length} cand, ground ${groundId || '—'})`);
         sendResponse({ success: true, decision, groundId: groundId || null, candidateCount: candidates.length });
@@ -537,6 +562,17 @@ export function createSgMessageHandlers(ctx) {
           // navigate/wait nodes are skipped this slice — the live filter intents are all fragments.)
           const liveTab = (typeof tabId === 'number') ? tabId : null;
           const phases = orderForRun(op.nodes, localeModel);
+          // PB-9 (R2, v2.74.961) — the tier2 ACHIEVABILITY floor, mirroring the flat path's
+          // no-bindable-roles exit (.925): a lowered op with no role-carrying fragment phase cannot
+          // prove anything live — exit with the cover verdict instead of "running" zero phases and
+          // aggregating an empty outcome set into a hollow verdict.
+          const _actionable = phases.filter((n) => n && n.type === 'fragment' && Array.isArray(n.roles) && n.roles.length);
+          if (!_actionable.length) {
+            const cover0 = coverComplete(spec, selection);
+            Logger.info('background', `RUN_SG_TRIAL[tier2] ▸ EXIT — no actionable phases for "${intent.slice(0, 60)}" (cover=${cover0.complete}; ${cover0.reason})`);
+            sendResponse({ success: true, ran: false, reason: 'no actionable phases from the selection', cover: cover0, intentShape: spec.shape, tier2: true });
+            return;
+          }
           const outcomes = [];
           // SG-T2-8 (v2.74.646) — SETTLE between phases when a phase NAVIGATED. The runner skips the plan's
           // wait nodes (above), so a filter phase used to fire the instant the search phase returned — before

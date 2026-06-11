@@ -11,6 +11,8 @@
 // user-authored `alias` as the match label. The real defense is fencing + provenance + the HITL gate; this
 // sanitize is defense-in-depth, not the whole story.
 
+import { toCandidate } from './orchMatch.js';   // R-5 (v2.74.957) — the ONE reversibility deriver (explicit stamp, else the intent/alias lexicon)
+
 // Small stop-list so lexical overlap keys on content words ("pixabay", "videos") not glue ("go", "to").
 const STOP = new Set('a an the to of for on in at is be do go i my me we us this that these those with and or your you it as by'.split(' '));
 
@@ -68,10 +70,15 @@ export function retrieveTools(ask, pools = {}, opts = {}) {
     let score = 0;
     for (const t of new Set(_tokens(alias)))   if (askSet.has(t)) score += 2;   // alias matches weighted higher
     for (const t of new Set(_tokens(display))) if (askSet.has(t)) score += 1;
+    // R-5 (v2.74.957) — carry the safetyClass floor (DESIGN_injection_boundary §4/§5): an explicit
+    // `reversible:false` stamp is honored; otherwise toCandidate's intent/alias lexicon derives it. The
+    // router prompt marks irreversible candidates and the chat dispatcher uses the "can't be undone" confirm.
+    const _cand = toCandidate(c);
     scored.push({
       kind: 'capability', capabilityId: id,
       name: display, alias: alias || null,
       provenance: alias ? 'user' : 'untrusted',   // a bare page/LLM-derived name with no user alias is untrusted
+      reversible: _cand ? _cand.reversible !== false : true,
       score,
     });
   }

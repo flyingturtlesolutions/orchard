@@ -2190,6 +2190,20 @@ async function _tryGroundedTurn(text) {
   // single-Ground fallback at the bottom doesn't redundantly re-attempt (and re-pay the LLM) what just failed here.
   let _xgTried = false;
   if (isCompoundAsk(text) && (_CROSS_SITE_CUE.test(text) || namesMultipleSites(text))) {
+    // R-4 (v2.74.956) — gate the cross-site escalation behind the ROUTER (DESIGN_llm_front_door §4:
+    // "Cross-site workflow / T3X — keep, but gate behind needs_decompose"). A confident SINGLE-tool
+    // decision (primitive/replay) handles the ask directly — the mis-escalation class ("go to pixabay
+    // home page" → a workflow card of mismatched candidates) dies here. decompose / demonstrate /
+    // clarify / low-confidence / router-miss → the cross-ground comprehend exactly as before.
+    try {
+      const rr = await _orchReq('ROUTE_ASK', { ask: text, tabId: tab.id });
+      const rd = rr && rr.success && rr.decision;
+      if (rd && (rd.action === 'primitive' || rd.action === 'replay')
+          && await _dispatchRouteDecision(rd, { tabId: tab.id, groundId: rr.groundId, text })) {
+        _orchLog(`ROUTE ▸ "${String(text).slice(0, 50)}" → router pre-empted T3X (${rd.action}, conf ${rd.confidence})`);
+        return true;
+      }
+    } catch { /* the gate is additive — any failure falls through to the comprehend unchanged */ }
     const probe = appendMessage({ role: 'thinking', body: 'Looking across your sites…' });
     const cg = await _orchReq('COMPREHEND_CROSS_GROUND', { ask: text });
     _xgTried = true;
@@ -2436,23 +2450,73 @@ async function _orchRecordFlow(msg, { groundId, tabId, ask, onAuthored = null })
 // types and drops this gate.
 const _NAV_RE = /^\s*(?:go(?:\s+(?:to|back))?|got\s+to|open|navigate(?:\s+to)?|take me to|visit|back to|return to|head\s+(?:to|back))\b/i;   // v2.74.911 — "got to" = common "go to" typo (23:28 trace: it fell through the whole legacy cascade, ~14.5s)
 
-// R-4 (v1) — the LLM front-door router as a NAVIGATION fast-path. On a nav-phrased ask, ROUTE_ASK runs the
-// full cascade; we act ONLY on a confident OPEN_URL primitive (the one self-contained primitive — "go to
-// pixabay home" → https://pixabay.com via world knowledge) and navigate. Anything else (replay / demonstrate /
-// decompose / clarify / low-confidence) returns false → the caller falls through to the existing flow
-// UNCHANGED. Never throws out (caller guards). Zero risk to the current chat behaviour.
+// R-4 (v2.74.956) — dispatch ONE RouteDecision through the EXISTING verified runners. Shared by the
+// nav fast-path, the T3X decompose gate, and the dead-end full router. Returns true iff it took the
+// turn. PRECISION-FIRST: a replay always CONFIRMS (a router selection is colder than an ORCH_MATCH hit,
+// and confirm-first is the chat's standing rule); primitives are limited to the self-contained OPEN_URL;
+// decompose reuses the lexical chain runner (per-clause re-match + the teach-resume loop — the verified
+// path); demonstrate/clarify/low-confidence return false so the caller's existing offers handle them.
+async function _dispatchRouteDecision(d, { tabId = null, groundId = null, text }) {
+  if (!d || d.lowConfidence) return false;
+  if (d.action === 'primitive' && d.tool && d.tool.op === 'OPEN_URL') {
+    const url = (d.params && typeof d.params.url === 'string') ? d.params.url.trim() : '';
+    if (!/^https?:\/\//i.test(url)) return false;
+    let host = url; try { host = new URL(url).host.replace(/^www\./, ''); } catch { /* */ }
+    const msg = appendMessage({ role: 'assistant', body: `Opening ${host}…` });
+    const r = await _orchReq('OPEN_URL_NEW_TAB', { url, active: true });   // v2.74.909 — a NAV ask transfers focus
+    _setMessageBody(msg, (r && r.success !== false) ? `Opened ${host}.` : `Couldn't open ${url}.`);
+    _orchFinalize(msg);   // v2.74.938 (CR-U1)
+    return true;
+  }
+  if (d.action === 'replay' && d.tool && d.tool.capabilityId && groundId && typeof tabId === 'number') {
+    const name = d.tool.name || 'that';
+    // R-5 (v2.74.957) — the HITL gate (DESIGN_injection_boundary §5): an IRREVERSIBLE capability gets the
+    // "can't be undone" confirm wording regardless of router confidence (same voice as orchTurn's
+    // irreversible-confirm). EVERY router replay confirms — this only sharpens what the user is told.
+    const irr = d.tool.reversible === false;
+    const msg = appendMessage({ role: 'assistant', body: '' });
+    _setMessageBody(msg, irr
+      ? `This will “${name}”, which can't be undone. Want me to go ahead?`
+      : `I think “${name}” covers this — want me to run it?`);
+    const ctx = { groundId, tabId, ask: text, intent: name, paramValues: (d.params && typeof d.params === 'object') ? d.params : {} };
+    _lastOrch = { groundId, capabilityId: d.tool.capabilityId, tabId, ask: text, intent: name, bindings: ctx.paramValues, params: null };
+    const bar = _orchActionBar(msg);
+    bar.appendChild(_mkBtn(irr ? 'Yes, go ahead' : 'Run it', () => { bar.remove(); _orchRun(msg, { ...ctx, capabilityId: d.tool.capabilityId }); }));
+    bar.appendChild(_mkBtn('Not that', () => { bar.remove(); _orchFeedbackFlow(msg, { kind: 'reject_match' }); }));
+    return true;
+  }
+  if (d.action === 'decompose' && Array.isArray(d.subAsks) && d.subAsks.length > 1 && typeof tabId === 'number') {
+    const msg = appendMessage({ role: 'assistant', body: '' });
+    _orchConfirmChain(msg, { tabId, clauses: d.subAsks.map((s) => ({ text: String(s) })), firstMatch: null, ask: text });
+    return true;
+  }
+  return false;
+}
+
+// R-4 (v1, kept) — the router as a NAVIGATION fast-path at the HEAD of the turn. The _NAV_RE gate keeps the
+// LLM call off non-nav asks (cheapest-first: warm paths never pay it); a nav phrasing routes via world
+// knowledge and just navigates. Everything else falls through to the existing flow UNCHANGED — the FULL
+// dispatch runs later, at the cascade's dead-end (_tryRouterFallback), where it can't pre-empt a warm path.
 async function _tryRouterNav(text) {
   if (!_NAV_RE.test(text)) return false;
   const res = await _orchReq('ROUTE_ASK', { ask: text });
   const d = res && res.success && res.decision;
   if (!d || d.action !== 'primitive' || !d.tool || d.tool.op !== 'OPEN_URL' || d.lowConfidence) return false;
-  const url = (d.params && typeof d.params.url === 'string') ? d.params.url.trim() : '';
-  if (!/^https?:\/\//i.test(url)) return false;
-  let host = url; try { host = new URL(url).host.replace(/^www\./, ''); } catch { /* */ }
-  const msg = appendMessage({ role: 'assistant', body: `Opening ${host}…` });
-  const r = await _orchReq('OPEN_URL_NEW_TAB', { url, active: true });   // v2.74.909 — a NAV ask transfers focus
-  _setMessageBody(msg, (r && r.success !== false) ? `Opened ${host}.` : `Couldn't open ${url}.`);
-  return true;
+  return _dispatchRouteDecision(d, { text });
+}
+
+// R-4-full (v2.74.956) — THE front door at the DEAD-END. Everything the grounded cascade declined (no
+// compound match, no chain, no plan, no single match — today these fell to the legacy fuzzy matcher, the
+// mis-escalation source) now gets ONE router pass: retrieve a small palette on this tab's Ground, let the
+// router select+parameterize, dispatch through the verified runners. demonstrate/clarify/low-confidence →
+// false → the legacy matcher exactly as before, so the floor never drops below today's behaviour.
+async function _tryRouterFallback(text) {
+  const tab = await _orchActiveTab();
+  const res = await _orchReq('ROUTE_ASK', { ask: text, tabId: tab && tab.id });
+  if (!res || res.success === false || !res.decision) return false;
+  const d = res.decision;
+  _orchLog(`ROUTE ▸ "${String(text).slice(0, 50)}" → router-fallback ${d.action}${d.tool ? ` ${d.tool.op || d.tool.capabilityId || ''}` : ''} (conf ${d.confidence})`);
+  return _dispatchRouteDecision(d, { tabId: tab && tab.id, groundId: res.groundId, text });
 }
 
 // IM-3 (v2.74.895) — "what can I do here?" → the INTENT MENU. A meta-ask about the APP's abilities on this
@@ -2681,6 +2745,15 @@ async function sendChatMessage() {
   try {
     if (await _tryGroundedTurn(text)) { $('btn-chat-send').disabled = false; return; }
   } catch (e) { try { console.warn('[chat] grounded pre-check fell through:', e?.message); } catch { /* */ } }
+
+  // R-4-full (v2.74.956) — the front-door router at the cascade's DEAD-END. Asks the whole grounded
+  // cascade declined used to fall straight into the legacy fuzzy matcher (the mis-escalation source);
+  // now the router gets ONE pass — world-knowledge navigation, a confident capability replay
+  // (confirm-first), or a decompose into the chain runner. Anything else falls to the legacy matcher
+  // exactly as before, so the floor never drops below today's behaviour.
+  try {
+    if (await _tryRouterFallback(text)) { $('btn-chat-send').disabled = false; return; }
+  } catch (e) { try { console.warn('[chat] router dead-end fallback fell through:', e?.message); } catch { /* */ } }
 
   // Routed flow — semantic match then invoke
   const status = $('input-status');

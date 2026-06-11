@@ -437,9 +437,27 @@ export function scoreTrial({ shape = 'act', safetyClass = 'reversible', resolved
   const resolvedCompleteness = denom > 0 ? Math.min(1, resolvedRoleCount / denom) : null;
   if (resolvedCompleteness != null) evidence.push(`${resolvedRoleCount}/${denom} role(s) resolved (${Math.round(resolvedCompleteness * 100)}%)`);
 
-  // effectMatch — did the op's steps execute without error? (PB-8 refines with observed-vs-predicted.)
+  // effectMatch — PB-8 (R5, v2.74.960): observed-vs-DECLARED reconciliation. The runtime brackets
+  // selected actions (terminal / navigation-likely / opt-in; ActionEffectObserver) and threads each
+  // bracketed action's drift verdict into stepResults[].effects. Scoring per observation: match = 1,
+  // SOFT drift ('unexpected' / 'parameter-mismatch') = 0.5, HARD drift ('expected-missing' — the
+  // declared effect did NOT happen) = 0. The PASS gate blocks only on hard drift (soft drift lowers
+  // the score but a trial whose declared effects all landed still passes). No bracketed actions ->
+  // the ran-without-error boolean exactly as before (PB-5).
+  const effects = stepResults.flatMap((s2) => Array.isArray(s2.effects) ? s2.effects : []);
   const ranOk = frag ? (frag.success !== false) : !!result?.success;
-  const effectMatch = result == null ? null : (ranOk ? 1 : 0);
+  let effectMatch = result == null ? null : (ranOk ? 1 : 0);
+  let hardDrift = false;
+  if (ranOk && effects.length) {
+    hardDrift = effects.some((e) => e && e.severity === 'expected-missing');
+    const weights = effects.map((e) => (e && e.severity == null) ? 1 : (e.severity === 'expected-missing' ? 0 : 0.5));
+    effectMatch = Math.round((weights.reduce((a, b) => a + b, 0) / weights.length) * 100) / 100;
+    for (const e of effects) {
+      if (e && e.severity) evidence.push(`Effect drift (${e.severity}) on ${e.action}: declared ${e.declared ?? 'none'}, observed ${e.observed ?? 'none'}`);
+    }
+    if (effects.every((e) => e && e.severity == null)) evidence.push(`${effects.length} observed effect(s) matched the declared effects`);
+  }
+  const effectOk = effectMatch != null && effectMatch > 0 && !hardDrift && ranOk;
   if (result != null) evidence.push(ranOk ? `Ran ${frag?.actionsRun ?? '?'} step(s), no errors` : `Run failed: ${frag?.error || result?.error || 'step error'}`);
 
   // postconditionMet — only meaningful if conditions existed (trial fragments have none → null).
@@ -464,9 +482,11 @@ export function scoreTrial({ shape = 'act', safetyClass = 'reversible', resolved
   }
 
   let pass;
-  if (safetyClass === 'irreversible') pass = effectMatch === 1 && terminalReachable === 1;
-  else if (shape === 'read') pass = effectMatch === 1 && extractQuality === 1;
-  else pass = effectMatch === 1 && (resolvedCompleteness == null || resolvedCompleteness >= 0.5);
+  // PB-8 — effectOk replaces the effectMatch===1 literal: identical when no actions were bracketed
+  // (effectMatch stays 0/1), and hard-drift-blocking (soft-drift-tolerant) when they were.
+  if (safetyClass === 'irreversible') pass = effectOk && terminalReachable === 1;
+  else if (shape === 'read') pass = effectOk && extractQuality === 1;
+  else pass = effectOk && (resolvedCompleteness == null || resolvedCompleteness >= 0.5);
 
   const vector = { resolvedCompleteness, effectMatch, postconditionMet, extractQuality, terminalReachable };
   const axes = Object.values(vector).filter((x) => x != null);

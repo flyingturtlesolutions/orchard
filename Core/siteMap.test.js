@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { pagesForAsk, siteMapFromLocale } from './siteMap.js';
+import { pagesForAsk, siteMapFromLocale, healSplitNodes, mergeSiteMap, deriveTemplateRules, templatePattern, archetypeId, normalizePattern } from './siteMap.js';
 
 // Minimal archetype node (only the fields pagesForAsk reads).
 const node = (o) => ({
@@ -139,5 +139,74 @@ describe('siteMapFromLocale — self-derived locale collapse (multi-language fix
     const self = Object.values(sm.nodes).find((n) => n.status === 'modeled');
     assert.match(self.urlPattern, /\/en\/jobs$/);
     assert.ok(!sm.templateRules.some((r) => /\{locale\}/.test(r)));
+  });
+});
+
+describe('healSplitNodes — self-heal split archetypes (task #164, v2.74.959)', () => {
+  // Rules derived the PRODUCTION way, so the test never guesses the rule-string shape.
+  // 8+ distinct hyphenated (sluggish) siblings at depth 1 derive /blog/{slug} (MIN_SLUG_SIBLINGS=8).
+  const RULES = deriveTemplateRules(Array.from({ length: 9 }, (_, i) => `https://x.com/blog/post-${i}-on-things`));
+  const consolidatedPattern = templatePattern('https://x.com/blog/my-first-post', RULES);
+  const consolidatedId = archetypeId(consolidatedPattern);
+  const splitNode = (url, status = 'discovered', extra = {}) => {
+    const pattern = normalizePattern(url);
+    return { id: archetypeId(pattern), urlPattern: pattern, status, exemplarUrl: url, instances: [url], instanceCount: 1, ...extra };
+  };
+
+  it('derives a slug rule (precondition for the rest of this suite)', () => {
+    assert.ok(consolidatedPattern.includes('{'), `expected a templated pattern, got ${consolidatedPattern}`);
+  });
+
+  it('merges split per-URL nodes into the ONE rules-derived archetype, unioning instances', () => {
+    const a = splitNode('https://x.com/blog/my-first-post');
+    const b = splitNode('https://x.com/blog/another-post', 'modeled', { name: 'Blog post' });
+    assert.notEqual(a.id, b.id, 'precondition: the nodes are split');
+    const map = { schema: 1, templateRules: RULES, nodes: { [a.id]: a, [b.id]: b }, edges: [] };
+    healSplitNodes(map);
+    assert.deepEqual(Object.keys(map.nodes), [consolidatedId]);
+    const n = map.nodes[consolidatedId];
+    assert.equal(n.urlPattern, consolidatedPattern);
+    assert.equal(n.status, 'modeled', 'the strongest split status wins');
+    assert.deepEqual([...n.instances].sort(), ['https://x.com/blog/another-post', 'https://x.com/blog/my-first-post']);
+  });
+
+  it('remaps edges onto the consolidated node and drops collapse-created self-loops', () => {
+    const homePattern = templatePattern('https://x.com/', RULES);   // the heal re-templates EVERY node — build home the same way
+    const home = { id: archetypeId(homePattern), urlPattern: homePattern, status: 'modeled', exemplarUrl: 'https://x.com/', instances: ['https://x.com/'] };
+    const a = splitNode('https://x.com/blog/my-first-post');
+    const b = splitNode('https://x.com/blog/another-post');
+    const map = { schema: 1, templateRules: RULES, nodes: { [home.id]: home, [a.id]: a, [b.id]: b }, edges: [
+      { from: home.id, to: a.id, via: 'f1', kind: 'link' },
+      { from: home.id, to: b.id, via: 'f2', kind: 'link' },
+      { from: a.id, to: b.id, via: 'f3', kind: 'link' },     // cross-split — collapses to a self-loop — dropped
+    ] };
+    healSplitNodes(map);
+    assert.equal(map.edges.length, 2);
+    for (const e of map.edges) { assert.equal(e.from, home.id); assert.equal(e.to, consolidatedId); }
+  });
+
+  it('idempotent on a healthy map; no-op without rules; pattern-only nodes untouched', () => {
+    const healthy = { id: consolidatedId, urlPattern: consolidatedPattern, status: 'discovered', exemplarUrl: 'https://x.com/blog/my-first-post', instances: ['https://x.com/blog/my-first-post'] };
+    const m1 = { schema: 1, templateRules: RULES, nodes: { [consolidatedId]: healthy }, edges: [] };
+    healSplitNodes(m1);
+    assert.deepEqual(Object.keys(m1.nodes), [consolidatedId]);
+    const a = splitNode('https://x.com/blog/my-first-post');
+    const m2 = { schema: 1, templateRules: [], nodes: { [a.id]: a }, edges: [] };
+    healSplitNodes(m2);
+    assert.deepEqual(Object.keys(m2.nodes), [a.id], 'no rules — nothing to heal against');
+    const ghost = { id: 'arch_ghost', urlPattern: 'https://x.com/blog/{slug}', status: 'stub' };   // no concrete URL
+    const m3 = { schema: 1, templateRules: RULES, nodes: { arch_ghost: ghost }, edges: [] };
+    healSplitNodes(m3);
+    assert.ok(m3.nodes.arch_ghost, 'pattern-only node is left alone');
+  });
+
+  it('mergeSiteMap heals on the way out: an old split map + a rules-bearing contribution converge', () => {
+    const a = splitNode('https://x.com/blog/my-first-post');
+    const b = splitNode('https://x.com/blog/another-post');
+    const existing = { schema: 1, templateRules: [], nodes: { [a.id]: a, [b.id]: b }, edges: [] };
+    const fresh = { schema: 1, templateRules: RULES, nodes: {}, edges: [] };
+    const merged = mergeSiteMap(existing, fresh);
+    assert.deepEqual(Object.keys(merged.nodes), [consolidatedId]);
+    assert.equal(merged.nodes[consolidatedId].instanceCount, 2);
   });
 });

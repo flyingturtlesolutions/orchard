@@ -38,7 +38,10 @@ export function buildRouterMessages(ask, candidates = []) {
     const ref = _toolKey(c);
     // Prefer the user-authored alias (trusted) as the label; fall back to the (possibly page-derived) name.
     const label = (c && c.alias && c.provenance === 'user') ? c.alias : (c && c.name) || ref;
-    return `- ref: ${ref}\n  does: ${label}`;
+    // R-5 (v2.74.957) — surface the safetyClass so the router can weigh real-world effect; the chat
+    // dispatcher independently enforces the confirm regardless of what the router decides.
+    const irr = (c && c.reversible === false) ? '   [IRREVERSIBLE: has a real-world effect]' : '';
+    return `- ref: ${ref}${irr}\n  does: ${label}`;
   }).filter(Boolean);
   const user = [
     `USER ASK: ${String(ask ?? '').trim()}`,

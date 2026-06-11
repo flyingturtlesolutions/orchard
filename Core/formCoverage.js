@@ -17,6 +17,12 @@
 // walker `enumerateFormFields` runs in a content script (it reads label elements + asterisks) and is the
 // only DOM-touching export; everything else operates on plain descriptors.
 //
+// PB-10 RECONCILIATION (v2.74.959): the intent-coverage GATE shipped via Core/cover.coverComplete
+// (the Locale-substrate floor, wired through accept.canAccept on the tier2 path) and the propose-time
+// BACKFILL ships inline in AnthropicService (~L2140: selectNecessaryFields + slugMatch with richer
+// dedup than missingRoleFields). assessIntentCoverage + missingRoleFields therefore stay UNWIRED but
+// TESTED: they are the LIVE-FORM-ORACLE alternative (full-DOM enumerateFormFields, authoritative when
+// the substrate is stale) — the documented escalation if cover's substrate floor proves lossy live.
 // @module Core/formCoverage
 
 const STOPWORDS = new Set(['the', 'a', 'an', 'your', 'please', 'enter', 'this', 'of', 'to', 'for', 'or', 'and', 'value', 'field', 'optional', 'required']);

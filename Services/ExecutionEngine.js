@@ -944,6 +944,7 @@ export class ExecutionEngine {
           success: false, actionsRun: execResult.actionsRun,
           error: `Postconditions failed: ${reasonSummary}`,
           postFailures,
+          effects: execResult.effects ?? [],
           ...(iteration ? { iteration } : {}),
         });
         // v2.36.0 (J1) — Richer fragment_post_failed event. Scope +
@@ -972,6 +973,7 @@ export class ExecutionEngine {
       fragmentId: step.fragmentId, fragmentName: displayName,
       success: true, actionsRun: execResult.actionsRun, error: null,
       postFailures,
+      effects: execResult.effects ?? [],   // PB-8 (v2.74.960) — bracketed-action drift verdicts for scoreTrial
       ...(iteration ? { iteration } : {}),
     });
     emit({

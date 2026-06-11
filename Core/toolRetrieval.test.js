@@ -73,3 +73,25 @@ describe('retrieveTools — ranked candidate palette (pure, lexical v1)', () => 
     assert.equal(retrieveTools('x', { capabilities: [] }).find((c) => c.kind === 'primitive').provenance, 'system');
   });
 });
+
+describe('retrieveTools — safetyClass carry (R-5)' , () => {
+  it('derives reversible:false from an irreversible intent; benign intents stay true', () => {
+    const got = retrieveTools('search application jobs', { capabilities: [
+      { capabilityId: 'c_apply', intent: 'submit the application', name: 'Submit application' },
+      { capabilityId: 'c_search', intent: 'search for jobs', name: 'Search jobs' },
+    ] });
+    assert.equal(got.find((c) => c.capabilityId === 'c_apply').reversible, false);
+    assert.equal(got.find((c) => c.capabilityId === 'c_search').reversible, true);
+  });
+  it('honors an explicit reversible stamp over the lexicon', () => {
+    const got = retrieveTools('x', { capabilities: [
+      { capabilityId: 'c_safe_submit', intent: 'submit the search form', reversible: true },
+    ] });
+    assert.equal(got.find((c) => c.capabilityId === 'c_safe_submit').reversible, true);
+  });
+  it('primitives carry no reversible:false marker (navigation/read are reversible)', () => {
+    for (const p of retrieveTools('x', { capabilities: [] }).filter((c) => c.kind === 'primitive')) {
+      assert.notEqual(p.reversible, false);
+    }
+  });
+});
