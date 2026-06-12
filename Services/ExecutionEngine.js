@@ -129,6 +129,12 @@ export class ExecutionEngine {
     // Locale (the tab the user is already standing on), not the Ground's base URL.
     // When set, the tab is reused as-is and NOT closed at the end (it's the user's).
     targetTabId = null,
+    // v2.74.967 — optional observer: reports the tabId this run will DRIVE (the reused targetTabId or
+    // the self-resolved/opened one) so the HANDLER layer can busy-mark it for monitor self-capture
+    // suppression (gl 114728: an INVOKE_WORKFLOW strategy step let the engine self-resolve, nothing
+    // marked the tab, and the run's own focus/type logged as INTERACTION hits). Layering stays clean
+    // (no background import here); the observer must never break the run.
+    onTabResolved = null,
   }) {
     const invId = invocationId || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `inv-${Date.now()}`);
 
@@ -299,6 +305,7 @@ export class ExecutionEngine {
         openedTab = true;
         await ExecutionEngine.#waitForTabReady(tabId);
       }
+      try { onTabResolved?.(tabId); } catch (_) { /* v2.74.967 — observer must never break the run */ }
 
       // v2.72.24 (Pass 13) — Strategy preconditions. Evaluated after the
       // tab is open and reachable but before any nodes run. Both page-family

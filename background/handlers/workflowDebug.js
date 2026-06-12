@@ -16,6 +16,7 @@
 import { Logger }           from '../../Core/Logger.js';
 import { StorageManager }   from '../../Services/StorageManager.js';
 import { executeWorkflow }  from '../../Services/WorkflowExecutor.js';
+import { markEngineBusy }   from './sg.js';   // v2.74.967 (gl 114728) — monitor self-capture suppression for workflow runs
 import { CapabilityAPI }    from '../../Services/CapabilityAPI.js';
 
 // v2.74.953 (CR-X3c) — the workflow-debug ctx seam contract, asserted at wiring time.
@@ -290,12 +291,22 @@ export function createWorkflowDebugHandlers(ctx) {
           const _wfGrounds = Array.isArray(workflow.groundIds) ? workflow.groundIds.length : 0;
           Logger.info('background', `▶ RUN ${_runId} "${String(workflow.name || workflow.intent || 'workflow').slice(0, 60)}" (${_wfSteps} step${_wfSteps === 1 ? '' : 's'}${_wfGrounds ? `, ${_wfGrounds} ground${_wfGrounds === 1 ? '' : 's'}` : ''}${inlineWorkflow ? ', ephemeral' : ''})`);
 
+          // v2.74.967 (gl 114728) — the .908 family's 4th emitter: REPLAY/.908, EXPLORE/.911 and
+          // RUN_SG_TRIAL/.912 are busy-marked, but the workflow runner dispatches ExecutionEngine
+          // DIRECTLY and the engine self-resolves its tab — so nothing marked it, and run 1's own
+          // focus/type logged as INTERACTION hits while run 2 (via REPLAY) logged none, an A/B inside
+          // one trace. The engine reports every tab it drives via onTabResolved; each stays marked
+          // (refcounted, CR-M1 — overlap with a nested REPLAY/RUN_OBSERVATION mark is safe) until the
+          // run settles in the finally below.
+          const _busyTabs = new Set();
+          const _markResolved = (tid) => { if (typeof tid === 'number' && !_busyTabs.has(tid)) { _busyTabs.add(tid); markEngineBusy(tid, true); } };
           try {
             const result = await executeWorkflow(workflow, paramValues ?? {}, {
               onProgress,
               invocationId: invId,
               isAborted: () => _workflowCancellations.has(invId),
               debug,
+              onTabResolved: _markResolved,
               // v2.74.789 — In-SW capabilities a cross-Ground READ step needs but the executor
               // can't import (they close over the background storage ctx). RUN_OBSERVATION is the
               // observation-native READ; a SW→SW sendMessage wouldn't re-enter our own onMessage,
@@ -317,6 +328,7 @@ export function createWorkflowDebugHandlers(ctx) {
           } finally {
             // Always cleanup — leaving stale ids in either map would
             // silently poison the next invocation that recycles the id.
+            for (const tid of _busyTabs) markEngineBusy(tid, false);   // v2.74.967 — release every driven tab (refcounted)
             _workflowCancellations.delete(invId);
             _workflowDebugStates.delete(invId);
           }

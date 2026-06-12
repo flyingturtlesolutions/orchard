@@ -418,6 +418,7 @@ async function executeWorkflowStep(step, stepIndex, paramValues, workflowScope, 
     isAborted: ctx.isAborted,
     onProgress: (ev) => ctx.emit({ ...ev, stepIndex, fromInnerWorkflow: true }),
     debug: ctx.debug ?? null,
+    onTabResolved: ctx.onTabResolved ?? null,   // v2.74.967 (gl 114728) — the engine self-resolves this step's tab; report it for busy-marking
   });
 
   ctx.emit({
@@ -656,6 +657,7 @@ export async function executeWorkflow(workflow, paramValues = {}, options = {}) 
     runObservation: options.runObservation ?? null,
     runCapability: options.runCapability ?? null,   // v2.74.792 — replay a cross-Ground READ's antecedent (the search) as the exact capability the chat ran
     ensureContentScript: options.ensureContentScript ?? null,
+    onTabResolved: options.onTabResolved ?? null,   // v2.74.967 (gl 114728) — the handler busy-marks every tab the engine reports driving
   };
   ctx.emit({ type: 'strategy_start', strategyId: workflow.id, message: `Running ${workflow.name ?? workflow.id}` });
 
