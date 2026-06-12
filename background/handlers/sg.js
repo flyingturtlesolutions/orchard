@@ -15,6 +15,7 @@ import { coverComplete } from '../../Core/cover.js';
 import { selectionToTrialRoles } from '../../Core/bind.js';
 import { lowerToTier2, orderForRun, scoreTier2, topoOrder } from '../../Core/tier2Lower.js';
 import { evaluatePostcondition } from '../../Core/postcondition.js';
+import { focusDecision, FOCUS_SETTING_KEY } from '../../Core/focusGrammar.js';   // FM-1 (v2.74.968) — the pure focus-grab verdict
 import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord, buildResultsLandmarkRecord, buildOutcomePerspective, findMatchingPerspective, buildPerspectiveGate, buildDestinationPerspective, pickDestinationLandmark, validateConditionRefs } from '../../Core/accept.js';
 import { authoringCoverage } from '../../Core/select.js';   // GA-7 — Locale→capability "done" signal
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
@@ -122,6 +123,47 @@ export function markEngineBusy(tabId, busy) {
   if (typeof tabId !== 'number') return;
   const depth = (_engineBusyTabs.get(tabId) || 0) + (busy ? 1 : -1);
   if (depth > 0) _engineBusyTabs.set(tabId, depth); else _engineBusyTabs.delete(tabId);
+}
+
+// FM-1 (v2.74.968) — the ONE focus-grab implementation: policy (Core/focusGrammar.focusDecision) +
+// mechanics + the `FOCUS ▸` trace line, so gl can audit yanking like everything else. Tab focus is
+// gesture-free (unlike sidePanel.open), so the discipline lives entirely here: REQUIRED grabs (a walk
+// teach step — pickers/demos/replays drive the ACTIVE tab) always land; COURTESY grabs (run done/failed
+// on a background tab) obey the 'autoFocus' setting (auto | ask | never; 'ask' defers until FM-2's
+// soft-invite ships). Already-active (tab active AND its window focused) is always a quiet no-op.
+// Exported for in-SW callers (workflowDebug's run-terminal wiring); chat reaches it via FOCUS_TAB.
+export async function focusTabPolicy({ tabId, reason = 'unspecified', required = false } = {}) {
+  if (typeof tabId !== 'number') return { success: false, error: 'tabId required' };
+  let tab = null;
+  try { tab = await chrome.tabs.get(tabId); } catch { /* gone */ }
+  if (!tab) { Logger.debug('background', `FOCUS ▸ tab ${tabId} (${reason}) → gone`); return { success: false, error: 'tab gone' }; }
+  let winFocused = false;
+  try { const w = await chrome.windows.get(tab.windowId); winFocused = !!(w && w.focused); } catch { /* */ }
+  let setting = 'auto';
+  try {
+    const data = await chrome.storage.local.get(`settings:${FOCUS_SETTING_KEY}`);
+    if (typeof data[`settings:${FOCUS_SETTING_KEY}`] === 'string') setting = data[`settings:${FOCUS_SETTING_KEY}`];
+  } catch { /* default auto */ }
+  const verdict = focusDecision(setting, { required, alreadyActive: !!tab.active && winFocused });
+  if (verdict === 'focus') {
+    try {
+      await chrome.tabs.update(tabId, { active: true });
+      // Cross-window: focus the tab's window too. If Chrome itself isn't the OS-foreground app the OS
+      // may downgrade this to a taskbar flash — that's the OS protecting the user; accept it.
+      if (typeof tab.windowId === 'number') { try { await chrome.windows.update(tab.windowId, { focused: true }); } catch { /* */ } }
+      Logger.info('background', `FOCUS ▸ tab ${tabId} (${reason}) → focused${required ? ' [required]' : ''}`);
+      return { success: true, focused: true, verdict };
+    } catch (e) {
+      Logger.warn('background', `FOCUS ▸ tab ${tabId} (${reason}) → FAILED: ${e.message}`);
+      return { success: false, error: e.message, verdict };
+    }
+  }
+  if (verdict === 'skip-active') {
+    Logger.debug('background', `FOCUS ▸ tab ${tabId} (${reason}) → already-active`);
+    return { success: true, focused: false, verdict };
+  }
+  Logger.info('background', `FOCUS ▸ tab ${tabId} (${reason}) → ${verdict === 'deferred-ask' ? 'deferred (setting=ask; FM-2 invite pending)' : 'suppressed (setting=never)'}`);
+  return { success: true, focused: false, verdict };
 }
 
 // v2.74.933 (CR-M3) — a closed tab never leaves stale entries (Chrome recycles tab ids, so a stale
@@ -2558,6 +2600,13 @@ export function createSgMessageHandlers(ctx) {
     // ORCH-L (open-each) — open a URL in a NEW BACKGROUND tab: the per-item action of an "open each <item>" loop.
     // A new tab (not an in-place click) so the result list the loop iterates over stays put for the next item, and
     // `active:false` so the loop doesn't yank focus away from the side panel on every iteration. http(s) only.
+    // FM-1 (v2.74.968) — focus a tab by EVENT or COMMAND, through the one policy (focusTabPolicy above).
+    // Chat-side callers: the walk's step activation (required) and terminal recaps (courtesy).
+    FOCUS_TAB: async (payload, _sender, sendResponse) => {
+      try { sendResponse(await focusTabPolicy(payload ?? {})); }
+      catch (err) { sendResponse({ success: false, error: err.message }); }
+    },
+
     OPEN_URL_NEW_TAB: async (payload, _sender, sendResponse) => {
       try {
         const { url = null, active = false } = payload ?? {};

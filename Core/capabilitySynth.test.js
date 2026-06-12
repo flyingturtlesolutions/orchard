@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildTier2CapabilityRecords, buildCapabilityRecords, wrapFragmentAsStrategy, collectReferencedPrimitiveIds, prepareTier1or2Records, prepareHeteroTier2Records, shieldedFragmentIds } from './capabilitySynth.js';
+import { buildTier2CapabilityRecords, buildCapabilityRecords, wrapFragmentAsStrategy, collectReferencedPrimitiveIds, prepareTier1or2Records, prepareHeteroTier2Records, shieldedFragmentIds, seedCapabilityDefaults } from './capabilitySynth.js';
 
 const phases = [
   { label: 'Initiate job search', actions: [{ action: 'TYPE', selector: '#q', value: 'test' }, { action: 'CLICK', selector: '#go' }] },
@@ -358,5 +358,31 @@ describe('prepareHeteroTier2Records — HS-2 scope-wired params (v2.74.916)', ()
     assert.equal(r.ok, true, r.error);
     assert.deepEqual(r.wiredParams, [], 'the read runs after the consumer — nothing wired');
     assert.deepEqual(r.strategy.params.map((p) => p.name).sort(), ['LOCATION', 'TOP_RESULT_TITLE']);
+  });
+});
+
+describe('seedCapabilityDefaults — REPLAY-parity param seeding (v2.74.969, gl 175931)', () => {
+  const cap = { params: [
+    { name: 'SEARCH_JOB_TITLE_KEYWORDS_OR_COMPANY', used: true, value: 'game developer' },
+    { name: 'EDIT_LOCATION', used: true, value: 'remote' },
+    { name: 'UNUSED_LEFTOVER', used: false, value: 'x' },
+    { name: null, used: true, value: 'y' },
+  ] };
+
+  it('the gl 175931 repro: an unstated param gets its demonstrated default; the stated one overlays', () => {
+    const out = seedCapabilityDefaults(cap, { SEARCH_JOB_TITLE_KEYWORDS_OR_COMPANY: 'playground studios' });
+    assert.equal(out.SEARCH_JOB_TITLE_KEYWORDS_OR_COMPANY, 'playground studios');   // clause-bound value wins
+    assert.equal(out.EDIT_LOCATION, 'remote');                                      // demo default fills the gap
+    assert.equal('UNUSED_LEFTOVER' in out, false);                                  // only `used` params seed (REPLAY rule)
+  });
+
+  it('no resolved bindings → pure demo replay values; null demo value → empty string (REPLAY stringify rule)', () => {
+    const out = seedCapabilityDefaults({ params: [{ name: 'A', used: true, value: null }, { name: 'B', used: true, value: 7 }] });
+    assert.deepEqual(out, { A: '', B: '7' });
+  });
+
+  it('tolerates a missing/empty cap record (the seed is best-effort)', () => {
+    assert.deepEqual(seedCapabilityDefaults(null, { K: 'v' }), { K: 'v' });
+    assert.deepEqual(seedCapabilityDefaults({}, {}), {});
   });
 });

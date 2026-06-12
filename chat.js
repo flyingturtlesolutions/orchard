@@ -1828,8 +1828,12 @@ async function _walkEnsureTab(st, si) {
   // id at render time and stay clickable long after that tab closes; the old swallow-and-return fed every
   // REPLAY/RUN_OBSERVATION a dead id (a confusing per-step failure instead of a fresh tab).
   if (st.tabId != null && st.ground === si.groundId) {
-    try { await chrome.tabs.update(st.tabId, { active: true }); return st.tabId; }
-    catch { st.tabId = null; /* tab is gone — fall through to create */ }
+    // FM-1 (v2.74.968) — the step's activation goes through the ONE focus policy (REQUIRED: a teach/
+    // replay drives the ACTIVE tab) so it lands in the `FOCUS ▸` audit; a dead tab falls through to
+    // create exactly as the old direct chrome.tabs.update catch did.
+    const r = await _orchReq('FOCUS_TAB', { tabId: st.tabId, reason: 'walk-step', required: true });
+    if (r && r.success) return st.tabId;
+    st.tabId = null;   // tab is gone — fall through to create
   }
   try { const t = await chrome.tabs.create({ url: si.groundUrl || undefined, active: true }); st.tabId = (t && typeof t.id === 'number') ? t.id : null; st.ground = si.groundId; }
   catch { st.tabId = null; }
@@ -1899,6 +1903,12 @@ function _endWalk(st, i, reason) {
   _walkAbortFlag.requested = false;
   const lines = walkEndLines(st, i, reason);
   _orchLog(`WALK ▸ ${lines.log}`);
+  // FM-1 (v2.74.968) — COURTESY focus at the terminal recap: surface the walk's last driven tab (the
+  // user may have wandered mid-walk; no-op when already there; the 'autoFocus' setting governs). A
+  // user STOP skips it — they are already engaging the panel, and yanking on a stop adds insult.
+  if (reason === 'done' && st && typeof st.tabId === 'number') {
+    try { _orchReq('FOCUS_TAB', { tabId: st.tabId, reason: 'walk-done' }); } catch { /* fire-and-forget */ }
+  }
   const _recapMsg = appendMessage({ role: 'assistant', body: '' });
   _setMessageBody(_recapMsg, lines.chat);
   _orchFinalize(_recapMsg);   // v2.74.938 (CR-U1)

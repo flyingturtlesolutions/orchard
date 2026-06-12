@@ -76,7 +76,7 @@
 
 import { StorageManager } from './StorageManager.js';
 import { waitForTabComplete } from './TabUtils.js';   // v2.74.944 (CR-D5)
-import { wrapFragmentAsStrategy } from '../Core/capabilitySynth.js';   // v2.74.786 — wrap a bare T1 Fragment cross-Ground step into a synthetic Strategy at run time
+import { wrapFragmentAsStrategy, seedCapabilityDefaults } from '../Core/capabilitySynth.js';   // v2.74.786 — wrap a bare T1 Fragment cross-Ground step into a synthetic Strategy at run time; v2.74.969 — REPLAY-parity param seeding
 import { ExecutionEngine } from './ExecutionEngine.js';
 import { parseFileValue, isFileValue } from './FileParsers.js';
 import { Scope, scalar, list, isKind } from './Scope.js';
@@ -373,7 +373,18 @@ async function executeWorkflowStep(step, stepIndex, paramValues, workflowScope, 
     return _runObservationStep(step, stepIndex, paramValues, workflowScope, ctx);
   }
 
-  const innerParams = resolveWorkflowStepParams(step, paramValues, workflowScope, ctx);
+  let innerParams = resolveWorkflowStepParams(step, paramValues, workflowScope, ctx);
+  // v2.74.969 (gl 175931) — REPLAY-parity seeding: the step's resolved bindings carry ONLY what the
+  // clause/scope stated, so a capability param the ask never mentioned ran UNRESOLVED (the indeed step
+  // typed an EMPTY location where REPLAY of the same capability types its demonstrated "remote").
+  // Seed the capability record's demonstrated defaults under the bindings — best-effort: no bridge /
+  // no record / a throw leaves the pre-.969 behavior rather than failing the step.
+  if (ctx.readCapability && step.groundId && step.workflowId) {
+    try {
+      const cap = await ctx.readCapability(step.groundId, step.workflowId);
+      if (cap) innerParams = seedCapabilityDefaults(cap, innerParams);
+    } catch { /* seed is best-effort */ }
+  }
 
   ctx.emit({
     type: 'strategy_step_start',
@@ -658,6 +669,7 @@ export async function executeWorkflow(workflow, paramValues = {}, options = {}) 
     runCapability: options.runCapability ?? null,   // v2.74.792 — replay a cross-Ground READ's antecedent (the search) as the exact capability the chat ran
     ensureContentScript: options.ensureContentScript ?? null,
     onTabResolved: options.onTabResolved ?? null,   // v2.74.967 (gl 114728) — the handler busy-marks every tab the engine reports driving
+    readCapability: options.readCapability ?? null,   // v2.74.969 (gl 175931) — sgCapability record read for REPLAY-parity param seeding
   };
   ctx.emit({ type: 'strategy_start', strategyId: workflow.id, message: `Running ${workflow.name ?? workflow.id}` });
 

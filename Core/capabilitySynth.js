@@ -13,9 +13,32 @@
 //
 // PURE: no DOM / chrome / storage / id-minting (the persistence slice mints ids + saves).
 //
+// Also home to the pure capability-record PARAM helper seedCapabilityDefaults (v2.74.969) — the
+// record's `params` schema is this module's domain.
+//
 // @module Core/capabilitySynth
 
 import { slugUpper } from './slug.js';   // v2.74.940 (CR-D2)
+
+/**
+ * v2.74.969 (gl 175931) — REPLAY-parity param seeding for ANY capability dispatch path. The workflow
+ * step dispatch passed ONLY clause-derived bindings, so a param the ask never mentioned ran
+ * UNRESOLVED — the indeed step typed an EMPTY location where the same capability's REPLAY (OBS-4b
+ * seeding) types its demonstrated "remote". Rule, mirrored from REPLAY_SG_CAPABILITY: seed every
+ * `used` param's demonstrated value FIRST (stringified; null → ''), then the resolved bindings
+ * overlay. The demo value is the PROVEN value — GA-4 later upgrades unstated-param-on-cold-match to
+ * ask-don't-default on top of this floor. PURE.
+ * @param {{params?: Array<{name?:string, used?:boolean, value?:any}>}|null} cap  the sgCapability record
+ * @param {Object<string,any>} [resolved]  clause/scope-resolved bindings (they win)
+ * @returns {Object<string,any>}
+ */
+export function seedCapabilityDefaults(cap, resolved = {}) {
+  const seeded = {};
+  for (const p of (Array.isArray(cap?.params) ? cap.params : [])) {
+    if (p && p.name && p.used) seeded[p.name] = p.value != null ? String(p.value) : '';
+  }
+  return { ...seeded, ...resolved };
+}
 
 /** Feature kinds that FILL a value (typed first), vs ACT (clicked after). */
 const _FILL_KINDS = new Set(['input']);

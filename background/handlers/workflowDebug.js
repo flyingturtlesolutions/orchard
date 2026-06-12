@@ -16,7 +16,7 @@
 import { Logger }           from '../../Core/Logger.js';
 import { StorageManager }   from '../../Services/StorageManager.js';
 import { executeWorkflow }  from '../../Services/WorkflowExecutor.js';
-import { markEngineBusy }   from './sg.js';   // v2.74.967 (gl 114728) — monitor self-capture suppression for workflow runs
+import { markEngineBusy, focusTabPolicy } from './sg.js';   // v2.74.967 (gl 114728) — monitor self-capture suppression; FM-1 (v2.74.968) — terminal courtesy focus
 import { CapabilityAPI }    from '../../Services/CapabilityAPI.js';
 
 // v2.74.953 (CR-X3c) — the workflow-debug ctx seam contract, asserted at wiring time.
@@ -318,12 +318,25 @@ export function createWorkflowDebugHandlers(ctx) {
               // only a single-fragment one. Same in-SW handoff + reject-safety net as runObservation.
               runCapability: (capPayload) => ctx.invokeSgHandler('REPLAY_SG_CAPABILITY', capPayload),   // v2.74.950 (CR-X3b) — the one bridge
               ensureContentScript: ctx.ensureContentScript,   // heal a freshly-opened hop tab's content-script port before the read
+              // v2.74.969 (gl 175931) — REPLAY-parity param seeding needs the sgCapability record's
+              // demonstrated defaults; bridge the read like runObservation (same triple-id lookup
+              // REPLAY itself uses since .833: own id OR dispatch strategyId/fragmentId).
+              readCapability: async (groundId, dispatchId) => {
+                const r = await ctx.invokeSgHandler('GET_SG_CAPABILITIES', { groundId });
+                const caps = Array.isArray(r?.capabilities) ? r.capabilities : [];
+                return caps.find((c) => c && (c.id === dispatchId || c.strategyId === dispatchId || c.fragmentId === dispatchId)) || null;
+              },
             });
             // v2.74.812 — run FOOTER: outcome + step/error/duration. stepResults shape varies, so read defensively.
             const _sr = Array.isArray(result.results) ? result.results : (Array.isArray(result.stepResults) ? result.stepResults : null);
             const _ran = _sr ? _sr.length : _wfSteps;
             const _errs = _sr ? _sr.filter((r) => r && r.success === false).length : (result.success ? 0 : 1);
             Logger.info('background', `${result.success ? '✓' : '✗'} RUN ${_runId} — ${result.success ? 'ok' : (result.error ? String(result.error).slice(0, 80) : 'failed')} · ${_ran}/${_wfSteps} step(s) · ${_errs} error(s) · ${Date.now() - _runT0}ms`);
+            // FM-1 (v2.74.968) — COURTESY focus at the run terminal: surface the last driven tab so the
+            // user sees the result/failure state (no-op when they're already on it; the 'autoFocus'
+            // setting governs — focusTabPolicy logs the FOCUS ▸ verdict either way).
+            const _lastTab = [..._busyTabs].pop();
+            if (typeof _lastTab === 'number') { try { await focusTabPolicy({ tabId: _lastTab, reason: result.success ? 'run-done' : 'run-failed' }); } catch { /* */ } }
             sendResponse({ success: !!result.success, invocationId: invId, ...result });
           } finally {
             // Always cleanup — leaving stale ids in either map would
