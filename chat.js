@@ -1156,6 +1156,10 @@ async function _orchTryGaps(msg, { tabId, groundId, gaps }) {
 }
 
 async function _orchNlFallback(msg, { tabId, groundId, ask, onAuthored = null }) {
+  // v2.74.965 (gl 085438) — a null Ground can neither trial NOR record (DERIVE needs a Ground): say so in
+  // person-speak instead of surfacing the handler's "groundId + intent required" refusal. The walk's
+  // establish-then-teach mints the Ground BEFORE calling here; this guard is the belt for any other path.
+  if (!groundId) { _setMessageBody(msg, `I don’t know “${ask}”’s site yet — open the site first, then ask again from there.`); return false; }
   _setMessageBody(msg, `Working out “${ask}” from the page…`);
   const res = await _orchReq('RUN_SG_TRIAL', { tabId, groundId, intent: ask, tier2: true });
   if (!res || res.success === false) {
@@ -1920,9 +1924,11 @@ async function _walkStep(steps, i, st, ask) {
     const verb = si.capabilityId ? (isRead ? 'reading' : 'running') : 'teaching';
     _setMessageBody(m, `Step ${i + 1}/${st.total} · ${verb} “${si.clause || 'this'}”${si.groundName ? ` on ${si.groundName}` : ''}…`);
 
-    const tab = await _walkEnsureTab(st, si);
+    // v2.74.965 — a NULL-Ground gap step (.962 gap-ambiguous) opens ITS OWN tab in the establish flow below;
+    // don't pre-open a blank one here (groundUrl is undefined → chrome.tabs.create lands on the New Tab page).
+    const tab = si.groundId ? await _walkEnsureTab(st, si) : st.tabId;
     const advance = (value) => { if (value != null && value !== '') for (const o of _wfNames(si.outputs)) st.scope[o] = value; next(); };
-    if (tab == null) {
+    if (tab == null && si.groundId) {
       mark('no-tab');   // v2.74.914
       _orchLog(`WALK ▸ step ${i + 1} · NO TAB for ${si.groundName || '?'}`);
       _setMessageBody(m, `Step ${i + 1}/${st.total} · couldn’t open ${si.groundName || 'the site'}.`);
@@ -1968,14 +1974,54 @@ async function _walkStep(steps, i, st, ask) {
         else { mark('failed'); _orchLog(`WALK ▸ step ${i + 1} · run FAIL [${r ? `success=${r.success} ran=${r.ran} ok=${r.ok}${r.error ? ` err="${String(r.error).slice(0, 50)}"` : ''}${r.reason ? ` ${String(r.reason).slice(0, 40)}` : ''}` : 'null/timeout'}]`); _setMessageBody(m, `Step ${i + 1}/${st.total} · “${si.capabilityName || si.clause}” didn’t complete${r && (r.error || r.reason) ? ` (${r.error || r.reason})` : ''}.`); _orchFinalize(m); _walkReteach(m, si, st, next, mark, i); }
       }
     } else {
-      // ── GAP → TEACH it in place (the prior steps warmed the page) ──
-      _setMessageBody(m, `Step ${i + 1}/${st.total} · ${isRead ? '◎ point at the value to read for' : '● show me how to'} “${si.clause}” on ${si.groundName || 'the site'}.`);
+      // ── GAP → TEACH it (in place when the Ground exists; ESTABLISH-then-teach when it doesn't) ──
       let done = false; const finish = (value, outcome) => { if (done) return; done = true; mark(outcome || 'taught'); _orchLog(`WALK ▸ step ${i + 1} · ${outcome || `taught (${isRead ? 'observe' : 'action'})`}`); advance(value); };
-      if (isRead) _orchObserveCapture(appendMessage({ role: 'assistant', body: '' }), { groundId: si.groundId, tabId: tab, ask: si.clause, onAuthored: (r) => { if (r && r.capabilityId) { si.capabilityId = r.capabilityId; si.capabilityKind = 'observation'; } finish(r && r.value); } });   // v2.74.916 — stash the taught read's id so a later foreach can drive on it
-      else _orchNlFallback(appendMessage({ role: 'assistant', body: '' }), { tabId: tab, groundId: si.groundId, ask: si.clause, onAuthored: () => finish() });
-      const bar = _orchActionBar(m);
-      bar.appendChild(_mkBtn('Skip ▸', () => { bar.remove(); finish(undefined, 'skipped'); }));
-      bar.appendChild(_mkBtn('Stop', () => { bar.remove(); done = true; mark('stopped'); _endWalk(st, i, 'stopped'); }));   // v2.74.919 (CR-S3)
+      const dispatchTeach = (gid, gname, teachTab) => {
+        _setMessageBody(m, `Step ${i + 1}/${st.total} · ${isRead ? '◎ point at the value to read for' : '● show me how to'} “${si.clause}” on ${gname || 'the site'}.`);
+        if (isRead) _orchObserveCapture(appendMessage({ role: 'assistant', body: '' }), { groundId: gid, tabId: teachTab, ask: si.clause, onAuthored: (r) => { if (r && r.capabilityId) { si.capabilityId = r.capabilityId; si.capabilityKind = 'observation'; } finish(r && r.value); } });   // v2.74.916 — stash the taught read's id so a later foreach can drive on it
+        else _orchNlFallback(appendMessage({ role: 'assistant', body: '' }), { tabId: teachTab, groundId: gid, ask: si.clause, onAuthored: () => finish() });
+        const bar = _orchActionBar(m);
+        bar.appendChild(_mkBtn('Skip ▸', () => { bar.remove(); finish(undefined, 'skipped'); }));
+        bar.appendChild(_mkBtn('Stop', () => { bar.remove(); done = true; mark('stopped'); _endWalk(st, i, 'stopped'); }));   // v2.74.919 (CR-S3)
+      };
+      if (si.groundId) { dispatchTeach(si.groundId, si.groundName, tab); }
+      else {
+        // v2.74.965 (gl 085438) — a .962 gap-ambiguous step has NO Ground: the site is UNKNOWN, so there is
+        // nothing to teach "in place" (the old path fed groundId=null into RUN_SG_TRIAL → a raw handler
+        // refusal surfaced in chat). ESTABLISH first, behind a confirm: router world knowledge → URL →
+        // focused tab → ENSURE_GROUND_FOR_URL (G1-1 dedup-before-mint, proven minting Indeed at .910) →
+        // re-dispatch this SAME teach on the fresh Ground. A fresh Ground is 'empty', so the teach's tier2
+        // trial will honestly miss and fall to the demonstration offer — which authors fine on an
+        // unexplored site (OBS derive needs no Locale).
+        const siteTok = (String(si.clause || '').match(/\b(?:on|at|in|via|using|to|from)\s+([A-Za-z][\w'’.&-]*(?:\s+[A-Za-z][\w'’.&-]*){0,2})[\s.!?]*$/) || [])[1] || null;
+        _setMessageBody(m, `Step ${i + 1}/${st.total} · ${siteTok ? `${siteTok} isn’t one of your sites yet` : 'I don’t know which site this needs'} — open it and teach “${si.clause}” there?`);
+        const bar = _orchActionBar(m);
+        bar.appendChild(_mkBtn(`● Open ${siteTok || 'the site'} & teach`, async () => {
+          bar.remove();
+          try {
+            _setMessageBody(m, `Step ${i + 1}/${st.total} · working out ${siteTok || 'the site'}’s address…`);
+            const r = await _orchReq('ROUTE_ASK', { ask: `go to ${siteTok || si.clause}` });
+            const d = r && r.decision;
+            const url = (d && d.tool && d.tool.op === 'OPEN_URL' && d.params && typeof d.params.url === 'string' && /^https?:\/\//i.test(d.params.url)) ? d.params.url.trim() : null;
+            if (!url) { _orchLog(`WALK ▸ step ${i + 1} · establish MISS — no URL for "${siteTok || si.clause}"`); _setMessageBody(m, `Couldn’t work out the site for “${si.clause}”.`); finish(undefined, 'failed'); return; }
+            const opened = await _orchReq('OPEN_URL_NEW_TAB', { url, active: true });
+            if (!opened || opened.success === false || typeof opened.tabId !== 'number') { _orchLog(`WALK ▸ step ${i + 1} · establish FAIL — ${url} did not open`); _setMessageBody(m, `Couldn’t open ${url}.`); finish(undefined, 'failed'); return; }
+            await _orchWaitTabReady(opened.tabId);
+            const eg = await _orchReq('ENSURE_GROUND_FOR_URL', { url });
+            if (!eg || eg.success === false || !eg.groundId) { _orchLog(`WALK ▸ step ${i + 1} · establish FAIL — no Ground for ${url}`); _setMessageBody(m, `Couldn’t set up ${url} as a site${eg && eg.error ? ` — ${eg.error}` : ''}.`); finish(undefined, 'failed'); return; }
+            si.groundId = eg.groundId; si.groundName = (eg.ground && eg.ground.name) || siteTok || '';
+            st.tabId = opened.tabId; st.ground = eg.groundId;   // adopt as the walk tab so later steps reuse it
+            _orchLog(`WALK ▸ step ${i + 1} · established ${String(eg.groundId).slice(-6)} (${eg.created ? 'minted' : 'reused'}, ${eg.readiness || '?'}) → teach`);
+            dispatchTeach(eg.groundId, si.groundName, opened.tabId);
+          } catch (e) {
+            _orchLog(`WALK ▸ step ${i + 1} · establish ERROR: ${(e && e.message) || e}`);
+            _setMessageBody(m, `Couldn’t open the site for “${si.clause}” — ${(e && e.message) || e}.`);
+            finish(undefined, 'failed');
+          }
+        }));
+        bar.appendChild(_mkBtn('Skip ▸', () => { bar.remove(); finish(undefined, 'skipped'); }));
+        bar.appendChild(_mkBtn('Stop', () => { bar.remove(); done = true; mark('stopped'); _endWalk(st, i, 'stopped'); }));   // v2.74.919 (CR-S3)
+      }
     }
   } catch (e) {
     mark('error');   // v2.74.914

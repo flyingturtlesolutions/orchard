@@ -15,18 +15,28 @@ document.getElementById('pop-studio').addEventListener('click', async () => {
 });
 
 document.getElementById('pop-chat').addEventListener('click', async () => {
-  // Switch the side panel to chat.html and open it on the active tab.
+  // Switch the side panel to chat.html and open it WINDOW-SCOPED.
   // Stage 3 of the multi-mode-sidepanel refactor will collapse chat.html
   // into the shell as a chat mode; until then, chat keeps its own HTML.
+  //
+  // v2.74.966 (gl 094214) — chat now mirrors the Ground entry below (v2.74.30): GLOBAL default
+  // binding + open by windowId, NO per-tab registration. The old per-tab pin made the chat document
+  // swap on every tab hop — the .965 walk's establish flow opened the teach site in a new tab and the
+  // walk's conversation (steps, demo offer) stayed behind on the origin tab. One window-scoped chat
+  // document survives every hop. A STALE capture/debug pin on the active tab is displaced — and only
+  // when one exists, since an unconditional per-tab set would re-introduce the pin this fix removes.
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  await chrome.sidePanel.setOptions({ path: 'chat.html', enabled: true });
   if (tab?.id != null) {
-    await chrome.sidePanel.setOptions({
-      tabId: tab.id,
-      path: 'chat.html',
-      enabled: true,
-    });
-    await chrome.sidePanel.open({ tabId: tab.id });
+    try {
+      const cur = await chrome.sidePanel.getOptions({ tabId: tab.id });
+      if (cur?.path && cur.path !== 'chat.html') {
+        await chrome.sidePanel.setOptions({ tabId: tab.id, path: 'chat.html', enabled: true });
+      }
+    } catch { /* getOptions unavailable — the global default wins */ }
   }
+  if (tab?.windowId != null) await chrome.sidePanel.open({ windowId: tab.windowId });
+  else if (tab?.id != null) await chrome.sidePanel.open({ tabId: tab.id });
   window.close();
 });
 

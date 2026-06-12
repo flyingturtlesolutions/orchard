@@ -115,10 +115,25 @@ export async function openSidepanelHere(path = 'sidepanel.html') {
     // Global default first — applies to tabs without a per-tab override
     // and to future tab activations in this window.
     await chrome.sidePanel.setOptions({ path, enabled: true });
-    // Per-tab override on the active tab — displaces any prior
-    // per-tab path (chat.html being the realistic case).
     const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (activeTab?.id != null) {
+    if (path === 'chat.html') {
+      // v2.74.966 (gl 094214) — CHAT IS WINDOW-SCOPED: global binding only, NO per-tab registration.
+      // A per-tab chat pin is exactly what swapped the panel document on every tab hop (per-tab vs
+      // default binding resolve as different panel instances even for the same path), stranding the
+      // .965 walk's conversation on its origin tab when the establish flow opened the teach site.
+      // A STALE capture/debug pin on the active tab is displaced — but only when one exists, since
+      // an unconditional per-tab set would re-introduce the pin this fix removes.
+      if (activeTab?.id != null) {
+        try {
+          const cur = await chrome.sidePanel.getOptions({ tabId: activeTab.id });
+          if (cur?.path && cur.path !== path) {
+            await chrome.sidePanel.setOptions({ tabId: activeTab.id, path, enabled: true });
+          }
+        } catch { /* getOptions unavailable — the global default wins */ }
+      }
+    } else if (activeTab?.id != null) {
+      // Capture/debug surfaces stay TAB-PINNED (a capture session is tab-specific): the per-tab
+      // override displaces any prior per-tab path on the active tab (the pre-.966 behavior).
       await chrome.sidePanel.setOptions({ tabId: activeTab.id, path, enabled: true });
     }
     if (activeTab?.windowId != null) {

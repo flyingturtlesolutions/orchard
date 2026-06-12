@@ -500,7 +500,9 @@ Logger.info('background', 'Agent HUB service worker starting');
 
 chrome.action.onClicked.addListener((tab) => {
   Logger.debug('background', `Action clicked on tab ${tab.id}`);
-  chrome.sidePanel.open({ tabId: tab.id });
+  // v2.74.966 — open by WINDOW: chat (the manifest default panel) is window-scoped, so the windowId
+  // form states the binding the panel actually uses; tabId remains the fallback for edge surfaces.
+  chrome.sidePanel.open(tab?.windowId != null ? { windowId: tab.windowId } : { tabId: tab.id });
 });
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
@@ -4345,8 +4347,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
           const tabId = payload?.tabId ?? tab?.id;
           if (tabId == null) { sendResponse({ success: false, error: 'no tab' }); return; }
-          await chrome.sidePanel.setOptions({ tabId, path: 'chat.html', enabled: true });
-          await chrome.sidePanel.open({ tabId });
+          // v2.74.966 (gl 094214) — chat is WINDOW-SCOPED: bind via the GLOBAL default + open by
+          // windowId, creating NO per-tab registration. The old per-tab pin made the chat document
+          // SWAP on every tab hop (per-tab vs default binding resolve as different panel instances,
+          // even for the same path — popup.js's Ground entry documented this at v2.74.30), which
+          // stranded the walk's conversation on the origin tab when .965's establish flow opened the
+          // teach site. Only a STALE capture/debug pin on this tab is displaced — and only when one
+          // exists, since an unconditional per-tab set would re-introduce the pin this fix removes.
+          await chrome.sidePanel.setOptions({ path: 'chat.html', enabled: true });
+          try {
+            const cur = await chrome.sidePanel.getOptions({ tabId });
+            if (cur?.path && cur.path !== 'chat.html') await chrome.sidePanel.setOptions({ tabId, path: 'chat.html', enabled: true });
+          } catch { /* getOptions unavailable — the global default wins */ }
+          let windowId = (tab && tab.id === tabId) ? (tab.windowId ?? null) : null;
+          if (windowId == null) { try { windowId = (await chrome.tabs.get(tabId))?.windowId ?? null; } catch { /* */ } }
+          if (windowId != null) await chrome.sidePanel.open({ windowId });
+          else await chrome.sidePanel.open({ tabId });
           sendResponse({ success: true });
         } catch (err) {
           sendResponse({ success: false, error: err.message });
