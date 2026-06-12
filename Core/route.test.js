@@ -78,6 +78,16 @@ describe('route — front-door cascade (pure, injected deps)', () => {
     });
     assert.equal(d.action, 'decompose');
     assert.deepEqual(d.subAsks, ['search cats', 'download first']);
+    assert.equal(d.lowConfidence, false);   // v2.74.963 — decompose carries the gate field (no longer vacuously undefined)
+  });
+
+  it('decompose below the confidence floor -> lowConfidence (R-6 cache + dispatch guards read it)', async () => {
+    const d = await route('vague compound ask', {
+      retrieveTools: async () => TOOLS,
+      callRouter: async () => ({ needs_decompose: true, subAsks: ['a', 'b'], confidence: 0.2 }),
+    });
+    assert.equal(d.action, 'decompose');
+    assert.equal(d.lowConfidence, true);
   });
 
   it('anti-hallucination: a tool NOT in the candidate set -> demonstrate (never dispatch an un-offered tool)', async () => {

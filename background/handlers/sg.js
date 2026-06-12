@@ -2132,8 +2132,15 @@ export function createSgMessageHandlers(ctx) {
               const m = await AnthropicService.matchGround({ clause, grounds: llmGrounds });
               picked = m ? pickValidGround(m.groundId, catalog) : null;
             } catch (e) { Logger.warn('background', `matchGround unavailable: ${e.message}`); }
-            groundId = picked || gr.groundId || null;   // LLM pick → else the lexical top (ambiguous winner) → else null
-            _via = picked ? 'llm' : (gr.groundId ? 'lexical-fallback' : 'none');
+            // v2.74.962 (gl 174308) — an AMBIGUOUS lexical tie does NOT override the LLM's null. matchGround
+            // correctly rejected both known sites for "search for fable on youtube" (YouTube isn't a Ground),
+            // but this fallback force-assigned the 0.33/0.33 coin-flip winner → a YouTube search bound on
+            // Pixabay, runnable with 0 repairs. LLM-null + ambiguous now resolves to NULL → the sub-intent
+            // becomes a GAP (the card's teach/skip affordances; null skips the bind AND the gap→alternate
+            // hop below). A non-ambiguous lexical top still backstops an LLM miss/outage.
+            const _lexAmbiguous = gr.decision === 'ambiguous';
+            groundId = picked || (_lexAmbiguous ? null : gr.groundId) || null;
+            _via = picked ? 'llm' : (groundId ? 'lexical-fallback' : (_lexAmbiguous ? 'gap-ambiguous' : 'none'));
             if (gr.decision === 'ambiguous' && !picked) ambiguities.push({ subIntentId: si.id || `s${i}`, clause, candidates: gr.candidates });
           }
           // v2.74.805 — diagnostic: HOW each sub-intent resolved + the chosen Ground's host (reveals a mis-resolution

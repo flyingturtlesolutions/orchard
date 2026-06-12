@@ -76,6 +76,37 @@ describe('postcondition — evaluate (SG-T2-9)', () => {
     assert.equal(evaluatePostcondition(pc, { beforeUrl: before, afterUrl: after }).held, true);
   });
 
+  it('v2.74.964 — INHERITED keyword (.912 "Submit search" spurious hold): already matched pre-state, URL unchanged → NOT held', () => {
+    const pc = { match: 'any', conditions: [{ type: 'url_matches', pattern: 'jobs search destination' }] };
+    const url = 'https://www.indeed.com/jobs?q=actor&l=Remote';   // phase 1's accidental submit already landed here
+    const res = evaluatePostcondition(pc, { beforeUrl: url, afterUrl: url });
+    assert.equal(res.held, false);
+    assert.equal(res.evaluated[0].vacuousHit, true);
+  });
+
+  it('v2.74.964 — keyword turning true ACROSS the phase (home → SERP) still holds', () => {
+    const pc = { match: 'any', conditions: [{ type: 'url_matches', pattern: 'jobs page reached' }] };
+    const res = evaluatePostcondition(pc, { beforeUrl: 'https://www.indeed.com/', afterUrl: 'https://www.indeed.com/jobs?q=actor' });
+    assert.equal(res.held, true);
+    assert.equal(res.evaluated[0].keywordHit, 'jobs');
+  });
+
+  it('v2.74.964 — vacuous keyword but a REAL param delta → held via the change leg', () => {
+    const pc = { match: 'any', conditions: [{ type: 'url_matches', pattern: 'jobs filter applied' }] };
+    const res = evaluatePostcondition(pc, {
+      beforeUrl: 'https://www.indeed.com/jobs?q=actor',
+      afterUrl:  'https://www.indeed.com/jobs?q=actor&fromage=7',
+    });
+    assert.equal(res.held, true);
+    assert.equal(res.evaluated[0].changed, true);
+    assert.equal(res.evaluated[0].vacuousHit, true);   // the keyword leg alone would NOT have held it
+  });
+
+  it('v2.74.964 — no beforeUrl (pre-state not gathered) → fail-open: any hit still counts', () => {
+    const pc = { match: 'any', conditions: [{ type: 'url_matches', pattern: 'jobs page' }] };
+    assert.equal(evaluatePostcondition(pc, { afterUrl: 'https://www.indeed.com/jobs?q=x' }).held, true);
+  });
+
   it('no url condition → falls back to the selector floor when present', () => {
     const pc = { match: 'any', conditions: [{ type: 'selector_present', selector: '#results' }] };
     const res = evaluatePostcondition(pc, { beforeUrl: 'x', afterUrl: 'y', selectorsPresent: { '#results': true } });

@@ -2164,7 +2164,7 @@ async function _tryGroundedTurn(text) {
   if (!tab || typeof tab.id !== 'number') return false;
   // v2.74.818 — the grounded route + active-tab Ground host; the downstream COMPREHEND_CROSS_GROUND / ORCH_MATCH(_GLOBAL)
   // line then shows which grounded sub-path ran, so a turn's full route reads in two lines.
-  _orchLog(`ROUTE ▸ "${String(text).slice(0, 50)}" → grounded [tab=${(() => { try { return new URL(tab.url).hostname; } catch { return '?'; } })()}]`);
+  _orchLog(`ROUTE ▸ "${String(text).slice(0, 50)}" → grounded [tab=${(() => { try { const u = new URL(tab.url); return u.protocol === 'chrome-extension:' ? 'extension-page' : u.hostname; } catch { return '?'; } })()}]`);   // v2.74.962 — the side panel as active tab rendered the extension id as a hostname
 
   // ORCH-X T2 CACHE — a COMPOUND ask the user already saved as a composite (a T2 artifact) runs ATOMICALLY: no
   // re-decompose, no per-clause re-match. Cheap lexical lookup (NO LLM), gated to compound-ish asks so a simple

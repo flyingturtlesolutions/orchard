@@ -22,6 +22,11 @@
 //     url_matches condition holds when EITHER a prose keyword appears in the URL OR the URL's query params
 //     actually CHANGED versus just-before-this-phase. The no-op (dropdown opened, commit deferred → URL
 //     unchanged, no keyword) fails; a real apply (param added, even an opaquely-named one) holds.
+//     v2.74.964 — the keyword leg is CAUSAL: a keyword that ALREADY matched the phase's pre-state URL is
+//     no evidence THIS phase did anything (.912 trace: "Submit search" HELD spuriously because phase 1's
+//     accidental empty submit had already landed the SERP URL — every later phase inherited the match).
+//     With a beforeUrl, only a keyword that turned true ACROSS the phase counts; without one (no pre-state
+//     gathered) any hit still counts (fail-open, the pre-.964 behavior).
 //
 // PURE: no DOM, no chrome, no LLM. The runtime gathers `observed` and calls evaluatePostcondition.
 //
@@ -127,9 +132,16 @@ export function evaluatePostcondition(postcondition, observed = {}) {
     if (c.type === 'url_matches') {
       const kws = extractKeywords(c.pattern);
       const checkable = !!afterUrl;
-      const keywordHit = checkable ? (kws.find((k) => afterLc.includes(k)) || null) : null;
+      const beforeLc = String(beforeUrl).toLowerCase();
+      const anyHit = checkable ? (kws.find((k) => afterLc.includes(k)) || null) : null;
+      // v2.74.964 — CAUSAL keyword evidence (header §2): with a pre-state to compare, only a keyword that
+      // turned true ACROSS the phase counts; a hit the phase merely inherited is vacuous. No pre-state →
+      // fail-open to any hit.
+      const newHit = (checkable && beforeUrl) ? (kws.find((k) => afterLc.includes(k) && !beforeLc.includes(k)) || null) : null;
+      const keywordHit = beforeUrl ? newHit : anyHit;
+      const vacuousHit = !!(anyHit && beforeUrl && !newHit);
       const changed = checkable ? urlParamsChanged(beforeUrl, afterUrl) : false;
-      evaluated.push({ type: 'url_matches', checkable, held: checkable ? (!!keywordHit || changed) : null, keywordHit, changed, keywords: kws });
+      evaluated.push({ type: 'url_matches', checkable, held: checkable ? (!!keywordHit || changed) : null, keywordHit, vacuousHit, changed, keywords: kws });
     } else if (c.type === 'selector_present') {
       const has = Object.prototype.hasOwnProperty.call(selPresent, c.selector);
       evaluated.push({ type: 'selector_present', selector: c.selector, checkable: has, held: has ? !!selPresent[c.selector] : null });

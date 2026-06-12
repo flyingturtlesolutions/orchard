@@ -65,6 +65,14 @@ describe('parseRouterOutput — tolerant parse + fail-safe to demonstrate', () =
     assert.deepEqual(o.subAsks, ['a', 'b', '3']);
   });
 
+  it('decompose confidence floor (v2.74.963): omitted/0 + a real split -> 0.5; explicit non-zero honored', () => {
+    assert.equal(parseRouterOutput('{"needs_decompose":true,"subAsks":["a","b"]}').confidence, 0.5);                  // omitted
+    assert.equal(parseRouterOutput('{"needs_decompose":true,"subAsks":["a","b"],"confidence":0}').confidence, 0.5);   // explicit 0 (the gl 174308 trace)
+    assert.equal(parseRouterOutput('{"needs_decompose":true,"subAsks":["a","b"],"confidence":0.2}').confidence, 0.2); // an honest low rating is honored
+    assert.equal(parseRouterOutput('{"needs_decompose":true,"subAsks":["a"],"confidence":0}').confidence, 0);         // degenerate 1-way split: no floor
+    assert.equal(parseRouterOutput('{"tool":"OPEN_URL","confidence":0}').confidence, 0);                              // select path unchanged (fail-safe)
+  });
+
   it('empty object {} parses to safe defaults (NOT a demonstrate fallback)', () => {
     const o = parseRouterOutput('{}');
     assert.equal(o.tool, null);

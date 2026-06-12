@@ -22,6 +22,9 @@ const SYSTEM = [
   '- Use world knowledge for navigation (e.g. "go to pixabay home" -> the OPEN_URL tool, params {"url":"https://pixabay.com"}).',
   '- If NO tool fits, set needs_demonstration=true (the user will teach it).',
   '- If the ask is several distinct steps, set needs_decompose=true and list subAsks.',
+  '- "confidence" rates YOUR DECISION, whatever its kind: the tool pick, the decompose split, or the',
+  '  no-tool-fits verdict. A clean decomposition of a compound ask is HIGH confidence — never 0 just',
+  '  because no single tool was selected.',
   '- Reply with ONLY a JSON object:',
   '  {"tool": <ref-string-or-null>, "params": {..}, "confidence": 0..1, "needs_decompose": bool,',
   '   "needs_demonstration": bool, "subAsks": [..], "reason": "short"}',
@@ -75,13 +78,21 @@ export function parseRouterOutput(raw) {
   const tool = (typeof obj.tool === 'string' && obj.tool.trim()) ? obj.tool.trim()
     : (obj.tool && typeof obj.tool === 'object') ? (obj.tool.ref || obj.tool.op || obj.tool.capabilityId || obj.tool.id || null)
     : null;
+  const subAsks = Array.isArray(obj.subAsks) ? obj.subAsks.map(String).filter(Boolean) : [];
+  // v2.74.963 (gl 174308) — confidence rates the DECISION, not the tool pick. The live router returned a
+  // correct 2-way decompose with confidence 0 ("I picked no tool"), which downstream reads as garbage
+  // (lowConfidence fallback, cache skip). A decompose carrying a REAL split whose confidence is omitted
+  // or 0 gets a modest 0.5 floor (above route()'s 0.4 minConfidence; the chain confirm still gates
+  // execution). Any explicit non-zero value — e.g. an honest 0.2 "unsure split" — is honored unchanged.
+  let confidence = _clamp01(obj.confidence);
+  if (obj.needs_decompose === true && subAsks.length >= 2 && confidence === 0) confidence = 0.5;
   return {
     tool,
     params: (obj.params && typeof obj.params === 'object') ? obj.params : {},
-    confidence: _clamp01(obj.confidence),
+    confidence,
     needs_decompose: obj.needs_decompose === true,
     needs_demonstration: obj.needs_demonstration === true,
-    subAsks: Array.isArray(obj.subAsks) ? obj.subAsks.map(String).filter(Boolean) : [],
+    subAsks,
     reason: (typeof obj.reason === 'string') ? obj.reason.slice(0, 200) : '',
   };
 }

@@ -77,7 +77,10 @@ export async function route(ask, deps = {}, opts = {}) {
   // Compound branch — gate the cross-site / workflow path behind an EXPLICIT decompose signal. Checked
   // BEFORE the gap branch: a decompose plan legitimately carries no single top-level tool (tool == null).
   if (out.needs_decompose === true) {
+    // v2.74.963 — decompose now carries lowConfidence too: the R-6 cache gate and chat's dispatch guard
+    // read it, and an undefined here made every decompose vacuously "confident" (a conf-0 split cached).
     return { action: 'decompose', tool: null, params, confidence, reason: out.reason || 'compound',
+             lowConfidence: confidence < minConfidence,
              subAsks: Array.isArray(out.subAsks) ? out.subAsks.map(String) : [], candidates };
   }
   // Gap branch — the LLM has no suitable tool -> demonstrate / run a trial.
