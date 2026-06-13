@@ -2802,9 +2802,9 @@ function _getDevBridge() {
   // start expanded; rehydrate collapses long past runs).
   // v2.74.993 — renderMarkdown + wireCodeCopyButtons: rich block rendering of run output (markdown
   // prose, tool chips) mirroring Claude Code desktop. Same injection-safe renderer the chat uses.
-  // v2.74.994 — scrollToBottom: follow the streamed output to the latest line (only when the user is
-  // near the bottom, so scrolling up to read isn't yanked — the chat's own streaming behavior).
-  if (!_devBridgeInstance) _devBridgeInstance = createDevBridge({ appendMessage, setMessageBody: _setMessageBody, mkBtn: _mkBtn, persistMessage: _persistMessageUpdate, decorateBubble: _decorateDevBubble, renderMarkdown, wireCodeCopyButtons, scrollToBottom: _scrollToBottomIfNearBottom });
+  // v2.74.995 — getScrollContainer: the bridge runs its OWN follow-scroll (the chat's 96px near-bottom
+  // heuristic breaks for the bridge's large per-block appends), anchoring the working…/Pause footer.
+  if (!_devBridgeInstance) _devBridgeInstance = createDevBridge({ appendMessage, setMessageBody: _setMessageBody, mkBtn: _mkBtn, persistMessage: _persistMessageUpdate, decorateBubble: _decorateDevBubble, renderMarkdown, wireCodeCopyButtons, getScrollContainer: () => $('conversation') });
   return _devBridgeInstance;
 }
 

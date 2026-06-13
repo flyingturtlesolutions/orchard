@@ -55,7 +55,7 @@ function _short(s, n = 60) { const t = String(s ?? ''); return t.length > n ? `�
  * Factory — chat.js hands in its rendering helpers (avoids any import cycle into the panel).
  * @param {{appendMessage: Function, setMessageBody: Function, mkBtn: Function, persistMessage?: Function, decorateBubble?: Function, renderMarkdown?: Function, wireCodeCopyButtons?: Function}} deps
  */
-export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistMessage, decorateBubble, renderMarkdown, wireCodeCopyButtons, scrollToBottom }) {
+export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistMessage, decorateBubble, renderMarkdown, wireCodeCopyButtons, getScrollContainer }) {
   let port = null;
   let run = null;   // { msgEl, lines: string[], bar: Element|null, sessionId: string|null }
 
@@ -106,6 +106,32 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     try { const v = (await chrome.storage.local.get(APPLIED_SIG_KEY))[APPLIED_SIG_KEY]; return typeof v === 'string' ? v : ''; } catch { return ''; }
   };
   const setAppliedSig = async (s) => { try { await chrome.storage.local.set({ [APPLIED_SIG_KEY]: String(s ?? '') }); } catch { /* */ } };
+
+  // ── Run-follow scroll (v2.74.995) ────────────────────────────────────────────────────────────────
+  // The chat's near-bottom heuristic (96px) breaks for the bridge: a single streamed block (a long
+  // text / tool / thinking block) is routinely TALLER than that, so right after one big block the view
+  // is no longer "near bottom" and following silently stops — which is why auto-scroll appeared dead.
+  // Instead we keep our own follow flag: it stays true while the view sits at the bottom and only flips
+  // off when the USER scrolls up; on every streamed block we re-anchor the run footer (the working…/
+  // Pause line, which is the last element in the bubble) into view by pinning the scroll to the bottom.
+  let _follow = true;
+  let _scrollWired = false;
+  const _scroller = () => { try { return getScrollContainer ? getScrollContainer() : null; } catch { return null; } };
+  const _atBottom = (c) => !c || (c.scrollHeight - c.scrollTop - c.clientHeight) <= 140;
+  function _wireFollow() {
+    if (_scrollWired) return;
+    const c = _scroller();
+    if (!c) return;
+    _scrollWired = true;
+    // A user scroll recomputes follow; a programmatic scroll-to-bottom lands at the bottom so follow
+    // stays true (no feedback loop). Appending a block does NOT fire 'scroll', so big blocks can't flip it.
+    c.addEventListener('scroll', () => { _follow = _atBottom(c); }, { passive: true });
+  }
+  function _anchor() {
+    if (!_follow) return;
+    const c = _scroller();
+    if (c) c.scrollTop = c.scrollHeight;   // footer bar is the last child → pins working…/Pause at the bottom
+  }
 
   // ── Rich rendering (v2.74.993) — mirror Claude Code's desktop formatting ──────────────────────────
   // Each stream event becomes a styled BLOCK in the bubble's .message-body, instead of the old plain-text
@@ -170,7 +196,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const blocks = [];
     if (initial) { const b = { kind: 'text', text: initial }; blocks.push(b); bodyEl?.appendChild(_blockNode(b)); }
     _persistBlocks(msg, blocks);
-    try { scrollToBottom?.(); } catch { /* */ }   // v2.74.994 — keep the new bubble's tail in view
+    try { _anchor(); } catch { /* */ }   // v2.74.995 — keep the new bubble's tail in view
     return { msg, bodyEl, blocks };
   }
 
@@ -183,9 +209,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       run.blocks.shift();
       if (run.bodyEl.firstChild) run.bodyEl.removeChild(run.bodyEl.firstChild);
     }
-    // v2.74.994 — auto-scroll to the latest streamed line (only when already near the bottom, so a
-    // user who scrolled up to read isn't yanked down — mirrors the chat's streaming scroll behavior).
-    try { scrollToBottom?.(); } catch { /* */ }
+    // v2.74.995 — re-anchor the run footer (working…/Pause) so the latest block stays in view, unless
+    // the user has scrolled up. Block-size-agnostic (unlike the chat's 96px near-bottom heuristic).
+    try { _anchor(); } catch { /* */ }
   }
 
   // End the run. `final` may be a block object or a string (→ an error result block).
@@ -291,6 +317,8 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   }
 
   function startRun(payload, headline) {
+    _follow = true;       // v2.74.995 — a fresh run follows from the top; the user can scroll up to stop it
+    _wireFollow();        // attach the one scroll listener (idempotent) now that the panel is up
     const { msg, bodyEl, blocks } = devBubble(headline);
     run = { msgEl: msg, msg, bodyEl, blocks, bar: null, sessionId: null, pendingPayload: payload, tick: null };
     // v2.74.989 — run footer: an amber spinner + a ticking "working… Ns" label give a live
@@ -316,6 +344,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const _content = msg.querySelector('.message-content') || msg;
     _content.appendChild(bar);
     run.bar = bar;
+    try { _anchor(); } catch { /* */ }   // v2.74.995 — pin the working…/Pause footer into view immediately
     const startedAt = Date.now();
     run.tick = setInterval(() => {
       const s = Math.round((Date.now() - startedAt) / 1000);
