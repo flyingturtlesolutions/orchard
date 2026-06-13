@@ -150,7 +150,13 @@ Headless `-p` cannot answer permission prompts, so each slice declares its polic
 - **DB-1 (analyze):** `Read, Grep, Glob, Edit, Write` — no Bash. Enough for gl (read logs, append the
   findings entry); the danger tier is arbitrary shell, not tracked-file edits sitting in a git tree.
 - **DB-2 (fix loop):** + `Bash(npm test:*)`, `Bash(node:*)` (syntax checks + suite). Still no git, no
-  network tools.
+  network tools. **(landed v2.74.988.)** Mechanism note: the scoped-Bash entries ride a generated
+  `logs/bridge/db2-permissions.json` loaded via `--settings <relative path>` — `--allowedTools
+  "Bash(npm test:*)"` can't survive Node's Windows arg-escaping (embedded quotes → `\"`, which cmd.exe
+  mangles), but a relative settings-file path has no special chars and claude unions its
+  `permissions.allow` with the CLI `--allowedTools`. The run is also pinned to `--permission-mode
+  default` so the allowlist actually binds (without it a `bypassPermissions` global default silently
+  disables the gate, letting the agent reach git/arbitrary shell).
 - **DB-3 (HITL relay):** replace the blanket allowlist with `--permission-prompt-tool` → an MCP tool the
   host serves → permission requests stream to the panel → the user approves/denies inline, exactly like
   the terminal. The panel becomes the permission UI; unusual tool calls stop being pre-authorized.
@@ -208,11 +214,16 @@ at spawn; there is no live stdin channel for "do this instead." So the bridge ap
   client + dev tab + stream renderer; verbs `gl` and `dev:`; DB-1 allowlist. *Acceptance:* after a live
   run, one click in the panel → trace lands in `logs/run/`, analysis streams into the panel, the run
   itself appends the findings entry — zero terminal, zero Downloads.
-- **DB-2 — fix loop.** `bug:` verb; DB-2 allowlist; post-run diffstat; `Apply & Reload` with gating.
-  *Acceptance:* report a bug in the panel → streamed fix → suite green in-stream → diffstat → reload →
-  retest, terminal untouched; commit still happens later via terminal `bcp`.
-- **DB-3 — lifecycle + HITL.** Pause & resume-with-redirect (§7.1 — the Esc-analog: `dev: pause` /
-  `Pause` control + the `redirect:` input + `--resume` plumbing), journal reattach, cost footer polish,
+- **DB-2 — fix loop. (landed v2.74.973–.988.)** `bug:` verb (.988); DB-2 allowlist via settings file +
+  `--permission-mode default` (.988); post-run diffstat (.975) + working-tree-signature reload icon (.975/
+  .980, which replaced the per-run `Apply & Reload` button); transcript persistence (.987). *Acceptance:*
+  report a bug in the panel → streamed fix → suite green in-stream → diffstat → reload → retest, terminal
+  untouched; commit still happens later via terminal `bcp`.
+- **DB-3 — lifecycle + HITL.** ✅ **Pause & resume-with-redirect landed (v2.74.992)** — the `Pause`
+  control + `dev: pause` kill the process but keep the session (`pauseRun` host verb, `cancel` kept as an
+  alias), and resume-with-redirect is the conversational `dev: <redirect>` that already `--resume`s the
+  last session (.985) — so the "redirect input" is the verb itself, not a separate widget. *Still open:*
+  journal reattach (panel-side `status`/replay + cross-reload child survival), cost-footer polish,
   permission relay replacing the blanket allowlist, run history (last N journals) in the panel.
 
 Effort: host ~200 lines + installer ~50; extension side ~250–300 (port client, dev UI, renderer). DB-1 is

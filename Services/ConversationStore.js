@@ -99,8 +99,13 @@ function _removeFromIndex(id) {
  *    id: string, role: 'user'|'assistant'|'system',
  *    body: string, markdown?: boolean, html?: boolean, attribution?: string,
  *    invocationId?: string, ts: number,
- *    outcome?: { kind: string, label: string, detail: string }
+ *    outcome?: { kind: string, label: string, detail: string },
+ *    devBridge?: boolean
  *  }} PersistedMessage */
+/* v2.74.987 — `devBridge?: boolean` added. Dev-bridge bubbles (Claude Code
+ * replies, Services/Chat/devBridge.js) persist with this flag so _rehydrate-
+ * Conversation restores their amber identity and — per the bridge trust rule —
+ * keeps their body on the PLAIN-TEXT path (never the markdown/html render). */
 /* v2.74.109 — `html?: boolean` added to the typedef. Strategy result cards
  * (handleInvocationCompleted in chat.js) write pre-built HTML and set the
  * flag so _rehydrateConversation knows to use innerHTML on re-render. The

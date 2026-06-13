@@ -456,6 +456,7 @@ async function _persistMessageUpdate(msgEl, fields) {
   if (fields.attribution) existing.attribution = fields.attribution;
   if (fields.outcome)     existing.outcome     = fields.outcome;
   if (fields.invocationId) existing.invocationId = fields.invocationId;
+  if (fields.devBridge)   existing.devBridge   = true;   // v2.74.987 — dev-bridge bubble: rehydrate restores amber identity + keeps it plain-text
 
   // Track ts on the DOM so subsequent updates don't bump it
   if (!msgEl.dataset.ts) msgEl.dataset.ts = existing.ts;
@@ -2756,11 +2757,54 @@ function _renderRichIntents(msg, intents) {
   msg.appendChild(wrap);
 }
 
+// v2.74.990 — Dev-bridge bubble decoration, ONE place shared by the live path (devBridge.devBubble)
+// and rehydrate, so both render identically. Applies the amber trust-domain identity AND a clickable
+// "Claude Code" header that collapses the (often long, multi-line) streamed body — old replies were
+// dominating the chat. Idempotent: re-decorating just syncs the collapsed state + caret.
+function _decorateDevBubble(msgEl, { collapsed = false } = {}) {
+  if (!msgEl) return;
+  try { msgEl.style.borderLeft = '3px solid #c9a227'; msgEl.dataset.devBridge = '1'; } catch { /* */ }
+  let header = msgEl.querySelector('.dev-bridge-header');
+  if (!header) {
+    header = document.createElement('button');
+    header.type = 'button';
+    header.className = 'dev-bridge-header';
+    header.title = 'Collapse / expand this Claude Code reply';
+    const caret = document.createElement('span');
+    caret.className = 'dev-bridge-caret';
+    caret.setAttribute('aria-hidden', 'true');
+    const label = document.createElement('span');
+    label.className = 'dev-bridge-label';
+    label.textContent = 'Claude Code';
+    header.appendChild(caret);
+    header.appendChild(label);
+    header.addEventListener('click', () => {
+      const isCollapsed = msgEl.classList.toggle('dev-collapsed');
+      caret.textContent = isCollapsed ? '▸' : '▾';
+      header.setAttribute('aria-expanded', String(!isCollapsed));
+    });
+    const content = msgEl.querySelector('.message-content') || msgEl;
+    content.insertBefore(header, content.firstChild);
+  }
+  msgEl.classList.toggle('dev-collapsed', collapsed);
+  const caretEl = header.querySelector('.dev-bridge-caret');
+  if (caretEl) caretEl.textContent = collapsed ? '▸' : '▾';
+  header.setAttribute('aria-expanded', String(!collapsed));
+}
+
 // DB-1b (v2.74.973) — lazy singleton: the dev bridge is created on first use with the chat's own
 // rendering helpers (no import cycle, nothing constructed for users who never type a bridge verb).
 let _devBridgeInstance = null;
 function _getDevBridge() {
-  if (!_devBridgeInstance) _devBridgeInstance = createDevBridge({ appendMessage, setMessageBody: _setMessageBody, mkBtn: _mkBtn });
+  // v2.74.987 — hand the bridge chat's persist hook so Claude Code replies survive a panel
+  // reload (they were DOM-only before). The bridge marks its bubbles { devBridge: true }.
+  // v2.74.990 — decorateBubble: the shared amber-identity + collapse-header decorator (live bubbles
+  // start expanded; rehydrate collapses long past runs).
+  // v2.74.993 — renderMarkdown + wireCodeCopyButtons: rich block rendering of run output (markdown
+  // prose, tool chips) mirroring Claude Code desktop. Same injection-safe renderer the chat uses.
+  // v2.74.994 — scrollToBottom: follow the streamed output to the latest line (only when the user is
+  // near the bottom, so scrolling up to read isn't yanked — the chat's own streaming behavior).
+  if (!_devBridgeInstance) _devBridgeInstance = createDevBridge({ appendMessage, setMessageBody: _setMessageBody, mkBtn: _mkBtn, persistMessage: _persistMessageUpdate, decorateBubble: _decorateDevBubble, renderMarkdown, wireCodeCopyButtons, scrollToBottom: _scrollToBottomIfNearBottom });
   return _devBridgeInstance;
 }
 
@@ -3987,8 +4031,17 @@ async function _rehydrateConversation(conv) {
 
     if (pm.markdown) {
       _setMessageBody(dom, pm.body, { markdown: true });
-    } else if (pm.html || looksLikeStrategyResultHtml(pm.body)) {
+    } else if (!pm.devBridge && (pm.html || looksLikeStrategyResultHtml(pm.body))) {
+      // v2.74.987 — dev-bridge bubbles are ALWAYS plain text (the bridge's trust rule);
+      // never route their body through the strategy-HTML heuristic on rehydrate.
       _setMessageBody(dom, pm.body, { html: true });
+    }
+    if (pm.devBridge) {
+      // v2.74.987/.990 — restore the amber dev-bridge identity + the collapse header. A long PAST run
+      // starts collapsed so reopening the panel isn't dominated by old Claude Code output; short status
+      // bubbles (≤3 lines) stay expanded since collapsing them would hide more than it saves.
+      const lineCount = (String(pm.body || '').match(/\n/g) || []).length + 1;
+      _decorateDevBubble(dom, { collapsed: lineCount > 3 });
     }
     if (pm.outcome) {
       _appendOutcomeCard(dom, pm.outcome);

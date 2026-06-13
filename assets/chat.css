@@ -245,6 +245,122 @@ textarea {
   opacity: 1;
 }
 
+/* v2.74.989 — Dev-bridge run footer: an amber spinner + a ticking "working… Ns"
+   label, shown while a Claude Code run is in flight (removed at endRun). The
+   ticking seconds are the "still alive" signal across silent gaps between stream
+   events; amber (#c9a227) matches the dev bubble's trust-domain border. */
+.dev-run-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.dev-run-spinner {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(201, 162, 39, 0.3);
+  border-top-color: #c9a227;
+  animation: dev-run-spin 0.8s linear infinite;
+}
+@keyframes dev-run-spin { to { transform: rotate(360deg); } }
+.dev-run-status {
+  font-size: 12px;
+  color: #c9a227;
+  font-variant-numeric: tabular-nums;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dev-run-spinner { animation: none; }
+}
+
+/* v2.74.990 — Dev-bridge replies are collapsible. The header bar toggles
+   .dev-collapsed on the message, which hides the (often long) streamed body so
+   old Claude Code output doesn't dominate the chat. Caret glyph is swapped in JS
+   (▾ open / ▸ collapsed); amber matches the trust-domain border. */
+.dev-bridge-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+  padding: 1px 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #c9a227;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.dev-bridge-header:hover .dev-bridge-label {
+  text-decoration: underline;
+}
+.dev-bridge-caret {
+  display: inline-block;
+  width: 10px;
+  font-size: 10px;
+  line-height: 1;
+}
+[data-dev-bridge].dev-collapsed .message-body {
+  display: none;
+}
+
+/* v2.74.993 — Dev-bridge rich rendering: each stream event is a styled block (mirrors
+   Claude Code's desktop layout). Assistant prose reuses the chat's markdown CSS (the body
+   carries .md-rendered); these rules cover the bridge-specific block kinds. */
+[data-dev-bridge] .message-body .dev-blk { margin: 7px 0; }
+[data-dev-bridge] .message-body .dev-blk:first-child { margin-top: 0; }
+[data-dev-bridge] .message-body .dev-blk:last-child { margin-bottom: 0; }
+
+/* run meta (preflight / session / started) — subtle monospace line */
+.dev-blk-meta {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  color: var(--c-text-muted, #8a8a8a);
+  opacity: 0.85;
+}
+
+/* tool call — a compact chip (glyph · name · arg) */
+.dev-blk-tool {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 3px 9px;
+  border-radius: 6px;
+  background: rgba(201, 162, 39, 0.08);
+  border: 1px solid rgba(201, 162, 39, 0.18);
+  font-size: 12px;
+}
+.dev-tool-icon { color: #c9a227; flex-shrink: 0; }
+.dev-tool-name { font-weight: 600; color: var(--c-text, #e6e6e6); flex-shrink: 0; }
+.dev-tool-arg {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  color: var(--c-text-muted, #9a9a9a);
+  word-break: break-all;
+  min-width: 0;
+}
+
+/* thinking — a dim aside */
+.dev-blk-think {
+  font-style: italic;
+  font-size: 12px;
+  color: var(--c-text-muted, #8a8a8a);
+  border-left: 2px solid rgba(201, 162, 39, 0.25);
+  padding-left: 9px;
+  white-space: pre-wrap;
+}
+
+/* result footer */
+.dev-blk-result {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: pre-line;
+  padding-top: 3px;
+}
+.dev-blk-result.ok  { color: #4caf7d; }
+.dev-blk-result.err { color: #d2796a; }
+
 /* ── Conversation area ───────────────────────────────────────────────────── */
 .conversation {
   flex: 1;

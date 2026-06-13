@@ -23,7 +23,6 @@ const TURNS_SETTING_KEY = 'settings:devBridgeTurns';   // v2.74.978 — per-run 
 const TURNS_DEFAULT = 25;   // v2.74.979 — the value when unset; NO artificial ceiling/floor (the host only checks it's a positive int)
 const APPLIED_SIG_KEY = 'settings:devBridgeAppliedSig';   // v2.74.980 — the working-tree signature as of the last reload (the "applied" baseline)
 const LAST_SESSION_KEY = 'settings:devBridgeLastSession';   // v2.74.985 — the prior run's claude session id; `dev:` resumes it (conversation by default)
-const MAX_RENDER_LINES = 100;   // a long run keeps the tail; the journal on disk is the full record
 
 // The decisions filter — VERBATIM from studio.js _DECISION_RE (the source of truth; keep in sync until
 // a shared extraction). Filters the session's log entries down to the signal-only story view that the
@@ -54,9 +53,9 @@ function _short(s, n = 60) { const t = String(s ?? ''); return t.length > n ? `�
 
 /**
  * Factory — chat.js hands in its rendering helpers (avoids any import cycle into the panel).
- * @param {{appendMessage: Function, setMessageBody: Function, mkBtn: Function}} deps
+ * @param {{appendMessage: Function, setMessageBody: Function, mkBtn: Function, persistMessage?: Function, decorateBubble?: Function, renderMarkdown?: Function, wireCodeCopyButtons?: Function}} deps
  */
-export function createDevBridge({ appendMessage, setMessageBody, mkBtn }) {
+export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistMessage, decorateBubble, renderMarkdown, wireCodeCopyButtons, scrollToBottom }) {
   let port = null;
   let run = null;   // { msgEl, lines: string[], bar: Element|null, sessionId: string|null }
 
@@ -108,23 +107,94 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn }) {
   };
   const setAppliedSig = async (s) => { try { await chrome.storage.local.set({ [APPLIED_SIG_KEY]: String(s ?? '') }); } catch { /* */ } };
 
+  // ── Rich rendering (v2.74.993) — mirror Claude Code's desktop formatting ──────────────────────────
+  // Each stream event becomes a styled BLOCK in the bubble's .message-body, instead of the old plain-text
+  // line dump: assistant prose → markdown (code fences, lists, bold — via the SAME injection-safe
+  // renderMarkdown the chat uses; it HTML-escapes first, so a run echoing page-derived strings still
+  // can't inject), tool calls → compact chips (glyph · name · arg), thinking → a dim aside, run meta →
+  // subtle lines, the result → a footer. Persistence serializes the blocks back to markdown (stored with
+  // { markdown:true, devBridge:true }) so a reloaded run re-renders with the same look via the existing
+  // pm.markdown rehydrate branch. The on-disk journal stays the full record; the bubble caps its history.
+  const MAX_BLOCKS = 80;
+  const TOOL_GLYPH = { Read: '▤', Edit: '✎', MultiEdit: '✎', Write: '✎', NotebookEdit: '✎', Bash: '▶', Grep: '⌕', Glob: '⌕', Task: '⛬', WebFetch: '⤓', WebSearch: '⌕' };
+  const _glyph = (name) => TOOL_GLYPH[name] || '▸';
+
+  function _blockNode(b) {
+    const el = document.createElement('div');
+    el.className = `dev-blk dev-blk-${b.kind}`;
+    if (b.kind === 'text') {
+      el.innerHTML = renderMarkdown ? renderMarkdown(b.text || '') : '';
+      if (!renderMarkdown) el.textContent = b.text || '';   // defensive: no renderer injected
+      try { wireCodeCopyButtons?.(el); } catch { /* */ }
+    } else if (b.kind === 'tool') {
+      const g = document.createElement('span'); g.className = 'dev-tool-icon'; g.textContent = _glyph(b.name);
+      const n = document.createElement('span'); n.className = 'dev-tool-name'; n.textContent = b.name || 'tool';
+      el.appendChild(g); el.appendChild(n);
+      if (b.arg) { const a = document.createElement('span'); a.className = 'dev-tool-arg'; a.textContent = b.arg; el.appendChild(a); }
+    } else if (b.kind === 'result') {
+      el.classList.add(b.ok ? 'ok' : 'err');
+      el.textContent = b.text || '';
+    } else {            // meta · thinking — plain text, styled dim
+      el.textContent = b.text || '';
+    }
+    return el;
+  }
+
+  // Serialize blocks → markdown for persistence (tool chips become inline-code; meta/thinking dim italic).
+  function _blocksToMarkdown(blocks) {
+    return (blocks || []).map((b) => {
+      if (b.kind === 'text') return b.text || '';
+      if (b.kind === 'tool') return '`' + _glyph(b.name) + ' ' + (b.name || 'tool') + '`' + (b.arg ? ' `' + b.arg + '`' : '');
+      if (b.kind === 'result') return '**' + (b.text || '') + '**';
+      return '_' + (b.text || '') + '_';   // meta · thinking
+    }).map((s) => String(s).trim()).filter(Boolean).join('\n\n');
+  }
+
+  function _persistBlocks(msg, blocks) {
+    if (!persistMessage) return;
+    try { persistMessage(msg, { role: 'assistant', body: _blocksToMarkdown(blocks), markdown: true, devBridge: true })?.catch?.(() => { /* */ }); } catch { /* */ }
+  }
+
+  // Create a dev bubble. `initial` (if any) renders as a markdown text block. Returns the handle the run
+  // streams into; standalone status/error bubbles just use it once.
   function devBubble(initial) {
     const msg = appendMessage({ role: 'assistant', body: '' });
-    try { msg.style.borderLeft = '3px solid #c9a227'; msg.dataset.devBridge = '1'; } catch { /* */ }
-    const lines = initial ? [initial] : [];
-    setMessageBody(msg, lines.join('\n'));
-    return { msg, lines };
+    const bodyEl = msg.querySelector('.message-body');
+    // .md-rendered on the body makes the chat's markdown CSS apply to the text blocks rendered inside it.
+    if (bodyEl) { bodyEl.textContent = ''; bodyEl.classList.add('md-rendered'); }
+    // v2.74.990 — shared decorator: amber identity + the collapse header. Live bubbles start expanded
+    // (you watch them stream); rehydrate is what collapses long past runs. Falls back to the inline
+    // amber border if no decorator was injected (older host wiring).
+    if (decorateBubble) decorateBubble(msg, { collapsed: false });
+    else { try { msg.style.borderLeft = '3px solid #c9a227'; msg.dataset.devBridge = '1'; } catch { /* */ } }
+    const blocks = [];
+    if (initial) { const b = { kind: 'text', text: initial }; blocks.push(b); bodyEl?.appendChild(_blockNode(b)); }
+    _persistBlocks(msg, blocks);
+    try { scrollToBottom?.(); } catch { /* */ }   // v2.74.994 — keep the new bubble's tail in view
+    return { msg, bodyEl, blocks };
   }
-  function pushLine(text) {
-    if (!run) return;
-    run.lines.push(text);
-    if (run.lines.length > MAX_RENDER_LINES) run.lines = [`… (${run.lines.length - MAX_RENDER_LINES + 1} earlier lines — full journal in logs/bridge/)`, ...run.lines.slice(-MAX_RENDER_LINES)];
-    setMessageBody(run.msg, run.lines.join('\n'));
+
+  // Append a streamed block to the active run. Caps the rendered history (journal on disk is the full record).
+  function _emit(b) {
+    if (!run || !run.bodyEl) return;
+    run.blocks.push(b);
+    run.bodyEl.appendChild(_blockNode(b));
+    while (run.blocks.length > MAX_BLOCKS) {
+      run.blocks.shift();
+      if (run.bodyEl.firstChild) run.bodyEl.removeChild(run.bodyEl.firstChild);
+    }
+    // v2.74.994 — auto-scroll to the latest streamed line (only when already near the bottom, so a
+    // user who scrolled up to read isn't yanked down — mirrors the chat's streaming scroll behavior).
+    try { scrollToBottom?.(); } catch { /* */ }
   }
-  function endRun(finalLine) {
+
+  // End the run. `final` may be a block object or a string (→ an error result block).
+  function endRun(final) {
     if (!run) return;
-    if (finalLine) pushLine(finalLine);
+    if (run.tick) { try { clearInterval(run.tick); } catch { /* */ } run.tick = null; }   // v2.74.989 — stop the elapsed ticker
+    if (final) _emit(typeof final === 'string' ? { kind: 'result', ok: false, text: final } : final);
     try { run.bar?.remove(); } catch { /* */ }
+    _persistBlocks(run.msg, run.blocks);   // v2.74.987/.993 — capture the run's terminal blocks before clearing
     run = null;
   }
 
@@ -154,22 +224,23 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn }) {
     switch (m.type) {
       case 'preflight':
         if (!m.ok) { endRun(`✗ preflight failed: ${m.error}`); break; }
-        if (run && run.pendingPayload) { const p = run.pendingPayload; run.pendingPayload = null; port.postMessage(p); pushLine(`claude ${m.claudeVersion} · ${m.repoRoot}`); }
+        if (run && run.pendingPayload) { const p = run.pendingPayload; run.pendingPayload = null; port.postMessage(p); _emit({ kind: 'meta', text: `claude ${m.claudeVersion} · ${m.repoRoot}` }); }
         break;
       case 'started':
-        pushLine(`▶ run started (pid ${m.pid}${m.resumed ? `, ↻ resumed ${String(m.resumed).slice(0, 8)}` : ''}${m.model && m.model !== 'default' ? `, model ${m.model}` : ''}${m.maxTurns ? `, ≤${m.maxTurns} turns` : ''}, journal logs/bridge/${m.journal})`);
+        _emit({ kind: 'meta', text: `▶ run started (pid ${m.pid}${m.resumed ? `, ↻ resumed ${String(m.resumed).slice(0, 8)}` : ''}${m.model && m.model !== 'default' ? `, model ${m.model}` : ''}${m.maxTurns ? `, ≤${m.maxTurns} turns` : ''}, journal logs/bridge/${m.journal})` });
         break;
       case 'event': {
         const ev = m.ev || {};
         if (ev.type === 'system' && ev.subtype === 'init') {
           if (run) run.sessionId = ev.session_id ?? null;
-          pushLine(`session ${String(ev.session_id ?? '').slice(0, 8)} · ${ev.model ?? ''}`);
+          _emit({ kind: 'meta', text: `session ${String(ev.session_id ?? '').slice(0, 8)} · ${ev.model ?? ''}` });
         } else if (ev.type === 'assistant') {
           for (const block of (ev.message?.content ?? [])) {
-            if (block.type === 'text' && block.text?.trim()) pushLine(block.text.trim());
+            if (block.type === 'text' && block.text?.trim()) _emit({ kind: 'text', text: block.text.trim() });
+            else if (block.type === 'thinking' && block.thinking?.trim()) _emit({ kind: 'thinking', text: block.thinking.trim() });
             else if (block.type === 'tool_use') {
               const arg = block.input?.file_path ?? block.input?.pattern ?? block.input?.command ?? '';
-              pushLine(`  ▸ ${block.name}${arg ? ` ${_short(arg)}` : ''}`);
+              _emit({ kind: 'tool', name: block.name, arg: arg ? _short(arg, 80) : '' });
             }
           }
         }
@@ -188,35 +259,68 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn }) {
         // A run may have edited the repo — re-check the working tree so the reload icon arms (spec §5).
         refreshReloadState();
         const r = m.result || {};
+        // v2.74.985 — remember this run's session so the NEXT `dev:` continues it by default (the
+        // bridge is a conversation; `dev: new` starts a fresh thread). Capture from the result, else the
+        // init event the run streamed. This is also what makes resume-after-pause work.
+        const sid = r.sessionId || run?.sessionId || null;
+        if (sid) setLastSession(sid);
+        // DB-3 (v2.74.992, spec §7.1) — a user-initiated PAUSE arrives here as the host-lost `done` that
+        // follows the kill. Frame it as paused (the Esc-analog: resume with a redirect), NOT an error.
+        if (run?.pausing) {
+          endRun({ kind: 'result', ok: true, text: sid
+            ? '⏸ paused — session kept. `dev: <your redirect>` to resume with a correction, or `dev:` to continue as-is.'
+            : '⏸ paused before a session id arrived — nothing to resume; start a fresh run.' });
+          break;
+        }
+        const ok = r.subtype === 'success';
         const bits = [
-          r.subtype === 'success' ? '✓ done' : `✗ ${r.subtype ?? 'ended'}`,
+          ok ? '✓ done' : `✗ ${r.subtype ?? 'ended'}`,
           r.numTurns != null ? `${r.numTurns} turns` : null,
           r.durationMs != null ? `${Math.round(r.durationMs / 1000)}s` : null,
           r.costUsd != null ? `$${Number(r.costUsd).toFixed(2)}` : null,
         ].filter(Boolean).join(' · ');
-        // v2.74.985 — remember this run's session so the NEXT `dev:` continues it by default (the
-        // bridge is a conversation; `dev: new` starts a fresh thread). Capture from the result, else the
-        // init event the run streamed.
-        const sid = r.sessionId || run?.sessionId || null;
-        if (sid) setLastSession(sid);
         const resume = sid ? `\ncontinue in terminal: claude --resume ${sid}` : '';
-        endRun(`${bits}${resume}`);
+        endRun({ kind: 'result', ok, text: `${bits}${resume}` });
         break;
       }
       case 'error':
-        endRun(`✗ bridge error: ${m.code}${m.message ? ` — ${m.message}` : ''}${m.code === 'busy' ? ' (one run at a time; "dev: cancel" to stop it)' : ''}`);
+        endRun(`✗ bridge error: ${m.code}${m.message ? ` — ${m.message}` : ''}${m.code === 'busy' ? ' (one run at a time; "dev: pause" to stop it)' : ''}`);
         break;
       default: break;
     }
   }
 
   function startRun(payload, headline) {
-    const { msg, lines } = devBubble(headline);
-    run = { msgEl: msg, msg, lines, bar: null, sessionId: null, pendingPayload: payload };
+    const { msg, bodyEl, blocks } = devBubble(headline);
+    run = { msgEl: msg, msg, bodyEl, blocks, bar: null, sessionId: null, pendingPayload: payload, tick: null };
+    // v2.74.989 — run footer: an amber spinner + a ticking "working… Ns" label give a live
+    // "still going" signal during the silent gaps between stream events (a long tool call, model
+    // thinking), where the streamed lines alone look stalled. The whole footer (spinner + label +
+    // Stop) is removed at endRun. Elapsed seconds reassure that a quiet run is alive, not hung.
     const bar = document.createElement('div');
-    bar.appendChild(mkBtn('Stop bridge run', () => { try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'cancel' }); } catch { /* */ } }));
-    msg.appendChild(bar);
+    bar.className = 'dev-run-bar';
+    const spinner = document.createElement('span');
+    spinner.className = 'dev-run-spinner';
+    spinner.setAttribute('aria-hidden', 'true');
+    const status = document.createElement('span');
+    status.className = 'dev-run-status';
+    status.textContent = 'working…';
+    bar.appendChild(spinner);
+    bar.appendChild(status);
+    // v2.74.992 — "Pause" (the Esc-analog, spec §7.1): kills the process but keeps the session. Marking
+    // run.pausing tells the done handler to frame the resulting host-lost as a pause, not an error.
+    bar.appendChild(mkBtn('Pause', () => { if (run) run.pausing = true; try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'pause' }); } catch { /* */ } }));
+    // v2.74.991 — append into .message-content (the vertical text column), NOT the message row. The
+    // message element is flex(avatar | content); appending the footer to it landed the spinner OFF TO
+    // THE SIDE. Inside content it sits at the BOTTOM of the reply, under the streamed body.
+    const _content = msg.querySelector('.message-content') || msg;
+    _content.appendChild(bar);
     run.bar = bar;
+    const startedAt = Date.now();
+    run.tick = setInterval(() => {
+      const s = Math.round((Date.now() - startedAt) / 1000);
+      status.textContent = `working… ${s}s`;
+    }, 1000);
     try {
       ensurePort().postMessage({ v: PROTOCOL_V, type: 'preflight' });   // run is posted on preflight-ok
     } catch (e) {
@@ -258,7 +362,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn }) {
       await setEnabled(true);
       emitReload({ enabled: true });   // reveal the header reload icon
       refreshReloadState();            // and arm it if the tree is already dirty
-      devBubble('✓ dev bridge ON — `gl` and `dev: <ask>` now route to Claude Code on this repo.\nIf the host isn’t installed yet: run bridge/install.ps1 once, then reload the extension.');
+      devBubble('✓ dev bridge ON — `gl`, `bug: <what broke>` and `dev: <ask>` now route to Claude Code on this repo.\nIf the host isn’t installed yet: run bridge/install.ps1 once, then reload the extension.');
       return true;
     }
     if (lower === 'dev: off' || lower === 'dev:off') {
@@ -276,10 +380,15 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn }) {
       return false;   // 'gl' (or anything else) falls through to the normal pipeline when the bridge is off
     }
 
-    if (lower === 'dev: cancel') {
+    // DB-3 (v2.74.992, spec §7.1) — `dev: pause` (and the kept `dev: cancel` alias): the Esc-analog.
+    // Kills the process but keeps the session; the done handler then frames it as paused and the next
+    // `dev: <redirect>` resumes it with a correction (resume-with-redirect — already the default for any
+    // `dev:` since .985). Marking run.pausing distinguishes this from an unexpected host-lost.
+    if (lower === 'dev: pause' || lower === 'dev: cancel') {
       appendMessage({ role: 'user', body: t });
-      try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'cancel' }); } catch { /* */ }
-      if (!run) devBubble('cancel sent.');
+      if (run) run.pausing = true;
+      try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'pause' }); } catch { /* */ }
+      if (!run) devBubble('nothing is running to pause.');
       return true;
     }
 
@@ -310,13 +419,33 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn }) {
 
     if (lower === 'gl') {
       appendMessage({ role: 'user', body: t });
-      if (run) { devBubble('a bridge run is already live — `dev: cancel` to stop it.'); return true; }
+      if (run) { devBubble('a bridge run is already live — `dev: pause` to stop it.'); return true; }
       const att = await buildDecisionsAttachment();
       const model = await getModel();
       const maxTurns = await getTurns();
       startRun(
         { v: PROTOCOL_V, type: 'run', verb: 'gl', attachments: att ? [att] : [], model, maxTurns },
         att ? `gl · shipping ${att.filename} + analyzing…` : 'gl · no decision lines this session — analyzing the newest trace already in logs/run/…',
+      );
+      return true;
+    }
+
+    // DB-2 (v2.74.988) — `bug: <what broke>`: the fix path. Ships the newest decisions trace (same
+    // attachment `gl` builds) plus the user's report; the host composes report + trace pointer + version
+    // line, and the DB-2 allowlist lets the run verify itself with `npm test`. Never commits (no git).
+    // A fresh report each time → no resume; the run's session is still recorded (done handler) so a
+    // follow-up `dev: <reply>` continues the same fix thread.
+    if (/^bug:/i.test(t)) {
+      appendMessage({ role: 'user', body: t });
+      const report = t.slice(t.indexOf(':') + 1).trim();
+      if (!report) { devBubble('usage: `bug: <what broke / what you saw>` — ships the newest trace + your report to a verified fix run.'); return true; }
+      if (run) { devBubble('a bridge run is already live — `dev: pause` to stop it.'); return true; }
+      const att = await buildDecisionsAttachment();
+      const model = await getModel();
+      const maxTurns = await getTurns();
+      startRun(
+        { v: PROTOCOL_V, type: 'run', verb: 'bug', text: report, attachments: att ? [att] : [], model, maxTurns },
+        att ? `bug · ${_short(report, 56)} (+ ${att.filename})` : `bug · ${_short(report, 70)}`,
       );
       return true;
     }
@@ -337,8 +466,8 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn }) {
       const isNew = /^new\b/i.test(rest);
       const ask = isNew ? rest.replace(/^new\b[:\s]*/i, '').trim() : rest;
       appendMessage({ role: 'user', body: t });
-      if (!ask) { devBubble('usage: `dev: <reply>` (continues the thread) · `dev: new <task>` (fresh) · `gl` · `dev: model|turns <…>` · `dev: reset` · `dev: cancel` · `dev: off`'); return true; }
-      if (run) { devBubble('a bridge run is already live — `dev: cancel` to stop it.'); return true; }
+      if (!ask) { devBubble('usage: `dev: <reply>` (continues / resumes the thread) · `dev: new <task>` (fresh) · `gl` · `bug: <what broke>` · `dev: pause` (stop, keep session) · `dev: model|turns <…>` · `dev: reset` · `dev: off`'); return true; }
+      if (run) { devBubble('a bridge run is already live — `dev: pause` to stop it.'); return true; }
       const model = await getModel();
       const maxTurns = await getTurns();
       const resumeSessionId = isNew ? null : await getLastSession();

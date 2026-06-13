@@ -43,10 +43,24 @@ function turnsFor(n) {
   const x = Math.floor(Number(n));
   return Number.isFinite(x) && x >= 1 ? x : DEFAULT_MAX_TURNS;
 }
+// DB-2 (v2.74.988) — the scoped-Bash allowlist (npm test + node, so a fix can verify itself) lives in a
+// GENERATED SETTINGS FILE, not on the command line. `--allowedTools "Bash(npm test:*)"` cannot survive
+// Node's Windows arg-escaping: the embedded quotes become \" and cmd.exe mangles them (verified). A
+// `--settings <relative path>` has no spaces/parens/quotes, threads through cmd.exe cleanly, and claude
+// UNIONS its permissions.allow with the CLI --allowedTools. The path is relative to cwd=REPO so it can't
+// pick up spaces from the user's home dir.
+const SETTINGS_FILE = path.join(BRIDGE_DIR, 'db2-permissions.json');
+const SETTINGS_REL = 'logs/bridge/db2-permissions.json';
+
 // The FIXED base command (see invariant above — no user text is ever concatenated into this). The
 // `--max-turns <n>` (clamped int) and `--model <id>` (frozen allowlist) flags are appended host-side.
-const CLAUDE_CMD = 'claude -p --output-format stream-json --verbose'
-  + ' --allowedTools Read Grep Glob Edit Write';
+// v2.74.988 — `--permission-mode default` makes the allowlist actually BIND. Without it the run inherits
+// the user's global default, and on a bypassPermissions machine that silently disables the gate entirely
+// (the agent could then run git / arbitrary shell, breaking the no-commit trust rule). In -p mode default
+// mode never hangs: an unlisted tool is auto-denied and the agent adapts. `--settings` adds the DB-2 Bash.
+const CLAUDE_CMD = 'claude -p --output-format stream-json --verbose --permission-mode default'
+  + ' --allowedTools Read Grep Glob Edit Write'
+  + ` --settings ${SETTINGS_REL}`;
 
 // v2.74.976 — model selection WITHOUT breaking the no-user-text-on-the-command-line invariant: the panel
 // sends a short ALIAS, and ONLY a value from this fixed table is ever appended to the command (`--model
@@ -66,6 +80,10 @@ function modelFlag(alias) {
 }
 
 for (const d of [BRIDGE_DIR, RUN_DIR]) { try { fs.mkdirSync(d, { recursive: true }); } catch { /* */ } }
+// DB-2 (v2.74.988) — (re)write the scoped-Bash allowlist the run loads via --settings. Static content;
+// rewritten on every host launch so a deleted/edited file self-heals. permissions.allow UNIONS with the
+// CLI --allowedTools, adding exactly `npm test …` and `node …` — still no git, no network, no plain shell.
+try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ permissions: { allow: ['Bash(npm test:*)', 'Bash(node:*)'] } }, null, 2)); } catch { /* */ }
 
 function log(line) {
   const msg = `${new Date().toISOString()} ${line}\n`;
@@ -193,13 +211,25 @@ function diffstatReply() {
   return { v: PROTOCOL_V, type: 'diffstat', files, sig: workingTreeSig() };
 }
 
-function cancelRun() {
+// DB-3 (v2.74.992, spec §7.1) — PAUSE: kill the run's process tree but leave the session recoverable.
+// The kill is the same forceful taskkill (Edit/Write are atomic between turns — a kill lands in the gap;
+// the journal + git working tree always show exactly what landed). The session_id the run streamed is
+// persisted in claude's own store, so `--resume <id>` (the panel's `dev: <redirect>`) continues it. Hence
+// the honest framing is PAUSE, not abort — nothing the agent already wrote is lost. `cancel` is a kept
+// alias for the same operation (older panel builds send it).
+function pauseRun() {
   const l = activeLock();
   if (!l) return { v: PROTOCOL_V, type: 'status', active: false, cancelled: false };
   try { spawnSync(`taskkill /pid ${l.pid} /t /f`, { shell: true, timeout: 10000 }); } catch { /* */ }
   clearLock();
-  log(`cancelled run pid=${l.pid}`);
+  log(`paused run pid=${l.pid} (session survives for --resume)`);
   return { v: PROTOCOL_V, type: 'status', active: false, cancelled: true };
+}
+
+// DB-2 (v2.74.988) — the manifest version, host-read, for the `bug:` prompt's version line (so a fix run
+// records which build the report came from). Host-side read keeps the panel dumb; '?' if unreadable.
+function repoVersion() {
+  try { return JSON.parse(fs.readFileSync(path.join(REPO, 'manifest.json'), 'utf8')).version || '?'; } catch { return '?'; }
 }
 
 // Sanitize a panel-supplied attachment filename: basename only, must look like an orchard trace, else a
@@ -219,17 +249,29 @@ function startRun(msg) {
   }
   // ---- schema guard (spec §3.4) ----
   const verb = msg.verb;
-  if (verb !== 'gl' && verb !== 'dev') { send({ v: PROTOCOL_V, type: 'error', code: 'bad-verb' }); return; }
-  let prompt = null;
-  if (verb === 'gl') {
+  if (verb !== 'gl' && verb !== 'dev' && verb !== 'bug') { send({ v: PROTOCOL_V, type: 'error', code: 'bad-verb' }); return; }
+  // gl + bug both ship the newest decisions trace as an attachment — write it to logs/run/ once, here.
+  let traceRel = null;
+  if (verb === 'gl' || verb === 'bug') {
     const att = Array.isArray(msg.attachments) ? msg.attachments[0] : null;
     if (att && att.kind === 'decisions-trace' && typeof att.content === 'string') {
       if (Buffer.byteLength(att.content, 'utf8') > MAX_ATTACHMENT) { send({ v: PROTOCOL_V, type: 'error', code: 'attachment-too-large' }); return; }
       const fname = traceFileName(att.filename);
-      try { fs.writeFileSync(path.join(RUN_DIR, fname), att.content, 'utf8'); log(`gl attachment → logs/run/${fname}`); }
+      try { fs.writeFileSync(path.join(RUN_DIR, fname), att.content, 'utf8'); log(`${verb} attachment → logs/run/${fname}`); traceRel = `logs/run/${fname}`; }
       catch (e) { send({ v: PROTOCOL_V, type: 'error', code: 'attachment-write-failed', message: e.message }); return; }
     }
+  }
+  let prompt = null;
+  if (verb === 'gl') {
     prompt = 'gl';   // the repo's standing convention does the rest (memory: read findings first, analyze newest, append one entry)
+  } else if (verb === 'bug') {
+    // DB-2 (v2.74.988) — `bug:` composes the user's report + a pointer to the trace just written + the
+    // version line, then asks for a VERIFIED fix (the DB-2 allowlist now lets the run do `npm test`).
+    // Still STDIN-fed — no user text on the command line, so the injection invariant is intact.
+    const text = typeof msg.text === 'string' ? msg.text.trim() : '';
+    if (!text || text.length > 4000) { send({ v: PROTOCOL_V, type: 'error', code: 'bad-text' }); return; }
+    const traceLine = traceRel ? `\n\nThe newest decisions trace is at ${traceRel} — read it first for the runtime story behind this report.` : '';
+    prompt = `${text}${traceLine}\n\n(dev-bridge bug report · AHuB v${repoVersion()}. Diagnose the cause, apply a fix, then run the suite with \`npm test\` and confirm it is green before finishing. Do NOT commit — the human reviews the diff and runs cp/bcp.)`;
   } else {
     const text = typeof msg.text === 'string' ? msg.text.trim() : '';
     if (!text || text.length > 4000) { send({ v: PROTOCOL_V, type: 'error', code: 'bad-text' }); return; }
@@ -338,7 +380,8 @@ async function handle(msg) {
     case 'preflight': send(preflight()); break;
     case 'status':    send(statusReply()); break;
     case 'diffstat':  send(diffstatReply()); break;
-    case 'cancel':    send(cancelRun()); break;
+    case 'pause':     send(pauseRun()); break;
+    case 'cancel':    send(pauseRun()); break;   // back-compat alias (DB-3, v2.74.992)
     case 'run':       startRun(msg); break;
     default:          send({ v: PROTOCOL_V, type: 'error', code: 'unknown-type', got: msg.type });
   }
