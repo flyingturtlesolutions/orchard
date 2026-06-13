@@ -177,6 +177,83 @@ function handleStatus() {
   if (l && l.journal) { log(`reattach: re-tailing pid=${l.pid} journal=${path.basename(l.journal)}`); tailJournal(l.journal, l.pid); }
 }
 
+// DB-3 run history (v2.74.1000) — cheap peek at a journal: model + first assistant text from the head,
+// the result summary from the tail. Read-only, bounded reads (journals can be hundreds of KB).
+function peekJournal(journal) {
+  const out = { model: null, firstText: null, sawResult: false, result: null };
+  try {
+    const size = fs.statSync(journal).size;
+    const fd = fs.openSync(journal, 'r');
+    try {
+      const headLen = Math.min(size, 16 * 1024);
+      const head = Buffer.alloc(headLen); fs.readSync(fd, head, 0, headLen, 0);
+      for (const ln of head.toString('utf8').split(/\r?\n/)) {
+        const t = ln.trim(); if (!t) continue;
+        let ev; try { ev = JSON.parse(t); } catch { continue; }
+        if (ev.type === 'system' && ev.subtype === 'init' && !out.model) out.model = ev.model ?? null;
+        if (ev.type === 'assistant' && !out.firstText) { for (const b of (ev.message && ev.message.content) || []) { if (b.type === 'text' && b.text && b.text.trim()) { out.firstText = b.text.trim().slice(0, 120); break; } } }
+        if (out.model && out.firstText) break;
+      }
+      const tailStart = Math.max(0, size - 32 * 1024);
+      const tail = Buffer.alloc(size - tailStart); fs.readSync(fd, tail, 0, tail.length, tailStart);
+      const tlines = tail.toString('utf8').split(/\r?\n/);
+      for (let i = tlines.length - 1; i >= 0; i--) {
+        const t = tlines[i].trim(); if (!t) continue;
+        let ev; try { ev = JSON.parse(t); } catch { continue; }
+        if (ev.type === 'result') { out.sawResult = true; out.result = { subtype: ev.subtype ?? null, costUsd: ev.total_cost_usd ?? null, durationMs: ev.duration_ms ?? null, numTurns: ev.num_turns ?? null }; break; }
+      }
+    } finally { fs.closeSync(fd); }
+  } catch { /* unreadable → minimal entry */ }
+  return out;
+}
+
+// `history` — the last N runs, newest first, as lightweight summaries (verb/model/preview from the meta
+// sidecar when present, else recovered from the journal; result from the journal tail).
+function historyReply(limit = 20) {
+  let journals = [];
+  try { journals = fs.readdirSync(BRIDGE_DIR).filter((f) => /^\d+\.jsonl$/.test(f)); } catch { /* */ }
+  journals.sort().reverse();   // ts filenames are equal-length numerics → lexical sort = chronological
+  const runs = [];
+  for (const jf of journals.slice(0, limit)) {
+    const ts = parseInt(jf, 10);
+    const peek = peekJournal(path.join(BRIDGE_DIR, jf));
+    let meta = null;
+    try { meta = JSON.parse(fs.readFileSync(path.join(BRIDGE_DIR, `${ts}.meta.json`), 'utf8')); } catch { /* pre-meta run */ }
+    runs.push({
+      ts, journal: jf,
+      verb: (meta && meta.verb) || '?',
+      model: (meta && meta.model) || peek.model || 'default',
+      promptPreview: (meta && meta.promptPreview) || peek.firstText || '',
+      startedAt: (meta && meta.startedAt) || ts,
+      subtype: peek.result ? peek.result.subtype : (peek.sawResult ? 'done' : 'incomplete'),
+      costUsd: peek.result ? peek.result.costUsd : null,
+      numTurns: peek.result ? peek.result.numTurns : null,
+      durationMs: peek.result ? peek.result.durationMs : null,
+    });
+  }
+  return { v: PROTOCOL_V, type: 'history', runs };
+}
+
+// `history-open` — replay a finished journal read-only: stream every event, then a `done`. Reuses the
+// panel's normal event/done render path (the panel sets up a replay bubble first). Never marks active.
+function replayJournal(journalBase) {
+  const base = path.basename(String(journalBase || ''));
+  if (!/^\d+\.jsonl$/.test(base)) { send({ v: PROTOCOL_V, type: 'error', code: 'bad-journal' }); return; }
+  let content = '';
+  try { content = fs.readFileSync(path.join(BRIDGE_DIR, base), 'utf8'); } catch { send({ v: PROTOCOL_V, type: 'error', code: 'journal-missing' }); return; }
+  let result = null;
+  for (const ln of content.split(/\r?\n/)) {
+    const t = ln.trim(); if (!t) continue;
+    let ev; try { ev = JSON.parse(t); } catch { continue; }
+    if (JSON.stringify(ev).length > MAX_OUT_EVENT) ev = { type: ev.type || 'event', truncated: true };
+    send({ v: PROTOCOL_V, type: 'event', ev });
+    if (ev.type === 'result') result = ev;
+  }
+  send({ v: PROTOCOL_V, type: 'done', result: result
+    ? { subtype: result.subtype ?? null, costUsd: result.total_cost_usd ?? null, durationMs: result.duration_ms ?? null, numTurns: result.num_turns ?? null, sessionId: result.session_id ?? null }
+    : { subtype: 'incomplete' } });
+}
+
 // DB-2 (v2.74.975, spec §3.4) — read-only working-tree diffstat so the panel's reload icon can light
 // when a bridge run (or a terminal edit) changed repo files. git is run BY THE HOST, read-only — this
 // does NOT relax the trust rule that the spawned `claude` child has no git in its allowlist (that rule
@@ -337,6 +414,10 @@ function startRun(msg) {
   } catch { /* */ }
   const _modelId = (modelFlag(msg.model).match(/--model (\S+)/) || [])[1] || 'default';
   const _resumed = resumeFlag ? _sid : null;
+  // v2.74.1000 (DB-3 run history) — a per-run meta sidecar that OUTLIVES the lock (cleared on completion),
+  // so `history` can show verb + prompt preview + model for past runs. The journal itself holds only
+  // stream-json OUTPUT, never the prompt (fed via stdin), so the preview has to come from here.
+  try { fs.writeFileSync(path.join(BRIDGE_DIR, `${ts}.meta.json`), JSON.stringify({ ts, verb, model: _modelId, maxTurns: turns, promptPreview: prompt.slice(0, 120), startedAt: ts, resumed: _resumed }, null, 2)); } catch { /* */ }
   log(`run started verb=${verb} model=${_modelId} maxTurns=${turns}${_resumed ? ` resume=${_resumed.slice(0, 8)}` : ''} pid=${child.pid} journal=${path.basename(journal)}`);
   send({ v: PROTOCOL_V, type: 'started', pid: child.pid, journal: path.basename(journal), startedAt: ts, model: _modelId, maxTurns: turns, resumed: _resumed });
   tailJournal(journal, child.pid);
@@ -407,6 +488,8 @@ async function handle(msg) {
     case 'diffstat':  send(diffstatReply()); break;
     case 'pause':     send(pauseRun()); break;
     case 'cancel':    send(pauseRun()); break;   // back-compat alias (DB-3, v2.74.992)
+    case 'history':   send(historyReply()); break;                 // DB-3 run history (v2.74.1000)
+    case 'history-open': replayJournal(msg.journal); break;        // replay one journal read-only
     case 'run':       startRun(msg); break;
     default:          send({ v: PROTOCOL_V, type: 'error', code: 'unknown-type', got: msg.type });
   }

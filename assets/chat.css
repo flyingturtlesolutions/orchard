@@ -361,6 +361,22 @@ textarea {
 .dev-blk-result.ok  { color: #4caf7d; }
 .dev-blk-result.err { color: #d2796a; }
 
+/* v2.74.1000 — DB-3 run history: a clickable list of recent runs (tap → read-only replay). */
+.dev-history { display: flex; flex-direction: column; gap: 3px; }
+.dev-history-head { font-size: 12px; font-weight: 600; color: #c9a227; margin-bottom: 3px; }
+.dev-history-row {
+  display: flex; align-items: baseline; gap: 8px; width: 100%;
+  text-align: left; background: none; border: 1px solid transparent; border-radius: 6px;
+  padding: 4px 8px; cursor: pointer; color: var(--c-text, #e6e6e6); font: inherit;
+}
+.dev-history-row:hover { background: rgba(201, 162, 39, 0.08); border-color: rgba(201, 162, 39, 0.18); }
+.dev-history-verb { font-weight: 600; color: #c9a227; flex-shrink: 0; min-width: 30px; }
+.dev-history-prev { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.dev-history-meta { flex-shrink: 0; font-size: 11px; color: var(--c-text-muted, #9a9a9a); font-variant-numeric: tabular-nums; }
+.dev-history-meta.ok   { color: #4caf7d; }
+.dev-history-meta.err  { color: #d2796a; }
+.dev-history-meta.warn { color: #c9a227; }
+
 /* ── Conversation area ───────────────────────────────────────────────────── */
 .conversation {
   flex: 1;

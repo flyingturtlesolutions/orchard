@@ -183,7 +183,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
 
   // Create a dev bubble. `initial` (if any) renders as a markdown text block. Returns the handle the run
   // streams into; standalone status/error bubbles just use it once.
-  function devBubble(initial) {
+  function devBubble(initial, { persist = true } = {}) {
     const msg = appendMessage({ role: 'assistant', body: '' });
     const bodyEl = msg.querySelector('.message-body');
     // .md-rendered on the body makes the chat's markdown CSS apply to the text blocks rendered inside it.
@@ -195,7 +195,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     else { try { msg.style.borderLeft = '3px solid #c9a227'; msg.dataset.devBridge = '1'; } catch { /* */ } }
     const blocks = [];
     if (initial) { const b = { kind: 'text', text: initial }; blocks.push(b); bodyEl?.appendChild(_blockNode(b)); }
-    _persistBlocks(msg, blocks);
+    if (persist) _persistBlocks(msg, blocks);   // v2.74.1000 — history replay bubbles are transient (not persisted)
     try { _anchor(); } catch { /* */ }   // v2.74.995 — keep the new bubble's tail in view
     return { msg, bodyEl, blocks };
   }
@@ -216,7 +216,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     // in the conversation (rehydrated on reopen), and `dev:` resumes the session from there. Throttled so
     // a fast run doesn't hammer chrome.storage; endRun still does the final, complete persist.
     const now = Date.now();
-    if (!run._lastPersist || (now - run._lastPersist) >= _PERSIST_THROTTLE_MS) {
+    if (!run.replay && (!run._lastPersist || (now - run._lastPersist) >= _PERSIST_THROTTLE_MS)) {
       run._lastPersist = now;
       _persistBlocks(run.msg, run.blocks);
     }
@@ -231,7 +231,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     if (run.tick) { try { clearInterval(run.tick); } catch { /* */ } run.tick = null; }   // v2.74.989 — stop the elapsed ticker
     if (final) _emit(typeof final === 'string' ? { kind: 'result', ok: false, text: final } : final);
     try { run.bar?.remove(); } catch { /* */ }
-    _persistBlocks(run.msg, run.blocks);   // v2.74.987/.993 — capture the run's terminal blocks before clearing
+    if (!run.replay) _persistBlocks(run.msg, run.blocks);   // v2.74.987/.993 — capture terminal blocks (replay views are transient)
     run = null;
   }
 
@@ -300,7 +300,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         // bridge is a conversation; `dev: new` starts a fresh thread). Capture from the result, else the
         // init event the run streamed. This is also what makes resume-after-pause work.
         const sid = r.sessionId || run?.sessionId || null;
-        if (sid) setLastSession(sid);
+        if (sid && !run?.replay) setLastSession(sid);   // v2.74.1000 — viewing history must not change the resume target
         // DB-3 (v2.74.992, spec §7.1) — a user-initiated PAUSE arrives here as the host-lost `done` that
         // follows the kill. Frame it as paused (the Esc-analog: resume with a redirect), NOT an error.
         if (run?.pausing) {
@@ -326,6 +326,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         if (m.active && !run) startReattach(`↻ reattaching to a run still in progress (pid ${m.pid ?? '?'})…`);
         break;
       }
+      case 'history':   // DB-3 (v2.74.1000) — list of recent runs → clickable, replay-on-tap
+        renderHistory(Array.isArray(m.runs) ? m.runs : []);
+        break;
       case 'error':
         endRun(`✗ bridge error: ${m.code}${m.message ? ` — ${m.message}` : ''}${m.code === 'busy' ? ' (one run at a time; "dev: pause" to stop it)' : ''}`);
         break;
@@ -389,6 +392,55 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     _beginRunBubble(headline, { reattach: true });
   }
 
+  // ── Run history (v2.74.1000, DB-3) ───────────────────────────────────────────────────────────────
+  const _clock = (ts) => { try { return new Date(Number(ts)).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }); } catch { return ''; } };
+
+  // Replay a past run read-only: a minimal bubble the host's `history-open` events render into. No footer/
+  // spinner/Pause (the run is finished) and NOT persisted (a transient view; re-open via `dev: history`).
+  function startReplay(headline) {
+    _beginReplayBubble(headline);
+  }
+  function _beginReplayBubble(headline) {
+    _follow = true; _wireFollow();
+    const { msg, bodyEl, blocks } = devBubble(headline, { persist: false });
+    run = { msgEl: msg, msg, bodyEl, blocks, bar: null, sessionId: null, pendingPayload: null, tick: null, replay: true };
+  }
+
+  // Render the `history` reply: a clickable list of recent runs; a row replays that journal read-only.
+  function renderHistory(runs) {
+    const msg = appendMessage({ role: 'assistant', body: '' });
+    const bodyEl = msg.querySelector('.message-body');
+    if (bodyEl) bodyEl.textContent = '';
+    if (decorateBubble) decorateBubble(msg, { collapsed: false });
+    else { try { msg.style.borderLeft = '3px solid #c9a227'; msg.dataset.devBridge = '1'; } catch { /* */ } }
+    const wrap = document.createElement('div');
+    wrap.className = 'dev-history';
+    const head = document.createElement('div');
+    head.className = 'dev-history-head';
+    head.textContent = runs.length ? `Recent runs (${runs.length}) — tap to replay` : 'No runs recorded yet.';
+    wrap.appendChild(head);
+    for (const r of runs) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'dev-history-row';
+      const stateCls = r.subtype === 'success' ? 'ok' : (r.subtype === 'incomplete' ? 'warn' : 'err');
+      const v = document.createElement('span'); v.className = 'dev-history-verb'; v.textContent = r.verb || '?';
+      const p = document.createElement('span'); p.className = 'dev-history-prev'; p.textContent = r.promptPreview || '(no preview)';
+      const meta = document.createElement('span'); meta.className = `dev-history-meta ${stateCls}`;
+      meta.textContent = [_clock(r.startedAt), r.numTurns != null ? `${r.numTurns}t` : '', r.costUsd != null ? `$${Number(r.costUsd).toFixed(2)}` : '', r.subtype].filter(Boolean).join(' · ');
+      row.appendChild(v); row.appendChild(p); row.appendChild(meta);
+      row.addEventListener('click', () => {
+        if (run) { devBubble('a run is live — `dev: pause` it first.'); return; }
+        startReplay(`↩ replaying ${r.verb || 'run'} · ${_short(r.promptPreview || r.journal, 60)}`);
+        try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'history-open', journal: r.journal }); }
+        catch { endRun('✗ could not reach the host to replay this run.'); }
+      });
+      wrap.appendChild(row);
+    }
+    bodyEl?.appendChild(wrap);
+    try { _anchor(); } catch { /* */ }
+  }
+
   async function buildDecisionsAttachment() {
     let entries = [];
     try {
@@ -450,6 +502,14 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       if (run) run.pausing = true;
       try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'pause' }); } catch { /* */ }
       if (!run) devBubble('nothing is running to pause.');
+      return true;
+    }
+
+    // DB-3 (v2.74.1000) — `dev: history` (alias `dev: runs`): list recent runs; tap one to replay it
+    // read-only. The host reads the journals in logs/bridge/; the reply renders via the `history` case.
+    if (lower === 'dev: history' || lower === 'dev: runs') {
+      appendMessage({ role: 'user', body: t });
+      try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'history' }); } catch { devBubble('✗ could not reach the bridge host.'); }
       return true;
     }
 
@@ -527,7 +587,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       const isNew = /^new\b/i.test(rest);
       const ask = isNew ? rest.replace(/^new\b[:\s]*/i, '').trim() : rest;
       appendMessage({ role: 'user', body: t });
-      if (!ask) { devBubble('usage: `dev: <reply>` (continues / resumes the thread) · `dev: new <task>` (fresh) · `gl` · `bug: <what broke>` · `dev: pause` (stop, keep session) · `dev: model|turns <…>` · `dev: reset` · `dev: off`'); return true; }
+      if (!ask) { devBubble('usage: `dev: <reply>` (continues / resumes the thread) · `dev: new <task>` (fresh) · `gl` · `bug: <what broke>` · `dev: pause` (stop, keep session) · `dev: history` (recent runs) · `dev: model|turns <…>` · `dev: reset` · `dev: off`'); return true; }
       if (run) { devBubble('a bridge run is already live — `dev: pause` to stop it.'); return true; }
       const model = await getModel();
       const maxTurns = await getTurns();

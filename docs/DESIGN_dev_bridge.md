@@ -238,7 +238,11 @@ at spawn; there is no live stdin channel for "do this instead." So the bridge ap
   control + `dev: pause` kill the process but keep the session (`pauseRun` host verb, `cancel` kept as an
   alias), and resume-with-redirect is the conversational `dev: <redirect>` that already `--resume`s the
   last session (.985) — so the "redirect input" is the verb itself, not a separate widget. *Still open:*
-  cost-footer polish, permission relay replacing the blanket allowlist, run history (last N journals).
+  cost-footer polish, permission relay replacing the blanket allowlist.
+  **Run history — landed (v2.74.1000):** `dev: history` (alias `dev: runs`) lists the last 20 runs (a
+  per-run `<ts>.meta.json` sidecar gives verb + prompt preview + model that the stream-json journal lacks;
+  the result/cost/turns come from the journal tail) and tapping a row replays that journal read-only via
+  a new `history-open` host verb — reusing the block renderer, never marked active, never persisted.
   **Journal reattach — protocol landed, dormant (v2.74.999):** the host re-tails an active run's journal
   on `status` and the panel probes on startup + builds a replay bubble, but the claude child does not
   survive host death on Windows (verified — see §3.3), so it fires only where survival holds. The robust
