@@ -219,6 +219,32 @@ textarea {
   color: var(--c-text);
 }
 
+/* DB-2 (v2.74.975) — Dev-bridge reload icon. Shown only in dev mode (.hidden is
+   toggled by devBridge state). The dot lights amber (#c9a227 — the bridge's
+   trust-domain colour, matching the dev bubble's left border) when the host
+   reports changed repo files and a reload would pick them up. */
+.dev-reload-btn {
+  position: relative;
+}
+.dev-reload-btn.has-change {
+  color: #c9a227;
+}
+.dev-reload-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #c9a227;
+  box-shadow: 0 0 0 2px var(--c-bg);
+  opacity: 0;
+  transition: opacity var(--t-fast);
+}
+.dev-reload-btn.has-change .dev-reload-dot {
+  opacity: 1;
+}
+
 /* ── Conversation area ───────────────────────────────────────────────────── */
 .conversation {
   flex: 1;

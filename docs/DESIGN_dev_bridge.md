@@ -41,7 +41,7 @@ What this bridge is NOT (non-goals, binding):
 │ dev mode UI              │◄────────►│ com.orchard.devbridge     │─────────────────►│ cwd = repo   │
 │ verbs: gl / bug: / dev:  │ runtime. │ • framing + schema guard  │   journal tail    │ stream-json  │
 │ stream renderer, HITL    │ connect  │ • write trace → logs/run/ │◄─────────────────│ → journal    │
-└──────────────────────────┘  Native  │ • spawn/cancel/reattach   │                   └──────────────┘
+└──────────────────────────┘  Native  │ • spawn/pause/reattach    │                   └──────────────┘
                                       └───────────────────────────┘
 ```
 
@@ -98,7 +98,8 @@ and `chrome.runtime.reload()` after an applied fix severs the port by design. Th
 ### 3.4 Port protocol (extension ↔ host)
 
 Panel → host: `{type:'run', verb:'gl'|'bug'|'dev', text?, attachments?:[{kind:'decisions-trace',
-filename, content}], maxTurns?}` · `{type:'cancel'}` · `{type:'status'}` (triggers reattach/replay) ·
+filename, content}], maxTurns?, resumeSessionId?}` (resume-with-redirect, §7.1) · `{type:'pause'}` (kills
+the process; the session survives for resume) · `{type:'status'}` (triggers reattach/replay) ·
 `{type:'diffstat'}`.
 Host → panel: `{type:'preflight', ok, claudeVersion?, nodeVersion?, error?}` · `{type:'event', ev}` (one
 stream-json event, verbatim) · `{type:'done', result}` · `{type:'diffstat', files:[{path, plus, minus}]}` ·
@@ -137,8 +138,10 @@ content. The rules that keep `DESIGN_injection_boundary.md` intact:
    extension, page, or process can drive it.
 4. **No credentials in the extension.** The CLI authenticates host-side (its own login/keychain). The
    extension never sees or stores a key.
-5. **Reload is gated.** `Apply & Reload` renders only after a `result` event with repo changes
-   (host-reported diffstat shown first), never mid-run.
+5. **Reload is gated.** Reload is surfaced as a **header icon** (top-right, before "Open Studio") that
+   renders ONLY in dev mode and lights its dot when the host-reported diffstat shows repo changes
+   (DB-2, v2.74.975 — replaces the per-run `Apply & Reload` button). Clicking it restarts the whole
+   extension; it commits nothing.
 
 ## 6. Permission model (per-slice tightening)
 
@@ -158,11 +161,31 @@ Headless `-p` cannot answer permission prompts, so each slice declares its polic
 - **Stream rendering:** assistant text as it arrives; `tool_use` blocks as compact chips
   ("✎ Core/postcondition.js", "▶ npm test → 800 passing"); `result` footer with cost + duration +
   turn count — every run shows what it cost.
-- **Controls:** `Cancel` (host kills the process tree) · `Apply & Reload` (post-result, diffstat first,
-  disabled while a run is active) · "continue in terminal" hint (`claude --resume <id>`).
+- **Controls:** `Pause` (see §7.1) · `Apply & Reload` (post-result, diffstat first, disabled while a run
+  is active) · "continue in terminal" hint (`claude --resume <id>`).
 - **Preflight surface:** port-open failure → install instructions (run `bridge/install.ps1`); version
   failures → actionable message (`claude --version`, Node ≥18 — NB the repo's test harness pins Node
   16.15.1, but the host runs on its own newer runtime; the installer checks).
+
+### 7.1 Pause & redirect — the Esc-analog (DB-3)
+
+The interactive REPL's **Esc** interrupts the current turn *without killing the session*, lets you type a
+redirect, and continues with your steering. Headless `-p` can't do that mid-run — the prompt was consumed
+at spawn; there is no live stdin channel for "do this instead." So the bridge approximates Esc with
+**pause = stop-the-process + keep-the-session + resume-with-redirect**:
+
+- **`Pause`** (the control, and `dev: pause`) — kills the run's process tree, but the run's `session_id`
+  (every run streams one in its `init` event) makes the *session* recoverable, so the honest label is
+  PAUSE, not abort/cancel. Forceful kill is fine: the agent's Edit/Write are atomic *between* turns, so a
+  kill lands in the gap (the only risk window is the few ms of an actual write); the journal + the git
+  working tree always show exactly what landed. Files already edited stay edited.
+- **Resume-with-redirect** — after a pause the panel offers a `redirect:` input. Sending it runs
+  `claude --resume <session_id>` with the new instruction, so the agent re-enters with its FULL context
+  (what it explored + edited) and applies the correction — the two-step analog of Esc-then-steer. A bare
+  resume (no redirect) just continues; this is also the recovery path for a `--max-turns` truncation
+  (resume to finish, never restart cold) and a panel-close/extension-reload reattach.
+- **`Apply & Reload`** remains the *terminal* affordance (post-result); Pause is the *mid-run* one. The
+  two never overlap (Apply is gated to post-result, Pause only shows during a run).
 
 ## 8. Failure modes
 
@@ -174,7 +197,9 @@ Headless `-p` cannot answer permission prompts, so each slice declares its polic
 | extension reloaded mid-run | same as above (this is why §3.3 exists); `Apply & Reload` is gated to post-result anyway |
 | host crash | pid probe on `active.json` → `host-lost` + journal tail still readable |
 | second `run` while one active | refused with the active run's id (lockfile) |
-| runaway run | `--max-turns` cap + Cancel; cost visible live in the footer |
+| runaway run | `--max-turns` cap + `Pause`; cost visible live in the footer |
+| `--max-turns` truncation (work 90% done) | the run kept a `session_id` → resume-with-redirect to finish, never restart cold (§7.1) |
+| user wants to redirect mid-run | `Pause` → `redirect:` → resume in the same session with the correction (§7.1 — the Esc-analog) |
 | concurrent terminal session editing the repo | out of scope (human discipline, same as two terminals today) |
 
 ## 9. Slices
@@ -186,7 +211,8 @@ Headless `-p` cannot answer permission prompts, so each slice declares its polic
 - **DB-2 — fix loop.** `bug:` verb; DB-2 allowlist; post-run diffstat; `Apply & Reload` with gating.
   *Acceptance:* report a bug in the panel → streamed fix → suite green in-stream → diffstat → reload →
   retest, terminal untouched; commit still happens later via terminal `bcp`.
-- **DB-3 — lifecycle + HITL.** Journal reattach, Cancel, cost footer polish, `--resume` terminal handoff,
+- **DB-3 — lifecycle + HITL.** Pause & resume-with-redirect (§7.1 — the Esc-analog: `dev: pause` /
+  `Pause` control + the `redirect:` input + `--resume` plumbing), journal reattach, cost footer polish,
   permission relay replacing the blanket allowlist, run history (last N journals) in the panel.
 
 Effort: host ~200 lines + installer ~50; extension side ~250–300 (port client, dev UI, renderer). DB-1 is
@@ -202,3 +228,41 @@ one to two focused sessions; DB-2 mostly flags + gating; DB-3 carries the real n
    wants a bridge.
 4. **The escalation-tier interplay** — once DB-3's permission relay exists, the same host+relay pattern is
    reusable by the future capability-authoring agent doc; keep the relay generic enough to share.
+
+## 11. Release posture & the open system (decided 2026-06-12)
+
+The bridge is built so "remove at release vs. ship as an advanced option" is a CONFIGURATION decision,
+not an architecture fork. Three composable gates:
+
+1. **`optional_permissions: ["nativeMessaging"]`** — the extension ships with ZERO standing permission;
+   enabling dev mode in settings triggers a `chrome.permissions.request()` prompt. Store-review-friendly,
+   user-consented, reversible. This is the shape DB-1 builds from the start.
+2. **Runtime dormancy** — the panel client is ONE module behind the dev-mode setting, and `connectNative`
+   to an unregistered host simply fails: the feature is inert unless the user deliberately installed the
+   host (whose own `allowed_origins` gates the native side).
+3. **Build-time strip** — a release packaging script (zip-with-exclusions + manifest transform; the repo
+   currently ships unpacked, so this lands with the first store release) can drop the client module +
+   permission entirely if even the dormant option is unwanted.
+
+**The structural fact that decides what can ship:** a store-installed extension is IMMUTABLE (signed
+package, unwritable files), so the DB-2/3 **code plane** (repo edits, Apply & Reload) is inherently a
+developer capability — it only works on unpacked installs and gates itself on install type (an unpacked
+install has no `update_url`; the code plane refuses to arm without that absence). What ships to end
+users is the **data plane**: traces out, substrate queries, capability proposals in.
+
+**The open system (BYO tiers):**
+- **BYO-model** — a provider adapter at the ONE LLM gateway (`AnthropicService.#call`): endpoint + key +
+  model in settings (OpenAI-compatible/local). The prompts and tolerant parsers are model-agnostic; the
+  TRIAL GATE is what keeps a weaker model safe (worse proposals, but nothing unverified becomes a
+  durable capability).
+- **BYO-agent** — the bridge generalized into a public extension point: the host exposes the substrate
+  as an **MCP server**, so "plug in your model" = connect any MCP-capable agent host (Claude Code,
+  Claude Desktop, custom). No proprietary plugin protocol to document; the ecosystem's.
+- **Prerequisite for ANY third-party write path:** GA-4's pending-review lifecycle — external-authored
+  artifacts enter pending-review, never auto-armed — plus the standing gates (trial/verify, HITL
+  confirms, the injection-boundary fencing, which is model-agnostic by design).
+
+**Resulting tiers:** default user — no bridge, no permission · advanced user — opt-in data plane,
+BYO-agent via MCP, everything through pending-review + the trial gate · developer — full code plane,
+unpacked installs only. One codebase, three postures. The port protocol is VERSIONED from message one
+(`{v: 1, ...}`) because it is a future public protocol, not an internal convenience.

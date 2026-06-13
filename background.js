@@ -500,9 +500,28 @@ Logger.info('background', 'Agent HUB service worker starting');
 
 chrome.action.onClicked.addListener((tab) => {
   Logger.debug('background', `Action clicked on tab ${tab.id}`);
-  // v2.74.966 — open by WINDOW: chat (the manifest default panel) is window-scoped, so the windowId
-  // form states the binding the panel actually uses; tabId remains the fallback for edge surfaces.
-  chrome.sidePanel.open(tab?.windowId != null ? { windowId: tab.windowId } : { tabId: tab.id });
+  // v2.74.984 — icon-click launches the CHAT side panel directly (no popup launcher; fires only because
+  // the manifest sets no action.default_popup). chrome.sidePanel.open() MUST run on the LIVE user
+  // gesture — i.e. as the FIRST statement, BEFORE any await. The .983 version awaited setOptions/
+  // getOptions first, which CONSUMED the gesture token, so open() ran gesture-less, threw, and (last
+  // line of an async listener, no catch) failed SILENTLY → clicking the icon did nothing. So: open
+  // SYNCHRONOUSLY here. The global default is already chat.html (manifest side_panel.default_path,
+  // window-scoped per v2.74.966), so the common case opens chat with no setup needed.
+  const openArg = tab?.windowId != null ? { windowId: tab.windowId } : { tabId: tab.id };
+  chrome.sidePanel.open(openArg).catch((e) => Logger.warn('background', `sidePanel.open (action click) failed: ${e?.message}`));
+  // Path hygiene runs AFTER the gesture-sensitive open (fire-and-forget) — it only displaces a STALE
+  // per-tab capture/debug pin for the NEXT open, which is the rare case; never gates this click.
+  (async () => {
+    try {
+      await chrome.sidePanel.setOptions({ path: 'chat.html', enabled: true });
+      if (tab?.id != null) {
+        const cur = await chrome.sidePanel.getOptions({ tabId: tab.id });
+        if (cur?.path && cur.path !== 'chat.html') {
+          await chrome.sidePanel.setOptions({ tabId: tab.id, path: 'chat.html', enabled: true });
+        }
+      }
+    } catch { /* setOptions/getOptions unavailable — the global default wins */ }
+  })();
 });
 
 // ╔══════════════════════════════════════════════════════════════════════════╗

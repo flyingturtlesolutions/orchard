@@ -4150,8 +4150,35 @@ export class TemplateWalker {
         TemplateWalker.#emitActionTrace(step, frameId, out, null, declaredEffect);
         return out;
       }
-      const { actionResult, observation } = await observeActionBracket(tabId, frameId, dispatchAction);
+      // v2.74.971 (gl 175931 nit b, 3rd sighting) — pre-capture the URL so a LOST bracket can be
+      // reconciled from the SW side below.
+      let _urlBeforeObs = null;
+      try { _urlBeforeObs = (await chrome.tabs.get(tabId))?.url ?? null; } catch { /* */ }
+      const { actionResult, observation: _obsRaw } = await observeActionBracket(tabId, frameId, dispatchAction);
       const res = actionResult ?? { success: false, error: 'EXECUTE_STEP returned no response' };
+      let observation = _obsRaw;
+      // v2.74.971 — SW-SIDE NAV FALLBACK: a bracketed action that NAVIGATES destroys the page-local
+      // observation state, so OBSERVE_ACTION_END lands on the fresh document ("end failed: no
+      // observation in progress" — always the replay-terminal CLICK) and the drift verdict was LOST
+      // for exactly the most decisive action. But the navigation IS the effect, and the SW can prove
+      // it from tab state: by the time the bracket returns (begin + action + settle), a navigation has
+      // long registered in tabs.get. A declared 'triggers-navigation' now reconciles as a MATCH for
+      // PB-8 instead of vanishing; an UNDECLARED navigation honestly classifies as 'unexpected'. A
+      // bracket lost for any other reason (content script unreachable, same-URL action) stays
+      // unobserved exactly as before.
+      if (!observation && res?.success && _urlBeforeObs) {
+        try {
+          const _urlAfterObs = (await chrome.tabs.get(tabId))?.url ?? null;
+          if (_urlAfterObs && _urlAfterObs !== _urlBeforeObs) {
+            observation = {
+              observedEffect: { kind: 'triggers-navigation' },
+              urlChanged: true, urlBefore: _urlBeforeObs, urlAfter: _urlAfterObs,
+              synthetic: 'sw-nav-fallback',
+            };
+            Logger.debug('TemplateWalker', `observation lost to navigation — synthesized triggers-navigation from tab state (${step.action})`);
+          }
+        } catch { /* tab gone — leave unobserved */ }
+      }
 
       // PB-8 (R5, v2.74.960) — drift classification is HOISTED out of the persisted-landmark guard:
       // trial protos often lack a uid/groundId (pre-accept), so their bracketed actions never

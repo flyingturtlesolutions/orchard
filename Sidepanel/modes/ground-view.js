@@ -24,6 +24,10 @@
 
 import { toast } from '../shell-api.js';
 import { matchGroundForUrl } from '../../Core/GroundMatcher.js';
+// v2.74.982 — Shared sidepanel launcher used by the header's chat icon to
+// swap the panel back to chat.html (window-scoped), mirroring Studio's
+// Chat button. Displaces any prior per-tab override so the swap is immediate.
+import { openSidepanelHere } from '../../shared.js';
 
 const escHtml = (s) => String(s ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -70,8 +74,34 @@ async function mount(_payload, mountEl) {
   _mountEl.innerHTML = `
     <div class="gv-shell">
       <div class="gv-header">
-        <span class="gv-header-title">Ground</span>
-        <span class="gv-header-sub">author fragments, observations &amp; more</span>
+        <div class="gv-header-titles">
+          <span class="gv-header-title">Ground</span>
+          <span class="gv-header-sub">author fragments, observations &amp; more</span>
+        </div>
+        <!-- v2.74.982 — Header affordances mirroring the chat side panel's
+             toolbar order (chat-launcher · Studio · Hide). The chat icon
+             takes the slot the chat panel gives its "Open Ground" button —
+             navigation to the sibling surface — then Open Studio and Hide
+             panel in the same right-aligned positions. -->
+        <div class="gv-header-actions">
+          <button class="icon-btn" id="gv-btn-open-chat" title="Open chat (side panel)">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+            </svg>
+          </button>
+          <button class="icon-btn" id="gv-btn-open-studio" title="Open Studio (authoring tab)">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 3h7v7"/>
+              <path d="M10 14L21 3"/>
+              <path d="M21 14v7H3V3h7"/>
+            </svg>
+          </button>
+          <button class="icon-btn" id="gv-btn-hide-panel" title="Hide panel (running tasks continue)">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="5" y1="12" x2="19" y2="12"/>
+            </svg>
+          </button>
+        </div>
       </div>
       <div class="gv-feed" data-gv="feed">
         <div class="gv-feed-head">
@@ -99,7 +129,46 @@ async function mount(_payload, mountEl) {
   }
   _wireTabListeners();
   _wireFeed();
+  _wireHeaderActions();
   await _renderList();
+}
+
+// v2.74.982 — Header toolbar handlers (chat launcher · Studio · Hide panel),
+// mirroring the chat side panel's equivalent buttons in chat.js.
+//   chat   → swap the panel back to chat.html (window-scoped) via the shared
+//            launcher. chrome.sidePanel.open needs a user gesture, and the
+//            click is it; openSidepanelHere awaits internally.
+//   studio → focus an existing Studio tab or open one (same as chat.js's
+//            btn-open-studio).
+//   hide   → window.close() closes only this side panel; running invocations
+//            continue in the service worker (same as chat.js's btn-hide-panel).
+function _wireHeaderActions() {
+  if (!_mountEl) return;
+  _mountEl.querySelector('#gv-btn-open-chat')?.addEventListener('click', async () => {
+    try {
+      await openSidepanelHere('chat.html');
+    } catch (err) {
+      toast(`Couldn't open chat: ${err?.message ?? 'unknown'}`, 'err');
+    }
+  });
+  _mountEl.querySelector('#gv-btn-open-studio')?.addEventListener('click', async () => {
+    const studioUrl = chrome.runtime.getURL('studio.html');
+    try {
+      const tabs = await chrome.tabs.query({ url: studioUrl });
+      if (tabs.length > 0) {
+        const tab = tabs[0];
+        await chrome.tabs.update(tab.id, { active: true });
+        if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true });
+        return;
+      }
+      await chrome.tabs.create({ url: studioUrl, active: true });
+    } catch (err) {
+      toast(`Couldn't open Studio: ${err?.message ?? 'unknown'}`, 'err');
+    }
+  });
+  _mountEl.querySelector('#gv-btn-hide-panel')?.addEventListener('click', () => {
+    window.close();
+  });
 }
 
 // ── Live interaction feed (monitoring) ───────────────────────────────────────

@@ -163,21 +163,26 @@ export const ConversationStore = {
    * Update an existing message by id. Used when an in-flight message
    * transitions to a completed state (thinking → final body + outcome).
    * Idempotent — if no message with that id exists, appends instead.
+   * v2.74.970 — pass { upsert: true } when append-on-miss is the CALLER'S DESIGN: chat's CR-U1
+   * finalize (.938) persists assistant bubbles only at their TERMINAL text, so the FIRST persist of
+   * every grounded reply misses by construction — the v2.74.109 warn assumed any miss was a caller
+   * bug and fired on every boot reply / walk recap (5 sightings, gl 094214→182702). Without the flag
+   * a miss still appends but WARN-logs — that path now genuinely indicates a typo'd or stale
+   * messageId (the legacy invocation finalize in background.js updates a previously-persisted
+   * placeholder, so a miss THERE is a real anomaly).
    * @param {string} conversationId
    * @param {string} messageId
    * @param {Partial<PersistedMessage>} updates
+   * @param {{upsert?: boolean}} [opts]
    */
-  async updateMessage(conversationId, messageId, updates) {
+  async updateMessage(conversationId, messageId, updates, { upsert = false } = {}) {
     const conv = await ConversationStore.load(conversationId);
     if (!conv) throw new Error(`Conversation ${conversationId} not found`);
     const idx = conv.messages.findIndex(m => m.id === messageId);
     if (idx === -1) {
-      // v2.74.109 — Append fallback is intentional (matches the docstring),
-      // but warn-log so a typo'd messageId or stale ref doesn't silently
-      // duplicate-create messages. Current callers (chat._persistMessageUpdate)
-      // always reuse a stable dataset.messageId — if this fires in practice,
-      // it points at a real caller bug.
-      console.warn(`[ConversationStore] updateMessage: no message ${messageId} in ${conversationId}, appending instead`);
+      // v2.74.109, narrowed at v2.74.970 — with declared upserts split out (the CR-U1 first-persist
+      // false positive), a warn here points at a REAL stale ref / duplicate-create risk.
+      if (!upsert) console.warn(`[ConversationStore] updateMessage: no message ${messageId} in ${conversationId}, appending instead`);
       conv.messages.push({ id: messageId, ts: Date.now(), ...updates });
     } else {
       conv.messages[idx] = { ...conv.messages[idx], ...updates };

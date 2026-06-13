@@ -73,10 +73,42 @@ body { display: flex; flex-direction: column; min-height: 100vh; }
   gap: 12px;
   padding: 12px;
 }
+/* v2.74.982 — Header is now a row: title block on the left (takes the
+   slack), icon toolbar pinned right. The toolbar mirrors the chat side
+   panel's chat-launcher · Studio · Hide buttons. */
 .gv-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.gv-header-titles {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.gv-header-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.gv-header-actions .icon-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--r);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.gv-header-actions .icon-btn:hover {
+  background: var(--bg3);
+  color: var(--text);
 }
 .gv-header-title {
   font-size: 14px;

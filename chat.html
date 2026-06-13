@@ -22,6 +22,29 @@
       <span class="app-brand-name">AHuB</span>
     </div>
     <div class="app-header-actions">
+      <!-- DB-2 (v2.74.975) — Dev-bridge reload. Hidden unless dev mode is on
+           (devBridge drives the .hidden toggle); the amber dot lights when the
+           bridge changed repo files since this load. Click → chrome.runtime.reload()
+           picks the edits up. This is DESIGN_dev_bridge §5's "Apply & Reload",
+           surfaced as a header affordance. Strippable with the bridge module. -->
+      <button class="icon-btn dev-reload-btn hidden" id="btn-dev-reload" title="Reload extension (dev)">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="23 4 23 10 17 10"/>
+          <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+        </svg>
+        <span class="dev-reload-dot" aria-hidden="true"></span>
+      </button>
+      <!-- v2.74.981 — Ground launcher. Swaps the side panel to sidepanel.html
+           and routes the shell into ground-view (read-only Ground browse).
+           Mirrors popup.js's "Ground" entry; lives between the dev-reload and
+           Studio buttons per the header affordance order. -->
+      <button class="icon-btn" id="btn-open-ground" title="Open Ground (side panel)">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="2" y1="12" x2="22" y2="12"/>
+          <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+        </svg>
+      </button>
       <!-- v2.27.0 — Studio launcher. Opens the Studio tab (authoring surface).
            Lab button removed in message 3 of the Studio relocation: sidepanel
            is now chat-only, there's no Lab mode to switch to. -->

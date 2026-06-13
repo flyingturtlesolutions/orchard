@@ -12,8 +12,9 @@ installGlobalErrorHandlers('chat', window);
 
 import { ChatAPI } from './Services/ChatAPI.js';
 import { ConversationStore } from './Services/ConversationStore.js';
-import { $, escHtml, escAttr, toast, relTime } from './shared.js';
+import { $, escHtml, escAttr, toast, relTime, openSidepanelHere } from './shared.js';
 import { isSafeStrategyResultHtml, looksLikeStrategyResultHtml } from './Services/Chat/strategyResultHtml.js';
+import { createDevBridge } from './Services/Chat/devBridge.js';   // DB-1b (v2.74.973) — the ONE strippable dev-bridge module (DESIGN_dev_bridge §11)
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
@@ -110,6 +111,27 @@ $('btn-open-studio')?.addEventListener('click', async () => {
     await chrome.tabs.create({ url: studioUrl, active: true });
   } catch (err) {
     toast(`Couldn't open Studio: ${err.message}`, 'err');
+  }
+});
+
+// ─── Ground launcher (v2.74.981) ─────────────────────────────────────────────
+
+// Swaps the side panel from chat.html to the multi-mode shell (sidepanel.html)
+// and routes it into the read-only 'ground-view' browse mode. Mirrors popup.js's
+// "Ground" entry: REQUEST_SIDEPANEL_MODE sets the shell's mode (the shell also
+// defaults to ground-view on a fresh mount), and openSidepanelHere does the
+// window-scoped setOptions + per-tab displace + open dance from a user gesture.
+$('btn-open-ground')?.addEventListener('click', async () => {
+  try {
+    // Set the target mode first so the freshly-mounted shell reads it via
+    // GET_SIDEPANEL_MODE (and existing shells pick up the broadcast).
+    chrome.runtime.sendMessage({
+      type: 'REQUEST_SIDEPANEL_MODE',
+      payload: { mode: 'ground-view', payload: {} },
+    });
+    await openSidepanelHere('sidepanel.html');
+  } catch (err) {
+    toast(`Couldn't open Ground: ${err.message}`, 'err');
   }
 });
 
@@ -439,7 +461,10 @@ async function _persistMessageUpdate(msgEl, fields) {
   if (!msgEl.dataset.ts) msgEl.dataset.ts = existing.ts;
 
   try {
-    await ConversationStore.updateMessage(convId, messageId, existing);
+    // v2.74.970 — declared upsert: the CR-U1 finalize (.938) persists assistant bubbles only at their
+    // TERMINAL text, so the FIRST persist of every grounded reply is a miss by construction — the
+    // store's stale-ref warn fired on every boot reply / walk recap (5 sightings, gl 094214→182702).
+    await ConversationStore.updateMessage(convId, messageId, existing, { upsert: true });
   } catch (err) {
     console.warn('[chat] persist failed:', err.message);
   }
@@ -2731,6 +2756,14 @@ function _renderRichIntents(msg, intents) {
   msg.appendChild(wrap);
 }
 
+// DB-1b (v2.74.973) — lazy singleton: the dev bridge is created on first use with the chat's own
+// rendering helpers (no import cycle, nothing constructed for users who never type a bridge verb).
+let _devBridgeInstance = null;
+function _getDevBridge() {
+  if (!_devBridgeInstance) _devBridgeInstance = createDevBridge({ appendMessage, setMessageBody: _setMessageBody, mkBtn: _mkBtn });
+  return _devBridgeInstance;
+}
+
 async function sendChatMessage() {
   const input    = $('chat-input');
   const text     = input.value.trim();
@@ -2754,6 +2787,15 @@ async function sendChatMessage() {
     _autosizeInput();
     appendMessage({ role: 'user', body: text });
     await _stopLongRunning();
+    return;
+  }
+
+  // DB-1b (v2.74.973) — dev-bridge verbs (`dev: on|off`, `dev: <ask>`, `gl`): user-typed only, handled
+  // BEFORE any routing so a bridge verb can never leak into the ask pipeline. Inert (falls through)
+  // unless the user enabled the bridge — `gl` stays an ordinary ask for everyone else.
+  if (await _getDevBridge().maybeHandle(text)) {
+    input.value = '';
+    _autosizeInput();
     return;
   }
 
@@ -3677,8 +3719,38 @@ $('btn-chat-send').addEventListener('click', sendChatMessage);
   // conversation surface so user always sees their running strategies.
   await _refreshRunningBar();
 
+  // DB-2 (v2.74.975) — Dev-bridge reload icon. Wired here (not at module top
+  // level) so _getDevBridge's deps — _mkBtn et al. — are already initialised.
+  // The icon stays hidden for everyone until dev mode is on; the dot lights
+  // when the bridge changed repo files. Click reloads the whole extension to
+  // pick the edits up (DESIGN_dev_bridge §5). Inert for non-dev users.
+  _wireDevReload();
+
   $('chat-input').focus();
 })();
+
+// DB-2 (v2.74.975) — subscribe the header reload icon to devBridge state and
+// reload on click. Creating the bridge here is cheap (closures only; no port,
+// no permission) and harmless for users who never enable dev mode — they get a
+// hidden button and nothing else.
+function _wireDevReload() {
+  const btn = $('btn-dev-reload');
+  if (!btn) return;
+  const bridge = _getDevBridge();
+  btn.addEventListener('click', () => {
+    if (confirm('Reload the extension to apply code changes? Running tasks will stop.')) {
+      bridge.reloadExtension();
+    }
+  });
+  void bridge.onReloadState((s) => {
+    btn.classList.toggle('hidden', !s.enabled);
+    btn.classList.toggle('has-change', !!s.available);
+    const n = s.files?.length || 0;
+    btn.title = s.available
+      ? `Reload extension — ${n} changed file${n === 1 ? '' : 's'} pending (dev)`
+      : 'Reload extension (dev)';
+  });
+}
 
 /**
  * v2.71.4 — Re-attach running-state UI to bubbles whose invocation is still
