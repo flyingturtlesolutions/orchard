@@ -201,6 +201,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   }
 
   // Append a streamed block to the active run. Caps the rendered history (journal on disk is the full record).
+  const _PERSIST_THROTTLE_MS = 2000;
   function _emit(b) {
     if (!run || !run.bodyEl) return;
     run.blocks.push(b);
@@ -208,6 +209,16 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     while (run.blocks.length > MAX_BLOCKS) {
       run.blocks.shift();
       if (run.bodyEl.firstChild) run.bodyEl.removeChild(run.bodyEl.firstChild);
+    }
+    // v2.74.999 (DB-3) — persist a snapshot AS the run streams (throttled), not only at endRun. The
+    // child does NOT survive a panel close / extension reload on Windows (verified — see findings), so
+    // live-reattach can't continue a run; instead a mid-run close now leaves a useful PARTIAL transcript
+    // in the conversation (rehydrated on reopen), and `dev:` resumes the session from there. Throttled so
+    // a fast run doesn't hammer chrome.storage; endRun still does the final, complete persist.
+    const now = Date.now();
+    if (!run._lastPersist || (now - run._lastPersist) >= _PERSIST_THROTTLE_MS) {
+      run._lastPersist = now;
+      _persistBlocks(run.msg, run.blocks);
     }
     // v2.74.995 — re-anchor the run footer (working…/Pause) so the latest block stays in view, unless
     // the user has scrolled up. Block-size-agnostic (unlike the chat's 96px near-bottom heuristic).
@@ -309,6 +320,12 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         endRun({ kind: 'result', ok, text: `${bits}${resume}` });
         break;
       }
+      case 'status': {
+        // DB-3 (v2.74.999) — startup reattach probe answered. If a run is still alive (the host is now
+        // re-tailing its journal) and this panel has no run of its own, build a bubble for the replay.
+        if (m.active && !run) startReattach(`↻ reattaching to a run still in progress (pid ${m.pid ?? '?'})…`);
+        break;
+      }
       case 'error':
         endRun(`✗ bridge error: ${m.code}${m.message ? ` — ${m.message}` : ''}${m.code === 'busy' ? ' (one run at a time; "dev: pause" to stop it)' : ''}`);
         break;
@@ -316,15 +333,18 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     }
   }
 
-  function startRun(payload, headline) {
+  // Build the live run bubble + footer (spinner · ticking elapsed · Pause). Shared by a normal run and a
+  // reattach (v2.74.999). The caller posts preflight/run (normal) or nothing (reattach — the host is
+  // already re-tailing the journal and will stream events straight into this bubble).
+  function _beginRunBubble(headline, { reattach = false } = {}) {
     _follow = true;       // v2.74.995 — a fresh run follows from the top; the user can scroll up to stop it
     _wireFollow();        // attach the one scroll listener (idempotent) now that the panel is up
     const { msg, bodyEl, blocks } = devBubble(headline);
-    run = { msgEl: msg, msg, bodyEl, blocks, bar: null, sessionId: null, pendingPayload: payload, tick: null };
-    // v2.74.989 — run footer: an amber spinner + a ticking "working… Ns" label give a live
-    // "still going" signal during the silent gaps between stream events (a long tool call, model
-    // thinking), where the streamed lines alone look stalled. The whole footer (spinner + label +
-    // Stop) is removed at endRun. Elapsed seconds reassure that a quiet run is alive, not hung.
+    run = { msgEl: msg, msg, bodyEl, blocks, bar: null, sessionId: null, pendingPayload: null, tick: null, reattach };
+    // v2.74.989 — run footer: an amber spinner + a ticking "working… Ns" label give a live "still going"
+    // signal during the silent gaps between stream events (a long tool call, model thinking). Removed at
+    // endRun. v2.74.992 — "Pause" (the Esc-analog): kills the process but keeps the session; run.pausing
+    // tells the done handler to frame the resulting host-lost as a pause, not an error.
     const bar = document.createElement('div');
     bar.className = 'dev-run-bar';
     const spinner = document.createElement('span');
@@ -332,15 +352,12 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     spinner.setAttribute('aria-hidden', 'true');
     const status = document.createElement('span');
     status.className = 'dev-run-status';
-    status.textContent = 'working…';
+    const label = reattach ? 'reattached · working…' : 'working…';
+    status.textContent = label;
     bar.appendChild(spinner);
     bar.appendChild(status);
-    // v2.74.992 — "Pause" (the Esc-analog, spec §7.1): kills the process but keeps the session. Marking
-    // run.pausing tells the done handler to frame the resulting host-lost as a pause, not an error.
     bar.appendChild(mkBtn('Pause', () => { if (run) run.pausing = true; try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'pause' }); } catch { /* */ } }));
-    // v2.74.991 — append into .message-content (the vertical text column), NOT the message row. The
-    // message element is flex(avatar | content); appending the footer to it landed the spinner OFF TO
-    // THE SIDE. Inside content it sits at the BOTTOM of the reply, under the streamed body.
+    // v2.74.991 — append into .message-content (the vertical text column), NOT the message row.
     const _content = msg.querySelector('.message-content') || msg;
     _content.appendChild(bar);
     run.bar = bar;
@@ -348,13 +365,28 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const startedAt = Date.now();
     run.tick = setInterval(() => {
       const s = Math.round((Date.now() - startedAt) / 1000);
-      status.textContent = `working… ${s}s`;
+      status.textContent = `${reattach ? 'reattached · ' : ''}working… ${s}s`;
     }, 1000);
+    return run;
+  }
+
+  function startRun(payload, headline) {
+    const r = _beginRunBubble(headline);
+    r.pendingPayload = payload;
     try {
       ensurePort().postMessage({ v: PROTOCOL_V, type: 'preflight' });   // run is posted on preflight-ok
     } catch (e) {
       endRun(`✗ could not reach the bridge host: ${e.message}. Run bridge/install.ps1, then reload.`);
     }
+  }
+
+  // DB-3 (v2.74.999) — reattach to a run still alive after a panel close / extension reload. The host's
+  // status handler is already re-tailing the journal, so we just build a bubble for the replayed events
+  // to land in. NOTE: best-effort — the claude child usually does NOT survive host death on Windows
+  // (verified), so this fires only where survival holds; the robust path is the throttled mid-run persist
+  // (a partial transcript on reopen) + `dev:` resume.
+  function startReattach(headline) {
+    _beginRunBubble(headline, { reattach: true });
   }
 
   async function buildDecisionsAttachment() {
@@ -518,13 +550,21 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'diffstat' }); } catch { /* host not reachable */ }
   }
 
+  // DB-3 (v2.74.999) — on startup, ask the host whether a run is still alive so the panel can reattach
+  // (status active:true → the host re-tails its journal → the `status` handler builds a replay bubble).
+  // No-op when off / host unreachable. Best-effort: see startReattach — the child usually dies with the host.
+  async function _probeActiveRun() {
+    if (!(await getEnabled())) return;
+    try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'status' }); } catch { /* host not reachable */ }
+  }
+
   // chat.js calls this once at startup: register the icon's state listener, then push current state
   // (visibility from the persisted setting) and arm the dot if the tree is already dirty.
   async function onReloadState(fn) {
     reloadListener = typeof fn === 'function' ? fn : null;
     const enabled = await getEnabled();
     emitReload({ enabled });
-    if (enabled) refreshReloadState();
+    if (enabled) { refreshReloadState(); _probeActiveRun(); }
   }
 
   // The reload action itself — restarts the WHOLE extension (the spec's "Apply & Reload"), which closes

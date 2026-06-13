@@ -95,6 +95,21 @@ and `chrome.runtime.reload()` after an applied fix severs the port by design. Th
   serializes bridge-vs-bridge — a concurrent *terminal* session editing the same repo remains human
   discipline, exactly as two terminals are today.
 
+> **⚠ Reality check (v2.74.999, verified).** The `detached` spawn above was DROPPED at v2.74.974 because
+> DETACHED_PROCESS gives `cmd.exe` no console and the `.cmd`-shim chain loses its redirected stdout (the
+> journal recorded 0 bytes). With detachment gone, the claude child does **not** survive host death: a
+> driver test (`bridge/reattachdrive.cjs` — start a run, kill host A, probe from host B) shows the child
+> pid dead within ~1s of the host exiting (`childAlive=false`), so a fresh host's `status` reports
+> *inactive* and live-reattach never fires. The reattach PROTOCOL is fully wired (host re-tails an active
+> journal on `status`; the panel probes on startup and builds a replay bubble), but it is **best-effort —
+> dormant until child survival is solved** (a detach-without-losing-journaling fix, e.g. bypassing the
+> `cmd.exe` shim, is its own focused task; Chrome's native-host job-object behaviour may also differ from
+> the node-spawn model and needs its own check). The robust path that works TODAY, no survival required:
+> the panel persists the run's transcript AS it streams (throttled), so a mid-run close leaves a partial
+> reply in the conversation on reopen, and `dev: <…>` resumes the session from there (§7.1). Also fixed
+> here: a stale `active.json` whose pid got REUSED read as "alive" and refused every new run as `busy`
+> forever — `activeLock()` now also reclaims any lock older than 6h, independent of the pid check.
+
 ### 3.4 Port protocol (extension ↔ host)
 
 Panel → host: `{type:'run', verb:'gl'|'bug'|'dev', text?, attachments?:[{kind:'decisions-trace',
@@ -223,8 +238,12 @@ at spawn; there is no live stdin channel for "do this instead." So the bridge ap
   control + `dev: pause` kill the process but keep the session (`pauseRun` host verb, `cancel` kept as an
   alias), and resume-with-redirect is the conversational `dev: <redirect>` that already `--resume`s the
   last session (.985) — so the "redirect input" is the verb itself, not a separate widget. *Still open:*
-  journal reattach (panel-side `status`/replay + cross-reload child survival), cost-footer polish,
-  permission relay replacing the blanket allowlist, run history (last N journals) in the panel.
+  cost-footer polish, permission relay replacing the blanket allowlist, run history (last N journals).
+  **Journal reattach — protocol landed, dormant (v2.74.999):** the host re-tails an active run's journal
+  on `status` and the panel probes on startup + builds a replay bubble, but the claude child does not
+  survive host death on Windows (verified — see §3.3), so it fires only where survival holds. The robust
+  substitute shipped alongside: throttled mid-run transcript persistence (a partial reply on reopen) +
+  `dev:` resume, plus a stale-lock age cap fixing the pid-reuse `busy` footgun.
 
 Effort: host ~200 lines + installer ~50; extension side ~250–300 (port client, dev UI, renderer). DB-1 is
 one to two focused sessions; DB-2 mostly flags + gating; DB-3 carries the real new design (relay MCP).

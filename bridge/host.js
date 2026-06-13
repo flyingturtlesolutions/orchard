@@ -132,10 +132,17 @@ function pidAlive(pid) {
   if (typeof pid !== 'number') return false;
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
+// v2.74.999 — bound the pid-reuse footgun. pidAlive() asks `process.kill(pid,0)`, but on Windows a dead
+// run's pid can be REUSED by an unrelated process, so a stale lock reads as "alive" and refuses every new
+// run as `busy` forever (observed: a lock from an abandoned run blocked the next run until deleted by
+// hand). An age cap reclaims a lock older than any sane run, independent of the pid check — and it never
+// taskkills, so it can't hit the innocent reused-pid process.
+const MAX_LOCK_AGE_MS = 6 * 60 * 60 * 1000;   // 6h — far longer than any real run; just bounds the footgun
 function activeLock() {
   const l = readLock();
   if (!l) return null;
-  if (!pidAlive(l.pid)) { try { fs.unlinkSync(LOCK); } catch { /* */ } return null; }   // stale → reclaim
+  if (l.startedAt && (Date.now() - l.startedAt) > MAX_LOCK_AGE_MS) { try { fs.unlinkSync(LOCK); } catch { /* */ } return null; }   // stale by age → reclaim
+  if (!pidAlive(l.pid)) { try { fs.unlinkSync(LOCK); } catch { /* */ } return null; }   // dead pid → reclaim
   return l;
 }
 function clearLock() { try { fs.unlinkSync(LOCK); } catch { /* */ } }
@@ -158,6 +165,16 @@ function preflight() {
 function statusReply() {
   const l = activeLock();
   return { v: PROTOCOL_V, type: 'status', active: !!l, pid: l ? l.pid : null, startedAt: l ? l.startedAt : null, journal: l ? path.basename(l.journal || '') : null };
+}
+
+// DB-3 (v2.74.999) — REATTACH. Answer the status probe AND, if a run is still alive, re-tail its journal
+// from the top so a FRESH host (panel reopened / extension reloaded) replays the whole run and then
+// catches up live. activeLock() already reclaims a stale lock (dead pid) → a dead run reports inactive and
+// no tail starts. tailJournal is _tailing-guarded, so this is a no-op when this host already owns the run.
+function handleStatus() {
+  send(statusReply());
+  const l = activeLock();
+  if (l && l.journal) { log(`reattach: re-tailing pid=${l.pid} journal=${path.basename(l.journal)}`); tailJournal(l.journal, l.pid); }
 }
 
 // DB-2 (v2.74.975, spec §3.4) — read-only working-tree diffstat so the panel's reload icon can light
@@ -327,7 +344,13 @@ function startRun(msg) {
 
 // Poll-tail the journal, forwarding each stream-json line as an event frame. Poll (not fs.watch) — it is
 // portable and the cadence is humane for a CLI run. Ends on the `result` line or child death.
+// v2.74.999 (DB-3 reattach) — _tailing guards against streaming the same journal twice in ONE host: a
+// status re-probe during a run this host already started must NOT spawn a second tail (would double every
+// event). Reattach from a FRESH host is fine — that host isn't tailing the journal yet.
+const _tailing = new Set();
 function tailJournal(journal, pid) {
+  if (_tailing.has(journal)) return;
+  _tailing.add(journal);
   let offset = 0;
   let partial = '';
   const timer = setInterval(() => {
@@ -354,6 +377,7 @@ function tailJournal(journal, pid) {
         if (ev && ev.type === 'result') {
           clearInterval(timer);
           clearLock();
+          _tailing.delete(journal);
           log(`run done pid=${pid} (${ev.subtype || 'result'})`);
           send({ v: PROTOCOL_V, type: 'done', result: { subtype: ev.subtype ?? null, costUsd: ev.total_cost_usd ?? null, durationMs: ev.duration_ms ?? null, numTurns: ev.num_turns ?? null, sessionId: ev.session_id ?? null } });
           return;
@@ -363,6 +387,7 @@ function tailJournal(journal, pid) {
     if (!pidAlive(pid)) {
       clearInterval(timer);
       clearLock();
+      _tailing.delete(journal);
       log(`run pid=${pid} exited without a result event`);
       send({ v: PROTOCOL_V, type: 'done', result: { subtype: 'host-lost' } });
     }
@@ -378,7 +403,7 @@ async function handle(msg) {
   }
   switch (msg.type) {
     case 'preflight': send(preflight()); break;
-    case 'status':    send(statusReply()); break;
+    case 'status':    handleStatus(); break;
     case 'diffstat':  send(diffstatReply()); break;
     case 'pause':     send(pauseRun()); break;
     case 'cancel':    send(pauseRun()); break;   // back-compat alias (DB-3, v2.74.992)
