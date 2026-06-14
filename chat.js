@@ -2271,7 +2271,28 @@ async function _tryGroundedTurn(text) {
   // T3X live-fix (v2.74.793) — track whether the cross-Ground comprehension already ran this turn, so the
   // single-Ground fallback at the bottom doesn't redundantly re-attempt (and re-pay the LLM) what just failed here.
   let _xgTried = false;
-  if (isCompoundAsk(text) && (_CROSS_SITE_CUE.test(text) || namesMultipleSites(text))) {
+  // v2.74.1005 (2c) — the lexical cues both MISS a VERB-OBJECT two-site compound ("search youtube for X and pixabay
+  // for Y"): _CROSS_SITE_CUE needs a transfer verb + destination prep, namesMultipleSites is preposition-only — and
+  // "search <site> for …" has neither. So the ask fell to the global path and COLLAPSED to one Ground, silently
+  // dropping half the request (the 2026-06-12 20:34 trace). Ground-AWARE backstop: for a compound ask the lexical
+  // cues missed, ask the background how many DISTINCT known Grounds the text names (verb-object included); ≥2 →
+  // escalate to the cross-site comprehend, which already resolves verb-object site names per clause (_askNamesOtherGround).
+  let _xgCue = _CROSS_SITE_CUE.test(text) || namesMultipleSites(text);
+  // v2.74.1006 — .1005 gated the COUNT round-trip (and the escalation below) on isCompoundAsk, which is itself
+  // FALSE for the verb-object compound it targeted: decomposeAsk only treats a connective as a clause boundary
+  // when a VERB follows it ("…and PIXABAY for Y" has none) → 1 clause → isCompoundAsk=false → .1005 never ran
+  // (live: decisions-20260613-210436 — "…for X and pixabay for Y" dead-ended at router-fallback decompose;
+  // "…for thelem and pixabay for thelem" collapsed to one Pixabay run). Gate the COUNT on a cheap CONNECTIVE
+  // check instead (no-LLM); ≥2 DISTINCT named Grounds IS the compound signal → set _xgForce so the escalation
+  // fires regardless of decomposeAsk's verb-led split. Narrow: only when the lexical cues already missed.
+  let _xgForce = false;
+  if (!_xgCue && (/\b(?:and|then|plus)\b/i.test(text) || text.includes('&'))) {
+    try {
+      const cn = await _orchReq('COUNT_NAMED_GROUNDS', { ask: text });
+      if (cn && cn.success && cn.count >= 2) { _xgCue = true; _xgForce = true; _orchLog(`ROUTE ▸ "${String(text).slice(0, 50)}" → cross-site (ground-aware: ${cn.count} grounds named)`); }
+    } catch { /* additive — a failure leaves the lexical decision unchanged */ }
+  }
+  if ((isCompoundAsk(text) || _xgForce) && _xgCue) {
     // R-4 (v2.74.956) — gate the cross-site escalation behind the ROUTER (DESIGN_llm_front_door §4:
     // "Cross-site workflow / T3X — keep, but gate behind needs_decompose"). A confident SINGLE-tool
     // decision (primitive/replay) handles the ask directly — the mis-escalation class ("go to pixabay
@@ -2311,10 +2332,24 @@ async function _tryGroundedTurn(text) {
   if (clauses.length > 1 && !isForeachAsk(text) && !isConditionalAsk(text)) {
     const probe = appendMessage({ role: 'thinking', body: 'Checking this page…' });
     const m0 = await _orchReq('ORCH_MATCH', { tabId: tab.id, ask: clauses[0].text });
-    if (!m0 || !m0.groundId) {
-      // T3X live-fix (v2.74.793) — the FIRST clause names a Ground we're not on ("search react jobs on indeed, …"),
-      // so the within-Ground chain can't even start. Resolve the whole ask the cross-Ground way before giving up.
-      if (namesAnySite(text) && !_xgTried && await _tryCrossGroundFallback(text, probe)) return true;
+    // v2.74.1010 — clause0 belongs to a DIFFERENT Ground than the tab we're on. ORCH_MATCH ALWAYS echoes the current
+    // tab's groundId, even on a MISS (sg.js:1544), so the old "!m0.groundId" guard only caught a NO-Ground tab — it
+    // NEVER caught the case where clause0 named another KNOWN Ground while we sit on a Ground tab. Live trace
+    // decisions-20260614-003316: "search indeed for jazz singer jobs, get the top job title, and search youtube for
+    // it" typed on a YOUTUBE tab → clause0 ("search indeed …") MISSED but groundId=youtube (truthy) → fell through to
+    // _orchConfirmChain → a chain built on the WRONG Ground → silent dead-end (the 2c gap, also seen from a no-Ground
+    // claude.ai tab on 2026-06-13 23:54). The reliable signal is ORCH_MATCH's OWN m0.otherGround (.801,
+    // _askNamesOtherGround) — set on a miss, VERB-OBJECT aware (unlike the preposition-only namesAnySite), and
+    // computed in this same working call (no dependence on the COUNT_NAMED_GROUNDS round-trip). A missed clause0 that
+    // names another Ground can't start the chain here → comprehend the whole ask across Grounds instead.
+    const clause0Elsewhere = !!(m0 && m0.decision === 'miss' && (m0.otherGround || _xgForce));
+    if (!m0 || !m0.groundId || clause0Elsewhere) {
+      // T3X live-fix (v2.74.793 / .1010) — the FIRST clause names a Ground we're not on ("search react jobs on
+      // indeed, …" / verb-object "search indeed for …"), so the within-Ground chain can't even start. Resolve the
+      // whole ask the cross-Ground way before giving up. Trigger on m0.otherGround (verb-object) OR namesAnySite
+      // (prepositional) OR _xgForce (≥2 named Grounds via the COUNT backstop).
+      if ((m0?.otherGround || namesAnySite(text) || _xgForce) && !_xgTried && !_isPageReferential(text)
+          && await _tryCrossGroundFallback(text, probe)) return true;
       // T3X-IND (v2.74.798) — COMPOUND off-Ground, no site named ("search jazz singer jobs … and retrieve the first
       // title" from a non-Ground tab): resolve the Ground globally (on the first/action clause) and run the whole
       // chain there. This is the "compound + independence" case.

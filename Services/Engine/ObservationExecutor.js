@@ -662,6 +662,16 @@ export class ObservationExecutor {
         return { status: 'failed', error: errMsg };
       }
 
+      // v2.74.1008 — Surface a selector heal. The OBSERVE_RAW_TEXT handler
+      // returns `healedSelector` (non-null) when the exact, capture-time
+      // selector matched 0 elements and a progressively-relaxed variant
+      // resolved the read instead (a read demonstrated over a dynamic list
+      // whose item-specific classes drifted). Logging it makes the recovery
+      // visible in a `gl` trace rather than a silent save.
+      if (result.healedSelector) {
+        Logger.info('ExecutionEngine', `OBSERVATION${label} — selector healed: exact "${ex.target}" missed → relaxed "${result.healedSelector}" matched`);
+      }
+
       // Wrap + bind. Each shape produces its own tagged scope value.
       let taggedValue;
       let summary = '';

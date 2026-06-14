@@ -169,8 +169,115 @@ export async function focusTabPolicy({ tabId, reason = 'unspecified', required =
 // v2.74.933 (CR-M3) — a closed tab never leaves stale entries (Chrome recycles tab ids, so a stale
 // session could mis-ground a NEW tab's events, and a stale busy depth could mute a new tab's monitor).
 try {
-  chrome.tabs.onRemoved.addListener((tabId) => { _interactionSessions.delete(tabId); _engineBusyTabs.delete(tabId); });
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    _interactionSessions.delete(tabId); _engineBusyTabs.delete(tabId);
+    // v2.74.1008 — evict any ground→tab reuse entry pointing at the closed tab (best-effort; find-time
+    // validation also catches a gone tab, so this is just storage hygiene).
+    try { chrome.storage?.session?.get(null, (all) => { void chrome.runtime.lastError; const rm = Object.keys(all || {}).filter((k) => k.startsWith('groundTab:') && all[k] === tabId); if (rm.length) chrome.storage.session.remove(rm); }); } catch { /* */ }
+  });
 } catch { /* non-extension context (unit tests import this module's siblings only) */ }
+
+// ── Ground→tab reuse (v2.74.1008) — "a YouTube intent opens a NEW tab instead of reusing the existing
+// one." There was NO ground→tab mapping anywhere: every replay/workflow step opened a fresh tab on the
+// ground URL. POLICY (user-chosen): reuse ONLY tabs ORCHARD itself created for a ground — never a tab the
+// user opened by hand. A session-backed `groundTab:<id>` → tabId map records orchard's own ground tabs;
+// chrome.storage.session is the right lifetime (survives an MV3 SW restart, auto-clears on browser close —
+// a tab id is meaningless across browser restarts). The tab analog of ensureGroundForUrl (reuse-before-open).
+const _GROUND_TAB_KEY = (gid) => `groundTab:${gid}`;
+// v2.74.1012 — DURABLE provenance marker (chrome.storage.local, survives a browser restart): the last URL
+// orchard's tab for this ground was known to be at. It serves TWO purposes across a restart, which clears
+// the session map AND reassigns every tab id (so the stored tabId is a dead number — persisting IT would
+// be useless): (1) its mere EXISTENCE = "orchard has owned a tab for this ground before", which is what
+// gates cold-start ADOPTION (so a hand-opened tab for a ground orchard never touched is still never
+// adopted); (2) its VALUE lets adoption prefer the tab whose url EXACTLY matches — almost certainly
+// orchard's own RESTORED tab, not a coincidental user tab. Tab ids can't survive a restart; a ground's
+// last URL can, and reconciling it against LIVE tabs is the only thing that actually recovers reuse.
+const _GROUND_URL_KEY = (gid) => `groundLastUrl:${gid}`;
+const _slug6 = (gid) => String(gid).slice(-6);
+
+async function _recordGroundTab(groundId, tabId, url) {
+  if (!groundId || typeof tabId !== 'number') return;
+  try { await chrome.storage?.session?.set({ [_GROUND_TAB_KEY(groundId)]: tabId }); } catch { /* */ }
+  if (url) { try { await chrome.storage?.local?.set({ [_GROUND_URL_KEY(groundId)]: String(url) }); } catch { /* */ } }
+}
+async function _getGroundLastUrl(groundId) {
+  if (!groundId || !chrome.storage?.local) return '';
+  try { const v = (await chrome.storage.local.get(_GROUND_URL_KEY(groundId)))[_GROUND_URL_KEY(groundId)]; return typeof v === 'string' ? v : ''; } catch { return ''; }
+}
+
+// A REUSABLE orchard-created tab for the ground (within-session, strict), or null. Validates: the tab still
+// EXISTS, its CURRENT url still maps to THIS ground (the user may have navigated it away — then it's no
+// longer ours), and it isn't engine-busy (no collision). Refreshes the durable last-URL marker on a hit so
+// it tracks the tab's drift. Evicts a genuinely-stale session entry.
+async function _findReusableGroundTab(groundId) {
+  if (!groundId || !chrome.storage?.session) return null;
+  let tabId = null;
+  try { tabId = (await chrome.storage.session.get(_GROUND_TAB_KEY(groundId)))[_GROUND_TAB_KEY(groundId)]; } catch { return null; }
+  if (typeof tabId !== 'number') return null;
+  if (_engineBusyTabs.has(tabId)) return null;   // busy — don't collide (still ours; don't evict)
+  const evict = async () => { try { await chrome.storage.session.remove(_GROUND_TAB_KEY(groundId)); } catch { /* */ } };
+  let url = '';
+  try { url = (await chrome.tabs.get(tabId))?.url || ''; } catch { await evict(); return null; }   // tab gone
+  try {
+    const grounds = await StorageManager.getAllGrounds();
+    if (_groundIdForUrl(url, grounds) !== groundId) { await evict(); return null; }   // navigated away — no longer ours
+  } catch { return null; }
+  if (url) { try { await chrome.storage?.local?.set({ [_GROUND_URL_KEY(groundId)]: url }); } catch { /* */ } }   // keep the marker fresh
+  return tabId;
+}
+
+// COLD-START ADOPTION (v2.74.1012) — recover reuse across a browser restart, where the session map is gone
+// and tab ids are reassigned. Fires ONLY when the durable marker exists (orchard has owned a tab for this
+// ground before — so a never-touched ground's user tab is still not adopted). Scans LIVE tabs for one on
+// the ground, preferring an EXACT url match to lastUrl (orchard's restored tab) over a same-ground tab in a
+// drifted state; skips engine-busy tabs. Returns { tabId, exact } or null. This is the relaxation the user
+// accepted for the post-restart moment — it may, in the no-exact-match case, adopt a hand-opened tab once.
+async function _adoptGroundTab(groundId, lastUrl) {
+  let tabs = [];
+  try { tabs = await chrome.tabs.query({}); } catch { return null; }
+  let grounds = [];
+  try { grounds = await StorageManager.getAllGrounds(); } catch { return null; }
+  const matches = tabs.filter((t) => t && typeof t.id === 'number' && t.url
+    && !_engineBusyTabs.has(t.id) && _groundIdForUrl(t.url, grounds) === groundId);
+  if (!matches.length) return null;
+  const exact = lastUrl ? matches.find((t) => t.url === lastUrl) : null;
+  if (exact) return { tabId: exact.id, exact: true };
+  const recent = matches.slice().sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+  return { tabId: recent.id, exact: false };
+}
+
+/**
+ * Resolve THE tab for a ground replay: (1) reuse orchard's own ground tab if the session record is still
+ * valid; (2) on a cold start (session map cleared by a browser restart) ADOPT a live tab on the ground when
+ * the durable marker says orchard has owned one before; (3) else open a fresh tab and record it. Only
+ * orchard-owned grounds enter the adoption path, so a hand-opened tab for a never-touched ground is never
+ * hijacked. Returns the tabId, or null when there's nothing to open.
+ * @param {string} groundId
+ * @param {string} groundUrl
+ * @param {{active?:boolean}} [opts]
+ * @returns {Promise<number|null>}
+ */
+export async function ensureTabForGround(groundId, groundUrl, { active = false } = {}) {
+  // 1. strict within-session reuse
+  const reuse = await _findReusableGroundTab(groundId);
+  if (reuse != null) { Logger.info('background', `TAB ▸ reuse ${reuse} for ground ${_slug6(groundId)} (orchard-owned)`); return reuse; }
+  // 2. cold-start adoption — only if orchard has owned a tab for this ground before (durable marker)
+  const lastUrl = await _getGroundLastUrl(groundId);
+  if (lastUrl) {
+    const adopted = await _adoptGroundTab(groundId, lastUrl);
+    if (adopted) {
+      await _recordGroundTab(groundId, adopted.tabId, lastUrl);
+      Logger.info('background', `TAB ▸ adopt ${adopted.tabId} for ground ${_slug6(groundId)} (cold-start recovery, ${adopted.exact ? 'exact url' : 'origin'})`);
+      return adopted.tabId;
+    }
+  }
+  // 3. open fresh
+  if (!groundUrl || !/^https?:\/\//i.test(String(groundUrl))) return null;
+  const tab = await new Promise((r) => { try { chrome.tabs.create({ url: String(groundUrl), active: !!active }, (t) => { void chrome.runtime.lastError; r(t || null); }); } catch { r(null); } });
+  const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
+  if (tabId != null) { await _recordGroundTab(groundId, tabId, groundUrl); Logger.info('background', `TAB ▸ opened ${tabId} for ground ${_slug6(groundId)} (recorded)`); }
+  return tabId;
+}
 async function _flushInteractionOutcomes(ctx, { force = false } = {}) {
   if (_traceFlushing) return;
   const pending = _interactionTrace.seq - _traceFlushedSeq;
@@ -206,25 +313,56 @@ function _groundLabel(g) {
 // name — as whole words in the ask. A small stoplist drops generic SLDs ("jobs", "app") that aren't real site names,
 // so the signal stays precise; it only fires on a miss and is confirm-first downstream, so a stray match is harmless.
 const _GROUND_TOKEN_STOP = new Set(['www', 'app', 'web', 'home', 'jobs', 'job', 'search', 'mail', 'login', 'account', 'site', 'page', 'shop', 'store', 'my', 'go', 'get']);
+// The distinctive whole-word tokens that identify a Ground in an ask — the host SLD ("pixabay.com" → "pixabay"),
+// the registrable BRAND (v2.74.835 — malbek.bamboohr.com → "bamboohr"), and a non-generic stored name. The
+// _GROUND_TOKEN_STOP set drops generic SLDs ("jobs", "app") so the signal stays precise. Shared by
+// _askNamesOtherGround (first hit) and _countNamedGrounds (distinct count) so the two can't drift.
+function _groundMatchTokens(g) {
+  const toks = [];
+  const url = (g && (g.url || (Array.isArray(g.urlPatterns) ? g.urlPatterns[0] : ''))) || '';
+  try { const sld = new URL(url).hostname.replace(/^www\./, '').split('.')[0]; if (sld && sld.length >= 4 && !_GROUND_TOKEN_STOP.has(sld.toLowerCase())) toks.push(sld); } catch { /* */ }
+  try { const brand = siteIdentity(url).brand; if (brand && brand.length >= 4 && !_GROUND_TOKEN_STOP.has(brand.toLowerCase())) toks.push(brand); } catch { /* */ }
+  const nm = String((g && (g.name || g.site)) || '').trim();
+  if (nm && nm.length >= 4 && !/^ground$/i.test(nm) && !_GROUND_TOKEN_STOP.has(nm.toLowerCase())) toks.push(nm);
+  return toks;
+}
+function _askMatchesGround(text, g) {
+  for (const t of _groundMatchTokens(g)) {
+    try { if (new RegExp('\\b' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i').test(text)) return true; } catch { /* */ }
+  }
+  return false;
+}
+// v2.74.801 — Does the ask NAME a different known Ground than the one we're on? ("search pixabay for X" while on
+// Indeed.) Used to route a GROUNDED miss to the named site instead of offering to teach it on the wrong one. PURE.
+// Matches by the distinctive tokens above, as whole words; it only fires on a miss and is confirm-first downstream,
+// so a stray match is harmless. Returns the FIRST other Ground named (host-derived label + url for the hop).
 function _askNamesOtherGround(ask, grounds, currentGid) {
   const text = String(ask || '');
   if (!text.trim()) return null;
   for (const g of (Array.isArray(grounds) ? grounds : [])) {
     if (!g || g.id === currentGid) continue;
-    const toks = [];
-    const url = g.url || (Array.isArray(g.urlPatterns) ? g.urlPatterns[0] : '') || '';
-    try { const sld = new URL(url).hostname.replace(/^www\./, '').split('.')[0]; if (sld && sld.length >= 4 && !_GROUND_TOKEN_STOP.has(sld.toLowerCase())) toks.push(sld); } catch { /* */ }
-    // v2.74.835 — ALSO the REGISTRABLE BRAND (groundDedup.siteIdentity): malbek.bamboohr.com → "bamboohr", so "on
-    // BambooHR" resolves a SUBDOMAIN ground by its brand, not just its leading subdomain label ("malbek" — which
-    // matched nothing, so resolution fell to a weak lexical pick and the whole data chain landed on the wrong site).
-    try { const brand = siteIdentity(url).brand; if (brand && brand.length >= 4 && !_GROUND_TOKEN_STOP.has(brand.toLowerCase())) toks.push(brand); } catch { /* */ }
-    const nm = String(g.name || g.site || '').trim();
-    if (nm && nm.length >= 4 && !/^ground$/i.test(nm) && !_GROUND_TOKEN_STOP.has(nm.toLowerCase())) toks.push(nm);
-    for (const t of toks) {
-      try { if (new RegExp('\\b' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i').test(text)) return { groundId: g.id, groundName: _groundLabel(g), groundUrl: url || null }; } catch { /* */ }
+    if (_askMatchesGround(text, g)) {
+      const url = (g.url || (Array.isArray(g.urlPatterns) ? g.urlPatterns[0] : '')) || '';
+      return { groundId: g.id, groundName: _groundLabel(g), groundUrl: url || null };
     }
   }
   return null;
+}
+// v2.74.1005 (2c) — how many DISTINCT known Grounds does this ask name? The Ground-AWARE sibling of orchChain's
+// namesMultipleSites: it matches VERB-OBJECT site names ("search youtube for X and pixabay for Y") that the
+// preposition-only _siteRefs misses, using the SAME token logic as _askNamesOtherGround. Gates the COMPOUND
+// cross-site trigger (chat.js) so an "A and B"-joined two-site ask reaches COMPREHEND_CROSS_GROUND instead of
+// collapsing to ONE Ground via the global path — the 2026-06-12 20:34 silent-half-success bug. PURE.
+function _countNamedGrounds(ask, grounds) {
+  const text = String(ask || '');
+  if (!text.trim()) return 0;
+  const seen = new Set();
+  for (const g of (Array.isArray(grounds) ? grounds : [])) {
+    const gid = g && (g.id || g.groundId);
+    if (!gid || seen.has(gid)) continue;
+    if (_askMatchesGround(text, g)) seen.add(gid);
+  }
+  return seen.size;
 }
 
 // v2.74.808 — A PRONOUN / back-reference value ("it", "that", "the title", "the first result") is a DATA HAND-OFF
@@ -2076,6 +2214,19 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // v2.74.1005 (2c) — Ground-AWARE cross-site precision gate for chat's COMPOUND trigger. Returns how many DISTINCT
+    // known Grounds the ask names (verb-object included — "search youtube for X and pixabay for Y"), which the
+    // chat-side lexical cues (preposition-only namesMultipleSites; transfer-verb _CROSS_SITE_CUE) both miss. Cheap:
+    // a storage read + whole-word regex, NO LLM — chat calls it only for a compound ask the lexical cues missed.
+    COUNT_NAMED_GROUNDS: async (payload, _sender, sendResponse) => {
+      try {
+        const ask = String(payload?.ask ?? '').trim();
+        if (!ask) { sendResponse({ success: true, count: 0 }); return; }
+        const grounds = (await StorageManager.getAllGrounds()) || [];
+        sendResponse({ success: true, count: _countNamedGrounds(ask, grounds) });
+      } catch (err) { sendResponse({ success: false, error: err.message, count: 0 }); }
+    },
+
     // T3X — CROSS-GROUND COMPREHENSION. The recursion one tier up (specs/DESIGN_t3_cross_ground.md): decompose a
     // cross-Ground ask into sub-intents (the SAME page-independent comprehendIntent — "intents all the way down"),
     // resolve which Ground each runs on (T3X-1 ground catalog), bind a Strategy on it (the existing matcher), and
@@ -2434,11 +2585,12 @@ export function createSgMessageHandlers(ctx) {
         const _read = (selector, opts = {}) => new Promise((r) => {
           const msg = opts.positional
             ? { type: 'EXECUTE_STEP', payload: { action: 'EXTRACT', selector, positional: true, fromIndex: opts.fromIndex || 0 } }
-            : { type: 'OBSERVE_RAW_TEXT', payload: { target: selector } };
+            // v2.74.1009 — preferLeadText narrows a list-fall-through container read to its title node (see below).
+            : { type: 'OBSERVE_RAW_TEXT', payload: { target: selector, ...(opts.preferLeadText ? { preferLeadText: true } : {}) } };
           try { chrome.tabs.sendMessage(tabId, msg, { frameId: 0 }, (x) => { void chrome.runtime.lastError; r(x); }); }
           catch (e) { r({ success: false, error: e.message }); }
         }).then((x) => (x && x.success !== false)
-          ? { success: true, extractedValue: (x.extractedValue != null ? x.extractedValue : x.value) }
+          ? { success: true, extractedValue: (x.extractedValue != null ? x.extractedValue : x.value), leadTag: (x && x.leadTag) || null }
           : { success: false, error: x && x.error });
         // (1) PREFERRED — the positional/archetype read: a value-independent selector matching one element per
         //     list item + the captured index ("the first/Nth"). Survives the list reordering / re-skinning.
@@ -2462,7 +2614,11 @@ export function createSgMessageHandlers(ctx) {
           Logger.warn('background', `RUN_OBSERVATION — per-item fromIndex=${fromIndex} requested but ${cap.id} has no archetype selector; the single selector reads the SAME element each iteration (re-capture with a positional pick for per-item reads)`);
         }
         // (2) Single selector — the fallback, and the path for non-list reads. Read via OBSERVE_RAW_TEXT (Verify path).
-        if (!res || res.success === false) res = await _read(ex.selector);
+        //     v2.74.1009 — For a `list` read this fall-through means the archetype isn't per-item (it matched the
+        //     CONTAINER, e.g. the whole Indeed job CARD). preferLeadText narrows that container to its title-like
+        //     lead node (first heading/link) so the value is "IT Support Technician", not the card blob that then
+        //     feeds a downstream search. A no-op for leaf selectors, so scalar reads are unchanged.
+        if (!res || res.success === false) res = await _read(ex.selector, { preferLeadText: cap.outputType === 'list' });
         let recovered = null;
         // (3) Both selectors MISSED → self-heal via the captured landmark's description layer, the SAME
         //     LANDMARK_PROBE_OR_RECOVER path fragments use. The structural selector survives the list
@@ -2498,6 +2654,9 @@ export function createSgMessageHandlers(ctx) {
           return;
         }
         const value = res.extractedValue != null ? String(res.extractedValue) : '';
+        // v2.74.1009 — Surface the container→title narrowing in the trace (leadTag is set only when a list
+        // fall-through read landed on a container and we took its <heading>/<a> lead instead of the full blob).
+        if (res.leadTag) Logger.info('background', `RUN_OBSERVATION — ${cap.id} (list) container read narrowed to <${res.leadTag}> lead text → "${value.slice(0, 60)}"`);
         // (4) HEAL the saved selector ONLY on EXACT-name heuristic recovery: the original selector drifted but
         //     we re-found exactly the same element by accessible name → pin the observation to the recovered
         //     structural selector so the next run is direct (no probe round-trip). Substring / fuzzy / role-only
