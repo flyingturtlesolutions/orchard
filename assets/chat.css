@@ -377,6 +377,25 @@ textarea {
 .dev-history-meta.err  { color: #d2796a; }
 .dev-history-meta.warn { color: #c9a227; }
 
+/* v2.74.1002 — DB-3 permission relay: an inline Allow/Deny card for a non-safe tool the run requested. */
+.dev-approval {
+  margin: 7px 0;
+  padding: 8px 10px;
+  border-radius: 7px;
+  border: 1px solid rgba(201, 162, 39, 0.35);
+  background: rgba(201, 162, 39, 0.07);
+}
+.dev-approval-q { font-size: 12px; font-weight: 600; color: #c9a227; }
+.dev-approval-detail {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px; color: var(--c-text, #e6e6e6);
+  margin: 4px 0 7px; word-break: break-all; white-space: pre-wrap;
+}
+.dev-approval-actions { display: flex; gap: 8px; }
+.dev-approval-verdict { font-size: 12px; font-weight: 600; }
+.dev-approval-verdict.allow { color: #4caf7d; }
+.dev-approval-verdict.deny  { color: #d2796a; }
+
 /* ── Conversation area ───────────────────────────────────────────────────── */
 .conversation {
   flex: 1;

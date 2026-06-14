@@ -23,6 +23,7 @@ const TURNS_SETTING_KEY = 'settings:devBridgeTurns';   // v2.74.978 — per-run 
 const TURNS_DEFAULT = 25;   // v2.74.979 — the value when unset; NO artificial ceiling/floor (the host only checks it's a positive int)
 const APPLIED_SIG_KEY = 'settings:devBridgeAppliedSig';   // v2.74.980 — the working-tree signature as of the last reload (the "applied" baseline)
 const LAST_SESSION_KEY = 'settings:devBridgeLastSession';   // v2.74.985 — the prior run's claude session id; `dev:` resumes it (conversation by default)
+const RELAY_SETTING_KEY = 'settings:devBridgeRelay';   // v2.74.1002 — DB-3 permission relay opt-in (PreToolUse hook → inline approve/deny)
 
 // The decisions filter — VERBATIM from studio.js _DECISION_RE (the source of truth; keep in sync until
 // a shared extraction). Filters the session's log entries down to the signal-only story view that the
@@ -92,6 +93,10 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     try { const v = Math.floor(Number((await chrome.storage.local.get(TURNS_SETTING_KEY))[TURNS_SETTING_KEY])); return (Number.isFinite(v) && v >= 1) ? v : TURNS_DEFAULT; } catch { return TURNS_DEFAULT; }
   };
   const setTurns = async (n) => { try { await chrome.storage.local.set({ [TURNS_SETTING_KEY]: n }); } catch { /* */ } };
+  // v2.74.1002 — DB-3 permission relay opt-in. When on, runs load the relay settings file (PreToolUse hook
+  // → the panel approves/denies each non-safe tool); when off, the proven DB-2 static allowlist is used.
+  const getRelay = async () => { try { return (await chrome.storage.local.get(RELAY_SETTING_KEY))[RELAY_SETTING_KEY] === true; } catch { return false; } };
+  const setRelay = async (v) => { try { await chrome.storage.local.set({ [RELAY_SETTING_KEY]: v === true }); } catch { /* */ } };
   // v2.74.985 — the last run's session id, so `dev:` CONTINUES the conversation by default. Persisted so
   // it survives a panel close. `dev: new` / `dev: reset` clear it to start a fresh thread.
   const getLastSession = async () => {
@@ -329,6 +334,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       case 'history':   // DB-3 (v2.74.1000) — list of recent runs → clickable, replay-on-tap
         renderHistory(Array.isArray(m.runs) ? m.runs : []);
         break;
+      case 'approval':  // DB-3 (v2.74.1002) — the run wants a non-safe tool → inline Allow/Deny
+        _emitApproval(m);
+        break;
       case 'error':
         endRun(`✗ bridge error: ${m.code}${m.message ? ` — ${m.message}` : ''}${m.code === 'busy' ? ' (one run at a time; "dev: pause" to stop it)' : ''}`);
         break;
@@ -404,6 +412,42 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     _follow = true; _wireFollow();
     const { msg, bodyEl, blocks } = devBubble(headline, { persist: false });
     run = { msgEl: msg, msg, bodyEl, blocks, bar: null, sessionId: null, pendingPayload: null, tick: null, replay: true };
+  }
+
+  // ── Permission relay (v2.74.1002, DB-3) ──────────────────────────────────────────────────────────
+  // The host forwards a non-safe tool request as an `approval` frame; render an inline Allow/Deny card in
+  // the active run bubble. The host writes the decision back to the hook, which is blocked polling for it.
+  function _approvalSummary(tool, input) {
+    input = input || {};
+    if (tool === 'Bash') return input.command || '(no command)';
+    const v = input.file_path ?? input.path ?? input.pattern ?? input.url ?? input.command ?? '';
+    return v ? String(v) : JSON.stringify(input).slice(0, 200);
+  }
+  function _emitApproval(m) {
+    const hostEl = (run && run.bodyEl) || devBubble('', { persist: false }).bodyEl;
+    if (!hostEl) return;
+    const card = document.createElement('div');
+    card.className = 'dev-approval';
+    const q = document.createElement('div'); q.className = 'dev-approval-q';
+    q.textContent = `Approve  ${m.tool || 'tool'} ?`;
+    const detail = document.createElement('div'); detail.className = 'dev-approval-detail';
+    detail.textContent = _approvalSummary(m.tool, m.input);
+    const actions = document.createElement('div'); actions.className = 'dev-approval-actions';
+    let decided = false;
+    const decide = (decision) => {
+      if (decided) return; decided = true;
+      try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'approval-decision', id: m.id, decision }); } catch { /* */ }
+      actions.remove();
+      const verdict = document.createElement('span');
+      verdict.className = `dev-approval-verdict ${decision}`;
+      verdict.textContent = decision === 'allow' ? '✓ allowed' : '✗ denied';
+      card.appendChild(verdict);
+    };
+    actions.appendChild(mkBtn('Allow', () => decide('allow')));
+    actions.appendChild(mkBtn('Deny', () => decide('deny')));
+    card.appendChild(q); card.appendChild(detail); card.appendChild(actions);
+    hostEl.appendChild(card);
+    try { _anchor(); } catch { /* */ }
   }
 
   // Render the `history` reply: a clickable list of recent runs; a row replays that journal read-only.
@@ -513,6 +557,20 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       return true;
     }
 
+    // DB-3 (v2.74.1002) — `dev: relay` shows the state; `dev: relay on|off` toggles the permission relay.
+    // ON → each run gates non-safe tools through an inline Allow/Deny in the panel (a PreToolUse hook);
+    // OFF → the static DB-2 allowlist (safe tools only; anything else auto-denied). Safe tier auto-allows
+    // either way. Takes effect on the next run.
+    if (lower === 'dev: relay' || /^dev: relay /.test(lower)) {
+      appendMessage({ role: 'user', body: t });
+      const arg = lower === 'dev: relay' ? '' : lower.slice('dev: relay '.length).trim();
+      if (!arg) { devBubble(`permission relay: ${(await getRelay()) ? 'ON — non-safe tools prompt for Allow/Deny' : 'OFF — non-safe tools auto-denied (DB-2 allowlist)'}.\ntoggle with \`dev: relay on|off\`.`); return true; }
+      if (arg !== 'on' && arg !== 'off') { devBubble('usage: `dev: relay on` or `dev: relay off`.'); return true; }
+      await setRelay(arg === 'on');
+      devBubble(`permission relay → ${arg.toUpperCase()}. Takes effect on the next run.${arg === 'on' ? ' Non-safe tools (git, network, plain shell…) will ask you inline.' : ''}`);
+      return true;
+    }
+
     // v2.74.976 — `dev: model` shows the current pick; `dev: model <alias>` sets it (next run uses it).
     if (lower === 'dev: model' || /^dev: model /.test(lower)) {
       appendMessage({ role: 'user', body: t });
@@ -545,7 +603,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       const model = await getModel();
       const maxTurns = await getTurns();
       startRun(
-        { v: PROTOCOL_V, type: 'run', verb: 'gl', attachments: att ? [att] : [], model, maxTurns },
+        { v: PROTOCOL_V, type: 'run', verb: 'gl', attachments: att ? [att] : [], model, maxTurns, relay: await getRelay() },
         att ? `gl · shipping ${att.filename} + analyzing…` : 'gl · no decision lines this session — analyzing the newest trace already in logs/run/…',
       );
       return true;
@@ -565,7 +623,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       const model = await getModel();
       const maxTurns = await getTurns();
       startRun(
-        { v: PROTOCOL_V, type: 'run', verb: 'bug', text: report, attachments: att ? [att] : [], model, maxTurns },
+        { v: PROTOCOL_V, type: 'run', verb: 'bug', text: report, attachments: att ? [att] : [], model, maxTurns, relay: await getRelay() },
         att ? `bug · ${_short(report, 56)} (+ ${att.filename})` : `bug · ${_short(report, 70)}`,
       );
       return true;
@@ -587,13 +645,13 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       const isNew = /^new\b/i.test(rest);
       const ask = isNew ? rest.replace(/^new\b[:\s]*/i, '').trim() : rest;
       appendMessage({ role: 'user', body: t });
-      if (!ask) { devBubble('usage: `dev: <reply>` (continues / resumes the thread) · `dev: new <task>` (fresh) · `gl` · `bug: <what broke>` · `dev: pause` (stop, keep session) · `dev: history` (recent runs) · `dev: model|turns <…>` · `dev: reset` · `dev: off`'); return true; }
+      if (!ask) { devBubble('usage: `dev: <reply>` (continues / resumes the thread) · `dev: new <task>` (fresh) · `gl` · `bug: <what broke>` · `dev: pause` (stop, keep session) · `dev: history` (recent runs) · `dev: relay on|off` (inline approvals) · `dev: model|turns <…>` · `dev: reset` · `dev: off`'); return true; }
       if (run) { devBubble('a bridge run is already live — `dev: pause` to stop it.'); return true; }
       const model = await getModel();
       const maxTurns = await getTurns();
       const resumeSessionId = isNew ? null : await getLastSession();
       if (isNew) await clearLastSession();   // the fresh run will record its own session on done
-      const payload = { v: PROTOCOL_V, type: 'run', verb: 'dev', text: ask, model, maxTurns };
+      const payload = { v: PROTOCOL_V, type: 'run', verb: 'dev', text: ask, model, maxTurns, relay: await getRelay() };
       if (resumeSessionId) payload.resumeSessionId = resumeSessionId;
       startRun(payload, `dev${resumeSessionId ? ' (continuing)' : isNew ? ' (new thread)' : ''} · ${_short(ask, 80)}`);
       return true;

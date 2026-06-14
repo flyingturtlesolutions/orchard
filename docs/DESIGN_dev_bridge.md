@@ -172,9 +172,28 @@ Headless `-p` cannot answer permission prompts, so each slice declares its polic
   `permissions.allow` with the CLI `--allowedTools`. The run is also pinned to `--permission-mode
   default` so the allowlist actually binds (without it a `bypassPermissions` global default silently
   disables the gate, letting the agent reach git/arbitrary shell).
-- **DB-3 (HITL relay):** replace the blanket allowlist with `--permission-prompt-tool` → an MCP tool the
-  host serves → permission requests stream to the panel → the user approves/denies inline, exactly like
-  the terminal. The panel becomes the permission UI; unusual tool calls stop being pre-authorized.
+- **DB-3 (HITL relay):** replace the blanket allowlist so permission requests stream to the panel → the
+  user approves/denies inline, exactly like the terminal. The panel becomes the permission UI; unusual
+  tool calls stop being pre-authorized.
+
+  > **⚠ Mechanism corrected by a spike (v2.74.1001).** The original plan — `--permission-prompt-tool` →
+  > an MCP tool the host serves — is **NOT viable on the shelled CLI** (claude 2.1.177). Verified
+  > (`bridge/approver.js` + `approvertest.cjs`): the flag is accepted and the MCP server loads + registers
+  > `approval_prompt` (init/tools-list handshake completes), but in `-p` mode the prompt tool is **never
+  > invoked** and a non-allowed tool runs anyway — adding the flag flipped Bash from *denied* (DB-2
+  > default-mode behavior) to *allowed without prompting*. **Fail-open — the worst outcome for a gate.**
+  > (`--permission-prompt-tool` is really an Agent-SDK `canUseTool` feature; we deliberately shell the CLI
+  > for behavioral parity, §3.2, so the SDK is not an option.)
+  >
+  > **The viable path: a `PreToolUse` hook.** Verified (`bridge/denyhook.js` + `hooktest.cjs`): a
+  > `PreToolUse` hook configured in the `--settings` file FIRES in `-p` mode and its `permissionDecision:
+  > "deny"` **is honored** (Bash blocked with the hook's reason; the agent then tried `PowerShell`, which
+  > was unmatched → allowed — so the matcher must be broad, `*`/all-tools, not a single tool). Design for
+  > the relay: a broad-matcher `PreToolUse` hook whose command is a tiny relay client — auto-`allow` for
+  > the safe tier (Read/Grep/Glob/scoped Bash), else write the request to `logs/bridge/` + BLOCK polling
+  > for a response while the host forwards it to the panel (new approval frame) and writes back the user's
+  > click. Hooks run as commands and claude waits for them, so the synchronous block IS the HITL pause.
+  > Build deferred to its own slice; the spike de-risked it and fixed the mechanism here.
 
 ## 7. Panel UX
 
@@ -238,7 +257,13 @@ at spawn; there is no live stdin channel for "do this instead." So the bridge ap
   control + `dev: pause` kill the process but keep the session (`pauseRun` host verb, `cancel` kept as an
   alias), and resume-with-redirect is the conversational `dev: <redirect>` that already `--resume`s the
   last session (.985) — so the "redirect input" is the verb itself, not a separate widget. *Still open:*
-  cost-footer polish, permission relay replacing the blanket allowlist.
+  cost-footer polish; **permission relay — LANDED (v2.74.1002), opt-in:** `dev: relay on` makes each run
+  gate every non-safe tool through an inline Allow/Deny in the panel (a broad-matcher `PreToolUse` hook →
+  host `watchPerm` → `approval` frame → `approval-decision` → response file the hook is polling); the safe
+  tier (Read/Grep/Glob/Edit/Write/scoped Bash) auto-allows, timeout denies (fail-safe). Verified end to
+  end with real claude runs (`bridge/permtest.cjs` core, `bridge/relaytest.cjs` host integration): a hook
+  `allow` even GRANTS a tool default mode would deny, `deny` blocks it. Mechanism corrected from the
+  original `--permission-prompt-tool` (fail-open on the CLI) — see §6.
   **Run history — landed (v2.74.1000):** `dev: history` (alias `dev: runs`) lists the last 20 runs (a
   per-run `<ts>.meta.json` sidecar gives verb + prompt preview + model that the stream-json journal lacks;
   the result/cost/turns come from the journal tail) and tapping a row replays that journal read-only via

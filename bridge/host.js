@@ -51,16 +51,23 @@ function turnsFor(n) {
 // pick up spaces from the user's home dir.
 const SETTINGS_FILE = path.join(BRIDGE_DIR, 'db2-permissions.json');
 const SETTINGS_REL = 'logs/bridge/db2-permissions.json';
+// DB-3 permission relay (v2.74.1002) — a SECOND settings file that ALSO registers the PreToolUse hook
+// (bridge/permhook.js). A `relay` run loads this instead of db2-permissions.json: the hook becomes the
+// gate (auto-allow the safe tier, relay everything else to the panel for approve/deny — verified by
+// bridge/permtest.cjs that a hook `allow` even grants a tool default mode would deny). The perm request/
+// response files live under logs/bridge/perm/. Relay is opt-in; default runs keep the DB-2 allowlist.
+const RELAY_SETTINGS_FILE = path.join(BRIDGE_DIR, 'db3-relay-settings.json');
+const RELAY_SETTINGS_REL = 'logs/bridge/db3-relay-settings.json';
+const PERM_DIR = path.join(BRIDGE_DIR, 'perm');
+const PERMHOOK = path.join(REPO, 'bridge', 'permhook.js');
 
 // The FIXED base command (see invariant above — no user text is ever concatenated into this). The
-// `--max-turns <n>` (clamped int) and `--model <id>` (frozen allowlist) flags are appended host-side.
-// v2.74.988 — `--permission-mode default` makes the allowlist actually BIND. Without it the run inherits
-// the user's global default, and on a bypassPermissions machine that silently disables the gate entirely
-// (the agent could then run git / arbitrary shell, breaking the no-commit trust rule). In -p mode default
-// mode never hangs: an unlisted tool is auto-denied and the agent adapts. `--settings` adds the DB-2 Bash.
+// `--settings`, `--max-turns <n>` (clamped int) and `--model <id>` (frozen allowlist) flags are appended
+// host-side in startRun. v2.74.988 — `--permission-mode default` makes the gate actually BIND (without it
+// a bypassPermissions global default silently disables it). In -p mode default never hangs: an unlisted
+// tool is auto-denied (or, with relay on, routed to the PreToolUse hook) and the agent adapts.
 const CLAUDE_CMD = 'claude -p --output-format stream-json --verbose --permission-mode default'
-  + ' --allowedTools Read Grep Glob Edit Write'
-  + ` --settings ${SETTINGS_REL}`;
+  + ' --allowedTools Read Grep Glob Edit Write';
 
 // v2.74.976 — model selection WITHOUT breaking the no-user-text-on-the-command-line invariant: the panel
 // sends a short ALIAS, and ONLY a value from this fixed table is ever appended to the command (`--model
@@ -84,6 +91,14 @@ for (const d of [BRIDGE_DIR, RUN_DIR]) { try { fs.mkdirSync(d, { recursive: true
 // rewritten on every host launch so a deleted/edited file self-heals. permissions.allow UNIONS with the
 // CLI --allowedTools, adding exactly `npm test …` and `node …` — still no git, no network, no plain shell.
 try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ permissions: { allow: ['Bash(npm test:*)', 'Bash(node:*)'] } }, null, 2)); } catch { /* */ }
+// DB-3 (v2.74.1002) — the relay settings file: same allowlist PLUS the PreToolUse hook that routes every
+// non-safe tool to the panel for approval. Quoted absolute path (handles spaces); forward slashes so the
+// JSON has no backslash-escaping surprises and the shell runs node fine on Windows.
+try { fs.writeFileSync(RELAY_SETTINGS_FILE, JSON.stringify({
+  permissions: { allow: ['Bash(npm test:*)', 'Bash(node:*)'] },
+  hooks: { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: `node "${PERMHOOK.replace(/\\/g, '/')}"` }] }] },
+}, null, 2)); } catch { /* */ }
+try { fs.mkdirSync(PERM_DIR, { recursive: true }); } catch { /* */ }
 
 function log(line) {
   const msg = `${new Date().toISOString()} ${line}\n`;
@@ -176,6 +191,33 @@ function handleStatus() {
   const l = activeLock();
   if (l && l.journal) { log(`reattach: re-tailing pid=${l.pid} journal=${path.basename(l.journal)}`); tailJournal(l.journal, l.pid); }
 }
+
+// DB-3 permission relay (v2.74.1002) — watch logs/bridge/perm for hook-written requests and forward each
+// to the panel as an `approval` frame; the panel's `approval-decision` is written back as a resp file the
+// hook is polling. Runs continuously while the host is alive (the hook only writes requests on relay runs,
+// so this is idle otherwise). One pending request at a time in practice (claude awaits the hook).
+const _seenPerm = new Set();
+function watchPerm() {
+  let files = [];
+  try { files = fs.readdirSync(PERM_DIR).filter((f) => f.endsWith('.req.json')); } catch { return; }
+  for (const rf of files) {
+    const id = rf.slice(0, -('.req.json'.length));
+    if (_seenPerm.has(id)) continue;
+    _seenPerm.add(id);
+    let req = null;
+    try { req = JSON.parse(fs.readFileSync(path.join(PERM_DIR, rf), 'utf8')); } catch { continue; }
+    log(`perm request ${id} tool=${req && req.tool_name}`);
+    send({ v: PROTOCOL_V, type: 'approval', id, tool: req ? req.tool_name : '?', input: req ? req.tool_input : {}, ts: req ? req.ts : Date.now() });
+  }
+  if (_seenPerm.size > 200) { for (const id of _seenPerm) { if (!files.includes(`${id}.req.json`)) _seenPerm.delete(id); } }   // GC resolved ids
+}
+function writePermResp(msg) {
+  const id = String(msg.id || '');
+  if (!/^[0-9_]+$/.test(id)) return;   // ids are `${Date.now()}_${pid}` — reject anything else (no path traversal)
+  const decision = msg.decision === 'allow' ? 'allow' : 'deny';
+  try { fs.writeFileSync(path.join(PERM_DIR, `${id}.resp.json`), JSON.stringify({ id, decision, reason: 'panel' })); log(`perm decision ${id} → ${decision}`); } catch { /* */ }
+}
+setInterval(watchPerm, 250).unref?.();
 
 // DB-3 run history (v2.74.1000) — cheap peek at a journal: model + first assistant text from the head,
 // the result summary from the tail. Read-only, bounded reads (journals can be hundreds of KB).
@@ -388,7 +430,10 @@ function startRun(msg) {
   // touches the command line — a non-UUID is ignored (fresh run), never interpolated.
   const _sid = String(msg.resumeSessionId ?? '');
   const resumeFlag = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(_sid) ? ` --resume ${_sid}` : '';
-  const cmd = CLAUDE_CMD + ` --max-turns ${turns}` + resumeFlag + modelFlag(msg.model);
+  // v2.74.1002 — a `relay` run loads the relay settings file (PreToolUse hook → panel approval) instead of
+  // the static DB-2 allowlist. Both are host-built relative paths; no panel text on the command line.
+  const settingsRel = msg.relay ? RELAY_SETTINGS_REL : SETTINGS_REL;
+  const cmd = CLAUDE_CMD + ` --settings ${settingsRel} --max-turns ${turns}` + resumeFlag + modelFlag(msg.model);
   let child;
   try {
     // cmd /d /s /c <FIXED literal> — the prompt goes to STDIN, never the command line (see header).
@@ -490,6 +535,7 @@ async function handle(msg) {
     case 'cancel':    send(pauseRun()); break;   // back-compat alias (DB-3, v2.74.992)
     case 'history':   send(historyReply()); break;                 // DB-3 run history (v2.74.1000)
     case 'history-open': replayJournal(msg.journal); break;        // replay one journal read-only
+    case 'approval-decision': writePermResp(msg); break;           // DB-3 permission relay (v2.74.1002)
     case 'run':       startRun(msg); break;
     default:          send({ v: PROTOCOL_V, type: 'error', code: 'unknown-type', got: msg.type });
   }
