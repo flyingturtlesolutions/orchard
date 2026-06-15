@@ -6,6 +6,17 @@
 .tmp*
 __*.mjs
 __*.cjs
+# Chrome RESERVES "_"-prefixed names at the extension root — ANY such file makes the whole unpacked
+# extension fail to load ("Filenames starting with _ are reserved"). The repo root IS the extension root
+# (no build step), so a stray `_tmp_*.mjs` probe at root breaks loading. Root-anchored, so bridge/ etc.
+# are unaffected; a legit `_`-file can't exist at root anyway. NB: this keeps scratch OUT OF GIT but an
+# untracked `_`-file still breaks the load until deleted — write probes to the TEMP dir, not the repo root.
+/_*
+
+# Local env config (FORGE_REPO_PATH etc.) — never commit; example stays tracked
+/.env
+/.env.*
+!/.env.example
 
 # Claude Code local state (memory, session projects) — user-specific
 .claude/

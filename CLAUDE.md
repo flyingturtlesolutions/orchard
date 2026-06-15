@@ -1,0 +1,45 @@
+# CLAUDE.md — Orchard (pkg `ahub`)
+
+Chrome side-panel agent that learns to operate websites. MV3 extension; no build step (source loads directly).
+
+## Commands
+- **Test (the gate):** `npm test` — node harness over `Core/*.test.js`, `Services/*.test.js`, `Services/Engine/*.test.js`. Must stay green (currently 808 passing).
+- **Syntax-check edited JS:** `node --check <file>` before relying on a change (ESM files: `node --input-type=module --check < <file>`).
+- **Scratch goes to the OS temp dir, never the repo root.** The repo root IS the unpacked-extension root (no build step), and Chrome refuses to load a directory containing any `_`-prefixed file (`_metadata`/`_locales` are reserved) — so a stray `_tmp_*.mjs` probe at root breaks `Load unpacked` entirely. Write probes/one-offs to `%TEMP%` (e.g. `C:\Users\Divine\AppData\Local\Temp`). `.gitignore` ignores root `/_*` so they can't be committed, but an untracked one still blocks the load until deleted.
+- **Version:** bump `manifest.json` (`v2.74.X`) on every behavior change — it's the join key between `logs/build/` (the conversation), `logs/run/` (traces + `findings.md`), and commit messages. Never ship a behavior change without a bump.
+- **`bcp`** = bug pass → commit → push (diff review + syntax + `npm test`, then commit/push only on green).
+
+## Layout
+`Core/` engine + matching · `Services/` (incl. `Services/Chat/`, `Services/Engine/`) · `background/` (SW + `background/handlers/`, e.g. `sg.js`, `explore.js`) · `Studio/` + `studio.js` · `Sidepanel/` · `ContentScripts/` · `docs/` design specs · `logs/` git-ignored build/run journals.
+
+---
+
+# Invariants — add to these, don't relearn them
+
+Two failure *families* below have each been re-diagnosed from scratch several times (see `logs/run/findings.md`). They are checklist-shaped: a new code path silently breaks an observability contract that no test covers. Before finishing any change that touches the listed trigger, confirm the paired rule.
+
+## 1. New decision marker → add it to `_DECISION_RE`
+**Trigger:** you add or rename a decision-worthy log marker (anything a `-decisions-` download should surface — `ROUTE ▸`, `ORCH_MATCH`, `WALK ▸`, `RICH_INTENTS ▸`, `INTENT_MENU ▸`, `ACCEPT_SG_TRIAL`, `INTERACTION_OUTCOMES ▸`, etc.).
+
+**Rule:** add the new marker to `_DECISION_RE` (`studio.js:5888`). The decisions-view filter is an explicit allow-list — a marker absent from it is **structurally invisible** to a `gl -decisions-` download, so the feature it's meant to verify can only be confirmed from a FULL trace.
+
+**Why this keeps biting (the "#165 lesson"):** missed at v2.74.818 (`MERGE_GROUNDS`), .832 (`WALK ▸`), .882 (`bindClauseParams`), .898 (four new markers at once — intent-menu / rich-intents / hetero-strategies all unverifiable from a decisions download). Same class every time. The fix is one line; the cost of forgetting is a blind verification run.
+
+## 2. New engine-driven click emitter → busy-mark its tab
+**Trigger:** you add a code path where the **engine** (not the user) drives clicks/types/navigation on a tab — replay, trial, sweep, workflow invoke, walk teach-step, etc.
+
+**Rule:** wrap the driven span with `markEngineBusy(tabId, true)` / `…false` (exported from `background/handlers/sg.js:122`; refcounted via `_busyTab`, always in a `try/finally` so it unmarks on every exit). Engine clicks then drop from the interaction monitor as `dropped: 'engine-run'` instead of polluting the trace / C4 / C5 as phantom `INTERACTION hit/miss` lines.
+
+**Exception — do NOT suppress the observation/demonstration recorder.** When the *user* is demonstrating a capability, those clicks ARE the signal; busy-marking them would erase the recording. Suppress engine-synthesized clicks only.
+
+**Why this keeps biting:** discovered one emitter at a time — `REPLAY_SG_CAPABILITY` (.908) → `EXPLORE_PAGE_STRUCTURE` sweep (.911) → `RUN_SG_TRIAL` (.912) → `INVOKE_WORKFLOW` (flagged .966, distinct dispatch path). Each new driver re-introduced the same monitor pollution. Treat busy-marking as part of the definition of "engine drives a tab," not a follow-up.
+
+---
+
+# Working conventions (from the build/run loop)
+
+- **The loop is `build → gl (download trace) → diagnose → fix + bump → re-verify → publish digest`.** `findings.md` is the system-of-record for *why* a fix happened (symptom → cause → change); commit messages + `manifest` version are the system-of-record for *what*. When you fix something a trace surfaced, add/append the `findings.md` entry.
+- **Publish the progress digest at pass-end.** After appending the `findings.md` entry, run `node tools/progress-digest/digest.cjs --post` (reads `FORGE_REPO_PATH` from env/`.env`). It derives a **meta-only** summary — schema fields only, never source/paths/identifiers/raw findings — and commits + pushes it to the Forge catalog (`project-catalog/digests/webpilot.md`, overwritten in place; git history is the timeline). **Fail-safe:** any git/offline failure warns one line and never blocks the pass; missing `FORGE_REPO_PATH` skips. Preview safely with `--dry-run`; standalone self-test `node tools/progress-digest/digest.test.cjs`. Lives in `tools/` (local toolchain, never the shipped extension bundle — it holds git push, the extension must not). For cleaner judgment fields, drop a `DIRECTION:` / `LESSON[tag]:` / `DIGEST_MILESTONE:` / `DIGEST_BLOCKER:` / `DIGEST_NEXT:` line into the findings entry (lightly scrubbed; the auto-extracted markers are heavy-scrubbed and choppy). *(Currently manual `--post`; an auto Stop-hook will replace it after a few clean passes.)*
+- **Verification honesty:** state plainly what was proven (syntax, `npm test`, headless harness) vs. what still needs a live eyeball (panel UI / DOM feel / cross-reload survival can't be confirmed headless — say so rather than implying it's done).
+- **Injection boundary:** untrusted page-derived strings must stay on the escape-first render path (`renderMarkdown` HTML-escapes before parsing); host commands are validated before reaching the command line (see `docs/DESIGN_injection_boundary.md`). Don't widen the trust surface without saying so.
+- **Trust rules for the dev-bridge:** the bridge runs `claude` under a scoped allowlist in `--permission-mode default`; no `git`, no arbitrary Bash beyond the DB-2 allowlist (`Bash(npm test:*)`, `Bash(node:*)`). Don't relax these silently.
