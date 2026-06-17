@@ -7,9 +7,13 @@
 // INVARIANTS (the spec's trust rules, enforced here):
 //   • stdout is the PROTOCOL channel — host diagnostics go to logs/bridge/host.log + stderr, never stdout.
 //   • The host writes ONLY under logs/ (trace attachments → logs/run/, journals/lock → logs/bridge/).
-//   • User text NEVER touches a shell command line: the spawned `claude -p` command is a FIXED literal;
-//     the prompt is written to the child's STDIN (print mode reads it), so there is no quoting/injection
-//     surface no matter what the panel sends.
+//   • The prompt is written to the child's STDIN (print mode reads it), so user *prompt* text has no
+//     command-line quoting/injection surface no matter what the panel sends. claude's args are passed as
+//     DISCRETE argv elements (never one concatenated string), so the host does NO shell interpolation; every
+//     appended value is host-validated (settings path · clamped int · strict-UUID · frozen model id). The one
+//     user-DERIVED value on the command line is the DBR-5 concern (--append-system-prompt), and only after
+//     concern.cjs sanitizes it to an inert single-line label — i.e. "validated before reaching the command
+//     line" (CLAUDE.md), not free panel text.
 //   • DB-1 allowlist: Read, Grep, Glob, Edit, Write — no Bash, no git (commits stay human, spec §2/§6).
 //   • Spawn + journal (§3.3): the run journals to logs/bridge/ and is tracked by a child-pid lock; a
 //     fresh host reads active.json + the journal to catch up. Survival across host death is BEST-EFFORT
@@ -24,6 +28,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
 const gitOps = require('./gitOps.cjs');   // DBR-1 — the parameter-validated dev-branch git allowlist (§3)
+const { buildConcernContract } = require('./concern.cjs');   // DBR-5 — the per-spawn scope-contract builder (§8.2)
 
 const PROTOCOL_V = 1;
 const REPO = path.resolve(__dirname, '..');
@@ -475,16 +480,32 @@ function startRun(msg) {
   // v2.74.1002 — a `relay` run loads the relay settings file (PreToolUse hook → panel approval) instead of
   // the static DB-2 allowlist. Both are host-built relative paths; no panel text on the command line.
   const settingsRel = msg.relay ? RELAY_SETTINGS_REL : SETTINGS_REL;
-  const cmd = CLAUDE_CMD + ` --settings ${settingsRel} --max-turns ${turns}` + resumeFlag + modelFlag(msg.model);
+  // DBR-5 (v2.74.1037, DESIGN §8.2) — re-pass the dev conversation's scope contract on EVERY spawn (initial
+  // AND --resume — the system prompt is rebuilt per-invocation, so without this the guardrail lapses after
+  // turn 1). The concern is USER-DERIVED: concern.cjs sanitizes it to an inert single-line label, and it is
+  // passed as a DISCRETE argv element (below), never concatenated into a command string.
+  const contract = buildConcernContract(msg.concern);
+  // Build claude's args as DISCRETE argv ELEMENTS, not one concatenated string. cmd.exe /d /s /c re-parses the
+  // line, so a multi-word value packed into a single command string gets split on spaces with literal \"
+  // fragments (the .988 --allowedTools mangling — verified); discrete elements survive intact AND remove all
+  // host-side shell interpolation, which is what lets --append-system-prompt carry the (sanitized) concern
+  // safely. The base tokens are space-free so splitting CLAUDE_CMD is safe; every appended value is host-
+  // validated (settings path · clamped int · strict-UUID · frozen model id · sanitized concern).
+  const claudeArgv = CLAUDE_CMD.split(' ').filter(Boolean);
+  claudeArgv.push('--settings', settingsRel, '--max-turns', String(turns));
+  if (resumeFlag) claudeArgv.push('--resume', _sid);                 // _sid: strict-UUID validated above
+  const _mf = modelFlag(msg.model).trim();                           // '--model <id>' (frozen table) or ''
+  if (_mf) claudeArgv.push(..._mf.split(' '));
+  if (contract) { claudeArgv.push('--append-system-prompt', contract); log(`CONCERN ▸ scope contract injected (${Buffer.byteLength(contract, 'utf8')}B)`); }
   let child;
   try {
-    // cmd /d /s /c <FIXED literal> — the prompt goes to STDIN, never the command line (see header).
-    // v2.74.974 — NO `detached`: on Windows, DETACHED_PROCESS gives cmd no console and the .cmd-shim
-    // chain (claude.cmd → node) loses its redirected stdout ENTIRELY — the first live gl run journaled
-    // 0 bytes and died as `host-lost` (flag matrix: plain ✓, windowsHide ✓, detached ✗). Survival on
-    // port-close is therefore BEST-EFFORT (Windows children outlive parents unless Chrome's job object
-    // says otherwise) — the DB-3 reattach slice owns making that a guarantee.
-    child = spawn('cmd.exe', ['/d', '/s', '/c', cmd], {
+    // cmd.exe /d /s /c claude … — args as DISCRETE elements (Node escapes each); the prompt still goes to
+    // STDIN, never the command line. v2.74.974 — NO `detached`: on Windows, DETACHED_PROCESS gives cmd no
+    // console and the .cmd-shim chain (claude.cmd → node) loses its redirected stdout ENTIRELY — the first
+    // live gl run journaled 0 bytes and died as `host-lost` (flag matrix: plain ✓, windowsHide ✓, detached ✗).
+    // Survival on port-close is therefore BEST-EFFORT (Windows children outlive parents unless Chrome's job
+    // object says otherwise) — the DB-3 reattach slice owns making that a guarantee.
+    child = spawn('cmd.exe', ['/d', '/s', '/c', ...claudeArgv], {
       cwd: REPO, windowsHide: true,
       stdio: ['pipe', outFd, errFd],
     });

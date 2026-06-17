@@ -30,7 +30,7 @@ const RELAY_SETTING_KEY = 'settings:devBridgeRelay';   // v2.74.1002 — DB-3 pe
 // The decisions filter — VERBATIM from studio.js _DECISION_RE (the source of truth; keep in sync until
 // a shared extraction). Filters the session's log entries down to the signal-only story view that the
 // gl convention prefers. v2.74.1022 — re-synced to studio.js (added FOCUS ▸ / CLARIFY ▸ / CLOSE_TABS ▸).
-const DECISION_RE = /(▶ RUN |[✓✗] RUN |COMPREHEND_CROSS_GROUND ▸|T3X resolve ▸|T3X bind ▸|_bind ▸|GROUNDS ▸|ROUTE ▸|HANDOFF ▸|postcond ▸|ORCH_MATCH ▸|ORCH_MATCH_GLOBAL ▸|DETECT_DUPLICATE_GROUNDS ▸|MERGE_GROUNDS ▸|mergeGround |Ground saved:|Ground deleted:|→ (?:auto|propose|miss)\/|RUN_OBSERVATION|RUN_BEST_OBSERVATION|ORCH_RECORD_ALIAS|ORCH_ADMIN ▸|REPLAY_SG_CAPABILITY —|— bindings:|CLICK caused navigation|WALK ▸|LOOP ▸|ORCH_PLAN ▸|OPEN_URL_NEW_TAB —|REVERIFY_SG_CAPABILITY —|ROUTE_ASK "|bindClauseParams →|locale-fresh-skip|locale-trust:|EXPLORE_PAGE_STRUCTURE done|RUN_SG_TRIAL|INTERACTION_MONITOR_START|INTENT_MENU ▸|RICH_INTENTS ▸|ACCEPT_SG_TRIAL|INTERACTION_OUTCOMES ▸|proposeRichIntents —|ensureGroundForUrl|EXPLORE ▸|STOP ▸|FOCUS ▸|CLARIFY ▸|CLOSE_TABS ▸|DEVBR ▸|LT ▸)/;
+const DECISION_RE = /(▶ RUN |[✓✗] RUN |COMPREHEND_CROSS_GROUND ▸|T3X resolve ▸|T3X bind ▸|_bind ▸|GROUNDS ▸|ROUTE ▸|HANDOFF ▸|postcond ▸|ORCH_MATCH ▸|ORCH_MATCH_GLOBAL ▸|DETECT_DUPLICATE_GROUNDS ▸|MERGE_GROUNDS ▸|mergeGround |Ground saved:|Ground deleted:|→ (?:auto|propose|miss)\/|RUN_OBSERVATION|RUN_BEST_OBSERVATION|ORCH_RECORD_ALIAS|ORCH_ADMIN ▸|REPLAY_SG_CAPABILITY —|— bindings:|CLICK caused navigation|WALK ▸|LOOP ▸|ORCH_PLAN ▸|OPEN_URL_NEW_TAB —|REVERIFY_SG_CAPABILITY —|ROUTE_ASK "|bindClauseParams →|locale-fresh-skip|locale-trust:|EXPLORE_PAGE_STRUCTURE done|RUN_SG_TRIAL|INTERACTION_MONITOR_START|INTENT_MENU ▸|RICH_INTENTS ▸|ACCEPT_SG_TRIAL|INTERACTION_OUTCOMES ▸|proposeRichIntents —|ensureGroundForUrl|EXPLORE ▸|STOP ▸|FOCUS ▸|CLARIFY ▸|CLOSE_TABS ▸|DEVBR ▸|LT ▸|CONCERN ▸)/;
 
 function _fmtEntry(entry) {
   const time = entry.timestamp
@@ -132,6 +132,25 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   // v2.74.1034 (DBR-2) — the resume target for a dev conversation is its OWN session (per-conversation), via
   // devResumeSession on the conversation record; falls back to null if the conversation/session is gone.
   const _convResume = async (id) => { try { return devResumeSession(await ConversationStore.load(id)); } catch { return null; } };
+  // DBR-5 (v2.74.1037, DESIGN §8.2) — trim an ask to a one-line concern LABEL (collapse whitespace, cap length).
+  const _conciseConcern = (ask) => String(ask ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  // DBR-5 — the concern DEFAULTS to the first real ask. Capture it on the dev conversation once (never
+  // overwrite an existing/edited concern), and return the EFFECTIVE concern for THIS spawn so the run payload
+  // carries it. Pass `ask` for a real task (sets it if unset); pass null for non-task runs (just reads it).
+  // The host builds the scope contract from this and re-injects on every spawn (initial + resume).
+  const _ensureConcern = async (id, ask = null) => {
+    if (!id) return null;
+    try {
+      const conv = await ConversationStore.load(id);
+      if (!conv || conv.kind !== 'dev') return null;
+      let concern = typeof conv.concern === 'string' ? conv.concern.trim() : '';
+      if (!concern && ask) {
+        concern = _conciseConcern(ask);
+        if (concern) await ConversationStore.patchMeta(id, { concern }).catch(() => { /* */ });
+      }
+      return concern || null;
+    } catch { return null; }
+  };
   // v2.74.980 — the working-tree signature stamped at the last reload (the "applied" baseline). Persisted
   // so it survives the chrome.runtime.reload() that the reload icon triggers — that survival is the whole
   // point: the post-reload diffstat compares against it to decide whether anything is still pending.
@@ -809,6 +828,24 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       return true;
     }
 
+    // DBR-5 (v2.74.1037, DESIGN §8.2) — `dev: concern` shows this conversation's scope; `dev: concern <text>`
+    // edits it. The concern defaults to the first ask (captured on dispatch); editing it changes the scope
+    // contract the host re-injects on the NEXT spawn. (DBR-6 surfaces the same edit in the header.)
+    if (lower === 'dev: concern' || /^dev: concern /.test(lower)) {
+      echoUser();
+      const arg = t.replace(/^dev:\s*concern\b/i, '').trim();   // from the ORIGINAL-case text — concerns are prose
+      if (!convId) { devBubble('the concern is per dev conversation — open a dev conversation to set one.'); return true; }
+      if (!arg) {
+        const cur = await _ensureConcern(convId, null);
+        devBubble(cur ? `scope (concern): ${cur}\nedit with \`dev: concern <new scope>\` — applies to the next run.` : 'no concern set yet — it defaults to your first task here. Set one now with `dev: concern <scope>`.');
+        return true;
+      }
+      const concern = _conciseConcern(arg);
+      await ConversationStore.patchMeta(convId, { concern }).catch(() => { /* */ });
+      devBubble(`scope (concern) → ${concern}. Applies to the next run.`);
+      return true;
+    }
+
     // v2.74.1022 — gl (FULL trace), gc (decisions), gch (chats) — each ships the matching attachment to
     // Claude Code over native messaging (no manual Download). The host writes it into logs/run/ and the
     // run's prompt is the bare shorthand; the repo's standing convention does the analysis.
@@ -842,8 +879,13 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       const att = await buildDecisionsAttachment();
       const model = await getModel();
       const maxTurns = await getTurns();
+      const bugPayload = { v: PROTOCOL_V, type: 'run', verb: 'bug', text: report, attachments: att ? [att] : [], model, maxTurns, relay: await getRelay() };
+      // DBR-5 (DESIGN §8.2) — a bug run codes against the branch too, so it carries the same scope contract;
+      // if this is the conversation's first task, the report seeds the concern.
+      const bugConcern = await _ensureConcern(convId, report);
+      if (bugConcern) bugPayload.concern = bugConcern;
       startRun(
-        { v: PROTOCOL_V, type: 'run', verb: 'bug', text: report, attachments: att ? [att] : [], model, maxTurns, relay: await getRelay() },
+        bugPayload,
         att ? `bug · ${_short(report, 56)} (+ ${att.filename})` : `bug · ${_short(report, 70)}`,
         { conversationId: convId },
       );
@@ -866,7 +908,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       const isNew = /^new\b/i.test(rest);
       const ask = isNew ? rest.replace(/^new\b[:\s]*/i, '').trim() : rest;
       echoUser();
-      if (!ask) { devBubble('usage: `dev: <reply>` (continues / resumes the thread) · `dev: new <task>` (fresh) · `gl` (full trace) · `gc` (decisions) · `gch` (chats) · `bug: <what broke>` · `dev: pause` (stop, keep session) · `dev: history` (recent runs) · `dev: relay on|off` (inline approvals) · `dev: model|turns <…>` · `dev: reset` · `dev: off`'); return true; }
+      if (!ask) { devBubble('usage: `dev: <reply>` (continues / resumes the thread) · `dev: new <task>` (fresh) · `gl` (full trace) · `gc` (decisions) · `gch` (chats) · `bug: <what broke>` · `dev: pause` (stop, keep session) · `dev: history` (recent runs) · `dev: relay on|off` (inline approvals) · `dev: concern [<scope>]` (show/edit scope) · `dev: model|turns <…>` · `dev: reset` · `dev: off`'); return true; }
       if (run) { devBubble('a bridge run is already live — `dev: pause` to stop it.'); return true; }
       const model = await getModel();
       const maxTurns = await getTurns();
@@ -876,6 +918,11 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       if (isNew) { if (convId) await ConversationStore.patchMeta(convId, { sessionId: null }).catch(() => { /* */ }); else await clearLastSession(); }
       const payload = { v: PROTOCOL_V, type: 'run', verb: 'dev', text: ask, model, maxTurns, relay: await getRelay() };
       if (resumeSessionId) payload.resumeSessionId = resumeSessionId;
+      // DBR-5 (DESIGN §8.2) — capture the concern from the first ask, then carry it so the host re-injects the
+      // scope contract on this spawn (fresh AND resume). The concern is per-conversation/branch, so `dev: new`
+      // (a fresh SESSION on the same branch) keeps it; it's only seeded if none exists yet.
+      const concern = await _ensureConcern(convId, ask);
+      if (concern) payload.concern = concern;
       startRun(payload, `dev${resumeSessionId ? ' (continuing)' : isNew ? ' (new thread)' : ''} · ${_short(ask, 80)}`, { conversationId: convId });
       return true;
     }
