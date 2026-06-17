@@ -30,7 +30,7 @@ const RELAY_SETTING_KEY = 'settings:devBridgeRelay';   // v2.74.1002 — DB-3 pe
 // The decisions filter — VERBATIM from studio.js _DECISION_RE (the source of truth; keep in sync until
 // a shared extraction). Filters the session's log entries down to the signal-only story view that the
 // gl convention prefers. v2.74.1022 — re-synced to studio.js (added FOCUS ▸ / CLARIFY ▸ / CLOSE_TABS ▸).
-const DECISION_RE = /(▶ RUN |[✓✗] RUN |COMPREHEND_CROSS_GROUND ▸|T3X resolve ▸|T3X bind ▸|_bind ▸|GROUNDS ▸|ROUTE ▸|HANDOFF ▸|postcond ▸|ORCH_MATCH ▸|ORCH_MATCH_GLOBAL ▸|DETECT_DUPLICATE_GROUNDS ▸|MERGE_GROUNDS ▸|mergeGround |Ground saved:|Ground deleted:|→ (?:auto|propose|miss)\/|RUN_OBSERVATION|RUN_BEST_OBSERVATION|ORCH_RECORD_ALIAS|ORCH_ADMIN ▸|REPLAY_SG_CAPABILITY —|— bindings:|CLICK caused navigation|WALK ▸|LOOP ▸|ORCH_PLAN ▸|OPEN_URL_NEW_TAB —|REVERIFY_SG_CAPABILITY —|ROUTE_ASK "|bindClauseParams →|locale-fresh-skip|locale-trust:|EXPLORE_PAGE_STRUCTURE done|RUN_SG_TRIAL|INTERACTION_MONITOR_START|INTENT_MENU ▸|RICH_INTENTS ▸|ACCEPT_SG_TRIAL|INTERACTION_OUTCOMES ▸|proposeRichIntents —|ensureGroundForUrl|EXPLORE ▸|STOP ▸|FOCUS ▸|CLARIFY ▸|CLOSE_TABS ▸|DEVBR ▸)/;
+const DECISION_RE = /(▶ RUN |[✓✗] RUN |COMPREHEND_CROSS_GROUND ▸|T3X resolve ▸|T3X bind ▸|_bind ▸|GROUNDS ▸|ROUTE ▸|HANDOFF ▸|postcond ▸|ORCH_MATCH ▸|ORCH_MATCH_GLOBAL ▸|DETECT_DUPLICATE_GROUNDS ▸|MERGE_GROUNDS ▸|mergeGround |Ground saved:|Ground deleted:|→ (?:auto|propose|miss)\/|RUN_OBSERVATION|RUN_BEST_OBSERVATION|ORCH_RECORD_ALIAS|ORCH_ADMIN ▸|REPLAY_SG_CAPABILITY —|— bindings:|CLICK caused navigation|WALK ▸|LOOP ▸|ORCH_PLAN ▸|OPEN_URL_NEW_TAB —|REVERIFY_SG_CAPABILITY —|ROUTE_ASK "|bindClauseParams →|locale-fresh-skip|locale-trust:|EXPLORE_PAGE_STRUCTURE done|RUN_SG_TRIAL|INTERACTION_MONITOR_START|INTENT_MENU ▸|RICH_INTENTS ▸|ACCEPT_SG_TRIAL|INTERACTION_OUTCOMES ▸|proposeRichIntents —|ensureGroundForUrl|EXPLORE ▸|STOP ▸|FOCUS ▸|CLARIFY ▸|CLOSE_TABS ▸|DEVBR ▸|LT ▸)/;
 
 function _fmtEntry(entry) {
   const time = entry.timestamp
@@ -66,6 +66,16 @@ function _fmtConv(conv) {
 }
 
 function _short(s, n = 60) { const t = String(s ?? ''); return t.length > n ? `…${t.slice(-(n - 1))}` : t; }
+
+// DBR-4 (v2.74.1036, DESIGN §4) — the `lt` live-test verb matcher. PURE + exported for unit tests. Matches on
+// the WHOLE trimmed message (case-insensitive, inner whitespace collapsed): only the bare tokens fire, so a
+// longer sentence merely CONTAINING "live test" (e.g. "can you live test the search box?") is NOT a match and
+// flows to Claude as a normal prompt. Whole-message-only is what makes the trigger safe (DESIGN §4, the `lt`
+// keyword decision). The caller gates this on a dev conversation — non-dev conversations never intercept.
+export function isLiveTest(text) {
+  const t = String(text ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+  return t === 'lt' || t === 'live' || t === 'live test' || t === 'livetest';
+}
 
 /**
  * Factory — chat.js hands in its rendering helpers (avoids any import cycle into the panel).
@@ -690,6 +700,14 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const skipEcho = opts.skipEcho === true;
     const convId = opts.conversationId || null;   // v2.74.1034 (DBR-2) — the dev conversation this run belongs to
     let t = String(text ?? '').trim();
+    // DBR-4 (v2.74.1036, DESIGN §4) — `lt` live-test. Dev-conversation only, WHOLE-message match, intercepted
+    // HERE — before the bare-text→`dev:` normalization below — so it never gets rewritten to `dev: lt` and
+    // forwarded to Claude. Switches the loaded tree to this conversation's branch and reloads the extension.
+    if (devConv && isLiveTest(t)) {
+      if (!skipEcho) appendMessage({ role: 'user', body: t });
+      await _liveTest(convId);
+      return true;
+    }
     // Inside a dev conversation, bare input IS a dev command: a standalone log verb (gl/gc/gch) or a
     // `bug:`/`dev:` prefix is taken verbatim; anything else (a sub-verb like `pause`/`history`/`model …`, or
     // a plain task) is normalized to the `dev: …` form so the existing branch table handles it unchanged —
@@ -898,6 +916,41 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   async function reloadExtension() {
     try { await setAppliedSig(reloadState.sig || ''); } catch { /* */ }
     try { chrome.runtime.reload(); } catch { /* */ }
+  }
+
+  // DBR-4 (v2.74.1036, DESIGN §4) — replace a devBubble's body with a single text block (the lt status line is
+  // optimistic; on failure we rewrite it in place). Mirrors devBubble's render + persist so the message reads
+  // the same after the swap.
+  function _setBubble(b, text) {
+    try {
+      if (!b || !b.bodyEl) return;
+      b.bodyEl.textContent = '';
+      const block = { kind: 'text', text };
+      b.blocks.length = 0; b.blocks.push(block);
+      b.bodyEl.appendChild(_blockNode(block));
+      _persistBlocks(b.msg, b.blocks);
+    } catch { /* a render throw must not break the flow */ }
+  }
+
+  // DBR-4 (v2.74.1036, DESIGN §4) — the `lt` flow: WIP-commit the CURRENT branch (so the tree is clean for the
+  // switch) → host `git switch` the loaded folder to THIS dev conversation's branch → reload the extension,
+  // which re-reads the now-swapped files. All git is host-side, parameter-validated (§3); the panel only relays
+  // via gitOp. Phase 1 is single-tree + serial — no worktree/preview yet (those are Phase 4). The reload CLOSES
+  // the panel (reopen via the toolbar icon to see the branch live), so this is the last thing the flow does.
+  async function _liveTest(convId) {
+    let branch = null;
+    try { branch = convId ? ((await ConversationStore.load(convId)) || {}).branch || null : null; } catch { branch = null; }
+    if (!branch) { devBubble('✗ `lt` — no branch is recorded for this dev conversation, so there’s nothing to live-test.'); return; }
+    const bubble = devBubble(`↻ switching to \`${branch}\` and reloading…`);
+    // 1) checkpoint the current branch (git switch needs a clean tree). The host commits with --allow-empty, so
+    // a no-op tree still succeeds; a real failure (not "nothing to commit") blocks the switch — surface + stop.
+    const wip = await gitOp('commitWip', { message: `lt → ${branch}` });
+    if (!wip || !wip.ok) { _setBubble(bubble, `✗ \`lt\` — couldn’t checkpoint the current branch: ${(wip && wip.error) || 'host unreachable'}. Not switching.`); return; }
+    // 2) switch the loaded folder to this conversation's branch (lt:true → the host logs the LT ▸ decision marker).
+    const sw = await gitOp('switch', { branch, lt: true });
+    if (!sw || !sw.ok) { _setBubble(bubble, `✗ \`lt\` — couldn’t switch to \`${branch}\`: ${(sw && sw.error) || 'host unreachable'}.`); return; }
+    // 3) reload so Chrome re-reads the swapped files (stamps the applied baseline first, then restarts).
+    await reloadExtension();
   }
 
   // v2.74.1029 — enable the bridge for a NEW dev conversation. The conversations-menu "New dev conversation"

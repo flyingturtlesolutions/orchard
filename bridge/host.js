@@ -378,6 +378,11 @@ function handleGit(msg) {
   const r = runGit(built.argv);
   const ok = r.code === 0 && !r.err;
   log(`DEVBR ▸ git ${op} [${built.argv.join(' ')}] → ${ok ? 'ok' : `FAIL(${r.code})`}${r.err ? ' ' + r.err : ''}`);
+  // DBR-4 (v2.74.1036, DESIGN §4) — the panel flags the `lt` switch with params.lt so the live-test action gets
+  // its own decision marker (the underlying git op also logs DEVBR ▸ above). LT ▸ is in _DECISION_RE (INVARIANT #1).
+  if (op === 'switch' && msg && msg.params && msg.params.lt) {
+    log(`LT ▸ live-test → switch ${msg.params.branch} → ${ok ? 'reloading' : `FAIL(${r.code})`}`);
+  }
   return { v: PROTOCOL_V, type: 'git-result', op, reqId: (msg && msg.reqId), ok, code: r.code, stdout: r.stdout, ...(ok ? {} : { stderr: r.stderr, error: r.err || r.stderr || 'git failed' }) };
 }
 
