@@ -4074,14 +4074,12 @@ export class TemplateWalker {
 
       if (step.action === 'WAIT_FOR') {
         const timeoutMs = Math.max(1000, parseInt(step.value, 10) || 10000);
-        const res = await TemplateWalker.#msg(tabId, {
-          type    : 'WAIT_FOR_ELEM',
-          // SG-RES-2b (v2.74.645) — carry the optional identity (role + accessibleName) so a revealed
-          // option that mounts in a body PORTAL satisfies the wait by description even when its captured
-          // positional selector never matches. handleWaitFor succeeds on selector OR description (either wins).
-          payload : { selector: step.selector, timeoutMs, description: step.waitFor || null },
-        }, frameId);
-        return res ?? { success: false, error: 'WAIT_FOR_ELEM returned no response' };
+        // BA-1 (v2.74.1003) — poll SW-side (throttle-immune in a hidden tab) instead of the content-script
+        // setTimeout loop. SG-RES-2b (v2.74.645) — carry the optional identity (role + accessibleName) so a
+        // revealed option that mounts in a body PORTAL satisfies the wait by description even when its
+        // captured positional selector never matches; the probe succeeds on selector OR description.
+        const res = await TemplateWalker.#swWaitFor(tabId, frameId, step.selector, timeoutMs, step.waitFor || null, isAborted);
+        return res ?? { success: false, error: 'WAIT_FOR returned no response' };
       }
 
       // v2.74.200 — WAIT_FOR_GONE: poll until selector disappears.
@@ -4553,6 +4551,44 @@ export class TemplateWalker {
     }
     Logger.warn('TemplateWalker', `Layer 2: "${selector}" still present after ${timeoutMs}ms — proceeding anyway`);
     return false;
+  }
+
+  /**
+   * BA-1 (v2.74.1003) — service-worker-side WAIT_FOR poll. Mirrors #waitForElementGone: the loop runs in
+   * the SW (whose timer is NOT throttled when the effector tab is hidden/active:false, §4-B/§5), and each
+   * tick is a one-shot WAIT_FOR_PROBE message reusing the content script's EXACT probe (selector OR portal
+   * description). So this is a strict SUPERSET of the old content-script setTimeout loop — identical result
+   * on a focused tab, plus survival in a backgrounded one. The continuous #msg round-trips keep the SW
+   * alive for the duration (same as #waitForElementGone); a transient channel error (frame swap mid-wait)
+   * is treated as "not yet" and polling continues to the deadline. Returns the WAIT_FOR result shape.
+   *
+   * v2.74.1004 — honor mid-wait ABORT. CR-S4 put `isAborted` on #executeStep precisely as the "abort hook
+   * for the sliced WAIT", but the BA-1 SW loop ignored it — so a STOP during a WAIT_FOR waited the full
+   * timeout before the next step-boundary check. That latency grew with BA-1 (the loop now SURVIVES
+   * navigation, so it's far more likely to run the deadline), and the whole background-agents premise —
+   * BA-5's stop-all especially — needs waits promptly interruptible. Checked at the top of each tick (and
+   * before the first probe) so a closed/abandoned worker tab's wait ends at once. Aborted → success:false,
+   * aborted:true (mirrors executeFragment's abort envelope; the step is failed, not silently passed).
+   * @param {Function|null} [isAborted]
+   * @returns {Promise<{success:boolean, elapsed:number, via?:string, error?:string, aborted?:boolean}>}
+   */
+  static async #swWaitFor(tabId, frameId, selector, timeoutMs, description, isAborted = null) {
+    const start = Date.now();
+    for (;;) {
+      if (isAborted?.()) return { success: false, aborted: true, elapsed: Date.now() - start, error: 'WAIT_FOR aborted' };
+      let probe = null;
+      try {
+        probe = await TemplateWalker.#msg(tabId, { type: 'WAIT_FOR_PROBE', payload: { selector, description } }, frameId);
+      } catch { probe = null; /* transient (navigation / frame swap) — keep polling until the deadline */ }
+      const elapsed = Date.now() - start;
+      if (probe && probe.matched) return { success: true, elapsed, via: probe.via };
+      if (isAborted?.()) return { success: false, aborted: true, elapsed, error: 'WAIT_FOR aborted' };
+      if (elapsed >= timeoutMs) {
+        const label = (selector || (description && description.role && description.accessibleName ? `${description.role}/${description.accessibleName}` : '') || '').slice(0, 100);
+        return { success: false, elapsed, error: `WAIT_FOR timeout after ${timeoutMs}ms: "${label}"` };
+      }
+      await TemplateWalker.#sleep(200);   // SW timer — throttle-immune in a hidden tab (the whole point of BA-1)
+    }
   }
 
   /**

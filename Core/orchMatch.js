@@ -260,6 +260,19 @@ export function rankAndDecide(ask, scoped, { score = lexicalScore, thresholds = 
     alternatives: scored.slice(0, 3).map((s) => ({ id: s.candidate.id, intent: s.candidate.intent, relevance: s.relevance })),
   };
 
+  // PRECISION GUARD (v2.74.1018) — "the search box swallows everything". A SINGLE bare token that shares NO
+  // vocabulary with the matched capability isn't EXPRESSING its intent — it's only being absorbed as a free-text
+  // PARAM VALUE (e.g. "gch" typed on Indeed → the LLM bound it as the search query and rated it 0.85 confident).
+  // Such a match carries zero intent signal, so an over-generous scorer (especially the LLM) confidently fires the
+  // wrong thing on junk input. Demote to MISS. Bounded TIGHT to avoid false-misses: only a length-1-token ask, only
+  // a NON-exact match (a confirmed/aliased/intent-exact single word still fires), and only when the token appears
+  // NOWHERE in the candidate's intent or aliases (so "nursing" → a "nursing jobs" capability is left alone).
+  const askTok = _tokens(ask);
+  if (askTok.length === 1 && !top.isExact) {
+    const capTok = new Set(_tokens([(top.candidate && top.candidate.intent) || '', ...((top.candidate && top.candidate.aliases) || [])].join(' ')));
+    if (!capTok.has(askTok[0])) return { ...base, decision: 'miss', reason: 'no-intent-signal' };
+  }
+
   if (top.relevance < t.propose) return { ...base, decision: 'miss', reason: 'below-floor' };
   // Two close, non-exact contenders → disambiguate rather than guess.
   if (runnerUp && margin < t.margin && !top.isExact) return { ...base, decision: 'propose', reason: 'ambiguous' };

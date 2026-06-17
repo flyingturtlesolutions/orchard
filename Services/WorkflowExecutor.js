@@ -421,6 +421,26 @@ async function executeWorkflowStep(step, stepIndex, paramValues, workflowScope, 
   // around OBSERVATION steps (and the PAUSE/Step-Over machinery); without
   // forwarding, an inner Strategy step inside a workflow-debug session
   // would behave as if debug were off and skip those visual aids.
+  // v2.74.1008 — ground→tab REUSE: resolve orchard's existing tab for this step's ground (or open + record
+  // one) and hand it in as targetTabId, instead of letting executeStrategy open a FRESH tab on the ground
+  // URL every run (the "a YouTube intent opens a new tab each time" bug). executeStrategy reuses a passed
+  // targetTabId as-is and does NOT close it — exactly right for a persistent ground tab. Null (no helper /
+  // no groundId) preserves the old open-fresh behavior, so nothing regresses without the wiring.
+  const reuseTabId = (typeof ctx.ensureTabForGround === 'function' && step.groundId)
+    ? await ctx.ensureTabForGround(step.groundId, step.groundUrl)
+    : null;
+  // v2.74.1020 (user-pasted RUN step-1 failure) — SETTLE the ground tab before the fragment drives it.
+  // ensureTabForGround returns the tabId the instant chrome.tabs.create resolves; for a COLD-opened ground
+  // tab (a cross-Ground RUN issued from ANOTHER site) the tab is still at url=/ with no content script, so the
+  // strategy's first TYPE hit "Receiving end does not exist [url=/]" and the never-delivered retries exhausted
+  // before the page ever loaded. Mirror _runObservationStep's HOP settle (wait for load + heal the port) — the
+  // action step never did this, only the read step did. Idempotent for a reused/already-loaded tab
+  // (_waitTabComplete returns at once; ensureContentScript no-ops), so the warm-reuse path is unchanged.
+  if (reuseTabId != null) {
+    await _waitTabComplete(reuseTabId);
+    if (typeof ctx.ensureContentScript === 'function') { try { await ctx.ensureContentScript(reuseTabId); } catch (_) { /* heal best-effort */ } }
+    if (ctx.isAborted?.()) return { success: false, error: 'Aborted' };
+  }
   const result = await ExecutionEngine.executeStrategy({
     strategyId: inlineStrategy ? inlineStrategy.id : step.workflowId,
     strategy: inlineStrategy,   // null → load the Strategy by id; the synthetic wrap runs a bare T1 Fragment
@@ -430,6 +450,7 @@ async function executeWorkflowStep(step, stepIndex, paramValues, workflowScope, 
     onProgress: (ev) => ctx.emit({ ...ev, stepIndex, fromInnerWorkflow: true }),
     debug: ctx.debug ?? null,
     onTabResolved: ctx.onTabResolved ?? null,   // v2.74.967 (gl 114728) — the engine self-resolves this step's tab; report it for busy-marking
+    ...(reuseTabId != null ? { targetTabId: reuseTabId } : {}),   // v2.74.1008 — reuse the ground's tab
   });
 
   ctx.emit({
@@ -669,6 +690,7 @@ export async function executeWorkflow(workflow, paramValues = {}, options = {}) 
     runCapability: options.runCapability ?? null,   // v2.74.792 — replay a cross-Ground READ's antecedent (the search) as the exact capability the chat ran
     ensureContentScript: options.ensureContentScript ?? null,
     onTabResolved: options.onTabResolved ?? null,   // v2.74.967 (gl 114728) — the handler busy-marks every tab the engine reports driving
+    ensureTabForGround: options.ensureTabForGround ?? null,   // v2.74.1008 — ground→tab reuse (open-fresh fallback when absent)
     readCapability: options.readCapability ?? null,   // v2.74.969 (gl 175931) — sgCapability record read for REPLAY-parity param seeding
   };
   ctx.emit({ type: 'strategy_start', strategyId: workflow.id, message: `Running ${workflow.name ?? workflow.id}` });

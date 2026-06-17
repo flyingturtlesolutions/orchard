@@ -14,7 +14,11 @@ const TIMEOUT_MS = 120000;   // a closed panel must not hang claude forever → 
 const POLL_MS = 200;
 
 // Safe tier = the DB-1/DB-2 allowlist (repo reads/edits + scoped test runs). Everything else is relayed.
-const AUTO_ALLOW = new Set(['Read', 'Grep', 'Glob', 'LS', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'TodoWrite', 'Task']);
+// v2.74.1024 — ExitPlanMode is an interactive prompt, not an action — auto-allow it (its plan surfaces as
+// text). v2.74.1025 (DB-4) — AskUserQuestion is DELIBERATELY NOT here: it RELAYS so the panel can render an
+// interactive question card and the run PAUSES (the hook blocks) until the user picks an answer, which comes
+// back in the resp `reason` and is fed to Claude. (Relay off → no hook → it falls to the .1024 text fallback.)
+const AUTO_ALLOW = new Set(['Read', 'Grep', 'Glob', 'LS', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'TodoWrite', 'Task', 'ExitPlanMode']);
 function isSafe(tool, input) {
   if (AUTO_ALLOW.has(tool)) return true;
   if (tool === 'Bash') {

@@ -215,7 +215,10 @@ function writePermResp(msg) {
   const id = String(msg.id || '');
   if (!/^[0-9_]+$/.test(id)) return;   // ids are `${Date.now()}_${pid}` — reject anything else (no path traversal)
   const decision = msg.decision === 'allow' ? 'allow' : 'deny';
-  try { fs.writeFileSync(path.join(PERM_DIR, `${id}.resp.json`), JSON.stringify({ id, decision, reason: 'panel' })); log(`perm decision ${id} → ${decision}`); } catch { /* */ }
+  // v2.74.1025 (DB-4) — the panel may attach a `reason` (the user's AskUserQuestion answer); pass it through
+  // so the hook returns it to Claude. Cap length; the hook feeds it back as the deny reason / answer.
+  const reason = (typeof msg.reason === 'string' && msg.reason.trim()) ? msg.reason.trim().slice(0, 2000) : 'panel';
+  try { fs.writeFileSync(path.join(PERM_DIR, `${id}.resp.json`), JSON.stringify({ id, decision, reason })); log(`perm decision ${id} → ${decision}`); } catch { /* */ }
 }
 setInterval(watchPerm, 250).unref?.();
 
@@ -373,6 +376,7 @@ function repoVersion() {
 function traceFileName(requested) {
   const base = path.basename(String(requested || ''));
   if (/^orchard-logs[A-Za-z0-9._-]*\.txt$/.test(base)) return base;
+  if (/^orchard-chats[A-Za-z0-9._-]*\.txt$/.test(base)) return base;   // v2.74.1022 — `gch` ships chats
   const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
   return `orchard-logs-bridge-${ts}.txt`;
 }
@@ -385,12 +389,14 @@ function startRun(msg) {
   }
   // ---- schema guard (spec §3.4) ----
   const verb = msg.verb;
-  if (verb !== 'gl' && verb !== 'dev' && verb !== 'bug') { send({ v: PROTOCOL_V, type: 'error', code: 'bad-verb' }); return; }
-  // gl + bug both ship the newest decisions trace as an attachment — write it to logs/run/ once, here.
+  // v2.74.1022 — gc (decisions) + gch (chats) join gl as trace-shipping verbs.
+  if (verb !== 'gl' && verb !== 'gc' && verb !== 'gch' && verb !== 'dev' && verb !== 'bug') { send({ v: PROTOCOL_V, type: 'error', code: 'bad-verb' }); return; }
+  // gl/gc/gch + bug ship a trace attachment — write it to logs/run/ once, here. v2.74.1022 — accept the
+  // three attachment kinds (full-trace / decisions-trace / chats); pre-.1022 only decisions-trace existed.
   let traceRel = null;
-  if (verb === 'gl' || verb === 'bug') {
+  if (verb === 'gl' || verb === 'gc' || verb === 'gch' || verb === 'bug') {
     const att = Array.isArray(msg.attachments) ? msg.attachments[0] : null;
-    if (att && att.kind === 'decisions-trace' && typeof att.content === 'string') {
+    if (att && typeof att.content === 'string' && (att.kind === 'full-trace' || att.kind === 'decisions-trace' || att.kind === 'chats')) {
       if (Buffer.byteLength(att.content, 'utf8') > MAX_ATTACHMENT) { send({ v: PROTOCOL_V, type: 'error', code: 'attachment-too-large' }); return; }
       const fname = traceFileName(att.filename);
       try { fs.writeFileSync(path.join(RUN_DIR, fname), att.content, 'utf8'); log(`${verb} attachment → logs/run/${fname}`); traceRel = `logs/run/${fname}`; }
@@ -398,8 +404,8 @@ function startRun(msg) {
     }
   }
   let prompt = null;
-  if (verb === 'gl') {
-    prompt = 'gl';   // the repo's standing convention does the rest (memory: read findings first, analyze newest, append one entry)
+  if (verb === 'gl' || verb === 'gc' || verb === 'gch') {
+    prompt = verb;   // the repo's standing convention does the rest (memory: read findings first, analyze newest, append one entry)
   } else if (verb === 'bug') {
     // DB-2 (v2.74.988) — `bug:` composes the user's report + a pointer to the trace just written + the
     // version line, then asks for a VERIFIED fix (the DB-2 allowlist now lets the run do `npm test`).

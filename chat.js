@@ -35,6 +35,12 @@ import { classifyReadAsk, askListIndex } from './Core/observe.js';   // OBS-READ
 
 let _currentConversationId = null;
 
+// v2.74.1029 — the active conversation's KIND. 'agent' = the normal website-operating assistant; 'dev' = a
+// Claude Code dev-bridge thread, where every typed message routes straight to the bridge (no `dev:` prefix).
+// The bridge is reachable ONLY when this is 'dev' — a normal conversation can't touch it (the gating win).
+// Set on create / rehydrate / switch; reset to 'agent' on a fresh-blank surface.
+let _currentConversationKind = 'agent';
+
 // v2.74.106 — Single-flight guard for conversation creation. Two parallel
 // callers (e.g. double-clicked suggestion cards) could both see
 // _currentConversationId === null, both start ConversationStore.create(),
@@ -65,6 +71,7 @@ async function _ensureConversation() {
 /** Clear the in-memory "current" pointer without deleting anything. */
 function _clearCurrentConversation() {
   _currentConversationId = null;
+  _currentConversationKind = 'agent';   // v2.74.1029 — a fresh/blank surface is always an agent conversation
 }
 
 /**
@@ -160,17 +167,52 @@ $('btn-new-conversation').addEventListener('click', async () => {
   // capability list. Pre-v2.71.8 the empty state appeared but with no
   // cards (subtitle/cards retained their stale state from rehydration).
   await renderSuggestionCards();
-  _closeHistory();
+  await _renderHistoryList();   // v2.74.1031 — keep the drawer open; refresh so no item shows active (new chat not yet created)
 });
+
+// v2.74.1029 — New DEV conversation: a dedicated Claude Code thread. The click IS the user gesture that
+// requests the nativeMessaging permission (via the bridge's enable() — must run before any other await),
+// replacing the old `dev: on` verb. On grant we open a fresh `kind:'dev'` conversation where every typed
+// message routes straight to Claude Code (no `dev:` prefix) — and the bridge is reachable from nowhere else.
+$('btn-new-dev-conversation')?.addEventListener('click', async () => {
+  if (_activeInvocations.size > 0) {
+    if (!confirm('Active invocations are in progress. Start a new dev conversation anyway?')) return;
+  }
+  const granted = await _getDevBridge().enable();   // permission request runs FIRST (gesture-bound)
+  if (!granted) return;                              // declined → bridge stays off, no conversation created (drawer stays open)
+  _clearCurrentConversation();
+  _resetConversation();
+  const conv = await ConversationStore.create({ title: 'Dev — Claude Code', kind: 'dev' });
+  _currentConversationId = conv.id;
+  _currentConversationKind = 'dev';
+  _showDevEmptyState();
+  await _renderHistoryList();   // v2.74.1031 — keep the drawer open; show the new dev conversation highlighted
+  $('chat-input').focus();
+});
+
+// v2.74.1029 — the dev-conversation empty state: no capability suggestion cards (those are agent-only); a
+// short hint on what routes to Claude Code from here. Restores nothing — switching back to an agent surface
+// goes through renderSuggestionCards, which resets the greeting/subtitle/cards.
+function _showDevEmptyState() {
+  $('messages').classList.add('hidden');
+  $('empty-state').classList.remove('hidden');
+  const cards = $('suggestion-cards'); if (cards) cards.innerHTML = '';
+  const greet = $('empty-state-greeting'); if (greet) greet.textContent = 'Dev — Claude Code';
+  const sub = $('empty-state-subtitle');
+  if (sub) sub.textContent = 'Type a task to send to Claude Code on this repo — no “dev:” prefix here. Also: gl · gc · gch · bug: <what broke> · pause · history · model/turns/relay · new <task>.';
+}
 
 // ─── History sidebar ─────────────────────────────────────────────────────────
 
+// v2.74.1030 — the drawer is an inline push panel now, so the header button TOGGLES it (open ↔ close)
+// rather than only opening — there's no dark backdrop to click away.
 $('btn-history').addEventListener('click', async () => {
+  if ($('history-sidebar').classList.contains('open')) { _closeHistory(); return; }
   await _openHistory();
 });
 
 $('btn-close-history').addEventListener('click', _closeHistory);
-$('history-overlay').addEventListener('click', _closeHistory);
+// v2.74.1030 — the dark click-to-close overlay is gone (the drawer pushes the chat instead of covering it).
 
 // Delete ALL conversations from the history menu (confirm first; this can't be undone). Wipes the active
 // conversation too, then resets to the empty state — mirrors the per-item delete's active-conversation path.
@@ -186,14 +228,12 @@ $('btn-delete-all-conversations').addEventListener('click', async () => {
 });
 
 async function _openHistory() {
-  $('history-sidebar').classList.remove('hidden');
-  $('history-overlay').classList.remove('hidden');
   await _renderHistoryList();
+  $('history-sidebar').classList.add('open');   // width 0 → drawer-w (chat column shrinks alongside)
 }
 
 function _closeHistory() {
-  $('history-sidebar').classList.add('hidden');
-  $('history-overlay').classList.add('hidden');
+  $('history-sidebar').classList.remove('open');
 }
 
 async function _renderHistoryList() {
@@ -207,11 +247,12 @@ async function _renderHistoryList() {
   }
 
   conversations.forEach(conv => {
+    const isDev = conv.kind === 'dev';   // v2.74.1029 — dev (Claude Code) conversations get an amber badge
     const item = document.createElement('div');
-    item.className = `history-item${conv.id === _currentConversationId ? ' active' : ''}`;
+    item.className = `history-item${conv.id === _currentConversationId ? ' active' : ''}${isDev ? ' dev' : ''}`;
     item.dataset.conversationId = conv.id;
     item.innerHTML = `
-      <div class="history-item-title">${escHtml(conv.title)}</div>
+      <div class="history-item-title">${isDev ? '<span class="history-item-badge">dev</span>' : ''}${escHtml(conv.title)}</div>
       <div class="history-item-meta">${relTime(conv.updatedAt)}</div>
       <button class="history-item-delete" title="Delete">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -220,10 +261,12 @@ async function _renderHistoryList() {
         </svg>
       </button>`;
 
-    // Click anywhere on the item (except delete) loads the conversation
+    // Click anywhere on the item (except delete) loads the conversation into the chat. v2.74.1031 — the
+    // drawer STAYS OPEN on select (only the ✕ / the header toggle closes it); selecting just swaps the chat
+    // portal, so the user can browse several conversations without reopening the drawer each time.
     item.addEventListener('click', async (e) => {
       if (e.target.closest('.history-item-delete')) return;
-      if (conv.id === _currentConversationId) { _closeHistory(); return; }
+      if (conv.id === _currentConversationId) return;   // already showing it — nothing to load, keep drawer open
       if (_activeInvocations.size > 0) {
         if (!confirm('Active invocations are in progress. Switch conversations anyway?')) return;
       }
@@ -233,7 +276,7 @@ async function _renderHistoryList() {
         // v2.71.4 — Resume running invocations belonging to the just-loaded
         // conversation, mirroring init flow.
         await _resumeRunningInvocations();
-        _closeHistory();
+        await _renderHistoryList();   // v2.74.1031 — refresh the .active highlight (drawer stays open)
       }
     });
 
@@ -320,6 +363,35 @@ function _scrollToBottomIfNearBottom() {
   if (!_isNearBottom()) return;
   const c = $('conversation');
   if (c) c.scrollTop = c.scrollHeight;
+}
+
+// v2.74.1026 — STICKY-FOLLOW auto-scroll. The per-append _scrollToBottomIfNearBottom checks near-bottom
+// AFTER the DOM already grew, so a LARGE append — a streaming body update via _setMessageBody, a card /
+// action-bar / question-card append, a dev-bridge block — leaves the user >96px from the NEW bottom and never
+// scrolls: the chat "stops following." Fix once, centrally: track a _stick flag from the user's OWN scrolling
+// (true while they're at the bottom), then a MutationObserver over the whole conversation re-pins to the
+// bottom on ANY content change while stuck. Covers every append path (main chat + dev-bridge bubbles, all
+// under #conversation) without patching each call site; scrolling up to read turns following off until the
+// user returns to the bottom — standard chat behavior.
+let _stickToBottom = true;
+let _autoScrollWired = false;
+function _setupAutoScroll() {
+  if (_autoScrollWired) return;
+  const c = $('conversation');
+  const messages = $('messages');
+  if (!c || !messages) return;
+  _autoScrollWired = true;
+  _stickToBottom = _isNearBottom();
+  c.addEventListener('scroll', () => {
+    _stickToBottom = (c.scrollHeight - c.scrollTop - c.clientHeight) <= NEAR_BOTTOM_PX;
+  }, { passive: true });
+  let pending = false;
+  const obs = new MutationObserver(() => {
+    if (!_stickToBottom || pending) return;
+    pending = true;
+    requestAnimationFrame(() => { pending = false; if (_stickToBottom && c) c.scrollTop = c.scrollHeight; });
+  });
+  obs.observe(messages, { childList: true, subtree: true, characterData: true });
 }
 
 // ─── Active invocation tracking ──────────────────────────────────────────────
@@ -544,6 +616,8 @@ async function renderSuggestionCards() {
   const container = $('suggestion-cards');
   const subtitle  = $('empty-state-subtitle');
   container.innerHTML = '';
+  // v2.74.1029 — restore the default greeting (a dev conversation's empty state overwrites it).
+  const greet = $('empty-state-greeting'); if (greet) greet.textContent = 'How can I help you today?';
 
   const capabilities = await ChatAPI.listCapabilities({ status: 'ready' });
 
@@ -811,8 +885,17 @@ async function _orchRun(msg, { groundId, capabilityId, intent, paramValues, tabI
       _setMessageBody(msg, res.reason || 'Couldn’t run on this page — make sure you’re on the right page.');
     }
   } else if (res.ok) {
-    _setMessageBody(msg, `Done — ran “${intent || 'it'}”.`);
-    _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId, phrase: ask });   // confirm → flywheel
+    // v2.74.1028 — a resolved binding that didn't land (REPLAY's ignoredKeys: a supplied value with no matching
+    // param, e.g. after disambiguating to a differently-shaped capability) means the run likely typed a demonstrated
+    // default instead of what the user asked. Say so and DON'T bank a confirmation alias on it — confidence must
+    // reflect a binding that actually reached execution, not a sample value (the mis-learning seen in gl 155112).
+    const ignored = Array.isArray(res.ignoredKeys) ? res.ignoredKeys : [];
+    if (ignored.length) {
+      _setMessageBody(msg, `Ran “${intent || 'it'}”, but I couldn’t apply what you asked for (${ignored.join(', ')}) — it may have used a saved default, so double-check the result.`);
+    } else {
+      _setMessageBody(msg, `Done — ran “${intent || 'it'}”.`);
+      _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId, phrase: ask });   // confirm → flywheel
+    }
     _lastOrch = { groundId, capabilityId, tabId, ask, intent, bindings: paramValues || {}, params: params || null };
     _orchFeedbackBar(msg);   // ORCH-FB — 👎 / Remove: correct a wrong run in chat, no Studio
   } else {
@@ -1881,6 +1964,34 @@ function _walkResolveParams(si, scope) {
 // halts the walk at the next step boundary AND cancels every live capability invocation (ChatAPI.cancel →
 // the engine's isAborted). A mid-step REPLAY finishes its current action; the walk never advances past it.
 const _STOP_RE = /^\s*(?:stop|end|cancel|abort|halt)(?:\s+(?:it|that|this|everything|the\s+run|the\s+walk))?\s*[.!]?\s*$/i;
+// v2.74.1029 — old dev-bridge verbs typed in a NORMAL conversation. The bridge no longer handles them here
+// (dev lives in its own conversation); this only matches to redirect the user to the conversations menu, so
+// it's deliberately narrow: a `dev:`/`bug:` prefix, or an exact `gl`/`gc`/`gch` (the log-grab shorthands).
+const _DEV_VERB_RE = /^(?:dev:|bug:)|^(?:gl|gc|gch)$/i;
+// v2.74.1013 — close-tabs commands. GLOBAL ("close all tabs" / "close everything" / "close tabs") → keep
+// only Studio; SPECIFIC ("close this tab" / "close tab") → close the active tab. Full-match so a real ask
+// ("close the deal on X") falls through to routing.
+// v2.74.1021 — SITE-scoped close ("close youtube tabs" / "close the indeed tab" / "close this youtube tab").
+// Before .1021 a site-named close MISSED both regexes → fell to routing → bled into a capability match (the
+// 19:17 trace: "close youtube tabs" ran "Search YouTube" with SEARCH=UNRESOLVED). Now it resolves to a
+// scope='site' close of tabs whose host matches the named site. The all/tab forms are tested FIRST, so
+// "close all tabs" can't be mis-read as a site named "all" (and a stoplist guards the rest).
+const _CLOSE_ALL_RE = /^\s*close\s+(?:all|every|everything)(?:\s+(?:the\s+)?(?:other\s+)?tabs?)?\s*[.!]?\s*$|^\s*close\s+(?:the\s+)?tabs\s*[.!]?\s*$/i;
+const _CLOSE_TAB_RE = /^\s*close\s+(?:this\s+|the\s+(?:current|active)\s+|current\s+|active\s+)?tab\s*[.!]?\s*$/i;
+const _CLOSE_SITE_RE = /^\s*close\s+(?:(?:all|every)\s+)?(?:the\s+)?(?:other\s+)?(?:this\s+|current\s+|active\s+)?([a-z0-9][\w.\-]*)\s+tabs?\s*[.!]?\s*$/i;
+// Words that can sit where a site token would but are NOT site names — so "close other tabs" / "close my tabs"
+// fall through (unchanged) instead of trying to close a host called "other".
+const _CLOSE_SITE_STOP = new Set(['all', 'every', 'everything', 'other', 'others', 'this', 'that', 'these', 'those', 'the', 'current', 'active', 'remaining', 'my', 'same', 'open']);
+function _matchCloseTabs(text) {
+  if (_CLOSE_ALL_RE.test(text)) return { scope: 'all' };
+  if (_CLOSE_TAB_RE.test(text)) return { scope: 'tab' };
+  const ms = _CLOSE_SITE_RE.exec(text);
+  if (ms) {
+    const site = ms[1].toLowerCase();
+    if (!_CLOSE_SITE_STOP.has(site)) return { scope: 'site', site };
+  }
+  return null;
+}
 const _walkAbortFlag = { requested: false };
 let _walkLive = false;
 // v2.74.917 (CR-S1) — plan-IR interpreter runs in flight. The .907 stop only armed the flag when a WALK was
@@ -2477,7 +2588,11 @@ async function _tryGroundedTurn(text) {
     const bar = _orchActionBar(thinking);
     for (const opt of (turn.options || [])) {
       const b = document.createElement('button'); b.className = 'btn-secondary tiny'; b.type = 'button'; b.textContent = opt.intent || opt.id;
-      b.addEventListener('click', () => { bar.remove(); _orchRun(thinking, { ...ctx, capabilityId: opt.id, intent: opt.intent, paramValues: {} }); });
+      // v2.74.1028 — flow the resolved bindings to the chosen option (was hard-set to {} → REPLAY fell back to the
+      // demonstrated sample value, e.g. typed "fable " for "search bobby hermitt on youtube"). The values are keyed
+      // by param name (the user's query), so they apply to whichever close contender is picked; REPLAY overlays only
+      // matching params and reports any that didn't land (ignoredKeys) so a wrong-shape alt doesn't bank a confirmation.
+      b.addEventListener('click', () => { bar.remove(); _orchRun(thinking, { ...ctx, capabilityId: opt.id, intent: opt.intent }); });
       bar.appendChild(b);
     }
     return true;
@@ -2610,6 +2725,41 @@ async function _dispatchRouteDecision(d, { tabId = null, groundId = null, text }
   return false;
 }
 
+// CLARIFY (v2.74.1016) — surface the router's DROPPED clarify signal as a real question, at the dead-end
+// ONLY (so it can never pre-empt a warm path). route() computes a `candidates` palette + a clarify/
+// lowConfidence signal, then `_dispatchRouteDecision` discards it (return false → legacy fuzzy matcher).
+// When the router was genuinely UNSURE and ≥2 retrieved capabilities are runnable on this Ground, ASK which
+// instead of guessing. The pick runs IMMEDIATELY through the verified runner (the choice IS the confirm —
+// same as the disambiguate flow); a free-text reply stays available (the buttons don't block input), so a
+// clarify never hard-stops the turn. Replay-only by design: a primitive (OPEN_URL) carries no bound url in
+// a clarify, so re-running it would be a dead button — those are left to the legacy path. Returns true iff a
+// question was rendered. NB: `CLARIFY ▸` is in studio.js `_DECISION_RE` (INVARIANT #1) so a decisions/gc
+// download surfaces WHEN and WHY the agent asked.
+function _orchClarifyFromRoute(d, { tabId = null, groundId = null, text }) {
+  if (!d) return false;
+  if (!(d.action === 'clarify' || d.lowConfidence === true)) return false;   // only when genuinely unsure
+  if (typeof tabId !== 'number' || !groundId) return false;                  // a replay needs its Ground + tab
+  const cands = (Array.isArray(d.candidates) ? d.candidates : [])
+    .filter((c) => c && c.capabilityId)   // runnable saved capabilities only (replay)
+    .slice(0, 3);                          // top-ranked few — a wall of buttons is its own kind of noise
+  if (cands.length < 2) return false;      // nothing to choose BETWEEN → let the legacy / teach path handle it
+  const label = (c) => c.name || c.intent || c.capabilityId;
+  const pv = (d.params && typeof d.params === 'object') ? d.params : {};
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  _setMessageBody(msg, `I'm not sure which you meant — pick one, or just say it a different way.`);
+  _orchLog(`CLARIFY ▸ "${String(text).slice(0, 50)}" → ${cands.length} options: ${cands.map(label).join(' | ')} (conf ${d.confidence})`);
+  const bar = _orchActionBar(msg);
+  for (const c of cands) {
+    bar.appendChild(_mkBtn(label(c), () => {
+      bar.remove();
+      _lastOrch = { groundId, capabilityId: c.capabilityId, tabId, ask: text, intent: label(c), bindings: pv, params: null };
+      _orchRun(msg, { groundId, tabId, ask: text, intent: label(c), capabilityId: c.capabilityId, paramValues: pv });
+    }));
+  }
+  bar.appendChild(_mkBtn('None of these', () => { bar.remove(); _setMessageBody(msg, `OK — tell me in different words and I'll try again.`); }));
+  return true;
+}
+
 // R-4 (v1, kept) — the router as a NAVIGATION fast-path at the HEAD of the turn. The _NAV_RE gate keeps the
 // LLM call off non-nav asks (cheapest-first: warm paths never pay it); a nav phrasing routes via world
 // knowledge and just navigates. Everything else falls through to the existing flow UNCHANGED — the FULL
@@ -2633,7 +2783,11 @@ async function _tryRouterFallback(text) {
   if (!res || res.success === false || !res.decision) return false;
   const d = res.decision;
   _orchLog(`ROUTE ▸ "${String(text).slice(0, 50)}" → router-fallback ${d.action}${d.tool ? ` ${d.tool.op || d.tool.capabilityId || ''}` : ''} (conf ${d.confidence})`);
-  return _dispatchRouteDecision(d, { tabId: tab && tab.id, groundId: res.groundId, text });
+  if (await _dispatchRouteDecision(d, { tabId: tab && tab.id, groundId: res.groundId, text })) return true;
+  // CLARIFY (v2.74.1016) — the dead-end declined a confident dispatch (low-confidence / explicit clarify).
+  // Rather than fall straight to the legacy fuzzy matcher (the mis-escalation source), surface the dropped
+  // candidate palette as a QUESTION if ≥2 are runnable here. Returns false → legacy matcher, unchanged.
+  return _orchClarifyFromRoute(d, { tabId: tab && tab.id, groundId: res.groundId, text });
 }
 
 // IM-3 (v2.74.895) — "what can I do here?" → the INTENT MENU. A meta-ask about the APP's abilities on this
@@ -2848,6 +3002,20 @@ async function sendChatMessage() {
   const text     = input.value.trim();
   if (!text) return;
 
+  // v2.74.1029 — DEV CONVERSATION: every typed message routes straight to the Claude Code bridge (no `dev:`
+  // prefix), and NOTHING else runs — not template-detection, not STOP, not the capability matcher. This is
+  // the only surface the bridge is reachable from. We render the user bubble here (so it shows exactly what
+  // was typed) and pass skipEcho so the bridge doesn't double it; bridge sub-verbs (gl/gc/gch/bug:/pause/
+  // history/model/turns/relay/new) still work because maybeHandle normalizes bare input to `dev: …`.
+  if (_currentConversationKind === 'dev') {
+    input.value = ''; _autosizeInput(); $('btn-chat-send').disabled = true;
+    appendMessage({ role: 'user', body: text });
+    try { await _getDevBridge().maybeHandle(text, { devConversation: true, skipEcho: true }); }
+    catch (e) { try { console.warn('[chat] dev-conversation route failed:', e?.message); } catch { /* */ } }
+    $('btn-chat-send').disabled = false;
+    return;
+  }
+
   // v2.74.905 — a TEMPLATE ask never routes: the 22:38 live run sent "{query}" literally — it typed
   // "{query}" into the page and accreted the template as an alias. Keep it in the input with the first
   // placeholder selected so typing replaces it.
@@ -2869,12 +3037,50 @@ async function sendChatMessage() {
     return;
   }
 
-  // DB-1b (v2.74.973) — dev-bridge verbs (`dev: on|off`, `dev: <ask>`, `gl`): user-typed only, handled
-  // BEFORE any routing so a bridge verb can never leak into the ask pipeline. Inert (falls through)
-  // unless the user enabled the bridge — `gl` stays an ordinary ask for everyone else.
-  if (await _getDevBridge().maybeHandle(text)) {
+  // v2.74.1013 — close-tabs commands (full-match, BEFORE routing). GLOBAL is destructive → confirm first;
+  // SPECIFIC (this tab) closes the active tab immediately.
+  const _closeScope = _matchCloseTabs(text);
+  if (_closeScope) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    if (_closeScope.scope === 'all') {
+      const m = appendMessage({ role: 'assistant', body: '' });
+      _setMessageBody(m, 'Close all other tabs and keep only Studio?');
+      const bar = _orchActionBar(m);
+      bar.appendChild(_mkBtn('Close all ▸', async () => {
+        bar.remove();
+        const r = await _orchReq('CLOSE_TABS', { scope: 'all' });
+        _setMessageBody(m, (r && r.success) ? `Closed ${r.closed} tab(s) — only Studio remains.` : `Couldn’t close tabs${r && r.error ? ` — ${r.error}` : ''}.`);
+        _orchFinalize(m);
+      }));
+      bar.appendChild(_mkBtn('Cancel', () => { bar.remove(); _setMessageBody(m, 'Kept your tabs.'); _orchFinalize(m); }));
+    } else if (_closeScope.scope === 'site') {
+      // v2.74.1021 — close every tab whose host matches the named site. Scoped + intentional (the user named
+      // the target), so it runs immediately like 'tab'; the response carries the count so a no-match is legible.
+      const site = _closeScope.site;
+      const r = await _orchReq('CLOSE_TABS', { scope: 'site', site });
+      const body = (r && r.success)
+        ? (r.closed ? `Closed ${r.closed} ${site} tab(s).` : `No open ${site} tabs to close.`)
+        : `Couldn’t close ${site} tabs${r && r.error ? ` — ${r.error}` : ''}.`;
+      _orchFinalize(appendMessage({ role: 'assistant', body }));
+    } else {
+      const tab = await _orchActiveTab();
+      const r = (tab && typeof tab.id === 'number') ? await _orchReq('CLOSE_TABS', { scope: 'tab', tabId: tab.id }) : null;
+      const m = appendMessage({ role: 'assistant', body: (r && r.success) ? 'Closed this tab.' : `Couldn’t close this tab${r && r.error ? ` — ${r.error}` : ''}.` });
+      _orchFinalize(m);
+    }
+    return;
+  }
+
+  // v2.74.1029 — dev-bridge verbs are no longer handled in a NORMAL conversation (the gating change): the
+  // bridge is reachable ONLY from a dev conversation now (the kind:'dev' fast-path at the top of this fn).
+  // If the user types an old dev verb here out of muscle memory, point them at the conversations menu rather
+  // than letting `dev: …` / `gl` leak into the capability matcher as a website ask.
+  if (_DEV_VERB_RE.test(text)) {
     input.value = '';
     _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    _orchFinalize(appendMessage({ role: 'assistant', body: 'Dev now lives in its own conversation. Open the conversations menu (the ☰ history button) and pick “New dev conversation” to chat with Claude Code — no “dev:” prefix needed there.' }));
     return;
   }
 
@@ -3805,6 +4011,8 @@ $('btn-chat-send').addEventListener('click', sendChatMessage);
   // pick the edits up (DESIGN_dev_bridge §5). Inert for non-dev users.
   _wireDevReload();
 
+  _setupAutoScroll();   // v2.74.1026 — start sticky-follow once the restored conversation is in the DOM
+
   $('chat-input').focus();
 })();
 
@@ -4049,6 +4257,10 @@ async function _rehydrateConversation(conv) {
   // update the now-detached thinkingMsg.
   _cancelOpenParamForms();
   _currentConversationId = conv.id;
+  _currentConversationKind = conv.kind === 'dev' ? 'dev' : 'agent';   // v2.74.1029 — restore routing kind on switch
+  // v2.74.1029 — an EMPTY dev conversation (created, not yet used, reopened from history) shows the dev hint
+  // instead of an empty message list. Non-empty ones fall through to the normal rehydrate below.
+  if (_currentConversationKind === 'dev' && !(conv.messages || []).length) { _showDevEmptyState(); return; }
   _enterConversation();
   $('messages').innerHTML = '';
 

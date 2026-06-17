@@ -134,6 +134,24 @@ describe('orchMatch — ORCH-M0 HIT/MISS matcher core', () => {
     assert.equal(r.reason, 'below-floor');
   });
 
+  it('rankAndDecide: a single bare token with NO vocabulary overlap → MISS (no-intent-signal), even at a confident score', () => {
+    // "the search box swallows everything" (v2.74.1018): the live LLM rated junk "gch" 0.85 and bound it as the
+    // search query → a confident "want me to run it?" on gibberish. A lone token sharing no vocab with the
+    // capability is only being absorbed as a param VALUE, not expressing the intent → demote to MISS.
+    const here = [search].map((x) => toCandidate(x));                       // "Search jobs by keyword and location"
+    const hot = () => ({ relevance: 0.85, isExact: false, effectEligible: true });   // an over-generous (LLM-like) scorer
+    const r = rankAndDecide('gch', here, { score: hot });
+    assert.equal(r.decision, 'miss');
+    assert.equal(r.reason, 'no-intent-signal');
+  });
+
+  it('rankAndDecide: the precision guard is TIGHT — overlapping or multi-token asks still fire', () => {
+    const here = [search].map((x) => toCandidate(x));                       // intent tokens: search, jobs, keyword, location
+    const hot = () => ({ relevance: 0.85, isExact: false, effectEligible: true });
+    assert.equal(rankAndDecide('jobs', here, { score: hot }).decision, 'auto', 'a single token that IS in the intent → real signal, fires');
+    assert.equal(rankAndDecide('gch gch', here, { score: hot }).decision, 'auto', 'guard is single-token only — multi-token left to scorer/floor');
+  });
+
   it('rankAndDecide: two close contenders → PROPOSE (ambiguous / disambiguate)', () => {
     // "filter results" overlaps date + pay similarly → small margin → ask which.
     const here = [dateF, payF].map((x) => toCandidate(x));

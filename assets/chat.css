@@ -395,6 +395,14 @@ textarea {
 .dev-approval-verdict { font-size: 12px; font-weight: 600; }
 .dev-approval-verdict.allow { color: #4caf7d; }
 .dev-approval-verdict.deny  { color: #d2796a; }
+/* DB-4 (v2.74.1025) — interactive question card: per-question blocks + wrapping option buttons + selected state. */
+.dev-question-block { margin: 6px 0; }
+.dev-question .dev-approval-actions { flex-wrap: wrap; }
+.dev-question button.sel {
+  background: rgba(201, 162, 39, 0.28);
+  border-color: rgba(201, 162, 39, 0.75);
+  color: #f0e3b0;
+}
 
 /* ── Conversation area ───────────────────────────────────────────────────── */
 .conversation {
@@ -1231,40 +1239,50 @@ textarea {
   border: none;
 }
 
-/* ── History sidebar (slide-over) ────────────────────────────────────────── */
-
-.history-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.4);
-  z-index: 40;
-  animation: overlayFadeIn var(--t-med);
+/* ── App body: conversation drawer (left, push) + chat column ─────────────
+   v2.74.1030 — the drawer is an INLINE left-push panel now, not a fixed
+   slide-over with a dark backdrop. It lives in this flex row beneath the
+   header; opening it shrinks the chat column instead of covering it, so the
+   conversation + input stay visible and interactive. */
+.app-body {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  min-height: 0;
+  overflow: hidden;
 }
-
-@keyframes overlayFadeIn {
-  from { opacity: 0; }
-  to   { opacity: 1; }
-}
-
-.history-sidebar {
-  position: fixed;
-  top: 0;
-  left: 0;
-  bottom: 0;
-  width: 85%;
-  max-width: 320px;
-  background: var(--c-bg-elevated);
-  border-right: 1px solid var(--c-border);
-  box-shadow: var(--shadow-lg);
-  z-index: 50;
+.chat-main {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  animation: historySlideIn var(--t-med);
+  overflow: hidden;
 }
 
-@keyframes historySlideIn {
-  from { transform: translateX(-100%); }
-  to   { transform: translateX(0); }
+/* ── Conversation drawer (inline, left-push) ─────────────────────────────── */
+.history-sidebar {
+  --drawer-w: min(280px, 58vw);   /* chat keeps ≥42vw so its input stays usable */
+  flex: 0 0 auto;
+  width: 0;                       /* collapsed by default; .open animates it out */
+  overflow: hidden;
+  background: var(--c-bg-elevated);
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  transition: width var(--t-med);
+}
+.history-sidebar.open {
+  width: var(--drawer-w);
+  border-right: 1px solid var(--c-border);
+}
+/* fixed-width inner so the content doesn't squish while the drawer width
+   animates — the vw-based width is stable; only the outer width moves. */
+.history-sidebar-inner {
+  flex: 0 0 auto;
+  width: var(--drawer-w);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .history-header {
@@ -1297,6 +1315,31 @@ textarea {
   transition: background var(--t-fast);
 }
 .history-new-btn:hover { background: var(--c-accent-hover); }
+
+/* v2.74.1029 — the dev-conversation entry: amber (the dev-bridge identity, #c9a227), set apart from the
+   accent-blue "New conversation" so the Claude Code surface reads as a distinct, gated thing. Top margin 0
+   to sit flush under the agent button. */
+.history-new-dev-btn {
+  margin-top: 0;
+  background: #8a6d12;
+}
+.history-new-dev-btn:hover { background: #a9871c; }
+
+/* A dev conversation in the history list: amber left-rail + a small "dev" badge before the title. */
+.history-item.dev { border-left: 2px solid #c9a227; padding-left: calc(var(--sp-3) - 2px); }
+.history-item-badge {
+  display: inline-block;
+  margin-right: var(--sp-2);
+  padding: 0 5px;
+  border-radius: var(--r-sm);
+  background: rgba(201, 162, 39, 0.18);
+  color: #c9a227;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+}
 
 .history-list {
   flex: 1;

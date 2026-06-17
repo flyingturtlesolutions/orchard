@@ -14,6 +14,8 @@
 //
 // Protocol: versioned {v:1} envelopes (§11) — Chrome's native-messaging port does the framing.
 
+import { ConversationStore } from '../ConversationStore.js';   // v2.74.1022 — `gch` ships the chat transcript
+
 const PROTOCOL_V = 1;
 const HOST_NAME = 'com.orchard.devbridge';
 const SETTING_KEY = 'settings:devBridge';
@@ -27,8 +29,8 @@ const RELAY_SETTING_KEY = 'settings:devBridgeRelay';   // v2.74.1002 — DB-3 pe
 
 // The decisions filter — VERBATIM from studio.js _DECISION_RE (the source of truth; keep in sync until
 // a shared extraction). Filters the session's log entries down to the signal-only story view that the
-// gl convention prefers.
-const DECISION_RE = /(▶ RUN |[✓✗] RUN |COMPREHEND_CROSS_GROUND ▸|T3X resolve ▸|T3X bind ▸|_bind ▸|GROUNDS ▸|ROUTE ▸|HANDOFF ▸|postcond ▸|ORCH_MATCH ▸|ORCH_MATCH_GLOBAL ▸|DETECT_DUPLICATE_GROUNDS ▸|MERGE_GROUNDS ▸|mergeGround |Ground saved:|Ground deleted:|→ (?:auto|propose|miss)\/|RUN_OBSERVATION|RUN_BEST_OBSERVATION|ORCH_RECORD_ALIAS|ORCH_ADMIN ▸|REPLAY_SG_CAPABILITY —|— bindings:|CLICK caused navigation|WALK ▸|LOOP ▸|ORCH_PLAN ▸|OPEN_URL_NEW_TAB —|REVERIFY_SG_CAPABILITY —|ROUTE_ASK "|bindClauseParams →|locale-fresh-skip|locale-trust:|EXPLORE_PAGE_STRUCTURE done|RUN_SG_TRIAL|INTERACTION_MONITOR_START|INTENT_MENU ▸|RICH_INTENTS ▸|ACCEPT_SG_TRIAL|INTERACTION_OUTCOMES ▸|proposeRichIntents —|ensureGroundForUrl|EXPLORE ▸|STOP ▸)/;
+// gl convention prefers. v2.74.1022 — re-synced to studio.js (added FOCUS ▸ / CLARIFY ▸ / CLOSE_TABS ▸).
+const DECISION_RE = /(▶ RUN |[✓✗] RUN |COMPREHEND_CROSS_GROUND ▸|T3X resolve ▸|T3X bind ▸|_bind ▸|GROUNDS ▸|ROUTE ▸|HANDOFF ▸|postcond ▸|ORCH_MATCH ▸|ORCH_MATCH_GLOBAL ▸|DETECT_DUPLICATE_GROUNDS ▸|MERGE_GROUNDS ▸|mergeGround |Ground saved:|Ground deleted:|→ (?:auto|propose|miss)\/|RUN_OBSERVATION|RUN_BEST_OBSERVATION|ORCH_RECORD_ALIAS|ORCH_ADMIN ▸|REPLAY_SG_CAPABILITY —|— bindings:|CLICK caused navigation|WALK ▸|LOOP ▸|ORCH_PLAN ▸|OPEN_URL_NEW_TAB —|REVERIFY_SG_CAPABILITY —|ROUTE_ASK "|bindClauseParams →|locale-fresh-skip|locale-trust:|EXPLORE_PAGE_STRUCTURE done|RUN_SG_TRIAL|INTERACTION_MONITOR_START|INTENT_MENU ▸|RICH_INTENTS ▸|ACCEPT_SG_TRIAL|INTERACTION_OUTCOMES ▸|proposeRichIntents —|ensureGroundForUrl|EXPLORE ▸|STOP ▸|FOCUS ▸|CLARIFY ▸|CLOSE_TABS ▸)/;
 
 function _fmtEntry(entry) {
   const time = entry.timestamp
@@ -48,6 +50,19 @@ function _stamp() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+// v2.74.1022 — chat transcript formatter for `gch` — mirrors studio.js formatConversationAsText.
+function _fmtConv(conv) {
+  const when = (ts) => ts ? new Date(ts).toLocaleString('en-US', { hour12: false }) : '—';
+  const lines = [`# ${conv.title ?? 'Untitled'}`, `created ${when(conv.createdAt)} · updated ${when(conv.updatedAt)} · ${(conv.messages ?? []).length} message(s)`, ''];
+  for (const m of (conv.messages ?? [])) {
+    lines.push(`## ${String(m.role ?? '?')} — ${when(m.ts)}`);
+    lines.push(String(m.body ?? ''));
+    if (m.outcome && m.outcome.label) lines.push(`_outcome: ${m.outcome.label}${m.outcome.detail ? ' — ' + m.outcome.detail : ''}_`);
+    lines.push('');
+  }
+  return lines.join('\n');
 }
 
 function _short(s, n = 60) { const t = String(s ?? ''); return t.length > n ? `…${t.slice(-(n - 1))}` : t; }
@@ -280,6 +295,28 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
           for (const block of (ev.message?.content ?? [])) {
             if (block.type === 'text' && block.text?.trim()) _emit({ kind: 'text', text: block.text.trim() });
             else if (block.type === 'thinking' && block.thinking?.trim()) _emit({ kind: 'thinking', text: block.thinking.trim() });
+            else if (block.type === 'tool_use' && block.name === 'AskUserQuestion') {
+              // v2.74.1024 — SURFACE Claude's questions. Pre-.1024 this rendered as a bare "AskUserQuestion"
+              // chip (the arg pick below has none of its fields) so the question + options VANISHED — the
+              // "chat doesn't surface claude code questions" bug. Headless `claude -p` can't take an
+              // interactive answer mid-run, so render the question as plain text and tell the user to reply
+              // with `dev: <choice>` (which resumes the session so Claude sees the answer).
+              // v2.74.1025 (DB-4) — when the relay is ON, the PreToolUse hook ALSO sends an interactive
+              // `approval` (question) frame → _emitQuestion renders option buttons that PAUSE the run. Skip
+              // this static text then (avoid a double); only render it as the relay-OFF fallback.
+              const qs = Array.isArray(block.input?.questions) ? block.input.questions : [];
+              const lines = ['❓ Claude is asking:'];
+              for (const q of qs) {
+                lines.push(`• ${String(q.question ?? q.header ?? '').trim()}`);
+                for (const o of (Array.isArray(q.options) ? q.options : [])) lines.push(`    – ${String(o.label ?? '').trim()}${o.description ? ` — ${String(o.description).trim()}` : ''}`);
+              }
+              lines.push('↳ answer with `dev: <your choice>`.');
+              getRelay().then((on) => { if (!on) _emit({ kind: 'text', text: lines.join('\n') }); }).catch(() => _emit({ kind: 'text', text: lines.join('\n') }));
+            }
+            else if (block.type === 'tool_use' && block.name === 'ExitPlanMode') {
+              // v2.74.1024 — surface the proposed plan (was a content-less chip too).
+              _emit({ kind: 'text', text: `📋 Claude proposed a plan:\n${String(block.input?.plan ?? '').trim()}\n↳ approve with \`dev: yes\`, or redirect with \`dev: <changes>\`.` });
+            }
             else if (block.type === 'tool_use') {
               const arg = block.input?.file_path ?? block.input?.pattern ?? block.input?.command ?? '';
               _emit({ kind: 'tool', name: block.name, arg: arg ? _short(arg, 80) : '' });
@@ -335,7 +372,8 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         renderHistory(Array.isArray(m.runs) ? m.runs : []);
         break;
       case 'approval':  // DB-3 (v2.74.1002) — the run wants a non-safe tool → inline Allow/Deny
-        _emitApproval(m);
+        // v2.74.1025 (DB-4) — an AskUserQuestion relay → interactive question card (pause-for-reply), not Allow/Deny.
+        if (m.tool === 'AskUserQuestion') _emitQuestion(m); else _emitApproval(m);
         break;
       case 'error':
         endRun(`✗ bridge error: ${m.code}${m.message ? ` — ${m.message}` : ''}${m.code === 'busy' ? ' (one run at a time; "dev: pause" to stop it)' : ''}`);
@@ -450,6 +488,70 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     try { _anchor(); } catch { /* */ }
   }
 
+  // v2.74.1025 (DB-4) — interactive QUESTION card. The PreToolUse hook relayed an AskUserQuestion and is
+  // BLOCKING; render each question with option buttons, collect the user's pick(s), then send the answer
+  // back as an `approval-decision` whose `reason` carries the answer — the hook returns it to Claude (as a
+  // deny reason) and the PAUSED run continues. All text via textContent (trust rule §5 — never HTML).
+  function _emitQuestion(m) {
+    const hostEl = (run && run.bodyEl) || devBubble('', { persist: false }).bodyEl;
+    if (!hostEl) return;
+    const questions = Array.isArray(m.input?.questions) ? m.input.questions : [];
+    const card = document.createElement('div');
+    card.className = 'dev-approval dev-question';
+    const head = document.createElement('div'); head.className = 'dev-approval-q'; head.textContent = '❓ Claude is asking:';
+    card.appendChild(head);
+    // selections[i] = Set of chosen labels for question i
+    const selections = questions.map(() => new Set());
+    let sent = false;
+    const submit = () => {
+      if (sent) return;
+      if (selections.some((s) => s.size === 0)) return;   // every question needs an answer
+      sent = true;
+      const summary = questions.map((q, i) => `${String(q.header || q.question || `Q${i + 1}`).trim()}: ${[...selections[i]].join(', ')}`).join(' · ');
+      const reason = `[dev-bridge] The user answered in the panel — ${summary}. Use these answers and continue; do NOT call AskUserQuestion again for them.`;
+      try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'approval-decision', id: m.id, decision: 'deny', reason }); } catch { /* */ }
+      card.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+      const verdict = document.createElement('div'); verdict.className = 'dev-approval-verdict allow';
+      verdict.textContent = `✓ answered — ${summary}`;
+      card.appendChild(verdict);
+      try { _anchor(); } catch { /* */ }
+    };
+    questions.forEach((q, i) => {
+      const block = document.createElement('div'); block.className = 'dev-question-block';
+      const qt = document.createElement('div'); qt.className = 'dev-approval-detail';
+      qt.textContent = String(q.question || q.header || '').trim();
+      block.appendChild(qt);
+      const opts = document.createElement('div'); opts.className = 'dev-approval-actions';
+      const btns = [];
+      (Array.isArray(q.options) ? q.options : []).forEach((o) => {
+        const label = String(o.label ?? '').trim();
+        if (!label) return;
+        const b = mkBtn(o.description ? `${label} — ${_short(String(o.description), 60)}` : label, () => {
+          if (sent) return;
+          if (q.multiSelect) {
+            if (selections[i].has(label)) { selections[i].delete(label); b.classList.remove('sel'); }
+            else { selections[i].add(label); b.classList.add('sel'); }
+          } else {
+            selections[i].clear(); selections[i].add(label);
+            btns.forEach((x) => x.classList.remove('sel')); b.classList.add('sel');
+            // single question + single-select → one click answers (Claude-chat feel)
+            if (questions.length === 1) { submit(); return; }
+          }
+        });
+        b.dataset.label = label; btns.push(b); opts.appendChild(b);
+      });
+      block.appendChild(opts); card.appendChild(block);
+    });
+    // Submit button for multi-select / multi-question cases (single-select single-question auto-submits above).
+    if (!(questions.length === 1 && !questions[0]?.multiSelect)) {
+      const actions = document.createElement('div'); actions.className = 'dev-approval-actions';
+      actions.appendChild(mkBtn('Send answer ▸', submit));
+      card.appendChild(actions);
+    }
+    hostEl.appendChild(card);
+    try { _anchor(); } catch { /* */ }
+  }
+
   // Render the `history` reply: a clickable list of recent runs; a row replays that journal read-only.
   function renderHistory(runs) {
     const msg = appendMessage({ role: 'assistant', body: '' });
@@ -485,7 +587,8 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     try { _anchor(); } catch { /* */ }
   }
 
-  async function buildDecisionsAttachment() {
+  // v2.74.1022 — the session's log entries (since logger:sessionStart), shared by the full + decisions builders.
+  async function _sessionEntries() {
     let entries = [];
     try {
       const res = await new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_LOGS' }, (r) => { void chrome.runtime.lastError; resolve(r); }));
@@ -496,17 +599,72 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       const start = sess?.['logger:sessionStart'];
       if (start) entries = entries.filter((e) => (e.timestamp ?? '') >= start);
     } catch { /* */ }
+    return entries;
+  }
+
+  // v2.74.1022 — `gl` ships the FULL trace (was decisions-only pre-.1022, mismatching the terminal `gl`).
+  async function buildFullTraceAttachment() {
+    const entries = await _sessionEntries();
+    if (!entries.length) return null;
+    return { kind: 'full-trace', filename: `orchard-logs-${_stamp()}.txt`, content: entries.map(_fmtEntry).join('\n') };
+  }
+
+  async function buildDecisionsAttachment() {
+    const entries = await _sessionEntries();
     const decisions = entries.filter((e) => DECISION_RE.test(String(e.message ?? '')));
     if (!decisions.length) return null;
     return { kind: 'decisions-trace', filename: `orchard-logs-decisions-${_stamp()}.txt`, content: decisions.map(_fmtEntry).join('\n') };
+  }
+
+  // v2.74.1022 — `gch` ships the chat transcript: non-dev conversations since the SHARED boundary
+  // (settings:lastChatExport — same key the Studio grab uses), oldest→newest, advancing the boundary so
+  // the next grab (bridge OR manual) doesn't re-ship them. Dev-bridge chats excluded whole.
+  async function buildChatsAttachment() {
+    const KEY = 'settings:lastChatExport';
+    let summaries = [];
+    try { summaries = await ConversationStore.list(); } catch { return null; }
+    if (!summaries.length) return null;
+    const now = Date.now();
+    let since = 0;
+    try { const s = await chrome.storage.local.get(KEY); since = s?.[KEY] ?? 0; } catch { /* */ }
+    // v2.74.1029 — a `kind:'dev'` conversation is excluded WHOLE (its messages are Claude Code, not user
+    // chat) — same intent as the per-message devBridge filter below, but catches an empty/user-only dev thread.
+    const candidates = summaries.filter((s) => (s.updatedAt ?? 0) > since && s.kind !== 'dev').sort((a, b) => (a.updatedAt ?? 0) - (b.updatedAt ?? 0));
+    if (!candidates.length) return null;
+    const convs = [];
+    for (const s of candidates) {
+      let conv = null;
+      try { conv = await ConversationStore.load(s.id); } catch { /* */ }
+      if (!conv) continue;
+      if ((conv.messages ?? []).some((m) => m.devBridge)) continue;   // dev chats excluded whole
+      convs.push(conv);
+    }
+    try { await chrome.storage.local.set({ [KEY]: now }); } catch { /* */ }   // advance boundary regardless of dev-filtering
+    if (!convs.length) return null;
+    return { kind: 'chats', filename: `orchard-chats-${_stamp()}.txt`, content: convs.map(_fmtConv).join(`\n${'─'.repeat(60)}\n\n`) };
   }
 
   /**
    * The chat send-path hook. Returns true when the text was a bridge verb (handled here, never routed).
    * MUST be called synchronously from the send gesture for `dev: on` (the permission request needs it).
    */
-  async function maybeHandle(text) {
-    const t = String(text ?? '').trim();
+  async function maybeHandle(text, opts = {}) {
+    // v2.74.1029 — `devConversation`: the caller is a DEV conversation (the conversations-menu surface that
+    // replaces the `dev:` prefix). `skipEcho`: the panel already rendered the user's bubble with the original
+    // text, so don't echo it again here. Both default off → every existing call site behaves exactly as before.
+    const devConv = opts.devConversation === true;
+    const skipEcho = opts.skipEcho === true;
+    let t = String(text ?? '').trim();
+    // Inside a dev conversation, bare input IS a dev command: a standalone log verb (gl/gc/gch) or a
+    // `bug:`/`dev:` prefix is taken verbatim; anything else (a sub-verb like `pause`/`history`/`model …`, or
+    // a plain task) is normalized to the `dev: …` form so the existing branch table handles it unchanged —
+    // the user never types `dev:`.
+    if (devConv && t) {
+      const head = t.toLowerCase();
+      const standalone = head === 'gl' || head === 'gc' || head === 'gch' || /^bug:/i.test(t) || /^dev:/i.test(t);
+      if (!standalone) t = `dev: ${t}`;
+    }
+    const echoUser = () => { if (!skipEcho) appendMessage({ role: 'user', body: t }); };
     const isDevVerb = /^dev:/i.test(t);
     const lower = t.toLowerCase().replace(/\s+/g, ' ');
 
@@ -514,16 +672,16 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       // Permission request FIRST — before any await — while the user-gesture token is live (§11).
       let granted = false;
       try { granted = await chrome.permissions.request({ permissions: ['nativeMessaging'] }); } catch { granted = false; }
-      appendMessage({ role: 'user', body: t });
+      echoUser();
       if (!granted) { devBubble('✗ nativeMessaging permission declined — the bridge stays off.'); return true; }
       await setEnabled(true);
       emitReload({ enabled: true });   // reveal the header reload icon
       refreshReloadState();            // and arm it if the tree is already dirty
-      devBubble('✓ dev bridge ON — `gl`, `bug: <what broke>` and `dev: <ask>` now route to Claude Code on this repo.\nIf the host isn’t installed yet: run bridge/install.ps1 once, then reload the extension.');
+      devBubble('✓ dev bridge ON — `gl` (full trace), `gc` (decisions), `gch` (chats), `bug: <what broke>` and `dev: <ask>` now route to Claude Code on this repo.\nIf the host isn’t installed yet: run bridge/install.ps1 once, then reload the extension.');
       return true;
     }
     if (lower === 'dev: off' || lower === 'dev:off') {
-      appendMessage({ role: 'user', body: t });
+      echoUser();
       await setEnabled(false);
       disconnect();
       emitReload({ enabled: false, available: false, files: [] });   // hide the header reload icon
@@ -533,7 +691,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
 
     const enabled = await getEnabled();
     if (!enabled) {
-      if (isDevVerb) { appendMessage({ role: 'user', body: t }); devBubble('dev bridge is off — type `dev: on` to enable it.'); return true; }
+      // v2.74.1029 — a dev conversation whose bridge got turned off (e.g. via `dev: off`) re-enables by
+      // starting a fresh dev conversation (the permission request needs that click gesture).
+      if (isDevVerb || devConv) { echoUser(); devBubble('dev bridge is off — open the conversations menu and start a new dev conversation to re-enable it.'); return true; }
       return false;   // 'gl' (or anything else) falls through to the normal pipeline when the bridge is off
     }
 
@@ -542,7 +702,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     // `dev: <redirect>` resumes it with a correction (resume-with-redirect — already the default for any
     // `dev:` since .985). Marking run.pausing distinguishes this from an unexpected host-lost.
     if (lower === 'dev: pause' || lower === 'dev: cancel') {
-      appendMessage({ role: 'user', body: t });
+      echoUser();
       if (run) run.pausing = true;
       try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'pause' }); } catch { /* */ }
       if (!run) devBubble('nothing is running to pause.');
@@ -552,7 +712,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     // DB-3 (v2.74.1000) — `dev: history` (alias `dev: runs`): list recent runs; tap one to replay it
     // read-only. The host reads the journals in logs/bridge/; the reply renders via the `history` case.
     if (lower === 'dev: history' || lower === 'dev: runs') {
-      appendMessage({ role: 'user', body: t });
+      echoUser();
       try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'history' }); } catch { devBubble('✗ could not reach the bridge host.'); }
       return true;
     }
@@ -562,7 +722,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     // OFF → the static DB-2 allowlist (safe tools only; anything else auto-denied). Safe tier auto-allows
     // either way. Takes effect on the next run.
     if (lower === 'dev: relay' || /^dev: relay /.test(lower)) {
-      appendMessage({ role: 'user', body: t });
+      echoUser();
       const arg = lower === 'dev: relay' ? '' : lower.slice('dev: relay '.length).trim();
       if (!arg) { devBubble(`permission relay: ${(await getRelay()) ? 'ON — non-safe tools prompt for Allow/Deny' : 'OFF — non-safe tools auto-denied (DB-2 allowlist)'}.\ntoggle with \`dev: relay on|off\`.`); return true; }
       if (arg !== 'on' && arg !== 'off') { devBubble('usage: `dev: relay on` or `dev: relay off`.'); return true; }
@@ -573,7 +733,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
 
     // v2.74.976 — `dev: model` shows the current pick; `dev: model <alias>` sets it (next run uses it).
     if (lower === 'dev: model' || /^dev: model /.test(lower)) {
-      appendMessage({ role: 'user', body: t });
+      echoUser();
       const arg = lower === 'dev: model' ? '' : lower.slice('dev: model '.length).trim();
       const cur = await getModel();
       if (!arg) { devBubble(`bridge model: ${cur}\nchange with \`dev: model <${MODEL_ALIASES.join('|')}>\` (default = your Claude Code setting).`); return true; }
@@ -585,7 +745,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
 
     // v2.74.978 — `dev: turns` shows the budget; `dev: turns <n>` sets it (any positive integer, no cap).
     if (lower === 'dev: turns' || /^dev: turns /.test(lower)) {
-      appendMessage({ role: 'user', body: t });
+      echoUser();
       const arg = lower === 'dev: turns' ? '' : lower.slice('dev: turns '.length).trim();
       const cur = await getTurns();
       if (!arg) { devBubble(`bridge turn budget: ${cur} (the runaway cap). Set with \`dev: turns <n>\` — ~25 for a fix, ~50 for a feature, higher for a big task.`); return true; }
@@ -596,15 +756,21 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       return true;
     }
 
-    if (lower === 'gl') {
-      appendMessage({ role: 'user', body: t });
+    // v2.74.1022 — gl (FULL trace), gc (decisions), gch (chats) — each ships the matching attachment to
+    // Claude Code over native messaging (no manual Download). The host writes it into logs/run/ and the
+    // run's prompt is the bare shorthand; the repo's standing convention does the analysis.
+    if (lower === 'gl' || lower === 'gc' || lower === 'gch') {
+      echoUser();
       if (run) { devBubble('a bridge run is already live — `dev: pause` to stop it.'); return true; }
-      const att = await buildDecisionsAttachment();
+      const att = lower === 'gl' ? await buildFullTraceAttachment()
+                : lower === 'gc' ? await buildDecisionsAttachment()
+                : await buildChatsAttachment();
       const model = await getModel();
       const maxTurns = await getTurns();
+      const nothing = lower === 'gch' ? 'no new chat activity this session' : lower === 'gc' ? 'no decision lines this session' : 'no log lines this session';
       startRun(
-        { v: PROTOCOL_V, type: 'run', verb: 'gl', attachments: att ? [att] : [], model, maxTurns, relay: await getRelay() },
-        att ? `gl · shipping ${att.filename} + analyzing…` : 'gl · no decision lines this session — analyzing the newest trace already in logs/run/…',
+        { v: PROTOCOL_V, type: 'run', verb: lower, attachments: att ? [att] : [], model, maxTurns, relay: await getRelay() },
+        att ? `${lower} · shipping ${att.filename} + analyzing…` : `${lower} · ${nothing} — analyzing the newest already in logs/run/…`,
       );
       return true;
     }
@@ -615,7 +781,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     // A fresh report each time → no resume; the run's session is still recorded (done handler) so a
     // follow-up `dev: <reply>` continues the same fix thread.
     if (/^bug:/i.test(t)) {
-      appendMessage({ role: 'user', body: t });
+      echoUser();
       const report = t.slice(t.indexOf(':') + 1).trim();
       if (!report) { devBubble('usage: `bug: <what broke / what you saw>` — ships the newest trace + your report to a verified fix run.'); return true; }
       if (run) { devBubble('a bridge run is already live — `dev: pause` to stop it.'); return true; }
@@ -631,7 +797,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
 
     // v2.74.985 — `dev: reset` drops the conversation thread (next `dev:` starts fresh), no run.
     if (lower === 'dev: reset') {
-      appendMessage({ role: 'user', body: t });
+      echoUser();
       await clearLastSession();
       devBubble('thread cleared — the next `dev:` starts a fresh conversation.');
       return true;
@@ -644,8 +810,8 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       const rest = t.slice(t.indexOf(':') + 1).trim();
       const isNew = /^new\b/i.test(rest);
       const ask = isNew ? rest.replace(/^new\b[:\s]*/i, '').trim() : rest;
-      appendMessage({ role: 'user', body: t });
-      if (!ask) { devBubble('usage: `dev: <reply>` (continues / resumes the thread) · `dev: new <task>` (fresh) · `gl` · `bug: <what broke>` · `dev: pause` (stop, keep session) · `dev: history` (recent runs) · `dev: relay on|off` (inline approvals) · `dev: model|turns <…>` · `dev: reset` · `dev: off`'); return true; }
+      echoUser();
+      if (!ask) { devBubble('usage: `dev: <reply>` (continues / resumes the thread) · `dev: new <task>` (fresh) · `gl` (full trace) · `gc` (decisions) · `gch` (chats) · `bug: <what broke>` · `dev: pause` (stop, keep session) · `dev: history` (recent runs) · `dev: relay on|off` (inline approvals) · `dev: model|turns <…>` · `dev: reset` · `dev: off`'); return true; }
       if (run) { devBubble('a bridge run is already live — `dev: pause` to stop it.'); return true; }
       const model = await getModel();
       const maxTurns = await getTurns();
@@ -695,5 +861,20 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     try { chrome.runtime.reload(); } catch { /* */ }
   }
 
-  return { maybeHandle, onReloadState, refreshReloadState, reloadExtension };
+  // v2.74.1029 — enable the bridge for a NEW dev conversation. The conversations-menu "New dev conversation"
+  // button calls this FIRST in its click handler (before any other await) so the nativeMessaging permission
+  // request stays gesture-bound — exactly as `dev: on` did (§11/§12). Returns whether the permission was
+  // granted; on grant it flips the setting and reveals/arms the reload icon. This is the ONLY enable path now
+  // (the `dev: on` verb is unreachable from a normal conversation — the bridge is dev-conversation-only).
+  async function enable() {
+    let granted = false;
+    try { granted = await chrome.permissions.request({ permissions: ['nativeMessaging'] }); } catch { granted = false; }
+    if (!granted) return false;
+    await setEnabled(true);
+    emitReload({ enabled: true });   // reveal the header reload icon
+    refreshReloadState();            // and arm it if the tree is already dirty
+    return true;
+  }
+
+  return { maybeHandle, enable, onReloadState, refreshReloadState, reloadExtension };
 }

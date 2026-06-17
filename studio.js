@@ -23,6 +23,7 @@ import { layoutLocaleGraph } from './Core/graphLayout.js';   // v2.74.478 — pu
 installGlobalErrorHandlers('studio', window);
 
 import { StorageManager }         from './Services/StorageManager.js';
+import { ConversationStore }      from './Services/ConversationStore.js';   // v2.74.1015 — Grab Chat export
 import { ChatAPI }                from './Services/ChatAPI.js';
 import { normalizeStrategyBody, validateStrategyBody, countExecutableNodes, normalizeStrategyParams, INPUT_TYPES, FILE_PARSERS } from './Services/StrategyTree.js';
 import { promptForParams } from './Services/ParamForm.js';
@@ -5824,7 +5825,11 @@ function formatLogEntryAsText(entry) {
         second: '2-digit', fractionalSecondDigits: 3,
       })
     : '—';
-  let line = `${time} ${entry.level.padEnd(5)} ${(entry.source ?? '').padEnd(20)} ${entry.message ?? ''}`;
+  // v2.74.1014 — coerce level defensively: a single entry with a missing/non-string
+  // level would otherwise throw `padEnd of undefined` and abort the ENTIRE download
+  // (the FULL path maps every entry; Decisions filtered the bad one out first, so the
+  // failure looked FULL-only and produced no file + no error). Never throw here.
+  let line = `${time} ${String(entry.level ?? '?').padEnd(5)} ${String(entry.source ?? '').padEnd(20)} ${entry.message ?? ''}`;
   if (entry.data !== null && entry.data !== undefined) {
     try {
       const dataStr = typeof entry.data === 'string'
@@ -5885,7 +5890,7 @@ function findLastReloadStart() {
 // v2.74.906 — + the rich-intent arc (INTENT_MENU/RICH_INTENTS), the teach promotion (ACCEPT_SG_TRIAL —
 // incl. HS-1's "+ N observation step(s)"), the C5 monitoring flush, and the EX/G1 leftovers (#165) — every
 // decision marker shipped since .882 that a decisions gl was structurally blind to.
-const _DECISION_RE = /(▶ RUN |[✓✗] RUN |COMPREHEND_CROSS_GROUND ▸|T3X resolve ▸|T3X bind ▸|_bind ▸|GROUNDS ▸|ROUTE ▸|HANDOFF ▸|postcond ▸|ORCH_MATCH ▸|ORCH_MATCH_GLOBAL ▸|DETECT_DUPLICATE_GROUNDS ▸|MERGE_GROUNDS ▸|mergeGround |Ground saved:|Ground deleted:|→ (?:auto|propose|miss)\/|RUN_OBSERVATION|RUN_BEST_OBSERVATION|ORCH_RECORD_ALIAS|ORCH_ADMIN ▸|REPLAY_SG_CAPABILITY —|— bindings:|CLICK caused navigation|WALK ▸|LOOP ▸|ORCH_PLAN ▸|OPEN_URL_NEW_TAB —|REVERIFY_SG_CAPABILITY —|ROUTE_ASK "|bindClauseParams →|locale-fresh-skip|locale-trust:|EXPLORE_PAGE_STRUCTURE done|RUN_SG_TRIAL|INTERACTION_MONITOR_START|INTENT_MENU ▸|RICH_INTENTS ▸|ACCEPT_SG_TRIAL|INTERACTION_OUTCOMES ▸|proposeRichIntents —|ensureGroundForUrl|EXPLORE ▸|STOP ▸)/;
+const _DECISION_RE = /(▶ RUN |[✓✗] RUN |COMPREHEND_CROSS_GROUND ▸|T3X resolve ▸|T3X bind ▸|_bind ▸|GROUNDS ▸|ROUTE ▸|HANDOFF ▸|postcond ▸|ORCH_MATCH ▸|ORCH_MATCH_GLOBAL ▸|DETECT_DUPLICATE_GROUNDS ▸|MERGE_GROUNDS ▸|mergeGround |Ground saved:|Ground deleted:|→ (?:auto|propose|miss)\/|RUN_OBSERVATION|RUN_BEST_OBSERVATION|ORCH_RECORD_ALIAS|ORCH_ADMIN ▸|REPLAY_SG_CAPABILITY —|— bindings:|CLICK caused navigation|WALK ▸|LOOP ▸|ORCH_PLAN ▸|OPEN_URL_NEW_TAB —|REVERIFY_SG_CAPABILITY —|ROUTE_ASK "|bindClauseParams →|locale-fresh-skip|locale-trust:|EXPLORE_PAGE_STRUCTURE done|RUN_SG_TRIAL|INTERACTION_MONITOR_START|INTENT_MENU ▸|RICH_INTENTS ▸|ACCEPT_SG_TRIAL|INTERACTION_OUTCOMES ▸|proposeRichIntents —|ensureGroundForUrl|EXPLORE ▸|STOP ▸|FOCUS ▸|CLARIFY ▸|CLOSE_TABS ▸)/;
 function _isDecisionLine(entry) {
   if (!entry) return false;
   if (entry.level === 'WARN' || entry.level === 'ERROR') return true;
@@ -5897,39 +5902,138 @@ function _isDecisionLine(entry) {
 // idle-restart is still included. refreshLogs → getPersistedLogs() merges the never-evicted WARN+ERROR sidecar.
 // Falls back to the SW-start marker (then to everything) if the session was never stamped. PII is scrubbed at persist.
 async function _downloadLogs(decisionsOnly = false) {
-  await refreshLogs();
-  if (allLogEntries.length === 0) { toast('No logs to download', 'warn'); return; }
-  let entries;
-  const sess = await chrome.storage.local.get('logger:sessionStart');   // Logger.SESSION_START_KEY
-  const sessionStart = sess?.['logger:sessionStart'] ?? null;
-  if (sessionStart) {
-    entries = allLogEntries.filter(e => (e.timestamp ?? '') >= sessionStart);
-    if (entries.length === 0) entries = allLogEntries.slice(findLastReloadStart());
-  } else {
-    entries = allLogEntries.slice(findLastReloadStart());
+  // v2.74.1014 — whole body wrapped: a throw anywhere here (formatter, blob, storage)
+  // previously produced NO file AND NO message — a silent failure indistinguishable
+  // from "nothing happened" (the symptom behind two days of zero FULL traces). Now the
+  // failure is surfaced via toast AND console.error (which the ErrorCapture patch routes
+  // to the Logger, so it persists into the NEXT grab instead of vanishing).
+  try {
+    await refreshLogs();
+    if (allLogEntries.length === 0) { toast('No logs to download', 'warn'); return; }
+    let entries;
+    const sess = await chrome.storage.local.get('logger:sessionStart');   // Logger.SESSION_START_KEY
+    const sessionStart = sess?.['logger:sessionStart'] ?? null;
+    if (sessionStart) {
+      entries = allLogEntries.filter(e => (e.timestamp ?? '') >= sessionStart);
+      if (entries.length === 0) entries = allLogEntries.slice(findLastReloadStart());
+    } else {
+      entries = allLogEntries.slice(findLastReloadStart());
+    }
+    if (decisionsOnly) entries = entries.filter(_isDecisionLine);
+    if (entries.length === 0) { toast(decisionsOnly ? 'No decision lines this session' : 'No logs to download', 'warn'); return; }
+    const text = entries.map(formatLogEntryAsText).join('\n');
+
+    // Filename stamped with local date-time: orchard-logs[-decisions]-YYYYMMDD-HHMMSS.txt
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url;
+    a.download = `orchard-logs${decisionsOnly ? '-decisions' : ''}-${stamp}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast(`Downloaded ${entries.length} ${decisionsOnly ? 'decision' : 'log'} line(s) (since last reload)`);
+  } catch (err) {
+    console.error(`[studio] ${decisionsOnly ? 'decisions' : 'full'} log download failed:`, err);
+    toast(`Download failed: ${err?.message ?? err}`, 'warn');
   }
-  if (decisionsOnly) entries = entries.filter(_isDecisionLine);
-  if (entries.length === 0) { toast(decisionsOnly ? 'No decision lines this session' : 'No logs to download', 'warn'); return; }
-  const text = entries.map(formatLogEntryAsText).join('\n');
-
-  // Filename stamped with local date-time: orchard-logs[-decisions]-YYYYMMDD-HHMMSS.txt
-  const d = new Date();
-  const p = (n) => String(n).padStart(2, '0');
-  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
-
-  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href = url;
-  a.download = `orchard-logs${decisionsOnly ? '-decisions' : ''}-${stamp}.txt`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  toast(`Downloaded ${entries.length} ${decisionsOnly ? 'decision' : 'log'} line(s) (since last reload)`);
 }
-$('btn-download-logs').addEventListener('click', () => _downloadLogs(false));
-$('btn-download-decisions')?.addEventListener('click', () => _downloadLogs(true));
+// v2.74.1017 — chat export rides along with EVERY log grab (no dedicated button): one click writes the
+// log file AND `orchard-chats-*.txt` (when there's new non-dev chat activity), so `gch` works off the same
+// gesture as `gl`/`gc`. Both are independent + self-toasting (own try/catch), fired in the same user
+// gesture so Chrome treats them as one multi-file download.
+$('btn-download-logs')?.addEventListener('click', () => { _downloadLogs(false); _downloadChats(); });
+$('btn-download-decisions')?.addEventListener('click', () => { _downloadLogs(true); _downloadChats(); });
+
+// ── Grab Chat (v2.74.1015; trigger moved v2.74.1017) ────────────────────────
+// Export the human↔AI conversation history accumulated SINCE the last grab, as a
+// readable transcript (`orchard-chats-<ts>.txt`) — the counterpart to gl/gc for the
+// CHAT stream rather than the LOG stream. Fired automatically alongside EVERY log
+// grab (Download + Decisions) — NOT a dedicated button — so a `gch` read works off
+// the same gesture as `gl`/`gc` (v2.74.1017, per user: "do the same thing"). The
+// boundary is a persisted timestamp,
+// advanced to the grab moment on every successful export (first grab → everything).
+// "Non-dev chats only": a conversation touched by the dev-bridge (any message with
+// `devBridge: true`, the `dev:` Claude Code replies — Services/Chat/devBridge.js) is
+// excluded WHOLE. The boundary still advances past skipped dev chats, so they don't
+// resurface each grab. Mirrors _downloadLogs's full-body try/catch: a throw anywhere
+// must surface (toast + console.error → Logger), never a silent no-file no-error.
+const LAST_CHAT_EXPORT_KEY = 'settings:lastChatExport';   // chrome.storage.local, ms epoch
+
+function formatConversationAsText(conv) {
+  const when = (ts) => ts
+    ? new Date(ts).toLocaleString('en-US', { hour12: false })
+    : '—';
+  const lines = [];
+  lines.push(`# ${conv.title ?? 'Untitled'}`);
+  lines.push(`created ${when(conv.createdAt)} · updated ${when(conv.updatedAt)} · ${(conv.messages ?? []).length} message(s)`);
+  lines.push('');
+  for (const m of (conv.messages ?? [])) {
+    lines.push(`## ${String(m.role ?? '?')} — ${when(m.ts)}`);
+    lines.push(String(m.body ?? ''));
+    if (m.outcome && m.outcome.label) lines.push(`_outcome: ${m.outcome.label}${m.outcome.detail ? ' — ' + m.outcome.detail : ''}_`);
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+async function _downloadChats() {
+  try {
+    const now = Date.now();
+    const summaries = await ConversationStore.list();   // newest-first metadata, no bodies
+    if (!summaries.length) { toast('No conversations to export', 'warn'); return; }
+    const sess = await chrome.storage.local.get(LAST_CHAT_EXPORT_KEY);
+    const since = sess?.[LAST_CHAT_EXPORT_KEY] ?? 0;
+    // Conversations with activity since the last grab. Load bodies oldest→newest for a
+    // chronological transcript; drop any conversation carrying a dev-bridge message.
+    const candidates = summaries
+      .filter(s => (s.updatedAt ?? 0) > since)
+      .sort((a, b) => (a.updatedAt ?? 0) - (b.updatedAt ?? 0));
+    if (!candidates.length) { toast('No new chat activity since last grab', 'warn'); return; }
+    const convs = [];
+    let devSkipped = 0;
+    for (const s of candidates) {
+      const conv = await ConversationStore.load(s.id);
+      if (!conv) continue;
+      if ((conv.messages ?? []).some(m => m.devBridge)) { devSkipped++; continue; }
+      convs.push(conv);
+    }
+    // Advance the boundary regardless of dev-filtering, so skipped dev chats don't
+    // reappear on the next grab. Only persist AFTER a successful blob/click below.
+    if (!convs.length) {
+      await chrome.storage.local.set({ [LAST_CHAT_EXPORT_KEY]: now });
+      toast(devSkipped ? `Only dev-bridge chat(s) since last grab — nothing to export` : 'No chats to export', 'warn');
+      return;
+    }
+    const text = convs.map(formatConversationAsText).join(`\n${'─'.repeat(60)}\n\n`);
+
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url;
+    a.download = `orchard-chats-${stamp}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    await chrome.storage.local.set({ [LAST_CHAT_EXPORT_KEY]: now });
+    toast(`Exported ${convs.length} chat(s) since last grab${devSkipped ? ` (${devSkipped} dev chat(s) skipped)` : ''}`);
+  } catch (err) {
+    console.error('[studio] chat export failed:', err);
+    toast(`Chat export failed: ${err?.message ?? err}`, 'warn');
+  }
+}
+// v2.74.1017 — no dedicated chat button: _downloadChats() now rides along with the log Download/Decisions
+// grabs (wired above). Kept callable on its own in case a chat-only trigger is added later.
 
 // ── Clear logs ────────────────────────────────────────────────────────────────
 

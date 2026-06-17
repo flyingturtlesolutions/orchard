@@ -73,9 +73,14 @@
   -->
   <div class="running-bar hidden" id="running-bar"></div>
 
-  <!-- ── History sidebar (slide-over) ───────────────────────────────────── -->
-  <div class="history-overlay hidden" id="history-overlay"></div>
-  <aside class="history-sidebar hidden" id="history-sidebar">
+  <!-- ── App body (v2.74.1030): the conversation drawer is now an INLINE left-push panel, not a fixed
+       slide-over with a dark backdrop. It opens beneath the header inside this flex row and the chat column
+       shrinks to make room — so the chat + input stay visible and usable while the drawer is open. -->
+  <div class="app-body" id="app-body">
+
+  <!-- ── Conversation drawer (left; pushes the chat column) ─────────────── -->
+  <aside class="history-sidebar" id="history-sidebar">
+    <div class="history-sidebar-inner">
     <div class="history-header">
       <span class="history-title">Conversations</span>
       <button class="icon-btn" id="btn-delete-all-conversations" title="Delete all conversations">
@@ -98,17 +103,30 @@
       </svg>
       <span>New conversation</span>
     </button>
+    <!-- v2.74.1029 — New dev conversation: a dedicated Claude Code thread. The click requests the
+         nativeMessaging permission (replacing `dev: on`) and opens a kind:'dev' conversation where typed
+         messages route to Claude Code with no `dev:` prefix. Strippable with the dev-bridge module. -->
+    <button class="history-new-btn history-new-dev-btn" id="btn-new-dev-conversation" title="Chat with Claude Code on this repo">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="16 18 22 12 16 6"/>
+        <polyline points="8 6 2 12 8 18"/>
+      </svg>
+      <span>New dev conversation</span>
+    </button>
     <div class="history-list" id="history-list">
       <div class="history-empty">No conversations yet.</div>
     </div>
+    </div><!-- /.history-sidebar-inner -->
   </aside>
 
+  <!-- ── Chat column: conversation + input (shrinks when the drawer opens) ─ -->
+  <div class="chat-main" id="chat-main">
   <!-- ── Main conversation area ─────────────────────────────────────────── -->
   <main class="conversation" id="conversation">
     <!-- Empty state — shown when no messages yet -->
     <div class="empty-state" id="empty-state">
       <div class="empty-state-content">
-        <h1 class="empty-state-greeting">How can I help you today?</h1>
+        <h1 class="empty-state-greeting" id="empty-state-greeting">How can I help you today?</h1>
         <p class="empty-state-subtitle" id="empty-state-subtitle">
           Loading available capabilities…
         </p>
@@ -161,6 +179,8 @@
       </div>
     </div>
   </div>
+  </div><!-- /.chat-main -->
+  </div><!-- /.app-body -->
 
   <!-- ── Capability picker drawer ───────────────────────────────────────── -->
   <div class="capability-drawer hidden" id="capability-drawer">

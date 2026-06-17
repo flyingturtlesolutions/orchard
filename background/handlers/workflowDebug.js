@@ -16,7 +16,7 @@
 import { Logger }           from '../../Core/Logger.js';
 import { StorageManager }   from '../../Services/StorageManager.js';
 import { executeWorkflow }  from '../../Services/WorkflowExecutor.js';
-import { markEngineBusy, focusTabPolicy } from './sg.js';   // v2.74.967 (gl 114728) — monitor self-capture suppression; FM-1 (v2.74.968) — terminal courtesy focus
+import { markEngineBusy, focusTabPolicy, ensureTabForGround } from './sg.js';   // v2.74.967 (gl 114728) — monitor self-capture suppression; FM-1 (v2.74.968) — terminal courtesy focus; v2.74.1008 — ground→tab reuse
 import { CapabilityAPI }    from '../../Services/CapabilityAPI.js';
 
 // v2.74.953 (CR-X3c) — the workflow-debug ctx seam contract, asserted at wiring time.
@@ -303,6 +303,9 @@ export function createWorkflowDebugHandlers(ctx) {
           try {
             const result = await executeWorkflow(workflow, paramValues ?? {}, {
               onProgress,
+              // v2.74.1008 — ground→tab reuse: each strategy step reuses orchard's existing tab for the
+              // step's ground (or opens + records one) instead of proliferating a fresh tab per run.
+              ensureTabForGround: (gid, gurl) => ensureTabForGround(gid, gurl, { active: false }),
               invocationId: invId,
               isAborted: () => _workflowCancellations.has(invId),
               debug,
@@ -331,7 +334,12 @@ export function createWorkflowDebugHandlers(ctx) {
             const _sr = Array.isArray(result.results) ? result.results : (Array.isArray(result.stepResults) ? result.stepResults : null);
             const _ran = _sr ? _sr.length : _wfSteps;
             const _errs = _sr ? _sr.filter((r) => r && r.success === false).length : (result.success ? 0 : 1);
-            Logger.info('background', `${result.success ? '✓' : '✗'} RUN ${_runId} — ${result.success ? 'ok' : (result.error ? String(result.error).slice(0, 80) : 'failed')} · ${_ran}/${_wfSteps} step(s) · ${_errs} error(s) · ${Date.now() - _runT0}ms`);
+            // v2.74.1019 — widen the failure-reason slice 80→240. The 80-char cap chopped every cross-Ground
+            // RUN failure right after the `In "<fragment>", step TYPE <sel> failed: ` prefix (~74 chars),
+            // hiding the ACTUAL cause (e.g. "Could not establish connection. Receiving end does not exist.
+            // [url=/]") from BOTH the decisions and full traces — so a real, recurring step-1 failure read as
+            // an opaque "failed: In <fragment>" for days. The reason is the whole point of the footer.
+            Logger.info('background', `${result.success ? '✓' : '✗'} RUN ${_runId} — ${result.success ? 'ok' : (result.error ? String(result.error).slice(0, 240) : 'failed')} · ${_ran}/${_wfSteps} step(s) · ${_errs} error(s) · ${Date.now() - _runT0}ms`);
             // FM-1 (v2.74.968) — COURTESY focus at the run terminal: surface the last driven tab so the
             // user sees the result/failure state (no-op when they're already on it; the 'autoFocus'
             // setting governs — focusTabPolicy logs the FOCUS ▸ verdict either way).

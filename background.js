@@ -5516,6 +5516,67 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // ▶, + Perspective, Walk button) calls setOptions({enabled:true}) before
     // sidePanel.open. That setOptions call effectively re-arms the panel
     // for the relevant tab.
+    // v2.74.1013 — close tabs from the extension. scope 'tab' = a SPECIFIC tab (the one passed); scope 'all'
+    // = GLOBAL reset — keep exactly ONE Studio tab (find it, else create it) and close every other tab in
+    // every window. Reuses EXIT_TO_STUDIO's Studio find-or-create. Destructive for scope 'all', so the
+    // panel gates it behind a confirm; the handler itself is the mechanism.
+    case 'CLOSE_TABS': {
+      (async () => {
+        try {
+          const { scope = 'all', tabId = null, site = '' } = payload ?? {};
+          if (scope === 'tab') {
+            if (typeof tabId !== 'number') { sendResponse({ success: false, error: 'tabId required for scope=tab' }); return; }
+            try { await chrome.tabs.remove(tabId); } catch (e) { sendResponse({ success: false, error: e.message }); return; }
+            Logger.info('background', `CLOSE_TABS ▸ scope=tab → closed ${tabId}`);
+            sendResponse({ success: true, closed: 1 });
+            return;
+          }
+          // v2.74.1021 — scope 'site' = close every tab whose HOST matches the named site (e.g. "youtube" →
+          // www.youtube.com, m.youtube.com), never the Studio tab. Label-based match (a host LABEL equals the
+          // token, or the bare host equals/starts-with it) so "youtube" hits youtube.com but not notyoutube.com.
+          if (scope === 'site') {
+            const want = String(site || '').toLowerCase().trim();
+            if (!want) { sendResponse({ success: false, error: 'site required for scope=site' }); return; }
+            const studioUrl = chrome.runtime.getURL('studio.html');
+            const all = await chrome.tabs.query({});
+            const toClose = all.filter((t) => {
+              if (!t || typeof t.id !== 'number' || !t.url) return false;
+              if (t.url.startsWith(studioUrl)) return false;   // never close Studio
+              let host = '';
+              try { host = new URL(t.url).hostname.toLowerCase(); } catch { return false; }
+              const bare = host.replace(/^www\./, '');
+              return host === want || bare === want || bare.startsWith(`${want}.`) || bare.split('.').includes(want);
+            }).map((t) => t.id);
+            let closed = 0;
+            if (toClose.length) { try { await chrome.tabs.remove(toClose); closed = toClose.length; } catch (e) { Logger.warn('background', `CLOSE_TABS site remove partial: ${e.message}`); } }
+            Logger.info('background', `CLOSE_TABS ▸ scope=site "${want}" → closed ${closed}`);
+            sendResponse({ success: true, closed, site: want });
+            return;
+          }
+          // scope 'all' — keep exactly one Studio tab (find or create), close the rest (all windows).
+          const studioUrl = chrome.runtime.getURL('studio.html');
+          const studios = await chrome.tabs.query({ url: studioUrl });
+          let keepId = (studios[0] && typeof studios[0].id === 'number') ? studios[0].id : null;
+          if (keepId == null) {
+            const t = await new Promise((r) => { try { chrome.tabs.create({ url: studioUrl, active: true }, (tt) => { void chrome.runtime.lastError; r(tt || null); }); } catch { r(null); } });
+            keepId = (t && typeof t.id === 'number') ? t.id : null;
+          } else {
+            try { await chrome.tabs.update(keepId, { active: true }); } catch { /* */ }
+          }
+          const all = await chrome.tabs.query({});
+          const toClose = all.filter((t) => t && typeof t.id === 'number' && t.id !== keepId).map((t) => t.id);
+          let closed = 0;
+          if (toClose.length) { try { await chrome.tabs.remove(toClose); closed = toClose.length; } catch (e) { Logger.warn('background', `CLOSE_TABS remove partial: ${e.message}`); } }
+          Logger.info('background', `CLOSE_TABS ▸ scope=all → kept Studio tab ${keepId}, closed ${closed}`);
+          sendResponse({ success: true, closed, keptStudioTab: keepId });
+        } catch (err) {
+          Logger.warn('background', `CLOSE_TABS failed: ${err.message}`);
+          sendResponse({ success: false, error: err.message });
+        }
+      })();
+      return true;
+    }
+
     case 'EXIT_TO_STUDIO': {
       (async () => {
         try {

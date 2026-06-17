@@ -94,7 +94,8 @@ function _removeFromIndex(id) {
   });
 }
 
-/** @typedef {{ id: string, title: string, updatedAt: number }} ConversationSummary */
+/** @typedef {{ id: string, title: string, updatedAt: number, kind?: 'agent'|'dev' }} ConversationSummary */
+/* v2.74.1029 — `kind?` added (default 'agent' when absent, for conversations created before the field). */
 /** @typedef {{
  *    id: string, role: 'user'|'assistant'|'system',
  *    body: string, markdown?: boolean, html?: boolean, attribution?: string,
@@ -112,7 +113,7 @@ function _removeFromIndex(id) {
  * flag was being persisted in practice but the typedef hadn't kept up. */
 /** @typedef {{
  *    id: string, title: string, createdAt: number, updatedAt: number,
- *    messages: PersistedMessage[]
+ *    kind?: 'agent'|'dev', messages: PersistedMessage[]
  *  }} Conversation */
 
 export const ConversationStore = {
@@ -144,12 +145,16 @@ export const ConversationStore = {
    * @param {{ title?: string }} [init]
    * @returns {Promise<Conversation>}
    */
-  async create({ title = 'New conversation' } = {}) {
+  async create({ title = 'New conversation', kind = 'agent' } = {}) {
     const id = crypto.randomUUID();
     const now = Date.now();
-    const conv = { id, title, createdAt: now, updatedAt: now, messages: [] };
+    // v2.74.1029 — `kind`: 'agent' (the website-operating assistant, the default) or 'dev' (a Claude Code
+    // dev-bridge thread). Stored on the body AND mirrored into the index entry so history rendering, the
+    // active-conversation routing, and the `gch` dev-exclusion can all read it without a body load.
+    const k = kind === 'dev' ? 'dev' : 'agent';
+    const conv = { id, title, kind: k, createdAt: now, updatedAt: now, messages: [] };
     await chrome.storage.local.set({ [convKey(id)]: conv });
-    await _addToIndex({ id, title, updatedAt: now });
+    await _addToIndex({ id, title, kind: k, updatedAt: now });
     return conv;
   },
 

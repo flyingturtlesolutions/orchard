@@ -3110,9 +3110,18 @@ export function createSgMessageHandlers(ctx) {
         for (const p of (Array.isArray(cap.params) ? cap.params : [])) {
           if (p && p.name && p.used) strategyParamValues[p.name] = p.value != null ? String(p.value) : '';
         }
+        // v2.74.1028 — collect supplied keys that match NO templated param: a resolved binding with nowhere to land
+        // (e.g. the user disambiguated to a capability whose param schema differs from the top pick the LLM bound).
+        // Reported back as `ignoredKeys` so the chat can avoid banking a confirmation on a run that silently fell
+        // back to a demonstrated sample value the user never asked for.
+        const ignoredKeys = [];
         if (paramValues && typeof paramValues === 'object') {
-          for (const [k, v] of Object.entries(paramValues)) if (k && strategyParamValues[k] !== undefined) strategyParamValues[k] = String(v ?? '');
+          for (const [k, v] of Object.entries(paramValues)) {
+            if (k && strategyParamValues[k] !== undefined) strategyParamValues[k] = String(v ?? '');
+            else if (k) ignoredKeys.push(k);
+          }
         }
+        if (ignoredKeys.length) Logger.warn('background', `REPLAY_SG_CAPABILITY — ${ignoredKeys.length} supplied binding(s) had no matching param [${ignoredKeys.join(', ')}] → ran on demonstrated default (not banking a confirmation)`);
         let liveUrl = '';
         if (typeof tabId === 'number') { try { const t = await chrome.tabs.get(tabId); liveUrl = t?.url ?? ''; } catch { /* */ } }
         // Page-drift guard — refuse only on a different SITE (origin), not a different path. A demonstrated
@@ -3153,7 +3162,7 @@ export function createSgMessageHandlers(ctx) {
           // capture here (the search-before-the-read). Only on ok (a failed run left the page in an uncertain state).
           if (ok) { try { _lastGroundAction.set(groundId, { capabilityId: cap.id, bindings: { ...strategyParamValues } }); } catch { /* */ } }
           Logger.info('background', `REPLAY_SG_CAPABILITY — "${cap.intent || cap.name || '?'}" ${cap.id} via saved strategy ${cap.strategyId} → ${ok ? 'ok' : 'failed'} (NO LLM, landmark recovery${pv.length ? `, params: ${pv.join(', ')}` : ''})`);
-          sendResponse({ success: true, ran: true, replayed: true, via: 'strategy', capabilityId: cap.id, ok, reason: ok ? undefined : (result?.error || 'a step failed') });
+          sendResponse({ success: true, ran: true, replayed: true, via: 'strategy', capabilityId: cap.id, ok, ignoredKeys, reason: ok ? undefined : (result?.error || 'a step failed') });
           return;
         }
         // T1-as-first-class (v2.74.752) — a bare T1 capability saved as a FRAGMENT (no Strategy wrapper, the
@@ -3172,7 +3181,7 @@ export function createSgMessageHandlers(ctx) {
             const ok = !!(result && result.success);
             if (ok) { try { _lastGroundAction.set(groundId, { capabilityId: cap.id, bindings: { ...strategyParamValues } }); } catch { /* */ } }   // T3X-DF — candidate antecedent for a later READ capture on this Ground
             Logger.info('background', `REPLAY_SG_CAPABILITY — "${cap.intent || cap.name || '?'}" ${cap.id} via bare FRAGMENT ${cap.fragmentId} (T1, wrapped at run time, NO LLM)`);
-            sendResponse({ success: true, ran: true, replayed: true, via: 'fragment', capabilityId: cap.id, ok, reason: ok ? undefined : (result?.error || 'a step failed') });
+            sendResponse({ success: true, ran: true, replayed: true, via: 'fragment', capabilityId: cap.id, ok, ignoredKeys, reason: ok ? undefined : (result?.error || 'a step failed') });
             return;
           }
         }
