@@ -3,6 +3,6 @@
   "private": true,
   "description": "AHuB / orchard — Chrome MV3 extension. No build step; no runtime deps. This file exists for the test script (CR-I1).",
   "scripts": {
-    "test": "node --experimental-loader ./tools/test-harness/loader.mjs ./tools/test-harness/runner.mjs Core/*.test.js Services/*.test.js Services/Engine/*.test.js"
+    "test": "node --experimental-loader ./tools/test-harness/loader.mjs ./tools/test-harness/runner.mjs Core/*.test.js Services/*.test.js Services/Engine/*.test.js bridge/*.test.js"
   }
 }

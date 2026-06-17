@@ -23,6 +23,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
+const gitOps = require('./gitOps.cjs');   // DBR-1 — the parameter-validated dev-branch git allowlist (§3)
 
 const PROTOCOL_V = 1;
 const REPO = path.resolve(__dirname, '..');
@@ -350,6 +351,36 @@ function diffstatReply() {
   return { v: PROTOCOL_V, type: 'diffstat', files, sig: workingTreeSig() };
 }
 
+// DBR-1 (docs/DESIGN_dev_branches.md §3) — the dev-branch git surface. Unlike the FIXED-string diffstat calls
+// above, these ops carry caller params, so they go through gitOps.buildGitArgs (parameter-validated → argv) and
+// run with `shell:false` (no quoting/injection surface). The host adds the commit current-branch guard:
+// `commitWip` carries no branch arg, so we verify HEAD is a dev/… branch here before letting it land.
+const GIT_TIMEOUT = 15000;
+function runGit(argv) {
+  const r = spawnSync('git', argv, { cwd: REPO, shell: false, timeout: GIT_TIMEOUT, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  return { code: r.status, stdout: String(r.stdout || '').trim(), stderr: String(r.stderr || '').trim(), err: r.error ? String(r.error.message || r.error) : null };
+}
+function currentBranchName() {
+  const r = runGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+  return r.code === 0 ? r.stdout : null;
+}
+function handleGit(msg) {
+  const op = msg && msg.op;
+  const built = gitOps.buildGitArgs(op, (msg && msg.params) || {});
+  if (!built.ok) return { v: PROTOCOL_V, type: 'git-result', op, ok: false, error: built.error };
+  if (op === 'commitWip') {                 // write guard: a commit may only land on a dev/… branch, never main
+    const cur = currentBranchName();
+    if (!cur || !gitOps.validateBranchName(cur)) {
+      log(`git: REFUSED commit — current branch '${cur}' is not a dev/… branch`);
+      return { v: PROTOCOL_V, type: 'git-result', op, ok: false, error: 'commit-guard: not on a dev branch' };
+    }
+  }
+  const r = runGit(built.argv);
+  const ok = r.code === 0 && !r.err;
+  log(`DEVBR ▸ git ${op} [${built.argv.join(' ')}] → ${ok ? 'ok' : `FAIL(${r.code})`}${r.err ? ' ' + r.err : ''}`);
+  return { v: PROTOCOL_V, type: 'git-result', op, ok, code: r.code, stdout: r.stdout, ...(ok ? {} : { stderr: r.stderr, error: r.err || r.stderr || 'git failed' }) };
+}
+
 // DB-3 (v2.74.992, spec §7.1) — PAUSE: kill the run's process tree but leave the session recoverable.
 // The kill is the same forceful taskkill (Edit/Write are atomic between turns — a kill lands in the gap;
 // the journal + git working tree always show exactly what landed). The session_id the run streamed is
@@ -542,6 +573,7 @@ async function handle(msg) {
     case 'history':   send(historyReply()); break;                 // DB-3 run history (v2.74.1000)
     case 'history-open': replayJournal(msg.journal); break;        // replay one journal read-only
     case 'approval-decision': writePermResp(msg); break;           // DB-3 permission relay (v2.74.1002)
+    case 'git':       send(handleGit(msg)); break;                 // DBR-1 dev-branch git allowlist (§3)
     case 'run':       startRun(msg); break;
     default:          send({ v: PROTOCOL_V, type: 'error', code: 'unknown-type', got: msg.type });
   }
