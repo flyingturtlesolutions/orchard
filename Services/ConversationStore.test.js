@@ -22,7 +22,7 @@ globalThis.chrome = {
 };
 
 import gitOps from '../bridge/gitOps.cjs';
-import { ConversationStore, deriveBranchName, devResumeSession } from './ConversationStore.js';
+import { ConversationStore, deriveBranchName, devResumeSession, persistTargetId } from './ConversationStore.js';
 
 describe('ConversationStore — dev-conversation fields round-trip (DBR-2)', () => {
   it('create({kind:dev, ...}) stores branch/concern/sessionId/status and reloads them', async () => {
@@ -78,5 +78,30 @@ describe('devResumeSession — per-conversation resume target (DBR-2)', () => {
     assert.equal(devResumeSession({ kind: 'dev', sessionId: null }), null);
     assert.equal(devResumeSession({ kind: 'agent', sessionId: 's-9' }), null);
     assert.equal(devResumeSession(null), null);
+  });
+});
+
+describe('persistTargetId — run-output pinning (DBR-3, the leak fix)', () => {
+  it('an explicit conversationId pins the write; otherwise the active conversation', () => {
+    assert.equal(persistTargetId({ conversationId: 'A' }, 'B'), 'A');   // pinned wins over active
+    assert.equal(persistTargetId({}, 'B'), 'B');                        // no pin → active
+    assert.equal(persistTargetId({ conversationId: '' }, 'B'), 'B');    // empty pin ignored
+    assert.equal(persistTargetId({}, null), null);
+  });
+  it('leak scenario: a run bound to A lands in A even when B is active; the unpinned path would leak to B', async () => {
+    const A = await ConversationStore.create({ title: 'dev A', kind: 'dev', branch: 'dev/a-abcd1234' });
+    const B = await ConversationStore.create({ title: 'agent B' });   // the conversation the user "switched to"
+    const activeId = B.id;   // simulate B being active mid-run
+
+    // The fixed path: the dev-run persist carries { conversationId: A.id } → pinned to A despite B active.
+    await ConversationStore.updateMessage(persistTargetId({ conversationId: A.id }, activeId), 'run-msg-1',
+      { role: 'assistant', body: 'streamed output', devBridge: true, ts: 1 }, { upsert: true });
+    const loadedA = await ConversationStore.load(A.id);
+    const loadedB = await ConversationStore.load(B.id);
+    assert.equal(loadedA.messages.some((m) => m.id === 'run-msg-1'), true, 'pinned output lands in A');
+    assert.equal(loadedB.messages.some((m) => m.id === 'run-msg-1'), false, 'pinned output does NOT leak to B');
+
+    // The OLD (buggy) path resolved the target as the active conversation → would have leaked into B.
+    assert.equal(persistTargetId({}, activeId), B.id);
   });
 });

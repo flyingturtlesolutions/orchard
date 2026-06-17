@@ -11,7 +11,7 @@ import { installGlobalErrorHandlers } from './Core/ErrorCapture.js';
 installGlobalErrorHandlers('chat', window);
 
 import { ChatAPI } from './Services/ChatAPI.js';
-import { ConversationStore, deriveBranchName } from './Services/ConversationStore.js';   // v2.74.1034 (DBR-2)
+import { ConversationStore, deriveBranchName, persistTargetId } from './Services/ConversationStore.js';   // v2.74.1034 (DBR-2), .1035 (DBR-3)
 import { $, escHtml, escAttr, toast, relTime, openSidepanelHere } from './shared.js';
 import { isSafeStrategyResultHtml, looksLikeStrategyResultHtml } from './Services/Chat/strategyResultHtml.js';
 import { createDevBridge } from './Services/Chat/devBridge.js';   // DB-1b (v2.74.973) — the ONE strippable dev-bridge module (DESIGN_dev_bridge §11)
@@ -516,7 +516,10 @@ function appendMessage({ role, body, attribution, id, skipPersist = false }) {
  * _ensureConversation runs before sends).
  */
 async function _persistMessageUpdate(msgEl, fields) {
-  const convId = await _ensureConversation();
+  // v2.74.1035 (DBR-3) — pin to fields.conversationId when given (a dev run bound to its conversation, so its
+  // streamed blocks land there even if the user switched away); otherwise the active conversation (created if
+  // needed). This closes the run-output leak — see DESIGN §9 / persistTargetId.
+  const convId = persistTargetId(fields, _currentConversationId) || await _ensureConversation();
   const messageId = msgEl.dataset.messageId;
   if (!messageId) return;
   const existing = {

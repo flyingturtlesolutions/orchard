@@ -199,9 +199,15 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     }).map((s) => String(s).trim()).filter(Boolean).join('\n\n');
   }
 
-  function _persistBlocks(msg, blocks) {
+  // v2.74.1035 (DBR-3, DESIGN §9) — `conversationId` PINS the write to the run's originating dev conversation.
+  // A run streams over time; if the user switches conversations mid-run, the unpinned path persisted its blocks
+  // into whatever was active (the leak). Run-path callers pass run.conversationId; standalone bubbles (created
+  // synchronously in the active conversation) omit it and use the active conversation.
+  function _persistBlocks(msg, blocks, conversationId = null) {
     if (!persistMessage) return;
-    try { persistMessage(msg, { role: 'assistant', body: _blocksToMarkdown(blocks), markdown: true, devBridge: true })?.catch?.(() => { /* */ }); } catch { /* */ }
+    const fields = { role: 'assistant', body: _blocksToMarkdown(blocks), markdown: true, devBridge: true };
+    if (conversationId) fields.conversationId = conversationId;
+    try { persistMessage(msg, fields)?.catch?.(() => { /* */ }); } catch { /* */ }
   }
 
   // Create a dev bubble. `initial` (if any) renders as a markdown text block. Returns the handle the run
@@ -241,7 +247,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const now = Date.now();
     if (!run.replay && (!run._lastPersist || (now - run._lastPersist) >= _PERSIST_THROTTLE_MS)) {
       run._lastPersist = now;
-      _persistBlocks(run.msg, run.blocks);
+      _persistBlocks(run.msg, run.blocks, run.conversationId);   // v2.74.1035 (DBR-3) — pin to the originating conversation
     }
     // v2.74.995 — re-anchor the run footer (working…/Pause) so the latest block stays in view, unless
     // the user has scrolled up. Block-size-agnostic (unlike the chat's 96px near-bottom heuristic).
@@ -254,7 +260,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     if (run.tick) { try { clearInterval(run.tick); } catch { /* */ } run.tick = null; }   // v2.74.989 — stop the elapsed ticker
     if (final) _emit(typeof final === 'string' ? { kind: 'result', ok: false, text: final } : final);
     try { run.bar?.remove(); } catch { /* */ }
-    if (!run.replay) _persistBlocks(run.msg, run.blocks);   // v2.74.987/.993 — capture terminal blocks (replay views are transient)
+    if (!run.replay) _persistBlocks(run.msg, run.blocks, run.conversationId);   // v2.74.987/.993 terminal blocks; .1035 pinned
     run = null;
   }
 

@@ -123,6 +123,14 @@ export function devResumeSession(conv) {
   return (conv && conv.kind === 'dev' && typeof conv.sessionId === 'string' && conv.sessionId) ? conv.sessionId : null;
 }
 
+// v2.74.1035 (DBR-3, DESIGN §9 "persistence pinning") — which conversation a message persists to. An explicit
+// `fields.conversationId` PINS the write to that conversation (a dev run streams over time; the user may switch
+// away — without pinning its blocks would leak into whatever's now active, resolved via _ensureConversation).
+// Falls back to the active conversation id. PURE.
+export function persistTargetId(fields, currentId) {
+  return (fields && typeof fields.conversationId === 'string' && fields.conversationId) ? fields.conversationId : (currentId || null);
+}
+
 /** @typedef {{ id: string, title: string, updatedAt: number, kind?: 'agent'|'dev', status?: 'active'|'merged'|'abandoned' }} ConversationSummary */
 /* v2.74.1029 — `kind?` added (default 'agent' when absent). v2.74.1034 (DBR-2) — `status?` mirrored for dev. */
 /** @typedef {{
