@@ -367,18 +367,18 @@ function currentBranchName() {
 function handleGit(msg) {
   const op = msg && msg.op;
   const built = gitOps.buildGitArgs(op, (msg && msg.params) || {});
-  if (!built.ok) return { v: PROTOCOL_V, type: 'git-result', op, ok: false, error: built.error };
+  if (!built.ok) return { v: PROTOCOL_V, type: 'git-result', op, reqId: (msg && msg.reqId), ok: false, error: built.error };
   if (op === 'commitWip') {                 // write guard: a commit may only land on a dev/… branch, never main
     const cur = currentBranchName();
     if (!cur || !gitOps.validateBranchName(cur)) {
       log(`git: REFUSED commit — current branch '${cur}' is not a dev/… branch`);
-      return { v: PROTOCOL_V, type: 'git-result', op, ok: false, error: 'commit-guard: not on a dev branch' };
+      return { v: PROTOCOL_V, type: 'git-result', op, reqId: (msg && msg.reqId), ok: false, error: 'commit-guard: not on a dev branch' };
     }
   }
   const r = runGit(built.argv);
   const ok = r.code === 0 && !r.err;
   log(`DEVBR ▸ git ${op} [${built.argv.join(' ')}] → ${ok ? 'ok' : `FAIL(${r.code})`}${r.err ? ' ' + r.err : ''}`);
-  return { v: PROTOCOL_V, type: 'git-result', op, ok, code: r.code, stdout: r.stdout, ...(ok ? {} : { stderr: r.stderr, error: r.err || r.stderr || 'git failed' }) };
+  return { v: PROTOCOL_V, type: 'git-result', op, reqId: (msg && msg.reqId), ok, code: r.code, stdout: r.stdout, ...(ok ? {} : { stderr: r.stderr, error: r.err || r.stderr || 'git failed' }) };
 }
 
 // DB-3 (v2.74.992, spec §7.1) — PAUSE: kill the run's process tree but leave the session recoverable.

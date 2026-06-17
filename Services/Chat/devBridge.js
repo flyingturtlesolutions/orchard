@@ -14,7 +14,7 @@
 //
 // Protocol: versioned {v:1} envelopes (§11) — Chrome's native-messaging port does the framing.
 
-import { ConversationStore } from '../ConversationStore.js';   // v2.74.1022 — `gch` ships the chat transcript
+import { ConversationStore, devResumeSession } from '../ConversationStore.js';   // v2.74.1022 `gch`; v2.74.1034 (DBR-2) per-conversation resume
 
 const PROTOCOL_V = 1;
 const HOST_NAME = 'com.orchard.devbridge';
@@ -119,6 +119,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   };
   const setLastSession = async (s) => { try { await chrome.storage.local.set({ [LAST_SESSION_KEY]: String(s ?? '') }); } catch { /* */ } };
   const clearLastSession = async () => { try { await chrome.storage.local.remove(LAST_SESSION_KEY); } catch { /* */ } };
+  // v2.74.1034 (DBR-2) — the resume target for a dev conversation is its OWN session (per-conversation), via
+  // devResumeSession on the conversation record; falls back to null if the conversation/session is gone.
+  const _convResume = async (id) => { try { return devResumeSession(await ConversationStore.load(id)); } catch { return null; } };
   // v2.74.980 — the working-tree signature stamped at the last reload (the "applied" baseline). Persisted
   // so it survives the chrome.runtime.reload() that the reload icon triggers — that survival is the whole
   // point: the post-reload diffstat compares against it to decide whether anything is still pending.
@@ -267,6 +270,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     port.onDisconnect.addListener(() => {
       const err = chrome.runtime.lastError?.message || '';
       port = null;
+      _failPendingGit('bridge port closed');   // v2.74.1034 (DBR-2) — don't leave git RPCs hanging on disconnect
       if (run) {
         endRun(/not found|forbidden/i.test(err)
           ? `✗ bridge host not reachable (${err}). Run bridge/install.ps1 once, then reload the extension.`
@@ -276,9 +280,27 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     return port;
   }
 
+  // v2.74.1034 (DBR-2) — panel→host git RPC. Posts {type:'git', op, params, reqId}; resolves on the matching
+  // git-result. The host enforces the §3 allowlist (parameter-validated argv → spawn shell-free; dev-branch
+  // write guard) — the panel only relays. Correlated by reqId and safety-timed so a dead host can't hang a caller.
+  let _gitSeq = 0;
+  const _gitPending = new Map();
+  function _failPendingGit(reason) { for (const resolve of _gitPending.values()) { try { resolve({ ok: false, error: reason }); } catch { /* */ } } _gitPending.clear(); }
+  function gitOp(op, params = {}) {
+    return new Promise((resolve) => {
+      const reqId = 'g' + (++_gitSeq);
+      _gitPending.set(reqId, resolve);
+      const done = (r) => { if (_gitPending.has(reqId)) { _gitPending.delete(reqId); resolve(r); } };
+      try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'git', op, params, reqId }); }
+      catch (e) { done({ ok: false, error: 'host unreachable: ' + ((e && e.message) || e) }); return; }
+      setTimeout(() => done({ ok: false, error: 'git op timed out' }), 20000);
+    });
+  }
+
   function onHostMsg(m) {
     if (!m || m.v !== PROTOCOL_V) return;
     switch (m.type) {
+      case 'git-result': { const resolve = _gitPending.get(m.reqId); if (resolve) { _gitPending.delete(m.reqId); resolve(m); } break; }   // v2.74.1034 (DBR-2)
       case 'preflight':
         if (!m.ok) { endRun(`✗ preflight failed: ${m.error}`); break; }
         if (run && run.pendingPayload) { const p = run.pendingPayload; run.pendingPayload = null; port.postMessage(p); _emit({ kind: 'meta', text: `claude ${m.claudeVersion} · ${m.repoRoot}` }); }
@@ -342,7 +364,12 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         // bridge is a conversation; `dev: new` starts a fresh thread). Capture from the result, else the
         // init event the run streamed. This is also what makes resume-after-pause work.
         const sid = r.sessionId || run?.sessionId || null;
-        if (sid && !run?.replay) setLastSession(sid);   // v2.74.1000 — viewing history must not change the resume target
+        // v2.74.1034 (DBR-2) — record the session on the OWNING dev conversation (per-conversation resume),
+        // falling back to the legacy global key only when the run isn't bound to a conversation.
+        if (sid && !run?.replay) {
+          if (run?.conversationId) ConversationStore.patchMeta(run.conversationId, { sessionId: sid }).catch(() => { /* */ });
+          else setLastSession(sid);
+        }
         // DB-3 (v2.74.992, spec §7.1) — a user-initiated PAUSE arrives here as the host-lost `done` that
         // follows the kill. Frame it as paused (the Esc-analog: resume with a redirect), NOT an error.
         if (run?.pausing) {
@@ -419,9 +446,10 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     return run;
   }
 
-  function startRun(payload, headline) {
+  function startRun(payload, headline, opts = {}) {
     const r = _beginRunBubble(headline);
     r.pendingPayload = payload;
+    r.conversationId = opts.conversationId || null;   // v2.74.1034 (DBR-2) — bind the run to its dev conversation
     try {
       ensurePort().postMessage({ v: PROTOCOL_V, type: 'preflight' });   // run is posted on preflight-ok
     } catch (e) {
@@ -654,6 +682,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     // text, so don't echo it again here. Both default off → every existing call site behaves exactly as before.
     const devConv = opts.devConversation === true;
     const skipEcho = opts.skipEcho === true;
+    const convId = opts.conversationId || null;   // v2.74.1034 (DBR-2) — the dev conversation this run belongs to
     let t = String(text ?? '').trim();
     // Inside a dev conversation, bare input IS a dev command: a standalone log verb (gl/gc/gch) or a
     // `bug:`/`dev:` prefix is taken verbatim; anything else (a sub-verb like `pause`/`history`/`model …`, or
@@ -771,6 +800,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       startRun(
         { v: PROTOCOL_V, type: 'run', verb: lower, attachments: att ? [att] : [], model, maxTurns, relay: await getRelay() },
         att ? `${lower} · shipping ${att.filename} + analyzing…` : `${lower} · ${nothing} — analyzing the newest already in logs/run/…`,
+        { conversationId: convId },
       );
       return true;
     }
@@ -791,6 +821,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       startRun(
         { v: PROTOCOL_V, type: 'run', verb: 'bug', text: report, attachments: att ? [att] : [], model, maxTurns, relay: await getRelay() },
         att ? `bug · ${_short(report, 56)} (+ ${att.filename})` : `bug · ${_short(report, 70)}`,
+        { conversationId: convId },
       );
       return true;
     }
@@ -815,11 +846,13 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       if (run) { devBubble('a bridge run is already live — `dev: pause` to stop it.'); return true; }
       const model = await getModel();
       const maxTurns = await getTurns();
-      const resumeSessionId = isNew ? null : await getLastSession();
-      if (isNew) await clearLastSession();   // the fresh run will record its own session on done
+      // v2.74.1034 (DBR-2) — resume THIS dev conversation's session (per-conversation), not the global key.
+      let resumeSessionId = null;
+      if (!isNew) resumeSessionId = convId ? await _convResume(convId) : await getLastSession();
+      if (isNew) { if (convId) await ConversationStore.patchMeta(convId, { sessionId: null }).catch(() => { /* */ }); else await clearLastSession(); }
       const payload = { v: PROTOCOL_V, type: 'run', verb: 'dev', text: ask, model, maxTurns, relay: await getRelay() };
       if (resumeSessionId) payload.resumeSessionId = resumeSessionId;
-      startRun(payload, `dev${resumeSessionId ? ' (continuing)' : isNew ? ' (new thread)' : ''} · ${_short(ask, 80)}`);
+      startRun(payload, `dev${resumeSessionId ? ' (continuing)' : isNew ? ' (new thread)' : ''} · ${_short(ask, 80)}`, { conversationId: convId });
       return true;
     }
 
@@ -876,5 +909,5 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     return true;
   }
 
-  return { maybeHandle, enable, onReloadState, refreshReloadState, reloadExtension };
+  return { maybeHandle, enable, gitOp, onReloadState, refreshReloadState, reloadExtension };
 }

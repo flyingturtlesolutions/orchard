@@ -94,8 +94,37 @@ function _removeFromIndex(id) {
   });
 }
 
-/** @typedef {{ id: string, title: string, updatedAt: number, kind?: 'agent'|'dev' }} ConversationSummary */
-/* v2.74.1029 — `kind?` added (default 'agent' when absent, for conversations created before the field). */
+// v2.74.1034 (DBR-2) — merge arbitrary index-entry fields (e.g. dev `status`, `updatedAt`) on the serialized
+// chain, so patchMeta's index mirror can't race a concurrent add/touch/title-update.
+function _updateIndexMeta(id, patch) {
+  return _serializeIndexOp(async () => {
+    const index = await _readIndex();
+    const entry = index.find(e => e.id === id);
+    if (entry) { Object.assign(entry, patch); await _writeIndex(index); }
+  });
+}
+
+// v2.74.1034 (DBR-2) — derive a valid, collision-resistant dev branch name from a seed (title / first ask).
+// PURE. Shape: `dev/<slug>-<shortid>` — slug = alnum-hyphen, leading-alnum, capped; shortid = 8 hex from a
+// uuid. By construction passes bridge/gitOps.cjs `validateBranchName` (dev/…, no `..`, no metacharacters).
+export function deriveBranchName(seed) {
+  let slug = String(seed || '').toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')   // any run of non-alnum → a single hyphen (no `--`, no dots → no `..`)
+    .replace(/^-+|-+$/g, '')        // trim leading/trailing hyphens
+    .slice(0, 32).replace(/^-+|-+$/g, '');
+  if (!slug || !/^[a-z0-9]/.test(slug)) slug = slug ? ('x-' + slug) : 'x';   // must start alphanumeric
+  const shortid = String(crypto.randomUUID()).replace(/[^a-z0-9]/gi, '').slice(0, 8).toLowerCase();
+  return `dev/${slug}-${shortid}`;
+}
+
+// v2.74.1034 (DBR-2) — the resume target for a dev conversation is ITS OWN session (replaces the global
+// `settings:devBridgeLastSession`). PURE: returns the conversation's sessionId, or null. Non-dev → null.
+export function devResumeSession(conv) {
+  return (conv && conv.kind === 'dev' && typeof conv.sessionId === 'string' && conv.sessionId) ? conv.sessionId : null;
+}
+
+/** @typedef {{ id: string, title: string, updatedAt: number, kind?: 'agent'|'dev', status?: 'active'|'merged'|'abandoned' }} ConversationSummary */
+/* v2.74.1029 — `kind?` added (default 'agent' when absent). v2.74.1034 (DBR-2) — `status?` mirrored for dev. */
 /** @typedef {{
  *    id: string, role: 'user'|'assistant'|'system',
  *    body: string, markdown?: boolean, html?: boolean, attribution?: string,
@@ -113,8 +142,11 @@ function _removeFromIndex(id) {
  * flag was being persisted in practice but the typedef hadn't kept up. */
 /** @typedef {{
  *    id: string, title: string, createdAt: number, updatedAt: number,
- *    kind?: 'agent'|'dev', messages: PersistedMessage[]
+ *    kind?: 'agent'|'dev', messages: PersistedMessage[],
+ *    branch?: string|null, concern?: string|null, sessionId?: string|null,
+ *    status?: 'active'|'merged'|'abandoned', mergedAt?: number, mergeCommit?: string
  *  }} Conversation */
+/* v2.74.1034 (DBR-2, DESIGN §2/§9) — dev-conversation branch metadata fields. */
 
 export const ConversationStore = {
 
@@ -145,7 +177,7 @@ export const ConversationStore = {
    * @param {{ title?: string }} [init]
    * @returns {Promise<Conversation>}
    */
-  async create({ title = 'New conversation', kind = 'agent' } = {}) {
+  async create({ title = 'New conversation', kind = 'agent', branch = null, concern = null, sessionId = null, status = 'active' } = {}) {
     const id = crypto.randomUUID();
     const now = Date.now();
     // v2.74.1029 — `kind`: 'agent' (the website-operating assistant, the default) or 'dev' (a Claude Code
@@ -153,8 +185,43 @@ export const ConversationStore = {
     // active-conversation routing, and the `gch` dev-exclusion can all read it without a body load.
     const k = kind === 'dev' ? 'dev' : 'agent';
     const conv = { id, title, kind: k, createdAt: now, updatedAt: now, messages: [] };
+    // v2.74.1034 (DBR-2, DESIGN §2/§9) — dev conversations carry branch metadata: the git branch they own,
+    // their `concern` (scope), their Claude Code `sessionId` (per-conversation resume), and lifecycle `status`.
+    if (k === 'dev') {
+      conv.branch = branch;
+      conv.concern = concern;
+      conv.sessionId = sessionId;
+      conv.status = (status === 'merged' || status === 'abandoned') ? status : 'active';
+    }
     await chrome.storage.local.set({ [convKey(id)]: conv });
-    await _addToIndex({ id, title, kind: k, updatedAt: now });
+    const entry = { id, title, kind: k, updatedAt: now };
+    if (k === 'dev') entry.status = conv.status;   // mirror status so list()/history can group without a body load
+    await _addToIndex(entry);
+    return conv;
+  },
+
+  /**
+   * v2.74.1034 (DBR-2) — patch a dev conversation's metadata (branch / concern / sessionId / status /
+   * mergedAt / mergeCommit). Bumps updatedAt and mirrors `status` (+ title) into the index. Idempotent;
+   * no-op (returns null) if the conversation is gone (mirrors updateMessage's delete-race narrowing).
+   * @param {string} id
+   * @param {{branch?:string, concern?:string, sessionId?:string, status?:string, mergedAt?:number, mergeCommit?:string, title?:string}} fields
+   * @returns {Promise<Conversation|null>}
+   */
+  async patchMeta(id, fields = {}) {
+    const conv = await ConversationStore.load(id);
+    if (!conv) return null;
+    for (const k of ['branch', 'concern', 'sessionId', 'status', 'mergedAt', 'mergeCommit', 'title']) {
+      if (k in fields) conv[k] = fields[k];
+    }
+    conv.updatedAt = Date.now();
+    const stillExists = await ConversationStore.load(id);   // narrow the delete-then-patch race (see updateMessage)
+    if (!stillExists) return null;
+    await chrome.storage.local.set({ [convKey(id)]: conv });
+    const patch = { updatedAt: conv.updatedAt };
+    if ('status' in fields) patch.status = conv.status;
+    if ('title' in fields) patch.title = conv.title;
+    await _updateIndexMeta(id, patch);
     return conv;
   },
 

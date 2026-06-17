@@ -11,7 +11,7 @@ import { installGlobalErrorHandlers } from './Core/ErrorCapture.js';
 installGlobalErrorHandlers('chat', window);
 
 import { ChatAPI } from './Services/ChatAPI.js';
-import { ConversationStore } from './Services/ConversationStore.js';
+import { ConversationStore, deriveBranchName } from './Services/ConversationStore.js';   // v2.74.1034 (DBR-2)
 import { $, escHtml, escAttr, toast, relTime, openSidepanelHere } from './shared.js';
 import { isSafeStrategyResultHtml, looksLikeStrategyResultHtml } from './Services/Chat/strategyResultHtml.js';
 import { createDevBridge } from './Services/Chat/devBridge.js';   // DB-1b (v2.74.973) — the ONE strippable dev-bridge module (DESIGN_dev_bridge §11)
@@ -182,7 +182,15 @@ $('btn-new-dev-conversation')?.addEventListener('click', async () => {
   if (!granted) return;                              // declined → bridge stays off, no conversation created (drawer stays open)
   _clearCurrentConversation();
   _resetConversation();
-  const conv = await ConversationStore.create({ title: 'Dev — Claude Code', kind: 'dev' });
+  // v2.74.1034 (DBR-2, DESIGN §2/§9) — a dev conversation owns a git branch off main. Create it via the host
+  // (best-effort: if the host isn't installed yet the conversation is still created with the intended branch
+  // name, stored for later reconciliation).
+  const branch = deriveBranchName('session');
+  let branchOk = false;
+  try { const r = await _getDevBridge().gitOp('branchCreate', { branch, base: 'main' }); branchOk = !!(r && r.ok); }
+  catch (e) { try { console.warn('[chat] dev branch create failed:', e?.message); } catch { /* */ } }
+  if (!branchOk) { try { console.warn(`[chat] dev branch ${branch} not created (host unready?); stored for reconciliation`); } catch { /* */ } }
+  const conv = await ConversationStore.create({ title: 'Dev — Claude Code', kind: 'dev', branch });
   _currentConversationId = conv.id;
   _currentConversationKind = 'dev';
   _showDevEmptyState();
@@ -3010,7 +3018,7 @@ async function sendChatMessage() {
   if (_currentConversationKind === 'dev') {
     input.value = ''; _autosizeInput(); $('btn-chat-send').disabled = true;
     appendMessage({ role: 'user', body: text });
-    try { await _getDevBridge().maybeHandle(text, { devConversation: true, skipEcho: true }); }
+    try { await _getDevBridge().maybeHandle(text, { devConversation: true, skipEcho: true, conversationId: _currentConversationId }); }
     catch (e) { try { console.warn('[chat] dev-conversation route failed:', e?.message); } catch { /* */ } }
     $('btn-chat-send').disabled = false;
     return;
