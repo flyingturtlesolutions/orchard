@@ -34,3 +34,21 @@ bridge/com.orchard.devbridge.json
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Dev-bridge local probe / scratch scripts — untracked one-offs, never part of `npm test` (which uses
+# bridge/*.test.js). Listed explicitly so no glob can accidentally untrack the tracked host modules
+# (bridge/concern.cjs, bridge/host.js, …). Add new probes here, or write them to %TEMP% per CLAUDE.md.
+bridge/approvertest.cjs
+bridge/debugapprover.cjs
+bridge/historytest.cjs
+bridge/hooktest.cjs
+bridge/hostdrive.cjs
+bridge/locktest.cjs
+bridge/permtest.cjs
+bridge/ppttest.cjs
+bridge/reattachdrive.cjs
+bridge/relaytest.cjs
+bridge/resumetest.cjs
+
+# Leftover commit-message scratch
+COMMIT_MSG.tmp
