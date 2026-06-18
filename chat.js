@@ -59,6 +59,7 @@ async function _ensureConversation() {
   _ensureConversationPromise = (async () => {
     const conv = await ConversationStore.create();
     _currentConversationId = conv.id;
+    _refreshHistoryIfOpen().catch(() => {});   // v2.74.1042 — show the just-minted conversation in an open drawer
     return conv.id;
   })();
   try {
@@ -94,6 +95,7 @@ async function _maybeGenerateTitle() {
     const title = await ChatAPI.generateTitle(firstUserMsg.body);
     if (title) {
       await ConversationStore.setTitle(_currentConversationId, title);
+      await _refreshHistoryIfOpen();   // v2.74.1042 — replace the placeholder title in an open drawer
     }
   } catch (err) {
     console.warn('[chat] title generation failed:', err.message);
@@ -383,6 +385,15 @@ async function _openHistory() {
 
 function _closeHistory() {
   $('history-sidebar').classList.remove('open');
+}
+
+// v2.74.1042 — Refresh the drawer list IF it's currently open. The drawer otherwise re-renders only
+// on open / new-button / select / delete, so a conversation minted mid-send (via _ensureConversation)
+// or re-titled after the first reply (_maybeGenerateTitle) was persisted + indexed yet stayed invisible
+// in an already-open drawer until it was closed and reopened — the reported "runs but doesn't appear"
+// bug. Guarded by .open so a closed drawer pays nothing on the hot send path.
+async function _refreshHistoryIfOpen() {
+  if ($('history-sidebar')?.classList.contains('open')) await _renderHistoryList();
 }
 
 async function _renderHistoryList() {
