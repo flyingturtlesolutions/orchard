@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch } from './devBridge.js';
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
@@ -186,5 +186,17 @@ describe('isMainStale — re-sync before landing iff main moved', () => {
   it('main unreadable → NOT stale (don\'t block; gated current=main + token guards still apply)', () => {
     assert.equal(isMainStale('abc123', ''), false);
     assert.equal(isMainStale(null, null), false);
+  });
+});
+
+// DBR-P2-6 (DESIGN §5/U13) — abandon verbs: `abandon` (soft) and `delete branch` (hard, gated).
+describe('isAbandon / isDeleteBranch — whole-message verbs, disjoint', () => {
+  it('isAbandon fires only for the bare word', () => {
+    for (const s of ['abandon', 'ABANDON', '  abandon  ']) assert.equal(isAbandon(s), true, `fire: ${JSON.stringify(s)}`);
+    for (const s of ['abandon it', 'abandon branch', 'abandoned', '', null, 'delete branch']) assert.equal(isAbandon(s), false, `no: ${String(s)}`);
+  });
+  it('isDeleteBranch fires only for the exact phrase, whitespace-tolerant', () => {
+    for (const s of ['delete branch', 'DELETE BRANCH', '  delete   branch  ']) assert.equal(isDeleteBranch(s), true, `fire: ${JSON.stringify(s)}`);
+    for (const s of ['delete branch dev/x', 'delete the branch', 'delete', 'branch', 'abandon', '', null]) assert.equal(isDeleteBranch(s), false, `no: ${String(s)}`);
   });
 });

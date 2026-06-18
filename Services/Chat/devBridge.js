@@ -148,6 +148,16 @@ export function isMainStale(syncedMain, currentMain) {
   return String(syncedMain == null ? '' : syncedMain).trim() !== b;
 }
 
+// DBR-P2-6 (DESIGN §5/U13) — abandon verbs. `abandon` = SOFT (archive the conversation, KEEP the branch —
+// recoverable). `delete branch` = HARD (irreversible — gated branchDelete after an in-chat confirm). Whole-message
+// only, dev-conversation gated by the caller. PURE + exported.
+export function isAbandon(text) {
+  return String(text ?? '').trim().toLowerCase().replace(/\s+/g, ' ') === 'abandon';
+}
+export function isDeleteBranch(text) {
+  return String(text ?? '').trim().toLowerCase().replace(/\s+/g, ' ') === 'delete branch';
+}
+
 // DBR-P2-4 (DESIGN §6.1) — the merge-SUMMARY (deterministic v1; an LLM-rich {learned, newInvariant} can refine
 // later). Subject ← the conversation's concern (its stated scope) or title; files ← the diff-stat lines. PURE.
 export function buildMergeSummary({ concern, title, diffStat } = {}) {
@@ -878,6 +888,18 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       await _mergePrepare(convId);
       return true;
     }
+    // DBR-P2-6 (v2.74.1051, DESIGN §5/U13) — `abandon` (soft archive, keep branch) / `delete branch` (hard,
+    // confirm-gated). Whole-message, dev-conversation only, intercepted before the bare-text normalization.
+    if (devConv && isAbandon(t)) {
+      if (!skipEcho) appendMessage({ role: 'user', body: t });
+      await _abandon(convId);
+      return true;
+    }
+    if (devConv && isDeleteBranch(t)) {
+      if (!skipEcho) appendMessage({ role: 'user', body: t });
+      await _deleteBranch(convId);
+      return true;
+    }
     // Inside a dev conversation, bare input IS a dev command: a standalone log verb (gl/gc/gch) or a
     // `bug:`/`dev:` prefix is taken verbatim; anything else (a sub-verb like `pause`/`history`/`model …`, or
     // a plain task) is normalized to the `dev: …` form so the existing branch table handles it unchanged —
@@ -1313,6 +1335,49 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const mergeCommit = String((head && head.ok && head.stdout) || '').trim();
     try { await ConversationStore.patchMeta(convId, { status: 'merged', mergedAt: Date.now(), mergeCommit }); } catch { /* archive is best-effort */ }
     _setBubble(bubble, `✓ merged \`${branch}\` → \`main\` as \`${mergeCommit.slice(0, 7) || '?'}\` (one squash commit). This conversation is archived (merged); the loaded tree is on \`main\`. **Push stays manual** — run \`cp\` when ready to publish.`);
+  }
+
+  // DBR-P2-6 (DESIGN §5/U13) — `abandon` (SOFT): archive the conversation (status → 'abandoned', read-only) but
+  // KEEP the branch — fully recoverable, no git mutation. (The drawer's Merged/Abandoned grouping is a separate
+  // chat.js render concern; this flips the data.)
+  async function _abandon(convId) {
+    let conv = null;
+    try { conv = convId ? await ConversationStore.load(convId) : null; } catch { conv = null; }
+    const branch = conv && conv.branch;
+    if (!branch) { devBubble('✗ `abandon` — no branch is recorded for this dev conversation.'); return; }
+    try { await ConversationStore.patchMeta(convId, { status: 'abandoned' }); } catch { /* best-effort */ }
+    devBubble(`✗ abandoned — this conversation is archived (read-only). The branch \`${branch}\` is KEPT (recoverable). Type \`delete branch\` to remove it permanently.`);
+  }
+
+  // DBR-P2-6 (DESIGN §5/U13) — `delete branch` (HARD): irreversible. A confirm button → gated host `branchDelete`
+  // (P2-1; needs a fresh token). Can't delete the checked-out branch, so we switch off it first. Then archive.
+  async function _deleteBranch(convId) {
+    let conv = null;
+    try { conv = convId ? await ConversationStore.load(convId) : null; } catch { conv = null; }
+    const branch = conv && conv.branch;
+    if (!branch) { devBubble('✗ `delete branch` — no branch is recorded for this dev conversation.'); return; }
+    const bubble = devBubble(`⚠ \`delete branch\` — permanently delete \`${branch}\`? This is **irreversible**: any commits on it not merged to \`main\` are lost.`);
+    try {
+      const actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;gap:8px;margin-top:8px';
+      const go = mkBtn('Delete branch ⌫', async () => {
+        try { actions.remove(); } catch { /* */ }
+        const cur = await gitOp('currentBranch');                          // can't delete the checked-out branch
+        if (cur && cur.ok && cur.stdout === branch) {
+          const sw = await gitOp('switch', { branch: 'main' });
+          if (!sw || !sw.ok) { _setBubble(bubble, `✗ delete — couldn’t switch off \`${branch}\` first: ${(sw && sw.error) || '?'}.`); return; }
+        }
+        const tok = await hostConfirmToken();
+        if (!tok || !tok.token) { _setBubble(bubble, `✗ delete — couldn’t mint a confirm token: ${(tok && tok.error) || '?'}.`); return; }
+        const del = await gitOp('branchDelete', { branch, confirmToken: tok.token });
+        if (!del || !del.ok) { _setBubble(bubble, `✗ delete — failed: ${(del && del.error) || '?'}.`); return; }
+        try { await ConversationStore.patchMeta(convId, { status: 'abandoned' }); } catch { /* */ }
+        _setBubble(bubble, `✓ deleted branch \`${branch}\` permanently. This conversation is archived (abandoned).`);
+      });
+      const no = mkBtn('Cancel', () => { try { actions.remove(); } catch { /* */ } _setBubble(bubble, `✗ delete cancelled — \`${branch}\` is kept.`); });
+      actions.appendChild(go); actions.appendChild(no);
+      bubble.bodyEl.appendChild(actions);
+    } catch { /* no buttons → re-run `delete branch` */ }
   }
 
   // v2.74.1029 — enable the bridge for a NEW dev conversation. The conversations-menu "New dev conversation"
