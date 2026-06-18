@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale } from './devBridge.js';
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
@@ -170,5 +170,21 @@ describe('mergeHasChanges — empty diff-stat means nothing to land', () => {
   it('false for empty / whitespace / nullish; true for any real diff line', () => {
     for (const d of ['', '   ', '\n\t ', null, undefined]) assert.equal(mergeHasChanges(d), false, `empty: ${JSON.stringify(d)}`);
     assert.equal(mergeHasChanges(' chat.js | 3 +\n 1 file changed'), true);
+  });
+});
+
+// DBR-P2-5 (DESIGN §7.2) — freshness: did `main` move between prepare and the land confirm?
+describe('isMainStale — re-sync before landing iff main moved', () => {
+  it('equal → fresh (land directly); differ → stale (re-sync)', () => {
+    assert.equal(isMainStale('abc123', 'abc123'), false);
+    assert.equal(isMainStale('abc123', 'def456'), true);
+  });
+  it('unknown synced-onto but main readable → stale (re-sync to be safe)', () => {
+    assert.equal(isMainStale('', 'def456'), true);
+    assert.equal(isMainStale(null, 'def456'), true);
+  });
+  it('main unreadable → NOT stale (don\'t block; gated current=main + token guards still apply)', () => {
+    assert.equal(isMainStale('abc123', ''), false);
+    assert.equal(isMainStale(null, null), false);
   });
 });

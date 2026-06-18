@@ -138,6 +138,16 @@ export function mergeHasChanges(diffStat) {
   return !!String(diffStat == null ? '' : diffStat).trim();
 }
 
+// DBR-P2-5 (DESIGN §7.2) — freshness: did `main` move since the branch synced onto it? PURE. Stale (→ re-sync +
+// re-test before the land) when the synced-onto commit differs from the current `main` HEAD — OR when the
+// synced-onto commit is unknown (can't confirm freshness → re-sync to be safe). If `main`'s HEAD can't be read
+// at all, NOT stale (don't force a re-sync; the gated land's current=main + token guards still apply).
+export function isMainStale(syncedMain, currentMain) {
+  const b = String(currentMain == null ? '' : currentMain).trim();
+  if (!b) return false;                                   // can't read current main → don't block
+  return String(syncedMain == null ? '' : syncedMain).trim() !== b;
+}
+
 // DBR-P2-4 (DESIGN §6.1) — the merge-SUMMARY (deterministic v1; an LLM-rich {learned, newInvariant} can refine
 // later). Subject ← the conversation's concern (its stated scope) or title; files ← the diff-stat lines. PURE.
 export function buildMergeSummary({ concern, title, diffStat } = {}) {
@@ -1229,6 +1239,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       _setBubble(bubble, `⚠ \`merge\` stopped — sync hit conflicts in ${where}. Resolve + commit, then re-run \`merge\` (no merge happened; \`main\` is untouched).`); return;
     }
     if (sync.status === 'error') { _setBubble(bubble, `✗ \`merge\` stopped — sync failed: ${sync.detail}.`); return; }
+    // DBR-P2-5 — record the `main` commit we synced onto, so the land can detect an out-of-band `main` move (§7.2).
+    const sm0 = await gitOp('revParse', { ref: 'main' });
+    const syncedMain = String((sm0 && sm0.ok && sm0.stdout) || '').trim();
     // 3) test gate — one automatic retry (real suites flake; U14)
     _setBubble(bubble, `↻ merge: running the test gate (\`npm test\`)…`);
     let t = await hostTest();
@@ -1246,11 +1259,11 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     }
     const summary = buildMergeSummary({ concern: conv.concern, title: conv.title, diffStat: stat });
     _setBubble(bubble, `✓ \`${branch}\` is synced with \`main\` + green. This will squash-merge it onto \`main\` as ONE commit:\n\n**${summary.subject}**\n\`\`\`\n${stat}\n\`\`\`\n\`main\` is mutated **locally only** — push stays manual (\`cp\`). Confirm to land:`);
-    // append confirm / cancel buttons — the closure captures the prepared {branch, summary} (no stale state).
+    // append confirm / cancel buttons — the closure captures the prepared {branch, summary, syncedMain} (no stale state).
     try {
       const actions = document.createElement('div');
       actions.style.cssText = 'display:flex;gap:8px;margin-top:8px';
-      const go = mkBtn('Confirm land ▸', () => { try { actions.remove(); } catch { /* */ } _mergeLand(convId, { branch, summary }); });
+      const go = mkBtn('Confirm land ▸', () => { try { actions.remove(); } catch { /* */ } _mergeLand(convId, { branch, summary, syncedMain }); });
       const no = mkBtn('Cancel', () => { try { actions.remove(); } catch { /* */ } devBubble(`✗ merge cancelled — \`${branch}\` is synced + green but NOT landed. \`main\` is untouched.`); });
       actions.appendChild(go); actions.appendChild(no);
       bubble.bodyEl.appendChild(actions);
@@ -1261,9 +1274,27 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   // onto `main` and commits with the merge-summary + a `Dev-conversation:<id>` trailer (the host's gated ops, each
   // carrying a freshly-minted confirm token — P2-1). LOCAL-ONLY: push stays manual (§6 step 7), so a bad land is a
   // local `main` commit the user can inspect + `git reset`/`merge --abort` before pushing. Marks the conversation
-  // merged (archived). NB: no P2-5 freshness re-check yet — single-tree serial makes an out-of-band race unlikely.
-  async function _mergeLand(convId, { branch, summary }) {
+  // merged (archived). DBR-P2-5 adds the freshness re-check below — nothing lands on a `main` it wasn't synced+green against.
+  async function _mergeLand(convId, { branch, summary, syncedMain }) {
     const bubble = devBubble(`↻ landing \`${branch}\` → \`main\`…`);
+    // DBR-P2-5 (DESIGN §7.2) — FRESHNESS: re-read `main`'s HEAD; if it moved since prepare (another merge or an
+    // out-of-band commit landed meanwhile), re-sync the branch onto the new `main` + re-run the test gate BEFORE
+    // landing, so nothing ever lands on a `main` it wasn't synced+green against. (The lock/FIFO queue is Phase 4.)
+    const headNow = await gitOp('revParse', { ref: 'main' });
+    const currentMain = String((headNow && headNow.ok && headNow.stdout) || '').trim();
+    if (isMainStale(syncedMain, currentMain)) {
+      _setBubble(bubble, `↻ land: \`main\` moved since prepare (${(syncedMain || '?').slice(0, 7)} → ${currentMain.slice(0, 7) || '?'}) — re-syncing + re-testing before landing…`);
+      const cur = await gitOp('currentBranch');
+      if (!cur || !cur.ok || cur.stdout !== branch) {
+        const back = await gitOp('switch', { branch });
+        if (!back || !back.ok) { _setBubble(bubble, `✗ land aborted — couldn’t switch back to \`${branch}\` to re-sync: ${(back && back.error) || '?'}. \`main\` is untouched.`); return; }
+      }
+      const resync = planSync(await gitOp('syncMain'));
+      if (resync.status === 'conflict') { _setBubble(bubble, `✗ land aborted — re-sync onto the new \`main\` hit conflicts in ${resync.files.length ? resync.files.map((f) => '`' + f + '`').join(', ') : 'files'}. Resolve + commit, then re-run \`merge\`. \`main\` is untouched.`); return; }
+      if (resync.status === 'error') { _setBubble(bubble, `✗ land aborted — re-sync failed: ${resync.detail}. \`main\` is untouched.`); return; }
+      let rt = await hostTest(); if (!rt.ok) rt = await hostTest();
+      if (!rt.ok) { _setBubble(bubble, `✗ land aborted — after re-syncing onto the new \`main\`, tests are red${rt.code != null ? ` (exit ${rt.code})` : ''}. No merge; \`main\` is untouched.`); return; }
+    }
     // 1) switch the loaded tree to main (the host's mergeSquash/commitMerge require current === main)
     const sw = await gitOp('switch', { branch: 'main' });
     if (!sw || !sw.ok) { _setBubble(bubble, `✗ land — couldn’t switch to \`main\`: ${(sw && sw.error) || 'host unreachable'}. \`main\` is unchanged.`); return; }
