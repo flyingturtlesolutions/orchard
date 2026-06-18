@@ -326,6 +326,25 @@ export function buildSplitNudge({ concern, reasons = [], components = [], founda
   return `⚠ scope — this branch${c} ${parts.join('; ')}. Consider \`split: <the separable part>\` to keep it focused — a nudge, not a block (§8).`;
 }
 
+// ── DBR-P3-3 (DESIGN §8.1/U5) — the `propose_split` typed-tool payload validator. Claude (the spawned `claude -p`)
+// calls the proposal-only `propose_split` MCP tool (wired host-side in P3-3b); its `tool_use` block streams to the
+// panel, which validates the input HERE — typed by construction, no prose parsing — and renders an approve/decline
+// card. The tool NEVER mutates git/fs; the panel alone seeds the branch, on a human tap (§2.1/§3). PURE + exported.
+// `{ ok:true, value }` for a well-formed proposal; `{ ok:false, error }` otherwise. The branch NAME is derived at
+// seed time (`splitSlug`), so a junk `suggestedName` can't yield an invalid branch — but a malformed `branchBase`
+// (not `main`, not a `dev/…` ref) is REJECTED: a split forks off `main` or the parent branch, never an arbitrary ref.
+export function validateProposeSplit(input) {
+  const o = input && typeof input === 'object' ? input : {};
+  const concern = String(o.concern == null ? '' : o.concern).replace(/\s+/g, ' ').trim();
+  if (!concern) return { ok: false, error: 'missing concern' };
+  let branchBase = String(o.branchBase == null ? '' : o.branchBase).trim() || 'main';
+  if (branchBase !== 'main' && !/^dev\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(branchBase)) return { ok: false, error: 'bad branchBase' };
+  const reason = String(o.reason == null ? '' : o.reason).replace(/\s+/g, ' ').trim();
+  const seedPrompt = String(o.seedPrompt == null ? '' : o.seedPrompt).trim();
+  const suggestedName = String(o.suggestedName == null ? '' : o.suggestedName).replace(/\s+/g, ' ').trim();
+  return { ok: true, value: { concern, reason, branchBase, seedPrompt, suggestedName } };
+}
+
 // DBR-P2-4 (DESIGN §6.1) — the merge-SUMMARY (deterministic v1; an LLM-rich {learned, newInvariant} can refine
 // later). Subject ← the conversation's concern (its stated scope) or title; files ← the diff-stat lines. PURE.
 export function buildMergeSummary({ concern, title, diffStat } = {}) {
@@ -688,6 +707,12 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
             else if (block.type === 'tool_use' && block.name === 'ExitPlanMode') {
               // v2.74.1024 — surface the proposed plan (was a content-less chip too).
               _emit({ kind: 'text', text: `📋 Claude proposed a plan:\n${String(block.input?.plan ?? '').trim()}\n↳ approve with \`dev: yes\`, or redirect with \`dev: <changes>\`.` });
+            }
+            else if (block.type === 'tool_use' && /(?:^|__)propose_split$/.test(String(block.name || ''))) {
+              // DBR-P3-3 (v2.74.1056, DESIGN §8.1/U5) — Claude proposed a split via the proposal-only `propose_split`
+              // tool. Surface the approve/decline card; the panel alone seeds the branch on a human tap (the tool
+              // never mutates git/fs). MCP exposes it as `mcp__<server>__propose_split` (P3-3b) — match the suffix.
+              _proposeSplitCard(block.input, run?.conversationId || null);
             }
             else if (block.type === 'tool_use') {
               const arg = block.input?.file_path ?? block.input?.pattern ?? block.input?.command ?? '';
@@ -1621,26 +1646,59 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     _setBubble(bubble, nudge);
   }
 
-  // DBR-P3-1 (DESIGN §8.1) — `split: <concern>`: the manual corrective split. The PANEL is the actor (§2.1) — mint
-  // a branch `dev/<slug>` OFF MAIN (DBR-1 branchCreate; a foundational split merges to main independently) + a
-  // kind:'dev' conversation seeded SEED-AND-HOLD (the seed rides the record; chat.js pre-fills the composer on
-  // first open, NOT sent). The user opens it from the drawer. (The `propose_split` tool — Claude-initiated — is P3-3.)
+  // DBR-P3-3 — the shared split SEEDER. Both the manual `split:` verb (P3-1) and the `propose_split` tool (P3-3)
+  // funnel through here: mint `dev/<slug>` off `branchBase` (default `main`; a `dev/…` base ONLY if the split
+  // depends on the parent — DBR-1 branchCreate) + a SEED-AND-HOLD kind:'dev' conversation (the seed rides the
+  // record; chat.js pre-fills the composer on first open, NOT sent). `seedPrompt` (Claude's, from the tool)
+  // overrides the deterministic default. The PANEL is the sole actor (§2.1) — actuation is panel-side + human-
+  // initiated. Returns the new conversation, or null on failure.
+  async function _seedSplitBranch({ concern, seedPrompt = '', branchBase = 'main', suggestedName = '', parentConvId = null, bubble = null } = {}) {
+    const c = String(concern || '').replace(/\s+/g, ' ').trim();
+    if (!c) { devBubble('✗ `split` — give a concern.'); return null; }
+    const b = bubble || devBubble(`↻ splitting out \`${c}\`…`);
+    let parent = null;
+    try { parent = parentConvId ? await ConversationStore.load(parentConvId) : null; } catch { parent = null; }
+    const base = (branchBase && branchBase !== 'main') ? branchBase : 'main';
+    const shortid = crypto.randomUUID().replace(/-/g, '').slice(0, 8);
+    const branch = splitSlug(suggestedName || c, shortid);
+    const br = await gitOp('branchCreate', { branch, base });
+    if (!br || !br.ok) { _setBubble(b, `✗ \`split\` — couldn’t create \`${branch}\`: ${(br && br.error) || 'host unreachable'}.`); return null; }
+    const seed = String(seedPrompt || '').trim() || buildSeedPrompt({ concern: c, parentConcern: parent && parent.concern });
+    let conv = null;
+    try { conv = await ConversationStore.create({ kind: 'dev', title: c.slice(0, 60), branch, concern: c, seed }); } catch { conv = null; }
+    if (!conv) { _setBubble(b, `✗ \`split\` — created \`${branch}\` but couldn’t create the conversation. Make a dev conversation on that branch manually.`); return null; }
+    try { await refreshHistory?.(); } catch { /* */ }   // v2.74.1054 — show the new split conversation in an already-open drawer
+    _setBubble(b, `✓ split — created \`${branch}\` (off \`${base}\`) + a new dev conversation **${c.slice(0, 60)}**. Open the conversations drawer (☰) and select it: its seed is **pre-filled** (review + send).${base === 'main' ? ' Merge that branch first, then `sync` this one onto it.' : ''}`);
+    return conv;
+  }
+
+  // DBR-P3-1 (DESIGN §8.1) — `split: <concern>`: the manual corrective split (the human-typed verb form; seeds off `main`).
   async function _split(convId, rawText) {
     const concern = String(rawText || '').replace(/^split:\s*/i, '').replace(/\s+/g, ' ').trim();
     if (!concern) { devBubble('✗ `split:` — give a concern, e.g. `split: extract the date util`.'); return; }
-    let parent = null;
-    try { parent = convId ? await ConversationStore.load(convId) : null; } catch { parent = null; }
-    const bubble = devBubble(`↻ splitting out \`${concern}\`…`);
-    const shortid = crypto.randomUUID().replace(/-/g, '').slice(0, 8);
-    const branch = splitSlug(concern, shortid);
-    const br = await gitOp('branchCreate', { branch, base: 'main' });
-    if (!br || !br.ok) { _setBubble(bubble, `✗ \`split:\` — couldn’t create \`${branch}\`: ${(br && br.error) || 'host unreachable'}.`); return; }
-    const seed = buildSeedPrompt({ concern, parentConcern: parent && parent.concern });
-    let conv = null;
-    try { conv = await ConversationStore.create({ kind: 'dev', title: concern.slice(0, 60), branch, concern, seed }); } catch { conv = null; }
-    if (!conv) { _setBubble(bubble, `✗ \`split:\` — created \`${branch}\` but couldn’t create the conversation. Make a dev conversation on that branch manually.`); return; }
-    try { await refreshHistory?.(); } catch { /* */ }   // v2.74.1054 — show the new split conversation in an already-open drawer (the .1042 fix, but _split mints directly via ConversationStore so it needs its own nudge)
-    _setBubble(bubble, `✓ split — created \`${branch}\` (off \`main\`) + a new dev conversation **${concern.slice(0, 60)}**. Open the conversations drawer (☰) and select it: its seed is **pre-filled** (review + send). Merge that branch first, then \`sync\` this one onto it.`);
+    await _seedSplitBranch({ concern, branchBase: 'main', parentConvId: convId });
+  }
+
+  // DBR-P3-3 (DESIGN §8.1/U5) — render the approve/decline card for a `propose_split` tool_use (surfaced from the
+  // assistant-block stream loop). Validate the typed payload; on `Yes, split` seed the branch (panel-side, human-
+  // gated — the tool itself never mutates); on `No` keep the work here. `parentConvId` = the run's dev conversation.
+  function _proposeSplitCard(input, parentConvId) {
+    const v = validateProposeSplit(input);
+    if (!v.ok) { devBubble(`⚠ propose_split — ignored a malformed proposal (${v.error}).`); return; }
+    const { concern, reason, branchBase, seedPrompt, suggestedName } = v.value;
+    const baseNote = branchBase && branchBase !== 'main' ? ` (off \`${branchBase}\`)` : '';
+    const bubble = devBubble(`🔀 Claude proposes splitting out **${concern.slice(0, 72)}** into its own branch${baseNote}.${reason ? `\n_${reason.slice(0, 200)}_` : ''}`);
+    try {
+      const actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;gap:8px;margin-top:8px';
+      const yes = mkBtn('Yes, split', async () => {
+        try { actions.remove(); } catch { /* */ }
+        await _seedSplitBranch({ concern, seedPrompt, branchBase, suggestedName, parentConvId, bubble });
+      });
+      const no = mkBtn('No, keep here', () => { try { actions.remove(); } catch { /* */ } _setBubble(bubble, `✗ split declined — keeping **${concern.slice(0, 60)}** in this branch.`); });
+      actions.appendChild(yes); actions.appendChild(no);
+      bubble.bodyEl.appendChild(actions);
+    } catch { /* no buttons → the proposal stays surfaced as text */ }
   }
 
   // v2.74.1029 — enable the bridge for a NEW dev conversation. The conversations-menu "New dev conversation"

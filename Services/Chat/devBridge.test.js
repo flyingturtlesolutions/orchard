@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit } from './devBridge.js';
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
@@ -326,5 +326,30 @@ describe('DBR-P3-2 scope/split-cluster helpers', () => {
     assert.equal(buildSplitNudge({ reasons: [], components: [], foundational: [] }), null);
     const n = buildSplitNudge({ concern: 'drawer UI', reasons: ['foundational-alongside-leaf', 'split-cluster'], components: [['a'], ['b']], foundational: ['Core/x.js'] });
     assert.ok(n.includes('Core/x.js') && n.includes('2 import-disconnected areas') && n.includes('split:') && n.includes('drawer UI'));
+  });
+});
+
+// DBR-P3-3 (DESIGN §8.1/U5) — the propose_split typed-tool payload validator (the tool_use -> card mapping).
+describe('DBR-P3-3 propose_split validator', () => {
+  it('accepts a well-formed proposal and normalizes it (branchBase defaults to main)', () => {
+    const r = validateProposeSplit({ concern: '  extract the date util ', reason: 'unrelated to the drawer', seedPrompt: 'Extract formatDate into Core.', suggestedName: 'date util' });
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.value, { concern: 'extract the date util', reason: 'unrelated to the drawer', branchBase: 'main', seedPrompt: 'Extract formatDate into Core.', suggestedName: 'date util' });
+  });
+  it('rejects a missing concern (the only required field)', () => {
+    for (const input of [{}, { concern: '' }, { concern: '   ' }, { reason: 'x' }, null, 'nope']) {
+      assert.equal(validateProposeSplit(input).ok, false, `reject: ${JSON.stringify(input)}`);
+    }
+  });
+  it('allows a dev/… branchBase (split depends on the parent) but rejects an arbitrary ref', () => {
+    assert.equal(validateProposeSplit({ concern: 'x', branchBase: 'dev/parent-abc' }).value.branchBase, 'dev/parent-abc');
+    for (const bad of ['main~1', 'feature/x', 'HEAD', '../etc', 'dev/..']) {
+      assert.equal(validateProposeSplit({ concern: 'x', branchBase: bad }).ok, false, `reject base: ${bad}`);
+    }
+  });
+  it('treats reason / seedPrompt / suggestedName as optional', () => {
+    const r = validateProposeSplit({ concern: 'just the concern' });
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.value, { concern: 'just the concern', reason: '', branchBase: 'main', seedPrompt: '', suggestedName: '' });
   });
 });
