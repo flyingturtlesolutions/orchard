@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, isSplit, splitSlug, buildSeedPrompt } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge } from './devBridge.js';
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
@@ -243,5 +243,88 @@ describe('DBR-P3-1 split helpers', () => {
     assert.equal(buildSeedPrompt({ concern: 'extract X' }), 'extract X');
     assert.ok(buildSeedPrompt({ concern: 'extract X', parentConcern: 'drawer UI' }).includes('Split out from: drawer UI'));
     assert.equal(buildSeedPrompt({}), 'the split-out work');            // default
+  });
+});
+
+// DBR-P3-2 (DESIGN §8/§8.1 layer 2) — the deterministic split backstop (scope verb + import-graph cluster detector).
+describe('DBR-P3-2 scope/split-cluster helpers', () => {
+  it('isScope matches the bare `scope` verb, not `scope?` or a task mentioning scope', () => {
+    for (const s of ['scope', 'SCOPE', '  scope  ']) assert.equal(isScope(s), true, `fire: ${JSON.stringify(s)}`);
+    for (const s of ['scope?', 'scope the work', 'scoped', 'rescope', '', null]) assert.equal(isScope(s), false, `no: ${String(s)}`);
+  });
+
+  it('scanImports finds static / re-export / dynamic / require / side-effect specifiers', () => {
+    const src = [
+      "import { a } from './a.js';",
+      "import b from '../b.js';",
+      "export { c } from './c.js';",
+      "const m = await import('./d.js');",
+      "const r = require('./e.cjs');",
+      "import './side-effect.js';",
+      "import pkg from 'some-package';",       // bare — still a specifier (resolveImport drops it)
+    ].join('\n');
+    const got = scanImports(src);
+    for (const s of ['./a.js', '../b.js', './c.js', './d.js', './e.cjs', './side-effect.js', 'some-package']) {
+      assert.ok(got.includes(s), `missing ${s} in ${JSON.stringify(got)}`);
+    }
+    assert.deepEqual(scanImports('const x = 1; // import nothing here'), []);
+  });
+
+  it('resolveImport resolves relative specifiers to repo-relative paths; drops bare ones', () => {
+    assert.equal(resolveImport('Services/Chat/devBridge.js', '../ConversationStore.js'), 'Services/ConversationStore.js');
+    assert.equal(resolveImport('Services/Chat/devBridge.js', './x.js'), 'Services/Chat/x.js');
+    assert.equal(resolveImport('Core/a/b.js', '../../Core/c.js'), 'Core/c.js');
+    assert.equal(resolveImport('chat.js', './Services/x.js'), 'Services/x.js');   // root file
+    assert.equal(resolveImport('a/b.js', 'react'), null);                          // bare
+    assert.equal(resolveImport('a/b.js', 'https://x/y.js'), null);                 // url
+  });
+
+  it('buildImportGraph maps each file to its resolved relative imports', () => {
+    const g = buildImportGraph({
+      'Services/Chat/devBridge.js': "import { ConversationStore } from '../ConversationStore.js'; import 'pkg';",
+      'Services/ConversationStore.js': "// no imports",
+    });
+    assert.deepEqual(g['Services/Chat/devBridge.js'], ['Services/ConversationStore.js']);
+    assert.deepEqual(g['Services/ConversationStore.js'], []);
+  });
+
+  it('splitClusters: connected diff → 1 component; disconnected → ≥2; deterministic order', () => {
+    // A↔B connected (A imports B), C alone.
+    const comps = splitClusters(['A.js', 'B.js', 'C.js'], { 'A.js': ['B.js'], 'B.js': [], 'C.js': [] });
+    assert.equal(comps.length, 2);
+    assert.deepEqual(comps[0], ['A.js', 'B.js']);   // sorted; A < C
+    assert.deepEqual(comps[1], ['C.js']);
+    // all connected → 1
+    assert.equal(splitClusters(['A.js', 'B.js'], { 'A.js': ['B.js'], 'B.js': [] }).length, 1);
+    // imports to files OUTSIDE the changed set don't merge components
+    assert.equal(splitClusters(['A.js', 'C.js'], { 'A.js': ['unchanged.js'], 'C.js': ['other.js'] }).length, 2);
+  });
+
+  it('foundationalAlongsideLeaf flags shared-file-with-leaf only', () => {
+    const f = (p) => isFoundationalFile(p);   // Core/ + Services/ are foundational by path
+    assert.equal(foundationalAlongsideLeaf(['Core/a.js', 'docs/b.md'], f).flagged, true);
+    assert.equal(foundationalAlongsideLeaf(['docs/a.md', 'README.md'], f).flagged, false);  // all leaf
+    assert.equal(foundationalAlongsideLeaf(['Core/a.js', 'Services/b.js'], f).flagged, false); // all foundational
+  });
+
+  it('assessSplit: cluster needs ≥minFiles; foundational signal independent; combined reasons', () => {
+    const f = (p) => isFoundationalFile(p);
+    // 3 files, two disconnected code clusters → split-cluster
+    const a = assessSplit({ changedFiles: ['x/a.js', 'x/b.js', 'y/c.js'], fileImports: { 'x/a.js': ['x/b.js'], 'x/b.js': [], 'y/c.js': [] }, isFoundational: f });
+    assert.ok(a.reasons.includes('split-cluster'));
+    // same shape but only 2 files → below minFilesForCluster, no cluster reason
+    const b = assessSplit({ changedFiles: ['x/a.js', 'y/c.js'], fileImports: { 'x/a.js': [], 'y/c.js': [] }, isFoundational: f });
+    assert.ok(!b.reasons.includes('split-cluster'));
+    // foundational + leaf, no import data → foundational reason only
+    const c = assessSplit({ changedFiles: ['Core/a.js', 'docs/b.md'], fileImports: {}, isFoundational: f });
+    assert.deepEqual(c.reasons, ['foundational-alongside-leaf']);
+    // nothing → no nudge
+    assert.equal(assessSplit({ changedFiles: ['docs/a.md'], fileImports: {}, isFoundational: f }).shouldNudge, false);
+  });
+
+  it('buildSplitNudge renders a nudge only when there is something to flag', () => {
+    assert.equal(buildSplitNudge({ reasons: [], components: [], foundational: [] }), null);
+    const n = buildSplitNudge({ concern: 'drawer UI', reasons: ['foundational-alongside-leaf', 'split-cluster'], components: [['a'], ['b']], foundational: ['Core/x.js'] });
+    assert.ok(n.includes('Core/x.js') && n.includes('2 import-disconnected areas') && n.includes('split:') && n.includes('drawer UI'));
   });
 });

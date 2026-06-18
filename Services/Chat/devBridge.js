@@ -207,6 +207,125 @@ export function buildSeedPrompt({ concern, parentConcern } = {}) {
   return parentConcern ? `${c}\n\n(Split out from: ${String(parentConcern).replace(/\s+/g, ' ').trim()}.)` : c;
 }
 
+// ── DBR-P3-2 (DESIGN §8/§8.1 layer 2) — the deterministic split BACKSTOP: no-LLM, always-on scope detection that
+// "catches what Claude forgets to flag." Structural signals over a branch's changed-file set: a SPLIT-CLUSTER (the
+// diff's import graph falls into ≥2 disconnected components — unrelated work bundled together) and a FOUNDATIONAL
+// file edited ALONGSIDE leaf work (§7.1). All PURE; the live glue (`_scopeCheck`) feeds them the changed-file list
+// (host `diffNames`) + an import map (panel-side `fetch` of the loaded tree — read-only, no host capability). A
+// NUDGE, never a block. The SEMANTIC concern-creep check (an LLM second opinion) is P3-7 (`scope?`), layer 3.
+
+// `scope` verb matcher — whole-message only, dev-conversation gated by the caller. (`scope?` is the P3-7 semantic
+// variant — deliberately NOT matched here.) PURE + exported.
+export function isScope(text) {
+  return String(text ?? '').trim().toLowerCase().replace(/\s+/g, ' ') === 'scope';
+}
+
+// scanImports — the module specifiers a JS/ESM/CJS source imports. PURE (text → specifiers). Covers static
+// `import … from 'x'` / re-export `export … from 'x'`, side-effect `import 'x'`, dynamic `import('x')`, and CJS
+// `require('x')`. A structural heuristic (not a parser) — good enough to build a changed-file import graph.
+export function scanImports(text) {
+  const src = String(text == null ? '' : text);
+  const out = [];
+  const push = (s) => { if (s && !out.includes(s)) out.push(s); };
+  let m;
+  const reFrom = /\bfrom\s*['"]([^'"]+)['"]/g;                       // import … from 'x' / export … from 'x'
+  while ((m = reFrom.exec(src))) push(m[1]);
+  const reCall = /\b(?:import|require)\s*\(\s*['"]([^'"]+)['"]\s*\)/g; // import('x') / require('x')
+  while ((m = reCall.exec(src))) push(m[1]);
+  const reBare = /(?:^|[\n;])\s*import\s+['"]([^'"]+)['"]/g;          // side-effect import 'x'
+  while ((m = reBare.exec(src))) push(m[1]);
+  return out;
+}
+
+// resolveImport — a RELATIVE specifier (`./x`, `../y`) resolved against the importing file's dir → a repo-relative
+// POSIX path. Bare/external specifiers (npm packages, absolute URLs) → null (not a repo file). PURE.
+export function resolveImport(fromFile, spec) {
+  const s = String(spec == null ? '' : spec);
+  if (!/^\.\.?\//.test(s)) return null;
+  const norm = String(fromFile == null ? '' : fromFile).replace(/\\/g, '/');
+  const slash = norm.lastIndexOf('/');
+  const parts = slash >= 0 ? norm.slice(0, slash).split('/').filter(Boolean) : [];
+  for (const seg of s.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') { if (parts.length) parts.pop(); continue; }
+    parts.push(seg);
+  }
+  return parts.join('/');
+}
+
+// buildImportGraph — `{path: text}` → `{path: [repo-relative import targets]}` (relative imports only). PURE.
+export function buildImportGraph(fileTexts) {
+  const graph = {};
+  for (const [path, text] of Object.entries(fileTexts || {})) {
+    const targets = [];
+    for (const spec of scanImports(text)) {
+      const r = resolveImport(path, spec);
+      if (r && !targets.includes(r)) targets.push(r);
+    }
+    graph[path] = targets;
+  }
+  return graph;
+}
+
+// splitClusters — partition the changed CODE files into import-connected components (undirected: an edge when one
+// changed file imports another changed file). ≥2 components ⇒ the diff bundles import-disconnected work. PURE;
+// deterministic (files + components sorted). `fileImports` is keyed by the importing file (changed-file → targets).
+export function splitClusters(changedFiles, fileImports) {
+  const files = [...new Set((Array.isArray(changedFiles) ? changedFiles : []).filter((f) => typeof f === 'string' && f))].sort();
+  const inSet = new Set(files);
+  const parent = new Map(files.map((f) => [f, f]));
+  const find = (x) => { while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); } return x; };
+  const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent.set(ra, rb); };
+  for (const f of files) {
+    for (const t of (fileImports && fileImports[f]) || []) { if (t !== f && inSet.has(t)) union(f, t); }
+  }
+  const groups = new Map();
+  for (const f of files) { const r = find(f); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(f); }
+  return [...groups.values()].map((g) => g.sort()).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+}
+
+// foundationalAlongsideLeaf — does the diff touch ≥1 foundational/shared file AND ≥1 leaf file? (Mixing surgery on
+// shared code with leaf work is a split candidate — §7.1.) `isFoundational` is an injected predicate (the live
+// glue passes `isFoundationalFile`); PURE here.
+export function foundationalAlongsideLeaf(changedFiles, isFoundational) {
+  const files = [...new Set((Array.isArray(changedFiles) ? changedFiles : []).filter((f) => typeof f === 'string' && f))];
+  const fn = typeof isFoundational === 'function' ? isFoundational : () => false;
+  const foundational = files.filter((f) => { try { return !!fn(f); } catch { return false; } }).sort();
+  const leaf = files.filter((f) => !foundational.includes(f)).sort();
+  return { flagged: foundational.length >= 1 && leaf.length >= 1, foundational, leaf };
+}
+
+// assessSplit — combine the structural signals into a nudge decision. Split-cluster needs ≥2 import-disconnected
+// components AND ≥ minFilesForCluster changed files (don't nag a 2-file branch). foundational-alongside-leaf runs
+// over ALL changed files (path heuristic — no import data needed); split-cluster runs over the files we have import
+// data for (`fileImports` keys). PURE.
+export function assessSplit({ changedFiles = [], fileImports = {}, isFoundational = () => false, minFilesForCluster = 3 } = {}) {
+  const files = [...new Set((Array.isArray(changedFiles) ? changedFiles : []).filter((f) => typeof f === 'string' && f))];
+  const codeFiles = files.filter((f) => Object.prototype.hasOwnProperty.call(fileImports || {}, f));
+  const components = splitClusters(codeFiles, fileImports || {});
+  const isCluster = components.length >= 2 && files.length >= minFilesForCluster;
+  const fal = foundationalAlongsideLeaf(files, isFoundational);
+  const reasons = [];
+  if (isCluster) reasons.push('split-cluster');
+  if (fal.flagged) reasons.push('foundational-alongside-leaf');
+  return { shouldNudge: reasons.length > 0, reasons, components, foundational: fal.foundational, leaf: fal.leaf };
+}
+
+// buildSplitNudge — render the §8.1 nudge ("⚠ … consider `split:`"). Null when there's nothing to flag. PURE.
+export function buildSplitNudge({ concern, reasons = [], components = [], foundational = [] } = {}) {
+  const parts = [];
+  if (reasons.includes('foundational-alongside-leaf') && foundational.length) {
+    const names = foundational.slice(0, 3).map((f) => '`' + f + '`').join(', ');
+    parts.push(`now edits ${names}${foundational.length > 3 ? ' …' : ''} (foundational/shared) alongside leaf work`);
+  }
+  if (reasons.includes('split-cluster') && components.length >= 2) {
+    parts.push(`spans ${components.length} import-disconnected areas`);
+  }
+  if (!parts.length) return null;
+  const c = concern ? ` (concern: \`${String(concern).replace(/\s+/g, ' ').trim().slice(0, 60)}\`)` : '';
+  return `⚠ scope — this branch${c} ${parts.join('; ')}. Consider \`split: <the separable part>\` to keep it focused — a nudge, not a block (§8).`;
+}
+
 // DBR-P2-4 (DESIGN §6.1) — the merge-SUMMARY (deterministic v1; an LLM-rich {learned, newInvariant} can refine
 // later). Subject ← the conversation's concern (its stated scope) or title; files ← the diff-stat lines. PURE.
 export function buildMergeSummary({ concern, title, diffStat } = {}) {
@@ -955,6 +1074,12 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       await _driftCheck(convId);
       return true;
     }
+    // DBR-P3-2 (v2.74.1055, DESIGN §8/§8.1) — `scope`: deterministic split backstop (cluster + foundational nudge).
+    if (devConv && isScope(t)) {
+      if (!skipEcho) appendMessage({ role: 'user', body: t });
+      await _scopeCheck(convId);
+      return true;
+    }
     // DBR-P3-1 (v2.74.1053, DESIGN §8.1) — `split: <concern>`: extract out-of-scope work into its own seeded branch.
     if (devConv && isSplit(t)) {
       if (!skipEcho) appendMessage({ role: 'user', body: t });
@@ -1466,6 +1591,34 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     }
     const flagged = drift.map((f) => isFoundationalFile(f) ? '`' + f + '` ⚠' : '`' + f + '`').join(', ');
     _setBubble(bubble, `⚠ drift — \`main\` and this branch both changed ${flagged} since the fork. \`sync\` to fold main's changes in before you \`merge\` (⚠ = foundational/shared file). Warning only — nothing is blocked.`);
+  }
+
+  // DBR-P3-2 (DESIGN §8/§8.1 layer 2) — `scope`: the deterministic split backstop. Read-only, no LLM, never blocks.
+  // Diffs THIS branch vs its fork point (`mergeBase` → `diffNames`), scans the changed CODE files' imports
+  // (panel-side `fetch` of the LOADED tree — read-only, no host capability; run `lt` first if the loaded tree
+  // isn't this branch), and runs the pure detectors (`assessSplit`). On a flag, posts the §8.1 nudge offering a
+  // `split:`. The auto-fire-on-run-complete hook is a follow-up (eyeball the nudge's signal/noise first).
+  async function _scopeCheck(convId) {
+    let conv = null;
+    try { conv = convId ? await ConversationStore.load(convId) : null; } catch { conv = null; }
+    const branch = conv && conv.branch;
+    if (!branch) { devBubble('✗ `scope` — no branch is recorded for this dev conversation.'); return; }
+    const bubble = devBubble(`↻ scope-checking \`${branch}\` vs \`main\`…`);
+    const base = await gitOp('mergeBase', { a: 'main', b: branch });
+    const baseSha = String((base && base.ok && base.stdout) || '').trim();
+    if (!baseSha) { _setBubble(bubble, `✗ \`scope\` — couldn’t find the fork point with \`main\`: ${(base && base.error) || 'host unreachable'}.`); return; }
+    const namesR = await gitOp('diffNames', { a: baseSha, b: branch });
+    const changed = String((namesR && namesR.ok && namesR.stdout) || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    if (!changed.length) { _setBubble(bubble, `✓ scope — \`${branch}\` has no changes vs \`main\` yet. Nothing to check.`); return; }
+    // import scan over the changed CODE files (panel reads its OWN packaged source — same-origin, read-only).
+    const texts = {};
+    await Promise.all(changed.filter((f) => /\.(?:js|cjs|mjs)$/.test(f)).map(async (f) => {
+      try { const res = await fetch(chrome.runtime.getURL(f)); if (res && res.ok) texts[f] = await res.text(); } catch { /* deleted/unfetchable → skip */ }
+    }));
+    const assessment = assessSplit({ changedFiles: changed, fileImports: buildImportGraph(texts), isFoundational: (p) => isFoundationalFile(p) });
+    const nudge = buildSplitNudge({ concern: conv.concern, ...assessment });
+    if (!nudge) { _setBubble(bubble, `✓ scope — \`${branch}\` looks focused (${changed.length} file${changed.length === 1 ? '' : 's'}${conv.concern ? `, concern: \`${String(conv.concern).slice(0, 48)}\`` : ''}). No split suggested.`); return; }
+    _setBubble(bubble, nudge);
   }
 
   // DBR-P3-1 (DESIGN §8.1) — `split: <concern>`: the manual corrective split. The PANEL is the actor (§2.1) — mint
