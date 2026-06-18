@@ -130,6 +130,14 @@ export function planMergePrepare({ sync, test1, test2 } = {}) {
   return { outcome: 'stopped', stoppedAt: 'test', ranDiff: false, retried: true };                     // still red → stop
 }
 
+// DBR-P2-4 fix (v2.74.1048; live-test) — a branch with NO changes vs main makes `git merge --squash` stage
+// nothing, so the land's commit fails "nothing to commit". The prepare step must NOT offer to land an empty
+// diff. PURE + exported: true iff the diff-stat has any content. (The diff-stat is empty exactly when there's
+// nothing to merge.)
+export function mergeHasChanges(diffStat) {
+  return !!String(diffStat == null ? '' : diffStat).trim();
+}
+
 // DBR-P2-4 (DESIGN §6.1) — the merge-SUMMARY (deterministic v1; an LLM-rich {learned, newInvariant} can refine
 // later). Subject ← the conversation's concern (its stated scope) or title; files ← the diff-stat lines. PURE.
 export function buildMergeSummary({ concern, title, diffStat } = {}) {
@@ -1228,10 +1236,15 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     if (!t.ok) {
       _setBubble(bubble, `✗ \`merge\` stopped — tests still red after a retry${t.code != null ? ` (exit ${t.code})` : ''}. No merge; \`main\` is untouched.${t.tail ? '\n```\n' + t.tail + '\n```' : ''}`); return;
     }
-    // 4) diff preview + the LAND confirm (P2-4)
+    // 4) diff preview — but only OFFER to land if there's actually something to merge. A no-change branch makes
+    //    `git merge --squash` stage NOTHING, so the land's commit fails "nothing to commit" (DBR-P2-4 live-test, .1048).
     const diff = await gitOp('diffStat', { a: 'main', b: branch });
-    const stat = (diff && diff.ok && String(diff.stdout || '').trim()) || '(no file changes vs main)';
-    const summary = buildMergeSummary({ concern: conv.concern, title: conv.title, diffStat: (diff && diff.ok && diff.stdout) || '' });
+    const stat = String((diff && diff.ok && diff.stdout) || '').trim();
+    if (!mergeHasChanges(stat)) {
+      _setBubble(bubble, `✓ \`${branch}\` is synced with \`main\` + green — but it has **no changes vs \`main\`** (already up to date). Nothing to land.`);
+      return;
+    }
+    const summary = buildMergeSummary({ concern: conv.concern, title: conv.title, diffStat: stat });
     _setBubble(bubble, `✓ \`${branch}\` is synced with \`main\` + green. This will squash-merge it onto \`main\` as ONE commit:\n\n**${summary.subject}**\n\`\`\`\n${stat}\n\`\`\`\n\`main\` is mutated **locally only** — push stays manual (\`cp\`). Confirm to land:`);
     // append confirm / cancel buttons — the closure captures the prepared {branch, summary} (no stale state).
     try {

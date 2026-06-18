@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges } from './devBridge.js';
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
@@ -161,5 +161,14 @@ describe('buildMergeCommitMessage — subject + changes + Dev-conversation trail
   });
   it('is robust to a nullish summary (no throw)', () => {
     assert.ok(buildMergeCommitMessage(null, 'c2').includes('Dev-conversation:c2'));
+  });
+});
+
+// DBR-P2-4 fix (live-test) — a branch with no changes vs main must NOT be offered for landing (empty squash →
+// `git commit` fails "nothing to commit").
+describe('mergeHasChanges — empty diff-stat means nothing to land', () => {
+  it('false for empty / whitespace / nullish; true for any real diff line', () => {
+    for (const d of ['', '   ', '\n\t ', null, undefined]) assert.equal(mergeHasChanges(d), false, `empty: ${JSON.stringify(d)}`);
+    assert.equal(mergeHasChanges(' chat.js | 3 +\n 1 file changed'), true);
   });
 });
