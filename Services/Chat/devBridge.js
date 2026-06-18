@@ -207,6 +207,23 @@ export function buildSeedPrompt({ concern, parentConcern } = {}) {
   return parentConcern ? `${c}\n\n(Split out from: ${String(parentConcern).replace(/\s+/g, ' ').trim()}.)` : c;
 }
 
+// DBR-P3-5 (DESIGN §6.1/U12) — the `fork` verb (whole-message; dev-conversation gated by the caller). PURE + exported.
+export function isFork(text) {
+  return String(text ?? '').trim().toLowerCase().replace(/\s+/g, ' ') === 'fork';
+}
+
+// DBR-P3-5 (DESIGN §6.1) — the seed prompt for "fork from here": continue a (usually merged/abandoned) parent on a
+// FRESH branch+conversation off `main`. Claude Code sessions are LINEAR (no fork-a-session primitive), so the seed
+// carries the parent's concern + an optional summary + a continue cue as text; the new run starts a fresh session.
+// PURE + exported.
+export function buildForkSeedPrompt({ parentConcern, parentTitle, parentSummary } = {}) {
+  const concern = String(parentConcern || parentTitle || '').replace(/\s+/g, ' ').trim();
+  const summary = String(parentSummary == null ? '' : parentSummary).replace(/\s+/g, ' ').trim();
+  const head = concern ? `Continue the work on: ${concern}.` : 'Continue from the previous dev conversation.';
+  const ctx = summary ? `\n\nWhere it left off: ${summary}` : '';
+  return `${head}${ctx}\n\n(Forked from a previous dev conversation — pick up from here.)`;
+}
+
 // ── DBR-P3-2 (DESIGN §8/§8.1 layer 2) — the deterministic split BACKSTOP: no-LLM, always-on scope detection that
 // "catches what Claude forgets to flag." Structural signals over a branch's changed-file set: a SPLIT-CLUSTER (the
 // diff's import graph falls into ≥2 disconnected components — unrelated work bundled together) and a FOUNDATIONAL
@@ -1111,6 +1128,12 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       await _split(convId, t);
       return true;
     }
+    // DBR-P3-5 (v2.74.1059, DESIGN §6.1) — `fork`: continue this (usually merged/abandoned) conversation on a fresh branch.
+    if (devConv && isFork(t)) {
+      if (!skipEcho) appendMessage({ role: 'user', body: t });
+      await _fork(convId);
+      return true;
+    }
     // Inside a dev conversation, bare input IS a dev command: a standalone log verb (gl/gc/gch) or a
     // `bug:`/`dev:` prefix is taken verbatim; anything else (a sub-verb like `pause`/`history`/`model …`, or
     // a plain task) is normalized to the `dev: …` form so the existing branch table handles it unchanged —
@@ -1652,9 +1675,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   // record; chat.js pre-fills the composer on first open, NOT sent). `seedPrompt` (Claude's, from the tool)
   // overrides the deterministic default. The PANEL is the sole actor (§2.1) — actuation is panel-side + human-
   // initiated. Returns the new conversation, or null on failure.
-  async function _seedSplitBranch({ concern, seedPrompt = '', branchBase = 'main', suggestedName = '', parentConvId = null, bubble = null } = {}) {
+  async function _seedSplitBranch({ concern, seedPrompt = '', branchBase = 'main', suggestedName = '', parentConvId = null, bubble = null, verb = 'split' } = {}) {
     const c = String(concern || '').replace(/\s+/g, ' ').trim();
-    if (!c) { devBubble('✗ `split` — give a concern.'); return null; }
+    if (!c) { devBubble(`✗ \`${verb}\` — give a concern.`); return null; }
     const b = bubble || devBubble(`↻ splitting out \`${c}\`…`);
     let parent = null;
     try { parent = parentConvId ? await ConversationStore.load(parentConvId) : null; } catch { parent = null; }
@@ -1662,13 +1685,14 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const shortid = crypto.randomUUID().replace(/-/g, '').slice(0, 8);
     const branch = splitSlug(suggestedName || c, shortid);
     const br = await gitOp('branchCreate', { branch, base });
-    if (!br || !br.ok) { _setBubble(b, `✗ \`split\` — couldn’t create \`${branch}\`: ${(br && br.error) || 'host unreachable'}.`); return null; }
+    if (!br || !br.ok) { _setBubble(b, `✗ \`${verb}\` — couldn’t create \`${branch}\`: ${(br && br.error) || 'host unreachable'}.`); return null; }
     const seed = String(seedPrompt || '').trim() || buildSeedPrompt({ concern: c, parentConcern: parent && parent.concern });
     let conv = null;
     try { conv = await ConversationStore.create({ kind: 'dev', title: c.slice(0, 60), branch, concern: c, seed }); } catch { conv = null; }
-    if (!conv) { _setBubble(b, `✗ \`split\` — created \`${branch}\` but couldn’t create the conversation. Make a dev conversation on that branch manually.`); return null; }
-    try { await refreshHistory?.(); } catch { /* */ }   // v2.74.1054 — show the new split conversation in an already-open drawer
-    _setBubble(b, `✓ split — created \`${branch}\` (off \`${base}\`) + a new dev conversation **${c.slice(0, 60)}**. Open the conversations drawer (☰) and select it: its seed is **pre-filled** (review + send).${base === 'main' ? ' Merge that branch first, then `sync` this one onto it.' : ''}`);
+    if (!conv) { _setBubble(b, `✗ \`${verb}\` — created \`${branch}\` but couldn’t create the conversation. Make a dev conversation on that branch manually.`); return null; }
+    try { await refreshHistory?.(); } catch { /* */ }   // v2.74.1054 — show the new conversation in an already-open drawer
+    const tail = (verb === 'split' && base === 'main') ? ' Merge that branch first, then `sync` this one onto it.' : '';
+    _setBubble(b, `✓ ${verb} — created \`${branch}\` (off \`${base}\`) + a new dev conversation **${c.slice(0, 60)}**. Open the conversations drawer (☰) and select it: its seed is **pre-filled** (review + send).${tail}`);
     return conv;
   }
 
@@ -1699,6 +1723,20 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       actions.appendChild(yes); actions.appendChild(no);
       bubble.bodyEl.appendChild(actions);
     } catch { /* no buttons → the proposal stays surfaced as text */ }
+  }
+
+  // DBR-P3-5 (DESIGN §6.1/U12) — `fork`: continue THIS dev conversation (usually a merged/abandoned proposal) on a
+  // FRESH branch off `main` + a new seeded conversation. Reuses the P3-3 seeder (verb:'fork'). The new conversation
+  // inherits the parent's concern; its seed carries the continue cue (Claude Code sessions are linear — a summary,
+  // not a session fork). Works from any dev conversation; the archived-proposal case is the primary use.
+  async function _fork(convId) {
+    let parent = null;
+    try { parent = convId ? await ConversationStore.load(convId) : null; } catch { parent = null; }
+    if (!parent) { devBubble('✗ `fork` — open the dev conversation you want to fork from.'); return; }
+    const concern = String(parent.concern || parent.title || '').replace(/\s+/g, ' ').trim() || 'continue the previous work';
+    const seedPrompt = buildForkSeedPrompt({ parentConcern: parent.concern, parentTitle: parent.title });
+    const bubble = devBubble(`↻ forking from **${concern.slice(0, 60)}**…`);
+    await _seedSplitBranch({ concern, seedPrompt, branchBase: 'main', parentConvId: convId, bubble, verb: 'fork' });
   }
 
   // v2.74.1029 — enable the bridge for a NEW dev conversation. The conversations-menu "New dev conversation"

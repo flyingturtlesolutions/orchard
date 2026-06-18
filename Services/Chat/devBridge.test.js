@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt } from './devBridge.js';
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
@@ -351,5 +351,25 @@ describe('DBR-P3-3 propose_split validator', () => {
     const r = validateProposeSplit({ concern: 'just the concern' });
     assert.equal(r.ok, true);
     assert.deepEqual(r.value, { concern: 'just the concern', reason: '', branchBase: 'main', seedPrompt: '', suggestedName: '' });
+  });
+});
+
+// DBR-P3-5 (DESIGN §6.1/U12) — fork-from-here helpers.
+describe('DBR-P3-5 fork helpers', () => {
+  it('isFork matches the bare `fork` verb only', () => {
+    for (const s of ['fork', 'FORK', '  fork  ']) assert.equal(isFork(s), true, `fire: ${JSON.stringify(s)}`);
+    for (const s of ['fork the repo', 'forked', 'fork:', '', null]) assert.equal(isFork(s), false, `no: ${String(s)}`);
+  });
+  it('buildForkSeedPrompt embeds the concern + the continue cue (summary optional)', () => {
+    const s = buildForkSeedPrompt({ parentConcern: 'drawer animation', parentSummary: 'shipped the slide, easing TODO' });
+    assert.ok(s.includes('Continue the work on: drawer animation'));
+    assert.ok(s.includes('Where it left off: shipped the slide, easing TODO'));
+    assert.ok(/Forked from a previous dev conversation/.test(s));
+  });
+  it('falls back to the title, then a generic cue, with no summary line', () => {
+    assert.ok(buildForkSeedPrompt({ parentTitle: 'export pipeline' }).includes('Continue the work on: export pipeline'));
+    const bare = buildForkSeedPrompt({});
+    assert.ok(bare.includes('Continue from the previous dev conversation'));
+    assert.equal(bare.includes('Where it left off'), false);
   });
 });
