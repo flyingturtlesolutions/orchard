@@ -427,6 +427,82 @@ textarea {
   background: var(--c-text-subtle);
 }
 
+/* ── DBR-6 (v2.74.1039) — dev-conversation branch-status header ──────────────
+   Pinned to the top of the conversation scroll area, shown only while a dev
+   conversation is active (toggled by chat.js). Amber (#c9a227) is the bridge's
+   trust-domain accent — same as the dev bubble border + reload dot. */
+.dev-status-header {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 14px;
+  background: var(--c-bg-elevated);
+  border-bottom: 1px solid var(--c-border-soft);
+  border-left: 2px solid #c9a227;
+}
+.dev-status-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.dev-status-branch {
+  font-size: 12px;
+  font-weight: 600;
+  color: #c9a227;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  letter-spacing: 0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.dev-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: var(--r-full, 999px);
+  background: var(--c-bg);
+  border: 1px solid var(--c-border-soft);
+  color: var(--c-text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.dev-status-pill.loading { opacity: 0.5; }
+.dev-status-pill-k { color: var(--c-text-subtle); }
+.dev-status-pill-v { color: var(--c-text-muted); }
+.dev-status-sync.clean { color: var(--c-text-subtle); }
+.dev-status-dirty.dirty {
+  color: #c9a227;
+  border-color: rgba(201, 162, 39, 0.4);
+}
+.dev-status-dirty.clean { color: var(--c-text-subtle); }
+.dev-status-pill.ok .dev-status-pill-v { color: var(--c-success); }
+.dev-status-pill.fail .dev-status-pill-v { color: var(--c-error); }
+.dev-status-concern {
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--c-text-muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dev-status-concern:hover { text-decoration: underline; color: var(--c-text); }
+.dev-status-concern.empty { color: var(--c-text-subtle); font-style: italic; }
+
 /* ── Empty state ─────────────────────────────────────────────────────────── */
 .empty-state {
   flex: 1;
@@ -1299,6 +1375,12 @@ textarea {
   font-weight: 600;
   color: var(--c-text);
   letter-spacing: 0.2px;
+  margin-right: auto;   /* v2.74.1040 — push the title left so the trash + ✕ group together at the right */
+}
+
+/* v2.74.1040 — small gap between the trash and the ✕ close button (they now sit side-by-side) */
+.history-header .icon-btn + .icon-btn {
+  margin-left: var(--sp-1);
 }
 
 .history-new-btn {

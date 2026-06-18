@@ -134,9 +134,21 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   const _convResume = async (id) => { try { return devResumeSession(await ConversationStore.load(id)); } catch { return null; } };
   // DBR-5 (v2.74.1037, DESIGN §8.2) — trim an ask to a one-line concern LABEL (collapse whitespace, cap length).
   const _conciseConcern = (ask) => String(ask ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
-  // DBR-5 — the concern DEFAULTS to the first real ask. Capture it on the dev conversation once (never
-  // overwrite an existing/edited concern), and return the EFFECTIVE concern for THIS spawn so the run payload
-  // carries it. Pass `ask` for a real task (sets it if unset); pass null for non-task runs (just reads it).
+  // DBR-5 fix (v2.74.1038) — a QUESTION/STATUS ask ("is the build complete?", "what's left?") is a query, not a
+  // scope of work. Defaulting a concern from one pins the conversation to "assess", and since the host re-injects
+  // that concern as a "work ONLY on …" guardrail on EVERY spawn, it then OVERRIDES later BUILD asks — the
+  // dev-bridge looped on itself, re-reporting "DBR-6 not built" and never building it (even on an explicit "yes").
+  // So an interrogative first ask does NOT seed a concern: the run stays unconstrained (pre-DBR-5 behaviour) until
+  // a real task or an explicit `dev: concern <scope>`. A false-skip is safe — it just means no scope guardrail for
+  // that run. See logs/run/findings.md.
+  const _looksLikeQuestion = (ask) => {
+    const s = String(ask ?? '').trim();
+    return /\?\s*$/.test(s)
+      || /^(is|are|was|were|do|does|did|can|could|should|would|will|has|have|what|which|who|whose|when|where|why|how)\b/i.test(s);
+  };
+  // DBR-5 — the concern DEFAULTS to the first real (non-question) ask. Capture it on the dev conversation once
+  // (never overwrite an existing/edited concern), and return the EFFECTIVE concern for THIS spawn so the run
+  // payload carries it. Pass `ask` for a real task (sets it if unset & not a question); null just reads it.
   // The host builds the scope contract from this and re-injects on every spawn (initial + resume).
   const _ensureConcern = async (id, ask = null) => {
     if (!id) return null;
@@ -144,7 +156,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       const conv = await ConversationStore.load(id);
       if (!conv || conv.kind !== 'dev') return null;
       let concern = typeof conv.concern === 'string' ? conv.concern.trim() : '';
-      if (!concern && ask) {
+      if (!concern && ask && !_looksLikeQuestion(ask)) {
         concern = _conciseConcern(ask);
         if (concern) await ConversationStore.patchMeta(id, { concern }).catch(() => { /* */ });
       }
@@ -989,10 +1001,20 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     try { branch = convId ? ((await ConversationStore.load(convId)) || {}).branch || null : null; } catch { branch = null; }
     if (!branch) { devBubble('✗ `lt` — no branch is recorded for this dev conversation, so there’s nothing to live-test.'); return; }
     const bubble = devBubble(`↻ switching to \`${branch}\` and reloading…`);
-    // 1) checkpoint the current branch (git switch needs a clean tree). The host commits with --allow-empty, so
-    // a no-op tree still succeeds; a real failure (not "nothing to commit") blocks the switch — surface + stop.
+    // 1) checkpoint the CURRENT branch so `git switch` has a clean tree — but only when we're ON a dev branch.
+    // The host commit-guard refuses to commit on main (correct — never commit to main), so on a non-dev branch
+    // commitWip returns "not on a dev branch". That is NOT fatal (v2.74.1040 fix — the old code aborted on it, so
+    // `lt` could never bootstrap from main): we never checkpoint main; instead switch directly when the tree is
+    // clean, and refuse with a clear next step when it's dirty (don't carry uncommitted work across the switch).
     const wip = await gitOp('commitWip', { message: `lt → ${branch}` });
-    if (!wip || !wip.ok) { _setBubble(bubble, `✗ \`lt\` — couldn’t checkpoint the current branch: ${(wip && wip.error) || 'host unreachable'}. Not switching.`); return; }
+    const guardBlocked = wip && !wip.ok && /not on a dev branch/i.test(String(wip.error || ''));
+    if ((!wip || !wip.ok) && !guardBlocked) { _setBubble(bubble, `✗ \`lt\` — couldn’t checkpoint the current branch: ${(wip && wip.error) || 'host unreachable'}. Not switching.`); return; }
+    if (guardBlocked) {
+      let dirty = false;
+      try { const st = await gitOp('status'); dirty = !!(st && st.ok && (st.dirty === true || (typeof st.porcelain === 'string' && st.porcelain.trim()) || (Array.isArray(st.changed) && st.changed.length) || (typeof st.changed === 'number' && st.changed > 0))); } catch { dirty = false; }
+      if (dirty) { _setBubble(bubble, `✗ \`lt\` — the loaded tree is on a non-dev branch (e.g. main) with uncommitted changes, so it can’t live-test \`${branch}\` cleanly. Commit or stash your changes first (the bridge never commits to main), then \`lt\`.`); return; }
+      // clean non-dev branch → no checkpoint needed; fall through to the switch.
+    }
     // 2) switch the loaded folder to this conversation's branch (lt:true → the host logs the LT ▸ decision marker).
     const sw = await gitOp('switch', { branch, lt: true });
     if (!sw || !sw.ok) { _setBubble(bubble, `✗ \`lt\` — couldn’t switch to \`${branch}\`: ${(sw && sw.error) || 'host unreachable'}.`); return; }

@@ -123,6 +123,11 @@
   <div class="chat-main" id="chat-main">
   <!-- ── Main conversation area ─────────────────────────────────────────── -->
   <main class="conversation" id="conversation">
+    <!-- DBR-6 (v2.74.1039) — dev-conversation branch-status header. Panel-only (injection-boundary rule:
+         nothing here touches the page). Hidden for agent conversations; shown + populated by chat.js
+         (_renderDevStatusHeader) only while a dev conversation is active. -->
+    <div class="dev-status-header hidden" id="dev-status-header" hidden></div>
+
     <!-- Empty state — shown when no messages yet -->
     <div class="empty-state" id="empty-state">
       <div class="empty-state-content">

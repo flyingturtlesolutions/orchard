@@ -208,6 +208,147 @@ function _showDevEmptyState() {
   const greet = $('empty-state-greeting'); if (greet) greet.textContent = 'Dev — Claude Code';
   const sub = $('empty-state-subtitle');
   if (sub) sub.textContent = 'Type a task to send to Claude Code on this repo — no “dev:” prefix here. Also: gl · gc · gch · bug: <what broke> · pause · history · model/turns/relay · new <task>.';
+  _renderDevStatusHeader();
+}
+
+// ─── DBR-6 (v2.74.1039, DESIGN §13) — dev-conversation branch-status header ───────────────────────────
+// Surfaces, for the ACTIVE dev conversation only: the owned branch · ahead/behind `main` · clean/dirty ·
+// the editable DBR-5 concern · a best-effort last-test result. Panel-only (injection-boundary rule: nothing
+// here touches the page). Branch + concern + last-test come from the conversation record (read-only); the
+// ahead/behind + dirty pills come from the host's read-only DBR-1 git ops (aheadBehind/status) relayed via
+// the bridge — no new host op is added. Refreshes on conversation switch (_rehydrateConversation /
+// _showDevEmptyState), after a run completes (the reload-state listener, which the `done` handler arms via
+// refreshReloadState), and on reopen after `lt` (which reloads the whole extension → a fresh render).
+let _devStatusToken = 0;   // guards against a stale async render landing after a fast conversation switch
+
+function _devStatusBadge(label, value, cls) {
+  const b = document.createElement('span');
+  b.className = 'dev-status-pill' + (cls ? ' ' + cls : '');
+  const k = document.createElement('span'); k.className = 'dev-status-pill-k'; k.textContent = label;
+  const v = document.createElement('span'); v.className = 'dev-status-pill-v'; v.textContent = value;
+  b.append(k, v);
+  return b;
+}
+
+// Best-effort: scan a dev conversation's bubbles (newest first) for the most recent npm-test result. The
+// node harness prints "<n> passing" / "<n> failing"; the bridge echoes Claude's run output verbatim, so the
+// line lands in a persisted dev bubble. Read-only (no host op); shown ONLY when confidently matched, else
+// omitted. A heuristic surface — the spec's "last test, if any" — not an authoritative gate.
+function _lastTestFromMessages(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m || !m.devBridge) continue;
+    const body = String(m.body || '');
+    const fail = body.match(/(\d+)\s+failing/i);
+    if (fail && Number(fail[1]) > 0) return { ok: false, text: `${fail[1]} failing` };
+    const pass = body.match(/(\d+)\s+passing/i);
+    if (pass) return { ok: true, text: `${pass[1]} passing` };
+  }
+  return null;
+}
+
+function _hideDevStatusHeader() {
+  const host = $('dev-status-header');
+  if (!host) return;
+  host.classList.add('hidden'); host.hidden = true; host.innerHTML = '';
+}
+
+async function _renderDevStatusHeader() {
+  const host = $('dev-status-header');
+  if (!host) return;
+  const token = ++_devStatusToken;
+  if (_currentConversationKind !== 'dev' || !_currentConversationId) { _hideDevStatusHeader(); return; }
+
+  let conv = null;
+  try { conv = await ConversationStore.load(_currentConversationId); } catch { /* */ }
+  if (token !== _devStatusToken) return;                       // switched away while loading
+  if (!conv || conv.kind !== 'dev') { _hideDevStatusHeader(); return; }
+
+  const branch  = conv.branch || null;
+  const concern = (typeof conv.concern === 'string' && conv.concern.trim()) ? conv.concern.trim() : null;
+  const lastTest = _lastTestFromMessages(conv.messages || []);
+
+  // Synchronous skeleton first: branch + concern + last-test render immediately; the ahead/behind + dirty
+  // pills show a spinner-ish "…" until the (read-only) git ops resolve, then fill in — or show "—" if the
+  // host is unreachable (dev mode not installed yet). Rebuilt wholesale each render — cheap, no diffing.
+  host.innerHTML = '';
+  host.hidden = false; host.classList.remove('hidden');
+
+  const row = document.createElement('div');
+  row.className = 'dev-status-row';
+
+  const branchEl = document.createElement('span');
+  branchEl.className = 'dev-status-branch';
+  branchEl.textContent = branch || 'no branch';
+  branchEl.title = branch ? `This dev conversation owns ${branch}` : 'No branch is recorded for this conversation';
+  row.appendChild(branchEl);
+
+  const syncEl = document.createElement('span');
+  syncEl.className = 'dev-status-pill dev-status-sync loading';
+  syncEl.textContent = '⇅ …';
+  row.appendChild(syncEl);
+
+  const dirtyEl = document.createElement('span');
+  dirtyEl.className = 'dev-status-pill dev-status-dirty loading';
+  dirtyEl.textContent = '…';
+  row.appendChild(dirtyEl);
+
+  if (lastTest) row.appendChild(_devStatusBadge('test', lastTest.text, lastTest.ok ? 'ok' : 'fail'));
+  host.appendChild(row);
+
+  // The editable DBR-5 concern. Click → edit in-panel (patchMeta, same effect as `dev: concern <text>`).
+  const concernEl = document.createElement('button');
+  concernEl.type = 'button';
+  concernEl.className = 'dev-status-concern' + (concern ? '' : ' empty');
+  concernEl.title = 'Click to edit this conversation’s scope (concern) — applies to the next run';
+  concernEl.textContent = concern ? `scope: ${concern}` : 'scope: (none — click to set)';
+  concernEl.addEventListener('click', () => _editDevConcern(conv.id, concern));
+  host.appendChild(concernEl);
+
+  // Async fill: ahead/behind + dirty from the host's read-only DBR-1 git ops, relayed via the bridge.
+  const settle = (el, text, title) => { el.classList.remove('loading'); el.textContent = text; if (title) el.title = title; };
+  if (!branch) { settle(syncEl, '⇅ —', 'no branch to compare'); settle(dirtyEl, '—', 'no branch'); return; }
+  let bridge = null; try { bridge = _getDevBridge(); } catch { /* */ }
+  if (!bridge) { settle(syncEl, '⇅ —'); settle(dirtyEl, '—'); return; }
+  try {
+    const [ab, st] = await Promise.all([
+      bridge.gitOp('aheadBehind', { a: 'main', b: branch }),
+      bridge.gitOp('status', {}),
+    ]);
+    if (token !== _devStatusToken) return;                     // a switch happened while the host answered
+    // ahead/behind: `git rev-list --left-right --count main...<branch>` → "<behind>\t<ahead>".
+    if (ab && ab.ok && typeof ab.stdout === 'string') {
+      const parts = ab.stdout.trim().split(/\s+/);
+      const behind = Number(parts[0]) || 0, ahead = Number(parts[1]) || 0;
+      settle(syncEl, `↑${ahead} ↓${behind}`, `${ahead} commit${ahead === 1 ? '' : 's'} ahead of main · ${behind} behind`);
+      syncEl.classList.toggle('clean', ahead === 0 && behind === 0);
+    } else { settle(syncEl, '⇅ —', 'ahead/behind unavailable (host not reachable)'); }
+    // dirty: porcelain v1 `--branch` → first line "## …"; any other line ⇒ an uncommitted change.
+    if (st && st.ok && typeof st.stdout === 'string') {
+      const changes = st.stdout.split('\n').filter((l) => l && !l.startsWith('##'));
+      const dirty = changes.length > 0;
+      settle(dirtyEl, dirty ? `${changes.length} changed` : 'clean',
+        dirty ? `${changes.length} uncommitted change${changes.length === 1 ? '' : 's'} in the working tree` : 'working tree clean');
+      dirtyEl.classList.toggle('dirty', dirty);
+      dirtyEl.classList.toggle('clean', !dirty);
+    } else { settle(dirtyEl, '—', 'working-tree state unavailable (host not reachable)'); }
+  } catch {
+    if (token === _devStatusToken) { settle(syncEl, '⇅ —'); settle(dirtyEl, '—'); }
+  }
+}
+
+// DBR-6 — edit the DBR-5 concern straight from the header. Mirrors `dev: concern <text>`: normalize to one
+// line (≤200 chars, matching devBridge's _conciseConcern), persist via patchMeta, re-render. The next run's
+// scope contract picks up the change (the host re-injects the stored concern on every spawn — DBR-5).
+async function _editDevConcern(convId, current) {
+  if (!convId) return;
+  let next;
+  try { next = window.prompt('Scope (concern) for this dev conversation — applies to the next run:', current || ''); }
+  catch { next = null; }
+  if (next == null) return;                                    // cancelled
+  const concern = next.replace(/\s+/g, ' ').trim().slice(0, 200);
+  try { await ConversationStore.patchMeta(convId, { concern: concern || null }); } catch { /* */ }
+  if (convId === _currentConversationId) _renderDevStatusHeader();
 }
 
 // ─── History sidebar ─────────────────────────────────────────────────────────
@@ -325,6 +466,7 @@ function _resetConversation() {
   $('empty-state').classList.remove('hidden');
   $('input-status').textContent = '';
   $('input-status').className = 'input-status';
+  _hideDevStatusHeader();   // DBR-6 — a fresh/agent surface has no branch header; dev paths re-show it
 }
 
 // v2.74.107 — Helper for #4: programmatically cancel any open param forms.
@@ -4047,6 +4189,9 @@ function _wireDevReload() {
     btn.title = s.available
       ? `Reload extension — ${n} changed file${n === 1 ? '' : 's'} pending (dev)`
       : 'Reload extension (dev)';
+    // DBR-6 — the `done` handler arms refreshReloadState() after a run, so this fires once a run completes:
+    // re-pull the branch header's ahead/behind + dirty + last-test. Self-guards to the active dev conversation.
+    if (_currentConversationKind === 'dev') _renderDevStatusHeader();
   });
 }
 
@@ -4308,5 +4453,6 @@ async function _rehydrateConversation(conv) {
       dom.classList.add(pm.outcome?.kind === 'error' ? 'error' : '');
     }
   }
+  _renderDevStatusHeader();   // DBR-6 — render the branch header for a dev conversation; self-hides for agent
 }
 

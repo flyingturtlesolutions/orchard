@@ -35,7 +35,9 @@ function buildConcernContract(concern) {
   if (!c) return null;
   const label = c.length > MAX_LEN ? c.slice(0, MAX_LEN).replace(/\s+\S*$/, '').trim() + '…' : c;
   return `You are working ONLY on: ${label}. `
-    + "Don't refactor unrelated or shared code. If a fix needs shared or foundational files, STOP and tell the user instead of doing it inline.";
+    + "Stay within that scope: don't refactor unrelated code, and don't make foundational changes beyond it. "
+    + "Files your concern names or clearly implies ARE in scope, so edit them. "
+    + "Only if completing it would require changing shared or foundational code OUTSIDE this scope, STOP and tell the user instead of doing it inline.";
 }
 
 module.exports = { buildConcernContract, _safeLabel, MAX_LEN };
