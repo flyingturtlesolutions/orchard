@@ -28,8 +28,11 @@ function _safeLabel(concern) {
 }
 
 // Build the scope contract from a concern, or return null when there's no concern (→ the host adds no flag,
-// so a concern-less run behaves exactly as before). Single line by construction (see INJECTION BOUNDARY).
-// Phase 1: the contract tells Claude to STOP and tell the user (the `propose_split` tool is Phase 3 — §8.1).
+// so a concern-less run behaves exactly as before). Single line by construction (see INJECTION BOUNDARY); ASCII
+// only in the fixed rule text (non-ASCII could be mangled by cmd.exe's codepage). DBR-P3-4 (v2.74.1058, §8.1/§8.2):
+// the contract now points Claude at the `propose_split` tool (P3-3) at PLAN time — scope-check the plan, not a
+// sprawling diff. A CONTRACT, not a hard block (Claude honors it; the deterministic P3-2 `scope` backstop catches
+// misses — not 100% by design). The friendly name `propose_split` matches the exposed mcp__devbridge__propose_split.
 function buildConcernContract(concern) {
   const c = _safeLabel(concern);
   if (!c) return null;
@@ -37,7 +40,9 @@ function buildConcernContract(concern) {
   return `You are working ONLY on: ${label}. `
     + "Stay within that scope: don't refactor unrelated code, and don't make foundational changes beyond it. "
     + "Files your concern names or clearly implies ARE in scope, so edit them. "
-    + "Only if completing it would require changing shared or foundational code OUTSIDE this scope, STOP and tell the user instead of doing it inline.";
+    + "If completing it would need shared or foundational code OUTSIDE this scope, or you notice a separable concern, "
+    + "call the propose_split tool (at PLAN time, before writing that out-of-scope code) with a seedPrompt for the "
+    + "out-of-scope work, instead of doing it inline. The user approves or declines each split in the panel.";
 }
 
 module.exports = { buildConcernContract, _safeLabel, MAX_LEN };
