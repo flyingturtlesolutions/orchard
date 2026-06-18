@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest } from './devBridge.js';
+import { isLiveTest, isLiveTestForce } from './devBridge.js';
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
@@ -43,6 +43,28 @@ describe('isLiveTest — a sentence merely containing the phrase does NOT fire (
   it('rejects empty / nullish / non-string input', () => {
     for (const s of ['', '   ', null, undefined, 0, {}, []]) {
       assert.equal(isLiveTest(s), false, `should NOT fire: ${String(s)}`);
+    }
+  });
+});
+
+// v2.74.1043 (DESIGN §4 guardrail) — the FORCE variant: a bare lt token + trailing `!`/` force` overrides the
+// behind-main warning ("switch anyway"). Same whole-message discipline; disjoint from the bare matcher.
+describe('isLiveTestForce — bare token + trailing `!`/`force` fires (override)', () => {
+  it('matches the force suffixes, case/space-tolerant', () => {
+    for (const s of ['lt!', 'lt force', 'live!', 'livetest!', 'live test!', 'live force', 'live test force',
+                     'LT!', 'Lt Force', '  livetest  force  ', 'lt !']) {
+      assert.equal(isLiveTestForce(s), true, `should force: ${JSON.stringify(s)}`);
+    }
+  });
+  it('does NOT fire for the bare tokens (those go through isLiveTest, not force)', () => {
+    for (const s of ['lt', 'live', 'live test', 'livetest']) {
+      assert.equal(isLiveTestForce(s), false, `should NOT force: ${s}`);
+      assert.equal(isLiveTest(s), true, `bare should still match isLiveTest: ${s}`);
+    }
+  });
+  it('does NOT fire for a sentence merely containing force/!, or bare force', () => {
+    for (const s of ['can you force a live test!', 'please lt the drawer!', 'force', '!', 'force lt', '', null, undefined]) {
+      assert.equal(isLiveTestForce(s), false, `should NOT force: ${String(s)}`);
     }
   });
 });

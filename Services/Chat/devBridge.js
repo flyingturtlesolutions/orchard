@@ -77,6 +77,20 @@ export function isLiveTest(text) {
   return t === 'lt' || t === 'live' || t === 'live test' || t === 'livetest';
 }
 
+// v2.74.1043 (DESIGN §4 guardrail) — the FORCE variant: a bare lt token with a trailing `!` or ` force`
+// ("lt!", "lt force", "live test!", …). It means "switch anyway, past the behind-main warning" (single-tree
+// `lt` reloads the WHOLE extension onto the branch, so a branch behind main reverts the panel itself — the
+// default `lt` warns + refuses; this is the explicit override). Same whole-message discipline as isLiveTest:
+// a sentence merely containing "force"/"!" does NOT match. PURE + exported for unit tests. Disjoint from
+// isLiveTest (the bare tokens never carry the suffix), so the caller can OR the two safely.
+export function isLiveTestForce(text) {
+  const t = String(text ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const m = t.match(/^(.*?)\s*(?:!|force)$/);   // strip a trailing `!` or the word `force`
+  if (!m) return false;
+  const base = m[1].trim();
+  return base === 'lt' || base === 'live' || base === 'live test' || base === 'livetest';
+}
+
 /**
  * Factory — chat.js hands in its rendering helpers (avoids any import cycle into the panel).
  * @param {{appendMessage: Function, setMessageBody: Function, mkBtn: Function, persistMessage?: Function, decorateBubble?: Function, renderMarkdown?: Function, wireCodeCopyButtons?: Function}} deps
@@ -734,9 +748,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     // DBR-4 (v2.74.1036, DESIGN §4) — `lt` live-test. Dev-conversation only, WHOLE-message match, intercepted
     // HERE — before the bare-text→`dev:` normalization below — so it never gets rewritten to `dev: lt` and
     // forwarded to Claude. Switches the loaded tree to this conversation's branch and reloads the extension.
-    if (devConv && isLiveTest(t)) {
+    if (devConv && (isLiveTest(t) || isLiveTestForce(t))) {
       if (!skipEcho) appendMessage({ role: 'user', body: t });
-      await _liveTest(convId);
+      await _liveTest(convId, { force: isLiveTestForce(t) });   // v2.74.1043 — `lt!`/`lt force` skips the behind-main warning
       return true;
     }
     // Inside a dev conversation, bare input IS a dev command: a standalone log verb (gl/gc/gch) or a
@@ -996,10 +1010,28 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   // which re-reads the now-swapped files. All git is host-side, parameter-validated (§3); the panel only relays
   // via gitOp. Phase 1 is single-tree + serial — no worktree/preview yet (those are Phase 4). The reload CLOSES
   // the panel (reopen via the toolbar icon to see the branch live), so this is the last thing the flow does.
-  async function _liveTest(convId) {
+  async function _liveTest(convId, opts = {}) {
+    const force = opts.force === true;
     let branch = null;
     try { branch = convId ? ((await ConversationStore.load(convId)) || {}).branch || null : null; } catch { branch = null; }
     if (!branch) { devBubble('✗ `lt` — no branch is recorded for this dev conversation, so there’s nothing to live-test.'); return; }
+    // v2.74.1043 (DESIGN §4 guardrail) — single-tree `lt` does a full reload onto the branch, so a branch BEHIND
+    // main reverts the WHOLE panel to that older code: you silently lose newer panel features (e.g. the DBR-5/DBR-6
+    // concern + dev header). Warn + refuse by default; `lt!`/`lt force` overrides. Uses the same read-only
+    // `aheadBehind` op the DBR-6 header uses (`git rev-list --left-right --count main...<branch>` → "<behind>\t<ahead>",
+    // so parts[0] is how far the branch is BEHIND main). Fails OPEN: a host that's unreachable or an unparseable
+    // answer must NOT block `lt` — only a confidently-positive behind count refuses.
+    if (!force) {
+      let behind = 0;
+      try {
+        const ab = await gitOp('aheadBehind', { a: 'main', b: branch });
+        if (ab && ab.ok && typeof ab.stdout === 'string') behind = Number(ab.stdout.trim().split(/\s+/)[0]) || 0;
+      } catch { behind = 0; }
+      if (behind > 0) {
+        devBubble(`⚠ \`lt\` — \`${branch}\` is ${behind} commit${behind === 1 ? '' : 's'} behind \`main\`. Switching reloads the **whole** extension onto that older code, so newer panel features (e.g. the dev header / concern) will disappear until you switch back. Type \`lt!\` to switch anyway, or bring the branch up to date with \`main\` first (Phase 2 \`sync\`).`);
+        return;
+      }
+    }
     const bubble = devBubble(`↻ switching to \`${branch}\` and reloading…`);
     // 1) checkpoint the CURRENT branch so `git switch` has a clean tree — but only when we're ON a dev branch.
     // The host commit-guard refuses to commit on main (correct — never commit to main), so on a non-dev branch
