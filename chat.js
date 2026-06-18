@@ -3157,7 +3157,7 @@ function _getDevBridge() {
   // prose, tool chips) mirroring Claude Code desktop. Same injection-safe renderer the chat uses.
   // v2.74.995 — getScrollContainer: the bridge runs its OWN follow-scroll (the chat's 96px near-bottom
   // heuristic breaks for the bridge's large per-block appends), anchoring the working…/Pause footer.
-  if (!_devBridgeInstance) _devBridgeInstance = createDevBridge({ appendMessage, setMessageBody: _setMessageBody, mkBtn: _mkBtn, persistMessage: _persistMessageUpdate, decorateBubble: _decorateDevBubble, renderMarkdown, wireCodeCopyButtons, getScrollContainer: () => $('conversation') });
+  if (!_devBridgeInstance) _devBridgeInstance = createDevBridge({ appendMessage, setMessageBody: _setMessageBody, mkBtn: _mkBtn, persistMessage: _persistMessageUpdate, decorateBubble: _decorateDevBubble, renderMarkdown, wireCodeCopyButtons, getScrollContainer: () => $('conversation'), refreshHistory: _refreshHistoryIfOpen });
   return _devBridgeInstance;
 }
 

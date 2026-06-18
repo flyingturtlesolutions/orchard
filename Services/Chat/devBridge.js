@@ -233,7 +233,7 @@ export function buildMergeCommitMessage(summary, convId) {
  * Factory — chat.js hands in its rendering helpers (avoids any import cycle into the panel).
  * @param {{appendMessage: Function, setMessageBody: Function, mkBtn: Function, persistMessage?: Function, decorateBubble?: Function, renderMarkdown?: Function, wireCodeCopyButtons?: Function}} deps
  */
-export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistMessage, decorateBubble, renderMarkdown, wireCodeCopyButtons, getScrollContainer }) {
+export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistMessage, decorateBubble, renderMarkdown, wireCodeCopyButtons, getScrollContainer, refreshHistory }) {
   let port = null;
   let run = null;   // { msgEl, lines: string[], bar: Element|null, sessionId: string|null }
 
@@ -1486,6 +1486,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     let conv = null;
     try { conv = await ConversationStore.create({ kind: 'dev', title: concern.slice(0, 60), branch, concern, seed }); } catch { conv = null; }
     if (!conv) { _setBubble(bubble, `✗ \`split:\` — created \`${branch}\` but couldn’t create the conversation. Make a dev conversation on that branch manually.`); return; }
+    try { await refreshHistory?.(); } catch { /* */ }   // v2.74.1054 — show the new split conversation in an already-open drawer (the .1042 fix, but _split mints directly via ConversationStore so it needs its own nudge)
     _setBubble(bubble, `✓ split — created \`${branch}\` (off \`main\`) + a new dev conversation **${concern.slice(0, 60)}**. Open the conversations drawer (☰) and select it: its seed is **pre-filled** (review + send). Merge that branch first, then \`sync\` this one onto it.`);
   }
 
