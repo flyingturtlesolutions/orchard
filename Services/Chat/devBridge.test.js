@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift } from './devBridge.js';
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
@@ -198,5 +198,29 @@ describe('isAbandon / isDeleteBranch — whole-message verbs, disjoint', () => {
   it('isDeleteBranch fires only for the exact phrase, whitespace-tolerant', () => {
     for (const s of ['delete branch', 'DELETE BRANCH', '  delete   branch  ']) assert.equal(isDeleteBranch(s), true, `fire: ${JSON.stringify(s)}`);
     for (const s of ['delete branch dev/x', 'delete the branch', 'delete', 'branch', 'abandon', '', null]) assert.equal(isDeleteBranch(s), false, `no: ${String(s)}`);
+  });
+});
+
+// DBR-P2-7 (DESIGN §7.1) — the `drift` matcher + the deterministic detectors (no LLM).
+describe('DBR-P2-7 drift detectors', () => {
+  it('isDrift fires only for the bare word', () => {
+    for (const s of ['drift', 'DRIFT', '  drift  ']) assert.equal(isDrift(s), true);
+    for (const s of ['drift check', 'drifted', '', null]) assert.equal(isDrift(s), false);
+  });
+  it('isFoundationalFile: under Core/Services OR imported by ≥N (config, not magic)', () => {
+    assert.equal(isFoundationalFile('Core/route.js'), true);
+    assert.equal(isFoundationalFile('Services/Chat/devBridge.js'), true);
+    assert.equal(isFoundationalFile('./Core/x.js'), true);        // leading ./ tolerated
+    assert.equal(isFoundationalFile('chat.js'), false);            // leaf file, 0 importers
+    assert.equal(isFoundationalFile('chat.js', { importerCount: 3 }), true);   // ≥ default minImporters
+    assert.equal(isFoundationalFile('chat.js', { importerCount: 2 }), false);
+    assert.equal(isFoundationalFile('lib/x.js', { layers: ['lib/'] }), true);  // config-driven layer
+  });
+  it('computeDrift: files BOTH main and the branch touched (deduped, branch order)', () => {
+    assert.deepEqual(computeDrift(['a', 'b', 'c'], ['c', 'b', 'd']), ['c', 'b']);
+    assert.deepEqual(computeDrift(['a'], ['a', 'a']), ['a']);      // deduped
+    assert.deepEqual(computeDrift([], ['a']), []);                 // main changed nothing
+    assert.deepEqual(computeDrift(['a'], []), []);                 // branch changed nothing
+    assert.deepEqual(computeDrift(null, null), []);               // robust to nullish
   });
 });

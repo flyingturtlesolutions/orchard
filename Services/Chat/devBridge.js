@@ -158,6 +158,33 @@ export function isDeleteBranch(text) {
   return String(text ?? '').trim().toLowerCase().replace(/\s+/g, ' ') === 'delete branch';
 }
 
+// DBR-P2-7 (DESIGN §5/§7) — the `drift` verb matcher (check this branch's overlap with main's recent changes).
+// Whole-message only, dev-conversation gated by the caller. PURE + exported.
+export function isDrift(text) {
+  return String(text ?? '').trim().toLowerCase().replace(/\s+/g, ' ') === 'drift';
+}
+
+// DBR-P2-7 (DESIGN §7.1) — a FOUNDATIONAL/SHARED file: lives in a shared layer (Core/, Services/) OR is imported
+// by ≥ minImporters modules. PURE — the importer count comes from a (separate) static import scan; here it's the
+// threshold logic + the cheap directory prior. Layers + threshold are config, not magic numbers in code.
+export function isFoundationalFile(path, { layers = ['Core/', 'Services/'], minImporters = 3, importerCount = 0 } = {}) {
+  const p = String(path == null ? '' : path).replace(/^\.?[\\/]/, '').replace(/\\/g, '/');
+  if (layers.some((L) => p.startsWith(L))) return true;
+  return (Number(importerCount) || 0) >= minImporters;
+}
+
+// DBR-P2-7 (DESIGN §7.1) — DRIFT = files that BOTH `main` (since the branch forked) and the branch modified — a
+// `git diff --name-only` set-intersection. PURE: returns the branch's drifted files (deduped, in branch order).
+export function computeDrift(mainFiles, branchFiles) {
+  const inMain = new Set((Array.isArray(mainFiles) ? mainFiles : []).map((f) => String(f == null ? '' : f).trim()).filter(Boolean));
+  const out = [];
+  for (const f of (Array.isArray(branchFiles) ? branchFiles : [])) {
+    const s = String(f == null ? '' : f).trim();
+    if (s && inMain.has(s) && !out.includes(s)) out.push(s);
+  }
+  return out;
+}
+
 // DBR-P2-4 (DESIGN §6.1) — the merge-SUMMARY (deterministic v1; an LLM-rich {learned, newInvariant} can refine
 // later). Subject ← the conversation's concern (its stated scope) or title; files ← the diff-stat lines. PURE.
 export function buildMergeSummary({ concern, title, diffStat } = {}) {
@@ -900,6 +927,12 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       await _deleteBranch(convId);
       return true;
     }
+    // DBR-P2-7 (v2.74.1052, DESIGN §5/§7) — `drift`: read-only check of this branch vs main's recent changes.
+    if (devConv && isDrift(t)) {
+      if (!skipEcho) appendMessage({ role: 'user', body: t });
+      await _driftCheck(convId);
+      return true;
+    }
     // Inside a dev conversation, bare input IS a dev command: a standalone log verb (gl/gc/gch) or a
     // `bug:`/`dev:` prefix is taken verbatim; anything else (a sub-verb like `pause`/`history`/`model …`, or
     // a plain task) is normalized to the `dev: …` form so the existing branch table handles it unchanged —
@@ -1378,6 +1411,33 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       actions.appendChild(go); actions.appendChild(no);
       bubble.bodyEl.appendChild(actions);
     } catch { /* no buttons → re-run `delete branch` */ }
+  }
+
+  // DBR-P2-7 (DESIGN §5/§7) — `drift`: does THIS branch overlap with main's recent changes? Read-only, no LLM,
+  // never blocks (§7). Computes the fork point (merge-base), the files main changed since then, the files the
+  // branch changed, and their intersection (`computeDrift`); flags foundational/shared files. The AUTOMATIC
+  // cross-branch broadcast (nudge OTHER live branches after a merge) is a follow-up — this is the on-demand check.
+  async function _driftCheck(convId) {
+    let conv = null;
+    try { conv = convId ? await ConversationStore.load(convId) : null; } catch { conv = null; }
+    const branch = conv && conv.branch;
+    if (!branch) { devBubble('✗ `drift` — no branch is recorded for this dev conversation.'); return; }
+    const bubble = devBubble(`↻ checking drift of \`${branch}\` vs \`main\`…`);
+    const base = await gitOp('mergeBase', { a: 'main', b: branch });
+    const baseSha = String((base && base.ok && base.stdout) || '').trim();
+    if (!baseSha) { _setBubble(bubble, `✗ \`drift\` — couldn’t find the fork point with \`main\`: ${(base && base.error) || 'host unreachable'}.`); return; }
+    const [mainD, branchD] = await Promise.all([
+      gitOp('diffNames', { a: baseSha, b: 'main' }),     // files main changed since the fork
+      gitOp('diffNames', { a: baseSha, b: branch }),     // files this branch changed since the fork
+    ]);
+    const split = (r) => String((r && r.ok && r.stdout) || '').split(/\r?\n/);
+    const drift = computeDrift(split(mainD), split(branchD));
+    if (!drift.length) {
+      _setBubble(bubble, `✓ no drift — \`${branch}\` and \`main\` haven’t changed the same files since the fork. Safe to \`merge\` (it'll still sync + test first).`);
+      return;
+    }
+    const flagged = drift.map((f) => isFoundationalFile(f) ? '`' + f + '` ⚠' : '`' + f + '`').join(', ');
+    _setBubble(bubble, `⚠ drift — \`main\` and this branch both changed ${flagged} since the fork. \`sync\` to fold main's changes in before you \`merge\` (⚠ = foundational/shared file). Warning only — nothing is blocked.`);
   }
 
   // v2.74.1029 — enable the bridge for a NEW dev conversation. The conversations-menu "New dev conversation"

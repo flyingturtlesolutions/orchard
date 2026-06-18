@@ -54,6 +54,8 @@ describe('gitOps.buildGitArgs — valid ops build the expected argv (acceptance 
     assert.deepEqual(buildGitArgs('revParse', { ref: 'dev/x' }).argv, ['rev-parse', 'dev/x']);
     assert.deepEqual(buildGitArgs('aheadBehind', { a: 'main', b: 'dev/x' }).argv,
       ['rev-list', '--left-right', '--count', 'main...dev/x']);
+    assert.deepEqual(buildGitArgs('diffNames', { a: 'main', b: 'dev/x' }).argv, ['diff', '--name-only', 'main...dev/x']);   // DBR-P2-7
+    assert.equal(buildGitArgs('diffNames', { a: 'a..b', b: 'x' }).ok, false);   // bad ref rejected
     assert.equal(buildGitArgs('log', { n: 9999 }).argv.at(-1), '200');   // clamped
   });
   it('write ops build argv and are flagged write:true', () => {

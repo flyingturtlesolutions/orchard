@@ -74,6 +74,7 @@ function buildGitArgs(op, params = {}) {
     case 'mergeBase':     return (validRef(params.a) && validRef(params.b)) ? ok(['merge-base', params.a, params.b]) : err('bad-ref');
     case 'aheadBehind':   return (validRef(params.a) && validRef(params.b)) ? ok(['rev-list', '--left-right', '--count', params.a + '...' + params.b]) : err('bad-ref');
     case 'diffStat':      return (validRef(params.a) && validRef(params.b)) ? ok(['diff', '--stat', params.a + '...' + params.b]) : err('bad-ref');
+    case 'diffNames':     return (validRef(params.a) && validRef(params.b)) ? ok(['diff', '--name-only', params.a + '...' + params.b]) : err('bad-ref');   // DBR-P2-7 — drift file-set intersection (§7.1)
     // ── write (W-auto, dev-branch-scoped) ──
     case 'branchCreate': {
       if (!validateBranchName(params.branch)) return err('bad-branch');
@@ -113,7 +114,7 @@ function buildGitArgs(op, params = {}) {
 // push, reset, worktree, config — they have no `case`, so buildGitArgs returns `unknown-op`. (Plain `merge` is
 // likewise absent — only the scoped `syncMain`/`mergeSquash` forms exist.)
 const ALLOWED_OPS = ['status', 'currentBranch', 'log', 'branchList', 'revParse', 'mergeBase', 'aheadBehind',
-  'diffStat', 'branchCreate', 'switch', 'switchDetach', 'commitWip',
+  'diffStat', 'diffNames', 'branchCreate', 'switch', 'switchDetach', 'commitWip',
   'syncMain', 'mergeSquash', 'commitMerge', 'branchDelete'];
 
 module.exports = { validateBranchName, validRef, validSwitchTarget, clampInt, wipMsg, commitMsg, hasConfirm, buildGitArgs, ALLOWED_OPS };
