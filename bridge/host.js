@@ -376,12 +376,12 @@ function currentBranchName() {
 const CONFIRM_TTL = 120000;                 // 2 min — a token is used immediately after the tap
 const _confirmTokens = new Map();           // token → expiry (ms since epoch)
 const GATED_GIT_OPS = new Set(['mergeSquash', 'commitMerge', 'branchDelete']);
-function mintConfirmToken() {
+function mintConfirmToken(msg) {
   const now = Date.now();
   for (const [t, exp] of _confirmTokens) if (exp < now) _confirmTokens.delete(t);   // opportunistic GC
   const token = crypto.randomBytes(18).toString('hex');
   _confirmTokens.set(token, now + CONFIRM_TTL);
-  return { v: PROTOCOL_V, type: 'git-confirm-result', token };
+  return { v: PROTOCOL_V, type: 'git-confirm-result', reqId: (msg && msg.reqId), token };   // DBR-P2-4 — echo reqId for panel correlation
 }
 function consumeConfirmToken(token) {
   if (typeof token !== 'string' || !_confirmTokens.has(token)) return false;
@@ -657,7 +657,7 @@ async function handle(msg) {
     case 'history-open': replayJournal(msg.journal); break;        // replay one journal read-only
     case 'approval-decision': writePermResp(msg); break;           // DB-3 permission relay (v2.74.1002)
     case 'git':       send(handleGit(msg)); break;                 // DBR-1 dev-branch git allowlist (§3)
-    case 'git-confirm': send(mintConfirmToken()); break;           // DBR-P2-1 — mint a one-time confirm token (§3/§6)
+    case 'git-confirm': send(mintConfirmToken(msg)); break;        // DBR-P2-1 — mint a one-time confirm token (§3/§6)
     case 'test':      runTest(msg); break;                         // DBR-P2-3 — the merge test gate (`npm test`, async)
     case 'run':       startRun(msg); break;
     default:          send({ v: PROTOCOL_V, type: 'error', code: 'unknown-type', got: msg.type });

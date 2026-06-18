@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage } from './devBridge.js';
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
@@ -128,5 +128,38 @@ describe('planMergePrepare — sync → test (1 retry) → diff sequencing', () 
   it('sync clean + still red after the retry → stop at test, BEFORE the diff (no merge)', () => {
     assert.deepEqual(planMergePrepare({ sync: 'clean', test1: 'fail', test2: 'fail' }),
       { outcome: 'stopped', stoppedAt: 'test', ranDiff: false, retried: true });
+  });
+});
+
+// DBR-P2-4 (DESIGN §6.1/§6.3) — the merge-summary + squash commit message builders.
+describe('buildMergeSummary — subject from concern/title, files from the diff-stat', () => {
+  it('prefers the concern, falls back to title, then a default', () => {
+    assert.equal(buildMergeSummary({ concern: 'drawer UI', title: 'X' }).subject, 'drawer UI');
+    assert.equal(buildMergeSummary({ title: 'export pipeline' }).subject, 'export pipeline');
+    assert.equal(buildMergeSummary({}).subject, 'merge dev branch');
+  });
+  it('splits the diff-stat into file lines + caps a long subject to one line', () => {
+    const r = buildMergeSummary({ concern: 'a\nb   c', diffStat: ' chat.js | 3 +\n Core/x.js | 1 -\n' });
+    assert.equal(r.subject.includes('\n'), false);
+    assert.deepEqual(r.files, ['chat.js | 3 +', 'Core/x.js | 1 -']);
+  });
+});
+
+describe('buildMergeCommitMessage — subject + changes + Dev-conversation trailer (§6.3)', () => {
+  it('embeds the subject, the changed files, and the conversation trailer', () => {
+    const msg = buildMergeCommitMessage({ subject: 'drawer UI', files: ['chat.js | 3 +'] }, 'conv-abc');
+    const lines = msg.split('\n');
+    assert.equal(lines[0], 'drawer UI');                       // subject first
+    assert.ok(msg.includes('Changes:') && msg.includes('chat.js | 3 +'));
+    assert.ok(msg.endsWith('Dev-conversation:conv-abc'));      // trailer last
+  });
+  it('includes a Learned line when present; defaults the subject; stays a string', () => {
+    const msg = buildMergeCommitMessage({ subject: '', learned: 'X breaks Y' }, 'c1');
+    assert.ok(msg.startsWith('merge dev branch'));
+    assert.ok(msg.includes('Learned: X breaks Y'));
+    assert.ok(msg.includes('Dev-conversation:c1'));
+  });
+  it('is robust to a nullish summary (no throw)', () => {
+    assert.ok(buildMergeCommitMessage(null, 'c2').includes('Dev-conversation:c2'));
   });
 });

@@ -130,6 +130,28 @@ export function planMergePrepare({ sync, test1, test2 } = {}) {
   return { outcome: 'stopped', stoppedAt: 'test', ranDiff: false, retried: true };                     // still red → stop
 }
 
+// DBR-P2-4 (DESIGN §6.1) — the merge-SUMMARY (deterministic v1; an LLM-rich {learned, newInvariant} can refine
+// later). Subject ← the conversation's concern (its stated scope) or title; files ← the diff-stat lines. PURE.
+export function buildMergeSummary({ concern, title, diffStat } = {}) {
+  const subject = String(concern || title || 'merge dev branch').replace(/[\r\n]+/g, ' ').trim().slice(0, 72) || 'merge dev branch';
+  const files = String(diffStat || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  return { subject, files };
+}
+
+// DBR-P2-4 (DESIGN §6.1/§6.3) — the squash-merge COMMIT MESSAGE: subject + the changed-file list + an optional
+// `Learned:` line + the `Dev-conversation:<id>` trailer (links the one squash commit back to the archived
+// conversation, since the branch's WIP history is discarded). PURE — the host commits it verbatim (it's the one
+// allowed `main` mutation). Newlines are intentional (multi-line message); NULs stripped, length capped.
+export function buildMergeCommitMessage(summary, convId) {
+  const s = summary || {};
+  const subject = (s.subject && String(s.subject).replace(/[\r\n]+/g, ' ').trim()) || 'merge dev branch';
+  const lines = [subject, ''];
+  if (Array.isArray(s.files) && s.files.length) { lines.push('Changes:'); for (const f of s.files) lines.push('  ' + String(f).trim()); lines.push(''); }
+  if (s.learned) lines.push('Learned: ' + String(s.learned).replace(/[\r\n]+/g, ' ').trim(), '');
+  lines.push(`Dev-conversation:${String(convId || '').trim()}`);
+  return lines.join('\n').replace(/\0/g, '').replace(/\n{3,}/g, '\n\n').trim().slice(0, 4000);
+}
+
 /**
  * Factory — chat.js hands in its rendering helpers (avoids any import cycle into the panel).
  * @param {{appendMessage: Function, setMessageBody: Function, mkBtn: Function, persistMessage?: Function, decorateBubble?: Function, renderMarkdown?: Function, wireCodeCopyButtons?: Function}} deps
@@ -412,11 +434,27 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     });
   }
 
+  // DBR-P2-4 — mint a one-time CONFIRM TOKEN for a gated converge op. Called by the panel only AFTER the human
+  // taps the merge-confirm button; the host returns a fresh single-use nonce the gated op then carries (P2-1).
+  let _confirmSeq = 0;
+  const _confirmPending = new Map();
+  function hostConfirmToken() {
+    return new Promise((resolve) => {
+      const reqId = 'c' + (++_confirmSeq);
+      _confirmPending.set(reqId, resolve);
+      const done = (r) => { if (_confirmPending.has(reqId)) { _confirmPending.delete(reqId); resolve(r); } };
+      try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'git-confirm', reqId }); }
+      catch (e) { done({ token: null, error: 'host unreachable: ' + ((e && e.message) || e) }); return; }
+      setTimeout(() => done({ token: null, error: 'confirm-token mint timed out' }), 15000);
+    });
+  }
+
   function onHostMsg(m) {
     if (!m || m.v !== PROTOCOL_V) return;
     switch (m.type) {
       case 'git-result': { const resolve = _gitPending.get(m.reqId); if (resolve) { _gitPending.delete(m.reqId); resolve(m); } break; }   // v2.74.1034 (DBR-2)
       case 'test-result': { const resolve = _testPending.get(m.reqId); if (resolve) { _testPending.delete(m.reqId); resolve(m); } break; }   // DBR-P2-3
+      case 'git-confirm-result': { const resolve = _confirmPending.get(m.reqId); if (resolve) { _confirmPending.delete(m.reqId); resolve(m); } break; }   // DBR-P2-4
       case 'preflight':
         if (!m.ok) { endRun(`✗ preflight failed: ${m.error}`); break; }
         if (run && run.pendingPayload) { const p = run.pendingPayload; run.pendingPayload = null; port.postMessage(p); _emit({ kind: 'meta', text: `claude ${m.claudeVersion} · ${m.repoRoot}` }); }
@@ -1190,10 +1228,47 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     if (!t.ok) {
       _setBubble(bubble, `✗ \`merge\` stopped — tests still red after a retry${t.code != null ? ` (exit ${t.code})` : ''}. No merge; \`main\` is untouched.${t.tail ? '\n```\n' + t.tail + '\n```' : ''}`); return;
     }
-    // 4) diff preview — the net changes that would land on main
+    // 4) diff preview + the LAND confirm (P2-4)
     const diff = await gitOp('diffStat', { a: 'main', b: branch });
     const stat = (diff && diff.ok && String(diff.stdout || '').trim()) || '(no file changes vs main)';
-    _setBubble(bubble, `✓ \`${branch}\` is synced with \`main\` + green. Changes that would land:\n\`\`\`\n${stat}\n\`\`\`\nReview, then confirm to land — the squash-merge + land confirm is **P2-4** (\`main\` is still untouched).`);
+    const summary = buildMergeSummary({ concern: conv.concern, title: conv.title, diffStat: (diff && diff.ok && diff.stdout) || '' });
+    _setBubble(bubble, `✓ \`${branch}\` is synced with \`main\` + green. This will squash-merge it onto \`main\` as ONE commit:\n\n**${summary.subject}**\n\`\`\`\n${stat}\n\`\`\`\n\`main\` is mutated **locally only** — push stays manual (\`cp\`). Confirm to land:`);
+    // append confirm / cancel buttons — the closure captures the prepared {branch, summary} (no stale state).
+    try {
+      const actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;gap:8px;margin-top:8px';
+      const go = mkBtn('Confirm land ▸', () => { try { actions.remove(); } catch { /* */ } _mergeLand(convId, { branch, summary }); });
+      const no = mkBtn('Cancel', () => { try { actions.remove(); } catch { /* */ } devBubble(`✗ merge cancelled — \`${branch}\` is synced + green but NOT landed. \`main\` is untouched.`); });
+      actions.appendChild(go); actions.appendChild(no);
+      bubble.bodyEl.appendChild(actions);
+    } catch { /* no buttons (older host wiring) → re-run `merge` */ }
+  }
+
+  // DBR-P2-4 (DESIGN §6/§6.1/§6.3) — the merge LAND, fired by the human's confirm tap. Squash-merges the branch
+  // onto `main` and commits with the merge-summary + a `Dev-conversation:<id>` trailer (the host's gated ops, each
+  // carrying a freshly-minted confirm token — P2-1). LOCAL-ONLY: push stays manual (§6 step 7), so a bad land is a
+  // local `main` commit the user can inspect + `git reset`/`merge --abort` before pushing. Marks the conversation
+  // merged (archived). NB: no P2-5 freshness re-check yet — single-tree serial makes an out-of-band race unlikely.
+  async function _mergeLand(convId, { branch, summary }) {
+    const bubble = devBubble(`↻ landing \`${branch}\` → \`main\`…`);
+    // 1) switch the loaded tree to main (the host's mergeSquash/commitMerge require current === main)
+    const sw = await gitOp('switch', { branch: 'main' });
+    if (!sw || !sw.ok) { _setBubble(bubble, `✗ land — couldn’t switch to \`main\`: ${(sw && sw.error) || 'host unreachable'}. \`main\` is unchanged.`); return; }
+    // 2) squash-merge the branch onto main (gated — fresh token)
+    const tok1 = await hostConfirmToken();
+    if (!tok1 || !tok1.token) { _setBubble(bubble, `✗ land — couldn’t mint a confirm token: ${(tok1 && tok1.error) || '?'}. \`main\` is unchanged.`); return; }
+    const sq = await gitOp('mergeSquash', { branch, confirmToken: tok1.token });
+    if (!sq || !sq.ok) { _setBubble(bubble, `✗ land — squash-merge failed: ${(sq && sq.error) || '?'}. Check \`git status\` on \`main\` (you may need \`git merge --abort\`).`); return; }
+    // 3) commit the staged squash on main (gated — fresh token) with the summary + Dev-conversation trailer
+    const tok2 = await hostConfirmToken();
+    if (!tok2 || !tok2.token) { _setBubble(bubble, `✗ land — couldn’t mint the commit token. The squash is STAGED on \`main\` but not committed — \`git commit\` or \`git reset --hard\` to back out.`); return; }
+    const cm = await gitOp('commitMerge', { message: buildMergeCommitMessage(summary, convId), confirmToken: tok2.token });
+    if (!cm || !cm.ok) { _setBubble(bubble, `✗ land — commit failed: ${(cm && cm.error) || '?'}. The squash is staged on \`main\` — \`git commit\` or \`git reset --hard\` to back out.`); return; }
+    // 4) record the merge + archive the conversation (DESIGN §6.1)
+    const head = await gitOp('revParse', { ref: 'HEAD' });
+    const mergeCommit = String((head && head.ok && head.stdout) || '').trim();
+    try { await ConversationStore.patchMeta(convId, { status: 'merged', mergedAt: Date.now(), mergeCommit }); } catch { /* archive is best-effort */ }
+    _setBubble(bubble, `✓ merged \`${branch}\` → \`main\` as \`${mergeCommit.slice(0, 7) || '?'}\` (one squash commit). This conversation is archived (merged); the loaded tree is on \`main\`. **Push stays manual** — run \`cp\` when ready to publish.`);
   }
 
   // v2.74.1029 — enable the bridge for a NEW dev conversation. The conversations-menu "New dev conversation"
