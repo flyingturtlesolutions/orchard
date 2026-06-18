@@ -185,7 +185,7 @@ export const ConversationStore = {
    * @param {{ title?: string }} [init]
    * @returns {Promise<Conversation>}
    */
-  async create({ title = 'New conversation', kind = 'agent', branch = null, concern = null, sessionId = null, status = 'active' } = {}) {
+  async create({ title = 'New conversation', kind = 'agent', branch = null, concern = null, sessionId = null, status = 'active', seed = null } = {}) {
     const id = crypto.randomUUID();
     const now = Date.now();
     // v2.74.1029 — `kind`: 'agent' (the website-operating assistant, the default) or 'dev' (a Claude Code
@@ -200,6 +200,7 @@ export const ConversationStore = {
       conv.concern = concern;
       conv.sessionId = sessionId;
       conv.status = (status === 'merged' || status === 'abandoned') ? status : 'active';
+      if (seed != null) conv.seed = String(seed);   // v2.74.1053 (DBR-P3-1) — a split-seeded conversation: chat.js pre-fills the input from this on first open, then clears it
     }
     await chrome.storage.local.set({ [convKey(id)]: conv });
     const entry = { id, title, kind: k, updatedAt: now };
@@ -220,7 +221,8 @@ export const ConversationStore = {
     const conv = await ConversationStore.load(id);
     if (!conv) return null;
     // v2.74.1045 (DBR-P2-2) — `syncedMain`: the `main` commit this branch last synced onto (feeds the P2-5 merge freshness check).
-    for (const k of ['branch', 'concern', 'sessionId', 'status', 'mergedAt', 'mergeCommit', 'title', 'syncedMain']) {
+    // v2.74.1053 (DBR-P3-1) — `seed`: the split-seed prompt; cleared (→ null) by chat.js once pre-filled into the input.
+    for (const k of ['branch', 'concern', 'sessionId', 'status', 'mergedAt', 'mergeCommit', 'title', 'syncedMain', 'seed']) {
       if (k in fields) conv[k] = fields[k];
     }
     conv.updatedAt = Date.now();

@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, isSplit, splitSlug, buildSeedPrompt } from './devBridge.js';
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
@@ -222,5 +222,26 @@ describe('DBR-P2-7 drift detectors', () => {
     assert.deepEqual(computeDrift([], ['a']), []);                 // main changed nothing
     assert.deepEqual(computeDrift(['a'], []), []);                 // branch changed nothing
     assert.deepEqual(computeDrift(null, null), []);               // robust to nullish
+  });
+});
+
+// DBR-P3-1 (DESIGN §8.1) — the split-seeding helpers.
+describe('DBR-P3-1 split helpers', () => {
+  const DEV_RE = /^dev\/[A-Za-z0-9][A-Za-z0-9._-]*$/;   // mirrors gitOps.validateBranchName's shape
+  it('isSplit fires for `split: <concern>` (prefix), not a bare task mentioning split', () => {
+    for (const s of ['split: extract the date util', 'SPLIT: x', '  split:  y']) assert.equal(isSplit(s), true, `fire: ${JSON.stringify(s)}`);
+    for (const s of ['split the panel into two', 'split:', 'split', 'splitter', '', null]) assert.equal(isSplit(s), false, `no: ${String(s)}`);
+  });
+  it('splitSlug yields a valid dev/<slug>-<shortid> name, robust to junk concerns', () => {
+    assert.match(splitSlug('Fix the Drawer Animation!', 'a1b2c3d4'), DEV_RE);
+    assert.equal(splitSlug('fix the drawer', 'a1b2c3d4'), 'dev/fix-the-drawer-a1b2c3d4');
+    assert.match(splitSlug('!!!', 'a1b2c3d4'), DEV_RE);                  // empty base → 'split'
+    assert.equal(splitSlug('!!!', '').startsWith('dev/split-'), true);  // empty shortid → 'x'
+    assert.match(splitSlug('x'.repeat(80), 'deadbeef'), DEV_RE);        // capped, still valid
+  });
+  it('buildSeedPrompt embeds the concern + an optional parent provenance line', () => {
+    assert.equal(buildSeedPrompt({ concern: 'extract X' }), 'extract X');
+    assert.ok(buildSeedPrompt({ concern: 'extract X', parentConcern: 'drawer UI' }).includes('Split out from: drawer UI'));
+    assert.equal(buildSeedPrompt({}), 'the split-out work');            // default
   });
 });

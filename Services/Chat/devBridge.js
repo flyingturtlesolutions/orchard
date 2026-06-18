@@ -185,6 +185,28 @@ export function computeDrift(mainFiles, branchFiles) {
   return out;
 }
 
+// DBR-P3-1 (DESIGN §8.1) — the manual `split:` corrective verb: extract out-of-scope work into its own dev branch
+// + conversation. Prefix form (`split: <concern>`) — unambiguous vs a coding task that merely mentions "split".
+// PURE + exported.
+export function isSplit(text) {
+  return /^split:\s*\S/i.test(String(text == null ? '' : text).trim());
+}
+
+// DBR-P3-1 — a collision-resistant `dev/<slug>-<shortid>` branch name from a concern. PURE (the shortid is passed
+// in — the caller mints it). Always `validateBranchName`-valid: starts alphanumeric, only [A-Za-z0-9._-].
+export function splitSlug(concern, shortid) {
+  const base = String(concern == null ? '' : concern).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32).replace(/-+$/, '') || 'split';
+  const sid = String(shortid == null ? '' : shortid).replace(/[^a-z0-9]/gi, '').slice(0, 8) || 'x';
+  return `dev/${base}-${sid}`;
+}
+
+// DBR-P3-1 (DESIGN §8.1) — the seed prompt for a split-out branch (the deterministic default; the `propose_split`
+// tool lets Claude write a richer one in P3-3). Embeds the concern + a provenance line to the parent. PURE.
+export function buildSeedPrompt({ concern, parentConcern } = {}) {
+  const c = String(concern == null ? '' : concern).replace(/\s+/g, ' ').trim() || 'the split-out work';
+  return parentConcern ? `${c}\n\n(Split out from: ${String(parentConcern).replace(/\s+/g, ' ').trim()}.)` : c;
+}
+
 // DBR-P2-4 (DESIGN §6.1) — the merge-SUMMARY (deterministic v1; an LLM-rich {learned, newInvariant} can refine
 // later). Subject ← the conversation's concern (its stated scope) or title; files ← the diff-stat lines. PURE.
 export function buildMergeSummary({ concern, title, diffStat } = {}) {
@@ -933,6 +955,12 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       await _driftCheck(convId);
       return true;
     }
+    // DBR-P3-1 (v2.74.1053, DESIGN §8.1) — `split: <concern>`: extract out-of-scope work into its own seeded branch.
+    if (devConv && isSplit(t)) {
+      if (!skipEcho) appendMessage({ role: 'user', body: t });
+      await _split(convId, t);
+      return true;
+    }
     // Inside a dev conversation, bare input IS a dev command: a standalone log verb (gl/gc/gch) or a
     // `bug:`/`dev:` prefix is taken verbatim; anything else (a sub-verb like `pause`/`history`/`model …`, or
     // a plain task) is normalized to the `dev: …` form so the existing branch table handles it unchanged —
@@ -1438,6 +1466,27 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     }
     const flagged = drift.map((f) => isFoundationalFile(f) ? '`' + f + '` ⚠' : '`' + f + '`').join(', ');
     _setBubble(bubble, `⚠ drift — \`main\` and this branch both changed ${flagged} since the fork. \`sync\` to fold main's changes in before you \`merge\` (⚠ = foundational/shared file). Warning only — nothing is blocked.`);
+  }
+
+  // DBR-P3-1 (DESIGN §8.1) — `split: <concern>`: the manual corrective split. The PANEL is the actor (§2.1) — mint
+  // a branch `dev/<slug>` OFF MAIN (DBR-1 branchCreate; a foundational split merges to main independently) + a
+  // kind:'dev' conversation seeded SEED-AND-HOLD (the seed rides the record; chat.js pre-fills the composer on
+  // first open, NOT sent). The user opens it from the drawer. (The `propose_split` tool — Claude-initiated — is P3-3.)
+  async function _split(convId, rawText) {
+    const concern = String(rawText || '').replace(/^split:\s*/i, '').replace(/\s+/g, ' ').trim();
+    if (!concern) { devBubble('✗ `split:` — give a concern, e.g. `split: extract the date util`.'); return; }
+    let parent = null;
+    try { parent = convId ? await ConversationStore.load(convId) : null; } catch { parent = null; }
+    const bubble = devBubble(`↻ splitting out \`${concern}\`…`);
+    const shortid = crypto.randomUUID().replace(/-/g, '').slice(0, 8);
+    const branch = splitSlug(concern, shortid);
+    const br = await gitOp('branchCreate', { branch, base: 'main' });
+    if (!br || !br.ok) { _setBubble(bubble, `✗ \`split:\` — couldn’t create \`${branch}\`: ${(br && br.error) || 'host unreachable'}.`); return; }
+    const seed = buildSeedPrompt({ concern, parentConcern: parent && parent.concern });
+    let conv = null;
+    try { conv = await ConversationStore.create({ kind: 'dev', title: concern.slice(0, 60), branch, concern, seed }); } catch { conv = null; }
+    if (!conv) { _setBubble(bubble, `✗ \`split:\` — created \`${branch}\` but couldn’t create the conversation. Make a dev conversation on that branch manually.`); return; }
+    _setBubble(bubble, `✓ split — created \`${branch}\` (off \`main\`) + a new dev conversation **${concern.slice(0, 60)}**. Open the conversations drawer (☰) and select it: its seed is **pre-filled** (review + send). Merge that branch first, then \`sync\` this one onto it.`);
   }
 
   // v2.74.1029 — enable the bridge for a NEW dev conversation. The conversations-menu "New dev conversation"

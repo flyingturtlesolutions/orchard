@@ -4425,6 +4425,13 @@ async function _rehydrateConversation(conv) {
   _cancelOpenParamForms();
   _currentConversationId = conv.id;
   _currentConversationKind = conv.kind === 'dev' ? 'dev' : 'agent';   // v2.74.1029 — restore routing kind on switch
+  // DBR-P3-1 (v2.74.1053) — a split-seeded dev conversation: pre-fill the composer with its seed the first time
+  // it's opened (SEED-AND-HOLD — not sent; the human reviews + presses enter), then clear the seed so reopening
+  // doesn't re-fill it. The composer (#chat-input) is visible even in the empty-dev state below.
+  if (_currentConversationKind === 'dev' && conv.seed) {
+    try { const ta = $('chat-input'); if (ta) { ta.value = conv.seed; ta.dispatchEvent(new Event('input', { bubbles: true })); ta.focus(); } } catch { /* */ }
+    try { await ConversationStore.patchMeta(conv.id, { seed: null }); } catch { /* */ }
+  }
   // v2.74.1029 — an EMPTY dev conversation (created, not yet used, reopened from history) shows the dev hint
   // instead of an empty message list. Non-empty ones fall through to the normal rehydrate below.
   if (_currentConversationKind === 'dev' && !(conv.messages || []).length) { _showDevEmptyState(); return; }
