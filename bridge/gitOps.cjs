@@ -9,8 +9,11 @@
 //
 // TRUST (DESIGN §3, signed off 2026-06-17): Claude Code never runs git — this is host-side. The host refuses
 // any WRITE whose target isn't a `dev/…` branch (commit's current-branch guard is enforced host-side, since
-// `commit` carries no branch arg). Phase-1 ops ONLY — no merge / rebase / push / worktree (those are Phases
-// 2–4). buildGitArgs returns argv for the allowed ops and rejects everything else.
+// `commit` carries no branch arg). Phase-1 ops + the Phase-2 W-GATED converge ops (`syncMain`/`mergeSquash`/
+// `commitMerge`/`branchDelete` — DESIGN §6/§7). The converge ops that mutate `main` or destroy a branch carry a
+// one-time CONFIRM TOKEN the panel supplies only after the human taps confirm (presence checked here, value
+// checked host-side). Still FORBIDDEN by construction: rebase / push / reset / worktree / config (no `case`).
+// buildGitArgs returns argv for the allowed ops and rejects everything else.
 
 // A dev branch: `dev/` + a segment starting alphanumeric, then [A-Za-z0-9._-]. No `..`, no metacharacters.
 const DEV_RE = /^dev\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -43,6 +46,17 @@ function wipMsg(m) {
   if (typeof m !== 'string' || !m.trim()) return base;
   return (base + ': ' + m.replace(/[\r\n]+/g, ' ').trim()).slice(0, 120);
 }
+// DBR-P2-1 (DESIGN §6.3) — the merge-squash commit message: the multi-line merge-summary becomes the commit
+// body, so (UNLIKE wipMsg) KEEP newlines (subject / body / `Dev-conversation:` trailer); strip only NULs; cap
+// length so a runaway summary can't bloat the commit.
+function commitMsg(m) {
+  const s = (typeof m === 'string' && m.replace(/\0/g, '').trim()) || 'Merge dev branch';
+  return s.slice(0, 4000);
+}
+// DBR-P2-1 (DESIGN §3) — the W-gated converge ops carry a one-time confirm token the PANEL supplies ONLY after
+// the human taps confirm (Claude's allowlist is git-free → it cannot reach these). The pure layer enforces token
+// PRESENCE; the host validates its VALUE against an issued single-use nonce.
+function hasConfirm(p) { return typeof p.confirmToken === 'string' && p.confirmToken.length > 0; }
 
 const ok = (argv, write = false) => ({ ok: true, argv, write });
 const err = (error) => ({ ok: false, error });
@@ -69,13 +83,37 @@ function buildGitArgs(op, params = {}) {
     case 'switch':        return validSwitchTarget(params.branch) ? ok(['switch', params.branch], true) : err('bad-target');
     case 'switchDetach':  return validRef(params.ref) ? ok(['switch', '--detach', params.ref], true) : err('bad-ref');
     case 'commitWip':     return ok(['commit', '--allow-empty', '-am', wipMsg(params.message)], true);
+    // ── Phase-2 W-gated converge ops (DESIGN §6/§7) ──
+    // `sync`: merge `main` INTO the current branch (catch up). The host guards that current is a `dev/…` branch
+    // — never merge into `main`. NO confirm token: the `sync` verb is itself the human gesture and it touches
+    // only the branch (not `main`). `--no-edit` so a non-ff merge never blocks on the editor in the shell-free spawn.
+    case 'syncMain':      return ok(['merge', '--no-edit', 'main'], true);
+    // `merge` land (two staged ops the host runs on `main`, after switching there): squash the dev branch, then
+    // commit. BOTH are CONFIRM-GATED (they mutate `main` — the single allowed mutation, §3) and take a `dev/…` SOURCE.
+    case 'mergeSquash': {
+      if (!validateBranchName(params.branch)) return err('bad-branch');   // (c) source must be dev/…
+      if (!hasConfirm(params)) return err('needs-confirm');               // (b) gated
+      return ok(['merge', '--squash', params.branch], true);
+    }
+    case 'commitMerge': {
+      if (!hasConfirm(params)) return err('needs-confirm');               // (b) gated — the ONE commit allowed on main
+      return ok(['commit', '-m', commitMsg(params.message)], true);
+    }
+    // abandon (hard): delete a dev branch — gated (irreversible) + `dev/…` only.
+    case 'branchDelete': {
+      if (!validateBranchName(params.branch)) return err('bad-branch');
+      if (!hasConfirm(params)) return err('needs-confirm');
+      return ok(['branch', '-D', params.branch], true);
+    }
     default:              return err('unknown-op');
   }
 }
 
-// The Phase-1 allowlist (read + W-auto). FORBIDDEN here by construction: merge, rebase, push, reset, worktree,
-// config — they have no `case`, so buildGitArgs returns `unknown-op`.
+// The allowlist (read + W-auto + the Phase-2 W-gated converge ops). FORBIDDEN here by construction: rebase,
+// push, reset, worktree, config — they have no `case`, so buildGitArgs returns `unknown-op`. (Plain `merge` is
+// likewise absent — only the scoped `syncMain`/`mergeSquash` forms exist.)
 const ALLOWED_OPS = ['status', 'currentBranch', 'log', 'branchList', 'revParse', 'mergeBase', 'aheadBehind',
-  'diffStat', 'branchCreate', 'switch', 'switchDetach', 'commitWip'];
+  'diffStat', 'branchCreate', 'switch', 'switchDetach', 'commitWip',
+  'syncMain', 'mergeSquash', 'commitMerge', 'branchDelete'];
 
-module.exports = { validateBranchName, validRef, validSwitchTarget, clampInt, wipMsg, buildGitArgs, ALLOWED_OPS };
+module.exports = { validateBranchName, validRef, validSwitchTarget, clampInt, wipMsg, commitMsg, hasConfirm, buildGitArgs, ALLOWED_OPS };

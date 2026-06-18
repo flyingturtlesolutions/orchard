@@ -369,25 +369,57 @@ function currentBranchName() {
   const r = runGit(['rev-parse', '--abbrev-ref', 'HEAD']);
   return r.code === 0 ? r.stdout : null;
 }
+// DBR-P2-1 (DESIGN §3/§6) — one-time CONFIRM TOKENS for the W-gated converge ops (mergeSquash / commitMerge /
+// branchDelete). The PANEL mints one via {type:'git-confirm'} ONLY after the human taps confirm in chat, then
+// echoes it on the gated op; the host validates + CONSUMES it (single-use, short TTL). Claude can't reach this
+// (its allowlist is git-free), so a gated op cannot run without a fresh human confirm routed through the panel.
+const CONFIRM_TTL = 120000;                 // 2 min — a token is used immediately after the tap
+const _confirmTokens = new Map();           // token → expiry (ms since epoch)
+const GATED_GIT_OPS = new Set(['mergeSquash', 'commitMerge', 'branchDelete']);
+function mintConfirmToken() {
+  const now = Date.now();
+  for (const [t, exp] of _confirmTokens) if (exp < now) _confirmTokens.delete(t);   // opportunistic GC
+  const token = crypto.randomBytes(18).toString('hex');
+  _confirmTokens.set(token, now + CONFIRM_TTL);
+  return { v: PROTOCOL_V, type: 'git-confirm-result', token };
+}
+function consumeConfirmToken(token) {
+  if (typeof token !== 'string' || !_confirmTokens.has(token)) return false;
+  const exp = _confirmTokens.get(token);
+  _confirmTokens.delete(token);             // single-use — delete whether or not it had expired
+  return exp >= Date.now();
+}
+
 function handleGit(msg) {
   const op = msg && msg.op;
-  const built = gitOps.buildGitArgs(op, (msg && msg.params) || {});
+  const params = (msg && msg.params) || {};
+  const built = gitOps.buildGitArgs(op, params);
+  const refuse = (error) => { log(`git: REFUSED ${op} — ${error}`); return { v: PROTOCOL_V, type: 'git-result', op, reqId: (msg && msg.reqId), ok: false, error }; };
   if (!built.ok) return { v: PROTOCOL_V, type: 'git-result', op, reqId: (msg && msg.reqId), ok: false, error: built.error };
-  if (op === 'commitWip') {                 // write guard: a commit may only land on a dev/… branch, never main
+  // ── write guards (current-branch). `commitWip`/`syncMain` may only run ON a dev/… branch (never main);
+  //    the merge LAND (`mergeSquash`/`commitMerge`) may only run ON main (the panel switches there first). ──
+  if (op === 'commitWip' || op === 'syncMain') {
     const cur = currentBranchName();
-    if (!cur || !gitOps.validateBranchName(cur)) {
-      log(`git: REFUSED commit — current branch '${cur}' is not a dev/… branch`);
-      return { v: PROTOCOL_V, type: 'git-result', op, reqId: (msg && msg.reqId), ok: false, error: 'commit-guard: not on a dev branch' };
-    }
+    if (!cur || !gitOps.validateBranchName(cur)) return refuse(`${op === 'syncMain' ? 'sync' : 'commit'}-guard: not on a dev branch`);
   }
+  if (op === 'mergeSquash' || op === 'commitMerge') {
+    if (currentBranchName() !== 'main') return refuse('merge-guard: not on main');
+  }
+  // ── confirm-token gate LAST (so a guard miss above doesn't burn the one-time token). ──
+  if (GATED_GIT_OPS.has(op) && !consumeConfirmToken(params.confirmToken)) return refuse('confirm-required');
   const r = runGit(built.argv);
   const ok = r.code === 0 && !r.err;
   log(`DEVBR ▸ git ${op} [${built.argv.join(' ')}] → ${ok ? 'ok' : `FAIL(${r.code})`}${r.err ? ' ' + r.err : ''}`);
   // DBR-4 (v2.74.1036, DESIGN §4) — the panel flags the `lt` switch with params.lt so the live-test action gets
   // its own decision marker (the underlying git op also logs DEVBR ▸ above). LT ▸ is in _DECISION_RE (INVARIANT #1).
-  if (op === 'switch' && msg && msg.params && msg.params.lt) {
-    log(`LT ▸ live-test → switch ${msg.params.branch} → ${ok ? 'reloading' : `FAIL(${r.code})`}`);
+  if (op === 'switch' && params.lt) {
+    log(`LT ▸ live-test → switch ${params.branch} → ${ok ? 'reloading' : `FAIL(${r.code})`}`);
   }
+  // DBR-P2-1 (DESIGN §6/§7) — decision markers for the converge ops (all registered in _DECISION_RE, INVARIANT #1).
+  if (op === 'syncMain')     log(`SYNC ▸ merge main into current branch → ${ok ? 'synced' : `FAIL(${r.code})`}`);
+  if (op === 'mergeSquash')  log(`MERGE ▸ squash ${params.branch} onto main → ${ok ? 'staged' : `FAIL(${r.code})`}`);
+  if (op === 'commitMerge')  log(`MERGE ▸ commit squash-merge on main → ${ok ? 'landed' : `FAIL(${r.code})`}`);
+  if (op === 'branchDelete') log(`ABANDON ▸ delete branch ${params.branch} → ${ok ? 'deleted' : `FAIL(${r.code})`}`);
   return { v: PROTOCOL_V, type: 'git-result', op, reqId: (msg && msg.reqId), ok, code: r.code, stdout: r.stdout, ...(ok ? {} : { stderr: r.stderr, error: r.err || r.stderr || 'git failed' }) };
 }
 
@@ -600,6 +632,7 @@ async function handle(msg) {
     case 'history-open': replayJournal(msg.journal); break;        // replay one journal read-only
     case 'approval-decision': writePermResp(msg); break;           // DB-3 permission relay (v2.74.1002)
     case 'git':       send(handleGit(msg)); break;                 // DBR-1 dev-branch git allowlist (§3)
+    case 'git-confirm': send(mintConfirmToken()); break;           // DBR-P2-1 — mint a one-time confirm token (§3/§6)
     case 'run':       startRun(msg); break;
     default:          send({ v: PROTOCOL_V, type: 'error', code: 'unknown-type', got: msg.type });
   }
