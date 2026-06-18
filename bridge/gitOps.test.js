@@ -6,7 +6,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import gitOps from './gitOps.cjs';
-const { validateBranchName, validRef, validSwitchTarget, buildGitArgs, ALLOWED_OPS, commitMsg, hasConfirm } = gitOps;
+const { validateBranchName, validRef, validSwitchTarget, validWorktreePath, buildGitArgs, ALLOWED_OPS, commitMsg, hasConfirm } = gitOps;
 
 describe('gitOps.validateBranchName — only well-formed dev/… branches', () => {
   it('accepts dev/… with safe chars', () => {
@@ -143,5 +143,34 @@ describe('gitOps Phase-2 converge ops — syncMain / mergeSquash / commitMerge /
     assert.equal(hasConfirm({ confirmToken: 'x' }), true);
     assert.equal(hasConfirm({ confirmToken: '' }), false);
     assert.equal(hasConfirm({}), false);
+  });
+});
+
+// DBR-P4-1 (§10/U6) — the worktree lifecycle ops + the `.wt/`-root path scoping.
+describe('gitOps worktree lifecycle (DBR-P4-1)', () => {
+  it('validWorktreePath accepts a single safe `.wt/` segment, rejects escapes', () => {
+    for (const p of ['.wt/preview', '.wt/r1', '.wt/a-b_c.2']) assert.equal(validWorktreePath(p), true, `accept ${p}`);
+    for (const p of ['.wt', '.wt/', '.wt/../etc', '.wt/a/b', '/abs/.wt/x', 'wt/x', '../x', '.wt/-leading', '.wt/a;rm', '']) {
+      assert.equal(validWorktreePath(p), false, `reject ${JSON.stringify(p)}`);
+    }
+  });
+  it('worktreeAdd builds argv for a dev/… branch OR a detached preview tip; rejects bad path/branch/ref', () => {
+    assert.deepEqual(buildGitArgs('worktreeAdd', { path: '.wt/r1', branch: 'dev/x' }), { ok: true, argv: ['worktree', 'add', '.wt/r1', 'dev/x'], write: true });
+    assert.deepEqual(buildGitArgs('worktreeAdd', { path: '.wt/preview', detach: 'dev/x' }), { ok: true, argv: ['worktree', 'add', '--detach', '.wt/preview', 'dev/x'], write: true });
+    assert.equal(buildGitArgs('worktreeAdd', { path: '/etc', branch: 'dev/x' }).ok, false);      // path escapes .wt/
+    assert.equal(buildGitArgs('worktreeAdd', { path: '.wt/r1', branch: 'main' }).ok, false);      // not a dev/… branch
+    assert.equal(buildGitArgs('worktreeAdd', { path: '.wt/r1', detach: 'a;b' }).ok, false);       // bad ref
+    assert.equal(buildGitArgs('worktreeAdd', { path: '.wt/r1' }).ok, false);                      // no branch, no detach
+  });
+  it('worktreeRemove (+optional --force), List, Prune build the right argv', () => {
+    assert.deepEqual(buildGitArgs('worktreeRemove', { path: '.wt/r1' }), { ok: true, argv: ['worktree', 'remove', '.wt/r1'], write: true });
+    assert.deepEqual(buildGitArgs('worktreeRemove', { path: '.wt/r1', force: true }), { ok: true, argv: ['worktree', 'remove', '--force', '.wt/r1'], write: true });
+    assert.equal(buildGitArgs('worktreeRemove', { path: '../x' }).ok, false);
+    assert.deepEqual(buildGitArgs('worktreeList', {}), { ok: true, argv: ['worktree', 'list', '--porcelain'], write: false });
+    assert.deepEqual(buildGitArgs('worktreePrune', {}), { ok: true, argv: ['worktree', 'prune'], write: true });
+  });
+  it('the four worktree ops are on the ALLOWED_OPS allowlist; push/rebase/reset still are not', () => {
+    for (const op of ['worktreeAdd', 'worktreeRemove', 'worktreeList', 'worktreePrune']) assert.ok(ALLOWED_OPS.includes(op), op);
+    for (const op of ['push', 'rebase', 'reset', 'config']) assert.equal(buildGitArgs(op, {}).error, 'unknown-op');
   });
 });

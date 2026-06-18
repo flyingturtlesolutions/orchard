@@ -34,6 +34,9 @@ const PROTOCOL_V = 1;
 const REPO = path.resolve(__dirname, '..');
 const BRIDGE_DIR = path.join(REPO, 'logs', 'bridge');
 const RUN_DIR = path.join(REPO, 'logs', 'run');
+// DBR-P4-1 (§10/U6) — the host-managed worktree root (git-ignored). Every `worktree add` path is constrained to a
+// single safe segment UNDER this (gitOps WT_RE) AND re-checked here to resolve inside it (belt-and-braces).
+const WT_DIR = path.join(REPO, '.wt');
 const LOCK = path.join(BRIDGE_DIR, 'active.json');
 const HOST_LOG = path.join(BRIDGE_DIR, 'host.log');
 const MAX_IN_FRAME = 4 * 1024 * 1024;     // Chrome→host frames may carry a trace attachment (we cap at 2MB)
@@ -102,7 +105,7 @@ function modelFlag(alias) {
   return id ? ` --model ${id}` : '';   // id comes from the frozen table — safe to interpolate
 }
 
-for (const d of [BRIDGE_DIR, RUN_DIR]) { try { fs.mkdirSync(d, { recursive: true }); } catch { /* */ } }
+for (const d of [BRIDGE_DIR, RUN_DIR, WT_DIR]) { try { fs.mkdirSync(d, { recursive: true }); } catch { /* */ } }
 // DB-2 (v2.74.988) — (re)write the scoped-Bash allowlist the run loads via --settings. Static content;
 // rewritten on every host launch so a deleted/edited file self-heals. permissions.allow UNIONS with the
 // CLI --allowedTools, adding exactly `npm test …` and `node …` — still no git, no network, no plain shell.
@@ -423,6 +426,12 @@ function handleGit(msg) {
   }
   // ── confirm-token gate LAST (so a guard miss above doesn't burn the one-time token). ──
   if (GATED_GIT_OPS.has(op) && !consumeConfirmToken(params.confirmToken)) return refuse('confirm-required');
+  // ── DBR-P4-1 worktree path re-check (belt-and-braces beyond gitOps WT_RE): the resolved path must live under the
+  //    host-managed `.wt/` root, never an arbitrary path — even if the regex were somehow bypassed. ──
+  if (op === 'worktreeAdd' || op === 'worktreeRemove') {
+    const resolved = path.resolve(REPO, String(params.path || ''));
+    if (!(resolved === WT_DIR || resolved.startsWith(WT_DIR + path.sep))) return refuse('worktree-guard: path escapes the managed root');
+  }
   const r = runGit(built.argv);
   const ok = r.code === 0 && !r.err;
   log(`DEVBR ▸ git ${op} [${built.argv.join(' ')}] → ${ok ? 'ok' : `FAIL(${r.code})`}${r.err ? ' ' + r.err : ''}`);
@@ -436,6 +445,10 @@ function handleGit(msg) {
   if (op === 'mergeSquash')  log(`MERGE ▸ squash ${params.branch} onto main → ${ok ? 'staged' : `FAIL(${r.code})`}`);
   if (op === 'commitMerge')  log(`MERGE ▸ commit squash-merge on main → ${ok ? 'landed' : `FAIL(${r.code})`}`);
   if (op === 'branchDelete') log(`ABANDON ▸ delete branch ${params.branch} → ${ok ? 'deleted' : `FAIL(${r.code})`}`);
+  // DBR-P4-1 (§10/U6) — worktree lifecycle markers (registered in _DECISION_RE, INVARIANT #1).
+  if (op === 'worktreeAdd')    log(`WORKTREE ▸ add ${params.path} → ${ok ? 'created' : `FAIL(${r.code})`}`);
+  if (op === 'worktreeRemove') log(`WORKTREE ▸ remove ${params.path} → ${ok ? 'removed' : `FAIL(${r.code})`}`);
+  if (op === 'worktreePrune')  log(`WORKTREE ▸ prune → ${ok ? 'pruned' : `FAIL(${r.code})`}`);
   return { v: PROTOCOL_V, type: 'git-result', op, reqId: (msg && msg.reqId), ok, code: r.code, stdout: r.stdout, ...(ok ? {} : { stderr: r.stderr, error: r.err || r.stderr || 'git failed' }) };
 }
 

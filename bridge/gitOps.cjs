@@ -35,6 +35,12 @@ function validRef(ref) {
 }
 // Switching the loaded tree may target a `dev/…` branch OR `main` (e.g. "show me main") — never anything else.
 function validSwitchTarget(t) { return t === 'main' || validateBranchName(t); }
+// DBR-P4-1 (§10/U6, sign-off 2026-06-18) — a HOST-MANAGED worktree path: the fixed `.wt/` root + ONE safe segment
+// (`.wt/preview`, `.wt/r1`, …). No `..`, no absolute, no nesting — a `worktree add` can't escape the managed root.
+const WT_RE = /^\.wt\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+function validWorktreePath(p) {
+  return typeof p === 'string' && p.length > 0 && p.length <= 200 && WT_RE.test(p) && noTraversal(p) && !BAD.test(p);
+}
 
 function clampInt(v, lo, hi, def) {
   const x = Math.floor(Number(v));
@@ -106,15 +112,30 @@ function buildGitArgs(op, params = {}) {
       if (!hasConfirm(params)) return err('needs-confirm');
       return ok(['branch', '-D', params.branch], true);
     }
+    // ── DBR-P4-1 worktree lifecycle (§10/U6 — host-managed `.wt/` trees) ──
+    // `add`: a per-branch tree for a `dev/…` branch, OR `--detach <ref>` for the read-only PREVIEW tree (§10).
+    // Path always `.wt/`-scoped (the host re-checks the resolved path too). These author in a worktree, never on `main`.
+    case 'worktreeAdd': {
+      if (!validWorktreePath(params.path)) return err('bad-wt-path');
+      if (params.detach != null) return validRef(params.detach) ? ok(['worktree', 'add', '--detach', params.path, params.detach], true) : err('bad-ref');
+      if (!validateBranchName(params.branch)) return err('bad-branch');
+      return ok(['worktree', 'add', params.path, params.branch], true);
+    }
+    case 'worktreeRemove': return validWorktreePath(params.path) ? ok(['worktree', 'remove', ...(params.force === true ? ['--force'] : []), params.path], true) : err('bad-wt-path');
+    case 'worktreeList':   return ok(['worktree', 'list', '--porcelain']);
+    case 'worktreePrune':  return ok(['worktree', 'prune'], true);
     default:              return err('unknown-op');
   }
 }
 
-// The allowlist (read + W-auto + the Phase-2 W-gated converge ops). FORBIDDEN here by construction: rebase,
-// push, reset, worktree, config — they have no `case`, so buildGitArgs returns `unknown-op`. (Plain `merge` is
-// likewise absent — only the scoped `syncMain`/`mergeSquash` forms exist.)
+// The allowlist (read + W-auto + the Phase-2 W-gated converge ops + the Phase-4 worktree lifecycle). FORBIDDEN here
+// by construction: rebase, push, reset, config — they have no `case`, so buildGitArgs returns `unknown-op`. (Plain
+// `merge` is likewise absent — only the scoped `syncMain`/`mergeSquash` forms exist.) DBR-P4-1: `worktree` is now
+// ALLOWED but tightly scoped — `.wt/`-rooted paths + a `dev/…` branch (or a detached preview tip), never an
+// arbitrary path; the host re-checks the resolved path (signed off 2026-06-18, §10/U6).
 const ALLOWED_OPS = ['status', 'currentBranch', 'log', 'branchList', 'revParse', 'mergeBase', 'aheadBehind',
   'diffStat', 'diffNames', 'branchCreate', 'switch', 'switchDetach', 'commitWip',
-  'syncMain', 'mergeSquash', 'commitMerge', 'branchDelete'];
+  'syncMain', 'mergeSquash', 'commitMerge', 'branchDelete',
+  'worktreeAdd', 'worktreeRemove', 'worktreeList', 'worktreePrune'];
 
-module.exports = { validateBranchName, validRef, validSwitchTarget, clampInt, wipMsg, commitMsg, hasConfirm, buildGitArgs, ALLOWED_OPS };
+module.exports = { validateBranchName, validRef, validSwitchTarget, validWorktreePath, clampInt, wipMsg, commitMsg, hasConfirm, buildGitArgs, ALLOWED_OPS };
