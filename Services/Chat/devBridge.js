@@ -91,6 +91,29 @@ export function isLiveTestForce(text) {
   return base === 'lt' || base === 'live' || base === 'live test' || base === 'livetest';
 }
 
+// DBR-P2-2 (DESIGN §5/§6.2) — the `sync` verb matcher: pull current `main` into THIS dev conversation's branch.
+// Whole-message only (a sentence merely containing "sync" flows to Claude), dev-conversation gated by the
+// caller — same discipline as isLiveTest. PURE + exported for unit tests.
+export function isSync(text) {
+  return String(text ?? '').trim().toLowerCase().replace(/\s+/g, ' ') === 'sync';
+}
+
+// DBR-P2-2 (DESIGN §6.2) — classify a `syncMain` (merge main → branch) git result into the sub-flow outcome.
+// PURE + exported. `clean` → proceed; `conflict` → §6.2 sub-flow (the auto-resolution run is P2-2b — for now we
+// hand the conflicted files to the human); `error` → a non-conflict merge failure. Reads only the result envelope.
+export function planSync(result) {
+  const r = result || {};
+  if (r.ok) return { status: 'clean', files: [], detail: '' };
+  const out = `${r.stdout || ''}\n${r.stderr || ''}\n${r.error || ''}`;
+  if (/conflict|automatic merge failed|fix conflicts|unmerged/i.test(out)) {
+    const files = [];
+    const re = /Merge conflict in (.+?)\s*$/gim;   // git: "CONFLICT (content): Merge conflict in <file>"
+    let m; while ((m = re.exec(out))) { const f = m[1].trim(); if (f && !files.includes(f)) files.push(f); }
+    return { status: 'conflict', files, detail: 'merge conflicts' };
+  }
+  return { status: 'error', files: [], detail: String(r.error || r.stderr || 'merge failed').split('\n')[0].slice(0, 200) };
+}
+
 /**
  * Factory — chat.js hands in its rendering helpers (avoids any import cycle into the panel).
  * @param {{appendMessage: Function, setMessageBody: Function, mkBtn: Function, persistMessage?: Function, decorateBubble?: Function, renderMarkdown?: Function, wireCodeCopyButtons?: Function}} deps
@@ -753,6 +776,13 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       await _liveTest(convId, { force: isLiveTestForce(t) });   // v2.74.1043 — `lt!`/`lt force` skips the behind-main warning
       return true;
     }
+    // DBR-P2-2 (v2.74.1045, DESIGN §5/§6.2) — `sync`: pull main into this conversation's branch. Whole-message,
+    // dev-conversation only, intercepted HERE (before the bare-text→`dev:` normalization) so it never forwards to Claude.
+    if (devConv && isSync(t)) {
+      if (!skipEcho) appendMessage({ role: 'user', body: t });
+      await _sync(convId);
+      return true;
+    }
     // Inside a dev conversation, bare input IS a dev command: a standalone log verb (gl/gc/gch) or a
     // `bug:`/`dev:` prefix is taken verbatim; anything else (a sub-verb like `pause`/`history`/`model …`, or
     // a plain task) is normalized to the `dev: …` form so the existing branch table handles it unchanged —
@@ -1052,6 +1082,39 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     if (!sw || !sw.ok) { _setBubble(bubble, `✗ \`lt\` — couldn’t switch to \`${branch}\`: ${(sw && sw.error) || 'host unreachable'}.`); return; }
     // 3) reload so Chrome re-reads the swapped files (stamps the applied baseline first, then restarts).
     await reloadExtension();
+  }
+
+  // DBR-P2-2 (DESIGN §5/§6.2) — `sync`: pull current `main` into THIS conversation's branch (catch up). Single-tree
+  // Phase 2: the loaded tree must already be ON the conversation's branch (`lt` there first) — we never merge main
+  // into the wrong branch, so a mismatch refuses with a clear next step. commitWip checkpoints the branch, then
+  // `syncMain` merges main in; `planSync` classifies. Clean → record the synced-onto main commit (feeds the P2-5
+  // freshness check) + report. Conflict → leave the branch's work checkpointed + the merge paused, hand to the human
+  // (the §6.2 auto-resolution run is P2-2b). Error → report. The host logs the `SYNC ▸` decision marker on syncMain.
+  async function _sync(convId) {
+    let conv = null;
+    try { conv = convId ? await ConversationStore.load(convId) : null; } catch { conv = null; }
+    const branch = conv && conv.branch;
+    if (!branch) { devBubble('✗ `sync` — no branch is recorded for this dev conversation, so there’s nothing to sync.'); return; }
+    const cur = await gitOp('currentBranch');
+    if (!cur || !cur.ok || cur.stdout !== branch) {
+      devBubble(`✗ \`sync\` — the loaded tree is on \`${(cur && cur.stdout) || '?'}\`, not this conversation's branch \`${branch}\`. \`lt\` to switch there first, then \`sync\`.`);
+      return;
+    }
+    const bubble = devBubble(`↻ syncing \`${branch}\` with \`main\`…`);
+    const wip = await gitOp('commitWip', { message: `sync ${branch}` });
+    if (!wip || !wip.ok) { _setBubble(bubble, `✗ \`sync\` — couldn’t checkpoint \`${branch}\` before merging: ${(wip && wip.error) || 'host unreachable'}.`); return; }
+    const plan = planSync(await gitOp('syncMain'));
+    if (plan.status === 'clean') {
+      const mainRef = await gitOp('revParse', { ref: 'main' });
+      const mainSha = String((mainRef && mainRef.ok && mainRef.stdout) || '').trim();
+      try { await ConversationStore.patchMeta(convId, { syncedMain: mainSha }); } catch { /* record is best-effort */ }
+      _setBubble(bubble, `✓ synced \`${branch}\` onto \`main@${mainSha.slice(0, 7) || '?'}\`.`);
+    } else if (plan.status === 'conflict') {
+      const where = plan.files.length ? plan.files.map((f) => '`' + f + '`').join(', ') : 'one or more files';
+      _setBubble(bubble, `⚠ \`sync\` hit merge conflicts in ${where}. Your branch work is checkpointed and the merge is paused — resolve the conflicts in the worktree/terminal and commit, then re-run \`sync\` (auto-resolution lands in P2-2b).`);
+    } else {
+      _setBubble(bubble, `✗ \`sync\` — merge failed: ${plan.detail}.`);
+    }
   }
 
   // v2.74.1029 — enable the bridge for a NEW dev conversation. The conversations-menu "New dev conversation"

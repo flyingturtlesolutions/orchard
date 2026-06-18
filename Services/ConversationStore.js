@@ -213,13 +213,14 @@ export const ConversationStore = {
    * mergedAt / mergeCommit). Bumps updatedAt and mirrors `status` (+ title) into the index. Idempotent;
    * no-op (returns null) if the conversation is gone (mirrors updateMessage's delete-race narrowing).
    * @param {string} id
-   * @param {{branch?:string, concern?:string, sessionId?:string, status?:string, mergedAt?:number, mergeCommit?:string, title?:string}} fields
+   * @param {{branch?:string, concern?:string, sessionId?:string, status?:string, mergedAt?:number, mergeCommit?:string, title?:string, syncedMain?:string}} fields
    * @returns {Promise<Conversation|null>}
    */
   async patchMeta(id, fields = {}) {
     const conv = await ConversationStore.load(id);
     if (!conv) return null;
-    for (const k of ['branch', 'concern', 'sessionId', 'status', 'mergedAt', 'mergeCommit', 'title']) {
+    // v2.74.1045 (DBR-P2-2) — `syncedMain`: the `main` commit this branch last synced onto (feeds the P2-5 merge freshness check).
+    for (const k of ['branch', 'concern', 'sessionId', 'status', 'mergedAt', 'mergeCommit', 'title', 'syncedMain']) {
       if (k in fields) conv[k] = fields[k];
     }
     conv.updatedAt = Date.now();

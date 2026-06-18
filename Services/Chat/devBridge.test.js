@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync } from './devBridge.js';
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
@@ -66,5 +66,34 @@ describe('isLiveTestForce — bare token + trailing `!`/`force` fires (override)
     for (const s of ['can you force a live test!', 'please lt the drawer!', 'force', '!', 'force lt', '', null, undefined]) {
       assert.equal(isLiveTestForce(s), false, `should NOT force: ${String(s)}`);
     }
+  });
+});
+
+// DBR-P2-2 (DESIGN §5/§6.2) — the `sync` verb matcher + the syncMain-result classifier.
+describe('isSync — whole-message `sync` fires; a sentence containing "sync" does not', () => {
+  it('fires for the bare token, case/space-tolerant', () => {
+    for (const s of ['sync', 'SYNC', '  sync  ', 'Sync']) assert.equal(isSync(s), true, `should fire: ${JSON.stringify(s)}`);
+  });
+  it('does NOT fire for embedded / partial / empty', () => {
+    for (const s of ['sync the branch', 'can you sync', 'syncing', 'resync', 'sync main', '', null, undefined, 42]) {
+      assert.equal(isSync(s), false, `should NOT fire: ${String(s)}`);
+    }
+  });
+});
+
+describe('planSync — classifies a syncMain git result (clean / conflict / error)', () => {
+  it('ok result → clean', () => {
+    assert.deepEqual(planSync({ ok: true, stdout: 'Already up to date.' }), { status: 'clean', files: [], detail: '' });
+  });
+  it('merge-conflict output → conflict + the conflicted files', () => {
+    const r = planSync({ ok: false, code: 1,
+      stderr: 'Auto-merging Core/foo.js\nCONFLICT (content): Merge conflict in Core/foo.js\nCONFLICT (content): Merge conflict in chat.js\nAutomatic merge failed; fix conflicts and then commit the result.' });
+    assert.equal(r.status, 'conflict');
+    assert.deepEqual(r.files, ['Core/foo.js', 'chat.js']);
+  });
+  it('a non-conflict failure → error (first line, capped); host-unreachable → error', () => {
+    assert.equal(planSync({ ok: false, stderr: 'fatal: not something we can merge' }).status, 'error');
+    assert.equal(planSync({ ok: false, error: 'host unreachable: port closed' }).status, 'error');
+    assert.equal(planSync(null).status, 'error');   // defensive: nullish result is not "clean"
   });
 });
