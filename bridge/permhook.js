@@ -18,7 +18,10 @@ const POLL_MS = 200;
 // text). v2.74.1025 (DB-4) — AskUserQuestion is DELIBERATELY NOT here: it RELAYS so the panel can render an
 // interactive question card and the run PAUSES (the hook blocks) until the user picks an answer, which comes
 // back in the resp `reason` and is fed to Claude. (Relay off → no hook → it falls to the .1024 text fallback.)
-const AUTO_ALLOW = new Set(['Read', 'Grep', 'Glob', 'LS', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'TodoWrite', 'Task', 'ExitPlanMode']);
+// v2.74.1057 (DBR-P3-3b) — mcp__devbridge__propose_split is auto-allowed for the SAME reason as ExitPlanMode:
+// it's an INERT proposal (returns a static ack), not an action. The panel surfaces the approve/decline split card
+// from the streamed tool_use; relaying it too would double-surface it. (It's also allow-listed in the settings.)
+const AUTO_ALLOW = new Set(['Read', 'Grep', 'Glob', 'LS', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'TodoWrite', 'Task', 'ExitPlanMode', 'mcp__devbridge__propose_split']);
 function isSafe(tool, input) {
   if (AUTO_ALLOW.has(tool)) return true;
   if (tool === 'Bash') {

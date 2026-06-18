@@ -67,6 +67,16 @@ const RELAY_SETTINGS_REL = 'logs/bridge/db3-relay-settings.json';
 const PERM_DIR = path.join(BRIDGE_DIR, 'perm');
 const PERMHOOK = path.join(REPO, 'bridge', 'permhook.js');
 
+// DBR-P3-3b (v2.74.1057, DESIGN §8.1/U5) — the INERT `propose_split` MCP server (bridge/mcpProposeSplit.cjs) is
+// exposed to claude via `--mcp-config`. The config is rewritten each launch (self-heal, like the settings files);
+// the server declares ONE proposal-only tool that returns a static ack — no fs/git/network — so the PANEL alone
+// seeds the branch on a human tap. `mcp__devbridge__propose_split` is added to the allowlist below so default mode
+// (which auto-denies unlisted tools) lets claude call it. Trust: this exposes a typed PROPOSAL, never a mutation.
+const MCP_SERVER = path.join(REPO, 'bridge', 'mcpProposeSplit.cjs');
+const MCP_CONFIG_FILE = path.join(BRIDGE_DIR, 'mcp-config.json');
+const MCP_CONFIG_REL = 'logs/bridge/mcp-config.json';
+const PROPOSE_SPLIT_TOOL = 'mcp__devbridge__propose_split';
+
 // The FIXED base command (see invariant above — no user text is ever concatenated into this). The
 // `--settings`, `--max-turns <n>` (clamped int) and `--model <id>` (frozen allowlist) flags are appended
 // host-side in startRun. v2.74.988 — `--permission-mode default` makes the gate actually BIND (without it
@@ -96,13 +106,19 @@ for (const d of [BRIDGE_DIR, RUN_DIR]) { try { fs.mkdirSync(d, { recursive: true
 // DB-2 (v2.74.988) — (re)write the scoped-Bash allowlist the run loads via --settings. Static content;
 // rewritten on every host launch so a deleted/edited file self-heals. permissions.allow UNIONS with the
 // CLI --allowedTools, adding exactly `npm test …` and `node …` — still no git, no network, no plain shell.
-try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ permissions: { allow: ['Bash(npm test:*)', 'Bash(node:*)'] } }, null, 2)); } catch { /* */ }
+try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify({ permissions: { allow: ['Bash(npm test:*)', 'Bash(node:*)', PROPOSE_SPLIT_TOOL] } }, null, 2)); } catch { /* */ }
 // DB-3 (v2.74.1002) — the relay settings file: same allowlist PLUS the PreToolUse hook that routes every
 // non-safe tool to the panel for approval. Quoted absolute path (handles spaces); forward slashes so the
 // JSON has no backslash-escaping surprises and the shell runs node fine on Windows.
 try { fs.writeFileSync(RELAY_SETTINGS_FILE, JSON.stringify({
-  permissions: { allow: ['Bash(npm test:*)', 'Bash(node:*)'] },
+  permissions: { allow: ['Bash(npm test:*)', 'Bash(node:*)', PROPOSE_SPLIT_TOOL] },
   hooks: { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: `node "${PERMHOOK.replace(/\\/g, '/')}"` }] }] },
+}, null, 2)); } catch { /* */ }
+// DBR-P3-3b (v2.74.1057) — the MCP config exposing the inert propose_split server (rewritten each launch, self-heal).
+// `command:'node' args:[<abs forward-slashed path>]` — claude spawns the server shell-free, so a path with spaces is
+// fine; the `--mcp-config` path itself is relative to cwd=REPO (no spaces). The server is dependency-free + inert.
+try { fs.writeFileSync(MCP_CONFIG_FILE, JSON.stringify({
+  mcpServers: { devbridge: { type: 'stdio', command: 'node', args: [MCP_SERVER.replace(/\\/g, '/')] } },
 }, null, 2)); } catch { /* */ }
 try { fs.mkdirSync(PERM_DIR, { recursive: true }); } catch { /* */ }
 
@@ -550,6 +566,7 @@ function startRun(msg) {
   // validated (settings path · clamped int · strict-UUID · frozen model id · sanitized concern).
   const claudeArgv = CLAUDE_CMD.split(' ').filter(Boolean);
   claudeArgv.push('--settings', settingsRel, '--max-turns', String(turns));
+  claudeArgv.push('--mcp-config', MCP_CONFIG_REL);                   // DBR-P3-3b — expose the inert propose_split tool (relative to cwd=REPO)
   if (resumeFlag) claudeArgv.push('--resume', _sid);                 // _sid: strict-UUID validated above
   const _mf = modelFlag(msg.model).trim();                           // '--model <id>' (frozen table) or ''
   if (_mf) claudeArgv.push(..._mf.split(' '));
