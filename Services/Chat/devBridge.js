@@ -12,11 +12,14 @@
 //   • The permission is requested ONLY on `dev: on`, first thing, while the user-gesture token is live.
 //   • Commits stay human: the host's allowlist has no git; this module offers no such verb either.
 //
-// Protocol: versioned {v:1} envelopes (§11) — Chrome's native-messaging port does the framing.
+// Protocol: versioned {v:N} envelopes (§11) — Chrome's native-messaging port does the framing.
 
 import { ConversationStore, devResumeSession } from '../ConversationStore.js';   // v2.74.1022 `gch`; v2.74.1034 (DBR-2) per-conversation resume
 
-const PROTOCOL_V = 1;
+// DBR-P4-2 (v2.74.1062, §10) — the v:2 run-multiplex protocol. MUST match bridge/protocol.cjs PROTO_V (the host's
+// single source). It's duplicated here because the panel is browser ESM and can't `require` a `.cjs`. The cutover
+// is HARD: a v:1 host's frames fail the `m.v === PROTOCOL_V` check below and are dropped — reload host + panel together.
+const PROTOCOL_V = 2;
 const HOST_NAME = 'com.orchard.devbridge';
 const SETTING_KEY = 'settings:devBridge';
 const MODEL_SETTING_KEY = 'settings:devBridgeModel';   // v2.74.976 — which model the bridge's claude runs as

@@ -29,8 +29,11 @@ const crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
 const gitOps = require('./gitOps.cjs');   // DBR-1 — the parameter-validated dev-branch git allowlist (§3)
 const { buildConcernContract } = require('./concern.cjs');   // DBR-5 — the per-spawn scope-contract builder (§8.2)
+const protocol = require('./protocol.cjs');   // DBR-P4-2 — the v:2 run-multiplex primitives (PROTO_V, tagFrame, poolSnapshot) (§10)
 
-const PROTOCOL_V = 1;
+// DBR-P4-2 (§10) — the protocol generation. Bumped 1→2 (run-multiplex); single source of truth in protocol.cjs.
+// The PANEL keeps its own `const PROTOCOL_V = 2` (browser ESM can't require a `.cjs`) — keep them in lockstep.
+const PROTOCOL_V = protocol.PROTO_V;
 const REPO = path.resolve(__dirname, '..');
 const BRIDGE_DIR = path.join(REPO, 'logs', 'bridge');
 const RUN_DIR = path.join(REPO, 'logs', 'run');
