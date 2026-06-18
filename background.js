@@ -1732,6 +1732,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   switch (type) {
 
+    // ── DBR-P3-7 (v2.74.1060) — the dev-bridge `scope?` semantic check: a single metered structured LLM call over
+    // a {system, user} prompt the panel built from the branch's diff + concern. Read-only; returns {success, text}.
+    case 'DEV_SCOPE_CHECK': {
+      (async () => {
+        try {
+          const r = await AnthropicService.devScopeCheck({ system: payload && payload.system, user: payload && payload.user });
+          sendResponse(r || { success: false, error: 'no result' });
+        } catch (e) { sendResponse({ success: false, error: e?.message || String(e) }); }
+      })();
+      return true;
+    }
+
     // ── OBS-1: demonstration recorder ────────────────────────────────────────
     case 'RECORD_START_SESSION': {
       (async () => {

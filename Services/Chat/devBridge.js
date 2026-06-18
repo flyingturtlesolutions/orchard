@@ -343,6 +343,39 @@ export function buildSplitNudge({ concern, reasons = [], components = [], founda
   return `⚠ scope — this branch${c} ${parts.join('; ')}. Consider \`split: <the separable part>\` to keep it focused — a nudge, not a block (§8).`;
 }
 
+// ── DBR-P3-7 (DESIGN §8.1 layer 3) — the OPTIONAL semantic scope check: `scope?` asks the panel's LLM for a second
+// opinion on scope creep (beyond P3-2's deterministic, no-LLM `scope`). On-demand + metered (one model call). The
+// PROMPT builder + the VERDICT normalizer are PURE + tested; the model call is live-only (the panel LLM path).
+
+// `scope?` verb matcher — whole-message; distinct from P3-2's bare `scope` (deterministic). PURE + exported.
+export function isScopeSemantic(text) {
+  return String(text ?? '').trim().toLowerCase().replace(/\s+/g, ' ') === 'scope?';
+}
+
+// buildScopeCheckPrompt — the {system, user} for the scope-creep call from a concern + the branch's diff (file list
+// + diffstat). PURE; capped so a huge diff can't blow the prompt. The model replies JSON-only (normalized below).
+export function buildScopeCheckPrompt({ concern, diffStat = '', changedFiles = [] } = {}) {
+  const c = String(concern || '').replace(/\s+/g, ' ').trim() || '(no concern set)';
+  const files = (Array.isArray(changedFiles) ? changedFiles : []).filter((f) => typeof f === 'string' && f).slice(0, 60).join('\n');
+  const stat = String(diffStat || '').slice(0, 4000);
+  const system = 'You are a code-review scope auditor. Given a branch\'s STATED CONCERN and its DIFF (changed-file list + diffstat), decide whether the branch has SCOPE CREEP — separable work outside the stated concern that belongs on its own branch. Be conservative: a focused branch is the norm; only flag genuinely separable work. Reply ONLY with JSON: {"creep":<bool>,"summary":"<one sentence>","suggestions":[{"concern":"<separable concern, imperative>","reason":"<why split>"}]}. Use an empty suggestions array when there is no creep.';
+  const user = `STATED CONCERN: ${c}\n\nCHANGED FILES:\n${files || '(none)'}\n\nDIFFSTAT:\n${stat || '(none)'}`;
+  return { system, user };
+}
+
+// normalizeScopeVerdict — coerce the model's reply (raw text with JSON, or an object) into a safe verdict shape.
+// PURE; defends against malformed / prose-wrapped / partial output (the first {…} block is parsed).
+export function normalizeScopeVerdict(raw) {
+  let o = raw;
+  if (typeof raw === 'string') { const m = raw.match(/\{[\s\S]*\}/); try { o = m ? JSON.parse(m[0]) : null; } catch { o = null; } }
+  if (!o || typeof o !== 'object') return { creep: false, summary: '', suggestions: [] };
+  const suggestions = (Array.isArray(o.suggestions) ? o.suggestions : [])
+    .map((s) => ({ concern: String((s && s.concern) || '').replace(/\s+/g, ' ').trim(), reason: String((s && s.reason) || '').replace(/\s+/g, ' ').trim() }))
+    .filter((s) => s.concern)
+    .slice(0, 6);
+  return { creep: !!o.creep, summary: String(o.summary || '').replace(/\s+/g, ' ').trim().slice(0, 280), suggestions };
+}
+
 // ── DBR-P3-3 (DESIGN §8.1/U5) — the `propose_split` typed-tool payload validator. Claude (the spawned `claude -p`)
 // calls the proposal-only `propose_split` MCP tool (wired host-side in P3-3b); its `tool_use` block streams to the
 // panel, which validates the input HERE — typed by construction, no prose parsing — and renders an approve/decline
@@ -388,7 +421,7 @@ export function buildMergeCommitMessage(summary, convId) {
  * Factory — chat.js hands in its rendering helpers (avoids any import cycle into the panel).
  * @param {{appendMessage: Function, setMessageBody: Function, mkBtn: Function, persistMessage?: Function, decorateBubble?: Function, renderMarkdown?: Function, wireCodeCopyButtons?: Function}} deps
  */
-export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistMessage, decorateBubble, renderMarkdown, wireCodeCopyButtons, getScrollContainer, refreshHistory }) {
+export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistMessage, decorateBubble, renderMarkdown, wireCodeCopyButtons, getScrollContainer, refreshHistory, scopeCheckLLM }) {
   let port = null;
   let run = null;   // { msgEl, lines: string[], bar: Element|null, sessionId: string|null }
 
@@ -1122,6 +1155,12 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       await _scopeCheck(convId);
       return true;
     }
+    // DBR-P3-7 (v2.74.1060, DESIGN §8.1 layer 3) — `scope?`: the optional semantic check (one metered model call).
+    if (devConv && isScopeSemantic(t)) {
+      if (!skipEcho) appendMessage({ role: 'user', body: t });
+      await _scopeSemantic(convId);
+      return true;
+    }
     // DBR-P3-1 (v2.74.1053, DESIGN §8.1) — `split: <concern>`: extract out-of-scope work into its own seeded branch.
     if (devConv && isSplit(t)) {
       if (!skipEcho) appendMessage({ role: 'user', body: t });
@@ -1667,6 +1706,35 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const nudge = buildSplitNudge({ concern: conv.concern, ...assessment });
     if (!nudge) { _setBubble(bubble, `✓ scope — \`${branch}\` looks focused (${changed.length} file${changed.length === 1 ? '' : 's'}${conv.concern ? `, concern: \`${String(conv.concern).slice(0, 48)}\`` : ''}). No split suggested.`); return; }
     _setBubble(bubble, nudge);
+  }
+
+  // DBR-P3-7 (DESIGN §8.1 layer 3) — `scope?`: the OPTIONAL semantic scope check. ONE metered model call (the panel
+  // LLM path, injected) for a second opinion on scope creep, beyond P3-2's deterministic `scope`. Read-only, never
+  // blocks. Gathers the branch's diff (mergeBase → diffNames + diffStat), asks the model, posts split suggestions.
+  async function _scopeSemantic(convId) {
+    if (typeof scopeCheckLLM !== 'function') { devBubble('✗ `scope?` — the semantic check needs the panel LLM (set your API key in settings). `scope` is the deterministic, no-model check.'); return; }
+    let conv = null;
+    try { conv = convId ? await ConversationStore.load(convId) : null; } catch { conv = null; }
+    const branch = conv && conv.branch;
+    if (!branch) { devBubble('✗ `scope?` — no branch is recorded for this dev conversation.'); return; }
+    const bubble = devBubble(`↻ scope? — asking the model about \`${branch}\` vs \`main\`… (one metered call)`);
+    const base = await gitOp('mergeBase', { a: 'main', b: branch });
+    const baseSha = String((base && base.ok && base.stdout) || '').trim();
+    if (!baseSha) { _setBubble(bubble, `✗ \`scope?\` — couldn’t find the fork point with \`main\`: ${(base && base.error) || 'host unreachable'}.`); return; }
+    const [namesR, statR] = await Promise.all([
+      gitOp('diffNames', { a: baseSha, b: branch }),
+      gitOp('diffStat', { a: baseSha, b: branch }),
+    ]);
+    const changedFiles = String((namesR && namesR.ok && namesR.stdout) || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    if (!changedFiles.length) { _setBubble(bubble, `✓ scope? — \`${branch}\` has no changes vs \`main\` yet. Nothing to check.`); return; }
+    const { system, user } = buildScopeCheckPrompt({ concern: conv.concern, diffStat: String((statR && statR.ok && statR.stdout) || ''), changedFiles });
+    let res = null;
+    try { res = await scopeCheckLLM({ system, user }); } catch (e) { res = { success: false, error: e && e.message }; }
+    if (!res || !res.success) { _setBubble(bubble, `✗ \`scope?\` — model call failed${res && res.error ? `: ${res.error}` : ''}. (\`scope\` still works — deterministic, no model.)`); return; }
+    const v = normalizeScopeVerdict(res.text);
+    if (!v.creep || !v.suggestions.length) { _setBubble(bubble, `✓ scope? — the model reads \`${branch}\` as focused${v.summary ? `: ${v.summary}` : ''}. No split suggested.`); return; }
+    const list = v.suggestions.map((s) => `• **${s.concern}** — ${s.reason}  ↳ \`split: ${s.concern}\``).join('\n');
+    _setBubble(bubble, `⚠ scope? — ${v.summary || 'possible scope creep.'}\n\n${list}\n\n_A second opinion (one model call) — a nudge, not a block._`);
   }
 
   // DBR-P3-3 — the shared split SEEDER. Both the manual `split:` verb (P3-1) and the `propose_split` tool (P3-3)

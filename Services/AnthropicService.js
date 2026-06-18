@@ -2704,6 +2704,20 @@ Reply ONLY with JSON: {"kind":"<one of ${KINDS.join('|')}>","correction":{"<PARA
     } catch (e) { Logger.warn('AnthropicService', `interpretFeedback — EXCEPTION: ${e.message}`); return null; }
   }
 
+  // DBR-P3-7 (v2.74.1060, DESIGN §8.1 layer 3) — the dev-bridge `scope?` semantic scope-creep check. A SINGLE
+  // structured call over a {system, user} prompt the PANEL built (from the branch's diff + concern — bounded; the
+  // panel normalizes the JSON reply). Returns { success, text } (raw model text) or { success:false, error }. The
+  // dev-bridge is the only caller (background DEV_SCOPE_CHECK → here); it's the panel LLM path, no new trust surface.
+  static async devScopeCheck({ system, user } = {}) {
+    if (!system || !user) return { success: false, error: 'missing prompt' };
+    if (!(await AnthropicService.hasLlm())) return { success: false, error: 'no LLM configured' };
+    try {
+      const raw = await AnthropicService.#call(String(system), [{ type: 'text', text: String(user) }], 600, [], { role: 'match', operation: 'devScopeCheck' });
+      if (!raw?.success) return { success: false, error: raw?.error || 'LLM call failed' };
+      return { success: true, text: raw.text };
+    } catch (e) { return { success: false, error: e.message }; }
+  }
+
   /**
    * ORCH-X compiler front-end — SEMANTICALLY decompose a complex ASK into an ORDERED plan over the user's recorded
    * CAPABILITIES, binding each step's params from the ask. This is what the lexical decomposeAsk can't do: turn

@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict } from './devBridge.js';
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
@@ -371,5 +371,40 @@ describe('DBR-P3-5 fork helpers', () => {
     const bare = buildForkSeedPrompt({});
     assert.ok(bare.includes('Continue from the previous dev conversation'));
     assert.equal(bare.includes('Where it left off'), false);
+  });
+});
+
+// DBR-P3-7 (DESIGN §8.1 layer 3) — the optional semantic scope-check helpers (prompt builder + verdict normalizer).
+describe('DBR-P3-7 scope? semantic-check helpers', () => {
+  it('isScopeSemantic matches `scope?` only — never the deterministic `scope`', () => {
+    for (const s of ['scope?', 'SCOPE?', '  scope?  ']) assert.equal(isScopeSemantic(s), true, `fire: ${JSON.stringify(s)}`);
+    for (const s of ['scope', 'scope ?', 'scope??', 'scoped?', '', null]) assert.equal(isScopeSemantic(s), false, `no: ${String(s)}`);
+  });
+
+  it('buildScopeCheckPrompt embeds the concern + changed files + diffstat, JSON-only system', () => {
+    const { system, user } = buildScopeCheckPrompt({ concern: 'drawer animation', diffStat: ' chat.css | 4 +', changedFiles: ['chat.css', 'Core/x.js'] });
+    assert.ok(/Reply ONLY with JSON/.test(system));
+    assert.ok(user.includes('STATED CONCERN: drawer animation'));
+    assert.ok(user.includes('chat.css') && user.includes('Core/x.js'));
+    assert.ok(user.includes('chat.css | 4 +'));
+  });
+
+  it('buildScopeCheckPrompt caps a huge diff/file list and tolerates an empty diff', () => {
+    const big = buildScopeCheckPrompt({ concern: 'x', diffStat: 'z'.repeat(9000), changedFiles: Array.from({ length: 200 }, (_, i) => `f${i}.js`) });
+    assert.ok(big.user.length < 7000);                       // capped
+    const empty = buildScopeCheckPrompt({});
+    assert.ok(empty.user.includes('(no concern set)') && empty.user.includes('(none)'));
+  });
+
+  it('normalizeScopeVerdict coerces raw model text / objects into a safe verdict shape', () => {
+    const v = normalizeScopeVerdict('Here you go: {"creep":true,"summary":"two unrelated areas","suggestions":[{"concern":"extract util","reason":"unrelated"},{"concern":"","reason":"drop me"}]}');
+    assert.equal(v.creep, true);
+    assert.equal(v.summary, 'two unrelated areas');
+    assert.equal(v.suggestions.length, 1);                   // the empty-concern suggestion is dropped
+    assert.deepEqual(v.suggestions[0], { concern: 'extract util', reason: 'unrelated' });
+    // garbage / no-creep / non-JSON → safe empty verdict
+    assert.deepEqual(normalizeScopeVerdict('no json here'), { creep: false, summary: '', suggestions: [] });
+    assert.deepEqual(normalizeScopeVerdict(null), { creep: false, summary: '', suggestions: [] });
+    assert.equal(normalizeScopeVerdict({ creep: false, suggestions: [] }).creep, false);
   });
 });
