@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare } from './devBridge.js';
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
@@ -95,5 +95,38 @@ describe('planSync — classifies a syncMain git result (clean / conflict / erro
     assert.equal(planSync({ ok: false, stderr: 'fatal: not something we can merge' }).status, 'error');
     assert.equal(planSync({ ok: false, error: 'host unreachable: port closed' }).status, 'error');
     assert.equal(planSync(null).status, 'error');   // defensive: nullish result is not "clean"
+  });
+});
+
+// DBR-P2-3 (DESIGN §6) — the `merge` verb matcher + the prepare-half sequencing.
+describe('isMerge — whole-message `merge` fires; a sentence containing "merge" does not', () => {
+  it('fires for the bare token, case/space-tolerant', () => {
+    for (const s of ['merge', 'MERGE', '  merge  ', 'Merge']) assert.equal(isMerge(s), true, `should fire: ${JSON.stringify(s)}`);
+  });
+  it('does NOT fire for embedded / partial / empty', () => {
+    for (const s of ['merge it', 'can you merge', 'merge main', 'merged', 'premerge', '', null, undefined]) {
+      assert.equal(isMerge(s), false, `should NOT fire: ${String(s)}`);
+    }
+  });
+});
+
+describe('planMergePrepare — sync → test (1 retry) → diff sequencing', () => {
+  it('sync not-clean → stop at sync, never reaches the diff', () => {
+    for (const sync of ['conflict', 'error', undefined]) {
+      const r = planMergePrepare({ sync });
+      assert.deepEqual(r, { outcome: 'stopped', stoppedAt: 'sync', ranDiff: false, retried: false }, `sync=${sync}`);
+    }
+  });
+  it('sync clean + tests pass first try → ready, diff, no retry', () => {
+    assert.deepEqual(planMergePrepare({ sync: 'clean', test1: 'pass' }),
+      { outcome: 'ready', stoppedAt: null, ranDiff: true, retried: false });
+  });
+  it('sync clean + green on the retry → ready, diff, retried', () => {
+    assert.deepEqual(planMergePrepare({ sync: 'clean', test1: 'fail', test2: 'pass' }),
+      { outcome: 'ready', stoppedAt: null, ranDiff: true, retried: true });
+  });
+  it('sync clean + still red after the retry → stop at test, BEFORE the diff (no merge)', () => {
+    assert.deepEqual(planMergePrepare({ sync: 'clean', test1: 'fail', test2: 'fail' }),
+      { outcome: 'stopped', stoppedAt: 'test', ranDiff: false, retried: true });
   });
 });

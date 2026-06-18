@@ -423,6 +423,31 @@ function handleGit(msg) {
   return { v: PROTOCOL_V, type: 'git-result', op, reqId: (msg && msg.reqId), ok, code: r.code, stdout: r.stdout, ...(ok ? {} : { stderr: r.stderr, error: r.err || r.stderr || 'git failed' }) };
 }
 
+// DBR-P2-3 (DESIGN §6 step 3) — the merge TEST GATE: run `npm test` in the loaded tree (= the branch, post-sync).
+// ASYNC spawn so it never blocks the host message loop; result via a reqId-correlated `test-result`. The command
+// is FIXED (`npm test`, no params) → zero injection surface. Same cmd.exe wrapper as the claude run, but with
+// piped capture (no journal) — and NO `detached` (the .cmd-shim stdout caveat, §startRun) so the pipes are live.
+function runTest(msg) {
+  const reqId = msg && msg.reqId;
+  let child;
+  try {
+    child = spawn('cmd.exe', ['/d', '/s', '/c', 'npm', 'test'], { cwd: REPO, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) {
+    send({ v: PROTOCOL_V, type: 'test-result', reqId, ok: false, error: 'spawn-failed: ' + e.message });
+    return;
+  }
+  let buf = '';
+  const cap = (b) => { buf += b.toString(); if (buf.length > 65536) buf = buf.slice(-65536); };   // keep the tail
+  child.stdout.on('data', cap);
+  child.stderr.on('data', cap);
+  child.on('error', (e) => send({ v: PROTOCOL_V, type: 'test-result', reqId, ok: false, error: String((e && e.message) || e) }));
+  child.on('close', (code) => {
+    const tail = buf.split(/\r?\n/).filter(Boolean).slice(-20).join('\n');
+    log(`MERGE ▸ test gate → ${code === 0 ? 'PASS' : `FAIL(${code})`}`);
+    send({ v: PROTOCOL_V, type: 'test-result', reqId, ok: code === 0, code, tail });
+  });
+}
+
 // DB-3 (v2.74.992, spec §7.1) — PAUSE: kill the run's process tree but leave the session recoverable.
 // The kill is the same forceful taskkill (Edit/Write are atomic between turns — a kill lands in the gap;
 // the journal + git working tree always show exactly what landed). The session_id the run streamed is
@@ -633,6 +658,7 @@ async function handle(msg) {
     case 'approval-decision': writePermResp(msg); break;           // DB-3 permission relay (v2.74.1002)
     case 'git':       send(handleGit(msg)); break;                 // DBR-1 dev-branch git allowlist (§3)
     case 'git-confirm': send(mintConfirmToken()); break;           // DBR-P2-1 — mint a one-time confirm token (§3/§6)
+    case 'test':      runTest(msg); break;                         // DBR-P2-3 — the merge test gate (`npm test`, async)
     case 'run':       startRun(msg); break;
     default:          send({ v: PROTOCOL_V, type: 'error', code: 'unknown-type', got: msg.type });
   }

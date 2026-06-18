@@ -114,6 +114,22 @@ export function planSync(result) {
   return { status: 'error', files: [], detail: String(r.error || r.stderr || 'merge failed').split('\n')[0].slice(0, 200) };
 }
 
+// DBR-P2-3 (DESIGN §6) — the `merge` verb matcher (the PREPARE half: WIP → sync → test → diff; the squash-land
+// is P2-4). Whole-message only, dev-conversation gated by the caller. PURE + exported.
+export function isMerge(text) {
+  return String(text ?? '').trim().toLowerCase().replace(/\s+/g, ' ') === 'merge';
+}
+
+// DBR-P2-3 (DESIGN §6 steps 2–4) — PURE sequencing of the merge PREPARE half from each stage's outcome:
+// sync (clean|conflict|error) → test gate (pass|fail, ONE retry — U14) → diff. A red-after-retry aborts BEFORE
+// the diff (no merge). Returns where it stopped + whether it reached the diff (i.e. is ready to confirm-land).
+export function planMergePrepare({ sync, test1, test2 } = {}) {
+  if (sync !== 'clean') return { outcome: 'stopped', stoppedAt: 'sync', ranDiff: false, retried: false };
+  if (test1 === 'pass') return { outcome: 'ready', stoppedAt: null, ranDiff: true, retried: false };
+  if (test2 === 'pass') return { outcome: 'ready', stoppedAt: null, ranDiff: true, retried: true };   // green on the retry
+  return { outcome: 'stopped', stoppedAt: 'test', ranDiff: false, retried: true };                     // still red → stop
+}
+
 /**
  * Factory — chat.js hands in its rendering helpers (avoids any import cycle into the panel).
  * @param {{appendMessage: Function, setMessageBody: Function, mkBtn: Function, persistMessage?: Function, decorateBubble?: Function, renderMarkdown?: Function, wireCodeCopyButtons?: Function}} deps
@@ -381,10 +397,26 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     });
   }
 
+  // DBR-P2-3 — panel→host TEST GATE. Posts {type:'test', reqId}; resolves on the matching `test-result`. The host
+  // runs `npm test` ASYNC (fixed command, no params). Long safety-timer — a full suite + a cold start takes a while.
+  let _testSeq = 0;
+  const _testPending = new Map();
+  function hostTest() {
+    return new Promise((resolve) => {
+      const reqId = 't' + (++_testSeq);
+      _testPending.set(reqId, resolve);
+      const done = (r) => { if (_testPending.has(reqId)) { _testPending.delete(reqId); resolve(r); } };
+      try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'test', reqId }); }
+      catch (e) { done({ ok: false, error: 'host unreachable: ' + ((e && e.message) || e) }); return; }
+      setTimeout(() => done({ ok: false, error: 'test gate timed out' }), 300000);
+    });
+  }
+
   function onHostMsg(m) {
     if (!m || m.v !== PROTOCOL_V) return;
     switch (m.type) {
       case 'git-result': { const resolve = _gitPending.get(m.reqId); if (resolve) { _gitPending.delete(m.reqId); resolve(m); } break; }   // v2.74.1034 (DBR-2)
+      case 'test-result': { const resolve = _testPending.get(m.reqId); if (resolve) { _testPending.delete(m.reqId); resolve(m); } break; }   // DBR-P2-3
       case 'preflight':
         if (!m.ok) { endRun(`✗ preflight failed: ${m.error}`); break; }
         if (run && run.pendingPayload) { const p = run.pendingPayload; run.pendingPayload = null; port.postMessage(p); _emit({ kind: 'meta', text: `claude ${m.claudeVersion} · ${m.repoRoot}` }); }
@@ -783,6 +815,13 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       await _sync(convId);
       return true;
     }
+    // DBR-P2-3 (v2.74.1046, DESIGN §6) — `merge` PREPARE: WIP → sync → test gate → diff preview, then halt for the
+    // P2-4 land confirm. Whole-message, dev-conversation only, intercepted before the bare-text normalization.
+    if (devConv && isMerge(t)) {
+      if (!skipEcho) appendMessage({ role: 'user', body: t });
+      await _mergePrepare(convId);
+      return true;
+    }
     // Inside a dev conversation, bare input IS a dev command: a standalone log verb (gl/gc/gch) or a
     // `bug:`/`dev:` prefix is taken verbatim; anything else (a sub-verb like `pause`/`history`/`model …`, or
     // a plain task) is normalized to the `dev: …` form so the existing branch table handles it unchanged —
@@ -1115,6 +1154,46 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     } else {
       _setBubble(bubble, `✗ \`sync\` — merge failed: ${plan.detail}.`);
     }
+  }
+
+  // DBR-P2-3 (DESIGN §6 steps 1–4) — the `merge` PREPARE half (lock-free; the squash-LAND + confirm is P2-4).
+  // Single-tree: requires the loaded tree is ON the conversation's branch. WIP-commit → sync (P2-2a; conflict/error
+  // STOPS, no merge) → test gate (`npm test` via the host, ONE retry on red — U14; still red STOPS) → diff preview
+  // (`git diff --stat main...<branch>`). Then HALTS awaiting the human's land confirm (P2-4). `MERGE ▸` markers
+  // are host-side (the syncMain + test ops log them). NB: the test-gate EXECUTION (host npm spawn) is live-only.
+  async function _mergePrepare(convId) {
+    let conv = null;
+    try { conv = convId ? await ConversationStore.load(convId) : null; } catch { conv = null; }
+    const branch = conv && conv.branch;
+    if (!branch) { devBubble('✗ `merge` — no branch is recorded for this dev conversation.'); return; }
+    const cur = await gitOp('currentBranch');
+    if (!cur || !cur.ok || cur.stdout !== branch) {
+      devBubble(`✗ \`merge\` — the loaded tree is on \`${(cur && cur.stdout) || '?'}\`, not \`${branch}\`. \`lt\` to switch there first, then \`merge\`.`);
+      return;
+    }
+    const bubble = devBubble(`↻ preparing to merge \`${branch}\` → \`main\`…`);
+    // 1) checkpoint
+    const wip = await gitOp('commitWip', { message: `merge-prep ${branch}` });
+    if (!wip || !wip.ok) { _setBubble(bubble, `✗ \`merge\` — couldn’t checkpoint \`${branch}\`: ${(wip && wip.error) || 'host unreachable'}.`); return; }
+    // 2) sync main into the branch (reuse P2-2a's classifier)
+    _setBubble(bubble, `↻ merge: syncing \`${branch}\` with \`main\`…`);
+    const sync = planSync(await gitOp('syncMain'));
+    if (sync.status === 'conflict') {
+      const where = sync.files.length ? sync.files.map((f) => '`' + f + '`').join(', ') : 'one or more files';
+      _setBubble(bubble, `⚠ \`merge\` stopped — sync hit conflicts in ${where}. Resolve + commit, then re-run \`merge\` (no merge happened; \`main\` is untouched).`); return;
+    }
+    if (sync.status === 'error') { _setBubble(bubble, `✗ \`merge\` stopped — sync failed: ${sync.detail}.`); return; }
+    // 3) test gate — one automatic retry (real suites flake; U14)
+    _setBubble(bubble, `↻ merge: running the test gate (\`npm test\`)…`);
+    let t = await hostTest();
+    if (!t.ok) { _setBubble(bubble, `↻ merge: tests red — one automatic retry…`); t = await hostTest(); }
+    if (!t.ok) {
+      _setBubble(bubble, `✗ \`merge\` stopped — tests still red after a retry${t.code != null ? ` (exit ${t.code})` : ''}. No merge; \`main\` is untouched.${t.tail ? '\n```\n' + t.tail + '\n```' : ''}`); return;
+    }
+    // 4) diff preview — the net changes that would land on main
+    const diff = await gitOp('diffStat', { a: 'main', b: branch });
+    const stat = (diff && diff.ok && String(diff.stdout || '').trim()) || '(no file changes vs main)';
+    _setBubble(bubble, `✓ \`${branch}\` is synced with \`main\` + green. Changes that would land:\n\`\`\`\n${stat}\n\`\`\`\nReview, then confirm to land — the squash-merge + land confirm is **P2-4** (\`main\` is still untouched).`);
   }
 
   // v2.74.1029 — enable the bridge for a NEW dev conversation. The conversations-menu "New dev conversation"
