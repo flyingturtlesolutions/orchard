@@ -227,6 +227,23 @@ export function buildForkSeedPrompt({ parentConcern, parentTitle, parentSummary 
   return `${head}${ctx}\n\n(Forked from a previous dev conversation — pick up from here.)`;
 }
 
+// DBR-P4 (post-dogfooding guardrail, §6.1) — a MERGED or ABANDONED conversation's branch is DONE: its work is on
+// `main` (squash-landed) or dropped. Reusing it via `lt`/`sync`/`merge` is the exact trap that left a squash-merged
+// branch reading "behind main" (the squash isn't in the branch's ancestry) and then chasing a phantom `sync` into a
+// version conflict. So for an archived conversation, steer to `fork` (a fresh branch off the NEW main) instead of the
+// misleading behind/on-main messages. Returns the steer text, or null when the conversation is still active. PURE.
+export function archivedSteer(conv, verb = 'that') {
+  const st = conv && conv.status;
+  if (st === 'merged') {
+    const at = conv.mergeCommit ? ` (as \`${String(conv.mergeCommit).slice(0, 7)}\`)` : '';
+    return `✓ \`${verb}\` — this conversation is already **merged**${at}; its work is on \`main\`. A squash-merge leaves the old branch reading "behind main" by design, so don't \`${verb}\` it. To keep going, type \`fork\` (continues on a fresh branch off the new \`main\`) or start a new dev conversation.`;
+  }
+  if (st === 'abandoned') {
+    return `✓ \`${verb}\` — this conversation was **abandoned**, so its branch is closed. To revive the work, type \`fork\` (a fresh branch off \`main\`) or start a new dev conversation.`;
+  }
+  return null;
+}
+
 // ── DBR-P3-2 (DESIGN §8/§8.1 layer 2) — the deterministic split BACKSTOP: no-LLM, always-on scope detection that
 // "catches what Claude forgets to flag." Structural signals over a branch's changed-file set: a SPLIT-CLUSTER (the
 // diff's import graph falls into ≥2 disconnected components — unrelated work bundled together) and a FOUNDATIONAL
@@ -1435,8 +1452,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   // the panel (reopen via the toolbar icon to see the branch live), so this is the last thing the flow does.
   async function _liveTest(convId, opts = {}) {
     const force = opts.force === true;
-    let branch = null;
-    try { branch = convId ? ((await ConversationStore.load(convId)) || {}).branch || null : null; } catch { branch = null; }
+    let conv = null;
+    try { conv = convId ? await ConversationStore.load(convId) : null; } catch { conv = null; }
+    const branch = conv && conv.branch;
     if (!branch) { devBubble('✗ `lt` — no branch is recorded for this dev conversation, so there’s nothing to live-test.'); return; }
     // v2.74.1043 (DESIGN §4 guardrail) — single-tree `lt` does a full reload onto the branch, so a branch BEHIND
     // main reverts the WHOLE panel to that older code: you silently lose newer panel features (e.g. the DBR-5/DBR-6
@@ -1445,6 +1463,8 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     // so parts[0] is how far the branch is BEHIND main). Fails OPEN: a host that's unreachable or an unparseable
     // answer must NOT block `lt` — only a confidently-positive behind count refuses.
     if (!force) {
+      const steer = archivedSteer(conv, 'lt');   // DBR-P4 — a merged/abandoned branch is done; steer to `fork` (lt! still overrides)
+      if (steer) { devBubble(steer); return; }
       let behind = 0;
       try {
         const ab = await gitOp('aheadBehind', { a: 'main', b: branch });
@@ -1488,6 +1508,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     try { conv = convId ? await ConversationStore.load(convId) : null; } catch { conv = null; }
     const branch = conv && conv.branch;
     if (!branch) { devBubble('✗ `sync` — no branch is recorded for this dev conversation, so there’s nothing to sync.'); return; }
+    { const steer = archivedSteer(conv, 'sync'); if (steer) { devBubble(steer); return; } }   // DBR-P4 — merged/abandoned → steer to fork
     const cur = await gitOp('currentBranch');
     if (!cur || !cur.ok || cur.stdout !== branch) {
       devBubble(`✗ \`sync\` — the loaded tree is on \`${(cur && cur.stdout) || '?'}\`, not this conversation's branch \`${branch}\`. \`lt\` to switch there first, then \`sync\`.`);
@@ -1520,6 +1541,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     try { conv = convId ? await ConversationStore.load(convId) : null; } catch { conv = null; }
     const branch = conv && conv.branch;
     if (!branch) { devBubble('✗ `merge` — no branch is recorded for this dev conversation.'); return; }
+    { const steer = archivedSteer(conv, 'merge'); if (steer) { devBubble(steer); return; } }   // DBR-P4 — merged/abandoned → steer to fork
     const cur = await gitOp('currentBranch');
     if (!cur || !cur.ok || cur.stdout !== branch) {
       devBubble(`✗ \`merge\` — the loaded tree is on \`${(cur && cur.stdout) || '?'}\`, not \`${branch}\`. \`lt\` to switch there first, then \`merge\`.`);

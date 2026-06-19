@@ -543,7 +543,7 @@ function startRun(msg) {
     const text = typeof msg.text === 'string' ? msg.text.trim() : '';
     if (!text || text.length > 4000) { send({ v: PROTOCOL_V, type: 'error', code: 'bad-text' }); return; }
     const traceLine = traceRel ? `\n\nThe newest decisions trace is at ${traceRel} — read it first for the runtime story behind this report.` : '';
-    prompt = `${text}${traceLine}\n\n(dev-bridge bug report · AHuB v${repoVersion()}. Diagnose the cause, apply a fix, then run the suite with \`npm test\` and confirm it is green before finishing. Do NOT commit — the human reviews the diff and runs cp/bcp.)`;
+    prompt = `${text}${traceLine}\n\n(dev-bridge bug report · Orchard v${repoVersion()}. Diagnose the cause, apply a fix, then run the suite with \`npm test\` and confirm it is green before finishing. Do NOT commit — the human reviews the diff and runs cp/bcp.)`;
   } else {
     const text = typeof msg.text === 'string' ? msg.text.trim() : '';
     if (!text || text.length > 4000) { send({ v: PROTOCOL_V, type: 'error', code: 'bad-text' }); return; }

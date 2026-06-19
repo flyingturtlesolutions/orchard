@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer } from './devBridge.js';
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
@@ -351,6 +351,27 @@ describe('DBR-P3-3 propose_split validator', () => {
     const r = validateProposeSplit({ concern: 'just the concern' });
     assert.equal(r.ok, true);
     assert.deepEqual(r.value, { concern: 'just the concern', reason: '', branchBase: 'main', seedPrompt: '', suggestedName: '' });
+  });
+});
+
+// DBR-P4 (post-dogfooding guardrail) — a merged/abandoned conversation steers reuse to `fork`.
+describe('archivedSteer — merged/abandoned branch reuse → fork', () => {
+  it('a MERGED conversation steers off lt/sync/merge to fork, naming the squash commit', () => {
+    const s = archivedSteer({ status: 'merged', mergeCommit: '9a2723baaaa' }, 'lt');
+    assert.ok(/already \*\*merged\*\*/.test(s));
+    assert.ok(s.includes('9a2723b'));               // 7-char short SHA
+    assert.ok(/\bfork\b/.test(s));
+    assert.ok(s.includes('`lt`'));                  // the verb is interpolated
+    assert.ok(archivedSteer({ status: 'merged' }, 'merge').includes('`merge`'));   // no mergeCommit → still steers
+  });
+  it('an ABANDONED conversation steers to fork', () => {
+    const s = archivedSteer({ status: 'abandoned' }, 'sync');
+    assert.ok(/\*\*abandoned\*\*/.test(s) && /\bfork\b/.test(s) && s.includes('`sync`'));
+  });
+  it('an ACTIVE (or missing) conversation returns null — the verb proceeds normally', () => {
+    assert.equal(archivedSteer({ status: 'active', branch: 'dev/x' }, 'lt'), null);
+    assert.equal(archivedSteer({ branch: 'dev/x' }, 'lt'), null);
+    assert.equal(archivedSteer(null, 'lt'), null);
   });
 });
 
