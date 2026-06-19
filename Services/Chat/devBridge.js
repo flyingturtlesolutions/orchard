@@ -761,13 +761,14 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         break;
       case 'event': {
         const ev = m.ev || {};
+        const rh = runs.get(m.runId) || run;   // DBR-P4-3b step 5b — demux: route this frame to ITS run's bubble (the foreground at cap=1)
         if (ev.type === 'system' && ev.subtype === 'init') {
-          if (run) run.sessionId = ev.session_id ?? null;
-          _emit({ kind: 'meta', text: `session ${String(ev.session_id ?? '').slice(0, 8)} · ${ev.model ?? ''}` });
+          if (rh) rh.sessionId = ev.session_id ?? null;
+          _emit({ kind: 'meta', text: `session ${String(ev.session_id ?? '').slice(0, 8)} · ${ev.model ?? ''}` }, rh);
         } else if (ev.type === 'assistant') {
           for (const block of (ev.message?.content ?? [])) {
-            if (block.type === 'text' && block.text?.trim()) _emit({ kind: 'text', text: block.text.trim() });
-            else if (block.type === 'thinking' && block.thinking?.trim()) _emit({ kind: 'thinking', text: block.thinking.trim() });
+            if (block.type === 'text' && block.text?.trim()) _emit({ kind: 'text', text: block.text.trim() }, rh);
+            else if (block.type === 'thinking' && block.thinking?.trim()) _emit({ kind: 'thinking', text: block.thinking.trim() }, rh);
             else if (block.type === 'tool_use' && block.name === 'AskUserQuestion') {
               // v2.74.1024 — SURFACE Claude's questions. Pre-.1024 this rendered as a bare "AskUserQuestion"
               // chip (the arg pick below has none of its fields) so the question + options VANISHED — the
@@ -784,21 +785,21 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
                 for (const o of (Array.isArray(q.options) ? q.options : [])) lines.push(`    – ${String(o.label ?? '').trim()}${o.description ? ` — ${String(o.description).trim()}` : ''}`);
               }
               lines.push('↳ answer with `dev: <your choice>`.');
-              getRelay().then((on) => { if (!on) _emit({ kind: 'text', text: lines.join('\n') }); }).catch(() => _emit({ kind: 'text', text: lines.join('\n') }));
+              getRelay().then((on) => { if (!on) _emit({ kind: 'text', text: lines.join('\n') }, rh); }).catch(() => _emit({ kind: 'text', text: lines.join('\n') }, rh));
             }
             else if (block.type === 'tool_use' && block.name === 'ExitPlanMode') {
               // v2.74.1024 — surface the proposed plan (was a content-less chip too).
-              _emit({ kind: 'text', text: `📋 Claude proposed a plan:\n${String(block.input?.plan ?? '').trim()}\n↳ approve with \`dev: yes\`, or redirect with \`dev: <changes>\`.` });
+              _emit({ kind: 'text', text: `📋 Claude proposed a plan:\n${String(block.input?.plan ?? '').trim()}\n↳ approve with \`dev: yes\`, or redirect with \`dev: <changes>\`.` }, rh);
             }
             else if (block.type === 'tool_use' && /(?:^|__)propose_split$/.test(String(block.name || ''))) {
               // DBR-P3-3 (v2.74.1056, DESIGN §8.1/U5) — Claude proposed a split via the proposal-only `propose_split`
               // tool. Surface the approve/decline card; the panel alone seeds the branch on a human tap (the tool
               // never mutates git/fs). MCP exposes it as `mcp__<server>__propose_split` (P3-3b) — match the suffix.
-              _proposeSplitCard(block.input, run?.conversationId || null);
+              _proposeSplitCard(block.input, rh?.conversationId || null);
             }
             else if (block.type === 'tool_use') {
               const arg = block.input?.file_path ?? block.input?.pattern ?? block.input?.command ?? '';
-              _emit({ kind: 'tool', name: block.name, arg: arg ? _short(arg, 80) : '' });
+              _emit({ kind: 'tool', name: block.name, arg: arg ? _short(arg, 80) : '' }, rh);
             }
           }
         }
@@ -816,23 +817,24 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       case 'done': {
         // A run may have edited the repo — re-check the working tree so the reload icon arms (spec §5).
         refreshReloadState();
+        const rh = runs.get(m.runId) || run;   // DBR-P4-3b step 5b — resolve which run finished (the foreground at cap=1)
         const r = m.result || {};
         // v2.74.985 — remember this run's session so the NEXT `dev:` continues it by default (the
         // bridge is a conversation; `dev: new` starts a fresh thread). Capture from the result, else the
         // init event the run streamed. This is also what makes resume-after-pause work.
-        const sid = r.sessionId || run?.sessionId || null;
+        const sid = r.sessionId || rh?.sessionId || null;
         // v2.74.1034 (DBR-2) — record the session on the OWNING dev conversation (per-conversation resume),
         // falling back to the legacy global key only when the run isn't bound to a conversation.
-        if (sid && !run?.replay) {
-          if (run?.conversationId) ConversationStore.patchMeta(run.conversationId, { sessionId: sid }).catch(() => { /* */ });
+        if (sid && !rh?.replay) {
+          if (rh?.conversationId) ConversationStore.patchMeta(rh.conversationId, { sessionId: sid }).catch(() => { /* */ });
           else setLastSession(sid);
         }
         // DB-3 (v2.74.992, spec §7.1) — a user-initiated PAUSE arrives here as the host-lost `done` that
         // follows the kill. Frame it as paused (the Esc-analog: resume with a redirect), NOT an error.
-        if (run?.pausing) {
+        if (rh?.pausing) {
           endRun({ kind: 'result', ok: true, text: sid
             ? '⏸ paused — session kept. `dev: <your redirect>` to resume with a correction, or `dev:` to continue as-is.'
-            : '⏸ paused before a session id arrived — nothing to resume; start a fresh run.' });
+            : '⏸ paused before a session id arrived — nothing to resume; start a fresh run.' }, rh);
           break;
         }
         const ok = r.subtype === 'success';
@@ -843,7 +845,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
           r.costUsd != null ? `$${Number(r.costUsd).toFixed(2)}` : null,
         ].filter(Boolean).join(' · ');
         const resume = sid ? `\ncontinue in terminal: claude --resume ${sid}` : '';
-        endRun({ kind: 'result', ok, text: `${bits}${resume}` });
+        endRun({ kind: 'result', ok, text: `${bits}${resume}` }, rh);
         break;
       }
       case 'status': {
@@ -860,7 +862,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         if (m.tool === 'AskUserQuestion') _emitQuestion(m); else _emitApproval(m);
         break;
       case 'error':
-        endRun(`✗ bridge error: ${m.code}${m.message ? ` — ${m.message}` : ''}${m.code === 'busy' ? ' (one run at a time; "dev: pause" to stop it)' : ''}`);
+        endRun(`✗ bridge error: ${m.code}${m.message ? ` — ${m.message}` : ''}${m.code === 'busy' ? ' (one run at a time; "dev: pause" to stop it)' : ''}`, runs.get(m.runId) || run);
         break;
       default: break;
     }
