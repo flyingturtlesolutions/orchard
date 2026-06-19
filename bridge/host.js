@@ -34,9 +34,12 @@ const protocol = require('./protocol.cjs');   // DBR-P4-2 — the v:2 run-multip
 // DBR-P4-2 (§10) — the protocol generation. Bumped 1→2 (run-multiplex); single source of truth in protocol.cjs.
 // The PANEL keeps its own `const PROTOCOL_V = 2` (browser ESM can't require a `.cjs`) — keep them in lockstep.
 const PROTOCOL_V = protocol.PROTO_V;
-// DBR-P4-3b (§10) — MAX_CONCURRENT: the run-pool slot cap, reported in the `pool` frame. Pinned at 1 (today's
-// single-run behavior); raised once the runs-Map + worktree execution land. Until then the lock still serializes.
-const MAX_CONCURRENT = 1;
+// DBR-P4-3b (§10) — MAX_CONCURRENT: the run-pool slot cap, reported in the `pool` frame. Default 1 (today's single-run
+// behavior). Opt into concurrency via env `ORCHARD_MAX_CONCURRENT` (2–8) — that ALSO flips WORKTREE_MODE so the N runs
+// spawn in per-branch worktrees instead of colliding in the one repo-root tree. Concurrency assumes the §10 preview
+// re-point is done (repo root = main; the loaded tree = the preview worktree). Unset/1 → everything is exactly as today.
+const MAX_CONCURRENT = (() => { const n = Math.floor(Number(process.env.ORCHARD_MAX_CONCURRENT)); return Number.isFinite(n) && n >= 1 && n <= 8 ? n : 1; })();
+const WORKTREE_MODE = MAX_CONCURRENT > 1;
 const REPO = path.resolve(__dirname, '..');
 const BRIDGE_DIR = path.join(REPO, 'logs', 'bridge');
 const RUN_DIR = path.join(REPO, 'logs', 'run');
@@ -533,6 +536,23 @@ function traceFileName(requested) {
   return `orchard-logs-bridge-${ts}.txt`;
 }
 
+// DBR-P4-3b step 4 (§10/U6) — ensure a per-branch worktree under `.wt/` for a CONCURRENT run's cwd, created via the
+// P4-1 `worktreeAdd` op (so the path is gitOps-validated: `.wt/`-scoped + a `dev/…` branch). Returns the absolute
+// path, or null → the caller falls back to the repo root. Only reached in WORKTREE_MODE; one tree per branch.
+function worktreeForBranch(branch) {
+  if (!gitOps.validateBranchName(branch)) return null;
+  const slug = String(branch).replace(/^dev\//, '').replace(/[^A-Za-z0-9._-]/g, '-').replace(/^[^A-Za-z0-9]+/, '') || 'wt';
+  const rel = `.wt/${slug}`;
+  const abs = path.join(REPO, rel);
+  if (fs.existsSync(abs)) return abs;   // reuse the branch's tree across runs
+  const built = gitOps.buildGitArgs('worktreeAdd', { path: rel, branch });
+  if (!built.ok) { log(`WORKTREE ▸ add ${rel} → REFUSED ${built.error}`); return null; }
+  const r = runGit(built.argv);
+  if (r.code !== 0) { log(`WORKTREE ▸ add ${rel} (${branch}) → FAIL(${r.code}) ${r.err || r.stderr || ''}`); return null; }
+  log(`WORKTREE ▸ add ${rel} (${branch}) for run`);
+  return abs;
+}
+
 function startRun(msg) {
   if (!canStart()) {   // DBR-P4-3b — a free slot? at MAX_CONCURRENT=1 this is exactly today's busy-when-one-runs.
     const l = activeRuns()[0];
@@ -577,6 +597,10 @@ function startRun(msg) {
   const journal = path.join(BRIDGE_DIR, `${ts}.jsonl`);
   const errLog = path.join(BRIDGE_DIR, `${ts}.err.log`);
   const runId = `r${ts}`;   // DBR-P4-3b (§10) — the run-multiplex tag on every run-scoped frame; stable across reattach (stored in the lock).
+  // DBR-P4-3b step 4 — a CONCURRENT run spawns in its branch's worktree so N children don't collide in one tree. Off
+  // unless WORKTREE_MODE AND the panel sent a branch → default (cap=1) is the repo root, exactly as today.
+  let cwd = REPO;
+  if (WORKTREE_MODE && msg.branch) { const wt = worktreeForBranch(msg.branch); if (wt) cwd = wt; }
   let outFd, errFd;
   try { outFd = fs.openSync(journal, 'a'); errFd = fs.openSync(errLog, 'a'); }
   catch (e) { send({ v: PROTOCOL_V, type: 'error', code: 'journal-open-failed', message: e.message }); return; }
@@ -592,6 +616,10 @@ function startRun(msg) {
   // v2.74.1002 — a `relay` run loads the relay settings file (PreToolUse hook → panel approval) instead of
   // the static DB-2 allowlist. Both are host-built relative paths; no panel text on the command line.
   const settingsRel = msg.relay ? RELAY_SETTINGS_REL : SETTINGS_REL;
+  // DBR-P4-3b step 4 — the --settings / --mcp-config paths are relative to cwd=REPO by default (no spaces). When cwd is
+  // a worktree, `logs/` isn't tracked there, so point them at the MAIN repo's files (absolute — safe as discrete argv).
+  const settingsArg = (cwd === REPO) ? settingsRel : (msg.relay ? RELAY_SETTINGS_FILE : SETTINGS_FILE);
+  const mcpArg = (cwd === REPO) ? MCP_CONFIG_REL : MCP_CONFIG_FILE;
   // DBR-5 (v2.74.1037, DESIGN §8.2) — re-pass the dev conversation's scope contract on EVERY spawn (initial
   // AND --resume — the system prompt is rebuilt per-invocation, so without this the guardrail lapses after
   // turn 1). The concern is USER-DERIVED: concern.cjs sanitizes it to an inert single-line label, and it is
@@ -604,8 +632,8 @@ function startRun(msg) {
   // safely. The base tokens are space-free so splitting CLAUDE_CMD is safe; every appended value is host-
   // validated (settings path · clamped int · strict-UUID · frozen model id · sanitized concern).
   const claudeArgv = CLAUDE_CMD.split(' ').filter(Boolean);
-  claudeArgv.push('--settings', settingsRel, '--max-turns', String(turns));
-  claudeArgv.push('--mcp-config', MCP_CONFIG_REL);                   // DBR-P3-3b — expose the inert propose_split tool (relative to cwd=REPO)
+  claudeArgv.push('--settings', settingsArg, '--max-turns', String(turns));
+  claudeArgv.push('--mcp-config', mcpArg);                           // DBR-P3-3b — expose the inert propose_split tool (path per cwd, DBR-P4-3b)
   if (resumeFlag) claudeArgv.push('--resume', _sid);                 // _sid: strict-UUID validated above
   const _mf = modelFlag(msg.model).trim();                           // '--model <id>' (frozen table) or ''
   if (_mf) claudeArgv.push(..._mf.split(' '));
@@ -619,7 +647,7 @@ function startRun(msg) {
     // Survival on port-close is therefore BEST-EFFORT (Windows children outlive parents unless Chrome's job
     // object says otherwise) — the DB-3 reattach slice owns making that a guarantee.
     child = spawn('cmd.exe', ['/d', '/s', '/c', ...claudeArgv], {
-      cwd: REPO, windowsHide: true,
+      cwd, windowsHide: true,   // DBR-P4-3b — the run's branch worktree in WORKTREE_MODE, else the repo root (default)
       stdio: ['pipe', outFd, errFd],
     });
   } catch (e) {

@@ -1396,6 +1396,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       // (a fresh SESSION on the same branch) keeps it; it's only seeded if none exists yet.
       const concern = await _ensureConcern(convId, ask);
       if (concern) payload.concern = concern;
+      // DBR-P4-3b step 4 — send the branch so a CONCURRENT host run spawns in that branch's worktree. Harmless at
+      // cap=1 (the host ignores it: repo-root spawn unless ORCHARD_MAX_CONCURRENT>1).
+      try { const _b = convId ? ((await ConversationStore.load(convId)) || {}).branch : null; if (_b) payload.branch = _b; } catch { /* */ }
       startRun(payload, `dev${resumeSessionId ? ' (continuing)' : isNew ? ' (new thread)' : ''} · ${_short(ask, 80)}`, { conversationId: convId });
       return true;
     }
