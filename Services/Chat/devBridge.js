@@ -767,12 +767,12 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   let _gitSeq = 0;
   const _gitPending = new Map();
   function _failPendingGit(reason) { for (const resolve of _gitPending.values()) { try { resolve({ ok: false, error: reason }); } catch { /* */ } } _gitPending.clear(); }
-  function gitOp(op, params = {}) {
+  function gitOp(op, params = {}, opts = {}) {   // DBR-#1 — opts.worktree (a dev branch) → host runs this op in that branch's .wt/ worktree (cap>1 prepare); omitted → repo-root main
     return new Promise((resolve) => {
       const reqId = 'g' + (++_gitSeq);
       _gitPending.set(reqId, resolve);
       const done = (r) => { if (_gitPending.has(reqId)) { _gitPending.delete(reqId); resolve(r); } };
-      try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'git', op, params, reqId }); }
+      try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'git', op, params, reqId, ...(opts.worktree ? { worktree: opts.worktree } : {}) }); }
       catch (e) { done({ ok: false, error: 'host unreachable: ' + ((e && e.message) || e) }); return; }
       setTimeout(() => done({ ok: false, error: 'git op timed out' }), 20000);
     });
@@ -782,12 +782,12 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   // runs `npm test` ASYNC (fixed command, no params). Long safety-timer — a full suite + a cold start takes a while.
   let _testSeq = 0;
   const _testPending = new Map();
-  function hostTest() {
+  function hostTest(opts = {}) {   // DBR-#1 — opts.worktree → npm test runs in that branch's worktree (cap>1); omitted → repo root
     return new Promise((resolve) => {
       const reqId = 't' + (++_testSeq);
       _testPending.set(reqId, resolve);
       const done = (r) => { if (_testPending.has(reqId)) { _testPending.delete(reqId); resolve(r); } };
-      try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'test', reqId }); }
+      try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'test', reqId, ...(opts.worktree ? { worktree: opts.worktree } : {}) }); }
       catch (e) { done({ ok: false, error: 'host unreachable: ' + ((e && e.message) || e) }); return; }
       setTimeout(() => done({ ok: false, error: 'test gate timed out' }), 300000);
     });
@@ -1642,15 +1642,16 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const branch = conv && conv.branch;
     if (!branch) { devBubble('✗ `sync` — no branch is recorded for this dev conversation, so there’s nothing to sync.'); return; }
     { const steer = archivedSteer(conv, 'sync'); if (steer) { devBubble(steer); return; } }   // DBR-P4 — merged/abandoned → steer to fork
-    const cur = await gitOp('currentBranch');
+    const wt = _capNow() > 1 ? branch : undefined;   // DBR-#1 — at cap>1 sync runs in the branch's `.wt/` worktree, not the repo root
+    const cur = await gitOp('currentBranch', {}, { worktree: wt });
     if (!cur || !cur.ok || cur.stdout !== branch) {
       devBubble(`✗ \`sync\` — the loaded tree is on \`${(cur && cur.stdout) || '?'}\`, not this conversation's branch \`${branch}\`. \`lt\` to switch there first, then \`sync\`.`);
       return;
     }
     const bubble = devBubble(`↻ syncing \`${branch}\` with \`main\`…`);
-    const wip = await gitOp('commitWip', { message: `sync ${branch}` });
+    const wip = await gitOp('commitWip', { message: `sync ${branch}` }, { worktree: wt });
     if (!wip || !wip.ok) { _setBubble(bubble, `✗ \`sync\` — couldn’t checkpoint \`${branch}\` before merging: ${(wip && wip.error) || 'host unreachable'}.`); return; }
-    const plan = planSync(await gitOp('syncMain'));
+    const plan = planSync(await gitOp('syncMain', {}, { worktree: wt }));
     if (plan.status === 'clean') {
       const mainRef = await gitOp('revParse', { ref: 'main' });
       const mainSha = String((mainRef && mainRef.ok && mainRef.stdout) || '').trim();
@@ -1675,18 +1676,22 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const branch = conv && conv.branch;
     if (!branch) { devBubble('✗ `merge` — no branch is recorded for this dev conversation.'); return; }
     { const steer = archivedSteer(conv, 'merge'); if (steer) { devBubble(steer); return; } }   // DBR-P4 — merged/abandoned → steer to fork
-    const cur = await gitOp('currentBranch');
+    // DBR-#1 (§7.2) — at cap>1 the branch lives in its OWN `.wt/` worktree, so the prepare ops (checkpoint · sync · test)
+    // run THERE (on the branch's real changes) while the land still lands on repo-root `main`. At cap=1 `wt` is
+    // undefined → every op runs in the repo root, exactly as before (and the guard below still needs an `lt` there).
+    const wt = _capNow() > 1 ? branch : undefined;
+    const cur = await gitOp('currentBranch', {}, { worktree: wt });   // at cap>1 reads the worktree (= the branch) → guard passes
     if (!cur || !cur.ok || cur.stdout !== branch) {
       devBubble(`✗ \`merge\` — the loaded tree is on \`${(cur && cur.stdout) || '?'}\`, not \`${branch}\`. \`lt\` to switch there first, then \`merge\`.`);
       return;
     }
     const bubble = devBubble(`↻ preparing to merge \`${branch}\` → \`main\`…`);
     // 1) checkpoint
-    const wip = await gitOp('commitWip', { message: `merge-prep ${branch}` });
+    const wip = await gitOp('commitWip', { message: `merge-prep ${branch}` }, { worktree: wt });
     if (!wip || !wip.ok) { _setBubble(bubble, `✗ \`merge\` — couldn’t checkpoint \`${branch}\`: ${(wip && wip.error) || 'host unreachable'}.`); return; }
     // 2) sync main into the branch (reuse P2-2a's classifier)
     _setBubble(bubble, `↻ merge: syncing \`${branch}\` with \`main\`…`);
-    const sync = planSync(await gitOp('syncMain'));
+    const sync = planSync(await gitOp('syncMain', {}, { worktree: wt }));
     if (sync.status === 'conflict') {
       const where = sync.files.length ? sync.files.map((f) => '`' + f + '`').join(', ') : 'one or more files';
       _setBubble(bubble, `⚠ \`merge\` stopped — sync hit conflicts in ${where}. Resolve + commit, then re-run \`merge\` (no merge happened; \`main\` is untouched).`); return;
@@ -1697,8 +1702,8 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const syncedMain = String((sm0 && sm0.ok && sm0.stdout) || '').trim();
     // 3) test gate — one automatic retry (real suites flake; U14)
     _setBubble(bubble, `↻ merge: running the test gate (\`npm test\`)…`);
-    let t = await hostTest();
-    if (!t.ok) { _setBubble(bubble, `↻ merge: tests red — one automatic retry…`); t = await hostTest(); }
+    let t = await hostTest({ worktree: wt });
+    if (!t.ok) { _setBubble(bubble, `↻ merge: tests red — one automatic retry…`); t = await hostTest({ worktree: wt }); }
     if (!t.ok) {
       _setBubble(bubble, `✗ \`merge\` stopped — tests still red after a retry${t.code != null ? ` (exit ${t.code})` : ''}. No merge; \`main\` is untouched.${t.tail ? '\n```\n' + t.tail + '\n```' : ''}`); return;
     }
@@ -1731,6 +1736,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   async function _mergeLand(convId, { branch, summary, syncedMain }) {
     const bubble = devBubble(`↻ landing \`${branch}\` → \`main\`…`);
     let landed = null, preMain = null;   // DBR-P4-7 — the merge commit + the pre-land `main` HEAD, captured on success → drive the post-release drift broadcast (below)
+    const wt = _capNow() > 1 ? branch : undefined;   // DBR-#1 — at cap>1 the freshness re-sync/re-test run in the branch's worktree; the land still lands on repo-root main
     // DBR-P4-6 (DESIGN §7.2) — acquire the single LAND lock. Prepare ran lock-free; here concurrent lands queue FIFO
     // (the bubble shows "waiting to merge — Nth in line") and each re-runs its freshness re-check below against the
     // `main` the one ahead just produced. ALWAYS release in the finally — a held lock would wedge every queued merge.
@@ -1748,15 +1754,17 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const currentMain = String((headNow && headNow.ok && headNow.stdout) || '').trim();
     if (isMainStale(syncedMain, currentMain)) {
       _setBubble(bubble, `↻ land: \`main\` moved since prepare (${(syncedMain || '?').slice(0, 7)} → ${currentMain.slice(0, 7) || '?'}) — re-syncing + re-testing before landing…`);
-      const cur = await gitOp('currentBranch');
-      if (!cur || !cur.ok || cur.stdout !== branch) {
-        const back = await gitOp('switch', { branch });
-        if (!back || !back.ok) { _setBubble(bubble, `✗ land aborted — couldn’t switch back to \`${branch}\` to re-sync: ${(back && back.error) || '?'}. \`main\` is untouched.`); return; }
+      if (!wt) {   // cap=1: ensure the repo root is back ON the branch before re-syncing (at cap>1 the worktree already is)
+        const cur = await gitOp('currentBranch');
+        if (!cur || !cur.ok || cur.stdout !== branch) {
+          const back = await gitOp('switch', { branch });
+          if (!back || !back.ok) { _setBubble(bubble, `✗ land aborted — couldn’t switch back to \`${branch}\` to re-sync: ${(back && back.error) || '?'}. \`main\` is untouched.`); return; }
+        }
       }
-      const resync = planSync(await gitOp('syncMain'));
+      const resync = planSync(await gitOp('syncMain', {}, { worktree: wt }));
       if (resync.status === 'conflict') { _setBubble(bubble, `✗ land aborted — re-sync onto the new \`main\` hit conflicts in ${resync.files.length ? resync.files.map((f) => '`' + f + '`').join(', ') : 'files'}. Resolve + commit, then re-run \`merge\`. \`main\` is untouched.`); return; }
       if (resync.status === 'error') { _setBubble(bubble, `✗ land aborted — re-sync failed: ${resync.detail}. \`main\` is untouched.`); return; }
-      let rt = await hostTest(); if (!rt.ok) rt = await hostTest();
+      let rt = await hostTest({ worktree: wt }); if (!rt.ok) rt = await hostTest({ worktree: wt });
       if (!rt.ok) { _setBubble(bubble, `✗ land aborted — after re-syncing onto the new \`main\`, tests are red${rt.code != null ? ` (exit ${rt.code})` : ''}. No merge; \`main\` is untouched.`); return; }
     }
     // 1) switch the loaded tree to main (the host's mergeSquash/commitMerge require current === main)
