@@ -540,6 +540,23 @@ function traceFileName(requested) {
   return `orchard-logs-bridge-${ts}.txt`;
 }
 
+// DBR-P4-8 (§11/U3) — junction the worktree's `node_modules` to the main store, so `npm test` runs in the worktree
+// without a per-tree `npm install`. A Windows DIRECTORY JUNCTION (`fs.symlink(..,'junction')`) — no admin. Best-effort
+// + idempotent: no main store yet, or a junction failure, just means the worktree lacks deps (an in-worktree `npm
+// test` would fail) — the run still proceeds. NB a branch that CHANGES package.json / the lockfile wants its OWN
+// `npm ci` (the junction would show stale deps) — that `needsOwnDeps` refinement is a follow-up; junction-always
+// covers the common case (deps unchanged).
+function ensureNodeModulesJunction(worktreeAbs) {
+  try {
+    const target = path.join(REPO, 'node_modules');
+    if (!fs.existsSync(target)) return;            // nothing to link yet
+    const link = path.join(worktreeAbs, 'node_modules');
+    if (fs.existsSync(link)) return;               // already linked (or a real dir) — idempotent
+    fs.symlinkSync(target, link, 'junction');
+    log(`WORKTREE ▸ node_modules junction → main store`);
+  } catch (e) { log(`WORKTREE ▸ node_modules junction failed (in-worktree npm test will fail): ${(e && e.message) || e}`); }
+}
+
 // DBR-P4-3b step 4 (§10/U6) — ensure a per-branch worktree under `.wt/` for a CONCURRENT run's cwd, created via the
 // P4-1 `worktreeAdd` op (so the path is gitOps-validated: `.wt/`-scoped + a `dev/…` branch). Returns the absolute
 // path, or null → the caller falls back to the repo root. Only reached in WORKTREE_MODE; one tree per branch.
@@ -548,12 +565,13 @@ function worktreeForBranch(branch) {
   const slug = String(branch).replace(/^dev\//, '').replace(/[^A-Za-z0-9._-]/g, '-').replace(/^[^A-Za-z0-9]+/, '') || 'wt';
   const rel = `.wt/${slug}`;
   const abs = path.join(REPO, rel);
-  if (fs.existsSync(abs)) return abs;   // reuse the branch's tree across runs
+  if (fs.existsSync(abs)) { ensureNodeModulesJunction(abs); return abs; }   // reuse the branch's tree across runs (+ ensure deps)
   const built = gitOps.buildGitArgs('worktreeAdd', { path: rel, branch });
   if (!built.ok) { log(`WORKTREE ▸ add ${rel} → REFUSED ${built.error}`); return null; }
   const r = runGit(built.argv);
   if (r.code !== 0) { log(`WORKTREE ▸ add ${rel} (${branch}) → FAIL(${r.code}) ${r.err || r.stderr || ''}`); return null; }
   log(`WORKTREE ▸ add ${rel} (${branch}) for run`);
+  ensureNodeModulesJunction(abs);   // DBR-P4-8 — link deps so an in-worktree `npm test` works
   return abs;
 }
 
