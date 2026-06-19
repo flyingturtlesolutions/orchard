@@ -28,6 +28,7 @@ import { CONDITION_FIELDS, getTypesByFamily } from './ConditionVocabulary.js';
 import { getCloudSettings, normalizeApiBaseUrl } from './Cloud/CloudSettings.js';
 import { ensureFreshSession } from './Cloud/CloudTokenStore.js';
 import { buildRouterMessages, parseRouterOutput } from '../Core/routerPrompt.js';   // R-3 — front-door router prompt (no DOM; fenced catalog)
+import { buildStepMessages, parseStepDecision } from '../Core/stepPrompt.js';   // IL-2 — the brain-loop step controller prompt (fenced palette + observation)
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL             = 'claude-sonnet-4-5';
@@ -5217,6 +5218,26 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
       return { ...parseRouterOutput(null), reason: 'router-unavailable' };   // fail safe; reason lets chat fall back
     }
     return parseRouterOutput(res.text);
+  }
+
+  /**
+   * IL-2 — the brain-loop STEP controller (DESIGN_inference_layer.md §4.1). Unlike routeAsk (a single-shot
+   * SELECT over a catalog), this is the iterated think seam: given the StepContext (goal · signal-only ledger ·
+   * latest observation · scope keys · palette), it returns the next Decision {kind: act|ask|done|needs}. PURE
+   * prompt + parse live in Core/stepPrompt.js (palette + observation fenced as inert DATA — §3/§9; scope VALUES
+   * never narrated — §5); this is the thin transport. Fails safe to needs:clarify so the loop hands back, never
+   * guesses an action. Core/agentLoop.js does the anti-hallucination check that the chosen leg was offered.
+   * @param {import('../Core/agentLoop.js').StepContext} ctx
+   * @returns {Promise<import('../Core/agentLoop.js').Decision>}
+   */
+  static async stepBrain(ctx = {}) {
+    const palette = Array.isArray(ctx && ctx.palette) ? ctx.palette : [];
+    const { system, user } = buildStepMessages(ctx || {});
+    const res = await AnthropicService.#call(system, user, 512, [], { role: 'routing', operation: 'step-brain' });
+    if (!res || res.success === false) {
+      return { kind: 'needs', needs: { kind: 'clarify' }, params: {}, confidence: 0, reason: 'brain-unavailable' };
+    }
+    return parseStepDecision(res.text, palette);
   }
 
   /**
