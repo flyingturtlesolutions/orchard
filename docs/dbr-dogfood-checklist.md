@@ -102,14 +102,6 @@ rewrites how the host + Chrome are wired, and a stumble shouldn't strand a sessi
 
 Until step 3, everything stays single-tree: cap=1, `lt` switches the repo root, one run at a time — exactly as today.
 
-> **One chat window drives the bridge (v2.74.1093).** The dev bridge is tied to a native-messaging port, and the
-> host exits the instant that port closes — so a *second* chat window (another Chrome window's side panel) used to
-> spawn a rival host, and switching away tore the first panel down and killed its run. Now a Web Lock makes the
-> **first** panel the sole owner: a bridge command in any other window is refused with *"active in another chat
-> window — close it (or `dev: off`) to use it here."* When the owner closes / reloads / `dev: off`s, the next window
-> takes over **automatically**. So: drive dev runs from one window at a time. (Cross-window cap>1 is still N runs in
-> the *one* owning window — the cap is per-host, and there's only ever one host now.)
-
 ---
 
 ### Notes / failures

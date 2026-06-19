@@ -482,21 +482,6 @@ export function buildMergeCommitMessage(summary, convId) {
   return lines.join('\n').replace(/\0/g, '').replace(/\n{3,}/g, '\n\n').trim().slice(0, 4000);
 }
 
-// SINGLE-PANEL GUARD (v2.74.1093) — PURE: does this input DRIVE THE HOST (and therefore need single-panel
-// ownership of the native-messaging port)? The panel is registered globally, so a second chat window is a second
-// port → a second host; only the owning window may spawn one. A dev CONVERSATION's commands all drive the host;
-// outside one, only the `dev:`/`bug:` verbs do — but NOT `dev: on|off` (they manage enablement, no host) and NOT
-// the `gl`/`gc`/`gch` log grabs (they read files / write the chat export, no host). Used by maybeHandle's guard.
-export function bridgeCommandNeedsOwnership(text, devConv) {
-  const t = String(text == null ? '' : text).trim();
-  const head = t.toLowerCase();
-  if (head === 'gl' || head === 'gc' || head === 'gch') return false;   // log grabs: read files, no host
-  if (/^dev:\s*(?:on|off)\b/i.test(t)) return false;                    // enable/disable: no host (in ANY context)
-  if (devConv === true) return true;                                    // a dev conversation drives the host
-  if (!/^(?:dev|bug):/i.test(t)) return false;                          // not a bridge verb
-  return true;
-}
-
 /**
  * Factory — chat.js hands in its rendering helpers (avoids any import cycle into the panel).
  * @param {{appendMessage: Function, setMessageBody: Function, mkBtn: Function, persistMessage?: Function, decorateBubble?: Function, renderMarkdown?: Function, wireCodeCopyButtons?: Function}} deps
@@ -525,56 +510,6 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   const _activeRuns = () => runs.size + _pendingPreflight.length + _pendingStarted.length;
   const _canDispatch = () => _activeRuns() < _capNow();
   const _liveForConv = (cid) => cid != null && [...runs.values(), ..._pendingPreflight, ..._pendingStarted].some((r) => r && r.conversationId === cid);
-
-  // SINGLE-PANEL GUARD (v2.74.1093) — the dev bridge is tied to a native-messaging PORT, and the host exits the
-  // instant its port closes (bridge/host.js: `stdin 'end' → process.exit(0)`). The panel is registered GLOBALLY, so
-  // a SECOND chat window is a second document → a second port → a second host; switching away then tears the first
-  // panel's document down, killing its in-flight run (and, worse under cap>1, two hosts contend over active.json +
-  // the worktrees). So only ONE panel may drive the bridge at a time. The Web Locks API is the right primitive:
-  // origin-scoped (shared across all the extension's documents), and AUTO-RELEASED when the holding document is
-  // destroyed — no heartbeat, no stale-claim cleanup, no SW dependency. The owner holds the lock for its lifetime;
-  // a non-owner refuses every host-spawning action and queues a "steal" request, so when the owner goes away
-  // (closed / `dev: off` / reload) the next window acquires and becomes the owner automatically.
-  const _LOCK_NAME = 'orchard-dev-bridge';
-  let _bridgeOwner = null;        // null = undetermined · true = this panel owns the bridge · false = another window does
-  let _releaseBridge = null;      // resolves the held-lock promise → releases the Web Lock
-  let _claimInFlight = null;      // de-dupes concurrent claim attempts
-  let _stealQueued = false;
-  const _locksAvailable = () => { try { return !!(navigator.locks && navigator.locks.request); } catch { return false; } };
-
-  async function _claimBridgeOwnership() {
-    if (_bridgeOwner === true) return true;
-    if (!_locksAvailable()) { _bridgeOwner = true; return true; }   // no Web Locks → fail OPEN (legacy single-owner assumption)
-    if (_claimInFlight) return _claimInFlight;
-    _claimInFlight = new Promise((resolve) => {
-      let settled = false;
-      navigator.locks.request(_LOCK_NAME, { ifAvailable: true }, (lock) => {
-        if (!lock) { settled = true; _bridgeOwner = false; resolve(false); _queueSteal(); return; }   // another window owns it
-        _bridgeOwner = true; settled = true;
-        return new Promise((rel) => { _releaseBridge = rel; resolve(true); });   // hold the lock for this document's lifetime
-      }).catch(() => { if (!settled) { _bridgeOwner = false; resolve(false); } });
-    }).finally(() => { _claimInFlight = null; });
-    return _claimInFlight;
-  }
-  // A NON-ifAvailable request QUEUES behind the current owner; its callback fires only once they release → we become
-  // the owner. One outstanding at a time. The previous owner's host died with it (Windows), so we come up fresh.
-  function _queueSteal() {
-    if (_stealQueued || !_locksAvailable()) return;
-    _stealQueued = true;
-    navigator.locks.request(_LOCK_NAME, (lock) => {
-      _stealQueued = false;
-      if (!lock) return;
-      _bridgeOwner = true;
-      const held = new Promise((rel) => { _releaseBridge = rel; });
-      try { emitReload({ enabled: true }); } catch { /* */ }
-      refreshReloadState(); _probeActiveRun(); _runWorktreeGc().catch(() => { /* */ });
-      return held;
-    }).catch(() => { _stealQueued = false; });
-  }
-  function _releaseBridgeOwnership() {
-    try { _releaseBridge && _releaseBridge(); } catch { /* */ }
-    _releaseBridge = null; _bridgeOwner = null;
-  }
 
   // DB-2 (v2.74.975) — reload-icon state (spec §5). The header icon (owned by chat.js) subscribes via
   // onReloadState; we push it `enabled` (dev mode on/off → show/hide) and `available` (changes are PENDING
@@ -836,14 +771,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   function disconnect() {
     try { port?.disconnect(); } catch { /* */ }
     port = null;
-    _releaseBridgeOwnership();   // SINGLE-PANEL GUARD — free the bridge so another window can take it over
   }
 
   function ensurePort() {
-    // SINGLE-PANEL GUARD — backstop: never spawn a second host from a non-owning window. The user-facing paths
-    // (maybeHandle / startup) claim ownership first and refuse with a clear message; this catches any path that
-    // reaches here without one. `=== false` only when Web Locks confirmed another window owns it (null/true → proceed).
-    if (_bridgeOwner === false) throw new Error('the dev bridge is active in another chat window — close it there (or run `dev: off`) to use the bridge here');
     if (port) return port;
     port = chrome.runtime.connectNative(HOST_NAME);
     port.onMessage.addListener(onHostMsg);
@@ -1334,14 +1264,6 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const skipEcho = opts.skipEcho === true;
     const convId = opts.conversationId || null;   // v2.74.1034 (DBR-2) — the dev conversation this run belongs to
     let t = String(text ?? '').trim();
-    // SINGLE-PANEL GUARD (v2.74.1093) — a command that drives the host may run ONLY in the window that owns the
-    // bridge. Claim (or confirm) ownership up front; a non-owner gets a clear hand-off message and stops here, so a
-    // second host is never spawned. Plain non-bridge chat in another window never reaches this and is unaffected.
-    if (bridgeCommandNeedsOwnership(t, devConv) && (await getEnabled()) && !(await _claimBridgeOwnership())) {
-      if (!skipEcho) appendMessage({ role: 'user', body: t });
-      devBubble('⚠ the dev bridge is already active in another chat window. Close that panel — or run `dev: off` there — then retry here. (One window drives the bridge at a time; close it and this one takes over automatically.)');
-      return true;
-    }
     // DBR-4 (v2.74.1036, DESIGN §4) — `lt` live-test. Dev-conversation only, WHOLE-message match, intercepted
     // HERE — before the bare-text→`dev:` normalization below — so it never gets rewritten to `dev: lt` and
     // forwarded to Claude. Switches the loaded tree to this conversation's branch and reloads the extension.
@@ -1426,14 +1348,6 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       echoUser();
       if (!granted) { devBubble('✗ nativeMessaging permission declined — the bridge stays off.'); return true; }
       await setEnabled(true);
-      // SINGLE-PANEL GUARD (v2.74.1093) — dev mode is global, but only ONE window drives the host. If another window
-      // already owns the bridge, enable here but DON'T connect; the user drives from that one (or closes it → the
-      // queued steal hands ownership here automatically).
-      if (!(await _claimBridgeOwnership())) {
-        emitReload({ enabled: true });
-        devBubble('✓ dev mode ON — but the bridge is currently driven by another chat window. Close that one (or run `dev: off` there) to drive it from here.');
-        return true;
-      }
       emitReload({ enabled: true });   // reveal the header reload icon
       refreshReloadState();            // and arm it if the tree is already dirty
       devBubble('✓ dev bridge ON — `gl` (full trace), `gc` (decisions), `gch` (chats), `bug: <what broke>` and `dev: <ask>` now route to Claude Code on this repo.\nIf the host isn’t installed yet: run bridge/install.ps1 once, then reload the extension.');
@@ -1663,10 +1577,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     reloadListener = typeof fn === 'function' ? fn : null;
     const enabled = await getEnabled();
     emitReload({ enabled });
-    // SINGLE-PANEL GUARD (v2.74.1093) — only the OWNING window spawns a host at startup (the diffstat / active-run
-    // probe / worktree GC all connect the port). A non-owner stays dormant; its queued steal request makes it the
-    // owner + runs these the moment the current owner goes away. DBR-P4-7 — reconcile leftover `.wt/` worktrees too.
-    if (enabled && await _claimBridgeOwnership()) { refreshReloadState(); _probeActiveRun(); _runWorktreeGc().catch(() => { /* */ }); }
+    if (enabled) { refreshReloadState(); _probeActiveRun(); _runWorktreeGc().catch(() => { /* */ }); }   // DBR-P4-7 — reconcile leftover `.wt/` worktrees on startup
   }
 
   // The reload action itself — restarts the WHOLE extension (the spec's "Apply & Reload"), which closes
