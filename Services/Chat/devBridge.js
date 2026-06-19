@@ -16,6 +16,7 @@
 
 import { ConversationStore, devResumeSession } from '../ConversationStore.js';   // v2.74.1022 `gch`; v2.74.1034 (DBR-2) per-conversation resume
 import { createMergeLock } from './mergeLock.js';   // DBR-P4-6 (§7.2) — the merge land-only lock + FIFO queue
+import { gcPlan, parseWorktreeList } from './worktreeGc.js';   // DBR-P4-7 (§9) — worktree GC: reconcile + actuate
 
 // DBR-P4-2 (v2.74.1062, §10) — the v:2 run-multiplex protocol. MUST match bridge/protocol.cjs PROTO_V (the host's
 // single source). It's duplicated here because the panel is browser ESM and can't `require` a `.cjs`. The cutover
@@ -1535,7 +1536,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     reloadListener = typeof fn === 'function' ? fn : null;
     const enabled = await getEnabled();
     emitReload({ enabled });
-    if (enabled) { refreshReloadState(); _probeActiveRun(); }
+    if (enabled) { refreshReloadState(); _probeActiveRun(); _runWorktreeGc().catch(() => { /* */ }); }   // DBR-P4-7 — reconcile leftover `.wt/` worktrees on startup
   }
 
   // The reload action itself — restarts the WHOLE extension (the spec's "Apply & Reload"), which closes
@@ -1792,7 +1793,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     }
     // DBR-P4-7 (DESIGN §7) — post-land, lock RELEASED: nudge the OTHER live dev branches that now drift from `main`.
     // Best-effort + non-blocking — a broadcast failure never touches the just-completed land.
-    if (landed) { try { await _broadcastDrift(convId, branch, landed, preMain); } catch { /* */ } }
+    if (landed) { try { await _broadcastDrift(convId, branch, landed, preMain); } catch { /* */ } _runWorktreeGc().catch(() => { /* */ }); }   // DBR-P4-7 — the merged branch's worktree can be reclaimed
   }
 
   // DBR-P2-6 (DESIGN §5/U13) — `abandon` (SOFT): archive the conversation (status → 'abandoned', read-only) but
@@ -1902,6 +1903,35 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       const msgId = `drift-${mergeCommit.slice(0, 7)}-${String(d.branch).replace(/[^\w.-]/g, '_')}`;
       try { await ConversationStore.updateMessage(d.convId, msgId, { role: 'assistant', body }, { upsert: true }); } catch { /* best-effort */ }
     }
+  }
+
+  // DBR-P4-7 (§9/U10) — actuate the worktree GC: list the `.wt/` worktrees, reconcile against the dev conversations
+  // via the pure `gcPlan`, then REMOVE the ones owned by a merged/abandoned conversation (the branch is done) + `prune`
+  // stale registrations. KEEP live-conversation + the preview worktree; an orphan (no conversation) is always SURFACED
+  // not deleted (`unmerged: true` → the safe default — never auto-delete work we can't attribute). Best-effort +
+  // non-blocking. Runs after a merge (the just-merged branch's worktree can go) and on panel startup (reconcile).
+  async function _runWorktreeGc() {
+    try {
+      const lst = await gitOp('worktreeList');
+      if (!lst || !lst.ok) return;
+      const items = [];
+      for (const w of parseWorktreeList(lst.stdout)) {
+        const m = String(w.path || '').match(/[/\\]\.wt[/\\](.+)$/);
+        if (!m) continue;   // the repo root (or anything outside `.wt/`) — never GC
+        const rel = '.wt/' + m[1].replace(/\\/g, '/');
+        items.push({ path: rel, branch: w.detached ? null : w.branch, stale: w.prunable, preview: rel === PREVIEW_WT, unmerged: true });
+      }
+      if (!items.length) return;
+      const convs = [];
+      try {
+        const sums = (await ConversationStore.list()).filter((s) => s && s.kind === 'dev');
+        for (const s of sums) { const c = await ConversationStore.load(s.id); if (c && c.branch) convs.push({ branch: c.branch, status: c.status }); }
+      } catch { /* no conversations readable → every worktree is an orphan → surfaced, never deleted */ }
+      const plan = gcPlan(items, convs);
+      for (const r of plan.remove) { try { console.info(`GC ▸ remove ${r.path} — ${r.reason}`); await gitOp('worktreeRemove', { path: r.path, force: true }); } catch { /* */ } }
+      if (plan.prune.length) { try { console.info(`GC ▸ prune ${plan.prune.length} stale`); await gitOp('worktreePrune'); } catch { /* */ } }
+      for (const s of plan.surface) { try { console.info(`GC ▸ kept (surfaced — ${s.reason}): ${s.path} (${s.branch || 'detached'})`); } catch { /* */ } }
+    } catch { /* GC is best-effort, never blocks a flow */ }
   }
 
   // DBR-P3-2 (DESIGN §8/§8.1 layer 2) — `scope`: the deterministic split backstop. Read-only, no LLM, never blocks.

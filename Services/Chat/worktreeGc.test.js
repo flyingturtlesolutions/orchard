@@ -8,7 +8,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { gcPlan, isLiveStatus } from './worktreeGc.js';
+import { gcPlan, isLiveStatus, parseWorktreeList } from './worktreeGc.js';
 
 const has = (arr, path) => arr.some((x) => x.path === path);
 
@@ -89,5 +89,29 @@ describe('gcPlan — input hygiene', () => {
     const plan = gcPlan([{ branch: 'dev/x' }, null, { path: '.wt/ok', branch: 'dev/ok' }], []);
     assert.equal(plan.keep.length + plan.remove.length + plan.surface.length + plan.prune.length, 1);
     assert.ok(has(plan.remove, '.wt/ok'));   // orphan, clean → remove
+  });
+});
+
+describe('parseWorktreeList — git worktree list --porcelain (DBR-P4-7)', () => {
+  it('parses main + detached preview + a dev-branch worktree', () => {
+    const text = [
+      'worktree /repo', 'HEAD aaa', 'branch refs/heads/main', '',
+      'worktree /repo/.wt/preview', 'HEAD bbb', 'detached', '',
+      'worktree /repo/.wt/session-abc', 'HEAD ccc', 'branch refs/heads/dev/session-abc', '',
+    ].join('\n');
+    const got = parseWorktreeList(text);
+    assert.equal(got.length, 3);
+    assert.deepEqual(got[0], { path: '/repo', branch: 'main', detached: false, prunable: false });
+    assert.deepEqual(got[1], { path: '/repo/.wt/preview', branch: null, detached: true, prunable: false });
+    assert.deepEqual(got[2], { path: '/repo/.wt/session-abc', branch: 'dev/session-abc', detached: false, prunable: false });
+  });
+  it('flags a prunable (stale) worktree', () => {
+    const got = parseWorktreeList('worktree /repo/.wt/gone\nHEAD ddd\nbranch refs/heads/dev/x\nprunable gitdir gone\n');
+    assert.equal(got.length, 1);
+    assert.equal(got[0].prunable, true);
+  });
+  it('empty / nullish -> []', () => {
+    assert.deepEqual(parseWorktreeList(''), []);
+    assert.deepEqual(parseWorktreeList(null), []);
   });
 });

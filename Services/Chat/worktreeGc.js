@@ -54,3 +54,22 @@ export function gcPlan(worktrees, conversations) {
   }
   return out;
 }
+
+// DBR-P4-7 (§9) — parse `git worktree list --porcelain` into [{ path, branch, detached, prunable }]. PURE. Entries are
+// blank-line separated; each is `worktree <abs-path>` then `HEAD <sha>` then `branch refs/heads/<b>` OR `detached`,
+// optionally `prunable <reason>`. The caller maps these onto gcPlan's input (filter to `.wt/`, derive the relative
+// path + the preview flag, default unmerged:true so an orphan is surfaced not deleted).
+export function parseWorktreeList(text) {
+  const out = [];
+  let cur = null;
+  for (const raw of String(text == null ? '' : text).split(/\r?\n/)) {
+    const line = raw.replace(/\s+$/, '');
+    if (line.startsWith('worktree ')) { if (cur) out.push(cur); cur = { path: line.slice(9).trim(), branch: null, detached: false, prunable: false }; }
+    else if (!cur) continue;
+    else if (line.startsWith('branch ')) cur.branch = line.slice(7).trim().replace(/^refs\/heads\//, '');
+    else if (line === 'detached') cur.detached = true;
+    else if (line.startsWith('prunable')) cur.prunable = true;
+  }
+  if (cur) out.push(cur);
+  return out;
+}
