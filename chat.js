@@ -3043,9 +3043,9 @@ async function _tryRouterFallback(text) {
 // IL-2 (v2.74.1112) — `brain: <ask>` runs the inference-layer loop LIVE, verify-only. The panel HOSTS the loop
 // (Core/brainRun → agentLoop): assembles the palette from RETRIEVE_TOOLS (learned) ∪ builtins, thinks via
 // STEP_BRAIN, and dispatches each step via _orchReq — which already routes any channel to its executor across
-// both handler maps (the cross-map routing a background loop would otherwise reimplement). SAFETY (first cut):
-// exec AUTO-runs only nav/focus/list; a page mutation / capability replay / tab-close returns a confirm-required
-// MISS so the loop reasons around it instead of acting unconfirmed (the §2.4/§9 HITL floor). `BRAIN ▸` is a
+// both handler maps (the cross-map routing a background loop would otherwise reimplement). SAFETY: exec AUTO-runs
+// only nav/focus/list; every other leg (a capability replay / mutation) gets an inline HITL CONFIRM (§2.4/§9) —
+// the loop AWAITS the human's OK, then observes the real reply (or a decline it reasons around). `BRAIN ▸` is a
 // decision marker (registered in studio.js _DECISION_RE — INVARIANT #1) so a gc/decisions download sees it.
 async function _tryBrainCommand(text) {
   const ask = String(text).replace(/^brain:\s*/i, '').trim();
@@ -3060,9 +3060,23 @@ async function _tryBrainCommand(text) {
   const retrieve = async (g) => { try { const r = await _orchReq('RETRIEVE_TOOLS', { ask: g, tabId, groundId }); return (r && r.candidates) || []; } catch { return []; } };
   const brain = async (sctx) => { try { const r = await _orchReq('STEP_BRAIN', { ctx: sctx }); return (r && r.decision) || { kind: 'needs', needs: { kind: 'clarify' }, reason: 'brain-unreachable', confidence: 0 }; } catch (e) { return { kind: 'needs', needs: { kind: 'clarify' }, reason: e?.message || 'brain-error', confidence: 0 }; } };
   const exec = async (plan) => {
+    // Nav/focus/list auto-run (cheap, reversible). v2.74.1114 — everything else (a capability replay / mutation)
+    // gets an inline HITL CONFIRM (§2.4/§9): the loop AWAITS the human's OK here, then observes the real reply
+    // (or a decline it reasons around). A corrupted think can't fire an irreversible act without this gate.
     const autoOk = plan.channel === 'OPEN_URL_NEW_TAB' || plan.channel === 'FOCUS_TAB' || plan.channel === 'LIST_TABS';
-    if (!autoOk) return { success: false, error: `confirm-required: ${plan.channel} (brain: auto-runs only reads + nav in this first cut)` };
-    try { return await _orchReq(plan.channel, plan.payload); } catch (e) { return { success: false, error: e?.message || 'exec-error' }; }
+    if (autoOk) { try { return await _orchReq(plan.channel, plan.payload); } catch (e) { return { success: false, error: e?.message || 'exec-error' }; } }
+    return await new Promise((resolve) => {
+      const card = appendMessage({ role: 'assistant', body: '' });
+      const label = _brainLegLabel(plan);
+      _setMessageBody(card, `🧠 needs your OK — run ${label}?`);
+      const bar = _orchActionBar(card);
+      bar.appendChild(_mkBtn('Run it', async () => {
+        bar.remove(); _setMessageBody(card, `running ${label}…`);
+        try { const r = await _orchReq(plan.channel, plan.payload); _setMessageBody(card, `✓ ran ${label}`); resolve(r || { success: true }); }
+        catch (e) { _setMessageBody(card, `✗ ${e?.message || 'failed'}`); resolve({ success: false, error: e?.message || 'exec-error' }); }
+      }));
+      bar.appendChild(_mkBtn('Skip', () => { bar.remove(); _setMessageBody(card, `skipped ${label}`); resolve({ success: false, error: 'declined-by-user' }); }));
+    });
   };
   let result = null;
   try { result = await runBrain(ask, { tabId, groundId }, { retrieve, brain, exec }, { maxSteps: 6 }); }
@@ -3083,6 +3097,17 @@ function _renderBrainRun(msg, ask, result) {
   lines.push('', `→ ${term}`);
   _setMessageBody(msg, lines.join('\n'));
   try { _orchFinalize(msg); } catch { /* */ }
+}
+
+// A human label for an exec plan's HITL confirm — the bound params are the meaningful bit (the capabilityId is
+// a uuid), so surface those: "this capability with {"query":"…"}".
+function _brainLegLabel(plan) {
+  if (!plan) return 'this step';
+  if (plan.channel === 'REPLAY_SG_CAPABILITY') {
+    const pv = plan.payload && plan.payload.paramValues;
+    return `this capability${pv && Object.keys(pv).length ? ` with ${JSON.stringify(pv).slice(0, 120)}` : ''}`;
+  }
+  return `${plan.channel}${plan.payload && Object.keys(plan.payload).length ? ` ${JSON.stringify(plan.payload).slice(0, 120)}` : ''}`;
 }
 
 // IM-3 (v2.74.895) — "what can I do here?" → the INTENT MENU. A meta-ask about the APP's abilities on this
