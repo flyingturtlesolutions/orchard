@@ -15,6 +15,7 @@
 // Protocol: versioned {v:N} envelopes (§11) — Chrome's native-messaging port does the framing.
 
 import { ConversationStore, devResumeSession } from '../ConversationStore.js';   // v2.74.1022 `gch`; v2.74.1034 (DBR-2) per-conversation resume
+import { createMergeLock } from './mergeLock.js';   // DBR-P4-6 (§7.2) — the merge land-only lock + FIFO queue
 
 // DBR-P4-2 (v2.74.1062, §10) — the v:2 run-multiplex protocol. MUST match bridge/protocol.cjs PROTO_V (the host's
 // single source). It's duplicated here because the panel is browser ESM and can't `require` a `.cjs`. The cutover
@@ -446,6 +447,12 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   let run = null;   // { msgEl, lines: string[], bar: Element|null, sessionId: string|null }
   let _lastPool = null;   // DBR-P4-3b (§10) — the latest run-pool snapshot {running:[{runId,pid}], cap} from the host; P4-4 renders it.
   const runs = new Map();   // DBR-P4-3b step 5 (§10) — runId → run handle. At cap=1 it holds ≤1 (= `run`, the foreground); the frame handler demuxes by runId so a cap>1 background run streams into ITS bubble, not the foreground.
+
+  // DBR-P4-6 (§7.2) — the single in-panel merge LAND lock. Prepare (sync+test+confirm) runs lock-free; only the
+  // land step (switch main → squash → commit) holds it, so concurrent lands queue FIFO + each re-checks freshness
+  // against the `main` the one ahead produced. At cap=1 / one land at a time, acquire is immediate (no behavior change).
+  const _mergeLock = createMergeLock();
+  function _ordinal(n) { const s = ['th', 'st', 'nd', 'rd'], v = n % 100; return `${n}${s[(v - 20) % 10] || s[v] || s[0]}`; }
 
   // DB-2 (v2.74.975) — reload-icon state (spec §5). The header icon (owned by chat.js) subscribes via
   // onReloadState; we push it `enabled` (dev mode on/off → show/hide) and `available` (changes are PENDING
@@ -1630,6 +1637,16 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   // merged (archived). DBR-P2-5 adds the freshness re-check below — nothing lands on a `main` it wasn't synced+green against.
   async function _mergeLand(convId, { branch, summary, syncedMain }) {
     const bubble = devBubble(`↻ landing \`${branch}\` → \`main\`…`);
+    // DBR-P4-6 (DESIGN §7.2) — acquire the single LAND lock. Prepare ran lock-free; here concurrent lands queue FIFO
+    // (the bubble shows "waiting to merge — Nth in line") and each re-runs its freshness re-check below against the
+    // `main` the one ahead just produced. ALWAYS release in the finally — a held lock would wedge every queued merge.
+    const release = await _mergeLock.acquire(convId || branch || 'land', (pos) => {
+      try { console.info(`MERGE_LOCK ▸ ${branch} queued — ${_ordinal(pos)} in line`); } catch { /* */ }
+      _setBubble(bubble, `⏳ waiting to merge — ${_ordinal(pos)} in line (another land is landing on \`main\`)…`);
+    });
+    try { console.info(`MERGE_LOCK ▸ ${branch} acquired the land lock`); } catch { /* */ }
+    _setBubble(bubble, `↻ landing \`${branch}\` → \`main\`…`);   // clears any "waiting…" text once we hold the lock
+    try {
     // DBR-P2-5 (DESIGN §7.2) — FRESHNESS: re-read `main`'s HEAD; if it moved since prepare (another merge or an
     // out-of-band commit landed meanwhile), re-sync the branch onto the new `main` + re-run the test gate BEFORE
     // landing, so nothing ever lands on a `main` it wasn't synced+green against. (The lock/FIFO queue is Phase 4.)
@@ -1666,6 +1683,10 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const mergeCommit = String((head && head.ok && head.stdout) || '').trim();
     try { await ConversationStore.patchMeta(convId, { status: 'merged', mergedAt: Date.now(), mergeCommit }); } catch { /* archive is best-effort */ }
     _setBubble(bubble, `✓ merged \`${branch}\` → \`main\` as \`${mergeCommit.slice(0, 7) || '?'}\` (one squash commit). This conversation is archived (merged); the loaded tree is on \`main\`. **Push stays manual** — run \`cp\` when ready to publish.`);
+    } finally {
+      try { console.info(`MERGE_LOCK ▸ ${branch} released the land lock`); } catch { /* */ }
+      release();   // free the land lock → auto-promotes the next queued land (which then re-checks freshness)
+    }
   }
 
   // DBR-P2-6 (DESIGN §5/U13) — `abandon` (SOFT): archive the conversation (status → 'abandoned', read-only) but
