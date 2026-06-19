@@ -42,6 +42,9 @@ describe('protocol — the v:2 cutover (DBR-P4-2)', () => {
     // cap=1 single-run shape (today) + the empty case
     assert.deepEqual(poolSnapshot([{ runId: 'r1', pid: 9 }], 1), { running: [{ runId: 'r1', pid: 9 }], cap: 1 });
     assert.deepEqual(poolSnapshot([], 4), { running: [], cap: 4 });
+    // v2.74.1106 — the host stores the home conversation under `conv` (the lock record's key); it must survive into
+    // the pool frame so a reattaching panel re-binds the surviving run to its conversation (drawer status + switch).
+    assert.deepEqual(poolSnapshot([{ runId: 'r1', pid: 9, conv: 'cAbc' }], 1), { running: [{ runId: 'r1', conv: 'cAbc', pid: 9 }], cap: 1 });
   });
 });
 

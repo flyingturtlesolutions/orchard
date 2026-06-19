@@ -520,7 +520,7 @@ export function scopeCategory(text) {
  * Factory — chat.js hands in its rendering helpers (avoids any import cycle into the panel).
  * @param {{appendMessage: Function, setMessageBody: Function, mkBtn: Function, persistMessage?: Function, decorateBubble?: Function, renderMarkdown?: Function, wireCodeCopyButtons?: Function}} deps
  */
-export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistMessage, decorateBubble, renderMarkdown, wireCodeCopyButtons, getScrollContainer, refreshHistory, scopeCheckLLM, categorizeScopeLLM }) {
+export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistMessage, decorateBubble, renderMarkdown, wireCodeCopyButtons, getScrollContainer, refreshHistory, currentConversationId, scopeCheckLLM, categorizeScopeLLM }) {
   let port = null;
   let run = null;   // { msgEl, lines: string[], bar: Element|null, sessionId: string|null }
   let _lastPool = null;   // DBR-P4-3b (§10) — the latest run-pool snapshot {running:[{runId,pid}], cap} from the host; P4-4 renders it.
@@ -945,8 +945,18 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         // new "↻ reattaching…" per reconnect. The FIRST reattach claims the foreground `run`; the rest are background.
         for (const r of _lastPool.running) {
           if (!r || !r.runId || runs.has(r.runId) || (run && run.runId === r.runId)) continue;
-          const h = _beginRunBubble(`↻ reattaching to a run still in progress (pid ${r.pid != null ? r.pid : '?'})…`, { reattach: true, background: !!run });
+          // v2.74.1106 — the host now reports each surviving run's home conversation (`r.conv`). Bind it so the run
+          // shows running in ITS conversation's drawer, the dispatch guard counts it, and a conversation switch
+          // re-attaches it correctly. Render the bubble HERE only if that conversation is the one on screen; else
+          // create it DETACHED (it accumulates blocks + persists pinned, invisibly) so it doesn't land in the wrong
+          // conversation — reattachConversation() renders it when the user opens its conversation.
+          const convId = r.conv || null;
+          const openConv = (typeof currentConversationId === 'function') ? currentConversationId() : null;
+          const isOpen = !!(convId && openConv && convId === openConv);
+          const h = _beginRunBubble(`↻ reattaching to a run still in progress (pid ${r.pid != null ? r.pid : '?'})…`, { reattach: true, background: !isOpen || !!run });
+          h.conversationId = convId;
           h.runId = r.runId; runs.set(r.runId, h); _rekeyRunMsg(h, r.runId);
+          if (!isOpen) { try { h.msg.remove(); } catch { /* */ } }   // not this conversation → detach; surfaced on switch
         }
         _renderRunningBar();   // DBR-P4-4 — refresh the multi-run indicator
         break;
@@ -1204,6 +1214,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
 
   function startRun(payload, headline, opts = {}) {
     if (opts.conversationId) _lastRunOutcome.delete(opts.conversationId);   // v2.74.1096 — a new run supersedes the prior "done" status
+    if (opts.conversationId && payload && typeof payload === 'object') payload.conv = opts.conversationId;   // v2.74.1106 — the host stores this in the lock so a reattach re-binds the surviving run to its home conversation
     const r = _beginRunBubble(headline, { background: opts.background || false });   // DBR-P4-4 — a cap>1 2nd+ run is background
     r.pendingPayload = payload;
     r.conversationId = opts.conversationId || null;   // v2.74.1034 (DBR-2) — bind the run to its dev conversation

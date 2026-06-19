@@ -650,6 +650,12 @@ function startRun(msg) {
   const journal = path.join(BRIDGE_DIR, `${ts}.jsonl`);
   const errLog = path.join(BRIDGE_DIR, `${ts}.err.log`);
   const runId = `r${ts}`;   // DBR-P4-3b (§10) — the run-multiplex tag on every run-scoped frame; stable across reattach (stored in the lock).
+  // v2.74.1106 — the dev conversation this run belongs to, stored in the lock so a REATTACHING panel (fresh host or
+  // panel reopen) learns each surviving run's home conversation from the `pool` frame and re-binds its bubble there
+  // (without it the reattach is conversation-less: it lands in whatever conversation is open + the drawer status for
+  // its real conversation stays dark). NEVER reaches the command line — only active.json + the pool frame (both JSON).
+  // Sanitized defensively to the id char class (a ConversationStore UUID is `[0-9a-f-]`) and length-capped.
+  const conv = typeof msg.conv === 'string' ? (msg.conv.replace(/[^\w-]/g, '').slice(0, 64) || null) : null;
   // DBR-P4-3b step 4 — a CONCURRENT run spawns in its branch's worktree so N children don't collide in one tree. Off
   // unless WORKTREE_MODE AND the panel sent a branch → default (cap=1) is the repo root, exactly as today.
   let cwd = REPO;
@@ -716,7 +722,8 @@ function startRun(msg) {
   try { fs.closeSync(outFd); fs.closeSync(errFd); } catch { /* */ }   // the child holds its own copies
   child.unref();
   try {
-    addRun({ runId, pid: child.pid, startedAt: ts, journal, verb, maxTurns: turns, promptPreview: prompt.slice(0, 100) });   // DBR-P4-3b — into the runs registry
+    addRun({ runId, pid: child.pid, startedAt: ts, journal, verb, maxTurns: turns, promptPreview: prompt.slice(0, 100), conv });   // DBR-P4-3b — into the runs registry; .1106 — + home conversation for reattach
+
   } catch { /* */ }
   const _modelId = (modelFlag(msg.model).match(/--model (\S+)/) || [])[1] || 'default';
   const _resumed = resumeFlag ? _sid : null;
@@ -728,7 +735,7 @@ function startRun(msg) {
   send({ v: PROTOCOL_V, type: 'started', runId, pid: child.pid, journal: path.basename(journal), startedAt: ts, model: _modelId, maxTurns: turns, resumed: _resumed });
   // DBR-P4-3b (§10) — the `pool` frame: who's running + the slot cap. At MAX_CONCURRENT=1 it's this one run; the
   // panel can demux/aggregate on it (P4-4). Connection-scoped (no runId).
-  send({ v: PROTOCOL_V, type: 'pool', ...protocol.poolSnapshot([{ runId, pid: child.pid }], MAX_CONCURRENT) });
+  send({ v: PROTOCOL_V, type: 'pool', ...protocol.poolSnapshot([{ runId, pid: child.pid, conv }], MAX_CONCURRENT) });
   tailJournal(journal, child.pid, runId);
 }
 
