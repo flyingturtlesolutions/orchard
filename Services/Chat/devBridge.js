@@ -475,6 +475,19 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   const _mergeLock = createMergeLock();
   function _ordinal(n) { const s = ['th', 'st', 'nd', 'rd'], v = n % 100; return `${n}${s[(v - 20) % 10] || s[v] || s[0]}`; }
 
+  // DBR-P4-4 (§10) — concurrent-dispatch bookkeeping. The host's `preflight`/`started` frames carry NO runId (the
+  // host mints the runId only at spawn), so the panel correlates them to the right run handle by ARRIVAL ORDER:
+  // the native-messaging port preserves message order, so the Nth `preflight`-ok answers the Nth dispatch, and the
+  // Nth `started` the Nth posted payload. These two FIFO queues hold the in-flight handles between those hops. At
+  // cap=1 each holds ≤1 entry, so every shift() returns the one foreground `run` — byte-identical to the old
+  // `run.pendingPayload` path. The cap comes from the host's `pool` snapshot (`_lastPool`), default 1.
+  const _pendingPreflight = [];   // dispatched → awaiting preflight-ok
+  const _pendingStarted = [];     // payload posted → awaiting `started`
+  const _capNow = () => Math.max(1, (_lastPool && _lastPool.cap) || 1);
+  const _activeRuns = () => runs.size + _pendingPreflight.length + _pendingStarted.length;
+  const _canDispatch = () => _activeRuns() < _capNow();
+  const _liveForConv = (cid) => cid != null && [...runs.values(), ..._pendingPreflight, ..._pendingStarted].some((r) => r && r.conversationId === cid);
+
   // DB-2 (v2.74.975) — reload-icon state (spec §5). The header icon (owned by chat.js) subscribes via
   // onReloadState; we push it `enabled` (dev mode on/off → show/hide) and `available` (changes are PENDING
   // a reload → light the dot).
@@ -696,6 +709,11 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     try { rh.bar?.remove(); } catch { /* */ }
     if (!rh.replay) _persistBlocks(rh.msg, rh.blocks, rh.conversationId);   // v2.74.987/.993 terminal blocks; .1035 pinned
     if (rh.runId) runs.delete(rh.runId);   // DBR-P4-3b step 5 — drop from the run registry
+    // DBR-P4-4 — purge from the dispatch FIFOs too: a run that ends mid-handshake (host died after preflight-ok but
+    // before `started`, or an unreachable-host dispatch) must NOT linger and get shift()'d as a LATER run's handle.
+    // No-op in the normal flow (the run is shifted out of both queues before it ends).
+    const _ip = _pendingPreflight.indexOf(rh); if (_ip >= 0) _pendingPreflight.splice(_ip, 1);
+    const _is = _pendingStarted.indexOf(rh); if (_is >= 0) _pendingStarted.splice(_is, 1);
     if (rh === run) run = null;             // clear the FOREGROUND pointer iff this was it (a cap>1 background run leaves `run` alone)
   }
 
@@ -774,19 +792,23 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       case 'git-result': { const resolve = _gitPending.get(m.reqId); if (resolve) { _gitPending.delete(m.reqId); resolve(m); } break; }   // v2.74.1034 (DBR-2)
       case 'test-result': { const resolve = _testPending.get(m.reqId); if (resolve) { _testPending.delete(m.reqId); resolve(m); } break; }   // DBR-P2-3
       case 'git-confirm-result': { const resolve = _confirmPending.get(m.reqId); if (resolve) { _confirmPending.delete(m.reqId); resolve(m); } break; }   // DBR-P2-4
-      case 'preflight':
-        if (!m.ok) { endRun(`✗ preflight failed: ${m.error}`); break; }
-        if (run && run.pendingPayload) { const p = run.pendingPayload; run.pendingPayload = null; port.postMessage(p); _emit({ kind: 'meta', text: `claude ${m.claudeVersion} · ${m.repoRoot}` }); }
+      case 'preflight': {
+        const r = _pendingPreflight.shift() || run;   // DBR-P4-4 — this preflight-ok answers the earliest-dispatched run (FIFO)
+        if (!m.ok) { endRun(`✗ preflight failed: ${m.error}`, r); break; }
+        if (r && r.pendingPayload) { const p = r.pendingPayload; r.pendingPayload = null; port.postMessage(p); _emit({ kind: 'meta', text: `claude ${m.claudeVersion} · ${m.repoRoot}` }, r); _pendingStarted.push(r); }
         break;
+      }
       case 'pool':
         // DBR-P4-3b (§10) — the run-pool snapshot the host emits on run start/finish. At cap=1 it's this one run;
         // P4-4 renders it as the multi-run running-bar (+ "Nth in line" at cap>1). Stored now, consumed there.
         _lastPool = { running: Array.isArray(m.running) ? m.running : [], cap: Number(m.cap) || 1 };
         break;
-      case 'started':
-        if (run) { run.runId = m.runId || run.runId; if (run.runId) runs.set(run.runId, run); }   // DBR-P4-3b step 5 — record the runId + register in the run map (the demux key); endRun drops it.
-        _emit({ kind: 'meta', text: `▶ run started (pid ${m.pid}${m.resumed ? `, ↻ resumed ${String(m.resumed).slice(0, 8)}` : ''}${m.model && m.model !== 'default' ? `, model ${m.model}` : ''}${m.maxTurns ? `, ≤${m.maxTurns} turns` : ''}, journal logs/bridge/${m.journal})` });
+      case 'started': {
+        const r = _pendingStarted.shift() || run;   // DBR-P4-4 — this `started` belongs to the earliest run awaiting it (FIFO)
+        if (r) { r.runId = m.runId || r.runId; if (r.runId) runs.set(r.runId, r); }   // DBR-P4-3b step 5 — record the runId + register in the run map (the demux key); endRun drops it.
+        _emit({ kind: 'meta', text: `▶ run started (pid ${m.pid}${m.resumed ? `, ↻ resumed ${String(m.resumed).slice(0, 8)}` : ''}${m.model && m.model !== 'default' ? `, model ${m.model}` : ''}${m.maxTurns ? `, ≤${m.maxTurns} turns` : ''}, journal logs/bridge/${m.journal})` }, r);
         break;
+      }
       case 'event': {
         const ev = m.ev || {};
         const rh = runs.get(m.runId) || run;   // DBR-P4-3b step 5b — demux: route this frame to ITS run's bubble (the foreground at cap=1)
@@ -899,11 +921,15 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   // Build the live run bubble + footer (spinner · ticking elapsed · Pause). Shared by a normal run and a
   // reattach (v2.74.999). The caller posts preflight/run (normal) or nothing (reattach — the host is
   // already re-tailing the journal and will stream events straight into this bubble).
-  function _beginRunBubble(headline, { reattach = false } = {}) {
+  function _beginRunBubble(headline, { reattach = false, background = false } = {}) {
     _follow = true;       // v2.74.995 — a fresh run follows from the top; the user can scroll up to stop it
     _wireFollow();        // attach the one scroll listener (idempotent) now that the panel is up
     const { msg, bodyEl, blocks } = devBubble(headline);
-    run = { msgEl: msg, msg, bodyEl, blocks, bar: null, sessionId: null, pendingPayload: null, tick: null, reattach };
+    const rh = { msgEl: msg, msg, bodyEl, blocks, bar: null, sessionId: null, pendingPayload: null, tick: null, reattach };
+    // DBR-P4-4 step 2 — a FOREGROUND run owns the global `run` pointer (cap=1: always; the reattach/replay/gl paths
+    // read it); a cap>1 BACKGROUND run lives ONLY in `runs` (registered on `started`) + streams to its own bubble via
+    // the runId demux, leaving the foreground pointer alone. Step 1 already threaded the footer/Pause through `rh`.
+    if (!background) run = rh;
     // v2.74.989 — run footer: an amber spinner + a ticking "working… Ns" label give a live "still going"
     // signal during the silent gaps between stream events (a long tool call, model thinking). Removed at
     // endRun. v2.74.992 — "Pause" (the Esc-analog): kills the process but keeps the session; run.pausing
@@ -919,28 +945,29 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     status.textContent = label;
     bar.appendChild(spinner);
     bar.appendChild(status);
-    bar.appendChild(mkBtn('Pause', () => { if (run) run.pausing = true; try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'pause', runId: run?.runId }); } catch { /* */ } }));   // DBR-P4-3b step 5 — pause THIS run by id (host: no runId → all)
+    bar.appendChild(mkBtn('Pause', () => { rh.pausing = true; try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'pause', runId: rh.runId }); } catch { /* */ } }));   // DBR-P4-3b step 5 / P4-4 — pause THIS run by its OWN id (host: no runId → all)
     // v2.74.991 — append into .message-content (the vertical text column), NOT the message row.
     const _content = msg.querySelector('.message-content') || msg;
     _content.appendChild(bar);
-    run.bar = bar;
+    rh.bar = bar;
     try { _anchor(); } catch { /* */ }   // v2.74.995 — pin the working…/Pause footer into view immediately
     const startedAt = Date.now();
-    run.tick = setInterval(() => {
+    rh.tick = setInterval(() => {
       const s = Math.round((Date.now() - startedAt) / 1000);
       status.textContent = `${reattach ? 'reattached · ' : ''}working… ${s}s`;
     }, 1000);
-    return run;
+    return rh;
   }
 
   function startRun(payload, headline, opts = {}) {
-    const r = _beginRunBubble(headline);
+    const r = _beginRunBubble(headline, { background: opts.background || false });   // DBR-P4-4 — a cap>1 2nd+ run is background
     r.pendingPayload = payload;
     r.conversationId = opts.conversationId || null;   // v2.74.1034 (DBR-2) — bind the run to its dev conversation
     try {
       ensurePort().postMessage({ v: PROTOCOL_V, type: 'preflight' });   // run is posted on preflight-ok
+      _pendingPreflight.push(r);   // DBR-P4-4 — queue ONLY once the preflight actually went out, so the FIFO and the host's ok stay in lockstep
     } catch (e) {
-      endRun(`✗ could not reach the bridge host: ${e.message}. Run bridge/install.ps1, then reload.`);
+      endRun(`✗ could not reach the bridge host: ${e.message}. Run bridge/install.ps1, then reload.`, r);
     }
   }
 
@@ -1417,7 +1444,12 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       const ask = isNew ? rest.replace(/^new\b[:\s]*/i, '').trim() : rest;
       echoUser();
       if (!ask) { devBubble('usage: `dev: <reply>` (continues / resumes the thread) · `dev: new <task>` (fresh) · `gl` (full trace) · `gc` (decisions) · `gch` (chats) · `bug: <what broke>` · `dev: pause` (stop, keep session) · `dev: history` (recent runs) · `dev: relay on|off` (inline approvals) · `dev: concern [<scope>]` (show/edit scope) · `dev: model|turns <…>` · `dev: reset` · `dev: off`'); return true; }
-      if (run) { devBubble('a bridge run is already live — `dev: pause` to stop it.'); return true; }
+      // DBR-P4-4 — at cap>1, a 2nd dev task in ANOTHER conversation spawns a BACKGROUND run; but NEVER two at once on
+      // the SAME conversation (same branch/worktree → they'd clobber), and never past the host's slot cap. At cap=1
+      // both checks collapse to the old "one run at a time" (any 2nd task is refused — `_canDispatch` is false once
+      // a single run is in flight).
+      if (_liveForConv(convId)) { devBubble('this conversation already has a live run — `dev: pause` to stop it.'); return true; }
+      if (!_canDispatch()) { devBubble(`all ${_capNow()} run slot${_capNow() === 1 ? '' : 's'} busy — \`dev: pause\` one, or wait.`); return true; }
       // DBR-P4 — a dev run edits whatever tree is LOADED (single-tree, cap=1). If the loaded checkout isn't this
       // conversation's branch, the work lands on the wrong tree — and the host's commit-guard refuses to commit on
       // `main`, so the run does NOTHING for the branch. That mismatch used to surface only later, at `merge` time;
@@ -1450,7 +1482,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       // cap=1 (the host ignores it: repo-root spawn unless ORCHARD_MAX_CONCURRENT>1). Reuses convBranch from the
       // loaded-tree guard above.
       if (convBranch) payload.branch = convBranch;
-      startRun(payload, `dev${resumeSessionId ? ' (continuing)' : isNew ? ' (new thread)' : ''} · ${_short(ask, 80)}`, { conversationId: convId });
+      startRun(payload, `dev${resumeSessionId ? ' (continuing)' : isNew ? ' (new thread)' : ''} · ${_short(ask, 80)}`, { conversationId: convId, background: _activeRuns() > 0 });   // DBR-P4-4 — first run = foreground; a concurrent one (cap>1) = background
       return true;
     }
 
