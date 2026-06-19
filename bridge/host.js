@@ -97,6 +97,25 @@ const PROPOSE_SPLIT_TOOL = 'mcp__devbridge__propose_split';
 const CLAUDE_CMD = 'claude -p --output-format stream-json --verbose --permission-mode default'
   + ' --allowedTools Read Grep Glob Edit Write';
 
+// v2.74.1103 (DESIGN §3.3 — background survival) — the NEW claude installer ships a single NATIVE claude.exe (no
+// `claude.cmd → node` shim). That dissolves the .974 blocker (cmd.exe under DETACHED_PROCESS lost the shim chain's
+// stdout → a 0-byte journal): a native exe spawned DIRECTLY (no cmd.exe wrapper) + `detached` keeps its journal AND
+// OUTLIVES this host — so a long autonomous run survives a panel close / Apply&Reload / host crash, and the panel
+// re-attaches via the journal (DB-3). Resolve it once from PATH; null → a legacy `.cmd`-shim install, which falls
+// back to the cmd.exe spawn (current best-effort; detached there still breaks the journal). This is LAUNCH-only — the
+// args / --settings allowlist / --permission-mode are unchanged, so WHAT claude may do is identical.
+function resolveClaudeExe() {
+  try {
+    for (const d of String(process.env.PATH || '').split(path.delimiter)) {
+      if (!d) continue;
+      const p = path.join(d, 'claude.exe');
+      try { if (fs.statSync(p).isFile()) return p; } catch { /* not here */ }
+    }
+  } catch { /* */ }
+  return null;
+}
+const CLAUDE_EXE = resolveClaudeExe();
+
 // v2.74.976 — model selection WITHOUT breaking the no-user-text-on-the-command-line invariant: the panel
 // sends a short ALIAS, and ONLY a value from this fixed table is ever appended to the command (`--model
 // <id>`). An alias not in the table is ignored → the run uses Claude Code's configured default, exactly
@@ -674,16 +693,20 @@ function startRun(msg) {
   if (contract) { claudeArgv.push('--append-system-prompt', contract); log(`CONCERN ▸ scope contract injected (${Buffer.byteLength(contract, 'utf8')}B)`); }
   let child;
   try {
-    // cmd.exe /d /s /c claude … — args as DISCRETE elements (Node escapes each); the prompt still goes to
-    // STDIN, never the command line. v2.74.974 — NO `detached`: on Windows, DETACHED_PROCESS gives cmd no
-    // console and the .cmd-shim chain (claude.cmd → node) loses its redirected stdout ENTIRELY — the first
-    // live gl run journaled 0 bytes and died as `host-lost` (flag matrix: plain ✓, windowsHide ✓, detached ✗).
-    // Survival on port-close is therefore BEST-EFFORT (Windows children outlive parents unless Chrome's job
-    // object says otherwise) — the DB-3 reattach slice owns making that a guarantee.
-    child = spawn('cmd.exe', ['/d', '/s', '/c', ...claudeArgv], {
-      cwd, windowsHide: true,   // DBR-P4-3b — the run's branch worktree in WORKTREE_MODE, else the repo root (default)
-      stdio: ['pipe', outFd, errFd],
-    });
+    // The prompt always goes to STDIN, never the command line. Two launch paths (resolveClaudeExe, §97):
+    //  • NATIVE claude.exe (v2.74.1103) — spawn DIRECTLY (no cmd.exe) + `detached` so the run OUTLIVES this host. No
+    //    cmd.exe → no console → the journal survives (the .974 0-byte regression was the cmd.exe-under-DETACHED case);
+    //    detached → the child keeps streaming to its journal after a panel close / Apply&Reload / host crash, and the
+    //    panel re-attaches (DB-3). claudeArgv[0] ('claude') is dropped — the resolved exe replaces it; every other arg
+    //    + --settings/allowlist/--permission-mode is IDENTICAL to the cmd path (a launch-only change).
+    //  • legacy `.cmd`-shim install — cmd.exe /d /s /c claude … (args as DISCRETE elements, Node escapes each). NO
+    //    `detached`: DETACHED_PROCESS gives cmd no console and the shim chain loses its stdout (.974). Survival is
+    //    best-effort there; resume-from-partial is the fallback. cwd = the branch worktree in WORKTREE_MODE, else REPO.
+    if (CLAUDE_EXE) {
+      child = spawn(CLAUDE_EXE, claudeArgv.slice(1), { cwd, windowsHide: true, detached: true, stdio: ['pipe', outFd, errFd] });
+    } else {
+      child = spawn('cmd.exe', ['/d', '/s', '/c', ...claudeArgv], { cwd, windowsHide: true, stdio: ['pipe', outFd, errFd] });
+    }
   } catch (e) {
     send({ v: PROTOCOL_V, type: 'error', code: 'spawn-failed', message: e.message });
     try { fs.closeSync(outFd); fs.closeSync(errFd); } catch { /* */ }
