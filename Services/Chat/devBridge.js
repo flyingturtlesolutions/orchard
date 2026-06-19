@@ -445,6 +445,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   let port = null;
   let run = null;   // { msgEl, lines: string[], bar: Element|null, sessionId: string|null }
   let _lastPool = null;   // DBR-P4-3b (§10) — the latest run-pool snapshot {running:[{runId,pid}], cap} from the host; P4-4 renders it.
+  const runs = new Map();   // DBR-P4-3b step 5 (§10) — runId → run handle. At cap=1 it holds ≤1 (= `run`, the foreground); the frame handler demuxes by runId so a cap>1 background run streams into ITS bubble, not the foreground.
 
   // DB-2 (v2.74.975) — reload-icon state (spec §5). The header icon (owned by chat.js) subscribes via
   // onReloadState; we push it `enabled` (dev mode on/off → show/hide) and `available` (changes are PENDING
@@ -633,13 +634,16 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
 
   // Append a streamed block to the active run. Caps the rendered history (journal on disk is the full record).
   const _PERSIST_THROTTLE_MS = 2000;
-  function _emit(b) {
-    if (!run || !run.bodyEl) return;
-    run.blocks.push(b);
-    run.bodyEl.appendChild(_blockNode(b));
-    while (run.blocks.length > MAX_BLOCKS) {
-      run.blocks.shift();
-      if (run.bodyEl.firstChild) run.bodyEl.removeChild(run.bodyEl.firstChild);
+  // DBR-P4-3b step 5 — render a streamed block into a run's bubble. `rh` defaults to the FOREGROUND run, so every
+  // existing caller is unchanged (cap=1 identical); the frame handler passes a specific `rh` to demux a cap>1
+  // background run into its own bubble.
+  function _emit(b, rh = run) {
+    if (!rh || !rh.bodyEl) return;
+    rh.blocks.push(b);
+    rh.bodyEl.appendChild(_blockNode(b));
+    while (rh.blocks.length > MAX_BLOCKS) {
+      rh.blocks.shift();
+      if (rh.bodyEl.firstChild) rh.bodyEl.removeChild(rh.bodyEl.firstChild);
     }
     // v2.74.999 (DB-3) — persist a snapshot AS the run streams (throttled), not only at endRun. The
     // child does NOT survive a panel close / extension reload on Windows (verified — see findings), so
@@ -647,9 +651,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     // in the conversation (rehydrated on reopen), and `dev:` resumes the session from there. Throttled so
     // a fast run doesn't hammer chrome.storage; endRun still does the final, complete persist.
     const now = Date.now();
-    if (!run.replay && (!run._lastPersist || (now - run._lastPersist) >= _PERSIST_THROTTLE_MS)) {
-      run._lastPersist = now;
-      _persistBlocks(run.msg, run.blocks, run.conversationId);   // v2.74.1035 (DBR-3) — pin to the originating conversation
+    if (!rh.replay && (!rh._lastPersist || (now - rh._lastPersist) >= _PERSIST_THROTTLE_MS)) {
+      rh._lastPersist = now;
+      _persistBlocks(rh.msg, rh.blocks, rh.conversationId);   // v2.74.1035 (DBR-3) — pin to the originating conversation
     }
     // v2.74.995 — re-anchor the run footer (working…/Pause) so the latest block stays in view, unless
     // the user has scrolled up. Block-size-agnostic (unlike the chat's 96px near-bottom heuristic).
@@ -657,13 +661,14 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   }
 
   // End the run. `final` may be a block object or a string (→ an error result block).
-  function endRun(final) {
-    if (!run) return;
-    if (run.tick) { try { clearInterval(run.tick); } catch { /* */ } run.tick = null; }   // v2.74.989 — stop the elapsed ticker
-    if (final) _emit(typeof final === 'string' ? { kind: 'result', ok: false, text: final } : final);
-    try { run.bar?.remove(); } catch { /* */ }
-    if (!run.replay) _persistBlocks(run.msg, run.blocks, run.conversationId);   // v2.74.987/.993 terminal blocks; .1035 pinned
-    run = null;
+  function endRun(final, rh = run) {
+    if (!rh) return;
+    if (rh.tick) { try { clearInterval(rh.tick); } catch { /* */ } rh.tick = null; }   // v2.74.989 — stop the elapsed ticker
+    if (final) _emit(typeof final === 'string' ? { kind: 'result', ok: false, text: final } : final, rh);
+    try { rh.bar?.remove(); } catch { /* */ }
+    if (!rh.replay) _persistBlocks(rh.msg, rh.blocks, rh.conversationId);   // v2.74.987/.993 terminal blocks; .1035 pinned
+    if (rh.runId) runs.delete(rh.runId);   // DBR-P4-3b step 5 — drop from the run registry
+    if (rh === run) run = null;             // clear the FOREGROUND pointer iff this was it (a cap>1 background run leaves `run` alone)
   }
 
   function disconnect() {
@@ -751,7 +756,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         _lastPool = { running: Array.isArray(m.running) ? m.running : [], cap: Number(m.cap) || 1 };
         break;
       case 'started':
-        if (run) run.runId = m.runId || run.runId;   // DBR-P4-3b — record the run-multiplex tag (P4-4 demuxes on it)
+        if (run) { run.runId = m.runId || run.runId; if (run.runId) runs.set(run.runId, run); }   // DBR-P4-3b step 5 — record the runId + register in the run map (the demux key); endRun drops it.
         _emit({ kind: 'meta', text: `▶ run started (pid ${m.pid}${m.resumed ? `, ↻ resumed ${String(m.resumed).slice(0, 8)}` : ''}${m.model && m.model !== 'default' ? `, model ${m.model}` : ''}${m.maxTurns ? `, ≤${m.maxTurns} turns` : ''}, journal logs/bridge/${m.journal})` });
         break;
       case 'event': {
@@ -884,7 +889,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     status.textContent = label;
     bar.appendChild(spinner);
     bar.appendChild(status);
-    bar.appendChild(mkBtn('Pause', () => { if (run) run.pausing = true; try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'pause' }); } catch { /* */ } }));
+    bar.appendChild(mkBtn('Pause', () => { if (run) run.pausing = true; try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'pause', runId: run?.runId }); } catch { /* */ } }));   // DBR-P4-3b step 5 — pause THIS run by id (host: no runId → all)
     // v2.74.991 — append into .message-content (the vertical text column), NOT the message row.
     const _content = msg.querySelector('.message-content') || msg;
     _content.appendChild(bar);
