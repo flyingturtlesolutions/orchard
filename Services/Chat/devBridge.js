@@ -907,10 +907,12 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       case 'history':   // DB-3 (v2.74.1000) — list of recent runs → clickable, replay-on-tap
         renderHistory(Array.isArray(m.runs) ? m.runs : []);
         break;
-      case 'approval':  // DB-3 (v2.74.1002) — the run wants a non-safe tool → inline Allow/Deny
+      case 'approval': {  // DB-3 (v2.74.1002) — the run wants a non-safe tool → inline Allow/Deny
         // v2.74.1025 (DB-4) — an AskUserQuestion relay → interactive question card (pause-for-reply), not Allow/Deny.
-        if (m.tool === 'AskUserQuestion') _emitQuestion(m); else _emitApproval(m);
+        const rh = runs.get(m.runId) || run;   // DBR-P4-4 step 3 — route the card to the requesting run's bubble (foreground at cap=1)
+        if (m.tool === 'AskUserQuestion') _emitQuestion(m, rh); else _emitApproval(m, rh);
         break;
+      }
       case 'error':
         endRun(`✗ bridge error: ${m.code}${m.message ? ` — ${m.message}` : ''}${m.code === 'busy' ? ' (one run at a time; "dev: pause" to stop it)' : ''}`, runs.get(m.runId) || run);
         break;
@@ -1003,8 +1005,8 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const v = input.file_path ?? input.path ?? input.pattern ?? input.url ?? input.command ?? '';
     return v ? String(v) : JSON.stringify(input).slice(0, 200);
   }
-  function _emitApproval(m) {
-    const hostEl = (run && run.bodyEl) || devBubble('', { persist: false }).bodyEl;
+  function _emitApproval(m, rh = run) {   // DBR-P4-4 step 3 — render into the REQUESTING run's bubble (rh), not always the foreground
+    const hostEl = (rh && rh.bodyEl) || devBubble('', { persist: false }).bodyEl;
     if (!hostEl) return;
     const card = document.createElement('div');
     card.className = 'dev-approval';
@@ -1034,8 +1036,8 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   // BLOCKING; render each question with option buttons, collect the user's pick(s), then send the answer
   // back as an `approval-decision` whose `reason` carries the answer — the hook returns it to Claude (as a
   // deny reason) and the PAUSED run continues. All text via textContent (trust rule §5 — never HTML).
-  function _emitQuestion(m) {
-    const hostEl = (run && run.bodyEl) || devBubble('', { persist: false }).bodyEl;
+  function _emitQuestion(m, rh = run) {   // DBR-P4-4 step 3 — render into the REQUESTING run's bubble (rh)
+    const hostEl = (rh && rh.bodyEl) || devBubble('', { persist: false }).bodyEl;
     if (!hostEl) return;
     const questions = Array.isArray(m.input?.questions) ? m.input.questions : [];
     const card = document.createElement('div');
