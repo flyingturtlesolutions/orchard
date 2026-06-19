@@ -1,5 +1,19 @@
 # Dev branches — Phase 4 prompt plan (concurrency · §10) · bcp-gated
 
+> **▶ STATUS (2026-06-18 checkpoint) — substrate landed, concurrency core deferred.**
+> **Done + on `origin/main`, tested (933 passing):** the three trust sign-offs (worktree paths · v:2 cutover) were
+> granted; **P4-1** (worktree git ops, v2.74.1061) · **P4-2** (v:1→v:2 protocol cutover + multiplex toolkit, .1062) ·
+> **P4-3a** (run-pool scheduling core — `canStart`/`nextQueued`/`queuePosition`/`queueAccepts`, .1066) all shipped.
+> **NOT yet eyeballed:** the v:2 single-run cutover (reload host **and** panel together) + on-disk worktree create/remove.
+>
+> **⚠ Resumption — the slice boundaries below need merging.** In code, **P4-3b (host run-pool) + P4-4 (panel
+> multi-run) + P4-5 (worktree execution topology) are ONE coupled landing**, not three independent `bcp` slices: a
+> `cap>1` host garbles a single-run panel, and "spawn each run in its worktree" *is* the single-tree→worktree shift.
+> Do them as **one focused, coordinated, live-tested change** — and **NOT while actively dogfooding** the dev-bridge,
+> since it rewrites the shared host's run lifecycle (lock/journal-tail/reattach) your live sessions depend on. The
+> per-frame `runId` tagging + `pool` emission the P4-2 toolkit is waiting for belong in that landing. P4-6/P4-7/P4-8
+> stay as written. (See `logs/run/findings.md` 2026-06-18 — LESSON[scope]/[process].)
+
 Ready-to-paste prompts for **Phase 4** of `docs/DESIGN_dev_branches.md` (§10 single-host multiplexing + §7.2 merge
 lock/queue + §11 worktree `node_modules` + §9/U10 worktree GC), in dependency order. Same discipline as Phases 1–3:
 paste one → land → verify → eyeball any live-only checks → **`bcp`** → *then* the next. **Don't batch across prompts.**
