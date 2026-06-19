@@ -444,6 +444,7 @@ export function buildMergeCommitMessage(summary, convId) {
 export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistMessage, decorateBubble, renderMarkdown, wireCodeCopyButtons, getScrollContainer, refreshHistory, scopeCheckLLM }) {
   let port = null;
   let run = null;   // { msgEl, lines: string[], bar: Element|null, sessionId: string|null }
+  let _lastPool = null;   // DBR-P4-3b (§10) — the latest run-pool snapshot {running:[{runId,pid}], cap} from the host; P4-4 renders it.
 
   // DB-2 (v2.74.975) — reload-icon state (spec §5). The header icon (owned by chat.js) subscribes via
   // onReloadState; we push it `enabled` (dev mode on/off → show/hide) and `available` (changes are PENDING
@@ -744,7 +745,13 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         if (!m.ok) { endRun(`✗ preflight failed: ${m.error}`); break; }
         if (run && run.pendingPayload) { const p = run.pendingPayload; run.pendingPayload = null; port.postMessage(p); _emit({ kind: 'meta', text: `claude ${m.claudeVersion} · ${m.repoRoot}` }); }
         break;
+      case 'pool':
+        // DBR-P4-3b (§10) — the run-pool snapshot the host emits on run start/finish. At cap=1 it's this one run;
+        // P4-4 renders it as the multi-run running-bar (+ "Nth in line" at cap>1). Stored now, consumed there.
+        _lastPool = { running: Array.isArray(m.running) ? m.running : [], cap: Number(m.cap) || 1 };
+        break;
       case 'started':
+        if (run) run.runId = m.runId || run.runId;   // DBR-P4-3b — record the run-multiplex tag (P4-4 demuxes on it)
         _emit({ kind: 'meta', text: `▶ run started (pid ${m.pid}${m.resumed ? `, ↻ resumed ${String(m.resumed).slice(0, 8)}` : ''}${m.model && m.model !== 'default' ? `, model ${m.model}` : ''}${m.maxTurns ? `, ≤${m.maxTurns} turns` : ''}, journal logs/bridge/${m.journal})` });
         break;
       case 'event': {
