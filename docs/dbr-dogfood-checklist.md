@@ -10,8 +10,9 @@ Each: **Setup → Do → Expect** + which slice it proves. Tick the box when it 
 
 ## 0. Reload + the `v:2` protocol cutover  ·  *proves P4-2 + the Orchard rename*  — **DO FIRST**
 - **Setup:** Reload the unpacked extension in Chrome (this respawns the native host) **and** the side panel.
-- **Do:** Confirm the header reads **Orchard** (not AHuB) and the version is **v2.74.1068+**. Start a **New dev**
-  conversation and run one trivial task (e.g. *"add a comment to the top of README"*).
+- **Do:** Confirm the header reads **Orchard** (not AHuB) and the version is **v2.74.1077+**. Start a **New dev**
+  conversation, type `lt` (loads the branch into the working tree + reloads — required before the first task as of
+  the v2.74.1077 run guard, Scenario 8), then run one trivial task (e.g. *"add a comment to the top of README"*).
 - **Expect:** the run **streams and finishes normally** — no hang, no "busy"/version-mismatch error. (If a run
   starts but nothing streams, the `v:2` cutover missed a frame — flag it; everything below depends on this.)
 - [ ] pass
@@ -68,6 +69,16 @@ Each: **Setup → Do → Expect** + which slice it proves. Tick the box when it 
 - **Expect:** **no manifest version conflict** — the driver auto-resolves the `version` line to the higher number and
   the flow proceeds to the test gate + land. (Last time this stopped on a conflict; now it shouldn't.) *Proven
   headless on a synthetic merge; this is the live confirmation in the panel flow.*
+- [ ] pass
+
+## 8. Run guard — `dev:` refuses when the loaded tree isn't the branch  ·  *proves the v2.74.1077 guard*
+- **Setup:** a dev conversation whose branch is **not** loaded — i.e. the working tree is on `main` (e.g. right after
+  creating the conversation, before any `lt`).
+- **Do:** send any task (just type it, or `dev: add a comment`).
+- **Expect:** **no run starts** — instead *"✗ `dev` — the loaded tree is on `main`, not this conversation's branch
+  `dev/session-…`. `lt` to load the branch first …"*. Then `lt`, re-send the task → it now streams and the work lands
+  on the branch. (Pre-.1077 the task silently ran against `main` and the mismatch only surfaced later at `merge`.)
+  Skipped under worktree mode (cap>1), where the host spawns in `.wt/<branch>` regardless of what's loaded.
 - [ ] pass
 
 ---

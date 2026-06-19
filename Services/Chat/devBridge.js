@@ -1390,6 +1390,21 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       echoUser();
       if (!ask) { devBubble('usage: `dev: <reply>` (continues / resumes the thread) · `dev: new <task>` (fresh) · `gl` (full trace) · `gc` (decisions) · `gch` (chats) · `bug: <what broke>` · `dev: pause` (stop, keep session) · `dev: history` (recent runs) · `dev: relay on|off` (inline approvals) · `dev: concern [<scope>]` (show/edit scope) · `dev: model|turns <…>` · `dev: reset` · `dev: off`'); return true; }
       if (run) { devBubble('a bridge run is already live — `dev: pause` to stop it.'); return true; }
+      // DBR-P4 — a dev run edits whatever tree is LOADED (single-tree, cap=1). If the loaded checkout isn't this
+      // conversation's branch, the work lands on the wrong tree — and the host's commit-guard refuses to commit on
+      // `main`, so the run does NOTHING for the branch. That mismatch used to surface only later, at `merge` time;
+      // guard the run itself the way `merge`/`sync` already do — refuse with a clear `lt` next-step. Fails OPEN (a
+      // host that can't answer `currentBranch` never blocks), and is SKIPPED under worktree mode (cap>1, from the
+      // last `pool` snapshot): there the host spawns in `.wt/<branch>` regardless of what's loaded.
+      const convBranch = convId ? (((await ConversationStore.load(convId).catch(() => null)) || {}).branch || null) : null;
+      const worktreeMode = !!(_lastPool && _lastPool.cap > 1);
+      if (convBranch && !worktreeMode) {
+        const cur = await gitOp('currentBranch');
+        if (cur && cur.ok && cur.stdout !== convBranch) {
+          devBubble(`✗ \`dev\` — the loaded tree is on \`${cur.stdout || '?'}\`, not this conversation's branch \`${convBranch}\`. \`lt\` to load the branch first so your work lands on it, then send the task. (\`merge\` needs the tree there too.)`);
+          return true;
+        }
+      }
       const model = await getModel();
       const maxTurns = await getTurns();
       // v2.74.1034 (DBR-2) — resume THIS dev conversation's session (per-conversation), not the global key.
@@ -1404,8 +1419,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       const concern = await _ensureConcern(convId, ask);
       if (concern) payload.concern = concern;
       // DBR-P4-3b step 4 — send the branch so a CONCURRENT host run spawns in that branch's worktree. Harmless at
-      // cap=1 (the host ignores it: repo-root spawn unless ORCHARD_MAX_CONCURRENT>1).
-      try { const _b = convId ? ((await ConversationStore.load(convId)) || {}).branch : null; if (_b) payload.branch = _b; } catch { /* */ }
+      // cap=1 (the host ignores it: repo-root spawn unless ORCHARD_MAX_CONCURRENT>1). Reuses convBranch from the
+      // loaded-tree guard above.
+      if (convBranch) payload.branch = convBranch;
       startRun(payload, `dev${resumeSessionId ? ' (continuing)' : isNew ? ' (new thread)' : ''} · ${_short(ask, 80)}`, { conversationId: convId });
       return true;
     }

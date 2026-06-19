@@ -188,16 +188,17 @@ $('btn-new-dev-conversation')?.addEventListener('click', async () => {
   // (best-effort: if the host isn't installed yet the conversation is still created with the intended branch
   // name, stored for later reconciliation).
   const branch = deriveBranchName('session');
-  // v2.74.1074 — the drawer label for a new dev conversation is `DEV <session-id>`, where session-id is the
-  // branch's collision-resistant shortid (`dev/session-<shortid>`). It's the only stable per-session id we
-  // have at creation (the Claude Code sessionId only arrives after the first run), and it makes every dev row
-  // self-identifying instead of every one reading the generic "Dev — Claude Code".
+  // v2.74.1077 — the drawer label for a new dev conversation is just the `<session-id>` (the branch's
+  // collision-resistant shortid, `dev/session-<shortid>`). It's the only stable per-session id we have at
+  // creation (the Claude Code sessionId only arrives after the first run), and the amber dev badge already
+  // marks the row as a Claude Code thread — so the row reads as its bare id (was `DEV <id>` through .1076,
+  // the prefix dropped here as redundant with the badge).
   const sessionId = branch.slice(branch.lastIndexOf('-') + 1);
   let branchOk = false;
   try { const r = await _getDevBridge().gitOp('branchCreate', { branch, base: 'main' }); branchOk = !!(r && r.ok); }
   catch (e) { try { console.warn('[chat] dev branch create failed:', e?.message); } catch { /* */ } }
   if (!branchOk) { try { console.warn(`[chat] dev branch ${branch} not created (host unready?); stored for reconciliation`); } catch { /* */ } }
-  const conv = await ConversationStore.create({ title: `DEV ${sessionId}`, kind: 'dev', branch });
+  const conv = await ConversationStore.create({ title: sessionId, kind: 'dev', branch });
   _currentConversationId = conv.id;
   _currentConversationKind = 'dev';
   _showDevEmptyState();
