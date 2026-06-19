@@ -731,10 +731,15 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   function _emit(b, rh = run) {
     if (!rh || !rh.bodyEl) return;
     rh.blocks.push(b);
-    rh.bodyEl.appendChild(_blockNode(b));
+    // v2.74.1093 — a BACKGROUNDED run (its conversation isn't the one on screen) has a DETACHED bubble after a
+    // conversation switch wiped #messages. Keep accumulating blocks (+ persist below) but skip the DOM work; the
+    // re-attach on switch-back re-renders rh.blocks into a fresh bubble. Attached (the normal/foreground case) is
+    // unchanged → cap=1 byte-identical.
+    const _attached = rh.bodyEl.isConnected;
+    if (_attached) rh.bodyEl.appendChild(_blockNode(b));
     while (rh.blocks.length > MAX_BLOCKS) {
       rh.blocks.shift();
-      if (rh.bodyEl.firstChild) rh.bodyEl.removeChild(rh.bodyEl.firstChild);
+      if (_attached && rh.bodyEl.firstChild) rh.bodyEl.removeChild(rh.bodyEl.firstChild);
     }
     // v2.74.999 (DB-3) — persist a snapshot AS the run streams (throttled), not only at endRun. The
     // child does NOT survive a panel close / extension reload on Windows (verified — see findings), so
@@ -748,7 +753,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     }
     // v2.74.995 — re-anchor the run footer (working…/Pause) so the latest block stays in view, unless
     // the user has scrolled up. Block-size-agnostic (unlike the chat's 96px near-bottom heuristic).
-    try { _anchor(); } catch { /* */ }
+    if (_attached) { try { _anchor(); } catch { /* */ } }
   }
 
   // End the run. `final` may be a block object or a string (→ an error result block).
@@ -995,10 +1000,16 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     // read it); a cap>1 BACKGROUND run lives ONLY in `runs` (registered on `started`) + streams to its own bubble via
     // the runId demux, leaving the foreground pointer alone. Step 1 already threaded the footer/Pause through `rh`.
     if (!background) run = rh;
-    // v2.74.989 — run footer: an amber spinner + a ticking "working… Ns" label give a live "still going"
-    // signal during the silent gaps between stream events (a long tool call, model thinking). Removed at
-    // endRun. v2.74.992 — "Pause" (the Esc-analog): kills the process but keeps the session; run.pausing
-    // tells the done handler to frame the resulting host-lost as a pause, not an error.
+    rh.startedAt = Date.now();   // v2.74.1093 — kept on the handle so a conversation-switch re-attach preserves elapsed
+    _attachRunFooter(rh);        // v2.74.989/.992 — amber spinner · ticking "working… Ns" · Pause; factored out (.1093) so re-attach can rebuild it
+    return rh;
+  }
+
+  // Build (or REBUILD) the run footer onto rh's CURRENT bubble: spinner · ticking elapsed · Pause. Factored out of
+  // _beginRunBubble at v2.74.1093 so _reattachRunBubble can re-create it on a freshly-rendered bubble after a
+  // conversation switch. Clears any prior tick first (the old bubble's interval) so only one ever ticks.
+  function _attachRunFooter(rh) {
+    if (rh.tick) { try { clearInterval(rh.tick); } catch { /* */ } rh.tick = null; }
     const bar = document.createElement('div');
     bar.className = 'dev-run-bar';
     const spinner = document.createElement('span');
@@ -1006,22 +1017,52 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     spinner.setAttribute('aria-hidden', 'true');
     const status = document.createElement('span');
     status.className = 'dev-run-status';
-    const label = reattach ? 'reattached · working…' : 'working…';
-    status.textContent = label;
     bar.appendChild(spinner);
     bar.appendChild(status);
-    bar.appendChild(mkBtn('Pause', () => { rh.pausing = true; try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'pause', runId: rh.runId }); } catch { /* */ } }));   // DBR-P4-3b step 5 / P4-4 — pause THIS run by its OWN id (host: no runId → all)
-    // v2.74.991 — append into .message-content (the vertical text column), NOT the message row.
-    const _content = msg.querySelector('.message-content') || msg;
-    _content.appendChild(bar);
+    bar.appendChild(mkBtn('Pause', () => { rh.pausing = true; try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'pause', runId: rh.runId }); } catch { /* */ } }));   // pause THIS run by its OWN id (host: no runId → all)
+    const _content = (rh.msg && rh.msg.querySelector('.message-content')) || rh.msg;   // v2.74.991 — the vertical text column, not the row
+    if (_content) _content.appendChild(bar);
     rh.bar = bar;
-    try { _anchor(); } catch { /* */ }   // v2.74.995 — pin the working…/Pause footer into view immediately
-    const startedAt = Date.now();
-    rh.tick = setInterval(() => {
-      const s = Math.round((Date.now() - startedAt) / 1000);
-      status.textContent = `${reattach ? 'reattached · ' : ''}working… ${s}s`;
-    }, 1000);
-    return rh;
+    try { _anchor(); } catch { /* */ }
+    const tickFn = () => { status.textContent = `${rh.reattach ? 'reattached · ' : ''}working… ${Math.round((Date.now() - (rh.startedAt || Date.now())) / 1000)}s`; };
+    tickFn();
+    rh.tick = setInterval(tickFn, 1000);
+  }
+
+  // v2.74.1093 — RE-ATTACH a still-live run to a FRESH bubble after a conversation switch wiped #messages. The run
+  // kept executing (the host doesn't know about UI switches) and kept accumulating rh.blocks + persisting; only its
+  // bubble DOM was destroyed. Rebuild: new bubble, re-render rh.blocks, KEEP the stored message id (so persistence
+  // stays ONE row), re-point the handle, restore the live footer. Streaming (demuxed by runId) lands here from now on.
+  function _reattachRunBubble(rh) {
+    if (!rh) return;
+    const prevMsgId = (rh.msg && rh.msg.dataset) ? rh.msg.dataset.messageId : null;
+    if (rh.tick) { try { clearInterval(rh.tick); } catch { /* */ } rh.tick = null; }
+    const { msg, bodyEl } = devBubble('', { persist: false });   // already persisting under prevMsgId — don't double-write
+    if (prevMsgId && msg && msg.dataset) { try { msg.dataset.messageId = prevMsgId; } catch { /* */ } }
+    for (const b of (rh.blocks || [])) { try { bodyEl.appendChild(_blockNode(b)); } catch { /* */ } }
+    rh.msgEl = msg; rh.msg = msg; rh.bodyEl = bodyEl;
+    _attachRunFooter(rh);
+  }
+  // The live run handles bound to a conversation (started, mid-handshake, or the foreground). At most one per
+  // conversation (the dispatch guard refuses a 2nd), but kept general. Replay/history bubbles are excluded.
+  function _liveRunsForConv(cid) {
+    if (cid == null) return [];
+    const set = new Set([...runs.values(), ..._pendingPreflight, ..._pendingStarted]);
+    if (run) set.add(run);
+    return [...set].filter((rh) => rh && rh.conversationId === cid && !rh.replay);
+  }
+  // v2.74.1093 — chat.js calls this on a conversation switch (after rendering persisted messages): re-attach any run
+  // still live for the now-open conversation so it shows LIVE, not a frozen snapshot. Returns how many re-attached.
+  function reattachConversation(cid) {
+    const live = _liveRunsForConv(cid);
+    for (const rh of live) _reattachRunBubble(rh);
+    try { _renderRunningBar(); } catch { /* */ }
+    return live.length;
+  }
+  // The persisted message ids of live runs for a conversation — chat.js SKIPS these on rehydrate so the live
+  // re-attach (above) is the single rendering, not a frozen duplicate beside it.
+  function liveRunMessageIds(cid) {
+    return new Set(_liveRunsForConv(cid).map((rh) => rh && rh.msg && rh.msg.dataset && rh.msg.dataset.messageId).filter(Boolean));
   }
 
   function startRun(payload, headline, opts = {}) {
@@ -2117,5 +2158,5 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     return true;
   }
 
-  return { maybeHandle, enable, gitOp, onReloadState, refreshReloadState, reloadExtension };
+  return { maybeHandle, enable, gitOp, onReloadState, refreshReloadState, reloadExtension, reattachConversation, liveRunMessageIds };
 }

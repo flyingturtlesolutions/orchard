@@ -4448,7 +4448,15 @@ async function _rehydrateConversation(conv) {
   _enterConversation();
   $('messages').innerHTML = '';
 
+  // v2.74.1093 — for a DEV conversation, a run still LIVE here kept executing while you were on another chat; skip its
+  // persisted snapshot and let the bridge re-attach it as a live, streaming bubble below (shown once, not frozen).
+  let _liveRunIds = new Set();
+  if (_currentConversationKind === 'dev') {
+    try { _liveRunIds = _getDevBridge()?.liveRunMessageIds?.(conv.id) || new Set(); } catch { /* */ }
+  }
+
   for (const pm of conv.messages) {
+    if (_liveRunIds.has(pm.id)) continue;   // its live bubble is re-attached after the loop
     const dom = appendMessage({
       role        : pm.role,
       body        : pm.body,
@@ -4482,5 +4490,10 @@ async function _rehydrateConversation(conv) {
     }
   }
   _renderDevStatusHeader();   // DBR-6 — render the branch header for a dev conversation; self-hides for agent
+  // v2.74.1093 — re-attach any dev run still live for this conversation → a live, streaming bubble (not a frozen
+  // snapshot). The run kept executing in the background; this reconnects its stream to the freshly-rendered view.
+  if (_currentConversationKind === 'dev') {
+    try { _getDevBridge()?.reattachConversation?.(conv.id); } catch { /* */ }
+  }
 }
 
