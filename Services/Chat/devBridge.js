@@ -189,6 +189,27 @@ export function computeDrift(mainFiles, branchFiles) {
   return out;
 }
 
+// DBR-P4-7 (DESIGN §7) — the post-merge cross-branch drift BROADCAST set. After a land moves `main` by `mergedFiles`,
+// every OTHER live dev branch that ALSO touched any of those files has drifted and should be nudged to `sync`. PURE:
+// composes computeDrift per branch; returns only the branches with non-empty drift, each with its drifted files +
+// whether any are foundational (a stronger "definitely sync" nudge). `branches` is [{ convId, branch, files }] where
+// `files` is that branch's own changes vs its merge-base. The caller excludes the just-merged branch + dead ones.
+export function driftBroadcastSet(mergedFiles, branches, opts = {}) {
+  const out = [];
+  for (const b of (Array.isArray(branches) ? branches : [])) {
+    if (!b || !b.branch) continue;
+    const drift = computeDrift(mergedFiles, b.files);
+    if (!drift.length) continue;
+    out.push({
+      convId: b.convId == null ? null : b.convId,
+      branch: b.branch,
+      drift,
+      foundational: drift.some((f) => isFoundationalFile(f, opts)),
+    });
+  }
+  return out;
+}
+
 // DBR-P3-1 (DESIGN §8.1) — the manual `split:` corrective verb: extract out-of-scope work into its own dev branch
 // + conversation. Prefix form (`split: <concern>`) — unambiguous vs a coding task that merely mentions "split".
 // PURE + exported.

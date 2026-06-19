@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, driftBroadcastSet, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer } from './devBridge.js';
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
@@ -427,5 +427,34 @@ describe('DBR-P3-7 scope? semantic-check helpers', () => {
     assert.deepEqual(normalizeScopeVerdict('no json here'), { creep: false, summary: '', suggestions: [] });
     assert.deepEqual(normalizeScopeVerdict(null), { creep: false, summary: '', suggestions: [] });
     assert.equal(normalizeScopeVerdict({ creep: false, suggestions: [] }).creep, false);
+  });
+});
+
+describe('driftBroadcastSet — post-merge cross-branch nudge set (DBR-P4-7)', () => {
+  it('includes a branch that touched a merged file, with its drift; excludes non-overlapping', () => {
+    const set = driftBroadcastSet(['a.js', 'Core/x.js'], [
+      { convId: 'c1', branch: 'dev/session-1', files: ['a.js', 'z.js'] },
+      { convId: 'c2', branch: 'dev/session-2', files: ['unrelated.js'] },
+    ]);
+    assert.equal(set.length, 1);
+    assert.equal(set[0].branch, 'dev/session-1');
+    assert.equal(set[0].convId, 'c1');
+    assert.deepEqual(set[0].drift, ['a.js']);
+    assert.equal(set[0].foundational, false);
+  });
+  it('flags foundational when a drifted file is under Core/ or Services/', () => {
+    const set = driftBroadcastSet(['Core/x.js'], [{ convId: 'c1', branch: 'dev/s1', files: ['Core/x.js'] }]);
+    assert.equal(set.length, 1);
+    assert.equal(set[0].foundational, true);
+  });
+  it('returns an empty set for no overlap / empty / nullish inputs', () => {
+    assert.deepEqual(driftBroadcastSet(['a.js'], [{ convId: 'c', branch: 'dev/s', files: ['b.js'] }]), []);
+    assert.deepEqual(driftBroadcastSet([], []), []);
+    assert.deepEqual(driftBroadcastSet(null, null), []);
+  });
+  it('skips entries with no branch', () => {
+    const set = driftBroadcastSet(['a.js'], [{ files: ['a.js'] }, { branch: 'dev/s', files: ['a.js'] }]);
+    assert.equal(set.length, 1);
+    assert.equal(set[0].branch, 'dev/s');
   });
 });
