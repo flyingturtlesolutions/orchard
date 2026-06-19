@@ -430,8 +430,14 @@ function _setItemMeta(item) {
     metaEl.className = 'history-item-meta run-status running';
     metaEl.textContent = `▶ running… ${_fmtElapsed((Date.now() - (Number(st.startedAt) || Date.now())) / 1000)}`;
   } else if (st.state === 'done') {
-    metaEl.className = `history-item-meta run-status done${st.ok ? '' : ' failed'}`;
-    metaEl.textContent = `${st.ok ? '✓ done' : '✗ failed'} · ${relTime(Number(st.at) || Date.now())}`;
+    metaEl.className = 'history-item-meta run-status done';
+    metaEl.textContent = `✓ done · ${relTime(Number(st.at) || Date.now())}`;
+  } else if (st.state === 'failed') {
+    metaEl.className = 'history-item-meta run-status done failed';
+    metaEl.textContent = `✗ failed · ${relTime(Number(st.at) || Date.now())}`;
+  } else if (st.state === 'paused') {
+    metaEl.className = 'history-item-meta run-status paused';
+    metaEl.textContent = `⏸ paused · ${relTime(Number(st.at) || Date.now())}`;
   } else {
     metaEl.className = 'history-item-meta';
     metaEl.textContent = relTime(Number(item.dataset.updated) || Date.now());

@@ -760,10 +760,13 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   // End the run. `final` may be a block object or a string (→ an error result block).
   function endRun(final, rh = run) {
     if (!rh) return;
-    // v2.74.1096 — record the last-run OUTCOME for the drawer's "✓ done" / "✗ failed" status. A PAUSED run (incl. a
-    // delete-cancel) or a REPLAY bubble is not a completion, so skip those. A string `final` is always an error.
-    if (rh.conversationId && !rh.pausing && !rh.replay && final) {
-      _lastRunOutcome.set(rh.conversationId, { ok: (typeof final === 'object') ? (final.ok !== false) : false, at: Date.now() });
+    // v2.74.1096/.1098 — record the last-run OUTCOME for the drawer status: paused / done / failed. A PAUSED run
+    // (Pause button or delete-cancel — rh.pausing) is resumable, not a completion; a REPLAY bubble isn't a run; a
+    // string `final` is always an error. Cleared when a new run starts or the conversation is opened.
+    if (rh.conversationId && !rh.replay) {
+      const kind = rh.pausing ? 'paused'
+        : (final ? (((typeof final === 'object') ? (final.ok !== false) : false) ? 'done' : 'failed') : null);
+      if (kind) _lastRunOutcome.set(rh.conversationId, { kind, at: Date.now() });
     }
     if (rh.tick) { try { clearInterval(rh.tick); } catch { /* */ } rh.tick = null; }   // v2.74.989 — stop the elapsed ticker
     if (final) _emit(typeof final === 'string' ? { kind: 'result', ok: false, text: final } : final, rh);
@@ -1086,8 +1089,8 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const live = _liveRunsForConv(cid);
     if (live.some((rh) => rh.awaitingAction)) return { state: 'awaiting' };
     if (live.length) return { state: 'running', startedAt: Math.min(...live.map((rh) => Number(rh.startedAt) || Date.now())) };
-    const done = _lastRunOutcome.get(cid);   // v2.74.1096 — no live run, but the last one finished → "✓ done" / "✗ failed"
-    if (done) return { state: 'done', ok: done.ok, at: done.at };
+    const o = _lastRunOutcome.get(cid);   // v2.74.1096/.1098 — no live run, but the last one ended → done / failed / paused
+    if (o) return { state: o.kind, at: o.at };
     return { state: 'idle' };
   }
   // v2.74.1096 — clear a conversation's "done" marker (called when the conversation is opened — you've seen it).
