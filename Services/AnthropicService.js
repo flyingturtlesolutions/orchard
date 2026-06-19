@@ -2718,6 +2718,23 @@ Reply ONLY with JSON: {"kind":"<one of ${KINDS.join('|')}>","correction":{"<PARA
     } catch (e) { return { success: false, error: e.message }; }
   }
 
+  // v2.74.1102 — categorize a dev task's SCOPE into a short engineering-specialty ROLE (the dev-conversation drawer
+  // label). One tiny structured call on the `match` (cheap) tier; the model picks an apt role, so there's no keyword
+  // exception list to maintain. Returns { success, role } or { success:false, error }. Panel LLM path, no new trust
+  // surface (the scope is the user's own ask).
+  static async categorizeDevScope({ scope } = {}) {
+    const s = String(scope || '').replace(/\s+/g, ' ').trim().slice(0, 400);
+    if (!s) return { success: false, error: 'empty scope' };
+    if (!(await AnthropicService.hasLlm())) return { success: false, error: 'no LLM configured' };
+    const system = 'Label a software-development task with the engineering SPECIALTY it most calls for, as a SHORT role title of 1-3 words — e.g. "UX designer", "Frontend engineer", "Backend engineer", "Cloud engineer", "Data engineer", "QA engineer", "Security engineer", "Performance engineer", "DevOps", "Docs writer", "Refactoring", "Bug fix". If none fit, invent a concise, apt specialty. Reply with ONLY the role title — no quotes, punctuation, or explanation.';
+    try {
+      const raw = await AnthropicService.#call(String(system), [{ type: 'text', text: s }], 16, [], { role: 'match', operation: 'categorizeDevScope' });
+      if (!raw?.success) return { success: false, error: raw?.error || 'LLM call failed' };
+      const role = String(raw.text || '').replace(/[\r\n]+/g, ' ').replace(/^["'`\s]+|["'`.\s]+$/g, '').replace(/\s+/g, ' ').trim().slice(0, 28);
+      return role ? { success: true, role } : { success: false, error: 'empty role' };
+    } catch (e) { return { success: false, error: e.message }; }
+  }
+
   /**
    * ORCH-X compiler front-end — SEMANTICALLY decompose a complex ASK into an ORDERED plan over the user's recorded
    * CAPABILITIES, binding each step's params from the ask. This is what the lexical decomposeAsk can't do: turn

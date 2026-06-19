@@ -3242,7 +3242,7 @@ function _getDevBridge() {
   // prose, tool chips) mirroring Claude Code desktop. Same injection-safe renderer the chat uses.
   // v2.74.995 — getScrollContainer: the bridge runs its OWN follow-scroll (the chat's 96px near-bottom
   // heuristic breaks for the bridge's large per-block appends), anchoring the working…/Pause footer.
-  if (!_devBridgeInstance) _devBridgeInstance = createDevBridge({ appendMessage, setMessageBody: _setMessageBody, mkBtn: _mkBtn, persistMessage: _persistMessageUpdate, decorateBubble: _decorateDevBubble, renderMarkdown, wireCodeCopyButtons, getScrollContainer: () => $('conversation'), refreshHistory: _refreshHistoryIfOpen, scopeCheckLLM: (p) => _orchReq('DEV_SCOPE_CHECK', p) });   // DBR-P3-7 — the `scope?` semantic check routes through the panel LLM path
+  if (!_devBridgeInstance) _devBridgeInstance = createDevBridge({ appendMessage, setMessageBody: _setMessageBody, mkBtn: _mkBtn, persistMessage: _persistMessageUpdate, decorateBubble: _decorateDevBubble, renderMarkdown, wireCodeCopyButtons, getScrollContainer: () => $('conversation'), refreshHistory: _refreshHistoryIfOpen, scopeCheckLLM: (p) => _orchReq('DEV_SCOPE_CHECK', p), categorizeScopeLLM: (p) => _orchReq('DEV_CATEGORIZE_SCOPE', p) });   // DBR-P3-7 — `scope?` semantic check; .1102 — Claude picks the dev-conversation label
   return _devBridgeInstance;
 }
 

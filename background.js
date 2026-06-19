@@ -1744,6 +1744,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
+    case 'DEV_CATEGORIZE_SCOPE': {   // v2.74.1102 — dev-conversation drawer label: Claude categorizes the scope into a short role
+      (async () => {
+        try {
+          const r = await AnthropicService.categorizeDevScope({ scope: payload && payload.scope });
+          sendResponse(r || { success: false, error: 'no result' });
+        } catch (e) { sendResponse({ success: false, error: e?.message || String(e) }); }
+      })();
+      return true;
+    }
+
     // ── OBS-1: demonstration recorder ────────────────────────────────────────
     case 'RECORD_START_SESSION': {
       (async () => {

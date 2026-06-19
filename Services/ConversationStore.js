@@ -222,7 +222,7 @@ export const ConversationStore = {
     if (!conv) return null;
     // v2.74.1045 (DBR-P2-2) — `syncedMain`: the `main` commit this branch last synced onto (feeds the P2-5 merge freshness check).
     // v2.74.1053 (DBR-P3-1) — `seed`: the split-seed prompt; cleared (→ null) by chat.js once pre-filled into the input.
-    for (const k of ['branch', 'concern', 'sessionId', 'status', 'mergedAt', 'mergeCommit', 'title', 'syncedMain', 'seed']) {
+    for (const k of ['branch', 'concern', 'sessionId', 'status', 'mergedAt', 'mergeCommit', 'title', 'syncedMain', 'seed', 'titledByLlm']) {   // .1102 — titledByLlm: the drawer label was set by Claude (don't let the keyword fallback clobber it)
       if (k in fields) conv[k] = fields[k];
     }
     conv.updatedAt = Date.now();

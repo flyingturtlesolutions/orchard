@@ -520,7 +520,7 @@ export function scopeCategory(text) {
  * Factory — chat.js hands in its rendering helpers (avoids any import cycle into the panel).
  * @param {{appendMessage: Function, setMessageBody: Function, mkBtn: Function, persistMessage?: Function, decorateBubble?: Function, renderMarkdown?: Function, wireCodeCopyButtons?: Function}} deps
  */
-export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistMessage, decorateBubble, renderMarkdown, wireCodeCopyButtons, getScrollContainer, refreshHistory, scopeCheckLLM }) {
+export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistMessage, decorateBubble, renderMarkdown, wireCodeCopyButtons, getScrollContainer, refreshHistory, scopeCheckLLM, categorizeScopeLLM }) {
   let port = null;
   let run = null;   // { msgEl, lines: string[], bar: Element|null, sessionId: string|null }
   let _lastPool = null;   // DBR-P4-3b (§10) — the latest run-pool snapshot {running:[{runId,pid}], cap} from the host; P4-4 renders it.
@@ -621,20 +621,39 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         concern = _conciseConcern(ask);
         if (concern) await ConversationStore.patchMeta(id, { concern }).catch(() => { /* */ });
       }
-      if (concern) _applyScopeTitle(conv, concern);   // v2.74.1099 — drawer label = scope category, not the session shortid
+      if (concern) {
+        _applyScopeTitle(conv, concern);                      // v2.74.1099 — instant keyword label (fallback / pre-LLM)
+        if (!conv.titledByLlm) _llmCategorize(id, concern);   // v2.74.1102 — then have Claude pick the role (once per conversation; overrides)
+      }
       return concern || null;
     } catch { return null; }
   };
-  // v2.74.1099 — keep the dev-conversation drawer LABEL = its scope category (scopeCategory of the concern), replacing
-  // the session shortid. Sets the title when it differs (no-op once it matches → not re-written every dispatch). The
-  // category applies to NEW conversations on their first task + EXISTING ones on their next task. Best-effort.
+  // v2.74.1099 — the dev-conversation drawer LABEL = its scope category (scopeCategory of the concern), replacing the
+  // session shortid. INSTANT keyword fallback; skipped once Claude has set the label (`titledByLlm`) so it can't clobber
+  // the LLM result. Sets only when it differs (no rewrite every dispatch). Best-effort.
   function _applyScopeTitle(conv, scopeText) {
-    if (!conv || conv.kind !== 'dev') return;
+    if (!conv || conv.kind !== 'dev' || conv.titledByLlm) return;
     const category = scopeCategory(scopeText);
     if (!category || conv.title === category) return;
     ConversationStore.patchMeta(conv.id, { title: category })
       .then(() => { try { refreshHistory && refreshHistory(); } catch { /* */ } })
       .catch(() => { /* */ });
+  }
+  // v2.74.1102 — have CLAUDE (not the keyword map) pick the role label: one tiny structured call (background
+  // DEV_CATEGORIZE_SCOPE → AnthropicService). On success it OVERRIDES the keyword label + marks `titledByLlm` so it
+  // runs once per conversation and the keyword can't clobber it. No-op without the LLM dep / API key (keyword stands).
+  const _sanitizeRole = (r) => String(r == null ? '' : r).replace(/[\r\n]+/g, ' ').replace(/[^\w /+&.-]/g, '').replace(/\s+/g, ' ').trim().slice(0, 28);
+  async function _llmCategorize(id, scopeText) {
+    if (typeof categorizeScopeLLM !== 'function' || !id || !scopeText) return;
+    let res; try { res = await categorizeScopeLLM({ scope: scopeText }); } catch { return; }
+    const role = _sanitizeRole(res && res.success && res.role);
+    if (!role) return;
+    try {
+      const conv = await ConversationStore.load(id);
+      if (!conv || conv.kind !== 'dev' || conv.title === role) { if (conv && conv.kind === 'dev' && !conv.titledByLlm) ConversationStore.patchMeta(id, { titledByLlm: true }).catch(() => { /* */ }); return; }
+      await ConversationStore.patchMeta(id, { title: role, titledByLlm: true });
+      try { refreshHistory && refreshHistory(); } catch { /* */ }
+    } catch { /* */ }
   }
   // v2.74.980 — the working-tree signature stamped at the last reload (the "applied" baseline). Persisted
   // so it survives the chrome.runtime.reload() that the reload icon triggers — that survival is the whole
@@ -1602,8 +1621,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         return true;
       }
       const concern = _conciseConcern(arg);
-      await ConversationStore.patchMeta(convId, { concern }).catch(() => { /* */ });
-      try { _applyScopeTitle(await ConversationStore.load(convId), concern); } catch { /* */ }   // v2.74.1099 — re-derive the drawer label from the new scope
+      await ConversationStore.patchMeta(convId, { concern, titledByLlm: false }).catch(() => { /* */ });   // .1102 — re-scope → let Claude re-pick the label
+      try { _applyScopeTitle(await ConversationStore.load(convId), concern); } catch { /* */ }   // v2.74.1099 — instant keyword label
+      _llmCategorize(convId, concern);   // v2.74.1102 — Claude re-categorizes for the new scope
       devBubble(`scope (concern) → ${concern}. Applies to the next run.`);
       return true;
     }
