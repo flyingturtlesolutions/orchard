@@ -408,11 +408,15 @@ async function _renderHistoryList() {
 
   conversations.forEach(conv => {
     const isDev = conv.kind === 'dev';   // v2.74.1029 — dev (Claude Code) conversations get an amber badge
+    // v2.74.1070 — non-dev (website-operating) conversations get a blue "APP" badge, mirroring the dev one,
+    // so every row is self-identifying at a glance instead of the agent kind reading as an unlabelled default.
+    const badge = isDev ? '<span class="history-item-badge">dev</span>'
+                        : '<span class="history-item-badge app">app</span>';
     const item = document.createElement('div');
-    item.className = `history-item${conv.id === _currentConversationId ? ' active' : ''}${isDev ? ' dev' : ''}`;
+    item.className = `history-item${conv.id === _currentConversationId ? ' active' : ''}${isDev ? ' dev' : ' app'}`;
     item.dataset.conversationId = conv.id;
     item.innerHTML = `
-      <div class="history-item-title">${isDev ? '<span class="history-item-badge">dev</span>' : ''}${escHtml(conv.title)}</div>
+      <div class="history-item-title">${badge}${escHtml(conv.title)}</div>
       <div class="history-item-meta">${relTime(conv.updatedAt)}</div>
       <button class="history-item-delete" title="Delete">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

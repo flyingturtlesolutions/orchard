@@ -1409,6 +1409,10 @@ textarea {
 
 /* A dev conversation in the history list: amber left-rail + a small "dev" badge before the title. */
 .history-item.dev { border-left: 2px solid #c9a227; padding-left: calc(var(--sp-3) - 2px); }
+/* v2.74.1070 — an app (website-operating) conversation: blue left-rail + a small "app" badge, mirroring dev.
+   Declared before .history-item.active so an active row's accent left-rail wins (equal specificity, later rule). */
+.history-item.app { border-left: 2px solid #5c8bc9; padding-left: calc(var(--sp-3) - 2px); }
+.history-item-badge.app { background: rgba(92, 139, 201, 0.18); color: #5c8bc9; }
 .history-item-badge {
   display: inline-block;
   margin-right: var(--sp-2);
