@@ -3074,7 +3074,7 @@ async function _tryBrainCommand(text) {
 
 function _renderBrainRun(msg, ask, result) {
   const lines = [`🧠 brain: ${ask}`, ''];
-  (result.ledger || []).forEach((e, i) => lines.push(`  ${i + 1}. ${e.kind} ${e.leg || ''} → ${e.ok ? 'ok' : 'miss'}${e.reason ? ` (${e.reason})` : ''}`));
+  (result.ledger || []).forEach((e, i) => { const p = (e.params && Object.keys(e.params).length) ? ` ${JSON.stringify(e.params).slice(0, 120)}` : ''; lines.push(`  ${i + 1}. ${e.kind} ${e.leg || ''}${p} → ${e.ok ? 'ok' : 'miss'}${e.reason ? ` (${e.reason})` : ''}`); });
   const d = result.decision || {};
   const term = result.status === 'done' ? `✓ done — ${result.answer ?? ''}`
     : result.status === 'needs' ? `⚠ needs ${(d.needs && d.needs.kind) || '?'} — ${d.reason || ''}`

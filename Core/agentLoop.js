@@ -103,9 +103,14 @@ function enforcePalette(decision, legs) {
   return { kind: 'needs', needs: { kind: 'demonstrate' }, params: decision.params || {}, confidence: decision.confidence ?? 0, reason: 'tool-not-in-palette' };
 }
 
-// A signal-only ledger entry (#3 compaction — never the raw observation, just its shape).
+// A signal-only ledger entry (#3 compaction — never the raw observation, just its shape). v2.74.1113 — carry
+// the PARAMS too: the .1112 live run repeated OPEN_URL 3× because the ledger showed only "act OPEN_URL → ok"
+// with no url, so the brain couldn't tell it had already navigated and kept re-picking it. The params are the
+// "what I did" the brain needs to recognize the goal is already met (→ done) instead of looping.
 function summarizeStep(decision, obs) {
-  return { kind: decision.kind, leg: keyOf(decision.leg) || decision.kind, ok: !!(obs && obs.ok), reason: (obs && obs.reason) || decision.reason || '' };
+  const e = { kind: decision.kind, leg: keyOf(decision.leg) || decision.kind, ok: !!(obs && obs.ok), reason: (obs && obs.reason) || decision.reason || '' };
+  if (decision.params && typeof decision.params === 'object' && Object.keys(decision.params).length) e.params = decision.params;
+  return e;
 }
 
 // Default StepContext assembler (§4.1). Override via deps.assemble to shape the prompt; the loop only needs

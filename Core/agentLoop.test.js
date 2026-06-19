@@ -127,6 +127,20 @@ describe('agentLoop — loop behavior', () => {
     assert.equal(res.scope.L1, 'v2');  // last read value keyed by its producing leg (HS-2)
   });
 
+  it('ledger entries carry the decision params (v2.74.1113 — the brain must see WHAT it did, not just that it acted)', async () => {
+    let i = 0;
+    const decisions = [
+      { kind: 'act', leg: { key: 'OPEN_URL' }, params: { url: 'https://pixabay.com' }, confidence: 1, reason: 'go' },
+      { kind: 'done', answer: 'there', confidence: 1, reason: 'arrived' },
+    ];
+    const res = await agentLoop('go to pixabay', {
+      palette: async () => [{ key: 'OPEN_URL' }],
+      callBrain: async () => decisions[i++],
+      runTool: async () => ({ ok: true }),
+    }, { maxSteps: 2 });
+    assert.deepEqual(res.ledger[0].params, { url: 'https://pixabay.com' });   // the url is in the ledger now
+  });
+
   it('done is gate-confirmed: verifyDone=false rejects it and the loop keeps going (#2)', async () => {
     let calls = 0;
     const res = await agentLoop('g', {

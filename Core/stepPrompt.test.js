@@ -33,6 +33,11 @@ describe('buildStepMessages — fences palette/observation as data, hides scope 
     assert.match(user, /1\. act L → ok/);
     assert.match(user, /2\. ask R → miss \(miss\)/);
   });
+
+  it('renders ledger PARAMS so the brain sees what it did (the .1112 OPEN_URL-repeat fix)', () => {
+    const { user } = buildStepMessages({ goal: 'go to pixabay', palette: [leg('OPEN_URL', { domain: 'browser' })], ledger: [{ kind: 'act', leg: 'OPEN_URL', params: { url: 'https://pixabay.com' }, ok: true }] });
+    assert.match(user, /OPEN_URL.*pixabay\.com.*→ ok/);
+  });
 });
 
 describe('parseStepDecision — raw LLM → Decision (pure)', () => {
