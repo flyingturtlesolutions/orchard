@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, driftBroadcastSet, PREVIEW_WT, ltUsesPreview, previewRepointPlan, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, driftBroadcastSet, PREVIEW_WT, ltUsesPreview, previewRepointPlan, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer, bridgeCommandNeedsOwnership } from './devBridge.js';
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
@@ -478,5 +478,34 @@ describe('P4-5 preview-lt pure core (DBR-P4-5)', () => {
   });
   it('PREVIEW_WT is the fixed .wt/preview path', () => {
     assert.equal(PREVIEW_WT, '.wt/preview');
+  });
+});
+
+describe('bridgeCommandNeedsOwnership — single-panel guard predicate (v2.74.1093)', () => {
+  it('a dev conversation: every command needs ownership (it drives the host)', () => {
+    for (const s of ['fix the bug', 'merge', 'sync', 'lt', 'dev: keep going', 'split: extract X']) {
+      assert.equal(bridgeCommandNeedsOwnership(s, true), true, `devConv should need ownership: ${s}`);
+    }
+  });
+  it('outside a dev conversation: only dev:/bug: verbs need it', () => {
+    assert.equal(bridgeCommandNeedsOwnership('dev: do a thing', false), true);
+    assert.equal(bridgeCommandNeedsOwnership('bug: it broke', false), true);
+    assert.equal(bridgeCommandNeedsOwnership('hello there', false), false);   // plain chat
+    assert.equal(bridgeCommandNeedsOwnership('what is 2+2', false), false);
+  });
+  it('enable/disable verbs never need ownership (no host)', () => {
+    for (const s of ['dev: on', 'dev:on', 'dev: off', 'dev:off', 'DEV: ON']) {
+      assert.equal(bridgeCommandNeedsOwnership(s, false), false, `no host: ${s}`);
+      assert.equal(bridgeCommandNeedsOwnership(s, true), false, `no host even in devConv: ${s}`);
+    }
+  });
+  it('the log grabs (gl/gc/gch) never need ownership — they read files, not the host', () => {
+    for (const s of ['gl', 'gc', 'gch', 'GL', ' gch ']) {
+      assert.equal(bridgeCommandNeedsOwnership(s, true), false, `log grab in devConv: ${s}`);
+      assert.equal(bridgeCommandNeedsOwnership(s, false), false, `log grab standalone: ${s}`);
+    }
+  });
+  it('nullish / empty input is harmless (false)', () => {
+    for (const s of [null, undefined, '', '   ']) assert.equal(bridgeCommandNeedsOwnership(s, false), false, `nullish: ${String(s)}`);
   });
 });
