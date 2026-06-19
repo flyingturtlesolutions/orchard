@@ -170,28 +170,40 @@ process.stdin.on('data', (chunk) => {
 // and journaling; a fresh host instance reattaches via the lock + journal (status verb, DB-3 replay).
 process.stdin.on('end', () => { log('port closed — host exiting (detached child, if any, continues)'); process.exit(0); });
 
-// ── lock (one bridge run at a time; the lock tracks the CHILD pid, not the host's) ────────────────
-function readLock() {
-  try { return JSON.parse(fs.readFileSync(LOCK, 'utf8')); } catch { return null; }
+// ── runs registry (DBR-P4-3b §10) — `active.json` holds the LIVE runs (≤ MAX_CONCURRENT), each tracking its CHILD
+// pid (not the host's). Was a single object; now {v, runs:[{runId,pid,startedAt,journal,verb,maxTurns}]}. A fresh
+// host re-adopts every live run on reattach (DB-3). At MAX_CONCURRENT=1 there's ≤1 entry → behavior is unchanged.
+function readRuns() {
+  let raw = null;
+  try { raw = JSON.parse(fs.readFileSync(LOCK, 'utf8')); } catch { return []; }
+  if (Array.isArray(raw)) return raw;
+  if (raw && Array.isArray(raw.runs)) return raw.runs;
+  if (raw && (raw.pid || raw.runId)) return [raw];   // back-compat — the pre-P4-3b single-object lock
+  return [];
+}
+function writeRuns(arr) {
+  try { if (arr.length) fs.writeFileSync(LOCK, JSON.stringify({ v: PROTOCOL_V, runs: arr }, null, 2)); else { try { fs.unlinkSync(LOCK); } catch { /* */ } } } catch { /* */ }
 }
 function pidAlive(pid) {
   if (typeof pid !== 'number') return false;
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
-// v2.74.999 — bound the pid-reuse footgun. pidAlive() asks `process.kill(pid,0)`, but on Windows a dead
-// run's pid can be REUSED by an unrelated process, so a stale lock reads as "alive" and refuses every new
-// run as `busy` forever (observed: a lock from an abandoned run blocked the next run until deleted by
-// hand). An age cap reclaims a lock older than any sane run, independent of the pid check — and it never
-// taskkills, so it can't hit the innocent reused-pid process.
+// v2.74.999 — bound the pid-reuse footgun. pidAlive() asks `process.kill(pid,0)`, but on Windows a dead run's pid
+// can be REUSED by an unrelated process, so a stale entry reads as "alive" and would block a slot forever. An age cap
+// reclaims an entry older than any sane run, independent of the pid check — and it never taskkills, so it can't hit
+// the innocent reused-pid process. Reclaim happens on every read (activeRuns rewrites if the live set shrank).
 const MAX_LOCK_AGE_MS = 6 * 60 * 60 * 1000;   // 6h — far longer than any real run; just bounds the footgun
-function activeLock() {
-  const l = readLock();
-  if (!l) return null;
-  if (l.startedAt && (Date.now() - l.startedAt) > MAX_LOCK_AGE_MS) { try { fs.unlinkSync(LOCK); } catch { /* */ } return null; }   // stale by age → reclaim
-  if (!pidAlive(l.pid)) { try { fs.unlinkSync(LOCK); } catch { /* */ } return null; }   // dead pid → reclaim
-  return l;
+function activeRuns() {
+  const all = readRuns();
+  const live = all.filter((r) => r && pidAlive(r.pid) && (!r.startedAt || (Date.now() - r.startedAt) <= MAX_LOCK_AGE_MS));
+  if (live.length !== all.length) writeRuns(live);   // reclaim dead/aged entries
+  return live;
 }
-function clearLock() { try { fs.unlinkSync(LOCK); } catch { /* */ } }
+function activeLock() { return activeRuns()[0] || null; }                       // back-compat: the first live run (the single run at cap=1)
+function canStart() { return protocol.canStart(activeRuns().length, MAX_CONCURRENT); }   // is a slot free?
+function addRun(rec) { const a = activeRuns(); a.push(rec); writeRuns(a); }
+function removeRun(runId) { writeRuns(activeRuns().filter((r) => r.runId !== runId)); }
+function clearLock() { try { fs.unlinkSync(LOCK); } catch { /* */ } }            // nuke-all (host reset); per-run completion uses removeRun
 
 // ── verbs ─────────────────────────────────────────────────────────────────────────────────────────
 function preflight() {
@@ -219,8 +231,10 @@ function statusReply() {
 // no tail starts. tailJournal is _tailing-guarded, so this is a no-op when this host already owns the run.
 function handleStatus() {
   send(statusReply());
-  const l = activeLock();
-  if (l && l.journal) { log(`reattach: re-tailing pid=${l.pid} journal=${path.basename(l.journal)}`); tailJournal(l.journal, l.pid, l.runId); }
+  const live = activeRuns();
+  for (const r of live) { if (r.journal) { log(`reattach: re-tailing pid=${r.pid} journal=${path.basename(r.journal)}`); tailJournal(r.journal, r.pid, r.runId); } }
+  // DBR-P4-3b — a reattaching panel learns ALL live runs from the pool (not just the back-compat single status).
+  if (live.length) send({ v: PROTOCOL_V, type: 'pool', ...protocol.poolSnapshot(live, MAX_CONCURRENT) });
 }
 
 // DB-3 permission relay (v2.74.1002) — watch logs/bridge/perm for hook-written requests and forward each
@@ -489,12 +503,17 @@ function runTest(msg) {
 // persisted in claude's own store, so `--resume <id>` (the panel's `dev: <redirect>`) continues it. Hence
 // the honest framing is PAUSE, not abort — nothing the agent already wrote is lost. `cancel` is a kept
 // alias for the same operation (older panel builds send it).
-function pauseRun() {
-  const l = activeLock();
-  if (!l) return { v: PROTOCOL_V, type: 'status', active: false, cancelled: false };
-  try { spawnSync(`taskkill /pid ${l.pid} /t /f`, { shell: true, timeout: 10000 }); } catch { /* */ }
-  clearLock();
-  log(`paused run pid=${l.pid} (session survives for --resume)`);
+// DBR-P4-3b — pause a run by `runId` (the panel scopes it per run); no runId → pause ALL live runs (today's single
+// `pause`). Each child is taskkilled (its session survives for --resume) and dropped from the registry.
+function pauseRun(msg) {
+  const runId = msg && msg.runId;
+  const targets = activeRuns().filter((r) => !runId || r.runId === runId);
+  if (!targets.length) return { v: PROTOCOL_V, type: 'status', active: false, cancelled: false };
+  for (const r of targets) {
+    try { spawnSync(`taskkill /pid ${r.pid} /t /f`, { shell: true, timeout: 10000 }); } catch { /* */ }
+    removeRun(r.runId);
+    log(`paused run pid=${r.pid} runId=${r.runId} (session survives for --resume)`);
+  }
   return { v: PROTOCOL_V, type: 'status', active: false, cancelled: true };
 }
 
@@ -515,8 +534,8 @@ function traceFileName(requested) {
 }
 
 function startRun(msg) {
-  if (activeLock()) {
-    const l = readLock();
+  if (!canStart()) {   // DBR-P4-3b — a free slot? at MAX_CONCURRENT=1 this is exactly today's busy-when-one-runs.
+    const l = activeRuns()[0];
     send({ v: PROTOCOL_V, type: 'error', code: 'busy', pid: l ? l.pid : null });
     return;
   }
@@ -612,7 +631,7 @@ function startRun(msg) {
   try { fs.closeSync(outFd); fs.closeSync(errFd); } catch { /* */ }   // the child holds its own copies
   child.unref();
   try {
-    fs.writeFileSync(LOCK, JSON.stringify({ v: PROTOCOL_V, runId, pid: child.pid, startedAt: ts, journal, verb, maxTurns: turns, promptPreview: prompt.slice(0, 100) }, null, 2));
+    addRun({ runId, pid: child.pid, startedAt: ts, journal, verb, maxTurns: turns, promptPreview: prompt.slice(0, 100) });   // DBR-P4-3b — into the runs registry
   } catch { /* */ }
   const _modelId = (modelFlag(msg.model).match(/--model (\S+)/) || [])[1] || 'default';
   const _resumed = resumeFlag ? _sid : null;
@@ -662,7 +681,7 @@ function tailJournal(journal, pid, runId) {
         send({ v: PROTOCOL_V, type: 'event', runId, ev });
         if (ev && ev.type === 'result') {
           clearInterval(timer);
-          clearLock();
+          removeRun(runId);
           _tailing.delete(journal);
           log(`run done pid=${pid} (${ev.subtype || 'result'})`);
           send({ v: PROTOCOL_V, type: 'done', runId, result: { subtype: ev.subtype ?? null, costUsd: ev.total_cost_usd ?? null, durationMs: ev.duration_ms ?? null, numTurns: ev.num_turns ?? null, sessionId: ev.session_id ?? null } });
@@ -673,7 +692,7 @@ function tailJournal(journal, pid, runId) {
     }
     if (!pidAlive(pid)) {
       clearInterval(timer);
-      clearLock();
+      removeRun(runId);
       _tailing.delete(journal);
       log(`run pid=${pid} exited without a result event`);
       send({ v: PROTOCOL_V, type: 'done', runId, result: { subtype: 'host-lost' } });
@@ -693,8 +712,8 @@ async function handle(msg) {
     case 'preflight': send(preflight()); break;
     case 'status':    handleStatus(); break;
     case 'diffstat':  send(diffstatReply()); break;
-    case 'pause':     send(pauseRun()); break;
-    case 'cancel':    send(pauseRun()); break;   // back-compat alias (DB-3, v2.74.992)
+    case 'pause':     send(pauseRun(msg)); break;
+    case 'cancel':    send(pauseRun(msg)); break;   // back-compat alias (DB-3, v2.74.992)
     case 'history':   send(historyReply()); break;                 // DB-3 run history (v2.74.1000)
     case 'history-open': replayJournal(msg.journal); break;        // replay one journal read-only
     case 'approval-decision': writePermResp(msg); break;           // DB-3 permission relay (v2.74.1002)
