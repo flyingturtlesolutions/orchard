@@ -4869,7 +4869,7 @@ function cloudMsg(type, payload = {}) {
     const timer = setTimeout(() => {
       finish({
         success: false,
-        error: 'Background not responding — open chrome://extensions and reload AHuB',
+        error: 'Background not responding — open chrome://extensions and reload Orchard',
       });
     }, timeoutMs);
     chrome.runtime.sendMessage({ type, payload }, (res) => {

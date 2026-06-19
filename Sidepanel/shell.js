@@ -68,7 +68,7 @@ const MODE_REGISTRY = {
 // Idle fallback view. Stage 1 placeholder; Stage 3 makes this the chat mode.
 const IDLE_HTML = `
   <div class="sidepanel-idle">
-    <h3>AHuB</h3>
+    <h3>Orchard</h3>
     <p>Sidepanel is ready. Open Studio or trigger an action that uses the panel.</p>
   </div>
 `;
