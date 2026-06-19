@@ -793,10 +793,15 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       const err = chrome.runtime.lastError?.message || '';
       port = null;
       _failPendingGit('bridge port closed');   // v2.74.1034 (DBR-2) — don't leave git RPCs hanging on disconnect
-      if (run) {
-        endRun(/not found|forbidden/i.test(err)
-          ? `✗ bridge host not reachable (${err}). Run bridge/install.ps1 once, then reload the extension.`
-          : `✗ bridge port closed${err ? ` — ${err}` : ''} (a started run continues detached; journal in logs/bridge/).`);
+      // v2.74.1097 — end EVERY live run, not just the foreground. The host owns the ONE port, so its death closes it
+      // for ALL runs; pre-fix only `run` was ended, leaving cap>1 BACKGROUND runs (in `runs`) + still-PENDING runs (in
+      // the dispatch FIFOs) as zombies — shown "running" forever in the drawer and miscounting the slot cap (so the
+      // dispatch guard refused new runs until reload). Snapshot first (endRun mutates `runs`/the FIFOs as it goes).
+      const msg = /not found|forbidden/i.test(err)
+        ? `✗ bridge host not reachable (${err}). Run bridge/install.ps1 once, then reload the extension.`
+        : `✗ bridge port closed${err ? ` — ${err}` : ''} (a started run continues detached; journal in logs/bridge/).`;
+      for (const rh of new Set([...runs.values(), ..._pendingPreflight, ..._pendingStarted, ...(run ? [run] : [])])) {
+        try { endRun(msg, rh); } catch { /* */ }
       }
     });
     return port;
