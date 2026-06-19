@@ -399,8 +399,59 @@ function _closeHistory() {
 // in an already-open drawer until it was closed and reopened — the reported "runs but doesn't appear"
 // bug. Guarded by .open so a closed drawer pays nothing on the hot send path.
 async function _refreshHistoryIfOpen() {
+  _updateHistoryActionDot();   // v2.74.1094 — the "needs you" dot rides the toggle button, visible even when the drawer is closed
   if ($('history-sidebar')?.classList.contains('open')) await _renderHistoryList();
 }
+
+// ── v2.74.1094 — per-conversation dev-run status in the drawer ───────────────────────────────────────────────
+// Under each dev conversation's title (the session id), the meta line shows a LIVE run status while a run is in
+// flight — "▶ running… Ns" (ticking) or "⚠ needs you" when it's paused for an approval/question — falling back to
+// the timestamp when idle. A 1s timer ticks the elapsed while the drawer is open + any run is active; the
+// drawer-toggle button carries a "needs you" dot (always visible) so you know to look without opening it.
+function _fmtElapsed(s) {
+  s = Math.max(0, Math.floor(Number(s) || 0));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+}
+function _devRunStatus(convId) {
+  try { return _getDevBridge()?.runStatusForConv?.(convId) || { state: 'idle' }; } catch { return { state: 'idle' }; }
+}
+// Render the meta line for one drawer item from its live run status; returns the state so callers can tally.
+function _setItemMeta(item) {
+  const metaEl = item?.querySelector?.('.history-item-meta');
+  if (!metaEl) return 'idle';
+  const st = item.dataset.kind === 'dev' ? _devRunStatus(item.dataset.conversationId) : { state: 'idle' };
+  if (st.state === 'awaiting') {
+    metaEl.className = 'history-item-meta run-status awaiting';
+    metaEl.textContent = '⚠ needs you';
+  } else if (st.state === 'running') {
+    metaEl.className = 'history-item-meta run-status running';
+    metaEl.textContent = `▶ running… ${_fmtElapsed((Date.now() - (Number(st.startedAt) || Date.now())) / 1000)}`;
+  } else {
+    metaEl.className = 'history-item-meta';
+    metaEl.textContent = relTime(Number(item.dataset.updated) || Date.now());
+  }
+  return st.state;
+}
+function _updateHistoryActionDot() {
+  const btn = $('btn-history');
+  if (!btn) return;
+  let awaiting = false;
+  try { awaiting = !!_getDevBridge()?.anyAwaiting?.(); } catch { /* */ }
+  btn.classList.toggle('needs-action', awaiting);
+}
+let _drawerStatusTimer = null;
+function _startDrawerStatusTimer() {
+  if (_drawerStatusTimer) return;
+  _drawerStatusTimer = setInterval(() => {
+    if (!$('history-sidebar')?.classList.contains('open')) { _stopDrawerStatusTimer(); return; }
+    let anyActive = false;
+    document.querySelectorAll('#history-list .history-item').forEach((item) => { if (_setItemMeta(item) !== 'idle') anyActive = true; });
+    if (!anyActive) _stopDrawerStatusTimer();
+  }, 1000);
+}
+function _stopDrawerStatusTimer() { if (_drawerStatusTimer) { clearInterval(_drawerStatusTimer); _drawerStatusTimer = null; } }
 
 async function _renderHistoryList() {
   const container = $('history-list');
@@ -421,6 +472,8 @@ async function _renderHistoryList() {
     const item = document.createElement('div');
     item.className = `history-item${conv.id === _currentConversationId ? ' active' : ''}${isDev ? ' dev' : ' app'}`;
     item.dataset.conversationId = conv.id;
+    item.dataset.kind = isDev ? 'dev' : 'app';                                  // v2.74.1094 — for the live run-status meta
+    item.dataset.updated = String(conv.updatedAt || conv.createdAt || Date.now());
     item.innerHTML = `
       <div class="history-item-title">${badge}${escHtml(conv.title)}</div>
       <div class="history-item-meta">${relTime(conv.updatedAt)}</div>
@@ -470,6 +523,13 @@ async function _renderHistoryList() {
 
     container.appendChild(item);
   });
+
+  // v2.74.1094 — apply each conversation's live run status to its meta line + flip the toggle's "needs you" dot;
+  // tick a 1s timer while any run is active so the elapsed updates live.
+  let anyActive = false;
+  container.querySelectorAll('.history-item').forEach((item) => { if (_setItemMeta(item) !== 'idle') anyActive = true; });
+  _updateHistoryActionDot();
+  if (anyActive) _startDrawerStatusTimer(); else _stopDrawerStatusTimer();
 }
 
 function _resetConversation() {

@@ -771,6 +771,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const _is = _pendingStarted.indexOf(rh); if (_is >= 0) _pendingStarted.splice(_is, 1);
     if (rh === run) run = null;             // clear the FOREGROUND pointer iff this was it (a cap>1 background run leaves `run` alone)
     _renderRunningBar();                    // DBR-P4-4 step 5 — a run ended; refresh / hide the multi-run indicator
+    try { refreshHistory && refreshHistory(); } catch { /* */ }   // v2.74.1094 — a run ended → refresh the drawer's per-conversation status
   }
 
   function disconnect() {
@@ -978,7 +979,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       case 'approval': {  // DB-3 (v2.74.1002) — the run wants a non-safe tool → inline Allow/Deny
         // v2.74.1025 (DB-4) — an AskUserQuestion relay → interactive question card (pause-for-reply), not Allow/Deny.
         const rh = runs.get(m.runId) || run;   // DBR-P4-4 step 3 — route the card to the requesting run's bubble (foreground at cap=1)
-        if (m.tool === 'AskUserQuestion') _emitQuestion(m, rh); else _emitApproval(m, rh);
+        _emitPrompt(m, rh);
         break;
       }
       case 'error':
@@ -1042,6 +1043,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     for (const b of (rh.blocks || [])) { try { bodyEl.appendChild(_blockNode(b)); } catch { /* */ } }
     rh.msgEl = msg; rh.msg = msg; rh.bodyEl = bodyEl;
     _attachRunFooter(rh);
+    // v2.74.1094 — if the run is paused waiting on you, re-render its approval/question card into the new bubble so
+    // it's answerable HERE (it was stranded in the bubble that got wiped on the switch).
+    if (rh.awaitingAction && rh.pendingPrompt) { try { _emitPrompt(rh.pendingPrompt, rh); } catch { /* */ } }
   }
   // The live run handles bound to a conversation (started, mid-handshake, or the foreground). At most one per
   // conversation (the dispatch guard refuses a 2nd), but kept general. Replay/history bubbles are excluded.
@@ -1064,6 +1068,22 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   function liveRunMessageIds(cid) {
     return new Set(_liveRunsForConv(cid).map((rh) => rh && rh.msg && rh.msg.dataset && rh.msg.dataset.messageId).filter(Boolean));
   }
+  // v2.74.1094 — the run status for a conversation, for the drawer's live indicator. 'awaiting' = a run is paused
+  // for YOUR input (approval / question); 'running' = executing; 'idle' = no live run. `startedAt` (running) drives
+  // the ticking elapsed. chat.js renders it under the session id, replacing the static timestamp while active.
+  function runStatusForConv(cid) {
+    const live = _liveRunsForConv(cid);
+    if (!live.length) return { state: 'idle' };
+    if (live.some((rh) => rh.awaitingAction)) return { state: 'awaiting' };
+    return { state: 'running', startedAt: Math.min(...live.map((rh) => Number(rh.startedAt) || Date.now())) };
+  }
+  // v2.74.1094 — ANY run (any conversation) paused for your input? Drives the drawer-toggle "needs you" dot, which
+  // must show even when the drawer is closed — so chat.js reads this on every run-state change, not just on render.
+  function anyAwaiting() {
+    if (run && run.awaitingAction) return true;
+    for (const rh of [...runs.values(), ..._pendingPreflight, ..._pendingStarted]) if (rh && rh.awaitingAction) return true;
+    return false;
+  }
 
   function startRun(payload, headline, opts = {}) {
     const r = _beginRunBubble(headline, { background: opts.background || false });   // DBR-P4-4 — a cap>1 2nd+ run is background
@@ -1073,6 +1093,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       ensurePort().postMessage({ v: PROTOCOL_V, type: 'preflight' });   // run is posted on preflight-ok
       _pendingPreflight.push(r);   // DBR-P4-4 — queue ONLY once the preflight actually went out, so the FIFO and the host's ok stay in lockstep
       _renderRunningBar();   // DBR-P4-4 step 5 — a new run is in flight; refresh the multi-run indicator
+      try { refreshHistory && refreshHistory(); } catch { /* */ }   // v2.74.1094 — a run started → drawer shows it running
     } catch (e) {
       endRun(`✗ could not reach the bridge host: ${e.message}. Run bridge/install.ps1, then reload.`, r);
     }
@@ -1110,9 +1131,16 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const v = input.file_path ?? input.path ?? input.pattern ?? input.url ?? input.command ?? '';
     return v ? String(v) : JSON.stringify(input).slice(0, 200);
   }
+  // v2.74.1094 — dispatch a relayed prompt to the right card renderer. Also called by _reattachRunBubble to
+  // RE-RENDER a pending prompt when its (backgrounded) conversation is reopened — so a run waiting on you is
+  // answerable there, not stranded in the bubble that got wiped on the switch.
+  function _emitPrompt(m, rh = run) {
+    if (m && m.tool === 'AskUserQuestion') _emitQuestion(m, rh); else _emitApproval(m, rh);
+  }
   function _emitApproval(m, rh = run) {   // DBR-P4-4 step 3 — render into the REQUESTING run's bubble (rh), not always the foreground
     const hostEl = (rh && rh.bodyEl) || devBubble('', { persist: false }).bodyEl;
     if (!hostEl) return;
+    if (rh) { rh.awaitingAction = true; rh.pendingPrompt = m; try { refreshHistory && refreshHistory(); } catch { /* */ } }   // v2.74.1094 — flag "needs you" in the drawer + stash for re-attach
     const card = document.createElement('div');
     card.className = 'dev-approval';
     const q = document.createElement('div'); q.className = 'dev-approval-q';
@@ -1123,6 +1151,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     let decided = false;
     const decide = (decision) => {
       if (decided) return; decided = true;
+      if (rh) { rh.awaitingAction = false; rh.pendingPrompt = null; try { refreshHistory && refreshHistory(); } catch { /* */ } }   // v2.74.1094 — answered → clear "needs you"
       try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'approval-decision', id: m.id, decision }); } catch { /* */ }
       actions.remove();
       const verdict = document.createElement('span');
@@ -1144,6 +1173,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   function _emitQuestion(m, rh = run) {   // DBR-P4-4 step 3 — render into the REQUESTING run's bubble (rh)
     const hostEl = (rh && rh.bodyEl) || devBubble('', { persist: false }).bodyEl;
     if (!hostEl) return;
+    if (rh) { rh.awaitingAction = true; rh.pendingPrompt = m; try { refreshHistory && refreshHistory(); } catch { /* */ } }   // v2.74.1094 — flag "needs you" + stash for re-attach
     const questions = Array.isArray(m.input?.questions) ? m.input.questions : [];
     const card = document.createElement('div');
     card.className = 'dev-approval dev-question';
@@ -1156,6 +1186,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       if (sent) return;
       if (selections.some((s) => s.size === 0)) return;   // every question needs an answer
       sent = true;
+      if (rh) { rh.awaitingAction = false; rh.pendingPrompt = null; try { refreshHistory && refreshHistory(); } catch { /* */ } }   // v2.74.1094 — answered → clear "needs you"
       const summary = questions.map((q, i) => `${String(q.header || q.question || `Q${i + 1}`).trim()}: ${[...selections[i]].join(', ')}`).join(' · ');
       const reason = `[dev-bridge] The user answered in the panel — ${summary}. Use these answers and continue; do NOT call AskUserQuestion again for them.`;
       try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'approval-decision', id: m.id, decision: 'deny', reason }); } catch { /* */ }
@@ -2158,5 +2189,5 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     return true;
   }
 
-  return { maybeHandle, enable, gitOp, onReloadState, refreshReloadState, reloadExtension, reattachConversation, liveRunMessageIds };
+  return { maybeHandle, enable, gitOp, onReloadState, refreshReloadState, reloadExtension, reattachConversation, liveRunMessageIds, runStatusForConv };
 }

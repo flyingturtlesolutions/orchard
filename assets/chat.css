@@ -1478,6 +1478,27 @@ textarea {
   color: var(--c-text-subtle);
 }
 
+/* v2.74.1094 — live dev-run status in a drawer item's meta line (replaces the timestamp while a run is active). */
+.history-item-meta.run-status { font-weight: 600; }
+.history-item-meta.run-status.running { color: #c9a227; }   /* amber — matches the dev-bridge bubble identity */
+.history-item-meta.run-status.awaiting {
+  color: #e0902a;                                            /* brighter amber-orange — paused for your input */
+  animation: run-status-pulse 1.4s ease-in-out infinite;
+}
+@keyframes run-status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+
+/* The "needs you" dot on the conversation-history toggle — visible even when the drawer is closed. */
+#btn-history.needs-action { position: relative; }
+#btn-history.needs-action::after {
+  content: '';
+  position: absolute;
+  top: 2px; right: 2px;
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: #e0902a;
+  animation: run-status-pulse 1.4s ease-in-out infinite;
+}
+
 .history-item-delete {
   position: absolute;
   top: 50%;
