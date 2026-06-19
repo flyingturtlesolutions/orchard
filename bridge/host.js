@@ -34,6 +34,9 @@ const protocol = require('./protocol.cjs');   // DBR-P4-2 — the v:2 run-multip
 // DBR-P4-2 (§10) — the protocol generation. Bumped 1→2 (run-multiplex); single source of truth in protocol.cjs.
 // The PANEL keeps its own `const PROTOCOL_V = 2` (browser ESM can't require a `.cjs`) — keep them in lockstep.
 const PROTOCOL_V = protocol.PROTO_V;
+// DBR-P4-3b (§10) — MAX_CONCURRENT: the run-pool slot cap, reported in the `pool` frame. Pinned at 1 (today's
+// single-run behavior); raised once the runs-Map + worktree execution land. Until then the lock still serializes.
+const MAX_CONCURRENT = 1;
 const REPO = path.resolve(__dirname, '..');
 const BRIDGE_DIR = path.join(REPO, 'logs', 'bridge');
 const RUN_DIR = path.join(REPO, 'logs', 'run');
@@ -217,7 +220,7 @@ function statusReply() {
 function handleStatus() {
   send(statusReply());
   const l = activeLock();
-  if (l && l.journal) { log(`reattach: re-tailing pid=${l.pid} journal=${path.basename(l.journal)}`); tailJournal(l.journal, l.pid); }
+  if (l && l.journal) { log(`reattach: re-tailing pid=${l.pid} journal=${path.basename(l.journal)}`); tailJournal(l.journal, l.pid, l.runId); }
 }
 
 // DB-3 permission relay (v2.74.1002) — watch logs/bridge/perm for hook-written requests and forward each
@@ -554,6 +557,7 @@ function startRun(msg) {
   const ts = Date.now();
   const journal = path.join(BRIDGE_DIR, `${ts}.jsonl`);
   const errLog = path.join(BRIDGE_DIR, `${ts}.err.log`);
+  const runId = `r${ts}`;   // DBR-P4-3b (§10) — the run-multiplex tag on every run-scoped frame; stable across reattach (stored in the lock).
   let outFd, errFd;
   try { outFd = fs.openSync(journal, 'a'); errFd = fs.openSync(errLog, 'a'); }
   catch (e) { send({ v: PROTOCOL_V, type: 'error', code: 'journal-open-failed', message: e.message }); return; }
@@ -608,7 +612,7 @@ function startRun(msg) {
   try { fs.closeSync(outFd); fs.closeSync(errFd); } catch { /* */ }   // the child holds its own copies
   child.unref();
   try {
-    fs.writeFileSync(LOCK, JSON.stringify({ v: PROTOCOL_V, pid: child.pid, startedAt: ts, journal, verb, maxTurns: turns, promptPreview: prompt.slice(0, 100) }, null, 2));
+    fs.writeFileSync(LOCK, JSON.stringify({ v: PROTOCOL_V, runId, pid: child.pid, startedAt: ts, journal, verb, maxTurns: turns, promptPreview: prompt.slice(0, 100) }, null, 2));
   } catch { /* */ }
   const _modelId = (modelFlag(msg.model).match(/--model (\S+)/) || [])[1] || 'default';
   const _resumed = resumeFlag ? _sid : null;
@@ -617,8 +621,11 @@ function startRun(msg) {
   // stream-json OUTPUT, never the prompt (fed via stdin), so the preview has to come from here.
   try { fs.writeFileSync(path.join(BRIDGE_DIR, `${ts}.meta.json`), JSON.stringify({ ts, verb, model: _modelId, maxTurns: turns, promptPreview: prompt.slice(0, 120), startedAt: ts, resumed: _resumed }, null, 2)); } catch { /* */ }
   log(`run started verb=${verb} model=${_modelId} maxTurns=${turns}${_resumed ? ` resume=${_resumed.slice(0, 8)}` : ''} pid=${child.pid} journal=${path.basename(journal)}`);
-  send({ v: PROTOCOL_V, type: 'started', pid: child.pid, journal: path.basename(journal), startedAt: ts, model: _modelId, maxTurns: turns, resumed: _resumed });
-  tailJournal(journal, child.pid);
+  send({ v: PROTOCOL_V, type: 'started', runId, pid: child.pid, journal: path.basename(journal), startedAt: ts, model: _modelId, maxTurns: turns, resumed: _resumed });
+  // DBR-P4-3b (§10) — the `pool` frame: who's running + the slot cap. At MAX_CONCURRENT=1 it's this one run; the
+  // panel can demux/aggregate on it (P4-4). Connection-scoped (no runId).
+  send({ v: PROTOCOL_V, type: 'pool', ...protocol.poolSnapshot([{ runId, pid: child.pid }], MAX_CONCURRENT) });
+  tailJournal(journal, child.pid, runId);
 }
 
 // Poll-tail the journal, forwarding each stream-json line as an event frame. Poll (not fs.watch) — it is
@@ -627,7 +634,7 @@ function startRun(msg) {
 // status re-probe during a run this host already started must NOT spawn a second tail (would double every
 // event). Reattach from a FRESH host is fine — that host isn't tailing the journal yet.
 const _tailing = new Set();
-function tailJournal(journal, pid) {
+function tailJournal(journal, pid, runId) {
   if (_tailing.has(journal)) return;
   _tailing.add(journal);
   let offset = 0;
@@ -652,13 +659,14 @@ function tailJournal(journal, pid) {
         let ev = null;
         try { ev = JSON.parse(line); } catch { continue; }   // non-JSON noise stays in the journal
         if (JSON.stringify(ev).length > MAX_OUT_EVENT) ev = { type: ev.type || 'event', truncated: true };
-        send({ v: PROTOCOL_V, type: 'event', ev });
+        send({ v: PROTOCOL_V, type: 'event', runId, ev });
         if (ev && ev.type === 'result') {
           clearInterval(timer);
           clearLock();
           _tailing.delete(journal);
           log(`run done pid=${pid} (${ev.subtype || 'result'})`);
-          send({ v: PROTOCOL_V, type: 'done', result: { subtype: ev.subtype ?? null, costUsd: ev.total_cost_usd ?? null, durationMs: ev.duration_ms ?? null, numTurns: ev.num_turns ?? null, sessionId: ev.session_id ?? null } });
+          send({ v: PROTOCOL_V, type: 'done', runId, result: { subtype: ev.subtype ?? null, costUsd: ev.total_cost_usd ?? null, durationMs: ev.duration_ms ?? null, numTurns: ev.num_turns ?? null, sessionId: ev.session_id ?? null } });
+          send({ v: PROTOCOL_V, type: 'pool', ...protocol.poolSnapshot([], MAX_CONCURRENT) });   // DBR-P4-3b — slot freed
           return;
         }
       }
@@ -668,7 +676,8 @@ function tailJournal(journal, pid) {
       clearLock();
       _tailing.delete(journal);
       log(`run pid=${pid} exited without a result event`);
-      send({ v: PROTOCOL_V, type: 'done', result: { subtype: 'host-lost' } });
+      send({ v: PROTOCOL_V, type: 'done', runId, result: { subtype: 'host-lost' } });
+      send({ v: PROTOCOL_V, type: 'pool', ...protocol.poolSnapshot([], MAX_CONCURRENT) });   // DBR-P4-3b — slot freed
     }
   }, 300);
   timer.unref?.();
