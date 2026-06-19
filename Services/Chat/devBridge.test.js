@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, driftBroadcastSet, PREVIEW_WT, ltUsesPreview, previewRepointPlan, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, driftBroadcastSet, PREVIEW_WT, ltUsesPreview, previewRepointPlan, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer, scopeCategory } from './devBridge.js';
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
@@ -478,5 +478,31 @@ describe('P4-5 preview-lt pure core (DBR-P4-5)', () => {
   });
   it('PREVIEW_WT is the fixed .wt/preview path', () => {
     assert.equal(PREVIEW_WT, '.wt/preview');
+  });
+});
+
+describe('scopeCategory — compact dev-conversation label from the scope (v2.74.1099)', () => {
+  it('maps a domain/activity scope to a role label', () => {
+    assert.equal(scopeCategory('redesign the settings panel layout'), 'UX designer');
+    assert.equal(scopeCategory('add tests for the merge driver'), 'QA engineer');
+    assert.equal(scopeCategory('optimize the explore sweep latency'), 'Performance');
+    assert.equal(scopeCategory('fix the auth token refresh'), 'Security eng');
+    assert.equal(scopeCategory('add a new API endpoint'), 'Backend eng');
+    assert.equal(scopeCategory('write the README for the bridge'), 'Docs writer');
+    assert.equal(scopeCategory('refactor and dedup the resolve helpers'), 'Refactoring');
+    assert.equal(scopeCategory('rework the storage schema'), 'Data engineer');
+  });
+  it('a specific domain beats a generic activity', () => {
+    assert.equal(scopeCategory('fix the UX layout spacing'), 'UX designer');   // domain (UX) over "Bug fix"
+    assert.equal(scopeCategory('add unit tests'), 'QA engineer');              // domain (QA) over "Feature dev"
+  });
+  it('a generic build task → Feature dev', () => {
+    assert.equal(scopeCategory('create a notification system'), 'Feature dev');
+  });
+  it('no keyword → a compact, capitalized scope summary', () => {
+    assert.equal(scopeCategory('tweak the onboarding'), 'Tweak the onboarding');
+  });
+  it('empty / nullish → empty string', () => {
+    for (const s of ['', '   ', null, undefined]) assert.equal(scopeCategory(s), '');
   });
 });

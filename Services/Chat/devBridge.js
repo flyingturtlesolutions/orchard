@@ -482,6 +482,33 @@ export function buildMergeCommitMessage(summary, convId) {
   return lines.join('\n').replace(/\0/g, '').replace(/\n{3,}/g, '\n\n').trim().slice(0, 4000);
 }
 
+// v2.74.1099 — the dev-conversation drawer LABEL: a compact role/category derived from the conversation's scope
+// (concern / first task), replacing the opaque session shortid. Information-dense yet short. Ordered keyword map,
+// first match wins — specific DOMAINS/activities before generic ones, so "fix the UX layout" reads as UX (not Bug
+// fix) and "add tests" as QA (not Feature). No keyword match → a compact summary of the scope. PURE (tested).
+const _SCOPE_CATEGORIES = [
+  [/\b(ux|ui|design|layout|css|styl|theme|visual|animation|responsive|spacing|colou?r|font|a11y|accessib|usabilit)/i, 'UX designer'],
+  [/\b(tests?|testing|spec|coverage|\bqa\b|assert|harness|e2e|regression)/i, 'QA engineer'],
+  [/\b(docs?|documentation|readme|comment|jsdoc|guide|tutorial|changelog)/i, 'Docs writer'],
+  [/\b(security|auth|authenticat|authoriz|injection|\bxss\b|csrf|\bcsp\b|token|credential|permission|sanitiz|escap|vuln)/i, 'Security eng'],
+  [/\b(perf|performance|optimi|latency|speed|faster|slow|memory|leak|throughput|cache|debounce|throttle)/i, 'Performance'],
+  [/\b(database|schema|storage|indexeddb|sqlite|\bsql\b|migration|persist|\bdb\b)/i, 'Data engineer'],
+  [/\b(backend|back-end|server|\bapi\b|endpoint|handler|service.?worker|background|webhook|\brpc\b)/i, 'Backend eng'],
+  [/\b(frontend|front-end|react|vue|svelte|component|widget|\bdom\b|render|sidepanel|drawer|chat ui|panel ui)/i, 'Frontend eng'],
+  [/\b(\bci\b|\bcd\b|deploy|pipeline|bundle|webpack|rollup|\bmanifest\b|release|\blint\b|docker|devops)/i, 'Build/DevOps'],
+  [/\b(refactor|cleanup|clean.?up|rename|dedup|deduplicat|simplif|extract|consolidat|reorganiz|tidy)/i, 'Refactoring'],
+  [/\b(fix|bug|broken|crash|regression|defect|fault|incorrect|fails?|failing|error)/i, 'Bug fix'],
+  [/\b(add|implement|build|create|introduce|enable|support|new)\b/i, 'Feature dev'],
+];
+export function scopeCategory(text) {
+  const t = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  for (const [re, label] of _SCOPE_CATEGORIES) if (re.test(t)) return label;
+  const head = t.split(' ').slice(0, 3).join(' ');                                   // no keyword → a compact scope summary
+  const compact = head.length > 22 ? head.slice(0, 21).replace(/\s\S*$/, '') + '…' : head;
+  return compact.charAt(0).toUpperCase() + compact.slice(1);
+}
+
 /**
  * Factory — chat.js hands in its rendering helpers (avoids any import cycle into the panel).
  * @param {{appendMessage: Function, setMessageBody: Function, mkBtn: Function, persistMessage?: Function, decorateBubble?: Function, renderMarkdown?: Function, wireCodeCopyButtons?: Function}} deps
@@ -587,9 +614,21 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         concern = _conciseConcern(ask);
         if (concern) await ConversationStore.patchMeta(id, { concern }).catch(() => { /* */ });
       }
+      if (concern) _applyScopeTitle(conv, concern);   // v2.74.1099 — drawer label = scope category, not the session shortid
       return concern || null;
     } catch { return null; }
   };
+  // v2.74.1099 — keep the dev-conversation drawer LABEL = its scope category (scopeCategory of the concern), replacing
+  // the session shortid. Sets the title when it differs (no-op once it matches → not re-written every dispatch). The
+  // category applies to NEW conversations on their first task + EXISTING ones on their next task. Best-effort.
+  function _applyScopeTitle(conv, scopeText) {
+    if (!conv || conv.kind !== 'dev') return;
+    const category = scopeCategory(scopeText);
+    if (!category || conv.title === category) return;
+    ConversationStore.patchMeta(conv.id, { title: category })
+      .then(() => { try { refreshHistory && refreshHistory(); } catch { /* */ } })
+      .catch(() => { /* */ });
+  }
   // v2.74.980 — the working-tree signature stamped at the last reload (the "applied" baseline). Persisted
   // so it survives the chrome.runtime.reload() that the reload icon triggers — that survival is the whole
   // point: the post-reload diffstat compares against it to decide whether anything is still pending.
@@ -1557,6 +1596,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       }
       const concern = _conciseConcern(arg);
       await ConversationStore.patchMeta(convId, { concern }).catch(() => { /* */ });
+      try { _applyScopeTitle(await ConversationStore.load(convId), concern); } catch { /* */ }   // v2.74.1099 — re-derive the drawer label from the new scope
       devBubble(`scope (concern) → ${concern}. Applies to the next run.`);
       return true;
     }
