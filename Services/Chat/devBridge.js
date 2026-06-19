@@ -938,22 +938,22 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         // DBR-P4-3b (§10) — the run-pool snapshot the host emits on run start/finish + on the connect probe. At cap=1
         // it's the one run; the running-bar (below, P4-4) renders it. Stored now, consumed there.
         _lastPool = { running: Array.isArray(m.running) ? m.running : [], cap: Number(m.cap) || 1 };
-        // DBR-P4-8 — POOL REATTACH: at cap>1, a run still live in the pool that the panel has NO handle for (lost to a
-        // reload) gets a fresh background bubble so the host's re-tailed events land somewhere instead of orphaning.
-        // Skips the foreground + already-tracked runs. (cap=1 keeps the single-run `status` reattach below, unchanged.)
-        if (_lastPool.cap > 1) {
-          for (const r of _lastPool.running) {
-            if (!r || !r.runId || runs.has(r.runId) || (run && run.runId === r.runId)) continue;
-            const h = _beginRunBubble(`↻ reattaching to a run still in progress (pid ${r.pid != null ? r.pid : '?'})…`, { reattach: true, background: true });
-            h.runId = r.runId; runs.set(r.runId, h);
-          }
+        // DBR-P4-8 / v2.74.1104 — POOL REATTACH (ALL caps — the host always sends `pool`, and it carries the runId the
+        // `status` frame lacks): a run still live in the pool that this panel has NO handle for (lost to a close/reload)
+        // gets a bubble so the host's re-tailed events land somewhere. _rekeyRunMsg gives it the stable `devrun-<runId>`
+        // id → reopening N times collapses to ONE bubble (+ removes the rehydrated stale copy), instead of piling up a
+        // new "↻ reattaching…" per reconnect. The FIRST reattach claims the foreground `run`; the rest are background.
+        for (const r of _lastPool.running) {
+          if (!r || !r.runId || runs.has(r.runId) || (run && run.runId === r.runId)) continue;
+          const h = _beginRunBubble(`↻ reattaching to a run still in progress (pid ${r.pid != null ? r.pid : '?'})…`, { reattach: true, background: !!run });
+          h.runId = r.runId; runs.set(r.runId, h); _rekeyRunMsg(h, r.runId);
         }
         _renderRunningBar();   // DBR-P4-4 — refresh the multi-run indicator
         break;
       }
       case 'started': {
         const r = _pendingStarted.shift() || run;   // DBR-P4-4 — this `started` belongs to the earliest run awaiting it (FIFO)
-        if (r) { r.runId = m.runId || r.runId; if (r.runId) runs.set(r.runId, r); }   // DBR-P4-3b step 5 — record the runId + register in the run map (the demux key); endRun drops it.
+        if (r) { r.runId = m.runId || r.runId; if (r.runId) { runs.set(r.runId, r); _rekeyRunMsg(r, r.runId); } }   // DBR-P4-3b step 5 — runId → run map (demux key); .1104 — + stable `devrun-<runId>` message id (collapses reattach copies)
         _emit({ kind: 'meta', text: `▶ run started (pid ${m.pid}${m.resumed ? `, ↻ resumed ${String(m.resumed).slice(0, 8)}` : ''}${m.model && m.model !== 'default' ? `, model ${m.model}` : ''}${m.maxTurns ? `, ≤${m.maxTurns} turns` : ''}, journal logs/bridge/${m.journal})` }, r);
         break;
       }
@@ -1047,9 +1047,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         break;
       }
       case 'status': {
-        // DB-3 (v2.74.999) — startup reattach probe answered. If a run is still alive (the host is now
-        // re-tailing its journal) and this panel has no run of its own, build a bubble for the replay.
-        if (m.active && !run) startReattach(`↻ reattaching to a run still in progress (pid ${m.pid ?? '?'})…`);
+        // DB-3 (v2.74.999) — the reattach probe reply. v2.74.1104 — reattach is now driven solely by the `pool` frame
+        // the host sends right after this: the pool carries the runId (this `status` frame doesn't), which is needed
+        // for the stable per-run bubble id that collapses open/close reattach copies. So this is informational only.
         break;
       }
       case 'history':   // DB-3 (v2.74.1000) — list of recent runs → clickable, replay-on-tap
@@ -1074,7 +1074,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   function _beginRunBubble(headline, { reattach = false, background = false } = {}) {
     _follow = true;       // v2.74.995 — a fresh run follows from the top; the user can scroll up to stop it
     _wireFollow();        // attach the one scroll listener (idempotent) now that the panel is up
-    const { msg, bodyEl, blocks } = devBubble(headline);
+    const { msg, bodyEl, blocks } = devBubble(headline, { persist: false });   // v2.74.1104 — run content persists via _emit under the STABLE `devrun-<runId>` id (_rekeyRunMsg); the initial UUID-keyed persist is what piled up duplicate reattach bubbles across open/close
     const rh = { msgEl: msg, msg, bodyEl, blocks, bar: null, sessionId: null, pendingPayload: null, tick: null, reattach };
     // DBR-P4-4 step 2 — a FOREGROUND run owns the global `run` pointer (cap=1: always; the reattach/replay/gl paths
     // read it); a cap>1 BACKGROUND run lives ONLY in `runs` (registered on `started`) + streams to its own bubble via
@@ -1083,6 +1083,17 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     rh.startedAt = Date.now();   // v2.74.1093 — kept on the handle so a conversation-switch re-attach preserves elapsed
     _attachRunFooter(rh);        // v2.74.989/.992 — amber spinner · ticking "working… Ns" · Pause; factored out (.1093) so re-attach can rebuild it
     return rh;
+  }
+
+  // v2.74.1104 — give a run's bubble a STABLE message id derived from its runId (`devrun-<runId>`), so EVERY bubble
+  // for that run — the original + each open/close reattach — shares ONE stored message instead of piling up a new
+  // "↻ reattaching…" copy per reconnect. Also removes any other DOM node already carrying that id (a rehydrated stale
+  // copy), so the run renders exactly once. Called on `started` (fresh run) and on a pool reattach (surviving run).
+  function _rekeyRunMsg(rh, runId) {
+    if (!rh || !rh.msg || runId == null) return;
+    const id = 'devrun-' + String(runId).replace(/[^\w-]/g, '');
+    try { document.querySelectorAll(`[data-message-id="${id}"]`).forEach((el) => { if (el !== rh.msg) el.remove(); }); } catch { /* */ }
+    try { rh.msg.dataset.messageId = id; } catch { /* */ }
   }
 
   // Build (or REBUILD) the run footer onto rh's CURRENT bubble: spinner · ticking elapsed · Pause. Factored out of
