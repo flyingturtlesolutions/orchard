@@ -623,6 +623,33 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     if (c) c.scrollTop = c.scrollHeight;   // footer bar is the last child → pins working…/Pause at the bottom
   }
 
+  // DBR-P4-4 step 5 (§10) — the multi-run RUNNING-BAR. A sticky strip at the top of the thread that, at cap>1, names
+  // how many dev runs are in flight against the slot cap — the one cross-conversation signal a per-bubble footer
+  // can't give (each bubble only knows its own run; a background run in ANOTHER conversation is otherwise invisible).
+  // DEAD at cap=1: the bar only renders when cap>1 AND ≥1 run is active, so the default single-run panel is unchanged
+  // (no element is ever created). Counts `_activeRuns()` (dispatched + started across all conversations), refreshed
+  // on every run start/end and on each host `pool` snapshot. Best-effort + cosmetic — wrapped so it never throws.
+  let _runBarEl = null;
+  function _renderRunningBar() {
+    try {
+      const cap = _capNow();
+      const active = _activeRuns();
+      if (cap <= 1 || active <= 0) { if (_runBarEl) _runBarEl.style.display = 'none'; return; }
+      const c = _scroller();
+      if (!c) return;
+      if (!_runBarEl) {
+        _runBarEl = document.createElement('div');
+        _runBarEl.className = 'dev-running-bar';
+        _runBarEl.dataset.devBridge = '1';
+        // Inline so it works without a CSS change; position:sticky pins it at the top of the scrolling thread.
+        _runBarEl.style.cssText = 'position:sticky;top:0;z-index:5;padding:4px 10px;margin:0 0 6px;font-size:12px;font-weight:600;color:#c9a227;background:rgba(201,162,39,0.12);border:1px solid rgba(201,162,39,0.35);border-radius:6px;';
+      }
+      if (_runBarEl.parentNode !== c) { try { c.insertBefore(_runBarEl, c.firstChild); } catch { /* */ } }
+      _runBarEl.style.display = '';
+      _runBarEl.textContent = `▶ ${active} dev run${active === 1 ? '' : 's'} running · ${cap} slots`;
+    } catch { /* */ }
+  }
+
   // ── Rich rendering (v2.74.993) — mirror Claude Code's desktop formatting ──────────────────────────
   // Each stream event becomes a styled BLOCK in the bubble's .message-body, instead of the old plain-text
   // line dump: assistant prose → markdown (code fences, lists, bold — via the SAME injection-safe
@@ -738,6 +765,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const _ip = _pendingPreflight.indexOf(rh); if (_ip >= 0) _pendingPreflight.splice(_ip, 1);
     const _is = _pendingStarted.indexOf(rh); if (_is >= 0) _pendingStarted.splice(_is, 1);
     if (rh === run) run = null;             // clear the FOREGROUND pointer iff this was it (a cap>1 background run leaves `run` alone)
+    _renderRunningBar();                    // DBR-P4-4 step 5 — a run ended; refresh / hide the multi-run indicator
   }
 
   function disconnect() {
@@ -821,11 +849,23 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         if (r && r.pendingPayload) { const p = r.pendingPayload; r.pendingPayload = null; port.postMessage(p); _emit({ kind: 'meta', text: `claude ${m.claudeVersion} · ${m.repoRoot}` }, r); _pendingStarted.push(r); }
         break;
       }
-      case 'pool':
-        // DBR-P4-3b (§10) — the run-pool snapshot the host emits on run start/finish. At cap=1 it's this one run;
-        // P4-4 renders it as the multi-run running-bar (+ "Nth in line" at cap>1). Stored now, consumed there.
+      case 'pool': {
+        // DBR-P4-3b (§10) — the run-pool snapshot the host emits on run start/finish + on the connect probe. At cap=1
+        // it's the one run; the running-bar (below, P4-4) renders it. Stored now, consumed there.
         _lastPool = { running: Array.isArray(m.running) ? m.running : [], cap: Number(m.cap) || 1 };
+        // DBR-P4-8 — POOL REATTACH: at cap>1, a run still live in the pool that the panel has NO handle for (lost to a
+        // reload) gets a fresh background bubble so the host's re-tailed events land somewhere instead of orphaning.
+        // Skips the foreground + already-tracked runs. (cap=1 keeps the single-run `status` reattach below, unchanged.)
+        if (_lastPool.cap > 1) {
+          for (const r of _lastPool.running) {
+            if (!r || !r.runId || runs.has(r.runId) || (run && run.runId === r.runId)) continue;
+            const h = _beginRunBubble(`↻ reattaching to a run still in progress (pid ${r.pid != null ? r.pid : '?'})…`, { reattach: true, background: true });
+            h.runId = r.runId; runs.set(r.runId, h);
+          }
+        }
+        _renderRunningBar();   // DBR-P4-4 — refresh the multi-run indicator
         break;
+      }
       case 'started': {
         const r = _pendingStarted.shift() || run;   // DBR-P4-4 — this `started` belongs to the earliest run awaiting it (FIFO)
         if (r) { r.runId = m.runId || r.runId; if (r.runId) runs.set(r.runId, r); }   // DBR-P4-3b step 5 — record the runId + register in the run map (the demux key); endRun drops it.
@@ -991,6 +1031,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     try {
       ensurePort().postMessage({ v: PROTOCOL_V, type: 'preflight' });   // run is posted on preflight-ok
       _pendingPreflight.push(r);   // DBR-P4-4 — queue ONLY once the preflight actually went out, so the FIFO and the host's ok stay in lockstep
+      _renderRunningBar();   // DBR-P4-4 step 5 — a new run is in flight; refresh the multi-run indicator
     } catch (e) {
       endRun(`✗ could not reach the bridge host: ${e.message}. Run bridge/install.ps1, then reload.`, r);
     }
