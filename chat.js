@@ -20,6 +20,7 @@ import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
 import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, namesMultipleSites, namesAnySite } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X)
 import { walkPlan, scanPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate); scanPlan — THE recursive plan walker (CR-D7)
+import { runBrain } from './Core/brainRun.js';   // IL-2 — the inference-layer brain loop, panel-hosted (reached via the `brain:` verify command)
 import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   // ORCH-A — predicate → gate (conditional routing + the analysis)
 import { comprehend } from './Core/orchComprehend.js';   // ORCH-CB — substrate-free shape comprehension (cold-ground decompose)
 import { renderCriteria, renderPlanLines } from './Core/orchVisual.js';   // ORCH-CB — search params → criteria for a visual condition's prompt; renderPlanLines — the confirm-card plan renderer (CR-D7)
@@ -3039,6 +3040,51 @@ async function _tryRouterFallback(text) {
   return _orchClarifyFromRoute(d, { tabId: tab && tab.id, groundId: res.groundId, text });
 }
 
+// IL-2 (v2.74.1112) — `brain: <ask>` runs the inference-layer loop LIVE, verify-only. The panel HOSTS the loop
+// (Core/brainRun → agentLoop): assembles the palette from RETRIEVE_TOOLS (learned) ∪ builtins, thinks via
+// STEP_BRAIN, and dispatches each step via _orchReq — which already routes any channel to its executor across
+// both handler maps (the cross-map routing a background loop would otherwise reimplement). SAFETY (first cut):
+// exec AUTO-runs only nav/focus/list; a page mutation / capability replay / tab-close returns a confirm-required
+// MISS so the loop reasons around it instead of acting unconfirmed (the §2.4/§9 HITL floor). `BRAIN ▸` is a
+// decision marker (registered in studio.js _DECISION_RE — INVARIANT #1) so a gc/decisions download sees it.
+async function _tryBrainCommand(text) {
+  const ask = String(text).replace(/^brain:\s*/i, '').trim();
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  if (!ask) { _setMessageBody(msg, 'usage: `brain: <ask>` — runs the inference-layer loop (verify-only; reads + nav auto-run, mutations need confirm).'); return true; }
+  _setMessageBody(msg, '🧠 thinking…');
+  const tab = await _orchActiveTab();
+  const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
+  // Resolve the Ground once (RETRIEVE_TOOLS returns it) so execPlan can ctx-bind a page replay to ground+tab.
+  let groundId = null;
+  try { const seed = await _orchReq('RETRIEVE_TOOLS', { ask, tabId }); groundId = (seed && seed.groundId) || null; } catch { /* */ }
+  const retrieve = async (g) => { try { const r = await _orchReq('RETRIEVE_TOOLS', { ask: g, tabId, groundId }); return (r && r.candidates) || []; } catch { return []; } };
+  const brain = async (sctx) => { try { const r = await _orchReq('STEP_BRAIN', { ctx: sctx }); return (r && r.decision) || { kind: 'needs', needs: { kind: 'clarify' }, reason: 'brain-unreachable', confidence: 0 }; } catch (e) { return { kind: 'needs', needs: { kind: 'clarify' }, reason: e?.message || 'brain-error', confidence: 0 }; } };
+  const exec = async (plan) => {
+    const autoOk = plan.channel === 'OPEN_URL_NEW_TAB' || plan.channel === 'FOCUS_TAB' || plan.channel === 'LIST_TABS';
+    if (!autoOk) return { success: false, error: `confirm-required: ${plan.channel} (brain: auto-runs only reads + nav in this first cut)` };
+    try { return await _orchReq(plan.channel, plan.payload); } catch (e) { return { success: false, error: e?.message || 'exec-error' }; }
+  };
+  let result = null;
+  try { result = await runBrain(ask, { tabId, groundId }, { retrieve, brain, exec }, { maxSteps: 6 }); }
+  catch (e) { _setMessageBody(msg, `🧠 brain run failed: ${e?.message || e}`); return true; }
+  try { _orchLog(`BRAIN ▸ "${String(ask).slice(0, 50)}" → ${result.status} in ${result.steps} step(s)`); } catch { /* */ }
+  _renderBrainRun(msg, ask, result);
+  return true;
+}
+
+function _renderBrainRun(msg, ask, result) {
+  const lines = [`🧠 brain: ${ask}`, ''];
+  (result.ledger || []).forEach((e, i) => lines.push(`  ${i + 1}. ${e.kind} ${e.leg || ''} → ${e.ok ? 'ok' : 'miss'}${e.reason ? ` (${e.reason})` : ''}`));
+  const d = result.decision || {};
+  const term = result.status === 'done' ? `✓ done — ${result.answer ?? ''}`
+    : result.status === 'needs' ? `⚠ needs ${(d.needs && d.needs.kind) || '?'} — ${d.reason || ''}`
+    : result.status === 'act' ? `▸ would run ${(d.leg && d.leg.key) || '?'} (handed back at the step cap)`
+    : `${result.status}${result.reason ? ` — ${result.reason}` : ''}`;
+  lines.push('', `→ ${term}`);
+  _setMessageBody(msg, lines.join('\n'));
+  try { _orchFinalize(msg); } catch { /* */ }
+}
+
 // IM-3 (v2.74.895) — "what can I do here?" → the INTENT MENU. A meta-ask about the APP's abilities on this
 // page must not fall into capability matching (it would miss and offer to teach "what can i do"). The menu is
 // anchored full-match so a real ask ("what can I do about my resume") is never hijacked.
@@ -3262,6 +3308,16 @@ async function sendChatMessage() {
     try { await _getDevBridge().maybeHandle(text, { devConversation: true, skipEcho: true, conversationId: _currentConversationId }); }
     catch (e) { try { console.warn('[chat] dev-conversation route failed:', e?.message); } catch { /* */ } }
     $('btn-chat-send').disabled = false;
+    return;
+  }
+
+  // IL-2 (v2.74.1112) — `brain: <ask>` runs the inference-layer loop LIVE (verify-only, opt-in). Explicit
+  // prefix → it can never pre-empt a normal ask; everything below is untouched. The loop drives tabs, so it's
+  // the eyeball step — exec auto-runs only reads + nav (page mutations gate behind a confirm-required miss).
+  if (/^brain:/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    try { await _tryBrainCommand(text); } catch (e) { try { console.warn('[chat] brain command failed:', e?.message); } catch { /* */ } }
     return;
   }
 

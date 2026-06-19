@@ -669,6 +669,41 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // IL-2 (v2.74.1112) — RETRIEVE_TOOLS: the LEARNED-leg source for the panel-hosted brain loop's
+    // assemblePalette (Core/brainRun). Mirrors ROUTE_ASK's ground-resolution + candidate computation, minus
+    // the LLM route — returns the retrieved candidates + the resolved groundId so the panel can ctx-bind
+    // execPlan. Reached ONLY by the `brain:` panel command (verify-only); never touches the default cascade.
+    RETRIEVE_TOOLS: async (payload, _sender, sendResponse) => {
+      try {
+        const ask = String(payload?.ask ?? '').trim();
+        if (!ask) { sendResponse({ success: false, error: 'ask required' }); return; }
+        let { tabId, groundId } = payload ?? {};
+        let tabUrl = '';
+        if (typeof tabId === 'number') { try { tabUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
+        if (!groundId && tabUrl) { try { groundId = _groundIdForUrl(tabUrl, await StorageManager.getAllGrounds()); } catch { /* */ } }
+        let caps = [];
+        if (groundId) { try { caps = ((await ctx.readSgCapabilities(groundId)) || []).filter((c) => c && isActiveCapability(c) && c.kind !== 'composite'); } catch { caps = []; } }
+        const candidates = retrieveTools(ask, { capabilities: caps });
+        sendResponse({ success: true, candidates, groundId: groundId || null });
+      } catch (err) {
+        Logger.error('background', `RETRIEVE_TOOLS failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // IL-2 (v2.74.1112) — STEP_BRAIN: the brain loop's THINK seam (AnthropicService.stepBrain over a
+    // StepContext). The panel hosts the loop (Core/brainRun + agentLoop) and round-trips here each cold step;
+    // the pure prompt/parse (palette + observation fenced as DATA) lives in Core/stepPrompt.js. Verify-only.
+    STEP_BRAIN: async (payload, _sender, sendResponse) => {
+      try {
+        const decision = await AnthropicService.stepBrain(payload?.ctx || {});
+        sendResponse({ success: true, decision });
+      } catch (err) {
+        Logger.error('background', `STEP_BRAIN failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
     // PB-4 (R8) — run a TRIAL of an already-RESOLVED bundle (Studio's resolve flow) as the intent-truth
     // proof. v2.74.950 (CR-X3) — migrated from the legacy background switch: this was the un-migrated
     // TWIN of RUN_SG_TRIAL that silently missed the .912 handler-level fix; it now lives beside its twin
