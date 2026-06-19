@@ -1217,15 +1217,6 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     }
   }
 
-  // DB-3 (v2.74.999) — reattach to a run still alive after a panel close / extension reload. The host's
-  // status handler is already re-tailing the journal, so we just build a bubble for the replayed events
-  // to land in. NOTE: best-effort — the claude child usually does NOT survive host death on Windows
-  // (verified), so this fires only where survival holds; the robust path is the throttled mid-run persist
-  // (a partial transcript on reopen) + `dev:` resume.
-  function startReattach(headline) {
-    _beginRunBubble(headline, { reattach: true });
-  }
-
   // ── Run history (v2.74.1000, DB-3) ───────────────────────────────────────────────────────────────
   const _clock = (ts) => { try { return new Date(Number(ts)).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }); } catch { return ''; } };
 
@@ -1755,9 +1746,10 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'diffstat' }); } catch { /* host not reachable */ }
   }
 
-  // DB-3 (v2.74.999) — on startup, ask the host whether a run is still alive so the panel can reattach
-  // (status active:true → the host re-tails its journal → the `status` handler builds a replay bubble).
-  // No-op when off / host unreachable. Best-effort: see startReattach — the child usually dies with the host.
+  // DB-3 (v2.74.999) — on startup, ask the host whether a run is still alive so the panel can reattach. The
+  // host answers with `status` (probe ack) THEN a `pool` frame listing live runs; v2.74.1104 the `pool` handler
+  // rebuilds a stable `devrun-<runId>` bubble per surviving run (the runId it needs isn't on the `status` frame).
+  // No-op when off / host unreachable. The detached native `claude.exe` now survives panel close (v2.74.1103).
   async function _probeActiveRun() {
     if (!(await getEnabled())) return;
     try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'status' }); } catch { /* host not reachable */ }
