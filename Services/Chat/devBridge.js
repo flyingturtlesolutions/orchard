@@ -491,6 +491,7 @@ const _SCOPE_CATEGORIES = [
   [/\b(tests?|testing|spec|coverage|\bqa\b|assert|harness|e2e|regression)/i, 'QA engineer'],
   [/\b(docs?|documentation|readme|comment|jsdoc|guide|tutorial|changelog)/i, 'Docs writer'],
   [/\b(security|auth|authenticat|authoriz|injection|\bxss\b|csrf|\bcsp\b|token|credential|permission|sanitiz|escap|vuln)/i, 'Security eng'],
+  [/\b(aws|azure|\bgcp\b|\bcloud\b|lambda|\bs3\b|\bec2\b|dynamo|cloudformation|terraform|kubernetes|\bk8s\b|serverless|\binfra\b|infrastructure|cloudwatch|cognito|\biam\b|\becs\b|\beks\b|fargate)/i, 'Cloud Engineer'],   // v2.74.1101
   [/\b(perf|performance|optimi|latency|speed|faster|slow|memory|leak|throughput|cache|debounce|throttle)/i, 'Performance'],
   [/\b(database|schema|storage|indexeddb|sqlite|\bsql\b|migration|persist|\bdb\b)/i, 'Data engineer'],
   [/\b(backend|back-end|server|\bapi\b|endpoint|handler|service.?worker|background|webhook|\brpc\b)/i, 'Backend eng'],
@@ -500,13 +501,19 @@ const _SCOPE_CATEGORIES = [
   [/\b(fix|bug|broken|crash|regression|defect|fault|incorrect|fails?|failing|error)/i, 'Bug fix'],
   [/\b(add|implement|build|create|introduce|enable|support|new)\b/i, 'Feature dev'],
 ];
+// v2.74.1101 — leading filler/stopwords stripped from the no-keyword fallback so a phrase like "lets work on aws"
+// surfaces its MEANINGFUL term, not "Lets work on" (the reported bug). (The aws case now hits Cloud Engineer above;
+// this hardens the tail for any other unmatched scope.)
+const _SCOPE_STOP = new Set(['lets', 'let', 'please', 'can', 'could', 'would', 'you', 'your', 'i', 'im', 'we', 'our', 'should', 'shall', 'need', 'want', 'wanna', 'gonna', 'to', 'the', 'a', 'an', 'of', 'for', 'on', 'in', 'into', 'with', 'help', 'me', 'my', 'go', 'now', 'just', 'try', 'make', 'do', 'set', 'up', 'work', 'working', 'this', 'that', 'it', 'and', 'or', 'get', 'use', 'using', 'some', 'also', 'then', 'start', 'begin', 'continue']);
 export function scopeCategory(text) {
   const t = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
   if (!t) return '';
   for (const [re, label] of _SCOPE_CATEGORIES) if (re.test(t)) return label;
-  const head = t.split(' ').slice(0, 3).join(' ');                                   // no keyword → a compact scope summary
-  const compact = head.length > 22 ? head.slice(0, 21).replace(/\s\S*$/, '') + '…' : head;
-  return compact.charAt(0).toUpperCase() + compact.slice(1);
+  // no keyword → a compact summary: drop leading filler/stopwords, surface the first meaningful term(s).
+  const meaningful = t.split(' ').filter((w) => { const k = w.toLowerCase().replace(/[^a-z0-9]/g, ''); return k && !_SCOPE_STOP.has(k); });
+  const picked = (meaningful.length ? meaningful : t.split(' ')).slice(0, 2).join(' ');
+  const compact = picked.length > 22 ? picked.slice(0, 21).replace(/\s\S*$/, '') + '…' : picked;
+  return compact ? compact.charAt(0).toUpperCase() + compact.slice(1) : 'Dev task';
 }
 
 /**

@@ -492,6 +492,11 @@ describe('scopeCategory — compact dev-conversation label from the scope (v2.74
     assert.equal(scopeCategory('refactor and dedup the resolve helpers'), 'Refactoring');
     assert.equal(scopeCategory('rework the storage schema'), 'Data engineer');
   });
+  it('maps cloud/infra scopes to Cloud Engineer (v2.74.1101)', () => {
+    assert.equal(scopeCategory('lets work on aws'), 'Cloud Engineer');         // the reported bug
+    assert.equal(scopeCategory('deploy the lambda function'), 'Cloud Engineer');
+    assert.equal(scopeCategory('set up the terraform infra'), 'Cloud Engineer');
+  });
   it('a specific domain beats a generic activity', () => {
     assert.equal(scopeCategory('fix the UX layout spacing'), 'UX designer');   // domain (UX) over "Bug fix"
     assert.equal(scopeCategory('add unit tests'), 'QA engineer');              // domain (QA) over "Feature dev"
@@ -499,8 +504,9 @@ describe('scopeCategory — compact dev-conversation label from the scope (v2.74
   it('a generic build task → Feature dev', () => {
     assert.equal(scopeCategory('create a notification system'), 'Feature dev');
   });
-  it('no keyword → a compact, capitalized scope summary', () => {
-    assert.equal(scopeCategory('tweak the onboarding'), 'Tweak the onboarding');
+  it('no keyword → a compact summary with leading filler/stopwords stripped (v2.74.1101)', () => {
+    assert.equal(scopeCategory('tweak the onboarding'), 'Tweak onboarding');   // "the" dropped
+    assert.equal(scopeCategory('lets work on the signup wizard'), 'Signup wizard');
   });
   it('empty / nullish → empty string', () => {
     for (const s of ['', '   ', null, undefined]) assert.equal(scopeCategory(s), '');
