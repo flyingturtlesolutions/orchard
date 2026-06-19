@@ -1731,7 +1731,19 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     reloadListener = typeof fn === 'function' ? fn : null;
     const enabled = await getEnabled();
     emitReload({ enabled });
-    if (enabled) { refreshReloadState(); _probeActiveRun(); _runWorktreeGc().catch(() => { /* */ }); }   // DBR-P4-7 — reconcile leftover `.wt/` worktrees on startup
+    if (enabled) { refreshReloadState(); _probeActiveRun(); _runWorktreeGc().catch(() => { /* */ }); _categorizeExistingDevConvs(); }   // DBR-P4-7 — reconcile leftover `.wt/` worktrees on startup; .1099 — backfill scope-category labels
+  }
+  // v2.74.1099 — one-time backfill: retitle EXISTING dev conversations from the session shortid to their SCOPE
+  // CATEGORY (from the stored concern). Idempotent (no-op once a title already matches its category) and host-free
+  // (pure storage + scopeCategory), so it runs regardless of run-pool ownership. Loads only the dev rows.
+  async function _categorizeExistingDevConvs() {
+    try {
+      const list = await ConversationStore.list();
+      for (const c of (Array.isArray(list) ? list : [])) {
+        if (!c || c.kind !== 'dev') continue;
+        try { const full = await ConversationStore.load(c.id); if (full && full.concern) _applyScopeTitle(full, full.concern); } catch { /* */ }
+      }
+    } catch { /* */ }
   }
 
   // The reload action itself — restarts the WHOLE extension (the spec's "Apply & Reload"), which closes
