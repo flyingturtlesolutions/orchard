@@ -1658,6 +1658,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   // merged (archived). DBR-P2-5 adds the freshness re-check below — nothing lands on a `main` it wasn't synced+green against.
   async function _mergeLand(convId, { branch, summary, syncedMain }) {
     const bubble = devBubble(`↻ landing \`${branch}\` → \`main\`…`);
+    let landed = null, preMain = null;   // DBR-P4-7 — the merge commit + the pre-land `main` HEAD, captured on success → drive the post-release drift broadcast (below)
     // DBR-P4-6 (DESIGN §7.2) — acquire the single LAND lock. Prepare ran lock-free; here concurrent lands queue FIFO
     // (the bubble shows "waiting to merge — Nth in line") and each re-runs its freshness re-check below against the
     // `main` the one ahead just produced. ALWAYS release in the finally — a held lock would wedge every queued merge.
@@ -1704,10 +1705,14 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     const mergeCommit = String((head && head.ok && head.stdout) || '').trim();
     try { await ConversationStore.patchMeta(convId, { status: 'merged', mergedAt: Date.now(), mergeCommit }); } catch { /* archive is best-effort */ }
     _setBubble(bubble, `✓ merged \`${branch}\` → \`main\` as \`${mergeCommit.slice(0, 7) || '?'}\` (one squash commit). This conversation is archived (merged); the loaded tree is on \`main\`. **Push stays manual** — run \`cp\` when ready to publish.`);
+    landed = mergeCommit; preMain = currentMain;   // DBR-P4-7 — mark success + the squash's parent; the drift broadcast runs AFTER the lock releases (below)
     } finally {
       try { console.info(`MERGE_LOCK ▸ ${branch} released the land lock`); } catch { /* */ }
       release();   // free the land lock → auto-promotes the next queued land (which then re-checks freshness)
     }
+    // DBR-P4-7 (DESIGN §7) — post-land, lock RELEASED: nudge the OTHER live dev branches that now drift from `main`.
+    // Best-effort + non-blocking — a broadcast failure never touches the just-completed land.
+    if (landed) { try { await _broadcastDrift(convId, branch, landed, preMain); } catch { /* */ } }
   }
 
   // DBR-P2-6 (DESIGN §5/U13) — `abandon` (SOFT): archive the conversation (status → 'abandoned', read-only) but
@@ -1778,6 +1783,45 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     }
     const flagged = drift.map((f) => isFoundationalFile(f) ? '`' + f + '` ⚠' : '`' + f + '`').join(', ');
     _setBubble(bubble, `⚠ drift — \`main\` and this branch both changed ${flagged} since the fork. \`sync\` to fold main's changes in before you \`merge\` (⚠ = foundational/shared file). Warning only — nothing is blocked.`);
+  }
+
+  // DBR-P4-7 (DESIGN §7) — the AUTOMATIC counterpart to `_driftCheck`: after a successful land, NUDGE the OTHER live
+  // dev branches that overlap what just landed. Best-effort + non-blocking (the caller wraps it): a broadcast failure
+  // NEVER affects the completed land. Reuses the pure `driftBroadcastSet` over each other live branch's changed-file
+  // set; posts a one-line `sync` nudge INTO each drifting conversation's transcript (updateMessage upsert — surfaced
+  // when they next open it). Skips a branch it can't fork-point (host hiccup) rather than false-nudging. Runs with the
+  // loaded tree on `main` (the land left it there) — every op is ref-based, so it's tree-agnostic.
+  async function _broadcastDrift(mergedConvId, mergedBranch, mergeCommit, preMain) {
+    if (!mergeCommit || !preMain) return;
+    const split = (r) => String((r && r.ok && r.stdout) || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    // what the squash landed: `preMain...mergeCommit`. Both are PLAIN shas — preMain is mergeCommit's parent, so the
+    // host's three-dot diffNames (`a...b`) collapses to the squash's own diff; using mergeCommit (a fixed sha) not the
+    // `main` ref makes it immune to another queued land moving `main` between our lock-release and this read (cap>1).
+    const mergedFiles = split(await gitOp('diffNames', { a: preMain, b: mergeCommit }));
+    if (!mergedFiles.length) return;
+    let summaries = [];
+    try { summaries = await ConversationStore.list(); } catch { summaries = []; }
+    const others = (Array.isArray(summaries) ? summaries : []).filter((s) => s && s.kind === 'dev' && (s.status == null || s.status === 'active') && s.id !== mergedConvId);
+    const branches = [];
+    for (const s of others) {
+      let conv = null;
+      try { conv = await ConversationStore.load(s.id); } catch { conv = null; }
+      const br = conv && conv.branch;
+      if (!br || br === mergedBranch) continue;
+      const base = await gitOp('mergeBase', { a: 'main', b: br });
+      const baseSha = String((base && base.ok && base.stdout) || '').trim();
+      if (!baseSha) continue;   // can't fork-point this branch → skip rather than false-nudge
+      const files = split(await gitOp('diffNames', { a: baseSha, b: br }));
+      branches.push({ convId: s.id, branch: br, files });
+    }
+    const drifted = driftBroadcastSet(mergedFiles, branches);
+    for (const d of drifted) {
+      try { console.info(`DRIFT ▸ broadcast — ${d.branch} drifts on ${d.drift.length} file(s) after ${mergeCommit.slice(0, 7)}`); } catch { /* */ }
+      const top = d.drift.slice(0, 5).map((f) => '`' + f + '`').join(', ') + (d.drift.length > 5 ? ', …' : '');
+      const body = `⚠ \`main\` moved — the merge \`${mergeCommit.slice(0, 7)}\` changed ${d.foundational ? 'a **foundational** file + ' : ''}${d.drift.length} file${d.drift.length === 1 ? '' : 's'} this branch also touched (${top}). Run \`sync\` to catch up before more work.`;
+      const msgId = `drift-${mergeCommit.slice(0, 7)}-${String(d.branch).replace(/[^\w.-]/g, '_')}`;
+      try { await ConversationStore.updateMessage(d.convId, msgId, { role: 'assistant', body }, { upsert: true }); } catch { /* best-effort */ }
+    }
   }
 
   // DBR-P3-2 (DESIGN §8/§8.1 layer 2) — `scope`: the deterministic split backstop. Read-only, no LLM, never blocks.
