@@ -55,6 +55,14 @@ try { $claudeV = (& cmd /c 'claude --version') 2>$null | Select-Object -First 1 
 if (-not $claudeV) { Write-Warning 'claude CLI not found on PATH - bridge runs will fail preflight' }
 else { Write-Host "claude       : $claudeV" }
 
+# ── 5. manifest version merge driver — auto-resolve manifest.json's `version` line on sync/merge (DBR). Local config
+#       (drivers can't be committed); idempotent. .gitattributes maps manifest.json -> merge=orchard-version. ──
+try {
+  & git -C $RepoRoot config merge.orchard-version.name 'Orchard manifest version auto-resolver' 2>$null
+  & git -C $RepoRoot config merge.orchard-version.driver 'node bridge/mergeVersion.cjs %O %A %B' 2>$null
+  Write-Host "merge driver : orchard-version registered (manifest.json version auto-resolves on merge)"
+} catch { Write-Warning 'could not register the manifest merge driver (git on PATH?) - version conflicts will need a manual resolve' }
+
 Write-Host ''
 Write-Host 'Installed. Reload the extension, enable the dev bridge in chat settings (grants the'
 Write-Host 'optional nativeMessaging permission), and the panel can connect.'

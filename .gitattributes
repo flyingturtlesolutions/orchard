@@ -1,0 +1,7 @@
+# DBR — auto-resolve manifest.json's `version` line on merge. The version is bumped on EVERY change, so any two
+# branches both touch it → it's the one line that ALWAYS conflicts on `sync`/`merge` once `main` moved (the recurring
+# dogfooding pain). The `orchard-version` driver (bridge/mergeVersion.cjs) picks the higher version; any OTHER conflict
+# in the file is left for the human. The driver is DEFINED per-clone (git requires local opt-in for merge drivers):
+# bridge/install.ps1 runs `git config merge.orchard-version.driver "node bridge/mergeVersion.cjs %O %A %B"`. Without
+# that local config, git falls back to its default merge (the version line conflicts, but resolvably) — graceful.
+manifest.json merge=orchard-version
