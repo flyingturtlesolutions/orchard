@@ -491,6 +491,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   let run = null;   // { msgEl, lines: string[], bar: Element|null, sessionId: string|null }
   let _lastPool = null;   // DBR-P4-3b (§10) — the latest run-pool snapshot {running:[{runId,pid}], cap} from the host; P4-4 renders it.
   const runs = new Map();   // DBR-P4-3b step 5 (§10) — runId → run handle. At cap=1 it holds ≤1 (= `run`, the foreground); the frame handler demuxes by runId so a cap>1 background run streams into ITS bubble, not the foreground.
+  const _lastRunOutcome = new Map();   // v2.74.1096 — conversationId → { ok, at }: the last COMPLETED run's outcome, so the drawer can show "✓ done" / "✗ failed". Cleared when a new run starts or the conversation is opened (in-memory; a reload starts clean).
 
   // DBR-P4-6 (§7.2) — the single in-panel merge LAND lock. Prepare (sync+test+confirm) runs lock-free; only the
   // land step (switch main → squash → commit) holds it, so concurrent lands queue FIFO + each re-checks freshness
@@ -759,6 +760,11 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   // End the run. `final` may be a block object or a string (→ an error result block).
   function endRun(final, rh = run) {
     if (!rh) return;
+    // v2.74.1096 — record the last-run OUTCOME for the drawer's "✓ done" / "✗ failed" status. A PAUSED run (incl. a
+    // delete-cancel) or a REPLAY bubble is not a completion, so skip those. A string `final` is always an error.
+    if (rh.conversationId && !rh.pausing && !rh.replay && final) {
+      _lastRunOutcome.set(rh.conversationId, { ok: (typeof final === 'object') ? (final.ok !== false) : false, at: Date.now() });
+    }
     if (rh.tick) { try { clearInterval(rh.tick); } catch { /* */ } rh.tick = null; }   // v2.74.989 — stop the elapsed ticker
     if (final) _emit(typeof final === 'string' ? { kind: 'result', ok: false, text: final } : final, rh);
     try { rh.bar?.remove(); } catch { /* */ }
@@ -1073,10 +1079,14 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   // the ticking elapsed. chat.js renders it under the session id, replacing the static timestamp while active.
   function runStatusForConv(cid) {
     const live = _liveRunsForConv(cid);
-    if (!live.length) return { state: 'idle' };
     if (live.some((rh) => rh.awaitingAction)) return { state: 'awaiting' };
-    return { state: 'running', startedAt: Math.min(...live.map((rh) => Number(rh.startedAt) || Date.now())) };
+    if (live.length) return { state: 'running', startedAt: Math.min(...live.map((rh) => Number(rh.startedAt) || Date.now())) };
+    const done = _lastRunOutcome.get(cid);   // v2.74.1096 — no live run, but the last one finished → "✓ done" / "✗ failed"
+    if (done) return { state: 'done', ok: done.ok, at: done.at };
+    return { state: 'idle' };
   }
+  // v2.74.1096 — clear a conversation's "done" marker (called when the conversation is opened — you've seen it).
+  function clearRunOutcome(cid) { if (cid != null) _lastRunOutcome.delete(cid); }
   // v2.74.1094 — ANY run (any conversation) paused for your input? Drives the drawer-toggle "needs you" dot, which
   // must show even when the drawer is closed — so chat.js reads this on every run-state change, not just on render.
   function anyAwaiting() {
@@ -1109,6 +1119,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   }
 
   function startRun(payload, headline, opts = {}) {
+    if (opts.conversationId) _lastRunOutcome.delete(opts.conversationId);   // v2.74.1096 — a new run supersedes the prior "done" status
     const r = _beginRunBubble(headline, { background: opts.background || false });   // DBR-P4-4 — a cap>1 2nd+ run is background
     r.pendingPayload = payload;
     r.conversationId = opts.conversationId || null;   // v2.74.1034 (DBR-2) — bind the run to its dev conversation
@@ -2212,5 +2223,5 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     return true;
   }
 
-  return { maybeHandle, enable, gitOp, onReloadState, refreshReloadState, reloadExtension, reattachConversation, liveRunMessageIds, runStatusForConv, anyAwaiting, cancelConversationRuns, cancelAllRuns };
+  return { maybeHandle, enable, gitOp, onReloadState, refreshReloadState, reloadExtension, reattachConversation, liveRunMessageIds, runStatusForConv, clearRunOutcome, anyAwaiting, cancelConversationRuns, cancelAllRuns };
 }

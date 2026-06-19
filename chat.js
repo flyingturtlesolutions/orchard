@@ -429,6 +429,9 @@ function _setItemMeta(item) {
   } else if (st.state === 'running') {
     metaEl.className = 'history-item-meta run-status running';
     metaEl.textContent = `▶ running… ${_fmtElapsed((Date.now() - (Number(st.startedAt) || Date.now())) / 1000)}`;
+  } else if (st.state === 'done') {
+    metaEl.className = `history-item-meta run-status done${st.ok ? '' : ' failed'}`;
+    metaEl.textContent = `${st.ok ? '✓ done' : '✗ failed'} · ${relTime(Number(st.at) || Date.now())}`;
   } else {
     metaEl.className = 'history-item-meta';
     metaEl.textContent = relTime(Number(item.dataset.updated) || Date.now());
@@ -448,7 +451,7 @@ function _startDrawerStatusTimer() {
   _drawerStatusTimer = setInterval(() => {
     if (!$('history-sidebar')?.classList.contains('open')) { _stopDrawerStatusTimer(); return; }
     let anyActive = false;
-    document.querySelectorAll('#history-list .history-item').forEach((item) => { if (_setItemMeta(item) !== 'idle') anyActive = true; });
+    document.querySelectorAll('#history-list .history-item').forEach((item) => { const s = _setItemMeta(item); if (s === 'running' || s === 'awaiting') anyActive = true; });
     if (!anyActive) _stopDrawerStatusTimer();
   }, 1000);
 }
@@ -536,7 +539,7 @@ async function _renderHistoryList() {
   // v2.74.1094 — apply each conversation's live run status to its meta line + flip the toggle's "needs you" dot;
   // tick a 1s timer while any run is active so the elapsed updates live.
   let anyActive = false;
-  container.querySelectorAll('.history-item').forEach((item) => { if (_setItemMeta(item) !== 'idle') anyActive = true; });
+  container.querySelectorAll('.history-item').forEach((item) => { const s = _setItemMeta(item); if (s === 'running' || s === 'awaiting') anyActive = true; });
   _updateHistoryActionDot();
   if (anyActive) _startDrawerStatusTimer(); else _stopDrawerStatusTimer();
 }
@@ -4562,6 +4565,7 @@ async function _rehydrateConversation(conv) {
   // v2.74.1093 — re-attach any dev run still live for this conversation → a live, streaming bubble (not a frozen
   // snapshot). The run kept executing in the background; this reconnects its stream to the freshly-rendered view.
   if (_currentConversationKind === 'dev') {
+    try { _getDevBridge()?.clearRunOutcome?.(conv.id); } catch { /* */ }   // v2.74.1096 — opening the conversation acks its "✓ done" marker → back to the timestamp
     try { _getDevBridge()?.reattachConversation?.(conv.id); } catch { /* */ }
   }
 }

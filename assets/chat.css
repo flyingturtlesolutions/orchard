@@ -1485,6 +1485,8 @@ textarea {
   color: #e0902a;                                            /* brighter amber-orange — paused for your input */
   animation: run-status-pulse 1.4s ease-in-out infinite;
 }
+.history-item-meta.run-status.done { color: var(--c-success); }            /* v2.74.1096 — last run finished OK */
+.history-item-meta.run-status.done.failed { color: var(--c-error); }       /* …or failed */
 @keyframes run-status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 
 /* The "needs you" dot on the conversation-history toggle — visible even when the drawer is closed. */
