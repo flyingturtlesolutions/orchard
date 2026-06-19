@@ -237,7 +237,11 @@ function handleStatus() {
   const live = activeRuns();
   for (const r of live) { if (r.journal) { log(`reattach: re-tailing pid=${r.pid} journal=${path.basename(r.journal)}`); tailJournal(r.journal, r.pid, r.runId); } }
   // DBR-P4-3b — a reattaching panel learns ALL live runs from the pool (not just the back-compat single status).
-  if (live.length) send({ v: PROTOCOL_V, type: 'pool', ...protocol.poolSnapshot(live, MAX_CONCURRENT) });
+  // DBR-P4-4 fix (v2.74.1087) — ALWAYS emit the pool, even with 0 live runs: the `cap` it carries is the ONLY way
+  // the panel's run guard learns it's in worktree mode (cap>1). Gating on `live.length` DEADLOCKED cap>1 — the panel
+  // never learned the cap before its first dispatch, so the guard blocked the first run on the tree-on-main check
+  // ("lt to load the branch first"), so no run ever started, so no pool ever arrived. The empty snapshot is cheap.
+  send({ v: PROTOCOL_V, type: 'pool', ...protocol.poolSnapshot(live, MAX_CONCURRENT) });
 }
 
 // DB-3 permission relay (v2.74.1002) — watch logs/bridge/perm for hook-written requests and forward each
