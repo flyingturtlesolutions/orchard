@@ -377,6 +377,7 @@ $('btn-delete-all-conversations').addEventListener('click', async () => {
   const list = await ConversationStore.list();
   if (!list.length) return;
   if (!confirm(`Delete all ${list.length} conversation${list.length === 1 ? '' : 's'}? This can't be undone.`)) return;
+  try { _getDevBridge()?.cancelAllRuns?.(); } catch { /* */ }   // v2.74.1095 — stop any live dev runs first so they don't orphan (hold host slots)
   await ConversationStore.deleteAll();
   _clearCurrentConversation();
   _resetConversation();
@@ -505,7 +506,15 @@ async function _renderHistoryList() {
 
     item.querySelector('.history-item-delete').addEventListener('click', async (e) => {
       e.stopPropagation();
-      if (!confirm(`Delete "${conv.title}"?`)) return;
+      // v2.74.1095 — dev-aware delete: if a run is LIVE for this conversation, WARN + STOP it (free the host slot)
+      // before removing the record, so it doesn't orphan (keep running with no UI home). The git branch is KEPT —
+      // open the conversation and run "delete branch" to remove that too.
+      const liveRun = conv.kind === 'dev' && _devRunStatus(conv.id).state !== 'idle';
+      const prompt = liveRun
+        ? `"${conv.title}" has a run in progress.\n\nDeleting will STOP the run and free its slot. Its git branch${conv.branch ? ` (${conv.branch})` : ''} is KEPT — open the conversation and run "delete branch" first if you also want that removed.\n\nDelete anyway?`
+        : `Delete "${conv.title}"?`;
+      if (!confirm(prompt)) return;
+      if (liveRun) { try { _getDevBridge()?.cancelConversationRuns?.(conv.id); } catch { /* */ } }
       await ConversationStore.delete(conv.id);
       if (conv.id === _currentConversationId) {
         _clearCurrentConversation();

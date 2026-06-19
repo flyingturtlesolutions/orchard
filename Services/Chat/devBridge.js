@@ -1084,6 +1084,29 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     for (const rh of [...runs.values(), ..._pendingPreflight, ..._pendingStarted]) if (rh && rh.awaitingAction) return true;
     return false;
   }
+  // v2.74.1095 — STOP every live run for a conversation, called when the conversation is DELETED so it doesn't ORPHAN
+  // (a run that keeps executing with no UI home, holding a host slot). Pause each STARTED run by its runId — the host
+  // kills the child + frees the slot, and the host-lost `done` runs endRun BY RUNID (the handle is still in `runs`,
+  // so it can't clobber another run — the same proven path as the Pause button; an immediate endRun here would let
+  // that late `done` fall back to the foreground `run`). A still-PENDING run (no runId — a sub-second window) is left
+  // to the order-based preflight/started FIFO so removing it can't desync a later run's correlation. Returns the count.
+  function cancelConversationRuns(cid) {
+    let n = 0;
+    for (const rh of _liveRunsForConv(cid)) {
+      if (!rh.runId) continue;
+      rh.pausing = true;
+      try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'pause', runId: rh.runId }); n++; } catch { /* */ }
+    }
+    try { refreshHistory && refreshHistory(); } catch { /* */ }
+    return n;
+  }
+  // v2.74.1095 — stop ALL live runs (for "delete all conversations"). One pause with NO runId → the host kills every
+  // child; each host-lost `done` then frees its slot via endRun.
+  function cancelAllRuns() {
+    for (const rh of [...runs.values(), ..._pendingPreflight, ..._pendingStarted, ...(run ? [run] : [])]) { if (rh) rh.pausing = true; }
+    try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'pause' }); } catch { /* */ }
+    try { refreshHistory && refreshHistory(); } catch { /* */ }
+  }
 
   function startRun(payload, headline, opts = {}) {
     const r = _beginRunBubble(headline, { background: opts.background || false });   // DBR-P4-4 — a cap>1 2nd+ run is background
@@ -2189,5 +2212,5 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     return true;
   }
 
-  return { maybeHandle, enable, gitOp, onReloadState, refreshReloadState, reloadExtension, reattachConversation, liveRunMessageIds, runStatusForConv };
+  return { maybeHandle, enable, gitOp, onReloadState, refreshReloadState, reloadExtension, reattachConversation, liveRunMessageIds, runStatusForConv, anyAwaiting, cancelConversationRuns, cancelAllRuns };
 }
