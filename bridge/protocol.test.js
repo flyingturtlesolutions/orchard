@@ -5,7 +5,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import protocol from './protocol.cjs';
-const { PROTO_V, isRunScoped, tagFrame, frameRunId, poolSnapshot } = protocol;
+const { PROTO_V, isRunScoped, tagFrame, frameRunId, poolSnapshot, DEFAULT_CAP, QUEUE_CEILING, canStart, nextQueued, queuePosition, queueAccepts } = protocol;
 
 describe('protocol — the v:2 cutover (DBR-P4-2)', () => {
   it('PROTO_V is 2 (the cutover)', () => {
@@ -42,5 +42,38 @@ describe('protocol — the v:2 cutover (DBR-P4-2)', () => {
     // cap=1 single-run shape (today) + the empty case
     assert.deepEqual(poolSnapshot([{ runId: 'r1', pid: 9 }], 1), { running: [{ runId: 'r1', pid: 9 }], cap: 1 });
     assert.deepEqual(poolSnapshot([], 4), { running: [], cap: 4 });
+  });
+});
+
+describe('run-pool scheduling core (DBR-P4-3)', () => {
+  it('canStart — a slot is free below the cap, full at it; bad cap falls back to DEFAULT_CAP', () => {
+    assert.equal(canStart(0, 4), true);
+    assert.equal(canStart(3, 4), true);
+    assert.equal(canStart(4, 4), false);
+    assert.equal(canStart(1, 1), false);                 // cap=1 (today's single-run) full at 1
+    assert.equal(canStart(DEFAULT_CAP - 1, undefined), true);   // undefined cap → DEFAULT_CAP
+    assert.equal(canStart(DEFAULT_CAP, 0), false);              // cap=0 invalid → DEFAULT_CAP
+  });
+
+  it('nextQueued — FIFO head, null when empty', () => {
+    assert.deepEqual(nextQueued([{ runId: 'r3' }, { runId: 'r4' }]), { runId: 'r3' });
+    assert.equal(nextQueued([]), null);
+    assert.equal(nextQueued(null), null);
+  });
+
+  it('queuePosition — 1-based Nth-in-line; 0 when absent; accepts {runId}|{id}|string', () => {
+    const q = [{ runId: 'r3' }, { runId: 'r4' }, { runId: 'r5' }];
+    assert.equal(queuePosition(q, 'r3'), 1);
+    assert.equal(queuePosition(q, 'r5'), 3);
+    assert.equal(queuePosition(q, 'rX'), 0);
+    assert.equal(queuePosition(['r3', 'r4'], 'r4'), 2);
+    assert.equal(queuePosition([{ id: 'r9' }], 'r9'), 1);
+  });
+
+  it('queueAccepts — joins below the hard ceiling, rejects a runaway pile-up', () => {
+    assert.equal(queueAccepts(0, 32), true);
+    assert.equal(queueAccepts(31, 32), true);
+    assert.equal(queueAccepts(32, 32), false);
+    assert.equal(queueAccepts(QUEUE_CEILING, undefined), false);   // default ceiling
   });
 });

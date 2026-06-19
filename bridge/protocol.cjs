@@ -47,4 +47,35 @@ function poolSnapshot(runs, cap) {
   return { running, cap: Number.isFinite(cap) ? cap : (running.length || 1) };
 }
 
-module.exports = { PROTO_V, RUN_SCOPED, isRunScoped, tagFrame, frameRunId, poolSnapshot };
+// ── DBR-P4-3 (§10) — the run-pool SCHEDULING core. PURE. The host owns the `runs` Map + the FIFO `queue`; these
+// decide when a queued run may START and where it sits IN LINE. `cap` = MAX_CONCURRENT (the compute-slot ration);
+// a SEPARATE hard `ceiling` stops runaway pile-ups (reject, not queue — §10/U10).
+const DEFAULT_CAP = 4;       // MAX_CONCURRENT default; the cost/rate governor (N concurrent Claude ≈ N× burn)
+const QUEUE_CEILING = 32;    // hard FIFO depth cap — beyond this, REJECT a new run (runaway guard), never silently grow
+
+// canStart — is a compute slot free (running below the cap)? PURE.
+function canStart(runningCount, cap) {
+  const c = Number.isFinite(cap) && cap > 0 ? cap : DEFAULT_CAP;
+  return (Number(runningCount) || 0) < c;
+}
+
+// nextQueued — the FIFO head to auto-start when a slot frees (null if the queue is empty). PURE.
+function nextQueued(queue) {
+  const q = Array.isArray(queue) ? queue : [];
+  return q.length ? q[0] : null;
+}
+
+// queuePosition — 1-based "Nth in line" for a runId (0 = not in the queue). Accepts entries as {runId}|{id}|string. PURE.
+function queuePosition(queue, runId) {
+  const i = (Array.isArray(queue) ? queue : []).findIndex((q) => q === runId || (q && (q.runId === runId || q.id === runId)));
+  return i < 0 ? 0 : i + 1;
+}
+
+// queueAccepts — may a new run JOIN the queue, or is the hard ceiling hit (→ reject the runaway)? PURE.
+function queueAccepts(queueDepth, ceiling) {
+  const cap = Number.isFinite(ceiling) && ceiling > 0 ? ceiling : QUEUE_CEILING;
+  return (Number(queueDepth) || 0) < cap;
+}
+
+module.exports = { PROTO_V, RUN_SCOPED, isRunScoped, tagFrame, frameRunId, poolSnapshot,
+  DEFAULT_CAP, QUEUE_CEILING, canStart, nextQueued, queuePosition, queueAccepts };
