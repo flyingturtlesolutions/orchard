@@ -407,8 +407,8 @@ function diffstatReply() {
 // run with `shell:false` (no quoting/injection surface). The host adds the commit current-branch guard:
 // `commitWip` carries no branch arg, so we verify HEAD is a dev/… branch here before letting it land.
 const GIT_TIMEOUT = 15000;
-function runGit(argv) {
-  const r = spawnSync('git', argv, { cwd: REPO, shell: false, timeout: GIT_TIMEOUT, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+function runGit(argv, cwd = REPO) {
+  const r = spawnSync('git', argv, { cwd: cwd || REPO, shell: false, timeout: GIT_TIMEOUT, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
   return { code: r.status, stdout: String(r.stdout || '').trim(), stderr: String(r.stderr || '').trim(), err: r.error ? String(r.error.message || r.error) : null };
 }
 function currentBranchName() {
@@ -459,7 +459,7 @@ function handleGit(msg) {
     const resolved = path.resolve(REPO, String(params.path || ''));
     if (!(resolved === WT_DIR || resolved.startsWith(WT_DIR + path.sep))) return refuse('worktree-guard: path escapes the managed root');
   }
-  const r = runGit(built.argv);
+  const r = runGit(built.argv, worktreeCwdFor(msg && msg.worktree, op));   // DBR-#1 — a prepare op for a concurrent run runs in its branch worktree; land/mgmt ops stay on repo-root main
   const ok = r.code === 0 && !r.err;
   log(`DEVBR ▸ git ${op} [${built.argv.join(' ')}] → ${ok ? 'ok' : `FAIL(${r.code})`}${r.err ? ' ' + r.err : ''}`);
   // DBR-4 (v2.74.1036, DESIGN §4) — the panel flags the `lt` switch with params.lt so the live-test action gets
@@ -487,7 +487,7 @@ function runTest(msg) {
   const reqId = msg && msg.reqId;
   let child;
   try {
-    child = spawn('cmd.exe', ['/d', '/s', '/c', 'npm', 'test'], { cwd: REPO, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawn('cmd.exe', ['/d', '/s', '/c', 'npm', 'test'], { cwd: worktreeCwdFor(msg && msg.worktree, 'test'), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });   // DBR-#1 — the merge test gate runs in the branch's worktree at cap>1
   } catch (e) {
     send({ v: PROTOCOL_V, type: 'test-result', reqId, ok: false, error: 'spawn-failed: ' + e.message });
     return;
@@ -555,6 +555,18 @@ function ensureNodeModulesJunction(worktreeAbs) {
     fs.symlinkSync(target, link, 'junction');
     log(`WORKTREE ▸ node_modules junction → main store`);
   } catch (e) { log(`WORKTREE ▸ node_modules junction failed (in-worktree npm test will fail): ${(e && e.message) || e}`); }
+}
+
+// DBR-#1 (§7.2) — the cwd for a PANEL-requested op. A concurrent run's PREPARE ops (commitWip / syncMain / status
+// reads / npm test) run in the BRANCH'S worktree so they touch the branch's REAL changes; the LAND + worktree-mgmt
+// ops (REPO_ONLY_OPS) always run in the repo-root `main` tree. At cap=1 / no `worktree` passed → always REPO (today's
+// behavior, unchanged). Read-only: returns an EXISTING `.wt/<branch>` only; never creates one (worktreeForBranch does).
+const REPO_ONLY_OPS = new Set(['switch', 'switchDetach', 'mergeSquash', 'commitMerge', 'branchDelete', 'branchCreate', 'worktreeAdd', 'worktreeRemove', 'worktreeList', 'worktreePrune']);
+function worktreeCwdFor(branch, op) {
+  if (!WORKTREE_MODE || !branch || REPO_ONLY_OPS.has(op) || !gitOps.validateBranchName(branch)) return REPO;
+  const slug = String(branch).replace(/^dev\//, '').replace(/[^A-Za-z0-9._-]/g, '-').replace(/^[^A-Za-z0-9]+/, '') || 'wt';
+  const abs = path.join(REPO, '.wt', slug);
+  return fs.existsSync(abs) ? abs : REPO;   // fall back to REPO if the branch has no worktree yet
 }
 
 // DBR-P4-3b step 4 (§10/U6) — ensure a per-branch worktree under `.wt/` for a CONCURRENT run's cwd, created via the
