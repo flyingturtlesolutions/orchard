@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, driftBroadcastSet, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, driftBroadcastSet, PREVIEW_WT, ltUsesPreview, previewRepointPlan, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer } from './devBridge.js';
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
@@ -456,5 +456,27 @@ describe('driftBroadcastSet — post-merge cross-branch nudge set (DBR-P4-7)', (
     const set = driftBroadcastSet(['a.js'], [{ files: ['a.js'] }, { branch: 'dev/s', files: ['a.js'] }]);
     assert.equal(set.length, 1);
     assert.equal(set[0].branch, 'dev/s');
+  });
+});
+
+describe('P4-5 preview-lt pure core (DBR-P4-5)', () => {
+  it('ltUsesPreview: only at cap>1', () => {
+    for (const c of [undefined, null, 0, 1, '1']) assert.equal(ltUsesPreview(c), false, `cap ${c}`);
+    for (const c of [2, 4, '3']) assert.equal(ltUsesPreview(c), true, `cap ${c}`);
+  });
+  it('previewRepointPlan: remove(optional) + add-detach for a dev branch', () => {
+    const plan = previewRepointPlan('dev/session-abc');
+    assert.equal(Array.isArray(plan), true);
+    assert.equal(plan.length, 2);
+    assert.deepEqual(plan[0], { op: 'worktreeRemove', params: { path: PREVIEW_WT, force: true }, optional: true });
+    assert.deepEqual(plan[1], { op: 'worktreeAdd', params: { path: PREVIEW_WT, detach: 'dev/session-abc' } });
+  });
+  it('previewRepointPlan: null for a non-dev branch / nullish / bare prefix', () => {
+    for (const b of ['main', '', null, undefined, 'feature/x', 'dev', 'dev/']) {
+      assert.equal(previewRepointPlan(b), null, `should reject: ${String(b)}`);
+    }
+  });
+  it('PREVIEW_WT is the fixed .wt/preview path', () => {
+    assert.equal(PREVIEW_WT, '.wt/preview');
   });
 });

@@ -83,5 +83,26 @@ Each: **Setup → Do → Expect** + which slice it proves. Tick the box when it 
 
 ---
 
+## cap>1 enablement — one-time setup  ·  *turns concurrency ON (P4-3b…P4-5)*
+
+The panel side is built + **cap=1-inert** (dispatch FIFO + per-run approval routing + the preview-`lt` branch all
+gate behind the host's cap). These steps make it live. Do it as a **focused session, NOT mid-dogfooding** — it
+rewrites how the host + Chrome are wired, and a stumble shouldn't strand a session you're depending on.
+
+1. **Set the cap** — launch the host with `ORCHARD_MAX_CONCURRENT=2` (1–8) in its environment. The host then spawns
+   each run in its own `.wt/<branch>` worktree (`WORKTREE_MODE`), and the panel's `pool` frame reports `cap>1`.
+2. **Create the preview worktree** — `git worktree add --detach .wt/preview main` (once). This read-only folder is
+   what Chrome will load.
+3. **Re-point Chrome** *(the only thing only you can do)* — `chrome://extensions` → Developer mode → **Load
+   unpacked** → pick **`.wt/preview`** (instead of the repo root); re-run `bridge/install.ps1` so the native host is
+   registered for it.
+4. **Verify** — two dev conversations on two branches → a task in each → both run **concurrently**, each streaming
+   to its own bubble; `lt` on one points the preview at its tip (repo-root `main` + the other's worktree stay put);
+   `merge` still serializes via the land lock.
+
+Until step 3, everything stays single-tree: cap=1, `lt` switches the repo root, one run at a time — exactly as today.
+
+---
+
 ### Notes / failures
 *(record anything that didn't match — symptom + the scenario #. Each becomes the next fix.)*

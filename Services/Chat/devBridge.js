@@ -210,6 +210,28 @@ export function driftBroadcastSet(mergedFiles, branches, opts = {}) {
   return out;
 }
 
+// DBR-P4-5 (§10) — the PREVIEW worktree: a fixed DETACHED checkout (`.wt/preview`) Chrome loads (instead of the repo
+// root) at cap>1, so `lt` can flip ANY branch's tip into view without disturbing the repo-root `main` OR a branch's
+// own worktree (a detached checkout is legal even while that branch is checked out elsewhere — §4).
+export const PREVIEW_WT = '.wt/preview';
+
+// lt-target selection: the preview path is used ONLY under worktree mode (cap>1); at cap=1 `lt` keeps switching the
+// repo root (legacy, unchanged). PURE.
+export function ltUsesPreview(cap) { return Number(cap) > 1; }
+
+// The ordered gitOps to (re-)point the preview worktree at `branch`'s tip: REMOVE the old detached checkout (if any),
+// then ADD it back detached at the branch. PURE — returns op descriptors the panel runs in order; the remove is
+// best-effort (`optional` — absent on first use). Returns null for a non-`dev/` branch (the preview only ever shows a
+// dev branch's tip). Reuses the P4-1 worktree ops (gitOps validates the `.wt/`-scoped path + the ref) — no new host op.
+export function previewRepointPlan(branch) {
+  const b = String(branch == null ? '' : branch).trim();
+  if (!/^dev\/[^\s]/.test(b)) return null;
+  return [
+    { op: 'worktreeRemove', params: { path: PREVIEW_WT, force: true }, optional: true },   // best-effort: nothing to remove on first use
+    { op: 'worktreeAdd', params: { path: PREVIEW_WT, detach: b } },                          // re-create detached at the branch's tip
+  ];
+}
+
 // DBR-P3-1 (DESIGN §8.1) — the manual `split:` corrective verb: extract out-of-scope work into its own dev branch
 // + conversation. Prefix form (`split: <concern>`) — unambiguous vs a coding task that merely mentions "split".
 // PURE + exported.
@@ -1571,6 +1593,22 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       }
     }
     const bubble = devBubble(`↻ switching to \`${branch}\` and reloading…`);
+    // DBR-P4-5 (§10) — worktree mode (cap>1): `lt` points the PREVIEW worktree (`.wt/preview`, the folder Chrome
+    // loads) at the branch's tip via a DETACHED checkout, leaving the repo-root `main` + the branch's own worktree
+    // untouched (so a branch can be live-tested WHILE its agent still runs in its worktree). The repo-root single-tree
+    // path below (commitWip + switch) is the cap=1 legacy, unchanged. This needs the one-time Chrome re-point
+    // (Load-unpacked `.wt/preview`) to take VISIBLE effect; until then the branch is inert (cap=1 never enters it).
+    if (ltUsesPreview(_capNow())) {
+      const plan = previewRepointPlan(branch);
+      if (!plan) { _setBubble(bubble, `✗ \`lt\` — \`${branch}\` isn't a dev branch; the preview only shows a dev branch's tip.`); return; }
+      _setBubble(bubble, `↻ pointing the preview at \`${branch}\` and reloading…`);
+      for (const step of plan) {
+        const r = await gitOp(step.op, step.params);
+        if ((!r || !r.ok) && !step.optional) { _setBubble(bubble, `✗ \`lt\` — couldn’t point the preview at \`${branch}\`: ${(r && r.error) || 'host unreachable'}.`); return; }
+      }
+      await reloadExtension();
+      return;
+    }
     // 1) checkpoint the CURRENT branch so `git switch` has a clean tree — but only when we're ON a dev branch.
     // The host commit-guard refuses to commit on main (correct — never commit to main), so on a non-dev branch
     // commitWip returns "not on a dev branch". That is NOT fatal (v2.74.1040 fix — the old code aborted on it, so
