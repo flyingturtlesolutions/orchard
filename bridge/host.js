@@ -430,8 +430,8 @@ function runGit(argv, cwd = REPO) {
   const r = spawnSync('git', argv, { cwd: cwd || REPO, shell: false, timeout: GIT_TIMEOUT, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
   return { code: r.status, stdout: String(r.stdout || '').trim(), stderr: String(r.stderr || '').trim(), err: r.error ? String(r.error.message || r.error) : null };
 }
-function currentBranchName() {
-  const r = runGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+function currentBranchName(cwd = REPO) {
+  const r = runGit(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
   return r.code === 0 ? r.stdout : null;
 }
 // DBR-P2-1 (DESIGN §3/§6) — one-time CONFIRM TOKENS for the W-gated converge ops (mergeSquash / commitMerge /
@@ -464,7 +464,11 @@ function handleGit(msg) {
   // ── write guards (current-branch). `commitWip`/`syncMain` may only run ON a dev/… branch (never main);
   //    the merge LAND (`mergeSquash`/`commitMerge`) may only run ON main (the panel switches there first). ──
   if (op === 'commitWip' || op === 'syncMain') {
-    const cur = currentBranchName();
+    // DBR (cap>1 fix, v2.74.1134) — read the WORKTREE's branch (where the op actually RUNS), not the repo root. At
+    // cap>1 the root stays on `main` while the work lives in `.wt/<branch>`; checking the root refused EVERY
+    // worktree `commitWip` as "not on a dev branch" — the reason `lt`'s checkpoint (.1133) silently no-op'd and dev
+    // edits stayed invisible. `worktreeCwdFor` → REPO at cap=1 / no worktree, so the single-tree path is unchanged.
+    const cur = currentBranchName(worktreeCwdFor(msg && msg.worktree, op));
     if (!cur || !gitOps.validateBranchName(cur)) return refuse(`${op === 'syncMain' ? 'sync' : 'commit'}-guard: not on a dev branch`);
   }
   if (op === 'mergeSquash' || op === 'commitMerge') {
