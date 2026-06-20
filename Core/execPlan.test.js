@@ -76,7 +76,7 @@ describe('toObservation — executor reply → uniform Observation (pure)', () =
     const o = toObservation({ success: true, scope: { foo: 'bar' }, verdict: { pass: true } });
     assert.equal(o.scope.foo, 'bar'); assert.equal(o.verdict.pass, true);
   });
-  it('failure → ok:false with a structuredFailure envelope (#1, lets the brain re-engage)', () => {
+  it('failure → ok:false with a structuredFailure envelope (#1, lets Orchard re-engage)', () => {
     const o = toObservation({ success: false, error: 'selector drift' }, { channel: 'REPLAY_SG_CAPABILITY' });
     assert.equal(o.ok, false);
     assert.equal(o.structuredFailure.where, 'REPLAY_SG_CAPABILITY');

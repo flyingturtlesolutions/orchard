@@ -3039,16 +3039,16 @@ async function _tryRouterFallback(text) {
   return _orchClarifyFromRoute(d, { tabId: tab && tab.id, groundId: res.groundId, text });
 }
 
-// IL-2 (v2.74.1118) — `brain: <ask>` — the brain as the USER'S STAND-IN over the existing matcher. It does NOT
+// IL-2 (v2.74.1118) — `il: <ask>` — Orchard as the USER'S STAND-IN over the existing matcher. It does NOT
 // pick from its own palette or bind params (that made it dumber and dropped values, e.g. "halo" never reaching
 // the box). Instead: ORCH_MATCH picks + binds using the live page affordances (the substrate's job, done well —
-// it knows "illustrations" is a CATEGORY, not part of the keyword) → the brain JUDGES which candidate to run for
+// it knows "illustrations" is a CATEGORY, not part of the keyword) → Orchard JUDGES which candidate to run for
 // the ask (replacing the user's Run / Not-that / pick-an-option click) → _orchRun runs it with the SUBSTRATE's
-// bindings. `BRAIN ▸` is a decision marker (studio.js _DECISION_RE — INVARIANT #1). Verify-only, opt-in.
-async function _tryBrainCommand(text) {
-  const ask = String(text).replace(/^brain:\s*/i, '').trim();
+// bindings. `IL ▸` is a decision marker (studio.js _DECISION_RE — INVARIANT #1). Verify-only, opt-in.
+async function _tryIlCommand(text) {
+  const ask = String(text).replace(/^il:\s*/i, '').trim();
   const msg = appendMessage({ role: 'assistant', body: '' });
-  if (!ask) { _setMessageBody(msg, 'usage: `brain: <ask>` — the brain judges the matcher and runs the best-fit capability.'); return true; }
+  if (!ask) { _setMessageBody(msg, 'usage: `il: <ask>` — Orchard judges the matcher and runs the best-fit capability.'); return true; }
   _setMessageBody(msg, '🧠 thinking…');
   const tab = await _orchActiveTab();
   const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
@@ -3057,17 +3057,17 @@ async function _tryBrainCommand(text) {
   let m = null;
   try { m = await _orchReq('ORCH_MATCH', { tabId, ask }); } catch { /* */ }
   if (!m || m.success === false || m.decision === 'miss' || !m.capabilityId) {
-    // No grounded action to run → the brain ANSWERS the ask (meta/conversational — "what can you do?",
+    // No grounded action to run → Orchard ANSWERS the ask (meta/conversational — "what can you do?",
     // "can you X?") from what it CAN do here, instead of dead-ending (v2.74.1119).
     let answer = null;
-    try { const r = await _orchReq('BRAIN_ANSWER', { ask, tabId }); answer = r && r.answer; } catch { /* */ }
+    try { const r = await _orchReq('IL_ANSWER', { ask, tabId }); answer = r && r.answer; } catch { /* */ }
     _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 I don’t have a saved capability for “${ask}” on this page yet — want to show me?`);
-    try { _orchLog(`BRAIN ▸ "${String(ask).slice(0, 50)}" → ${answer ? 'answered' : 'no match'}`); } catch { /* */ }
+    try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${answer ? 'answered' : 'no match'}`); } catch { /* */ }
     return true;
   }
 
   // 2. Gather what the USER would see — the top match + any close alternatives — each carrying the values the
-  //    substrate already bound (so the brain judges over real, page-derived bindings, never re-binds).
+  //    substrate already bound (so Orchard judges over real, page-derived bindings, never re-binds).
   const turn = planAssistantTurn(m);
   const ctx = { groundId: m.groundId, tabId, ask, intent: m.candidate && m.candidate.intent, paramValues: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {}, params: m.candidate && m.candidate.params };
   const candidates = [];
@@ -3076,7 +3076,7 @@ async function _tryBrainCommand(text) {
   add(m.capabilityId, m.candidate && m.candidate.intent);
   for (const o of (turn.options || [])) add(o.id, o.intent);
 
-  // 3. The brain JUDGES — the user's stand-in choosing which candidate to run, or rejecting. On an unavailable
+  // 3. Orchard JUDGES — the user's stand-in choosing which candidate to run, or rejecting. On an unavailable
   //    judge: a single confident match runs (the user would have confirmed it); multiple → don't guess.
   let verdict = null;
   try { const r = await _orchReq('JUDGE_MATCH', { ask, candidates }); verdict = r && r.verdict; } catch { /* */ }
@@ -3087,13 +3087,13 @@ async function _tryBrainCommand(text) {
   const why = (verdict && verdict.reason) ? ` — ${verdict.reason}` : '';
   if (!pickedId) {
     _setMessageBody(msg, `🧠 The closest match didn’t fit “${ask}”${why}. Try rephrasing.`);
-    try { _orchLog(`BRAIN ▸ "${String(ask).slice(0, 50)}" → rejected${why}`); } catch { /* */ }
+    try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → rejected${why}`); } catch { /* */ }
     return true;
   }
 
-  // 4. RUN the brain's pick through the EXISTING runner — with the substrate's bindings (no re-binding).
+  // 4. RUN Orchard's pick through the EXISTING runner — with the substrate's bindings (no re-binding).
   const picked = candidates.find((c) => c.id === pickedId) || {};
-  try { _orchLog(`BRAIN ▸ "${String(ask).slice(0, 50)}" → run "${picked.intent || pickedId}"${why}`); } catch { /* */ }
+  try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → run "${picked.intent || pickedId}"${why}`); } catch { /* */ }
   await _orchRun(msg, { ...ctx, capabilityId: pickedId, intent: picked.intent || ctx.intent });
   return true;
 }
@@ -3324,13 +3324,13 @@ async function sendChatMessage() {
     return;
   }
 
-  // IL-2 (v2.74.1112) — `brain: <ask>` runs the inference-layer loop LIVE (verify-only, opt-in). Explicit
+  // IL-2 (v2.74.1112) — `il: <ask>` runs the inference-layer loop LIVE (verify-only, opt-in). Explicit
   // prefix → it can never pre-empt a normal ask; everything below is untouched. The loop drives tabs, so it's
   // the eyeball step — exec auto-runs only reads + nav (page mutations gate behind a confirm-required miss).
-  if (/^brain:/i.test(text)) {
+  if (/^il:/i.test(text)) {
     input.value = ''; _autosizeInput();
     appendMessage({ role: 'user', body: text });
-    try { await _tryBrainCommand(text); } catch (e) { try { console.warn('[chat] brain command failed:', e?.message); } catch { /* */ } }
+    try { await _tryIlCommand(text); } catch (e) { try { console.warn('[chat] il command failed:', e?.message); } catch { /* */ } }
     return;
   }
 

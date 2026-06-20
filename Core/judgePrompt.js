@@ -1,10 +1,10 @@
-// Core/judgePrompt.js — the brain as the USER'S STAND-IN at matchCapability's decision point (IL-2, v2.74.1118).
+// Core/judgePrompt.js — Orchard as the USER'S STAND-IN at matchCapability's decision point (IL-2, v2.74.1118).
 //
 // The substrate (ORCH_MATCH / matchCapability) already PICKS a capability + BINDS its values using the live page
 // affordances + the capabilities' option vocabulary — it does this well. Today it then PRESENTS the match (and any
-// close alternatives) to the USER, who clicks Run / Not-that / picks an option. This module is the brain making
+// close alternatives) to the USER, who clicks Run / Not-that / picks an option. This module is Orchard making
 // THAT decision instead: given the ask + the candidate match(es) (with the values the substrate already bound),
-// pick the one to run, or reject. The brain chooses the CAPABILITY; it does NOT re-bind values (that was the bug —
+// pick the one to run, or reject. Orchard chooses the CAPABILITY; it does NOT re-bind values (that was the bug —
 // it guessed a param name and "halo" never reached the box). PURE prompt + parse, mirroring routerPrompt.js.
 
 const _refOf = (c) => (c && (c.id || c.ref || c.capabilityId)) || null;

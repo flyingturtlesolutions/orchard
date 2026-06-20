@@ -1,10 +1,10 @@
-// Core/stepPrompt.js — the step-brain's LLM messages + parse (DESIGN_inference_layer.md §4.1). IL-2 (v2.74.1110).
+// Core/stepPrompt.js — the step-il's LLM messages + parse (DESIGN_inference_layer.md §4.1). IL-2 (v2.74.1110).
 //
 // PURE, mirroring Core/routerPrompt.js: build the controller's input + parse its output. Per the injection
-// boundary (§3/§9): the PALETTE and the OBSERVATION are FENCED as inert DATA — the brain reasons ABOUT them,
+// boundary (§3/§9): the PALETTE and the OBSERVATION are FENCED as inert DATA — Orchard reasons ABOUT them,
 // never obeys imperative text inside them (an observation is page-derived → untrusted). SCOPE VALUES are NOT
 // narrated into the prompt (§4.1/§5 privacy) — only the available keys are named. The thin live call
-// (AnthropicService.stepBrain) wraps these two functions; Core/agentLoop.js does the anti-hallucination check
+// (AnthropicService.stepIl) wraps these two functions; Core/agentLoop.js does the anti-hallucination check
 // that the chosen leg is one the palette offered.
 
 const keyOf = (x) => (x && (x.key ?? x.capabilityId ?? x.op ?? x.name)) || null;
@@ -46,7 +46,7 @@ const SYSTEM = [
 ].join('\n');
 
 /**
- * Build the step-brain messages. PURE. NO scope VALUES, NO live DOM (only the fenced observation the executor
+ * Build the step-il messages. PURE. NO scope VALUES, NO live DOM (only the fenced observation the executor
  * already returned, as data). @param {object} ctx StepContext {goal, scope, ledger, observation, palette}
  * @returns {{ system:string, user:string }}
  */
@@ -60,8 +60,8 @@ export function buildStepMessages(ctx = {}) {
     const ref = keyOf(l);
     if (!ref) return null;
     const meta = [l.mode || 'act', l.domain || 'page'].join('/');
-    // Surface BOTH the name and the description (deduped) so the brain can tell similar legs apart (the .1114
-    // live miss: two search capabilities, the brain grabbed one without disambiguating).
+    // Surface BOTH the name and the description (deduped) so Orchard can tell similar legs apart (the .1114
+    // live miss: two search capabilities, Orchard grabbed one without disambiguating).
     const desc = [l.name, l.does].filter((s) => s && s !== ref).join(' — ') || ref;
     return `- ref: ${ref}  (${meta}${l.safety ? `, ${l.safety}` : ''})\n  ${desc}`;
   }).filter(Boolean);
@@ -99,7 +99,7 @@ export function buildStepMessages(ctx = {}) {
 function _short(s, n) { const t = String(s ?? ''); return t.length > n ? `${t.slice(0, n)}…` : t; }
 
 /**
- * Parse + validate the step-brain's raw output into a Decision. PURE. Tolerant JSON extraction; resolves the
+ * Parse + validate the step-il's raw output into a Decision. PURE. Tolerant JSON extraction; resolves the
  * returned leg ref → the palette's leg object (Core/agentLoop owns the final palette-membership enforcement).
  * An unparseable reply degrades to needs:clarify (fail safe — ask, never guess an action).
  * @param {string|object} raw

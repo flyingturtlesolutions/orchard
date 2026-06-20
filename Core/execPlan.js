@@ -9,7 +9,7 @@
 // Busy-mark policy (Invariant #2): a PAGE leg drives the tab with synthetic events → busy-mark so the
 // interaction monitor drops them as `engine-run`. BROWSER legs are `chrome.tabs` calls (no synthetic DOM
 // input) and SELF legs are introspection → never busy-mark. (A user-demonstration leg is never busy-marked
-// either, but that path doesn't go through the brain loop.)
+// either, but that path doesn't go through the inference-layer loop.)
 
 // The verified executor channels per leg (the names the SW message handlers already answer). A learned PAGE
 // capability replays through REPLAY_SG_CAPABILITY (the trial/verify-gated runner); browser primitives map to
@@ -83,7 +83,7 @@ function _planExec(leg, params = {}, ctx = {}) {
 
 /**
  * Normalize a raw executor reply ({success, …}) into a uniform Observation the loop re-thinks over. PURE.
- * `value`/`scope` carry forward; a failure rides back as `structuredFailure` (the #1 envelope) so the brain
+ * `value`/`scope` carry forward; a failure rides back as `structuredFailure` (the #1 envelope) so Orchard
  * can re-engage, not just give up.
  * @param {object|null} reply   the executor's response message
  * @param {object} [plan]       the planExec output (for context on a miss)

@@ -1,4 +1,4 @@
-// Core/judgePrompt.test.js — IL-2 the brain-as-user-standin match judge (node --test).
+// Core/judgePrompt.test.js — IL-2 the IL-as-user-standin match judge (node --test).
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';

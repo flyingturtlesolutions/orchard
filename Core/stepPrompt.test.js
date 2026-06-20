@@ -1,4 +1,4 @@
-// Core/stepPrompt.test.js — IL-2 the step-brain prompt + parse (node --test).
+// Core/stepPrompt.test.js — IL-2 the step-il prompt + parse (node --test).
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -23,7 +23,7 @@ describe('buildStepMessages — fences palette/observation as data, hides scope 
 
   it('renders the capability NAME in the palette + carries the DISAMBIGUATE rule (the .1114 fix)', () => {
     const { system, user } = buildStepMessages({ goal: 'search', palette: [leg('cap_1', { name: 'Search for media content', does: 'find media by keyword' })] });
-    assert.match(user, /Search for media content/);   // the name reaches the brain, not just the uuid
+    assert.match(user, /Search for media content/);   // the name reaches Orchard, not just the uuid
     assert.match(system, /DISAMBIGUATE/);              // and it's told to pick the best-fit, or clarify
     assert.match(system, /META \/ CAPABILITY/);        // …and to ANSWER "can you X?" questions, not act on them
   });
@@ -41,7 +41,7 @@ describe('buildStepMessages — fences palette/observation as data, hides scope 
     assert.match(user, /2\. ask R → miss \(miss\)/);
   });
 
-  it('renders ledger PARAMS so the brain sees what it did (the .1112 OPEN_URL-repeat fix)', () => {
+  it('renders ledger PARAMS so Orchard sees what it did (the .1112 OPEN_URL-repeat fix)', () => {
     const { user } = buildStepMessages({ goal: 'go to pixabay', palette: [leg('OPEN_URL', { domain: 'browser' })], ledger: [{ kind: 'act', leg: 'OPEN_URL', params: { url: 'https://pixabay.com' }, ok: true }] });
     assert.match(user, /OPEN_URL.*pixabay\.com.*→ ok/);
   });

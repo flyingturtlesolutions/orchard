@@ -669,10 +669,10 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
-    // IL-2 (v2.74.1112) — RETRIEVE_TOOLS: the LEARNED-leg source for the panel-hosted brain loop's
-    // assemblePalette (Core/brainRun). Mirrors ROUTE_ASK's ground-resolution + candidate computation, minus
+    // IL-2 (v2.74.1112) — RETRIEVE_TOOLS: the LEARNED-leg source for the panel-hosted inference-layer loop's
+    // assemblePalette (Core/ilRun). Mirrors ROUTE_ASK's ground-resolution + candidate computation, minus
     // the LLM route — returns the retrieved candidates + the resolved groundId so the panel can ctx-bind
-    // execPlan. Reached ONLY by the `brain:` panel command (verify-only); never touches the default cascade.
+    // execPlan. Reached ONLY by the `il:` panel command (verify-only); never touches the default cascade.
     RETRIEVE_TOOLS: async (payload, _sender, sendResponse) => {
       try {
         const ask = String(payload?.ask ?? '').trim();
@@ -691,22 +691,22 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
-    // IL-2 (v2.74.1112) — STEP_BRAIN: the brain loop's THINK seam (AnthropicService.stepBrain over a
-    // StepContext). The panel hosts the loop (Core/brainRun + agentLoop) and round-trips here each cold step;
+    // IL-2 (v2.74.1112) — STEP_IL: the inference-layer loop's THINK seam (AnthropicService.stepIl over a
+    // StepContext). The panel hosts the loop (Core/ilRun + agentLoop) and round-trips here each cold step;
     // the pure prompt/parse (palette + observation fenced as DATA) lives in Core/stepPrompt.js. Verify-only.
-    STEP_BRAIN: async (payload, _sender, sendResponse) => {
+    STEP_IL: async (payload, _sender, sendResponse) => {
       try {
-        const decision = await AnthropicService.stepBrain(payload?.ctx || {});
+        const decision = await AnthropicService.stepIl(payload?.ctx || {});
         sendResponse({ success: true, decision });
       } catch (err) {
-        Logger.error('background', `STEP_BRAIN failed: ${err.message}`);
+        Logger.error('background', `STEP_IL failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },
 
-    // IL-2 (v2.74.1118) — JUDGE_MATCH: the brain as the user's stand-in deciding WHICH of matchCapability's
+    // IL-2 (v2.74.1118) — JUDGE_MATCH: Orchard as the user's stand-in deciding WHICH of matchCapability's
     // candidates to run (or reject), given the ask + the values the substrate already bound. The panel passes the
-    // candidates ORCH_MATCH surfaced; this returns {ref, reason}. No re-binding — the brain picks the capability.
+    // candidates ORCH_MATCH surfaced; this returns {ref, reason}. No re-binding — Orchard picks the capability.
     JUDGE_MATCH: async (payload, _sender, sendResponse) => {
       try {
         const verdict = await AnthropicService.judgeMatch({ ask: payload?.ask, candidates: payload?.candidates });
@@ -717,17 +717,17 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
-    // IL-2 (v2.74.1119) — BRAIN_ANSWER: the brain handles a META / conversational ask ("what can you do?") when
+    // IL-2 (v2.74.1119) — IL_ANSWER: Orchard handles a META / conversational ask ("what can you do?") when
     // nothing matched. Reads the FULL capability set for this Ground (not a lexical top-k — the user wants the
     // whole picture) + answers from it via AnthropicService.answerAsk. Resolves the Ground like ROUTE_ASK.
-    BRAIN_ANSWER: async (payload, _sender, sendResponse) => {
+    IL_ANSWER: async (payload, _sender, sendResponse) => {
       try {
         const ask = String(payload?.ask ?? '').trim();
         let { tabId, groundId } = payload ?? {};
         let tabUrl = '';
         if (typeof tabId === 'number') { try { tabUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
         if (!groundId && tabUrl) { try { groundId = _groundIdForUrl(tabUrl, await StorageManager.getAllGrounds()); } catch { /* */ } }
-        // v2.74.1121 — feed the brain the context the substrate already computes but it was blind to:
+        // v2.74.1121 — feed Orchard the context the substrate already computes but it was blind to:
         //   #1 affordances (what's on the page now) · #3 which caps are established (aliased) · #5 coverage (gaps).
         let rawCaps = [];
         if (groundId) { try { rawCaps = ((await ctx.readSgCapabilities(groundId)) || []).filter((c) => c && isActiveCapability(c) && c.kind !== 'composite'); } catch { rawCaps = []; } }
@@ -745,7 +745,7 @@ export function createSgMessageHandlers(ctx) {
         const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl });
         sendResponse({ success: true, answer, groundId: groundId || null });
       } catch (err) {
-        Logger.error('background', `BRAIN_ANSWER failed: ${err.message}`);
+        Logger.error('background', `IL_ANSWER failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },
@@ -3126,7 +3126,7 @@ export function createSgMessageHandlers(ctx) {
         if (cap.strategyId) { sendResponse({ success: true, promoted: true, alreadyPromoted: true, strategyId: cap.strategyId }); return; }
 
         const now = Date.now();
-        // Leaf resolution (the ONLY I/O the pure promoter needs) — injected so the brain stays mockable/tested.
+        // Leaf resolution (the ONLY I/O the pure promoter needs) — injected so the promoter stays mockable/tested.
         const resolveFragmentCap = async (cid) => {
           const c = caps.find((x) => x.id === cid);
           if (!c) return null;
@@ -3195,7 +3195,7 @@ export function createSgMessageHandlers(ctx) {
         // (e.g. the user disambiguated to a capability whose param schema differs from the top pick the LLM bound).
         // Reported back as `ignoredKeys` so the chat can avoid banking a confirmation on a run that silently fell
         // back to a demonstrated sample value the user never asked for.
-        // IL-2 delegation (v2.74.1117, model a) — the brain PICKS the capability but does NOT bind its params;
+        // IL-2 delegation (v2.74.1117, model a) — Orchard PICKS the capability but does NOT bind its params;
         // bind the ask's VALUES to this cap's REAL schema HERE via the existing binder (bindClauseParams — knows
         // the param names + option/category vocabulary), so the value lands in the right field instead of being
         // guessed. Only when no paramValues were supplied (the deterministic callers pre-bind + pass paramValues).

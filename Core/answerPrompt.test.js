@@ -1,4 +1,4 @@
-// Core/answerPrompt.test.js — IL-2 the brain's meta/conversational answer prompt (node --test).
+// Core/answerPrompt.test.js — IL-2 Orchard's meta/conversational answer prompt (node --test).
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';

@@ -1,6 +1,6 @@
 // Core/palette.js — the inference-layer leg palette (DESIGN_inference_layer.md §4.3). IL-2 (v2.74.1108).
 //
-// PURE: no chrome / DOM / LLM / storage. `assemblePalette` unifies the two leg sources the brain selects over —
+// PURE: no chrome / DOM / LLM / storage. `assemblePalette` unifies the two leg sources Orchard selects over —
 // LEARNED capabilities (tool-RAG, R-2, injected `retrieve`) and the small fixed BUILTIN registry — into one
 // uniform, availability-gated, policy-filtered, OUTCOMES-biased OfferedLeg[] (the §4.3 pipeline). The handlers
 // that DISPATCH a chosen leg live with runTool (the IL-2 wire-in, impure); THIS module is descriptors + the
@@ -15,7 +15,7 @@
 const keyOf = (x) => (x && (x.key ?? x.capabilityId ?? x.op ?? x.name)) || null;
 
 /**
- * The BUILTIN leg registry — the small fixed set the brain always has beyond the learned library. Descriptors
+ * The BUILTIN leg registry — the small fixed set Orchard always has beyond the learned library. Descriptors
  * only (handlers are wired at runTool, IL-2b). `requires` is the availability gate (§4.3): a leg is offered
  * only when the env provides every flag (e.g. FOCUS_TAB needs an existing tab). Browser is partial today,
  * Self is partial, Connector is greenfield (§4.2) — so this set is intentionally small and grows with handlers.

@@ -28,9 +28,9 @@ import { CONDITION_FIELDS, getTypesByFamily } from './ConditionVocabulary.js';
 import { getCloudSettings, normalizeApiBaseUrl } from './Cloud/CloudSettings.js';
 import { ensureFreshSession } from './Cloud/CloudTokenStore.js';
 import { buildRouterMessages, parseRouterOutput } from '../Core/routerPrompt.js';   // R-3 — front-door router prompt (no DOM; fenced catalog)
-import { buildStepMessages, parseStepDecision } from '../Core/stepPrompt.js';   // IL-2 — the brain-loop step controller prompt (fenced palette + observation)
-import { buildJudgeMessages, parseJudgeDecision } from '../Core/judgePrompt.js';   // IL-2 — the brain-as-user-standin match judge (pick the capability matchCapability found; no re-bind)
-import { buildAnswerMessages } from '../Core/answerPrompt.js';   // IL-2 — the brain ANSWERING a meta/conversational ask from the available capabilities
+import { buildStepMessages, parseStepDecision } from '../Core/stepPrompt.js';   // IL-2 — the inference-layer step controller prompt (fenced palette + observation)
+import { buildJudgeMessages, parseJudgeDecision } from '../Core/judgePrompt.js';   // IL-2 — the IL-as-user-standin match judge (pick the capability matchCapability found; no re-bind)
+import { buildAnswerMessages } from '../Core/answerPrompt.js';   // IL-2 — Orchard ANSWERING a meta/conversational ask from the available capabilities
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL             = 'claude-sonnet-4-5';
@@ -5223,7 +5223,7 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
   }
 
   /**
-   * IL-2 — the brain-loop STEP controller (DESIGN_inference_layer.md §4.1). Unlike routeAsk (a single-shot
+   * IL-2 — the inference-layer STEP controller (DESIGN_inference_layer.md §4.1). Unlike routeAsk (a single-shot
    * SELECT over a catalog), this is the iterated think seam: given the StepContext (goal · signal-only ledger ·
    * latest observation · scope keys · palette), it returns the next Decision {kind: act|ask|done|needs}. PURE
    * prompt + parse live in Core/stepPrompt.js (palette + observation fenced as inert DATA — §3/§9; scope VALUES
@@ -5232,18 +5232,18 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    * @param {import('../Core/agentLoop.js').StepContext} ctx
    * @returns {Promise<import('../Core/agentLoop.js').Decision>}
    */
-  static async stepBrain(ctx = {}) {
+  static async stepIl(ctx = {}) {
     const palette = Array.isArray(ctx && ctx.palette) ? ctx.palette : [];
     const { system, user } = buildStepMessages(ctx || {});
-    const res = await AnthropicService.#call(system, user, 512, [], { role: 'routing', operation: 'step-brain' });
+    const res = await AnthropicService.#call(system, user, 512, [], { role: 'routing', operation: 'step-il' });
     if (!res || res.success === false) {
-      return { kind: 'needs', needs: { kind: 'clarify' }, params: {}, confidence: 0, reason: 'brain-unavailable' };
+      return { kind: 'needs', needs: { kind: 'clarify' }, params: {}, confidence: 0, reason: 'il-unavailable' };
     }
     return parseStepDecision(res.text, palette);
   }
 
   /**
-   * IL-2 — the brain as the USER'S STAND-IN at matchCapability's decision point. The substrate already PICKED +
+   * IL-2 — Orchard as the USER'S STAND-IN at matchCapability's decision point. The substrate already PICKED +
    * BOUND the candidates (using the live page); this decides WHICH to run (or reject) given the ask — replacing
    * the user's Run/Not-that/pick-an-option click. It does NOT re-bind values. PURE prompt + parse in
    * Core/judgePrompt.js. Fails safe to ref:null (reject → ask) so it never runs the wrong capability.
@@ -5259,7 +5259,7 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
   }
 
   /**
-   * IL-2 — the brain ANSWERING a meta / conversational ask ("what can you do?", "can you X?") when there's
+   * IL-2 — Orchard ANSWERING a meta / conversational ask ("what can you do?", "can you X?") when there's
    * nothing to RUN. Free-text reply grounded ONLY in the capabilities available on the page + the built-in
    * nav/tab abilities (Core/answerPrompt.js fences the capability list as data). @param {{ask:string,
    * capabilities:Array<object>}} args  @returns {Promise<string|null>}
@@ -5267,7 +5267,7 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
   static async answerAsk({ ask, capabilities, affordances, coverage, url } = {}) {
     if (!(await AnthropicService.hasLlm())) return null;
     const { system, user } = buildAnswerMessages({ ask, capabilities: Array.isArray(capabilities) ? capabilities : [], affordances, coverage, url });
-    const res = await AnthropicService.#call(system, user, 700, [], { role: 'describe', operation: 'brain-answer' });   // room for a substantive, reflective answer
+    const res = await AnthropicService.#call(system, user, 700, [], { role: 'describe', operation: 'il-answer' });   // room for a substantive, reflective answer
     return (res && res.success !== false && typeof res.text === 'string' && res.text.trim()) ? res.text.trim() : null;
   }
 

@@ -1,6 +1,6 @@
-// Core/agentLoop.js — the inference-layer brain loop (DESIGN_inference_layer.md §4). IL-1 (v2.74.1107).
+// Core/agentLoop.js — the inference-layer loop (DESIGN_inference_layer.md §4). IL-1 (v2.74.1107).
 //
-// PURE control flow: no chrome / DOM / LLM / storage. `palette` (offer legs), `callBrain` (the think seam),
+// PURE control flow: no chrome / DOM / LLM / storage. `palette` (offer legs), `callIl` (the think seam),
 // `runTool` (execute a leg), `verifyDone` (the #2 done-gate) and `isAborted` are INJECTED async deps — so the
 // loop is unit-testable with mocks, exactly like Core/route.js. The loop IS `route.js + state`:
 //   maxSteps=1  → one think, terminal-after-one, HANDS THE DECISION BACK un-executed → byte-identical to a
@@ -8,17 +8,17 @@
 //   maxSteps>1  → think → act (runTool) → observe → re-think, until done / needs / budget / abort.
 //
 // This module only ORCHESTRATES; it never touches the DOM and never bypasses the downstream trial/verify gate.
-// Two safety invariants live HERE, not in the (possibly hallucinating / injected-into) brain:
+// Two safety invariants live HERE, not in the (possibly hallucinating / injected-into) il:
 //   • anti-hallucination — a selected `leg` MUST be one `palette` offered, else hand back to demonstrate
 //     (route.js's "a selected tool MUST be one we offered", now enforced on every observe→think edge — §9).
-//   • done is gate-confirmed, not the brain's opinion — `verifyDone` can reject a 'done' and force more work (#2).
+//   • done is gate-confirmed, not Orchard's opinion — `verifyDone` can reject a 'done' and force more work (#2).
 
 // A tool/leg's stable key: a saved capability's id, a primitive's op, or (last resort) its name. Tolerant of
 // either an OfferedLeg ({key}) or a raw route.js tool ({capabilityId|op|name}) so the loop accepts both.
 const keyOf = (x) => (x && (x.key ?? x.capabilityId ?? x.op ?? x.name)) || null;
 
 /**
- * @typedef {Object} OfferedLeg   a palette entry the brain may select (DESIGN §2.2 / §4.3)
+ * @typedef {Object} OfferedLeg   a palette entry Orchard may select (DESIGN §2.2 / §4.3)
  * @property {string} key         stable id (capabilityId | op | name)
  * @property {string} [name]
  * @property {'page'|'browser'|'connector'|'self'} [domain]
@@ -27,7 +27,7 @@ const keyOf = (x) => (x && (x.key ?? x.capabilityId ?? x.op ?? x.name)) || null;
  * @property {'auto'|'confirm'|'gated'} [safety]
  * @property {Object} [tool]      the underlying capability/primitive descriptor (for dispatch)
  *
- * @typedef {Object} StepContext  the brain's input, assembled fresh each step (DESIGN §4.1)
+ * @typedef {Object} StepContext  Orchard's input, assembled fresh each step (DESIGN §4.1)
  * @property {string} goal
  * @property {Object} scope       live values from prior reads (HS-2); never narrated into the prompt
  * @property {Array<Object>} ledger   signal-only per-step summaries (#3 compaction)
@@ -35,7 +35,7 @@ const keyOf = (x) => (x && (x.key ?? x.capabilityId ?? x.op ?? x.name)) || null;
  * @property {Array<OfferedLeg>} palette
  * @property {{remaining:number}} budget
  *
- * @typedef {Object} Decision     the brain's structured output, generalizing RouteDecision (DESIGN §4.1)
+ * @typedef {Object} Decision     Orchard's structured output, generalizing RouteDecision (DESIGN §4.1)
  * @property {'act'|'ask'|'done'|'needs'} kind
  * @property {OfferedLeg|null} [leg]   for act/ask — MUST be one of palette[].key
  * @property {Object} [params]
@@ -49,7 +49,7 @@ const keyOf = (x) => (x && (x.key ?? x.capabilityId ?? x.op ?? x.name)) || null;
  * @property {*} [value]
  * @property {Object} [scope]     scope deltas to merge (HS-2)
  * @property {Object} [verdict]
- * @property {Object} [structuredFailure]   the #1 envelope that lets the brain re-engage
+ * @property {Object} [structuredFailure]   the #1 envelope that lets Orchard re-engage
  *
  * @typedef {Object} LoopResult
  * @property {'act'|'ask'|'done'|'needs'|'exhausted'|'aborted'|'error'} status
@@ -93,7 +93,7 @@ export function routeDecisionToDecision(rd) {
   }
 }
 
-// Anti-hallucination (§4.3 / §9): an act/ask decision's leg MUST be one the palette offered. Else the brain
+// Anti-hallucination (§4.3 / §9): an act/ask decision's leg MUST be one the palette offered. Else Orchard
 // invented (or was steered to invent) a tool we never exposed → hand back to demonstrate, never dispatch it.
 function enforcePalette(decision, legs) {
   if (decision.kind !== 'act' && decision.kind !== 'ask') return decision;
@@ -105,12 +105,12 @@ function enforcePalette(decision, legs) {
 
 // A signal-only ledger entry (#3 compaction — never the raw observation, just its shape). v2.74.1113 — carry
 // the PARAMS too: the .1112 live run repeated OPEN_URL 3× because the ledger showed only "act OPEN_URL → ok"
-// with no url, so the brain couldn't tell it had already navigated and kept re-picking it. The params are the
-// "what I did" the brain needs to recognize the goal is already met (→ done) instead of looping.
+// with no url, so Orchard couldn't tell it had already navigated and kept re-picking it. The params are the
+// "what I did" Orchard needs to recognize the goal is already met (→ done) instead of looping.
 function summarizeStep(decision, obs) {
   const e = { kind: decision.kind, leg: keyOf(decision.leg) || decision.kind, ok: !!(obs && obs.ok), reason: (obs && obs.reason) || decision.reason || '' };
-  // v2.74.1115 — carry the human NAME + the brain's pick RATIONALE so the choice is visible (the .1114 miss
-  // showed a uuid + "ran this capability", hiding which capability the brain disambiguated to, and why).
+  // v2.74.1115 — carry the human NAME + Orchard's pick RATIONALE so the choice is visible (the .1114 miss
+  // showed a uuid + "ran this capability", hiding which capability Orchard disambiguated to, and why).
   if (decision.leg && decision.leg.name) e.legName = decision.leg.name;
   if (decision.reason) e.pick = decision.reason;
   if (decision.params && typeof decision.params === 'object' && Object.keys(decision.params).length) e.params = decision.params;
@@ -118,17 +118,17 @@ function summarizeStep(decision, obs) {
 }
 
 // Default StepContext assembler (§4.1). Override via deps.assemble to shape the prompt; the loop only needs
-// the shape. budget is collapsed to its remaining count (the brain reasons over headroom, not the object).
+// the shape. budget is collapsed to its remaining count (Orchard reasons over headroom, not the object).
 function defaultAssemble(goal, scope, ledger, observation, palette, budget) {
   return { goal, scope, ledger, observation, palette, budget: { remaining: budget.remaining() } };
 }
 
 /**
- * Run the brain loop. PURE — all I/O via injected async deps (any may be absent).
+ * Run the inference-layer loop. PURE — all I/O via injected async deps (any may be absent).
  * @param {string} goal
  * @param {{
  *   palette?:    (goal:string, scope:Object)=>Promise<Array<OfferedLeg>>,
- *   callBrain?:  (ctx:StepContext)=>Promise<Decision>,
+ *   callIl?:  (ctx:StepContext)=>Promise<Decision>,
  *   runTool?:    (leg:OfferedLeg, params:Object)=>Promise<Observation>,
  *   verifyDone?: (decision:Decision, state:{scope:Object,ledger:Array})=>Promise<boolean>|boolean,
  *   isAborted?:  ()=>boolean,
@@ -138,7 +138,7 @@ function defaultAssemble(goal, scope, ledger, observation, palette, budget) {
  * @returns {Promise<LoopResult>}
  */
 export async function agentLoop(goal, deps = {}, opts = {}) {
-  const { palette, callBrain, runTool, verifyDone, isAborted, assemble = defaultAssemble } = deps || {};
+  const { palette, callIl, runTool, verifyDone, isAborted, assemble = defaultAssemble } = deps || {};
   const maxSteps = (Number.isFinite(opts.maxSteps) && opts.maxSteps > 0) ? Math.floor(opts.maxSteps) : 1;
   const budget = (opts.budget && typeof opts.budget.remaining === 'function') ? opts.budget : { remaining: () => Infinity };
 
@@ -147,7 +147,7 @@ export async function agentLoop(goal, deps = {}, opts = {}) {
   const ledger = [];
 
   if (!g) return { status: 'needs', decision: { kind: 'needs', needs: { kind: 'clarify' }, params: {}, confidence: 0, reason: 'empty-goal' }, steps: 0, ledger, scope };
-  if (typeof callBrain !== 'function') return { status: 'error', decision: null, steps: 0, ledger, scope, reason: 'no-brain' };
+  if (typeof callIl !== 'function') return { status: 'error', decision: null, steps: 0, ledger, scope, reason: 'no-il' };
 
   let lastObs = null;
   let steps = 0;
@@ -165,9 +165,9 @@ export async function agentLoop(goal, deps = {}, opts = {}) {
     const ctx = assemble(g, scope, ledger, lastObs, legs, budget);
 
     let decision = null;
-    try { decision = await callBrain(ctx); } catch { decision = null; }
+    try { decision = await callIl(ctx); } catch { decision = null; }
     if (!decision || typeof decision !== 'object') {
-      return { status: 'needs', decision: { kind: 'needs', needs: { kind: 'clarify' }, params: {}, confidence: 0, reason: 'brain-failed' }, steps, ledger, scope };
+      return { status: 'needs', decision: { kind: 'needs', needs: { kind: 'clarify' }, params: {}, confidence: 0, reason: 'il-failed' }, steps, ledger, scope };
     }
     decision = enforcePalette(decision, legs);
 
@@ -175,7 +175,7 @@ export async function agentLoop(goal, deps = {}, opts = {}) {
       let ok = true;
       if (typeof verifyDone === 'function') { try { ok = !!(await verifyDone(decision, { scope, ledger })); } catch { ok = false; } }
       if (ok) return { status: 'done', decision, answer: decision.answer ?? null, steps, ledger, scope };
-      // The gate overrides the brain's "done" — record it and keep going (#2: done is a gate, not an opinion).
+      // The gate overrides Orchard's "done" — record it and keep going (#2: done is a gate, not an opinion).
       const obs = { ok: false, reason: 'done-rejected' };
       ledger.push(summarizeStep(decision, obs));
       lastObs = obs;

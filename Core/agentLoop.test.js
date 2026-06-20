@@ -1,4 +1,4 @@
-// Core/agentLoop.test.js — IL-1 the inference-layer brain loop (node --test).
+// Core/agentLoop.test.js — IL-1 the inference-layer loop (node --test).
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -55,13 +55,13 @@ describe('agentLoop — maxSteps=1 IS route.js (the §8 Phase-1 parity claim)', 
   const retrieveTools = async () => TOOLS;
   const callRouter = async () => ({ tool: 'OPEN_URL', params: { url: 'https://pixabay.com' }, confidence: 0.95 });
 
-  it('loop@1 with a route-backed brain ≡ routeDecisionToDecision(route(…))', async () => {
+  it('loop@1 with a route-backed Orchard ≡ routeDecisionToDecision(route(…))', async () => {
     const rd = await route('go to pixabay', { retrieveTools, callRouter });        // the direct route decision
     const expected = routeDecisionToDecision(rd);
 
     const palette = async (g) => (await retrieveTools(g, 8)).map(legFromTool);
-    const callBrain = async (ctx) => routeDecisionToDecision(await route(ctx.goal, { retrieveTools: async () => TOOLS, callRouter }));
-    const res = await agentLoop('go to pixabay', { palette, callBrain }, { maxSteps: 1 });
+    const callIl = async (ctx) => routeDecisionToDecision(await route(ctx.goal, { retrieveTools: async () => TOOLS, callRouter }));
+    const res = await agentLoop('go to pixabay', { palette, callIl }, { maxSteps: 1 });
 
     assert.equal(res.status, 'act');
     assert.deepEqual(res.decision, expected);     // no divergence from route at step 1
@@ -71,7 +71,7 @@ describe('agentLoop — maxSteps=1 IS route.js (the §8 Phase-1 parity claim)', 
     let toolCalls = 0;
     const res = await agentLoop('g', {
       palette: async () => [{ key: 'L1' }],
-      callBrain: async () => ({ kind: 'act', leg: { key: 'L1' }, params: {}, confidence: 1, reason: 'x' }),
+      callIl: async () => ({ kind: 'act', leg: { key: 'L1' }, params: {}, confidence: 1, reason: 'x' }),
       runTool: async () => { toolCalls++; return { ok: true }; },
     }, { maxSteps: 1 });
     assert.equal(res.status, 'act');
@@ -81,21 +81,21 @@ describe('agentLoop — maxSteps=1 IS route.js (the §8 Phase-1 parity claim)', 
 });
 
 describe('agentLoop — loop behavior', () => {
-  it('empty goal → needs(clarify), the brain is never called', async () => {
+  it('empty goal → needs(clarify), Orchard is never called', async () => {
     let called = false;
-    const res = await agentLoop('   ', { callBrain: async () => { called = true; return null; } });
+    const res = await agentLoop('   ', { callIl: async () => { called = true; return null; } });
     assert.equal(res.status, 'needs'); assert.equal(res.decision.reason, 'empty-goal'); assert.equal(called, false);
   });
 
-  it('no brain → error', async () => {
+  it('no Orchard → error', async () => {
     const res = await agentLoop('g', {});
-    assert.equal(res.status, 'error'); assert.equal(res.reason, 'no-brain');
+    assert.equal(res.status, 'error'); assert.equal(res.reason, 'no-il');
   });
 
   it('anti-hallucination: an act leg NOT in the palette → coerced to needs(demonstrate)', async () => {
     const res = await agentLoop('g', {
       palette: async () => [{ key: 'REAL' }],
-      callBrain: async () => ({ kind: 'act', leg: { key: 'GHOST' }, params: {}, confidence: 1, reason: 'x' }),
+      callIl: async () => ({ kind: 'act', leg: { key: 'GHOST' }, params: {}, confidence: 1, reason: 'x' }),
     }, { maxSteps: 1 });
     assert.equal(res.status, 'needs');
     assert.equal(res.decision.needs.kind, 'demonstrate');
@@ -103,7 +103,7 @@ describe('agentLoop — loop behavior', () => {
   });
 
   it('needs decision is terminal (handed off immediately)', async () => {
-    const res = await agentLoop('g', { callBrain: async () => ({ kind: 'needs', needs: { kind: 'demonstrate' }, reason: 'gap', confidence: 0.2 }) }, { maxSteps: 5 });
+    const res = await agentLoop('g', { callIl: async () => ({ kind: 'needs', needs: { kind: 'demonstrate' }, reason: 'gap', confidence: 0.2 }) }, { maxSteps: 5 });
     assert.equal(res.status, 'needs'); assert.equal(res.decision.needs.kind, 'demonstrate');
   });
 
@@ -117,7 +117,7 @@ describe('agentLoop — loop behavior', () => {
     let toolCalls = 0;
     const res = await agentLoop('g', {
       palette: async () => [{ key: 'L1' }],
-      callBrain: async () => decisions[i++],
+      callIl: async () => decisions[i++],
       runTool: async () => { toolCalls++; return { ok: true, value: `v${toolCalls}` }; },
     }, { maxSteps: 3 });
     assert.equal(res.status, 'done');
@@ -127,7 +127,7 @@ describe('agentLoop — loop behavior', () => {
     assert.equal(res.scope.L1, 'v2');  // last read value keyed by its producing leg (HS-2)
   });
 
-  it('ledger entries carry the decision params (v2.74.1113 — the brain must see WHAT it did, not just that it acted)', async () => {
+  it('ledger entries carry the decision params (v2.74.1113 — Orchard must see WHAT it did, not just that it acted)', async () => {
     let i = 0;
     const decisions = [
       { kind: 'act', leg: { key: 'OPEN_URL' }, params: { url: 'https://pixabay.com' }, confidence: 1, reason: 'go' },
@@ -135,13 +135,13 @@ describe('agentLoop — loop behavior', () => {
     ];
     const res = await agentLoop('go to pixabay', {
       palette: async () => [{ key: 'OPEN_URL' }],
-      callBrain: async () => decisions[i++],
+      callIl: async () => decisions[i++],
       runTool: async () => ({ ok: true }),
     }, { maxSteps: 2 });
     assert.deepEqual(res.ledger[0].params, { url: 'https://pixabay.com' });   // the url is in the ledger now
   });
 
-  it('ledger carries the capability NAME + the brain pick RATIONALE (v2.74.1115 — visible disambiguation)', async () => {
+  it('ledger carries the capability NAME + Orchard pick RATIONALE (v2.74.1115 — visible disambiguation)', async () => {
     let i = 0;
     const decisions = [
       { kind: 'act', leg: { key: 'cap_1', name: 'Search for media content' }, params: {}, confidence: 1, reason: 'keyword query fits content search, not the category filter' },
@@ -149,7 +149,7 @@ describe('agentLoop — loop behavior', () => {
     ];
     const res = await agentLoop('search halo vectors', {
       palette: async () => [{ key: 'cap_1', name: 'Search for media content' }],
-      callBrain: async () => decisions[i++],
+      callIl: async () => decisions[i++],
       runTool: async () => ({ ok: true }),
     }, { maxSteps: 2 });
     assert.equal(res.ledger[0].legName, 'Search for media content');
@@ -159,7 +159,7 @@ describe('agentLoop — loop behavior', () => {
   it('done is gate-confirmed: verifyDone=false rejects it and the loop keeps going (#2)', async () => {
     let calls = 0;
     const res = await agentLoop('g', {
-      callBrain: async () => { calls++; return calls === 1 ? { kind: 'done', answer: 'x', reason: 'd', confidence: 1 } : { kind: 'needs', needs: { kind: 'clarify' }, reason: 'n', confidence: 0 }; },
+      callIl: async () => { calls++; return calls === 1 ? { kind: 'done', answer: 'x', reason: 'd', confidence: 1 } : { kind: 'needs', needs: { kind: 'clarify' }, reason: 'n', confidence: 0 }; },
       verifyDone: () => false,
     }, { maxSteps: 3 });
     assert.equal(res.status, 'needs');   // the rejected done forced another iteration → needs
@@ -172,7 +172,7 @@ describe('agentLoop — loop behavior', () => {
     const decisions = [{ kind: 'act', leg: { key: 'L1' }, reason: 'a', confidence: 1 }, { kind: 'done', answer: 'ok', reason: 'd', confidence: 1 }];
     const res = await agentLoop('g', {
       palette: async () => [{ key: 'L1' }],
-      callBrain: async () => decisions[i++],
+      callIl: async () => decisions[i++],
       runTool: async () => ({ ok: true, scope: { foo: 'bar' } }),
     }, { maxSteps: 2 });
     assert.equal(res.scope.foo, 'bar');
@@ -180,17 +180,17 @@ describe('agentLoop — loop behavior', () => {
 
   it('budget exhaustion → exhausted before the first think', async () => {
     let called = false;
-    const res = await agentLoop('g', { callBrain: async () => { called = true; return { kind: 'done' }; } }, { maxSteps: 3, budget: { remaining: () => 0 } });
+    const res = await agentLoop('g', { callIl: async () => { called = true; return { kind: 'done' }; } }, { maxSteps: 3, budget: { remaining: () => 0 } });
     assert.equal(res.status, 'exhausted'); assert.equal(res.reason, 'budget'); assert.equal(called, false);
   });
 
   it('abort signal → aborted', async () => {
-    const res = await agentLoop('g', { callBrain: async () => ({ kind: 'done' }), isAborted: () => true }, { maxSteps: 2 });
+    const res = await agentLoop('g', { callIl: async () => ({ kind: 'done' }), isAborted: () => true }, { maxSteps: 2 });
     assert.equal(res.status, 'aborted');
   });
 
-  it('a brain that throws/returns garbage → needs(clarify, brain-failed), never throws', async () => {
-    const res = await agentLoop('g', { callBrain: async () => { throw new Error('boom'); } }, { maxSteps: 2 });
-    assert.equal(res.status, 'needs'); assert.equal(res.decision.reason, 'brain-failed');
+  it('an Orchard step that throws/returns garbage → needs(clarify, il-failed), never throws', async () => {
+    const res = await agentLoop('g', { callIl: async () => { throw new Error('boom'); } }, { maxSteps: 2 });
+    assert.equal(res.status, 'needs'); assert.equal(res.decision.reason, 'il-failed');
   });
 });

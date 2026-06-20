@@ -1,6 +1,6 @@
-// Core/answerPrompt.js — the brain ANSWERING a meta / conversational ask (IL-2, v2.74.1119; context-enriched .1121).
+// Core/answerPrompt.js — Orchard ANSWERING a meta / conversational ask (IL-2, v2.74.1119; context-enriched .1121).
 //
-// The brain is the user's stand-in: when there's a grounded action it delegates to matchCapability; when the
+// Orchard is the user's stand-in: when there's a grounded action it delegates to matchCapability; when the
 // ask is ABOUT what it can do ("what can you do?", "can you X?"), or there's nothing to run, it ANSWERS. v2.74.1121
 // feeds it the context the substrate already computes but it was blind to: #1 the live page AFFORDANCES (what's
 // visible/selected now) + the URL, #3 which capabilities are ESTABLISHED (aliased = you've used them), #5 the
