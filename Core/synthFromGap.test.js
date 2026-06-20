@@ -60,6 +60,14 @@ describe('synthFromGap — stage an unverified capability from a harvested gap (
     assert.equal(r.landmarks[0].lifecycle, 'fresh');      // selector-proven, behaviour unverified
     assert.equal(r.landmarks[0].source, 'harvested');
   });
+
+  it('the composed capability stays matcher-findable (regression: activeness + candidate + non-orphan gates)', () => {
+    const cap = build().capability;
+    assert.equal(cap.retracted, undefined);                // isActiveCapability (orchFeedback): not retracted
+    assert.equal(cap.disabled, undefined);                 // ...not disabled → ACTIVE (source/verdict are NOT gated)
+    assert.notEqual(cap.kind, 'observation');              // _bind's candidate filter routes it to the action pool
+    assert.ok(cap.fragmentId && !cap.strategyId);          // bare T1 → non-orphan once its Fragment is saved (listFragments)
+  });
 });
 
 function cap_landmarks(r) { return r.capability.landmarkUids; }
