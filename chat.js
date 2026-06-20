@@ -3053,15 +3053,16 @@ const PS_REACTIVE_SYNTH = false;
 // ASK×Self cells). Param-free + read-only → no binder, no confirm. Dispatched via a SW channel (execPlan).
 const IL_READ_LEG_KEYS = new Set(['LIST_TABS', 'LIST_CAPABILITIES']);
 
-// IL-3c (v2.74.1132) — the ACT×Self PANEL legs: the side panel's own commands, dispatched LOCALLY (a chat.js
-// function / a button click), NOT via a SW channel. Each entry: { confirm? (a write-gate prompt), run(msg) — may
+// IL-3c (v2.74.1132; confirm dropped v2.74.1135) — the ACT×Self PANEL legs: the side panel's own commands,
+// dispatched LOCALLY (a chat.js function / a button click), NOT via a SW channel. Each entry: { run(msg) — may
 // return {rendered:true} when the action draws its own UI / resets the chat, done? (the default success line) }.
-// Many reuse the existing button handlers (which already carry their own confirms), so the leg = the same action.
-// Gesture caveat: NEW_DEV_CONVERSATION's FIRST-EVER permission grant and OPEN_GROUND's sidePanel.open need a live
-// user gesture, which a typed (LLM-routed) command no longer holds — they work once permission/panel state allows,
-// else fail gracefully. DELETE_ALL self-confirms (count-aware) in its handler, so no extra il-confirm here.
+// They run DIRECTLY — NO il-confirm: `window.confirm` is suppressed in the async `il:` flow (no user activation),
+// so it only ever auto-cancelled ("Okay — cancelled" with no dialog); and the explicit `il:` command IS the
+// authorization (a dev conversation is reversible — deletable). DELETE_ALL still hits its button's own count-aware
+// confirm() (destructive). Gesture caveat (unchanged): OPEN_GROUND's sidePanel.open + NEW_DEV's FIRST-EVER
+// permission grant need a live gesture a typed command lacks — NEW_DEV works once granted (the common case).
 const IL_PANEL_LEGS = {
-  NEW_DEV_CONVERSATION:     { confirm: 'Open a new dev (Claude Code) conversation on this repo?', run: () => { $('btn-new-dev-conversation')?.click(); return { rendered: true }; } },
+  NEW_DEV_CONVERSATION:     { run: () => { $('btn-new-dev-conversation')?.click(); return { rendered: true }; } },
   NEW_CONVERSATION:         { run: () => { $('btn-new-conversation')?.click(); return { rendered: true }; } },
   OPEN_HISTORY:             { run: () => { $('btn-history')?.click(); }, done: '🧠 Opened conversation history.' },
   DELETE_ALL_CONVERSATIONS: { run: () => { $('btn-delete-all-conversations')?.click(); return { rendered: true }; } },
@@ -3070,7 +3071,7 @@ const IL_PANEL_LEGS = {
   HIDE_PANEL:               { run: () => { $('btn-hide-panel')?.click(); return { rendered: true }; } },
   RELOAD_EXTENSION:         { run: () => { try { chrome.runtime.reload(); } catch { /* */ } return { rendered: true }; } },
   EXPLORE_PAGE:             { run: async (msg) => { await _chatExplore({ msg }); return { rendered: true }; } },
-  TOGGLE_TRACKING:          { confirm: 'Turn interaction tracking on/off? (the monitor watches your clicks to learn capabilities.)', run: async (msg) => {
+  TOGGLE_TRACKING:          { run: async (msg) => {
     let cur = false;
     try { const got = await _orchReq('GET_MONITOR_CONSENT', {}); cur = !!(got && got.consent && got.consent.track && got.consent.track.enabled); } catch { /* */ }
     try { await _orchReq('SET_MONITOR_CONSENT', { enabled: !cur }); } catch { /* */ }
@@ -3079,9 +3080,9 @@ const IL_PANEL_LEGS = {
   } },
 };
 
-// Dispatch an ACT×Self PANEL leg JUDGE picked → its local handler, gated by an il-confirm for the privileged ones.
+// Dispatch an ACT×Self PANEL leg JUDGE picked → its local handler. No il-confirm (see IL_PANEL_LEGS): the legs run
+// directly — the explicit `il:` command is the authorization, and window.confirm is dead in the async panel flow.
 async function _ilRunPanelAction(msg, { leg, panel, ask }) {
-  if (panel.confirm) { let ok = false; try { ok = window.confirm(panel.confirm); } catch { ok = false; } if (!ok) { _setMessageBody(msg, '🧠 Okay — cancelled.'); return; } }
   try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → self:${leg.key}`); } catch { /* */ }
   let r = null;
   try { r = await panel.run(msg); }
