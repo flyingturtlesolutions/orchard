@@ -2952,6 +2952,24 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // IL-3b (v2.74.1131) — LIST_TABS: the ASK×Browser read leg for the inference layer ("what tabs are open?").
+    // Read-only → auto. Excludes the extension's OWN pages (Studio / side panel) and non-http(s) tabs so the user
+    // sees real web tabs. The loop offers this leg on a page miss (palette ∪ builtins); chat renders the list.
+    LIST_TABS: async (_payload, _sender, sendResponse) => {
+      try {
+        const own = chrome.runtime.getURL('');
+        const all = await chrome.tabs.query({});
+        const tabs = (all || [])
+          .filter((t) => t && typeof t.id === 'number' && t.url && !String(t.url).startsWith(own) && /^https?:/i.test(t.url))
+          .map((t) => ({ id: t.id, title: (t.title || '').slice(0, 120), url: t.url, active: !!t.active }));
+        Logger.info('background', `LIST_TABS ▸ ${tabs.length} web tab(s)`);
+        sendResponse({ success: true, tabs });
+      } catch (err) {
+        Logger.error('background', `LIST_TABS failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
     // OBS-READ bridge — run the user's MANUAL (Studio-authored) Observation for a read-ask. These live in a
     // DIFFERENT store (StorageManager.listObservations) than the captured observations the ORCH matcher sees, so
     // without this a hand-authored read is invisible to chat. SELECTION is deliberately simple: a SINGLE authored

@@ -27,6 +27,9 @@ import { walkBoundary, walkEndLines } from './Core/walkLedger.js';   // CR-D7 �
 import { classifyFeedback } from './Core/orchFeedback.js'; // ORCH-FB — recognize corrective feedback (LLM refines)
 import { parseAdminCommand, parseDedupCommand } from './Core/orchAdmin.js';    // ORCH-ADMIN — management commands (clear/delete); dedup — find duplicate Grounds
 import { classifyReadAsk, askListIndex } from './Core/observe.js';   // OBS-READ — is the ask a question (a read)? + the index a singular/ordinal read wants
+import { runIlStandin } from './Core/ilStandin.js';   // IL-3 — the single-shot stand-in folded through agentLoop@maxSteps=1 (DESIGN §8 Phase-1 parity)
+import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
+import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 
 // ─── Conversation state ──────────────────────────────────────────────────────
 // `_currentConversationId` is null before the first user message of a new
@@ -3039,12 +3042,55 @@ async function _tryRouterFallback(text) {
   return _orchClarifyFromRoute(d, { tabId: tab && tab.id, groundId: res.groundId, text });
 }
 
-// IL-2 (v2.74.1118) — `il: <ask>` — Orchard as the USER'S STAND-IN over the existing matcher. It does NOT
-// pick from its own palette or bind params (that made it dumber and dropped values, e.g. "halo" never reaching
-// the box). Instead: ORCH_MATCH picks + binds using the live page affordances (the substrate's job, done well —
-// it knows "illustrations" is a CATEGORY, not part of the keyword) → Orchard JUDGES which candidate to run for
-// the ask (replacing the user's Run / Not-that / pick-an-option click) → _orchRun runs it with the SUBSTRATE's
-// bindings. `IL ▸` is a decision marker (studio.js _DECISION_RE — INVARIANT #1). Verify-only, opt-in.
+// PS_REACTIVE_SYNTH — PARKED (v2.74.1129, 2026-06-20). The PS-4 reactive flywheel (stage a capability from a
+// harvested gap + run it on a match-miss) is gated OFF: harvesting a click into a Landmark is a cheap, keepable
+// win, but synthesizing a full capability from ONE one-click harvest isn't mature (toggle/state-coupled identity,
+// no postcondition — proven live on YouTube subscribe). PS-0/1/2 (enumerate → harvest → pool) keep collecting
+// passively. Flip to true to re-enable once synthesis is toggle-aware (idempotent state-check + name-flip postcond).
+const PS_REACTIVE_SYNTH = false;
+
+// IL-3b (v2.74.1131) — the Browser/Self READ legs the loop may pick on a page miss (the grid's ASK×Browser /
+// ASK×Self cells). Param-free + read-only → no binder, no confirm. Descriptors live in Core/palette.js
+// (BUILTIN_LEGS); only these wired keys are offered for now (RUN_STATUS + the ACT legs await a param-binder seam).
+const IL_READ_LEG_KEYS = new Set(['LIST_TABS', 'LIST_CAPABILITIES']);
+
+// Dispatch a builtin read leg JUDGE picked → its existing channel (via the pure execPlan planner) → render the
+// read here. Read-only, so it auto-runs (no write-confirm); the PAGE-capability path stays on _orchRun.
+async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId }) {
+  const plan = planExec(leg, {}, { tabId, groundId });
+  if (!plan || !plan.ok || !plan.channel) { _setMessageBody(msg, `🧠 I can’t do “${ask}” here yet.`); return; }
+  try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${leg.domain}:${leg.key}`); } catch { /* */ }
+  let res = null;
+  try { res = await _orchReq(plan.channel, plan.payload); } catch { /* */ }
+  if (!res || res.success === false) { _setMessageBody(msg, `🧠 Couldn’t ${leg.does || leg.name || 'do that'}${res && res.error ? ` — ${res.error}` : ''}.`); return; }
+  if (leg.key === 'LIST_TABS') {
+    const tabs = Array.isArray(res.tabs) ? res.tabs : [];
+    if (!tabs.length) { _setMessageBody(msg, '🧠 No open web tabs.'); return; }
+    const lines = tabs.map((t) => {
+      let host = t.url || ''; try { host = new URL(t.url).hostname.replace(/^www\./, ''); } catch { /* */ }
+      return `• ${t.title || host}${t.active ? '  ·  active' : ''} — ${host}`;
+    });
+    _setMessageBody(msg, `🧠 ${tabs.length} open tab${tabs.length === 1 ? '' : 's'}:\n${lines.join('\n')}`);
+    return;
+  }
+  if (leg.key === 'LIST_CAPABILITIES') {
+    const entries = (res.menu && Array.isArray(res.menu.entries)) ? res.menu.entries : [];
+    if (!entries.length) { _setMessageBody(msg, '🧠 I don’t have anything mapped on this page yet — want to show me something?'); return; }
+    const lines = entries.slice(0, 12).map((e) => `• ${e.label || e.intent || e.phrase || e.name || 'capability'}`);
+    _setMessageBody(msg, `🧠 Here’s what I can do here:\n${lines.join('\n')}`);
+    return;
+  }
+  _setMessageBody(msg, '🧠 Done.');
+}
+
+// IL-3 (v2.74.1130) — `il: <ask>` — Orchard as the USER'S STAND-IN, now folded THROUGH agentLoop@maxSteps=1
+// (DESIGN_inference_layer.md §8 Phase-1 parity). The substrate matcher (ORCH_MATCH — picks + binds over the live
+// page affordances, the part it does well; it knows "illustrations" is a CATEGORY, not the keyword) is the loop's
+// PALETTE; JUDGE (which candidate to run, replacing the user's Run / Not-that click) is the THINK seam; the chosen
+// act is handed BACK here for _orchRun (the rich runner, with its HITL/param gates). `runIlStandin` IS the .1118
+// single-shot decision over agentLoop — byte-identical today — but raising maxSteps later makes it multi-step
+// (re-match → judge → execute → observe → re-think) with NO new machinery. It never re-binds params (the .1117
+// "halo" bug). `IL ▸` is a decision marker (studio.js _DECISION_RE — INVARIANT #1). Opt-in.
 async function _tryIlCommand(text) {
   const ask = String(text).replace(/^il:\s*/i, '').trim();
   const msg = appendMessage({ role: 'assistant', body: '' });
@@ -3053,14 +3099,60 @@ async function _tryIlCommand(text) {
   const tab = await _orchActiveTab();
   const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
 
-  // 1. DELEGATE the match: the substrate picks + binds using the live page (the part it does well).
-  let m = null;
-  try { m = await _orchReq('ORCH_MATCH', { tabId, ask }); } catch { /* */ }
-  if (!m || m.success === false || m.decision === 'miss' || !m.capabilityId) {
-    // PS-4 (v2.74.1127) — REACTIVE synthesis trigger: before dead-ending, try to STAGE a capability from a
-    // HARVESTED gap matching the ask (the user has already DONE this action here) and run it. The run goes through
-    // the existing runner, so a write hits the read-only-floor / write-confirm — synthesis never auto-acts. Strictly
-    // additive: no harvested gap matches → falls through to the meta answer below (today's behaviour).
+  // The loop's two think seams, injected as deps (the live message sends; runIlStandin is pure over them):
+  //   offer = ORCH_MATCH (substrate picks + binds) + planAssistantTurn's close alternatives — the loop's palette.
+  //   judge = JUDGE_MATCH over those candidates (Orchard picks the CAPABILITY; never re-binds the values).
+  const offer = async (g) => {
+    let m = null;
+    try { m = await _orchReq('ORCH_MATCH', { tabId, ask: g }); } catch { /* */ }
+    if (!m || m.success === false || m.decision === 'miss' || !m.capabilityId) {
+      // IL-3b — on a page miss, offer the param-free Browser/Self READ legs so JUDGE can pick "list tabs" / "what
+      // can I do here" instead of dead-ending to a world-knowledge answer (the grid's ASK×Browser/Self cells).
+      const builtins = availableBuiltins(BUILTIN_LEGS, { tab: tabId != null }).map(toOfferedLeg).filter((l) => l && IL_READ_LEG_KEYS.has(l.key));
+      return { candidates: [], builtins, groundId: m && m.groundId, match: m };
+    }
+    const turn = planAssistantTurn(m);
+    const candidates = []; const seen = new Set();
+    const add = (id, intent) => { if (id && !seen.has(id)) { seen.add(id); candidates.push({ id, intent, bindings: m.bindings }); } };
+    add(m.capabilityId, m.candidate && m.candidate.intent);
+    for (const o of (turn.options || [])) add(o.id, o.intent);
+    return { candidates, groundId: m.groundId, match: m };
+  };
+  const judge = async (g, candidates) => {
+    let verdict = null;
+    try { const r = await _orchReq('JUDGE_MATCH', { ask: g, candidates }); verdict = r && r.verdict; } catch { /* */ }
+    return verdict;
+  };
+
+  const out = await runIlStandin(ask, { offer, judge });
+  const m = out.match;
+
+  // ACT — Orchard picked a tool. A PAGE capability runs through the rich runner (substrate bindings, no re-bind);
+  // a Browser/Self builtin READ leg dispatches through its channel and renders here (IL-3b).
+  if (out.status === 'act' && out.decision && out.decision.leg) {
+    const leg = out.decision.leg;
+    if (leg.domain && leg.domain !== 'page') { await _ilRunBuiltin(msg, { leg, ask, tabId, groundId: out.groundId }); return true; }
+    const why = out.decision.reason ? ` — ${out.decision.reason}` : '';
+    try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → run "${leg.name || leg.key}"${why}`); } catch { /* */ }
+    await _orchRun(msg, {
+      groundId: out.groundId, tabId, ask, capabilityId: leg.key,
+      intent: leg.name || (m && m.candidate && m.candidate.intent),
+      paramValues: out.decision.params || {}, params: m && m.candidate && m.candidate.params,
+    });
+    return true;
+  }
+
+  // REJECT — JUDGE saw candidates but none fit (don't run the wrong thing; ask to rephrase).
+  if (out.decision && out.decision.needs && out.decision.needs.kind === 'reject') {
+    const why = out.decision.needs.reason ? ` — ${out.decision.needs.reason}` : '';
+    _setMessageBody(msg, `🧠 The closest match didn’t fit “${ask}”${why}. Try rephrasing.`);
+    try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → rejected${why}`); } catch { /* */ }
+    return true;
+  }
+
+  // MISS (needs:answer / no candidates) → the meta ANSWER path. PS-4 reactive synthesis (PARKED, gated off — see
+  // .1129) gets first refusal; with PS_REACTIVE_SYNTH=false it falls straight through to the answer.
+  if (PS_REACTIVE_SYNTH) {
     try {
       const syn = await _orchReq('SYNTHESIZE_FROM_GAP', { ask, tabId, groundId: m && m.groundId });
       if (syn && syn.synthesized && syn.capabilityId) {
@@ -3069,44 +3161,12 @@ async function _tryIlCommand(text) {
         return true;
       }
     } catch { /* */ }
-    // No grounded action to run → Orchard ANSWERS the ask (meta/conversational — "what can you do?",
-    // "can you X?") from what it CAN do here, instead of dead-ending (v2.74.1119).
-    let answer = null;
-    try { const r = await _orchReq('IL_ANSWER', { ask, tabId }); answer = r && r.answer; } catch { /* */ }
-    _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 I don’t have a saved capability for “${ask}” on this page yet — want to show me?`);
-    try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${answer ? 'answered' : 'no match'}`); } catch { /* */ }
-    return true;
   }
-
-  // 2. Gather what the USER would see — the top match + any close alternatives — each carrying the values the
-  //    substrate already bound (so Orchard judges over real, page-derived bindings, never re-binds).
-  const turn = planAssistantTurn(m);
-  const ctx = { groundId: m.groundId, tabId, ask, intent: m.candidate && m.candidate.intent, paramValues: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {}, params: m.candidate && m.candidate.params };
-  const candidates = [];
-  const seen = new Set();
-  const add = (id, intent) => { if (id && !seen.has(id)) { seen.add(id); candidates.push({ id, intent, bindings: m.bindings }); } };
-  add(m.capabilityId, m.candidate && m.candidate.intent);
-  for (const o of (turn.options || [])) add(o.id, o.intent);
-
-  // 3. Orchard JUDGES — the user's stand-in choosing which candidate to run, or rejecting. On an unavailable
-  //    judge: a single confident match runs (the user would have confirmed it); multiple → don't guess.
-  let verdict = null;
-  try { const r = await _orchReq('JUDGE_MATCH', { ask, candidates }); verdict = r && r.verdict; } catch { /* */ }
-  let pickedId = null;
-  if (verdict && verdict.ref && seen.has(verdict.ref)) pickedId = verdict.ref;
-  else if (verdict && verdict.ref === null) pickedId = null;
-  else if (candidates.length === 1) pickedId = candidates[0].id;
-  const why = (verdict && verdict.reason) ? ` — ${verdict.reason}` : '';
-  if (!pickedId) {
-    _setMessageBody(msg, `🧠 The closest match didn’t fit “${ask}”${why}. Try rephrasing.`);
-    try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → rejected${why}`); } catch { /* */ }
-    return true;
-  }
-
-  // 4. RUN Orchard's pick through the EXISTING runner — with the substrate's bindings (no re-binding).
-  const picked = candidates.find((c) => c.id === pickedId) || {};
-  try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → run "${picked.intent || pickedId}"${why}`); } catch { /* */ }
-  await _orchRun(msg, { ...ctx, capabilityId: pickedId, intent: picked.intent || ctx.intent });
+  // No grounded action to run → Orchard ANSWERS the ask (meta/conversational — "what can you do?", "can you X?").
+  let answer = null;
+  try { const r = await _orchReq('IL_ANSWER', { ask, tabId }); answer = r && r.answer; } catch { /* */ }
+  _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 I don’t have a saved capability for “${ask}” on this page yet — want to show me?`);
+  try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${answer ? 'answered' : 'no match'}`); } catch { /* */ }
   return true;
 }
 
