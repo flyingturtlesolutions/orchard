@@ -1337,7 +1337,7 @@ textarea {
 
 /* ── Conversation drawer (inline, left-push) ─────────────────────────────── */
 .history-sidebar {
-  --drawer-w: min(280px, 58vw);   /* chat keeps ≥42vw so its input stays usable */
+  --drawer-w: min(187px, 39vw);   /* v2.74.1132 — shrunk 1/3 (was 280px/58vw); chat keeps ≥61vw so its input stays usable */
   flex: 0 0 auto;
   width: 0;                       /* collapsed by default; .open animates it out */
   overflow: hidden;
