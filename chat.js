@@ -3088,7 +3088,12 @@ async function _tryBrainCommand(text) {
 
 function _renderBrainRun(msg, ask, result) {
   const lines = [`🧠 brain: ${ask}`, ''];
-  (result.ledger || []).forEach((e, i) => { const p = (e.params && Object.keys(e.params).length) ? ` ${JSON.stringify(e.params).slice(0, 120)}` : ''; lines.push(`  ${i + 1}. ${e.kind} ${e.leg || ''}${p} → ${e.ok ? 'ok' : 'miss'}${e.reason ? ` (${e.reason})` : ''}`); });
+  (result.ledger || []).forEach((e, i) => {
+    const p = (e.params && Object.keys(e.params).length) ? ` ${JSON.stringify(e.params).slice(0, 120)}` : '';
+    const nm = e.legName || e.leg || '';                              // the human capability name, not the uuid
+    const why = (e.pick && e.pick !== e.reason) ? ` — ${e.pick}` : ''; // the brain's disambiguation rationale
+    lines.push(`  ${i + 1}. ${e.kind} ${nm}${p} → ${e.ok ? 'ok' : 'miss'}${e.reason ? ` (${e.reason})` : ''}${why}`);
+  });
   const d = result.decision || {};
   const term = result.status === 'done' ? `✓ done — ${result.answer ?? ''}`
     : result.status === 'needs' ? `⚠ needs ${(d.needs && d.needs.kind) || '?'} — ${d.reason || ''}`
@@ -3103,11 +3108,12 @@ function _renderBrainRun(msg, ask, result) {
 // a uuid), so surface those: "this capability with {"query":"…"}".
 function _brainLegLabel(plan) {
   if (!plan) return 'this step';
+  const named = plan.name && !/^[0-9a-f-]{8,}$/i.test(plan.name) ? plan.name : null;   // a real label, not a uuid
   if (plan.channel === 'REPLAY_SG_CAPABILITY') {
     const pv = plan.payload && plan.payload.paramValues;
-    return `this capability${pv && Object.keys(pv).length ? ` with ${JSON.stringify(pv).slice(0, 120)}` : ''}`;
+    return `${named ? `“${named}”` : 'this capability'}${pv && Object.keys(pv).length ? ` with ${JSON.stringify(pv).slice(0, 120)}` : ''}`;
   }
-  return `${plan.channel}${plan.payload && Object.keys(plan.payload).length ? ` ${JSON.stringify(plan.payload).slice(0, 120)}` : ''}`;
+  return `${named || plan.channel}${plan.payload && Object.keys(plan.payload).length ? ` ${JSON.stringify(plan.payload).slice(0, 120)}` : ''}`;
 }
 
 // IM-3 (v2.74.895) — "what can I do here?" → the INTENT MENU. A meta-ask about the APP's abilities on this

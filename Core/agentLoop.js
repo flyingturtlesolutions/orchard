@@ -109,6 +109,10 @@ function enforcePalette(decision, legs) {
 // "what I did" the brain needs to recognize the goal is already met (→ done) instead of looping.
 function summarizeStep(decision, obs) {
   const e = { kind: decision.kind, leg: keyOf(decision.leg) || decision.kind, ok: !!(obs && obs.ok), reason: (obs && obs.reason) || decision.reason || '' };
+  // v2.74.1115 — carry the human NAME + the brain's pick RATIONALE so the choice is visible (the .1114 miss
+  // showed a uuid + "ran this capability", hiding which capability the brain disambiguated to, and why).
+  if (decision.leg && decision.leg.name) e.legName = decision.leg.name;
+  if (decision.reason) e.pick = decision.reason;
   if (decision.params && typeof decision.params === 'object' && Object.keys(decision.params).length) e.params = decision.params;
   return e;
 }

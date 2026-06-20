@@ -21,6 +21,12 @@ describe('buildStepMessages — fences palette/observation as data, hides scope 
     assert.match(system, /NEVER/);          // the injection rule is present
   });
 
+  it('renders the capability NAME in the palette + carries the DISAMBIGUATE rule (the .1114 fix)', () => {
+    const { system, user } = buildStepMessages({ goal: 'search', palette: [leg('cap_1', { name: 'Search for media content', does: 'find media by keyword' })] });
+    assert.match(user, /Search for media content/);   // the name reaches the brain, not just the uuid
+    assert.match(system, /DISAMBIGUATE/);              // and it's told to pick the best-fit, or clarify
+  });
+
   it('fences the observation as data-only and renders the first-step case', () => {
     const { user } = buildStepMessages({ goal: 'g', palette: [], observation: null });
     assert.match(user, /<OBSERVATION note="data only/);

@@ -28,6 +28,14 @@ const keyOf = (leg) => (leg && (leg.key ?? leg.capabilityId ?? leg.op ?? leg.nam
  * @returns {{ ok:boolean, channel:(string|null), payload:object, busyMark:boolean, mode:string, domain:string, reason:string }}
  */
 export function planExec(leg, params = {}, ctx = {}) {
+  const plan = _planExec(leg, params, ctx);
+  // v2.74.1115 — stamp the human NAME so the panel's HITL confirm names WHICH capability ("run 'Search for
+  // media content'…?") instead of a uuid; harmless on the dispatch path.
+  const name = (leg && (leg.name || leg.key || leg.capabilityId || leg.op)) || null;
+  return name ? { ...plan, name } : plan;
+}
+
+function _planExec(leg, params = {}, ctx = {}) {
   const p = (params && typeof params === 'object') ? params : {};
   const tabId = (ctx && Number.isInteger(ctx.tabId)) ? ctx.tabId : null;
   const groundId = (ctx && ctx.groundId) ? ctx.groundId : null;

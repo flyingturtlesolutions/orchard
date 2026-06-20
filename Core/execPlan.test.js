@@ -20,6 +20,11 @@ describe('planExec — leg → dispatch plan (pure §4.2)', () => {
     assert.equal(plan.payload.paramValues.q, 'cats');
   });
 
+  it('stamps the capability NAME on the plan (so the HITL confirm names it, not a uuid) — v2.74.1115', () => {
+    const plan = planExec({ key: 'cap_x', name: 'Search for media content', domain: 'page', source: 'learned', mode: 'act' }, { q: 'x' }, { tabId: 7, groundId: 'g' });
+    assert.equal(plan.name, 'Search for media content');
+  });
+
   it('page leg WITHOUT a ground/tab → not dispatchable (needs-ground-tab)', () => {
     assert.equal(planExec(pageLeg('cap_x'), {}, {}).ok, false);
     assert.equal(planExec(pageLeg('cap_x'), {}, { tabId: 7 }).reason, 'needs-ground-tab');   // ground missing

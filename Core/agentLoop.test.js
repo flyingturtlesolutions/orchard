@@ -141,6 +141,21 @@ describe('agentLoop — loop behavior', () => {
     assert.deepEqual(res.ledger[0].params, { url: 'https://pixabay.com' });   // the url is in the ledger now
   });
 
+  it('ledger carries the capability NAME + the brain pick RATIONALE (v2.74.1115 — visible disambiguation)', async () => {
+    let i = 0;
+    const decisions = [
+      { kind: 'act', leg: { key: 'cap_1', name: 'Search for media content' }, params: {}, confidence: 1, reason: 'keyword query fits content search, not the category filter' },
+      { kind: 'done', answer: 'ok', confidence: 1, reason: 'd' },
+    ];
+    const res = await agentLoop('search halo vectors', {
+      palette: async () => [{ key: 'cap_1', name: 'Search for media content' }],
+      callBrain: async () => decisions[i++],
+      runTool: async () => ({ ok: true }),
+    }, { maxSteps: 2 });
+    assert.equal(res.ledger[0].legName, 'Search for media content');
+    assert.match(res.ledger[0].pick, /content search/);
+  });
+
   it('done is gate-confirmed: verifyDone=false rejects it and the loop keeps going (#2)', async () => {
     let calls = 0;
     const res = await agentLoop('g', {
