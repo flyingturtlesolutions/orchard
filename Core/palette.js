@@ -26,9 +26,20 @@ export const BUILTIN_LEGS = [
   { key: 'FOCUS_TAB',  name: 'Focus a tab',    does: 'bring an existing tab to the front',    mode: 'act', domain: 'browser', safety: 'auto',    params: ['tabId'], requires: ['tab'] },
   { key: 'CLOSE_TABS', name: 'Close tabs',     does: 'close tabs matching a description',     mode: 'act', domain: 'browser', safety: 'confirm', params: ['match'], requires: ['tab'] },
   { key: 'LIST_TABS',  name: 'List open tabs', does: 'report the open tabs',                  mode: 'ask', domain: 'browser', safety: 'auto',    params: [],        requires: [] },
-  // Self — the agent reasons over its own tool/state
+  // Self — the agent reasons over its own tool/state (READ)
   { key: 'LIST_CAPABILITIES', name: 'What can I do here', does: 'list capabilities available on this page/site', mode: 'ask', domain: 'self', safety: 'auto', params: [], requires: [] },
   { key: 'RUN_STATUS',        name: "What's running",      does: 'report in-flight runs',                        mode: 'ask', domain: 'self', safety: 'auto', params: [], requires: [] },
+  // Self — PANEL actions (ACT×Self; dispatched panel-local in chat.js — a function/button click, not a SW channel). IL-3c.
+  { key: 'NEW_DEV_CONVERSATION',     name: 'New dev conversation', does: 'open a new dev (Claude Code) conversation on this repo', mode: 'act', domain: 'self', safety: 'confirm', params: [], requires: [] },
+  { key: 'NEW_CONVERSATION',         name: 'New conversation',     does: 'start a fresh chat conversation',                       mode: 'act', domain: 'self', safety: 'auto',    params: [], requires: [] },
+  { key: 'OPEN_HISTORY',             name: 'Conversation history', does: 'show the list of past conversations',                   mode: 'act', domain: 'self', safety: 'auto',    params: [], requires: [] },
+  { key: 'DELETE_ALL_CONVERSATIONS', name: 'Delete all conversations', does: 'delete every saved conversation (irreversible)',    mode: 'act', domain: 'self', safety: 'gated',   params: [], requires: [] },
+  { key: 'OPEN_STUDIO',              name: 'Open Studio',          does: 'open the Studio authoring tab',                        mode: 'act', domain: 'self', safety: 'auto',    params: [], requires: [] },
+  { key: 'OPEN_GROUND',              name: 'Open Ground panel',    does: 'open the Ground monitoring side panel',                mode: 'act', domain: 'self', safety: 'auto',    params: [], requires: [] },
+  { key: 'HIDE_PANEL',               name: 'Hide panel',           does: 'hide the side panel (running tasks continue)',         mode: 'act', domain: 'self', safety: 'auto',    params: [], requires: [] },
+  { key: 'RELOAD_EXTENSION',         name: 'Reload extension',     does: 'reload the extension (dev)',                           mode: 'act', domain: 'self', safety: 'auto',    params: [], requires: [] },
+  { key: 'EXPLORE_PAGE',             name: 'Explore this page',    does: 'map/ground the current page so I learn what it offers', mode: 'act', domain: 'self', safety: 'auto',    params: [], requires: [] },
+  { key: 'TOGGLE_TRACKING',          name: 'Toggle interaction tracking', does: 'turn the interaction monitor (learns capabilities from your clicks) on or off', mode: 'act', domain: 'self', safety: 'confirm', params: [], requires: [] },
 ];
 
 /**

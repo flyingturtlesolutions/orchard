@@ -3050,13 +3050,51 @@ async function _tryRouterFallback(text) {
 const PS_REACTIVE_SYNTH = false;
 
 // IL-3b (v2.74.1131) — the Browser/Self READ legs the loop may pick on a page miss (the grid's ASK×Browser /
-// ASK×Self cells). Param-free + read-only → no binder, no confirm. Descriptors live in Core/palette.js
-// (BUILTIN_LEGS); only these wired keys are offered for now (RUN_STATUS + the ACT legs await a param-binder seam).
+// ASK×Self cells). Param-free + read-only → no binder, no confirm. Dispatched via a SW channel (execPlan).
 const IL_READ_LEG_KEYS = new Set(['LIST_TABS', 'LIST_CAPABILITIES']);
 
-// Dispatch a builtin read leg JUDGE picked → its existing channel (via the pure execPlan planner) → render the
-// read here. Read-only, so it auto-runs (no write-confirm); the PAGE-capability path stays on _orchRun.
+// IL-3c (v2.74.1132) — the ACT×Self PANEL legs: the side panel's own commands, dispatched LOCALLY (a chat.js
+// function / a button click), NOT via a SW channel. Each entry: { confirm? (a write-gate prompt), run(msg) — may
+// return {rendered:true} when the action draws its own UI / resets the chat, done? (the default success line) }.
+// Many reuse the existing button handlers (which already carry their own confirms), so the leg = the same action.
+// Gesture caveat: NEW_DEV_CONVERSATION's FIRST-EVER permission grant and OPEN_GROUND's sidePanel.open need a live
+// user gesture, which a typed (LLM-routed) command no longer holds — they work once permission/panel state allows,
+// else fail gracefully. DELETE_ALL self-confirms (count-aware) in its handler, so no extra il-confirm here.
+const IL_PANEL_LEGS = {
+  NEW_DEV_CONVERSATION:     { confirm: 'Open a new dev (Claude Code) conversation on this repo?', run: () => { $('btn-new-dev-conversation')?.click(); return { rendered: true }; } },
+  NEW_CONVERSATION:         { run: () => { $('btn-new-conversation')?.click(); return { rendered: true }; } },
+  OPEN_HISTORY:             { run: () => { $('btn-history')?.click(); }, done: '🧠 Opened conversation history.' },
+  DELETE_ALL_CONVERSATIONS: { run: () => { $('btn-delete-all-conversations')?.click(); return { rendered: true }; } },
+  OPEN_STUDIO:              { run: () => { $('btn-open-studio')?.click(); }, done: '🧠 Opening Studio…' },
+  OPEN_GROUND:              { run: () => { $('btn-open-ground')?.click(); }, done: '🧠 Opening the Ground panel…' },
+  HIDE_PANEL:               { run: () => { $('btn-hide-panel')?.click(); return { rendered: true }; } },
+  RELOAD_EXTENSION:         { run: () => { try { chrome.runtime.reload(); } catch { /* */ } return { rendered: true }; } },
+  EXPLORE_PAGE:             { run: async (msg) => { await _chatExplore({ msg }); return { rendered: true }; } },
+  TOGGLE_TRACKING:          { confirm: 'Turn interaction tracking on/off? (the monitor watches your clicks to learn capabilities.)', run: async (msg) => {
+    let cur = false;
+    try { const got = await _orchReq('GET_MONITOR_CONSENT', {}); cur = !!(got && got.consent && got.consent.track && got.consent.track.enabled); } catch { /* */ }
+    try { await _orchReq('SET_MONITOR_CONSENT', { enabled: !cur }); } catch { /* */ }
+    _setMessageBody(msg, `🧠 Interaction tracking ${!cur ? 'ON' : 'off'}.`);
+    return { rendered: true };
+  } },
+};
+
+// Dispatch an ACT×Self PANEL leg JUDGE picked → its local handler, gated by an il-confirm for the privileged ones.
+async function _ilRunPanelAction(msg, { leg, panel, ask }) {
+  if (panel.confirm) { let ok = false; try { ok = window.confirm(panel.confirm); } catch { ok = false; } if (!ok) { _setMessageBody(msg, '🧠 Okay — cancelled.'); return; } }
+  try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → self:${leg.key}`); } catch { /* */ }
+  let r = null;
+  try { r = await panel.run(msg); }
+  catch (e) { _setMessageBody(msg, `🧠 Couldn’t ${leg.does || leg.name || 'do that'}${e && e.message ? ` — ${e.message}` : ''}.`); return; }
+  if (r && r.rendered) return;                       // the action drew its own UI / reset the chat → no default line
+  _setMessageBody(msg, panel.done || `🧠 ${leg.name || 'Done'}.`);
+}
+
+// Dispatch a builtin leg JUDGE picked. A PANEL (ACT×Self) leg runs locally (above); a Browser/Self READ leg goes
+// through its existing SW channel (via the pure execPlan planner) and renders here. Reads auto-run (no confirm).
 async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId }) {
+  const panel = IL_PANEL_LEGS[leg.key];
+  if (panel) return _ilRunPanelAction(msg, { leg, panel, ask });
   const plan = planExec(leg, {}, { tabId, groundId });
   if (!plan || !plan.ok || !plan.channel) { _setMessageBody(msg, `🧠 I can’t do “${ask}” here yet.`); return; }
   try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${leg.domain}:${leg.key}`); } catch { /* */ }
@@ -3108,7 +3146,7 @@ async function _tryIlCommand(text) {
     if (!m || m.success === false || m.decision === 'miss' || !m.capabilityId) {
       // IL-3b — on a page miss, offer the param-free Browser/Self READ legs so JUDGE can pick "list tabs" / "what
       // can I do here" instead of dead-ending to a world-knowledge answer (the grid's ASK×Browser/Self cells).
-      const builtins = availableBuiltins(BUILTIN_LEGS, { tab: tabId != null }).map(toOfferedLeg).filter((l) => l && IL_READ_LEG_KEYS.has(l.key));
+      const builtins = availableBuiltins(BUILTIN_LEGS, { tab: tabId != null }).map(toOfferedLeg).filter((l) => l && (IL_READ_LEG_KEYS.has(l.key) || IL_PANEL_LEGS[l.key]));
       return { candidates: [], builtins, groundId: m && m.groundId, match: m };
     }
     const turn = planAssistantTurn(m);
@@ -3180,14 +3218,15 @@ const _MENU_RE = /^\s*(?:what\s+can\s+(?:i|you|we)\s+do(?:\s+(?:here|on\s+this\s
 // siteMap merge — EX-1 veto + EX-4 freshness-skip included). Exploring busts the intent-context
 // fingerprint, so the menu recomposes over the new goals.
 const _EXPLORE_RE = /^\s*(?:explore(?:\s+(?:this|the|current))?(?:\s+(?:page|site|locale))?|(?:map|learn)\s+(?:this|the|current)?\s*(?:page|site|locale))\s*[.!]?\s*$/i;
-async function _chatExplore({ thenMenu = false } = {}) {
+async function _chatExplore({ thenMenu = false, msg: passedMsg = null } = {}) {
   const tab = await _orchActiveTab();
   if (!tab || typeof tab.id !== 'number' || !/^https?:/i.test(tab.url || '')) {
-    _setMessageBody(appendMessage({ role: 'assistant', body: '' }), 'I can only explore a normal web page — switch to the tab you want mapped and ask again.');
+    _setMessageBody(passedMsg || appendMessage({ role: 'assistant', body: '' }), 'I can only explore a normal web page — switch to the tab you want mapped and ask again.');
     return false;
   }
   let host = 'this page'; try { host = new URL(tab.url).hostname.replace(/^www\./, ''); } catch { /* */ }
-  const msg = appendMessage({ role: 'assistant', body: `Grounding ${host}…` });
+  const msg = passedMsg || appendMessage({ role: 'assistant', body: '' });   // IL-3c — reuse the il bubble when invoked as a panel leg
+  _setMessageBody(msg, `Grounding ${host}…`);
   const g = await _orchReq('ENSURE_GROUND_FOR_URL', { url: tab.url });
   if (!g?.success || !g.groundId) { _setMessageBody(msg, `Couldn't ground this page${g && g.error ? ` — ${g.error}` : ''}.`); return false; }
   _orchLog(`EXPLORE ▸ chat ask → ground ${g.groundId} (${g.created ? 'minted' : 'reused'}; readiness ${g.readiness || '?'})`);

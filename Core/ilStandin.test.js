@@ -146,4 +146,15 @@ describe('ilStandin — fold the single-shot stand-in through agentLoop@maxSteps
     });
     assert.equal(seen[0].intent, 'report the open tabs');
   });
+
+  it('C: a self ACT leg (panel action) flows through as an act decision carrying domain:self', async () => {
+    const openStudio = { key: 'OPEN_STUDIO', name: 'Open Studio', does: 'open the Studio authoring tab', domain: 'self', mode: 'act', source: 'builtin', params: [] };
+    const out = await runIlStandin('open studio', {
+      offer: async () => ({ candidates: [], builtins: [openStudio], match: {} }),
+      judge: async () => ({ ref: 'OPEN_STUDIO' }),
+    });
+    assert.equal(out.status, 'act');
+    assert.equal(out.decision.leg.key, 'OPEN_STUDIO');
+    assert.equal(out.decision.leg.domain, 'self');     // chat.js routes domain:self panel legs to _ilRunPanelAction
+  });
 });
