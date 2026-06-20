@@ -3079,7 +3079,9 @@ async function _tryBrainCommand(text) {
     });
   };
   let result = null;
-  try { result = await runBrain(ask, { tabId, groundId }, { retrieve, brain, exec }, { maxSteps: 6 }); }
+  // env tells assemblePalette which availability-gated builtins to offer — without { tab } the tab-requiring
+  // legs (FOCUS_TAB, CLOSE_TABS) are dropped, which is why the brain truthfully reported it had no focus action.
+  try { result = await runBrain(ask, { tabId, groundId }, { retrieve, brain, exec, env: { tab: tabId != null } }, { maxSteps: 6 }); }
   catch (e) { _setMessageBody(msg, `🧠 brain run failed: ${e?.message || e}`); return true; }
   try { _orchLog(`BRAIN ▸ "${String(ask).slice(0, 50)}" → ${result.status} in ${result.steps} step(s)`); } catch { /* */ }
   _renderBrainRun(msg, ask, result);

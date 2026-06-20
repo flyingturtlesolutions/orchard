@@ -25,6 +25,7 @@ describe('buildStepMessages — fences palette/observation as data, hides scope 
     const { system, user } = buildStepMessages({ goal: 'search', palette: [leg('cap_1', { name: 'Search for media content', does: 'find media by keyword' })] });
     assert.match(user, /Search for media content/);   // the name reaches the brain, not just the uuid
     assert.match(system, /DISAMBIGUATE/);              // and it's told to pick the best-fit, or clarify
+    assert.match(system, /META \/ CAPABILITY/);        // …and to ANSWER "can you X?" questions, not act on them
   });
 
   it('fences the observation as data-only and renders the first-step case', () => {
