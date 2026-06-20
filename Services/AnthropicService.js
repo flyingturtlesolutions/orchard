@@ -5267,7 +5267,7 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
   static async answerAsk({ ask, capabilities } = {}) {
     if (!(await AnthropicService.hasLlm())) return null;
     const { system, user } = buildAnswerMessages({ ask, capabilities: Array.isArray(capabilities) ? capabilities : [] });
-    const res = await AnthropicService.#call(system, user, 400, [], { role: 'describe', operation: 'brain-answer' });
+    const res = await AnthropicService.#call(system, user, 700, [], { role: 'describe', operation: 'brain-answer' });   // room for a substantive, reflective answer
     return (res && res.success !== false && typeof res.text === 'string' && res.text.trim()) ? res.text.trim() : null;
   }
 
