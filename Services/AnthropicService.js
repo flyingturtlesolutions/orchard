@@ -29,6 +29,7 @@ import { getCloudSettings, normalizeApiBaseUrl } from './Cloud/CloudSettings.js'
 import { ensureFreshSession } from './Cloud/CloudTokenStore.js';
 import { buildRouterMessages, parseRouterOutput } from '../Core/routerPrompt.js';   // R-3 — front-door router prompt (no DOM; fenced catalog)
 import { buildStepMessages, parseStepDecision } from '../Core/stepPrompt.js';   // IL-2 — the brain-loop step controller prompt (fenced palette + observation)
+import { buildJudgeMessages, parseJudgeDecision } from '../Core/judgePrompt.js';   // IL-2 — the brain-as-user-standin match judge (pick the capability matchCapability found; no re-bind)
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL             = 'claude-sonnet-4-5';
@@ -5238,6 +5239,22 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
       return { kind: 'needs', needs: { kind: 'clarify' }, params: {}, confidence: 0, reason: 'brain-unavailable' };
     }
     return parseStepDecision(res.text, palette);
+  }
+
+  /**
+   * IL-2 — the brain as the USER'S STAND-IN at matchCapability's decision point. The substrate already PICKED +
+   * BOUND the candidates (using the live page); this decides WHICH to run (or reject) given the ask — replacing
+   * the user's Run/Not-that/pick-an-option click. It does NOT re-bind values. PURE prompt + parse in
+   * Core/judgePrompt.js. Fails safe to ref:null (reject → ask) so it never runs the wrong capability.
+   * @param {{ ask:string, candidates:Array<{id:string,intent?:string,bindings?:object}> }} args
+   * @returns {Promise<{ref:(string|null), reason:string}>}
+   */
+  static async judgeMatch({ ask, candidates } = {}) {
+    if (!(await AnthropicService.hasLlm())) return { ref: null, reason: 'no-llm' };
+    const { system, user } = buildJudgeMessages(ask, Array.isArray(candidates) ? candidates : []);
+    const res = await AnthropicService.#call(system, user, 200, [], { role: 'routing', operation: 'judge-match' });
+    if (!res || res.success === false) return { ref: null, reason: 'judge-unavailable' };
+    return parseJudgeDecision(res.text);
   }
 
   /**

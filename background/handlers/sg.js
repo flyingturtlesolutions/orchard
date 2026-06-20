@@ -704,6 +704,19 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // IL-2 (v2.74.1118) — JUDGE_MATCH: the brain as the user's stand-in deciding WHICH of matchCapability's
+    // candidates to run (or reject), given the ask + the values the substrate already bound. The panel passes the
+    // candidates ORCH_MATCH surfaced; this returns {ref, reason}. No re-binding — the brain picks the capability.
+    JUDGE_MATCH: async (payload, _sender, sendResponse) => {
+      try {
+        const verdict = await AnthropicService.judgeMatch({ ask: payload?.ask, candidates: payload?.candidates });
+        sendResponse({ success: true, verdict });
+      } catch (err) {
+        Logger.error('background', `JUDGE_MATCH failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
     // PB-4 (R8) — run a TRIAL of an already-RESOLVED bundle (Studio's resolve flow) as the intent-truth
     // proof. v2.74.950 (CR-X3) — migrated from the legacy background switch: this was the un-migrated
     // TWIN of RUN_SG_TRIAL that silently missed the .912 handler-level fix; it now lives beside its twin

@@ -20,7 +20,6 @@ import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
 import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, namesMultipleSites, namesAnySite } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X)
 import { walkPlan, scanPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate); scanPlan — THE recursive plan walker (CR-D7)
-import { runBrain } from './Core/brainRun.js';   // IL-2 — the inference-layer brain loop, panel-hosted (reached via the `brain:` verify command)
 import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   // ORCH-A — predicate → gate (conditional routing + the analysis)
 import { comprehend } from './Core/orchComprehend.js';   // ORCH-CB — substrate-free shape comprehension (cold-ground decompose)
 import { renderCriteria, renderPlanLines } from './Core/orchVisual.js';   // ORCH-CB — search params → criteria for a visual condition's prompt; renderPlanLines — the confirm-card plan renderer (CR-D7)
@@ -3040,88 +3039,59 @@ async function _tryRouterFallback(text) {
   return _orchClarifyFromRoute(d, { tabId: tab && tab.id, groundId: res.groundId, text });
 }
 
-// IL-2 (v2.74.1112) — `brain: <ask>` runs the inference-layer loop LIVE, verify-only. The panel HOSTS the loop
-// (Core/brainRun → agentLoop): assembles the palette from RETRIEVE_TOOLS (learned) ∪ builtins, thinks via
-// STEP_BRAIN, and dispatches each step via _orchReq — which already routes any channel to its executor across
-// both handler maps (the cross-map routing a background loop would otherwise reimplement). SAFETY: exec AUTO-runs
-// only nav/focus/list; every other leg (a capability replay / mutation) gets an inline HITL CONFIRM (§2.4/§9) —
-// the loop AWAITS the human's OK, then observes the real reply (or a decline it reasons around). `BRAIN ▸` is a
-// decision marker (registered in studio.js _DECISION_RE — INVARIANT #1) so a gc/decisions download sees it.
+// IL-2 (v2.74.1118) — `brain: <ask>` — the brain as the USER'S STAND-IN over the existing matcher. It does NOT
+// pick from its own palette or bind params (that made it dumber and dropped values, e.g. "halo" never reaching
+// the box). Instead: ORCH_MATCH picks + binds using the live page affordances (the substrate's job, done well —
+// it knows "illustrations" is a CATEGORY, not part of the keyword) → the brain JUDGES which candidate to run for
+// the ask (replacing the user's Run / Not-that / pick-an-option click) → _orchRun runs it with the SUBSTRATE's
+// bindings. `BRAIN ▸` is a decision marker (studio.js _DECISION_RE — INVARIANT #1). Verify-only, opt-in.
 async function _tryBrainCommand(text) {
   const ask = String(text).replace(/^brain:\s*/i, '').trim();
   const msg = appendMessage({ role: 'assistant', body: '' });
-  if (!ask) { _setMessageBody(msg, 'usage: `brain: <ask>` — runs the inference-layer loop (verify-only; reads + nav auto-run, mutations need confirm).'); return true; }
+  if (!ask) { _setMessageBody(msg, 'usage: `brain: <ask>` — the brain judges the matcher and runs the best-fit capability.'); return true; }
   _setMessageBody(msg, '🧠 thinking…');
   const tab = await _orchActiveTab();
   const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
-  // Resolve the Ground once (RETRIEVE_TOOLS returns it) so execPlan can ctx-bind a page replay to ground+tab.
-  let groundId = null;
-  try { const seed = await _orchReq('RETRIEVE_TOOLS', { ask, tabId }); groundId = (seed && seed.groundId) || null; } catch { /* */ }
-  const retrieve = async (g) => { try { const r = await _orchReq('RETRIEVE_TOOLS', { ask: g, tabId, groundId }); return (r && r.candidates) || []; } catch { return []; } };
-  const brain = async (sctx) => { try { const r = await _orchReq('STEP_BRAIN', { ctx: sctx }); return (r && r.decision) || { kind: 'needs', needs: { kind: 'clarify' }, reason: 'brain-unreachable', confidence: 0 }; } catch (e) { return { kind: 'needs', needs: { kind: 'clarify' }, reason: e?.message || 'brain-error', confidence: 0 }; } };
-  // DELEGATE to the substrate (v2.74.1117, model a) — the brain PICKS a capability; the existing
-  // REPLAY_SG_CAPABILITY binds the ask's values (bindClauseParams, which knows the real param schema) + runs. So
-  // a learned-capability leg dispatches with the ASK and the brain's guessed params are dropped (they were the
-  // wrong layer — the bug where "halo" never reached the search box). Builtins (nav/focus/list) pass through.
-  const _dispatch = (plan) => (plan.channel === 'REPLAY_SG_CAPABILITY')
-    ? _orchReq('REPLAY_SG_CAPABILITY', { capabilityId: plan.payload.capabilityId, groundId: plan.payload.groundId, tabId: plan.payload.tabId, ask })
-    : _orchReq(plan.channel, plan.payload);
-  const exec = async (plan) => {
-    // Nav/focus/list auto-run (cheap, reversible); everything else (a capability replay / mutation) gets an
-    // inline HITL CONFIRM (§2.4/§9): the loop AWAITS the human's OK, then observes the real reply (or a decline).
-    const autoOk = plan.channel === 'OPEN_URL_NEW_TAB' || plan.channel === 'FOCUS_TAB' || plan.channel === 'LIST_TABS';
-    if (autoOk) { try { return await _dispatch(plan); } catch (e) { return { success: false, error: e?.message || 'exec-error' }; } }
-    return await new Promise((resolve) => {
-      const card = appendMessage({ role: 'assistant', body: '' });
-      const label = _brainLegLabel(plan);
-      _setMessageBody(card, `🧠 needs your OK — run ${label}?`);
-      const bar = _orchActionBar(card);
-      bar.appendChild(_mkBtn('Run it', async () => {
-        bar.remove(); _setMessageBody(card, `running ${label}…`);
-        try { const r = await _dispatch(plan); _setMessageBody(card, `✓ ran ${label}`); resolve(r || { success: true }); }
-        catch (e) { _setMessageBody(card, `✗ ${e?.message || 'failed'}`); resolve({ success: false, error: e?.message || 'exec-error' }); }
-      }));
-      bar.appendChild(_mkBtn('Skip', () => { bar.remove(); _setMessageBody(card, `skipped ${label}`); resolve({ success: false, error: 'declined-by-user' }); }));
-    });
-  };
-  let result = null;
-  // env tells assemblePalette which availability-gated builtins to offer — without { tab } the tab-requiring
-  // legs (FOCUS_TAB, CLOSE_TABS) are dropped, which is why the brain truthfully reported it had no focus action.
-  try { result = await runBrain(ask, { tabId, groundId }, { retrieve, brain, exec, env: { tab: tabId != null } }, { maxSteps: 6 }); }
-  catch (e) { _setMessageBody(msg, `🧠 brain run failed: ${e?.message || e}`); return true; }
-  try { _orchLog(`BRAIN ▸ "${String(ask).slice(0, 50)}" → ${result.status} in ${result.steps} step(s)`); } catch { /* */ }
-  _renderBrainRun(msg, ask, result);
-  return true;
-}
 
-function _renderBrainRun(msg, ask, result) {
-  const lines = [`🧠 brain: ${ask}`, ''];
-  (result.ledger || []).forEach((e, i) => {
-    const p = (e.params && Object.keys(e.params).length) ? ` ${JSON.stringify(e.params).slice(0, 120)}` : '';
-    const nm = e.legName || e.leg || '';                              // the human capability name, not the uuid
-    const why = (e.pick && e.pick !== e.reason) ? ` — ${e.pick}` : ''; // the brain's disambiguation rationale
-    lines.push(`  ${i + 1}. ${e.kind} ${nm}${p} → ${e.ok ? 'ok' : 'miss'}${e.reason ? ` (${e.reason})` : ''}${why}`);
-  });
-  const d = result.decision || {};
-  const term = result.status === 'done' ? `✓ done — ${result.answer ?? ''}`
-    : result.status === 'needs' ? `⚠ needs ${(d.needs && d.needs.kind) || '?'} — ${d.reason || ''}`
-    : result.status === 'act' ? `▸ would run ${(d.leg && d.leg.key) || '?'} (handed back at the step cap)`
-    : `${result.status}${result.reason ? ` — ${result.reason}` : ''}`;
-  lines.push('', `→ ${term}`);
-  _setMessageBody(msg, lines.join('\n'));
-  try { _orchFinalize(msg); } catch { /* */ }
-}
-
-// A human label for an exec plan's HITL confirm — the bound params are the meaningful bit (the capabilityId is
-// a uuid), so surface those: "this capability with {"query":"…"}".
-function _brainLegLabel(plan) {
-  if (!plan) return 'this step';
-  const named = plan.name && !/^[0-9a-f-]{8,}$/i.test(plan.name) ? plan.name : null;   // a real label, not a uuid
-  if (plan.channel === 'REPLAY_SG_CAPABILITY') {
-    const pv = plan.payload && plan.payload.paramValues;
-    return `${named ? `“${named}”` : 'this capability'}${pv && Object.keys(pv).length ? ` with ${JSON.stringify(pv).slice(0, 120)}` : ''}`;
+  // 1. DELEGATE the match: the substrate picks + binds using the live page (the part it does well).
+  let m = null;
+  try { m = await _orchReq('ORCH_MATCH', { tabId, ask }); } catch { /* */ }
+  if (!m || m.success === false || m.decision === 'miss' || !m.capabilityId) {
+    _setMessageBody(msg, `🧠 No saved capability matched “${ask}” on this page.`);
+    try { _orchLog(`BRAIN ▸ "${String(ask).slice(0, 50)}" → no match`); } catch { /* */ }
+    return true;
   }
-  return `${named || plan.channel}${plan.payload && Object.keys(plan.payload).length ? ` ${JSON.stringify(plan.payload).slice(0, 120)}` : ''}`;
+
+  // 2. Gather what the USER would see — the top match + any close alternatives — each carrying the values the
+  //    substrate already bound (so the brain judges over real, page-derived bindings, never re-binds).
+  const turn = planAssistantTurn(m);
+  const ctx = { groundId: m.groundId, tabId, ask, intent: m.candidate && m.candidate.intent, paramValues: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {}, params: m.candidate && m.candidate.params };
+  const candidates = [];
+  const seen = new Set();
+  const add = (id, intent) => { if (id && !seen.has(id)) { seen.add(id); candidates.push({ id, intent, bindings: m.bindings }); } };
+  add(m.capabilityId, m.candidate && m.candidate.intent);
+  for (const o of (turn.options || [])) add(o.id, o.intent);
+
+  // 3. The brain JUDGES — the user's stand-in choosing which candidate to run, or rejecting. On an unavailable
+  //    judge: a single confident match runs (the user would have confirmed it); multiple → don't guess.
+  let verdict = null;
+  try { const r = await _orchReq('JUDGE_MATCH', { ask, candidates }); verdict = r && r.verdict; } catch { /* */ }
+  let pickedId = null;
+  if (verdict && verdict.ref && seen.has(verdict.ref)) pickedId = verdict.ref;
+  else if (verdict && verdict.ref === null) pickedId = null;
+  else if (candidates.length === 1) pickedId = candidates[0].id;
+  const why = (verdict && verdict.reason) ? ` — ${verdict.reason}` : '';
+  if (!pickedId) {
+    _setMessageBody(msg, `🧠 The closest match didn’t fit “${ask}”${why}. Try rephrasing.`);
+    try { _orchLog(`BRAIN ▸ "${String(ask).slice(0, 50)}" → rejected${why}`); } catch { /* */ }
+    return true;
+  }
+
+  // 4. RUN the brain's pick through the EXISTING runner — with the substrate's bindings (no re-binding).
+  const picked = candidates.find((c) => c.id === pickedId) || {};
+  try { _orchLog(`BRAIN ▸ "${String(ask).slice(0, 50)}" → run "${picked.intent || pickedId}"${why}`); } catch { /* */ }
+  await _orchRun(msg, { ...ctx, capabilityId: pickedId, intent: picked.intent || ctx.intent });
+  return true;
 }
 
 // IM-3 (v2.74.895) — "what can I do here?" → the INTENT MENU. A meta-ask about the APP's abilities on this
