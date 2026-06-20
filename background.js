@@ -29,6 +29,7 @@ import * as Outcomes           from './Core/outcomes.js';    // v2.74.413 — Ou
 import * as SiteMap            from './Core/siteMap.js';     // v2.74.431 — Ground siteMap (GROUND_SPEC § 7)
 import * as CapabilitySynth    from './Core/capabilitySynth.js';  // v2.74.471 — synthesize capability from a goal
 import { serializeGaps, deserializeGaps } from './Core/gapRegistry.js';  // PS-0 — persist/read Orchard's per-Ground capability-gap registry
+import { serializePool, deserializePool } from './Core/observedPool.js';  // PS-2 — the long-tail observed pool (catch-net for un-anticipated controls)
 import { synthesizeTrialOp, classifyTrialSafety, scoreTrial } from './Core/trialSynth.js';  // PB-3/4/5 — trial op + safety + scoring
 import { coverComplete }       from './Core/cover.js';      // SG-3 Cover — completeness floor
 import { selectionToTrialRoles } from './Core/bind.js';     // SG-4 Bind — selection → trial roles bundle
@@ -1302,6 +1303,35 @@ async function _mutateGaps(groundId, fn) {
     return next;
   });
 }
+
+// PS-2 — the long-tail observed pool (observedPool:<groundId>): unmatched named misses, durably retained as a
+// VALUE-FREE catch-net. Its own per-Ground RMW chain (mirrors the gaps chain) so concurrent harvest-misses serialize.
+const _obsPoolKey = (groundId) => `observedPool:${groundId}`;
+async function _readObsPool(groundId) {
+  if (!groundId) return [];
+  try { const k = _obsPoolKey(groundId); const got = await chrome.storage.local.get(k); return deserializePool(got?.[k]); }
+  catch { return []; }
+}
+const _obsPoolChains = new Map();
+function _obsPoolChained(groundId, fn) {
+  const tail = _obsPoolChains.get(groundId) || Promise.resolve();
+  const next = tail.then(() => fn());
+  const stored = next.catch(() => {});
+  _obsPoolChains.set(groundId, stored);
+  stored.then(() => { if (_obsPoolChains.get(groundId) === stored) _obsPoolChains.delete(groundId); });
+  return next;
+}
+async function _mutateObsPool(groundId, fn) {
+  if (!groundId || typeof fn !== 'function') return [];
+  return _obsPoolChained(groundId, async () => {
+    const cur = await _readObsPool(groundId);
+    let next; try { next = fn(cur); } catch { next = cur; }
+    if (next == null || next === cur) return cur;
+    try { await chrome.storage.local.set({ [_obsPoolKey(groundId)]: serializePool(next) }); }
+    catch (e) { Logger.warn('background', `observed-pool write failed: ${e.message}`); }
+    return next;
+  });
+}
 // Remove matcher-facing capabilities matching a predicate (ORCH-ADMIN bulk delete + REPLAY self-heal of an
 // orphan whose underlying Strategy is gone). Returns how many were removed. The `sgCapabilities:<ground>` store
 // is what the matcher reads, SEPARATE from the Tier-1 `strategies:*` records — so it must be pruned in lockstep.
@@ -1679,6 +1709,7 @@ const _sgMessageHandlers = {
   enrichSgLandmarks    : _enrichSgLandmarks,
   readGaps             : _readGaps,                // PS-0 — Orchard's per-Ground capability-gap registry (read)
   mutateGaps           : _mutateGaps,              // PS-0/1 — atomic per-Ground read-modify-write of the gaps registry (serialized)
+  mutateObsPool        : _mutateObsPool,           // PS-2 — atomic per-Ground RMW of the long-tail observed pool
   }),
 };
 

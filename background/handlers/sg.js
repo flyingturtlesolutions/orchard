@@ -18,7 +18,9 @@ import { evaluatePostcondition } from '../../Core/postcondition.js';
 import { focusDecision, FOCUS_SETTING_KEY } from '../../Core/focusGrammar.js';   // FM-1 (v2.74.968) — the pure focus-grab verdict
 import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord, buildResultsLandmarkRecord, buildOutcomePerspective, findMatchingPerspective, buildPerspectiveGate, buildDestinationPerspective, pickDestinationLandmark, validateConditionRefs } from '../../Core/accept.js';
 import { authoringCoverage } from '../../Core/select.js';   // GA-7 — Locale→capability "done" signal
-import { mergeGaps, summarizeGaps, matchInteractionToGap, recordFulfillment } from '../../Core/gapRegistry.js';   // PS-0/1 — capability-gap registry (enumerate + passive harvest)
+import { mergeGaps, summarizeGaps, matchInteractionToGap, recordFulfillment, setStatus } from '../../Core/gapRegistry.js';   // PS-0/1/3 — capability-gap registry (enumerate + harvest + promote)
+import { addObservation } from '../../Core/observedPool.js';   // PS-2 — the long-tail observed pool (catch-net for unmatched touches)
+import { buildHarvestCapability } from '../../Core/synthFromGap.js';   // PS-3 — compose an UNVERIFIED capability from a harvested gap (stage/verify-on-first-use)
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
@@ -759,6 +761,48 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, answer, groundId: groundId || null });
       } catch (err) {
         Logger.error('background', `IL_ANSWER failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // PS-3 (v2.74.1126) — SYNTHESIZE_FROM_GAP: turn a HARVESTED gap into a durable, UNVERIFIED capability,
+    // "stage / verify-on-first-use". Probe the live page to RESOLVE a selector for the captured a11y identity
+    // (proves the control still exists — NO click), compose the library entities (Core/synthFromGap, the same
+    // shape the OBS demonstration path produces), persist them marked trial.verdict:'observed' (the matcher
+    // downranks vs trial-pass'd), and flip the gap to 'promoted'. The FIRST real `il:` invocation is the actual
+    // click, gated by the existing read-only-floor / write-confirm — synthesis never executes the action.
+    SYNTHESIZE_FROM_GAP: async (payload, _sender, sendResponse) => {
+      try {
+        const { groundId = null, tabId = null, gapKey = null } = payload ?? {};
+        if (!groundId || !gapKey) { sendResponse({ success: false, error: 'groundId + gapKey required' }); return; }
+        const gap = (await ctx.readGaps(groundId)).find((g) => g && g.key === gapKey);
+        if (!gap || gap.status !== 'harvested' || !gap.fulfillment || !gap.fulfillment.accessibleName) {
+          sendResponse({ success: true, synthesized: false, reason: 'no-harvested-gap' }); return;
+        }
+        // Resolve a selector from the captured identity (probe-or-recover; selector:null → straight to heuristic
+        // recovery by role+accessibleName). A miss means the control is gone → can't stage; no side effect either way.
+        let selector = null, via = null;
+        if (typeof tabId === 'number') {
+          try {
+            const probe = await chrome.tabs.sendMessage(tabId, { type: 'LANDMARK_PROBE_OR_RECOVER', payload: { selector: null, fallback: { role: gap.fulfillment.role, accessibleName: gap.fulfillment.accessibleName } } });
+            if (probe && probe.success && probe.selector) { selector = probe.selector; via = probe.via || probe.matchMethod || null; }
+          } catch (e) { Logger.warn('background', `SYNTHESIZE_FROM_GAP probe failed: ${e.message}`); }
+        }
+        if (!selector) { sendResponse({ success: true, synthesized: false, reason: 'selector-unresolved' }); return; }
+        let tabUrl = '';
+        if (typeof tabId === 'number') { try { tabUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
+        const localeUrl = ctx.normalizeUrl(tabUrl || '');
+        const built = buildHarvestCapability({ gap, selector, localeUrl, groundId }, { now: Date.now(), newId: () => crypto.randomUUID() });
+        if (!built) { sendResponse({ success: true, synthesized: false, reason: 'compose-failed' }); return; }
+        for (const lm of built.landmarks) { try { await StorageManager.saveLandmark(lm); } catch (e) { Logger.warn('background', `SYNTHESIZE saveLandmark: ${e.message}`); } }
+        try { await StorageManager.savePerspective(built.perspective); } catch (e) { Logger.warn('background', `SYNTHESIZE savePerspective: ${e.message}`); }
+        try { await StorageManager.saveFragment(built.fragment); } catch (e) { Logger.warn('background', `SYNTHESIZE saveFragment: ${e.message}`); }
+        await ctx.writeSgCapability(groundId, built.capability);
+        await ctx.mutateGaps(groundId, (gaps) => setStatus(gaps, gapKey, 'promoted', Date.now()));
+        try { Logger.info('monitor', `SYNTH ▸ "${gap.intent}" → capability ${built.capability.id} (via ${via || 'probe'}, unverified) @ ${groundId}`); } catch { /* */ }
+        sendResponse({ success: true, synthesized: true, accepted: true, capabilityId: built.capability.id, reason: 'staged' });
+      } catch (err) {
+        Logger.error('background', `SYNTHESIZE_FROM_GAP failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },
@@ -1531,6 +1575,11 @@ export function createSgMessageHandlers(ctx) {
                 return recordFulfillment(gaps, k, { role: raw.target.role, accessibleName: raw.target.accessibleName, tagName: raw.target.tagName }, raw.ts);
               });
               if (hit) { try { Logger.info('monitor', `HARVEST ▸ "${hit.intent}" ← ${raw.interactionKind} on "${raw.target.accessibleName}" @ ${groundId}`); } catch { /* */ } }
+              else {
+                // PS-2 — no declared gap matched → retain in the long-tail observed pool (value-free), the
+                // catch-net PS-3 reads on an ask-miss for capabilities Orchard never thought to list.
+                await ctx.mutateObsPool(groundId, (pool) => addObservation(pool, { role: raw.target.role, accessibleName: raw.target.accessibleName, kind: raw.interactionKind }, { seq, now: raw.ts }));
+              }
             } catch (e) { try { Logger.warn('background', `gap-harvest non-fatal: ${e.message}`); } catch { /* */ } }
           })();
         }
