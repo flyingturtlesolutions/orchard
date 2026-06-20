@@ -233,6 +233,16 @@ export function previewRepointPlan(branch) {
   ];
 }
 
+// DBR (regress, v2.74.1133) — the ordered gitOps to point the preview worktree at `main`'s tip (the post-`regress`
+// home). `previewRepointPlan` is DEV-only by design (the preview shows a dev branch's tip), so reverting the live
+// build to `main` needs its own un-gated plan. Same remove-then-detached-add shape. PURE.
+export function previewToMainPlan() {
+  return [
+    { op: 'worktreeRemove', params: { path: PREVIEW_WT, force: true }, optional: true },
+    { op: 'worktreeAdd', params: { path: PREVIEW_WT, detach: 'main' } },
+  ];
+}
+
 // DBR-P3-1 (DESIGN §8.1) — the manual `split:` corrective verb: extract out-of-scope work into its own dev branch
 // + conversation. Prefix form (`split: <concern>`) — unambiguous vs a coding task that merely mentions "split".
 // PURE + exported.
@@ -258,6 +268,14 @@ export function buildSeedPrompt({ concern, parentConcern } = {}) {
 // DBR-P3-5 (DESIGN §6.1/U12) — the `fork` verb (whole-message; dev-conversation gated by the caller). PURE + exported.
 export function isFork(text) {
   return String(text ?? '').trim().toLowerCase().replace(/\s+/g, ' ') === 'fork';
+}
+
+// DBR (regress, v2.74.1133) — the `regress` verb (whole-message; dev-conversation gated by the caller): abandon
+// this conversation's change AND snap the live build back to `main` (preview → main + reload + archive). Distinct
+// from `abandon`, which keeps the branch but leaves the preview where it is — `regress` is abandon + revert. PURE.
+export function isRegress(text) {
+  const t = String(text ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+  return t === 'regress' || t === 'discard';
 }
 
 // DBR-P3-5 (DESIGN §6.1) — the seed prompt for "fork from here": continue a (usually merged/abandoned) parent on a
@@ -1520,6 +1538,12 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       await _fork(convId);
       return true;
     }
+    // DBR (regress, v2.74.1133) — `regress`: abandon this change and snap the live build back to `main` (preview → main + reload + archive).
+    if (devConv && isRegress(t)) {
+      if (!skipEcho) appendMessage({ role: 'user', body: t });
+      await _regress(convId);
+      return true;
+    }
     // Inside a dev conversation, bare input IS a dev command: a standalone log verb (gl/gc/gch) or a
     // `bug:`/`dev:` prefix is taken verbatim; anything else (a sub-verb like `pause`/`history`/`model …`, or
     // a plain task) is normalized to the `dev: …` form so the existing branch table handles it unchanged —
@@ -1850,6 +1874,12 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     if (ltUsesPreview(_capNow())) {
       const plan = previewRepointPlan(branch);
       if (!plan) { _setBubble(bubble, `✗ \`lt\` — \`${branch}\` isn't a dev branch; the preview only shows a dev branch's tip.`); return; }
+      // DBR (eyeball fix, v2.74.1133) — CHECKPOINT the branch's worktree FIRST. The preview reads the branch's
+      // COMMITTED tip, so without this the dev session's uncommitted edits are invisible ("no changes reflected").
+      // Mirrors sync/merge's `commitWip {worktree}`. Best-effort: nothing-to-commit / a clean tree is fine → repoint
+      // the last committed state (no worse than before); a real failure still falls through (the preview shows HEAD).
+      _setBubble(bubble, `↻ checkpointing \`${branch}\` then pointing the preview at it…`);
+      await gitOp('commitWip', { message: `lt → ${branch}` }, { worktree: branch });
       _setBubble(bubble, `↻ pointing the preview at \`${branch}\` and reloading…`);
       for (const step of plan) {
         const r = await gitOp(step.op, step.params);
@@ -2054,6 +2084,29 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     if (!branch) { devBubble('✗ `abandon` — no branch is recorded for this dev conversation.'); return; }
     try { await ConversationStore.patchMeta(convId, { status: 'abandoned' }); } catch { /* best-effort */ }
     devBubble(`✗ abandoned — this conversation is archived (read-only). The branch \`${branch}\` is KEPT (recoverable). Type \`delete branch\` to remove it permanently.`);
+  }
+
+  // DBR (regress, v2.74.1133) — abandon this conversation's change AND snap the LIVE build back to `main`: point the
+  // preview at `main` (the un-gated previewToMainPlan) + reload + archive (status 'abandoned'). The branch is KEPT
+  // (recoverable via `fork`), exactly like `abandon`; regress just ALSO reverts the preview so the panel returns to
+  // the last `main` build. NO `main` mutation, no force-reset — the dev branch's commits stay on the branch.
+  async function _regress(convId) {
+    let conv = null;
+    try { conv = convId ? await ConversationStore.load(convId) : null; } catch { conv = null; }
+    const branch = (conv && conv.branch) || null;
+    const bubble = devBubble('↻ regress — reverting the live build to `main`…');
+    if (ltUsesPreview(_capNow())) {
+      for (const step of previewToMainPlan()) {
+        const r = await gitOp(step.op, step.params);
+        if ((!r || !r.ok) && !step.optional) { _setBubble(bubble, `✗ \`regress\` — couldn’t point the preview at \`main\`: ${(r && r.error) || 'host unreachable'}.`); return; }
+      }
+    } else {
+      const sw = await gitOp('switch', { branch: 'main' });
+      if (!sw || !sw.ok) { _setBubble(bubble, `✗ \`regress\` — couldn’t switch the loaded tree to \`main\` (commit/stash branch work first?): ${(sw && sw.error) || 'host unreachable'}.`); return; }
+    }
+    await reloadExtension();
+    try { await ConversationStore.patchMeta(convId, { status: 'abandoned' }); } catch { /* best-effort */ }
+    _setBubble(bubble, `✓ regressed — the live build is back on \`main\` and this conversation is archived. The branch${branch ? ` \`${branch}\`` : ''} is KEPT (type \`fork\` to revive it).`);
   }
 
   // DBR-P2-6 (DESIGN §5/U13) — `delete branch` (HARD): irreversible. A confirm button → gated host `branchDelete`

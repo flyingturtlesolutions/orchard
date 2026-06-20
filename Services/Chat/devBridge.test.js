@@ -9,7 +9,29 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, driftBroadcastSet, PREVIEW_WT, ltUsesPreview, previewRepointPlan, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer, scopeCategory } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, driftBroadcastSet, PREVIEW_WT, ltUsesPreview, previewRepointPlan, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer, scopeCategory, isRegress, previewToMainPlan } from './devBridge.js';
+
+describe('isRegress — whole-message regress trigger (abandon + revert preview to main)', () => {
+  it('fires on the bare tokens', () => {
+    for (const s of ['regress', 'discard', 'REGRESS', '  regress  ', 'Discard', '\tregress\n']) {
+      assert.equal(isRegress(s), true, `should fire: ${JSON.stringify(s)}`);
+    }
+  });
+  it('does NOT fire on a sentence containing the word (flows to Claude), or empty/nullish', () => {
+    for (const s of ['regress the drawer', 'this is a regression', 'discard the changes please', 'regression test', '', '   ', null, undefined, 0, {}]) {
+      assert.equal(isRegress(s), false, `should NOT fire: ${String(s)}`);
+    }
+  });
+});
+
+describe('previewToMainPlan — repoint the preview worktree at main (un-gated, unlike the dev-only previewRepointPlan)', () => {
+  it('removes then re-adds the preview detached at main', () => {
+    const plan = previewToMainPlan();
+    assert.equal(plan.length, 2);
+    assert.equal(plan[0].op, 'worktreeRemove'); assert.equal(plan[0].optional, true); assert.equal(plan[0].params.path, PREVIEW_WT);
+    assert.equal(plan[1].op, 'worktreeAdd'); assert.equal(plan[1].params.detach, 'main'); assert.equal(plan[1].params.path, PREVIEW_WT);
+  });
+});
 
 describe('isLiveTest — whole-message live-test triggers fire', () => {
   it('matches the bare tokens', () => {
