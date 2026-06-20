@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 
 import {
   gapKey, normalizeGap, mergeGaps, setStatus, summarizeGaps, serializeGaps, deserializeGaps,
+  matchInteractionToGap, recordFulfillment,
 } from './gapRegistry.js';
 
 describe('gapRegistry — derive/dedup/age a per-Ground capability-gap registry (pure)', () => {
@@ -91,5 +92,52 @@ describe('gapRegistry — derive/dedup/age a per-Ground capability-gap registry 
     assert.deepEqual(round, gaps);
     assert.deepEqual(deserializeGaps(null), []);
     assert.deepEqual(deserializeGaps({ gaps: [{ intent: 'no key' }, { key: 'k', intent: 'i', status: 'bogus' }] }), []);
+  });
+});
+
+describe('gapRegistry PS-1 — passive harvest match + record (pure)', () => {
+  const armedGap = (extra = {}) => mergeGaps([], [{ intent: 'Play/Pause the video', verbHint: 'click', expectedIdentity: { role: 'button', namePattern: 'play|pause' }, ...extra }], { now: 1 });
+
+  it('matchInteractionToGap matches an open gap by namePattern (regex), role agreeing or absent', () => {
+    const gaps = armedGap();
+    assert.equal(matchInteractionToGap({ role: 'button', accessibleName: 'Play (k)' }, gaps), 'play pause the video');
+    assert.equal(matchInteractionToGap({ accessibleName: 'Pause (k)' }, gaps), 'play pause the video');   // target role absent → OK
+  });
+
+  it('no match: role disagreement, missing name, no expectedIdentity, or non-open status', () => {
+    const gaps = armedGap();
+    assert.equal(matchInteractionToGap({ role: 'link', accessibleName: 'Play' }, gaps), null);   // role disagrees
+    assert.equal(matchInteractionToGap({ accessibleName: 'Share' }, gaps), null);                // name doesn't match the pattern
+    assert.equal(matchInteractionToGap({ role: 'button' }, gaps), null);                         // no accessibleName
+    assert.equal(matchInteractionToGap({ accessibleName: 'Play' }, mergeGaps([], [{ intent: 'Bare' }], { now: 1 })), null);  // gap has no expectedIdentity
+    assert.equal(matchInteractionToGap({ accessibleName: 'Play' }, setStatus(gaps, 'play pause the video', 'harvested', 2)), null);  // only OPEN gaps
+  });
+
+  it('falls back to substring (not a crash) when the namePattern is not a valid regex', () => {
+    const gaps = mergeGaps([], [{ intent: 'Show more', expectedIdentity: { namePattern: 'more (' } }], { now: 1 });  // unbalanced ( → invalid regex
+    assert.equal(matchInteractionToGap({ accessibleName: 'More (5)' }, gaps), 'show more');                          // literal substring still matches
+    assert.equal(matchInteractionToGap({ accessibleName: 'More' }, gaps), null);                                    // and degrades safely to no-match
+  });
+
+  it('recordFulfillment flips the matched gap to harvested + attaches a VALUE-FREE identity', () => {
+    const gaps = recordFulfillment(armedGap(), 'play pause the video', { role: 'BUTTON', accessibleName: 'Play (k)', tagName: 'BUTTON' }, 7);
+    const g = gaps.find((x) => x.key === 'play pause the video');
+    assert.equal(g.status, 'harvested');
+    assert.equal(g.updatedAt, 7);
+    assert.deepEqual(g.fulfillment, { role: 'button', accessibleName: 'Play (k)', tagName: 'button', seenAt: 7 });
+    assert.equal('value' in g.fulfillment, false);                                   // only the WHERE, never WHAT was typed
+  });
+
+  it('recordFulfillment leaves other gaps untouched; a non-matching key is a no-op', () => {
+    let gaps = mergeGaps([], [{ intent: 'A' }, { intent: 'B' }], { now: 1 });
+    gaps = recordFulfillment(gaps, 'a', { accessibleName: 'A' }, 5);
+    assert.equal(gaps.find((g) => g.key === 'a').status, 'harvested');
+    assert.equal(gaps.find((g) => g.key === 'b').status, 'open');
+    assert.deepEqual(recordFulfillment(gaps, 'zzz', {}, 9), gaps);                    // no-op
+  });
+
+  it('a harvested gap survives the serialize round-trip with its fulfillment', () => {
+    const gaps = recordFulfillment(armedGap(), 'play pause the video', { role: 'button', accessibleName: 'Play' }, 3);
+    assert.deepEqual(deserializeGaps(serializeGaps(gaps)), gaps);
   });
 });

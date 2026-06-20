@@ -1277,10 +1277,30 @@ async function _readGaps(groundId) {
   try { const k = _gapsKey(groundId); const got = await chrome.storage.local.get(k); return deserializeGaps(got?.[k]); }
   catch { return []; }
 }
-async function _writeGaps(groundId, gaps) {
-  if (!groundId) return;
-  try { await chrome.storage.local.set({ [_gapsKey(groundId)]: serializeGaps(gaps) }); }
-  catch (e) { Logger.warn('background', `gaps write failed: ${e.message}`); }
+// PS-1 — per-Ground gaps RMW CHAIN (CR-ST2 pattern). IL_ANSWER's enumerate-merge and the monitor's passive
+// harvest are BOTH read-modify-writers of gaps:<groundId>; serialize them per Ground so a click-harvest can't
+// clobber a concurrent re-enumeration (or vice versa) with a stale snapshot.
+const _gapsChains = new Map();
+function _gapsChained(groundId, fn) {
+  const tail = _gapsChains.get(groundId) || Promise.resolve();
+  const next = tail.then(() => fn());
+  const stored = next.catch(() => {});
+  _gapsChains.set(groundId, stored);
+  stored.then(() => { if (_gapsChains.get(groundId) === stored) _gapsChains.delete(groundId); });
+  return next;
+}
+// Read -> apply mutator -> write, atomically per Ground. Skips the write when the mutator returns the SAME array
+// (no change) so a no-match harvest costs only a read. Returns the resulting gaps.
+async function _mutateGaps(groundId, fn) {
+  if (!groundId || typeof fn !== 'function') return [];
+  return _gapsChained(groundId, async () => {
+    const cur = await _readGaps(groundId);
+    let next; try { next = fn(cur); } catch { next = cur; }
+    if (next == null || next === cur) return cur;
+    try { await chrome.storage.local.set({ [_gapsKey(groundId)]: serializeGaps(next) }); }
+    catch (e) { Logger.warn('background', `gaps write failed: ${e.message}`); }
+    return next;
+  });
 }
 // Remove matcher-facing capabilities matching a predicate (ORCH-ADMIN bulk delete + REPLAY self-heal of an
 // orphan whose underlying Strategy is gone). Returns how many were removed. The `sgCapabilities:<ground>` store
@@ -1658,7 +1678,7 @@ const _sgMessageHandlers = {
   writeSgTrace         : _writeSgTrace,
   enrichSgLandmarks    : _enrichSgLandmarks,
   readGaps             : _readGaps,                // PS-0 — Orchard's per-Ground capability-gap registry (read)
-  writeGaps            : _writeGaps,               // PS-0 — persist the merged demand signal (gaps:<groundId>)
+  mutateGaps           : _mutateGaps,              // PS-0/1 — atomic per-Ground read-modify-write of the gaps registry (serialized)
   }),
 };
 

@@ -94,6 +94,53 @@ export function setStatus(gaps, key, status, now = 0) {
   return (Array.isArray(gaps) ? gaps : []).map((g) => (g && g.key === key ? { ...g, status, updatedAt: now } : g));
 }
 
+const _nameMatches = (pattern, name) => {
+  const p = String(pattern ?? '').toLowerCase().trim();
+  if (!p) return false;
+  try { return new RegExp(p, 'i').test(name); } catch { return name.includes(p); }
+};
+
+/**
+ * PS-1 — deterministically match a captured interaction target to an OPEN gap (the harvest signal): a user
+ * clicked an UNKNOWN control; does its a11y identity fulfil a declared gap? Matches on the gap's
+ * `expectedIdentity` — `namePattern` (required; tested as a regex, falling back to substring, against the
+ * control's accessibleName) gated by `role` (when BOTH are known they must agree). Only 'open' gaps are eligible
+ * (an earned gap is never re-harvested). Returns the gap key, or null. PURE.
+ * @param {{role?:string, accessibleName?:string}} target  the captured interaction target descriptor
+ * @param {Array<object>} gaps
+ * @returns {string|null}
+ */
+export function matchInteractionToGap(target, gaps) {
+  const name = String(target?.accessibleName ?? '').toLowerCase().trim();
+  if (!name) return null;                                   // need an accessible name to match on
+  const role = String(target?.role ?? '').toLowerCase().trim();
+  for (const g of (Array.isArray(gaps) ? gaps : [])) {
+    if (!g || g.status !== 'open' || !g.expectedIdentity || !g.expectedIdentity.namePattern) continue;
+    if (g.expectedIdentity.role && role && g.expectedIdentity.role !== role) continue;   // role, when both known, must agree
+    if (_nameMatches(g.expectedIdentity.namePattern, name)) return g.key;
+  }
+  return null;
+}
+
+/**
+ * PS-1 — record a passive fulfilment: flip the matched gap to 'harvested' and attach the fulfilling control's
+ * a11y IDENTITY (the WHERE — never a typed value; privacy invariant §5). PS-3 materialises a selector from this
+ * via probe-or-recover. Immutable; a non-matching key is a no-op. PURE.
+ * @param {Array<object>} gaps  @param {string} key  @param {{role?:string,accessibleName?:string,tagName?:string}} fulfillment  @param {number} [now]
+ */
+export function recordFulfillment(gaps, key, fulfillment, now = 0) {
+  return (Array.isArray(gaps) ? gaps : []).map((g) => {
+    if (!g || g.key !== key) return g;
+    const f = {
+      role: _clamp(fulfillment && fulfillment.role, 40).toLowerCase() || null,
+      accessibleName: _clamp(fulfillment && fulfillment.accessibleName, 120) || null,
+      tagName: _clamp(fulfillment && fulfillment.tagName, 40).toLowerCase() || null,
+      seenAt: now,
+    };
+    return { ...g, status: 'harvested', updatedAt: now, fulfillment: f };
+  });
+}
+
 /** Status histogram (for logging / the PS-6 inspector). PURE. */
 export function summarizeGaps(gaps) {
   const out = { total: 0, open: 0, armed: 0, harvested: 0, promoted: 0, dismissed: 0 };

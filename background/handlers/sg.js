@@ -18,7 +18,7 @@ import { evaluatePostcondition } from '../../Core/postcondition.js';
 import { focusDecision, FOCUS_SETTING_KEY } from '../../Core/focusGrammar.js';   // FM-1 (v2.74.968) — the pure focus-grab verdict
 import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord, buildResultsLandmarkRecord, buildOutcomePerspective, findMatchingPerspective, buildPerspectiveGate, buildDestinationPerspective, pickDestinationLandmark, validateConditionRefs } from '../../Core/accept.js';
 import { authoringCoverage } from '../../Core/select.js';   // GA-7 — Locale→capability "done" signal
-import { mergeGaps, summarizeGaps } from '../../Core/gapRegistry.js';   // PS-0 — the per-Ground capability-gap registry (Orchard's demand signal)
+import { mergeGaps, summarizeGaps, matchInteractionToGap, recordFulfillment } from '../../Core/gapRegistry.js';   // PS-0/1 — capability-gap registry (enumerate + passive harvest)
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
@@ -750,8 +750,7 @@ export function createSgMessageHandlers(ctx) {
           if (groundId) {
             const candidates = await AnthropicService.enumerateGaps({ ask, capabilities: caps, affordances, url: tabUrl });
             if (Array.isArray(candidates) && candidates.length) {
-              const merged = mergeGaps(await ctx.readGaps(groundId), candidates, { now: Date.now() });
-              await ctx.writeGaps(groundId, merged);
+              const merged = await ctx.mutateGaps(groundId, (g) => mergeGaps(g, candidates, { now: Date.now() }));
               const gs = summarizeGaps(merged);
               try { Logger.info('background', `GAPS ▸ ${gs.total} for ${groundId} (+${candidates.length} enumerated, ${gs.open} open)`); } catch { /* */ }
             }
@@ -1516,6 +1515,25 @@ export function createSgMessageHandlers(ctx) {
         } catch { /* no listener (panel closed) */ }
         sendResponse({ success: true, id: raw.id, status: resolved.resolutionStatus });
         void _flushInteractionOutcomes(ctx);   // C5 — threshold-batched durable flush; never delays the ack
+        // PS-1 (v2.74.1124) — passive gap HARVEST: a USER click (engine already dropped at the top guard) on an
+        // UNKNOWN control ('miss') whose a11y identity fulfils a declared OPEN gap flips the gap to 'harvested' +
+        // records the WHERE (role/name/tag — NEVER a typed value, §5). Detached + non-fatal (mirrors the C5 flush);
+        // the RMW goes through ctx.mutateGaps so a concurrent re-enumeration can't clobber it. Gated on an
+        // accessibleName — a nameless control can't match a namePattern, so most misses skip the chain entirely.
+        if (resolved.resolutionStatus === 'miss' && groundId && raw.target && raw.target.accessibleName) {
+          void (async () => {
+            try {
+              let hit = null;
+              await ctx.mutateGaps(groundId, (gaps) => {
+                const k = (Array.isArray(gaps) && gaps.length) ? matchInteractionToGap(raw.target, gaps) : null;
+                if (!k) return gaps;
+                hit = gaps.find((g) => g.key === k) || null;
+                return recordFulfillment(gaps, k, { role: raw.target.role, accessibleName: raw.target.accessibleName, tagName: raw.target.tagName }, raw.ts);
+              });
+              if (hit) { try { Logger.info('monitor', `HARVEST ▸ "${hit.intent}" ← ${raw.interactionKind} on "${raw.target.accessibleName}" @ ${groundId}`); } catch { /* */ } }
+            } catch (e) { try { Logger.warn('background', `gap-harvest non-fatal: ${e.message}`); } catch { /* */ } }
+          })();
+        }
       } catch (err) {
         Logger.error('background', `INTERACTION_RAW failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
