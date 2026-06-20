@@ -24,7 +24,10 @@ export function buildHarvestCapability({ gap, selector, localeUrl = '', groundId
   const f = gap && gap.fulfillment;
   if (!gap || !groundId || !selector || !f || !f.accessibleName) return null;
   const intent = String(gap.intent || f.accessibleName).slice(0, 80);
-  const landmark = { role: f.role || null, accessibleName: f.accessibleName, selector, hierarchicalContext: null };
+  // Native controls (a YouTube <button>) capture NO explicit aria role → fall back to Orchard's enumerated guess
+  // (expectedIdentity.role) so probe-or-recover has a role to recover by, both now and on replay.
+  const role = f.role || (gap.expectedIdentity && gap.expectedIdentity.role) || null;
+  const landmark = { role, accessibleName: f.accessibleName, selector, hierarchicalContext: null };
 
   // Mint the durable Landmark (same builder the OBS accept uses). 'fresh' + 'harvested' — selector-proven, NOT
   // 'verified' (a demonstration is its own verification; a harvest's BEHAVIOUR isn't proven until first run).

@@ -68,6 +68,13 @@ describe('synthFromGap — stage an unverified capability from a harvested gap (
     assert.notEqual(cap.kind, 'observation');              // _bind's candidate filter routes it to the action pool
     assert.ok(cap.fragmentId && !cap.strategyId);          // bare T1 → non-orphan once its Fragment is saved (listFragments)
   });
+
+  it('falls back to the gap expectedIdentity.role when the captured fulfillment has no role (the .1127 native-button miss)', () => {
+    const gap = { intent: 'Subscribe to the channel', fulfillment: { accessibleName: 'Subscribe to Random Edits.', tagName: 'button' }, expectedIdentity: { role: 'button', namePattern: 'subscribe' } };
+    const r = buildHarvestCapability({ gap, selector: '#sub', localeUrl: 'https://youtube.com', groundId: 'gr1' }, { now: 1, newId: () => 'id' });
+    assert.ok(r, 'composes even though the fulfillment has no role');
+    assert.equal(r.landmarks[0].a11yRole, 'button');       // recovered from the enumerated guess, so probe-or-recover can find it on replay
+  });
 });
 
 function cap_landmarks(r) { return r.capability.landmarkUids; }

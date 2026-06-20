@@ -786,17 +786,20 @@ export function createSgMessageHandlers(ctx) {
         }
         // Resolve a selector from the captured identity (probe-or-recover; selector:null → straight to heuristic
         // recovery by role+accessibleName). A miss means the control is gone → can't stage; no side effect either way.
+        // Native controls capture NO explicit aria role → fall back to the enumerated expectedIdentity.role (the
+        // recovery heuristic needs a role; a role-less fallback makes it silently fail, the .1127 live miss).
+        const probeRole = gap.fulfillment.role || (gap.expectedIdentity && gap.expectedIdentity.role) || null;
         let selector = null, via = null;
         if (typeof tabId === 'number') {
           try {
-            const probe = await chrome.tabs.sendMessage(tabId, { type: 'LANDMARK_PROBE_OR_RECOVER', payload: { selector: null, fallback: { role: gap.fulfillment.role, accessibleName: gap.fulfillment.accessibleName } } });
+            const probe = await chrome.tabs.sendMessage(tabId, { type: 'LANDMARK_PROBE_OR_RECOVER', payload: { selector: null, fallback: { role: probeRole, accessibleName: gap.fulfillment.accessibleName } } });
             if (probe && probe.success && probe.selector) { selector = probe.selector; via = probe.via || probe.matchMethod || null; }
           } catch (e) { Logger.warn('background', `SYNTHESIZE_FROM_GAP probe failed: ${e.message}`); }
         }
-        if (!selector) { sendResponse({ success: true, synthesized: false, reason: 'selector-unresolved' }); return; }
+        if (!selector) { try { Logger.info('monitor', `SYNTH ▸ "${gap.intent}" → no-synth (selector-unresolved; role=${probeRole || '—'}, name="${gap.fulfillment.accessibleName}") @ ${groundId}`); } catch { /* */ } sendResponse({ success: true, synthesized: false, reason: 'selector-unresolved' }); return; }
         const localeUrl = ctx.normalizeUrl(tabUrl || '');
         const built = buildHarvestCapability({ gap, selector, localeUrl, groundId }, { now: Date.now(), newId: () => crypto.randomUUID() });
-        if (!built) { sendResponse({ success: true, synthesized: false, reason: 'compose-failed' }); return; }
+        if (!built) { try { Logger.info('monitor', `SYNTH ▸ "${gap.intent}" → no-synth (compose-failed) @ ${groundId}`); } catch { /* */ } sendResponse({ success: true, synthesized: false, reason: 'compose-failed' }); return; }
         for (const lm of built.landmarks) { try { await StorageManager.saveLandmark(lm); } catch (e) { Logger.warn('background', `SYNTHESIZE saveLandmark: ${e.message}`); } }
         try { await StorageManager.savePerspective(built.perspective); } catch (e) { Logger.warn('background', `SYNTHESIZE savePerspective: ${e.message}`); }
         try { await StorageManager.saveFragment(built.fragment); } catch (e) { Logger.warn('background', `SYNTHESIZE saveFragment: ${e.message}`); }
