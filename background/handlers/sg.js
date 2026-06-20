@@ -3131,7 +3131,7 @@ export function createSgMessageHandlers(ctx) {
       const _busyTab = (typeof payload?.tabId === 'number') ? payload.tabId : null;   // v2.74.908 — monitor self-capture suppression
       if (_busyTab != null) markEngineBusy(_busyTab, true);   // v2.74.922 (CR-M1) — via the refcount
       try {
-        const { tabId, groundId = null, capabilityId = null, paramValues = null } = payload ?? {};
+        const { tabId, groundId = null, capabilityId = null, paramValues = null, ask = null } = payload ?? {};
         if (!groundId || !capabilityId) { sendResponse({ success: false, error: 'groundId + capabilityId required' }); return; }
         // v2.74.833 — accept the cap's OWN id OR its DISPATCH id (strategyId/fragmentId). The cross-Ground bind
         // (_bindStrategyOnGround) returns the DISPATCH id for an action step, so the in-order walk passed THAT to
@@ -3149,9 +3149,23 @@ export function createSgMessageHandlers(ctx) {
         // (e.g. the user disambiguated to a capability whose param schema differs from the top pick the LLM bound).
         // Reported back as `ignoredKeys` so the chat can avoid banking a confirmation on a run that silently fell
         // back to a demonstrated sample value the user never asked for.
+        // IL-2 delegation (v2.74.1117, model a) — the brain PICKS the capability but does NOT bind its params;
+        // bind the ask's VALUES to this cap's REAL schema HERE via the existing binder (bindClauseParams — knows
+        // the param names + option/category vocabulary), so the value lands in the right field instead of being
+        // guessed. Only when no paramValues were supplied (the deterministic callers pre-bind + pass paramValues).
+        let effectiveParamValues = paramValues;
+        if ((!effectiveParamValues || !Object.keys(effectiveParamValues).length) && typeof ask === 'string' && ask.trim()) {
+          const usedParams = (Array.isArray(cap.params) ? cap.params : []).filter((p) => p && p.name && p.used);
+          if (usedParams.length) {
+            try {
+              const bp = await AnthropicService.bindClauseParams({ clause: ask, params: usedParams });
+              if (bp && bp.values && typeof bp.values === 'object') { effectiveParamValues = bp.values; Logger.info('background', `REPLAY delegation bound ${Object.keys(bp.values).length} param(s) from ask "${ask.slice(0, 50)}"`); }
+            } catch (e) { Logger.warn('background', `REPLAY delegation bind failed: ${e.message}`); }
+          }
+        }
         const ignoredKeys = [];
-        if (paramValues && typeof paramValues === 'object') {
-          for (const [k, v] of Object.entries(paramValues)) {
+        if (effectiveParamValues && typeof effectiveParamValues === 'object') {
+          for (const [k, v] of Object.entries(effectiveParamValues)) {
             if (k && strategyParamValues[k] !== undefined) strategyParamValues[k] = String(v ?? '');
             else if (k) ignoredKeys.push(k);
           }
