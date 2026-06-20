@@ -727,15 +727,22 @@ export function createSgMessageHandlers(ctx) {
         let tabUrl = '';
         if (typeof tabId === 'number') { try { tabUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
         if (!groundId && tabUrl) { try { groundId = _groundIdForUrl(tabUrl, await StorageManager.getAllGrounds()); } catch { /* */ } }
-        let caps = [];
+        // v2.74.1121 — feed the brain the context the substrate already computes but it was blind to:
+        //   #1 affordances (what's on the page now) · #3 which caps are established (aliased) · #5 coverage (gaps).
+        let rawCaps = [];
+        if (groundId) { try { rawCaps = ((await ctx.readSgCapabilities(groundId)) || []).filter((c) => c && isActiveCapability(c) && c.kind !== 'composite'); } catch { rawCaps = []; } }
+        const caps = rawCaps.map((c) => ({ name: c.intent || c.name, alias: c.alias }));
+        let affordances = [], coverage = null;
         if (groundId) {
           try {
-            caps = ((await ctx.readSgCapabilities(groundId)) || [])
-              .filter((c) => c && isActiveCapability(c) && c.kind !== 'composite')
-              .map((c) => ({ name: c.intent || c.name, alias: c.alias }));
-          } catch { caps = []; }
+            const pm = await ctx.readLocaleCache(groundId, ctx.normalizeUrl(tabUrl || ''));
+            const model = pm && pm.model;
+            affordances = localeAffordanceLabels(model);                                   // #1 — the live page vocabulary
+            const goals = (model && model.goals && typeof model.goals === 'object') ? Object.values(model.goals) : [];
+            coverage = authoringCoverage(goals, rawCaps);                                   // #5 — taught vs known gaps
+          } catch { /* */ }
         }
-        const answer = await AnthropicService.answerAsk({ ask, capabilities: caps });
+        const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl });
         sendResponse({ success: true, answer, groundId: groundId || null });
       } catch (err) {
         Logger.error('background', `BRAIN_ANSWER failed: ${err.message}`);

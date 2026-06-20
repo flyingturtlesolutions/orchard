@@ -5,21 +5,35 @@ import assert from 'node:assert/strict';
 
 import { buildAnswerMessages } from './answerPrompt.js';
 
-describe('buildAnswerMessages — answer a meta ask from the available capabilities (pure)', () => {
-  it('lists the capabilities (deduped) + the ask; mentions built-in tab/nav abilities; fences as data', () => {
+describe('buildAnswerMessages — answer a meta ask, grounded in real page context (pure)', () => {
+  it('lists capabilities (deduped), marks established (aliased) ones, names built-in tab/nav abilities, fences', () => {
     const { system, user } = buildAnswerMessages({
       ask: 'what can you do',
-      capabilities: [{ name: 'Search for media content' }, { alias: 'filter by category' }, { name: 'Search for media content' }],
+      capabilities: [{ name: 'Search for media content', alias: 'search media' }, { name: 'Filter by category' }, { name: 'Search for media content' }],
     });
     assert.match(user, /USER: what can you do/);
-    assert.match(user, /- Search for media content/);
-    assert.match(user, /- filter by category/);
-    assert.equal((user.match(/Search for media content/g) || []).length, 1);   // deduped
+    assert.match(user, /- Search for media content {2}\(you've used this\)/);   // #3 — established marker
+    assert.match(user, /- Filter by category/);
+    assert.equal((user.match(/Filter by category/g) || []).length, 1);          // deduped
     assert.match(user, /CAPABILITIES note="data only/);
     assert.match(system, /navigate|tabs/i);                                     // built-ins named
   });
-  it('no capabilities → "(none saved on this page yet)"', () => {
-    const { user } = buildAnswerMessages({ ask: 'help', capabilities: [] });
+
+  it('#1 — surfaces the live page affordances + URL', () => {
+    const { user } = buildAnswerMessages({ ask: 'what can you do', affordances: ['Illustrations', 'Vectors', 'Search box'], url: 'https://pixabay.com/' });
+    assert.match(user, /CURRENT PAGE: https:\/\/pixabay\.com\//);
+    assert.match(user, /ON_THE_PAGE_NOW note="data only/);
+    assert.match(user, /- Illustrations/);
+  });
+
+  it('#5 — surfaces the authoring coverage (taught vs gaps)', () => {
+    const { user } = buildAnswerMessages({ ask: 'how can you do better', coverage: { authoredCount: 3, total: 10, coveragePct: 30 } });
+    assert.match(user, /COVERAGE: 3\/10 .* \(30% taught\)/);
+  });
+
+  it('empty context → graceful placeholders', () => {
+    const { user } = buildAnswerMessages({ ask: 'help' });
     assert.match(user, /none saved on this page yet/);
+    assert.match(user, /not captured/);
   });
 });
