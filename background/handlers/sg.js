@@ -18,6 +18,7 @@ import { evaluatePostcondition } from '../../Core/postcondition.js';
 import { focusDecision, FOCUS_SETTING_KEY } from '../../Core/focusGrammar.js';   // FM-1 (v2.74.968) — the pure focus-grab verdict
 import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord, buildResultsLandmarkRecord, buildOutcomePerspective, findMatchingPerspective, buildPerspectiveGate, buildDestinationPerspective, pickDestinationLandmark, validateConditionRefs } from '../../Core/accept.js';
 import { authoringCoverage } from '../../Core/select.js';   // GA-7 — Locale→capability "done" signal
+import { mergeGaps, summarizeGaps } from '../../Core/gapRegistry.js';   // PS-0 — the per-Ground capability-gap registry (Orchard's demand signal)
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
 import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
@@ -743,6 +744,19 @@ export function createSgMessageHandlers(ctx) {
           } catch { /* */ }
         }
         const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl });
+        // PS-0 (v2.74.1123) — persist Orchard's capability-gap enumeration instead of discarding it: the durable,
+        // per-Ground DEMAND signal PS-1 arms into the interaction monitor for passive harvest. Non-fatal/best-effort.
+        try {
+          if (groundId) {
+            const candidates = await AnthropicService.enumerateGaps({ ask, capabilities: caps, affordances, url: tabUrl });
+            if (Array.isArray(candidates) && candidates.length) {
+              const merged = mergeGaps(await ctx.readGaps(groundId), candidates, { now: Date.now() });
+              await ctx.writeGaps(groundId, merged);
+              const gs = summarizeGaps(merged);
+              try { Logger.info('background', `GAPS ▸ ${gs.total} for ${groundId} (+${candidates.length} enumerated, ${gs.open} open)`); } catch { /* */ }
+            }
+          }
+        } catch (e) { try { Logger.warn('background', `IL_ANSWER gap-persist non-fatal: ${e.message}`); } catch { /* */ } }
         sendResponse({ success: true, answer, groundId: groundId || null });
       } catch (err) {
         Logger.error('background', `IL_ANSWER failed: ${err.message}`);

@@ -31,6 +31,7 @@ import { buildRouterMessages, parseRouterOutput } from '../Core/routerPrompt.js'
 import { buildStepMessages, parseStepDecision } from '../Core/stepPrompt.js';   // IL-2 — the inference-layer step controller prompt (fenced palette + observation)
 import { buildJudgeMessages, parseJudgeDecision } from '../Core/judgePrompt.js';   // IL-2 — the IL-as-user-standin match judge (pick the capability matchCapability found; no re-bind)
 import { buildAnswerMessages } from '../Core/answerPrompt.js';   // IL-2 — Orchard ANSWERING a meta/conversational ask from the available capabilities
+import { buildGapMessages, parseGaps } from '../Core/gapPrompt.js';   // PS-0 — Orchard's STRUCTURED capability-gap enumeration (the per-Ground demand signal)
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL             = 'claude-sonnet-4-5';
@@ -5269,6 +5270,23 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     const { system, user } = buildAnswerMessages({ ask, capabilities: Array.isArray(capabilities) ? capabilities : [], affordances, coverage, url });
     const res = await AnthropicService.#call(system, user, 700, [], { role: 'describe', operation: 'il-answer' });   // room for a substantive, reflective answer
     return (res && res.success !== false && typeof res.text === 'string' && res.text.trim()) ? res.text.trim() : null;
+  }
+
+  /**
+   * PS-0 — Orchard enumerating its capability GAPS for a Ground: the capabilities this page SHOULD afford but
+   * that aren't saved yet. The STRUCTURED twin of answerAsk's reflective half — instead of prose it returns a
+   * machine-readable list `[{intent, verbHint, expectedIdentity}]` that Core/gapRegistry stores as the per-Ground
+   * DEMAND signal (PS-1 arms it into the monitor for passive harvest). Grounded + fenced in Core/gapPrompt.js;
+   * the prompt asks ONLY for gaps plausible on this page (§2.1 grounding gate). Fails safe to [].
+   * @param {{ask?:string, capabilities?:Array<object>, affordances?:Array<string>, url?:string}} args
+   * @returns {Promise<Array<{intent:string,verbHint:string|null,expectedIdentity:object|null}>>}
+   */
+  static async enumerateGaps({ ask, capabilities, affordances, url } = {}) {
+    if (!(await AnthropicService.hasLlm())) return [];
+    const { system, user } = buildGapMessages({ ask, capabilities: Array.isArray(capabilities) ? capabilities : [], affordances, url });
+    const res = await AnthropicService.#call(system, user, 600, [], { role: 'describe', operation: 'enumerate-gaps' });
+    if (!res || res.success === false) return [];
+    return parseGaps(res.text);
   }
 
   /**
