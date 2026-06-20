@@ -30,6 +30,7 @@ import { ensureFreshSession } from './Cloud/CloudTokenStore.js';
 import { buildRouterMessages, parseRouterOutput } from '../Core/routerPrompt.js';   // R-3 — front-door router prompt (no DOM; fenced catalog)
 import { buildStepMessages, parseStepDecision } from '../Core/stepPrompt.js';   // IL-2 — the brain-loop step controller prompt (fenced palette + observation)
 import { buildJudgeMessages, parseJudgeDecision } from '../Core/judgePrompt.js';   // IL-2 — the brain-as-user-standin match judge (pick the capability matchCapability found; no re-bind)
+import { buildAnswerMessages } from '../Core/answerPrompt.js';   // IL-2 — the brain ANSWERING a meta/conversational ask from the available capabilities
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL             = 'claude-sonnet-4-5';
@@ -5255,6 +5256,19 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     const res = await AnthropicService.#call(system, user, 200, [], { role: 'routing', operation: 'judge-match' });
     if (!res || res.success === false) return { ref: null, reason: 'judge-unavailable' };
     return parseJudgeDecision(res.text);
+  }
+
+  /**
+   * IL-2 — the brain ANSWERING a meta / conversational ask ("what can you do?", "can you X?") when there's
+   * nothing to RUN. Free-text reply grounded ONLY in the capabilities available on the page + the built-in
+   * nav/tab abilities (Core/answerPrompt.js fences the capability list as data). @param {{ask:string,
+   * capabilities:Array<object>}} args  @returns {Promise<string|null>}
+   */
+  static async answerAsk({ ask, capabilities } = {}) {
+    if (!(await AnthropicService.hasLlm())) return null;
+    const { system, user } = buildAnswerMessages({ ask, capabilities: Array.isArray(capabilities) ? capabilities : [] });
+    const res = await AnthropicService.#call(system, user, 400, [], { role: 'describe', operation: 'brain-answer' });
+    return (res && res.success !== false && typeof res.text === 'string' && res.text.trim()) ? res.text.trim() : null;
   }
 
   /**

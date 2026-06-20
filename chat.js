@@ -3057,8 +3057,12 @@ async function _tryBrainCommand(text) {
   let m = null;
   try { m = await _orchReq('ORCH_MATCH', { tabId, ask }); } catch { /* */ }
   if (!m || m.success === false || m.decision === 'miss' || !m.capabilityId) {
-    _setMessageBody(msg, `🧠 No saved capability matched “${ask}” on this page.`);
-    try { _orchLog(`BRAIN ▸ "${String(ask).slice(0, 50)}" → no match`); } catch { /* */ }
+    // No grounded action to run → the brain ANSWERS the ask (meta/conversational — "what can you do?",
+    // "can you X?") from what it CAN do here, instead of dead-ending (v2.74.1119).
+    let answer = null;
+    try { const r = await _orchReq('BRAIN_ANSWER', { ask, tabId }); answer = r && r.answer; } catch { /* */ }
+    _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 I don’t have a saved capability for “${ask}” on this page yet — want to show me?`);
+    try { _orchLog(`BRAIN ▸ "${String(ask).slice(0, 50)}" → ${answer ? 'answered' : 'no match'}`); } catch { /* */ }
     return true;
   }
 

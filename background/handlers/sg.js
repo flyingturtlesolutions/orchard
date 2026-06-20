@@ -717,6 +717,32 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // IL-2 (v2.74.1119) — BRAIN_ANSWER: the brain handles a META / conversational ask ("what can you do?") when
+    // nothing matched. Reads the FULL capability set for this Ground (not a lexical top-k — the user wants the
+    // whole picture) + answers from it via AnthropicService.answerAsk. Resolves the Ground like ROUTE_ASK.
+    BRAIN_ANSWER: async (payload, _sender, sendResponse) => {
+      try {
+        const ask = String(payload?.ask ?? '').trim();
+        let { tabId, groundId } = payload ?? {};
+        let tabUrl = '';
+        if (typeof tabId === 'number') { try { tabUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
+        if (!groundId && tabUrl) { try { groundId = _groundIdForUrl(tabUrl, await StorageManager.getAllGrounds()); } catch { /* */ } }
+        let caps = [];
+        if (groundId) {
+          try {
+            caps = ((await ctx.readSgCapabilities(groundId)) || [])
+              .filter((c) => c && isActiveCapability(c) && c.kind !== 'composite')
+              .map((c) => ({ name: c.intent || c.name, alias: c.alias }));
+          } catch { caps = []; }
+        }
+        const answer = await AnthropicService.answerAsk({ ask, capabilities: caps });
+        sendResponse({ success: true, answer, groundId: groundId || null });
+      } catch (err) {
+        Logger.error('background', `BRAIN_ANSWER failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
     // PB-4 (R8) — run a TRIAL of an already-RESOLVED bundle (Studio's resolve flow) as the intent-truth
     // proof. v2.74.950 (CR-X3) — migrated from the legacy background switch: this was the un-migrated
     // TWIN of RUN_SG_TRIAL that silently missed the .912 handler-level fix; it now lives beside its twin
