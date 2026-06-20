@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 import {
   gapKey, normalizeGap, mergeGaps, setStatus, summarizeGaps, serializeGaps, deserializeGaps,
-  matchInteractionToGap, recordFulfillment,
+  matchInteractionToGap, recordFulfillment, matchAskToGap,
 } from './gapRegistry.js';
 
 describe('gapRegistry — derive/dedup/age a per-Ground capability-gap registry (pure)', () => {
@@ -139,5 +139,29 @@ describe('gapRegistry PS-1 — passive harvest match + record (pure)', () => {
   it('a harvested gap survives the serialize round-trip with its fulfillment', () => {
     const gaps = recordFulfillment(armedGap(), 'play pause the video', { role: 'button', accessibleName: 'Play' }, 3);
     assert.deepEqual(deserializeGaps(serializeGaps(gaps)), gaps);
+  });
+});
+
+describe('gapRegistry PS-4 — match an ask to a harvested gap (pure)', () => {
+  const harvested = () => {
+    let g = mergeGaps([], [{ intent: 'Subscribe to the channel' }, { intent: 'Play/Pause the video' }, { intent: 'Open settings' }], { now: 1 });
+    g = setStatus(g, 'subscribe to the channel', 'harvested', 2);
+    g = setStatus(g, 'play pause the video', 'harvested', 2);
+    return g;   // 'open settings' stays OPEN (never harvested)
+  };
+
+  it('matches by keyword overlap over harvested gap intents', () => {
+    const g = harvested();
+    assert.equal(matchAskToGap('subscribe', g), 'subscribe to the channel');
+    assert.equal(matchAskToGap('pause the video', g), 'play pause the video');
+    assert.equal(matchAskToGap('can you pause this video for me', g), 'play pause the video');   // stopwords stripped
+  });
+
+  it('only considers HARVESTED gaps; returns null when nothing meaningfully overlaps', () => {
+    const g = harvested();
+    assert.equal(matchAskToGap('open settings', g), null);      // "Open settings" is still OPEN, not harvested
+    assert.equal(matchAskToGap('go to pixabay home', g), null); // no overlap with any harvested gap
+    assert.equal(matchAskToGap('', g), null);
+    assert.equal(matchAskToGap('what can you do', g), null);    // a meta ask won't wrongly synthesize
   });
 });

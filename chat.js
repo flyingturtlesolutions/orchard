@@ -3057,6 +3057,18 @@ async function _tryIlCommand(text) {
   let m = null;
   try { m = await _orchReq('ORCH_MATCH', { tabId, ask }); } catch { /* */ }
   if (!m || m.success === false || m.decision === 'miss' || !m.capabilityId) {
+    // PS-4 (v2.74.1127) — REACTIVE synthesis trigger: before dead-ending, try to STAGE a capability from a
+    // HARVESTED gap matching the ask (the user has already DONE this action here) and run it. The run goes through
+    // the existing runner, so a write hits the read-only-floor / write-confirm — synthesis never auto-acts. Strictly
+    // additive: no harvested gap matches → falls through to the meta answer below (today's behaviour).
+    try {
+      const syn = await _orchReq('SYNTHESIZE_FROM_GAP', { ask, tabId, groundId: m && m.groundId });
+      if (syn && syn.synthesized && syn.capabilityId) {
+        try { _orchLog(`SYNTH ▸ "${String(ask).slice(0, 50)}" → staged "${syn.intent || syn.capabilityId}"`); } catch { /* */ }
+        await _orchRun(msg, { groundId: syn.groundId || (m && m.groundId), tabId, ask, capabilityId: syn.capabilityId, intent: syn.intent, paramValues: {} });
+        return true;
+      }
+    } catch { /* */ }
     // No grounded action to run → Orchard ANSWERS the ask (meta/conversational — "what can you do?",
     // "can you X?") from what it CAN do here, instead of dead-ending (v2.74.1119).
     let answer = null;

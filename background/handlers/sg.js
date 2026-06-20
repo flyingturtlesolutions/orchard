@@ -18,7 +18,7 @@ import { evaluatePostcondition } from '../../Core/postcondition.js';
 import { focusDecision, FOCUS_SETTING_KEY } from '../../Core/focusGrammar.js';   // FM-1 (v2.74.968) — the pure focus-grab verdict
 import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord, buildResultsLandmarkRecord, buildOutcomePerspective, findMatchingPerspective, buildPerspectiveGate, buildDestinationPerspective, pickDestinationLandmark, validateConditionRefs } from '../../Core/accept.js';
 import { authoringCoverage } from '../../Core/select.js';   // GA-7 — Locale→capability "done" signal
-import { mergeGaps, summarizeGaps, matchInteractionToGap, recordFulfillment, setStatus } from '../../Core/gapRegistry.js';   // PS-0/1/3 — capability-gap registry (enumerate + harvest + promote)
+import { mergeGaps, summarizeGaps, matchInteractionToGap, recordFulfillment, setStatus, matchAskToGap } from '../../Core/gapRegistry.js';   // PS-0/1/3/4 — capability-gap registry (enumerate + harvest + promote + ask-match)
 import { addObservation } from '../../Core/observedPool.js';   // PS-2 — the long-tail observed pool (catch-net for unmatched touches)
 import { buildHarvestCapability } from '../../Core/synthFromGap.js';   // PS-3 — compose an UNVERIFIED capability from a harvested gap (stage/verify-on-first-use)
 import * as CapabilitySynth from '../../Core/capabilitySynth.js';
@@ -773,9 +773,14 @@ export function createSgMessageHandlers(ctx) {
     // click, gated by the existing read-only-floor / write-confirm — synthesis never executes the action.
     SYNTHESIZE_FROM_GAP: async (payload, _sender, sendResponse) => {
       try {
-        const { groundId = null, tabId = null, gapKey = null } = payload ?? {};
-        if (!groundId || !gapKey) { sendResponse({ success: false, error: 'groundId + gapKey required' }); return; }
-        const gap = (await ctx.readGaps(groundId)).find((g) => g && g.key === gapKey);
+        let { groundId = null, tabId = null, gapKey = null, ask = null } = payload ?? {};
+        let tabUrl = '';
+        if (typeof tabId === 'number') { try { tabUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
+        if (!groundId && tabUrl) { try { groundId = _groundIdForUrl(tabUrl, await StorageManager.getAllGrounds()); } catch { /* */ } }
+        if (!groundId) { sendResponse({ success: true, synthesized: false, reason: 'no-ground' }); return; }
+        const gaps = await ctx.readGaps(groundId);
+        const key = gapKey || (ask ? matchAskToGap(ask, gaps) : null);   // PS-4 — resolve the ask → best HARVESTED gap
+        const gap = key ? gaps.find((g) => g && g.key === key) : null;
         if (!gap || gap.status !== 'harvested' || !gap.fulfillment || !gap.fulfillment.accessibleName) {
           sendResponse({ success: true, synthesized: false, reason: 'no-harvested-gap' }); return;
         }
@@ -789,8 +794,6 @@ export function createSgMessageHandlers(ctx) {
           } catch (e) { Logger.warn('background', `SYNTHESIZE_FROM_GAP probe failed: ${e.message}`); }
         }
         if (!selector) { sendResponse({ success: true, synthesized: false, reason: 'selector-unresolved' }); return; }
-        let tabUrl = '';
-        if (typeof tabId === 'number') { try { tabUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
         const localeUrl = ctx.normalizeUrl(tabUrl || '');
         const built = buildHarvestCapability({ gap, selector, localeUrl, groundId }, { now: Date.now(), newId: () => crypto.randomUUID() });
         if (!built) { sendResponse({ success: true, synthesized: false, reason: 'compose-failed' }); return; }
@@ -798,9 +801,9 @@ export function createSgMessageHandlers(ctx) {
         try { await StorageManager.savePerspective(built.perspective); } catch (e) { Logger.warn('background', `SYNTHESIZE savePerspective: ${e.message}`); }
         try { await StorageManager.saveFragment(built.fragment); } catch (e) { Logger.warn('background', `SYNTHESIZE saveFragment: ${e.message}`); }
         await ctx.writeSgCapability(groundId, built.capability);
-        await ctx.mutateGaps(groundId, (gaps) => setStatus(gaps, gapKey, 'promoted', Date.now()));
+        await ctx.mutateGaps(groundId, (g) => setStatus(g, key, 'promoted', Date.now()));
         try { Logger.info('monitor', `SYNTH ▸ "${gap.intent}" → capability ${built.capability.id} (via ${via || 'probe'}, unverified) @ ${groundId}`); } catch { /* */ }
-        sendResponse({ success: true, synthesized: true, accepted: true, capabilityId: built.capability.id, reason: 'staged' });
+        sendResponse({ success: true, synthesized: true, accepted: true, capabilityId: built.capability.id, intent: gap.intent, groundId, reason: 'staged' });
       } catch (err) {
         Logger.error('background', `SYNTHESIZE_FROM_GAP failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });

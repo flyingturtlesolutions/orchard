@@ -141,6 +141,31 @@ export function recordFulfillment(gaps, key, fulfillment, now = 0) {
   });
 }
 
+const _ASK_STOP = new Set(['the', 'a', 'an', 'to', 'of', 'on', 'in', 'for', 'my', 'this', 'that', 'it', 'please', 'can', 'you', 'could', 'would', 'and', 'with', 'me', 'is']);
+const _askTokens = (s) => String(s ?? '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).filter((t) => t.length > 2 && !_ASK_STOP.has(t));
+
+/**
+ * PS-4 — match a user ask to the best HARVESTED gap (the reactive synthesis trigger). Deterministic keyword
+ * overlap over gap intents — for the param-free single-click case the ask IS basically the action word
+ * ("subscribe", "pause"). Returns the gap key, or null when nothing meaningfully overlaps; the caller then falls
+ * through to its existing dead-end, so this is STRICTLY ADDITIVE (sometimes synthesizes, never worse). An LLM
+ * gap-judge can refine the fuzzy tail later. PURE.
+ * @param {string} ask  @param {Array<object>} gaps  @param {{status?:string}} [opts]
+ * @returns {string|null}
+ */
+export function matchAskToGap(ask, gaps, { status = 'harvested' } = {}) {
+  const at = _askTokens(ask);
+  if (!at.length) return null;
+  let best = null, score = 0;
+  for (const g of (Array.isArray(gaps) ? gaps : [])) {
+    if (!g || (status && g.status !== status)) continue;
+    const gt = _askTokens(g.intent);
+    const overlap = at.filter((t) => gt.includes(t)).length;
+    if (overlap > score) { score = overlap; best = g.key; }
+  }
+  return score > 0 ? best : null;
+}
+
 /** Status histogram (for logging / the PS-6 inspector). PURE. */
 export function summarizeGaps(gaps) {
   const out = { total: 0, open: 0, armed: 0, harvested: 0, promoted: 0, dismissed: 0 };
