@@ -3066,7 +3066,9 @@ const IL_PANEL_LEGS = {
   NEW_DEV_CONVERSATION:     { run: () => { $('btn-new-dev-conversation')?.click(); return { rendered: true }; } },
   NEW_CONVERSATION:         { run: () => { $('btn-new-conversation')?.click(); return { rendered: true }; } },
   OPEN_HISTORY:             { run: () => { $('btn-history')?.click(); }, done: '🧠 Opened conversation history.' },
-  DELETE_ALL_CONVERSATIONS: { run: () => { $('btn-delete-all-conversations')?.click(); return { rendered: true }; } },
+  // DELETE_ALL_CONVERSATIONS dropped v2.74.1137 — its button handler calls confirm(), which async-suppresses in
+  // the `il:` flow → the click is a no-op, and a `rendered:true` no-op leaves the '🧠 thinking…' placeholder STUCK
+  // (one source of the "only thinking… visible" symptom). Destructive + can't fire from a typed command → button-only.
   OPEN_STUDIO:              { run: () => { $('btn-open-studio')?.click(); }, done: '🧠 Opening Studio…' },
   // OPEN_GROUND dropped v2.74.1136 — its handler calls sidePanel.open(), which REQUIRES a real user gesture a
   // typed (async) `il:` command can't carry (unlike NEW_DEV's permission, there's no gesture-free `contains` path).
