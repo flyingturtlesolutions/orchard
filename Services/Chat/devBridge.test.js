@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, driftBroadcastSet, PREVIEW_WT, ltUsesPreview, previewRepointPlan, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer, scopeCategory, isRegress, previewToMainPlan, shouldOfferReview, parsePorcelainFiles } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, driftBroadcastSet, PREVIEW_WT, ltUsesPreview, previewRepointPlan, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer, scopeCategory, isRegress, previewToMainPlan, shouldOfferReview, parsePorcelainFiles, landTouchedHost } from './devBridge.js';
 
 describe('isRegress — whole-message regress trigger (abandon + revert preview to main)', () => {
   it('fires on the bare tokens', () => {
@@ -75,6 +75,19 @@ describe('parsePorcelainFiles — changed paths from `git status --porcelain --b
     const files = parsePorcelainFiles('## dev/y\n M a.js\n M b.js');
     assert.equal(shouldOfferReview({ ok: true, replay: false, pausing: false, conversationId: 'c', status: 'active', fileCount: files.length }), true);
     assert.equal(shouldOfferReview({ ok: true, replay: false, pausing: false, conversationId: 'c', status: 'active', fileCount: parsePorcelainFiles('## main').length }), false);
+  });
+});
+
+describe('landTouchedHost — does a land touch bridge/ host code (surfaces §4.4)', () => {
+  it('true when any path is under bridge/', () => {
+    assert.equal(landTouchedHost(['chat.js', 'bridge/host.js']), true);
+    assert.equal(landTouchedHost(['bridge/gitOps.cjs']), true);
+  });
+  it('false for panel-only / empty / nullish, and only a LEADING bridge/ segment counts', () => {
+    assert.equal(landTouchedHost(['chat.js', 'studio.js', 'Core/x.js']), false);
+    assert.equal(landTouchedHost([]), false);
+    assert.equal(landTouchedHost(null), false);
+    assert.equal(landTouchedHost(['notbridge/x.js', 'a/bridge/x.js']), false);   // must START with bridge/
   });
 });
 

@@ -309,6 +309,15 @@ export function parsePorcelainFiles(stdout) {
   return out;
 }
 
+// surfaces-§4.4 — does a landed change touch HOST code (`bridge/`)? Panel code (chat.js, devBridge.js, studio.js…) is
+// live on the preview reload, but the native host is a SEPARATE process: it exits on port-close (host.js stdin 'end'),
+// and Chrome's native messaging spawns a FRESH host from repo-root `bridge/host.js` — which is on `main` post-land — on
+// the next connect. So a `bridge/` land goes live automatically when the panel reopens; no respawn capability is needed.
+// The auto-deploy uses this only to SURFACE that refresh (so it's legible, not silent). PURE + tested.
+export function landTouchedHost(files) {
+  return (Array.isArray(files) ? files : []).some((f) => /^bridge\//.test(String(f == null ? '' : f).trim()));
+}
+
 // DBR-P3-5 (DESIGN §6.1) — the seed prompt for "fork from here": continue a (usually merged/abandoned) parent on a
 // FRESH branch+conversation off `main`. Claude Code sessions are LINEAR (no fork-a-session primitive), so the seed
 // carries the parent's concern + an optional summary + a continue cue as text; the new run starts a fresh session.
@@ -2138,7 +2147,16 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     // (NOT the typed `merge` verb), redeploy the landed `main` to the live build. LAST thing — reloadExtension restarts
     // the extension, so the drift broadcast + GC above run first. Host-code (`bridge/`) lands still need a manual host
     // respawn to take effect (deferred — slice 2b).
-    if (landed && autoDeploy) { try { console.info(`DEPLOY ▸ approve → main live (${String(landed).slice(0, 7)})`); } catch { /* */ } await _redeployToMain(); }
+    if (landed && autoDeploy) {
+      // Detect whether the land touched HOST code (`bridge/`) from the clean diff path-set (not the stat lines), so the
+      // host-refresh is legible: panel code is live on the reload below, but the host only refreshes on the panel reopen
+      // (a fresh native-messaging host loads the landed repo-root `bridge/host.js`). See landTouchedHost.
+      let hostTouched = false;
+      try { const dn = await gitOp('diffNames', { a: preMain, b: landed }); hostTouched = landTouchedHost(String((dn && dn.ok && dn.stdout) || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean)); } catch { /* best-effort — a diff failure just omits the note */ }
+      try { console.info(`DEPLOY ▸ approve → main live (${String(landed).slice(0, 7)})${hostTouched ? ' [host code — refreshes on reopen]' : ''}`); } catch { /* */ }
+      if (hostTouched) devBubble('⚙ This land changed `bridge/` (host) code. The panel reloads now; the **host** refreshes automatically when you **reopen the panel** — a fresh native-messaging host loads the landed `bridge/host.js`.');
+      await _redeployToMain();
+    }
   }
 
   // surfaces-§4.4 — push the landed `main` to the live build: at cap>1 repoint the preview worktree at `main` (the

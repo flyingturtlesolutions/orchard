@@ -92,8 +92,8 @@ On completion a task auto-enters **Review**: the `git diff --stat main…task` +
 *Exists:* `merge` (sync→test→diff→land), `regress`, durable run bubbles. *To build:* the auto-on-completion transition + the unified two-button surface (vs. the typed verbs).
 
 ### 4.4 Auto-deploy on approve — *"approved" means "live"*
-The gate drives **all three** deploy layers so the user never reasons about them again: repoint the live build to `main`, **reload the panel**, and **respawn the host** when the landed change touched `bridge/`. The "is it actually live?" hour we burned becomes a non-question.
-*To build:* a deploy step in the gate; a host self-restart signal for host-code lands.
+The gate drives the deploy so the user never reasons about it again: repoint the live build to `main` + **reload the panel**. Panel code is live immediately; **host code refreshes automatically on the panel reopen** — the native host exits on port-close (`host.js` stdin `end`) and Chrome's native messaging spawns a fresh host from repo-root `bridge/host.js` (which is on `main` post-land) on the next connect, so **no respawn capability is needed** (the "host self-restart" in earlier drafts was a phantom — confirmed v2.74.1142). The auto-deploy just **surfaces** a `bridge/`-land's host-refresh (`landTouchedHost`) so it's legible. The "is it actually live?" hour we burned becomes a non-question.
+*Built (v2.74.1140–1142):* the Approve-scoped deploy step + the host-refresh note.
 
 ### 4.5 Preview-as-selection — *not a fought pointer*
 `.wt/preview` stops being a pointer two surfaces move and becomes the target of a **"view task X"** selection. The user picks which build to load; the runtime points it. Defaults to `main` (the shipped trunk) when nothing is selected.
@@ -113,7 +113,7 @@ The gate drives **all three** deploy layers so the user never reasons about them
 | **Symmetric isolation** (high-level surface in a worktree) | **to build** | §4.1 — keystone |
 | **Version-at-land** | **to build** | §4.2 — safety gate |
 | **Auto-on-completion Review + two-button gate** | **to build** | §4.3 |
-| **Auto-deploy (panel + host + ref) on approve** | **to build** | §4.4 |
+| Auto-deploy (panel reload + host auto-refresh on reopen) on approve | **built** (v2.74.1140–1142) | §4.4 |
 | **Preview-as-selection** | **to build** | §4.5 |
 
 The dangerous machinery (safe serial integration) is done. The deltas are isolation + versioning + a thin UX gate.
@@ -125,7 +125,7 @@ The dangerous machinery (safe serial integration) is done. The deltas are isolat
 - **One live preview.** Chrome loads one unpacked extension per profile, so visual eyeballing is serial — the user selects which task to view. Execution and review are unbounded; only the final look is one-at-a-time. (Separate Chrome profiles could relax even this, but it's heavier and out of scope.)
 - **Cost, not correctness.** N parallel agents = N parallel LLM streams. That's the managed-proxy/budget layer's job to meter (`DESIGN_inference_layer.md` §5/§2.6); concurrency is a *spend* dial, not a safety one.
 - **Overlapping tasks → one conflict at land.** Two tasks on the same lines = a merge conflict the queue surfaces as a Review state. Unavoidable when work overlaps; mitigated by keeping surfaces on different code (the high/low split already does this).
-- **Host-code lands need a respawn.** A task that edits `bridge/host.js` only goes live after the host restarts (§4.4 automates this, but it's a real moment, not instantaneous).
+- **Host-code lands refresh on reopen, not instantly.** A task that edits `bridge/host.js` goes live when the panel reopens — a fresh native-messaging host loads it (automatic, no extra mechanism), but a real moment, not instantaneous. The auto-deploy surfaces a note so it's expected.
 
 ---
 
