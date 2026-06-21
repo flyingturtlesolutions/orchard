@@ -1,6 +1,6 @@
 # DESIGN — Surfaces (the unified task lifecycle)
 
-**Status:** proposal · design-only · 2026-06-20 · v2.74.x era
+**Status:** BUILT — code-complete, **live-verification pending** · 2026-06-20 · v2.74.1138–1147 · see §9 (as-built)
 **Relation:** *generalizes* `DESIGN_dev_branches.md` (the low-level dev bridge — branches, worktrees, the land flow) into a **surface-agnostic** task model; companion to `DESIGN_inference_layer.md` (the page-side agent). The dev bridge is one surface; this doc is how the user tasks **any** agent and ships the result with the wiring out of sight.
 
 > One line: **pick a surface, pin a task, approve the result** — and every branch / worktree / sync / test / merge / version / deploy step happens below the waterline. The user sees three states and takes one action each.
@@ -150,3 +150,26 @@ After (1)+(2) the model is *safe and symmetric*; (3)–(5) are the UX that makes
 - **Cross-task dependencies** — task B that *needs* task A's land first (a DAG of tasks, not just a flat queue). Out of scope for v1; the flat FIFO covers the common case.
 - **Conflict-at-land UX** — the exact "needs your input" Review surface when a re-sync conflicts (auto-resolve vs. hand to the user vs. re-task the surface).
 - **Where the high-level surface runs** — this chat is a separate CLI today; symmetric isolation needs it to either adopt the worktree convention or be fronted by the same task runtime.
+
+---
+
+## 9. As-built (v2.74.1138–1147)
+
+The whole model above is **implemented**. It turned out to be *less* than a from-scratch runtime: the dev bridge's machinery (worktrees, the land queue, the review/merge flow) was already surface-agnostic, so most of the keystone was "thread a surface config through what exists."
+
+| Plan | Built as | Version |
+|---|---|---|
+| §4.2 version-at-land | `bridge/setVersion.cjs` + host stamp in the land flow; agents stop hand-bumping on dev branches | 1138 |
+| §4.3 review gate | run-`done` → `_offerReview` (cap-correct worktree status) → Approve/Preview/Discard card | 1139–1140 |
+| §4.4 auto-deploy | Approve → `_redeployToMain` (preview→main + reload); host code refreshes on reopen (native-messaging respawn — the "host self-restart" was a phantom); `landTouchedHost` note | 1140–1142 |
+| §4.5 preview-as-selection | drawer per-dev-row **Preview** + **↩ Preview main** (`previewConversation`/`previewMain`) | 1141 |
+| §8 keystone — surface registry | `bridge/surfaces.cjs` — `low`/`high` configs, one git-free trust posture | 1143 (K1) |
+| §8 keystone — host engine | `startRun` injects the surface altitude preamble (`--append-system-prompt`); `high` = design altitude, `low` = unchanged | 1144 (K2/K4) |
+| §8 keystone — activation | the **`surface high\|low\|design`** dev verb sets `conversation.surface`; the `dev:` run threads it to the host; a violet **design** badge in the drawer | 1145, 1147 (K3) |
+| §8 keystone — lands through the gate | **free** — the review gate / queue / version-at-land / auto-deploy are surface-agnostic | (K5) |
+
+**The high surface, concretely:** a dev conversation set to `high` → spawns with the design-altitude preamble → works in an isolated worktree → lands through the same review gate + version-at-land + auto-deploy, never committing to `main`. The terminal chat is **not yet** retired (that migration is the remaining big piece); the in-panel high surface *exists* alongside it.
+
+**Live-verification pending — and that matters here more than usual.** Every behaviour-pure piece is unit-tested (~40 new tests, suite green), but the dev bridge lives in a host process + panel + worktrees the headless harness can't reach. **All six bugs found this session lived in that live-only seam** — the merge-driver dedup gap, the cap>1 diffstat, the host-respawn phantom, `_redeployToMain` at cap=1, and (twice the worst) the `surface` field that the store's `patchMeta` allowlist **silently dropped**, so the keystone looked "functionally complete" while saving nothing. Lesson burned in: **green + code-traced ≠ works** for this subsystem; the live eyeball is where the real bugs are, not optional polish. Confirm with: `surface high` → drawer flips to a `design` badge → `dev: <a design task>` → trace shows `SURFACE ▸ high … preamble injected`, the agent works at a design altitude → Review → Approve → lands.
+
+**Remaining (post-eyeball):** the new-conversation Dev/Design **picker** (UX nicety — the `surface` verb already does this) · `gl`/`bug` runs carrying the conversation's surface (today only `dev:` does — minor consistency) · the **terminal-retirement migration** (make the in-panel high surface the primary entry — a real project, needs its own design pass once the keystone is confirmed live).
