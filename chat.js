@@ -488,7 +488,8 @@ async function _renderHistoryList() {
     const isDev = conv.kind === 'dev';   // v2.74.1029 — dev (Claude Code) conversations get an amber badge
     // v2.74.1070 — non-dev (website-operating) conversations get a blue "APP" badge, mirroring the dev one,
     // so every row is self-identifying at a glance instead of the agent kind reading as an unlabelled default.
-    const badge = isDev ? '<span class="history-item-badge">dev</span>'
+    // surfaces §2.2 — a high-altitude (Design) dev conversation gets a distinct violet "design" badge; low/absent = the dev badge.
+    const badge = isDev ? (conv.surface === 'high' ? '<span class="history-item-badge design">design</span>' : '<span class="history-item-badge">dev</span>')
                         : '<span class="history-item-badge app">app</span>';
     const item = document.createElement('div');
     item.className = `history-item${conv.id === _currentConversationId ? ' active' : ''}${isDev ? ' dev' : ' app'}`;

@@ -1413,6 +1413,7 @@ textarea {
    Declared before .history-item.active so an active row's accent left-rail wins (equal specificity, later rule). */
 .history-item.app { border-left: 2px solid #5c8bc9; padding-left: calc(var(--sp-3) - 2px); }
 .history-item-badge.app { background: rgba(92, 139, 201, 0.18); color: #5c8bc9; }
+.history-item-badge.design { background: rgba(160, 122, 201, 0.18); color: #a07ac9; }   /* surfaces §2.2 — a high-altitude (Design) dev conversation */
 .history-item-badge {
   display: inline-block;
   margin-right: var(--sp-2);

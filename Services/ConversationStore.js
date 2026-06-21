@@ -185,7 +185,7 @@ export const ConversationStore = {
    * @param {{ title?: string }} [init]
    * @returns {Promise<Conversation>}
    */
-  async create({ title = 'New conversation', kind = 'agent', branch = null, concern = null, sessionId = null, status = 'active', seed = null } = {}) {
+  async create({ title = 'New conversation', kind = 'agent', branch = null, concern = null, sessionId = null, status = 'active', seed = null, surface = null } = {}) {
     const id = crypto.randomUUID();
     const now = Date.now();
     // v2.74.1029 — `kind`: 'agent' (the website-operating assistant, the default) or 'dev' (a Claude Code
@@ -201,10 +201,11 @@ export const ConversationStore = {
       conv.sessionId = sessionId;
       conv.status = (status === 'merged' || status === 'abandoned') ? status : 'active';
       if (seed != null) conv.seed = String(seed);   // v2.74.1053 (DBR-P3-1) — a split-seeded conversation: chat.js pre-fills the input from this on first open, then clears it
+      conv.surface = surface === 'high' ? 'high' : 'low';   // v2.74.1147 (surfaces §2.2) — the dev surface's altitude; default low (= today's dev behaviour)
     }
     await chrome.storage.local.set({ [convKey(id)]: conv });
     const entry = { id, title, kind: k, updatedAt: now };
-    if (k === 'dev') entry.status = conv.status;   // mirror status so list()/history can group without a body load
+    if (k === 'dev') { entry.status = conv.status; entry.surface = conv.surface; }   // mirror status + surface so list()/history (the drawer badge) read them without a body load
     await _addToIndex(entry);
     return conv;
   },
@@ -214,7 +215,7 @@ export const ConversationStore = {
    * mergedAt / mergeCommit). Bumps updatedAt and mirrors `status` (+ title) into the index. Idempotent;
    * no-op (returns null) if the conversation is gone (mirrors updateMessage's delete-race narrowing).
    * @param {string} id
-   * @param {{branch?:string, concern?:string, sessionId?:string, status?:string, mergedAt?:number, mergeCommit?:string, title?:string, syncedMain?:string}} fields
+   * @param {{branch?:string, concern?:string, sessionId?:string, status?:string, mergedAt?:number, mergeCommit?:string, title?:string, syncedMain?:string, surface?:string}} fields
    * @returns {Promise<Conversation|null>}
    */
   async patchMeta(id, fields = {}) {
@@ -222,7 +223,7 @@ export const ConversationStore = {
     if (!conv) return null;
     // v2.74.1045 (DBR-P2-2) — `syncedMain`: the `main` commit this branch last synced onto (feeds the P2-5 merge freshness check).
     // v2.74.1053 (DBR-P3-1) — `seed`: the split-seed prompt; cleared (→ null) by chat.js once pre-filled into the input.
-    for (const k of ['branch', 'concern', 'sessionId', 'status', 'mergedAt', 'mergeCommit', 'title', 'syncedMain', 'seed', 'titledByLlm']) {   // .1102 — titledByLlm: the drawer label was set by Claude (don't let the keyword fallback clobber it)
+    for (const k of ['branch', 'concern', 'sessionId', 'status', 'mergedAt', 'mergeCommit', 'title', 'syncedMain', 'seed', 'titledByLlm', 'surface']) {   // .1102 — titledByLlm; .1147 — surface (the dev altitude; WITHOUT this, `surface high` silently dropped the field and never activated the high surface)
       if (k in fields) conv[k] = fields[k];
     }
     conv.updatedAt = Date.now();
@@ -232,6 +233,7 @@ export const ConversationStore = {
     const patch = { updatedAt: conv.updatedAt };
     if ('status' in fields) patch.status = conv.status;
     if ('title' in fields) patch.title = conv.title;
+    if ('surface' in fields) patch.surface = conv.surface;   // v2.74.1147 — mirror the altitude so the drawer badge updates without a body load
     await _updateIndexMeta(id, patch);
     return conv;
   },
