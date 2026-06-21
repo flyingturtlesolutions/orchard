@@ -318,6 +318,20 @@ export function landTouchedHost(files) {
   return (Array.isArray(files) ? files : []).some((f) => /^bridge\//.test(String(f == null ? '' : f).trim()));
 }
 
+// keystone K3 (docs/DESIGN_surfaces.md §2.2/§8) — parse the `surface` verb that sets/shows THIS dev conversation's
+// surface (the unified runtime's altitude): `surface` shows it; `surface high|low|design|dev` (or bare `design`) sets
+// it. `design`→high, `dev`→low. Returns { show:true } | { set:'high'|'low' } | null (not a surface verb). PURE + tested.
+// (The panel can't `require` the CJS registry — browser ESM — so the two ids live here too, in lockstep with surfaces.cjs.)
+export function parseSurfaceVerb(text) {
+  const t = String(text ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (t === 'surface') return { show: true };
+  const norm = (w) => (w === 'design' ? 'high' : w === 'dev' ? 'low' : w);
+  const m = t.match(/^surface (high|low|design|dev)$/);
+  if (m) return { set: norm(m[1]) };
+  if (t === 'design') return { set: 'high' };
+  return null;
+}
+
 // DBR-P3-5 (DESIGN §6.1) — the seed prompt for "fork from here": continue a (usually merged/abandoned) parent on a
 // FRESH branch+conversation off `main`. Claude Code sessions are LINEAR (no fork-a-session primitive), so the seed
 // carries the parent's concern + an optional summary + a continue cue as text; the new run starts a fresh session.
@@ -1608,6 +1622,12 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       await _regress(convId);
       return true;
     }
+    // keystone K3 (DESIGN_surfaces §2.2) — `surface` / `surface high|low|design` sets THIS conversation's altitude; the
+    // next `dev:` run carries it so the host injects the surface preamble (K2/K4). Whole-message, dev-conversation only.
+    {
+      const sv = devConv ? parseSurfaceVerb(t) : null;
+      if (sv) { if (!skipEcho) appendMessage({ role: 'user', body: t }); await _handleSurface(convId, sv); return true; }
+    }
     // Inside a dev conversation, bare input IS a dev command: a standalone log verb (gl/gc/gch) or a
     // `bug:`/`dev:` prefix is taken verbatim; anything else (a sub-verb like `pause`/`history`/`model …`, or
     // a plain task) is normalized to the `dev: …` form so the existing branch table handles it unchanged —
@@ -1804,7 +1824,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       // guard the run itself the way `merge`/`sync` already do — refuse with a clear `lt` next-step. Fails OPEN (a
       // host that can't answer `currentBranch` never blocks), and is SKIPPED under worktree mode (cap>1, from the
       // last `pool` snapshot): there the host spawns in `.wt/<branch>` regardless of what's loaded.
-      const convBranch = convId ? (((await ConversationStore.load(convId).catch(() => null)) || {}).branch || null) : null;
+      const _devConv = convId ? await ConversationStore.load(convId).catch(() => null) : null;
+      const convBranch = (_devConv && _devConv.branch) || null;
+      const convSurface = (_devConv && _devConv.surface) || null;   // keystone K3 — the conversation's altitude ('high'/'low'); absent → low (host default)
       const worktreeMode = !!(_lastPool && _lastPool.cap > 1);
       if (convBranch && !worktreeMode) {
         const cur = await gitOp('currentBranch');
@@ -1830,6 +1852,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       // cap=1 (the host ignores it: repo-root spawn unless ORCHARD_MAX_CONCURRENT>1). Reuses convBranch from the
       // loaded-tree guard above.
       if (convBranch) payload.branch = convBranch;
+      if (convSurface) payload.surface = convSurface;   // keystone K3 — carry the conversation's altitude so the host injects the surface preamble (K2/K4)
       startRun(payload, `dev${resumeSessionId ? ' (continuing)' : isNew ? ' (new thread)' : ''} · ${_short(ask, 80)}`, { conversationId: convId, background: _activeRuns() > 0 });   // DBR-P4-4 — first run = foreground; a concurrent one (cap>1) = background
       return true;
     }
@@ -2242,6 +2265,24 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
       bubble.bodyEl.appendChild(actions);
     } catch { /* no buttons → the offer stays as text; the verbs still work */ }
     try { console.info(`REVIEW ▸ offer ${branch} — ${n} file(s) changed`); } catch { /* */ }
+  }
+
+  // keystone K3 — show or SET this dev conversation's surface (altitude). Stored on the conversation record; ABSENT =
+  // 'low' (Dev), so existing conversations need no migration. The next `dev:` run reads it + carries it to the host,
+  // which injects the surface preamble (K2/K4). SURFACE ▸ marker (panel-side; the host logs its own at spawn).
+  async function _handleSurface(convId, parsed) {
+    let conv = null;
+    try { conv = convId ? await ConversationStore.load(convId) : null; } catch { conv = null; }
+    const label = (s) => (s === 'high' ? 'Design (high-level / conceptual)' : 'Dev (low-level / implementation)');
+    if (parsed.show) {
+      const cur = (conv && conv.surface) || 'low';
+      devBubble(`surface — this conversation is **${label(cur)}**. \`surface high\` (Design) / \`surface low\` (Dev) to change — applies to the next \`dev:\` run.`);
+      return;
+    }
+    const next = parsed.set === 'high' ? 'high' : 'low';
+    try { await ConversationStore.patchMeta(convId, { surface: next }); } catch { /* best-effort */ }
+    try { console.info(`SURFACE ▸ set ${next}`); } catch { /* */ }
+    devBubble(`✓ surface → **${label(next)}**. The next \`dev:\` run spawns at this altitude.`);
   }
 
   // DBR-P2-6 (DESIGN §5/U13) — `delete branch` (HARD): irreversible. A confirm button → gated host `branchDelete`

@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, driftBroadcastSet, PREVIEW_WT, ltUsesPreview, previewRepointPlan, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer, scopeCategory, isRegress, previewToMainPlan, shouldOfferReview, parsePorcelainFiles, landTouchedHost } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, driftBroadcastSet, PREVIEW_WT, ltUsesPreview, previewRepointPlan, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer, scopeCategory, isRegress, previewToMainPlan, shouldOfferReview, parsePorcelainFiles, landTouchedHost, parseSurfaceVerb } from './devBridge.js';
 
 describe('isRegress — whole-message regress trigger (abandon + revert preview to main)', () => {
   it('fires on the bare tokens', () => {
@@ -53,6 +53,27 @@ describe('shouldOfferReview — the review-gate predicate (surfaces §4.3)', () 
   it('tolerates an empty arg (no crash → no offer)', () => {
     assert.equal(shouldOfferReview(), false);
     assert.equal(shouldOfferReview({}), false);
+  });
+});
+
+describe('parseSurfaceVerb — the surface-altitude verb (keystone K3)', () => {
+  it('bare `surface` → show', () => {
+    assert.deepEqual(parseSurfaceVerb('surface'), { show: true });
+    assert.deepEqual(parseSurfaceVerb('  SURFACE  '), { show: true });
+  });
+  it('`surface high|design` → set high; `surface low|dev` → set low (case/space-insensitive)', () => {
+    assert.deepEqual(parseSurfaceVerb('surface high'), { set: 'high' });
+    assert.deepEqual(parseSurfaceVerb('surface design'), { set: 'high' });
+    assert.deepEqual(parseSurfaceVerb('SURFACE  Low'), { set: 'low' });
+    assert.deepEqual(parseSurfaceVerb('surface dev'), { set: 'low' });
+  });
+  it('bare `design` → set high (a convenient alias)', () => {
+    assert.deepEqual(parseSurfaceVerb('design'), { set: 'high' });
+  });
+  it('not a surface verb → null (flows on to Claude / other handlers)', () => {
+    for (const s of ['surface up', 'surfaces', 'surface the page', 'high', 'dev: surface high', '', '  ', null, undefined]) {
+      assert.equal(parseSurfaceVerb(s), null, `should be null: ${JSON.stringify(s)}`);
+    }
   });
 });
 
