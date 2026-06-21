@@ -173,3 +173,38 @@ The whole model above is **implemented**. It turned out to be *less* than a from
 **Live-verification pending — and that matters here more than usual.** Every behaviour-pure piece is unit-tested (~40 new tests, suite green), but the dev bridge lives in a host process + panel + worktrees the headless harness can't reach. **All six bugs found this session lived in that live-only seam** — the merge-driver dedup gap, the cap>1 diffstat, the host-respawn phantom, `_redeployToMain` at cap=1, and (twice the worst) the `surface` field that the store's `patchMeta` allowlist **silently dropped**, so the keystone looked "functionally complete" while saving nothing. Lesson burned in: **green + code-traced ≠ works** for this subsystem; the live eyeball is where the real bugs are, not optional polish. Confirm with: `surface high` → drawer flips to a `design` badge → `dev: <a design task>` → trace shows `SURFACE ▸ high … preamble injected`, the agent works at a design altitude → Review → Approve → lands.
 
 **Remaining (post-eyeball):** the new-conversation Dev/Design **picker** (UX nicety — the `surface` verb already does this) · `gl`/`bug` runs carrying the conversation's surface (today only `dev:` does — minor consistency) · the **terminal-retirement migration** (make the in-panel high surface the primary entry — a real project, needs its own design pass once the keystone is confirmed live).
+
+---
+
+## 11. The terminal-retirement migration (the last asymmetry)
+
+§4.1 said *every* surface, including this high-level chat, works **beside** `main`. The keystone (§9) built an in-panel high surface that does exactly that. But **this terminal chat still exists** — an external `claude` CLI working *on* `main`. So there are now two high-level surfaces, and the §1 asymmetry survives in the terminal one. This is how that resolves.
+
+### 11.1 Full retirement is impossible — the terminal is the bootstrap surface
+The in-panel high surface is spawned by the host, which is part of the extension. **It cannot fix a broken extension** (a bad `bridge/host.js`, a panel that won't load, a corrupt build) — it runs *inside* the thing that's broken. So a terminal `claude` operating on the repo directly must remain as the **bootstrap / recovery surface**. "Retire the terminal" is really **"make the panel the PRIMARY high surface; keep the terminal as the explicit break-glass path."**
+
+### 11.2 End-state — three surfaces, one clear division
+| Surface | Where | Does | Isolation |
+|---|---|---|---|
+| **Terminal** (bootstrap) | external `claude` CLI | extension-breaking / `bridge/` / host changes · recovery · the dev-bridge's own development | on `main` or a worktree — the deliberate exception, used rarely |
+| **Panel · Design** (high) | host-spawned, in-panel | routine conceptual / app-level work | worktree → review gate → land |
+| **Panel · Dev** (low) | host-spawned, in-panel | implementation | worktree → review gate → land |
+
+Routine high-level work moves to the panel Design surface; the terminal shrinks to the escape hatch it has to be.
+
+### 11.3 The parity gap — what Design must absorb to take routine work off the terminal
+The in-panel surfaces carry the **git-free scoped** allowlist (Read/Edit/Write/Grep/Glob + scoped Bash). For Design to absorb routine high-level work it needs, beyond that:
+- **A `high` settings tier** — broader than `dev`'s (read-broad · more Bash verbs for build/test/inspect) but **still git-free** (it lands through the gate, never commits) and **still injection-bounded**. The registry's `settingsTier` field (today both `'scoped'`) is the seam — add a `'high'` tier; nothing else in the spawn path changes.
+- **Context parity** — CLAUDE.md already rides the repo it runs in; conversation continuity is the panel's per-conversation `--resume`; the memory system (`.claude/memory/`) the surface reads/writes like the terminal does.
+- **Sub-agents / web / MCP** — the terminal has the Task tool, web, MCP. Decide per-need: Design likely wants *read* web + MCP, not arbitrary sub-agent spawning (cost + the host's slot model). The `high` tier scopes exactly this.
+
+### 11.4 Migration path
+1. **Parallel (now).** Both exist. Shift discretionary high-level work into the panel Design surface; notice what's missing (the §11.3 gaps).
+2. **Close the parity gap.** Add the `high` settings tier + confirm context/memory parity. Design can now do most of what the terminal does for routine work.
+3. **Reframe, don't delete.** Repurpose the terminal's role *explicitly* to "bootstrap / recovery" (docs + the user's mental model). It stops being the daily driver; it's break-glass.
+4. **(Optional) bootstrap ergonomics.** A documented "recover from a broken build" flow so the escape hatch is reliable when the panel is down.
+
+### 11.5 Open
+- **The `high` tier's exact scope** — the central call; capability vs. the trust posture (git-free, injection-bounded) that lets a surface land through the gate instead of committing.
+- **The hard rule for what STAYS on the terminal** — `bridge/`-or-host changes, extension-breaking changes, recovery. (A panel Design surface that edits `bridge/host.js` and lands it could brick its own host mid-land — host-code MUST stay on the terminal.)
+- **Cost governance** — panel surfaces spawn `claude` children; a busy Design surface multiplies spend (the §6 dial, the managed-proxy/budget layer).
