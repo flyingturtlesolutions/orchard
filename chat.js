@@ -179,7 +179,17 @@ $('btn-new-conversation').addEventListener('click', async () => {
 // requests the nativeMessaging permission (via the bridge's enable() — must run before any other await),
 // replacing the old `dev: on` verb. On grant we open a fresh `kind:'dev'` conversation where every typed
 // message routes straight to Claude Code (no `dev:` prefix) — and the bridge is reachable from nowhere else.
-$('btn-new-dev-conversation')?.addEventListener('click', async () => {
+$('btn-new-dev-conversation')?.addEventListener('click', () => { _startDevConversation('low'); });
+// surfaces §2.2 — New DESIGN conversation: the same Claude Code thread at a HIGH (conceptual / architecture) altitude.
+$('btn-new-design-conversation')?.addEventListener('click', () => { _startDevConversation('high'); });
+
+// Start a dev-bridge conversation at the chosen ALTITUDE ('low' Dev / 'high' Design). Both are kind:'dev' Claude Code
+// threads on a git branch off main; `surface` (recorded on the conversation, surfaces §2.2) only changes the agent's
+// system-prompt altitude + the drawer badge — the `surface high|low` verb re-picks it later. enable() runs FIRST (the
+// click is the gesture that requests the nativeMessaging permission, replacing the old `dev: on`); on grant a fresh
+// conversation opens where every typed message routes straight to Claude Code (no `dev:` prefix). Best-effort branch
+// create: if the host isn't installed yet, the conversation is still created with the intended branch for reconciliation.
+async function _startDevConversation(surface = 'low') {
   if (_activeInvocations.size > 0) {
     if (!confirm('Active invocations are in progress. Start a new dev conversation anyway?')) return;
   }
@@ -187,24 +197,18 @@ $('btn-new-dev-conversation')?.addEventListener('click', async () => {
   if (!granted) return;                              // declined → bridge stays off, no conversation created (drawer stays open)
   _clearCurrentConversation();
   _resetConversation();
-  // v2.74.1034 (DBR-2, DESIGN §2/§9) — a dev conversation owns a git branch off main. Create it via the host
-  // (best-effort: if the host isn't installed yet the conversation is still created with the intended branch
-  // name, stored for later reconciliation).
   const branch = deriveBranchName('session');
-  // v2.74.1099 — a NEW dev conversation opens with a neutral placeholder; on its first task the drawer label becomes
-  // the SCOPE CATEGORY (devBridge's scopeCategory of the concern — e.g. "UX designer"), set by _applyScopeTitle. The
-  // opaque session shortid is no longer the label (it was through .1098); the amber dev badge marks the row as Claude Code.
   let branchOk = false;
   try { const r = await _getDevBridge().gitOp('branchCreate', { branch, base: 'main' }); branchOk = !!(r && r.ok); }
   catch (e) { try { console.warn('[chat] dev branch create failed:', e?.message); } catch { /* */ } }
   if (!branchOk) { try { console.warn(`[chat] dev branch ${branch} not created (host unready?); stored for reconciliation`); } catch { /* */ } }
-  const conv = await ConversationStore.create({ title: 'New dev task', kind: 'dev', branch });
+  const conv = await ConversationStore.create({ title: surface === 'high' ? 'New design task' : 'New dev task', kind: 'dev', branch, surface });
   _currentConversationId = conv.id;
   _currentConversationKind = 'dev';
   _showDevEmptyState();
-  await _renderHistoryList();   // v2.74.1031 — keep the drawer open; show the new dev conversation highlighted
+  await _renderHistoryList();   // v2.74.1031 — keep the drawer open; show the new conversation highlighted
   $('chat-input').focus();
-});
+}
 
 // v2.74.1029 — the dev-conversation empty state: no capability suggestion cards (those are agent-only); a
 // short hint on what routes to Claude Code from here. Restores nothing — switching back to an agent surface
