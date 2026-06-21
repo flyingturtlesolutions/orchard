@@ -3059,15 +3059,19 @@ const IL_READ_LEG_KEYS = new Set(['LIST_TABS', 'LIST_CAPABILITIES']);
 // They run DIRECTLY — NO il-confirm: `window.confirm` is suppressed in the async `il:` flow (no user activation),
 // so it only ever auto-cancelled ("Okay — cancelled" with no dialog); and the explicit `il:` command IS the
 // authorization (a dev conversation is reversible — deletable). DELETE_ALL still hits its button's own count-aware
-// confirm() (destructive). Gesture caveat (unchanged): OPEN_GROUND's sidePanel.open + NEW_DEV's FIRST-EVER
-// permission grant need a live gesture a typed command lacks — NEW_DEV works once granted (the common case).
+// confirm() (destructive — a safety floor; via `il:` that confirm async-suppresses → a safe no-op, so delete-all
+// stays a button action). Gesture (v2.74.1136): OPEN_GROUND is DROPPED (sidePanel.open needs a real gesture, no
+// contains-style escape); NEW_DEV now runs gesture-free when granted (enable() checks contains() first).
 const IL_PANEL_LEGS = {
   NEW_DEV_CONVERSATION:     { run: () => { $('btn-new-dev-conversation')?.click(); return { rendered: true }; } },
   NEW_CONVERSATION:         { run: () => { $('btn-new-conversation')?.click(); return { rendered: true }; } },
   OPEN_HISTORY:             { run: () => { $('btn-history')?.click(); }, done: '🧠 Opened conversation history.' },
   DELETE_ALL_CONVERSATIONS: { run: () => { $('btn-delete-all-conversations')?.click(); return { rendered: true }; } },
   OPEN_STUDIO:              { run: () => { $('btn-open-studio')?.click(); }, done: '🧠 Opening Studio…' },
-  OPEN_GROUND:              { run: () => { $('btn-open-ground')?.click(); }, done: '🧠 Opening the Ground panel…' },
+  // OPEN_GROUND dropped v2.74.1136 — its handler calls sidePanel.open(), which REQUIRES a real user gesture a
+  // typed (async) `il:` command can't carry (unlike NEW_DEV's permission, there's no gesture-free `contains` path).
+  // A leg that can't fire shouldn't be offered → open Ground via its own button. (Descriptor stays in palette.js,
+  // unoffered — the offer filter only surfaces IL_PANEL_LEGS keys.)
   HIDE_PANEL:               { run: () => { $('btn-hide-panel')?.click(); return { rendered: true }; } },
   RELOAD_EXTENSION:         { run: () => { try { chrome.runtime.reload(); } catch { /* */ } return { rendered: true }; } },
   EXPLORE_PAGE:             { run: async (msg) => { await _chatExplore({ msg }); return { rendered: true }; } },

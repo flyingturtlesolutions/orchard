@@ -2368,8 +2368,16 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   // granted; on grant it flips the setting and reveals/arms the reload icon. This is the ONLY enable path now
   // (the `dev: on` verb is unreachable from a normal conversation — the bridge is dev-conversation-only).
   async function enable() {
+    // v2.74.1136 — `permissions.request` REQUIRES a live user gesture and THROWS otherwise, even when the
+    // permission is ALREADY granted. So check `contains()` FIRST (gesture-free): an already-granted enable then
+    // succeeds from a non-gesture caller — the `il: open new dev conversation` panel leg, dispatched after the
+    // async ORCH_MATCH/JUDGE calls have spent the user gesture. Only the FIRST-EVER grant needs `request` (a real
+    // New-dev BUTTON click); `il:` can't grant it cold, by Chrome's design — and that's the only case left gated.
     let granted = false;
-    try { granted = await chrome.permissions.request({ permissions: ['nativeMessaging'] }); } catch { granted = false; }
+    try { granted = await chrome.permissions.contains({ permissions: ['nativeMessaging'] }); } catch { granted = false; }
+    if (!granted) {
+      try { granted = await chrome.permissions.request({ permissions: ['nativeMessaging'] }); } catch { granted = false; }
+    }
     if (!granted) return false;
     await setEnabled(true);
     emitReload({ enabled: true });   // reveal the header reload icon
