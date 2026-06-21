@@ -2502,5 +2502,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     return true;
   }
 
-  return { maybeHandle, enable, gitOp, onReloadState, refreshReloadState, reloadExtension, reattachConversation, liveRunMessageIds, runStatusForConv, clearRunOutcome, anyAwaiting, cancelConversationRuns, cancelAllRuns };
+  return { maybeHandle, enable, gitOp, onReloadState, refreshReloadState, reloadExtension, reattachConversation, liveRunMessageIds, runStatusForConv, clearRunOutcome, anyAwaiting, cancelConversationRuns, cancelAllRuns,
+    // surfaces-§4.5 (preview-as-selection) — the drawer drives the live build instead of typed `lt` / back-to-main:
+    // previewConversation loads a dev conversation's branch (the SAME _liveTest the `lt` verb uses — behind-main guard
+    // + reload); previewMain points the live build back at `main` (previewToMainPlan + reload, no archive).
+    previewConversation: (convId) => _liveTest(convId), previewMain: () => _redeployToMain() };
 }

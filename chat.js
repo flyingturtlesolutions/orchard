@@ -473,6 +473,17 @@ async function _renderHistoryList() {
     return;
   }
 
+  // surfaces-§4.5 (preview-as-selection) — when there are dev conversations, a drawer-level control to point the live
+  // build back at `main` (the trunk). Per-conversation Preview buttons (below) load a specific branch; this is the
+  // "default to main" / reset. Shown once, above the list.
+  if (conversations.some((c) => c.kind === 'dev')) {
+    const bar = document.createElement('div');
+    bar.className = 'history-preview-main';
+    bar.innerHTML = '<button class="history-preview-main-btn" title="Point the live build back at main (reloads the panel)">↩ Preview main</button>';
+    bar.querySelector('button').addEventListener('click', () => { try { _getDevBridge()?.previewMain?.(); } catch { /* */ } });
+    container.appendChild(bar);
+  }
+
   conversations.forEach(conv => {
     const isDev = conv.kind === 'dev';   // v2.74.1029 — dev (Claude Code) conversations get an amber badge
     // v2.74.1070 — non-dev (website-operating) conversations get a blue "APP" badge, mirroring the dev one,
@@ -487,6 +498,11 @@ async function _renderHistoryList() {
     item.innerHTML = `
       <div class="history-item-title">${badge}${escHtml(conv.title)}</div>
       <div class="history-item-meta">${relTime(conv.updatedAt)}</div>
+      ${isDev ? `<button class="history-item-preview" title="Load this branch into the live build (reloads the panel)">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+        </svg>
+      </button>` : ''}
       <button class="history-item-delete" title="Delete">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="3 6 5 6 21 6"/>
@@ -498,7 +514,7 @@ async function _renderHistoryList() {
     // drawer STAYS OPEN on select (only the ✕ / the header toggle closes it); selecting just swaps the chat
     // portal, so the user can browse several conversations without reopening the drawer each time.
     item.addEventListener('click', async (e) => {
-      if (e.target.closest('.history-item-delete')) return;
+      if (e.target.closest('.history-item-delete') || e.target.closest('.history-item-preview')) return;   // those buttons have their own handlers
       if (conv.id === _currentConversationId) return;   // already showing it — nothing to load, keep drawer open
       if (_activeInvocations.size > 0) {
         if (!confirm('Active invocations are in progress. Switch conversations anyway?')) return;
@@ -538,6 +554,16 @@ async function _renderHistoryList() {
       }
       await _renderHistoryList();
     });
+
+    // surfaces-§4.5 (preview-as-selection) — the dev row's Preview button loads THIS conversation's branch into the
+    // live build (the same `lt` flow: behind-main guard + reload), so the user picks which build to view by clicking
+    // rather than typing `lt` in that conversation. stopPropagation so it doesn't also fire the row's select handler.
+    if (isDev) {
+      item.querySelector('.history-item-preview')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        try { _getDevBridge()?.previewConversation?.(conv.id); } catch { /* */ }
+      });
+    }
 
     container.appendChild(item);
   });

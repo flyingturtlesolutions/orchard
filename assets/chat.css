@@ -1523,6 +1523,40 @@ textarea {
   color: var(--c-error);
 }
 
+/* surfaces-§4.5 (preview-as-selection) — the per-dev-row "load this branch into the live build" button (sat just left
+   of delete) + the drawer's "Preview main" control. Mirrors the delete button: hover-revealed icon; amber on hover. */
+.history-item-preview {
+  position: absolute;
+  top: 50%;
+  right: calc(var(--sp-2) + 24px);
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--c-text-subtle);
+  opacity: 0;
+  transition: opacity var(--t-fast), background var(--t-fast), color var(--t-fast);
+}
+.history-item:hover .history-item-preview { opacity: 1; }
+.history-item-preview:hover { background: var(--c-bg); color: #c9a227; }   /* amber — matches the dev identity */
+.history-item.dev { padding-right: 54px; }   /* room for the preview + delete buttons (overrides the base 30px) */
+
+.history-preview-main { display: flex; margin-bottom: var(--sp-2); }
+.history-preview-main-btn {
+  font-size: 11px;
+  color: var(--c-text-subtle);
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--c-border);
+  background: transparent;
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.history-preview-main-btn:hover { background: var(--c-bg-subtle); color: var(--c-text); }
+
 /* ── Slash command picker ────────────────────────────────────────────────── */
 
 .slash-picker {
