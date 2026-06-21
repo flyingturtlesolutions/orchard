@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, driftBroadcastSet, PREVIEW_WT, ltUsesPreview, previewRepointPlan, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer, scopeCategory, isRegress, previewToMainPlan, shouldOfferReview } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, driftBroadcastSet, PREVIEW_WT, ltUsesPreview, previewRepointPlan, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer, scopeCategory, isRegress, previewToMainPlan, shouldOfferReview, parsePorcelainFiles } from './devBridge.js';
 
 describe('isRegress — whole-message regress trigger (abandon + revert preview to main)', () => {
   it('fires on the bare tokens', () => {
@@ -53,6 +53,28 @@ describe('shouldOfferReview — the review-gate predicate (surfaces §4.3)', () 
   it('tolerates an empty arg (no crash → no offer)', () => {
     assert.equal(shouldOfferReview(), false);
     assert.equal(shouldOfferReview({}), false);
+  });
+});
+
+describe('parsePorcelainFiles — changed paths from `git status --porcelain --branch` (surfaces §4.3)', () => {
+  it('drops the ## branch header + blanks, returns the changed paths', () => {
+    const out = parsePorcelainFiles('## dev/x...origin/dev/x\n M chat.js\n?? new.js\nA  Core/foo.js\n');
+    assert.deepEqual(out, ['chat.js', 'new.js', 'Core/foo.js']);
+  });
+  it('reports the NEW path for a rename, strips surrounding quotes', () => {
+    assert.deepEqual(parsePorcelainFiles('R  old.js -> new.js'), ['new.js']);
+    assert.deepEqual(parsePorcelainFiles(' M "a file.js"'), ['a file.js']);
+  });
+  it('empty / header-only / nullish → no files', () => {
+    assert.deepEqual(parsePorcelainFiles(''), []);
+    assert.deepEqual(parsePorcelainFiles('## main'), []);
+    assert.deepEqual(parsePorcelainFiles(null), []);
+    assert.deepEqual(parsePorcelainFiles(undefined), []);
+  });
+  it('count matches what shouldOfferReview gates on (the two compose)', () => {
+    const files = parsePorcelainFiles('## dev/y\n M a.js\n M b.js');
+    assert.equal(shouldOfferReview({ ok: true, replay: false, pausing: false, conversationId: 'c', status: 'active', fileCount: files.length }), true);
+    assert.equal(shouldOfferReview({ ok: true, replay: false, pausing: false, conversationId: 'c', status: 'active', fileCount: parsePorcelainFiles('## main').length }), false);
   });
 });
 

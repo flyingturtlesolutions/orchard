@@ -292,6 +292,23 @@ export function shouldOfferReview({ ok, replay, pausing, conversationId, status,
   return true;
 }
 
+// surfaces-§4.3 — parse `git status --porcelain=v1 --branch` stdout → the changed file paths. Drops the `## branch`
+// header + blank lines; a rename "old -> new" reports the NEW path; surrounding quotes stripped. (Porcelain v1: two
+// status chars + a space + the path, so the path starts at index 3 — same slice the host's diffstat uses.) PURE + tested.
+export function parsePorcelainFiles(stdout) {
+  const out = [];
+  for (const raw of String(stdout == null ? '' : stdout).split(/\r?\n/)) {
+    const line = raw.replace(/\s+$/, '');
+    if (!line.trim() || line.startsWith('##')) continue;
+    let p = line.slice(3).trim();
+    const arrow = p.indexOf(' -> ');
+    if (arrow !== -1) p = p.slice(arrow + 4);
+    p = p.replace(/^"|"$/g, '');
+    if (p) out.push(p);
+  }
+  return out;
+}
+
 // DBR-P3-5 (DESIGN §6.1) — the seed prompt for "fork from here": continue a (usually merged/abandoned) parent on a
 // FRESH branch+conversation off `main`. Claude Code sessions are LINEAR (no fork-a-session primitive), so the seed
 // carries the parent's concern + an optional summary + a continue cue as text; the new run starts a fresh session.
@@ -973,11 +990,6 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     });
   }
 
-  // surfaces-§4.3 — set on a dev run's `done` (its conversationId), consumed by the NEXT diffstat reply (which carries
-  // the changed-file list) to decide whether to surface a Review card. One-shot: cleared on consume so an unrelated
-  // later diffstat (startup / reload) never re-offers.
-  let _pendingReview = null;
-
   function onHostMsg(m) {
     if (!m || m.v !== PROTOCOL_V) return;
     switch (m.type) {
@@ -1077,10 +1089,6 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         // use (no baseline persisted) appliedSig is '' so a dirty tree still arms the dot — honest: there
         // are uncommitted changes a reload would apply. After a reload the signatures match → dot clears.
         getAppliedSig().then((applied) => emitReload({ available: files.length > 0 && sig !== applied, files, sig }));
-        // surfaces-§4.3 — if a dev run just finished (armed _pendingReview), this diffstat carries its changed files →
-        // offer Review. One-shot: clear first so a later unrelated diffstat can't re-trigger. Best-effort: a render
-        // throw must never break the reload-dot flow above.
-        if (_pendingReview) { const _cid = _pendingReview; _pendingReview = null; try { _offerReview(_cid, files); } catch { /* */ } }
         break;
       }
       case 'done': {
@@ -1115,9 +1123,10 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         ].filter(Boolean).join(' · ');
         const resume = sid ? `\ncontinue in terminal: claude --resume ${sid}` : '';
         endRun({ kind: 'result', ok, text: `${bits}${resume}` }, rh);
-        // surfaces-§4.3 — a successful dev-conversation run may be a task to land. Arm the review offer; the diffstat
-        // reply (already requested by refreshReloadState above) decides if it actually CHANGED files before surfacing it.
-        if (ok && rh?.conversationId && !rh.replay && !rh.pausing) _pendingReview = rh.conversationId;
+        // surfaces-§4.3 — a successful dev-conversation run may be a task to land → offer Review. _offerReview queries
+        // the branch's OWN worktree for changes (cap-correct: a cap>1 run edits `.wt/<branch>`, which the repo-root
+        // diffstat misses) and no-ops if nothing changed / the gate is off. Best-effort: never blocks the done flow.
+        if (ok && rh?.conversationId && !rh.replay && !rh.pausing) _offerReview(rh.conversationId).catch(() => { /* */ });
         break;
       }
       case 'status': {
@@ -1995,7 +2004,8 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   // STOPS, no merge) → test gate (`npm test` via the host, ONE retry on red — U14; still red STOPS) → diff preview
   // (`git diff --stat main...<branch>`). Then HALTS awaiting the human's land confirm (P2-4). `MERGE ▸` markers
   // are host-side (the syncMain + test ops log them). NB: the test-gate EXECUTION (host npm spawn) is live-only.
-  async function _mergePrepare(convId) {
+  async function _mergePrepare(convId, opts = {}) {
+    const autoDeploy = opts.autoDeploy === true;   // surfaces-§4.4 — set by the review gate's Approve (not the typed `merge`) → land also redeploys live
     let conv = null;
     try { conv = convId ? await ConversationStore.load(convId) : null; } catch { conv = null; }
     const branch = conv && conv.branch;
@@ -2046,7 +2056,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     try {
       const actions = document.createElement('div');
       actions.style.cssText = 'display:flex;gap:8px;margin-top:8px';
-      const go = mkBtn('Confirm land ▸', () => { try { actions.remove(); } catch { /* */ } _mergeLand(convId, { branch, summary, syncedMain }); });
+      const go = mkBtn('Confirm land ▸', () => { try { actions.remove(); } catch { /* */ } _mergeLand(convId, { branch, summary, syncedMain, autoDeploy }); });
       const no = mkBtn('Cancel', () => { try { actions.remove(); } catch { /* */ } devBubble(`✗ merge cancelled — \`${branch}\` is synced + green but NOT landed. \`main\` is untouched.`); });
       actions.appendChild(go); actions.appendChild(no);
       bubble.bodyEl.appendChild(actions);
@@ -2058,7 +2068,7 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   // carrying a freshly-minted confirm token — P2-1). LOCAL-ONLY: push stays manual (§6 step 7), so a bad land is a
   // local `main` commit the user can inspect + `git reset`/`merge --abort` before pushing. Marks the conversation
   // merged (archived). DBR-P2-5 adds the freshness re-check below — nothing lands on a `main` it wasn't synced+green against.
-  async function _mergeLand(convId, { branch, summary, syncedMain }) {
+  async function _mergeLand(convId, { branch, summary, syncedMain, autoDeploy = false }) {
     const bubble = devBubble(`↻ landing \`${branch}\` → \`main\`…`);
     let landed = null, preMain = null;   // DBR-P4-7 — the merge commit + the pre-land `main` HEAD, captured on success → drive the post-release drift broadcast (below)
     const wt = _capNow() > 1 ? branch : undefined;   // DBR-#1 — at cap>1 the freshness re-sync/re-test run in the branch's worktree; the land still lands on repo-root main
@@ -2124,6 +2134,25 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     // DBR-P4-7 (DESIGN §7) — post-land, lock RELEASED: nudge the OTHER live dev branches that now drift from `main`.
     // Best-effort + non-blocking — a broadcast failure never touches the just-completed land.
     if (landed) { try { await _broadcastDrift(convId, branch, landed, preMain); } catch { /* */ } _runWorktreeGc().catch(() => { /* */ }); }   // DBR-P4-7 — the merged branch's worktree can be reclaimed
+    // surfaces-§4.4 (Approve-scoped auto-deploy) — "approved → live": when the land came from the review gate's Approve
+    // (NOT the typed `merge` verb), redeploy the landed `main` to the live build. LAST thing — reloadExtension restarts
+    // the extension, so the drift broadcast + GC above run first. Host-code (`bridge/`) lands still need a manual host
+    // respawn to take effect (deferred — slice 2b).
+    if (landed && autoDeploy) { try { console.info(`DEPLOY ▸ approve → main live (${String(landed).slice(0, 7)})`); } catch { /* */ } await _redeployToMain(); }
+  }
+
+  // surfaces-§4.4 — push the landed `main` to the live build: at cap>1 repoint the preview worktree at `main` (the
+  // un-gated previewToMainPlan), then reload; at cap=1 the loaded tree (repo root) is already on `main` after a land, so
+  // a reload alone applies it. Mirrors _regress's deploy half (minus the archive). reloadExtension CLOSES the panel.
+  async function _redeployToMain() {
+    if (ltUsesPreview(_capNow())) {
+      for (const step of previewToMainPlan()) {
+        const r = await gitOp(step.op, step.params);
+        if ((!r || !r.ok) && !step.optional) return false;   // a preview-repoint failure → skip the reload (don't strand on a half-pointed preview)
+      }
+    }
+    await reloadExtension();
+    return true;
   }
 
   // DBR-P2-6 (DESIGN §5/U13) — `abandon` (SOFT): archive the conversation (status → 'abandoned', read-only) but
@@ -2166,21 +2195,28 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   // land, version-at-land stamps the version); Preview → `lt` (load this branch to eyeball); Discard → `regress` (snap
   // the live build back to `main` + archive); Keep working → dismiss. NON-modal — ignore it and type the verbs as
   // before. Gated by getReviewGate() + the pure shouldOfferReview() (dev conversation, not archived, has changes).
-  async function _offerReview(convId, files) {
+  async function _offerReview(convId) {
     if (!(await getReviewGate())) return;
     let conv = null;
     try { conv = convId ? await ConversationStore.load(convId) : null; } catch { conv = null; }
     const branch = conv && conv.branch;
-    const list = Array.isArray(files) ? files : [];
-    if (!branch || !shouldOfferReview({ ok: true, replay: false, pausing: false, conversationId: convId, status: conv && conv.status, fileCount: list.length })) return;
-    const n = list.length;
-    const shown = list.slice(0, 6).map((f) => `\`${f}\``).join(', ');
+    if (!branch) return;
+    // Read the changes the run made in the tree it RAN in: at cap>1 the branch's own `.wt/` worktree; at cap=1 the
+    // repo root (mirrors _mergePrepare/_sync's `wt`). The global diffstat reads the repo root only, so it'd miss a
+    // cap>1 run's edits — query the worktree directly so the gate is cap-correct.
+    const wt = _capNow() > 1 ? branch : undefined;
+    const st = await gitOp('status', {}, { worktree: wt });
+    const changed = parsePorcelainFiles(st && st.ok ? st.stdout : '');
+    if (!shouldOfferReview({ ok: true, replay: false, pausing: false, conversationId: convId, status: conv && conv.status, fileCount: changed.length })) return;
+    const n = changed.length;
+    const shown = changed.slice(0, 6).map((f) => `\`${f}\``).join(', ');
     const more = n > 6 ? `, +${n - 6} more` : '';
-    const bubble = devBubble(`✦ Review \`${branch}\` — ${n} file${n === 1 ? '' : 's'} changed: ${shown}${more}\n\n_Approve to sync + test + land on \`main\`, Preview to load this branch, or Discard to drop it._`);
+    const bubble = devBubble(`✦ Review \`${branch}\` — ${n} file${n === 1 ? '' : 's'} changed: ${shown}${more}\n\n_Approve to sync + test + land on \`main\` (then go live), Preview to load this branch, or Discard to drop it._`);
     try {
       const actions = document.createElement('div');
       actions.style.cssText = 'display:flex;gap:8px;margin-top:8px;flex-wrap:wrap';
-      const approve = mkBtn('Approve ▸', () => { try { actions.remove(); } catch { /* */ } _mergePrepare(convId); });
+      // Approve → the merge prepare with autoDeploy:true so a successful land also redeploys `main` to the live build (§4.4).
+      const approve = mkBtn('Approve ▸', () => { try { actions.remove(); } catch { /* */ } _mergePrepare(convId, { autoDeploy: true }); });
       const preview = mkBtn('Preview', () => { try { actions.remove(); } catch { /* */ } _liveTest(convId); });
       const discard = mkBtn('Discard', () => { try { actions.remove(); } catch { /* */ } _regress(convId); });
       const keep = mkBtn('Keep working', () => { try { actions.remove(); } catch { /* */ } _setBubble(bubble, `✦ Review dismissed — \`${branch}\`'s changes are kept; type \`merge\` when you're ready to land.`); });
