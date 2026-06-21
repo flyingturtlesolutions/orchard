@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, driftBroadcastSet, PREVIEW_WT, ltUsesPreview, previewRepointPlan, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer, scopeCategory, isRegress, previewToMainPlan } from './devBridge.js';
+import { isLiveTest, isLiveTestForce, isSync, planSync, isMerge, planMergePrepare, buildMergeSummary, buildMergeCommitMessage, mergeHasChanges, isMainStale, isAbandon, isDeleteBranch, isDrift, isFoundationalFile, computeDrift, driftBroadcastSet, PREVIEW_WT, ltUsesPreview, previewRepointPlan, isSplit, splitSlug, buildSeedPrompt, isScope, scanImports, resolveImport, buildImportGraph, splitClusters, foundationalAlongsideLeaf, assessSplit, buildSplitNudge, validateProposeSplit, isFork, buildForkSeedPrompt, isScopeSemantic, buildScopeCheckPrompt, normalizeScopeVerdict, archivedSteer, scopeCategory, isRegress, previewToMainPlan, shouldOfferReview } from './devBridge.js';
 
 describe('isRegress — whole-message regress trigger (abandon + revert preview to main)', () => {
   it('fires on the bare tokens', () => {
@@ -21,6 +21,38 @@ describe('isRegress — whole-message regress trigger (abandon + revert preview 
     for (const s of ['regress the drawer', 'this is a regression', 'discard the changes please', 'regression test', '', '   ', null, undefined, 0, {}]) {
       assert.equal(isRegress(s), false, `should NOT fire: ${String(s)}`);
     }
+  });
+});
+
+describe('shouldOfferReview — the review-gate predicate (surfaces §4.3)', () => {
+  const base = { ok: true, replay: false, pausing: false, conversationId: 'c1', status: 'active', fileCount: 3 };
+  it('offers when a successful dev-conversation run changed files', () => {
+    assert.equal(shouldOfferReview(base), true);
+    assert.equal(shouldOfferReview({ ...base, status: undefined }), true);   // an open conversation w/o explicit status
+  });
+  it('does NOT offer on a failed/ended run', () => {
+    assert.equal(shouldOfferReview({ ...base, ok: false }), false);
+    assert.equal(shouldOfferReview({ ...base, ok: undefined }), false);
+  });
+  it('does NOT offer for replay/paused runs (not a fresh result to land)', () => {
+    assert.equal(shouldOfferReview({ ...base, replay: true }), false);
+    assert.equal(shouldOfferReview({ ...base, pausing: true }), false);
+  });
+  it('does NOT offer for a run not bound to a dev conversation (gl/replay/unbound)', () => {
+    assert.equal(shouldOfferReview({ ...base, conversationId: null }), false);
+    assert.equal(shouldOfferReview({ ...base, conversationId: '' }), false);
+  });
+  it('does NOT offer for an archived (merged/abandoned) conversation', () => {
+    assert.equal(shouldOfferReview({ ...base, status: 'merged' }), false);
+    assert.equal(shouldOfferReview({ ...base, status: 'abandoned' }), false);
+  });
+  it('does NOT offer when the run changed nothing (no files)', () => {
+    assert.equal(shouldOfferReview({ ...base, fileCount: 0 }), false);
+    assert.equal(shouldOfferReview({ ...base, fileCount: undefined }), false);
+  });
+  it('tolerates an empty arg (no crash → no offer)', () => {
+    assert.equal(shouldOfferReview(), false);
+    assert.equal(shouldOfferReview({}), false);
   });
 });
 

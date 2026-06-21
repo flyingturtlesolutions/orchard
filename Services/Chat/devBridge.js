@@ -31,6 +31,7 @@ const TURNS_DEFAULT = 25;   // v2.74.979 — the value when unset; NO artificial
 const APPLIED_SIG_KEY = 'settings:devBridgeAppliedSig';   // v2.74.980 — the working-tree signature as of the last reload (the "applied" baseline)
 const LAST_SESSION_KEY = 'settings:devBridgeLastSession';   // v2.74.985 — the prior run's claude session id; `dev:` resumes it (conversation by default)
 const RELAY_SETTING_KEY = 'settings:devBridgeRelay';   // v2.74.1002 — DB-3 permission relay opt-in (PreToolUse hook → inline approve/deny)
+const REVIEW_GATE_KEY = 'settings:devReviewGate';   // v2.74.1139 — surfaces-§4.3 review gate: auto-offer Review (Approve/Preview/Discard) on a dev run's done. Default ON (only `=== false` disables).
 
 // The decisions filter — VERBATIM from studio.js _DECISION_RE (the source of truth; keep in sync until
 // a shared extraction). Filters the session's log entries down to the signal-only story view that the
@@ -276,6 +277,19 @@ export function isFork(text) {
 export function isRegress(text) {
   const t = String(text ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
   return t === 'regress' || t === 'discard';
+}
+
+// surfaces-§4.3 (the review gate) — the PURE predicate for "offer a Review card now". A dev RUN that finished
+// successfully, on a still-open dev conversation (branch-backed, not merged/abandoned), that actually CHANGED files
+// → surface Approve/Preview/Discard so the verbs become buttons at the right moment. Replay/paused runs and
+// no-change / non-dev-conversation runs never offer (the signal/noise guard the findings flagged). PURE + tested.
+export function shouldOfferReview({ ok, replay, pausing, conversationId, status, fileCount } = {}) {
+  if (ok !== true) return false;                                   // a failed/ended run isn't a result to land
+  if (replay === true || pausing === true) return false;          // a replay bubble isn't a run; a pause is resumable
+  if (!conversationId) return false;                              // gl/replay/unbound run → not a reviewable task
+  if (status === 'merged' || status === 'abandoned') return false; // archived conversation → nothing to land
+  if (!(Number(fileCount) > 0)) return false;                    // the run changed nothing → no review
+  return true;
 }
 
 // DBR-P3-5 (DESIGN §6.1) — the seed prompt for "fork from here": continue a (usually merged/abandoned) parent on a
@@ -600,6 +614,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
   // v2.74.1002 — DB-3 permission relay opt-in. When on, runs load the relay settings file (PreToolUse hook
   // → the panel approves/denies each non-safe tool); when off, the proven DB-2 static allowlist is used.
   const getRelay = async () => { try { return (await chrome.storage.local.get(RELAY_SETTING_KEY))[RELAY_SETTING_KEY] === true; } catch { return false; } };
+  // surfaces-§4.3 — the review gate is ON unless explicitly disabled (`settings:devReviewGate === false`), so a fresh
+  // install gets the contextual Approve/Preview/Discard offer; a user who finds it noisy can switch it off in storage.
+  const getReviewGate = async () => { try { return (await chrome.storage.local.get(REVIEW_GATE_KEY))[REVIEW_GATE_KEY] !== false; } catch { return true; } };
   const setRelay = async (v) => { try { await chrome.storage.local.set({ [RELAY_SETTING_KEY]: v === true }); } catch { /* */ } };
   // v2.74.985 — the last run's session id, so `dev:` CONTINUES the conversation by default. Persisted so
   // it survives a panel close. `dev: new` / `dev: reset` clear it to start a fresh thread.
@@ -956,6 +973,11 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     });
   }
 
+  // surfaces-§4.3 — set on a dev run's `done` (its conversationId), consumed by the NEXT diffstat reply (which carries
+  // the changed-file list) to decide whether to surface a Review card. One-shot: cleared on consume so an unrelated
+  // later diffstat (startup / reload) never re-offers.
+  let _pendingReview = null;
+
   function onHostMsg(m) {
     if (!m || m.v !== PROTOCOL_V) return;
     switch (m.type) {
@@ -1055,6 +1077,10 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         // use (no baseline persisted) appliedSig is '' so a dirty tree still arms the dot — honest: there
         // are uncommitted changes a reload would apply. After a reload the signatures match → dot clears.
         getAppliedSig().then((applied) => emitReload({ available: files.length > 0 && sig !== applied, files, sig }));
+        // surfaces-§4.3 — if a dev run just finished (armed _pendingReview), this diffstat carries its changed files →
+        // offer Review. One-shot: clear first so a later unrelated diffstat can't re-trigger. Best-effort: a render
+        // throw must never break the reload-dot flow above.
+        if (_pendingReview) { const _cid = _pendingReview; _pendingReview = null; try { _offerReview(_cid, files); } catch { /* */ } }
         break;
       }
       case 'done': {
@@ -1089,6 +1115,9 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         ].filter(Boolean).join(' · ');
         const resume = sid ? `\ncontinue in terminal: claude --resume ${sid}` : '';
         endRun({ kind: 'result', ok, text: `${bits}${resume}` }, rh);
+        // surfaces-§4.3 — a successful dev-conversation run may be a task to land. Arm the review offer; the diffstat
+        // reply (already requested by refreshReloadState above) decides if it actually CHANGED files before surfacing it.
+        if (ok && rh?.conversationId && !rh.replay && !rh.pausing) _pendingReview = rh.conversationId;
         break;
       }
       case 'status': {
@@ -2130,6 +2159,35 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     await reloadExtension();
     try { await ConversationStore.patchMeta(convId, { status: 'abandoned' }); } catch { /* best-effort */ }
     _setBubble(bubble, `✓ regressed — the live build is back on \`main\` and this conversation is archived. The branch${branch ? ` \`${branch}\`` : ''} is KEPT (type \`fork\` to revive it).`);
+  }
+
+  // surfaces-§4.3 (the review gate) — the contextual Review card. After a successful dev run that CHANGED files, the
+  // land verbs become buttons at the right moment: Approve → the existing `merge` prepare (WIP→sync→test→diff→Confirm-
+  // land, version-at-land stamps the version); Preview → `lt` (load this branch to eyeball); Discard → `regress` (snap
+  // the live build back to `main` + archive); Keep working → dismiss. NON-modal — ignore it and type the verbs as
+  // before. Gated by getReviewGate() + the pure shouldOfferReview() (dev conversation, not archived, has changes).
+  async function _offerReview(convId, files) {
+    if (!(await getReviewGate())) return;
+    let conv = null;
+    try { conv = convId ? await ConversationStore.load(convId) : null; } catch { conv = null; }
+    const branch = conv && conv.branch;
+    const list = Array.isArray(files) ? files : [];
+    if (!branch || !shouldOfferReview({ ok: true, replay: false, pausing: false, conversationId: convId, status: conv && conv.status, fileCount: list.length })) return;
+    const n = list.length;
+    const shown = list.slice(0, 6).map((f) => `\`${f}\``).join(', ');
+    const more = n > 6 ? `, +${n - 6} more` : '';
+    const bubble = devBubble(`✦ Review \`${branch}\` — ${n} file${n === 1 ? '' : 's'} changed: ${shown}${more}\n\n_Approve to sync + test + land on \`main\`, Preview to load this branch, or Discard to drop it._`);
+    try {
+      const actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;gap:8px;margin-top:8px;flex-wrap:wrap';
+      const approve = mkBtn('Approve ▸', () => { try { actions.remove(); } catch { /* */ } _mergePrepare(convId); });
+      const preview = mkBtn('Preview', () => { try { actions.remove(); } catch { /* */ } _liveTest(convId); });
+      const discard = mkBtn('Discard', () => { try { actions.remove(); } catch { /* */ } _regress(convId); });
+      const keep = mkBtn('Keep working', () => { try { actions.remove(); } catch { /* */ } _setBubble(bubble, `✦ Review dismissed — \`${branch}\`'s changes are kept; type \`merge\` when you're ready to land.`); });
+      [approve, preview, discard, keep].forEach((b) => actions.appendChild(b));
+      bubble.bodyEl.appendChild(actions);
+    } catch { /* no buttons → the offer stays as text; the verbs still work */ }
+    try { console.info(`REVIEW ▸ offer ${branch} — ${n} file(s) changed`); } catch { /* */ }
   }
 
   // DBR-P2-6 (DESIGN §5/U13) — `delete branch` (HARD): irreversible. A confirm button → gated host `branchDelete`
