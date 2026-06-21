@@ -2191,6 +2191,13 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
         const r = await gitOp(step.op, step.params);
         if ((!r || !r.ok) && !step.optional) return false;   // a preview-repoint failure → skip the reload (don't strand on a half-pointed preview)
       }
+    } else {
+      // cap=1: the loaded tree IS the repo root — point it at `main` before reloading. A no-op after an Approve land
+      // (already switched there), but the necessary correction when called from "Preview main" with the tree on a dev
+      // branch (else the reload would re-load that branch, not the trunk). Mirrors _regress's cap=1 branch; a dirty-tree
+      // switch failure → skip the reload (don't strand). (v2.74.1146 — bcp catch.)
+      const sw = await gitOp('switch', { branch: 'main' });
+      if (!sw || !sw.ok) return false;
     }
     await reloadExtension();
     return true;
