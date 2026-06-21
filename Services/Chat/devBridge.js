@@ -940,12 +940,29 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     });
   }
 
+  // Version-at-land (docs/DESIGN_surfaces.md §4.2) — panel→host STAMP. Posts {type:'stamp-version'}; resolves on the
+  // matching `stamp-result` ({ ok, version, from }). Fired in the land between the staged squash and the commit, so the
+  // landed manifest version is main-current+1 regardless of what the branch bumped to. Safety-timed like the others.
+  let _stampSeq = 0;
+  const _stampPending = new Map();
+  function hostStampVersion() {
+    return new Promise((resolve) => {
+      const reqId = 's' + (++_stampSeq);
+      _stampPending.set(reqId, resolve);
+      const done = (r) => { if (_stampPending.has(reqId)) { _stampPending.delete(reqId); resolve(r); } };
+      try { ensurePort().postMessage({ v: PROTOCOL_V, type: 'stamp-version', reqId }); }
+      catch (e) { done({ ok: false, error: 'host unreachable: ' + ((e && e.message) || e) }); return; }
+      setTimeout(() => done({ ok: false, error: 'version stamp timed out' }), 15000);
+    });
+  }
+
   function onHostMsg(m) {
     if (!m || m.v !== PROTOCOL_V) return;
     switch (m.type) {
       case 'git-result': { const resolve = _gitPending.get(m.reqId); if (resolve) { _gitPending.delete(m.reqId); resolve(m); } break; }   // v2.74.1034 (DBR-2)
       case 'test-result': { const resolve = _testPending.get(m.reqId); if (resolve) { _testPending.delete(m.reqId); resolve(m); } break; }   // DBR-P2-3
       case 'git-confirm-result': { const resolve = _confirmPending.get(m.reqId); if (resolve) { _confirmPending.delete(m.reqId); resolve(m); } break; }   // DBR-P2-4
+      case 'stamp-result': { const resolve = _stampPending.get(m.reqId); if (resolve) { _stampPending.delete(m.reqId); resolve(m); } break; }   // version-at-land (docs/DESIGN_surfaces.md §4.2)
       case 'preflight': {
         const r = _pendingPreflight.shift() || run;   // DBR-P4-4 — this preflight-ok answers the earliest-dispatched run (FIFO)
         if (!m.ok) { endRun(`✗ preflight failed: ${m.error}`, r); break; }
@@ -2054,6 +2071,12 @@ export function createDevBridge({ appendMessage, setMessageBody, mkBtn, persistM
     if (!tok1 || !tok1.token) { _setBubble(bubble, `✗ land — couldn’t mint a confirm token: ${(tok1 && tok1.error) || '?'}. \`main\` is unchanged.`); return; }
     const sq = await gitOp('mergeSquash', { branch, confirmToken: tok1.token });
     if (!sq || !sq.ok) { _setBubble(bubble, `✗ land — squash-merge failed: ${(sq && sq.error) || '?'}. Check \`git status\` on \`main\` (you may need \`git merge --abort\`).`); return; }
+    // 2b) version-at-land (docs/DESIGN_surfaces.md §4.2) — stamp `main`'s manifest version to current+1 on the STAGED
+    //     squash, so the landed version is monotonic + unique regardless of what the branch bumped to. commitMerge's
+    //     `-am` then carries this one tracked modification into the single squash commit (below).
+    const vs = await hostStampVersion();
+    if (!vs || !vs.ok) { _setBubble(bubble, `✗ land — version stamp failed: ${(vs && vs.error) || '?'}. The squash is STAGED on \`main\` but not committed — \`git commit\` or \`git reset --hard\` to back out.`); return; }
+    try { console.info(`VERSION ▸ stamp ${branch} → main ${vs.version}${vs.from ? ` (was ${vs.from})` : ''}`); } catch { /* */ }
     // 3) commit the staged squash on main (gated — fresh token) with the summary + Dev-conversation trailer
     const tok2 = await hostConfirmToken();
     if (!tok2 || !tok2.token) { _setBubble(bubble, `✗ land — couldn’t mint the commit token. The squash is STAGED on \`main\` but not committed — \`git commit\` or \`git reset --hard\` to back out.`); return; }

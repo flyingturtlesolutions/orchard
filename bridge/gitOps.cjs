@@ -104,7 +104,10 @@ function buildGitArgs(op, params = {}) {
     }
     case 'commitMerge': {
       if (!hasConfirm(params)) return err('needs-confirm');               // (b) gated — the ONE commit allowed on main
-      return ok(['commit', '-m', commitMsg(params.message)], true);
+      // `-am` (not `-m`): the squash already staged the branch; the version-at-land stamp (§4.2, bridge/setVersion.cjs)
+      // then rewrites manifest.json's version line in the working tree AFTER the squash, so `-a` stages that one tracked
+      // modification too → the bump rides the single squash commit. Mirrors commitWip's `-am`. (docs/DESIGN_surfaces.md)
+      return ok(['commit', '-am', commitMsg(params.message)], true);
     }
     // abandon (hard): delete a dev branch — gated (irreversible) + `dev/…` only.
     case 'branchDelete': {

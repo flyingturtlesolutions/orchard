@@ -28,6 +28,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
 const gitOps = require('./gitOps.cjs');   // DBR-1 — the parameter-validated dev-branch git allowlist (§3)
+const setVer = require('./setVersion.cjs');   // version-at-land (docs/DESIGN_surfaces.md §4.2) — pure stamp core; the host does the git-read + manifest write
 const { buildConcernContract } = require('./concern.cjs');   // DBR-5 — the per-spawn scope-contract builder (§8.2)
 const protocol = require('./protocol.cjs');   // DBR-P4-2 — the v:2 run-multiplex primitives (PROTO_V, tagFrame, poolSnapshot) (§10)
 
@@ -502,6 +503,33 @@ function handleGit(msg) {
   return { v: PROTOCOL_V, type: 'git-result', op, reqId: (msg && msg.reqId), ok, code: r.code, stdout: r.stdout, ...(ok ? {} : { stderr: r.stderr, error: r.err || r.stderr || 'git failed' }) };
 }
 
+// Version-at-land (docs/DESIGN_surfaces.md §4.2, Phase 1) — set `main`'s manifest version to (current patch + 1),
+// AUTHORITATIVELY, during a dev-branch land (the panel calls this between the staged squash and the commit). Guarded ON
+// main like the land ops; NO confirm token needed — it only runs sandwiched between the two token-gated land ops, and a
+// stray call merely rewrites an UNCOMMITTED version line on main (trivially `git checkout`'d back). The ONE new host
+// capability vs. the git-only surface: it WRITES a tracked source file (manifest.json's version line ONLY). The number
+// is derived by the pure setVer module from `git show HEAD:manifest.json` (= pre-land main, since the squash isn't
+// committed yet, HEAD still points at main's tip), so it ignores whatever the branch bumped to → monotonic + unique.
+// commitMerge's `-am` then carries the bump into the one squash commit. Approved 2026-06-20 (Q1-A); git allowlist intact.
+function stampVersion(msg) {
+  const reqId = msg && msg.reqId;
+  const fail = (error) => { log(`stamp REFUSED — ${error}`); return { v: PROTOCOL_V, type: 'stamp-result', reqId, ok: false, error }; };
+  if (currentBranchName() !== 'main') return fail('stamp-guard: not on main');
+  const show = runGit(['show', 'HEAD:manifest.json'], REPO);   // pre-land main manifest (HEAD = main; the squash is staged, not committed)
+  if (show.code !== 0) return fail('cannot read HEAD:manifest.json' + (show.stderr ? ' — ' + show.stderr : ''));
+  const from = setVer.parseVersion(show.stdout);
+  const to = from && setVer.bumpPatch(from);
+  if (!to) return fail('unparseable manifest version');
+  const mfPath = path.join(REPO, 'manifest.json');
+  let cur;
+  try { cur = fs.readFileSync(mfPath, 'utf8'); } catch (e) { return fail('cannot read manifest.json: ' + ((e && e.message) || e)); }
+  const stamped = setVer.stampVersionLine(cur, to);
+  if (!stamped) return fail('no version line in manifest.json');
+  try { fs.writeFileSync(mfPath, stamped.text); } catch (e) { return fail('write failed: ' + ((e && e.message) || e)); }
+  log(`stamp main ${from} → ${to}`);   // host journal; the VERSION ▸ decision marker is emitted panel-side in _mergeLand
+  return { v: PROTOCOL_V, type: 'stamp-result', reqId, ok: true, from, version: to };
+}
+
 // DBR-P2-3 (DESIGN §6 step 3) — the merge TEST GATE: run `npm test` in the loaded tree (= the branch, post-sync).
 // ASYNC spawn so it never blocks the host message loop; result via a reqId-correlated `test-result`. The command
 // is FIXED (`npm test`, no params) → zero injection surface. Same cmd.exe wrapper as the claude run, but with
@@ -816,6 +844,7 @@ async function handle(msg) {
     case 'git':       send(handleGit(msg)); break;                 // DBR-1 dev-branch git allowlist (§3)
     case 'git-confirm': send(mintConfirmToken(msg)); break;        // DBR-P2-1 — mint a one-time confirm token (§3/§6)
     case 'test':      runTest(msg); break;                         // DBR-P2-3 — the merge test gate (`npm test`, async)
+    case 'stamp-version': send(stampVersion(msg)); break;          // version-at-land — stamp main's manifest version (docs/DESIGN_surfaces.md §4.2)
     case 'run':       startRun(msg); break;
     default:          send({ v: PROTOCOL_V, type: 'error', code: 'unknown-type', got: msg.type });
   }

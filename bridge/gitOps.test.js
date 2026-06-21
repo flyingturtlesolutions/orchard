@@ -115,9 +115,9 @@ describe('gitOps Phase-2 converge ops — syncMain / mergeSquash / commitMerge /
     assert.equal(buildGitArgs('mergeSquash', { branch: 'feature/y', confirmToken: TOKEN }).error, 'bad-branch');
   });
 
-  it('commitMerge: token → `commit -m <msg>` (the one main commit); refuses without token (b)', () => {
+  it('commitMerge: token → `commit -am <msg>` (-am carries the version-at-land stamp); refuses without token (b)', () => {
     const okR = buildGitArgs('commitMerge', { message: 'Add drawer\n\nDev-conversation:abc', confirmToken: TOKEN });
-    assert.deepEqual(okR.argv, ['commit', '-m', 'Add drawer\n\nDev-conversation:abc']); assert.equal(okR.write, true);
+    assert.deepEqual(okR.argv, ['commit', '-am', 'Add drawer\n\nDev-conversation:abc']); assert.equal(okR.write, true);
     assert.equal(buildGitArgs('commitMerge', { message: 'x' }).error, 'needs-confirm');                    // (b)
   });
 
