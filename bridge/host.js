@@ -30,6 +30,7 @@ const { spawn, spawnSync } = require('child_process');
 const gitOps = require('./gitOps.cjs');   // DBR-1 — the parameter-validated dev-branch git allowlist (§3)
 const setVer = require('./setVersion.cjs');   // version-at-land (docs/DESIGN_surfaces.md §4.2) — pure stamp core; the host does the git-read + manifest write
 const { buildConcernContract } = require('./concern.cjs');   // DBR-5 — the per-spawn scope-contract builder (§8.2)
+const surfaces = require('./surfaces.cjs');   // keystone K2/K4 (docs/DESIGN_surfaces.md §2.2) — resolve a run's surface → its altitude preamble
 const protocol = require('./protocol.cjs');   // DBR-P4-2 — the v:2 run-multiplex primitives (PROTO_V, tagFrame, poolSnapshot) (§10)
 
 // DBR-P4-2 (§10) — the protocol generation. Bumped 1→2 (run-multiplex); single source of truth in protocol.cjs.
@@ -728,6 +729,11 @@ function startRun(msg) {
   if (resumeFlag) claudeArgv.push('--resume', _sid);                 // _sid: strict-UUID validated above
   const _mf = modelFlag(msg.model).trim();                           // '--model <id>' (frozen table) or ''
   if (_mf) claudeArgv.push(..._mf.split(' '));
+  // keystone K2/K4 (docs/DESIGN_surfaces.md §2.2) — inject the run's SURFACE altitude preamble (a host-CONSTANT string
+  // from the registry: '' for low → unchanged; the design-altitude prompt for high). Discrete argv element, no user
+  // data → injection-safe by construction. Goes BEFORE the (user-derived, sanitized) concern contract.
+  const surfacePre = surfaces.surfacePreamble(msg.surface);
+  if (surfacePre) { claudeArgv.push('--append-system-prompt', surfacePre); log(`SURFACE ▸ ${surfaces.resolveSurface(msg.surface).id} altitude preamble injected (${Buffer.byteLength(surfacePre, 'utf8')}B)`); }
   if (contract) { claudeArgv.push('--append-system-prompt', contract); log(`CONCERN ▸ scope contract injected (${Buffer.byteLength(contract, 'utf8')}B)`); }
   let child;
   try {

@@ -5,7 +5,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import sf from './surfaces.cjs';
-const { SURFACES, DEFAULT_SURFACE, listSurfaces, surfaceById, isSurfaceId, resolveSurface } = sf;
+const { SURFACES, DEFAULT_SURFACE, listSurfaces, surfaceById, isSurfaceId, resolveSurface, surfacePreamble } = sf;
 
 describe('surfaces — the registry shape', () => {
   it('declares low + high, each with the required config fields, id matching its key', () => {
@@ -48,5 +48,23 @@ describe('surfaces — lookups', () => {
     assert.equal(resolveSurface('bogus').id, DEFAULT_SURFACE);
     assert.equal(resolveSurface(null).id, DEFAULT_SURFACE);
     assert.equal(resolveSurface(undefined).id, DEFAULT_SURFACE);
+  });
+});
+
+describe('surfaces — the altitude preamble (K2/K4 — injected via --append-system-prompt)', () => {
+  it('preamble is a string on every surface (empty for low → today’s dev behavior unchanged)', () => {
+    assert.equal(typeof SURFACES.low.preamble, 'string');
+    assert.equal(SURFACES.low.preamble, '');
+    assert.equal(typeof SURFACES.high.preamble, 'string');
+    assert.ok(SURFACES.high.preamble.length > 0);
+  });
+  it('surfacePreamble: high → the design altitude prompt; low / unknown / nullish → empty', () => {
+    const hi = surfacePreamble('high');
+    assert.ok(/design|architectur|conceptual/i.test(hi), 'high preamble steers to design/architecture');
+    assert.ok(/never commit/i.test(hi), 'high preamble keeps the land-through-the-gate posture');
+    assert.equal(surfacePreamble('low'), '');
+    assert.equal(surfacePreamble('bogus'), '');   // unknown → default low → ''
+    assert.equal(surfacePreamble(null), '');
+    assert.equal(surfacePreamble(undefined), '');
   });
 });
