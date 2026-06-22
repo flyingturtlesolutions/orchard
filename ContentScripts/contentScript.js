@@ -6093,6 +6093,29 @@ const MESSAGE_HANDLERS = {
     }
   },
 
+  // CX-3 (session-ride) — perform a SAME-ORIGIN credentialed fetch from the page's own origin so the user's existing
+  // login cookies ride (a background cross-site fetch would drop SameSite cookies). The URL is built background-side
+  // from a vetted recipe (background/handlers/connector.js); read-only. Async → return true.
+  'SESSION_FETCH': (message, _sender, sendResponse) => {
+    const { payload } = message;
+    (async () => {
+      try {
+        const url = (payload && typeof payload.url === 'string') ? payload.url : '';
+        const method = String((payload && payload.method) || 'GET').toUpperCase();
+        if (!url) { sendResponse({ success: false, error: 'session-fetch-no-url' }); return; }
+        const res = await fetch(url, { method, credentials: 'include', headers: { Accept: 'application/json' } });
+        if (!res.ok) { sendResponse({ success: false, error: `http-${res.status}` }); return; }
+        const text = await res.text();
+        let value; try { value = JSON.parse(text); } catch { value = text; }
+        const capped = typeof value === 'string' && value.length > 100000;   // §12 — crude cap; offload comes later
+        sendResponse({ success: true, value: capped ? value.slice(0, 100000) : value, capped });
+      } catch (e) {
+        sendResponse({ success: false, error: (e && e.message) || 'session-fetch-failed' });
+      }
+    })();
+    return true;
+  },
+
 
     // v2.74.46 — Perspective-capture verification overlays.
   'SHOW_PERSPECTIVE_OVERLAYS': (message, _sender, sendResponse) => {
