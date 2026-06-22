@@ -30,7 +30,8 @@ Session-ride is **why Orchard is a browser extension at all** (§3); the broker 
 | Per-class safety ladder (`auto·confirm·gated·forbidden`) + floor | `policyFilter` | **built** — HITL is a leg property; the floor is unrelaxable; the rule table can only tighten |
 | Class-agnostic router cascade | `Core/route.js` | **built** — Tier-0 alias → Tier-1 retrieve+select; anti-hallucination |
 | Availability gate | `assemblePalette` `env` (:124) | **built** — `env.connector` documented |
-| Dispatch planner connector arm | `Core/execPlan.js:80` | **stubbed** — `fail('connector','connector-greenfield')` ← now needs **two** arms (§7) |
+| Dispatch planner connector arm | `Core/execPlan.js` | **built (CX-2)** — two arms: `INVOKE_SESSION` (session-ride) + `INVOKE_CONNECTOR` (broker) (§7) |
+| Leg projection — recipe + MCP tool → `OfferedLeg` | `Core/connectorLeg.js` | **built (CX-1)** — `paramSchema`, `impl`, account-namespaced key, escalate-only `hintToSafety` (§9) |
 | Arbitration rule (read→API-first, write→grounded-first) | `DESIGN_inference_layer.md` §2.3 | **designed** (§8) |
 | OUTCOMES prior, tool-RAG retrieval | `attachPrior`, R-2 | **built** — connectors inherit both |
 

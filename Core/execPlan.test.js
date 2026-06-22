@@ -59,10 +59,39 @@ describe('planExec — leg → dispatch plan (pure §4.2)', () => {
     assert.equal(plan.ok, true); assert.equal(plan.busyMark, false); assert.equal(plan.mode, 'ask');
   });
 
-  it('connector → not dispatchable (greenfield); unknown ops fail gracefully', () => {
-    assert.equal(planExec({ key: 'X', domain: 'connector' }, {}, {}).reason, 'connector-greenfield');
+  it('connector with no binding → not dispatchable; unknown ops fail gracefully', () => {
+    assert.equal(planExec({ key: 'X', domain: 'connector' }, {}, {}).reason, 'connector-no-binding');
     assert.equal(planExec({ key: 'NOPE', domain: 'browser' }, {}, {}).reason, 'unknown-browser-op');
     assert.equal(planExec(null, {}, {}).ok, false);
+  });
+
+  it('session-ride connector → INVOKE_SESSION, not busy-marked, carries origin+endpoint+args (CX-2 §7)', () => {
+    const leg = { key: 'acme.zendesk.read_ticket', domain: 'connector', source: 'builtin', mode: 'ask',
+                  tool: { impl: 'session', origin: 'acme.zendesk.com', endpoint: '/api/v2/tickets/{id}.json', method: 'GET' } };
+    const plan = planExec(leg, { id: 12345 }, {});
+    assert.equal(plan.ok, true);
+    assert.equal(plan.channel, 'INVOKE_SESSION');
+    assert.equal(plan.busyMark, false);                 // drives no tab → Invariant #2 N/A
+    assert.equal(plan.payload.origin, 'acme.zendesk.com');
+    assert.equal(plan.payload.endpoint, '/api/v2/tickets/{id}.json');
+    assert.equal(plan.payload.method, 'GET');
+    assert.equal(plan.payload.args.id, 12345);
+  });
+
+  it('session-ride with no recipe binding → not dispatchable', () => {
+    assert.equal(planExec({ key: 'x', domain: 'connector', tool: { impl: 'session' } }, {}, {}).reason, 'session-no-recipe');
+  });
+
+  it('oauth/MCP connector → INVOKE_CONNECTOR, not busy-marked, carries server+tool+args (CX-2 §7)', () => {
+    const leg = { key: 'acme.zendesk.get_ticket', domain: 'connector', source: 'builtin', mode: 'ask',
+                  tool: { impl: 'oauth', server: 'zendesk', name: 'get_ticket' } };
+    const plan = planExec(leg, { ticket_id: 12345 }, {});
+    assert.equal(plan.ok, true);
+    assert.equal(plan.channel, 'INVOKE_CONNECTOR');
+    assert.equal(plan.busyMark, false);
+    assert.equal(plan.payload.server, 'zendesk');
+    assert.equal(plan.payload.tool, 'get_ticket');
+    assert.equal(plan.payload.args.ticket_id, 12345);
   });
 });
 

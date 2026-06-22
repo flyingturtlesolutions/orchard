@@ -77,7 +77,19 @@ function _planExec(leg, params = {}, ctx = {}) {
     if (!channel) return fail('self', 'unknown-self-op');
     return { ok: true, channel, busyMark: false, mode: 'ask', domain: 'self', payload: { tabId, groundId }, reason: 'self-introspect' };
   }
-  if (domain === 'connector') return fail('connector', 'connector-greenfield');
+  if (domain === 'connector') {
+    // Two implementations (DESIGN_connectors.md §7): session-ride (client, rides the browser login) and
+    // oauth/MCP-broker (cloud proxy). Neither drives a tab → never busy-mark (Invariant #2 N/A).
+    const t = (leg && leg.tool) || {};
+    if (t.impl === 'session') {
+      if (!t.origin || !t.endpoint) return fail('connector', 'session-no-recipe');
+      return { ok: true, channel: 'INVOKE_SESSION', busyMark: false, mode, domain: 'connector',
+               payload: { origin: t.origin, endpoint: t.endpoint, method: t.method || 'GET', args: p }, reason: 'session-ride' };
+    }
+    if (!t.server || !t.name) return fail('connector', 'connector-no-binding');
+    return { ok: true, channel: 'INVOKE_CONNECTOR', busyMark: false, mode, domain: 'connector',
+             payload: { server: t.server, tool: t.name, args: p }, reason: 'connector-invoke' };
+  }
   return fail(domain, 'no-dispatch');
 }
 
