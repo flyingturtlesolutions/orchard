@@ -3117,6 +3117,16 @@ const IL_PANEL_LEGS = {
   } },
 };
 
+// IL (v2.74.1149) — the FULL always-available capability set for "what can you do" (operate Orchard + the browser):
+// every env-available builtin EXCEPT the meta one (LIST_CAPABILITIES itself) and the two that can't fire from a typed
+// `il:` (OPEN_GROUND needs a real gesture; DELETE_ALL is gated/destructive → button-only). `availableBuiltins` already
+// env-filters (e.g. FOCUS_TAB needs a tab). Used by the "what can I do here" answer so a COLD page no longer collapses
+// to just "Explore this page" — the panel/browser legs are page-independent and always real.
+const _IL_CAP_SKIP = new Set(['LIST_CAPABILITIES', 'OPEN_GROUND', 'DELETE_ALL_CONVERSATIONS']);
+function _ilAllCapabilities(tabId) {
+  return availableBuiltins(BUILTIN_LEGS, { tab: tabId != null }).map(toOfferedLeg).filter((l) => l && !_IL_CAP_SKIP.has(l.key));
+}
+
 // Dispatch an ACT×Self PANEL leg JUDGE picked → its local handler. No il-confirm (see IL_PANEL_LEGS): the legs run
 // directly — the explicit `il:` command is the authorization, and window.confirm is dead in the async panel flow.
 async function _ilRunPanelAction(msg, { leg, panel, ask }) {
@@ -3150,10 +3160,17 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId }) {
     return;
   }
   if (leg.key === 'LIST_CAPABILITIES') {
-    const entries = (res.menu && Array.isArray(res.menu.entries)) ? res.menu.entries : [];
-    if (!entries.length) { _setMessageBody(msg, '🧠 I don’t have anything mapped on this page yet — want to show me something?'); return; }
-    const lines = entries.slice(0, 12).map((e) => `• ${e.label || e.intent || e.phrase || e.name || 'capability'}`);
-    _setMessageBody(msg, `🧠 Here’s what I can do here:\n${lines.join('\n')}`);
+    // v2.74.1149 — list the ALWAYS-available capabilities (operate Orchard + the browser) FIRST, then any page-derived
+    // ones. The page menu (GET_INTENT_MENU → buildIntentMenu) is empty on a cold/unexplored page, which is why the old
+    // answer collapsed to a lone "Explore this page" — the panel/browser legs are page-independent and were just omitted.
+    const selfLines = _ilAllCapabilities(tabId).map((l) => `• ${l.does || l.name || l.key}`);
+    const pageEntries = (res.menu && Array.isArray(res.menu.entries)) ? res.menu.entries : [];
+    const pageLines = pageEntries.filter((e) => e && e.kind !== 'explore-first').slice(0, 10).map((e) => `• ${e.label || e.intent || e.phrase || e.name || 'capability'}`);
+    const body = ['🧠 Here’s what I can do:'];
+    if (selfLines.length) body.push('', '**Operate Orchard / the browser**', ...selfLines);
+    if (pageLines.length) body.push('', '**On this page**', ...pageLines);
+    else body.push('', '_On this page: nothing mapped yet — ask me to “explore this page” to learn what it offers._');
+    _setMessageBody(msg, body.join('\n'));
     return;
   }
   _setMessageBody(msg, '🧠 Done.');
