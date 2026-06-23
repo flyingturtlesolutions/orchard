@@ -6104,7 +6104,17 @@ const MESSAGE_HANDLERS = {
         const method = String((payload && payload.method) || 'GET').toUpperCase();
         if (!url) { sendResponse({ success: false, error: 'session-fetch-no-url' }); return; }
         const headers = Object.assign({ Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, (payload && payload.headers) || {});
-        const res = await fetch(url, { method, credentials: 'include', headers });
+        let fetchBody;
+        if (method !== 'GET' && method !== 'HEAD') {
+          // CX-6 (write) — read the CSRF token straight off the live page's DOM (the content script is ON the page —
+          // no headless load, the CS Tools blueprint). A missing token means the page is logged out / not the app. Belt #2.
+          const metaTok = document.querySelector('meta[name="csrf-token"]');
+          const csrf = metaTok && metaTok.getAttribute('content');
+          if (!csrf) { sendResponse({ success: false, error: 'no-csrf', hint: 'open the app signed in so it can authorize the write' }); return; }
+          headers['X-CSRF-Token'] = csrf;
+          if (payload && payload.body != null) { headers['Content-Type'] = 'application/json'; fetchBody = JSON.stringify(payload.body); }
+        }
+        const res = await fetch(url, { method, credentials: 'include', headers, body: fetchBody });
         const ct = res.headers.get('content-type') || '';
         const text = await res.text();
         let value = null, isJson = false;

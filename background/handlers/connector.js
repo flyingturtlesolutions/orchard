@@ -12,8 +12,8 @@
 import { fillEndpoint } from '../../Core/connectorRecipes.js';
 
 export function createConnectorHandlers({ ensureContentScript } = {}) {
-  const fetchVia = (tabId, url, method) =>
-    chrome.tabs.sendMessage(tabId, { type: 'SESSION_FETCH', payload: { url, method } }, { frameId: 0 });
+  const fetchVia = (tabId, url, method, body) =>
+    chrome.tabs.sendMessage(tabId, { type: 'SESSION_FETCH', payload: { url, method, body } }, { frameId: 0 });
 
   return {
     'INVOKE_SESSION': (payload, _sender, sendResponse) => {
@@ -21,7 +21,10 @@ export function createConnectorHandlers({ ensureContentScript } = {}) {
         try {
           const args = (payload && typeof payload.args === 'object' && payload.args) || {};
           const method = String((payload && payload.method) || 'GET').toUpperCase();
-          if (method !== 'GET') { sendResponse({ success: false, error: 'session-write-not-built' }); return; }   // CX-6
+          // CX-6 — writes are allowed but EXECUTOR-GATED: a non-GET requires explicit `confirmed:true` (the panel sets
+          // it only AFTER the HITL confirm — CX-6b). The CSRF token is read page-side in SESSION_FETCH. Belt #1.
+          const isWrite = method !== 'GET' && method !== 'HEAD';
+          if (isWrite && !(payload && payload.confirmed === true)) { sendResponse({ success: false, error: 'write-needs-confirm' }); return; }
 
           // Resolve a live, logged-in tab: an explicit origin (templated from args), or the open *.appHost tab.
           let origin = fillEndpoint(String((payload && payload.origin) || ''), args).replace(/^https?:\/\//i, '').replace(/\/+$/, '');
@@ -58,7 +61,7 @@ export function createConnectorHandlers({ ensureContentScript } = {}) {
           const path = fillEndpoint(String((payload && payload.endpoint) || ''), args);
           if (!path) { sendResponse({ success: false, error: 'session-no-recipe' }); return; }
           const url = `https://${origin}${path.startsWith('/') ? path : '/' + path}`;
-          const reply = await fetchVia(tab.id, url, method);
+          const reply = await fetchVia(tab.id, url, method, payload && payload.body);
           sendResponse(reply && reply.success ? { ...reply, origin } : (reply || { success: false, error: 'no-reply' }));   // origin → ticket-url synthesis
         } catch (e) {
           sendResponse({ success: false, error: (e && e.message) || 'invoke-session-failed' });
