@@ -1,6 +1,6 @@
 # DESIGN_connectors.md — the Connector tool class
 
-**Status:** BUILDING — **session-ride proven LIVE 2026-06-23** (a Zendesk ticket read rode the user's login). CX-1/CX-2/CX-3 landed (v2.74.1150–1152); the §12 cookie contract is resolved. Next: CX-4 (feed connectors into the palette so `il:` selects them). Auth model revised 2026-06-22 (session-ride primary, #1 downgraded — §11). Elaborates the Connector cell of `DESIGN_inference_layer.md` (§2.1 grid, §2.3 arbitration, §4.2 `runTool`, §4.3 availability).
+**Status:** BUILDING — **session-ride proven LIVE (read + write) 2026-06-23** (a Zendesk ticket read rode the user's login; an internal-note write authenticated via the page's CSRF token). CX-1…CX-4b + CX-6a landed (v2.74.1150–1157); the §12 cookie contract is resolved. **CX-9 (hybrid read-legs — the lattice per *step*) designed 2026-06-23 (§15).** Next live: CX-6b (`il:` write flow — binder + dry-run/confirm UI). Auth model revised 2026-06-22 (session-ride primary, #1 downgraded — §11). Elaborates the Connector cell of `DESIGN_inference_layer.md` (§2.1 grid, §2.3 arbitration, §4.2 `runTool`, §4.3 availability).
 
 **One line:** the IL router sits above a four-domain tool lattice (`page · browser · connector · self`); this doc fills the **connector** domain with two execution implementations — **session-ride** (call the app's own endpoint from inside the already-authenticated browser, like the grounded caps already do — *primary*) and **OAuth/MCP-broker** (the cloud proxy reaches official/scoped APIs the session can't — *reach-extender*). The model **selects, never executes** in either case.
 
@@ -124,6 +124,8 @@ if (domain === 'connector') {
 
 Reads favor the credential-free path; writes favor the *scoped, governable* path. Realized in the `routeAsk` prompt (it sees each candidate's `domain`/`mode`/`impl`) + a read/write tie-break next to GA-5.
 
+**Per *step*, not just per task (CX-9, §15).** The table ranks legs for *one logical step*; a single capability mixes legs **across** steps — a grounded driver feeding a session-ride read, or a session-ride read **verifying** a grounded write. The read row then becomes a per-step choice `session-fetch → network-harvest → dom-scrape`.
+
 **Two cracks to close (else arbitration silently fails):**
 - **Co-retrieval.** The router can only prefer a tool that made the top-k candidate set. Class-blind retrieval may not surface the connector → reserve a per-class slot so a matching connector always appears.
 - **Alias collision.** Tier-0 (`route.js:50`) short-circuits an exact alias *before* the palette. A taught Gmail-web path aliased to "search gmail" shadows the connector. On connect, scan aliases/learned caps for read-intent overlap and **demote** (drop alias, keep as fallback) — surfaced, conservative (overlap detection must not false-retire, §12); and the teach path should decline to record a read path a connector already covers.
@@ -146,6 +148,8 @@ Reads favor the credential-free path; writes favor the *scoped, governable* path
 5. **CX-5 — the broker (cloud).** MCP client + vault + `GET/POST` in the Phase C-P3 proxy; one OAuth read connector.
 6. **CX-6 — writes + HITL.** A write connector through `confirm`/`gated` (both impls); the alias-collision demote.
 7. **CX-7 — the connection layer + catalog UX.** A "connection" is *which instance · which role · which host*, beyond the open tab: **disambiguate** multiple open `*.appHost` tabs (prefer the active / most-recently-used — shipped in CX-4a.2), **remember the instance** for the cold-start "open a tab" (§14) when none is open, and pick the **agent vs end-user** recipe by role. Plus OAuth link / user recipes / SSO-for-teams; `env.connectors` reflects linked + logged-in state.
+8. **CX-8 — learn-from-traffic authoring.** One demonstration captures DOM actions **and** the page's network calls (a MAIN-world `fetch`/`XHR` tee) → emits the grounded fragments **and** a session-ride recipe per observed read/write, bound to the same step as an alternative leg (the "learnable from traffic" hook in §4/§12). The multiplier that makes hybrid legs (CX-9) *automatic* instead of hand-authored.
+9. **CX-9 — hybrid read-legs (the lattice per *step*).** The `read-leg` kind on the Observation node (`dom-scrape | session-fetch | network-harvest`) + the **network-harvest executor** (A2 — MAIN-world tee; `chrome.debugger` Network as the heavyweight fallback) + the per-step read arbitration (§8). A1 (`session-fetch`) is nearly free — bind a connector recipe as a leg of a learnt step. **Pattern C** (session-ride read *verifies* a grounded write) is the write-side safety multiplier. Provable on a real search (Zendesk / the vendor portal); CX-8 makes it scale. (§15)
 
 CX-1…3 ship a working read connector with **no cloud and no credential**. The broker (CX-5+) is where the live-only seam (proxy, vault, OAuth) needs an eyeball.
 
@@ -191,3 +195,37 @@ CS Tools — the operator's **in-use** Deako CS toolset ([[reference_cs_tools]])
 - **Composability** *(CX-4c)* — a read's output feeds the next step (their `search_customer → mezmo_query → fetch_logs`). The autonomous arc.
 
 **Does NOT transfer (CS-Tools-specific; Orchard's in-browser locus removes the need):** durable browser profiles, `storageState` snapshots, headless Okta re-warm, `save-*-session` capture, the keepalive, Playwright. Orchard rides the user's *actual* logged-in tab; the no-open-tab case is **open a tab to the origin** (§12), not replay a stored profile.
+
+## 15. Hybrid read-legs — the lattice per *step* (CX-9, designed 2026-06-23)
+
+Arbitration so far (§8) picks a tool **per task**. The deeper move: a learnt path and a session-ride leg compose **inside one capability**, at **per-step** granularity. The unit of choice drops from "this task uses `page` *or* `connector`" to: each logical **step** (a read, a write, a navigate) carries one or more **legs** across classes; the router picks the best-feasible leg per step; and a single demonstration (CX-8) populates multiple legs. A grounded path can *drive* the UI while a session-ride leg *serves the read* — the motivating case: **drive a search via the learnt path, take the results JSON instead of scraping the render.**
+
+**Three read legs for one logical step** (decreasing preference, health-gated):
+
+| Leg | Mechanism | Wins when |
+|---|---|---|
+| **`session-fetch`** (A1) | skip the UI — call the search endpoint directly with the query as a param (the existing `INVOKE_SESSION`) | the read is *self-contained*: all inputs expressible as endpoint params, no hidden UI state. Fastest, most stable, no driving. |
+| **`network-harvest`** (A2) | drive the UI step via the learnt path, but **tee the in-flight JSON response** instead of scraping the render ("before it populates the UI") | the request is *hard to replicate* — UI-set filters, signed params, opaque cursors, CSRF nonces. The page builds the perfect request; you read its response. |
+| **`dom-scrape`** (today) | read the rendered DOM (Observation node) | no clean JSON — server-rendered HTML, opaque GraphQL batching, or data computed client-side post-render. The fallback. |
+
+**Why A2 ≠ "A1 but worse."** It sidesteps request signing / CSRF / filter-state replication — the page constructs a valid request with all its context; you only read the response. And on **completeness**: virtualized / infinite-scroll lists only ever hold the *visible window* in the DOM — scraping loses off-screen rows and forces a scroll-to-load loop, while the JSON response carries the **full result set**. So A2 is more complete, more stable, *and* faster (no render wait).
+
+**Mechanics (MV3-real):**
+- **A2 interception** — a **MAIN-world `fetch`/`XHR` tee** (the same machinery as CX-8 authoring capture) that `postMessage`s responses to the content script; or **`chrome.debugger` Network** (the `debugger` permission is already held — `manifest.json`) as the heavyweight option. MV3 `webRequest` can't read response bodies → it's these two.
+- **Sequencing is strict** — *arm interceptor → run the grounded step → await the matching response* (timeout → fall back to `dom-scrape`). Arm **before** the action fires.
+- **Correlation** — a submit fires several XHRs (analytics, autocomplete, the search, lazy sub-fetches). Match the result-bearing one by endpoint shape + params-contains-the-query + timing. The recipe **records which endpoint is "the result."**
+
+**Invariants this touches (don't relearn):**
+- **Harvested JSON is untrusted page-origin data** — escape-first injection boundary, identical to scraped DOM. Data, never instructions (§9, `DESIGN_injection_boundary.md`).
+- **Busy-mark with a twist (Invariant #2).** The driven span busy-marks (engine clicks are noise) — but the network harvester is the *intended* signal. Suppress the *interaction monitor*; **enable** the harvester. Same shape as the OBS exception: suppress synthesized clicks, keep the capture.
+- **Two-leg health, not blind preference.** APIs drift too (versioned endpoints, param changes). A GA-3-style trust score gates which leg the router prefers per step, with fallback to the other — not "session-ride always wins."
+- **Semantics drift.** The rendered view sometimes ≠ the raw response (client-side filter/sort/format). The trial gate must confirm the JSON read satisfies the *same intent* as the DOM read it replaces — not just "returns rows."
+
+**Pattern C — session-ride as the *verifier* of a grounded write.** The inverse composition, and the highest-safety one: a learnt path does the gated/irreversible **write** (the API write is forbidden or absent), and a session-ride **read** confirms the effect — replacing the fragile "look for a success toast" postcondition with "re-fetch the record's JSON, assert the field changed." Hardens the trial/verify gate directly (the connector face of PB-8 effect reconciliation). Arguably higher-leverage than the read-easing case: it strengthens the safety net rather than speeding a read.
+
+**Maps onto what exists (small):**
+- A **read-leg kind on the Observation node**: `dom-scrape | session-fetch | network-harvest`. Same logical step, preferred leg + fallbacks. `OfferedLeg` already carries `page` + `connector` domains — this lets *one step* hold both.
+- **Authoring (CX-8) is the multiplier** — one demonstration captures DOM actions **and** network calls → grounded fragments **and** a session-ride recipe per read, bound to the same step as alternative legs. The combination becomes *automatic*, not hand-wired.
+- **Arbitration (§8)** — the read row already prefers `session-ride → … → scrape`; CX-9 makes that a *per-step* choice with `network-harvest` sitting between direct fetch and scrape.
+
+**Build order if taken:** (1) the `read-leg` abstraction on Observation (pure) — **LANDED `Core/readLeg.js` v2.74.1158** (constructors · `normalizeExtract` back-compat · `legFeasible`/`selectReadLeg` per-step arbitration; `shape` is extract-level, legs are pure mechanism); (2) the `network-harvest` executor (A2) — **pure correlation core LANDED `Core/harvest.js` v2.74.1159** (`jsonPath` · `callMatchesLeg` · `matchHarvest`: pick the result-bearing call out of the XHR noise by match+method+2xx+JSON, prefer the query-carrying request, tie-break rows→recency, extract via the `result` path); the **live MAIN-world tee + the ObservationExecutor dispatch branch remain** (impure — needs an eyeball on a real search); (3) bind A1 (`session-fetch`) as a leg of a learnt step (nearly free — route the leg's `tool` through `INVOKE_SESSION`); (4) Pattern C for the write side. CX-8 (dual capture) is what makes legs accrue without hand-authoring.
