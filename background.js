@@ -1671,7 +1671,7 @@ function _readSgSpec(groundId, url, intent) {
 
 // v2.74.951 (CR-X3a) — domain handler maps merge here; the dispatch + _invokeSgHandler serve them all.
 const _sgMessageHandlers = {
-  ...createConnectorHandlers(),                  // CX-3 — connector domain (INVOKE_SESSION session-ride)
+  ...createConnectorHandlers({ ensureContentScript: _ensureContentScript }),   // CX-3 — connector domain (INVOKE_SESSION session-ride)
   ...createWorkflowDebugHandlers({
     invokeSgHandler    : _invokeSgHandler,
     ensureContentScript: _ensureContentScript,

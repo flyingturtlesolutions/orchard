@@ -6103,7 +6103,8 @@ const MESSAGE_HANDLERS = {
         const url = (payload && typeof payload.url === 'string') ? payload.url : '';
         const method = String((payload && payload.method) || 'GET').toUpperCase();
         if (!url) { sendResponse({ success: false, error: 'session-fetch-no-url' }); return; }
-        const res = await fetch(url, { method, credentials: 'include', headers: { Accept: 'application/json' } });
+        const headers = Object.assign({ Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, (payload && payload.headers) || {});
+        const res = await fetch(url, { method, credentials: 'include', headers });
         if (!res.ok) { sendResponse({ success: false, error: `http-${res.status}` }); return; }
         const text = await res.text();
         let value; try { value = JSON.parse(text); } catch { value = text; }

@@ -1,6 +1,6 @@
 # DESIGN_connectors.md — the Connector tool class
 
-**Status:** DESIGN — **auth model revised 2026-06-22** (session-ride is now the primary implementation; decision #1 downgraded, see §11). Not built. Elaborates the greenfield Connector cell of `DESIGN_inference_layer.md` (§2.1 grid, §2.3 arbitration, §4.2 `runTool`, §4.3 availability). Build path in §10 (CX-1/CX-2 pure + headless; CX-3 is the first live connector and needs **no** cloud).
+**Status:** BUILDING — **session-ride proven LIVE 2026-06-23** (a Zendesk ticket read rode the user's login). CX-1/CX-2/CX-3 landed (v2.74.1150–1152); the §12 cookie contract is resolved. Next: CX-4 (feed connectors into the palette so `il:` selects them). Auth model revised 2026-06-22 (session-ride primary, #1 downgraded — §11). Elaborates the Connector cell of `DESIGN_inference_layer.md` (§2.1 grid, §2.3 arbitration, §4.2 `runTool`, §4.3 availability).
 
 **One line:** the IL router sits above a four-domain tool lattice (`page · browser · connector · self`); this doc fills the **connector** domain with two execution implementations — **session-ride** (call the app's own endpoint from inside the already-authenticated browser, like the grounded caps already do — *primary*) and **OAuth/MCP-broker** (the cloud proxy reaches official/scoped APIs the session can't — *reach-extender*). The model **selects, never executes** in either case.
 
@@ -157,7 +157,7 @@ CX-1…3 ship a working read connector with **no cloud and no credential**. The 
 ## 12. Open contracts (resolved direction; pin before the slice that needs them)
 
 - **Param fidelity** *(CX-1)* — carry the pruned `inputSchema` (`paramSchema`) for binding, not just names. Negligible cost; `routeAsk` already speaks JSON Schema.
-- **Session-ride cookie mechanics** *(CX-3, live-only)* — does a background `fetch` carry the host's cookies past SameSite, or must it run in the app's tab? What if no tab is open (open a hidden tab? offscreen?)? Verify live.
+- **Session-ride cookie mechanics** *(CX-3 — RESOLVED 2026-06-23)* — a content-script fetch from the app's origin tab carries the SameSite login cookie: **proven live** (Zendesk `/api/v2/tickets/{id}.json` returned the ticket JSON riding the user's session, v2.74.1151). Must run in the origin tab (a background cross-site fetch would not); a stale/missing content script is auto-healed via `_ensureContentScript` (v2.74.1152). Open-a-hidden-tab when no origin tab is open (→ `no-authenticated-tab`) is the one remaining follow-up.
 - **Session-ride recipe catalog** *(CX-3)* — curated `origin·endpoint·param-spec` per app; later learnable from observed traffic.
 - **Result shape / limits** *(CX-3/5)* — **offload + preview** (dump big results to a scratch artifact, hand the AI a preview + reference — mirrors MCP's >100K offload and the page-EXTRACT path), with cap/paginate fallbacks.
 - **Timeout / cancel** *(CX-3/5)* — per-invoke deadline → structured-failure; thread the existing CR-S abort signal into both invoke channels (+ MCP cancellation for the broker).
