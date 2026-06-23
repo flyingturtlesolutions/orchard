@@ -159,7 +159,7 @@ CX-1…3 ship a working read connector with **no cloud and no credential**. The 
 ## 12. Open contracts (resolved direction; pin before the slice that needs them)
 
 - **Param fidelity** *(CX-1)* — carry the pruned `inputSchema` (`paramSchema`) for binding, not just names. Negligible cost; `routeAsk` already speaks JSON Schema.
-- **Session-ride cookie mechanics** *(CX-3 — RESOLVED 2026-06-23)* — a content-script fetch from the app's origin tab carries the SameSite login cookie: **proven live** (Zendesk `/api/v2/tickets/{id}.json` returned the ticket JSON riding the user's session, v2.74.1151). Must run in the origin tab (a background cross-site fetch would not); a stale/missing content script is auto-healed via `_ensureContentScript` (v2.74.1152). Open-a-hidden-tab when no origin tab is open (→ `no-authenticated-tab`) is the one remaining follow-up.
+- **Session-ride cookie mechanics** *(CX-3 — RESOLVED 2026-06-23)* — a content-script fetch from the app's origin tab carries the SameSite login cookie: **proven live** (Zendesk `/api/v2/tickets/{id}.json` returned the ticket JSON riding the user's session, v2.74.1151). Must run in the origin tab (a background cross-site fetch would not); a stale/missing content script is auto-healed via `_ensureContentScript` (v2.74.1152). **No-open-tab → open a tab to the origin** (the real browser is/may-be logged in) — Orchard's in-browser locus needs no profile replay (§14).
 - **Session-ride recipe catalog** *(CX-3)* — curated `origin·endpoint·param-spec` per app; later learnable from observed traffic.
 - **Result shape / limits** *(CX-3/5)* — **offload + preview** (dump big results to a scratch artifact, hand the AI a preview + reference — mirrors MCP's >100K offload and the page-EXTRACT path), with cap/paginate fallbacks.
 - **Timeout / cancel** *(CX-3/5)* — per-invoke deadline → structured-failure; thread the existing CR-S abort signal into both invoke channels (+ MCP cancellation for the broker).
@@ -177,3 +177,16 @@ Real asks carry neither identity nor ids — **"get my open tickets"**, not "rea
 This collapses the CX-4 risk I flagged: the realistic first connector (`my_open_tickets`) is a param-free read with a tab-derived origin — no LLM binder, no `decision.params` threading.
 
 **The autonomous arc (the bigger vision).** "Auto: grab all my open Zendesk tickets and, for each, open a conversation and research it" is the connector as a **data source feeding the multi-step loop**: one session-ride list read → `agentLoop` `foreach` over the results → per-item work (spawn a conversation, research, …). The same loop that runs single-shot today, at `maxSteps > 1`, with the connector list as the iteration source. The target (CX-4c), not the first slice.
+
+## 14. Lessons from CS Tools (what transfers — 2026-06-23)
+
+CS Tools — the operator's **in-use** Deako CS toolset ([[reference_cs_tools]]) — is the production proof of this design's session-replay philosophy. Direction: **learn from it.** It runs on the Claude Code terminal via Playwright; Orchard is an extension riding the *live* browser. So the lessons about **response semantics** and **the write gate** transfer; the **credential machinery** does not.
+
+**Transfers (fold into the build):**
+- **Health = a live identity probe, never status/cookie** *(CX-4a render + CX-3)* — Zendesk returns **HTTP 200 + an anonymous sentinel user when logged out**, and `cf_clearance` churns while the real session lasts hours. `SESSION_FETCH` checking only `res.ok` is a false-positive risk: inspect the *returned identity* (an empty/anonymous list ≠ "0 results"; it means logged out). The connector face of §12's intent≠success.
+- **CSRF writes** *(CX-6)* — read the token straight off the live page's `meta[name="csrf-token"]` (Orchard's content script is already on the page — no headless load), PUT/POST with `X-CSRF-Token`, self-heal once on 401/403.
+- **Money/inventory = navigate-only, human-clicks** *(§9)* — never session-ride a refund/return/transfer. Use the **grounded page path**: navigate the tab to the admin page, the human clicks. The tool can't move money on its own. (Above `gated`.)
+- **Self-heal once → a clear surface** *(CX-3/6)* — after the one heal fails, say exactly what to do. For Orchard that's "open `<app>` and sign in" — a tab, not a profile re-capture.
+- **Composability** *(CX-4c)* — a read's output feeds the next step (their `search_customer → mezmo_query → fetch_logs`). The autonomous arc.
+
+**Does NOT transfer (CS-Tools-specific; Orchard's in-browser locus removes the need):** durable browser profiles, `storageState` snapshots, headless Okta re-warm, `save-*-session` capture, the keepalive, Playwright. Orchard rides the user's *actual* logged-in tab; the no-open-tab case is **open a tab to the origin** (§12), not replay a stored profile.
