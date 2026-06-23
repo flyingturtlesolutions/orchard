@@ -1,50 +1,60 @@
-// background/handlers/connector.js — the connector domain (DESIGN_connectors.md §7). CX-3 (+heal/headers v2.74.1152).
+// background/handlers/connector.js — the connector domain (DESIGN_connectors.md §7, §13–14). CX-3/CX-4a.
 //
 // INVOKE_SESSION (session-ride): the user's existing browser login IS the credential. A login cookie only rides a
-// SAME-ORIGIN request from the app's own page — a cross-site fetch from the service worker drops SameSite cookies —
-// so we never fetch here. We locate an open, logged-in tab on the recipe's origin, ensure its content script is live
-// (auto-inject if the extension was just reloaded), and have ITS content script (SESSION_FETCH) do the fetch from the
-// page origin. Read-only: the URL is built here from a VETTED recipe (origin + endpoint templated from the bound
-// args), so untrusted page content never shapes the request; writes are refused (CX-6 gates them behind CSRF +
-// confirm). INVOKE_CONNECTOR (the cloud/MCP broker) is CX-5 — not built here.
+// SAME-ORIGIN request from the app's own page, so we never fetch here — we locate the open, logged-in tab on the
+// recipe's origin (or derive it from the open *.appHost tab — the tab you're in IS the connection), ensure its
+// content script is live, and have it do the fetch (SESSION_FETCH). Read-only; URL built from a VETTED recipe.
 //
-// PROVEN LIVE (v2.74.1151): Zendesk /api/v2/tickets/{id}.json returned the ticket JSON riding the user's session.
+// Identity probe (CS Tools lesson, §14): a logged-out session returns HTTP 200 + an anonymous sentinel, so a list
+// read would look like "0 results". When a recipe sets verifyIdentity we probe first, verify the RETURNED identity
+// (never the status), and reuse the probed user id for {me} ("my X" recipes). Writes are refused (CX-6 gates them).
 
 import { fillEndpoint } from '../../Core/connectorRecipes.js';
 
 export function createConnectorHandlers({ ensureContentScript } = {}) {
+  const fetchVia = (tabId, url, method) =>
+    chrome.tabs.sendMessage(tabId, { type: 'SESSION_FETCH', payload: { url, method } }, { frameId: 0 });
+
   return {
     'INVOKE_SESSION': (payload, _sender, sendResponse) => {
       (async () => {
         try {
           const args = (payload && typeof payload.args === 'object' && payload.args) || {};
-          const origin = fillEndpoint(String((payload && payload.origin) || ''), args)
-            .replace(/^https?:\/\//i, '').replace(/\/+$/, '');
-          const path = fillEndpoint(String((payload && payload.endpoint) || ''), args);
           const method = String((payload && payload.method) || 'GET').toUpperCase();
-          if (!origin || !path) { sendResponse({ success: false, error: 'session-no-recipe' }); return; }
           if (method !== 'GET') { sendResponse({ success: false, error: 'session-write-not-built' }); return; }   // CX-6
-          const url = `https://${origin}${path.startsWith('/') ? path : '/' + path}`;
 
-          // Find an open, non-discarded tab on this origin (the cookies live there). An invalid pattern (e.g. an
-          // unfilled {subdomain}) throws → treated as no tab.
+          // Resolve a live, logged-in tab: an explicit origin (templated from args), or the open *.appHost tab.
+          let origin = fillEndpoint(String((payload && payload.origin) || ''), args).replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+          const appHost = String((payload && payload.appHost) || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+          const queryHost = origin || (appHost ? `*.${appHost}` : '');
+          if (!queryHost) { sendResponse({ success: false, error: 'session-no-recipe' }); return; }
+
           let tabs = [];
-          try { tabs = await chrome.tabs.query({ url: `*://${origin}/*` }); } catch { tabs = []; }
+          try { tabs = await chrome.tabs.query({ url: `*://${queryHost}/*` }); } catch { tabs = []; }
           const tab = (Array.isArray(tabs) ? tabs : []).find((t) => t && t.id != null && !t.discarded) || null;
-          if (!tab) { sendResponse({ success: false, error: 'no-authenticated-tab', origin }); return; }
+          if (!tab) { sendResponse({ success: false, error: 'no-authenticated-tab', host: appHost || origin, hint: `open ${appHost || origin} and sign in` }); return; }
+          if (!origin) { try { origin = new URL(tab.url).host; } catch { origin = appHost; } }
 
-          // Ensure the content script is live (cheap PING; auto-injects if the extension was just reloaded or the tab
-          // predates it) so the user never has to manually reload the page. Mirrors the SG REPLAY stale-port recovery.
           if (typeof ensureContentScript === 'function') {
             const ok = await ensureContentScript(tab.id);
             if (!ok) { sendResponse({ success: false, error: 'no-content-script', origin }); return; }
           }
 
-          const reply = await chrome.tabs.sendMessage(
-            tab.id,
-            { type: 'SESSION_FETCH', payload: { url, method, headers: (payload && payload.headers) || null } },
-            { frameId: 0 },
-          );
+          // Identity probe — verify identity, not status; reuse the probed id for {me}. (Zendesk-shaped sentinel
+          // check today; a per-app probe/check is the generalization.)
+          if (payload && payload.verifyIdentity) {
+            const probePath = String(payload.identityProbe || '/api/v2/users/me.json');
+            const me = await fetchVia(tab.id, `https://${origin}${probePath.startsWith('/') ? probePath : '/' + probePath}`, 'GET');
+            const u = me && me.success && me.value && me.value.user;
+            const anon = !u || u.id === -1 || u.id == null || u.email === 'invalid@example.com';
+            if (anon) { sendResponse({ success: false, error: 'not-logged-in', origin, hint: `open https://${origin} and sign in` }); return; }
+            if (u.id != null) args.me = u.id;
+          }
+
+          const path = fillEndpoint(String((payload && payload.endpoint) || ''), args);
+          if (!path) { sendResponse({ success: false, error: 'session-no-recipe' }); return; }
+          const url = `https://${origin}${path.startsWith('/') ? path : '/' + path}`;
+          const reply = await fetchVia(tab.id, url, method);
           sendResponse(reply || { success: false, error: 'no-reply' });
         } catch (e) {
           sendResponse({ success: false, error: (e && e.message) || 'invoke-session-failed' });

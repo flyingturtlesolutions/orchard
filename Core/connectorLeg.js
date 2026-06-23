@@ -71,8 +71,9 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
   const id = _str(r.id) || _str(r.name);
   const app = _str(r.app);
   const origin = _str(r.origin);
+  const appHost = _str(r.appHost);                       // §13/§14 — origin derived from the open *.appHost tab
   const endpoint = _str(r.endpoint);
-  if (!id || !app || !origin || !endpoint) return null;
+  if (!id || !app || !endpoint || !(origin || appHost)) return null;   // origin OR appHost
   const params = Array.isArray(r.params) ? r.params : [];
   const write = r.write === true;
   return {
@@ -85,7 +86,13 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
     params: params.map((p) => (p && p.name) || p).filter(Boolean),
     paramSchema: recipeParamSchema(params),
     safety: hintToSafety({ readOnlyHint: !write, destructiveHint: r.destructive === true }, trusted),
-    tool: { impl: 'session', account, app, origin, endpoint, method: _str(r.method).toUpperCase() || 'GET' },
+    tool: {
+      impl: 'session', account, app,
+      origin: origin || null, appHost: appHost || null,
+      endpoint, method: _str(r.method).toUpperCase() || 'GET',
+      verifyIdentity: r.verifyIdentity === true,
+      identityProbe: _str(r.identityProbe) || null,
+    },
   };
 }
 

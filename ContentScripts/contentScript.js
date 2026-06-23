@@ -6105,11 +6105,16 @@ const MESSAGE_HANDLERS = {
         if (!url) { sendResponse({ success: false, error: 'session-fetch-no-url' }); return; }
         const headers = Object.assign({ Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, (payload && payload.headers) || {});
         const res = await fetch(url, { method, credentials: 'include', headers });
-        if (!res.ok) { sendResponse({ success: false, error: `http-${res.status}` }); return; }
+        const ct = res.headers.get('content-type') || '';
         const text = await res.text();
-        let value; try { value = JSON.parse(text); } catch { value = text; }
-        const capped = typeof value === 'string' && value.length > 100000;   // §12 — crude cap; offload comes later
-        sendResponse({ success: true, value: capped ? value.slice(0, 100000) : value, capped });
+        let value = null, isJson = false;
+        try { value = JSON.parse(text); isJson = true; } catch { /* non-JSON body */ }
+        if (!res.ok) { sendResponse({ success: false, error: `http-${res.status}`, json: isJson }); return; }
+        // A 2xx that isn't JSON on a JSON endpoint is a login / Cloudflare-challenge HTML page (CS Tools lesson) —
+        // not a real result. Don't pass it back as a misleading success (it would parse-error or read as junk).
+        if (!isJson) { sendResponse({ success: false, error: 'non-json', status: res.status, contentType: ct.slice(0, 60), hint: 'login or challenge page?' }); return; }
+        const capped = typeof text === 'string' && text.length > 100000;   // §12 — informational; offload later
+        sendResponse({ success: true, value, capped });
       } catch (e) {
         sendResponse({ success: false, error: (e && e.message) || 'session-fetch-failed' });
       }

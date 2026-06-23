@@ -82,9 +82,12 @@ function _planExec(leg, params = {}, ctx = {}) {
     // oauth/MCP-broker (cloud proxy). Neither drives a tab → never busy-mark (Invariant #2 N/A).
     const t = (leg && leg.tool) || {};
     if (t.impl === 'session') {
-      if (!t.origin || !t.endpoint) return fail('connector', 'session-no-recipe');
+      if (!(t.origin || t.appHost) || !t.endpoint) return fail('connector', 'session-no-recipe');
       return { ok: true, channel: 'INVOKE_SESSION', busyMark: false, mode, domain: 'connector',
-               payload: { origin: t.origin, endpoint: t.endpoint, method: t.method || 'GET', args: p }, reason: 'session-ride' };
+               payload: { origin: t.origin || null, appHost: t.appHost || null, endpoint: t.endpoint,
+                          method: t.method || 'GET', args: p,
+                          verifyIdentity: t.verifyIdentity === true, identityProbe: t.identityProbe || null },
+               reason: 'session-ride' };
     }
     if (!t.server || !t.name) return fail('connector', 'connector-no-binding');
     return { ok: true, channel: 'INVOKE_CONNECTOR', busyMark: false, mode, domain: 'connector',

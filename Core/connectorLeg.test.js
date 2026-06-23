@@ -78,8 +78,23 @@ describe('recipeToLeg — session-ride recipe → client connector leg (§4)', (
     assert.equal(toOfferedLeg(leg), leg);
   });
 
-  it('rejects an incomplete recipe', () => {
-    assert.equal(recipeToLeg({ id: 'x', app: 'zendesk' }, {}), null);   // no origin/endpoint
+  it('an appHost recipe (no origin) → leg with tool.appHost + verifyIdentity + identityProbe (§14)', () => {
+    const leg = recipeToLeg({
+      id: 'my_open_tickets', app: 'zendesk', name: 'My open tickets', appHost: 'zendesk.com',
+      verifyIdentity: true, identityProbe: '/api/v2/users/me.json',
+      endpoint: '/api/v2/search.json?query=assignee:{me}', method: 'GET', params: [],
+    }, { account: 'me', trusted: true });
+    assert.ok(leg);
+    assert.equal(leg.tool.impl, 'session');
+    assert.equal(leg.tool.appHost, 'zendesk.com');
+    assert.equal(leg.tool.origin, null);
+    assert.equal(leg.tool.verifyIdentity, true);
+    assert.equal(leg.tool.identityProbe, '/api/v2/users/me.json');
+  });
+
+  it('rejects an incomplete recipe (no origin AND no appHost, or no endpoint)', () => {
+    assert.equal(recipeToLeg({ id: 'x', app: 'zendesk' }, {}), null);                              // no endpoint, no host
+    assert.equal(recipeToLeg({ id: 'x', app: 'zendesk', endpoint: '/y' }, {}), null);              // host missing
     assert.equal(recipeToLeg(null, {}), null);
   });
 });
