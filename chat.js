@@ -29,6 +29,7 @@ import { parseAdminCommand, parseDedupCommand } from './Core/orchAdmin.js';    /
 import { classifyReadAsk, askListIndex } from './Core/observe.js';   // OBS-READ — is the ask a question (a read)? + the index a singular/ordinal read wants
 import { runIlStandin } from './Core/ilStandin.js';   // IL-3 — the single-shot stand-in folded through agentLoop@maxSteps=1 (DESIGN §8 Phase-1 parity)
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
+import { recipeLegs, normalizeTicket } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 
 // ─── Conversation state ──────────────────────────────────────────────────────
@@ -3148,7 +3149,29 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId }) {
   try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${leg.domain}:${leg.key}`); } catch { /* */ }
   let res = null;
   try { res = await _orchReq(plan.channel, plan.payload); } catch { /* */ }
-  if (!res || res.success === false) { _setMessageBody(msg, `🧠 Couldn’t ${leg.does || leg.name || 'do that'}${res && res.error ? ` — ${res.error}` : ''}.`); return; }
+  if (!res || res.success === false) {
+    const hint = (res && res.hint) ? `  ${res.hint}.` : '';   // CX-4a.1 — surface "open <app> and sign in" on a connector auth miss
+    _setMessageBody(msg, `🧠 Couldn’t ${leg.does || leg.name || 'do that'}${res && res.error ? ` — ${res.error}` : ''}.${hint}`);
+    return;
+  }
+  if (leg.domain === 'connector') {
+    // CX-4a.2 — render a session-ride read. A list (search → results / view → tickets) renders the normalized subset;
+    // a single object renders one. PII stays in the user's own panel (their own data).
+    const v = res.value || {};
+    const list = Array.isArray(v.results) ? v.results : (Array.isArray(v.tickets) ? v.tickets : null);
+    const origin = res.origin || '';
+    if (list) {
+      const lines = list.slice(0, 25).map((t) => { const n = normalizeTicket(t, origin); return `• #${n.id} ${n.subject || '(no subject)'} — ${n.status}`; });
+      const head = `🧠 ${list.length} ${leg.name || 'result'}${list.length === 1 ? '' : 's'}`;
+      _setMessageBody(msg, list.length ? `${head}:\n${lines.join('\n')}` : `${head}.`);
+    } else if (v.ticket) {
+      const n = normalizeTicket(v.ticket, origin);
+      _setMessageBody(msg, `🧠 #${n.id} ${n.subject || ''} — ${n.status}${n.description ? `\n${n.description}` : ''}${n.url ? `\n${n.url}` : ''}`);
+    } else {
+      _setMessageBody(msg, '🧠 Done.');
+    }
+    return;
+  }
   if (leg.key === 'LIST_TABS') {
     const tabs = Array.isArray(res.tabs) ? res.tabs : [];
     if (!tabs.length) { _setMessageBody(msg, '🧠 No open web tabs.'); return; }
@@ -3202,7 +3225,10 @@ async function _tryIlCommand(text) {
       // IL-3b — on a page miss, offer the param-free Browser/Self READ legs so JUDGE can pick "list tabs" / "what
       // can I do here" instead of dead-ending to a world-knowledge answer (the grid's ASK×Browser/Self cells).
       const builtins = availableBuiltins(BUILTIN_LEGS, { tab: tabId != null }).map(toOfferedLeg).filter((l) => l && (IL_READ_LEG_KEYS.has(l.key) || IL_PANEL_LEGS[l.key]));
-      return { candidates: [], builtins, groundId: m && m.groundId, match: m };
+      // CX-4a.2 — connectors are ground-independent reads (session-ride; the open *.appHost tab is the connection),
+      // so offer them on a page miss too. Reads only (mode 'ask'); the curated catalog is trusted.
+      const connectorLegs = recipeLegs({ trusted: true }).filter((l) => l && l.mode === 'ask');
+      return { candidates: [], builtins: [...builtins, ...connectorLegs], groundId: m && m.groundId, match: m };
     }
     const turn = planAssistantTurn(m);
     const candidates = []; const seen = new Set();

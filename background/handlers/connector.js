@@ -31,7 +31,11 @@ export function createConnectorHandlers({ ensureContentScript } = {}) {
 
           let tabs = [];
           try { tabs = await chrome.tabs.query({ url: `*://${queryHost}/*` }); } catch { tabs = []; }
-          const tab = (Array.isArray(tabs) ? tabs : []).find((t) => t && t.id != null && !t.discarded) || null;
+          // Disambiguate multiple open instances (another Zendesk, a second login): prefer an active tab, then the
+          // most-recently-used — "the connection the user is actually looking at" (§13/CX-7).
+          const live = (Array.isArray(tabs) ? tabs : []).filter((t) => t && t.id != null && !t.discarded);
+          live.sort((a, b) => (Number(b.active === true) - Number(a.active === true)) || ((b.lastAccessed || 0) - (a.lastAccessed || 0)));
+          const tab = live[0] || null;
           if (!tab) { sendResponse({ success: false, error: 'no-authenticated-tab', host: appHost || origin, hint: `open ${appHost || origin} and sign in` }); return; }
           if (!origin) { try { origin = new URL(tab.url).host; } catch { origin = appHost; } }
 
@@ -55,7 +59,7 @@ export function createConnectorHandlers({ ensureContentScript } = {}) {
           if (!path) { sendResponse({ success: false, error: 'session-no-recipe' }); return; }
           const url = `https://${origin}${path.startsWith('/') ? path : '/' + path}`;
           const reply = await fetchVia(tab.id, url, method);
-          sendResponse(reply || { success: false, error: 'no-reply' });
+          sendResponse(reply && reply.success ? { ...reply, origin } : (reply || { success: false, error: 'no-reply' }));   // origin → ticket-url synthesis
         } catch (e) {
           sendResponse({ success: false, error: (e && e.message) || 'invoke-session-failed' });
         }

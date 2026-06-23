@@ -145,7 +145,7 @@ Reads favor the credential-free path; writes favor the *scoped, governable* path
    - **CX-4c — the autonomous arc** (§13): connector list → `agentLoop` `foreach` → per-item work.
 5. **CX-5 — the broker (cloud).** MCP client + vault + `GET/POST` in the Phase C-P3 proxy; one OAuth read connector.
 6. **CX-6 — writes + HITL.** A write connector through `confirm`/`gated` (both impls); the alias-collision demote.
-7. **CX-7 — account/catalog UX.** Link OAuth, add user MCP URLs / recipes, SSO-for-teams; `env.connectors` reflects linked + logged-in state.
+7. **CX-7 — the connection layer + catalog UX.** A "connection" is *which instance · which role · which host*, beyond the open tab: **disambiguate** multiple open `*.appHost` tabs (prefer the active / most-recently-used — shipped in CX-4a.2), **remember the instance** for the cold-start "open a tab" (§14) when none is open, and pick the **agent vs end-user** recipe by role. Plus OAuth link / user recipes / SSO-for-teams; `env.connectors` reflects linked + logged-in state.
 
 CX-1…3 ship a working read connector with **no cloud and no credential**. The broker (CX-5+) is where the live-only seam (proxy, vault, OAuth) needs an eyeball.
 
@@ -166,6 +166,7 @@ CX-1…3 ship a working read connector with **no cloud and no credential**. The 
 - **Per-user credential isolation + OAuth lifecycle** *(CX-5)* — every broker invoke resolves to the calling user's vault; per-provider OAuth dance, refresh, revoke; SSO-derived for teams.
 - **Intent ≠ tool-success** *(CX-4)* — a 0-result read is structural success but answers nothing; add a connector-side "did this answer the ask?" check (the connector analog of PB-10).
 - **Co-retrieval slot + overlap detection** *(CX-4b/6)* — reserve a per-class candidate slot; detect alias/connector overlap conservatively (no false retirements).
+- **Generalization across users/instances** *(CX-7)* — `appHost` + identity-from-the-open-tab is per-user/per-instance correct with **zero config** (another agent or a different Zendesk → *their* tickets; nothing hardcoded — proven `n:11`). Open: multiple open instances (**disambiguate** — active-tab pref shipped CX-4a.2), **no-tab cold start** (needs the remembered instance to open one — §14), **agent vs end-user** surface (`/api/v2/search` vs `/api/v2/requests` — a per-role recipe), and **host-mapped** Zendesk (`support.acme.com` ∉ `*.zendesk.com` — needs the real host on the connection).
 
 ## 13. Usage shapes & identity (2026-06-23 reframe)
 
