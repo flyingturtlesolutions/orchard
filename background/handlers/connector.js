@@ -14,6 +14,18 @@ import { fillEndpoint } from '../../Core/connectorRecipes.js';
 export function createConnectorHandlers({ ensureContentScript } = {}) {
   const fetchVia = (tabId, url, method, body) =>
     chrome.tabs.sendMessage(tabId, { type: 'SESSION_FETCH', payload: { url, method, body } }, { frameId: 0 });
+  // The TOP-FRAME content script can be orphaned (an extension reload kills it; `_ensureContentScript`'s all-frames
+  // PING can read a live SUBframe as "live" while frame 0 is dead). On a frame-0 connection error, force-reinject the
+  // current content script + retry once — so a session-ride call never needs a manual page reload.
+  const fetchViaHealed = async (tabId, url, method, body) => {
+    try { return await fetchVia(tabId, url, method, body); }
+    catch (e) {
+      if (!/Receiving end does not exist|Could not establish connection/i.test((e && e.message) || '')) throw e;
+      try { await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['ContentScripts/contentScript.js'] }); } catch { /* */ }
+      await new Promise((r) => setTimeout(r, 300));
+      return await fetchVia(tabId, url, method, body);
+    }
+  };
 
   return {
     'INVOKE_SESSION': (payload, _sender, sendResponse) => {
@@ -51,7 +63,7 @@ export function createConnectorHandlers({ ensureContentScript } = {}) {
           // check today; a per-app probe/check is the generalization.)
           if (payload && payload.verifyIdentity) {
             const probePath = String(payload.identityProbe || '/api/v2/users/me.json');
-            const me = await fetchVia(tab.id, `https://${origin}${probePath.startsWith('/') ? probePath : '/' + probePath}`, 'GET');
+            const me = await fetchViaHealed(tab.id, `https://${origin}${probePath.startsWith('/') ? probePath : '/' + probePath}`, 'GET');
             const u = me && me.success && me.value && me.value.user;
             const anon = !u || u.id === -1 || u.id == null || u.email === 'invalid@example.com';
             if (anon) { sendResponse({ success: false, error: 'not-logged-in', origin, hint: `open https://${origin} and sign in` }); return; }
@@ -61,7 +73,7 @@ export function createConnectorHandlers({ ensureContentScript } = {}) {
           const path = fillEndpoint(String((payload && payload.endpoint) || ''), args);
           if (!path) { sendResponse({ success: false, error: 'session-no-recipe' }); return; }
           const url = `https://${origin}${path.startsWith('/') ? path : '/' + path}`;
-          const reply = await fetchVia(tab.id, url, method, payload && payload.body);
+          const reply = await fetchViaHealed(tab.id, url, method, payload && payload.body);
           sendResponse(reply && reply.success ? { ...reply, origin } : (reply || { success: false, error: 'no-reply' }));   // origin → ticket-url synthesis
         } catch (e) {
           sendResponse({ success: false, error: (e && e.message) || 'invoke-session-failed' });
