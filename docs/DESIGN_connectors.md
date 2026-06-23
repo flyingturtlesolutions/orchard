@@ -140,7 +140,9 @@ Reads favor the credential-free path; writes favor the *scoped, governable* path
 1. **CX-1 — projection (pure).** `recipe → OfferedLeg` **and** `mcpTool → OfferedLeg` (carry `paramSchema`, `impl`, account-namespaced key) + tests. No I/O.
 2. **CX-2 — dispatch (pure).** Replace `execPlan.js:80` with the two-arm connector plan + tests; Invariant #2 note.
 3. **CX-3 — first live connector, session-ride, NO cloud.** The `INVOKE_SESSION` handler + one curated read recipe (e.g. GitHub or Gmail search) end-to-end. Proves the whole shape with zero proxy work. ← biggest derisk.
-4. **CX-4 — palette + arbitration.** `retrieveConnectors` + the `env.connectors` set + the read preference (session→OAuth→scrape) into `routeAsk`; reserve the per-class retrieval slot.
+4. **CX-4a — param-free list reads, `il:`-invokable (no LLM binder).** A `my_open_tickets`-style recipe (param-free; identity = the session cookie) + origin **auto-derived from the open `*.{appHost}` tab**; inject connector legs into the live `offer`; render the list. The realistic first feature (§13).
+   - **CX-4b — the param-binder** for by-id / filtered reads (§12) + the read→session-ride arbitration (`retrieveConnectors`, the `env.connectors` set, per-class retrieval slot).
+   - **CX-4c — the autonomous arc** (§13): connector list → `agentLoop` `foreach` → per-item work.
 5. **CX-5 — the broker (cloud).** MCP client + vault + `GET/POST` in the Phase C-P3 proxy; one OAuth read connector.
 6. **CX-6 — writes + HITL.** A write connector through `confirm`/`gated` (both impls); the alias-collision demote.
 7. **CX-7 — account/catalog UX.** Link OAuth, add user MCP URLs / recipes, SSO-for-teams; `env.connectors` reflects linked + logged-in state.
@@ -163,4 +165,15 @@ CX-1…3 ship a working read connector with **no cloud and no credential**. The 
 - **Timeout / cancel** *(CX-3/5)* — per-invoke deadline → structured-failure; thread the existing CR-S abort signal into both invoke channels (+ MCP cancellation for the broker).
 - **Per-user credential isolation + OAuth lifecycle** *(CX-5)* — every broker invoke resolves to the calling user's vault; per-provider OAuth dance, refresh, revoke; SSO-derived for teams.
 - **Intent ≠ tool-success** *(CX-4)* — a 0-result read is structural success but answers nothing; add a connector-side "did this answer the ask?" check (the connector analog of PB-10).
-- **Co-retrieval slot + overlap detection** *(CX-4/6)* — reserve a per-class candidate slot; detect alias/connector overlap conservatively (no false retirements).
+- **Co-retrieval slot + overlap detection** *(CX-4b/6)* — reserve a per-class candidate slot; detect alias/connector overlap conservatively (no false retirements).
+
+## 13. Usage shapes & identity (2026-06-23 reframe)
+
+Real asks carry neither identity nor ids — **"get my open tickets"**, not "read deako ticket 64222". Two consequences that *de-risk* CX-4:
+
+- **Identity binds at the connection, not the ask.** *Which* Zendesk (`deako`) is a property of the user's connection, set once — never parsed from the ask. For **session-ride, the open logged-in tab IS the connection**: resolve the origin from the open `*.{appHost}` tab (`deako.zendesk.com`). So "get my open tickets" carries nothing identity-shaped. (For the OAuth/broker path, identity is the linked account; same idea, different source.)
+- **Primary reads are LIST/SEARCH and param-free.** "My open tickets" is a search/view whose `me` resolves **server-side from the session cookie** — zero ask-params to bind. The dominant read needs **no LLM binder**; the router only maps intent → recipe (JUDGE already does that), dispatched through the existing `{}`-param builtin path. The **by-id / filtered** shape ("ticket 64222", "tickets about X") is *secondary* and is where the param-binder (§12) earns its place — deferred to CX-4b.
+
+This collapses the CX-4 risk I flagged: the realistic first connector (`my_open_tickets`) is a param-free read with a tab-derived origin — no LLM binder, no `decision.params` threading.
+
+**The autonomous arc (the bigger vision).** "Auto: grab all my open Zendesk tickets and, for each, open a conversation and research it" is the connector as a **data source feeding the multi-step loop**: one session-ride list read → `agentLoop` `foreach` over the results → per-item work (spawn a conversation, research, …). The same loop that runs single-shot today, at `maxSteps > 1`, with the connector list as the iteration source. The target (CX-4c), not the first slice.
