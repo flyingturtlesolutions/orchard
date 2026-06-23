@@ -3189,8 +3189,25 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId }) {
     const selfLines = _ilAllCapabilities(tabId).map((l) => `• ${l.does || l.name || l.key}`);
     const pageEntries = (res.menu && Array.isArray(res.menu.entries)) ? res.menu.entries : [];
     const pageLines = pageEntries.filter((e) => e && e.kind !== 'explore-first').slice(0, 10).map((e) => `• ${e.label || e.intent || e.phrase || e.name || 'capability'}`);
+    // CX-4b — connector capabilities for the apps you're SIGNED INTO (a live *.appHost tab), grouped by app. Makes
+    // session-ride reads discoverable instead of only runnable if you guess the phrase.
+    const connectorLines = [];
+    try {
+      const tabsRes = await _orchReq('LIST_TABS', {});
+      const hosts = (tabsRes && Array.isArray(tabsRes.tabs) ? tabsRes.tabs : []).map((t) => { try { return new URL(t.url).host; } catch { return ''; } }).filter(Boolean);
+      const reachable = (h) => h && hosts.some((x) => x === h || x.endsWith(`.${h}`));
+      const byApp = new Map();
+      for (const cl of recipeLegs({ trusted: true })) {
+        if (!cl || cl.mode !== 'ask' || !reachable(cl.tool && cl.tool.appHost)) continue;
+        const app = (cl.tool && cl.tool.app) || 'connector';
+        if (!byApp.has(app)) byApp.set(app, []);
+        byApp.get(app).push(`• ${cl.does || cl.name || cl.key}`);
+      }
+      for (const [app, lines] of byApp) connectorLines.push('', `**${app.charAt(0).toUpperCase()}${app.slice(1)} — you’re signed in**`, ...lines);
+    } catch { /* */ }
     const body = ['🧠 Here’s what I can do:'];
     if (selfLines.length) body.push('', '**Operate Orchard / the browser**', ...selfLines);
+    if (connectorLines.length) body.push(...connectorLines);
     if (pageLines.length) body.push('', '**On this page**', ...pageLines);
     else body.push('', '_On this page: nothing mapped yet — ask me to “explore this page” to learn what it offers._');
     _setMessageBody(msg, body.join('\n'));
@@ -3219,23 +3236,24 @@ async function _tryIlCommand(text) {
   //   offer = ORCH_MATCH (substrate picks + binds) + planAssistantTurn's close alternatives — the loop's palette.
   //   judge = JUDGE_MATCH over those candidates (Orchard picks the CAPABILITY; never re-binds the values).
   const offer = async (g) => {
+    // CX-4b — connectors are ground-independent reads; offer them on a page HIT and a MISS so JUDGE arbitrates across
+    // classes (a robust session-ride read vs a brittle taught DOM path for the same intent — §8). The judge picks by
+    // description; an irrelevant connector simply isn't chosen.
+    const connectorReadLegs = recipeLegs({ trusted: true }).filter((l) => l && l.mode === 'ask');
     let m = null;
     try { m = await _orchReq('ORCH_MATCH', { tabId, ask: g }); } catch { /* */ }
     if (!m || m.success === false || m.decision === 'miss' || !m.capabilityId) {
       // IL-3b — on a page miss, offer the param-free Browser/Self READ legs so JUDGE can pick "list tabs" / "what
       // can I do here" instead of dead-ending to a world-knowledge answer (the grid's ASK×Browser/Self cells).
       const builtins = availableBuiltins(BUILTIN_LEGS, { tab: tabId != null }).map(toOfferedLeg).filter((l) => l && (IL_READ_LEG_KEYS.has(l.key) || IL_PANEL_LEGS[l.key]));
-      // CX-4a.2 — connectors are ground-independent reads (session-ride; the open *.appHost tab is the connection),
-      // so offer them on a page miss too. Reads only (mode 'ask'); the curated catalog is trusted.
-      const connectorLegs = recipeLegs({ trusted: true }).filter((l) => l && l.mode === 'ask');
-      return { candidates: [], builtins: [...builtins, ...connectorLegs], groundId: m && m.groundId, match: m };
+      return { candidates: [], builtins: [...builtins, ...connectorReadLegs], groundId: m && m.groundId, match: m };
     }
     const turn = planAssistantTurn(m);
     const candidates = []; const seen = new Set();
     const add = (id, intent) => { if (id && !seen.has(id)) { seen.add(id); candidates.push({ id, intent, bindings: m.bindings }); } };
     add(m.capabilityId, m.candidate && m.candidate.intent);
     for (const o of (turn.options || [])) add(o.id, o.intent);
-    return { candidates, groundId: m.groundId, match: m };
+    return { candidates, builtins: connectorReadLegs, groundId: m.groundId, match: m };   // CX-4b — connectors alongside the page hit
   };
   const judge = async (g, candidates) => {
     let verdict = null;
