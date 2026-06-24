@@ -47,6 +47,11 @@ describe('appDef — normalizeAppDefinition', () => {
     assert.equal(d.version, 1);
     assert.ok(ARCHETYPES.includes('operator'));
   });
+  it('normalizes starters: trims, drops blanks, caps at 4; absent → []', () => {
+    assert.deepEqual(normalizeAppDefinition(DEF).starters, []);                                  // none on DEF → []
+    const d = normalizeAppDefinition({ ...DEF, starters: ['  a ', '', 'b', 'c', 'd', 'e'] });
+    assert.deepEqual(d.starters, ['a', 'b', 'c', 'd']);                                          // trimmed, blank dropped, capped at 4
+  });
 });
 
 describe('appDef — appFromDefinition (copy-on-add)', () => {

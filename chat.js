@@ -1141,8 +1141,20 @@ async function _createAppConversation(def) {
   $('messages').classList.add('hidden');
   $('empty-state').classList.remove('hidden');
   const greet = $('empty-state-greeting'); if (greet) greet.textContent = def.name;
-  const sub = $('empty-state-subtitle'); if (sub) sub.textContent = `${def.description || ''} — tell me what you need.`;
-  const cards = $('suggestion-cards'); if (cards) cards.innerHTML = '';
+  const sub = $('empty-state-subtitle'); if (sub) sub.textContent = def.description || 'Tell me what you need.';
+  // CV-5b (v2.74.1183) — render the app's role-specific STARTERS as cards in the empty state, so an app is
+  // immediately useful + self-explaining on open. Clicking one sends it (runs through the interpret front door).
+  const cards = $('suggestion-cards');
+  if (cards) {
+    cards.innerHTML = '';
+    for (const s of (Array.isArray(def.starters) ? def.starters : [])) {
+      const card = document.createElement('button');
+      card.className = 'suggestion-card';
+      card.innerHTML = `<div class="suggestion-card-name">${escHtml(s)}</div>`;
+      card.addEventListener('click', () => { const inp = $('chat-input'); if (inp) inp.value = s; sendChatMessage(); });
+      cards.appendChild(card);
+    }
+  }
   _refreshHistoryIfOpen().catch(() => {});
 }
 

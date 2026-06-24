@@ -51,6 +51,10 @@ export function normalizeAppDefinition(def) {
     defaultConfig: normalizeConfig(d.defaultConfig),
     version: Number.isFinite(d.version) ? d.version : 1,
     source: _source(d.source),
+    // CV-5b (v2.74.1183) — role-specific STARTER asks shown in the app's empty state (the gallery passes the def
+    // straight to _createAppConversation, so these render without threading through the conversation record). PURE:
+    // trim, drop blanks, cap at 4 so a malformed catalog entry can't flood the UI.
+    starters: Array.isArray(d.starters) ? d.starters.map(_str).filter(Boolean).slice(0, 4) : [],
   };
 }
 
