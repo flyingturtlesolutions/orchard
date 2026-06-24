@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildDrawerTree } from './drawerTree.js';
+import { buildDrawerTree, subTasksOf } from './drawerTree.js';
 import { OVERVIEW_ID } from './appDef.js';
 
 const roles = (rows) => rows.map((r) => r.role);
@@ -86,5 +86,24 @@ describe('drawerTree — buildDrawerTree', () => {
     // drop the Overview pin (first) and New-app (last); the middle is recency-ordered
     const middle = rows.slice(1, -1).map((r) => r.id);
     assert.deepEqual(middle, ['new', 'old']);
+  });
+});
+
+describe('drawerTree — subTasksOf (bounded across)', () => {
+  const summaries = [
+    { id: 'app1', title: 'Support', kind: 'agent', appId: 'support', updatedAt: 100 },
+    { id: 't1', title: 'Ticket #1', kind: 'agent', parentId: 'app1', updatedAt: 90 },
+    { id: 't2', title: 'Ticket #2', kind: 'agent', parentId: 'app1', updatedAt: 95 },
+    { id: 'other', title: 'Elsewhere', kind: 'agent', parentId: 'app2', updatedAt: 80 },
+  ];
+
+  it('returns only the named app’s children, newest first', () => {
+    assert.deepEqual(subTasksOf(summaries, 'app1').map((c) => c.id), ['t2', 't1']);
+  });
+
+  it('empty for an app with no children, or a missing id', () => {
+    assert.deepEqual(subTasksOf(summaries, 'app1-none'), []);
+    assert.deepEqual(subTasksOf(summaries, null), []);
+    assert.deepEqual(subTasksOf(null, 'app1'), []);
   });
 });

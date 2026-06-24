@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {
   OVERVIEW_ID, ARCHETYPES, WRITE_POLICIES,
   normalizeConfig, tightenConfig, normalizeAppDefinition, appFromDefinition,
-  isOverview, isApp, isSubTask, canDelete, composeSeed, subTaskFromApp, overviewShape,
+  isOverview, isApp, isSubTask, canDelete, composeSeed, subTaskFromApp, overviewShape, planSubTasks,
 } from './appDef.js';
 
 const DEF = { id: 'support', name: 'Support agent', seed: 'You triage and reply to tickets.', archetype: 'operator', defaultConfig: { writePolicy: 'gated' }, version: 2, source: 'builtin' };
@@ -114,6 +114,39 @@ describe('appDef — seed composition + sub-task shape', () => {
     assert.equal(subTaskFromApp({ id: OVERVIEW_ID, kind: 'agent' }, 'x'), null);
     assert.equal(subTaskFromApp({ kind: 'app' }, 'x'), null);       // no id
     assert.equal(subTaskFromApp(null, 'x'), null);
+  });
+});
+
+describe('appDef — planSubTasks (fan-out) + live-record classifiers', () => {
+  // A LIVE app record: ConversationStore coerces kind:'app'→'agent', so apps are identified by appId, not kind.
+  const liveApp = { id: 'cv9', kind: 'agent', appId: 'inbox', seed: 'Triage and draft email.', config: { writePolicy: 'gated' } };
+
+  it('classifiers recognize the live (kind:agent + appId) form', () => {
+    assert.equal(isApp(liveApp), true);
+    assert.equal(isSubTask({ id: 's', kind: 'agent', parentId: 'cv9' }), true);
+    assert.equal(isApp({ id: 'x', kind: 'agent' }), false);   // a plain agent (no appId) is not an app
+  });
+
+  it('plans one sub-task spec per item — composed seed, parentId, inherited config', () => {
+    const specs = planSubTasks(liveApp, ['Alice', 'Bob']);
+    assert.equal(specs.length, 2);
+    assert.equal(specs[0].title, 'Alice');
+    assert.equal(specs[0].parentId, 'cv9');
+    assert.equal(specs[0].appId, 'inbox');
+    assert.ok(specs[0].seed.startsWith('Triage and draft email.'));   // the app seed leads (composeSeed)
+    assert.ok(specs[0].seed.includes('Alice'));
+    assert.equal(specs[0].config.writePolicy, 'gated');
+  });
+
+  it('dedupes items case-insensitively and drops blanks', () => {
+    const specs = planSubTasks(liveApp, ['x', 'X', '  ', 'y']);
+    assert.deepEqual(specs.map((s) => s.title), ['x', 'y']);
+  });
+
+  it('refuses to fan out from a sub-task or a non-app (the one-level cap)', () => {
+    assert.deepEqual(planSubTasks({ id: 's', kind: 'agent', appId: 'inbox', parentId: 'cv9' }, ['a']), []);
+    assert.deepEqual(planSubTasks({ id: 'p', kind: 'agent' }, ['a']), []);   // plain, not an app
+    assert.deepEqual(planSubTasks(liveApp, []), []);
   });
 });
 

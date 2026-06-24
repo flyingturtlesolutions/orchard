@@ -33,6 +33,7 @@ import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch plan
 import { recipeLegs, normalizeTicket } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildDrawerTree } from './Core/drawerTree.js';   // CV-3c — the pure flush-left accordion model
+import { planSubTasks } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure)
 
 // ─── Conversation state ──────────────────────────────────────────────────────
 // `_currentConversationId` is null before the first user message of a new
@@ -1076,6 +1077,41 @@ async function _createAppConversation(def) {
   const greet = $('empty-state-greeting'); if (greet) greet.textContent = def.name;
   const sub = $('empty-state-subtitle'); if (sub) sub.textContent = `${def.description || ''} — tell me what you need.`;
   const cards = $('suggestion-cards'); if (cards) cards.innerHTML = '';
+  _refreshHistoryIfOpen().catch(() => {});
+}
+
+// CV-4 (v2.74.1171) — fan the CURRENT app out into one sub-task conversation per item. `subtasks: a, b, c`
+// (comma/newline list) creates a child conversation per item, each seeded `app seed ∘ item` (composeSeed, §6),
+// parentId = the app, config inherited (a child can only tighten). Enforces the one-level cap (refuses on a
+// sub-task / non-app). The accordion then nests them under the app (auto-expanded). The full "for each <list in
+// my queue>" form — where the IL ENUMERATES the list from a read/connector — is CV-4-full (deferred); this is the
+// explicit-list MVP that makes fan-out real + visible.
+async function _spawnSubTasks(listText) {
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  if (!_currentConversationId) { _setMessageBody(msg, 'Open an app first — sub-tasks fan out under an app.'); _orchFinalize(msg); return; }
+  let app = null;
+  try { app = await ConversationStore.load(_currentConversationId); } catch { /* */ }
+  if (!app || !app.appId || app.parentId) {
+    _setMessageBody(msg, (app && app.parentId)
+      ? 'This is already a sub-task — sub-tasks can’t have their own sub-tasks (one level only).'
+      : 'Sub-tasks fan out under an app. Open or create an app (New app → the gallery), then try again.');
+    _orchFinalize(msg); return;
+  }
+  const items = String(listText).split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+  if (!items.length) { _setMessageBody(msg, 'Give me a list, e.g. `subtasks: first item, second item, third`.'); _orchFinalize(msg); return; }
+  const specs = planSubTasks(app, items);
+  let made = 0;
+  for (const spec of specs) {
+    try {
+      await ConversationStore.create({ title: spec.title, kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config });
+      made++;
+    } catch (e) { try { console.warn('[chat] sub-task create failed:', e?.message); } catch { /* */ } }
+  }
+  if (made) _expandedApps.add(app.id);   // reveal the new children under the app
+  _setMessageBody(msg, made
+    ? `Spawned ${made} sub-task${made === 1 ? '' : 's'} under “${app.title}”. Open the conversation drawer — they’re nested under the app.`
+    : 'Couldn’t create any sub-tasks.');
+  _orchFinalize(msg);
   _refreshHistoryIfOpen().catch(() => {});
 }
 
@@ -3670,6 +3706,16 @@ async function sendChatMessage() {
       if (_currentConversationId) await ConversationStore.patchMeta(_currentConversationId, { seed: _seed || null });
       appendMessage({ role: 'assistant', body: _seed ? '🌱 Seed set — it now shapes how I respond in this conversation.' : '🌱 Seed cleared.' });
     } catch (e) { try { console.warn('[chat] seed command failed:', e?.message); } catch { /* */ } }
+    return;
+  }
+
+  // CV-4 (v2.74.1171) — `subtasks: a, b, c` fans the CURRENT app out into one sub-task conversation per item. A
+  // utility command (handled before routing) — it creates conversations under the app, it isn't a website ask.
+  if (/^subtasks?:/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    try { await _spawnSubTasks(text.replace(/^subtasks?:\s*/i, '')); }
+    catch (e) { try { console.warn('[chat] subtasks command failed:', e?.message); } catch { /* */ } }
     return;
   }
 

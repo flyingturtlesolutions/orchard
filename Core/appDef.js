@@ -74,10 +74,13 @@ export function appFromDefinition(def) {
   };
 }
 
-// Classifiers over a conversation record. PURE.
+// Classifiers over a conversation record. PURE. CV-4 (v2.74.1171) — recognize BOTH the pure schema form (kind:'app')
+// AND the live-stored form: ConversationStore coerces kind:'app'→'agent' (apps are identified by `appId`, not kind),
+// so classify by parentId/appId, not kind. A sub-task is anything with a parentId; an app has an appId (or kind:'app')
+// and no parent. Backward-compatible with the CV-1 kind:'app' fixtures.
 export const isOverview = (conv) => !!conv && conv.id === OVERVIEW_ID;
-export const isSubTask  = (conv) => !!conv && conv.kind === 'app' && !!_str(conv.parentId);
-export const isApp      = (conv) => !!conv && conv.kind === 'app' && !_str(conv.parentId) && !isOverview(conv);
+export const isSubTask  = (conv) => !!conv && !!_str(conv.parentId);
+export const isApp      = (conv) => !!conv && !isOverview(conv) && !_str(conv.parentId) && (conv.kind === 'app' || !!_str(conv.appId));
 /** The Overview is reserved and cannot be deleted (decision #5 / §2). PURE. */
 export const canDelete  = (conv) => !!conv && !isOverview(conv);
 
@@ -103,6 +106,26 @@ export function subTaskFromApp(app, subSeed) {
     config: normalizeConfig(a.config),
     seed: composeSeed(a.seed, subSeed),
   };
+}
+
+/**
+ * Fan-out (CV-4, §6): project a list of item labels into sub-task conversation specs under `app`. PURE. Each item
+ * → `subTaskFromApp(app, "<framed item>")` with the item as the title; dedupes case-insensitively. Returns [] when
+ * `app` is not a valid parent (the one-level cap — a sub-task can't fan out) or there are no items.
+ */
+export function planSubTasks(app, items) {
+  if (!isApp(app)) return [];
+  const list = (Array.isArray(items) ? items : []).map(_str).filter(Boolean);
+  const seen = new Set();
+  const specs = [];
+  for (const item of list) {
+    const key = item.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const spec = subTaskFromApp(app, `This sub-task handles: ${item}. Apply the app's instructions to this specific item.`);
+    if (spec) specs.push({ ...spec, title: item.slice(0, 60) });
+  }
+  return specs;
 }
 
 /** The reserved Overview conversation-extension fields. PURE. Fixed id, agent kind, system-default seed (null). */

@@ -107,3 +107,16 @@ export function buildDrawerTree(summaries, { devMode = false, activeId = null, e
 
   return rows;
 }
+
+/**
+ * The sub-tasks of an app — its children by `parentId`, newest first. PURE. (CV-4, §6/§10) Feeds the **bounded
+ * across** read: an app may reason over ITS OWN sub-tasks (never global), and the live spawn uses it for the count.
+ * `appConvId` is the app's CONVERSATION id (what a sub-task's `parentId` points at).
+ */
+export function subTasksOf(summaries, appConvId) {
+  const id = appConvId == null ? '' : String(appConvId);
+  if (!id) return [];
+  return (Array.isArray(summaries) ? summaries : [])
+    .filter((c) => c && String(c.parentId || '') === id)
+    .sort(byUpdatedDesc);
+}
