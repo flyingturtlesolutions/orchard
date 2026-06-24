@@ -643,9 +643,10 @@ export function createSgMessageHandlers(ctx) {
         let tabUrl = '';
         if (typeof tabId === 'number') { try { tabUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
         if (!groundId && tabUrl) { try { groundId = _groundIdForUrl(tabUrl, await StorageManager.getAllGrounds()); } catch { /* */ } }
+        const seed = String(payload?.seed ?? '').trim();   // CV-2b — conversation seed → router context (a seeded ask skips the warm cache)
         // R-6 (v2.74.958) — warm-path cache check (see _routeCache above).
         const cacheKey = _routeCacheKey(ask, groundId, tabUrl ? ctx.normalizeUrl(tabUrl) : '');
-        const hit = _routeCache.get(cacheKey);
+        const hit = seed ? null : _routeCache.get(cacheKey);   // CV-2b — a seeded ask is conversation-specific; never serve/pollute the cross-conversation cache
         if (hit && (Date.now() - hit.at) < ROUTE_CACHE_TTL_MS) {
           Logger.info('route', `ROUTE_ASK "${ask.slice(0, 60)}" -> ${hit.decision.action} (CACHE HIT, age ${Math.round((Date.now() - hit.at) / 1000)}s)`);
           sendResponse({ success: true, decision: hit.decision, groundId: groundId || null, candidateCount: hit.candidateCount, cached: true });
@@ -656,10 +657,10 @@ export function createSgMessageHandlers(ctx) {
         const candidates = retrieveTools(ask, { capabilities: caps });
         const decision = await route(ask, {
           retrieveTools: async () => candidates,                                       // R-2 candidates (precomputed)
-          callRouter:    async ({ ask: a, tools }) => AnthropicService.routeAsk({ ask: a, tools }),   // R-3 LLM
+          callRouter:    async ({ ask: a, tools }) => AnthropicService.routeAsk({ ask: a, tools, seed }),   // R-3 LLM (CV-2b — seed → router context)
         });
         // R-6 (v2.74.958) — store only confident, actionable decisions (never the miss class).
-        if (!decision.lowConfidence && (decision.action === 'primitive' || decision.action === 'replay' || decision.action === 'decompose')) {
+        if (!seed && !decision.lowConfidence && (decision.action === 'primitive' || decision.action === 'replay' || decision.action === 'decompose')) {
           _routeCache.set(cacheKey, { decision, candidateCount: candidates.length, at: Date.now() });
           if (_routeCache.size > ROUTE_CACHE_MAX) { _routeCache.delete(_routeCache.keys().next().value); }
         }
@@ -727,6 +728,7 @@ export function createSgMessageHandlers(ctx) {
       try {
         const ask = String(payload?.ask ?? '').trim();
         let { tabId, groundId } = payload ?? {};
+        const seed = String(payload?.seed ?? '').trim();   // CV-2b — conversation seed → the answer's persona preamble
         let tabUrl = '';
         if (typeof tabId === 'number') { try { tabUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
         if (!groundId && tabUrl) { try { groundId = _groundIdForUrl(tabUrl, await StorageManager.getAllGrounds()); } catch { /* */ } }
@@ -745,7 +747,7 @@ export function createSgMessageHandlers(ctx) {
             coverage = authoringCoverage(goals, rawCaps);                                   // #5 — taught vs known gaps
           } catch { /* */ }
         }
-        const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl });
+        const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed });
         // PS-0 (v2.74.1123) — persist Orchard's capability-gap enumeration instead of discarding it: the durable,
         // per-Ground DEMAND signal PS-1 arms into the interaction monitor for passive harvest. Non-fatal/best-effort.
         try {

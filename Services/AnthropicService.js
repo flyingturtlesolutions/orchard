@@ -5213,8 +5213,8 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    * @param {{ ask:string, tools:Array<object> }} args
    * @returns {Promise<{tool:(string|null),params:object,confidence:number,needs_decompose:boolean,needs_demonstration:boolean,subAsks:string[],reason:string}>}
    */
-  static async routeAsk({ ask, tools } = {}) {
-    const { system, user } = buildRouterMessages(ask, Array.isArray(tools) ? tools : []);
+  static async routeAsk({ ask, tools, seed } = {}) {
+    const { system, user } = buildRouterMessages(ask, Array.isArray(tools) ? tools : [], { seed: seed || '' });   // CV-2b — seed → fenced router context
     // v1 uses the default policy model; R-6 (model tiering) routes operation 'route-ask' -> MODEL_FAST (Haiku).
     const res = await AnthropicService.#call(system, user, 1024, [], { role: 'routing', operation: 'route-ask' });
     if (!res || res.success === false) {
@@ -5265,9 +5265,9 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    * nav/tab abilities (Core/answerPrompt.js fences the capability list as data). @param {{ask:string,
    * capabilities:Array<object>}} args  @returns {Promise<string|null>}
    */
-  static async answerAsk({ ask, capabilities, affordances, coverage, url } = {}) {
+  static async answerAsk({ ask, capabilities, affordances, coverage, url, seed } = {}) {
     if (!(await AnthropicService.hasLlm())) return null;
-    const { system, user } = buildAnswerMessages({ ask, capabilities: Array.isArray(capabilities) ? capabilities : [], affordances, coverage, url });
+    const { system, user } = buildAnswerMessages({ ask, capabilities: Array.isArray(capabilities) ? capabilities : [], affordances, coverage, url, seed: seed || '' });   // CV-2b — seed → persona preamble
     const res = await AnthropicService.#call(system, user, 700, [], { role: 'describe', operation: 'il-answer' });   // room for a substantive, reflective answer
     return (res && res.success !== false && typeof res.text === 'string' && res.text.trim()) ? res.text.trim() : null;
   }

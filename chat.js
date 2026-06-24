@@ -45,6 +45,7 @@ let _currentConversationId = null;
 // Set on create / rehydrate / switch; reset to 'agent' on a fresh-blank surface.
 let _currentConversationKind = 'agent';
 let _devModeEnabled = false;   // v2.74.1160 — Studio toggle (settings:devMode). When off, dev/design conversations are hidden + inactive.
+let _currentConversationSeed = '';   // v2.74.1163 (CV-2b) — the current conversation's seed (its standing instructions); the IL threads it into routing context + the answer preamble.
 
 // v2.74.106 — Single-flight guard for conversation creation. Two parallel
 // callers (e.g. double-clicked suggestion cards) could both see
@@ -78,6 +79,7 @@ async function _ensureConversation() {
 function _clearCurrentConversation() {
   _currentConversationId = null;
   _currentConversationKind = 'agent';   // v2.74.1029 — a fresh/blank surface is always an agent conversation
+  _currentConversationSeed = '';        // v2.74.1163 (CV-2b) — clear the IL seed on a fresh surface
 }
 
 /**
@@ -2725,7 +2727,7 @@ async function _tryGroundedTurn(text) {
     // home page" → a workflow card of mismatched candidates) dies here. decompose / demonstrate /
     // clarify / low-confidence / router-miss → the cross-ground comprehend exactly as before.
     try {
-      const rr = await _orchReq('ROUTE_ASK', { ask: text, tabId: tab.id });
+      const rr = await _orchReq('ROUTE_ASK', { ask: text, tabId: tab.id, seed: _currentConversationSeed });
       const rd = rr && rr.success && rr.decision;
       if (rd && (rd.action === 'primitive' || rd.action === 'replay')
           && await _dispatchRouteDecision(rd, { tabId: tab.id, groundId: rr.groundId, text })) {
@@ -3094,7 +3096,7 @@ async function _tryRouterNav(text) {
 // false → the legacy matcher exactly as before, so the floor never drops below today's behaviour.
 async function _tryRouterFallback(text) {
   const tab = await _orchActiveTab();
-  const res = await _orchReq('ROUTE_ASK', { ask: text, tabId: tab && tab.id });
+  const res = await _orchReq('ROUTE_ASK', { ask: text, tabId: tab && tab.id, seed: _currentConversationSeed });
   if (!res || res.success === false || !res.decision) return false;
   const d = res.decision;
   _orchLog(`ROUTE ▸ "${String(text).slice(0, 50)}" → router-fallback ${d.action}${d.tool ? ` ${d.tool.op || d.tool.capabilityId || ''}` : ''} (conf ${d.confidence})`);
@@ -3332,7 +3334,7 @@ async function _tryIlCommand(text) {
   }
   // No grounded action to run → Orchard ANSWERS the ask (meta/conversational — "what can you do?", "can you X?").
   let answer = null;
-  try { const r = await _orchReq('IL_ANSWER', { ask, tabId }); answer = r && r.answer; } catch { /* */ }
+  try { const r = await _orchReq('IL_ANSWER', { ask, tabId, seed: _currentConversationSeed }); answer = r && r.answer; } catch { /* */ }
   _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 I don’t have a saved capability for “${ask}” on this page yet — want to show me?`);
   try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${answer ? 'answered' : 'no match'}`); } catch { /* */ }
   return true;
@@ -3562,6 +3564,22 @@ async function sendChatMessage() {
     try { await _getDevBridge().maybeHandle(text, { devConversation: true, skipEcho: true, conversationId: _currentConversationId }); }
     catch (e) { try { console.warn('[chat] dev-conversation route failed:', e?.message); } catch { /* */ } }
     $('btn-chat-send').disabled = false;
+    return;
+  }
+
+  // CV-2b (v2.74.1163) — `seed: <text>` sets THIS conversation's standing instructions (its app/persona seed).
+  // The IL threads the seed into routing context + the answer's system preamble (DESIGN_conversations.md §6).
+  // Empty clears it; persisted so it survives a reopen. A pre-gallery test affordance; the edit-UI lands in CV-3.
+  if (/^seed:/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    const _seed = text.replace(/^seed:\s*/i, '').trim();
+    appendMessage({ role: 'user', body: text });
+    try {
+      await _ensureConversation();
+      _currentConversationSeed = _seed;
+      if (_currentConversationId) await ConversationStore.patchMeta(_currentConversationId, { seed: _seed || null });
+      appendMessage({ role: 'assistant', body: _seed ? '🌱 Seed set — it now shapes how I respond in this conversation.' : '🌱 Seed cleared.' });
+    } catch (e) { try { console.warn('[chat] seed command failed:', e?.message); } catch { /* */ } }
     return;
   }
 
@@ -4822,6 +4840,7 @@ async function _rehydrateConversation(conv) {
   _cancelOpenParamForms();
   _currentConversationId = conv.id;
   _currentConversationKind = conv.kind === 'dev' ? 'dev' : 'agent';   // v2.74.1029 — restore routing kind on switch
+  _currentConversationSeed = (conv.kind !== 'dev' && conv.seed) ? String(conv.seed).trim() : '';   // v2.74.1163 (CV-2b) — restore the IL seed (agent convs only; dev `seed` is a one-shot prefill)
   // DBR-P3-1 (v2.74.1053) — a split-seeded dev conversation: pre-fill the composer with its seed the first time
   // it's opened (SEED-AND-HOLD — not sent; the human reviews + presses enter), then clear the seed so reopening
   // doesn't re-fill it. The composer (#chat-input) is visible even in the empty-dev state below.

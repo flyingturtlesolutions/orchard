@@ -32,7 +32,7 @@ const SYSTEM = [
  *          coverage?:{authoredCount:number,total:number,coveragePct:number}|null, url?:string }} args
  * @returns {{ system:string, user:string }}
  */
-export function buildAnswerMessages({ ask, capabilities = [], affordances = [], coverage = null, url = '' } = {}) {
+export function buildAnswerMessages({ ask, capabilities = [], affordances = [], coverage = null, url = '', seed = '' } = {}) {
   const capLines = (Array.isArray(capabilities) ? capabilities : [])
     .map((c) => { const n = c && (c.name || c.alias); return n ? `- ${n}${c.alias ? '  (you\'ve used this)' : ''}` : null; })
     .filter(Boolean)
@@ -58,5 +58,8 @@ export function buildAnswerMessages({ ask, capabilities = [], affordances = [], 
     '</CAPABILITIES>',
   );
   if (cov) parts.push('', `COVERAGE: ${cov}.`);
-  return { system: SYSTEM, user: parts.join('\n') };
+  // CV-2 — the conversation's seed (its standing instructions / persona) prepended as a SYSTEM preamble. SAFE
+  // here (free-text generation, not structured output): a persona seed shapes the assistant's voice directly.
+  const persona = String(seed ?? '').trim();
+  return { system: persona ? `${persona}\n\n${SYSTEM}` : SYSTEM, user: parts.join('\n') };
 }
