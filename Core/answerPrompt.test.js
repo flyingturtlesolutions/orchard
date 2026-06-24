@@ -42,12 +42,13 @@ describe('buildAnswerMessages — CV-2 seed persona preamble', () => {
   it('no seed → SYSTEM is the base assistant identity, unchanged', () => {
     assert.ok(buildAnswerMessages({ ask: 'what can you do' }).system.startsWith('You are an intelligent browser-automation assistant'));
   });
-  it('seed → prepended as the SYSTEM preamble (persona leads, base behaviour retained)', () => {
+  it('seed → the persona is the DOMINANT role; the generic browser-tool identity is NOT the frame (.1182 fix)', () => {
     const seed = 'You are a pirate; always mention parrots.';
     const { system } = buildAnswerMessages({ ask: 'what can you do', seed });
-    assert.ok(system.startsWith(seed));                                                 // persona leads
-    assert.ok(system.includes('You are an intelligent browser-automation assistant'));  // base behaviour kept
-    assert.ok(system.indexOf(seed) < system.indexOf('browser-automation assistant'));   // persona precedes base
+    assert.ok(system.startsWith(seed));                                       // persona leads AND is the identity
+    assert.match(system, /WHO YOU ARE|secondary to your role/);               // role dominates; capabilities are the means
+    assert.match(system, /navigate|tabs/i);                                   // BASE operating rules retained
+    assert.doesNotMatch(system, /You are an intelligent browser-automation assistant/);  // the overriding generic identity is gone
   });
   it('ignores an empty / whitespace-only seed', () => {
     const base = buildAnswerMessages({ ask: 'x' }).system;
