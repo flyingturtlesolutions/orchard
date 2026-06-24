@@ -1,6 +1,6 @@
 # DESIGN_conversations.md — conversations as apps
 
-**Status:** DESIGN — model + decisions pinned, accordion/sub-task revision folded (2026-06-24). Not yet built. The chat surface exists today (`Services/ConversationStore.js`, the `#history-sidebar` drawer, the per-ask-stateless IL); this doc specifies the **apps** layer on top. Sibling to `DESIGN_connectors.md` — apps **select** the connector/tool lattice, they don't replace it.
+**Status:** DESIGN — **CV-1…6 BUILT** (v2.74.1160–1183: schema, seed→IL, accordion + gallery, sub-task spawn, custom apps, writePolicy). **Model ENRICHED 2026-06-24** (§6A): setup-for-**every**-app, capabilities-and-connectors-are-**global**, the **six app dimensions**, target≡connection, session-ride tooling, and the **goal-directed learning model** (`DESIGN_apps_learning.md`). The original §1–§13 are the shipped structure; §6A is the configured-app model layered on top (it supersedes "the prompt is the only variable" and "questionnaire only for custom apps"). Sibling to `DESIGN_connectors.md` (the tool lattice) + `DESIGN_apps_learning.md` (how an app learns toward its goal).
 
 **One line:** every conversation is the one inference layer (IL) wearing a prompt; an **app** is that IL configured for a goal (a **seed prompt** + light config), picked from a gallery and kept as a drawer track. The prompt is the only thing that varies — tools, router, and safety gates are uniform.
 
@@ -8,11 +8,13 @@
 
 ---
 
-## 1. The model — one IL, the prompt is the variable
+## 1. The model — one shared substrate, the app's CONFIG is the variable
 
-The IL is one shared engine (route → palette → judge → execute, `Core/route.js`), with all tools, constant. A **conversation = the shared IL + a per-conversation prompt/context**. The prompt creates identity, persona, concern, role. Two conversations are the same engine — one seeded *"you are the customer of #64222,"* the other *"monitor these balances."* Nothing structural differs.
+The IL is one shared engine (route → palette → judge → execute), and the **tools, capabilities, and connectors are a SHARED substrate** — *constant* across every conversation. A **conversation = the shared substrate + a per-conversation CONFIG.** The config creates identity, concern, behaviour; two conversations are the same engine + the same substrate, only the config differs.
 
-This is *why* "an app is just the IL with a prompt" holds: every app runs the same read → think → act loop; the seed sets the goal, surface, and emphasis.
+This is *why* "an app is just the IL configured" holds: every app runs the same read → think → act loop over the same substrate; the config sets the goal, targets, behaviour, and emphasis.
+
+> *2026-06-24 — this supersedes the original "the prompt is the only variable." The variable grew from a bare prompt into a small **config** (seed + bound targets/shape/focus + standing rules + cadence + chat model — §6A), but the principle is unchanged: **one engine, one shared substrate; the app varies only the view.** Critically, **capabilities and connectors are GLOBAL** — the app is a lens, never a silo (§6A.1).*
 
 ## 2. Roles — Overview, apps, sub-tasks
 
@@ -79,6 +81,85 @@ Today the IL is **stateless per ask**: `_tryIlCommand` (`chat.js:3227`) strips t
 
 **Bounded across.** Chatting at an app may reason over *its own* sub-tasks ("how many of my tickets are billing?") by reading `conv:index` filtered by `parentId`. This is the safe, scoped form of the rejected coordinator — bounded to one app's children, never global. (Overview → across *all apps* is the deferred portfolio, decision #5.)
 
+## 6A. The configured app — setup · targets · tooling · learning (2026-06-24 enrichment)
+
+CV-1…6 shipped the thin "seed + light config" app. This section folds in the model as sharpened over the
+2026-06-24 design pass; it **supersedes** "the prompt is the only variable" (§1) and "questionnaire only for custom
+apps" (§9 / decision #7). The CV build is the substrate it sits on.
+
+### 6A.1 An app is a CONFIG over a SHARED substrate (capabilities + connectors are global)
+
+The variable is the app's **config**, not just a prompt; the substrate is shared. **Six dimensions:**
+
+| Dimension | What | Where |
+|---|---|---|
+| **Goal / context** | seed (role) + bound targets / shape / focus (from setup) | app config |
+| **History / experience** | the typed, tiered **belief + behavior-delta learning store** (`DESIGN_apps_learning.md`) — *not* a chat log | app store |
+| **Standing rules** | persistent *if-X-do-Y* (authored deltas; *learned* deltas from a mismatch) | app config |
+| **Cadence** | *when* it runs | deferred (backend) |
+| **Chat mental model** | the interaction / presentation most useful for *this* work | app config (latest to build) |
+| **Tooling** | the shared `page · browser · connector · self` lattice — incl. **session-ride** | **SHARED** |
+
+**Capabilities AND connectors are GLOBAL — the app is a lens, never a silo.** Teaching "get inbox contents" inside
+the Inbox manager banks it on the **Gmail Ground** (or as a session-ride recipe) — globally; Overview and every
+other app can call it. The app *authored* it; it does not *own* it. Setup binds the app's **focus** (where it works
+— a default + retrieval bias), never exclusivity. This preserves the founding principle: one IL, one tool +
+capability substrate, constant — the app only varies the *view*.
+
+### 6A.2 Every app has a setup step (not only custom)
+
+A builtin is a **template**; **setup specializes it to the user.** On add, *every* app runs a setup that **banks**
+the user's specific workflow the way a taught workflow's steps are banked — decomposed into bindings, each captured
++ banked, reusable + editable. Setup binds three things (*what sites · what object · how*):
+
+- **Target** — *where* it works → bound from the **live connection** (§6A.3), banked as a target ref;
+- **Shape** — *how* it runs (one-by-one · **fan-out a sub-task per item** · watch-loop · gated) → the **archetype
+  templates the default** (Operator → fan-out · Monitor → watch-and-report · Executor → plan-act-commit); user
+  confirms / tweaks. *(This elevates §3's archetypes from soft-descriptive to load-bearing for setup.)*
+- **Focus** — *which* objects / goals matter → a soft retrieval + starter + chat hint.
+
+**Progressive** (bind the essentials upfront — at least one target + the shape — and let objects/capabilities keep
+banking *as you use it*; the flywheel never stops) and **reuse-then-teach** (reuse a capability already taught on
+that Ground; demonstrate fresh only if absent). The custom-card **questionnaire** (§9) is just how a *custom* app
+authors its setup **spec**; a builtin ships one.
+
+### 6A.3 Targets bind from the live connection, not start-config (target ≡ connection)
+
+An app's **role (seed) is target-agnostic**; its targets bind **lazily from your live session** — the open
+authenticated tab (session-ride), the Ground you've taught (page caps), or the linked account (OAuth). Per
+`DESIGN_connectors.md` ("identity binds at the connection, not the ask"): **the bound target and the session-ride
+origin are the same thing** — binding "my tickets" to `deako.zendesk.com` says *where the app works* AND *which
+session it rides*. "Which Zendesk" is never parsed from the ask. `allowedOrigins` (deferred config) is a **scope
+limiter** (tighten-only security), distinct from target *discovery*.
+
+### 6A.4 Tooling = the lattice, including session-ride (reads prefer it)
+
+The app's tooling is the full `page · browser · connector · self` lattice, all **global**. The **connector** domain
+— **session-ride** (primary; call the site's own endpoint from the authenticated tab, credential-free → structured
+JSON) + **OAuth/MCP** (reach-extender) — is first-class app tooling. A **read** prefers **session-fetch →
+network-harvest → dom-scrape** (CX-9). One demonstration banks BOTH a grounded cap AND a session-ride recipe
+(learn-from-traffic, CX-8). Session-ride **reads** are ideal for the read-only monitors (Financial/Research);
+session-ride **writes** are full-session blast-radius → gated harder (§8 / CV-6 / money-is-human-click).
+
+### 6A.5 Standing rules + the learning loop
+
+**Standing rules** (`if X do Y`) are the layer above the seed (the seed is the *role*; rules are conditional
+automation). Authorable two ways — **in setup** and **in-chat** ("from now on, if X, do Y"). In v1 (no background)
+they evaluate **when the app runs** (on read/load); autonomous firing waits for **cadence** (the backend stage,
+decision #3). The **history/experience** dimension is the **goal-directed learning store** (`DESIGN_apps_learning.md`):
+typed beliefs + behavior deltas, tiered promotion under the existing trial gate, dual-rate updating, context-scarce
+learned retrieval, HITL at promotion + action (= Orchard's two gates). "Each app oriented toward learning" = that
+closed loop turning on the app's targets.
+
+### 6A.6 v1 vs the backend stage, and the build slices
+
+- **v1 (buildable now):** setup-on-add for every app (bind target=connection · shape[archetype] · focus;
+  progressive; reuse-then-teach); capabilities + connectors global; standing rules **on-run**; the goal learning
+  store. Build: **AS-1** setup-spec schema (pure) → **AS-2** the guided bind flow → **AS-3** bank + edit; **AL-1…6**
+  the learning model (`DESIGN_apps_learning.md`).
+- **Backend stage (deferred, decision #3):** cadence / autonomous firing of standing rules; the richer
+  task-tailored **chat mental model**; cross-app belief sharing.
+
 ## 7. UI — the flush-left accordion + gallery
 
 - **Default = the Overview chat:** centered "How can I help you today?", bottom input, header unchanged. The current simple view; nothing new for a first-time user.
@@ -117,7 +198,10 @@ User `AppDefinition`s live in a **user catalog**, shown in the gallery under "Yo
 9. **One-level nesting cap.** Overview → app → sub-task, full stop. A sub-task has no sub-sub-tasks; deeper nesting is the rejected fleet model. The drawer renders the same accordion at every level (visual uniform) but the edges differ — app→sub-task is inheritance, Overview→app is navigation (§2).
 10. **Bounded across, not global.** An app may reason across *its own* sub-tasks (v1, `conv:index` by `parentId`). The Overview reasoning across *all apps* (the portfolio) stays deferred (decision #5).
 
-## 11. Build path (CV-1…6)
+## 11. Build path (CV-1…6 — ✅ BUILT v2.74.1160–1183)
+
+> The CV-1…6 slices below all shipped. The §6A enrichment adds the next tranche: **AS-1…3** (setup-for-every-app:
+> setup-spec schema → guided bind flow → bank + edit) and **AL-1…6** (the goal learning model, `DESIGN_apps_learning.md`).
 
 Pure-first; each slice headless-testable except where marked **live** (panel UI / IL behavior can't be confirmed headless — `npm test` won't exercise it). Mirrors the connector spec's slicing.
 
