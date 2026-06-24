@@ -1344,18 +1344,21 @@ async function _renderAppMemory() {
     _setMessageBody(msg, '🧠 This app hasn’t learned anything yet. Use it (when it acts on a capability it remembers what you asked for), or teach it a rule — “remember: keep replies terse”.');
     _orchFinalize(msg); return;
   }
+  // AL-3b+ (v2.74.1196) — the AUDIT line: WHAT (body + the capability it points at) and HOW it knows (tier ·
+  // confidence · ×evidence · PROVENANCE). Provenance is the trust dimension — every item says where it came from.
+  const provLabel = (p) => (p === 'user-rule' ? 'you set this' : p === 'interpret-act' ? 'learned by use' : (p ? `from ${p}` : 'observed'));
   const fmt = (x) => {
     const conf = Math.round((x.confidence ?? 0) * 100);
     const ev = (x.evidence && x.evidence > 1) ? ` ·×${x.evidence}` : '';
     const ref = x.ref ? `  → \`${x.ref}\`` : '';
-    return `• [${x.tier || 'observation'} ${conf}%${ev}] ${x.body}${ref}`;
+    return `• [${x.tier || 'observation'} · ${conf}%${ev} · ${provLabel(x.provenance)}] ${x.body}${ref}`;
   };
   const beliefs = items.filter((x) => x.kind === 'belief');
   const deltas = items.filter((x) => x.kind === 'delta');
-  const lines = [`🧠 **${items.length} thing${items.length === 1 ? '' : 's'} learned** in this app:`];
+  const lines = [`🧠 **What this app has learned** — ${items.length} item${items.length === 1 ? '' : 's'}, each with how it knows it (tier · confidence · source):`];
   if (beliefs.length) lines.push('', '**Beliefs**', ...beliefs.map(fmt));
-  if (deltas.length) lines.push('', '**Rules (deltas)**', ...deltas.map(fmt));
-  lines.push('', '_`forget memory` to clear._');
+  if (deltas.length) lines.push('', '**Rules**', ...deltas.map(fmt));
+  lines.push('', '_`forget memory` to clear everything._');
   _setMessageBody(msg, lines.join('\n'), { markdown: true });
   _orchFinalize(msg);
 }
@@ -4161,7 +4164,10 @@ async function sendChatMessage() {
     try { await clearGoalMemory(_currentConversationAppId); } catch { /* */ }
     _setMessageBody(m, '🧠 Cleared this app’s memory.'); _orchFinalize(m); return;
   }
-  if (/^memory\s*$/i.test(text)) {
+  // AL-3b+ (v2.74.1196) — `memory` OR a plain "show me what you know / what have you learned / what do you remember"
+  // → the AUDIT view (what the app knows + how it knows it). The `…\??$` anchor keeps "what do you know ABOUT X"
+  // out (that has trailing text → falls through to a normal answer).
+  if (/^memory\s*$/i.test(text) || /^(show me )?what (do |have )?you('ve| have)? ?(know|knows|learned|learnt|remember|remembered)\??$/i.test(text)) {
     input.value = ''; _autosizeInput();
     appendMessage({ role: 'user', body: text });
     try { await _renderAppMemory(); }
