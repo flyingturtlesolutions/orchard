@@ -3,7 +3,7 @@
  * @description Legacy chrome.storage keys ↔ Orchard logical paths (§19.2).
  */
 
-/** @typedef {'ground'|'fragment'|'observation'|'analysis'|'assertion'|'perspective'|'landmark'|'strategy'|'workflow'|'locale'|'siteMap'|'chrome'} SyncKind */
+/** @typedef {'ground'|'fragment'|'observation'|'analysis'|'assertion'|'perspective'|'landmark'|'strategy'|'workflow'|'locale'|'siteMap'|'chrome'|'goalMemory'} SyncKind */
 
 /** @type {SyncKind[]} */
 export const SYNCABLE_KINDS = [
@@ -19,6 +19,12 @@ export const SYNCABLE_KINDS = [
   'locale',
   'siteMap',
   'chrome',
+  // AL-3 (v2.74.1192) — per-app goal memory. DECLARED syncable + path-registered HERE (the storage contract); cloud
+  // sync stays OFF until ACTIVATED additively (no data/store change): KIND_ALIASES + loadRecord (Services/Sync/
+  // SyncBridge.js) and isWorkspacePartitionKind (Services/Storage/WorkspacePartitionStore.js). SyncBridge early-returns
+  // on any kind absent from KIND_ALIASES, so this entry is inert (local-only) until then — the safe default for the
+  // user's learned work-beliefs.
+  'goalMemory',
 ];
 
 const LEGACY_PREFIX = {
@@ -103,6 +109,12 @@ export function logicalPathForRecord(kind, record) {
         ? `workspace/grounds/${groundId}/siteMap.json`
         : `workspace/grounds/${groundId}/chrome.json`;
     }
+    case 'goalMemory': {
+      // AL-3 — per-app goal memory lives OUTSIDE the per-ground tree (it's keyed by appId, not groundId).
+      const appId = String(record.appId || id || '');
+      if (!appId) return null;
+      return `workspace/appMemory/${encodePathSegment(appId)}/goalMemory.json`;
+    }
     default:
       return null;
   }
@@ -155,6 +167,9 @@ export function recordMetaFromPath(logicalPath) {
 
   m = logicalPath.match(/^workspace\/strategies\/([^/]+)\/strategy\.json$/);
   if (m) return { kind: 'workflow', id: m[1] };
+
+  m = logicalPath.match(/^workspace\/appMemory\/([^/]+)\/goalMemory\.json$/);   // AL-3 — per-app goal memory
+  if (m) return { kind: 'goalMemory', id: decodePathSegment(m[1]), appId: decodePathSegment(m[1]) };
 
   return null;
 }
