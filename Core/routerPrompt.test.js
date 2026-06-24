@@ -33,6 +33,24 @@ describe('buildRouterMessages — fenced catalog, no DOM (injection boundary)', 
   });
 });
 
+describe('buildRouterMessages — CV-2 conversation seed (fenced context, never SYSTEM)', () => {
+  it('no seed → unchanged (no CONVERSATION_INTENT, SYSTEM identical)', () => {
+    assert.ok(!buildRouterMessages('go home', []).user.includes('CONVERSATION_INTENT'));
+  });
+  it('threads the seed into the USER message as fenced context, SYSTEM untouched (JSON output safe)', () => {
+    const seed = 'You are the Support agent; reply to tickets.';
+    const base = buildRouterMessages('reply to this', []).system;
+    const { system, user } = buildRouterMessages('reply to this', [], { seed });
+    assert.equal(system, base);                                                  // structured-output identity unchanged
+    assert.ok(user.includes('<CONVERSATION_INTENT'));
+    assert.ok(user.includes(seed));
+    assert.ok(user.indexOf('CONVERSATION_INTENT') < user.indexOf('TOOL_CATALOG'));  // context precedes the catalog
+  });
+  it('ignores an empty / whitespace-only seed', () => {
+    assert.ok(!buildRouterMessages('x', [], { seed: '   ' }).user.includes('CONVERSATION_INTENT'));
+  });
+});
+
 describe('parseRouterOutput — tolerant parse + fail-safe to demonstrate', () => {
   it('parses a clean JSON object', () => {
     const o = parseRouterOutput('{"tool":"OPEN_URL","params":{"url":"https://pixabay.com"},"confidence":0.95}');
