@@ -55,6 +55,8 @@ export function normalizeBelief(raw) {
     provenance: _str(r.provenance) || null,
     tier: TIERS.includes(r.tier) ? r.tier : 'observation',
     body,
+    ref: _str(r.ref) || null,      // AL-3b — an optional reference the belief is ABOUT (e.g. a capabilityId for an
+                                    // intent→capability association: body = the ask phrasing, ref = the capability).
   };
 }
 
@@ -76,6 +78,7 @@ export function normalizeDelta(raw) {
     provenance: _str(r.provenance) || null,
     tier: TIERS.includes(r.tier) ? r.tier : 'observation',
     body,
+    ref: _str(r.ref) || null,      // AL-3b — optional reference (uniform with beliefs; e.g. a delta about a capability)
   };
 }
 

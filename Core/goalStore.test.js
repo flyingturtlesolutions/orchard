@@ -41,6 +41,14 @@ describe('goalStore — addItem (dedup = corroboration)', () => {
     assert.equal(addItem([], { kind: 'belief' }).length, 0);
     assert.equal(addItem([], null).length, 0);
   });
+  it('AL-3b — same phrasing → DIFFERENT capability stays distinct; same capability merges (corroboration)', () => {
+    let l = addItem([], { kind: 'belief', body: 'open emails', ref: 'cap-a' });
+    l = addItem(l, { kind: 'belief', body: 'open emails', ref: 'cap-b' });   // different ref → a second association
+    assert.equal(l.length, 2);
+    l = addItem(l, { kind: 'belief', body: 'OPEN emails', ref: 'cap-a' });   // same ref + phrasing → merge
+    assert.equal(l.length, 2);
+    assert.equal(l.find((x) => x.ref === 'cap-a').evidence, 2);
+  });
 });
 
 describe('goalStore — promoteItemInList (evidence drives the ratchet)', () => {

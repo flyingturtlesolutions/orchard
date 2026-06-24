@@ -20,11 +20,13 @@ function _hash(s) {
   return (h >>> 0).toString(36);
 }
 
-/** The dedup/content KEY for an item: kind | trigger | body, lowercased. PURE. '' for an unusable item. */
+/** The dedup/content KEY for an item: kind | trigger | ref | body, lowercased. PURE. '' for an unusable item.
+ * `ref` is in the key so the SAME phrasing pointing at DIFFERENT capabilities stays distinct (two real associations),
+ * while the same phrasing→same capability MERGES (corroboration). */
 export function goalItemKey(item) {
   const i = normalizeMemoryItem(item);
   if (!i) return '';
-  return `${i.kind}|${(i.trigger || '').toLowerCase()}|${i.body.toLowerCase()}`;
+  return `${i.kind}|${(i.trigger || '').toLowerCase()}|${(i.ref || '').toLowerCase()}|${i.body.toLowerCase()}`;
 }
 
 /** A stable CONTENT id (so add is idempotent — same claim → same id → merge). PURE. '' for an unusable item. */

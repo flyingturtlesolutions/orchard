@@ -51,6 +51,11 @@ describe('goalMemory — normalizeBelief', () => {
     assert.equal(b.epistemic, 'inferred');
     assert.equal(b.tier, 'observation');
   });
+  it('AL-3b — carries an optional ref (what the belief is ABOUT, e.g. a capabilityId); defaults null', () => {
+    assert.equal(normalizeBelief({ body: 'x' }).ref, null);
+    assert.equal(normalizeBelief({ body: 'get my open emails', ref: 'cap-x' }).ref, 'cap-x');
+    assert.equal(normalizeDelta({ body: 'do y', ref: 'cap-z' }).ref, 'cap-z');
+  });
 });
 
 describe('goalMemory — normalizeDelta', () => {

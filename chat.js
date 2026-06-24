@@ -37,6 +37,7 @@ import { planSubTasks } from './Core/appDef.js';          // CV-4 — fan-out: a
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-app write gate (read-only enforcement)
 import { userAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
+import { recordGoalItem, loadGoalItems, clearGoalMemory } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view
 import { normalizeInterpretDecision, applyConfidenceGate } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
 
 // ─── Conversation state ──────────────────────────────────────────────────────
@@ -55,6 +56,7 @@ let _devModeEnabled = false;   // v2.74.1160 — Studio toggle (settings:devMode
 let _currentConversationSeed = '';   // v2.74.1163 (CV-2b) — the current conversation's seed (its standing instructions); the IL threads it into routing context + the answer preamble.
 let _currentConversationConfig = { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — the current track's enforced app config; the write gate (actAllowed) blocks ACTS when writePolicy:'never' (a read-only app/sub-task).
 let _setupState = null;   // AS-2 (v2.74.1188) — the in-progress guided-setup flow: { convId, spec } while connecting an app to its site; null otherwise. While set (for the current conversation), the modal intercept at the top of sendChatMessage routes the next typed message into advanceSetup.
+let _currentConversationAppId = null;   // AL-3b (v2.74.1193) — the current app's appId (the goal-memory key); null off-app. Tracked alongside _currentConversationConfig at create / rehydrate / clear. A sub-task carries its app's appId, so beliefs bank to the app (shared across its sub-tasks).
 
 // v2.74.106 — Single-flight guard for conversation creation. Two parallel
 // callers (e.g. double-clicked suggestion cards) could both see
@@ -91,6 +93,7 @@ function _clearCurrentConversation() {
   _currentConversationSeed = '';        // v2.74.1163 (CV-2b) — clear the IL seed on a fresh surface
   _currentConversationConfig = { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — a fresh/blank surface is unrestricted (gated)
   _setupState = null;   // AS-2 (v2.74.1188) — drop any in-progress setup flow when the surface changes
+  _currentConversationAppId = null;   // AL-3b — clear the goal-memory key on a fresh surface
 }
 
 /**
@@ -1137,6 +1140,7 @@ async function _createAppConversation(def) {
   _currentConversationId = conv.id;
   _currentConversationKind = 'agent';            // an app routes through the IL (the seed shapes it), not the dev bridge
   _currentConversationSeed = def.seed || '';
+  _currentConversationAppId = def.id || null;    // AL-3b — key the app's goal memory
   // best-effort — stash the app identity + enforced config for the drawer (CV-3c) and writePolicy (CV-6).
   try { await ConversationStore.patchMeta(conv.id, { appId: def.id, appVersion: def.version, icon: def.icon, config: def.defaultConfig }); } catch { /* */ }
   // The app's empty state: greet with the app, no generic suggestion cards.
@@ -1324,6 +1328,35 @@ async function _bankSetup(step) {
   _setMessageBody(msg, `✅ **Connected to ${where}.** Now just tell me what to do — e.g. “get my open emails” — and I’ll learn each task the first time, then recall it when you ask again (even worded differently).`, { markdown: true });
   _orchFinalize(msg);
   _refreshHistoryIfOpen().catch(() => {});
+}
+
+// AL-3b (v2.74.1193) — render what the current app has LEARNED (its goal memory): beliefs/deltas with tier,
+// confidence, evidence (corroboration ×N), and the ref (the capability an association points at), grouped by kind.
+// Read-only; renders one markdown message. Off-app → a gentle note (Overview has no goal memory).
+async function _renderAppMemory() {
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  const appId = _currentConversationAppId;
+  if (!appId) { _setMessageBody(msg, 'Open an app — goal memory is per-app. (Overview has none.)'); _orchFinalize(msg); return; }
+  let items = [];
+  try { items = await loadGoalItems(appId); } catch { /* */ }
+  if (!items.length) {
+    _setMessageBody(msg, '🧠 This app hasn’t learned anything yet. Use it — when it acts on a capability, it remembers what you asked for, so a differently-worded ask finds it next time.');
+    _orchFinalize(msg); return;
+  }
+  const fmt = (x) => {
+    const conf = Math.round((x.confidence ?? 0) * 100);
+    const ev = (x.evidence && x.evidence > 1) ? ` ·×${x.evidence}` : '';
+    const ref = x.ref ? `  → \`${x.ref}\`` : '';
+    return `• [${x.tier || 'observation'} ${conf}%${ev}] ${x.body}${ref}`;
+  };
+  const beliefs = items.filter((x) => x.kind === 'belief');
+  const deltas = items.filter((x) => x.kind === 'delta');
+  const lines = [`🧠 **${items.length} thing${items.length === 1 ? '' : 's'} learned** in this app:`];
+  if (beliefs.length) lines.push('', '**Beliefs**', ...beliefs.map(fmt));
+  if (deltas.length) lines.push('', '**Rules (deltas)**', ...deltas.map(fmt));
+  lines.push('', '_`forget memory` to clear._');
+  _setMessageBody(msg, lines.join('\n'), { markdown: true });
+  _orchFinalize(msg);
 }
 
 // ─── Capability drawer ──────────────────────────────────────────────────────
@@ -3647,6 +3680,18 @@ function _withBoundUrl(params) {
   if (!String(p.url || '').trim()) { const t = _boundTarget(); if (t) p.url = t.origin; }
   return p;
 }
+// AL-3b (v2.74.1193) — write-back: bank (or corroborate) an intent→capability association into the CURRENT app's
+// goal memory. The body is the ask phrasing (so a later paraphrase can recall it, AL-4); the ref is the capability.
+// Inferred + moderate confidence; a re-ask MERGES → bumps evidence → drives the promotion ratchet. Fire-and-forget;
+// a no-op off-app (no appId) or on a bad arg.
+function _bankCapabilityUse(goal, capabilityId) {
+  const appId = _currentConversationAppId;
+  if (!appId || !goal || !capabilityId) return;
+  try {
+    recordGoalItem(appId, { kind: 'belief', epistemic: 'inferred', confidence: 0.5, body: String(goal).slice(0, 160), ref: String(capabilityId), provenance: 'interpret-act' })
+      .catch(() => { /* best-effort */ });
+  } catch { /* */ }
+}
 async function _tryInterpret(ask) {
   const goal = String(ask || '').trim();
   if (!goal) { _orchFinalize(appendMessage({ role: 'assistant', body: 'usage: `i: <ask>` — the interpret front door (F-2 test).' })); return true; }
@@ -3689,7 +3734,10 @@ async function _tryInterpret(ask) {
     : (d.intent === 'decompose') ? { action: 'decompose', subAsks: d.subAsks || [], confidence: d.confidence }
     : null;
   try { msg.remove(); } catch { /* */ }
-  if (rd && await _dispatchRouteDecision(rd, { tabId, groundId, text: goal })) return true;
+  if (rd && await _dispatchRouteDecision(rd, { tabId, groundId, text: goal })) {
+    if (d.intent === 'act' && d.capabilityId) _bankCapabilityUse(goal, d.capabilityId);   // AL-3b — learn the association
+    return true;
+  }
 
   // couldn't dispatch (an act with only a primitive op, or a nav with no ground) → reasoned answer fallback.
   const m2 = appendMessage({ role: 'assistant', body: '🧠 thinking…' });
@@ -4099,6 +4147,24 @@ async function sendChatMessage() {
     appendMessage({ role: 'user', body: text });
     try { await _startSetupFlow(); }
     catch (e) { try { console.warn('[chat] setup command failed:', e?.message); } catch { /* */ } }
+    return;
+  }
+
+  // AL-3b (v2.74.1193) — `memory` shows what THIS app has LEARNED (banked beliefs/deltas — the goal store, AL-2/3);
+  // `forget memory` clears it. Utility commands (before routing): they read/clear the app's own memory, not a site.
+  if (/^forget\s+memory\s*$/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    const m = appendMessage({ role: 'assistant', body: '' });
+    if (!_currentConversationAppId) { _setMessageBody(m, 'Open an app — goal memory is per-app.'); _orchFinalize(m); return; }
+    try { await clearGoalMemory(_currentConversationAppId); } catch { /* */ }
+    _setMessageBody(m, '🧠 Cleared this app’s memory.'); _orchFinalize(m); return;
+  }
+  if (/^memory\s*$/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    try { await _renderAppMemory(); }
+    catch (e) { try { console.warn('[chat] memory view failed:', e?.message); } catch { /* */ } }
     return;
   }
 
@@ -5403,6 +5469,7 @@ async function _rehydrateConversation(conv) {
   _currentConversationKind = conv.kind === 'dev' ? 'dev' : 'agent';   // v2.74.1029 — restore routing kind on switch
   _currentConversationSeed = (conv.kind !== 'dev' && conv.seed) ? String(conv.seed).trim() : '';   // v2.74.1163 (CV-2b) — restore the IL seed (agent convs only; dev `seed` is a one-shot prefill)
   _currentConversationConfig = (conv.config && typeof conv.config === 'object') ? conv.config : { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — restore the track's enforced write policy (a sub-task carries its app's tightened copy)
+  _currentConversationAppId = (conv.kind !== 'dev' && conv.appId) ? String(conv.appId) : null;   // AL-3b — restore the goal-memory key
   // DBR-P3-1 (v2.74.1053) — a split-seeded dev conversation: pre-fill the composer with its seed the first time
   // it's opened (SEED-AND-HOLD — not sent; the human reviews + presses enter), then clear the seed so reopening
   // doesn't re-fill it. The composer (#chat-input) is visible even in the empty-dev state below.
