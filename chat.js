@@ -36,6 +36,7 @@ import { buildDrawerTree } from './Core/drawerTree.js';   // CV-3c — the pure 
 import { planSubTasks } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure)
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-app write gate (read-only enforcement)
 import { userAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps
+import { normalizeInterpretDecision, applyConfidenceGate } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
 
 // ─── Conversation state ──────────────────────────────────────────────────────
 // `_currentConversationId` is null before the first user message of a new
@@ -3447,6 +3448,61 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId }) {
 // single-shot decision over agentLoop — byte-identical today — but raising maxSteps later makes it multi-step
 // (re-match → judge → execute → observe → re-think) with NO new machinery. It never re-binds params (the .1117
 // "halo" bug). `IL ▸` is a decision marker (studio.js _DECISION_RE — INVARIANT #1). Opt-in.
+// F-2c (v2.74.1176, DESIGN_llm_front_door.md §9) — the INTERPRET front door (OPT-IN via `i:`). One reasoning call
+// (INTERPRET_ASK → AnthropicService.interpret over ORCH_MATCH-retrieved candidates) → normalize + the §9.3
+// confidence/clarify gate (Core/interpret) → dispatch each intent to the VERIFIED runners (navigate/act/decompose
+// via _dispatchRouteDecision — confirm-first + the CV-6 write gate inside _orchRun; clarify/teach/answer rendered
+// here). The default cascade is untouched; this is the test surface before flipping interpret to default.
+async function _tryInterpret(ask) {
+  const goal = String(ask || '').trim();
+  if (!goal) { _orchFinalize(appendMessage({ role: 'assistant', body: 'usage: `i: <ask>` — the interpret front door (F-2 test).' })); return true; }
+  const msg = appendMessage({ role: 'assistant', body: '🧠 interpreting…' });
+  const tab = await _orchActiveTab();
+  const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
+  let raw = null; let retrieved = []; let groundId = null;
+  try {
+    const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId, seed: _currentConversationSeed });
+    if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; groundId = r.groundId || null; }
+  } catch { /* */ }
+  const d = applyConfidenceGate(
+    normalizeInterpretDecision(raw, { retrieved, primitives: ['OPEN_URL', 'CLICK', 'TYPE', 'SCROLL', 'EXTRACT'] }),
+    { minConfidence: 0.6 },
+  );
+  try { _orchLog(`INTERPRET ▸ "${goal.slice(0, 50)}" → ${d.intent} (conf ${d.confidence}${d.why ? `; ${d.why}` : ''})`); } catch { /* */ }
+
+  // clarify / teach / answer — rendered here (no engine dispatch).
+  if (d.intent === 'clarify') { _setMessageBody(msg, `🧠 ${d.question || 'Can you say that a different way?'}`); _orchFinalize(msg); return true; }
+  if (d.intent === 'teach') {
+    _setMessageBody(msg, '🧠 I don’t have a way to do that here yet — want to show me?');
+    _orchOfferRecord(msg, { groundId, tabId, ask: goal, label: '● Show me' });
+    return true;
+  }
+  if (d.intent === 'answer') {
+    let answer = null;
+    try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed }); answer = r && r.answer; } catch { /* */ }
+    _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 ${d.why || 'I’m not sure how to help with that here.'}`);
+    _orchFinalize(msg);
+    return true;
+  }
+
+  // navigate / act / decompose → map to a RouteDecision and dispatch through the VERIFIED runners (the dispatcher
+  // renders its own bubbles, so drop the placeholder). act→replay confirms first; _orchRun carries the CV-6 gate.
+  const rd = (d.intent === 'navigate') ? { action: 'primitive', tool: { op: 'OPEN_URL' }, params: d.params || {}, confidence: d.confidence }
+    : (d.intent === 'act' && d.capabilityId) ? { action: 'replay', tool: { capabilityId: d.capabilityId, name: d.why || 'that' }, params: d.params || {}, confidence: d.confidence }
+    : (d.intent === 'decompose') ? { action: 'decompose', subAsks: d.subAsks || [], confidence: d.confidence }
+    : null;
+  try { msg.remove(); } catch { /* */ }
+  if (rd && await _dispatchRouteDecision(rd, { tabId, groundId, text: goal })) return true;
+
+  // couldn't dispatch (an act with only a primitive op, or a nav with no ground) → reasoned answer fallback.
+  const m2 = appendMessage({ role: 'assistant', body: '🧠 thinking…' });
+  let answer = null;
+  try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed }); answer = r && r.answer; } catch { /* */ }
+  _setMessageBody(m2, answer ? `🧠 ${answer}` : '🧠 I’m not sure how to do that here — want to show me?');
+  _orchFinalize(m2);
+  return true;
+}
+
 async function _tryIlCommand(text) {
   const ask = String(text).replace(/^il:\s*/i, '').trim();
   const msg = appendMessage({ role: 'assistant', body: '' });
@@ -3808,6 +3864,17 @@ async function sendChatMessage() {
     appendMessage({ role: 'user', body: text });
     try { await _forgetApp(text.replace(/^forget app:\s*/i, '')); }
     catch (e) { try { console.warn('[chat] forget-app failed:', e?.message); } catch { /* */ } }
+    return;
+  }
+
+  // F-2c (v2.74.1176) — `i: <ask>` runs the INTERPRET front door (DESIGN_llm_front_door §9) as an OPT-IN test path.
+  // Default routing is UNCHANGED; this is the test surface before flipping interpret to default (mirrors how `il:`
+  // was introduced). `i:` ≠ `il:` — the regex needs `i` immediately followed by `:`.
+  if (/^i:/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    try { await _tryInterpret(text.replace(/^i:\s*/i, '').trim()); }
+    catch (e) { try { console.warn('[chat] interpret command failed:', e?.message); } catch { /* */ } }
     return;
   }
 

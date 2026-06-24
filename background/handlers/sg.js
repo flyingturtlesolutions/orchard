@@ -673,6 +673,34 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // F-2 (v2.74.1176, DESIGN_llm_front_door.md §9) — INTERPRET_ASK: the LLM front-door INTERPRET call. Resolves the
+    // Ground + retrieves the candidate set (ORCH_MATCH-as-RETRIEVER — the SAME tool-RAG as ROUTE_ASK, FED not gating),
+    // then AnthropicService.interpret returns the raw §9.2 decision {intent, capabilityId|op, params, subAsks,
+    // question, confidence, why}. The panel (chat.js) normalizes + palette-enforces + confidence-gates (Core/interpret)
+    // and dispatches. Reached ONLY by the opt-in `i:` panel command for now (the F-2 test surface); the default
+    // cascade is untouched until interpret proves out and is flipped to default.
+    INTERPRET_ASK: async (payload, _sender, sendResponse) => {
+      try {
+        const ask = String(payload?.ask ?? '').trim();
+        if (!ask) { sendResponse({ success: false, error: 'ask required' }); return; }
+        let { tabId, groundId } = payload ?? {};
+        let tabUrl = '';
+        if (typeof tabId === 'number') { try { tabUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
+        if (!groundId && tabUrl) { try { groundId = _groundIdForUrl(tabUrl, await StorageManager.getAllGrounds()); } catch { /* */ } }
+        const seed = String(payload?.seed ?? '').trim();
+        let caps = [];
+        if (groundId) { try { caps = ((await ctx.readSgCapabilities(groundId)) || []).filter((c) => c && isActiveCapability(c) && c.kind !== 'composite'); } catch { caps = []; } }
+        const retrieved = retrieveTools(ask, { capabilities: caps });
+        const primitives = ['OPEN_URL', 'CLICK', 'TYPE', 'SCROLL', 'EXTRACT'];
+        const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances: '', seed });
+        Logger.info('route', `INTERPRET_ASK "${ask.slice(0, 60)}" → ${decision.intent} (conf ${decision.confidence}, ${retrieved.length} cand, ground ${groundId || '—'})`);
+        sendResponse({ success: true, decision, groundId: groundId || null, retrieved });
+      } catch (err) {
+        Logger.error('background', `INTERPRET_ASK failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
     // IL-2 (v2.74.1112) — RETRIEVE_TOOLS: the LEARNED-leg source for the panel-hosted inference-layer loop's
     // assemblePalette (Core/ilRun). Mirrors ROUTE_ASK's ground-resolution + candidate computation, minus
     // the LLM route — returns the retrieved candidates + the resolved groundId so the panel can ctx-bind
