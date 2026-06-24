@@ -3384,6 +3384,17 @@ async function _tryIlCommand(text) {
       }
     } catch { /* */ }
   }
+  // ACT via the ROUTER (v2.74.1167) — the IL judge's palette is page-caps + read legs only, so a world-knowledge
+  // navigation, a confident cold replay, or a compound/decompose ask reaches HERE on a miss with no leg to run.
+  // Before answering in prose, give the router ONE pass: it selects + parameterizes a PRIMITIVE (OPEN_URL by world
+  // knowledge), a replay (confirm-first), or a decompose, and dispatches through the SAME verified runners. On a
+  // genuinely non-act ask it declines → we fall to the reasoned answer below. Restores the act-execution the
+  // v2.74.1166 inversion left behind `tool:` (it had moved _tryRouterNav/_tryRouterFallback there). `msg` is the
+  // '🧠 thinking…' placeholder; the dispatch renders its OWN bubble, so drop the placeholder on success.
+  try {
+    if (await _tryRouterFallback(ask)) { try { msg.remove(); } catch { /* */ } return true; }
+  } catch (e) { try { console.warn('[chat] il→router dispatch fell through:', e?.message); } catch { /* */ } }
+
   // No grounded action to run → Orchard ANSWERS the ask (meta/conversational — "what can you do?", "can you X?").
   let answer = null;
   try { const r = await _orchReq('IL_ANSWER', { ask, tabId, seed: _currentConversationSeed }); answer = r && r.answer; } catch { /* */ }
@@ -3741,7 +3752,15 @@ async function sendChatMessage() {
   // `tool: <ask>` strips the prefix and falls through to the former-default deterministic flow unchanged.
   if (!/^tool:/i.test(text)) {
     $('btn-chat-send').disabled = false;
-    try { await _tryIlCommand('il: ' + text.replace(/^il:\s*/i, '').trim()); }
+    const ask = text.replace(/^il:\s*/i, '').trim();
+    // ACT short-circuit (v2.74.1167) — a clear "go to <site>" is a NAVIGATION act. The IL loop's judge palette is
+    // page-caps + read legs only (no OPEN_URL primitive), so a bare nav would fall all the way through the loop to
+    // its MISS→router fallback (2-3 LLM calls). The _NAV_RE-gated router resolves the URL by world knowledge in ONE
+    // call and navigates; it costs nothing on a non-nav ask (regex miss → false → the IL loop). Still LLM-fronted —
+    // the router IS an LLM call; this restores _tryRouterNav to the default path (the inversion left it under `tool:`).
+    try { if (await _tryRouterNav(ask)) return; }
+    catch (e) { try { console.warn('[chat] default nav fast-path fell through:', e?.message); } catch { /* */ } }
+    try { await _tryIlCommand('il: ' + ask); }
     catch (e) { try { console.warn('[chat] default (LLM) route failed:', e?.message); } catch { /* */ } }
     return;
   }
