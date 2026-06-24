@@ -692,7 +692,18 @@ export function createSgMessageHandlers(ctx) {
         if (groundId) { try { caps = ((await ctx.readSgCapabilities(groundId)) || []).filter((c) => c && isActiveCapability(c) && c.kind !== 'composite'); } catch { caps = []; } }
         const retrieved = retrieveTools(ask, { capabilities: caps });
         const primitives = ['OPEN_URL', 'CLICK', 'TYPE', 'SCROLL', 'EXTRACT'];
-        const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances: '', seed });
+        // F-2 (v2.74.1179) — feed interpret the live page VOCABULARY (the same affordances IL_ANSWER reads from the
+        // cached Locale) so its act/teach/clarify decisions are grounded in what the page actually offers, not just
+        // the ask + the saved-capability catalog. Fenced as DATA in the prompt; empty (cold page) is harmless.
+        let affordances = '';
+        if (groundId) {
+          try {
+            const pm = await ctx.readLocaleCache(groundId, ctx.normalizeUrl(tabUrl || ''));
+            const labels = localeAffordanceLabels(pm && pm.model);
+            if (Array.isArray(labels) && labels.length) affordances = labels.join(', ');
+          } catch { /* */ }
+        }
+        const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed });
         Logger.info('route', `INTERPRET_ASK "${ask.slice(0, 60)}" → ${decision.intent} (conf ${decision.confidence}, ${retrieved.length} cand, ground ${groundId || '—'})`);
         sendResponse({ success: true, decision, groundId: groundId || null, retrieved });
       } catch (err) {
