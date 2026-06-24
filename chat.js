@@ -20,7 +20,7 @@ import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
 import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, namesMultipleSites, namesAnySite } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X)
 import { walkPlan, scanPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate); scanPlan — THE recursive plan walker (CR-D7)
-import { builtinApps } from './Core/appCatalog.js';   // CV-3 — the builtin app catalog (the gallery's cards; each seeds a kind:'app' conversation)
+import { builtinApps, builtinApp } from './Core/appCatalog.js';   // CV-3 — the builtin app catalog (the gallery's cards; each seeds a kind:'app' conversation). AS-2 — builtinApp(appId) → the def behind a conversation (for its archetype → shape template)
 import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   // ORCH-A — predicate → gate (conditional routing + the analysis)
 import { comprehend } from './Core/orchComprehend.js';   // ORCH-CB — substrate-free shape comprehension (cold-ground decompose)
 import { renderCriteria, renderPlanLines } from './Core/orchVisual.js';   // ORCH-CB — search params → criteria for a visual condition's prompt; renderPlanLines — the confirm-card plan renderer (CR-D7)
@@ -36,6 +36,7 @@ import { buildDrawerTree } from './Core/drawerTree.js';   // CV-3c — the pure 
 import { planSubTasks } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure)
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-app write gate (read-only enforcement)
 import { userAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps
+import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (bind an app's target/focus/shape; pure)
 import { normalizeInterpretDecision, applyConfidenceGate } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
 
 // ─── Conversation state ──────────────────────────────────────────────────────
@@ -53,6 +54,7 @@ let _currentConversationKind = 'agent';
 let _devModeEnabled = false;   // v2.74.1160 — Studio toggle (settings:devMode). When off, dev/design conversations are hidden + inactive.
 let _currentConversationSeed = '';   // v2.74.1163 (CV-2b) — the current conversation's seed (its standing instructions); the IL threads it into routing context + the answer preamble.
 let _currentConversationConfig = { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — the current track's enforced app config; the write gate (actAllowed) blocks ACTS when writePolicy:'never' (a read-only app/sub-task).
+let _setupState = null;   // AS-2 (v2.74.1188) — the in-progress guided-setup flow: { convId, spec } while binding an app's target/focus/shape; null otherwise. While set (for the current conversation), the modal intercept at the top of sendChatMessage routes the next typed message into advanceSetup.
 
 // v2.74.106 — Single-flight guard for conversation creation. Two parallel
 // callers (e.g. double-clicked suggestion cards) could both see
@@ -88,6 +90,7 @@ function _clearCurrentConversation() {
   _currentConversationKind = 'agent';   // v2.74.1029 — a fresh/blank surface is always an agent conversation
   _currentConversationSeed = '';        // v2.74.1163 (CV-2b) — clear the IL seed on a fresh surface
   _currentConversationConfig = { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — a fresh/blank surface is unrestricted (gated)
+  _setupState = null;   // AS-2 (v2.74.1188) — drop any in-progress setup flow when the surface changes
 }
 
 /**
@@ -1147,6 +1150,15 @@ async function _createAppConversation(def) {
   const cards = $('suggestion-cards');
   if (cards) {
     cards.innerHTML = '';
+    // AS-2 (v2.74.1188) — a "Set up" affordance so binding the app to YOUR site + workflow (target/focus/shape) is
+    // discoverable on open. Clicking it runs the `setup` command (the guided bind flow).
+    {
+      const setup = document.createElement('button');
+      setup.className = 'suggestion-card';
+      setup.innerHTML = '<div class="suggestion-card-name">⚙️ Set up — bind to your site &amp; workflow</div>';
+      setup.addEventListener('click', () => { const inp = $('chat-input'); if (inp) inp.value = 'setup'; sendChatMessage(); });
+      cards.appendChild(setup);
+    }
     for (const s of (Array.isArray(def.starters) ? def.starters : [])) {
       const card = document.createElement('button');
       card.className = 'suggestion-card';
@@ -1189,6 +1201,127 @@ async function _spawnSubTasks(listText) {
   _setMessageBody(msg, made
     ? `Spawned ${made} sub-task${made === 1 ? '' : 's'} under “${app.title}”. Open the conversation drawer — they’re nested under the app.`
     : 'Couldn’t create any sub-tasks.');
+  _orchFinalize(msg);
+  _refreshHistoryIfOpen().catch(() => {});
+}
+
+// ─── AS-2 (v2.74.1188): guided setup — bind an app to your target / focus / shape ───────────────────────────
+// "Setup-for-every-app" (DESIGN_conversations.md §6A): before an app is useful it's CONFIGURED, the way a workflow
+// is decomposed into banked steps. The pure controller (Core/setupFlow.js) decides each step; this is the thin live
+// wiring — source connections from the open tabs (reuse-then-teach), render the prompt + candidate cards, feed the
+// answer back through the modal intercept, and BANK the completed config onto the conversation. While _setupState
+// is set for the current conversation, the modal at the top of sendChatMessage captures each typed answer.
+
+// Distinct https(s) origins from the open tabs — the session-ride "connections" offered as target candidates
+// (target ≡ connection: the live logged-in tab IS the origin, §6A).
+async function _setupConnections() {
+  try {
+    const r = await _orchReq('LIST_TABS', {});
+    const tabs = (r && Array.isArray(r.tabs)) ? r.tabs : [];
+    const seen = new Set(); const out = [];
+    for (const t of tabs) {
+      let u = null; try { u = new URL(t.url); } catch { continue; }
+      if (!/^https?:$/.test(u.protocol)) continue;            // skip chrome:// / extension pages
+      if (seen.has(u.origin)) continue; seen.add(u.origin);
+      out.push({ origin: u.origin, label: u.hostname.replace(/^www\./, '') });
+    }
+    return out;
+  } catch { return []; }
+}
+
+// Best-effort {origin,label} from a typed answer (a bare host like "mail.google.com" → an https origin). A non-URL
+// answer returns null → the modal re-prompts rather than binding garbage.
+function _targetFromText(text) {
+  const t = String(text || '').trim();
+  if (!t) return null;
+  let u = null;
+  try { u = new URL(t); } catch { /* */ }
+  if (!u) { try { u = new URL('https://' + t.replace(/^\/+/, '')); } catch { /* */ } }
+  if (!u || !/^https?:$/.test(u.protocol)) return null;
+  return { origin: u.origin, label: u.hostname.replace(/^www\./, '') };
+}
+
+// The app definition behind a conversation (for the archetype → shape template): builtin, then the user catalog,
+// then a minimal shell (unknown archetype → the interactive default).
+function _setupDefFor(conv) {
+  const appId = conv && conv.appId;
+  if (!appId) return null;
+  return builtinApp(appId)
+    || (_userCatalog || []).find((d) => d && d.id === appId)
+    || { id: appId, name: (conv && conv.title) || 'App', archetype: null };
+}
+
+// Start the guided flow for the CURRENT app conversation. Validates it's an app (not a sub-task / blank surface),
+// sources connections, and renders the first step.
+async function _startSetupFlow() {
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  if (!_currentConversationId) { _setMessageBody(msg, 'Open an app first — setup binds an app to your sites and workflow.'); _orchFinalize(msg); return; }
+  let conv = null;
+  try { conv = await ConversationStore.load(_currentConversationId); } catch { /* */ }
+  if (!conv || !conv.appId || conv.parentId) {
+    _setMessageBody(msg, (conv && conv.parentId)
+      ? 'A sub-task inherits its app’s setup — run `setup` on the app itself.'
+      : 'Setup configures an APP. Open or create an app (New app → the gallery), then type “setup”.');
+    _orchFinalize(msg); return;
+  }
+  try { await _loadUserCatalog(); } catch { /* */ }
+  const def = _setupDefFor(conv);
+  const connections = await _setupConnections();
+  const { spec, step } = startSetup(def, { connections });
+  _setupState = { convId: _currentConversationId, spec };
+  _setMessageBody(msg, `⚙️ **Setting up “${conv.title || def.name}”.** I’ll bind it to your site and workflow — answer below, or type \`cancel\` to stop.`, { markdown: true });
+  _orchFinalize(msg);
+  _renderSetupStep(step);
+}
+
+// Render one step: the prompt + (for the target slot) clickable connection candidates. Typing an answer also works —
+// the modal intercept routes it through _setupAdvanceAnswer.
+function _renderSetupStep(step) {
+  if (!step) return;
+  if (step.done) { void _bankSetup(step); return; }
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  _setMessageBody(msg, step.prompt || 'Tell me more.');
+  if (step.kind === 'target' && Array.isArray(step.candidates) && step.candidates.length) {
+    const wrap = document.createElement('div');
+    wrap.className = 'intent-menu';
+    for (const c of step.candidates) {
+      const card = document.createElement('button');
+      card.className = 'suggestion-card intent-chip';
+      card.innerHTML = `<div class="suggestion-card-name">${escHtml(c.label)}</div>`;
+      card.addEventListener('click', () => { void _setupAdvanceAnswer(c); });
+      wrap.appendChild(card);
+    }
+    msg.appendChild(wrap);
+  }
+  _orchFinalize(msg);
+}
+
+// Apply an answer to the current slot + advance (shared by clicked candidates and typed answers). The answer is
+// pre-shaped by the caller (a {origin,label} object for target, a string for focus).
+async function _setupAdvanceAnswer(answer) {
+  if (!_setupState) return;
+  const { spec, step } = advanceSetup(_setupState.spec, answer);
+  _setupState.spec = spec;
+  _renderSetupStep(step);
+}
+
+// Bank the completed config onto the conversation (merged over the existing config — preserves writePolicy). The
+// bound fields (target / focus / allowedOrigins / shape) persist; allowedOrigins is the derived SCOPE fence (§6A).
+async function _bankSetup(step) {
+  const state = _setupState; _setupState = null;
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  const cfg = step && step.config;
+  if (!state || !cfg) { _setMessageBody(msg, 'Setup didn’t complete — type “setup” to try again.'); _orchFinalize(msg); return; }
+  let conv = null;
+  try { conv = await ConversationStore.load(state.convId); } catch { /* */ }
+  const base = (conv && conv.config && typeof conv.config === 'object') ? conv.config : { writePolicy: 'gated' };
+  const merged = { ...base, target: cfg.target, focus: cfg.focus, allowedOrigins: cfg.allowedOrigins, shape: cfg.shape, setupComplete: true };
+  try { await ConversationStore.patchMeta(state.convId, { config: merged }); }
+  catch (e) { try { console.warn('[chat] setup bank failed:', e?.message); } catch { /* */ } }
+  if (state.convId === _currentConversationId) _currentConversationConfig = merged;
+  const where = cfg.target ? `\`${cfg.target.label}\`` : 'your site';
+  const mode = (cfg.shape && cfg.shape.mode) || 'interactive';
+  _setMessageBody(msg, `✅ **Set up.** This app now works ${where} on \`${cfg.focus || 'your workflow'}\` (${mode}). Re-run \`setup\` anytime to change it.`, { markdown: true });
   _orchFinalize(msg);
   _refreshHistoryIfOpen().catch(() => {});
 }
@@ -3875,6 +4008,32 @@ async function sendChatMessage() {
     return;
   }
 
+  // AS-2 (v2.74.1188) — GUIDED-SETUP MODAL: while a setup flow is active for THIS conversation, the next typed
+  // message is the answer to the current slot (NOT a command / website ask). `cancel`/`stop`/`exit` aborts. Runs
+  // right after the dev fast-path and before every command guard so the flow owns the input until it completes.
+  if (_setupState && _setupState.convId === _currentConversationId) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    if (/^(cancel|stop|exit|nevermind|never mind|quit)$/i.test(text)) {
+      _setupState = null;
+      _orchFinalize(appendMessage({ role: 'assistant', body: 'Setup paused — type “setup” to pick up where you left off.' }));
+      return;
+    }
+    if (/^set\s*up:?\s*$/i.test(text)) { _renderSetupStep(setupStep(_setupState.spec)); return; }   // re-show the current step, don't bind "setup" as an answer
+    const step = setupStep(_setupState.spec);
+    let answer = text;
+    if (step.kind === 'target') {
+      answer = _targetFromText(text);
+      if (!answer) {
+        _orchFinalize(appendMessage({ role: 'assistant', body: 'I need a site — type its address (e.g. mail.google.com) or pick one of the open tabs above.' }));
+        return;
+      }
+    }
+    try { await _setupAdvanceAnswer(answer); }
+    catch (e) { try { console.warn('[chat] setup advance failed:', e?.message); } catch { /* */ } }
+    return;
+  }
+
   // CV-2b (v2.74.1163) — `seed: <text>` sets THIS conversation's standing instructions (its app/persona seed).
   // The IL threads the seed into routing context + the answer's system preamble (DESIGN_conversations.md §6).
   // Empty clears it; persisted so it survives a reopen. A pre-gallery test affordance; the edit-UI lands in CV-3.
@@ -3915,6 +4074,18 @@ async function sendChatMessage() {
     appendMessage({ role: 'user', body: text });
     try { await _forgetApp(text.replace(/^forget app:\s*/i, '')); }
     catch (e) { try { console.warn('[chat] forget-app failed:', e?.message); } catch { /* */ } }
+    return;
+  }
+
+  // AS-2 (v2.74.1188) — `setup` (bare) starts the guided bind flow for the CURRENT app (target/focus/shape). A
+  // utility command (before routing): it configures the app, it isn't a website ask. The modal above then captures
+  // each answer until the flow completes (or `cancel`). Matches "setup" / "set up" / "setup:" only — "setup my X"
+  // falls through to normal routing.
+  if (/^set\s*up:?\s*$/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    try { await _startSetupFlow(); }
+    catch (e) { try { console.warn('[chat] setup command failed:', e?.message); } catch { /* */ } }
     return;
   }
 
