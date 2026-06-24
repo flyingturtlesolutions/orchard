@@ -542,6 +542,16 @@ textarea {
   text-align: left;
 }
 
+/* CV-5 (v2.74.1173) — the "Your apps" section label in the gallery (separates user-authored apps from the builtins). */
+.suggestion-section {
+  margin: var(--sp-3) 0 calc(var(--sp-1) * -1);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--c-text-subtle);
+}
+
 .suggestion-card {
   background: var(--c-bg-elevated);
   border: 1px solid var(--c-border-soft);

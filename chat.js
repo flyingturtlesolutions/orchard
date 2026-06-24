@@ -35,6 +35,7 @@ import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js
 import { buildDrawerTree } from './Core/drawerTree.js';   // CV-3c — the pure flush-left accordion model
 import { planSubTasks } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure)
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-app write gate (read-only enforcement)
+import { userAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps
 
 // ─── Conversation state ──────────────────────────────────────────────────────
 // `_currentConversationId` is null before the first user message of a new
@@ -1057,6 +1058,67 @@ function _renderAppGallery() {
   custom.innerHTML = '<div class="suggestion-card-name">+ Custom</div><div class="suggestion-card-summary">Start a blank conversation.</div>';
   custom.addEventListener('click', () => { _clearCurrentConversation(); _resetConversation(); void renderSuggestionCards(); });
   container.appendChild(custom);
+  void _appendUserApps(container);   // CV-5 — async-append "Your apps" (the user catalog) after the builtins + Custom
+}
+
+// CV-5 (v2.74.1173, DESIGN_conversations.md §9) — the user app catalog: user-authored AppDefinitions persisted in
+// chrome.storage (`apps:userCatalog`), shown in the gallery under "Your apps", instantiated exactly like a builtin.
+// Created via `save as app: <name>` (promote the current conversation's seed); removed via `forget app: <name>`.
+// The IL questionnaire + chat-distillation are CV-5-full; this MVP captures a user-authored seed directly.
+let _userCatalog = [];
+async function _loadUserCatalog() {
+  try { const s = await chrome.storage.local.get('apps:userCatalog'); _userCatalog = listUserDefs(s['apps:userCatalog'] || []); }
+  catch { _userCatalog = []; }
+  return _userCatalog;
+}
+async function _saveUserCatalog() {
+  await chrome.storage.local.set({ 'apps:userCatalog': _userCatalog });
+}
+async function _appendUserApps(container) {
+  if (!container) return;
+  await _loadUserCatalog();
+  if (!_userCatalog.length) return;
+  const hdr = document.createElement('div');
+  hdr.className = 'suggestion-section';
+  hdr.textContent = 'Your apps';
+  container.appendChild(hdr);
+  for (const def of _userCatalog) {
+    const card = document.createElement('button');
+    card.className = 'suggestion-card';
+    card.innerHTML = `
+      <div class="suggestion-card-name">${escHtml(def.name)}</div>
+      ${def.description ? `<div class="suggestion-card-summary">${escHtml(def.description)}</div>` : ''}
+      <div class="suggestion-card-meta"><span class="suggestion-card-kind">${escHtml(def.archetype || 'your app')}</span>${def.defaultConfig && def.defaultConfig.writePolicy === 'never' ? '<span class="suggestion-card-kind">read-only</span>' : ''}</div>`;
+    card.addEventListener('click', () => { void _createAppConversation(def); });
+    container.appendChild(card);
+  }
+}
+
+// CV-5 — promote THIS conversation into a reusable user app: capture its seed (+ enforced config) under a name.
+async function _promoteToApp(name) {
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  const seed = String(_currentConversationSeed || '').trim();
+  if (!seed) { _setMessageBody(msg, 'First tell this conversation what to do — `seed: <instructions>` — then `save as app: <name>`.'); _orchFinalize(msg); return; }
+  const def = userAppDefinition({ name, seed, config: _currentConversationConfig });
+  if (!def) { _setMessageBody(msg, 'Give it a name, e.g. `save as app: Invoice watcher`.'); _orchFinalize(msg); return; }
+  await _loadUserCatalog();
+  _userCatalog = addUserDef(_userCatalog, def);
+  try { await _saveUserCatalog(); }
+  catch (e) { _setMessageBody(msg, `Couldn’t save the app${e && e.message ? ` — ${e.message}` : ''}.`); _orchFinalize(msg); return; }
+  _setMessageBody(msg, `Saved “${def.name}” to Your apps — open it any time from New app${def.defaultConfig.writePolicy === 'never' ? ' (read-only)' : ''}. It carries this conversation’s seed.`);
+  _orchFinalize(msg);
+}
+
+// CV-5 — remove a user app from the catalog by name.
+async function _forgetApp(name) {
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  const id = slugifyAppId(name);
+  await _loadUserCatalog();
+  const had = _userCatalog.some((d) => d.id === id);
+  _userCatalog = removeUserDef(_userCatalog, id);
+  try { await _saveUserCatalog(); } catch { /* */ }
+  _setMessageBody(msg, had ? `Removed “${String(name).trim()}” from Your apps.` : `No app called “${String(name).trim()}” in Your apps.`);
+  _orchFinalize(msg);
 }
 
 // Instantiate an app: a fresh kind:'app' conversation carrying the app's seed (copy-on-add). The seed is set
@@ -3729,6 +3791,23 @@ async function sendChatMessage() {
     appendMessage({ role: 'user', body: text });
     try { await _spawnSubTasks(text.replace(/^subtasks?:\s*/i, '')); }
     catch (e) { try { console.warn('[chat] subtasks command failed:', e?.message); } catch { /* */ } }
+    return;
+  }
+
+  // CV-5 (v2.74.1173) — `save as app: <name>` promotes THIS conversation (its seed) into a reusable user app;
+  // `forget app: <name>` removes one. Utility commands, handled before routing (they manage the catalog, not a site).
+  if (/^save as app:/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    try { await _promoteToApp(text.replace(/^save as app:\s*/i, '')); }
+    catch (e) { try { console.warn('[chat] save-as-app failed:', e?.message); } catch { /* */ } }
+    return;
+  }
+  if (/^forget app:/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    try { await _forgetApp(text.replace(/^forget app:\s*/i, '')); }
+    catch (e) { try { console.warn('[chat] forget-app failed:', e?.message); } catch { /* */ } }
     return;
   }
 
