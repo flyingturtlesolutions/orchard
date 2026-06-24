@@ -38,6 +38,7 @@ import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-ap
 import { userAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
 import { recordGoalItem, loadGoalItems, clearGoalMemory } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view
+import { standingRuleFromText } from './Core/goalMemory.js';   // AL-3c — non-tool capture: `remember:` authors a standing-rule delta
 import { normalizeInterpretDecision, applyConfidenceGate } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
 
 // ─── Conversation state ──────────────────────────────────────────────────────
@@ -1340,7 +1341,7 @@ async function _renderAppMemory() {
   let items = [];
   try { items = await loadGoalItems(appId); } catch { /* */ }
   if (!items.length) {
-    _setMessageBody(msg, '🧠 This app hasn’t learned anything yet. Use it — when it acts on a capability, it remembers what you asked for, so a differently-worded ask finds it next time.');
+    _setMessageBody(msg, '🧠 This app hasn’t learned anything yet. Use it (when it acts on a capability it remembers what you asked for), or teach it a rule — “remember: keep replies terse”.');
     _orchFinalize(msg); return;
   }
   const fmt = (x) => {
@@ -4166,6 +4167,22 @@ async function sendChatMessage() {
     try { await _renderAppMemory(); }
     catch (e) { try { console.warn('[chat] memory view failed:', e?.message); } catch { /* */ } }
     return;
+  }
+
+  // AL-3c (v2.74.1194) — `remember: <rule>` authors a STANDING RULE (a behavior delta) into this app's goal memory:
+  // NON-tool learning (a behavior, not a capability choice). Light `if X, Y` parse → trigger/body. Shows under
+  // "Rules" in `memory`; AL-4 will apply it (thread it into the app's reasoning context).
+  if (/^remember:/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    const m = appendMessage({ role: 'assistant', body: '' });
+    if (!_currentConversationAppId) { _setMessageBody(m, 'Open an app — standing rules are per-app.'); _orchFinalize(m); return; }
+    const rule = standingRuleFromText(text.replace(/^remember:\s*/i, ''));
+    if (!rule) { _setMessageBody(m, 'Tell me a rule to remember, e.g. “remember: keep replies under 3 sentences”.'); _orchFinalize(m); return; }
+    try { await recordGoalItem(_currentConversationAppId, rule); } catch { /* */ }
+    const when = rule.trigger ? ` when ${rule.trigger}` : '';
+    _setMessageBody(m, `🧠 Got it — I’ll remember to ${rule.body}${when}. Type “memory” to review this app’s rules.`);
+    _orchFinalize(m); return;
   }
 
   // `i: <ask>` — explicit INTERPRET front door. As of F-2c-flip (v2.74.1180) interpret is the DEFAULT for any plain

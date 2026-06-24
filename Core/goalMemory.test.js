@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {
   ITEM_KINDS, EPISTEMIC, TIERS, tierRank, nextTier,
   normalizeBelief, normalizeDelta, normalizeMemoryItem, isBelief, isDelta,
-  canPromote, promote,
+  canPromote, promote, standingRuleFromText,
 } from './goalMemory.js';
 
 describe('goalMemory — enums + tier helpers', () => {
@@ -79,6 +79,35 @@ describe('goalMemory — normalizeMemoryItem + classifiers', () => {
     assert.equal(normalizeMemoryItem({ body: 'no kind' }), null);
     assert.equal(normalizeMemoryItem({ kind: 'rumor', body: 'z' }), null);
     assert.equal(normalizeMemoryItem(null), null);
+  });
+});
+
+describe('goalMemory — standingRuleFromText (AL-3c — non-tool: authored rules → deltas)', () => {
+  it('a plain rule → an always-on delta (trigger null), confirmed + user-authored', () => {
+    const d = standingRuleFromText('keep replies under 3 sentences');
+    assert.equal(d.kind, 'delta');
+    assert.equal(d.trigger, null);
+    assert.equal(d.body, 'keep replies under 3 sentences');
+    assert.equal(d.tier, 'confirmed');
+    assert.equal(d.provenance, 'user-rule');
+    assert.equal(d.ref, null);                       // a rule isn't tool-bound
+  });
+  it('"if X, Y" and "if X then Y" split into trigger + body', () => {
+    const a = standingRuleFromText('if a ticket is a refund, check payment status first');
+    assert.equal(a.trigger, 'a ticket is a refund');
+    assert.equal(a.body, 'check payment status first');
+    const b = standingRuleFromText('if overdue then escalate');
+    assert.equal(b.trigger, 'overdue');
+    assert.equal(b.body, 'escalate');
+  });
+  it('a no-delimiter "if" sentence is NOT mis-split — becomes an always-on rule', () => {
+    const d = standingRuleFromText('if uncertain ask the user');
+    assert.equal(d.trigger, null);
+    assert.equal(d.body, 'if uncertain ask the user');
+  });
+  it('empty → null', () => {
+    assert.equal(standingRuleFromText('   '), null);
+    assert.equal(standingRuleFromText(null), null);
   });
 });
 

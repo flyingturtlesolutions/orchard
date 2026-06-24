@@ -94,6 +94,24 @@ export function normalizeMemoryItem(raw) {
 export const isBelief = (x) => !!x && x.kind === 'belief';
 export const isDelta  = (x) => !!x && x.kind === 'delta';
 
+/**
+ * AL-3c — build an AUTHORED standing-rule DELTA from user text ("the app's standing rules are authored deltas", §8).
+ * PURE. NON-tool learning: the user states a behavioral rule, not a capability choice. Light `if X, Y` / `if X then
+ * Y` parse → trigger (the "when") + body (the "then"); a delimiter is REQUIRED (a comma/`;`/`:`/"then") so a no-
+ * delimiter sentence isn't mis-split — it becomes an always-on rule (trigger null). Starts at 'confirmed' with high
+ * confidence: the user EXPLICITLY authored it (a deliberate act), so it's confirmed-by-construction — but not auto-
+ * canonized (canon is for consolidated knowledge, §4/§6). Returns the delta, or null if there's no rule text.
+ */
+export function standingRuleFromText(text) {
+  const s = _str(text);
+  if (!s) return null;
+  let trigger = null;
+  let body = s;
+  const m = s.match(/^if\s+(.+?)\s*(?:,|;|:|\bthen\b)\s+(.+)$/i);
+  if (m && m[1].trim() && m[2].trim()) { trigger = m[1].trim(); body = m[2].trim(); }
+  return normalizeDelta({ body, trigger, confidence: 0.85, tier: 'confirmed', provenance: 'user-rule' });
+}
+
 // The per-target-tier promotion gate (the ratchet, §4). `s` = normalized signals. Cheap to hypothesize; corroborated
 // to confirm; HITL to canonize (§7 — confidence alone never canonizes); consolidation-only to summarize (§5).
 function _gateFor(target, s) {
