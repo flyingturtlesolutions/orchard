@@ -14,7 +14,7 @@ The IL is one shared engine (route → palette → judge → execute), and the *
 
 This is *why* "an app is just the IL configured" holds: every app runs the same read → think → act loop over the same substrate; the config sets the goal, targets, behaviour, and emphasis.
 
-> *2026-06-24 — this supersedes the original "the prompt is the only variable." The variable grew from a bare prompt into a small **config** (seed + bound targets/shape/focus + standing rules + cadence + chat model — §6A), but the principle is unchanged: **one engine, one shared substrate; the app varies only the view.** Critically, **capabilities and connectors are GLOBAL** — the app is a lens, never a silo (§6A.1).*
+> *2026-06-24 — this supersedes the original "the prompt is the only variable." The variable grew from a bare prompt into a small **config** (seed + bound site/shape + learned capabilities + standing rules + cadence + chat model — §6A; focus is learned at runtime, not set at setup), but the principle is unchanged: **one engine, one shared substrate; the app varies only the view.** Critically, **capabilities and connectors are GLOBAL** — the app is a lens, never a silo (§6A.1).*
 
 ## 2. Roles — Overview, apps, sub-tasks
 
@@ -93,7 +93,7 @@ The variable is the app's **config**, not just a prompt; the substrate is shared
 
 | Dimension | What | Where |
 |---|---|---|
-| **Goal / context** | seed (role) + bound targets / shape / focus (from setup) | app config |
+| **Goal / context** | seed (role) + bound site / shape (from setup); focus is *learned*, not set | app config |
 | **History / experience** | the typed, tiered **belief + behavior-delta learning store** (`DESIGN_apps_learning.md`) — *not* a chat log | app store |
 | **Standing rules** | persistent *if-X-do-Y* (authored deltas; *learned* deltas from a mismatch) | app config |
 | **Cadence** | *when* it runs | deferred (backend) |
@@ -102,26 +102,30 @@ The variable is the app's **config**, not just a prompt; the substrate is shared
 
 **Capabilities AND connectors are GLOBAL — the app is a lens, never a silo.** Teaching "get inbox contents" inside
 the Inbox manager banks it on the **Gmail Ground** (or as a session-ride recipe) — globally; Overview and every
-other app can call it. The app *authored* it; it does not *own* it. Setup binds the app's **focus** (where it works
-— a default + retrieval bias), never exclusivity. This preserves the founding principle: one IL, one tool +
-capability substrate, constant — the app only varies the *view*.
+other app can call it. The app *authored* it; it does not *own* it. This preserves the founding principle: one IL,
+one tool + capability substrate, constant — the app only varies the *view*.
 
-### 6A.2 Every app has a setup step (not only custom)
+### 6A.2 Every app has a setup step (not only custom) — but setup is LIGHT (the site, not a questionnaire)
 
-A builtin is a **template**; **setup specializes it to the user.** On add, *every* app runs a setup that **banks**
-the user's specific workflow the way a taught workflow's steps are banked — decomposed into bindings, each captured
-+ banked, reusable + editable. Setup binds three things (*what sites · what object · how*):
+A builtin is a **template**; **setup specializes it to the user** — but only just enough to start. On add, *every*
+app runs a setup that binds **the site, and nothing more**:
 
-- **Target** — *where* it works → bound from the **live connection** (§6A.3), banked as a target ref;
-- **Shape** — *how* it runs (one-by-one · **fan-out a sub-task per item** · watch-loop · gated) → the **archetype
-  templates the default** (Operator → fan-out · Monitor → watch-and-report · Executor → plan-act-commit); user
-  confirms / tweaks. *(This elevates §3's archetypes from soft-descriptive to load-bearing for setup.)*
-- **Focus** — *which* objects / goals matter → a soft retrieval + starter + chat hint.
+- **Target (site)** — *where* it works → bound from the **live connection** (§6A.3), banked as a target ref. The one
+  thing setup must capture (you can't ride a session without knowing which). REQUIRED.
+- **Shape** — *how* it runs → the **archetype templates the default** (Operator → interactive · Monitor → watch ·
+  Executor → run + sub-agents); **pre-bound, never prompted** — an override is an explicit edit (AS-3).
 
-**Progressive** (bind the essentials upfront — at least one target + the shape — and let objects/capabilities keep
-banking *as you use it*; the flywheel never stops) and **reuse-then-teach** (reuse a capability already taught on
-that Ground; demonstrate fresh only if absent). The custom-card **questionnaire** (§9) is just how a *custom* app
-authors its setup **spec**; a builtin ships one.
+**Focus is NOT a setup slot** (2026-06-24 correction). A user shouldn't enumerate every workflow up front. What the
+app DOES on the site **accretes at runtime**: you ask *"get my open emails"* in chat → a novel ask is authored via
+the teach/trial flywheel → banked. Then the **learning scheme** (`DESIGN_apps_learning.md`) lets a later paraphrase
+(*"how many open emails do I have"*) **recall** the taught capability — a goal-store belief (`intent → capability`)
+that strengthens with use. So three layers carry what one questionnaire used to: **SEED = the goal/role · SETUP =
+the site · CHAT + LEARNING = the capabilities.**
+
+**Progressive** (bind the site, then let capabilities keep banking *as you use it*; the flywheel never stops) and
+**reuse-then-teach** (reuse a capability already taught on that Ground; demonstrate fresh only if absent). Additional
+sites accrete the same way (operate on a new origin → it joins `allowedOrigins`). The custom-card **questionnaire**
+(§9) authors a *custom* app's seed; a builtin ships one.
 
 ### 6A.3 Targets bind from the live connection, not start-config (target ≡ connection)
 
@@ -153,8 +157,8 @@ closed loop turning on the app's targets.
 
 ### 6A.6 v1 vs the backend stage, and the build slices
 
-- **v1 (buildable now):** setup-on-add for every app (bind target=connection · shape[archetype] · focus;
-  progressive; reuse-then-teach); capabilities + connectors global; standing rules **on-run**; the goal learning
+- **v1 (buildable now):** setup-on-add for every app (bind target=connection · shape[archetype]; focus accretes at
+  runtime via chat→teach→recall; progressive; reuse-then-teach); capabilities + connectors global; standing rules **on-run**; the goal learning
   store. Build: **AS-1** setup-spec schema (pure) → **AS-2** the guided bind flow → **AS-3** bank + edit; **AL-1…6**
   the learning model (`DESIGN_apps_learning.md`).
 - **Backend stage (deferred, decision #3):** cadence / autonomous firing of standing rules; the richer

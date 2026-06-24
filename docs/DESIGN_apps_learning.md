@@ -38,6 +38,13 @@ of *what's been written* and *what gets loaded* — not of the reasoner changing
 - **Behavior delta ("lesson")** — *not* a fact about the world but a **rule about future action**, born from a
   **prediction↔ground-truth mismatch**. e.g. you predicted a draft was good, the user rewrote it to check the
   account first → the delta `"for refund tickets, verify payment status before drafting."`
+- **Capability-association** — the most load-bearing belief in practice: `intent → capability`. When the user asks
+  *"get my open emails"* and a novel capability is authored (the tooling flywheel) + banked, the goal store records
+  the association; a later **paraphrase** (*"how many open emails do I have"*) **recalls** it instead of re-authoring.
+  This is the **bridge** between the tooling flywheel (which learns *the capability*) and this layer (which learns
+  *when to reach for it*) — and it's why setup needn't enumerate workflows (`DESIGN_conversations.md` §6A.2): the
+  app's focus accretes *here*, as these associations bank with use. (Tool-RAG / aliases already do a shallow form;
+  the goal store makes it app-scoped, confidence-graded, and tiered.)
 
 *Orchard seeds, not yet first-class at the goal layer:* confidence exists (trust/trial scores); provenance exists
 (`source`); epistemic type appears as verified-vs-proposed / stale-suspected-vs-confirmed. Behavior-delta seeds:

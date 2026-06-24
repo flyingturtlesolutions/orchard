@@ -36,7 +36,7 @@ import { buildDrawerTree } from './Core/drawerTree.js';   // CV-3c — the pure 
 import { planSubTasks } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure)
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-app write gate (read-only enforcement)
 import { userAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps
-import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (bind an app's target/focus/shape; pure)
+import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
 import { normalizeInterpretDecision, applyConfidenceGate } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
 
 // ─── Conversation state ──────────────────────────────────────────────────────
@@ -54,7 +54,7 @@ let _currentConversationKind = 'agent';
 let _devModeEnabled = false;   // v2.74.1160 — Studio toggle (settings:devMode). When off, dev/design conversations are hidden + inactive.
 let _currentConversationSeed = '';   // v2.74.1163 (CV-2b) — the current conversation's seed (its standing instructions); the IL threads it into routing context + the answer preamble.
 let _currentConversationConfig = { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — the current track's enforced app config; the write gate (actAllowed) blocks ACTS when writePolicy:'never' (a read-only app/sub-task).
-let _setupState = null;   // AS-2 (v2.74.1188) — the in-progress guided-setup flow: { convId, spec } while binding an app's target/focus/shape; null otherwise. While set (for the current conversation), the modal intercept at the top of sendChatMessage routes the next typed message into advanceSetup.
+let _setupState = null;   // AS-2 (v2.74.1188) — the in-progress guided-setup flow: { convId, spec } while connecting an app to its site; null otherwise. While set (for the current conversation), the modal intercept at the top of sendChatMessage routes the next typed message into advanceSetup.
 
 // v2.74.106 — Single-flight guard for conversation creation. Two parallel
 // callers (e.g. double-clicked suggestion cards) could both see
@@ -1155,7 +1155,7 @@ async function _createAppConversation(def) {
     {
       const setup = document.createElement('button');
       setup.className = 'suggestion-card';
-      setup.innerHTML = '<div class="suggestion-card-name">⚙️ Set up — bind to your site &amp; workflow</div>';
+      setup.innerHTML = '<div class="suggestion-card-name">⚙️ Set up — connect your site</div>';
       setup.addEventListener('click', () => { const inp = $('chat-input'); if (inp) inp.value = 'setup'; sendChatMessage(); });
       cards.appendChild(setup);
     }
@@ -1205,9 +1205,10 @@ async function _spawnSubTasks(listText) {
   _refreshHistoryIfOpen().catch(() => {});
 }
 
-// ─── AS-2 (v2.74.1188): guided setup — bind an app to your target / focus / shape ───────────────────────────
-// "Setup-for-every-app" (DESIGN_conversations.md §6A): before an app is useful it's CONFIGURED, the way a workflow
-// is decomposed into banked steps. The pure controller (Core/setupFlow.js) decides each step; this is the thin live
+// ─── AS-2 (v2.74.1188): guided setup — connect an app to its site ──────────────────────────────────────────
+// "Setup-for-every-app" (DESIGN_conversations.md §6A): before an app is useful it's CONNECTED to its site. Setup is
+// LIGHT — it binds the SITE only; what the app DOES there is learned at runtime (chat → teach → recall), never
+// enumerated here (per 2026-06-24 feedback). The pure controller (Core/setupFlow.js) decides each step; this is live
 // wiring — source connections from the open tabs (reuse-then-teach), render the prompt + candidate cards, feed the
 // answer back through the modal intercept, and BANK the completed config onto the conversation. While _setupState
 // is set for the current conversation, the modal at the top of sendChatMessage captures each typed answer.
@@ -1269,7 +1270,7 @@ async function _startSetupFlow() {
   const connections = await _setupConnections();
   const { spec, step } = startSetup(def, { connections });
   _setupState = { convId: _currentConversationId, spec };
-  _setMessageBody(msg, `⚙️ **Setting up “${conv.title || def.name}”.** I’ll bind it to your site and workflow — answer below, or type \`cancel\` to stop.`, { markdown: true });
+  _setMessageBody(msg, `⚙️ **Setting up “${conv.title || def.name}”.** Just pick the site it works on — type the address, or pick an open tab below. \`cancel\` to stop.`, { markdown: true });
   _orchFinalize(msg);
   _renderSetupStep(step);
 }
@@ -1320,8 +1321,7 @@ async function _bankSetup(step) {
   catch (e) { try { console.warn('[chat] setup bank failed:', e?.message); } catch { /* */ } }
   if (state.convId === _currentConversationId) _currentConversationConfig = merged;
   const where = cfg.target ? `\`${cfg.target.label}\`` : 'your site';
-  const mode = (cfg.shape && cfg.shape.mode) || 'interactive';
-  _setMessageBody(msg, `✅ **Set up.** This app now works ${where} on \`${cfg.focus || 'your workflow'}\` (${mode}). Re-run \`setup\` anytime to change it.`, { markdown: true });
+  _setMessageBody(msg, `✅ **Connected to ${where}.** Now just tell me what to do — e.g. “get my open emails” — and I’ll learn each task the first time, then recall it when you ask again (even worded differently).`, { markdown: true });
   _orchFinalize(msg);
   _refreshHistoryIfOpen().catch(() => {});
 }

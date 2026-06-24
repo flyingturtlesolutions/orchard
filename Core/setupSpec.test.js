@@ -1,4 +1,4 @@
-// Core/setupSpec.test.js — AS-1 (v2.74.1186): the per-app setup spec.
+// Core/setupSpec.test.js — AS-1 (v2.74.1186; revised v2.74.1189 — focus dropped from setup): the per-app setup spec.
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
@@ -36,11 +36,6 @@ describe('setupSpec — normalizeSlotValue', () => {
     assert.equal(normalizeSlotValue('target', { label: 'no origin' }), null);   // no origin → unusable
     assert.equal(normalizeSlotValue('target', null), null);
   });
-  it('focus trims, drops blanks, caps at 120', () => {
-    assert.equal(normalizeSlotValue('focus', '  open tickets  '), 'open tickets');
-    assert.equal(normalizeSlotValue('focus', '   '), null);
-    assert.equal(normalizeSlotValue('focus', 'x'.repeat(200)).length, 120);
-  });
   it('shape clamps mode to the enum and coerces the flags', () => {
     assert.deepEqual(normalizeSlotValue('shape', { mode: 'watch', subAgents: 1, cadence: 'daily' }),
       { mode: 'watch', subAgents: true, cadence: 'daily' });
@@ -48,7 +43,8 @@ describe('setupSpec — normalizeSlotValue', () => {
       { mode: 'interactive', subAgents: false, cadence: null });
     assert.equal(normalizeSlotValue('shape', null), null);
   });
-  it('unknown kind → null', () => {
+  it('a dropped/unknown kind (e.g. the old "focus") → null', () => {
+    assert.equal(normalizeSlotValue('focus', 'open tickets'), null);
     assert.equal(normalizeSlotValue('mystery', 'x'), null);
   });
 });
@@ -56,18 +52,19 @@ describe('setupSpec — normalizeSlotValue', () => {
 describe('setupSpec — buildSetupSpec', () => {
   const def = { id: 'support', name: 'Support agent', archetype: 'operator' };
 
-  it('produces exactly the three ordered slots, all known kinds', () => {
+  it('produces just target + shape (focus is not a setup slot)', () => {
     const spec = buildSetupSpec(def);
     assert.deepEqual(spec.slots.map((s) => s.kind), SETUP_KINDS);
+    assert.deepEqual(SETUP_KINDS, ['target', 'shape']);
     assert.equal(spec.appId, 'support');
     assert.equal(spec.archetype, 'operator');
   });
-  it('target + focus are required and unbound; shape is pre-bound from the archetype', () => {
+  it('target is required + unbound (the only prompt); shape is pre-bound from the archetype, not required', () => {
     const spec = buildSetupSpec(def);
     const byKey = Object.fromEntries(spec.slots.map((s) => [s.key, s]));
     assert.equal(byKey.target.required, true);  assert.equal(byKey.target.value, null);
-    assert.equal(byKey.focus.required, true);   assert.equal(byKey.focus.value, null);
     assert.equal(byKey.shape.required, false);  assert.equal(byKey.shape.value.mode, 'interactive');
+    assert.equal(byKey.focus, undefined);       // no focus slot
   });
   it('existing connections become the target slot candidates (reuse-then-teach); junk is dropped', () => {
     const spec = buildSetupSpec(def, { connections: [
@@ -104,37 +101,30 @@ describe('setupSpec — bindSlot (copy-on-write)', () => {
   });
 });
 
-describe('setupSpec — progressive completion', () => {
-  it('nextUnboundSlot walks required slots in order, then null; isSetupComplete tracks it', () => {
+describe('setupSpec — progressive completion (target is the only required slot)', () => {
+  it('nextUnboundSlot is target, then null once it is bound; isSetupComplete tracks it', () => {
     let spec = buildSetupSpec({ id: 'support', archetype: 'operator' });
-    assert.equal(nextUnboundSlot(spec).key, 'target');                              // target first
+    assert.equal(nextUnboundSlot(spec).key, 'target');
     assert.equal(isSetupComplete(spec), false);
 
     spec = bindSlot(spec, 'target', { origin: 'https://mail.google.com' });
-    assert.equal(nextUnboundSlot(spec).key, 'focus');                              // then focus
-    assert.equal(isSetupComplete(spec), false);
-
-    spec = bindSlot(spec, 'focus', 'open tickets');
     assert.equal(nextUnboundSlot(spec), null);                                     // shape isn't required
     assert.equal(isSetupComplete(spec), true);
   });
 });
 
 describe('setupSpec — specToConfig (the banked patch)', () => {
-  it('returns null while any required slot is unbound', () => {
-    const spec = buildSetupSpec({ id: 'support', archetype: 'operator' });
-    assert.equal(specToConfig(spec), null);
-    assert.equal(specToConfig(bindSlot(spec, 'target', { origin: 'https://x.com' })), null);  // focus still missing
+  it('returns null while the target is unbound', () => {
+    assert.equal(specToConfig(buildSetupSpec({ id: 'support', archetype: 'operator' })), null);
   });
-  it('collapses a completed spec; allowedOrigins is derived from the target', () => {
+  it('collapses once the target is bound; allowedOrigins is derived; no focus field', () => {
     let spec = buildSetupSpec({ id: 'support', archetype: 'operator' });
     spec = bindSlot(spec, 'target', { origin: 'https://mail.google.com', label: 'Gmail' });
-    spec = bindSlot(spec, 'focus', 'open tickets');
     const cfg = specToConfig(spec);
     assert.equal(cfg.target.label, 'Gmail');
     assert.deepEqual(cfg.allowedOrigins, ['https://mail.google.com']);
-    assert.equal(cfg.focus, 'open tickets');
     assert.equal(cfg.shape.mode, 'interactive');                                   // operator template carried through
+    assert.equal('focus' in cfg, false);                                           // focus is not banked
   });
 });
 
@@ -144,7 +134,7 @@ describe('setupSpec — normalizeSetupSpec (rehydrate)', () => {
       appId: 'support', archetype: 'operator',
       slots: [
         { key: 'target', kind: 'target', required: true, value: { origin: 'https://x.com' }, candidates: [{ label: 'junk' }] },
-        { key: 'bad', kind: 'mystery', value: 'x' },                              // unknown kind → dropped
+        { key: 'focus', kind: 'focus', value: 'open tickets' },                   // old focus slot → dropped (kind no longer valid)
       ],
     };
     const clean = normalizeSetupSpec(dirty);
