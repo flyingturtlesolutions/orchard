@@ -3492,6 +3492,9 @@ async function _tryInterpret(ask) {
     const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId, seed: _currentConversationSeed });
     if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; groundId = r.groundId || null; }
   } catch { /* */ }
+  // F-2c-flip (v2.74.1180) — interpret unavailable (no LLM / handler error) → return FALSE so the caller falls back
+  // to the prior path (the floor never drops below pre-flip behaviour). Drop the placeholder so there's no orphan.
+  if (!raw || raw.why === 'interpret-unavailable') { try { msg.remove(); } catch { /* */ } return false; }
   const d = applyConfidenceGate(
     normalizeInterpretDecision(raw, { retrieved, primitives: ['OPEN_URL', 'CLICK', 'TYPE', 'SCROLL', 'EXTRACT'] }),
     { minConfidence: 0.6 },
@@ -3895,14 +3898,15 @@ async function sendChatMessage() {
     return;
   }
 
-  // F-2c (v2.74.1176) — `i: <ask>` runs the INTERPRET front door (DESIGN_llm_front_door §9) as an OPT-IN test path.
-  // Default routing is UNCHANGED; this is the test surface before flipping interpret to default (mirrors how `il:`
-  // was introduced). `i:` ≠ `il:` — the regex needs `i` immediately followed by `:`.
+  // `i: <ask>` — explicit INTERPRET front door. As of F-2c-flip (v2.74.1180) interpret is the DEFAULT for any plain
+  // ask, so `i:` is now a redundant alias kept for muscle memory (it forces interpret + falls back to the IL loop on
+  // unavailable, same as the default). `i:` ≠ `il:` — the regex needs `i` immediately followed by `:`.
   if (/^i:/i.test(text)) {
     input.value = ''; _autosizeInput();
     appendMessage({ role: 'user', body: text });
-    try { await _tryInterpret(text.replace(/^i:\s*/i, '').trim()); }
-    catch (e) { try { console.warn('[chat] interpret command failed:', e?.message); } catch { /* */ } }
+    const iask = text.replace(/^i:\s*/i, '').trim();
+    try { if (await _tryInterpret(iask)) return; } catch (e) { try { console.warn('[chat] interpret command failed:', e?.message); } catch { /* */ } }
+    try { await _tryIlCommand('il: ' + iask); } catch (e) { try { console.warn('[chat] i: fallback failed:', e?.message); } catch { /* */ } }
     return;
   }
 
@@ -4013,6 +4017,13 @@ async function sendChatMessage() {
   if (!/^tool:/i.test(text)) {
     $('btn-chat-send').disabled = false;
     const ask = text.replace(/^il:\s*/i, '').trim();
+    // F-2c-flip (v2.74.1180) — INTERPRET is the DEFAULT front door (DESIGN_llm_front_door.md §9): one reasoning call
+    // → normalize + the §9.3 confidence/clarify gate → dispatch to the verified runners. It returns false ONLY if the
+    // interpret CALL was unavailable, then we fall back to the prior path below (nav head-check + the IL loop) so the
+    // floor never drops below pre-flip behaviour. `tool:` still escapes to the deterministic cascade.
+    try { if (await _tryInterpret(ask)) return; }
+    catch (e) { try { console.warn('[chat] interpret default failed:', e?.message); } catch { /* */ } }
+    // FALLBACK (interpret unavailable) — the pre-flip path:
     // ACT short-circuit (v2.74.1167) — a clear "go to <site>" is a NAVIGATION act. The IL loop's judge palette is
     // page-caps + read legs only (no OPEN_URL primitive), so a bare nav would fall all the way through the loop to
     // its MISS→router fallback (2-3 LLM calls). The _NAV_RE-gated router resolves the URL by world knowledge in ONE
