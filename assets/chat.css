@@ -1402,7 +1402,7 @@ textarea {
    accent-blue "New conversation" so the Claude Code surface reads as a distinct, gated thing. Top margin 0
    to sit flush under the agent button. */
 .history-new-dev-btn {
-  margin-top: 0;
+  margin-top: var(--sp-3);   /* CV-3c (v2.74.1170) — now the topmost button (the legacy "New app" above it was removed) */
   background: #8a6d12;
 }
 .history-new-dev-btn:hover { background: #a9871c; }

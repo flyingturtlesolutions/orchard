@@ -97,12 +97,9 @@
         </svg>
       </button>
     </div>
-    <button class="history-new-btn" id="btn-new-conversation">
-      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 5v14M5 12h14"/>
-      </svg>
-      <span>New app</span>
-    </button>
+    <!-- CV-3c (v2.74.1170) — the legacy "New app" top button (btn-new-conversation) was REMOVED: the accordion's
+         own "New app" entry (rendered at the bottom of #history-list by _historyNewAppRow → the gallery) is the
+         single canonical entry, so this top button was a duplicate. The dev/design entries below stay (dev-gated). -->
     <!-- v2.74.1029 — New dev conversation: a dedicated Claude Code thread. The click requests the
          nativeMessaging permission (replacing `dev: on`) and opens a kind:'dev' conversation where typed
          messages route to Claude Code with no `dev:` prefix. Strippable with the dev-bridge module. -->

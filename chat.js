@@ -168,15 +168,9 @@ $('btn-hide-panel')?.addEventListener('click', () => {
 
 // ─── New conversation ────────────────────────────────────────────────────────
 
-$('btn-new-conversation').addEventListener('click', async () => {
-  if (_activeInvocations.size > 0) {
-    if (!confirm('Active invocations are in progress. Open the app picker anyway?')) return;
-  }
-  // CV-3b (v2.74.1165) — "New app" opens the app GALLERY (the builtin apps + a blank Custom card) rather than
-  // going straight to a blank chat. Picking a builtin seeds a kind:'app' conversation; Custom is the old blank path.
-  _renderAppGallery();
-  await _renderHistoryList();   // v2.74.1031 — keep the drawer fresh
-});
+// CV-3c (v2.74.1170) — the legacy "New app" top button (btn-new-conversation) was removed as a duplicate of the
+// accordion's own "New app" entry (_historyNewAppRow → the gallery). Its click listener went with it; the IL's
+// NEW_CONVERSATION self-leg now opens the gallery directly (see IL_PANEL_LEGS below).
 
 // v2.74.1029 — New DEV conversation: a dedicated Claude Code thread. The click IS the user gesture that
 // requests the nativeMessaging permission (via the bridge's enable() — must run before any other await),
@@ -3214,7 +3208,7 @@ const IL_READ_LEG_KEYS = new Set(['LIST_TABS', 'LIST_CAPABILITIES']);
 // contains-style escape); NEW_DEV now runs gesture-free when granted (enable() checks contains() first).
 const IL_PANEL_LEGS = {
   NEW_DEV_CONVERSATION:     { run: () => { $('btn-new-dev-conversation')?.click(); return { rendered: true }; } },
-  NEW_CONVERSATION:         { run: () => { $('btn-new-conversation')?.click(); return { rendered: true }; } },
+  NEW_CONVERSATION:         { run: () => { _renderAppGallery(); return { rendered: true }; } },   // CV-3c (.1170) — was a click on the removed btn-new-conversation; opens the gallery directly now
   OPEN_HISTORY:             { run: () => { $('btn-history')?.click(); }, done: '🧠 Opened conversation history.' },
   // DELETE_ALL_CONVERSATIONS dropped v2.74.1137 — its button handler calls confirm(), which async-suppresses in
   // the `il:` flow → the click is a no-op, and a `rendered:true` no-op leaves the '🧠 thinking…' placeholder STUCK
