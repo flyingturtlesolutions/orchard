@@ -123,6 +123,12 @@ we don't rebuild it.
    (mirror the OUTCOMES store). The global-vs-scoped split (§8) lands here.
 3. **AL-3 — write-back hooks.** At observe-points (a 👎/edit/correction, a postcondition mismatch) re-encode → a
    belief or delta. The fast path: a new delta is loadable next cycle.
+   - ⚠ **Injection boundary (AL-3d).** Today's hooks bank only TRUSTED bodies — the user's own ask (capability-
+     association) and authored `remember:` rules — so the `<LEARNED>` block (AL-4) is genuinely trusted. The
+     moment AL-3d banks a **read-surfaced fact** (e.g. a value scraped from a ticket) the body is **untrusted page
+     content**. Such beliefs must be tagged untrusted and rendered into `<LEARNED>` as **inert DATA, never as
+     "trusted" / a standing rule** (DESIGN_injection_boundary.md §3) — a malicious page must not be able to plant a
+     belief that steers the agent. Provenance already distinguishes them; the retrieval/render must honor it.
 4. **AL-4 — the assemble/retrieval policy (the hard part, §6).** Budget the context: always-on app summary +
    task-conditional retrieval over beliefs/deltas + lazy detail. Feeds the interpret call's `conversationContext`.
 5. **AL-5 — tiered promotion (reuse §4's gate).** Route promotion through the existing trial/accept confidence gate;
