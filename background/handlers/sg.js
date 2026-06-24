@@ -26,6 +26,8 @@ import { synthesizeTrialOp } from '../../Core/trialSynth.js';
 import { coalesce } from '../../Core/observedTrace.js';                 // OBS-3 — derive a capability from a demonstration
 import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved, describeTraceInput, derivePhasePostcondition, reconcileObservedLandmarks } from '../../Core/observedSegment.js';
 import { listLocales } from '../../Services/Storage/GroundAssetStore.js';   // OBS (v2.74.764) — reconcile observed landmarks to grounded Locale features
+import { loadGoalItems } from '../../Services/Storage/GoalMemoryStore.js';   // AL-4 — read the app's goal memory (beliefs/deltas)
+import { goalContextFor } from '../../Core/goalRetrieval.js';   // AL-4 — assemble the relevant standing rules + recall into a context block
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability, findDuplicateCapabilities } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A; GA-6 dedup
 import { findDuplicateGroundGroups, planGroundMerge, primaryHost, siteIdentity, planEnsureGround } from '../../Core/groundDedup.js';   // v2.74.816/.817 — duplicate-Ground detect + merge; .835 — registrable brand for site-name matching; G1 — dedup-before-mint plan
 import { GroundManager } from '../../Core/GroundManager.js';   // G1 — auto-ground mint (dedup-before-mint entrypoint)
@@ -688,6 +690,7 @@ export function createSgMessageHandlers(ctx) {
         if (typeof tabId === 'number') { try { tabUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
         if (!groundId && tabUrl) { try { groundId = _groundIdForUrl(tabUrl, await StorageManager.getAllGrounds()); } catch { /* */ } }
         const seed = String(payload?.seed ?? '').trim();
+        const appId = String(payload?.appId ?? '').trim();   // AL-4 — the app's goal-memory key (off-app → '')
         // AS-2c (v2.74.1190) — the app's bound site (TRUSTED config from setup). It seeds interpret's operating
         // context (the SYSTEM "OPERATING SITE" rule), and when the active tab ISN'T the bound site we resolve the
         // bound site's Ground so tool-RAG retrieves ITS capabilities ("get my open emails" finds the Gmail cap even
@@ -710,7 +713,12 @@ export function createSgMessageHandlers(ctx) {
             if (Array.isArray(labels) && labels.length) affordances = labels.join(', ');
           } catch { /* */ }
         }
-        const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed, target });
+        // AL-4 — the app's LEARNED context: standing rules (deltas) + ask-relevant recall (the capability-association
+        // belief banked in AL-3b → so a paraphrase recalls the taught capability). Trusted (the app's own memory),
+        // fenced in the prompt. Empty off-app / no-memory.
+        let learned = '';
+        if (appId) { try { learned = goalContextFor(await loadGoalItems(appId), ask); } catch { /* */ } }
+        const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed, target, learned });
         Logger.info('route', `INTERPRET_ASK "${ask.slice(0, 60)}" → ${decision.intent} (conf ${decision.confidence}, ${retrieved.length} cand, ground ${groundId || '—'})`);
         sendResponse({ success: true, decision, groundId: groundId || null, retrieved });
       } catch (err) {
@@ -775,6 +783,7 @@ export function createSgMessageHandlers(ctx) {
         const ask = String(payload?.ask ?? '').trim();
         let { tabId, groundId } = payload ?? {};
         const seed = String(payload?.seed ?? '').trim();   // CV-2b — conversation seed → the answer's persona preamble
+        const appId = String(payload?.appId ?? '').trim();   // AL-4 — the app's goal-memory key (off-app → '')
         let tabUrl = '';
         if (typeof tabId === 'number') { try { tabUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
         if (!groundId && tabUrl) { try { groundId = _groundIdForUrl(tabUrl, await StorageManager.getAllGrounds()); } catch { /* */ } }
@@ -793,7 +802,11 @@ export function createSgMessageHandlers(ctx) {
             coverage = authoringCoverage(goals, rawCaps);                                   // #5 — taught vs known gaps
           } catch { /* */ }
         }
-        const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed });
+        // AL-4 — the app's LEARNED context (standing rules + relevant facts) shapes the prose answer too (e.g. a
+        // `remember:` rule like "keep replies terse" applies here). Trusted; fenced in the prompt; empty off-app.
+        let learned = '';
+        if (appId) { try { learned = goalContextFor(await loadGoalItems(appId), ask); } catch { /* */ } }
+        const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed, learned });
         // PS-0 (v2.74.1123) — persist Orchard's capability-gap enumeration instead of discarding it: the durable,
         // per-Ground DEMAND signal PS-1 arms into the interaction monitor for passive harvest. Non-fatal/best-effort.
         try {

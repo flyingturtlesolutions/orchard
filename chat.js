@@ -3701,7 +3701,7 @@ async function _tryInterpret(ask) {
   const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
   let raw = null; let retrieved = []; let groundId = null;
   try {
-    const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId, seed: _currentConversationSeed, target: _boundTarget() });
+    const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId, seed: _currentConversationSeed, target: _boundTarget(), appId: _currentConversationAppId });
     if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; groundId = r.groundId || null; }
   } catch { /* */ }
   // F-2c-flip (v2.74.1180) — interpret unavailable (no LLM / handler error) → return FALSE so the caller falls back
@@ -3722,7 +3722,7 @@ async function _tryInterpret(ask) {
   }
   if (d.intent === 'answer') {
     let answer = null;
-    try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed }); answer = r && r.answer; } catch { /* */ }
+    try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, appId: _currentConversationAppId }); answer = r && r.answer; } catch { /* */ }
     _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 ${d.why || 'I’m not sure how to help with that here.'}`);
     _orchFinalize(msg);
     return true;
@@ -3743,7 +3743,7 @@ async function _tryInterpret(ask) {
   // couldn't dispatch (an act with only a primitive op, or a nav with no ground) → reasoned answer fallback.
   const m2 = appendMessage({ role: 'assistant', body: '🧠 thinking…' });
   let answer = null;
-  try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed }); answer = r && r.answer; } catch { /* */ }
+  try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, appId: _currentConversationAppId }); answer = r && r.answer; } catch { /* */ }
   _setMessageBody(m2, answer ? `🧠 ${answer}` : '🧠 I’m not sure how to do that here — want to show me?');
   _orchFinalize(m2);
   return true;
@@ -3837,7 +3837,7 @@ async function _tryIlCommand(text) {
 
   // No grounded action to run → Orchard ANSWERS the ask (meta/conversational — "what can you do?", "can you X?").
   let answer = null;
-  try { const r = await _orchReq('IL_ANSWER', { ask, tabId, seed: _currentConversationSeed }); answer = r && r.answer; } catch { /* */ }
+  try { const r = await _orchReq('IL_ANSWER', { ask, tabId, seed: _currentConversationSeed, appId: _currentConversationAppId }); answer = r && r.answer; } catch { /* */ }
   _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 I don’t have a saved capability for “${ask}” on this page yet — want to show me?`);
   try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${answer ? 'answered' : 'no match'}`); } catch { /* */ }
   return true;

@@ -55,3 +55,14 @@ describe('buildAnswerMessages — CV-2 seed persona preamble', () => {
     assert.equal(buildAnswerMessages({ ask: 'x', seed: '   ' }).system, base);
   });
 });
+
+describe('buildAnswerMessages — AL-4 learned context (standing rules apply to prose)', () => {
+  it('a learned block adds <LEARNED> to the user + a follow-the-rules line to SYSTEM; absent when empty', () => {
+    const learned = 'STANDING RULES — follow these:\n- keep replies under 3 sentences';
+    const { system, user } = buildAnswerMessages({ ask: 'summarize my unread', learned });
+    assert.match(user, /<LEARNED/);
+    assert.match(user, /under 3 sentences/);
+    assert.match(system, /STANDING RULES/);
+    assert.doesNotMatch(buildAnswerMessages({ ask: 'x' }).user, /<LEARNED/);
+  });
+});

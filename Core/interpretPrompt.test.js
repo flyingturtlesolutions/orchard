@@ -47,6 +47,15 @@ describe('interpretPrompt — buildInterpretMessages', () => {
     const { user } = buildInterpretMessages('go to youtube', {});
     assert.doesNotMatch(user, /OPERATING_SITE/);
   });
+
+  it('AL-4 — learned context adds a <LEARNED> block + the SYSTEM LEARNED rule; absent when empty', () => {
+    const learned = 'STANDING RULES — follow these:\n- keep it terse\n\nLEARNED here:\n- open emails  → previously handled with capability "cap-x"';
+    const { system, user } = buildInterpretMessages('how many open emails', { learned });
+    assert.match(user, /<LEARNED/);
+    assert.match(user, /capability "cap-x"/);
+    assert.match(system, /LEARNED:/);
+    assert.doesNotMatch(buildInterpretMessages('x', {}).user, /<LEARNED/);
+  });
 });
 
 describe('interpretPrompt — parseInterpretOutput', () => {
