@@ -32,6 +32,7 @@ import { runIlStandin } from './Core/ilStandin.js';   // IL-3 — the single-sho
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
 import { recipeLegs, normalizeTicket } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
+import { buildDrawerTree } from './Core/drawerTree.js';   // CV-3c — the pure flush-left accordion model
 
 // ─── Conversation state ──────────────────────────────────────────────────────
 // `_currentConversationId` is null before the first user message of a new
@@ -497,22 +498,22 @@ function _startDrawerStatusTimer() {
 }
 function _stopDrawerStatusTimer() { if (_drawerStatusTimer) { clearInterval(_drawerStatusTimer); _drawerStatusTimer = null; } }
 
+let _expandedApps = new Set();   // CV-3c — which app rows are expanded in the drawer accordion (collapsed by default)
+
 async function _renderHistoryList() {
   const container = $('history-list');
   container.innerHTML = '';
 
   const all = await ConversationStore.list();
-  // v2.74.1160 — dev mode off → hide dev & design conversations (both kind:'dev', surface high|low).
-  const conversations = _devModeEnabled ? all : all.filter((c) => c && c.kind !== 'dev');
-  if (conversations.length === 0) {
-    container.innerHTML = '<div class="history-empty">No conversations yet.</div>';
-    return;
-  }
+  // CV-3c (v2.74.1168, DESIGN_conversations.md §7) — render the flush-left ACCORDION (Core/drawerTree.js): an
+  // Overview pin → apps → (when expanded) their sub-tasks → a New-app entry. The dev-filter, the per-row
+  // preview/delete/run-status, and the active highlight are all preserved; only the ORDER + grouping + the
+  // Overview/New-app pins are new. Hierarchy is glyph + chevron + weight, NEVER indentation.
+  const rows = buildDrawerTree(all, { devMode: _devModeEnabled, activeId: _currentConversationId, expanded: _expandedApps });
+  const byId = new Map(all.map((c) => [c.id, c]));
 
-  // surfaces-§4.5 (preview-as-selection) — when there are dev conversations, a drawer-level control to point the live
-  // build back at `main` (the trunk). Per-conversation Preview buttons (below) load a specific branch; this is the
-  // "default to main" / reset. Shown once, above the list.
-  if (conversations.some((c) => c.kind === 'dev')) {
+  // surfaces-§4.5 (preview-as-selection) — the drawer-level "Preview main" control, shown once when dev rows are visible.
+  if (_devModeEnabled && all.some((c) => c && c.kind === 'dev')) {
     const bar = document.createElement('div');
     bar.className = 'history-preview-main';
     bar.innerHTML = '<button class="history-preview-main-btn" title="Point the live build back at main (reloads the panel)">↩ Preview main</button>';
@@ -520,26 +521,75 @@ async function _renderHistoryList() {
     container.appendChild(bar);
   }
 
-  conversations.forEach(conv => {
-    const isDev = conv.kind === 'dev';   // v2.74.1029 — dev (Claude Code) conversations get an amber badge
-    // v2.74.1070 — non-dev (website-operating) conversations get a blue "APP" badge, mirroring the dev one,
-    // so every row is self-identifying at a glance instead of the agent kind reading as an unlabelled default.
-    // surfaces §2.2 — a high-altitude (Design) dev conversation gets a distinct violet "design" badge; low/absent = the dev badge.
-    const badge = isDev ? (conv.surface === 'high' ? '<span class="history-item-badge design">design</span>' : '<span class="history-item-badge">dev</span>')
-                        : '<span class="history-item-badge app">app</span>';
-    const item = document.createElement('div');
-    item.className = `history-item${conv.id === _currentConversationId ? ' active' : ''}${isDev ? ' dev' : ' app'}`;
-    item.dataset.conversationId = conv.id;
-    item.dataset.kind = isDev ? 'dev' : 'app';                                  // v2.74.1094 — for the live run-status meta
-    item.dataset.updated = String(conv.updatedAt || conv.createdAt || Date.now());
-    item.innerHTML = `
-      <div class="history-item-title">${badge}${escHtml(conv.title)}</div>
-      <div class="history-item-meta">${relTime(conv.updatedAt)}</div>
-      ${isDev ? `<button class="history-item-preview" title="Load this branch into the live build (reloads the panel)">
+  for (const row of rows) {
+    if (row.role === 'overview') { container.appendChild(_historyPinRow(row)); continue; }
+    if (row.role === 'new-app') { container.appendChild(_historyNewAppRow()); continue; }
+    const conv = byId.get(row.id);
+    if (conv) container.appendChild(_historyConvRow(conv, row));
+  }
+
+  // v2.74.1094 — apply each conversation's live run status to its meta line + flip the toggle's "needs you" dot;
+  // tick a 1s timer while any run is active so the elapsed updates live. (Pins have no conversationId → skipped.)
+  let anyActive = false;
+  container.querySelectorAll('.history-item').forEach((item) => { if (!item.dataset.conversationId) return; const s = _setItemMeta(item); if (s === 'running' || s === 'awaiting') anyActive = true; });
+  _updateHistoryActionDot();
+  if (anyActive) _startDrawerStatusTimer(); else _stopDrawerStatusTimer();
+}
+
+// CV-3c — the Overview pin: the reserved home row (the general assistant). Click → clear to the default empty state.
+function _historyPinRow(row) {
+  const el = document.createElement('div');
+  el.className = `history-item history-overview${row.active ? ' active' : ''}`;
+  el.innerHTML = `<div class="history-item-title"><span class="history-glyph" aria-hidden="true">⌂</span>${escHtml(row.title)}</div>`;
+  el.addEventListener('click', async () => {
+    if (_currentConversationId == null) { _closeHistory(); return; }   // already home — just close the drawer
+    if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch anyway?')) return;
+    _clearCurrentConversation();
+    _resetConversation();
+    await renderSuggestionCards();
+    await _renderHistoryList();
+  });
+  return el;
+}
+
+// CV-3c — the New-app entry: opens the gallery (DESIGN_conversations.md §7). Closes the drawer so the cards show.
+function _historyNewAppRow() {
+  const el = document.createElement('div');
+  el.className = 'history-item history-new-app';
+  el.innerHTML = `<div class="history-item-title"><span class="history-glyph" aria-hidden="true">＋</span>New app</div>`;
+  el.addEventListener('click', () => { _closeHistory(); _renderAppGallery(); });
+  return el;
+}
+
+// CV-3c — a conversation row (app | sub-task | plain). Reuses the dev/app badge + preview/delete/run-status from the
+// pre-accordion list; ADDS an absolutely-positioned expand chevron (apps with children) + a leaf glyph (sub-tasks).
+// No indentation — depth is conveyed by glyph + chevron + weight, per §7. `row` carries the accordion flags.
+function _historyConvRow(conv, row) {
+  const isDev = conv.kind === 'dev';
+  const badge = isDev ? (conv.surface === 'high' ? '<span class="history-item-badge design">design</span>' : '<span class="history-item-badge">dev</span>')
+                      : '<span class="history-item-badge app">app</span>';
+  const item = document.createElement('div');
+  item.className = ['history-item', row.active ? 'active' : '', isDev ? 'dev' : 'app',
+    row.role === 'app' ? 'is-app' : '', row.role === 'subtask' ? 'is-subtask' : '',
+    (row.role === 'app' && row.hasChildren) ? 'has-children' : ''].filter(Boolean).join(' ');
+  item.dataset.conversationId = conv.id;
+  item.dataset.kind = isDev ? 'dev' : 'app';
+  item.dataset.updated = String(conv.updatedAt || conv.createdAt || Date.now());
+
+  const leaf = row.role === 'subtask' ? '<span class="history-glyph leaf" aria-hidden="true">•</span>' : '';
+  const chevron = (row.role === 'app' && row.hasChildren)
+    ? `<button class="history-chevron" title="${row.expanded ? 'Collapse sub-tasks' : 'Expand sub-tasks'}" aria-label="Toggle sub-tasks">${row.expanded ? '▾' : '▸'} ${row.count}</button>`
+    : '';
+  const previewBtn = isDev ? `<button class="history-item-preview" title="Load this branch into the live build (reloads the panel)">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
         </svg>
-      </button>` : ''}
+      </button>` : '';
+  item.innerHTML = `
+      <div class="history-item-title">${leaf}${badge}${escHtml(conv.title)}</div>
+      <div class="history-item-meta">${relTime(conv.updatedAt)}</div>
+      ${chevron}
+      ${previewBtn}
       <button class="history-item-delete" title="Delete">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="3 6 5 6 21 6"/>
@@ -547,70 +597,53 @@ async function _renderHistoryList() {
         </svg>
       </button>`;
 
-    // Click anywhere on the item (except delete) loads the conversation into the chat. v2.74.1031 — the
-    // drawer STAYS OPEN on select (only the ✕ / the header toggle closes it); selecting just swaps the chat
-    // portal, so the user can browse several conversations without reopening the drawer each time.
-    item.addEventListener('click', async (e) => {
-      if (e.target.closest('.history-item-delete') || e.target.closest('.history-item-preview')) return;   // those buttons have their own handlers
-      if (conv.id === _currentConversationId) return;   // already showing it — nothing to load, keep drawer open
-      if (_activeInvocations.size > 0) {
-        if (!confirm('Active invocations are in progress. Switch conversations anyway?')) return;
-      }
-      const full = await ConversationStore.load(conv.id);
-      if (full) {
-        await _rehydrateConversation(full);
-        // v2.71.4 — Resume running invocations belonging to the just-loaded
-        // conversation, mirroring init flow.
-        await _resumeRunningInvocations();
-        await _renderHistoryList();   // v2.74.1031 — refresh the .active highlight (drawer stays open)
-      }
-    });
-
-    item.querySelector('.history-item-delete').addEventListener('click', async (e) => {
-      e.stopPropagation();
-      // v2.74.1095 — dev-aware delete: if a run is LIVE for this conversation, WARN + STOP it (free the host slot)
-      // before removing the record, so it doesn't orphan (keep running with no UI home). The git branch is KEPT —
-      // open the conversation and run "delete branch" to remove that too.
-      const liveRun = conv.kind === 'dev' && _devRunStatus(conv.id).state !== 'idle';
-      const prompt = liveRun
-        ? `"${conv.title}" has a run in progress.\n\nDeleting will STOP the run and free its slot. Its git branch${conv.branch ? ` (${conv.branch})` : ''} is KEPT — open the conversation and run "delete branch" first if you also want that removed.\n\nDelete anyway?`
-        : `Delete "${conv.title}"?`;
-      if (!confirm(prompt)) return;
-      if (liveRun) { try { _getDevBridge()?.cancelConversationRuns?.(conv.id); } catch { /* */ } }
-      await ConversationStore.delete(conv.id);
-      if (conv.id === _currentConversationId) {
-        _clearCurrentConversation();
-        _resetConversation();
-        // v2.74.106 — Mirror the "New conversation" button: after wiping
-        // the active conversation, re-render suggestion cards so the empty
-        // state actually shows something. Pre-fix, deleting the active
-        // conversation left an empty-state shell with stale or absent
-        // suggestion cards (the "new conversation" path always re-rendered,
-        // but the delete path only called _resetConversation).
-        await renderSuggestionCards();
-      }
-      await _renderHistoryList();
-    });
-
-    // surfaces-§4.5 (preview-as-selection) — the dev row's Preview button loads THIS conversation's branch into the
-    // live build (the same `lt` flow: behind-main guard + reload), so the user picks which build to view by clicking
-    // rather than typing `lt` in that conversation. stopPropagation so it doesn't also fire the row's select handler.
-    if (isDev) {
-      item.querySelector('.history-item-preview')?.addEventListener('click', (e) => {
-        e.stopPropagation();
-        try { _getDevBridge()?.previewConversation?.(conv.id); } catch { /* */ }
-      });
-    }
-
-    container.appendChild(item);
+  // chevron → toggle THIS app's expansion (re-render); never loads the app.
+  item.querySelector('.history-chevron')?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (_expandedApps.has(conv.id)) _expandedApps.delete(conv.id); else _expandedApps.add(conv.id);
+    await _renderHistoryList();
   });
 
-  // v2.74.1094 — apply each conversation's live run status to its meta line + flip the toggle's "needs you" dot;
-  // tick a 1s timer while any run is active so the elapsed updates live.
-  let anyActive = false;
-  container.querySelectorAll('.history-item').forEach((item) => { const s = _setItemMeta(item); if (s === 'running' || s === 'awaiting') anyActive = true; });
-  _updateHistoryActionDot();
-  if (anyActive) _startDrawerStatusTimer(); else _stopDrawerStatusTimer();
+  // click the row → load the conversation (any level — Overview/app/sub-task; §2 chat-at-any-level). The drawer
+  // stays open (only ✕ / the header toggle closes it). delete/preview/chevron have their own handlers.
+  item.addEventListener('click', async (e) => {
+    if (e.target.closest('.history-item-delete') || e.target.closest('.history-item-preview') || e.target.closest('.history-chevron')) return;
+    if (conv.id === _currentConversationId) return;
+    if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch conversations anyway?')) return;
+    const full = await ConversationStore.load(conv.id);
+    if (full) {
+      await _rehydrateConversation(full);
+      await _resumeRunningInvocations();
+      await _renderHistoryList();
+    }
+  });
+
+  // v2.74.1095 — dev-aware delete: stop a live run (free the host slot) before removing the record; keep the branch.
+  item.querySelector('.history-item-delete').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const liveRun = conv.kind === 'dev' && _devRunStatus(conv.id).state !== 'idle';
+    const prompt = liveRun
+      ? `"${conv.title}" has a run in progress.\n\nDeleting will STOP the run and free its slot. Its git branch${conv.branch ? ` (${conv.branch})` : ''} is KEPT — open the conversation and run "delete branch" first if you also want that removed.\n\nDelete anyway?`
+      : `Delete "${conv.title}"?`;
+    if (!confirm(prompt)) return;
+    if (liveRun) { try { _getDevBridge()?.cancelConversationRuns?.(conv.id); } catch { /* */ } }
+    await ConversationStore.delete(conv.id);
+    _expandedApps.delete(conv.id);
+    if (conv.id === _currentConversationId) {
+      _clearCurrentConversation();
+      _resetConversation();
+      await renderSuggestionCards();
+    }
+    await _renderHistoryList();
+  });
+
+  if (isDev) {
+    item.querySelector('.history-item-preview')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      try { _getDevBridge()?.previewConversation?.(conv.id); } catch { /* */ } });
+  }
+
+  return item;
 }
 
 function _resetConversation() {

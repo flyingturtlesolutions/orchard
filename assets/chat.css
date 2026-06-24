@@ -1433,6 +1433,35 @@ textarea {
   vertical-align: middle;
 }
 
+/* CV-3c (v2.74.1168) — the drawer ACCORDION (DESIGN_conversations.md §7): the Overview pin, the New-app entry, the
+   app expand-chevron, the sub-task leaf glyph. Hierarchy is glyph + chevron + weight, NEVER indentation. */
+.history-overview .history-item-title,
+.history-new-app  .history-item-title { display: flex; align-items: center; gap: var(--sp-2); }
+.history-glyph { color: var(--c-text-subtle); font-weight: 600; }
+.history-glyph.leaf { margin-right: 5px; font-weight: 700; }
+.history-new-app { color: var(--c-text-subtle); }
+.history-new-app:hover .history-item-title { color: var(--c-text); }
+.history-item.is-subtask .history-item-title { font-weight: 400; color: var(--c-text-subtle); }
+.history-item.has-children { padding-right: 64px; }   /* clear the chevron, which sits left of the delete button */
+.history-chevron {
+  position: absolute;
+  top: 50%;
+  right: 34px;
+  transform: translateY(-50%);
+  height: 20px;
+  min-width: 28px;
+  padding: 0 6px;
+  border-radius: var(--r-sm);
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--c-text-subtle);
+  font-size: 11px;
+  font-weight: 600;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.history-chevron:hover { background: var(--c-bg); color: var(--c-text); }
+
 .history-list {
   flex: 1;
   overflow-y: auto;
