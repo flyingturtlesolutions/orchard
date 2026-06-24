@@ -1714,6 +1714,13 @@ async function _runResolvedStep({ tabId, groundId, ask, capabilityId, bindings =
     await new Promise((r) => setTimeout(r, 400));
     return { ok: true, value };
   }
+  // CV-6-full (v2.74.1181, §8) — writePolicy enforcement on the CHAIN / PLAN act path too (not just _orchRun): a
+  // read-only app/sub-task (writePolicy:'never') blocks a state-changing step. Reads (isRead, above) always pass.
+  // Closes the defense-in-depth gap the interpret DECOMPOSE made reachable (decompose → _orchRunChain → here).
+  if (!actAllowed(_currentConversationConfig)) {
+    try { _orchLog(`WRITE_GATE ▸ blocked chain step "${String(ask || capabilityId || 'act').slice(0, 40)}" — track writePolicy:never`); } catch { /* */ }
+    return { ok: false, blocked: true, why: ' — this app is read-only' };
+  }
   const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId, capabilityId, paramValues: (bindings && typeof bindings === 'object') ? bindings : {} });
   if (!res || res.success === false || res.ran === false || res.ok === false) {
     return { ok: false, why: (res && (res.error || res.reason)) ? ` — ${res.error || res.reason}` : '' };
@@ -2169,6 +2176,7 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
       continue;
     }
     const r = await _runResolvedStep({ tabId, groundId: m.groundId, ask: clause.text, capabilityId: m.capabilityId, bindings: m.bindings });
+    if (r.blocked) { _setMessageBody(msg, `🔒 Stopped at step ${i + 1} — this app is read-only, and “${clause.text}” would change something. Switch to a non-read-only app to run it.`); return; }
     if (!r.ok) {
       _setMessageBody(msg, `Step ${i + 1} (“${clause.text}”) didn’t run${r.why} — show me the right way and I’ll keep going.`);
       _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me the right way', onAuthored: _resumeAfterDemo(i, clause, m.groundId) });
