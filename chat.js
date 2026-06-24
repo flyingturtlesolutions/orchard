@@ -3602,7 +3602,7 @@ function _getDevBridge() {
 
 async function sendChatMessage() {
   const input    = $('chat-input');
-  const text     = input.value.trim();
+  let text       = input.value.trim();   // v2.74.1166 — `let` so the routing inversion can strip a `tool:` prefix
   if (!text) return;
 
   // v2.74.1029 — DEV CONVERSATION: every typed message routes straight to the Claude Code bridge (no `dev:`
@@ -3635,9 +3635,9 @@ async function sendChatMessage() {
     return;
   }
 
-  // IL-2 (v2.74.1112) — `il: <ask>` runs the inference-layer loop LIVE (verify-only, opt-in). Explicit
-  // prefix → it can never pre-empt a normal ask; everything below is untouched. The loop drives tabs, so it's
-  // the eyeball step — exec auto-runs only reads + nav (page mutations gate behind a confirm-required miss).
+  // `il: <ask>` — LEGACY alias (v2.74.1166): the LLM reasoning front door is now the DEFAULT for any ask (the
+  // routing inversion below), so `il:` is no longer required. Kept so existing muscle memory still works — it runs
+  // the inference-layer loop directly (bypassing the utility-command guards), exactly as before.
   if (/^il:/i.test(text)) {
     input.value = ''; _autosizeInput();
     appendMessage({ role: 'user', body: text });
@@ -3731,6 +3731,21 @@ async function sendChatMessage() {
     await _invokeAssistant({ id: targetId, name: targetName }, text);
     return;
   }
+
+  // ── ROUTING INVERSION (v2.74.1166) ──────────────────────────────────────────────────────────────────────
+  // The LLM reasoning front door is now the DEFAULT; the deterministic tool-routing fast-paths below are opt-in
+  // via `tool:`. The LLM bridge interprets the ask and offloads to a TOOL only when an ACT is needed (the leg
+  // metaphor — tools are HOW an act happens). So a non-act ask ("how could you do better here?") is REASONED,
+  // not classified into a read/observe offer (the old default's `classifyReadAsk` mis-route). The user bubble is
+  // already rendered above; for the default path we just hand the ask to the inference-layer loop and return.
+  // `tool: <ask>` strips the prefix and falls through to the former-default deterministic flow unchanged.
+  if (!/^tool:/i.test(text)) {
+    $('btn-chat-send').disabled = false;
+    try { await _tryIlCommand('il: ' + text.replace(/^il:\s*/i, '').trim()); }
+    catch (e) { try { console.warn('[chat] default (LLM) route failed:', e?.message); } catch { /* */ } }
+    return;
+  }
+  text = text.replace(/^tool:\s*/i, '').trim();
 
   // IM-3 (v2.74.895) — intent-menu fast-path: "what can I do here?" is a meta-ask about the APP, never a
   // capability ask — answer it from the substrate (zero LLM) instead of letting it miss in the matcher.
