@@ -106,7 +106,7 @@
     <!-- v2.74.1029 — New dev conversation: a dedicated Claude Code thread. The click requests the
          nativeMessaging permission (replacing `dev: on`) and opens a kind:'dev' conversation where typed
          messages route to Claude Code with no `dev:` prefix. Strippable with the dev-bridge module. -->
-    <button class="history-new-btn history-new-dev-btn" id="btn-new-dev-conversation" title="Chat with Claude Code on this repo">
+    <button class="history-new-btn history-new-dev-btn" id="btn-new-dev-conversation" title="Chat with Claude Code on this repo" style="display:none">
       <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <polyline points="16 18 22 12 16 6"/>
         <polyline points="8 6 2 12 8 18"/>
@@ -115,7 +115,7 @@
     </button>
     <!-- surfaces §2.2 — New DESIGN conversation: the same Claude Code thread at a HIGH (conceptual / architecture)
          altitude. Sets conversation.surface='high' so the host injects the design preamble; `surface high|low` re-picks it. -->
-    <button class="history-new-btn history-new-design-btn" id="btn-new-design-conversation" title="Claude Code at a high-level / design altitude">
+    <button class="history-new-btn history-new-design-btn" id="btn-new-design-conversation" title="Claude Code at a high-level / design altitude" style="display:none">
       <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>
       </svg>

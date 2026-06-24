@@ -44,6 +44,7 @@ let _currentConversationId = null;
 // The bridge is reachable ONLY when this is 'dev' — a normal conversation can't touch it (the gating win).
 // Set on create / rehydrate / switch; reset to 'agent' on a fresh-blank surface.
 let _currentConversationKind = 'agent';
+let _devModeEnabled = false;   // v2.74.1160 — Studio toggle (settings:devMode). When off, dev/design conversations are hidden + inactive.
 
 // v2.74.106 — Single-flight guard for conversation creation. Two parallel
 // callers (e.g. double-clicked suggestion cards) could both see
@@ -183,6 +184,34 @@ $('btn-new-conversation').addEventListener('click', async () => {
 $('btn-new-dev-conversation')?.addEventListener('click', () => { _startDevConversation('low'); });
 // surfaces §2.2 — New DESIGN conversation: the same Claude Code thread at a HIGH (conceptual / architecture) altitude.
 $('btn-new-design-conversation')?.addEventListener('click', () => { _startDevConversation('high'); });
+
+// v2.74.1160 — Dev mode gate. The Studio "Enable dev mode" toggle (settings:devMode) controls whether dev &
+// design conversations (both kind:'dev', surface high|low — Claude Code threads) are visible/active in the panel.
+// Off by default → a clean end-user view. We hide the New dev / New design entry buttons and filter the drawer
+// (_renderHistoryList). Cross-context: a Studio toggle reflects here live via storage.onChanged.
+function _applyDevModeVisibility() {
+  for (const id of ['btn-new-dev-conversation', 'btn-new-design-conversation']) {
+    const el = $(id);
+    if (el) el.style.display = _devModeEnabled ? '' : 'none';
+  }
+}
+async function _loadDevMode() {
+  try { const s = await chrome.storage.local.get('settings:devMode'); _devModeEnabled = s['settings:devMode'] === true; }
+  catch { _devModeEnabled = false; }
+  _applyDevModeVisibility();
+}
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !changes['settings:devMode']) return;
+  _devModeEnabled = changes['settings:devMode'].newValue === true;
+  _applyDevModeVisibility();
+  _renderHistoryList();
+  // Switched OFF while a dev/design conversation is open → drop back to a fresh agent surface (not visible/active).
+  if (!_devModeEnabled && _currentConversationKind === 'dev') {
+    _clearCurrentConversation();
+    _resetConversation();
+    renderSuggestionCards();
+  }
+});
 
 // Start a dev-bridge conversation at the chosen ALTITUDE ('low' Dev / 'high' Design). Both are kind:'dev' Claude Code
 // threads on a git branch off main; `surface` (recorded on the conversation, surfaces §2.2) only changes the agent's
@@ -472,7 +501,9 @@ async function _renderHistoryList() {
   const container = $('history-list');
   container.innerHTML = '';
 
-  const conversations = await ConversationStore.list();
+  const all = await ConversationStore.list();
+  // v2.74.1160 — dev mode off → hide dev & design conversations (both kind:'dev', surface high|low).
+  const conversations = _devModeEnabled ? all : all.filter((c) => c && c.kind !== 'dev');
   if (conversations.length === 0) {
     container.innerHTML = '<div class="history-empty">No conversations yet.</div>';
     return;
@@ -4501,13 +4532,15 @@ $('btn-chat-send').addEventListener('click', sendChatMessage);
 // ─── Init ────────────────────────────────────────────────────────────────────
 
 (async function init() {
+  await _loadDevMode();   // v2.74.1160 — gate dev/design surfaces before any restore
   // Attempt to restore the most recent conversation. If none exists, the
   // empty state remains and we show suggestion cards.
   try {
     const recent = await ConversationStore.mostRecent();
     if (recent) {
       const conv = await ConversationStore.load(recent.id);
-      if (conv && conv.messages.length > 0) {
+      // v2.74.1160 — with dev mode off, don't auto-restore a dev/design conversation as the active surface.
+      if (conv && conv.messages.length > 0 && !(conv.kind === 'dev' && !_devModeEnabled)) {
         await _rehydrateConversation(conv);
         // v2.71.4 — Resume running invocations. If a strategy was launched
         // and the panel was hidden mid-run, reopening should show the

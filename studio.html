@@ -1005,6 +1005,22 @@
       </details>
     </div>
 
+    <div class="card" id="card-dev-mode">
+      <h3 class="card-subheading">Dev mode</h3>
+      <p class="settings-note">Show developer surfaces in the side panel. When on, <strong>dev</strong> and <strong>design</strong> conversations (Claude Code threads) are visible and active in the conversations drawer; when off, they're hidden — a clean end-user view.</p>
+      <div class="setting-row" style="margin-top:8px">
+        <div class="setting-row-text">
+          <span class="setting-label">Enable dev mode</span>
+          <span class="setting-desc">Reveals the New dev / New design buttons and any dev or design conversations.</span>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="chk-dev-mode-enabled" />
+          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+        </label>
+      </div>
+      <p id="dev-mode-status-line" class="settings-note" style="margin-top:8px">Off.</p>
+    </div>
+
     <div class="card">
       <details id="api-key-details">
         <summary class="card-subheading" style="cursor:pointer">Anthropic API Key <span class="settings-note" style="font-weight:400">(optional — only without cloud)</span></summary>

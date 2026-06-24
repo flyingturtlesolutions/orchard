@@ -5090,6 +5090,33 @@ $('chk-monitor-enabled')?.addEventListener('change', async (e) => {
 });
 refreshMonitorSetting();
 
+// ── Dev mode — show/hide dev & design conversations in the panel (v2.74.1160) ────────────────────────
+// A plain chrome.storage flag (settings:devMode); chat.js reads it on load + live-updates via storage.onChanged.
+// No background handler needed — both Studio and the panel are extension contexts with direct storage access.
+async function refreshDevModeSetting() {
+  const chk = $('chk-dev-mode-enabled');
+  const line = $('dev-mode-status-line');
+  let enabled = false;
+  try { const s = await chrome.storage.local.get('settings:devMode'); enabled = s['settings:devMode'] === true; } catch { /* */ }
+  if (chk) chk.checked = enabled;
+  if (line) line.textContent = enabled
+    ? 'On — dev and design conversations are visible and active in the panel.'
+    : 'Off — dev and design conversations are hidden.';
+}
+$('chk-dev-mode-enabled')?.addEventListener('change', async (e) => {
+  const chk = /** @type {HTMLInputElement} */ (e.target);
+  const enabled = chk.checked;
+  try {
+    await chrome.storage.local.set({ 'settings:devMode': enabled });
+    toast(enabled ? 'Dev mode enabled' : 'Dev mode disabled');
+    await refreshDevModeSetting();
+  } catch (err) {
+    toast('Failed to update dev mode', 'err');
+    chk.checked = !enabled;
+  }
+});
+refreshDevModeSetting();
+
 // C5-viewer (v2.74.894) — session trace inspector over GET_INTERACTION_TRACE: the recorded L3 stream
 // (classified, value-free), newest first. Loads on expand + Refresh; shows the ring stats so "is the
 // recorder running?" is answerable at a glance. Empty after an SW restart by design (in-memory v1).
