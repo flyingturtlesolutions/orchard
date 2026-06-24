@@ -37,3 +37,20 @@ describe('buildAnswerMessages — answer a meta ask, grounded in real page conte
     assert.match(user, /not captured/);
   });
 });
+
+describe('buildAnswerMessages — CV-2 seed persona preamble', () => {
+  it('no seed → SYSTEM is the base assistant identity, unchanged', () => {
+    assert.ok(buildAnswerMessages({ ask: 'what can you do' }).system.startsWith('You are an intelligent browser-automation assistant'));
+  });
+  it('seed → prepended as the SYSTEM preamble (persona leads, base behaviour retained)', () => {
+    const seed = 'You are a pirate; always mention parrots.';
+    const { system } = buildAnswerMessages({ ask: 'what can you do', seed });
+    assert.ok(system.startsWith(seed));                                                 // persona leads
+    assert.ok(system.includes('You are an intelligent browser-automation assistant'));  // base behaviour kept
+    assert.ok(system.indexOf(seed) < system.indexOf('browser-automation assistant'));   // persona precedes base
+  });
+  it('ignores an empty / whitespace-only seed', () => {
+    const base = buildAnswerMessages({ ask: 'x' }).system;
+    assert.equal(buildAnswerMessages({ ask: 'x', seed: '   ' }).system, base);
+  });
+});
