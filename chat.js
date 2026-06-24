@@ -20,6 +20,7 @@ import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
 import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, namesMultipleSites, namesAnySite } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X)
 import { walkPlan, scanPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate); scanPlan — THE recursive plan walker (CR-D7)
+import { builtinApps } from './Core/appCatalog.js';   // CV-3 — the builtin app catalog (the gallery's cards; each seeds a kind:'app' conversation)
 import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   // ORCH-A — predicate → gate (conditional routing + the analysis)
 import { comprehend } from './Core/orchComprehend.js';   // ORCH-CB — substrate-free shape comprehension (cold-ground decompose)
 import { renderCriteria, renderPlanLines } from './Core/orchVisual.js';   // ORCH-CB — search params → criteria for a visual condition's prompt; renderPlanLines — the confirm-card plan renderer (CR-D7)
@@ -168,15 +169,12 @@ $('btn-hide-panel')?.addEventListener('click', () => {
 
 $('btn-new-conversation').addEventListener('click', async () => {
   if (_activeInvocations.size > 0) {
-    if (!confirm('Active invocations are in progress. Start a new conversation anyway?')) return;
+    if (!confirm('Active invocations are in progress. Open the app picker anyway?')) return;
   }
-  _clearCurrentConversation();
-  _resetConversation();
-  // v2.71.8 — Re-render suggestion cards so user sees the available
-  // capability list. Pre-v2.71.8 the empty state appeared but with no
-  // cards (subtitle/cards retained their stale state from rehydration).
-  await renderSuggestionCards();
-  await _renderHistoryList();   // v2.74.1031 — keep the drawer open; refresh so no item shows active (new chat not yet created)
+  // CV-3b (v2.74.1165) — "New app" opens the app GALLERY (the builtin apps + a blank Custom card) rather than
+  // going straight to a blank chat. Picking a builtin seeds a kind:'app' conversation; Custom is the old blank path.
+  _renderAppGallery();
+  await _renderHistoryList();   // v2.74.1031 — keep the drawer fresh
 });
 
 // v2.74.1029 — New DEV conversation: a dedicated Claude Code thread. The click IS the user gesture that
@@ -998,6 +996,60 @@ function focusForAssistant(cap) {
   // Stash the assistant id so the next send routes to it directly
   $('chat-input').dataset.targetCapabilityId = cap.id;
   $('chat-input').dataset.targetCapabilityName = cap.name;
+}
+
+// ─── App gallery (CV-3b) ──────────────────────────────────────────────────────
+// "New app" opens this: the empty state, repurposed to show the builtin app cards (Core/appCatalog) + a blank
+// Custom card. Picking a builtin CREATES a kind:'app' conversation seeded with the app's prompt — CV-2 threads
+// that seed into the IL (router context + answer preamble), so the app's answers reflect its concern. The full
+// flush-left accordion + Overview pin is CV-3c; for now an app shows as a normal drawer entry.
+function _renderAppGallery() {
+  $('messages').innerHTML = '';
+  $('messages').classList.add('hidden');
+  $('empty-state').classList.remove('hidden');
+  const greet = $('empty-state-greeting'); if (greet) greet.textContent = 'Choose an app';
+  const sub = $('empty-state-subtitle'); if (sub) sub.textContent = 'A focused assistant for one goal — or start a blank conversation.';
+  const container = $('suggestion-cards'); if (!container) return;
+  container.innerHTML = '';
+  for (const def of builtinApps()) {
+    const card = document.createElement('button');
+    card.className = 'suggestion-card';
+    card.innerHTML = `
+      <div class="suggestion-card-name">${escHtml(def.name)}</div>
+      ${def.description ? `<div class="suggestion-card-summary">${escHtml(def.description)}</div>` : ''}
+      <div class="suggestion-card-meta"><span class="suggestion-card-kind">${escHtml(def.archetype || 'app')}</span></div>`;
+    card.addEventListener('click', () => { void _createAppConversation(def); });
+    container.appendChild(card);
+  }
+  const custom = document.createElement('button');
+  custom.className = 'suggestion-card';
+  custom.innerHTML = '<div class="suggestion-card-name">+ Custom</div><div class="suggestion-card-summary">Start a blank conversation.</div>';
+  custom.addEventListener('click', () => { _clearCurrentConversation(); _resetConversation(); void renderSuggestionCards(); });
+  container.appendChild(custom);
+}
+
+// Instantiate an app: a fresh kind:'app' conversation carrying the app's seed (copy-on-add). The seed is set
+// in memory immediately (so the IL is seeded this turn) and persisted on the record (so a reopen restores it,
+// via _rehydrateConversation). Routes through the IL like any agent conversation (_currentConversationKind 'agent').
+async function _createAppConversation(def) {
+  if (!def) return;
+  _clearCurrentConversation();
+  let conv;
+  try { conv = await ConversationStore.create({ title: def.name, kind: 'app', seed: def.seed }); }
+  catch (e) { try { console.warn('[chat] app create failed:', e?.message); } catch { /* */ } return; }
+  _currentConversationId = conv.id;
+  _currentConversationKind = 'agent';            // an app routes through the IL (the seed shapes it), not the dev bridge
+  _currentConversationSeed = def.seed || '';
+  // best-effort — stash the app identity + enforced config for the drawer (CV-3c) and writePolicy (CV-6).
+  try { await ConversationStore.patchMeta(conv.id, { appId: def.id, appVersion: def.version, icon: def.icon, config: def.defaultConfig }); } catch { /* */ }
+  // The app's empty state: greet with the app, no generic suggestion cards.
+  $('messages').innerHTML = '';
+  $('messages').classList.add('hidden');
+  $('empty-state').classList.remove('hidden');
+  const greet = $('empty-state-greeting'); if (greet) greet.textContent = def.name;
+  const sub = $('empty-state-subtitle'); if (sub) sub.textContent = `${def.description || ''} — tell me what you need.`;
+  const cards = $('suggestion-cards'); if (cards) cards.innerHTML = '';
+  _refreshHistoryIfOpen().catch(() => {});
 }
 
 // ─── Capability drawer ──────────────────────────────────────────────────────
