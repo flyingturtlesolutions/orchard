@@ -3634,6 +3634,19 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId }) {
 // confidence/clarify gate (Core/interpret) → dispatch each intent to the VERIFIED runners (navigate/act/decompose
 // via _dispatchRouteDecision — confirm-first + the CV-6 write gate inside _orchRun; clarify/teach/answer rendered
 // here). The default cascade is untouched; this is the test surface before flipping interpret to default.
+// AS-2c (v2.74.1190) — the current app's bound site { origin, label } (banked by setup, AS-2), or null. Fed into the
+// interpret call so the LLM operates on the bound site when the ask names no other (DESIGN_conversations.md §6A).
+function _boundTarget() {
+  const t = _currentConversationConfig && _currentConversationConfig.target;
+  return (t && typeof t === 'object' && t.origin) ? { origin: String(t.origin), label: String(t.label || t.origin) } : null;
+}
+// Deterministic safety net: if interpret chose NAVIGATE but produced no URL and the app has a bound site, default to
+// it. The OPERATING SITE prompt rule should already make the LLM do this; this guarantees it.
+function _withBoundUrl(params) {
+  const p = (params && typeof params === 'object') ? { ...params } : {};
+  if (!String(p.url || '').trim()) { const t = _boundTarget(); if (t) p.url = t.origin; }
+  return p;
+}
 async function _tryInterpret(ask) {
   const goal = String(ask || '').trim();
   if (!goal) { _orchFinalize(appendMessage({ role: 'assistant', body: 'usage: `i: <ask>` — the interpret front door (F-2 test).' })); return true; }
@@ -3642,7 +3655,7 @@ async function _tryInterpret(ask) {
   const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
   let raw = null; let retrieved = []; let groundId = null;
   try {
-    const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId, seed: _currentConversationSeed });
+    const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId, seed: _currentConversationSeed, target: _boundTarget() });
     if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; groundId = r.groundId || null; }
   } catch { /* */ }
   // F-2c-flip (v2.74.1180) — interpret unavailable (no LLM / handler error) → return FALSE so the caller falls back
@@ -3671,7 +3684,7 @@ async function _tryInterpret(ask) {
 
   // navigate / act / decompose → map to a RouteDecision and dispatch through the VERIFIED runners (the dispatcher
   // renders its own bubbles, so drop the placeholder). act→replay confirms first; _orchRun carries the CV-6 gate.
-  const rd = (d.intent === 'navigate') ? { action: 'primitive', tool: { op: 'OPEN_URL' }, params: d.params || {}, confidence: d.confidence }
+  const rd = (d.intent === 'navigate') ? { action: 'primitive', tool: { op: 'OPEN_URL' }, params: _withBoundUrl(d.params), confidence: d.confidence }
     : (d.intent === 'act' && d.capabilityId) ? { action: 'replay', tool: { capabilityId: d.capabilityId, name: d.why || 'that' }, params: d.params || {}, confidence: d.confidence }
     : (d.intent === 'decompose') ? { action: 'decompose', subAsks: d.subAsks || [], confidence: d.confidence }
     : null;

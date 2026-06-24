@@ -5233,11 +5233,12 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    * @param {{ ask:string, retrieved?:Array, primitives?:Array, affordances?:string, seed?:string }} args
    * @returns {Promise<object>} the parsed raw decision
    */
-  static async interpret({ ask, retrieved, primitives, affordances, seed } = {}) {
+  static async interpret({ ask, retrieved, primitives, affordances, seed, target } = {}) {
     const { system, user } = buildInterpretMessages(ask, {
       retrieved: Array.isArray(retrieved) ? retrieved : [],
       primitives: Array.isArray(primitives) ? primitives : [],
       affordances: affordances || '', seed: seed || '',
+      target: (target && typeof target === 'object') ? target : null,   // AS-2c — the app's bound site
     });
     const res = await AnthropicService.#call(system, user, 1024, [], { role: 'routing', operation: 'interpret' });
     if (!res || res.success === false) return { ...parseInterpretOutput(null), why: 'interpret-unavailable' };

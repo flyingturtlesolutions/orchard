@@ -688,6 +688,13 @@ export function createSgMessageHandlers(ctx) {
         if (typeof tabId === 'number') { try { tabUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
         if (!groundId && tabUrl) { try { groundId = _groundIdForUrl(tabUrl, await StorageManager.getAllGrounds()); } catch { /* */ } }
         const seed = String(payload?.seed ?? '').trim();
+        // AS-2c (v2.74.1190) — the app's bound site (TRUSTED config from setup). It seeds interpret's operating
+        // context (the SYSTEM "OPERATING SITE" rule), and when the active tab ISN'T the bound site we resolve the
+        // bound site's Ground so tool-RAG retrieves ITS capabilities ("get my open emails" finds the Gmail cap even
+        // from another tab). Only fills an empty groundId — a real active-tab Ground is left as-is.
+        const target = (payload?.target && typeof payload.target === 'object' && payload.target.origin)
+          ? { origin: String(payload.target.origin), label: String(payload.target.label || payload.target.origin) } : null;
+        if (target && !groundId) { try { groundId = _groundIdForUrl(target.origin, await StorageManager.getAllGrounds()); } catch { /* */ } }
         let caps = [];
         if (groundId) { try { caps = ((await ctx.readSgCapabilities(groundId)) || []).filter((c) => c && isActiveCapability(c) && c.kind !== 'composite'); } catch { caps = []; } }
         const retrieved = retrieveTools(ask, { capabilities: caps });
@@ -703,7 +710,7 @@ export function createSgMessageHandlers(ctx) {
             if (Array.isArray(labels) && labels.length) affordances = labels.join(', ');
           } catch { /* */ }
         }
-        const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed });
+        const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed, target });
         Logger.info('route', `INTERPRET_ASK "${ask.slice(0, 60)}" → ${decision.intent} (conf ${decision.confidence}, ${retrieved.length} cand, ground ${groundId || '—'})`);
         sendResponse({ success: true, decision, groundId: groundId || null, retrieved });
       } catch (err) {

@@ -34,6 +34,19 @@ describe('interpretPrompt — buildInterpretMessages', () => {
     assert.match(user, /<PAGE_AFFORDANCES/);
     assert.match(user, /search box, results list/);
   });
+
+  it('AS-2c — a bound target adds the OPERATING_SITE block + the SYSTEM operating-site rule', () => {
+    const { system, user } = buildInterpretMessages('get my open emails', { target: { origin: 'https://mail.google.com', label: 'Gmail' } });
+    assert.match(user, /<OPERATING_SITE/);
+    assert.match(user, /Gmail — https:\/\/mail\.google\.com/);
+    assert.match(system, /OPERATING SITE/);
+    assert.match(system, /prefer its capabilities/i);
+  });
+
+  it('AS-2c — no target → no OPERATING_SITE block (unbound apps are unchanged)', () => {
+    const { user } = buildInterpretMessages('go to youtube', {});
+    assert.doesNotMatch(user, /OPERATING_SITE/);
+  });
 });
 
 describe('interpretPrompt — parseInterpretOutput', () => {
