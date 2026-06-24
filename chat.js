@@ -2110,6 +2110,17 @@ function _orchConfirmChain(msg, { tabId, clauses, firstMatch, ask = '' }) {
 // is NOT re-run on resume (that would double-apply a toggle like a filter); we trust the demo left the page settled.
 // `startIndex`/`state` carry the resume point + accumulated readouts/ranSteps across demos; the first clause reuses
 // the match already computed to probe the Ground (no re-LLM).
+// F-2c (v2.74.1177) — resolve a NAV clause to a URL: an explicit http(s)/host in the text, else the router's world
+// knowledge ("go to youtube" → https://youtube.com). Returns null for a non-nav clause (so the chain falls through
+// to normal capability matching). Lets a cross-site DECOMPOSE actually navigate instead of dead-ending.
+async function _resolveNavUrl(text) {
+  const s = String(text || '');
+  const explicit = s.match(/\bhttps?:\/\/\S+/i) || s.match(/\b[a-z0-9-]+\.[a-z]{2,}(?:\/\S*)?\b/i);
+  if (explicit) { let u = explicit[0].replace(/[).,]+$/, ''); if (!/^https?:\/\//i.test(u)) u = 'https://' + u; return u; }
+  try { const res = await _orchReq('ROUTE_ASK', { ask: s }); const d = res && res.decision; if (d && d.action === 'primitive' && d.tool && d.tool.op === 'OPEN_URL' && /^https?:\/\//i.test((d.params && d.params.url) || '')) return d.params.url; } catch { /* */ }
+  return null;
+}
+
 async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startIndex = 0, state = null }) {
   const total = clauses.length;
   const st = state || { readouts: [], ranSteps: [], chainGroundId: null };   // T2 — resolved steps for promotion
@@ -2123,6 +2134,23 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
   for (let i = startIndex; i < total; i++) {
     const clause = clauses[i];
     _setMessageBody(msg, `Step ${i + 1} of ${total}: “${clause.text}”…`);
+    // NAV clause (a decompose may emit "go to youtube" / "navigate to youtube.com" as a step) — it's a PRIMITIVE, not
+    // a page capability. OPEN_URL it, switch the chain to the new tab + GROUND it (so the next clause can match/teach
+    // there), then continue. Without this a cross-site chain dead-ends trying to MATCH the navigation (the "Ran 0 of N
+    // … don't have this site mapped" symptom). Fires ONLY when the URL resolves, so a non-nav "go through…" clause
+    // falls straight through to normal matching. (v2.74.1177 — fixes the F-2c `i:` decompose dispatch.)
+    if (_NAV_RE.test(clause.text)) {
+      const navUrl = await _resolveNavUrl(clause.text);
+      if (navUrl) {
+        let host = navUrl; try { host = new URL(navUrl).host.replace(/^www\./, ''); } catch { /* */ }
+        _setMessageBody(msg, `Step ${i + 1} of ${total}: opening ${host}…`);
+        await _orchReq('OPEN_URL_NEW_TAB', { url: navUrl, active: true });
+        const nt = await _orchActiveTab(); if (nt && typeof nt.id === 'number') tabId = nt.id;   // the chain follows to the new tab
+        try { const g = await _orchReq('ENSURE_GROUND_FOR_URL', { url: navUrl }); if (g && g.groundId) st.chainGroundId = g.groundId; } catch { /* */ }
+        st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'navigate', clause: clause.text, intent: clause.text });
+        continue;
+      }
+    }
     const m = (i === 0 && firstMatch) ? firstMatch : await _orchReq('ORCH_MATCH', { tabId, ask: clause.text });
     if (!m || !m.capabilityId || m.decision === 'miss') {
       const gid = (m && m.groundId) || st.chainGroundId;
