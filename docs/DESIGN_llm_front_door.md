@@ -141,3 +141,105 @@ before irreversible actions** (submits/purchases/deletes). [Stagehand; Anthropic
 - LLMCompiler (ICML 2024, arXiv 2312.04511) — planner vs ReAct. **primary**
 - **Killed (do not rely on):** "classifiers are Anthropic's primary injection defense" (0-3); "hierarchical retrieval beats static RAG by +35%" (0-3).
 - **Evidence gap:** OpenAI Operator/CUA, browser-use, Skyvern, WebVoyager, LaVague, MultiOn yielded no *surviving verified* claims in this batch — absence of evidence, not disagreement.
+
+---
+
+## 9. Reconciliation — the IL stand-in divergence + the *interpret* tier (v2.74.1167, 2026-06-24)
+
+> Status: **target**, supersedes the §3 sketch where they conflict. Written after live testing exposed that the
+> shipped front door diverged from its own spec. The §1–§8 research stands; this section is the corrected target
+> + the migration from where the code actually is.
+
+### 9.1 What shipped vs what §3 specced (the divergence)
+
+§3 specced **one constrained LLM call that selects + parameterizes over a *retrieved* set** (Tier-1), with
+`orchBind` reframed as a *retriever*. What actually shipped (the IL stand-in, `Core/ilStandin.js`, .1118→.1167)
+is different in a way that matters:
+
+- The **primary selector is `ORCH_MATCH`** — the *deterministic* substrate matcher — run **first, as a gatekeeper**.
+- The **LLM only JUDGES** (`JUDGE_MATCH`) among what ORCH_MATCH already surfaced, or — on a miss — is demoted to a
+  **greedy classifier** (`ROUTE_ASK` extracts `{tool,params}`), or finally a **prose answerer** (`IL_ANSWER`).
+
+Net: the model never *interprets the whole ask as the first move*. It judges, classifies, or answers — three
+narrow roles at three points, because no single call has the full context to reason. This is **reasoning-last**,
+the opposite of §1's framing ("the chat is the semantic surface — the LLM's job"). The live failure that exposed
+it: **`if go to youtube` navigated.** `_NAV_RE` correctly declined (good), ORCH_MATCH missed, and the miss-branch
+`ROUTE_ASK` — a classifier, not a reasoner — extracted `OPEN_URL youtube.com`, *dropped the "if"*, returned it
+**confident**, and `_dispatchRouteDecision` navigates a confident primitive **with no confirm**. Nothing in the
+path ever read the ask and thought "this is malformed."
+
+### 9.2 The *interpret* tier — one reasoning call, full context (the correction)
+
+Replace the ORCH_MATCH-gatekeeper + JUDGE + classifier-fallback chain with **one reasoning call** that is given
+the full context up front and *decides*:
+
+```
+interpret(ask, conversationContext, retrieved, affordances, primitives) →
+  { intent: 'act'|'navigate'|'decompose'|'clarify'|'teach',
+    capabilityId?|op?, params?, subAsks?, question?,
+    confidence, why }
+```
+
+- **Fed by retrieval, not gated by it.** `ORCH_MATCH` is **demoted from gatekeeper to retriever** — it surfaces the
+  affordance-aware candidate capabilities + the page's affordances as *context for the reasoner*, never a pre-filter
+  the model can only pick within. (This is the §3.3 tool-RAG, finally wired as context.)
+- **The LLM owns SELECTION + INTENT; the substrate owns BINDING + EXECUTION + VERIFY.** The reasoner picks *which*
+  capability / *whether* to navigate / *whether* to decompose / *whether* to clarify — and the **substrate binds the
+  pick to grounded landmarks** and runs it through the trial/verify gate. This is the load-bearing split that
+  **honors the `.1118` lesson** (a thin LLM tool-palette underperformed the affordance-aware substrate *at binding*):
+  binding stays deterministic; only *interpretation* moves to the LLM.
+- **`enforcePalette` (`agentLoop.js:98`) + the trial gate stay** as the anti-hallucination floor — a selected tool
+  the retriever didn't surface → demonstrate, never dispatch.
+
+This *is* the §3.1 contract, plus the two things the shipped stand-in dropped: a real **interpret** step (not
+judge/classify), and an explicit **clarify** branch.
+
+### 9.3 The trust contract (why this is also the trust answer)
+
+The chat is the surface the user must trust. Trust = four observable properties, and only a *reasoning* call can
+deliver the second:
+
+1. **Does the obvious thing** on a clear ask (`go to youtube` → navigates).
+2. **Asks when unsure** instead of guessing (`if go to youtube` → "did you mean *go to youtube*?"). A classifier has
+   **no representation of its own uncertainty**; a reasoner does. This is the property the shipped path lacks.
+3. **Never irreversible without a confirm** (the §3.5 / R-5 HITL gate — money = human-click-only).
+4. **Shows its reasoning** — `why` + `confidence` are surfaced, not hidden.
+
+So a **confidence/clarify gate** is not polish — it is the trust mechanism. `interpret` returns `clarify` (or low
+`confidence`) → the front door **asks**; it does **not** dispatch a primitive. Nav stops being fire-and-hope.
+
+### 9.4 Migration — from the `.1167` cascade to the interpret tier
+
+The post-inversion default route (`chat.js sendChatMessage`) today is: utility guards → `_tryRouterNav` (regex
+nav) → `_tryIlCommand` (ORCH_MATCH → JUDGE → act/reject) → miss → `_tryRouterFallback` (ROUTE_ASK) → `IL_ANSWER`.
+Target (keep / demote / delete):
+
+| Live piece | Fate |
+|---|---|
+| Warm alias short-circuit (Tier-0) | **keep** — deterministic replay, no LLM |
+| `ORCH_MATCH` | **keep, repurpose** — retriever (feeds interpret) + binder (resolves the pick). No longer a gatekeeper |
+| `JUDGE_MATCH` (judge-among-prefiltered) | **subsume** into `interpret` (select with full context, not judge a pre-filter) |
+| `_tryRouterNav` regex head-check | **demote** — a latency optimization for the warm nav case *only*; the interpret call is the real path. Gate its dispatch on confidence |
+| `_tryRouterFallback` / `ROUTE_ASK` greedy extract | **replace** with `interpret` (reason, don't extract); keep `_dispatchRouteDecision` as the **executor** for the chosen intent |
+| `_dispatchRouteDecision` primitive nav | **keep, gate** — confirm/decline a low-confidence or cruft-prefixed `OPEN_URL` (fixes 9.1) |
+| `IL_ANSWER` | **keep** — the `intent:'clarify'|'teach'|answer` rendering; now reached *by decision*, not as a fallback |
+| `agentLoop` `maxSteps>1` | **the real multi-step path** — `interpret` IS step-1; raising maxSteps turns it into observe→re-interpret with no new machinery |
+
+This is **R-7 made concrete** (the board's "retire orchComprehend/orchRoute"): the cascade collapses to
+**warm → interpret → execute-verify**, one brain fed by retrieval, gated by the trial/verify floor.
+
+### 9.5 Slices (extend R-1…R-7)
+
+- **F-1 (pure)** — `interpret` decision core: given `{ask, retrieved, affordances, primitives, conversationContext}`
+  → the 9.2 contract. Pure, LLM injected, unit-tested (mirrors `Core/route.js` / `Core/ilStandin.js`). The clarify +
+  confidence branches are first-class outputs, not afterthoughts.
+- **F-2 (live)** — wire `interpret` as the IL step-1; `ORCH_MATCH` → retriever+binder; **confidence/clarify gate**
+  on nav dispatch (closes 9.1's eager-fire). The single behavior-visible change.
+- **F-3 (subtractive)** — retire `JUDGE_MATCH`-as-selector + the `_tryRouterFallback` greedy path once F-2 proves out
+  (keep `_dispatchRouteDecision` as the executor). Collapse the cascade.
+- **F-4 (spike)** — the confidence threshold sweep (§6 Q2, still our-data-only) on the interpret call's calibration.
+
+**Conversations tie-in:** an *app* is a seeded conversation (`DESIGN_conversations.md` §6); its `seed` is the
+`conversationContext` the interpret call already takes — so the apps layer rides this contract with no new
+mechanism. The seed-reach problem (`memory/cv2_seed_reach_narrow`) dissolves once `interpret` is the single
+front door, because the seed colours the *one* call every ask flows through.

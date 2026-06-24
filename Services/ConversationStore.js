@@ -185,7 +185,7 @@ export const ConversationStore = {
    * @param {{ title?: string }} [init]
    * @returns {Promise<Conversation>}
    */
-  async create({ title = 'New conversation', kind = 'agent', branch = null, concern = null, sessionId = null, status = 'active', seed = null, surface = null } = {}) {
+  async create({ title = 'New conversation', kind = 'agent', branch = null, concern = null, sessionId = null, status = 'active', seed = null, surface = null, appId = null, appVersion = null, parentId = null, icon = null, config = null } = {}) {
     const id = crypto.randomUUID();
     const now = Date.now();
     // v2.74.1029 — `kind`: 'agent' (the website-operating assistant, the default) or 'dev' (a Claude Code
@@ -203,9 +203,25 @@ export const ConversationStore = {
       if (seed != null) conv.seed = String(seed);   // v2.74.1053 (DBR-P3-1) — a split-seeded conversation: chat.js pre-fills the input from this on first open, then clears it
       conv.surface = surface === 'high' ? 'high' : 'low';   // v2.74.1147 (surfaces §2.2) — the dev surface's altitude; default low (= today's dev behaviour)
     }
+    // CV-3c (v2.74.1168, DESIGN_conversations.md §5/§7) — an AGENT conversation can be an APP (a seeded, identified
+    // track) or a SUB-TASK (`parentId` → its app). Persist seed + app identity on the body so a reopen restores them
+    // (_rehydrateConversation reads conv.seed); mirror the grouping keys (appId/parentId/icon) into the index so the
+    // drawer accordion builds without a body load. Fixes the latent CV-3b gap: create() stored seed for dev ONLY and
+    // patchMeta() dropped appId/icon/config, so a gallery app persisted NEITHER its seed nor its identity.
+    if (k === 'agent') {
+      if (seed != null) conv.seed = String(seed);
+      if (appId) conv.appId = appId;
+      if (appVersion != null) conv.appVersion = appVersion;
+      if (parentId) conv.parentId = parentId;
+      if (icon) conv.icon = icon;
+      if (config && typeof config === 'object') conv.config = config;
+    }
     await chrome.storage.local.set({ [convKey(id)]: conv });
     const entry = { id, title, kind: k, updatedAt: now };
     if (k === 'dev') { entry.status = conv.status; entry.surface = conv.surface; }   // mirror status + surface so list()/history (the drawer badge) read them without a body load
+    if (conv.appId) entry.appId = conv.appId;          // CV-3c — accordion grouping keys, index-mirrored
+    if (conv.parentId) entry.parentId = conv.parentId;
+    if (conv.icon) entry.icon = conv.icon;
     await _addToIndex(entry);
     return conv;
   },
@@ -223,7 +239,7 @@ export const ConversationStore = {
     if (!conv) return null;
     // v2.74.1045 (DBR-P2-2) — `syncedMain`: the `main` commit this branch last synced onto (feeds the P2-5 merge freshness check).
     // v2.74.1053 (DBR-P3-1) — `seed`: the split-seed prompt; cleared (→ null) by chat.js once pre-filled into the input.
-    for (const k of ['branch', 'concern', 'sessionId', 'status', 'mergedAt', 'mergeCommit', 'title', 'syncedMain', 'seed', 'titledByLlm', 'surface']) {   // .1102 — titledByLlm; .1147 — surface (the dev altitude; WITHOUT this, `surface high` silently dropped the field and never activated the high surface)
+    for (const k of ['branch', 'concern', 'sessionId', 'status', 'mergedAt', 'mergeCommit', 'title', 'syncedMain', 'seed', 'titledByLlm', 'surface', 'appId', 'appVersion', 'parentId', 'icon', 'config']) {   // .1102 — titledByLlm; .1147 — surface (the dev altitude; WITHOUT this, `surface high` silently dropped the field and never activated the high surface); .1168 (CV-3c) — app identity (appId/appVersion/parentId/icon) + tighten-only config, previously dropped so a gallery app never persisted
       if (k in fields) conv[k] = fields[k];
     }
     conv.updatedAt = Date.now();
@@ -234,6 +250,9 @@ export const ConversationStore = {
     if ('status' in fields) patch.status = conv.status;
     if ('title' in fields) patch.title = conv.title;
     if ('surface' in fields) patch.surface = conv.surface;   // v2.74.1147 — mirror the altitude so the drawer badge updates without a body load
+    if ('appId' in fields) patch.appId = conv.appId;          // CV-3c (v2.74.1168) — mirror the accordion grouping keys
+    if ('parentId' in fields) patch.parentId = conv.parentId;
+    if ('icon' in fields) patch.icon = conv.icon;
     await _updateIndexMeta(id, patch);
     return conv;
   },
