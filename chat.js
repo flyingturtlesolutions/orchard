@@ -34,6 +34,7 @@ import { recipeLegs, normalizeTicket } from './Core/connectorRecipes.js';   // C
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildDrawerTree } from './Core/drawerTree.js';   // CV-3c — the pure flush-left accordion model
 import { planSubTasks } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure)
+import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-app write gate (read-only enforcement)
 
 // ─── Conversation state ──────────────────────────────────────────────────────
 // `_currentConversationId` is null before the first user message of a new
@@ -49,6 +50,7 @@ let _currentConversationId = null;
 let _currentConversationKind = 'agent';
 let _devModeEnabled = false;   // v2.74.1160 — Studio toggle (settings:devMode). When off, dev/design conversations are hidden + inactive.
 let _currentConversationSeed = '';   // v2.74.1163 (CV-2b) — the current conversation's seed (its standing instructions); the IL threads it into routing context + the answer preamble.
+let _currentConversationConfig = { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — the current track's enforced app config; the write gate (actAllowed) blocks ACTS when writePolicy:'never' (a read-only app/sub-task).
 
 // v2.74.106 — Single-flight guard for conversation creation. Two parallel
 // callers (e.g. double-clicked suggestion cards) could both see
@@ -83,6 +85,7 @@ function _clearCurrentConversation() {
   _currentConversationId = null;
   _currentConversationKind = 'agent';   // v2.74.1029 — a fresh/blank surface is always an agent conversation
   _currentConversationSeed = '';        // v2.74.1163 (CV-2b) — clear the IL seed on a fresh surface
+  _currentConversationConfig = { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — a fresh/blank surface is unrestricted (gated)
 }
 
 /**
@@ -1304,6 +1307,16 @@ async function _orchActiveTab() {
 // REPLAY a grounded capability and report the outcome in `msg`. On success, records the ask as a confirmation
 // (ORCH-D/G flywheel: alias accretion + health → future auto-fire). NO LLM in this path.
 async function _orchRun(msg, { groundId, capabilityId, intent, paramValues, tabId, ask, params }) {
+  // CV-6 (v2.74.1172, §8) — writePolicy enforcement. This is the ACT runner (REPLAY_SG_CAPABILITY); reads go
+  // through the observation path and never reach here. A read-only track (writePolicy:'never' — e.g. the Financial
+  // / Research monitors, or any sub-task that inherited it) blocks the act before it runs, so the policy is the
+  // ENFORCED boundary the §8 design promised, not a label. Overview + 'gated' apps are unaffected.
+  if (!actAllowed(_currentConversationConfig)) {
+    _setMessageBody(msg, '🔒 This app is read-only — it watches and reports, but won’t run actions that change things. Switch to Overview (or a non-read-only app) to act.');
+    try { _orchLog(`WRITE_GATE ▸ blocked "${intent || capabilityId || 'act'}" — track writePolicy:never`); } catch { /* */ }
+    _orchFinalize(msg);
+    return;
+  }
   _setMessageBody(msg, `Running “${intent || 'it'}”…`);
   const res = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId, capabilityId, paramValues });
   if (!res || res.success === false) {
@@ -5000,6 +5013,7 @@ async function _rehydrateConversation(conv) {
   _currentConversationId = conv.id;
   _currentConversationKind = conv.kind === 'dev' ? 'dev' : 'agent';   // v2.74.1029 — restore routing kind on switch
   _currentConversationSeed = (conv.kind !== 'dev' && conv.seed) ? String(conv.seed).trim() : '';   // v2.74.1163 (CV-2b) — restore the IL seed (agent convs only; dev `seed` is a one-shot prefill)
+  _currentConversationConfig = (conv.config && typeof conv.config === 'object') ? conv.config : { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — restore the track's enforced write policy (a sub-task carries its app's tightened copy)
   // DBR-P3-1 (v2.74.1053) — a split-seeded dev conversation: pre-fill the composer with its seed the first time
   // it's opened (SEED-AND-HOLD — not sent; the human reviews + presses enter), then clear the seed so reopening
   // doesn't re-fill it. The composer (#chat-input) is visible even in the empty-dev state below.
