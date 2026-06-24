@@ -28,6 +28,7 @@ import { CONDITION_FIELDS, getTypesByFamily } from './ConditionVocabulary.js';
 import { getCloudSettings, normalizeApiBaseUrl } from './Cloud/CloudSettings.js';
 import { ensureFreshSession } from './Cloud/CloudTokenStore.js';
 import { buildRouterMessages, parseRouterOutput } from '../Core/routerPrompt.js';   // R-3 — front-door router prompt (no DOM; fenced catalog)
+import { buildInterpretMessages, parseInterpretOutput } from '../Core/interpretPrompt.js';   // F-2 — the interpret front-door prompt
 import { buildStepMessages, parseStepDecision } from '../Core/stepPrompt.js';   // IL-2 — the inference-layer step controller prompt (fenced palette + observation)
 import { buildJudgeMessages, parseJudgeDecision } from '../Core/judgePrompt.js';   // IL-2 — the IL-as-user-standin match judge (pick the capability matchCapability found; no re-bind)
 import { buildAnswerMessages } from '../Core/answerPrompt.js';   // IL-2 — Orchard ANSWERING a meta/conversational ask from the available capabilities
@@ -5221,6 +5222,26 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
       return { ...parseRouterOutput(null), reason: 'router-unavailable' };   // fail safe; reason lets chat fall back
     }
     return parseRouterOutput(res.text);
+  }
+
+  /**
+   * F-2 (DESIGN_llm_front_door.md §9) — the INTERPRET front door: one structured-output call that, given the ask +
+   * retrieved candidates + primitives + page affordances + the conversation seed, returns a raw §9.2 decision
+   * {intent, capabilityId|op, params, subAsks, question, confidence, why}. Core/interpret.js then normalizes +
+   * palette-enforces + confidence-gates it (single source of truth). Fails safe to an unparseable→clarify raw on
+   * no-LLM / error, so the IL front door can fall back to the existing path. (R-6 tiering: operation 'interpret'.)
+   * @param {{ ask:string, retrieved?:Array, primitives?:Array, affordances?:string, seed?:string }} args
+   * @returns {Promise<object>} the parsed raw decision
+   */
+  static async interpret({ ask, retrieved, primitives, affordances, seed } = {}) {
+    const { system, user } = buildInterpretMessages(ask, {
+      retrieved: Array.isArray(retrieved) ? retrieved : [],
+      primitives: Array.isArray(primitives) ? primitives : [],
+      affordances: affordances || '', seed: seed || '',
+    });
+    const res = await AnthropicService.#call(system, user, 1024, [], { role: 'routing', operation: 'interpret' });
+    if (!res || res.success === false) return { ...parseInterpretOutput(null), why: 'interpret-unavailable' };
+    return parseInterpretOutput(res.text);
   }
 
   /**
