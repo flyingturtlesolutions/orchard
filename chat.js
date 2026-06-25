@@ -553,7 +553,9 @@ async function _renderHistoryList() {
 function _historyPinRow(row) {
   const el = document.createElement('div');
   el.className = `history-item history-overview${row.active ? ' active' : ''}`;
-  el.innerHTML = `<div class="history-item-title"><span class="history-glyph" aria-hidden="true">⌂</span>${escHtml(row.title)}</div>`;
+  // v2.74.1219 — the Overview "pick up where you left off" peek = the last active conversation's summary (drawerTree).
+  const summaryLine = row.summary ? `<div class="history-item-summary">${escHtml(row.summary)}</div>` : '';
+  el.innerHTML = `<div class="history-item-title"><span class="history-glyph" aria-hidden="true">⌂</span>${escHtml(row.title)}</div>${summaryLine}`;
   el.addEventListener('click', async () => {
     if (_currentConversationId == null) { _closeHistory(); return; }   // already home — just close the drawer
     if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch anyway?')) return;

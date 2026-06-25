@@ -26,6 +26,21 @@ describe('drawerTree — pinned sorts to the top (AP-1)', () => {
   });
 });
 
+describe('drawerTree — Overview peek = last active conversation (v2.74.1219)', () => {
+  it('the overview row carries the most-recently-updated conversation\'s summary', () => {
+    const rows = buildDrawerTree([
+      { id: 'a', title: 'Old app', appId: 'support', updatedAt: 100, summary: 'old direction' },
+      { id: 'b', title: 'Recent chat', updatedAt: 900, summary: 'the latest direction' },
+    ], { activeId: null });
+    assert.equal(rows.find((r) => r.role === 'overview').summary, 'the latest direction');
+  });
+  it('no conversations (or no summary on the freshest) → overview summary null', () => {
+    assert.equal(buildDrawerTree([], {}).find((r) => r.role === 'overview').summary, null);
+    const rows = buildDrawerTree([{ id: 'a', title: 'fresh, no summary yet', updatedAt: 5 }], {});
+    assert.equal(rows.find((r) => r.role === 'overview').summary, null);
+  });
+});
+
 describe('userCatalog — configuredAppDefinition (AP-4 durable configured app)', () => {
   const setup = { target: { origin: 'https://acme.zendesk.com', label: 'acme.zendesk.com' } };
   it('carries type + setup + presetId + instanceId, with a name+site-unique id', () => {

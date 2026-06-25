@@ -67,10 +67,14 @@ export function buildDrawerTree(summaries, { devMode = false, activeId = null, e
   const rows = [];
 
   // 1) Overview — pinned first, reserved (cannot be created/deleted, §2). Active when nothing else is (home state).
+  // v2.74.1219 — the Overview has no thread of its own, so its "quick peek" = the LAST ACTIVE conversation's summary
+  // (the most-recently-updated, any kind) — a "pick up where you left off" hint under the home row.
+  const lastActive = [...visible].sort(byUpdatedDesc)[0] || null;
   rows.push({
     id: OVERVIEW_ID, role: 'overview', title: 'Overview', icon: 'home', depth: 0,
     hasChildren: false, expanded: false, active: activeId == null || activeId === OVERVIEW_ID,
     count: 0, kind: 'agent',
+    summary: (lastActive && lastActive.summary) ? lastActive.summary : null,
   });
 
   // 2) Apps + plain conversations, by recency. An expanded app is immediately followed by its sub-task rows.
