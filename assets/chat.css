@@ -1470,9 +1470,8 @@ textarea {
 .history-item.has-children { padding-right: 64px; }   /* clear the chevron, which sits left of the delete button */
 .history-chevron {
   position: absolute;
-  top: 50%;
+  bottom: var(--sp-2);          /* v2.74.1229 — sit at the bottom-right, just LEFT of the "+" (was vertically centered) */
   right: 34px;
-  transform: translateY(-50%);
   height: 20px;
   min-width: 28px;
   padding: 0 6px;
