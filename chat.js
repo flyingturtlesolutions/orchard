@@ -549,32 +549,70 @@ async function _renderHistoryList() {
   if (anyActive) _startDrawerStatusTimer(); else _stopDrawerStatusTimer();
 }
 
-// CV-3c — the Overview pin: the reserved home row (the general assistant). Click → clear to the default empty state.
+// v2.74.1223 (message-input redesign) — a row's own action buttons; their handlers run instead of select/open.
+const _isRowActionTarget = (e) => !!(e.target.closest('.history-item-delete') || e.target.closest('.history-item-preview') || e.target.closest('.history-chevron') || e.target.closest('.history-item-subtask'));
+
+// v2.74.1223 — SINGLE-click: SELECT a conversation as the message-input target WITHOUT closing the drawer. The drawer
+// stays open as a live multi-conversation surface (its row highlights `active`, the input now routes here, and a reply
+// refreshes its peek). No-op when it's already the selected target.
+async function _selectConvForInput(conv) {
+  if (!conv || conv.id === _currentConversationId) return;
+  if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch the input target anyway?')) return;
+  const full = await ConversationStore.load(conv.id);
+  if (full) { await _rehydrateConversation(full); await _resumeRunningInvocations(); }
+  await _renderHistoryList();   // re-highlight the selected row; the drawer STAYS open
+}
+
+// v2.74.1223 — DOUBLE-click: open a conversation's FULL timeline — load it (if not already selected) + CLOSE the drawer.
+async function _openConvFullTimeline(conv) {
+  if (!conv) return;
+  if (conv.id !== _currentConversationId) {
+    if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch conversations anyway?')) return;
+    const full = await ConversationStore.load(conv.id);
+    if (full) { await _rehydrateConversation(full); await _resumeRunningInvocations(); }
+  }
+  await _renderHistoryList();
+  _closeHistory();
+}
+
+// v2.74.1223 — the Overview "resume": open the last-active conversation (or the home empty state when there are none).
+// `close` distinguishes single-click (keep the drawer open, .1223) from double-click (reveal the full timeline).
+async function _resumeOverview({ close = false } = {}) {
+  if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch anyway?')) return;
+  let recent = null;
+  try { recent = await ConversationStore.mostRecent(); } catch { /* */ }
+  if (recent && recent.id) {
+    if (recent.id !== _currentConversationId) {
+      const full = await ConversationStore.load(recent.id);
+      if (full) { await _rehydrateConversation(full); await _resumeRunningInvocations(); }
+    }
+  } else {
+    _clearCurrentConversation();
+    _resetConversation();
+    await renderSuggestionCards();
+  }
+  await _renderHistoryList();
+  if (close) _closeHistory();
+}
+
+// CV-3c — the Overview pin: the reserved home row (the general assistant). Single-click → resume the last conversation
+// (keep the drawer open); double-click → resume + open the full timeline (close the drawer). (.1223)
 function _historyPinRow(row) {
   const el = document.createElement('div');
   el.className = `history-item history-overview${row.active ? ' active' : ''}`;
   // v2.74.1219 — the Overview "pick up where you left off" peek = the last active conversation's summary (drawerTree).
   const summaryLine = row.summary ? `<div class="history-item-summary">${escHtml(row.summary)}</div>` : '';
   el.innerHTML = `<div class="history-item-title"><span class="history-glyph" aria-hidden="true">⌂</span>${escHtml(row.title)}</div>${summaryLine}`;
-  el.addEventListener('click', async () => {
-    if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch anyway?')) return;
-    // v2.74.1222 — "keep the conversation history when there is one": Overview OPENS your last-active conversation
-    // (the one previewed under its name) instead of wiping the panel to the empty state. It drops to the fresh home
-    // empty state only when there are NO conversations. Closes the drawer like any pick (.1218).
-    let recent = null;
-    try { recent = await ConversationStore.mostRecent(); } catch { /* */ }
-    if (recent && recent.id) {
-      if (recent.id !== _currentConversationId) {
-        const full = await ConversationStore.load(recent.id);
-        if (full) { await _rehydrateConversation(full); await _resumeRunningInvocations(); }
-      }
-    } else {
-      _clearCurrentConversation();
-      _resetConversation();
-      await renderSuggestionCards();
-    }
-    await _renderHistoryList();
-    _closeHistory();
+  // v2.74.1223 — single-click resumes the last conversation but KEEPS the drawer open (select); double-click also
+  // closes it (full timeline). A short timer separates the two.
+  let _pinClickTimer = null;
+  el.addEventListener('click', () => {
+    if (_pinClickTimer) return;                          // 2nd click of a double — dblclick handles it
+    _pinClickTimer = setTimeout(() => { _pinClickTimer = null; void _resumeOverview({ close: false }); }, 220);
+  });
+  el.addEventListener('dblclick', () => {
+    if (_pinClickTimer) { clearTimeout(_pinClickTimer); _pinClickTimer = null; }
+    void _resumeOverview({ close: true });
   });
   return el;
 }
@@ -648,20 +686,20 @@ function _historyConvRow(conv, row) {
     await _spawnSubTask(conv.id);
   });
 
-  // click the row → load the conversation (ANY level — Overview/app/sub-task/plain; §2 chat-at-any-level) AND close
-  // the drawer. v2.74.1218 — any pick is a navigation, so it always closes (was app/overview-only at .1216, which
-  // skipped sub-conversations). delete/preview/chevron/subtask have their own handlers — they don't switch the row.
-  item.addEventListener('click', async (e) => {
-    if (e.target.closest('.history-item-delete') || e.target.closest('.history-item-preview') || e.target.closest('.history-chevron') || e.target.closest('.history-item-subtask')) return;
-    if (conv.id === _currentConversationId) { _closeHistory(); return; }   // already active — just close the drawer
-    if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch conversations anyway?')) return;
-    const full = await ConversationStore.load(conv.id);
-    if (full) {
-      await _rehydrateConversation(full);
-      await _resumeRunningInvocations();
-      await _renderHistoryList();
-    }
-    _closeHistory();
+  // v2.74.1223 (message-input redesign) — SINGLE-click SELECTS this conversation as the message-input target and KEEPS
+  // the drawer open (the drawer is a live multi-conversation surface; a reply refreshes this row's peek). DOUBLE-click
+  // opens its FULL timeline (closes the drawer). A short timer separates the two; delete/preview/chevron/subtask keep
+  // their own handlers.
+  let _rowClickTimer = null;
+  item.addEventListener('click', (e) => {
+    if (_isRowActionTarget(e)) return;
+    if (_rowClickTimer) return;                          // 2nd click of a double — dblclick handles it
+    _rowClickTimer = setTimeout(() => { _rowClickTimer = null; void _selectConvForInput(conv); }, 220);
+  });
+  item.addEventListener('dblclick', (e) => {
+    if (_isRowActionTarget(e)) return;
+    if (_rowClickTimer) { clearTimeout(_rowClickTimer); _rowClickTimer = null; }
+    void _openConvFullTimeline(conv);
   });
 
   // v2.74.1095 — dev-aware delete: stop a live run (free the host slot) before removing the record; keep the branch.
@@ -1811,7 +1849,9 @@ function _orchFinalize(msg, { outcome = null } = {}) {
     if (!msg || !msg.dataset || !msg.dataset.messageId) return;
     const body = msg.querySelector('.message-body')?.textContent ?? '';
     if (!body.trim()) return;
-    _persistMessageUpdate(msg, { role: 'assistant', body, ...(outcome ? { outcome } : {}) }).catch(() => { /* persistence must never break the flow */ });
+    _persistMessageUpdate(msg, { role: 'assistant', body, ...(outcome ? { outcome } : {}) })
+      .then(() => _refreshHistoryIfOpen())   // v2.74.1223 — the selected app "updates accordingly": refresh its drawer peek live once the reply is persisted (peek mirrored into the index by then)
+      .catch(() => { /* persistence must never break the flow */ });
   } catch { /* */ }
 }
 
