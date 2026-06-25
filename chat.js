@@ -38,6 +38,7 @@ import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-ap
 import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps; AP-4 — configuredAppDefinition (mint a durable, re-creatable app from a set-up instance)
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
 import { recordGoalItem, loadGoalItems, clearGoalMemory } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view
+import { seedInstanceFromPreset } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
 import { standingRuleFromText } from './Core/goalMemory.js';   // AL-3c — non-tool capture: `remember:` authors a standing-rule delta
 import { normalizeInterpretDecision, applyConfidenceGate } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
 
@@ -1245,6 +1246,9 @@ async function _createAppConversation(def, { setup = false } = {}) {
   _currentConversationAppId = typeId || null;            // the TYPE — object-model / canvas resolution + the gallery
   _currentConversationInstanceId = conv.instanceId || null;   // AP-0 — the per-instance goal-memory key
   if (cfg && typeof cfg === 'object') _currentConversationConfig = cfg;
+  // §10.1 seed-down (v2.74.1215) — a NEW instance inherits its preset's baseline rules so it's useful day 1.
+  // typeId IS the preset id (configured → presetId, else the def id). Seed-IF-EMPTY, fire-and-forget.
+  void _seedInstanceMemory(conv.instanceId, typeId);
   // The app's empty state: greet with the app, no generic suggestion cards.
   $('messages').innerHTML = '';
   $('messages').classList.add('hidden');
@@ -1280,6 +1284,26 @@ async function _createAppConversation(def, { setup = false } = {}) {
     }
   }
   _refreshHistoryIfOpen().catch(() => {});
+}
+
+// §10.1 seed-down (v2.74.1215, DESIGN_apps_learning.md §10) — seed a NEW instance's goal memory from its PRESET:
+// the preset's hand-authored baseline (builtinApp(presetId).baseline) + any rules accrued in the preset store
+// (goalMemory under a `preset:<presetId>` key — distill-up fills it later). seedInstanceFromPreset emits each as a
+// `confirmed`/`preset-baseline` delta (de-duped, deltas-only — facts never seed). Seed-IF-EMPTY: an instance that
+// already carries memory (a re-created configured app keeps its learning per AP-3, or one that's specialized) is
+// left untouched. Fire-and-forget — a seed failure never blocks opening the app.
+async function _seedInstanceMemory(instanceId, presetId) {
+  try {
+    if (!instanceId) return;
+    const existing = await loadGoalItems(instanceId);
+    if (existing.length) return;                                   // already has memory — never clobber
+    const presetItems = presetId ? await loadGoalItems(`preset:${presetId}`) : [];
+    let baseline = [];
+    try { baseline = (presetId && builtinApp(presetId)?.baseline) || []; } catch { /* */ }
+    const seeded = seedInstanceFromPreset(presetItems, { baseline });
+    for (const d of seeded) await recordGoalItem(instanceId, d);
+    if (seeded.length) { try { console.info(`[chat] §10.1 seeded ${seeded.length} baseline rule(s) into instance from preset ${presetId || '—'}`); } catch { /* */ } }
+  } catch (e) { try { console.warn('[chat] seed-down failed:', e?.message); } catch { /* */ } }
 }
 
 // CV-4 (v2.74.1171) — fan the CURRENT app out into one sub-task conversation per item. `subtasks: a, b, c`

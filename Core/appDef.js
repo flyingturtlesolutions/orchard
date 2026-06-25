@@ -143,6 +143,10 @@ export function normalizeAppDefinition(def) {
     presetId: _str(d.presetId) || null,
     instanceId: _str(d.instanceId) || null,
     setup: (d.setup && typeof d.setup === 'object') ? d.setup : null,
+    // §10.1 (v2.74.1215) — the preset's hand-authored BASELINE rules (behavior deltas), SEEDED into every new
+    // instance (Core/presetMemory.seedInstanceFromPreset). Carried OPAQUE here as a raw object list (cap 16) — the
+    // seeder validates each via goalMemory's normalizeMemoryItem + drops non-deltas, keeping appDef goalMemory-free.
+    baseline: Array.isArray(d.baseline) ? d.baseline.filter((x) => x && typeof x === 'object').slice(0, 16) : [],
   };
 }
 
