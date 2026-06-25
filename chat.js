@@ -467,18 +467,23 @@ function _devRunStatus(convId) {
   try { return _getDevBridge()?.runStatusForConv?.(convId) || { state: 'idle' }; } catch { return { state: 'idle' }; }
 }
 // Render the meta line for one drawer item from its live run status; returns the state so callers can tally.
-// v2.74.1224 — is the ACTIVE conversation's reply in flight? An in-flight `.thinking` bubble lives in #messages until
-// the reply finalizes (`classList.remove('thinking')`). This is the per-row "processing" signal for the selected app.
-function _activeConvBusy() {
-  return !!$('messages')?.querySelector('.message.thinking');
+// v2.74.1226 — conversations whose reply is IN FLIGHT (a send is being processed). Drives the "● working…" drawer
+// indicator. A conversation is marked for the WHOLE sendChatMessage turn (try/finally), so it spans every reply path
+// — the common IL/interpret path renders into an `assistant` placeholder, not a `.thinking` bubble, so the earlier
+// DOM signal missed it — and the finally guarantees it clears. A Set so concurrent app turns each show independently.
+const _processingConvIds = new Set();
+function _setConvProcessing(id, on) {
+  if (!id) return;
+  const had = _processingConvIds.has(id);
+  if (on) _processingConvIds.add(id); else _processingConvIds.delete(id);
+  if (_processingConvIds.has(id) !== had) _refreshHistoryIfOpen().catch(() => {});   // reflect the change in an open drawer
 }
 function _setItemMeta(item) {
   const metaEl = item?.querySelector?.('.history-item-meta');
   if (!metaEl) return 'idle';
   const st = item.dataset.kind === 'dev' ? _devRunStatus(item.dataset.conversationId) : { state: 'idle' };
-  // v2.74.1224 — the SELECTED app (the input target) shows "working…" while its reply is in flight. Non-dev rows, the
-  // active conversation only (dev rows have their own run-status below).
-  if (item.dataset.kind !== 'dev' && item.dataset.conversationId && item.dataset.conversationId === _currentConversationId && _activeConvBusy()) {
+  // v2.74.1226 — a conversation with an in-flight reply shows "● working…" (non-dev rows; dev rows have run-status).
+  if (item.dataset.kind !== 'dev' && item.dataset.conversationId && _processingConvIds.has(item.dataset.conversationId)) {
     metaEl.className = 'history-item-meta run-status running working';
     metaEl.textContent = '● working…';
     return 'busy';
@@ -4327,6 +4332,13 @@ async function sendChatMessage() {
     return;
   }
 
+  // v2.74.1226 — mark the SELECTED app PROCESSING for the WHOLE turn (every send path below — IL/interpret/answer,
+  // grounded, legacy matcher), so its drawer row shows "● working…". The finally clears it on EVERY exit (return,
+  // throw), so it can never stick. Dev has its own run-status and returned above.
+  const _busyConv = _currentConversationId;
+  _setConvProcessing(_busyConv, true);
+  try {
+
   // AS-2 (v2.74.1188) — GUIDED-SETUP MODAL: while a setup flow is active for THIS conversation, the next typed
   // message is the answer to the current slot (NOT a command / website ask). `cancel`/`stop`/`exit` aborts. Runs
   // right after the dev fast-path and before every command guard so the flow owns the input until it completes.
@@ -4740,6 +4752,9 @@ async function sendChatMessage() {
     thinkingMsg.classList.remove('thinking');
     thinkingMsg.classList.add('error');
     _setMessageBody(thinkingMsg, err?.message ?? 'Failed to invoke capability.');
+  }
+  } finally {
+    _setConvProcessing(_busyConv, false);   // v2.74.1226 — always clear "● working…" (return/throw alike)
   }
 }
 
