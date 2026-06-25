@@ -1533,6 +1533,19 @@ textarea {
   line-height: 1.4;
 }
 
+/* v2.74.1217 — the app-row "quick peek": up to 3 lines of the conversation's recent direction, under the name.
+   Muted + line-clamped; the row is flex-column so it stacks between the title and the timestamp. */
+.history-item-summary {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--c-text-subtle);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  margin-top: 1px;
+}
+
 .history-item-meta {
   font-size: 11px;
   color: var(--c-text-subtle);

@@ -18,6 +18,8 @@
  *    NOT persisted. They're transient UI state that dies with the panel.
  */
 
+import { conversationPeek } from '../Core/conversationPeek.js';   // v2.74.1217 — the drawer's under-the-name "quick peek", mirrored into the index on every message finalize
+
 const INDEX_KEY = 'conv:index';
 
 function convKey(id) { return `conv:${id}`; }
@@ -62,12 +64,15 @@ function _addToIndex(entry) {
   });
 }
 
-function _touchIndex(id, updatedAt) {
+// v2.74.1217 — `summary` (optional): the drawer "quick peek". Mirrored alongside updatedAt on every message
+// finalize so the app-row preview renders from the index (no body load). `undefined` leaves it untouched.
+function _touchIndex(id, updatedAt, summary) {
   return _serializeIndexOp(async () => {
     const index = await _readIndex();
     const entry = index.find(e => e.id === id);
     if (entry) {
       entry.updatedAt = updatedAt;
+      if (summary !== undefined) entry.summary = summary;
       await _writeIndex(index);
     }
   });
@@ -312,7 +317,9 @@ export const ConversationStore = {
     const stillExists = await ConversationStore.load(conversationId);
     if (!stillExists) throw new Error(`Conversation ${conversationId} not found`);
     await chrome.storage.local.set({ [convKey(conversationId)]: conv });
-    await _touchIndex(conversationId, conv.updatedAt);
+    // v2.74.1217 — refresh the drawer "quick peek" from the now-current message list (the most recent substantive
+    // line). Cheap + pure; mirrored into the index so app-row previews render without a body load.
+    await _touchIndex(conversationId, conv.updatedAt, conversationPeek(conv.messages));
   },
 
   /**

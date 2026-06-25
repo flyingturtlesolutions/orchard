@@ -602,8 +602,14 @@ function _historyConvRow(conv, row) {
   const subtaskBtn = row.role === 'app'
     ? `<button class="history-item-subtask" title="New sub-conversation"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`
     : '';
+  // v2.74.1217 — a 3-line "quick peek" at the conversation's recent direction, shown UNDER an app's name (apps only).
+  // row.summary is the index-mirrored recent-activity peek (untrusted message text → escHtml; CSS clamps to 3 lines).
+  const summaryLine = (row.role === 'app' && row.summary)
+    ? `<div class="history-item-summary">${escHtml(row.summary)}</div>`
+    : '';
   item.innerHTML = `
       <div class="history-item-title">${leaf}${badge}${escHtml(conv.title)}</div>
+      ${summaryLine}
       <div class="history-item-meta">${relTime(conv.updatedAt)}</div>
       ${chevron}
       ${subtaskBtn}

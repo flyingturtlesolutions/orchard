@@ -82,6 +82,7 @@ export function buildDrawerTree(summaries, { devMode = false, activeId = null, e
         id: c.id, role: 'app', title: c.title, icon: c.icon || null, depth: 0,
         hasChildren: subs.length > 0, expanded: open, active: activeId === c.id,
         count: subs.length, kind: c.kind || 'agent', appId: c.appId, pinned: !!c.pinned,   // AP-1 — drives the pin toggle's state
+        summary: c.summary || null,   // v2.74.1217 — the under-the-name "quick peek" (index-mirrored; rendered ≤3 lines)
       });
       if (open) {
         for (const s of subs) {
