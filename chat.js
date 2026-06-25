@@ -1047,14 +1047,30 @@ async function renderSuggestionCards() {
     ? '1 capability is ready. Try it below or describe what you need.'
     : `${capabilities.length} capabilities are ready. Try one below or describe what you need.`;
 
-  // Show up to 4 suggestion cards in the empty state
-  capabilities.slice(0, 4).forEach(cap => {
+  // v2.74.1221 — DEDUP by name before sampling cards. The store can hold near-duplicate capabilities authored across
+  // runs (same intent, distinct ids — GA-6 catches structural dups, but same-name re-authors slip through), which
+  // otherwise filled the empty state with the SAME suggestion 3-4×. Keep the first of each name.
+  const seenNames = new Set();
+  const distinct = [];
+  for (const cap of capabilities) {
+    const key = String((cap && cap.name) || '').trim().toLowerCase();
+    if (!key || seenNames.has(key)) continue;
+    seenNames.add(key);
+    distinct.push(cap);
+  }
+
+  // Show up to 4 DISTINCT suggestion cards in the empty state.
+  distinct.slice(0, 4).forEach(cap => {
     const card = document.createElement('button');
     card.className = 'suggestion-card';
     card.dataset.capabilityId = cap.id;
+    // v2.74.1221 — only show the summary when it ADDS information; many capabilities carry summary === name, which
+    // rendered the same line twice.
+    const summary = String(cap.summary || '').trim();
+    const showSummary = summary && summary.toLowerCase() !== String(cap.name || '').trim().toLowerCase();
     card.innerHTML = `
       <div class="suggestion-card-name">${escHtml(cap.name)}</div>
-      ${cap.summary ? `<div class="suggestion-card-summary">${escHtml(cap.summary)}</div>` : ''}
+      ${showSummary ? `<div class="suggestion-card-summary">${escHtml(cap.summary)}</div>` : ''}
       <div class="suggestion-card-meta">
         <span class="suggestion-card-kind">${cap.kind === 'task' ? 'Task' : 'Assistant'}</span>
       </div>`;
