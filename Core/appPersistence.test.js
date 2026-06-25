@@ -27,12 +27,12 @@ describe('drawerTree — pinned sorts to the top (AP-1)', () => {
 });
 
 describe('drawerTree — Overview peek = last active conversation (v2.74.1219)', () => {
-  it('the overview row carries the most-recently-updated conversation\'s summary', () => {
+  it('the overview peek = the most-recent conversation\'s summary, ATTRIBUTED to its title (v2.74.1227)', () => {
     const rows = buildDrawerTree([
       { id: 'a', title: 'Old app', appId: 'support', updatedAt: 100, summary: 'old direction' },
       { id: 'b', title: 'Recent chat', updatedAt: 900, summary: 'the latest direction' },
     ], { activeId: null });
-    assert.equal(rows.find((r) => r.role === 'overview').summary, 'the latest direction');
+    assert.equal(rows.find((r) => r.role === 'overview').summary, 'Recent chat · the latest direction');
   });
   it('no conversations (or no summary on the freshest) → overview summary null', () => {
     assert.equal(buildDrawerTree([], {}).find((r) => r.role === 'overview').summary, null);
