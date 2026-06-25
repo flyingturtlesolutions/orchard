@@ -5816,6 +5816,7 @@ async function _rehydrateConversation(conv) {
   if (_currentConversationKind === 'dev' && !(conv.messages || []).length) { _showDevEmptyState(); return; }
   _enterConversation();
   $('messages').innerHTML = '';
+  _stickToBottom = true;   // v2.74.1232 — opening/returning to a conversation ALWAYS follows to the bottom: reset any "scrolled up" state carried over from the previous conversation so the sticky-follow observer re-pins through this rehydrate
 
   // v2.74.1093 — for a DEV conversation, a run still LIVE here kept executing while you were on another chat; skip its
   // persisted snapshot and let the bridge re-attach it as a live, streaming bubble below (shown once, not frozen).
@@ -5865,5 +5866,10 @@ async function _rehydrateConversation(conv) {
     try { _getDevBridge()?.clearRunOutcome?.(conv.id); } catch { /* */ }   // v2.74.1096 — opening the conversation acks its "✓ done" marker → back to the timestamp
     try { _getDevBridge()?.reattachConversation?.(conv.id); } catch { /* */ }
   }
+  // v2.74.1232 — ALWAYS land at the bottom (the most recent reply) when a timeline opens. The per-append scroll during
+  // the loop is unreliable once bodies re-render (markdown/html/outcome cards change height), so snap explicitly after
+  // the full timeline is laid out; the rAF covers async height settle. #conversation stays laid out behind the drawer
+  // overlay, so this sticks even when rehydrated from a single-click select (revealed at the bottom on drawer close).
+  try { const c = $('conversation'); if (c) { c.scrollTop = c.scrollHeight; requestAnimationFrame(() => { c.scrollTop = c.scrollHeight; }); } } catch { /* */ }
 }
 
