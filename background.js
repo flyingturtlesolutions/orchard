@@ -40,6 +40,7 @@ import { createExploreHandlers } from './background/handlers/explore.js';  // v2
 import { createDiscoveryHandlers } from './background/handlers/discovery.js';  // v2.74.952 (CR-X3b) — the discovery domain
 import { createWorkflowDebugHandlers } from './background/handlers/workflowDebug.js';  // v2.74.953 (CR-X3c) — the workflow + debugger domain
 import { createConnectorHandlers } from './background/handlers/connector.js';  // v2.74.1151 (CX-3) — the connector domain (session-ride)
+import { createCanvasHandlers } from './background/handlers/canvas.js';  // v2.74.1205 (CA-4) — the canvas domain (RENDER_CANVAS → the presentation tab)
 import { buildRawAction, coalesce } from './Core/observedTrace.js';     // OBS-1 — observed demonstration recorder
 import * as ChromeHoist        from './Core/chromeHoist.js';  // v2.74.480 — hoist recurring chrome off Locales → Ground.chrome
 import * as Workflows          from './Core/workflows.js';   // v2.74.488 — cross-Locale workflows (partOf) over the siteMap
@@ -1672,6 +1673,7 @@ function _readSgSpec(groundId, url, intent) {
 // v2.74.951 (CR-X3a) — domain handler maps merge here; the dispatch + _invokeSgHandler serve them all.
 const _sgMessageHandlers = {
   ...createConnectorHandlers({ ensureContentScript: _ensureContentScript }),   // CX-3 — connector domain (INVOKE_SESSION session-ride)
+  ...createCanvasHandlers({ log: (line) => { try { Logger.info('background', line); } catch { /* */ } } }),   // CA-4 — canvas domain (RENDER_CANVAS → presentation tab)
   ...createWorkflowDebugHandlers({
     invokeSgHandler    : _invokeSgHandler,
     ensureContentScript: _ensureContentScript,

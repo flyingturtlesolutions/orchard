@@ -68,6 +68,15 @@ const PRESETS = [
     objectModel: { noun: 'account', plural: 'accounts', states: ['steady', 'changed', 'flagged'], actions: ['read', 'compute', 'compare'], transitions: [{ verb: 'flag', to: 'flagged' }] },
     seed: 'You are a financial WATCHER. Watch the user’s accounts and balances, compute what they ask (rates, totals, changes), and flag anything notable. You READ ONLY: you never move money, transfer funds, pay, or change a setting. If an action is needed, tell the user to do it themselves. You are not a licensed advisor and do not give personalized investment advice.',
     starters: ['Show my balances', 'What changed since last week?', 'Flag anything unusual'],
+    // CA-7 — this watcher DEFINES a presentation layer (a HUD). The `canvas` command renders these seed blocks (a
+    // sample skeleton — live values wire in later with the watcher's cadence). Read-only; never advice.
+    presentation: { title: 'Finances', blocks: [
+      { id: 'net',    kind: 'metric', label: 'Net worth',   value: '$128,450', delta: '+1.2%' },
+      { id: 'cash',   kind: 'metric', label: 'Cash',        value: '$12,300' },
+      { id: 'invest', kind: 'metric', label: 'Investments', value: '$116,150', delta: '+1.8%' },
+      { id: 'alloc',  kind: 'chart',  chartType: 'bar', data: { labels: ['Cash', 'Stocks', 'Bonds', 'Crypto'], series: [{ name: 'Allocation', values: [12300, 78000, 30000, 8150] }] } },
+      { id: 'note',   kind: 'markdown', text: '**Sample dashboard** — live values wire in with the watcher’s cadence. _Read-only: I never move money._' },
+    ] },
   },
   {
     id: 'watcher-listings', name: 'Price / job watcher', icon: 'ti-eye', archetype: 'monitor', type: 'watcher', version: 1, source: 'builtin',

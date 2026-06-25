@@ -1,0 +1,48 @@
+/* assets/canvas.css — CA-5: the Canvas tab (an app's presentation surface). Roomy + themed off the sidepanel tokens,
+   with fallbacks so it renders standalone. The motion (enter / flash / leave) lives HERE — the renderer ships data. */
+
+.canvas-body { margin: 0; background: var(--bg, #0e1116); color: var(--fg, #e6edf3); font: 14px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+
+.cv-header { position: sticky; top: 0; z-index: 5; display: flex; align-items: baseline; gap: 14px;
+  padding: 14px 24px; background: var(--bg, #0e1116); border-bottom: 1px solid var(--border, #232a33); }
+.cv-brand { display: flex; align-items: baseline; gap: 8px; }
+.cv-logo { color: var(--accent, #6ea8fe); font-size: 16px; }
+.cv-title { font-size: 18px; font-weight: 600; }
+.cv-meta { color: var(--muted, #8b97a6); font-size: 12px; }
+
+.cv-root { max-width: 1000px; margin: 0 auto; padding: 24px;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; align-items: start; }
+.cv-empty { grid-column: 1 / -1; color: var(--muted, #8b97a6); padding: 48px; text-align: center; }
+
+.cv-block { background: var(--card, #161b22); border: 1px solid var(--border, #232a33); border-radius: 10px; padding: 16px; overflow: hidden; }
+/* prose, charts, editors and images span the full width; metrics tile */
+.cv-markdown, .cv-chart, .cv-compose, .cv-image { grid-column: 1 / -1; }
+.cv-markdown :first-child { margin-top: 0; } .cv-markdown :last-child { margin-bottom: 0; }
+.cv-markdown pre { overflow: auto; background: var(--bg, #0e1116); padding: 10px; border-radius: 6px; }
+
+.cv-metric-label { color: var(--muted, #8b97a6); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.cv-metric-value { font-size: 26px; font-weight: 600; margin-top: 4px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.cv-delta { font-size: 13px; font-weight: 500; }
+.cv-delta.up { color: var(--good, #3fb950); } .cv-delta.down { color: var(--bad, #f85149); }
+
+.cv-svg { width: 100%; height: auto; display: block; }
+.cv-bar { fill: var(--accent, #6ea8fe); }
+.cv-line { stroke: var(--accent, #6ea8fe); stroke-width: 2; }
+.cv-area { fill: var(--accent, #6ea8fe); opacity: .12; }
+.cv-dot { fill: var(--accent, #6ea8fe); }
+.cv-xlabel { fill: var(--muted, #8b97a6); font-size: 10px; }
+.cv-chart-empty { color: var(--muted, #8b97a6); padding: 24px; text-align: center; }
+
+.cv-img { max-width: 100%; height: auto; border-radius: 6px; display: block; }
+
+.cv-compose-input { width: 100%; min-height: 180px; resize: vertical; box-sizing: border-box; padding: 12px;
+  background: var(--bg, #0e1116); color: var(--fg, #e6edf3); border: 1px solid var(--border, #232a33); border-radius: 8px; font: inherit; }
+.cv-compose-input:focus { outline: none; border-color: var(--accent, #6ea8fe); }
+
+/* motion — the renderer's job (DESIGN_canvas.md §2.5) */
+@keyframes cvEnter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes cvFlash { 0% { background: var(--accent-dim, rgba(110, 168, 254, .18)); } 100% { background: var(--card, #161b22); } }
+.cv-enter { animation: cvEnter .28s ease both; }
+.cv-changed { animation: cvFlash .9s ease; }
+.cv-leave { opacity: 0; transform: translateY(-4px); transition: opacity .2s ease, transform .2s ease; }
+@media (prefers-reduced-motion: reduce) { .cv-enter, .cv-changed, .cv-leave { animation: none; transition: none; } }

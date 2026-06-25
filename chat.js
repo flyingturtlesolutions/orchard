@@ -4214,6 +4214,25 @@ async function sendChatMessage() {
     _orchFinalize(m); return;
   }
 
+  // CA-6 (v2.74.1205) — `canvas` opens this app's PRESENTATION tab (the roomy display/compose surface,
+  // DESIGN_canvas.md). It renders the app's presentation DEFAULT through the RENDER_CANVAS handler (exercising the
+  // full CA-4 pipeline). Only apps that DEFINE a presentation layer (appDef.presentation) have a canvas — env.canvas.
+  if (/^(canvas|open (the )?canvas|dashboard)\s*$/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    const m = appendMessage({ role: 'assistant', body: '' });
+    const appId = _currentConversationAppId;
+    let pres = null; try { pres = appId ? (builtinApp(appId)?.presentation || null) : null; } catch { /* */ }
+    if (!pres) { _setMessageBody(m, 'This app works in the panel — it has no canvas. (Apps that define a presentation layer, like the Financial monitor, open one.)'); _orchFinalize(m); return; }
+    const anchor = { appId, conversationId: null };   // a watcher's dashboard is per-APP (one standing HUD), not per-conversation
+    const spec = { title: pres.title || null, blocks: Array.isArray(pres.blocks) ? pres.blocks : [] };
+    try {
+      const r = await _orchReq('RENDER_CANVAS', { op: 'display', spec, anchor });
+      _setMessageBody(m, (r && r.success !== false) ? '🖼️ Opened the canvas in a tab — it updates live as the app composes it.' : `Couldn’t open the canvas${r && r.error ? ` (${r.error})` : ''}.`);
+    } catch { _setMessageBody(m, 'Couldn’t open the canvas.'); }
+    _orchFinalize(m); return;
+  }
+
   // `i: <ask>` — explicit INTERPRET front door. As of F-2c-flip (v2.74.1180) interpret is the DEFAULT for any plain
   // ask, so `i:` is now a redundant alias kept for muscle memory (it forces interpret + falls back to the IL loop on
   // unavailable, same as the default). `i:` ≠ `il:` — the regex needs `i` immediately followed by `:`.
