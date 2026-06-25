@@ -1673,7 +1673,10 @@ function _readSgSpec(groundId, url, intent) {
 // v2.74.951 (CR-X3a) — domain handler maps merge here; the dispatch + _invokeSgHandler serve them all.
 const _sgMessageHandlers = {
   ...createConnectorHandlers({ ensureContentScript: _ensureContentScript }),   // CX-3 — connector domain (INVOKE_SESSION session-ride)
-  ...createCanvasHandlers({ log: (line) => { try { Logger.info('background', line); } catch { /* */ } } }),   // CA-4 — canvas domain (RENDER_CANVAS → presentation tab)
+  ...createCanvasHandlers({   // CA-4 RENDER_CANVAS + CA-9 COMPOSE_CANVAS (the app authors a spec → render)
+    log: (line) => { try { Logger.info('background', line); } catch { /* */ } },
+    composeCanvas: (args) => AnthropicService.composeCanvas(args),
+  }),
   ...createWorkflowDebugHandlers({
     invokeSgHandler    : _invokeSgHandler,
     ensureContentScript: _ensureContentScript,

@@ -1,19 +1,21 @@
-// background/handlers/canvas.js — the canvas domain (DESIGN_canvas.md §3). CA-4.
+// background/handlers/canvas.js — the canvas domain (DESIGN_canvas.md §3). CA-4 + CA-9.
 //
-// RENDER_CANVAS: the executor behind the DISPLAY/COMPOSE legs AND the panel's `canvas` command. It (1) persists the
-// model-/app-authored spec per anchor via CanvasStore (which re-pins the anchor + stamps a monotonic rev, and runs
-// the closed-vocabulary normalize — Core/canvasSpec), then (2) opens/focuses the app's canvas TAB. The open tab
-// re-renders itself off chrome.storage.onChanged — the storage write IS the broadcast, so there's no custom fan-out.
-// NOT a page-driving channel (it writes a store + paints an extension tab) → never busy-marked (Invariant #2 N/A).
+// RENDER_CANVAS (CA-4): persist a given spec + open/focus the app's canvas tab.
+// COMPOSE_CANVAS (CA-9): have the app AUTHOR a fresh spec from an ask (the injected composeCanvas = the LLM), then
+//   render it through the same path. The closed-vocabulary normalize (CanvasStore → canvasSpec.normalizeCanvasSpec)
+//   is the single safety CHOKE POINT — an unknown/unsafe block from the model is DROPPED there.
+// The open tab re-renders itself off chrome.storage.onChanged — the write IS the broadcast. NOT a page-driving
+// channel → never busy-marked (Invariant #2 N/A).
 
 import { writeCanvasSpec } from '../../Services/Storage/CanvasStore.js';
 import { canvasDocId } from '../../Core/canvasSpec.js';
+import { builtinApp } from '../../Core/appCatalog.js';
+import { describeObjectModel } from '../../Core/appDef.js';
 
 const CANVAS_PAGE = 'canvas.html';
 
 // Open or focus THE canvas tab for an anchor — one tab per (appId, conversationId), carried in the hash. tabs.query
-// ignores the fragment, so we query all canvas.html tabs and match on the hash. Mirrors chat.js's btn-open-studio
-// focus-or-create. Returns the tabId or null.
+// ignores the fragment, so we query all canvas.html tabs and match on the hash. Mirrors chat.js's btn-open-studio.
 async function _openCanvasTab(anchor) {
   const appId = (anchor && anchor.appId) ? String(anchor.appId) : '';
   const convId = (anchor && anchor.conversationId) ? String(anchor.conversationId) : '';
@@ -32,26 +34,45 @@ async function _openCanvasTab(anchor) {
   } catch { return null; }
 }
 
-export function createCanvasHandlers({ log } = {}) {
+export function createCanvasHandlers({ log, composeCanvas } = {}) {
   const note = (line) => { try { if (typeof log === 'function') log(line); } catch { /* never let a log break a render */ } };
+
+  // Shared render: normalize+persist the spec (CanvasStore stamps rev) then open/focus the tab. Returns the response.
+  async function _render(anchor, spec, op, focus) {
+    const docId = canvasDocId(anchor);
+    if (!docId) return { success: false, error: 'canvas-no-anchor' };
+    const stored = await writeCanvasSpec(anchor, spec);
+    const tabId = (focus !== false) ? await _openCanvasTab(anchor) : null;   // a cadence refresh may pass focus:false
+    note(`CANVAS ▸ ${op} → ${docId} (rev ${stored ? stored.rev : '?'}, ${stored ? stored.blocks.length : 0} blocks)`);
+    return { success: true, op, docId, rev: stored ? stored.rev : null, tabId };
+  }
+
   return {
     'RENDER_CANVAS': (payload, _sender, sendResponse) => {
       (async () => {
         try {
           const p = (payload && typeof payload === 'object') ? payload : {};
           const anchor = (p.anchor && typeof p.anchor === 'object') ? p.anchor : {};
-          const docId = canvasDocId(anchor);
-          if (!docId) { sendResponse({ success: false, error: 'canvas-no-anchor' }); return; }
-          const stored = await writeCanvasSpec(anchor, p.spec);   // normalize (closed vocab) + pin anchor + stamp rev; the open tab repaints off storage.onChanged
-          const focus = p.focus !== false;                        // a cadence refresh may pass focus:false to update silently
-          const tabId = focus ? await _openCanvasTab(anchor) : null;
-          note(`CANVAS ▸ ${String(p.op || 'display')} → ${docId} (rev ${stored ? stored.rev : '?'}, ${stored ? stored.blocks.length : 0} blocks)`);
-          sendResponse({ success: true, op: String(p.op || 'display'), docId, rev: stored ? stored.rev : null, tabId });
-        } catch (e) {
-          sendResponse({ success: false, error: (e && e.message) || 'render-canvas-failed' });
-        }
+          sendResponse(await _render(anchor, p.spec, String(p.op || 'display'), p.focus));
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'render-canvas-failed' }); }
       })();
-      return true;   // async — keep the sendResponse channel open
+      return true;
+    },
+
+    'COMPOSE_CANVAS': (payload, _sender, sendResponse) => {
+      (async () => {
+        try {
+          if (typeof composeCanvas !== 'function') { sendResponse({ success: false, error: 'no-compose' }); return; }
+          const p = (payload && typeof payload === 'object') ? payload : {};
+          const anchor = (p.anchor && typeof p.anchor === 'object') ? p.anchor : {};
+          if (!canvasDocId(anchor)) { sendResponse({ success: false, error: 'canvas-no-anchor' }); return; }
+          let objects = ''; try { objects = describeObjectModel(builtinApp(p.appId)?.objectModel || null); } catch { objects = ''; }
+          const spec = await composeCanvas({ ask: String(p.ask || ''), seed: String(p.seed || ''), objects, learned: String(p.learned || '') });
+          if (!spec) { sendResponse({ success: false, error: 'compose-empty' }); return; }   // no LLM / unparseable / empty
+          sendResponse(await _render(anchor, spec, 'compose', p.focus));
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'compose-canvas-failed' }); }
+      })();
+      return true;
     },
   };
 }

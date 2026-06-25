@@ -4214,6 +4214,24 @@ async function sendChatMessage() {
     _orchFinalize(m); return;
   }
 
+  // CA-9 (v2.74.1206) — `canvas: <ask>` has the app COMPOSE a fresh view (LLM → CanvasSpec → the verified render
+  // pipeline). The closed vocabulary is enforced at the handler's normalizeCanvasSpec, so an odd reply can't inject.
+  if (/^canvas:\s*\S/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    const m = appendMessage({ role: 'assistant', body: '' });
+    const appId = _currentConversationAppId;
+    let pres = null; try { pres = appId ? (builtinApp(appId)?.presentation || null) : null; } catch { /* */ }
+    if (!pres) { _setMessageBody(m, 'This app has no canvas to compose into — it works in the panel. (The Financial monitor does.)'); _orchFinalize(m); return; }
+    const ask = text.replace(/^canvas:\s*/i, '').trim();
+    _setMessageBody(m, '🖼️ composing…');
+    try {
+      const r = await _orchReq('COMPOSE_CANVAS', { ask, appId, seed: _currentConversationSeed, anchor: { appId, conversationId: null } });
+      _setMessageBody(m, (r && r.success !== false) ? '🖼️ Composed it on the canvas.' : `Couldn’t compose the canvas${r && r.error ? ` (${r.error})` : ''}.`);
+    } catch { _setMessageBody(m, 'Couldn’t compose the canvas.'); }
+    _orchFinalize(m); return;
+  }
+
   // CA-6 (v2.74.1205) — `canvas` opens this app's PRESENTATION tab (the roomy display/compose surface,
   // DESIGN_canvas.md). It renders the app's presentation DEFAULT through the RENDER_CANVAS handler (exercising the
   // full CA-4 pipeline). Only apps that DEFINE a presentation layer (appDef.presentation) have a canvas — env.canvas.

@@ -32,6 +32,7 @@ import { buildInterpretMessages, parseInterpretOutput } from '../Core/interpretP
 import { buildStepMessages, parseStepDecision } from '../Core/stepPrompt.js';   // IL-2 — the inference-layer step controller prompt (fenced palette + observation)
 import { buildJudgeMessages, parseJudgeDecision } from '../Core/judgePrompt.js';   // IL-2 — the IL-as-user-standin match judge (pick the capability matchCapability found; no re-bind)
 import { buildAnswerMessages } from '../Core/answerPrompt.js';   // IL-2 — Orchard ANSWERING a meta/conversational ask from the available capabilities
+import { buildCanvasMessages, parseCanvasOutput } from '../Core/canvasPrompt.js';   // CA-9 — the app COMPOSES a CanvasSpec from an ask
 import { buildGapMessages, parseGaps } from '../Core/gapPrompt.js';   // PS-0 — Orchard's STRUCTURED capability-gap enumeration (the per-Ground demand signal)
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
@@ -5245,6 +5246,20 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     const res = await AnthropicService.#call(system, user, 1024, [], { role: 'routing', operation: 'interpret' });
     if (!res || res.success === false) return { ...parseInterpretOutput(null), why: 'interpret-unavailable' };
     return parseInterpretOutput(res.text);
+  }
+
+  /**
+   * CA-9 (v2.74.1206, DESIGN_canvas.md) — the app COMPOSES a CanvasSpec for its presentation tab from an ask. One
+   * structured call; PURE prompt + parse in Core/canvasPrompt.js. The closed display vocabulary is ENFORCED at the
+   * render side (canvasSpec.normalizeCanvasSpec — the single safety choke point), so a malformed reply can't inject.
+   * @returns {Promise<{title:string, blocks:Array}|null>}  null when no LLM / unparseable / empty.
+   */
+  static async composeCanvas({ ask, seed = '', objects = '', learned = '' } = {}) {
+    if (!ask || !(await AnthropicService.hasLlm())) return null;
+    const { system, user } = buildCanvasMessages(ask, { seed, objects, learned });
+    const res = await AnthropicService.#call(system, user, 1400, [], { role: 'describe', operation: 'compose-canvas' });
+    if (!res || res.success === false) return null;
+    return parseCanvasOutput(res.text);
   }
 
   /**
