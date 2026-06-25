@@ -58,7 +58,10 @@ let _currentConversationSeed = '';   // v2.74.1163 (CV-2b) — the current conve
 let _currentConversationConfig = { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — the current track's enforced app config; the write gate (actAllowed) blocks ACTS when writePolicy:'never' (a read-only app/sub-task).
 let _setupState = null;   // AS-2 (v2.74.1188) — the in-progress guided-setup flow: { convId, spec } while connecting an app to its site; null otherwise. While set (for the current conversation), the modal intercept at the top of sendChatMessage routes the next typed message into advanceSetup.
 let _currentConversationAppId = null;   // AL-3b (v2.74.1193) — the current app's appId = its TYPE (preset id); object-model / canvas resolve through it. Tracked at create / rehydrate / clear.
-let _currentConversationInstanceId = null;   // AP-0 (v2.74.1211) — the per-INSTANCE identity (unique per configured app); the goal-memory key once AP-0's threading lands, so two apps of one type don't share learning. Tracked alongside appId.
+let _currentConversationInstanceId = null;   // AP-0 (v2.74.1211) — the per-INSTANCE identity (unique per configured app); the goal-memory key, so two apps of one type don't share learning. Tracked alongside appId.
+// AP-0 — THE goal-memory key: the per-instance id when present, else the app TYPE (legacy apps with no instanceId, e.g.
+// created before .1211). `appId` stays the TYPE for object-model / canvas resolution; memory keys by THIS.
+const _memoryId = () => _currentConversationInstanceId || _currentConversationAppId || null;
 
 // v2.74.106 — Single-flight guard for conversation creation. Two parallel
 // callers (e.g. double-clicked suggestion cards) could both see
@@ -1255,7 +1258,7 @@ async function _spawnSubTasks(listText) {
   let made = 0;
   for (const spec of specs) {
     try {
-      await ConversationStore.create({ title: spec.title, kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config });
+      await ConversationStore.create({ title: spec.title, kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config, instanceId: app.instanceId || app.appId || null, presetId: app.presetId || app.appId || null });   // AP-0 — a sub-task SHARES its parent app's memory key (instanceId) + type
       made++;
     } catch (e) { try { console.warn('[chat] sub-task create failed:', e?.message); } catch { /* */ } }
   }
@@ -1409,7 +1412,7 @@ async function _bankSetup(step) {
 // Read-only; renders one markdown message. Off-app → a gentle note (Overview has no goal memory).
 async function _renderAppMemory() {
   const msg = appendMessage({ role: 'assistant', body: '' });
-  const appId = _currentConversationAppId;
+  const appId = _memoryId();   // AP-0 — the audit reads THIS instance's memory (per-instance, not the shared type)
   if (!appId) { _setMessageBody(msg, 'Open an app — goal memory is per-app. (Overview has none.)'); _orchFinalize(msg); return; }
   let items = [];
   try { items = await loadGoalItems(appId); } catch { /* */ }
@@ -3771,7 +3774,7 @@ function _withBoundUrl(params) {
 // Inferred + moderate confidence; a re-ask MERGES → bumps evidence → drives the promotion ratchet. Fire-and-forget;
 // a no-op off-app (no appId) or on a bad arg.
 function _bankCapabilityUse(goal, capabilityId) {
-  const appId = _currentConversationAppId;
+  const appId = _memoryId();   // AP-0 — bank the intent→capability association to THIS instance's memory
   if (!appId || !goal || !capabilityId) return;
   try {
     recordGoalItem(appId, { kind: 'belief', epistemic: 'inferred', confidence: 0.5, body: String(goal).slice(0, 160), ref: String(capabilityId), provenance: 'interpret-act' })
@@ -3786,7 +3789,7 @@ async function _tryInterpret(ask) {
   const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
   let raw = null; let retrieved = []; let groundId = null;
   try {
-    const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId, seed: _currentConversationSeed, target: _boundTarget(), appId: _currentConversationAppId });
+    const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId, seed: _currentConversationSeed, target: _boundTarget(), appId: _currentConversationAppId, memoryId: _memoryId() });
     if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; groundId = r.groundId || null; }
   } catch { /* */ }
   // F-2c-flip (v2.74.1180) — interpret unavailable (no LLM / handler error) → return FALSE so the caller falls back
@@ -3807,7 +3810,7 @@ async function _tryInterpret(ask) {
   }
   if (d.intent === 'answer') {
     let answer = null;
-    try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, appId: _currentConversationAppId }); answer = r && r.answer; } catch { /* */ }
+    try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
     _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 ${d.why || 'I’m not sure how to help with that here.'}`);
     _orchFinalize(msg);
     return true;
@@ -3828,7 +3831,7 @@ async function _tryInterpret(ask) {
   // couldn't dispatch (an act with only a primitive op, or a nav with no ground) → reasoned answer fallback.
   const m2 = appendMessage({ role: 'assistant', body: '🧠 thinking…' });
   let answer = null;
-  try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, appId: _currentConversationAppId }); answer = r && r.answer; } catch { /* */ }
+  try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
   _setMessageBody(m2, answer ? `🧠 ${answer}` : '🧠 I’m not sure how to do that here — want to show me?');
   _orchFinalize(m2);
   return true;
@@ -3922,7 +3925,7 @@ async function _tryIlCommand(text) {
 
   // No grounded action to run → Orchard ANSWERS the ask (meta/conversational — "what can you do?", "can you X?").
   let answer = null;
-  try { const r = await _orchReq('IL_ANSWER', { ask, tabId, seed: _currentConversationSeed, appId: _currentConversationAppId }); answer = r && r.answer; } catch { /* */ }
+  try { const r = await _orchReq('IL_ANSWER', { ask, tabId, seed: _currentConversationSeed, appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
   _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 I don’t have a saved capability for “${ask}” on this page yet — want to show me?`);
   try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${answer ? 'answered' : 'no match'}`); } catch { /* */ }
   return true;
@@ -4243,7 +4246,7 @@ async function sendChatMessage() {
     appendMessage({ role: 'user', body: text });
     const m = appendMessage({ role: 'assistant', body: '' });
     if (!_currentConversationAppId) { _setMessageBody(m, 'Open an app — goal memory is per-app.'); _orchFinalize(m); return; }
-    try { await clearGoalMemory(_currentConversationAppId); } catch { /* */ }
+    try { await clearGoalMemory(_memoryId()); } catch { /* */ }   // AP-0 — clear THIS instance's memory
     _setMessageBody(m, '🧠 Cleared this app’s memory.'); _orchFinalize(m); return;
   }
   // AL-3b+ (v2.74.1196) — `memory` OR a plain "show me what you know / what have you learned / what do you remember"
@@ -4267,7 +4270,7 @@ async function sendChatMessage() {
     if (!_currentConversationAppId) { _setMessageBody(m, 'Open an app — standing rules are per-app.'); _orchFinalize(m); return; }
     const rule = standingRuleFromText(text.replace(/^remember:\s*/i, ''));
     if (!rule) { _setMessageBody(m, 'Tell me a rule to remember, e.g. “remember: keep replies under 3 sentences”.'); _orchFinalize(m); return; }
-    try { await recordGoalItem(_currentConversationAppId, rule); } catch { /* */ }
+    try { await recordGoalItem(_memoryId(), rule); } catch { /* */ }   // AP-0 — a standing rule banks to THIS instance
     const when = rule.trigger ? ` when ${rule.trigger}` : '';
     _setMessageBody(m, `🧠 Got it — I’ll remember to ${rule.body}${when}. Type “memory” to review this app’s rules.`);
     _orchFinalize(m); return;

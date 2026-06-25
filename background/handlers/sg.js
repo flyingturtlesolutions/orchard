@@ -692,7 +692,8 @@ export function createSgMessageHandlers(ctx) {
         if (typeof tabId === 'number') { try { tabUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
         if (!groundId && tabUrl) { try { groundId = _groundIdForUrl(tabUrl, await StorageManager.getAllGrounds()); } catch { /* */ } }
         const seed = String(payload?.seed ?? '').trim();
-        const appId = String(payload?.appId ?? '').trim();   // AL-4 — the app's goal-memory key (off-app → '')
+        const appId = String(payload?.appId ?? '').trim();   // AL-4 — the app's TYPE (object-model resolve; off-app → '')
+        const memId = String(payload?.memoryId ?? '').trim() || appId;   // AP-0 (v2.74.1213) — the per-INSTANCE goal-memory key (falls back to the type for legacy apps)
         // AS-2c (v2.74.1190) — the app's bound site (TRUSTED config from setup). It seeds interpret's operating
         // context (the SYSTEM "OPERATING SITE" rule), and when the active tab ISN'T the bound site we resolve the
         // bound site's Ground so tool-RAG retrieves ITS capabilities ("get my open emails" finds the Gmail cap even
@@ -723,7 +724,7 @@ export function createSgMessageHandlers(ctx) {
         // (recall-by-grid, v2.74.1201). Empty off-app.
         const om = appId ? (builtinApp(appId)?.objectModel || null) : null;
         let learned = '';
-        if (appId) { try { learned = goalContextFor(await loadGoalItems(appId), ask, { om }); } catch { /* */ } }
+        if (memId) { try { learned = goalContextFor(await loadGoalItems(memId), ask, { om }); } catch { /* */ } }
         const objects = describeObjectModel(om);
         const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed, target, learned, objects });
         Logger.info('route', `INTERPRET_ASK "${ask.slice(0, 60)}" → ${decision.intent} (conf ${decision.confidence}, ${retrieved.length} cand, ground ${groundId || '—'})`);
@@ -790,7 +791,8 @@ export function createSgMessageHandlers(ctx) {
         const ask = String(payload?.ask ?? '').trim();
         let { tabId, groundId } = payload ?? {};
         const seed = String(payload?.seed ?? '').trim();   // CV-2b — conversation seed → the answer's persona preamble
-        const appId = String(payload?.appId ?? '').trim();   // AL-4 — the app's goal-memory key (off-app → '')
+        const appId = String(payload?.appId ?? '').trim();   // AL-4 — the app's TYPE (object-model resolve; off-app → '')
+        const memId = String(payload?.memoryId ?? '').trim() || appId;   // AP-0 (v2.74.1213) — the per-INSTANCE goal-memory key (falls back to the type for legacy apps)
         let tabUrl = '';
         if (typeof tabId === 'number') { try { tabUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
         if (!groundId && tabUrl) { try { groundId = _groundIdForUrl(tabUrl, await StorageManager.getAllGrounds()); } catch { /* */ } }
@@ -813,7 +815,7 @@ export function createSgMessageHandlers(ctx) {
         // `remember:` rule like "keep replies terse" applies here). Trusted; fenced in the prompt; empty off-app.
         const om = appId ? (builtinApp(appId)?.objectModel || null) : null;   // OM — the app's object model (resolved once)
         let learned = '';
-        if (appId) { try { learned = goalContextFor(await loadGoalItems(appId), ask, { om }); } catch { /* */ } }
+        if (memId) { try { learned = goalContextFor(await loadGoalItems(memId), ask, { om }); } catch { /* */ } }
         const objects = describeObjectModel(om);
         const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed, learned, objects });
         // PS-0 (v2.74.1123) — persist Orchard's capability-gap enumeration instead of discarding it: the durable,
