@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 import {
   OVERVIEW_ID, ARCHETYPES, WRITE_POLICIES, APP_TYPES,
-  normalizeConfig, tightenConfig, normalizeAppDefinition, appFromDefinition, normalizeObjectModel, describeObjectModel, classifyAskToGrid,
+  normalizeConfig, tightenConfig, normalizeAppDefinition, normalizePresentation, appFromDefinition, normalizeObjectModel, describeObjectModel, classifyAskToGrid,
   isOverview, isApp, isSubTask, canDelete, composeSeed, subTaskFromApp, overviewShape, planSubTasks,
 } from './appDef.js';
 
@@ -219,5 +219,23 @@ describe('appDef — overviewShape', () => {
     assert.equal(o.kind, 'agent');
     assert.equal(o.seed, null);
     assert.ok(isOverview(o) && canDelete(o) === false);
+  });
+});
+
+describe('appDef — presentation (CA-7, the optional canvas declaration)', () => {
+  it('absent / null / explicitly-disabled → null (panel-only, the default)', () => {
+    assert.equal(normalizePresentation(undefined), null);
+    assert.equal(normalizePresentation(null), null);
+    assert.equal(normalizePresentation({ enabled: false }), null);
+  });
+  it('true → an enabled empty canvas; an object carries title + opaque blocks', () => {
+    assert.deepEqual(normalizePresentation(true), { title: null, blocks: [] });
+    const p = normalizePresentation({ title: 'Dashboard', blocks: [{ kind: 'metric' }] });
+    assert.equal(p.title, 'Dashboard');
+    assert.equal(p.blocks.length, 1);
+  });
+  it('normalizeAppDefinition carries presentation (null by default, set when declared)', () => {
+    assert.equal(normalizeAppDefinition(DEF).presentation, null);
+    assert.deepEqual(normalizeAppDefinition({ ...DEF, presentation: true }).presentation, { title: null, blocks: [] });
   });
 });

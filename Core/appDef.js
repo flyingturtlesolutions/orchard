@@ -96,6 +96,20 @@ export function classifyAskToGrid(ask, om) {
   return { op, object, state, target: transition ? transition.to : null };
 }
 
+/**
+ * Normalize an app's PRESENTATION declaration (CA-7, DESIGN_canvas.md §3) — whether the app defines a CANVAS (its
+ * optional presentation plane). PURE. Returns null when the app has NO canvas (the default — it works entirely in
+ * the panel), else `{ title, blocks }`. `presentation: true` is shorthand for an empty canvas; `enabled:false`
+ * explicitly opts out. `blocks` (default seed content) is carried OPAQUE here — the renderer normalizes it via
+ * Core/canvasSpec (kept decoupled). The live wiring (env.canvas → the display/compose legs become offerable) is CA-6.
+ */
+export function normalizePresentation(p) {
+  if (p === true) return { title: null, blocks: [] };
+  const m = (p && typeof p === 'object') ? p : null;
+  if (!m || m.enabled === false) return null;
+  return { title: _str(m.title) || null, blocks: Array.isArray(m.blocks) ? m.blocks : [] };
+}
+
 /** Validate + normalize an AppDefinition (catalog entry). PURE. Returns the normalized def, or null if unusable. */
 export function normalizeAppDefinition(def) {
   const d = (def && typeof def === 'object') ? def : null;
@@ -116,6 +130,9 @@ export function normalizeAppDefinition(def) {
     // on. A preset specializes a type by binding the noun/states; null on a plain user app (learned at runtime).
     type: APP_TYPES.includes(d.type) ? d.type : null,
     objectModel: normalizeObjectModel(d.objectModel),
+    // CA-7 (v2.74.1204) — the optional presentation plane (the canvas). null ⇒ no canvas (panel-only). Drives the
+    // env.canvas gate (CA-6) that makes the display/compose legs offerable.
+    presentation: normalizePresentation(d.presentation),
     // CV-5b (v2.74.1183) — role-specific STARTER asks shown in the app's empty state (the gallery passes the def
     // straight to _createAppConversation, so these render without threading through the conversation record). PURE:
     // trim, drop blanks, cap at 4 so a malformed catalog entry can't flood the UI.

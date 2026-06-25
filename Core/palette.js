@@ -40,6 +40,11 @@ export const BUILTIN_LEGS = [
   { key: 'RELOAD_EXTENSION',         name: 'Reload extension',     does: 'reload the extension (dev)',                           mode: 'act', domain: 'self', safety: 'auto',    params: [], requires: [] },
   { key: 'EXPLORE_PAGE',             name: 'Explore this page',    does: 'map/ground the current page so I learn what it offers', mode: 'act', domain: 'self', safety: 'auto',    params: [], requires: [] },
   { key: 'TOGGLE_TRACKING',          name: 'Toggle interaction tracking', does: 'turn the interaction monitor (learns capabilities from your clicks) on or off', mode: 'act', domain: 'self', safety: 'confirm', params: [], requires: [] },
+  // Self — CANVAS render (ACT×Self → the SW channel RENDER_CANVAS, not panel-local). CA-2 (DESIGN_canvas.md §3).
+  // Offered ONLY when the bound app DEFINES a presentation layer (`requires:['canvas']` → env.canvas, set in CA-6);
+  // until then never offered. `spec` is the model-authored CanvasSpec (validated by canvasSpec.normalizeCanvasSpec).
+  { key: 'DISPLAY', name: 'Show in the canvas',    does: "render a read-only view (a HUD, digest, or summary) in the app's canvas tab",                 mode: 'act', domain: 'self', safety: 'auto', params: ['spec'], requires: ['canvas'] },
+  { key: 'COMPOSE', name: 'Compose in the canvas', does: "open editable content (a reply, a guide) in the app's canvas tab for the user to review/edit", mode: 'act', domain: 'self', safety: 'auto', params: ['spec'], requires: ['canvas'] },
 ];
 
 /**

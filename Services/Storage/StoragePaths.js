@@ -3,7 +3,7 @@
  * @description Legacy chrome.storage keys ↔ Orchard logical paths (§19.2).
  */
 
-/** @typedef {'ground'|'fragment'|'observation'|'analysis'|'assertion'|'perspective'|'landmark'|'strategy'|'workflow'|'locale'|'siteMap'|'chrome'|'goalMemory'} SyncKind */
+/** @typedef {'ground'|'fragment'|'observation'|'analysis'|'assertion'|'perspective'|'landmark'|'strategy'|'workflow'|'locale'|'siteMap'|'chrome'|'goalMemory'|'canvas'} SyncKind */
 
 /** @type {SyncKind[]} */
 export const SYNCABLE_KINDS = [
@@ -25,6 +25,10 @@ export const SYNCABLE_KINDS = [
   // on any kind absent from KIND_ALIASES, so this entry is inert (local-only) until then — the safe default for the
   // user's learned work-beliefs.
   'goalMemory',
+  // CA-3 (v2.74.1204) — per-anchor canvas docs (the app presentation layer, DESIGN_canvas.md §3). Same filter-gated
+  // pattern as goalMemory: declared syncable + path-registered, but cloud sync stays OFF until additively activated
+  // (KIND_ALIASES + loadRecord; isWorkspacePartitionKind). Inert/local-only until then.
+  'canvas',
 ];
 
 const LEGACY_PREFIX = {
@@ -115,6 +119,13 @@ export function logicalPathForRecord(kind, record) {
       if (!appId) return null;
       return `workspace/appMemory/${encodePathSegment(appId)}/goalMemory.json`;
     }
+    case 'canvas': {
+      // CA-3 — a per-anchor canvas doc lives under its owning app's memory area, keyed by canvasDocId.
+      const appId = String(record.appId || '');
+      const docId = String(record.docId || id || '');
+      if (!appId || !docId) return null;
+      return `workspace/appMemory/${encodePathSegment(appId)}/canvas/${encodePathSegment(docId)}.json`;
+    }
     default:
       return null;
   }
@@ -170,6 +181,9 @@ export function recordMetaFromPath(logicalPath) {
 
   m = logicalPath.match(/^workspace\/appMemory\/([^/]+)\/goalMemory\.json$/);   // AL-3 — per-app goal memory
   if (m) return { kind: 'goalMemory', id: decodePathSegment(m[1]), appId: decodePathSegment(m[1]) };
+
+  m = logicalPath.match(/^workspace\/appMemory\/([^/]+)\/canvas\/([^/]+)\.json$/);   // CA-3 — per-anchor canvas doc
+  if (m) return { kind: 'canvas', id: decodePathSegment(m[2]), appId: decodePathSegment(m[1]) };
 
   return null;
 }

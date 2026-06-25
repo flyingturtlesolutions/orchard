@@ -73,6 +73,16 @@ function _planExec(leg, params = {}, ctx = {}) {
     return { ok: true, channel, busyMark: false, mode: 'ask', domain: 'browser', payload: {}, reason: 'browser-list' };
   }
   if (domain === 'self') {
+    // CA-2 — canvas render legs (DESIGN_canvas.md §3): write a model-authored spec to the app's presentation tab.
+    // Self-domain but SW-channel-dispatched (it crosses to the canvas tab + persists, and the cadence path fires it
+    // with no panel open) → never busy-marked (Invariant #2 N/A, like connector). The handler is CA-4.
+    if (key === 'DISPLAY' || key === 'COMPOSE') {
+      const spec = (p && p.spec && typeof p.spec === 'object') ? p.spec : null;
+      if (!spec) return fail('self', 'render-needs-spec');
+      const anchor = { appId: (ctx && ctx.appId) || null, conversationId: (ctx && ctx.conversationId) || null };
+      return { ok: true, channel: 'RENDER_CANVAS', busyMark: false, mode: 'act', domain: 'self',
+               payload: { op: key.toLowerCase(), spec, anchor }, reason: 'canvas-render' };
+    }
     const channel = SELF_CHANNEL[key];
     if (!channel) return fail('self', 'unknown-self-op');
     return { ok: true, channel, busyMark: false, mode: 'ask', domain: 'self', payload: { tabId, groundId }, reason: 'self-introspect' };
