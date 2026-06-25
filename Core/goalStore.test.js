@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  goalItemKey, goalItemId, addItem, promoteItemInList, removeItem, queryItems, rollupGoalMemory, capItems,
+  goalItemKey, goalItemId, addItem, promoteItemInList, removeItem, queryItems, rollupGoalMemory, capItems, consolidateGoalMemory,
 } from './goalStore.js';
 
 const belief = (body, over = {}) => ({ kind: 'belief', body, ...over });
@@ -128,5 +128,30 @@ describe('goalStore — capItems (bounded growth, canon protected)', () => {
     assert.ok(capped.some((x) => x.tier === 'summary'));
     // the 2 protected + the 2 strongest observations
     assert.equal(capped.filter((x) => x.tier === 'observation').length, 2);
+  });
+});
+
+describe('goalStore — consolidateGoalMemory (AL-6, the slow pass)', () => {
+  const one = (over) => consolidateGoalMemory([addItem([], belief('a claim', over))[0]])[0];
+  it('settles an observation up the evidence gates as far as it qualifies', () => {
+    assert.equal(one({ tier: 'observation', confidence: 0.5 }).tier, 'hypothesis');   // 0.5 ≥ 0.3 (cheap), but < 0.7 → stops at hypothesis
+  });
+  it('promotes a corroborated hypothesis to confirmed', () => {
+    let l = addItem([], belief('churning', { tier: 'hypothesis', confidence: 0.8 }));
+    l = addItem(l, belief('churning', { confidence: 0.8 }));        // evidence → 2
+    assert.equal(consolidateGoalMemory(l)[0].tier, 'confirmed');    // 0.8 ≥ 0.7 AND evidence 2 → confirmed
+  });
+  it('NEVER auto-canonizes — confirmed stays confirmed (canonization is HITL)', () => {
+    assert.equal(one({ tier: 'confirmed', confidence: 1, evidence: 9 }).tier, 'confirmed');
+  });
+  it('rolls a canonical item into the summary tier (the distilled, always-loaded summary)', () => {
+    assert.equal(one({ tier: 'canonical', confidence: 0.9 }).tier, 'summary');
+  });
+  it('compacts: caps growth, protecting canonical/summary', () => {
+    let l = addItem([], belief('canon', { tier: 'canonical' }));
+    for (let i = 0; i < 6; i++) l = addItem(l, belief(`o${i}`, { tier: 'observation', confidence: 0.1 }));
+    const out = consolidateGoalMemory(l, { cap: 3 });
+    assert.equal(out.length, 3);
+    assert.ok(out.some((x) => x.tier === 'summary'));              // the canonical was rolled to summary + survived the cap (protected)
   });
 });

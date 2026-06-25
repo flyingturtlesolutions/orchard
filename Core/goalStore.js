@@ -10,7 +10,7 @@
 // count — how many times this claim has been re-recorded; it FEEDS the promotion gate: 2+ corroborations is the
 // hypothesis→confirmed threshold, §4).
 
-import { normalizeMemoryItem, promote, tierRank, TIERS } from './goalMemory.js';
+import { normalizeMemoryItem, promote, nextTier, tierRank, TIERS } from './goalMemory.js';
 
 // djb2 → base36, the same id style as Core/outcomes.hashId / Core/locale. PURE + deterministic (no clock/random).
 function _hash(s) {
@@ -119,4 +119,31 @@ export function capItems(items, max = 200) {
     .sort((a, b) => (tierRank(b.tier) - tierRank(a.tier)) || ((b.confidence ?? 0) - (a.confidence ?? 0)) || ((b.evidence ?? 0) - (a.evidence ?? 0)));
   const keep = prunable.slice(0, Math.max(0, max - protectedItems.length));
   return [...protectedItems, ...keep];
+}
+
+// Settle ONE item: walk it UP through the gates it already clears, then stop. Uses the item's own confidence +
+// evidence as the signals, and provides `consolidating:true` (the slow-path flag for canonical→summary). STOPS at
+// the confirmed→canonical step — canonization is HITL (§7, the human's accept gate), never automatic here.
+function _settleItem(x) {
+  let item = x;
+  for (let guard = 0; guard < TIERS.length; guard++) {
+    const nt = nextTier(item.tier);
+    if (!nt || nt === 'canonical') break;                              // top tier, or the HITL canonization step → leave to the human
+    const next = promote(item, { confidence: item.confidence, evidenceCount: item.evidence, consolidating: true });
+    if (!next || next.tier === item.tier) break;                       // the gate didn't clear → settled
+    item = { ...next, id: x.id, evidence: x.evidence };                // keep the store fields (id/evidence) across the promote
+  }
+  return item;
+}
+
+/**
+ * AL-6 — the SLOW CONSOLIDATION pass (DESIGN_apps_learning.md §5/§9). PURE. The slow clock: it SETTLES the store —
+ * promoting every item as far up as the evidence/consolidation gates already allow (observation→hypothesis→confirmed
+ * by accumulated confidence/evidence; canonical→summary by consolidation) — then COMPACTS (capItems, canon/summary
+ * protected). It NEVER auto-canonizes: confirmed→canonical is HITL (§7) and stays the human's accept gate. The
+ * PERIODIC FIRING (a cadence/alarm) is the backend stage (deferred); this is the pure transform.
+ */
+export function consolidateGoalMemory(items, { cap = 200 } = {}) {
+  const list = (Array.isArray(items) ? items : []).filter((x) => x && x.id);
+  return capItems(list.map(_settleItem), cap);
 }
