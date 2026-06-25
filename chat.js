@@ -33,7 +33,7 @@ import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch plan
 import { recipeLegs, normalizeTicket } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildDrawerTree } from './Core/drawerTree.js';   // CV-3c — the pure flush-left accordion model
-import { planSubTasks, classifyAskToGrid, isConfiguredDef } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app)
+import { planSubTasks, subTaskFromApp, classifyAskToGrid, isConfiguredDef } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app)
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-app write gate (read-only enforcement)
 import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps; AP-4 — configuredAppDefinition (mint a durable, re-creatable app from a set-up instance)
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
@@ -622,20 +622,19 @@ function _historyConvRow(conv, row) {
     await _renderHistoryList();
   });
 
-  // AP-2 — "+" → start a sub-conversation under this app (prompt for a name; reuse the fan-out spawn).
+  // AP-2 — "+" → start a sub-conversation under this app, AUTO-NAMED `<parent> #N` (no prompt; v2.74.1216).
   item.querySelector('.history-item-subtask')?.addEventListener('click', async (e) => {
     e.stopPropagation();
-    const name = prompt('Name this sub-conversation (e.g. a ticket # or task):');
-    if (name == null) return;
-    const title = String(name).trim();
-    if (title) await _spawnSubTask(conv.id, title);
+    await _spawnSubTask(conv.id);
   });
 
-  // click the row → load the conversation (any level — Overview/app/sub-task; §2 chat-at-any-level). The drawer
-  // stays open (only ✕ / the header toggle closes it). delete/preview/chevron have their own handlers.
+  // click the row → load the conversation (any level — Overview/app/sub-task; §2 chat-at-any-level). delete/preview/
+  // chevron/subtask have their own handlers. v2.74.1216 — picking an APP or the OVERVIEW also CLOSES the drawer (it's
+  // a navigation to a primary context); sub-task / plain rows keep it open so you can keep browsing.
   item.addEventListener('click', async (e) => {
     if (e.target.closest('.history-item-delete') || e.target.closest('.history-item-preview') || e.target.closest('.history-chevron') || e.target.closest('.history-item-subtask')) return;
-    if (conv.id === _currentConversationId) return;
+    const closeOnPick = row.role === 'app' || row.role === 'overview';
+    if (conv.id === _currentConversationId) { if (closeOnPick) _closeHistory(); return; }
     if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch conversations anyway?')) return;
     const full = await ConversationStore.load(conv.id);
     if (full) {
@@ -643,6 +642,7 @@ function _historyConvRow(conv, row) {
       await _resumeRunningInvocations();
       await _renderHistoryList();
     }
+    if (closeOnPick) _closeHistory();
   });
 
   // v2.74.1095 — dev-aware delete: stop a live run (free the host slot) before removing the record; keep the branch.
@@ -1141,17 +1141,23 @@ async function _appendConfiguredApps(container, typeId) {
   }
 }
 
-// AP-2 (v2.74.1213) — start ONE sub-conversation under a specific app (from the drawer "+"). Mirrors _spawnSubTasks
-// but targets an app by id with a single titled item; the child INHERITS the app's memory key (instanceId) + type.
-async function _spawnSubTask(appConvId, title) {
+// AP-2 (v2.74.1213) — start ONE sub-conversation under a specific app (from the drawer "+"). The child INHERITS the
+// app's memory key (instanceId) + type. AUTO-NAMED `<parent name> #N` (v2.74.1216) — no prompt; N is the next free
+// index among the app's sub-conversations (skips gaps left by deletions so the number stays unique). The sub-thread
+// inherits the app's seed (subTaskFromApp with a blank sub-seed) — it's a fresh working thread, not an item handler.
+async function _spawnSubTask(appConvId) {
   let app = null;
   try { app = await ConversationStore.load(appConvId); } catch { /* */ }
   if (!app || !app.appId || app.parentId) { toast('Sub-conversations start under an app.', 'err'); return; }
-  const specs = planSubTasks(app, [title]);
-  if (!specs.length) { toast('Couldn’t start the sub-conversation.', 'err'); return; }
-  const spec = specs[0];
+  let n = 1; let titles = new Set();
+  try { const all = await ConversationStore.list(); const kids = all.filter((c) => c && c.parentId === appConvId); n = kids.length + 1; titles = new Set(kids.map((k) => String(k.title || ''))); } catch { /* */ }
+  const base = app.title || 'Task';
+  while (titles.has(`${base} #${n}`)) n++;     // a deletion can leave a gap — bump past any taken number
+  const title = `${base} #${n}`;
+  const spec = subTaskFromApp(app, '');        // blank sub-seed → the child inherits the app's seed (composeSeed)
+  if (!spec) { toast('Sub-conversations start under an app.', 'err'); return; }
   try {
-    await ConversationStore.create({ title: String(title).slice(0, 60), kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config, instanceId: app.instanceId || app.appId || null, presetId: app.presetId || app.appId || null });
+    await ConversationStore.create({ title: title.slice(0, 60), kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config, instanceId: app.instanceId || app.appId || null, presetId: app.presetId || app.appId || null });
     _expandedApps.add(app.id);
     await _renderHistoryList();
   } catch (e) { try { console.warn('[chat] sub-task spawn failed:', e?.message); } catch { /* */ } toast('Couldn’t start the sub-conversation.', 'err'); }
