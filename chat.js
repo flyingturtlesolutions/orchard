@@ -4758,6 +4758,7 @@ async function sendChatMessage() {
   }
   } finally {
     _setConvProcessing(_busyConv, false);   // v2.74.1226 — always clear "● working…" (return/throw alike)
+    $('btn-chat-send').disabled = false;     // v2.74.1231 (bcp) — always re-enable Send; the targetId direct-invoke / legacy-matcher / throw paths left it stuck disabled
   }
 }
 
