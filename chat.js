@@ -20,7 +20,7 @@ import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
 import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, namesMultipleSites, namesAnySite } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X)
 import { walkPlan, scanPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate); scanPlan — THE recursive plan walker (CR-D7)
-import { builtinApps, builtinApp } from './Core/appCatalog.js';   // CV-3 — the builtin app catalog (the gallery's cards; each seeds a kind:'app' conversation). AS-2 — builtinApp(appId) → the def behind a conversation (for its archetype → shape template)
+import { builtinApps, builtinApp, presetsForType } from './Core/appCatalog.js';   // CV-3 — the builtin app catalog (the gallery's cards; each seeds a kind:'app' conversation). AS-2 — builtinApp(appId) → the def behind a conversation. OM — presetsForType → the named quick-starts under each abstract type
 import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   // ORCH-A — predicate → gate (conditional routing + the analysis)
 import { comprehend } from './Core/orchComprehend.js';   // ORCH-CB — substrate-free shape comprehension (cold-ground decompose)
 import { renderCriteria, renderPlanLines } from './Core/orchVisual.js';   // ORCH-CB — search params → criteria for a visual condition's prompt; renderPlanLines — the confirm-card plan renderer (CR-D7)
@@ -1060,6 +1060,20 @@ function _renderAppGallery() {
       <div class="suggestion-card-meta"><span class="suggestion-card-kind">${escHtml(def.archetype || 'app')}</span></div>`;
     card.addEventListener('click', () => { void _createAppConversation(def); });
     container.appendChild(card);
+    // OM (v2.74.1200) — the named PRESETS that specialize this type (Support agent under Inbox, …) as one-click
+    // quick-starts, rendered right after their type so they read as its specializations. Clicking the abstract
+    // type makes a generic app; clicking a preset binds its object model + role/safety. The `-preset` class lets
+    // CSS subordinate them later (no rule needed now — they're clearly named cards).
+    for (const preset of presetsForType(def.id)) {
+      const pc = document.createElement('button');
+      pc.className = 'suggestion-card suggestion-card-preset';
+      pc.innerHTML = `
+        <div class="suggestion-card-name">${escHtml(preset.name)}</div>
+        ${preset.description ? `<div class="suggestion-card-summary">${escHtml(preset.description)}</div>` : ''}
+        <div class="suggestion-card-meta"><span class="suggestion-card-kind">${escHtml(def.name)} preset</span></div>`;
+      pc.addEventListener('click', () => { void _createAppConversation(preset); });
+      container.appendChild(pc);
+    }
   }
   const custom = document.createElement('button');
   custom.className = 'suggestion-card';

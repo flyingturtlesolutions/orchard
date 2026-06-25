@@ -573,6 +573,15 @@ textarea {
   opacity: 0.5;
   cursor: not-allowed;
 }
+/* OM (v2.74.1200) — a named PRESET under its abstract type: dashed + transparent so the type cards read as the
+   primary choice and presets as their lighter-weight specializations. Layout-safe (no width/margin change). */
+.suggestion-card-preset {
+  background: transparent;
+  border-style: dashed;
+}
+.suggestion-card-preset .suggestion-card-name {
+  font-weight: 500;
+}
 
 .suggestion-card-name {
   font-size: 13px;
