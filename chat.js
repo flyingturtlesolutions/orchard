@@ -620,17 +620,10 @@ function _historyPinRow(row) {
   // v2.74.1219 — the Overview "pick up where you left off" peek = the last active conversation's summary (drawerTree).
   const summaryLine = row.summary ? `<div class="history-item-summary">${escHtml(row.summary)}</div>` : '';
   el.innerHTML = `<div class="history-item-title"><span class="history-glyph" aria-hidden="true">⌂</span>${escHtml(row.title)}</div>${summaryLine}`;
-  // v2.74.1223 — single-click resumes the last conversation but KEEPS the drawer open (select); double-click also
-  // closes it (full timeline). A short timer separates the two.
-  let _pinClickTimer = null;
-  el.addEventListener('click', () => {
-    if (_pinClickTimer) return;                          // 2nd click of a double — dblclick handles it
-    _pinClickTimer = setTimeout(() => { _pinClickTimer = null; void _resumeOverview({ close: false }); }, 220);
-  });
-  el.addEventListener('dblclick', () => {
-    if (_pinClickTimer) { clearTimeout(_pinClickTimer); _pinClickTimer = null; }
-    void _resumeOverview({ close: true });
-  });
+  // v2.74.1233 — Overview is a plain SINGLE-click: resume your last conversation AND close the drawer, so you land in
+  // the chat ready to type. (The .1223 single/double model kept the drawer OPEN on single-click — it loaded behind
+  // the drawer and never highlighted Overview, so it felt unselectable and you never reached the chat.)
+  el.addEventListener('click', () => { void _resumeOverview({ close: true }); });
   return el;
 }
 
