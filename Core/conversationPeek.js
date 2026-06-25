@@ -26,14 +26,23 @@ export function peekText(body) {
 }
 
 /**
- * The most recent substantive user/assistant message as a capped plain-text peek, or ''. PURE. Walks from the end
- * (the freshest line = the "recent direction") and skips system/thinking/empty messages.
+ * The conversation's "where it stands" peek, plain-text + capped, or ''. PURE. v2.74.1225 — prefers the LAST LLM
+ * (assistant) reply: that's the conversation's current state, and it's stable while you type the next ask. Falls back
+ * to the last user message only when there's no assistant reply yet (a fresh ask), so the card is never blank. Skips
+ * system/thinking/empty messages. The cap is generous (the drawer clamps to 3 lines, expanding to the full text on
+ * hover — so this is the hover payload).
  */
-export function conversationPeek(messages, { maxChars = 240 } = {}) {
+export function conversationPeek(messages, { maxChars = 400 } = {}) {
   const list = Array.isArray(messages) ? messages : [];
-  for (let i = list.length - 1; i >= 0; i--) {
+  for (let i = list.length - 1; i >= 0; i--) {            // the last LLM reply wins
     const m = list[i];
-    if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
+    if (!m || m.role !== 'assistant') continue;
+    const text = peekText(m.body);
+    if (text) return text.slice(0, maxChars);
+  }
+  for (let i = list.length - 1; i >= 0; i--) {            // none yet → the last user ask, so the card isn't blank
+    const m = list[i];
+    if (!m || m.role !== 'user') continue;
     const text = peekText(m.body);
     if (text) return text.slice(0, maxChars);
   }

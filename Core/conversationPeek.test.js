@@ -36,6 +36,18 @@ describe('conversationPeek — the recent-direction peek', () => {
     assert.ok(conversationPeek([{ role: 'assistant', body: long }], { maxChars: 50 }).length <= 50);
   });
 
+  it('prefers the last LLM (assistant) reply over a trailing pending user ask (v2.74.1225)', () => {
+    const msgs = [
+      { role: 'assistant', body: 'Here are your 3 open tickets.' },
+      { role: 'user', body: 'now close the first one' },
+    ];
+    assert.equal(conversationPeek(msgs), 'Here are your 3 open tickets.');   // the LLM's last word, not the pending ask
+  });
+
+  it('falls back to the last user message when there is no assistant reply yet', () => {
+    assert.equal(conversationPeek([{ role: 'user', body: 'first question' }]), 'first question');
+  });
+
   it('no substantive messages → empty string', () => {
     assert.equal(conversationPeek([]), '');
     assert.equal(conversationPeek([{ role: 'system', body: 'x' }]), '');

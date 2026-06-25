@@ -1545,6 +1545,12 @@ textarea {
   overflow: hidden;
   margin-top: 1px;
 }
+/* v2.74.1225 — hovering a row VERTICALLY EXPANDS the card: the 3-line clamp lifts so the full last-LLM-message peek
+   shows. The row grows to fit (the drawer is a flex column), so neighbours reflow down. */
+.history-item:hover .history-item-summary {
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}
 
 .history-item-meta {
   font-size: 11px;
