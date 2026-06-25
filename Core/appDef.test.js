@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 import {
   OVERVIEW_ID, ARCHETYPES, WRITE_POLICIES, APP_TYPES,
-  normalizeConfig, tightenConfig, normalizeAppDefinition, appFromDefinition, normalizeObjectModel,
+  normalizeConfig, tightenConfig, normalizeAppDefinition, appFromDefinition, normalizeObjectModel, describeObjectModel,
   isOverview, isApp, isSubTask, canDelete, composeSeed, subTaskFromApp, overviewShape, planSubTasks,
 } from './appDef.js';
 
@@ -78,6 +78,15 @@ describe('appDef — normalizeObjectModel', () => {
   it('keeps only well-formed {verb,to} transitions (the postcondition pairs)', () => {
     const m = normalizeObjectModel({ noun: 'msg', transitions: [{ verb: 'archive', to: 'archived' }, { verb: 'x' }, { to: 'y' }, null] });
     assert.deepEqual(m.transitions, [{ verb: 'archive', to: 'archived' }]);
+  });
+  it('describeObjectModel renders a compact schema block; empty model → ""', () => {
+    const block = describeObjectModel({ noun: 'ticket', plural: 'tickets', states: ['open', 'closed'], actions: ['reply'], transitions: [{ verb: 'close', to: 'closed' }] });
+    assert.match(block, /Objects: tickets/);
+    assert.match(block, /States .*: open · closed/);
+    assert.match(block, /Actions .*: reply/);
+    assert.match(block, /close → closed/);
+    assert.equal(describeObjectModel(null), '');
+    assert.equal(describeObjectModel({ states: ['x'] }), '');   // no noun
   });
 });
 

@@ -56,6 +56,15 @@ describe('interpretPrompt — buildInterpretMessages', () => {
     assert.match(system, /LEARNED:/);
     assert.doesNotMatch(buildInterpretMessages('x', {}).user, /<LEARNED/);
   });
+
+  it('OM — an objects block adds <OBJECTS> + the SYSTEM OBJECTS rule; absent when empty', () => {
+    const objects = 'Objects: tickets (each one a "ticket").\nStates (also the views): open · closed.\nState changes: close → closed.';
+    const { system, user } = buildInterpretMessages('close it', { objects });
+    assert.match(user, /<OBJECTS/);
+    assert.match(user, /State changes: close → closed/);
+    assert.match(system, /OBJECTS:/);
+    assert.doesNotMatch(buildInterpretMessages('x', {}).user, /<OBJECTS/);
+  });
 });
 
 describe('interpretPrompt — parseInterpretOutput', () => {

@@ -55,7 +55,7 @@ function personaRole(persona) {
  *          coverage?:{authoredCount:number,total:number,coveragePct:number}|null, url?:string }} args
  * @returns {{ system:string, user:string }}
  */
-export function buildAnswerMessages({ ask, capabilities = [], affordances = [], coverage = null, url = '', seed = '', learned = '' } = {}) {
+export function buildAnswerMessages({ ask, capabilities = [], affordances = [], coverage = null, url = '', seed = '', learned = '', objects = '' } = {}) {
   const capLines = (Array.isArray(capabilities) ? capabilities : [])
     .map((c) => { const n = c && (c.name || c.alias); return n ? `- ${n}${c.alias ? '  (you\'ve used this)' : ''}` : null; })
     .filter(Boolean)
@@ -80,6 +80,8 @@ export function buildAnswerMessages({ ask, capabilities = [], affordances = [], 
     capLines.length ? capLines.join('\n') : '(none saved on this page yet)',
     '</CAPABILITIES>',
   );
+  const objectsText = String(objects ?? '').trim();   // OM — the app's object model (its schema)
+  if (objectsText) parts.push('', '<OBJECTS note="what this app works on — its objects, states, and the verbs that change state">', objectsText, '</OBJECTS>');
   const learnedText = String(learned ?? '').trim();   // AL-4 — the app's learned rules + relevant facts
   if (learnedText) parts.push('', '<LEARNED note="this app\'s own memory — standing rules + relevant facts; trusted, follow the rules">', learnedText, '</LEARNED>');
   if (cov) parts.push('', `COVERAGE: ${cov}.`);

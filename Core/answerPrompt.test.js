@@ -66,3 +66,12 @@ describe('buildAnswerMessages — AL-4 learned context (standing rules apply to 
     assert.doesNotMatch(buildAnswerMessages({ ask: 'x' }).user, /<LEARNED/);
   });
 });
+
+describe('buildAnswerMessages — OM object model', () => {
+  it('an objects block adds <OBJECTS> to the user; absent when empty', () => {
+    const { user } = buildAnswerMessages({ ask: 'what can you do', objects: 'Objects: emails (each one a "email").' });
+    assert.match(user, /<OBJECTS/);
+    assert.match(user, /Objects: emails/);
+    assert.doesNotMatch(buildAnswerMessages({ ask: 'x' }).user, /<OBJECTS/);
+  });
+});

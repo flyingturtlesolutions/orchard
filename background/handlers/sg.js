@@ -28,6 +28,8 @@ import { segmentTrace, opToPhases, deriveObservedParams, parameterizeObserved, d
 import { listLocales } from '../../Services/Storage/GroundAssetStore.js';   // OBS (v2.74.764) — reconcile observed landmarks to grounded Locale features
 import { loadGoalItems } from '../../Services/Storage/GoalMemoryStore.js';   // AL-4 — read the app's goal memory (beliefs/deltas)
 import { goalContextFor } from '../../Core/goalRetrieval.js';   // AL-4 — assemble the relevant standing rules + recall into a context block
+import { builtinApp } from '../../Core/appCatalog.js';   // OM — the app's catalog entry (its object model)
+import { describeObjectModel } from '../../Core/appDef.js';   // OM — render the app's object model (noun/states/actions/transitions) as a context block
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability, findDuplicateCapabilities } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A; GA-6 dedup
 import { findDuplicateGroundGroups, planGroundMerge, primaryHost, siteIdentity, planEnsureGround } from '../../Core/groundDedup.js';   // v2.74.816/.817 — duplicate-Ground detect + merge; .835 — registrable brand for site-name matching; G1 — dedup-before-mint plan
 import { GroundManager } from '../../Core/GroundManager.js';   // G1 — auto-ground mint (dedup-before-mint entrypoint)
@@ -718,7 +720,10 @@ export function createSgMessageHandlers(ctx) {
         // fenced in the prompt. Empty off-app / no-memory.
         let learned = '';
         if (appId) { try { learned = goalContextFor(await loadGoalItems(appId), ask); } catch { /* */ } }
-        const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed, target, learned });
+        // OM (v2.74.1199) — the app's OBJECT MODEL (what it works on: noun/states/actions/transitions), from its
+        // catalog type/preset. Gives the LLM the exact state vocabulary + which verbs change state. Empty off-app.
+        const objects = appId ? describeObjectModel(builtinApp(appId)?.objectModel || null) : '';
+        const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed, target, learned, objects });
         Logger.info('route', `INTERPRET_ASK "${ask.slice(0, 60)}" → ${decision.intent} (conf ${decision.confidence}, ${retrieved.length} cand, ground ${groundId || '—'})`);
         sendResponse({ success: true, decision, groundId: groundId || null, retrieved });
       } catch (err) {
@@ -806,7 +811,8 @@ export function createSgMessageHandlers(ctx) {
         // `remember:` rule like "keep replies terse" applies here). Trusted; fenced in the prompt; empty off-app.
         let learned = '';
         if (appId) { try { learned = goalContextFor(await loadGoalItems(appId), ask); } catch { /* */ } }
-        const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed, learned });
+        const objects = appId ? describeObjectModel(builtinApp(appId)?.objectModel || null) : '';   // OM — the app's object schema
+        const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed, learned, objects });
         // PS-0 (v2.74.1123) — persist Orchard's capability-gap enumeration instead of discarding it: the durable,
         // per-Ground DEMAND signal PS-1 arms into the interaction monitor for passive harvest. Non-fatal/best-effort.
         try {

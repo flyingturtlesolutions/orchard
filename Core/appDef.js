@@ -59,6 +59,21 @@ export function normalizeObjectModel(om) {
   return { noun, plural: _str(m.plural) || `${noun}s`, states: list(m.states), actions: list(m.actions), transitions };
 }
 
+/**
+ * Render an object model as a compact, prompt-ready DATA block — the app's schema (what it works on) for the LLM's
+ * context. PURE. '' when there's no usable model. So the reasoner knows the exact state vocabulary ("mark it
+ * 'pending'") and which verbs change state (→ postconditions). The live wiring fences this as inert DATA.
+ */
+export function describeObjectModel(om) {
+  const m = normalizeObjectModel(om);
+  if (!m) return '';
+  const parts = [`Objects: ${m.plural} (each one a "${m.noun}").`];
+  if (m.states.length) parts.push(`States (also the views): ${m.states.join(' · ')}.`);
+  if (m.actions.length) parts.push(`Actions (no state change): ${m.actions.join(' · ')}.`);
+  if (m.transitions.length) parts.push(`State changes: ${m.transitions.map((t) => `${t.verb} → ${t.to}`).join(' · ')}.`);
+  return parts.join('\n');
+}
+
 /** Validate + normalize an AppDefinition (catalog entry). PURE. Returns the normalized def, or null if unusable. */
 export function normalizeAppDefinition(def) {
   const d = (def && typeof def === 'object') ? def : null;
