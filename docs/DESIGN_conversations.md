@@ -227,15 +227,31 @@ Builtin **seed-prompt content** (the starter catalog, §13) threads through CV-1
 - **Overview cross-app visibility** — a later upgrade ("what are my apps doing"); v1 is a plain assistant.
 - **Deeper nesting (depth > 1)** — sub-sub-tasks / the recursive fleet — explicitly out (decision #9); the cap is one level.
 
-## 13. Starter catalog (builtins)
+## 13. Starter catalog — abstract TYPES + the object model (OM refactor, v2.74.1198)
 
-| App | Archetype | Seed intent (authored in CV content) | Default config |
+The defaults are **3 abstract, friendly TYPES** (what the gallery shows), each defined by an **object model** — the
+thing it works on — *orthogonal* to its archetype (how it runs). Support and Email weren't two apps; they're the
+**same type** (Inbox) with a different noun. The named apps become **presets** that bind the type's object model.
+
+| Type (friendly) | Object model | Archetype | Default config |
 |---|---|---|---|
-| **Inbox manager** | Operator | triage, draft, file email | `gated` |
-| **Support agent** | Operator | research, triage, reply to tickets | `gated` |
-| **Financial monitor** | Monitor | watch balances/rates, flag changes | `writePolicy:'never'` |
-| **Price / job watcher** | Monitor | watch listings/prices, surface fits | `gated` |
-| **Shopper** | Executor | fill an order; checkout = human | `gated` (money navigate-only) |
-| **Research digest** | Monitor | watch sources on a topic, summarize | `writePolicy:'never'` |
+| **Inbox** | a queue of **stateful objects** (emails, tickets, messages): view · act · **transition state** | Operator | `gated` |
+| **Watcher** | a stream of **signals** (prices, balances, listings, sources): check · compare · **flag** | Monitor | `gated` (read-only presets pin `'never'`) |
+| **Concierge** | a **goal** taken to the finish line (shop, book, fill): find · compare · prepare, **then STOP** | Executor | `gated` (money = human-click) |
 
-Inbox is the highest-value universal one after the three originals — ubiquitous toil, a bounded surface, and ~90% (triage + draft) is safe-autonomous.
+**Object model** (`Core/appDef.normalizeObjectModel`): `{ noun, plural, states[], actions[], transitions:[{verb,to}] }`.
+`states` are the lifecycle *and* the queue's views (`open tickets`); `actions` operate without changing state;
+each `transition` (verb → target state) yields a **postcondition for free** — `close` must observably leave the
+object `closed`, which the **trial gate** can verify.
+
+**Presets** (`builtinPresets()` / `presetsForType()`): Support agent (Inbox · `ticket` · open→pending→solved→closed),
+Inbox manager (Inbox · `email` · unread/read/archived/deleted), Financial monitor (Watcher · `account` · `'never'`),
+Price/job watcher (Watcher · `listing`), Research digest (Watcher · `source` · `'never'`), Shopper (Concierge · `cart`).
+A preset gives sensible defaults; **setup binds the site** and **use/learning refine** the noun + states at runtime
+(§6A) — so the object model is a starting schema, not a cage.
+
+**Why it earns its place:** the object model scopes both halves of §6A — setup binds the *source* of the objects, and
+learning gets a real grid (capability = **operation × object**: `get open tickets` = view(ticket, open); `close #5` =
+transition(ticket → closed)), so recall + the `memory` audit organize by schema, not free text, and transitions hand
+the trial gate its postconditions. **Build:** ✅ schema + catalog (this slice). Next: thread the object model into the
+seed/context, the learning grid, and trial postconditions (live slices). Names are easy to change — they're labels.

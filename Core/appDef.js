@@ -16,8 +16,12 @@
 const _str = (x) => (typeof x === 'string' ? x.trim() : '');
 
 export const OVERVIEW_ID = 'overview';                 // the reserved, undeletable general-assistant conversation
-export const ARCHETYPES = ['operator', 'monitor', 'executor'];
+export const ARCHETYPES = ['operator', 'monitor', 'executor'];   // the RUN-shape (how it works); see APP_TYPES for the OBJECT-model
 export const SOURCES = ['builtin', 'user', 'shared'];
+// OM (object-model) — the abstract, friendly catalog TYPES (what the app works ON), orthogonal to the archetype
+// (how it runs). 'inbox' = a queue of stateful objects (emails, tickets); 'watcher' = a stream of signals to flag;
+// 'concierge' = a goal taken to the finish line. The 6 named apps are PRESETS that specialize a type.
+export const APP_TYPES = ['inbox', 'watcher', 'concierge'];
 export const WRITE_POLICIES = ['gated', 'never'];      // 'gated' = the default; 'never' = the tightening (read-only)
 
 const _archetype = (a) => (ARCHETYPES.includes(a) ? a : null);
@@ -33,6 +37,26 @@ export function normalizeConfig(config) {
 export function tightenConfig(parent, child) {
   const p = normalizeConfig(parent), k = normalizeConfig(child);
   return { writePolicy: (p.writePolicy === 'never' || k.writePolicy === 'never') ? 'never' : 'gated' };
+}
+
+/**
+ * Normalize an app's OBJECT MODEL (OM) — what the app works ON. PURE. Needs a `noun` (else null). Shape:
+ *   { noun, plural, states[], actions[], transitions:[{verb,to}] }
+ * `states` are the lifecycle + the queue's views (e.g. open / pending / closed); `actions` operate on an item
+ * WITHOUT changing state (read, reply, draft); each `transition` is a verb → target state, so a POSTCONDITION is
+ * derivable for free ("after `close`, the <noun> is `closed`") — which the trial gate can verify. Lists are
+ * trimmed, de-duped, capped.
+ */
+export function normalizeObjectModel(om) {
+  const m = (om && typeof om === 'object') ? om : null;
+  if (!m) return null;
+  const noun = _str(m.noun);
+  if (!noun) return null;
+  const list = (a) => (Array.isArray(a) ? [...new Set(a.map(_str).filter(Boolean))] : []).slice(0, 16);
+  const transitions = (Array.isArray(m.transitions) ? m.transitions : [])
+    .map((t) => { const verb = _str(t && t.verb); const to = _str(t && t.to); return (verb && to) ? { verb, to } : null; })
+    .filter(Boolean).slice(0, 16);
+  return { noun, plural: _str(m.plural) || `${noun}s`, states: list(m.states), actions: list(m.actions), transitions };
 }
 
 /** Validate + normalize an AppDefinition (catalog entry). PURE. Returns the normalized def, or null if unusable. */
@@ -51,6 +75,10 @@ export function normalizeAppDefinition(def) {
     defaultConfig: normalizeConfig(d.defaultConfig),
     version: Number.isFinite(d.version) ? d.version : 1,
     source: _source(d.source),
+    // OM (v2.74.1198) — the abstract object-model TYPE ('inbox'|'watcher'|'concierge') + the object model it works
+    // on. A preset specializes a type by binding the noun/states; null on a plain user app (learned at runtime).
+    type: APP_TYPES.includes(d.type) ? d.type : null,
+    objectModel: normalizeObjectModel(d.objectModel),
     // CV-5b (v2.74.1183) — role-specific STARTER asks shown in the app's empty state (the gallery passes the def
     // straight to _createAppConversation, so these render without threading through the conversation record). PURE:
     // trim, drop blanks, cap at 4 so a malformed catalog entry can't flood the UI.

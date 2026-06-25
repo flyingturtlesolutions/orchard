@@ -4,8 +4,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  OVERVIEW_ID, ARCHETYPES, WRITE_POLICIES,
-  normalizeConfig, tightenConfig, normalizeAppDefinition, appFromDefinition,
+  OVERVIEW_ID, ARCHETYPES, WRITE_POLICIES, APP_TYPES,
+  normalizeConfig, tightenConfig, normalizeAppDefinition, appFromDefinition, normalizeObjectModel,
   isOverview, isApp, isSubTask, canDelete, composeSeed, subTaskFromApp, overviewShape, planSubTasks,
 } from './appDef.js';
 
@@ -51,6 +51,33 @@ describe('appDef — normalizeAppDefinition', () => {
     assert.deepEqual(normalizeAppDefinition(DEF).starters, []);                                  // none on DEF → []
     const d = normalizeAppDefinition({ ...DEF, starters: ['  a ', '', 'b', 'c', 'd', 'e'] });
     assert.deepEqual(d.starters, ['a', 'b', 'c', 'd']);                                          // trimmed, blank dropped, capped at 4
+  });
+  it('OM — carries a valid type + object model; clamps a bad type to null; absent OM → null', () => {
+    const om = { noun: 'ticket', states: ['open', 'closed'], actions: ['reply'], transitions: [{ verb: 'close', to: 'closed' }] };
+    const d = normalizeAppDefinition({ ...DEF, type: 'inbox', objectModel: om });
+    assert.equal(d.type, 'inbox');
+    assert.equal(d.objectModel.noun, 'ticket');
+    assert.equal(d.objectModel.plural, 'tickets');           // defaulted
+    assert.deepEqual(d.objectModel.transitions, [{ verb: 'close', to: 'closed' }]);
+    assert.equal(normalizeAppDefinition({ ...DEF, type: 'bogus' }).type, null);
+    assert.equal(normalizeAppDefinition(DEF).objectModel, null);   // none on DEF → null
+    assert.deepEqual(APP_TYPES, ['inbox', 'watcher', 'concierge']);
+  });
+});
+
+describe('appDef — normalizeObjectModel', () => {
+  it('requires a noun; trims/dedupes/caps lists; defaults plural', () => {
+    assert.equal(normalizeObjectModel({ states: ['x'] }), null);   // no noun
+    assert.equal(normalizeObjectModel(null), null);
+    const m = normalizeObjectModel({ noun: ' email ', states: ['unread', 'unread', ' read '], actions: ['', 'reply'] });
+    assert.equal(m.noun, 'email');
+    assert.equal(m.plural, 'emails');
+    assert.deepEqual(m.states, ['unread', 'read']);            // trimmed + deduped
+    assert.deepEqual(m.actions, ['reply']);                   // blank dropped
+  });
+  it('keeps only well-formed {verb,to} transitions (the postcondition pairs)', () => {
+    const m = normalizeObjectModel({ noun: 'msg', transitions: [{ verb: 'archive', to: 'archived' }, { verb: 'x' }, { to: 'y' }, null] });
+    assert.deepEqual(m.transitions, [{ verb: 'archive', to: 'archived' }]);
   });
 });
 
