@@ -1583,6 +1583,25 @@ textarea {
   color: var(--c-error);
 }
 
+/* AP-2 (v2.74.1213) — the per-app "new sub-conversation" + button; hover-revealed, sat left of the chevron/delete cluster. */
+.history-item-subtask {
+  position: absolute;
+  top: 50%;
+  right: 64px;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--c-text-subtle);
+  opacity: 0;
+  transition: opacity var(--t-fast), background var(--t-fast), color var(--t-fast);
+}
+.history-item:hover .history-item-subtask { opacity: 1; }
+.history-item-subtask:hover { background: var(--c-bg); color: var(--c-accent); }
+
 /* surfaces-§4.5 (preview-as-selection) — the per-dev-row "load this branch into the live build" button (sat just left
    of delete) + the drawer's "Preview main" control. Mirrors the delete button: hover-revealed icon; amber on hover. */
 .history-item-preview {

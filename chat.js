@@ -597,10 +597,15 @@ function _historyConvRow(conv, row) {
           <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
         </svg>
       </button>` : '';
+  // AP-2 (v2.74.1213) — a "+" on an app row starts a sub-conversation under it (the spawn concept, surfaced as an icon).
+  const subtaskBtn = row.role === 'app'
+    ? `<button class="history-item-subtask" title="New sub-conversation"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`
+    : '';
   item.innerHTML = `
       <div class="history-item-title">${leaf}${badge}${escHtml(conv.title)}</div>
       <div class="history-item-meta">${relTime(conv.updatedAt)}</div>
       ${chevron}
+      ${subtaskBtn}
       ${previewBtn}
       <button class="history-item-delete" title="Delete">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -616,10 +621,19 @@ function _historyConvRow(conv, row) {
     await _renderHistoryList();
   });
 
+  // AP-2 — "+" → start a sub-conversation under this app (prompt for a name; reuse the fan-out spawn).
+  item.querySelector('.history-item-subtask')?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const name = prompt('Name this sub-conversation (e.g. a ticket # or task):');
+    if (name == null) return;
+    const title = String(name).trim();
+    if (title) await _spawnSubTask(conv.id, title);
+  });
+
   // click the row → load the conversation (any level — Overview/app/sub-task; §2 chat-at-any-level). The drawer
   // stays open (only ✕ / the header toggle closes it). delete/preview/chevron have their own handlers.
   item.addEventListener('click', async (e) => {
-    if (e.target.closest('.history-item-delete') || e.target.closest('.history-item-preview') || e.target.closest('.history-chevron')) return;
+    if (e.target.closest('.history-item-delete') || e.target.closest('.history-item-preview') || e.target.closest('.history-chevron') || e.target.closest('.history-item-subtask')) return;
     if (conv.id === _currentConversationId) return;
     if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch conversations anyway?')) return;
     const full = await ConversationStore.load(conv.id);
@@ -1107,6 +1121,39 @@ function _renderCategoryMenu(typeDef) {
   custom.innerHTML = `<div class="suggestion-card-name">+ Custom ${escHtml(typeDef.name)}</div><div class="suggestion-card-summary">A blank ${escHtml(typeDef.name.toLowerCase())} app — set it up for your site.</div>`;
   custom.addEventListener('click', () => { void _createAppConversation(typeDef, { setup: true }); });   // → setup
   container.appendChild(custom);
+  void _appendConfiguredApps(container, typeDef.id);   // AP-4 — your already-configured apps of this type (open pre-configured)
+}
+
+// AP-4 (v2.74.1213) — append the user's CONFIGURED apps of a type to its category menu. Re-selecting one opens it
+// PRE-CONFIGURED: isConfiguredDef(def) → _createAppConversation skips setup + restores the bound site + instanceId.
+async function _appendConfiguredApps(container, typeId) {
+  if (!container) return;
+  try { await _loadUserCatalog(); } catch { /* */ }
+  const mine = (_userCatalog || []).filter((d) => d && isConfiguredDef(d) && (d.type === typeId || d.presetId === typeId));
+  for (const def of mine) {
+    const site = (def.setup && def.setup.target && def.setup.target.label) ? def.setup.target.label : '';
+    const card = document.createElement('button');
+    card.className = 'suggestion-card';
+    card.innerHTML = `<div class="suggestion-card-name">${escHtml(def.name)}</div><div class="suggestion-card-summary">${site ? `Configured · ${escHtml(site)} — opens ready` : 'Configured — opens ready, no setup'}</div>`;
+    card.addEventListener('click', () => { void _createAppConversation(def); });   // configured → opens pre-configured, no setup
+    container.appendChild(card);
+  }
+}
+
+// AP-2 (v2.74.1213) — start ONE sub-conversation under a specific app (from the drawer "+"). Mirrors _spawnSubTasks
+// but targets an app by id with a single titled item; the child INHERITS the app's memory key (instanceId) + type.
+async function _spawnSubTask(appConvId, title) {
+  let app = null;
+  try { app = await ConversationStore.load(appConvId); } catch { /* */ }
+  if (!app || !app.appId || app.parentId) { toast('Sub-conversations start under an app.', 'err'); return; }
+  const specs = planSubTasks(app, [title]);
+  if (!specs.length) { toast('Couldn’t start the sub-conversation.', 'err'); return; }
+  const spec = specs[0];
+  try {
+    await ConversationStore.create({ title: String(title).slice(0, 60), kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config, instanceId: app.instanceId || app.appId || null, presetId: app.presetId || app.appId || null });
+    _expandedApps.add(app.id);
+    await _renderHistoryList();
+  } catch (e) { try { console.warn('[chat] sub-task spawn failed:', e?.message); } catch { /* */ } toast('Couldn’t start the sub-conversation.', 'err'); }
 }
 
 // CV-5 (v2.74.1173, DESIGN_conversations.md §9) — the user app catalog: user-authored AppDefinitions persisted in
