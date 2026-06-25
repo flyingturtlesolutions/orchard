@@ -1538,7 +1538,7 @@ textarea {
 .history-item-summary {
   font-size: 11px;
   line-height: 1.35;
-  color: var(--c-text-subtle);
+  color: var(--c-text-muted);   /* v2.74.1228 — one shade brighter than the timestamp (.history-item-meta stays --c-text-subtle) */
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
@@ -1604,13 +1604,15 @@ textarea {
   background: var(--c-bg);
   color: var(--c-error);
 }
+/* v2.74.1228 (App card UI) — on an APP card the delete (×) sits in the TOP-RIGHT corner (the subtask "+" takes the
+   bottom-right). Non-app rows keep the vertically-centered delete. */
+.history-item.is-app .history-item-delete { top: var(--sp-2); bottom: auto; transform: none; }
 
 /* AP-2 (v2.74.1213) — the per-app "new sub-conversation" + button; hover-revealed, sat left of the chevron/delete cluster. */
 .history-item-subtask {
   position: absolute;
-  top: 50%;
-  right: 64px;
-  transform: translateY(-50%);
+  bottom: var(--sp-2);          /* v2.74.1228 (App card UI) — the "+" sits in the BOTTOM-RIGHT corner */
+  right: var(--sp-2);
   width: 22px;
   height: 22px;
   border-radius: var(--r-sm);
