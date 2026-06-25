@@ -467,10 +467,22 @@ function _devRunStatus(convId) {
   try { return _getDevBridge()?.runStatusForConv?.(convId) || { state: 'idle' }; } catch { return { state: 'idle' }; }
 }
 // Render the meta line for one drawer item from its live run status; returns the state so callers can tally.
+// v2.74.1224 — is the ACTIVE conversation's reply in flight? An in-flight `.thinking` bubble lives in #messages until
+// the reply finalizes (`classList.remove('thinking')`). This is the per-row "processing" signal for the selected app.
+function _activeConvBusy() {
+  return !!$('messages')?.querySelector('.message.thinking');
+}
 function _setItemMeta(item) {
   const metaEl = item?.querySelector?.('.history-item-meta');
   if (!metaEl) return 'idle';
   const st = item.dataset.kind === 'dev' ? _devRunStatus(item.dataset.conversationId) : { state: 'idle' };
+  // v2.74.1224 — the SELECTED app (the input target) shows "working…" while its reply is in flight. Non-dev rows, the
+  // active conversation only (dev rows have their own run-status below).
+  if (item.dataset.kind !== 'dev' && item.dataset.conversationId && item.dataset.conversationId === _currentConversationId && _activeConvBusy()) {
+    metaEl.className = 'history-item-meta run-status running working';
+    metaEl.textContent = '● working…';
+    return 'busy';
+  }
   if (st.state === 'awaiting') {
     metaEl.className = 'history-item-meta run-status awaiting';
     metaEl.textContent = '⚠ needs you';
@@ -505,7 +517,7 @@ function _startDrawerStatusTimer() {
   _drawerStatusTimer = setInterval(() => {
     if (!$('history-sidebar')?.classList.contains('open')) { _stopDrawerStatusTimer(); return; }
     let anyActive = false;
-    document.querySelectorAll('#history-list .history-item').forEach((item) => { const s = _setItemMeta(item); if (s === 'running' || s === 'awaiting') anyActive = true; });
+    document.querySelectorAll('#history-list .history-item').forEach((item) => { const s = _setItemMeta(item); if (s === 'running' || s === 'awaiting' || s === 'busy') anyActive = true; });
     if (!anyActive) _stopDrawerStatusTimer();
   }, 1000);
 }
@@ -544,7 +556,7 @@ async function _renderHistoryList() {
   // v2.74.1094 — apply each conversation's live run status to its meta line + flip the toggle's "needs you" dot;
   // tick a 1s timer while any run is active so the elapsed updates live. (Pins have no conversationId → skipped.)
   let anyActive = false;
-  container.querySelectorAll('.history-item').forEach((item) => { if (!item.dataset.conversationId) return; const s = _setItemMeta(item); if (s === 'running' || s === 'awaiting') anyActive = true; });
+  container.querySelectorAll('.history-item').forEach((item) => { if (!item.dataset.conversationId) return; const s = _setItemMeta(item); if (s === 'running' || s === 'awaiting' || s === 'busy') anyActive = true; });
   _updateHistoryActionDot();
   if (anyActive) _startDrawerStatusTimer(); else _stopDrawerStatusTimer();
 }
@@ -928,10 +940,12 @@ function appendMessage({ role, body, attribution, id, skipPersist = false }) {
   // messages wait for completion. Assistant/system messages from re-render
   // already exist in storage — the { skipPersist } opt-out avoids duplicates.
   if (role === 'user' && !skipPersist) {
-    _persistMessageUpdate(msg, { role, body, attribution }).catch(err =>
-      console.warn('[chat] failed to persist user message:', err.message)
-    );
+    _persistMessageUpdate(msg, { role, body, attribution })
+      .then(() => _refreshHistoryIfOpen())   // v2.74.1224 — the selected app's peek shows the just-sent message ("received")
+      .catch(err => console.warn('[chat] failed to persist user message:', err.message));
   }
+  // v2.74.1224 — a thinking bubble lights the selected app's "● working…" indicator in an open drawer (no-op when closed).
+  if (role === 'thinking') { _refreshHistoryIfOpen().catch(() => {}); }
 
   return msg;
 }

@@ -1561,6 +1561,9 @@ textarea {
 .history-item-meta.run-status.done { color: var(--c-success); }            /* v2.74.1096 — last run finished OK */
 .history-item-meta.run-status.done.failed { color: var(--c-error); }       /* …or failed */
 .history-item-meta.run-status.paused { color: #8a93a8; }                   /* v2.74.1098 — last run paused (resumable via `dev:`) */
+/* v2.74.1224 — the SELECTED app's "● working…" while its reply is in flight (drawer multi-conversation mode). Amber
+   (via .running) + a pulse so "message received and processing" reads at a glance. */
+.history-item-meta.run-status.working { animation: run-status-pulse 1.4s ease-in-out infinite; }
 @keyframes run-status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 
 /* The "needs you" dot on the conversation-history toggle — visible even when the drawer is closed. */
