@@ -906,6 +906,9 @@ function appendMessage({ role, body, attribution, id, skipPersist = false }) {
   // `msg-<invocationId>`); for user messages we generate a fresh one.
   const messageId = id ? id.replace(/^msg-/, '') : crypto.randomUUID();
   msg.dataset.messageId = messageId;
+  // v2.74.1230 — pin the message to its ORIGIN conversation, so an in-flight reply persists to THAT conversation even
+  // if the user switches to another app mid-flight (the working app updates on completion; the new app is untouched).
+  if (_currentConversationId) msg.dataset.conversationId = String(_currentConversationId);
 
   const avatar = document.createElement('div');
   avatar.className = 'message-avatar';
@@ -964,9 +967,10 @@ function appendMessage({ role, body, attribution, id, skipPersist = false }) {
  */
 async function _persistMessageUpdate(msgEl, fields) {
   // v2.74.1035 (DBR-3) — pin to fields.conversationId when given (a dev run bound to its conversation, so its
-  // streamed blocks land there even if the user switched away); otherwise the active conversation (created if
-  // needed). This closes the run-output leak — see DESIGN §9 / persistTargetId.
-  const convId = persistTargetId(fields, _currentConversationId) || await _ensureConversation();
+  // streamed blocks land there even if the user switched away); otherwise the message's ORIGIN conversation (stamped
+  // at appendMessage, v2.74.1230 — an in-flight reply lands on its own app even after a mid-flight switch), and only
+  // then the active conversation (created if needed). This closes the run-output leak — see DESIGN §9 / persistTargetId.
+  const convId = persistTargetId(fields, msgEl.dataset.conversationId || _currentConversationId) || await _ensureConversation();
   const messageId = msgEl.dataset.messageId;
   if (!messageId) return;
   const existing = {
