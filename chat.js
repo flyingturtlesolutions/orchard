@@ -1038,49 +1038,65 @@ function focusForAssistant(cap) {
   $('chat-input').dataset.targetCapabilityName = cap.name;
 }
 
-// ─── App gallery (CV-3b) ──────────────────────────────────────────────────────
-// "New app" opens this: the empty state, repurposed to show the builtin app cards (Core/appCatalog) + a blank
-// Custom card. Picking a builtin CREATES a kind:'app' conversation seeded with the app's prompt — CV-2 threads
-// that seed into the IL (router context + answer preamble), so the app's answers reflect its concern. The full
-// flush-left accordion + Overview pin is CV-3c; for now an app shows as a normal drawer entry.
+// ─── App gallery (CV-3b · OM two-level v2.74.1209) ────────────────────────────
+// "New app" opens this as a TWO-LEVEL menu over Core/appCatalog:
+//   LEVEL 1 (_renderAppGallery) — "Choose an app": the 3 abstract CATEGORIES only (Inbox / Watcher / Concierge).
+//   LEVEL 2 (_renderCategoryMenu) — "Choose <category> type": that category's PRESETS + a Custom + Back.
+// Selecting a preset OR Custom CREATES a kind:'app' conversation (CV-2 threads its seed into the IL) and goes
+// STRAIGHT to setup. The flat "type + all its presets at once" list this replaced put every preset on the first
+// screen; the drill-down keeps the first choice a clean pick of category.
 function _renderAppGallery() {
   $('messages').innerHTML = '';
   $('messages').classList.add('hidden');
   $('empty-state').classList.remove('hidden');
   const greet = $('empty-state-greeting'); if (greet) greet.textContent = 'Choose an app';
-  const sub = $('empty-state-subtitle'); if (sub) sub.textContent = 'A focused assistant for one goal — or start a blank conversation.';
+  const sub = $('empty-state-subtitle'); if (sub) sub.textContent = 'Pick a category to see its presets.';
   const container = $('suggestion-cards'); if (!container) return;
   container.innerHTML = '';
-  for (const def of builtinApps()) {
+  for (const def of builtinApps()) {   // the 3 abstract categories
     const card = document.createElement('button');
     card.className = 'suggestion-card';
     card.innerHTML = `
       <div class="suggestion-card-name">${escHtml(def.name)}</div>
       ${def.description ? `<div class="suggestion-card-summary">${escHtml(def.description)}</div>` : ''}
       <div class="suggestion-card-meta"><span class="suggestion-card-kind">${escHtml(def.archetype || 'app')}</span></div>`;
-    card.addEventListener('click', () => { void _createAppConversation(def); });
+    card.addEventListener('click', () => { _renderCategoryMenu(def); });   // → LEVEL 2
     container.appendChild(card);
-    // OM (v2.74.1200) — the named PRESETS that specialize this type (Support agent under Inbox, …) as one-click
-    // quick-starts, rendered right after their type so they read as its specializations. Clicking the abstract
-    // type makes a generic app; clicking a preset binds its object model + role/safety. The `-preset` class lets
-    // CSS subordinate them later (no rule needed now — they're clearly named cards).
-    for (const preset of presetsForType(def.id)) {
-      const pc = document.createElement('button');
-      pc.className = 'suggestion-card suggestion-card-preset';
-      pc.innerHTML = `
-        <div class="suggestion-card-name">${escHtml(preset.name)}</div>
-        ${preset.description ? `<div class="suggestion-card-summary">${escHtml(preset.description)}</div>` : ''}
-        <div class="suggestion-card-meta"><span class="suggestion-card-kind">${escHtml(def.name)} preset</span></div>`;
-      pc.addEventListener('click', () => { void _createAppConversation(preset); });
-      container.appendChild(pc);
-    }
   }
+  void _appendUserApps(container);   // CV-5 — async-append "Your apps" (the user catalog) below the categories
+}
+
+// LEVEL 2 — the presets that specialize a category + a Custom (a blank app OF this category) + Back. Selecting a
+// preset or Custom creates the app and opens setup immediately (_createAppConversation(…, { setup:true })).
+function _renderCategoryMenu(typeDef) {
+  if (!typeDef) return;
+  $('messages').innerHTML = '';
+  $('messages').classList.add('hidden');
+  $('empty-state').classList.remove('hidden');
+  const greet = $('empty-state-greeting'); if (greet) greet.textContent = `Choose ${typeDef.name} type`;
+  const sub = $('empty-state-subtitle'); if (sub) sub.textContent = typeDef.description || 'Pick a preset, or start a custom one.';
+  const container = $('suggestion-cards'); if (!container) return;
+  container.innerHTML = '';
+  const back = document.createElement('button');
+  back.className = 'suggestion-card';
+  back.innerHTML = '<div class="suggestion-card-name">← Back to categories</div>';
+  back.addEventListener('click', () => { _renderAppGallery(); });
+  container.appendChild(back);
+  for (const preset of presetsForType(typeDef.id)) {
+    const pc = document.createElement('button');
+    pc.className = 'suggestion-card';
+    pc.innerHTML = `
+      <div class="suggestion-card-name">${escHtml(preset.name)}</div>
+      ${preset.description ? `<div class="suggestion-card-summary">${escHtml(preset.description)}</div>` : ''}`;
+    pc.addEventListener('click', () => { void _createAppConversation(preset, { setup: true }); });   // → setup
+    container.appendChild(pc);
+  }
+  // Custom: the abstract category itself (its object model + general role) — a blank app of this type, then setup.
   const custom = document.createElement('button');
-  custom.className = 'suggestion-card';
-  custom.innerHTML = '<div class="suggestion-card-name">+ Custom</div><div class="suggestion-card-summary">Start a blank conversation.</div>';
-  custom.addEventListener('click', () => { _clearCurrentConversation(); _resetConversation(); void renderSuggestionCards(); });
+  custom.className = 'suggestion-card suggestion-card-preset';
+  custom.innerHTML = `<div class="suggestion-card-name">+ Custom ${escHtml(typeDef.name)}</div><div class="suggestion-card-summary">A blank ${escHtml(typeDef.name.toLowerCase())} app — set it up for your site.</div>`;
+  custom.addEventListener('click', () => { void _createAppConversation(typeDef, { setup: true }); });   // → setup
   container.appendChild(custom);
-  void _appendUserApps(container);   // CV-5 — async-append "Your apps" (the user catalog) after the builtins + Custom
 }
 
 // CV-5 (v2.74.1173, DESIGN_conversations.md §9) — the user app catalog: user-authored AppDefinitions persisted in
@@ -1146,7 +1162,7 @@ async function _forgetApp(name) {
 // Instantiate an app: a fresh kind:'app' conversation carrying the app's seed (copy-on-add). The seed is set
 // in memory immediately (so the IL is seeded this turn) and persisted on the record (so a reopen restores it,
 // via _rehydrateConversation). Routes through the IL like any agent conversation (_currentConversationKind 'agent').
-async function _createAppConversation(def) {
+async function _createAppConversation(def, { setup = false } = {}) {
   if (!def) return;
   _clearCurrentConversation();
   let conv;
@@ -1166,24 +1182,29 @@ async function _createAppConversation(def) {
   const sub = $('empty-state-subtitle'); if (sub) sub.textContent = def.description || 'Tell me what you need.';
   // CV-5b (v2.74.1183) — render the app's role-specific STARTERS as cards in the empty state, so an app is
   // immediately useful + self-explaining on open. Clicking one sends it (runs through the interpret front door).
-  const cards = $('suggestion-cards');
-  if (cards) {
-    cards.innerHTML = '';
-    // AS-2 (v2.74.1188) — a "Set up" affordance so binding the app to YOUR site + workflow (target/focus/shape) is
-    // discoverable on open. Clicking it runs the `setup` command (the guided bind flow).
-    {
-      const setup = document.createElement('button');
-      setup.className = 'suggestion-card';
-      setup.innerHTML = '<div class="suggestion-card-name">⚙️ Set up — connect your site</div>';
-      setup.addEventListener('click', () => { const inp = $('chat-input'); if (inp) inp.value = 'setup'; sendChatMessage(); });
-      cards.appendChild(setup);
-    }
-    for (const s of (Array.isArray(def.starters) ? def.starters : [])) {
-      const card = document.createElement('button');
-      card.className = 'suggestion-card';
-      card.innerHTML = `<div class="suggestion-card-name">${escHtml(s)}</div>`;
-      card.addEventListener('click', () => { const inp = $('chat-input'); if (inp) inp.value = s; sendChatMessage(); });
-      cards.appendChild(card);
+  // OM (v2.74.1209) — a preset/custom pick from the gallery goes STRAIGHT to setup. Opening an app another way
+  // (e.g. a saved user app) shows its empty state with starters + a discoverable Set-up affordance.
+  if (setup) {
+    await _startSetupFlow();
+  } else {
+    const cards = $('suggestion-cards');
+    if (cards) {
+      cards.innerHTML = '';
+      // AS-2 (v2.74.1188) — a "Set up" affordance so binding the app to YOUR site + workflow is discoverable on open.
+      {
+        const setupBtn = document.createElement('button');
+        setupBtn.className = 'suggestion-card';
+        setupBtn.innerHTML = '<div class="suggestion-card-name">⚙️ Set up — connect your site</div>';
+        setupBtn.addEventListener('click', () => { const inp = $('chat-input'); if (inp) inp.value = 'setup'; sendChatMessage(); });
+        cards.appendChild(setupBtn);
+      }
+      for (const s of (Array.isArray(def.starters) ? def.starters : [])) {
+        const card = document.createElement('button');
+        card.className = 'suggestion-card';
+        card.innerHTML = `<div class="suggestion-card-name">${escHtml(s)}</div>`;
+        card.addEventListener('click', () => { const inp = $('chat-input'); if (inp) inp.value = s; sendChatMessage(); });
+        cards.appendChild(card);
+      }
     }
   }
   _refreshHistoryIfOpen().catch(() => {});

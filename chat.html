@@ -153,8 +153,13 @@
        fragment-walk sidepanel mode that this comment used to point at
        is gone too (AI-walked path eliminated); fragment authoring lives
        in the sidepanel fragment-author mode. -->
+  </div><!-- /.chat-main -->
+  </div><!-- /.app-body -->
 
-  <!-- ── Input area ─────────────────────────────────────────────────────── -->
+  <!-- ── Input area (v2.74.1207) ────────────────────────────────────────────
+       Moved OUT of .app-body to a body-level row, so the conversation drawer —
+       which now overlays .app-body at FULL panel width — never covers it. The
+       input stays visible (its own width + height) whenever the drawer is open. -->
   <div class="input-area">
     <div class="input-container">
       <!-- Slash command picker — shown when input starts with / -->
@@ -189,8 +194,6 @@
       </div>
     </div>
   </div>
-  </div><!-- /.chat-main -->
-  </div><!-- /.app-body -->
 
   <!-- ── Capability picker drawer ───────────────────────────────────────── -->
   <div class="capability-drawer hidden" id="capability-drawer">

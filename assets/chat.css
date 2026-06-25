@@ -820,7 +820,7 @@ textarea {
   resize: none;
   font-size: 14px;
   line-height: 1.5;
-  min-height: 22px;
+  min-height: 66px;   /* v2.74.1208 — 3× the prior one-line resting height (was 22px) */
   max-height: 240px;
   padding: 0;
   overflow-y: auto;
@@ -1334,12 +1334,13 @@ textarea {
   border: none;
 }
 
-/* ── App body: conversation drawer (left, push) + chat column ─────────────
-   v2.74.1030 — the drawer is an INLINE left-push panel now, not a fixed
-   slide-over with a dark backdrop. It lives in this flex row beneath the
-   header; opening it shrinks the chat column instead of covering it, so the
-   conversation + input stay visible and interactive. */
+/* ── App body: the chat-history region (conversation) the drawer overlays ──
+   v2.74.1207 — the conversation drawer is a FULL-WIDTH overlay over .app-body
+   (the history region): it covers the messages but NOT the input row, which now
+   lives OUTSIDE .app-body (a body-level row) so it stays visible + usable while
+   the drawer is open. (Was a left-push that shrank the chat column, v2.74.1030.) */
 .app-body {
+  position: relative;   /* v2.74.1207 — the containing block for the full-width conversation-drawer overlay */
   flex: 1;
   display: flex;
   flex-direction: row;
@@ -1354,26 +1355,31 @@ textarea {
   overflow: hidden;
 }
 
-/* ── Conversation drawer (inline, left-push) ─────────────────────────────── */
+/* ── Conversation drawer (v2.74.1207 — FULL-WIDTH overlay over the chat history only) ─────────────────
+   The drawer absolutely overlays .app-body (the conversation region), so it covers the ENTIRE panel width
+   and the messages behind it. The input row lives OUTSIDE .app-body (a body-level row), so it is NEVER
+   covered — always visible at its own width/height. Slides in from the left; opaque, fully replacing the
+   history view while open. */
 .history-sidebar {
-  --drawer-w: min(280px, 58vw);   /* chat keeps ≥42vw so its input stays usable */
-  flex: 0 0 auto;
-  width: 0;                       /* collapsed by default; .open animates it out */
+  position: absolute;
+  inset: 0;                       /* full width + full height of .app-body (= the chat-history region) */
+  z-index: 20;
   overflow: hidden;
   background: var(--c-bg-elevated);
   box-shadow: var(--shadow-lg);
   display: flex;
-  transition: width var(--t-med);
+  transform: translateX(-100%);   /* off-screen left when closed */
+  opacity: 0;
+  pointer-events: none;           /* closed → doesn't intercept clicks on the conversation */
+  transition: transform var(--t-med), opacity var(--t-med);
 }
 .history-sidebar.open {
-  width: var(--drawer-w);
-  border-right: 1px solid var(--c-border);
+  transform: translateX(0);
+  opacity: 1;
+  pointer-events: auto;
 }
-/* fixed-width inner so the content doesn't squish while the drawer width
-   animates — the vw-based width is stable; only the outer width moves. */
 .history-sidebar-inner {
-  flex: 0 0 auto;
-  width: var(--drawer-w);
+  width: 100%;                    /* full panel width */
   height: 100%;
   display: flex;
   flex-direction: column;
