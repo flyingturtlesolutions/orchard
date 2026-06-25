@@ -629,9 +629,14 @@ function _historyConvRow(conv, row) {
   item.querySelector('.history-item-delete').addEventListener('click', async (e) => {
     e.stopPropagation();
     const liveRun = conv.kind === 'dev' && _devRunStatus(conv.id).state !== 'idle';
+    // AP-3 (v2.74.1211) — deleting an APP now CASCADES to its sub-conversations (ConversationStore.delete); warn first.
+    let childN = 0;
+    try { const all = await ConversationStore.list(); childN = all.filter((c) => c && c.parentId === conv.id).length; } catch { /* */ }
     const prompt = liveRun
       ? `"${conv.title}" has a run in progress.\n\nDeleting will STOP the run and free its slot. Its git branch${conv.branch ? ` (${conv.branch})` : ''} is KEPT — open the conversation and run "delete branch" first if you also want that removed.\n\nDelete anyway?`
-      : `Delete "${conv.title}"?`;
+      : childN
+        ? `Delete "${conv.title}" and its ${childN} sub-conversation${childN === 1 ? '' : 's'}? This can't be undone.`
+        : `Delete "${conv.title}"?`;
     if (!confirm(prompt)) return;
     if (liveRun) { try { _getDevBridge()?.cancelConversationRuns?.(conv.id); } catch { /* */ } }
     await ConversationStore.delete(conv.id);
@@ -1357,7 +1362,8 @@ async function _bankSetup(step) {
   try { conv = await ConversationStore.load(state.convId); } catch { /* */ }
   const base = (conv && conv.config && typeof conv.config === 'object') ? conv.config : { writePolicy: 'gated' };
   const merged = { ...base, target: cfg.target, focus: cfg.focus, allowedOrigins: cfg.allowedOrigins, shape: cfg.shape, setupComplete: true };
-  try { await ConversationStore.patchMeta(state.convId, { config: merged }); }
+  // AP-1 (v2.74.1211) — a CONFIGURED app PINS itself to the top of the drawer (so you return to it, not re-create it).
+  try { await ConversationStore.patchMeta(state.convId, { config: merged, pinned: true }); }
   catch (e) { try { console.warn('[chat] setup bank failed:', e?.message); } catch { /* */ } }
   if (state.convId === _currentConversationId) _currentConversationConfig = merged;
   const where = cfg.target ? `\`${cfg.target.label}\`` : 'your site';

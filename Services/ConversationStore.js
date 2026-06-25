@@ -185,7 +185,7 @@ export const ConversationStore = {
    * @param {{ title?: string }} [init]
    * @returns {Promise<Conversation>}
    */
-  async create({ title = 'New conversation', kind = 'agent', branch = null, concern = null, sessionId = null, status = 'active', seed = null, surface = null, appId = null, appVersion = null, parentId = null, icon = null, config = null } = {}) {
+  async create({ title = 'New conversation', kind = 'agent', branch = null, concern = null, sessionId = null, status = 'active', seed = null, surface = null, appId = null, appVersion = null, parentId = null, icon = null, config = null, presetId = null, instanceId = null, pinned = false } = {}) {
     const id = crypto.randomUUID();
     const now = Date.now();
     // v2.74.1029 — `kind`: 'agent' (the website-operating assistant, the default) or 'dev' (a Claude Code
@@ -215,6 +215,9 @@ export const ConversationStore = {
       if (parentId) conv.parentId = parentId;
       if (icon) conv.icon = icon;
       if (config && typeof config === 'object') conv.config = config;
+      if (presetId) conv.presetId = presetId;                          // AP-0 (v2.74.1211) — the generic TEMPLATE this app instance came from (object-model / canvas resolve through it)
+      if (appId) conv.instanceId = instanceId || crypto.randomUUID();  // AP-0 — per-INSTANCE identity; goal memory keys by THIS, not the shared appId/type (re-create passes the saved id so memory persists)
+      if (pinned) conv.pinned = true;                                  // AP-1 — pinned apps sort to the top of the drawer
     }
     await chrome.storage.local.set({ [convKey(id)]: conv });
     const entry = { id, title, kind: k, updatedAt: now };
@@ -222,6 +225,7 @@ export const ConversationStore = {
     if (conv.appId) entry.appId = conv.appId;          // CV-3c — accordion grouping keys, index-mirrored
     if (conv.parentId) entry.parentId = conv.parentId;
     if (conv.icon) entry.icon = conv.icon;
+    if (conv.pinned) entry.pinned = true;              // AP-1 — index-mirrored so drawerTree sorts pinned-first without a body load
     await _addToIndex(entry);
     return conv;
   },
@@ -239,7 +243,7 @@ export const ConversationStore = {
     if (!conv) return null;
     // v2.74.1045 (DBR-P2-2) — `syncedMain`: the `main` commit this branch last synced onto (feeds the P2-5 merge freshness check).
     // v2.74.1053 (DBR-P3-1) — `seed`: the split-seed prompt; cleared (→ null) by chat.js once pre-filled into the input.
-    for (const k of ['branch', 'concern', 'sessionId', 'status', 'mergedAt', 'mergeCommit', 'title', 'syncedMain', 'seed', 'titledByLlm', 'surface', 'appId', 'appVersion', 'parentId', 'icon', 'config']) {   // .1102 — titledByLlm; .1147 — surface (the dev altitude; WITHOUT this, `surface high` silently dropped the field and never activated the high surface); .1168 (CV-3c) — app identity (appId/appVersion/parentId/icon) + tighten-only config, previously dropped so a gallery app never persisted
+    for (const k of ['branch', 'concern', 'sessionId', 'status', 'mergedAt', 'mergeCommit', 'title', 'syncedMain', 'seed', 'titledByLlm', 'surface', 'appId', 'appVersion', 'parentId', 'icon', 'config', 'pinned', 'instanceId', 'presetId']) {   // .1102 — titledByLlm; .1147 — surface (the dev altitude; WITHOUT this, `surface high` silently dropped the field and never activated the high surface); .1168 (CV-3c) — app identity (appId/appVersion/parentId/icon) + tighten-only config; .1211 (AP-0/1) — pinned + per-instance identity (instanceId/presetId)
       if (k in fields) conv[k] = fields[k];
     }
     conv.updatedAt = Date.now();
@@ -253,6 +257,7 @@ export const ConversationStore = {
     if ('appId' in fields) patch.appId = conv.appId;          // CV-3c (v2.74.1168) — mirror the accordion grouping keys
     if ('parentId' in fields) patch.parentId = conv.parentId;
     if ('icon' in fields) patch.icon = conv.icon;
+    if ('pinned' in fields) patch.pinned = conv.pinned;       // AP-1 (v2.74.1211) — mirror so the drawer re-sorts pinned-first without a body load
     await _updateIndexMeta(id, patch);
     return conv;
   },
@@ -333,15 +338,23 @@ export const ConversationStore = {
   },
 
   /**
-   * Delete a conversation and its index entry.
+   * Delete a conversation and its index entry. AP-3 (v2.74.1211) — CASCADE: deleting an APP also removes its
+   * sub-task children (any conversation whose `parentId` is this id), so children never orphan. One op on the
+   * serialized index chain (a concurrent add/touch can't clobber it). Goal memory is KEPT (a re-created app stays
+   * smart, §10) — clearing it is a separate, deliberate action, not a side effect of delete.
    * @param {string} id
+   * @returns {Promise<number>} how many conversations were removed (the app + its children)
    */
   async delete(id) {
-    // v2.74.109 — Index filter now goes through the serialized helper so
-    // a concurrent _addToIndex/_touchIndex from another async chain can't
-    // clobber the delete with its own snapshot-based write.
-    await chrome.storage.local.remove(convKey(id));
-    await _removeFromIndex(id);
+    return _serializeIndexOp(async () => {
+      const index = await _readIndex();
+      const arr = Array.isArray(index) ? index : [];
+      const childIds = arr.filter((e) => e && e.parentId === id).map((e) => e.id);
+      const ids = [id, ...childIds];
+      await chrome.storage.local.remove(ids.map(convKey));
+      await _writeIndex(arr.filter((e) => e && !ids.includes(e.id)));
+      return ids.length;
+    });
   },
 
   /**

@@ -14,6 +14,8 @@
 import { OVERVIEW_ID } from './appDef.js';
 
 const byUpdatedDesc = (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0);
+// AP-1 (v2.74.1211) — PINNED conversations sort to the top (a configured app pins itself on setup-complete), then recency.
+const byPinnedThenUpdated = (a, b) => (Number(!!b.pinned) - Number(!!a.pinned)) || byUpdatedDesc(a, b);
 const isApp = (c) => !!c.appId && !c.parentId;
 const isSub = (c) => !!c.parentId;
 
@@ -60,7 +62,7 @@ export function buildDrawerTree(summaries, { devMode = false, activeId = null, e
 
   const appIds = new Set(visible.filter(isApp).map((c) => c.id));
   // Top level = everything that isn't a sub-task of a PRESENT app (orphans fall through to plain → never lost).
-  const top = visible.filter((c) => !isSub(c) || !appIds.has(c.parentId)).sort(byUpdatedDesc);
+  const top = visible.filter((c) => !isSub(c) || !appIds.has(c.parentId)).sort(byPinnedThenUpdated);
 
   const rows = [];
 
@@ -79,7 +81,7 @@ export function buildDrawerTree(summaries, { devMode = false, activeId = null, e
       rows.push({
         id: c.id, role: 'app', title: c.title, icon: c.icon || null, depth: 0,
         hasChildren: subs.length > 0, expanded: open, active: activeId === c.id,
-        count: subs.length, kind: c.kind || 'agent', appId: c.appId,
+        count: subs.length, kind: c.kind || 'agent', appId: c.appId, pinned: !!c.pinned,   // AP-1 — drives the pin toggle's state
       });
       if (open) {
         for (const s of subs) {
@@ -94,7 +96,7 @@ export function buildDrawerTree(summaries, { devMode = false, activeId = null, e
       rows.push({
         id: c.id, role: 'plain', title: c.title, icon: c.icon || null, depth: 0,
         hasChildren: false, expanded: false, active: activeId === c.id, count: 0,
-        kind: c.kind || 'agent', surface: c.surface || null, status: c.status || null,
+        kind: c.kind || 'agent', surface: c.surface || null, status: c.status || null, pinned: !!c.pinned,
       });
     }
   }

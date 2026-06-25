@@ -25,6 +25,24 @@ export function userAppDefinition({ name, seed, archetype = null, icon = null, c
   return normalizeAppDefinition({ id, name: String(name).trim(), seed, archetype, icon, defaultConfig: config, version: 1, source: 'user' });
 }
 
+/**
+ * AP-4 (v2.74.1211) — mint a CONFIGURED, durable app definition from a just-set-up instance. PURE. Unlike
+ * `userAppDefinition` (seed only), this carries the instance's TYPE + object model + bound SETUP + its durable
+ * per-instance `instanceId` + the `presetId` it specialized — so re-creating it from the gallery restores the SAME
+ * app (its learning lives under instanceId) and SKIPS setup. The id is unique per name+site so two configs of one
+ * preset don't collide. Returns null without a name/seed.
+ */
+export function configuredAppDefinition({ name, seed, type = null, objectModel = null, archetype = null, icon = null, config = null, setup = null, presetId = null, instanceId = null } = {}) {
+  const base = slugifyAppId(name);
+  const host = (setup && setup.target && setup.target.label) ? slugifyAppId(setup.target.label).replace(/^user-/, '') : '';
+  const id = base ? (host ? `${base}-${host}` : base) : '';
+  if (!id || !String(seed || '').trim()) return null;
+  return normalizeAppDefinition({
+    id, name: String(name).trim(), seed, type, objectModel, archetype, icon,
+    defaultConfig: config, setup, presetId, instanceId, version: 1, source: 'user',
+  });
+}
+
 /** Add (or REPLACE same-id) a def in the catalog list. PURE — returns a new array, newest last. */
 export function addUserDef(list, def) {
   if (!def || !def.id) return Array.isArray(list) ? [...list] : [];

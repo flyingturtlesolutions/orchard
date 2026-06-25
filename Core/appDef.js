@@ -137,7 +137,18 @@ export function normalizeAppDefinition(def) {
     // straight to _createAppConversation, so these render without threading through the conversation record). PURE:
     // trim, drop blanks, cap at 4 so a malformed catalog entry can't flood the UI.
     starters: Array.isArray(d.starters) ? d.starters.map(_str).filter(Boolean).slice(0, 4) : [],
+    // AP-0/AP-4 (v2.74.1211) — a CONFIGURED (durable) app def carries its generic TEMPLATE (presetId), its durable
+    // per-instance identity (instanceId — the goal-memory key), and the bound SETUP (site/shape). So re-creating it
+    // from the gallery restores the SAME app + its learning, and skips setup. All null on a plain/builtin def.
+    presetId: _str(d.presetId) || null,
+    instanceId: _str(d.instanceId) || null,
+    setup: (d.setup && typeof d.setup === 'object') ? d.setup : null,
   };
+}
+
+/** Is this def a CONFIGURED, re-creatable app (carries a bound site)? PURE — drives "skip setup on re-select" (AP-4). */
+export function isConfiguredDef(def) {
+  return !!(def && def.setup && typeof def.setup === 'object' && def.setup.target);
 }
 
 /**

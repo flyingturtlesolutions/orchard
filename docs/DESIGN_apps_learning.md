@@ -138,3 +138,30 @@ we don't rebuild it.
    `DESIGN_conversations.md` decision #3); cross-app belief sharing.
 
 Each slice is shippable; AL-1/2 are the pure foundation, AL-4 is the load-bearing one, AL-5 reuses the existing gate.
+
+## 10. Two-tier learning — instance memory + preset memory (v2.74.1210)
+
+The §2 store is **per-instance**, but learning rises a level too. Two stores of goalMemory items:
+- **Instance memory** (per configured app, private): the specifics — facts about *this* app's KB/site. Local.
+- **Preset memory** (per type, the shared template): generalizable behavior rules — *how to be a good `<type>`* — seeded into every new instance and accrued across them, so a day-100 preset instantiates smarter than a day-1 one.
+
+**The split rides the belief/delta line (§2):** a **belief is a fact** (instance-private — "Acme is enterprise"); a **delta is a behavior rule** (generalizable — "confirm resolution before closing"). So **only deltas rise**, and only at the **`canonical`** tier (HITL-confirmed, §7) — the §4 gate, now applied to crossing the instance→preset boundary. Facts never leave their instance.
+
+Two flows — `Core/presetMemory.js` (pure; `isPromotableToPreset` / `promotableToPreset` / `seedInstanceFromPreset`):
+- **10.1 Seed down (instantiate).** A new instance copies the preset's accrued rules + the preset's hand-authored **baseline** as starting deltas (tier `confirmed`, provenance `preset-baseline`, de-duped). It then specializes its own memory — Acme-support and Beta-support never touch.
+- **10.2 Distill up (periodic).** Select an instance's canonical deltas → an LLM **abstraction** step strips specifics ("verify the refund window" kept; "Acme's window is 30 days" dropped) → merge into the preset store. **HITL-gated**: crossing into the shared preset is a promotion, so it carries the §7 human gate. Beliefs (facts) NEVER rise.
+- **10.3 Local now, federation-ready.** The preset store keys `goalMemory:preset:<presetId>` — per-USER + local today. The logic is **identical** for a GLOBAL (federated, cross-user) preset; federation is only whether that keyspace **syncs** (the SyncBridge filter-gate, exactly like `goalMemory`). Build local; the federal seam is an additive sync registration. A global preset raises a cross-tenant privacy bar — only abstracted, confirmed deltas cross, never raw memory.
+
+The abstraction step + the belief/delta line **are** the privacy boundary: instance KB/PII (beliefs) is structurally barred from rising.
+
+## 11. App persistence & per-instance identity (the durable-apps arc)
+
+Painpoints: re-personalizing every new app, content lost on delete, long-running cases rebuilt from scratch. The fix is durable, identity-bearing app instances.
+
+- **AP-0 — per-instance identity (the foundation).** A configured app gets its OWN id (`appId` = a unique instance id, **not** the preset's type id) + a `presetId` pointing back at its generic template. **Goal memory keys by the instance id**, so two configs of the same preset don't collide (the bug §10 fixes — today every builtin-preset instance shares `goalMemory:<presetId>`). Object-model / canvas resolution (`builtinApp(appId)`) falls back through the catalog via `presetId`.
+- **AP-1 — pin.** `pinned` on the conv record (index-mirrored); auto-pin on setup-complete; `Core/drawerTree.js` sorts pinned-first.
+- **AP-2 — sub-conversations, first-class.** A "+" ICON on the app / drawer-row → `subTaskFromApp` (the `subtasks:` fan-out, surfaced).
+- **AP-3 — cascade delete.** `ConversationStore.delete` removes `parentId` children too (confirm-first). Goal memory is KEPT (a re-created instance stays smart).
+- **AP-4 — durable configured app.** Setup-complete mints a config-carrying user definition (an automatic, enhanced `save as app`); it shows in its category's choose-preset menu; re-selecting it opens **pre-configured, no setup**. The builtin preset always remains too.
+
+AP-0 is the prerequisite for §10 (instances need their own identity before learning can distill up). Build order: **AP-0 → AP-1..4 → §10 wiring**.
