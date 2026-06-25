@@ -634,13 +634,12 @@ function _historyConvRow(conv, row) {
     await _spawnSubTask(conv.id);
   });
 
-  // click the row → load the conversation (any level — Overview/app/sub-task; §2 chat-at-any-level). delete/preview/
-  // chevron/subtask have their own handlers. v2.74.1216 — picking an APP or the OVERVIEW also CLOSES the drawer (it's
-  // a navigation to a primary context); sub-task / plain rows keep it open so you can keep browsing.
+  // click the row → load the conversation (ANY level — Overview/app/sub-task/plain; §2 chat-at-any-level) AND close
+  // the drawer. v2.74.1218 — any pick is a navigation, so it always closes (was app/overview-only at .1216, which
+  // skipped sub-conversations). delete/preview/chevron/subtask have their own handlers — they don't switch the row.
   item.addEventListener('click', async (e) => {
     if (e.target.closest('.history-item-delete') || e.target.closest('.history-item-preview') || e.target.closest('.history-chevron') || e.target.closest('.history-item-subtask')) return;
-    const closeOnPick = row.role === 'app' || row.role === 'overview';
-    if (conv.id === _currentConversationId) { if (closeOnPick) _closeHistory(); return; }
+    if (conv.id === _currentConversationId) { _closeHistory(); return; }   // already active — just close the drawer
     if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch conversations anyway?')) return;
     const full = await ConversationStore.load(conv.id);
     if (full) {
@@ -648,7 +647,7 @@ function _historyConvRow(conv, row) {
       await _resumeRunningInvocations();
       await _renderHistoryList();
     }
-    if (closeOnPick) _closeHistory();
+    _closeHistory();
   });
 
   // v2.74.1095 — dev-aware delete: stop a live run (free the host slot) before removing the record; keep the branch.
