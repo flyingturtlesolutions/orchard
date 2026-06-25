@@ -52,6 +52,24 @@ describe('goalRetrieval — assembleGoalContext: RECALL (the capability-associat
   });
 });
 
+describe('goalRetrieval — recall-by-grid (OM #3a, operation-aware)', () => {
+  const OM = { noun: 'ticket', plural: 'tickets', states: ['open', 'closed'], actions: ['reply'], transitions: [{ verb: 'close', to: 'closed' }] };
+  it('a close-op ask ranks the close-capability above a view one (op-match boost)', () => {
+    const items = [
+      belief('show all tickets', { ref: 'cap-view' }),
+      belief('close ticket #5', { ref: 'cap-close' }),
+    ];
+    const { recalled } = assembleGoalContext(items, { ask: 'close the urgent ticket', om: OM, maxRecall: 1 });
+    assert.equal(recalled[0].ref, 'cap-close');
+  });
+  it('a same-operation belief is recalled even with low word overlap; om is additive (no om still works via tokens)', () => {
+    const om2 = { noun: 'email', plural: 'emails', states: ['unread'], actions: ['reply'], transitions: [{ verb: 'archive', to: 'archived' }] };
+    const items = [belief('archive the promo email', { ref: 'cap-arch' })];
+    assert.equal(assembleGoalContext(items, { ask: 'archive the newsletter', om: om2 }).recalled.length, 1);   // grid op (archive) matches
+    assert.equal(assembleGoalContext(items, { ask: 'archive the newsletter' }).recalled.length, 1);            // and without om, the shared "archive" token
+  });
+});
+
 describe('goalRetrieval — renderGoalContext', () => {
   it('renders rules + recall as a labeled block; ref becomes a capability hint', () => {
     const block = renderGoalContext({

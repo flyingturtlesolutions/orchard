@@ -718,11 +718,13 @@ export function createSgMessageHandlers(ctx) {
         // AL-4 — the app's LEARNED context: standing rules (deltas) + ask-relevant recall (the capability-association
         // belief banked in AL-3b → so a paraphrase recalls the taught capability). Trusted (the app's own memory),
         // fenced in the prompt. Empty off-app / no-memory.
+        // OM — the app's OBJECT MODEL (noun/states/actions/transitions) from its catalog type/preset, resolved once:
+        // it gives the LLM the exact state vocabulary (<OBJECTS>, v2.74.1199) AND makes recall operation-aware
+        // (recall-by-grid, v2.74.1201). Empty off-app.
+        const om = appId ? (builtinApp(appId)?.objectModel || null) : null;
         let learned = '';
-        if (appId) { try { learned = goalContextFor(await loadGoalItems(appId), ask); } catch { /* */ } }
-        // OM (v2.74.1199) — the app's OBJECT MODEL (what it works on: noun/states/actions/transitions), from its
-        // catalog type/preset. Gives the LLM the exact state vocabulary + which verbs change state. Empty off-app.
-        const objects = appId ? describeObjectModel(builtinApp(appId)?.objectModel || null) : '';
+        if (appId) { try { learned = goalContextFor(await loadGoalItems(appId), ask, { om }); } catch { /* */ } }
+        const objects = describeObjectModel(om);
         const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed, target, learned, objects });
         Logger.info('route', `INTERPRET_ASK "${ask.slice(0, 60)}" → ${decision.intent} (conf ${decision.confidence}, ${retrieved.length} cand, ground ${groundId || '—'})`);
         sendResponse({ success: true, decision, groundId: groundId || null, retrieved });
@@ -809,9 +811,10 @@ export function createSgMessageHandlers(ctx) {
         }
         // AL-4 — the app's LEARNED context (standing rules + relevant facts) shapes the prose answer too (e.g. a
         // `remember:` rule like "keep replies terse" applies here). Trusted; fenced in the prompt; empty off-app.
+        const om = appId ? (builtinApp(appId)?.objectModel || null) : null;   // OM — the app's object model (resolved once)
         let learned = '';
-        if (appId) { try { learned = goalContextFor(await loadGoalItems(appId), ask); } catch { /* */ } }
-        const objects = appId ? describeObjectModel(builtinApp(appId)?.objectModel || null) : '';   // OM — the app's object schema
+        if (appId) { try { learned = goalContextFor(await loadGoalItems(appId), ask, { om }); } catch { /* */ } }
+        const objects = describeObjectModel(om);
         const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed, learned, objects });
         // PS-0 (v2.74.1123) — persist Orchard's capability-gap enumeration instead of discarding it: the durable,
         // per-Ground DEMAND signal PS-1 arms into the interaction monitor for passive harvest. Non-fatal/best-effort.

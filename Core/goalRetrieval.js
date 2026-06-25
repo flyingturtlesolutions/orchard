@@ -12,6 +12,7 @@
 // interpret + answer prompts) is AL-4's later slices; this is the policy, headless-testable.
 
 import { tierRank } from './goalMemory.js';
+import { classifyAskToGrid } from './appDef.js';   // OM #3a — classify the ask + each belief into their operation×object cell
 
 // Tiny stoplist — drop function words + the highest-frequency app verbs so overlap reflects DOMAIN words ("open
 // emails", "refund ticket"), not "get"/"show"/"my". Conservative on purpose.
@@ -43,11 +44,21 @@ function _overlap(askTokens, text) {
  * @param {{ ask?: string, maxRules?: number, maxRecall?: number, minOverlap?: number }} [opts]
  * @returns {{ rules: Array, recalled: Array }}
  */
-export function assembleGoalContext(items, { ask = '', maxRules = 8, maxRecall = 5, minOverlap = 1 } = {}) {
+export function assembleGoalContext(items, { ask = '', maxRules = 8, maxRecall = 5, minOverlap = 1, om = null } = {}) {
   const list = (Array.isArray(items) ? items : []).filter((x) => x && x.id);
   const askTokens = _tokens(ask);
   const deltas = list.filter((x) => x.kind === 'delta');
   const beliefs = list.filter((x) => x.kind === 'belief');
+  // OM #3a — recall-by-GRID: when the app has an object model, classify the ask into its operation×object cell and
+  // BOOST beliefs whose body lands in the same cell (op match +2, object match +1). So a "close" ask recalls the
+  // close-capability over a view one even when the wording overlaps little — and a grid match can clear the floor.
+  const askGrid = (om && ask) ? classifyAskToGrid(ask, om) : null;
+  const gridBoost = (b) => {
+    if (!askGrid) return 0;
+    const bg = classifyAskToGrid(b.body, om);
+    if (!bg) return 0;
+    return (askGrid.op && bg.op === askGrid.op ? 2 : 0) + (askGrid.object && bg.object === askGrid.object ? 1 : 0);
+  };
 
   // RULES — always-on (no trigger) ALWAYS; triggered rules whose trigger overlaps the ask. Rank tier then confidence.
   const rules = deltas
@@ -59,7 +70,7 @@ export function assembleGoalContext(items, { ask = '', maxRules = 8, maxRecall =
   const always = beliefs.filter((b) => b.tier === 'summary');
   const scored = beliefs
     .filter((b) => b.tier !== 'summary')
-    .map((b) => ({ b, score: _overlap(askTokens, `${b.body} ${b.ref || ''}`) }))
+    .map((b) => ({ b, score: _overlap(askTokens, `${b.body} ${b.ref || ''}`) + gridBoost(b) }))
     .filter((x) => x.score >= minOverlap)
     .sort((x, y) => (y.score - x.score) || (tierRank(y.b.tier) - tierRank(x.b.tier)) || ((y.b.confidence ?? 0) - (x.b.confidence ?? 0)));
   const recalled = [...always, ...scored.map((x) => x.b)].slice(0, maxRecall);
