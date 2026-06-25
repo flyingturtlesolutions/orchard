@@ -657,8 +657,9 @@ function _historyConvRow(conv, row) {
     e.stopPropagation();
     const liveRun = conv.kind === 'dev' && _devRunStatus(conv.id).state !== 'idle';
     // AP-3 (v2.74.1211) — deleting an APP now CASCADES to its sub-conversations (ConversationStore.delete); warn first.
-    let childN = 0;
-    try { const all = await ConversationStore.list(); childN = all.filter((c) => c && c.parentId === conv.id).length; } catch { /* */ }
+    let childIds = [];
+    try { const all = await ConversationStore.list(); childIds = all.filter((c) => c && c.parentId === conv.id).map((c) => c.id); } catch { /* */ }
+    const childN = childIds.length;
     const prompt = liveRun
       ? `"${conv.title}" has a run in progress.\n\nDeleting will STOP the run and free its slot. Its git branch${conv.branch ? ` (${conv.branch})` : ''} is KEPT — open the conversation and run "delete branch" first if you also want that removed.\n\nDelete anyway?`
       : childN
@@ -668,7 +669,9 @@ function _historyConvRow(conv, row) {
     if (liveRun) { try { _getDevBridge()?.cancelConversationRuns?.(conv.id); } catch { /* */ } }
     await ConversationStore.delete(conv.id);
     _expandedApps.delete(conv.id);
-    if (conv.id === _currentConversationId) {
+    // AP-3 fix (v2.74.1220) — the cascade also removed this app's sub-conversations, so reset the panel if the ACTIVE
+    // conversation was the app OR one of its now-deleted children (else you'd be left viewing a conversation that's gone).
+    if (conv.id === _currentConversationId || childIds.includes(_currentConversationId)) {
       _clearCurrentConversation();
       _resetConversation();
       await renderSuggestionCards();
