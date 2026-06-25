@@ -33,9 +33,9 @@ import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch plan
 import { recipeLegs, normalizeTicket } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildDrawerTree } from './Core/drawerTree.js';   // CV-3c — the pure flush-left accordion model
-import { planSubTasks, classifyAskToGrid } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell
+import { planSubTasks, classifyAskToGrid, isConfiguredDef } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app)
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-app write gate (read-only enforcement)
-import { userAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps
+import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps; AP-4 — configuredAppDefinition (mint a durable, re-creatable app from a set-up instance)
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
 import { recordGoalItem, loadGoalItems, clearGoalMemory } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view
 import { standingRuleFromText } from './Core/goalMemory.js';   // AL-3c — non-tool capture: `remember:` authors a standing-rule delta
@@ -57,7 +57,8 @@ let _devModeEnabled = false;   // v2.74.1160 — Studio toggle (settings:devMode
 let _currentConversationSeed = '';   // v2.74.1163 (CV-2b) — the current conversation's seed (its standing instructions); the IL threads it into routing context + the answer preamble.
 let _currentConversationConfig = { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — the current track's enforced app config; the write gate (actAllowed) blocks ACTS when writePolicy:'never' (a read-only app/sub-task).
 let _setupState = null;   // AS-2 (v2.74.1188) — the in-progress guided-setup flow: { convId, spec } while connecting an app to its site; null otherwise. While set (for the current conversation), the modal intercept at the top of sendChatMessage routes the next typed message into advanceSetup.
-let _currentConversationAppId = null;   // AL-3b (v2.74.1193) — the current app's appId (the goal-memory key); null off-app. Tracked alongside _currentConversationConfig at create / rehydrate / clear. A sub-task carries its app's appId, so beliefs bank to the app (shared across its sub-tasks).
+let _currentConversationAppId = null;   // AL-3b (v2.74.1193) — the current app's appId = its TYPE (preset id); object-model / canvas resolve through it. Tracked at create / rehydrate / clear.
+let _currentConversationInstanceId = null;   // AP-0 (v2.74.1211) — the per-INSTANCE identity (unique per configured app); the goal-memory key once AP-0's threading lands, so two apps of one type don't share learning. Tracked alongside appId.
 
 // v2.74.106 — Single-flight guard for conversation creation. Two parallel
 // callers (e.g. double-clicked suggestion cards) could both see
@@ -94,7 +95,8 @@ function _clearCurrentConversation() {
   _currentConversationSeed = '';        // v2.74.1163 (CV-2b) — clear the IL seed on a fresh surface
   _currentConversationConfig = { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — a fresh/blank surface is unrestricted (gated)
   _setupState = null;   // AS-2 (v2.74.1188) — drop any in-progress setup flow when the surface changes
-  _currentConversationAppId = null;   // AL-3b — clear the goal-memory key on a fresh surface
+  _currentConversationAppId = null;   // AL-3b — clear the app type on a fresh surface
+  _currentConversationInstanceId = null;   // AP-0 — clear the per-instance memory key too
 }
 
 /**
@@ -1170,15 +1172,29 @@ async function _forgetApp(name) {
 async function _createAppConversation(def, { setup = false } = {}) {
   if (!def) return;
   _clearCurrentConversation();
+  // AP-0/AP-4 (v2.74.1211) — `appId` is ALWAYS the TYPE (the preset id → object-model / canvas resolve through it).
+  // A CONFIGURED def (already set up, from the gallery) re-creates with appId = its presetId, RESTORES its durable
+  // instanceId (so its per-instance goal memory persists) + its bound site (config), and SKIPS setup. A plain
+  // preset/custom mints a fresh instanceId. The store persists appId/presetId/instanceId/config on create.
+  const configured = isConfiguredDef(def);
+  const typeId = configured ? (def.presetId || def.type || def.id) : def.id;
+  // a configured def restores writePolicy (defaultConfig) + the bound site (setup) + the setupComplete flag.
+  const cfg = configured ? { ...(def.defaultConfig || {}), ...(def.setup || {}), setupComplete: true } : def.defaultConfig;
   let conv;
-  try { conv = await ConversationStore.create({ title: def.name, kind: 'app', seed: def.seed }); }
+  try {
+    conv = await ConversationStore.create({
+      title: def.name, kind: 'app', seed: def.seed,
+      appId: typeId, appVersion: def.version, icon: def.icon, config: cfg,
+      presetId: def.presetId || def.id, instanceId: def.instanceId || null,
+    });
+  }
   catch (e) { try { console.warn('[chat] app create failed:', e?.message); } catch { /* */ } return; }
   _currentConversationId = conv.id;
   _currentConversationKind = 'agent';            // an app routes through the IL (the seed shapes it), not the dev bridge
   _currentConversationSeed = def.seed || '';
-  _currentConversationAppId = def.id || null;    // AL-3b — key the app's goal memory
-  // best-effort — stash the app identity + enforced config for the drawer (CV-3c) and writePolicy (CV-6).
-  try { await ConversationStore.patchMeta(conv.id, { appId: def.id, appVersion: def.version, icon: def.icon, config: def.defaultConfig }); } catch { /* */ }
+  _currentConversationAppId = typeId || null;            // the TYPE — object-model / canvas resolution + the gallery
+  _currentConversationInstanceId = conv.instanceId || null;   // AP-0 — the per-instance goal-memory key
+  if (cfg && typeof cfg === 'object') _currentConversationConfig = cfg;
   // The app's empty state: greet with the app, no generic suggestion cards.
   $('messages').innerHTML = '';
   $('messages').classList.add('hidden');
@@ -1187,9 +1203,10 @@ async function _createAppConversation(def, { setup = false } = {}) {
   const sub = $('empty-state-subtitle'); if (sub) sub.textContent = def.description || 'Tell me what you need.';
   // CV-5b (v2.74.1183) — render the app's role-specific STARTERS as cards in the empty state, so an app is
   // immediately useful + self-explaining on open. Clicking one sends it (runs through the interpret front door).
-  // OM (v2.74.1209) — a preset/custom pick from the gallery goes STRAIGHT to setup. Opening an app another way
-  // (e.g. a saved user app) shows its empty state with starters + a discoverable Set-up affordance.
-  if (setup) {
+  // OM (v2.74.1209) — a preset/custom pick from the gallery goes STRAIGHT to setup. AP-4 — but a CONFIGURED def
+  // (already set up) opens pre-configured with its starters, NEVER re-running setup. Opening a saved app shows its
+  // empty state with starters + a Set-up affordance.
+  if (setup && !configured) {
     await _startSetupFlow();
   } else {
     const cards = $('suggestion-cards');
@@ -1366,6 +1383,21 @@ async function _bankSetup(step) {
   try { await ConversationStore.patchMeta(state.convId, { config: merged, pinned: true }); }
   catch (e) { try { console.warn('[chat] setup bank failed:', e?.message); } catch { /* */ } }
   if (state.convId === _currentConversationId) _currentConversationConfig = merged;
+  // AP-4 (v2.74.1211) — mint a durable, re-creatable CONFIGURED app from this just-set-up instance: it carries the
+  // type/object-model + the bound site + the durable instanceId, so re-selecting it from the gallery restores the
+  // SAME app (its learning lives under instanceId) and SKIPS setup. Best-effort — never blocks the connect message.
+  try {
+    const presetId = (conv && conv.presetId) || (conv && conv.appId) || _currentConversationAppId;
+    const typeDef = presetId ? builtinApp(presetId) : null;
+    const def = configuredAppDefinition({
+      name: (conv && conv.title) || (typeDef && typeDef.name) || 'My app',
+      seed: (conv && conv.seed) || _currentConversationSeed,
+      type: typeDef && typeDef.type, objectModel: typeDef && typeDef.objectModel, icon: (conv && conv.icon) || (typeDef && typeDef.icon),
+      config: merged, setup: { target: cfg.target, shape: cfg.shape }, presetId,
+      instanceId: (conv && conv.instanceId) || _currentConversationInstanceId,
+    });
+    if (def) { await _loadUserCatalog(); _userCatalog = addUserDef(_userCatalog, def); await _saveUserCatalog(); }
+  } catch (e) { try { console.warn('[chat] configured-app mint failed:', e?.message); } catch { /* */ } }
   const where = cfg.target ? `\`${cfg.target.label}\`` : 'your site';
   _setMessageBody(msg, `✅ **Connected to ${where}.** Now just tell me what to do — e.g. “get my open emails” — and I’ll learn each task the first time, then recall it when you ask again (even worded differently).`, { markdown: true });
   _orchFinalize(msg);
@@ -5579,7 +5611,8 @@ async function _rehydrateConversation(conv) {
   _currentConversationKind = conv.kind === 'dev' ? 'dev' : 'agent';   // v2.74.1029 — restore routing kind on switch
   _currentConversationSeed = (conv.kind !== 'dev' && conv.seed) ? String(conv.seed).trim() : '';   // v2.74.1163 (CV-2b) — restore the IL seed (agent convs only; dev `seed` is a one-shot prefill)
   _currentConversationConfig = (conv.config && typeof conv.config === 'object') ? conv.config : { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — restore the track's enforced write policy (a sub-task carries its app's tightened copy)
-  _currentConversationAppId = (conv.kind !== 'dev' && conv.appId) ? String(conv.appId) : null;   // AL-3b — restore the goal-memory key
+  _currentConversationAppId = (conv.kind !== 'dev' && conv.appId) ? String(conv.appId) : null;   // AL-3b — restore the app type
+  _currentConversationInstanceId = (conv.kind !== 'dev' && conv.instanceId) ? String(conv.instanceId) : null;   // AP-0 — restore the per-instance memory key
   // DBR-P3-1 (v2.74.1053) — a split-seeded dev conversation: pre-fill the composer with its seed the first time
   // it's opened (SEED-AND-HOLD — not sent; the human reviews + presses enter), then clear the seed so reopening
   // doesn't re-fill it. The composer (#chat-input) is visible even in the empty-dev state below.
