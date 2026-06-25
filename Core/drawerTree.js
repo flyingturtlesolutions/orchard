@@ -62,24 +62,21 @@ export function buildDrawerTree(summaries, { devMode = false, activeId = null, e
 
   const appIds = new Set(visible.filter(isApp).map((c) => c.id));
   // Top level = everything that isn't a sub-task of a PRESENT app (orphans fall through to plain → never lost).
-  const top = visible.filter((c) => !isSub(c) || !appIds.has(c.parentId)).sort(byPinnedThenUpdated);
+  // v2.74.1234 — the Overview is a real persistent conversation now, but it's rendered as the reserved pin (below),
+  // so exclude it from the regular rows or it'd appear twice (pin + a plain row).
+  const top = visible.filter((c) => c.id !== OVERVIEW_ID && (!isSub(c) || !appIds.has(c.parentId))).sort(byPinnedThenUpdated);
 
   const rows = [];
 
   // 1) Overview — pinned first, reserved (cannot be created/deleted, §2). Active when nothing else is (home state).
-  // v2.74.1219 — the Overview has no thread of its own, so its "quick peek" = the LAST ACTIVE conversation (the most-
-  // recently-updated, any kind) — a "pick up where you left off" hint under the home row.
-  // v2.74.1227 — ATTRIBUTE it to its source ("<title> · <last reply>") so it reads as a pointer to that conversation,
-  // not a bare verbatim echo of the most-recent app's message (which already shows on that app's own row below).
-  const lastActive = [...visible].sort(byUpdatedDesc)[0] || null;
-  const overviewPeek = (lastActive && lastActive.summary)
-    ? (lastActive.title ? `${lastActive.title} · ${lastActive.summary}` : lastActive.summary)
-    : null;
+  // v2.74.1234 — the Overview is a REAL persistent general-assistant conversation, so its peek = ITS OWN last message
+  // (from its index entry's summary), not an echo of another app. Null until it has activity.
+  const overviewConv = visible.find((c) => c.id === OVERVIEW_ID) || null;
   rows.push({
     id: OVERVIEW_ID, role: 'overview', title: 'Overview', icon: 'home', depth: 0,
     hasChildren: false, expanded: false, active: activeId == null || activeId === OVERVIEW_ID,
     count: 0, kind: 'agent',
-    summary: overviewPeek,
+    summary: (overviewConv && overviewConv.summary) ? overviewConv.summary : null,
   });
 
   // 2) Apps + plain conversations, by recency. An expanded app is immediately followed by its sub-task rows.

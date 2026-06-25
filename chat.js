@@ -33,7 +33,7 @@ import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch plan
 import { recipeLegs, normalizeTicket } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildDrawerTree } from './Core/drawerTree.js';   // CV-3c — the pure flush-left accordion model
-import { planSubTasks, subTaskFromApp, classifyAskToGrid, isConfiguredDef } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app)
+import { planSubTasks, subTaskFromApp, classifyAskToGrid, isConfiguredDef, OVERVIEW_ID } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app)
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-app write gate (read-only enforcement)
 import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps; AP-4 — configuredAppDefinition (mint a durable, re-creatable app from a set-up instance)
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
@@ -76,11 +76,21 @@ let _ensureConversationPromise = null;
  * Lazily create the current conversation if one isn't active, returns the id.
  * Called just-in-time when we're about to persist a real message.
  */
+// v2.74.1234 — the Overview is a REAL, persistent, reserved GENERAL-ASSISTANT conversation (id OVERVIEW_ID): home /
+// general chat persists to it, so it keeps its own history, shows its own peek, and is selectable like any thread.
+// Get-or-create (never re-create over the existing one). App-agnostic: no appId / seed (the generalist, vs the apps).
+async function _ensureOverviewConversation() {
+  let conv = null;
+  try { conv = await ConversationStore.load(OVERVIEW_ID); } catch { /* */ }
+  if (!conv) conv = await ConversationStore.create({ id: OVERVIEW_ID, title: 'Overview' });
+  return conv;
+}
+
 async function _ensureConversation() {
   if (_currentConversationId) return _currentConversationId;
   if (_ensureConversationPromise) return _ensureConversationPromise;
   _ensureConversationPromise = (async () => {
-    const conv = await ConversationStore.create();
+    const conv = await _ensureOverviewConversation();   // v2.74.1234 — a raw chat with no active conversation IS the general-assistant Overview thread (not a throwaway)
     _currentConversationId = conv.id;
     _refreshHistoryIfOpen().catch(() => {});   // v2.74.1042 — show the just-minted conversation in an open drawer
     return conv.id;
@@ -592,25 +602,6 @@ async function _openConvFullTimeline(conv) {
   _closeHistory();
 }
 
-// v2.74.1223 — the Overview "resume": open the last-active conversation (or the home empty state when there are none).
-// `close` distinguishes single-click (keep the drawer open, .1223) from double-click (reveal the full timeline).
-async function _resumeOverview({ close = false } = {}) {
-  if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch anyway?')) return;
-  let recent = null;
-  try { recent = await ConversationStore.mostRecent(); } catch { /* */ }
-  if (recent && recent.id) {
-    if (recent.id !== _currentConversationId) {
-      const full = await ConversationStore.load(recent.id);
-      if (full) { await _rehydrateConversation(full); await _resumeRunningInvocations(); }
-    }
-  } else {
-    _clearCurrentConversation();
-    _resetConversation();
-    await renderSuggestionCards();
-  }
-  await _renderHistoryList();
-  if (close) _closeHistory();
-}
 
 // CV-3c — the Overview pin: the reserved home row (the general assistant). Single-click → resume the last conversation
 // (keep the drawer open); double-click → resume + open the full timeline (close the drawer). (.1223)
@@ -620,10 +611,23 @@ function _historyPinRow(row) {
   // v2.74.1219 — the Overview "pick up where you left off" peek = the last active conversation's summary (drawerTree).
   const summaryLine = row.summary ? `<div class="history-item-summary">${escHtml(row.summary)}</div>` : '';
   el.innerHTML = `<div class="history-item-title"><span class="history-glyph" aria-hidden="true">⌂</span>${escHtml(row.title)}</div>${summaryLine}`;
-  // v2.74.1233 — Overview is a plain SINGLE-click: resume your last conversation AND close the drawer, so you land in
-  // the chat ready to type. (The .1223 single/double model kept the drawer OPEN on single-click — it loaded behind
-  // the drawer and never highlighted Overview, so it felt unselectable and you never reached the chat.)
-  el.addEventListener('click', () => { void _resumeOverview({ close: true }); });
+  // v2.74.1234 — Overview is a REAL persistent conversation: clicking it LOADS its own thread (its history) and closes
+  // the drawer. An empty Overview shows the general-assistant home (suggestion cards), but pinned to the thread so
+  // chatting appends to it.
+  el.addEventListener('click', async () => {
+    if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch anyway?')) return;
+    const conv = await _ensureOverviewConversation();
+    if ((conv.messages || []).length) {
+      if (conv.id !== _currentConversationId) { await _rehydrateConversation(conv); await _resumeRunningInvocations(); }
+    } else {
+      _clearCurrentConversation();         // general-assistant defaults (agent, no app, gated)…
+      _currentConversationId = conv.id;    // …but pinned to the Overview thread so chatting appends to it
+      _resetConversation();
+      await renderSuggestionCards();
+    }
+    await _renderHistoryList();
+    _closeHistory();
+  });
   return el;
 }
 

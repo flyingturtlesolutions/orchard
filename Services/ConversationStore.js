@@ -190,8 +190,10 @@ export const ConversationStore = {
    * @param {{ title?: string }} [init]
    * @returns {Promise<Conversation>}
    */
-  async create({ title = 'New conversation', kind = 'agent', branch = null, concern = null, sessionId = null, status = 'active', seed = null, surface = null, appId = null, appVersion = null, parentId = null, icon = null, config = null, presetId = null, instanceId = null, pinned = false } = {}) {
-    const id = crypto.randomUUID();
+  async create({ id: explicitId = null, title = 'New conversation', kind = 'agent', branch = null, concern = null, sessionId = null, status = 'active', seed = null, surface = null, appId = null, appVersion = null, parentId = null, icon = null, config = null, presetId = null, instanceId = null, pinned = false } = {}) {
+    // v2.74.1234 — an explicit id mints a RESERVED conversation (the persistent Overview owns OVERVIEW_ID). The caller
+    // is responsible for get-or-create (don't create over an existing id); a random uuid is the default.
+    const id = (typeof explicitId === 'string' && explicitId) ? explicitId : crypto.randomUUID();
     const now = Date.now();
     // v2.74.1029 — `kind`: 'agent' (the website-operating assistant, the default) or 'dev' (a Claude Code
     // dev-bridge thread). Stored on the body AND mirrored into the index entry so history rendering, the
