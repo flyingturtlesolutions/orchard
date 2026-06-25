@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 import {
   OVERVIEW_ID, ARCHETYPES, WRITE_POLICIES, APP_TYPES,
-  normalizeConfig, tightenConfig, normalizeAppDefinition, appFromDefinition, normalizeObjectModel, describeObjectModel,
+  normalizeConfig, tightenConfig, normalizeAppDefinition, appFromDefinition, normalizeObjectModel, describeObjectModel, classifyAskToGrid,
   isOverview, isApp, isSubTask, canDelete, composeSeed, subTaskFromApp, overviewShape, planSubTasks,
 } from './appDef.js';
 
@@ -87,6 +87,27 @@ describe('appDef — normalizeObjectModel', () => {
     assert.match(block, /close → closed/);
     assert.equal(describeObjectModel(null), '');
     assert.equal(describeObjectModel({ states: ['x'] }), '');   // no noun
+  });
+});
+
+describe('appDef — classifyAskToGrid (OM #3a — operation × object)', () => {
+  const OM = { noun: 'ticket', plural: 'tickets', states: ['open', 'pending', 'closed'], actions: ['reply', 'draft'], transitions: [{ verb: 'close', to: 'closed' }, { verb: 'reopen', to: 'open' }] };
+  it('a read-ish ask on the object → view · object · state', () => {
+    assert.deepEqual(classifyAskToGrid('show me my open tickets', OM), { op: 'view', object: 'ticket', state: 'open', target: null });
+    assert.equal(classifyAskToGrid('how many open tickets do I have', OM).op, 'view');
+  });
+  it('a transition verb wins and carries its target state (the postcondition)', () => {
+    assert.deepEqual(classifyAskToGrid('close ticket #5', OM), { op: 'close', object: 'ticket', state: null, target: 'closed' });
+  });
+  it('an action verb (no state change) → that op, target null', () => {
+    const g = classifyAskToGrid('draft something for the ticket', OM);
+    assert.equal(g.op, 'draft');     // matched action; not a state change → no target
+    assert.equal(g.object, 'ticket');
+    assert.equal(g.target, null);
+  });
+  it('nothing matches → an all-null cell; no model → null', () => {
+    assert.deepEqual(classifyAskToGrid('what is the weather', OM), { op: null, object: null, state: null, target: null });
+    assert.equal(classifyAskToGrid('x', null), null);
   });
 });
 

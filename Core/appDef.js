@@ -74,6 +74,28 @@ export function describeObjectModel(om) {
   return parts.join('\n');
 }
 
+/**
+ * Classify an ask into the object-model GRID cell it touches — `{ op, object, state, target }` — by deterministic
+ * vocabulary match against the model (OM #3a, the learning grid). PURE. `op`: a transition verb wins (a state
+ * change, with `target` = the state it reaches → a postcondition), then an action verb, else "view" for a read-ish
+ * ask. `object` = the noun if mentioned; `state` = a mentioned state. All-null when nothing matches → null cell.
+ * So recall + the `memory` audit can organize by operation × object instead of free text.
+ */
+export function classifyAskToGrid(ask, om) {
+  const m = normalizeObjectModel(om);
+  if (!m) return null;
+  const text = String(ask || '').toLowerCase();
+  const toks = new Set(text.match(/[a-z0-9]+/g) || []);
+  const has = (phrase) => { const t = String(phrase || '').toLowerCase().match(/[a-z0-9]+/g) || []; return t.length > 0 && t.every((x) => toks.has(x)); };
+  const object = (has(m.noun) || has(m.plural)) ? m.noun : null;
+  const state = m.states.find((s) => has(s)) || null;
+  const transition = m.transitions.find((t) => has(t.verb)) || null;
+  let op = transition ? transition.verb : (m.actions.find((a) => has(a)) || null);
+  // "view" is the read fallback — but only when the ask is actually ABOUT the app's object (else it's off-grid).
+  if (!op && object && /\b(get|show|list|view|read|find|see|how\s+many|count|what)\b/.test(text)) op = 'view';
+  return { op, object, state, target: transition ? transition.to : null };
+}
+
 /** Validate + normalize an AppDefinition (catalog entry). PURE. Returns the normalized def, or null if unusable. */
 export function normalizeAppDefinition(def) {
   const d = (def && typeof def === 'object') ? def : null;

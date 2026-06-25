@@ -33,7 +33,7 @@ import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch plan
 import { recipeLegs, normalizeTicket } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildDrawerTree } from './Core/drawerTree.js';   // CV-3c — the pure flush-left accordion model
-import { planSubTasks } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure)
+import { planSubTasks, classifyAskToGrid } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-app write gate (read-only enforcement)
 import { userAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
@@ -1361,11 +1361,20 @@ async function _renderAppMemory() {
   // AL-3b+ (v2.74.1196) — the AUDIT line: WHAT (body + the capability it points at) and HOW it knows (tier ·
   // confidence · ×evidence · PROVENANCE). Provenance is the trust dimension — every item says where it came from.
   const provLabel = (p) => (p === 'user-rule' ? 'you set this' : p === 'interpret-act' ? 'learned by use' : (p ? `from ${p}` : 'observed'));
+  // OM #3a (v2.74.1201) — the GRID tag: classify a capability-association belief's ask into its operation×object
+  // cell (view·email, close·ticket, …) against the app's object model, so the audit organizes by schema not text.
+  let _om = null; try { _om = builtinApp(appId)?.objectModel || null; } catch { /* */ }
+  const gridTag = (x) => {
+    if (!_om || x.kind !== 'belief') return '';
+    const g = classifyAskToGrid(x.body, _om);
+    if (!g || (!g.op && !g.object)) return '';
+    return `  〔${[g.op, g.object].filter(Boolean).join(' · ')}〕`;
+  };
   const fmt = (x) => {
     const conf = Math.round((x.confidence ?? 0) * 100);
     const ev = (x.evidence && x.evidence > 1) ? ` ·×${x.evidence}` : '';
     const ref = x.ref ? `  → \`${x.ref}\`` : '';
-    return `• [${x.tier || 'observation'} · ${conf}%${ev} · ${provLabel(x.provenance)}] ${x.body}${ref}`;
+    return `• [${x.tier || 'observation'} · ${conf}%${ev} · ${provLabel(x.provenance)}] ${x.body}${ref}${gridTag(x)}`;
   };
   const beliefs = items.filter((x) => x.kind === 'belief');
   const deltas = items.filter((x) => x.kind === 'delta');
