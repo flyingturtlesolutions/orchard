@@ -557,12 +557,24 @@ function _historyPinRow(row) {
   const summaryLine = row.summary ? `<div class="history-item-summary">${escHtml(row.summary)}</div>` : '';
   el.innerHTML = `<div class="history-item-title"><span class="history-glyph" aria-hidden="true">⌂</span>${escHtml(row.title)}</div>${summaryLine}`;
   el.addEventListener('click', async () => {
-    if (_currentConversationId == null) { _closeHistory(); return; }   // already home — just close the drawer
     if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch anyway?')) return;
-    _clearCurrentConversation();
-    _resetConversation();
-    await renderSuggestionCards();
+    // v2.74.1222 — "keep the conversation history when there is one": Overview OPENS your last-active conversation
+    // (the one previewed under its name) instead of wiping the panel to the empty state. It drops to the fresh home
+    // empty state only when there are NO conversations. Closes the drawer like any pick (.1218).
+    let recent = null;
+    try { recent = await ConversationStore.mostRecent(); } catch { /* */ }
+    if (recent && recent.id) {
+      if (recent.id !== _currentConversationId) {
+        const full = await ConversationStore.load(recent.id);
+        if (full) { await _rehydrateConversation(full); await _resumeRunningInvocations(); }
+      }
+    } else {
+      _clearCurrentConversation();
+      _resetConversation();
+      await renderSuggestionCards();
+    }
     await _renderHistoryList();
+    _closeHistory();
   });
   return el;
 }
