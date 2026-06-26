@@ -111,7 +111,7 @@ if (domain === 'connector') {
            payload: { server: t.server, tool: t.name, args: p }, reason: 'connector-invoke' };
 }
 ```
-- `INVOKE_SESSION` → a background/content-script handler that fetches from the app's authenticated origin. `INVOKE_CONNECTOR` → the proxy broker. Both `busyMark:false`; both normalize through `toObservation` (`Core/execPlan.js:92`) — structured success/error, no new normalization. Add both to the Invariant #2 emitter note (no busy-mark — they drive no tab).
+- `INVOKE_SESSION` → a background/content-script handler that fetches from the app's authenticated origin. `INVOKE_CONNECTOR` → the proxy broker. Both `busyMark:false`; both normalize through `toObservation` (`Core/execPlan.js:92`) — structured success/error, no new normalization. Add both to the Invariant #2 emitter note (no busy-mark — they drive no tab). Tab-resolution prefers an open logged-in tab and **falls back to an ephemeral managed tab** (open→fetch→close, with re-auth focus) when none is open — §16.
 
 ## 8. Arbitration
 
@@ -147,7 +147,7 @@ Reads favor the credential-free path; writes favor the *scoped, governable* path
    - **CX-4c — the autonomous arc** (§13): connector list → `agentLoop` `foreach` → per-item work.
 5. **CX-5 — the broker (cloud).** MCP client + vault + `GET/POST` in the Phase C-P3 proxy; one OAuth read connector.
 6. **CX-6 — writes + HITL.** A write connector through `confirm`/`gated` (both impls); the alias-collision demote.
-7. **CX-7 — the connection layer + catalog UX.** A "connection" is *which instance · which role · which host*, beyond the open tab: **disambiguate** multiple open `*.appHost` tabs (prefer the active / most-recently-used — shipped in CX-4a.2), **remember the instance** for the cold-start "open a tab" (§14) when none is open, and pick the **agent vs end-user** recipe by role. Plus OAuth link / user recipes / SSO-for-teams; `env.connectors` reflects linked + logged-in state.
+7. **CX-7 — the connection layer + catalog UX.** A "connection" is *which instance · which role · which host*, beyond the open tab: **disambiguate** multiple open `*.appHost` tabs (prefer the active / most-recently-used — shipped in CX-4a.2), the **ephemeral managed tab** for cold-start (open→fetch→close + re-auth focus, §16) when none is open, and pick the **agent vs end-user** recipe by role. Plus OAuth link / user recipes / SSO-for-teams; `env.connectors` reflects linked + logged-in state.
 8. **CX-8 — learn-from-traffic authoring.** One demonstration captures DOM actions **and** the page's network calls (a MAIN-world `fetch`/`XHR` tee) → emits the grounded fragments **and** a session-ride recipe per observed read/write, bound to the same step as an alternative leg (the "learnable from traffic" hook in §4/§12). The multiplier that makes hybrid legs (CX-9) *automatic* instead of hand-authored.
 9. **CX-9 — hybrid read-legs (the lattice per *step*).** The `read-leg` kind on the Observation node (`dom-scrape | session-fetch | network-harvest`) + the **network-harvest executor** (A2 — MAIN-world tee; `chrome.debugger` Network as the heavyweight fallback) + the per-step read arbitration (§8). A1 (`session-fetch`) is nearly free — bind a connector recipe as a leg of a learnt step. **Pattern C** (session-ride read *verifies* a grounded write) is the write-side safety multiplier. Provable on a real search (Zendesk / the vendor portal); CX-8 makes it scale. (§15)
 
@@ -163,14 +163,14 @@ CX-1…3 ship a working read connector with **no cloud and no credential**. The 
 ## 12. Open contracts (resolved direction; pin before the slice that needs them)
 
 - **Param fidelity** *(CX-1)* — carry the pruned `inputSchema` (`paramSchema`) for binding, not just names. Negligible cost; `routeAsk` already speaks JSON Schema.
-- **Session-ride cookie mechanics** *(CX-3 — RESOLVED 2026-06-23)* — a content-script fetch from the app's origin tab carries the SameSite login cookie: **proven live** (Zendesk `/api/v2/tickets/{id}.json` returned the ticket JSON riding the user's session, v2.74.1151). Must run in the origin tab (a background cross-site fetch would not); a stale/missing content script is auto-healed via `_ensureContentScript` (v2.74.1152). **No-open-tab → open a tab to the origin** (the real browser is/may-be logged in) — Orchard's in-browser locus needs no profile replay (§14).
+- **Session-ride cookie mechanics** *(CX-3 — RESOLVED 2026-06-23)* — a content-script fetch from the app's origin tab carries the SameSite login cookie: **proven live** (Zendesk `/api/v2/tickets/{id}.json` returned the ticket JSON riding the user's session, v2.74.1151). Must run in the origin tab (a background cross-site fetch would not); a stale/missing content script is auto-healed via `_ensureContentScript` (v2.74.1152). **No-open-tab → the ephemeral managed tab** (open→fetch→close; specced §16) — the real browser is/may-be logged in, so Orchard's in-browser locus needs no profile replay (§14).
 - **Session-ride recipe catalog** *(CX-3)* — curated `origin·endpoint·param-spec` per app; later learnable from observed traffic.
 - **Result shape / limits** *(CX-3/5)* — **offload + preview** (dump big results to a scratch artifact, hand the AI a preview + reference — mirrors MCP's >100K offload and the page-EXTRACT path), with cap/paginate fallbacks.
 - **Timeout / cancel** *(CX-3/5)* — per-invoke deadline → structured-failure; thread the existing CR-S abort signal into both invoke channels (+ MCP cancellation for the broker).
 - **Per-user credential isolation + OAuth lifecycle** *(CX-5)* — every broker invoke resolves to the calling user's vault; per-provider OAuth dance, refresh, revoke; SSO-derived for teams.
 - **Intent ≠ tool-success** *(CX-4)* — a 0-result read is structural success but answers nothing; add a connector-side "did this answer the ask?" check (the connector analog of PB-10).
 - **Co-retrieval slot + overlap detection** *(CX-4b/6)* — reserve a per-class candidate slot; detect alias/connector overlap conservatively (no false retirements).
-- **Generalization across users/instances** *(CX-7)* — `appHost` + identity-from-the-open-tab is per-user/per-instance correct with **zero config** (another agent or a different Zendesk → *their* tickets; nothing hardcoded — proven `n:11`). Open: multiple open instances (**disambiguate** — active-tab pref shipped CX-4a.2), **no-tab cold start** (needs the remembered instance to open one — §14), **agent vs end-user** surface (`/api/v2/search` vs `/api/v2/requests` — a per-role recipe), and **host-mapped** Zendesk (`support.acme.com` ∉ `*.zendesk.com` — needs the real host on the connection).
+- **Generalization across users/instances** *(CX-7)* — `appHost` + identity-from-the-open-tab is per-user/per-instance correct with **zero config** (another agent or a different Zendesk → *their* tickets; nothing hardcoded — proven `n:11`). Open: multiple open instances (**disambiguate** — active-tab pref shipped CX-4a.2), **no-tab cold start** (**specced — the ephemeral managed tab, §16**), **agent vs end-user** surface (`/api/v2/search` vs `/api/v2/requests` — a per-role recipe), and **host-mapped** Zendesk (`support.acme.com` ∉ `*.zendesk.com` — needs the real host on the connection).
 
 ## 13. Usage shapes & identity (2026-06-23 reframe)
 
@@ -229,3 +229,39 @@ Arbitration so far (§8) picks a tool **per task**. The deeper move: a learnt pa
 - **Arbitration (§8)** — the read row already prefers `session-ride → … → scrape`; CX-9 makes that a *per-step* choice with `network-harvest` sitting between direct fetch and scrape.
 
 **Build order if taken:** (1) the `read-leg` abstraction on Observation (pure) — **LANDED `Core/readLeg.js` v2.74.1158** (constructors · `normalizeExtract` back-compat · `legFeasible`/`selectReadLeg` per-step arbitration; `shape` is extract-level, legs are pure mechanism); (2) the `network-harvest` executor (A2) — **pure correlation core LANDED `Core/harvest.js` v2.74.1159** (`jsonPath` · `callMatchesLeg` · `matchHarvest`: pick the result-bearing call out of the XHR noise by match+method+2xx+JSON, prefer the query-carrying request, tie-break rows→recency, extract via the `result` path); the **live MAIN-world tee + the ObservationExecutor dispatch branch remain** (impure — needs an eyeball on a real search); (3) bind A1 (`session-fetch`) as a leg of a learnt step (nearly free — route the leg's `tool` through `INVOKE_SESSION`); (4) Pattern C for the write side. CX-8 (dual capture) is what makes legs accrue without hand-authoring.
+
+## 16. Cold-start ride — the ephemeral managed tab (CX-7)
+
+Resolves the §12 *no-open-tab* contract. `ride` reaches an endpoint by riding a same-origin tab's cookies, so today "no logged-in tab on the origin" → `no-authenticated-tab` and the ride dies. But the real requirement is a **live session cookie, not a *kept-open* tab** — cookies live in the browser's shared per-origin jar, so a tab Orchard opens itself **inherits** the existing login. The ephemeral managed tab supplies the missing same-origin context on demand. It is an **acceptable headless** — background, transient, no babysitting — *within* ride's envelope (still browser-bound + session-lifetime-bounded; true headless/cron is `broker`/managed-replay, §14).
+
+**Not the default — a fallback.** `INVOKE_SESSION` tab-resolution (§7) order:
+1. an already-open, live, logged-in tab on the origin — **preferred** (zero side-effects, the user's real context; active/MRU disambiguation, CX-4a.2);
+2. **the ephemeral managed tab** — only when (1) finds none. The default path is unchanged; this is the cold-start arm for *"the resource isn't open."*
+
+**Lifecycle — open → ensure → fetch → close.**
+1. `chrome.tabs.create({ url: 'https://<origin>/', active: false })` — a **background** tab (no focus steal). The fresh tab inherits the cookie jar; for a Cloudflare/Okta app the navigation itself clears the challenge and warms `cf_clearance` (the open *is* the warm-up).
+2. `ensureContentScript(tabId)`; for a **write**, wait for `meta[name="csrf-token"]` to render — a **read** fires as soon as the content script is live (document_start).
+3. identity probe (if `verifyIdentity`) → `SESSION_FETCH`.
+4. `chrome.tabs.remove(tabId)` on completion.
+
+**Reuse, don't churn.** A managed tab is tracked **per-origin** with an **idle-TTL**: a burst (a `foreach` over a list read) shares one tab and closes it after N s idle / at run-end — open-per-request only for a lone call. Concurrent rides to one origin share the tab.
+
+**Re-auth — focus the tab for sign-in (don't close it).** Opening a tab *inherits* auth; it cannot *create* it. If the ephemeral tab is unauthenticated — the identity probe returns anon, or the navigation lands on a login/SSO page — **do not close it**:
+1. **promote it to the foreground** — `chrome.tabs.update(tabId, { active: true })` + focus its window — so the user lands on the app's real login page;
+2. surface *"sign in to `<app>` to continue — your `<ride>` is waiting"*;
+3. **watch for sign-in** (`webNavigation` + re-probe); when the identity probe passes, **resume the pending ride** on the now-authenticated tab, then apply the normal close/idle policy.
+
+Orchard never types the credentials (the injection boundary, §9) — it only brings the user to the login surface and resumes. A `confirm`/`gated` ride still passes its own HITL gate after re-auth.
+
+**`Connection` guards compose here** (the pure-core slice):
+- **wrong-account** — the probed identity must match the leg's `account` namespace; a mismatch → `wrong-account` (never act as the wrong principal), surfaced like expiry (focus the tab so the user can switch login).
+- **freshness** — the probe + `lastVerifiedAt` set `Connection.status` (`unknown` until probed → `fresh` after → `signed-out`/`wrong-account` on the guard paths).
+
+**Caveats (behavioral).** inherits-not-creates auth (above); writes wait for the CSRF meta, reads don't; Cloudflare apps pay a one-time challenge-clear on a cold open (then `cf_clearance` persists); a background tab briefly shows in the tab strip (a minimized helper window hides it if it ever matters); still browser-bound + session-lifetime-bounded.
+
+**Safety.** Unchanged trust posture — a full-session ride (writes `gated`/`confirm`). The open/close is a benign tab op needing **no new permission** (`tabs` + `<all_urls>` already held). The one new user-facing act is *focusing a tab so the human can sign in*, which is on the right side of the injection boundary (the user acts; Orchard enters nothing).
+
+**Build (pure-first; live edge flagged).**
+1. `Core/connection.js` **(pure)** — **BUILT v2.74.1238** — `assessProbe`/`rideAction` (the anon-sentinel + wrong-account verdict → proceed | reauth-focus), `connectionFromProbe`/`connectionFreshness` (TTL), `pickRideTab` (live, active-then-MRU). 17 tests.
+2. `INVOKE_SESSION` glue **(impure — eyeball pending)** — **BUILT v2.74.1239** — `pickRideTab` → ephemeral `tabs.create({active:false})` → `_waitTabComplete` → `ensureContentScript` → ride → idle-`tabs.remove`; per-origin managed-tab registry (reuse + idle-TTL + `onRemoved` cleanup) + a `lastOriginByAppHost` memory for cold-start. `account` threaded → the wrong-account guard is live-capable.
+3. re-auth focus + resume **(impure — eyeball pending)** — **BUILT v2.74.1240** — `_focusTab` + `_waitForReauth` (`webNavigation`-driven re-probe on each settled nav, tab-closed cancel, 90 s deadline) → resume the pending invoke; the focused tab is promoted out of the disposable registry. **Caveat:** a long idle wait can outlive the MV3 SW — the robust form (chrome.alarms + a persisted continuation + out-of-band delivery, the `alarms` permission is already held) is the hardening follow-up.

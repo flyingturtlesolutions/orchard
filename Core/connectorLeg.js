@@ -62,7 +62,7 @@ function recipeParamSchema(params) {
 /**
  * A session-ride recipe → a client-side connector leg. A recipe is a curated (or later learned) endpoint binding:
  *   { id, name, does, app, origin, endpoint, method?('GET'), write?(false), destructive?(false),
- *     params?:[{name,type?,enum?,required?}] }
+ *     body?(write body TEMPLATE — fillBody substitutes its {param}s), params?:[{name,type?,enum?,required?}] }
  * The call rides the user's existing browser session — no credential. PURE. Returns null on an incomplete recipe.
  */
 export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
@@ -90,6 +90,7 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
       impl: 'session', account, app,
       origin: origin || null, appHost: appHost || null,
       endpoint, method: _str(r.method).toUpperCase() || 'GET',
+      body: (write && r.body && typeof r.body === 'object') ? r.body : null,   // write body TEMPLATE; the executor fillBody()s it
       verifyIdentity: r.verifyIdentity === true,
       identityProbe: _str(r.identityProbe) || null,
     },

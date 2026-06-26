@@ -67,7 +67,7 @@ describe('planExec — leg → dispatch plan (pure §4.2)', () => {
 
   it('session-ride connector → INVOKE_SESSION, not busy-marked, carries origin+endpoint+args (CX-2 §7)', () => {
     const leg = { key: 'acme.zendesk.read_ticket', domain: 'connector', source: 'builtin', mode: 'ask',
-                  tool: { impl: 'session', origin: 'acme.zendesk.com', endpoint: '/api/v2/tickets/{id}.json', method: 'GET' } };
+                  tool: { impl: 'session', account: 'acme', origin: 'acme.zendesk.com', endpoint: '/api/v2/tickets/{id}.json', method: 'GET' } };
     const plan = planExec(leg, { id: 12345 }, {});
     assert.equal(plan.ok, true);
     assert.equal(plan.channel, 'INVOKE_SESSION');
@@ -75,7 +75,23 @@ describe('planExec — leg → dispatch plan (pure §4.2)', () => {
     assert.equal(plan.payload.origin, 'acme.zendesk.com');
     assert.equal(plan.payload.endpoint, '/api/v2/tickets/{id}.json');
     assert.equal(plan.payload.method, 'GET');
+    assert.equal(plan.payload.account, 'acme');         // CX-7 — threads the expected account for the wrong-account guard
     assert.equal(plan.payload.args.id, 12345);
+  });
+
+  it('session-ride WRITE → INVOKE_SESSION carries the body TEMPLATE + non-GET method (CX-6a; reads send body:null)', () => {
+    const write = { key: 'me.zendesk.update_ticket_status', domain: 'connector', source: 'builtin', mode: 'act',
+                    tool: { impl: 'session', appHost: 'zendesk.com', endpoint: '/api/v2/tickets/{id}.json', method: 'PUT',
+                            body: { ticket: { status: '{status}' } } } };
+    const plan = planExec(write, { id: 7, status: 'solved' }, {});
+    assert.equal(plan.channel, 'INVOKE_SESSION');
+    assert.equal(plan.busyMark, false);                                 // a connector drives no tab (Invariant #2 N/A)
+    assert.equal(plan.payload.method, 'PUT');
+    assert.deepEqual(plan.payload.body, { ticket: { status: '{status}' } });   // template passed through; the executor fillBody()s it
+    // a GET read carries no body
+    const read = { key: 'me.zendesk.read_ticket', domain: 'connector', source: 'builtin', mode: 'ask',
+                   tool: { impl: 'session', appHost: 'zendesk.com', endpoint: '/api/v2/tickets/{id}.json', method: 'GET' } };
+    assert.equal(planExec(read, { id: 7 }, {}).payload.body, null);
   });
 
   it('session-ride with no recipe binding → not dispatchable', () => {

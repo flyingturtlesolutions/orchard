@@ -55,12 +55,12 @@ Coverage: **Page** rich, **Browser** partial (close only), **Self** partial, **C
 The grid's cells are **legs** — the tools the loop selects over, mirroring Claude Code's tool palette. Leg spec (the tool definition):
 
 ```
-leg { name · does · mode(ACT|ASK) · domain(page|browser|connector|self)
+leg { name · does · mode(ACT|ASK) · domain(page|browser|connector|self) · path(drive|ride|broker|walk)
       params · source(learned|builtin) · verified_by(trial|postcondition|n/a)
       safety(auto|confirm|gated) }
 ```
 
-`name/does/params` is the Claude-Code tool schema; `mode/domain/source/safety` is the Orchard metadata that makes selection and autonomy safe. Legs are retrieved (tool-RAG, R-2), never dumped.
+`name/does/params` is the Claude-Code tool schema; `mode/domain/source/safety` is the Orchard metadata that makes selection and autonomy safe; `path` is the **actuation channel** (§2.8), derived from `domain`+`impl`+`source`. Legs are retrieved (tool-RAG, R-2), never dumped.
 
 ### 2.3 Selection policy — *LLM proposes, policy disposes*
 
@@ -71,7 +71,7 @@ Tool choice is constrained, not free. The constraint flips on read-vs-write:
 | **ASK** (read) | speed/cost | **connector/API first**, grounded fallback | low-risk; structured fetch beats scrape |
 | **ACT** (write) | observability + verifiability | **grounded T2/T3 first**, even if an API exists | trial gate, visible trace, reversible-ish |
 
-The policy is a **fixed safety floor + a user-editable rule table**. The floor (writes→grounded; never type credentials; gate the irreversible) cannot be relaxed by the loop. The table is edited *conversationally* via the **Self** effector ("only use grounded on Shopify" → a saved routing rule), with three guardrails: **user-origin only** (a page can't reprogram routing — the injection wall), **tighten-free / loosen-gated** (rules can raise the floor silently, lowering it needs elevated consent), and **confirm-the-scope at author time**. Precedence: most-specific scope wins, the floor always wins, recency breaks ties; the chosen leg + rationale is logged (a `_DECISION_RE` marker).
+The policy is a **fixed safety floor + a user-editable rule table**. The floor (writes→grounded; never type credentials; gate the irreversible) cannot be relaxed by the loop. The table is edited *conversationally* via the **Self** effector (a **path rule** — "drive Shopify, ride Zendesk" → a saved routing rule, §2.8), with three guardrails: **user-origin only** (a page can't reprogram routing — the injection wall), **tighten-free / loosen-gated** (rules can raise the floor silently, lowering it needs elevated consent), and **confirm-the-scope at author time**. Precedence: most-specific scope wins, the floor always wins, recency breaks ties; the chosen leg + rationale is logged (a `_DECISION_RE` marker).
 
 ### 2.4 Access — subtractive
 
@@ -98,6 +98,24 @@ The LLM is touched **at the think seams, never during the do** — the grounded 
 ### 2.7 Promotion — Orchard paths become substrate
 
 An Orchard run produces a transcript of landmark-backed acts — the same raw material as a demonstration or a trial — so it feeds the **existing** accept pipeline: segment (OBS-2) → generalize params (OBS-4) → re-trial verify → **accept** promotes protos into saved Landmarks/Fragments/Strategy(T2)/Workflow(T3) (SG-LM-4), with dedup (GA-6), integrity (GA-8), alias accretion. **Selective:** you can only compile the compilable — linear segments harden into T2/T3; the data-dependent branch points stay as Orchard decisions or become Analysis/param holes in a **partially-compiled** T3. The flywheel **shrinks the un-compilable residue**: a path that needed mid-task grounding on run 1 is mostly a leg-selection on run 2. An Orchard-promoted artifact passes the *same* trial/fidelity gate (Orchard proposing never bypasses verification) and is stamped `Orchard-derived` for re-verify (GA-3).
+
+### 2.8 The four paths — how a leg actuates the app
+
+Orthogonal to the (mode × domain) grid: every leg reaches the target app by exactly one **path** — its actuation channel. Three are Orchard acting at increasing depth; the fourth is the human. Selection (§2.3) chooses *among* paths; the path a run used is logged.
+
+| `path` | actuates | actor | maps to a leg | its artifacts |
+|---|---|---|---|---|
+| **`drive`** | the rendered **UI**, through verified anchors (probe-or-recover) | Orchard | `domain:page, source:learned` (+ raw browser primitives) | Landmarks · Fragments · Strategies · Workflows |
+| **`ride`** | the app's **own frontend endpoint**, on the live login — credential-free, same-origin | Orchard | `domain:connector, impl:session` | session **recipes** (`Core/connectorRecipes.js`) |
+| **`broker`** | the app's **official scoped API**, via the cloud OAuth/MCP vault | Orchard | `domain:connector, impl:oauth` | MCP tool descriptors / bindings |
+| **`walk`** | the **UI, directly by the human** — Orchard's existing teach flow (`WALK ▸`, `endWalk`) | the **user** | the demonstration / interaction-monitor source | demonstrations / raw traces → *author* `drive` |
+
+**Motion metaphor:** you **drive** the controls · **ride** the already-running session · **broker** through an authorized intermediary · **walk** Orchard through it by hand. `walk` is special — it is both a path *and* the learning source that authors `drive` (a demonstration segments into Fragments, §2.7).
+
+- **"Connector" = the two API paths** (`ride` + `broker` = `domain:connector`). The collective noun for all four is **paths**. *(Overload caution: §2.7's "Orchard paths" means runs/transcripts, not this channel — if the code field's overload bites, name it `channel`.)*
+- **Safety composes, never relaxes:** a path rule (§2.3) reorders/restricts among *already-permitted* legs — it can't promote a `gated`/`forbidden` leg or override the money/inventory navigate-only floor. Most-specific scope wins; health (GA-3 trust) can demote a preferred-but-unhealthy path to its fallback.
+- **Default arbitration (§2.3):** reads favour `ride`/`broker` (structured fetch), writes favour `drive` (the trial gate + visible trace) — a **path rule** is the app's standing override of that default.
+- **Edge:** raw primitives (`OPEN_URL`, bare `CLICK`, canvas `DISPLAY`) are Orchard-driven but un-taught — the bare edge of `drive` (split out as a fifth `native` path only if ever needed).
 
 ---
 

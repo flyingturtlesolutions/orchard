@@ -95,7 +95,7 @@ function _planExec(leg, params = {}, ctx = {}) {
       if (!(t.origin || t.appHost) || !t.endpoint) return fail('connector', 'session-no-recipe');
       return { ok: true, channel: 'INVOKE_SESSION', busyMark: false, mode, domain: 'connector',
                payload: { origin: t.origin || null, appHost: t.appHost || null, endpoint: t.endpoint,
-                          method: t.method || 'GET', args: p,
+                          method: t.method || 'GET', body: t.body || null, account: t.account || null, args: p,
                           verifyIdentity: t.verifyIdentity === true, identityProbe: t.identityProbe || null },
                reason: 'session-ride' };
     }
