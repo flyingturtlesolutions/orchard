@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin } from './connectorRecipes.js';
+import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections } from './connectorRecipes.js';
 
 describe('fillEndpoint — {name} templating (pure, §12)', () => {
   it('fills placeholders from args and URL-encodes', () => {
@@ -196,5 +196,20 @@ describe('recipeForOrigin — pick the strong-probe recipe for a host (AS-4 veri
     assert.equal(recipeForOrigin('zendesk.com').app, 'zendesk');                 // exact host
     assert.equal(recipeForOrigin('https://support.deako.com'), null);            // no recipe → generic verify path
     assert.equal(recipeForOrigin(''), null);
+  });
+});
+
+describe('connectorLegsForConnections — connected sites → selectable interpret legs (CX-4c)', () => {
+  it('matches recipes by connection host, origin-enriched to the instance; reads-only via mode; no match → []', () => {
+    const legs = connectorLegsForConnections([{ origin: 'https://deako.zendesk.com', label: 'Deako' }], { mode: 'ask' });
+    assert.ok(legs.length >= 7);                                              // the Zendesk reads
+    assert.ok(legs.every((l) => l.mode === 'ask'));                          // reads only
+    assert.ok(legs.every((l) => l.tool.origin === 'deako.zendesk.com'));     // origin-enriched to the SPECIFIC instance
+    assert.ok(legs.some((l) => l.key === 'me.zendesk.my_open_tickets'));
+    assert.deepEqual(connectorLegsForConnections([{ origin: 'https://support.deako.com' }], { mode: 'ask' }), []);  // no recipe app
+    assert.deepEqual(connectorLegsForConnections([]), []);
+  });
+  it('without a mode filter, writes are included too (gated downstream)', () => {
+    assert.ok(connectorLegsForConnections([{ origin: 'https://x.zendesk.com' }]).some((l) => l.mode === 'act'));
   });
 });

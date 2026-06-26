@@ -1579,12 +1579,12 @@ async function _bankSetup(step) {
   try { await ConversationStore.patchMeta(state.convId, { config: merged, pinned: true }); }
   catch (e) { try { console.warn('[chat] setup bank failed:', e?.message); } catch { /* */ } }
   if (state.convId === _currentConversationId) _currentConversationConfig = merged;
+  const presetId = (conv && conv.presetId) || (conv && conv.appId) || _currentConversationAppId;
+  const typeDef = presetId ? builtinApp(presetId) : null;   // the app's preset (object model + curated starters) — also used for the "e.g." hint below
   // AP-4 (v2.74.1211) — mint a durable, re-creatable CONFIGURED app from this just-set-up instance: it carries the
   // type/object-model + the bound site + the durable instanceId, so re-selecting it from the gallery restores the
   // SAME app (its learning lives under instanceId) and SKIPS setup. Best-effort — never blocks the connect message.
   try {
-    const presetId = (conv && conv.presetId) || (conv && conv.appId) || _currentConversationAppId;
-    const typeDef = presetId ? builtinApp(presetId) : null;
     const def = configuredAppDefinition({
       name: (conv && conv.title) || (typeDef && typeDef.name) || 'My app',
       seed: (conv && conv.seed) || _currentConversationSeed,
@@ -1597,7 +1597,13 @@ async function _bankSetup(step) {
   const where = (cfg.connections && cfg.connections.length)
     ? cfg.connections.map((c) => `\`${c.label}\``).join(', ')
     : (cfg.target ? `\`${cfg.target.label}\`` : 'your site');
-  _setMessageBody(msg, `✅ **Connected to ${where}.** Now just tell me what to do — e.g. “get my open emails” — and I’ll learn each task the first time, then recall it when you ask again (even worded differently).`, { markdown: true });
+  // AS-4 — the "e.g." hint is the app's OWN curated starter (e.g. a support agent → "Show me my open tickets"), then
+  // its object-model noun, then NOTHING — never a misleading generic like "get my open emails" for a non-mail app.
+  const om = typeDef && typeDef.objectModel;
+  const eg = (typeDef && Array.isArray(typeDef.starters) && typeDef.starters.find(Boolean))
+    || (om && om.plural ? `get my ${om.plural}` : '');
+  const egText = eg ? ` — e.g. “${eg}”` : '';
+  _setMessageBody(msg, `✅ **Connected to ${where}.** Now just tell me what to do${egText} — and I’ll learn each task the first time, then recall it when you ask again (even worded differently).`, { markdown: true });
   _orchFinalize(msg);
   _refreshHistoryIfOpen().catch(() => {});
 }
@@ -3865,10 +3871,10 @@ async function _ilRunPanelAction(msg, { leg, panel, ask }) {
 
 // Dispatch a builtin leg JUDGE picked. A PANEL (ACT×Self) leg runs locally (above); a Browser/Self READ leg goes
 // through its existing SW channel (via the pure execPlan planner) and renders here. Reads auto-run (no confirm).
-async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId }) {
+async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
   const panel = IL_PANEL_LEGS[leg.key];
   if (panel) return _ilRunPanelAction(msg, { leg, panel, ask });
-  const plan = planExec(leg, {}, { tabId, groundId });
+  const plan = planExec(leg, params, { tabId, groundId });
   if (!plan || !plan.ok || !plan.channel) { _setMessageBody(msg, `🧠 I can’t do “${ask}” here yet.`); return; }
   try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${leg.domain}:${leg.key}`); } catch { /* */ }
   let res = null;
@@ -4020,6 +4026,18 @@ async function _tryInterpret(ask) {
     _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 ${d.why || 'I’m not sure how to help with that here.'}`);
     _orchFinalize(msg);
     return true;
+  }
+
+  // CX-4c — an ACT on a CONNECTED session-ride recipe (the app's Zendesk reads, injected into the candidate set by
+  // INTERPRET_ASK): run it via INVOKE_SESSION + the connector render (`_ilRunBuiltin`), not the page-capability replay.
+  if (d.intent === 'act' && d.capabilityId) {
+    const cleg = retrieved.find((l) => l && l.domain === 'connector' && l.key === d.capabilityId);
+    if (cleg) {
+      await _ilRunBuiltin(msg, { leg: cleg, ask: goal, tabId, groundId, params: d.params || {} });
+      _orchFinalize(msg);
+      _bankCapabilityUse(goal, d.capabilityId);   // AL-3b — learn the association so a paraphrase recalls it
+      return true;
+    }
   }
 
   // navigate / act / decompose → map to a RouteDecision and dispatch through the VERIFIED runners (the dispatcher

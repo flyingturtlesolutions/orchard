@@ -216,3 +216,30 @@ export function recipeForOrigin(origin) {
     return ah && (host === ah || host.endsWith('.' + ah));
   }) || null;
 }
+
+/**
+ * The session-ride legs an app can use given its CONNECTED sites (CX-4c). PURE. A recipe matches when its `appHost`
+ * equals a connection's host or is its parent domain (`deako.zendesk.com` → `zendesk.com` recipes); each matching leg
+ * is **origin-enriched** to ride the SPECIFIC connected instance (so the ride targets `deako.zendesk.com`, not any
+ * Zendesk). Feeds the interpret candidate set so the IL can SELECT a connected recipe. Pass `mode:'ask'` for reads only.
+ *   connections: [{ origin, label }]   → [OfferedLeg with tool.origin set]
+ */
+export function connectorLegsForConnections(connections, { account = 'me', trusted = true, mode = null } = {}) {
+  const hosts = (Array.isArray(connections) ? connections : [])
+    .map((c) => String((c && c.origin) || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '').toLowerCase())
+    .filter(Boolean);
+  if (!hosts.length) return [];
+  const legs = recipeLegs({ account, trusted });
+  const out = []; const seen = new Set();
+  for (const host of hosts) {
+    for (const leg of legs) {
+      if (!leg || (mode && leg.mode !== mode)) continue;
+      const ah = String((leg.tool && leg.tool.appHost) || '').toLowerCase();
+      if (!ah || !(host === ah || host.endsWith('.' + ah))) continue;
+      const k = `${host}|${leg.key}`;
+      if (seen.has(k)) continue; seen.add(k);
+      out.push({ ...leg, tool: { ...leg.tool, origin: host } });   // ride the SPECIFIC connected instance
+    }
+  }
+  return out;
+}
