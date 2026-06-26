@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { primaryList, primaryObject, summarizeItem, renderConnectorLines } from './connectorRender.js';
+import { primaryList, primaryObject, summarizeItem, renderConnectorLines, itemLabels } from './connectorRender.js';
 
 describe('primaryList — find the data array', () => {
   it('prefers known data keys, falls back to any object-array, ignores scalar arrays', () => {
@@ -71,5 +71,26 @@ describe('renderConnectorLines — the chat lines', () => {
   it('nothing displayable → null (caller shows "Done.")', () => {
     assert.equal(renderConnectorLines({ ok: true }, {}), null);
     assert.equal(renderConnectorLines(null, {}), null);
+  });
+});
+
+describe('itemLabels — fan-out labels from a read (CV-4-full)', () => {
+  it('projects a ticket list into "#id title" labels; reports total + uncapped', () => {
+    const r = itemLabels({ results: [{ id: 1, subject: 'A' }, { id: 2, subject: 'B' }] });
+    assert.deepEqual(r.labels, ['#1 A', '#2 B']);
+    assert.equal(r.total, 2);
+    assert.equal(r.capped, false);
+  });
+  it('caps at the limit + flags capped (no silent truncation — the caller says "N of M")', () => {
+    const big = Array.from({ length: 25 }, (_, i) => ({ id: i, subject: `t${i}` }));
+    const r = itemLabels({ results: big }, 20);
+    assert.equal(r.labels.length, 20);
+    assert.equal(r.total, 25);
+    assert.equal(r.capped, true);
+  });
+  it('a content-only item (no id) → just the title; a listless/empty/null result → no labels', () => {
+    assert.deepEqual(itemLabels({ comments: [{ body: 'Call me back' }] }).labels, ['Call me back']);
+    assert.deepEqual(itemLabels({ ticket: { id: 7 } }).labels, [], 'a single object is not a list');
+    assert.deepEqual(itemLabels(null).labels, []);
   });
 });

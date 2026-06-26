@@ -18,7 +18,7 @@ import { createDevBridge } from './Services/Chat/devBridge.js';   // DB-1b (v2.7
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
-import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, namesMultipleSites, namesAnySite } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X)
+import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, isFanoutAsk, namesMultipleSites, namesAnySite } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; isFanoutAsk — CV-4-full "open each in a conversation"; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X)
 import { walkPlan, scanPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate); scanPlan — THE recursive plan walker (CR-D7)
 import { builtinApps, builtinApp, presetsForType } from './Core/appCatalog.js';   // CV-3 — the builtin app catalog (the gallery's cards; each seeds a kind:'app' conversation). AS-2 — builtinApp(appId) → the def behind a conversation. OM — presetsForType → the named quick-starts under each abstract type
 import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   // ORCH-A — predicate → gate (conditional routing + the analysis)
@@ -31,7 +31,7 @@ import { classifyReadAsk, askListIndex } from './Core/observe.js';   // OBS-READ
 import { runIlStandin } from './Core/ilStandin.js';   // IL-3 — the single-shot stand-in folded through agentLoop@maxSteps=1 (DESIGN §8 Phase-1 parity)
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
 import { recipeLegs, coerceParams } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775
-import { renderConnectorLines } from './Core/connectorRender.js';   // CX-4c — generic render of ANY connector read (not just tickets)
+import { renderConnectorLines, itemLabels } from './Core/connectorRender.js';   // CX-4c — generic render of ANY connector read (not just tickets); CV-4-full — itemLabels: read list → fan-out labels
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildDrawerTree } from './Core/drawerTree.js';   // CV-3c — the pure flush-left accordion model
 import { planSubTasks, subTaskFromApp, classifyAskToGrid, isConfiguredDef, OVERVIEW_ID } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app)
@@ -1411,36 +1411,69 @@ async function _seedInstanceMemory(instanceId, presetId) {
 // CV-4 (v2.74.1171) — fan the CURRENT app out into one sub-task conversation per item. `subtasks: a, b, c`
 // (comma/newline list) creates a child conversation per item, each seeded `app seed ∘ item` (composeSeed, §6),
 // parentId = the app, config inherited (a child can only tighten). Enforces the one-level cap (refuses on a
-// sub-task / non-app). The accordion then nests them under the app (auto-expanded). The full "for each <list in
-// my queue>" form — where the IL ENUMERATES the list from a read/connector — is CV-4-full (deferred); this is the
-// explicit-list MVP that makes fan-out real + visible.
-async function _spawnSubTasks(listText) {
-  const msg = appendMessage({ role: 'assistant', body: '' });
-  if (!_currentConversationId) { _setMessageBody(msg, 'Open an app first — sub-tasks fan out under an app.'); _orchFinalize(msg); return; }
+// sub-task / non-app). The accordion then nests them under the app (auto-expanded). Two entry points share the
+// fan-out CORE (_createSubTasks): this `subtasks:` EXPLICIT list, and the CV-4-full ENUMERATE-from-read path
+// (v2.74.1248, _fanOutFromList) — "get my open tickets and open each in a new conversation" — where a chain's prior
+// read (connector or grounded, st.lastValue) is projected into labels (itemLabels) and fanned out, capped + honest.
+// CV-4 — the shared fan-out parent guard: the CURRENT conversation must be a real APP (not a sub-task / Overview /
+// non-app), since children nest ONE level under an app. Returns {app} or {error:<message>}. (One store load.)
+async function _fanoutParentApp() {
+  if (!_currentConversationId) return { error: 'Open an app first — sub-tasks fan out under an app.' };
   let app = null;
   try { app = await ConversationStore.load(_currentConversationId); } catch { /* */ }
   if (!app || !app.appId || app.parentId) {
-    _setMessageBody(msg, (app && app.parentId)
+    return { error: (app && app.parentId)
       ? 'This is already a sub-task — sub-tasks can’t have their own sub-tasks (one level only).'
-      : 'Sub-tasks fan out under an app. Open or create an app (New app → the gallery), then try again.');
-    _orchFinalize(msg); return;
+      : 'Sub-tasks fan out under an app. Open or create an app (New app → the gallery), then try again.' };
   }
-  const items = String(listText).split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
-  if (!items.length) { _setMessageBody(msg, 'Give me a list, e.g. `subtasks: first item, second item, third`.'); _orchFinalize(msg); return; }
+  return { app };
+}
+
+// CV-4 — create one child conversation per item label under `app` (the shared fan-out CORE, used by both the
+// `subtasks:` explicit list AND the CV-4-full enumerate-from-read path). Returns the count made; reveals + refreshes
+// the drawer. AP-0 — a sub-task SHARES its parent app's memory key (instanceId) + type.
+async function _createSubTasks(app, items) {
   const specs = planSubTasks(app, items);
   let made = 0;
   for (const spec of specs) {
     try {
-      await ConversationStore.create({ title: spec.title, kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config, instanceId: app.instanceId || app.appId || null, presetId: app.presetId || app.appId || null });   // AP-0 — a sub-task SHARES its parent app's memory key (instanceId) + type
+      await ConversationStore.create({ title: spec.title, kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config, instanceId: app.instanceId || app.appId || null, presetId: app.presetId || app.appId || null });
       made++;
     } catch (e) { try { console.warn('[chat] sub-task create failed:', e?.message); } catch { /* */ } }
   }
-  if (made) _expandedApps.add(app.id);   // reveal the new children under the app
+  if (made) { _expandedApps.add(app.id); _refreshHistoryIfOpen().catch(() => {}); }   // reveal the new children under the app
+  return made;
+}
+
+async function _spawnSubTasks(listText) {
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  const { app, error } = await _fanoutParentApp();
+  if (error) { _setMessageBody(msg, error); _orchFinalize(msg); return; }
+  const items = String(listText).split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+  if (!items.length) { _setMessageBody(msg, 'Give me a list, e.g. `subtasks: first item, second item, third`.'); _orchFinalize(msg); return; }
+  const made = await _createSubTasks(app, items);
   _setMessageBody(msg, made
     ? `Spawned ${made} sub-task${made === 1 ? '' : 's'} under “${app.title}”. Open the conversation drawer — they’re nested under the app.`
     : 'Couldn’t create any sub-tasks.');
   _orchFinalize(msg);
-  _refreshHistoryIfOpen().catch(() => {});
+}
+
+// CV-4-full (Slice B) — fan a PRIOR connector read (st.lastValue from a chain's Slice-A step) out into one child
+// conversation per item. Reuses the explicit-list fan-out core; the ONLY new bit is ENUMERATING the list from the
+// read (itemLabels) instead of a typed comma-list. Capped + honest ("N of M" — never a silent truncation). Sets
+// `msg` to the outcome and returns {ok, summary}; ok:false → the chain stops with the message already shown.
+// UNTRUSTED: each label becomes a sub-task title/seed (escaped on render), never an instruction.
+async function _fanOutFromList(msg, value, { i, total, cap = 20 } = {}) {
+  const { app, error } = await _fanoutParentApp();
+  if (error) { const s = `Ran ${i} of ${total}. ${error}`; _setMessageBody(msg, s); return { ok: false, summary: s }; }
+  const { labels, total: n, capped } = itemLabels(value, cap);
+  if (!labels.length) { const s = `Ran ${i} of ${total}. Nothing to open — the previous step returned no list of items.`; _setMessageBody(msg, s); return { ok: false, summary: s }; }
+  const made = await _createSubTasks(app, labels);
+  const summary = made
+    ? `Opened ${made} conversation${made === 1 ? '' : 's'} under “${app.title}”${capped ? ` (capped at ${cap} of ${n})` : ''} — nested under the app in the drawer.`
+    : 'Couldn’t open any conversations.';
+  _setMessageBody(msg, summary);
+  return { ok: made > 0, summary };
 }
 
 // ─── AS-2 (v2.74.1188): guided setup — connect an app to its site ──────────────────────────────────────────
@@ -2578,6 +2611,39 @@ function _orchConfirmChain(msg, { tabId, clauses, firstMatch, ask = '' }) {
   cancel.addEventListener('click', () => { bar.remove(); _setMessageBody(msg, 'Okay — cancelled.'); });
 }
 
+// CX-4d — run a session-ride connector leg → {ok, value, error, hint}. The lean primitive shared by the chain
+// runner's connector-clause path and any caller that needs the STRUCTURED result (not just the rendered text that
+// `_ilRunBuiltin` produces). One `_orchReq` over the leg's planned channel (INVOKE_SESSION); never throws.
+async function _runConnectorLeg(leg, params, { tabId = null, groundId = null } = {}) {
+  const plan = planExec(leg, params, { tabId, groundId });
+  if (!plan || !plan.ok || !plan.channel) return { ok: false, error: 'no executor' };
+  let res = null;
+  try { res = await _orchReq(plan.channel, plan.payload); } catch (e) { return { ok: false, error: (e && e.message) || 'failed' }; }
+  if (!res || res.success === false) return { ok: false, error: res && res.error, hint: res && res.hint };
+  return { ok: true, value: res.value };
+}
+
+// CX-4d (Slice A) — does a DECOMPOSED chain clause name a CONNECTED session-ride read ("get my open tickets")? The
+// chain's grounded matcher (ORCH_MATCH) only sees the ACTIVE tab; a ride recipe lives on its OWN logged-in origin,
+// so it's invisible there. Reuse INTERPRET_ASK (with the app's connections) — the same connector selection + param
+// binding the single-ask path uses — and if it picks a connector leg, RUN it and return {leg, ok, value, …}. Returns
+// null when the app has no connections OR the clause isn't a connector read → the chain falls through to ORCH_MATCH
+// unchanged. Gated by the caller on `_boundConnections().length`, so non-connector apps pay nothing.
+async function _chainConnectorRun(clauseText, { tabId }) {
+  let raw = null; let retrieved = []; let groundId = null;
+  try {
+    const r = await _orchReq('INTERPRET_ASK', { ask: clauseText, tabId, seed: _currentConversationSeed, target: _boundTarget(), connections: _boundConnections(), appId: _currentConversationAppId, memoryId: _memoryId() });
+    if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; groundId = r.groundId || null; }
+  } catch { return null; }
+  if (!raw) return null;
+  const d = applyConfidenceGate(normalizeInterpretDecision(raw, { retrieved }), { minConfidence: 0.6 });
+  if (d.intent !== 'act' || !d.capabilityId) return null;
+  const leg = retrieved.find((l) => l && l.domain === 'connector' && l.key === d.capabilityId);
+  if (!leg) return null;
+  const run = await _runConnectorLeg(leg, coerceParams(d.params || {}, leg.paramSchema), { tabId, groundId });
+  return { leg, ...run };
+}
+
 // Run a decomposed chain JIT: match EACH clause against the page state AT THAT POINT (so a clause on the
 // post-navigation page resolves correctly), REPLAY it, settle, next.
 //
@@ -2601,7 +2667,7 @@ async function _resolveNavUrl(text) {
 
 async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startIndex = 0, state = null }) {
   const total = clauses.length;
-  const st = state || { readouts: [], ranSteps: [], chainGroundId: null };   // T2 — resolved steps for promotion
+  const st = state || { readouts: [], ranSteps: [], chainGroundId: null, lastValue: null };   // T2 — resolved steps for promotion; lastValue — last read's result (CV-4-full fan-out source)
   const _record = (m, clause, kind) => { st.ranSteps.push({ capabilityId: m.capabilityId, bindings: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {}, kind: kind || (m.candidate && m.candidate.kind) || null, clause: clause.text, intent: (m.candidate && m.candidate.intent) || clause.text }); st.chainGroundId = m.groundId; };
   // The demo of clause i performed it live → record the new capability for promotion, then continue from i+1.
   const _resumeAfterDemo = (i, clause, gid) => (cap) => {
@@ -2629,8 +2695,33 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
         continue;
       }
     }
+    // CV-4-full (Slice B) — "open each in a new conversation": fan the PRIOR step's read (a list captured in
+    // st.lastValue by Slice A below) out into one child conversation per item, via the existing fan-out core. Cheap
+    // regex gate (isFanoutAsk), checked before any match — it never grounds, so don't waste an ORCH_MATCH on it.
+    if (isFanoutAsk(clause.text)) {
+      const fo = await _fanOutFromList(msg, st.lastValue, { i, total });
+      if (!fo.ok) return;
+      st.readouts.push(fo.summary);
+      st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'fanout', clause: clause.text, intent: clause.text });
+      continue;
+    }
     const m = (i === 0 && firstMatch) ? firstMatch : await _orchReq('ORCH_MATCH', { tabId, ask: clause.text });
     if (!m || !m.capabilityId || m.decision === 'miss') {
+      // CX-4d (Slice A) — a grounded MISS may still be a CONNECTED session-ride read ("get my open tickets") that
+      // doesn't live on the active tab — it rides the app's OWN logged-in origin. Try the app's connectors before
+      // declaring the step un-runnable; stash the structured result in st.lastValue so a following "open each…"
+      // (Slice B) can fan out over it. Gated on bound connections → non-connector apps skip the extra interpret.
+      if (_boundConnections().length) {
+        const cr = await _chainConnectorRun(clause.text, { tabId });
+        if (cr && cr.ok) {
+          const lines = renderConnectorLines(cr.value, { name: cr.leg.name || 'Results' });
+          st.lastValue = cr.value;
+          st.readouts.push(lines ? lines.join('\n') : `Ran “${clause.text}”.`);
+          st.ranSteps.push({ capabilityId: cr.leg.key, bindings: {}, kind: 'connector', clause: clause.text, intent: cr.leg.name || clause.text });
+          continue;
+        }
+        if (cr && !cr.ok) { _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t ${cr.leg.does || cr.leg.name || 'run that'}${cr.error ? ` — ${cr.error}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); return; }
+      }
       const gid = (m && m.groundId) || st.chainGroundId;
       if (!gid) { _setMessageBody(msg, `Ran ${i} of ${total}. I don’t know how to “${clause.text}” here, and I don’t have this site mapped to learn it.`); return; }
       _setMessageBody(msg, `Step ${i + 1} of ${total}: I don’t know how to “${clause.text}” on this page yet — show me this step and I’ll keep going.`);
@@ -2643,7 +2734,7 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
     if (m.candidate && m.candidate.kind === 'observation') {
       const r = await _runResolvedStep({ tabId, groundId: m.groundId, ask: clause.text, capabilityId: m.capabilityId, isRead: true });
       if (!r.ok) { _setMessageBody(msg, `Step ${i + 1} of ${total}: couldn’t read “${clause.text}” here — show me this step and I’ll keep going.`); _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me this step', onAuthored: _resumeAfterDemo(i, clause, m.groundId) }); return; }
-      st.readouts.push(r.value); _record(m, clause, 'observation');
+      st.readouts.push(r.value); st.lastValue = r.value; _record(m, clause, 'observation');   // CV-4-full — a grounded read also feeds a following "open each…" fan-out (Slice B)
       continue;
     }
     const r = await _runResolvedStep({ tabId, groundId: m.groundId, ask: clause.text, capabilityId: m.capabilityId, bindings: m.bindings });

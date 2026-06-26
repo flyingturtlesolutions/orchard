@@ -77,3 +77,18 @@ export function renderConnectorLines(value, { name = 'Results' } = {}) {
   }
   return null;
 }
+
+/**
+ * Project a connector result's primary LIST into short fan-out labels ("#id title"), capped. PURE. Feeds the
+ * CV-4-full enumerate-from-read fan-out (one child conversation per item). Returns {labels, total, capped}; a
+ * listless / empty result → no labels (a single object isn't a list). Labels are UNTRUSTED page text — the caller
+ * escapes them (they become a sub-task title/seed), never an instruction.
+ */
+export function itemLabels(value, cap = 20) {
+  const list = primaryList(value) || [];
+  const labels = list.slice(0, cap).map((o) => {
+    const it = summarizeItem(o);
+    return `${it.id != null ? `#${it.id} ` : ''}${it.title || 'item'}`.trim();
+  }).filter(Boolean);
+  return { labels, total: list.length, capped: list.length > cap };
+}

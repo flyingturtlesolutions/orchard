@@ -4,9 +4,26 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites, namesAnySite } from './orchChain.js';
+import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites, namesAnySite, isForeachAsk, isFanoutAsk } from './orchChain.js';
 import { validatePlan } from './orchPlan.js';
 import { walkPlan } from './orchRun.js';   // ORCH-L — the pure interpreter, to RUN the lifted open-each loop end-to-end
+
+describe('orchChain — isFanoutAsk (CV-4-full: foreach over a read → conversations)', () => {
+  it('fires on a foreach that targets conversations / sub-tasks / threads', () => {
+    assert.equal(isFanoutAsk('open each in a new conversation'), true);
+    assert.equal(isFanoutAsk('for each ticket open a conversation'), true);
+    assert.equal(isFanoutAsk('open every order in its own subtask'), true);
+    assert.equal(isFanoutAsk('open each one in a new sub-task'), true);
+  });
+  it('does NOT fire on a foreach over page links (no conversation noun), nor on a non-foreach', () => {
+    assert.equal(isFanoutAsk('open each result'), false, 'DOM open-each-link foreach, not a conversation fan-out');
+    assert.equal(isFanoutAsk('click each job and read the title'), false);
+    assert.equal(isFanoutAsk('open each thread'), false, '"thread" is a page noun (forum/email), not an Orchard fan-out');
+    assert.equal(isFanoutAsk('get my open tickets'), false, 'no quantifier → not a foreach at all');
+    assert.equal(isFanoutAsk('start a new conversation'), false, 'a conversation noun without "each" is not a fan-out');
+    assert.equal(isForeachAsk('open each in a new conversation'), true, 'still a foreach (the broader gate)');
+  });
+});
 
 describe('orchChain — namesMultipleSites (cross-site pre-filter, T3X)', () => {
   it('fires on two DISTINCT site references (the bug ask + the data-handoff ask)', () => {

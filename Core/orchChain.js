@@ -270,6 +270,15 @@ function _liftOpenEach(flat, ask) {
  *  LLM planner (so liftControlFlow can lift it), not the flat lexical chain. */
 export function isForeachAsk(ask) { return _QUANTIFIER.test(String(ask || '')); }
 
+/** A FAN-OUT ask: a foreach whose target is Orchard CONVERSATIONS / sub-tasks ("open each in a new conversation"),
+ *  not page links. PURE. CV-4-full routes these to the conversation fan-out OVER THE PRIOR STEP'S read (enumerate →
+ *  one child conversation per item), distinct from the DOM "open each result link" foreach (liftControlFlow). The
+ *  nouns are deliberately the unambiguous Orchard ones — "thread" is excluded (a forum/email page has threads). */
+export function isFanoutAsk(ask) {
+  const s = String(ask || '');
+  return isForeachAsk(s) && /\b(conversations?|sub-?tasks?)\b/i.test(s);
+}
+
 /**
  * Lift a FLAT compound plan into a CONTROL-FLOW plan when the ask quantifies over a collection. PURE — the
  * comprehension floor (the LLM may refine; this is the deterministic lift). The collection = the FIRST
