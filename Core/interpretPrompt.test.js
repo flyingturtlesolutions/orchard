@@ -40,6 +40,18 @@ describe('interpretPrompt — buildInterpretMessages', () => {
     assert.match(user, /IRREVERSIBLE/);
   });
 
+  it('CX-4c — renders a tool\'s param schema (name*+type) + the SYSTEM PARAMS binding rule', () => {
+    const { system, user } = buildInterpretMessages('get ticket #64775', {
+      retrieved: [{ key: 'me.zendesk.read_ticket', name: 'Read a Zendesk ticket', does: 'fetch one ticket',
+        paramSchema: { type: 'object', properties: { id: { type: 'integer' } }, required: ['id'] } }],
+    });
+    assert.match(user, /ref: me\.zendesk\.read_ticket/);
+    assert.match(user, /params: id\*:integer/);          // exact name, required*, type — so the LLM binds {id} not {ticket_id}
+    assert.match(system, /PARAMS:/);
+    assert.match(system, /digits ONLY/);                 // the no-"#" rule
+    assert.doesNotMatch(buildInterpretMessages('x', { retrieved: [{ capabilityId: 'cap-x', name: 'X' }] }).user, /params:/);   // no schema → no params line
+  });
+
   it('includes NO raw DOM — only the fenced summary affordances', () => {
     const { user } = buildInterpretMessages('x', { affordances: 'search box, results list' });
     assert.match(user, /<PAGE_AFFORDANCES/);

@@ -30,7 +30,8 @@ import { parseAdminCommand, parseDedupCommand } from './Core/orchAdmin.js';    /
 import { classifyReadAsk, askListIndex } from './Core/observe.js';   // OBS-READ — is the ask a question (a read)? + the index a singular/ordinal read wants
 import { runIlStandin } from './Core/ilStandin.js';   // IL-3 — the single-shot stand-in folded through agentLoop@maxSteps=1 (DESIGN §8 Phase-1 parity)
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
-import { recipeLegs, normalizeTicket } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette
+import { recipeLegs, coerceParams } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775
+import { renderConnectorLines } from './Core/connectorRender.js';   // CX-4c — generic render of ANY connector read (not just tickets)
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildDrawerTree } from './Core/drawerTree.js';   // CV-3c — the pure flush-left accordion model
 import { planSubTasks, subTaskFromApp, classifyAskToGrid, isConfiguredDef, OVERVIEW_ID } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app)
@@ -3885,21 +3886,10 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
     return;
   }
   if (leg.domain === 'connector') {
-    // CX-4a.2 — render a session-ride read. A list (search → results / view → tickets) renders the normalized subset;
-    // a single object renders one. PII stays in the user's own panel (their own data).
-    const v = res.value || {};
-    const list = Array.isArray(v.results) ? v.results : (Array.isArray(v.tickets) ? v.tickets : null);
-    const origin = res.origin || '';
-    if (list) {
-      const lines = list.slice(0, 25).map((t) => { const n = normalizeTicket(t, origin); return `• #${n.id} ${n.subject || '(no subject)'} — ${n.status}`; });
-      const head = `🧠 ${list.length} ${leg.name || 'result'}${list.length === 1 ? '' : 's'}`;
-      _setMessageBody(msg, list.length ? `${head}:\n${lines.join('\n')}` : `${head}.`);
-    } else if (v.ticket) {
-      const n = normalizeTicket(v.ticket, origin);
-      _setMessageBody(msg, `🧠 #${n.id} ${n.subject || ''} — ${n.status}${n.description ? `\n${n.description}` : ''}${n.url ? `\n${n.url}` : ''}`);
-    } else {
-      _setMessageBody(msg, '🧠 Done.');
-    }
+    // CX-4c — GENERIC render: ANY app's read (tickets, comments, users, orders, messages…) → its salient fields, not
+    // just tickets. PII stays in the user's own panel; the result is UNTRUSTED page data → rendered as escaped text only.
+    const lines = renderConnectorLines(res.value, { name: leg.name || 'Results' });
+    _setMessageBody(msg, lines ? `🧠 ${lines.join('\n')}` : '🧠 Done.');
     return;
   }
   if (leg.key === 'LIST_TABS') {
@@ -4033,7 +4023,7 @@ async function _tryInterpret(ask) {
   if (d.intent === 'act' && d.capabilityId) {
     const cleg = retrieved.find((l) => l && l.domain === 'connector' && l.key === d.capabilityId);
     if (cleg) {
-      await _ilRunBuiltin(msg, { leg: cleg, ask: goal, tabId, groundId, params: d.params || {} });
+      await _ilRunBuiltin(msg, { leg: cleg, ask: goal, tabId, groundId, params: coerceParams(d.params || {}, cleg.paramSchema) });
       _orchFinalize(msg);
       _bankCapabilityUse(goal, d.capabilityId);   // AL-3b — learn the association so a paraphrase recalls it
       return true;

@@ -203,6 +203,24 @@ export function recipeLegs({ account = 'me', trusted = true } = {}) {
 }
 
 /**
+ * Coerce param VALUES against a leg's paramSchema before a connector call. PURE. An integer/number param given as a
+ * STRING (the LLM often includes a "#", e.g. "#64775") → its digits as a Number — so `{id}` fills to `64775`, not the
+ * URL-encoded `%2364775` that the server rejects (the read_ticket http-400). Unknown / already-typed params pass through.
+ */
+export function coerceParams(params, paramSchema) {
+  const props = (paramSchema && typeof paramSchema === 'object' && paramSchema.properties) || {};
+  const out = {};
+  for (const [k, v] of Object.entries((params && typeof params === 'object') ? params : {})) {
+    const t = props[k] && props[k].type;
+    if ((t === 'integer' || t === 'number') && typeof v === 'string') {
+      const n = Number(v.replace(/[^0-9.\-]/g, ''));   // strip '#', spaces, stray text
+      out[k] = Number.isFinite(n) && v.replace(/[^0-9.\-]/g, '') !== '' ? n : v;
+    } else { out[k] = v; }
+  }
+  return out;
+}
+
+/**
  * The first curated recipe whose `appHost` matches an origin (host === appHost or a subdomain of it). PURE. Lets the
  * setup-time verify (AS-4) pick the STRONG identity probe for a recipe-backed site (e.g. `deako.zendesk.com` →
  * `zendesk.com`); a generic site (no match) falls back to the reach/login heuristic. Recipes share appHost+probe, so

@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections } from './connectorRecipes.js';
+import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams } from './connectorRecipes.js';
 
 describe('fillEndpoint — {name} templating (pure, §12)', () => {
   it('fills placeholders from args and URL-encodes', () => {
@@ -211,5 +211,16 @@ describe('connectorLegsForConnections — connected sites → selectable interpr
   });
   it('without a mode filter, writes are included too (gated downstream)', () => {
     assert.ok(connectorLegsForConnections([{ origin: 'https://x.zendesk.com' }]).some((l) => l.mode === 'act'));
+  });
+});
+
+describe('coerceParams — clean integer ids before a connector call (CX-4c http-400 fix)', () => {
+  const ps = { type: 'object', properties: { id: { type: 'integer' }, query: { type: 'string' } }, required: ['id'] };
+  it('strips "#"/stray text from an integer param → a Number; leaves strings + un-parseable values', () => {
+    assert.deepEqual(coerceParams({ id: '#64775' }, ps), { id: 64775 });        // the read_ticket http-400 case
+    assert.deepEqual(coerceParams({ id: 64775 }, ps), { id: 64775 });           // already a number
+    assert.deepEqual(coerceParams({ id: 'ticket 7' }, ps), { id: 7 });
+    assert.deepEqual(coerceParams({ query: '#open status' }, ps), { query: '#open status' });   // a string param is untouched
+    assert.deepEqual(coerceParams({ id: 'abc' }, ps), { id: 'abc' });           // no digits → leave it (required-gate catches)
   });
 });
