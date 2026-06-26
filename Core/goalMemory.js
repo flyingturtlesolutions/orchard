@@ -107,9 +107,25 @@ export function standingRuleFromText(text) {
   if (!s) return null;
   let trigger = null;
   let body = s;
-  const m = s.match(/^if\s+(.+?)\s*(?:,|;|:|\bthen\b)\s+(.+)$/i);
+  // `if X, Y` / `if X then Y` → trigger = X (the "when"), body = Y (the "then").
+  let m = s.match(/^if\s+(.+?)\s*(?:,|;|:|\bthen\b)\s+(.+)$/i);
+  // §12.3 — `when I say X, I mean|run|do Y` → a PHRASE-scoped rule (trigger = the phrase X, body = the expansion Y),
+  // NOT an always-on one. Lets `remember: when I say "get tickets" I mean …` key the rule to the phrase, so recall
+  // fires it only when the ask overlaps X (instead of loading it into every prompt).
+  if (!m) m = s.match(/^when\s+(?:i\s+say\s+)?["“']?(.+?)["”']?\s*(?:,|:|—)?\s*(?:i\s+(?:mean|want|need)|run|do|then)\s+(.+)$/i);
   if (m && m[1].trim() && m[2].trim()) { trigger = m[1].trim(); body = m[2].trim(); }
   return normalizeDelta({ body, trigger, confidence: 0.85, tier: 'confirmed', provenance: 'user-rule' });
+}
+
+/**
+ * §12.2 — does a plain chat ask LOOK like a standing behavioral rule (a preference about HOW the assistant should
+ * behave) rather than an action? PURE. Precision-biased: the caller gates on the IL already classifying the ask as
+ * `answer`, so an action imperative ("use the search box") is filtered by intent and never reaches here. Used to
+ * OFFER "remember this rule?" when the user states a preference WITHOUT the `remember:` prefix.
+ */
+const _RULE_RE = /^(?:please\s+)?(keep|always|never|don'?t|do not|avoid|prefer|make sure|ensure|use|respond|reply|answer|write|format|limit|from now on|going forward|when i say)\b/i;
+export function looksLikeStandingRule(ask) {
+  return _RULE_RE.test(_str(ask));
 }
 
 /**

@@ -43,7 +43,7 @@ import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — suc
 import { workflowMatch } from './Core/workflowMemory.js';   // WF-1 — recall a saved IL workflow by lexical match on the ask
 import { loadWorkflows, saveWorkflow, bumpWorkflowRun } from './Services/Storage/WorkflowStore.js';   // WF-1 — per-instance saved workflows (bank → recall → replay)
 import { seedInstanceFromPreset } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
-import { standingRuleFromText } from './Core/goalMemory.js';   // AL-3c — non-tool capture: `remember:` authors a standing-rule delta
+import { standingRuleFromText, looksLikeStandingRule } from './Core/goalMemory.js';   // AL-3c — `remember:` authors a standing-rule delta; §12.2 — looksLikeStandingRule offers prefix-less capture
 import { normalizeInterpretDecision, applyConfidenceGate } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
 
 // ─── Conversation state ──────────────────────────────────────────────────────
@@ -4171,6 +4171,22 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
   return true;
 }
 
+// §12.2 — OFFER to remember a behavioral preference stated WITHOUT the `remember:` prefix (the IL just ANSWERED it
+// and it reads like a rule). An offer, never auto-store: a button → standingRuleFromText → the SAME goal-memory delta
+// the `remember:` path writes. No-op off-app (no per-instance memory) or on un-parseable rule text.
+function _offerRememberRule(msg, goal) {
+  const appId = _memoryId();
+  if (!appId) return;
+  const rule = standingRuleFromText(goal);
+  if (!rule) return;
+  const bar = _orchActionBar(msg);
+  bar.appendChild(_mkBtn('💾 Remember this rule', async () => {
+    bar.remove();
+    try { await recordGoalItem(appId, rule); } catch { /* */ }
+    _orchFinalize(appendMessage({ role: 'assistant', body: `Got it — I’ll remember: “${rule.body}”${rule.trigger ? ` (when ${rule.trigger})` : ''}.` }));
+  }));
+}
+
 // IL-3 (v2.74.1130) — `il: <ask>` — Orchard as the USER'S STAND-IN, now folded THROUGH agentLoop@maxSteps=1
 // (DESIGN_inference_layer.md §8 Phase-1 parity). The substrate matcher (ORCH_MATCH — picks + binds over the live
 // page affordances, the part it does well; it knows "illustrations" is a CATEGORY, not the keyword) is the loop's
@@ -4269,6 +4285,9 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
     let answer = null;
     try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, connections: _boundConnections(), subTasks, appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
     _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 ${d.why || 'I’m not sure how to help with that here.'}`);
+    // §12.2 — the IL ANSWERED it (not an act/nav), and it reads like a standing behavioral preference ("keep replies
+    // terse") → OFFER to remember it as a rule, so capture doesn't need the `remember:` prefix. Offer, never auto-store.
+    if (looksLikeStandingRule(goal)) _offerRememberRule(msg, goal);
     _orchFinalize(msg);
     return true;
   }

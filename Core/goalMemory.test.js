@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {
   ITEM_KINDS, EPISTEMIC, TIERS, tierRank, nextTier,
   normalizeBelief, normalizeDelta, normalizeMemoryItem, isBelief, isDelta,
-  canPromote, promote, standingRuleFromText, capabilityOutcomeItem,
+  canPromote, promote, standingRuleFromText, capabilityOutcomeItem, looksLikeStandingRule,
 } from './goalMemory.js';
 
 describe('goalMemory — enums + tier helpers', () => {
@@ -105,9 +105,33 @@ describe('goalMemory — standingRuleFromText (AL-3c — non-tool: authored rule
     assert.equal(d.trigger, null);
     assert.equal(d.body, 'if uncertain ask the user');
   });
+  it('§12.3 — "when I say X, I mean/run Y" → a PHRASE-scoped rule (trigger=X, body=Y)', () => {
+    const a = standingRuleFromText('when I say "get tickets", I mean get my open tickets, open each and summarize');
+    assert.equal(a.trigger, 'get tickets');
+    assert.equal(a.body, 'get my open tickets, open each and summarize');
+    const b = standingRuleFromText('when I say standup run open jira and list my issues');
+    assert.equal(b.trigger, 'standup');
+    assert.equal(b.body, 'open jira and list my issues');
+  });
   it('empty → null', () => {
     assert.equal(standingRuleFromText('   '), null);
     assert.equal(standingRuleFromText(null), null);
+  });
+});
+
+describe('goalMemory — looksLikeStandingRule (§12.2 — prefix-less rule capture)', () => {
+  it('fires on a behavioral preference (the caller also gates on intent:answer)', () => {
+    assert.equal(looksLikeStandingRule('keep replies terse'), true);
+    assert.equal(looksLikeStandingRule('always confirm before closing a ticket'), true);
+    assert.equal(looksLikeStandingRule("don't use jargon"), true);
+    assert.equal(looksLikeStandingRule('from now on sign off as Sam'), true);
+    assert.equal(looksLikeStandingRule('when I say standup, open jira'), true);
+  });
+  it('does NOT fire on a question or a plain action ask', () => {
+    assert.equal(looksLikeStandingRule('what can you do'), false);
+    assert.equal(looksLikeStandingRule('get my open tickets'), false);
+    assert.equal(looksLikeStandingRule('when is the next meeting'), false);   // "when is" ≠ "when I say"
+    assert.equal(looksLikeStandingRule(''), false);
   });
 });
 
