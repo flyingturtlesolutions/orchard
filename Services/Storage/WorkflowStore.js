@@ -62,6 +62,18 @@ export async function bumpWorkflowRun(appId, id) {
   });
 }
 
+/** WF-2 — bump a workflow's dismissed-count when the user declines a suggestion; a never-run, twice-dismissed match
+ *  stops suggesting (workflowMatch suppression). */
+export async function bumpWorkflowDismissed(appId, id) {
+  if (!appId || !id) return [];
+  return _chained(appId, async () => {
+    const items = await loadWorkflows(appId);
+    const next = items.map((x) => (x && x.id === id) ? { ...x, dismissed: (x.dismissed || 0) + 1 } : x);
+    await _write(appId, next);
+    return next;
+  });
+}
+
 /** Forget a saved workflow. */
 export async function deleteWorkflow(appId, id) {
   if (!appId || !id) return [];

@@ -41,7 +41,7 @@ import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // 
 import { recordGoalItem, loadGoalItems, clearGoalMemory } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view
 import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
 import { workflowMatch } from './Core/workflowMemory.js';   // WF-1 — recall a saved IL workflow by lexical match on the ask
-import { loadWorkflows, saveWorkflow, bumpWorkflowRun } from './Services/Storage/WorkflowStore.js';   // WF-1 — per-instance saved workflows (bank → recall → replay)
+import { loadWorkflows, saveWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete)
 import { seedInstanceFromPreset } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
 import { standingRuleFromText, looksLikeStandingRule } from './Core/goalMemory.js';   // AL-3c — `remember:` authors a standing-rule delta; §12.2 — looksLikeStandingRule offers prefix-less capture
 import { normalizeInterpretDecision, applyConfidenceGate } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
@@ -2902,12 +2902,16 @@ function _maybeOfferWorkflowSave(msg, { ask, clauses, steps }) {
   const subAsks = (Array.isArray(clauses) ? clauses : []).map((c) => c && c.text).filter(Boolean);
   if (!appId || !autonomous || subAsks.length < 2 || !String(ask || '').trim()) return;
   const bar = _orchActionBar(msg);
+  const name = document.createElement('input');   // WF-2 — an optional short alias to invoke it by ("standup")
+  name.type = 'text'; name.placeholder = 'name it (optional, e.g. standup)'; name.style.cssText = 'width:13em;margin-right:6px;';
+  bar.appendChild(name);
   bar.appendChild(_mkBtn('💾 Remember this workflow', async () => {
     bar.remove();
+    const nm = name.value.trim() || null;
     let saved = false;
-    try { saved = (await saveWorkflow(appId, { ask, subAsks })).some((w) => w && w.ask === ask); } catch { /* */ }
+    try { saved = (await saveWorkflow(appId, { ask, subAsks, name: nm })).some((w) => w && w.ask === ask); } catch { /* */ }
     const note = appendMessage({ role: 'assistant', body: saved
-      ? `Saved. Next time you ask something like “${String(ask).slice(0, 60)}…”, I’ll offer to run the whole workflow.`
+      ? (nm ? `Saved as “${nm}”. Say “${nm}” any time to run it.` : `Saved. Next time you ask something like “${String(ask).slice(0, 60)}…”, I’ll offer to run the whole workflow.`)
       : 'Couldn’t save that workflow.' });
     _orchFinalize(note);
   }));
@@ -2923,7 +2927,8 @@ async function _matchWorkflow(goal) {
 // Suggest-and-confirm: a strong workflow match → a Run / interpret-fresh card (the confirm). NOT silent auto-replay —
 // these are autonomous + side-effectful, so the user re-confirms; then the inner step gates still apply.
 function _offerWorkflowReplay(goal, wf) {
-  const m = appendMessage({ role: 'assistant', body: `🔁 This looks like a saved workflow — “${wf.ask}” (${wf.subAsks.length} steps). Run it?` });
+  const label = wf.name ? `“${wf.name}” — ${wf.ask}` : `“${wf.ask}”`;   // WF-2 — lead with the alias when there is one
+  const m = appendMessage({ role: 'assistant', body: `🔁 This looks like a saved workflow — ${label} (${wf.subAsks.length} steps). Run it?` });
   const bar = _orchActionBar(m);
   bar.appendChild(_mkBtn('▶ Run it', async () => {
     bar.remove();
@@ -2934,9 +2939,38 @@ function _offerWorkflowReplay(goal, wf) {
   }));
   bar.appendChild(_mkBtn('No, interpret it', () => {
     bar.remove();
+    bumpWorkflowDismissed(_memoryId(), wf.id).catch(() => {});   // WF-2 — a wrong/unwanted match learns to stop nagging (twice-dismissed + never-run → suppressed)
     _setMessageBody(m, 'Okay — interpreting it fresh.'); _orchFinalize(m);
     _tryInterpret(goal, { suggestWorkflows: false });   // re-run the front door WITHOUT re-suggesting (no loop)
   }));
+}
+
+// WF-2 — the manage view (`workflows` command): list THIS instance's saved workflows with ▶ Run / 🗑 Delete per row.
+// A transient menu (DOM-only, not persisted) — re-type `workflows` to refresh. Run replays through the chain runner.
+async function _renderWorkflows() {
+  const m = appendMessage({ role: 'assistant', body: '' });
+  const appId = _memoryId();
+  if (!appId) { _setMessageBody(m, 'Open an app — workflows are saved per app.'); return; }
+  let wfs = [];
+  try { wfs = await loadWorkflows(appId); } catch { /* */ }
+  if (!wfs.length) { _setMessageBody(m, '🔁 No saved workflows yet. Run a multi-step ask (e.g. “get my open tickets and research each in a new conversation”), then click “💾 Remember this workflow”.'); return; }
+  _setMessageBody(m, `🔁 ${wfs.length} saved workflow${wfs.length === 1 ? '' : 's'} (▶ run · 🗑 delete):`);
+  for (const wf of wfs) {
+    const steps = Array.isArray(wf.subAsks) ? wf.subAsks.length : 0;
+    const row = appendMessage({ role: 'assistant', body: `• ${wf.name ? `${wf.name} — ` : ''}${wf.ask}  (${steps} step${steps === 1 ? '' : 's'}${wf.runs ? `, run ${wf.runs}×` : ''})` });
+    const bar = _orchActionBar(row);
+    bar.appendChild(_mkBtn('▶ Run', async () => {
+      const tab = await _orchActiveTab();
+      const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
+      bumpWorkflowRun(appId, wf.id).catch(() => {});
+      _orchRunChain(appendMessage({ role: 'assistant', body: '' }), { tabId, clauses: (wf.subAsks || []).map((t) => ({ text: t })), firstMatch: null, ask: wf.ask });
+    }));
+    bar.appendChild(_mkBtn('🗑 Delete', async () => {
+      bar.remove();
+      try { await deleteWorkflow(appId, wf.id); } catch { /* */ }
+      _setMessageBody(row, `Deleted${wf.name ? ` “${wf.name}”` : ''}.`);
+    }));
+  }
 }
 
 // ORCH-CB — COLD ground: the LLM planner couldn't bind a plan, but a STRUCTURED ask still has shape. Comprehend it
@@ -4760,6 +4794,16 @@ async function sendChatMessage() {
     appendMessage({ role: 'user', body: text });
     try { await _renderAppMemory(); }
     catch (e) { try { console.warn('[chat] memory view failed:', e?.message); } catch { /* */ } }
+    return;
+  }
+
+  // WF-2 — `workflows` lists THIS app's saved IL workflows (name/ask/steps/runs) with ▶ Run / 🗑 Delete per row. A
+  // utility command (before routing): it manages the app's saved workflows, it isn't a website ask.
+  if (/^workflows?\s*$/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    try { await _renderWorkflows(); }
+    catch (e) { try { console.warn('[chat] workflows view failed:', e?.message); } catch { /* */ } }
     return;
   }
 

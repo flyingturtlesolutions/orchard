@@ -52,3 +52,18 @@ describe('workflowMatch — recall by overlap-coefficient', () => {
     assert.equal(workflowMatch('tickets', saved), null);   // 1 token < minShared
   });
 });
+
+describe('workflowMatch — WF-2 (name alias + dismissal suppression)', () => {
+  it('a NAME match wins outright (the user typed the alias), case/space-insensitive', () => {
+    const wfs = [normalizeWorkflow(WF('open jira and list my issues then post to slack', ['open jira', 'list my issues', 'post to slack'], { name: 'standup' }))];
+    assert.ok(workflowMatch('standup', wfs));
+    assert.ok(workflowMatch('  Standup ', wfs));            // normalized
+    assert.equal(workflowMatch('weather', wfs), null);      // not the name, no token overlap
+  });
+  it('a never-run, twice-dismissed workflow stops suggesting (suppression)', () => {
+    const live = normalizeWorkflow(WF('get my open tickets and triage each', ['get my open tickets', 'triage each'], { dismissed: 2, runs: 0 }));
+    assert.equal(workflowMatch('get tickets', [live]), null);                 // suppressed
+    const used = normalizeWorkflow(WF('get my open tickets and triage each', ['get my open tickets', 'triage each'], { dismissed: 5, runs: 1 }));
+    assert.ok(workflowMatch('get tickets', [used]));                          // ran once → keeps suggesting
+  });
+});

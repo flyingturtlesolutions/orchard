@@ -37,9 +37,11 @@ export function normalizeWorkflow(raw) {
     id: _str(r.id) || workflowId(ask, subAsks),
     ask,
     subAsks,
+    name: _str(r.name) || null,                                       // WF-2 — an optional short alias ("standup")
     appId: _str(r.appId) || null,
     createdAt: Number.isFinite(r.createdAt) ? r.createdAt : 0,
     runs: Number.isFinite(r.runs) ? r.runs : 0,
+    dismissed: Number.isFinite(r.dismissed) ? r.dismissed : 0,        // WF-2 — "No, interpret it" count (suppression)
   };
 }
 
@@ -51,13 +53,18 @@ export function normalizeWorkflow(raw) {
  * `workflows` must already be scoped to the current app (the store loads per-instance).
  */
 export function workflowMatch(ask, workflows, { minScore = 0.6, minShared = 2 } = {}) {
+  // WF-2 — drop a never-run, twice-dismissed match: the user said "no" to it ≥2× and never ran it → stop nagging.
+  const list = (Array.isArray(workflows) ? workflows : []).map(normalizeWorkflow).filter(Boolean)
+    .filter((w) => !(w.dismissed >= 2 && w.runs === 0));
+  // WF-2 — a NAME match (the user typed the alias directly) is the strongest signal; takes priority over ask overlap.
+  const aNorm = _str(ask).toLowerCase().replace(/\s+/g, ' ');
+  const named = aNorm && list.find((w) => w.name && w.name.toLowerCase().replace(/\s+/g, ' ') === aNorm);
+  if (named) return named;
   const qa = _tokens(ask);
   if (qa.length < minShared) return null;
   const qs = new Set(qa);
   let best = null; let bestScore = 0;
-  for (const raw of (Array.isArray(workflows) ? workflows : [])) {
-    const w = normalizeWorkflow(raw);
-    if (!w) continue;
+  for (const w of list) {
     const wt = _tokens(w.ask);
     const shared = wt.filter((t) => qs.has(t)).length;
     if (shared < minShared) continue;
