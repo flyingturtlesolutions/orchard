@@ -40,6 +40,8 @@ import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, 
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
 import { recordGoalItem, loadGoalItems, clearGoalMemory } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view
 import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
+import { workflowMatch } from './Core/workflowMemory.js';   // WF-1 — recall a saved IL workflow by lexical match on the ask
+import { loadWorkflows, saveWorkflow, bumpWorkflowRun } from './Services/Storage/WorkflowStore.js';   // WF-1 — per-instance saved workflows (bank → recall → replay)
 import { seedInstanceFromPreset } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
 import { standingRuleFromText } from './Core/goalMemory.js';   // AL-3c — non-tool capture: `remember:` authors a standing-rule delta
 import { normalizeInterpretDecision, applyConfidenceGate } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
@@ -2837,6 +2839,9 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
   _setMessageBody(msg, st.readouts.length ? st.readouts.join('\n') : `Done — ran all ${total} steps.`);
   // T2 — the whole compound ran cleanly → offer to promote it to a durable composite (cache hit next time).
   _orchOfferSaveCompound(msg, { tabId, groundId: st.chainGroundId, ask, steps: st.ranSteps });
+  // WF-1 — an AUTONOMOUS compound (a connector read / fan-out chain) has no Ground, so the composite saver above
+  // bails; offer instead to bank it as a recallable WORKFLOW keyed to the ask (bank → recall → suggest-and-confirm).
+  _maybeOfferWorkflowSave(msg, { ask, clauses, steps: st.ranSteps });
 }
 
 // A "show me" record button (offered on a grounded MISS or after a failed run). No groundId → no-op.
@@ -2881,6 +2886,56 @@ function _orchOfferSaveCompound(msg, { tabId, groundId, ask, steps, plan = null 
       } catch { /* promote is best-effort; the composite still runs regardless */ }
     }
     appendMessage({ role: 'assistant', body: `Saved — next time “${ask}” runs in one step.${extra}` });
+  }));
+}
+
+// ── WF-1 — recallable IL WORKFLOWS (bank → recall → suggest-and-confirm → replay) ─────────────────────────────────
+// The structured flywheel for AUTONOMOUS compounds: a clean connector/fan-out chain → banked as a {ask, subAsks}
+// workflow keyed to the instance → a later matching ask SUGGESTS it (a confirm) → replay re-dispatches the subAsks
+// through the SAME chain runner (so the inner map/fan-out/write gates still apply). Lexical recall, no LLM per ask.
+
+// Bank offer: only for an AUTONOMOUS compound (a connector/fan-out step — what the Ground-composite saver can't hold),
+// on an app instance, ≥2 clauses. The button banks {ask, subAsks = the clause texts}.
+function _maybeOfferWorkflowSave(msg, { ask, clauses, steps }) {
+  const appId = _memoryId();
+  const autonomous = Array.isArray(steps) && steps.some((s) => s && (s.kind === 'connector' || s.kind === 'fanout'));
+  const subAsks = (Array.isArray(clauses) ? clauses : []).map((c) => c && c.text).filter(Boolean);
+  if (!appId || !autonomous || subAsks.length < 2 || !String(ask || '').trim()) return;
+  const bar = _orchActionBar(msg);
+  bar.appendChild(_mkBtn('💾 Remember this workflow', async () => {
+    bar.remove();
+    let saved = false;
+    try { saved = (await saveWorkflow(appId, { ask, subAsks })).some((w) => w && w.ask === ask); } catch { /* */ }
+    const note = appendMessage({ role: 'assistant', body: saved
+      ? `Saved. Next time you ask something like “${String(ask).slice(0, 60)}…”, I’ll offer to run the whole workflow.`
+      : 'Couldn’t save that workflow.' });
+    _orchFinalize(note);
+  }));
+}
+
+// Recall: the saved workflow (if any) the ask strongly matches, scoped to THIS instance. Null off-app / no match.
+async function _matchWorkflow(goal) {
+  const appId = _memoryId();
+  if (!appId) return null;
+  try { return workflowMatch(goal, await loadWorkflows(appId)); } catch { return null; }
+}
+
+// Suggest-and-confirm: a strong workflow match → a Run / interpret-fresh card (the confirm). NOT silent auto-replay —
+// these are autonomous + side-effectful, so the user re-confirms; then the inner step gates still apply.
+function _offerWorkflowReplay(goal, wf) {
+  const m = appendMessage({ role: 'assistant', body: `🔁 This looks like a saved workflow — “${wf.ask}” (${wf.subAsks.length} steps). Run it?` });
+  const bar = _orchActionBar(m);
+  bar.appendChild(_mkBtn('▶ Run it', async () => {
+    bar.remove();
+    try { await bumpWorkflowRun(_memoryId(), wf.id); } catch { /* */ }   // corroboration
+    const tab = await _orchActiveTab();
+    const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
+    _orchRunChain(m, { tabId, clauses: wf.subAsks.map((t) => ({ text: t })), firstMatch: null, ask: wf.ask });   // replay via the same chain runner
+  }));
+  bar.appendChild(_mkBtn('No, interpret it', () => {
+    bar.remove();
+    _setMessageBody(m, 'Okay — interpreting it fresh.'); _orchFinalize(m);
+    _tryInterpret(goal, { suggestWorkflows: false });   // re-run the front door WITHOUT re-suggesting (no loop)
   }));
 }
 
@@ -4176,9 +4231,15 @@ function _bankCapabilityOutcome(goal, capabilityId, ok) {
   if (!item) return;
   try { recordGoalItem(appId, item).catch(() => { /* best-effort */ }); } catch { /* */ }
 }
-async function _tryInterpret(ask) {
+async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
   const goal = String(ask || '').trim();
   if (!goal) { _orchFinalize(appendMessage({ role: 'assistant', body: 'usage: `i: <ask>` — the interpret front door (F-2 test).' })); return true; }
+  // WF-1 — RECALL: a saved workflow strongly matches this ask → SUGGEST-and-confirm before interpreting. The "No"
+  // button re-enters with suggestWorkflows:false (no loop). Off-app / no match → straight through, no cost.
+  if (suggestWorkflows) {
+    const wf = await _matchWorkflow(goal);
+    if (wf) { _offerWorkflowReplay(goal, wf); return true; }
+  }
   const msg = appendMessage({ role: 'assistant', body: '🧠 interpreting…' });
   const tab = await _orchActiveTab();
   const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;

@@ -176,3 +176,38 @@ Painpoints: re-personalizing every new app, content lost on delete, long-running
 - **AP-4 — durable configured app.** Setup-complete mints a config-carrying user definition (an automatic, enhanced `save as app`); it shows in its category's choose-preset menu; re-selecting it opens **pre-configured, no setup**. The builtin preset always remains too.
 
 AP-0 is the prerequisite for §10 (instances need their own identity before learning can distill up). Build order: **AP-0 → AP-1..4 → §10 wiring**.
+
+## 12. Memory transparency & authoring (SPEC — not built, v2.74.1251)
+
+The goal store (§1–9) is structured + opaque: typed beliefs/deltas in chrome.storage, projected into the prompt's `<LEARNED>` block. Three authoring/visibility gaps, most→least scoped. All DEFERRED; this is the spec.
+
+### 12.1 `memory.md` — a readable/editable projection (export ⇄ edit ⇄ import)
+
+The transparency + portability + bulk-edit layer ("can't it just be a memory.md?"). It round-trips **THROUGH** the typed schema, never replacing it — so the tiers / confidence / ratchet (§4) / injection boundary (AL-3d) all survive.
+
+**Pure cores (testable, no I/O):**
+- `goalMemoryToMarkdown(items) → string` — project to markdown: **Standing rules** (deltas) + **Learned** (beliefs), grouped by tier. Body per line; metadata (`tier · confidence · evidence · provenance`) rides as a trailing annotation / HTML comment so it survives a round-trip. Untrusted (read-surfaced) beliefs marked as data, never rules.
+- `markdownToGoalItems(md) → { items, dropped }` — parse back, EACH line through `normalizeMemoryItem` (so an untyped line is **dropped, not admitted** — §2). Returns the items + a dropped-count (honest; no silent loss).
+
+**The reconcile (the one live store op):**
+- `reconcileGoalMemory(current, imported) → next` — match by content-id: unchanged → **keep its earned store fields** (`evidence`, the ratcheted `tier`); changed/new → take imported, `provenance:'user-edit'`; in current but absent from the doc → **removed** (the doc is authoritative). Confirm + one-step undo backup before the destructive replace.
+
+**Safety (the crux — why round-trip-through-schema):** no freeform text becomes a rule without passing `normalizeDelta`/`normalizeBelief`; the import is a HITL act (the USER types/approves the doc → trusted `user-edit`; a page cannot write it, so the boundary holds); confidence/tier clamp on import (no forging `canonical`); store-cap bounded.
+
+**Entry point:** extend the read-only `memory` view → **Export** + **Edit** (textarea) + **Import** (paste → reconcile + confirm). Instance memory first; the shared preset memory (§10) is a later, separate export.
+
+**Open decisions:** (1) metadata rendering — inline vs HTML-comment vs footer table (fidelity ⇄ readability); (2) import = replace-with-id-preservation + backup (over merge); (3) a user-edit may set tier up to `confirmed`, never `canonical` (canonization stays the runtime HITL path); (4) instance-only first.
+
+### 12.2 Natural-language rule capture (the "keep replies terse" gap)
+
+Today ONLY the `remember:` prefix persists a rule; a plain behavioral directive in chat ("keep replies terse") is `answer`'d and **lost**. Spec: add a `remember` intent to the interpret front door (or have the `answer` path OFFER *"Want me to remember that?"* when it detects a standing preference) → route to the same `standingRuleFromText` → store. Makes the prefix optional. Input-side; composes with 12.1 but ships independently.
+
+### 12.3 Soft rules vs structured workflows (the spectrum — what `remember:` is and isn't)
+
+`remember: when I say "get tickets" I mean get my open tickets, open each in a new conversation and summarize` IS stored — but as a **soft, always-on prose rule**: a delta the `<LEARNED>` block carries every pass. (The `standingRuleFromText` parser only splits `if X, Y` / `if X then Y` into trigger→body; it does **not** recognize `when I say X, I mean Y`, so the phrase-keying lives in the PROSE the LLM reads, not the store's `trigger` field — the rule is loaded always, not phrase-scoped.)
+
+It **works loosely** — the IL reads the rule and expands "get tickets" into the workflow — but it is **LLM-re-interpreted every time**: re-decomposed, re-run from scratch, subject to judgment, and still bounded by the autonomous-workflow gaps (the fanout/map confirms, no deterministic replay, not a saved composite capability).
+
+The **robust** form — a phrase keyed to a *structured, recallable* workflow (the alias flywheel for autonomous compounds) — is the **bank → recall → suggest-and-confirm** arc (the connector-workflow gap noted at §9's outcome-hook lessons). `remember:` is the poor-man's version; the structured one is the real target. **Cheap intermediate:** teach `standingRuleFromText` the `when I say X, I mean Y` form → `trigger = X` (phrase-scoped, no longer always-on) + `body = Y`, so at least the keying becomes structural.
+
+- ✅ **WF-1 — the structured workflow flywheel, slice 1 (v2.74.1252).** A clean AUTONOMOUS compound (a connector read / fan-out chain — what the Ground-composite saver can't hold, no Ground) offers **"💾 Remember this workflow"** at the chain's end → bank `{ask, subAsks}` per-instance (`Services/Storage/WorkflowStore.js`). RECALL: at `_tryInterpret`'s top, `workflowMatch` (`Core/workflowMemory.js`, pure+tested — overlap-coefficient, so a short re-ask "get tickets" matches a long saved workflow; precision-biased) finds the saved workflow. SUGGEST-and-confirm: a strong match → a "🔁 …Run it?" card (never silent — autonomous + side-effectful). REPLAY: re-dispatch the subAsks through the SAME chain runner (`_orchRunChain`), so the inner map/fan-out/write gates still apply; bumps a run-count (corroboration + the match tie-break). **Deferred:** naming/aliasing, LLM-semantic match, a manage-workflows view (`deleteWorkflow` exists, unwired), a run-count suggestion threshold, and `<LEARNED>`-block awareness (kept out so the IL can't try to "act" on a non-tool ref).
