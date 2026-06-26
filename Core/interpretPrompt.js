@@ -33,6 +33,9 @@ const SYSTEM = [
   '- OPERATING SITE: if an OPERATING_SITE is given and the ask implies acting on a website but names no other,',
   '  assume THAT site — "navigate" there (params.url = its origin) or "act" there, and prefer its capabilities.',
   '  Do NOT "clarify" which site; the user already chose it for this app.',
+  '- CONNECTED SITES: <CONNECTED_SITES> lists the ONLY sites this app is connected to. Operate on those. If the ask',
+  '  needs a site or service NOT among them (e.g. "emails" with no mail site connected), do NOT navigate to it or',
+  '  invent it — "answer" that it is not connected and name the sites that ARE, or "clarify" which connected site.',
   '- LEARNED: follow any STANDING RULES given in <LEARNED>. If <LEARNED> says a similar ask was handled with a',
   '  capability AND that capability ref is in the TOOL_CATALOG, prefer acting with it.',
   '- OBJECTS: if an <OBJECTS> block is given, it is the app\'s schema (its objects, states, actions). Use its exact',
@@ -46,11 +49,12 @@ const SYSTEM = [
  * Build the interpret messages. PURE. NO live DOM (injection boundary §3) — only the ask, the fenced seed, the
  * bound site, the fenced tool catalog, the primitive list, and a short fenced affordances summary.
  * @param {string} ask
- * @param {{ retrieved?: Array, primitives?: Array, affordances?: string, seed?: string, target?: object }} [ctx]
- *   `target` (AS-2c) = the app's bound site { origin, label } — TRUSTED config (the user's own setup, like the seed).
+ * @param {{ retrieved?: Array, primitives?: Array, affordances?: string, seed?: string, target?: object, connections?: Array }} [ctx]
+ *   `target` (AS-2c) = the app's bound site { origin, label }; `connections` (AS-4) = its full connected SET — both
+ *   TRUSTED config (the user's own setup, like the seed).
  * @returns {{ system:string, user:string }}
  */
-export function buildInterpretMessages(ask, { retrieved = [], primitives = [], affordances = '', seed = '', target = null, learned = '', objects = '' } = {}) {
+export function buildInterpretMessages(ask, { retrieved = [], primitives = [], affordances = '', seed = '', target = null, connections = [], learned = '', objects = '' } = {}) {
   const tools = (Array.isArray(retrieved) ? retrieved : []).map((c) => {
     const ref = _toolRef(c);
     const label = (c && c.alias && c.provenance === 'user') ? c.alias : (c && (c.intent || c.name)) || ref;
@@ -63,12 +67,18 @@ export function buildInterpretMessages(ask, { retrieved = [], primitives = [], a
   // AS-2c — the app's bound site (the SYSTEM rule tells the LLM to operate here when the ask names no other site).
   const site = (target && typeof target === 'object' && target.origin)
     ? { origin: String(target.origin).trim(), label: String(target.label || target.origin).trim() } : null;
+  // AS-4 — the app's full connected SET (the scope of sites it operates on); falls back to the single `target`.
+  const sites = (Array.isArray(connections) ? connections : [])
+    .map((c) => (c && typeof c === 'object' && c.origin) ? { origin: String(c.origin).trim(), label: String(c.label || c.origin).trim() } : null)
+    .filter(Boolean);
   const learnedText = String(learned ?? '').trim();   // AL-4 — the app's learned rules + ask-relevant recall (trusted)
   const objectsText = String(objects ?? '').trim();    // OM — the app's object model (its schema; trusted config)
   const user = [
     `USER ASK: ${String(ask ?? '').trim()}`,
     '',
-    ...(site ? ['<OPERATING_SITE note="this app is set up to work on this site — operate here when the ask names no other">', `${site.label} — ${site.origin}`, '</OPERATING_SITE>', ''] : []),
+    ...(sites.length
+      ? ['<CONNECTED_SITES note="the ONLY sites this app is connected to — operate on these; do not reach outside this set">', sites.map((s) => `${s.label} — ${s.origin}`).join('\n'), '</CONNECTED_SITES>', '']
+      : (site ? ['<OPERATING_SITE note="this app is set up to work on this site — operate here when the ask names no other">', `${site.label} — ${site.origin}`, '</OPERATING_SITE>', ''] : [])),
     ...(objectsText ? ['<OBJECTS note="what this app works on — its objects, states, and the verbs that change state; use these exact names">', objectsText, '</OBJECTS>', ''] : []),
     ...(learnedText ? ['<LEARNED note="this app\'s OWN memory — standing rules to follow + capabilities used for similar asks; trusted">', learnedText, '</LEARNED>', ''] : []),
     ...(intent ? ['<CONVERSATION_INTENT note="the user\'s standing intent — judge what fits; output format unchanged">', intent, '</CONVERSATION_INTENT>', ''] : []),

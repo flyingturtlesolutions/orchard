@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket } from './connectorRecipes.js';
+import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin } from './connectorRecipes.js';
 
 describe('fillEndpoint — {name} templating (pure, §12)', () => {
   it('fills placeholders from args and URL-encodes', () => {
@@ -187,5 +187,14 @@ describe('fillBody — write-body templating (pure, §6/§12)', () => {
   it('null template → null (a GET has no body); literals pass through untouched', () => {
     assert.equal(fillBody(null, {}), null);
     assert.deepEqual(fillBody({ public: false, n: 3 }, {}), { public: false, n: 3 });
+  });
+});
+
+describe('recipeForOrigin — pick the strong-probe recipe for a host (AS-4 verify)', () => {
+  it('matches a recipe by appHost suffix; a generic site → null', () => {
+    assert.equal(recipeForOrigin('https://deako.zendesk.com').app, 'zendesk');   // subdomain of zendesk.com
+    assert.equal(recipeForOrigin('zendesk.com').app, 'zendesk');                 // exact host
+    assert.equal(recipeForOrigin('https://support.deako.com'), null);            // no recipe → generic verify path
+    assert.equal(recipeForOrigin(''), null);
   });
 });

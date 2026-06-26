@@ -24,6 +24,17 @@ describe('interpretPrompt — buildInterpretMessages', () => {
     assert.match(user, /Search videos/);
   });
 
+  it('renders the connected SET as <CONNECTED_SITES> + a SYSTEM scope-fence rule (AS-4)', () => {
+    const { system, user } = buildInterpretMessages('get my open emails', {
+      connections: [{ origin: 'https://deako.zendesk.com', label: 'deako.zendesk.com' }, { origin: 'https://support.deako.com', label: 'support.deako.com' }],
+    });
+    assert.match(system, /CONNECTED SITES/);          // the scope-fence rule is in SYSTEM
+    assert.match(system, /not connected/i);
+    assert.match(user, /<CONNECTED_SITES/);
+    assert.match(user, /deako\.zendesk\.com/);
+    assert.match(user, /support\.deako\.com/);
+  });
+
   it('marks an irreversible capability for the model', () => {
     const { user } = buildInterpretMessages('x', { retrieved: [{ capabilityId: 'cap-buy', name: 'Buy it', reversible: false }] });
     assert.match(user, /IRREVERSIBLE/);

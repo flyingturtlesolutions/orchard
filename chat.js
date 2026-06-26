@@ -1507,7 +1507,7 @@ async function _startSetupFlow() {
   const connections = await _setupConnections();
   const { spec, step } = startSetup(def, { connections });
   _setupState = { convId: _currentConversationId, spec };
-  _setMessageBody(msg, `⚙️ **Setting up “${conv.title || def.name}”.** Just pick the site it works on — type the address, or pick an open tab below. \`cancel\` to stop.`, { markdown: true });
+  _setMessageBody(msg, `⚙️ **Setting up “${conv.title || def.name}”.** Pick the sites it works on — type an address or pick an open tab, add as many as it needs, then say \`done\`. \`cancel\` to stop.`, { markdown: true });
   _orchFinalize(msg);
   _renderSetupStep(step);
 }
@@ -1518,8 +1518,11 @@ function _renderSetupStep(step) {
   if (!step) return;
   if (step.done) { void _bankSetup(step); return; }
   const msg = appendMessage({ role: 'assistant', body: '' });
-  _setMessageBody(msg, step.prompt || 'Tell me more.');
-  if (step.kind === 'target' && Array.isArray(step.candidates) && step.candidates.length) {
+  // AS-4 — in the sequential 'more' stage, confirm what's connected so far before asking for the next site.
+  const connectedLine = (step.stage === 'more' && Array.isArray(step.connected) && step.connected.length)
+    ? `✅ Connected: ${step.connected.map((c) => c.label).join(', ')}.\n\n` : '';
+  _setMessageBody(msg, `${connectedLine}${step.prompt || 'Tell me more.'}`, { markdown: true });
+  if (step.kind === 'connections' && Array.isArray(step.candidates) && step.candidates.length) {
     const wrap = document.createElement('div');
     wrap.className = 'intent-menu';
     for (const c of step.candidates) {
@@ -1538,6 +1541,24 @@ function _renderSetupStep(step) {
 // pre-shaped by the caller (a {origin,label} object for target, a string for focus).
 async function _setupAdvanceAnswer(answer) {
   if (!_setupState) return;
+  // AS-4 — a site answer is VERIFIED LIVE before it accretes (recipe sites → identity probe; generic → login check). A
+  // `{done:true}` signal passes straight through. On not-connected, the background foregrounds the tab for sign-in.
+  if (answer && typeof answer === 'object' && answer.origin && answer.done !== true) {
+    const probing = appendMessage({ role: 'assistant', body: '' });
+    _setMessageBody(probing, `🔌 Connecting to \`${answer.label}\`…`, { markdown: true });
+    let verdict = 'unreachable';
+    try { const r = await _orchReq('VERIFY_CONNECTION', { origin: answer.origin }); verdict = (r && r.verdict) || 'unreachable'; }
+    catch { /* network/handler error → treat as unreachable */ }
+    _orchFinalize(probing);
+    if (verdict !== 'connected') {
+      const m = appendMessage({ role: 'assistant', body: '' });
+      _setMessageBody(m, verdict === 'signed-out'
+        ? `🔑 Not signed in to \`${answer.label}\` — I brought its tab forward. Sign in there, then send the address again.`
+        : `⚠️ Couldn’t reach \`${answer.label}\`. Check the address and try again.`, { markdown: true });
+      _orchFinalize(m);
+      return;   // don't accrete an unverified site
+    }
+  }
   const { spec, step } = advanceSetup(_setupState.spec, answer);
   _setupState.spec = spec;
   _renderSetupStep(step);
@@ -1553,7 +1574,7 @@ async function _bankSetup(step) {
   let conv = null;
   try { conv = await ConversationStore.load(state.convId); } catch { /* */ }
   const base = (conv && conv.config && typeof conv.config === 'object') ? conv.config : { writePolicy: 'gated' };
-  const merged = { ...base, target: cfg.target, focus: cfg.focus, allowedOrigins: cfg.allowedOrigins, shape: cfg.shape, setupComplete: true };
+  const merged = { ...base, connections: cfg.connections, target: cfg.target, focus: cfg.focus, allowedOrigins: cfg.allowedOrigins, shape: cfg.shape, setupComplete: true };
   // AP-1 (v2.74.1211) — a CONFIGURED app PINS itself to the top of the drawer (so you return to it, not re-create it).
   try { await ConversationStore.patchMeta(state.convId, { config: merged, pinned: true }); }
   catch (e) { try { console.warn('[chat] setup bank failed:', e?.message); } catch { /* */ } }
@@ -1568,12 +1589,14 @@ async function _bankSetup(step) {
       name: (conv && conv.title) || (typeDef && typeDef.name) || 'My app',
       seed: (conv && conv.seed) || _currentConversationSeed,
       type: typeDef && typeDef.type, objectModel: typeDef && typeDef.objectModel, icon: (conv && conv.icon) || (typeDef && typeDef.icon),
-      config: merged, setup: { target: cfg.target, shape: cfg.shape }, presetId,
+      config: merged, setup: { target: cfg.target, connections: cfg.connections, shape: cfg.shape }, presetId,
       instanceId: (conv && conv.instanceId) || _currentConversationInstanceId,
     });
     if (def) { await _loadUserCatalog(); _userCatalog = addUserDef(_userCatalog, def); await _saveUserCatalog(); }
   } catch (e) { try { console.warn('[chat] configured-app mint failed:', e?.message); } catch { /* */ } }
-  const where = cfg.target ? `\`${cfg.target.label}\`` : 'your site';
+  const where = (cfg.connections && cfg.connections.length)
+    ? cfg.connections.map((c) => `\`${c.label}\``).join(', ')
+    : (cfg.target ? `\`${cfg.target.label}\`` : 'your site');
   _setMessageBody(msg, `✅ **Connected to ${where}.** Now just tell me what to do — e.g. “get my open emails” — and I’ll learn each task the first time, then recall it when you ask again (even worded differently).`, { markdown: true });
   _orchFinalize(msg);
   _refreshHistoryIfOpen().catch(() => {});
@@ -3936,6 +3959,15 @@ function _boundTarget() {
   const t = _currentConversationConfig && _currentConversationConfig.target;
   return (t && typeof t === 'object' && t.origin) ? { origin: String(t.origin), label: String(t.label || t.origin) } : null;
 }
+
+// AS-4 — the app's full connected SET (its setup), threaded into the IL so it knows what it's actually connected to
+// (and says so when an ask needs a site that isn't — e.g. "get my emails" with no mail site connected).
+function _boundConnections() {
+  const c = _currentConversationConfig && _currentConversationConfig.connections;
+  return (Array.isArray(c) ? c : [])
+    .map((x) => (x && typeof x === 'object' && x.origin) ? { origin: String(x.origin), label: String(x.label || x.origin) } : null)
+    .filter(Boolean);
+}
 // Deterministic safety net: if interpret chose NAVIGATE but produced no URL and the app has a bound site, default to
 // it. The OPERATING SITE prompt rule should already make the LLM do this; this guarantees it.
 function _withBoundUrl(params) {
@@ -3963,7 +3995,7 @@ async function _tryInterpret(ask) {
   const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
   let raw = null; let retrieved = []; let groundId = null;
   try {
-    const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId, seed: _currentConversationSeed, target: _boundTarget(), appId: _currentConversationAppId, memoryId: _memoryId() });
+    const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId, seed: _currentConversationSeed, target: _boundTarget(), connections: _boundConnections(), appId: _currentConversationAppId, memoryId: _memoryId() });
     if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; groundId = r.groundId || null; }
   } catch { /* */ }
   // F-2c-flip (v2.74.1180) — interpret unavailable (no LLM / handler error) → return FALSE so the caller falls back
@@ -3984,7 +4016,7 @@ async function _tryInterpret(ask) {
   }
   if (d.intent === 'answer') {
     let answer = null;
-    try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
+    try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, connections: _boundConnections(), appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
     _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 ${d.why || 'I’m not sure how to help with that here.'}`);
     _orchFinalize(msg);
     return true;
@@ -4005,7 +4037,7 @@ async function _tryInterpret(ask) {
   // couldn't dispatch (an act with only a primitive op, or a nav with no ground) → reasoned answer fallback.
   const m2 = appendMessage({ role: 'assistant', body: '🧠 thinking…' });
   let answer = null;
-  try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
+  try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, connections: _boundConnections(), appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
   _setMessageBody(m2, answer ? `🧠 ${answer}` : '🧠 I’m not sure how to do that here — want to show me?');
   _orchFinalize(m2);
   return true;
@@ -4099,7 +4131,7 @@ async function _tryIlCommand(text) {
 
   // No grounded action to run → Orchard ANSWERS the ask (meta/conversational — "what can you do?", "can you X?").
   let answer = null;
-  try { const r = await _orchReq('IL_ANSWER', { ask, tabId, seed: _currentConversationSeed, appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
+  try { const r = await _orchReq('IL_ANSWER', { ask, tabId, seed: _currentConversationSeed, connections: _boundConnections(), appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
   _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 I don’t have a saved capability for “${ask}” on this page yet — want to show me?`);
   try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${answer ? 'answered' : 'no match'}`); } catch { /* */ }
   return true;
@@ -4353,11 +4385,18 @@ async function sendChatMessage() {
     if (/^set\s*up:?\s*$/i.test(text)) { _renderSetupStep(setupStep(_setupState.spec)); return; }   // re-show the current step, don't bind "setup" as an answer
     const step = setupStep(_setupState.spec);
     let answer = text;
-    if (step.kind === 'target') {
-      answer = _targetFromText(text);
-      if (!answer) {
-        _orchFinalize(appendMessage({ role: 'assistant', body: 'I need a site — type its address (e.g. mail.google.com) or pick one of the open tabs above.' }));
-        return;
+    if (step.kind === 'connections') {
+      // AS-4 — a "done" word ends the sequential add (ignored before the first site); otherwise shape a site address.
+      if (/^(done|finish|finished|that'?s all|no more|all set|that is all)$/i.test(text)) {
+        answer = { done: true };
+      } else {
+        answer = _targetFromText(text);
+        if (!answer) {
+          _orchFinalize(appendMessage({ role: 'assistant', body: step.stage === 'more'
+            ? 'Type another site (e.g. support.deako.com), or say “done”.'
+            : 'I need a site — type its address (e.g. mail.google.com) or pick one of the open tabs above.' }));
+          return;
+        }
       }
     }
     try { await _setupAdvanceAnswer(answer); }

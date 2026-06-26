@@ -13,8 +13,8 @@
 // Identity (CS Tools §14): verify the RETURNED identity, never `res.ok`. The verdict + the open-tab-vs-ephemeral
 // decision live in the pure `Core/connection.js` core; this handler is the live tab glue.
 
-import { fillEndpoint, fillBody } from '../../Core/connectorRecipes.js';
-import { pickRideTab, assessProbe, rideAction, STATUS } from '../../Core/connection.js';
+import { fillEndpoint, fillBody, recipeForOrigin } from '../../Core/connectorRecipes.js';
+import { pickRideTab, assessProbe, rideAction, STATUS, classifyReachProbe } from '../../Core/connection.js';
 
 // ── Ephemeral managed-tab registry (§16) — module singleton, lives within a SW lifetime ─────────────────────────────
 const IDLE_CLOSE_MS = 8000;                 // close an Orchard-opened tab this long after its last ride (burst-reuse window)
@@ -199,6 +199,48 @@ export function createConnectorHandlers({ ensureContentScript } = {}) {
         }
       })();
       return true;   // async — keep the sendResponse channel open
+    },
+
+    // VERIFY_CONNECTION (AS-4) — setup-time "is this site connected?" check for ONE origin. A recipe-backed site uses
+    // the STRONG identity probe (catches the §14 200+anon sentinel); a generic site loads its origin and classifies the
+    // final URL (login page → signed-out). On not-connected, the tab is FOREGROUNDED for the human to sign in (§16).
+    // → { success, verdict:'connected'|'signed-out'|'unreachable', origin, identity? }.
+    'VERIFY_CONNECTION': (payload, _sender, sendResponse) => {
+      (async () => {
+        let ephemeralOrigin = null;                          // a throwaway verify tab we should close (unless kept for sign-in)
+        try {
+          const origin = String((payload && payload.origin) || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+          if (!origin) { sendResponse({ success: false, error: 'no-origin' }); return; }
+
+          let tabs = [];
+          try { tabs = await chrome.tabs.query({ url: `*://${origin}/*` }); } catch { tabs = []; }
+          let tab = pickRideTab(tabs);
+          if (!tab) { const got = await _acquireEphemeralTab(origin); ephemeralOrigin = origin; tab = { id: got.tabId }; if (got.opened) await _waitTabComplete(got.tabId); }
+          if (typeof ensureContentScript === 'function') { try { await ensureContentScript(tab.id); } catch { /* */ } }
+
+          const recipe = recipeForOrigin(origin);
+          let verdict, identity = null;
+          if (recipe && recipe.verifyIdentity) {
+            const probePath = String(recipe.identityProbe || '/api/v2/users/me.json');
+            const reply = await fetchViaHealed(tab.id, `https://${origin}${probePath.startsWith('/') ? probePath : '/' + probePath}`, 'GET');
+            const v = assessProbe(reply, null);
+            verdict = v.status === STATUS.FRESH ? 'connected' : 'signed-out';
+            if (v.user) identity = { id: v.user.id ?? null, name: v.user.name ?? null, email: v.user.email ?? null };
+          } else {
+            let url = '';
+            try { const t = await chrome.tabs.get(tab.id); url = (t && t.url) || ''; } catch { /* */ }
+            verdict = classifyReachProbe({ finalUrl: url });
+          }
+
+          if (verdict !== 'connected') { await _focusTab(tab.id); ephemeralOrigin = null; }   // bring it forward for sign-in; keep it
+          sendResponse({ success: true, verdict, origin, identity });
+        } catch (e) {
+          sendResponse({ success: false, error: (e && e.message) || 'verify-failed' });
+        } finally {
+          if (ephemeralOrigin) _releaseEphemeralTab(ephemeralOrigin);
+        }
+      })();
+      return true;
     },
   };
 }

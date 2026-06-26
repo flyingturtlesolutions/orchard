@@ -201,3 +201,18 @@ export function normalizeTicket(t, origin = '') {
 export function recipeLegs({ account = 'me', trusted = true } = {}) {
   return CONNECTOR_RECIPES.map((r) => recipeToLeg(r, { account, trusted })).filter(Boolean);
 }
+
+/**
+ * The first curated recipe whose `appHost` matches an origin (host === appHost or a subdomain of it). PURE. Lets the
+ * setup-time verify (AS-4) pick the STRONG identity probe for a recipe-backed site (e.g. `deako.zendesk.com` →
+ * `zendesk.com`); a generic site (no match) falls back to the reach/login heuristic. Recipes share appHost+probe, so
+ * any match suffices for the probe.
+ */
+export function recipeForOrigin(origin) {
+  const host = String(origin || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '').toLowerCase();
+  if (!host) return null;
+  return CONNECTOR_RECIPES.find((r) => {
+    const ah = String(r.appHost || '').toLowerCase();
+    return ah && (host === ah || host.endsWith('.' + ah));
+  }) || null;
+}

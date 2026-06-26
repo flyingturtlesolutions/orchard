@@ -701,6 +701,10 @@ export function createSgMessageHandlers(ctx) {
         const target = (payload?.target && typeof payload.target === 'object' && payload.target.origin)
           ? { origin: String(payload.target.origin), label: String(payload.target.label || payload.target.origin) } : null;
         if (target && !groundId) { try { groundId = _groundIdForUrl(target.origin, await StorageManager.getAllGrounds()); } catch { /* */ } }
+        // AS-4 — the app's full connected SET (TRUSTED config); the interpret prompt's <CONNECTED_SITES> scope fence.
+        const connections = Array.isArray(payload?.connections)
+          ? payload.connections.filter((c) => c && typeof c === 'object' && c.origin).map((c) => ({ origin: String(c.origin), label: String(c.label || c.origin) }))
+          : [];
         let caps = [];
         if (groundId) { try { caps = ((await ctx.readSgCapabilities(groundId)) || []).filter((c) => c && isActiveCapability(c) && c.kind !== 'composite'); } catch { caps = []; } }
         const retrieved = retrieveTools(ask, { capabilities: caps });
@@ -726,7 +730,7 @@ export function createSgMessageHandlers(ctx) {
         let learned = '';
         if (memId) { try { learned = goalContextFor(await loadGoalItems(memId), ask, { om }); } catch { /* */ } }
         const objects = describeObjectModel(om);
-        const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed, target, learned, objects });
+        const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed, target, connections, learned, objects });
         Logger.info('route', `INTERPRET_ASK "${ask.slice(0, 60)}" → ${decision.intent} (conf ${decision.confidence}, ${retrieved.length} cand, ground ${groundId || '—'})`);
         sendResponse({ success: true, decision, groundId: groundId || null, retrieved });
       } catch (err) {
@@ -791,6 +795,9 @@ export function createSgMessageHandlers(ctx) {
         const ask = String(payload?.ask ?? '').trim();
         let { tabId, groundId } = payload ?? {};
         const seed = String(payload?.seed ?? '').trim();   // CV-2b — conversation seed → the answer's persona preamble
+        const connections = Array.isArray(payload?.connections)   // AS-4 — the app's connected sites → the answer's reach
+          ? payload.connections.filter((c) => c && typeof c === 'object' && c.origin).map((c) => ({ origin: String(c.origin), label: String(c.label || c.origin) }))
+          : [];
         const appId = String(payload?.appId ?? '').trim();   // AL-4 — the app's TYPE (object-model resolve; off-app → '')
         const memId = String(payload?.memoryId ?? '').trim() || appId;   // AP-0 (v2.74.1213) — the per-INSTANCE goal-memory key (falls back to the type for legacy apps)
         let tabUrl = '';
@@ -817,7 +824,7 @@ export function createSgMessageHandlers(ctx) {
         let learned = '';
         if (memId) { try { learned = goalContextFor(await loadGoalItems(memId), ask, { om }); } catch { /* */ } }
         const objects = describeObjectModel(om);
-        const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed, learned, objects });
+        const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed, connections, learned, objects });
         // PS-0 (v2.74.1123) — persist Orchard's capability-gap enumeration instead of discarding it: the durable,
         // per-Ground DEMAND signal PS-1 arms into the interaction monitor for passive harvest. Non-fatal/best-effort.
         try {

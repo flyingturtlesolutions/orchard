@@ -106,3 +106,27 @@ export function pickRideTab(tabs) {
   live.sort((a, b) => (Number(b.active === true) - Number(a.active === true)) || ((b.lastAccessed || 0) - (a.lastAccessed || 0)));
   return live[0] || null;
 }
+
+// ── Setup-time connection verify (AS-4) — the GENERIC, recipe-free check ─────────────────────────────────────────────
+// A site with a connector recipe verifies via the strong identity probe (assessProbe). A generic site has no identity
+// endpoint, so we load its origin and ask "did it land on a login page?" — a redirect to a login path or a known IdP
+// means signed-out. PURE. KNOWN LIMIT: an inline login FORM that keeps the app's URL isn't caught here (needs a DOM check).
+
+/** URL looks like a login / SSO page? PURE. */
+export function looksLikeLogin(url) {
+  const u = _str(url);
+  if (!u) return false;
+  return /(?:\/(?:login|log-in|sign-?in|sign_in|signon|auth|sso|session|users\/sign_in|account\/login))(?:[/?#]|$)/i.test(u)
+    || /(?:accounts\.google\.|okta\.com|auth0\.com|onelogin\.com|login\.microsoftonline|login\.salesforce|sso\.)/i.test(u);
+}
+
+/**
+ * Classify a generic connection probe from the tab's FINAL url after loading the origin. PURE.
+ *   'unreachable' (no / invalid url) · 'signed-out' (landed on a login page / IdP) · 'connected' (stayed in the app).
+ */
+export function classifyReachProbe({ finalUrl } = {}) {
+  const url = _str(finalUrl);
+  if (!url) return 'unreachable';
+  try { new URL(url); } catch { return 'unreachable'; }
+  return looksLikeLogin(url) ? 'signed-out' : 'connected';
+}

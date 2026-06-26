@@ -26,6 +26,18 @@ describe('buildAnswerMessages — answer a meta ask, grounded in real page conte
     assert.match(user, /- Illustrations/);
   });
 
+  it('AS-4 — lists the connected sites (its reach) + the SYSTEM names them', () => {
+    const { system, user } = buildAnswerMessages({
+      ask: 'get my open emails',
+      connections: [{ origin: 'https://deako.zendesk.com', label: 'deako.zendesk.com' }, { origin: 'https://deako.com', label: 'deako.com' }],
+    });
+    assert.match(user, /<CONNECTED_SITES/);
+    assert.match(user, /deako\.zendesk\.com/);
+    assert.match(user, /deako\.com/);
+    assert.match(system, /CONNECTED_SITES/);          // the "your reach" rule in BASE
+    assert.match(system, /not connected/i);
+  });
+
   it('#5 — surfaces the authoring coverage (taught vs gaps)', () => {
     const { user } = buildAnswerMessages({ ask: 'how can you do better', coverage: { authoredCount: 3, total: 10, coveragePct: 30 } });
     assert.match(user, /COVERAGE: 3\/10 .* \(30% taught\)/);

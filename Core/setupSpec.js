@@ -1,36 +1,29 @@
-// Core/setupSpec.js — AS-1 (v2.74.1186): the setup spec — the per-app binding checklist (DESIGN_conversations.md
-// §6A). PURE: no chrome / DOM / LLM / storage.
+// Core/setupSpec.js — AS-1 (v2.74.1186; AS-4 v2.74.1241 — multi-connection): the per-app setup spec
+// (DESIGN_conversations.md §6A). PURE: no chrome / DOM / LLM / storage.
 //
-// Setup is deliberately LIGHT — it binds the SITE, nothing more. Two slots:
-//   1. target — "which site?"  → a CONNECTION. target ≡ connection: the live logged-in tab IS the session-ride
-//                                 origin (§6A). REQUIRED — the one thing setup must capture (you can't ride a session
-//                                 without knowing which). Additional sites accrete through use, like capabilities.
-//   2. shape  — "how it runs"  → interactive / watch / run; sub-agents; cadence. The ARCHETYPE templates the default,
-//                                 so this is PRE-BOUND and never prompted (an override is an explicit edit/AS-3).
+// Setup binds the app's CONNECTION SET — the sites it operates on. Each entry IS a connection (the live logged-in tab
+// is the session-ride origin, §6A). AS-4 (2026-06-25): setup is SEQUENTIAL + immediately-verified — pick a site, the
+// live flow verifies it (open/probe via the CX-7 connection layer), it accretes; repeat until the user says "done".
+// So `connections` is an ACCUMULATOR, not a single slot, and a `done` flag marks the end of the sequence (≥1 required).
+// The same `addConnection` lets a site accrete LATER too (post-setup, via a connect command) — setup is just the first
+// pass of the same mechanism. Two slots:
+//   1. connections — "which sites?"  → the verified connection list. REQUIRED (≥1). The only prompted slot.
+//   2. shape        — "how it runs"  → interactive / watch / run; PRE-BOUND from the archetype, never prompted (AS-3 edit).
 //
-// FOCUS is NOT a setup slot (2026-06-24, per user feedback). A user shouldn't enumerate every workflow up front. What
-// the app DOES on the site accretes at RUNTIME: the user asks "get my open emails" in chat, a novel ask is authored
-// via the teach/trial flywheel, and the learning scheme (DESIGN_apps_learning.md) lets a later paraphrase ("how many
-// open emails do I have") RECALL the taught capability. So the SEED gives the goal/role, SETUP gives the site, and
-// CHAT + LEARNING give the capabilities — three layers, not one setup questionnaire.
+// FOCUS is NOT a setup slot (2026-06-24): what the app DOES accretes at RUNTIME via the teach/trial flywheel + the
+// learning scheme (DESIGN_apps_learning.md). SEED gives the goal/role, SETUP gives the sites, CHAT+LEARNING the caps.
 //
-// Progressive (prompt one unbound slot → `nextUnboundSlot`; in practice just `target`) + reuse-then-teach (existing
-// connections become the target slot's `candidates`). A COMPLETED spec collapses to a config patch (`specToConfig`)
-// that AS-3 banks onto the app. Pure transforms only; the guided bind flow (AS-2) + bank/edit (AS-3) are live wiring.
-//
-// `allowedOrigins` is a SCOPE-LIMITER derived from the bound target, NOT the target-discovery mechanism (§6A): the
-// target comes from the live connection; allowedOrigins just fences where the app may operate.
+// A COMPLETED spec collapses to a config patch (`specToConfig` → `connections[]` + a derived `allowedOrigins` fence;
+// `target` = the primary connection, kept for back-compat readers). Pure transforms only; the guided verified bind
+// loop (AS-2, chat.js) is the live wiring.
 
 import { ARCHETYPES } from './appDef.js';
 
 const _str = (x) => (typeof x === 'string' ? x.trim() : '');
 
-export const SETUP_KINDS = Object.freeze(['target', 'shape']);             // the binding slots (only target is prompted)
+export const SETUP_KINDS = Object.freeze(['connections', 'shape']);        // the binding slots (only connections is prompted)
 export const SHAPE_MODES = Object.freeze(['interactive', 'watch', 'run']);
 
-// The archetype → default run-shape map (the archetype TEMPLATES the shape, §6A). Operators work a queue with the
-// user; monitors watch read-only; executors run a task to its stopping point and may fan out sub-tasks. True cadence
-// firing is the interface→backend split (deferred, decision #3) — 'on-run' is the v1 stand-in.
 const _SHAPE_BY_ARCHETYPE = {
   operator: { mode: 'interactive', subAgents: false, cadence: null },
   monitor:  { mode: 'watch',       subAgents: false, cadence: 'on-run' },
@@ -43,18 +36,36 @@ export function archetypeShape(archetype) {
   return { ...(_SHAPE_BY_ARCHETYPE[archetype] || _DEFAULT_SHAPE) };
 }
 
+/** One connection: `{ origin, label }`. origin REQUIRED (it IS the connection); label defaults to the origin. PURE. */
+function normalizeConnection(value) {
+  const v = (value && typeof value === 'object') ? value : null;
+  const origin = _str(v && v.origin);
+  if (!origin) return null;
+  return { origin, label: _str(v && v.label) || origin };
+}
+
+/** Normalize + dedup a connection LIST by origin (first wins). PURE. */
+function dedupConnections(list) {
+  const out = []; const seen = new Set();
+  for (const c of (Array.isArray(list) ? list : [])) {
+    const n = normalizeConnection(c);
+    if (!n || seen.has(n.origin)) continue;
+    seen.add(n.origin); out.push(n);
+  }
+  return out;
+}
+
 /**
- * Normalize a slot VALUE by kind. PURE. Returns the cleaned value, or null if unusable (→ the slot stays unbound,
- * so a malformed bind can never corrupt the spec).
- *   target → { origin, label }  (origin REQUIRED — it IS the connection; label defaults to the origin)
- *   shape  → { mode∈SHAPE_MODES, subAgents:bool, cadence:string|null }
+ * Normalize a slot VALUE by kind. PURE. Returns the cleaned value, or null when unbound (so a malformed bind can't
+ * corrupt the spec).
+ *   connections → [{origin,label}]  (the accumulator; accepts an array or a single conn to seed; null = empty/unbound)
+ *   shape       → { mode∈SHAPE_MODES, subAgents:bool, cadence:string|null }
  */
 export function normalizeSlotValue(kind, value) {
-  if (kind === 'target') {
-    const v = (value && typeof value === 'object') ? value : null;
-    const origin = _str(v && v.origin);
-    if (!origin) return null;                                  // a target MUST carry an origin (the connection)
-    return { origin, label: _str(v && v.label) || origin };
+  if (kind === 'connections') {
+    const arr = Array.isArray(value) ? value : (value != null ? [value] : []);
+    const deduped = dedupConnections(arr);
+    return deduped.length ? deduped : null;                  // empty = unbound (uniform with the slot model)
   }
   if (kind === 'shape') {
     const v = (value && typeof value === 'object') ? value : null;
@@ -70,46 +81,85 @@ export function normalizeSlotValue(kind, value) {
 
 /**
  * Derive the setup checklist for an app definition. PURE.
- * target is REQUIRED and starts unbound (the only prompted slot); shape is PRE-BOUND from the archetype template
- * (never prompted — an override is an explicit edit). `connections` (existing session-ride connections) become the
- * target slot's reuse `candidates` (reuse-then-teach).
- * @returns {{ appId:string, archetype:string|null, slots:Array }}
+ * `connections` is REQUIRED and starts empty (the only prompted slot, looped sequentially); `shape` is PRE-BOUND from
+ * the archetype template. Existing session-ride connections become the connections slot's reuse `candidates`.
+ * @returns {{ appId:string, archetype:string|null, done:boolean, slots:Array }}
  */
 export function buildSetupSpec(def, { connections = [] } = {}) {
   const d = (def && typeof def === 'object') ? def : {};
   const appId = _str(d.id) || _str(d.appId);
   const archetype = ARCHETYPES.includes(d.archetype) ? d.archetype : null;
-  const candidates = (Array.isArray(connections) ? connections : [])
-    .map((c) => normalizeSlotValue('target', c)).filter(Boolean);
   const slots = [
-    { key: 'target', kind: 'target', required: true,  value: null, candidates,
-      prompt: 'Which site should this app work on? Sign in to it in a tab, then pick it here.' },
-    { key: 'shape',  kind: 'shape',  required: false, value: archetypeShape(archetype), candidates: [],
+    { key: 'connections', kind: 'connections', required: true, value: null, candidates: dedupConnections(connections),
+      prompt: 'Which site should this app work on? Sign in to it in a tab, then pick it here — add as many as it needs.' },
+    { key: 'shape', kind: 'shape', required: false, value: archetypeShape(archetype), candidates: [],
       prompt: 'How should it run?' },
   ];
-  return { appId, archetype, slots };
+  return { appId, archetype, done: false, slots };
 }
 
-/** Normalize / rehydrate a persisted spec: drop junk slots, re-normalize bound values + candidates. PURE. */
+/** Normalize / rehydrate a persisted spec: migrate the legacy single `target` slot → `connections`, drop junk,
+ *  re-normalize values + candidates, preserve the `done` finish flag. PURE. */
 export function normalizeSetupSpec(spec) {
   const s = (spec && typeof spec === 'object') ? spec : {};
   const slots = (Array.isArray(s.slots) ? s.slots : [])
-    .filter((sl) => sl && SETUP_KINDS.includes(sl.kind))
-    .map((sl) => ({
-      key: _str(sl.key) || sl.kind,
-      kind: sl.kind,
-      required: !!sl.required,
-      value: sl.value == null ? null : normalizeSlotValue(sl.kind, sl.value),
-      candidates: (Array.isArray(sl.candidates) ? sl.candidates : [])
-        .map((c) => normalizeSlotValue(sl.kind, c)).filter(Boolean),
-      prompt: _str(sl.prompt),
-    }));
-  return { appId: _str(s.appId), archetype: ARCHETYPES.includes(s.archetype) ? s.archetype : null, slots };
+    .map((sl) => {
+      if (!sl) return null;
+      const kind = sl.kind === 'target' ? 'connections' : sl.kind;     // legacy single-target → the accumulator
+      if (!SETUP_KINDS.includes(kind)) return null;
+      const isConn = kind === 'connections';
+      return {
+        key: isConn ? 'connections' : (_str(sl.key) || kind),
+        kind,
+        required: !!sl.required,
+        value: sl.value == null ? null : normalizeSlotValue(kind, sl.value),
+        candidates: (Array.isArray(sl.candidates) ? sl.candidates : [])
+          .map((c) => (isConn ? normalizeConnection(c) : normalizeSlotValue(kind, c))).filter(Boolean),
+        prompt: _str(sl.prompt),
+      };
+    })
+    .filter(Boolean);
+  return { appId: _str(s.appId), archetype: ARCHETYPES.includes(s.archetype) ? s.archetype : null, done: !!s.done, slots };
+}
+
+/** The bound connections (the accumulator), in order. PURE. */
+export function connectionsOf(spec) {
+  const sl = normalizeSetupSpec(spec).slots.find((x) => x.kind === 'connections');
+  return (sl && Array.isArray(sl.value)) ? sl.value : [];
 }
 
 /**
- * Bind a value to a slot — returns a NEW spec (pure, copy-on-write). A value that's bad for the kind is IGNORED (the
- * slot stays unbound) so a malformed bind can't corrupt the spec; an unknown key leaves the spec unchanged.
+ * Append a (live-verified) connection to the set — dedup by origin. PURE, copy-on-write. A bad conn is ignored. This
+ * is the sequential-setup bind AND the post-setup accretion path (same mechanism).
+ */
+export function addConnection(spec, conn) {
+  const s = normalizeSetupSpec(spec);
+  const n = normalizeConnection(conn);
+  if (!n) return s;
+  const slots = s.slots.map((sl) => (sl.kind !== 'connections' ? sl
+    : { ...sl, value: dedupConnections([...(sl.value || []), n]) }));
+  return { ...s, slots };
+}
+
+/** Remove a connection by origin. PURE, copy-on-write. (Post-setup "disconnect"; never empties below the floor here —
+ *  the floor is enforced at completion via isSetupComplete.) */
+export function removeConnection(spec, origin) {
+  const key = _str(origin);
+  const s = normalizeSetupSpec(spec);
+  const slots = s.slots.map((sl) => (sl.kind !== 'connections' ? sl
+    : { ...sl, value: ((sl.value || []).filter((c) => c.origin !== key)).length ? (sl.value || []).filter((c) => c.origin !== key) : null }));
+  return { ...s, slots };
+}
+
+/** Signal the user finished adding sites (the sequential-setup "done"). PURE. Only completes setup with ≥1 connection. */
+export function markSetupDone(spec, done = true) {
+  return { ...normalizeSetupSpec(spec), done: !!done };
+}
+
+/**
+ * Bind a value to a slot — returns a NEW spec (pure, copy-on-write). For `connections` this REPLACES the set (use
+ * `addConnection` for the sequential append); used for `shape` overrides + AS-3 edits. A bad value / unknown key is a
+ * no-op so a malformed bind can't corrupt the spec.
  */
 export function bindSlot(spec, key, value) {
   const s = normalizeSetupSpec(spec);
@@ -118,38 +168,40 @@ export function bindSlot(spec, key, value) {
   const slots = s.slots.map((sl) => {
     if (sl.key !== k) return sl;
     const v = normalizeSlotValue(sl.kind, value);
-    if (v == null) return sl;                                  // reject a bad value; leave it unbound
+    if (v == null) return sl;
     touched = true;
     return { ...sl, value: v };
   });
   return touched ? { ...s, slots } : s;
 }
 
-/** The next REQUIRED + unbound slot (progressive prompting). PURE. Returns the slot, or null when setup is done. */
+/** The next REQUIRED + unbound slot (the first prompt). PURE. Null once `connections` has ≥1 entry (then the live flow
+ *  runs the sequential "add another / done" loop until markSetupDone). */
 export function nextUnboundSlot(spec) {
   return normalizeSetupSpec(spec).slots.find((sl) => sl.required && sl.value == null) || null;
 }
 
-/** Are all REQUIRED slots bound? PURE. */
+/** Is setup complete? PURE. ≥1 bound connection AND the user signaled done (the sequence is finished). */
 export function isSetupComplete(spec) {
-  return !nextUnboundSlot(spec);
+  const s = normalizeSetupSpec(spec);
+  return !!s.done && connectionsOf(s).length > 0;
 }
 
 /**
- * Collapse a COMPLETED spec into the config patch AS-3 banks onto the app. PURE. Returns null if setup is incomplete
- * (the required target is unbound) — a half-bound app is never banked. Shape:
- *   { target:{origin,label}, allowedOrigins:[origin], shape:{...} }
- * `allowedOrigins` is the derived SCOPE fence (the bound target's origin), not a separate target list (§6A). No
- * `focus` — what the app does is learned at runtime (see the header), never enumerated at setup.
+ * Collapse a COMPLETED spec into the config patch AS-3 banks. PURE. Returns null if incomplete. Shape:
+ *   { connections:[{origin,label}], target:{origin,label}, allowedOrigins:[origin…], shape:{…} }
+ * `connections` is the set; `target` = the PRIMARY connection (kept for back-compat readers — id/label/isConfiguredDef);
+ * `allowedOrigins` is the derived SCOPE fence over ALL connection origins (§6A). No `focus` — learned at runtime.
  */
 export function specToConfig(spec) {
   const s = normalizeSetupSpec(spec);
   if (!isSetupComplete(s)) return null;
   const byKey = Object.fromEntries(s.slots.map((sl) => [sl.key, sl.value]));
-  const target = byKey.target || null;
+  const connections = connectionsOf(s);
   return {
-    target,
-    allowedOrigins: target ? [target.origin] : [],
+    connections,
+    target: connections[0] || null,
+    allowedOrigins: connections.map((c) => c.origin),
     shape: byKey.shape || archetypeShape(s.archetype),
   };
 }

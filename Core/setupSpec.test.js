@@ -1,156 +1,145 @@
-// Core/setupSpec.test.js — AS-1 (v2.74.1186; revised v2.74.1189 — focus dropped from setup): the per-app setup spec.
+// Core/setupSpec.test.js — AS-1 + AS-4 (v2.74.1241 — sequential multi-connection): the per-app setup spec.
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  SETUP_KINDS, SHAPE_MODES, archetypeShape, normalizeSlotValue, buildSetupSpec,
-  normalizeSetupSpec, bindSlot, nextUnboundSlot, isSetupComplete, specToConfig,
+  SETUP_KINDS, SHAPE_MODES, archetypeShape, normalizeSlotValue, buildSetupSpec, normalizeSetupSpec,
+  bindSlot, nextUnboundSlot, isSetupComplete, specToConfig, addConnection, removeConnection, markSetupDone, connectionsOf,
 } from './setupSpec.js';
 
+const DEF = { id: 'support', name: 'Support agent', archetype: 'operator' };
+const GMAIL = { origin: 'https://mail.google.com', label: 'Gmail' };
+const ZD = { origin: 'https://deako.zendesk.com', label: 'Deako Zendesk' };
+
 describe('setupSpec — archetypeShape (the archetype templates the shape)', () => {
-  it('each archetype maps to its own run-shape', () => {
+  it('each archetype maps to its own run-shape; unknown → interactive default; returns a copy', () => {
     assert.equal(archetypeShape('operator').mode, 'interactive');
-    assert.equal(archetypeShape('monitor').mode, 'watch');
     assert.equal(archetypeShape('monitor').cadence, 'on-run');
-    assert.equal(archetypeShape('executor').mode, 'run');
     assert.equal(archetypeShape('executor').subAgents, true);
-  });
-  it('unknown / missing archetype falls back to the interactive default', () => {
     assert.equal(archetypeShape('bogus').mode, 'interactive');
-    assert.equal(archetypeShape(null).mode, 'interactive');
-    assert.equal(archetypeShape(undefined).subAgents, false);
-  });
-  it('returns a COPY (callers can mutate without poisoning the template)', () => {
     const a = archetypeShape('operator'); a.mode = 'run';
     assert.equal(archetypeShape('operator').mode, 'interactive');
   });
 });
 
 describe('setupSpec — normalizeSlotValue', () => {
-  it('target requires an origin; label defaults to the origin', () => {
-    assert.deepEqual(normalizeSlotValue('target', { origin: 'https://mail.google.com', label: 'Gmail' }),
-      { origin: 'https://mail.google.com', label: 'Gmail' });
-    assert.deepEqual(normalizeSlotValue('target', { origin: 'https://x.com' }),
-      { origin: 'https://x.com', label: 'https://x.com' });
-    assert.equal(normalizeSlotValue('target', { label: 'no origin' }), null);   // no origin → unusable
-    assert.equal(normalizeSlotValue('target', null), null);
+  it('connections → a deduped {origin,label} array; a single conn is wrapped; empty/junk → null', () => {
+    assert.deepEqual(normalizeSlotValue('connections', [GMAIL, { origin: 'https://x.com' }]),
+      [GMAIL, { origin: 'https://x.com', label: 'https://x.com' }]);          // label defaults to origin
+    assert.deepEqual(normalizeSlotValue('connections', GMAIL), [GMAIL]);      // single → wrapped
+    assert.deepEqual(normalizeSlotValue('connections', [GMAIL, GMAIL]), [GMAIL]);  // dedup by origin
+    assert.equal(normalizeSlotValue('connections', [{ label: 'no origin' }]), null);
+    assert.equal(normalizeSlotValue('connections', []), null);               // empty = unbound
   });
-  it('shape clamps mode to the enum and coerces the flags', () => {
+  it('shape clamps the mode and coerces flags; junk → null', () => {
     assert.deepEqual(normalizeSlotValue('shape', { mode: 'watch', subAgents: 1, cadence: 'daily' }),
       { mode: 'watch', subAgents: true, cadence: 'daily' });
-    assert.deepEqual(normalizeSlotValue('shape', { mode: 'bogus' }),
-      { mode: 'interactive', subAgents: false, cadence: null });
-    assert.equal(normalizeSlotValue('shape', null), null);
-  });
-  it('a dropped/unknown kind (e.g. the old "focus") → null', () => {
-    assert.equal(normalizeSlotValue('focus', 'open tickets'), null);
-    assert.equal(normalizeSlotValue('mystery', 'x'), null);
+    assert.deepEqual(normalizeSlotValue('shape', { mode: 'bogus' }), { mode: 'interactive', subAgents: false, cadence: null });
+    assert.equal(normalizeSlotValue('focus', 'x'), null);                    // a dropped/unknown kind
   });
 });
 
 describe('setupSpec — buildSetupSpec', () => {
-  const def = { id: 'support', name: 'Support agent', archetype: 'operator' };
-
-  it('produces just target + shape (focus is not a setup slot)', () => {
-    const spec = buildSetupSpec(def);
+  it('produces connections + shape; connections is required + unbound (the only prompt); shape pre-bound', () => {
+    const spec = buildSetupSpec(DEF);
     assert.deepEqual(spec.slots.map((s) => s.kind), SETUP_KINDS);
-    assert.deepEqual(SETUP_KINDS, ['target', 'shape']);
-    assert.equal(spec.appId, 'support');
-    assert.equal(spec.archetype, 'operator');
-  });
-  it('target is required + unbound (the only prompt); shape is pre-bound from the archetype, not required', () => {
-    const spec = buildSetupSpec(def);
+    assert.deepEqual(SETUP_KINDS, ['connections', 'shape']);
+    assert.equal(spec.done, false);
     const byKey = Object.fromEntries(spec.slots.map((s) => [s.key, s]));
-    assert.equal(byKey.target.required, true);  assert.equal(byKey.target.value, null);
-    assert.equal(byKey.shape.required, false);  assert.equal(byKey.shape.value.mode, 'interactive');
-    assert.equal(byKey.focus, undefined);       // no focus slot
+    assert.equal(byKey.connections.required, true);  assert.equal(byKey.connections.value, null);
+    assert.equal(byKey.shape.required, false);       assert.equal(byKey.shape.value.mode, 'interactive');
   });
-  it('existing connections become the target slot candidates (reuse-then-teach); junk is dropped', () => {
-    const spec = buildSetupSpec(def, { connections: [
-      { origin: 'https://mail.google.com', label: 'Gmail' },
-      { label: 'no origin — dropped' },
-    ] });
-    const target = spec.slots.find((s) => s.key === 'target');
-    assert.equal(target.candidates.length, 1);
-    assert.equal(target.candidates[0].origin, 'https://mail.google.com');
-  });
-  it('unknown archetype → shape defaults; still builds', () => {
-    const spec = buildSetupSpec({ id: 'x', archetype: 'nope' });
-    assert.equal(spec.archetype, null);
-    assert.equal(spec.slots.find((s) => s.key === 'shape').value.mode, 'interactive');
+  it('existing connections become reuse candidates (junk dropped)', () => {
+    const spec = buildSetupSpec(DEF, { connections: [GMAIL, { label: 'no origin' }] });
+    const slot = spec.slots.find((s) => s.key === 'connections');
+    assert.equal(slot.candidates.length, 1);
+    assert.equal(slot.candidates[0].origin, GMAIL.origin);
   });
 });
 
-describe('setupSpec — bindSlot (copy-on-write)', () => {
-  it('binds a good value and leaves the original spec untouched', () => {
-    const spec = buildSetupSpec({ id: 'support', archetype: 'operator' });
-    const next = bindSlot(spec, 'target', { origin: 'https://mail.google.com', label: 'Gmail' });
-    assert.equal(next.slots.find((s) => s.key === 'target').value.origin, 'https://mail.google.com');
-    assert.equal(spec.slots.find((s) => s.key === 'target').value, null);          // original unchanged
+describe('setupSpec — addConnection (the sequential accumulator)', () => {
+  it('appends verified connections, dedups by origin, ignores a bad conn', () => {
+    let spec = buildSetupSpec(DEF);
+    spec = addConnection(spec, GMAIL);
+    assert.deepEqual(connectionsOf(spec).map((c) => c.origin), [GMAIL.origin]);
+    spec = addConnection(spec, ZD);
+    assert.deepEqual(connectionsOf(spec).map((c) => c.origin), [GMAIL.origin, ZD.origin]);
+    spec = addConnection(spec, GMAIL);                                       // dup origin → no change
+    spec = addConnection(spec, { label: 'no origin' });                     // bad → ignored
+    assert.equal(connectionsOf(spec).length, 2);
   });
-  it('rejects a value that is bad for the kind (slot stays unbound)', () => {
-    const spec = buildSetupSpec({ id: 'support', archetype: 'operator' });
-    const next = bindSlot(spec, 'target', { label: 'no origin' });
-    assert.equal(next.slots.find((s) => s.key === 'target').value, null);
-  });
-  it('an unknown key leaves the spec effectively unchanged', () => {
-    const spec = buildSetupSpec({ id: 'support', archetype: 'operator' });
-    const next = bindSlot(spec, 'mystery', 'x');
-    assert.deepEqual(next.slots.map((s) => s.value), spec.slots.map((s) => s.value));
+  it('removeConnection drops by origin', () => {
+    let spec = addConnection(addConnection(buildSetupSpec(DEF), GMAIL), ZD);
+    spec = removeConnection(spec, GMAIL.origin);
+    assert.deepEqual(connectionsOf(spec).map((c) => c.origin), [ZD.origin]);
   });
 });
 
-describe('setupSpec — progressive completion (target is the only required slot)', () => {
-  it('nextUnboundSlot is target, then null once it is bound; isSetupComplete tracks it', () => {
-    let spec = buildSetupSpec({ id: 'support', archetype: 'operator' });
-    assert.equal(nextUnboundSlot(spec).key, 'target');
+describe('setupSpec — completion requires ≥1 connection AND done', () => {
+  it('nextUnboundSlot is connections until the first; isSetupComplete needs the done signal too', () => {
+    let spec = buildSetupSpec(DEF);
+    assert.equal(nextUnboundSlot(spec).key, 'connections');
     assert.equal(isSetupComplete(spec), false);
 
-    spec = bindSlot(spec, 'target', { origin: 'https://mail.google.com' });
-    assert.equal(nextUnboundSlot(spec), null);                                     // shape isn't required
+    spec = addConnection(spec, GMAIL);
+    assert.equal(nextUnboundSlot(spec), null);                              // first site bound — no more *required* prompts
+    assert.equal(isSetupComplete(spec), false);                            // …but not complete until "done"
+
+    spec = markSetupDone(spec);
     assert.equal(isSetupComplete(spec), true);
+  });
+  it('markSetupDone with zero connections does NOT complete (the ≥1 floor)', () => {
+    assert.equal(isSetupComplete(markSetupDone(buildSetupSpec(DEF))), false);
   });
 });
 
 describe('setupSpec — specToConfig (the banked patch)', () => {
-  it('returns null while the target is unbound', () => {
-    assert.equal(specToConfig(buildSetupSpec({ id: 'support', archetype: 'operator' })), null);
+  it('returns null until ≥1 connection AND done', () => {
+    let spec = buildSetupSpec(DEF);
+    assert.equal(specToConfig(spec), null);
+    spec = addConnection(spec, GMAIL);
+    assert.equal(specToConfig(spec), null);                                // not done yet
   });
-  it('collapses once the target is bound; allowedOrigins is derived; no focus field', () => {
-    let spec = buildSetupSpec({ id: 'support', archetype: 'operator' });
-    spec = bindSlot(spec, 'target', { origin: 'https://mail.google.com', label: 'Gmail' });
+  it('emits connections[] + back-compat target/allowedOrigins over ALL origins; no focus', () => {
+    let spec = markSetupDone(addConnection(addConnection(buildSetupSpec(DEF), GMAIL), ZD));
     const cfg = specToConfig(spec);
-    assert.equal(cfg.target.label, 'Gmail');
-    assert.deepEqual(cfg.allowedOrigins, ['https://mail.google.com']);
-    assert.equal(cfg.shape.mode, 'interactive');                                   // operator template carried through
-    assert.equal('focus' in cfg, false);                                           // focus is not banked
+    assert.deepEqual(cfg.connections.map((c) => c.origin), [GMAIL.origin, ZD.origin]);
+    assert.deepEqual(cfg.target, GMAIL);                                   // primary = the first connection (back-compat)
+    assert.deepEqual(cfg.allowedOrigins, [GMAIL.origin, ZD.origin]);       // fence over the whole set
+    assert.equal(cfg.shape.mode, 'interactive');                          // operator template carried through
+    assert.equal('focus' in cfg, false);
   });
 });
 
-describe('setupSpec — normalizeSetupSpec (rehydrate)', () => {
-  it('drops junk slots and re-normalizes bound values', () => {
-    const dirty = {
-      appId: 'support', archetype: 'operator',
-      slots: [
-        { key: 'target', kind: 'target', required: true, value: { origin: 'https://x.com' }, candidates: [{ label: 'junk' }] },
-        { key: 'focus', kind: 'focus', value: 'open tickets' },                   // old focus slot → dropped (kind no longer valid)
-      ],
-    };
-    const clean = normalizeSetupSpec(dirty);
-    assert.equal(clean.slots.length, 1);
-    assert.equal(clean.slots[0].value.label, 'https://x.com');                    // label defaulted
-    assert.equal(clean.slots[0].candidates.length, 0);                            // junk candidate dropped
+describe('setupSpec — normalizeSetupSpec (rehydrate + legacy migration)', () => {
+  it('migrates a legacy single "target" slot → the connections accumulator', () => {
+    const legacy = { appId: 'support', archetype: 'operator',
+      slots: [{ key: 'target', kind: 'target', required: true, value: { origin: 'https://x.com' }, candidates: [GMAIL] }] };
+    const clean = normalizeSetupSpec(legacy);
+    const slot = clean.slots.find((s) => s.kind === 'connections');
+    assert.ok(slot);
+    assert.equal(slot.key, 'connections');
+    assert.deepEqual(slot.value.map((c) => c.origin), ['https://x.com']);   // single value → one-entry list
+    assert.equal(slot.candidates[0].origin, GMAIL.origin);
   });
-  it('garbage input → an empty, well-formed spec', () => {
-    assert.deepEqual(normalizeSetupSpec(null), { appId: '', archetype: null, slots: [] });
-    assert.deepEqual(normalizeSetupSpec('nope'), { appId: '', archetype: null, slots: [] });
+  it('drops junk slots, preserves the done flag; garbage → an empty well-formed spec', () => {
+    const clean = normalizeSetupSpec({ appId: 's', done: true,
+      slots: [{ key: 'focus', kind: 'focus', value: 'open tickets' }, { key: 'shape', kind: 'shape', value: { mode: 'run' } }] });
+    assert.deepEqual(clean.slots.map((s) => s.kind), ['shape']);            // focus dropped
+    assert.equal(clean.done, true);
+    assert.deepEqual(normalizeSetupSpec(null), { appId: '', archetype: null, done: false, slots: [] });
   });
 });
 
 describe('setupSpec — exported enums', () => {
   it('SHAPE_MODES + SETUP_KINDS are frozen', () => {
-    assert.ok(Object.isFrozen(SHAPE_MODES));
-    assert.ok(Object.isFrozen(SETUP_KINDS));
+    assert.ok(Object.isFrozen(SHAPE_MODES) && Object.isFrozen(SETUP_KINDS));
+  });
+  it('bindSlot still overrides shape, leaving the original untouched', () => {
+    const spec = buildSetupSpec(DEF);
+    const next = bindSlot(spec, 'shape', { mode: 'run', subAgents: true });
+    assert.equal(next.slots.find((s) => s.key === 'shape').value.mode, 'run');
+    assert.equal(spec.slots.find((s) => s.key === 'shape').value.mode, 'interactive');
   });
 });

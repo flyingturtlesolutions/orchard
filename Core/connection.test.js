@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 import {
   STATUS, probedUser, isAnonUser, identityMatches, assessProbe, rideAction,
-  connectionFromProbe, connectionFreshness, pickRideTab,
+  connectionFromProbe, connectionFreshness, pickRideTab, looksLikeLogin, classifyReachProbe,
 } from './connection.js';
 
 const reply = (user) => ({ success: true, value: { user } });          // a SESSION_FETCH probe reply
@@ -112,6 +112,23 @@ describe('connectionFreshness — reuse without re-probing?', () => {
   it('signed-out / wrong-account is sticky until a fresh probe clears it', () => {
     assert.equal(connectionFreshness({ status: STATUS.SIGNED_OUT, lastVerifiedAt: 1000 }, 1000), STATUS.SIGNED_OUT);
     assert.equal(connectionFreshness({ status: STATUS.WRONG_ACCOUNT, lastVerifiedAt: 1000 }, 1000), STATUS.WRONG_ACCOUNT);
+  });
+});
+
+describe('looksLikeLogin / classifyReachProbe — the generic (no-recipe) verify (AS-4)', () => {
+  it('flags login paths + known IdP hosts; app pages are not login', () => {
+    assert.equal(looksLikeLogin('https://support.deako.com/login'), true);
+    assert.equal(looksLikeLogin('https://x.com/users/sign_in'), true);
+    assert.equal(looksLikeLogin('https://acme.okta.com/app/...'), true);
+    assert.equal(looksLikeLogin('https://accounts.google.com/o/oauth2'), true);
+    assert.equal(looksLikeLogin('https://support.deako.com/hc/en-us/requests'), false);   // a real app page
+    assert.equal(looksLikeLogin(''), false);
+  });
+  it('classifies the final url: connected / signed-out / unreachable', () => {
+    assert.equal(classifyReachProbe({ finalUrl: 'https://support.deako.com/hc/requests' }), 'connected');
+    assert.equal(classifyReachProbe({ finalUrl: 'https://support.deako.com/login?return=/x' }), 'signed-out');
+    assert.equal(classifyReachProbe({ finalUrl: '' }), 'unreachable');
+    assert.equal(classifyReachProbe({ finalUrl: 'not a url' }), 'unreachable');
   });
 });
 
