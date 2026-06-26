@@ -170,6 +170,15 @@ describe('appDef — seed composition + sub-task shape', () => {
     assert.equal(subTaskFromApp(strict, 'x').config.writePolicy, 'never');
   });
 
+  it('CV-4-map — a sub-task INHERITS the app\'s connections (so the child knows which sites it operates on)', () => {
+    const conns = [{ origin: 'https://deako.zendesk.com', label: 'deako.zendesk.com' }];
+    const connected = { ...app, config: { writePolicy: 'gated', connections: conns } };
+    const s = subTaskFromApp(connected, 'ticket #1');
+    assert.equal(s.config.writePolicy, 'gated');
+    assert.deepEqual(s.config.connections, conns);              // carried through (normalizeConfig alone would drop them)
+    assert.equal(subTaskFromApp(app, 'x').config.connections, undefined);   // no parent connections → none added
+  });
+
   it('ONE-LEVEL cap — refuses a sub-task or the Overview as a parent (no sub-sub-tasks)', () => {
     const sub = { id: 'c2', kind: 'app', parentId: 'c1', seed: 'sub' };
     assert.equal(subTaskFromApp(sub, 'deeper'), null);              // parent is a sub-task → refused

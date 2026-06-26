@@ -199,12 +199,17 @@ export function composeSeed(appSeed, subSeed) {
 export function subTaskFromApp(app, subSeed) {
   const a = (app && typeof app === 'object') ? app : null;
   if (!a || !_str(a.id) || !isApp(a)) return null;     // parent must be a real app, not a sub-task / overview
+  // A child INHERITS the app's CONNECTIONS (its connected sites) — they're inherited reach, not a policy to tighten.
+  // normalizeConfig is tighten-only (writePolicy) and would otherwise DROP them, leaving the child ignorant of which
+  // sites the app operates on (a fanned-out "research this ticket" child then asks "which ticketing platform?").
+  const cfg = normalizeConfig(a.config);
+  const conns = (a.config && Array.isArray(a.config.connections)) ? a.config.connections : null;
   return {
     kind: 'app',
     parentId: _str(a.id),
     appId: _str(a.appId) || _str(a.id),
     title: _str(subSeed).slice(0, 60) || 'sub-task',
-    config: normalizeConfig(a.config),
+    config: (conns && conns.length) ? { ...cfg, connections: conns } : cfg,
     seed: composeSeed(a.seed, subSeed),
   };
 }

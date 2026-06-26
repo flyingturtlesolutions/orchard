@@ -96,6 +96,7 @@ export function buildDrawerTree(summaries, { devMode = false, activeId = null, e
             id: s.id, role: 'subtask', title: s.title, icon: s.icon || null, depth: 1,
             hasChildren: false, expanded: false, active: activeId === s.id, count: 0,
             kind: s.kind || 'agent', parentId: c.id, appId: c.appId,
+            summary: s.summary || null,   // CV-4-map — a sub-task's peek (its latest result / "⏳ Working…") so the parent's auto-run is visible per child
           });
         }
       }
