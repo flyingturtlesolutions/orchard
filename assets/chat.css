@@ -14,6 +14,7 @@
   --c-bg-subtle:   #322e26;         /* hover, message backgrounds */
   --c-border:      #3a3530;
   --c-border-soft: #2c2825;
+  --c-scrollbar:   #16130f;         /* v2.74.1258 — webkit scrollbar thumb: a shade darker than --c-bg (chat body) */
 
   --c-text:         #e8e3d8;        /* warm off-white, easier on eyes than pure white */
   --c-text-muted:   #b5ad9d;
@@ -412,19 +413,25 @@ textarea {
   flex-direction: column;
 }
 
-/* Custom scrollbar — subtle, warm */
-.thread::-webkit-scrollbar {
+/* Custom scrollbar — subtle, warm. v2.74.1258 — thumb a SHADE DARKER than the chat body (--c-scrollbar),
+   lifting to a grabbable border tone on hover; shared by the Thread (chat body) and the Rail list so both
+   match the theme. */
+.thread::-webkit-scrollbar,
+.rail-list::-webkit-scrollbar {
   width: 8px;
 }
-.thread::-webkit-scrollbar-track {
+.thread::-webkit-scrollbar-track,
+.rail-list::-webkit-scrollbar-track {
   background: transparent;
 }
-.thread::-webkit-scrollbar-thumb {
-  background: var(--c-border);
+.thread::-webkit-scrollbar-thumb,
+.rail-list::-webkit-scrollbar-thumb {
+  background: var(--c-scrollbar);
   border-radius: var(--r-full);
 }
-.thread::-webkit-scrollbar-thumb:hover {
-  background: var(--c-text-subtle);
+.thread::-webkit-scrollbar-thumb:hover,
+.rail-list::-webkit-scrollbar-thumb:hover {
+  background: var(--c-border);
 }
 
 /* ── DBR-6 (v2.74.1039) — dev-conversation branch-status header ──────────────
@@ -1533,10 +1540,12 @@ textarea {
 }
 
 /* v2.74.1217 — the app-row "quick peek": up to 3 lines of the conversation's recent direction, under the name.
-   Muted + line-clamped; the row is flex-column so it stacks between the title and the timestamp. */
+   Muted + line-clamped; the row is flex-column so it stacks between the title and the timestamp.
+   v2.74.1259 — bolder weight for readability (the #3 card restyle was reverted; just heavier text). */
 .rail-item-summary {
   font-size: 11px;
   line-height: 1.35;
+  font-weight: 600;
   color: var(--c-text-muted);   /* v2.74.1228 — one shade brighter than the timestamp (.rail-item-meta stays --c-text-subtle) */
   display: -webkit-box;
   -webkit-box-orient: vertical;

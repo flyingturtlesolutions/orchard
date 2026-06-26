@@ -32,19 +32,19 @@ export function peekText(body) {
  * system/thinking/empty messages. The cap is generous (the drawer clamps to 3 lines, expanding to the full text on
  * hover — so this is the hover payload).
  */
-export function conversationPeek(messages, { maxChars = 400 } = {}) {
+export function conversationPeek(messages, { maxChars = 4000 } = {}) {   // v2.74.1258 — generous so the hover expand shows the ENTIRE last message; a safety bound (index bloat), not a display limit
   const list = Array.isArray(messages) ? messages : [];
   for (let i = list.length - 1; i >= 0; i--) {            // the last LLM reply wins
     const m = list[i];
     if (!m || m.role !== 'assistant') continue;
     const text = peekText(m.body);
-    if (text) return text.slice(0, maxChars);
+    if (text) return text.length > maxChars ? text.slice(0, maxChars).replace(/\s+$/, '') + '…' : text;
   }
   for (let i = list.length - 1; i >= 0; i--) {            // none yet → the last user ask, so the card isn't blank
     const m = list[i];
     if (!m || m.role !== 'user') continue;
     const text = peekText(m.body);
-    if (text) return text.slice(0, maxChars);
+    if (text) return text.length > maxChars ? text.slice(0, maxChars).replace(/\s+$/, '') + '…' : text;
   }
   return '';
 }
