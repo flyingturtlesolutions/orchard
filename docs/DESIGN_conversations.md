@@ -2,7 +2,7 @@
 
 **Status:** DESIGN — **CV-1…6 BUILT** (v2.74.1160–1183: schema, seed→IL, accordion + gallery, sub-task spawn, custom apps, writePolicy). **Model ENRICHED 2026-06-24** (§6A): setup-for-**every**-app, capabilities-and-connectors-are-**global**, the **six app dimensions**, target≡connection, session-ride tooling, and the **goal-directed learning model** (`DESIGN_apps_learning.md`). The original §1–§13 are the shipped structure; §6A is the configured-app model layered on top (it supersedes "the prompt is the only variable" and "questionnaire only for custom apps"). Sibling to `DESIGN_connectors.md` (the tool lattice) + `DESIGN_apps_learning.md` (how an app learns toward its goal).
 
-**One line:** every conversation is the one inference layer (IL) wearing a prompt; an **app** is that IL configured for a goal (a **seed prompt** + light config), picked from a gallery and kept as a drawer track. The prompt is the only thing that varies — tools, router, and safety gates are uniform.
+**One line:** every conversation is the one inference layer (IL) wearing a prompt; an **app** is that IL configured for a goal (a **seed prompt** + light config), picked from a gallery and kept as a **Rail** track (the Rail = the conversation-navigation pane; §7.1). The prompt is the only thing that varies — tools, router, and safety gates are uniform.
 
 **Rejected (don't let it creep back):** a second "global/coordinator" engine, a fleet roster, per-conversation capability boundaries, authority envelopes, autonomy classes. All of that collapses into *the prompt* + the *uniform* gate. The model is deliberately flat.
 
@@ -26,7 +26,7 @@ This is *why* "an app is just the IL configured" holds: every app runs the same 
 
 You chat at **any level** — Overview, an app, or one of its sub-tasks. All the **same IL**, just a different prompt (§6).
 
-**Visual uniform, semantically split (don't conflate).** The drawer renders one **flush-left accordion** (§7): Overview, apps under it, sub-tasks under each app. But the two edges differ in kind:
+**Visual uniform, semantically split (don't conflate).** The **Rail** renders one **flush-left accordion** (§7): Overview, apps under it, sub-tasks under each app. But the two edges differ in kind:
 - **app → sub-task = inheritance** — the sub-task's prompt *composes* the app's seed (§6); the app owns and can read across its children.
 - **Overview → app = navigation only** — apps keep their own seeds and stay portable/shareable; the Overview neither seeds nor (in v1) coordinates them. "Overview = parent of apps" is true for *grouping*, false for *inheritance*.
 
@@ -167,12 +167,24 @@ closed loop turning on the app's targets.
 ## 7. UI — the flush-left accordion + gallery
 
 - **Default = the Overview chat:** centered "How can I help you today?", bottom input, header unchanged. The current simple view; nothing new for a first-time user.
-- **Drawer** (`#history-sidebar`) = one **flush-left accordion, no indentation**: **Overview** at the root, **apps** under it, an app's **sub-tasks** under it; then a **New app** entry. Hierarchy is read *without indenting* — every label aligns at the same left edge — from: the **chevron** (Overview + apps expand; sub-tasks are chevron-less leaves), the **glyph** (home · archetype icon · dot), **weight**, and a **bounding box** around an expanded app.
+- **Rail** (`#rail`) = one **flush-left accordion, no indentation**: **Overview** at the root, **apps** under it, an app's **sub-tasks** under it; then a **New app** entry. Hierarchy is read *without indenting* — every label aligns at the same left edge — from: the **chevron** (Overview + apps expand; sub-tasks are chevron-less leaves), the **glyph** (home · archetype icon · dot), **weight**, and a **bounding box** around an expanded app.
 - **Chat at any level by tapping its label** (Overview · app · sub-task); the chevron expands/collapses. The active row is highlighted; a count pill previews an app's sub-task load; a leaf can still flag status ("needs you").
-- **New app → the gallery:** the main window shows cards — builtin apps + a blank **Custom** card — reusing the task-card component. Selecting → copy-on-add → a new app → drawer.
+- **New app → the gallery:** the main window shows cards — builtin apps + a blank **Custom** card — reusing the task-card component. Selecting → copy-on-add → a new app → Rail.
 - **Fan-out is visible, not hidden:** "for each ticket…" produces the app's **sub-task rows** (the connector autonomous arc, `DESIGN_connectors.md` §13 / CX-4c), enterable — not a hidden internal loop and not a separate roster.
 - **The IL drives all of it** (open gallery, create app, switch, expand) via self-domain ACT builtins (`Core/palette.js` — extends `NEW_CONVERSATION` / `OPEN_HISTORY`).
 - **Edit the seed:** an identity affordance on the conversation; immediate effect (decision #8).
+
+### 7.1 The three panes — Rail · Thread · Canvas
+
+The conversation experience is three **panes** (the canonical UI names — *not* "surfaces"; that word is taken by `DESIGN_surfaces.md` for an agent's *altitude*):
+
+| Pane | Anchor | Plane | Role (one verb) |
+|---|---|---|---|
+| **Rail** | `#rail` (was `#history-sidebar`) | control | **navigate** — the flush-left accordion (Overview · apps · sub-tasks) |
+| **Thread** | `#thread` (was `#conversation`) | control | **converse** — the conversation transcript + input |
+| **Canvas** | `canvas.html` | presentation | **present** — the app's optional rich render target (`DESIGN_canvas.md`) |
+
+Flow: **navigate → converse → present** — pick a track in the **Rail**, drive its **Thread**, rich output renders to the **Canvas**. Rail + Thread live in the panel (the **control plane**); the Canvas is its own tab (the **presentation plane**). "Conversation" stays the *entity* (`ConversationStore`, `conversationId`); the **Thread** is only its *visible transcript*. *(Baked into code v2.74.1257: the `history-*` DOM/CSS family → `rail-*`, `#conversation` → `#thread`, `Core/drawerTree.js` → `Core/railTree.js` / `buildRailTree`. The "drawer" word now means only the **capability picker** + page disclosure-drawers — never this pane.)*
 
 ## 8. Safety — uniform gates, tighten-only config, soft archetype
 

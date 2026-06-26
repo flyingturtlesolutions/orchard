@@ -10,7 +10,7 @@
 
   <!-- ── App header ─────────────────────────────────────────────────────── -->
   <header class="app-header">
-    <button class="icon-btn" id="btn-history" title="Conversation history">
+    <button class="icon-btn" id="btn-rail" title="Conversation history">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <line x1="3" y1="6" x2="21" y2="6"/>
         <line x1="3" y1="12" x2="21" y2="12"/>
@@ -73,16 +73,16 @@
   -->
   <div class="running-bar hidden" id="running-bar"></div>
 
-  <!-- ── App body (v2.74.1030): the conversation drawer is now an INLINE left-push panel, not a fixed
+  <!-- ── App body (v2.74.1030): the Rail is now an INLINE left-push panel, not a fixed
        slide-over with a dark backdrop. It opens beneath the header inside this flex row and the chat column
-       shrinks to make room — so the chat + input stay visible and usable while the drawer is open. -->
+       shrinks to make room — so the chat + input stay visible and usable while the Rail is open. -->
   <div class="app-body" id="app-body">
 
-  <!-- ── Conversation drawer (left; pushes the chat column) ─────────────── -->
-  <aside class="history-sidebar" id="history-sidebar">
-    <div class="history-sidebar-inner">
-    <div class="history-header">
-      <span class="history-title">Conversations</span>
+  <!-- ── Rail — conversation navigation (left; pushes the Thread column) ─────────────── -->
+  <aside class="rail" id="rail">
+    <div class="rail-inner">
+    <div class="rail-header">
+      <span class="rail-title">Conversations</span>
       <button class="icon-btn" id="btn-delete-all-conversations" title="Delete all conversations">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="3 6 5 6 21 6"/>
@@ -90,7 +90,7 @@
           <path d="M10 11v6M14 11v6"/>
         </svg>
       </button>
-      <button class="icon-btn" id="btn-close-history" title="Close">
+      <button class="icon-btn" id="btn-close-rail" title="Close">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <line x1="18" y1="6" x2="6" y2="18"/>
           <line x1="6" y1="6" x2="18" y2="18"/>
@@ -98,12 +98,12 @@
       </button>
     </div>
     <!-- CV-3c (v2.74.1170) — the legacy "New app" top button (btn-new-conversation) was REMOVED: the accordion's
-         own "New app" entry (rendered at the bottom of #history-list by _historyNewAppRow → the gallery) is the
+         own "New app" entry (rendered at the bottom of #rail-list by _historyNewAppRow → the gallery) is the
          single canonical entry, so this top button was a duplicate. The dev/design entries below stay (dev-gated). -->
     <!-- v2.74.1029 — New dev conversation: a dedicated Claude Code thread. The click requests the
          nativeMessaging permission (replacing `dev: on`) and opens a kind:'dev' conversation where typed
          messages route to Claude Code with no `dev:` prefix. Strippable with the dev-bridge module. -->
-    <button class="history-new-btn history-new-dev-btn" id="btn-new-dev-conversation" title="Chat with Claude Code on this repo" style="display:none">
+    <button class="rail-new-btn rail-new-dev-btn" id="btn-new-dev-conversation" title="Chat with Claude Code on this repo" style="display:none">
       <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <polyline points="16 18 22 12 16 6"/>
         <polyline points="8 6 2 12 8 18"/>
@@ -112,22 +112,22 @@
     </button>
     <!-- surfaces §2.2 — New DESIGN conversation: the same Claude Code thread at a HIGH (conceptual / architecture)
          altitude. Sets conversation.surface='high' so the host injects the design preamble; `surface high|low` re-picks it. -->
-    <button class="history-new-btn history-new-design-btn" id="btn-new-design-conversation" title="Claude Code at a high-level / design altitude" style="display:none">
+    <button class="rail-new-btn rail-new-design-btn" id="btn-new-design-conversation" title="Claude Code at a high-level / design altitude" style="display:none">
       <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>
       </svg>
       <span>New design</span>
     </button>
-    <div class="history-list" id="history-list">
-      <div class="history-empty">No conversations yet.</div>
+    <div class="rail-list" id="rail-list">
+      <div class="rail-empty">No conversations yet.</div>
     </div>
-    </div><!-- /.history-sidebar-inner -->
+    </div><!-- /.rail-inner -->
   </aside>
 
   <!-- ── Chat column: conversation + input (shrinks when the drawer opens) ─ -->
   <div class="chat-main" id="chat-main">
-  <!-- ── Main conversation area ─────────────────────────────────────────── -->
-  <main class="conversation" id="conversation">
+  <!-- ── Thread — the conversation transcript ─────────────────────────────────────────── -->
+  <main class="thread" id="thread">
     <!-- DBR-6 (v2.74.1039) — dev-conversation branch-status header. Panel-only (injection-boundary rule:
          nothing here touches the page). Hidden for agent conversations; shown + populated by chat.js
          (_renderDevStatusHeader) only while a dev conversation is active. -->
@@ -157,9 +157,9 @@
   </div><!-- /.app-body -->
 
   <!-- ── Input area (v2.74.1207) ────────────────────────────────────────────
-       Moved OUT of .app-body to a body-level row, so the conversation drawer —
+       Moved OUT of .app-body to a body-level row, so the Rail —
        which now overlays .app-body at FULL panel width — never covers it. The
-       input stays visible (its own width + height) whenever the drawer is open. -->
+       input stays visible (its own width + height) whenever the Rail is open. -->
   <div class="input-area">
     <div class="input-container">
       <!-- Slash command picker — shown when input starts with / -->

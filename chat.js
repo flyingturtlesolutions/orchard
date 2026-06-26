@@ -33,7 +33,7 @@ import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch plan
 import { recipeLegs, coerceParams } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775
 import { renderConnectorLines, itemLabels } from './Core/connectorRender.js';   // CX-4c — generic render of ANY connector read (not just tickets); CV-4-full — itemLabels: read list → fan-out labels
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
-import { buildDrawerTree } from './Core/drawerTree.js';   // CV-3c — the pure flush-left accordion model
+import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
 import { planSubTasks, subTaskFromApp, classifyAskToGrid, isConfiguredDef, OVERVIEW_ID } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app)
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-app write gate (read-only enforcement)
 import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps; AP-4 — configuredAppDefinition (mint a durable, re-creatable app from a set-up instance)
@@ -96,7 +96,7 @@ async function _ensureConversation() {
   _ensureConversationPromise = (async () => {
     const conv = await _ensureOverviewConversation();   // v2.74.1234 — a raw chat with no active conversation IS the general-assistant Overview thread (not a throwaway)
     _currentConversationId = conv.id;
-    _refreshHistoryIfOpen().catch(() => {});   // v2.74.1042 — show the just-minted conversation in an open drawer
+    _refreshRailIfOpen().catch(() => {});   // v2.74.1042 — show the just-minted conversation in an open drawer
     return conv.id;
   })();
   try {
@@ -137,7 +137,7 @@ async function _maybeGenerateTitle() {
     const title = await ChatAPI.generateTitle(firstUserMsg.body);
     if (title) {
       await ConversationStore.setTitle(_currentConversationId, title);
-      await _refreshHistoryIfOpen();   // v2.74.1042 — replace the placeholder title in an open drawer
+      await _refreshRailIfOpen();   // v2.74.1042 — replace the placeholder title in an open drawer
     }
   } catch (err) {
     console.warn('[chat] title generation failed:', err.message);
@@ -216,7 +216,7 @@ $('btn-new-design-conversation')?.addEventListener('click', () => { _startDevCon
 // v2.74.1160 — Dev mode gate. The Studio "Enable dev mode" toggle (settings:devMode) controls whether dev &
 // design conversations (both kind:'dev', surface high|low — Claude Code threads) are visible/active in the panel.
 // Off by default → a clean end-user view. We hide the New dev / New design entry buttons and filter the drawer
-// (_renderHistoryList). Cross-context: a Studio toggle reflects here live via storage.onChanged.
+// (_renderRailList). Cross-context: a Studio toggle reflects here live via storage.onChanged.
 function _applyDevModeVisibility() {
   for (const id of ['btn-new-dev-conversation', 'btn-new-design-conversation']) {
     const el = $(id);
@@ -232,7 +232,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !changes['settings:devMode']) return;
   _devModeEnabled = changes['settings:devMode'].newValue === true;
   _applyDevModeVisibility();
-  _renderHistoryList();
+  _renderRailList();
   // Switched OFF while a dev/design conversation is open → drop back to a fresh agent surface (not visible/active).
   if (!_devModeEnabled && _currentConversationKind === 'dev') {
     _clearCurrentConversation();
@@ -264,7 +264,7 @@ async function _startDevConversation(surface = 'low') {
   _currentConversationId = conv.id;
   _currentConversationKind = 'dev';
   _showDevEmptyState();
-  await _renderHistoryList();   // v2.74.1031 — keep the drawer open; show the new conversation highlighted
+  await _renderRailList();   // v2.74.1031 — keep the drawer open; show the new conversation highlighted
   $('chat-input').focus();
 }
 
@@ -425,12 +425,12 @@ async function _editDevConcern(convId, current) {
 
 // v2.74.1030 — the drawer is an inline push panel now, so the header button TOGGLES it (open ↔ close)
 // rather than only opening — there's no dark backdrop to click away.
-$('btn-history').addEventListener('click', async () => {
-  if ($('history-sidebar').classList.contains('open')) { _closeHistory(); return; }
-  await _openHistory();
+$('btn-rail').addEventListener('click', async () => {
+  if ($('rail').classList.contains('open')) { _closeRail(); return; }
+  await _openRail();
 });
 
-$('btn-close-history').addEventListener('click', _closeHistory);
+$('btn-close-rail').addEventListener('click', _closeRail);
 // v2.74.1030 — the dark click-to-close overlay is gone (the drawer pushes the chat instead of covering it).
 
 // Delete ALL conversations from the history menu (confirm first; this can't be undone). Wipes the active
@@ -444,16 +444,16 @@ $('btn-delete-all-conversations').addEventListener('click', async () => {
   _clearCurrentConversation();
   _resetConversation();
   await renderSuggestionCards();
-  await _renderHistoryList();
+  await _renderRailList();
 });
 
-async function _openHistory() {
-  await _renderHistoryList();
-  $('history-sidebar').classList.add('open');   // width 0 → drawer-w (chat column shrinks alongside)
+async function _openRail() {
+  await _renderRailList();
+  $('rail').classList.add('open');   // width 0 → drawer-w (chat column shrinks alongside)
 }
 
-function _closeHistory() {
-  $('history-sidebar').classList.remove('open');
+function _closeRail() {
+  $('rail').classList.remove('open');
 }
 
 // v2.74.1042 — Refresh the drawer list IF it's currently open. The drawer otherwise re-renders only
@@ -461,17 +461,17 @@ function _closeHistory() {
 // or re-titled after the first reply (_maybeGenerateTitle) was persisted + indexed yet stayed invisible
 // in an already-open drawer until it was closed and reopened — the reported "runs but doesn't appear"
 // bug. Guarded by .open so a closed drawer pays nothing on the hot send path.
-async function _refreshHistoryIfOpen() {
-  _updateHistoryActionDot();   // v2.74.1094 — the "needs you" dot rides the toggle button, visible even when the drawer is closed
-  if ($('history-sidebar')?.classList.contains('open')) await _renderHistoryList();
+async function _refreshRailIfOpen() {
+  _updateRailActionDot();   // v2.74.1094 — the "needs you" dot rides the toggle button, visible even when the drawer is closed
+  if ($('rail')?.classList.contains('open')) await _renderRailList();
 }
 
 // v2.74.1249 — REVEAL the conversations drawer: open it if closed, then render. Called wherever an ASK adds/removes
-// apps/conversations (fan-out, sub-task spawn) so the change is actually visible — unlike _refreshHistoryIfOpen,
+// apps/conversations (fan-out, sub-task spawn) so the change is actually visible — unlike _refreshRailIfOpen,
 // which is a deliberate no-op on a CLOSED drawer and so left freshly-spawned children hidden behind it.
-async function _revealDrawer() {
-  _updateHistoryActionDot();
-  await _openHistory();   // _renderHistoryList() + .add('open'); classList.add is idempotent when already open
+async function _revealRail() {
+  _updateRailActionDot();
+  await _openRail();   // _renderRailList() + .add('open'); classList.add is idempotent when already open
 }
 
 // ── v2.74.1094 — per-conversation dev-run status in the drawer ───────────────────────────────────────────────
@@ -498,77 +498,77 @@ function _setConvProcessing(id, on) {
   if (!id) return;
   const had = _processingConvIds.has(id);
   if (on) _processingConvIds.add(id); else _processingConvIds.delete(id);
-  if (_processingConvIds.has(id) !== had) _refreshHistoryIfOpen().catch(() => {});   // reflect the change in an open drawer
+  if (_processingConvIds.has(id) !== had) _refreshRailIfOpen().catch(() => {});   // reflect the change in an open drawer
 }
 function _setItemMeta(item) {
-  const metaEl = item?.querySelector?.('.history-item-meta');
+  const metaEl = item?.querySelector?.('.rail-item-meta');
   if (!metaEl) return 'idle';
   const st = item.dataset.kind === 'dev' ? _devRunStatus(item.dataset.conversationId) : { state: 'idle' };
   // v2.74.1226 — a conversation with an in-flight reply shows "● working…" (non-dev rows; dev rows have run-status).
   if (item.dataset.kind !== 'dev' && item.dataset.conversationId && _processingConvIds.has(item.dataset.conversationId)) {
-    metaEl.className = 'history-item-meta run-status running working';
+    metaEl.className = 'rail-item-meta run-status running working';
     metaEl.textContent = '● working…';
     return 'busy';
   }
   if (st.state === 'awaiting') {
-    metaEl.className = 'history-item-meta run-status awaiting';
+    metaEl.className = 'rail-item-meta run-status awaiting';
     metaEl.textContent = '⚠ needs you';
   } else if (st.state === 'running') {
-    metaEl.className = 'history-item-meta run-status running';
+    metaEl.className = 'rail-item-meta run-status running';
     metaEl.textContent = `▶ running… ${_fmtElapsed((Date.now() - (Number(st.startedAt) || Date.now())) / 1000)}`;
   } else if (st.state === 'done') {
-    metaEl.className = 'history-item-meta run-status done';
+    metaEl.className = 'rail-item-meta run-status done';
     metaEl.textContent = `✓ done · ${relTime(Number(st.at) || Date.now())}`;
   } else if (st.state === 'failed') {
-    metaEl.className = 'history-item-meta run-status done failed';
+    metaEl.className = 'rail-item-meta run-status done failed';
     metaEl.textContent = `✗ failed · ${relTime(Number(st.at) || Date.now())}`;
   } else if (st.state === 'paused') {
-    metaEl.className = 'history-item-meta run-status paused';
+    metaEl.className = 'rail-item-meta run-status paused';
     metaEl.textContent = `⏸ paused · ${relTime(Number(st.at) || Date.now())}`;
   } else {
-    metaEl.className = 'history-item-meta';
+    metaEl.className = 'rail-item-meta';
     metaEl.textContent = relTime(Number(item.dataset.updated) || Date.now());
   }
   return st.state;
 }
-function _updateHistoryActionDot() {
-  const btn = $('btn-history');
+function _updateRailActionDot() {
+  const btn = $('btn-rail');
   if (!btn) return;
   let awaiting = false;
   try { awaiting = !!_getDevBridge()?.anyAwaiting?.(); } catch { /* */ }
   btn.classList.toggle('needs-action', awaiting);
 }
-let _drawerStatusTimer = null;
-function _startDrawerStatusTimer() {
-  if (_drawerStatusTimer) return;
-  _drawerStatusTimer = setInterval(() => {
-    if (!$('history-sidebar')?.classList.contains('open')) { _stopDrawerStatusTimer(); return; }
+let _railStatusTimer = null;
+function _startRailStatusTimer() {
+  if (_railStatusTimer) return;
+  _railStatusTimer = setInterval(() => {
+    if (!$('rail')?.classList.contains('open')) { _stopRailStatusTimer(); return; }
     let anyActive = false;
-    document.querySelectorAll('#history-list .history-item').forEach((item) => { const s = _setItemMeta(item); if (s === 'running' || s === 'awaiting' || s === 'busy') anyActive = true; });
-    if (!anyActive) _stopDrawerStatusTimer();
+    document.querySelectorAll('#rail-list .rail-item').forEach((item) => { const s = _setItemMeta(item); if (s === 'running' || s === 'awaiting' || s === 'busy') anyActive = true; });
+    if (!anyActive) _stopRailStatusTimer();
   }, 1000);
 }
-function _stopDrawerStatusTimer() { if (_drawerStatusTimer) { clearInterval(_drawerStatusTimer); _drawerStatusTimer = null; } }
+function _stopRailStatusTimer() { if (_railStatusTimer) { clearInterval(_railStatusTimer); _railStatusTimer = null; } }
 
 let _expandedApps = new Set();   // CV-3c — which app rows are expanded in the drawer accordion (collapsed by default)
 
-async function _renderHistoryList() {
-  const container = $('history-list');
+async function _renderRailList() {
+  const container = $('rail-list');
   container.innerHTML = '';
 
   const all = await ConversationStore.list();
-  // CV-3c (v2.74.1168, DESIGN_conversations.md §7) — render the flush-left ACCORDION (Core/drawerTree.js): an
+  // CV-3c (v2.74.1168, DESIGN_conversations.md §7) — render the flush-left ACCORDION (Core/railTree.js): an
   // Overview pin → apps → (when expanded) their sub-tasks → a New-app entry. The dev-filter, the per-row
   // preview/delete/run-status, and the active highlight are all preserved; only the ORDER + grouping + the
   // Overview/New-app pins are new. Hierarchy is glyph + chevron + weight, NEVER indentation.
-  const rows = buildDrawerTree(all, { devMode: _devModeEnabled, activeId: _currentConversationId, expanded: _expandedApps });
+  const rows = buildRailTree(all, { devMode: _devModeEnabled, activeId: _currentConversationId, expanded: _expandedApps });
   const byId = new Map(all.map((c) => [c.id, c]));
 
   // surfaces-§4.5 (preview-as-selection) — the drawer-level "Preview main" control, shown once when dev rows are visible.
   if (_devModeEnabled && all.some((c) => c && c.kind === 'dev')) {
     const bar = document.createElement('div');
-    bar.className = 'history-preview-main';
-    bar.innerHTML = '<button class="history-preview-main-btn" title="Point the live build back at main (reloads the panel)">↩ Preview main</button>';
+    bar.className = 'rail-preview-main';
+    bar.innerHTML = '<button class="rail-preview-main-btn" title="Point the live build back at main (reloads the panel)">↩ Preview main</button>';
     bar.querySelector('button').addEventListener('click', () => { try { _getDevBridge()?.previewMain?.(); } catch { /* */ } });
     container.appendChild(bar);
   }
@@ -583,13 +583,13 @@ async function _renderHistoryList() {
   // v2.74.1094 — apply each conversation's live run status to its meta line + flip the toggle's "needs you" dot;
   // tick a 1s timer while any run is active so the elapsed updates live. (Pins have no conversationId → skipped.)
   let anyActive = false;
-  container.querySelectorAll('.history-item').forEach((item) => { if (!item.dataset.conversationId) return; const s = _setItemMeta(item); if (s === 'running' || s === 'awaiting' || s === 'busy') anyActive = true; });
-  _updateHistoryActionDot();
-  if (anyActive) _startDrawerStatusTimer(); else _stopDrawerStatusTimer();
+  container.querySelectorAll('.rail-item').forEach((item) => { if (!item.dataset.conversationId) return; const s = _setItemMeta(item); if (s === 'running' || s === 'awaiting' || s === 'busy') anyActive = true; });
+  _updateRailActionDot();
+  if (anyActive) _startRailStatusTimer(); else _stopRailStatusTimer();
 }
 
 // v2.74.1223 (message-input redesign) — a row's own action buttons; their handlers run instead of select/open.
-const _isRowActionTarget = (e) => !!(e.target.closest('.history-item-delete') || e.target.closest('.history-item-preview') || e.target.closest('.history-chevron') || e.target.closest('.history-item-subtask'));
+const _isRowActionTarget = (e) => !!(e.target.closest('.rail-item-delete') || e.target.closest('.rail-item-preview') || e.target.closest('.rail-chevron') || e.target.closest('.rail-item-subtask'));
 
 // v2.74.1223 — SINGLE-click: SELECT a conversation as the message-input target WITHOUT closing the drawer. The drawer
 // stays open as a live multi-conversation surface (its row highlights `active`, the input now routes here, and a reply
@@ -599,7 +599,7 @@ async function _selectConvForInput(conv) {
   if (_activeInvocations.size > 0 && !confirm('Active invocations are in progress. Switch the input target anyway?')) return;
   const full = await ConversationStore.load(conv.id);
   if (full) { await _rehydrateConversation(full); await _resumeRunningInvocations(); }
-  await _renderHistoryList();   // re-highlight the selected row; the drawer STAYS open
+  await _renderRailList();   // re-highlight the selected row; the drawer STAYS open
 }
 
 // v2.74.1223 — DOUBLE-click: open a conversation's FULL timeline — load it (if not already selected) + CLOSE the drawer.
@@ -610,8 +610,8 @@ async function _openConvFullTimeline(conv) {
     const full = await ConversationStore.load(conv.id);
     if (full) { await _rehydrateConversation(full); await _resumeRunningInvocations(); }
   }
-  await _renderHistoryList();
-  _closeHistory();
+  await _renderRailList();
+  _closeRail();
 }
 
 
@@ -619,10 +619,10 @@ async function _openConvFullTimeline(conv) {
 // (keep the drawer open); double-click → resume + open the full timeline (close the drawer). (.1223)
 function _historyPinRow(row) {
   const el = document.createElement('div');
-  el.className = `history-item history-overview${row.active ? ' active' : ''}`;
+  el.className = `rail-item rail-overview${row.active ? ' active' : ''}`;
   // v2.74.1219 — the Overview "pick up where you left off" peek = the last active conversation's summary (drawerTree).
-  const summaryLine = row.summary ? `<div class="history-item-summary">${escHtml(row.summary)}</div>` : '';
-  el.innerHTML = `<div class="history-item-title"><span class="history-glyph" aria-hidden="true">⌂</span>${escHtml(row.title)}</div>${summaryLine}`;
+  const summaryLine = row.summary ? `<div class="rail-item-summary">${escHtml(row.summary)}</div>` : '';
+  el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">⌂</span>${escHtml(row.title)}</div>${summaryLine}`;
   // v2.74.1234 — Overview is a REAL persistent conversation: clicking it LOADS its own thread (its history) and closes
   // the drawer. An empty Overview shows the general-assistant home (suggestion cards), but pinned to the thread so
   // chatting appends to it.
@@ -637,8 +637,8 @@ function _historyPinRow(row) {
       _resetConversation();
       await renderSuggestionCards();
     }
-    await _renderHistoryList();
-    _closeHistory();
+    await _renderRailList();
+    _closeRail();
   });
   return el;
 }
@@ -646,9 +646,9 @@ function _historyPinRow(row) {
 // CV-3c — the New-app entry: opens the gallery (DESIGN_conversations.md §7). Closes the drawer so the cards show.
 function _historyNewAppRow() {
   const el = document.createElement('div');
-  el.className = 'history-item history-new-app';
-  el.innerHTML = `<div class="history-item-title"><span class="history-glyph" aria-hidden="true">＋</span>New app</div>`;
-  el.addEventListener('click', () => { _closeHistory(); _renderAppGallery(); });
+  el.className = 'rail-item rail-new-app';
+  el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">＋</span>New app</div>`;
+  el.addEventListener('click', () => { _closeRail(); _renderAppGallery(); });
   return el;
 }
 
@@ -657,57 +657,57 @@ function _historyNewAppRow() {
 // No indentation — depth is conveyed by glyph + chevron + weight, per §7. `row` carries the accordion flags.
 function _historyConvRow(conv, row) {
   const isDev = conv.kind === 'dev';
-  const badge = isDev ? (conv.surface === 'high' ? '<span class="history-item-badge design">design</span>' : '<span class="history-item-badge">dev</span>')
-                      : '<span class="history-item-badge app">app</span>';
+  const badge = isDev ? (conv.surface === 'high' ? '<span class="rail-item-badge design">design</span>' : '<span class="rail-item-badge">dev</span>')
+                      : '<span class="rail-item-badge app">app</span>';
   const item = document.createElement('div');
-  item.className = ['history-item', row.active ? 'active' : '', isDev ? 'dev' : 'app',
+  item.className = ['rail-item', row.active ? 'active' : '', isDev ? 'dev' : 'app',
     row.role === 'app' ? 'is-app' : '', row.role === 'subtask' ? 'is-subtask' : '',
     (row.role === 'app' && row.hasChildren) ? 'has-children' : ''].filter(Boolean).join(' ');
   item.dataset.conversationId = conv.id;
   item.dataset.kind = isDev ? 'dev' : 'app';
   item.dataset.updated = String(conv.updatedAt || conv.createdAt || Date.now());
 
-  const leaf = row.role === 'subtask' ? '<span class="history-glyph leaf" aria-hidden="true">•</span>' : '';
+  const leaf = row.role === 'subtask' ? '<span class="rail-glyph leaf" aria-hidden="true">•</span>' : '';
   const chevron = (row.role === 'app' && row.hasChildren)
-    ? `<button class="history-chevron" title="${row.expanded ? 'Collapse sub-tasks' : 'Expand sub-tasks'}" aria-label="Toggle sub-tasks">${row.expanded ? '▾' : '▸'} ${row.count}</button>`
+    ? `<button class="rail-chevron" title="${row.expanded ? 'Collapse sub-tasks' : 'Expand sub-tasks'}" aria-label="Toggle sub-tasks">${row.expanded ? '▾' : '▸'} ${row.count}</button>`
     : '';
-  const previewBtn = isDev ? `<button class="history-item-preview" title="Load this branch into the live build (reloads the panel)">
+  const previewBtn = isDev ? `<button class="rail-item-preview" title="Load this branch into the live build (reloads the panel)">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
         </svg>
       </button>` : '';
   // AP-2 (v2.74.1213) — a "+" on an app row starts a sub-conversation under it (the spawn concept, surfaced as an icon).
   const subtaskBtn = row.role === 'app'
-    ? `<button class="history-item-subtask" title="New sub-conversation"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`
+    ? `<button class="rail-item-subtask" title="New sub-conversation"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`
     : '';
   // v2.74.1217 — a 3-line "quick peek" at the conversation's recent direction, shown UNDER the name. row.summary is
   // the index-mirrored recent-activity peek (untrusted message text → escHtml; CSS clamps to 3 lines). CV-4-map — also
   // on SUB-TASK rows, so the parent's headless auto-run shows live per child ("⏳ Working…" → the result).
   const summaryLine = ((row.role === 'app' || row.role === 'subtask') && row.summary)
-    ? `<div class="history-item-summary">${escHtml(row.summary)}</div>`
+    ? `<div class="rail-item-summary">${escHtml(row.summary)}</div>`
     : '';
   item.innerHTML = `
-      <div class="history-item-title">${leaf}${badge}${escHtml(conv.title)}</div>
+      <div class="rail-item-title">${leaf}${badge}${escHtml(conv.title)}</div>
       ${summaryLine}
-      <div class="history-item-meta">${relTime(conv.updatedAt)}</div>
+      <div class="rail-item-meta">${relTime(conv.updatedAt)}</div>
       ${chevron}
       ${subtaskBtn}
       ${previewBtn}
-      <button class="history-item-delete" title="Delete">
+      <button class="rail-item-delete" title="Delete">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
         </svg>
       </button>`;
 
   // chevron → toggle THIS app's expansion (re-render); never loads the app.
-  item.querySelector('.history-chevron')?.addEventListener('click', async (e) => {
+  item.querySelector('.rail-chevron')?.addEventListener('click', async (e) => {
     e.stopPropagation();
     if (_expandedApps.has(conv.id)) _expandedApps.delete(conv.id); else _expandedApps.add(conv.id);
-    await _renderHistoryList();
+    await _renderRailList();
   });
 
   // AP-2 — "+" → start a sub-conversation under this app, AUTO-NAMED `<parent> #N` (no prompt; v2.74.1216).
-  item.querySelector('.history-item-subtask')?.addEventListener('click', async (e) => {
+  item.querySelector('.rail-item-subtask')?.addEventListener('click', async (e) => {
     e.stopPropagation();
     await _spawnSubTask(conv.id);
   });
@@ -729,7 +729,7 @@ function _historyConvRow(conv, row) {
   });
 
   // v2.74.1095 — dev-aware delete: stop a live run (free the host slot) before removing the record; keep the branch.
-  item.querySelector('.history-item-delete').addEventListener('click', async (e) => {
+  item.querySelector('.rail-item-delete').addEventListener('click', async (e) => {
     e.stopPropagation();
     const liveRun = conv.kind === 'dev' && _devRunStatus(conv.id).state !== 'idle';
     // AP-3 (v2.74.1211) — deleting an APP now CASCADES to its sub-conversations (ConversationStore.delete); warn first.
@@ -752,11 +752,11 @@ function _historyConvRow(conv, row) {
       _resetConversation();
       await renderSuggestionCards();
     }
-    await _renderHistoryList();
+    await _renderRailList();
   });
 
   if (isDev) {
-    item.querySelector('.history-item-preview')?.addEventListener('click', (e) => {
+    item.querySelector('.rail-item-preview')?.addEventListener('click', (e) => {
       e.stopPropagation();
       try { _getDevBridge()?.previewConversation?.(conv.id); } catch { /* */ } });
   }
@@ -818,13 +818,13 @@ function _enterConversation() {
 // the fold still counts as "near bottom" and keeps tracking.
 const NEAR_BOTTOM_PX = 96;
 function _isNearBottom() {
-  const c = $('conversation');
+  const c = $('thread');
   if (!c) return true;
   return c.scrollHeight - c.scrollTop - c.clientHeight <= NEAR_BOTTOM_PX;
 }
 function _scrollToBottomIfNearBottom() {
   if (!_isNearBottom()) return;
-  const c = $('conversation');
+  const c = $('thread');
   if (c) c.scrollTop = c.scrollHeight;
 }
 
@@ -840,7 +840,7 @@ let _stickToBottom = true;
 let _autoScrollWired = false;
 function _setupAutoScroll() {
   if (_autoScrollWired) return;
-  const c = $('conversation');
+  const c = $('thread');
   const messages = $('messages');
   if (!c || !messages) return;
   _autoScrollWired = true;
@@ -948,7 +948,7 @@ function appendMessage({ role, body, attribution, id, skipPersist = false }) {
   // unconditional scroll though — sending always scrolls back to the
   // conversation tail, matching every other chat product's behavior.
   if (role === 'user') {
-    $('conversation').scrollTop = $('conversation').scrollHeight;
+    $('thread').scrollTop = $('thread').scrollHeight;
   } else {
     _scrollToBottomIfNearBottom();
   }
@@ -958,11 +958,11 @@ function appendMessage({ role, body, attribution, id, skipPersist = false }) {
   // already exist in storage — the { skipPersist } opt-out avoids duplicates.
   if (role === 'user' && !skipPersist) {
     _persistMessageUpdate(msg, { role, body, attribution })
-      .then(() => _refreshHistoryIfOpen())   // v2.74.1224 — the selected app's peek shows the just-sent message ("received")
+      .then(() => _refreshRailIfOpen())   // v2.74.1224 — the selected app's peek shows the just-sent message ("received")
       .catch(err => console.warn('[chat] failed to persist user message:', err.message));
   }
   // v2.74.1224 — a thinking bubble lights the selected app's "● working…" indicator in an open drawer (no-op when closed).
-  if (role === 'thinking') { _refreshHistoryIfOpen().catch(() => {}); }
+  if (role === 'thinking') { _refreshRailIfOpen().catch(() => {}); }
 
   return msg;
 }
@@ -1267,7 +1267,7 @@ async function _spawnSubTask(appConvId) {
   try {
     await ConversationStore.create({ title: title.slice(0, 60), kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config, instanceId: app.instanceId || app.appId || null, presetId: app.presetId || app.appId || null });
     _expandedApps.add(app.id);
-    await _revealDrawer();   // v2.74.1249 — open the drawer (if closed) so the new sub-conversation is visible
+    await _revealRail();   // v2.74.1249 — open the drawer (if closed) so the new sub-conversation is visible
   } catch (e) { try { console.warn('[chat] sub-task spawn failed:', e?.message); } catch { /* */ } toast('Couldn’t start the sub-conversation.', 'err'); }
 }
 
@@ -1397,7 +1397,7 @@ async function _createAppConversation(def, { setup = false } = {}) {
       }
     }
   }
-  _refreshHistoryIfOpen().catch(() => {});
+  _refreshRailIfOpen().catch(() => {});
 }
 
 // §10.1 seed-down (v2.74.1215, DESIGN_apps_learning.md §10) — seed a NEW instance's goal memory from its PRESET:
@@ -1453,7 +1453,7 @@ async function _createSubTasks(app, items) {
       created.push(conv);
     } catch (e) { try { console.warn('[chat] sub-task create failed:', e?.message); } catch { /* */ } }
   }
-  if (created.length) { _expandedApps.add(app.id); _revealDrawer().catch(() => {}); }   // v2.74.1249 — OPEN the drawer (if closed) so the spawned children are visible, not just refresh-if-open
+  if (created.length) { _expandedApps.add(app.id); _revealRail().catch(() => {}); }   // v2.74.1249 — OPEN the drawer (if closed) so the spawned children are visible, not just refresh-if-open
   return created;
 }
 
@@ -1501,7 +1501,7 @@ async function _persistChildMessage(childId, role, body) {
 // then refresh an open drawer so the child's peek shows the live state (issue #3 — a "working…" indicator on children).
 async function _setChildMessage(childId, msgId, body) {
   try { await ConversationStore.updateMessage(childId, msgId, { role: 'assistant', body: String(body || ''), ts: Date.now() }, { upsert: true }); } catch { /* */ }
-  _refreshHistoryIfOpen().catch(() => {});
+  _refreshRailIfOpen().catch(() => {});
 }
 
 // CV-4-map — GROUND a child's reasoning: read the record it's working on (a connector READ by the #id in its task,
@@ -1602,7 +1602,7 @@ function _offerRunEach(app, children, directive) {
     };
     await Promise.all(Array.from({ length: Math.min(CONC, tasks.length) }, worker));
     _setMessageBody(m, `Ran ${children.length}: ${done} done${need ? `, ${need} 🟡 need you (open them to continue)` : ''}. Ask me to “summarize what each found”.`);
-    _revealDrawer().catch(() => {});   // children's peeks updated → reveal them
+    _revealRail().catch(() => {});   // children's peeks updated → reveal them
     _orchFinalize(m);
   });
   const skip = _mkBtn('Skip', () => { bar.remove(); _setMessageBody(m, 'Okay — left them seeded; open any one to run it yourself.'); _orchFinalize(m); });
@@ -1772,7 +1772,7 @@ async function _bankSetup(step) {
   const egText = eg ? ` — e.g. “${eg}”` : '';
   _setMessageBody(msg, `✅ **Connected to ${where}.** Now just tell me what to do${egText} — and I’ll learn each task the first time, then recall it when you ask again (even worded differently).`, { markdown: true });
   _orchFinalize(msg);
-  _refreshHistoryIfOpen().catch(() => {});
+  _refreshRailIfOpen().catch(() => {});
 }
 
 // AL-3b (v2.74.1193) — render what the current app has LEARNED (its goal memory): beliefs/deltas with tier,
@@ -1906,7 +1906,7 @@ async function runTaskCapability(cap) {
     variant:     'inline',
   });
   messages.appendChild(element);
-  $('conversation').scrollTop = $('conversation').scrollHeight;
+  $('thread').scrollTop = $('thread').scrollHeight;
 
   const values = await promise;
   element.remove();
@@ -2068,7 +2068,7 @@ function _orchFinalize(msg, { outcome = null } = {}) {
     const body = msg.querySelector('.message-body')?.textContent ?? '';
     if (!body.trim()) return;
     _persistMessageUpdate(msg, { role: 'assistant', body, ...(outcome ? { outcome } : {}) })
-      .then(() => _refreshHistoryIfOpen())   // v2.74.1223 — the selected app "updates accordingly": refresh its drawer peek live once the reply is persisted (peek mirrored into the index by then)
+      .then(() => _refreshRailIfOpen())   // v2.74.1223 — the selected app "updates accordingly": refresh its drawer peek live once the reply is persisted (peek mirrored into the index by then)
       .catch(() => { /* persistence must never break the flow */ });
   } catch { /* */ }
 }
@@ -4142,7 +4142,7 @@ const IL_READ_LEG_KEYS = new Set(['LIST_TABS', 'LIST_CAPABILITIES']);
 const IL_PANEL_LEGS = {
   NEW_DEV_CONVERSATION:     { run: () => { $('btn-new-dev-conversation')?.click(); return { rendered: true }; } },
   NEW_CONVERSATION:         { run: () => { _renderAppGallery(); return { rendered: true }; } },   // CV-3c (.1170) — was a click on the removed btn-new-conversation; opens the gallery directly now
-  OPEN_HISTORY:             { run: () => { $('btn-history')?.click(); }, done: '🧠 Opened conversation history.' },
+  OPEN_HISTORY:             { run: () => { $('btn-rail')?.click(); }, done: '🧠 Opened conversation history.' },
   // DELETE_ALL_CONVERSATIONS dropped v2.74.1137 — its button handler calls confirm(), which async-suppresses in
   // the `il:` flow → the click is a no-op, and a `rendered:true` no-op leaves the '🧠 thinking…' placeholder STUCK
   // (one source of the "only thinking… visible" symptom). Destructive + can't fire from a typed command → button-only.
@@ -4704,7 +4704,7 @@ function _getDevBridge() {
   // prose, tool chips) mirroring Claude Code desktop. Same injection-safe renderer the chat uses.
   // v2.74.995 — getScrollContainer: the bridge runs its OWN follow-scroll (the chat's 96px near-bottom
   // heuristic breaks for the bridge's large per-block appends), anchoring the working…/Pause footer.
-  if (!_devBridgeInstance) _devBridgeInstance = createDevBridge({ appendMessage, setMessageBody: _setMessageBody, mkBtn: _mkBtn, persistMessage: _persistMessageUpdate, decorateBubble: _decorateDevBubble, renderMarkdown, wireCodeCopyButtons, getScrollContainer: () => $('conversation'), refreshHistory: _refreshHistoryIfOpen, currentConversationId: () => _currentConversationId, scopeCheckLLM: (p) => _orchReq('DEV_SCOPE_CHECK', p), categorizeScopeLLM: (p) => _orchReq('DEV_CATEGORIZE_SCOPE', p) });   // DBR-P3-7 — `scope?` semantic check; .1102 — Claude picks the dev-conversation label; .1106 — open-conversation getter so a reattach renders in its OWN conversation
+  if (!_devBridgeInstance) _devBridgeInstance = createDevBridge({ appendMessage, setMessageBody: _setMessageBody, mkBtn: _mkBtn, persistMessage: _persistMessageUpdate, decorateBubble: _decorateDevBubble, renderMarkdown, wireCodeCopyButtons, getScrollContainer: () => $('thread'), refreshHistory: _refreshRailIfOpen, currentConversationId: () => _currentConversationId, scopeCheckLLM: (p) => _orchReq('DEV_SCOPE_CHECK', p), categorizeScopeLLM: (p) => _orchReq('DEV_CATEGORIZE_SCOPE', p) });   // DBR-P3-7 — `scope?` semantic check; .1102 — Claude picks the dev-conversation label; .1106 — open-conversation getter so a reattach renders in its OWN conversation
   return _devBridgeInstance;
 }
 
@@ -6279,6 +6279,6 @@ async function _rehydrateConversation(conv) {
   // the loop is unreliable once bodies re-render (markdown/html/outcome cards change height), so snap explicitly after
   // the full timeline is laid out; the rAF covers async height settle. #conversation stays laid out behind the drawer
   // overlay, so this sticks even when rehydrated from a single-click select (revealed at the bottom on drawer close).
-  try { const c = $('conversation'); if (c) { c.scrollTop = c.scrollHeight; requestAnimationFrame(() => { c.scrollTop = c.scrollHeight; }); } } catch { /* */ }
+  try { const c = $('thread'); if (c) { c.scrollTop = c.scrollHeight; requestAnimationFrame(() => { c.scrollTop = c.scrollHeight; }); } } catch { /* */ }
 }
 

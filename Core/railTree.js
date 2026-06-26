@@ -1,9 +1,9 @@
-// Core/drawerTree.js — CV-3c (v2.74.1168): the pure drawer-accordion model.
+// Core/railTree.js — CV-3c (v2.74.1168): the pure rail-accordion model.
 //
-// DESIGN_conversations.md §7: the drawer is ONE flush-left accordion (no indentation) — Overview pinned at the
+// DESIGN_conversations.md §7: the rail is ONE flush-left accordion (no indentation) — Overview pinned at the
 // root, apps under it, an app's sub-tasks under it (when expanded), then a "New app" entry. This module turns a
 // flat `ConversationStore.list()` summary array into the ORDERED row model the renderer walks. PURE — no DOM, no
-// storage; the live `_renderHistoryList` builds DOM from these rows (chevron / glyph / weight / box convey the
+// storage; the live `_renderRailList` builds DOM from these rows (chevron / glyph / weight / box convey the
 // hierarchy WITHOUT indenting — depth is informational, not a left-pad).
 //
 // Identity (the store coerces kind:'app' → 'agent', §5): an APP = a conversation with `appId` and no `parentId`;
@@ -20,7 +20,7 @@ const isApp = (c) => !!c.appId && !c.parentId;
 const isSub = (c) => !!c.parentId;
 
 /**
- * @typedef {Object} DrawerRow
+ * @typedef {Object} RailRow
  * @property {string|null} id        conversation id (OVERVIEW_ID for the pin; null for the New-app entry)
  * @property {'overview'|'app'|'subtask'|'plain'|'new-app'} role
  * @property {string} title
@@ -41,13 +41,13 @@ const isSub = (c) => !!c.parentId;
  * Build the ordered accordion row model. PURE.
  * @param {Array<Object>} summaries  ConversationStore.list() summaries ({id,title,kind,updatedAt,appId?,parentId?,icon?,…})
  * @param {{ devMode?:boolean, activeId?:string|null, expanded?:Set<string>|Array<string>|null }} [opts]
- * @returns {DrawerRow[]}
+ * @returns {RailRow[]}
  */
-export function buildDrawerTree(summaries, { devMode = false, activeId = null, expanded = null } = {}) {
+export function buildRailTree(summaries, { devMode = false, activeId = null, expanded = null } = {}) {
   const list = (Array.isArray(summaries) ? summaries : []).filter(Boolean);
   const expandedSet = expanded instanceof Set ? expanded : new Set(Array.isArray(expanded) ? expanded : []);
 
-  // Dev filter — mirror _renderHistoryList: dev mode off → hide dev conversations entirely (§2 precedent).
+  // Dev filter — mirror _renderRailList: dev mode off → hide dev conversations entirely (§2 precedent).
   const visible = devMode ? list : list.filter((c) => c.kind !== 'dev');
 
   // Sub-tasks grouped by parent (newest first within a group).

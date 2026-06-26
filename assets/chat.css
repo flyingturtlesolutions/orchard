@@ -405,7 +405,7 @@ textarea {
 }
 
 /* ── Conversation area ───────────────────────────────────────────────────── */
-.conversation {
+.thread {
   flex: 1;
   overflow-y: auto;
   display: flex;
@@ -413,17 +413,17 @@ textarea {
 }
 
 /* Custom scrollbar — subtle, warm */
-.conversation::-webkit-scrollbar {
+.thread::-webkit-scrollbar {
   width: 8px;
 }
-.conversation::-webkit-scrollbar-track {
+.thread::-webkit-scrollbar-track {
   background: transparent;
 }
-.conversation::-webkit-scrollbar-thumb {
+.thread::-webkit-scrollbar-thumb {
   background: var(--c-border);
   border-radius: var(--r-full);
 }
-.conversation::-webkit-scrollbar-thumb:hover {
+.thread::-webkit-scrollbar-thumb:hover {
   background: var(--c-text-subtle);
 }
 
@@ -1360,7 +1360,7 @@ textarea {
    and the messages behind it. The input row lives OUTSIDE .app-body (a body-level row), so it is NEVER
    covered — always visible at its own width/height. Slides in from the left; opaque, fully replacing the
    history view while open. */
-.history-sidebar {
+.rail {
   position: absolute;
   inset: 0;                       /* full width + full height of .app-body (= the chat-history region) */
   z-index: 20;
@@ -1373,12 +1373,12 @@ textarea {
   pointer-events: none;           /* closed → doesn't intercept clicks on the conversation */
   transition: transform var(--t-med), opacity var(--t-med);
 }
-.history-sidebar.open {
+.rail.open {
   transform: translateX(0);
   opacity: 1;
   pointer-events: auto;
 }
-.history-sidebar-inner {
+.rail-inner {
   width: 100%;                    /* full panel width */
   height: 100%;
   display: flex;
@@ -1386,7 +1386,7 @@ textarea {
   overflow: hidden;
 }
 
-.history-header {
+.rail-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1395,7 +1395,7 @@ textarea {
   flex-shrink: 0;
 }
 
-.history-title {
+.rail-title {
   font-size: 13px;
   font-weight: 600;
   color: var(--c-text);
@@ -1404,11 +1404,11 @@ textarea {
 }
 
 /* v2.74.1040 — small gap between the trash and the ✕ close button (they now sit side-by-side) */
-.history-header .icon-btn + .icon-btn {
+.rail-header .icon-btn + .icon-btn {
   margin-left: var(--sp-1);
 }
 
-.history-new-btn {
+.rail-new-btn {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
@@ -1421,30 +1421,30 @@ textarea {
   font-weight: 500;
   transition: background var(--t-fast);
 }
-.history-new-btn:hover { background: var(--c-accent-hover); }
+.rail-new-btn:hover { background: var(--c-accent-hover); }
 
 /* v2.74.1029 — the dev-conversation entry: amber (the dev-bridge identity, #c9a227), set apart from the
    accent-blue "New conversation" so the Claude Code surface reads as a distinct, gated thing. Top margin 0
    to sit flush under the agent button. */
-.history-new-dev-btn {
+.rail-new-dev-btn {
   margin-top: var(--sp-3);   /* CV-3c (v2.74.1170) — now the topmost button (the legacy "New app" above it was removed) */
   background: #8a6d12;
 }
-.history-new-dev-btn:hover { background: #a9871c; }
+.rail-new-dev-btn:hover { background: #a9871c; }
 
 /* surfaces §2.2 — the DESIGN (high-altitude) dev entry: violet (#6d4f8a, matching the drawer's design badge), set apart
    from the amber dev button. Flush under it. */
-.history-new-design-btn { margin-top: 0; background: #6d4f8a; }
-.history-new-design-btn:hover { background: #8662a9; }
+.rail-new-design-btn { margin-top: 0; background: #6d4f8a; }
+.rail-new-design-btn:hover { background: #8662a9; }
 
 /* A dev conversation in the history list: amber left-rail + a small "dev" badge before the title. */
-.history-item.dev { border-left: 2px solid #c9a227; padding-left: calc(var(--sp-3) - 2px); }
+.rail-item.dev { border-left: 2px solid #c9a227; padding-left: calc(var(--sp-3) - 2px); }
 /* v2.74.1070 — an app (website-operating) conversation: blue left-rail + a small "app" badge, mirroring dev.
-   Declared before .history-item.active so an active row's accent left-rail wins (equal specificity, later rule). */
-.history-item.app { border-left: 2px solid #5c8bc9; padding-left: calc(var(--sp-3) - 2px); }
-.history-item-badge.app { background: rgba(92, 139, 201, 0.18); color: #5c8bc9; }
-.history-item-badge.design { background: rgba(160, 122, 201, 0.18); color: #a07ac9; }   /* surfaces §2.2 — a high-altitude (Design) dev conversation */
-.history-item-badge {
+   Declared before .rail-item.active so an active row's accent left-rail wins (equal specificity, later rule). */
+.rail-item.app { border-left: 2px solid #5c8bc9; padding-left: calc(var(--sp-3) - 2px); }
+.rail-item-badge.app { background: rgba(92, 139, 201, 0.18); color: #5c8bc9; }
+.rail-item-badge.design { background: rgba(160, 122, 201, 0.18); color: #a07ac9; }   /* surfaces §2.2 — a high-altitude (Design) dev conversation */
+.rail-item-badge {
   display: inline-block;
   margin-right: var(--sp-2);
   padding: 0 5px;
@@ -1460,15 +1460,15 @@ textarea {
 
 /* CV-3c (v2.74.1168) — the drawer ACCORDION (DESIGN_conversations.md §7): the Overview pin, the New-app entry, the
    app expand-chevron, the sub-task leaf glyph. Hierarchy is glyph + chevron + weight, NEVER indentation. */
-.history-overview .history-item-title,
-.history-new-app  .history-item-title { display: flex; align-items: center; gap: var(--sp-2); }
-.history-glyph { color: var(--c-text-subtle); font-weight: 600; }
-.history-glyph.leaf { margin-right: 5px; font-weight: 700; }
-.history-new-app { color: var(--c-text-subtle); }
-.history-new-app:hover .history-item-title { color: var(--c-text); }
-.history-item.is-subtask .history-item-title { font-weight: 400; color: var(--c-text-subtle); }
-.history-item.has-children { padding-right: 64px; }   /* clear the chevron, which sits left of the delete button */
-.history-chevron {
+.rail-overview .rail-item-title,
+.rail-new-app  .rail-item-title { display: flex; align-items: center; gap: var(--sp-2); }
+.rail-glyph { color: var(--c-text-subtle); font-weight: 600; }
+.rail-glyph.leaf { margin-right: 5px; font-weight: 700; }
+.rail-new-app { color: var(--c-text-subtle); }
+.rail-new-app:hover .rail-item-title { color: var(--c-text); }
+.rail-item.is-subtask .rail-item-title { font-weight: 400; color: var(--c-text-subtle); }
+.rail-item.has-children { padding-right: 64px; }   /* clear the chevron, which sits left of the delete button */
+.rail-chevron {
   position: absolute;
   bottom: var(--sp-2);          /* v2.74.1229 — sit at the bottom-right, just LEFT of the "+" (was vertically centered) */
   right: 34px;
@@ -1484,9 +1484,9 @@ textarea {
   font-weight: 600;
   transition: background var(--t-fast), color var(--t-fast);
 }
-.history-chevron:hover { background: var(--c-bg); color: var(--c-text); }
+.rail-chevron:hover { background: var(--c-bg); color: var(--c-text); }
 
-.history-list {
+.rail-list {
   flex: 1;
   overflow-y: auto;
   padding: var(--sp-1) var(--sp-2) var(--sp-3) var(--sp-2);
@@ -1495,14 +1495,14 @@ textarea {
   gap: 2px;
 }
 
-.history-empty {
+.rail-empty {
   padding: var(--sp-4);
   color: var(--c-text-subtle);
   font-size: 12px;
   text-align: center;
 }
 
-.history-item {
+.rail-item {
   position: relative;
   display: flex;
   flex-direction: column;
@@ -1513,16 +1513,16 @@ textarea {
   cursor: pointer;
   transition: background var(--t-fast);
 }
-.history-item:hover {
+.rail-item:hover {
   background: var(--c-bg-subtle);
 }
-.history-item.active {
+.rail-item.active {
   background: var(--c-bg-subtle);
   border-left: 2px solid var(--c-accent);
   padding-left: calc(var(--sp-3) - 2px);
 }
 
-.history-item-title {
+.rail-item-title {
   font-size: 13px;
   font-weight: 500;
   color: var(--c-text);
@@ -1534,10 +1534,10 @@ textarea {
 
 /* v2.74.1217 — the app-row "quick peek": up to 3 lines of the conversation's recent direction, under the name.
    Muted + line-clamped; the row is flex-column so it stacks between the title and the timestamp. */
-.history-item-summary {
+.rail-item-summary {
   font-size: 11px;
   line-height: 1.35;
-  color: var(--c-text-muted);   /* v2.74.1228 — one shade brighter than the timestamp (.history-item-meta stays --c-text-subtle) */
+  color: var(--c-text-muted);   /* v2.74.1228 — one shade brighter than the timestamp (.rail-item-meta stays --c-text-subtle) */
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
@@ -1546,34 +1546,34 @@ textarea {
 }
 /* v2.74.1225 — hovering a row VERTICALLY EXPANDS the card: the 3-line clamp lifts so the full last-LLM-message peek
    shows. The row grows to fit (the drawer is a flex column), so neighbours reflow down. */
-.history-item:hover .history-item-summary {
+.rail-item:hover .rail-item-summary {
   -webkit-line-clamp: unset;
   overflow: visible;
 }
 
-.history-item-meta {
+.rail-item-meta {
   font-size: 11px;
   color: var(--c-text-subtle);
 }
 
 /* v2.74.1094 — live dev-run status in a drawer item's meta line (replaces the timestamp while a run is active). */
-.history-item-meta.run-status { font-weight: 600; }
-.history-item-meta.run-status.running { color: #c9a227; }   /* amber — matches the dev-bridge bubble identity */
-.history-item-meta.run-status.awaiting {
+.rail-item-meta.run-status { font-weight: 600; }
+.rail-item-meta.run-status.running { color: #c9a227; }   /* amber — matches the dev-bridge bubble identity */
+.rail-item-meta.run-status.awaiting {
   color: #e0902a;                                            /* brighter amber-orange — paused for your input */
   animation: run-status-pulse 1.4s ease-in-out infinite;
 }
-.history-item-meta.run-status.done { color: var(--c-success); }            /* v2.74.1096 — last run finished OK */
-.history-item-meta.run-status.done.failed { color: var(--c-error); }       /* …or failed */
-.history-item-meta.run-status.paused { color: #8a93a8; }                   /* v2.74.1098 — last run paused (resumable via `dev:`) */
+.rail-item-meta.run-status.done { color: var(--c-success); }            /* v2.74.1096 — last run finished OK */
+.rail-item-meta.run-status.done.failed { color: var(--c-error); }       /* …or failed */
+.rail-item-meta.run-status.paused { color: #8a93a8; }                   /* v2.74.1098 — last run paused (resumable via `dev:`) */
 /* v2.74.1224 — the SELECTED app's "● working…" while its reply is in flight (drawer multi-conversation mode). Amber
    (via .running) + a pulse so "message received and processing" reads at a glance. */
-.history-item-meta.run-status.working { animation: run-status-pulse 1.4s ease-in-out infinite; }
+.rail-item-meta.run-status.working { animation: run-status-pulse 1.4s ease-in-out infinite; }
 @keyframes run-status-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 
 /* The "needs you" dot on the conversation-history toggle — visible even when the drawer is closed. */
-#btn-history.needs-action { position: relative; }
-#btn-history.needs-action::after {
+#btn-rail.needs-action { position: relative; }
+#btn-rail.needs-action::after {
   content: '';
   position: absolute;
   top: 2px; right: 2px;
@@ -1583,7 +1583,7 @@ textarea {
   animation: run-status-pulse 1.4s ease-in-out infinite;
 }
 
-.history-item-delete {
+.rail-item-delete {
   position: absolute;
   top: 50%;
   right: var(--sp-2);
@@ -1598,17 +1598,17 @@ textarea {
   opacity: 0;
   transition: opacity var(--t-fast), background var(--t-fast), color var(--t-fast);
 }
-.history-item:hover .history-item-delete { opacity: 1; }
-.history-item-delete:hover {
+.rail-item:hover .rail-item-delete { opacity: 1; }
+.rail-item-delete:hover {
   background: var(--c-bg);
   color: var(--c-error);
 }
 /* v2.74.1228 (App card UI) — on an APP card the delete (×) sits in the TOP-RIGHT corner (the subtask "+" takes the
    bottom-right). Non-app rows keep the vertically-centered delete. */
-.history-item.is-app .history-item-delete { top: var(--sp-2); bottom: auto; transform: none; }
+.rail-item.is-app .rail-item-delete { top: var(--sp-2); bottom: auto; transform: none; }
 
 /* AP-2 (v2.74.1213) — the per-app "new sub-conversation" + button; hover-revealed, sat left of the chevron/delete cluster. */
-.history-item-subtask {
+.rail-item-subtask {
   position: absolute;
   bottom: var(--sp-2);          /* v2.74.1228 (App card UI) — the "+" sits in the BOTTOM-RIGHT corner */
   right: var(--sp-2);
@@ -1622,12 +1622,12 @@ textarea {
   opacity: 0;
   transition: opacity var(--t-fast), background var(--t-fast), color var(--t-fast);
 }
-.history-item:hover .history-item-subtask { opacity: 1; }
-.history-item-subtask:hover { background: var(--c-bg); color: var(--c-accent); }
+.rail-item:hover .rail-item-subtask { opacity: 1; }
+.rail-item-subtask:hover { background: var(--c-bg); color: var(--c-accent); }
 
 /* surfaces-§4.5 (preview-as-selection) — the per-dev-row "load this branch into the live build" button (sat just left
    of delete) + the drawer's "Preview main" control. Mirrors the delete button: hover-revealed icon; amber on hover. */
-.history-item-preview {
+.rail-item-preview {
   position: absolute;
   top: 50%;
   right: calc(var(--sp-2) + 24px);
@@ -1642,12 +1642,12 @@ textarea {
   opacity: 0;
   transition: opacity var(--t-fast), background var(--t-fast), color var(--t-fast);
 }
-.history-item:hover .history-item-preview { opacity: 1; }
-.history-item-preview:hover { background: var(--c-bg); color: #c9a227; }   /* amber — matches the dev identity */
-.history-item.dev { padding-right: 54px; }   /* room for the preview + delete buttons (overrides the base 30px) */
+.rail-item:hover .rail-item-preview { opacity: 1; }
+.rail-item-preview:hover { background: var(--c-bg); color: #c9a227; }   /* amber — matches the dev identity */
+.rail-item.dev { padding-right: 54px; }   /* room for the preview + delete buttons (overrides the base 30px) */
 
-.history-preview-main { display: flex; margin-bottom: var(--sp-2); }
-.history-preview-main-btn {
+.rail-preview-main { display: flex; margin-bottom: var(--sp-2); }
+.rail-preview-main-btn {
   font-size: 11px;
   color: var(--c-text-subtle);
   padding: 4px 8px;
@@ -1657,7 +1657,7 @@ textarea {
   cursor: pointer;
   transition: background var(--t-fast), color var(--t-fast);
 }
-.history-preview-main-btn:hover { background: var(--c-bg-subtle); color: var(--c-text); }
+.rail-preview-main-btn:hover { background: var(--c-bg-subtle); color: var(--c-text); }
 
 /* ── Slash command picker ────────────────────────────────────────────────── */
 

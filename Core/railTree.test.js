@@ -1,16 +1,16 @@
-// Core/drawerTree.test.js — CV-3c (v2.74.1168): the pure accordion model.
+// Core/railTree.test.js — CV-3c (v2.74.1168): the pure accordion model.
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildDrawerTree, subTasksOf } from './drawerTree.js';
+import { buildRailTree, subTasksOf } from './railTree.js';
 import { OVERVIEW_ID } from './appDef.js';
 
 const roles = (rows) => rows.map((r) => r.role);
 
-describe('drawerTree — buildDrawerTree', () => {
+describe('railTree — buildRailTree', () => {
   it('always pins Overview first and New-app last, even with no conversations', () => {
-    const rows = buildDrawerTree([]);
+    const rows = buildRailTree([]);
     assert.equal(rows[0].role, 'overview');
     assert.equal(rows[0].id, OVERVIEW_ID);
     assert.equal(rows[rows.length - 1].role, 'new-app');
@@ -24,7 +24,7 @@ describe('drawerTree — buildDrawerTree', () => {
       { id: 't2', title: 'Ticket #2', kind: 'agent', parentId: 'app1', updatedAt: 95 },
     ];
 
-    const collapsed = buildDrawerTree(summaries);
+    const collapsed = buildRailTree(summaries);
     const appRow = collapsed.find((r) => r.id === 'app1');
     assert.equal(appRow.role, 'app');
     assert.equal(appRow.hasChildren, true);
@@ -32,7 +32,7 @@ describe('drawerTree — buildDrawerTree', () => {
     assert.equal(appRow.expanded, false);
     assert.equal(collapsed.some((r) => r.role === 'subtask'), false, 'collapsed app hides sub-tasks');
 
-    const open = buildDrawerTree(summaries, { expanded: ['app1'] });
+    const open = buildRailTree(summaries, { expanded: ['app1'] });
     const subs = open.filter((r) => r.role === 'subtask');
     assert.equal(subs.length, 2);
     assert.equal(subs[0].depth, 1);
@@ -47,18 +47,18 @@ describe('drawerTree — buildDrawerTree', () => {
       { id: 'c1', title: 'Free chat', kind: 'agent', updatedAt: 50 },
       { id: 'd1', title: 'Dev thread', kind: 'dev', updatedAt: 60 },
     ];
-    const off = buildDrawerTree(summaries, { devMode: false });
+    const off = buildRailTree(summaries, { devMode: false });
     assert.equal(off.some((r) => r.id === 'd1'), false);
     assert.equal(off.some((r) => r.id === 'c1'), true);
 
-    const on = buildDrawerTree(summaries, { devMode: true });
+    const on = buildRailTree(summaries, { devMode: true });
     const devRow = on.find((r) => r.id === 'd1');
     assert.equal(devRow.role, 'plain');
     assert.equal(devRow.kind, 'dev');
   });
 
   it('an orphan sub-task (its app is absent) renders plain so it is never lost', () => {
-    const rows = buildDrawerTree([
+    const rows = buildRailTree([
       { id: 'orphan', title: 'Stray', kind: 'agent', parentId: 'gone', updatedAt: 10 },
     ]);
     const row = rows.find((r) => r.id === 'orphan');
@@ -69,17 +69,17 @@ describe('drawerTree — buildDrawerTree', () => {
   it('active flags the right row: a real id marks that row, null marks Overview', () => {
     const summaries = [{ id: 'app1', title: 'Inbox', kind: 'agent', appId: 'inbox', updatedAt: 100 }];
 
-    const appActive = buildDrawerTree(summaries, { activeId: 'app1' });
+    const appActive = buildRailTree(summaries, { activeId: 'app1' });
     assert.equal(appActive.find((r) => r.id === 'app1').active, true);
     assert.equal(appActive.find((r) => r.role === 'overview').active, false);
 
-    const homeActive = buildDrawerTree(summaries, { activeId: null });
+    const homeActive = buildRailTree(summaries, { activeId: null });
     assert.equal(homeActive.find((r) => r.role === 'overview').active, true);
     assert.equal(homeActive.find((r) => r.id === 'app1').active, false);
   });
 
   it('apps + plain conversations order by updatedAt desc between the pins', () => {
-    const rows = buildDrawerTree([
+    const rows = buildRailTree([
       { id: 'old', title: 'Old', kind: 'agent', updatedAt: 10 },
       { id: 'new', title: 'New', kind: 'agent', appId: 'x', updatedAt: 99 },
     ]);
@@ -89,7 +89,7 @@ describe('drawerTree — buildDrawerTree', () => {
   });
 });
 
-describe('drawerTree — subTasksOf (bounded across)', () => {
+describe('railTree — subTasksOf (bounded across)', () => {
   const summaries = [
     { id: 'app1', title: 'Support', kind: 'agent', appId: 'support', updatedAt: 100 },
     { id: 't1', title: 'Ticket #1', kind: 'agent', parentId: 'app1', updatedAt: 90 },

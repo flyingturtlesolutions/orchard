@@ -4,7 +4,7 @@
 
 ## 1. Painpoint & decision
 
-The side panel (~380px) is a **control** surface — quick conversation + actions. Many app use-cases are **presentation**-heavy and the strip degrades them:
+The side panel (~380px) is the **control plane** — the **Rail** + **Thread** panes (`DESIGN_conversations.md` §7.1): quick navigation + conversation + actions. The Canvas is the third pane, the **presentation plane**. Many app use-cases are **presentation**-heavy and the strip degrades them:
 
 - a **finance** app maintains a personal-finance **HUD** that the app refreshes on a cadence;
 - a **support** app **composes** a personalized troubleshooting guide (with capability-fetched screenshots) before sending;

@@ -37,6 +37,8 @@ A **task** is a pinned intent + its isolated sandbox + its lifecycle state. It i
 ### 2.2 Surface = which agent runs the task
 A **surface** is an agent config — its altitude, prompt, and tool scope. `{ high-level (conceptual), low-level (dev bridge), …research, …review }`. Surfaces are **interchangeable** w.r.t. the lifecycle: they all produce a sandbox of landmark-able edits and feed the same `Running → Review → Shipped` pipe. Adding a surface = registering an agent, not a new integration path.
 
+> **Surfaces ≠ panes — keep the two axes lexically separate.** `DESIGN_conversations.md` §7.1 names three **panes** — **Rail · Thread · Canvas** — the UI regions the user *looks at*. A **surface** (this doc) is *which agent runs* the task; a **pane** is *where output shows*. They are orthogonal: a `high`/`low`/`design` surface still renders into the Thread pane. Don't call a pane a "surface" or vice-versa.
+
 ### 2.3 The three states (and the one action each)
 ```
 RUNNING  ─►  REVIEW  ─►  SHIPPED

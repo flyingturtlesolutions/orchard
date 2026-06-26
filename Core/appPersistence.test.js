@@ -1,17 +1,17 @@
-// Core/appPersistence.test.js — AP foundation (v2.74.1211): drawer pin-sort (AP-1) + the durable configured-app def (AP-4).
+// Core/appPersistence.test.js — AP foundation (v2.74.1211): rail pin-sort (AP-1) + the durable configured-app def (AP-4).
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildDrawerTree } from './drawerTree.js';
+import { buildRailTree } from './railTree.js';
 import { configuredAppDefinition } from './userCatalog.js';
 import { isConfiguredDef, normalizeAppDefinition, OVERVIEW_ID } from './appDef.js';
 import { builtinApp } from './appCatalog.js';
 import { seedInstanceFromPreset } from './presetMemory.js';
 
-describe('drawerTree — pinned sorts to the top (AP-1)', () => {
+describe('railTree — pinned sorts to the top (AP-1)', () => {
   it('a pinned app outranks a more-recently-updated unpinned row', () => {
-    const rows = buildDrawerTree([
+    const rows = buildRailTree([
       { id: 'a', title: 'Pinned app', appId: 'support', pinned: true, updatedAt: 100 },
       { id: 'b', title: 'Fresh chat', updatedAt: 999 },
     ], { activeId: null });
@@ -21,14 +21,14 @@ describe('drawerTree — pinned sorts to the top (AP-1)', () => {
     assert.equal(rows[2].id, 'b');
   });
   it('among unpinned, recency still wins', () => {
-    const rows = buildDrawerTree([{ id: 'x', title: 'older', updatedAt: 1 }, { id: 'y', title: 'newer', updatedAt: 2 }]);
+    const rows = buildRailTree([{ id: 'x', title: 'older', updatedAt: 1 }, { id: 'y', title: 'newer', updatedAt: 2 }]);
     assert.deepEqual(rows.filter((r) => r.role === 'plain').map((r) => r.id), ['y', 'x']);
   });
 });
 
-describe('drawerTree — Overview peek = last active conversation (v2.74.1219)', () => {
+describe('railTree — Overview peek = last active conversation (v2.74.1219)', () => {
   it('the overview peek = the Overview conversation\'s OWN summary, and it is NOT duplicated as a plain row (v2.74.1234)', () => {
-    const rows = buildDrawerTree([
+    const rows = buildRailTree([
       { id: OVERVIEW_ID, title: 'Overview', updatedAt: 500, summary: 'my last general reply' },
       { id: 'b', title: 'Recent chat', updatedAt: 900, summary: 'the latest direction' },
     ], { activeId: null });
@@ -36,8 +36,8 @@ describe('drawerTree — Overview peek = last active conversation (v2.74.1219)',
     assert.deepEqual(rows.filter((r) => r.role === 'plain').map((r) => r.id), ['b']);          // the Overview conversation is excluded from the plain rows (pin only)
   });
   it('no Overview conversation yet → overview peek null', () => {
-    assert.equal(buildDrawerTree([], {}).find((r) => r.role === 'overview').summary, null);
-    assert.equal(buildDrawerTree([{ id: 'a', title: 'an app chat', updatedAt: 5, summary: 's' }], {}).find((r) => r.role === 'overview').summary, null);
+    assert.equal(buildRailTree([], {}).find((r) => r.role === 'overview').summary, null);
+    assert.equal(buildRailTree([{ id: 'a', title: 'an app chat', updatedAt: 5, summary: 's' }], {}).find((r) => r.role === 'overview').summary, null);
   });
 });
 
