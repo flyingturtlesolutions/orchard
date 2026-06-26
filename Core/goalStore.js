@@ -73,6 +73,20 @@ export function promoteItemInList(items, id, signals = {}) {
   const next = [...list]; next[idx] = { ...promoted, id, evidence: ev }; return next;
 }
 
+/**
+ * AL-5 (write-time ratchet) — SETTLE one item by id: walk it UP through every gate it already clears (observation→
+ * hypothesis→confirmed by its own confidence + accumulated evidence), STOPPING before the HITL canonical step. PURE,
+ * copy-on-write. This is what turns the ratchet on CORROBORATION (a 2nd success → confirmed) instead of leaving every
+ * belief stuck at 'observation' forever. No-op if the id is missing. (Same engine as the slow consolidation pass,
+ * applied to a single just-written item.)
+ */
+export function settleItemInList(items, id) {
+  const list = Array.isArray(items) ? items : [];
+  const idx = list.findIndex((x) => x && x.id === id);
+  if (idx < 0) return [...list];
+  const next = [...list]; next[idx] = _settleItem(list[idx]); return next;
+}
+
 /** Remove an item by id. PURE. */
 export function removeItem(items, id) {
   const key = String(id || '');

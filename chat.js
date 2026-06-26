@@ -18,7 +18,7 @@ import { createDevBridge } from './Services/Chat/devBridge.js';   // DB-1b (v2.7
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
-import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, isFanoutAsk, namesMultipleSites, namesAnySite } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; isFanoutAsk — CV-4-full "open each in a conversation"; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X)
+import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, isFanoutAsk, innerDirective, namesMultipleSites, namesAnySite } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; isFanoutAsk/innerDirective — CV-4 "open each in a conversation" + the per-child task; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X)
 import { walkPlan, scanPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate); scanPlan — THE recursive plan walker (CR-D7)
 import { builtinApps, builtinApp, presetsForType } from './Core/appCatalog.js';   // CV-3 — the builtin app catalog (the gallery's cards; each seeds a kind:'app' conversation). AS-2 — builtinApp(appId) → the def behind a conversation. OM — presetsForType → the named quick-starts under each abstract type
 import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   // ORCH-A — predicate → gate (conditional routing + the analysis)
@@ -39,6 +39,7 @@ import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-ap
 import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps; AP-4 — configuredAppDefinition (mint a durable, re-creatable app from a set-up instance)
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
 import { recordGoalItem, loadGoalItems, clearGoalMemory } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view
+import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
 import { seedInstanceFromPreset } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
 import { standingRuleFromText } from './Core/goalMemory.js';   // AL-3c — non-tool capture: `remember:` authors a standing-rule delta
 import { normalizeInterpretDecision, applyConfidenceGate } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
@@ -461,6 +462,14 @@ function _closeHistory() {
 async function _refreshHistoryIfOpen() {
   _updateHistoryActionDot();   // v2.74.1094 — the "needs you" dot rides the toggle button, visible even when the drawer is closed
   if ($('history-sidebar')?.classList.contains('open')) await _renderHistoryList();
+}
+
+// v2.74.1249 — REVEAL the conversations drawer: open it if closed, then render. Called wherever an ASK adds/removes
+// apps/conversations (fan-out, sub-task spawn) so the change is actually visible — unlike _refreshHistoryIfOpen,
+// which is a deliberate no-op on a CLOSED drawer and so left freshly-spawned children hidden behind it.
+async function _revealDrawer() {
+  _updateHistoryActionDot();
+  await _openHistory();   // _renderHistoryList() + .add('open'); classList.add is idempotent when already open
 }
 
 // ── v2.74.1094 — per-conversation dev-run status in the drawer ───────────────────────────────────────────────
@@ -1255,7 +1264,7 @@ async function _spawnSubTask(appConvId) {
   try {
     await ConversationStore.create({ title: title.slice(0, 60), kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config, instanceId: app.instanceId || app.appId || null, presetId: app.presetId || app.appId || null });
     _expandedApps.add(app.id);
-    await _renderHistoryList();
+    await _revealDrawer();   // v2.74.1249 — open the drawer (if closed) so the new sub-conversation is visible
   } catch (e) { try { console.warn('[chat] sub-task spawn failed:', e?.message); } catch { /* */ } toast('Couldn’t start the sub-conversation.', 'err'); }
 }
 
@@ -1430,19 +1439,19 @@ async function _fanoutParentApp() {
 }
 
 // CV-4 — create one child conversation per item label under `app` (the shared fan-out CORE, used by both the
-// `subtasks:` explicit list AND the CV-4-full enumerate-from-read path). Returns the count made; reveals + refreshes
-// the drawer. AP-0 — a sub-task SHARES its parent app's memory key (instanceId) + type.
+// `subtasks:` explicit list AND the CV-4-full enumerate-from-read path). Returns the CREATED records (so the map's
+// run loop can drive them); reveals the drawer. AP-0 — a sub-task SHARES its parent app's memory key (instanceId) + type.
 async function _createSubTasks(app, items) {
   const specs = planSubTasks(app, items);
-  let made = 0;
+  const created = [];
   for (const spec of specs) {
     try {
-      await ConversationStore.create({ title: spec.title, kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config, instanceId: app.instanceId || app.appId || null, presetId: app.presetId || app.appId || null });
-      made++;
+      const conv = await ConversationStore.create({ title: spec.title, kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config, instanceId: app.instanceId || app.appId || null, presetId: app.presetId || app.appId || null });
+      created.push(conv);
     } catch (e) { try { console.warn('[chat] sub-task create failed:', e?.message); } catch { /* */ } }
   }
-  if (made) { _expandedApps.add(app.id); _refreshHistoryIfOpen().catch(() => {}); }   // reveal the new children under the app
-  return made;
+  if (created.length) { _expandedApps.add(app.id); _revealDrawer().catch(() => {}); }   // v2.74.1249 — OPEN the drawer (if closed) so the spawned children are visible, not just refresh-if-open
+  return created;
 }
 
 async function _spawnSubTasks(listText) {
@@ -1451,7 +1460,7 @@ async function _spawnSubTasks(listText) {
   if (error) { _setMessageBody(msg, error); _orchFinalize(msg); return; }
   const items = String(listText).split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
   if (!items.length) { _setMessageBody(msg, 'Give me a list, e.g. `subtasks: first item, second item, third`.'); _orchFinalize(msg); return; }
-  const made = await _createSubTasks(app, items);
+  const made = (await _createSubTasks(app, items)).length;
   _setMessageBody(msg, made
     ? `Spawned ${made} sub-task${made === 1 ? '' : 's'} under “${app.title}”. Open the conversation drawer — they’re nested under the app.`
     : 'Couldn’t create any sub-tasks.');
@@ -1463,17 +1472,93 @@ async function _spawnSubTasks(listText) {
 // read (itemLabels) instead of a typed comma-list. Capped + honest ("N of M" — never a silent truncation). Sets
 // `msg` to the outcome and returns {ok, summary}; ok:false → the chain stops with the message already shown.
 // UNTRUSTED: each label becomes a sub-task title/seed (escaped on render), never an instruction.
-async function _fanOutFromList(msg, value, { i, total, cap = 20 } = {}) {
+async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '' } = {}) {
   const { app, error } = await _fanoutParentApp();
   if (error) { const s = `Ran ${i} of ${total}. ${error}`; _setMessageBody(msg, s); return { ok: false, summary: s }; }
   const { labels, total: n, capped } = itemLabels(value, cap);
   if (!labels.length) { const s = `Ran ${i} of ${total}. Nothing to open — the previous step returned no list of items.`; _setMessageBody(msg, s); return { ok: false, summary: s }; }
-  const made = await _createSubTasks(app, labels);
-  const summary = made
-    ? `Opened ${made} conversation${made === 1 ? '' : 's'} under “${app.title}”${capped ? ` (capped at ${cap} of ${n})` : ''} — nested under the app in the drawer.`
+  const created = await _createSubTasks(app, labels);
+  const summary = created.length
+    ? `Opened ${created.length} conversation${created.length === 1 ? '' : 's'} under “${app.title}”${capped ? ` (capped at ${cap} of ${n})` : ''} — nested under the app in the drawer.`
     : 'Couldn’t open any conversations.';
   _setMessageBody(msg, summary);
-  return { ok: made > 0, summary };
+  // CV-4-map (Q1) — if the fan-out ask carried a per-child DIRECTIVE ("research each …"), offer to RUN it in every
+  // child (this click IS the single batch confirm). A bare "open each …" has no directive → just the children.
+  const directive = innerDirective(clause);
+  if (directive && created.length) _offerRunEach(app, created, directive);
+  return { ok: created.length > 0, summary };
+}
+
+// CV-4-map — persist a message INTO a child conversation (not the visible panel). upsert appends; the write refreshes
+// the child's drawer peek (conversationPeek), so the parent's reduce AND the user-on-open both see the latest result.
+async function _persistChildMessage(childId, role, body) {
+  try { await ConversationStore.updateMessage(childId, crypto.randomUUID(), { role, body: String(body || ''), ts: Date.now() }, { upsert: true }); } catch { /* */ }
+}
+
+// CV-4-map — run ONE child's task through the IL, HEADLESS: interpret with the CHILD's OWN context (seed / config /
+// connections / per-instance memory) and persist the result INTO the child (never the active panel, never the globals).
+// Reads + reasoning run autonomously; a WRITE / page-action is NOT executed — the child is left a "🟡 needs you" note
+// (the existing safety ladder, surfaced as a flag, not an unattended action). Returns 'done' | 'needs-you'.
+async function _runChildTask(child, task) {
+  const cid = child && child.id; if (!cid) return 'needs-you';
+  const cfg = (child.config && typeof child.config === 'object') ? child.config : {};
+  const conns = Array.isArray(cfg.connections) ? cfg.connections.filter((c) => c && c.origin).map((c) => ({ origin: String(c.origin), label: String(c.label || c.origin) })) : [];
+  const seed = child.seed || ''; const appId = child.appId || ''; const memoryId = child.instanceId || child.appId || '';
+  const tab = await _orchActiveTab();
+  const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
+  await _persistChildMessage(cid, 'user', task);
+  let raw = null; let retrieved = [];
+  try {
+    const r = await _orchReq('INTERPRET_ASK', { ask: task, tabId, seed, connections: conns, appId, memoryId });
+    if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; }
+  } catch { /* */ }
+  const d = raw ? applyConfidenceGate(normalizeInterpretDecision(raw, { retrieved }), { minConfidence: 0.6 }) : null;
+  let body = ''; let status = 'needs-you';
+  if (d && d.intent === 'answer') {
+    let answer = null;
+    try { const r = await _orchReq('IL_ANSWER', { ask: task, tabId, seed, connections: conns, appId, memoryId }); answer = r && r.answer; } catch { /* */ }
+    if (answer) { body = answer; status = 'done'; } else { body = `🟡 Needs you — couldn’t complete “${task}” automatically; open this conversation to continue.`; }
+  } else if (d && d.intent === 'act' && d.capabilityId) {
+    const cleg = retrieved.find((l) => l && l.domain === 'connector' && l.key === d.capabilityId);   // a session-ride READ is safe to run unattended
+    if (cleg) {
+      const run = await _runConnectorLeg(cleg, coerceParams(d.params || {}, cleg.paramSchema), { tabId });
+      if (run.ok) { const lines = renderConnectorLines(run.value, { name: cleg.name || 'Results' }); body = lines ? lines.join('\n') : 'Done.'; status = 'done'; }
+      else { body = `🟡 Needs you — couldn’t ${cleg.does || cleg.name || 'run that'}${run.error ? ` — ${run.error}` : ''}.${run.hint ? `  ${run.hint}.` : ''}`; }
+    } else { body = `🟡 Needs you — “${task}” is a page action; open this conversation to run it.`; }
+  } else {
+    body = `🟡 Needs you — “${task}” needs a write or a step I won’t run unattended. Open this conversation to continue.`;
+  }
+  await _persistChildMessage(cid, 'assistant', body);
+  return status;
+}
+
+// CV-4-map — the SINGLE batch confirm for the auto-run: one click runs `directive` in every child (headless, each on
+// its OWN context). Its own bubble (NOT the chain's reused msg, which gets overwritten). Reads/reasoning complete;
+// writes pause as "🟡 needs you" on that child. After, the parent can "summarize what each found" (the reduce, Q2).
+function _offerRunEach(app, children, directive) {
+  const m = appendMessage({ role: 'assistant', body: `▶ Run “${directive} …” in all ${children.length}? Each runs on its own; a write pauses for you.` });
+  const bar = _orchActionBar(m);
+  const go = _mkBtn(`▶ Run in all ${children.length}`, async () => {
+    bar.remove();
+    let done = 0; let need = 0;
+    for (let k = 0; k < children.length; k++) {
+      const ch = children[k];
+      _setMessageBody(m, `Running ${k + 1}/${children.length}: ${ch.title}…`);
+      // §9 boundary — the directive is the user's (trusted); the item is bound by its STABLE `#id` token where the
+      // label has one, so the UNTRUSTED read-derived title never enters the ASK (instruction) channel. (Id-less
+      // items fall back to the label; the write-gate in _runChildTask still blocks any unattended action.)
+      const idTok = String(ch.title).match(/^#\S+/);
+      const task = `${directive} ${idTok ? idTok[0] : ch.title}`.trim();
+      let status = 'needs-you';
+      try { status = await _runChildTask(ch, task); } catch { status = 'needs-you'; }   // one child's failure never aborts the batch
+      if (status === 'done') done++; else need++;
+    }
+    _setMessageBody(m, `Ran ${children.length}: ${done} done${need ? `, ${need} 🟡 need you (open them to continue)` : ''}. Ask me to “summarize what each found”.`);
+    _revealDrawer().catch(() => {});   // children's peeks updated → reveal them
+    _orchFinalize(m);
+  });
+  const skip = _mkBtn('Skip', () => { bar.remove(); _setMessageBody(m, 'Okay — left them seeded; open any one to run it yourself.'); _orchFinalize(m); });
+  bar.appendChild(go); bar.appendChild(skip);
 }
 
 // ─── AS-2 (v2.74.1188): guided setup — connect an app to its site ──────────────────────────────────────────
@@ -1887,6 +1972,7 @@ async function _orchRun(msg, { groundId, capabilityId, intent, paramValues, tabI
   if (!res || res.success === false) {
     _setMessageBody(msg, `That didn’t run${res && res.error ? ` — ${res.error}` : ''}.`);
     _orchOfferRecord(msg, { groundId, tabId, ask, label: '● Show me the right way' });
+    _bankCapabilityOutcome(ask, capabilityId, false);   // AL-3e — outcome FAILURE → a low-confidence mismatch delta (don't corroborate the positive)
   } else if (res.ran === false) {
     if (res.pruned) {   // the matched capability turned out orphaned → treat as a NEW request, not "it was deleted"
       _setMessageBody(msg, `I don’t have a way to do that here yet — want to show me?`);
@@ -1904,13 +1990,15 @@ async function _orchRun(msg, { groundId, capabilityId, intent, paramValues, tabI
       _setMessageBody(msg, `Ran “${intent || 'it'}”, but I couldn’t apply what you asked for (${ignored.join(', ')}) — it may have used a saved default, so double-check the result.`);
     } else {
       _setMessageBody(msg, `Done — ran “${intent || 'it'}”.`);
-      _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId, phrase: ask });   // confirm → flywheel
+      _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId, phrase: ask });   // confirm → flywheel (the GROUNDING alias)
+      _bankCapabilityOutcome(ask, capabilityId, true);   // AL-3e — outcome SUCCESS → corroborate the intent→capability belief (the APPS-layer learning); a 2nd success ratchets it to 'confirmed'
     }
     _lastOrch = { groundId, capabilityId, tabId, ask, intent, bindings: paramValues || {}, params: params || null };
     _orchFeedbackBar(msg);   // ORCH-FB — 👎 / Remove: correct a wrong run in chat, no Studio
   } else {
     _setMessageBody(msg, `That didn’t work as expected${res.reason ? ` — ${res.reason}` : ''}.`);
     _orchOfferRecord(msg, { groundId, tabId, ask, label: '● Show me the right way' });
+    _bankCapabilityOutcome(ask, capabilityId, false);   // AL-3e — outcome FAILURE → mismatch delta
   }
 }
 
@@ -2699,7 +2787,7 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
     // st.lastValue by Slice A below) out into one child conversation per item, via the existing fan-out core. Cheap
     // regex gate (isFanoutAsk), checked before any match — it never grounds, so don't waste an ORCH_MATCH on it.
     if (isFanoutAsk(clause.text)) {
-      const fo = await _fanOutFromList(msg, st.lastValue, { i, total });
+      const fo = await _fanOutFromList(msg, st.lastValue, { i, total, clause: clause.text });   // clause → the per-child directive (CV-4-map)
       if (!fo.ok) return;
       st.readouts.push(fo.summary);
       st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'fanout', clause: clause.text, intent: clause.text });
@@ -3967,31 +4055,31 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
   const panel = IL_PANEL_LEGS[leg.key];
   if (panel) return _ilRunPanelAction(msg, { leg, panel, ask });
   const plan = planExec(leg, params, { tabId, groundId });
-  if (!plan || !plan.ok || !plan.channel) { _setMessageBody(msg, `🧠 I can’t do “${ask}” here yet.`); return; }
+  if (!plan || !plan.ok || !plan.channel) { _setMessageBody(msg, `🧠 I can’t do “${ask}” here yet.`); return false; }   // AL-3e — returns the ok verdict so the caller can bank the outcome
   try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${leg.domain}:${leg.key}`); } catch { /* */ }
   let res = null;
   try { res = await _orchReq(plan.channel, plan.payload); } catch { /* */ }
   if (!res || res.success === false) {
     const hint = (res && res.hint) ? `  ${res.hint}.` : '';   // CX-4a.1 — surface "open <app> and sign in" on a connector auth miss
     _setMessageBody(msg, `🧠 Couldn’t ${leg.does || leg.name || 'do that'}${res && res.error ? ` — ${res.error}` : ''}.${hint}`);
-    return;
+    return false;
   }
   if (leg.domain === 'connector') {
     // CX-4c — GENERIC render: ANY app's read (tickets, comments, users, orders, messages…) → its salient fields, not
     // just tickets. PII stays in the user's own panel; the result is UNTRUSTED page data → rendered as escaped text only.
     const lines = renderConnectorLines(res.value, { name: leg.name || 'Results' });
     _setMessageBody(msg, lines ? `🧠 ${lines.join('\n')}` : '🧠 Done.');
-    return;
+    return true;
   }
   if (leg.key === 'LIST_TABS') {
     const tabs = Array.isArray(res.tabs) ? res.tabs : [];
-    if (!tabs.length) { _setMessageBody(msg, '🧠 No open web tabs.'); return; }
+    if (!tabs.length) { _setMessageBody(msg, '🧠 No open web tabs.'); return true; }
     const lines = tabs.map((t) => {
       let host = t.url || ''; try { host = new URL(t.url).hostname.replace(/^www\./, ''); } catch { /* */ }
       return `• ${t.title || host}${t.active ? '  ·  active' : ''} — ${host}`;
     });
     _setMessageBody(msg, `🧠 ${tabs.length} open tab${tabs.length === 1 ? '' : 's'}:\n${lines.join('\n')}`);
-    return;
+    return true;
   }
   if (leg.key === 'LIST_CAPABILITIES') {
     // v2.74.1149 — list the ALWAYS-available capabilities (operate Orchard + the browser) FIRST, then any page-derived
@@ -4022,9 +4110,10 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
     if (pageLines.length) body.push('', '**On this page**', ...pageLines);
     else body.push('', '_On this page: nothing mapped yet — ask me to “explore this page” to learn what it offers._');
     _setMessageBody(msg, body.join('\n'));
-    return;
+    return true;
   }
   _setMessageBody(msg, '🧠 Done.');
+  return true;
 }
 
 // IL-3 (v2.74.1130) — `il: <ask>` — Orchard as the USER'S STAND-IN, now folded THROUGH agentLoop@maxSteps=1
@@ -4055,6 +4144,19 @@ function _boundConnections() {
     .map((x) => (x && typeof x === 'object' && x.origin) ? { origin: String(x.origin), label: String(x.label || x.origin) } : null)
     .filter(Boolean);
 }
+// CV-4-reduce — THIS app's OWN sub-task conversations + each one's latest-result peek (the drawer's index summary —
+// no body load), for the IL to reason over ("how many of my sub-tasks are billing?", "summarize what each found").
+// Bounded to the CURRENT app's children (parentId), never global (§6). `runStatus` (set by the map's auto-run) rides
+// the index when present; idle children carry just a title. Returns [] off an app / with no children.
+async function _childSummariesForCurrent() {
+  const pid = _currentConversationId;
+  if (!pid) return [];
+  try {
+    return (await ConversationStore.list())
+      .filter((c) => c && c.parentId === pid)
+      .map((c) => ({ title: c.title || 'sub-task', summary: c.summary || '', status: c.runStatus || '' }));
+  } catch { return []; }
+}
 // Deterministic safety net: if interpret chose NAVIGATE but produced no URL and the app has a bound site, default to
 // it. The OPERATING SITE prompt rule should already make the LLM do this; this guarantees it.
 function _withBoundUrl(params) {
@@ -4062,17 +4164,17 @@ function _withBoundUrl(params) {
   if (!String(p.url || '').trim()) { const t = _boundTarget(); if (t) p.url = t.origin; }
   return p;
 }
-// AL-3b (v2.74.1193) — write-back: bank (or corroborate) an intent→capability association into the CURRENT app's
-// goal memory. The body is the ask phrasing (so a later paraphrase can recall it, AL-4); the ref is the capability.
-// Inferred + moderate confidence; a re-ask MERGES → bumps evidence → drives the promotion ratchet. Fire-and-forget;
-// a no-op off-app (no appId) or on a bad arg.
-function _bankCapabilityUse(goal, capabilityId) {
-  const appId = _memoryId();   // AP-0 — bank the intent→capability association to THIS instance's memory
-  if (!appId || !goal || !capabilityId) return;
-  try {
-    recordGoalItem(appId, { kind: 'belief', epistemic: 'inferred', confidence: 0.5, body: String(goal).slice(0, 160), ref: String(capabilityId), provenance: 'interpret-act' })
-      .catch(() => { /* best-effort */ });
-  } catch { /* */ }
+// AL-3e (v2.74.1251) — OUTCOME write-back: bank the RESULT of an interpret-act into the CURRENT app's goal memory.
+// Supersedes the AL-3b dispatch-time bank (which fired before the run, learning *what was asked*, not *what worked*).
+// SUCCESS → an OBSERVED intent→capability belief (0.7), so a 2nd success ratchets it to 'confirmed' (the store now
+// settles on write). FAILURE → a low-confidence mismatch DELTA (§2), keyed separately so it can't corroborate the
+// positive. The body/ask phrasing is the recall key (a paraphrase MERGES → bumps evidence). Off-app → no-op.
+function _bankCapabilityOutcome(goal, capabilityId, ok) {
+  const appId = _memoryId();   // AP-0 — bank to THIS instance's memory
+  if (!appId) return;
+  const item = capabilityOutcomeItem(goal, capabilityId, ok);
+  if (!item) return;
+  try { recordGoalItem(appId, item).catch(() => { /* best-effort */ }); } catch { /* */ }
 }
 async function _tryInterpret(ask) {
   const goal = String(ask || '').trim();
@@ -4080,9 +4182,10 @@ async function _tryInterpret(ask) {
   const msg = appendMessage({ role: 'assistant', body: '🧠 interpreting…' });
   const tab = await _orchActiveTab();
   const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
+  const subTasks = await _childSummariesForCurrent();   // CV-4-reduce — THIS app's own children + their latest results (reason over them)
   let raw = null; let retrieved = []; let groundId = null;
   try {
-    const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId, seed: _currentConversationSeed, target: _boundTarget(), connections: _boundConnections(), appId: _currentConversationAppId, memoryId: _memoryId() });
+    const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId, seed: _currentConversationSeed, target: _boundTarget(), connections: _boundConnections(), subTasks, appId: _currentConversationAppId, memoryId: _memoryId() });
     if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; groundId = r.groundId || null; }
   } catch { /* */ }
   // F-2c-flip (v2.74.1180) — interpret unavailable (no LLM / handler error) → return FALSE so the caller falls back
@@ -4103,7 +4206,7 @@ async function _tryInterpret(ask) {
   }
   if (d.intent === 'answer') {
     let answer = null;
-    try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, connections: _boundConnections(), appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
+    try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, connections: _boundConnections(), subTasks, appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
     _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 ${d.why || 'I’m not sure how to help with that here.'}`);
     _orchFinalize(msg);
     return true;
@@ -4114,9 +4217,9 @@ async function _tryInterpret(ask) {
   if (d.intent === 'act' && d.capabilityId) {
     const cleg = retrieved.find((l) => l && l.domain === 'connector' && l.key === d.capabilityId);
     if (cleg) {
-      await _ilRunBuiltin(msg, { leg: cleg, ask: goal, tabId, groundId, params: coerceParams(d.params || {}, cleg.paramSchema) });
+      const ok = await _ilRunBuiltin(msg, { leg: cleg, ask: goal, tabId, groundId, params: coerceParams(d.params || {}, cleg.paramSchema) });
       _orchFinalize(msg);
-      _bankCapabilityUse(goal, d.capabilityId);   // AL-3b — learn the association so a paraphrase recalls it
+      _bankCapabilityOutcome(goal, d.capabilityId, ok !== false);   // AL-3e — bank the OUTCOME (ride ran vs failed), not just the attempt
       return true;
     }
   }
@@ -4129,7 +4232,8 @@ async function _tryInterpret(ask) {
     : null;
   try { msg.remove(); } catch { /* */ }
   if (rd && await _dispatchRouteDecision(rd, { tabId, groundId, text: goal })) {
-    if (d.intent === 'act' && d.capabilityId) _bankCapabilityUse(goal, d.capabilityId);   // AL-3b — learn the association
+    // AL-3e — a replay CONFIRMS first, then runs on the button click; the OUTCOME is banked at _orchRun's real verdict
+    // (success vs failure), NOT here at dispatch (the old AL-3b banked on confirm-render, before the run even happened).
     return true;
   }
 

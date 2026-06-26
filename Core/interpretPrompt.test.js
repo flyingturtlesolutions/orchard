@@ -35,6 +35,16 @@ describe('interpretPrompt — buildInterpretMessages', () => {
     assert.match(user, /support\.deako\.com/);
   });
 
+  it('CV-4-reduce — renders THIS app\'s own <SUB_TASKS> (title + status + peek) + the SYSTEM rule; absent when none', () => {
+    const { system, user } = buildInterpretMessages('how many of my sub-tasks are billing?', {
+      subTasks: [{ title: '#64775 Switches', status: 'done', summary: 'Billing dispute — refunded.' }],
+    });
+    assert.match(user, /<SUB_TASKS/);
+    assert.match(user, /#64775 Switches \[done\] — Billing dispute/);
+    assert.match(system, /SUB_TASKS:/);
+    assert.doesNotMatch(buildInterpretMessages('x', {}).user, /<SUB_TASKS/);
+  });
+
   it('marks an irreversible capability for the model', () => {
     const { user } = buildInterpretMessages('x', { retrieved: [{ capabilityId: 'cap-buy', name: 'Buy it', reversible: false }] });
     assert.match(user, /IRREVERSIBLE/);

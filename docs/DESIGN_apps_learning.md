@@ -123,6 +123,12 @@ we don't rebuild it.
    (mirror the OUTCOMES store). The global-vs-scoped split (§8) lands here.
 3. **AL-3 — write-back hooks.** At observe-points (a 👎/edit/correction, a postcondition mismatch) re-encode → a
    belief or delta. The fast path: a new delta is loadable next cycle.
+   - ✅ **AL-3e — the OUTCOME hook (v2.74.1251).** The act's RESULT is banked at its real verdict (`_orchRun`'s
+     success/failure branches + the connector `_ilRunBuiltin` return), superseding the dispatch-time bank that fired
+     before the run. SUCCESS → an `observed` intent→capability belief (0.7) — so a 2nd success ratchets it to
+     `confirmed` (AL-5). FAILURE → a low-confidence (0.4) mismatch DELTA, keyed separately so it can't corroborate the
+     positive (the store has no un-corroborate). The neutral `ran:false` / `ignoredKeys` paths bank nothing. The app
+     now learns *what worked*, not just *what was asked*. (`Core/goalMemory.capabilityOutcomeItem`, pure + tested.)
    - ⚠ **Injection boundary (AL-3d).** Today's hooks bank only TRUSTED bodies — the user's own ask (capability-
      association) and authored `remember:` rules — so the `<LEARNED>` block (AL-4) is genuinely trusted. The
      moment AL-3d banks a **read-surfaced fact** (e.g. a value scraped from a ticket) the body is **untrusted page
@@ -133,6 +139,11 @@ we don't rebuild it.
    task-conditional retrieval over beliefs/deltas + lazy detail. Feeds the interpret call's `conversationContext`.
 5. **AL-5 — tiered promotion (reuse §4's gate).** Route promotion through the existing trial/accept confidence gate;
    HITL at canonization (constraint §7).
+   - ✅ **Write-time ratchet (v2.74.1251).** The promotion gate was *defined but never called* — every belief sat at
+     `observation` forever, accruing evidence that drove nothing. `recordGoalItem` now SETTLES the just-corroborated
+     item up the gates it clears (`Core/goalStore.settleItemInList`), stopping before the HITL `canonical` step. So a
+     2nd corroboration (evidence ≥2 ∧ confidence ≥0.7) graduates `hypothesis → confirmed` automatically, and recall
+     (tier-ranked) surfaces confirmed associations first — for free, no retrieval change. Canonization stays HITL.
 6. **AL-6 — slow consolidation (§5).** A periodic pass: consolidate confirmed→canonical, roll up summaries, compact.
 7. **Deferred / backend:** autonomous firing of standing-rule deltas on a **cadence** (the interface→backend split,
    `DESIGN_conversations.md` decision #3); cross-app belief sharing.

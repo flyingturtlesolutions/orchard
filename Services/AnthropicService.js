@@ -5234,7 +5234,7 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    * @param {{ ask:string, retrieved?:Array, primitives?:Array, affordances?:string, seed?:string }} args
    * @returns {Promise<object>} the parsed raw decision
    */
-  static async interpret({ ask, retrieved, primitives, affordances, seed, target, connections, learned, objects } = {}) {
+  static async interpret({ ask, retrieved, primitives, affordances, seed, target, connections, learned, objects, subTasks } = {}) {
     const { system, user } = buildInterpretMessages(ask, {
       retrieved: Array.isArray(retrieved) ? retrieved : [],
       primitives: Array.isArray(primitives) ? primitives : [],
@@ -5243,6 +5243,7 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
       connections: Array.isArray(connections) ? connections : [],       // AS-4 — its full connected set
       learned: learned || '',   // AL-4 — the app's learned rules + recall
       objects: objects || '',    // OM — the app's object model (schema)
+      subTasks: Array.isArray(subTasks) ? subTasks : [],   // CV-4-reduce — THIS app's own children + their latest results
     });
     const res = await AnthropicService.#call(system, user, 1024, [], { role: 'routing', operation: 'interpret' });
     if (!res || res.success === false) return { ...parseInterpretOutput(null), why: 'interpret-unavailable' };
@@ -5305,9 +5306,9 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    * nav/tab abilities (Core/answerPrompt.js fences the capability list as data). @param {{ask:string,
    * capabilities:Array<object>}} args  @returns {Promise<string|null>}
    */
-  static async answerAsk({ ask, capabilities, affordances, coverage, url, seed, connections, learned, objects } = {}) {
+  static async answerAsk({ ask, capabilities, affordances, coverage, url, seed, connections, learned, objects, subTasks } = {}) {
     if (!(await AnthropicService.hasLlm())) return null;
-    const { system, user } = buildAnswerMessages({ ask, capabilities: Array.isArray(capabilities) ? capabilities : [], affordances, coverage, url, seed: seed || '', connections: Array.isArray(connections) ? connections : [], learned: learned || '', objects: objects || '' });   // CV-2b — seed → persona; AS-4 — connected sites; AL-4 — learned; OM — object model
+    const { system, user } = buildAnswerMessages({ ask, capabilities: Array.isArray(capabilities) ? capabilities : [], affordances, coverage, url, seed: seed || '', connections: Array.isArray(connections) ? connections : [], learned: learned || '', objects: objects || '', subTasks: Array.isArray(subTasks) ? subTasks : [] });   // CV-2b — seed → persona; AS-4 — connected sites; AL-4 — learned; OM — object model; CV-4-reduce — own sub-tasks
     const res = await AnthropicService.#call(system, user, 700, [], { role: 'describe', operation: 'il-answer' });   // room for a substantive, reflective answer
     return (res && res.success !== false && typeof res.text === 'string' && res.text.trim()) ? res.text.trim() : null;
   }

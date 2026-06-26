@@ -16,7 +16,7 @@
  */
 
 import { goalMemoryStorageKey, goalMemorySyncRecord } from './GoalMemorySyncRecords.js';
-import { addItem, promoteItemInList, capItems } from '../../Core/goalStore.js';
+import { addItem, promoteItemInList, capItems, settleItemInList, goalItemId } from '../../Core/goalStore.js';
 
 const GOAL_MEMORY_CAP = 200;   // bounded growth — capItems protects canonical/summary, prunes the cheap tiers
 
@@ -65,7 +65,11 @@ export async function recordGoalItem(appId, raw) {
   if (!appId) return [];
   return _chained(appId, async () => {
     const items = await loadGoalItems(appId);
-    const next = capItems(addItem(items, raw), GOAL_MEMORY_CAP);
+    const added = addItem(items, raw);
+    // AL-5 — TURN THE RATCHET on write: settle the just-corroborated item up the gates it now clears (a 2nd success →
+    // confirmed) instead of leaving it stuck at 'observation'. Stops before the HITL canonical step (settleItemInList).
+    const id = goalItemId(raw);
+    const next = capItems(id ? settleItemInList(added, id) : added, GOAL_MEMORY_CAP);
     await _writeGoalMemory(appId, next);
     return next;
   });

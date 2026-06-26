@@ -4,7 +4,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  goalItemKey, goalItemId, addItem, promoteItemInList, removeItem, queryItems, rollupGoalMemory, capItems, consolidateGoalMemory,
+  goalItemKey, goalItemId, addItem, promoteItemInList, settleItemInList, removeItem, queryItems, rollupGoalMemory, capItems, consolidateGoalMemory,
 } from './goalStore.js';
 
 const belief = (body, over = {}) => ({ kind: 'belief', body, ...over });
@@ -153,5 +153,22 @@ describe('goalStore — consolidateGoalMemory (AL-6, the slow pass)', () => {
     const out = consolidateGoalMemory(l, { cap: 3 });
     assert.equal(out.length, 3);
     assert.ok(out.some((x) => x.tier === 'summary'));              // the canonical was rolled to summary + survived the cap (protected)
+  });
+});
+
+describe('goalStore — settleItemInList (AL-5 write-time ratchet)', () => {
+  it('corroboration (evidence ≥2 ∧ confidence ≥0.7) settles observation → confirmed; STOPS before HITL canonical', () => {
+    let l = addItem([], belief('show tickets', { confidence: 0.7 }));   // evidence 1, observation
+    l = addItem(l, belief('show tickets', { confidence: 0.7 }));        // evidence 2 — corroborated
+    const id = goalItemId(belief('show tickets'));
+    assert.equal(settleItemInList(l, id).find((x) => x.id === id).tier, 'confirmed');
+  });
+  it('a single observation (evidence 1) settles ONLY to hypothesis (confirmed needs ≥2 evidence)', () => {
+    const l = addItem([], belief('one-off', { confidence: 0.7 }));
+    const id = goalItemId(belief('one-off'));
+    assert.equal(settleItemInList(l, id).find((x) => x.id === id).tier, 'hypothesis');
+  });
+  it('missing id → list unchanged', () => {
+    assert.equal(settleItemInList(addItem([], belief('x')), 'nope').length, 1);
   });
 });

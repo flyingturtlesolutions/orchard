@@ -706,6 +706,11 @@ export function createSgMessageHandlers(ctx) {
         const connections = Array.isArray(payload?.connections)
           ? payload.connections.filter((c) => c && typeof c === 'object' && c.origin).map((c) => ({ origin: String(c.origin), label: String(c.label || c.origin) }))
           : [];
+        // CV-4-reduce — THIS app's OWN sub-task conversations + each one's latest-result peek (panel-sent, bounded to
+        // the app's children). UNTRUSTED message text → the prompt fences it as data; coerce to plain strings here.
+        const subTasks = Array.isArray(payload?.subTasks)
+          ? payload.subTasks.filter((s) => s && typeof s === 'object').map((s) => ({ title: String(s.title || ''), summary: String(s.summary || ''), status: String(s.status || '') })).slice(0, 80)
+          : [];
         let caps = [];
         if (groundId) { try { caps = ((await ctx.readSgCapabilities(groundId)) || []).filter((c) => c && isActiveCapability(c) && c.kind !== 'composite'); } catch { caps = []; } }
         // CX-4c — the app's CONNECTED session-ride recipes (scoped to its `connections`, the AS-4 set) become
@@ -736,7 +741,7 @@ export function createSgMessageHandlers(ctx) {
         let learned = '';
         if (memId) { try { learned = goalContextFor(await loadGoalItems(memId), ask, { om }); } catch { /* */ } }
         const objects = describeObjectModel(om);
-        const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed, target, connections, learned, objects });
+        const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed, target, connections, learned, objects, subTasks });
         Logger.info('route', `INTERPRET_ASK "${ask.slice(0, 60)}" → ${decision.intent} (conf ${decision.confidence}, ${retrieved.length} cand, ground ${groundId || '—'})`);
         sendResponse({ success: true, decision, groundId: groundId || null, retrieved });
       } catch (err) {
@@ -804,6 +809,9 @@ export function createSgMessageHandlers(ctx) {
         const connections = Array.isArray(payload?.connections)   // AS-4 — the app's connected sites → the answer's reach
           ? payload.connections.filter((c) => c && typeof c === 'object' && c.origin).map((c) => ({ origin: String(c.origin), label: String(c.label || c.origin) }))
           : [];
+        const subTasks = Array.isArray(payload?.subTasks)   // CV-4-reduce — THIS app's own children + their latest results (untrusted; fenced as data)
+          ? payload.subTasks.filter((s) => s && typeof s === 'object').map((s) => ({ title: String(s.title || ''), summary: String(s.summary || ''), status: String(s.status || '') })).slice(0, 80)
+          : [];
         const appId = String(payload?.appId ?? '').trim();   // AL-4 — the app's TYPE (object-model resolve; off-app → '')
         const memId = String(payload?.memoryId ?? '').trim() || appId;   // AP-0 (v2.74.1213) — the per-INSTANCE goal-memory key (falls back to the type for legacy apps)
         let tabUrl = '';
@@ -830,7 +838,7 @@ export function createSgMessageHandlers(ctx) {
         let learned = '';
         if (memId) { try { learned = goalContextFor(await loadGoalItems(memId), ask, { om }); } catch { /* */ } }
         const objects = describeObjectModel(om);
-        const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed, connections, learned, objects });
+        const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed, connections, learned, objects, subTasks });
         // PS-0 (v2.74.1123) — persist Orchard's capability-gap enumeration instead of discarding it: the durable,
         // per-Ground DEMAND signal PS-1 arms into the interaction monitor for passive harvest. Non-fatal/best-effort.
         try {

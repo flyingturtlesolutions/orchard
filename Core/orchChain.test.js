@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites, namesAnySite, isForeachAsk, isFanoutAsk } from './orchChain.js';
+import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites, namesAnySite, isForeachAsk, isFanoutAsk, innerDirective } from './orchChain.js';
 import { validatePlan } from './orchPlan.js';
 import { walkPlan } from './orchRun.js';   // ORCH-L — the pure interpreter, to RUN the lifted open-each loop end-to-end
 
@@ -22,6 +22,20 @@ describe('orchChain — isFanoutAsk (CV-4-full: foreach over a read → conversa
     assert.equal(isFanoutAsk('get my open tickets'), false, 'no quantifier → not a foreach at all');
     assert.equal(isFanoutAsk('start a new conversation'), false, 'a conversation noun without "each" is not a fan-out');
     assert.equal(isForeachAsk('open each in a new conversation'), true, 'still a foreach (the broader gate)');
+  });
+});
+
+describe('orchChain — innerDirective (CV-4-map: the per-child task inside a fan-out)', () => {
+  it('extracts the action verb-phrase before the fan-out wrapper', () => {
+    assert.equal(innerDirective('research each in a new conversation'), 'research');
+    assert.equal(innerDirective('summarize each ticket in its own conversation'), 'summarize');
+    assert.equal(innerDirective('get the latest comment on each ticket in a new conversation'), 'get the latest comment on');
+  });
+  it('a bare open/start/create fan-out has no task → "" (just open the children)', () => {
+    assert.equal(innerDirective('open each in a new conversation'), '');
+    assert.equal(innerDirective('start each one in its own subtask'), '');
+    assert.equal(innerDirective('create a conversation for each'), '');
+    assert.equal(innerDirective(''), '');
   });
 });
 

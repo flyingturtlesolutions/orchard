@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {
   ITEM_KINDS, EPISTEMIC, TIERS, tierRank, nextTier,
   normalizeBelief, normalizeDelta, normalizeMemoryItem, isBelief, isDelta,
-  canPromote, promote, standingRuleFromText,
+  canPromote, promote, standingRuleFromText, capabilityOutcomeItem,
 } from './goalMemory.js';
 
 describe('goalMemory — enums + tier helpers', () => {
@@ -163,5 +163,29 @@ describe('goalMemory — promote (copy-on-write)', () => {
   });
   it('garbage → null', () => {
     assert.equal(promote({ body: 'no kind' }, { confirmedByHuman: true }), null);
+  });
+});
+
+describe('goalMemory — capabilityOutcomeItem (AL-3e, the outcome hook)', () => {
+  it('SUCCESS → an OBSERVED belief (0.7) keyed by ask→capability (so a 2nd success ratchets it)', () => {
+    const it = capabilityOutcomeItem('show my open tickets', 'cap-123', true);
+    assert.equal(it.kind, 'belief');
+    assert.equal(it.epistemic, 'observed');
+    assert.equal(it.confidence, 0.7);
+    assert.equal(it.ref, 'cap-123');
+    assert.equal(it.body, 'show my open tickets');
+    assert.equal(it.provenance, 'act-ok');
+  });
+  it('FAILURE → a low-confidence mismatch DELTA (distinct kind → never corroborates the positive belief)', () => {
+    const it = capabilityOutcomeItem('show my open tickets', 'cap-123', false);
+    assert.equal(it.kind, 'delta');
+    assert.equal(it.confidence, 0.4);
+    assert.equal(it.trigger, 'show my open tickets');
+    assert.equal(it.ref, 'cap-123');
+    assert.equal(it.provenance, 'act-fail');
+  });
+  it('missing goal or capabilityId → null (no-op)', () => {
+    assert.equal(capabilityOutcomeItem('', 'cap-1', true), null);
+    assert.equal(capabilityOutcomeItem('x', '', true), null);
   });
 });

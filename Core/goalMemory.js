@@ -112,6 +112,28 @@ export function standingRuleFromText(text) {
   return normalizeDelta({ body, trigger, confidence: 0.85, tier: 'confirmed', provenance: 'user-rule' });
 }
 
+/**
+ * AL-3e (the OUTCOME hook) — the goal-memory item recording an interpret-ACT's RESULT. PURE. This is the missing
+ * "learn what WORKED" write-back (§3): the app learned *what was asked* (AL-3b banks the association at dispatch) but
+ * not *what succeeded*. Here:
+ *   • SUCCESS → an OBSERVED belief (the intent→capability association, witnessed to work). confidence 0.7 so a SECOND
+ *     success crosses the hypothesis→confirmed gate (≥0.7 ∧ evidence ≥2) and the association graduates — corroboration
+ *     by OUTCOME, not by mere re-asking.
+ *   • FAILURE → a low-confidence "lesson" DELTA (a prediction↔ground-truth mismatch, §2), keyed SEPARATELY from the
+ *     belief (kind 'delta' ≠ 'belief' → distinct content id) so it can never corroborate the positive — the store has
+ *     no un-corroborate. Confidence is deliberately weak (0.4): one transient failure must not bury a good tool; only
+ *     REPEATED failure of the same ask→capability accrues. Recall surfaces it as "this didn't work here — reconsider".
+ * `goal` = the ask phrasing (the recall key, truncated). `capabilityId` = the tool. Returns null on missing args.
+ */
+export function capabilityOutcomeItem(goal, capabilityId, ok) {
+  const g = _str(goal);
+  const ref = _str(capabilityId);
+  if (!g || !ref) return null;
+  return ok
+    ? { kind: 'belief', epistemic: 'observed', confidence: 0.7, body: g.slice(0, 160), ref, provenance: 'act-ok' }
+    : { kind: 'delta', confidence: 0.4, trigger: g.slice(0, 120), body: 'a saved capability was tried for this and didn\'t work — re-teach or pick a different approach', ref, provenance: 'act-fail' };
+}
+
 // The per-target-tier promotion gate (the ratchet, §4). `s` = normalized signals. Cheap to hypothesize; corroborated
 // to confirm; HITL to canonize (§7 — confidence alone never canonizes); consolidation-only to summarize (§5).
 function _gateFor(target, s) {

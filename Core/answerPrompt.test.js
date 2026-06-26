@@ -43,6 +43,18 @@ describe('buildAnswerMessages — answer a meta ask, grounded in real page conte
     assert.match(user, /COVERAGE: 3\/10 .* \(30% taught\)/);
   });
 
+  it('CV-4-reduce — lists THIS app\'s own sub-tasks + their results, with the BASE rule to reason FROM them', () => {
+    const { system, user } = buildAnswerMessages({
+      ask: 'how many of my sub-tasks are billing?',
+      subTasks: [{ title: '#64775 Switches', status: 'done', summary: 'Billing dispute — refund issued.' }, { title: '#64776 Crash', status: 'needs-you' }],
+    });
+    assert.match(user, /<SUB_TASKS/);
+    assert.match(user, /#64775 Switches \[done\] — Billing dispute/);
+    assert.match(user, /#64776 Crash \[needs-you\]/);
+    assert.match(system, /SUB_TASKS/);                                   // the reason-from-your-children rule lives in BASE
+    assert.doesNotMatch(buildAnswerMessages({ ask: 'x' }).user, /<SUB_TASKS/);   // none → block omitted
+  });
+
   it('empty context → graceful placeholders', () => {
     const { user } = buildAnswerMessages({ ask: 'help' });
     assert.match(user, /none saved on this page yet/);

@@ -279,6 +279,20 @@ export function isFanoutAsk(ask) {
   return isForeachAsk(s) && /\b(conversations?|sub-?tasks?)\b/i.test(s);
 }
 
+/** The per-child DIRECTIVE inside a fan-out ask (CV-4-map): the action to run IN each child. PURE. Strips the
+ *  fan-out wrapper ("… each [noun] in a/its own/a new/separate conversation/sub-task"); what's left is the task.
+ *  "research each in a new conversation" → "research". A bare "open/start each …" → '' (just open them, nothing to
+ *  auto-run). The caller appends the item to bind it: `${directive} ${itemLabel}`. */
+export function innerDirective(ask) {
+  let s = String(ask || '').trim();
+  s = s.replace(/\b(in|into)\b[\s\S]*$/i, '');     // drop the "in a new conversation …" tail
+  s = s.replace(/\beach\b[\s\S]*$/i, '');          // drop "each [noun] …" onward
+  s = s.replace(/[\s,]*\b(and|then)\b[\s,]*$/i, '').replace(/[\s,]+$/,'').trim();
+  const verb = s.toLowerCase().replace(/[^a-z ]/g, '').trim();
+  if (!verb || /^(open|start|create|make|spin\s*up|spawn|fan\s*out)\b/.test(verb)) return '';
+  return s;
+}
+
 /**
  * Lift a FLAT compound plan into a CONTROL-FLOW plan when the ask quantifies over a collection. PURE — the
  * comprehension floor (the LLM may refine; this is the deterministic lift). The collection = the FIRST
