@@ -44,21 +44,38 @@ async function _fetchRideRecipes(groundId, origin) {
 
 // §18 — the RIDE class glance card (the Ground panel is glance + deep-link; full edit lives in Studio's Ride section).
 // Lists recipes with a safety badge + disabled/pending markers, a count, and the pending-review tally. UNTRUSTED → escaped.
+// §18 — one recipe row for the panel, mirroring the fragment ENTRY (gv-entry: name + chips + description). UNTRUSTED → escaped.
+function _renderRideEntry(r) {
+  const badge = r.safetyClass === 'destructive' ? '🔴' : (r.safetyClass === 'gated' ? '🟡' : '🟢');
+  const off = (r.enabled === false) ? ' gv-ride-off' : '';
+  const pend = (r.reviewState === 'pending') ? '<span class="gv-ride-pending">pending</span>' : '';
+  const prov = (r.provenance && r.provenance !== 'curated') ? `<span class="gv-ride-prov">${escHtml(r.provenance)}</span>` : '';
+  return `
+    <div class="fragment-row gv-entry gv-ride-entry${off}">
+      <div class="fragment-row-main">
+        <span class="gv-ride-badge" title="${escAttr(r.safetyClass || 'auto')}">${badge}</span>
+        <span class="fragment-name">${escHtml(r.name || r.id || '')}</span>
+        <span class="gv-ride-method">${escHtml(String(r.method || 'GET'))}</span>
+        ${prov}${pend}
+      </div>
+      ${r.does ? `<div class="fragment-desc" style="white-space:pre-line">${escHtml(r.does)}</div>` : ''}
+    </div>`;
+}
+
+// §18 — the RIDE class card for the panel: mirrors the fragments section card EXACTLY (rendered through _renderSection —
+// same collapse chevron, head, count, list). Display-only here (full edit is in Studio's Ride section); a pending tally
+// reminds the user where to review. The empty/seed-on-first-access flow is handled by GET_RIDE_RECIPES upstream.
 function _renderRideCard(recipes, groundId) {
   const list = Array.isArray(recipes) ? recipes : [];
   const pending = list.filter((r) => r && r.reviewState === 'pending').length;
-  const rows = list.slice(0, 40).map((r) => {
-    const badge = r.safetyClass === 'destructive' ? '🔴' : (r.safetyClass === 'gated' ? '🟡' : '🟢');
-    const off = (r.enabled === false) ? ' gv-ride-off' : '';
-    const pend = (r.reviewState === 'pending') ? ' <span class="gv-ride-pending">pending</span>' : '';
-    const prov = (r.provenance && r.provenance !== 'curated') ? ` <span class="gv-ride-prov">${escHtml(r.provenance)}</span>` : '';
-    return `<li class="gv-ride-row${off}"><span class="gv-ride-badge" title="${escAttr(r.safetyClass || 'auto')}">${badge}</span> <span class="gv-ride-name">${escHtml(r.name || r.id || '')}</span> <span class="gv-ride-method">${escHtml(String(r.method || 'GET'))}</span>${prov}${pend}</li>`;
-  }).join('');
-  return `<section class="gv-card gv-ride-card" data-gv-ride="${escAttr(groundId)}">`
-    + `<header class="gv-card-head"><span class="gv-card-title">Ride · Recipes</span><span class="gv-card-count">${list.length}${pending ? ` · ${pending} pending` : ''}</span></header>`
-    + `<ul class="gv-ride-list">${rows || '<li class="gv-feed-empty">No ride recipes — connect a session-ride app, or harvest them.</li>'}</ul>`
-    + (pending ? `<div class="gv-ride-hint">Review the ${pending} pending in Studio → this Ground's Ride section.</div>` : '')
-    + '</section>';
+  return _renderSection({
+    key: 'recipes',
+    label: 'Ride · Recipes',
+    count: pending ? `${list.length} · ${pending} pending` : list.length,
+    groundId,
+    emptyMsg: 'No ride recipes — connect a session-ride app, or harvest them.',
+    entries: list.slice(0, 60).map(_renderRideEntry),
+  });
 }
 
 let _mountEl = null;

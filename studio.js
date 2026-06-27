@@ -40,32 +40,56 @@ import { rideSection } from './Core/groundToolSurface.js';   // §18 — the Rid
 // §18 (v2.74.1268, DESIGN_connectors.md) — a Ground's tool surface is grouped by execution CLASS: Drive (the grounded
 // page substrates) · Ride (session-ride recipes) · Broker (OAuth/MCP, later). A class divider is a lightweight header
 // row ABOVE the substrate sections — Ride is a PEER of Drive, not of Fragments. PURE DOM builder.
-function _classDivider(label, { pending = 0, placeholder = false } = {}) {
+// §18 (v2.74.1269) — a COLLAPSIBLE class header (mirrors the Ground header: chevron + label + brief description). Click
+// the chevron to hide every substrate section that follows it, up to the next class header (the sections are siblings,
+// so the toggle walks nextElementSibling until the next `.ground-class-divider`). PURE-ish DOM builder + its own toggle.
+function _classDivider(label, { desc = '', pending = 0, placeholder = false } = {}) {
   const row = document.createElement('div');
   row.className = 'ground-class-divider';
-  row.innerHTML = `<strong class="ground-class-label">${escHtml(label)}</strong>`
+  row.innerHTML = `<button class="ground-class-collapse" type="button" aria-expanded="true" title="Collapse / expand ${escAttr(label)}"><span class="ground-class-chevron">▾</span></button>`
+    + `<strong class="ground-class-label">${escHtml(label)}</strong>`
     + (pending ? ` <span class="ground-class-pending" title="${pending} pending review">${pending} pending</span>` : '')
+    + (desc ? ` <span class="ground-class-desc">${escHtml(desc)}</span>` : '')
     + (placeholder ? ' <span class="empty-state small">— not connected yet</span>' : '');
+  row.querySelector('.ground-class-collapse').addEventListener('click', (e) => {
+    const btn = e.currentTarget;
+    const collapsed = row.classList.toggle('ground-class-collapsed');
+    btn.setAttribute('aria-expanded', String(!collapsed));
+    const chev = btn.querySelector('.ground-class-chevron'); if (chev) chev.textContent = collapsed ? '▸' : '▾';
+    let el = row.nextElementSibling;
+    while (el && !el.classList.contains('ground-class-divider')) { el.hidden = collapsed; el = el.nextElementSibling; }
+  });
   return row;
 }
 
 const _RIDE_SAFETY_BADGE = { auto: '🟢 auto', gated: '🟡 gated', destructive: '🔴 destructive' };
-// §18 — one recipe row: enable toggle · safety badge · name (method+endpoint on hover) · method · provenance · does ·
-// review buttons (only when pending). UNTRUSTED display data → escaped. The edits route through the guarded handler.
+const _RIDE_CRUD_FOR_METHOD = { GET: 'read', POST: 'create', PUT: 'update', PATCH: 'update', DELETE: 'delete' };
+// §18 (v2.74.1269) — a recipe row mirrors the fragment/strategy CARD format: a head line (enable toggle · name · CRUD
+// chip · safety chip · provenance) · a description (does) · params · an action row ({ } JSON view toggle + accept/reject
+// when pending) · a hidden <pre> with the recipe JSON. UNTRUSTED display data → escaped. Edits route through the handler.
 function _rideRecipeRowHtml(r) {
-  const badge = _RIDE_SAFETY_BADGE[r.safetyClass] || escHtml(r.safetyClass);
-  const prov = r.provenance !== 'curated' ? ` <span class="ride-prov">${escHtml(r.provenance)}</span>` : '';
+  const safety = _RIDE_SAFETY_BADGE[r.safetyClass] || escHtml(r.safetyClass);
+  const crud = _RIDE_CRUD_FOR_METHOD[String(r.method || 'GET').toUpperCase()] || 'read';
+  const prov = r.provenance !== 'curated' ? `<span class="ride-chip ride-prov">${escHtml(r.provenance)}</span>` : '';
+  const params = (Array.isArray(r.params) && r.params.length)
+    ? `<div class="ride-recipe-params">params: ${r.params.map((p) => escHtml(typeof p === 'string' ? p : ((p && p.name) || ''))).filter(Boolean).join(', ')}</div>`
+    : '';
   const review = r.reviewState === 'pending'
-    ? `<button class="btn-action" data-ride-op="review" data-ride-val="accept" data-rid="${escAttr(r.id)}" title="Accept — make this recipe armable">✓</button>`
+    ? `<button class="btn-action" data-ride-op="review" data-ride-val="accept" data-rid="${escAttr(r.id)}" title="Accept — make this recipe armable">✓ accept</button>`
       + `<button class="btn-action danger" data-ride-op="review" data-ride-val="reject" data-rid="${escAttr(r.id)}" title="Reject">✕</button>`
     : '';
-  return `<div class="ride-recipe-row${r.enabled ? '' : ' ride-disabled'}${r.reviewState === 'pending' ? ' ride-pending' : ''}">`
-    + `<input type="checkbox" data-ride-op="enable" data-rid="${escAttr(r.id)}"${r.enabled ? ' checked' : ''} title="Enable / disable">`
-    + ` <span class="ride-safety">${badge}</span>`
-    + ` <span class="ride-name" title="${escAttr(r.method + ' ' + r.endpoint)}">${escHtml(r.name)}</span>`
-    + ` <span class="ride-method">${escHtml(r.method)}</span>${prov}`
-    + ` <span class="ride-does">${escHtml(r.does)}</span>`
-    + ` <span class="ride-actions">${review}</span>`
+  const json = escHtml(JSON.stringify({ id: r.id, method: r.method, endpoint: r.endpoint, params: r.params, safetyClass: r.safetyClass, provenance: r.provenance, reviewState: r.reviewState }, null, 2));
+  return `<div class="ride-recipe-row${r.enabled ? '' : ' ride-disabled'}${r.reviewState === 'pending' ? ' ride-pending' : ''}" data-rid="${escAttr(r.id)}">`
+    + `<div class="ride-recipe-head">`
+    + `<label class="ride-enable" title="Enable / disable"><input type="checkbox" data-ride-op="enable" data-rid="${escAttr(r.id)}"${r.enabled ? ' checked' : ''}></label>`
+    + `<span class="ride-recipe-name" title="${escAttr(String(r.method || 'GET') + ' ' + (r.endpoint || ''))}">${escHtml(r.name || r.id)}</span>`
+    + `<span class="ride-chip ride-crud ride-crud-${escAttr(crud)}">${escHtml(crud)}</span>`
+    + `<span class="ride-chip ride-safety ride-safety-${escAttr(r.safetyClass)}">${safety}</span>${prov}`
+    + `</div>`
+    + (r.does ? `<div class="ride-recipe-desc">${escHtml(r.does)}</div>` : '')
+    + params
+    + `<div class="ride-recipe-actions"><button class="btn-action" data-ride-op="json" data-rid="${escAttr(r.id)}" title="View JSON (read-only)">{ }</button>${review}</div>`
+    + `<pre class="ride-recipe-json" data-ride-json="${escAttr(r.id)}" hidden>${json}</pre>`
     + '</div>';
 }
 
@@ -76,13 +100,13 @@ function _rideRecipeRowHtml(r) {
 function _renderRideClass(card, ground) {
   let origin = '';
   try { origin = new URL(ground.url || ground.origin || ground.homeUrl || '').host; } catch { origin = String(ground.origin || ground.host || ''); }
-  card.appendChild(_classDivider('Ride'));
+  card.appendChild(_classDivider('Ride', { desc: "Session-ride recipes — the app's own API, called by riding your login." }));
   const row = document.createElement('div');
   row.className = 'ground-section-row ground-ride-row';
   row.innerHTML = '<div class="ground-section-head"><span class="ground-section-label">Recipes</span><span class="ground-section-count" data-ride-count>…</span></div>'
     + '<div class="ground-section-body" data-ride-body><span class="empty-state small">Loading ride recipes…</span></div>';
   card.appendChild(row);
-  card.appendChild(_classDivider('Broker', { placeholder: true }));
+  card.appendChild(_classDivider('Broker', { desc: 'OAuth / MCP connectors.', placeholder: true }));
 
   const render = async () => {
     let recipes = [];
@@ -99,6 +123,10 @@ function _renderRideClass(card, ground) {
       ? sec.entries.map(_rideRecipeRowHtml).join('')
       : '<span class="empty-state small">No ride recipes yet — connect a session-ride app, or harvest them (§17).</span>';
     body.querySelectorAll('[data-ride-op]').forEach((el) => {
+      if (el.dataset.rideOp === 'json') {   // §18 — { } toggles the inline JSON <pre> (no message; the record is already loaded)
+        el.addEventListener('click', () => { const pre = el.closest('.ride-recipe-row')?.querySelector('.ride-recipe-json'); if (pre) pre.hidden = !pre.hidden; });
+        return;
+      }
       el.addEventListener(el.type === 'checkbox' ? 'change' : 'click', async () => {
         const op = el.dataset.rideOp;
         const value = op === 'enable' ? el.checked : (el.dataset.rideVal || '');
@@ -2828,7 +2856,7 @@ async function _renderGroundCard(ground, { list, localeMap }) {
     });
     groupHeader.querySelector('[data-action="discover"]').addEventListener('click', () => startDiscovery(ground.id));
     card.appendChild(groupHeader);
-    card.appendChild(_classDivider('Drive'));   // §18 — the DRIVE class header; the substrate sections below (Fragments/Perspectives/…) are its members
+    card.appendChild(_classDivider('Drive', { desc: 'Grounded page capabilities — fragments, perspectives, landmarks, strategies.' }));   // §18 — the DRIVE class header; the substrate sections below are its members
 
     // Fragments stub row — wired in Pass B
     const fragRow = document.createElement('div');
