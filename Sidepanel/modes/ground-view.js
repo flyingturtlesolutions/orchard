@@ -1185,7 +1185,7 @@ function _wireHandlers(grounds) {
         sessionTabId = typeof t?.id === 'number' ? t.id : null;
       } catch { /* */ }
       const res = await new Promise((r) => chrome.runtime.sendMessage({ type: 'FORAGE', payload: { groundId, sessionTabId } }, r));
-      if (res?.success && res.armed) { _forageArmed.add(groundId); toast('Foraging armed — open a few sections of your app, then click ⛏ again to bank'); await _renderList(); }
+      if (res?.success && res.armed) { _forageArmed.add(groundId); toast('Foraging — your app tab reloads to capture; open a few sections, then click ⛏ to bank'); await _renderList(); }
       else if (res?.success && res.banking) { toast('Banking foraged reads…'); /* FORAGE_COMPLETE finishes + re-renders */ }
       else { _forageArmed.delete(groundId); toast(`Forage: ${res?.error ?? 'failed'}`, 'err'); btn.disabled = false; }
     });

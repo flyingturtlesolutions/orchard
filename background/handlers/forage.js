@@ -140,8 +140,14 @@ export async function armForage({ groundId = '', sessionTabId = null } = {}) {
   const hr = await startHarvestSession({ groundId, host, appHost: host, origin: host, tabId: sessionTabId });
   if (!hr.ok) { Logger.info('background', `FORAGE not armed: ${hr.error} (ground ${groundId})`); return { ok: false, error: hr.error }; }
   _forageArmed.set(groundId, { tabId: sessionTabId, host });
-  try { await chrome.scripting.executeScript({ target: { tabId: sessionTabId, frameIds: [0] }, func: _forageSpaDriverFunc, args: [MAX_VISITS] }); } catch { /* best-effort kick */ }
-  Logger.info('ride', `FORAGE ▸ armed (passive) on ${host} — capturing the user's reads until bank (ground ${groundId})`);
+  // CAPTURE THE BOOT (v2.74.1285): reload the tab so the document_start tee wraps fetch/XHR BEFORE the app's bundle grabs
+  // its own reference — a late in-place inject is BYPASSED by apps that capture fetch at load (the Deako SPA does; verified
+  // live). The tee's sessionStorage sink survives the reload, so nothing is lost; the (re-auth'd) boot's authenticated API
+  // reads accumulate, then the user navigates more. We never touch auth: a silent-refresh app stays in, a login-gated one
+  // just re-logs-in — either way the document_start tee captures. This is the universal-correct capture timing (the in-
+  // place inject only worked for apps that call window.fetch directly / use XHR-via-prototype).
+  try { await chrome.tabs.reload(sessionTabId); } catch (e) { Logger.warn('background', `FORAGE reload failed (continuing): ${e.message}`); }
+  Logger.info('ride', `FORAGE ▸ armed (passive, reloaded for document_start capture) on ${host} (ground ${groundId})`);
   return { ok: true, armed: true };
 }
 
