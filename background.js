@@ -38,6 +38,7 @@ import { deriveCapabilities, deriveAllowedOperations } from './Services/Landmark
 import { createSgMessageHandlers, markEngineBusy } from './background/handlers/sg.js';  // R1 seed — SG handlers behind a registry; markEngineBusy v2.74.911
 import { createExploreHandlers } from './background/handlers/explore.js';  // v2.74.951 (CR-X3a) — the explore domain
 import { createDiscoveryHandlers } from './background/handlers/discovery.js';  // v2.74.952 (CR-X3b) — the discovery domain
+import { createForageHandlers } from './background/handlers/forage.js';  // §19 — Forage: the read-safe nav-following recipe-capture crawler
 import { createWorkflowDebugHandlers } from './background/handlers/workflowDebug.js';  // v2.74.953 (CR-X3c) — the workflow + debugger domain
 import { createConnectorHandlers } from './background/handlers/connector.js';  // v2.74.1151 (CX-3) — the connector domain (session-ride)
 import { createCanvasHandlers } from './background/handlers/canvas.js';  // v2.74.1205 (CA-4) — the canvas domain (RENDER_CANVAS → the presentation tab)
@@ -1713,6 +1714,10 @@ const _sgMessageHandlers = {
     readSiteMap          : _readSiteMap,
     mergeSiteMapForGround: _mergeSiteMapForGround,
     readRideRecipes      : _readRideRecipes,        // §17 (1b) — auto-harvest ride-recipes during the crawl (bank target)
+    writeRideRecipes     : _writeRideRecipes,
+  }),
+  ...createForageHandlers({                          // §19 — Forage (recipe-capture nav crawl); banks into the ride store
+    readRideRecipes      : _readRideRecipes,
     writeRideRecipes     : _writeRideRecipes,
   }),
   ...createExploreHandlers({

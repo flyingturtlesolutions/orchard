@@ -16,6 +16,7 @@ import { DiscoveryService } from '../../Services/DiscoveryService.js';
 import * as SitemapService  from '../../Services/SitemapService.js';
 import { waitForTabComplete } from '../../Services/TabUtils.js';
 import { startHarvestSession, stopHarvestSession } from './sg.js';   // §17 (1b) — auto-harvest ride-recipes during the architecture crawl
+import { runForage } from './forage.js';   // §19 — auto-chain Forage after Discovery (the decided trigger): drive the read-safe nav to harvest the section/param surface
 
 // v2.74.952 (CR-X3b) — the discovery ctx seam contract, asserted at wiring time.
 const REQUIRED_CTX_KEYS = Object.freeze(['readSiteMap', 'mergeSiteMapForGround']);
@@ -287,6 +288,17 @@ export function createDiscoveryHandlers(ctx) {
                 const sr = await stopHarvestSession({ groundId, tabId: existingTabId, readRideRecipes: ctx.readRideRecipes, writeRideRecipes: ctx.writeRideRecipes });
                 Logger.info('ride', `discovery harvest: ${(sr.captures || []).length} capture(s) → banked ${sr.banked || 0} recipe(s) (ground ${groundId})`);
               } catch (e) { Logger.warn('background', `harvest stop/bank failed: ${e.message}`); }
+            }
+            // §19 — AUTO-CHAIN Forage (the decided trigger): Discovery built the frontier + banked landing-reads; Forage
+            // now drives the read-safe nav (sections + a sample of filters/pagination/detail) to harvest the section/param
+            // surface Discovery's breadth missed. Fire-and-forget (it arms its OWN harvest session, sequenced after the
+            // stop above). NOTE: existingTabId is the user's VISIBLE tab (Ground-panel path) — we deliberately do NOT
+            // reuse it: forage drives up to MAX_VISITS navigations, and the §19 "state DISPOSABLE" principle means a
+            // throwaway BACKGROUND tab (active:false, auto-removed), never the user's tab. Read-only + consent-gated inside.
+            if (typeof ctx.readRideRecipes === 'function' && typeof ctx.writeRideRecipes === 'function') {
+              runForage({ groundId, existingTabId: null, readRideRecipes: ctx.readRideRecipes, writeRideRecipes: ctx.writeRideRecipes })
+                .then((r) => { try { Logger.info('ride', `discovery→forage: ${r.visits || 0} page(s) → banked ${r.banked || 0} (ground ${groundId})`); } catch { /* */ } })
+                .catch((e) => { try { Logger.warn('background', `discovery→forage failed: ${e.message}`); } catch { /* */ } });
             }
           }
         })();

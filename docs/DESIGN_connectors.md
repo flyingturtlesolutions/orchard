@@ -276,7 +276,7 @@ Orchard never types the credentials (the injection boundary, §9) — it only br
 
 | | Driver | Cost to user | Why safe |
 |---|---|---|---|
-| **Reads** | **Explore (engine)** — the templated crawl already navigates the app autonomously; each page load fires the app's read APIs → harvest them | **zero** — no task performed | EX-1 destructive-veto keeps the crawl read-only *by construction* |
+| **Reads** | ⚠ **CORRECTED in §19** — this premise ("Explore navigates the app") is FALSE: Explore is nav-guarded and only fires same-page XHR. Reads are harvested by **Discovery** (breadth landing-reads), **Explore** (same-page XHR), and **Forage** (§19 — the purpose-built nav-following read-surface crawler, the primary one). | **zero** — no task performed | EX-1 destructive-veto + §19 read-only allowlist keep it read-only *by construction* |
 | **Writes** | **the user (once)** — demonstrate only the writes worth teaching; CX-8 captures the request | one demo per write | fail-closed HITL forever (§9); **never** engine-fired |
 
 Both proto-recipes pass **generalize → trial-verify → bank** (the OBS flywheel; the trial gate closes the staleness/hallucination hole). Banked recipes land in the same origin-keyed palette the hand catalog feeds (`connectorLegsForConnections`/`recipeForOrigin`).
@@ -339,3 +339,66 @@ Matches §1 (connectors are a tool class) + the [tool lattice](project_router_ov
 → **Then** §17's harvest banks into this collection (`provenance: harvested`, `reviewState: pending`), and the human reviews it here before it is armable.
 
 **Reuse (not net-new machinery):** the `sgCapabilities` per-Ground shape · GA-4 review-lifecycle + arm-guard · GA-3 trust/health · the Studio `ground-section` pattern · §9 method=safety-class. The genuinely new code is `rideRecipe.js` + `groundToolSurface.js` (both pure) + the two render surfaces.
+
+## 19. Forage — the purpose-built recipe-capture explorer (designed 2026-06-27)
+
+**Why a THIRD mode (correcting §17's premise).** §17 assumed *"Explore navigates the app → harvest the reads."* The live pixabay run (v2.74.1279) **disproved it**: Explore is **nav-GUARDED** by construction — the poke sweep `preventDefault()`s every `a[href]`, no-ops `history.pushState`, and aborts on `beforeunload` ([contentScript.js:5215-5222](../ContentScripts/contentScript.js#L5215)), because Explore authors DOM capabilities for the CURRENT page and must keep the user's state sacred. So Explore only ever fires **same-page XHR**; a section like `/videos/` is *never loaded* → never harvested. Discovery navigates but its frontier is sitemap-skewed (it drowned in `/images/search/{q}/` instances and never reached `/videos/`). Three distinct behaviors — and the one that actually maps the read surface is missing:
+
+| mode | navigates? | drives | captures | state sacred? |
+|---|---|---|---|---|
+| **Discovery** | yes (sitemap/link frontier) | nothing (read-only crawl) | each page's LANDING read | n/a (own tab) |
+| **Explore** | **NO** (nav-guarded) | pokes disclosures in place | same-page XHR depth | YES (DOM authoring) |
+| **Forage** *(new)* | **yes — the app's OWN nav** | **read-safe interactions** | **the read-API SURFACE** | **NO (throwaway pass)** |
+
+Forage is built from the ground up for ONE goal: **maximize the app's READ-endpoint coverage for ride-recipe harvest.** The DOM is only the *means* to fire each read; the network is the signal. It does NOT replace Discovery/Explore harvest — those stay as opportunistic ride-alongs (breadth landing-reads · same-page XHR); `mergeRecipes` dedups across all three. Forage is the **primary, targeted** harvester.
+
+**The inversion vs Explore.** Explore: state sacred · network incidental · nav forbidden. Forage: state disposable · network is the whole point · nav required. Opposite contract — so it CANNOT ride Explore. It reuses Explore's *mechanics* (enumerate, settle-wait, the content-script poke) **minus the nav-guard**, plus the §17 tee + bank.
+
+### 19.1 The frontier — what Forage drives
+A bounded tree of READ-firing affordances, all sourced from artifacts Orchard already has:
+1. **Top-level sections** *(breadth)* — the app's own nav menu. Source: `Ground.chrome` (chrome-hoist already derives the recurring nav) ∪ the siteMap's top nodes ∪ a fresh enumerate of the page's nav `href`s. Each section = a distinct read-endpoint class (`/videos/` → the video-search API). Driven by **background navigation** (`chrome.tabs.update(tabId, {url})`) so the page LOADS with the tee armed at document_start — no in-page click, no nav-guard to fight.
+2. **In-section parameter variation** *(depth + the generalizer's fuel)* — within each section, fire a FEW read-safe, parameter-VARYING interactions:
+   - **paginate** 1-2× (`page=2,3` → templates `{page}`),
+   - **sort / filter / category** at 1-2 representative values (`order=popular`, `category=nature` → the query schema, and multiple instances → confident templating),
+   - **open ONE representative item** (→ the detail read `/items/{id}` → templates `{id}`),
+   - **search** 1-2 queries if a box exists (→ `{query}`).
+   URL-encoded filters/sorts are driven by **constructing the URL variant + `tabs.update`** (read-only navigation); XHR-only interactions (infinite-scroll "load more") by an **in-page read-safe poke** (no nav-guard needed — they don't navigate).
+
+The parameter variation is **deliberate**: Forage varies params on purpose (`page=1,2,3`; `cat=a,b`) so `recipeFromHarvest` sees multiple same-endpoint instances → templates `{param}` + the query schema *confidently* — the synergy passive/landing capture can't reach.
+
+### 19.2 Safety — the crux (read-only; ALLOWLIST not denylist)
+A free-navigating, self-clicking driver that hits "Delete" / "Buy" / "Post" would be catastrophic. Layered defense:
+1. **ALLOWLIST, not denylist.** Forage fires ONLY affordances classified READ-SAFE: nav links, pagination, sort/filter/category, tab switches, search, "load more", open-detail. Everything else is *not fired*. (Explore's sweep is deny-destructive + allow-most; Forage is **allow-read-only + deny-rest** — strictly tighter.)
+2. **EX-1 destructive veto as a SECOND gate** ([contentScript.js:5065](../ContentScripts/contentScript.js#L5065) `DESTRUCTIVE_LABEL`): even a read-looking control whose label hits delete/buy/checkout/post/logout is vetoed over the allowlist.
+3. **GET-only navigation.** Background-nav is `tabs.update` to a URL — never a form POST. URL-constructed filter variants are GETs by definition.
+4. **Method-class capture backstop (§9).** If a read-safe interaction *surprises* with a non-GET, the tee captures the method, `recipeFromHarvest` classes it gated/destructive → banked PENDING → never auto-armed. So a mis-fire is *contained* as a human-gated recipe — but the driver's job is to not TRIGGER side effects in the first place (capture safety is the backstop, not the plan).
+5. **Money / inventory NEVER** (§14) — the allowlist excludes cart/checkout/buy/bid by construction.
+6. **Consent-gated** (C6 Track) + own throwaway tab (or the user's, restored) — same as Discovery.
+
+### 19.3 Capture → generalize → bank (all reused, zero new)
+- **Capture:** the §17 body-blind tee (`startHarvestSession`: registerContentScripts document_start + the live-page inject), host-scoped, consent-gated.
+- **Generalize:** `recipeFromHarvest` — unchanged; Forage just FEEDS it richer (param-varied) instances.
+- **Bank:** `_bankHarvested` → `mergeRecipes` into the per-Ground collection, `pending`. Dedups against Discovery/Explore harvests by deterministic id.
+
+### 19.4 Termination
+- **Budget:** max sections × max-interactions-per-section (e.g. 12 × 5), bounded.
+- **Loop-until-dry per section:** stop a section after K consecutive interactions yield no NEW endpoint id (`recipeFromHarvest` ids are deterministic → "new" is a cheap Set check).
+- **Time cap** + an abort flag (mirror Discovery's `discoveryAbortFlags`).
+
+### 19.5 Reuse vs net-new
+**Reuse:** the §17 tee + `start`/`stopHarvestSession` + `_bankHarvested` · `recipeFromHarvest` · `Ground.chrome` (nav frontier) · siteMap hrefs · EX-1 `DESTRUCTIVE_LABEL` · the Explore enumerate + settle-wait + content-script poke (minus nav-guard) · `DiscoveryService` tab management + abort pattern.
+**Net-new (small, pure-first):**
+- `Core/readSafe.js` *(pure + tests)* — the read-safe affordance classifier (allowlist ∧ EX-1 veto).
+- `Core/forageFrontier.js` *(pure + tests)* — from `{Ground.chrome, siteMap, enumerate}` → the ordered section list + per-section read-safe interaction plan (incl. URL-constructed filter variants).
+- a content-script **`forage` phase** (read-safe poke, **nav-ALLOWED**) — or a flag on the existing poke phase that drops the nav-guard + restricts to the read-safe allowlist.
+- a **`FORAGE` background handler** — the driver loop (arm tee → per section: `tabs.update` / in-page poke → settle-wait → next; loop-until-dry; drain+bank).
+- **trigger (DECIDED 2026-06-27):** **PRIMARY = auto-chain at the tail of Discovery.** `START_DISCOVERY` builds the siteMap + `Ground.chrome`, then — consent-gated, on the same (reused) tab — kicks `FORAGE` over that fresh nav frontier, so one "Discover" = breadth-map + recipe-harvest. **SECONDARY = manual:** a "Forage reads" Ground-panel button + a `forage:` command that drives the current page's nav (or the existing `Ground.chrome`) for standalone re-runs. (NB the existing Discovery-tee harvest still runs *during* the crawl — landing reads; Forage runs *after* — the section/param surface; `mergeRecipes` dedups.) Both emit the `FORAGE ▸` trace marker (→ `_DECISION_RE`, Invariant #1).
+
+### 19.6 Build order (pure-first)
+1. `Core/readSafe.js` — the allowlist classifier + EX-1 veto. *(pure)*
+2. `Core/forageFrontier.js` — frontier + per-section plan from the existing artifacts. *(pure)*
+3. content-script `forage` phase — nav-allowed read-safe poke. *(live)*
+4. `FORAGE` handler — driver loop + bank (composes tee/bank/recipeFromHarvest). *(live)*
+5. termination (loop-until-dry + budget) + trigger + `FORAGE ▸` decision marker. *(live)*
+
+**Open decision (pin before slice 3):** background-nav (`tabs.update` per section/filter — robust, GET-only, no in-page risk) vs in-page nav-allowed click (closer to "real" use, but re-introduces nav-guard complexity). **Lean:** background-nav for sections + URL-constructed filter variants (the bulk); in-page read-safe poke ONLY for XHR-only interactions (load-more) that have no URL form.
