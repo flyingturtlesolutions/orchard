@@ -270,14 +270,47 @@ function _liftOpenEach(flat, ask) {
  *  LLM planner (so liftControlFlow can lift it), not the flat lexical chain. */
 export function isForeachAsk(ask) { return _QUANTIFIER.test(String(ask || '')); }
 
-/** A FAN-OUT ask: a foreach whose target is Orchard CONVERSATIONS / sub-tasks ("open each in a new conversation"),
- *  not page links. PURE. CV-4-full routes these to the conversation fan-out OVER THE PRIOR STEP'S read (enumerate →
- *  one child conversation per item), distinct from the DOM "open each result link" foreach (liftControlFlow). The
- *  nouns are deliberately the unambiguous Orchard ones — "thread" is excluded (a forum/email page has threads). */
+// A per-item ANALYSIS verb — the item's task needs REASONING (a worker conversation), not a page action. Its presence
+// turns a foreach into a worker FAN-OUT (one child conversation per item), distinct from the DOM "open each result
+// link" foreach. (research/investigate/analyse/review/draft/reply/triage per item.)
+const _ANALYSIS = /\b(research|investigate|analy[sz]e|review|assess|evaluate|study|triage|draft|respond|repl(?:y|ies)|look\s+into|dig\s+into|read\s+up|report\s+on|summari[sz]e)\b/i;
+// An Orchard CONVERSATION target: "(in|into|as) a/new/separate/its own (conversation|sub-thread|sub-task|chat)".
+// v2.74.1262 — post the Rail/Thread/Canvas rename, **Thread is a conversation**, so a QUALIFIED thread (sub/new/
+// separate/own) counts; bare "thread" still does NOT (a forum/email page has threads). This is what the .1257 rename
+// broke in the live "open each in a sub thread" trace — the old detector excluded "thread" wholesale.
+const _CONV_TARGET = /\b(conversations?|sub-?tasks?|chats?)\b|\b(?:sub|new|separate|own|individual)[\s-]*threads?\b/i;
+// A REDUCE over the whole set — ONE answer ABOUT all items ("summarize them", "a digest", "compare", "rank"). Marks an
+// EPHEMERAL fan-out: the per-item workers are map-stage compute, disposed once the reduce is rendered in the parent.
+const _REDUCE = /\b(summari[sz]e|summary|digest|consolidate|combined?|compare|contrast|rank|overview|recap|round-?up|tl;?dr|aggregate)\b/i;
+// An explicit PERSIST signal — keep each item as a durable workspace ("in a new conversation/thread/sub-task", "keep
+// each", "in its own chat"). OVERRIDES ephemeral: an explicit keep persists the children even alongside a reduce.
+const _PERSIST = /\b(?:in|into|as)\b[^.]*\b(conversations?|sub-?tasks?|chats?|threads?)\b|\bkeep\s+(?:each|them|the)\b|\b(?:its|their)\s+own\b/i;
+
+/** A FAN-OUT ask: a foreach whose per-item task is a CONVERSATION/ANALYSIS (one child conversation per item), not a
+ *  page open-each. PURE. CV-4-full routes these to the conversation fan-out OVER THE PRIOR STEP'S read (enumerate →
+ *  one child per item), distinct from the DOM "open each result link" foreach (liftControlFlow). Fires when a foreach
+ *  carries an analysis verb OR an Orchard conversation target — broadened (v2.74.1262) from the old conversation-noun-
+ *  only test, which missed "research each" and (post-rename) "open each in a sub thread". */
 export function isFanoutAsk(ask) {
   const s = String(ask || '');
-  return isForeachAsk(s) && /\b(conversations?|sub-?tasks?)\b/i.test(s);
+  return isForeachAsk(s) && (_ANALYSIS.test(s) || _CONV_TARGET.test(s));
 }
+
+/** The LIFECYCLE of a fan-out's children: 'ephemeral' | 'persistent'. PURE. v2.74.1262 — PERSISTENCE IS THE DEFAULT
+ *  (durable sub-tasks). A fan-out is EPHEMERAL only when it's a REDUCE over the set (summarize/digest/compare …) with
+ *  NO explicit keep signal — then the workers are map-stage compute: they run, report, feed the parent's aggregate,
+ *  and are CLOSED. An explicit "in a new conversation / keep each" persists them even alongside a reduce. */
+export function fanoutLifecycle(ask) {
+  const s = String(ask || '');
+  return (_REDUCE.test(s) && !_PERSIST.test(s)) ? 'ephemeral' : 'persistent';
+}
+
+/** Convenience: is this fan-out EPHEMERAL (its workers are disposed after the reduce)? PURE. */
+export function isEphemeralFanout(ask) { return fanoutLifecycle(ask) === 'ephemeral'; }
+
+/** Is this clause a REDUCE over a set (summarize/digest/compare …)? PURE. Used to AUTO-fan-out a bare reduce over a
+ *  freshly-read list ("get my tickets and summarize" → a worker per item, ephemeral) even WITHOUT an explicit "each". */
+export function isReduceAsk(ask) { return _REDUCE.test(String(ask || '')); }
 
 /** The per-child DIRECTIVE inside a fan-out ask (CV-4-map): the action to run IN each child. PURE. Strips the
  *  fan-out wrapper ("… each [noun] in a/its own/a new/separate conversation/sub-task"); what's left is the task.

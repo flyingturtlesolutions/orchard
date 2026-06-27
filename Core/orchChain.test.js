@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites, namesAnySite, isForeachAsk, isFanoutAsk, innerDirective } from './orchChain.js';
+import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites, namesAnySite, isForeachAsk, isFanoutAsk, innerDirective, fanoutLifecycle, isEphemeralFanout } from './orchChain.js';
 import { validatePlan } from './orchPlan.js';
 import { walkPlan } from './orchRun.js';   // ORCH-L — the pure interpreter, to RUN the lifted open-each loop end-to-end
 
@@ -22,6 +22,30 @@ describe('orchChain — isFanoutAsk (CV-4-full: foreach over a read → conversa
     assert.equal(isFanoutAsk('get my open tickets'), false, 'no quantifier → not a foreach at all');
     assert.equal(isFanoutAsk('start a new conversation'), false, 'a conversation noun without "each" is not a fan-out');
     assert.equal(isForeachAsk('open each in a new conversation'), true, 'still a foreach (the broader gate)');
+  });
+  it('v2.74.1262 — ALSO fires on an analysis-verb foreach (no conversation noun) + a QUALIFIED "sub thread"', () => {
+    assert.equal(isFanoutAsk('research each ticket'), true, 'analysis per item → worker fan-out, no conv noun needed');
+    assert.equal(isFanoutAsk('summarize each order'), true);
+    assert.equal(isFanoutAsk('open each ticket in a sub thread and research it'), true, 'the live trace: a sub-thread IS a conversation now');
+    assert.equal(isFanoutAsk('investigate every alert in its own thread'), true);
+    assert.equal(isFanoutAsk('open each thread'), false, 'bare "thread" (a page noun) still does NOT fan out');
+  });
+});
+
+describe('orchChain — fanoutLifecycle (v2.74.1262: persistent by default, ephemeral on a reduce)', () => {
+  it('PERSISTENT by default — per-item work kept as durable sub-tasks', () => {
+    assert.equal(fanoutLifecycle('research each in a new conversation'), 'persistent');
+    assert.equal(fanoutLifecycle('open each ticket in a sub thread and research it'), 'persistent');
+    assert.equal(isEphemeralFanout('draft a reply to each'), false);
+  });
+  it('EPHEMERAL on a reduce over the set (no keep signal) — workers feed the aggregate, then close', () => {
+    assert.equal(fanoutLifecycle('get my tickets and summarize'), 'ephemeral');
+    assert.equal(fanoutLifecycle('compare my open tickets'), 'ephemeral');
+    assert.equal(isEphemeralFanout('summarise each ticket and give a digest'), true);
+  });
+  it('a KEEP signal OVERRIDES ephemeral — a reduce alongside "in a new conversation" stays persistent', () => {
+    assert.equal(fanoutLifecycle('research each in a new conversation and summarize'), 'persistent');
+    assert.equal(fanoutLifecycle('open each in its own chat and compare them'), 'persistent');
   });
 });
 
