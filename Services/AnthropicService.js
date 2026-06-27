@@ -36,6 +36,7 @@ import { buildCanvasMessages, parseCanvasOutput } from '../Core/canvasPrompt.js'
 import { buildWorkflowMatchMessages, parseWorkflowMatchOutput } from '../Core/workflowMatchPrompt.js';   // WF-3 — LLM fallback for workflow recall
 import { buildPresetAbstractMessages, parsePresetAbstractOutput } from '../Core/presetAbstractPrompt.js';   // §10.2 — abstract an instance rule for the shared preset (distill-up)
 import { buildFanoutSpecMessages, parseFanoutSpecOutput } from '../Core/fanoutPersonaPrompt.js';   // Q2 — split a fan-out into {task, persona}
+import { buildAnswerShapeMessages, parseAnswerShapeOutput } from '../Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — match a read's answer to the question
 import { buildGapMessages, parseGaps } from '../Core/gapPrompt.js';   // PS-0 — Orchard's STRUCTURED capability-gap enumeration (the per-Ground demand signal)
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
@@ -105,6 +106,7 @@ const ROLE_MODEL_POLICY = Object.freeze({
     'route-ask':               MODEL_FAST,   // R-6 — the front-door router is a small/fast classification (DESIGN_llm_front_door.md §3.6); Haiku, not Sonnet
     'match-workflow':          MODEL_FAST,   // WF-3 — workflow recall is the same small/fast pick-one-or-null classification; Haiku, only on a lexical-miss near-miss
     'fanout-spec':             MODEL_FAST,   // Q2 — small {task, persona} extraction; Haiku, only behind the personaHint gate
+    'answer-shape':            MODEL_FAST,   // the interrogator's final stage — shape a read into the answer's shape; small/bounded → Haiku
     proposeRichIntents:        MODEL_FAST,   // v2.74.902 — the managed proxy (API Gateway) hard-caps ~29s; the default tier streams 3-4k tokens too slowly (28-29s observed → 500s). Composition over a CURATED pack + the cite-or-reject gate suits the fast tier.
   },
 });
@@ -5239,7 +5241,7 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    * @param {{ ask:string, retrieved?:Array, primitives?:Array, affordances?:string, seed?:string }} args
    * @returns {Promise<object>} the parsed raw decision
    */
-  static async interpret({ ask, retrieved, primitives, affordances, seed, target, connections, learned, objects, subTasks } = {}) {
+  static async interpret({ ask, retrieved, primitives, affordances, seed, target, connections, learned, objects, subTasks, history } = {}) {
     const { system, user } = buildInterpretMessages(ask, {
       retrieved: Array.isArray(retrieved) ? retrieved : [],
       primitives: Array.isArray(primitives) ? primitives : [],
@@ -5249,6 +5251,7 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
       learned: learned || '',   // AL-4 — the app's learned rules + recall
       objects: objects || '',    // OM — the app's object model (schema)
       subTasks: Array.isArray(subTasks) ? subTasks : [],   // CV-4-reduce — THIS app's own children + their latest results
+      history: Array.isArray(history) ? history : [],   // Q1 — the recent-turn window (follow-up continuity)
     });
     const res = await AnthropicService.#call(system, user, 1024, [], { role: 'routing', operation: 'interpret' });
     if (!res || res.success === false) return { ...parseInterpretOutput(null), why: 'interpret-unavailable' };
@@ -5321,6 +5324,24 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
   }
 
   /**
+   * Interrogator ANSWER-SHAPE (v2.74.1267) — shape a connector read's answer to the QUESTION ("how many" → a number)
+   * instead of dumping the list render. HYBRID: the model PHRASES + picks the shape but never COUNTS — `facts` carries
+   * the EXACT count + a MINIMIZED sample ({id,title,status}, no record bodies; DESIGN_llm_privacy.md §3 minimization).
+   * Cheap tier (small bounded input). Returns {answer, showList}: a non-empty answer → show it; showList → the caller
+   * renders the list deterministically; a miss → {answer:null, showList:false} (caller falls back to the render).
+   * PURE prompt+parse in Core/answerShapePrompt.js. Fails safe.
+   * @param {{ ask:string, facts:object }} args
+   * @returns {Promise<{ answer:string|null, showList:boolean }>}
+   */
+  static async shapeAnswer({ ask, facts } = {}) {
+    if (!String(ask || '').trim() || !facts || typeof facts !== 'object' || !(await AnthropicService.hasLlm())) return { answer: null, showList: false };
+    const { system, user } = buildAnswerShapeMessages({ ask, facts });
+    const res = await AnthropicService.#call(system, user, 300, [], { role: 'routing', operation: 'answer-shape' });
+    if (!res || res.success === false) return { answer: null, showList: false };
+    return parseAnswerShapeOutput(res.text);
+  }
+
+  /**
    * IL-2 — the inference-layer STEP controller (DESIGN_inference_layer.md §4.1). Unlike routeAsk (a single-shot
    * SELECT over a catalog), this is the iterated think seam: given the StepContext (goal · signal-only ledger ·
    * latest observation · scope keys · palette), it returns the next Decision {kind: act|ask|done|needs}. PURE
@@ -5362,9 +5383,9 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    * nav/tab abilities (Core/answerPrompt.js fences the capability list as data). @param {{ask:string,
    * capabilities:Array<object>}} args  @returns {Promise<string|null>}
    */
-  static async answerAsk({ ask, capabilities, affordances, coverage, url, seed, connections, learned, objects, subTasks } = {}) {
+  static async answerAsk({ ask, capabilities, affordances, coverage, url, seed, connections, learned, objects, subTasks, history } = {}) {
     if (!(await AnthropicService.hasLlm())) return null;
-    const { system, user } = buildAnswerMessages({ ask, capabilities: Array.isArray(capabilities) ? capabilities : [], affordances, coverage, url, seed: seed || '', connections: Array.isArray(connections) ? connections : [], learned: learned || '', objects: objects || '', subTasks: Array.isArray(subTasks) ? subTasks : [] });   // CV-2b — seed → persona; AS-4 — connected sites; AL-4 — learned; OM — object model; CV-4-reduce — own sub-tasks
+    const { system, user } = buildAnswerMessages({ ask, capabilities: Array.isArray(capabilities) ? capabilities : [], affordances, coverage, url, seed: seed || '', connections: Array.isArray(connections) ? connections : [], learned: learned || '', objects: objects || '', subTasks: Array.isArray(subTasks) ? subTasks : [], history: Array.isArray(history) ? history : [] });   // CV-2b — seed → persona; AS-4 — connected sites; AL-4 — learned; OM — object model; CV-4-reduce — own sub-tasks; Q1 — recent-turn window
     const res = await AnthropicService.#call(system, user, 700, [], { role: 'describe', operation: 'il-answer' });   // room for a substantive, reflective answer
     return (res && res.success !== false && typeof res.text === 'string' && res.text.trim()) ? res.text.trim() : null;
   }

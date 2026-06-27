@@ -15,6 +15,7 @@ import { coverComplete } from '../../Core/cover.js';
 import { selectionToTrialRoles } from '../../Core/bind.js';
 import { lowerToTier2, orderForRun, scoreTier2, topoOrder } from '../../Core/tier2Lower.js';
 import { evaluatePostcondition } from '../../Core/postcondition.js';
+import { coerceRecentTurns as _recentTurnsPayload } from '../../Core/recentTurns.js';   // Q1 — coerce + bound the panel-sent recent-turn window (untrusted; fenced as data downstream)
 import { focusDecision, FOCUS_SETTING_KEY } from '../../Core/focusGrammar.js';   // FM-1 (v2.74.968) — the pure focus-grab verdict
 import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord, buildResultsLandmarkRecord, buildOutcomePerspective, findMatchingPerspective, buildPerspectiveGate, buildDestinationPerspective, pickDestinationLandmark, validateConditionRefs } from '../../Core/accept.js';
 import { authoringCoverage } from '../../Core/select.js';   // GA-7 — Locale→capability "done" signal
@@ -727,6 +728,22 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // ANSWER-SHAPE (v2.74.1267) — the interrogator's final stage: chat.js sends the user's question + the deterministic,
+    // MINIMIZED facts (count + a {id,title,status} sample — no record bodies); we return {answer, showList}. The model
+    // shapes + phrases; the count is code's. A miss → {answer:null, showList:false} → chat.js renders the list as before.
+    SHAPE_ANSWER: async (payload, _sender, sendResponse) => {
+      try {
+        const ask = String(payload?.ask ?? '').trim();
+        const facts = (payload && typeof payload.facts === 'object') ? payload.facts : null;
+        if (!ask || !facts) { sendResponse({ success: true, answer: null, showList: false }); return; }
+        const shaped = await AnthropicService.shapeAnswer({ ask, facts });
+        sendResponse({ success: true, answer: shaped.answer, showList: shaped.showList });
+      } catch (err) {
+        Logger.error('background', `SHAPE_ANSWER failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
     // F-2 (v2.74.1176, DESIGN_llm_front_door.md §9) — INTERPRET_ASK: the LLM front-door INTERPRET call. Resolves the
     // Ground + retrieves the candidate set (ORCH_MATCH-as-RETRIEVER — the SAME tool-RAG as ROUTE_ASK, FED not gating),
     // then AnthropicService.interpret returns the raw §9.2 decision {intent, capabilityId|op, params, subAsks,
@@ -760,6 +777,10 @@ export function createSgMessageHandlers(ctx) {
         const subTasks = Array.isArray(payload?.subTasks)
           ? payload.subTasks.filter((s) => s && typeof s === 'object').map((s) => ({ title: String(s.title || ''), summary: String(s.summary || ''), status: String(s.status || '') })).slice(0, 80)
           : [];
+        // Q1 (v2.74.1264) — the panel-sent RECENT-TURN window (the last few turns of THIS conversation) for follow-up
+        // continuity. UNTRUSTED (a prior assistant turn can echo page/tool text) → coerce to {role,text}, bound here;
+        // the interpret prompt fences it as data (renderRecentTurns), never an instruction channel.
+        const history = _recentTurnsPayload(payload?.history);
         let caps = [];
         if (groundId) { try { caps = ((await ctx.readSgCapabilities(groundId)) || []).filter((c) => c && isActiveCapability(c) && c.kind !== 'composite'); } catch { caps = []; } }
         // CX-4c — the app's CONNECTED session-ride recipes (scoped to its `connections`, the AS-4 set) become
@@ -790,7 +811,7 @@ export function createSgMessageHandlers(ctx) {
         let learned = '';
         if (memId) { try { learned = goalContextFor(await loadGoalItems(memId), ask, { om }); } catch { /* */ } }
         const objects = describeObjectModel(om);
-        const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed, target, connections, learned, objects, subTasks });
+        const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed, target, connections, learned, objects, subTasks, history });
         Logger.info('route', `INTERPRET_ASK "${ask.slice(0, 60)}" → ${decision.intent} (conf ${decision.confidence}, ${retrieved.length} cand, ground ${groundId || '—'})`);
         sendResponse({ success: true, decision, groundId: groundId || null, retrieved });
       } catch (err) {
@@ -861,6 +882,7 @@ export function createSgMessageHandlers(ctx) {
         const subTasks = Array.isArray(payload?.subTasks)   // CV-4-reduce — THIS app's own children + their latest results (untrusted; fenced as data)
           ? payload.subTasks.filter((s) => s && typeof s === 'object').map((s) => ({ title: String(s.title || ''), summary: String(s.summary || ''), status: String(s.status || '') })).slice(0, 80)
           : [];
+        const history = _recentTurnsPayload(payload?.history);   // Q1 — the recent-turn window (untrusted; coerced + bounded; fenced as data in the answer prompt)
         const appId = String(payload?.appId ?? '').trim();   // AL-4 — the app's TYPE (object-model resolve; off-app → '')
         const memId = String(payload?.memoryId ?? '').trim() || appId;   // AP-0 (v2.74.1213) — the per-INSTANCE goal-memory key (falls back to the type for legacy apps)
         let tabUrl = '';
@@ -887,7 +909,7 @@ export function createSgMessageHandlers(ctx) {
         let learned = '';
         if (memId) { try { learned = goalContextFor(await loadGoalItems(memId), ask, { om }); } catch { /* */ } }
         const objects = describeObjectModel(om);
-        const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed, connections, learned, objects, subTasks });
+        const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed, connections, learned, objects, subTasks, history });
         // PS-0 (v2.74.1123) — persist Orchard's capability-gap enumeration instead of discarding it: the durable,
         // per-Ground DEMAND signal PS-1 arms into the interaction monitor for passive harvest. Non-fatal/best-effort.
         try {

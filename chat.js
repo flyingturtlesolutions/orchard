@@ -34,6 +34,8 @@ import { recipeLegs, coerceParams } from './Core/connectorRecipes.js';   // CX-4
 import { renderConnectorLines, itemLabels } from './Core/connectorRender.js';   // CX-4c — generic render of ANY connector read (not just tickets); CV-4-full — itemLabels: read list → fan-out labels
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
+import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recent-turn window selector (follow-up continuity for the IL)
+import { readShapeFacts } from './Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — derive the deterministic, minimized facts a read's answer is shaped from
 import { planSubTasks, subTaskFromApp, composeSeed, classifyAskToGrid, isConfiguredDef, OVERVIEW_ID } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app). Q2 — composeSeed: fold a per-child persona into each worker's seed
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-app write gate (read-only enforcement)
 import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps; AP-4 — configuredAppDefinition (mint a durable, re-creatable app from a set-up instance)
@@ -1506,13 +1508,17 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
     await _runEphemeralFanout(childApp, created, directive || 'summarize', msg);
     return { ok: true, summary: `Synthesized ${created.length} (ephemeral workers closed).` };
   }
+  // PERSISTENT with a per-child DIRECTIVE ("research each …", "respond …") → AUTO-RUN it in every child: the worker
+  // RESOLVES (this populates each durable thread), then STAYS open. v2.74.1265 — was an offer-button in the parent, so
+  // the user opened the children and found them BLANK. A bare "open each …" (no directive) just creates the threads.
+  if (directive && created.length) {
+    await _runPersistentFanout(childApp, created, directive, msg, { suffix: capped ? ` (capped at ${cap} of ${n})` : '' });
+    return { ok: true, summary: `Ran “${directive}” in ${created.length}.` };
+  }
   const summary = created.length
     ? `Opened ${created.length} conversation${created.length === 1 ? '' : 's'} under “${app.title}”${capped ? ` (capped at ${cap} of ${n})` : ''} — nested under the app in the drawer.`
     : 'Couldn’t open any conversations.';
   _setMessageBody(msg, summary);
-  // CV-4-map (Q1) — if the fan-out ask carried a per-child DIRECTIVE ("research each …"), offer to RUN it in every
-  // child (this click IS the single batch confirm). A bare "open each …" has no directive → just the children.
-  if (directive && created.length) _offerRunEach(childApp, created, directive);
   return { ok: created.length > 0, summary };
 }
 
@@ -1595,10 +1601,11 @@ async function _runChildTask(child, task) {
   return { status, result: body, label: (child && child.title) || '' };   // v2.74.1262 — the result feeds the ephemeral fan-out's synthesis
 }
 
-// CV-4-map — run `directive` in every child via a bounded CONCURRENT pool; returns [{status, result, label}]. Used by
-// the ephemeral fan-out (the persistent _offerRunEach keeps its own inline pool). `onStep(finished)` ticks progress.
+// CV-4-map — run `directive` in every child via a bounded CONCURRENT pool; returns [{status, result, label}]. Shared
+// by BOTH fan-out lifecycles — _runEphemeralFanout (reduce → synthesize → close) and _runPersistentFanout (keep open).
 // §9 boundary — the directive is the user's (trusted); the item is bound by its STABLE `#id` token where the label has
 // one, so the UNTRUSTED read-derived title never enters the ASK channel (id-less items fall back to the label).
+// `onStep(finished)` ticks progress.
 async function _runEachChild(children, directive, onStep) {
   const tasks = children.map((ch) => {
     const idTok = String(ch.title).match(/^#\S+/);
@@ -1641,42 +1648,20 @@ async function _runEphemeralFanout(app, children, directive, msg) {
   _orchFinalize(msg);
 }
 
-// CV-4-map — the SINGLE batch confirm for the auto-run: one click runs `directive` in every child (headless, each on
-// its OWN context). Its own bubble (NOT the chain's reused msg, which gets overwritten). Reads/reasoning complete;
-// writes pause as "🟡 needs you" on that child. After, the parent can "summarize what each found" (the reduce, Q2).
-function _offerRunEach(app, children, directive) {
-  const m = appendMessage({ role: 'assistant', body: `▶ Run “${directive} …” in all ${children.length}? Each runs on its own; a write pauses for you.` });
-  const bar = _orchActionBar(m);
-  const go = _mkBtn(`▶ Run in all ${children.length}`, async () => {
-    bar.remove();
-    // §9 boundary — the directive is the user's (trusted); the item is bound by its STABLE `#id` token where the label
-    // has one, so the UNTRUSTED read-derived title never enters the ASK (instruction) channel. (Id-less items fall back
-    // to the label; the write-gate in _runChildTask still blocks any unattended action.)
-    const tasks = children.map((ch) => {
-      const idTok = String(ch.title).match(/^#\S+/);
-      return { ch, task: `${directive} ${idTok ? idTok[0] : ch.title}`.trim() };
-    });
-    // issue #1 — run children CONCURRENTLY, bounded (a worker pool) — not serially. Cap avoids LLM/managed-tab contention.
-    const CONC = 4;
-    let done = 0; let need = 0; let finished = 0; let idx = 0;
-    const update = () => _setMessageBody(m, `Running ${finished}/${children.length}${done || need ? ` — ${done} done${need ? `, ${need} 🟡 need you` : ''}` : ''}…`);
-    update();
-    const worker = async () => {
-      while (idx < tasks.length) {
-        const { ch, task } = tasks[idx++];
-        let status = 'needs-you';
-        try { const _cr = await _runChildTask(ch, task); status = (_cr && _cr.status) || 'needs-you'; } catch { status = 'needs-you'; }   // one child's failure never aborts the batch
-        if (status === 'done') done++; else need++;
-        finished++; update();
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(CONC, tasks.length) }, worker));
-    _setMessageBody(m, `Ran ${children.length}: ${done} done${need ? `, ${need} 🟡 need you (open them to continue)` : ''}. Ask me to “summarize what each found”.`);
-    _revealRail().catch(() => {});   // children's peeks updated → reveal them
-    _orchFinalize(m);
-  });
-  const skip = _mkBtn('Skip', () => { bar.remove(); _setMessageBody(m, 'Okay — left them seeded; open any one to run it yourself.'); _orchFinalize(m); });
-  bar.appendChild(go); bar.appendChild(skip);
+// CV-4-persistent (v2.74.1265) — a PERSISTENT fan-out WITH a per-child directive AUTO-RUNS it in every child: the
+// worker RESOLVES (each thread is POPULATED with its result — reads/reasoning complete), then STAYS open. The durable
+// counterpart to _runEphemeralFanout (which CLOSES after a reduce). Was an offer-button (children opened blank until a
+// click); now it just runs — the ask ("respond to each", "research each") IS the intent. A child WRITE still pauses as
+// "🟡 needs you" on that child (the per-child safety gate in _runChildTask — never an unattended action). §9 boundary +
+// the bounded concurrent pool live in the shared _runEachChild. `msg` is the chain's reused bubble (its progress line).
+async function _runPersistentFanout(app, children, directive, msg, { suffix = '' } = {}) {
+  _setMessageBody(msg, `🛠 ${children.length} sub-task${children.length === 1 ? '' : 's'} — ${directive}…`);
+  const results = await _runEachChild(children, directive, (fin) => _setMessageBody(msg, `🛠 Working ${fin}/${children.length}…`));
+  const done = results.filter((r) => r && r.status === 'done').length;
+  const need = results.length - done;
+  _revealRail().catch(() => {});   // children's peeks updated → reveal them
+  _setMessageBody(msg, `Opened ${children.length} sub-task${children.length === 1 ? '' : 's'} under “${app.title}”${suffix} and ran “${directive}” in each — ${done} done${need ? `, ${need} 🟡 need you (open them to continue)` : ''}. Open any to see its result; ask me to “summarize what each found”.`);
+  _orchFinalize(msg);
 }
 
 // ─── AS-2 (v2.74.1188): guided setup — connect an app to its site ──────────────────────────────────────────
@@ -4335,6 +4320,14 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
     return false;
   }
   if (leg.domain === 'connector') {
+    // ANSWER-SHAPE (v2.74.1267) — the interrogator's final stage: match the answer to the QUESTION ("how many" → a
+    // number), not the recipe's default list. The model SHAPES + phrases; `readShapeFacts` hands it the EXACT count + a
+    // MINIMIZED sample (ids/titles/status, NO bodies — the privacy-minimization lever). A shaped answer → show it;
+    // showList / a miss / no-LLM → the deterministic CX-4c render below (grounded #ids, never LLM-re-emitted).
+    const facts = readShapeFacts(res.value);
+    let shaped = null;
+    try { shaped = await _orchReq('SHAPE_ANSWER', { ask, facts }); } catch { /* shaper is best-effort → fall through to the render */ }
+    if (shaped && shaped.answer) { _setMessageBody(msg, `🧠 ${shaped.answer}`); return true; }
     // CX-4c — GENERIC render: ANY app's read (tickets, comments, users, orders, messages…) → its salient fields, not
     // just tickets. PII stays in the user's own panel; the result is UNTRUSTED page data → rendered as escaped text only.
     const lines = renderConnectorLines(res.value, { name: leg.name || 'Results' });
@@ -4443,6 +4436,18 @@ async function _childSummariesForCurrent() {
       .map((c) => ({ title: c.title || 'sub-task', summary: c.summary || '', status: c.runStatus || '' }));
   } catch { return []; }
 }
+// Q1 (v2.74.1264) — the recent-turn WINDOW of the CURRENT conversation, fed to the IL (interpret + answer) so a
+// follow-up resolves references ("the second one", "do that again", "what about it") to what was just discussed. The
+// IL is otherwise STATELESS w.r.t. the Thread transcript (it gets typed memory — beliefs/objects/sub-tasks — not the
+// chat log). Bounded + EXCLUDES the in-flight current ask (selectRecentTurns cuts the just-appended user turn + its
+// placeholder). Off-conversation / no prior turns → [] (the prompt omits the block). The window is fenced as DATA
+// downstream (renderRecentTurns), never an instruction channel — a prior assistant turn can echo page-derived text.
+async function _recentTurnsWindow(ask) {
+  const cid = _currentConversationId;
+  if (!cid) return [];
+  try { const conv = await ConversationStore.load(cid); return selectRecentTurns(conv && conv.messages, { excludeAsk: ask }); }
+  catch { return []; }
+}
 // Deterministic safety net: if interpret chose NAVIGATE but produced no URL and the app has a bound site, default to
 // it. The OPERATING SITE prompt rule should already make the LLM do this; this guarantees it.
 function _withBoundUrl(params) {
@@ -4475,9 +4480,10 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
   const tab = await _orchActiveTab();
   const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
   const subTasks = await _childSummariesForCurrent();   // CV-4-reduce — THIS app's own children + their latest results (reason over them)
+  const history = await _recentTurnsWindow(goal);   // Q1 — the recent-turn window (excludes this ask); shared by the interpret + both answer calls below
   let raw = null; let retrieved = []; let groundId = null;
   try {
-    const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId, seed: _currentConversationSeed, target: _boundTarget(), connections: _boundConnections(), subTasks, appId: _currentConversationAppId, memoryId: _memoryId() });
+    const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId, seed: _currentConversationSeed, target: _boundTarget(), connections: _boundConnections(), subTasks, history, appId: _currentConversationAppId, memoryId: _memoryId() });
     if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; groundId = r.groundId || null; }
   } catch { /* */ }
   // F-2c-flip (v2.74.1180) — interpret unavailable (no LLM / handler error) → return FALSE so the caller falls back
@@ -4498,7 +4504,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
   }
   if (d.intent === 'answer') {
     let answer = null;
-    try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, connections: _boundConnections(), subTasks, appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
+    try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, connections: _boundConnections(), subTasks, history, appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
     _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 ${d.why || 'I’m not sure how to help with that here.'}`);
     // §12.2 — the IL ANSWERED it (not an act/nav), and it reads like a standing behavioral preference ("keep replies
     // terse") → OFFER to remember it as a rule, so capture doesn't need the `remember:` prefix. Offer, never auto-store.
@@ -4535,7 +4541,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
   // couldn't dispatch (an act with only a primitive op, or a nav with no ground) → reasoned answer fallback.
   const m2 = appendMessage({ role: 'assistant', body: '🧠 thinking…' });
   let answer = null;
-  try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, connections: _boundConnections(), appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
+  try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, connections: _boundConnections(), history, appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
   _setMessageBody(m2, answer ? `🧠 ${answer}` : '🧠 I’m not sure how to do that here — want to show me?');
   _orchFinalize(m2);
   return true;
@@ -4628,8 +4634,9 @@ async function _tryIlCommand(text) {
   } catch (e) { try { console.warn('[chat] il→router dispatch fell through:', e?.message); } catch { /* */ } }
 
   // No grounded action to run → Orchard ANSWERS the ask (meta/conversational — "what can you do?", "can you X?").
+  const history = await _recentTurnsWindow(ask);   // Q1 — recent-turn window for the IL-loop answer fallback too (continuity parity with _tryInterpret)
   let answer = null;
-  try { const r = await _orchReq('IL_ANSWER', { ask, tabId, seed: _currentConversationSeed, connections: _boundConnections(), appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
+  try { const r = await _orchReq('IL_ANSWER', { ask, tabId, seed: _currentConversationSeed, connections: _boundConnections(), history, appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
   _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 I don’t have a saved capability for “${ask}” on this page yet — want to show me?`);
   try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${answer ? 'answered' : 'no match'}`); } catch { /* */ }
   return true;
