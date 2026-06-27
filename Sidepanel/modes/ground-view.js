@@ -77,10 +77,11 @@ function _renderRideCard(recipes, groundId) {
   const bulkBtn = pendingReads > 0
     ? `<button class="btn-secondary gv-ride-bulk" data-gv-ride-bulk="${escAttr(groundId)}" type="button" title="Accept all pending reads (GETs) — makes them armable. Writes still need an individual ✓.">✓ ${pendingReads} read${pendingReads === 1 ? '' : 's'}</button>`
     : '';
-  // §19 (v2.74.1281) — manual Forage trigger: crawl the site's read-safe nav in a background tab to harvest NEW read-recipes
-  // (the same crawl Discovery auto-chains). Always present; sends FORAGE with NO existingTabId → a throwaway tab (never the
-  // user's). Read-only + consent-gated background-side; banks `pending` → they appear here on FORAGE_COMPLETE.
-  const forageBtn = `<button class="btn-secondary gv-ride-forage" data-gv-ride-forage="${escAttr(groundId)}" type="button" title="Forage — crawl this site's read-safe navigation in a background tab to harvest new read-recipes (banks pending when done).">⛏ Forage</button>`;
+  // §19 (passive toggle v2.74.1284) — Forage is an ARM/BANK toggle: 1st click arms passive capture on your LIVE logged-in
+  // tab, you navigate your app (its API reads — incl. cross-origin — are captured), 2nd click banks them `pending`. This is
+  // the robust path for static SPAs whose nav can't be driven synthetically. Label reflects the armed state.
+  const armed = _forageArmed.has(groundId);
+  const forageBtn = `<button class="btn-secondary gv-ride-forage${armed ? ' gv-ride-forage-armed' : ''}" data-gv-ride-forage="${escAttr(groundId)}" type="button" title="${armed ? 'Foraging — navigate your app to capture its reads, then click to BANK them.' : 'Forage — arm passive capture on your logged-in tab; navigate your app, then click again to bank the API reads it makes.'}">⛏ ${armed ? 'Foraging — bank' : 'Forage'}</button>`;
   const headExtra = `${bulkBtn}${forageBtn}`;
   return _renderSection({
     key: 'recipes',
@@ -114,10 +115,10 @@ const _siteMapCache = new Map();
 // section list. Discovery broadcasts (DISCOVERY_COMPLETE / FAILED)
 // remove the entry and trigger a re-render.
 const _discoveryRunning = new Set();
-// §19 (v2.74.1281) — manual-Forage-in-progress tracking (the "⛏ Forage" Ride-card button). A groundId sits here between
-// the FORAGE dispatch and its FORAGE_COMPLETE broadcast, so the listener TOASTs only for user-initiated runs (the
-// Discovery auto-chain forages silently). Ephemeral; lost on unmount, like _discoveryRunning.
-const _forageRunning = new Set();
+// §19 (v2.74.1281; passive toggle v2.74.1284) — which grounds have a PASSIVE forage ARMED (the "⛏ Forage" Ride-card button
+// is a toggle: arm → the user navigates their app → bank). A groundId sits here between the arm click and the bank's
+// FORAGE_COMPLETE, driving the button label (⛏ Forage ↔ ⛏ Foraging — bank). Ephemeral; lost on unmount, like _discoveryRunning.
+const _forageArmed = new Set();
 // v2.74.42 — Collapse state for the matched-Ground header card.
 const _collapsedHeader = new Set();
 // v2.74.866 — Collapse state for the Landmarks card (monitoring registry view),
@@ -370,13 +371,16 @@ function handleEvent(message) {
     toast(`Discovery failed: ${error ?? 'unknown'}`, 'err');
     _renderList().catch(() => {});
   }
-  // §19 (v2.74.1281) — Forage finished (manual button OR Discovery auto-chain). TOAST only for a user-initiated run
-  // (groundId in _forageRunning); ALWAYS re-render so the freshly-banked pending recipes show in the Ride card.
+  // §19 (passive toggle v2.74.1284) — a passive forage BANKED (or armForage failed → disarmed). Clear the armed state +
+  // TOAST the result for a user-initiated toggle; ALWAYS re-render so the freshly-banked pending recipes + the reset button
+  // label show in the Ride card. (The Discovery auto-chain's one-shot forage also lands here — silent refresh, no toast.)
   if (message.type === 'FORAGE_COMPLETE') {
-    const { groundId, visits, banked } = message.payload ?? {};
-    if (_forageRunning.has(groundId)) {
-      _forageRunning.delete(groundId);
-      toast(`Foraged ${visits ?? 0} page${visits === 1 ? '' : 's'} → banked ${banked ?? 0} recipe${banked === 1 ? '' : 's'}`);
+    const { groundId, banked, captures, error, disarmed } = message.payload ?? {};
+    if (_forageArmed.has(groundId)) {
+      _forageArmed.delete(groundId);
+      if (error) toast(`Forage couldn't arm: ${error}`, 'err');
+      else if (disarmed) toast('Forage stopped', 'err');
+      else toast(`Foraged ${captures ?? 0} read${captures === 1 ? '' : 's'} → banked ${banked ?? 0} recipe${banked === 1 ? '' : 's'}`);
     }
     _renderList().catch(() => {});
     return;
@@ -1166,16 +1170,14 @@ function _wireHandlers(grounds) {
       else { toast(`Bulk accept failed: ${res?.error ?? 'unknown'}`, 'err'); btn.disabled = false; }
     });
   });
-  // §19 (v2.74.1281; session-ride v2.74.1282) — "⛏ Forage" → fire the background recipe-capture crawl (fire-and-forget;
-  // the handler returns started:true). Pass the panel's ACTIVE tab as sessionTabId: Forage DUPLICATES that logged-in tab
-  // and crawls the clone, so it harvests YOUR authenticated read surface (a fresh tab would be anonymous). Mark the ground
-  // running so FORAGE_COMPLETE toasts; the result lands in the Ride card on that broadcast.
+  // §19 (passive toggle v2.74.1284) — "⛏ Forage" toggles passive capture. ARM (1st click): pass the panel's ACTIVE (logged-
+  // in) tab as sessionTabId; background arms the tee on it. The user then navigates their app — its API reads (incl. cross-
+  // origin) are captured. BANK (2nd click): background drains + banks `pending`, broadcasting FORAGE_COMPLETE.
   _mountEl.querySelectorAll('[data-gv-ride-forage]').forEach(btn => {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
       btn.disabled = true;
       const groundId = btn.dataset.gvRideForage;
-      _forageRunning.add(groundId);
       let sessionTabId = null;
       try {
         const q = typeof _windowId === 'number' ? { active: true, windowId: _windowId } : { active: true, currentWindow: true };
@@ -1183,8 +1185,9 @@ function _wireHandlers(grounds) {
         sessionTabId = typeof t?.id === 'number' ? t.id : null;
       } catch { /* */ }
       const res = await new Promise((r) => chrome.runtime.sendMessage({ type: 'FORAGE', payload: { groundId, sessionTabId } }, r));
-      if (res?.success) { toast('Foraging your logged-in session… (background tab; banks when done)'); }
-      else { _forageRunning.delete(groundId); toast(`Forage failed: ${res?.error ?? 'unknown'}`, 'err'); btn.disabled = false; }
+      if (res?.success && res.armed) { _forageArmed.add(groundId); toast('Foraging armed — open a few sections of your app, then click ⛏ again to bank'); await _renderList(); }
+      else if (res?.success && res.banking) { toast('Banking foraged reads…'); /* FORAGE_COMPLETE finishes + re-renders */ }
+      else { _forageArmed.delete(groundId); toast(`Forage: ${res?.error ?? 'failed'}`, 'err'); btn.disabled = false; }
     });
   });
 }

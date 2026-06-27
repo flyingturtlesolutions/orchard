@@ -15,6 +15,7 @@ import { StorageManager } from '../../Services/StorageManager.js';
 import { startHarvestSession, stopHarvestSession } from './sg.js';
 
 const _forageAbort = new Map();   // groundId → bool (concurrency guard; ABORT_FORAGE sets true)
+const _forageArmed = new Map();   // groundId → { tabId, host } while a MANUAL PASSIVE forage is armed (toggle: arm → the user navigates → bank)
 const MAX_VISITS = 16;            // bounded client-side crawl (kept short so the awaited executeScript stays inside the SW idle window)
 
 // THE CLIENT-SIDE NAV DRIVER — injected into the user's LIVE logged-in tab (ISOLATED world via executeScript). Self-contained
@@ -119,21 +120,69 @@ export async function runForage({ groundId = '', sessionTabId = null, readRideRe
 /** Request abort of a running forage (the concurrency guard; the in-tab crawl is short and self-terminating). */
 export function abortForage(groundId) { const id = String(groundId || '').trim(); if (_forageAbort.get(id) != null) { _forageAbort.set(id, true); return true; } return false; }
 
+/** Is a manual passive forage currently armed for this ground? (drives the panel button's arm↔bank label). */
+export function isForageArmed(groundId) { return _forageArmed.has(String(groundId || '').trim()); }
+
+/**
+ * §19 — ARM a PASSIVE forage on the user's LIVE logged-in tab and STAY ARMED. This is the robust path for the apps the
+ * synthetic driver can't navigate (static SPAs whose nav is buttons/programmatic): the tee (now cross-origin — it captures
+ * the app's API, v2.74.1284) records every authenticated read as the USER navigates their own app. A best-effort client-
+ * side kick runs once (helps apps with real <a> nav). `bankForage` (the 2nd button click) stops + banks. Returns { ok, armed }.
+ */
+export async function armForage({ groundId = '', sessionTabId = null } = {}) {
+  groundId = String(groundId || '').trim();
+  if (!groundId || typeof sessionTabId !== 'number') return { ok: false, error: 'groundId + live tab required' };
+  if (_forageArmed.has(groundId)) return { ok: true, armed: true, already: true };
+  let host = '';
+  try { host = new URL((await chrome.tabs.get(sessionTabId))?.url || '').host; } catch { /* */ }
+  if (!host) { try { const g = await StorageManager.getGround(groundId); host = g && g.url ? new URL(g.url).host : ''; } catch { /* */ } }
+  if (!host) return { ok: false, error: 'no host' };
+  const hr = await startHarvestSession({ groundId, host, appHost: host, origin: host, tabId: sessionTabId });
+  if (!hr.ok) { Logger.info('background', `FORAGE not armed: ${hr.error} (ground ${groundId})`); return { ok: false, error: hr.error }; }
+  _forageArmed.set(groundId, { tabId: sessionTabId, host });
+  try { await chrome.scripting.executeScript({ target: { tabId: sessionTabId, frameIds: [0] }, func: _forageSpaDriverFunc, args: [MAX_VISITS] }); } catch { /* best-effort kick */ }
+  Logger.info('ride', `FORAGE ▸ armed (passive) on ${host} — capturing the user's reads until bank (ground ${groundId})`);
+  return { ok: true, armed: true };
+}
+
+/** §19 — STOP a passive forage: drain the tee + bank what the user's navigation produced. Broadcasts FORAGE_COMPLETE. */
+export async function bankForage({ groundId = '', readRideRecipes, writeRideRecipes } = {}) {
+  groundId = String(groundId || '').trim();
+  const armed = _forageArmed.get(groundId); _forageArmed.delete(groundId);
+  if (!armed) return { ok: false, error: 'not armed', banked: 0 };
+  let banked = 0, captures = 0;
+  try {
+    const sr = await stopHarvestSession({ groundId, tabId: armed.tabId, readRideRecipes, writeRideRecipes });
+    banked = sr.banked || 0; captures = (sr.captures || []).length;
+    Logger.info('ride', `FORAGE harvest (passive): ${captures} capture(s) → banked ${banked} recipe(s) (ground ${groundId})`);
+  } catch (e) { Logger.warn('background', `FORAGE bank failed: ${e.message}`); }
+  try { chrome.runtime.sendMessage({ type: 'FORAGE_COMPLETE', payload: { groundId, banked, captures, passive: true } }).catch(() => { /* */ }); } catch { /* */ }
+  return { ok: true, banked, captures };
+}
+
 /**
  * @param {object} ctx  { readRideRecipes, writeRideRecipes }
  */
 export function createForageHandlers(ctx) {
   return {
-    // §19 — fire-and-forget: returns started:true; the in-tab crawl runs + banks pending on completion (FORAGE_COMPLETE).
+    // §19 — PASSIVE TOGGLE: 1st click ARMS (tee on the live tab; the user navigates their app → reads captured), 2nd click
+    // BANKS (drain + bank pending → FORAGE_COMPLETE). The arm/bank split is what makes it work for static SPAs the synthetic
+    // driver can't navigate — the USER's own navigation fires the (now cross-origin) API reads the tee records.
     FORAGE: (payload, _sender, sendResponse) => {
       const groundId = String(payload?.groundId ?? '').trim();
       if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
-      const sessionTabId = typeof payload?.sessionTabId === 'number' ? payload.sessionTabId : null;
+      if (isForageArmed(groundId)) {   // 2nd click → BANK what the user's navigation produced
+        sendResponse({ success: true, banking: true });
+        bankForage({ groundId, readRideRecipes: ctx.readRideRecipes, writeRideRecipes: ctx.writeRideRecipes })
+          .catch((e) => { try { Logger.warn('background', `FORAGE bank: ${e.message}`); } catch { /* */ } });
+        return;
+      }
+      const sessionTabId = typeof payload?.sessionTabId === 'number' ? payload.sessionTabId : null;   // the panel's active (logged-in) tab
       if (sessionTabId == null) { sendResponse({ success: false, error: 'no logged-in tab — open the app tab and try again' }); return; }
-      sendResponse({ success: true, started: true });
-      // sessionTabId = the user's LIVE logged-in tab to ride (the panel passes its active tab); it is where the crawl runs.
-      runForage({ groundId, sessionTabId, readRideRecipes: ctx.readRideRecipes, writeRideRecipes: ctx.writeRideRecipes })
-        .catch((e) => { try { Logger.warn('background', `FORAGE handler: ${e.message}`); } catch { /* */ } });
+      sendResponse({ success: true, armed: true });
+      armForage({ groundId, sessionTabId }).then((r) => {
+        if (!r.ok) { try { chrome.runtime.sendMessage({ type: 'FORAGE_COMPLETE', payload: { groundId, banked: 0, error: r.error, disarmed: true } }).catch(() => {}); } catch { /* */ } }
+      }).catch((e) => { try { Logger.warn('background', `FORAGE arm: ${e.message}`); } catch { /* */ } });
     },
     ABORT_FORAGE: (payload, _sender, sendResponse) => {
       const ok = abortForage(payload?.groundId);
