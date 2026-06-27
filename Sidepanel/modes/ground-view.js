@@ -74,9 +74,14 @@ function _renderRideCard(recipes, groundId) {
   const list = Array.isArray(recipes) ? recipes : [];
   const pending = list.filter((r) => r && r.reviewState === 'pending').length;
   const pendingReads = list.filter((r) => r && r.reviewState === 'pending' && r.safetyClass === 'auto').length;
-  const headExtra = pendingReads > 0
+  const bulkBtn = pendingReads > 0
     ? `<button class="btn-secondary gv-ride-bulk" data-gv-ride-bulk="${escAttr(groundId)}" type="button" title="Accept all pending reads (GETs) — makes them armable. Writes still need an individual ✓.">✓ ${pendingReads} read${pendingReads === 1 ? '' : 's'}</button>`
     : '';
+  // §19 (v2.74.1281) — manual Forage trigger: crawl the site's read-safe nav in a background tab to harvest NEW read-recipes
+  // (the same crawl Discovery auto-chains). Always present; sends FORAGE with NO existingTabId → a throwaway tab (never the
+  // user's). Read-only + consent-gated background-side; banks `pending` → they appear here on FORAGE_COMPLETE.
+  const forageBtn = `<button class="btn-secondary gv-ride-forage" data-gv-ride-forage="${escAttr(groundId)}" type="button" title="Forage — crawl this site's read-safe navigation in a background tab to harvest new read-recipes (banks pending when done).">⛏ Forage</button>`;
+  const headExtra = `${bulkBtn}${forageBtn}`;
   return _renderSection({
     key: 'recipes',
     label: 'Ride · Recipes',
@@ -109,6 +114,10 @@ const _siteMapCache = new Map();
 // section list. Discovery broadcasts (DISCOVERY_COMPLETE / FAILED)
 // remove the entry and trigger a re-render.
 const _discoveryRunning = new Set();
+// §19 (v2.74.1281) — manual-Forage-in-progress tracking (the "⛏ Forage" Ride-card button). A groundId sits here between
+// the FORAGE dispatch and its FORAGE_COMPLETE broadcast, so the listener TOASTs only for user-initiated runs (the
+// Discovery auto-chain forages silently). Ephemeral; lost on unmount, like _discoveryRunning.
+const _forageRunning = new Set();
 // v2.74.42 — Collapse state for the matched-Ground header card.
 const _collapsedHeader = new Set();
 // v2.74.866 — Collapse state for the Landmarks card (monitoring registry view),
@@ -360,6 +369,17 @@ function handleEvent(message) {
     _discoveryRunning.delete(groundId);
     toast(`Discovery failed: ${error ?? 'unknown'}`, 'err');
     _renderList().catch(() => {});
+  }
+  // §19 (v2.74.1281) — Forage finished (manual button OR Discovery auto-chain). TOAST only for a user-initiated run
+  // (groundId in _forageRunning); ALWAYS re-render so the freshly-banked pending recipes show in the Ride card.
+  if (message.type === 'FORAGE_COMPLETE') {
+    const { groundId, visits, banked } = message.payload ?? {};
+    if (_forageRunning.has(groundId)) {
+      _forageRunning.delete(groundId);
+      toast(`Foraged ${visits ?? 0} page${visits === 1 ? '' : 's'} → banked ${banked ?? 0} recipe${banked === 1 ? '' : 's'}`);
+    }
+    _renderList().catch(() => {});
+    return;
   }
 }
 
@@ -1144,6 +1164,19 @@ function _wireHandlers(grounds) {
       const res = await new Promise((r) => chrome.runtime.sendMessage({ type: 'BULK_REVIEW_RIDE_RECIPES', payload: { groundId: btn.dataset.gvRideBulk, scope: 'reads' } }, r));
       if (res?.success) { toast(`Accepted ${res.accepted} read${res.accepted === 1 ? '' : 's'}`); await _renderList(); }
       else { toast(`Bulk accept failed: ${res?.error ?? 'unknown'}`, 'err'); btn.disabled = false; }
+    });
+  });
+  // §19 (v2.74.1281) — "⛏ Forage" → fire the background recipe-capture crawl (fire-and-forget; the handler returns
+  // started:true). Mark the ground running so FORAGE_COMPLETE toasts; the result lands in the Ride card on that broadcast.
+  _mountEl.querySelectorAll('[data-gv-ride-forage]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      btn.disabled = true;
+      const groundId = btn.dataset.gvRideForage;
+      _forageRunning.add(groundId);
+      const res = await new Promise((r) => chrome.runtime.sendMessage({ type: 'FORAGE', payload: { groundId } }, r));
+      if (res?.success) { toast('Foraging reads… (background tab; banks when done)'); }
+      else { _forageRunning.delete(groundId); toast(`Forage failed: ${res?.error ?? 'unknown'}`, 'err'); btn.disabled = false; }
     });
   });
 }

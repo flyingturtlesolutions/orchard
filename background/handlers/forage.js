@@ -83,6 +83,9 @@ export async function runForage({ groundId = '', existingTabId = null, readRideR
       } catch (e) { Logger.warn('background', `FORAGE bank failed: ${e.message}`); }
     }
     if (ownTab && typeof tabId === 'number') { try { await chrome.tabs.remove(tabId); } catch { /* */ } }
+    // Tell the Ground panel the crawl finished so it can re-render the Ride card with the newly-banked recipes (mirrors
+    // DISCOVERY_COMPLETE). Best-effort; the manual trigger toasts on it, the Discovery auto-chain just silently refreshes.
+    try { chrome.runtime.sendMessage({ type: 'FORAGE_COMPLETE', payload: { groundId, visits, banked } }).catch(() => { /* no listener */ }); } catch { /* */ }
   }
   return { ok: true, visits, banked };
 }
