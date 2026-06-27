@@ -104,6 +104,26 @@ try {
   });
 } catch { /* no chrome.tabs in this context */ }
 
+// §20 (v2.74.1288) — the MAIN-world REPLAY fetch, injected into the app tab. Reads the page-captured auth headers
+// (window.__ahub_ride_auth[apiHost], stashed by the §20 tee) and fetches the (cross-origin) endpoint WITH them. Runs from
+// the app's own origin so the API's CORS is satisfied; the token never leaves the page. Self-contained (serialized). GET-
+// shaped reads only. → { status, body } | { noAuth } | { error }.
+function _replayFetchFunc(url, apiHost, method) {
+  return (async function () {
+    try {
+      var store = window.__ahub_ride_auth || {};
+      var cap = store[apiHost] || null;
+      if (!cap || !cap.headers || !cap.headers.authorization) return { noAuth: true };
+      var headers = { accept: 'application/json' };
+      for (var k in cap.headers) { if (Object.prototype.hasOwnProperty.call(cap.headers, k)) headers[k] = cap.headers[k]; }
+      var res = await fetch(url, { method: method || 'GET', headers: headers, credentials: 'include' });
+      var status = res.status, body = null;
+      try { body = await res.json(); } catch (e) { try { body = await res.text(); } catch (e2) { body = null; } }
+      return { status: status, body: body };
+    } catch (e) { return { error: String((e && e.message) || e) }; }
+  })();
+}
+
 export function createConnectorHandlers({ ensureContentScript, readRideRecipes } = {}) {
   const fetchVia = (tabId, url, method, body) =>
     chrome.tabs.sendMessage(tabId, { type: 'SESSION_FETCH', payload: { url, method, body } }, { frameId: 0 });
@@ -210,6 +230,39 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes }
         }
       })();
       return true;   // async — keep the sendResponse channel open
+    },
+
+    // §20 (v2.74.1288) — SESSION_REPLAY (header-replay session-ride): for a cross-origin Bearer/JWT API (a static SPA's
+    // data API, where a cookie can't ride), execute a harvested READ by replaying the page-captured auth headers FROM the
+    // app tab. Finds the live app tab on `sessionHost` (where the login + captured token live) and runs `_replayFetchFunc`
+    // there in the MAIN world. GET-shaped reads only — a header-replay write is a future, harder HITL slice. The token
+    // stays page-local; the background only ever sees the response. → { success, value } | { success:false, error, hint }.
+    'SESSION_REPLAY': (payload, _sender, sendResponse) => {
+      (async () => {
+        try {
+          const sessionHost = String((payload && payload.sessionHost) || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+          const apiHost = String((payload && payload.origin) || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+          const method = String((payload && payload.method) || 'GET').toUpperCase();
+          if (method !== 'GET' && method !== 'HEAD') { sendResponse({ success: false, error: 'replay-reads-only' }); return; }   // §9 — header-replay reads only for now
+          const args = (payload && typeof payload.params === 'object' && payload.params) || {};
+          const path = fillEndpoint(String((payload && payload.endpoint) || ''), args);
+          if (!sessionHost || !apiHost || !path) { sendResponse({ success: false, error: 'replay-missing-fields' }); return; }
+          const url = `https://${apiHost}${path.startsWith('/') ? path : '/' + path}`;
+          let tabs = []; try { tabs = await chrome.tabs.query({ url: `*://${sessionHost}/*` }); } catch { tabs = []; }
+          const tab = pickRideTab(tabs);
+          if (!tab) { sendResponse({ success: false, error: 'no-app-tab', hint: `open ${sessionHost} (your logged-in app) and arm Forage` }); return; }
+          let out = null;
+          try { out = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, world: 'MAIN', func: _replayFetchFunc, args: [url, apiHost, method] }); }
+          catch (e) { sendResponse({ success: false, error: 'replay-exec-failed' }); return; }
+          const r = out && out[0] && out[0].result;
+          if (!r) { sendResponse({ success: false, error: 'replay-no-result' }); return; }
+          if (r.noAuth) { sendResponse({ success: false, error: 'no-session-captured', hint: `arm Forage on ${sessionHost} to capture the session, then retry` }); return; }
+          if (r.error) { sendResponse({ success: false, error: r.error }); return; }
+          if (r.status === 401 || r.status === 403) { sendResponse({ success: false, error: 'session-expired', hint: `re-arm Forage on ${sessionHost} to refresh the session` }); return; }
+          sendResponse({ success: true, value: r.body, status: r.status, origin: apiHost });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'replay-failed' }); }
+      })();
+      return true;
     },
 
     // VERIFY_CONNECTION (AS-4) — setup-time "is this site connected?" check for ONE origin. A recipe-backed site uses

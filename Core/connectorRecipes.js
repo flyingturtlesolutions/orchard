@@ -270,7 +270,12 @@ export function harvestedRecipeLegs(recipes, { host = '', account = 'me', mode =
     }, { account, trusted: true });                                    // accepted = user-vetted → read drops to 'auto'
     if (!leg) continue;
     if (seen.has(leg.key)) continue; seen.add(leg.key);
-    leg.provenance = 'harvested';                                      // mark the source (the dispatch rides it via INVOKE_SESSION token-replay)
+    leg.provenance = 'harvested';                                      // mark the source
+    // §20 — header-replay routing: the endpoint (leg.tool.origin, e.g. the cross-origin API host) is reached by replaying
+    // the page-captured auth HEADERS FROM the app tab (sessionHost = the connected host where the login + token live). The
+    // dispatch sees tool.replay==='headers' → SESSION_REPLAY instead of cookie-ride INVOKE_SESSION.
+    leg.tool.sessionHost = host;
+    leg.tool.replay = 'headers';
     out.push(leg);
   }
   return out;

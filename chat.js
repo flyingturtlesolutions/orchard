@@ -4309,6 +4309,24 @@ async function _ilRunPanelAction(msg, { leg, panel, ask }) {
 async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
   const panel = IL_PANEL_LEGS[leg.key];
   if (panel) return _ilRunPanelAction(msg, { leg, panel, ask });
+  // §20 (v2.74.1288) — HEADER-REPLAY session-ride: a harvested cross-origin Bearer read (cookie-ride can't reach it) runs
+  // via SESSION_REPLAY on the app tab, carrying the page-captured auth headers. Reuses the connector ANSWER-SHAPE render.
+  if (leg.domain === 'connector' && leg.tool && leg.tool.replay === 'headers') {
+    let rr = null;
+    try { rr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params }); } catch { /* */ }
+    if (!rr || rr.success === false) {
+      const hint = (rr && rr.hint) ? `  ${rr.hint}.` : '';
+      _setMessageBody(msg, `🧠 Couldn’t ${leg.does || leg.name || 'do that'}${rr && rr.error ? ` — ${rr.error}` : ''}.${hint}`);
+      return false;
+    }
+    const facts = readShapeFacts(rr.value);
+    let shaped = null;
+    try { shaped = await _orchReq('SHAPE_ANSWER', { ask, facts }); } catch { /* best-effort */ }
+    if (shaped && shaped.answer) { _setMessageBody(msg, `🧠 ${shaped.answer}`); return true; }
+    const rlines = renderConnectorLines(rr.value, { name: leg.name || 'Results' });
+    _setMessageBody(msg, rlines ? `🧠 ${rlines.join('\n')}` : '🧠 Done.');
+    return true;
+  }
   const plan = planExec(leg, params, { tabId, groundId });
   if (!plan || !plan.ok || !plan.channel) { _setMessageBody(msg, `🧠 I can’t do “${ask}” here yet.`); return false; }   // AL-3e — returns the ok verdict so the caller can bank the outcome
   try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${leg.domain}:${leg.key}`); } catch { /* */ }

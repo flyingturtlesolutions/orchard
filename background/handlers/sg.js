@@ -34,7 +34,7 @@ import { listLocales } from '../../Services/Storage/GroundAssetStore.js';   // O
 import { loadGoalItems } from '../../Services/Storage/GoalMemoryStore.js';   // AL-4 — read the app's goal memory (beliefs/deltas)
 import { goalContextFor } from '../../Core/goalRetrieval.js';   // AL-4 — assemble the relevant standing rules + recall into a context block
 import { builtinApp } from '../../Core/appCatalog.js';   // OM — the app's catalog entry (its object model)
-import { connectorLegsForConnections } from '../../Core/connectorRecipes.js';   // CX-4c — the app's connected session-ride recipes as selectable interpret tools
+import { connectorLegsForConnections, harvestedRecipeLegs } from '../../Core/connectorRecipes.js';   // CX-4c + §20 — connected session-ride recipes (curated + harvested header-replay) as selectable interpret tools
 import { describeObjectModel } from '../../Core/appDef.js';   // OM — render the app's object model (noun/states/actions/transitions) as a context block
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability, findDuplicateCapabilities } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A; GA-6 dedup
 import { findDuplicateGroundGroups, planGroundMerge, primaryHost, siteIdentity, planEnsureGround } from '../../Core/groundDedup.js';   // v2.74.816/.817 — duplicate-Ground detect + merge; .835 — registrable brand for site-name matching; G1 — dedup-before-mint plan
@@ -1106,8 +1106,26 @@ export function createSgMessageHandlers(ctx) {
         // selectable tools, origin-enriched to the connected instance: a support agent connected to deako.zendesk.com
         // retrieves the Zendesk READS, so interpret can pick `my_open_tickets` instead of teaching/navigating. Reads
         // only (mode:'ask') — writes await the CX-6b confirm UI. chat.js routes a connector pick through INVOKE_SESSION.
+        const ragLegs = retrieveTools(ask, { capabilities: caps });
         const connLegs = connectorLegsForConnections(connections, { mode: 'ask' });
-        const retrieved = [...retrieveTools(ask, { capabilities: caps }), ...connLegs];
+        // §20 — ALSO offer the connected Grounds' HARVESTED + accepted reads as session-ride tools (header-replay). Per
+        // connection, resolve its Ground (by origin) → project its armable reads (the §18 gate) → deduped against the RAG +
+        // curated legs. So "show me my schedules" can SELECT a harvested deakoapi recipe; the dispatch rides it via
+        // SESSION_REPLAY (page-captured auth headers). Reads only (mode 'ask'); best-effort (never blocks interpret).
+        let harvestedLegs = [];
+        try {
+          if (typeof ctx.readRideRecipes === 'function' && connections.length) {
+            const _allG = await StorageManager.getAllGrounds();
+            const _seen = new Set([...ragLegs, ...connLegs].map((l) => l && l.key).filter(Boolean));
+            for (const c of connections) {
+              const gid = _groundIdForUrl(c.origin, _allG); if (!gid) continue;
+              const recs = await ctx.readRideRecipes(gid);
+              const host = String(c.origin || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+              harvestedLegs.push(...harvestedRecipeLegs(recs, { host, mode: 'ask', seenKeys: _seen }));
+            }
+          }
+        } catch { /* never block interpret on the harvested-leg projection */ }
+        const retrieved = [...ragLegs, ...connLegs, ...harvestedLegs];
         const primitives = ['OPEN_URL', 'CLICK', 'TYPE', 'SCROLL', 'EXTRACT'];
         // F-2 (v2.74.1179) — feed interpret the live page VOCABULARY (the same affordances IL_ANSWER reads from the
         // cached Locale) so its act/teach/clarify decisions are grounded in what the page actually offers, not just
