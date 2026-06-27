@@ -265,3 +265,77 @@ Orchard never types the credentials (the injection boundary, §9) — it only br
 1. `Core/connection.js` **(pure)** — **BUILT v2.74.1238** — `assessProbe`/`rideAction` (the anon-sentinel + wrong-account verdict → proceed | reauth-focus), `connectionFromProbe`/`connectionFreshness` (TTL), `pickRideTab` (live, active-then-MRU). 17 tests.
 2. `INVOKE_SESSION` glue **(impure — eyeball pending)** — **BUILT v2.74.1239** — `pickRideTab` → ephemeral `tabs.create({active:false})` → `_waitTabComplete` → `ensureContentScript` → ride → idle-`tabs.remove`; per-origin managed-tab registry (reuse + idle-TTL + `onRemoved` cleanup) + a `lastOriginByAppHost` memory for cold-start. `account` threaded → the wrong-account guard is live-capable.
 3. re-auth focus + resume **(impure — eyeball pending)** — **BUILT v2.74.1240** — `_focusTab` + `_waitForReauth` (`webNavigation`-driven re-probe on each settled nav, tab-closed cancel, 90 s deadline) → resume the pending invoke; the focused tab is promoted out of the disposable registry. **Caveat:** a long idle wait can outlive the MV3 SW — the robust form (chrome.alarms + a persisted continuation + out-of-band delivery, the `alarms` permission is already held) is the hardening follow-up.
+
+## 17. Recipe definition at scale — Explore harvests reads, demonstrate-once for writes (designed 2026-06-27)
+
+**The problem.** The curated `CONNECTOR_RECIPES` catalog (`Core/connectorRecipes.js`) is hand-authored — one engineer per API, Zendesk-only today. It does not scale to the long tail of apps a user actually runs. "How else can a recipe be defined?"
+
+**The thesis.** A ride recipe is the **network twin of a DOM capability** — its own definition is *"the same request the app's own UI button fires."* So it is *learned*, the way Orchard learns DOM capabilities (OBS-1..4: observe → generalize → trial → bank), pointed at the network layer. **The capture machinery already exists** — §15's `network-harvest` (A2: a MAIN-world `fetch`/XHR tee or `chrome.debugger`), `Core/harvest.js` correlation, and CX-8 dual-capture. §17 adds the one missing *source*: **autonomous breadth** — a whole app's read catalog harvested *without the user performing each task*.
+
+**Two definition paths, one gate.**
+
+| | Driver | Cost to user | Why safe |
+|---|---|---|---|
+| **Reads** | **Explore (engine)** — the templated crawl already navigates the app autonomously; each page load fires the app's read APIs → harvest them | **zero** — no task performed | EX-1 destructive-veto keeps the crawl read-only *by construction* |
+| **Writes** | **the user (once)** — demonstrate only the writes worth teaching; CX-8 captures the request | one demo per write | fail-closed HITL forever (§9); **never** engine-fired |
+
+Both proto-recipes pass **generalize → trial-verify → bank** (the OBS flywheel; the trial gate closes the staleness/hallucination hole). Banked recipes land in the same origin-keyed palette the hand catalog feeds (`connectorLegsForConnections`/`recipeForOrigin`).
+
+**The crawl IS the generalizer (the unique win over §15/CX-8).** A single demonstration can't turn `64863 → {id}` without a guess. The Explore crawl visits **many** instances of a page type (ticket #1, #2, #3 — id-segment templating + sitemap ingestion, both built) → **multiple captures of the same endpoint with different ids → diff them → the varying segment collapses to `{param}` deterministically.** Breadth is the generalization signal; the LLM is only the fallback for the single-sample case, plus naming + `does` + intent. The identity call (`/users/me`) fires on the first authenticated load → `{me}` solved for free.
+
+**The ladder (where a recipe can come from).** Hand-authored (today; precise, doesn't scale) · **Explore-harvest (primary — autonomous reads)** · CX-8 demonstrate (writes + the read tail the crawl doesn't exercise — interaction-gated searches) · OpenAPI/GraphQL-introspection + LLM-synthesis (cold-start *accelerants*: propose a candidate catalog, but feed the **same** trial-verify gate — never trusted unverified, because the published/official API ≠ the frontend API the session rides) · user/community declarative + federation (the crowd play, over the P2b sync).
+
+**Maps onto what exists (small).**
+- **Capture** — reuse §15 `network-harvest` (A2) + `Core/harvest.js` `matchHarvest` (pick the result-bearing call out of the XHR noise). No new capture code.
+- **Driver** — reuse the Explore templated crawl (Completeness slices, built) + EX-6 auto-explore. The harvester rides the crawl; the crawl already enumerates the read surface.
+- **Verify** — reuse the trial gate (`RUN_SG_TRIAL` / PB-*): probe the harvested endpoint, confirm the response shape + *same intent* (not just "returns rows" — §15's semantics-drift caveat).
+- **Bank** — a harvested recipe is a `CONNECTOR_RECIPES`-shaped record matched by origin; no new palette path.
+
+**Invariants this touches (don't relearn).**
+- **Method IS the safety class.** GET → read (`auto`); non-GET → write (`gated`, fail-closed HITL); DELETE/merge/`mark_as_spam` → `destructive`. The classifier is the HTTP method; a harvested recipe is **never** auto-armed for writes regardless of how it was born (§9). Money/inventory stays navigate-only (§14) even if a write endpoint is observed.
+- **Harvested JSON is untrusted page-origin data** — escape-first, never instructions (§9, identical to §15).
+- **Busy-mark with the §15 twist** — the crawl's engine clicks busy-mark the *interaction monitor* (noise), but the harvester is the *intended* signal: suppress the monitor, **enable** the harvest (same shape as the OBS exception, Invariant #2).
+- **Verify identity, not status** (§14) — a harvested read against a logged-out crawl returns 200 + an anonymous sentinel → a *false* recipe. Gate harvest on a passing identity probe.
+
+**Why this may beat passive DOM-synth.** [[passive_synthesis_parked]] parked PS-3/4 (synth-from-harvest) because DOM identity is toggle/state-coupled with **no postcondition**. A recipe dodges both: an **endpoint+method is a stable identity** (not coupled to render state), and the **response shape is a real postcondition** the trial gate can assert. So the wall that stopped passive DOM-synthesis likely does not block network-recipe harvest — PS-0/1/2's "harvest stays a cheap source" extends cleanly to the network layer.
+
+**Build order (pure-first; reuses landed cores).**
+1. **Harvest-during-Explore wiring** *(impure — the one real new surface)* — arm the §15 harvester for the *duration of an Explore crawl* (not just a single CX-8 demo); collect `{method, url, query, body?, responseShape}` per same-origin JSON call, tagged by the crawl's current page-type.
+2. **`Core/recipeFromHarvest.js` (pure + tested)** — group captures by endpoint; **diff multi-instance captures → `{param}` templating**; classify read/write/destructive by method; detect the identity call; emit a proto-`CONNECTOR_RECIPES` record. The crawl-as-generalizer core.
+3. **LLM polish** *(cheap tier)* — name + `does` + param-schema + the single-sample generalization fallback (the OBS-4 analog).
+4. **Trial-verify → bank** — probe each proto-recipe live (same-intent gate), bank the survivors into the origin palette; writes banked `gated` (a definition, not a run grant).
+5. **CX-8 write capture** — the demonstrate-once path for writes (already the §15 multiplier; surface it as "teach this write").
+
+**Open decision (carried from §15):** CDP (`debugger` — body-clean but shows the "started debugging this browser" infobar) vs the MAIN-world `fetch`-tee (banner-free, more fragile). §15 already leans MAIN-world for the per-step harvest; the Explore-wide harvest shares that mechanism — pick once.
+
+## 18. Per-Ground tool surface — Drive / Ride / Broker observability (designed 2026-06-27)
+
+**Why this comes before §17.** A harvested recipe must land in a surface that can DISPLAY + EDIT it — you cannot bank into a view that can't show or correct it (the `_DECISION_RE` lesson, generalized to a whole tool class). And the review/edit surface IS the **human gate** for the harvest: a harvested write lands `pending` + `gated` and is un-armable until a human accepts it here. So observability precedes the flywheel — and forces the data-model question now.
+
+**The hierarchy — two tiers.** A Ground's tools group by **class** (HOW it executes), then by **substrate type** (WHAT kind, within the class). **Ride is a peer of Drive (the class level), NOT of fragments** (a substrate type *inside* Drive):
+
+```
+Ground
+├─ DRIVE   (grounded page execution)   Fragments · Perspectives · Assertions · Locales · Landmarks · Strategies/Workflows
+├─ RIDE    (session-ride, §4)          Recipes (reads + writes, safety-badged)
+└─ BROKER  (OAuth/MCP, §5 — later)     (placeholder)
+```
+
+Matches §1 (connectors are a tool class) + the [tool lattice](project_router_over_tools.md): the router selects *across* classes, so the surface must make the classes visible, not flatten substrate types up to the class level. Studio's existing flat `ground-section-row`s (Fragments/Perspectives/Assertions/Locales) **re-parent under a Drive group**; Ride + Broker are new *sibling class groups*; `Recipes` sits inside Ride exactly as `Fragments` sits inside Drive.
+
+**The data-model shift (the crux — the UI is downstream).** Ride recipes are GLOBAL today: `CONNECTOR_RECIPES` is one static catalog matched to a Ground by origin at runtime (`connectorLegsForConnections`). For per-Ground display/edit AND to have somewhere to bank harvested entries, they become a **per-Ground collection** — the shape `sgCapabilities` already has. A Ground's recipes = the curated catalog (seeded by origin) ∪ its harvested/demonstrated ones, each carrying:
+`{ provenance: curated|harvested|demonstrated, safetyClass: auto|gated|destructive (method-derived, §9), trust (GA-3), enabled, reviewState: pending|accepted }`.
+
+**The arm guard (the teeth).** `armable(recipe) = enabled ∧ reviewState==='accepted' ∧ safety-gates-pass`. Enforced at the connector **dispatch** (not just the UI): a `pending` harvested write is never executed. This is **GA-4** (pending-review + arm guard) generalized from capabilities to the ride class — the harvest's safety net.
+
+**Build path (pure-first; each slice independently valuable + testable).**
+1. **`Core/rideRecipe.js` (pure + tested)** — the per-Ground record + collection ops: `safetyClassForMethod` (the §9 classifier) · `seedFromCatalog(origin)` (curated `CONNECTOR_RECIPES` → per-Ground records) · `mergeRecipes` (re-seed + harvested, preserving user edits) · edit transforms (`setEnabled` · `review` accept/reject · `downgradeSafety` — gated-only, **never** promote a write to auto · `editMeta`) · `armable`. **The data-model shift; everything else renders it.**
+2. **Per-Ground storage + handlers (impure)** — read/write the collection by `groundId` (mirror `sgCapabilities`), seed-on-first-access; `GET / SAVE / REVIEW_RIDE_RECIPE`.
+3. **`Core/groundToolSurface.js` (pure + tested)** — `(ground, recipes, broker) → { drive:[{type,count,entries}], ride:[…], broker:[…] }`. The ONE tri-class model BOTH surfaces render — the hierarchy becomes a tested contract, not ad-hoc UI nesting.
+4. **Studio class-tier refactor (impure — eyeball)** — re-parent drive sections under a Drive group; add Ride (Recipes rows: name · `does` · method+endpoint · params · safety badge · provenance · health · enabled) + a Broker placeholder; edit ops (toggle · edit · downgrade · delete · re-verify · review→accept/reject). Renders `groundToolSurface`.
+5. **Ground-panel tri-class cards (impure)** — Drive/Ride/Broker cards in `Sidepanel/modes/ground-view.js`; the Ride card glances recipes (safety badge · health dot · toggle) + a "N pending review" deep-link to Studio.
+6. **Arm guard + review lifecycle wired (impure)** — enforce `armable` at the connector dispatch; the pending→accept/reject transitions surfaced in both views. GA-4 for the ride class.
+
+→ **Then** §17's harvest banks into this collection (`provenance: harvested`, `reviewState: pending`), and the human reviews it here before it is armable.
+
+**Reuse (not net-new machinery):** the `sgCapabilities` per-Ground shape · GA-4 review-lifecycle + arm-guard · GA-3 trust/health · the Studio `ground-section` pattern · §9 method=safety-class. The genuinely new code is `rideRecipe.js` + `groundToolSurface.js` (both pure) + the two render surfaces.

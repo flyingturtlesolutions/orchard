@@ -1,0 +1,98 @@
+// Core/rideRecipe.test.js — the per-Ground ride-recipe model (§18 slice 1). node --test.
+
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+
+import {
+  safetyClassForMethod, safetyRank, originMatchesAppHost, recipeFromCatalogEntry,
+  seedFromCatalog, mergeRecipes, setEnabled, review, downgradeSafety, editMeta, armable,
+} from './rideRecipe.js';
+
+// A miniature of the CONNECTOR_RECIPES shape.
+const CATALOG = [
+  { id: 'my_open_tickets', name: 'My open Zendesk tickets', does: 'list open', method: 'GET', endpoint: '/api/v2/search.json', params: [], appHost: 'zendesk.com' },
+  { id: 'add_comment', name: 'Comment on a ticket', does: 'reply', method: 'PUT', endpoint: '/api/v2/tickets/{id}.json', params: [{ name: 'id' }], appHost: 'zendesk.com', write: true, body: {} },
+  { id: 'delete_ticket', name: 'Delete a ticket', does: 'delete', method: 'DELETE', endpoint: '/api/v2/tickets/{id}.json', params: [{ name: 'id' }], appHost: 'zendesk.com', write: true, destructive: true },
+  { id: 'shopify_orders', name: 'Orders', does: 'list orders', method: 'GET', endpoint: '/admin/orders.json', params: [], appHost: 'myshopify.com' },
+];
+
+describe('rideRecipe — safety classing (method IS the class, §9)', () => {
+  it('GET → auto, non-GET → gated, destructive → destructive', () => {
+    assert.equal(safetyClassForMethod('GET'), 'auto');
+    assert.equal(safetyClassForMethod('get'), 'auto');
+    assert.equal(safetyClassForMethod('PUT'), 'gated');
+    assert.equal(safetyClassForMethod('POST'), 'gated');
+    assert.equal(safetyClassForMethod('DELETE', { destructive: true }), 'destructive');
+    assert.equal(safetyClassForMethod('GET', { destructive: true }), 'destructive');   // flag wins
+  });
+  it('rank orders auto < gated < destructive', () => {
+    assert.ok(safetyRank('auto') < safetyRank('gated'));
+    assert.ok(safetyRank('gated') < safetyRank('destructive'));
+    assert.equal(safetyRank('nonsense'), -1);
+  });
+});
+
+describe('rideRecipe — origin match', () => {
+  it('exact host + subdomain match; foreign host does not', () => {
+    assert.equal(originMatchesAppHost('zendesk.com', 'zendesk.com'), true);
+    assert.equal(originMatchesAppHost('deako.zendesk.com', 'zendesk.com'), true);
+    assert.equal(originMatchesAppHost('https://deako.zendesk.com/', 'zendesk.com'), true);
+    assert.equal(originMatchesAppHost('evil-zendesk.com', 'zendesk.com'), false);   // not a subdomain
+    assert.equal(originMatchesAppHost('myshopify.com', 'zendesk.com'), false);
+  });
+});
+
+describe('rideRecipe — seed from catalog', () => {
+  it('keeps only origin-matching entries; curated → accepted/enabled/trust 1', () => {
+    const seeded = seedFromCatalog(CATALOG, { groundId: 'g1', origin: 'deako.zendesk.com' });
+    assert.deepEqual(seeded.map((r) => r.id).sort(), ['add_comment', 'delete_ticket', 'my_open_tickets']);   // not shopify
+    const open = seeded.find((r) => r.id === 'my_open_tickets');
+    assert.equal(open.provenance, 'curated');
+    assert.equal(open.reviewState, 'accepted');
+    assert.equal(open.enabled, true);
+    assert.equal(open.trust, 1);
+    assert.equal(open.safetyClass, 'auto');
+    assert.equal(open.origin, 'deako.zendesk.com');
+    assert.equal(seeded.find((r) => r.id === 'add_comment').safetyClass, 'gated');
+    assert.equal(seeded.find((r) => r.id === 'delete_ticket').safetyClass, 'destructive');
+  });
+});
+
+describe('rideRecipe — merge preserves user state', () => {
+  it('a re-seed keeps a disabled/reviewed recipe disabled; harvested entries survive a re-seed; new harvest adds', () => {
+    let coll = seedFromCatalog(CATALOG, { groundId: 'g1', origin: 'deako.zendesk.com' });
+    coll = coll.map((r) => (r.id === 'my_open_tickets' ? setEnabled(r, false) : r));
+    // a harvested recipe added to the collection
+    const harvested = { id: 'harvest_a1', groundId: 'g1', origin: 'deako.zendesk.com', name: 'recent', does: 'x', method: 'GET', endpoint: '/api/v2/x', params: [], provenance: 'harvested', safetyClass: 'auto', trust: 0.3, enabled: true, reviewState: 'pending' };
+    coll = mergeRecipes(coll, [harvested]);
+    assert.ok(coll.find((r) => r.id === 'harvest_a1'));                                  // harvested added
+    assert.equal(coll.find((r) => r.id === 'my_open_tickets').enabled, false);           // edit survived the add
+    // RE-SEED the curated catalog → user disable preserved, harvested entry kept, endpoint refreshed
+    const reseed = seedFromCatalog([{ ...CATALOG[0], endpoint: '/api/v2/search.json?v2' }, CATALOG[1], CATALOG[2]], { groundId: 'g1', origin: 'deako.zendesk.com' });
+    coll = mergeRecipes(coll, reseed);
+    assert.equal(coll.find((r) => r.id === 'my_open_tickets').enabled, false);           // user disable preserved
+    assert.equal(coll.find((r) => r.id === 'my_open_tickets').endpoint, '/api/v2/search.json?v2');  // mechanical refreshed
+    assert.ok(coll.find((r) => r.id === 'harvest_a1'));                                  // harvested NOT clobbered by re-seed
+  });
+});
+
+describe('rideRecipe — edit transforms + arm guard', () => {
+  const base = recipeFromCatalogEntry(CATALOG[0], { groundId: 'g1', origin: 'deako.zendesk.com' });
+  it('downgradeSafety TIGHTENS only', () => {
+    assert.equal(downgradeSafety(base, 'gated').safetyClass, 'gated');                    // auto→gated ok
+    assert.equal(downgradeSafety(base, 'destructive').safetyClass, 'destructive');        // auto→destructive ok
+    const gated = { ...base, safetyClass: 'gated' };
+    assert.equal(downgradeSafety(gated, 'auto').safetyClass, 'gated');                    // gated→auto REFUSED
+  });
+  it('review + editMeta', () => {
+    assert.equal(review(base, 'reject').reviewState, 'rejected');
+    assert.equal(review({ ...base, reviewState: 'pending' }, 'accept').reviewState, 'accepted');
+    assert.equal(editMeta(base, { does: 'list my open tickets' }).does, 'list my open tickets');
+  });
+  it('armable = enabled AND accepted; pending/rejected/disabled are NOT armable', () => {
+    assert.equal(armable(base), true);                                                   // curated: enabled + accepted
+    assert.equal(armable({ ...base, reviewState: 'pending' }), false);                    // harvested-pending: blocked
+    assert.equal(armable({ ...base, reviewState: 'rejected' }), false);
+    assert.equal(armable(setEnabled(base, false)), false);
+  });
+});

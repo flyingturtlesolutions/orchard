@@ -33,6 +33,34 @@ const escHtml = (s) => String(s ?? '')
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const escAttr = escHtml;
 
+// §18 — fetch the Ground's ride-recipe collection (GET_RIDE_RECIPES — seeded from the curated catalog on first access)
+// for the panel's glance card. Best-effort → [] on any failure.
+async function _fetchRideRecipes(groundId, origin) {
+  try {
+    const res = await new Promise((r) => chrome.runtime.sendMessage({ type: 'GET_RIDE_RECIPES', payload: { groundId, origin } }, r));
+    return (res && res.success && Array.isArray(res.recipes)) ? res.recipes : [];
+  } catch { return []; }
+}
+
+// §18 — the RIDE class glance card (the Ground panel is glance + deep-link; full edit lives in Studio's Ride section).
+// Lists recipes with a safety badge + disabled/pending markers, a count, and the pending-review tally. UNTRUSTED → escaped.
+function _renderRideCard(recipes, groundId) {
+  const list = Array.isArray(recipes) ? recipes : [];
+  const pending = list.filter((r) => r && r.reviewState === 'pending').length;
+  const rows = list.slice(0, 40).map((r) => {
+    const badge = r.safetyClass === 'destructive' ? '🔴' : (r.safetyClass === 'gated' ? '🟡' : '🟢');
+    const off = (r.enabled === false) ? ' gv-ride-off' : '';
+    const pend = (r.reviewState === 'pending') ? ' <span class="gv-ride-pending">pending</span>' : '';
+    const prov = (r.provenance && r.provenance !== 'curated') ? ` <span class="gv-ride-prov">${escHtml(r.provenance)}</span>` : '';
+    return `<li class="gv-ride-row${off}"><span class="gv-ride-badge" title="${escAttr(r.safetyClass || 'auto')}">${badge}</span> <span class="gv-ride-name">${escHtml(r.name || r.id || '')}</span> <span class="gv-ride-method">${escHtml(String(r.method || 'GET'))}</span>${prov}${pend}</li>`;
+  }).join('');
+  return `<section class="gv-card gv-ride-card" data-gv-ride="${escAttr(groundId)}">`
+    + `<header class="gv-card-head"><span class="gv-card-title">Ride · Recipes</span><span class="gv-card-count">${list.length}${pending ? ` · ${pending} pending` : ''}</span></header>`
+    + `<ul class="gv-ride-list">${rows || '<li class="gv-feed-empty">No ride recipes — connect a session-ride app, or harvest them.</li>'}</ul>`
+    + (pending ? `<div class="gv-ride-hint">Review the ${pending} pending in Studio → this Ground's Ride section.</div>` : '')
+    + '</section>';
+}
+
 let _mountEl = null;
 // v2.74.31 — Per-section collapse state. Map<groundId, Set<sectionKey>>
 // — sectionKey is one of 'fragments' | 'assertions' | 'perspectives' |
@@ -403,20 +431,25 @@ async function _renderList() {
     const proposedLm = (matched.perspectives || []).reduce(
       (s, p) => s + (Array.isArray(p.landmarks) ? p.landmarks.length : 0), 0);
     const lmHtml = _renderLandmarksCard(landmarks, matched.ground.id, proposedLm);
+    // §18 — the RIDE class glance card (a free-floating sibling card, like Landmarks). Fetch-then-render mirrors the
+    // Landmarks pattern. Display-only here; full edit is in Studio's Ride section (per the spec — panel glances, Studio edits).
+    let _rideOrigin = '';
+    try { _rideOrigin = new URL(matched.ground.url || matched.ground.origin || '').host; } catch { _rideOrigin = String(matched.ground.origin || ''); }
+    const rideHtml = _renderRideCard(await _fetchRideRecipes(matched.ground.id, _rideOrigin), matched.ground.id);
     // v2.74.42 — Section list is gated on a mapped Ground (siteMap present).
     // While discovery is in flight, show the indeterminate loading
     // indicator. When a Ground exists but has no map yet, show a
     // Discover prompt instead of empty section cards.
     if (_discoveryRunning.has(matched.ground.id)) {
-      list.innerHTML = _renderHeaderOnly(matched) + lmHtml + _renderDiscoveringBlock();
+      list.innerHTML = _renderHeaderOnly(matched) + lmHtml + rideHtml + _renderDiscoveringBlock();
       _wireHeaderHandlers(matched);
       _wireLandmarksCard();
     } else if (hasMap) {
-      list.innerHTML = _renderGroundCard(matched, lmHtml);
+      list.innerHTML = _renderGroundCard(matched, lmHtml) + rideHtml;
       _wireHandlers([matched]);
       _wireLandmarksCard();
     } else {
-      list.innerHTML = _renderHeaderOnly(matched) + lmHtml + _renderUndiscoveredBlock(matched.ground.id);
+      list.innerHTML = _renderHeaderOnly(matched) + lmHtml + rideHtml + _renderUndiscoveredBlock(matched.ground.id);
       _wireHeaderHandlers(matched);
       _wireDiscoverPromptHandler(matched.ground);
       _wireLandmarksCard();

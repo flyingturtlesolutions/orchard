@@ -96,6 +96,7 @@ function _planExec(leg, params = {}, ctx = {}) {
       return { ok: true, channel: 'INVOKE_SESSION', busyMark: false, mode, domain: 'connector',
                payload: { origin: t.origin || null, appHost: t.appHost || null, endpoint: t.endpoint,
                           method: t.method || 'GET', body: t.body || null, account: t.account || null, args: p,
+                          groundId: groundId || null, recipeId: (leg && leg.key) || null,   // §18 — the arm guard checks the per-Ground recipe at INVOKE_SESSION
                           verifyIdentity: t.verifyIdentity === true, identityProbe: t.identityProbe || null },
                reason: 'session-ride' };
     }

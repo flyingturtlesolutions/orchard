@@ -35,6 +35,81 @@ import {
 import { BUILTIN_ANALYSES, isBuiltinAnalysisId, getBuiltinAnalysis } from './Services/BuiltinAnalyses.js';
 import { parseTemplate, collectTemplateReferences } from './Services/TemplateEngine.js';
 import { uid, $, qs, qsa, escHtml, escAttr, relTime, toast, broadcastStorageChanged, openSidepanelHere } from './shared.js';
+import { rideSection } from './Core/groundToolSurface.js';   // §18 — the Ride class's recipe rows + badges (the tri-class surface model)
+
+// §18 (v2.74.1268, DESIGN_connectors.md) — a Ground's tool surface is grouped by execution CLASS: Drive (the grounded
+// page substrates) · Ride (session-ride recipes) · Broker (OAuth/MCP, later). A class divider is a lightweight header
+// row ABOVE the substrate sections — Ride is a PEER of Drive, not of Fragments. PURE DOM builder.
+function _classDivider(label, { pending = 0, placeholder = false } = {}) {
+  const row = document.createElement('div');
+  row.className = 'ground-class-divider';
+  row.innerHTML = `<strong class="ground-class-label">${escHtml(label)}</strong>`
+    + (pending ? ` <span class="ground-class-pending" title="${pending} pending review">${pending} pending</span>` : '')
+    + (placeholder ? ' <span class="empty-state small">— not connected yet</span>' : '');
+  return row;
+}
+
+const _RIDE_SAFETY_BADGE = { auto: '🟢 auto', gated: '🟡 gated', destructive: '🔴 destructive' };
+// §18 — one recipe row: enable toggle · safety badge · name (method+endpoint on hover) · method · provenance · does ·
+// review buttons (only when pending). UNTRUSTED display data → escaped. The edits route through the guarded handler.
+function _rideRecipeRowHtml(r) {
+  const badge = _RIDE_SAFETY_BADGE[r.safetyClass] || escHtml(r.safetyClass);
+  const prov = r.provenance !== 'curated' ? ` <span class="ride-prov">${escHtml(r.provenance)}</span>` : '';
+  const review = r.reviewState === 'pending'
+    ? `<button class="btn-action" data-ride-op="review" data-ride-val="accept" data-rid="${escAttr(r.id)}" title="Accept — make this recipe armable">✓</button>`
+      + `<button class="btn-action danger" data-ride-op="review" data-ride-val="reject" data-rid="${escAttr(r.id)}" title="Reject">✕</button>`
+    : '';
+  return `<div class="ride-recipe-row${r.enabled ? '' : ' ride-disabled'}${r.reviewState === 'pending' ? ' ride-pending' : ''}">`
+    + `<input type="checkbox" data-ride-op="enable" data-rid="${escAttr(r.id)}"${r.enabled ? ' checked' : ''} title="Enable / disable">`
+    + ` <span class="ride-safety">${badge}</span>`
+    + ` <span class="ride-name" title="${escAttr(r.method + ' ' + r.endpoint)}">${escHtml(r.name)}</span>`
+    + ` <span class="ride-method">${escHtml(r.method)}</span>${prov}`
+    + ` <span class="ride-does">${escHtml(r.does)}</span>`
+    + ` <span class="ride-actions">${review}</span>`
+    + '</div>';
+}
+
+// §18 — render the RIDE class block under a Ground card: fetch the collection (GET_RIDE_RECIPES — seeded from the curated
+// catalog on first access), render the Recipes section + a Broker placeholder, and wire the guarded edits (enable/disable
+// + review accept/reject → EDIT_RIDE_RECIPE; the safety transforms are enforced server-side in Core/rideRecipe.js).
+// LIVE-ONLY (chrome.runtime + the storage round-trip). Best-effort: a fetch failure shows the empty state.
+function _renderRideClass(card, ground) {
+  let origin = '';
+  try { origin = new URL(ground.url || ground.origin || ground.homeUrl || '').host; } catch { origin = String(ground.origin || ground.host || ''); }
+  card.appendChild(_classDivider('Ride'));
+  const row = document.createElement('div');
+  row.className = 'ground-section-row ground-ride-row';
+  row.innerHTML = '<div class="ground-section-head"><span class="ground-section-label">Recipes</span><span class="ground-section-count" data-ride-count>…</span></div>'
+    + '<div class="ground-section-body" data-ride-body><span class="empty-state small">Loading ride recipes…</span></div>';
+  card.appendChild(row);
+  card.appendChild(_classDivider('Broker', { placeholder: true }));
+
+  const render = async () => {
+    let recipes = [];
+    try {
+      const res = await new Promise((r) => chrome.runtime.sendMessage({ type: 'GET_RIDE_RECIPES', payload: { groundId: ground.id, origin } }, r));
+      recipes = (res && res.success && Array.isArray(res.recipes)) ? res.recipes : [];
+    } catch { /* best-effort */ }
+    const sec = rideSection(recipes);
+    const countEl = row.querySelector('[data-ride-count]');
+    if (countEl) countEl.textContent = String(sec.count) + (sec.pending ? ` · ${sec.pending} pending` : '');
+    const body = row.querySelector('[data-ride-body]');
+    if (!body) return;
+    body.innerHTML = sec.count
+      ? sec.entries.map(_rideRecipeRowHtml).join('')
+      : '<span class="empty-state small">No ride recipes yet — connect a session-ride app, or harvest them (§17).</span>';
+    body.querySelectorAll('[data-ride-op]').forEach((el) => {
+      el.addEventListener(el.type === 'checkbox' ? 'change' : 'click', async () => {
+        const op = el.dataset.rideOp;
+        const value = op === 'enable' ? el.checked : (el.dataset.rideVal || '');
+        const res = await new Promise((r) => chrome.runtime.sendMessage({ type: 'EDIT_RIDE_RECIPE', payload: { groundId: ground.id, id: el.dataset.rid, op, value } }, r));
+        if (res && res.success) { toast(`Recipe ${op === 'review' ? value : op}`); render(); }
+        else toast(`Edit failed: ${res?.error ?? 'unknown'}`, 'err');
+      });
+    });
+  };
+  render();
+}
 import { recordMetaFromPath, conflictTierForPath } from './Services/Storage/StoragePaths.js';
 import { composeDescriptions } from './Services/FragmentDescription.js';
 // v2.72.45 (Pass 17g iter) — Perspective form removed entirely. Perspective authoring
@@ -2753,6 +2828,7 @@ async function _renderGroundCard(ground, { list, localeMap }) {
     });
     groupHeader.querySelector('[data-action="discover"]').addEventListener('click', () => startDiscovery(ground.id));
     card.appendChild(groupHeader);
+    card.appendChild(_classDivider('Drive'));   // §18 — the DRIVE class header; the substrate sections below (Fragments/Perspectives/…) are its members
 
     // Fragments stub row — wired in Pass B
     const fragRow = document.createElement('div');
@@ -3827,6 +3903,10 @@ async function _renderGroundCard(ground, { list, localeMap }) {
       });
     });
     card.appendChild(stratRow);
+
+    // §18 — the RIDE + BROKER class blocks (peers of DRIVE). Everything above belongs to the Drive class; this appends
+    // the Ride class (its Recipes section, async-loaded + edit-wired) and a Broker placeholder. Fire-and-forget render.
+    _renderRideClass(card, ground);
 
     // Finally append the fully-assembled card to the list
     list.appendChild(card);

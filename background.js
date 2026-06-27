@@ -1271,6 +1271,34 @@ async function _writeSgCapability(groundId, cap) {
   });
 }
 
+// §18 (v2.74.1268) — the per-Ground RIDE-RECIPE collection (DESIGN_connectors.md). Mirrors the sgCapabilities store: a
+// per-ground array in chrome.storage.local, serialized by an RMW chain (CR-ST2). Seeded from CONNECTOR_RECIPES on first
+// access (in the GET handler, which knows the origin); harvested/demonstrated recipes accrete here (§17). The pure model
+// + the safety transforms live in Core/rideRecipe.js; the arm guard (armable) gates execution at the dispatch (slice 6).
+const _rideRecipesKey = (groundId) => `rideRecipes:${groundId}`;
+const RIDE_RECIPE_CAP = 300;
+async function _readRideRecipes(groundId) {
+  if (!groundId) return [];
+  try { const k = _rideRecipesKey(groundId); const got = await chrome.storage.local.get(k); return Array.isArray(got?.[k]) ? got[k] : []; }
+  catch { return []; }
+}
+const _rideRecipeChains = new Map();
+function _rideRecipeChained(groundId, fn) {
+  const tail = _rideRecipeChains.get(groundId) || Promise.resolve();
+  const next = tail.then(() => fn());
+  const stored = next.catch(() => {});
+  _rideRecipeChains.set(groundId, stored);
+  stored.then(() => { if (_rideRecipeChains.get(groundId) === stored) _rideRecipeChains.delete(groundId); });
+  return next;
+}
+// Replace the whole per-ground list (handlers compute the next list with the PURE rideRecipe transforms, then persist).
+async function _writeRideRecipes(groundId, list) {
+  if (!groundId) return;
+  return _rideRecipeChained(groundId, async () => {
+    await chrome.storage.local.set({ [_rideRecipesKey(groundId)]: (Array.isArray(list) ? list : []).slice(0, RIDE_RECIPE_CAP) });
+  });
+}
+
 // PS-0 (v2.74.1123) — the per-Ground capability-gap registry: Orchard's "how could you do better?" enumeration,
 // PERSISTED (durable chrome.storage.local) instead of discarded. The inverse of a Perspective; PS-1 arms it into
 // the interaction monitor so the user's ordinary actions passively fulfil + learn the gaps. (DESIGN_passive_synthesis §2.1)
@@ -1672,7 +1700,7 @@ function _readSgSpec(groundId, url, intent) {
 
 // v2.74.951 (CR-X3a) — domain handler maps merge here; the dispatch + _invokeSgHandler serve them all.
 const _sgMessageHandlers = {
-  ...createConnectorHandlers({ ensureContentScript: _ensureContentScript }),   // CX-3 — connector domain (INVOKE_SESSION session-ride)
+  ...createConnectorHandlers({ ensureContentScript: _ensureContentScript, readRideRecipes: _readRideRecipes }),   // CX-3 — connector domain (INVOKE_SESSION session-ride); §18 — readRideRecipes feeds the arm guard
   ...createCanvasHandlers({   // CA-4 RENDER_CANVAS + CA-9 COMPOSE_CANVAS (the app authors a spec → render)
     log: (line) => { try { Logger.info('background', line); } catch { /* */ } },
     composeCanvas: (args) => AnthropicService.composeCanvas(args),
@@ -1717,6 +1745,8 @@ const _sgMessageHandlers = {
   readGaps             : _readGaps,                // PS-0 — Orchard's per-Ground capability-gap registry (read)
   mutateGaps           : _mutateGaps,              // PS-0/1 — atomic per-Ground read-modify-write of the gaps registry (serialized)
   mutateObsPool        : _mutateObsPool,           // PS-2 — atomic per-Ground RMW of the long-tail observed pool
+  readRideRecipes      : _readRideRecipes,         // §18 — the per-Ground ride-recipe collection (read)
+  writeRideRecipes     : _writeRideRecipes,        // §18 — replace the per-Ground ride-recipe list (chained RMW)
   }),
 };
 

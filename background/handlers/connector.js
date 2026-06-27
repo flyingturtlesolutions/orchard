@@ -15,6 +15,7 @@
 
 import { fillEndpoint, fillBody, recipeForOrigin } from '../../Core/connectorRecipes.js';
 import { pickRideTab, assessProbe, rideAction, STATUS, classifyReachProbe } from '../../Core/connection.js';
+import { armable } from '../../Core/rideRecipe.js';   // §18 — the arm guard: a non-armable (disabled / pending / rejected) per-Ground recipe must not run
 
 // ── Ephemeral managed-tab registry (§16) — module singleton, lives within a SW lifetime ─────────────────────────────
 const IDLE_CLOSE_MS = 8000;                 // close an Orchard-opened tab this long after its last ride (burst-reuse window)
@@ -103,7 +104,7 @@ try {
   });
 } catch { /* no chrome.tabs in this context */ }
 
-export function createConnectorHandlers({ ensureContentScript } = {}) {
+export function createConnectorHandlers({ ensureContentScript, readRideRecipes } = {}) {
   const fetchVia = (tabId, url, method, body) =>
     chrome.tabs.sendMessage(tabId, { type: 'SESSION_FETCH', payload: { url, method, body } }, { frameId: 0 });
   // The TOP-FRAME content script can be orphaned (an extension reload kills it; the all-frames PING can read a live
@@ -123,6 +124,16 @@ export function createConnectorHandlers({ ensureContentScript } = {}) {
       (async () => {
         let ephemeralOrigin = null;          // set when this ride opened/reused a managed tab (→ idle-close on exit)
         try {
+          // §18 arm guard (the observability layer's teeth) — a per-Ground recipe that's disabled / pending / rejected
+          // must NOT run. If we know the Ground + recipe and a stored record exists, refuse unless armable. No record
+          // (the curated catalog is trusted, or not yet seeded) → fall through to existing behavior. Best-effort.
+          if (payload && payload.groundId && payload.recipeId && typeof readRideRecipes === 'function') {
+            try {
+              const _recs = await readRideRecipes(payload.groundId);
+              const _rec = Array.isArray(_recs) ? _recs.find((r) => r && r.id === payload.recipeId) : null;
+              if (_rec && !armable(_rec)) { sendResponse({ success: false, error: 'recipe-not-armable', hint: _rec.reviewState === 'pending' ? 'accept this recipe in Studio first' : 'this recipe is disabled in Studio' }); return; }
+            } catch { /* never block on the guard's own failure */ }
+          }
           const args = (payload && typeof payload.args === 'object' && payload.args) || {};
           const method = String((payload && payload.method) || 'GET').toUpperCase();
           // CX-6 — a non-GET is fail-closed behind explicit post-HITL `confirmed:true` (Belt #1). CSRF is page-side (Belt #2).

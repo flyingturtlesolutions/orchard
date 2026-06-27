@@ -16,6 +16,8 @@ import { selectionToTrialRoles } from '../../Core/bind.js';
 import { lowerToTier2, orderForRun, scoreTier2, topoOrder } from '../../Core/tier2Lower.js';
 import { evaluatePostcondition } from '../../Core/postcondition.js';
 import { coerceRecentTurns as _recentTurnsPayload } from '../../Core/recentTurns.js';   // Q1 — coerce + bound the panel-sent recent-turn window (untrusted; fenced as data downstream)
+import { CONNECTOR_RECIPES } from '../../Core/connectorRecipes.js';   // §18 — the curated catalog seeded into a Ground's ride-recipe collection
+import { seedFromCatalog as seedRideFromCatalog, setEnabled as rideSetEnabled, review as rideReview, downgradeSafety as rideDowngradeSafety, editMeta as rideEditMeta } from '../../Core/rideRecipe.js';   // §18 — the per-Ground ride-recipe transforms (safety enforced here, not the UI)
 import { focusDecision, FOCUS_SETTING_KEY } from '../../Core/focusGrammar.js';   // FM-1 (v2.74.968) — the pure focus-grab verdict
 import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord, buildResultsLandmarkRecord, buildOutcomePerspective, findMatchingPerspective, buildPerspectiveGate, buildDestinationPerspective, pickDestinationLandmark, validateConditionRefs } from '../../Core/accept.js';
 import { authoringCoverage } from '../../Core/select.js';   // GA-7 — Locale→capability "done" signal
@@ -604,7 +606,7 @@ const REQUIRED_CTX_KEYS = Object.freeze([
   'runTrialBundle', 'readLocaleCache', 'readSgSpec', 'normalizeUrl', 'appendOutcomes', 'readOutcomes',
   'outcomeRollups', 'broadcastStorageChanged', 'readSgCapabilities', 'readSiteMap', 'readSgDraft',
   'writeSgDraft', 'clearSgDraft', 'writeSgCapability', 'removeSgCapabilities', 'ensureContentScript',
-  'writeSgTrace', 'enrichSgLandmarks',
+  'writeSgTrace', 'enrichSgLandmarks', 'readRideRecipes', 'writeRideRecipes',
 ]);
 
 /** Throw (at SW startup) if the seam object is missing any contract key — names every gap at once. */
@@ -740,6 +742,59 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, answer: shaped.answer, showList: shaped.showList });
       } catch (err) {
         Logger.error('background', `SHAPE_ANSWER failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // §18 — the per-Ground RIDE-RECIPE collection. GET reads the stored list, SEEDING it from CONNECTOR_RECIPES (matched
+    // to the Ground's origin) on first access so a Ground always shows its curated reads; harvested recipes (§17) accrete
+    // here later. Returns the full collection (the Studio + Ground-panel surfaces render it via groundToolSurface).
+    GET_RIDE_RECIPES: async (payload, _sender, sendResponse) => {
+      try {
+        const groundId = String(payload?.groundId ?? '').trim();
+        const origin = String(payload?.origin ?? '').trim();
+        if (!groundId) { sendResponse({ success: true, recipes: [] }); return; }
+        let recipes = await ctx.readRideRecipes(groundId);
+        if (!recipes.length && origin) {   // first access → seed the curated catalog matched to this Ground's origin
+          recipes = seedRideFromCatalog(CONNECTOR_RECIPES, { groundId, origin });
+          if (recipes.length) await ctx.writeRideRecipes(groundId, recipes);
+        }
+        sendResponse({ success: true, recipes });
+      } catch (err) {
+        Logger.error('background', `GET_RIDE_RECIPES failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // §18 — apply ONE guarded edit to a recipe. The safety transforms live in Core/rideRecipe.js and are enforced HERE
+    // (not in the UI): op ∈ enable | meta | review | downgrade | delete. `downgradeSafety` TIGHTENS only (never promotes
+    // a write to auto); `review` is accept/reject. Read-modify-write of the per-Ground list (user-driven → sequential).
+    EDIT_RIDE_RECIPE: async (payload, _sender, sendResponse) => {
+      try {
+        const groundId = String(payload?.groundId ?? '').trim();
+        const id = String(payload?.id ?? '').trim();
+        const op = String(payload?.op ?? '').trim();
+        if (!groundId || !id || !op) { sendResponse({ success: false, error: 'groundId, id, op required' }); return; }
+        const list = await ctx.readRideRecipes(groundId);
+        const idx = list.findIndex((r) => r && r.id === id);
+        if (idx < 0) { sendResponse({ success: false, error: 'recipe not found' }); return; }
+        let next;
+        if (op === 'delete') {
+          next = list.filter((r) => r.id !== id);
+        } else {
+          const r = list[idx];
+          const edited = op === 'enable'    ? rideSetEnabled(r, !!payload.value)
+                       : op === 'meta'      ? rideEditMeta(r, (payload.value && typeof payload.value === 'object') ? payload.value : {})
+                       : op === 'review'    ? rideReview(r, String(payload.value || ''))
+                       : op === 'downgrade' ? rideDowngradeSafety(r, String(payload.value || ''))
+                       : r;
+          next = list.slice(); next[idx] = edited;
+        }
+        await ctx.writeRideRecipes(groundId, next);
+        Logger.info('ride', `EDIT_RIDE_RECIPE ${op} ${id.slice(0, 40)} (ground ${groundId})`);
+        sendResponse({ success: true, recipes: next });
+      } catch (err) {
+        Logger.error('background', `EDIT_RIDE_RECIPE failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },
