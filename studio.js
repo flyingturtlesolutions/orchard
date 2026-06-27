@@ -62,35 +62,44 @@ function _classDivider(label, { desc = '', pending = 0, placeholder = false } = 
   return row;
 }
 
-const _RIDE_SAFETY_BADGE = { auto: '🟢 auto', gated: '🟡 gated', destructive: '🔴 destructive' };
 const _RIDE_CRUD_FOR_METHOD = { GET: 'read', POST: 'create', PUT: 'update', PATCH: 'update', DELETE: 'delete' };
-// §18 (v2.74.1269) — a recipe row mirrors the fragment/strategy CARD format: a head line (enable toggle · name · CRUD
-// chip · safety chip · provenance) · a description (does) · params · an action row ({ } JSON view toggle + accept/reject
-// when pending) · a hidden <pre> with the recipe JSON. UNTRUSTED display data → escaped. Edits route through the handler.
+const _RIDE_SAFETY_TIER = { auto: 't1', gated: 't2', destructive: 't3' };   // §18 — reuse the styled 3-colour .fragment-tier pill to encode the 3 safety classes
+// §18 (v2.74.1270) — a recipe MIRRORS the fragment Studio card, REUSING its already-styled classes (no new CSS): the
+// card is `.fragment-row`; the head is `.fragment-row-main` + `.fragment-name` + a safety chip (`.fragment-tier`, the
+// 3-colour pill) + a CRUD chip (`.fragment-health`) + provenance/pending (`.ground-lifecycle-badge`); the description is
+// `.fragment-desc`; the action row is `.fragment-row-actions` + `.fragment-meta` + the REAL `.toggle-switch` (enable) +
+// `.btn-action` ({ } JSON toggle + accept/reject). Disabled → `.fragment-row-deprecated` (dims it). UNTRUSTED → escaped.
 function _rideRecipeRowHtml(r) {
-  const safety = _RIDE_SAFETY_BADGE[r.safetyClass] || escHtml(r.safetyClass);
   const crud = _RIDE_CRUD_FOR_METHOD[String(r.method || 'GET').toUpperCase()] || 'read';
-  const prov = r.provenance !== 'curated' ? `<span class="ride-chip ride-prov">${escHtml(r.provenance)}</span>` : '';
-  const params = (Array.isArray(r.params) && r.params.length)
-    ? `<div class="ride-recipe-params">params: ${r.params.map((p) => escHtml(typeof p === 'string' ? p : ((p && p.name) || ''))).filter(Boolean).join(', ')}</div>`
-    : '';
-  const review = r.reviewState === 'pending'
-    ? `<button class="btn-action" data-ride-op="review" data-ride-val="accept" data-rid="${escAttr(r.id)}" title="Accept — make this recipe armable">✓ accept</button>`
+  const safety = String(r.safetyClass || 'auto');
+  const nParams = Array.isArray(r.params) ? r.params.length : 0;
+  const prov = (r.provenance && r.provenance !== 'curated') ? `<span class="ground-lifecycle-badge" title="how this recipe was learned">${escHtml(r.provenance)}</span>` : '';
+  const pending = (r.reviewState === 'pending') ? '<span class="ground-lifecycle-badge" title="needs review before it can run">pending</span>' : '';
+  const review = (r.reviewState === 'pending')
+    ? `<button class="btn-action" data-ride-op="review" data-ride-val="accept" data-rid="${escAttr(r.id)}" title="Accept — make this recipe armable">✓</button>`
       + `<button class="btn-action danger" data-ride-op="review" data-ride-val="reject" data-rid="${escAttr(r.id)}" title="Reject">✕</button>`
     : '';
   const json = escHtml(JSON.stringify({ id: r.id, method: r.method, endpoint: r.endpoint, params: r.params, safetyClass: r.safetyClass, provenance: r.provenance, reviewState: r.reviewState }, null, 2));
-  return `<div class="ride-recipe-row${r.enabled ? '' : ' ride-disabled'}${r.reviewState === 'pending' ? ' ride-pending' : ''}" data-rid="${escAttr(r.id)}">`
-    + `<div class="ride-recipe-head">`
-    + `<label class="ride-enable" title="Enable / disable"><input type="checkbox" data-ride-op="enable" data-rid="${escAttr(r.id)}"${r.enabled ? ' checked' : ''}></label>`
-    + `<span class="ride-recipe-name" title="${escAttr(String(r.method || 'GET') + ' ' + (r.endpoint || ''))}">${escHtml(r.name || r.id)}</span>`
-    + `<span class="ride-chip ride-crud ride-crud-${escAttr(crud)}">${escHtml(crud)}</span>`
-    + `<span class="ride-chip ride-safety ride-safety-${escAttr(r.safetyClass)}">${safety}</span>${prov}`
-    + `</div>`
-    + (r.does ? `<div class="ride-recipe-desc">${escHtml(r.does)}</div>` : '')
-    + params
-    + `<div class="ride-recipe-actions"><button class="btn-action" data-ride-op="json" data-rid="${escAttr(r.id)}" title="View JSON (read-only)">{ }</button>${review}</div>`
-    + `<pre class="ride-recipe-json" data-ride-json="${escAttr(r.id)}" hidden>${json}</pre>`
-    + '</div>';
+  return `
+    <div class="fragment-row${r.enabled === false ? ' fragment-row-deprecated' : ''}" data-rid="${escAttr(r.id)}">
+      <div class="fragment-row-main">
+        <span class="fragment-name">${escHtml(r.name || r.id)}</span>
+        <span class="fragment-tier tier-${_RIDE_SAFETY_TIER[safety] || 't3'}" title="safety class — ${escAttr(safety)}">${escHtml(safety)}</span>
+        <span class="fragment-health health-untested" title="${escAttr(String(r.method || 'GET'))} — ${escHtml(crud)}">${escHtml(crud)}</span>
+        ${prov}${pending}
+      </div>
+      ${r.does ? `<div class="fragment-desc" style="white-space:pre-line">${escHtml(r.does)}</div>` : ''}
+      <div class="fragment-row-actions">
+        <span class="fragment-meta" title="${escAttr(r.endpoint || '')}">${escHtml(String(r.method || 'GET'))} · ${nParams} param${nParams === 1 ? '' : 's'}</span>
+        <label class="toggle-switch" title="Enable / disable this recipe">
+          <input type="checkbox" data-ride-op="enable" data-rid="${escAttr(r.id)}"${r.enabled ? ' checked' : ''} />
+          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+        </label>
+        <button class="btn-action" data-ride-op="json" data-rid="${escAttr(r.id)}" title="View JSON (read-only)">{ }</button>
+        ${review}
+      </div>
+      <pre class="ride-recipe-json" hidden>${json}</pre>
+    </div>`;
 }
 
 // §18 — render the RIDE class block under a Ground card: fetch the collection (GET_RIDE_RECIPES — seeded from the curated
@@ -124,7 +133,7 @@ function _renderRideClass(card, ground) {
       : '<span class="empty-state small">No ride recipes yet — connect a session-ride app, or harvest them (§17).</span>';
     body.querySelectorAll('[data-ride-op]').forEach((el) => {
       if (el.dataset.rideOp === 'json') {   // §18 — { } toggles the inline JSON <pre> (no message; the record is already loaded)
-        el.addEventListener('click', () => { const pre = el.closest('.ride-recipe-row')?.querySelector('.ride-recipe-json'); if (pre) pre.hidden = !pre.hidden; });
+        el.addEventListener('click', () => { const pre = el.closest('.fragment-row')?.querySelector('.ride-recipe-json'); if (pre) pre.hidden = !pre.hidden; });
         return;
       }
       el.addEventListener(el.type === 'checkbox' ? 'change' : 'click', async () => {
