@@ -1712,6 +1712,8 @@ const _sgMessageHandlers = {
   ...createDiscoveryHandlers({
     readSiteMap          : _readSiteMap,
     mergeSiteMapForGround: _mergeSiteMapForGround,
+    readRideRecipes      : _readRideRecipes,        // §17 (1b) — auto-harvest ride-recipes during the crawl (bank target)
+    writeRideRecipes     : _writeRideRecipes,
   }),
   ...createExploreHandlers({
     readLocaleCache      : _readLocaleCache,

@@ -122,3 +122,19 @@ export function editMeta(recipe, { name, does } = {}) {
 export function armable(recipe) {
   return !!(recipe && recipe.enabled && recipe.reviewState === 'accepted');
 }
+
+/**
+ * BULK-accept every PENDING READ recipe (safetyClass 'auto' = a GET, the §9 unattended-safe class) in one pass. PURE.
+ * Writes (`gated`) and destructive recipes are NEVER bulk-accepted — they stay per-recipe HITL, so a harvest can't arm a
+ * write en masse. Already-accepted/rejected and non-pending records pass through untouched. Returns { recipes, accepted }
+ * (accepted = how many flipped). The cheap "30 harvested GETs, one click" path; non-GETs still need an individual ✓.
+ */
+export function acceptPendingReads(recipes) {
+  const list = Array.isArray(recipes) ? recipes : [];
+  let accepted = 0;
+  const out = list.map((r) => {
+    if (r && r.reviewState === 'pending' && r.safetyClass === 'auto') { accepted++; return { ...r, reviewState: 'accepted' }; }
+    return r;
+  });
+  return { recipes: out, accepted };
+}

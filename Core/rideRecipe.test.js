@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 import {
   safetyClassForMethod, safetyRank, originMatchesAppHost, recipeFromCatalogEntry,
-  seedFromCatalog, mergeRecipes, setEnabled, review, downgradeSafety, editMeta, armable,
+  seedFromCatalog, mergeRecipes, setEnabled, review, downgradeSafety, editMeta, armable, acceptPendingReads,
 } from './rideRecipe.js';
 
 // A miniature of the CONNECTOR_RECIPES shape.
@@ -94,5 +94,21 @@ describe('rideRecipe — edit transforms + arm guard', () => {
     assert.equal(armable({ ...base, reviewState: 'pending' }), false);                    // harvested-pending: blocked
     assert.equal(armable({ ...base, reviewState: 'rejected' }), false);
     assert.equal(armable(setEnabled(base, false)), false);
+  });
+  it('acceptPendingReads bulk-accepts pending GETs (auto) ONLY — writes/destructive stay pending', () => {
+    const recs = [
+      { id: 'r1', reviewState: 'pending', safetyClass: 'auto' },         // GET read → accepted
+      { id: 'r2', reviewState: 'pending', safetyClass: 'gated' },        // write → stays pending
+      { id: 'r3', reviewState: 'pending', safetyClass: 'destructive' },  // delete → stays pending
+      { id: 'r4', reviewState: 'accepted', safetyClass: 'auto' },        // already accepted → untouched
+      { id: 'r5', reviewState: 'rejected', safetyClass: 'auto' },        // rejected (not pending) → untouched
+    ];
+    const { recipes, accepted } = acceptPendingReads(recs);
+    assert.equal(accepted, 1);
+    assert.equal(recipes.find((r) => r.id === 'r1').reviewState, 'accepted');
+    assert.equal(recipes.find((r) => r.id === 'r2').reviewState, 'pending');
+    assert.equal(recipes.find((r) => r.id === 'r3').reviewState, 'pending');
+    assert.equal(recipes.find((r) => r.id === 'r5').reviewState, 'rejected');
+    assert.deepEqual(acceptPendingReads([]), { recipes: [], accepted: 0 });
   });
 });

@@ -42,14 +42,18 @@ async function _fetchRideRecipes(groundId, origin) {
   } catch { return []; }
 }
 
-// §18 — the RIDE class glance card (the Ground panel is glance + deep-link; full edit lives in Studio's Ride section).
-// Lists recipes with a safety badge + disabled/pending markers, a count, and the pending-review tally. UNTRUSTED → escaped.
-// §18 — one recipe row for the panel, mirroring the fragment ENTRY (gv-entry: name + chips + description). UNTRUSTED → escaped.
-function _renderRideEntry(r) {
+// §18 — one recipe row for the panel, mirroring the fragment ENTRY (gv-entry: name + chips + description). UNTRUSTED →
+// escaped. A `pending` recipe now carries ✓ accept / ✕ reject buttons (promotion FROM the panel; v2.74.1277) — wired in
+// the post-render pass, carrying their own groundId so the handler is self-contained.
+function _renderRideEntry(r, groundId) {
   const badge = r.safetyClass === 'destructive' ? '🔴' : (r.safetyClass === 'gated' ? '🟡' : '🟢');
   const off = (r.enabled === false) ? ' gv-ride-off' : '';
   const pend = (r.reviewState === 'pending') ? '<span class="gv-ride-pending">pending</span>' : '';
   const prov = (r.provenance && r.provenance !== 'curated') ? `<span class="gv-ride-prov">${escHtml(r.provenance)}</span>` : '';
+  const review = (r.reviewState === 'pending')
+    ? `<button class="btn-secondary gv-ride-act" data-gv-ride-op="review" data-gv-ride-val="accept" data-gv-ride-id="${escAttr(r.id || '')}" data-gv-ride-gid="${escAttr(groundId || '')}" type="button" title="Accept — make this recipe armable">✓</button>`
+      + `<button class="btn-secondary gv-ride-act" data-gv-ride-op="review" data-gv-ride-val="reject" data-gv-ride-id="${escAttr(r.id || '')}" data-gv-ride-gid="${escAttr(groundId || '')}" type="button" title="Reject">✕</button>`
+    : '';
   return `
     <div class="fragment-row gv-entry gv-ride-entry${off}">
       <div class="fragment-row-main">
@@ -57,24 +61,30 @@ function _renderRideEntry(r) {
         <span class="fragment-name">${escHtml(r.name || r.id || '')}</span>
         <span class="gv-ride-method">${escHtml(String(r.method || 'GET'))}</span>
         ${prov}${pend}
+        ${review ? `<span class="gv-ride-actions">${review}</span>` : ''}
       </div>
       ${r.does ? `<div class="fragment-desc" style="white-space:pre-line">${escHtml(r.does)}</div>` : ''}
     </div>`;
 }
 
-// §18 — the RIDE class card for the panel: mirrors the fragments section card EXACTLY (rendered through _renderSection —
-// same collapse chevron, head, count, list). Display-only here (full edit is in Studio's Ride section); a pending tally
-// reminds the user where to review. The empty/seed-on-first-access flow is handled by GET_RIDE_RECIPES upstream.
+// §18 — the RIDE class card for the panel: mirrors the fragments section card (through _renderSection — same collapse
+// chevron, head, count, list). PROMOTABLE here now (v2.74.1277): per-recipe ✓/✕ + a head "✓ N reads" bulk-accept for the
+// pending GETs (auto-safe; writes still need an individual ✓). The empty/seed flow is handled by GET_RIDE_RECIPES upstream.
 function _renderRideCard(recipes, groundId) {
   const list = Array.isArray(recipes) ? recipes : [];
   const pending = list.filter((r) => r && r.reviewState === 'pending').length;
+  const pendingReads = list.filter((r) => r && r.reviewState === 'pending' && r.safetyClass === 'auto').length;
+  const headExtra = pendingReads > 0
+    ? `<button class="btn-secondary gv-ride-bulk" data-gv-ride-bulk="${escAttr(groundId)}" type="button" title="Accept all pending reads (GETs) — makes them armable. Writes still need an individual ✓.">✓ ${pendingReads} read${pendingReads === 1 ? '' : 's'}</button>`
+    : '';
   return _renderSection({
     key: 'recipes',
     label: 'Ride · Recipes',
     count: pending ? `${list.length} · ${pending} pending` : list.length,
+    headExtra,
     groundId,
     emptyMsg: 'No ride recipes — connect a session-ride app, or harvest them.',
-    entries: list.slice(0, 60).map(_renderRideEntry),
+    entries: list.slice(0, 60).map((r) => _renderRideEntry(r, groundId)),
   });
 }
 
@@ -752,7 +762,7 @@ function _renderGroundCard(entry, landmarksHtml = '') {
 // v2.74.35 — + Add moved out of the head row and into a right-aligned
 // footer beneath the entries (mirrors the fragment-author + Action / pre
 // & post + Add pattern).
-function _renderSection({ key, label, count, addLabel, addKind, addButtons, groundId, groundUrl, emptyMsg, entries }) {
+function _renderSection({ key, label, count, addLabel, addKind, addButtons, headExtra, groundId, groundUrl, emptyMsg, entries }) {
   const body = entries.length === 0
     ? `<span class="empty-state small">${escHtml(emptyMsg)}</span>`
     : entries.join('');
@@ -789,6 +799,7 @@ function _renderSection({ key, label, count, addLabel, addKind, addButtons, grou
         </button>
         <span class="ground-section-label">${escHtml(label)}</span>
         <span class="ground-section-count">${count}</span>
+        ${headExtra || ''}
       </div>
       <div class="gv-section-card-body">
         ${body}
@@ -1110,6 +1121,29 @@ function _wireHandlers(grounds) {
       // Re-render — STORAGE_CHANGED would catch this too, but a direct
       // call keeps the response immediate.
       await _renderList();
+    });
+  });
+
+  // §18 (v2.74.1277) — Ride recipe PROMOTION from the panel (no longer Studio-only). Per-recipe ✓ accept / ✕ reject →
+  // EDIT_RIDE_RECIPE review; the head "✓ N reads" → BULK_REVIEW_RIDE_RECIPES (auto/GET only — writes never bulk). Each
+  // carries its own groundId; on success a full re-render reflects the new reviewState (and the recipe becomes armable).
+  _mountEl.querySelectorAll('[data-gv-ride-op]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      btn.disabled = true;
+      const value = btn.dataset.gvRideVal;
+      const res = await new Promise((r) => chrome.runtime.sendMessage({ type: 'EDIT_RIDE_RECIPE', payload: { groundId: btn.dataset.gvRideGid, id: btn.dataset.gvRideId, op: 'review', value } }, r));
+      if (res?.success) { toast(`Recipe ${value === 'accept' ? 'accepted' : 'rejected'}`); await _renderList(); }
+      else { toast(`Failed: ${res?.error ?? 'unknown'}`, 'err'); btn.disabled = false; }
+    });
+  });
+  _mountEl.querySelectorAll('[data-gv-ride-bulk]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      btn.disabled = true;
+      const res = await new Promise((r) => chrome.runtime.sendMessage({ type: 'BULK_REVIEW_RIDE_RECIPES', payload: { groundId: btn.dataset.gvRideBulk, scope: 'reads' } }, r));
+      if (res?.success) { toast(`Accepted ${res.accepted} read${res.accepted === 1 ? '' : 's'}`); await _renderList(); }
+      else { toast(`Bulk accept failed: ${res?.error ?? 'unknown'}`, 'err'); btn.disabled = false; }
     });
   });
 }

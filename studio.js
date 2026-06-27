@@ -114,7 +114,7 @@ function _renderRideClass(card, ground) {
   card.appendChild(_rideCard.card);
   const row = document.createElement('div');
   row.className = 'ground-section-row ground-ride-row';
-  row.innerHTML = '<div class="ground-section-head"><span class="ground-section-label">Recipes</span><span class="ground-section-count" data-ride-count>…</span></div>'
+  row.innerHTML = '<div class="ground-section-head"><span class="ground-section-label">Recipes</span><span class="ground-section-count" data-ride-count>…</span><button class="btn-action ride-bulk-accept" data-ride-bulk hidden title="Accept all pending reads (GETs) — makes them armable. Writes still need an individual ✓.">✓ accept reads</button></div>'
     + '<div class="ground-section-body" data-ride-body><span class="empty-state small">Loading ride recipes…</span></div>';
   _rideCard.body.appendChild(row);   // §18 — the Recipes substrate card nests INTO the Ride class card
   card.appendChild(_classCard('Broker', { desc: 'OAuth / MCP connectors.', placeholder: true }).card);
@@ -128,6 +128,18 @@ function _renderRideClass(card, ground) {
     const sec = rideSection(recipes);
     const countEl = row.querySelector('[data-ride-count]');
     if (countEl) countEl.textContent = String(sec.count) + (sec.pending ? ` · ${sec.pending} pending` : '');
+    // §18 — bulk "accept all reads": one click accepts every pending GET (auto-safe); writes still need an individual ✓.
+    const pendingReads = recipes.filter((r) => r && r.reviewState === 'pending' && r.safetyClass === 'auto').length;
+    const bulkBtn = row.querySelector('[data-ride-bulk]');
+    if (bulkBtn) {
+      bulkBtn.hidden = pendingReads === 0;
+      bulkBtn.textContent = `✓ accept ${pendingReads} read${pendingReads === 1 ? '' : 's'}`;
+      bulkBtn.onclick = async () => {
+        const res = await new Promise((r) => chrome.runtime.sendMessage({ type: 'BULK_REVIEW_RIDE_RECIPES', payload: { groundId: ground.id, scope: 'reads' } }, r));
+        if (res && res.success) { toast(`Accepted ${res.accepted} read${res.accepted === 1 ? '' : 's'}`); render(); }
+        else toast(`Bulk accept failed: ${res?.error ?? 'unknown'}`, 'err');
+      };
+    }
     const body = row.querySelector('[data-ride-body]');
     if (!body) return;
     body.innerHTML = sec.count

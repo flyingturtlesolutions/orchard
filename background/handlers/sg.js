@@ -17,7 +17,7 @@ import { lowerToTier2, orderForRun, scoreTier2, topoOrder } from '../../Core/tie
 import { evaluatePostcondition } from '../../Core/postcondition.js';
 import { coerceRecentTurns as _recentTurnsPayload } from '../../Core/recentTurns.js';   // Q1 — coerce + bound the panel-sent recent-turn window (untrusted; fenced as data downstream)
 import { CONNECTOR_RECIPES } from '../../Core/connectorRecipes.js';   // §18 — the curated catalog seeded into a Ground's ride-recipe collection
-import { seedFromCatalog as seedRideFromCatalog, setEnabled as rideSetEnabled, review as rideReview, downgradeSafety as rideDowngradeSafety, editMeta as rideEditMeta, mergeRecipes as rideMergeRecipes } from '../../Core/rideRecipe.js';   // §18 — the per-Ground ride-recipe transforms (safety enforced here, not the UI)
+import { seedFromCatalog as seedRideFromCatalog, setEnabled as rideSetEnabled, review as rideReview, downgradeSafety as rideDowngradeSafety, editMeta as rideEditMeta, mergeRecipes as rideMergeRecipes, acceptPendingReads as rideAcceptPendingReads } from '../../Core/rideRecipe.js';   // §18 — the per-Ground ride-recipe transforms (safety enforced here, not the UI)
 import { recipesFromHarvest } from '../../Core/recipeFromHarvest.js';   // §17 — the crawl-as-generalizer: captures → proto ride-recipes (templated, method-classed, pending)
 import { applyPolish } from '../../Core/recipePolishPrompt.js';   // §17 — apply an LLM polish (name/does/param-names) onto a proto — the SAFE relabel (never touches method/safety)
 import { focusDecision, FOCUS_SETTING_KEY } from '../../Core/focusGrammar.js';   // FM-1 (v2.74.968) — the pure focus-grab verdict
@@ -639,6 +639,97 @@ const _harvestSessions = new Map();   // groundId → { tabId, host, regId, appH
 const _harvestRegId = (groundId) => `ahub-harvest-${String(groundId || '').replace(/[^a-zA-Z0-9_-]+/g, '_').slice(0, 60)}`;
 const _hostMatchPattern = (host) => `*://${String(host || '').replace(/[^a-zA-Z0-9.\-]+/g, '')}/*`;
 
+// The MAIN-world reader DRAIN_HARVEST_TEE + stopHarvestSession run to pull + clear a tab's captures (sessionStorage
+// accumulator, superset of the current page's window buffer). Self-contained (page globals only) — serialized by executeScript.
+function _drainTeeFunc() {
+  var acc = []; try { var s = sessionStorage.getItem('__ahub_harvest'); if (s) acc = JSON.parse(s) || []; } catch (e) {}
+  try { sessionStorage.removeItem('__ahub_harvest'); } catch (e) {}
+  var cur = Array.isArray(window.__ahub_harvest_buf) ? window.__ahub_harvest_buf : [];
+  window.__ahub_harvest_buf = [];
+  return acc.length ? acc : cur;   // acc is a superset of cur for this origin (push writes both sinks)
+}
+
+/**
+ * §17 — BANK captures into a Ground's ride-recipe collection. MODULE-LEVEL + self-contained: it takes the per-Ground
+ * store accessors so ANY caller can use it (the SG message handlers pass ctx's; the Discovery CRAWL passes background's).
+ * GENERALIZE → POLISH new ids (cheap, capped, best-effort) → mergeRecipes (landing `pending`; user state preserved on a
+ * re-harvest). Returns { banked, total, recipes, identityPath }. Fails safe to a zero result on a missing store.
+ */
+export async function bankHarvested({ readRideRecipes, writeRideRecipes, groundId, captures = [], appHost = '', origin = '', doPolish = true } = {}) {
+  if (typeof readRideRecipes !== 'function' || typeof writeRideRecipes !== 'function' || !groundId) return { banked: 0, total: 0, recipes: [], identityPath: null };
+  const existing = await readRideRecipes(groundId);
+  const ex = Array.isArray(existing) ? existing : [];
+  const knownIds = new Set(ex.map((r) => r && r.id));
+  const { recipes: protos, identityPath } = recipesFromHarvest(Array.isArray(captures) ? captures : [], { appHost });
+  let staged = protos.map((r) => ({ ...r, groundId, origin: origin || appHost }));
+  if (doPolish && staged.length) {   // only NEW ids; each failure falls back to the placeholder
+    let budget = 24;
+    staged = await Promise.all(staged.map(async (r) => {
+      if (knownIds.has(r.id) || budget <= 0) return r;
+      budget--;
+      try { const p = await AnthropicService.polishRecipe({ recipe: r }); return p ? applyPolish(r, p) : r; }
+      catch { return r; }
+    }));
+  }
+  const merged = rideMergeRecipes(ex, staged);
+  await writeRideRecipes(groundId, merged);
+  return { banked: staged.length, total: merged.length, recipes: merged, identityPath };
+}
+
+/**
+ * §17 (1b) — START a harvest session: register the body-blind tee at DOCUMENT_START (registerContentScripts, MAIN world)
+ * scoped to `host` — HOST-scoped not tab-scoped, so it auto-installs on every page the crawl navigates to and catches
+ * each page's INITIAL data-load fetches. CONSENT-GATED (C6 Track, default-deny). MODULE-LEVEL so the Discovery crawl can
+ * arm it directly. Returns { ok, groundId, host, error? }. A prior session for the Ground is cleared first.
+ */
+export async function startHarvestSession({ tabId = null, groundId = '', host = '', appHost = '', origin = '', reload = false } = {}) {
+  groundId = String(groundId || '').trim();
+  if (!groundId) return { ok: false, error: 'groundId required' };
+  if (!host && typeof tabId === 'number') { try { host = new URL((await chrome.tabs.get(tabId))?.url || '').host; } catch { /* */ } }
+  if (!host) return { ok: false, error: 'no-host' };
+  let consent = MONITOR_CONSENT_DEFAULT;
+  try { consent = (await chrome.storage.local.get('monitor:consent'))?.['monitor:consent'] || MONITOR_CONSENT_DEFAULT; } catch { /* */ }
+  if (!canTrack(consent, { host })) return { ok: false, error: 'no-consent', host };
+  const regId = _harvestRegId(groundId);
+  try { await chrome.scripting.unregisterContentScripts({ ids: [regId] }); } catch { /* none registered — fine */ }
+  await chrome.scripting.registerContentScripts([{
+    id: regId, matches: [_hostMatchPattern(host)], js: [_HARVEST_TEE_FILE],
+    runAt: 'document_start', world: 'MAIN', allFrames: false, persistAcrossSessions: false,
+  }]);
+  _harvestSessions.set(groundId, { tabId, host, regId, appHost: appHost || host, origin: origin || host });
+  if (reload === true && typeof tabId === 'number') { try { await chrome.tabs.reload(tabId); } catch { /* */ } }
+  return { ok: true, groundId, host };
+}
+
+/**
+ * §17 (1b) — STOP a harvest session: unregister the document_start tee, DRAIN the tab's accumulator, and BANK. MODULE-
+ * LEVEL (the Discovery crawl calls this in its finally). Robust to a lost in-memory session (unregisters by DERIVED id).
+ * The drain needs a live tab; the dedicated-tab crawl case closes its tab, so it only banks when a durable tab is given
+ * (e.g. the Ground panel's existingTabId). Returns { ok, banked, total, captures, ... }.
+ */
+export async function stopHarvestSession({ groundId = '', tabId = null, readRideRecipes, writeRideRecipes, appHost = '', origin = '', doPolish = true } = {}) {
+  groundId = String(groundId || '').trim();
+  if (!groundId) return { ok: false, error: 'groundId required', banked: 0, total: 0, captures: [] };
+  const sess = _harvestSessions.get(groundId) || {};
+  const regId = sess.regId || _harvestRegId(groundId);
+  try { await chrome.scripting.unregisterContentScripts({ ids: [regId] }); } catch { /* already gone */ }
+  _harvestSessions.delete(groundId);
+  const drainTab = typeof tabId === 'number' ? tabId : sess.tabId;
+  let captures = [];
+  if (typeof drainTab === 'number') {
+    try {
+      const out = await chrome.scripting.executeScript({ target: { tabId: drainTab, frameIds: [0] }, world: 'MAIN', func: _drainTeeFunc });
+      captures = Array.isArray(out?.[0]?.result) ? out[0].result : [];
+    } catch (e) { /* tab gone — bank nothing */ }
+  }
+  if (!captures.length) return { ok: true, groundId, captures: [], banked: 0, total: 0 };
+  const res = await bankHarvested({
+    readRideRecipes, writeRideRecipes, groundId, captures,
+    appHost: appHost || sess.appHost || sess.host || '', origin: origin || sess.origin || sess.host || '', doPolish,
+  });
+  return { ok: true, groundId, captures, ...res };
+}
+
 export function createSgMessageHandlers(ctx) {
   assertCtx(ctx);   // v2.74.950 (CR-X3a) — fail at WIRING time, not deep inside the first handler to touch a gap
   // T3X-DF (v2.74.790/792) — CAPTURE-TIME ANTECEDENT INFERENCE. The LAST action capability the chat REPLAYED on a
@@ -651,28 +742,9 @@ export function createSgMessageHandlers(ctx) {
   // never persisted (a stale entry just means a base-URL read, which fails cleanly).
   const _lastGroundAction = new Map();
 
-  // §17 — the harvest BANK core, shared by the BANK_HARVESTED_RECIPES message and DRAIN_HARVEST_TEE's bank step:
-  // GENERALIZE captures → proto recipes → POLISH only NEW ids (cheap, capped, best-effort — a re-harvest's known
-  // endpoints are skipped since mergeRecipes keeps their existing name/does) → mergeRecipes into the per-Ground store
-  // (landing `pending`; user state preserved on a re-harvest). Returns { banked, total, recipes, identityPath }.
-  const _bankHarvested = async ({ groundId, captures = [], appHost = '', origin = '', doPolish = true }) => {
-    const existing = await ctx.readRideRecipes(groundId);
-    const knownIds = new Set(existing.map((r) => r && r.id));
-    const { recipes: protos, identityPath } = recipesFromHarvest(Array.isArray(captures) ? captures : [], { appHost });
-    let staged = protos.map((r) => ({ ...r, groundId, origin: origin || appHost }));
-    if (doPolish && staged.length) {   // best-effort, parallel, capped — only NEW ids; each failure falls back to the placeholder
-      let budget = 24;
-      staged = await Promise.all(staged.map(async (r) => {
-        if (knownIds.has(r.id) || budget <= 0) return r;
-        budget--;
-        try { const p = await AnthropicService.polishRecipe({ recipe: r }); return p ? applyPolish(r, p) : r; }
-        catch { return r; }
-      }));
-    }
-    const merged = rideMergeRecipes(existing, staged);
-    await ctx.writeRideRecipes(groundId, merged);
-    return { banked: staged.length, total: merged.length, recipes: merged, identityPath };
-  };
+  // §17 — the harvest BANK bound to THIS ctx's per-Ground store; delegates to the module-level bankHarvested (the same
+  // core the Discovery crawl uses). generalize → polish NEW ids → mergeRecipes, landing `pending`.
+  const _bankHarvested = (args) => bankHarvested({ readRideRecipes: ctx.readRideRecipes, writeRideRecipes: ctx.writeRideRecipes, ...args });
 
   return {
     // R-3/R-4a — the LLM front-door ROUTER (DESIGN_llm_front_door.md). ISOLATED + console-testable: resolve the
@@ -835,6 +907,26 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // §18 — BULK-accept all PENDING READ recipes (safetyClass 'auto' = GET) for a Ground in one click — the "30 harvested
+    // GETs, one accept" path. Writes/destructive are NEVER bulk-accepted (the pure rideAcceptPendingReads filters them
+    // out — they stay per-recipe HITL, §9). scope is 'reads' for now (the only safe bulk class).
+    BULK_REVIEW_RIDE_RECIPES: async (payload, _sender, sendResponse) => {
+      try {
+        const groundId = String(payload?.groundId ?? '').trim();
+        if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
+        const scope = String(payload?.scope ?? 'reads');
+        if (scope !== 'reads') { sendResponse({ success: false, error: `unsupported scope: ${scope}` }); return; }
+        const list = await ctx.readRideRecipes(groundId);
+        const { recipes: next, accepted } = rideAcceptPendingReads(list);
+        if (accepted) await ctx.writeRideRecipes(groundId, next);
+        Logger.info('ride', `BULK_REVIEW_RIDE_RECIPES reads: accepted ${accepted} (ground ${groundId})`);
+        sendResponse({ success: true, accepted, recipes: next });
+      } catch (err) {
+        Logger.error('background', `BULK_REVIEW_RIDE_RECIPES failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
     // §17 (DESIGN_connectors.md) — BANK already-captured network reads into the Ground's ride-recipe collection (the
     // flywheel tail: generalize → polish → mergeRecipes, landing `pending` behind the §18 arm guard). Thin wrapper over
     // the shared _bankHarvested core. Captures are UNTRUSTED app data — only their STRUCTURE (method + templated path) is
@@ -929,68 +1021,35 @@ export function createSgMessageHandlers(ctx) {
         try { url = (await chrome.tabs.get(tabId))?.url || ''; host = new URL(url).host; } catch { /* */ }
         let groundId = String(payload?.groundId ?? '').trim();
         if (!groundId && url) { try { groundId = _groundIdForUrl(url, await StorageManager.getAllGrounds()); } catch { /* */ } }
-        if (!groundId) { sendResponse({ success: false, error: 'no-ground', host }); return; }
-        if (!host) { sendResponse({ success: false, error: 'no-host' }); return; }
-        let consent = MONITOR_CONSENT_DEFAULT;
-        try { consent = (await chrome.storage.local.get('monitor:consent'))?.['monitor:consent'] || MONITOR_CONSENT_DEFAULT; } catch { /* */ }
-        if (!canTrack(consent, { host })) {
-          Logger.info('background', `START_HARVEST_SESSION DENIED — no Track consent for ${host}`);
-          sendResponse({ success: false, error: 'no-consent', host }); return;
+        const r = await startHarvestSession({ tabId, groundId, host, appHost: String(payload?.appHost ?? '').trim(), origin: String(payload?.origin ?? '').trim(), reload: payload?.reload === true });
+        if (!r.ok) {
+          if (r.error === 'no-consent') Logger.info('background', `START_HARVEST_SESSION DENIED — no Track consent for ${host}`);
+          sendResponse({ success: false, error: r.error, host: r.host || host }); return;
         }
-        const regId = _harvestRegId(groundId);
-        try { await chrome.scripting.unregisterContentScripts({ ids: [regId] }); } catch { /* none registered — fine */ }
-        await chrome.scripting.registerContentScripts([{
-          id: regId, matches: [_hostMatchPattern(host)], js: [_HARVEST_TEE_FILE],
-          runAt: 'document_start', world: 'MAIN', allFrames: false, persistAcrossSessions: false,
-        }]);
-        _harvestSessions.set(groundId, { tabId, host, regId, appHost: String(payload?.appHost ?? host).trim() || host, origin: String(payload?.origin ?? host).trim() || host });
-        if (payload?.reload === true) { try { await chrome.tabs.reload(tabId); } catch { /* */ } }
-        Logger.info('ride', `START_HARVEST_SESSION ${groundId} on ${host} (reg ${regId})`);
-        sendResponse({ success: true, groundId, host });
+        Logger.info('ride', `START_HARVEST_SESSION ${r.groundId} on ${r.host}`);
+        sendResponse({ success: true, groundId: r.groundId, host: r.host });
       } catch (err) {
         Logger.error('background', `START_HARVEST_SESSION failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },
 
-    // §17 (1b) — STOP a harvest session: unregister the document_start tee, DRAIN the per-origin sessionStorage
-    // accumulator (+ the current page's window buffer) from the tab, and BANK the captures (generalize → polish →
-    // mergeRecipes, landing pending). Robust to a lost in-memory session (SW restart): unregisters by the DERIVED id and
-    // still banks whatever it can drain from the tab. No captures → a clean no-op success.
+    // §17 (1b) — STOP a harvest session: thin delegate to stopHarvestSession (unregister the document_start tee, drain
+    // the tab's accumulator, bank). The Discovery crawl calls stopHarvestSession directly in its finally; this is the
+    // manual/console message surface. Robust to a lost in-memory session (unregisters by the DERIVED id).
     STOP_HARVEST_SESSION: async (payload, _sender, sendResponse) => {
       try {
         const groundId = String(payload?.groundId ?? '').trim();
         if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
-        const sess = _harvestSessions.get(groundId) || {};
-        const regId = sess.regId || _harvestRegId(groundId);
-        try { await chrome.scripting.unregisterContentScripts({ ids: [regId] }); } catch { /* already gone */ }
-        _harvestSessions.delete(groundId);
-        const tabId = typeof payload?.tabId === 'number' ? payload.tabId : sess.tabId;
-        let captures = [];
-        if (typeof tabId === 'number') {
-          try {
-            const out = await chrome.scripting.executeScript({
-              target: { tabId, frameIds: [0] }, world: 'MAIN',
-              func: () => {
-                var acc = []; try { var s = sessionStorage.getItem('__ahub_harvest'); if (s) acc = JSON.parse(s) || []; } catch (e) {}
-                try { sessionStorage.removeItem('__ahub_harvest'); } catch (e) {}
-                var cur = Array.isArray(window.__ahub_harvest_buf) ? window.__ahub_harvest_buf : [];
-                window.__ahub_harvest_buf = [];
-                return acc.length ? acc : cur;   // acc is a superset of cur for this origin (push writes both sinks)
-              },
-            });
-            captures = Array.isArray(out?.[0]?.result) ? out[0].result : [];
-          } catch (e) { /* tab gone — bank nothing */ }
-        }
-        if (!captures.length) { sendResponse({ success: true, groundId, captures: [], banked: 0, total: 0 }); return; }
-        const res = await _bankHarvested({
-          groundId, captures,
-          appHost: String(payload?.appHost ?? sess.appHost ?? '').trim() || sess.host || '',
-          origin: String(payload?.origin ?? sess.origin ?? '').trim() || sess.host || '',
+        const r = await stopHarvestSession({
+          groundId,
+          tabId: typeof payload?.tabId === 'number' ? payload.tabId : null,
+          readRideRecipes: ctx.readRideRecipes, writeRideRecipes: ctx.writeRideRecipes,
+          appHost: String(payload?.appHost ?? '').trim(), origin: String(payload?.origin ?? '').trim(),
           doPolish: payload?.polish !== false,
         });
-        Logger.info('ride', `STOP_HARVEST_SESSION ${groundId}: ${captures.length} capture(s) → banked ${res.banked} (total ${res.total})`);
-        sendResponse({ success: true, groundId, captures, ...res });
+        Logger.info('ride', `STOP_HARVEST_SESSION ${groundId}: ${(r.captures || []).length} capture(s) → banked ${r.banked || 0}`);
+        sendResponse({ success: true, ...r });
       } catch (err) {
         Logger.error('background', `STOP_HARVEST_SESSION failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });

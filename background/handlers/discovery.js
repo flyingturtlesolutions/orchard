@@ -15,6 +15,7 @@ import { StorageManager }   from '../../Services/StorageManager.js';
 import { DiscoveryService } from '../../Services/DiscoveryService.js';
 import * as SitemapService  from '../../Services/SitemapService.js';
 import { waitForTabComplete } from '../../Services/TabUtils.js';
+import { startHarvestSession, stopHarvestSession } from './sg.js';   // §17 (1b) — auto-harvest ride-recipes during the architecture crawl
 
 // v2.74.952 (CR-X3b) — the discovery ctx seam contract, asserted at wiring time.
 const REQUIRED_CTX_KEYS = Object.freeze(['readSiteMap', 'mergeSiteMapForGround']);
@@ -112,6 +113,7 @@ export function createDiscoveryHandlers(ctx) {
         // Fire-and-forget: broadcast progress and final result; return immediately
         sendResponse({ success: true, started: true });
         (async () => {
+          let _harvestStarted = false;   // §17 (1b) — armed below if the ride-recipe store is wired + a durable tab + consent
           try {
             // v2.74.450 — drift (§8 slice 2): snapshot the prior siteMap BEFORE any merge,
             // so we can report what this (re-)discovery changed.
@@ -176,6 +178,24 @@ export function createDiscoveryHandlers(ctx) {
                 seedUrls = sm.nodes ? Object.values(sm.nodes).map((n) => n.exemplarUrl).filter(Boolean) : [];
               }
             } catch (e) { Logger.warn('background', `siteMap seed read failed: ${e.message}`); }
+
+            // §17 (1b, DESIGN_connectors.md) — ARM the body-blind harvest TEE for the crawl. As Discovery navigates each
+            // archetype page (ticket/user/org…), the document_start tee records that page's read APIs ({method,url,status}
+            // only — never a body); STOP banks them into the Ground's ride-recipe collection (pending, behind the §18 arm
+            // guard). Host-scoped + CONSENT-GATED (C6 Track, default-deny). Gated on existingTabId: that's the durable tab
+            // we can drain at stop — the dedicated-tab crawl closes its own tab (nothing to drain), so harvest only arms
+            // for the reused-tab (Ground panel) path. Best-effort; never blocks discovery.
+            if (typeof ctx.readRideRecipes === 'function' && typeof ctx.writeRideRecipes === 'function' && typeof existingTabId === 'number') {
+              try {
+                const g = await StorageManager.getGround(groundId);
+                const host = g?.url ? new URL(g.url).host : '';
+                if (host) {
+                  const hr = await startHarvestSession({ groundId, host, appHost: host, origin: host, tabId: existingTabId });
+                  _harvestStarted = hr.ok;
+                  Logger.info(hr.ok ? 'ride' : 'background', hr.ok ? `discovery harvest armed on ${host} (ground ${groundId})` : `discovery harvest not armed: ${hr.error}`);
+                }
+              } catch (e) { Logger.warn('background', `harvest arm failed (continuing): ${e.message}`); }
+            }
 
             const { pages, error, aborted } = await DiscoveryService.discover({
               groundId,
@@ -260,6 +280,14 @@ export function createDiscoveryHandlers(ctx) {
             }).catch(() => {});
           } finally {
             discoveryAbortFlags.delete(groundId);
+            // §17 (1b) — STOP the harvest on EVERY crawl exit (complete / error / abort): unregister the tee, drain the
+            // reused tab's accumulated captures, and bank them (generalize → polish → mergeRecipes, landing pending).
+            if (_harvestStarted) {
+              try {
+                const sr = await stopHarvestSession({ groundId, tabId: existingTabId, readRideRecipes: ctx.readRideRecipes, writeRideRecipes: ctx.writeRideRecipes });
+                Logger.info('ride', `discovery harvest: ${(sr.captures || []).length} capture(s) → banked ${sr.banked || 0} recipe(s) (ground ${groundId})`);
+              } catch (e) { Logger.warn('background', `harvest stop/bank failed: ${e.message}`); }
+            }
           }
         })();
       })();
