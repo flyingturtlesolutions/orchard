@@ -26,6 +26,47 @@
     try { return !NOISE.test(new URL(u, location.href).host); }   // app same-site OR its first-party API — drop only known beacons
     catch (e) { return false; }
   };
+  // ── §20 (v2.74.1287) — SESSION-REPLAY auth capture (DESIGN_connectors.md header-replay model). For a cross-origin
+  // Bearer/JWT API (a static SPA's data API: the cookie can't ride it), executing a harvested read needs the request's
+  // auth HEADERS, not a cookie. This captures them — but STRICTLY:
+  //   • OPT-IN: only when the user armed a replay session (sessionStorage '__ahub_cap_auth'='1'); default OFF.
+  //   • PAGE-LOCAL: stored ONLY on `window.__ahub_ride_auth` (which the MAIN-world replay reads) — NEVER the harvest buffer
+  //     / sessionStorage harvest sink. So a token is never banked, polished, logged, or chat-exported; it lives only where
+  //     the app's own token already lives — this page's memory.
+  //   • DETECTS the model: only requests carrying an `authorization` header are captured (a cookie-auth app has none → no
+  //     capture, ever). The app-set "session signature" headers (minus cookie/length/host) are kept for a same-host replay.
+  var capAuth = function () { try { return sessionStorage.getItem('__ahub_cap_auth') === '1'; } catch (e) { return false; } };
+  var DROP_HDR = { cookie: 1, 'content-length': 1, host: 1 };
+  var toPlainHeaders = function (h) {
+    var out = {};
+    try {
+      if (!h) return out;
+      if (typeof h.forEach === 'function' && !Array.isArray(h)) { h.forEach(function (v, k) { out[String(k).toLowerCase()] = String(v); }); return out; }   // Headers object
+      if (Array.isArray(h)) { for (var i = 0; i < h.length; i++) { if (h[i] && h[i].length >= 2) out[String(h[i][0]).toLowerCase()] = String(h[i][1]); } return out; }
+      for (var k in h) { if (Object.prototype.hasOwnProperty.call(h, k)) out[String(k).toLowerCase()] = String(h[k]); }
+    } catch (e) {}
+    return out;
+  };
+  var stashAuth = function (url, merged) {
+    try {
+      if (!merged || !merged.authorization) return;   // only Bearer/header-auth requests (a cookie-auth app has none)
+      var headers = {};
+      for (var k in merged) { if (Object.prototype.hasOwnProperty.call(merged, k) && !DROP_HDR[k]) headers[k] = merged[k]; }
+      var host = ''; try { host = new URL(url, location.href).host; } catch (e) { return; }
+      if (!host) return;
+      if (!window.__ahub_ride_auth || typeof window.__ahub_ride_auth !== 'object') window.__ahub_ride_auth = {};
+      window.__ahub_ride_auth[host] = { headers: headers, at: (window.performance && performance.now) ? performance.now() : 0 };
+    } catch (e) { /* never throw into the page */ }
+  };
+  var stashFetchAuth = function (url, input, init) {
+    try {
+      if (!capAuth()) return;
+      var merged = {};
+      try { if (input && typeof input === 'object' && input.headers) { var ih = toPlainHeaders(input.headers); for (var a in ih) merged[a] = ih[a]; } } catch (e) {}
+      try { if (init && init.headers) { var jh = toPlainHeaders(init.headers); for (var b in jh) merged[b] = jh[b]; } } catch (e) {}
+      stashAuth(url, merged);
+    } catch (e) { /* */ }
+  };
   var push = function (method, url, status) {
     try {
       if (!url || !keep(url)) return;   // capture the app's reads (same-site + cross-origin API); drop analytics/telemetry only
@@ -49,6 +90,7 @@
           else { url = String(input); }
           if (init && init.method) method = init.method;
         } catch (e) { /* */ }
+        try { stashFetchAuth(url, input, init); } catch (e) { /* */ }   // §20 — page-local auth capture (opt-in); never the harvest buffer
         var p = of.apply(this, arguments);
         // PASSIVE observer: a separate .then that reads only res.status/res.url — the page still gets `p` untouched and is
         // the one that consumes the body. We never read it.
@@ -60,9 +102,15 @@
   try {
     var oo = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function (m, u) { try { this.__ahub_m = m; this.__ahub_u = u; } catch (e) {} return oo.apply(this, arguments); };
+    var osh = XMLHttpRequest.prototype.setRequestHeader;
+    XMLHttpRequest.prototype.setRequestHeader = function (k, v) {   // §20 — collect app-set headers per request (for auth capture)
+      try { if (!this.__ahub_h) this.__ahub_h = {}; this.__ahub_h[String(k).toLowerCase()] = String(v); } catch (e) {}
+      return osh.apply(this, arguments);
+    };
     var os = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.send = function () {
       try { var self = this; this.addEventListener('loadend', function () { try { push(self.__ahub_m, self.__ahub_u, self.status); } catch (e) {} }); } catch (e) {}
+      try { if (capAuth() && this.__ahub_h) stashAuth(this.__ahub_u, this.__ahub_h); } catch (e) { /* §20 — page-local auth capture (opt-in) */ }
       return os.apply(this, arguments);
     };
   } catch (e) { /* */ }

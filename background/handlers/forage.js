@@ -140,6 +140,11 @@ export async function armForage({ groundId = '', sessionTabId = null } = {}) {
   const hr = await startHarvestSession({ groundId, host, appHost: host, origin: host, tabId: sessionTabId });
   if (!hr.ok) { Logger.info('background', `FORAGE not armed: ${hr.error} (ground ${groundId})`); return { ok: false, error: hr.error }; }
   _forageArmed.set(groundId, { tabId: sessionTabId, host });
+  // §20 (v2.74.1287) — enable SESSION-REPLAY auth capture for THIS armed session: set the page flag BEFORE the reload so
+  // the document_start tee captures the app's auth HEADERS (page-local on window.__ahub_ride_auth — NEVER banked/logged/
+  // exported) for header-replay of cross-origin Bearer reads (a cookie can't ride those). Opt-in per armed session; the
+  // tee ignores it otherwise. sessionStorage is origin-shared, so an ISOLATED set is read by the MAIN-world tee post-reload.
+  try { await chrome.scripting.executeScript({ target: { tabId: sessionTabId, frameIds: [0] }, func: () => { try { sessionStorage.setItem('__ahub_cap_auth', '1'); } catch (e) { /* */ } } }); } catch { /* */ }
   // CAPTURE THE BOOT (v2.74.1285): reload the tab so the document_start tee wraps fetch/XHR BEFORE the app's bundle grabs
   // its own reference — a late in-place inject is BYPASSED by apps that capture fetch at load (the Deako SPA does; verified
   // live). The tee's sessionStorage sink survives the reload, so nothing is lost; the (re-auth'd) boot's authenticated API
