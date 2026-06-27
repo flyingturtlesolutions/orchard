@@ -40,26 +40,27 @@ import { rideSection } from './Core/groundToolSurface.js';   // §18 — the Rid
 // §18 (v2.74.1268, DESIGN_connectors.md) — a Ground's tool surface is grouped by execution CLASS: Drive (the grounded
 // page substrates) · Ride (session-ride recipes) · Broker (OAuth/MCP, later). A class divider is a lightweight header
 // row ABOVE the substrate sections — Ride is a PEER of Drive, not of Fragments. PURE DOM builder.
-// §18 (v2.74.1269) — a COLLAPSIBLE class header (mirrors the Ground header: chevron + label + brief description). Click
-// the chevron to hide every substrate section that follows it, up to the next class header (the sections are siblings,
-// so the toggle walks nextElementSibling until the next `.ground-class-divider`). PURE-ish DOM builder + its own toggle.
-function _classDivider(label, { desc = '', pending = 0, placeholder = false } = {}) {
-  const row = document.createElement('div');
-  row.className = 'ground-class-divider';
-  row.innerHTML = `<button class="ground-class-collapse" type="button" aria-expanded="true" title="Collapse / expand ${escAttr(label)}"><span class="ground-class-chevron">▾</span></button>`
-    + `<strong class="ground-class-label">${escHtml(label)}</strong>`
-    + (pending ? ` <span class="ground-class-pending" title="${pending} pending review">${pending} pending</span>` : '')
-    + (desc ? ` <span class="ground-class-desc">${escHtml(desc)}</span>` : '')
-    + (placeholder ? ' <span class="empty-state small">— not connected yet</span>' : '');
-  row.querySelector('.ground-class-collapse').addEventListener('click', (e) => {
+// §18 (v2.74.1271) — a Type-level CLASS CARD (Drive / Ride / Broker): a COLLAPSIBLE card whose body holds the substrate
+// cards (the hierarchy is Ground card > Type card > Substrate card). Returns { card, body } — append the substrate
+// sections (or the recipes row) into `body`. Its own collapse toggle hides the body (so the whole Type folds away).
+function _classCard(label, { desc = '', placeholder = false } = {}) {
+  const card = document.createElement('section');
+  card.className = 'ground-class-card';
+  card.innerHTML = '<div class="ground-class-head">'
+    + `<button class="ground-class-collapse" type="button" aria-expanded="true" title="Collapse / expand ${escAttr(label)}"><span class="ground-class-chevron">▾</span></button>`
+    + `<span class="ground-class-label">${escHtml(label)}</span>`
+    + (desc ? `<span class="ground-class-desc">${escHtml(desc)}</span>` : '')
+    + (placeholder ? ' <span class="empty-state small">— not connected yet</span>' : '')
+    + '</div><div class="ground-class-body"></div>';
+  const body = card.querySelector('.ground-class-body');
+  card.querySelector('.ground-class-collapse').addEventListener('click', (e) => {
     const btn = e.currentTarget;
-    const collapsed = row.classList.toggle('ground-class-collapsed');
+    const collapsed = card.classList.toggle('ground-class-collapsed');
     btn.setAttribute('aria-expanded', String(!collapsed));
     const chev = btn.querySelector('.ground-class-chevron'); if (chev) chev.textContent = collapsed ? '▸' : '▾';
-    let el = row.nextElementSibling;
-    while (el && !el.classList.contains('ground-class-divider')) { el.hidden = collapsed; el = el.nextElementSibling; }
+    if (body) body.hidden = collapsed;
   });
-  return row;
+  return { card, body };
 }
 
 const _RIDE_CRUD_FOR_METHOD = { GET: 'read', POST: 'create', PUT: 'update', PATCH: 'update', DELETE: 'delete' };
@@ -84,7 +85,7 @@ function _rideRecipeRowHtml(r) {
     <div class="fragment-row${r.enabled === false ? ' fragment-row-deprecated' : ''}" data-rid="${escAttr(r.id)}">
       <div class="fragment-row-main">
         <span class="fragment-name">${escHtml(r.name || r.id)}</span>
-        <span class="fragment-tier tier-${_RIDE_SAFETY_TIER[safety] || 't3'}" title="safety class — ${escAttr(safety)}">${escHtml(safety)}</span>
+        <span class="ride-safety-pill ride-safety-${escAttr(safety)}" title="safety class">${escHtml(safety)}</span>
         <span class="fragment-health health-untested" title="${escAttr(String(r.method || 'GET'))} — ${escHtml(crud)}">${escHtml(crud)}</span>
         ${prov}${pending}
       </div>
@@ -109,13 +110,14 @@ function _rideRecipeRowHtml(r) {
 function _renderRideClass(card, ground) {
   let origin = '';
   try { origin = new URL(ground.url || ground.origin || ground.homeUrl || '').host; } catch { origin = String(ground.origin || ground.host || ''); }
-  card.appendChild(_classDivider('Ride', { desc: "Session-ride recipes — the app's own API, called by riding your login." }));
+  const _rideCard = _classCard('Ride', { desc: "Session-ride recipes — the app's own API, called by riding your login." });
+  card.appendChild(_rideCard.card);
   const row = document.createElement('div');
   row.className = 'ground-section-row ground-ride-row';
   row.innerHTML = '<div class="ground-section-head"><span class="ground-section-label">Recipes</span><span class="ground-section-count" data-ride-count>…</span></div>'
     + '<div class="ground-section-body" data-ride-body><span class="empty-state small">Loading ride recipes…</span></div>';
-  card.appendChild(row);
-  card.appendChild(_classDivider('Broker', { desc: 'OAuth / MCP connectors.', placeholder: true }));
+  _rideCard.body.appendChild(row);   // §18 — the Recipes substrate card nests INTO the Ride class card
+  card.appendChild(_classCard('Broker', { desc: 'OAuth / MCP connectors.', placeholder: true }).card);
 
   const render = async () => {
     let recipes = [];
@@ -2865,7 +2867,10 @@ async function _renderGroundCard(ground, { list, localeMap }) {
     });
     groupHeader.querySelector('[data-action="discover"]').addEventListener('click', () => startDiscovery(ground.id));
     card.appendChild(groupHeader);
-    card.appendChild(_classDivider('Drive', { desc: 'Grounded page capabilities — fragments, perspectives, landmarks, strategies.' }));   // §18 — the DRIVE class header; the substrate sections below are its members
+    // §18 — the DRIVE class CARD: its body holds the drive substrate sections (re-parented below via `driveBody`).
+    const _driveCard = _classCard('Drive', { desc: 'Grounded page capabilities — fragments, perspectives, landmarks, strategies.' });
+    card.appendChild(_driveCard.card);
+    const driveBody = _driveCard.body;
 
     // Fragments stub row — wired in Pass B
     const fragRow = document.createElement('div');
@@ -3002,7 +3007,7 @@ async function _renderGroundCard(ground, { list, localeMap }) {
         else toast(`Failed: ${res?.error ?? 'unknown'}`, 'err');
       });
     });
-    card.appendChild(fragRow);
+    driveBody.appendChild(fragRow);
 
     // v2.42.0 (Pass M2) — Assertions section. Like fragments but for
     // named conditions. Authors save commonly-used checks here and
@@ -3059,7 +3064,7 @@ async function _renderGroundCard(ground, { list, localeMap }) {
     predRow.querySelectorAll('[data-action="delete-assertion"]').forEach(btn => {
       btn.addEventListener('click', () => deleteAssertion(btn.dataset.pid));
     });
-    card.appendChild(predRow);
+    driveBody.appendChild(predRow);
 
     // v2.72.29 (Pass 17) — Perspectives section. Vocabulary, like Assertions,
     // but for verified DOM landmark records rather than logical assertions.
@@ -3145,7 +3150,7 @@ async function _renderGroundCard(ground, { list, localeMap }) {
         else toast(`Failed: ${res?.error ?? 'unknown'}`, 'err');
       });
     });
-    card.appendChild(perspectiveRow);
+    driveBody.appendChild(perspectiveRow);
 
 
     // v2.74.399 — Locales section. The Locale capability catalog
@@ -3219,7 +3224,7 @@ async function _renderGroundCard(ground, { list, localeMap }) {
         } catch (e) { toast(`Failed: ${e?.message ?? 'unknown'}`, 'err'); }
       });
     });
-    card.appendChild(localeRow);
+    driveBody.appendChild(localeRow);
 
     // v2.74.416 — OUTCOMES slice 5: the unified append-only stream viewer
     // (OUTCOMES_SPEC). Reads the background fold (GET_OUTCOMES) — recent events
@@ -3296,7 +3301,7 @@ async function _renderGroundCard(ground, { list, localeMap }) {
         await refreshGroundList();
       } catch (e) { toast(`Failed: ${e?.message ?? 'unknown'}`, 'err'); }
     });
-    card.appendChild(oRow);
+    driveBody.appendChild(oRow);
 
     // v2.74.431 — Site Map section (GROUND_SPEC § 7). The navigation graph of the
     // site: the current page(s) modeled, every nav destination discovered. Reuses
@@ -3572,7 +3577,7 @@ async function _renderGroundCard(ground, { list, localeMap }) {
         await refreshGroundList();
       } catch (e) { toast(`Failed: ${e?.message ?? 'unknown'}`, 'err'); }
     });
-    card.appendChild(smRow);
+    driveBody.appendChild(smRow);
 
     // v2.65.0 (Pass 2) — Observations section. Foundation only: storage
     // exists, library row exists. NO authoring flow, NO runtime path,
@@ -3722,7 +3727,7 @@ async function _renderGroundCard(ground, { list, localeMap }) {
         refreshGroundList();
       });
     });
-    card.appendChild(obsRow);
+    driveBody.appendChild(obsRow);
 
     // v2.62.0 — Analyses section. Library of named, parameterized data-ops
     // definitions. Built-ins ship with the system and appear here on every
@@ -3833,7 +3838,7 @@ async function _renderGroundCard(ground, { list, localeMap }) {
         else toast(`Failed: ${res?.error ?? 'unknown'}`, 'err');
       });
     });
-    card.appendChild(analysisRow);
+    driveBody.appendChild(analysisRow);
 
     // Strategies stub row — wired in Pass C
     const stratRow = document.createElement('div');
@@ -3939,7 +3944,7 @@ async function _renderGroundCard(ground, { list, localeMap }) {
         else toast(`Failed: ${res?.error ?? 'unknown'}`, 'err');
       });
     });
-    card.appendChild(stratRow);
+    driveBody.appendChild(stratRow);
 
     // §18 — the RIDE + BROKER class blocks (peers of DRIVE). Everything above belongs to the Drive class; this appends
     // the Ride class (its Recipes section, async-loaded + edit-wired) and a Broker placeholder. Fire-and-forget render.

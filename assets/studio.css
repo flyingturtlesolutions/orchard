@@ -353,6 +353,23 @@
   border: 1px solid rgba(220, 180, 255, 0.3);
 }
 
+/* ── §18 (v2.74.1271) — Type-level CLASS CARD (Drive / Ride / Broker): a collapsible card whose body holds the
+   substrate cards. Hierarchy: Ground card > Type card > Substrate card. ─────────────────────────────── */
+.ground-class-card { border: 1px solid rgba(148,163,184,0.18); border-radius: 8px; margin: 10px 0; background: rgba(148,163,184,0.04); overflow: hidden; }
+.ground-class-head { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid rgba(148,163,184,0.12); }
+.ground-class-card.ground-class-collapsed .ground-class-head { border-bottom: none; }
+.ground-class-collapse { background: none; border: none; color: rgba(148,163,184,0.85); cursor: pointer; font-size: 12px; line-height: 1; padding: 0 2px; }
+.ground-class-label { font-weight: 700; font-size: 11.5px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--accent, #82c4ff); }
+.ground-class-desc { font-size: 11px; color: rgba(148,163,184,0.75); }
+.ground-class-body { padding: 4px 8px 8px; }
+
+/* §18 — recipe safety pill (green / amber / red), mirroring the fragment-tier badge shape */
+.ride-safety-pill { display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: 0.06em; padding: 1px 5px; border-radius: 3px; text-transform: uppercase; margin-left: 4px; border: 1px solid; }
+.ride-safety-auto        { background: rgba(61,214,140,0.14);  border-color: rgba(61,214,140,0.5);  color: rgba(110,231,168,1); }
+.ride-safety-gated       { background: rgba(251,191,36,0.14);  border-color: rgba(251,191,36,0.5);  color: rgba(252,211,77,1); }
+.ride-safety-destructive { background: rgba(247,110,110,0.16); border-color: rgba(247,110,110,0.6); color: rgba(252,165,165,1); }
+.fragment-tier.tier-t2 { background: rgba(251,191,36,0.16); color: #fcd34d; border: 1px solid rgba(251,191,36,0.4); }   /* was missing */
+
 /* ── v2.74.357 — Resolve performance viewer ───────────────────────────── */
 .rp-summary { font-size: 12px; color: rgba(148,163,184,0.9); margin: 4px 0 10px; }
 .rp-dim { color: rgba(148,163,184,0.7); font-size: 11px; }
