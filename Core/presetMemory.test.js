@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isPromotableToPreset, promotableToPreset, seedInstanceFromPreset } from './presetMemory.js';
+import { isPromotableToPreset, promotableToPreset, seedInstanceFromPreset, presetMemoryKey, distillCandidates, presetRuleFromAbstract } from './presetMemory.js';
 
 const delta = (body, over = {}) => ({ kind: 'delta', body, ...over });
 const belief = (body, over = {}) => ({ kind: 'belief', body, ...over });
@@ -46,5 +46,40 @@ describe('presetMemory — seedInstanceFromPreset (the baseline a new instance s
     assert.deepEqual(seedInstanceFromPreset([belief('a fact', { tier: 'canonical' })]), []);
     assert.equal(seedInstanceFromPreset([delta('same'), delta('SAME')]).length, 1);
     assert.deepEqual(seedInstanceFromPreset(null), []);
+  });
+});
+
+describe('presetMemory — §10.2 distill-up core', () => {
+  it('presetMemoryKey: preset:<id>, blank → ""', () => {
+    assert.equal(presetMemoryKey('support'), 'preset:support');
+    assert.equal(presetMemoryKey('  inbox '), 'preset:inbox');
+    assert.equal(presetMemoryKey(''), '');
+    assert.equal(presetMemoryKey(null), '');
+  });
+  it('distillCandidates: confirmed deltas NOT preset-sourced; facts + other tiers + preset/distilled provenance excluded', () => {
+    const items = [
+      delta('verify the refund window', { tier: 'confirmed', provenance: 'act-ok' }),        // earned → candidate
+      delta('summarize before escalating', { tier: 'confirmed', provenance: 'user-rule' }),  // earned → candidate
+      delta('already vetted', { tier: 'canonical', provenance: 'user-rule' }),               // canonical = already shared → no
+      belief('Acme is enterprise', { tier: 'canonical' }),                                   // a FACT is barred (privacy boundary)
+      delta('still a hypothesis', { tier: 'hypothesis' }),                                   // not earned yet → no
+      delta('came down from preset', { tier: 'confirmed', provenance: 'preset-baseline' }),  // seeded down → never re-rises
+      delta('already rose once', { tier: 'confirmed', provenance: 'distilled-up' }),         // already shared → no loop
+    ];
+    assert.deepEqual(distillCandidates(items).map((x) => x.body), ['verify the refund window', 'summarize before escalating']);
+    assert.deepEqual(distillCandidates(null), []);
+  });
+  it('distillCandidates carries the store id through (the caller canonizes that item)', () => {
+    assert.equal(distillCandidates([{ kind: 'delta', body: 'a rule', tier: 'confirmed', id: 'gm-xyz' }])[0].id, 'gm-xyz');
+  });
+  it('presetRuleFromAbstract: abstracted body → a canonical distilled-up preset delta; blank → null', () => {
+    const r = presetRuleFromAbstract({ trigger: 'before closing a ticket', body: 'confirm the resolution with the customer' });
+    assert.equal(r.kind, 'delta');
+    assert.equal(r.tier, 'canonical');
+    assert.equal(r.provenance, 'distilled-up');
+    assert.equal(r.trigger, 'before closing a ticket');
+    assert.equal(r.body, 'confirm the resolution with the customer');
+    assert.equal(presetRuleFromAbstract({ body: '   ' }), null);
+    assert.equal(presetRuleFromAbstract({}), null);
   });
 });

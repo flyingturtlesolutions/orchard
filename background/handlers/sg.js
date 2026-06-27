@@ -695,6 +695,22 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // §10.2 (v2.74.1261) — distill-up's LLM ABSTRACTION pass: chat.js sends ONE instance rule + the preset type; we
+    // return the generalized {trigger, body} (specifics STRIPPED — the privacy boundary) or null (the model declined).
+    // The user CONFIRMS before it rises (HITL), so this only PROPOSES; nothing is written here.
+    ABSTRACT_RULE: async (payload, _sender, sendResponse) => {
+      try {
+        const body = String(payload?.body ?? '').trim();
+        if (!body) { sendResponse({ success: true, rule: null }); return; }
+        const rule = await AnthropicService.abstractRuleForPreset({ trigger: payload?.trigger || null, body, presetType: payload?.presetType || '' });
+        Logger.info('preset', `ABSTRACT_RULE "${body.slice(0, 48)}" → ${rule ? 'generalized' : 'declined'}`);
+        sendResponse({ success: true, rule });
+      } catch (err) {
+        Logger.error('background', `ABSTRACT_RULE failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
     // F-2 (v2.74.1176, DESIGN_llm_front_door.md §9) — INTERPRET_ASK: the LLM front-door INTERPRET call. Resolves the
     // Ground + retrieves the candidate set (ORCH_MATCH-as-RETRIEVER — the SAME tool-RAG as ROUTE_ASK, FED not gating),
     // then AnthropicService.interpret returns the raw §9.2 decision {intent, capabilityId|op, params, subAsks,

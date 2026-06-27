@@ -34,6 +34,7 @@ import { buildJudgeMessages, parseJudgeDecision } from '../Core/judgePrompt.js';
 import { buildAnswerMessages } from '../Core/answerPrompt.js';   // IL-2 — Orchard ANSWERING a meta/conversational ask from the available capabilities
 import { buildCanvasMessages, parseCanvasOutput } from '../Core/canvasPrompt.js';   // CA-9 — the app COMPOSES a CanvasSpec from an ask
 import { buildWorkflowMatchMessages, parseWorkflowMatchOutput } from '../Core/workflowMatchPrompt.js';   // WF-3 — LLM fallback for workflow recall
+import { buildPresetAbstractMessages, parsePresetAbstractOutput } from '../Core/presetAbstractPrompt.js';   // §10.2 — abstract an instance rule for the shared preset (distill-up)
 import { buildGapMessages, parseGaps } from '../Core/gapPrompt.js';   // PS-0 — Orchard's STRUCTURED capability-gap enumeration (the per-Ground demand signal)
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
@@ -5282,6 +5283,23 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     const res = await AnthropicService.#call(system, user, 256, [], { role: 'routing', operation: 'match-workflow' });
     if (!res || res.success === false) return { id: null, confidence: 0 };
     return parseWorkflowMatchOutput(res.text);
+  }
+
+  /**
+   * §10.2 (v2.74.1261, DESIGN_apps_learning.md §10) — the LLM ABSTRACTION pass for distill-up: generalize ONE
+   * instance behavior rule for the shared preset, STRIPPING instance specifics (the privacy boundary). Returns the
+   * abstracted { trigger, body } or null (the model declined / no LLM / unparseable). DEFAULT tier (quality matters
+   * for clean stripping; it's rare + user-initiated, so not cost-sensitive). PURE prompt+parse in
+   * Core/presetAbstractPrompt.js. The user still CONFIRMS the result before it rises (§7 HITL), so a slip is caught.
+   * @param {{ trigger?:string, body:string, presetType?:string }} rule
+   * @returns {Promise<{ trigger:string|null, body:string }|null>}
+   */
+  static async abstractRuleForPreset({ trigger = null, body = '', presetType = '' } = {}) {
+    if (!String(body || '').trim() || !(await AnthropicService.hasLlm())) return null;
+    const { system, user } = buildPresetAbstractMessages({ trigger, body }, presetType);
+    const res = await AnthropicService.#call(system, user, 400, [], { role: 'describe', operation: 'abstract-rule' });
+    if (!res || res.success === false) return null;
+    return parsePresetAbstractOutput(res.text);
   }
 
   /**

@@ -38,11 +38,11 @@ import { planSubTasks, subTaskFromApp, classifyAskToGrid, isConfiguredDef, OVERV
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-app write gate (read-only enforcement)
 import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps; AP-4 — configuredAppDefinition (mint a durable, re-creatable app from a set-up instance)
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
-import { recordGoalItem, loadGoalItems, clearGoalMemory } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view
+import { recordGoalItem, loadGoalItems, clearGoalMemory, promoteGoalItem } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view
 import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
 import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab } from './Core/workflowMemory.js';   // WF-1 lexical recall + WF-3 LLM-fallback prep/validate/gate
 import { loadWorkflows, saveWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete)
-import { seedInstanceFromPreset } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
+import { seedInstanceFromPreset, distillCandidates, presetRuleFromAbstract, presetMemoryKey } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
 import { standingRuleFromText, looksLikeStandingRule } from './Core/goalMemory.js';   // AL-3c — `remember:` authors a standing-rule delta; §12.2 — looksLikeStandingRule offers prefix-less capture
 import { normalizeInterpretDecision, applyConfidenceGate } from './Core/interpret.js';   // F-2c — interpret decision validate + the §9.3 confidence gate
 
@@ -66,6 +66,7 @@ let _currentConversationAppId = null;   // AL-3b (v2.74.1193) — the current ap
 let _currentConversationInstanceId = null;   // AP-0 (v2.74.1211) — the per-INSTANCE identity (unique per configured app); the goal-memory key, so two apps of one type don't share learning. Tracked alongside appId.
 // AP-0 — THE goal-memory key: the per-instance id when present, else the app TYPE (legacy apps with no instanceId, e.g.
 // created before .1211). `appId` stays the TYPE for object-model / canvas resolution; memory keys by THIS.
+let _currentConversationPresetId = null;     // §10.2 — the app's TYPE id (its preset), so distill-up can teach the shared preset. Tracked alongside instanceId.
 const _memoryId = () => _currentConversationInstanceId || _currentConversationAppId || null;
 
 // v2.74.106 — Single-flight guard for conversation creation. Two parallel
@@ -115,6 +116,7 @@ function _clearCurrentConversation() {
   _setupState = null;   // AS-2 (v2.74.1188) — drop any in-progress setup flow when the surface changes
   _currentConversationAppId = null;   // AL-3b — clear the app type on a fresh surface
   _currentConversationInstanceId = null;   // AP-0 — clear the per-instance memory key too
+  _currentConversationPresetId = null;     // §10.2 — clear the preset type too
 }
 
 /**
@@ -1359,6 +1361,7 @@ async function _createAppConversation(def, { setup = false } = {}) {
   _currentConversationSeed = def.seed || '';
   _currentConversationAppId = typeId || null;            // the TYPE — object-model / canvas resolution + the gallery
   _currentConversationInstanceId = conv.instanceId || null;   // AP-0 — the per-instance goal-memory key
+  _currentConversationPresetId = conv.presetId || null;       // §10.2 — the app's preset type (distill-up target)
   if (cfg && typeof cfg === 'object') _currentConversationConfig = cfg;
   // §10.1 seed-down (v2.74.1215) — a NEW instance inherits its preset's baseline rules so it's useful day 1.
   // typeId IS the preset id (configured → presetId, else the def id). Seed-IF-EMPTY, fire-and-forget.
@@ -3008,6 +3011,51 @@ function _offerWorkflowReplay(goal, wf) {
 
 // WF-2 — the manage view (`workflows` command): list THIS instance's saved workflows with ▶ Run / 🗑 Delete per row.
 // A transient menu (DOM-only, not persisted) — re-type `workflows` to refresh. Run replays through the chain runner.
+// §10.2 distill-up — `distill` lists THIS app's CONFIRMED learned rules and offers to TEACH each, abstracted + HITL,
+// to its app-TYPE preset, so new apps of that type start smarter. Per row: ⬆ Teach preset → generalize (the LLM strips
+// anything specific to this app — the privacy boundary) → confirm the generalized rule → it lands in the preset store
+// (`preset:<presetId>`) + the instance copy is canonized (marked done; won't re-offer). The body render escapes (it's
+// the app's own learned rule, but the escape-first path covers it).
+async function _renderDistill() {
+  const m = appendMessage({ role: 'assistant', body: '' });
+  const instanceId = _memoryId();
+  const presetId = _currentConversationPresetId;
+  if (!instanceId) { _setMessageBody(m, 'Open an app — its learned rules distill up to that app type’s shared template.'); return; }
+  let items = [];
+  try { items = await loadGoalItems(instanceId); } catch { /* */ }
+  const candidates = distillCandidates(items);
+  if (!candidates.length) { _setMessageBody(m, '🎓 Nothing to teach the preset yet — distill-up shares an app’s CONFIRMED behavior rules (ones it has learned and corroborated through use). Keep using it.'); return; }
+  if (!presetId) { _setMessageBody(m, `🎓 This app has ${candidates.length} learned rule${candidates.length === 1 ? '' : 's'}, but it isn’t tied to an app-type preset to teach.`); return; }
+  _setMessageBody(m, `🎓 ${candidates.length} learned rule${candidates.length === 1 ? '' : 's'} this app could teach the “${presetId}” preset — generalized, then shared with new ${presetId} apps:`);
+  for (const c of candidates) {
+    const row = appendMessage({ role: 'assistant', body: `• ${c.trigger ? `when ${c.trigger}: ` : ''}${c.body}` });
+    const bar = _orchActionBar(row);
+    bar.appendChild(_mkBtn('⬆ Teach preset', async () => {
+      bar.remove();
+      _setMessageBody(row, '⏳ Generalizing (stripping anything specific to this app)…');
+      let abstracted = null;
+      try { const res = await _orchReq('ABSTRACT_RULE', { trigger: c.trigger, body: c.body, presetType: presetId }); abstracted = res && res.rule; } catch { /* */ }
+      if (!abstracted || !abstracted.body) { _setMessageBody(row, `Left “${String(c.body).slice(0, 48)}…” local — too specific to this app to generalize cleanly.`); return; }
+      _setMessageBody(row, `Teach the “${presetId}” preset this generalized rule?\n${abstracted.trigger ? `when ${abstracted.trigger}: ` : ''}${abstracted.body}`);
+      const bar2 = _orchActionBar(row);
+      bar2.appendChild(_mkBtn('✓ Teach it', async () => {
+        bar2.remove();
+        const rule = presetRuleFromAbstract(abstracted);
+        let ok = false;
+        try {
+          if (rule) {
+            await recordGoalItem(presetMemoryKey(presetId), rule);
+            if (c.id) await promoteGoalItem(instanceId, c.id, { confirmedByHuman: true });   // canonize the instance copy → marked done, won't re-offer
+            ok = true;
+          }
+        } catch { /* */ }
+        _setMessageBody(row, ok ? `✓ Taught the “${presetId}” preset — new ${presetId} apps will start with this rule.` : 'Couldn’t save that to the preset.');
+      }));
+      bar2.appendChild(_mkBtn('✕ Keep local', () => { bar2.remove(); _setMessageBody(row, `Kept “${String(c.body).slice(0, 48)}…” local to this app.`); }));
+    }));
+  }
+}
+
 async function _renderWorkflows() {
   const m = appendMessage({ role: 'assistant', body: '' });
   const appId = _memoryId();
@@ -4868,6 +4916,16 @@ async function sendChatMessage() {
     return;
   }
 
+  // §10.2 — `distill` (or `teach preset`) lists THIS app's confirmed learned rules and offers to teach each (abstracted,
+  // HITL) to its app-type preset, so new apps of that type start smarter. A utility command, before routing.
+  if (/^(distill|teach\s+preset)\s*$/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    try { await _renderDistill(); }
+    catch (e) { try { console.warn('[chat] distill view failed:', e?.message); } catch { /* */ } }
+    return;
+  }
+
   // AL-3c (v2.74.1194) — `remember: <rule>` authors a STANDING RULE (a behavior delta) into this app's goal memory:
   // NON-tool learning (a behavior, not a capability choice). Light `if X, Y` parse → trigger/body. Shows under
   // "Rules" in `memory`; AL-4 will apply it (thread it into the app's reasoning context).
@@ -6228,6 +6286,7 @@ async function _rehydrateConversation(conv) {
   _currentConversationConfig = (conv.config && typeof conv.config === 'object') ? conv.config : { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — restore the track's enforced write policy (a sub-task carries its app's tightened copy)
   _currentConversationAppId = (conv.kind !== 'dev' && conv.appId) ? String(conv.appId) : null;   // AL-3b — restore the app type
   _currentConversationInstanceId = (conv.kind !== 'dev' && conv.instanceId) ? String(conv.instanceId) : null;   // AP-0 — restore the per-instance memory key
+  _currentConversationPresetId = (conv.kind !== 'dev' && conv.presetId) ? String(conv.presetId) : null;        // §10.2 — restore the preset type (distill-up)
   // DBR-P3-1 (v2.74.1053) — a split-seeded dev conversation: pre-fill the composer with its seed the first time
   // it's opened (SEED-AND-HOLD — not sent; the human reviews + presses enter), then clear the seed so reopening
   // doesn't re-fill it. The composer (#chat-input) is visible even in the empty-dev state below.

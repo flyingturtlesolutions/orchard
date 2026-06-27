@@ -47,3 +47,39 @@ export function seedInstanceFromPreset(presetItems, { baseline = [] } = {}) {
   }
   return out;
 }
+
+// ─── §10.2 distill UP (instance → preset) ─────────────────────────────────────────────────────────────────────────
+
+/** The preset store's goalMemory key for a type. PURE. Single-sourced: seed-down READS it, distill-up WRITES it. */
+export function presetMemoryKey(presetId) {
+  const id = String(presetId == null ? '' : presetId).trim();
+  return id ? `preset:${id}` : '';
+}
+
+/**
+ * The instance deltas eligible to OFFER for distill-up, or []. PURE. A corroborated behavior RULE at tier `confirmed`
+ * (the ratchet's earned ceiling) that did NOT come down from the preset — `preset-baseline` / `distilled-up` never
+ * re-rises (already shared; re-rising would loop). `canonical` is excluded too: canonizing the instance copy is exactly
+ * how a rule is MARKED done once it rises (the caller does that on confirm), so canonical = already-shared. Beliefs
+ * (facts) are structurally barred (kind !== delta) — that IS the privacy boundary (§10). Carries the store `id` through
+ * so the caller can canonize that exact item. The caller LLM-abstracts each, the user CONFIRMS (the §7 gate, applied to
+ * crossing into the shared preset), then it's merged up + the instance copy canonized.
+ */
+export function distillCandidates(instanceItems) {
+  return (Array.isArray(instanceItems) ? instanceItems : [])
+    .map((raw) => { const i = normalizeMemoryItem(raw); return i ? { ...i, id: (raw && raw.id) || null } : null; })
+    .filter((i) => i && i.kind === 'delta' && i.tier === 'confirmed'
+      && i.provenance !== 'preset-baseline' && i.provenance !== 'distilled-up');
+}
+
+/**
+ * Shape an ABSTRACTED rule (the caller's LLM stripped instance specifics) into a PRESET delta to merge up, or null.
+ * PURE. Lands `canonical` (it crossed the HITL gate → vetted) with provenance `distilled-up` (the audit shows it rose
+ * from an instance, vs `preset-baseline` hand-authored). The store (recordGoalItem on the preset key) content-dedups.
+ */
+export function presetRuleFromAbstract({ trigger = null, body = '' } = {}) {
+  const b = String(body || '').trim();
+  if (!b) return null;
+  const t = String(trigger || '').trim() || null;
+  return { kind: 'delta', trigger: t, body: b, epistemic: 'inferred', confidence: 0.85, tier: 'canonical', provenance: 'distilled-up' };
+}
