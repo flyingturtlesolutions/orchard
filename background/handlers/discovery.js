@@ -290,12 +290,11 @@ export function createDiscoveryHandlers(ctx) {
               } catch (e) { Logger.warn('background', `harvest stop/bank failed: ${e.message}`); }
             }
             // §19 — AUTO-CHAIN Forage (the decided trigger): Discovery built the frontier + banked landing-reads; Forage
-            // now drives the read-safe nav (sections + a sample of filters/pagination/detail) to harvest the section/param
-            // surface Discovery's breadth missed. Fire-and-forget (it arms its OWN harvest session, sequenced after the
-            // stop above). Pass existingTabId as the SESSION tab to RIDE: Forage DUPLICATES it (cookies + sessionStorage →
-            // authenticated) and crawls the disposable clone — so it harvests the LOGGED-IN read surface, not the anonymous
-            // one (v2.74.1282). Gated on a real tab: no logged-in tab → no session to ride → skip (matches Discovery's
-            // own harvest gating). Read-only + consent-gated inside.
+            // now drives the read-safe nav to harvest the authenticated section/param surface Discovery's breadth missed.
+            // Fire-and-forget (it arms its OWN harvest session, sequenced after the stop above). Pass existingTabId as the
+            // SESSION tab: Forage drives CLIENT-SIDE nav INSIDE that live logged-in tab (clicks read-safe in-app links, no
+            // reload → the in-memory auth token survives → authenticated reads captured), restoring the route after
+            // (v2.74.1283). Gated on a real tab: no logged-in tab → nothing to ride → skip. Read-only + consent-gated inside.
             if (typeof ctx.readRideRecipes === 'function' && typeof ctx.writeRideRecipes === 'function' && typeof existingTabId === 'number') {
               runForage({ groundId, sessionTabId: existingTabId, readRideRecipes: ctx.readRideRecipes, writeRideRecipes: ctx.writeRideRecipes })
                 .then((r) => { try { Logger.info('ride', `discovery→forage: ${r.visits || 0} page(s) → banked ${r.banked || 0} (ground ${groundId})`); } catch { /* */ } })

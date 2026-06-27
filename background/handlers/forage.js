@@ -1,104 +1,114 @@
 // background/handlers/forage.js — §19 (DESIGN_connectors.md): FORAGE — the purpose-built recipe-capture crawler.
-// READ-ONLY by construction: it drives the app's OWN navigation (read-safe GET URLs only — forageFrontier/readSafe via a
-// self-contained a[href] extract) by `chrome.tabs.update`, so each section LOADS with the §17 harvest tee armed → it
-// captures the read-API SURFACE that Discovery's breadth (landing reads) and Explore's nav-guarded poke (same-page XHR)
-// both miss. Banks `pending` via the §17 bank. Composes — no new capture/generalize/bank: the tee (start/stopHarvestSession)
-// · recipeFromHarvest (inside the bank) · waitForTabComplete. RIDES THE LOGGED-IN SESSION: it DUPLICATES the user's tab
-// (cookies + sessionStorage carry → authenticated) and crawls the disposable background CLONE — never the user's own tab,
-// never an anonymous fresh tab (that harvested only public endpoints — the v2.74.1282 fix).
+// READ-ONLY by construction. RIDES THE LOGGED-IN SESSION the only way that actually works for a modern SPA: it drives
+// CLIENT-SIDE navigation INSIDE the user's LIVE logged-in tab. Many apps (e.g. the Deako CS tool, a static S3 SPA) hold
+// their auth token IN MEMORY — so a fresh tab, a duplicated tab, OR a hard `tabs.update` reload all boot ANONYMOUS (cookies
+// transfer, but sessionStorage/in-memory auth don't survive a fresh document). The fix (v2.74.1283): inject a driver into
+// the live tab that CLICKS read-safe in-app <a href> nav links → the SPA router changes route WITHOUT a reload → the app
+// fetches each route with the in-memory token still held in that tab → the §17 tee (MAIN world, injected on the live tab)
+// captures those AUTHENTICATED reads. No new tab, no duplicate, no hard load. Banks `pending` via the §17 bank. Composes —
+// the tee (start/stopHarvestSession) · recipeFromHarvest (inside the bank). NOTE: the URL-frontier path (Core/readSafe.js +
+// Core/forageFrontier.js, a background hard-nav crawl) is PARKED for a future cookie-auth MPA mode — it can't ride
+// in-memory auth, which is why this live-tab client-side driver replaced it.
 
 import { Logger } from '../../Core/Logger.js';
 import { StorageManager } from '../../Services/StorageManager.js';
-import { waitForTabComplete } from '../../Services/TabUtils.js';
-import { forageFrontier, normForVisit } from '../../Core/forageFrontier.js';
 import { startHarvestSession, stopHarvestSession } from './sg.js';
 
-const _forageAbort = new Map();   // groundId → bool (ABORT_FORAGE sets true; checked between visits)
-const MAX_VISITS = 24;            // bounded crawl
-const DRY_LIMIT = 4;              // K consecutive no-new-url visits → stop (loop-until-dry)
+const _forageAbort = new Map();   // groundId → bool (concurrency guard; ABORT_FORAGE sets true)
+const MAX_VISITS = 16;            // bounded client-side crawl (kept short so the awaited executeScript stays inside the SW idle window)
 
-// Self-contained link extractor — runs in the page (ISOLATED is fine: reads a[href] only, NEVER mutates). Serialized by
-// executeScript, so no imports/closures. The read-safety + frontier prioritization happen background-side (readSafe).
-function _extractLinksFunc() {
-  try {
-    return [...document.querySelectorAll('a[href]')].slice(0, 500).map((a) => ({
-      href: a.href,
-      label: (a.textContent || a.getAttribute('aria-label') || a.title || '').replace(/\s+/g, ' ').trim().slice(0, 80),
-      role: a.getAttribute('role') || '', tag: 'a',
-    }));
-  } catch (e) { return []; }
+// THE CLIENT-SIDE NAV DRIVER — injected into the user's LIVE logged-in tab (ISOLATED world via executeScript). Self-contained
+// (serialized → no imports/closures). It CLICKS read-safe in-app <a href> links so the SPA router navigates CLIENT-SIDE (no
+// page reload → the in-memory auth token survives → the app fetches each route AUTHENTICATED, and the tee captures it).
+// READ-ONLY by construction: it clicks ONLY same-origin <a href> whose label is neither destructive nor a write verb, and
+// whose path isn't an auth/destructive route — never buttons/divs (those could be actions), never target=_blank, never
+// off-site. Inlines the EX-1 / Core/readSafe.js lexicons (a self-contained injected func can't import them). Async →
+// executeScript awaits the whole bounded crawl. Restores the start route CLIENT-SIDE (history.go) — NEVER a hard nav, which
+// would reboot the SPA and DROP the in-memory token (i.e. log the user out).
+async function _forageSpaDriverFunc(maxVisits) {
+  const DESTRUCTIVE = /\b(delete|deactivate|destroy|unsubscribe|publish|withdraw|log\s?out|sign\s?out|logout)\b|\b(empty|clear)\s+(cart|basket)\b|\b(cancel|close|delete|deactivate|remove)\s+(account|order|subscription|plan|membership|payment|profile)\b|\b(place|confirm)\s+(order|payment|purchase)\b|\b(buy|checkout|pay|bid)\b/i;
+  const WRITE = /\b(submit|save|send|post|reply|comment|upload|create|edit|update|confirm|apply|sign\s?up|register|subscribe|follow|favou?rite|add\s+to|remove|report|flag|share|invite|message|delete)\b/i;
+  const DESTRUCTIVE_PATH = /(?:^|\/)(logout|log-?out|signout|sign-?out|checkout|deactivate|unsubscribe)(?:\/|$)/i;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const keyOf = (u) => { try { const x = new URL(u, location.href); return x.pathname + x.search; } catch { return null; } };
+  const readSafe = (a) => {
+    try {
+      if (a.target === '_blank') return false;
+      const href = a.getAttribute('href') || '';
+      if (!href || /^(javascript:|mailto:|tel:|#|data:|blob:)/i.test(href)) return false;
+      if (new URL(a.href).origin !== location.origin) return false;            // same-origin only
+      const label = (a.textContent || a.getAttribute('aria-label') || a.title || '').replace(/\s+/g, ' ').trim();
+      if (DESTRUCTIVE.test(label) || WRITE.test(label)) return false;          // EX-1 + write veto on the label
+      if (DESTRUCTIVE_PATH.test(keyOf(a.href) || '')) return false;            // …and on the path (icon-only logout/checkout)
+      return true;
+    } catch { return false; }
+  };
+  const startUrl = location.href;
+  const visited = new Set([keyOf(location.href)]);
+  let visits = 0, hops = 0;
+  // BFS-ish over the LIVE DOM: each route renders its own nav, so re-enumerate every step and click the next unvisited
+  // read-safe link. Bounded by maxVisits. A client-side route change keeps the document (and the in-memory token) alive.
+  while (visits < maxVisits) {
+    let next = null;
+    for (const a of document.querySelectorAll('a[href]')) {
+      const k = keyOf(a.href);
+      if (k && !visited.has(k) && readSafe(a)) { next = a; visited.add(k); break; }
+    }
+    if (!next) break;
+    visits++;
+    try { next.click(); hops++; } catch { /* */ }
+    await sleep(1100);   // settle — let the SPA fetch + render the new route (the tee records the fetches)
+  }
+  // Restore the user's view CLIENT-SIDE (history back the number of hops). NEVER location.assign/reload — that reboots the
+  // SPA and drops the in-memory token. Best-effort; on overshoot the user lands on an app route, still logged in.
+  try { if (hops > 0 && location.href !== startUrl) { history.go(-hops); await sleep(300); } } catch { /* */ }
+  return { visits, startUrl, endUrl: location.href };
 }
 
 /**
- * §19 — run a read-safe nav-following harvest crawl on a Ground. Arms the §17 tee, BFS-crawls the app's read-safe nav
- * (sections → a capped sample of filters/pagination/detail), banks the captured reads `pending`. MODULE-LEVEL so the
- * Discovery handler can auto-chain it directly (the decided trigger).
- *
- * RIDES THE LOGGED-IN SESSION: pass `sessionTabId` = the user's logged-in tab; Forage DUPLICATES it (chrome.tabs.duplicate
- * copies cookies + sessionStorage) and crawls the background CLONE — so it sees exactly what the user sees, authenticated.
- * A fresh/throwaway tab is ANONYMOUS (sessionStorage + in-memory auth don't transfer) and would harvest only PUBLIC
- * endpoints — the bug this fixes. The user's own tab is never navigated; focus returns to it immediately. Without a
- * sessionTabId (or if duplicate fails) it falls back to a logged-OUT throwaway tab. Read-only + consent-gated; never
- * blocks. Returns { ok, visits, banked }.
+ * §19 — harvest a Ground's AUTHENTICATED read surface by driving CLIENT-SIDE nav in the user's LIVE logged-in tab.
+ * MODULE-LEVEL so the Discovery handler can auto-chain it. `sessionTabId` = the user's logged-in tab (REQUIRED — it is the
+ * only context holding the in-memory auth token). Arms the §17 tee ON that tab (executeScript inject; the page is already
+ * loaded), runs the in-tab client-side click-crawl, banks the captured reads `pending`. Read-only + consent-gated; never
+ * navigates away with a hard load (that would log the user out). Returns { ok, visits, banked }.
  */
 export async function runForage({ groundId = '', sessionTabId = null, readRideRecipes, writeRideRecipes } = {}) {
   groundId = String(groundId || '').trim();
   if (!groundId || typeof readRideRecipes !== 'function' || typeof writeRideRecipes !== 'function') return { ok: false, error: 'groundId + ride store required', visits: 0, banked: 0 };
+  if (typeof sessionTabId !== 'number') return { ok: false, error: 'no logged-in tab to ride (sessionTabId required)', visits: 0, banked: 0 };
   if (_forageAbort.get(groundId) != null) return { ok: false, error: 'forage already running', visits: 0, banked: 0 };
   _forageAbort.set(groundId, false);
 
-  let tabId = null;
-  let ownTab = false, harvestStarted = false, visits = 0, banked = 0;
+  const tabId = sessionTabId;
+  let harvestStarted = false, visits = 0, banked = 0;
   try {
     const g = await StorageManager.getGround(groundId);
-    const seedUrl = g && g.url;
-    if (!seedUrl) return { ok: false, error: 'no ground url', visits: 0, banked: 0 };
-    const host = new URL(seedUrl).host;
-    const hr = await startHarvestSession({ groundId, host, appHost: host, origin: host });   // host-scoped register; the crawl tab is acquired below
+    let host = '';
+    try { host = new URL((await chrome.tabs.get(tabId))?.url || (g && g.url) || '').host; } catch { /* */ }
+    if (!host && g && g.url) { try { host = new URL(g.url).host; } catch { /* */ } }
+    if (!host) return { ok: false, error: 'no host', visits: 0, banked: 0 };
+    // Arm the tee ON the live tab (startHarvestSession injects on the already-loaded document). Client-side nav keeps that
+    // same document, so the MAIN-world tee persists across the whole crawl and accumulates every authenticated fetch.
+    const hr = await startHarvestSession({ groundId, host, appHost: host, origin: host, tabId });
     if (!hr.ok) { Logger.info('background', `FORAGE not armed: ${hr.error} (ground ${groundId})`); return { ok: false, error: hr.error, visits: 0, banked: 0 }; }
     harvestStarted = true;
-    // RIDE THE SESSION: duplicate the user's logged-in tab into a background clone (carries cookies + sessionStorage), crawl
-    // THAT — never the user's own tab, never an anonymous fresh tab. Focus is handed straight back to the user's tab.
-    if (typeof sessionTabId === 'number') {
-      try {
-        const dup = await chrome.tabs.duplicate(sessionTabId);
-        if (typeof dup?.id === 'number') { tabId = dup.id; ownTab = true; try { await chrome.tabs.update(sessionTabId, { active: true }); } catch { /* */ } }
-      } catch (e) { Logger.warn('background', `FORAGE duplicate failed (${e.message}) — falling back to a logged-OUT tab`); }
-    }
-    if (typeof tabId !== 'number') { const t = await chrome.tabs.create({ url: 'about:blank', active: false }); tabId = t.id; ownTab = true; }   // no session tab / dup failed → anonymous fallback
-
-    const visited = new Set();
-    const seedNorm = normForVisit(seedUrl, seedUrl);
-    const queue = [{ url: seedNorm, label: 'home', class: 'nav' }];
-    visited.add(seedNorm);
-    let dry = 0;
-    while (queue.length && visits < MAX_VISITS && _forageAbort.get(groundId) !== true) {
-      const step = queue.shift(); visits++;
-      try {
-        await chrome.tabs.update(tabId, { url: step.url });
-        await waitForTabComplete(tabId, { timeoutMs: 12000 });
-        await new Promise((r) => setTimeout(r, 900));   // settle — let the page's read APIs fire + the tee capture
-        let links = [];
-        try { const out = await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, func: _extractLinksFunc }); links = Array.isArray(out?.[0]?.result) ? out[0].result : []; } catch { /* */ }
-        const next = forageFrontier({ links, baseUrl: step.url, visited, max: 12 });
-        if (!next.length) dry++; else dry = 0;
-        for (const n of next) { if (visits + queue.length < MAX_VISITS) { queue.push(n); visited.add(n.url); } }
-        if (dry >= DRY_LIMIT) break;
-      } catch (e) { Logger.warn('background', `FORAGE ▸ visit failed (${step.url}): ${e.message}`); }
-    }
-    Logger.info('ride', `FORAGE ▸ ${visits} read-safe page(s) visited (ground ${groundId})`);
+    // Drive CLIENT-SIDE nav in the LIVE logged-in tab — the only context with the in-memory auth token.
+    try {
+      const out = await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, func: _forageSpaDriverFunc, args: [MAX_VISITS] });
+      visits = out?.[0]?.result?.visits || 0;
+    } catch (e) { Logger.warn('background', `FORAGE ▸ client-side drive failed: ${e.message}`); }
+    Logger.info('ride', `FORAGE ▸ ${visits} client-side route(s) crawled on the logged-in tab (ground ${groundId})`);
   } catch (err) {
     Logger.error('background', `FORAGE failed: ${err.message}`);
   } finally {
     _forageAbort.delete(groundId);
     if (harvestStarted) {
       try {
-        const sr = await stopHarvestSession({ groundId, tabId: typeof tabId === 'number' ? tabId : null, readRideRecipes, writeRideRecipes });
+        const sr = await stopHarvestSession({ groundId, tabId, readRideRecipes, writeRideRecipes });
         banked = sr.banked || 0;
         Logger.info('ride', `FORAGE harvest: ${(sr.captures || []).length} capture(s) → banked ${banked} recipe(s) (ground ${groundId})`);
       } catch (e) { Logger.warn('background', `FORAGE bank failed: ${e.message}`); }
     }
-    if (ownTab && typeof tabId === 'number') { try { await chrome.tabs.remove(tabId); } catch { /* */ } }
     // Tell the Ground panel the crawl finished so it can re-render the Ride card with the newly-banked recipes (mirrors
     // DISCOVERY_COMPLETE). Best-effort; the manual trigger toasts on it, the Discovery auto-chain just silently refreshes.
     try { chrome.runtime.sendMessage({ type: 'FORAGE_COMPLETE', payload: { groundId, visits, banked } }).catch(() => { /* no listener */ }); } catch { /* */ }
@@ -106,7 +116,7 @@ export async function runForage({ groundId = '', sessionTabId = null, readRideRe
   return { ok: true, visits, banked };
 }
 
-/** Request abort of a running forage (checked between visits). */
+/** Request abort of a running forage (the concurrency guard; the in-tab crawl is short and self-terminating). */
 export function abortForage(groundId) { const id = String(groundId || '').trim(); if (_forageAbort.get(id) != null) { _forageAbort.set(id, true); return true; } return false; }
 
 /**
@@ -114,13 +124,15 @@ export function abortForage(groundId) { const id = String(groundId || '').trim()
  */
 export function createForageHandlers(ctx) {
   return {
-    // §19 — fire-and-forget: returns started:true; the crawl runs in the background + banks pending on completion.
+    // §19 — fire-and-forget: returns started:true; the in-tab crawl runs + banks pending on completion (FORAGE_COMPLETE).
     FORAGE: (payload, _sender, sendResponse) => {
       const groundId = String(payload?.groundId ?? '').trim();
       if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
+      const sessionTabId = typeof payload?.sessionTabId === 'number' ? payload.sessionTabId : null;
+      if (sessionTabId == null) { sendResponse({ success: false, error: 'no logged-in tab — open the app tab and try again' }); return; }
       sendResponse({ success: true, started: true });
-      // sessionTabId = the user's logged-in tab to DUPLICATE + ride (the panel passes its active tab); absent → logged-out fallback.
-      runForage({ groundId, sessionTabId: typeof payload?.sessionTabId === 'number' ? payload.sessionTabId : null, readRideRecipes: ctx.readRideRecipes, writeRideRecipes: ctx.writeRideRecipes })
+      // sessionTabId = the user's LIVE logged-in tab to ride (the panel passes its active tab); it is where the crawl runs.
+      runForage({ groundId, sessionTabId, readRideRecipes: ctx.readRideRecipes, writeRideRecipes: ctx.writeRideRecipes })
         .catch((e) => { try { Logger.warn('background', `FORAGE handler: ${e.message}`); } catch { /* */ } });
     },
     ABORT_FORAGE: (payload, _sender, sendResponse) => {
