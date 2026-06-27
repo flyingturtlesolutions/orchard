@@ -40,7 +40,7 @@ import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, 
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
 import { recordGoalItem, loadGoalItems, clearGoalMemory } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view
 import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
-import { workflowMatch } from './Core/workflowMemory.js';   // WF-1 — recall a saved IL workflow by lexical match on the ask
+import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab } from './Core/workflowMemory.js';   // WF-1 lexical recall + WF-3 LLM-fallback prep/validate/gate
 import { loadWorkflows, saveWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete)
 import { seedInstanceFromPreset } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
 import { standingRuleFromText, looksLikeStandingRule } from './Core/goalMemory.js';   // AL-3c — `remember:` authors a standing-rule delta; §12.2 — looksLikeStandingRule offers prefix-less capture
@@ -2963,11 +2963,26 @@ function _maybeOfferWorkflowSave(msg, { ask, clauses, steps }) {
   }));
 }
 
-// Recall: the saved workflow (if any) the ask strongly matches, scoped to THIS instance. Null off-app / no match.
+// Recall: the saved workflow (if any) the ask matches, scoped to THIS instance. Null off-app / no match. A CASCADE:
+// WF-1 lexical (free, deterministic) FIRST; on a miss, WF-3 escalates to the LLM semantic matcher — but ONLY on a
+// near-miss (shares vocab with a saved workflow), so the common unrelated ask pays nothing. The model's id is
+// VALIDATED (resolveWorkflowMatch) and the suggestion is still a CONFIRM (_offerWorkflowReplay), so a mismatch can't
+// silently replay a side-effectful chain.
 async function _matchWorkflow(goal) {
   const appId = _memoryId();
   if (!appId) return null;
-  try { return workflowMatch(goal, await loadWorkflows(appId)); } catch { return null; }
+  let workflows;
+  try { workflows = await loadWorkflows(appId); } catch { return null; }
+  const lex = workflowMatch(goal, workflows);
+  if (lex) return lex;
+  const candidates = workflowCandidates(workflows);
+  if (!candidates.length || !workflowSharesVocab(goal, candidates)) return null;   // near-miss gate — no LLM otherwise
+  try {
+    const res = await _orchReq('MATCH_WORKFLOW', { goal, candidates });
+    const m = res && res.match;
+    if (m && m.id && (!Number.isFinite(m.confidence) || m.confidence >= 0.6)) return resolveWorkflowMatch(workflows, m.id);
+  } catch { /* semantic fallback is best-effort; lexical already missed */ }
+  return null;
 }
 
 // Suggest-and-confirm: a strong workflow match → a Run / interpret-fresh card (the confirm). NOT silent auto-replay —

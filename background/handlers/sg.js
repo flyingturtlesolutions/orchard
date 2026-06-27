@@ -678,6 +678,23 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // WF-3 (v2.74.1260) — the LLM fallback for workflow RECALL: chat.js sends the new ask + the compact candidate set
+    // (already loaded + suppression-filtered + near-miss-gated client-side); we return the model's {id, confidence}.
+    // The caller VALIDATES the id (resolveWorkflowMatch) + shows a CONFIRM. Thin: no ground/tab — just goal+candidates.
+    MATCH_WORKFLOW: async (payload, _sender, sendResponse) => {
+      try {
+        const goal = String(payload?.goal ?? '').trim();
+        const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
+        if (!goal || !candidates.length) { sendResponse({ success: true, match: { id: null, confidence: 0 } }); return; }
+        const match = await AnthropicService.matchWorkflowSemantic({ goal, candidates });
+        Logger.info('workflow', `MATCH_WORKFLOW "${goal.slice(0, 50)}" (${candidates.length} cand) → ${match.id || 'none'}${match.id ? ` (conf ${match.confidence})` : ''}`);
+        sendResponse({ success: true, match });
+      } catch (err) {
+        Logger.error('background', `MATCH_WORKFLOW failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
     // F-2 (v2.74.1176, DESIGN_llm_front_door.md §9) — INTERPRET_ASK: the LLM front-door INTERPRET call. Resolves the
     // Ground + retrieves the candidate set (ORCH_MATCH-as-RETRIEVER — the SAME tool-RAG as ROUTE_ASK, FED not gating),
     // then AnthropicService.interpret returns the raw §9.2 decision {intent, capabilityId|op, params, subAsks,

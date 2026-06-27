@@ -33,6 +33,7 @@ import { buildStepMessages, parseStepDecision } from '../Core/stepPrompt.js';   
 import { buildJudgeMessages, parseJudgeDecision } from '../Core/judgePrompt.js';   // IL-2 — the IL-as-user-standin match judge (pick the capability matchCapability found; no re-bind)
 import { buildAnswerMessages } from '../Core/answerPrompt.js';   // IL-2 — Orchard ANSWERING a meta/conversational ask from the available capabilities
 import { buildCanvasMessages, parseCanvasOutput } from '../Core/canvasPrompt.js';   // CA-9 — the app COMPOSES a CanvasSpec from an ask
+import { buildWorkflowMatchMessages, parseWorkflowMatchOutput } from '../Core/workflowMatchPrompt.js';   // WF-3 — LLM fallback for workflow recall
 import { buildGapMessages, parseGaps } from '../Core/gapPrompt.js';   // PS-0 — Orchard's STRUCTURED capability-gap enumeration (the per-Ground demand signal)
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
@@ -100,6 +101,7 @@ const ROLE_MODEL_POLICY = Object.freeze({
     generateConversationTitle: MODEL_FAST,
     generateSampleQuestion:    MODEL_FAST,
     'route-ask':               MODEL_FAST,   // R-6 — the front-door router is a small/fast classification (DESIGN_llm_front_door.md §3.6); Haiku, not Sonnet
+    'match-workflow':          MODEL_FAST,   // WF-3 — workflow recall is the same small/fast pick-one-or-null classification; Haiku, only on a lexical-miss near-miss
     proposeRichIntents:        MODEL_FAST,   // v2.74.902 — the managed proxy (API Gateway) hard-caps ~29s; the default tier streams 3-4k tokens too slowly (28-29s observed → 500s). Composition over a CURATED pack + the cite-or-reject gate suits the fast tier.
   },
 });
@@ -5262,6 +5264,24 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     const res = await AnthropicService.#call(system, user, 1400, [], { role: 'describe', operation: 'compose-canvas' });
     if (!res || res.success === false) return null;
     return parseCanvasOutput(res.text);
+  }
+
+  /**
+   * WF-3 (v2.74.1260, DESIGN_apps_learning.md §12) — the LLM fallback for workflow RECALL when the lexical matcher
+   * misses. Given the new ask + the compact candidate set (Core/workflowMemory.workflowCandidates: {id,name,ask}),
+   * pick the ONE saved workflow the ask wants to run — by INTENT — or null. Cheap tier (a routing decision); PURE
+   * prompt + parse in Core/workflowMatchPrompt.js. The caller VALIDATES the id (resolveWorkflowMatch) + CONFIRMS, so
+   * a wrong/hallucinated id is caught — this only proposes. Fails safe to {id:null} on no-LLM / unparseable.
+   * @param {{ goal:string, candidates:Array<{id:string,name:?string,ask:string}> }} args
+   * @returns {Promise<{ id:string|null, confidence:number }>}
+   */
+  static async matchWorkflowSemantic({ goal, candidates } = {}) {
+    const cand = Array.isArray(candidates) ? candidates : [];
+    if (!String(goal || '').trim() || !cand.length || !(await AnthropicService.hasLlm())) return { id: null, confidence: 0 };
+    const { system, user } = buildWorkflowMatchMessages(goal, cand);
+    const res = await AnthropicService.#call(system, user, 256, [], { role: 'routing', operation: 'match-workflow' });
+    if (!res || res.success === false) return { id: null, confidence: 0 };
+    return parseWorkflowMatchOutput(res.text);
   }
 
   /**

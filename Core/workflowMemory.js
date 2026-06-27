@@ -3,14 +3,19 @@
 //
 // The STRUCTURED form of `remember: when I say X, run [steps]` — the flywheel for AUTONOMOUS compounds (a connector
 // read → fan-out → the map run), which the Ground-composite saver (T2) cannot hold because they have no Ground. A
-// workflow record = { id, ask, subAsks[], appId, createdAt, runs }. Recall is LEXICAL (token overlap) — deterministic,
-// no LLM round-trip on every ask; an LLM matcher is a later refinement.
+// workflow record = { id, ask, subAsks[], appId, createdAt, runs }. Recall is a CASCADE: LEXICAL (token overlap —
+// free + deterministic, no LLM) FIRST; on a miss the caller may escalate to an LLM matcher over `workflowCandidates`
+// (a compact {id,name,ask} set), validated back through `resolveWorkflowMatch` (the trust gate on the model's id).
+// Either way the suggestion is a CONFIRM, so an LLM mismatch is caught by the user, never silently replayed.
 //
 // SAFETY: a workflow stores the user's OWN decomposition (the ask + its sub-asks) — trusted config, no page content.
 // Replaying it re-runs the same chain, so the inner per-step gates (the chain's "Run all", the map's batch confirm,
 // the write gate) still apply; the suggestion itself is a confirm. Nothing here bypasses an effect gate.
 
 const _str = (x) => String(x == null ? '' : x).trim();
+
+// WF-2 suppression, single-sourced: a never-run, twice-dismissed workflow stops suggesting ("no" ≥2× + never ran).
+const _live = (w) => !(w.dismissed >= 2 && w.runs === 0);
 
 // Tiny stoplist so a short re-ask ("get tickets") matches a long saved workflow without function words dominating.
 const STOP = new Set(['the', 'a', 'an', 'and', 'or', 'to', 'of', 'in', 'on', 'for', 'my', 'me', 'i', 'it', 'then', 'each', 'all', 'with', 'at', 'is', 'new']);
@@ -54,8 +59,7 @@ export function normalizeWorkflow(raw) {
  */
 export function workflowMatch(ask, workflows, { minScore = 0.6, minShared = 2 } = {}) {
   // WF-2 — drop a never-run, twice-dismissed match: the user said "no" to it ≥2× and never ran it → stop nagging.
-  const list = (Array.isArray(workflows) ? workflows : []).map(normalizeWorkflow).filter(Boolean)
-    .filter((w) => !(w.dismissed >= 2 && w.runs === 0));
+  const list = (Array.isArray(workflows) ? workflows : []).map(normalizeWorkflow).filter(Boolean).filter(_live);
   // WF-2 — a NAME match (the user typed the alias directly) is the strongest signal; takes priority over ask overlap.
   const aNorm = _str(ask).toLowerCase().replace(/\s+/g, ' ');
   const named = aNorm && list.find((w) => w.name && w.name.toLowerCase().replace(/\s+/g, ' ') === aNorm);
@@ -72,4 +76,43 @@ export function workflowMatch(ask, workflows, { minScore = 0.6, minShared = 2 } 
     if (score > bestScore || (score === bestScore && best && w.runs > best.runs)) { best = w; bestScore = score; }
   }
   return bestScore >= minScore ? best : null;
+}
+
+/**
+ * The candidate set to hand an LLM matcher when LEXICAL recall misses, or []. PURE. Applies the SAME suppression
+ * filter as workflowMatch (_live), sorts most-used first, and returns a COMPACT shape — { id, name, ask } only,
+ * never subAsks/appId — so the prompt stays lean and the model matches on the user-authored ask/alias, not the
+ * steps. Capped (default 24) to bound the prompt. The caller sends these; the model returns one id (or null).
+ */
+export function workflowCandidates(workflows, { cap = 24 } = {}) {
+  return (Array.isArray(workflows) ? workflows : []).map(normalizeWorkflow).filter(Boolean).filter(_live)
+    .sort((w1, w2) => (w2.runs - w1.runs) || (w2.createdAt - w1.createdAt))
+    .slice(0, Math.max(0, cap))
+    .map((w) => ({ id: w.id, name: w.name, ask: w.ask }));
+}
+
+/**
+ * Resolve an LLM-returned workflow id back to the FULL normalized record, or null. PURE — the TRUST GATE on the
+ * model's answer: accept the id ONLY if it names a real, non-suppressed candidate (guards a hallucinated / stale /
+ * suppressed id). Defence-in-depth: the caller still shows a suggest-and-confirm, so this isn't the only check.
+ */
+export function resolveWorkflowMatch(workflows, id) {
+  const want = _str(id);
+  if (!want) return null;
+  return (Array.isArray(workflows) ? workflows : []).map(normalizeWorkflow).filter(Boolean).filter(_live)
+    .find((w) => w.id === want) || null;
+}
+
+/**
+ * Cheap PRE-GATE for the LLM semantic fallback: does `ask` share ≥1 meaningful token with any candidate's ask/name?
+ * PURE. The LLM matcher only earns its cost on a NEAR-miss (some shared vocabulary, below the lexical threshold);
+ * an ask with zero vocabulary in common is almost never a re-invocation, so skip the round-trip. Candidates are the
+ * compact {id,name,ask} from `workflowCandidates`.
+ */
+export function workflowSharesVocab(ask, candidates) {
+  const q = new Set(_tokens(ask));
+  if (!q.size) return false;
+  return (Array.isArray(candidates) ? candidates : []).some(
+    (c) => c && _tokens(`${_str(c.ask)} ${_str(c.name)}`).some((t) => q.has(t)),
+  );
 }

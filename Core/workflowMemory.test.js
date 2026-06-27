@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { workflowId, normalizeWorkflow, workflowMatch } from './workflowMemory.js';
+import { workflowId, normalizeWorkflow, workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab } from './workflowMemory.js';
 
 const WF = (ask, subAsks, over = {}) => ({ ask, subAsks, ...over });
 
@@ -65,5 +65,40 @@ describe('workflowMatch — WF-2 (name alias + dismissal suppression)', () => {
     assert.equal(workflowMatch('get tickets', [live]), null);                 // suppressed
     const used = normalizeWorkflow(WF('get my open tickets and triage each', ['get my open tickets', 'triage each'], { dismissed: 5, runs: 1 }));
     assert.ok(workflowMatch('get tickets', [used]));                          // ran once → keeps suggesting
+  });
+});
+
+describe('workflowMemory — semantic-match support (candidates + resolve)', () => {
+  const a = normalizeWorkflow(WF('get my open tickets and research each', ['get my open tickets', 'research each'], { runs: 3 }));
+  const b = normalizeWorkflow(WF('open jira and post standup to slack', ['open jira', 'post to slack'], { name: 'standup', runs: 7 }));
+  const suppressed = normalizeWorkflow(WF('export the weekly report and email it', ['export report', 'email it'], { dismissed: 2, runs: 0 }));
+  const all = [a, b, suppressed];
+
+  it('workflowCandidates → a compact {id,name,ask} set, suppression-filtered, most-used first', () => {
+    const c = workflowCandidates(all);
+    assert.deepEqual(c.map((x) => x.id), [b.id, a.id]);                       // suppressed dropped; b (7 runs) before a (3)
+    assert.deepEqual(Object.keys(c[0]).sort(), ['ask', 'id', 'name']);       // no subAsks / appId leak into the prompt
+    assert.equal(c[0].name, 'standup');
+  });
+  it('workflowCandidates caps the set', () => {
+    assert.equal(workflowCandidates(all, { cap: 1 }).length, 1);
+    assert.equal(workflowCandidates(all, { cap: 0 }).length, 0);
+  });
+  it('resolveWorkflowMatch accepts a real candidate id → the FULL record', () => {
+    const r = resolveWorkflowMatch(all, a.id);
+    assert.ok(r); assert.equal(r.subAsks.length, 2); assert.equal(r.ask, 'get my open tickets and research each');
+  });
+  it('resolveWorkflowMatch rejects a hallucinated / suppressed / empty id (the trust gate)', () => {
+    assert.equal(resolveWorkflowMatch(all, 'wf-nope'), null);                 // hallucinated
+    assert.equal(resolveWorkflowMatch(all, suppressed.id), null);            // suppressed never resolves
+    assert.equal(resolveWorkflowMatch(all, ''), null);
+    assert.equal(resolveWorkflowMatch(all, null), null);
+  });
+  it('workflowSharesVocab gates the LLM: a paraphrase sharing vocab → true; an unrelated ask → false', () => {
+    const cand = workflowCandidates([a, b]);                                  // {tickets/research}, {jira/standup/slack}
+    assert.equal(workflowSharesVocab('pull my tickets and dig into each', cand), true);   // "tickets" shared → escalate
+    assert.equal(workflowSharesVocab('what is the standup about', cand), true);           // "standup" (name) shared
+    assert.equal(workflowSharesVocab('book me a flight to tokyo', cand), false);          // zero overlap → skip the call
+    assert.equal(workflowSharesVocab('', cand), false);
   });
 });
