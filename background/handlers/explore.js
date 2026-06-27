@@ -13,7 +13,7 @@ import * as SiteMap     from '../../Core/siteMap.js';     // Ground siteMap cont
 import * as ChromeHoist from '../../Core/chromeHoist.js'; // chrome-hoist skip-list for known chrome
 import * as Outcomes    from '../../Core/outcomes.js';    // poke-reveal confirmation events
 import { AnthropicService } from '../../Services/AnthropicService.js';  // band planner + affordance/goal synthesis
-import { markEngineBusy } from './sg.js';                 // the poke sweep's clicks must not be monitored as user interactions
+import { markEngineBusy, startHarvestSession, stopHarvestSession } from './sg.js';   // busy-mark; §17 — Explore-DEPTH ride-recipe harvest (poke-triggered API reads Discovery's breadth misses)
 
 // v2.74.950-pattern (CR-X3a) — the explore ctx seam contract, asserted at wiring time.
 const REQUIRED_CTX_KEYS = Object.freeze([
@@ -43,6 +43,7 @@ export function createExploreHandlers(ctx) {
     EXPLORE_PAGE_STRUCTURE: (payload, _sender, sendResponse) => {
       let _ownsExplore = false;   // v2.74.936 (CR-U2) — only the invocation that ACQUIRED the flags releases them (a refused duplicate must not clear the live sweep's)
       return (async () => {
+        let _harvestStarted = false, _harvestGround = null;   // §17 — Explore-DEPTH ride harvest: armed before the poke sweep, banked in the finally
         try {
           const { tabId, groundId = null, bandBudget = 8 } = payload ?? {};
           if (typeof tabId !== 'number') { sendResponse({ success: false, error: 'tabId required' }); return; }
@@ -212,6 +213,19 @@ export function createExploreHandlers(ctx) {
               return true;
             } catch (e) { Logger.warn('explore', `recovery failed: ${e.message}`); return false; }
           };
+
+          // §17 (DESIGN_connectors.md) — ARM the body-blind harvest tee for the poke sweep. Clicking disclosures /
+          // filters / "load more" fires INTERACTION-triggered API reads that Discovery's breadth crawl (one landing
+          // load per archetype) never exercises — the depth class. Same-site + CONSENT-GATED; banked `pending` in the
+          // finally (mergeRecipes dedups the overlap with Discovery). Best-effort; needs a resolved Ground + the store.
+          if (groundId && typeof ctx.readRideRecipes === 'function' && typeof ctx.writeRideRecipes === 'function') {
+            try {
+              const _hh = new URL(pageUrl).host;
+              const hr = await startHarvestSession({ groundId, host: _hh, appHost: _hh, origin: _hh, tabId });
+              _harvestStarted = hr.ok; _harvestGround = groundId;
+              if (hr.ok) Logger.info('ride', `explore harvest armed on ${_hh} (ground ${groundId})`);
+            } catch (e) { Logger.warn('background', `explore harvest arm failed (continuing): ${e.message}`); }
+          }
 
           for (const y of bandYs) {
             // Recover first if a prior poke navigated the tab away.
@@ -440,6 +454,16 @@ export function createExploreHandlers(ctx) {
         } catch (err) {
           Logger.error('background', `EXPLORE_PAGE_STRUCTURE failed: ${err.message}`);
           sendResponse({ success: false, error: err.message });
+        } finally {
+          // §17 — STOP the harvest on EVERY exit (success / error / fresh-skip): unregister the tee, drain the tab's
+          // accumulated poke-reads, bank them (generalize → polish → mergeRecipes, pending). _harvestStarted stays false
+          // on the early returns (no Ground / fresh-skip / bad tab), so this is a clean no-op there.
+          if (_harvestStarted && _harvestGround) {
+            try {
+              const sr = await stopHarvestSession({ groundId: _harvestGround, tabId: payload?.tabId, readRideRecipes: ctx.readRideRecipes, writeRideRecipes: ctx.writeRideRecipes });
+              Logger.info('ride', `explore harvest: ${(sr.captures || []).length} capture(s) → banked ${sr.banked || 0} recipe(s) (ground ${_harvestGround})`);
+            } catch (e) { Logger.warn('background', `explore harvest stop/bank failed: ${e.message}`); }
+          }
         }
       })().finally(() => { if (_ownsExplore && typeof payload?.tabId === 'number') { markEngineBusy(payload.tabId, false); _exploreInFlight.delete(payload.tabId); } });   // v2.74.911; ownership-gated v2.74.936 (CR-U2)
     },

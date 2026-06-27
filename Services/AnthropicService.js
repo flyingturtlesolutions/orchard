@@ -5402,9 +5402,9 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    * nav/tab abilities (Core/answerPrompt.js fences the capability list as data). @param {{ask:string,
    * capabilities:Array<object>}} args  @returns {Promise<string|null>}
    */
-  static async answerAsk({ ask, capabilities, affordances, coverage, url, seed, connections, learned, objects, subTasks, history } = {}) {
+  static async answerAsk({ ask, capabilities, affordances, coverage, url, seed, connections, ride, learned, objects, subTasks, history } = {}) {
     if (!(await AnthropicService.hasLlm())) return null;
-    const { system, user } = buildAnswerMessages({ ask, capabilities: Array.isArray(capabilities) ? capabilities : [], affordances, coverage, url, seed: seed || '', connections: Array.isArray(connections) ? connections : [], learned: learned || '', objects: objects || '', subTasks: Array.isArray(subTasks) ? subTasks : [], history: Array.isArray(history) ? history : [] });   // CV-2b — seed → persona; AS-4 — connected sites; AL-4 — learned; OM — object model; CV-4-reduce — own sub-tasks; Q1 — recent-turn window
+    const { system, user } = buildAnswerMessages({ ask, capabilities: Array.isArray(capabilities) ? capabilities : [], affordances, coverage, url, seed: seed || '', connections: Array.isArray(connections) ? connections : [], ride: Array.isArray(ride) ? ride : [], learned: learned || '', objects: objects || '', subTasks: Array.isArray(subTasks) ? subTasks : [], history: Array.isArray(history) ? history : [] });   // CV-2b — seed → persona; AS-4 — connected sites; §18 — RIDE class; AL-4 — learned; OM — object model; CV-4-reduce — own sub-tasks; Q1 — recent-turn window
     const res = await AnthropicService.#call(system, user, 700, [], { role: 'describe', operation: 'il-answer' });   // room for a substantive, reflective answer
     return (res && res.success !== false && typeof res.text === 'string' && res.text.trim()) ? res.text.trim() : null;
   }

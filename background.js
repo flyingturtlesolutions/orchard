@@ -1724,6 +1724,8 @@ const _sgMessageHandlers = {
     readGroundChrome     : _readGroundChrome,
     deriveGroundChrome   : _deriveGroundChrome,
     appendOutcomes       : _appendOutcomes,
+    readRideRecipes      : _readRideRecipes,        // §17 — Explore-depth ride-recipe harvest (poke-triggered reads); bank target
+    writeRideRecipes     : _writeRideRecipes,
   }),
   ...createSgMessageHandlers({
   runTrialBundle       : _runTrialBundle,

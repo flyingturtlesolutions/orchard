@@ -697,7 +697,14 @@ export async function startHarvestSession({ tabId = null, groundId = '', host = 
     runAt: 'document_start', world: 'MAIN', allFrames: false, persistAcrossSessions: false,
   }]);
   _harvestSessions.set(groundId, { tabId, host, regId, appHost: appHost || host, origin: origin || host });
-  if (reload === true && typeof tabId === 'number') { try { await chrome.tabs.reload(tabId); } catch { /* */ } }
+  if (reload === true && typeof tabId === 'number') {
+    try { await chrome.tabs.reload(tabId); } catch { /* */ }
+  } else if (typeof tabId === 'number') {
+    // document_start only fires on the NEXT navigation — but Explore pokes the page IN PLACE (no reload), so its
+    // interaction-triggered reads need the tee armed on the ALREADY-loaded document right now. Idempotent (the tee
+    // self-guards); best-effort. (Discovery navigates, so its seed page is also covered by the registration above.)
+    try { await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, world: 'MAIN', files: [_HARVEST_TEE_FILE] }); } catch { /* */ }
+  }
   return { ok: true, groundId, host };
 }
 
@@ -1221,7 +1228,9 @@ export function createSgMessageHandlers(ctx) {
         let learned = '';
         if (memId) { try { learned = goalContextFor(await loadGoalItems(memId), ask, { om }); } catch { /* */ } }
         const objects = describeObjectModel(om);
-        const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed, connections, learned, objects, subTasks, history });
+        let ride = [];   // §18 — the RIDE class (harvested/curated ride-recipes) so "what can you do" covers the app's Data/API actions, not only page actions
+        if (groundId) { try { ride = (await ctx.readRideRecipes(groundId)) || []; } catch { ride = []; } }
+        const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed, connections, ride, learned, objects, subTasks, history });
         // PS-0 (v2.74.1123) — persist Orchard's capability-gap enumeration instead of discarding it: the durable,
         // per-Ground DEMAND signal PS-1 arms into the interaction monitor for passive harvest. Non-fatal/best-effort.
         try {
@@ -1877,7 +1886,9 @@ export function createSgMessageHandlers(ctx) {
         try { const sm = ctx.readSiteMap ? await ctx.readSiteMap(gid) : null; if (sm) siteCatalog = siteMapCapabilities(sm); } catch { /* */ }
         let readiness = null;
         try { readiness = (await _readinessForGround(ctx, gid)).state; } catch { /* */ }
-        const menu = buildIntentMenu({ caps, goals, siteCatalog, readiness, limit });
+        let ride = [];   // §18 — the RIDE class (harvested/curated ride-recipes); buildIntentMenu shows armable run-now + a pending summary
+        try { ride = (await ctx.readRideRecipes(gid)) || []; } catch { /* */ }
+        const menu = buildIntentMenu({ caps, goals, siteCatalog, ride, readiness, limit });
         Logger.info('background', `INTENT_MENU ▸ ${menu.entries.length} entr${menu.entries.length === 1 ? 'y' : 'ies'} (${menu.counts.taught} taught, ${menu.counts.teachable} teachable, ${menu.counts.goals} goal(s); readiness=${readiness || '—'}) [${String(gid).slice(-6)}]`);
         sendResponse({ success: true, groundId: gid, menu });
       } catch (err) {

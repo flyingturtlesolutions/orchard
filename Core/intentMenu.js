@@ -13,16 +13,36 @@ import { authoringCoverage } from './select.js';
 import { normalizeGoalLabel } from './siteMap.js';
 
 /**
+ * Ride-recipe entries for the menu — the §18 RIDE class (the app's own API, harvested/curated). PURE. ARMABLE recipes
+ * (accepted ∧ enabled) become `run-now` (clicking invokes them); merely PENDING ones become one `needs-accept` summary
+ * (clicking opens the Ride section to accept). Class-tagged `ride` so the surface can group Drive · Ride · Broker.
+ */
+function _rideEntries(ride, max) {
+  const list = (Array.isArray(ride) ? ride : []).filter((r) => r && (r.name || r.id));
+  const armable = list.filter((r) => r.enabled !== false && r.reviewState === 'accepted');
+  const pending = list.filter((r) => r.reviewState === 'pending');
+  const out = armable
+    .map((r) => ({ kind: 'run-now', class: 'ride', label: String(r.name || r.id).trim(), ask: String(r.name || r.id).trim(), capabilityId: r.id || null, prevalence: 0, source: 'ride' }))
+    .slice(0, Math.max(1, max));
+  if (pending.length) {   // never enumerate dozens of pending recipes as chips — one summary that routes to review
+    out.push({ kind: 'needs-accept', class: 'ride', label: `${pending.length} data action${pending.length === 1 ? '' : 's'} available — accept to enable`, ask: null, capabilityId: null, prevalence: 0, source: 'ride' });
+  }
+  return out;
+}
+
+/**
  * @param {object} [input]
- * @param {Array}  [input.caps]        the Ground's ACTIVE, non-orphan sgCapabilities
+ * @param {Array}  [input.caps]        the Ground's ACTIVE, non-orphan sgCapabilities (the DRIVE class)
  * @param {Array<{id?:string,label:string}>} [input.goals]  Locale goals (union across the Ground's pages)
  * @param {{capabilities?:Array<{goal:string,count:number}>}|null} [input.siteCatalog]  siteMapCapabilities(map)
+ * @param {Array} [input.ride]   the Ground's ride-recipes (§18 RIDE class) — armable shown run-now, pending summarized
+ * @param {Array} [input.broker] OAuth/MCP broker tools (§18 BROKER class) — empty until brokers exist; the agnostic seam
  * @param {string|null} [input.readiness]  G1-3 state (empty|preparing|capable|rich)
  * @param {number} [input.limit]
- * @returns {{entries:Array<{kind:string,label:string,ask:(string|null),capabilityId:(string|null),prevalence:number,source:string}>,
- *            readiness:(string|null), counts:{taught:number,teachable:number,goals:number}}}
+ * @returns {{entries:Array<{kind:string,class:string,label:string,ask:(string|null),capabilityId:(string|null),prevalence:number,source:string}>,
+ *            readiness:(string|null), counts:{taught:number,teachable:number,goals:number,ride:number,broker:number}}}
  */
-export function buildIntentMenu({ caps = [], goals = [], siteCatalog = null, readiness = null, limit = 5 } = {}) {
+export function buildIntentMenu({ caps = [], goals = [], siteCatalog = null, ride = [], broker = [], readiness = null, limit = 5 } = {}) {
   const max = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 5;
 
   // ── run-now: taught capabilities, ranked by alias count (a usage proxy — confirmations accrete aliases)
@@ -37,7 +57,7 @@ export function buildIntentMenu({ caps = [], goals = [], siteCatalog = null, rea
     seenLabels.add(k);
     const aliases = Array.isArray(c.aliases) ? c.aliases.filter((a) => typeof a === 'string' && a.trim()) : [];
     runNow.push({
-      kind: 'run-now', label,
+      kind: 'run-now', class: 'drive', label,
       ask: aliases[0] || label,                      // an accreted alias hits the deterministic warm path
       capabilityId: c.id || null,
       prevalence: aliases.length,
@@ -68,31 +88,45 @@ export function buildIntentMenu({ caps = [], goals = [], siteCatalog = null, rea
   const teachable = unauthored
     .filter((u) => u.label && !seenLabels.has(u.label.toLowerCase()))   // a goal lexically identical to a taught cap is already surfaced
     .map((u) => ({
-      kind: 'teachable', label: u.label, ask: u.label, capabilityId: null,
+      kind: 'teachable', class: 'drive', label: u.label, ask: u.label, capabilityId: null,
       prevalence: catalogByLabel.get(normalizeGoalLabel(u.label))?.count || 1,
       source: catalogByLabel.has(normalizeGoalLabel(u.label)) ? 'site-catalog' : 'locale-goal',
     }))
     .sort((a, b) => (b.prevalence - a.prevalence) || a.label.localeCompare(b.label));
 
-  // ── compose: taught first (immediately useful) but never crowd out discovery — when both tiers exist,
+  // ── compose DRIVE: taught first (immediately useful) but never crowd out discovery — when both tiers exist,
   // run-now takes at most ceil(max/2); teachable fills the rest; leftovers top up from whichever remains.
-  let entries;
+  let driveEntries;
   if (runNow.length && teachable.length) {
     const runTake = Math.min(runNow.length, Math.ceil(max / 2));
-    entries = [...runNow.slice(0, runTake), ...teachable.slice(0, max - runTake)];
-    if (entries.length < max) entries = [...entries, ...runNow.slice(runTake, runTake + (max - entries.length))];
+    driveEntries = [...runNow.slice(0, runTake), ...teachable.slice(0, max - runTake)];
+    if (driveEntries.length < max) driveEntries = [...driveEntries, ...runNow.slice(runTake, runTake + (max - driveEntries.length))];
   } else {
-    entries = [...runNow, ...teachable].slice(0, max);
+    driveEntries = [...runNow, ...teachable].slice(0, max);
   }
 
-  // ── cold ground: nothing known → a single explore-first signpost (ask=null; the UI explains/triggers Explore)
+  // ── AGNOSTIC class mix: the menu represents EVERY available class (Drive · Ride · Broker), not just the page-action
+  // lane. Ride = the §18 ride-recipes; Broker = OAuth/MCP tools (seam — empty until brokers exist). When everything fits
+  // in `max` we show it all; over budget, the non-drive classes are RESERVED up to half the slots so they never vanish.
+  const rideEntries = _rideEntries(ride, max);
+  const brokerEntries = (Array.isArray(broker) ? broker : [])
+    .filter((b) => b && (b.label || b.name))
+    .map((b) => ({ kind: 'run-now', class: 'broker', label: String(b.label || b.name).trim(), ask: String(b.ask || b.label || b.name).trim(), capabilityId: b.id || null, prevalence: 0, source: 'broker' }));
+  const classExtra = [...rideEntries, ...brokerEntries];
+  let entries = [...driveEntries, ...classExtra];
+  if (entries.length > max) {
+    const keepExtra = Math.min(classExtra.length, Math.max(1, Math.floor(max / 2)));
+    entries = [...driveEntries.slice(0, max - keepExtra), ...classExtra.slice(0, keepExtra)];
+  }
+
+  // ── cold ground: nothing known in ANY class → a single explore-first signpost (ask=null; the UI explains/triggers Explore)
   if (!entries.length) {
-    entries = [{ kind: 'explore-first', label: 'Explore this page to discover what it can do', ask: null, capabilityId: null, prevalence: 0, source: 'readiness' }];
+    entries = [{ kind: 'explore-first', class: 'drive', label: 'Explore this page to discover what it can do', ask: null, capabilityId: null, prevalence: 0, source: 'readiness' }];
   }
 
   return {
     entries,
     readiness: readiness || null,
-    counts: { taught: runNow.length, teachable: teachable.length, goals: pool.size },
+    counts: { taught: runNow.length, teachable: teachable.length, goals: pool.size, ride: rideEntries.length, broker: brokerEntries.length },
   };
 }

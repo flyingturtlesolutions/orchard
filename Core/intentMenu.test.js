@@ -74,4 +74,20 @@ describe('buildIntentMenu — "what can I do here?" from the substrate', () => {
     const m = buildIntentMenu({ caps: [null, {}], goals: [null, { id: 'x' }], siteCatalog: { capabilities: [null] } });
     assert.equal(m.entries[0].kind, 'explore-first', 'all-garbage → explore-first, no throw');
   });
+
+  it('AGNOSTIC: ride recipes surface as a class — armable run-now, pending summarized; entries class-tagged', () => {
+    const ride = [
+      { id: 'r1', name: 'Search images', method: 'GET', safetyClass: 'auto', reviewState: 'accepted', enabled: true },   // armable → run-now
+      { id: 'r2', name: 'List flags', method: 'GET', safetyClass: 'auto', reviewState: 'pending', enabled: true },        // pending → summarized
+      { id: 'r3', name: 'List orgs', method: 'GET', safetyClass: 'auto', reviewState: 'pending', enabled: true },         // pending → summarized
+    ];
+    const m = buildIntentMenu({ ride, limit: 5 });
+    const armable = m.entries.find((e) => e.class === 'ride' && e.kind === 'run-now');
+    assert.ok(armable && armable.label === 'Search images' && armable.capabilityId === 'r1', 'armable ride → run-now chip');
+    const summary = m.entries.find((e) => e.class === 'ride' && e.kind === 'needs-accept');
+    assert.ok(summary && /2 data actions/.test(summary.label) && summary.ask === null, 'pending ride → one accept-to-enable summary');
+    assert.equal(m.counts.broker, 0);
+    // a DRIVE cap is still class-tagged
+    assert.equal(buildIntentMenu({ caps: [{ id: 'c1', intent: 'Search jobs', aliases: ['find jobs'] }] }).entries[0].class, 'drive');
+  });
 });
