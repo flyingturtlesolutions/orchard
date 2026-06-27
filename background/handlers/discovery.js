@@ -292,11 +292,12 @@ export function createDiscoveryHandlers(ctx) {
             // §19 — AUTO-CHAIN Forage (the decided trigger): Discovery built the frontier + banked landing-reads; Forage
             // now drives the read-safe nav (sections + a sample of filters/pagination/detail) to harvest the section/param
             // surface Discovery's breadth missed. Fire-and-forget (it arms its OWN harvest session, sequenced after the
-            // stop above). NOTE: existingTabId is the user's VISIBLE tab (Ground-panel path) — we deliberately do NOT
-            // reuse it: forage drives up to MAX_VISITS navigations, and the §19 "state DISPOSABLE" principle means a
-            // throwaway BACKGROUND tab (active:false, auto-removed), never the user's tab. Read-only + consent-gated inside.
-            if (typeof ctx.readRideRecipes === 'function' && typeof ctx.writeRideRecipes === 'function') {
-              runForage({ groundId, existingTabId: null, readRideRecipes: ctx.readRideRecipes, writeRideRecipes: ctx.writeRideRecipes })
+            // stop above). Pass existingTabId as the SESSION tab to RIDE: Forage DUPLICATES it (cookies + sessionStorage →
+            // authenticated) and crawls the disposable clone — so it harvests the LOGGED-IN read surface, not the anonymous
+            // one (v2.74.1282). Gated on a real tab: no logged-in tab → no session to ride → skip (matches Discovery's
+            // own harvest gating). Read-only + consent-gated inside.
+            if (typeof ctx.readRideRecipes === 'function' && typeof ctx.writeRideRecipes === 'function' && typeof existingTabId === 'number') {
+              runForage({ groundId, sessionTabId: existingTabId, readRideRecipes: ctx.readRideRecipes, writeRideRecipes: ctx.writeRideRecipes })
                 .then((r) => { try { Logger.info('ride', `discovery→forage: ${r.visits || 0} page(s) → banked ${r.banked || 0} (ground ${groundId})`); } catch { /* */ } })
                 .catch((e) => { try { Logger.warn('background', `discovery→forage failed: ${e.message}`); } catch { /* */ } });
             }

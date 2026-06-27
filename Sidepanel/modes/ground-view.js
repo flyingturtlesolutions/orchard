@@ -1166,16 +1166,24 @@ function _wireHandlers(grounds) {
       else { toast(`Bulk accept failed: ${res?.error ?? 'unknown'}`, 'err'); btn.disabled = false; }
     });
   });
-  // §19 (v2.74.1281) — "⛏ Forage" → fire the background recipe-capture crawl (fire-and-forget; the handler returns
-  // started:true). Mark the ground running so FORAGE_COMPLETE toasts; the result lands in the Ride card on that broadcast.
+  // §19 (v2.74.1281; session-ride v2.74.1282) — "⛏ Forage" → fire the background recipe-capture crawl (fire-and-forget;
+  // the handler returns started:true). Pass the panel's ACTIVE tab as sessionTabId: Forage DUPLICATES that logged-in tab
+  // and crawls the clone, so it harvests YOUR authenticated read surface (a fresh tab would be anonymous). Mark the ground
+  // running so FORAGE_COMPLETE toasts; the result lands in the Ride card on that broadcast.
   _mountEl.querySelectorAll('[data-gv-ride-forage]').forEach(btn => {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
       btn.disabled = true;
       const groundId = btn.dataset.gvRideForage;
       _forageRunning.add(groundId);
-      const res = await new Promise((r) => chrome.runtime.sendMessage({ type: 'FORAGE', payload: { groundId } }, r));
-      if (res?.success) { toast('Foraging reads… (background tab; banks when done)'); }
+      let sessionTabId = null;
+      try {
+        const q = typeof _windowId === 'number' ? { active: true, windowId: _windowId } : { active: true, currentWindow: true };
+        const [t] = await chrome.tabs.query(q);
+        sessionTabId = typeof t?.id === 'number' ? t.id : null;
+      } catch { /* */ }
+      const res = await new Promise((r) => chrome.runtime.sendMessage({ type: 'FORAGE', payload: { groundId, sessionTabId } }, r));
+      if (res?.success) { toast('Foraging your logged-in session… (background tab; banks when done)'); }
       else { _forageRunning.delete(groundId); toast(`Forage failed: ${res?.error ?? 'unknown'}`, 'err'); btn.disabled = false; }
     });
   });

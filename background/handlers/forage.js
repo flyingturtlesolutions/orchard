@@ -3,7 +3,9 @@
 // self-contained a[href] extract) by `chrome.tabs.update`, so each section LOADS with the §17 harvest tee armed → it
 // captures the read-API SURFACE that Discovery's breadth (landing reads) and Explore's nav-guarded poke (same-page XHR)
 // both miss. Banks `pending` via the §17 bank. Composes — no new capture/generalize/bank: the tee (start/stopHarvestSession)
-// · recipeFromHarvest (inside the bank) · waitForTabComplete. State is DISPOSABLE (own throwaway tab, or the caller's).
+// · recipeFromHarvest (inside the bank) · waitForTabComplete. RIDES THE LOGGED-IN SESSION: it DUPLICATES the user's tab
+// (cookies + sessionStorage carry → authenticated) and crawls the disposable background CLONE — never the user's own tab,
+// never an anonymous fresh tab (that harvested only public endpoints — the v2.74.1282 fix).
 
 import { Logger } from '../../Core/Logger.js';
 import { StorageManager } from '../../Services/StorageManager.js';
@@ -30,26 +32,40 @@ function _extractLinksFunc() {
 /**
  * §19 — run a read-safe nav-following harvest crawl on a Ground. Arms the §17 tee, BFS-crawls the app's read-safe nav
  * (sections → a capped sample of filters/pagination/detail), banks the captured reads `pending`. MODULE-LEVEL so the
- * Discovery handler can auto-chain it directly (the decided trigger). existingTabId reuses the caller's tab (Discovery's);
- * null → a throwaway tab. Read-only + consent-gated; never blocks. Returns { ok, visits, banked }.
+ * Discovery handler can auto-chain it directly (the decided trigger).
+ *
+ * RIDES THE LOGGED-IN SESSION: pass `sessionTabId` = the user's logged-in tab; Forage DUPLICATES it (chrome.tabs.duplicate
+ * copies cookies + sessionStorage) and crawls the background CLONE — so it sees exactly what the user sees, authenticated.
+ * A fresh/throwaway tab is ANONYMOUS (sessionStorage + in-memory auth don't transfer) and would harvest only PUBLIC
+ * endpoints — the bug this fixes. The user's own tab is never navigated; focus returns to it immediately. Without a
+ * sessionTabId (or if duplicate fails) it falls back to a logged-OUT throwaway tab. Read-only + consent-gated; never
+ * blocks. Returns { ok, visits, banked }.
  */
-export async function runForage({ groundId = '', existingTabId = null, readRideRecipes, writeRideRecipes } = {}) {
+export async function runForage({ groundId = '', sessionTabId = null, readRideRecipes, writeRideRecipes } = {}) {
   groundId = String(groundId || '').trim();
   if (!groundId || typeof readRideRecipes !== 'function' || typeof writeRideRecipes !== 'function') return { ok: false, error: 'groundId + ride store required', visits: 0, banked: 0 };
   if (_forageAbort.get(groundId) != null) return { ok: false, error: 'forage already running', visits: 0, banked: 0 };
   _forageAbort.set(groundId, false);
 
-  let tabId = typeof existingTabId === 'number' ? existingTabId : null;
+  let tabId = null;
   let ownTab = false, harvestStarted = false, visits = 0, banked = 0;
   try {
     const g = await StorageManager.getGround(groundId);
     const seedUrl = g && g.url;
     if (!seedUrl) return { ok: false, error: 'no ground url', visits: 0, banked: 0 };
     const host = new URL(seedUrl).host;
-    const hr = await startHarvestSession({ groundId, host, appHost: host, origin: host, tabId: tabId == null ? undefined : tabId });
+    const hr = await startHarvestSession({ groundId, host, appHost: host, origin: host });   // host-scoped register; the crawl tab is acquired below
     if (!hr.ok) { Logger.info('background', `FORAGE not armed: ${hr.error} (ground ${groundId})`); return { ok: false, error: hr.error, visits: 0, banked: 0 }; }
     harvestStarted = true;
-    if (typeof tabId !== 'number') { const t = await chrome.tabs.create({ url: 'about:blank', active: false }); tabId = t.id; ownTab = true; }   // about:blank first so document_start fires on the FIRST real load
+    // RIDE THE SESSION: duplicate the user's logged-in tab into a background clone (carries cookies + sessionStorage), crawl
+    // THAT — never the user's own tab, never an anonymous fresh tab. Focus is handed straight back to the user's tab.
+    if (typeof sessionTabId === 'number') {
+      try {
+        const dup = await chrome.tabs.duplicate(sessionTabId);
+        if (typeof dup?.id === 'number') { tabId = dup.id; ownTab = true; try { await chrome.tabs.update(sessionTabId, { active: true }); } catch { /* */ } }
+      } catch (e) { Logger.warn('background', `FORAGE duplicate failed (${e.message}) — falling back to a logged-OUT tab`); }
+    }
+    if (typeof tabId !== 'number') { const t = await chrome.tabs.create({ url: 'about:blank', active: false }); tabId = t.id; ownTab = true; }   // no session tab / dup failed → anonymous fallback
 
     const visited = new Set();
     const seedNorm = normForVisit(seedUrl, seedUrl);
@@ -103,7 +119,8 @@ export function createForageHandlers(ctx) {
       const groundId = String(payload?.groundId ?? '').trim();
       if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
       sendResponse({ success: true, started: true });
-      runForage({ groundId, existingTabId: typeof payload?.existingTabId === 'number' ? payload.existingTabId : null, readRideRecipes: ctx.readRideRecipes, writeRideRecipes: ctx.writeRideRecipes })
+      // sessionTabId = the user's logged-in tab to DUPLICATE + ride (the panel passes its active tab); absent → logged-out fallback.
+      runForage({ groundId, sessionTabId: typeof payload?.sessionTabId === 'number' ? payload.sessionTabId : null, readRideRecipes: ctx.readRideRecipes, writeRideRecipes: ctx.writeRideRecipes })
         .catch((e) => { try { Logger.warn('background', `FORAGE handler: ${e.message}`); } catch { /* */ } });
     },
     ABORT_FORAGE: (payload, _sender, sendResponse) => {

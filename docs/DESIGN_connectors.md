@@ -348,7 +348,7 @@ Matches §1 (connectors are a tool class) + the [tool lattice](project_router_ov
 |---|---|---|---|---|
 | **Discovery** | yes (sitemap/link frontier) | nothing (read-only crawl) | each page's LANDING read | n/a (own tab) |
 | **Explore** | **NO** (nav-guarded) | pokes disclosures in place | same-page XHR depth | YES (DOM authoring) |
-| **Forage** *(new)* | **yes — the app's OWN nav** | **read-safe interactions** | **the read-API SURFACE** | **NO (throwaway pass)** |
+| **Forage** *(new)* | **yes — the app's OWN nav** | **read-safe interactions** | **the read-API SURFACE** | **NO (disposable CLONE of the logged-in tab)** |
 
 Forage is built from the ground up for ONE goal: **maximize the app's READ-endpoint coverage for ride-recipe harvest.** The DOM is only the *means* to fire each read; the network is the signal. It does NOT replace Discovery/Explore harvest — those stay as opportunistic ride-alongs (breadth landing-reads · same-page XHR); `mergeRecipes` dedups across all three. Forage is the **primary, targeted** harvester.
 
@@ -373,7 +373,8 @@ A free-navigating, self-clicking driver that hits "Delete" / "Buy" / "Post" woul
 3. **GET-only navigation.** Background-nav is `tabs.update` to a URL — never a form POST. URL-constructed filter variants are GETs by definition.
 4. **Method-class capture backstop (§9).** If a read-safe interaction *surprises* with a non-GET, the tee captures the method, `recipeFromHarvest` classes it gated/destructive → banked PENDING → never auto-armed. So a mis-fire is *contained* as a human-gated recipe — but the driver's job is to not TRIGGER side effects in the first place (capture safety is the backstop, not the plan).
 5. **Money / inventory NEVER** (§14) — the allowlist excludes cart/checkout/buy/bid by construction.
-6. **Consent-gated** (C6 Track) + own throwaway tab (or the user's, restored) — same as Discovery.
+6. **Consent-gated** (C6 Track).
+7. **Rides the LOGGED-IN session via a tab DUPLICATE** (v2.74.1282 — the corrected mechanism). Forage `chrome.tabs.duplicate`s the user's logged-in tab (cookies **+ sessionStorage** clone → authenticated exactly as the user is) and crawls the **disposable background clone**, returning focus to the user's own tab immediately. It NEVER navigates the user's tab, and NEVER a fresh/throwaway tab — that's anonymous (sessionStorage + in-memory auth don't transfer) and harvested only PUBLIC endpoints, defeating the session-ride premise. Fallback when no session tab is available (or duplicate fails): a logged-out throwaway, logged as such. The clone is "disposable state" — the user's real session is untouched.
 
 ### 19.3 Capture → generalize → bank (all reused, zero new)
 - **Capture:** the §17 body-blind tee (`startHarvestSession`: registerContentScripts document_start + the live-page inject), host-scoped, consent-gated.
