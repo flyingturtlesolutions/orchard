@@ -37,6 +37,7 @@ import { buildWorkflowMatchMessages, parseWorkflowMatchOutput } from '../Core/wo
 import { buildPresetAbstractMessages, parsePresetAbstractOutput } from '../Core/presetAbstractPrompt.js';   // §10.2 — abstract an instance rule for the shared preset (distill-up)
 import { buildFanoutSpecMessages, parseFanoutSpecOutput } from '../Core/fanoutPersonaPrompt.js';   // Q2 — split a fan-out into {task, persona}
 import { buildAnswerShapeMessages, parseAnswerShapeOutput } from '../Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — match a read's answer to the question
+import { buildRecipePolishMessages, parseRecipePolishOutput } from '../Core/recipePolishPrompt.js';   // §17 — name/does/param-name a HARVESTED ride-recipe (structure-only input; the OBS-4 analog)
 import { buildGapMessages, parseGaps } from '../Core/gapPrompt.js';   // PS-0 — Orchard's STRUCTURED capability-gap enumeration (the per-Ground demand signal)
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
@@ -107,6 +108,7 @@ const ROLE_MODEL_POLICY = Object.freeze({
     'match-workflow':          MODEL_FAST,   // WF-3 — workflow recall is the same small/fast pick-one-or-null classification; Haiku, only on a lexical-miss near-miss
     'fanout-spec':             MODEL_FAST,   // Q2 — small {task, persona} extraction; Haiku, only behind the personaHint gate
     'answer-shape':            MODEL_FAST,   // the interrogator's final stage — shape a read into the answer's shape; small/bounded → Haiku
+    'recipe-polish':           MODEL_FAST,   // §17 — name/does/param a harvested ride-recipe from its STRUCTURE only; tiny bounded relabel → Haiku
     proposeRichIntents:        MODEL_FAST,   // v2.74.902 — the managed proxy (API Gateway) hard-caps ~29s; the default tier streams 3-4k tokens too slowly (28-29s observed → 500s). Composition over a CURATED pack + the cite-or-reject gate suits the fast tier.
   },
 });
@@ -5339,6 +5341,23 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     const res = await AnthropicService.#call(system, user, 300, [], { role: 'routing', operation: 'answer-shape' });
     if (!res || res.success === false) return { answer: null, showList: false };
     return parseAnswerShapeOutput(res.text);
+  }
+
+  /**
+   * §17 POLISH (v2.74.1273) — name a HARVESTED ride-recipe + write its one-line `does` + suggest clearer param names.
+   * The OBS-4 analog for the network twin. PRIVACY-FIRST: the input is the endpoint's STRUCTURE only (method, the path
+   * with real ids already collapsed to {params}, param types) — no instance data ever leaves (DESIGN_llm_privacy.md).
+   * Cheap tier. Returns {name, does, params} | null; the HANDLER applies it via the pure applyPolish (which only
+   * relabels — never touches method/safety/provenance). PURE prompt+parse in Core/recipePolishPrompt.js. Fails safe.
+   * @param {{ recipe:object }} args  a proto from recipesFromHarvest
+   * @returns {Promise<{ name:string, does:string, params:string[] } | null>}
+   */
+  static async polishRecipe({ recipe } = {}) {
+    if (!recipe || typeof recipe !== 'object' || !(await AnthropicService.hasLlm())) return null;
+    const { system, user } = buildRecipePolishMessages(recipe);
+    const res = await AnthropicService.#call(system, user, 220, [], { role: 'routing', operation: 'recipe-polish' });
+    if (!res || res.success === false) return null;
+    return parseRecipePolishOutput(res.text);
   }
 
   /**
