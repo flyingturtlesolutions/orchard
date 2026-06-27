@@ -12,6 +12,7 @@
 // look like "0 results"; verify the returned identity, never the status.
 
 import { recipeToLeg } from './connectorLeg.js';
+import { armable } from './rideRecipe.js';
 
 /**
  * Substitute `{name}` placeholders in a template from `args`, URL-encoding each value. PURE.
@@ -233,6 +234,46 @@ export function recipeForOrigin(origin) {
     const ah = String(r.appHost || '').toLowerCase();
     return ah && (host === ah || host.endsWith('.' + ah));
   }) || null;
+}
+
+// A short, stable `app` slug for a host's registrable domain (deakoapi.deako.com → 'deako'). Used only to build a
+// unique leg.key (`account.app.id`); not semantic. PURE.
+function _appFromHost(host) {
+  const h = String(host || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '').toLowerCase();
+  const labels = h.split('.').filter(Boolean);
+  if (labels.length >= 2) return labels[labels.length - 2] || 'site';   // the registrable label (deako, zendesk)
+  return labels[0] || 'site';
+}
+
+/**
+ * §17/§18 — project a Ground's HARVESTED ride-recipes into session-ride connector legs for the IL invoke palette. PURE.
+ * Gated by the §18 ARM GUARD: only `armable` recipes (enabled ∧ accepted) are projected — a `pending`/`rejected`/disabled
+ * one is never a tool. For `mode:'ask'` only READS (GET) are projected (writes await their own confirm path). Adapts the
+ * per-Ground record (Core/rideRecipe.js shape: origin · method · safetyClass) to recipeToLeg's recipe shape, deriving
+ * `app` from the host + mapping method→write/safetyClass→destructive. `trusted:true` because an ACCEPTED recipe is
+ * user-vetted (so its read drops to 'auto'). Dedups against `seenKeys` (so a harvested recipe can't shadow a curated one).
+ *   recipes: per-Ground ride-recipes · host: the connected origin's host · seenKeys: keys already in the palette
+ */
+export function harvestedRecipeLegs(recipes, { host = '', account = 'me', mode = null, seenKeys = null } = {}) {
+  const list = Array.isArray(recipes) ? recipes : [];
+  const app = _appFromHost(host);
+  const seen = seenKeys instanceof Set ? seenKeys : new Set();
+  const out = [];
+  for (const r of list) {
+    if (!r || !armable(r)) continue;                                   // the §18 gate — accepted ∧ enabled only
+    const write = String(r.method || 'GET').toUpperCase() !== 'GET';
+    if (mode === 'ask' && write) continue;                            // reads-only palette (writes have their own gate)
+    const leg = recipeToLeg({
+      id: r.id, name: r.name, does: r.does, app,
+      origin: r.origin || host, endpoint: r.endpoint, method: r.method,
+      write, destructive: r.safetyClass === 'destructive', body: r.body, params: r.params,
+    }, { account, trusted: true });                                    // accepted = user-vetted → read drops to 'auto'
+    if (!leg) continue;
+    if (seen.has(leg.key)) continue; seen.add(leg.key);
+    leg.provenance = 'harvested';                                      // mark the source (the dispatch rides it via INVOKE_SESSION token-replay)
+    out.push(leg);
+  }
+  return out;
 }
 
 /**

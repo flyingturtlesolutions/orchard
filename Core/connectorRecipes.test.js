@@ -3,7 +3,46 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams } from './connectorRecipes.js';
+import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs } from './connectorRecipes.js';
+
+describe('harvestedRecipeLegs — armable harvested reads → invoke-palette legs (§17/§18)', () => {
+  const REC = (over) => ({ id: 'r1', name: 'My schedules', does: 'list schedules', method: 'GET', endpoint: '/v2/admin/profiles/{id}/schedules', origin: 'deakoapi.deako.com', params: [{ name: 'id', type: 'string', required: true }], safetyClass: 'auto', enabled: true, reviewState: 'accepted', provenance: 'harvested', ...over });
+
+  it('projects an ARMABLE read into a connector leg (key/domain/paramSchema/tool)', () => {
+    const legs = harvestedRecipeLegs([REC()], { host: 'deakoapi.deako.com', mode: 'ask' });
+    assert.equal(legs.length, 1);
+    const l = legs[0];
+    assert.equal(l.key, 'me.deako.r1');                 // app slug = registrable label 'deako'
+    assert.equal(l.domain, 'connector');
+    assert.equal(l.mode, 'ask');
+    assert.equal(l.safety, 'auto');                     // accepted (vetted) read → auto
+    assert.equal(l.provenance, 'harvested');
+    assert.equal(l.tool.impl, 'session');
+    assert.equal(l.tool.endpoint, '/v2/admin/profiles/{id}/schedules');
+    assert.deepEqual(l.paramSchema.required, ['id']);
+  });
+
+  it('the §18 ARM GUARD: pending / rejected / disabled are NOT projected', () => {
+    assert.equal(harvestedRecipeLegs([REC({ reviewState: 'pending' })], { host: 'deakoapi.deako.com' }).length, 0);
+    assert.equal(harvestedRecipeLegs([REC({ reviewState: 'rejected' })], { host: 'deakoapi.deako.com' }).length, 0);
+    assert.equal(harvestedRecipeLegs([REC({ enabled: false })], { host: 'deakoapi.deako.com' }).length, 0);
+  });
+
+  it("mode:'ask' projects READS only — a write (non-GET) is skipped", () => {
+    const legs = harvestedRecipeLegs([REC({ id: 'w1', method: 'POST', safetyClass: 'gated' })], { host: 'deakoapi.deako.com', mode: 'ask' });
+    assert.equal(legs.length, 0);
+  });
+
+  it('dedups against seenKeys (a harvested recipe never shadows a curated one)', () => {
+    const seen = new Set(['me.deako.r1']);
+    assert.equal(harvestedRecipeLegs([REC()], { host: 'deakoapi.deako.com', mode: 'ask', seenKeys: seen }).length, 0);
+  });
+
+  it('degrades on empty / garbage', () => {
+    assert.deepEqual(harvestedRecipeLegs(), []);
+    assert.deepEqual(harvestedRecipeLegs([null, {}], { host: 'x.com' }), []);
+  });
+});
 
 describe('fillEndpoint — {name} templating (pure, §12)', () => {
   it('fills placeholders from args and URL-encodes', () => {
