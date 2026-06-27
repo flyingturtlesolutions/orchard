@@ -18,7 +18,7 @@ import { createDevBridge } from './Services/Chat/devBridge.js';   // DB-1b (v2.7
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
-import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, isFanoutAsk, innerDirective, namesMultipleSites, namesAnySite, fanoutLifecycle, isReduceAsk } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; isFanoutAsk/innerDirective — CV-4 "open each in a conversation" + the per-child task; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X)
+import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, isFanoutAsk, innerDirective, namesMultipleSites, namesAnySite, fanoutLifecycle, isReduceAsk, personaHint } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; isFanoutAsk/innerDirective — CV-4 "open each in a conversation" + the per-child task; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X); personaHint — Q2 cost-gate for the per-child persona extractor
 import { walkPlan, scanPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate); scanPlan — THE recursive plan walker (CR-D7)
 import { builtinApps, builtinApp, presetsForType } from './Core/appCatalog.js';   // CV-3 — the builtin app catalog (the gallery's cards; each seeds a kind:'app' conversation). AS-2 — builtinApp(appId) → the def behind a conversation. OM — presetsForType → the named quick-starts under each abstract type
 import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   // ORCH-A — predicate → gate (conditional routing + the analysis)
@@ -34,7 +34,7 @@ import { recipeLegs, coerceParams } from './Core/connectorRecipes.js';   // CX-4
 import { renderConnectorLines, itemLabels } from './Core/connectorRender.js';   // CX-4c — generic render of ANY connector read (not just tickets); CV-4-full — itemLabels: read list → fan-out labels
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
-import { planSubTasks, subTaskFromApp, classifyAskToGrid, isConfiguredDef, OVERVIEW_ID } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app)
+import { planSubTasks, subTaskFromApp, composeSeed, classifyAskToGrid, isConfiguredDef, OVERVIEW_ID } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app). Q2 — composeSeed: fold a per-child persona into each worker's seed
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-app write gate (read-only enforcement)
 import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps; AP-4 — configuredAppDefinition (mint a durable, re-creatable app from a set-up instance)
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
@@ -1483,11 +1483,27 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
   if (error) { const s = `Ran ${i} of ${total}. ${error}`; _setMessageBody(msg, s); return { ok: false, summary: s }; }
   const { labels, total: n, capped } = itemLabels(value, cap);
   if (!labels.length) { const s = `Ran ${i} of ${total}. Nothing to open — the previous step returned no list of items.`; _setMessageBody(msg, s); return { ok: false, summary: s }; }
-  const created = await _createSubTasks(app, labels);
+  // Q2 (v2.74.1263) — a PERSONA-bearing fan-out ("… and respond in the customer's voice") needs the {task, persona}
+  // split: the lexical innerDirective reads "in the customer's voice" as the "in a …" wrapper and drops the persona.
+  // Behind the personaHint cost gate (no LLM otherwise). The persona composes into each child's SEED so every worker
+  // ADOPTS it; the extracted task becomes the per-child directive. Best-effort — falls back to innerDirective + app seed.
+  let directive = innerDirective(clause);
+  let childApp = app;
+  if (personaHint(clause)) {
+    try {
+      const r = await _orchReq('FANOUT_SPEC', { clause });
+      const spec = r && r.spec;
+      if (spec) {
+        if (spec.task) directive = spec.task;
+        if (spec.persona) childApp = { ...app, seed: composeSeed(app.seed, spec.persona) };
+      }
+    } catch { /* extraction is best-effort; keep innerDirective + the app's own seed */ }
+  }
+  const created = await _createSubTasks(childApp, labels);
   // EPHEMERAL (v2.74.1262) — a REDUCE over the set: the workers run → the parent SYNTHESIZES their findings → the
   // workers CLOSE (delete). No durable sub-tasks; the deliverable is the summary. Auto-runs (the ask was the intent).
   if (lifecycle === 'ephemeral' && created.length) {
-    await _runEphemeralFanout(app, created, innerDirective(clause) || 'summarize', msg);
+    await _runEphemeralFanout(childApp, created, directive || 'summarize', msg);
     return { ok: true, summary: `Synthesized ${created.length} (ephemeral workers closed).` };
   }
   const summary = created.length
@@ -1496,8 +1512,7 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
   _setMessageBody(msg, summary);
   // CV-4-map (Q1) — if the fan-out ask carried a per-child DIRECTIVE ("research each …"), offer to RUN it in every
   // child (this click IS the single batch confirm). A bare "open each …" has no directive → just the children.
-  const directive = innerDirective(clause);
-  if (directive && created.length) _offerRunEach(app, created, directive);
+  if (directive && created.length) _offerRunEach(childApp, created, directive);
   return { ok: created.length > 0, summary };
 }
 

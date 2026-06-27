@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites, namesAnySite, isForeachAsk, isFanoutAsk, innerDirective, fanoutLifecycle, isEphemeralFanout } from './orchChain.js';
+import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites, namesAnySite, isForeachAsk, isFanoutAsk, innerDirective, fanoutLifecycle, isEphemeralFanout, isReduceAsk, personaHint } from './orchChain.js';
 import { validatePlan } from './orchPlan.js';
 import { walkPlan } from './orchRun.js';   // ORCH-L — the pure interpreter, to RUN the lifted open-each loop end-to-end
 
@@ -46,6 +46,15 @@ describe('orchChain — fanoutLifecycle (v2.74.1262: persistent by default, ephe
   it('a KEEP signal OVERRIDES ephemeral — a reduce alongside "in a new conversation" stays persistent', () => {
     assert.equal(fanoutLifecycle('research each in a new conversation and summarize'), 'persistent');
     assert.equal(fanoutLifecycle('open each in its own chat and compare them'), 'persistent');
+  });
+  it('isReduceAsk flags an aggregate; personaHint gates the persona extractor (v2.74.1263)', () => {
+    assert.equal(isReduceAsk('get my tickets and summarize'), true);
+    assert.equal(isReduceAsk('research each ticket'), false);
+    assert.equal(personaHint("each should respond in the customer's voice"), true);   // "voice"
+    assert.equal(personaHint('reply to each as a senior engineer'), true);            // "as a "
+    assert.equal(personaHint('summarize each one, keep it concise'), true);           // "concise"
+    assert.equal(personaHint('research each in a new conversation'), false);          // plain task → no LLM
+    assert.equal(personaHint('get my tickets and summarize'), false);
   });
 });
 

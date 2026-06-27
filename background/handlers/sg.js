@@ -711,6 +711,22 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // Q2 (v2.74.1263) — split a fan-out ask into {task, persona}: chat.js sends the fan-out clause (behind its
+    // personaHint gate); we return the per-item task + the per-child persona (a voice/role each worker adopts). The
+    // caller composes the persona into each child's seed. Thin: just the clause → the LLM extractor.
+    FANOUT_SPEC: async (payload, _sender, sendResponse) => {
+      try {
+        const clause = String(payload?.clause ?? '').trim();
+        if (!clause) { sendResponse({ success: true, spec: { task: '', persona: null } }); return; }
+        const spec = await AnthropicService.extractFanoutSpec({ clause });
+        Logger.info('fanout', `FANOUT_SPEC "${clause.slice(0, 50)}" → task="${spec.task}" persona=${spec.persona ? `"${spec.persona}"` : 'none'}`);
+        sendResponse({ success: true, spec });
+      } catch (err) {
+        Logger.error('background', `FANOUT_SPEC failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
     // F-2 (v2.74.1176, DESIGN_llm_front_door.md §9) — INTERPRET_ASK: the LLM front-door INTERPRET call. Resolves the
     // Ground + retrieves the candidate set (ORCH_MATCH-as-RETRIEVER — the SAME tool-RAG as ROUTE_ASK, FED not gating),
     // then AnthropicService.interpret returns the raw §9.2 decision {intent, capabilityId|op, params, subAsks,

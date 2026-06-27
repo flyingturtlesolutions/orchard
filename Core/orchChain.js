@@ -312,6 +312,14 @@ export function isEphemeralFanout(ask) { return fanoutLifecycle(ask) === 'epheme
  *  freshly-read list ("get my tickets and summarize" → a worker per item, ephemeral) even WITHOUT an explicit "each". */
 export function isReduceAsk(ask) { return _REDUCE.test(String(ask || '')); }
 
+// A persona/style HINT in a fan-out ask — a voice/tone/role each child should adopt ("in the customer's voice", "as a
+// senior engineer", "concise"). A cheap PRE-GATE: only when this fires does the fan-out spend an LLM call to EXTRACT
+// the {task, persona} (the lexical innerDirective mis-handles "in the X voice" — it strips it as the "in a …" wrapper).
+const _PERSONA_HINT = /\b(voice|tone|style|persona|character|formal|casual|concise|terse|friendly|professional|empathetic|polite|playful|blunt|sound\s+like|as\s+(?:a|an)\s)\b/i;
+/** Does the fan-out ask carry a persona/style directive worth LLM-extracting? PURE. Cost gate (false positives just
+ *  spend one extra LLM call that returns persona:null; the real decision is the extractor). */
+export function personaHint(ask) { return _PERSONA_HINT.test(String(ask || '')); }
+
 /** The per-child DIRECTIVE inside a fan-out ask (CV-4-map): the action to run IN each child. PURE. Strips the
  *  fan-out wrapper ("… each [noun] in a/its own/a new/separate conversation/sub-task"); what's left is the task.
  *  "research each in a new conversation" → "research". A bare "open/start each …" → '' (just open them, nothing to

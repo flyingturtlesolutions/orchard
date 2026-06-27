@@ -35,6 +35,7 @@ import { buildAnswerMessages } from '../Core/answerPrompt.js';   // IL-2 — Orc
 import { buildCanvasMessages, parseCanvasOutput } from '../Core/canvasPrompt.js';   // CA-9 — the app COMPOSES a CanvasSpec from an ask
 import { buildWorkflowMatchMessages, parseWorkflowMatchOutput } from '../Core/workflowMatchPrompt.js';   // WF-3 — LLM fallback for workflow recall
 import { buildPresetAbstractMessages, parsePresetAbstractOutput } from '../Core/presetAbstractPrompt.js';   // §10.2 — abstract an instance rule for the shared preset (distill-up)
+import { buildFanoutSpecMessages, parseFanoutSpecOutput } from '../Core/fanoutPersonaPrompt.js';   // Q2 — split a fan-out into {task, persona}
 import { buildGapMessages, parseGaps } from '../Core/gapPrompt.js';   // PS-0 — Orchard's STRUCTURED capability-gap enumeration (the per-Ground demand signal)
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
@@ -103,6 +104,7 @@ const ROLE_MODEL_POLICY = Object.freeze({
     generateSampleQuestion:    MODEL_FAST,
     'route-ask':               MODEL_FAST,   // R-6 — the front-door router is a small/fast classification (DESIGN_llm_front_door.md §3.6); Haiku, not Sonnet
     'match-workflow':          MODEL_FAST,   // WF-3 — workflow recall is the same small/fast pick-one-or-null classification; Haiku, only on a lexical-miss near-miss
+    'fanout-spec':             MODEL_FAST,   // Q2 — small {task, persona} extraction; Haiku, only behind the personaHint gate
     proposeRichIntents:        MODEL_FAST,   // v2.74.902 — the managed proxy (API Gateway) hard-caps ~29s; the default tier streams 3-4k tokens too slowly (28-29s observed → 500s). Composition over a CURATED pack + the cite-or-reject gate suits the fast tier.
   },
 });
@@ -5300,6 +5302,22 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     const res = await AnthropicService.#call(system, user, 400, [], { role: 'describe', operation: 'abstract-rule' });
     if (!res || res.success === false) return null;
     return parsePresetAbstractOutput(res.text);
+  }
+
+  /**
+   * Q2 (v2.74.1263) — split a FAN-OUT ask into the per-item TASK and an optional per-child PERSONA (a voice/tone/role
+   * each spawned worker adopts, composed into its seed). The lexical innerDirective loses a persona ("in the X voice"
+   * reads as the "in a …" wrapper), so this LLM pass recovers it. Cheap tier; called only behind the `personaHint`
+   * cost gate. PURE prompt+parse in Core/fanoutPersonaPrompt.js. Fails safe to {task:'', persona:null}.
+   * @param {{ clause:string }} args
+   * @returns {Promise<{ task:string, persona:string|null }>}
+   */
+  static async extractFanoutSpec({ clause } = {}) {
+    if (!String(clause || '').trim() || !(await AnthropicService.hasLlm())) return { task: '', persona: null };
+    const { system, user } = buildFanoutSpecMessages(clause);
+    const res = await AnthropicService.#call(system, user, 200, [], { role: 'routing', operation: 'fanout-spec' });
+    if (!res || res.success === false) return { task: '', persona: null };
+    return parseFanoutSpecOutput(res.text);
   }
 
   /**
