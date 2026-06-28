@@ -117,7 +117,7 @@ function _replayFetchFunc(url, apiHost, method) {
       if (!cap || !cap.headers || !cap.headers.authorization) return { noAuth: true, keys: Object.keys(store) };   // keys → diagnose a host-key mismatch vs an empty global
       var headers = { accept: 'application/json' };
       for (var k in cap.headers) { if (Object.prototype.hasOwnProperty.call(cap.headers, k)) headers[k] = cap.headers[k]; }
-      var res = await fetch(url, { method: method || 'GET', headers: headers, credentials: 'include' });
+      var res = await fetch(url, { method: method || 'GET', headers: headers, credentials: 'omit' });   // §20 — Bearer HEADER auth, not cookies; 'include' imposes credentialed-CORS the header-auth API rejects (Failed to fetch)
       var status = res.status, body = null;
       try { body = await res.json(); } catch (e) { try { body = await res.text(); } catch (e2) { body = null; } }
       return { status: status, body: body };
