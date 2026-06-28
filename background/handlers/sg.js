@@ -740,6 +740,47 @@ export async function stopHarvestSession({ groundId = '', tabId = null, readRide
   return { ok: true, groundId, captures, ...res };
 }
 
+const _rideAuthArmed = new Set();   // host → persistent ride auth-capture registered this SW lifetime (dedup)
+const _rideAuthRegId = (host) => `ahub_rideauth_${String(host || '').replace(/[^a-z0-9]/gi, '_')}`;
+
+/**
+ * §20 (v2.74.1293) — PERSISTENT ride auth-capture. Keep the §20 tee armed on a connected ride app's tab so the page-local
+ * token global (window.__ahub_ride_auth) always tracks the app's FRESHEST Bearer — the SPA self-refreshes via its IdP
+ * (Deako = Auth0 silent-auth, ref deako-cs-access.md), and we just keep grabbing the latest header. The credential-free
+ * mirror of the production refresh-token loop ([[reference_cs_tools]]): instead of storing + refreshing a token, ride the
+ * live tab. Fixes the stale/empty-global replay miss — a forage STOP unregistered the tee, so the token went stale and
+ * cleared on reload. This uses a DEDICATED persistent registration (NOT the forage regId) so a forage stop never tears it
+ * down. Consent-gated (C6 Track, same as harvest). Idempotent (host-dedup). Best-effort.
+ */
+export async function armRideAuthCapture({ host = '', tabId = null } = {}) {
+  host = String(host || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '').toLowerCase();
+  if (!host) return { ok: false, error: 'host required' };
+  let consent = MONITOR_CONSENT_DEFAULT;
+  try { consent = (await chrome.storage.local.get('monitor:consent'))?.['monitor:consent'] || MONITOR_CONSENT_DEFAULT; } catch { /* */ }
+  if (!canTrack(consent, { host })) return { ok: false, error: 'no-consent', host };
+  // 1) persistent document_start registration → the tee re-injects + captures the freshest token on EVERY load (survives
+  //    reloads + SW restarts). Dedicated id so a forage stopHarvestSession (which unregisters _harvestRegId) can't kill it.
+  if (!_rideAuthArmed.has(host)) {
+    const id = _rideAuthRegId(host);
+    try { await chrome.scripting.unregisterContentScripts({ ids: [id] }); } catch { /* none registered */ }
+    try {
+      await chrome.scripting.registerContentScripts([{
+        id, matches: [_hostMatchPattern(host)], js: [_HARVEST_TEE_FILE],
+        runAt: 'document_start', world: 'MAIN', allFrames: false, persistAcrossSessions: true,
+      }]);
+      _rideAuthArmed.add(host);
+      Logger.info('ride', `ride auth-capture armed (persistent) on ${host}`);
+    } catch (e) { Logger.warn('background', `ride auth-capture register failed: ${e.message}`); }
+  }
+  // 2) the live tab NOW: set the capAuth flag + inject the tee in-place so the CURRENT (already-loaded) page captures the
+  //    next authed request without waiting for a reload. sessionStorage is origin-shared → the MAIN-world tee reads it.
+  if (typeof tabId === 'number') {
+    try { await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, func: () => { try { sessionStorage.setItem('__ahub_cap_auth', '1'); } catch (e) { /* */ } } }); } catch { /* */ }
+    try { await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, world: 'MAIN', files: [_HARVEST_TEE_FILE] }); } catch { /* */ }
+  }
+  return { ok: true, armed: true };
+}
+
 export function createSgMessageHandlers(ctx) {
   assertCtx(ctx);   // v2.74.950 (CR-X3a) — fail at WIRING time, not deep inside the first handler to touch a gap
   // T3X-DF (v2.74.790/792) — CAPTURE-TIME ANTECEDENT INFERENCE. The LAST action capability the chat REPLAYED on a
@@ -941,6 +982,13 @@ export function createSgMessageHandlers(ctx) {
     // flywheel tail: generalize → polish → mergeRecipes, landing `pending` behind the §18 arm guard). Thin wrapper over
     // the shared _bankHarvested core. Captures are UNTRUSTED app data — only their STRUCTURE (method + templated path) is
     // used; the polish input is structure-only (DESIGN_llm_privacy.md). DRAIN_HARVEST_TEE is the live producer of captures.
+    // §20 (v2.74.1293) — keep ride auth-capture armed on a connected ride app's tab so the replay always reads a fresh
+    // token (the panel fires this on render of a Ground that has accepted header-replay recipes). Fire-and-forget.
+    ARM_RIDE_CAPTURE: (payload, _sender, sendResponse) => {
+      sendResponse({ success: true });
+      armRideAuthCapture({ host: String(payload?.host ?? ''), tabId: typeof payload?.tabId === 'number' ? payload.tabId : null })
+        .catch((e) => { try { Logger.warn('background', `ARM_RIDE_CAPTURE: ${e.message}`); } catch { /* */ } });
+    },
     BANK_HARVESTED_RECIPES: async (payload, _sender, sendResponse) => {
       try {
         const groundId = String(payload?.groundId ?? '').trim();

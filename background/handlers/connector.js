@@ -17,6 +17,7 @@ import { fillEndpoint, fillBody, recipeForOrigin } from '../../Core/connectorRec
 import { pickRideTab, assessProbe, rideAction, STATUS, classifyReachProbe } from '../../Core/connection.js';
 import { armable } from '../../Core/rideRecipe.js';   // §18 — the arm guard: a non-armable (disabled / pending / rejected) per-Ground recipe must not run
 import { Logger } from '../../Core/Logger.js';   // §20 — SESSION_REPLAY outcome observability (Invariant #1)
+import { armRideAuthCapture } from './sg.js';   // §20 — keep the page-local token fresh on the app tab (no import cycle: sg.js doesn't import connector.js)
 
 // ── Ephemeral managed-tab registry (§16) — module singleton, lives within a SW lifetime ─────────────────────────────
 const IDLE_CLOSE_MS = 8000;                 // close an Orchard-opened tab this long after its last ride (burst-reuse window)
@@ -252,6 +253,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes }
           let tabs = []; try { tabs = await chrome.tabs.query({ url: `*://${sessionHost}/*` }); } catch { tabs = []; }
           const tab = pickRideTab(tabs);
           if (!tab) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → NO-APP-TAB on ${sessionHost} (open it + arm Forage)`); } catch { /* */ } sendResponse({ success: false, error: 'no-app-tab', hint: `open ${sessionHost} (your logged-in app) and arm Forage` }); return; }
+          try { await armRideAuthCapture({ host: sessionHost, tabId: tab.id }); } catch { /* §20 — keep the token fresh for next time (+ in-place arm now); best-effort */ }
           let out = null;
           try { out = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, world: 'MAIN', func: _replayFetchFunc, args: [url, apiHost, method] }); }
           catch (e) { try { Logger.warn('background', `SESSION_REPLAY ▸ ${apiHost} exec-failed: ${e && e.message}`); } catch { /* */ } sendResponse({ success: false, error: 'replay-exec-failed' }); return; }

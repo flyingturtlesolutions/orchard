@@ -119,6 +119,26 @@ const _discoveryRunning = new Set();
 // is a toggle: arm → the user navigates their app → bank). A groundId sits here between the arm click and the bank's
 // FORAGE_COMPLETE, driving the button label (⛏ Forage ↔ ⛏ Foraging — bank). Ephemeral; lost on unmount, like _discoveryRunning.
 const _forageArmed = new Set();
+// §20 (v2.74.1293) — grounds whose PERSISTENT ride auth-capture we've armed this mount (fire-once). When a matched Ground
+// has an ACCEPTED harvested (header-replay) recipe, arm capture on its live tab so the page-local token stays fresh for
+// SESSION_REPLAY (the SPA self-refreshes its Bearer; we keep grabbing the latest). Consent-gated background-side.
+const _rideCaptureArmed = new Set();
+function _maybeArmRideCapture(ground, recipes) {
+  try {
+    if (!ground || _rideCaptureArmed.has(ground.id)) return;
+    const armable = (Array.isArray(recipes) ? recipes : []).some((r) => r && r.provenance === 'harvested' && r.reviewState === 'accepted' && r.enabled !== false);
+    if (!armable) return;
+    _rideCaptureArmed.add(ground.id);
+    let host = ''; try { host = new URL(ground.url || ground.origin || '').host; } catch { host = String(ground.origin || ''); }
+    if (!host) return;
+    const q = typeof _windowId === 'number' ? { active: true, windowId: _windowId } : { active: true, currentWindow: true };
+    chrome.tabs.query(q, (tabs) => {
+      const t = Array.isArray(tabs) && tabs[0];   // matched ⟹ the active tab IS this Ground's tab
+      const tabId = t && typeof t.id === 'number' ? t.id : null;
+      chrome.runtime.sendMessage({ type: 'ARM_RIDE_CAPTURE', payload: { host, tabId } }, () => { void chrome.runtime.lastError; });
+    });
+  } catch { /* never break the render on the arm */ }
+}
 // v2.74.42 — Collapse state for the matched-Ground header card.
 const _collapsedHeader = new Set();
 // v2.74.866 — Collapse state for the Landmarks card (monitoring registry view),
@@ -486,7 +506,9 @@ async function _renderList() {
     // Landmarks pattern. Display-only here; full edit is in Studio's Ride section (per the spec — panel glances, Studio edits).
     let _rideOrigin = '';
     try { _rideOrigin = new URL(matched.ground.url || matched.ground.origin || '').host; } catch { _rideOrigin = String(matched.ground.origin || ''); }
-    const rideHtml = _renderRideCard(await _fetchRideRecipes(matched.ground.id, _rideOrigin), matched.ground.id);
+    const _rideRecipes = await _fetchRideRecipes(matched.ground.id, _rideOrigin);
+    _maybeArmRideCapture(matched.ground, _rideRecipes);   // §20 — keep the token fresh while the user is in a connected ride app
+    const rideHtml = _renderRideCard(_rideRecipes, matched.ground.id);
     // v2.74.42 — Section list is gated on a mapped Ground (siteMap present).
     // While discovery is in flight, show the indeterminate loading
     // indicator. When a Ground exists but has no map yet, show a
