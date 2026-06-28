@@ -661,7 +661,10 @@ export async function bankHarvested({ readRideRecipes, writeRideRecipes, groundI
   const ex = Array.isArray(existing) ? existing : [];
   const knownIds = new Set(ex.map((r) => r && r.id));
   const { recipes: protos, identityPath } = recipesFromHarvest(Array.isArray(captures) ? captures : [], { appHost });
-  let staged = protos.map((r) => ({ ...r, groundId, origin: origin || appHost }));
+  // §20 — PRESERVE the recipe's own captured host (the API origin, possibly CROSS-ORIGIN to appHost). Only fall back to
+  // the passed origin/appHost when the capture had no host (a relative URL). Clobbering with appHost was the cross-origin
+  // bug — a static SPA's recipe got the PAGE host, so the replay fetched + token-looked-up the wrong origin (v2.74.1291).
+  let staged = protos.map((r) => ({ ...r, groundId, origin: r.origin || origin || appHost }));
   if (doPolish && staged.length) {   // only NEW ids; each failure falls back to the placeholder
     let budget = 24;
     staged = await Promise.all(staged.map(async (r) => {

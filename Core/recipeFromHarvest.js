@@ -147,6 +147,10 @@ export function recipesFromHarvest(captures, { appHost = '' } = {}) {
     const tq = templateQuery(parsed.map((p) => p.query));
     const endpoint = tp.endpoint + (tq.query ? `?${tq.query}` : '');
     const destructive = method === 'DELETE' || /\/(merge|mark_as_spam|bulk_destroy|destroy_many)/i.test(tp.endpoint);
+    // §20 — the captured API HOST (the recipe's `origin`). parseUrl strips it from the endpoint (path-only), so carry it
+    // here: a static SPA fetches its data CROSS-ORIGIN (page on appHost, API on `deakoapi.…`), so origin ≠ appHost and the
+    // replay needs the real API host to build the URL + find the page-captured token. Same host as appHost for a same-origin app.
+    let originHost = ''; try { originHost = new URL(group[0].url).host; } catch { /* relative — no host */ }
     recipes.push({
       id: `harvest_${_slug(`${method} ${tp.endpoint}`)}`,
       name: `${method} ${tp.endpoint}`,   // placeholder — the LLM polish slice renames + writes `does`
@@ -155,6 +159,7 @@ export function recipesFromHarvest(captures, { appHost = '' } = {}) {
       endpoint,
       params: [...tp.params, ...tq.params],
       body: null,
+      origin: originHost,   // §20 — the captured API host (may be cross-origin to appHost)
       appHost: String(appHost || ''),
       provenance: 'harvested',
       reviewState: 'pending',
