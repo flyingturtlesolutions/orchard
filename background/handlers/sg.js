@@ -20,6 +20,7 @@ import { CONNECTOR_RECIPES } from '../../Core/connectorRecipes.js';   // §18 �
 import { seedFromCatalog as seedRideFromCatalog, setEnabled as rideSetEnabled, review as rideReview, downgradeSafety as rideDowngradeSafety, editMeta as rideEditMeta, mergeRecipes as rideMergeRecipes, acceptPendingReads as rideAcceptPendingReads } from '../../Core/rideRecipe.js';   // §18 — the per-Ground ride-recipe transforms (safety enforced here, not the UI)
 import { recipesFromHarvest } from '../../Core/recipeFromHarvest.js';   // §17 — the crawl-as-generalizer: captures → proto ride-recipes (templated, method-classed, pending)
 import { applyPolish } from '../../Core/recipePolishPrompt.js';   // §17 — apply an LLM polish (name/does/param-names) onto a proto — the SAFE relabel (never touches method/safety)
+import { recipesFromObservedWrites } from '../../Core/recipeFromObservedWrite.js';   // CX-8 — a demo's captured WRITE requests → proto ride write-recipes (body templated; typed values → params, never banked)
 import { focusDecision, FOCUS_SETTING_KEY } from '../../Core/focusGrammar.js';   // FM-1 (v2.74.968) — the pure focus-grab verdict
 import { buildAcceptance, landmarkRefActions, buildLandmarkRecords, buildPerspectiveRecord, buildResultsLandmarkRecord, buildOutcomePerspective, findMatchingPerspective, buildPerspectiveGate, buildDestinationPerspective, pickDestinationLandmark, validateConditionRefs } from '../../Core/accept.js';
 import { authoringCoverage } from '../../Core/select.js';   // GA-7 — Locale→capability "done" signal
@@ -1881,6 +1882,24 @@ export function createSgMessageHandlers(ctx) {
           createdAt: Date.now(), trial: { score: null, verdict: 'observed', trialRef: null },
         };
         await ctx.writeSgCapability(groundId, capability);
+        // CX-8c (v2.74.1299) — if the demonstration captured the app's OWN write request(s) (body-aware tee, opt-in +
+        // page-local; drained at RECORD_STOP), template them into pending ride WRITE-recipes (recipeFromObservedWrite:
+        // the user's typed values → params, the body NEVER banked literally) and merge into this Ground's ride store,
+        // behind the §18 arm guard — HITL accept before they can run. Best-effort; never blocks the demo accept.
+        try {
+          const writeCaps = (ctx && typeof ctx.getDemoWriteCaptures === 'function') ? (ctx.getDemoWriteCaptures() || []) : [];
+          if (writeCaps.length) {
+            const demonstratedValues = coalesce(trace).map((a) => a && a.value).filter((v) => typeof v === 'string' && v.trim());
+            let appHost = ''; try { appHost = new URL((phases[0] && phases[0].url) || (trace[0] && trace[0].url) || '').host; } catch { /* */ }
+            const writeRecipes = recipesFromObservedWrites(writeCaps, { appHost, demonstratedValues });
+            if (writeRecipes.length) {
+              const named = writeRecipes.map((r) => ({ ...r, groundId, ...(writeRecipes.length === 1 ? { name: capName || r.name, does: capDescription || r.does } : {}) }));
+              const existingRide = (await ctx.readRideRecipes(groundId)) || [];
+              await ctx.writeRideRecipes(groundId, rideMergeRecipes(existingRide, named));
+              Logger.info('background', `DEMO_WRITE ▸ banked ${writeRecipes.length} demonstrated write-recipe(s) (pending) for ${groundId}: ${named.map((r) => `${r.method} ${r.endpoint}`).join(', ').slice(0, 120)}`);
+            }
+          }
+        } catch (e) { Logger.warn('background', `DEMO_WRITE bank non-fatal: ${e.message}`); }
         try { await ctx.appendOutcomes(groundId, [Outcomes.makeStageEvent('accept', { groundId, verdict: 'accepted', input: { roleOrIntent: capName.slice(0, 120) }, detail: { capabilityId: capability.id, perspectiveId, strategyId, fragments: fragmentCount, landmarks: landmarkRecords.length, shape: 'observed' } })]); } catch { /* */ }
         try { await ctx.broadcastStorageChanged('perspective', perspectiveId, 'saved'); } catch { /* */ }
         const tmplCount = namedParams.filter((p) => p.used).length;

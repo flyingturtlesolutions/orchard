@@ -1756,6 +1756,7 @@ const _sgMessageHandlers = {
   mutateObsPool        : _mutateObsPool,           // PS-2 — atomic per-Ground RMW of the long-tail observed pool
   readRideRecipes      : _readRideRecipes,         // §18 — the per-Ground ride-recipe collection (read)
   writeRideRecipes     : _writeRideRecipes,        // §18 — replace the per-Ground ride-recipe list (chained RMW)
+  getDemoWriteCaptures : () => _obsLastWriteCaptures,   // CX-8c — DERIVE reads the demo's captured writes to bank pending ride write-recipes
   }),
 };
 
@@ -1808,8 +1809,25 @@ chrome.storage.onChanged.addListener((changes, area) => {
 // is replaced on each page) and we RE-ARM the content-script listeners on the freshly-loaded page so a
 // multi-page demonstration (search → job → apply) records as ONE trace. coalesce() runs on read.
 let _obsSession = null;   // { tabId, startedAt, seq, trace: RawAction[], lastUrl }
+let _obsLastWriteCaptures = [];   // CX-8c — the app's OWN write request(s) captured during the last demonstration (page-local bodies, drained at STOP); DERIVE templates them into pending ride write-recipes, then they're consumed.
 function _obsArm(tabId) { try { chrome.tabs.sendMessage(tabId, { type: 'RECORD_START' }, () => void chrome.runtime.lastError); } catch { /* */ } }
 function _obsDisarm(tabId) { try { chrome.tabs.sendMessage(tabId, { type: 'RECORD_STOP' }, () => void chrome.runtime.lastError); } catch { /* */ } }
+// CX-8c (v2.74.1299) — DEMONSTRATE-ONCE write capture. Arm the page's body-capturing tee for the demo window
+// (opt-in flag + inject the tee MAIN-world), then drain window.__ahub_write_buf at stop. PAGE-LOCAL: the raw
+// bodies are templated by recipeFromObservedWrite (typed values → params) before anything banks; the flag is
+// cleared at stop so capture is strictly demo-scoped. Best-effort — never blocks the recorder.
+async function _obsArmBodyCapture(tabId) {
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: () => { try { sessionStorage.setItem('__ahub_cap_body', '1'); window.__ahub_write_buf = []; } catch (e) {} } });
+    await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', files: ['ContentScripts/harvestTee.js'] });   // idempotent — wraps fetch/XHR if not already on this page
+  } catch (e) { Logger.warn('background', `OBS body-capture arm failed: ${e.message}`); }
+}
+async function _obsDrainBodyCapture(tabId) {
+  try {
+    const [r] = await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: () => { try { var b = Array.isArray(window.__ahub_write_buf) ? window.__ahub_write_buf.slice() : []; sessionStorage.removeItem('__ahub_cap_body'); window.__ahub_write_buf = []; return b; } catch (e) { return []; } } });
+    return (r && Array.isArray(r.result)) ? r.result : [];
+  } catch (e) { Logger.warn('background', `OBS body-capture drain failed: ${e.message}`); return []; }
+}
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   if (!_obsSession || tabId !== _obsSession.tabId) return;
   if (info.status === 'complete') {
@@ -1879,6 +1897,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           let url = ''; try { const t = await chrome.tabs.get(tabId); url = t?.url || ''; } catch { /* */ }
           _obsSession = { tabId, startedAt: Date.now(), seq: 0, trace: [], lastUrl: url, seenUids: new Set() };
           _obsArm(tabId);
+          _obsLastWriteCaptures = []; _obsArmBodyCapture(tabId);   // CX-8c — arm demo-scoped, opt-in write-body capture (fire-and-forget)
           Logger.info('background', `RECORD_START_SESSION — recording tab ${tabId} @ ${String(url).slice(0, 80)}`);
           sendResponse({ success: true, recording: true, tabId, url });
         } catch (e) { sendResponse({ success: false, error: e.message }); }
@@ -1905,13 +1924,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
     case 'RECORD_STOP_SESSION': {
-      const sess = _obsSession;
-      if (sess) { _obsDisarm(sess.tabId); }
-      const trace = sess ? coalesce(sess.trace) : [];
-      _obsSession = null;
-      Logger.info('background', `RECORD_STOP_SESSION — ${trace.length} action(s) captured`);
-      sendResponse({ success: true, recording: false, count: trace.length, trace });
-      return false;
+      (async () => {
+        const sess = _obsSession;
+        if (sess) { _obsDisarm(sess.tabId); }
+        const trace = sess ? coalesce(sess.trace) : [];
+        _obsSession = null;
+        // CX-8c — drain the demo's PAGE-LOCAL write-body captures so DERIVE can template + bank them (pending).
+        try { _obsLastWriteCaptures = sess ? await _obsDrainBodyCapture(sess.tabId) : []; } catch { _obsLastWriteCaptures = []; }
+        if (_obsLastWriteCaptures.length) Logger.info('background', `RECORD_STOP_SESSION — ${_obsLastWriteCaptures.length} write capture(s) held for CX-8c banking`);
+        Logger.info('background', `RECORD_STOP_SESSION — ${trace.length} action(s) captured`);
+        sendResponse({ success: true, recording: false, count: trace.length, trace });
+      })();
+      return true;
     }
 
     // ── CapabilityAPI surface ────────────────────────────────────────────────
