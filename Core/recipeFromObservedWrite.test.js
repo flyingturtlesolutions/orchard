@@ -97,6 +97,16 @@ describe('recipesFromObservedWrites — a demo trace', () => {
     assert.ok(recipes.every((r) => r.method !== 'GET'));
     assert.ok(recipes.some((r) => r.safetyClass === 'destructive'));
   });
+
+  it('drops telemetry beacons fired during the demo, keeps the real write (v1300)', () => {
+    const captures = [
+      { method: 'POST', url: 'https://mail.google.com/_/jserror', body: '{}', contentType: 'application/json' },
+      { method: 'POST', url: 'https://mail.google.com/sync/u/0/i/send', body: '{"to":"a@b.c"}', contentType: 'application/json' },
+    ];
+    const recipes = recipesFromObservedWrites(captures, { demonstratedValues: ['a@b.c'] });
+    assert.equal(recipes.length, 1);
+    assert.match(recipes[0].endpoint, /send/);
+  });
 });
 
 describe('fillWriteBody — the invoke-side inverse (round-trip)', () => {

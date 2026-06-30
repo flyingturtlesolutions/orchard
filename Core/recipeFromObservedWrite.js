@@ -15,7 +15,7 @@
 // @module Core/recipeFromObservedWrite
 
 import { safetyClassForMethod } from './rideRecipe.js';
-import { parseUrl, templatePath, templateQuery } from './recipeFromHarvest.js';   // reuse the read core's URL templating
+import { parseUrl, templatePath, templateQuery, isNoiseCapture } from './recipeFromHarvest.js';   // reuse the read core's URL templating + the v1300 asset/beacon noise filter
 
 const _slug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60);
 
@@ -153,6 +153,7 @@ export function recipeFromObservedWrite(capture, { appHost = '', demonstratedVal
 export function recipesFromObservedWrites(captures, opts = {}) {
   const out = []; const seen = new Set();
   for (const c of (Array.isArray(captures) ? captures : [])) {
+    if (isNoiseCapture(c)) continue;   // v1300 — drop telemetry beacons fired during the demo (keep the real write)
     const r = recipeFromObservedWrite(c, opts);
     if (r && !seen.has(r.id)) { seen.add(r.id); out.push(r); }
   }

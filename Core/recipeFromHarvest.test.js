@@ -3,7 +3,37 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseUrl, pathKey, templatePath, templateQuery, isIdentityCall, recipesFromHarvest } from './recipeFromHarvest.js';
+import { parseUrl, pathKey, templatePath, templateQuery, isIdentityCall, recipesFromHarvest, isNoiseCapture } from './recipeFromHarvest.js';
+
+describe('recipeFromHarvest — isNoiseCapture (v2.74.1300 recipe-worthiness)', () => {
+  it('drops static asset GETs (JS bundles, fonts, images) + their cache-bust dups', () => {
+    for (const u of ['https://mail.google.com/_/scs/mail-static/_/js/k=gmail.main.en.AbCdEf.js',
+                     'https://x.test/assets/app.css', 'https://x.test/fonts/roboto.woff2',
+                     'https://x.test/img/logo.png', 'https://x.test/m.js?cb=99']) {
+      assert.equal(isNoiseCapture({ method: 'GET', url: u }), true, u);
+    }
+  });
+  it('drops telemetry beacons (any method)', () => {
+    assert.equal(isNoiseCapture({ method: 'GET', url: 'https://play.google.com/log/gen_204?v=3' }), true);
+    assert.equal(isNoiseCapture({ method: 'POST', url: 'https://mail.google.com/_/jserror?id=1' }), true);
+    assert.equal(isNoiseCapture({ method: 'GET', url: 'https://x.test/csi?foo=bar' }), true);
+  });
+  it('KEEPS real data operations (the signal)', () => {
+    assert.equal(isNoiseCapture({ method: 'POST', url: 'https://mail.google.com/sync/u/0/i/send' }), false);
+    assert.equal(isNoiseCapture({ method: 'GET', url: 'https://deakoapi.deako.com/v1/profile_list/email/x' }), false);
+    assert.equal(isNoiseCapture({ method: 'GET', url: 'https://x.test/api/v2/tickets.json' }), false);   // .json is data, not an asset
+  });
+  it('recipesFromHarvest filters the noise out before templating', () => {
+    const caps = [
+      { method: 'GET', url: 'https://x.test/js/main.AbC.js' },     // asset → dropped
+      { method: 'POST', url: 'https://x.test/_/jserror' },          // beacon → dropped
+      { method: 'GET', url: 'https://x.test/api/items.json' },      // data → kept
+    ];
+    const { recipes } = recipesFromHarvest(caps, { appHost: 'x.test' });
+    assert.equal(recipes.length, 1);
+    assert.match(recipes[0].endpoint, /items\.json/);
+  });
+});
 
 describe('recipeFromHarvest — parseUrl', () => {
   it('splits a relative + absolute url into path + ordered query', () => {

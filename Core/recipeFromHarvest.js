@@ -17,6 +17,24 @@ const _NUM = /^\d+$/;
 const _uniq = (arr) => [...new Set(arr)];
 const _slug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60);
 
+// ── Recipe-worthiness filter (v2.74.1300) — forage on a complex internal-RPC app (Gmail/Calendar) captures a FLOOD of
+// non-data calls: static ASSET loads (JS bundles, fonts, images) and telemetry BEACONS (gen_204, jserror, csi…). Banking
+// those as "recipes" is pure noise — the user saw ~40 Gmail recipes, the majority boot scripts + pings. Drop them BEFORE
+// templating: a recipe is a DATA operation, not an asset fetch or a log beacon. Dropping the asset GETs also collapses
+// their cache-busting-hash duplicates (the "Load Gmail JavaScript ×4" problem). PURE; conservative — only UNAMBIGUOUS noise.
+const _ASSET_EXT = /\.(?:js|mjs|css|map|woff2?|ttf|otf|eot|png|jpe?g|gif|svg|ico|webp|avif|bmp|wasm|mp4|webm)(?:$|\?)/i;
+const _BEACON_PATH = /\/(?:gen_204|generate_204|jserror|jslog|csi|client_?streamz|streamz)(?:[/?]|$)/i;
+
+/** Is this capture NOISE — a static-asset load (GET) or a telemetry beacon — rather than a data operation? PURE. */
+export function isNoiseCapture(capture) {
+  if (!capture || !capture.url) return true;
+  const method = String(capture.method || 'GET').toUpperCase();
+  const { path } = parseUrl(capture.url);
+  if (method === 'GET' && _ASSET_EXT.test(path)) return true;   // static asset → never a data op (also collapses hash dups)
+  if (_BEACON_PATH.test(path)) return true;                     // telemetry / instrumentation beacon (any method)
+  return false;
+}
+
 /** Split a URL (relative or absolute) into { path, query }. PURE. query is an ordered {key:value} object. */
 export function parseUrl(url) {
   const s = String(url || '');
@@ -129,7 +147,7 @@ export function isIdentityCall(capture) {
  * @param {{ appHost?: string }} [opts]
  */
 export function recipesFromHarvest(captures, { appHost = '' } = {}) {
-  const valid = (Array.isArray(captures) ? captures : []).filter((c) => c && c.url && c.method);
+  const valid = (Array.isArray(captures) ? captures : []).filter((c) => c && c.url && c.method && !isNoiseCapture(c));   // v1300 — drop asset/beacon noise before banking
   let identityPath = null;
   const groups = new Map();
   for (const c of valid) {
