@@ -35,6 +35,7 @@ import { loadGoalItems } from '../../Services/Storage/GoalMemoryStore.js';   // 
 import { goalContextFor } from '../../Core/goalRetrieval.js';   // AL-4 — assemble the relevant standing rules + recall into a context block
 import { builtinApp } from '../../Core/appCatalog.js';   // OM — the app's catalog entry (its object model)
 import { connectorLegsForConnections, harvestedRecipeLegs } from '../../Core/connectorRecipes.js';   // CX-4c + §20 — connected session-ride recipes (curated + harvested header-replay) as selectable interpret tools
+import { neutralizeFalseCompletion } from '../../Core/answerGuard.js';   // honesty belt — the answer path dispatches nothing, so a completion claim on a side-effect COMMAND is a fabrication (the calendar "✅ I created it" bug)
 import { describeObjectModel } from '../../Core/appDef.js';   // OM — render the app's object model (noun/states/actions/transitions) as a context block
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability, findDuplicateCapabilities } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A; GA-6 dedup
 import { findDuplicateGroundGroups, planGroundMerge, primaryHost, siteIdentity, planEnsureGround } from '../../Core/groundDedup.js';   // v2.74.816/.817 — duplicate-Ground detect + merge; .835 — registrable brand for site-name matching; G1 — dedup-before-mint plan
@@ -1299,7 +1300,19 @@ export function createSgMessageHandlers(ctx) {
         const objects = describeObjectModel(om);
         let ride = [];   // §18 — the RIDE class (harvested/curated ride-recipes) so "what can you do" covers the app's Data/API actions, not only page actions
         if (groundId) { try { ride = (await ctx.readRideRecipes(groundId)) || []; } catch { ride = []; } }
-        const answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed, connections, ride, learned, objects, subTasks, history });
+        let answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed, connections, ride, learned, objects, subTasks, history });
+        // Honesty belt (v2.74.1295) — the answer path dispatched NOTHING, so a completion claim on a side-effect
+        // COMMAND is a fabrication (the calendar "✅ I created it" bug, findings 2026-06-27 21:27). Neutralize +
+        // log so a trace SHOWS the override. The answerPrompt BASE rule is primary; this is the deterministic backstop.
+        try {
+          if (answer) {
+            const guarded = neutralizeFalseCompletion(answer, ask);
+            if (guarded.neutralized) {
+              answer = guarded.answer;
+              Logger.info('background', `ANSWER_GUARD ▸ neutralized a false-completion claim — "${ask.slice(0, 48)}" routed to answer (no dispatch) but the reply claimed the act was done`);
+            }
+          }
+        } catch { /* never block the answer on the guard */ }
         // PS-0 (v2.74.1123) — persist Orchard's capability-gap enumeration instead of discarding it: the durable,
         // per-Ground DEMAND signal PS-1 arms into the interaction monitor for passive harvest. Non-fatal/best-effort.
         try {

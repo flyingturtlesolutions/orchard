@@ -67,6 +67,36 @@
       stashAuth(url, merged);
     } catch (e) { /* */ }
   };
+  // ── CX-8b (v2.74.1298) — DEMONSTRATE-ONCE write-body capture (DESIGN_connectors.md §10 CX-8). The tee is body-BLIND by
+  // design; this carves a DEMO-SCOPED, opt-in exception so a Ride WRITE can be learned (a body-blind harvest yields only an
+  // un-runnable stub — the Google-Calendar "/hello" recipe). STRICTLY bounded, mirroring the §20 auth capture above:
+  //   • OPT-IN: only when a demonstration armed it (sessionStorage '__ahub_cap_body'='1'); default OFF.
+  //   • PAGE-LOCAL: written ONLY to window.__ahub_write_buf (drained by the demo-complete handler) — NEVER the harvest
+  //     buffer / sessionStorage sink, so a raw body is never banked. recipeFromObservedWrite TEMPLATES it (the user's typed
+  //     values → params, never persisted); only the template banks.
+  //   • WRITES + TEXT ONLY: non-GET/HEAD, STRING bodies only (JSON/form/text). FormData/Blob/streams skipped (can't template).
+  var capBody = function () { try { return sessionStorage.getItem('__ahub_cap_body') === '1'; } catch (e) { return false; } };
+  var BMAX = 100;
+  var stashBody = function (method, url, body, contentType) {
+    try {
+      var m = String(method || 'GET').toUpperCase();
+      if (m === 'GET' || m === 'HEAD') return;            // writes only
+      if (typeof body !== 'string' || !body) return;      // text bodies only (skip FormData/Blob/stream/empty)
+      var abs = ''; try { abs = new URL(url, location.href).href; } catch (e) { abs = String(url); }
+      if (!keep(abs)) return;                             // same beacon denylist as reads
+      if (!Array.isArray(window.__ahub_write_buf)) window.__ahub_write_buf = [];
+      window.__ahub_write_buf.push({ method: m, url: abs, body: String(body), contentType: String(contentType || ''), at: (window.performance && performance.now) ? performance.now() : 0 });
+      if (window.__ahub_write_buf.length > BMAX) window.__ahub_write_buf.splice(0, window.__ahub_write_buf.length - BMAX);
+    } catch (e) { /* never throw into the page */ }
+  };
+  var ctOf = function (input, init) {
+    try {
+      var h = {};
+      if (input && typeof input === 'object' && input.headers) { var ih = toPlainHeaders(input.headers); for (var a in ih) h[a] = ih[a]; }
+      if (init && init.headers) { var jh = toPlainHeaders(init.headers); for (var b in jh) h[b] = jh[b]; }
+      return h['content-type'] || '';
+    } catch (e) { return ''; }
+  };
   var push = function (method, url, status) {
     try {
       if (!url || !keep(url)) return;   // capture the app's reads (same-site + cross-origin API); drop analytics/telemetry only
@@ -91,6 +121,7 @@
           if (init && init.method) method = init.method;
         } catch (e) { /* */ }
         try { stashFetchAuth(url, input, init); } catch (e) { /* */ }   // §20 — page-local auth capture (opt-in); never the harvest buffer
+        try { if (capBody()) stashBody(method, url, init && init.body, ctOf(input, init)); } catch (e) { /* CX-8b — demo-scoped write-body capture (opt-in; page-local) */ }
         var p = of.apply(this, arguments);
         // PASSIVE observer: a separate .then that reads only res.status/res.url — the page still gets `p` untouched and is
         // the one that consumes the body. We never read it.
@@ -111,6 +142,7 @@
     XMLHttpRequest.prototype.send = function () {
       try { var self = this; this.addEventListener('loadend', function () { try { push(self.__ahub_m, self.__ahub_u, self.status); } catch (e) {} }); } catch (e) {}
       try { if (capAuth() && this.__ahub_h) stashAuth(this.__ahub_u, this.__ahub_h); } catch (e) { /* §20 — page-local auth capture (opt-in) */ }
+      try { if (capBody()) stashBody(this.__ahub_m, this.__ahub_u, arguments[0], this.__ahub_h && this.__ahub_h['content-type']); } catch (e) { /* CX-8b — demo-scoped write-body capture */ }
       return os.apply(this, arguments);
     };
   } catch (e) { /* */ }
