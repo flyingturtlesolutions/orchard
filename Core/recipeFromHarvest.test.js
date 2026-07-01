@@ -33,6 +33,15 @@ describe('recipeFromHarvest — isNoiseCapture (v2.74.1300 recipe-worthiness)', 
     assert.equal(recipes.length, 1);
     assert.match(recipes[0].endpoint, /items\.json/);
   });
+
+  it('v1304: forage banks READS only — a harvested write (non-GET) is not banked (body-blind stub)', () => {
+    const { recipes } = recipesFromHarvest([
+      { method: 'POST', url: 'https://x.test/calendar/hello' },     // write → dropped (body-blind stub)
+      { method: 'GET', url: 'https://x.test/api/items.json' },       // read → kept
+    ], { appHost: 'x.test' });
+    assert.equal(recipes.length, 1);
+    assert.equal(recipes[0].method, 'GET');
+  });
 });
 
 describe('recipeFromHarvest — parseUrl', () => {
@@ -107,10 +116,10 @@ describe('recipeFromHarvest — recipesFromHarvest (end to end)', () => {
     { method: 'DELETE', url: '/api/v2/tickets/64863.json' },
   ];
 
-  it('groups + templates + classifies safety by method; excludes identity', () => {
+  it('v1304: forage banks READS ONLY — templates + excludes identity; body-blind writes (PUT/DELETE) are not harvested', () => {
     const { recipes, identityPath } = recipesFromHarvest(captures, { appHost: 'zendesk.com' });
     assert.equal(identityPath, '/api/v2/users/me.json');
-    assert.equal(recipes.length, 4);                                       // read-ticket, search, write, delete (NOT identity)
+    assert.equal(recipes.length, 2);                                       // read-ticket + search only (NOT identity, NOT the PUT/DELETE writes)
 
     const read = recipes.find((r) => r.method === 'GET' && r.endpoint.includes('/tickets/{id}'));
     assert.equal(read.endpoint, '/api/v2/tickets/{id}.json');
@@ -121,8 +130,8 @@ describe('recipeFromHarvest — recipesFromHarvest (end to end)', () => {
     assert.equal(read.samples, 2);                                         // diffed two instances
     assert.equal(read.appHost, 'zendesk.com');
 
-    assert.equal(recipes.find((r) => r.method === 'PUT').safetyClass, 'gated');         // write
-    assert.equal(recipes.find((r) => r.method === 'DELETE').safetyClass, 'destructive'); // DELETE
+    // forage is body-blind → a harvested PUT/DELETE is a hollow stub; writes come from demonstrate-once (body-aware, HITL).
+    assert.ok(recipes.every((r) => r.method === 'GET'), 'no PUT/DELETE write recipes are foraged');
   });
 
   it('ids are deterministic (re-harvest the same endpoint → same id, so mergeRecipes dedups)', () => {

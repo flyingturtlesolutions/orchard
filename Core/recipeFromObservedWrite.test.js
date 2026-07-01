@@ -54,12 +54,11 @@ describe('recipeFromObservedWrite — blanket mode (decouple: 0 DOM actions → 
     assert.ok(!JSON.stringify(r).includes('bob@x.test'));
   });
 
-  it('an opaque body under blanket is omitted (can’t safely template → never bank a literal)', () => {
+  it('v1304: an opaque body under blanket → SUPPRESSED whole (POST, no templatable body, 0 params = hollow; literal never banks)', () => {
     const r = recipeFromObservedWrite(
       { method: 'POST', url: 'https://x.test/rpc', contentType: 'application/octet-stream', body: 'SECRET-blob-Acme' },
       { blanket: true });
-    assert.equal(r.body, null);
-    assert.ok(!JSON.stringify(r).includes('Acme'));
+    assert.equal(r, null);   // nothing to send or fill → not a recipe at all (and so the literal certainly never banks)
   });
 });
 
@@ -98,6 +97,12 @@ describe('recipeFromObservedWrite — other shapes', () => {
   it('GET / HEAD are not writes → null', () => {
     assert.equal(recipeFromObservedWrite({ method: 'GET', url: 'https://x.test/events' }), null);
     assert.equal(recipeFromObservedWrite({ method: 'HEAD', url: 'https://x.test/events' }), null);
+  });
+
+  it('v1304: a HOLLOW write (no body + 0 params) is suppressed → null (Google /$rpc.* protobuf case)', () => {
+    assert.equal(recipeFromObservedWrite({ method: 'POST', url: 'https://x.test/$rpc/Service/Method' }), null);   // no body, no url param
+    assert.equal(recipeFromObservedWrite({ method: 'POST', url: 'https://x.test/rpc', contentType: 'application/grpc', body: '' }), null);
+    assert.ok(recipeFromObservedWrite({ method: 'DELETE', url: 'https://x.test/events/99' }));   // but a URL param keeps it
   });
 
   it('a re-demo of the same endpoint yields the same id (dedupable)', () => {

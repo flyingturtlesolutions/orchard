@@ -160,6 +160,7 @@ export function recipesFromHarvest(captures, { appHost = '' } = {}) {
   const recipes = [];
   for (const [, group] of groups) {
     const method = String(group[0].method || 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD') continue;   // v1304 — forage is BODY-BLIND, so a harvested WRITE is always a hollow stub (no payload to send). Reads only; real writes come from demonstrate-once (CX-8). This kills the "/hello" pseudo-writes.
     const parsed = group.map((c) => parseUrl(c.url));
     const tp = templatePath(parsed.map((p) => p.path));
     const tq = templateQuery(parsed.map((p) => p.query));

@@ -141,6 +141,14 @@ export function recipeFromObservedWrite(capture, { appHost = '', demonstratedVal
     if (blanket && bodyType === 'raw') { body = null; bodyType = null; }   // opaque body + no demo → can't safely template → omit rather than bank a literal
   }
 
+  // v1304 — suppress a HOLLOW write: a BODY-CARRYING method (POST/PUT/PATCH) that captured NO usable body AND templated
+  // to 0 params (a binary/opaque body the capture can't template — gRPC/protobuf — or a body-blind stub) has nothing to
+  // send or fill. Not a reusable recipe → drop it (Google's `/$rpc.*` calendar writes are exactly this). A write with a
+  // body OR any param is kept. DELETE (and other body-less verbs) are EXEMPT: their URL *is* the payload, so a
+  // demonstrated `DELETE /events/5` is a real, bankable action even at 0 params.
+  const _bodyCarrying = method === 'POST' || method === 'PUT' || method === 'PATCH';
+  if (body == null && params.length === 0 && _bodyCarrying) return null;
+
   let originHost = ''; try { originHost = new URL(c.url).host; } catch { /* relative — no host */ }
   const destructive = method === 'DELETE' || /\/(merge|destroy|bulk_destroy|delete_many)/i.test(tp.endpoint);
   return {
