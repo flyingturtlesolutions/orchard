@@ -1933,7 +1933,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         try { _obsLastWriteCaptures = sess ? await _obsDrainBodyCapture(sess.tabId) : []; } catch { _obsLastWriteCaptures = []; }
         if (_obsLastWriteCaptures.length) Logger.info('background', `RECORD_STOP_SESSION — ${_obsLastWriteCaptures.length} write capture(s) held for CX-8c banking`);
         Logger.info('background', `RECORD_STOP_SESSION — ${trace.length} action(s) captured`);
-        sendResponse({ success: true, recording: false, count: trace.length, trace });
+        sendResponse({ success: true, recording: false, count: trace.length, trace, writeCaptures: _obsLastWriteCaptures.length });   // CX-8c decouple — the client banks writes even at 0 DOM actions
       })();
       return true;
     }

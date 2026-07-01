@@ -110,7 +110,7 @@ try {
 // (window.__ahub_ride_auth[apiHost], stashed by the §20 tee) and fetches the (cross-origin) endpoint WITH them. Runs from
 // the app's own origin so the API's CORS is satisfied; the token never leaves the page. Self-contained (serialized). GET-
 // shaped reads only. → { status, body } | { noAuth } | { error }.
-function _replayFetchFunc(url, apiHost, method) {
+function _replayFetchFunc(url, apiHost, method, reqBody, contentType) {
   return (async function () {
     try {
       var store = window.__ahub_ride_auth || {};
@@ -118,7 +118,9 @@ function _replayFetchFunc(url, apiHost, method) {
       if (!cap || !cap.headers || !cap.headers.authorization) return { noAuth: true, keys: Object.keys(store) };   // keys → diagnose a host-key mismatch vs an empty global
       var headers = { accept: 'application/json' };
       for (var k in cap.headers) { if (Object.prototype.hasOwnProperty.call(cap.headers, k)) headers[k] = cap.headers[k]; }
-      var res = await fetch(url, { method: method || 'GET', headers: headers, credentials: 'omit' });   // §20 — Bearer HEADER auth, not cookies; 'include' imposes credentialed-CORS the header-auth API rejects (Failed to fetch)
+      var init = { method: method || 'GET', headers: headers, credentials: 'omit' };   // §20 — Bearer HEADER auth, not cookies; credentialed CORS ('include') is rejected by a header-auth API (Failed to fetch)
+      if (reqBody != null && method && method !== 'GET' && method !== 'HEAD') { init.body = reqBody; if (contentType) headers['content-type'] = contentType; }   // CX-6 — a confirmed WRITE: attach the filled body + its content type
+      var res = await fetch(url, init);
       var status = res.status, body = null;
       try { body = await res.json(); } catch (e) { try { body = await res.text(); } catch (e2) { body = null; } }
       return { status: status, body: body };
@@ -245,7 +247,13 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes }
           const sessionHost = String((payload && payload.sessionHost) || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
           const apiHost = String((payload && payload.origin) || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
           const method = String((payload && payload.method) || 'GET').toUpperCase();
-          if (method !== 'GET' && method !== 'HEAD') { sendResponse({ success: false, error: 'replay-reads-only' }); return; }   // §9 — header-replay reads only for now
+          const isWrite = (method !== 'GET' && method !== 'HEAD');
+          // CX-6 (v2.74.1303) — FAIL-CLOSED write gate: a header-replay WRITE fires ONLY with explicit confirmation
+          // (the panel's HITL confirm passes confirmed:true). A write can NEVER run unattended or without the user
+          // approving THIS exact request — the execution boundary itself refuses it, independent of any caller.
+          if (isWrite && !(payload && payload.confirmed === true)) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → BLOCKED (write, not confirmed)`); } catch { /* */ } sendResponse({ success: false, error: 'write-needs-confirm' }); return; }
+          const reqBody = isWrite ? ((payload && typeof payload.body === 'string') ? payload.body : ((payload && payload.body != null) ? JSON.stringify(payload.body) : null)) : null;
+          const contentType = isWrite ? String((payload && payload.contentType) || '') : '';
           const args = (payload && typeof payload.params === 'object' && payload.params) || {};
           const path = fillEndpoint(String((payload && payload.endpoint) || ''), args);
           if (!sessionHost || !apiHost || !path) { sendResponse({ success: false, error: 'replay-missing-fields' }); return; }
@@ -255,7 +263,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes }
           if (!tab) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → NO-APP-TAB on ${sessionHost} (open it + arm Forage)`); } catch { /* */ } sendResponse({ success: false, error: 'no-app-tab', hint: `open ${sessionHost} (your logged-in app) and arm Forage` }); return; }
           try { await armRideAuthCapture({ host: sessionHost, tabId: tab.id }); } catch { /* §20 — keep the token fresh for next time (+ in-place arm now); best-effort */ }
           let out = null;
-          try { out = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, world: 'MAIN', func: _replayFetchFunc, args: [url, apiHost, method] }); }
+          try { out = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, world: 'MAIN', func: _replayFetchFunc, args: [url, apiHost, method, reqBody, contentType] }); }
           catch (e) { try { Logger.warn('background', `SESSION_REPLAY ▸ ${apiHost} exec-failed: ${e && e.message}`); } catch { /* */ } sendResponse({ success: false, error: 'replay-exec-failed' }); return; }
           const r = out && out[0] && out[0].result;
           if (!r) { try { Logger.warn('background', `SESSION_REPLAY ▸ ${apiHost} no-result (tab ${tab.id})`); } catch { /* */ } sendResponse({ success: false, error: 'replay-no-result' }); return; }

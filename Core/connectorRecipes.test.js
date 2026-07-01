@@ -28,9 +28,12 @@ describe('harvestedRecipeLegs — armable harvested reads → invoke-palette leg
     assert.equal(harvestedRecipeLegs([REC({ enabled: false })], { host: 'deakoapi.deako.com' }).length, 0);
   });
 
-  it("mode:'ask' projects READS only — a write (non-GET) is skipped", () => {
+  it("CX-6 (v1303): a WRITE is now projected as an act-leg (selectable, gated at dispatch — never a casual read)", () => {
     const legs = harvestedRecipeLegs([REC({ id: 'w1', method: 'POST', safetyClass: 'gated' })], { host: 'deakoapi.deako.com', mode: 'ask' });
-    assert.equal(legs.length, 0);
+    assert.equal(legs.length, 1);                 // was 0 (reads-only skip) — writes now project; the dispatch confirm-gates + SESSION_REPLAY fail-closes on confirmed
+    assert.equal(legs[0].tool.method, 'POST');
+    assert.equal(legs[0].mode, 'act');            // a write is mode:'act', not a read — clearly a gated action
+    assert.notEqual(legs[0].safety, 'auto');      // §9 — a write never auto-runs
   });
 
   it('dedups against seenKeys (a harvested recipe never shadows a curated one)', () => {

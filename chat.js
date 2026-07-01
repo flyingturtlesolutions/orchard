@@ -30,7 +30,7 @@ import { parseAdminCommand, parseDedupCommand } from './Core/orchAdmin.js';    /
 import { classifyReadAsk, askListIndex } from './Core/observe.js';   // OBS-READ — is the ask a question (a read)? + the index a singular/ordinal read wants
 import { runIlStandin } from './Core/ilStandin.js';   // IL-3 — the single-shot stand-in folded through agentLoop@maxSteps=1 (DESIGN §8 Phase-1 parity)
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
-import { recipeLegs, coerceParams } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775
+import { recipeLegs, coerceParams, fillBody } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template
 import { renderConnectorLines, itemLabels } from './Core/connectorRender.js';   // CX-4c — generic render of ANY connector read (not just tickets); CV-4-full — itemLabels: read list → fan-out labels
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
@@ -4107,7 +4107,19 @@ async function _orchRecordFlow(msg, { groundId, tabId, ask, onAuthored = null })
     _setMessageBody(msg, 'Saving what you showed me…');
     const stopped = await _orchReq('RECORD_STOP_SESSION', { tabId });
     const trace = (stopped && Array.isArray(stopped.trace)) ? stopped.trace : null;
-    if (!trace || !trace.length) { _setMessageBody(msg, 'I didn’t capture any actions — try again.'); return; }
+    if (!trace || !trace.length) {
+      // CX-8c decouple (v2.74.1302) — the DOM-action recorder caught nothing (fragile on iframe/shadow SPAs like
+      // Gmail), but the MAIN-world tee may have captured the app's WRITE(s). Those need no DOM trace — bank them as a
+      // pending Ride recipe rather than discarding the whole demo. The Drive half is lost (no page steps), the Ride half isn't.
+      if (stopped && Number(stopped.writeCaptures) > 0) {
+        const bw = await _orchReq('BANK_DEMONSTRATED_WRITES', { groundId });
+        if (bw && bw.success && bw.banked > 0) {
+          _setMessageBody(msg, `I couldn’t record your on-page steps here (this app hides them from the recorder), but I captured ${bw.banked === 1 ? 'the API write' : `${bw.banked} API writes`} you made and saved ${bw.banked === 1 ? 'it' : 'them'} as a pending Ride recipe — review in Studio → Ride. (No page-drive capability, just the API call.)`);
+          return;
+        }
+      }
+      _setMessageBody(msg, 'I didn’t capture any actions — try again.'); return;
+    }
     const res = await _orchReq('DERIVE_OBSERVED_CAPABILITY', { groundId, trace });
     if (res && res.success && res.capability) {
       _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId: res.capability.id, phrase: ask });   // so the next ask hits
@@ -4312,6 +4324,28 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
   // §20 (v2.74.1288) — HEADER-REPLAY session-ride: a harvested cross-origin Bearer read (cookie-ride can't reach it) runs
   // via SESSION_REPLAY on the app tab, carrying the page-captured auth headers. Reuses the connector ANSWER-SHAPE render.
   if (leg.domain === 'connector' && leg.tool && leg.tool.replay === 'headers') {
+    const _method = String(leg.tool.method || 'GET').toUpperCase();
+    // CX-6 (v2.74.1303) — a demonstrated/curated WRITE: fill the body template, show the EXACT request in a HITL confirm
+    // gate, and fire ONLY on the user's confirm (the SESSION_REPLAY handler ALSO fail-closes on confirmed:true). Never
+    // engine-fired, never unattended — the user approves THIS specific request. JSON bodies for now (form/raw: follow-up).
+    if (_method !== 'GET' && _method !== 'HEAD') {
+      let filled = null;
+      try { filled = leg.tool.body ? fillBody(leg.tool.body, params) : null; } catch { filled = leg.tool.body || null; }
+      const bodyStr = (filled != null) ? JSON.stringify(filled) : '';
+      const preview = (bodyStr.length > 400 ? bodyStr.slice(0, 400) + '…' : bodyStr).replace(/`/g, "'");
+      _setMessageBody(msg, `⚠️ This will send **${_method} ${leg.tool.endpoint}** to \`${leg.tool.origin || leg.tool.appHost || ''}\` on your logged-in session — it **creates or modifies data**. Review the exact request, then confirm:\n\n\`\`\`json\n${preview || '(no body)'}\n\`\`\``);
+      const confirmed = await new Promise((resolve) => {
+        const bar = _orchActionBar(msg);
+        bar.appendChild(_mkBtn('✓ Confirm & send', () => { try { bar.remove(); } catch { /* */ } resolve(true); }));
+        bar.appendChild(_mkBtn('✕ Cancel', () => { try { bar.remove(); } catch { /* */ } resolve(false); }));
+      });
+      if (!confirmed) { _setMessageBody(msg, '🧠 Cancelled — nothing was sent.'); return false; }
+      let wr = null;
+      try { wr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: _method, params, body: bodyStr, contentType: 'application/json', confirmed: true }); } catch { /* */ }
+      if (!wr || wr.success === false) { _setMessageBody(msg, `🧠 Couldn’t ${leg.does || leg.name || 'send that'}${wr && wr.error ? ` — ${wr.error}` : ''}.${wr && wr.hint ? `  ${wr.hint}.` : ''}`); return false; }
+      _setMessageBody(msg, `✅ Sent — ${_method} ${leg.tool.endpoint} → ${wr.status || 'ok'}.`);
+      return true;
+    }
     let rr = null;
     try { rr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params }); } catch { /* */ }
     if (!rr || rr.success === false) {
@@ -4924,6 +4958,30 @@ async function sendChatMessage() {
     }
     try { await _setupAdvanceAnswer(answer); }
     catch (e) { try { console.warn('[chat] setup advance failed:', e?.message); } catch { /* */ } }
+    return;
+  }
+
+  // CX-8 (v2.74.1301) — `teach: <ask>` opens the demonstration recorder DIRECTLY on the current page, so you can
+  // PROACTIVELY teach a capability (its Drive DOM steps + any Ride write it fires — the dual capture) WITHOUT first
+  // tricking the router into a miss. The reactive "● Show me" offers only surface after a miss/failed run, which a
+  // confident persona (a support agent absorbing "create a draft" → "which ticket?") never reaches — this is the
+  // always-available entrance. Resolves the active tab + its Ground, then hands both to the shared _orchRecordFlow.
+  if (/^teach:/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    const ask = text.replace(/^teach:\s*/i, '').trim();
+    appendMessage({ role: 'user', body: text });
+    const msg = appendMessage({ role: 'assistant', body: '' });
+    if (!ask) { _setMessageBody(msg, 'usage: `teach: <what to do>` — I’ll record so you can show me on this page, then reuse it next time.'); _orchFinalize(msg); return; }
+    try {
+      const tab = await _orchActiveTab();
+      if (!tab || typeof tab.id !== 'number' || /^(chrome|edge|about|chrome-extension|devtools|view-source):/i.test(String(tab.url || ''))) {
+        _setMessageBody(msg, 'Open the app page you want to teach me on first — I can’t record on a browser-internal page.'); _orchFinalize(msg); return;
+      }
+      let groundId = null;
+      try { const g = await _orchReq('ENSURE_GROUND_FOR_URL', { url: tab.url }); groundId = (g && g.groundId) || null; } catch { /* */ }
+      if (!groundId) { _setMessageBody(msg, 'Couldn’t ground this page to record against — try reloading it.'); _orchFinalize(msg); return; }
+      await _orchRecordFlow(msg, { groundId, tabId: tab.id, ask });   // shared recorder: RECORD_START → you demo → Stop & save → DERIVE (banks Drive + any Ride write)
+    } catch (e) { _setMessageBody(msg, `Couldn’t start teaching: ${e && e.message ? e.message : e}`); _orchFinalize(msg); }
     return;
   }
 

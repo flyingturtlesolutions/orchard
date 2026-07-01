@@ -1258,6 +1258,28 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // CX-8c decouple (v2.74.1302) — bank the demonstration's captured WRITE(s) even when the DOM-action recorder got
+    // NOTHING (fragile on iframe/shadow SPAs like Gmail). The write recipe comes from the network capture, not the DOM
+    // trace, so it doesn't need one. Without demonstratedValues (no DOM types), BLANKET-template every string leaf →
+    // params (privacy: never bank a literal) so the recipe is safe + fillable, if crude (rename in Studio). Pending,
+    // behind the §18 arm guard. Called by _orchRecordFlow when a stop has 0 actions but writeCaptures > 0.
+    BANK_DEMONSTRATED_WRITES: async (payload, _sender, sendResponse) => {
+      try {
+        const { groundId = null } = payload ?? {};
+        if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
+        const writeCaps = (ctx && typeof ctx.getDemoWriteCaptures === 'function') ? (ctx.getDemoWriteCaptures() || []) : [];
+        if (!writeCaps.length) { sendResponse({ success: true, banked: 0 }); return; }
+        let appHost = ''; try { appHost = new URL(writeCaps[0].url).host; } catch { /* */ }
+        const writeRecipes = recipesFromObservedWrites(writeCaps, { appHost, demonstratedValues: [], blanket: true });
+        if (!writeRecipes.length) { sendResponse({ success: true, banked: 0 }); return; }
+        const named = writeRecipes.map((r) => ({ ...r, groundId }));
+        const existingRide = (await ctx.readRideRecipes(groundId)) || [];
+        await ctx.writeRideRecipes(groundId, rideMergeRecipes(existingRide, named));
+        Logger.info('background', `DEMO_WRITE ▸ banked ${writeRecipes.length} demonstrated write-recipe(s) (pending, no-DOM-trace blanket-template) for ${groundId}: ${named.map((r) => `${r.method} ${r.endpoint}`).join(', ').slice(0, 120)}`);
+        sendResponse({ success: true, banked: writeRecipes.length });
+      } catch (err) { try { Logger.error('background', `BANK_DEMONSTRATED_WRITES failed: ${err.message}`); } catch { /* */ } sendResponse({ success: false, error: err.message }); }
+    },
+
     // IL-2 (v2.74.1119) — IL_ANSWER: Orchard handles a META / conversational ask ("what can you do?") when
     // nothing matched. Reads the FULL capability set for this Ground (not a lexical top-k — the user wants the
     // whole picture) + answers from it via AnthropicService.answerAsk. Resolves the Ground like ROUTE_ASK.

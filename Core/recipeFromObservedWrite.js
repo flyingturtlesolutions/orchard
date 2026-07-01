@@ -35,6 +35,23 @@ function _demoSet(demonstratedValues) {
   return s;
 }
 
+// CX-8c decouple (v2.74.1302) — BLANKET mode: when the DOM recorder caught nothing (0 actions → no demonstratedValues),
+// collect EVERY string leaf of the captured body so all of them become params (privacy: never bank a string literal).
+// Crude (protocol constants become params too — rename in Studio), but SAFE + fillable. JSON + form only; an opaque
+// body has no parseable leaves, so its raw form is omitted by the caller rather than banked literally.
+function _collectStrings(raw, contentType) {
+  const out = [];
+  try {
+    if (_isJsonType(contentType) || /^\s*[[{]/.test(raw)) {
+      const walk = (n) => { if (Array.isArray(n)) n.forEach(walk); else if (n && typeof n === 'object') Object.values(n).forEach(walk); else if (typeof n === 'string' && n.trim()) out.push(n.trim()); };
+      walk(JSON.parse(raw));
+    } else if (_isFormType(contentType)) {
+      for (const pair of String(raw).split('&')) { const eq = pair.indexOf('='); if (eq >= 0) { const v = decodeURIComponent(pair.slice(eq + 1).replace(/\+/g, ' ')).trim(); if (v) out.push(v); } }
+    }
+  } catch { /* unparseable → nothing to collect */ }
+  return out;
+}
+
 // A single leaf → a `{param}` placeholder (matched a demonstrated value) or the literal constant. PURE.
 function _templateLeaf(val, demo, params, keyHint) {
   if (val === null || val === undefined) return val;
@@ -93,7 +110,7 @@ const _isFormType = (ct) => /x-www-form-urlencoded/i.test(String(ct || ''));
  * @param {{ appHost?:string, demonstratedValues?:string[] }} [opts]
  * @returns {object|null}
  */
-export function recipeFromObservedWrite(capture, { appHost = '', demonstratedValues = [] } = {}) {
+export function recipeFromObservedWrite(capture, { appHost = '', demonstratedValues = [], blanket = false } = {}) {
   const c = capture || {};
   const method = String(c.method || '').toUpperCase();
   if (!c.url || !method || method === 'GET' || method === 'HEAD') return null;   // not a write
@@ -111,6 +128,7 @@ export function recipeFromObservedWrite(capture, { appHost = '', demonstratedVal
   let body = null, bodyType = null;
   const raw = (c.body === undefined || c.body === null) ? '' : String(c.body);
   if (raw) {
+    if (blanket) { for (const s of _collectStrings(raw, c.contentType)) demo.add(s); }   // no demonstratedValues → every string leaf becomes a param
     if (_isJsonType(c.contentType) || /^\s*[[{]/.test(raw)) {
       try { body = _templateJson(JSON.parse(raw), demo, params, 'field'); bodyType = 'json'; }
       catch { body = _templateRaw(raw, demo, params); bodyType = 'raw'; }
@@ -120,6 +138,7 @@ export function recipeFromObservedWrite(capture, { appHost = '', demonstratedVal
       // unknown/opaque content type → substring-template the typed values so no PII banks; never guess "form".
       body = _templateRaw(raw, demo, params); bodyType = 'raw';
     }
+    if (blanket && bodyType === 'raw') { body = null; bodyType = null; }   // opaque body + no demo → can't safely template → omit rather than bank a literal
   }
 
   let originHost = ''; try { originHost = new URL(c.url).host; } catch { /* relative — no host */ }

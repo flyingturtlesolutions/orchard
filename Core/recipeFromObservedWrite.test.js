@@ -40,6 +40,29 @@ describe('recipeFromObservedWrite — JSON body templating', () => {
   });
 });
 
+describe('recipeFromObservedWrite — blanket mode (decouple: 0 DOM actions → no demonstratedValues)', () => {
+  it('templates every string leaf so NO literal banks; numbers stay constant', () => {
+    const r = recipeFromObservedWrite(
+      { method: 'POST', url: 'https://x.test/drafts', contentType: 'application/json', body: JSON.stringify({ subject: 'Hi Bob', to: 'bob@x.test', type: 'draft', count: 3 }) },
+      { blanket: true });
+    assert.equal(r.bodyType, 'json');
+    assert.equal(r.body.subject, '{subject}');   // string → param
+    assert.equal(r.body.to, '{to}');              // string → param
+    assert.equal(r.body.type, '{type}');          // even a protocol-constant string → param (crude but safe)
+    assert.equal(r.body.count, 3);                // number stays literal (rarely PII)
+    assert.ok(!JSON.stringify(r).includes('Hi Bob'), 'no string literal banks under blanket');
+    assert.ok(!JSON.stringify(r).includes('bob@x.test'));
+  });
+
+  it('an opaque body under blanket is omitted (can’t safely template → never bank a literal)', () => {
+    const r = recipeFromObservedWrite(
+      { method: 'POST', url: 'https://x.test/rpc', contentType: 'application/octet-stream', body: 'SECRET-blob-Acme' },
+      { blanket: true });
+    assert.equal(r.body, null);
+    assert.ok(!JSON.stringify(r).includes('Acme'));
+  });
+});
+
 describe('recipeFromObservedWrite — other shapes', () => {
   it('form-urlencoded body templates by key', () => {
     const r = recipeFromObservedWrite(

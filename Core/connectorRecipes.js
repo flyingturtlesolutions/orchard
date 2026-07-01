@@ -262,7 +262,9 @@ export function harvestedRecipeLegs(recipes, { host = '', account = 'me', mode =
   for (const r of list) {
     if (!r || !armable(r)) continue;                                   // the §18 gate — accepted ∧ enabled only
     const write = String(r.method || 'GET').toUpperCase() !== 'GET';
-    if (mode === 'ask' && write) continue;                            // reads-only palette (writes have their own gate)
+    // v2.74.1303 (CX-6) — writes ARE now projected (mode:'act' legs): the dispatch confirm-gates them AND the
+    // SESSION_REPLAY handler fail-closes on `confirmed:true`, so a demonstrated "Create X" is selectable and can only
+    // run through the HITL gate — a write reaching execution un-confirmed is refused at the boundary. (Was: reads-only skip.)
     const leg = recipeToLeg({
       id: r.id, name: r.name, does: r.does, app,
       origin: r.origin || host, endpoint: r.endpoint, method: r.method,
