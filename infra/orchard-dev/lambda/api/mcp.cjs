@@ -34,6 +34,9 @@ function initializedNotification() {
 function toolsCallRequest(id, name, args) {
   return { jsonrpc: '2.0', id, method: 'tools/call', params: { name: String(name || ''), arguments: (args && typeof args === 'object') ? args : {} } };
 }
+function toolsListRequest(id, cursor) {
+  return { jsonrpc: '2.0', id, method: 'tools/list', params: cursor ? { cursor } : {} };
+}
 
 // ── Response parse (JSON body OR SSE `data:` frames; prefer the response frame) — mirror of mcpClient ──
 function parseRpcBody(raw) {
@@ -109,12 +112,51 @@ async function invokeMcpTool({ server, tool, args = {}, accessToken = null, fetc
   }
 }
 
+/**
+ * MP-2c — DISCOVER a server's tools: initialize → initialized → tools/list. Returns the RAW MCP tool descriptors
+ * (name · description · inputSchema · annotations) — exactly what Core/connectorLeg.mcpToolToLeg consumes — so the
+ * palette can carry the server's OWN schemas instead of a hand-transcribed seed. First page only (a cursor beyond
+ * ~page-1 is a pathological server for our curated set; noted, not followed).
+ * @param {{ server:string, accessToken?:string, fetchImpl?:Function, deadlineMs?:number }} opts
+ * @returns {Promise<{ success:true, tools:Array } | { success:false, error:string, hint?:string }>}
+ */
+async function listMcpTools({ server, accessToken = null, fetchImpl = globalThis.fetch, deadlineMs = 15000 } = {}) {
+  const endpoint = MCP_ENDPOINTS[String(server || '').trim()];
+  if (!endpoint) return { success: false, error: 'unknown-mcp-server', hint: `no curated endpoint for "${server}"` };
+  if (typeof fetchImpl !== 'function') return { success: false, error: 'no-fetch' };
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), Math.max(1000, deadlineMs));
+  const ctx = { sessionId: null, protocolVersion: null, accessToken, signal: ctl.signal };
+  try {
+    const init = await _post(fetchImpl, endpoint, initializeRequest(1), ctx);
+    if (init.status === 401 || init.status === 403) return { success: false, error: 'broker-unauthorized', hint: 're-link the connector' };
+    const initMsg = parseRpcBody(init.body);
+    if (!initMsg || initMsg.error) return { success: false, error: 'mcp-initialize-failed', hint: initMsg && initMsg.error ? String(initMsg.error.message || '') : `http ${init.status}` };
+    ctx.sessionId = (init.headers && typeof init.headers.get === 'function' && init.headers.get('mcp-session-id')) || null;
+    ctx.protocolVersion = (initMsg.result && initMsg.result.protocolVersion) || MCP_PROTOCOL_VERSION;
+    await _post(fetchImpl, endpoint, initializedNotification(), ctx);
+    const list = await _post(fetchImpl, endpoint, toolsListRequest(2), ctx);
+    const msg = parseRpcBody(list.body);
+    if (!msg) return { success: false, error: 'mcp-bad-response', hint: `http ${list.status}` };
+    if (msg.error) return { success: false, error: 'mcp-rpc-error', hint: String(msg.error.message || msg.error.code || '') };
+    const tools = (msg.result && Array.isArray(msg.result.tools)) ? msg.result.tools.filter((t) => t && typeof t === 'object' && t.name) : [];
+    return { success: true, tools };
+  } catch (e) {
+    const aborted = ctl.signal.aborted;
+    return { success: false, error: aborted ? 'mcp-timeout' : 'mcp-network-error', hint: aborted ? `deadline ${deadlineMs}ms` : String((e && e.message) || '') };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 module.exports = {
   MCP_PROTOCOL_VERSION,
   MCP_ENDPOINTS,
   initializeRequest,
   initializedNotification,
   toolsCallRequest,
+  toolsListRequest,
   parseRpcBody,
   invokeMcpTool,
+  listMcpTools,
 };

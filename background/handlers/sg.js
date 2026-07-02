@@ -1185,14 +1185,17 @@ export function createSgMessageHandlers(ctx) {
         // confirm and INVOKE_CONNECTOR fail-closes without confirmed:true — gated end-to-end, so surfacing is honest.
         let brokerLegs = [];
         try {
-          const _lp = await chrome.storage.local.get('connector:linkedProviders');
+          const _lp = await chrome.storage.local.get(['connector:linkedProviders', 'connector:liveTools']);
           const linked = Array.isArray(_lp['connector:linkedProviders']) ? _lp['connector:linkedProviders'] : [];
+          // MP-2c (v2.74.1319) — the live tools/list cache: when present for a server, the palette carries the
+          // server's OWN schemas instead of the seed (brokerCatalog liveTools override — schemas can't drift).
+          const liveTools = (_lp['connector:liveTools'] && typeof _lp['connector:liveTools'] === 'object') ? _lp['connector:liveTools'] : null;
           if (linked.length) {
             const _seenB = new Set([...ragLegs, ...connLegs, ...harvestedLegs].map((l) => l && l.key).filter(Boolean));
             const hosts = new Set();
             try { if (tabUrl) hosts.add(new URL(tabUrl).host); } catch { /* */ }
             for (const c of connections) { try { hosts.add(new URL(/^https?:\/\//i.test(c.origin) ? c.origin : `https://${c.origin}`).host); } catch { /* */ } }
-            for (const h of hosts) brokerLegs.push(...brokerLegsForLinked(h, linked, { seenKeys: _seenB }));
+            for (const h of hosts) brokerLegs.push(...brokerLegsForLinked(h, linked, { seenKeys: _seenB, liveTools }));
           }
         } catch { /* never block interpret on the broker projection */ }
         const retrieved = [...ragLegs, ...connLegs, ...harvestedLegs, ...brokerLegs];

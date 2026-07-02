@@ -7,7 +7,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import lambdaMcp from '../infra/orchard-dev/lambda/api/mcp.cjs';
-import { MCP_PROTOCOL_VERSION, initializeRequest, initializedNotification, toolsCallRequest } from './mcpClient.js';
+import { MCP_PROTOCOL_VERSION, initializeRequest, initializedNotification, toolsCallRequest, toolsListRequest } from './mcpClient.js';
 import { MCP_SERVERS } from './mcpServers.js';
 
 const { invokeMcpTool, MCP_ENDPOINTS, parseRpcBody } = lambdaMcp;
@@ -100,7 +100,40 @@ describe('mcp.cjs — invokeMcpTool (full handshake, scripted server)', () => {
   });
 });
 
+describe('mcp.cjs — listMcpTools (MP-2c live discovery)', () => {
+  it('initialize → initialized → tools/list, returns the RAW descriptors mcpToolToLeg consumes', async () => {
+    const fetchImpl = fakeFetch([
+      { status: 200, headers: { 'mcp-session-id': 'sess-2' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, result: { protocolVersion: '2025-03-26' } }) },
+      { status: 202, body: '' },
+      { body: JSON.stringify({ jsonrpc: '2.0', id: 2, result: { tools: [
+        { name: 'create_page', description: 'Create a page', inputSchema: { type: 'object', properties: { title: { type: 'string' } } }, annotations: {} },
+        { description: 'junk — no name' },
+      ] } }) },
+    ]);
+    const r = await lambdaMcp.listMcpTools({ server: 'notion', accessToken: 'tok', fetchImpl });
+    assert.equal(r.success, true);
+    assert.equal(r.tools.length, 1);                                          // junk dropped
+    assert.ok(r.tools[0].name && r.tools[0].inputSchema && ('annotations' in r.tools[0]));
+    assert.equal(JSON.parse(fetchImpl.calls[2].init.body).method, 'tools/list');
+    assert.equal(fetchImpl.calls[2].init.headers['mcp-session-id'], 'sess-2');   // session threaded
+  });
+  it('401 → broker-unauthorized; rpc error → mcp-rpc-error; unknown server → no fetch', async () => {
+    assert.equal((await lambdaMcp.listMcpTools({ server: 'github', fetchImpl: fakeFetch([{ status: 401, body: '' }]) })).error, 'broker-unauthorized');
+    assert.equal((await lambdaMcp.listMcpTools({ server: 'hubspot', fetchImpl: fakeFetch([
+      { body: JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }) }, { status: 202, body: '' },
+      { body: JSON.stringify({ jsonrpc: '2.0', id: 2, error: { code: -32601, message: 'nope' } }) },
+    ]) })).error, 'mcp-rpc-error');
+    const f = fakeFetch([]);
+    assert.equal((await lambdaMcp.listMcpTools({ server: 'evil', fetchImpl: f })).error, 'unknown-mcp-server');
+    assert.equal(f.calls.length, 0);
+  });
+});
+
 describe('mcp.cjs × Core — the PARITY lock (drift turns this red)', () => {
+  it('v1319: tools/list envelope matches the canonical builder', () => {
+    assert.deepEqual(lambdaMcp.toolsListRequest(2), toolsListRequest({}, 2));
+  });
+
   it('protocol version matches the canonical core', () => {
     assert.equal(lambdaMcp.MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION);
   });

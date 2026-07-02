@@ -61,6 +61,20 @@ describe('brokerCatalog — brokerLegsForLinked (CX-5c palette gate)', () => {
     assert.deepEqual(brokerLegsForLinked('calendar.google.com', []), []);
     assert.deepEqual(brokerLegsForLinked('calendar.google.com', ['notion']), []);   // linked ≠ this host's provider
   });
+  it('v1319 (MP-2c): live tools/list schemas OVERRIDE the seed; absent/empty live → seed fallback', async () => {
+    const { brokerLegsForLinked } = await import('./brokerCatalog.js');
+    const liveTools = { 'google-calendar': [
+      { name: 'create_event', description: 'Create (live)', inputSchema: { type: 'object', properties: { summary: { type: 'string' }, startTime: { type: 'string', format: 'date-time' }, endTime: { type: 'string', format: 'date-time' }, liveOnlyField: { type: 'string' } }, required: ['summary', 'startTime', 'endTime'] }, annotations: {} },
+    ] };
+    const legs = brokerLegsForLinked('calendar.google.com', ['google'], { liveTools });
+    assert.equal(legs.length, 1);                                             // live list REPLACES the seed set
+    assert.ok('liveOnlyField' in legs[0].paramSchema.properties, 'the server-published schema rides into the palette');
+    assert.equal(legs[0].paramSchema.properties.startTime.format, 'date-time');
+    // empty/absent live → the seed serves (cold start + REST-channel servers)
+    assert.equal(brokerLegsForLinked('calendar.google.com', ['google'], { liveTools: { 'google-calendar': [] } }).length, 4);
+    assert.equal(brokerLegsForLinked('calendar.google.com', ['google'], { liveTools: null }).length, 4);
+  });
+
   it('mode filter + seenKeys dedupe (the palette assembly contract)', async () => {
     const { brokerLegsForLinked } = await import('./brokerCatalog.js');
     const reads = brokerLegsForLinked('calendar.google.com', ['google'], { mode: 'ask' });

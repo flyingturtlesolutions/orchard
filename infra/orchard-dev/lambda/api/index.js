@@ -20,8 +20,8 @@ const {
 } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
-const { invokeMcpTool } = require('./mcp.cjs');   // MP-2b (CX-5b §5.2) — the MCP transport to remote servers (parity-locked to Core/mcpClient.js)
-const { exchangeAuthCode, refreshAccessToken } = require('./oauth.cjs');   // MP-3b — code→token exchange + refresh (client secret lives HERE only)
+const { invokeMcpTool, listMcpTools, MCP_ENDPOINTS } = require('./mcp.cjs');   // MP-2b (CX-5b §5.2) — the MCP transport; MP-2c — live tools/list discovery
+const { exchangeAuthCode, refreshAccessToken, CONNECTOR_TOKEN_URLS } = require('./oauth.cjs');   // MP-3b — code→token exchange + refresh (client secret lives HERE only)
 const { invokeGoogleRestTool } = require('./googleRest.cjs');   // v1318 — the GA REST channel for Google (its MCP servers are Developer-Preview-gated; consumer accounts can't enroll)
 
 const IDENTITY_TABLE = process.env.IDENTITY_TABLE;
@@ -1403,18 +1403,30 @@ async function handleConnectorInvoke(event) {
 }
 const CONNECTOR_CHANNEL = { 'google-calendar': 'google-rest' };   // v1318 — per-server execution channel (default 'mcp')
 
-// GET /connectors/tools — discovery. Reports which providers the CALLER has linked (descriptors only,
-// never tokens) so the client can gate surfacing. The tool catalog itself is curated client-side
-// (Core/brokerCatalog); a live MCP tools/list would populate `tools` once the adapters land.
+// GET /connectors/tools — MP-2c discovery: which providers the CALLER has linked + the LIVE tool descriptors
+// (tools/list) for each linked provider's MCP-channel servers. Descriptors only, never tokens. REST-channel servers
+// (Google today — its MCP is preview-gated) are SKIPPED: their tools are seed-defined client-side, and calling the
+// ineligible MCP endpoint would just re-manufacture the PERMISSION_DENIED. Per-server failures ride back named
+// ({server, error, hint}) — one bad server never hides another's tools.
 async function handleConnectorTools(event) {
   const auth = await requireOrchardUser(event);
   if (auth.error) return auth.error;
   const linked = [];
-  for (const p of ['google']) {
-    const link = await getConnectorLink(auth.orchardUserId, p);
-    if (link && link.refreshToken) linked.push(p);
+  const servers = [];
+  for (const provider of Object.keys(CONNECTOR_TOKEN_URLS)) {
+    const link = await getConnectorLink(auth.orchardUserId, provider);
+    if (!link || !link.refreshToken) continue;
+    linked.push(provider);
+    const mcpServers = Object.keys(MCP_ENDPOINTS).filter((s) => connectorProviderOf(s) === provider && (CONNECTOR_CHANNEL[s] || 'mcp') === 'mcp');
+    if (!mcpServers.length) continue;
+    const tok = await refreshAccessToken(provider, link.refreshToken);
+    if (tok.error) { for (const s of mcpServers) servers.push({ server: s, error: tok.error }); continue; }
+    for (const s of mcpServers) {
+      const r = await listMcpTools({ server: s, accessToken: tok.accessToken });
+      servers.push(r.success ? { server: s, tools: r.tools } : { server: s, error: r.error, hint: r.hint });
+    }
   }
-  return json(200, { tools: [], linked });
+  return json(200, { linked, servers });
 }
 
 // POST /connectors/link/{provider} — complete the link (MP-3, §5.2 pinned contract): the extension danced the

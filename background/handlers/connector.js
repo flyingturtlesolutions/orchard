@@ -142,6 +142,13 @@ async function _readLinkedProviders() {
 async function _writeLinkedProviders(list) {
   try { await chrome.storage.local.set({ [LINKED_KEY]: [...new Set((list || []).filter(Boolean))] }); } catch { /* */ }
 }
+// MP-2c (v2.74.1319) — the LIVE-TOOLS cache: { server → raw MCP tool descriptors } from the backend's tools/list
+// discovery. The palette prefers these over the hand-transcribed seed (brokerCatalog liveTools override) — schemas
+// from the source can't drift. Empty/absent is always safe: the seed serves.
+const LIVETOOLS_KEY = 'connector:liveTools';
+async function _writeLiveTools(map) {
+  try { await chrome.storage.local.set({ [LIVETOOLS_KEY]: (map && typeof map === 'object') ? map : {} }); } catch { /* */ }
+}
 
 export function createConnectorHandlers({ ensureContentScript, readRideRecipes, cloudInvokeConnector, cloudLinkConnector, cloudUnlinkConnector, cloudListConnectorTools, cloudHasSession } = {}) {
   const fetchVia = (tabId, url, method, body) =>
@@ -157,6 +164,24 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
       return await fetchVia(tabId, url, method, body);
     }
   };
+
+  // MP-2c — refresh linked-state + LIVE TOOLS from the backend (fires at link time + on GET_CONNECTOR_STATUS).
+  // Logs `CONNECTOR_TOOLS ▸` (Invariant #1: in studio.js _DECISION_RE). Returns the summary or null (no cloud client).
+  async function _refreshConnectorState() {
+    if (typeof cloudListConnectorTools !== 'function') return null;
+    const r = await cloudListConnectorTools({});
+    const linked = (r && Array.isArray(r.linked)) ? r.linked : [];
+    await _writeLinkedProviders(linked);
+    const map = {};
+    let toolCount = 0, errCount = 0;
+    for (const s of ((r && Array.isArray(r.servers)) ? r.servers : [])) {
+      if (s && s.server && Array.isArray(s.tools) && s.tools.length) { map[s.server] = s.tools; toolCount += s.tools.length; }
+      else if (s && s.error) errCount += 1;
+    }
+    await _writeLiveTools(map);
+    try { Logger.info('connector', `CONNECTOR_TOOLS ▸ ${linked.length} linked · ${Object.keys(map).length} live server(s) · ${toolCount} tool(s)${errCount ? ` · ${errCount} error(s)` : ''}`); } catch { /* */ }
+    return { linked, liveServers: Object.keys(map).length, liveToolCount: toolCount };
+  }
 
   return {
     'INVOKE_SESSION': (payload, _sender, sendResponse) => {
@@ -315,6 +340,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           }
           const reply = await cloudLinkConnector(provider, { code: parsed.code, redirectUri, codeVerifier: verifier });
           await _writeLinkedProviders([...(await _readLinkedProviders()), provider]);   // CX-5c — the palette gate reads this
+          _refreshConnectorState().catch(() => { /* MP-2c — best-effort live-tools discovery; the seed serves until it lands */ });
           try { Logger.info('connector', `CONNECTOR_LINK ▸ ${provider} → linked (${(reply && reply.scope) || 'no scope reported'})`); } catch { /* */ }
           sendResponse({ success: true, provider, scope: (reply && reply.scope) || '' });
         } catch (e) {
@@ -350,14 +376,10 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
     'GET_CONNECTOR_STATUS': (_payload, _sender, sendResponse) => {
       (async () => {
         try {
-          if (typeof cloudListConnectorTools === 'function') {
-            try {
-              const r = await cloudListConnectorTools({});
-              const linked = (r && Array.isArray(r.linked)) ? r.linked : [];
-              await _writeLinkedProviders(linked);
-              sendResponse({ success: true, linked, stale: false }); return;
-            } catch { /* fall through to the cache */ }
-          }
+          try {
+            const st = await _refreshConnectorState();   // MP-2c — linked + live tools in one refresh
+            if (st) { sendResponse({ success: true, ...st, stale: false }); return; }
+          } catch { /* fall through to the cache */ }
           sendResponse({ success: true, linked: await _readLinkedProviders(), stale: true });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'status-failed' }); }
       })();

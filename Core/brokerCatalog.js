@@ -113,12 +113,21 @@ export function brokerLegsForHost(host, { catalog = BROKER_CATALOG, account = 'm
  * @param {{ catalog?:ReadonlyArray, account?:string, mode?:('ask'|'act'|null), seenKeys?:Set<string> }} [opts]
  * @returns {Array<object>}
  */
-export function brokerLegsForLinked(host, linkedProviders, { catalog = BROKER_CATALOG, account = 'me', mode = null, seenKeys = null } = {}) {
+export function brokerLegsForLinked(host, linkedProviders, { catalog = BROKER_CATALOG, account = 'me', mode = null, seenKeys = null, liveTools = null } = {}) {
   const linked = new Set((Array.isArray(linkedProviders) ? linkedProviders : []).map((p) => String(p || '').toLowerCase()));
   if (!linked.size) return [];
   const entry = brokerConnectorForHost(host, catalog);
   if (!entry || !linked.has(String(entry.provider || '').toLowerCase())) return [];
-  return brokerLegsForHost(host, { catalog, account })
+  // MP-2c (v2.74.1319) — prefer the server's OWN published tools (live `tools/list`, cached by GET_CONNECTOR_STATUS)
+  // over the hand-transcribed seed: schemas come from the source, so they can't drift (the v1316 "Unknown name"
+  // lesson made structural). The seed stays as the cold-start / REST-channel fallback. Live tools inherit the
+  // curated trust (§9) because the SERVER LIST is curated (MCP_SERVERS) — only the schemas are live, not the peer.
+  const live = (liveTools && typeof liveTools === 'object' && Array.isArray(liveTools[entry.server]) && liveTools[entry.server].length)
+    ? liveTools[entry.server] : null;
+  const tools = live || (Array.isArray(entry.tools) ? entry.tools : []);
+  return tools
+    .map((t) => mcpToolToLeg(t, { account, server: entry.server, trusted: true }))
+    .filter(Boolean)
     .filter((l) => !mode || l.mode === mode)
     .filter((l) => !(seenKeys && seenKeys.has(l.key)));
 }
