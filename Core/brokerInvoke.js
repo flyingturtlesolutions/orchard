@@ -44,7 +44,14 @@ export function brokerReplyFromCloud({ resp = null, err = null } = {}) {
     return { success: false, error: (err && err.message) || 'broker-failed' };
   }
   if (resp && typeof resp === 'object') {
-    if (resp.success === false || resp.error) return { success: false, error: String(resp.error || 'broker-failed') };
+    // v2.74.1314 — carry the proxy's HINT through (the tool's own error text, e.g. Google's PERMISSION_DENIED
+    // detail). The 2026-07-01 link failure taught this lesson on the LINK path; the first live READ hit the same
+    // drop HERE — a `tool-error` with its self-naming reason stripped. The hint must survive every hop.
+    if (resp.success === false || resp.error) {
+      const out = { success: false, error: String(resp.error || 'broker-failed') };
+      if (resp.hint) out.hint = String(resp.hint);
+      return out;
+    }
     return { success: true, value: ('value' in resp) ? resp.value : resp };
   }
   return { success: true, value: resp };

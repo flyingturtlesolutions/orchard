@@ -73,6 +73,13 @@ describe('brokerReplyFromCloud — normalize the proxy response / error', () => 
     assert.equal(brokerReplyFromCloud({ resp: { error: 'bad-args' } }).error, 'bad-args');
   });
 
+  it('v1314: the proxy failure HINT survives the hop (the tool names its own error — never strip it)', () => {
+    const r = brokerReplyFromCloud({ resp: { success: false, error: 'tool-error', hint: 'PERMISSION_DENIED: Calendar API not enabled' } });
+    assert.equal(r.error, 'tool-error');
+    assert.equal(r.hint, 'PERMISSION_DENIED: Calendar API not enabled');
+    assert.ok(!('hint' in brokerReplyFromCloud({ resp: { error: 'x' } })), 'no hint → no empty key');
+  });
+
   it('a bare value (no envelope) is treated as the value', () => {
     assert.deepEqual(brokerReplyFromCloud({ resp: [1, 2, 3] }).value, [1, 2, 3]);
   });

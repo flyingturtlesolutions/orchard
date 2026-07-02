@@ -319,8 +319,12 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           sendResponse({ success: true, provider, scope: (reply && reply.scope) || '' });
         } catch (e) {
           // launchWebAuthFlow rejects on user-cancel too — surface it plainly, never as a fake failure elsewhere.
-          try { Logger.info('connector', `CONNECTOR_LINK ▸ ${provider} → ${(e && e.message) || 'link-failed'}`); } catch { /* */ }
-          sendResponse({ success: false, error: (e && e.message) || 'link-failed' });
+          // v2.74.1313 — thread the PROXY'S HINT through (CloudClientError carries the 502 body — e.g. Google's
+          // `invalid_client` on a bad env secret). Dropping it turned the first live link failure into a guessing
+          // game: the cause was captured at both ends and visible at neither (findings 2026-07-01 23:06).
+          const hint = (e && e.body && typeof e.body === 'object' && e.body.hint) ? String(e.body.hint) : null;
+          try { Logger.info('connector', `CONNECTOR_LINK ▸ ${provider} → ${(e && e.message) || 'link-failed'}${hint ? ` (${hint})` : ''}`); } catch { /* */ }
+          sendResponse({ success: false, error: (e && e.message) || 'link-failed', hint });
         }
       })();
       return true;   // async — keep the sendResponse channel open

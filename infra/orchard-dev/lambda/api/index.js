@@ -1392,6 +1392,7 @@ async function handleConnectorInvoke(event) {
   if (tok.error === 'connector-not-configured') return json(503, { error: 'connector-not-configured', provider, hint: 'no OAuth client registered for this provider' });
   if (tok.error) return json(200, { success: false, error: 'broker-unauthorized', hint: `token refresh failed — re-link ${provider}` });
   const result = await invokeMcpTool({ server, tool, args: (body.args && typeof body.args === 'object') ? body.args : {}, accessToken: tok.accessToken });
+  if (!result.success) console.error('connector-invoke failed', server, tool, result.error, result.hint || '');   // v1314 — CloudWatch names the tool's own error (no secrets)
   return json(200, result);
 }
 
@@ -1423,7 +1424,10 @@ async function handleConnectorLink(event, provider) {
   if (!code || !redirectUri) return json(400, { error: 'link-missing-fields' });
   const ex = await exchangeAuthCode(provider, { code, redirectUri, codeVerifier: body.codeVerifier }, {});
   if (ex.error === 'connector-not-configured') return json(503, { error: 'connector-not-configured', provider, hint: 'no OAuth client registered for this provider' });
-  if (ex.error) return json(502, { error: ex.error, provider, hint: ex.hint });
+  if (ex.error) {
+    console.error('connector-link failed', provider, ex.error, ex.hint || '');   // v1313 — CloudWatch gets the provider's rejection code (no secrets)
+    return json(502, { error: ex.error, provider, hint: ex.hint });
+  }
   await ddb.send(new PutCommand({
     TableName: OBJECT_TABLE,
     Item: { PK: `USER#${auth.orchardUserId}`, SK: `CONNLINK#${provider}`, provider, refreshToken: ex.refreshToken, scope: ex.scope, linkedAt: new Date().toISOString() },
