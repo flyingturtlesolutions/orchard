@@ -102,7 +102,7 @@ function _planExec(leg, params = {}, ctx = {}) {
     }
     if (!t.server || !t.name) return fail('connector', 'connector-no-binding');
     return { ok: true, channel: 'INVOKE_CONNECTOR', busyMark: false, mode, domain: 'connector',
-             payload: { server: t.server, tool: t.name, args: p }, reason: 'connector-invoke' };
+             payload: { server: t.server, tool: t.name, args: p, write: mode === 'act' }, reason: 'connector-invoke' };   // CX-5b — write flag lets the handler fail-close (Belt #1, §9)
   }
   return fail(domain, 'no-dispatch');
 }

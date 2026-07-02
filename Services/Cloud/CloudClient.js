@@ -117,6 +117,29 @@ export async function fetchPublication(publicationId) {
 export async function searchPublications(query) {
   return /** @type {any} */ (cloudRequest('GET', '/publications', { query: query ? { query } : {} }));
 }
+
+// ── Connectors (broker / OAuth·MCP) — CX-5b (DESIGN_connectors.md §5, §7) ─────
+// The extension NEVER holds a third-party token: it sends {server, tool, args} to the proxy, which injects the
+// vaulted OAuth secret at egress. A write carries confirmed:true (the INVOKE_CONNECTOR handler already fail-closed on
+// it). A 404/501 means the connector proxy isn't provisioned yet → Core/brokerInvoke normalizes it to 'broker-unavailable'.
+/**
+ * @param {{ server:string, tool:string, args?:object, confirmed?:boolean }} req
+ * @returns {Promise<{ success?:boolean, value?:unknown, error?:string }>}
+ */
+export async function invokeConnector(req) {
+  return /** @type {any} */ (cloudRequest('POST', '/connectors/invoke', { body: req }));
+}
+/**
+ * Discover broker tools for a goal — the proxy returns OfferedLeg descriptors only, never credentials.
+ * @param {{ q?:string, k?:number }} [opts]
+ * @returns {Promise<{ tools?: object[] }>}
+ */
+export async function listConnectorTools({ q = '', k } = {}) {
+  const query = {};
+  if (q) query.q = q;
+  if (k != null) query.k = String(k);
+  return /** @type {any} */ (cloudRequest('GET', '/connectors/tools', { query }));
+}
 /**
  * Newer versions in the publication's lineage (DD-12 B).
  * @param {string} publicationId

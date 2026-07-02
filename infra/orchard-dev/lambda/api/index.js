@@ -1337,6 +1337,81 @@ async function handleLlmMessages(event) {
   return { statusCode: upstream.status, headers: { 'content-type': 'application/json' }, body: text };
 }
 
+// ── Connectors (broker / OAuth·MCP) — CX-5b (DESIGN_connectors.md §5, §5.2) ───────────────
+// The broker's server half. The extension sends {server, tool, args, confirmed}; the proxy injects
+// the user's vaulted OAuth token at egress and calls the provider's official API. v1 is a per-provider
+// REST adapter (NO MCP server process, per §5.2 — a stdio server would need Fargate; Google has clean
+// REST). Per-user link records (the tokens) live in OBJECT_TABLE (PK USER#, SK CONNLINK#{provider});
+// the link flow populates them. HONEST DEGRADATION: until a provider's OAuth client is configured (env)
+// AND the user has linked, invoke returns a structured 'connector-not-linked' — it never fakes a result.
+const CONNECTOR_WRITE_TOOLS = {
+  'google-calendar': new Set(['create_event', 'update_event', 'delete_event']),
+  'google-gmail': new Set(['send_message', 'create_draft']),
+};
+function connectorIsWrite(server, tool) {
+  const s = CONNECTOR_WRITE_TOOLS[server];
+  return !!(s && s.has(tool));
+}
+function connectorProviderOf(server) { return String(server || '').split('-')[0]; }   // google-calendar → google
+
+// The per-user link/token record. Absent (or no refreshToken) = the provider isn't linked for this user.
+async function getConnectorLink(orchardUserId, provider) {
+  const res = await ddb.send(new GetCommand({
+    TableName: OBJECT_TABLE,
+    Key: { PK: `USER#${orchardUserId}`, SK: `CONNLINK#${provider}` },
+  }));
+  return res.Item || null;
+}
+
+// POST /connectors/invoke — the execution endpoint the extension's CloudClient.invokeConnector calls.
+async function handleConnectorInvoke(event) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+  let body = {};
+  try { body = event.body ? JSON.parse(event.body) : {}; } catch { return json(400, { error: 'invalid_json' }); }
+  const server = String(body.server || '').trim();
+  const tool = String(body.tool || '').trim();
+  if (!server || !tool) return json(400, { error: 'connector-no-binding' });
+  // Belt (§9) — defense in depth: the extension already fail-closed on writes; the proxy re-checks that
+  // a write carries an explicit confirmed:true and never runs one unattended.
+  if (connectorIsWrite(server, tool) && body.confirmed !== true) {
+    return json(403, { error: 'write-needs-confirm', server, tool });
+  }
+  const provider = connectorProviderOf(server);
+  const link = await getConnectorLink(auth.orchardUserId, provider);
+  if (!link || !link.refreshToken) {
+    return json(409, { error: 'connector-not-linked', provider, hint: `link ${provider} first` });
+  }
+  // NEXT (per-provider adapter): exchange the refresh token → access token, call the official API
+  // (e.g. googleapis /calendar/v3), normalize → { success, value }. A linked-but-unimplemented server
+  // is honest about it rather than faking success.
+  return json(501, { error: 'connector-adapter-not-implemented', server, tool });
+}
+
+// GET /connectors/tools — discovery. Reports which providers the CALLER has linked (descriptors only,
+// never tokens) so the client can gate surfacing. The tool catalog itself is curated client-side
+// (Core/brokerCatalog); a live MCP tools/list would populate `tools` once the adapters land.
+async function handleConnectorTools(event) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+  const linked = [];
+  for (const p of ['google']) {
+    const link = await getConnectorLink(auth.orchardUserId, p);
+    if (link && link.refreshToken) linked.push(p);
+  }
+  return json(200, { tools: [], linked });
+}
+
+// POST /connectors/link/{provider} — begin the OAuth link. Needs a registered OAuth client (env, set
+// once per provider). Not-configured is honest; the authorize-URL + callback token exchange land next.
+async function handleConnectorLink(event, provider) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+  const clientId = process.env[`${String(provider).toUpperCase()}_OAUTH_CLIENT_ID`];
+  if (!clientId) return json(503, { error: 'connector-not-configured', provider, hint: 'no OAuth client registered for this provider' });
+  return json(501, { error: 'connector-link-not-implemented', provider });
+}
+
 exports.handler = async (event) => {
   try {
     const method = event.requestContext?.http?.method || 'GET';
@@ -1422,6 +1497,14 @@ exports.handler = async (event) => {
     }
 
     if (method === 'POST' && path === '/llm/messages') return handleLlmMessages(event);
+
+    // Connectors (broker / OAuth·MCP) — CX-5b §5
+    if (method === 'POST' && path === '/connectors/invoke') return handleConnectorInvoke(event);
+    if (method === 'GET' && path === '/connectors/tools') return handleConnectorTools(event);
+    if (path.startsWith('/connectors/link/')) {
+      const provider = decodeURIComponent(path.slice('/connectors/link/'.length));
+      if (method === 'POST' && provider) return handleConnectorLink(event, provider);
+    }
 
     return json(404, { error: 'not_found', method, path });
   } catch (err) {

@@ -116,7 +116,7 @@ import {
   signInToCloud,
   signOutOfCloud,
 } from './Services/Cloud/OrchardAuth.js';
-import { getIdentityMe, getCloudObject } from './Services/Cloud/CloudClient.js';
+import { getIdentityMe, getCloudObject, invokeConnector } from './Services/Cloud/CloudClient.js';   // CX-5b — invokeConnector → POST /connectors/invoke (broker)
 import { getIdentitySummary } from './Core/OrchardIdentity.js';
 import { syncBridgeOnStorageChange } from './Services/Sync/SyncBridge.js';
 import {
@@ -1701,7 +1701,7 @@ function _readSgSpec(groundId, url, intent) {
 
 // v2.74.951 (CR-X3a) — domain handler maps merge here; the dispatch + _invokeSgHandler serve them all.
 const _sgMessageHandlers = {
-  ...createConnectorHandlers({ ensureContentScript: _ensureContentScript, readRideRecipes: _readRideRecipes }),   // CX-3 — connector domain (INVOKE_SESSION session-ride); §18 — readRideRecipes feeds the arm guard
+  ...createConnectorHandlers({ ensureContentScript: _ensureContentScript, readRideRecipes: _readRideRecipes, cloudInvokeConnector: invokeConnector }),   // CX-3 — connector domain (INVOKE_SESSION session-ride); §18 — readRideRecipes feeds the arm guard; CX-5b — cloudInvokeConnector → INVOKE_CONNECTOR broker
   ...createCanvasHandlers({   // CA-4 RENDER_CANVAS + CA-9 COMPOSE_CANVAS (the app authors a spec → render)
     log: (line) => { try { Logger.info('background', line); } catch { /* */ } },
     composeCanvas: (args) => AnthropicService.composeCanvas(args),

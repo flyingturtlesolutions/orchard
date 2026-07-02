@@ -16,6 +16,7 @@
 import { fillEndpoint, fillBody, recipeForOrigin } from '../../Core/connectorRecipes.js';
 import { pickRideTab, assessProbe, rideAction, STATUS, classifyReachProbe } from '../../Core/connection.js';
 import { armable } from '../../Core/rideRecipe.js';   // §18 — the arm guard: a non-armable (disabled / pending / rejected) per-Ground recipe must not run
+import { brokerInvokeGate, brokerReplyFromCloud } from '../../Core/brokerInvoke.js';   // CX-5b — the broker (OAuth/MCP) fail-closed gate + cloud-reply normalizer (pure)
 import { Logger } from '../../Core/Logger.js';   // §20 — SESSION_REPLAY outcome observability (Invariant #1)
 import { armRideAuthCapture } from './sg.js';   // §20 — keep the page-local token fresh on the app tab (no import cycle: sg.js doesn't import connector.js)
 
@@ -128,7 +129,7 @@ function _replayFetchFunc(url, apiHost, method, reqBody, contentType) {
   })();
 }
 
-export function createConnectorHandlers({ ensureContentScript, readRideRecipes } = {}) {
+export function createConnectorHandlers({ ensureContentScript, readRideRecipes, cloudInvokeConnector } = {}) {
   const fetchVia = (tabId, url, method, body) =>
     chrome.tabs.sendMessage(tabId, { type: 'SESSION_FETCH', payload: { url, method, body } }, { frameId: 0 });
   // The TOP-FRAME content script can be orphaned (an extension reload kills it; the all-frames PING can read a live
@@ -232,6 +233,32 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes }
         } finally {
           if (ephemeralOrigin) _releaseEphemeralTab(ephemeralOrigin);   // idle-close (a burst reuses first; a re-auth-focused tab was promoted out)
         }
+      })();
+      return true;   // async — keep the sendResponse channel open
+    },
+
+    // CX-5b (v2.74.1306) — INVOKE_CONNECTOR (OAuth/MCP broker, §5/§7): the model SELECTED a broker tool; we hand
+    // {server, tool, args} to the cloud proxy, which injects the vaulted OAuth secret at egress (the extension never
+    // sees a third-party token). A WRITE is fail-closed behind explicit confirmed:true HERE (Belt #1, §9) before it
+    // leaves the extension; the proxy re-checks. A 404/501 (proxy not provisioned) → 'broker-unavailable' (honest).
+    // Never drives a tab → not busy-marked. Logs `CONNECTOR_INVOKE ▸` (Invariant #1: in studio.js _DECISION_RE).
+    'INVOKE_CONNECTOR': (payload, _sender, sendResponse) => {
+      (async () => {
+        const gate = brokerInvokeGate(payload);
+        const who = `${(payload && payload.server) || '?'}/${(payload && payload.tool) || '?'}`;
+        if (!gate.ok) {
+          try { Logger.info('connector', `CONNECTOR_INVOKE ▸ ${who} → BLOCKED (${gate.error})`); } catch { /* */ }
+          sendResponse({ success: false, error: gate.error, hint: gate.hint }); return;
+        }
+        if (typeof cloudInvokeConnector !== 'function') {
+          try { Logger.warn('connector', `CONNECTOR_INVOKE ▸ ${who} → no proxy client wired`); } catch { /* */ }
+          sendResponse({ success: false, error: 'broker-unavailable', hint: 'the connector proxy is not wired' }); return;
+        }
+        let resp = null, err = null;
+        try { resp = await cloudInvokeConnector(gate.request); } catch (e) { err = e; }
+        const reply = brokerReplyFromCloud({ resp, err });
+        try { Logger.info('connector', `CONNECTOR_INVOKE ▸ ${gate.request.server}/${gate.request.tool} ${gate.write ? '(write)' : '(read)'} → ${reply.success ? 'ok' : reply.error}`); } catch { /* */ }
+        sendResponse(reply);
       })();
       return true;   // async — keep the sendResponse channel open
     },

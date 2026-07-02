@@ -108,6 +108,15 @@ describe('planExec — leg → dispatch plan (pure §4.2)', () => {
     assert.equal(plan.payload.server, 'zendesk');
     assert.equal(plan.payload.tool, 'get_ticket');
     assert.equal(plan.payload.args.ticket_id, 12345);
+    assert.equal(plan.payload.write, false);   // CX-5b — a read (mode 'ask') carries write:false
+  });
+
+  it('CX-5b: an oauth WRITE (mode act) carries write:true so the handler can fail-close', () => {
+    const leg = { key: 'me.google-calendar.create_event', domain: 'connector', source: 'builtin', mode: 'act',
+                  tool: { impl: 'oauth', server: 'google-calendar', name: 'create_event' } };
+    const plan = planExec(leg, { summary: 'Lunch' }, {});
+    assert.equal(plan.channel, 'INVOKE_CONNECTOR');
+    assert.equal(plan.payload.write, true);
   });
 });
 

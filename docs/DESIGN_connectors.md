@@ -85,6 +85,47 @@ mcpTool { name, description, inputSchema, annotations } ⇒
 - **Catalog = curated + user-add (mixed).** Ship a vetted catalog (servers + recipes) → eligible for the read-trust allowlist; let users add their own MCP server URLs / recipes → **always untrusted** (every tool `confirm`/`gated`, never on the allowlist). Available registries to seed the curated set: the official MCP Registry, Anthropic's connectors directory, Docker's MCP Catalog, community aggregators (Smithery, mcp.so, Glama, PulseMCP).
 - **SSO for teams (mode B).** Identity via the org IDP; derive app auth via OAuth Token Exchange (RFC 8693) / IDP federation where the app supports it, SSO-gated per-app OAuth otherwise. Maps onto the existing Phase C workspace/ACL model. Individuals (no IDP) use plain per-app OAuth; the broker resolves every invoke to the **calling user's** vault (§12).
 
+### 5.1 The protocol, end to end (mental model)
+
+MCP is "USB-C for tools": one Host speaks one protocol to any Server; each Server wraps one system and advertises what it can do. The model picks from that menu — it never touches the API.
+
+```
+  User ──ask──▶ ┌──────────────────┐  MCP · JSON-RPC   ┌────────────┐  REST/SDK  ┌───────────────┐
+                │ MCP HOST         │ ◀═══════════════▶ │ MCP SERVER │ ─────────▶ │ Provider/Data │
+                │ LLM + MCP Client │                   │  (tools/…) │            │ Google·Slack  │
+                └──────────────────┘                   └────────────┘            └───────────────┘
+
+  Per connection — negotiated ONCE, then reused:
+   ① initialize   client ▶ server   negotiate protocol version + capabilities
+   ② tools/list   client ▶ server   "what can you do?"
+   ③ (tools)      client ◀ server   [create_event, list_events, delete_event, …]
+   ④ SELECT       (model)           picks a tool + fills args      ◀── the ONLY model step
+   ⑤ tools/call   client ▶ server   { name, args } → server runs it against the provider
+   ⑥ result       client ◀ server   structured JSON → back to the reasoner
+```
+
+- **Transports (same JSON-RPC either way):** `stdio` = server is a LOCAL subprocess *you* host · `Streamable HTTP` = server is a REMOTE endpoint someone else hosts (your client is just an HTTPS caller). This distinction — not the protocol — is the whole hosting question (§5.2).
+- **A server exposes three primitives:** **Tools** (actions, model-picked) · **Resources** (data, app-picked) · **Prompts** (templates, user-picked). Orchard consumes **Tools** today (→ `mcpToolToLeg` → `OfferedLeg`); Resources are a later read-context source.
+- **Invariant preserved:** the SERVER executes; the model only SELECTED — the same LLM-proposes / Orchard-executes-and-verifies spine as `drive`/`ride`. (This is why Anthropic's API-level MCP connector, where the model calls tools mid-turn, is the *wrong* fit — it breaks "the model never executes.")
+
+### 5.2 Backend hosting strategy — "MCP server" is usually a URL, not a process (decided 2026-07-01)
+
+Reaching many providers (Notion, Slack, Google, …) does **not** force us to run MCP server processes. Three strategies, chosen **per provider**; `mcpToolToLeg` normalizes all three to the same `OfferedLeg`, so **the extension never changes**:
+
+| Strategy | What *we* run | Per-provider cost | OAuth | When |
+|---|---|---|---|---|
+| **REST adapter** (no MCP) | nothing new — path cases in the existing API Lambda | bespoke adapter + our own OAuth app, each | we own it | first 1–3 high-value providers (Google · Slack · Notion all have clean REST) |
+| **MCP client → *remote* MCP** | one MCP client (fits the Lambda; HTTPS calls) | ≈ 0 — discover via `tools/list` | often the remote server owns it | breadth: any provider that publishes a hosted MCP endpoint |
+| **Self-hosted MCP *process*** | N long-lived containers (Fargate/ECS) | host + operate each | us or the server | last resort: a stdio-only server we must reach via MCP, or self-host for isolation |
+
+- **The literal server PROCESS is the last resort, not the default.** Streamable-HTTP servers are HTTPS endpoints → an MCP *client* in the request-scoped Lambda reaches them with nothing to host. Only stdio-only servers need Fargate.
+- **This is FEATURE CODE on already-deployed infra, not new infra.** The AWS stack (`infra/orchard-dev/lib/p0-stack.js`, Phase C-P0/1/2) is live: Cognito UserPool + hosted OAuth domain · API Gateway v2 → one proxy Lambda (`/v1/{proxy+}`) behind a Cognito JWT authorizer · DynamoDB · S3 · KMS · **Secrets Manager (already vaults the Anthropic key — the exact vault pattern the broker needs)**. Build = add `/v1/connectors/{tools,invoke,link/*}` path cases in `lambda/api/index.js` (no new APIGW routes) + a per-user token item (KMS-encrypted DynamoDB keyed by Cognito `sub`, or Secrets Manager) + a per-provider OAuth client + the extension's `INVOKE_CONNECTOR` handler → `CloudClient.invokeConnector`.
+- **Google, concretely:** skip MCP — the Lambda calls `googleapis.com` directly with the vaulted token (a REST adapter). "MCP" is then only the tool-schema shape `mcpToolToLeg` consumes. *(Client-side alt: `chrome.identity.getAuthToken` + direct googleapis from the SW — no backend at all; Google-only, browser-bound, not headless.)*
+- **Eyeball boundary:** the backend half deploys to AWS (`cdk deploy` + a live OAuth round-trip) → not harness-verifiable. Correctly located at **deploy**, not at "infrastructure."
+- **Recommended order:** REST adapter for Google/Slack/Notion → add an MCP client for remote-MCP breadth → Fargate only for the stragglers.
+
+**Status (v2.74.1305):** CX-5a pure foundation built — `Core/brokerCatalog.js` (curated Google Calendar + Gmail; `brokerConnectorForHost` + `brokerLegsForHost` → `impl:'oauth'` legs via `mcpToolToLeg`; 8 tests). Closes the leg-availability loop (a Google Ground → Broker recommended). CX-5b (the `INVOKE_CONNECTOR` handler + `CloudClient.invokeConnector` + backend routes) is next, per the order above.
+
 ## 6. Palette source & availability
 
 `assemblePalette` unions **learned** (`retrieve`, R-2) + **builtins**. Add connectors via one injected dep:
@@ -145,7 +186,7 @@ Reads favor the credential-free path; writes favor the *scoped, governable* path
 4. **CX-4a — param-free list reads, `il:`-invokable (no LLM binder).** A `my_open_tickets`-style recipe (param-free; identity = the session cookie) + origin **auto-derived from the open `*.{appHost}` tab**; inject connector legs into the live `offer`; render the list. The realistic first feature (§13).
    - **CX-4b — the param-binder** for by-id / filtered reads (§12) + the read→session-ride arbitration (`retrieveConnectors`, the `env.connectors` set, per-class retrieval slot).
    - **CX-4c — the autonomous arc** (§13): connector list → `agentLoop` `foreach` → per-item work.
-5. **CX-5 — the broker (cloud).** MCP client + vault + `GET/POST` in the Phase C-P3 proxy; one OAuth read connector.
+5. **CX-5 — the broker (cloud).** Backend strategy in **§5.2** (REST-adapter → remote-MCP-client → self-host, per provider — the literal MCP process is the last resort). **CX-5a done (v2.74.1305):** `Core/brokerCatalog.js` — Google seed catalog + `brokerLegsForHost` projection, closes the leg-availability loop. **CX-5b next:** `INVOKE_CONNECTOR` handler + `CloudClient.invokeConnector` + `/v1/connectors/*` path cases on the existing API Lambda + per-user vault (reuse the Secrets-Manager pattern); one OAuth connector (Google, direct-REST adapter).
 6. **CX-6 — writes + HITL.** A write connector through `confirm`/`gated` (both impls); the alias-collision demote.
 7. **CX-7 — the connection layer + catalog UX.** A "connection" is *which instance · which role · which host*, beyond the open tab: **disambiguate** multiple open `*.appHost` tabs (prefer the active / most-recently-used — shipped in CX-4a.2), the **ephemeral managed tab** for cold-start (open→fetch→close + re-auth focus, §16) when none is open, and pick the **agent vs end-user** recipe by role. Plus OAuth link / user recipes / SSO-for-teams; `env.connectors` reflects linked + logged-in state.
 8. **CX-8 — learn-from-traffic authoring.** One demonstration captures DOM actions **and** the page's network calls (a MAIN-world `fetch`/`XHR` tee) → emits the grounded fragments **and** a session-ride recipe per observed read/write, bound to the same step as an alternative leg (the "learnable from traffic" hook in §4/§12). The multiplier that makes hybrid legs (CX-9) *automatic* instead of hand-authored.
