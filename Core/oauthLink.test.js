@@ -70,6 +70,11 @@ describe('mcpServers — providerScopes (one dance grants every server the provi
     assert.ok(scopes.includes('https://www.googleapis.com/auth/calendar.events'));
     assert.equal(new Set(scopes).size, scopes.length);
   });
+  it('GD-2: REST-channel servers (google-docs, catalog-only) join the union — one re-link grants Calendar + Docs', () => {
+    const scopes = providerScopes('google');
+    assert.ok(scopes.includes('https://www.googleapis.com/auth/documents'));
+    assert.ok(scopes.includes('https://www.googleapis.com/auth/drive.file'));
+  });
   it('unknown provider → []', () => {
     assert.deepEqual(providerScopes('nope'), []);
   });

@@ -13,6 +13,24 @@
 'use strict';
 
 const CAL_BASE = 'https://www.googleapis.com/calendar/v3';
+const DOCS_BASE = 'https://docs.googleapis.com/v1';
+
+// GD-2 — render_document takes PRE-LOWERED batchUpdate requests (Core/canvasLower runs client-side, pure+tested).
+// To keep that from being a raw write conduit, the request SHAPES are allowlisted here: exactly the vocabulary the
+// lowering emits, nothing else (no replaceAllText, no insertInlineImage, no named-range ops until v2). Belt-and-
+// suspenders with drive.file (the token can only touch app-created docs anyway).
+const _DOC_REQ_KINDS = ['insertText', 'deleteContentRange', 'updateTextStyle', 'updateParagraphStyle', 'createParagraphBullets'];
+const _DOC_REQ_MAX = 400;
+function _validDocRequests(requests) {
+  if (!Array.isArray(requests) || !requests.length) return 'render-needs-requests';
+  if (requests.length > _DOC_REQ_MAX) return `too many requests (${requests.length} > ${_DOC_REQ_MAX})`;
+  for (const r of requests) {
+    if (!r || typeof r !== 'object') return 'malformed request';
+    const keys = Object.keys(r);
+    if (keys.length !== 1 || !_DOC_REQ_KINDS.includes(keys[0])) return `disallowed request kind: ${keys.join(',') || '(empty)'}`;
+  }
+  return null;
+}
 
 const _cid = (args) => encodeURIComponent(String((args && args.calendarId) || 'primary'));
 const _hasOffset = (s) => /(?:Z|[+-]\d{2}:?\d{2})$/.test(String(s || ''));
@@ -50,12 +68,37 @@ const _slim = (e) => (e && typeof e === 'object')
  * @returns {Promise<{ success:true, value:any } | { success:false, error:string, hint?:string }>}
  */
 async function invokeGoogleRestTool({ server, tool, args = {}, accessToken = null, fetchImpl = globalThis.fetch, deadlineMs = 15000 } = {}) {
-  if (String(server) !== 'google-calendar') return { success: false, error: 'unknown-rest-server', hint: `no REST adapter for "${server}"` };
+  const srv = String(server);
+  if (srv !== 'google-calendar' && srv !== 'google-docs') return { success: false, error: 'unknown-rest-server', hint: `no REST adapter for "${server}"` };
   if (typeof fetchImpl !== 'function') return { success: false, error: 'no-fetch' };
   const a = args || {};
 
   let req = null;   // { method, url, body? }
-  if (tool === 'list_events') {
+  let shape = null; // per-tool reply minimizer override
+  if (srv === 'google-docs') {
+    // GD-2 (DESIGN_canvas.md §8) — the Docs presentation backend. drive.file scope ⇒ only app-created docs reachable.
+    if (tool === 'create_document') {
+      if (!a.title) return { success: false, error: 'tool-error', hint: 'title is required' };
+      req = { method: 'POST', url: `${DOCS_BASE}/documents`, body: { title: String(a.title) } };
+      shape = (d) => ({ documentId: d.documentId, title: d.title, revisionId: d.revisionId });
+    } else if (tool === 'get_document') {
+      if (!a.documentId) return { success: false, error: 'tool-error', hint: 'documentId is required' };
+      req = { method: 'GET', url: `${DOCS_BASE}/documents/${encodeURIComponent(String(a.documentId))}?fields=documentId,title,revisionId,body.content(endIndex)` };
+      shape = (d) => {
+        const content = (d.body && Array.isArray(d.body.content)) ? d.body.content : [];
+        const bodyEndIndex = content.length ? (content[content.length - 1].endIndex || 1) : 1;   // the replace-body parameter (canvasLower)
+        return { documentId: d.documentId, title: d.title, revisionId: d.revisionId, bodyEndIndex };
+      };
+    } else if (tool === 'render_document') {
+      if (!a.documentId) return { success: false, error: 'tool-error', hint: 'documentId is required' };
+      const bad = _validDocRequests(a.requests);
+      if (bad) return { success: false, error: 'tool-error', hint: bad };
+      req = { method: 'POST', url: `${DOCS_BASE}/documents/${encodeURIComponent(String(a.documentId))}:batchUpdate`, body: { requests: a.requests } };
+      shape = (d) => ({ documentId: d.documentId, applied: Array.isArray(d.replies) ? d.replies.length : 0 });
+    } else {
+      return { success: false, error: 'unknown-tool', hint: `no REST mapping for "${tool}"` };
+    }
+  } else if (tool === 'list_events') {
     const q = new URLSearchParams({ singleEvents: 'true', orderBy: 'startTime' });
     if (a.startTime) q.set('timeMin', _listBound(String(a.startTime)));
     if (a.endTime) q.set('timeMax', _listBound(String(a.endTime)));
@@ -97,6 +140,7 @@ async function invokeGoogleRestTool({ server, tool, args = {}, accessToken = nul
       const items = (data && Array.isArray(data.items)) ? data.items.map(_slim) : [];
       return { success: true, value: { events: items, count: items.length } };
     }
+    if (shape) return { success: true, value: shape(data || {}) };   // GD-2 — per-tool minimizer (docs)
     return { success: true, value: _slim(data) };
   } catch (e) {
     const aborted = ctl.signal.aborted;

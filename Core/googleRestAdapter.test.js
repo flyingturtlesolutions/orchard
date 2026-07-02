@@ -7,6 +7,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import googleRest from '../infra/orchard-dev/lambda/api/googleRest.cjs';
+import { specToDocsRequests } from './canvasLower.js';   // GD-2 — the lowering's output must pass the adapter's allowlist (integration)
 
 const { invokeGoogleRestTool } = googleRest;
 
@@ -66,6 +67,41 @@ describe('googleRest — list_events (the read)', () => {
     assert.equal(u.searchParams.get('maxResults'), '10');
     assert.equal(u.searchParams.get('q'), 'standup');
     assert.equal(u.searchParams.get('singleEvents'), 'true');
+  });
+});
+
+describe('googleRest — google-docs (GD-2: the presentation backend)', () => {
+  it('create_document POSTs the title and minimizes the reply', async () => {
+    const fetchImpl = fakeFetch({ body: { documentId: 'doc9', title: 'Ticket #1', revisionId: 'r1', body: { content: [] }, extra: 'dropped' } });
+    const r = await invokeGoogleRestTool({ server: 'google-docs', tool: 'create_document', args: { title: 'Ticket #1' }, accessToken: 'tok', fetchImpl });
+    assert.deepEqual(r, { success: true, value: { documentId: 'doc9', title: 'Ticket #1', revisionId: 'r1' } });
+    assert.match(fetchImpl.calls[0].url, /docs\.googleapis\.com\/v1\/documents$/);
+    assert.equal((await invokeGoogleRestTool({ server: 'google-docs', tool: 'create_document', args: {}, fetchImpl })).hint, 'title is required');
+  });
+  it('get_document computes bodyEndIndex from the last structural element (the replace-body parameter)', async () => {
+    const fetchImpl = fakeFetch({ body: { documentId: 'doc9', title: 'T', revisionId: 'r2', body: { content: [{ endIndex: 1 }, { endIndex: 87 }] } } });
+    const r = await invokeGoogleRestTool({ server: 'google-docs', tool: 'get_document', args: { documentId: 'doc9' }, fetchImpl });
+    assert.equal(r.value.bodyEndIndex, 87);
+    const empty = await invokeGoogleRestTool({ server: 'google-docs', tool: 'get_document', args: { documentId: 'doc9' }, fetchImpl: fakeFetch({ body: { documentId: 'doc9', body: { content: [] } } }) });
+    assert.equal(empty.value.bodyEndIndex, 1);
+  });
+  it('render_document: canvasLower output PASSES the allowlist end-to-end; a disallowed kind is named + never sent', async () => {
+    const spec = { blocks: [
+      { id: 'c', kind: 'markdown', text: '## Context\n\nHub **offline**.' },
+      { id: 'd', kind: 'compose', ref: 'r', text: 'Hi **Jane**,\n\n- restart the hub' },
+    ] };
+    const { requests } = specToDocsRequests(spec, { bodyEndIndex: 50 });
+    const fetchImpl = fakeFetch({ body: { documentId: 'doc9', replies: requests.map(() => ({})) } });
+    const r = await invokeGoogleRestTool({ server: 'google-docs', tool: 'render_document', args: { documentId: 'doc9', requests }, accessToken: 'tok', fetchImpl });
+    assert.equal(r.success, true);
+    assert.equal(r.value.applied, requests.length);
+    assert.match(fetchImpl.calls[0].url, /doc9:batchUpdate$/);
+    const blocked = fakeFetch({ body: {} });
+    const bad = await invokeGoogleRestTool({ server: 'google-docs', tool: 'render_document', args: { documentId: 'doc9', requests: [{ replaceAllText: {} }] }, fetchImpl: blocked });
+    assert.equal(bad.error, 'tool-error');
+    assert.match(bad.hint, /disallowed request kind: replaceAllText/);
+    assert.equal(blocked.calls.length, 0, 'a disallowed request never reaches the API');
+    assert.match((await invokeGoogleRestTool({ server: 'google-docs', tool: 'render_document', args: { documentId: 'doc9', requests: [] }, fetchImpl: blocked })).hint, /render-needs-requests/);
   });
 });
 

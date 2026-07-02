@@ -11,6 +11,7 @@ import { writeCanvasSpec } from '../../Services/Storage/CanvasStore.js';
 import { canvasDocId } from '../../Core/canvasSpec.js';
 import { builtinApp } from '../../Core/appCatalog.js';
 import { describeObjectModel } from '../../Core/appDef.js';
+import { specToDocsRequests } from '../../Core/canvasLower.js';   // GD-3 (§8) — the pure spec→batchUpdate lowering (the gdoc backend's paint)
 
 const CANVAS_PAGE = 'canvas.html';
 
@@ -34,14 +35,64 @@ async function _openCanvasTab(anchor) {
   } catch { return null; }
 }
 
-export function createCanvasHandlers({ log, composeCanvas } = {}) {
+export function createCanvasHandlers({ log, composeCanvas, cloudInvokeConnector } = {}) {
   const note = (line) => { try { if (typeof log === 'function') log(line); } catch { /* never let a log break a render */ } };
 
-  // Shared render: normalize+persist the spec (CanvasStore stamps rev) then open/focus the tab. Returns the response.
+  // GD-3 (DESIGN_canvas.md §8) — the EXTERNAL gdoc backend: paint the spec into the app's own Google Doc via the
+  // broker's REST channel. The doc is app-created under drive.file (the §8.1 ownership boundary — the token cannot
+  // touch any other file), display-only by contract, and repainted replace-body from the SPEC (the single source of
+  // truth — never read back). `confirmed:true` here is the §8.1-auto design decision: a render to the app's OWN
+  // presentation doc is app plumbing (like a tab paint), NOT a model-driven write — the wire belt still gets its
+  // explicit flag, and interpret-selected docs writes keep the normal HITL bar. Create-once per anchor; a vanished
+  // doc (deleted by the user) recreates once.
+  const _GDOC_KEY = (docId) => `canvas:gdocId:${docId}`;
+  async function _renderGdoc(anchor, stored, docId) {
+    if (typeof cloudInvokeConnector !== 'function') return { error: 'broker-unavailable' };
+    const invoke = async (tool, args) => {
+      try { return await cloudInvokeConnector({ server: 'google-docs', tool, args, confirmed: true }); }
+      catch (e) { return { success: false, error: (e && e.message) || 'invoke-failed', hint: (e && e.body && e.body.hint) || undefined }; }
+    };
+    const key = _GDOC_KEY(docId);
+    let documentId = null;
+    try { documentId = (await chrome.storage.local.get(key))[key] || null; } catch { /* */ }
+    for (let attempt = 0; attempt < 2; attempt++) {   // attempt 2 = recreate after a vanished doc
+      if (!documentId) {
+        const created = await invoke('create_document', { title: (stored && stored.title) || 'Orchard Canvas' });
+        if (!created || created.success === false || !created.value || !created.value.documentId) {
+          return { error: (created && created.error) || 'gdoc-create-failed', hint: created && created.hint };
+        }
+        documentId = created.value.documentId;
+        try { await chrome.storage.local.set({ [key]: documentId }); } catch { /* */ }
+      }
+      const meta = await invoke('get_document', { documentId });
+      if (!meta || meta.success === false) {
+        documentId = null;                                   // vanished / inaccessible → drop the id and recreate once
+        try { await chrome.storage.local.remove(key); } catch { /* */ }
+        continue;
+      }
+      const { requests } = specToDocsRequests(stored, { bodyEndIndex: meta.value.bodyEndIndex || 1 });
+      if (!requests.length) return { documentId, applied: 0 };
+      const painted = await invoke('render_document', { documentId, requests });
+      if (!painted || painted.success === false) return { error: (painted && painted.error) || 'gdoc-render-failed', hint: painted && painted.hint, documentId };
+      return { documentId, applied: painted.value ? painted.value.applied : requests.length };
+    }
+    return { error: 'gdoc-recreate-failed' };
+  }
+
+  // Shared render: normalize+persist the spec (CanvasStore stamps rev), then paint the app's chosen backend —
+  // the canvas TAB (default) or the external gdoc (§8; the Doc is the surface, so no tab opens). Returns the response.
   async function _render(anchor, spec, op, focus) {
     const docId = canvasDocId(anchor);
     if (!docId) return { success: false, error: 'canvas-no-anchor' };
     const stored = await writeCanvasSpec(anchor, spec);
+    const backend = (builtinApp(anchor.appId)?.presentation?.backend) || 'tab';
+    if (backend === 'gdoc') {
+      const g = await _renderGdoc(anchor, stored, docId);
+      note(`CANVAS ▸ ${op} → ${docId} gdoc ${g.error ? `ERROR ${g.error}${g.hint ? ` (${g.hint})` : ''}` : `${g.documentId} (applied ${g.applied})`} (rev ${stored ? stored.rev : '?'})`);
+      return g.error
+        ? { success: false, op, docId, rev: stored ? stored.rev : null, error: g.error, hint: g.hint }
+        : { success: true, op, docId, rev: stored ? stored.rev : null, gdoc: g };
+    }
     const tabId = (focus !== false) ? await _openCanvasTab(anchor) : null;   // a cadence refresh may pass focus:false
     note(`CANVAS ▸ ${op} → ${docId} (rev ${stored ? stored.rev : '?'}, ${stored ? stored.blocks.length : 0} blocks)`);
     return { success: true, op, docId, rev: stored ? stored.rev : null, tabId };

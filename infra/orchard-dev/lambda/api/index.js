@@ -1350,6 +1350,7 @@ async function handleLlmMessages(event) {
 const CONNECTOR_WRITE_TOOLS = {
   'google-calendar': new Set(['create_event', 'update_event', 'delete_event']),
   'google-gmail': new Set(['send_message', 'create_draft']),
+  'google-docs': new Set(['create_document', 'render_document']),   // GD-2 — renders are §8.1-auto CLIENT-side (app-owned doc, drive.file); the belt still demands confirmed:true on the wire
 };
 function connectorIsWrite(server, tool) {
   const s = CONNECTOR_WRITE_TOOLS[server];
@@ -1401,7 +1402,7 @@ async function handleConnectorInvoke(event) {
   if (!result.success) console.error('connector-invoke failed', server, tool, `[${channel}]`, result.error, result.hint || '');   // v1314 — CloudWatch names the tool's own error (no secrets)
   return json(200, result);
 }
-const CONNECTOR_CHANNEL = { 'google-calendar': 'google-rest' };   // v1318 — per-server execution channel (default 'mcp')
+const CONNECTOR_CHANNEL = { 'google-calendar': 'google-rest', 'google-docs': 'google-rest' };   // v1318/GD-2 — per-server execution channel (default 'mcp')
 
 // GET /connectors/tools — MP-2c discovery: which providers the CALLER has linked + the LIVE tool descriptors
 // (tools/list) for each linked provider's MCP-channel servers. Descriptors only, never tokens. REST-channel servers

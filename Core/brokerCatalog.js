@@ -46,6 +46,23 @@ export const BROKER_CATALOG = Object.freeze([
         inputSchema: { type: 'object', properties: { eventId: { type: 'string' }, calendarId: { type: 'string' } }, required: ['eventId'] } },
     ],
   }),
+  // GD-2 (v2.74.1321) — the Docs presentation backend (DESIGN_canvas.md §8): the RENDERER drives this server via
+  // create_document/get_document/render_document (render_document is deliberately NOT in the palette seed — it takes
+  // pre-lowered batchUpdate requests, plumbing not a model-pickable tool; the Lambda allowlists its request shapes).
+  // drive.file scopes the token to APP-CREATED docs — the §8.1 ownership boundary, enforced by the API itself.
+  Object.freeze({
+    server: 'google-docs',
+    provider: 'google',
+    label: 'Google Docs',
+    hosts: ['docs.google.com'],
+    scopes: ['https://www.googleapis.com/auth/documents', 'https://www.googleapis.com/auth/drive.file'],
+    tools: [
+      { name: 'create_document', description: 'Create a new Google Doc', annotations: {},
+        inputSchema: { type: 'object', properties: { title: { type: 'string' } }, required: ['title'] } },
+      { name: 'get_document', description: 'Get a Google Doc’s metadata (title, revision, body end)', annotations: { readOnlyHint: true },
+        inputSchema: { type: 'object', properties: { documentId: { type: 'string' } }, required: ['documentId'] } },
+    ],
+  }),
   Object.freeze({
     server: 'google-gmail',
     provider: 'google',

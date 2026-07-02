@@ -1707,6 +1707,7 @@ const _sgMessageHandlers = {
   ...createCanvasHandlers({   // CA-4 RENDER_CANVAS + CA-9 COMPOSE_CANVAS (the app authors a spec → render)
     log: (line) => { try { Logger.info('background', line); } catch { /* */ } },
     composeCanvas: (args) => AnthropicService.composeCanvas(args),
+    cloudInvokeConnector: invokeConnector,   // GD-3 (§8) — the gdoc backend paints via the broker's REST channel
   }),
   ...createWorkflowDebugHandlers({
     invokeSgHandler    : _invokeSgHandler,

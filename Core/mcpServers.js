@@ -57,8 +57,11 @@ export function isKnownMcpServer(id) {
   return Object.prototype.hasOwnProperty.call(MCP_SERVERS, _id(id));
 }
 
+import { BROKER_CATALOG } from './brokerCatalog.js';   // GD-2 — REST-channel servers (google-docs …) carry scopes here, not in the MCP endpoint map
+
 /**
- * MP-3 — the UNION of scopes across a provider's servers (google → calendar ∪ gmail …). One link dance per
+ * MP-3 — the UNION of scopes across a provider's servers, over BOTH registries: the MCP endpoint map (mcp-channel
+ * servers) AND the broker catalog (REST-channel servers like google-docs live only there). One link dance per
  * PROVIDER grants every server it fronts, so the authorize request must carry them all. PURE, order-stable.
  * @param {string} provider
  * @returns {string[]}
@@ -66,9 +69,8 @@ export function isKnownMcpServer(id) {
 export function providerScopes(provider) {
   const p = _id(provider);
   const out = [];
-  for (const s of Object.values(MCP_SERVERS)) {
-    if (s.provider !== p) continue;
-    for (const scope of (s.scopes || [])) if (!out.includes(scope)) out.push(scope);
-  }
+  const take = (scopes) => { for (const scope of (scopes || [])) if (!out.includes(scope)) out.push(scope); };
+  for (const s of Object.values(MCP_SERVERS)) if (s.provider === p) take(s.scopes);
+  for (const c of BROKER_CATALOG) if (c && c.provider === p) take(c.scopes);
   return out;
 }

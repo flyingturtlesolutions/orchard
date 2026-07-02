@@ -8,13 +8,20 @@ import { BROKER_CATALOG, brokerConnectorForHost, brokerLegsForHost } from './bro
 import { assessLegAvailability } from './legAvailability.js';
 
 describe('brokerCatalog — brokerConnectorForHost', () => {
-  it('resolves the Google Calendar / Gmail connectors by host', () => {
+  it('resolves the Google Calendar / Gmail / Docs connectors by host', () => {
     assert.equal(brokerConnectorForHost('calendar.google.com')?.server, 'google-calendar');
     assert.equal(brokerConnectorForHost('mail.google.com')?.server, 'google-gmail');
+    assert.equal(brokerConnectorForHost('docs.google.com')?.server, 'google-docs');   // GD-2 — the presentation backend
+  });
+  it('GD-2: google-docs carries documents + drive.file scopes; render_document is NOT in the palette seed (plumbing)', () => {
+    const docs = brokerConnectorForHost('docs.google.com');
+    assert.ok(docs.scopes.includes('https://www.googleapis.com/auth/documents'));
+    assert.ok(docs.scopes.includes('https://www.googleapis.com/auth/drive.file'));
+    assert.deepEqual(docs.tools.map((t) => t.name).sort(), ['create_document', 'get_document']);
   });
   it('is subdomain-suffix aware but does NOT broadly match *.google.com (distinct product = distinct server/scope)', () => {
     assert.equal(brokerConnectorForHost('www.calendar.google.com')?.server, 'google-calendar');   // suffix ok
-    assert.equal(brokerConnectorForHost('docs.google.com'), null);                                 // not in catalog
+    assert.equal(brokerConnectorForHost('drive.google.com'), null);                                // not in catalog (GD-2 added docs.google.com)
     assert.equal(brokerConnectorForHost('google.com'), null);                                      // parent ≠ product host
   });
   it('returns null for an unknown host / empty input', () => {

@@ -96,3 +96,37 @@ The pure spine (**CA-1 → CA-2 → CA-3 → CA-7**) is the safe build, mirrorin
 - **`sandboxed-html` artifacts** — full arbitrary-HTML/JS artifacts in a hardened iframe; a separate gated slice (§5).
 - **Cloud sync of canvas state** — `canvas` kind is registered but filter-gated OFF; additive activation later (the `GoalMemoryStore` pattern).
 - **True token-streaming into the canvas** — forwarding the streaming tool-call argument; an enhancement to CA-4's transport, not v1.
+
+## 8. External presentation backends — Google Docs/Sheets as the canvas (designed 2026-07-02)
+
+The canvas is a *plane*, not a *tab*: the same `display`/`compose` primitives + the same `CanvasSpec` can render into an **external document** — a Google Doc (composed prose) or Sheet (live data) — via the broker's GA REST channel (`DESIGN_connectors.md` §5.2). The app's presentation becomes a **durable, shareable artifact** (versioned by Google, viewable by people who never installed Orchard) while everything else in the model stays put.
+
+**8.1 The model (all §2 axioms hold, two get sharper):**
+- **Panel = control plane, ALWAYS.** The human steers conversationally from the Thread ("change the first line", "include account information") — they do **not** edit the Doc. The IL revises the **spec** and re-renders. The Doc is **display-only by contract**: a re-render overwrites external edits (v1 documents the rule; v2 may diff-detect foreign edits and warn before overwriting).
+- **The spec is the single source of truth**, held in `CanvasStore` exactly as for the tab backend. The Doc is a projection; **nothing is ever read back from it** — delivery, revision, and reference all work from the spec. (No read-back ⇒ no named-range requirement; named ranges demote to a v2 partial-re-render efficiency.)
+- **Backend selection is app config**: `appDef.presentation.backend: 'tab' | 'gdoc' | 'gsheet'` (default `'tab'`). The dispatch/executor path is unchanged up to `RENDER_CANVAS`; the handler routes to the tab broadcast or the external-render adapter per backend.
+- **Ownership boundary enforced by scope**: the external doc is created by the app under **`drive.file`** — the token can only touch files the app created, so auto-rendering the app's own presentation doc is safe *at the API level*, and every other document is unreachable. No per-render HITL (same stance as tab renders, `safety:'auto'`); the CX-6a gate still owns anything that leaves the app (8.4).
+
+**8.2 Spec-revision turns (the workstation feel).** "Change the first line" is not a fresh compose — it is an **edit bound against the current spec** (which block, which line) producing a **minimal delta**, then a re-render. Contract: the compose/interpret call for an edit-ask receives the current `CanvasSpec` as fenced context (extends CA-9 compose-live from "compose next state" to "revise addressed state"); the reply is a revised spec (or block-level patch), `rev` bumps, the backend repaints. Cadence-realtime: seconds, not keystrokes — Docs/Sheets write quotas sustain ~1 request/sec, which compose-live cadence fits comfortably.
+
+**8.3 Format-fidelity contract (WYSIWYG by construction).** The preview and the sent reply are **two lowerings of the same spec**, so fidelity is a vocabulary rule, not a scraping problem:
+- **Two tiers.** *Presentation-only* blocks (context summary, timeline, metrics, charts) may use the full canvas vocabulary — they never ship. The **deliverable block** (`compose`) is constrained to the **delivery-safe subset**: paragraphs, bold/italic, links, bulleted/numbered lists — exactly what Zendesk `html_body` / Gmail `text/html` render. The Doc preview of the reply block therefore cannot over-promise.
+- **Per-surface lowerings from one parser** (`Core/canvasLower.js`, pure): spec → Docs `batchUpdate` (preview) · spec → semantic HTML (delivery) · spec → plain text (degrade). One markdown-subset parser feeds all three ⇒ **preview/delivery parity is a unit test**, not a hope.
+- **Escape-first extends to the HTML lowering**: interpolated untrusted values (ticket text, names) are escaped; link hrefs sanitized to `https?:`. Same boundary as the panel's markdown path.
+
+**8.4 Delivery (the CS-agent workflow's last hop).** "Send it" in the panel → the reply text/HTML comes **from the spec's compose block** (`composeContent`) → one of:
+- **Ride-write** (Zendesk comment `html_body` / Gmail MIME): **full formatting fidelity**, deterministic, behind the existing CX-6a confirm gate — the default for rich replies;
+- **Drive-fill** (fill the site's composer; the human clicks Send): the conservative outward-send stance, but **plain-text fidelity** — the confirm bar says so ("delivers as plain text"), never a silent downgrade.
+CA-8's gate applies unchanged — the canvas exposes content; the act layer sends.
+
+**8.5 The motivating workflow (CS agent):** get tickets (Ride reads) → get context (Ride + interrogator) → **compose in the Doc** (display/compose → gdoc backend; IL streams context + draft) → **revise conversationally from the panel** (8.2) → **deliver** (8.4). The draft→accepted-edit deltas are labeled learning signal for the app's preset memory (`DESIGN_apps_learning.md`).
+
+**8.6 Build path (arc `GD-*`, pure-first):**
+| Slice | What | Safe? |
+|---|---|---|
+| **GD-1** | `Core/canvasLower.js` — markdown-subset parser + spec→Docs `batchUpdate` (replace-body v1, parameterized `bodyEndIndex`) + spec→HTML + spec→plain + parity tests | ✅ pure |
+| **GD-2** | `googleRest.cjs` docs section (`documents.create`/`batchUpdate`/`get` for bodyEndIndex) + `google-docs` catalog/channel entries + `documents`+`drive.file` scopes (one re-link grants all) | ✅ headless (injected fetch); deploy-gated live |
+| **GD-3** | backend registry: `appDef.presentation.backend` + the `RENDER_CANVAS` handler's gdoc route (create-once per anchor, store docId, render on display/compose) | ⚠ live |
+| **GD-4** | spec-revision turns: current spec into the compose/interpret context; block-addressed edits | ⚠ live (prompt + loop) |
+| **GD-5** | delivery: `composeContent` → Ride-write `html_body` (confirm-gated) / Drive-fill plain (+format notice) | ⛔ gated (CA-8's go) |
+| **GD-6** | `gsheet` backend (spec `metric`/table blocks → `values.update` — naturally diffable; the dashboard case) | after GD-3 |
