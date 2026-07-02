@@ -16,7 +16,15 @@
 export const MCP_SERVERS = Object.freeze({
   // Every entry has a real https url + provider (the invariant the tests lock). scopes only where confirmed; the OAuth
   // flow / the server's protected-resource metadata (RFC 9728) declares the rest at link time (MP-3).
-  'google-calendar': Object.freeze({ url: 'https://calendarmcp.googleapis.com/mcp/v1', provider: 'google', transport: 'streamable-http', scopes: ['https://www.googleapis.com/auth/calendar.events'] }),
+  // v2.74.1315 — the FULL documented scope set. The live PERMISSION_DENIED (2026-07-01) taught: the server checks
+  // GRANULAR scopes per tool — `calendar.events` (write) alone does NOT satisfy the read tools; Google's config guide
+  // requires the three readonly/freebusy scopes. Union = reads + writes. Changing scopes ⇒ RE-LINK (fresh consent).
+  'google-calendar': Object.freeze({ url: 'https://calendarmcp.googleapis.com/mcp/v1', provider: 'google', transport: 'streamable-http', scopes: [
+    'https://www.googleapis.com/auth/calendar.events',                    // write tools (create/update/delete_event)
+    'https://www.googleapis.com/auth/calendar.events.readonly',           // list/get events
+    'https://www.googleapis.com/auth/calendar.calendarlist.readonly',     // list_calendars
+    'https://www.googleapis.com/auth/calendar.events.freebusy',           // suggest_time / availability
+  ] }),
   'notion':          Object.freeze({ url: 'https://mcp.notion.com/mcp', provider: 'notion', transport: 'streamable-http', scopes: [] }),
   'github':          Object.freeze({ url: 'https://api.githubcopilot.com/mcp/', provider: 'github', transport: 'streamable-http', scopes: [] }),
   'hubspot':         Object.freeze({ url: 'https://mcp.hubspot.com', provider: 'hubspot', transport: 'streamable-http', scopes: [] }),
