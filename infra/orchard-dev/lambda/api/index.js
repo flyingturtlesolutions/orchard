@@ -22,6 +22,7 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
 const { invokeMcpTool } = require('./mcp.cjs');   // MP-2b (CX-5b §5.2) — the MCP transport to remote servers (parity-locked to Core/mcpClient.js)
 const { exchangeAuthCode, refreshAccessToken } = require('./oauth.cjs');   // MP-3b — code→token exchange + refresh (client secret lives HERE only)
+const { invokeGoogleRestTool } = require('./googleRest.cjs');   // v1318 — the GA REST channel for Google (its MCP servers are Developer-Preview-gated; consumer accounts can't enroll)
 
 const IDENTITY_TABLE = process.env.IDENTITY_TABLE;
 const OBJECT_TABLE = process.env.OBJECT_TABLE;
@@ -1391,10 +1392,16 @@ async function handleConnectorInvoke(event) {
   const tok = await refreshAccessToken(provider, link.refreshToken);   // MP-3b — oauth.cjs owns the token endpoints + creds
   if (tok.error === 'connector-not-configured') return json(503, { error: 'connector-not-configured', provider, hint: 'no OAuth client registered for this provider' });
   if (tok.error) return json(200, { success: false, error: 'broker-unauthorized', hint: `token refresh failed — re-link ${provider}` });
-  const result = await invokeMcpTool({ server, tool, args: (body.args && typeof body.args === 'object') ? body.args : {}, accessToken: tok.accessToken });
-  if (!result.success) console.error('connector-invoke failed', server, tool, result.error, result.hint || '');   // v1314 — CloudWatch names the tool's own error (no secrets)
+  // v1318 — per-server CHANNEL: Google's MCP servers are Developer-Preview-gated (a consumer @gmail.com can't
+  // enroll — the live PERMISSION_DENIED, findings 2026-07-01), so Google serves via GA REST; everything else speaks
+  // MCP. Flip a server to 'mcp' when its provider ships GA — the extension never knows which channel served it.
+  const channel = CONNECTOR_CHANNEL[server] || 'mcp';
+  const invokeArgs = { server, tool, args: (body.args && typeof body.args === 'object') ? body.args : {}, accessToken: tok.accessToken };
+  const result = channel === 'google-rest' ? await invokeGoogleRestTool(invokeArgs) : await invokeMcpTool(invokeArgs);
+  if (!result.success) console.error('connector-invoke failed', server, tool, `[${channel}]`, result.error, result.hint || '');   // v1314 — CloudWatch names the tool's own error (no secrets)
   return json(200, result);
 }
+const CONNECTOR_CHANNEL = { 'google-calendar': 'google-rest' };   // v1318 — per-server execution channel (default 'mcp')
 
 // GET /connectors/tools — discovery. Reports which providers the CALLER has linked (descriptors only,
 // never tokens) so the client can gate surfacing. The tool catalog itself is curated client-side

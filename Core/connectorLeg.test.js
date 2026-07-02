@@ -22,6 +22,10 @@ describe('hintToSafety — hints may only RAISE caution (§9)', () => {
 });
 
 describe('pruneSchema — keep type/enum/required, drop verbosity (§12)', () => {
+  it('v1317: format survives the prune (the binder must know a field wants ISO 8601)', () => {
+    const out = pruneSchema({ type: 'object', properties: { startTime: { type: 'string', format: 'date-time', description: 'dropped' } }, required: [] });
+    assert.deepEqual(out.properties.startTime, { type: 'string', format: 'date-time' });
+  });
   it('reduces to the binding skeleton', () => {
     const out = pruneSchema({
       type: 'object',

@@ -37,11 +37,11 @@ export const BROKER_CATALOG = Object.freeze([
     // timeMin/timeMax) + fullText/pageSize. Seed schemas rot — live tools/list discovery stays the durable successor.
     tools: [
       { name: 'list_events', description: 'List calendar events in a time range', annotations: { readOnlyHint: true },
-        inputSchema: { type: 'object', properties: { startTime: { type: 'string' }, endTime: { type: 'string' }, calendarId: { type: 'string' }, pageSize: { type: 'integer' }, fullText: { type: 'string' } }, required: [] } },
+        inputSchema: { type: 'object', properties: { startTime: { type: 'string', format: 'date-time' }, endTime: { type: 'string', format: 'date-time' }, calendarId: { type: 'string' }, pageSize: { type: 'integer' }, fullText: { type: 'string' } }, required: [] } },
       { name: 'create_event', description: 'Create a calendar event', annotations: {},
-        inputSchema: { type: 'object', properties: { summary: { type: 'string' }, startTime: { type: 'string' }, endTime: { type: 'string' }, description: { type: 'string' }, location: { type: 'string' }, calendarId: { type: 'string' }, timeZone: { type: 'string' }, allDay: { type: 'boolean' }, attendeeEmails: { type: 'array' } }, required: ['summary', 'startTime', 'endTime'] } },
+        inputSchema: { type: 'object', properties: { summary: { type: 'string' }, startTime: { type: 'string', format: 'date-time' }, endTime: { type: 'string', format: 'date-time' }, description: { type: 'string' }, location: { type: 'string' }, calendarId: { type: 'string' }, timeZone: { type: 'string' }, allDay: { type: 'boolean' }, attendeeEmails: { type: 'array' } }, required: ['summary', 'startTime', 'endTime'] } },
       { name: 'update_event', description: 'Update an existing calendar event', annotations: {},
-        inputSchema: { type: 'object', properties: { eventId: { type: 'string' }, summary: { type: 'string' }, startTime: { type: 'string' }, endTime: { type: 'string' }, calendarId: { type: 'string' } }, required: ['eventId'] } },
+        inputSchema: { type: 'object', properties: { eventId: { type: 'string' }, summary: { type: 'string' }, startTime: { type: 'string', format: 'date-time' }, endTime: { type: 'string', format: 'date-time' }, calendarId: { type: 'string' } }, required: ['eventId'] } },
       { name: 'delete_event', description: 'Delete a calendar event', annotations: { destructiveHint: true },
         inputSchema: { type: 'object', properties: { eventId: { type: 'string' }, calendarId: { type: 'string' } }, required: ['eventId'] } },
     ],

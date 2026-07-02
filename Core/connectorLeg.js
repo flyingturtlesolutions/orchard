@@ -38,6 +38,7 @@ export function pruneSchema(inputSchema) {
     const slot = {};
     if (p.type) slot.type = p.type;
     if (Array.isArray(p.enum)) slot.enum = p.enum.slice(0, 50);   // cap a pathological enum
+    if (p.format) slot.format = String(p.format);   // v2.74.1317 — format survives the prune (date-time grounding: the binder must KNOW a field wants ISO 8601)
     out[k] = slot;
   }
   return { type: 'object', properties: out, required: Array.isArray(s.required) ? s.required.slice() : [] };

@@ -5244,7 +5244,15 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    * @returns {Promise<object>} the parsed raw decision
    */
   static async interpret({ ask, retrieved, primitives, affordances, seed, target, connections, learned, objects, subTasks, history } = {}) {
+    // v2.74.1317 — ground relative time: without NOW (+ the user's timezone) "tomorrow 3pm" is unresolvable, and the
+    // first live broker create_event emitted a non-ISO startTime. Local wall-clock via sv-SE (YYYY-MM-DD HH:mm).
+    let _now = '';
+    try {
+      const _tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+      _now = `${new Date().toLocaleString('sv-SE').slice(0, 16)} (${_tz})`;
+    } catch { /* prompt renders without NOW */ }
     const { system, user } = buildInterpretMessages(ask, {
+      now: _now,
       retrieved: Array.isArray(retrieved) ? retrieved : [],
       primitives: Array.isArray(primitives) ? primitives : [],
       affordances: affordances || '', seed: seed || '',

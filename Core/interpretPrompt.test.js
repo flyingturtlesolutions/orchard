@@ -7,6 +7,18 @@ import { buildInterpretMessages, parseInterpretOutput } from './interpretPrompt.
 import { normalizeInterpretDecision } from './interpret.js';
 
 describe('interpretPrompt — buildInterpretMessages', () => {
+  it('v1317: NOW renders + date-time format shows in the param line (relative-time grounding)', () => {
+    const { system, user } = buildInterpretMessages('create event tomorrow 3pm', {
+      now: '2026-07-01 23:41 (America/Chicago)',
+      retrieved: [{ capabilityId: 'me.google-calendar.create_event', name: 'Create a calendar event',
+        paramSchema: { type: 'object', properties: { summary: { type: 'string' }, startTime: { type: 'string', format: 'date-time' } }, required: ['summary', 'startTime'] } }],
+    });
+    assert.match(user, /NOW: 2026-07-01 23:41 \(America\/Chicago\)/);
+    assert.match(user, /startTime\*:string\(date-time\)/);
+    assert.match(system, /ISO 8601/);
+    assert.doesNotMatch(buildInterpretMessages('x', {}).user, /NOW:/);   // no now → no stray line
+  });
+
   it('system states the intents + the clarify-when-unsure trust rule; user carries the ask', () => {
     const { system, user } = buildInterpretMessages('go to youtube', { retrieved: [], primitives: ['OPEN_URL'] });
     assert.match(system, /reasoning front door/i);
