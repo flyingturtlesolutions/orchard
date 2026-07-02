@@ -5274,9 +5274,9 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    * render side (canvasSpec.normalizeCanvasSpec — the single safety choke point), so a malformed reply can't inject.
    * @returns {Promise<{title:string, blocks:Array}|null>}  null when no LLM / unparseable / empty.
    */
-  static async composeCanvas({ ask, seed = '', objects = '', learned = '' } = {}) {
+  static async composeCanvas({ ask, seed = '', objects = '', learned = '', current = null } = {}) {
     if (!ask || !(await AnthropicService.hasLlm())) return null;
-    const { system, user } = buildCanvasMessages(ask, { seed, objects, learned });
+    const { system, user } = buildCanvasMessages(ask, { seed, objects, learned, current });   // GD-4 — current spec ⇒ revision turn
     const res = await AnthropicService.#call(system, user, 1400, [], { role: 'describe', operation: 'compose-canvas' });
     if (!res || res.success === false) return null;
     return parseCanvasOutput(res.text);

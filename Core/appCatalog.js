@@ -60,6 +60,14 @@ const PRESETS = [
       { kind: 'delta', trigger: 'before marking a ticket solved or closed', body: 'Confirm the customer’s underlying problem is actually resolved — a reply sent is not the same as a problem solved.' },
       { kind: 'delta', trigger: 'a ticket is vague or missing the detail you need', body: 'Ask one focused clarifying question before drafting, rather than guessing the customer’s intent.' },
     ],
+    // GD-3b (DESIGN_canvas.md §8.5) — the CS-agent workflow's compose WORKSTATION: this app presents into a Google
+    // Doc (backend 'gdoc'), the roomy surface the ~380px Thread can't be. The human steers from the PANEL ("change
+    // the first line"); the Doc is display-only and repaints from the spec. Requires google linked (documents +
+    // drive.file scopes); an unlinked render fails honestly (connector-not-linked) and the panel says so.
+    presentation: { backend: 'gdoc', title: 'Support drafts', blocks: [
+      { id: 'guide', kind: 'markdown', text: '## Support workstation\n\nAsk me to **draft a reply** to a ticket and I’ll compose it here — then steer from the panel: *“change the first line”*, *“include the account info”*, *“make it warmer”*. When it reads right, say **send it**.' },
+      { id: 'draft', kind: 'compose', ref: 'reply-draft', editable: true, text: '_No draft yet — pick a ticket and ask me to draft a reply._' },
+    ] },
   },
   {
     id: 'inbox-email', name: 'Inbox manager', icon: 'ti-mail', archetype: 'operator', type: 'inbox', version: 1, source: 'builtin',

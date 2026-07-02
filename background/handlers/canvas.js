@@ -7,7 +7,7 @@
 // The open tab re-renders itself off chrome.storage.onChanged — the write IS the broadcast. NOT a page-driving
 // channel → never busy-marked (Invariant #2 N/A).
 
-import { writeCanvasSpec } from '../../Services/Storage/CanvasStore.js';
+import { writeCanvasSpec, loadCanvasSpec } from '../../Services/Storage/CanvasStore.js';
 import { canvasDocId } from '../../Core/canvasSpec.js';
 import { builtinApp } from '../../Core/appCatalog.js';
 import { describeObjectModel } from '../../Core/appDef.js';
@@ -118,7 +118,10 @@ export function createCanvasHandlers({ log, composeCanvas, cloudInvokeConnector 
           const anchor = (p.anchor && typeof p.anchor === 'object') ? p.anchor : {};
           if (!canvasDocId(anchor)) { sendResponse({ success: false, error: 'canvas-no-anchor' }); return; }
           let objects = ''; try { objects = describeObjectModel(builtinApp(p.appId)?.objectModel || null); } catch { objects = ''; }
-          const spec = await composeCanvas({ ask: String(p.ask || ''), seed: String(p.seed || ''), objects, learned: String(p.learned || '') });
+          // GD-4 (§8.2) — spec-revision turns: hand the CURRENT spec to compose, so "change the first line" edits
+          // the addressed block instead of starting over. First compose (no spec yet) stays a fresh compose.
+          let current = null; try { current = await loadCanvasSpec(anchor); } catch { current = null; }
+          const spec = await composeCanvas({ ask: String(p.ask || ''), seed: String(p.seed || ''), objects, learned: String(p.learned || ''), current });
           if (!spec) { sendResponse({ success: false, error: 'compose-empty' }); return; }   // no LLM / unparseable / empty
           sendResponse(await _render(anchor, spec, 'compose', p.focus));
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'compose-canvas-failed' }); }

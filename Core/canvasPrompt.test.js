@@ -16,8 +16,25 @@ describe('canvasPrompt — buildCanvasMessages', () => {
   });
   it('omits empty optional sections', () => {
     const { user } = buildCanvasMessages('x');
-    assert.doesNotMatch(user, /ROLE|OBJECTS|LEARNED/);
+    assert.doesNotMatch(user, /ROLE|OBJECTS|LEARNED|CURRENT CANVAS/);
     assert.match(user, /ASK: x/);
+  });
+
+  it('GD-4: a CURRENT spec turns the ask into a REVISION — fenced as data, with the untouched-blocks rule in SYSTEM', () => {
+    const current = { title: 'Support drafts', rev: 4, anchor: { appId: 'support' }, blocks: [
+      { id: 'draft', kind: 'compose', ref: 'reply-draft', editable: true, text: 'Hi Jane, …' },
+    ] };
+    const { system, user } = buildCanvasMessages('change the first line', { current });
+    assert.match(user, /CURRENT CANVAS/);
+    assert.match(user, /"ref":"reply-draft"/);
+    assert.doesNotMatch(user, /"rev":4/);            // slimmed: title+blocks only, no rev/anchor
+    assert.doesNotMatch(user, /"appId"/);
+    assert.match(system, /REVISION: when a CURRENT CANVAS is given/);
+    assert.match(system, /byte-for-byte/);
+    assert.match(system, /"kind":"compose"/);        // the deliverable block is in the compose vocabulary now
+    assert.match(system, /no headings\/images\/tables/);
+    // an empty/absent current stays a fresh compose
+    assert.doesNotMatch(buildCanvasMessages('x', { current: { title: '', blocks: [] } }).user, /CURRENT CANVAS/);
   });
 });
 
