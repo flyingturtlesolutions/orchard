@@ -62,6 +62,18 @@ describe('interpretPrompt — buildInterpretMessages', () => {
     assert.match(user, /IRREVERSIBLE/);
   });
 
+  it('GD-4d — marks a self-domain leg [SELF-SURFACE] + the page-independence and RETRY rules (the .1326 answer-instead-of-act)', () => {
+    const { system, user } = buildInterpretMessages('draft a reply to James', {
+      retrieved: [{ key: 'COMPOSE', name: 'Draft on the canvas', domain: 'self' },
+                  { key: 'cap-page', name: 'Page thing', domain: 'page' }],
+    });
+    assert.match(user, /ref: COMPOSE +\[SELF-SURFACE: page-independent\]/);
+    assert.doesNotMatch(user, /cap-page +\[SELF-SURFACE/);              // page legs stay unmarked
+    assert.match(system, /SELF-SURFACE tools/);
+    assert.match(system, /CURRENT TAB is IRRELEVANT/);
+    assert.match(system, /RETRY: if RECENT_TURNS shows the matching act FAILED/);
+  });
+
   it('CX-4c — renders a tool\'s param schema (name*+type) + the SYSTEM PARAMS binding rule', () => {
     const { system, user } = buildInterpretMessages('get ticket #64775', {
       retrieved: [{ key: 'me.zendesk.read_ticket', name: 'Read a Zendesk ticket', does: 'fetch one ticket',

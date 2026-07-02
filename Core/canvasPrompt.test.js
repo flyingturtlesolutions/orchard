@@ -20,6 +20,23 @@ describe('canvasPrompt — buildCanvasMessages', () => {
     assert.match(user, /ASK: x/);
   });
 
+  it('GD-7e: SOURCES render fenced with a MEDIA MENU; SYSTEM carries the refs-only + remix rules; absent → no block', () => {
+    const sources = [{ title: 'How to reset your hub', text: 'Hold the pinhole 10s…',
+      media: [{ ref: 'kb:88#img1', kind: 'image', label: 'the pinhole location' }, { ref: 'kb:88#vid1', kind: 'video', label: 'walkthrough' }] }];
+    const { system, user } = buildCanvasMessages('compose a troubleshooting guide for James', { sources });
+    assert.match(user, /SOURCES \(fetched reference material/);
+    assert.match(user, /\[1\] How to reset your hub/);
+    assert.match(user, /MEDIA MENU \(the ONLY media you may reference/);
+    assert.match(user, /- kb:88#img1 \(image\) — the pinhole location/);
+    assert.match(user, /- kb:88#vid1 \(video\) — walkthrough/);
+    assert.match(system, /"kind":"image","ref":"<a ref from the MEDIA MENU>"/);
+    assert.match(system, /"kind":"video"/);
+    assert.match(system, /NEVER invent a media URL/);
+    assert.match(system, /don't copy wholesale/);
+    assert.doesNotMatch(buildCanvasMessages('x', {}).user, /SOURCES|MEDIA MENU/);
+    assert.doesNotMatch(buildCanvasMessages('x', { sources: [] }).user, /SOURCES/);
+  });
+
   it('GD-4: a CURRENT spec turns the ask into a REVISION — fenced as data, with the untouched-blocks rule in SYSTEM', () => {
     const current = { title: 'Support drafts', rev: 4, anchor: { appId: 'support' }, blocks: [
       { id: 'draft', kind: 'compose', ref: 'reply-draft', editable: true, text: 'Hi Jane, …' },

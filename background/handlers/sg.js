@@ -37,6 +37,7 @@ import { goalContextFor } from '../../Core/goalRetrieval.js';   // AL-4 — asse
 import { builtinApp } from '../../Core/appCatalog.js';   // OM — the app's catalog entry (its object model)
 import { connectorLegsForConnections, harvestedRecipeLegs } from '../../Core/connectorRecipes.js';   // CX-4c + §20 — connected session-ride recipes (curated + harvested header-replay) as selectable interpret tools
 import { brokerLegsForLinked } from '../../Core/brokerCatalog.js';   // CX-5c — broker (OAuth/MCP) legs, gated on LINKED providers
+import { composeOfferedLeg } from '../../Core/palette.js';   // GD-4b — the app's COMPOSE (draft-on-canvas) leg joins interpret's palette
 import { neutralizeFalseCompletion } from '../../Core/answerGuard.js';   // honesty belt — the answer path dispatches nothing, so a completion claim on a side-effect COMMAND is a fabrication (the calendar "✅ I created it" bug)
 import { describeObjectModel } from '../../Core/appDef.js';   // OM — render the app's object model (noun/states/actions/transitions) as a context block
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability, findDuplicateCapabilities } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A; GA-6 dedup
@@ -1198,7 +1199,12 @@ export function createSgMessageHandlers(ctx) {
             for (const h of hosts) brokerLegs.push(...brokerLegsForLinked(h, linked, { seenKeys: _seenB, liveTools }));
           }
         } catch { /* never block interpret on the broker projection */ }
-        const retrieved = [...ragLegs, ...connLegs, ...harvestedLegs, ...brokerLegs];
+        // GD-4b (v2.74.1324) — drafting on the fly: when THIS app defines a presentation layer (§8), its COMPOSE
+        // leg joins the palette as a STANDALONE act — "draft a reply to James…" selects compose (the ask IS the
+        // brief; no ticket/connector context required) instead of clarify-looping. chat.js routes the pick through
+        // COMPOSE_CANVAS; with a spec already on the surface the ask becomes a GD-4 revision turn.
+        const composeLeg = appId ? composeOfferedLeg(builtinApp(appId)) : null;
+        const retrieved = [...ragLegs, ...connLegs, ...harvestedLegs, ...brokerLegs, ...(composeLeg ? [composeLeg] : [])];
         const primitives = ['OPEN_URL', 'CLICK', 'TYPE', 'SCROLL', 'EXTRACT'];
         // F-2 (v2.74.1179) — feed interpret the live page VOCABULARY (the same affordances IL_ANSWER reads from the
         // cached Locale) so its act/teach/clarify decisions are grounded in what the page actually offers, not just

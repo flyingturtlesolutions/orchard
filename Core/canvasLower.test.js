@@ -107,3 +107,32 @@ describe('canvasLower — PARITY (preview ⇄ delivery: the WYSIWYG contract, ex
     assert.equal(specDeliverableHtml({ blocks: [] }), null);
   });
 });
+
+describe('canvasLower — GD-7a backend profiles + honest degradation (§8.7)', () => {
+  it('profiles: tab renders everything native; gdoc degrades image/chart/video; unknown backend → null (no claim)', async () => {
+    const { backendProfile } = await import('./canvasLower.js');
+    assert.ok(backendProfile('tab').native.includes('video'));
+    assert.deepEqual(backendProfile('gdoc').degrade, { image: 'placeholder', chart: 'placeholder', video: 'link' });
+    assert.equal(backendProfile('notion'), null);
+  });
+  it('degradationsFor reports ONLY the kinds this spec actually uses, deduped', async () => {
+    const { degradationsFor } = await import('./canvasLower.js');
+    const spec = { blocks: [{ kind: 'markdown', text: 'x' }, { kind: 'video', src: 'https://v.example/a' }, { kind: 'video', src: 'https://v.example/b' }] };
+    assert.deepEqual(degradationsFor(spec, 'gdoc'), [{ kind: 'video', as: 'link' }]);
+    assert.deepEqual(degradationsFor(spec, 'tab'), []);
+    assert.deepEqual(degradationsFor(spec, 'nope'), []);
+  });
+  it('video lowering: an https src becomes a ▶-labelled LINK line; a ref-only video a placeholder; degraded rides the return', () => {
+    const spec = { blocks: [
+      { kind: 'video', src: 'https://help.x.com/v.mp4', label: 'pairing demo' },
+      { kind: 'video', mediaRef: 'kb:1#vid1', label: 'reset walkthrough' },
+    ] };
+    const { requests, degraded } = specToDocsRequests(spec, { bodyEndIndex: 1 });
+    const texts = requests.filter((r) => r.insertText).map((r) => r.insertText.text);
+    assert.ok(texts.some((t) => t.startsWith('▶ pairing demo')));
+    const link = requests.find((r) => r.updateTextStyle && r.updateTextStyle.textStyle.link);
+    assert.equal(link.updateTextStyle.textStyle.link.url, 'https://help.x.com/v.mp4');
+    assert.ok(texts.some((t) => t === '[video: reset walkthrough]\n'));
+    assert.deepEqual(degraded, [{ kind: 'video', as: 'link' }]);
+  });
+});

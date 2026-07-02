@@ -157,13 +157,39 @@ function _lowerBlocksToDocs(blocks, startIndex, requests) {
   return idx;
 }
 
+// ── GD-7a (§8.7): per-backend CAPABILITY PROFILES + the honest-degradation report ──────────
+// A backend declares which block kinds render NATIVELY and how the rest DEGRADE. One spec, per-surface lowerings;
+// a degrade is NAMED in the render response (→ the panel line) — never a silent downgrade (§8.3). `tab` is our own
+// renderer (everything native); `gdoc` degrades media until GD-7b's insertInlineImage lands. Unknown backend → null
+// (no claim — callers treat as no-report, not as "all native").
+export const BACKEND_PROFILES = {
+  tab:  { native: ['markdown', 'metric', 'chart', 'image', 'video', 'compose'], degrade: {} },
+  gdoc: { native: ['markdown', 'metric', 'compose'],
+          degrade: { image: 'placeholder', chart: 'placeholder', video: 'link' } },
+};
+export function backendProfile(backend) { return BACKEND_PROFILES[backend] || null; }
+
+/** The §8.3 honesty report: which of THIS spec's blocks degrade on THIS backend, as [{kind, as}]. PURE. */
+export function degradationsFor(spec, backend) {
+  const prof = backendProfile(backend);
+  if (!prof) return [];
+  const out = [];
+  const seen = new Set();
+  for (const b of ((spec && Array.isArray(spec.blocks)) ? spec.blocks : [])) {
+    const as = b && prof.degrade[b.kind];
+    if (as && !seen.has(b.kind)) { seen.add(b.kind); out.push({ kind: b.kind, as }); }
+  }
+  return out;
+}
+
 /**
  * Lower a CanvasSpec to a replace-body Docs batchUpdate. Blocks: markdown → styled prose (full vocabulary);
  * compose → a "Reply" section (DELIVERABLE vocabulary, so the preview shows exactly what ships); metric →
- * "label: value" line; image/chart → text placeholders (inline media is a GD-2+ upgrade). PURE.
+ * "label: value" line; video → a LINK line (Docs cannot embed video — the §8.3 named degrade); image/chart →
+ * text placeholders (inline images are GD-7b). PURE. `degraded` = the honesty report for the panel line.
  * @param {{ title?:string, blocks?:Array }} spec
  * @param {{ bodyEndIndex?:number }} [opts]  the live doc's current body end (from documents.get); >2 ⇒ clear first
- * @returns {{ requests:Array, endIndex:number }}
+ * @returns {{ requests:Array, endIndex:number, degraded:Array<{kind:string, as:string}> }}
  */
 export function specToDocsRequests(spec, { bodyEndIndex = 1 } = {}) {
   const requests = [];
@@ -185,16 +211,31 @@ export function specToDocsRequests(spec, { bodyEndIndex = 1 } = {}) {
       requests.push({ insertText: { location: { index: idx }, text: line } });
       idx += line.length;
     } else if (blk.kind === 'image') {
-      const line = `[image: ${blk.alt ?? 'image'}]\n`;
+      const line = `[image: ${blk.alt || 'image'}]\n`;   // GD-7b upgrades a resolvable src/ref to insertInlineImage
       requests.push({ insertText: { location: { index: idx }, text: line } });
       idx += line.length;
+    } else if (blk.kind === 'video') {
+      // GD-7e — Docs cannot embed video: an https src lowers to a styled LINK line; a ref-only video (unresolved
+      // until the GD-7b adapter hop) lowers to a placeholder. Either way it's in `degraded` (video → link).
+      const label = blk.label || 'video';
+      if (blk.src) {
+        const at = idx;
+        const text = `▶ ${label}\n`;
+        requests.push({ insertText: { location: { index: idx }, text } });
+        requests.push({ updateTextStyle: { range: { startIndex: at, endIndex: at + text.length - 1 }, textStyle: { link: { url: blk.src } }, fields: 'link' } });
+        idx += text.length;
+      } else {
+        const line = `[video: ${label}]\n`;
+        requests.push({ insertText: { location: { index: idx }, text: line } });
+        idx += line.length;
+      }
     } else if (blk.kind === 'chart') {
       const line = `[chart: ${blk.chartType ?? 'chart'}]\n`;
       requests.push({ insertText: { location: { index: idx }, text: line } });
       idx += line.length;
     }
   }
-  return { requests, endIndex: idx };
+  return { requests, endIndex: idx, degraded: degradationsFor(spec, 'gdoc') };
 }
 
 // ── The delivery extractors (from the SPEC — never from the rendered doc) ─────────────────

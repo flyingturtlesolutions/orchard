@@ -60,8 +60,22 @@ export function assembleGoalContext(items, { ask = '', maxRules = 8, maxRecall =
     return (askGrid.op && bg.op === askGrid.op ? 2 : 0) + (askGrid.object && bg.object === askGrid.object ? 1 : 0);
   };
 
+  // AL-3e conflict resolution (v2.74.1328) — an act-fail LESSON delta must not override STRONGER positive evidence
+  // for the SAME capability on this ask. Live .1327: one infra-era failure delta rendered as a STANDING RULE
+  // ("didn't work — re-teach") and beat the confirmed "previously handled with COMPOSE" recall below it, wedging
+  // every re-ask to teach. Read-time retire: an ask-relevant positive belief for the delta's ref with confidence
+  // ≥ the delta's suppresses it (repeated REAL failures out-accrue the belief and surface again; user-authored
+  // `remember:` rules carry no act-fail provenance and are never touched).
+  const posConf = new Map();   // ref → best ask-relevant positive confidence
+  for (const b of beliefs) {
+    if (!b.ref) continue;
+    if (b.tier !== 'summary' && (_overlap(askTokens, `${b.body} ${b.ref}`) + gridBoost(b)) < minOverlap) continue;
+    const c = b.confidence ?? 0;
+    if (c > (posConf.get(b.ref) ?? -1)) posConf.set(b.ref, c);
+  }
   // RULES — always-on (no trigger) ALWAYS; triggered rules whose trigger overlaps the ask. Rank tier then confidence.
   const rules = deltas
+    .filter((d) => !(d.provenance === 'act-fail' && d.ref && (posConf.get(d.ref) ?? -1) >= (d.confidence ?? 0)))
     .filter((d) => !d.trigger || _overlap(askTokens, d.trigger) >= minOverlap)
     .sort((a, b) => (tierRank(b.tier) - tierRank(a.tier)) || ((b.confidence ?? 0) - (a.confidence ?? 0)))
     .slice(0, maxRules);

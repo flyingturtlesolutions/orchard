@@ -16,7 +16,7 @@
 //                                                its current content (composeContent) — the canvas owns NO send.
 // An unknown kind is DROPPED (not rendered) — that drop is the safety property, so do not loosen it casually.
 
-export const BLOCK_KINDS = ['markdown', 'metric', 'chart', 'image', 'compose'];
+export const BLOCK_KINDS = ['markdown', 'metric', 'chart', 'image', 'video', 'compose'];
 export const EFFECTS = ['none', 'fade', 'typewriter', 'count'];        // optional render hints; the canvas owns motion defaults
 export const CHART_TYPES = ['line', 'bar', 'area', 'pie', 'scatter'];  // the vetted set CA-5's lib understands
 
@@ -34,6 +34,17 @@ export function sanitizeImageSrc(src) {
   if (/^https:\/\/[^\s]+$/i.test(s)) return s;
   if (/^data:image\/(png|jpe?g|gif|webp|avif);[a-z0-9.+=/-]*,/i.test(s)) return s;
   return '';
+}
+
+/**
+ * GD-7e (§8.7) — the trusted-media REF gate: `attachment:<id>` (a connector-read attachment) · `capture:<id>` (an
+ * Orchard page screenshot) · `kb:<articleId>[#media]` (a banked KB article's enumerated media). PURE. Returns the
+ * ref or '' (invalid shape → dropped). Refs are NAMES into the trusted store — the adapter resolves them at render;
+ * the composing model can only pick from an enumerated menu, never mint a URL (the exfil-beacon rule).
+ */
+export function sanitizeMediaRef(ref) {
+  const s = _str(ref).trim();
+  return /^(attachment|capture|kb):[A-Za-z0-9][A-Za-z0-9_.:#\/-]{0,200}$/.test(s) ? s : '';
 }
 
 /** The {appId, conversationId} anchor — who owns this canvas (conversationId null → an app-level standing canvas). PURE. */
@@ -71,8 +82,18 @@ export function normalizeBlock(raw) {
 
   if (raw.kind === 'image') {
     const src = sanitizeImageSrc(raw.src);
-    if (!src) return null;                                          // unsafe/empty src → drop (never render an unsafe image)
-    return { ...base, src, alt: _str(raw.alt) };
+    const ref = sanitizeMediaRef(raw.mediaRef ?? raw.ref);          // GD-7e — a trusted-store ref (adapter-resolved at render)
+    if (!src && !ref) return null;                                  // neither a safe src NOR a valid ref → drop
+    return { ...base, ...(src ? { src } : {}), ...(ref ? { mediaRef: ref } : {}), alt: _str(raw.alt) };
+  }
+
+  if (raw.kind === 'video') {
+    // GD-7e — video: an https URL (a hosted/KB video page or file) or a trusted-store ref. No data:/blob: (size +
+    // provenance); a backend that can't embed degrades it to a LINK (canvasLower profiles — the §8.3 named downgrade).
+    const src = /^https:\/\/[^\s]+$/i.test(_str(raw.src).trim()) ? _str(raw.src).trim() : '';
+    const ref = sanitizeMediaRef(raw.mediaRef ?? raw.ref);
+    if (!src && !ref) return null;
+    return { ...base, ...(src ? { src } : {}), ...(ref ? { mediaRef: ref } : {}), label: _str(raw.label || raw.alt) };
   }
 
   // compose — the only editable kind; carries `ref` so the act layer can read its content (composeContent)
@@ -93,6 +114,25 @@ export function normalizeCanvasSpec(raw) {
 /** A fresh spec for an anchor. PURE. (rev starts at 0; CanvasStore bumps it on each write.) */
 export function newCanvasSpec({ anchor = {}, title = '', blocks = [] } = {}) {
   return normalizeCanvasSpec({ anchor, title, blocks, rev: 0 });
+}
+
+/**
+ * GD-7e (§8.7, refs-not-URLs) — tighten an LLM-AUTHORED spec before it enters the render path: a MINTED remote
+ * media URL is stripped (an LLM-authored image/video URL is an exfiltration beacon — data rides the query string
+ * the moment a surface fetches it). Kept: trusted-store refs (`mediaRef`) and inline data: raster (no network).
+ * A media block left with neither is dropped whole. Applied ONLY where model output enters (COMPOSE_CANVAS);
+ * app-defined presentation blocks (trusted config) keep their https srcs. PURE.
+ */
+export function stripMintedMedia(spec) {
+  const d = (spec && typeof spec === 'object') ? spec : {};
+  const blocks = (Array.isArray(d.blocks) ? d.blocks : []).map((b) => {
+    if (!b || (b.kind !== 'image' && b.kind !== 'video')) return b;
+    const src = _str(b.src).trim();
+    if (!/^https:\/\//i.test(src)) return b;                        // no remote src → nothing to strip
+    const { src: _drop, ...rest } = b;
+    return (rest.mediaRef || rest.ref) ? rest : null;               // ref survives; a src-only minted block drops whole
+  }).filter(Boolean);
+  return { ...d, blocks };
 }
 
 /**

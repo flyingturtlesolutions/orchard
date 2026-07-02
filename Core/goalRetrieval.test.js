@@ -26,6 +26,29 @@ describe('goalRetrieval — assembleGoalContext: RULES', () => {
   });
 });
 
+describe('goalRetrieval — AL-3e conflict resolution (an act-fail lesson vs a positive association, v2.74.1328)', () => {
+  const ASK = 'draft a brief, apologetic reply to James about the outage';
+  const fail = (over = {}) => delta('a saved capability was tried for this and didn\'t work — re-teach or pick a different approach',
+    { trigger: 'draft a brief apologetic reply to James', ref: 'COMPOSE', provenance: 'act-fail', confidence: 0.4, tier: 'hypothesis', ...over });
+  const ok = (over = {}) => belief('draft a brief apologetic reply to James about the outage', { ref: 'COMPOSE', provenance: 'act-ok', confidence: 0.7, ...over });
+  it('a stronger ask-relevant positive for the SAME ref RETIRES the act-fail rule (the .1327 wedge)', () => {
+    const { rules, recalled } = assembleGoalContext([fail(), ok()], { ask: ASK });
+    assert.equal(rules.length, 0);                              // the "didn't work — re-teach" rule is suppressed
+    assert.equal(recalled[0].ref, 'COMPOSE');                   // the positive association still recalls
+  });
+  it('with NO positive for that ref, the lesson still warns (a genuinely failing tool keeps its flag)', () => {
+    assert.equal(assembleGoalContext([fail()], { ask: ASK }).rules.length, 1);
+  });
+  it('repeated REAL failures out-accrue the positive and surface again (confidence beats the belief)', () => {
+    assert.equal(assembleGoalContext([fail({ confidence: 0.8 }), ok()], { ask: ASK }).rules.length, 1);
+  });
+  it('a positive for a DIFFERENT ref never suppresses; user rules (no act-fail provenance) never touched', () => {
+    assert.equal(assembleGoalContext([fail(), ok({ ref: 'cap-other' })], { ask: ASK }).rules.length, 1);
+    const userRule = delta('always draft replies warmly', { ref: 'COMPOSE' });   // remember: rule — no provenance
+    assert.equal(assembleGoalContext([userRule, ok()], { ask: 'draft replies to James' }).rules.length, 1);
+  });
+});
+
 describe('goalRetrieval — assembleGoalContext: RECALL (the capability-association)', () => {
   it('recalls a belief whose phrasing overlaps a differently-worded ask', () => {
     const items = [belief('get my open emails', { ref: 'cap-emails' })];

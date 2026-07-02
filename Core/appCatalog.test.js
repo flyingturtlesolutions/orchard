@@ -63,6 +63,15 @@ describe('appCatalog — resolution', () => {
     assert.equal(builtinApp(null), null);
   });
 
+  it('GD-3b (§8): the support preset\'s gdoc backend SURVIVES catalog normalization (the .1325 live bug)', () => {
+    // builtinApp returns NORMALIZED defs — if normalizePresentation strips `backend`, the render route silently
+    // falls to the tab default while the compose leg still offers (presentation truthy). This pins the seam.
+    const p = builtinApp('support').presentation;
+    assert.ok(p, 'support declares a presentation layer');
+    assert.equal(p.backend, 'gdoc');
+    assert.equal(p.title, 'Support drafts');
+  });
+
   it('presetsForType groups presets under their abstract type', () => {
     assert.deepEqual(presetsForType('inbox').map((p) => p.id).sort(), ['inbox-email', 'support']);
     assert.deepEqual(presetsForType('concierge').map((p) => p.id), ['shopper']);

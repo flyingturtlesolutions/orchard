@@ -238,13 +238,22 @@ describe('appDef — presentation (CA-7, the optional canvas declaration)', () =
     assert.equal(normalizePresentation({ enabled: false }), null);
   });
   it('true → an enabled empty canvas; an object carries title + opaque blocks', () => {
-    assert.deepEqual(normalizePresentation(true), { title: null, blocks: [] });
+    assert.deepEqual(normalizePresentation(true), { title: null, blocks: [], backend: 'tab' });
     const p = normalizePresentation({ title: 'Dashboard', blocks: [{ kind: 'metric' }] });
     assert.equal(p.title, 'Dashboard');
     assert.equal(p.blocks.length, 1);
   });
+  it('GD-3 (§8): backend SURVIVES normalization — gdoc/gsheet carried, unknown/absent → the safe tab default', () => {
+    // the live .1325 bug: this normalizer predated §8 and stripped `backend`, so the catalog's gdoc declaration
+    // never reached the render route — compose leg offered (presentation truthy) but the Doc never created.
+    assert.equal(normalizePresentation({ backend: 'gdoc' }).backend, 'gdoc');
+    assert.equal(normalizePresentation({ backend: 'gsheet' }).backend, 'gsheet');
+    assert.equal(normalizePresentation({ backend: 'iframe' }).backend, 'tab');   // unknown → tab, never trusted through
+    assert.equal(normalizePresentation({ title: 'D' }).backend, 'tab');
+  });
   it('normalizeAppDefinition carries presentation (null by default, set when declared)', () => {
     assert.equal(normalizeAppDefinition(DEF).presentation, null);
-    assert.deepEqual(normalizeAppDefinition({ ...DEF, presentation: true }).presentation, { title: null, blocks: [] });
+    assert.deepEqual(normalizeAppDefinition({ ...DEF, presentation: true }).presentation, { title: null, blocks: [], backend: 'tab' });
+    assert.equal(normalizeAppDefinition({ ...DEF, presentation: { backend: 'gdoc' } }).presentation.backend, 'gdoc');
   });
 });

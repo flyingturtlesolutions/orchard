@@ -4598,6 +4598,29 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
     }
   }
 
+  // GD-4b (v2.74.1324) — interpret picked the app's COMPOSE leg: drafting on the fly (the ask IS the brief — no
+  // ticket/connector context required). Route through COMPOSE_CANVAS exactly like the `canvas:` command; with a
+  // spec already on the surface the ask becomes a GD-4 REVISION turn, so "change the first line" follows on. The
+  // leg is only in `retrieved` when THIS app defines a presentation layer (sg.js gates on it), so no re-check here.
+  if (d.intent === 'act' && d.capabilityId === 'COMPOSE' && retrieved.some((l) => l && l.domain === 'self' && l.key === 'COMPOSE')) {
+    const appId = _currentConversationAppId;
+    _setMessageBody(msg, '🖼️ composing…');
+    let r = null;
+    try { r = await _orchReq('COMPOSE_CANVAS', { ask: goal, appId, seed: _currentConversationSeed, anchor: { appId, conversationId: null } }); } catch { /* */ }
+    const ok = !!(r && r.success !== false);
+    // GD-4c — name the ACTUAL surface; GD-7a — name any degrades (§8.3: never a silent downgrade).
+    const deg = (ok && r && Array.isArray(r.degraded) && r.degraded.length) ? ` (${r.degraded.map((d) => `${d.kind} shipped as ${d.as}`).join(', ')})` : '';
+    _setMessageBody(msg, ok ? `🖼️ Drafted it in ${r && r.gdoc ? 'your Google Doc' : 'the canvas'}${deg} — keep steering from here (“change the first line”, “make it warmer”).`
+      : `Couldn’t compose the canvas${r && r.error ? ` (${r.error})` : ''}${r && r.hint ? ` — ${r.hint}` : ''}.`);
+    _orchFinalize(msg);
+    // AL-3e — bank the outcome, EXCEPT infra/setup failures (broker down, API not enabled, doc plumbing): those say
+    // nothing about whether COMPOSE fits the ask, and banking them as a mismatch poisons the recall that steers the
+    // next pick (live .1326: a broker-unauthorized bank fed "compose failed for this ask" back into <LEARNED>).
+    const _infra = !ok && r && /^(broker-|gdoc-|canvas-no-anchor|no-compose|compose-empty)/.test(String(r.error || ''));
+    if (!_infra) _bankCapabilityOutcome(goal, 'COMPOSE', ok);
+    return true;
+  }
+
   // navigate / act / decompose → map to a RouteDecision and dispatch through the VERIFIED runners (the dispatcher
   // renders its own bubbles, so drop the placeholder). act→replay confirms first; _orchRun carries the CV-6 gate.
   const rd = (d.intent === 'navigate') ? { action: 'primitive', tool: { op: 'OPEN_URL' }, params: _withBoundUrl(d.params), confidence: d.confidence }
@@ -5153,7 +5176,8 @@ async function sendChatMessage() {
     _setMessageBody(m, '🖼️ composing…');
     try {
       const r = await _orchReq('COMPOSE_CANVAS', { ask, appId, seed: _currentConversationSeed, anchor: { appId, conversationId: null } });
-      _setMessageBody(m, (r && r.success !== false) ? '🖼️ Composed it on the canvas.' : `Couldn’t compose the canvas${r && r.error ? ` (${r.error})` : ''}.`);
+      const deg = (r && r.success !== false && Array.isArray(r.degraded) && r.degraded.length) ? ` (${r.degraded.map((d) => `${d.kind} shipped as ${d.as}`).join(', ')})` : '';   // GD-7a — §8.3 named downgrade
+      _setMessageBody(m, (r && r.success !== false) ? `🖼️ Composed it in ${r && r.gdoc ? 'your Google Doc' : 'the canvas'}${deg}.` : `Couldn’t compose the canvas${r && r.error ? ` (${r.error})` : ''}.`);
     } catch { _setMessageBody(m, 'Couldn’t compose the canvas.'); }
     _orchFinalize(m); return;
   }

@@ -8,7 +8,7 @@
 // channel → never busy-marked (Invariant #2 N/A).
 
 import { writeCanvasSpec, loadCanvasSpec } from '../../Services/Storage/CanvasStore.js';
-import { canvasDocId } from '../../Core/canvasSpec.js';
+import { canvasDocId, stripMintedMedia } from '../../Core/canvasSpec.js';   // GD-7e — refs-not-URLs: strip LLM-minted media srcs where model output enters
 import { builtinApp } from '../../Core/appCatalog.js';
 import { describeObjectModel } from '../../Core/appDef.js';
 import { specToDocsRequests } from '../../Core/canvasLower.js';   // GD-3 (§8) — the pure spec→batchUpdate lowering (the gdoc backend's paint)
@@ -31,6 +31,29 @@ async function _openCanvasTab(anchor) {
       return mine.id;
     }
     const t = await chrome.tabs.create({ url, active: true });
+    return (t && typeof t.id === 'number') ? t.id : null;
+  } catch { return null; }
+}
+
+// GD-4c (v2.74.1325) — open or FOCUS the app's Google Doc (the §8 external surface). Live lesson (.1324): painting
+// a Doc nobody has open reads as "nothing happened" — the design's no-tab rule meant "no extension CANVAS tab",
+// never "no surface". First compose opens the Doc; later composes focus it (the open Doc live-updates from the
+// API batchUpdate on its own — the realtime property). focus:false = a silent background repaint: focus nothing,
+// never open a new tab.
+const _DOC_URL = (documentId) => `https://docs.google.com/document/d/${encodeURIComponent(documentId)}/edit`;
+async function _openDocTab(documentId, focus) {
+  try {
+    const tabs = await chrome.tabs.query({ url: `https://docs.google.com/document/d/${documentId}/*` });
+    const mine = (tabs || []).find((t) => t && t.id != null);
+    if (mine) {
+      if (focus !== false) {
+        await chrome.tabs.update(mine.id, { active: true });
+        if (mine.windowId != null) { try { await chrome.windows.update(mine.windowId, { focused: true }); } catch { /* */ } }
+      }
+      return mine.id;
+    }
+    if (focus === false) return null;
+    const t = await chrome.tabs.create({ url: _DOC_URL(documentId), active: true });
     return (t && typeof t.id === 'number') ? t.id : null;
   } catch { return null; }
 }
@@ -70,11 +93,11 @@ export function createCanvasHandlers({ log, composeCanvas, cloudInvokeConnector 
         try { await chrome.storage.local.remove(key); } catch { /* */ }
         continue;
       }
-      const { requests } = specToDocsRequests(stored, { bodyEndIndex: meta.value.bodyEndIndex || 1 });
-      if (!requests.length) return { documentId, applied: 0 };
+      const { requests, degraded } = specToDocsRequests(stored, { bodyEndIndex: meta.value.bodyEndIndex || 1 });
+      if (!requests.length) return { documentId, applied: 0, degraded };
       const painted = await invoke('render_document', { documentId, requests });
       if (!painted || painted.success === false) return { error: (painted && painted.error) || 'gdoc-render-failed', hint: painted && painted.hint, documentId };
-      return { documentId, applied: painted.value ? painted.value.applied : requests.length };
+      return { documentId, applied: painted.value ? painted.value.applied : requests.length, degraded };   // GD-7a — the §8.3 honesty report rides to the panel
     }
     return { error: 'gdoc-recreate-failed' };
   }
@@ -88,10 +111,13 @@ export function createCanvasHandlers({ log, composeCanvas, cloudInvokeConnector 
     const backend = (builtinApp(anchor.appId)?.presentation?.backend) || 'tab';
     if (backend === 'gdoc') {
       const g = await _renderGdoc(anchor, stored, docId);
-      note(`CANVAS ▸ ${op} → ${docId} gdoc ${g.error ? `ERROR ${g.error}${g.hint ? ` (${g.hint})` : ''}` : `${g.documentId} (applied ${g.applied})`} (rev ${stored ? stored.rev : '?'})`);
+      // GD-4c — the Doc IS the surface, so SURFACE it: open on first compose, focus on the rest (unless focus:false).
+      const gTabId = (!g.error && g.documentId) ? await _openDocTab(g.documentId, focus) : null;
+      const deg = (Array.isArray(g.degraded) && g.degraded.length) ? ` degraded ${g.degraded.map((d) => `${d.kind}→${d.as}`).join(',')}` : '';
+      note(`CANVAS ▸ ${op} → ${docId} gdoc ${g.error ? `ERROR ${g.error}${g.hint ? ` (${g.hint})` : ''}` : `${g.documentId} (applied ${g.applied}, tab ${gTabId ?? '—'})`}${deg} (rev ${stored ? stored.rev : '?'})`);
       return g.error
         ? { success: false, op, docId, rev: stored ? stored.rev : null, error: g.error, hint: g.hint }
-        : { success: true, op, docId, rev: stored ? stored.rev : null, gdoc: g };
+        : { success: true, op, docId, rev: stored ? stored.rev : null, gdoc: g, tabId: gTabId, docUrl: _DOC_URL(g.documentId), degraded: g.degraded || [] };
     }
     const tabId = (focus !== false) ? await _openCanvasTab(anchor) : null;   // a cadence refresh may pass focus:false
     note(`CANVAS ▸ ${op} → ${docId} (rev ${stored ? stored.rev : '?'}, ${stored ? stored.blocks.length : 0} blocks)`);
@@ -121,9 +147,13 @@ export function createCanvasHandlers({ log, composeCanvas, cloudInvokeConnector 
           // GD-4 (§8.2) — spec-revision turns: hand the CURRENT spec to compose, so "change the first line" edits
           // the addressed block instead of starting over. First compose (no spec yet) stays a fresh compose.
           let current = null; try { current = await loadCanvasSpec(anchor); } catch { current = null; }
-          const spec = await composeCanvas({ ask: String(p.ask || ''), seed: String(p.seed || ''), objects, learned: String(p.learned || ''), current });
+          // GD-7e (§8.7.1) — banked SOURCES (a fetched KB article + its enumerated media menu) ride into compose;
+          // the returned spec passes stripMintedMedia BEFORE the render path (refs-not-URLs: an LLM-minted remote
+          // media src is an exfil beacon — refs survive, minted srcs don't; trusted app-defined blocks never pass here).
+          const sources = Array.isArray(p.sources) ? p.sources : null;
+          const spec = await composeCanvas({ ask: String(p.ask || ''), seed: String(p.seed || ''), objects, learned: String(p.learned || ''), current, sources });
           if (!spec) { sendResponse({ success: false, error: 'compose-empty' }); return; }   // no LLM / unparseable / empty
-          sendResponse(await _render(anchor, spec, 'compose', p.focus));
+          sendResponse(await _render(anchor, stripMintedMedia(spec), 'compose', p.focus));
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'compose-canvas-failed' }); }
       })();
       return true;

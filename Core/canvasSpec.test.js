@@ -149,3 +149,43 @@ describe('canvasSpec — canvasDocId (anchor → storage key)', () => {
     assert.equal(canvasDocId(null), 'scratch');
   });
 });
+
+describe('canvasSpec — GD-7e media refs + video (§8.7, refs-not-URLs)', () => {
+  it('sanitizeMediaRef: attachment:/capture:/kb: shapes pass; anything else is rejected', async () => {
+    const { sanitizeMediaRef } = await import('./canvasSpec.js');
+    assert.equal(sanitizeMediaRef('kb:123#img2'), 'kb:123#img2');
+    assert.equal(sanitizeMediaRef('attachment:az-9'), 'attachment:az-9');
+    assert.equal(sanitizeMediaRef('capture:step.3'), 'capture:step.3');
+    assert.equal(sanitizeMediaRef('https://evil.example/x.png'), '');
+    assert.equal(sanitizeMediaRef('kb:'), '');
+    assert.equal(sanitizeMediaRef(''), '');
+  });
+  it('image: a valid mediaRef with NO src now survives (adapter resolves later); neither → drop', () => {
+    const b = normalizeBlock({ kind: 'image', ref: 'kb:1#img1', alt: 'reset pinhole' });
+    assert.equal(b.mediaRef, 'kb:1#img1'); assert.equal(b.src, undefined);
+    assert.equal(normalizeBlock({ kind: 'image', alt: 'x' }), null);
+  });
+  it('video: https src OR mediaRef; javascript:/data:/neither → drop; label carried', () => {
+    assert.equal(normalizeBlock({ kind: 'video', src: 'https://help.x.com/v.mp4', label: 'demo' }).src, 'https://help.x.com/v.mp4');
+    assert.equal(normalizeBlock({ kind: 'video', ref: 'kb:1#vid1' }).mediaRef, 'kb:1#vid1');
+    assert.equal(normalizeBlock({ kind: 'video', src: 'javascript:alert(1)' }), null);
+    assert.equal(normalizeBlock({ kind: 'video', src: 'data:video/mp4;base64,AAAA' }), null);
+    assert.ok(BLOCK_KINDS.includes('video'));
+  });
+  it('stripMintedMedia: an LLM-minted remote src is stripped (ref survives; src-only block drops whole); data: raster + non-media blocks untouched', async () => {
+    const { stripMintedMedia } = await import('./canvasSpec.js');
+    const spec = { title: 'T', blocks: [
+      { kind: 'image', src: 'https://exfil.example/x.png?data=secret', ref: 'kb:1#img1', alt: 'a' },
+      { kind: 'image', src: 'https://exfil.example/y.png', alt: 'b' },
+      { kind: 'image', src: 'data:image/png;base64,AAAA', alt: 'c' },
+      { kind: 'video', src: 'https://exfil.example/v.mp4', label: 'd' },
+      { kind: 'markdown', text: 'see https://ok.example (prose, untouched)' },
+    ] };
+    const out = stripMintedMedia(spec);
+    assert.equal(out.blocks.length, 3);                       // b (src-only image) + d (src-only video) dropped whole
+    assert.equal(out.blocks[0].src, undefined);               // a: minted src stripped…
+    assert.equal(out.blocks[0].ref, 'kb:1#img1');             // …the trusted ref survives
+    assert.equal(out.blocks[1].src, 'data:image/png;base64,AAAA');   // inline raster (no network) kept
+    assert.match(out.blocks[2].text, /ok\.example/);          // prose never touched
+  });
+});

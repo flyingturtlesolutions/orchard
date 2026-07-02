@@ -3,7 +3,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { assemblePalette, toOfferedLeg, availableBuiltins, policyFilter, attachPrior, BUILTIN_LEGS } from './palette.js';
+import { assemblePalette, toOfferedLeg, availableBuiltins, policyFilter, attachPrior, composeOfferedLeg, BUILTIN_LEGS } from './palette.js';
+import { normalizeInterpretDecision } from './interpret.js';
 
 const cap = (id, extra = {}) => ({ kind: 'capability', capabilityId: id, name: id, ...extra });
 
@@ -44,6 +45,30 @@ describe('availableBuiltins — availability gating', () => {
   });
   it('stamps source=builtin', () => {
     assert.ok(availableBuiltins(BUILTIN_LEGS, { tab: true }).every((l) => l.source === 'builtin'));
+  });
+});
+
+describe('composeOfferedLeg — GD-4b drafting joins interpret’s palette (§8.2)', () => {
+  const app = { presentation: { backend: 'gdoc', blocks: [] } };
+  it('an app WITH a presentation layer → a param-free COMPOSE act leg (the ask is the brief, not a spec param)', () => {
+    const l = composeOfferedLeg(app);
+    assert.equal(l.key, 'COMPOSE'); assert.equal(l.domain, 'self'); assert.equal(l.mode, 'act');
+    assert.equal(l.source, 'builtin');
+    assert.deepEqual(l.params, []);                          // NOT the BUILTIN_LEGS ['spec'] channel shape
+    assert.match(l.does, /draft/i);                          // draft-forward — an underspecified ask can select it
+    assert.match(l.does, /no ticket or context required/i);  // the standalone-act promise (the clarify-loop fix)
+  });
+  it('off-app / no presentation → null (the leg never reaches interpret)', () => {
+    assert.equal(composeOfferedLeg(null), null);
+    assert.equal(composeOfferedLeg({}), null);
+    assert.equal(composeOfferedLeg({ presentation: null }), null);
+  });
+  it('a COMPOSE pick survives normalizeInterpretDecision ONLY when the leg is in retrieved (the GD-4b wiring)', () => {
+    const raw = { intent: 'act', capabilityId: 'COMPOSE', confidence: 0.9 };
+    const withLeg = normalizeInterpretDecision(raw, { retrieved: [composeOfferedLeg(app)] });
+    assert.equal(withLeg.intent, 'act'); assert.equal(withLeg.capabilityId, 'COMPOSE');
+    const without = normalizeInterpretDecision(raw, { retrieved: [] });   // pre-GD-4b: the leg was never offered…
+    assert.equal(without.intent, 'teach');                                // …so the pick demoted (the clarify/teach loop)
   });
 });
 

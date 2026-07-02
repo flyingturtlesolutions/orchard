@@ -79,6 +79,21 @@ export function availableBuiltins(catalog = BUILTIN_LEGS, env = {}) {
     .map((l) => ({ ...l, source: 'builtin' }));
 }
 
+/**
+ * GD-4b (v2.74.1324, DESIGN_canvas.md §8.2) — project the COMPOSE leg for INTERPRET's palette when the bound app
+ * DEFINES a presentation layer. Drafting is a STANDALONE act (not ticket/connector-gated — the ask itself is the
+ * brief), so the projection is PARAM-FREE: the dispatch hands the WHOLE ask to COMPOSE_CANVAS and the compose LLM
+ * authors the spec — interpret never fills a `spec` param (the BUILTIN_LEGS descriptor's `spec` is the CA-2
+ * channel shape, wrong for selection). The draft-forward `does` is what breaks the clarify-loop: an
+ * underspecified "draft a reply to James" is ENOUGH detail to select compose. PURE; null off-app / no presentation.
+ */
+export function composeOfferedLeg(app) {
+  if (!app || !app.presentation || typeof app.presentation !== 'object') return null;
+  const base = BUILTIN_LEGS.find((l) => l && l.key === 'COMPOSE') || {};
+  return { ...base, key: 'COMPOSE', params: [], source: 'builtin', name: 'Draft on the canvas',
+           does: 'draft or revise content (a reply, a message, a document) on the app’s canvas — works from ANY page (the canvas is its own surface; the current tab is irrelevant) and from whatever detail the ask gives (no ticket or context required); a follow-up ask ("change the first line") revises the same draft; nothing is sent anywhere' };
+}
+
 const _ruleApplies = (r, scope) => !r || !r.when || (r.when.ground == null) || (r.when.ground === (scope && scope.ground));
 const _ruleForbids = (r, leg) => !!((Array.isArray(r.forbidKeys) && r.forbidKeys.includes(leg.key)) ||
                                     (Array.isArray(r.forbidDomains) && r.forbidDomains.includes(leg.domain)));

@@ -103,11 +103,16 @@ export function classifyAskToGrid(ask, om) {
  * explicitly opts out. `blocks` (default seed content) is carried OPAQUE here — the renderer normalizes it via
  * Core/canvasSpec (kept decoupled). The live wiring (env.canvas → the display/compose legs become offerable) is CA-6.
  */
+const _BACKENDS = ['tab', 'gdoc', 'gsheet'];   // GD-3 (DESIGN_canvas.md §8) — the render targets the handler routes on
 export function normalizePresentation(p) {
-  if (p === true) return { title: null, blocks: [] };
+  if (p === true) return { title: null, blocks: [], backend: 'tab' };
   const m = (p && typeof p === 'object') ? p : null;
   if (!m || m.enabled === false) return null;
-  return { title: _str(m.title) || null, blocks: Array.isArray(m.blocks) ? m.blocks : [] };
+  // GD-3 fix (v2.74.1326): CARRY `backend` — this CA-7 normalizer predates §8 and silently STRIPPED it, so the
+  // catalog's `backend:'gdoc'` never survived builtinApp() and every render fell to the tab default (live .1325:
+  // compose leg offered — presentation truthy — but the Doc never created). Unknown/absent → the safe 'tab'.
+  return { title: _str(m.title) || null, blocks: Array.isArray(m.blocks) ? m.blocks : [],
+           backend: _BACKENDS.includes(m.backend) ? m.backend : 'tab' };
 }
 
 /** Validate + normalize an AppDefinition (catalog entry). PURE. Returns the normalized def, or null if unusable. */

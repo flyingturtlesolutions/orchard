@@ -51,6 +51,11 @@ const SYSTEM = [
   '  invent it — "answer" that it is not connected and name the sites that ARE, or "clarify" which connected site.',
   '- LEARNED: follow any STANDING RULES given in <LEARNED>. If <LEARNED> says a similar ask was handled with a',
   '  capability AND that capability ref is in the TOOL_CATALOG, prefer acting with it.',
+  '- SELF-SURFACE tools (marked [SELF-SURFACE]) run on the app\'s OWN surface (its canvas/panel), never the live page —',
+  '  the CURRENT TAB is IRRELEVANT to selecting one: never reject or downgrade it because the active site looks',
+  '  unrelated to the ask ("draft a reply" composes on the app\'s canvas from ANY page).',
+  '- RETRY: if RECENT_TURNS shows the matching act FAILED and the user asks again, RE-SELECT that act — a re-ask after',
+  '  a failure means the user likely fixed the blocker and wants a retry, not an "answer" explaining the old failure.',
   '- OBJECTS: if an <OBJECTS> block is given, it is the app\'s schema (its objects, states, actions). Use its exact',
   '  state + action names; a "state change" is the verb that reaches that state.',
   '- SUB_TASKS: if <SUB_TASKS> is given, it lists THIS app\'s own child conversations + each one\'s latest result. When',
@@ -81,6 +86,10 @@ export function buildInterpretMessages(ask, { retrieved = [], primitives = [], a
     if (!ref) return null;
     const label = (c && c.alias && c.provenance === 'user') ? c.alias : (c && (c.intent || c.name)) || ref;
     const irr = (c && c.reversible === false) ? '   [IRREVERSIBLE: real-world effect]' : '';
+    // GD-4d (v2.74.1327) — surface the domain so the SELF-SURFACE rule can bind: a self leg (canvas/panel) is
+    // page-independent, and without this marker the model can't tell it from a page capability (live .1326: on an
+    // unrelated tab it reasoned "tickets don't live here" and answered instead of composing).
+    const selfMark = (c && c.domain === 'self') ? '   [SELF-SURFACE: page-independent]' : '';
     // CX-4c — render the param schema so the LLM binds the EXACT names/types (a connector read like read_ticket needs {id}).
     const ps = c && c.paramSchema && c.paramSchema.properties;
     const req = (c && c.paramSchema && Array.isArray(c.paramSchema.required)) ? c.paramSchema.required : [];
@@ -88,7 +97,7 @@ export function buildInterpretMessages(ask, { retrieved = [], primitives = [], a
     const params = pkeys.length
       ? `\n  params: ${pkeys.map((k) => `${k}${req.includes(k) ? '*' : ''}${ps[k] && ps[k].type ? `:${ps[k].type}` : ''}${ps[k] && ps[k].format ? `(${ps[k].format})` : ''}`).join(', ')}`
       : '';
-    return `- ref: ${ref}${irr}\n  does: ${label}${params}`;
+    return `- ref: ${ref}${irr}${selfMark}\n  does: ${label}${params}`;
   }).filter(Boolean);
   const prims = (Array.isArray(primitives) ? primitives : []).map((p) => (typeof p === 'string' ? p : (p && (p.op || p.key)))).filter(Boolean);
   const intent = String(seed ?? '').trim();
