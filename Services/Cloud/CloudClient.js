@@ -141,6 +141,18 @@ export async function listConnectorTools({ q = '', k } = {}) {
   return /** @type {any} */ (cloudRequest('GET', '/connectors/tools', { query }));
 }
 /**
+ * MP-3 (§5.2) — complete a provider link: the PKCE dance ran client-side (launchWebAuthFlow); this posts the
+ * code on the JWT-authed channel and the proxy exchanges + vaults the refresh token. The extension never sees it.
+ * @param {string} provider @param {{ code:string, redirectUri:string, codeVerifier?:string }} body
+ */
+export async function linkConnector(provider, body) {
+  return /** @type {any} */ (cloudRequest('POST', `/connectors/link/${encodeURIComponent(provider)}`, { body }));
+}
+/** Unlink a provider (best-effort revoke at the provider + drop the vault record). @param {string} provider */
+export async function unlinkConnector(provider) {
+  return /** @type {any} */ (cloudRequest('DELETE', `/connectors/link/${encodeURIComponent(provider)}`));
+}
+/**
  * Newer versions in the publication's lineage (DD-12 B).
  * @param {string} publicationId
  * @returns {Promise<{ publicationId: string, lineageRootId: string, updates: object[] }>}

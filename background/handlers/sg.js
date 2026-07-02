@@ -36,6 +36,7 @@ import { loadGoalItems } from '../../Services/Storage/GoalMemoryStore.js';   // 
 import { goalContextFor } from '../../Core/goalRetrieval.js';   // AL-4 — assemble the relevant standing rules + recall into a context block
 import { builtinApp } from '../../Core/appCatalog.js';   // OM — the app's catalog entry (its object model)
 import { connectorLegsForConnections, harvestedRecipeLegs } from '../../Core/connectorRecipes.js';   // CX-4c + §20 — connected session-ride recipes (curated + harvested header-replay) as selectable interpret tools
+import { brokerLegsForLinked } from '../../Core/brokerCatalog.js';   // CX-5c — broker (OAuth/MCP) legs, gated on LINKED providers
 import { neutralizeFalseCompletion } from '../../Core/answerGuard.js';   // honesty belt — the answer path dispatches nothing, so a completion claim on a side-effect COMMAND is a fabrication (the calendar "✅ I created it" bug)
 import { describeObjectModel } from '../../Core/appDef.js';   // OM — render the app's object model (noun/states/actions/transitions) as a context block
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability, findDuplicateCapabilities } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A; GA-6 dedup
@@ -1178,7 +1179,23 @@ export function createSgMessageHandlers(ctx) {
             }
           }
         } catch { /* never block interpret on the harvested-leg projection */ }
-        const retrieved = [...ragLegs, ...connLegs, ...harvestedLegs];
+        // CX-5c — the BROKER (OAuth/MCP) legs for the active page + connected hosts, gated on LINKED providers (the
+        // `connector:linkedProviders` cache LINK/UNLINK maintain — an unlinked provider's legs stay out; a
+        // selectable-but-dead leg reads as broken). Reads AND writes project: a write pick hits the chat-side HITL
+        // confirm and INVOKE_CONNECTOR fail-closes without confirmed:true — gated end-to-end, so surfacing is honest.
+        let brokerLegs = [];
+        try {
+          const _lp = await chrome.storage.local.get('connector:linkedProviders');
+          const linked = Array.isArray(_lp['connector:linkedProviders']) ? _lp['connector:linkedProviders'] : [];
+          if (linked.length) {
+            const _seenB = new Set([...ragLegs, ...connLegs, ...harvestedLegs].map((l) => l && l.key).filter(Boolean));
+            const hosts = new Set();
+            try { if (tabUrl) hosts.add(new URL(tabUrl).host); } catch { /* */ }
+            for (const c of connections) { try { hosts.add(new URL(/^https?:\/\//i.test(c.origin) ? c.origin : `https://${c.origin}`).host); } catch { /* */ } }
+            for (const h of hosts) brokerLegs.push(...brokerLegsForLinked(h, linked, { seenKeys: _seenB }));
+          }
+        } catch { /* never block interpret on the broker projection */ }
+        const retrieved = [...ragLegs, ...connLegs, ...harvestedLegs, ...brokerLegs];
         const primitives = ['OPEN_URL', 'CLICK', 'TYPE', 'SCROLL', 'EXTRACT'];
         // F-2 (v2.74.1179) — feed interpret the live page VOCABULARY (the same affordances IL_ANSWER reads from the
         // cached Locale) so its act/teach/clarify decisions are grounded in what the page actually offers, not just

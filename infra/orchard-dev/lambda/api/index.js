@@ -20,6 +20,8 @@ const {
 } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
+const { invokeMcpTool } = require('./mcp.cjs');   // MP-2b (CX-5b §5.2) — the MCP transport to remote servers (parity-locked to Core/mcpClient.js)
+const { exchangeAuthCode, refreshAccessToken } = require('./oauth.cjs');   // MP-3b — code→token exchange + refresh (client secret lives HERE only)
 
 const IDENTITY_TABLE = process.env.IDENTITY_TABLE;
 const OBJECT_TABLE = process.env.OBJECT_TABLE;
@@ -1382,10 +1384,15 @@ async function handleConnectorInvoke(event) {
   if (!link || !link.refreshToken) {
     return json(409, { error: 'connector-not-linked', provider, hint: `link ${provider} first` });
   }
-  // NEXT (per-provider adapter): exchange the refresh token → access token, call the official API
-  // (e.g. googleapis /calendar/v3), normalize → { success, value }. A linked-but-unimplemented server
-  // is honest about it rather than faking success.
-  return json(501, { error: 'connector-adapter-not-implemented', server, tool });
+  // MP-2b — exchange the vaulted refresh token → a short-lived access token, then speak MCP to the curated
+  // endpoint (mcp.cjs; the server→URL map is SERVER-SIDE only — anti-SSRF). Tool/transport failures return
+  // 200 + { success:false, … } — the §5 envelope the extension's brokerReplyFromCloud already consumes;
+  // config/link problems stay HTTP-status-shaped (503/409) like the rest of this section.
+  const tok = await refreshAccessToken(provider, link.refreshToken);   // MP-3b — oauth.cjs owns the token endpoints + creds
+  if (tok.error === 'connector-not-configured') return json(503, { error: 'connector-not-configured', provider, hint: 'no OAuth client registered for this provider' });
+  if (tok.error) return json(200, { success: false, error: 'broker-unauthorized', hint: `token refresh failed — re-link ${provider}` });
+  const result = await invokeMcpTool({ server, tool, args: (body.args && typeof body.args === 'object') ? body.args : {}, accessToken: tok.accessToken });
+  return json(200, result);
 }
 
 // GET /connectors/tools — discovery. Reports which providers the CALLER has linked (descriptors only,
@@ -1402,14 +1409,39 @@ async function handleConnectorTools(event) {
   return json(200, { tools: [], linked });
 }
 
-// POST /connectors/link/{provider} — begin the OAuth link. Needs a registered OAuth client (env, set
-// once per provider). Not-configured is honest; the authorize-URL + callback token exchange land next.
+// POST /connectors/link/{provider} — complete the link (MP-3, §5.2 pinned contract): the extension danced the
+// PKCE authorize CLIENT-side (launchWebAuthFlow) and posts {code, redirectUri, codeVerifier} on the JWT-authed
+// channel; we exchange server-side (the client secret never leaves this Lambda) and VAULT the refresh token at
+// CONNLINK#{provider}. No unauthenticated callback route exists — the redirect never touches this API.
 async function handleConnectorLink(event, provider) {
   const auth = await requireOrchardUser(event);
   if (auth.error) return auth.error;
-  const clientId = process.env[`${String(provider).toUpperCase()}_OAUTH_CLIENT_ID`];
-  if (!clientId) return json(503, { error: 'connector-not-configured', provider, hint: 'no OAuth client registered for this provider' });
-  return json(501, { error: 'connector-link-not-implemented', provider });
+  let body = {};
+  try { body = event.body ? JSON.parse(event.body) : {}; } catch { return json(400, { error: 'invalid_json' }); }
+  const code = String(body.code || '').trim();
+  const redirectUri = String(body.redirectUri || '').trim();
+  if (!code || !redirectUri) return json(400, { error: 'link-missing-fields' });
+  const ex = await exchangeAuthCode(provider, { code, redirectUri, codeVerifier: body.codeVerifier }, {});
+  if (ex.error === 'connector-not-configured') return json(503, { error: 'connector-not-configured', provider, hint: 'no OAuth client registered for this provider' });
+  if (ex.error) return json(502, { error: ex.error, provider, hint: ex.hint });
+  await ddb.send(new PutCommand({
+    TableName: OBJECT_TABLE,
+    Item: { PK: `USER#${auth.orchardUserId}`, SK: `CONNLINK#${provider}`, provider, refreshToken: ex.refreshToken, scope: ex.scope, linkedAt: new Date().toISOString() },
+  }));
+  return json(200, { success: true, provider, scope: ex.scope });
+}
+
+// DELETE /connectors/link/{provider} — unlink: best-effort revoke at the provider, then drop the vault record.
+async function handleConnectorUnlink(event, provider) {
+  const auth = await requireOrchardUser(event);
+  if (auth.error) return auth.error;
+  const link = await getConnectorLink(auth.orchardUserId, provider);
+  if (link && link.refreshToken && provider === 'google') {
+    // Best-effort: a failed revoke must not block the unlink (the vault record is the thing we own).
+    try { await fetch('https://oauth2.googleapis.com/revoke', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: link.refreshToken }).toString() }); } catch { /* best-effort */ }
+  }
+  await ddb.send(new DeleteCommand({ TableName: OBJECT_TABLE, Key: { PK: `USER#${auth.orchardUserId}`, SK: `CONNLINK#${provider}` } }));
+  return json(200, { success: true, provider, unlinked: true });
 }
 
 exports.handler = async (event) => {
@@ -1504,6 +1536,7 @@ exports.handler = async (event) => {
     if (path.startsWith('/connectors/link/')) {
       const provider = decodeURIComponent(path.slice('/connectors/link/'.length));
       if (method === 'POST' && provider) return handleConnectorLink(event, provider);
+      if (method === 'DELETE' && provider) return handleConnectorUnlink(event, provider);
     }
 
     return json(404, { error: 'not_found', method, path });

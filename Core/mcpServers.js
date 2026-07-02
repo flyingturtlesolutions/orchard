@@ -48,3 +48,19 @@ export function mcpProviderFor(id) {
 export function isKnownMcpServer(id) {
   return Object.prototype.hasOwnProperty.call(MCP_SERVERS, _id(id));
 }
+
+/**
+ * MP-3 — the UNION of scopes across a provider's servers (google → calendar ∪ gmail …). One link dance per
+ * PROVIDER grants every server it fronts, so the authorize request must carry them all. PURE, order-stable.
+ * @param {string} provider
+ * @returns {string[]}
+ */
+export function providerScopes(provider) {
+  const p = _id(provider);
+  const out = [];
+  for (const s of Object.values(MCP_SERVERS)) {
+    if (s.provider !== p) continue;
+    for (const scope of (s.scopes || [])) if (!out.includes(scope)) out.push(scope);
+  }
+  return out;
+}

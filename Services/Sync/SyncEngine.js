@@ -526,6 +526,12 @@ async function pushOutbox() {
     Logger.info('SyncEngine', `push: ${deleteEntries.length} delete(s), ${putEntries.length} put(s)`);
   }
 
+  // v2.74.1312 — an AUTH failure is total, not per-item: a stored session whose refresh is dead (signed-out /
+  // identity-unbound) fails EVERY op identically, so retrying the remaining ~140 outbox items just floods the trace
+  // with one WARN each (the live symptom: ~140 lines/min). Abort the push on the first 401/403 — runSync's catch
+  // turns it into ONE line. Genuine per-item failures still warn item-by-item.
+  const _isAuthFailure = (e) => e instanceof CloudClientError && (e.status === 401 || e.status === 403);
+
   // Tombstones first — a failed manifest PUT must not block delete propagation.
   for (const entry of deleteEntries) {
     try {
@@ -535,6 +541,7 @@ async function pushOutbox() {
       pushed += 1;
       Logger.info('SyncEngine', `pushed delete ${entry.path}`);
     } catch (err) {
+      if (_isAuthFailure(err)) throw err;   // dead session → abort the whole push (outbox stays queued)
       Logger.warn('SyncEngine', `delete failed ${entry.path}: ${err.message}`);
     }
   }
@@ -562,6 +569,7 @@ async function pushOutbox() {
       await removeOutboxEntryIfUnchanged(entry.path, entry.queuedAt);  // race-safe: keep ops queued mid-push
       pushed += 1;
     } catch (e) {
+      if (_isAuthFailure(e)) throw e;   // v2.74.1312 — dead session → abort (see the delete loop)
       if (e instanceof CloudClientError && e.status === 409 && e.body && typeof e.body === 'object') {
         await handleConflict(/** @type {any} */ (e.body));
       } else {
@@ -1022,6 +1030,7 @@ export async function runSync() {
     };
   } catch (e) {
     let msg = e.message;
+    let expectedAuth = false;   // v2.74.1312 — a dead session recurs every sync tick until re-sign-in → DEBUG, not a WARN/min (the v2.74.812 rule)
     if (e instanceof CloudClientError) {
       if (e.status === 404) {
         const body = /** @type {{ error?: string, path?: string, message?: string }} */ (
@@ -1033,11 +1042,15 @@ export async function runSync() {
           const settings = await getCloudSettings();
           msg = `Sync API not found — API base URL must end with /v1 (current: ${settings.apiBaseUrl}). Reload extension after saving Cloud config.`;
         }
+      } else if (e.status === 401) {
+        msg = 'Not signed in to Orchard cloud — sign in again (Studio → Cloud); outbox stays queued';
+        expectedAuth = true;
       } else if (e.status === 403) {
         msg = 'Cloud identity not bound — sign out and sign in again';
+        expectedAuth = true;
       }
     }
-    Logger.warn('SyncEngine', `sync failed: ${msg}`);
+    Logger[expectedAuth ? 'debug' : 'warn']('SyncEngine', `sync failed: ${msg}`);
     return { ok: false, error: msg };
   } finally {
     _syncInFlight = false;

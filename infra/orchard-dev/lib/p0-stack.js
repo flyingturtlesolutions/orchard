@@ -170,6 +170,12 @@ class P0Stack extends cdk.Stack {
         PUBLICATIONS_BUCKET: publicationsBucket.bucketName,
         SHARED_WS_TABLE: sharedWorkspaceTable.tableName,
         ANTHROPIC_SECRET_ARN: anthropicSecret.secretArn,
+        // CX-5b/MP-3 (DESIGN_connectors.md §5.2) — the connector broker's per-provider OAuth client. Values come
+        // from the SHELL env at synth time (set them before `cdk deploy`) so nothing secret is ever committed;
+        // empty keeps the routes honest (503 connector-not-configured). Dev tradeoff: the secret lands in the
+        // synthesized template / Lambda env — the hardened path (Secrets Manager read in oauth.cjs) can come later.
+        GOOGLE_OAUTH_CLIENT_ID: process.env.GOOGLE_OAUTH_CLIENT_ID ?? '',
+        GOOGLE_OAUTH_CLIENT_SECRET: process.env.GOOGLE_OAUTH_CLIENT_SECRET ?? '',
       },
     });
 

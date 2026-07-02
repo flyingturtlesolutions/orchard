@@ -17,6 +17,8 @@ import { fillEndpoint, fillBody, recipeForOrigin } from '../../Core/connectorRec
 import { pickRideTab, assessProbe, rideAction, STATUS, classifyReachProbe } from '../../Core/connection.js';
 import { armable } from '../../Core/rideRecipe.js';   // §18 — the arm guard: a non-armable (disabled / pending / rejected) per-Ground recipe must not run
 import { brokerInvokeGate, brokerReplyFromCloud } from '../../Core/brokerInvoke.js';   // CX-5b — the broker (OAuth/MCP) fail-closed gate + cloud-reply normalizer (pure)
+import { pkcePair, authorizeUrl, parseAuthRedirect } from '../../Core/oauthLink.js';   // MP-3 — the pure client half of the link dance (§5.2 pinned contract)
+import { providerScopes } from '../../Core/mcpServers.js';                             // MP-3 — one dance grants every server the provider fronts
 import { Logger } from '../../Core/Logger.js';   // §20 — SESSION_REPLAY outcome observability (Invariant #1)
 import { armRideAuthCapture } from './sg.js';   // §20 — keep the page-local token fresh on the app tab (no import cycle: sg.js doesn't import connector.js)
 
@@ -129,7 +131,19 @@ function _replayFetchFunc(url, apiHost, method, reqBody, contentType) {
   })();
 }
 
-export function createConnectorHandlers({ ensureContentScript, readRideRecipes, cloudInvokeConnector } = {}) {
+// CX-5c — the LINKED-PROVIDER cache: which providers this install has OAuth-granted. Written by LINK/UNLINK (and
+// refreshed from the backend by GET_CONNECTOR_STATUS); read by the palette so broker legs only surface when runnable.
+// Cache-stale is safe: a stale "linked" fails honestly at invoke (connector-not-linked); a stale "unlinked" merely
+// hides legs until the next status refresh.
+const LINKED_KEY = 'connector:linkedProviders';
+async function _readLinkedProviders() {
+  try { const o = await chrome.storage.local.get(LINKED_KEY); return Array.isArray(o[LINKED_KEY]) ? o[LINKED_KEY] : []; } catch { return []; }
+}
+async function _writeLinkedProviders(list) {
+  try { await chrome.storage.local.set({ [LINKED_KEY]: [...new Set((list || []).filter(Boolean))] }); } catch { /* */ }
+}
+
+export function createConnectorHandlers({ ensureContentScript, readRideRecipes, cloudInvokeConnector, cloudLinkConnector, cloudUnlinkConnector, cloudListConnectorTools, cloudHasSession } = {}) {
   const fetchVia = (tabId, url, method, body) =>
     chrome.tabs.sendMessage(tabId, { type: 'SESSION_FETCH', payload: { url, method, body } }, { frameId: 0 });
   // The TOP-FRAME content script can be orphaned (an extension reload kills it; the all-frames PING can read a live
@@ -261,6 +275,89 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
         sendResponse(reply);
       })();
       return true;   // async — keep the sendResponse channel open
+    },
+
+    // MP-3 (v2.74.1310) — LINK_CONNECTOR (§5.2 pinned contract): dance the provider's PKCE authorize CLIENT-side
+    // via chrome.identity.launchWebAuthFlow, then hand ONLY {code, redirectUri, codeVerifier} to the JWT-authed
+    // proxy, which exchanges + vaults the refresh token. The extension never sees a secret or a refresh token; the
+    // state param is VERIFIED (parseAuthRedirect) so an injected redirect can't smuggle a code. The client id is
+    // PUBLIC config — chrome.storage.local `connector:oauthClientId:{provider}` (set once per install/deploy).
+    // Logs `CONNECTOR_LINK ▸` (Invariant #1: in studio.js _DECISION_RE).
+    'LINK_CONNECTOR': (payload, _sender, sendResponse) => {
+      (async () => {
+        const provider = String((payload && payload.provider) || '').trim();
+        try {
+          if (!provider) { sendResponse({ success: false, error: 'no-provider' }); return; }
+          if (typeof cloudLinkConnector !== 'function') { sendResponse({ success: false, error: 'broker-unavailable', hint: 'the connector proxy is not wired' }); return; }
+          const cfgKey = `connector:oauthClientId:${provider}`;
+          const clientId = String((payload && payload.clientId) || (await chrome.storage.local.get(cfgKey))[cfgKey] || '').trim();
+          if (!clientId) {
+            try { Logger.info('connector', `CONNECTOR_LINK ▸ ${provider} → BLOCKED (no client id)`); } catch { /* */ }
+            sendResponse({ success: false, error: 'connector-not-configured', hint: `set ${cfgKey} in chrome.storage.local (the PUBLIC OAuth client id)` }); return;
+          }
+          // v2.74.1312 — PREFLIGHT the Orchard session BEFORE the consent dance: the vault POST rides the Cognito
+          // JWT, so a signed-out user would otherwise walk the whole Google consent flow and THEN fail. Fail fast.
+          if (typeof cloudHasSession === 'function' && !(await cloudHasSession())) {
+            try { Logger.info('connector', `CONNECTOR_LINK ▸ ${provider} → BLOCKED (not signed in to Orchard cloud)`); } catch { /* */ }
+            sendResponse({ success: false, error: 'orchard-not-signed-in', hint: 'sign in to Orchard cloud first (Studio → Cloud) — the link vaults on your cloud account' }); return;
+          }
+          const scopes = providerScopes(provider);
+          const { verifier, challenge } = await pkcePair();
+          const state = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
+          const redirectUri = `https://${chrome.runtime.id}.chromiumapp.org/${provider}`;
+          const url = authorizeUrl({ provider, clientId, redirectUri, scopes, state, codeChallenge: challenge });
+          if (!url) { sendResponse({ success: false, error: 'unknown-provider' }); return; }
+          const redirectedTo = await chrome.identity.launchWebAuthFlow({ url, interactive: true });
+          const parsed = parseAuthRedirect(redirectedTo, state);
+          if (!parsed.ok) {
+            try { Logger.info('connector', `CONNECTOR_LINK ▸ ${provider} → ${parsed.error}`); } catch { /* */ }
+            sendResponse({ success: false, error: parsed.error }); return;
+          }
+          const reply = await cloudLinkConnector(provider, { code: parsed.code, redirectUri, codeVerifier: verifier });
+          await _writeLinkedProviders([...(await _readLinkedProviders()), provider]);   // CX-5c — the palette gate reads this
+          try { Logger.info('connector', `CONNECTOR_LINK ▸ ${provider} → linked (${(reply && reply.scope) || 'no scope reported'})`); } catch { /* */ }
+          sendResponse({ success: true, provider, scope: (reply && reply.scope) || '' });
+        } catch (e) {
+          // launchWebAuthFlow rejects on user-cancel too — surface it plainly, never as a fake failure elsewhere.
+          try { Logger.info('connector', `CONNECTOR_LINK ▸ ${provider} → ${(e && e.message) || 'link-failed'}`); } catch { /* */ }
+          sendResponse({ success: false, error: (e && e.message) || 'link-failed' });
+        }
+      })();
+      return true;   // async — keep the sendResponse channel open
+    },
+
+    // CX-5c — UNLINK_CONNECTOR: revoke + drop the vault record (proxy-side), then clear the local palette gate.
+    'UNLINK_CONNECTOR': (payload, _sender, sendResponse) => {
+      (async () => {
+        const provider = String((payload && payload.provider) || '').trim();
+        try {
+          if (!provider) { sendResponse({ success: false, error: 'no-provider' }); return; }
+          if (typeof cloudUnlinkConnector === 'function') { try { await cloudUnlinkConnector(provider); } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'unlink-failed' }); return; } }
+          await _writeLinkedProviders((await _readLinkedProviders()).filter((p) => p !== provider));
+          try { Logger.info('connector', `CONNECTOR_LINK ▸ ${provider} → unlinked`); } catch { /* */ }
+          sendResponse({ success: true, provider, unlinked: true });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'unlink-failed' }); }
+      })();
+      return true;
+    },
+
+    // CX-5c — GET_CONNECTOR_STATUS: the backend's linked-state is the truth; refresh the local cache from it (the
+    // Studio/status surface calls this; the palette reads the cache). Cloud-unreachable → the cache, marked stale.
+    'GET_CONNECTOR_STATUS': (_payload, _sender, sendResponse) => {
+      (async () => {
+        try {
+          if (typeof cloudListConnectorTools === 'function') {
+            try {
+              const r = await cloudListConnectorTools({});
+              const linked = (r && Array.isArray(r.linked)) ? r.linked : [];
+              await _writeLinkedProviders(linked);
+              sendResponse({ success: true, linked, stale: false }); return;
+            } catch { /* fall through to the cache */ }
+          }
+          sendResponse({ success: true, linked: await _readLinkedProviders(), stale: true });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'status-failed' }); }
+      })();
+      return true;
     },
 
     // §20 (v2.74.1288) — SESSION_REPLAY (header-replay session-ride): for a cross-origin Bearer/JWT API (a static SPA's

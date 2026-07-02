@@ -4361,6 +4361,27 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
     _setMessageBody(msg, rlines ? `🧠 ${rlines.join('\n')}` : '🧠 Done.');
     return true;
   }
+  // CX-5c (v2.74.1311) — a BROKER (OAuth/MCP) WRITE: show the EXACT tool call in the same HITL confirm gate as a
+  // ride write (CX-6), and fire only on the user's confirm — INVOKE_CONNECTOR ALSO fail-closes without confirmed:true
+  // (Belt #1 at both ends, plus the proxy re-checks server-side). Reads fall through to the normal dispatch below.
+  if (leg.domain === 'connector' && leg.tool && leg.tool.impl === 'oauth' && leg.mode === 'act') {
+    const plan0 = planExec(leg, params, { tabId, groundId });
+    if (!plan0 || !plan0.ok || !plan0.channel) { _setMessageBody(msg, `🧠 I can’t do “${ask}” here yet.`); return false; }
+    const argStr = JSON.stringify(plan0.payload.args || {}).replace(/`/g, "'");
+    const preview = argStr.length > 400 ? argStr.slice(0, 400) + '…' : argStr;
+    _setMessageBody(msg, `⚠️ This will call **${plan0.payload.server} · ${plan0.payload.tool}** on your linked account — it **creates or modifies data**. Review the exact call, then confirm:\n\n\`\`\`json\n${preview}\n\`\`\``);
+    const okd = await new Promise((resolve) => {
+      const bar = _orchActionBar(msg);
+      bar.appendChild(_mkBtn('✓ Confirm & send', () => { try { bar.remove(); } catch { /* */ } resolve(true); }));
+      bar.appendChild(_mkBtn('✕ Cancel', () => { try { bar.remove(); } catch { /* */ } resolve(false); }));
+    });
+    if (!okd) { _setMessageBody(msg, '🧠 Cancelled — nothing was sent.'); return false; }
+    let br = null;
+    try { br = await _orchReq('INVOKE_CONNECTOR', { ...plan0.payload, confirmed: true }); } catch { /* */ }
+    if (!br || br.success === false) { _setMessageBody(msg, `🧠 Couldn’t ${leg.does || leg.name || 'do that'}${br && br.error ? ` — ${br.error}` : ''}.${br && br.hint ? `  ${br.hint}.` : ''}`); return false; }
+    _setMessageBody(msg, `✅ Done — ${plan0.payload.tool} sent.`);
+    return true;
+  }
   const plan = planExec(leg, params, { tabId, groundId });
   if (!plan || !plan.ok || !plan.channel) { _setMessageBody(msg, `🧠 I can’t do “${ask}” here yet.`); return false; }   // AL-3e — returns the ok verdict so the caller can bank the outcome
   try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${leg.domain}:${leg.key}`); } catch { /* */ }
@@ -4982,6 +5003,28 @@ async function sendChatMessage() {
       if (!groundId) { _setMessageBody(msg, 'Couldn’t ground this page to record against — try reloading it.'); _orchFinalize(msg); return; }
       await _orchRecordFlow(msg, { groundId, tabId: tab.id, ask });   // shared recorder: RECORD_START → you demo → Stop & save → DERIVE (banks Drive + any Ride write)
     } catch (e) { _setMessageBody(msg, `Couldn’t start teaching: ${e && e.message ? e.message : e}`); _orchFinalize(msg); }
+    return;
+  }
+
+  // CX-5c (v2.74.1311) — `link: <provider>` / `unlink: <provider>` — connect an official-API (broker) provider via
+  // the client-side PKCE dance (LINK_CONNECTOR, §5.2). Once linked, its tools surface in the interpret palette
+  // ("create a calendar event" → the google-calendar broker leg instead of the brittle DOM). The user-facing trigger
+  // the arc owed: `link: google` → the consent screen → linked.
+  if (/^(un)?link:/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    const un = /^unlink:/i.test(text);
+    const provider = text.replace(/^(un)?link:\s*/i, '').trim().toLowerCase();
+    appendMessage({ role: 'user', body: text });
+    const msg = appendMessage({ role: 'assistant', body: '' });
+    if (!provider) { _setMessageBody(msg, `usage: \`${un ? 'unlink' : 'link'}: <provider>\` — e.g. \`link: google\`.`); _orchFinalize(msg); return; }
+    _setMessageBody(msg, un ? `Unlinking ${provider}…` : `Opening ${provider} sign-in — approve the consent screen to link…`);
+    try {
+      const r = await _orchReq(un ? 'UNLINK_CONNECTOR' : 'LINK_CONNECTOR', { provider });
+      if (!r || r.success === false) _setMessageBody(msg, `Couldn’t ${un ? 'unlink' : 'link'} ${provider}${r && r.error ? ` — ${r.error}` : ''}.${r && r.hint ? `  ${r.hint}.` : ''}`);
+      else if (un) _setMessageBody(msg, `✅ ${provider} unlinked.`);
+      else _setMessageBody(msg, `✅ ${provider} linked — its official-API tools are now in the palette${r.scope ? ` (scope: ${r.scope})` : ''}.`);
+    } catch (e) { _setMessageBody(msg, `Couldn’t ${un ? 'unlink' : 'link'} ${provider}: ${e && e.message ? e.message : e}`); }
+    _orchFinalize(msg);
     return;
   }
 

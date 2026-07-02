@@ -54,6 +54,23 @@ describe('brokerCatalog — brokerLegsForHost (projection through mcpToolToLeg)'
   });
 });
 
+describe('brokerCatalog — brokerLegsForLinked (CX-5c palette gate)', () => {
+  it('linked provider → legs; UNLINKED → none (a selectable-but-dead leg reads as broken)', async () => {
+    const { brokerLegsForLinked } = await import('./brokerCatalog.js');
+    assert.equal(brokerLegsForLinked('calendar.google.com', ['google']).length, 4);
+    assert.deepEqual(brokerLegsForLinked('calendar.google.com', []), []);
+    assert.deepEqual(brokerLegsForLinked('calendar.google.com', ['notion']), []);   // linked ≠ this host's provider
+  });
+  it('mode filter + seenKeys dedupe (the palette assembly contract)', async () => {
+    const { brokerLegsForLinked } = await import('./brokerCatalog.js');
+    const reads = brokerLegsForLinked('calendar.google.com', ['google'], { mode: 'ask' });
+    assert.ok(reads.length >= 1);
+    assert.ok(reads.every((l) => l.mode === 'ask'));
+    const seen = new Set(brokerLegsForLinked('calendar.google.com', ['google']).map((l) => l.key));
+    assert.deepEqual(brokerLegsForLinked('calendar.google.com', ['google'], { seenKeys: seen }), []);
+  });
+});
+
 describe('brokerCatalog × legAvailability — closing the loop on a Google Ground', () => {
   it('a Google-class Ground (obfuscated DOM + binary writes) + a broker connector → Broker available + RECOMMENDED', () => {
     const connector = brokerConnectorForHost('calendar.google.com')?.server;   // 'google-calendar'

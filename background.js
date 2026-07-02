@@ -116,7 +116,8 @@ import {
   signInToCloud,
   signOutOfCloud,
 } from './Services/Cloud/OrchardAuth.js';
-import { getIdentityMe, getCloudObject, invokeConnector } from './Services/Cloud/CloudClient.js';   // CX-5b — invokeConnector → POST /connectors/invoke (broker)
+import { getIdentityMe, getCloudObject, invokeConnector, linkConnector, unlinkConnector, listConnectorTools } from './Services/Cloud/CloudClient.js';   // CX-5b — invokeConnector → POST /connectors/invoke (broker); MP-3 — linkConnector → POST /connectors/link/{provider}; CX-5c — unlink + linked-state
+import { ensureFreshSession } from './Services/Cloud/CloudTokenStore.js';   // v2.74.1312 — LINK_CONNECTOR preflights the Orchard session before the consent dance
 import { getIdentitySummary } from './Core/OrchardIdentity.js';
 import { syncBridgeOnStorageChange } from './Services/Sync/SyncBridge.js';
 import {
@@ -1701,7 +1702,8 @@ function _readSgSpec(groundId, url, intent) {
 
 // v2.74.951 (CR-X3a) — domain handler maps merge here; the dispatch + _invokeSgHandler serve them all.
 const _sgMessageHandlers = {
-  ...createConnectorHandlers({ ensureContentScript: _ensureContentScript, readRideRecipes: _readRideRecipes, cloudInvokeConnector: invokeConnector }),   // CX-3 — connector domain (INVOKE_SESSION session-ride); §18 — readRideRecipes feeds the arm guard; CX-5b — cloudInvokeConnector → INVOKE_CONNECTOR broker
+  ...createConnectorHandlers({ ensureContentScript: _ensureContentScript, readRideRecipes: _readRideRecipes, cloudInvokeConnector: invokeConnector, cloudLinkConnector: linkConnector, cloudUnlinkConnector: unlinkConnector, cloudListConnectorTools: listConnectorTools,
+    cloudHasSession: async () => { try { const s = await ensureFreshSession(); return !!(s && s.idToken); } catch { return false; } } }),   // CX-3 — connector domain (INVOKE_SESSION session-ride); §18 — readRideRecipes feeds the arm guard; CX-5b — cloudInvokeConnector → INVOKE_CONNECTOR broker; MP-3 — cloudLinkConnector → LINK_CONNECTOR; CX-5c — unlink + status; v1312 — link preflight
   ...createCanvasHandlers({   // CA-4 RENDER_CANVAS + CA-9 COMPOSE_CANVAS (the app authors a spec → render)
     log: (line) => { try { Logger.info('background', line); } catch { /* */ } },
     composeCanvas: (args) => AnthropicService.composeCanvas(args),

@@ -98,3 +98,23 @@ export function brokerLegsForHost(host, { catalog = BROKER_CATALOG, account = 'm
     .map((t) => mcpToolToLeg(t, { account, server: entry.server, trusted: true }))
     .filter(Boolean);
 }
+
+/**
+ * CX-5c — the PALETTE projection: broker legs for a host, gated on the provider being LINKED (OAuth granted, per
+ * the `connector:linkedProviders` cache the LINK/UNLINK handlers maintain). An unlinked provider's legs stay OUT of
+ * the interpret palette — a selectable-but-dead leg reads as broken; the leg-assessor + `link: <provider>` are the
+ * discovery/repair path. Optional seenKeys dedupes against already-collected legs (RAG/curated/harvested). PURE.
+ * @param {string} host
+ * @param {string[]} linkedProviders   e.g. ['google']
+ * @param {{ catalog?:ReadonlyArray, account?:string, mode?:('ask'|'act'|null), seenKeys?:Set<string> }} [opts]
+ * @returns {Array<object>}
+ */
+export function brokerLegsForLinked(host, linkedProviders, { catalog = BROKER_CATALOG, account = 'me', mode = null, seenKeys = null } = {}) {
+  const linked = new Set((Array.isArray(linkedProviders) ? linkedProviders : []).map((p) => String(p || '').toLowerCase()));
+  if (!linked.size) return [];
+  const entry = brokerConnectorForHost(host, catalog);
+  if (!entry || !linked.has(String(entry.provider || '').toLowerCase())) return [];
+  return brokerLegsForHost(host, { catalog, account })
+    .filter((l) => !mode || l.mode === mode)
+    .filter((l) => !(seenKeys && seenKeys.has(l.key)));
+}
