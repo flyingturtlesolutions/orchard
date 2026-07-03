@@ -95,7 +95,7 @@ export function composeOfferedLeg(app) {
 }
 
 const _ruleApplies = (r, scope) => !r || !r.when || (r.when.ground == null) || (r.when.ground === (scope && scope.ground));
-const _ruleForbids = (r, leg) => !!((Array.isArray(r.forbidKeys) && r.forbidKeys.includes(leg.key)) ||
+const _ruleForbids = (r, leg) => !!((Array.isArray(r.forbidKeys) && r.forbidKeys.includes(keyOf(leg))) ||
                                     (Array.isArray(r.forbidDomains) && r.forbidDomains.includes(leg.domain)));
 
 /**
@@ -111,7 +111,7 @@ export function policyFilter(legs, { rules = [], scope = {} } = {}) {
   const list = Array.isArray(legs) ? legs : [];
   const rs = Array.isArray(rules) ? rules : [];
   return list.filter((leg) => {
-    if (!leg || !leg.key) return false;
+    if (!leg || !keyOf(leg)) return false;   // v1340 — keyOf-tolerant: a RAG candidate carries capabilityId, not key (the live interpret palette runs through here now)
     if (leg.safety === 'forbidden') return false;                       // floor — unrelaxable
     for (const r of rs) { if (_ruleApplies(r, scope) && _ruleForbids(r, leg)) return false; }
     return true;

@@ -254,7 +254,7 @@ function _appFromHost(host) {
  * user-vetted (so its read drops to 'auto'). Dedups against `seenKeys` (so a harvested recipe can't shadow a curated one).
  *   recipes: per-Ground ride-recipes · host: the connected origin's host · seenKeys: keys already in the palette
  */
-export function harvestedRecipeLegs(recipes, { host = '', account = 'me', mode = null, seenKeys = null } = {}) {
+export function harvestedRecipeLegs(recipes, { host = '', account = 'me', mode = null, seenKeys = null, groundId = '' } = {}) {
   const list = Array.isArray(recipes) ? recipes : [];
   const app = _appFromHost(host);
   const seen = seenKeys instanceof Set ? seenKeys : new Set();
@@ -278,6 +278,9 @@ export function harvestedRecipeLegs(recipes, { host = '', account = 'me', mode =
     // dispatch sees tool.replay==='headers' → SESSION_REPLAY instead of cookie-ride INVOKE_SESSION.
     leg.tool.sessionHost = host;
     leg.tool.replay = 'headers';
+    // v2.74.1340 (review A/§18) — carry the recipe's Ground so the SESSION_REPLAY dispatch can hand the arm guard
+    // its {groundId, recipeId} pair (the executor re-checks armable at run time, not just at projection time).
+    if (groundId) leg.tool.groundId = String(groundId);
     out.push(leg);
   }
   return out;

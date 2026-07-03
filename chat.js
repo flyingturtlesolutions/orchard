@@ -40,6 +40,7 @@ import { planSubTasks, subTaskFromApp, composeSeed, classifyAskToGrid, isConfigu
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-app write gate (read-only enforcement)
 import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps; AP-4 — configuredAppDefinition (mint a durable, re-creatable app from a set-up instance)
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
+import { originFromText } from './Core/setupSpec.js';   // AS-4 / review P1-6 — the host-shape floor: a real public host has a dot (TLD); rejects bare words like "gmail" before they bank a poisoned target
 import { recordGoalItem, loadGoalItems, clearGoalMemory, promoteGoalItem } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view
 import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
 import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab } from './Core/workflowMemory.js';   // WF-1 lexical recall + WF-3 LLM-fallback prep/validate/gate
@@ -864,14 +865,20 @@ function _setupAutoScroll() {
 // ─── Active invocation tracking ──────────────────────────────────────────────
 
 const _activeInvocations = new Set();
+// v2.74.1338 (review P1-3) — invocation → ORIGIN conversation, recorded at launch (pre-await, so the global is
+// right here). Lets a completion that arrives after the user switched away persist its result to the right
+// conversation instead of being dropped with the wiped bubble.
+const _invocationConvs = new Map();
 
 function _trackInvocation(invocationId) {
   _activeInvocations.add(invocationId);
+  if (_currentConversationId) _invocationConvs.set(invocationId, String(_currentConversationId));
   _updateRunningStatus();
 }
 
 function _untrackInvocation(invocationId) {
   _activeInvocations.delete(invocationId);
+  _invocationConvs.delete(invocationId);
   _updateRunningStatus();
 }
 
@@ -902,13 +909,22 @@ function _updateRunningStatus() {
  *  - The returned element has a `data-message-id` attribute used as the
  *    persistence key for future updates.
  */
-function appendMessage({ role, body, attribution, id, skipPersist = false }) {
+function appendMessage({ role, body, attribution, id, skipPersist = false, convId = null }) {
   // v2.74.107 — skipPersist explicit in the signature (was previously read
   // off `arguments[0].skipPersist`, which worked but hid the contract from
   // readers of the function header). Callers: appendMessage(..., skipPersist:
   // true) is set by _rehydrateConversation for messages already in storage
   // to avoid re-persisting them on re-render.
-  _enterConversation();
+  //
+  // v2.74.1338 (review P1-1) — `convId` = the TURN'S origin conversation. The v1230 pin below only protected
+  // bubbles appended BEFORE the first await; a bubble created AFTER an await stamped whichever conversation was
+  // current, misrouting the reply (visually + in storage) when the user switched apps mid-flight. A caller that
+  // spans awaits passes its turn-start convId: when it differs from the CURRENT conversation the bubble is built
+  // DETACHED (never rendered into the foreign thread) and persists to its origin via dataset.conversationId —
+  // _setMessageBody/_orchFinalize work on the detached node unchanged.
+  const _origin = (convId != null ? String(convId) : (_currentConversationId ? String(_currentConversationId) : null));
+  const _foreign = convId != null && String(_currentConversationId ?? '') !== String(convId);
+  if (!_foreign) _enterConversation();
 
   const messages = $('messages');
   const msg = document.createElement('div');
@@ -922,7 +938,7 @@ function appendMessage({ role, body, attribution, id, skipPersist = false }) {
   msg.dataset.messageId = messageId;
   // v2.74.1230 — pin the message to its ORIGIN conversation, so an in-flight reply persists to THAT conversation even
   // if the user switches to another app mid-flight (the working app updates on completion; the new app is untouched).
-  if (_currentConversationId) msg.dataset.conversationId = String(_currentConversationId);
+  if (_origin) msg.dataset.conversationId = _origin;
 
   const avatar = document.createElement('div');
   avatar.className = 'message-avatar';
@@ -945,16 +961,18 @@ function appendMessage({ role, body, attribution, id, skipPersist = false }) {
 
   msg.appendChild(avatar);
   msg.appendChild(content);
-  messages.appendChild(msg);
+  if (!_foreign) {   // v2.74.1338 — a foreign-origin bubble never renders into the visible thread (persist-only)
+    messages.appendChild(msg);
 
-  // v2.74.106 — Conditional scroll: don't yank the user back to the bottom
-  // if they've scrolled up to read prior messages. User-sent messages get an
-  // unconditional scroll though — sending always scrolls back to the
-  // conversation tail, matching every other chat product's behavior.
-  if (role === 'user') {
-    $('thread').scrollTop = $('thread').scrollHeight;
-  } else {
-    _scrollToBottomIfNearBottom();
+    // v2.74.106 — Conditional scroll: don't yank the user back to the bottom
+    // if they've scrolled up to read prior messages. User-sent messages get an
+    // unconditional scroll though — sending always scrolls back to the
+    // conversation tail, matching every other chat product's behavior.
+    if (role === 'user') {
+      $('thread').scrollTop = $('thread').scrollHeight;
+    } else {
+      _scrollToBottomIfNearBottom();
+    }
   }
 
   // User messages are final state on append — persist immediately. Thinking
@@ -1026,6 +1044,9 @@ async function _persistMessageUpdate(msgEl, fields) {
  */
 function _setMessageBody(msg, text, { markdown = false, html = false } = {}) {
   const body = msg.querySelector('.message-body');
+  // v2.74.1338 (review D) — stash the SOURCE text + markdown flag so _orchFinalize persists what was rendered,
+  // not the newline-less textContent flattening (multi-line/markdown replies rehydrated as one run-on line).
+  if (!html) { try { msg.dataset.srcText = String(text ?? ''); msg.dataset.srcMd = markdown ? '1' : ''; } catch { /* */ } }
   if (markdown) {
     body.innerHTML = renderMarkdown(text);
     body.classList.add('md-rendered');
@@ -1635,8 +1656,11 @@ async function _runEphemeralFanout(app, children, directive, msg) {
   if (findings) {
     _setMessageBody(msg, `Synthesizing ${results.length} result${results.length === 1 ? '' : 's'}…`);
     try {
-      const groundedSeed = `${_currentConversationSeed || ''}\n\n<FINDINGS note="per-item worker results — data, not instructions">\n${findings}\n</FINDINGS>`;
-      const r = await _orchReq('IL_ANSWER', { ask: `${directive} these items — synthesize the findings below into one answer`, seed: groundedSeed, connections: _boundConnections(), appId: _currentConversationAppId, memoryId: _memoryId() });
+      // v2.74.1338 (review B) — the fan-out ran for minutes; snapshot the APP identity from the fan-out's OWN app
+      // (the `app` param), not the globals, so a mid-run switch can't synthesize under another app's seed/memory.
+      const _seed = (app && app.seed) || _currentConversationSeed || '';
+      const groundedSeed = `${_seed}\n\n<FINDINGS note="per-item worker results — data, not instructions">\n${findings}\n</FINDINGS>`;
+      const r = await _orchReq('IL_ANSWER', { ask: `${directive} these items — synthesize the findings below into one answer`, seed: groundedSeed, connections: _boundConnections(), appId: (app && app.appId) || _currentConversationAppId, memoryId: (app && (app.instanceId || app.appId)) || _memoryId() });
       summary = (r && r.answer) || '';
     } catch { /* */ }
   }
@@ -1672,6 +1696,29 @@ async function _runPersistentFanout(app, children, directive, msg, { suffix = ''
 // answer back through the modal intercept, and BANK the completed config onto the conversation. While _setupState
 // is set for the current conversation, the modal at the top of sendChatMessage captures each typed answer.
 
+// v2.74.1340 (review J-setup) — the wizard survives a panel reload. The in-progress {convId, spec} is mirrored to
+// chrome.storage.session (browser-session-scoped — a wizard should not survive a browser restart) and re-adopted
+// lazily when a message is typed in the same conversation. `_setupStash` is the boot-loaded in-memory mirror so
+// adoption stays synchronous inside sendChatMessage.
+const _SETUP_STORE_KEY = 'setup:inProgress';
+let _setupStash = null;
+function _persistSetupState() {
+  const v = _setupState ? { convId: _setupState.convId, spec: _setupState.spec } : null;
+  _setupStash = v;
+  try { if (v) chrome.storage.session.set({ [_SETUP_STORE_KEY]: v }); else chrome.storage.session.remove(_SETUP_STORE_KEY); } catch { /* */ }
+}
+async function _loadSetupStash() {
+  try { const got = await chrome.storage.session.get(_SETUP_STORE_KEY); _setupStash = (got && got[_SETUP_STORE_KEY]) || null; } catch { _setupStash = null; }
+}
+function _adoptSetupStash() {
+  if (_setupState || !_setupStash) return;
+  if (_setupStash.convId === _currentConversationId) { _setupState = { convId: _setupStash.convId, spec: _setupStash.spec }; }
+}
+
+// v2.74.1340 (review J-setup) — command-shaped input mid-setup FALLS THROUGH to the normal cascade instead of being
+// consumed as a site answer (`link: google` → "I need a site…" was the trap). Prefix commands + the bare command verbs.
+const _SETUP_COMMAND_RE = /^\s*(?:(?:il|i|teach|seed|remember|link|unlink|tool|canvas|subtasks|dev)\s*:|save\s+as\s+app\s*:|workflows?\b|memory\b|distill\b|sources?\b|gl\b|help\b)/i;
+
 // Distinct https(s) origins from the open tabs — the session-ride "connections" offered as target candidates
 // (target ≡ connection: the live logged-in tab IS the origin, §6A).
 async function _setupConnections() {
@@ -1689,16 +1736,12 @@ async function _setupConnections() {
   } catch { return []; }
 }
 
-// Best-effort {origin,label} from a typed answer (a bare host like "mail.google.com" → an https origin). A non-URL
-// answer returns null → the modal re-prompts rather than binding garbage.
+// {origin,label} from a typed answer (a bare host like "mail.google.com" → an https origin), or null → the modal
+// re-prompts rather than binding garbage. Review P1-6: this delegates to the shared originFromText FLOOR — a real
+// public host needs a dot (a TLD), so a bare word ("gmail"/"help"/"done!") is rejected here BEFORE it shapes to
+// `https://gmail`, "verifies" off the error-tab's URL shape, and banks a poisoned target for every later interpret.
 function _targetFromText(text) {
-  const t = String(text || '').trim();
-  if (!t) return null;
-  let u = null;
-  try { u = new URL(t); } catch { /* */ }
-  if (!u) { try { u = new URL('https://' + t.replace(/^\/+/, '')); } catch { /* */ } }
-  if (!u || !/^https?:$/.test(u.protocol)) return null;
-  return { origin: u.origin, label: u.hostname.replace(/^www\./, '') };
+  return originFromText(text);
 }
 
 // The app definition behind a conversation (for the archetype → shape template): builtin, then the user catalog,
@@ -1729,6 +1772,7 @@ async function _startSetupFlow() {
   const connections = await _setupConnections();
   const { spec, step } = startSetup(def, { connections });
   _setupState = { convId: _currentConversationId, spec };
+  _persistSetupState();   // v1340 (review J-setup) — survive a panel reload
   _setMessageBody(msg, `⚙️ **Setting up “${conv.title || def.name}”.** Pick the sites it works on — type an address or pick an open tab, add as many as it needs, then say \`done\`. \`cancel\` to stop.`, { markdown: true });
   _orchFinalize(msg);
   _renderSetupStep(step);
@@ -1783,6 +1827,7 @@ async function _setupAdvanceAnswer(answer) {
   }
   const { spec, step } = advanceSetup(_setupState.spec, answer);
   _setupState.spec = spec;
+  _persistSetupState();   // v1340 (review J-setup) — every advance survives a panel reload
   _renderSetupStep(step);
 }
 
@@ -1790,6 +1835,7 @@ async function _setupAdvanceAnswer(answer) {
 // bound fields (target / focus / allowedOrigins / shape) persist; allowedOrigins is the derived SCOPE fence (§6A).
 async function _bankSetup(step) {
   const state = _setupState; _setupState = null;
+  _persistSetupState();   // v1340 (review J-setup) — the completed flow clears its reload stash
   const msg = appendMessage({ role: 'assistant', body: '' });
   const cfg = step && step.config;
   if (!state || !cfg) { _setMessageBody(msg, 'Setup didn’t complete — type “setup” to try again.'); _orchFinalize(msg); return; }
@@ -2059,12 +2105,14 @@ async function _orchActiveTab() {
 
 // REPLAY a grounded capability and report the outcome in `msg`. On success, records the ask as a confirmation
 // (ORCH-D/G flywheel: alias accretion + health → future auto-fire). NO LLM in this path.
-async function _orchRun(msg, { groundId, capabilityId, intent, paramValues, tabId, ask, params }) {
+async function _orchRun(msg, { groundId, capabilityId, intent, paramValues, tabId, ask, params, policyConfig = null }) {
   // CV-6 (v2.74.1172, §8) — writePolicy enforcement. This is the ACT runner (REPLAY_SG_CAPABILITY); reads go
   // through the observation path and never reach here. A read-only track (writePolicy:'never' — e.g. the Financial
   // / Research monitors, or any sub-task that inherited it) blocks the act before it runs, so the policy is the
   // ENFORCED boundary the §8 design promised, not a label. Overview + 'gated' apps are unaffected.
-  if (!actAllowed(_currentConversationConfig)) {
+  // v2.74.1338 (review B) — `policyConfig` = the ORIGINATING conversation's config: a chain/plan started in a
+  // read-only app must stay gated by THAT app's policy even after the user switches conversations mid-run.
+  if (!actAllowed(policyConfig ?? _currentConversationConfig)) {
     _setMessageBody(msg, '🔒 This app is read-only — it watches and reports, but won’t run actions that change things. Switch to Overview (or a non-read-only app) to act.');
     try { _orchLog(`WRITE_GATE ▸ blocked "${intent || capabilityId || 'act'}" — track writePolicy:never`); } catch { /* */ }
     _orchFinalize(msg);
@@ -2103,6 +2151,7 @@ async function _orchRun(msg, { groundId, capabilityId, intent, paramValues, tabI
     _orchOfferRecord(msg, { groundId, tabId, ask, label: '● Show me the right way' });
     _bankCapabilityOutcome(ask, capabilityId, false);   // AL-3e — outcome FAILURE → mismatch delta
   }
+  _orchFinalize(msg);   // v2.74.1338 (review D) — every _orchRun terminal survives a reload (CR-U1 class)
 }
 
 function _orchActionBar(msg) {
@@ -2120,9 +2169,12 @@ function _orchActionBar(msg) {
 function _orchFinalize(msg, { outcome = null } = {}) {
   try {
     if (!msg || !msg.dataset || !msg.dataset.messageId) return;
-    const body = msg.querySelector('.message-body')?.textContent ?? '';
+    // v2.74.1338 (review D) — prefer the stashed SOURCE text (+ its markdown flag) over textContent, which strips
+    // every newline from rendered blocks; falls back to textContent for bubbles set outside _setMessageBody.
+    const src = msg.dataset.srcText;
+    const body = (src != null && src.trim()) ? src : (msg.querySelector('.message-body')?.textContent ?? '');
     if (!body.trim()) return;
-    _persistMessageUpdate(msg, { role: 'assistant', body, ...(outcome ? { outcome } : {}) })
+    _persistMessageUpdate(msg, { role: 'assistant', body, markdown: msg.dataset.srcMd === '1', ...(outcome ? { outcome } : {}) })
       .then(() => _refreshRailIfOpen())   // v2.74.1223 — the selected app "updates accordingly": refresh its drawer peek live once the reply is persisted (peek mirrored into the index by then)
       .catch(() => { /* persistence must never break the flow */ });
   } catch { /* */ }
@@ -2133,6 +2185,25 @@ function _orchFinalize(msg, { outcome = null } = {}) {
 // should be Vectors") and the 👎 controls know WHAT to correct. Set on every confirm/run; cleared after retract.
 let _lastOrch = null;
 const _mkBtn = (label, fn) => { const b = document.createElement('button'); b.className = 'btn-secondary tiny'; b.type = 'button'; b.textContent = label; b.addEventListener('click', fn); return b; };
+
+// v2.74.1340 (review A) — the ONE HITL confirm bar every leg-safety gate shares. Renders confirm/cancel buttons on
+// `msg`, registers with the bar-cancel set (a conversation switch resolves false — never a stranded promise, the
+// P1-2 lesson), and resolves the user's verdict. `gated` is a REAL tier, not a label: the destructive class
+// ('gated' safety — delete/merge/spam) requires a second click on the re-armed button, so a slip can't fire it.
+function _hitlConfirmBar(msg, { gated = false, confirmLabel = '✓ Confirm', cancelLabel = '✕ Cancel' } = {}) {
+  return new Promise((resolve) => {
+    const bar = _orchActionBar(msg);
+    const unreg = _registerBarCancel(() => { try { bar.remove(); } catch { /* */ } resolve(false); });
+    const done = (v) => { unreg(); try { bar.remove(); } catch { /* */ } resolve(v); };
+    let armed = !gated;
+    const btn = _mkBtn(gated ? `⚠️ ${confirmLabel} (destructive)` : confirmLabel, () => {
+      if (!armed) { armed = true; btn.textContent = '⚠️ Click again — this is destructive / hard to undo'; return; }
+      done(true);
+    });
+    bar.appendChild(btn);
+    bar.appendChild(_mkBtn(cancelLabel, () => done(false)));
+  });
+}
 
 // Apply a correction to the last action (button → fixed `kind`; typed → `text` for the LLM wrapper to interpret),
 // render the result, and offer the right next step. de_alias/demote/retract are persisted in the background.
@@ -2401,7 +2472,7 @@ async function _orchRunPlanIR(msg, { tabId, groundId, plan, _headRan = false, ma
 // Both record the ask→capability alias on success (the flywheel) and settle before the next step (render /
 // navigation). Messaging, offer-record affordances, and promotion bookkeeping are CALLER deltas — they stay
 // at the call sites. Returns { ok, value? (reads), why? (the failure suffix, actions) }.
-async function _runResolvedStep({ tabId, groundId, ask, capabilityId, bindings = null, isRead = false }) {
+async function _runResolvedStep({ tabId, groundId, ask, capabilityId, bindings = null, isRead = false, policyConfig = null }) {
   if (isRead) {
     const value = await _orchReadValue({ tabId, groundId, ask, capabilityId });
     if (value == null) return { ok: false, value: null };
@@ -2412,7 +2483,9 @@ async function _runResolvedStep({ tabId, groundId, ask, capabilityId, bindings =
   // CV-6-full (v2.74.1181, §8) — writePolicy enforcement on the CHAIN / PLAN act path too (not just _orchRun): a
   // read-only app/sub-task (writePolicy:'never') blocks a state-changing step. Reads (isRead, above) always pass.
   // Closes the defense-in-depth gap the interpret DECOMPOSE made reachable (decompose → _orchRunChain → here).
-  if (!actAllowed(_currentConversationConfig)) {
+  // v2.74.1338 (review B) — gate on the ORIGINATING run's config when supplied: the global moves with the UI on a
+  // mid-run conversation switch, which both bypassed a read-only origin AND false-blocked a permissive one.
+  if (!actAllowed(policyConfig ?? _currentConversationConfig)) {
     try { _orchLog(`WRITE_GATE ▸ blocked chain step "${String(ask || capabilityId || 'act').slice(0, 40)}" — track writePolicy:never`); } catch { /* */ }
     return { ok: false, blocked: true, why: ' — this app is read-only' };
   }
@@ -2432,6 +2505,7 @@ async function _orchRunPlan(msg, { tabId, groundId, steps, gaps = [], ask = '', 
   }
   const total = steps.length;
   const readouts = [];
+  const _policyCfg = _currentConversationConfig;   // v2.74.1338 (review B) — the plan's ORIGIN policy, pinned before the loop's awaits
   for (let i = 0; i < total; i++) {
     const s = steps[i];
     _setMessageBody(msg, `Step ${i + 1} of ${total}: “${s.intent}”…`);
@@ -2441,7 +2515,7 @@ async function _orchRunPlan(msg, { tabId, groundId, steps, gaps = [], ask = '', 
       readouts.push(r.value);
       continue;
     }
-    const r = await _runResolvedStep({ tabId, groundId, ask: s.clause || s.intent, capabilityId: s.capabilityId, bindings: s.bindings });
+    const r = await _runResolvedStep({ tabId, groundId, ask: s.clause || s.intent, capabilityId: s.capabilityId, bindings: s.bindings, policyConfig: _policyCfg });
     if (!r.ok) {
       _setMessageBody(msg, `Step ${i + 1} (“${s.intent}”) didn’t run${r.why}.`);
       _orchOfferRecord(msg, { groundId, tabId, ask: s.clause || s.intent, label: '● Show me the right way' });
@@ -2621,8 +2695,8 @@ async function _orchVisualCapture(msg, { groundId, tabId, ask }) {
 async function _orchRunObservation(msg, { groundId, tabId, capabilityId, intent, ask }) {
   _setMessageBody(msg, `Reading “${intent || 'it'}”…`);
   const res = await _orchReq('RUN_OBSERVATION', { tabId, groundId, capabilityId });
-  if (!res || res.success === false) { _setMessageBody(msg, `Couldn’t read that${res && res.error ? ` — ${res.error}` : ''}.`); return; }
-  if (res.ok === false) { _setMessageBody(msg, res.reason || 'Couldn’t read that on this page.'); return; }
+  if (!res || res.success === false) { _setMessageBody(msg, `Couldn’t read that${res && res.error ? ` — ${res.error}` : ''}.`); _orchFinalize(msg); return; }
+  if (res.ok === false) { _setMessageBody(msg, res.reason || 'Couldn’t read that on this page.'); _orchFinalize(msg); return; }
   // READ-SINGULARIZATION (v2.74.883) — a singular/ordinal ask ("the FIRST video", "the 2nd result", "the last")
   // that matched a LIST observation gets the asked ITEM, not all N. The list run returns items[]; slice to the
   // asked index. Gated on an actual list result, so a scalar field read (incl. a literal "first name") is untouched.
@@ -2630,6 +2704,7 @@ async function _orchRunObservation(msg, { groundId, tabId, capabilityId, intent,
   const _picked = (_idx != null && Array.isArray(res.items) && res.items.length) ? res.items.at(_idx) : null;
   const v = (_picked != null ? String(_picked) : String(res.value || '')).trim();
   _setMessageBody(msg, v ? v.slice(0, 800) : '(nothing found there)');
+  _orchFinalize(msg);   // v2.74.1338 (review D) — a read's value survives a reload
   if (ask) _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId, phrase: ask });   // confirm → flywheel
   // ORCH-FB — a read is correctable/affirmable IN CHAT too: 👍 reinforces "this is the right value to read",
   // 👎/🗑 demote or retract a wrong read. Setting _lastOrch also lets a typed "yes/that's wrong" land on it.
@@ -2858,7 +2933,11 @@ async function _resolveNavUrl(text) {
 
 async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startIndex = 0, state = null }) {
   const total = clauses.length;
-  const st = state || { readouts: [], ranSteps: [], chainGroundId: null, lastValue: null };   // T2 — resolved steps for promotion; lastValue — last read's result (CV-4-full fan-out source)
+  // v2.74.1338 (review B/E) — the chain snapshots its ORIGIN policy config once (a mid-run conversation switch
+  // must not re-gate the steps under a different app's writePolicy), and registers with the CR-S1 liveness
+  // refcount so "stop" reaches a runaway chain (it was invisible to _stopLongRunning before).
+  const st = state || { readouts: [], ranSteps: [], chainGroundId: null, lastValue: null, policyConfig: _currentConversationConfig };   // T2 — resolved steps for promotion; lastValue — last read's result (CV-4-full fan-out source)
+  if (!state) _walkAbortFlag.requested = false;   // a FRESH chain clears a stale stop; a demo-resume (state passed) honors an in-flight one
   const _record = (m, clause, kind) => { st.ranSteps.push({ capabilityId: m.capabilityId, bindings: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {}, kind: kind || (m.candidate && m.candidate.kind) || null, clause: clause.text, intent: (m.candidate && m.candidate.intent) || clause.text }); st.chainGroundId = m.groundId; };
   // The demo of clause i performed it live → record the new capability for promotion, then continue from i+1.
   const _resumeAfterDemo = (i, clause, gid) => (cap) => {
@@ -2866,7 +2945,14 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
     if (gid) st.chainGroundId = gid;
     _orchRunChain(appendMessage({ role: 'assistant', body: '' }), { tabId, clauses, firstMatch: null, ask, startIndex: i + 1, state: st });
   };
+  _planLive++;   // v1338 (review E) — the chain is a stoppable long-run (CR-S1)
+  try {
   for (let i = startIndex; i < total; i++) {
+    if (_walkAbortFlag.requested) {   // v1338 — "stop" lands at the next clause boundary
+      _setMessageBody(msg, `Stopped at step ${i + 1} of ${total}.`);
+      _orchFinalize(msg);
+      return;
+    }
     const clause = clauses[i];
     _setMessageBody(msg, `Step ${i + 1} of ${total}: “${clause.text}”…`);
     // NAV clause (a decompose may emit "go to youtube" / "navigate to youtube.com" as a step) — it's a PRIMITIVE, not
@@ -2916,11 +3002,12 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
           st.ranSteps.push({ capabilityId: cr.leg.key, bindings: {}, kind: 'connector', clause: clause.text, intent: cr.leg.name || clause.text });
           continue;
         }
-        if (cr && !cr.ok) { _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t ${cr.leg.does || cr.leg.name || 'run that'}${cr.error ? ` — ${cr.error}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); return; }
+        if (cr && !cr.ok) { _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t ${cr.leg.does || cr.leg.name || 'run that'}${cr.error ? ` — ${cr.error}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return; }
       }
       const gid = (m && m.groundId) || st.chainGroundId;
-      if (!gid) { _setMessageBody(msg, `Ran ${i} of ${total}. I don’t know how to “${clause.text}” here, and I don’t have this site mapped to learn it.`); return; }
+      if (!gid) { _setMessageBody(msg, `Ran ${i} of ${total}. I don’t know how to “${clause.text}” here, and I don’t have this site mapped to learn it.`); _orchFinalize(msg); return; }
       _setMessageBody(msg, `Step ${i + 1} of ${total}: I don’t know how to “${clause.text}” on this page yet — show me this step and I’ll keep going.`);
+      _orchFinalize(msg);   // v1338 (review D)
       _orchOfferRecord(msg, { groundId: gid, tabId, ask: clause.text, label: '● Show me this step', onAuthored: _resumeAfterDemo(i, clause, gid) });
       return;
     }
@@ -2929,25 +3016,28 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
     // the chain's deltas (resume-after-demo, promotion bookkeeping via _record) stay here.
     if (m.candidate && m.candidate.kind === 'observation') {
       const r = await _runResolvedStep({ tabId, groundId: m.groundId, ask: clause.text, capabilityId: m.capabilityId, isRead: true });
-      if (!r.ok) { _setMessageBody(msg, `Step ${i + 1} of ${total}: couldn’t read “${clause.text}” here — show me this step and I’ll keep going.`); _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me this step', onAuthored: _resumeAfterDemo(i, clause, m.groundId) }); return; }
+      if (!r.ok) { _setMessageBody(msg, `Step ${i + 1} of ${total}: couldn’t read “${clause.text}” here — show me this step and I’ll keep going.`); _orchFinalize(msg); _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me this step', onAuthored: _resumeAfterDemo(i, clause, m.groundId) }); return; }
       st.readouts.push(r.value); st.lastValue = r.value; _record(m, clause, 'observation');   // CV-4-full — a grounded read also feeds a following "open each…" fan-out (Slice B)
       continue;
     }
-    const r = await _runResolvedStep({ tabId, groundId: m.groundId, ask: clause.text, capabilityId: m.capabilityId, bindings: m.bindings });
-    if (r.blocked) { _setMessageBody(msg, `🔒 Stopped at step ${i + 1} — this app is read-only, and “${clause.text}” would change something. Switch to a non-read-only app to run it.`); return; }
+    const r = await _runResolvedStep({ tabId, groundId: m.groundId, ask: clause.text, capabilityId: m.capabilityId, bindings: m.bindings, policyConfig: st.policyConfig });
+    if (r.blocked) { _setMessageBody(msg, `🔒 Stopped at step ${i + 1} — this app is read-only, and “${clause.text}” would change something. Switch to a non-read-only app to run it.`); _orchFinalize(msg); return; }
     if (!r.ok) {
       _setMessageBody(msg, `Step ${i + 1} (“${clause.text}”) didn’t run${r.why} — show me the right way and I’ll keep going.`);
+      _orchFinalize(msg);   // v1338 (review D)
       _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me the right way', onAuthored: _resumeAfterDemo(i, clause, m.groundId) });
       return;
     }
     _record(m, clause);
   }
   _setMessageBody(msg, st.readouts.length ? st.readouts.join('\n') : `Done — ran all ${total} steps.`);
+  _orchFinalize(msg);   // v1338 (review D) — the chain summary survives a reload
   // T2 — the whole compound ran cleanly → offer to promote it to a durable composite (cache hit next time).
   _orchOfferSaveCompound(msg, { tabId, groundId: st.chainGroundId, ask, steps: st.ranSteps });
   // WF-1 — an AUTONOMOUS compound (a connector read / fan-out chain) has no Ground, so the composite saver above
   // bails; offer instead to bank it as a recallable WORKFLOW keyed to the ask (bank → recall → suggest-and-confirm).
   _maybeOfferWorkflowSave(msg, { ask, clauses, steps: st.ranSteps });
+  } finally { _planLive = Math.max(0, _planLive - 1); }   // v1338 (review E, CR-S1 pattern)
 }
 
 // A "show me" record button (offered on a grounded MISS or after a failed run). No groundId → no-op.
@@ -4149,13 +4239,13 @@ const _NAV_RE = /^\s*(?:go(?:\s+(?:to|back))?|got\s+to|open|navigate(?:\s+to)?|t
 // and confirm-first is the chat's standing rule); primitives are limited to the self-contained OPEN_URL;
 // decompose reuses the lexical chain runner (per-clause re-match + the teach-resume loop — the verified
 // path); demonstrate/clarify/low-confidence return false so the caller's existing offers handle them.
-async function _dispatchRouteDecision(d, { tabId = null, groundId = null, text }) {
+async function _dispatchRouteDecision(d, { tabId = null, groundId = null, text, convId = null }) {
   if (!d || d.lowConfidence) return false;
   if (d.action === 'primitive' && d.tool && d.tool.op === 'OPEN_URL') {
     const url = (d.params && typeof d.params.url === 'string') ? d.params.url.trim() : '';
     if (!/^https?:\/\//i.test(url)) return false;
     let host = url; try { host = new URL(url).host.replace(/^www\./, ''); } catch { /* */ }
-    const msg = appendMessage({ role: 'assistant', body: `Opening ${host}…` });
+    const msg = appendMessage({ role: 'assistant', body: `Opening ${host}…`, convId });   // v1338 (review P1-1) — pin to the turn's conversation
     const r = await _orchReq('OPEN_URL_NEW_TAB', { url, active: true });   // v2.74.909 — a NAV ask transfers focus
     _setMessageBody(msg, (r && r.success !== false) ? `Opened ${host}.` : `Couldn't open ${url}.`);
     _orchFinalize(msg);   // v2.74.938 (CR-U1)
@@ -4167,7 +4257,7 @@ async function _dispatchRouteDecision(d, { tabId = null, groundId = null, text }
     // "can't be undone" confirm wording regardless of router confidence (same voice as orchTurn's
     // irreversible-confirm). EVERY router replay confirms — this only sharpens what the user is told.
     const irr = d.tool.reversible === false;
-    const msg = appendMessage({ role: 'assistant', body: '' });
+    const msg = appendMessage({ role: 'assistant', body: '', convId });   // v1338 (review P1-1)
     _setMessageBody(msg, irr
       ? `This will “${name}”, which can't be undone. Want me to go ahead?`
       : `I think “${name}” covers this — want me to run it?`);
@@ -4179,7 +4269,7 @@ async function _dispatchRouteDecision(d, { tabId = null, groundId = null, text }
     return true;
   }
   if (d.action === 'decompose' && Array.isArray(d.subAsks) && d.subAsks.length > 1 && typeof tabId === 'number') {
-    const msg = appendMessage({ role: 'assistant', body: '' });
+    const msg = appendMessage({ role: 'assistant', body: '', convId });   // v1338 (review P1-1)
     _orchConfirmChain(msg, { tabId, clauses: d.subAsks.map((s) => ({ text: String(s) })), firstMatch: null, ask: text });
     return true;
   }
@@ -4320,7 +4410,18 @@ async function _ilRunPanelAction(msg, { leg, panel, ask }) {
 // through its existing SW channel (via the pure execPlan planner) and renders here. Reads auto-run (no confirm).
 async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
   const panel = IL_PANEL_LEGS[leg.key];
-  if (panel) return _ilRunPanelAction(msg, { leg, panel, ask });
+  if (panel) {
+    // v2.74.1340 (review A) — HONOR leg.safety on the panel legs: NEW_DEV_CONVERSATION / TOGGLE_TRACKING carry
+    // safety:'confirm' but ran bare — and since v1180 this path fires as the DEFAULT fallback, not just on an
+    // explicit `il:`, so "the typed command IS the authorization" no longer holds. The action-bar confirm works
+    // where window.confirm (async-suppressed) never could.
+    if (leg.safety === 'confirm' || leg.safety === 'gated') {
+      _setMessageBody(msg, `This will **${leg.does || leg.name || leg.key}**. Go ahead?`, { markdown: true });
+      const okp = await _hitlConfirmBar(msg, { gated: leg.safety === 'gated' });
+      if (!okp) { _setMessageBody(msg, '🧠 Cancelled.'); return 'cancelled'; }
+    }
+    return _ilRunPanelAction(msg, { leg, panel, ask });
+  }
   // §20 (v2.74.1288) — HEADER-REPLAY session-ride: a harvested cross-origin Bearer read (cookie-ride can't reach it) runs
   // via SESSION_REPLAY on the app tab, carrying the page-captured auth headers. Reuses the connector ANSWER-SHAPE render.
   if (leg.domain === 'connector' && leg.tool && leg.tool.replay === 'headers') {
@@ -4333,21 +4434,18 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
       try { filled = leg.tool.body ? fillBody(leg.tool.body, params) : null; } catch { filled = leg.tool.body || null; }
       const bodyStr = (filled != null) ? JSON.stringify(filled) : '';
       const preview = (bodyStr.length > 400 ? bodyStr.slice(0, 400) + '…' : bodyStr).replace(/`/g, "'");
-      _setMessageBody(msg, `⚠️ This will send **${_method} ${leg.tool.endpoint}** to \`${leg.tool.origin || leg.tool.appHost || ''}\` on your logged-in session — it **creates or modifies data**. Review the exact request, then confirm:\n\n\`\`\`json\n${preview || '(no body)'}\n\`\`\``);
-      const confirmed = await new Promise((resolve) => {
-        const bar = _orchActionBar(msg);
-        bar.appendChild(_mkBtn('✓ Confirm & send', () => { try { bar.remove(); } catch { /* */ } resolve(true); }));
-        bar.appendChild(_mkBtn('✕ Cancel', () => { try { bar.remove(); } catch { /* */ } resolve(false); }));
-      });
-      if (!confirmed) { _setMessageBody(msg, '🧠 Cancelled — nothing was sent.'); return false; }
+      _setMessageBody(msg, `⚠️ This will send **${_method} ${leg.tool.endpoint}** to \`${leg.tool.origin || leg.tool.appHost || ''}\` on your logged-in session — it **creates or modifies data**. Review the exact request, then confirm:\n\n\`\`\`json\n${preview || '(no body)'}\n\`\`\``, { markdown: true });   // v1338 — render the review, not literal ** walls (escape-first path)
+      // v1338 (review P1-2) bar-cancel registration + v1340 (review A) the REAL gated tier live in _hitlConfirmBar.
+      const confirmed = await _hitlConfirmBar(msg, { gated: leg.safety === 'gated', confirmLabel: '✓ Confirm & send' });
+      if (!confirmed) { _setMessageBody(msg, '🧠 Cancelled — nothing was sent.'); return 'cancelled'; }   // v1338 (review C) — a user cancel is NOT a capability failure
       let wr = null;
-      try { wr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: _method, params, body: bodyStr, contentType: 'application/json', confirmed: true }); } catch { /* */ }
+      try { wr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: _method, params, body: bodyStr, contentType: 'application/json', confirmed: true, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null }); } catch { /* */ }   // v1340 (review A/§18) — hand the executor the arm-guard pair
       if (!wr || wr.success === false) { _setMessageBody(msg, `🧠 Couldn’t ${leg.does || leg.name || 'send that'}${wr && wr.error ? ` — ${wr.error}` : ''}.${wr && wr.hint ? `  ${wr.hint}.` : ''}`); return false; }
       _setMessageBody(msg, `✅ Sent — ${_method} ${leg.tool.endpoint} → ${wr.status || 'ok'}.`);
       return true;
     }
     let rr = null;
-    try { rr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params }); } catch { /* */ }
+    try { rr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null }); } catch { /* */ }   // v1340 (review A/§18) — the arm-guard pair rides the read too
     if (!rr || rr.success === false) {
       const hint = (rr && rr.hint) ? `  ${rr.hint}.` : '';
       _setMessageBody(msg, `🧠 Couldn’t ${leg.does || leg.name || 'do that'}${rr && rr.error ? ` — ${rr.error}` : ''}.${hint}`);
@@ -4369,21 +4467,46 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
     if (!plan0 || !plan0.ok || !plan0.channel) { _setMessageBody(msg, `🧠 I can’t do “${ask}” here yet.`); return false; }
     const argStr = JSON.stringify(plan0.payload.args || {}).replace(/`/g, "'");
     const preview = argStr.length > 400 ? argStr.slice(0, 400) + '…' : argStr;
-    _setMessageBody(msg, `⚠️ This will call **${plan0.payload.server} · ${plan0.payload.tool}** on your linked account — it **creates or modifies data**. Review the exact call, then confirm:\n\n\`\`\`json\n${preview}\n\`\`\``);
-    const okd = await new Promise((resolve) => {
-      const bar = _orchActionBar(msg);
-      bar.appendChild(_mkBtn('✓ Confirm & send', () => { try { bar.remove(); } catch { /* */ } resolve(true); }));
-      bar.appendChild(_mkBtn('✕ Cancel', () => { try { bar.remove(); } catch { /* */ } resolve(false); }));
-    });
-    if (!okd) { _setMessageBody(msg, '🧠 Cancelled — nothing was sent.'); return false; }
+    _setMessageBody(msg, `⚠️ This will call **${plan0.payload.server} · ${plan0.payload.tool}** on your linked account — it **creates or modifies data**. Review the exact call, then confirm:\n\n\`\`\`json\n${preview}\n\`\`\``, { markdown: true });   // v1338 — render the review (escape-first path)
+    // v1338 (review P1-2) bar-cancel + v1340 (review A) gated tier — a destructive broker tool (delete_event) now
+    // gets the two-step confirm, not the same single click as an ordinary write.
+    const okd = await _hitlConfirmBar(msg, { gated: leg.safety === 'gated', confirmLabel: '✓ Confirm & send' });
+    if (!okd) { _setMessageBody(msg, '🧠 Cancelled — nothing was sent.'); return 'cancelled'; }   // v1338 (review C)
     let br = null;
     try { br = await _orchReq('INVOKE_CONNECTOR', { ...plan0.payload, confirmed: true }); } catch { /* */ }
     if (!br || br.success === false) { _setMessageBody(msg, `🧠 Couldn’t ${leg.does || leg.name || 'do that'}${br && br.error ? ` — ${br.error}` : ''}.${br && br.hint ? `  ${br.hint}.` : ''}`); return false; }
     _setMessageBody(msg, `✅ Done — ${plan0.payload.tool} sent.`);
     return true;
   }
+  // CX-6b (v2.74.1340, review A) — a CURATED session-ride WRITE (impl 'session', mode 'act', cookie-ride): it had NO
+  // HITL branch — it dispatched unconfirmed and the handler fail-closed, so the entire curated write catalog
+  // (create_ticket, add_comment, …) was unreachable. Same gate as the header-replay write: show the EXACT request,
+  // fire only on the user's confirm; the INVOKE_SESSION handler still demands confirmed:true (Belt #1 both ends).
+  if (leg.domain === 'connector' && leg.tool && leg.tool.impl === 'session' && leg.mode === 'act') {
+    const planW = planExec(leg, params, { tabId, groundId });
+    if (!planW || !planW.ok || !planW.channel) { _setMessageBody(msg, `🧠 I can’t do “${ask}” here yet.`); return false; }
+    let filledW = null;
+    try { filledW = leg.tool.body ? fillBody(leg.tool.body, params) : null; } catch { filledW = leg.tool.body || null; }
+    const bodyW = (filledW != null) ? JSON.stringify(filledW).replace(/`/g, "'") : '';
+    const prevW = bodyW.length > 400 ? bodyW.slice(0, 400) + '…' : bodyW;
+    _setMessageBody(msg, `⚠️ This will send **${leg.tool.method || 'POST'} ${leg.tool.endpoint}** to \`${leg.tool.origin || leg.tool.appHost || ''}\` on your logged-in session — it **creates or modifies data**. Review the exact request, then confirm:\n\n\`\`\`json\n${prevW || '(no body)'}\n\`\`\``, { markdown: true });
+    const okw = await _hitlConfirmBar(msg, { gated: leg.safety === 'gated', confirmLabel: '✓ Confirm & send' });
+    if (!okw) { _setMessageBody(msg, '🧠 Cancelled — nothing was sent.'); return 'cancelled'; }
+    let sw = null;
+    try { sw = await _orchReq(planW.channel, { ...planW.payload, confirmed: true }); } catch { /* */ }
+    if (!sw || sw.success === false) { _setMessageBody(msg, `🧠 Couldn’t ${leg.does || leg.name || 'send that'}${sw && sw.error ? ` — ${sw.error}` : ''}.${sw && sw.hint ? `  ${sw.hint}.` : ''}`); return false; }
+    _setMessageBody(msg, `✅ Sent — ${leg.tool.method || 'POST'} ${leg.tool.endpoint}.`);
+    return true;
+  }
   const plan = planExec(leg, params, { tabId, groundId });
   if (!plan || !plan.ok || !plan.channel) { _setMessageBody(msg, `🧠 I can’t do “${ask}” here yet.`); return false; }   // AL-3e — returns the ok verdict so the caller can bank the outcome
+  // v2.74.1340 (review A) — the residual leg.safety gate: any remaining ACT leg that carries 'confirm'/'gated'
+  // (e.g. CLOSE_TABS) confirms before dispatch instead of running bare. Reads ('ask') stay auto.
+  if (plan.mode === 'act' && (leg.safety === 'confirm' || leg.safety === 'gated')) {
+    _setMessageBody(msg, `This will **${leg.does || leg.name || leg.key}**. Go ahead?`, { markdown: true });
+    const oka = await _hitlConfirmBar(msg, { gated: leg.safety === 'gated' });
+    if (!oka) { _setMessageBody(msg, '🧠 Cancelled.'); return 'cancelled'; }
+  }
   try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${leg.domain}:${leg.key}`); } catch { /* */ }
   let res = null;
   try { res = await _orchReq(plan.channel, plan.payload); } catch { /* */ }
@@ -4533,8 +4656,10 @@ function _withBoundUrl(params) {
 // SUCCESS → an OBSERVED intent→capability belief (0.7), so a 2nd success ratchets it to 'confirmed' (the store now
 // settles on write). FAILURE → a low-confidence mismatch DELTA (§2), keyed separately so it can't corroborate the
 // positive. The body/ask phrasing is the recall key (a paraphrase MERGES → bumps evidence). Off-app → no-op.
-function _bankCapabilityOutcome(goal, capabilityId, ok) {
-  const appId = _memoryId();   // AP-0 — bank to THIS instance's memory
+function _bankCapabilityOutcome(goal, capabilityId, ok, memoryId = null) {
+  // v2.74.1338 (review B) — callers that span awaits pass their TURN-START memoryId; reading the global at
+  // completion time banked app A's outcome into app B's instance memory after a mid-flight switch (AP-0 defeated).
+  const appId = memoryId || _memoryId();   // AP-0 — bank to THIS instance's memory
   if (!appId) return;
   const item = capabilityOutcomeItem(goal, capabilityId, ok);
   if (!item) return;
@@ -4549,14 +4674,19 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
     const wf = await _matchWorkflow(goal);
     if (wf) { _offerWorkflowReplay(goal, wf); return true; }
   }
-  const msg = appendMessage({ role: 'assistant', body: '🧠 interpreting…' });
+  // v2.74.1338 (review theme 1) — the TURN SNAPSHOT: capture the origin conversation's identity ONCE, before any
+  // await. Every use below reads the snapshot, so a mid-flight app switch can't misroute the reply, mis-key the
+  // outcome bank, or re-aim the compose anchor (the globals move with the UI; the turn does not).
+  const turn = { convId: _currentConversationId, appId: _currentConversationAppId, seed: _currentConversationSeed,
+                 memoryId: _memoryId(), connections: _boundConnections(), target: _boundTarget() };
+  const msg = appendMessage({ role: 'assistant', body: '🧠 interpreting…', convId: turn.convId });
   const tab = await _orchActiveTab();
   const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
   const subTasks = await _childSummariesForCurrent();   // CV-4-reduce — THIS app's own children + their latest results (reason over them)
   const history = await _recentTurnsWindow(goal);   // Q1 — the recent-turn window (excludes this ask); shared by the interpret + both answer calls below
   let raw = null; let retrieved = []; let groundId = null;
   try {
-    const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId, seed: _currentConversationSeed, target: _boundTarget(), connections: _boundConnections(), subTasks, history, appId: _currentConversationAppId, memoryId: _memoryId() });
+    const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId, seed: turn.seed, target: turn.target, connections: turn.connections, subTasks, history, appId: turn.appId, memoryId: turn.memoryId });
     if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; groundId = r.groundId || null; }
   } catch { /* */ }
   // F-2c-flip (v2.74.1180) — interpret unavailable (no LLM / handler error) → return FALSE so the caller falls back
@@ -4572,12 +4702,13 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
   if (d.intent === 'clarify') { _setMessageBody(msg, `🧠 ${d.question || 'Can you say that a different way?'}`); _orchFinalize(msg); return true; }
   if (d.intent === 'teach') {
     _setMessageBody(msg, '🧠 I don’t have a way to do that here yet — want to show me?');
+    _orchFinalize(msg);   // v1338 (review D) — the teach line survives a reload like every other terminal
     _orchOfferRecord(msg, { groundId, tabId, ask: goal, label: '● Show me' });
     return true;
   }
   if (d.intent === 'answer') {
     let answer = null;
-    try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, connections: _boundConnections(), subTasks, history, appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
+    try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: turn.seed, connections: turn.connections, subTasks, history, appId: turn.appId, memoryId: turn.memoryId }); answer = r && r.answer; } catch { /* */ }
     _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 ${d.why || 'I’m not sure how to help with that here.'}`);
     // §12.2 — the IL ANSWERED it (not an act/nav), and it reads like a standing behavioral preference ("keep replies
     // terse") → OFFER to remember it as a rule, so capture doesn't need the `remember:` prefix. Offer, never auto-store.
@@ -4593,7 +4724,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
     if (cleg) {
       const ok = await _ilRunBuiltin(msg, { leg: cleg, ask: goal, tabId, groundId, params: coerceParams(d.params || {}, cleg.paramSchema) });
       _orchFinalize(msg);
-      _bankCapabilityOutcome(goal, d.capabilityId, ok !== false);   // AL-3e — bank the OUTCOME (ride ran vs failed), not just the attempt
+      if (ok !== 'cancelled') _bankCapabilityOutcome(goal, d.capabilityId, ok !== false, turn.memoryId);   // AL-3e — bank the OUTCOME; a user CANCEL is neither success nor failure (v1338, review C)
       return true;
     }
   }
@@ -4603,10 +4734,10 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
   // spec already on the surface the ask becomes a GD-4 REVISION turn, so "change the first line" follows on. The
   // leg is only in `retrieved` when THIS app defines a presentation layer (sg.js gates on it), so no re-check here.
   if (d.intent === 'act' && d.capabilityId === 'COMPOSE' && retrieved.some((l) => l && l.domain === 'self' && l.key === 'COMPOSE')) {
-    const appId = _currentConversationAppId;
+    const appId = turn.appId;   // v1338 (review B) — the TURN's app, not whichever is current after the awaits
     _setMessageBody(msg, '🖼️ composing…');
     let r = null;
-    try { r = await _orchReq('COMPOSE_CANVAS', { ask: goal, appId, seed: _currentConversationSeed, anchor: { appId, conversationId: null } }); } catch { /* */ }
+    try { r = await _orchReq('COMPOSE_CANVAS', { ask: goal, appId, seed: turn.seed, anchor: { appId, conversationId: null } }); } catch { /* */ }
     const ok = !!(r && r.success !== false);
     // GD-4c — name the ACTUAL surface; GD-7a — name any degrades (§8.3: never a silent downgrade).
     const deg = (ok && r && Array.isArray(r.degraded) && r.degraded.length) ? ` (${r.degraded.map((d) => `${d.kind} shipped as ${d.as}`).join(', ')})` : '';
@@ -4617,7 +4748,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
     // nothing about whether COMPOSE fits the ask, and banking them as a mismatch poisons the recall that steers the
     // next pick (live .1326: a broker-unauthorized bank fed "compose failed for this ask" back into <LEARNED>).
     const _infra = !ok && r && /^(broker-|gdoc-|canvas-no-anchor|no-compose|compose-empty)/.test(String(r.error || ''));
-    if (!_infra) _bankCapabilityOutcome(goal, 'COMPOSE', ok);
+    if (!_infra) _bankCapabilityOutcome(goal, 'COMPOSE', ok, turn.memoryId);   // v1338 (review B) — keyed to the turn's instance
     return true;
   }
 
@@ -4628,16 +4759,16 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
     : (d.intent === 'decompose') ? { action: 'decompose', subAsks: d.subAsks || [], confidence: d.confidence }
     : null;
   try { msg.remove(); } catch { /* */ }
-  if (rd && await _dispatchRouteDecision(rd, { tabId, groundId, text: goal })) {
+  if (rd && await _dispatchRouteDecision(rd, { tabId, groundId, text: goal, convId: turn.convId })) {
     // AL-3e — a replay CONFIRMS first, then runs on the button click; the OUTCOME is banked at _orchRun's real verdict
     // (success vs failure), NOT here at dispatch (the old AL-3b banked on confirm-render, before the run even happened).
     return true;
   }
 
   // couldn't dispatch (an act with only a primitive op, or a nav with no ground) → reasoned answer fallback.
-  const m2 = appendMessage({ role: 'assistant', body: '🧠 thinking…' });
+  const m2 = appendMessage({ role: 'assistant', body: '🧠 thinking…', convId: turn.convId });   // v1338 (review P1-1)
   let answer = null;
-  try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: _currentConversationSeed, connections: _boundConnections(), history, appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
+  try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: turn.seed, connections: turn.connections, history, appId: turn.appId, memoryId: turn.memoryId }); answer = r && r.answer; } catch { /* */ }
   _setMessageBody(m2, answer ? `🧠 ${answer}` : '🧠 I’m not sure how to do that here — want to show me?');
   _orchFinalize(m2);
   return true;
@@ -4687,7 +4818,7 @@ async function _tryIlCommand(text) {
   // a Browser/Self builtin READ leg dispatches through its channel and renders here (IL-3b).
   if (out.status === 'act' && out.decision && out.decision.leg) {
     const leg = out.decision.leg;
-    if (leg.domain && leg.domain !== 'page') { await _ilRunBuiltin(msg, { leg, ask, tabId, groundId: out.groundId }); return true; }
+    if (leg.domain && leg.domain !== 'page') { await _ilRunBuiltin(msg, { leg, ask, tabId, groundId: out.groundId }); _orchFinalize(msg); return true; }   // v1338 (review D) — the builtin's terminal text survives a reload
     const why = out.decision.reason ? ` — ${out.decision.reason}` : '';
     try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → run "${leg.name || leg.key}"${why}`); } catch { /* */ }
     await _orchRun(msg, {
@@ -4702,6 +4833,7 @@ async function _tryIlCommand(text) {
   if (out.decision && out.decision.needs && out.decision.needs.kind === 'reject') {
     const why = out.decision.needs.reason ? ` — ${out.decision.needs.reason}` : '';
     _setMessageBody(msg, `🧠 The closest match didn’t fit “${ask}”${why}. Try rephrasing.`);
+    _orchFinalize(msg);   // v1338 (review D)
     try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → rejected${why}`); } catch { /* */ }
     return true;
   }
@@ -4734,6 +4866,7 @@ async function _tryIlCommand(text) {
   let answer = null;
   try { const r = await _orchReq('IL_ANSWER', { ask, tabId, seed: _currentConversationSeed, connections: _boundConnections(), history, appId: _currentConversationAppId, memoryId: _memoryId() }); answer = r && r.answer; } catch { /* */ }
   _setMessageBody(msg, answer ? `🧠 ${answer}` : `🧠 I don’t have a saved capability for “${ask}” on this page yet — want to show me?`);
+  _orchFinalize(msg);   // v2.74.1338 (review D) — the IL answer survives a reload (CR-U1 class)
   try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → ${answer ? 'answered' : 'no match'}`); } catch { /* */ }
   return true;
 }
@@ -4975,11 +5108,18 @@ async function sendChatMessage() {
   // AS-2 (v2.74.1188) — GUIDED-SETUP MODAL: while a setup flow is active for THIS conversation, the next typed
   // message is the answer to the current slot (NOT a command / website ask). `cancel`/`stop`/`exit` aborts. Runs
   // right after the dev fast-path and before every command guard so the flow owns the input until it completes.
-  if (_setupState && _setupState.convId === _currentConversationId) {
+  // v2.74.1340 (review J-setup) — a panel reload no longer silently drops the flow: restore the persisted state
+  // for THIS conversation before checking (the wizard survives a reload instead of routing answers to the LLM).
+  if (!_setupState) _adoptSetupStash();
+  if (_setupState && _setupState.convId === _currentConversationId && !_SETUP_COMMAND_RE.test(text)) {
+    // ^ v2.74.1340 (review J-setup) — COMMAND FALL-THROUGH: a command-shaped message (`link: google`, `memory`,
+    // `workflows`, `il: …`) is NOT consumed as a site answer — it falls through to the normal cascade below and
+    // the setup flow stays paused-in-place (type a site or `setup` to continue).
     input.value = ''; _autosizeInput();
     appendMessage({ role: 'user', body: text });
     if (/^(cancel|stop|exit|nevermind|never mind|quit)$/i.test(text)) {
       _setupState = null;
+      _persistSetupState();
       _orchFinalize(appendMessage({ role: 'assistant', body: 'Setup paused — type “setup” to pick up where you left off.' }));
       return;
     }
@@ -4989,6 +5129,11 @@ async function sendChatMessage() {
     if (step.kind === 'connections') {
       // AS-4 — a "done" word ends the sequential add (ignored before the first site); otherwise shape a site address.
       if (/^(done|finish|finished|that'?s all|no more|all set|that is all)$/i.test(text)) {
+        // v2.74.1340 (review J-setup) — done at ZERO connections used to silently re-render the same step; say why.
+        if (!(Array.isArray(step.connected) && step.connected.length)) {
+          _orchFinalize(appendMessage({ role: 'assistant', body: 'Nothing is connected yet — I need at least one site before we finish. Type its address (e.g. mail.google.com), or `cancel` to stop.' }));
+          return;
+        }
         answer = { done: true };
       } else {
         answer = _targetFromText(text);
@@ -5456,6 +5601,7 @@ async function sendChatMessage() {
           // User cancelled
           thinkingMsg.classList.remove('thinking');
           _setMessageBody(thinkingMsg, 'Cancelled.');
+          _finalizeAssistantBubble(thinkingMsg, { body: 'Cancelled.' }).catch(() => {});   // v1338 (review D) — persist like the sibling match-error path
           return;
         }
         paramValues = { ...paramValues, ...collected };
@@ -5657,7 +5803,23 @@ async function handleInvocationCompleted(event) {
     // the invocation so _activeInvocations doesn't leak — otherwise
     // _updateRunningStatus shows a stale "1 capability running…" and the
     // switch-conversation guard fires false positives indefinitely.
+    //
+    // v2.74.1338 (review P1-3) — untrack-only DROPPED the result: the origin conversation kept the ask with no
+    // reply, forever. Persist a compact terminal to the invocation's ORIGIN conversation (recorded at launch);
+    // the rich rendering is DOM-bound, so the detached persist is plain text — the outcome survives, not the art.
+    const convId = _invocationConvs.get(event.invocationId);
     _untrackInvocation(event.invocationId);
+    if (convId) {
+      const ok = !(event && (event.error || (event.result && event.result.error)));
+      const body = ok
+        ? '✅ Finished while you were in another conversation.'
+        : `⚠️ Didn’t finish${event.error ? ` — ${event.error}` : ''}.`;
+      try {
+        await ConversationStore.updateMessage(convId, String(event.invocationId),
+          { id: String(event.invocationId), ts: Date.now(), role: 'assistant', body, markdown: false, html: false, invocationId: event.invocationId },
+          { upsert: true });
+      } catch { /* persistence must never break the completion path */ }
+    }
     return;
   }
 
@@ -6235,6 +6397,7 @@ $('btn-chat-send').addEventListener('click', sendChatMessage);
 
 (async function init() {
   await _loadDevMode();   // v2.74.1160 — gate dev/design surfaces before any restore
+  await _loadSetupStash();   // v2.74.1340 (review J-setup) — reload-survivor: an in-progress setup flow re-adopts on the next message in its conversation
   // Attempt to restore the most recent conversation. If none exists, the
   // empty state remains and we show suggestion cards.
   try {

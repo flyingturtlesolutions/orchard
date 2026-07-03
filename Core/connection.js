@@ -122,11 +122,20 @@ export function looksLikeLogin(url) {
 
 /**
  * Classify a generic connection probe from the tab's FINAL url after loading the origin. PURE.
- *   'unreachable' (no / invalid url) · 'signed-out' (landed on a login page / IdP) · 'connected' (stayed in the app).
+ *   'unreachable' (no / invalid / error-page url) · 'signed-out' (landed on a login page / IdP) · 'connected'.
+ * v2.74.1339 (review P1-6): a DNS/connection failure lands the tab on a `chrome-error:`/`chrome:`/`about:` page
+ * (or blank) — treat any NON-http(s) final URL as unreachable so an unresolvable host can't verify as connected.
+ * `requestedHost` (optional) tightens it: a landing on a wholly different host that isn't a login/IdP redirect is
+ * a park/redirect, not the app. Belt over the originFromText dotted-host floor, not a replacement for it.
  */
-export function classifyReachProbe({ finalUrl } = {}) {
+export function classifyReachProbe({ finalUrl, requestedHost = '' } = {}) {
   const url = _str(finalUrl);
   if (!url) return 'unreachable';
-  try { new URL(url); } catch { return 'unreachable'; }
-  return looksLikeLogin(url) ? 'signed-out' : 'connected';
+  let u = null; try { u = new URL(url); } catch { return 'unreachable'; }
+  if (!/^https?:$/.test(u.protocol)) return 'unreachable';                 // chrome-error: / about:blank / chrome: = load failed
+  if (looksLikeLogin(url)) return 'signed-out';
+  const want = _str(requestedHost).replace(/^www\./, '').toLowerCase();
+  const got = u.hostname.replace(/^www\./, '').toLowerCase();
+  if (want && got && got !== want && !got.endsWith(`.${want}`) && !want.endsWith(`.${got}`)) return 'unreachable';   // parked / redirected off the app
+  return 'connected';
 }

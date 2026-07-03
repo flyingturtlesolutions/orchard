@@ -6145,6 +6145,12 @@ const MESSAGE_HANDLERS = {
         const url = (payload && typeof payload.url === 'string') ? payload.url : '';
         const method = String((payload && payload.method) || 'GET').toUpperCase();
         if (!url) { sendResponse({ success: false, error: 'session-fetch-no-url' }); return; }
+        // v2.74.1340 (review A) — SECOND write belt AT THE EXECUTION BOUNDARY: this handler used to run any non-GET
+        // handed to it (the confirm belt lived only in INVOKE_SESSION). Now a write must carry the confirmed:true the
+        // HITL gate stamped — a future/rogue background path that skips the first belt is refused HERE too.
+        if (method !== 'GET' && method !== 'HEAD' && !(payload && payload.confirmed === true)) {
+          sendResponse({ success: false, error: 'write-needs-confirm' }); return;
+        }
         const headers = Object.assign({ Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, (payload && payload.headers) || {});
         let fetchBody;
         if (method !== 'GET' && method !== 'HEAD') {

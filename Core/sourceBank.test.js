@@ -74,6 +74,14 @@ describe('sourceBank — v1336 source attribution (the "source link always inclu
     assert.match(out.blocks[1].text, /\n\nSource: \[How to reset your hub\]\(kb:7\)$/);
     assert.equal(out.blocks[0].text, 'ctx');                                 // only the compose block gains the line
   });
+  it('v1340 (review F): markdown metachars in the untrusted TITLE are escaped — a `](` title cannot forge a link in the shipped draft', async () => {
+    const { ensureSourceAttribution, pageToSource } = await import('./sourceBank.js');
+    const evil = pageToSource({ title: 'help](https://evil.example/x) [pwn', url: 'https://help.x.com/a', text: 'body' }, { seq: 3 });
+    const out = ensureSourceAttribution({ blocks: [{ kind: 'compose', ref: 'r', text: 'Hi.' }] }, [evil]);
+    const line = out.blocks[0].text.split('\n').pop();
+    assert.ok(!line.includes('](https://evil.example/x)'));                       // the forged link target is dead
+    assert.match(line, /^Source: \[help\\\]\\\(https:\/\/evil\.example\/x\\\) \\\[pwn\]\(kb:3\)$/);   // metachars escaped, cite target intact
+  });
   it('already-cited / no compose block / no banked sources → spec unchanged', async () => {
     const { ensureSourceAttribution } = await import('./sourceBank.js');
     const cited = { blocks: [{ kind: 'compose', ref: 'r', text: 'See [the guide](kb:7) for more.' }] };

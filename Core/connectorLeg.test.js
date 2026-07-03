@@ -55,6 +55,7 @@ describe('recipeToLeg — session-ride recipe → client connector leg (§4)', (
     assert.equal(leg.domain, 'connector');
     assert.equal(leg.source, 'builtin');
     assert.equal(leg.key, 'acme.zendesk.read_ticket');
+    assert.equal(leg.tool.recipeId, 'read_ticket');      // v1340 (review A/§18) — the BARE id rides on the tool so the arm guard can match stored records
     assert.equal(leg.tool.impl, 'session');
     assert.equal(leg.tool.origin, 'acme.zendesk.com');
     assert.equal(leg.tool.endpoint, '/api/v2/tickets/{id}.json');

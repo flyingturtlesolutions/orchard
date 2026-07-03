@@ -1352,9 +1352,20 @@ const CONNECTOR_WRITE_TOOLS = {
   'google-gmail': new Set(['send_message', 'create_draft']),
   'google-docs': new Set(['create_document', 'render_document']),   // GD-2 — renders are §8.1-auto CLIENT-side (app-owned doc, drive.file); the belt still demands confirmed:true on the wire
 };
+// v2.74.1340 (review A) — the READ allowlist that makes the re-check FAIL-CLOSED: a tool must be explicitly listed
+// as a read to skip the confirm re-check; anything unknown (a new tool, a whole MCP server we never enumerated) is
+// treated as a WRITE and demands confirmed:true. Was fail-OPEN (unknown = read = no server confirm — the client's
+// HITL was the only belt). Adding an MCP server now requires enumerating its reads here, or every call needs confirm.
+const CONNECTOR_READ_TOOLS = {
+  'google-calendar': new Set(['list_events']),
+  'google-docs': new Set(['get_document']),
+};
 function connectorIsWrite(server, tool) {
-  const s = CONNECTOR_WRITE_TOOLS[server];
-  return !!(s && s.has(tool));
+  const w = CONNECTOR_WRITE_TOOLS[server];
+  if (w && w.has(tool)) return true;         // known write
+  const r = CONNECTOR_READ_TOOLS[server];
+  if (r && r.has(tool)) return false;        // known read — the only path that skips the confirm re-check
+  return true;                                // unknown tool or server → fail-closed (treated as a write)
 }
 function connectorProviderOf(server) { return String(server || '').split('-')[0]; }   // google-calendar → google
 

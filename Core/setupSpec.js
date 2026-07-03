@@ -36,6 +36,29 @@ export function archetypeShape(archetype) {
   return { ...(_SHAPE_BY_ARCHETYPE[archetype] || _DEFAULT_SHAPE) };
 }
 
+/**
+ * v2.74.1339 (review P1-6/setup) — shape a typed answer into a connection `{origin,label}`, or null. PURE.
+ * The setup verifier's generic probe classifies only the tab's FINAL-URL SHAPE (no reachability signal), so a
+ * bare word like "gmail" was shaped to `https://gmail`, "verified", and banked as a real connection that then
+ * poisoned every interpret `target`. The floor here: a real PUBLIC host has a DOT (a TLD) — "gmail"/"help"/"done!"
+ * are rejected and the modal re-prompts, while "mail.google.com"/"support.deako.com" pass. `localhost[:port]` is
+ * the one dotless exception (dev). Whole sentences already fail (a space is not a valid host char).
+ */
+export function originFromText(text) {
+  const raw = _str(text);
+  if (!raw) return null;
+  // Parse with an EXPLICIT scheme only; otherwise prefix https:// and re-parse. (A bare `localhost:3000` would
+  // otherwise parse as scheme `localhost:` + opaque path — silently defeating the dev exception below.)
+  let u = null;
+  try { u = new URL(/^https?:\/\//i.test(raw) ? raw : ('https://' + raw.replace(/^\/+/, ''))); } catch { /* */ }
+  if (!u || !/^https?:$/.test(u.protocol)) return null;
+  const host = u.hostname;
+  const dotted = host.includes('.') && !/^\.|\.$|\.\./.test(host) && /[a-z]/i.test(host.split('.').pop() || '');   // needs a real TLD label
+  const isLocal = /^localhost$/i.test(host);
+  if (!dotted && !isLocal) return null;
+  return { origin: u.origin, label: host.replace(/^www\./, '') };
+}
+
 /** One connection: `{ origin, label }`. origin REQUIRED (it IS the connection); label defaults to the origin. PURE. */
 function normalizeConnection(value) {
   const v = (value && typeof value === 'object') ? value : null;

@@ -151,17 +151,19 @@ async function _writeLiveTools(map) {
 }
 
 export function createConnectorHandlers({ ensureContentScript, readRideRecipes, cloudInvokeConnector, cloudLinkConnector, cloudUnlinkConnector, cloudListConnectorTools, cloudHasSession } = {}) {
-  const fetchVia = (tabId, url, method, body) =>
-    chrome.tabs.sendMessage(tabId, { type: 'SESSION_FETCH', payload: { url, method, body } }, { frameId: 0 });
+  // v2.74.1340 (review A) — `confirmed` rides through to SESSION_FETCH so the CONTENT-SCRIPT boundary can hold its
+  // own fail-closed write belt (second belt): only a caller that already passed the HITL gate hands it a write.
+  const fetchVia = (tabId, url, method, body, confirmed = false) =>
+    chrome.tabs.sendMessage(tabId, { type: 'SESSION_FETCH', payload: { url, method, body, confirmed: confirmed === true } }, { frameId: 0 });
   // The TOP-FRAME content script can be orphaned (an extension reload kills it; the all-frames PING can read a live
   // SUBframe as "live" while frame 0 is dead). On a frame-0 connection error, force-reinject + retry once.
-  const fetchViaHealed = async (tabId, url, method, body) => {
-    try { return await fetchVia(tabId, url, method, body); }
+  const fetchViaHealed = async (tabId, url, method, body, confirmed = false) => {
+    try { return await fetchVia(tabId, url, method, body, confirmed); }
     catch (e) {
       if (!/Receiving end does not exist|Could not establish connection/i.test((e && e.message) || '')) throw e;
       try { await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['ContentScripts/contentScript.js'] }); } catch { /* */ }
       await new Promise((r) => setTimeout(r, 300));
-      return await fetchVia(tabId, url, method, body);
+      return await fetchVia(tabId, url, method, body, confirmed);
     }
   };
 
@@ -265,7 +267,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           if (!path) { sendResponse({ success: false, error: 'session-no-recipe' }); return; }
           const url = `https://${origin}${path.startsWith('/') ? path : '/' + path}`;
           const body = isWrite ? fillBody(payload && payload.body, args) : undefined;
-          const reply = await fetchViaHealed(tab.id, url, method, body);
+          const reply = await fetchViaHealed(tab.id, url, method, body, isWrite);   // v1340 — the write already passed the confirmed:true gate above; carry it to the content-script belt
           sendResponse(reply && reply.success ? { ...reply, origin } : (reply || { success: false, error: 'no-reply' }));
         } catch (e) {
           sendResponse({ success: false, error: (e && e.message) || 'invoke-session-failed' });
@@ -398,6 +400,16 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           const apiHost = String((payload && payload.origin) || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
           const method = String((payload && payload.method) || 'GET').toUpperCase();
           const isWrite = (method !== 'GET' && method !== 'HEAD');
+          // §18 arm guard (v2.74.1340, review A) — SESSION_REPLAY is where HARVESTED recipes execute, so it re-checks
+          // armable at run time exactly like INVOKE_SESSION: a recipe disabled / un-accepted / rejected in Studio after
+          // projection must not run. Same fall-through semantics: no {groundId, recipeId} or no stored record → proceed.
+          if (payload && payload.groundId && payload.recipeId && typeof readRideRecipes === 'function') {
+            try {
+              const _recs = await readRideRecipes(payload.groundId);
+              const _rec = Array.isArray(_recs) ? _recs.find((r) => r && r.id === payload.recipeId) : null;
+              if (_rec && !armable(_rec)) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → BLOCKED (recipe ${payload.recipeId} not armable)`); } catch { /* */ } sendResponse({ success: false, error: 'recipe-not-armable', hint: _rec.reviewState === 'pending' ? 'accept this recipe in Studio first' : 'this recipe is disabled in Studio' }); return; }
+            } catch { /* never block on the guard's own failure */ }
+          }
           // CX-6 (v2.74.1303) — FAIL-CLOSED write gate: a header-replay WRITE fires ONLY with explicit confirmation
           // (the panel's HITL confirm passes confirmed:true). A write can NEVER run unattended or without the user
           // approving THIS exact request — the execution boundary itself refuses it, independent of any caller.
@@ -457,7 +469,10 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           } else {
             let url = '';
             try { const t = await chrome.tabs.get(tab.id); url = (t && t.url) || ''; } catch { /* */ }
-            verdict = classifyReachProbe({ finalUrl: url });
+            // review P1-6: pass the requested HOST (no port) so a landing on a wholly different host that isn't a
+            // login/IdP redirect is caught as a park/redirect (belt over classifyReachProbe's non-http→unreachable floor).
+            let requestedHost = ''; try { requestedHost = new URL(`https://${origin}`).hostname; } catch { /* */ }
+            verdict = classifyReachProbe({ finalUrl: url, requestedHost });
           }
 
           if (verdict !== 'connected') { await _focusTab(tab.id); ephemeralOrigin = null; }   // bring it forward for sign-in; keep it

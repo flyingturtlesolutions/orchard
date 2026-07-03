@@ -41,6 +41,13 @@ describe('harvestedRecipeLegs — armable harvested reads → invoke-palette leg
     assert.equal(harvestedRecipeLegs([REC()], { host: 'deakoapi.deako.com', mode: 'ask', seenKeys: seen }).length, 0);
   });
 
+  it('v1340 (review A/§18): carries the arm-guard pair — tool.recipeId (bare id) + tool.groundId when given', () => {
+    const legs = harvestedRecipeLegs([REC()], { host: 'deakoapi.deako.com', mode: 'ask', groundId: 'g-42' });
+    assert.equal(legs[0].tool.recipeId, 'r1');            // bare stored id, not the prefixed leg.key
+    assert.equal(legs[0].tool.groundId, 'g-42');          // the recipe's Ground rides to the SESSION_REPLAY dispatch
+    assert.equal(harvestedRecipeLegs([REC()], { host: 'deakoapi.deako.com', mode: 'ask' })[0].tool.groundId, undefined);   // no ground → not stamped
+  });
+
   it('degrades on empty / garbage', () => {
     assert.deepEqual(harvestedRecipeLegs(), []);
     assert.deepEqual(harvestedRecipeLegs([null, {}], { host: 'x.com' }), []);

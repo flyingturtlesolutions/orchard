@@ -96,7 +96,10 @@ function _planExec(leg, params = {}, ctx = {}) {
       return { ok: true, channel: 'INVOKE_SESSION', busyMark: false, mode, domain: 'connector',
                payload: { origin: t.origin || null, appHost: t.appHost || null, endpoint: t.endpoint,
                           method: t.method || 'GET', body: t.body || null, account: t.account || null, args: p,
-                          groundId: groundId || null, recipeId: (leg && leg.key) || null,   // §18 — the arm guard checks the per-Ground recipe at INVOKE_SESSION
+                          // §18 — the arm guard checks the per-Ground recipe at INVOKE_SESSION. v2.74.1340 (review A):
+                          // send the BARE stored id (tool.recipeId) — the prefixed leg.key (`me.zendesk.read_ticket`)
+                          // never matched a stored record's bare id, so the guard silently always fell through.
+                          groundId: (t.groundId || groundId) || null, recipeId: t.recipeId || null,
                           verifyIdentity: t.verifyIdentity === true, identityProbe: t.identityProbe || null },
                reason: 'session-ride' };
     }

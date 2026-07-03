@@ -98,6 +98,18 @@ describe('planExec — leg → dispatch plan (pure §4.2)', () => {
     assert.equal(planExec({ key: 'x', domain: 'connector', tool: { impl: 'session' } }, {}, {}).reason, 'session-no-recipe');
   });
 
+  it('v1340 (review A/§18): the arm-guard pair — recipeId is the BARE tool.recipeId (never the prefixed leg.key); tool.groundId wins over ctx', () => {
+    const leg = { key: 'me.zendesk.read_ticket', domain: 'connector', source: 'builtin', mode: 'ask',
+                  tool: { impl: 'session', recipeId: 'read_ticket', origin: 'acme.zendesk.com', endpoint: '/api/v2/tickets/{id}.json', method: 'GET' } };
+    const plan = planExec(leg, { id: 1 }, { groundId: 'g-ctx' });
+    assert.equal(plan.payload.recipeId, 'read_ticket');       // the stored per-Ground record's id — the guard can actually match now
+    assert.equal(plan.payload.groundId, 'g-ctx');             // ctx ground when the tool carries none
+    const harvested = { ...leg, tool: { ...leg.tool, groundId: 'g-tool' } };
+    assert.equal(planExec(harvested, { id: 1 }, { groundId: 'g-ctx' }).payload.groundId, 'g-tool');   // the recipe's own Ground wins
+    const bare = { ...leg, tool: { ...leg.tool, recipeId: undefined } };
+    assert.equal(planExec(bare, { id: 1 }, {}).payload.recipeId, null);   // no bare id → null (guard falls through), never the prefixed key
+  });
+
   it('oauth/MCP connector → INVOKE_CONNECTOR, not busy-marked, carries server+tool+args (CX-2 §7)', () => {
     const leg = { key: 'acme.zendesk.get_ticket', domain: 'connector', source: 'builtin', mode: 'ask',
                   tool: { impl: 'oauth', server: 'zendesk', name: 'get_ticket' } };

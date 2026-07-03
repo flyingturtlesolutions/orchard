@@ -130,6 +130,18 @@ describe('looksLikeLogin / classifyReachProbe — the generic (no-recipe) verify
     assert.equal(classifyReachProbe({ finalUrl: '' }), 'unreachable');
     assert.equal(classifyReachProbe({ finalUrl: 'not a url' }), 'unreachable');
   });
+  it('review P1-6: a DNS/connection failure lands on a non-http(s) page → unreachable (the "verified garbage" trap)', () => {
+    assert.equal(classifyReachProbe({ finalUrl: 'chrome-error://chromewebdata/' }), 'unreachable');
+    assert.equal(classifyReachProbe({ finalUrl: 'about:blank' }), 'unreachable');
+    assert.equal(classifyReachProbe({ finalUrl: 'chrome://newtab/' }), 'unreachable');
+  });
+  it('review P1-6: requestedHost belt — a park/redirect to a foreign host is unreachable; www + subdomain drift is fine', () => {
+    assert.equal(classifyReachProbe({ finalUrl: 'https://parked.example/for-sale', requestedHost: 'support.deako.com' }), 'unreachable');
+    assert.equal(classifyReachProbe({ finalUrl: 'https://www.support.deako.com/hc', requestedHost: 'support.deako.com' }), 'connected');   // www drift
+    assert.equal(classifyReachProbe({ finalUrl: 'https://app.acme.com/home', requestedHost: 'acme.com' }), 'connected');                   // parent→subdomain
+    assert.equal(classifyReachProbe({ finalUrl: 'https://acme.com/home', requestedHost: 'app.acme.com' }), 'connected');                   // subdomain→parent
+    assert.equal(classifyReachProbe({ finalUrl: 'https://acme.okta.com/app', requestedHost: 'acme.com' }), 'signed-out');                  // login wins over host-mismatch
+  });
 });
 
 describe('pickRideTab — the entry tab (live, active-then-MRU), or null → open ephemeral', () => {

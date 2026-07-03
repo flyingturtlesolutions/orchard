@@ -9,6 +9,7 @@
 
 import { renderSubTasksBlock } from './childContext.js';   // CV-4-reduce — render THIS app's own sub-tasks as a data block
 import { renderRecentTurns } from './recentTurns.js';   // Q1 — render the recent-turn window as a fenced context block (follow-up continuity)
+import { sanitizeToolString } from './toolRetrieval.js';   // v2.74.1340 (review F) — sanitize AT RENDER: harvested-recipe / live-MCP name+does reach here unsanitized (only the RAG path pre-sanitized), so a crafted `does` could forge TOOL_CATALOG lines
 
 const _toolRef = (c) => (c && (c.capabilityId || c.id || c.op || c.key || c.name)) || null;
 
@@ -82,9 +83,13 @@ const SYSTEM = [
  */
 export function buildInterpretMessages(ask, { retrieved = [], primitives = [], affordances = '', seed = '', target = null, connections = [], learned = '', objects = '', subTasks = [], history = [], now = '' } = {}) {
   const tools = (Array.isArray(retrieved) ? retrieved : []).map((c) => {
-    const ref = _toolRef(c);
-    if (!ref) return null;
-    const label = (c && c.alias && c.provenance === 'user') ? c.alias : (c && (c.intent || c.name)) || ref;
+    const rawRef = _toolRef(c);
+    if (!rawRef) return null;
+    // v2.74.1340 (review F) — sanitize every catalog string AT RENDER (control chars, ``` fences, role tags, caps).
+    // The RAG path pre-sanitizes; harvested-recipe and live-MCP legs (name/does straight from a page or a server's
+    // tools/list) did NOT — a crafted `does` could forge extra TOOL_CATALOG/rule lines inside the fence.
+    const ref = sanitizeToolString(rawRef, 80);
+    const label = sanitizeToolString((c && c.alias && c.provenance === 'user') ? c.alias : ((c && (c.intent || c.name)) || rawRef), 200);
     const irr = (c && c.reversible === false) ? '   [IRREVERSIBLE: real-world effect]' : '';
     // GD-4d (v2.74.1327) — surface the domain so the SELF-SURFACE rule can bind: a self leg (canvas/panel) is
     // page-independent, and without this marker the model can't tell it from a page capability (live .1326: on an
@@ -95,7 +100,7 @@ export function buildInterpretMessages(ask, { retrieved = [], primitives = [], a
     const req = (c && c.paramSchema && Array.isArray(c.paramSchema.required)) ? c.paramSchema.required : [];
     const pkeys = (ps && typeof ps === 'object') ? Object.keys(ps) : [];
     const params = pkeys.length
-      ? `\n  params: ${pkeys.map((k) => `${k}${req.includes(k) ? '*' : ''}${ps[k] && ps[k].type ? `:${ps[k].type}` : ''}${ps[k] && ps[k].format ? `(${ps[k].format})` : ''}`).join(', ')}`
+      ? `\n  params: ${pkeys.map((k) => `${sanitizeToolString(k, 40)}${req.includes(k) ? '*' : ''}${ps[k] && ps[k].type ? `:${sanitizeToolString(String(ps[k].type), 20)}` : ''}${ps[k] && ps[k].format ? `(${sanitizeToolString(String(ps[k].format), 20)})` : ''}`).join(', ')}`
       : '';
     return `- ref: ${ref}${irr}${selfMark}\n  does: ${label}${params}`;
   }).filter(Boolean);

@@ -81,7 +81,10 @@ export function ensureSourceAttribution(spec, banked) {
   const composeIx = d.blocks.findIndex((b) => b && b.kind === 'compose' && typeof b.text === 'string');
   if (composeIx < 0) return d;
   const s = list[0];   // newest-first per the bank — the likeliest brief
-  const blocks = d.blocks.map((b, i) => (i === composeIx ? { ...b, text: `${b.text}\n\nSource: [${s.title}](${s.id})` } : b));
+  // v2.74.1340 (review F) — the TITLE is untrusted page text landing in a SHIPPED draft: a `]`/`(` in it could
+  // forge a link to an attacker URL ("]​(https://evil…"). Escape markdown link metachars before interpolating.
+  const safeTitle = String(s.title || 'source').replace(/([\\\[\]()])/g, '\\$1');
+  const blocks = d.blocks.map((b, i) => (i === composeIx ? { ...b, text: `${b.text}\n\nSource: [${safeTitle}](${s.id})` } : b));
   return { ...d, blocks };
 }
 

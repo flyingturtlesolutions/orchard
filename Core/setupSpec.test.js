@@ -6,11 +6,39 @@ import assert from 'node:assert/strict';
 import {
   SETUP_KINDS, SHAPE_MODES, archetypeShape, normalizeSlotValue, buildSetupSpec, normalizeSetupSpec,
   bindSlot, nextUnboundSlot, isSetupComplete, specToConfig, addConnection, removeConnection, markSetupDone, connectionsOf,
+  originFromText,
 } from './setupSpec.js';
 
 const DEF = { id: 'support', name: 'Support agent', archetype: 'operator' };
 const GMAIL = { origin: 'https://mail.google.com', label: 'Gmail' };
 const ZD = { origin: 'https://deako.zendesk.com', label: 'Deako Zendesk' };
+
+describe('setupSpec — originFromText (review P1-6: the host-shape floor)', () => {
+  it('a bare word (no TLD) is REJECTED — the "gmail" trap that banked https://gmail', () => {
+    assert.equal(originFromText('gmail'), null);
+    assert.equal(originFromText('help'), null);
+    assert.equal(originFromText('done!'), null);
+    assert.equal(originFromText('https://gmail'), null);          // even an explicit dotless https origin
+    assert.equal(originFromText('http://intranet'), null);
+  });
+  it('a whole sentence is rejected (a space is not a valid host char)', () => {
+    assert.equal(originFromText('please connect my gmail'), null);
+  });
+  it('a real dotted host passes (with/without scheme, www stripped for the label)', () => {
+    assert.deepEqual(originFromText('mail.google.com'), { origin: 'https://mail.google.com', label: 'mail.google.com' });
+    assert.deepEqual(originFromText('https://support.deako.com'), { origin: 'https://support.deako.com', label: 'support.deako.com' });
+    assert.deepEqual(originFromText('www.example.com'), { origin: 'https://www.example.com', label: 'example.com' });
+  });
+  it('localhost[:port] is the one dotless exception (dev)', () => {
+    assert.deepEqual(originFromText('localhost'), { origin: 'https://localhost', label: 'localhost' });
+    assert.deepEqual(originFromText('localhost:3000'), { origin: 'https://localhost:3000', label: 'localhost' });
+  });
+  it('empty / non-string → null', () => {
+    assert.equal(originFromText(''), null);
+    assert.equal(originFromText('   '), null);
+    assert.equal(originFromText(null), null);
+  });
+});
 
 describe('setupSpec — archetypeShape (the archetype templates the shape)', () => {
   it('each archetype maps to its own run-shape; unknown → interactive default; returns a copy', () => {

@@ -37,7 +37,7 @@ import { goalContextFor } from '../../Core/goalRetrieval.js';   // AL-4 — asse
 import { builtinApp } from '../../Core/appCatalog.js';   // OM — the app's catalog entry (its object model)
 import { connectorLegsForConnections, harvestedRecipeLegs } from '../../Core/connectorRecipes.js';   // CX-4c + §20 — connected session-ride recipes (curated + harvested header-replay) as selectable interpret tools
 import { brokerLegsForLinked } from '../../Core/brokerCatalog.js';   // CX-5c — broker (OAuth/MCP) legs, gated on LINKED providers
-import { composeOfferedLeg } from '../../Core/palette.js';   // GD-4b — the app's COMPOSE (draft-on-canvas) leg joins interpret's palette
+import { composeOfferedLeg, policyFilter } from '../../Core/palette.js';   // GD-4b — the app's COMPOSE (draft-on-canvas) leg joins interpret's palette; v1340 (review A) — policyFilter: the 'forbidden' floor now runs on the LIVE interpret palette, not just the dormant ilRun
 import { neutralizeFalseCompletion } from '../../Core/answerGuard.js';   // honesty belt — the answer path dispatches nothing, so a completion claim on a side-effect COMMAND is a fabrication (the calendar "✅ I created it" bug)
 import { describeObjectModel } from '../../Core/appDef.js';   // OM — render the app's object model (noun/states/actions/transitions) as a context block
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability, findDuplicateCapabilities } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A; GA-6 dedup
@@ -1176,7 +1176,7 @@ export function createSgMessageHandlers(ctx) {
               const gid = _groundIdForUrl(c.origin, _allG); if (!gid) continue;
               const recs = await ctx.readRideRecipes(gid);
               const host = String(c.origin || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
-              harvestedLegs.push(...harvestedRecipeLegs(recs, { host, mode: 'ask', seenKeys: _seen }));
+              harvestedLegs.push(...harvestedRecipeLegs(recs, { host, mode: 'ask', seenKeys: _seen, groundId: gid }));   // v1340 (review A/§18) — carry the Ground for the run-time arm guard
             }
           }
         } catch { /* never block interpret on the harvested-leg projection */ }
@@ -1204,7 +1204,10 @@ export function createSgMessageHandlers(ctx) {
         // brief; no ticket/connector context required) instead of clarify-looping. chat.js routes the pick through
         // COMPOSE_CANVAS; with a spec already on the surface the ask becomes a GD-4 revision turn.
         const composeLeg = appId ? composeOfferedLeg(builtinApp(appId)) : null;
-        const retrieved = [...ragLegs, ...connLegs, ...harvestedLegs, ...brokerLegs, ...(composeLeg ? [composeLeg] : [])];
+        // v2.74.1340 (review A) — the §2.3 policy floor on the LIVE palette: a `forbidden`-safety leg is never
+        // offerable to interpret (it previously ran only in the dormant Core/ilRun.js — the floor was unwired here).
+        // The rule table stays empty until user routing-rules ship; the unrelaxable floor is what matters now.
+        const retrieved = policyFilter([...ragLegs, ...connLegs, ...harvestedLegs, ...brokerLegs, ...(composeLeg ? [composeLeg] : [])], { scope: { ground: groundId || null } });
         const primitives = ['OPEN_URL', 'CLICK', 'TYPE', 'SCROLL', 'EXTRACT'];
         // F-2 (v2.74.1179) — feed interpret the live page VOCABULARY (the same affordances IL_ANSWER reads from the
         // cached Locale) so its act/teach/clarify decisions are grounded in what the page actually offers, not just

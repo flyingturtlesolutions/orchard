@@ -96,6 +96,15 @@ describe('policyFilter — floor + tighten-only rules (§2.3)', () => {
     assert.ok(policyFilter(legs, { rules, scope: { ground: 'other' } }).map((l) => l.key).includes('READ'));   // off-scope: kept
     assert.ok(!policyFilter(legs, { rules, scope: { ground: 'shopify' } }).map((l) => l.key).includes('READ')); // in-scope: dropped
   });
+  it('v1340 (review A): keyOf-tolerant — a RAG candidate (capabilityId, no key) passes the filter and matches rules', () => {
+    const rag = [
+      { kind: 'capability', capabilityId: 'cap_1', name: 'do a thing' },
+      { kind: 'capability', capabilityId: 'cap_evil', name: 'x', safety: 'forbidden' },
+    ];
+    const kept = policyFilter(rag, {});
+    assert.deepEqual(kept.map((c) => c.capabilityId), ['cap_1']);                     // floor holds on the RAG shape too
+    assert.equal(policyFilter(rag, { rules: [{ forbidKeys: ['cap_1'] }] }).length, 0); // forbidKeys matches capabilityId
+  });
 });
 
 describe('attachPrior — OUTCOMES bias + read/write hint', () => {
