@@ -18,7 +18,9 @@
 const BROWSER_CHANNEL = { OPEN_URL: 'OPEN_URL_NEW_TAB', FOCUS_TAB: 'FOCUS_TAB', CLOSE_TABS: 'CLOSE_TABS', LIST_TABS: 'LIST_TABS' };
 const SELF_CHANNEL    = { LIST_CAPABILITIES: 'GET_INTENT_MENU', RUN_STATUS: 'RUN_STATUS' };   // IL-3b — the real handler is GET_INTENT_MENU
 
-const keyOf = (leg) => (leg && (leg.key ?? leg.capabilityId ?? leg.op ?? leg.name)) || null;
+import { legRef } from './legRef.js';
+
+const keyOf = legRef;
 
 /**
  * Plan the dispatch of one leg. PURE.

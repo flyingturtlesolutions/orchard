@@ -145,7 +145,8 @@
     </div>
 
     <!-- Message list — populated as conversation progresses -->
-    <div class="messages hidden" id="messages"></div>
+    <!-- v2.74.1343 (review Batch 6, a11y): role=log + aria-live so a screen reader announces new replies. -->
+    <div class="messages hidden" id="messages" role="log" aria-live="polite" aria-relevant="additions" aria-label="Conversation"></div>
   </main>
 
   <!-- v2.72.52 (Stage 3) — Walk-mode <section> removed. Chat no longer

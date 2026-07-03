@@ -63,21 +63,6 @@ export const BROKER_CATALOG = Object.freeze([
         inputSchema: { type: 'object', properties: { documentId: { type: 'string' } }, required: ['documentId'] } },
     ],
   }),
-  Object.freeze({
-    server: 'google-gmail',
-    provider: 'google',
-    label: 'Gmail',
-    hosts: ['mail.google.com'],
-    scopes: ['https://www.googleapis.com/auth/gmail.modify'],
-    tools: [
-      { name: 'list_messages', description: 'List Gmail messages matching a query', annotations: { readOnlyHint: true },
-        inputSchema: { type: 'object', properties: { q: { type: 'string' }, maxResults: { type: 'number' } }, required: [] } },
-      { name: 'create_draft', description: 'Create a draft email', annotations: {},
-        inputSchema: { type: 'object', properties: { to: { type: 'string' }, subject: { type: 'string' }, body: { type: 'string' } }, required: [] } },
-      { name: 'send_message', description: 'Send an email', annotations: {},
-        inputSchema: { type: 'object', properties: { to: { type: 'string' }, subject: { type: 'string' }, body: { type: 'string' } }, required: ['to'] } },
-    ],
-  }),
 ]);
 
 const _host = (h) => String(h || '').toLowerCase().replace(/^www\./, '');
@@ -146,5 +131,6 @@ export function brokerLegsForLinked(host, linkedProviders, { catalog = BROKER_CA
     .map((t) => mcpToolToLeg(t, { account, server: entry.server, trusted: true }))
     .filter(Boolean)
     .filter((l) => !mode || l.mode === mode)
-    .filter((l) => !(seenKeys && seenKeys.has(l.key)));
+    .filter((l) => !(seenKeys && seenKeys.has(l.key)))
+    .map((l) => { if (seenKeys) seenKeys.add(l.key); return l; });
 }

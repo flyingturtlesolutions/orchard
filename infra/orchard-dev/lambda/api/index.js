@@ -1428,15 +1428,21 @@ async function handleConnectorTools(event) {
   for (const provider of Object.keys(CONNECTOR_TOKEN_URLS)) {
     const link = await getConnectorLink(auth.orchardUserId, provider);
     if (!link || !link.refreshToken) continue;
-    linked.push(provider);
     const mcpServers = Object.keys(MCP_ENDPOINTS).filter((s) => connectorProviderOf(s) === provider && (CONNECTOR_CHANNEL[s] || 'mcp') === 'mcp');
-    if (!mcpServers.length) continue;
     const tok = await refreshAccessToken(provider, link.refreshToken);
-    if (tok.error) { for (const s of mcpServers) servers.push({ server: s, error: tok.error }); continue; }
-    for (const s of mcpServers) {
-      const r = await listMcpTools({ server: s, accessToken: tok.accessToken });
-      servers.push(r.success ? { server: s, tools: r.tools } : { server: s, error: r.error, hint: r.hint });
+    // v1342 (review H) — a dead refresh token must NOT stay in `linked` (palette would offer legs that fail at invoke).
+    if (tok.error) {
+      if (mcpServers.length) for (const s of mcpServers) servers.push({ server: s, error: tok.error, hint: tok.hint, staleLink: true });
+      else servers.push({ provider, error: tok.error, hint: tok.hint, staleLink: true });
+      continue;
     }
+    linked.push(provider);
+    if (!mcpServers.length) continue;
+    const listed = await Promise.all(mcpServers.map(async (s) => {
+      const r = await listMcpTools({ server: s, accessToken: tok.accessToken });
+      return r.success ? { server: s, tools: r.tools } : { server: s, error: r.error, hint: r.hint };
+    }));
+    servers.push(...listed);
   }
   return json(200, { linked, servers });
 }

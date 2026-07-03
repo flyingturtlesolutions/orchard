@@ -11,8 +11,10 @@
 //     params, source('learned'|'builtin'), safety('auto'|'confirm'|'gated'|'forbidden'),
 //     verified_by?, tool?(underlying descriptor for dispatch), prior?(attached bias) }
 
-// The stable selection key, tolerant of a normalized leg, a saved capability, or a primitive descriptor.
-const keyOf = (x) => (x && (x.key ?? x.capabilityId ?? x.op ?? x.name)) || null;
+import { legRef } from './legRef.js';
+
+// The stable selection key — see Core/legRef.js (single precedence order).
+const keyOf = legRef;
 
 /**
  * The BUILTIN leg registry — the small fixed set Orchard always has beyond the learned library. Descriptors

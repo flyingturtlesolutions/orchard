@@ -10,10 +10,10 @@
 // This module only DECIDES; it never executes the DOM and never bypasses the downstream trial/verify
 // gate that bounds every cold selection. Anti-hallucination: a selected tool MUST be one we offered.
 
+import { legRef } from './legRef.js';
+
 const _clamp01  = (n) => { const x = Number(n); return Number.isFinite(x) ? Math.max(0, Math.min(1, x)) : 0; };
 const _normAsk  = (s) => String(s ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
-// A tool's stable key: a saved capability's id, a primitive's op, or (last resort) its name.
-const _toolKey  = (c) => (c && (c.capabilityId || c.op || c.name)) || null;
 
 /**
  * @typedef {Object} RouteDecision
@@ -88,8 +88,8 @@ export async function route(ask, deps = {}, opts = {}) {
     return { action: 'demonstrate', tool: null, params, confidence, reason: out.reason || 'no-tool', candidates };
   }
   // Anti-hallucination — the selected tool MUST be one we actually offered (else demonstrate, don't dispatch).
-  const ref = (typeof out.tool === 'string') ? out.tool : _toolKey(out.tool);
-  const selected = candidates.find((c) => _toolKey(c) === ref) || null;
+  const ref = (typeof out.tool === 'string') ? out.tool : legRef(out.tool);
+  const selected = candidates.find((c) => legRef(c) === ref) || null;
   if (!selected) {
     return { action: 'demonstrate', tool: null, params, confidence, reason: 'tool-not-in-palette', candidates };
   }

@@ -57,6 +57,13 @@ describe('sourceBank — resolveMediaRefs (the trusted render-side resolution)',
     const out = resolveMediaRefs({ blocks: [{ kind: 'image', mediaRef: 'kb:1#img1' }] }, { 'kb:1#img1': { url: 'javascript:alert(1)', kind: 'image' } });
     assert.equal(out.blocks[0].src, undefined);
   });
+  it('v1341 (review G) — mergedRefMap: the NEWEST source wins a ref collision (the bank is newest-first)', () => {
+    const newest = { refs: { 'kb:7#img1': { url: 'https://new.example/a.png', kind: 'image' } } };
+    const oldest = { refs: { 'kb:7#img1': { url: 'https://old.example/a.png', kind: 'image' }, 'kb:6#img1': { url: 'https://old.example/b.png', kind: 'image' } } };
+    const map = mergedRefMap([newest, oldest]);   // newest-first, as stored
+    assert.equal(map['kb:7#img1'].url, 'https://new.example/a.png');
+    assert.equal(map['kb:6#img1'].url, 'https://old.example/b.png');   // non-colliding entries all survive
+  });
 });
 
 describe('sourceBank — v1336 source attribution (the "source link always included" guarantee)', () => {

@@ -13,9 +13,9 @@
 //     (route.js's "a selected tool MUST be one we offered", now enforced on every observe→think edge — §9).
 //   • done is gate-confirmed, not Orchard's opinion — `verifyDone` can reject a 'done' and force more work (#2).
 
-// A tool/leg's stable key: a saved capability's id, a primitive's op, or (last resort) its name. Tolerant of
-// either an OfferedLeg ({key}) or a raw route.js tool ({capabilityId|op|name}) so the loop accepts both.
-const keyOf = (x) => (x && (x.key ?? x.capabilityId ?? x.op ?? x.name)) || null;
+import { legRef } from './legRef.js';
+
+const keyOf = legRef;
 
 /**
  * @typedef {Object} OfferedLeg   a palette entry Orchard may select (DESIGN §2.2 / §4.3)

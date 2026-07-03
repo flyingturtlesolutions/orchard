@@ -13,7 +13,9 @@ import { agentLoop } from './agentLoop.js';
 import { assemblePalette } from './palette.js';
 import { planExec, toObservation } from './execPlan.js';
 
-const keyOf = (leg) => (leg && (leg.key ?? leg.capabilityId ?? leg.op ?? leg.name)) || null;
+import { legRef } from './legRef.js';
+
+const keyOf = legRef;
 
 /**
  * Run Orchard on a goal. PURE — all I/O via injected deps.

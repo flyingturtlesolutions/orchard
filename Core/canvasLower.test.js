@@ -15,6 +15,13 @@ describe('canvasLower — the markdown-subset parser', () => {
     assert.deepEqual(parseInline('[evil](javascript:alert(1))'), [{ text: 'evil' }]);   // href dropped, text kept
     assert.deepEqual(parseInline('_i_'), [{ text: 'i', italic: true }]);
   });
+  it('v1341 (review G) — italic has word-boundary guards: mid-word _/* is NOT emphasis (identifiers/URLs survive)', () => {
+    assert.deepEqual(parseInline('file_name_v2'), [{ text: 'file_name_v2' }]);                     // snake_case intact
+    assert.deepEqual(parseInline('see https://x.com/a_b_c ok'), [{ text: 'see https://x.com/a_b_c ok' }]);
+    assert.deepEqual(parseInline('2*3*4'), [{ text: '2*3*4' }]);                                    // mid-word star intact
+    assert.deepEqual(parseInline('an _emphasized_ word'), [{ text: 'an ' }, { text: 'emphasized', italic: true }, { text: ' word' }]);
+    assert.deepEqual(parseInline('a *starred* word'), [{ text: 'a ' }, { text: 'starred', italic: true }, { text: ' word' }]);
+  });
   it('blocks: paragraphs split on blank lines; ul/ol group; headings parse in BOTH modes (GD-7h: html_body renders them)', () => {
     const b = parseMd('## Title\n\npara\n\n- a\n- b\n\n1. one\n2. two');
     assert.deepEqual(b.map((x) => x.type), ['h', 'p', 'ul', 'ol']);

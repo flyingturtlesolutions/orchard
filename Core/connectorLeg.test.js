@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { recipeToLeg, mcpToolToLeg, hintToSafety, pruneSchema } from './connectorLeg.js';
+import { recipeToLeg, mcpToolToLeg, hintToSafety, pruneSchema, connectorLegKey } from './connectorLeg.js';
 import { toOfferedLeg } from './palette.js';
 
 describe('hintToSafety — hints may only RAISE caution (§9)', () => {
@@ -54,7 +54,7 @@ describe('recipeToLeg — session-ride recipe → client connector leg (§4)', (
     const leg = recipeToLeg(recipe, { account: 'acme', trusted: true });
     assert.equal(leg.domain, 'connector');
     assert.equal(leg.source, 'builtin');
-    assert.equal(leg.key, 'acme.zendesk.read_ticket');
+    assert.equal(leg.key, 'acme.zendesk.read_ticket@acme.zendesk.com');   // v1342 — origin suffix when recipe carries origin
     assert.equal(leg.tool.recipeId, 'read_ticket');      // v1340 (review A/§18) — the BARE id rides on the tool so the arm guard can match stored records
     assert.equal(leg.tool.impl, 'session');
     assert.equal(leg.tool.origin, 'acme.zendesk.com');
@@ -101,6 +101,13 @@ describe('recipeToLeg — session-ride recipe → client connector leg (§4)', (
     assert.equal(recipeToLeg({ id: 'x', app: 'zendesk' }, {}), null);                              // no endpoint, no host
     assert.equal(recipeToLeg({ id: 'x', app: 'zendesk', endpoint: '/y' }, {}), null);              // host missing
     assert.equal(recipeToLeg(null, {}), null);
+  });
+});
+
+describe('connectorLegKey — host suffix (v1342)', () => {
+  it('suffixes @host when set; bare key when not', () => {
+    assert.equal(connectorLegKey({ account: 'me', app: 'zendesk', id: 'read_ticket' }), 'me.zendesk.read_ticket');
+    assert.equal(connectorLegKey({ account: 'me', app: 'zendesk', id: 'read_ticket', host: 'a.zendesk.com' }), 'me.zendesk.read_ticket@a.zendesk.com');
   });
 });
 

@@ -32,7 +32,9 @@ export function parseInline(text) {
     const mImg  = s.match(/!\[([^\]]*)\]\(((?:[^()\s]|\([^()\s]*\))+)\)/);
     const mLink = s.match(/(?<!!)\[([^\]]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)/);   // url may carry one paren-nested group (e.g. javascript:alert(1) — sanitized away, but consumed whole)
     const mBold = s.match(/\*\*([^*]+)\*\*/);
-    const mItal = s.match(/(?:\*([^*]+)\*|_([^_]+)_)/);
+    // v2.74.1341 (review G) — word-boundary guards (markdown.js semantics): a mid-word `_`/`*` is NOT emphasis, so
+    // `file_name_v2` / snake_case identifiers / underscored URLs survive a SHIPPED draft intact.
+    const mItal = s.match(/(?:(?<![\w*])\*([^*\n]+?)\*(?![\w*])|(?<!\w)_([^_\n]+?)_(?!\w))/);
     const cands = [
       mImg  ? { idx: mImg.index, m: mImg, kind: 'image' } : null,
       mLink ? { idx: mLink.index, m: mLink, kind: 'link' } : null,

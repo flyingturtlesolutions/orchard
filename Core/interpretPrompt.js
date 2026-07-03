@@ -11,7 +11,9 @@ import { renderSubTasksBlock } from './childContext.js';   // CV-4-reduce — re
 import { renderRecentTurns } from './recentTurns.js';   // Q1 — render the recent-turn window as a fenced context block (follow-up continuity)
 import { sanitizeToolString } from './toolRetrieval.js';   // v2.74.1340 (review F) — sanitize AT RENDER: harvested-recipe / live-MCP name+does reach here unsanitized (only the RAG path pre-sanitized), so a crafted `does` could forge TOOL_CATALOG lines
 
-const _toolRef = (c) => (c && (c.capabilityId || c.id || c.op || c.key || c.name)) || null;
+import { legRef } from './legRef.js';
+
+const _toolRef = legRef;
 
 const SYSTEM = [
   'You are the reasoning front door for a browser-automation assistant. Decide what to do with the USER ASK,',

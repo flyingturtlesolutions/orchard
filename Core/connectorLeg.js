@@ -16,6 +16,16 @@
 const _str = (x) => (typeof x === 'string' ? x.trim() : '');
 
 /**
+ * Build a connector leg key. When `host` is set, suffix it so two connected instances of the same app don't collide.
+ * PURE. @param {{ account?:string, app:string, id:string, host?:string }} p
+ */
+export function connectorLegKey({ account = 'me', app, id, host = '' } = {}) {
+  const base = `${account}.${app}.${id}`;
+  const h = _str(host).toLowerCase().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+  return h ? `${base}@${h}` : base;
+}
+
+/**
  * Safety class from a tool's self-declared hints + whether the SOURCE is trusted (curated catalog). PURE.
  * Hints can only raise caution; an untrusted read never drops below 'confirm'. (§9)
  */
@@ -77,8 +87,9 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
   if (!id || !app || !endpoint || !(origin || appHost)) return null;   // origin OR appHost
   const params = Array.isArray(r.params) ? r.params : [];
   const write = r.write === true;
+  const host = origin || _str(r.host);
   return {
-    key: `${account}.${app}.${id}`,
+    key: connectorLegKey({ account, app, id, host }),
     name: r.name ?? id,
     does: r.does ?? null,
     mode: write ? 'act' : 'ask',
@@ -93,6 +104,8 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
       origin: origin || null, appHost: appHost || null,
       endpoint, method: _str(r.method).toUpperCase() || 'GET',
       body: (write && r.body && typeof r.body === 'object') ? r.body : null,   // write body TEMPLATE; the executor fillBody()s it
+      bodyType: _str(r.bodyType) || (write && r.body ? 'json' : null),         // v1342 — json | form | raw (fillWriteBody)
+      contentType: _str(r.contentType) || null,
       verifyIdentity: r.verifyIdentity === true,
       identityProbe: _str(r.identityProbe) || null,
     },

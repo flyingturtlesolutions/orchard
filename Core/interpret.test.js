@@ -27,6 +27,12 @@ describe('interpret — normalizeInterpretDecision', () => {
     assert.equal(d.op, 'CLICK');
   });
 
+  it('v1342: act with capabilityId OPEN_URL (primitive op in wrong field) → act op', () => {
+    const d = normalizeInterpretDecision({ intent: 'act', capabilityId: 'OPEN_URL', confidence: 0.8 }, { retrieved: RETRIEVED, primitives: PRIMS });
+    assert.equal(d.intent, 'act');
+    assert.equal(d.op, 'OPEN_URL');
+  });
+
   it('navigate needs a real url; without one → clarify', () => {
     assert.equal(normalizeInterpretDecision({ intent: 'navigate', params: { url: 'https://youtube.com' }, confidence: 0.9 }).op, 'OPEN_URL');
     assert.equal(normalizeInterpretDecision({ intent: 'navigate', params: {}, confidence: 0.9 }).intent, 'clarify');
@@ -58,6 +64,12 @@ describe('interpret — applyConfidenceGate (the §9.3 trust mechanism)', () => 
   it('a CONFIDENT act/navigate passes; a non-act intent is never gated', () => {
     assert.equal(applyConfidenceGate({ intent: 'act', capabilityId: 'x', confidence: 0.9 }).intent, 'act');
     assert.equal(applyConfidenceGate({ intent: 'answer', confidence: 0.1 }).intent, 'answer');
+  });
+
+  it('v1342: a LOW-confidence decompose carries lowConfidence (dispatch guard reads it)', () => {
+    const d = applyConfidenceGate({ intent: 'decompose', subAsks: ['a', 'b'], confidence: 0.1 });
+    assert.equal(d.intent, 'decompose');
+    assert.equal(d.lowConfidence, true);
   });
 });
 

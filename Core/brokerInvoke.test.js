@@ -52,7 +52,19 @@ describe('brokerReplyFromCloud — normalize the proxy response / error', () => 
     assert.equal(brokerReplyFromCloud({ err: { status: 501 } }).error, 'broker-unavailable');
   });
 
-  it('401 / 403 → broker-unauthorized (link the connector first)', () => {
+  it('403 thrown-path reads err.body → write-needs-confirm (not broker-unauthorized)', () => {
+    const r = brokerReplyFromCloud({ err: { status: 403, message: 'Forbidden', body: { error: 'write-needs-confirm', hint: 'confirm the action first' } } });
+    assert.equal(r.error, 'write-needs-confirm');
+    assert.equal(r.hint, 'confirm the action first');
+  });
+
+  it('409 thrown-path carries err.body hint', () => {
+    const r = brokerReplyFromCloud({ err: { status: 409, body: { error: 'connector-not-linked', hint: 'link google first' } } });
+    assert.equal(r.error, 'connector-not-linked');
+    assert.equal(r.hint, 'link google first');
+  });
+
+  it('401 / 403 without err.body → broker-unauthorized (link the connector first)', () => {
     assert.equal(brokerReplyFromCloud({ err: { status: 401 } }).error, 'broker-unauthorized');
     assert.equal(brokerReplyFromCloud({ err: { status: 403 } }).error, 'broker-unauthorized');
   });

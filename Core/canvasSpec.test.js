@@ -109,12 +109,27 @@ describe('canvasSpec — diffSpec (the renderer animation input)', () => {
     const c2 = { id: 'c', kind: 'chart', data: { b: 2, a: 1 } };
     assert.equal(diffSpec(newCanvasSpec({ blocks: [c1] }), newCanvasSpec({ blocks: [c2] })).changed.length, 0);
   });
-  it('id-less blocks can\'t be tracked → next added, prev removed', () => {
+  // v2.74.1341 (review G) — id hygiene: an id-less block gets a STABLE positional id at normalize, so a text edit
+  // is `changed` (patched in place on the live tab) instead of added+removed (which made the node vanish on update).
+  it('id-less blocks get stable positional ids → a text edit is `changed`, an identical spec diffs to NOTHING', () => {
     const d = diffSpec(newCanvasSpec({ blocks: [{ kind: 'markdown', text: 'old' }] }),
                        newCanvasSpec({ blocks: [{ kind: 'markdown', text: 'new' }] }));
-    assert.equal(d.added.length, 1);
-    assert.equal(d.removed.length, 1);
-    assert.equal(d.changed.length, 0);
+    assert.equal(d.added.length, 0);
+    assert.equal(d.removed.length, 0);
+    assert.equal(d.changed.length, 1);
+    const same = diffSpec(newCanvasSpec({ blocks: [{ kind: 'markdown', text: 'x' }] }),
+                          newCanvasSpec({ blocks: [{ kind: 'markdown', text: 'x' }] }));
+    assert.deepEqual([same.added.length, same.removed.length, same.changed.length, same.moved.length], [0, 0, 0, 0]);
+  });
+  it('duplicate ids are de-duped at normalize (a diff/patch can never hit the wrong node)', () => {
+    const s = normalizeCanvasSpec({ blocks: [
+      { id: 'x', kind: 'markdown', text: 'one' },
+      { id: 'x', kind: 'markdown', text: 'two' },
+      { kind: 'markdown', text: 'three' },
+    ] });
+    assert.deepEqual(s.blocks.map((b) => b.id), ['x', 'x~2', '_b2']);
+    const ids = new Set(s.blocks.map((b) => b.id));
+    assert.equal(ids.size, s.blocks.length);
   });
 });
 

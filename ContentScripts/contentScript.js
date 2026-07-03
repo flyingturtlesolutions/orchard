@@ -6160,7 +6160,11 @@ const MESSAGE_HANDLERS = {
           const csrf = metaTok && metaTok.getAttribute('content');
           if (!csrf) { sendResponse({ success: false, error: 'no-csrf', hint: 'open the app signed in so it can authorize the write' }); return; }
           headers['X-CSRF-Token'] = csrf;
-          if (payload && payload.body != null) { headers['Content-Type'] = 'application/json'; fetchBody = JSON.stringify(payload.body); }
+          if (payload && payload.body != null) {
+            const ct = String(payload.contentType || 'application/json');
+            headers['Content-Type'] = ct;
+            fetchBody = (typeof payload.body === 'string') ? payload.body : (ct.includes('json') ? JSON.stringify(payload.body) : String(payload.body));
+          }
         }
         const res = await fetch(url, { method, credentials: 'include', headers, body: fetchBody });
         const ct = res.headers.get('content-type') || '';

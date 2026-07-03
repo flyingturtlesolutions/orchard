@@ -580,6 +580,20 @@ textarea {
   opacity: 0.5;
   cursor: not-allowed;
 }
+/* v2.74.1343 (review Batch 6) — the connection / rich-intent chip MENU (setup site candidates, "what can I do here"
+   intents). The chips reuse .suggestion-card styling, but here they lay out as a WRAPPING ROW under the bubble text
+   (they were appended to the .message flex row with NO CSS — squeezed as a third column beside the text). */
+.intent-menu {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+.intent-menu .intent-chip {
+  width: auto;
+  flex: 0 1 auto;
+  padding: var(--sp-1) var(--sp-3);
+}
 /* OM (v2.74.1200) — a named PRESET under its abstract type: dashed + transparent so the type cards read as the
    primary choice and presets as their lighter-weight specializations. Layout-safe (no width/margin change). */
 .suggestion-card-preset {
@@ -1320,6 +1334,10 @@ textarea {
   padding: var(--sp-3);
   overflow-x: auto;
   background: transparent;
+  /* v2.74.1343 (bcp) — cap thread code blocks: a long HITL write preview (full request, review H) scrolls in
+     place instead of swallowing the panel. renderMarkdown escapes raw HTML, so the cap must live in CSS. */
+  max-height: 16em;
+  overflow-y: auto;
 }
 
 .message-body.md-rendered pre::-webkit-scrollbar {
@@ -1763,6 +1781,13 @@ textarea {
   background: var(--c-bg-subtle);
   color: var(--c-text-muted);
   border: 1px solid var(--c-border);
+}
+/* v2.74.1343 (review Batch 6) — the built-in COMMAND-verb badge ("/"). Distinct from task (T) and assistant (AI). */
+.slash-item-kind.command {
+  background: transparent;
+  color: var(--c-accent);
+  border: 1px solid var(--c-accent);
+  font-size: 11px;
 }
 
 .slash-item-content {

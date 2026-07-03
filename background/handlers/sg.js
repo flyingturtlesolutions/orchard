@@ -37,6 +37,7 @@ import { goalContextFor } from '../../Core/goalRetrieval.js';   // AL-4 — asse
 import { builtinApp } from '../../Core/appCatalog.js';   // OM — the app's catalog entry (its object model)
 import { connectorLegsForConnections, harvestedRecipeLegs } from '../../Core/connectorRecipes.js';   // CX-4c + §20 — connected session-ride recipes (curated + harvested header-replay) as selectable interpret tools
 import { brokerLegsForLinked } from '../../Core/brokerCatalog.js';   // CX-5c — broker (OAuth/MCP) legs, gated on LINKED providers
+import { legRef } from '../../Core/legRef.js';   // v1342 — unified ref for palette dedup (_seen seeding)
 import { composeOfferedLeg, policyFilter } from '../../Core/palette.js';   // GD-4b — the app's COMPOSE (draft-on-canvas) leg joins interpret's palette; v1340 (review A) — policyFilter: the 'forbidden' floor now runs on the LIVE interpret palette, not just the dormant ilRun
 import { neutralizeFalseCompletion } from '../../Core/answerGuard.js';   // honesty belt — the answer path dispatches nothing, so a completion claim on a side-effect COMMAND is a fabrication (the calendar "✅ I created it" bug)
 import { describeObjectModel } from '../../Core/appDef.js';   // OM — render the app's object model (noun/states/actions/transitions) as a context block
@@ -1171,7 +1172,7 @@ export function createSgMessageHandlers(ctx) {
         try {
           if (typeof ctx.readRideRecipes === 'function' && connections.length) {
             const _allG = await StorageManager.getAllGrounds();
-            const _seen = new Set([...ragLegs, ...connLegs].map((l) => l && l.key).filter(Boolean));
+            const _seen = new Set([...ragLegs, ...connLegs].map((l) => legRef(l)).filter(Boolean));
             for (const c of connections) {
               const gid = _groundIdForUrl(c.origin, _allG); if (!gid) continue;
               const recs = await ctx.readRideRecipes(gid);
@@ -1192,7 +1193,7 @@ export function createSgMessageHandlers(ctx) {
           // server's OWN schemas instead of the seed (brokerCatalog liveTools override — schemas can't drift).
           const liveTools = (_lp['connector:liveTools'] && typeof _lp['connector:liveTools'] === 'object') ? _lp['connector:liveTools'] : null;
           if (linked.length) {
-            const _seenB = new Set([...ragLegs, ...connLegs, ...harvestedLegs].map((l) => l && l.key).filter(Boolean));
+            const _seenB = new Set([...ragLegs, ...connLegs, ...harvestedLegs].map((l) => legRef(l)).filter(Boolean));
             const hosts = new Set();
             try { if (tabUrl) hosts.add(new URL(tabUrl).host); } catch { /* */ }
             for (const c of connections) { try { hosts.add(new URL(/^https?:\/\//i.test(c.origin) ? c.origin : `https://${c.origin}`).host); } catch { /* */ } }

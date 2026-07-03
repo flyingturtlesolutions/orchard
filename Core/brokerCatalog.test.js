@@ -8,9 +8,9 @@ import { BROKER_CATALOG, brokerConnectorForHost, brokerLegsForHost } from './bro
 import { assessLegAvailability } from './legAvailability.js';
 
 describe('brokerCatalog — brokerConnectorForHost', () => {
-  it('resolves the Google Calendar / Gmail / Docs connectors by host', () => {
+  it('resolves the Google Calendar / Docs connectors by host', () => {
     assert.equal(brokerConnectorForHost('calendar.google.com')?.server, 'google-calendar');
-    assert.equal(brokerConnectorForHost('mail.google.com')?.server, 'google-gmail');
+    assert.equal(brokerConnectorForHost('mail.google.com'), null);   // v1342 — gmail dropped until REST adapter ships
     assert.equal(brokerConnectorForHost('docs.google.com')?.server, 'google-docs');   // GD-2 — the presentation backend
   });
   it('GD-2: google-docs carries documents + drive.file scopes; render_document is NOT in the palette seed (plumbing)', () => {

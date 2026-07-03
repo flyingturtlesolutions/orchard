@@ -17,6 +17,7 @@ import { fillEndpoint, fillBody, recipeForOrigin } from '../../Core/connectorRec
 import { pickRideTab, assessProbe, rideAction, STATUS, classifyReachProbe } from '../../Core/connection.js';
 import { armable } from '../../Core/rideRecipe.js';   // §18 — the arm guard: a non-armable (disabled / pending / rejected) per-Ground recipe must not run
 import { brokerInvokeGate, brokerReplyFromCloud } from '../../Core/brokerInvoke.js';   // CX-5b — the broker (OAuth/MCP) fail-closed gate + cloud-reply normalizer (pure)
+import { BROKER_CATALOG } from '../../Core/brokerCatalog.js';   // v1342 — UNLINK clears this provider's liveTools cache entries
 import { pkcePair, authorizeUrl, parseAuthRedirect } from '../../Core/oauthLink.js';   // MP-3 — the pure client half of the link dance (§5.2 pinned contract)
 import { providerScopes } from '../../Core/mcpServers.js';                             // MP-3 — one dance grants every server the provider fronts
 import { Logger } from '../../Core/Logger.js';   // §20 — SESSION_REPLAY outcome observability (Invariant #1)
@@ -146,6 +147,9 @@ async function _writeLinkedProviders(list) {
 // discovery. The palette prefers these over the hand-transcribed seed (brokerCatalog liveTools override) — schemas
 // from the source can't drift. Empty/absent is always safe: the seed serves.
 const LIVETOOLS_KEY = 'connector:liveTools';
+async function _readLiveTools() {
+  try { const o = await chrome.storage.local.get(LIVETOOLS_KEY); return (o[LIVETOOLS_KEY] && typeof o[LIVETOOLS_KEY] === 'object') ? o[LIVETOOLS_KEY] : {}; } catch { return {}; }
+}
 async function _writeLiveTools(map) {
   try { await chrome.storage.local.set({ [LIVETOOLS_KEY]: (map && typeof map === 'object') ? map : {} }); } catch { /* */ }
 }
@@ -153,17 +157,17 @@ async function _writeLiveTools(map) {
 export function createConnectorHandlers({ ensureContentScript, readRideRecipes, cloudInvokeConnector, cloudLinkConnector, cloudUnlinkConnector, cloudListConnectorTools, cloudHasSession } = {}) {
   // v2.74.1340 (review A) — `confirmed` rides through to SESSION_FETCH so the CONTENT-SCRIPT boundary can hold its
   // own fail-closed write belt (second belt): only a caller that already passed the HITL gate hands it a write.
-  const fetchVia = (tabId, url, method, body, confirmed = false) =>
-    chrome.tabs.sendMessage(tabId, { type: 'SESSION_FETCH', payload: { url, method, body, confirmed: confirmed === true } }, { frameId: 0 });
+  const fetchVia = (tabId, url, method, body, confirmed = false, contentType = '') =>
+    chrome.tabs.sendMessage(tabId, { type: 'SESSION_FETCH', payload: { url, method, body, contentType: contentType || undefined, confirmed: confirmed === true } }, { frameId: 0 });
   // The TOP-FRAME content script can be orphaned (an extension reload kills it; the all-frames PING can read a live
   // SUBframe as "live" while frame 0 is dead). On a frame-0 connection error, force-reinject + retry once.
-  const fetchViaHealed = async (tabId, url, method, body, confirmed = false) => {
-    try { return await fetchVia(tabId, url, method, body, confirmed); }
+  const fetchViaHealed = async (tabId, url, method, body, confirmed = false, contentType = '') => {
+    try { return await fetchVia(tabId, url, method, body, confirmed, contentType); }
     catch (e) {
       if (!/Receiving end does not exist|Could not establish connection/i.test((e && e.message) || '')) throw e;
       try { await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['ContentScripts/contentScript.js'] }); } catch { /* */ }
       await new Promise((r) => setTimeout(r, 300));
-      return await fetchVia(tabId, url, method, body, confirmed);
+      return await fetchVia(tabId, url, method, body, confirmed, contentType);
     }
   };
 
@@ -174,7 +178,8 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
     const r = await cloudListConnectorTools({});
     const linked = (r && Array.isArray(r.linked)) ? r.linked : [];
     await _writeLinkedProviders(linked);
-    const map = {};
+    const prev = await _readLiveTools();
+    const map = { ...prev };   // v1342 — merge per-server: one transient tools/list failure must not wipe cached schemas
     let toolCount = 0, errCount = 0;
     for (const s of ((r && Array.isArray(r.servers)) ? r.servers : [])) {
       if (s && s.server && Array.isArray(s.tools) && s.tools.length) { map[s.server] = s.tools; toolCount += s.tools.length; }
@@ -266,8 +271,14 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           const path = fillEndpoint(String((payload && payload.endpoint) || ''), args);
           if (!path) { sendResponse({ success: false, error: 'session-no-recipe' }); return; }
           const url = `https://${origin}${path.startsWith('/') ? path : '/' + path}`;
-          const body = isWrite ? fillBody(payload && payload.body, args) : undefined;
-          const reply = await fetchViaHealed(tab.id, url, method, body, isWrite);   // v1340 — the write already passed the confirmed:true gate above; carry it to the content-script belt
+          let body = undefined;
+          const contentType = String((payload && payload.contentType) || '');
+          if (isWrite) {
+            // v1342 — panel may pre-fill via fillWriteBody (string body + contentType); else template fillBody.
+            if (typeof payload.body === 'string') body = payload.body;
+            else body = fillBody(payload && payload.body, args);
+          }
+          const reply = await fetchViaHealed(tab.id, url, method, body, isWrite, contentType);   // v1340 — the write already passed the confirmed:true gate above; carry it to the content-script belt
           sendResponse(reply && reply.success ? { ...reply, origin } : (reply || { success: false, error: 'no-reply' }));
         } catch (e) {
           sendResponse({ success: false, error: (e && e.message) || 'invoke-session-failed' });
@@ -366,6 +377,14 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           if (!provider) { sendResponse({ success: false, error: 'no-provider' }); return; }
           if (typeof cloudUnlinkConnector === 'function') { try { await cloudUnlinkConnector(provider); } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'unlink-failed' }); return; } }
           await _writeLinkedProviders((await _readLinkedProviders()).filter((p) => p !== provider));
+          // v1342 (review H P4) — drop this provider's liveTools entries so the palette doesn't carry stale schemas.
+          try {
+            const lt = await _readLiveTools();
+            for (const entry of BROKER_CATALOG) {
+              if (entry && entry.provider === provider && entry.server) delete lt[entry.server];
+            }
+            await _writeLiveTools(lt);
+          } catch { /* */ }
           try { Logger.info('connector', `CONNECTOR_LINK ▸ ${provider} → unlinked`); } catch { /* */ }
           sendResponse({ success: true, provider, unlinked: true });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'unlink-failed' }); }
@@ -434,6 +453,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           if (r.noAuth) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → NO-AUTH on tab ${tab.id} (looked for "${apiHost}"; captured hosts: [${(r.keys || []).join(', ')}])`); } catch { /* */ } sendResponse({ success: false, error: 'no-session-captured', hint: `arm Forage on ${sessionHost} to capture the session, then retry` }); return; }
           if (r.error) { try { Logger.warn('background', `SESSION_REPLAY ▸ ${apiHost} ${method} → fetch-error: ${r.error} (tab ${tab.id})`); } catch { /* */ } sendResponse({ success: false, error: r.error }); return; }
           if (r.status === 401 || r.status === 403) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → ${r.status} session-expired (tab ${tab.id})`); } catch { /* */ } sendResponse({ success: false, error: 'session-expired', hint: `re-arm Forage on ${sessionHost} to refresh the session` }); return; }
+          if (r.status >= 400) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → ${r.status} http-error (tab ${tab.id})`); } catch { /* */ } sendResponse({ success: false, error: `http-${r.status}`, hint: 'the server rejected the request', status: r.status, value: r.body }); return; }
           try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → ${r.status} ${_shape} (tab ${tab.id})`); } catch { /* */ }
           sendResponse({ success: true, value: r.body, status: r.status, origin: apiHost });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'replay-failed' }); }

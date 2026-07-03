@@ -96,11 +96,14 @@ export function sourcesForPrompt(banked) {
     .map((s) => ({ id: s.id || '', title: s.title || '', text: s.text || '', media: Array.isArray(s.media) ? s.media : [] }));
 }
 
-/** Merge the kept sources' ref maps into one resolve map (newest wins a collision). PURE. */
+/** Merge the kept sources' ref maps into one resolve map (newest wins a collision). PURE.
+ * v2.74.1341 (review G) — the bank is NEWEST-FIRST, so a plain Object.assign let the OLDEST entry win a ref
+ * collision (each later assign overwrote the earlier). First-seen-wins over the newest-first list = newest wins. */
 export function mergedRefMap(banked) {
   const out = {};
   for (const s of (Array.isArray(banked) ? banked : [])) {
-    if (s && s.refs && typeof s.refs === 'object') Object.assign(out, s.refs);
+    if (!s || !s.refs || typeof s.refs !== 'object') continue;
+    for (const [ref, hit] of Object.entries(s.refs)) { if (!(ref in out)) out[ref] = hit; }
   }
   return out;
 }

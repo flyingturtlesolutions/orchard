@@ -38,6 +38,13 @@ export function brokerInvokeGate(payload = {}) {
  */
 export function brokerReplyFromCloud({ resp = null, err = null } = {}) {
   if (err) {
+    const body = (err && err.body && typeof err.body === 'object') ? err.body : null;
+    // v1342 (review H) — the thrown-path must read err.body (403 write-needs-confirm, 409 hints, 503 config).
+    if (body && body.error) {
+      const out = { success: false, error: String(body.error) };
+      if (body.hint) out.hint = String(body.hint);
+      return out;
+    }
     const status = (err && typeof err.status === 'number') ? err.status : 0;
     if (status === 404 || status === 501) return { success: false, error: 'broker-unavailable', hint: 'the connector proxy is not provisioned yet' };
     if (status === 401 || status === 403) return { success: false, error: 'broker-unauthorized', hint: 'link this connector (sign in) first' };

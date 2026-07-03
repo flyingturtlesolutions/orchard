@@ -7,9 +7,9 @@
 // wraps these two pure functions; route() (Core/route.js) does the final anti-hallucination check that the
 // selected tool is one we actually offered.
 
-// A candidate's stable key — MUST match Core/route.js `_toolKey` precedence so the LLM's returned ref
-// resolves back to the same candidate.
-const _toolKey = (c) => (c && (c.capabilityId || c.op || c.name)) || null;
+import { legRef } from './legRef.js';
+
+// A candidate's stable key — MUST match Core/legRef.js so the LLM's returned ref resolves back.
 
 const SYSTEM = [
   'You are a router for a browser-automation assistant. From the TOOL CATALOG, pick the ONE tool that best',
@@ -42,7 +42,7 @@ const SYSTEM = [
  */
 export function buildRouterMessages(ask, candidates = [], { seed = '' } = {}) {
   const lines = (Array.isArray(candidates) ? candidates : []).map((c) => {
-    const ref = _toolKey(c);
+    const ref = legRef(c);
     // Prefer the user-authored alias (trusted) as the label; fall back to the (possibly page-derived) name.
     const label = (c && c.alias && c.provenance === 'user') ? c.alias : (c && c.name) || ref;
     // R-5 (v2.74.957) — surface the safetyClass so the router can weigh real-world effect; the chat

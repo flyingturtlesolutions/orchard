@@ -216,6 +216,14 @@ export function coerceParams(params, paramSchema) {
     if ((t === 'integer' || t === 'number') && typeof v === 'string') {
       const n = Number(v.replace(/[^0-9.\-]/g, ''));   // strip '#', spaces, stray text
       out[k] = Number.isFinite(n) && v.replace(/[^0-9.\-]/g, '') !== '' ? n : v;
+    } else if (t === 'boolean') {   // v1342 (review I) — "false" must not serialize as a truthy string
+      if (typeof v === 'boolean') out[k] = v;
+      else if (typeof v === 'string') {
+        const s = v.trim().toLowerCase();
+        if (s === 'true' || s === '1' || s === 'yes') out[k] = true;
+        else if (s === 'false' || s === '0' || s === 'no') out[k] = false;
+        else out[k] = v;
+      } else out[k] = !!v;
     } else { out[k] = v; }
   }
   return out;
@@ -269,6 +277,7 @@ export function harvestedRecipeLegs(recipes, { host = '', account = 'me', mode =
       id: r.id, name: r.name, does: r.does, app,
       origin: r.origin || host, endpoint: r.endpoint, method: r.method,
       write, destructive: r.safetyClass === 'destructive', body: r.body, params: r.params,
+      bodyType: r.bodyType, contentType: r.contentType,
     }, { account, trusted: true });                                    // accepted = user-vetted → read drops to 'auto'
     if (!leg) continue;
     if (seen.has(leg.key)) continue; seen.add(leg.key);
@@ -307,7 +316,8 @@ export function connectorLegsForConnections(connections, { account = 'me', trust
       if (!ah || !(host === ah || host.endsWith('.' + ah))) continue;
       const k = `${host}|${leg.key}`;
       if (seen.has(k)) continue; seen.add(k);
-      out.push({ ...leg, tool: { ...leg.tool, origin: host } });   // ride the SPECIFIC connected instance
+      const enriched = { ...leg, key: leg.key.includes('@') ? leg.key : `${leg.key}@${host}`, tool: { ...leg.tool, origin: host } };
+      out.push(enriched);   // ride the SPECIFIC connected instance (host-suffixed key)
     }
   }
   return out;

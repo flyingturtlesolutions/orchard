@@ -100,13 +100,27 @@ export function normalizeBlock(raw) {
   return { ...base, text: _str(raw.text), editable: true, ref: _str(raw.ref) || null };
 }
 
+// v2.74.1341 (review G) — ID HYGIENE: diffSpec tracks blocks by id, and the live renderer patches DOM nodes by
+// `[data-id]`. An id-LESS block used to land in added+removed on every diff (its node vanished on live update),
+// and DUPLICATE ids patched the wrong node. Materialize a deterministic positional fallback (`_b<i>` — stable for
+// the same array, so an unchanged id-less block diffs to nothing) and de-dupe collisions (`x`, `x~2`, …). PURE.
+function _hygieneIds(blocks) {
+  const used = new Set();
+  return blocks.map((b, i) => {
+    let id = b.id || `_b${i}`;
+    if (used.has(id)) { let n = 2; while (used.has(`${id}~${n}`)) n++; id = `${id}~${n}`; }
+    used.add(id);
+    return (id === b.id) ? b : { ...b, id };
+  });
+}
+
 /** Normalize a whole spec (defensive — survives a partial/legacy stored shape). PURE. Bad blocks are filtered out. */
 export function normalizeCanvasSpec(raw) {
   const d = (raw && typeof raw === 'object') ? raw : {};
   return {
     anchor: _anchor(d.anchor),
     title: _str(d.title),
-    blocks: (Array.isArray(d.blocks) ? d.blocks : []).map(normalizeBlock).filter(Boolean),
+    blocks: _hygieneIds((Array.isArray(d.blocks) ? d.blocks : []).map(normalizeBlock).filter(Boolean)),
     rev: Number.isFinite(d.rev) ? d.rev : 0,
   };
 }

@@ -7,7 +7,9 @@
 // (AnthropicService.stepIl) wraps these two functions; Core/agentLoop.js does the anti-hallucination check
 // that the chosen leg is one the palette offered.
 
-const keyOf = (x) => (x && (x.key ?? x.capabilityId ?? x.op ?? x.name)) || null;
+import { legRef } from './legRef.js';
+
+const keyOf = legRef;
 const _clamp01 = (n) => { const x = Number(n); return Number.isFinite(x) ? Math.max(0, Math.min(1, x)) : 0; };
 
 const SYSTEM = [

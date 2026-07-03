@@ -11,12 +11,14 @@
 // GATE (the trust mechanism: "ask when unsure" — a low-confidence act/navigate becomes a clarify, NOT a fire; this
 // is what stops the "if go to youtube" eager-nav). The live LLM call + prompt + dispatch are F-2.
 
+import { legRef } from './legRef.js';
+
 export const INTENTS = ['act', 'navigate', 'decompose', 'clarify', 'teach', 'answer'];
 
 const _str = (x) => (typeof x === 'string' ? x.trim() : '');
 const _clamp01 = (n) => (Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0);
-const _idSet = (list) => new Set((Array.isArray(list) ? list : []).map((c) => _str(c && (c.id || c.capabilityId || c.key))).filter(Boolean));
-const _opSet = (list) => new Set((Array.isArray(list) ? list : []).map((p) => _str(typeof p === 'string' ? p : (p && (p.op || p.key))).toUpperCase()).filter(Boolean));
+const _idSet = (list) => new Set((Array.isArray(list) ? list : []).map((c) => _str(legRef(c))).filter(Boolean));
+const _opSet = (list) => new Set((Array.isArray(list) ? list : []).map((p) => _str(typeof p === 'string' ? p : legRef(p)).toUpperCase()).filter(Boolean));
 
 /**
  * Normalize a raw interpret decision into the validated §9.2 contract. PURE.
@@ -38,6 +40,8 @@ export function normalizeInterpretDecision(raw, { retrieved = [], primitives = [
     const op = _str(d.op).toUpperCase();
     if (id && _idSet(retrieved).has(id)) return { ...base, capabilityId: id };
     if (op && _opSet(primitives).has(op)) return { ...base, op };
+    // v1342 (review I) — models often put a primitive op in capabilityId ('OPEN_URL'); honor that too.
+    if (id && _opSet(primitives).has(id.toUpperCase())) return { ...base, op: id.toUpperCase() };
     return { ...base, intent: 'teach', why: why || 'tool-not-in-palette' };
   }
   if (intent === 'navigate') {
@@ -65,6 +69,10 @@ export function normalizeInterpretDecision(raw, { retrieved = [], primitives = [
 export function applyConfidenceGate(decision, { minConfidence = 0.6 } = {}) {
   const d = (decision && typeof decision === 'object') ? decision
     : { intent: 'clarify', params: {}, subAsks: [], question: '', confidence: 0, why: 'no-decision' };
+  // v1342 (review I) — decompose carries lowConfidence (route.js R-6 lesson): chat's dispatch guard reads it.
+  if (d.intent === 'decompose' && d.confidence < minConfidence) {
+    return { ...d, lowConfidence: true, why: d.why || `low-confidence ${d.confidence} < ${minConfidence}` };
+  }
   if ((d.intent === 'act' || d.intent === 'navigate') && d.confidence < minConfidence) {
     return { ...d, intent: 'clarify',
       question: d.question || (d.intent === 'navigate' ? 'Did you mean to navigate there? I wasn’t sure.' : 'Did you want me to run that? I wasn’t sure.'),

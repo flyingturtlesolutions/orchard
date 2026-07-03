@@ -242,12 +242,43 @@ focused editor, Rail delete cascade + sticky-follow autoscroll correct, astral/U
   markdown-escaped in `ensureSourceAttribution`. Tests added (palette, execPlan, connectorLeg, connectorRecipes,
   interpretPrompt, canvasPrompt, sourceBank — 1836 passing). NOT covered here (unchanged): the Lambda change is
   source-only (deploy is a separate step); gmail catalog/scope removal stays in Batch 5 (H).
-- **Batch 4 — canvas seams (P1-4/5 + G):** CAS-on-rev or SW-owned writes; 404-only doc recreate + re-get before
-  fallback; italic boundary guards; mergedRefMap order + seq chain; exact-hash tab match; tab inline-ref
-  resolution; id hygiene in normalize; focus-once; sources list/clear.
-- **Batch 5 — contract + drift (I + H-robustness + K-markers/parity):** one legRef(); primitives contract;
-  host-suffixed keys; decompose confidence; confirm names/reversible; err.body hints; linked-state downgrade;
-  liveTools merge; access-token cache; full HITL preview; markers + _DECISION_RE; the six parity tests; bodyType
-  carry; boolean coercion.
-- **Batch 6 — UX polish (J):** help + slash-picker verbs; once-guard buttons; markdown HITL bodies; voice
-  standardization; Rail latency/keyboard/aria-live; placeholder; intent-menu parent; connecting-line finalize.
+- **Batch 4 — canvas seams (P1-4/5 + G) ✅ FIXED in v2.74.1341.** Shipped: **P1-4** — `writeCanvasSpec({ ifRev })`
+  CAS so the canvas tab's edit save and the SW's compose can't rev-clobber each other (tab rebases on refusal, up to
+  3 retries); **P1-5** — `_renderGdoc` recreates a Doc ONLY on 404/not-found (`googleRest` now carries `status`; auth/
+  network failures keep the stored doc id); image-fallback retry **re-gets** before repainting (stale `bodyEndIndex`
+  double-paint belt). **G:** italic word-boundary guards in `canvasLower.parseInline`; `mergedRefMap` first-seen-wins
+  (newest bank entry wins collisions); `BANK_SOURCE` seq mint serialized (no duplicate `kb:N`); exact hash match for
+  canvas tab focus (no `app=x&conv=` prefix trap); tab backend renders markdown via shared `mdToHtml` + banked ref map
+  (inline `kb:` images/links resolve); `_hygieneIds` in `normalizeCanvasSpec` (stable `_b<i>` + de-dupe); focus-once
+  (compose/revision no longer steals tab/window focus; `display`/`canvas` still focuses); `sources` / `sources clear`
+  commands + `LIST_SOURCES`/`CLEAR_SOURCES` handlers; banked-source notice on `source` bank; Doc recreate surfaced
+  to the panel ("Your old Doc was gone…"); removed the latent `p.sources` compose override. Tests added (CanvasStore
+  CAS, canvasLower italic, canvasSpec id hygiene, sourceBank mergedRefMap — **1840 passing**). NOT covered here
+  (unchanged): Lambda `status` field needs deploy for P1-5's 404 belt to be reliable against live Google (hint-regex
+  is the fallback for older lambdas).
+- **Batch 5 — contract + drift (I + H-robustness + K-markers/parity) ✅ FIXED in v2.74.1342.** Shipped: **I**
+  `Core/legRef.js` (one ref precedence everywhere); primitives `capabilityId:'OPEN_URL'` honored; host-suffixed
+  connector keys; decompose `lowConfidence`; replay confirm looks up retrieved name/reversible; `fillWriteBody` +
+  `bodyType`/`contentType` on header-replay + session writes; boolean `coerceParams`; **H** `brokerReplyFromCloud`
+  reads `err.body`; dead refresh token drops from `linked`; liveTools merge on refresh; oauth access-token cache;
+  full (scrollable) HITL preview; gmail catalog removed; **K** `WORKFLOW ▸` / `RIDE_WRITE ▸` / `INTERPRET_ASK "`
+  in `_DECISION_RE`; parity tests (`legRef`, oauth cache, fillWriteBody, catalog/scopes). **1856 passing** (headless).
+  NOT covered: Lambda deploy for linked-downgrade + token cache; live HITL scroll feel.
+- **Batch 6 — UX polish (J) ✅ FIXED in v2.74.1343** (the high-value, clearly-correct subset). Shipped: **once-guard
+  buttons** — a shared `_mkOnceBtn` (self-disables synchronously before `fn`, `lockBar` disables the whole bar for
+  single-choice bars) applied to the feedback 👍/👎/🗑 (lockBar), the dedup Merge (self, multi-cluster), and both
+  workflow ▶ Run bars (the flagged double-launch is closed). **help** — a `help`/`commands`/`?`/`what commands`
+  guard renders the grouped command reference (was learnable only from scattered hints; "help" used to route to the
+  LLM). **slash-picker verbs** — 15 command verbs surfaced in the `/` picker (a "/" badge; selecting INSERTS the
+  verb text, never auto-runs). **placeholder** — restored "Message Orchard… (type / for capabilities)" (was
+  "Message Agent HUB…", losing the name + the "/" hint). **a11y** — `#messages` gets `role=log`/`aria-live=polite`;
+  Rail rows (`_wireRowKeyboard`) get `role=button`/`tabindex`/`aria-label` + Enter/Space activation (were mouse-only
+  divs). **intent-menu** — setup + rich-intent chips append to `.message-content` (not the flex `.message` row) and
+  get real chip-row CSS (`.intent-menu`/`.intent-chip` had none). **connecting-line** — the setup "🔌 Connecting to
+  X…" probe bubble now SETTLES in place (✅ Connected / 🔑 signed-out / ⚠️ unreachable) instead of dangling +
+  spawning a second bubble. Gate 1856/0 (UI-only; not headless-testable). DEFERRED (needs a live eyeball or is a
+  design-judgment sweep, noted honestly): **voice standardization** (the 🧠-leaks-the-route emoji rework — a broad,
+  subjective, high-churn sweep across hundreds of `_setMessageBody` sites; better done deliberately than mechanically)
+  and **Rail 220ms latency** (removing the click/dblclick disambiguation is a feel change that can't be verified
+  headless — dblclick-to-open would need a keyboard/UX redesign first). **markdown HITL bodies** was already covered
+  in Batch 1 (the CX-6/CX-5c confirms render markdown).

@@ -76,6 +76,20 @@ describe('CanvasStore', () => {
     await Promise.all([writeCanvasSpec(anchor, { blocks: [] }), writeCanvasSpec(anchor, { blocks: [] }), writeCanvasSpec(anchor, { blocks: [] })]);
     assert.equal((await loadCanvasSpec(anchor)).rev, 3);
   });
+
+  // v2.74.1341 (review P1-4) — the RMW chain is per-JS-context; cross-context writers (the canvas tab's edit save
+  // vs the SW's compose) pass `ifRev` so a stale write is REFUSED instead of clobbering the other side's revision.
+  it('ifRev CAS: a matching rev writes; a stale rev is refused (null) and the stored spec keeps', async () => {
+    const first = await writeCanvasSpec(anchor, { title: 'v1', blocks: [] });          // rev 1
+    assert.equal(first.rev, 1);
+    const won = await writeCanvasSpec(anchor, { title: 'v2', blocks: [] }, { ifRev: 1 });
+    assert.equal(won.rev, 2);
+    const lost = await writeCanvasSpec(anchor, { title: 'STALE', blocks: [] }, { ifRev: 1 });   // derived from rev 1 — too old
+    assert.equal(lost, null);
+    const stored = await loadCanvasSpec(anchor);
+    assert.equal(stored.rev, 2);
+    assert.equal(stored.title, 'v2');                                                   // the newer write was NOT reverted
+  });
 });
 
 describe('CanvasSyncRecords + StoragePaths (cloud path round-trips; sync still OFF)', () => {

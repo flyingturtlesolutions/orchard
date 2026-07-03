@@ -7,7 +7,13 @@
 import { loadCanvasSpec, writeCanvasSpec } from './Services/Storage/CanvasStore.js';
 import { canvasDocId, normalizeCanvasSpec, newCanvasSpec, diffSpec, setBlockText } from './Core/canvasSpec.js';
 import { builtinApp } from './Core/appCatalog.js';
-import { renderMarkdown } from './markdown.js';
+// v2.74.1341 (review G) — markdown renders through the SHARED lowering (canvasLower.mdToHtml: escape-first, the
+// same parser as the gdoc preview + the delivery HTML), so inline `![alt](kb:…)` images and `[title](kb:N)` source
+// links RESOLVE from the trusted banked map on the tab too. The chat renderer (markdown.js renderMarkdown) had no
+// image rule and its isSafeUrl refused kb: targets — refs rendered as literal text on the tab backend, while
+// BACKEND_PROFILES claimed tab all-native.
+import { mdToHtml } from './Core/canvasLower.js';
+import { mergedRefMap } from './Core/sourceBank.js';
 
 // ── the anchor, from the hash (#app=<appId>&conv=<conversationId>) ──
 function _anchorFromHash() {
@@ -17,12 +23,45 @@ function _anchorFromHash() {
 const _anchor = _anchorFromHash();
 const _storageKey = `canvas:${canvasDocId(_anchor)}`;
 
+// v2.74.1341 (review G) — the app's banked source ref→url map (same store the SW reads), so inline kb: refs in
+// markdown text resolve on the TAB backend too. Loaded at boot, refreshed when the bank changes.
+const _srcKey = _anchor.appId ? `canvas:sources:${_anchor.appId}` : null;
+let _refMap = {};
+async function _loadRefMap() {
+  if (!_srcKey) return;
+  try { const got = await chrome.storage.local.get(_srcKey); _refMap = mergedRefMap(Array.isArray(got[_srcKey]) ? got[_srcKey] : []); } catch { /* */ }
+}
+
 const $root = document.getElementById('cv-root');
 const $title = document.getElementById('cv-title');
 const $meta = document.getElementById('cv-meta');
 
 let _current = newCanvasSpec({ anchor: _anchor });   // what's painted now (the diff baseline)
 let _selfWriting = false;                            // suppress the storage echo of our OWN compose edit
+
+// v2.74.1341 (review P1-4) — the edit save is a CAS write: this tab and the SW are DIFFERENT JS contexts, so the
+// store's RMW chain (per-context) cannot order a textarea save against a compose-in-flight — an unconditional write
+// here used to REVERT a concurrent SW render (rev clobber). Write against the rev we derived from; a refusal means
+// a newer spec landed since — REBASE (re-read, re-apply the user's text onto it) and retry, so neither side's write
+// is silently reverted.
+async function _saveEdit(blockId, text) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const base = attempt === 0 ? _current : ((await loadCanvasSpec(_anchor).catch(() => null)) || _current);
+    const next = setBlockText(base, blockId, text);
+    _selfWriting = true;
+    let stored = null;
+    try { stored = await writeCanvasSpec(_anchor, next, { ifRev: base.rev }); } catch { stored = null; }
+    if (stored) {
+      if (attempt > 0) {   // we rebased over someone else's write — paint THEIR block changes too (ours diffs to nothing)
+        const d = diffSpec(_current, stored);
+        if (d.added.length || d.removed.length || d.changed.length || d.moved.length) _applyDiff(stored, d);
+      }
+      _current = stored;   // rev advances locally so the NEXT save's CAS is against reality
+      return;
+    }
+    _selfWriting = false;   // a refused write emits no storage event — don't swallow the next real one
+  }
+}
 
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -71,7 +110,8 @@ function _blockNode(block) {
   el.className = `cv-block cv-${block.kind}`;
   el.dataset.id = block.id;
   if (block.kind === 'markdown') {
-    el.innerHTML = renderMarkdown(block.text);                 // escape-FIRST — untrusted text renders inert
+    el.innerHTML = mdToHtml(block.text, { refMap: _refMap });   // escape-FIRST (shared lowering) — untrusted text renders inert; kb: refs resolve from the trusted map
+    for (const a of el.querySelectorAll('a')) { a.target = '_blank'; a.rel = 'noopener noreferrer'; }   // links leave the canvas tab alone
   } else if (block.kind === 'metric') {
     const dn = (block.delta != null && block.delta !== '');
     const dir = dn && String(block.delta).trim().startsWith('-') ? 'down' : 'up';
@@ -104,7 +144,7 @@ function _blockNode(block) {
     ta.addEventListener('input', () => {
       _current = setBlockText(_current, block.id, ta.value);   // update LOCAL first → our storage echo diffs to nothing
       if (t) clearTimeout(t);
-      t = setTimeout(() => { _selfWriting = true; writeCanvasSpec(_anchor, _current).catch(() => {}); }, 400);
+      t = setTimeout(() => { _saveEdit(block.id, ta.value); }, 400);
     });
     el.appendChild(ta);
   }
@@ -142,6 +182,7 @@ async function _boot() {
     return;
   }
   let spec = null;
+  await _loadRefMap();
   try { spec = await loadCanvasSpec(_anchor); } catch { /* */ }
   _current = spec || _defaultSpec();
   _renderAll(_current);
@@ -149,7 +190,9 @@ async function _boot() {
 
 // Live: the storage write IS the broadcast (chrome.storage.onChanged fires in every extension context).
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== 'local' || !changes[_storageKey]) return;
+  if (area !== 'local') return;
+  if (_srcKey && changes[_srcKey]) _loadRefMap();   // v1341 — a re-banked source refreshes the resolve map for the next paint
+  if (!changes[_storageKey]) return;
   if (_selfWriting) { _selfWriting = false; return; }   // our own compose write — already on screen
   const rec = changes[_storageKey].newValue;
   const next = normalizeCanvasSpec(rec && rec.spec);

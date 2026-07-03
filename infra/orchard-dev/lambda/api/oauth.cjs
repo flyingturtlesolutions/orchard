@@ -14,6 +14,9 @@ const CONNECTOR_TOKEN_URLS = {
   google: 'https://oauth2.googleapis.com/token',
 };
 
+// v1342 — per-provider access-token cache (module lifetime; one Lambda container ≈ one user burst).
+const _accessCache = new Map();
+
 function _creds(provider, env) {
   const P = String(provider || '').toUpperCase();
   const clientId = env[`${P}_OAUTH_CLIENT_ID`];
@@ -63,17 +66,27 @@ async function exchangeAuthCode(provider, { code, redirectUri, codeVerifier } = 
  * @param {string} refreshToken
  * @param {{ env?:object, fetchImpl?:Function }} [io]
  */
-async function refreshAccessToken(provider, refreshToken, { env = process.env, fetchImpl = globalThis.fetch } = {}) {
+async function refreshAccessToken(provider, refreshToken, { env = process.env, fetchImpl = globalThis.fetch, force = false } = {}) {
   const c = _creds(provider, env);
   if (!c) return { error: 'connector-not-configured' };
   if (!refreshToken) return { error: 'connector-not-linked' };
+  // v1342 (review H) — cache short-lived access tokens (Google refresh quota + invoke latency).
+  // v1343 (bcp catch) — keyed per provider+REFRESH TOKEN, not provider alone: a warm Lambda container serves
+  // MULTIPLE users, and a provider-only key would hand user A's cached access token to user B's request.
+  const cacheKey = `${String(provider || '')}:${refreshToken}`;
+  const cached = _accessCache.get(cacheKey);
+  if (!force && cached && cached.token && cached.expiresAt > Date.now() + 30_000) {
+    return { accessToken: cached.token };
+  }
   try {
     const { ok, data } = await _tokenPost(fetchImpl, c.tokenUrl, {
       client_id: c.clientId, client_secret: c.clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token',
     });
     if (!ok || !data || !data.access_token) return { error: 'connector-refresh-failed', hint: data && data.error ? String(data.error) : undefined };
+    const ttl = (Number(data.expires_in) > 0 ? Number(data.expires_in) : 3600) * 1000;
+    _accessCache.set(cacheKey, { token: data.access_token, expiresAt: Date.now() + ttl });
     return { accessToken: data.access_token };
   } catch { return { error: 'connector-refresh-failed' }; }
 }
 
-module.exports = { CONNECTOR_TOKEN_URLS, exchangeAuthCode, refreshAccessToken };
+module.exports = { CONNECTOR_TOKEN_URLS, exchangeAuthCode, refreshAccessToken, clearAccessTokenCache: () => _accessCache.clear() };

@@ -31,6 +31,8 @@ import { classifyReadAsk, askListIndex } from './Core/observe.js';   // OBS-READ
 import { runIlStandin } from './Core/ilStandin.js';   // IL-3 — the single-shot stand-in folded through agentLoop@maxSteps=1 (DESIGN §8 Phase-1 parity)
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
 import { recipeLegs, coerceParams, fillBody } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template
+import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 — header-replay writes: json/form/raw + contentType (review I)
+import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
 import { renderConnectorLines, itemLabels } from './Core/connectorRender.js';   // CX-4c — generic render of ANY connector read (not just tickets); CV-4-full — itemLabels: read list → fan-out labels
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
@@ -620,6 +622,19 @@ async function _openConvFullTimeline(conv) {
 }
 
 
+// v2.74.1343 (review Batch 6, a11y) — make a Rail row keyboard-operable: button semantics + focusable + Enter/Space.
+// The rows are <div>s (they carry rich inner buttons), so switching conversations was mouse-only. `activate` is the
+// row's PRIMARY action (select); the inner delete/chevron/subtask buttons remain independently tab-reachable.
+function _wireRowKeyboard(el, activate, label) {
+  el.setAttribute('role', 'button');
+  el.setAttribute('tabindex', '0');
+  if (label) el.setAttribute('aria-label', label);
+  el.addEventListener('keydown', (e) => {
+    if (e.target !== el) return;                       // a keypress on an inner button is that button's business
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') { e.preventDefault(); activate(); }
+  });
+}
+
 // CV-3c — the Overview pin: the reserved home row (the general assistant). Single-click → resume the last conversation
 // (keep the drawer open); double-click → resume + open the full timeline (close the drawer). (.1223)
 function _historyPinRow(row) {
@@ -645,6 +660,7 @@ function _historyPinRow(row) {
     await _renderRailList();
     _closeRail();
   });
+  _wireRowKeyboard(el, () => el.click(), `Home — ${row.title}`);   // v1343 (a11y)
   return el;
 }
 
@@ -654,6 +670,7 @@ function _historyNewAppRow() {
   el.className = 'rail-item rail-new-app';
   el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">＋</span>New app</div>`;
   el.addEventListener('click', () => { _closeRail(); _renderAppGallery(); });
+  _wireRowKeyboard(el, () => el.click(), 'New app');   // v1343 (a11y)
   return el;
 }
 
@@ -765,6 +782,10 @@ function _historyConvRow(conv, row) {
       e.stopPropagation();
       try { _getDevBridge()?.previewConversation?.(conv.id); } catch { /* */ } });
   }
+
+  // v1343 (a11y) — Enter/Space SELECTS the conversation (the single-click action; the 220ms disambiguation is a
+  // mouse concern, and dblclick-to-open has no keyboard analogue that matters here).
+  _wireRowKeyboard(item, () => { void _selectConvForInput(conv); }, `${isDev ? 'Dev' : 'App'} conversation: ${conv.title}`);
 
   return item;
 }
@@ -1798,7 +1819,7 @@ function _renderSetupStep(step) {
       card.addEventListener('click', () => { void _setupAdvanceAnswer(c); });
       wrap.appendChild(card);
     }
-    msg.appendChild(wrap);
+    (msg.querySelector('.message-content') || msg).appendChild(wrap);   // v1343 — under the bubble text, not the flex row
   }
   _orchFinalize(msg);
 }
@@ -1815,15 +1836,17 @@ async function _setupAdvanceAnswer(answer) {
     let verdict = 'unreachable';
     try { const r = await _orchReq('VERIFY_CONNECTION', { origin: answer.origin }); verdict = (r && r.verdict) || 'unreachable'; }
     catch { /* network/handler error → treat as unreachable */ }
-    _orchFinalize(probing);
+    // v2.74.1343 (review Batch 6) — SETTLE the probe bubble in place with the verdict (it used to persist as a
+    // dangling "🔌 Connecting to X…" and spawn a separate result bubble).
     if (verdict !== 'connected') {
-      const m = appendMessage({ role: 'assistant', body: '' });
-      _setMessageBody(m, verdict === 'signed-out'
+      _setMessageBody(probing, verdict === 'signed-out'
         ? `🔑 Not signed in to \`${answer.label}\` — I brought its tab forward. Sign in there, then send the address again.`
         : `⚠️ Couldn’t reach \`${answer.label}\`. Check the address and try again.`, { markdown: true });
-      _orchFinalize(m);
+      _orchFinalize(probing);
       return;   // don't accrete an unverified site
     }
+    _setMessageBody(probing, `✅ Connected to \`${answer.label}\`.`, { markdown: true });
+    _orchFinalize(probing);
   }
   const { spec, step } = advanceSetup(_setupState.spec, answer);
   _setupState.spec = spec;
@@ -2186,6 +2209,23 @@ function _orchFinalize(msg, { outcome = null } = {}) {
 let _lastOrch = null;
 const _mkBtn = (label, fn) => { const b = document.createElement('button'); b.className = 'btn-secondary tiny'; b.type = 'button'; b.textContent = label; b.addEventListener('click', fn); return b; };
 
+// v2.74.1343 (review Batch 6, J) — a button that fires AT MOST ONCE. On the first click it self-disables (and, with
+// `lockBar`, disables every button in the same action bar), synchronously, BEFORE `fn` runs — so a double-click /
+// double-tap can't double-launch a chain, double-corroborate an alias, or double-merge (the flagged double-fire on
+// the feedback / Merge / workflow-Run bars). `lockBar` is for single-choice bars (👍/👎/🗑, ▶ Run); a multi-choice
+// bar (one Merge per cluster) omits it so siblings stay live. A throw in `fn` never un-guards the button.
+function _mkOnceBtn(label, fn, { lockBar = false } = {}) {
+  const b = document.createElement('button');
+  b.className = 'btn-secondary tiny'; b.type = 'button'; b.textContent = label;
+  b.addEventListener('click', (e) => {
+    if (b.disabled) return;
+    b.disabled = true;
+    if (lockBar) { try { for (const sib of (b.parentElement ? b.parentElement.querySelectorAll('button') : [])) sib.disabled = true; } catch { /* */ } }
+    try { fn(e); } catch { /* a handler throw must not re-enable the button */ }
+  });
+  return b;
+}
+
 // v2.74.1340 (review A) — the ONE HITL confirm bar every leg-safety gate shares. Renders confirm/cancel buttons on
 // `msg`, registers with the bar-cancel set (a conversation switch resolves false — never a stranded promise, the
 // P1-2 lesson), and resolves the user's verdict. `gated` is a REAL tier, not a label: the destructive class
@@ -2203,6 +2243,23 @@ function _hitlConfirmBar(msg, { gated = false, confirmLabel = '✓ Confirm', can
     bar.appendChild(btn);
     bar.appendChild(_mkBtn(cancelLabel, () => done(false)));
   });
+}
+
+// v1342 (review H) — HITL write previews show the FULL request; never a 400-char slice that hides what will
+// actually be sent on confirm. v1343 (bcp catch) — the scroll cap moved to CSS (.md-code-block pre): renderMarkdown
+// ESCAPES raw HTML (the escape-first boundary), so the old inline <div> wrapper rendered as literal text.
+function _hitlRequestPreview(text, lang = 'json') {
+  const safe = String(text ?? '').replace(/`/g, "'");
+  return `\`\`\`${lang}\n${safe || '(empty)'}\n\`\`\``;
+}
+
+function _filledConnectorWrite(leg, params) {
+  if (leg.tool && leg.tool.bodyType) {
+    return fillWriteBody({ body: leg.tool.body, bodyType: leg.tool.bodyType, contentType: leg.tool.contentType }, params);
+  }
+  let filled = null;
+  try { filled = leg.tool.body ? fillBody(leg.tool.body, params) : null; } catch { filled = leg.tool.body || null; }
+  return { body: (filled != null) ? JSON.stringify(filled) : null, contentType: 'application/json' };
 }
 
 // Apply a correction to the last action (button → fixed `kind`; typed → `text` for the LLM wrapper to interpret),
@@ -2232,9 +2289,11 @@ async function _orchFeedbackFlow(msg, { kind = '', text = '' } = {}) {
 // feedbackLearn turns into a relevance boost for similar future asks — the flywheel, made explicit.
 function _orchFeedbackBar(msg) {
   const bar = _orchActionBar(msg);
-  bar.appendChild(_mkBtn('👍 Right', () => { _orchFeedbackFlow(appendMessage({ role: 'assistant', body: '' }), { kind: 'affirm' }); }));
-  bar.appendChild(_mkBtn('👎 Wrong', () => { _orchFeedbackFlow(appendMessage({ role: 'assistant', body: '' }), { kind: 'reject_run' }); }));
-  bar.appendChild(_mkBtn('🗑 Remove', () => { _orchFeedbackFlow(appendMessage({ role: 'assistant', body: '' }), { kind: 'retract' }); }));
+  // v2.74.1343 — once-guard + lockBar: one verdict per run. A double-tap on 👍 (double-corroborate the alias) or a
+  // 👍-then-🗑 slip is blocked — the first click disables all three synchronously.
+  bar.appendChild(_mkOnceBtn('👍 Right', () => { _orchFeedbackFlow(appendMessage({ role: 'assistant', body: '' }), { kind: 'affirm' }); }, { lockBar: true }));
+  bar.appendChild(_mkOnceBtn('👎 Wrong', () => { _orchFeedbackFlow(appendMessage({ role: 'assistant', body: '' }), { kind: 'reject_run' }); }, { lockBar: true }));
+  bar.appendChild(_mkOnceBtn('🗑 Remove', () => { _orchFeedbackFlow(appendMessage({ role: 'assistant', body: '' }), { kind: 'retract' }); }, { lockBar: true }));
 }
 
 // ── ORCH-X — semantic plan over capabilities ────────────────────────────────────────────────────────────────
@@ -2767,7 +2826,9 @@ async function _orchDedupFlow() {
   _setMessageBody(msg, `Found ${clusters.length} duplicate cluster${clusters.length === 1 ? '' : 's'} across ${r.groundCount} Ground${r.groundCount === 1 ? '' : 's'}:\n\n${lines.join('\n')}\n\nMerge consolidates a cluster onto one Ground — moves the capabilities, drops the empty sibling. Nothing is lost.`);
   const bar = _orchActionBar(msg);
   clusters.forEach((c) => {
-    bar.appendChild(_mkBtn(`Merge “${c.key}”`, async () => {
+    // v2.74.1343 — once-guard (self only, no lockBar): a double-click can't merge the same cluster twice, but the
+    // OTHER clusters' Merge buttons stay live (multi-choice bar).
+    bar.appendChild(_mkOnceBtn(`Merge “${c.key}”`, async () => {
       const m2 = appendMessage({ role: 'assistant', body: `Merging “${c.key}” onto one Ground…` });
       const res = await _orchReq('MERGE_GROUNDS', { groundIds: c.grounds.map((g) => g.id) });
       if (res && res.success) {
@@ -3141,13 +3202,15 @@ function _offerWorkflowReplay(goal, wf) {
   const label = wf.name ? `“${wf.name}” — ${wf.ask}` : `“${wf.ask}”`;   // WF-2 — lead with the alias when there is one
   const m = appendMessage({ role: 'assistant', body: `🔁 This looks like a saved workflow — ${label} (${wf.subAsks.length} steps). Run it?` });
   const bar = _orchActionBar(m);
-  bar.appendChild(_mkBtn('▶ Run it', async () => {
+  // v2.74.1343 — once-guard + lockBar: a double-click on ▶ Run no longer launches the chain twice (the remove-first
+  // was a race with fast dblclick; the synchronous disable closes it).
+  bar.appendChild(_mkOnceBtn('▶ Run it', async () => {
     bar.remove();
     try { await bumpWorkflowRun(_memoryId(), wf.id); } catch { /* */ }   // corroboration
     const tab = await _orchActiveTab();
     const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
     _orchRunChain(m, { tabId, clauses: wf.subAsks.map((t) => ({ text: t })), firstMatch: null, ask: wf.ask });   // replay via the same chain runner
-  }));
+  }, { lockBar: true }));
   bar.appendChild(_mkBtn('No, interpret it', () => {
     bar.remove();
     bumpWorkflowDismissed(_memoryId(), wf.id).catch(() => {});   // WF-2 — a wrong/unwanted match learns to stop nagging (twice-dismissed + never-run → suppressed)
@@ -3215,7 +3278,7 @@ async function _renderWorkflows() {
     const steps = Array.isArray(wf.subAsks) ? wf.subAsks.length : 0;
     const row = appendMessage({ role: 'assistant', body: `• ${wf.name ? `${wf.name} — ` : ''}${wf.ask}  (${steps} step${steps === 1 ? '' : 's'}${wf.runs ? `, run ${wf.runs}×` : ''})` });
     const bar = _orchActionBar(row);
-    bar.appendChild(_mkBtn('▶ Run', async () => {
+    bar.appendChild(_mkOnceBtn('▶ Run', async () => {   // v1343 — a double-click no longer launches the chain twice
       const tab = await _orchActiveTab();
       const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
       bumpWorkflowRun(appId, wf.id).catch(() => {});
@@ -4252,11 +4315,12 @@ async function _dispatchRouteDecision(d, { tabId = null, groundId = null, text, 
     return true;
   }
   if (d.action === 'replay' && d.tool && d.tool.capabilityId && groundId && typeof tabId === 'number') {
-    const name = d.tool.name || 'that';
+    const picked = (Array.isArray(d.candidates) ? d.candidates : []).find((c) => c && c.capabilityId && legRef(c) === legRef(d.tool)) || d.tool;
+    const name = picked.name || picked.intent || picked.alias || 'that';
     // R-5 (v2.74.957) — the HITL gate (DESIGN_injection_boundary §5): an IRREVERSIBLE capability gets the
     // "can't be undone" confirm wording regardless of router confidence (same voice as orchTurn's
     // irreversible-confirm). EVERY router replay confirms — this only sharpens what the user is told.
-    const irr = d.tool.reversible === false;
+    const irr = picked.reversible === false;
     const msg = appendMessage({ role: 'assistant', body: '', convId });   // v1338 (review P1-1)
     _setMessageBody(msg, irr
       ? `This will “${name}”, which can't be undone. Want me to go ahead?`
@@ -4430,17 +4494,16 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
     // gate, and fire ONLY on the user's confirm (the SESSION_REPLAY handler ALSO fail-closes on confirmed:true). Never
     // engine-fired, never unattended — the user approves THIS specific request. JSON bodies for now (form/raw: follow-up).
     if (_method !== 'GET' && _method !== 'HEAD') {
-      let filled = null;
-      try { filled = leg.tool.body ? fillBody(leg.tool.body, params) : null; } catch { filled = leg.tool.body || null; }
-      const bodyStr = (filled != null) ? JSON.stringify(filled) : '';
-      const preview = (bodyStr.length > 400 ? bodyStr.slice(0, 400) + '…' : bodyStr).replace(/`/g, "'");
-      _setMessageBody(msg, `⚠️ This will send **${_method} ${leg.tool.endpoint}** to \`${leg.tool.origin || leg.tool.appHost || ''}\` on your logged-in session — it **creates or modifies data**. Review the exact request, then confirm:\n\n\`\`\`json\n${preview || '(no body)'}\n\`\`\``, { markdown: true });   // v1338 — render the review, not literal ** walls (escape-first path)
+      const { body: bodyStr, contentType } = _filledConnectorWrite(leg, params);
+      const preview = _hitlRequestPreview(bodyStr);
+      _setMessageBody(msg, `⚠️ This will send **${_method} ${leg.tool.endpoint}** to \`${leg.tool.origin || leg.tool.appHost || ''}\` on your logged-in session — it **creates or modifies data**. Review the exact request, then confirm:\n\n${preview}`, { markdown: true });   // v1338 — render the review, not literal ** walls (escape-first path)
       // v1338 (review P1-2) bar-cancel registration + v1340 (review A) the REAL gated tier live in _hitlConfirmBar.
       const confirmed = await _hitlConfirmBar(msg, { gated: leg.safety === 'gated', confirmLabel: '✓ Confirm & send' });
       if (!confirmed) { _setMessageBody(msg, '🧠 Cancelled — nothing was sent.'); return 'cancelled'; }   // v1338 (review C) — a user cancel is NOT a capability failure
+      try { _orchLog(`RIDE_WRITE ▸ confirm ${leg.key || leg.tool.recipeId || ''} → ${leg.tool.endpoint}`); } catch { /* */ }
       let wr = null;
-      try { wr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: _method, params, body: bodyStr, contentType: 'application/json', confirmed: true, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null }); } catch { /* */ }   // v1340 (review A/§18) — hand the executor the arm-guard pair
-      if (!wr || wr.success === false) { _setMessageBody(msg, `🧠 Couldn’t ${leg.does || leg.name || 'send that'}${wr && wr.error ? ` — ${wr.error}` : ''}.${wr && wr.hint ? `  ${wr.hint}.` : ''}`); return false; }
+      try { wr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: _method, params, body: bodyStr, contentType: contentType || 'application/json', confirmed: true, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null }); } catch { /* */ }   // v1340 (review A/§18) — hand the executor the arm-guard pair
+      if (!wr || wr.success === false || (typeof wr.status === 'number' && wr.status >= 400)) { _setMessageBody(msg, `🧠 Couldn’t ${leg.does || leg.name || 'send that'}${wr && wr.error ? ` — ${wr.error}` : ''}.${wr && wr.hint ? `  ${wr.hint}.` : ''}`); return false; }
       _setMessageBody(msg, `✅ Sent — ${_method} ${leg.tool.endpoint} → ${wr.status || 'ok'}.`);
       return true;
     }
@@ -4466,8 +4529,8 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
     const plan0 = planExec(leg, params, { tabId, groundId });
     if (!plan0 || !plan0.ok || !plan0.channel) { _setMessageBody(msg, `🧠 I can’t do “${ask}” here yet.`); return false; }
     const argStr = JSON.stringify(plan0.payload.args || {}).replace(/`/g, "'");
-    const preview = argStr.length > 400 ? argStr.slice(0, 400) + '…' : argStr;
-    _setMessageBody(msg, `⚠️ This will call **${plan0.payload.server} · ${plan0.payload.tool}** on your linked account — it **creates or modifies data**. Review the exact call, then confirm:\n\n\`\`\`json\n${preview}\n\`\`\``, { markdown: true });   // v1338 — render the review (escape-first path)
+    const preview = _hitlRequestPreview(argStr);
+    _setMessageBody(msg, `⚠️ This will call **${plan0.payload.server} · ${plan0.payload.tool}** on your linked account — it **creates or modifies data**. Review the exact call, then confirm:\n\n${preview}`, { markdown: true });   // v1338 — render the review (escape-first path)
     // v1338 (review P1-2) bar-cancel + v1340 (review A) gated tier — a destructive broker tool (delete_event) now
     // gets the two-step confirm, not the same single click as an ordinary write.
     const okd = await _hitlConfirmBar(msg, { gated: leg.safety === 'gated', confirmLabel: '✓ Confirm & send' });
@@ -4485,15 +4548,14 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
   if (leg.domain === 'connector' && leg.tool && leg.tool.impl === 'session' && leg.mode === 'act') {
     const planW = planExec(leg, params, { tabId, groundId });
     if (!planW || !planW.ok || !planW.channel) { _setMessageBody(msg, `🧠 I can’t do “${ask}” here yet.`); return false; }
-    let filledW = null;
-    try { filledW = leg.tool.body ? fillBody(leg.tool.body, params) : null; } catch { filledW = leg.tool.body || null; }
-    const bodyW = (filledW != null) ? JSON.stringify(filledW).replace(/`/g, "'") : '';
-    const prevW = bodyW.length > 400 ? bodyW.slice(0, 400) + '…' : bodyW;
-    _setMessageBody(msg, `⚠️ This will send **${leg.tool.method || 'POST'} ${leg.tool.endpoint}** to \`${leg.tool.origin || leg.tool.appHost || ''}\` on your logged-in session — it **creates or modifies data**. Review the exact request, then confirm:\n\n\`\`\`json\n${prevW || '(no body)'}\n\`\`\``, { markdown: true });
+    const { body: bodyW, contentType: ctW } = _filledConnectorWrite(leg, params);
+    const prevW = _hitlRequestPreview(bodyW);
+    _setMessageBody(msg, `⚠️ This will send **${leg.tool.method || 'POST'} ${leg.tool.endpoint}** to \`${leg.tool.origin || leg.tool.appHost || ''}\` on your logged-in session — it **creates or modifies data**. Review the exact request, then confirm:\n\n${prevW}`, { markdown: true });
     const okw = await _hitlConfirmBar(msg, { gated: leg.safety === 'gated', confirmLabel: '✓ Confirm & send' });
     if (!okw) { _setMessageBody(msg, '🧠 Cancelled — nothing was sent.'); return 'cancelled'; }
+    try { _orchLog(`RIDE_WRITE ▸ confirm ${leg.key || leg.tool.recipeId || ''} → ${leg.tool.endpoint}`); } catch { /* */ }
     let sw = null;
-    try { sw = await _orchReq(planW.channel, { ...planW.payload, confirmed: true }); } catch { /* */ }
+    try { sw = await _orchReq(planW.channel, { ...planW.payload, body: bodyW, contentType: ctW, confirmed: true }); } catch { /* */ }
     if (!sw || sw.success === false) { _setMessageBody(msg, `🧠 Couldn’t ${leg.does || leg.name || 'send that'}${sw && sw.error ? ` — ${sw.error}` : ''}.${sw && sw.hint ? `  ${sw.hint}.` : ''}`); return false; }
     _setMessageBody(msg, `✅ Sent — ${leg.tool.method || 'POST'} ${leg.tool.endpoint}.`);
     return true;
@@ -4672,7 +4734,11 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
   // button re-enters with suggestWorkflows:false (no loop). Off-app / no match → straight through, no cost.
   if (suggestWorkflows) {
     const wf = await _matchWorkflow(goal);
-    if (wf) { _offerWorkflowReplay(goal, wf); return true; }
+    if (wf) {
+      try { _orchLog(`WORKFLOW ▸ "${goal.slice(0, 50)}" → ${wf.name || wf.id || 'saved'} (${wf.subAsks.length} steps)`); } catch { /* */ }
+      _offerWorkflowReplay(goal, wf);
+      return true;
+    }
   }
   // v2.74.1338 (review theme 1) — the TURN SNAPSHOT: capture the origin conversation's identity ONCE, before any
   // await. Every use below reads the snapshot, so a mid-flight app switch can't misroute the reply, mis-key the
@@ -4741,7 +4807,8 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
     const ok = !!(r && r.success !== false);
     // GD-4c — name the ACTUAL surface; GD-7a — name any degrades (§8.3: never a silent downgrade).
     const deg = (ok && r && Array.isArray(r.degraded) && r.degraded.length) ? ` (${r.degraded.map((d) => `${d.kind} shipped as ${d.as}`).join(', ')})` : '';
-    _setMessageBody(msg, ok ? `🖼️ Drafted it in ${r && r.gdoc ? 'your Google Doc' : 'the canvas'}${deg} — keep steering from here (“change the first line”, “make it warmer”).`
+    const rec = (ok && r && r.recreated) ? ' Your old Doc was gone, so I created a fresh one.' : '';   // v1341 (review G) — a recreate is never silent
+    _setMessageBody(msg, ok ? `🖼️ Drafted it in ${r && r.gdoc ? 'your Google Doc' : 'the canvas'}${deg} — keep steering from here (“change the first line”, “make it warmer”).${rec}`
       : `Couldn’t compose the canvas${r && r.error ? ` (${r.error})` : ''}${r && r.hint ? ` — ${r.hint}` : ''}.`);
     _orchFinalize(msg);
     // AL-3e — bank the outcome, EXCEPT infra/setup failures (broker down, API not enabled, doc plumbing): those say
@@ -4755,8 +4822,8 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
   // navigate / act / decompose → map to a RouteDecision and dispatch through the VERIFIED runners (the dispatcher
   // renders its own bubbles, so drop the placeholder). act→replay confirms first; _orchRun carries the CV-6 gate.
   const rd = (d.intent === 'navigate') ? { action: 'primitive', tool: { op: 'OPEN_URL' }, params: _withBoundUrl(d.params), confidence: d.confidence }
-    : (d.intent === 'act' && d.capabilityId) ? { action: 'replay', tool: { capabilityId: d.capabilityId, name: d.why || 'that' }, params: d.params || {}, confidence: d.confidence }
-    : (d.intent === 'decompose') ? { action: 'decompose', subAsks: d.subAsks || [], confidence: d.confidence }
+    : (d.intent === 'act' && d.capabilityId) ? { action: 'replay', tool: retrieved.find((c) => c && c.capabilityId && legRef(c) === d.capabilityId) || { capabilityId: d.capabilityId, name: d.why || 'that' }, params: d.params || {}, confidence: d.confidence, candidates: retrieved }
+    : (d.intent === 'decompose') ? { action: 'decompose', subAsks: d.subAsks || [], confidence: d.confidence, lowConfidence: d.lowConfidence === true }
     : null;
   try { msg.remove(); } catch { /* */ }
   if (rd && await _dispatchRouteDecision(rd, { tabId, groundId, text: goal, convId: turn.convId })) {
@@ -5025,7 +5092,7 @@ function _renderRichIntents(msg, intents) {
     chip.addEventListener('click', () => { void _sendRichIntent(it); });
     wrap.appendChild(chip);
   }
-  msg.appendChild(wrap);
+  (msg.querySelector('.message-content') || msg).appendChild(wrap);   // v1343 — under the bubble text, not the flex row
 }
 
 // v2.74.990 — Dev-bridge bubble decoration, ONE place shared by the live path (devBridge.devBubble)
@@ -5264,6 +5331,42 @@ async function sendChatMessage() {
   // AL-3b+ (v2.74.1196) — `memory` OR a plain "show me what you know / what have you learned / what do you remember"
   // → the AUDIT view (what the app knows + how it knows it). The `…\??$` anchor keeps "what do you know ABOUT X"
   // out (that has trailing text → falls through to a normal answer).
+  // v2.74.1343 (review Batch 6, J) — `help` / `commands` / `?`: the command reference. A dozen verbs were learnable
+  // only from scattered reply hints; typing "help" routed to the LLM (or, mid-setup, shaped to `https://help`). This
+  // is a utility guard (before routing) that lists them, grouped. Static text through the escape-first markdown path.
+  if (/^(help|commands?|\?|how do i use (this|you)|what commands?)\s*\??$/i.test(text)) {   // NB: bare "what can you do here" stays the app-abilities intent menu (below), not this reference
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    const m = appendMessage({ role: 'assistant', body: '' });
+    _setMessageBody(m, [
+      'Just **type what you want** — I interpret it and act, ask, or answer. Commands for specific things:',
+      '',
+      '**Do / ask on a site**',
+      '- `<anything>` — the default: I interpret your ask and run the best-fit capability, navigate, or answer',
+      '- `tool: <ask>` — force the deterministic tool-router (skip interpretation)',
+      '- `link: <provider>` — connect an official account (Google, etc.) for the broker',
+      '',
+      '**This app**',
+      '- `setup` — bind the app to the site(s) it works on',
+      '- `memory` — review what this app has learned · `remember: <rule>` — teach it a standing rule',
+      '- `seed: <text>` — set the app’s role/instructions · `distill` — share learned rules up to the app type',
+      '- `subtasks: <list>` — fan a job out into child conversations',
+      '',
+      '**Compose (apps with a canvas)**',
+      '- `source` — bank the current page (a KB article) as reference · `sources` — list them · `sources clear`',
+      '- `canvas: <ask>` — draft/revise on the app’s canvas (or just ask; e.g. “draft a reply to James”)',
+      '- `canvas` — open the app’s presentation surface',
+      '',
+      '**Teach / save**',
+      '- `teach: <ask>` — show me how to do something new here · `workflows` — your saved multi-step flows',
+      '- `save as app: <name>` — turn this conversation into a reusable app',
+      '',
+      'Type `/` for the capability picker. Say `stop` to halt a running job, `cancel` during setup.',
+    ].join('\n'), { markdown: true });
+    _orchFinalize(m);
+    return;
+  }
+
   if (/^memory\s*$/i.test(text) || /^(show me )?what (do |have )?you('ve| have)? ?(know|knows|learned|learnt|remember|remembered)\??$/i.test(text)) {
     input.value = ''; _autosizeInput();
     appendMessage({ role: 'user', body: text });
@@ -5322,9 +5425,36 @@ async function sendChatMessage() {
     const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
     let r = null;
     try { r = await _orchReq('BANK_SOURCE', { appId, tabId }); } catch { /* */ }
-    _setMessageBody(m, (r && r.success !== false)
-      ? `📚 Banked “${r.title}” as a source (${r.images} image${r.images === 1 ? '' : 's'}, ${r.videos} video${r.videos === 1 ? '' : 's'}; ${r.banked} banked). Now ask me to draft from it.`
-      : `Couldn’t bank this page${r && r.error ? ` (${r.error})` : ''}${r && r.hint ? ` — ${r.hint}` : ''}.`);
+    if (r && r.success !== false) {
+      const safeTitle = (String(r.title || '').replace(/[\[\]*_`\\]/g, '') || 'page');   // untrusted page title on a markdown-rendered line — strip link/emphasis metachars
+      _setMessageBody(m, `📚 Banked “${safeTitle}” as a source (${r.images} image${r.images === 1 ? '' : 's'}, ${r.videos} video${r.videos === 1 ? '' : 's'}; ${r.banked} banked). Now ask me to draft from it.\n\n_It rides every future draft this app composes until it rotates out — “sources” lists what’s banked, “sources clear” drops it._`, { markdown: true });
+    } else {
+      _setMessageBody(m, `Couldn’t bank this page${r && r.error ? ` (${r.error})` : ''}${r && r.hint ? ` — ${r.hint}` : ''}.`);
+    }
+    _orchFinalize(m); return;
+  }
+
+  // v2.74.1341 (review G) — the bank is no longer write-only: `sources` SHOWS what page text is riding this app's
+  // composes (up to 3 banked pages — an egress surface worth seeing); `sources clear` drops them all.
+  if (/^sources(\s+clear)?\s*$/i.test(text)) {
+    const clearing = /clear/i.test(text);
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    const m = appendMessage({ role: 'assistant', body: '' });
+    const appId = _currentConversationAppId;
+    if (!appId) { _setMessageBody(m, 'Open an app first — sources are banked per-app.'); _orchFinalize(m); return; }
+    let r = null;
+    try { r = await _orchReq(clearing ? 'CLEAR_SOURCES' : 'LIST_SOURCES', { appId }); } catch { /* */ }
+    if (!r || r.success === false) { _setMessageBody(m, `Couldn’t ${clearing ? 'clear' : 'list'} the sources${r && r.error ? ` (${r.error})` : ''}.`); _orchFinalize(m); return; }
+    if (clearing) {
+      _setMessageBody(m, r.cleared ? `🧹 Dropped ${r.cleared} banked source${r.cleared === 1 ? '' : 's'} — future drafts compose without them.` : 'Nothing was banked.');
+    } else if (!Array.isArray(r.sources) || !r.sources.length) {
+      _setMessageBody(m, 'No sources banked for this app. Open a page and type “source” to bank it for composes.');
+    } else {
+      const safe = (t) => (String(t || '').replace(/[\[\]*_`\\]/g, '') || 'page');   // page titles are untrusted — no forged links/emphasis in the panel (renderMarkdown has no backslash-escape, so STRIP)
+      const lines = r.sources.map((s) => `- **${s.id}** — ${safe(s.title)} (${s.chars} chars, ${s.images} image${s.images === 1 ? '' : 's'}, ${s.videos} video${s.videos === 1 ? '' : 's'})`);
+      _setMessageBody(m, `📚 Riding this app’s composes:\n\n${lines.join('\n')}\n\n_“sources clear” drops them._`, { markdown: true });
+    }
     _orchFinalize(m); return;
   }
 
@@ -5342,7 +5472,8 @@ async function sendChatMessage() {
     try {
       const r = await _orchReq('COMPOSE_CANVAS', { ask, appId, seed: _currentConversationSeed, anchor: { appId, conversationId: null } });
       const deg = (r && r.success !== false && Array.isArray(r.degraded) && r.degraded.length) ? ` (${r.degraded.map((d) => `${d.kind} shipped as ${d.as}`).join(', ')})` : '';   // GD-7a — §8.3 named downgrade
-      _setMessageBody(m, (r && r.success !== false) ? `🖼️ Composed it in ${r && r.gdoc ? 'your Google Doc' : 'the canvas'}${deg}.` : `Couldn’t compose the canvas${r && r.error ? ` (${r.error})` : ''}.`);
+      const rec = (r && r.success !== false && r.recreated) ? ' Your old Doc was gone, so I created a fresh one.' : '';   // v1341 (review G)
+      _setMessageBody(m, (r && r.success !== false) ? `🖼️ Composed it in ${r && r.gdoc ? 'your Google Doc' : 'the canvas'}${deg}.${rec}` : `Couldn’t compose the canvas${r && r.error ? ` (${r.error})` : ''}.`);
     } catch { _setMessageBody(m, 'Couldn’t compose the canvas.'); }
     _orchFinalize(m); return;
   }
@@ -5463,7 +5594,7 @@ async function sendChatMessage() {
   input.value = '';
   delete input.dataset.targetCapabilityId;
   delete input.dataset.targetCapabilityName;
-  input.placeholder = 'Message Agent HUB…';
+  input.placeholder = 'Message Orchard…  (type / for capabilities)';   // v2.74.1343 (review Batch 6) — keep the product name + the "/" hint (was "Message Agent HUB…", losing both)
   _autosizeInput();
   $('btn-chat-send').disabled = true;
 
@@ -6192,6 +6323,35 @@ const SlashPicker = (() => {
   let _selected   = 0;    // index into _candidates
   let _allCaps    = null; // cached capability list (ready only)
 
+  // v2.74.1343 (review Batch 6, J) — the built-in COMMAND VERBS, surfaced in the picker so they're discoverable
+  // (they were learnable only from scattered reply hints). Selecting one INSERTS its text into the input (never
+  // auto-runs) — a prefix verb (`canvas: `) leaves the cursor ready for the ask; a standalone (`help`) is one Enter.
+  const _COMMAND_VERBS = [
+    { kind: 'command', id: 'help',     name: 'help',        summary: 'List every command',                 insert: 'help' },
+    { kind: 'command', id: 'setup',    name: 'setup',       summary: 'Bind this app to its site(s)',        insert: 'setup' },
+    { kind: 'command', id: 'source',   name: 'source',      summary: 'Bank the current page as reference',  insert: 'source' },
+    { kind: 'command', id: 'sources',  name: 'sources',     summary: 'List / clear banked sources',         insert: 'sources' },
+    { kind: 'command', id: 'canvas',   name: 'canvas:',     summary: 'Draft / revise on the canvas',        insert: 'canvas: ' },
+    { kind: 'command', id: 'link',     name: 'link:',       summary: 'Connect an official account',         insert: 'link: ' },
+    { kind: 'command', id: 'memory',   name: 'memory',      summary: 'What this app has learned',           insert: 'memory' },
+    { kind: 'command', id: 'remember', name: 'remember:',   summary: 'Teach a standing rule',               insert: 'remember: ' },
+    { kind: 'command', id: 'seed',     name: 'seed:',       summary: 'Set the app’s role / instructions',   insert: 'seed: ' },
+    { kind: 'command', id: 'teach',    name: 'teach:',      summary: 'Show me how to do something new',      insert: 'teach: ' },
+    { kind: 'command', id: 'workflows',name: 'workflows',   summary: 'Your saved multi-step flows',         insert: 'workflows' },
+    { kind: 'command', id: 'distill',  name: 'distill',     summary: 'Share learned rules up to the type',  insert: 'distill' },
+    { kind: 'command', id: 'subtasks', name: 'subtasks:',   summary: 'Fan a job into child conversations',  insert: 'subtasks: ' },
+    { kind: 'command', id: 'saveapp',  name: 'save as app:',summary: 'Turn this chat into a reusable app',  insert: 'save as app: ' },
+    { kind: 'command', id: 'tool',     name: 'tool:',       summary: 'Force the deterministic tool-router', insert: 'tool: ' },
+  ];
+  function _matchCommands(query) {
+    const q = (query || '').toLowerCase();
+    return _COMMAND_VERBS
+      .map((c) => { const name = c.name.toLowerCase(); const score = !q ? 1 : name.startsWith(q) ? 3 : name.includes(q) ? 2 : 0; return { c, score }; })
+      .filter((e) => e.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .map((e) => e.c);
+  }
+
   function isActive() {
     return !$('slash-picker').classList.contains('hidden');
   }
@@ -6268,9 +6428,11 @@ const SlashPicker = (() => {
       const item = document.createElement('button');
       item.className = `slash-item${idx === _selected ? ' selected' : ''}`;
       item.dataset.idx = idx;
+      const kindClass = cap.kind === 'task' ? 'task' : cap.kind === 'command' ? 'command' : 'ai';   // v1343 — command verbs get a "/" badge
+      const kindText  = cap.kind === 'task' ? 'T'    : cap.kind === 'command' ? '/'       : 'AI';
       item.innerHTML = `
-        <div class="slash-item-kind ${cap.kind === 'task' ? 'task' : 'ai'}">
-          ${cap.kind === 'task' ? 'T' : 'AI'}
+        <div class="slash-item-kind ${kindClass}">
+          ${kindText}
         </div>
         <div class="slash-item-content">
           <div class="slash-item-name">${_highlight(cap.name, query)}</div>
@@ -6309,7 +6471,9 @@ const SlashPicker = (() => {
 
     const query = inputValue.slice(1);
     const caps = await _getCapabilities();
-    _candidates = _rank(caps, query);
+    // v1343 — command verbs join the picker. Bare `/` keeps CAPABILITIES first (the picker's muscle-memory purpose;
+    // verbs are discoverable below); a typed query ranks matching verbs first (an intentful `/can…` wants `canvas:`).
+    _candidates = query ? [..._matchCommands(query), ..._rank(caps, query)] : [..._rank(caps, query), ..._matchCommands(query)];
     _selected   = 0;
     await _render();
   }
@@ -6332,6 +6496,17 @@ const SlashPicker = (() => {
     const cap = _candidates[_selected];
     close();
 
+    if (cap.kind === 'command') {
+      // v1343 — INSERT the verb text (never auto-run): a prefix verb leaves the cursor ready for the ask, a
+      // standalone is one Enter away. The user always reviews before it fires.
+      const input = $('chat-input');
+      input.value = cap.insert || '';
+      _autosizeInput();
+      $('btn-chat-send').disabled = !input.value.trim();
+      input.focus();
+      try { input.setSelectionRange(input.value.length, input.value.length); } catch { /* */ }
+      return true;
+    }
     if (cap.kind === 'task') {
       // Clear input; runTaskCapability handles param form or direct invoke
       $('chat-input').value = '';

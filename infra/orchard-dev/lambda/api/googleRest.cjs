@@ -140,7 +140,9 @@ async function invokeGoogleRestTool({ server, tool, args = {}, accessToken = nul
     try { data = text ? JSON.parse(text) : null; } catch { /* non-JSON error body */ }
     if (!res.ok) {
       const msg = (data && data.error && data.error.message) || `http ${res.status}`;
-      return { success: false, error: 'tool-error', hint: String(msg).slice(0, 500) };   // same vocabulary the panel already renders
+      // v2.74.1341 (review P1-5) — carry the HTTP status so the client can tell "doc deleted" (404 → recreate)
+      // from "transient/permission failure" (never recreate — that orphans the shared doc).
+      return { success: false, error: 'tool-error', status: res.status, hint: String(msg).slice(0, 500) };
     }
     if (tool === 'list_events') {
       const items = (data && Array.isArray(data.items)) ? data.items.map(_slim) : [];

@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 
 import lambdaOauth from '../infra/orchard-dev/lambda/api/oauth.cjs';
 
-const { exchangeAuthCode, refreshAccessToken, CONNECTOR_TOKEN_URLS } = lambdaOauth;
+const { exchangeAuthCode, refreshAccessToken, CONNECTOR_TOKEN_URLS, clearAccessTokenCache } = lambdaOauth;
 const ENV = { GOOGLE_OAUTH_CLIENT_ID: 'cid', GOOGLE_OAUTH_CLIENT_SECRET: 'shh' };
 
 function fakeToken(reply, calls = []) {
@@ -43,6 +43,7 @@ describe('oauth.cjs — exchangeAuthCode (code → refresh+access, PKCE verifier
 
 describe('oauth.cjs — refreshAccessToken (vaulted refresh → short-lived access)', () => {
   it('happy path → { accessToken }; the refresh token goes only to the curated endpoint', async () => {
+    clearAccessTokenCache();
     const fetchImpl = fakeToken({ data: { access_token: 'at2' } });
     const r = await refreshAccessToken('google', 'rt', { env: ENV, fetchImpl });
     assert.deepEqual(r, { accessToken: 'at2' });
@@ -50,12 +51,37 @@ describe('oauth.cjs — refreshAccessToken (vaulted refresh → short-lived acce
     assert.equal(new URLSearchParams(fetchImpl.calls[0].init.body).get('grant_type'), 'refresh_token');
   });
   it('revoked/expired grant → connector-refresh-failed (the caller maps it to re-link)', async () => {
+    clearAccessTokenCache();
     const r = await refreshAccessToken('google', 'rt', { env: ENV, fetchImpl: fakeToken({ ok: false, data: { error: 'invalid_grant' } }) });
     assert.equal(r.error, 'connector-refresh-failed');
     assert.equal(r.hint, 'invalid_grant');
   });
   it('no refresh token → connector-not-linked; unknown provider → connector-not-configured', async () => {
+    clearAccessTokenCache();
     assert.equal((await refreshAccessToken('google', '', { env: ENV, fetchImpl: fakeToken({ data: {} }) })).error, 'connector-not-linked');
     assert.equal((await refreshAccessToken('zendesk', 'rt', { env: ENV, fetchImpl: fakeToken({ data: {} }) })).error, 'connector-not-configured');
+  });
+  it('v1342: caches access tokens within expires_in (one refresh POST per burst)', async () => {
+    clearAccessTokenCache();
+    let posts = 0;
+    const fetchImpl = async (url, init) => {
+      posts += 1;
+      return { ok: true, json: async () => ({ access_token: 'at-cache', expires_in: 3600 }) };
+    };
+    const r1 = await refreshAccessToken('google', 'rt-cache', { env: ENV, fetchImpl });
+    const r2 = await refreshAccessToken('google', 'rt-cache', { env: ENV, fetchImpl });
+    assert.equal(r1.accessToken, 'at-cache');
+    assert.equal(r2.accessToken, 'at-cache');
+    assert.equal(posts, 1);
+  });
+  it('v1343 (bcp): the cache is per refresh token — user B NEVER gets user A\'s cached access token', async () => {
+    clearAccessTokenCache();
+    let posts = 0;
+    const fetchImpl = async () => { posts += 1; return { ok: true, json: async () => ({ access_token: `at-${posts}`, expires_in: 3600 }) }; };
+    const a = await refreshAccessToken('google', 'rt-user-a', { env: ENV, fetchImpl });
+    const b = await refreshAccessToken('google', 'rt-user-b', { env: ENV, fetchImpl });   // same provider, other user
+    assert.equal(a.accessToken, 'at-1');
+    assert.equal(b.accessToken, 'at-2');   // a provider-only cache key would have returned at-1 here
+    assert.equal(posts, 2);
   });
 });

@@ -12,7 +12,7 @@ describe('harvestedRecipeLegs — armable harvested reads → invoke-palette leg
     const legs = harvestedRecipeLegs([REC()], { host: 'deakoapi.deako.com', mode: 'ask' });
     assert.equal(legs.length, 1);
     const l = legs[0];
-    assert.equal(l.key, 'me.deako.r1');                 // app slug = registrable label 'deako'
+    assert.equal(l.key, 'me.deako.r1@deakoapi.deako.com');                 // v1342 — host suffix on harvested legs
     assert.equal(l.domain, 'connector');
     assert.equal(l.mode, 'ask');
     assert.equal(l.safety, 'auto');                     // accepted (vetted) read → auto
@@ -37,7 +37,7 @@ describe('harvestedRecipeLegs — armable harvested reads → invoke-palette leg
   });
 
   it('dedups against seenKeys (a harvested recipe never shadows a curated one)', () => {
-    const seen = new Set(['me.deako.r1']);
+    const seen = new Set(['me.deako.r1@deakoapi.deako.com']);
     assert.equal(harvestedRecipeLegs([REC()], { host: 'deakoapi.deako.com', mode: 'ask', seenKeys: seen }).length, 0);
   });
 
@@ -254,12 +254,21 @@ describe('connectorLegsForConnections — connected sites → selectable interpr
     assert.ok(legs.length >= 7);                                              // the Zendesk reads
     assert.ok(legs.every((l) => l.mode === 'ask'));                          // reads only
     assert.ok(legs.every((l) => l.tool.origin === 'deako.zendesk.com'));     // origin-enriched to the SPECIFIC instance
-    assert.ok(legs.some((l) => l.key === 'me.zendesk.my_open_tickets'));
+    assert.ok(legs.some((l) => l.key === 'me.zendesk.my_open_tickets@deako.zendesk.com'));   // v1342 — host-suffixed keys
     assert.deepEqual(connectorLegsForConnections([{ origin: 'https://support.deako.com' }], { mode: 'ask' }), []);  // no recipe app
     assert.deepEqual(connectorLegsForConnections([]), []);
   });
   it('without a mode filter, writes are included too (gated downstream)', () => {
     assert.ok(connectorLegsForConnections([{ origin: 'https://x.zendesk.com' }]).some((l) => l.mode === 'act'));
+  });
+  it('v1342: two connected instances of the same app get DISTINCT host-suffixed keys', () => {
+    const a = connectorLegsForConnections([{ origin: 'https://a.zendesk.com' }], { mode: 'ask' });
+    const b = connectorLegsForConnections([{ origin: 'https://b.zendesk.com' }], { mode: 'ask' });
+    const ka = a.find((l) => l.tool.endpoint && l.key.includes('my_open'))?.key;
+    const kb = b.find((l) => l.tool.endpoint && l.key.includes('my_open'))?.key;
+    assert.ok(ka && kb && ka !== kb);
+    assert.ok(ka.endsWith('@a.zendesk.com'));
+    assert.ok(kb.endsWith('@b.zendesk.com'));
   });
 });
 
@@ -271,5 +280,11 @@ describe('coerceParams — clean integer ids before a connector call (CX-4c http
     assert.deepEqual(coerceParams({ id: 'ticket 7' }, ps), { id: 7 });
     assert.deepEqual(coerceParams({ query: '#open status' }, ps), { query: '#open status' });   // a string param is untouched
     assert.deepEqual(coerceParams({ id: 'abc' }, ps), { id: 'abc' });           // no digits → leave it (required-gate catches)
+  });
+  it('v1342: coerces string booleans (public:"false" must not stay a truthy string)', () => {
+    const ps = { type: 'object', properties: { public: { type: 'boolean' } }, required: [] };
+    assert.deepEqual(coerceParams({ public: 'false' }, ps), { public: false });
+    assert.deepEqual(coerceParams({ public: 'true' }, ps), { public: true });
+    assert.deepEqual(coerceParams({ public: '0' }, ps), { public: false });
   });
 });
