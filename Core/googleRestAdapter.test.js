@@ -88,9 +88,12 @@ describe('googleRest — google-docs (GD-2: the presentation backend)', () => {
   it('render_document: canvasLower output PASSES the allowlist end-to-end; a disallowed kind is named + never sent', async () => {
     const spec = { blocks: [
       { id: 'c', kind: 'markdown', text: '## Context\n\nHub **offline**.' },
+      { id: 'i', kind: 'image', src: 'https://cdn.x.com/pinhole.png', alt: 'pinhole' },   // GD-7b — insertInlineImage must clear the allowlist
+      { id: 'v', kind: 'video', src: 'https://youtu.be/x', label: 'walkthrough' },
       { id: 'd', kind: 'compose', ref: 'r', text: 'Hi **Jane**,\n\n- restart the hub' },
     ] };
     const { requests } = specToDocsRequests(spec, { bodyEndIndex: 50 });
+    assert.ok(requests.some((q) => q.insertInlineImage), 'the lowering emits an inline image');
     const fetchImpl = fakeFetch({ body: { documentId: 'doc9', replies: requests.map(() => ({})) } });
     const r = await invokeGoogleRestTool({ server: 'google-docs', tool: 'render_document', args: { documentId: 'doc9', requests }, accessToken: 'tok', fetchImpl });
     assert.equal(r.success, true);
@@ -101,6 +104,11 @@ describe('googleRest — google-docs (GD-2: the presentation backend)', () => {
     assert.equal(bad.error, 'tool-error');
     assert.match(bad.hint, /disallowed request kind: replaceAllText/);
     assert.equal(blocked.calls.length, 0, 'a disallowed request never reaches the API');
+    // GD-7b — the conduit re-checks the image uri: non-https (or unbounded) never reaches Google
+    const evil = await invokeGoogleRestTool({ server: 'google-docs', tool: 'render_document',
+      args: { documentId: 'doc9', requests: [{ insertInlineImage: { location: { index: 1 }, uri: 'http://evil.example/x.png' } }] }, fetchImpl: blocked });
+    assert.match(evil.hint, /insertInlineImage needs a bounded https uri/);
+    assert.equal(blocked.calls.length, 0);
     assert.match((await invokeGoogleRestTool({ server: 'google-docs', tool: 'render_document', args: { documentId: 'doc9', requests: [] }, fetchImpl: blocked })).hint, /render-needs-requests/);
   });
 });

@@ -17,9 +17,11 @@ const DOCS_BASE = 'https://docs.googleapis.com/v1';
 
 // GD-2 — render_document takes PRE-LOWERED batchUpdate requests (Core/canvasLower runs client-side, pure+tested).
 // To keep that from being a raw write conduit, the request SHAPES are allowlisted here: exactly the vocabulary the
-// lowering emits, nothing else (no replaceAllText, no insertInlineImage, no named-range ops until v2). Belt-and-
-// suspenders with drive.file (the token can only touch app-created docs anyway).
-const _DOC_REQ_KINDS = ['insertText', 'deleteContentRange', 'updateTextStyle', 'updateParagraphStyle', 'createParagraphBullets'];
+// lowering emits, nothing else (no replaceAllText, no named-range ops). Belt-and-suspenders with drive.file (the
+// token can only touch app-created docs anyway). GD-7b (v2.74.1333): + insertInlineImage — the uri is deep-checked
+// https + bounded (the client's refs-not-URLs belt means it came from a banked trusted map, but the conduit
+// re-checks; Google fetches the uri itself, so only publicly-readable images render).
+const _DOC_REQ_KINDS = ['insertText', 'deleteContentRange', 'updateTextStyle', 'updateParagraphStyle', 'createParagraphBullets', 'insertInlineImage'];
 const _DOC_REQ_MAX = 400;
 function _validDocRequests(requests) {
   if (!Array.isArray(requests) || !requests.length) return 'render-needs-requests';
@@ -28,6 +30,10 @@ function _validDocRequests(requests) {
     if (!r || typeof r !== 'object') return 'malformed request';
     const keys = Object.keys(r);
     if (keys.length !== 1 || !_DOC_REQ_KINDS.includes(keys[0])) return `disallowed request kind: ${keys.join(',') || '(empty)'}`;
+    if (keys[0] === 'insertInlineImage') {
+      const uri = r.insertInlineImage && r.insertInlineImage.uri;
+      if (typeof uri !== 'string' || !/^https:\/\/[^\s]+$/i.test(uri) || uri.length > 600) return 'insertInlineImage needs a bounded https uri';
+    }
   }
   return null;
 }

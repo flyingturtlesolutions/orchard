@@ -15,19 +15,28 @@ describe('canvasLower — the markdown-subset parser', () => {
     assert.deepEqual(parseInline('[evil](javascript:alert(1))'), [{ text: 'evil' }]);   // href dropped, text kept
     assert.deepEqual(parseInline('_i_'), [{ text: 'i', italic: true }]);
   });
-  it('blocks: paragraphs split on blank lines; ul/ol group; headings parse (and DEGRADE in deliverable mode)', () => {
+  it('blocks: paragraphs split on blank lines; ul/ol group; headings parse in BOTH modes (GD-7h: html_body renders them)', () => {
     const b = parseMd('## Title\n\npara\n\n- a\n- b\n\n1. one\n2. two');
     assert.deepEqual(b.map((x) => x.type), ['h', 'p', 'ul', 'ol']);
     assert.equal(b[0].level, 2);
     assert.equal(b[2].items.length, 2);
     const d = parseMd('## Title\n\npara', { deliverable: true });
-    assert.deepEqual(d.map((x) => x.type), ['p', 'p']);   // heading degrades, never upgrades what delivery can't ship
+    assert.deepEqual(d.map((x) => x.type), ['h', 'p']);   // GD-7h — deliverable headings are real (Zendesk/Gmail render them)
   });
-  it('validateDeliverable names what delivery would lose (the two-tier rule, machine-checked)', () => {
+  it('GD-7h inline images: ref/https targets parse to image runs; a bad target degrades to the alt TEXT', () => {
+    assert.deepEqual(parseInline('see ![pinhole](kb:1#img2) here'),
+      [{ text: 'see ' }, { text: 'pinhole', image: 'kb:1#img2' }, { text: ' here' }]);
+    assert.deepEqual(parseInline('![shot](https://cdn.x/a.png)'), [{ text: 'shot', image: 'https://cdn.x/a.png' }]);
+    assert.deepEqual(parseInline('![evil](javascript:alert(1))'), [{ text: 'evil' }]);   // never an image
+    assert.deepEqual(parseInline('a [link](https://a.b) and ![img](kb:1#img1)'),
+      [{ text: 'a ' }, { text: 'link', link: 'https://a.b' }, { text: ' and ' }, { text: 'img', image: 'kb:1#img1' }]);
+  });
+  it('validateDeliverable: tables + URL-target images flagged; headings + ref-images are deliverable now (GD-7h)', () => {
     assert.equal(validateDeliverable(MD).ok, true);
-    const v = validateDeliverable('# H\n\n![img](https://x/y.png)\n\n| a | b |');
+    assert.equal(validateDeliverable('## H\n\n![img](kb:1#img1)').ok, true);
+    const v = validateDeliverable('![img](https://x/y.png)\n\n| a | b |');
     assert.equal(v.ok, false);
-    assert.equal(v.violations.length, 3);
+    assert.equal(v.violations.length, 2);
   });
 });
 
@@ -109,11 +118,29 @@ describe('canvasLower — PARITY (preview ⇄ delivery: the WYSIWYG contract, ex
 });
 
 describe('canvasLower — GD-7a backend profiles + honest degradation (§8.7)', () => {
-  it('profiles: tab renders everything native; gdoc degrades image/chart/video; unknown backend → null (no claim)', async () => {
+  it('profiles: tab renders everything native; gdoc images native (GD-7b), chart/video degrade; unknown backend → null', async () => {
     const { backendProfile } = await import('./canvasLower.js');
     assert.ok(backendProfile('tab').native.includes('video'));
-    assert.deepEqual(backendProfile('gdoc').degrade, { image: 'placeholder', chart: 'placeholder', video: 'link' });
+    assert.ok(backendProfile('gdoc').native.includes('image'));
+    assert.deepEqual(backendProfile('gdoc').degrade, { chart: 'placeholder', video: 'link' });
     assert.equal(backendProfile('notion'), null);
+  });
+
+  it('GD-7b: a resolved image lowers to insertInlineImage (bounded width, ONE index unit + newline); unresolved → placeholder + honest degrade', () => {
+    const spec = { blocks: [
+      { kind: 'image', src: 'https://cdn.x.com/pinhole.png', mediaRef: 'kb:1#img1', alt: 'pinhole' },
+      { kind: 'image', mediaRef: 'kb:1#img9', alt: 'unresolved' },
+      { kind: 'markdown', text: 'after' },
+    ] };
+    const { requests, degraded } = specToDocsRequests(spec, { bodyEndIndex: 1 });
+    const img = requests.find((r) => r.insertInlineImage);
+    assert.equal(img.insertInlineImage.uri, 'https://cdn.x.com/pinhole.png');
+    assert.equal(img.insertInlineImage.location.index, 1);
+    assert.equal(img.insertInlineImage.objectSize.width.magnitude, 440);
+    const nl = requests.find((r) => r.insertText && r.insertText.text === '\n');
+    assert.equal(nl.insertText.location.index, 2);                             // image = ONE index unit
+    assert.ok(requests.some((r) => r.insertText && r.insertText.text === '[image: unresolved]\n' && r.insertText.location.index === 3));
+    assert.deepEqual(degraded, [{ kind: 'image', as: 'placeholder' }]);        // the RESOLVED image is native — no false degrade
   });
   it('degradationsFor reports ONLY the kinds this spec actually uses, deduped', async () => {
     const { degradationsFor } = await import('./canvasLower.js');
@@ -122,6 +149,58 @@ describe('canvasLower — GD-7a backend profiles + honest degradation (§8.7)', 
     assert.deepEqual(degradationsFor(spec, 'tab'), []);
     assert.deepEqual(degradationsFor(spec, 'nope'), []);
   });
+  it('GD-7h: inline ![alt](ref) in compose text lowers to insertInlineImage mid-flow (indices coherent); unresolved → marker + degrade; html/text lowerings match', () => {
+    const refMap = { 'kb:1#img1': { url: 'https://cdn.x.com/pinhole.png', kind: 'image', label: 'pinhole' } };
+    const spec = { blocks: [{ id: 'd', kind: 'compose', ref: 'r', text: 'Press ![pinhole](kb:1#img1) firmly.\n\nThen ![missing](kb:9#img9) retry.' }] };
+    const { requests, degraded, endIndex } = specToDocsRequests(spec, { bodyEndIndex: 1, refMap });
+    const img = requests.find((r) => r.insertInlineImage);
+    assert.equal(img.insertInlineImage.uri, 'https://cdn.x.com/pinhole.png');
+    // 'Reply\n'(6) + 'Press '(6) → image at 1+6+6=13; the following segment ' firmly.' inserts at 14 (image = 1 unit)
+    assert.equal(img.insertInlineImage.location.index, 13);
+    assert.ok(requests.some((r) => r.insertText && r.insertText.text === ' firmly.' && r.insertText.location.index === 14));
+    assert.ok(requests.some((r) => r.insertText && r.insertText.text === '[image: missing]'));   // unresolved ref → visible marker
+    assert.deepEqual(degraded, [{ kind: 'image', as: 'placeholder' }]);
+    // styling ranges still sit inside the inserted body (index-accounting invariant survives inline media)
+    for (const r of requests) {
+      const range = (r.updateTextStyle || r.updateParagraphStyle || r.createParagraphBullets || {}).range;
+      if (range) assert.ok(range.startIndex >= 1 && range.endIndex <= endIndex, JSON.stringify(r));
+    }
+    const html = specDeliverableHtml(spec, 'r', { refMap });
+    assert.match(html, /<img src="https:\/\/cdn\.x\.com\/pinhole\.png" alt="pinhole">/);
+    assert.match(html, /\[image: missing\]/);
+    assert.match(specDeliverableText(spec, 'r'), /\[image: pinhole\]/);      // plain-text delivery names the loss
+  });
+
+  it('v1336 source attribution: a [title](kb:N) link resolves to the ARTICLE url in Docs + HTML; unresolved → plain text', () => {
+    const refMap = { 'kb:7': { url: 'https://help.x.com/hub-reset', kind: 'source', label: 'How to reset your hub' } };
+    const spec = { blocks: [{ kind: 'compose', ref: 'r', text: 'Do the thing.\n\nSource: [How to reset your hub](kb:7)' }] };
+    const { requests } = specToDocsRequests(spec, { bodyEndIndex: 1, refMap });
+    const link = requests.find((q) => q.updateTextStyle && q.updateTextStyle.textStyle.link);
+    assert.equal(link.updateTextStyle.textStyle.link.url, 'https://help.x.com/hub-reset');
+    assert.match(specDeliverableHtml(spec, 'r', { refMap }), /<a href="https:\/\/help\.x\.com\/hub-reset">How to reset your hub<\/a>/);
+    // no map → the citation degrades to plain text (never a dead/invented link)
+    const bare = specToDocsRequests(spec, { bodyEndIndex: 1 });
+    assert.ok(!bare.requests.some((q) => q.updateTextStyle && q.updateTextStyle.textStyle.link));
+    assert.doesNotMatch(specDeliverableHtml(spec, 'r'), /<a /);
+  });
+
+  it('GD-7h: deliverable headings style as HEADING_n inside the compose section + <h2> in delivery HTML', () => {
+    const spec = { blocks: [{ id: 'd', kind: 'compose', ref: 'r', text: '## Network checks\n\nVerify the bridge.' }] };
+    const { requests } = specToDocsRequests(spec, { bodyEndIndex: 1 });
+    const h = requests.filter((r) => r.updateParagraphStyle && r.updateParagraphStyle.paragraphStyle.namedStyleType === 'HEADING_2');
+    assert.equal(h.length, 2);                                               // the Reply marker + the deliverable's own ##
+    assert.match(specDeliverableHtml(spec, 'r'), /<h2>Network checks<\/h2>/);
+  });
+
+  it('v1332 typographic default: ONE whole-body spaceBelow pass rides every non-empty render (the wall-of-text fix)', () => {
+    const { requests, endIndex } = specToDocsRequests({ blocks: [{ kind: 'markdown', text: 'one\n\ntwo' }] }, { bodyEndIndex: 1 });
+    const sp = requests.filter((r) => r.updateParagraphStyle && r.updateParagraphStyle.fields === 'spaceBelow');
+    assert.equal(sp.length, 1);
+    assert.deepEqual(sp[0].updateParagraphStyle.range, { startIndex: 1, endIndex });
+    assert.equal(sp[0].updateParagraphStyle.paragraphStyle.spaceBelow.magnitude, 10);
+    assert.equal(specToDocsRequests({ blocks: [] }).requests.length, 0);   // empty spec → no styling pass
+  });
+
   it('video lowering: an https src becomes a ▶-labelled LINK line; a ref-only video a placeholder; degraded rides the return', () => {
     const spec = { blocks: [
       { kind: 'video', src: 'https://help.x.com/v.mp4', label: 'pairing demo' },
@@ -133,6 +212,25 @@ describe('canvasLower — GD-7a backend profiles + honest degradation (§8.7)', 
     const link = requests.find((r) => r.updateTextStyle && r.updateTextStyle.textStyle.link);
     assert.equal(link.updateTextStyle.textStyle.link.url, 'https://help.x.com/v.mp4');
     assert.ok(texts.some((t) => t === '[video: reset walkthrough]\n'));
-    assert.deepEqual(degraded, [{ kind: 'video', as: 'link' }]);
+    assert.deepEqual(degraded, [{ kind: 'video', as: 'link' }, { kind: 'video', as: 'placeholder' }]);   // per-block actuals (GD-7b)
+  });
+});
+
+describe('canvasLower — v1337 noInlineImages (the protected-source degrade-retry)', () => {
+  it('every image (block src, inline ref, inline direct-https) lowers to a placeholder; links + text keep', () => {
+    const refMap = { 'kb:1#img1': { url: 'https://cdn.x/p.png', kind: 'image' }, 'kb:1': { url: 'https://help.x/a', kind: 'source' } };
+    const spec = { blocks: [
+      { kind: 'image', src: 'https://cdn.x/block.png', alt: 'block shot' },
+      { kind: 'compose', ref: 'r', text: 'Step ![inline](kb:1#img1) and ![direct](https://cdn.x/d.png).\n\nSource: [guide](kb:1)' },
+    ] };
+    const { requests, degraded } = specToDocsRequests(spec, { bodyEndIndex: 1, refMap, noInlineImages: true });
+    assert.ok(!requests.some((q) => q.insertInlineImage), 'no image request survives the degrade-retry');
+    const texts = requests.filter((q) => q.insertText).map((q) => q.insertText.text).join('');
+    assert.match(texts, /\[image: block shot\]/);
+    assert.match(texts, /\[image: inline\]/);
+    assert.match(texts, /\[image: direct\]/);
+    assert.deepEqual(degraded, [{ kind: 'image', as: 'placeholder' }]);
+    const link = requests.find((q) => q.updateTextStyle && q.updateTextStyle.textStyle.link);
+    assert.equal(link.updateTextStyle.textStyle.link.url, 'https://help.x/a');   // the source attribution still resolves
   });
 });

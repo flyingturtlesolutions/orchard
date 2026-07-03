@@ -5163,6 +5163,26 @@ async function sendChatMessage() {
     _orchFinalize(m); return;
   }
 
+  // GD-7e (v2.74.1330, §8.7.1) — `source` BANKS the active page (a KB article) as compose reference material:
+  // read-only extraction → kb: refs minted over its media → the app's next draft composes FROM it ("compose a
+  // troubleshooting guide for James from this article") with images/videos referenced by menu, never minted URLs.
+  if (/^source$/i.test(text.trim())) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    const m = appendMessage({ role: 'assistant', body: '' });
+    const appId = _currentConversationAppId;
+    if (!appId) { _setMessageBody(m, 'Open an app first — sources are banked per-app (they feed its canvas composes).'); _orchFinalize(m); return; }
+    _setMessageBody(m, '📚 reading this page…');
+    const tab = await _orchActiveTab();
+    const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
+    let r = null;
+    try { r = await _orchReq('BANK_SOURCE', { appId, tabId }); } catch { /* */ }
+    _setMessageBody(m, (r && r.success !== false)
+      ? `📚 Banked “${r.title}” as a source (${r.images} image${r.images === 1 ? '' : 's'}, ${r.videos} video${r.videos === 1 ? '' : 's'}; ${r.banked} banked). Now ask me to draft from it.`
+      : `Couldn’t bank this page${r && r.error ? ` (${r.error})` : ''}${r && r.hint ? ` — ${r.hint}` : ''}.`);
+    _orchFinalize(m); return;
+  }
+
   // CA-9 (v2.74.1206) — `canvas: <ask>` has the app COMPOSE a fresh view (LLM → CanvasSpec → the verified render
   // pipeline). The closed vocabulary is enforced at the handler's normalizeCanvasSpec, so an odd reply can't inject.
   if (/^canvas:\s*\S/i.test(text)) {

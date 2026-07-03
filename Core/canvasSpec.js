@@ -125,8 +125,15 @@ export function newCanvasSpec({ anchor = {}, title = '', blocks = [] } = {}) {
  */
 export function stripMintedMedia(spec) {
   const d = (spec && typeof spec === 'object') ? spec : {};
+  // GD-7h — INLINE images in markdown/compose TEXT get the same belt: `![alt](target)` keeps only trusted-REF
+  // targets (the model's sole legal form); a minted URL/other target collapses to the alt text. Block-level media
+  // below unchanged. Trusted app-defined specs never pass through here, so their https inline images survive.
+  const stripText = (t) => _str(t).replace(/!\[([^\]]*)\]\(((?:[^()\s]|\([^()\s]*\))+)\)/g,
+    (m, alt, target) => (sanitizeMediaRef(target) ? m : (alt || '')));
   const blocks = (Array.isArray(d.blocks) ? d.blocks : []).map((b) => {
-    if (!b || (b.kind !== 'image' && b.kind !== 'video')) return b;
+    if (!b) return b;
+    if ((b.kind === 'markdown' || b.kind === 'compose') && typeof b.text === 'string') return { ...b, text: stripText(b.text) };
+    if (b.kind !== 'image' && b.kind !== 'video') return b;
     const src = _str(b.src).trim();
     if (!/^https:\/\//i.test(src)) return b;                        // no remote src → nothing to strip
     const { src: _drop, ...rest } = b;

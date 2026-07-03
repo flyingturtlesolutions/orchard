@@ -79,9 +79,24 @@ function _blockNode(block) {
   } else if (block.kind === 'chart') {
     el.innerHTML = _chartSvg(block);
   } else if (block.kind === 'image') {
-    const img = document.createElement('img');
-    img.className = 'cv-img'; img.src = block.src; img.alt = block.alt || '';   // src already sanitized by normalizeBlock
-    el.appendChild(img);
+    if (block.src) {                                             // GD-7e — a ref-only image (unresolved) renders its alt as a visible placeholder, never a broken img
+      const img = document.createElement('img');
+      img.className = 'cv-img'; img.src = block.src; img.alt = block.alt || '';   // src already sanitized by normalizeBlock
+      el.appendChild(img);
+    } else {
+      el.textContent = `[image: ${block.alt || 'image'}]`;
+    }
+  } else if (block.kind === 'video') {
+    // GD-7e (v2.74.1330) — the video tile: a LINK-OUT card (▶ label → opens the video), never an inline <video>/iframe
+    // (no autoplay/embed surface on the canvas; the profile's "native" = a real, clickable representation).
+    if (block.src) {
+      const a = document.createElement('a');
+      a.className = 'cv-video'; a.href = block.src; a.target = '_blank'; a.rel = 'noopener noreferrer';
+      a.textContent = `▶ ${block.label || 'video'}`;
+      el.appendChild(a);
+    } else {
+      el.textContent = `[video: ${block.label || 'video'}]`;
+    }
   } else if (block.kind === 'compose') {
     const ta = document.createElement('textarea');
     ta.className = 'cv-compose-input'; ta.value = block.text || ''; ta.setAttribute('aria-label', 'Editable draft');

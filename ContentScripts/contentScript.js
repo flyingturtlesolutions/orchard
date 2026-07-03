@@ -6093,6 +6093,48 @@ const MESSAGE_HANDLERS = {
     }
   },
 
+  // GD-7e (v2.74.1330, DESIGN_canvas.md §8.7.1) — READ-ONLY page→source extraction for the source bank: the page's
+  // title + main text (bounded) + its media inventory (https imgs above icon size; <video> srcs + youtube/vimeo
+  // embeds as video links). No clicks, no mutation, no field values — the SW normalizes via Core/sourceBank
+  // (https-only re-checked there; refs minted there). Sync; top frame only (like the monitor).
+  'EXTRACT_SOURCE': (message, _sender, sendResponse) => {
+    const { type, payload } = message; void type; void payload;
+    try {
+      const title = (document.title || '').slice(0, 200);
+      let text = '';
+      try {
+        const main = document.querySelector('main, article, [role="main"]') || document.body;
+        text = (main && main.innerText ? main.innerText : '').replace(/[ \t]+\n/g, '\n').slice(0, 8000);
+      } catch { text = ''; }
+      const images = [];
+      try {
+        for (const img of document.querySelectorAll('img')) {
+          if (images.length >= 16) break;
+          const src = img.currentSrc || img.src || '';
+          if (!/^https:\/\//i.test(src)) continue;
+          const w = img.naturalWidth || img.width || 0, h = img.naturalHeight || img.height || 0;
+          if (w && h && (w < 80 || h < 80)) continue;                      // skip icons/trackers; unknown sizes pass
+          images.push({ src: src.slice(0, 600), alt: (img.alt || '').slice(0, 120) });
+        }
+      } catch { /* */ }
+      const videos = [];
+      try {
+        for (const v of document.querySelectorAll('video')) {
+          if (videos.length >= 6) break;
+          const s = v.currentSrc || v.src || (v.querySelector('source') && v.querySelector('source').src) || '';
+          if (/^https:\/\//i.test(s)) videos.push({ src: s.slice(0, 600), label: (v.title || v.getAttribute('aria-label') || 'video').slice(0, 120) });
+        }
+        for (const f of document.querySelectorAll('iframe[src*="youtube.com/embed"], iframe[src*="youtube-nocookie.com/embed"], iframe[src*="player.vimeo.com"]')) {
+          if (videos.length >= 6) break;
+          const s = f.src || '';
+          if (/^https:\/\//i.test(s)) videos.push({ src: s.slice(0, 600), label: (f.title || 'video').slice(0, 120) });
+        }
+      } catch { /* */ }
+      sendResponse({ success: true, page: { title, url: String(location.href).slice(0, 600), text, images, videos } });
+    } catch (e) { sendResponse({ success: false, error: e.message }); }
+    return false;
+  },
+
   // CX-3 (session-ride) — perform a SAME-ORIGIN credentialed fetch from the page's own origin so the user's existing
   // login cookies ride (a background cross-site fetch would drop SameSite cookies). The URL is built background-side
   // from a vetted recipe (background/handlers/connector.js); read-only. Async → return true.
