@@ -204,7 +204,15 @@ escape-first holds across chat.js and canvas renderer innerHTML sites, canvas di
 focused editor, Rail delete cascade + sticky-follow autoscroll correct, astral/UTF-16 Docs indexing consistent.
 
 ## Recommended fix batches
-- **Batch 0 — ops, immediately:** rotate the Google client secret; Secrets Manager read in oauth.cjs. *(user action)*
+- **Batch 0 — ops, immediately:** rotate the Google client secret; Secrets Manager read in oauth.cjs. **Code half
+  ✅ BUILT in v2.74.1344**: `orchard/google-oauth-client-secret` Secret in the stack (ARN-only in template/env,
+  grantRead), oauth.cjs runtime read (lazy SDK, container cache, JSON-or-raw, env-var fallback for local/tests),
+  synth-verified 0 plaintext occurrences. **Remaining user half:** `cdk deploy` → `put-secret-value` with a freshly
+  ROTATED secret (Google console: add new secret, keep old active) → verify a linked-Google flow → disable+delete
+  the old secret → drop GOOGLE_OAUTH_CLIENT_SECRET from the deploy shell. Refresh tokens survive rotation (bound
+  to client id). **2026-07-07 LIVE-VERIFIED**: deploy + put-secret-value + rotation ran; a calendar read answered
+  through the full SM-read path. v1345 also committed the (public) client id as the stack default — future deploys
+  need no shell env at all. Remaining: disable+delete the OLD secret in the Google console (user).
 - **Batch 1 — correctness spine (P1-1/2/3 + clusters B/C/D/E): ✅ FIXED in v2.74.1338.** Shipped: appendMessage
   `convId` origin pin + detached (persist-only) foreign bubbles, threaded through `_tryInterpret`'s turn snapshot
   (`{convId, appId, seed, memoryId, connections, target}` captured pre-await) + `_dispatchRouteDecision`;

@@ -156,6 +156,19 @@ class P0Stack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    // v2.74.1344 (review Batch 0 / H) — the Google OAuth client secret moves OUT of the synth-time env: as a Lambda
+    // env var it landed plaintext in cdk.out/, the CloudFormation template (cloudformation:GetTemplate), and the
+    // Lambda console. Same pattern as AnthropicApiKey — CFN creates the container (throwaway generated value);
+    // set the REAL (freshly ROTATED — the old one is burned) secret post-deploy:
+    //   aws secretsmanager put-secret-value --secret-id orchard/google-oauth-client-secret \
+    //     --secret-string 'GOCSPX-...'
+    // oauth.cjs reads it at runtime via GOOGLE_OAUTH_SECRET_ARN (container-cached; env-var fallback for local dev).
+    const googleOauthSecret = new secretsmanager.Secret(this, 'GoogleOauthClientSecret', {
+      secretName: 'orchard/google-oauth-client-secret',
+      description: 'Google OAuth client secret for the connector broker (MP-3b). Set the rotated value post-deploy; oauth.cjs reads at runtime.',
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
     const apiHandler = new lambda.Function(this, 'ApiHandler', {
       functionName: 'orchard-p0-api',
       runtime: lambda.Runtime.NODEJS_20_X,
@@ -170,12 +183,14 @@ class P0Stack extends cdk.Stack {
         PUBLICATIONS_BUCKET: publicationsBucket.bucketName,
         SHARED_WS_TABLE: sharedWorkspaceTable.tableName,
         ANTHROPIC_SECRET_ARN: anthropicSecret.secretArn,
-        // CX-5b/MP-3 (DESIGN_connectors.md §5.2) — the connector broker's per-provider OAuth client. Values come
-        // from the SHELL env at synth time (set them before `cdk deploy`) so nothing secret is ever committed;
-        // empty keeps the routes honest (503 connector-not-configured). Dev tradeoff: the secret lands in the
-        // synthesized template / Lambda env — the hardened path (Secrets Manager read in oauth.cjs) can come later.
-        GOOGLE_OAUTH_CLIENT_ID: process.env.GOOGLE_OAUTH_CLIENT_ID ?? '',
-        GOOGLE_OAUTH_CLIENT_SECRET: process.env.GOOGLE_OAUTH_CLIENT_SECRET ?? '',
+        // CX-5b/MP-3 (DESIGN_connectors.md §5.2) — the connector broker's per-provider OAuth client. The client ID
+        // is PUBLIC by design (it rides every authorize URL the extension opens), so it's committed as the default
+        // (v1345 — the synth-time env read silently baked "" whenever the deploy shell lacked the export; that trap
+        // fired twice on 2026-07-07). Env still overrides for a different Google project. The SECRET moved to
+        // Secrets Manager (v1344, review Batch 0) — only its ARN rides the template/env. `||` not `??`: an
+        // empty-string export must also fall to the default.
+        GOOGLE_OAUTH_CLIENT_ID: process.env.GOOGLE_OAUTH_CLIENT_ID || '854479605840-ccbn2eq4k2cafjq7pnja8puhtadc0g1h.apps.googleusercontent.com',
+        GOOGLE_OAUTH_SECRET_ARN: googleOauthSecret.secretArn,
       },
     });
 
@@ -187,6 +202,7 @@ class P0Stack extends cdk.Stack {
     publicationsBucket.grantReadWrite(apiHandler);
     sharedWorkspaceTable.grantReadWriteData(apiHandler);
     anthropicSecret.grantRead(apiHandler);
+    googleOauthSecret.grantRead(apiHandler);   // v1344 — oauth.cjs GetSecretValue at runtime
 
     const httpApi = new apigwv2.HttpApi(this, 'HttpApi', {
       apiName: 'orchard-dev',

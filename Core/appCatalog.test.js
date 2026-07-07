@@ -73,8 +73,19 @@ describe('appCatalog — resolution', () => {
   });
 
   it('presetsForType groups presets under their abstract type', () => {
-    assert.deepEqual(presetsForType('inbox').map((p) => p.id).sort(), ['inbox-email', 'support']);
+    assert.deepEqual(presetsForType('inbox').map((p) => p.id).sort(), ['inbox-email', 'support', 'ticket-manager']);   // FL-5 (v1346) — the fleet preset joins the inbox type
     assert.deepEqual(presetsForType('concierge').map((p) => p.id), ['shopper']);
+  });
+
+  // FL-5 (v2.74.1346, DESIGN_app_fleet.md) — the fleet preset is pure DATA over the generic sweep harness.
+  it('ticket-manager: propose-only seed, gated writes, ticket object model with merge/solve/assign transitions', () => {
+    const t = builtinApp('ticket-manager');
+    assert.ok(t, 'ticket-manager preset exists');
+    assert.equal(t.defaultConfig.writePolicy, 'gated');
+    assert.ok(/propose/i.test(t.seed), 'the seed is propose-only');
+    assert.equal(t.objectModel.noun, 'ticket');
+    assert.deepEqual(t.objectModel.transitions.map((x) => x.verb), ['merge', 'solve', 'assign', 'reopen']);
+    assert.ok(Array.isArray(t.baseline) && t.baseline.length >= 2, 'ships baseline RULES (generalizable behavior, not facts)');
   });
 
   it('a builtin instantiates into a kind:app conversation with its seed copied (appFromDefinition)', () => {

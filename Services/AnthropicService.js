@@ -29,6 +29,7 @@ import { getCloudSettings, normalizeApiBaseUrl } from './Cloud/CloudSettings.js'
 import { ensureFreshSession } from './Cloud/CloudTokenStore.js';
 import { buildRouterMessages, parseRouterOutput } from '../Core/routerPrompt.js';   // R-3 — front-door router prompt (no DOM; fenced catalog)
 import { buildInterpretMessages, parseInterpretOutput } from '../Core/interpretPrompt.js';   // F-2 — the interpret front-door prompt
+import { buildSweepReadsMessages, buildSweepProposeMessages } from '../Core/sweepPrompt.js';   // FL-1 (v2.74.1346) — the propose-only sweep's two think seams
 import { buildStepMessages, parseStepDecision } from '../Core/stepPrompt.js';   // IL-2 — the inference-layer step controller prompt (fenced palette + observation)
 import { buildJudgeMessages, parseJudgeDecision } from '../Core/judgePrompt.js';   // IL-2 — the IL-as-user-standin match judge (pick the capability matchCapability found; no re-bind)
 import { buildAnswerMessages } from '../Core/answerPrompt.js';   // IL-2 — Orchard ANSWERING a meta/conversational ask from the available capabilities
@@ -5266,6 +5267,26 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     const res = await AnthropicService.#call(system, user, 1024, [], { role: 'routing', operation: 'interpret' });
     if (!res || res.success === false) return { ...parseInterpretOutput(null), why: 'interpret-unavailable' };
     return parseInterpretOutput(res.text);
+  }
+
+  /**
+   * FL-1 (v2.74.1346, DESIGN_app_fleet.md) — the propose-only SWEEP, phase A: pick which offered READ tools
+   * establish the queue state the app's goal needs. Returns the RAW model text — background SWEEP_PROPOSE validates
+   * via Core/sweepPrompt.parseSweepReads against the offered legs (anti-hallucination lives with the palette).
+   */
+  static async sweepReads({ seed = '', learned = '', objects = '', legs = [], maxReads = 3 } = {}) {
+    if (!(await AnthropicService.hasLlm())) return null;
+    const { system, user } = buildSweepReadsMessages({ seed, learned, objects, legs, maxReads });
+    const res = await AnthropicService.#call(system, user, 700, [], { role: 'routing', operation: 'sweep-reads' });
+    return (res && res.success !== false) ? res.text : null;
+  }
+
+  /** FL-1 phase B: read results (fenced DATA) → proposals over the offered ACTION tools. Raw text; caller parses. */
+  static async sweepPropose({ seed = '', learned = '', objects = '', legs = [], results = [] } = {}) {
+    if (!(await AnthropicService.hasLlm())) return null;
+    const { system, user } = buildSweepProposeMessages({ seed, learned, objects, legs, results });
+    const res = await AnthropicService.#call(system, user, 1600, [], { role: 'describe', operation: 'sweep-propose' });
+    return (res && res.success !== false) ? res.text : null;
   }
 
   /**

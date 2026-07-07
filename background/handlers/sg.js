@@ -38,6 +38,7 @@ import { builtinApp } from '../../Core/appCatalog.js';   // OM — the app's cat
 import { connectorLegsForConnections, harvestedRecipeLegs } from '../../Core/connectorRecipes.js';   // CX-4c + §20 — connected session-ride recipes (curated + harvested header-replay) as selectable interpret tools
 import { brokerLegsForLinked } from '../../Core/brokerCatalog.js';   // CX-5c — broker (OAuth/MCP) legs, gated on LINKED providers
 import { legRef } from '../../Core/legRef.js';   // v1342 — unified ref for palette dedup (_seen seeding)
+import { parseSweepReads, parseSweepProposals } from '../../Core/sweepPrompt.js';   // FL-1 (v2.74.1346) — sweep output validated against the OFFERED legs
 import { composeOfferedLeg, policyFilter } from '../../Core/palette.js';   // GD-4b — the app's COMPOSE (draft-on-canvas) leg joins interpret's palette; v1340 (review A) — policyFilter: the 'forbidden' floor now runs on the LIVE interpret palette, not just the dormant ilRun
 import { neutralizeFalseCompletion } from '../../Core/answerGuard.js';   // honesty belt — the answer path dispatches nothing, so a completion claim on a side-effect COMMAND is a fabrication (the calendar "✅ I created it" bug)
 import { describeObjectModel } from '../../Core/appDef.js';   // OM — render the app's object model (noun/states/actions/transitions) as a context block
@@ -1236,6 +1237,77 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, decision, groundId: groundId || null, retrieved });
       } catch (err) {
         Logger.error('background', `INTERPRET_ASK failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // FL-1 (v2.74.1346, DESIGN_app_fleet.md) — SWEEP_PROPOSE: the fleet app's propose-only run's two think seams.
+    // phase 'reads': offer the app's connector READ legs → the model picks ≤3 reads (validated against the offer).
+    // phase 'propose': the panel-executed read RESULTS (fenced DATA) + the ACT legs → validated PROPOSALS — never
+    // dispatched here; the panel parks them in the pending queue (ProposalStore) for the user's approve/reject.
+    // The palette is CONNECTOR-DOMAIN only (curated for the app's connections + harvested reads + broker legs) —
+    // deliberately leaner than INTERPRET_ASK's (no page RAG / compose / affordances): a sweep works the app's
+    // connected systems, not the active tab. Zero domain logic — the seed + memory rules steer the model
+    // (the DESIGN_app_fleet.md portability test).
+    SWEEP_PROPOSE: async (payload, _sender, sendResponse) => {
+      try {
+        const phase = payload?.phase === 'propose' ? 'propose' : 'reads';
+        const connections = Array.isArray(payload?.connections)
+          ? payload.connections.filter((c) => c && typeof c === 'object' && c.origin).map((c) => ({ origin: String(c.origin), label: String(c.label || c.origin) }))
+          : [];
+        if (!connections.length) { sendResponse({ success: false, error: 'no-connections', hint: 'run setup to connect this app’s sites first' }); return; }
+        const appId = payload?.appId ? String(payload.appId) : '';
+        const memId = payload?.memoryId ? String(payload.memoryId) : appId;
+        const seed = String(payload?.seed || '');
+        // Curated legs for the connected set — reads AND writes (the writes are what proposals select over).
+        const curated = connectorLegsForConnections(connections);
+        // Harvested + broker READS join the offer (same projections INTERPRET_ASK makes, deduped).
+        let harvested = [];
+        try {
+          if (typeof ctx.readRideRecipes === 'function') {
+            const _allG = await StorageManager.getAllGrounds();
+            const _seen = new Set(curated.map((l) => legRef(l)).filter(Boolean));
+            for (const c of connections) {
+              const gid = _groundIdForUrl(c.origin, _allG); if (!gid) continue;
+              const recs = await ctx.readRideRecipes(gid);
+              const host = String(c.origin || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+              harvested.push(...harvestedRecipeLegs(recs, { host, mode: 'ask', seenKeys: _seen, groundId: gid }));
+            }
+          }
+        } catch { /* never block the sweep on the harvested projection */ }
+        let broker = [];
+        try {
+          const _lp = await chrome.storage.local.get(['connector:linkedProviders', 'connector:liveTools']);
+          const linked = Array.isArray(_lp['connector:linkedProviders']) ? _lp['connector:linkedProviders'] : [];
+          const liveTools = (_lp['connector:liveTools'] && typeof _lp['connector:liveTools'] === 'object') ? _lp['connector:liveTools'] : null;
+          if (linked.length) {
+            const _seenB = new Set([...curated, ...harvested].map((l) => legRef(l)).filter(Boolean));
+            for (const c of connections) {
+              try { const h = new URL(/^https?:\/\//i.test(c.origin) ? c.origin : `https://${c.origin}`).host; broker.push(...brokerLegsForLinked(h, linked, { seenKeys: _seenB, liveTools })); } catch { /* */ }
+            }
+          }
+        } catch { /* never block the sweep on the broker projection */ }
+        const legsAll = policyFilter([...curated, ...harvested, ...broker], { scope: {} });   // the 'forbidden' floor holds here too
+        const askLegs = legsAll.filter((l) => l && l.mode === 'ask');
+        const actLegs = legsAll.filter((l) => l && l.mode === 'act');
+        const om = appId ? (builtinApp(appId)?.objectModel || null) : null;
+        let learned = '';
+        if (memId) { try { learned = goalContextFor(await loadGoalItems(memId), `sweep: ${seed.slice(0, 80)}`, { om }); } catch { /* */ } }
+        const objects = describeObjectModel(om);
+        if (phase === 'reads') {
+          const raw = await AnthropicService.sweepReads({ seed, learned, objects, legs: askLegs, maxReads: 3 });
+          const reads = parseSweepReads(raw, { legs: askLegs, maxReads: 3 });
+          Logger.info('route', `SWEEP ▸ reads → picked ${reads.length} of ${askLegs.length} offered (${connections.length} connection(s))`);
+          sendResponse({ success: true, reads, legs: askLegs });
+        } else {
+          const results = Array.isArray(payload?.results) ? payload.results.slice(0, 3) : [];
+          const raw = await AnthropicService.sweepPropose({ seed, learned, objects, legs: actLegs, results });
+          const { proposals, summary } = parseSweepProposals(raw, { legs: actLegs });
+          Logger.info('route', `SWEEP ▸ propose → ${proposals.length} proposal(s) from ${results.length} read(s), ${actLegs.length} action(s) offered${summary ? ` — ${summary.slice(0, 80)}` : ''}`);
+          sendResponse({ success: true, proposals, summary });
+        }
+      } catch (err) {
+        Logger.error('background', `SWEEP_PROPOSE failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },

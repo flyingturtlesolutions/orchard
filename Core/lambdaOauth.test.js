@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 
 import lambdaOauth from '../infra/orchard-dev/lambda/api/oauth.cjs';
 
-const { exchangeAuthCode, refreshAccessToken, CONNECTOR_TOKEN_URLS, clearAccessTokenCache } = lambdaOauth;
+const { exchangeAuthCode, refreshAccessToken, CONNECTOR_TOKEN_URLS, clearAccessTokenCache, clearSecretCache } = lambdaOauth;
 const ENV = { GOOGLE_OAUTH_CLIENT_ID: 'cid', GOOGLE_OAUTH_CLIENT_SECRET: 'shh' };
 
 function fakeToken(reply, calls = []) {
@@ -83,5 +83,61 @@ describe('oauth.cjs — refreshAccessToken (vaulted refresh → short-lived acce
     assert.equal(a.accessToken, 'at-1');
     assert.equal(b.accessToken, 'at-2');   // a provider-only cache key would have returned at-1 here
     assert.equal(posts, 2);
+  });
+});
+
+describe('oauth.cjs — v1344 (review Batch 0): client secret from Secrets Manager', () => {
+  const SM_ENV = { GOOGLE_OAUTH_CLIENT_ID: 'cid', GOOGLE_OAUTH_SECRET_ARN: 'arn:aws:secretsmanager:us-east-1:1:secret:orchard/google-oauth-client-secret' };
+  const _reset = () => { clearAccessTokenCache(); clearSecretCache(); };
+
+  it('resolves the secret via getSecretImpl — NO env secret needed; the token POST carries it', async () => {
+    _reset();
+    const asked = [];
+    const getSecretImpl = async (id) => { asked.push(id); return 'GOCSPX-rotated'; };
+    const fetchImpl = fakeToken({ data: { access_token: 'at-sm' } });
+    const r = await refreshAccessToken('google', 'rt', { env: SM_ENV, fetchImpl, getSecretImpl });
+    assert.deepEqual(r, { accessToken: 'at-sm' });
+    assert.deepEqual(asked, [SM_ENV.GOOGLE_OAUTH_SECRET_ARN]);
+    assert.equal(new URLSearchParams(fetchImpl.calls[0].init.body).get('client_secret'), 'GOCSPX-rotated');
+  });
+
+  it('accepts a JSON-wrapped secret string ({ clientSecret })', async () => {
+    _reset();
+    const getSecretImpl = async () => '{"clientSecret":"GOCSPX-json"}';
+    const fetchImpl = fakeToken({ data: { access_token: 'at-j' } });
+    await refreshAccessToken('google', 'rt', { env: SM_ENV, fetchImpl, getSecretImpl });
+    assert.equal(new URLSearchParams(fetchImpl.calls[0].init.body).get('client_secret'), 'GOCSPX-json');
+  });
+
+  it('caches the secret per container — one GetSecretValue across calls', async () => {
+    _reset();
+    let gets = 0;
+    const getSecretImpl = async () => { gets += 1; return 'GOCSPX-once'; };
+    const fetchImpl = fakeToken({ data: { access_token: 'at-c' } });
+    await refreshAccessToken('google', 'rt-1', { env: SM_ENV, fetchImpl, getSecretImpl });
+    await refreshAccessToken('google', 'rt-2', { env: SM_ENV, fetchImpl, getSecretImpl });   // distinct rt → distinct access-cache slot
+    assert.equal(gets, 1);
+  });
+
+  it('a FAILED secret fetch falls back to the env secret when present; else connector-not-configured', async () => {
+    _reset();
+    const boom = async () => { throw new Error('sm down'); };
+    const withFallback = { ...SM_ENV, GOOGLE_OAUTH_CLIENT_SECRET: 'shh-env' };
+    const fetchImpl = fakeToken({ data: { access_token: 'at-fb' } });
+    const ok = await refreshAccessToken('google', 'rt', { env: withFallback, fetchImpl, getSecretImpl: boom });
+    assert.deepEqual(ok, { accessToken: 'at-fb' });
+    assert.equal(new URLSearchParams(fetchImpl.calls[0].init.body).get('client_secret'), 'shh-env');
+    _reset();
+    const bad = await refreshAccessToken('google', 'rt', { env: SM_ENV, fetchImpl: fakeToken({ data: {} }), getSecretImpl: boom });
+    assert.equal(bad.error, 'connector-not-configured');
+  });
+
+  it('exchangeAuthCode resolves via Secrets Manager too', async () => {
+    _reset();
+    const getSecretImpl = async () => 'GOCSPX-x';
+    const fetchImpl = fakeToken({ data: { access_token: 'at', refresh_token: 'rt', scope: 's' } });
+    const r = await exchangeAuthCode('google', { code: 'c', redirectUri: 'https://r' }, { env: SM_ENV, fetchImpl, getSecretImpl });
+    assert.equal(r.refreshToken, 'rt');
+    assert.equal(new URLSearchParams(fetchImpl.calls[0].init.body).get('client_secret'), 'GOCSPX-x');
   });
 });

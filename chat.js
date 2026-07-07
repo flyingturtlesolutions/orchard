@@ -29,6 +29,10 @@ import { classifyFeedback } from './Core/orchFeedback.js'; // ORCH-FB — recogn
 import { parseAdminCommand, parseDedupCommand } from './Core/orchAdmin.js';    // ORCH-ADMIN — management commands (clear/delete); dedup — find duplicate Grounds
 import { classifyReadAsk, askListIndex } from './Core/observe.js';   // OBS-READ — is the ask a question (a read)? + the index a singular/ordinal read wants
 import { runIlStandin } from './Core/ilStandin.js';   // IL-3 — the single-shot stand-in folded through agentLoop@maxSteps=1 (DESIGN §8 Phase-1 parity)
+import { canBulkApprove, getPath, pendingSummary } from './Core/proposals.js';   // FL-2 (v2.74.1346) — the fleet pending queue's pure helpers
+import { ledgerEntry, summarizeLedger, renderLedgerLines } from './Core/actionLedger.js';   // FL-4 — the app action ledger (pure half)
+import { loadProposals, addProposals, decideProposal } from './Services/Storage/ProposalStore.js';   // FL-2 — instance-keyed pending queue
+import { appendLedger, loadLedger } from './Services/Storage/ActionLedgerStore.js';   // FL-4 — instance-keyed ledger
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
 import { recipeLegs, coerceParams, fillBody } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template
 import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 — header-replay writes: json/form/raw + contentType (review I)
@@ -2950,6 +2954,145 @@ async function _runConnectorLeg(leg, params, { tabId = null, groundId = null } =
   return { ok: true, value: res.value };
 }
 
+// ─── FL (v2.74.1346, DESIGN_app_fleet.md) — the FLEET app: propose-only sweep → pending queue → gated execute ───
+// The app is DATA (seed + fence + memory); this block is the GENERIC harness: run the sweep (SWEEP_PROPOSE's two
+// think seams + `_runConnectorLeg` reads), park proposals (ProposalStore, instance-keyed), render an approvable
+// batch, and execute approvals through the EXISTING write path — the approval click IS the CX-6 confirm
+// (confirmed:true), one HITL per action, moved from a modal bar to the queue. Zero domain logic here (the
+// portability test: a different seed + connection = a different fleet app, no code change).
+
+let _sweepBatchIndex = [];   // render-order number → proposalId (what `approve 1,3` / `reject 2` refer to)
+
+async function _runFleetSweep() {
+  const inst = _memoryId();
+  const connections = _boundConnections();
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  if (!_currentConversationAppId || !inst) { _setMessageBody(msg, 'Open an app first — a sweep runs an app’s goal over its connected sites.'); _orchFinalize(msg); return; }
+  if (!connections.length) { _setMessageBody(msg, 'This app has no connected sites yet — run `setup` first.', { markdown: true }); _orchFinalize(msg); return; }
+  const base = { connections, appId: _currentConversationAppId, memoryId: inst, seed: _currentConversationSeed };
+  _setMessageBody(msg, '🧹 Sweeping — planning reads…');
+  let reads = []; let legs = [];
+  try {
+    const r = await _orchReq('SWEEP_PROPOSE', { ...base, phase: 'reads' });
+    if (!r || r.success === false) { _setMessageBody(msg, `Couldn’t plan the sweep — ${(r && r.error) || 'no reply'}.${r && r.hint ? ` (${r.hint})` : ''}`); _orchFinalize(msg); return; }
+    reads = Array.isArray(r.reads) ? r.reads : [];
+    legs = Array.isArray(r.legs) ? r.legs : [];
+  } catch (e) { _setMessageBody(msg, `Couldn’t plan the sweep — ${(e && e.message) || 'error'}.`); _orchFinalize(msg); return; }
+  const results = [];
+  for (const rd of reads) {
+    const leg = legs.find((l) => l && l.key === rd.key);
+    if (!leg) continue;
+    _setMessageBody(msg, `🧹 Sweeping — reading ${leg.name || rd.key}…`);
+    const run = await _runConnectorLeg(leg, coerceParams(rd.params || {}, leg.paramSchema), {});
+    if (run.ok) results.push({ key: rd.key, params: rd.params || {}, value: run.value, leg });
+    else results.push({ key: rd.key, params: rd.params || {}, value: { error: run.error || 'read failed' }, leg });
+  }
+  _setMessageBody(msg, `🧹 Sweeping — reviewing ${results.length} read${results.length === 1 ? '' : 's'}…`);
+  let proposals = []; let summary = '';
+  try {
+    const r = await _orchReq('SWEEP_PROPOSE', { ...base, phase: 'propose', results: results.map((x) => ({ key: x.key, params: x.params, value: x.value })) });
+    if (!r || r.success === false) { _setMessageBody(msg, `The sweep couldn’t propose — ${(r && r.error) || 'no reply'}.`); _orchFinalize(msg); return; }
+    proposals = Array.isArray(r.proposals) ? r.proposals : [];
+    summary = r.summary || '';
+  } catch (e) { _setMessageBody(msg, `The sweep couldn’t propose — ${(e && e.message) || 'error'}.`); _orchFinalize(msg); return; }
+  // Thread each proposal's GROUNDING read (leg+params) through for the execute-time staleness re-check.
+  for (const p of proposals) {
+    if (p.basedOn && p.basedOn.readKey) {
+      const src = results.find((x) => x.key === p.basedOn.readKey);
+      if (src) { p.readLeg = src.leg; p.readParams = src.params; }
+    }
+  }
+  const minted = await addProposals(inst, proposals);
+  await appendLedger(inst, ledgerEntry('sweep', { counts: { reads: results.length, proposals: minted.length } }));
+  for (const p of minted) await appendLedger(inst, ledgerEntry('proposal', { action: p.name, targets: p.targets, why: p.why, proposalId: p.id }));
+  if (!minted.length) {
+    _setMessageBody(msg, `✅ Swept ${results.length} read${results.length === 1 ? '' : 's'} — nothing needs doing.${summary ? `\n\n${summary}` : ''}`, { markdown: true });
+    _orchFinalize(msg);
+    return;
+  }
+  _setMessageBody(msg, `🧹 Sweep done${summary ? ` — ${summary}` : ''}.`, { markdown: true });
+  _orchFinalize(msg);
+  _renderProposalBatch(minted);
+}
+
+// Render an approvable batch: numbered cards + per-item ✓/✗ (once-guard) + a bulk button for the REVERSIBLE classes
+// only (safety auto/confirm — a gated/destructive proposal always takes its own click; DESIGN_app_fleet.md).
+function _renderProposalBatch(list) {
+  const pend = list.filter((p) => p.status === 'pending');
+  if (!pend.length) { const m0 = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m0, 'Nothing pending.'); _orchFinalize(m0); return; }
+  _sweepBatchIndex = pend.map((p) => p.id);
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  const lines = pend.map((p, i) => {
+    const tag = p.safety === 'gated' ? ' ⚠️' : '';
+    const tgt = p.targets && p.targets.length ? ` — ${p.targets.join(', ')}` : '';
+    const ev = p.evidence && p.evidence.length ? `\n   > ${p.evidence.join(' · ')}` : '';
+    return `${i + 1}. **${p.name}**${tag}${tgt}\n   ${p.why || ''}${ev}`;
+  });
+  _setMessageBody(msg, `**${pendingSummary(pend)}**\n\n${lines.join('\n')}\n\n_Buttons below, or:_ \`approve all\` · \`approve 1,3\` · \`reject 2 <why>\``, { markdown: true });
+  const bar = _orchActionBar(msg);
+  pend.forEach((p, i) => {
+    bar.appendChild(_mkOnceBtn(`✓ ${i + 1}`, () => { void _approveProposal(p.id); }));
+    bar.appendChild(_mkOnceBtn(`✗ ${i + 1}`, () => { void _rejectProposal(p.id, ''); }));
+  });
+  const bulk = pend.filter(canBulkApprove);
+  if (bulk.length > 1) bar.appendChild(_mkOnceBtn(`Approve all safe (${bulk.length})`, () => { void _approveMany(bulk.map((b) => b.id)); }));
+  _orchFinalize(msg);
+}
+
+async function _approveMany(ids) {
+  for (const id of ids) await _approveProposal(id);   // sequential — each does its own staleness re-check
+}
+
+async function _approveProposal(id) {
+  const inst = _memoryId(); if (!inst) return;
+  const p = (await loadProposals(inst)).find((x) => x.id === id);
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  if (!p) { _setMessageBody(msg, 'That proposal is gone.'); _orchFinalize(msg); return; }
+  if (p.status !== 'pending') { _setMessageBody(msg, `${p.name} is already ${p.status}.`); _orchFinalize(msg); return; }
+  // Staleness CAS — never act on an item that moved since the sweep read it (the canvas ifRev pattern).
+  if (p.basedOn && p.readLeg) {
+    _setMessageBody(msg, `Checking ${p.name} is still current…`);
+    const chk = await _runConnectorLeg(p.readLeg, p.readParams || {}, {});
+    if (chk.ok) {
+      const cur = getPath(chk.value, p.basedOn.path);
+      if (cur !== undefined && String(cur) !== String(p.basedOn.value)) {
+        await decideProposal(inst, id, { status: 'stale' });
+        await appendLedger(inst, ledgerEntry('decision', { status: 'stale', action: p.name, targets: p.targets, proposalId: id }));
+        _setMessageBody(msg, `⏸ ${p.name} — that item changed since the sweep, so I won’t act on stale state. Run \`sweep\` again.`, { markdown: true });
+        _orchFinalize(msg); return;
+      }
+    }
+  }
+  await decideProposal(inst, id, { status: 'approved' });
+  await appendLedger(inst, ledgerEntry('decision', { status: 'approved', action: p.name, targets: p.targets, proposalId: id }));
+  _setMessageBody(msg, `Running ${p.name}…`);
+  const plan = planExec(p.leg, p.params, {});
+  let res = null;
+  if (!plan || !plan.ok || !plan.channel) res = { success: false, error: plan && plan.reason ? plan.reason : 'no executor' };
+  else { try { res = await _orchReq(plan.channel, { ...plan.payload, confirmed: true }); } catch (e) { res = { success: false, error: (e && e.message) || 'failed' }; } }   // approval = the CX-6 confirm
+  const ok = !!(res && res.success !== false);
+  await decideProposal(inst, id, { status: ok ? 'executed' : 'failed', reason: ok ? '' : ((res && res.error) || 'failed') });
+  await appendLedger(inst, ledgerEntry('execution', { action: p.name, targets: p.targets, proposalId: id, ok, error: ok ? '' : ((res && res.error) || 'failed') }));
+  _setMessageBody(msg, ok
+    ? `✓ ${p.name}${p.targets && p.targets.length ? ` — ${p.targets.join(', ')}` : ''} done.`
+    : `✗ ${p.name} failed — ${(res && res.error) || 'error'}${res && res.hint ? ` (${res.hint})` : ''}`);
+  _orchFinalize(msg);
+}
+
+async function _rejectProposal(id, reason) {
+  const inst = _memoryId(); if (!inst) return;
+  const p = (await loadProposals(inst)).find((x) => x.id === id);
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  if (!p) { _setMessageBody(msg, 'That proposal is gone.'); _orchFinalize(msg); return; }
+  if (p.status !== 'pending') { _setMessageBody(msg, `${p.name} is already ${p.status}.`); _orchFinalize(msg); return; }
+  await decideProposal(inst, id, { status: 'rejected', reason });
+  await appendLedger(inst, ledgerEntry('decision', { status: 'rejected', action: p.name, targets: p.targets, proposalId: id, reason }));
+  // A reasoned rejection is a LEARNING SIGNAL — banked as an observation-tier delta the ratchet can corroborate.
+  if (reason) { try { await recordGoalItem(inst, { kind: 'delta', trigger: `proposing "${p.name}"`, body: `The user rejected this once: ${reason}`, provenance: 'proposal-reject' }); } catch { /* */ } }
+  _setMessageBody(msg, `✗ Rejected ${p.name}${reason ? ` — noted: “${reason}”` : ''}.`);
+  _orchFinalize(msg);
+}
+
 // CX-4d (Slice A) — does a DECOMPOSED chain clause name a CONNECTED session-ride read ("get my open tickets")? The
 // chain's grounded matcher (ORCH_MATCH) only sees the ACTIVE tab; a ride recipe lives on its OWN logged-in origin,
 // so it's invisible there. Reuse INTERPRET_ASK (with the app's connections) — the same connector selection + param
@@ -5361,10 +5504,82 @@ async function sendChatMessage() {
       '- `teach: <ask>` — show me how to do something new here · `workflows` — your saved multi-step flows',
       '- `save as app: <name>` — turn this conversation into a reusable app',
       '',
+      '**Fleet (queue apps)**',
+      '- `sweep` (or “review the queue”) — read the connected systems and PROPOSE actions (never acts unasked)',
+      '- `pending` — the approval queue · `approve all` / `approve 1,3` / `reject 2 <why>`',
+      '- `ledger` / `ledger hour` / `ledger today` — what the app did, and why',
+      '',
       'Type `/` for the capability picker. Say `stop` to halt a running job, `cancel` during setup.',
     ].join('\n'), { markdown: true });
     _orchFinalize(m);
     return;
+  }
+
+  // ─── FL (v2.74.1346, DESIGN_app_fleet.md) — the fleet verbs: sweep / pending / approve / reject / ledger ───
+  if (/^(sweep|review the queue)\s*$/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    await _runFleetSweep();
+    return;
+  }
+  if (/^pending\s*$/i.test(text) && _memoryId()) {   // app conversations only — "pending" in Overview stays a normal ask
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    const pend = (await loadProposals(_memoryId())).filter((p) => p.status === 'pending');
+    _renderProposalBatch(pend);
+    return;
+  }
+  {
+    const mApprove = text.match(/^approve\s+(all|[\d,\s]+)\s*$/i);
+    if (mApprove && _memoryId()) {
+      input.value = ''; _autosizeInput();
+      appendMessage({ role: 'user', body: text });
+      const inst1 = _memoryId();
+      const pend = (await loadProposals(inst1)).filter((p) => p.status === 'pending');
+      let ids = [];
+      if (/^all$/i.test(mApprove[1])) {
+        ids = pend.filter(canBulkApprove).map((p) => p.id);   // bulk NEVER covers the gated/destructive class
+        const gatedN = pend.length - ids.length;
+        if (gatedN > 0) { const mN = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(mN, `${gatedN} gated proposal${gatedN === 1 ? ' needs' : 's need'} individual approval (⚠️ — irreversible class).`); _orchFinalize(mN); }
+      } else {
+        const nums = mApprove[1].split(/[\s,]+/).map((n) => parseInt(n, 10)).filter((n) => n >= 1);
+        ids = nums.map((n) => _sweepBatchIndex[n - 1]).filter(Boolean);
+      }
+      if (!ids.length) { const m1 = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m1, 'Nothing to approve — run `sweep` or `pending` first.', { markdown: true }); _orchFinalize(m1); return; }
+      await _approveMany(ids);
+      return;
+    }
+    const mReject = text.match(/^reject\s+(\d+)\s*(.*)$/i);
+    if (mReject && _memoryId()) {
+      input.value = ''; _autosizeInput();
+      appendMessage({ role: 'user', body: text });
+      const id = _sweepBatchIndex[parseInt(mReject[1], 10) - 1];
+      if (!id) { const m2 = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m2, 'No such proposal number — run `pending` to renumber.', { markdown: true }); _orchFinalize(m2); return; }
+      await _rejectProposal(id, (mReject[2] || '').trim());
+      return;
+    }
+  }
+  {
+    const mLedger = text.match(/^ledger(?:\s+(hour|today))?\s*$/i);
+    if (mLedger && _memoryId()) {
+      input.value = ''; _autosizeInput();
+      appendMessage({ role: 'user', body: text });
+      const inst2 = _memoryId();
+      const items = await loadLedger(inst2);
+      const m3 = appendMessage({ role: 'assistant', body: '' });
+      if (!items.length) { _setMessageBody(m3, 'The ledger is empty — this app hasn’t swept or acted yet.'); _orchFinalize(m3); return; }
+      const win = mLedger[1] === 'hour' ? 3600_000 : mLedger[1] === 'today' ? (Date.now() - new Date().setHours(0, 0, 0, 0)) : 0;
+      const s = summarizeLedger(items, { sinceMs: win });
+      const acts = Object.entries(s.executedByAction).map(([a, c]) => `${c}× ${a}`).join(' · ') || 'none';
+      const label = mLedger[1] === 'hour' ? 'last hour' : mLedger[1] === 'today' ? 'today' : 'all time';
+      _setMessageBody(m3, [
+        `**Ledger (${label})** — ${s.total} entr${s.total === 1 ? 'y' : 'ies'}; executed: ${acts}`,
+        '',
+        ...renderLedgerLines(items, 12).map((l) => `- ${l}`),
+      ].join('\n'), { markdown: true });
+      _orchFinalize(m3);
+      return;
+    }
   }
 
   if (/^memory\s*$/i.test(text) || /^(show me )?what (do |have )?you('ve| have)? ?(know|knows|learned|learnt|remember|remembered)\??$/i.test(text)) {

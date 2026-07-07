@@ -1,11 +1,15 @@
 // infra/orchard-dev/lambda/api/oauth.cjs — MP-3b (v2.74.1310). The proxy's OAuth half of the §5.2 link contract:
 // exchange an authorization CODE (PKCE, danced client-side via launchWebAuthFlow) → refresh+access tokens, and
-// refresh a vaulted refresh token → a short-lived access token. The client SECRET lives only here (Lambda env,
-// `${PROVIDER}_OAUTH_CLIENT_ID/SECRET`) — it never touches the extension; the REFRESH token never leaves the vault
-// path (index.js stores it at CONNLINK#{provider}); only derived ACCESS tokens travel, and only to curated endpoints.
+// refresh a vaulted refresh token → a short-lived access token. The client SECRET never touches the extension;
+// the REFRESH token never leaves the vault path (index.js stores it at CONNLINK#{provider}); only derived ACCESS
+// tokens travel, and only to curated endpoints.
 //
-// fetchImpl + env are injectable → the whole exchange is headless-testable (Core/lambdaOauth.test.js). CJS mirror
-// note: nothing here mirrors Core (the token endpoints are server-side-only knowledge, like mcp.cjs's endpoint map).
+// v2.74.1344 (review Batch 0) — the client secret now lives in SECRETS MANAGER (`${P}_OAUTH_SECRET_ARN` env names
+// it; read at runtime, container-cached), so it no longer rides the synthesized template / Lambda env panel. The
+// `${P}_OAUTH_CLIENT_SECRET` env var stays as the FALLBACK (local dev, tests, not-yet-migrated stacks).
+//
+// fetchImpl + env + getSecretImpl are injectable → the whole exchange is headless-testable (Core/lambdaOauth.test.js).
+// CJS mirror note: nothing here mirrors Core (the token endpoints are server-side-only knowledge, like mcp.cjs's map).
 
 'use strict';
 
@@ -17,10 +21,41 @@ const CONNECTOR_TOKEN_URLS = {
 // v1342 — per-provider access-token cache (module lifetime; one Lambda container ≈ one user burst).
 const _accessCache = new Map();
 
-function _creds(provider, env) {
+// v1344 — client-secret cache (container lifetime, keyed by SecretId). Fetch failures are NOT cached (retry next call).
+const _secretCache = new Map();
+
+// Default Secrets Manager read. The SDK require is LAZY (inside the call): the AWS SDK v3 is bundled in the Lambda
+// runtime but absent locally — tests inject getSecretImpl and must be able to import this module without it.
+let _smClient = null;
+async function _defaultGetSecret(secretId) {
+  // eslint-disable-next-line global-require
+  const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
+  if (!_smClient) _smClient = new SecretsManagerClient({});
+  const res = await _smClient.send(new GetSecretValueCommand({ SecretId: secretId }));
+  return res.SecretString || '';
+}
+
+// Resolve the provider's client secret: Secrets Manager (when `${P}_OAUTH_SECRET_ARN` is set) → env-var fallback.
+// The secret string may be raw ('GOCSPX-…') or JSON ({ clientSecret } — forgiving, mirrors index.js's key parse).
+async function _clientSecret(P, env, getSecretImpl) {
+  const secretId = env[`${P}_OAUTH_SECRET_ARN`];
+  if (secretId) {
+    const hit = _secretCache.get(secretId);
+    if (hit) return hit;
+    try {
+      const raw = await (getSecretImpl || _defaultGetSecret)(secretId);
+      let val = String(raw || '');
+      try { const parsed = JSON.parse(val); val = parsed.clientSecret || parsed.secret || parsed.value || ''; } catch { /* raw string secret */ }
+      if (val) { _secretCache.set(secretId, val); return val; }
+    } catch { /* fetch failed → fall through to the env fallback (and retry SM next call) */ }
+  }
+  return env[`${P}_OAUTH_CLIENT_SECRET`] || '';
+}
+
+async function _creds(provider, env, getSecretImpl) {
   const P = String(provider || '').toUpperCase();
   const clientId = env[`${P}_OAUTH_CLIENT_ID`];
-  const clientSecret = env[`${P}_OAUTH_CLIENT_SECRET`];
+  const clientSecret = await _clientSecret(P, env, getSecretImpl);
   const tokenUrl = CONNECTOR_TOKEN_URLS[String(provider || '')];
   if (!tokenUrl || !clientId || !clientSecret) return null;
   return { tokenUrl, clientId, clientSecret };
@@ -42,10 +77,10 @@ async function _tokenPost(fetchImpl, tokenUrl, params) {
  * against the challenge from the authorize step). → { error } on any failure, never a throw.
  * @param {string} provider
  * @param {{ code:string, redirectUri:string, codeVerifier?:string }} p
- * @param {{ env?:object, fetchImpl?:Function }} [io]
+ * @param {{ env?:object, fetchImpl?:Function, getSecretImpl?:Function }} [io]
  */
-async function exchangeAuthCode(provider, { code, redirectUri, codeVerifier } = {}, { env = process.env, fetchImpl = globalThis.fetch } = {}) {
-  const c = _creds(provider, env);
+async function exchangeAuthCode(provider, { code, redirectUri, codeVerifier } = {}, { env = process.env, fetchImpl = globalThis.fetch, getSecretImpl } = {}) {
+  const c = await _creds(provider, env, getSecretImpl);
   if (!c) return { error: 'connector-not-configured' };
   if (!code || !redirectUri) return { error: 'link-missing-fields' };
   try {
@@ -64,10 +99,10 @@ async function exchangeAuthCode(provider, { code, redirectUri, codeVerifier } = 
  * Vaulted refresh token → a short-lived access token. → { accessToken } | { error }.
  * @param {string} provider
  * @param {string} refreshToken
- * @param {{ env?:object, fetchImpl?:Function }} [io]
+ * @param {{ env?:object, fetchImpl?:Function, getSecretImpl?:Function }} [io]
  */
-async function refreshAccessToken(provider, refreshToken, { env = process.env, fetchImpl = globalThis.fetch, force = false } = {}) {
-  const c = _creds(provider, env);
+async function refreshAccessToken(provider, refreshToken, { env = process.env, fetchImpl = globalThis.fetch, force = false, getSecretImpl } = {}) {
+  const c = await _creds(provider, env, getSecretImpl);
   if (!c) return { error: 'connector-not-configured' };
   if (!refreshToken) return { error: 'connector-not-linked' };
   // v1342 (review H) — cache short-lived access tokens (Google refresh quota + invoke latency).
@@ -89,4 +124,8 @@ async function refreshAccessToken(provider, refreshToken, { env = process.env, f
   } catch { return { error: 'connector-refresh-failed' }; }
 }
 
-module.exports = { CONNECTOR_TOKEN_URLS, exchangeAuthCode, refreshAccessToken, clearAccessTokenCache: () => _accessCache.clear() };
+module.exports = {
+  CONNECTOR_TOKEN_URLS, exchangeAuthCode, refreshAccessToken,
+  clearAccessTokenCache: () => _accessCache.clear(),
+  clearSecretCache: () => _secretCache.clear(),   // v1344 — test isolation for the Secrets Manager path
+};
