@@ -5,7 +5,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildSweepReadsMessages, buildSweepProposeMessages, parseSweepReads, parseSweepProposals } from './sweepPrompt.js';
-import { normalizeProposal, canBulkApprove, getPath, pendingSummary } from './proposals.js';
+import { normalizeProposal, canBulkApprove, getPath, pendingSummary, targetUrls } from './proposals.js';
 import { ledgerEntry, summarizeLedger, renderLedgerLines } from './actionLedger.js';
 
 const ASK_LEGS = [
@@ -64,6 +64,69 @@ describe('sweepPrompt — phase B (propose)', () => {
     assert.equal(proposals[0].leg.key, 'me.zendesk.merge_tickets@d.zendesk.com');
     assert.deepEqual(proposals[0].basedOn, { readKey: 'r1', path: 'tickets[1].updated_at', value: '2026-07-07T10:00:00Z' });
     assert.equal(proposals[1].name, 'Assign ticket');
+  });
+});
+
+describe('sweepPrompt — FL-1b evidence round (v1347)', () => {
+  it('round 1 offers READ TOOLS for needs; round 2 says FINAL and offers none', () => {
+    const r1 = buildSweepProposeMessages({ seed: 's', legs: ACT_LEGS, askLegs: ASK_LEGS, results: [], round: 1 });
+    assert.ok(r1.user.includes('READ TOOLS'));
+    const r2 = buildSweepProposeMessages({ seed: 's', legs: ACT_LEGS, askLegs: [], results: [], round: 2 });
+    assert.ok(r2.user.includes('FINAL ROUND'));
+  });
+  it('parse validates needs against the OFFERED read legs, dedups, caps at 3', () => {
+    const raw = JSON.stringify({ proposals: [], needs: [
+      { key: 'me.zendesk.read_ticket@d.zendesk.com', params: { id: 7 } },
+      { key: 'me.zendesk.read_ticket@d.zendesk.com', params: { id: 7 } },     // exact dup — dropped
+      { key: 'me.zendesk.read_ticket@d.zendesk.com', params: { id: 8 } },     // same leg, different params — kept
+      { key: 'hallucinated.read', params: {} },                                // not offered — dropped
+      { key: 'me.zendesk.merge_tickets@d.zendesk.com', params: {} },           // an ACT leg is not a valid need — dropped
+    ], summary: 'need the conversations' });
+    const { needs, summary } = parseSweepProposals(raw, { legs: ACT_LEGS, askLegs: ASK_LEGS });
+    assert.deepEqual(needs.map((n) => n.params.id), [7, 8]);
+    assert.equal(summary, 'need the conversations');
+  });
+});
+
+describe('proposals — FL-1c targetUrls (ground truth, trusted-template only)', () => {
+  const LEG = { key: 'k', name: 'Solve ticket', mode: 'act', safety: 'confirm',
+    tool: { origin: 'deako.zendesk.com', itemUrl: '/agent/tickets/{id}' } };
+  it('builds https urls from origin + template + sanitized ids; strips leading #', () => {
+    const urls = targetUrls({ leg: LEG, targets: ['#64775', '64780'] });
+    assert.deepEqual(urls, [
+      { id: '64775', url: 'https://deako.zendesk.com/agent/tickets/64775' },
+      { id: '64780', url: 'https://deako.zendesk.com/agent/tickets/64780' },
+    ]);
+  });
+  it('rejects non-token ids (a minted `../../evil` can never escape the path)', () => {
+    assert.deepEqual(targetUrls({ leg: LEG, targets: ['../../evil', 'a b', '64775?x=1'] }), []);
+  });
+  it('no template / no origin → [] (graceful plain-text targets)', () => {
+    assert.deepEqual(targetUrls({ leg: { tool: { origin: 'x.com' } }, targets: ['1'] }), []);
+    assert.deepEqual(targetUrls({ leg: null, targets: ['1'] }), []);
+  });
+});
+
+describe('actionLedger — FL-1c ground-truth urls (v1348: stored as provenance, NEVER rendered as links)', () => {
+  it('entries carry validated urls; renderLedgerLines stays plain text (conversational console)', () => {
+    const e = ledgerEntry('execution', { action: 'Merge tickets', targets: ['1', '2'], ok: true,
+      urls: [{ id: '1', url: 'https://d.zendesk.com/agent/tickets/1' }, { id: 'bad', url: 'http://insecure' }] }, 1000);
+    assert.equal(e.urls.length, 1);                                   // non-https dropped at mint; provenance persists
+    const [line] = renderLedgerLines([e]);
+    assert.ok(line.includes('(1, 2)'));                               // plain targets
+    assert.ok(!line.includes(']('));                                  // and NO markdown links anywhere
+  });
+});
+
+describe('palette — fleetOfferedLegs (v1348: NL routes through the IL, not regex)', () => {
+  it('offers REVIEW_QUEUE + SHOW_ITEM_SOURCES for a connected app, with the object-model noun woven in', async () => {
+    const { fleetOfferedLegs } = await import('./palette.js');
+    const legs = fleetOfferedLegs({ objectModel: { plural: 'tickets' } }, true);
+    assert.deepEqual(legs.map((l) => l.key), ['REVIEW_QUEUE', 'SHOW_ITEM_SOURCES']);
+    assert.ok(legs.every((l) => l.domain === 'self' && l.safety === 'auto'));
+    assert.ok(legs[0].does.includes('tickets'));
+    assert.ok(legs[1].paramSchema.properties.proposal);
+    assert.deepEqual(fleetOfferedLegs({ objectModel: { plural: 'tickets' } }, false), []);   // unconnected app → not offered
   });
 });
 

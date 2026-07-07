@@ -96,6 +96,31 @@ export function composeOfferedLeg(app) {
            does: 'draft or revise content (a reply, a message, a document) on the app’s canvas — works from ANY page (the canvas is its own surface; the current tab is irrelevant) and from whatever detail the ask gives (no ticket or context required); a follow-up ask ("change the first line") revises the same draft; nothing is sent anywhere' };
 }
 
+/**
+ * FL (v2.74.1348, DESIGN_app_fleet.md) — the fleet CONSOLE legs, offered to interpret for a CONNECTED app so
+ * natural language routes through the IL (never static regex — the v1166 inversion holds): "review the queue" /
+ * "clean this up" selects REVIEW_QUEUE; "show me both tickets" / "open zendesk" selects SHOW_ITEM_SOURCES with
+ * params. Dispatched panel-side (chat.js IL_PANEL_LEGS). PURE; [] when the app has no connections.
+ */
+export function fleetOfferedLegs(app, connected = false) {
+  if (!connected) return [];
+  const noun = (app && app.objectModel && app.objectModel.plural) || 'items';
+  return [
+    { key: 'REVIEW_QUEUE', domain: 'self', mode: 'act', safety: 'auto', source: 'builtin', params: [],
+      name: 'Review the queue',
+      does: `run a maintenance sweep over the connected ${noun}: read the queue and PROPOSE actions (merge / resolve / assign …) for the user to approve — nothing executes unasked; use when the user asks to review, check, clean up, or triage the queue` },
+    { key: 'SHOW_ITEM_SOURCES', domain: 'self', mode: 'act', safety: 'auto', source: 'builtin',
+      params: ['proposal', 'targets', 'origin'],
+      paramSchema: { type: 'object', properties: {
+        proposal: { type: 'integer', description: 'a pending-proposal number to show the real page(s) for' },
+        targets: { type: 'array', items: { type: 'string' }, description: `specific ${noun.replace(/s$/, '')} ids to open` },
+        origin: { type: 'boolean', description: 'true = open the connected site itself' },
+      }, required: [] },
+      name: 'Show the real pages',
+      does: `open the actual page(s) behind proposals or ${noun} in the connected site’s OWN tab (reused — never a pile of new tabs) — use when the user wants to see or verify the source: a proposal’s ${noun}, specific ids, or the site itself ("open zendesk", "go to the site")` },
+  ];
+}
+
 const _ruleApplies = (r, scope) => !r || !r.when || (r.when.ground == null) || (r.when.ground === (scope && scope.ground));
 const _ruleForbids = (r, leg) => !!((Array.isArray(r.forbidKeys) && r.forbidKeys.includes(keyOf(leg))) ||
                                     (Array.isArray(r.forbidDomains) && r.forbidDomains.includes(leg.domain)));

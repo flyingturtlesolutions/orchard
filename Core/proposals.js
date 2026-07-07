@@ -60,6 +60,27 @@ export function getPath(obj, path) {
   return cur;
 }
 
+/**
+ * FL-1c (v2.74.1347) — GROUND TRUTH: the human-viewable page per target, assembled from TRUSTED data ONLY —
+ * the leg's connection origin + its curated `itemUrl` template + the target id, which must be a plain token
+ * ([A-Za-z0-9_-]+, then URI-encoded) so a minted target like `../../evil` can never escape the path. The model
+ * contributes nothing but the id. Returns [] when the leg carries no template (graceful). PURE.
+ * @returns {Array<{ id:string, url:string }>}
+ */
+export function targetUrls(p) {
+  const tool = p && p.leg && p.leg.tool;
+  const origin = tool && _str(tool.origin).toLowerCase().replace(/^https?:\/\//, '').replace(/\/+$/, '');
+  const tpl = tool && _str(tool.itemUrl);
+  if (!origin || !tpl || !tpl.includes('{id}')) return [];
+  const out = [];
+  for (const t of (Array.isArray(p.targets) ? p.targets : [])) {
+    const id = String(t).trim().replace(/^#/, '');
+    if (!/^[A-Za-z0-9_-]+$/.test(id)) continue;
+    out.push({ id, url: `https://${origin}${tpl.replace('{id}', encodeURIComponent(id))}` });
+  }
+  return out;
+}
+
 /** One-line batch summary: "6 pending: 3× Merge tickets · 2× Solve ticket · 1× Assign ticket". PURE. */
 export function pendingSummary(list) {
   const pend = (Array.isArray(list) ? list : []).filter((p) => p && p.status === 'pending');

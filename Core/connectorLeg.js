@@ -102,6 +102,7 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
       impl: 'session', account, app,
       recipeId: id,   // v2.74.1340 (review A/§18) — the BARE stored id: the arm guard matches per-Ground records by THIS, never the prefixed leg.key
       origin: origin || null, appHost: appHost || null,
+      itemUrl: _str(r.itemUrl) || null,   // FL-1c (v2.74.1347) — the object's HUMAN page template (ground-truth links)
       endpoint, method: _str(r.method).toUpperCase() || 'GET',
       body: (write && r.body && typeof r.body === 'object') ? r.body : null,   // write body TEMPLATE; the executor fillBody()s it
       bodyType: _str(r.bodyType) || (write && r.body ? 'json' : null),         // v1342 — json | form | raw (fillWriteBody)

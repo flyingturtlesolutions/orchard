@@ -1,7 +1,42 @@
 # DESIGN_app_fleet — the FLEET app (workflow-anchored)
 
 **Status:** FL-1..5 BUILT v2.74.1346 (propose-only sweep · pending queue · gated executor + staleness CAS · action
-ledger · `ticket-manager` preset). FL-6 (clock trigger) pending. Live verification owed (needs the real queue).
+ledger · `ticket-manager` preset). **FL-1b + FL-1c BUILT v2.74.1347** (evidence round · ground-truth links,
+reuse-then-navigate). FL-6 (clock trigger) pending. Live verification owed (needs the real queue).
+
+## 1b. The evidence round (FL-1b, v1347 — from the first live sweep's lesson)
+
+The first live run found a solve candidate but proposed nothing: phase A picks reads BLIND (3 breadth lists), and
+the baseline rule ("look for the agent's last message actually resolving it") demands conversation-level evidence
+the sweep never fetched — honest conservatism, starved of depth. Fix: phase B may return `needs` — targeted reads
+(validated against the OFFERED read legs, ≤3) — the panel serves them and calls ONE final round (hard cap, never a
+loop). Round 2's prompt says FINAL; needs are ignored. Honesty tweak alongside: a 0-proposal sweep with a non-empty
+summary says "no actionable proposals — here's what I saw", never "nothing needs doing"; the `SWEEP ▸ reads` log
+names the picked read keys.
+
+## 1c. Ground truth: every claim links to its source (FL-1c, v1347)
+
+The evidence quotes are the model's EXCERPTS; approval needs the RECEIPT. **The model never mints URLs** — links
+assemble from TRUSTED data only: connection origin + the recipe's curated `itemUrl` template (`/agent/tickets/{id}`
+on the Zendesk recipes; threaded recipe → `leg.tool.itemUrl`) + the target id sanitized to a plain token
+(Core/proposals.targetUrls, tested against `../../evil`-class escapes). Surfaces: proposal-card targets render as
+links; ledger targets too (`urls` on entries); `show N` verb + a 🔍 button on multi-target proposals.
+
+**Reuse-then-navigate (one tab per origin, ever):** `SHOW_SOURCES` (background/handlers/connector.js) re-validates
+urls against the claimed https origin, resolves the origin's EXISTING tab with the same `pickRideTab` session-ride
+uses (the session tab IS the evidence tab), focuses it, and navigates it to each target sequentially — Zendesk's
+agent workspace accumulates them as internal workspace tabs, so a merge's two tickets land side-by-side in ONE
+browser tab. Only with no tab on the origin does it create one. The driven span is busy-marked (Invariant #2);
+`SHOW ▸` is in `_DECISION_RE`.
+
+**v1348 (user direction — conversational, and no static semantic routing):** NO hyperlinks anywhere — targets
+render plain; the trusted urls stay on proposal/ledger RECORDS as provenance, never as anchors. Viewing is
+CONVERSATIONAL, routed through the IL (the v1166 inversion, never regex): `palette.fleetOfferedLegs` offers two
+console legs to interpret for a connected app — **REVIEW_QUEUE** ("review the queue", "clean this up" → the sweep)
+and **SHOW_ITEM_SOURCES** (params {proposal|targets|origin} bound from the ask: "show me both tickets", "open
+zendesk") — dispatched panel-side (chat.js `_showItemSources` → SHOW_SOURCES). Deterministic guards remain ONLY
+for terse number-addressed console commands (`sweep`, `pending`, `approve 1,3`, `reject 2 <why>`, `show 2`,
+`ledger`) — zero semantics, CLI-shaped; every natural phrasing goes through interpret.
 
 **The build discipline this doc exists to enforce (2026-07-07, the "this is all wrong" correction):** we build
 workflows, not abstract infrastructure — but the workflow's *intelligence* is never code. Everything the app "knows"

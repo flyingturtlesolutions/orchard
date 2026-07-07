@@ -21,7 +21,7 @@ import { BROKER_CATALOG } from '../../Core/brokerCatalog.js';   // v1342 — UNL
 import { pkcePair, authorizeUrl, parseAuthRedirect } from '../../Core/oauthLink.js';   // MP-3 — the pure client half of the link dance (§5.2 pinned contract)
 import { providerScopes } from '../../Core/mcpServers.js';                             // MP-3 — one dance grants every server the provider fronts
 import { Logger } from '../../Core/Logger.js';   // §20 — SESSION_REPLAY outcome observability (Invariant #1)
-import { armRideAuthCapture } from './sg.js';   // §20 — keep the page-local token fresh on the app tab (no import cycle: sg.js doesn't import connector.js)
+import { armRideAuthCapture, markEngineBusy } from './sg.js';   // §20 — keep the page-local token fresh on the app tab (no import cycle: sg.js doesn't import connector.js); FL-1c — SHOW_SOURCES busy-marks its driven navigation (Invariant #2)
 
 // ── Ephemeral managed-tab registry (§16) — module singleton, lives within a SW lifetime ─────────────────────────────
 const IDLE_CLOSE_MS = 8000;                 // close an Orchard-opened tab this long after its last ride (burst-reuse window)
@@ -191,6 +191,43 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
   }
 
   return {
+    // FL-1c (v2.74.1347, DESIGN_app_fleet.md) — SHOW_SOURCES: ground-truth viewing with REUSE-THEN-NAVIGATE. One
+    // tab per origin, ever: reuse the origin's existing tab (the same one session-ride picks — the session tab IS
+    // the evidence tab), focus it, navigate it to each target sequentially (Zendesk's agent workspace accumulates
+    // them as internal workspace tabs); only with NO tab on the origin do we create ONE. URLs are validated to the
+    // claimed https origin (the panel builds them from trusted templates — Core/proposals.targetUrls — but this end
+    // re-checks; fail-closed). The driven navigation span is busy-marked (Invariant #2).
+    'SHOW_SOURCES': (payload, _sender, sendResponse) => {
+      (async () => {
+        try {
+          const host = String((payload && payload.origin) || '').toLowerCase().replace(/^https?:\/\//, '').replace(/\/+$/, '');
+          if (!host) { sendResponse({ success: false, error: 'no-origin' }); return; }
+          const urls = (Array.isArray(payload && payload.urls) ? payload.urls : [])
+            .map((u) => String(u || ''))
+            .filter((u) => { try { const p = new URL(u); return p.protocol === 'https:' && p.host.toLowerCase() === host; } catch { return false; } })
+            .slice(0, 6);
+          if (!urls.length) { sendResponse({ success: false, error: 'no-valid-urls' }); return; }
+          let tabs = [];
+          try { tabs = await chrome.tabs.query({ url: `*://${host}/*` }); } catch { tabs = []; }
+          let tab = pickRideTab(tabs);
+          let reused = true;
+          if (!tab) { tab = await chrome.tabs.create({ url: urls[0], active: true }); reused = false; await _waitTabComplete(tab.id); }
+          markEngineBusy(tab.id, true);   // engine-driven navigation — keep it out of the interaction monitor
+          try {
+            for (const u of (reused ? urls : urls.slice(1))) {
+              await chrome.tabs.update(tab.id, { url: u, active: true });
+              await _waitTabComplete(tab.id);
+            }
+          } finally { markEngineBusy(tab.id, false); }
+          try { if (tab.windowId != null) await chrome.windows.update(tab.windowId, { focused: true }); } catch { /* */ }
+          try { await chrome.tabs.update(tab.id, { active: true }); } catch { /* */ }
+          try { Logger.info('connector', `SHOW ▸ ${host} ← ${urls.length} target(s) (${reused ? 'reused tab' : 'new tab'} ${tab.id})`); } catch { /* */ }
+          sendResponse({ success: true, tabId: tab.id, shown: urls.length, reused });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'show-failed' }); }
+      })();
+      return true;
+    },
+
     'INVOKE_SESSION': (payload, _sender, sendResponse) => {
       (async () => {
         let ephemeralOrigin = null;          // set when this ride opened/reused a managed tab (→ idle-close on exit)

@@ -29,7 +29,7 @@ import { classifyFeedback } from './Core/orchFeedback.js'; // ORCH-FB — recogn
 import { parseAdminCommand, parseDedupCommand } from './Core/orchAdmin.js';    // ORCH-ADMIN — management commands (clear/delete); dedup — find duplicate Grounds
 import { classifyReadAsk, askListIndex } from './Core/observe.js';   // OBS-READ — is the ask a question (a read)? + the index a singular/ordinal read wants
 import { runIlStandin } from './Core/ilStandin.js';   // IL-3 — the single-shot stand-in folded through agentLoop@maxSteps=1 (DESIGN §8 Phase-1 parity)
-import { canBulkApprove, getPath, pendingSummary } from './Core/proposals.js';   // FL-2 (v2.74.1346) — the fleet pending queue's pure helpers
+import { canBulkApprove, getPath, pendingSummary, targetUrls } from './Core/proposals.js';   // FL-2 (v2.74.1346) — the fleet pending queue's pure helpers; FL-1c (v1347) — ground-truth target links
 import { ledgerEntry, summarizeLedger, renderLedgerLines } from './Core/actionLedger.js';   // FL-4 — the app action ledger (pure half)
 import { loadProposals, addProposals, decideProposal } from './Services/Storage/ProposalStore.js';   // FL-2 — instance-keyed pending queue
 import { appendLedger, loadLedger } from './Services/Storage/ActionLedgerStore.js';   // FL-4 — instance-keyed ledger
@@ -2987,32 +2987,59 @@ async function _runFleetSweep() {
     if (run.ok) results.push({ key: rd.key, params: rd.params || {}, value: run.value, leg });
     else results.push({ key: rd.key, params: rd.params || {}, value: { error: run.error || 'read failed' }, leg });
   }
-  _setMessageBody(msg, `🧹 Sweeping — reviewing ${results.length} read${results.length === 1 ? '' : 's'}…`);
+  // FL-1b (v1347) — propose, with ONE bounded evidence round: round 1 may return `needs` (targeted reads the
+  // model's rules demand — e.g. a candidate ticket's conversation before judging it resolved); the panel serves
+  // them and calls the FINAL round. Never loops beyond round 2.
   let proposals = []; let summary = '';
-  try {
-    const r = await _orchReq('SWEEP_PROPOSE', { ...base, phase: 'propose', results: results.map((x) => ({ key: x.key, params: x.params, value: x.value })) });
+  for (let round = 1; round <= 2; round++) {
+    _setMessageBody(msg, `🧹 Sweeping — reviewing ${results.length} read${results.length === 1 ? '' : 's'}${round === 2 ? ' (with evidence)' : ''}…`);
+    let r = null;
+    try { r = await _orchReq('SWEEP_PROPOSE', { ...base, phase: 'propose', round, results: results.map((x) => ({ key: x.key, params: x.params, value: x.value })) }); }
+    catch (e) { _setMessageBody(msg, `The sweep couldn’t propose — ${(e && e.message) || 'error'}.`); _orchFinalize(msg); return; }
     if (!r || r.success === false) { _setMessageBody(msg, `The sweep couldn’t propose — ${(r && r.error) || 'no reply'}.`); _orchFinalize(msg); return; }
     proposals = Array.isArray(r.proposals) ? r.proposals : [];
     summary = r.summary || '';
-  } catch (e) { _setMessageBody(msg, `The sweep couldn’t propose — ${(e && e.message) || 'error'}.`); _orchFinalize(msg); return; }
-  // Thread each proposal's GROUNDING read (leg+params) through for the execute-time staleness re-check.
+    const needs = (round === 1 && Array.isArray(r.needs)) ? r.needs : [];
+    if (!needs.length) break;
+    for (const nd of needs) {
+      const leg = legs.find((l) => l && l.key === nd.key);
+      if (!leg) continue;
+      _setMessageBody(msg, `🧹 Sweeping — gathering evidence: ${leg.name || nd.key}…`);
+      const run = await _runConnectorLeg(leg, coerceParams(nd.params || {}, leg.paramSchema), {});
+      results.push({ key: nd.key, params: nd.params || {}, value: run.ok ? run.value : { error: run.error || 'read failed' }, leg });
+    }
+  }
+  // Thread each proposal's GROUNDING read (leg+params) + its ground-truth target links (FL-1c: TRUSTED
+  // origin+template+id — the model never mints URLs) through to the stored record.
   for (const p of proposals) {
     if (p.basedOn && p.basedOn.readKey) {
       const src = results.find((x) => x.key === p.basedOn.readKey);
       if (src) { p.readLeg = src.leg; p.readParams = src.params; }
     }
+    p.urls = targetUrls(p);
   }
   const minted = await addProposals(inst, proposals);
   await appendLedger(inst, ledgerEntry('sweep', { counts: { reads: results.length, proposals: minted.length } }));
-  for (const p of minted) await appendLedger(inst, ledgerEntry('proposal', { action: p.name, targets: p.targets, why: p.why, proposalId: p.id }));
+  for (const p of minted) await appendLedger(inst, ledgerEntry('proposal', { action: p.name, targets: p.targets, why: p.why, proposalId: p.id, urls: p.urls }));
   if (!minted.length) {
-    _setMessageBody(msg, `✅ Swept ${results.length} read${results.length === 1 ? '' : 's'} — nothing needs doing.${summary ? `\n\n${summary}` : ''}`, { markdown: true });
+    // v1347 honesty — don't claim "nothing needs doing" when the model's own summary says otherwise.
+    _setMessageBody(msg, summary
+      ? `🧹 Swept ${results.length} read${results.length === 1 ? '' : 's'} — no actionable proposals.\n\n${summary}`
+      : `✅ Swept ${results.length} read${results.length === 1 ? '' : 's'} — the queue looks clean.`, { markdown: true });
     _orchFinalize(msg);
     return;
   }
   _setMessageBody(msg, `🧹 Sweep done${summary ? ` — ${summary}` : ''}.`, { markdown: true });
   _orchFinalize(msg);
   _renderProposalBatch(minted);
+}
+
+async function _showProposalSources(p) {
+  const urls = (Array.isArray(p.urls) && p.urls.length ? p.urls : targetUrls(p)).map((u) => u.url);
+  if (!urls.length) { const m = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m, 'No source pages for that one (its recipe has no item template).'); _orchFinalize(m); return; }
+  let host = '';
+  try { host = new URL(urls[0]).host; } catch { /* */ }
+  await _orchReq('SHOW_SOURCES', { origin: host, urls });
 }
 
 // Render an approvable batch: numbered cards + per-item ✓/✗ (once-guard) + a bulk button for the REVERSIBLE classes
@@ -3022,13 +3049,16 @@ function _renderProposalBatch(list) {
   if (!pend.length) { const m0 = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m0, 'Nothing pending.'); _orchFinalize(m0); return; }
   _sweepBatchIndex = pend.map((p) => p.id);
   const msg = appendMessage({ role: 'assistant', body: '' });
+  // v1348 (user direction) — CONVERSATIONAL ground truth: targets render as PLAIN TEXT (no hyperlinks anywhere);
+  // viewing the real pages is a VERB — `show 2` / `show tickets` / `go to origin` — resolved through SHOW_SOURCES
+  // (reuse-then-navigate). The trusted urls still ride the records (provenance); only the entry is conversational.
   const lines = pend.map((p, i) => {
     const tag = p.safety === 'gated' ? ' ⚠️' : '';
     const tgt = p.targets && p.targets.length ? ` — ${p.targets.join(', ')}` : '';
     const ev = p.evidence && p.evidence.length ? `\n   > ${p.evidence.join(' · ')}` : '';
     return `${i + 1}. **${p.name}**${tag}${tgt}\n   ${p.why || ''}${ev}`;
   });
-  _setMessageBody(msg, `**${pendingSummary(pend)}**\n\n${lines.join('\n')}\n\n_Buttons below, or:_ \`approve all\` · \`approve 1,3\` · \`reject 2 <why>\``, { markdown: true });
+  _setMessageBody(msg, `**${pendingSummary(pend)}**\n\n${lines.join('\n')}\n\n_Say:_ \`approve all\` · \`approve 1,3\` · \`reject 2 <why>\` · \`show 2\` — _or just ask (“show me both tickets”, “open zendesk”)._`, { markdown: true });
   const bar = _orchActionBar(msg);
   pend.forEach((p, i) => {
     bar.appendChild(_mkOnceBtn(`✓ ${i + 1}`, () => { void _approveProposal(p.id); }));
@@ -3037,6 +3067,64 @@ function _renderProposalBatch(list) {
   const bulk = pend.filter(canBulkApprove);
   if (bulk.length > 1) bar.appendChild(_mkOnceBtn(`Approve all safe (${bulk.length})`, () => { void _approveMany(bulk.map((b) => b.id)); }));
   _orchFinalize(msg);
+}
+
+// FL (v1348) — the SHOW_ITEM_SOURCES leg's resolver: interpret binds {proposal?|targets?|origin?} from the user's
+// NL; this maps them onto the pending queue's TRUSTED urls. origin → the site itself; proposal N → that proposal's
+// pages; targets → matching ids across pending proposals; nothing bound → the whole batch (or origin when empty).
+async function _showItemSources(params = {}) {
+  if (params.origin === true) { await _goToOrigin(); return; }
+  const inst = _memoryId(); if (!inst) { await _goToOrigin(); return; }
+  const pend = (await loadProposals(inst)).filter((p) => p.status === 'pending');
+  const n = Number(params.proposal);
+  if (Number.isFinite(n) && n >= 1) {
+    const id = _sweepBatchIndex[n - 1];
+    const p = id ? pend.find((x) => x.id === id) : pend[n - 1];
+    if (p) { await _showProposalSources(p); return; }
+  }
+  const wanted = (Array.isArray(params.targets) ? params.targets : []).map((t) => String(t).replace(/^#/, '').trim()).filter(Boolean);
+  if (wanted.length) {
+    const urls = []; const seen = new Set();
+    for (const p of pend) for (const u of (Array.isArray(p.urls) ? p.urls : [])) {
+      if (wanted.includes(String(u.id)) && !seen.has(u.url)) { seen.add(u.url); urls.push(u.url); }
+    }
+    if (urls.length) {
+      let host = ''; try { host = new URL(urls[0]).host; } catch { /* */ }
+      const m = appendMessage({ role: 'assistant', body: '' });
+      const r = await _orchReq('SHOW_SOURCES', { origin: host, urls: urls.slice(0, 6) });
+      _setMessageBody(m, r && r.success !== false ? `Opened ${urls.length} page${urls.length === 1 ? '' : 's'} in the ${host} tab.` : `Couldn’t open them — ${(r && r.error) || 'error'}.`);
+      _orchFinalize(m); return;
+    }
+  }
+  if (pend.length) { await _showBatchSources(); return; }
+  await _goToOrigin();
+}
+
+// v1348 — the CURRENT batch's targets, union-deduped (≤6), in the origin's one tab.
+async function _showBatchSources() {
+  const inst = _memoryId(); if (!inst) return;
+  const pend = (await loadProposals(inst)).filter((p) => p.status === 'pending');
+  const seen = new Set(); const urls = [];
+  for (const p of pend) for (const u of (Array.isArray(p.urls) ? p.urls : [])) { if (!seen.has(u.url)) { seen.add(u.url); urls.push(u.url); if (urls.length >= 6) break; } }
+  const m = appendMessage({ role: 'assistant', body: '' });
+  if (!urls.length) { _setMessageBody(m, pend.length ? 'No source pages on the pending proposals.' : 'Nothing pending to show — run `sweep` first, or say `go to origin`.', { markdown: true }); _orchFinalize(m); return; }
+  let host = ''; try { host = new URL(urls[0]).host; } catch { /* */ }
+  const r = await _orchReq('SHOW_SOURCES', { origin: host, urls });
+  _setMessageBody(m, r && r.success !== false ? `Opened ${urls.length} page${urls.length === 1 ? '' : 's'} in the ${host} tab.` : `Couldn’t open them — ${(r && r.error) || 'error'}.`);
+  _orchFinalize(m);
+}
+
+// v1348 — `go to origin`: focus (or open) the app's connected site itself — the app-level "take me there".
+async function _goToOrigin() {
+  const conns = _boundConnections();
+  const m = appendMessage({ role: 'assistant', body: '' });
+  if (!conns.length) { _setMessageBody(m, 'This app has no connected sites yet — run `setup` first.', { markdown: true }); _orchFinalize(m); return; }
+  let host = '';
+  try { host = new URL(/^https?:\/\//i.test(conns[0].origin) ? conns[0].origin : `https://${conns[0].origin}`).host; } catch { /* */ }
+  if (!host) { _setMessageBody(m, 'Couldn’t resolve the connected origin.'); _orchFinalize(m); return; }
+  const r = await _orchReq('SHOW_SOURCES', { origin: host, urls: [`https://${host}/`] });
+  _setMessageBody(m, r && r.success !== false ? `${r.reused ? 'Focused' : 'Opened'} ${host}.` : `Couldn’t open ${host} — ${(r && r.error) || 'error'}.`);
+  _orchFinalize(m);
 }
 
 async function _approveMany(ids) {
@@ -3064,7 +3152,7 @@ async function _approveProposal(id) {
     }
   }
   await decideProposal(inst, id, { status: 'approved' });
-  await appendLedger(inst, ledgerEntry('decision', { status: 'approved', action: p.name, targets: p.targets, proposalId: id }));
+  await appendLedger(inst, ledgerEntry('decision', { status: 'approved', action: p.name, targets: p.targets, proposalId: id, urls: p.urls }));
   _setMessageBody(msg, `Running ${p.name}…`);
   const plan = planExec(p.leg, p.params, {});
   let res = null;
@@ -3072,7 +3160,7 @@ async function _approveProposal(id) {
   else { try { res = await _orchReq(plan.channel, { ...plan.payload, confirmed: true }); } catch (e) { res = { success: false, error: (e && e.message) || 'failed' }; } }   // approval = the CX-6 confirm
   const ok = !!(res && res.success !== false);
   await decideProposal(inst, id, { status: ok ? 'executed' : 'failed', reason: ok ? '' : ((res && res.error) || 'failed') });
-  await appendLedger(inst, ledgerEntry('execution', { action: p.name, targets: p.targets, proposalId: id, ok, error: ok ? '' : ((res && res.error) || 'failed') }));
+  await appendLedger(inst, ledgerEntry('execution', { action: p.name, targets: p.targets, proposalId: id, ok, error: ok ? '' : ((res && res.error) || 'failed'), urls: p.urls }));
   _setMessageBody(msg, ok
     ? `✓ ${p.name}${p.targets && p.targets.length ? ` — ${p.targets.join(', ')}` : ''} done.`
     : `✗ ${p.name} failed — ${(res && res.error) || 'error'}${res && res.hint ? ` (${res.hint})` : ''}`);
@@ -3086,7 +3174,7 @@ async function _rejectProposal(id, reason) {
   if (!p) { _setMessageBody(msg, 'That proposal is gone.'); _orchFinalize(msg); return; }
   if (p.status !== 'pending') { _setMessageBody(msg, `${p.name} is already ${p.status}.`); _orchFinalize(msg); return; }
   await decideProposal(inst, id, { status: 'rejected', reason });
-  await appendLedger(inst, ledgerEntry('decision', { status: 'rejected', action: p.name, targets: p.targets, proposalId: id, reason }));
+  await appendLedger(inst, ledgerEntry('decision', { status: 'rejected', action: p.name, targets: p.targets, proposalId: id, reason, urls: p.urls }));
   // A reasoned rejection is a LEARNING SIGNAL — banked as an observation-tier delta the ratchet can corroborate.
   if (reason) { try { await recordGoalItem(inst, { kind: 'delta', trigger: `proposing "${p.name}"`, body: `The user rejected this once: ${reason}`, provenance: 'proposal-reject' }); } catch { /* */ } }
   _setMessageBody(msg, `✗ Rejected ${p.name}${reason ? ` — noted: “${reason}”` : ''}.`);
@@ -4582,6 +4670,10 @@ const IL_PANEL_LEGS = {
   // unoffered — the offer filter only surfaces IL_PANEL_LEGS keys.)
   HIDE_PANEL:               { run: () => { $('btn-hide-panel')?.click(); return { rendered: true }; } },
   RELOAD_EXTENSION:         { run: () => { try { chrome.runtime.reload(); } catch { /* */ } return { rendered: true }; } },
+  // FL (v2.74.1348, DESIGN_app_fleet.md) — the fleet console legs, NL-routed through interpret (never regex):
+  // "review the queue" → the propose-only sweep; "show me both tickets" / "open zendesk" → ground-truth viewing.
+  REVIEW_QUEUE:             { run: async () => { await _runFleetSweep(); return { rendered: true }; } },
+  SHOW_ITEM_SOURCES:        { run: async (_msg, { params } = {}) => { await _showItemSources(params || {}); return { rendered: true }; } },
   EXPLORE_PAGE:             { run: async (msg) => { await _chatExplore({ msg }); return { rendered: true }; } },
   TOGGLE_TRACKING:          { run: async (msg) => {
     let cur = false;
@@ -4604,10 +4696,10 @@ function _ilAllCapabilities(tabId) {
 
 // Dispatch an ACT×Self PANEL leg JUDGE picked → its local handler. No il-confirm (see IL_PANEL_LEGS): the legs run
 // directly — the explicit `il:` command is the authorization, and window.confirm is dead in the async panel flow.
-async function _ilRunPanelAction(msg, { leg, panel, ask }) {
+async function _ilRunPanelAction(msg, { leg, panel, ask, params = {} }) {
   try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → self:${leg.key}`); } catch { /* */ }
   let r = null;
-  try { r = await panel.run(msg); }
+  try { r = await panel.run(msg, { ask, params }); }   // FL v1348 — interpret-bound params reach the panel leg (extra args are ignored by the param-free legs)
   catch (e) { _setMessageBody(msg, `🧠 Couldn’t ${leg.does || leg.name || 'do that'}${e && e.message ? ` — ${e.message}` : ''}.`); return; }
   if (r && r.rendered) return;                       // the action drew its own UI / reset the chat → no default line
   _setMessageBody(msg, panel.done || `🧠 ${leg.name || 'Done'}.`);
@@ -4627,7 +4719,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
       const okp = await _hitlConfirmBar(msg, { gated: leg.safety === 'gated' });
       if (!okp) { _setMessageBody(msg, '🧠 Cancelled.'); return 'cancelled'; }
     }
-    return _ilRunPanelAction(msg, { leg, panel, ask });
+    return _ilRunPanelAction(msg, { leg, panel, ask, params });
   }
   // §20 (v2.74.1288) — HEADER-REPLAY session-ride: a harvested cross-origin Bearer read (cookie-ride can't reach it) runs
   // via SESSION_REPLAY on the app tab, carrying the page-captured auth headers. Reuses the connector ANSWER-SHAPE render.
@@ -4959,6 +5051,23 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
     // next pick (live .1326: a broker-unauthorized bank fed "compose failed for this ask" back into <LEARNED>).
     const _infra = !ok && r && /^(broker-|gdoc-|canvas-no-anchor|no-compose|compose-empty)/.test(String(r.error || ''));
     if (!_infra) _bankCapabilityOutcome(goal, 'COMPOSE', ok, turn.memoryId);   // v1338 (review B) — keyed to the turn's instance
+    return true;
+  }
+
+  // FL (v2.74.1348, DESIGN_app_fleet.md) — interpret picked a fleet CONSOLE leg (NL → IL, the v1166 inversion:
+  // "review the queue" / "show me both tickets" / "open zendesk" — never a regex). Offered only for a connected
+  // app (sg.js gates via fleetOfferedLegs). Params bound by interpret ({proposal|targets|origin}) for the show leg.
+  if (d.intent === 'act' && (d.capabilityId === 'REVIEW_QUEUE' || d.capabilityId === 'SHOW_ITEM_SOURCES')
+      && retrieved.some((l) => l && l.domain === 'self' && l.key === d.capabilityId)) {
+    if (d.capabilityId === 'REVIEW_QUEUE') {
+      _setMessageBody(msg, '🧹 Reviewing the queue…');
+      _orchFinalize(msg);
+      await _runFleetSweep();
+      return true;
+    }
+    _setMessageBody(msg, '🔎 Opening the source…');
+    _orchFinalize(msg);
+    await _showItemSources(d.params || {});
     return true;
   }
 
@@ -5504,9 +5613,9 @@ async function sendChatMessage() {
       '- `teach: <ask>` — show me how to do something new here · `workflows` — your saved multi-step flows',
       '- `save as app: <name>` — turn this conversation into a reusable app',
       '',
-      '**Fleet (queue apps)**',
-      '- `sweep` (or “review the queue”) — read the connected systems and PROPOSE actions (never acts unasked)',
-      '- `pending` — the approval queue · `approve all` / `approve 1,3` / `reject 2 <why>`',
+      '**Fleet (queue apps)** — mostly just ask: “review the queue”, “show me both tickets”, “open zendesk”',
+      '- `sweep` — read the connected systems and PROPOSE actions (never acts unasked)',
+      '- `pending` — the approval queue · `approve all` / `approve 1,3` / `reject 2 <why>` · `show 2`',
       '- `ledger` / `ledger hour` / `ledger today` — what the app did, and why',
       '',
       'Type `/` for the capability picker. Say `stop` to halt a running job, `cancel` during setup.',
@@ -5515,8 +5624,10 @@ async function sendChatMessage() {
     return;
   }
 
-  // ─── FL (v2.74.1346, DESIGN_app_fleet.md) — the fleet verbs: sweep / pending / approve / reject / ledger ───
-  if (/^(sweep|review the queue)\s*$/i.test(text)) {
+  // ─── FL (v2.74.1346, DESIGN_app_fleet.md) — the fleet CONSOLE COMMANDS: terse, number-addressed, deterministic
+  // by design. All NATURAL LANGUAGE ("review the queue", "show me both tickets", "open zendesk") routes through
+  // interpret via the fleet legs (palette.fleetOfferedLegs — v1348; never static regex, the v1166 inversion). ───
+  if (/^sweep\s*$/i.test(text)) {
     input.value = ''; _autosizeInput();
     appendMessage({ role: 'user', body: text });
     await _runFleetSweep();
@@ -5556,6 +5667,17 @@ async function sendChatMessage() {
       const id = _sweepBatchIndex[parseInt(mReject[1], 10) - 1];
       if (!id) { const m2 = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m2, 'No such proposal number — run `pending` to renumber.', { markdown: true }); _orchFinalize(m2); return; }
       await _rejectProposal(id, (mReject[2] || '').trim());
+      return;
+    }
+    // FL-1c (v1347) — `show N`: open proposal N's GROUND-TRUTH pages (reuse-then-navigate; a merge shows both tickets).
+    const mShow = text.match(/^show\s+(\d+)\s*$/i);
+    if (mShow && _memoryId()) {
+      input.value = ''; _autosizeInput();
+      appendMessage({ role: 'user', body: text });
+      const id = _sweepBatchIndex[parseInt(mShow[1], 10) - 1];
+      const p = id ? (await loadProposals(_memoryId())).find((x) => x.id === id) : null;
+      if (!p) { const m4 = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m4, 'No such proposal number — run `pending` to renumber.', { markdown: true }); _orchFinalize(m4); return; }
+      await _showProposalSources(p);
       return;
     }
   }

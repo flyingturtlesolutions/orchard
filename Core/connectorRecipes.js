@@ -67,7 +67,10 @@ export function fillBody(template, args = {}) {
 // live, §12). `appHost` → origin auto-derived from the open `*.zendesk.com` tab; the probe fills `{me}` + closes the
 // anonymous-sentinel trap (§14: a logged-out session returns 200 + an anon user, so verify identity, not status).
 // All entries are GET reads (mode 'ask'); a TRUSTED curated read → safety 'auto'. Static query spaces are %20.
-const ZD = Object.freeze({ app: 'zendesk', appHost: 'zendesk.com', verifyIdentity: true, identityProbe: '/api/v2/users/me.json', method: 'GET' });
+// FL-1c (v2.74.1347) — `itemUrl`: the HUMAN page for this recipe's object (the agent-workspace ticket view),
+// templated on {id}. GROUND TRUTH: proposal/ledger targets link to the real page, assembled from TRUSTED data only
+// (connection origin + this template + a sanitized id) — the model never mints URLs. view_user overrides (users).
+const ZD = Object.freeze({ app: 'zendesk', appHost: 'zendesk.com', verifyIdentity: true, identityProbe: '/api/v2/users/me.json', method: 'GET', itemUrl: '/agent/tickets/{id}' });
 
 // The curated catalog — full CRUD (CX-3/4a reads + CX-6a writes). `{me}` resolves server-side from the session cookie,
 // so "my X" reads are param-free (no LLM binder, §13); by-id / search reads carry one typed param. A WRITE adds
@@ -105,7 +108,7 @@ export const CONNECTOR_RECIPES = [
     params: [{ name: 'query', type: 'string', required: true }] },
   { ...ZD, id: 'view_user', name: 'Look up a Zendesk user',
     does: 'look up a Zendesk user (a requester / customer) by id, riding your login',
-    endpoint: '/api/v2/users/{id}.json',
+    endpoint: '/api/v2/users/{id}.json', itemUrl: '/agent/users/{id}',
     params: [{ name: 'id', type: 'integer', required: true }] },
   // ── writes — gated HARD; fail-closed until the human confirms (CX-6/§9). Each carries a `body` template. ──────────
   { ...ZD, id: 'create_ticket', name: 'Create a Zendesk ticket', write: true, method: 'POST',

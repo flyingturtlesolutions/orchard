@@ -39,7 +39,7 @@ import { connectorLegsForConnections, harvestedRecipeLegs } from '../../Core/con
 import { brokerLegsForLinked } from '../../Core/brokerCatalog.js';   // CX-5c — broker (OAuth/MCP) legs, gated on LINKED providers
 import { legRef } from '../../Core/legRef.js';   // v1342 — unified ref for palette dedup (_seen seeding)
 import { parseSweepReads, parseSweepProposals } from '../../Core/sweepPrompt.js';   // FL-1 (v2.74.1346) — sweep output validated against the OFFERED legs
-import { composeOfferedLeg, policyFilter } from '../../Core/palette.js';   // GD-4b — the app's COMPOSE (draft-on-canvas) leg joins interpret's palette; v1340 (review A) — policyFilter: the 'forbidden' floor now runs on the LIVE interpret palette, not just the dormant ilRun
+import { composeOfferedLeg, policyFilter, fleetOfferedLegs } from '../../Core/palette.js';   // GD-4b — the app's COMPOSE (draft-on-canvas) leg joins interpret's palette; v1340 (review A) — policyFilter: the 'forbidden' floor now runs on the LIVE interpret palette, not just the dormant ilRun; FL (v1348) — the fleet console legs (NL → sweep/show via IL, never regex)
 import { neutralizeFalseCompletion } from '../../Core/answerGuard.js';   // honesty belt — the answer path dispatches nothing, so a completion claim on a side-effect COMMAND is a fabrication (the calendar "✅ I created it" bug)
 import { describeObjectModel } from '../../Core/appDef.js';   // OM — render the app's object model (noun/states/actions/transitions) as a context block
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability, findDuplicateCapabilities } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A; GA-6 dedup
@@ -1206,10 +1206,13 @@ export function createSgMessageHandlers(ctx) {
         // brief; no ticket/connector context required) instead of clarify-looping. chat.js routes the pick through
         // COMPOSE_CANVAS; with a spec already on the surface the ask becomes a GD-4 revision turn.
         const composeLeg = appId ? composeOfferedLeg(builtinApp(appId)) : null;
+        // FL (v1348) — the fleet CONSOLE legs join interpret's palette for a connected app: "review the queue" /
+        // "show me both tickets" / "open zendesk" route through the IL like everything else (no static regex).
+        const fleetLegs = (appId && connections.length) ? fleetOfferedLegs(builtinApp(appId), true) : [];
         // v2.74.1340 (review A) — the §2.3 policy floor on the LIVE palette: a `forbidden`-safety leg is never
         // offerable to interpret (it previously ran only in the dormant Core/ilRun.js — the floor was unwired here).
         // The rule table stays empty until user routing-rules ship; the unrelaxable floor is what matters now.
-        const retrieved = policyFilter([...ragLegs, ...connLegs, ...harvestedLegs, ...brokerLegs, ...(composeLeg ? [composeLeg] : [])], { scope: { ground: groundId || null } });
+        const retrieved = policyFilter([...ragLegs, ...connLegs, ...harvestedLegs, ...brokerLegs, ...(composeLeg ? [composeLeg] : []), ...fleetLegs], { scope: { ground: groundId || null } });
         const primitives = ['OPEN_URL', 'CLICK', 'TYPE', 'SCROLL', 'EXTRACT'];
         // F-2 (v2.74.1179) — feed interpret the live page VOCABULARY (the same affordances IL_ANSWER reads from the
         // cached Locale) so its act/teach/clarify decisions are grounded in what the page actually offers, not just
@@ -1297,14 +1300,17 @@ export function createSgMessageHandlers(ctx) {
         if (phase === 'reads') {
           const raw = await AnthropicService.sweepReads({ seed, learned, objects, legs: askLegs, maxReads: 3 });
           const reads = parseSweepReads(raw, { legs: askLegs, maxReads: 3 });
-          Logger.info('route', `SWEEP ▸ reads → picked ${reads.length} of ${askLegs.length} offered (${connections.length} connection(s))`);
+          Logger.info('route', `SWEEP ▸ reads → picked [${reads.map((r) => r.key).join(', ') || '—'}] of ${askLegs.length} offered (${connections.length} connection(s))`);
           sendResponse({ success: true, reads, legs: askLegs });
         } else {
-          const results = Array.isArray(payload?.results) ? payload.results.slice(0, 3) : [];
-          const raw = await AnthropicService.sweepPropose({ seed, learned, objects, legs: actLegs, results });
-          const { proposals, summary } = parseSweepProposals(raw, { legs: actLegs });
-          Logger.info('route', `SWEEP ▸ propose → ${proposals.length} proposal(s) from ${results.length} read(s), ${actLegs.length} action(s) offered${summary ? ` — ${summary.slice(0, 80)}` : ''}`);
-          sendResponse({ success: true, proposals, summary });
+          // FL-1b (v1347) — round 1 may return `needs` (targeted evidence reads); round 2 is FINAL (needs ignored).
+          const round = payload?.round === 2 ? 2 : 1;
+          const results = Array.isArray(payload?.results) ? payload.results.slice(0, 6) : [];   // 3 breadth + 3 evidence
+          const raw = await AnthropicService.sweepPropose({ seed, learned, objects, legs: actLegs, askLegs: round === 1 ? askLegs : [], results, round });
+          const { proposals, needs, summary } = parseSweepProposals(raw, { legs: actLegs, askLegs });
+          const outNeeds = round === 1 ? needs : [];
+          Logger.info('route', `SWEEP ▸ propose r${round} → ${proposals.length} proposal(s)${outNeeds.length ? ` + ${outNeeds.length} evidence need(s)` : ''} from ${results.length} read(s), ${actLegs.length} action(s) offered${summary ? ` — ${summary.slice(0, 80)}` : ''}`);
+          sendResponse({ success: true, proposals, needs: outNeeds, summary });
         }
       } catch (err) {
         Logger.error('background', `SWEEP_PROPOSE failed: ${err.message}`);

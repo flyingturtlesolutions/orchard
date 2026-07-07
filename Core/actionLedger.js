@@ -26,6 +26,8 @@ export function ledgerEntry(kind, fields = {}, now = Date.now()) {
     if (typeof fields.ok === 'boolean') e.ok = fields.ok;
     if (_str(fields.error)) e.error = _str(fields.error).slice(0, 200);
     if (fields.counts && typeof fields.counts === 'object') e.counts = fields.counts;
+    // FL-1c (v2.74.1347) — ground-truth links per target (TRUSTED, built by Core/proposals.targetUrls — never model text)
+    if (Array.isArray(fields.urls) && fields.urls.length) e.urls = fields.urls.filter((u) => u && u.id && /^https:\/\//.test(u.url)).slice(0, 12);
   }
   return e;
 }
@@ -47,14 +49,18 @@ export function summarizeLedger(items, { sinceMs = 0, now = Date.now() } = {}) {
   return { total: inWindow.length, byKind, executedByAction };
 }
 
-/** Render the most recent N entries as console lines (newest first). PURE — caller escapes for HTML. */
+/** Render the most recent N entries as console lines (newest first). PURE — caller escapes for HTML.
+ * v1348 (user direction: conversational, no hyperlinks) — targets render PLAIN; the trusted `urls` stay ON the
+ * entries as provenance data (the SHOW_ITEM_SOURCES leg / `show N` resolve through them), they just never render
+ * as links. */
 export function renderLedgerLines(items, n = 12) {
   const list = (Array.isArray(items) ? items : []).slice(-n).reverse();
   return list.map((e) => {
     const t = new Date(e.ts).toLocaleTimeString();
+    const tgts = e.targets && e.targets.length ? ` (${e.targets.join(', ')})` : '';
     if (e.kind === 'sweep') return `${t} · sweep — ${e.counts ? Object.entries(e.counts).map(([k, v]) => `${v} ${k}`).join(', ') : 'ran'}`;
-    if (e.kind === 'decision') return `${t} · ${e.status || 'decided'} — ${e.action || ''}${e.targets ? ` (${e.targets.join(', ')})` : ''}${e.reason ? ` — ${e.reason}` : ''}`;
-    if (e.kind === 'execution') return `${t} · ${e.ok === false ? '✗ failed' : '✓ executed'} — ${e.action || ''}${e.targets ? ` (${e.targets.join(', ')})` : ''}${e.error ? ` — ${e.error}` : ''}`;
-    return `${t} · proposed — ${e.action || ''}${e.targets ? ` (${e.targets.join(', ')})` : ''}${e.why ? ` — ${e.why}` : ''}`;
+    if (e.kind === 'decision') return `${t} · ${e.status || 'decided'} — ${e.action || ''}${tgts}${e.reason ? ` — ${e.reason}` : ''}`;
+    if (e.kind === 'execution') return `${t} · ${e.ok === false ? '✗ failed' : '✓ executed'} — ${e.action || ''}${tgts}${e.error ? ` — ${e.error}` : ''}`;
+    return `${t} · proposed — ${e.action || ''}${tgts}${e.why ? ` — ${e.why}` : ''}`;
   });
 }

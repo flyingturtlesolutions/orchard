@@ -5281,10 +5281,11 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     return (res && res.success !== false) ? res.text : null;
   }
 
-  /** FL-1 phase B: read results (fenced DATA) → proposals over the offered ACTION tools. Raw text; caller parses. */
-  static async sweepPropose({ seed = '', learned = '', objects = '', legs = [], results = [] } = {}) {
+  /** FL-1 phase B: read results (fenced DATA) → proposals over the offered ACTION tools. `askLegs`+`round` = the
+   * FL-1b evidence round (v1347): round 1 may request targeted reads via `needs`; round 2 is final. Raw text. */
+  static async sweepPropose({ seed = '', learned = '', objects = '', legs = [], askLegs = [], results = [], round = 1 } = {}) {
     if (!(await AnthropicService.hasLlm())) return null;
-    const { system, user } = buildSweepProposeMessages({ seed, learned, objects, legs, results });
+    const { system, user } = buildSweepProposeMessages({ seed, learned, objects, legs, askLegs, results, round });
     const res = await AnthropicService.#call(system, user, 1600, [], { role: 'describe', operation: 'sweep-propose' });
     return (res && res.success !== false) ? res.text : null;
   }
