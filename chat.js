@@ -3150,11 +3150,24 @@ function _renderProposalBatch(list) {
   // v1348 (user direction) — CONVERSATIONAL ground truth: targets render as PLAIN TEXT (no hyperlinks anywhere);
   // viewing the real pages is a VERB — `show 2` / `show tickets` / `go to origin` — resolved through SHOW_SOURCES
   // (reuse-then-navigate). The trusted urls still ride the records (provenance); only the entry is conversational.
+  // v1372 (live gap: "is the proposal to change status to pending? to close?") — the card must state the EXACT
+  // parameters that will be sent, not just the action name: "Set a Zendesk ticket status — 65679 → status: solved".
+  // Params are model-bound (untrusted) — escape-first markdown renders them; backticks stripped so the code spans
+  // can't be broken; params that merely repeat a target (the id) are elided.
+  const _paramBits = (p) => {
+    const tset = new Set((Array.isArray(p.targets) ? p.targets : []).map((t) => String(t).replace(/^#/, '')));
+    return Object.entries((p.params && typeof p.params === 'object') ? p.params : {})
+      .filter(([, v]) => v != null && (typeof v !== 'object' || Array.isArray(v)))
+      .map(([k, v]) => [k, (Array.isArray(v) ? v.map(String).join(', ') : String(v)).replace(/`/g, '′').slice(0, 80)])
+      .filter(([, v]) => v.trim() && !tset.has(v.replace(/^#/, '')));
+  };
   const lines = pend.map((p, i) => {
     const tag = p.safety === 'gated' ? ' ' : '';
     const tgt = p.targets && p.targets.length ? ` — ${p.targets.join(', ')}` : '';
+    const bits = _paramBits(p);
+    const prm = bits.length ? `\n   → ${bits.map(([k, v]) => `\`${k}: ${v}\``).join(' · ')}` : '';
     const ev = p.evidence && p.evidence.length ? `\n   > ${p.evidence.join(' · ')}` : '';
-    return `${i + 1}. **${p.name}**${tag}${tgt}\n   ${p.why || ''}${ev}`;
+    return `${i + 1}. **${p.name}**${tag}${tgt}${prm}\n   ${p.why || ''}${ev}`;
   });
   _setMessageBody(msg, `**${pendingSummary(pend)}**\n\n${lines.join('\n')}\n\n_Say:_ \`approve all\` · \`approve 1,3\` · \`reject 2 <why>\` · \`show 2\` — _or just ask (“show me both tickets”, “open zendesk”)._`, { markdown: true });
   const bar = _orchActionBar(msg);
