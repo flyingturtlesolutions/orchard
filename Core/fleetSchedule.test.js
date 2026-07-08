@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseEvery, describeEvery, sweepAlarmName, instanceFromAlarmName, buildSeedDirectivesMessages, parseSeedDirectives, rollDailyCounts, spikeVerdict, localDay, fmtCountdown } from './fleetSchedule.js';
+import { parseEvery, describeEvery, sweepAlarmName, instanceFromAlarmName, buildSeedDirectivesMessages, parseSeedDirectives, rollDailyCounts, spikeVerdict, localDay, fmtCountdown, queueStateLines, priorRunVerdict } from './fleetSchedule.js';
 
 describe('fleetSchedule — parseEvery (human interval → clamped minutes)', () => {
   it('parses m/h forms and bare numbers (minutes default)', () => {
@@ -73,12 +73,51 @@ describe('fleetSchedule — FL-8d spike detection (code counts, the model interp
     assert.equal(fmtCountdown((3600 + 5 * 60 + 42) * 1000), '1:05:42');
     assert.equal(fmtCountdown(-5), '0:00');
   });
-  it('pulse classes thread recipe → leg.tool (v1359 — the digest keys on CLASS, never a recipe id)', async () => {
+  it('pulse semantics thread recipe → leg.tool (v1359/v1375 — the digest keys on pulse DATA, never a recipe id)', async () => {
     const { recipeToLeg } = await import('./connectorLeg.js');
-    const leg = recipeToLeg({ id: 'inbox_unread', app: 'gmail', appHost: 'mail.google.com', endpoint: '/x', pulse: 'inflow', params: [] }, { trusted: true });
-    assert.equal(leg.tool.pulse, 'inflow');
+    const obj = recipeToLeg({ id: 'inbox_unread', app: 'gmail', appHost: 'mail.google.com', endpoint: '/x', pulse: { kind: 'inflow' }, params: [] }, { trusted: true });
+    assert.deepEqual(obj.tool.pulse, { kind: 'inflow' });
+    const legacy = recipeToLeg({ id: 'inbox_all', app: 'gmail', appHost: 'mail.google.com', endpoint: '/z', pulse: 'inventory', params: [] }, { trusted: true });
+    assert.deepEqual(legacy.tool.pulse, { kind: 'inventory' });   // string form normalizes
     const noPulse = recipeToLeg({ id: 'read_one', app: 'gmail', appHost: 'mail.google.com', endpoint: '/y', params: [] }, { trusted: true });
     assert.equal(noPulse.tool.pulse, null);
+  });
+});
+
+describe('fleetSchedule — H-1b priorRunVerdict (dead-run marker)', () => {
+  const NOW = 1_800_000_000_000;
+  it('no marker → neither in-flight nor died', () => {
+    assert.deepEqual(priorRunVerdict(null, NOW), { inFlight: false, died: false });
+    assert.deepEqual(priorRunVerdict({}, NOW), { inFlight: false, died: false });
+  });
+  it('fresh marker (<5m) → a run is in flight (skip the fire; no concurrent double-runs)', () => {
+    assert.deepEqual(priorRunVerdict({ runId: 'r', startedAt: NOW - 2 * 60_000 }, NOW), { inFlight: true, died: false });
+  });
+  it('stale marker (≥5m) → the previous run DIED mid-flight (report + proceed)', () => {
+    assert.deepEqual(priorRunVerdict({ runId: 'r', startedAt: NOW - 12 * 60_000 }, NOW), { inFlight: false, died: true });
+  });
+});
+
+describe('fleetSchedule — v1375 queueStateLines (the "You: 4 open · 3 pending" breakdown)', () => {
+  const _read = (pulse, count) => ({ leg: { tool: { pulse } }, value: { count } });
+  it('groups reads by scope, in read order, from their API counts', () => {
+    const lines = queueStateLines([
+      _read({ scope: 'mine', status: 'open' }, 4),
+      _read({ scope: 'mine', status: 'pending' }, 3),
+      _read({ kind: 'inventory', scope: 'team', status: 'open' }, 32),
+      _read({ kind: 'backlog', scope: 'team', status: 'unassigned' }, 3),
+    ]);
+    assert.deepEqual(lines, ['You: 4 open · 3 pending', 'Team: 32 open · 3 unassigned']);
+  });
+  it('skips reads without scope/status or without a count; dedupes a re-run cell; empty → []', () => {
+    const lines = queueStateLines([
+      _read({ kind: 'inflow' }, 98),                                  // no scope/status → not in the breakdown
+      _read({ scope: 'mine', status: 'open' }, 4),
+      _read({ scope: 'mine', status: 'open' }, 9),                    // duplicate cell — first read wins
+      { leg: { tool: { pulse: { scope: 'team', status: 'open' } } }, value: { items: [] } },   // no count → skipped
+    ]);
+    assert.deepEqual(lines, ['You: 4 open']);
+    assert.deepEqual(queueStateLines([]), []);
   });
 });
 

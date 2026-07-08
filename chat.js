@@ -31,7 +31,7 @@ import { classifyReadAsk, askListIndex } from './Core/observe.js';   // OBS-READ
 import { runIlStandin } from './Core/ilStandin.js';   // IL-3 — the single-shot stand-in folded through agentLoop@maxSteps=1 (DESIGN §8 Phase-1 parity)
 import { canBulkApprove, getPath, pendingSummary, targetUrls } from './Core/proposals.js';   // FL-2 (v2.74.1346) — the fleet pending queue's pure helpers; FL-1c (v1347) — ground-truth target links
 import { minimizeReadValue } from './Core/sweepPrompt.js';   // FL-2b (v1353) — slim read facts into the sweep prompt (coverage + privacy)
-import { parseEvery, describeEvery, instanceFromAlarmName, fmtCountdown } from './Core/fleetSchedule.js';   // FL-6 (v1355) — the clock trigger's interval grammar; FL-6d (v1361) — the card countdown
+import { parseEvery, describeEvery, instanceFromAlarmName, fmtCountdown, queueStateLines } from './Core/fleetSchedule.js';   // FL-6 (v1355) — the clock trigger's interval grammar; FL-6d (v1361) — the card countdown; v1375 — the queue-state breakdown
 import { ledgerEntry, summarizeLedger, renderLedgerLines, renderWorkTrace } from './Core/actionLedger.js';   // FL-4 — the app action ledger (pure half); FL-1e (v1352) — the "show work" run trace
 import { loadProposals, addProposals, decideProposal, pendingCounts } from './Services/Storage/ProposalStore.js';   // FL-2 — instance-keyed pending queue; FL-6c — batched counts for the Rail chip
 import { filterRejectedRepeats, rejectionContext } from './Core/proposals.js';   // FL-9 (v1370) — rejections stick
@@ -2250,11 +2250,31 @@ async function _orchRun(msg, { groundId, capabilityId, intent, paramValues, tabI
   _orchFinalize(msg);   // v2.74.1338 (review D) — every _orchRun terminal survives a reload (CR-U1 class)
 }
 
-function _orchActionBar(msg) {
+function _orchActionBar(msg, { scope = null } = {}) {
   const bar = document.createElement('div');
   bar.className = 'orch-actions';
+  // v1373 (live pattern: "buttons from earlier in the conversation remain active") — a SCOPED bar retires every
+  // earlier bar of the same scope the moment it renders: only the newest proposals batch / feedback bar is live;
+  // superseded ones grey out instead of silently acting on stale state (an old 👎 fed _lastOrch — the LATEST
+  // action — so stale feedback bars weren't just confusing, they corrected the wrong run). Opt-in per bar kind:
+  // menus (workflow rows) and self-lifecycled confirm bars stay unscoped.
+  if (scope) {
+    try {
+      document.querySelectorAll(`.orch-actions[data-bar-scope="${CSS.escape(scope)}"]`).forEach((old) => {
+        old.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+        old.classList.add('stale');
+      });
+    } catch { /* */ }
+    bar.dataset.barScope = scope;
+  }
   msg.querySelector('.message-content').appendChild(bar);
   return bar;
+}
+
+// v1373 — a DECIDED proposal's ✓/✗ die everywhere, however it was decided (button, `approve 1`/`reject 2 <why>`
+// text command, bulk, supersede-by-render): the queue is the truth; buttons are just its projection.
+function _disableProposalButtons(id) {
+  try { document.querySelectorAll(`.orch-actions button[data-proposal-id="${CSS.escape(String(id))}"]`).forEach((b) => { b.disabled = true; }); } catch { /* */ }
 }
 
 // v2.74.938 (CR-U1) — persist a grounded-path assistant bubble at its TERMINAL text. appendMessage only
@@ -2361,7 +2381,7 @@ async function _orchFeedbackFlow(msg, { kind = '', text = '' } = {}) {
 // Studio). 👍 (affirm) is symmetric to 👎: it confirms the ask→capability alias and emits a POSITIVE outcome that
 // feedbackLearn turns into a relevance boost for similar future asks — the flywheel, made explicit.
 function _orchFeedbackBar(msg) {
-  const bar = _orchActionBar(msg);
+  const bar = _orchActionBar(msg, { scope: 'feedback' });   // v1373 — old 👍/👎 fed _lastOrch (the LATEST action); only the newest bar may judge it
   // v2.74.1343 — once-guard + lockBar: one verdict per run. A double-tap on 👍 (double-corroborate the alias) or a
   // 👍-then-🗑 slip is blocked — the first click disables all three synchronously.
   bar.appendChild(_mkOnceBtn('👍 Right', () => { _orchFeedbackFlow(appendMessage({ role: 'assistant', body: '' }), { kind: 'affirm' }); }, { lockBar: true }));
@@ -3118,15 +3138,16 @@ async function _runFleetSweep() {
   const minted = await addProposals(inst, proposals);
   await appendLedger(inst, ledgerEntry('sweep', { counts: { reads: results.length, proposals: minted.length }, runId }));
   for (const p of minted) await appendLedger(inst, ledgerEntry('proposal', { action: p.name, targets: p.targets, why: p.why, proposalId: p.id, urls: p.urls, runId }));
+  // v1375 — the queue-state breakdown ("You: 4 open · 3 pending"), from whatever pulse-tagged reads this sweep
+  // ran (code-assembled counts; the scheduled path additionally runs the full pulse set for a complete block).
+  const qBlock = queueStateLines(results).join('\n');
   if (!minted.length) {
     // v1347 honesty — don't claim "nothing needs doing" when the model's own summary says otherwise.
-    _setMessageBody(msg, summary
-      ? `Swept ${results.length} read${results.length === 1 ? '' : 's'} — no actionable proposals.\n\n${summary}`
-      : `Swept ${results.length} read${results.length === 1 ? '' : 's'} — the queue looks clean.`, { markdown: true });
+    _setMessageBody(msg, `Swept ${results.length} read${results.length === 1 ? '' : 's'} — ${summary ? 'no actionable proposals.' : 'the queue looks clean.'}${qBlock ? `\n\n${qBlock}` : ''}${summary ? `\n\n${summary}` : ''}`, { markdown: true });
     _orchFinalize(msg);
     return;
   }
-  _setMessageBody(msg, `Sweep done${summary ? ` — ${summary.replace(/\.+$/, '')}` : ''}.`, { markdown: true });   // v1351 — no doubled period when the summary ends with one
+  _setMessageBody(msg, `Sweep done${summary ? ` — ${summary.replace(/\.+$/, '')}` : ''}.${qBlock ? `\n\n${qBlock}` : ''}`, { markdown: true });   // v1351 — no doubled period when the summary ends with one
   _orchFinalize(msg);
   _renderProposalBatch(minted);
 }
@@ -3170,10 +3191,11 @@ function _renderProposalBatch(list) {
     return `${i + 1}. **${p.name}**${tag}${tgt}${prm}\n   ${p.why || ''}${ev}`;
   });
   _setMessageBody(msg, `**${pendingSummary(pend)}**\n\n${lines.join('\n')}\n\n_Say:_ \`approve all\` · \`approve 1,3\` · \`reject 2 <why>\` · \`show 2\` — _or just ask (“show me both tickets”, “open zendesk”)._`, { markdown: true });
-  const bar = _orchActionBar(msg);
+  const bar = _orchActionBar(msg, { scope: 'proposals' });   // v1373 — a new batch retires every older batch's bar
   pend.forEach((p, i) => {
-    bar.appendChild(_mkOnceBtn(`✓ ${i + 1}`, () => { void _approveProposal(p.id); }));
-    bar.appendChild(_mkOnceBtn(`✗ ${i + 1}`, () => { void _rejectProposal(p.id, ''); }));
+    const a = _mkOnceBtn(`✓ ${i + 1}`, () => { void _approveProposal(p.id); }); a.dataset.proposalId = p.id;
+    const r = _mkOnceBtn(`✗ ${i + 1}`, () => { void _rejectProposal(p.id, ''); }); r.dataset.proposalId = p.id;
+    bar.appendChild(a); bar.appendChild(r);
   });
   const bulk = pend.filter(canBulkApprove);
   if (bulk.length > 1) bar.appendChild(_mkOnceBtn(`Approve all safe (${bulk.length})`, () => { void _approveMany(bulk.map((b) => b.id)); }));
@@ -3383,6 +3405,7 @@ async function _approveMany(ids) {
 
 async function _approveProposal(id) {
   const inst = _memoryId(); if (!inst) return;
+  _disableProposalButtons(id);   // v1373 — this proposal's ✓/✗ die in every rendered batch, whatever path decided it
   const p = (await loadProposals(inst)).find((x) => x.id === id);
   const msg = appendMessage({ role: 'assistant', body: '' });
   if (!p) { _setMessageBody(msg, 'That proposal is gone.'); _orchFinalize(msg); return; }
@@ -3419,6 +3442,8 @@ async function _approveProposal(id) {
 
 async function _rejectProposal(id, reason) {
   const inst = _memoryId(); if (!inst) return;
+  reason = String(reason || '').replace(/^[\s:;,–—-]+/, '').trim();   // v1374 — `reject 2 : why` left a stray colon in the record + the learning delta
+  _disableProposalButtons(id);   // v1373 — mirror of _approveProposal
   const p = (await loadProposals(inst)).find((x) => x.id === id);
   const msg = appendMessage({ role: 'assistant', body: '' });
   if (!p) { _setMessageBody(msg, 'That proposal is gone.'); _orchFinalize(msg); return; }

@@ -135,21 +135,31 @@ export function filterRejectedRepeats(proposals, prior, { windowMs = REJECT_COOL
   const kept = []; const suppressed = [];
   for (const p of list) {
     const twin = rejected.find((r) => _pairKey(r) === _pairKey(p));
-    const moved = !!(twin && twin.basedOn && p && p.basedOn && String(twin.basedOn.value) !== String(p.basedOn.value));
+    // v1374 (live: the 65679 re-proposal slipped through) — "moved" ONLY when the SAME anchor (readKey + path)
+    // changed value. Each sweep may ground on a different field, and cross-field comparison made every
+    // re-grounding look like change. Index-shifted paths land on the conservative side (suppressed) — the
+    // human can always act manually inside the 24h window.
+    const moved = !!(twin && twin.basedOn && p && p.basedOn
+      && twin.basedOn.readKey === p.basedOn.readKey && twin.basedOn.path === p.basedOn.path
+      && String(twin.basedOn.value) !== String(p.basedOn.value));
     if (twin && !moved) suppressed.push({ proposal: p, reason: twin.reason || '' });
     else kept.push(p);
   }
   return { kept, suppressed };
 }
 
-/** The recent-rejection lines for the propose prompt's operational context (fenced data, last 8). PURE. */
+/** The recent-rejection lines for the propose prompt's operational context (fenced data, last 8). PURE.
+ * v1374 — scoped explicitly as PER-ITEM decisions: the live sweep read two same-reason rejections as a policy
+ * pivot and invented a bulk status-to-pending task the goal never asked for. */
 export function rejectionContext(prior, { windowMs = REJECT_COOLDOWN_MS, now = Date.now() } = {}) {
   const lines = [];
   for (const p of (Array.isArray(prior) ? prior : [])) {
     if (!p || p.status !== 'rejected' || (now - (p.decidedAt || 0)) > windowMs) continue;
-    lines.push(`recently REJECTED by the user (do not re-propose unless the item has changed): ${p.name}${p.targets && p.targets.length ? ` @ ${p.targets.join(', ')}` : ''}${p.reason ? ` — "${p.reason}"` : ''}`);
+    lines.push(`- ${p.name}${p.targets && p.targets.length ? ` @ ${p.targets.join(', ')}` : ''}${p.reason ? ` — "${p.reason}"` : ''}`);
   }
-  return lines.slice(-8).join('\n');
+  return lines.length
+    ? `USER DECISIONS on specific items (do not re-propose these unless the item has changed; learn the judgment behind each reason, but do NOT invent new task types or shift your overall behavior — each decision scopes to its item only):\n${lines.slice(-8).join('\n')}`
+    : '';
 }
 
 /** One-line batch summary: "6 pending: 3× Merge tickets · 2× Solve ticket · 1× Assign ticket". PURE. */

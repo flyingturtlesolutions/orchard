@@ -1487,6 +1487,9 @@ textarea {
    by other features). */
 .rail-item-badge.pending { margin-left: var(--sp-2); margin-right: 0; }
 
+/* v1373 — a superseded action bar (an older proposals batch / feedback bar) reads as dead, not just unclickable. */
+.orch-actions.stale { opacity: 0.45; }
+
 /* CV-3c (v2.74.1168) — the drawer ACCORDION (DESIGN_conversations.md §7): the Overview pin, the New-app entry, the
    app expand-chevron, the sub-task leaf glyph. Hierarchy is glyph + chevron + weight, NEVER indentation. */
 .rail-overview .rail-item-title,

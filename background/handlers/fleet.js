@@ -17,7 +17,7 @@ import { coerceParams } from '../../Core/connectorRecipes.js';
 import { minimizeReadValue } from '../../Core/sweepPrompt.js';
 import { targetUrls, getPath, autonomyFor, executedTodayByRecipe, filterRejectedRepeats, rejectionContext } from '../../Core/proposals.js';
 import { ledgerEntry } from '../../Core/actionLedger.js';
-import { sweepAlarmName, instanceFromAlarmName, describeEvery, rollDailyCounts, spikeVerdict, localDay } from '../../Core/fleetSchedule.js';
+import { sweepAlarmName, instanceFromAlarmName, describeEvery, rollDailyCounts, spikeVerdict, localDay, queueStateLines, priorRunVerdict } from '../../Core/fleetSchedule.js';
 import { builtinApp } from '../../Core/appCatalog.js';
 import { loadProposals, addProposals, decideProposal } from '../../Services/Storage/ProposalStore.js';
 import { appendLedger } from '../../Services/Storage/ActionLedgerStore.js';
@@ -30,11 +30,13 @@ async function _readSchedule(instanceId) {
   try { const got = await chrome.storage.local.get(_SCHED_KEY(instanceId)); return got[_SCHED_KEY(instanceId)] || null; } catch { return null; }
 }
 
-/** Execute one read leg through the in-SW channel (the same dispatch the panel's _runConnectorLeg plans). */
+/** Execute one read leg through the in-SW channel (the same dispatch the panel's _runConnectorLeg plans).
+ * H-1a (v1376) — `headless: true` rides every payload: INVOKE_SESSION must fail fast on signed-out instead of
+ * focusing a login tab and waiting for a human who isn't there. */
 async function _runReadLeg(invokeSgHandler, leg, params) {
   const plan = planExec(leg, coerceParams(params || {}, leg.paramSchema), {});
   if (!plan || !plan.ok || !plan.channel) return { ok: false, error: (plan && plan.reason) || 'no executor' };
-  const res = await invokeSgHandler(plan.channel, plan.payload);
+  const res = await invokeSgHandler(plan.channel, { ...plan.payload, headless: true });
   if (!res || res.success === false) return { ok: false, error: (res && res.error) || 'failed' };
   return { ok: true, value: res.value };
 }
@@ -60,7 +62,7 @@ async function _executeHeadless(instanceId, p, { invokeSgHandler, runId }) {
   const plan = planExec(p.leg, p.params, {});
   let res = null;
   if (!plan || !plan.ok || !plan.channel) res = { success: false, error: (plan && plan.reason) || 'no executor' };
-  else { try { res = await invokeSgHandler(plan.channel, { ...plan.payload, confirmed: true }); } catch (e) { res = { success: false, error: (e && e.message) || 'failed' }; } }
+  else { try { res = await invokeSgHandler(plan.channel, { ...plan.payload, confirmed: true, headless: true }); } catch (e) { res = { success: false, error: (e && e.message) || 'failed' }; } }   // H-1a — no reauth-focus from the clock
   const ok = !!(res && res.success !== false);
   await decideProposal(instanceId, p.id, { status: ok ? 'executed' : 'failed', reason: ok ? '' : ((res && res.error) || 'failed') });
   await appendLedger(instanceId, ledgerEntry('execution', { action: p.name, targets: p.targets, proposalId: p.id, ok, error: ok ? '' : ((res && res.error) || 'failed'), urls: p.urls, runId }));
@@ -75,16 +77,31 @@ async function _note(convId, id, body) {
 }
 const _hhmm = () => { try { return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch { return ''; } };
 
+const _RUN_KEY = (instanceId) => `fleetRun:${instanceId}`;   // H-1b — the in-flight run marker (instance-keyed)
+
 /** The headless sweep — the clock-fired twin of chat.js `_runFleetSweep`. Never throws. */
 export async function runHeadlessSweep(instanceId, { invokeSgHandler } = {}) {
   const sched = await _readSchedule(instanceId);
   if (!sched || !sched.convId) return;
+  // H-1b (v1376) — the DEAD-RUN marker: a mid-flight SW/browser death runs no catch, so the run vanishes without
+  // a trace. Every run stamps a marker and clears it on exit; the NEXT fire judges any leftover — fresh means a
+  // run is still in flight (skip: no concurrent double-runs), stale means the previous run died (say so, proceed).
+  let prior = null;
+  try { const got = await chrome.storage.local.get(_RUN_KEY(instanceId)); prior = got[_RUN_KEY(instanceId)] || null; } catch { /* */ }
+  const verdict = priorRunVerdict(prior);
+  if (verdict.inFlight) { try { Logger.info('route', `SWEEP ▸ clock ${instanceId.slice(0, 12)} → skipped (a run is already in flight)`); } catch { /* */ } return; }
   const runId = `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+  try { await chrome.storage.local.set({ [_RUN_KEY(instanceId)]: { runId, startedAt: Date.now() } }); } catch { /* */ }
   const _step = (phase, action, ok, note) => appendLedger(instanceId, ledgerEntry('step', { runId, phase, action, ok, note }));
   // FL-6e — a scheduled run must NEVER be chat-invisible (the first live clock test: "timer resets but nothing
   // prints" — a failed run and a quiet run both looked like a run that never happened). Every early exit says why.
   const _fail = (why) => _note(sched.convId, 'sweep_status', `Scheduled sweep at ${_hhmm()} couldn't complete — ${why}. Details: \`show work\`.`);
   try {
+    if (verdict.died) {
+      const when = (() => { try { return new Date(prior.startedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch { return 'earlier'; } })();
+      await _step('plan', 'clock', false, `previous run (${when}) died mid-flight — browser or extension shutdown`);
+      await _note(sched.convId, 'sweep_status', `The scheduled run at ${when} didn't finish (browser or extension shut down mid-run). This run continues normally.`);
+    }
     const conv = await ConversationStore.load(sched.convId);
     if (!conv) {
       // The app conversation is gone — the schedule is orphaned; self-clear instead of firing forever.
@@ -120,7 +137,22 @@ export async function runHeadlessSweep(instanceId, { invokeSgHandler } = {}) {
       let _size = ''; try { _size = run.ok ? `${mv && mv.count != null ? `${mv.shown}/${mv.count} items, ` : ''}~${JSON.stringify(mv).length} chars` : ''; } catch { /* */ }
       await _step('read', leg.name || rd.key, run.ok !== false, run.ok ? _size : (run.error || 'read failed'));
     }
-    if (!results.length || results.every((x) => x.value && x.value.error)) {
+    // v1375 — deterministic DIGEST coverage: run every param-free PULSE read the model didn't pick (plain API
+    // GETs, no LLM cost) so the queue-state breakdown is complete on every fire, not only when phase-A happened
+    // to choose those reads. Kept OUT of the propose results (they'd crowd the handler's results belt + the
+    // evidence-needs headroom) — digest-only.
+    const pulseResults = [];
+    const _readKeys = new Set(results.map((x) => x.key));
+    for (const leg of legs) {
+      const pl = leg && leg.tool && leg.tool.pulse;
+      if (!pl || _readKeys.has(leg.key)) continue;
+      if (Array.isArray(leg.params) && leg.params.length) continue;   // param-free only — nothing to bind headless
+      const run = await _runReadLeg(invokeSgHandler, leg, {});
+      if (run.ok) { pulseResults.push({ key: leg.key, params: {}, value: minimizeReadValue(run.value), leg }); await _step('read', leg.name || leg.key, true, 'digest pulse'); }
+      else await _step('read', leg.name || leg.key, false, run.error || 'read failed');
+    }
+
+    if ((!results.length || results.every((x) => x.value && x.value.error)) && !pulseResults.length) {
       await _step('propose', 'round 1', false, 'no readable queue (signed out / site unreachable?) — skipped');
       await _fail('the queue wasn’t readable (signed out or the site is unreachable?)');
       return;
@@ -201,12 +233,14 @@ export async function runHeadlessSweep(instanceId, { invokeSgHandler } = {}) {
     }
     try { Logger.info('route', `SWEEP ▸ clock ${instanceId.slice(0, 12)} → ${minted.length} proposal(s) from ${results.length} read(s); auto-executed ${executed}${failed ? `, ${failed} failed` : ''}${capped ? `, ${capped} capped` : ''}`); } catch { /* */ }
 
-    // FL-8d — digest + spike, from whatever counts this run's reads happened to carry (data-driven, never
-    // forced). Keyed by the reads' PULSE CLASS (recipe data, v1359) — never a recipe id: this harness must stay
-    // app-blind (the portability test; the v1358 first cut named three Zendesk ids here — that was the bug).
-    const _countFor = (cls) => { const e = results.find((x) => x.leg && x.leg.tool && x.leg.tool.pulse === cls); const v = e && e.value; return (v && typeof v.count === 'number') ? v.count : null; };
+    // FL-8d — digest + spike, keyed by the reads' PULSE semantics (recipe data, v1359; object form v1375) —
+    // never a recipe id: this harness must stay app-blind (the portability test; the v1358 first cut named three
+    // Zendesk ids here — that was the bug). Digest counts come from BOTH the model-picked reads and the
+    // deterministic pulse reads.
+    const allReads = [...results, ...pulseResults];
+    const _countFor = (cls) => { const e = allReads.find((x) => x.leg && x.leg.tool && x.leg.tool.pulse && x.leg.tool.pulse.kind === cls); const v = e && e.value; return (v && typeof v.count === 'number') ? v.count : null; };
     const day = localDay();
-    const openN = _countFor('inventory'), unassignedN = _countFor('backlog'), newN = _countFor('inflow');
+    const newN = _countFor('inflow');
     let spike = { spike: false, baseline: null, ratio: null };
     const schedNow = await _readSchedule(instanceId);   // re-read — never resurrect a schedule turned off mid-run
     const firstOfDay = !!schedNow && schedNow.lastDigestDay !== day;
@@ -221,11 +255,11 @@ export async function runHeadlessSweep(instanceId, { invokeSgHandler } = {}) {
     // time), so results are always visible without hourly spam.
     const pendingLeft = minted.length - executed - failed - staleN;
     const lines = [];
-    const bits = [];
-    if (openN != null) bits.push(`${openN} in the queue`);
-    if (unassignedN != null) bits.push(`${unassignedN} unassigned`);
-    if (newN != null) bits.push(`${newN} new in 24h${spike.baseline != null ? ` (~${spike.baseline}/day baseline)` : ''}`);
-    if (bits.length) lines.push(`Queue: ${bits.join(' · ')}.`);
+    // v1375 — the queue-state breakdown ("You: 4 open · 3 pending / Team: 32 open · 3 unassigned"), assembled by
+    // CODE from the reads' own API counts + their pulse {scope, status} data. Inflow keeps its baseline tail.
+    const qLines = queueStateLines(allReads);
+    if (newN != null) qLines.push(`${newN} new in 24h${spike.baseline != null ? ` (~${spike.baseline}/day baseline)` : ''}`);
+    if (qLines.length) lines.push(qLines.join('\n'));
     if (spike.spike) lines.push(`New-ticket volume spike — ${newN} in 24h vs ~${spike.baseline}/day${spike.ratio ? ` (${spike.ratio}×)` : ''}. See the sweep summary / \`show work\` for the cluster.`);
     if (executed || failed || staleN) lines.push(`Ran ${executed} action${executed === 1 ? '' : 's'} unattended (policy)${failed ? `, ${failed} failed` : ''}${staleN ? `, ${staleN} skipped as stale` : ''} — \`ledger\` has the trail.`);
     if (capped) lines.push(`${capped} held at the daily cap.`);
@@ -238,6 +272,10 @@ export async function runHeadlessSweep(instanceId, { invokeSgHandler } = {}) {
     }
   } catch (e) {
     try { await _step('propose', 'run', false, (e && e.message) || 'headless sweep failed'); } catch { /* */ }
+  } finally {
+    // H-1b — clear OUR marker only (an overlapping newer run owns its own); a crash before this line is exactly
+    // what the next fire's dead-run verdict reports.
+    try { const got = await chrome.storage.local.get(_RUN_KEY(instanceId)); if (got[_RUN_KEY(instanceId)] && got[_RUN_KEY(instanceId)].runId === runId) await chrome.storage.local.remove(_RUN_KEY(instanceId)); } catch { /* */ }
   }
 }
 

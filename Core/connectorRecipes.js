@@ -84,12 +84,12 @@ export const CONNECTOR_RECIPES = [
   // FL-1d (v2.74.1349) — `listUrl`: the COLLECTION's human page (the itemUrl counterpart for list-shaped reads).
   // These are search reads, so the honest view is the agent search page running the SAME query — "show me" after
   // "how many open tickets" opens the list the count came from, not a random item.
-  { ...ZD, id: 'my_open_tickets', name: 'My open Zendesk tickets',
+  { ...ZD, id: 'my_open_tickets', name: 'My open Zendesk tickets', pulse: { scope: 'mine', status: 'open' },
     does: 'list your OPEN Zendesk tickets (assigned to you), riding your Zendesk login',
     endpoint: '/api/v2/search.json?query=type:ticket%20status:open%20assignee:{me}&per_page=25&sort_by=created_at&sort_order=desc',
     listUrl: '/agent/search/1?type=ticket&q=status%3Aopen%20assignee%3Ame',
     params: [] },
-  { ...ZD, id: 'my_pending_tickets', name: 'My pending Zendesk tickets',
+  { ...ZD, id: 'my_pending_tickets', name: 'My pending Zendesk tickets', pulse: { scope: 'mine', status: 'pending' },
     does: 'list your PENDING Zendesk tickets (awaiting the customer, assigned to you), riding your login',
     endpoint: '/api/v2/search.json?query=type:ticket%20status:pending%20assignee:{me}&per_page=25&sort_by=updated_at&sort_order=desc',
     listUrl: '/agent/search/1?type=ticket&q=status%3Apending%20assignee%3Ame',
@@ -100,20 +100,22 @@ export const CONNECTOR_RECIPES = [
     listUrl: '/agent/search/1?type=ticket&q=status%3Asolved%20assignee%3Ame',
     params: [] },
   // ── FL-8a (v2.74.1358) — the ADMIN-view reads: the whole queue, not just mine (the fleet sweep's working set).
-  // `pulse` (v1359) — the read's GENERIC digest role ('inventory' | 'backlog' | 'inflow'): the fleet harness keys
-  // its digest/spike bookkeeping on the CLASS, never on a recipe id — a Gmail fleet app tags its own reads and
-  // gets the same digest for free (the portability test). Data declares meaning; the harness stays app-blind. ──
-  { ...ZD, id: 'all_open_tickets', name: 'All open Zendesk tickets (whole queue)', pulse: 'inventory',
+  // `pulse` (v1359; enriched v1375) — the read's GENERIC digest semantics, as DATA: {kind, scope, status}.
+  // kind ('inventory' | 'backlog' | 'inflow') keys the harness's spike/count bookkeeping; scope+status place the
+  // read's exact API `count` into the queue-state breakdown ("You: 4 open · 3 pending / Team: 32 open · 3
+  // unassigned") — CODE assembles counts, the model never counts. Never keyed on a recipe id — a Gmail fleet app
+  // tags its own reads and gets the same digest for free (the portability test). ──
+  { ...ZD, id: 'all_open_tickets', name: 'All open Zendesk tickets (whole queue)', pulse: { kind: 'inventory', scope: 'team', status: 'open' },
     does: 'list ALL open Zendesk tickets across the whole queue — everyone’s and unassigned, oldest first (the admin/queue-review view, not just yours), riding your login',
     endpoint: '/api/v2/search.json?query=type:ticket%20status:open&per_page=100&sort_by=created_at&sort_order=asc',
     listUrl: '/agent/search/1?type=ticket&q=status%3Aopen',
     params: [] },
-  { ...ZD, id: 'unassigned_tickets', name: 'Unassigned Zendesk tickets', pulse: 'backlog',
+  { ...ZD, id: 'unassigned_tickets', name: 'Unassigned Zendesk tickets', pulse: { kind: 'backlog', scope: 'team', status: 'unassigned' },
     does: 'list open Zendesk tickets with NO assignee (the assignment backlog), oldest first, riding your login',
     endpoint: '/api/v2/search.json?query=type:ticket%20status:open%20assignee:none&per_page=100&sort_by=created_at&sort_order=asc',
     listUrl: '/agent/search/1?type=ticket&q=status%3Aopen%20assignee%3Anone',
     params: [] },
-  { ...ZD, id: 'tickets_last_day', name: 'Zendesk tickets created in the last 24h', pulse: 'inflow',
+  { ...ZD, id: 'tickets_last_day', name: 'Zendesk tickets created in the last 24h', pulse: { kind: 'inflow' },
     does: 'list Zendesk tickets CREATED in the last 24 hours (new-volume pulse — the digest / spike-detection feed), riding your login',
     endpoint: '/api/v2/search.json?query=type:ticket%20created>24hours&per_page=100&sort_by=created_at&sort_order=desc',
     listUrl: '/agent/search/1?type=ticket&q=created%3E24hours',

@@ -298,9 +298,16 @@ describe('FL-9 — filterRejectedRepeats / rejectionContext', () => {
     assert.equal(suppressed.length, 1);
     assert.equal(suppressed[0].reason, 'not yet');
   });
-  it('lets it through when the grounding anchor MOVED (the item changed since the rejection)', () => {
+  it('lets it through when the SAME anchor MOVED (same readKey+path, different value)', () => {
     const { kept } = filterRejectedRepeats([_fresh('update_ticket_status', ['65679'], 'pending')], [_rej('update_ticket_status', ['65679'], { basedOnValue: 'open' })], { now: NOW });
     assert.equal(kept.length, 1);
+  });
+  it('a DIFFERENT grounding field is NOT "moved" — suppressed (v1374: the 65679 re-proposal slipped through cross-field comparison)', () => {
+    const fresh = _fresh('update_ticket_status', ['65679'], 'whatever');
+    fresh.basedOn = { readKey: 'other_read', path: 'results[3].updated_at', value: '2026-07-08T09:40:00Z' };
+    const { kept, suppressed } = filterRejectedRepeats([fresh], [_rej('update_ticket_status', ['65679'], { basedOnValue: 'open' })], { now: NOW });
+    assert.equal(kept.length, 0);
+    assert.equal(suppressed.length, 1);
   });
   it('window + identity: an old rejection or different targets never suppress', () => {
     const old = _rej('update_ticket_status', ['65679'], { decidedAt: NOW - 30 * 3600_000 });
@@ -308,10 +315,15 @@ describe('FL-9 — filterRejectedRepeats / rejectionContext', () => {
     assert.equal(filterRejectedRepeats([_fresh('update_ticket_status', ['99999'])], [_rej('update_ticket_status', ['65679'])], { now: NOW }).kept.length, 1);
     assert.equal(filterRejectedRepeats([_fresh('assign_ticket_to_me', ['65679'])], [_rej('update_ticket_status', ['65679'])], { now: NOW }).kept.length, 1);
   });
-  it('rejectionContext renders name @ targets — "reason" lines (window-scoped)', () => {
+  it('rejectionContext renders name @ targets — "reason" lines under a PER-ITEM scoping header (v1374)', () => {
     const ctx = rejectionContext([_rej('update_ticket_status', ['65679'], { reason: "agent hasn't actioned it" })], { now: NOW });
     assert.ok(ctx.includes('update_ticket_status @ 65679'));
     assert.ok(ctx.includes("agent hasn't actioned it"));
+    assert.ok(/do NOT invent new task types/.test(ctx));   // the live sweep pivoted to bulk status-to-pending
     assert.equal(rejectionContext([], { now: NOW }), '');
+  });
+  it('PROPOSE_SYSTEM carries the seed-fidelity rule (v1374: only the GOAL’s enumerated tasks)', () => {
+    const { system } = buildSweepProposeMessages({ seed: 's', legs: ACT_LEGS, results: [], round: 2 });
+    assert.ok(/SEED FIDELITY/.test(system));
   });
 });

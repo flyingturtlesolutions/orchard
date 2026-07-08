@@ -75,6 +75,45 @@ export function localDay(now = Date.now()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+/**
+ * H-1b (v2.74.1376) — judge a leftover run marker: a marker younger than the in-flight window means another run
+ * is (probably) still executing → skip this fire (no concurrent double-runs); an older one means the previous
+ * run DIED mid-flight (SW/browser shutdown — its catch never ran, so nothing was reported). PURE.
+ * @returns {{ inFlight: boolean, died: boolean }}
+ */
+export function priorRunVerdict(marker, now = Date.now(), { inFlightMs = 5 * 60_000 } = {}) {
+  if (!marker || !Number.isFinite(marker.startedAt)) return { inFlight: false, died: false };
+  return (now - marker.startedAt) < inFlightMs ? { inFlight: true, died: false } : { inFlight: false, died: true };
+}
+
+/**
+ * v1375 (user: "You have 4 Open, 3 Pending / Team has 10 Open, 3 Unassigned") — the queue-state breakdown, from
+ * the reads' own API counts + their pulse semantics ({scope, status} — recipe DATA). Code assembles, the model
+ * never counts; a read without scope/status (or without a count) simply doesn't contribute. PURE.
+ * @param {Array<{leg?:object, value?:object}>} results
+ * @returns {string[]} e.g. ['You: 4 open · 3 pending', 'Team: 32 open · 3 unassigned']
+ */
+export function queueStateLines(results) {
+  const SCOPE_LABEL = { mine: 'You', team: 'Team' };
+  const cells = new Map();   // scope → [[status, count], …] in read order
+  const seen = new Set();    // scope|status — first read wins (dedupe re-runs)
+  for (const r of (Array.isArray(results) ? results : [])) {
+    const p = r && r.leg && r.leg.tool && r.leg.tool.pulse;
+    if (!p || typeof p !== 'object' || !p.scope || !p.status) continue;
+    const count = (r.value && typeof r.value.count === 'number') ? r.value.count : null;
+    if (count == null || seen.has(`${p.scope}|${p.status}`)) continue;
+    seen.add(`${p.scope}|${p.status}`);
+    if (!cells.has(p.scope)) cells.set(p.scope, []);
+    cells.get(p.scope).push([p.status, count]);
+  }
+  const lines = [];
+  for (const [scope, arr] of cells) {
+    const label = SCOPE_LABEL[scope] || (scope.charAt(0).toUpperCase() + scope.slice(1));
+    lines.push(`${label}: ${arr.map(([s, c]) => `${c} ${s}`).join(' · ')}`);
+  }
+  return lines;
+}
+
 /** FL-6d (v2.74.1361; timer format v1363) — the card's next-sweep countdown as a TICKING TIMER: h:mm:ss above an
  * hour, m:ss below ("1:05:42" / "23:14" / "0:42"). PURE. */
 export function fmtCountdown(ms) {

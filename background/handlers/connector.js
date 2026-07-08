@@ -286,6 +286,13 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             const probeUrl = `https://${origin}${probePath.startsWith('/') ? probePath : '/' + probePath}`;
             const verdict = assessProbe(await fetchViaHealed(tab.id, probeUrl, 'GET'), expectedAccount);
             if (rideAction(verdict, { ephemeral }).action === 'reauth-focus') {
+              // H-1a (v2.74.1376) — a HEADLESS caller (the scheduled sweep) must NEVER steal the screen or hang
+              // waiting for a human: no focus, no wait — fail fast as signed-out. The sweep's status note + `show
+              // work` carry the honest reason; the ephemeral tab (if any) idle-closes via the managed registry.
+              if (payload && payload.headless === true) {
+                sendResponse({ success: false, error: 'not-logged-in', origin, hint: `sign in to ${origin} to continue` });
+                return;
+              }
               // Opening inherits auth, can't create it → focus the login/SSO page for the human (§16), then WAIT for
               // sign-in and RESUME — never make them re-ask. A focused tab is now the user's: drop it from the
               // disposable registry so it's never auto-closed.
