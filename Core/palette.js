@@ -34,6 +34,8 @@ export const BUILTIN_LEGS = [
   // Self — PANEL actions (ACT×Self; dispatched panel-local in chat.js — a function/button click, not a SW channel). IL-3c.
   { key: 'NEW_DEV_CONVERSATION',     name: 'New dev conversation', does: 'open a new dev (Claude Code) conversation on this repo', mode: 'act', domain: 'self', safety: 'confirm', params: [], requires: [] },
   { key: 'NEW_CONVERSATION',         name: 'New conversation',     does: 'start a fresh chat conversation',                       mode: 'act', domain: 'self', safety: 'auto',    params: [], requires: [] },
+  // v2.74.1354 — "clear chat" fell through to the TEACH offer (a panel action can't be demonstrated on a page).
+  { key: 'CLEAR_CHAT',               name: 'Clear this chat',      does: 'wipe THIS conversation’s message history and start it fresh — the app itself (seed, connections, learned memory, pending proposals) is KEPT; asks before wiping. For "clear chat", "clear this conversation", "start over", "wipe the thread"', mode: 'act', domain: 'self', safety: 'auto', params: [], requires: [] },
   { key: 'OPEN_HISTORY',             name: 'Conversation history', does: 'show the list of past conversations',                   mode: 'act', domain: 'self', safety: 'auto',    params: [], requires: [] },
   { key: 'DELETE_ALL_CONVERSATIONS', name: 'Delete all conversations', does: 'delete every saved conversation (irreversible)',    mode: 'act', domain: 'self', safety: 'gated',   params: [], requires: [] },
   { key: 'OPEN_STUDIO',              name: 'Open Studio',          does: 'open the Studio authoring tab',                        mode: 'act', domain: 'self', safety: 'auto',    params: [], requires: [] },
@@ -97,6 +99,16 @@ export function composeOfferedLeg(app) {
 }
 
 /**
+ * v2.74.1354 — the always-offerable PANEL legs for interpret's palette (conversation-management self acts that
+ * work in ANY conversation). Kept to the few that make sense from a typed ask; the wider builtin set stays on
+ * the il:/fallback path. Extensible — add keys here as more panel verbs earn NL routing.
+ */
+const _INTERPRET_PANEL_KEYS = ['CLEAR_CHAT'];
+export function panelOfferedLegs() {
+  return BUILTIN_LEGS.filter((l) => l && _INTERPRET_PANEL_KEYS.includes(l.key));
+}
+
+/**
  * FL (v2.74.1348, DESIGN_app_fleet.md) — the fleet CONSOLE legs, offered to interpret for a CONNECTED app so
  * natural language routes through the IL (never static regex — the v1166 inversion holds): "review the queue" /
  * "clean this up" selects REVIEW_QUEUE; "show me both tickets" / "open zendesk" selects SHOW_ITEM_SOURCES with
@@ -106,9 +118,14 @@ export function fleetOfferedLegs(app, connected = false) {
   if (!connected) return [];
   const noun = (app && app.objectModel && app.objectModel.plural) || 'items';
   return [
-    { key: 'REVIEW_QUEUE', domain: 'self', mode: 'act', safety: 'auto', source: 'builtin', params: [],
+    { key: 'REVIEW_QUEUE', domain: 'self', mode: 'act', safety: 'auto', source: 'builtin',
+      params: ['every', 'off'],
+      paramSchema: { type: 'object', properties: {
+        every: { type: 'string', description: 'FL-6: a recurring interval ("30m", "2h", "1 hour") when the user asks for SCHEDULED/recurring sweeps ("review the queue every hour", "check it every 30 minutes")' },
+        off: { type: 'boolean', description: 'true = STOP the scheduled sweeps ("stop the schedule", "stop sweeping automatically")' },
+      }, required: [] },
       name: 'Review the queue',
-      does: `run a maintenance sweep over the connected ${noun}: read the queue and PROPOSE actions (merge / resolve / assign …) for the user to approve — nothing executes unasked; use when the user asks to review, check, clean up, or triage the queue` },
+      does: `run a maintenance sweep over the connected ${noun}: read the queue and PROPOSE actions (merge / resolve / assign …) for the user to approve — nothing executes unasked; use when the user asks to review, check, clean up, or triage the queue. Bind "every" for a RECURRING schedule ("every hour"), "off" to stop it; bind nothing to run once now` },
     { key: 'SHOW_ITEM_SOURCES', domain: 'self', mode: 'act', safety: 'auto', source: 'builtin',
       params: ['proposal', 'targets', 'origin'],
       paramSchema: { type: 'object', properties: {

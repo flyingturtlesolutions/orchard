@@ -91,3 +91,23 @@ export async function clearProposals(instanceId) {
   if (!instanceId) return;
   return _chained(instanceId, async () => { await chrome.storage.local.remove(_key(instanceId)); });
 }
+
+/**
+ * FL-6c (v2.74.1357) — batched pending counts for the Rail's app-card chip: ONE storage read for N instances
+ * (the Rail re-renders often; per-instance loads would multiply). Zero counts are omitted.
+ * @returns {Promise<Record<string, number>>} instanceId → pending count.
+ */
+export async function pendingCounts(instanceIds) {
+  const ids = [...new Set((instanceIds || []).filter(Boolean))];
+  if (!ids.length) return {};
+  try {
+    const got = await chrome.storage.local.get(ids.map(_key));
+    const out = {};
+    for (const id of ids) {
+      const rec = got?.[_key(id)];
+      const n = (rec && Array.isArray(rec.items)) ? rec.items.filter((p) => p && p.status === 'pending').length : 0;
+      if (n) out[id] = n;
+    }
+    return out;
+  } catch { return {}; }
+}

@@ -5,7 +5,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildSweepReadsMessages, buildSweepProposeMessages, parseSweepReads, parseSweepProposals, minimizeReadValue } from './sweepPrompt.js';
-import { normalizeProposal, canBulkApprove, getPath, pendingSummary, targetUrls } from './proposals.js';
+import { normalizeProposal, canBulkApprove, getPath, pendingSummary, targetUrls, autonomyFor, executedTodayByRecipe, filterRejectedRepeats, rejectionContext } from './proposals.js';
 import { ledgerEntry, summarizeLedger, renderLedgerLines, renderWorkTrace } from './actionLedger.js';
 
 const ASK_LEGS = [
@@ -180,8 +180,8 @@ describe('actionLedger — FL-1e renderWorkTrace ("show work")', () => {
     assert.equal(runId, 'run_new');
     assert.equal(lines.length, 7);                                     // the run_old step is NOT included
     assert.ok(lines[0].includes('planned reads'));
-    assert.ok(lines[3].includes('🔍 evidence'));
-    assert.ok(lines[4].includes('✋ evidence UNSERVED'));               // the invisible failure, made visible
+    assert.ok(lines[3].includes('evidence'));
+    assert.ok(lines[4].includes('evidence UNSERVED'));               // the invisible failure, made visible (de-iconed v1368)
     assert.ok(lines[6].startsWith('Σ done'));
     assert.deepEqual(renderWorkTrace([]), { lines: [], runId: null }); // no traced runs → honest empty
   });
@@ -241,5 +241,77 @@ describe('actionLedger — entries + window aggregation', () => {
     assert.equal(lines.length, 2);
     assert.ok(lines[0].includes('✓ executed'));
     assert.ok(lines[1].includes('proposed'));
+  });
+});
+
+// ── FL-8b/8c (v2.74.1358) — autonomy policy + quota counters + the operational-context fence ─────────────────
+
+describe('FL-8 — autonomyFor / executedTodayByRecipe / context fence', () => {
+  const AUTONOMY = { update_ticket_status: 'auto', merge_tickets: 'auto' };   // config LYING about merge
+  const _p = (recipeId, safety, status = 'pending', decidedAt = 0) => ({
+    name: recipeId, safety, status, decidedAt,
+    leg: { safety, tool: { recipeId } },
+  });
+  it('autonomyFor: auto only when the map says auto AND the safety floor allows it', () => {
+    assert.equal(autonomyFor({ autonomy: AUTONOMY }, _p('update_ticket_status', 'confirm')), 'auto');
+    assert.equal(autonomyFor({ autonomy: AUTONOMY }, _p('merge_tickets', 'gated')), 'gated');     // destructive floor beats config
+    assert.equal(autonomyFor({ autonomy: AUTONOMY }, _p('assign_ticket_to_me', 'confirm')), 'gated');   // absent → fail-closed
+    assert.equal(autonomyFor({}, _p('update_ticket_status', 'confirm')), 'gated');                // no policy → nothing runs alone
+  });
+  it('executedTodayByRecipe: executed-today only, keyed by recipeId', () => {
+    const now = Date.UTC(2026, 6, 7, 20, 0, 0);
+    const today = now - 3600_000, yesterday = now - 30 * 3600_000;
+    const counts = executedTodayByRecipe([
+      { ..._p('update_ticket_status', 'confirm', 'executed', today) },
+      { ..._p('update_ticket_status', 'confirm', 'executed', today) },
+      { ..._p('assign_ticket_to_me', 'confirm', 'executed', yesterday) },   // not today
+      { ..._p('assign_ticket_to_me', 'confirm', 'rejected', today) },       // not executed
+    ], now);
+    assert.equal(counts.update_ticket_status, 2);
+    assert.ok(!('assign_ticket_to_me' in counts));
+  });
+  it('buildSweepProposeMessages: the operational-context fence appears only when given', () => {
+    const withCtx = buildSweepProposeMessages({ seed: 's', legs: ACT_LEGS, results: [], round: 2, context: 'quota assign: 9/10 executed today — 1 remaining' });
+    assert.ok(withCtx.user.includes('<SWEEP_CONTEXT'));
+    assert.ok(withCtx.user.includes('9/10'));
+    const without = buildSweepProposeMessages({ seed: 's', legs: ACT_LEGS, results: [], round: 2 });
+    assert.ok(!without.user.includes('<SWEEP_CONTEXT'));
+  });
+});
+
+// ── FL-9 (v2.74.1370) — rejections stick: the structural repeat filter + the prompt-context lines ────────────
+
+describe('FL-9 — filterRejectedRepeats / rejectionContext', () => {
+  const NOW = Date.UTC(2026, 6, 8, 17, 0, 0);
+  const _rej = (recipeId, targets, { decidedAt = NOW - 3600_000, basedOnValue = 'open', reason = 'not yet' } = {}) => ({
+    name: recipeId, status: 'rejected', decidedAt, reason,
+    targets, basedOn: { readKey: 'k', path: 'p', value: basedOnValue },
+    leg: { tool: { recipeId } },
+  });
+  const _fresh = (recipeId, targets, basedOnValue = 'open') => ({
+    name: recipeId, targets, basedOn: { readKey: 'k', path: 'p', value: basedOnValue },
+    leg: { tool: { recipeId } },
+  });
+  it('suppresses a same-action same-targets repeat inside the window (the 09:02→09:08 live miss)', () => {
+    const { kept, suppressed } = filterRejectedRepeats([_fresh('update_ticket_status', ['65679'])], [_rej('update_ticket_status', ['65679'])], { now: NOW });
+    assert.equal(kept.length, 0);
+    assert.equal(suppressed.length, 1);
+    assert.equal(suppressed[0].reason, 'not yet');
+  });
+  it('lets it through when the grounding anchor MOVED (the item changed since the rejection)', () => {
+    const { kept } = filterRejectedRepeats([_fresh('update_ticket_status', ['65679'], 'pending')], [_rej('update_ticket_status', ['65679'], { basedOnValue: 'open' })], { now: NOW });
+    assert.equal(kept.length, 1);
+  });
+  it('window + identity: an old rejection or different targets never suppress', () => {
+    const old = _rej('update_ticket_status', ['65679'], { decidedAt: NOW - 30 * 3600_000 });
+    assert.equal(filterRejectedRepeats([_fresh('update_ticket_status', ['65679'])], [old], { now: NOW }).kept.length, 1);
+    assert.equal(filterRejectedRepeats([_fresh('update_ticket_status', ['99999'])], [_rej('update_ticket_status', ['65679'])], { now: NOW }).kept.length, 1);
+    assert.equal(filterRejectedRepeats([_fresh('assign_ticket_to_me', ['65679'])], [_rej('update_ticket_status', ['65679'])], { now: NOW }).kept.length, 1);
+  });
+  it('rejectionContext renders name @ targets — "reason" lines (window-scoped)', () => {
+    const ctx = rejectionContext([_rej('update_ticket_status', ['65679'], { reason: "agent hasn't actioned it" })], { now: NOW });
+    assert.ok(ctx.includes('update_ticket_status @ 65679'));
+    assert.ok(ctx.includes("agent hasn't actioned it"));
+    assert.equal(rejectionContext([], { now: NOW }), '');
   });
 });

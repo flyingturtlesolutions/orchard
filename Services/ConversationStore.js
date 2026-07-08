@@ -47,6 +47,8 @@ function _serializeIndexOp(fn) {
   return next;                         // but propagate them to the caller
 }
 
+let _instanceMirrorHealed = false;   // FL-6c (v2.74.1357) — the list() index self-heal runs once per context
+
 async function _readIndex() {
   const data = await chrome.storage.local.get(INDEX_KEY);
   return data[INDEX_KEY] ?? [];
@@ -171,6 +173,28 @@ export const ConversationStore = {
    */
   async list() {
     const index = await _readIndex();
+    // FL-6c (v2.74.1357) — one-time self-heal: mirror instanceId into agent app entries created before the
+    // mirror existed, so the Rail's pending-proposals chip never needs a body load. Best-effort; a failed heal
+    // just leaves the chip absent until the next context start (the #164 self-heal pattern).
+    if (!_instanceMirrorHealed) {
+      _instanceMirrorHealed = true;
+      const missing = index.filter((e) => e && e.kind !== 'dev' && e.appId && !e.instanceId);
+      if (missing.length) {
+        try {
+          const got = await chrome.storage.local.get(missing.map((e) => convKey(e.id)));
+          const fixes = new Map();
+          for (const e of missing) { const c = got[convKey(e.id)]; if (c && c.instanceId) fixes.set(e.id, c.instanceId); }
+          if (fixes.size) {
+            await _serializeIndexOp(async () => {
+              const idx = await _readIndex();
+              for (const e of idx) if (fixes.has(e.id) && !e.instanceId) e.instanceId = fixes.get(e.id);
+              await _writeIndex(idx);
+            });
+            for (const e of index) if (fixes.has(e.id) && !e.instanceId) e.instanceId = fixes.get(e.id);   // this return reflects the heal too
+          }
+        } catch { /* */ }
+      }
+    }
     return [...index].sort((a, b) => b.updatedAt - a.updatedAt);
   },
 
@@ -233,6 +257,7 @@ export const ConversationStore = {
     if (conv.parentId) entry.parentId = conv.parentId;
     if (conv.icon) entry.icon = conv.icon;
     if (conv.pinned) entry.pinned = true;              // AP-1 — index-mirrored so drawerTree sorts pinned-first without a body load
+    if (conv.instanceId) entry.instanceId = conv.instanceId;   // FL-6c (v2.74.1357) — mirrored so the Rail's pending-proposals chip counts without a body load
     await _addToIndex(entry);
     return conv;
   },
@@ -265,7 +290,28 @@ export const ConversationStore = {
     if ('parentId' in fields) patch.parentId = conv.parentId;
     if ('icon' in fields) patch.icon = conv.icon;
     if ('pinned' in fields) patch.pinned = conv.pinned;       // AP-1 (v2.74.1211) — mirror so the drawer re-sorts pinned-first without a body load
+    if ('instanceId' in fields) patch.instanceId = conv.instanceId;   // FL-6c (v2.74.1357) — mirror for the Rail's pending chip
     await _updateIndexMeta(id, patch);
+    return conv;
+  },
+
+  /**
+   * v2.74.1354 — CLEAR a conversation's message history ("clear chat"). The ENTITY keeps everything else —
+   * id, seed, config, app identity (appId/instanceId/presetId), pin — so an app conversation restarts fresh
+   * without losing its constitution, connections, learned memory, or pending proposals (those live in their
+   * own instance-keyed stores). The index summary peek resets so the Rail row stops showing the wiped thread.
+   * @param {string} id
+   * @returns {Promise<Conversation|null>} the cleared conversation, or null if it vanished.
+   */
+  async clearMessages(id) {
+    const conv = await ConversationStore.load(id);
+    if (!conv) return null;
+    conv.messages = [];
+    conv.updatedAt = Date.now();
+    const stillExists = await ConversationStore.load(id);   // narrow the delete-then-clear race (mirrors patchMeta)
+    if (!stillExists) return null;
+    await chrome.storage.local.set({ [convKey(id)]: conv });
+    await _updateIndexMeta(id, { updatedAt: conv.updatedAt, summary: '' });
     return conv;
   },
 

@@ -81,6 +81,77 @@ export function targetUrls(p) {
   return out;
 }
 
+// ── FL-8b (v2.74.1358) — per-action-class AUTONOMY: the config policy that lets the CLOCK execute ──────────────
+// The user's standing directive ("run the admin task without me") lives as DATA in the app's config:
+// `config.autonomy = { <recipeId>: 'auto' | 'gated' }`. Fail-closed three ways: an action absent from the map is
+// gated; a leg whose SAFETY class is 'gated' (destructive:true — merge) can never be auto'd by config; and only
+// the headless executor consults this at all — a panel `sweep` always parks for the human who is right there.
+
+/** Resolve one proposal's unattended-execution verdict against the app's autonomy config. PURE. */
+export function autonomyFor(config, p) {
+  if (!p || !p.leg) return 'gated';
+  if (p.safety === 'gated') return 'gated';               // destructive class — config cannot override the floor
+  const map = (config && config.autonomy && typeof config.autonomy === 'object') ? config.autonomy : {};
+  const rid = _str(p.leg.tool && p.leg.tool.recipeId);
+  return rid && map[rid] === 'auto' ? 'auto' : 'gated';   // absent → gated (fail-closed)
+}
+
+/**
+ * FL-8c — today's EXECUTED count per recipeId (the daily-quota counter, derived from the queue — no separate
+ * bookkeeping). "Today" = same local calendar day as `now`. PURE.
+ * @returns {Record<string, number>}
+ */
+export function executedTodayByRecipe(proposals, now = Date.now()) {
+  const day = new Date(now); day.setHours(0, 0, 0, 0);
+  const start = day.getTime();
+  const out = {};
+  for (const p of (Array.isArray(proposals) ? proposals : [])) {
+    if (!p || p.status !== 'executed' || !(p.decidedAt >= start && p.decidedAt <= now + 86400000)) continue;
+    const rid = _str(p.leg && p.leg.tool && p.leg.tool.recipeId);
+    if (rid) out[rid] = (out[rid] || 0) + 1;
+  }
+  return out;
+}
+
+// ── FL-9 (v2.74.1370) — rejections must STICK (live miss: the 09:08 sweep re-proposed the exact action the
+// user rejected at 09:02). Two layers: a STRUCTURAL filter (the harness never re-asks what a human just
+// declined — contract, not domain judgment) + rejection lines in the propose prompt's operational context
+// (so the model learns the pattern too). The escape hatch is mechanical: if the proposal's grounding anchor
+// (basedOn.value) MOVED since the rejection, the world changed and re-proposing is legitimate.
+
+const REJECT_COOLDOWN_MS = 24 * 3600_000;
+
+const _pairKey = (p) => `${_str(p && p.leg && p.leg.tool && p.leg.tool.recipeId) || _str(p && p.key)}|${(Array.isArray(p && p.targets) ? p.targets : []).map((t) => String(t).trim().replace(/^#/, '')).sort().join(',')}`;
+
+/**
+ * Drop fresh proposals that repeat a HUMAN-REJECTED (action, targets) pair from the cooldown window — unless
+ * the grounding anchor moved. PURE.
+ * @returns {{ kept: Array<object>, suppressed: Array<{proposal: object, reason: string}> }}
+ */
+export function filterRejectedRepeats(proposals, prior, { windowMs = REJECT_COOLDOWN_MS, now = Date.now() } = {}) {
+  const rejected = (Array.isArray(prior) ? prior : []).filter((p) => p && p.status === 'rejected' && (now - (p.decidedAt || 0)) <= windowMs);
+  const list = Array.isArray(proposals) ? proposals : [];
+  if (!rejected.length) return { kept: list, suppressed: [] };
+  const kept = []; const suppressed = [];
+  for (const p of list) {
+    const twin = rejected.find((r) => _pairKey(r) === _pairKey(p));
+    const moved = !!(twin && twin.basedOn && p && p.basedOn && String(twin.basedOn.value) !== String(p.basedOn.value));
+    if (twin && !moved) suppressed.push({ proposal: p, reason: twin.reason || '' });
+    else kept.push(p);
+  }
+  return { kept, suppressed };
+}
+
+/** The recent-rejection lines for the propose prompt's operational context (fenced data, last 8). PURE. */
+export function rejectionContext(prior, { windowMs = REJECT_COOLDOWN_MS, now = Date.now() } = {}) {
+  const lines = [];
+  for (const p of (Array.isArray(prior) ? prior : [])) {
+    if (!p || p.status !== 'rejected' || (now - (p.decidedAt || 0)) > windowMs) continue;
+    lines.push(`recently REJECTED by the user (do not re-propose unless the item has changed): ${p.name}${p.targets && p.targets.length ? ` @ ${p.targets.join(', ')}` : ''}${p.reason ? ` — "${p.reason}"` : ''}`);
+  }
+  return lines.slice(-8).join('\n');
+}
+
 /** One-line batch summary: "6 pending: 3× Merge tickets · 2× Solve ticket · 1× Assign ticket". PURE. */
 export function pendingSummary(list) {
   const pend = (Array.isArray(list) ? list : []).filter((p) => p && p.status === 'pending');

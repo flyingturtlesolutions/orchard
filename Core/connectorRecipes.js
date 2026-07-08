@@ -99,6 +99,25 @@ export const CONNECTOR_RECIPES = [
     endpoint: '/api/v2/search.json?query=type:ticket%20status:solved%20assignee:{me}&per_page=25&sort_by=updated_at&sort_order=desc',
     listUrl: '/agent/search/1?type=ticket&q=status%3Asolved%20assignee%3Ame',
     params: [] },
+  // ── FL-8a (v2.74.1358) — the ADMIN-view reads: the whole queue, not just mine (the fleet sweep's working set).
+  // `pulse` (v1359) — the read's GENERIC digest role ('inventory' | 'backlog' | 'inflow'): the fleet harness keys
+  // its digest/spike bookkeeping on the CLASS, never on a recipe id — a Gmail fleet app tags its own reads and
+  // gets the same digest for free (the portability test). Data declares meaning; the harness stays app-blind. ──
+  { ...ZD, id: 'all_open_tickets', name: 'All open Zendesk tickets (whole queue)', pulse: 'inventory',
+    does: 'list ALL open Zendesk tickets across the whole queue — everyone’s and unassigned, oldest first (the admin/queue-review view, not just yours), riding your login',
+    endpoint: '/api/v2/search.json?query=type:ticket%20status:open&per_page=100&sort_by=created_at&sort_order=asc',
+    listUrl: '/agent/search/1?type=ticket&q=status%3Aopen',
+    params: [] },
+  { ...ZD, id: 'unassigned_tickets', name: 'Unassigned Zendesk tickets', pulse: 'backlog',
+    does: 'list open Zendesk tickets with NO assignee (the assignment backlog), oldest first, riding your login',
+    endpoint: '/api/v2/search.json?query=type:ticket%20status:open%20assignee:none&per_page=100&sort_by=created_at&sort_order=asc',
+    listUrl: '/agent/search/1?type=ticket&q=status%3Aopen%20assignee%3Anone',
+    params: [] },
+  { ...ZD, id: 'tickets_last_day', name: 'Zendesk tickets created in the last 24h', pulse: 'inflow',
+    does: 'list Zendesk tickets CREATED in the last 24 hours (new-volume pulse — the digest / spike-detection feed), riding your login',
+    endpoint: '/api/v2/search.json?query=type:ticket%20created>24hours&per_page=100&sort_by=created_at&sort_order=desc',
+    listUrl: '/agent/search/1?type=ticket&q=created%3E24hours',
+    params: [] },
   // ── by-id / search reads — one typed param ───────────────────────────────────────────────────────────────────
   { ...ZD, id: 'read_ticket', name: 'Read a Zendesk ticket',
     does: 'fetch one Zendesk ticket by its number and summarize its DETAILS AS TEXT in the chat (for "what does it say / what’s it about" asks — NOT for showing/opening the page itself)',
@@ -173,6 +192,23 @@ export const CONNECTOR_RECIPES = [
     params: [
       { name: 'id', type: 'integer', required: true },
       { name: 'group_id', type: 'integer', required: true },
+    ] },
+  // ── FL-8a (v2.74.1358) — the requester-fix pair: create the customer profile, then attach it to the ticket. ──
+  { ...ZD, id: 'create_user', name: 'Create a Zendesk user (customer profile)', write: true, method: 'POST',
+    does: 'create a Zendesk END-USER (customer) profile with a name + email — e.g. to become the requester on a ticket that has none, riding your login',
+    endpoint: '/api/v2/users.json', itemUrl: '/agent/users/{id}',
+    body: { user: { name: '{name}', email: '{email}', role: 'end-user' } },   // role is a LITERAL — a sweep can never mint agents/admins
+    params: [
+      { name: 'name', type: 'string', required: true },
+      { name: 'email', type: 'string', required: true },
+    ] },
+  { ...ZD, id: 'set_ticket_requester', name: 'Set a Zendesk ticket requester', write: true, method: 'PUT',
+    does: 'attach a requester (customer profile, by user id) to a Zendesk ticket — for tickets missing one, riding your login',
+    endpoint: '/api/v2/tickets/{id}.json',
+    body: { ticket: { requester_id: '{requester_id}' } },
+    params: [
+      { name: 'id', type: 'integer', required: true },
+      { name: 'requester_id', type: 'integer', required: true },
     ] },
   // ── destructive / consolidating — gated (the human approves; still fail-closed until CX-6b). User may also pick DOM. ──
   { ...ZD, id: 'merge_tickets', name: 'Merge Zendesk tickets', write: true, destructive: true, method: 'POST',

@@ -39,7 +39,8 @@ import { connectorLegsForConnections, harvestedRecipeLegs } from '../../Core/con
 import { brokerLegsForLinked } from '../../Core/brokerCatalog.js';   // CX-5c — broker (OAuth/MCP) legs, gated on LINKED providers
 import { legRef } from '../../Core/legRef.js';   // v1342 — unified ref for palette dedup (_seen seeding)
 import { parseSweepReads, parseSweepProposals } from '../../Core/sweepPrompt.js';   // FL-1 (v2.74.1346) — sweep output validated against the OFFERED legs
-import { composeOfferedLeg, policyFilter, fleetOfferedLegs } from '../../Core/palette.js';   // GD-4b — the app's COMPOSE (draft-on-canvas) leg joins interpret's palette; v1340 (review A) — policyFilter: the 'forbidden' floor now runs on the LIVE interpret palette, not just the dormant ilRun; FL (v1348) — the fleet console legs (NL → sweep/show via IL, never regex)
+import { parseSeedDirectives } from '../../Core/fleetSchedule.js';   // FL-6b (v2.74.1356) — the seed's stated cadence, strict-parsed
+import { composeOfferedLeg, policyFilter, fleetOfferedLegs, panelOfferedLegs } from '../../Core/palette.js';   // GD-4b — the app's COMPOSE (draft-on-canvas) leg joins interpret's palette; v1340 (review A) — policyFilter: the 'forbidden' floor now runs on the LIVE interpret palette, not just the dormant ilRun; FL (v1348) — the fleet console legs (NL → sweep/show via IL, never regex); v1354 — CLEAR_CHAT (conversation-management panel legs)
 import { neutralizeFalseCompletion } from '../../Core/answerGuard.js';   // honesty belt — the answer path dispatches nothing, so a completion claim on a side-effect COMMAND is a fabrication (the calendar "✅ I created it" bug)
 import { describeObjectModel } from '../../Core/appDef.js';   // OM — render the app's object model (noun/states/actions/transitions) as a context block
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability, findDuplicateCapabilities } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A; GA-6 dedup
@@ -1212,7 +1213,7 @@ export function createSgMessageHandlers(ctx) {
         // v2.74.1340 (review A) — the §2.3 policy floor on the LIVE palette: a `forbidden`-safety leg is never
         // offerable to interpret (it previously ran only in the dormant Core/ilRun.js — the floor was unwired here).
         // The rule table stays empty until user routing-rules ship; the unrelaxable floor is what matters now.
-        const retrieved = policyFilter([...ragLegs, ...connLegs, ...harvestedLegs, ...brokerLegs, ...(composeLeg ? [composeLeg] : []), ...fleetLegs], { scope: { ground: groundId || null } });
+        const retrieved = policyFilter([...ragLegs, ...connLegs, ...harvestedLegs, ...brokerLegs, ...(composeLeg ? [composeLeg] : []), ...fleetLegs, ...panelOfferedLegs()], { scope: { ground: groundId || null } });   // v1354 — CLEAR_CHAT joins (a typed "clear chat" used to fall through to the TEACH offer)
         const primitives = ['OPEN_URL', 'CLICK', 'TYPE', 'SCROLL', 'EXTRACT'];
         // F-2 (v2.74.1179) — feed interpret the live page VOCABULARY (the same affordances IL_ANSWER reads from the
         // cached Locale) so its act/teach/clarify decisions are grounded in what the page actually offers, not just
@@ -1306,7 +1307,7 @@ export function createSgMessageHandlers(ctx) {
           // FL-1b (v1347) — round 1 may return `needs` (targeted evidence reads); round 2 is FINAL (needs ignored).
           const round = payload?.round === 2 ? 2 : 1;
           const results = Array.isArray(payload?.results) ? payload.results.slice(0, 12) : [];   // 3 breadth + 8 evidence (FL-2b) + margin
-          const raw = await AnthropicService.sweepPropose({ seed, learned, objects, legs: actLegs, askLegs: round === 1 ? askLegs : [], results, round });
+          const raw = await AnthropicService.sweepPropose({ seed, learned, objects, legs: actLegs, askLegs: round === 1 ? askLegs : [], results, round, context: String(payload?.context || '') });
           const { proposals, needs, summary } = parseSweepProposals(raw, { legs: actLegs, askLegs });
           const outNeeds = round === 1 ? needs : [];
           Logger.info('route', `SWEEP ▸ propose r${round} → ${proposals.length} proposal(s)${outNeeds.length ? ` + ${outNeeds.length} evidence need(s)` : ''} from ${results.length} read(s), ${actLegs.length} action(s) offered${summary ? ` — ${summary.slice(0, 80)}` : ''}`);
@@ -1314,6 +1315,25 @@ export function createSgMessageHandlers(ctx) {
         }
       } catch (err) {
         Logger.error('background', `SWEEP_PROPOSE failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // FL-6b (v2.74.1356, DESIGN_app_fleet.md §6b) — SEED_DIRECTIVES: the IL reads an app's SEED for a stated
+    // recurring cadence ("review the queue every hour" → {"every":"1h"}). Never regex over the seed (v1348);
+    // the panel operationalizes only the validated return (parseEvery clamps; instanceId never comes from the
+    // model). A no-LLM/failed extraction returns success:false so the caller touches NOTHING.
+    SEED_DIRECTIVES: async (payload, _sender, sendResponse) => {
+      try {
+        const seed = String(payload?.seed || '').trim();
+        if (!seed) { sendResponse({ success: true, every: null }); return; }
+        const raw = await AnthropicService.seedDirectives({ seed });
+        if (raw == null) { sendResponse({ success: false, error: 'no-llm' }); return; }
+        const d = parseSeedDirectives(raw);
+        Logger.info('route', `SWEEP ▸ seed-directive → ${d.every ? `every ${d.every}` : 'no cadence'}${d.assignQuota != null ? `, quota ${d.assignQuota}/day` : ''}`);
+        sendResponse({ success: true, every: d.every, assignQuota: d.assignQuota });
+      } catch (err) {
+        Logger.error('background', `SEED_DIRECTIVES failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },

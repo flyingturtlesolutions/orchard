@@ -50,14 +50,14 @@ export function renderWorkTrace(items, runId = null) {
     if (e.kind === 'step') {
       if (e.phase === 'plan') return `▸ planned reads: ${e.note || '—'}`;
       if (e.phase === 'read') return `${e.ok === false ? '⚠' : '✓'} read ${e.action || ''}${e.note ? ` — ${e.note}` : ''}`;
-      if (e.phase === 'need') return `${e.ok === false ? '✋ evidence UNSERVED' : '🔍 evidence'} ${e.action || ''}${e.note ? ` — ${e.note}` : ''}`;
-      if (e.phase === 'propose') return `🧠 ${e.action || 'propose'}${e.note ? ` — ${e.note}` : ''}`;
+      if (e.phase === 'need') return `${e.ok === false ? 'evidence UNSERVED' : 'evidence'} ${e.action || ''}${e.note ? ` — ${e.note}` : ''}`;
+      if (e.phase === 'propose') return `${e.action || 'propose'}${e.note ? ` — ${e.note}` : ''}`;
       return `· ${e.action || e.phase || 'step'}${e.note ? ` — ${e.note}` : ''}`;
     }
     if (e.kind === 'sweep') return `Σ done — ${e.counts ? Object.entries(e.counts).map(([k, v]) => `${v} ${k}`).join(', ') : 'ran'}`;
-    if (e.kind === 'proposal') return `📋 proposed ${e.action || ''}${e.targets && e.targets.length ? ` (${e.targets.join(', ')})` : ''}`;
+    if (e.kind === 'proposal') return `proposed ${e.action || ''}${e.targets && e.targets.length ? ` (${e.targets.join(', ')})` : ''}`;
     if (e.kind === 'decision') return `${e.status === 'approved' ? '✓' : e.status === 'rejected' ? '✗' : '·'} ${e.status || 'decided'} ${e.action || ''}${e.reason ? ` — ${e.reason}` : ''}`;
-    if (e.kind === 'execution') return `${e.ok === false ? '✗ failed' : '⚡ executed'} ${e.action || ''}`;
+    if (e.kind === 'execution') return `${e.ok === false ? '✗ failed' : '✓ executed'} ${e.action || ''}`;
     return `· ${e.kind}`;
   });
   return { lines, runId: rid };

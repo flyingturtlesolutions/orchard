@@ -30,6 +30,7 @@ import { ensureFreshSession } from './Cloud/CloudTokenStore.js';
 import { buildRouterMessages, parseRouterOutput } from '../Core/routerPrompt.js';   // R-3 — front-door router prompt (no DOM; fenced catalog)
 import { buildInterpretMessages, parseInterpretOutput } from '../Core/interpretPrompt.js';   // F-2 — the interpret front-door prompt
 import { buildSweepReadsMessages, buildSweepProposeMessages } from '../Core/sweepPrompt.js';   // FL-1 (v2.74.1346) — the propose-only sweep's two think seams
+import { buildSeedDirectivesMessages } from '../Core/fleetSchedule.js';   // FL-6b (v2.74.1356) — cadence stated in the seed
 import { buildStepMessages, parseStepDecision } from '../Core/stepPrompt.js';   // IL-2 — the inference-layer step controller prompt (fenced palette + observation)
 import { buildJudgeMessages, parseJudgeDecision } from '../Core/judgePrompt.js';   // IL-2 — the IL-as-user-standin match judge (pick the capability matchCapability found; no re-bind)
 import { buildAnswerMessages } from '../Core/answerPrompt.js';   // IL-2 — Orchard ANSWERING a meta/conversational ask from the available capabilities
@@ -5283,10 +5284,19 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
 
   /** FL-1 phase B: read results (fenced DATA) → proposals over the offered ACTION tools. `askLegs`+`round` = the
    * FL-1b evidence round (v1347): round 1 may request targeted reads via `needs`; round 2 is final. Raw text. */
-  static async sweepPropose({ seed = '', learned = '', objects = '', legs = [], askLegs = [], results = [], round = 1 } = {}) {
+  static async sweepPropose({ seed = '', learned = '', objects = '', legs = [], askLegs = [], results = [], round = 1, context = '' } = {}) {
     if (!(await AnthropicService.hasLlm())) return null;
-    const { system, user } = buildSweepProposeMessages({ seed, learned, objects, legs, askLegs, results, round });
+    const { system, user } = buildSweepProposeMessages({ seed, learned, objects, legs, askLegs, results, round, context });
     const res = await AnthropicService.#call(system, user, 1600, [], { role: 'describe', operation: 'sweep-propose' });
+    return (res && res.success !== false) ? res.text : null;
+  }
+
+  /** FL-6b (v2.74.1356) — read an app's SEED for operational directives the harness can arm (today: a recurring
+   * sweep cadence). The seed is fenced DATA to this seam, never followed. Raw text; parseSeedDirectives validates. */
+  static async seedDirectives({ seed = '' } = {}) {
+    if (!(await AnthropicService.hasLlm())) return null;
+    const { system, user } = buildSeedDirectivesMessages({ seed });
+    const res = await AnthropicService.#call(system, user, 200, [], { role: 'routing', operation: 'seed-directives' });
     return (res && res.success !== false) ? res.text : null;
   }
 

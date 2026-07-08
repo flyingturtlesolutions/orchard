@@ -104,6 +104,7 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
       origin: origin || null, appHost: appHost || null,
       itemUrl: _str(r.itemUrl) || null,   // FL-1c (v2.74.1347) — the object's HUMAN page template (ground-truth links)
       listUrl: _str(r.listUrl) || null,   // FL-1d (v2.74.1349) — the COLLECTION's human page ("show me" after a list read)
+      pulse: _str(r.pulse) || null,       // FL-8d (v2.74.1359) — the read's generic digest role (inventory|backlog|inflow); the fleet digest keys on THIS, never a recipe id
       endpoint, method: _str(r.method).toUpperCase() || 'GET',
       body: (write && r.body && typeof r.body === 'object') ? r.body : null,   // write body TEMPLATE; the executor fillBody()s it
       bodyType: _str(r.bodyType) || (write && r.body ? 'json' : null),         // v1342 — json | form | raw (fillWriteBody)

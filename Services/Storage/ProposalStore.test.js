@@ -13,7 +13,7 @@ const _chrome = {
   } },
 };
 
-const { loadProposals, addProposals, decideProposal, clearProposals } = await import('./ProposalStore.js');
+const { loadProposals, addProposals, decideProposal, clearProposals, pendingCounts } = await import('./ProposalStore.js');
 const { loadLedger, appendLedger, clearLedger } = await import('./ActionLedgerStore.js');
 const { ledgerEntry } = await import('../../Core/actionLedger.js');
 
@@ -56,6 +56,20 @@ describe('ProposalStore + ActionLedgerStore (instance-keyed)', () => {
     assert.equal((await loadProposals(INST)).length, 3);
     await clearProposals(INST);
     assert.deepEqual(await loadProposals(INST), []);
+  });
+
+  it('pendingCounts (FL-6c): ONE batched read, pending-only counts, zeros omitted', async () => {
+    const [a] = await addProposals(INST, [
+      { key: 'a', name: 'A', params: {}, safety: 'confirm', leg: {} },
+      { key: 'b', name: 'B', params: {}, safety: 'confirm', leg: {} },
+    ]);
+    await decideProposal(INST, a.id, { status: 'rejected', reason: 'no' });   // 2 minted, 1 settled → 1 pending
+    await addProposals('inst_other', [{ key: 'c', name: 'C', params: {}, safety: 'confirm', leg: {} }]);
+    const counts = await pendingCounts([INST, 'inst_other', 'inst_empty', null, INST]);   // dupes + nulls tolerated
+    assert.equal(counts[INST], 1);
+    assert.equal(counts['inst_other'], 1);
+    assert.ok(!('inst_empty' in counts));                                     // zero → omitted (no chip)
+    assert.deepEqual(await pendingCounts([]), {});
   });
 
   it('ledger appends + caps and clears; entries keep their minted shape', async () => {

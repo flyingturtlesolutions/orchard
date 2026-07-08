@@ -1482,6 +1482,10 @@ textarea {
   letter-spacing: 0.04em;
   vertical-align: middle;
 }
+/* FL-6c (v2.74.1357) — the app card's pending-proposals chip: trails the title (base amber). The sweep's
+   attention signal lives HERE, on the app's own card — never on the extension-icon badge (app-blind, owned
+   by other features). */
+.rail-item-badge.pending { margin-left: var(--sp-2); margin-right: 0; }
 
 /* CV-3c (v2.74.1168) — the drawer ACCORDION (DESIGN_conversations.md §7): the Overview pin, the New-app entry, the
    app expand-chevron, the sub-task leaf glyph. Hierarchy is glyph + chevron + weight, NEVER indentation. */
@@ -1633,6 +1637,27 @@ textarea {
 /* v2.74.1228 (App card UI) — on an APP card the delete (×) sits in the TOP-RIGHT corner (the subtask "+" takes the
    bottom-right). Non-app rows keep the vertically-centered delete. */
 .rail-item.is-app .rail-item-delete { top: var(--sp-2); bottom: auto; transform: none; }
+
+/* FL-6d (v2.74.1364) — the next-sweep countdown: TOP-RIGHT corner, left of the × slot, accent, always visible
+   (a hover-only timer is useless). tabular-nums so the per-second tick doesn't jitter the layout. */
+.rail-item-timer {
+  position: absolute;
+  top: var(--sp-2);
+  right: calc(var(--sp-2) + 34px);   /* v1365 — 22px × slot + 12px breathing room */
+  height: 22px;
+  display: flex;
+  align-items: center;
+  color: var(--c-accent);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+}
+/* v1366 — the card TEXT fills the full card width (summary/meta run edge to edge; the hover-revealed ×/+ overlay
+   them with their own bg). Only the TITLE line reserves clearance for the always-visible timer + the × slot. */
+.rail-item.is-app:has(.rail-item-timer) { padding-right: var(--sp-3); }
+.rail-item.is-app:has(.rail-item-timer) .rail-item-title { padding-right: 72px; }
 
 /* AP-2 (v2.74.1213) — the per-app "new sub-conversation" + button; hover-revealed, sat left of the chevron/delete cluster. */
 .rail-item-subtask {

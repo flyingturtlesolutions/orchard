@@ -42,6 +42,7 @@ import { createForageHandlers } from './background/handlers/forage.js';  // §19
 import { createWorkflowDebugHandlers } from './background/handlers/workflowDebug.js';  // v2.74.953 (CR-X3c) — the workflow + debugger domain
 import { createConnectorHandlers } from './background/handlers/connector.js';  // v2.74.1151 (CX-3) — the connector domain (session-ride)
 import { createCanvasHandlers } from './background/handlers/canvas.js';  // v2.74.1205 (CA-4) — the canvas domain (RENDER_CANVAS → the presentation tab)
+import { createFleetHandlers, registerFleetAlarmListener } from './background/handlers/fleet.js';  // FL-6 (v2.74.1355) — the fleet clock trigger (scheduled headless sweeps)
 import { buildRawAction, coalesce } from './Core/observedTrace.js';     // OBS-1 — observed demonstration recorder
 import * as ChromeHoist        from './Core/chromeHoist.js';  // v2.74.480 — hoist recurring chrome off Locales → Ground.chrome
 import * as Workflows          from './Core/workflows.js';   // v2.74.488 — cross-Locale workflows (partOf) over the siteMap
@@ -409,6 +410,11 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     })
     .catch((err) => Logger.warn('background', `sync alarm: ${err?.message || err}`));
 });
+
+// FL-6 (v2.74.1355) — the fleet clock: `fleet-sweep:<instanceId>` alarms → the headless propose-only sweep.
+// chrome.alarms persist across SW restarts natively, so scheduling once is durable; the listener re-registers
+// on every SW boot (this module eval). _invokeSgHandler is hoisted; the map is initialized long before any fire.
+registerFleetAlarmListener({ invokeSgHandler: _invokeSgHandler });
 
 
 // v2.74.22 — walkAbortFlags + stepApprovalResolvers removed; only the
@@ -1713,6 +1719,8 @@ const _sgMessageHandlers = {
     invokeSgHandler    : _invokeSgHandler,
     ensureContentScript: _ensureContentScript,
   }),
+  ...createFleetHandlers({ invokeSgHandler: _invokeSgHandler }),   // FL-6 (v1355) — FLEET_SCHEDULE (set/off/status); the alarm listener registers below
+
   ...createDiscoveryHandlers({
     readSiteMap          : _readSiteMap,
     mergeSiteMapForGround: _mergeSiteMapForGround,
