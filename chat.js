@@ -34,7 +34,7 @@ import { ledgerEntry, summarizeLedger, renderLedgerLines } from './Core/actionLe
 import { loadProposals, addProposals, decideProposal } from './Services/Storage/ProposalStore.js';   // FL-2 — instance-keyed pending queue
 import { appendLedger, loadLedger } from './Services/Storage/ActionLedgerStore.js';   // FL-4 — instance-keyed ledger
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
-import { recipeLegs, coerceParams, fillBody } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template
+import { recipeLegs, coerceParams, fillBody, fillEndpoint } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template
 import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 — header-replay writes: json/form/raw + contentType (review I)
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
 import { renderConnectorLines, itemLabels } from './Core/connectorRender.js';   // CX-4c — generic render of ANY connector read (not just tickets); CV-4-full — itemLabels: read list → fan-out labels
@@ -2962,6 +2962,11 @@ async function _runConnectorLeg(leg, params, { tabId = null, groundId = null } =
 // portability test: a different seed + connection = a different fleet app, no code change).
 
 let _sweepBatchIndex = [];   // render-order number → proposalId (what `approve 1,3` / `reject 2` refer to)
+// FL-1d (v1349) — READ PROVENANCE: the connector read that grounded the LAST answer ("how many open tickets" →
+// my_open_tickets). "Show me" resolves HERE first when the read is more recent than the last proposal batch —
+// a claim's ground truth is the read that produced it, never a random item.
+let _lastGroundedRead = null;   // { leg, params, at }
+let _lastBatchAt = 0;           // when the current proposal batch rendered (recency arbiter)
 
 async function _runFleetSweep() {
   const inst = _memoryId();
@@ -3018,6 +3023,11 @@ async function _runFleetSweep() {
     }
     p.urls = targetUrls(p);
   }
+  // FL-1d (v1349) — a NEW sweep SUPERSEDES the previous pending batch: those proposals were grounded in reads the
+  // sweep just re-ran, so they expire as stale instead of lingering (the "show me opened an old proposal" hazard).
+  const prior = (await loadProposals(inst)).filter((p) => p.status === 'pending');
+  for (const p of prior) await decideProposal(inst, p.id, { status: 'stale', reason: 'superseded by a new sweep' });
+  if (prior.length) await appendLedger(inst, ledgerEntry('decision', { status: 'stale', reason: `superseded ${prior.length} pending proposal${prior.length === 1 ? '' : 's'} (new sweep)` }));
   const minted = await addProposals(inst, proposals);
   await appendLedger(inst, ledgerEntry('sweep', { counts: { reads: results.length, proposals: minted.length } }));
   for (const p of minted) await appendLedger(inst, ledgerEntry('proposal', { action: p.name, targets: p.targets, why: p.why, proposalId: p.id, urls: p.urls }));
@@ -3048,6 +3058,7 @@ function _renderProposalBatch(list) {
   const pend = list.filter((p) => p.status === 'pending');
   if (!pend.length) { const m0 = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m0, 'Nothing pending.'); _orchFinalize(m0); return; }
   _sweepBatchIndex = pend.map((p) => p.id);
+  _lastBatchAt = Date.now();   // FL-1d — the batch is now the freshest referent for a bare "show me"
   const msg = appendMessage({ role: 'assistant', body: '' });
   // v1348 (user direction) — CONVERSATIONAL ground truth: targets render as PLAIN TEXT (no hyperlinks anywhere);
   // viewing the real pages is a VERB — `show 2` / `show tickets` / `go to origin` — resolved through SHOW_SOURCES
@@ -3082,6 +3093,14 @@ async function _showItemSources(params = {}) {
     const p = id ? pend.find((x) => x.id === id) : pend[n - 1];
     if (p) { await _showProposalSources(p); return; }
   }
+  // FL-1d (v1349) — RECENCY: a bare "show me" right after an answer means the answer's SOURCE — the read that
+  // grounded it — never a stale pending proposal or an arbitrary item. The last grounded read wins whenever it's
+  // fresher than the last rendered batch AND the ask bound no explicit targets.
+  const wantedEarly = (Array.isArray(params.targets) ? params.targets : []).filter(Boolean);
+  if (!wantedEarly.length && _lastGroundedRead && _lastGroundedRead.at > _lastBatchAt) {
+    await _showGroundedReadView();
+    return;
+  }
   const wanted = (Array.isArray(params.targets) ? params.targets : []).map((t) => String(t).replace(/^#/, '').trim()).filter(Boolean);
   if (wanted.length) {
     const urls = []; const seen = new Set();
@@ -3098,6 +3117,28 @@ async function _showItemSources(params = {}) {
   }
   if (pend.length) { await _showBatchSources(); return; }
   await _goToOrigin();
+}
+
+// FL-1d (v1349) — show the VIEW behind the last grounded read: a list read opens its collection's human page
+// (`listUrl`, e.g. the agent search running the SAME query the API counted); an item read (read_ticket {id})
+// opens that item via `itemUrl`; no template → the origin root with an honest note. Trusted-data rule holds:
+// origin + curated template + the read's OWN params (never model-minted).
+async function _showGroundedReadView() {
+  const g = _lastGroundedRead;
+  const m = appendMessage({ role: 'assistant', body: '' });
+  const tool = g && g.leg && g.leg.tool;
+  const host = tool && String(tool.origin || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+  if (!host) { _setMessageBody(m, 'I’ve lost track of what grounded that — ask again and then say “show me”.'); _orchFinalize(m); return; }
+  let path = '';
+  if (tool.listUrl) { path = fillEndpoint(tool.listUrl, g.params || {}); if (path.includes('{')) path = ''; }   // an UNFILLED placeholder must not leak into the URL → treat as unmapped
+  else if (tool.itemUrl && (g.params && (g.params.id != null))) path = tool.itemUrl.replace('{id}', encodeURIComponent(String(g.params.id)));
+  const url = `https://${host}${path && path.startsWith('/') ? path : '/'}`;
+  const r = await _orchReq('SHOW_SOURCES', { origin: host, urls: [url] });
+  const ok = !!(r && r.success !== false);
+  _setMessageBody(m, ok
+    ? (path ? `${r.reused ? 'Focused' : 'Opened'} the ${g.leg.name || 'source'} view in ${host}.` : `${r.reused ? 'Focused' : 'Opened'} ${host} — the exact view isn’t mapped for “${g.leg.name || 'that read'}” yet.`)
+    : `Couldn’t open ${host} — ${(r && r.error) || 'error'}.`);
+  _orchFinalize(m);
 }
 
 // v1348 — the CURRENT batch's targets, union-deduped (≤6), in the origin's one tab.
@@ -4749,6 +4790,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
       _setMessageBody(msg, `🧠 Couldn’t ${leg.does || leg.name || 'do that'}${rr && rr.error ? ` — ${rr.error}` : ''}.${hint}`);
       return false;
     }
+    _lastGroundedRead = { leg, params, at: Date.now() };   // FL-1d — this read grounds the coming answer
     const facts = readShapeFacts(rr.value);
     let shaped = null;
     try { shaped = await _orchReq('SHAPE_ANSWER', { ask, facts }); } catch { /* best-effort */ }
@@ -4817,6 +4859,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
     // number), not the recipe's default list. The model SHAPES + phrases; `readShapeFacts` hands it the EXACT count + a
     // MINIMIZED sample (ids/titles/status, NO bodies — the privacy-minimization lever). A shaped answer → show it;
     // showList / a miss / no-LLM → the deterministic CX-4c render below (grounded #ids, never LLM-re-emitted).
+    _lastGroundedRead = { leg, params, at: Date.now() };   // FL-1d — this read grounds the coming answer
     const facts = readShapeFacts(res.value);
     let shaped = null;
     try { shaped = await _orchReq('SHAPE_ANSWER', { ask, facts }); } catch { /* shaper is best-effort → fall through to the render */ }

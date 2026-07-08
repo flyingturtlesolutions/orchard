@@ -81,17 +81,23 @@ const ZD = Object.freeze({ app: 'zendesk', appHost: 'zendesk.com', verifyIdentit
 // inventory mutations stay navigate-only human-clicks, never a recipe (§9).
 export const CONNECTOR_RECIPES = [
   // ── "my X" queue reads — param-free (identity = the session) ──────────────────────────────────────────────────
+  // FL-1d (v2.74.1349) — `listUrl`: the COLLECTION's human page (the itemUrl counterpart for list-shaped reads).
+  // These are search reads, so the honest view is the agent search page running the SAME query — "show me" after
+  // "how many open tickets" opens the list the count came from, not a random item.
   { ...ZD, id: 'my_open_tickets', name: 'My open Zendesk tickets',
     does: 'list your OPEN Zendesk tickets (assigned to you), riding your Zendesk login',
     endpoint: '/api/v2/search.json?query=type:ticket%20status:open%20assignee:{me}&per_page=25&sort_by=created_at&sort_order=desc',
+    listUrl: '/agent/search/1?type=ticket&q=status%3Aopen%20assignee%3Ame',
     params: [] },
   { ...ZD, id: 'my_pending_tickets', name: 'My pending Zendesk tickets',
     does: 'list your PENDING Zendesk tickets (awaiting the customer, assigned to you), riding your login',
     endpoint: '/api/v2/search.json?query=type:ticket%20status:pending%20assignee:{me}&per_page=25&sort_by=updated_at&sort_order=desc',
+    listUrl: '/agent/search/1?type=ticket&q=status%3Apending%20assignee%3Ame',
     params: [] },
   { ...ZD, id: 'my_solved_tickets', name: 'My recently solved Zendesk tickets',
     does: 'list your recently SOLVED Zendesk tickets (assigned to you), riding your login',
     endpoint: '/api/v2/search.json?query=type:ticket%20status:solved%20assignee:{me}&per_page=25&sort_by=updated_at&sort_order=desc',
+    listUrl: '/agent/search/1?type=ticket&q=status%3Asolved%20assignee%3Ame',
     params: [] },
   // ── by-id / search reads — one typed param ───────────────────────────────────────────────────────────────────
   { ...ZD, id: 'read_ticket', name: 'Read a Zendesk ticket',
@@ -105,6 +111,7 @@ export const CONNECTOR_RECIPES = [
   { ...ZD, id: 'search_tickets', name: 'Search Zendesk tickets',
     does: 'search your Zendesk tickets by keywords or a query (e.g. a subject, requester, or tag), riding your login',
     endpoint: '/api/v2/search.json?query={query}%20type:ticket&per_page=25&sort_by=updated_at&sort_order=desc',
+    listUrl: '/agent/search/1?type=ticket&q={query}',
     params: [{ name: 'query', type: 'string', required: true }] },
   { ...ZD, id: 'view_user', name: 'Look up a Zendesk user',
     does: 'look up a Zendesk user (a requester / customer) by id, riding your login',

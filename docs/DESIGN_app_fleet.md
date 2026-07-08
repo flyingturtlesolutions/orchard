@@ -29,6 +29,15 @@ agent workspace accumulates them as internal workspace tabs, so a merge's two ti
 browser tab. Only with no tab on the origin does it create one. The driven span is busy-marked (Invariant #2);
 `SHOW ▸` is in `_DECISION_RE`.
 
+**v1349 — FL-1d read provenance ("show me" after an ANSWER):** a claim's ground truth is the READ that produced
+it. The panel stashes `_lastGroundedRead {leg, params, at}` at the connector-answer render sites; a bare
+"show me" (no targets bound) resolves there whenever the read is fresher than the last proposal batch — never a
+stale pending or an arbitrary item. Two receipt kinds: item claims → `itemUrl`; COLLECTION claims → the new
+`listUrl` recipe template (the agent search page running the SAME query the API counted — my_open/pending/solved
++ search_tickets carry it; param-filled via fillEndpoint). No template → origin root with an honest "exact view
+isn't mapped" note. Hygiene: a new sweep SUPERSEDES the prior pending batch (stale, ledgered) — old proposals
+stop lingering as show-me bait.
+
 **v1348 (user direction — conversational, and no static semantic routing):** NO hyperlinks anywhere — targets
 render plain; the trusted urls stay on proposal/ledger RECORDS as provenance, never as anchors. Viewing is
 CONVERSATIONAL, routed through the IL (the v1166 inversion, never regex): `palette.fleetOfferedLegs` offers two

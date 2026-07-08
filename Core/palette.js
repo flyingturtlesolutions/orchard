@@ -117,7 +117,7 @@ export function fleetOfferedLegs(app, connected = false) {
         origin: { type: 'boolean', description: 'true = open the connected site itself' },
       }, required: [] },
       name: 'Show the real pages',
-      does: `open the actual page(s) behind proposals or ${noun} in the connected site’s OWN tab (reused — never a pile of new tabs) — use when the user wants to see or verify the source: a proposal’s ${noun}, specific ids, or the site itself ("open zendesk", "go to the site")` },
+      does: `open the actual page(s) behind an answer or proposal in the connected site’s OWN tab (reused — never a pile of new tabs) — use when the user wants to see or verify the source: a bare "show me"/"show me those" right after an answer means the VIEW that answer came from (bind NOTHING — the panel resolves the most recent grounding); or a proposal’s ${noun}, specific ids, or the site itself ("open zendesk")` },
   ];
 }
 

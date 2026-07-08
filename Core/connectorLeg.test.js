@@ -63,6 +63,12 @@ describe('recipeToLeg — session-ride recipe → client connector leg (§4)', (
     assert.equal(leg.mode, 'ask');                       // a read
     assert.equal(leg.safety, 'auto');                    // trusted read
     assert.deepEqual(leg.params, ['id']);
+    // FL-1c/1d (v1347/1349) — the ground-truth HUMAN page templates thread recipe → tool (null when absent).
+    assert.equal(leg.tool.itemUrl, null);
+    assert.equal(leg.tool.listUrl, null);
+    const withUrls = recipeToLeg({ ...recipe, itemUrl: '/agent/tickets/{id}', listUrl: '/agent/search/1?q={query}' }, { account: 'acme', trusted: true });
+    assert.equal(withUrls.tool.itemUrl, '/agent/tickets/{id}');
+    assert.equal(withUrls.tool.listUrl, '/agent/search/1?q={query}');
     assert.equal(leg.paramSchema.properties.id.type, 'integer');
     assert.deepEqual(leg.paramSchema.required, ['id']);
   });
