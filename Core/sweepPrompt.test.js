@@ -4,9 +4,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildSweepReadsMessages, buildSweepProposeMessages, parseSweepReads, parseSweepProposals } from './sweepPrompt.js';
+import { buildSweepReadsMessages, buildSweepProposeMessages, parseSweepReads, parseSweepProposals, minimizeReadValue } from './sweepPrompt.js';
 import { normalizeProposal, canBulkApprove, getPath, pendingSummary, targetUrls } from './proposals.js';
-import { ledgerEntry, summarizeLedger, renderLedgerLines } from './actionLedger.js';
+import { ledgerEntry, summarizeLedger, renderLedgerLines, renderWorkTrace } from './actionLedger.js';
 
 const ASK_LEGS = [
   { key: 'me.zendesk.my_open_tickets@d.zendesk.com', name: 'My open tickets', does: 'List open tickets', mode: 'ask', safety: 'auto', domain: 'connector', paramSchema: { type: 'object', properties: {} } },
@@ -67,6 +67,40 @@ describe('sweepPrompt — phase B (propose)', () => {
   });
 });
 
+describe('sweepPrompt — FL-2b minimizeReadValue (coverage + privacy)', () => {
+  it('a list read slims to whitelisted per-item facts with FULL coverage counts (no raw bodies)', () => {
+    const tickets = Array.from({ length: 25 }, (_, i) => ({
+      id: 65700 + i, subject: `Ticket ${i}`, status: 'open', requester_id: 900 + i, updated_at: `2026-07-0${(i % 7) + 1}`,
+      description: 'x'.repeat(5000), url: 'https://api...', via: { channel: 'email', source: { from: { address: 'pii@example.com' } } },
+    }));
+    const m = minimizeReadValue({ results: tickets, next_page: null });
+    assert.equal(m.count, 25);
+    assert.equal(m.shown, 25);                                        // full coverage (the old 6k truncation showed ~4)
+    assert.equal(m.items[0].id, 65700);
+    assert.equal(m.items[0].requester_id, 900);
+    assert.equal(m.items[0].excerpt.length, 120);                     // list body → slim excerpt, never 5000 raw chars
+    assert.equal(m.items[0].via, undefined);                          // nested objects (email PII) dropped
+    assert.ok(JSON.stringify(m).length < 6000);                       // 25 tickets FIT the prompt belt (the old path truncated to ~4)
+  });
+  it('comments keep the LAST N (recency = the resolution signal)', () => {
+    const comments = Array.from({ length: 20 }, (_, i) => ({ id: i, author_id: 1, public: true, body: `comment ${i}`, created_at: `t${i}` }));
+    const m = minimizeReadValue({ comments }, { maxComments: 8 });
+    assert.equal(m.count, 20);
+    assert.equal(m.shown, 8);
+    assert.equal(m.kept, 'last');
+    assert.equal(m.items[0].excerpt, 'comment 12');                   // the last 8, oldest-of-kept first
+  });
+  it('non-list values pass through untouched', () => {
+    assert.deepEqual(minimizeReadValue({ ok: true, n: 3 }), { ok: true, n: 3 });
+    assert.equal(minimizeReadValue('plain'), 'plain');
+  });
+  it('needs cap is 8 (v1353 — 3 starved an 11-ticket queue)', () => {
+    const raw = JSON.stringify({ proposals: [], needs: Array.from({ length: 12 }, (_, i) => ({ key: 'me.zendesk.read_ticket@d.zendesk.com', params: { id: i } })) });
+    const { needs } = parseSweepProposals(raw, { legs: ACT_LEGS, askLegs: ASK_LEGS });
+    assert.equal(needs.length, 8);
+  });
+});
+
 describe('sweepPrompt — FL-1b evidence round (v1347)', () => {
   it('round 1 offers READ TOOLS for needs; round 2 says FINAL and offers none', () => {
     const r1 = buildSweepProposeMessages({ seed: 's', legs: ACT_LEGS, askLegs: ASK_LEGS, results: [], round: 1 });
@@ -119,14 +153,37 @@ describe('actionLedger — FL-1c ground-truth urls (v1348: stored as provenance,
 });
 
 describe('palette — fleetOfferedLegs (v1348: NL routes through the IL, not regex)', () => {
-  it('offers REVIEW_QUEUE + SHOW_ITEM_SOURCES for a connected app, with the object-model noun woven in', async () => {
+  it('offers REVIEW_QUEUE + SHOW_ITEM_SOURCES + SHOW_WORK for a connected app, with the object-model noun woven in', async () => {
     const { fleetOfferedLegs } = await import('./palette.js');
     const legs = fleetOfferedLegs({ objectModel: { plural: 'tickets' } }, true);
-    assert.deepEqual(legs.map((l) => l.key), ['REVIEW_QUEUE', 'SHOW_ITEM_SOURCES']);
+    assert.deepEqual(legs.map((l) => l.key), ['REVIEW_QUEUE', 'SHOW_ITEM_SOURCES', 'SHOW_WORK']);
     assert.ok(legs.every((l) => l.domain === 'self' && l.safety === 'auto'));
     assert.ok(legs[0].does.includes('tickets'));
     assert.ok(legs[1].paramSchema.properties.proposal);
     assert.deepEqual(fleetOfferedLegs({ objectModel: { plural: 'tickets' } }, false), []);   // unconnected app → not offered
+  });
+});
+
+describe('actionLedger — FL-1e renderWorkTrace ("show work")', () => {
+  it('groups by the LATEST runId, renders steps in order, and makes an UNSERVED need visible', () => {
+    const items = [
+      ledgerEntry('step', { runId: 'run_old', phase: 'plan', action: 'reads', note: 'My open tickets' }, 1000),
+      ledgerEntry('step', { runId: 'run_new', phase: 'plan', action: 'reads', ok: true, note: 'My open tickets · My pending tickets' }, 2000),
+      ledgerEntry('step', { runId: 'run_new', phase: 'read', action: 'My open tickets', ok: true, note: '~4200 chars' }, 2001),
+      ledgerEntry('step', { runId: 'run_new', phase: 'propose', action: 'round 1', ok: true, note: '0 proposal(s), 2 evidence need(s)' }, 2002),
+      ledgerEntry('step', { runId: 'run_new', phase: 'need', action: 'Read a Zendesk ticket conversation', ok: true, note: '{"id":65721}' }, 2003),
+      ledgerEntry('step', { runId: 'run_new', phase: 'need', action: 'made.up.read', ok: false, note: 'not among the offered reads' }, 2004),
+      ledgerEntry('step', { runId: 'run_new', phase: 'propose', action: 'round 2', ok: true, note: '1 proposal(s)' }, 2005),
+      ledgerEntry('sweep', { counts: { reads: 3, proposals: 1 }, runId: 'run_new' }, 2006),
+    ];
+    const { lines, runId } = renderWorkTrace(items);
+    assert.equal(runId, 'run_new');
+    assert.equal(lines.length, 7);                                     // the run_old step is NOT included
+    assert.ok(lines[0].includes('planned reads'));
+    assert.ok(lines[3].includes('🔍 evidence'));
+    assert.ok(lines[4].includes('✋ evidence UNSERVED'));               // the invisible failure, made visible
+    assert.ok(lines[6].startsWith('Σ done'));
+    assert.deepEqual(renderWorkTrace([]), { lines: [], runId: null }); // no traced runs → honest empty
   });
 });
 

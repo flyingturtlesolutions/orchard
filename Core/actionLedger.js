@@ -5,7 +5,7 @@
 
 const _str = (x) => (typeof x === 'string' ? x.trim() : '');
 
-export const LEDGER_KINDS = ['sweep', 'proposal', 'decision', 'execution'];
+export const LEDGER_KINDS = ['sweep', 'proposal', 'decision', 'execution', 'step'];   // FL-1e (v1352) — 'step': the run's WORKING (reads planned/run, evidence needs, propose rounds)
 
 /**
  * Mint one ledger entry. PURE (timestamp injected for testability).
@@ -28,8 +28,39 @@ export function ledgerEntry(kind, fields = {}, now = Date.now()) {
     if (fields.counts && typeof fields.counts === 'object') e.counts = fields.counts;
     // FL-1c (v2.74.1347) — ground-truth links per target (TRUSTED, built by Core/proposals.targetUrls — never model text)
     if (Array.isArray(fields.urls) && fields.urls.length) e.urls = fields.urls.filter((u) => u && u.id && /^https:\/\//.test(u.url)).slice(0, 12);
+    // FL-1e (v1352) — the work-trace fields: runId groups one run's entries; phase names the step kind.
+    if (_str(fields.runId)) e.runId = _str(fields.runId);
+    if (_str(fields.phase)) e.phase = _str(fields.phase);
+    if (_str(fields.note)) e.note = _str(fields.note).slice(0, 200);
   }
   return e;
+}
+
+/**
+ * FL-1e (v1352) — render one run's WORKING, step by step ("show work"). Groups by runId (default: the LATEST run
+ * that has any entries); privacy: steps carry leg NAMES + counts/notes, never content. PURE — caller escapes.
+ * @returns {{ lines: string[], runId: string|null }}
+ */
+export function renderWorkTrace(items, runId = null) {
+  const list = Array.isArray(items) ? items : [];
+  const rid = runId || [...list].reverse().find((e) => e && e.runId)?.runId || null;
+  if (!rid) return { lines: [], runId: null };
+  const run = list.filter((e) => e && e.runId === rid);
+  const lines = run.map((e) => {
+    if (e.kind === 'step') {
+      if (e.phase === 'plan') return `▸ planned reads: ${e.note || '—'}`;
+      if (e.phase === 'read') return `${e.ok === false ? '⚠' : '✓'} read ${e.action || ''}${e.note ? ` — ${e.note}` : ''}`;
+      if (e.phase === 'need') return `${e.ok === false ? '✋ evidence UNSERVED' : '🔍 evidence'} ${e.action || ''}${e.note ? ` — ${e.note}` : ''}`;
+      if (e.phase === 'propose') return `🧠 ${e.action || 'propose'}${e.note ? ` — ${e.note}` : ''}`;
+      return `· ${e.action || e.phase || 'step'}${e.note ? ` — ${e.note}` : ''}`;
+    }
+    if (e.kind === 'sweep') return `Σ done — ${e.counts ? Object.entries(e.counts).map(([k, v]) => `${v} ${k}`).join(', ') : 'ran'}`;
+    if (e.kind === 'proposal') return `📋 proposed ${e.action || ''}${e.targets && e.targets.length ? ` (${e.targets.join(', ')})` : ''}`;
+    if (e.kind === 'decision') return `${e.status === 'approved' ? '✓' : e.status === 'rejected' ? '✗' : '·'} ${e.status || 'decided'} ${e.action || ''}${e.reason ? ` — ${e.reason}` : ''}`;
+    if (e.kind === 'execution') return `${e.ok === false ? '✗ failed' : '⚡ executed'} ${e.action || ''}`;
+    return `· ${e.kind}`;
+  });
+  return { lines, runId: rid };
 }
 
 /**

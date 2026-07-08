@@ -30,7 +30,8 @@ import { parseAdminCommand, parseDedupCommand } from './Core/orchAdmin.js';    /
 import { classifyReadAsk, askListIndex } from './Core/observe.js';   // OBS-READ — is the ask a question (a read)? + the index a singular/ordinal read wants
 import { runIlStandin } from './Core/ilStandin.js';   // IL-3 — the single-shot stand-in folded through agentLoop@maxSteps=1 (DESIGN §8 Phase-1 parity)
 import { canBulkApprove, getPath, pendingSummary, targetUrls } from './Core/proposals.js';   // FL-2 (v2.74.1346) — the fleet pending queue's pure helpers; FL-1c (v1347) — ground-truth target links
-import { ledgerEntry, summarizeLedger, renderLedgerLines } from './Core/actionLedger.js';   // FL-4 — the app action ledger (pure half)
+import { minimizeReadValue } from './Core/sweepPrompt.js';   // FL-2b (v1353) — slim read facts into the sweep prompt (coverage + privacy)
+import { ledgerEntry, summarizeLedger, renderLedgerLines, renderWorkTrace } from './Core/actionLedger.js';   // FL-4 — the app action ledger (pure half); FL-1e (v1352) — the "show work" run trace
 import { loadProposals, addProposals, decideProposal } from './Services/Storage/ProposalStore.js';   // FL-2 — instance-keyed pending queue
 import { appendLedger, loadLedger } from './Services/Storage/ActionLedgerStore.js';   // FL-4 — instance-keyed ledger
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
@@ -2975,6 +2976,9 @@ async function _runFleetSweep() {
   if (!_currentConversationAppId || !inst) { _setMessageBody(msg, 'Open an app first — a sweep runs an app’s goal over its connected sites.'); _orchFinalize(msg); return; }
   if (!connections.length) { _setMessageBody(msg, 'This app has no connected sites yet — run `setup` first.', { markdown: true }); _orchFinalize(msg); return; }
   const base = { connections, appId: _currentConversationAppId, memoryId: inst, seed: _currentConversationSeed };
+  // FL-1e (v1352) — the WORK TRACE: every step of this run is ledgered under one runId ("show work" renders it).
+  const runId = `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+  const _step = (phase, action, ok, note) => appendLedger(inst, ledgerEntry('step', { runId, phase, action, ok, note }));
   _setMessageBody(msg, '🧹 Sweeping — planning reads…');
   let reads = []; let legs = [];
   try {
@@ -2983,14 +2987,19 @@ async function _runFleetSweep() {
     reads = Array.isArray(r.reads) ? r.reads : [];
     legs = Array.isArray(r.legs) ? r.legs : [];
   } catch (e) { _setMessageBody(msg, `Couldn’t plan the sweep — ${(e && e.message) || 'error'}.`); _orchFinalize(msg); return; }
+  await _step('plan', 'reads', true, reads.length ? reads.map((rd) => (legs.find((l) => l && l.key === rd.key)?.name) || rd.key).join(' · ') : 'none picked');
   const results = [];
   for (const rd of reads) {
     const leg = legs.find((l) => l && l.key === rd.key);
     if (!leg) continue;
     _setMessageBody(msg, `🧹 Sweeping — reading ${leg.name || rd.key}…`);
     const run = await _runConnectorLeg(leg, coerceParams(rd.params || {}, leg.paramSchema), {});
-    if (run.ok) results.push({ key: rd.key, params: rd.params || {}, value: run.value, leg });
-    else results.push({ key: rd.key, params: rd.params || {}, value: { error: run.error || 'read failed' }, leg });
+    // FL-2b (v1353) — MINIMIZE before the prompt: slim per-item facts (full coverage) instead of raw-JSON truncation
+    // (<15% coverage on the live queue), and bodies/emails stop riding the prompt raw (privacy minimization).
+    const mv = run.ok ? minimizeReadValue(run.value) : { error: run.error || 'read failed' };
+    results.push({ key: rd.key, params: rd.params || {}, value: mv, leg });
+    let _size = ''; try { _size = run.ok ? `${mv && mv.count != null ? `${mv.shown}/${mv.count} items, ` : ''}~${JSON.stringify(mv).length} chars` : ''; } catch { /* */ }   // privacy: counts only, never content
+    await _step('read', leg.name || rd.key, run.ok !== false, run.ok ? _size : (run.error || 'read failed'));
   }
   // FL-1b (v1347) — propose, with ONE bounded evidence round: round 1 may return `needs` (targeted reads the
   // model's rules demand — e.g. a candidate ticket's conversation before judging it resolved); the panel serves
@@ -3005,13 +3014,15 @@ async function _runFleetSweep() {
     proposals = Array.isArray(r.proposals) ? r.proposals : [];
     summary = r.summary || '';
     const needs = (round === 1 && Array.isArray(r.needs)) ? r.needs : [];
+    await _step('propose', `round ${round}`, true, `${proposals.length} proposal(s)${needs.length ? `, ${needs.length} evidence need(s)` : ''}${summary ? ` — ${summary}` : ''}`);
     if (!needs.length) break;
     for (const nd of needs) {
       const leg = legs.find((l) => l && l.key === nd.key);
-      if (!leg) continue;
+      if (!leg) { await _step('need', nd.key, false, 'not among the offered reads'); continue; }   // FL-1e — an UNSERVED need is visible, never silent
       _setMessageBody(msg, `🧹 Sweeping — gathering evidence: ${leg.name || nd.key}…`);
       const run = await _runConnectorLeg(leg, coerceParams(nd.params || {}, leg.paramSchema), {});
-      results.push({ key: nd.key, params: nd.params || {}, value: run.ok ? run.value : { error: run.error || 'read failed' }, leg });
+      results.push({ key: nd.key, params: nd.params || {}, value: run.ok ? minimizeReadValue(run.value) : { error: run.error || 'read failed' }, leg });   // FL-2b — minimized like the breadth reads
+      await _step('need', leg.name || nd.key, run.ok !== false, run.ok ? (nd.params && Object.keys(nd.params).length ? JSON.stringify(nd.params) : '') : (run.error || 'read failed'));
     }
   }
   // Thread each proposal's GROUNDING read (leg+params) + its ground-truth target links (FL-1c: TRUSTED
@@ -3027,10 +3038,10 @@ async function _runFleetSweep() {
   // sweep just re-ran, so they expire as stale instead of lingering (the "show me opened an old proposal" hazard).
   const prior = (await loadProposals(inst)).filter((p) => p.status === 'pending');
   for (const p of prior) await decideProposal(inst, p.id, { status: 'stale', reason: 'superseded by a new sweep' });
-  if (prior.length) await appendLedger(inst, ledgerEntry('decision', { status: 'stale', reason: `superseded ${prior.length} pending proposal${prior.length === 1 ? '' : 's'} (new sweep)` }));
+  if (prior.length) await appendLedger(inst, ledgerEntry('decision', { status: 'stale', reason: `superseded ${prior.length} pending proposal${prior.length === 1 ? '' : 's'} (new sweep)`, runId }));
   const minted = await addProposals(inst, proposals);
-  await appendLedger(inst, ledgerEntry('sweep', { counts: { reads: results.length, proposals: minted.length } }));
-  for (const p of minted) await appendLedger(inst, ledgerEntry('proposal', { action: p.name, targets: p.targets, why: p.why, proposalId: p.id, urls: p.urls }));
+  await appendLedger(inst, ledgerEntry('sweep', { counts: { reads: results.length, proposals: minted.length }, runId }));
+  for (const p of minted) await appendLedger(inst, ledgerEntry('proposal', { action: p.name, targets: p.targets, why: p.why, proposalId: p.id, urls: p.urls, runId }));
   if (!minted.length) {
     // v1347 honesty — don't claim "nothing needs doing" when the model's own summary says otherwise.
     _setMessageBody(msg, summary
@@ -3039,7 +3050,7 @@ async function _runFleetSweep() {
     _orchFinalize(msg);
     return;
   }
-  _setMessageBody(msg, `🧹 Sweep done${summary ? ` — ${summary}` : ''}.`, { markdown: true });
+  _setMessageBody(msg, `🧹 Sweep done${summary ? ` — ${summary.replace(/\.+$/, '')}` : ''}.`, { markdown: true });   // v1351 — no doubled period when the summary ends with one
   _orchFinalize(msg);
   _renderProposalBatch(minted);
 }
@@ -3152,6 +3163,19 @@ async function _showBatchSources() {
   let host = ''; try { host = new URL(urls[0]).host; } catch { /* */ }
   const r = await _orchReq('SHOW_SOURCES', { origin: host, urls });
   _setMessageBody(m, r && r.success !== false ? `Opened ${urls.length} page${urls.length === 1 ? '' : 's'} in the ${host} tab.` : `Couldn’t open them — ${(r && r.error) || 'error'}.`);
+  _orchFinalize(m);
+}
+
+// FL-1e (v1352) — "show work": render the last run's step-by-step WORKING from the ledger (reads planned/run,
+// evidence requested and whether it was served, propose rounds, park). The audit answer to "why no proposals?".
+async function _renderWorkTraceMsg() {
+  const inst = _memoryId();
+  const m = appendMessage({ role: 'assistant', body: '' });
+  if (!inst) { _setMessageBody(m, 'Open an app first — the work trace is per-app.'); _orchFinalize(m); return; }
+  const { lines, runId } = renderWorkTrace(await loadLedger(inst));
+  if (!lines.length) { _setMessageBody(m, 'No traced runs yet — run `sweep` first.', { markdown: true }); _orchFinalize(m); return; }
+  _setMessageBody(m, [`**Work trace** (last run):`, '', ...lines.map((l) => `- ${l}`)].join('\n'), { markdown: true });
+  try { _orchLog(`SHOW ▸ work trace — ${lines.length} step(s) (${runId})`); } catch { /* */ }
   _orchFinalize(m);
 }
 
@@ -4715,6 +4739,7 @@ const IL_PANEL_LEGS = {
   // "review the queue" → the propose-only sweep; "show me both tickets" / "open zendesk" → ground-truth viewing.
   REVIEW_QUEUE:             { run: async () => { await _runFleetSweep(); return { rendered: true }; } },
   SHOW_ITEM_SOURCES:        { run: async (_msg, { params } = {}) => { await _showItemSources(params || {}); return { rendered: true }; } },
+  SHOW_WORK:                { run: async () => { await _renderWorkTraceMsg(); return { rendered: true }; } },   // FL-1e (v1352)
   EXPLORE_PAGE:             { run: async (msg) => { await _chatExplore({ msg }); return { rendered: true }; } },
   TOGGLE_TRACKING:          { run: async (msg) => {
     let cur = false;
@@ -5100,12 +5125,18 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
   // FL (v2.74.1348, DESIGN_app_fleet.md) — interpret picked a fleet CONSOLE leg (NL → IL, the v1166 inversion:
   // "review the queue" / "show me both tickets" / "open zendesk" — never a regex). Offered only for a connected
   // app (sg.js gates via fleetOfferedLegs). Params bound by interpret ({proposal|targets|origin}) for the show leg.
-  if (d.intent === 'act' && (d.capabilityId === 'REVIEW_QUEUE' || d.capabilityId === 'SHOW_ITEM_SOURCES')
+  if (d.intent === 'act' && (d.capabilityId === 'REVIEW_QUEUE' || d.capabilityId === 'SHOW_ITEM_SOURCES' || d.capabilityId === 'SHOW_WORK')
       && retrieved.some((l) => l && l.domain === 'self' && l.key === d.capabilityId)) {
     if (d.capabilityId === 'REVIEW_QUEUE') {
       _setMessageBody(msg, '🧹 Reviewing the queue…');
       _orchFinalize(msg);
       await _runFleetSweep();
+      return true;
+    }
+    if (d.capabilityId === 'SHOW_WORK') {   // FL-1e (v1352) — "what did you just do" / "why no proposals"
+      _setMessageBody(msg, '🧾 Pulling up the work trace…');
+      _orchFinalize(msg);
+      await _renderWorkTraceMsg();
       return true;
     }
     _setMessageBody(msg, '🔎 Opening the source…');
@@ -5558,9 +5589,32 @@ async function sendChatMessage() {
     return;
   }
 
+  // v2.74.1350 — bare `seed` VIEWS the current seed and PRE-FILLS the input with `seed: <current>` — the
+  // chat-native edit affordance (see it, tweak it, send it). The seed was write-once-at-creation before this;
+  // an app's constitution must be inspectable and editable after the fact.
+  if (/^seed\s*$/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    const cur = _currentConversationSeed || '';
+    const m = appendMessage({ role: 'assistant', body: '' });
+    _setMessageBody(m, cur
+      ? `🌱 This conversation’s seed:\n\n${cur}\n\n(The input is pre-filled — edit and send. \`seed:\` alone clears it.)`
+      : '🌱 No seed set — the input is pre-filled; write the instructions and send.');
+    _orchFinalize(m);
+    input.value = cur ? `seed: ${cur}` : 'seed: ';
+    _autosizeInput();
+    $('btn-chat-send').disabled = !input.value.trim();
+    input.focus();
+    try { input.setSelectionRange(input.value.length, input.value.length); } catch { /* */ }
+    return;
+  }
+
   // CV-2b (v2.74.1163) — `seed: <text>` sets THIS conversation's standing instructions (its app/persona seed).
   // The IL threads the seed into routing context + the answer's system preamble (DESIGN_conversations.md §6).
-  // Empty clears it; persisted so it survives a reopen. A pre-gallery test affordance; the edit-UI lands in CV-3.
+  // Empty clears it; persisted so it survives a reopen. v1350 — view/edit via bare `seed` (above), and a
+  // non-empty set SYNCS the durable configured-app definition (AP-4) so a re-created app keeps the EDITED seed
+  // instead of resurrecting the setup-time snapshot. Existing sub-tasks keep their composed seeds (spawn-time
+  // copies, by design); future spawns compose from the new one.
   if (/^seed:/i.test(text)) {
     input.value = ''; _autosizeInput();
     const _seed = text.replace(/^seed:\s*/i, '').trim();
@@ -5569,7 +5623,17 @@ async function sendChatMessage() {
       await _ensureConversation();
       _currentConversationSeed = _seed;
       if (_currentConversationId) await ConversationStore.patchMeta(_currentConversationId, { seed: _seed || null });
-      appendMessage({ role: 'assistant', body: _seed ? '🌱 Seed set — it now shapes how I respond in this conversation.' : '🌱 Seed cleared.' });
+      let syncedDef = false;
+      if (_seed && _currentConversationInstanceId) {
+        try {
+          await _loadUserCatalog();
+          const found = (_userCatalog || []).find((d) => d && d.instanceId && d.instanceId === _currentConversationInstanceId);
+          if (found) { _userCatalog = addUserDef(_userCatalog, { ...found, seed: _seed }); await _saveUserCatalog(); syncedDef = true; }
+        } catch { /* best-effort — the conversation's own seed is already saved */ }
+      }
+      appendMessage({ role: 'assistant', body: _seed
+        ? `🌱 Seed updated — it now shapes how I respond here.${syncedDef ? ' Your saved app definition was updated too, so a re-created app keeps it.' : ''}`
+        : '🌱 Seed cleared.' });
     } catch (e) { try { console.warn('[chat] seed command failed:', e?.message); } catch { /* */ } }
     return;
   }
@@ -5644,7 +5708,7 @@ async function sendChatMessage() {
       '**This app**',
       '- `setup` — bind the app to the site(s) it works on',
       '- `memory` — review what this app has learned · `remember: <rule>` — teach it a standing rule',
-      '- `seed: <text>` — set the app’s role/instructions · `distill` — share learned rules up to the app type',
+      '- `seed` — view/edit the app’s role/instructions (input pre-fills) · `seed: <text>` — set it · `distill` — share learned rules up to the app type',
       '- `subtasks: <list>` — fan a job out into child conversations',
       '',
       '**Compose (apps with a canvas)**',
@@ -5660,6 +5724,7 @@ async function sendChatMessage() {
       '- `sweep` — read the connected systems and PROPOSE actions (never acts unasked)',
       '- `pending` — the approval queue · `approve all` / `approve 1,3` / `reject 2 <why>` · `show 2`',
       '- `ledger` / `ledger hour` / `ledger today` — what the app did, and why',
+      '- `show work` (or “what did you just do?”) — the last run’s step-by-step audit trail',
       '',
       'Type `/` for the capability picker. Say `stop` to halt a running job, `cancel` during setup.',
     ].join('\n'), { markdown: true });
@@ -5723,6 +5788,14 @@ async function sendChatMessage() {
       await _showProposalSources(p);
       return;
     }
+  }
+  // FL-1e (v1352) — `show work`: the last run's step-by-step audit (a terse console command; NL "what did you
+  // just do" / "why no proposals" routes through the SHOW_WORK leg).
+  if (/^show work\s*$/i.test(text) && _memoryId()) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    await _renderWorkTraceMsg();
+    return;
   }
   {
     const mLedger = text.match(/^ledger(?:\s+(hour|today))?\s*$/i);

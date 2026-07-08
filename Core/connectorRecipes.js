@@ -101,7 +101,7 @@ export const CONNECTOR_RECIPES = [
     params: [] },
   // ── by-id / search reads — one typed param ───────────────────────────────────────────────────────────────────
   { ...ZD, id: 'read_ticket', name: 'Read a Zendesk ticket',
-    does: 'fetch one Zendesk ticket by its number, riding your login',
+    does: 'fetch one Zendesk ticket by its number and summarize its DETAILS AS TEXT in the chat (for "what does it say / what’s it about" asks — NOT for showing/opening the page itself)',
     endpoint: '/api/v2/tickets/{id}.json',
     params: [{ name: 'id', type: 'integer', required: true }] },
   { ...ZD, id: 'ticket_comments', name: 'Read a Zendesk ticket conversation',

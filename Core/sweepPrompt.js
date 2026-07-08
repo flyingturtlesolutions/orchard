@@ -15,6 +15,44 @@ import { legRef } from './legRef.js';
 import { sanitizeToolString } from './toolRetrieval.js';
 import { normalizeProposal } from './proposals.js';
 
+// FL-2b (v2.74.1353) — MINIMIZE, don't truncate: raw list reads ran 45k-104k chars and the old 6k truncation belt
+// showed the model <15% of the queue (the live "no proposals — need more data" decline was starvation). Reduce a
+// read to judgment-relevant facts: per-item slim fields (ids, subject, requester, status, timestamps) + a short
+// excerpt — full coverage in a fraction of the tokens, and bodies/emails stop riding the prompt raw (the
+// llm_privacy minimization lever). Comments keep the LAST N (recency is the resolution signal). PURE, generic
+// (a field whitelist, no app knowledge); non-list values pass through untouched (the size belt still applies).
+const _SLIM_KEYS = ['id', 'subject', 'title', 'name', 'status', 'priority', 'type', 'requester_id', 'submitter_id', 'assignee_id', 'group_id', 'author_id', 'public', 'created_at', 'updated_at'];
+const _EXCERPT_KEYS = ['description', 'body', 'plain_body', 'comment', 'text', 'snippet'];
+function _findPrimaryArray(v) {
+  if (Array.isArray(v)) return v.some((x) => x && typeof x === 'object') ? v : null;
+  if (!v || typeof v !== 'object') return null;
+  let best = null;
+  for (const val of Object.values(v)) {
+    if (Array.isArray(val) && val.some((x) => x && typeof x === 'object') && (!best || val.length > best.length)) best = val;
+  }
+  return best;
+}
+function _slimItem(o, excerptLen) {
+  if (!o || typeof o !== 'object') return o;
+  const out = {};
+  for (const k of _SLIM_KEYS) if (o[k] != null && typeof o[k] !== 'object') out[k] = o[k];
+  if (Array.isArray(o.tags) && o.tags.length) out.tags = o.tags.slice(0, 6);
+  for (const k of _EXCERPT_KEYS) {
+    if (typeof o[k] === 'string' && o[k].trim()) { out.excerpt = o[k].trim().slice(0, excerptLen); break; }
+  }
+  return out;
+}
+export function minimizeReadValue(value, { maxItems = 30, maxComments = 8 } = {}) {
+  const arr = _findPrimaryArray(value);
+  if (!arr || !arr.length) return value;
+  const isComments = arr.some((x) => x && typeof x === 'object' && (typeof x.body === 'string' || typeof x.plain_body === 'string') && (x.author_id != null || x.public != null));
+  const items = isComments ? arr.slice(-maxComments) : arr.slice(0, maxItems);
+  // Breadth lists: slim 120-char excerpts (subject/status/requester/dates carry the dedup/staleness signal — and
+  // 30 items must FIT the prompt belt). Depth (comments): 240 (the resolution language lives in the prose).
+  const exLen = isComments ? 240 : 120;
+  return { count: arr.length, shown: items.length, kept: isComments ? 'last' : 'first', items: items.map((x) => _slimItem(x, exLen)) };
+}
+
 const _legLine = (l) => {
   const ref = legRef(l);
   const name = sanitizeToolString(String(l.name || ''));
@@ -54,6 +92,9 @@ const PROPOSE_SYSTEM = [
   '- FL-1b: if a candidate action lacks the evidence your rules demand (e.g. you need the item\'s full conversation',
   '  before judging it resolved), do NOT guess and do NOT propose it — instead list the targeted reads you need in',
   '  "needs" (from the READ TOOLS, with params), and you will be called again with those results.',
+  '- FL-2b: PARTIAL COVERAGE IS NORMAL. Propose whatever the evidence supports NOW and name the unverified',
+  '  remainder in the summary ("N items unverified this pass") — NEVER decline wholesale because you could not',
+  '  verify everything.',
   '- At most ONE proposal per target item.',
   '- "why": one sentence. "evidence": 1-3 SHORT quotes from the data. "targets": the item ids/labels affected.',
   '- "basedOn": a freshness anchor when the data offers one — {"readKey":"<which read>","path":"<json path to the',
@@ -79,7 +120,7 @@ export function buildSweepProposeMessages({ seed = '', learned = '', objects = '
     `ACTION TOOLS:\n${(legs || []).map(_legLine).join('\n')}`,
     (round === 1 && askLegs && askLegs.length)
       ? `READ TOOLS (for "needs" — evidence you may request ONCE):\n${askLegs.map(_legLine).join('\n')}`
-      : 'FINAL ROUND — your evidence needs were served (or none are available); propose or decline now, "needs" is ignored.',
+      : 'FINAL ROUND — your evidence needs were served (or none are available). Propose for the items whose evidence you HAVE and name the unverified remainder in the summary; "needs" is ignored.',
     `<SWEEP_DATA>\n${data}\n</SWEEP_DATA>`,
   ].filter(Boolean).join('\n\n');
   return { system: PROPOSE_SYSTEM, user };
@@ -135,7 +176,7 @@ export function parseSweepProposals(raw, { legs = [], askLegs = [] } = {}) {
     const params = (nd.params && typeof nd.params === 'object' && !Array.isArray(nd.params)) ? nd.params : {};
     if (needs.some((x) => x.key === key && JSON.stringify(x.params) === JSON.stringify(params))) continue;
     needs.push({ key, params });
-    if (needs.length >= 3) break;                        // one bounded evidence round, ≤3 targeted reads
+    if (needs.length >= 8) break;                        // one bounded evidence round, ≤8 targeted reads (FL-2b: 3 starved an 11-ticket queue; minimized payloads make 8 cheap)
   }
   return { proposals: out, needs, summary: obj && typeof obj.summary === 'string' ? obj.summary.trim().slice(0, 200) : '' };
 }

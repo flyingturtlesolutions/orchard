@@ -117,7 +117,11 @@ export function fleetOfferedLegs(app, connected = false) {
         origin: { type: 'boolean', description: 'true = open the connected site itself' },
       }, required: [] },
       name: 'Show the real pages',
-      does: `open the actual page(s) behind an answer or proposal in the connected site’s OWN tab (reused — never a pile of new tabs) — use when the user wants to see or verify the source: a bare "show me"/"show me those" right after an answer means the VIEW that answer came from (bind NOTHING — the panel resolves the most recent grounding); or a proposal’s ${noun}, specific ids, or the site itself ("open zendesk")` },
+      does: `OPEN the real page in the connected site’s own tab (reused — never a pile of new tabs). Pick this whenever the user says "show", "view", "open", or "see" a ${noun.replace(/s$/, '')}/item/page/queue — they want the PAGE ON SCREEN, not a text summary in chat (reading content into chat is the read tools' job). A bare "show me"/"show the ${noun.replace(/s$/, '')}" → bind NOTHING (the panel resolves the most recent grounding: the last answer’s view, or the pending proposal’s ${noun}); or bind a proposal number, specific ids, or origin:true for the site itself ("open zendesk")` },
+    // FL-1e (v1352) — the AUDIT leg: the run's step-by-step working, rendered in chat (not a page).
+    { key: 'SHOW_WORK', domain: 'self', mode: 'ask', safety: 'auto', source: 'builtin', params: [],
+      name: 'Show the work',
+      does: 'explain step by step what the last run/sweep actually DID — which reads ran, what evidence it requested and whether it was served, and why proposals did or didn’t materialize. Use for "show your work", "what did you just do", "why no proposals", "what did the sweep check"' },
   ];
 }
 

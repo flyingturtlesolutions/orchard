@@ -1305,7 +1305,7 @@ export function createSgMessageHandlers(ctx) {
         } else {
           // FL-1b (v1347) — round 1 may return `needs` (targeted evidence reads); round 2 is FINAL (needs ignored).
           const round = payload?.round === 2 ? 2 : 1;
-          const results = Array.isArray(payload?.results) ? payload.results.slice(0, 6) : [];   // 3 breadth + 3 evidence
+          const results = Array.isArray(payload?.results) ? payload.results.slice(0, 12) : [];   // 3 breadth + 8 evidence (FL-2b) + margin
           const raw = await AnthropicService.sweepPropose({ seed, learned, objects, legs: actLegs, askLegs: round === 1 ? askLegs : [], results, round });
           const { proposals, needs, summary } = parseSweepProposals(raw, { legs: actLegs, askLegs });
           const outNeeds = round === 1 ? needs : [];
