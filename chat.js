@@ -6030,6 +6030,26 @@ async function sendChatMessage() {
       await _rejectProposal(id, (mReject[2] || '').trim());
       return;
     }
+    // v1377 (live miss: `reject never assign vendor notification ticket` → "Can you say that a different way?")
+    // — a bare `reject [reason]` / `approve` is UNAMBIGUOUS with exactly one pending proposal: apply it there.
+    // With several pending, ask for the number instead of falling through to interpret's clarify dead-end.
+    const mBare = text.match(/^(approve|reject)\b\s*(.*)$/i);
+    if (mBare && _memoryId() && !/^(all|\d)/i.test(mBare[2] || '')) {
+      input.value = ''; _autosizeInput();
+      appendMessage({ role: 'user', body: text });
+      const pendB = (await loadProposals(_memoryId())).filter((p) => p.status === 'pending');
+      if (pendB.length === 1) {
+        if (/^approve$/i.test(mBare[1])) await _approveProposal(pendB[0].id);
+        else await _rejectProposal(pendB[0].id, (mBare[2] || '').trim());
+      } else {
+        const mB = appendMessage({ role: 'assistant', body: '' });
+        _setMessageBody(mB, pendB.length === 0
+          ? 'Nothing is pending.'
+          : `${pendB.length} proposals are pending — say \`${mBare[1].toLowerCase()} 2${/^reject$/i.test(mBare[1]) ? ' <why>' : ''}\` (run \`pending\` to see the numbers).`, { markdown: true });
+        _orchFinalize(mB);
+      }
+      return;
+    }
     // FL-1c (v1347) — `show N`: open proposal N's GROUND-TRUTH pages (reuse-then-navigate; a merge shows both tickets).
     const mShow = text.match(/^show\s+(\d+)\s*$/i);
     if (mShow && _memoryId()) {
@@ -6039,6 +6059,15 @@ async function sendChatMessage() {
       const p = id ? (await loadProposals(_memoryId())).find((x) => x.id === id) : null;
       if (!p) { const m4 = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(m4, 'No such proposal number — run `pending` to renumber.', { markdown: true }); _orchFinalize(m4); return; }
       await _showProposalSources(p);
+      return;
+    }
+    // v1378 (live miss: "show ticket" with ONE pending → interpret asked "Which ticket?") — the bare console
+    // phrasings are DETERMINISTIC: the FL-1d cascade already resolves the referent (last answer's read → the
+    // batch → origin), so a plain `show` / `show ticket(s)` / `show me` never needs the model at all.
+    if (/^show(\s+(me|the|it|tickets?|items?|sources?))*\s*$/i.test(text) && _memoryId()) {
+      input.value = ''; _autosizeInput();
+      appendMessage({ role: 'user', body: text });
+      await _showItemSources({});
       return;
     }
   }

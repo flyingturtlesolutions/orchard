@@ -134,7 +134,7 @@ export function fleetOfferedLegs(app, connected = false) {
         origin: { type: 'boolean', description: 'true = open the connected site itself' },
       }, required: [] },
       name: 'Show the real pages',
-      does: `OPEN the real page in the connected site’s own tab (reused — never a pile of new tabs). Pick this whenever the user says "show", "view", "open", or "see" a ${noun.replace(/s$/, '')}/item/page/queue — they want the PAGE ON SCREEN, not a text summary in chat (reading content into chat is the read tools' job). A bare "show me"/"show the ${noun.replace(/s$/, '')}" → bind NOTHING (the panel resolves the most recent grounding: the last answer’s view, or the pending proposal’s ${noun}); or bind a proposal number, specific ids, or origin:true for the site itself ("open zendesk")` },
+      does: `OPEN the real page in the connected site’s own tab (reused — never a pile of new tabs). Pick this whenever the user says "show", "view", "open", or "see" a ${noun.replace(/s$/, '')}/item/page/queue — they want the PAGE ON SCREEN, not a text summary in chat (reading content into chat is the read tools' job). A bare "show me"/"show the ${noun.replace(/s$/, '')}" → CALL THIS LEG with NO params — NEVER ask "which one?": the console resolves the referent itself (the last answer’s view, or the pending proposal’s ${noun}); or bind a proposal number, specific ids, or origin:true for the site itself ("open zendesk")` },
     // FL-1e (v1352) — the AUDIT leg: the run's step-by-step working, rendered in chat (not a page).
     { key: 'SHOW_WORK', domain: 'self', mode: 'ask', safety: 'auto', source: 'builtin', params: [],
       name: 'Show the work',
