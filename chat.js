@@ -40,7 +40,7 @@ import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch plan
 import { recipeLegs, coerceParams, fillBody, fillEndpoint } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template
 import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 — header-replay writes: json/form/raw + contentType (review I)
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
-import { renderConnectorLines, itemLabels, primaryItemId } from './Core/connectorRender.js';   // CX-4c — generic render of ANY connector read (not just tickets); CV-4-full — itemLabels: read list → fan-out labels; CX-7e — primaryItemId: the record a lookup returned (for "show profile")
+import { renderConnectorLines, itemLabels, primaryItemId, createdRecordId } from './Core/connectorRender.js';   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it")
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
 import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recent-turn window selector (follow-up continuity for the IL)
@@ -49,6 +49,7 @@ import { planSubTasks, subTaskFromApp, composeSeed, classifyAskToGrid, isConfigu
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-app write gate (read-only enforcement)
 import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps; AP-4 — configuredAppDefinition (mint a durable, re-creatable app from a set-up instance)
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
+import { capableSitesCatalog } from './Core/capableSites.js';   // AS-5 — the "sites with defined capabilities" catalog the setup multi-select lists (pure merge)
 import { originFromText } from './Core/setupSpec.js';   // AS-4 / review P1-6 — the host-shape floor: a real public host has a dot (TLD); rejects bare words like "gmail" before they bank a poisoned target
 import { recordGoalItem, loadGoalItems, clearGoalMemory, promoteGoalItem } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view
 import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
@@ -74,6 +75,8 @@ let _devModeEnabled = false;   // v2.74.1160 — Studio toggle (settings:devMode
 let _currentConversationSeed = '';   // v2.74.1163 (CV-2b) — the current conversation's seed (its standing instructions); the IL threads it into routing context + the answer preamble.
 let _currentConversationConfig = { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — the current track's enforced app config; the write gate (actAllowed) blocks ACTS when writePolicy:'never' (a read-only app/sub-task).
 let _setupState = null;   // AS-2 (v2.74.1188) — the in-progress guided-setup flow: { convId, spec } while connecting an app to its site; null otherwise. While set (for the current conversation), the modal intercept at the top of sendChatMessage routes the next typed message into advanceSetup.
+let _setupPick = null;      // AS-5 (v2.74.1406) — the catalog-setup multi-select working set: Map<key,{origin,label}> while picking sites; null when not in catalog mode.
+let _setupCatalog = null;   // AS-5 — the last-rendered capability catalog list (so a typed-in site appends to it + re-renders with the pick checked).
 let _currentConversationAppId = null;   // AL-3b (v2.74.1193) — the current app's appId = its TYPE (preset id); object-model / canvas resolve through it. Tracked at create / rehydrate / clear.
 let _currentConversationInstanceId = null;   // AP-0 (v2.74.1211) — the per-INSTANCE identity (unique per configured app); the goal-memory key, so two apps of one type don't share learning. Tracked alongside appId.
 // AP-0 — THE goal-memory key: the per-instance id when present, else the app TYPE (legacy apps with no instanceId, e.g.
@@ -125,7 +128,7 @@ function _clearCurrentConversation() {
   _currentConversationKind = 'agent';   // v2.74.1029 — a fresh/blank surface is always an agent conversation
   _currentConversationSeed = '';        // v2.74.1163 (CV-2b) — clear the IL seed on a fresh surface
   _currentConversationConfig = { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — a fresh/blank surface is unrestricted (gated)
-  _setupState = null;   // AS-2 (v2.74.1188) — drop any in-progress setup flow when the surface changes
+  _setupState = null; _setupPick = null; _setupCatalog = null;   // AS-2/AS-5 (v2.74.1188/.1406) — drop any in-progress setup flow + its multi-select picks when the surface changes
   _currentConversationAppId = null;   // AL-3b — clear the app type on a fresh surface
   _currentConversationInstanceId = null;   // AP-0 — clear the per-instance memory key too
   _currentConversationPresetId = null;     // §10.2 — clear the preset type too
@@ -1876,13 +1879,98 @@ async function _startSetupFlow() {
   }
   try { await _loadUserCatalog(); } catch { /* */ }
   const def = _setupDefFor(conv);
-  const connections = await _setupConnections();
-  const { spec, step } = startSetup(def, { connections });
+  // AS-5 (v2.74.1406) — source the site picker from the capability CATALOG (sites Orchard already has recipes /
+  // taught capabilities for), NOT the open tabs. The pure controller's candidate list stays empty — we render the
+  // catalog as a MULTI-SELECT directly and drive the spec to done at Confirm.
+  const { spec } = startSetup(def, {});
   _setupState = { convId: _currentConversationId, spec };
-  _persistSetupState();   // v1340 (review J-setup) — survive a panel reload
-  _setMessageBody(msg, `**Setting up “${conv.title || def.name}”.** Pick the sites it works on — type an address or pick an open tab, add as many as it needs, then say \`done\`. \`cancel\` to stop.`, { markdown: true });
+  _setupPick = new Map();
+  _setupCatalog = await _capableSitesCatalog();
+  _persistSetupState();   // v1340 — survive a panel reload (a mid-selection reload re-renders the catalog fresh)
+  _setMessageBody(msg, `**Setting up “${conv.title || def.name}”.** Pick the sites it works on from the catalog below — select as many as it needs, then **Confirm**. Not listed? Type its address to add it. \`cancel\` to stop.`, { markdown: true });
   _orchFinalize(msg);
-  _renderSetupStep(step);
+  _renderSetupCatalog(_setupCatalog);
+}
+
+// AS-5 — assemble the "sites with defined capabilities" catalog: the background's taught Grounds + linked broker
+// providers (GET_CAPABLE_SITES), merged (Core/capableSites) with the curated + broker catalogs and the origins
+// already connected in the user's OTHER apps.
+async function _capableSitesCatalog() {
+  let sites = []; let linkedProviders = [];
+  try { const r = await _orchReq('GET_CAPABLE_SITES', {}); if (r && r.success !== false) { sites = Array.isArray(r.sites) ? r.sites : []; linkedProviders = Array.isArray(r.linkedProviders) ? r.linkedProviders : []; } } catch { /* */ }
+  const connections = []; const seen = new Set();
+  try {
+    await _loadUserCatalog();
+    for (const d of (_userCatalog || [])) {
+      const cs = (d && d.setup && Array.isArray(d.setup.connections)) ? d.setup.connections : [];
+      for (const c of cs) { if (c && c.origin && !seen.has(c.origin)) { seen.add(c.origin); connections.push({ origin: c.origin, label: c.label }); } }
+    }
+  } catch { /* */ }
+  try { return capableSitesCatalog({ grounds: sites, linkedProviders, connections }); } catch { return []; }
+}
+
+// AS-5 — render the capability catalog as a MULTI-SELECT list + a ✓ Confirm bar. Toggling a concrete/broker card
+// picks it (bind directly — login is verified at RUN time, not setup); a connector class with no instance guides the
+// user to type its address (which appends to the catalog + auto-picks). Confirm drives the pure spec to done + banks.
+function _renderSetupCatalog(catalog) {
+  const list = Array.isArray(catalog) ? catalog : [];
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  _setMessageBody(msg, list.length ? 'Select the sites this app works on, then **Confirm**:' : 'No sites with saved capabilities yet — type a site address (e.g. `deako.zendesk.com`) to add one, then **Confirm**.', { markdown: true });
+  const body = msg.querySelector('.message-content') || msg;
+  const confirmBtn = _mkBtn('✓ Confirm', () => { void _confirmSetupCatalog(); });
+  const sync = () => { const n = _setupPick ? _setupPick.size : 0; confirmBtn.disabled = !n; confirmBtn.textContent = n ? `✓ Confirm (${n})` : '✓ Confirm'; };
+  if (list.length) {
+    const wrap = document.createElement('div'); wrap.className = 'intent-menu setup-catalog';
+    for (const e of list) {
+      const card = document.createElement('button');
+      card.className = 'suggestion-card intent-chip setup-site';
+      const off = (Array.isArray(e.offers) && e.offers.length) ? `<div class="suggestion-card-summary">${escHtml(e.offers.join(' · '))}</div>` : '';
+      card.innerHTML = `<div class="suggestion-card-name">${escHtml(e.label)}</div>${off}`;
+      if (_setupPick && _setupPick.has(e.key)) card.classList.add('selected');
+      card.addEventListener('click', () => {
+        if (e.needsInstance && !e.origin) {   // a connector class with no bound instance → guide the user to type its address
+          const inp = $('chat-input'); if (inp) { inp.focus(); }
+          _orchFinalize(appendMessage({ role: 'assistant', body: `Type your ${e.label} address (e.g. \`yourteam.${e.host}\`) to add it.` }));
+          return;
+        }
+        if (!_setupPick) return;
+        if (_setupPick.has(e.key)) { _setupPick.delete(e.key); card.classList.remove('selected'); }
+        else { _setupPick.set(e.key, { origin: e.origin, label: e.label }); card.classList.add('selected'); }
+        sync();
+      });
+      wrap.appendChild(card);
+    }
+    body.appendChild(wrap);
+  }
+  const bar = document.createElement('div'); bar.className = 'orch-action-bar';
+  bar.appendChild(confirmBtn);
+  bar.appendChild(_mkBtn('Cancel', () => { _setupState = null; _setupPick = null; _setupCatalog = null; _persistSetupState(); _orchFinalize(appendMessage({ role: 'assistant', body: 'Setup cancelled — type “setup” to start again.' })); }));
+  body.appendChild(bar);
+  sync();
+  _orchFinalize(msg);
+}
+
+// AS-5 — re-render the catalog (after a typed-in site appends, or after a reload where the in-flight picks were lost).
+async function _reshowSetupCatalog() {
+  if (!_setupState) return;
+  if (!_setupPick) _setupPick = new Map();
+  if (!Array.isArray(_setupCatalog)) { try { _setupCatalog = await _capableSitesCatalog(); } catch { _setupCatalog = []; } }
+  _renderSetupCatalog(_setupCatalog);
+}
+
+// AS-5 — bank the whole multi-selected set: accrete each pick into the pure spec, mark done, hand to _bankSetup. NO
+// per-site live verify here — the domain is DEFINED at setup; login is checked at RUN time (the ride path foregrounds
+// the tab for sign-in), so you can pick sites you aren't logged into right now.
+async function _confirmSetupCatalog() {
+  if (!_setupState || !_setupPick || !_setupPick.size) return;
+  let spec = _setupState.spec;
+  for (const conn of _setupPick.values()) {
+    if (conn && conn.origin) { try { ({ spec } = advanceSetup(spec, { origin: conn.origin, label: conn.label })); } catch { /* */ } }
+  }
+  const { spec: doneSpec, step } = advanceSetup(spec, { done: true });
+  _setupState.spec = doneSpec;
+  _setupPick = null; _setupCatalog = null;
+  await _bankSetup(step);
 }
 
 // Render one step: the prompt + (for the target slot) clickable connection candidates. Typing an answer also works —
@@ -5058,7 +5146,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
     try { rr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null }); } catch { /* */ }   // v1340 (review A/§18) — the arm-guard pair rides the read too
     if (!rr || rr.success === false) {
       const hint = (rr && rr.hint) ? `  ${rr.hint}.` : '';
-      _setMessageBody(msg, `Couldn’t ${leg.does || leg.name || 'do that'}${rr && rr.error ? ` — ${rr.error}` : ''}.${hint}`);
+      _setMessageBody(msg, `Couldn’t ${leg.does || leg.name || 'do that'}${rr && rr.error ? ` — ${rr.error}` : ''}${rr && rr.detail ? ` (${rr.detail})` : ''}.${hint}`);
       return false;
     }
     _lastGroundedRead = { leg, params, at: Date.now() };   // FL-1d — this read grounds the coming answer
@@ -5085,7 +5173,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
     if (!okd) { _setMessageBody(msg, 'Cancelled — nothing was sent.'); return 'cancelled'; }   // v1338 (review C)
     let br = null;
     try { br = await _orchReq('INVOKE_CONNECTOR', { ...plan0.payload, confirmed: true }); } catch { /* */ }
-    if (!br || br.success === false) { _setMessageBody(msg, `Couldn’t ${leg.does || leg.name || 'do that'}${br && br.error ? ` — ${br.error}` : ''}.${br && br.hint ? `  ${br.hint}.` : ''}`); return false; }
+    if (!br || br.success === false) { _setMessageBody(msg, `Couldn’t ${leg.does || leg.name || 'do that'}${br && br.error ? ` — ${br.error}` : ''}${br && br.detail ? ` (${br.detail})` : ''}.${br && br.hint ? `  ${br.hint}.` : ''}`); return false; }
     _setMessageBody(msg, `Done — ${plan0.payload.tool} sent.`);
     return true;
   }
@@ -5104,8 +5192,17 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
     try { _orchLog(`RIDE_WRITE ▸ confirm ${leg.key || leg.tool.recipeId || ''} → ${leg.tool.endpoint}`); } catch { /* */ }
     let sw = null;
     try { sw = await _orchReq(planW.channel, { ...planW.payload, body: bodyW, contentType: ctW, confirmed: true }); } catch { /* */ }
-    if (!sw || sw.success === false) { _setMessageBody(msg, `Couldn’t ${leg.does || leg.name || 'send that'}${sw && sw.error ? ` — ${sw.error}` : ''}.${sw && sw.hint ? `  ${sw.hint}.` : ''}`); return false; }
-    _setMessageBody(msg, `Sent — ${leg.tool.method || 'POST'} ${leg.tool.endpoint}.`);
+    if (!sw || sw.success === false) { _setMessageBody(msg, `Couldn’t ${leg.does || leg.name || 'send that'}${sw && sw.error ? ` — ${sw.error}` : ''}${sw && sw.detail ? ` (${sw.detail})` : ''}.${sw && sw.hint ? `  ${sw.hint}.` : ''}`); return false; }   // CX-7 — surface the GraphQL `detail` (the real userErrors/errors message names the wrong field)
+    // CX-7f (v2.74.1404) — a WRITE that created a record leaves a navigable "last read" so "show it" opens the new
+    // record (the write leg carries an itemUrl; createdRecordId digs the new id out of the mutation reply's
+    // data.<op>.<entity>). Only when we actually have an id + itemUrl — else a plain "Done." (nothing to open).
+    const _madeId = createdRecordId(sw && sw.value);
+    if (_madeId != null && leg.tool.itemUrl) {
+      _lastGroundedRead = { leg, params, at: Date.now(), itemId: _madeId, urlArgs: (sw && sw.urlArgs) || null };
+      _setMessageBody(msg, `Done — created it (#${_madeId}). Say “show it” to open the record.`);
+    } else {
+      _setMessageBody(msg, 'Done.');
+    }
     return true;
   }
   const plan = planExec(leg, params, { tabId, groundId });
@@ -5122,7 +5219,7 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
   try { res = await _orchReq(plan.channel, plan.payload); } catch { /* */ }
   if (!res || res.success === false) {
     const hint = (res && res.hint) ? `  ${res.hint}.` : '';   // CX-4a.1 — surface "open <app> and sign in" on a connector auth miss
-    _setMessageBody(msg, `Couldn’t ${leg.does || leg.name || 'do that'}${res && res.error ? ` — ${res.error}` : ''}.${hint}`);
+    _setMessageBody(msg, `Couldn’t ${leg.does || leg.name || 'do that'}${res && res.error ? ` — ${res.error}` : ''}${res && res.detail ? ` (${res.detail})` : ''}.${hint}`);
     return false;
   }
   if (leg.domain === 'connector') {
@@ -5774,30 +5871,30 @@ async function sendChatMessage() {
       _orchFinalize(appendMessage({ role: 'assistant', body: 'Setup paused — type “setup” to pick up where you left off.' }));
       return;
     }
-    if (/^set\s*up:?\s*$/i.test(text)) { _renderSetupStep(setupStep(_setupState.spec)); return; }   // re-show the current step, don't bind "setup" as an answer
-    const step = setupStep(_setupState.spec);
-    let answer = text;
-    if (step.kind === 'connections') {
-      // AS-4 — a "done" word ends the sequential add (ignored before the first site); otherwise shape a site address.
-      if (/^(done|finish|finished|that'?s all|no more|all set|that is all)$/i.test(text)) {
-        // v2.74.1340 (review J-setup) — done at ZERO connections used to silently re-render the same step; say why.
-        if (!(Array.isArray(step.connected) && step.connected.length)) {
-          _orchFinalize(appendMessage({ role: 'assistant', body: 'Nothing is connected yet — I need at least one site before we finish. Type its address (e.g. mail.google.com), or `cancel` to stop.' }));
-          return;
-        }
-        answer = { done: true };
-      } else {
-        answer = _targetFromText(text);
-        if (!answer) {
-          _orchFinalize(appendMessage({ role: 'assistant', body: step.stage === 'more'
-            ? 'Type another site (e.g. support.deako.com), or say “done”.'
-            : 'I need a site — type its address (e.g. mail.google.com) or pick one of the open tabs above.' }));
-          return;
-        }
+    if (/^set\s*up:?\s*$/i.test(text)) { void _reshowSetupCatalog(); return; }   // AS-5 — re-show the capability catalog, don't bind "setup" as a site
+    // AS-5 (v2.74.1406) — catalog multi-select mode: `done`/`confirm` BANKS the current picks; a typed address
+    // APPENDS to the catalog + auto-picks it (bind directly, runtime verifies login); anything unshapeable re-prompts.
+    if (/^(done|finish|finished|confirm|that'?s all|no more|all set|that is all)$/i.test(text)) {
+      if (!_setupPick || !_setupPick.size) {
+        _orchFinalize(appendMessage({ role: 'assistant', body: 'Nothing is selected yet — pick a site from the catalog above, or type its address, then Confirm.' }));
+        return;
       }
+      await _confirmSetupCatalog();
+      return;
     }
-    try { await _setupAdvanceAnswer(answer); }
-    catch (e) { try { console.warn('[chat] setup advance failed:', e?.message); } catch { /* */ } }
+    const picked = _targetFromText(text);
+    if (!picked) {
+      _orchFinalize(appendMessage({ role: 'assistant', body: 'Type a site address (e.g. `support.deako.com`), or pick one from the catalog above and Confirm.' }));
+      return;
+    }
+    if (!_setupPick) _setupPick = new Map();
+    if (!Array.isArray(_setupCatalog)) _setupCatalog = [];
+    const _typedKey = `typed:${picked.origin}`;
+    _setupPick.set(_typedKey, { origin: picked.origin, label: picked.label });
+    if (!_setupCatalog.some((x) => x.key === _typedKey || x.origin === picked.origin)) {
+      _setupCatalog.push({ key: _typedKey, origin: picked.origin, host: picked.label, label: picked.label, kind: 'site', offers: ['added'], concrete: true, needsInstance: false, groundId: null, provider: null });
+    }
+    void _reshowSetupCatalog();
     return;
   }
 

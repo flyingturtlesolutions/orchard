@@ -53,6 +53,27 @@ export function primaryItemId(value) {
   return o ? (summarizeItem(o).id ?? null) : null;   // gid → numeric tail already handled by summarizeItem
 }
 
+/** CX-7f (v2.74.1404) — the id of the record a WRITE just created, for post-write navigation ("create customer" →
+ * "show customer" opens the new record). A Shopify mutation nests it at data.<op>.<entity>.id (e.g.
+ * customerCreate.customer.id / draftOrderCreate.draftOrder.id) — which the read-shaped primaryObject doesn't unwrap.
+ * Dig data → each op-result → its first nested object that ISN'T `userErrors` → an `id`; gid → numeric tail (the
+ * admin URL uses the numeric id). PURE. Null when the reply carries no created record. */
+export function createdRecordId(value) {
+  const data = (value && typeof value === 'object' && value.data && typeof value.data === 'object') ? value.data : null;
+  if (!data) return null;
+  for (const op of Object.values(data)) {
+    if (!op || typeof op !== 'object' || Array.isArray(op)) continue;
+    for (const [k, v] of Object.entries(op)) {
+      if (k === 'userErrors') continue;
+      let id = (v && typeof v === 'object' && !Array.isArray(v)) ? v.id : (k === 'id' ? v : null);
+      if (id == null) continue;
+      if (typeof id === 'string' && /^gid:\/\/shopify\//i.test(id)) id = id.split('/').pop();   // gid → numeric tail (matches primaryItemId)
+      return id;
+    }
+  }
+  return null;
+}
+
 /** The primary single OBJECT (a wrapper like {ticket:{…}}, or the value itself when id/name-shaped). PURE.
  * CX-7 — unwraps a GraphQL `{data:{<root>:{…}}}` envelope to the inner object. */
 export function primaryObject(value, _depth = 0) {

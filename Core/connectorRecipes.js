@@ -34,13 +34,17 @@ const _has = (a, name) => a && Object.prototype.hasOwnProperty.call(a, name);
 function _fillBodyNode(node, a) {
   if (typeof node === 'string') {
     const sole = node.match(_SOLE_PLACEHOLDER);
-    if (sole) return _has(a, sole[1]) ? { value: a[sole[1]] } : { drop: true };   // unfilled → drop the field
+    // Drop the field when the arg reads as ABSENT: unfilled, '' / null / undefined, OR a bare placeholder token the
+    // LLM binder ECHOED ("{company}") as the value for a param it couldn't fill (v1405). An empty/echoed optional must
+    // NEVER ride the body — Shopify rejects phone:"" as "Phone is invalid" (v1403) and stores "{company}" LITERALLY in
+    // an address. `false` / `0` are real values and stay — only ''/null/undefined/placeholder-echo read as absent.
+    if (sole) { const val = _has(a, sole[1]) ? a[sole[1]] : undefined; return (val === '' || val == null || (typeof val === 'string' && _SOLE_PLACEHOLDER.test(val))) ? { drop: true } : { value: val }; }
     return { value: node.replace(/\{([a-zA-Z_][\w-]*)\}/g, (m, n) => (_has(a, n) ? String(a[n]) : m)) };
   }
   if (Array.isArray(node)) {
     const arr = [];
     for (const item of node) { const r = _fillBodyNode(item, a); if (!r.drop) arr.push(r.value); }
-    return { value: arr };
+    return arr.length === 0 ? { drop: true } : { value: arr };     // an emptied array optional drops, symmetric with the object branch (so an all-unfilled addresses:[{…}] falls out clean)
   }
   if (node && typeof node === 'object') {
     const obj = {};
@@ -322,22 +326,37 @@ export const CONNECTOR_RECIPES = [
   // once with the tab ridden → the op is banked; a stale hash after a deploy re-captures the same way).
   // Fail-closed like every write: confirmed:true at both belts + sniffed CSRF; 200-with-userErrors = failure.
   { ...SH, id: 'shopify_create_customer', name: 'Create a Shopify customer', write: true, gql: false, persistedOp: 'CustomerCreate',
-    does: 'create a NEW Shopify customer profile (name + email and/or phone — at least one contact is required), riding your admin login',
-    endpoint: '/api/operations/{op_sha}/CustomerCreate/shopify/{handle}',
-    body: { operationName: 'CustomerCreate', variables: { customerInput: { firstName: '{first_name}', lastName: '{last_name}', email: '{email}', phone: '{phone}', note: '{note}' } } },
+    does: 'create a NEW Shopify customer profile (name + email and/or phone — at least one contact is required; optional mailing address), riding your admin login',
+    endpoint: '/api/operations/{op_sha}/CustomerCreate/shopify/{handle}', itemUrl: '/store/{handle}/customers/{id}',   // CX-7f — "show customer" after a create opens the new record (id from the reply, handle from the ride tab)
+    // CX-7 — the optional mailing address rides as customerInput.addresses[0]. With NO address field set, the inner
+    // object empties → the array empties → `addresses` drops entirely (the array-drop symmetry in _fillBodyNode), so
+    // a contact-only create is byte-identical to before. province/country map to the GraphQL CODES (provinceCode
+    // "WA", countryCode "US"); if this store's persisted op wants names or a different key, the live userErrors names
+    // it (same hand-authored-guess caveat as the op variable shape — CX-8 body-capture forges this exactly later).
+    body: { operationName: 'CustomerCreate', variables: { customerInput: {
+      firstName: '{first_name}', lastName: '{last_name}', email: '{email}', phone: '{phone}', note: '{note}',
+      addresses: [{ address1: '{address1}', address2: '{address2}', city: '{city}', provinceCode: '{province}', countryCode: '{country}', zip: '{zip}', company: '{company}' }],
+    } } },
     params: [
       { name: 'first_name', type: 'string', required: true },
       { name: 'last_name', type: 'string', required: true },
       { name: 'email', type: 'string' },      // email OR phone — unfilled optionals drop from the body (fillBody);
       { name: 'phone', type: 'string' },      // Shopify rejects a contactless input with userErrors (surfaced honestly)
       { name: 'note', type: 'string' },
+      { name: 'address1', type: 'string' },   // street — the presence of any address field builds addresses[0]
+      { name: 'address2', type: 'string' },
+      { name: 'city', type: 'string' },
+      { name: 'province', type: 'string' },   // → provinceCode, e.g. "WA"
+      { name: 'country', type: 'string' },    // → countryCode, e.g. "US"
+      { name: 'zip', type: 'string' },
+      { name: 'company', type: 'string' },
     ] },
   // CX-7c (v2.74.1388) — EDIT an existing customer (spec's ALLOWED EditCustomer op). Partial: only filled fields
   // ride the body (fillBody drops unfilled optionals). `customer_gid` gid-coerces (bare id → gid) — it's the `id`
   // a customer read returned.
   { ...SH, id: 'shopify_update_customer', name: 'Edit a Shopify customer', write: true, gql: false, persistedOp: 'EditCustomer',
     does: 'update fields on an EXISTING Shopify customer (name, email, phone, note, tags) — only the fields you set change; identify them by the customer id from a lookup',
-    endpoint: '/api/operations/{op_sha}/EditCustomer/shopify/{handle}',
+    endpoint: '/api/operations/{op_sha}/EditCustomer/shopify/{handle}', itemUrl: '/store/{handle}/customers/{id}',   // CX-7f — "show customer" after an edit opens the record
     body: { operationName: 'EditCustomer', variables: { input: { id: '{customer_gid}', firstName: '{first_name}', lastName: '{last_name}', email: '{email}', phone: '{phone}', note: '{note}', tags: '{tags}' } } },
     params: [
       { name: 'customer_gid', type: 'string', required: true, gid: 'Customer' },
@@ -354,7 +373,7 @@ export const CONNECTOR_RECIPES = [
   // placeholders → native value; unfilled → dropped), so an ordinary paid draft omits them cleanly.
   { ...SH, id: 'shopify_create_order', name: 'Create a Shopify draft order', write: true, gql: false, persistedOp: 'DraftOrderCreate',
     does: 'create a DRAFT order for a customer (line items by variant id + quantity) — a reversible draft the human reviews and completes; for a free warranty replacement pass a 100% applied_discount and a zero shipping_line',
-    endpoint: '/api/operations/{op_sha}/DraftOrderCreate/shopify/{handle}',
+    endpoint: '/api/operations/{op_sha}/DraftOrderCreate/shopify/{handle}', itemUrl: '/store/{handle}/draft_orders/{id}',   // CX-7f — "show order" after a create opens the draft
     body: { operationName: 'DraftOrderCreate', variables: {
       input: { purchasingEntity: { customerId: '{customer_gid}' }, lineItems: '{line_items}', useCustomerDefaultAddress: true, note: '{note}', poNumber: '{po_number}', tags: '{tags}', appliedDiscount: '{applied_discount}', shippingLine: '{shipping_line}' },
       hasDiscountsPermission: true, hasVaultedPaymentPermissions: true, firstLineItems: 50 } },
@@ -395,6 +414,7 @@ export function coerceParams(params, paramSchema) {
   const props = (paramSchema && typeof paramSchema === 'object' && paramSchema.properties) || {};
   const out = {};
   for (const [k, v] of Object.entries((params && typeof params === 'object') ? params : {})) {
+    if (typeof v === 'string' && _SOLE_PLACEHOLDER.test(v.trim())) continue;   // v1405 — the LLM binder sometimes ECHOES a placeholder token ("{company}") as the value for a param it couldn't fill; drop it here so it's treated as unfilled everywhere (body + endpoint), never stored literally
     const t = props[k] && props[k].type;
     const gidKind = props[k] && props[k].gid;
     if (gidKind && (typeof v === 'string' || typeof v === 'number')) {   // CX-7c — a customer/variant id → its gid form

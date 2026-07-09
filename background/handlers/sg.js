@@ -1162,10 +1162,15 @@ export function createSgMessageHandlers(ctx) {
         if (groundId) { try { caps = ((await ctx.readSgCapabilities(groundId)) || []).filter((c) => c && isActiveCapability(c) && c.kind !== 'composite'); } catch { caps = []; } }
         // CX-4c — the app's CONNECTED session-ride recipes (scoped to its `connections`, the AS-4 set) become
         // selectable tools, origin-enriched to the connected instance: a support agent connected to deako.zendesk.com
-        // retrieves the Zendesk READS, so interpret can pick `my_open_tickets` instead of teaching/navigating. Reads
-        // only (mode:'ask') — writes await the CX-6b confirm UI. chat.js routes a connector pick through INVOKE_SESSION.
+        // retrieves the Zendesk READS + WRITES, so interpret can pick `my_open_tickets` OR `create_ticket` instead of
+        // teaching/navigating. v2.74.1400 — writes now project too (was reads-only while the confirm UI was unbuilt):
+        // a write pick routes through chat.js `_ilRunBuiltin`'s CX-6b HITL confirm branch and INVOKE_SESSION
+        // fail-closes without confirmed:true (both belts) — gated end-to-end, exactly like the broker writes below. A
+        // destructive write (merge/delete/spam, safety 'gated') gets the two-step confirm; the 'forbidden' floor stays
+        // unofferable via policyFilter. This is what makes the Shopify write legs (create/edit customer, draft order)
+        // reachable from a plain ask — the SH-T5 vehicle, no app required.
         const ragLegs = retrieveTools(ask, { capabilities: caps });
-        const connLegs = connectorLegsForConnections(connections, { mode: 'ask' });
+        const connLegs = connectorLegsForConnections(connections);
         // §20 — ALSO offer the connected Grounds' HARVESTED + accepted reads as session-ride tools (header-replay). Per
         // connection, resolve its Ground (by origin) → project its armable reads (the §18 gate) → deduped against the RAG +
         // curated legs. So "show me my schedules" can SELECT a harvested deakoapi recipe; the dispatch rides it via
@@ -2144,6 +2149,33 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, groundId: gid, menu });
       } catch (err) {
         Logger.error('background', `GET_INTENT_MENU failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // AS-5 (v2.74.1406) — GET_CAPABLE_SITES: the BACKGROUND half of the "sites with defined capabilities" setup
+    // catalog. Returns every Ground's origin + its ACTIVE capability count (Grounds that taught something), plus the
+    // linked broker providers. The panel adds the curated + broker catalogs + its own apps' connections and runs the
+    // pure `capableSitesCatalog` merge. Read-only introspection over the user's OWN Grounds — mints/drives nothing.
+    GET_CAPABLE_SITES: async (_payload, _sender, sendResponse) => {
+      try {
+        let grounds = [];
+        try { grounds = (await StorageManager.getAllGrounds()) || []; } catch { grounds = []; }
+        const sites = [];
+        for (const g of (Array.isArray(grounds) ? grounds : [])) {
+          const gid = g && (g.id || g.groundId); if (!gid) continue;
+          let caps = 0;
+          try { caps = ((await ctx.readSgCapabilities(gid)) || []).filter((c) => isActiveCapability(c)).length; } catch { /* */ }
+          if (!(caps > 0)) continue;   // only Grounds with taught capabilities belong in the catalog
+          let origin = null; try { origin = g.url ? new URL(g.url).origin : (g.origin || null); } catch { origin = g.origin || null; }
+          sites.push({ origin: origin || g.name || null, caps, groundId: gid });
+        }
+        let linkedProviders = [];
+        try { const lp = await chrome.storage.local.get('connector:linkedProviders'); linkedProviders = Array.isArray(lp['connector:linkedProviders']) ? lp['connector:linkedProviders'] : []; } catch { /* */ }
+        Logger.info('background', `CAPABLE_SITES ▸ ${sites.length} taught site(s) · ${linkedProviders.length} linked provider(s)`);
+        sendResponse({ success: true, sites, linkedProviders });
+      } catch (err) {
+        try { Logger.error('background', `GET_CAPABLE_SITES failed: ${err.message}`); } catch { /* */ }
         sendResponse({ success: false, error: err.message });
       }
     },

@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { primaryList, primaryObject, summarizeItem, renderConnectorLines, itemLabels, primaryItemId } from './connectorRender.js';
+import { primaryList, primaryObject, summarizeItem, renderConnectorLines, itemLabels, primaryItemId, createdRecordId } from './connectorRender.js';
 
 describe('primaryList — find the data array', () => {
   it('prefers known data keys, falls back to any object-array, ignores scalar arrays', () => {
@@ -76,6 +76,19 @@ describe('primaryItemId — the record a read RETURNED (CX-7e, for "show profile
     assert.equal(primaryItemId({ ticket: { id: 7 } }), 7);     // wrapped single object
     assert.equal(primaryItemId({ data: { customers: { edges: [] } } }), null);        // empty → null
     assert.equal(primaryItemId(null), null);
+  });
+});
+
+describe('createdRecordId — the record a WRITE created (CX-7f, for "show it" after a create)', () => {
+  it('digs data.<op>.<entity>.id, skips userErrors, gid → numeric tail; null when none', () => {
+    const create = { data: { customerCreate: { customer: { id: 'gid://shopify/Customer/778899', firstName: 'Divine' }, userErrors: [] } } };
+    assert.equal(createdRecordId(create), '778899');                                   // feeds /customers/{id}
+    const draft = { data: { draftOrderCreate: { draftOrder: { id: 'gid://shopify/DraftOrder/42' }, userErrors: [] } } };
+    assert.equal(createdRecordId(draft), '42');                                        // feeds /draft_orders/{id}
+    assert.equal(createdRecordId({ data: { thing: { id: 5 } } }), 5);                  // op-result carries the id directly
+    assert.equal(createdRecordId({ data: { customerCreate: { customer: null, userErrors: [{ message: 'x' }] } } }), null);  // no record (only userErrors) → null
+    assert.equal(createdRecordId({ data: { customers: { edges: [] } } }), null);       // a READ envelope isn't a create → null
+    assert.equal(createdRecordId(null), null);
   });
 });
 

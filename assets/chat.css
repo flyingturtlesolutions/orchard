@@ -594,6 +594,16 @@ textarea {
   flex: 0 1 auto;
   padding: var(--sp-1) var(--sp-3);
 }
+/* AS-5 (v2.74.1407) — the setup capability catalog's MULTI-SELECT: a picked site reads as filled (accent bg + border
+   + a leading ✓) so the whole domain you're assembling is visible before Confirm. */
+.setup-site.selected {
+  background: var(--c-accent-bg);
+  border-color: var(--c-accent, var(--c-border));
+}
+.setup-site.selected .suggestion-card-name::before {
+  content: '✓\00a0';
+  font-weight: 700;
+}
 /* OM (v2.74.1200) — a named PRESET under its abstract type: dashed + transparent so the type cards read as the
    primary choice and presets as their lighter-weight specializations. Layout-safe (no width/margin change). */
 .suggestion-card-preset {

@@ -234,6 +234,20 @@ describe('fillBody — write-body templating (pure, §6/§12)', () => {
     assert.deepEqual(fillBody({ ticket: { subject: '{s}', priority: '{p}' } }, { s: 'hi' }), { ticket: { subject: 'hi' } });
     assert.equal(fillBody({ ticket: { meta: { x: '{x}' } } }, {}), null); // everything empties → null body
   });
+  it('a placeholder filled with "" / null drops like an unfilled one (v1403 — the LLM binder emits "" for a param it can\'t fill; Shopify rejects phone:"" as "Phone is invalid")', () => {
+    assert.deepEqual(fillBody({ c: { firstName: '{first_name}', phone: '{phone}' } }, { first_name: 'Divine', phone: '' }), { c: { firstName: 'Divine' } });   // phone:"" dropped
+    assert.deepEqual(fillBody({ c: { email: '{email}', phone: '{phone}' } }, { email: 'a@b.co', phone: null }), { c: { email: 'a@b.co' } });                     // phone:null dropped
+    assert.equal(fillBody({ c: { phone: '{phone}' } }, { phone: '' }), null);   // the only field empties → the object → the whole body drops
+    assert.equal(fillBody({ a: '{b}' }, { b: 0 }).a, 0);                         // 0 is a REAL value — kept (only '' / null / undefined read as absent)
+  });
+  it('a placeholder-ECHO value ("{company}" — the LLM binder emitting a token it could not fill) drops, in fillBody AND coerceParams (v1405)', () => {
+    // fillBody: the echoed token must never ride the body (else Shopify stores "{company}" LITERALLY in an address)
+    assert.deepEqual(fillBody({ addr: { city: '{city}', company: '{company}' } }, { city: 'Seattle', company: '{company}' }), { addr: { city: 'Seattle' } });
+    // coerceParams: scrub the echo at the param boundary → unfilled everywhere (body + endpoint)
+    assert.deepEqual(coerceParams({ city: 'Seattle', company: '{company}', address2: '{address2}' }, { properties: {} }), { city: 'Seattle' });
+    // a real value that merely CONTAINS braces mid-string is NOT a bare token → kept
+    assert.equal(coerceParams({ note: 'call re {order}' }, { properties: {} }).note, 'call re {order}');
+  });
   it('null template → null (a GET has no body); literals pass through untouched', () => {
     assert.equal(fillBody(null, {}), null);
     assert.deepEqual(fillBody({ public: false, n: 3 }, {}), { public: false, n: 3 });

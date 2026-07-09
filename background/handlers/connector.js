@@ -243,6 +243,20 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
   async function _clearBankedOp(origin, name) {
     try { const got = await chrome.storage.local.get(_OPS_KEY(origin)); const cur = got[_OPS_KEY(origin)] || {}; if (cur[name]) { delete cur[name]; await chrome.storage.local.set({ [_OPS_KEY(origin)]: cur }); } } catch { /* */ }
   }
+  // CX-7 (v2.74.1401) — the sniffed-CSRF PERSIST bank. The token was cached only in SW memory (_sniffedCsrf, dies on
+  // MV3 SW restart) + the page-scoped window.__ahubSniffCsrfTok (dies on tab reload), so a write after a reload found
+  // no token → the belt hard-rejected `no-csrf` and an idle tab fired no request to re-capture. Persisting per-origin
+  // (like the op bank) makes a token captured from ANY admin request survive restarts/reloads — a write reuses it, a
+  // stale one 40x's → the force-reacquire path re-mints. TTL-bounded; it's the user's own session anti-forgery token
+  // (paired with the session cookie the browser holds — inert alone), extension-private, same class as the op bank.
+  const _CSRF_KEY = (origin) => `rideCsrf:${origin}`;
+  async function _persistCsrf(origin, token) {
+    if (!origin || !token) return;
+    try { await chrome.storage.local.set({ [_CSRF_KEY(origin)]: { token: String(token).slice(0, 400), at: Date.now() } }); } catch { /* */ }
+  }
+  async function _bankedCsrf(origin) {
+    try { const got = await chrome.storage.local.get(_CSRF_KEY(origin)); const c = got[_CSRF_KEY(origin)]; return (c && c.token && (Date.now() - (c.at || 0)) < CSRF_TTL_MS) ? c.token : null; } catch { return null; }
+  }
 
   // ── CX-7c (v2.74.1388) — the SHOPIFY LIVENESS PROBE (spec §2 probeShopify): a GraphQL `{ shop { name } }` before
   // the real call, so a signed-out session fails FAST + honest instead of mid-write. Cached 60s per origin (a burst
@@ -269,22 +283,29 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
     return { live: true, name };
   }
   async function _acquireSniffedCsrf(tabId, origin, { force = false } = {}) {
-    const c = _sniffedCsrf.get(origin);
+    let c = _sniffedCsrf.get(origin);
+    // v1401 — seed the in-memory cache from the PERSISTED bank when memory is cold/stale (SW restart cleared it): a
+    // token captured during an earlier admin interaction is reused, so an idle tab needn't re-fire a request first.
+    if (!force && !(c && (Date.now() - c.at) < CSRF_TTL_MS)) {
+      const banked = await _bankedCsrf(origin);
+      if (banked) { c = { token: banked, at: Date.now() }; _sniffedCsrf.set(origin, c); }
+    }
     const ask = async () => {
       try {
         const r = await chrome.tabs.sendMessage(tabId, { type: 'GET_SNIFFED_CSRF', payload: {} }, { frameId: 0 });
         if (r && r.ops) await _persistSniffedOps(origin, r.ops);   // CX-7b — bank any ops the tee saw, whatever we came for
+        if (r && r.token) { _sniffedCsrf.set(origin, { token: r.token, at: Date.now() }); await _persistCsrf(origin, r.token); }   // v1401 — persist any FRESH token so it survives a restart/reload
         return (r && r.token) || null;
       } catch { return null; }
     };
-    if (!force && c && (Date.now() - c.at) < CSRF_TTL_MS) { await ask(); return c.token; }   // still harvest ops on the warm path
+    if (!force && c && (Date.now() - c.at) < CSRF_TTL_MS) { await ask(); return (_sniffedCsrf.get(origin) || c).token; }   // still harvest ops + refresh on the warm path
     let tok = await ask();                       // ORDER MATTERS: the first ask wires the page's message listener…
     if (!tok || force) {
       try { await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: _csrfSnifferFunc }); } catch { /* CSP-proof: MAIN-world exec needs no page <script> */ }
       const deadline = Date.now() + 8000;        // …so the tee (injected after) can never post into the void
       while (!tok && Date.now() < deadline) { await new Promise((r) => setTimeout(r, 500)); tok = await ask(); }
     }
-    if (tok) _sniffedCsrf.set(origin, { token: tok, at: Date.now() });
+    if (tok) { _sniffedCsrf.set(origin, { token: tok, at: Date.now() }); await _persistCsrf(origin, tok); }
     return tok || null;
   }
 
@@ -532,10 +553,12 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             extra = { ...(extra || {}), headers: csrfTok ? { 'x-csrf-token': csrfTok } : undefined };
           }
           let reply = await fetchViaHealed(tab.id, url, method, body, isWrite, contentType, extra);   // v1340 — the write already passed the confirmed:true gate above; carry it to the content-script belt
-          if (reply && reply.success === false && /^http-40[13]$/.test(String(reply.error || '')) && payload && payload.csrf === 'sniff') {
+          // v1401 — a cold write hits the content-script belt's `no-csrf` HARD reject (not an http-40x), so include it
+          // in the re-mint predicate: force-reacquire (inject the tee + poll) and retry once with a fresh token.
+          if (reply && reply.success === false && (/^http-40[13]$/.test(String(reply.error || '')) || reply.error === 'no-csrf') && payload && payload.csrf === 'sniff') {
             const tok2 = await _acquireSniffedCsrf(tab.id, origin, { force: true });
             if (tok2) reply = await fetchViaHealed(tab.id, url, method, body, isWrite, contentType, { ...(extra || {}), headers: { 'x-csrf-token': tok2 } });
-            if (reply && reply.success === false && /^http-40[13]$/.test(String(reply.error || ''))) reply = { ...reply, hint: 'no CSRF token captured yet — click around the admin tab once, then retry' };
+            if (reply && reply.success === false && (/^http-40[13]$/.test(String(reply.error || '')) || reply.error === 'no-csrf')) reply = { ...reply, hint: 'no CSRF token yet — click anywhere in the admin tab once (it fires a request Orchard reads), then retry' };
           }
           // CX-7b — HASH_STALE (the spec's deploy-rotation trap): a persisted-op 404/406 means the store's op hash
           // changed — clear the banked op so the next attempt re-captures, and say so honestly.
