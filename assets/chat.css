@@ -30,6 +30,31 @@
   --c-warn:         #c8954a;
   --c-error:        #c25a5a;
 
+  /* ── Accent palette (v2.74.1416) ─────────────────────────────────────────
+   * Formerly hardcoded hexes scattered through this file. Every one was tuned against
+   * a dark panel, so once the tint could flip the panel LIGHT they became unreadable.
+   * Tokenised here; the .tinted-light block further down carries derived variants, each
+   * darkened until it clears 4.5:1 against the light background.
+   * ───────────────────────────────────────────────────────────────────────── */
+  --c-x-dev:          #c9a227;   /* the dev-bridge amber identity */
+  --c-x-dev-pale:     #f0e3b0;
+  --c-x-dev-soft:     #e0c488;
+  --c-x-dev-strong:   #e0902a;
+  --c-x-info:         #9cc8ff;
+  --c-x-info-soft:    #5c8bc9;
+  --c-x-sky:          #38bdf8;
+  --c-x-error:        #ff9a8a;
+  --c-x-danger:       #ff7a7a;
+  --c-x-warn:         #ffb854;
+  --c-x-ok:           #4caf7d;
+  --c-x-ok-pale:      #b8e0a4;
+  --c-x-ok-soft:      #8fd89c;
+  --c-x-accent-soft:  #d2796a;
+  --c-x-violet:       #a78bfa;
+  --c-x-violet-soft:  #a07ac9;
+  --c-x-violet-grey:  #c0c0e0;
+  --c-x-slate:        #8a93a8;
+
   /* Typography */
   --font-sans:  -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
   --font-serif: "Charter", "Iowan Old Style", "Source Serif Pro", Georgia, serif;
@@ -75,9 +100,68 @@ body.chat-page {
   font-size: 14px;
   line-height: 1.5;
   color: var(--c-text);
-  background: var(--c-bg);
+  background-color: var(--c-bg);
   display: flex;
   flex-direction: column;
+}
+
+/* ── Active-tab tint (v2.74.1416) ─────────────────────────────────────────
+ * Services/Chat/tabTint.js samples the visible tab and overwrites the surface
+ * tokens above on :root, plus --c-tint-gradient. Every value it writes is passed
+ * through Core/tabTint.js#clampSurface first, so --c-text keeps its contrast no
+ * matter what the page looks like. Until a capture succeeds the .tinted class is
+ * absent and the static tokens above hold — the unsampled panel is unchanged.
+ *
+ * The header and input area drop their opaque fill so the gradient runs edge to
+ * edge. They sit in the body's flex column (never over it), so nothing scrolls
+ * beneath them and no backdrop blur is needed.
+ * ─────────────────────────────────────────────────────────────────────────── */
+body.chat-page.tinted {
+  background-image: var(--c-tint-gradient, none);
+  background-attachment: fixed;
+}
+
+body.chat-page.tinted .app-header,
+body.chat-page.tinted .input-area {
+  background: transparent;
+}
+
+/* ── Light panel (v2.74.1416) ─────────────────────────────────────────────
+ * Set alongside .tinted when the sampled page is light enough that Core/tabTint.js
+ * flips polarity: the background goes light and --c-text goes dark (both written by
+ * the glue). These accent colours cannot come from the sampler — they are brand and
+ * status colours, not page colours — so they are hand-carried here, each derived by
+ * darkening the dark-panel value until it clears 4.5:1 on the light background.
+ *
+ * color-scheme keeps native widgets (scrollbars, form controls, focus rings) on the
+ * same side as the panel; without it they stay dark and look pasted on.
+ * ───────────────────────────────────────────────────────────────────────── */
+body.chat-page.tinted-light {
+  color-scheme: light;
+
+  --c-x-dev:          #806719;
+  --c-x-dev-pale:     #7f6a18;
+  --c-x-dev-soft:     #846522;
+  --c-x-dev-strong:   #985f16;
+  --c-x-info:         #0065e3;
+  --c-x-info-soft:    #3a6cae;
+  --c-x-sky:          #0671a1;
+  --c-x-error:        #d11d00;
+  --c-x-danger:       #d60000;
+  --c-x-warn:         #9b5b00;
+  --c-x-ok:           #337654;
+  --c-x-ok-pale:      #427628;
+  --c-x-ok-soft:      #297737;
+  --c-x-accent-soft:  #b44836;
+  --c-x-violet:       #7347f7;
+  --c-x-violet-soft:  #8452b9;
+  --c-x-violet-grey:  #6060b1;
+  --c-x-slate:        #606a81;
+
+  /* The semantic trio is also dark-panel tuned — same treatment. */
+  --c-success:        #2f7a4d;
+  --c-warn:           #8a6212;
+  --c-error:          #b03636;
 }
 
 button {
@@ -189,7 +273,7 @@ textarea {
   height: 24px;
   border-radius: 4px;
   background: rgba(167, 139, 250, 0.12);
-  color: #a78bfa;
+  color: var(--c-x-violet);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -228,7 +312,7 @@ textarea {
   position: relative;
 }
 .dev-reload-btn.has-change {
-  color: #c9a227;
+  color: var(--c-x-dev);
 }
 .dev-reload-dot {
   position: absolute;
@@ -262,13 +346,13 @@ textarea {
   flex-shrink: 0;
   border-radius: 50%;
   border: 2px solid rgba(201, 162, 39, 0.3);
-  border-top-color: #c9a227;
+  border-top-color: var(--c-x-dev);
   animation: dev-run-spin 0.8s linear infinite;
 }
 @keyframes dev-run-spin { to { transform: rotate(360deg); } }
 .dev-run-status {
   font-size: 12px;
-  color: #c9a227;
+  color: var(--c-x-dev);
   font-variant-numeric: tabular-nums;
 }
 @media (prefers-reduced-motion: reduce) {
@@ -288,7 +372,7 @@ textarea {
   background: none;
   border: none;
   cursor: pointer;
-  color: #c9a227;
+  color: var(--c-x-dev);
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
@@ -332,7 +416,7 @@ textarea {
   border: 1px solid rgba(201, 162, 39, 0.18);
   font-size: 12px;
 }
-.dev-tool-icon { color: #c9a227; flex-shrink: 0; }
+.dev-tool-icon { color: var(--c-x-dev); flex-shrink: 0; }
 .dev-tool-name { font-weight: 600; color: var(--c-text, #e6e6e6); flex-shrink: 0; }
 .dev-tool-arg {
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
@@ -359,24 +443,24 @@ textarea {
   white-space: pre-line;
   padding-top: 3px;
 }
-.dev-blk-result.ok  { color: #4caf7d; }
-.dev-blk-result.err { color: #d2796a; }
+.dev-blk-result.ok  { color: var(--c-x-ok); }
+.dev-blk-result.err { color: var(--c-x-accent-soft); }
 
 /* v2.74.1000 — DB-3 run history: a clickable list of recent runs (tap → read-only replay). */
 .dev-history { display: flex; flex-direction: column; gap: 3px; }
-.dev-history-head { font-size: 12px; font-weight: 600; color: #c9a227; margin-bottom: 3px; }
+.dev-history-head { font-size: 12px; font-weight: 600; color: var(--c-x-dev); margin-bottom: 3px; }
 .dev-history-row {
   display: flex; align-items: baseline; gap: 8px; width: 100%;
   text-align: left; background: none; border: 1px solid transparent; border-radius: 6px;
   padding: 4px 8px; cursor: pointer; color: var(--c-text, #e6e6e6); font: inherit;
 }
 .dev-history-row:hover { background: rgba(201, 162, 39, 0.08); border-color: rgba(201, 162, 39, 0.18); }
-.dev-history-verb { font-weight: 600; color: #c9a227; flex-shrink: 0; min-width: 30px; }
+.dev-history-verb { font-weight: 600; color: var(--c-x-dev); flex-shrink: 0; min-width: 30px; }
 .dev-history-prev { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .dev-history-meta { flex-shrink: 0; font-size: 11px; color: var(--c-text-muted, #9a9a9a); font-variant-numeric: tabular-nums; }
-.dev-history-meta.ok   { color: #4caf7d; }
-.dev-history-meta.err  { color: #d2796a; }
-.dev-history-meta.warn { color: #c9a227; }
+.dev-history-meta.ok   { color: var(--c-x-ok); }
+.dev-history-meta.err  { color: var(--c-x-accent-soft); }
+.dev-history-meta.warn { color: var(--c-x-dev); }
 
 /* v2.74.1002 — DB-3 permission relay: an inline Allow/Deny card for a non-safe tool the run requested. */
 .dev-approval {
@@ -386,7 +470,7 @@ textarea {
   border: 1px solid rgba(201, 162, 39, 0.35);
   background: rgba(201, 162, 39, 0.07);
 }
-.dev-approval-q { font-size: 12px; font-weight: 600; color: #c9a227; }
+.dev-approval-q { font-size: 12px; font-weight: 600; color: var(--c-x-dev); }
 .dev-approval-detail {
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   font-size: 11px; color: var(--c-text, #e6e6e6);
@@ -394,15 +478,15 @@ textarea {
 }
 .dev-approval-actions { display: flex; gap: 8px; }
 .dev-approval-verdict { font-size: 12px; font-weight: 600; }
-.dev-approval-verdict.allow { color: #4caf7d; }
-.dev-approval-verdict.deny  { color: #d2796a; }
+.dev-approval-verdict.allow { color: var(--c-x-ok); }
+.dev-approval-verdict.deny  { color: var(--c-x-accent-soft); }
 /* DB-4 (v2.74.1025) — interactive question card: per-question blocks + wrapping option buttons + selected state. */
 .dev-question-block { margin: 6px 0; }
 .dev-question .dev-approval-actions { flex-wrap: wrap; }
 .dev-question button.sel {
   background: rgba(201, 162, 39, 0.28);
   border-color: rgba(201, 162, 39, 0.75);
-  color: #f0e3b0;
+  color: var(--c-x-dev-pale);
 }
 
 /* ── Conversation area ───────────────────────────────────────────────────── */
@@ -460,7 +544,7 @@ textarea {
 .dev-status-branch {
   font-size: 12px;
   font-weight: 600;
-  color: #c9a227;
+  color: var(--c-x-dev);
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
   letter-spacing: 0.01em;
   overflow: hidden;
@@ -487,7 +571,7 @@ textarea {
 .dev-status-pill-v { color: var(--c-text-muted); }
 .dev-status-sync.clean { color: var(--c-text-subtle); }
 .dev-status-dirty.dirty {
-  color: #c9a227;
+  color: var(--c-x-dev);
   border-color: rgba(201, 162, 39, 0.4);
 }
 .dev-status-dirty.clean { color: var(--c-text-subtle); }
@@ -596,7 +680,11 @@ textarea {
 }
 /* AS-5 (v2.74.1407) — the setup capability catalog's MULTI-SELECT: a picked site reads as filled (accent bg + border
    + a leading ✓) so the whole domain you're assembling is visible before Confirm. */
-.setup-site.selected {
+/* AS-5 (v2.74.1411) — the cards carry a PERSISTENT selected state, so drop the per-hover jump/highlight (it competes
+   with the ✓ fill + reads as noise in a checklist): a card holds its resting look on hover; a selected one keeps accent. */
+.setup-site:hover:not(:disabled) { transform: none; background: var(--c-bg-elevated); border-color: var(--c-border-soft); }
+.setup-site.selected,
+.setup-site.selected:hover:not(:disabled) {
   background: var(--c-accent-bg);
   border-color: var(--c-accent, var(--c-border));
 }
@@ -1135,7 +1223,7 @@ textarea {
   font-family: var(--ff-mono, monospace);
 }
 .debug-scope-name {
-  color: #38bdf8;
+  color: var(--c-x-sky);
   flex: 0 0 100px;
   text-overflow: ellipsis;
   overflow: hidden;
@@ -1477,15 +1565,15 @@ textarea {
 /* v2.74.1070 — an app (website-operating) conversation: blue left-rail + a small "app" badge, mirroring dev.
    Declared before .rail-item.active so an active row's accent left-rail wins (equal specificity, later rule). */
 .rail-item.app { border-left: 2px solid #5c8bc9; padding-left: calc(var(--sp-3) - 2px); }
-.rail-item-badge.app { background: rgba(92, 139, 201, 0.18); color: #5c8bc9; }
-.rail-item-badge.design { background: rgba(160, 122, 201, 0.18); color: #a07ac9; }   /* surfaces §2.2 — a high-altitude (Design) dev conversation */
+.rail-item-badge.app { background: rgba(92, 139, 201, 0.18); color: var(--c-x-info-soft); }
+.rail-item-badge.design { background: rgba(160, 122, 201, 0.18); color: var(--c-x-violet-soft); }   /* surfaces §2.2 — a high-altitude (Design) dev conversation */
 .rail-item-badge {
   display: inline-block;
   margin-right: var(--sp-2);
   padding: 0 5px;
   border-radius: var(--r-sm);
   background: rgba(201, 162, 39, 0.18);
-  color: #c9a227;
+  color: var(--c-x-dev);
   font-size: 10px;
   font-weight: 600;
   text-transform: uppercase;
@@ -1602,14 +1690,14 @@ textarea {
 
 /* v2.74.1094 — live dev-run status in a drawer item's meta line (replaces the timestamp while a run is active). */
 .rail-item-meta.run-status { font-weight: 600; }
-.rail-item-meta.run-status.running { color: #c9a227; }   /* amber — matches the dev-bridge bubble identity */
+.rail-item-meta.run-status.running { color: var(--c-x-dev); }   /* amber — matches the dev-bridge bubble identity */
 .rail-item-meta.run-status.awaiting {
-  color: #e0902a;                                            /* brighter amber-orange — paused for your input */
+  color: var(--c-x-dev-strong);                                            /* brighter amber-orange — paused for your input */
   animation: run-status-pulse 1.4s ease-in-out infinite;
 }
 .rail-item-meta.run-status.done { color: var(--c-success); }            /* v2.74.1096 — last run finished OK */
 .rail-item-meta.run-status.done.failed { color: var(--c-error); }       /* …or failed */
-.rail-item-meta.run-status.paused { color: #8a93a8; }                   /* v2.74.1098 — last run paused (resumable via `dev:`) */
+.rail-item-meta.run-status.paused { color: var(--c-x-slate); }                   /* v2.74.1098 — last run paused (resumable via `dev:`) */
 /* v2.74.1224 — the SELECTED app's "● working…" while its reply is in flight (drawer multi-conversation mode). Amber
    (via .running) + a pulse so "message received and processing" reads at a glance. */
 .rail-item-meta.run-status.working { animation: run-status-pulse 1.4s ease-in-out infinite; }
@@ -1708,7 +1796,7 @@ textarea {
   transition: opacity var(--t-fast), background var(--t-fast), color var(--t-fast);
 }
 .rail-item:hover .rail-item-preview { opacity: 1; }
-.rail-item-preview:hover { background: var(--c-bg); color: #c9a227; }   /* amber — matches the dev identity */
+.rail-item-preview:hover { background: var(--c-bg); color: var(--c-x-dev); }   /* amber — matches the dev identity */
 .rail-item.dev { padding-right: 54px; }   /* room for the preview + delete buttons (overrides the base 30px) */
 
 .rail-preview-main { display: flex; margin-bottom: var(--sp-2); }
@@ -1903,7 +1991,7 @@ textarea {
 .param-modal-label {
   font-family: var(--mono, monospace);
   font-size: 11px;
-  color: #9cc8ff;
+  color: var(--c-x-info);
   letter-spacing: 0.3px;
 }
 .param-modal-input {
@@ -1950,7 +2038,7 @@ textarea {
 
 .param-form-req,
 .param-modal-req {
-  color: #ff7a7a;
+  color: var(--c-x-danger);
   margin-left: 2px;
 }
 
@@ -1959,7 +2047,7 @@ textarea {
   margin-top: 8px;
   padding: 6px 10px;
   font-size: 11px;
-  color: #ff9a8a;
+  color: var(--c-x-error);
   background: rgba(255, 122, 122, 0.08);
   border: 1px solid rgba(255, 122, 122, 0.25);
   border-radius: 3px;
@@ -2064,8 +2152,8 @@ textarea {
   font-weight: 700;
   width: 14px;
 }
-.strategy-result-step.success .step-icon { color: #8fd89c; }
-.strategy-result-step.error   .step-icon { color: #ff9a8a; }
+.strategy-result-step.success .step-icon { color: var(--c-x-ok-soft); }
+.strategy-result-step.error   .step-icon { color: var(--c-x-error); }
 .strategy-result-step .step-name {
   flex: 1;
   color: var(--text, #ddd);
@@ -2079,7 +2167,7 @@ textarea {
 .strategy-result-step .step-error {
   display: block;
   font-size: 10px;
-  color: #ff9a8a;
+  color: var(--c-x-error);
   margin-left: 4px;
   font-family: var(--mono, monospace);
 }
@@ -2130,7 +2218,7 @@ textarea {
   text-transform: uppercase;
   letter-spacing: 0.4px;
   font-weight: 700;
-  color: #9cc8ff;
+  color: var(--c-x-info);
   margin-bottom: 6px;
 }
 .extracted-row {
@@ -2146,7 +2234,7 @@ textarea {
   font-family: var(--mono, monospace);
   font-size: 11px;
   font-weight: 600;
-  color: #9cc8ff;
+  color: var(--c-x-info);
   background: none;
 }
 .extracted-value {
@@ -2175,7 +2263,7 @@ textarea {
   padding: 3px 10px;
   background: rgba(120, 180, 255, 0.12);
   border: 1px solid rgba(120, 180, 255, 0.35);
-  color: #9cc8ff;
+  color: var(--c-x-info);
   border-radius: 4px;
   font-size: 11px;
   font-weight: 500;
@@ -2213,7 +2301,7 @@ textarea {
 }
 .walk-mode-icon {
   font-size: 16px;
-  color: #ffb854;
+  color: var(--c-x-warn);
   flex-shrink: 0;
 }
 .walk-mode-title-group {
@@ -2223,7 +2311,7 @@ textarea {
 .walk-mode-title {
   font-size: 13px;
   font-weight: 600;
-  color: #ffb854;
+  color: var(--c-x-warn);
   line-height: 1.2;
 }
 .walk-mode-subtitle {
@@ -2263,10 +2351,10 @@ textarea {
   word-break: break-word;
 }
 .walk-log-row.success   { color: var(--text, #ddd); }
-.walk-log-row.action    { color: #9cc8ff; }
+.walk-log-row.action    { color: var(--c-x-info); }
 .walk-log-row.reasoning { color: var(--sub, #bbb); font-style: italic; }
-.walk-log-row.probe     { color: #b8e0a4; }
-.walk-log-row.warn      { color: #ffb854; }
+.walk-log-row.probe     { color: var(--c-x-ok-pale); }
+.walk-log-row.warn      { color: var(--c-x-warn); }
 .walk-log-row.error     { color: #f88; }
 
 .walk-log-timestamp {
@@ -2410,7 +2498,7 @@ textarea {
 }
 .chat-review-params code {
   background: rgba(255, 180, 80, 0.08);
-  color: #ffb854;
+  color: var(--c-x-warn);
   padding: 2px 8px;
   border-radius: 3px;
   font-size: 11px;
@@ -2467,7 +2555,7 @@ textarea {
 .walk-pending-action {
   padding: 2px 8px;
   background: rgba(120, 180, 255, 0.15);
-  color: #9cc8ff;
+  color: var(--c-x-info);
   border-radius: 3px;
   font-family: var(--mono, monospace);
   font-size: 11px;
@@ -2475,9 +2563,9 @@ textarea {
   text-transform: uppercase;
   letter-spacing: 0.4px;
 }
-.walk-pending-action.action-click    { background: rgba(140, 220, 140, 0.15); color: #b8e0a4; }
-.walk-pending-action.action-type     { background: rgba(220, 180, 120, 0.15); color: #e0c488; }
-.walk-pending-action.action-wait_for { background: rgba(160, 160, 200, 0.15); color: #c0c0e0; }
+.walk-pending-action.action-click    { background: rgba(140, 220, 140, 0.15); color: var(--c-x-ok-pale); }
+.walk-pending-action.action-type     { background: rgba(220, 180, 120, 0.15); color: var(--c-x-dev-soft); }
+.walk-pending-action.action-wait_for { background: rgba(160, 160, 200, 0.15); color: var(--c-x-violet-grey); }
 .walk-pending-selector {
   font-family: var(--mono, monospace);
   font-size: 11px;
@@ -2531,7 +2619,7 @@ textarea {
   color: var(--warn, #f0b429);   /* amber instead of green, consistent with ENUMERATE/FOREACH color language */
 }
 .strategy-result-step.foreach-summary.error .step-icon {
-  color: #ff9a8a;
+  color: var(--c-x-error);
 }
 
 /* Nested iteration rows */
@@ -2557,5 +2645,5 @@ textarea {
 .foreach-iteration-row .step-name {
   color: var(--text, #ddd);
 }
-.foreach-iteration-row.success .step-icon { color: #8fd89c; }
-.foreach-iteration-row.error   .step-icon { color: #ff9a8a; }
+.foreach-iteration-row.success .step-icon { color: var(--c-x-ok-soft); }
+.foreach-iteration-row.error   .step-icon { color: var(--c-x-error); }

@@ -6,9 +6,15 @@
  */
 
 import { installGlobalErrorHandlers } from './Core/ErrorCapture.js';
+import { installTabTint } from './Services/Chat/tabTint.js';
 // v2.74.188 — Capture uncaught errors / unhandled promise rejections
 // in this page so they surface in the Studio Logs tab.
 installGlobalErrorHandlers('chat', window);
+
+// v2.74.1416 — the panel background samples the active tab and builds a gradient from
+// its colours. Safe at module scope: chat.js is the last element in <body>, so the body
+// exists. Self-reverting — a page it cannot capture leaves the static tokens in place.
+installTabTint();
 
 import { ChatAPI } from './Services/ChatAPI.js';
 import { ConversationStore, deriveBranchName, persistTargetId } from './Services/ConversationStore.js';   // v2.74.1034 (DBR-2), .1035 (DBR-3)
