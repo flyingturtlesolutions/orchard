@@ -86,6 +86,7 @@ let _setupState = null;   // AS-2 (v2.74.1188) — the in-progress guided-setup 
 let _setupPick = null;      // AS-5 (v2.74.1406) — the catalog-setup multi-select working set: Map<key,{origin,label}> while picking sites; null when not in catalog mode.
 let _setupCatalog = null;   // AS-5 — the last-rendered capability catalog list (so a typed-in site appends to it + re-renders with the pick checked).
 let _setupCatalogMsg = null;   // AS-5 (v2.74.1411) — the DOM message holding the catalog cards + Confirm/Cancel bar, removed on confirm/cancel/re-render (only ever one on screen).
+let _addLegMsg = null;   // OV-5c (v2.74.1422) — the TRANSIENT add-leg card picker (site cards + spec field + Add); only ever one on screen. Declared here (not in the OV block) because the surface-change cleanup drops it.
 let _currentConversationAppId = null;   // AL-3b (v2.74.1193) — the current app's appId = its TYPE (preset id); object-model / canvas resolve through it. Tracked at create / rehydrate / clear.
 let _currentConversationInstanceId = null;   // AP-0 (v2.74.1211) — the per-INSTANCE identity (unique per configured app); the goal-memory key, so two apps of one type don't share learning. Tracked alongside appId.
 // AP-0 — THE goal-memory key: the per-instance id when present, else the app TYPE (legacy apps with no instanceId, e.g.
@@ -138,6 +139,7 @@ function _clearCurrentConversation() {
   _currentConversationSeed = '';        // v2.74.1163 (CV-2b) — clear the IL seed on a fresh surface
   _currentConversationConfig = { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — a fresh/blank surface is unrestricted (gated)
   _setupState = null; _setupPick = null; _setupCatalog = null; _setupCatalogMsg = null;   // AS-2/AS-5 (v2.74.1188/.1406) — drop any in-progress setup flow + its multi-select picks when the surface changes
+  try { if (_addLegMsg) _addLegMsg.remove(); } catch { /* */ } _addLegMsg = null;   // OV-5c — drop a transient add-leg picker left open on the prior surface
   _currentConversationAppId = null;   // AL-3b — clear the app type on a fresh surface
   _currentConversationInstanceId = null;   // AP-0 — clear the per-instance memory key too
   _currentConversationPresetId = null;     // §10.2 — clear the preset type too
@@ -3457,7 +3459,7 @@ async function _showLegOverview() {
   const rest = legs.filter((e) => !qSet.has(qKey(e)));
   const ordered = [...queue, ...rest];
   _legWorkbench = { legs: ordered, at: Date.now() };
-  if (!ordered.length) { _setMessageBody(m, 'No legs yet — author one with `add leg on <site>: <Name> | <METHOD> <endpoint>`, or teach/harvest a site so its capabilities accrue here.', { markdown: true }); _orchFinalize(m); return; }
+  if (!ordered.length) { _setMessageBody(m, 'No legs yet — author one with `add leg` (pick one of your open tabs), or teach/harvest a site so its capabilities accrue here.', { markdown: true }); _orchFinalize(m); return; }
   const c = ov.counts || {};
   const nSites = (ov.grounds || []).length;
   const lines = [`**Legs** — ${c.total || ordered.length} across ${nSites} site${nSites === 1 ? '' : 's'} · ${c.verified || 0} verified · ${queue.length} need${queue.length === 1 ? 's' : ''} work`, ''];
@@ -3518,26 +3520,284 @@ async function _verifyLeg(n) {
   _orchFinalize(m);
 }
 
-// `add leg on <site>: <Name> | <METHOD> <endpoint>` — author a ride recipe by hand (OV-5). Resolves <site> to a known
-// ground, sends the spec to ADD_RIDE_RECIPE (validate + method-derived safety, lands pending). Never invokes.
-async function _addLeg(host, spec) {
-  const m = appendMessage({ role: 'assistant', body: '' });
-  const gr = await _orchReq('GET_LEG_OVERVIEW', {});
-  const grounds = (gr && gr.overview && gr.overview.grounds) || [];
-  const h = String(host || '').toLowerCase();
-  const g = h
-    ? (grounds.find((x) => x && x.host && x.host.toLowerCase() === h) || grounds.find((x) => x && x.host && x.host.toLowerCase().includes(h)))
-    : (grounds.length === 1 ? grounds[0] : null);
-  if (!g) {
-    _setMessageBody(m, h
-      ? `I don’t have a ground for **${host}** yet. Open the site and teach or harvest one capability first — it’ll appear in \`legs\`, then you can add more by hand.`
-      : 'Say which site: `add leg on <site>: <Name> | <METHOD> <endpoint>`.', { markdown: true });
-    _orchFinalize(m); return;
+// OV-5b/5c (v2.74.1424) — `add leg` is a CLASS-FIRST WIZARD: pick a leg CLASS (Drive/Ride/Broker), then the SITE (from
+// your OPEN TABS), then run the class's AUTHORING mechanism. Legs are authored by the MACHINE, not hand-typed —
+//   Ride  → FORAGE  (arm → you browse the site → bank the captured API reads as pending ride recipes; forage.js §19)
+//   Drive → DISCOVERY (EXPLORE_PAGE_STRUCTURE maps the page into taught capabilities; the same "explore" the panel runs)
+//   Broker→ OAuth/MCP — under construction
+// The ground is minted/reused on demand (ENSURE_GROUND_FOR_URL, dedup-before-mint). The console forms
+// `add leg: <spec>` (active tab) and `add leg on <host>: <spec>` remain as a hand-authoring power path.
+
+// The open-tab sites (deduped by host, http/https only — skips chrome:// + the extension's own pages). PURE-ish (reads tabs).
+async function _legOpenSites() {
+  let tabs = []; try { tabs = await chrome.tabs.query({}); } catch { tabs = []; }
+  const seen = new Set(); const sites = [];
+  for (const t of (Array.isArray(tabs) ? tabs : [])) {
+    let u = null; try { u = new URL(t.url || ''); } catch { continue; }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') continue;
+    if (seen.has(u.host)) continue; seen.add(u.host);
+    const title = String(t.title || u.host).replace(/[|\n\r]+/g, ' ').trim().slice(0, 60);
+    sites.push({ id: t.id, host: u.host, origin: u.origin, url: t.url, title });   // id = tabId (forge sessionTabId / discovery tab / FOCUS_TAB)
   }
-  const r = await _orchReq('ADD_RIDE_RECIPE', { groundId: g.groundId, origin: g.host, spec });
+  return sites;
+}
+
+// A pick card (site or class) in the app-setup visual vocabulary. escHtml'd (untrusted host/title on the escape path).
+function _mkPickCard(name, desc, onClick) {
+  const card = document.createElement('button');
+  card.className = 'suggestion-card intent-chip setup-site';
+  card.innerHTML = `<div class="suggestion-card-name">${escHtml(name)}</div>${desc ? `<div class="suggestion-card-summary">${escHtml(desc)}</div>` : ''}`;
+  card.addEventListener('click', onClick);
+  return card;
+}
+
+// Drop the transient wizard message; optionally leave a terminal note.
+function _closeAddLeg(note) {
+  try { if (_addLegMsg) _addLegMsg.remove(); } catch { /* */ }
+  _addLegMsg = null;
+  if (note) _orchFinalize(appendMessage({ role: 'assistant', body: note }));
+}
+
+// STEP 1 — the leg CLASS. Transient card message (never persisted, like the setup catalog).
+function _addLegClasses() {
+  try { if (_addLegMsg) _addLegMsg.remove(); } catch { /* */ }
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  _addLegMsg = msg;
+  try { delete msg.dataset.messageId; } catch { /* */ }
+  _setMessageBody(msg, 'Add a leg — what kind?', { markdown: true });
+  const body = msg.querySelector('.message-content') || msg;
+  const wrap = document.createElement('div'); wrap.className = 'intent-menu setup-catalog';
+  wrap.appendChild(_mkPickCard('Ride', 'Session-ride API recipes (reads/writes). Forge captures them as you browse.', () => { void _addLegSitesFor('ride'); }));
+  wrap.appendChild(_mkPickCard('Drive', 'Taught page actions (clicks, forms). Discovery maps the page.', () => { void _addLegSitesFor('drive'); }));
+  wrap.appendChild(_mkPickCard('Broker', 'OAuth / MCP connectors. (Under construction.)', () => { void _addLegSitesFor('broker'); }));
+  body.appendChild(wrap);
+  const bar = document.createElement('div'); bar.className = 'orch-action-bar';
+  bar.appendChild(_mkBtn('Cancel', () => _closeAddLeg('Okay — no leg added.')));
+  body.appendChild(bar);
+  _orchFinalize(msg);
+}
+
+// STEP 2 — the SITE (single-select from open tabs) + the class's Run action. Run is always clickable + hints on no-pick.
+async function _addLegSitesFor(cls) {
+  try { if (_addLegMsg) _addLegMsg.remove(); } catch { /* */ }
+  const sites = await _legOpenSites();
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  _addLegMsg = msg;
+  try { delete msg.dataset.messageId; } catch { /* */ }
+  const noun = cls === 'ride' ? 'Ride — forge' : cls === 'drive' ? 'Drive — discovery' : 'Broker';
+  if (!sites.length) { _setMessageBody(msg, `${noun}: no open site tabs. Open the site (logged in) in a tab, then \`add leg\`.`, { markdown: true }); _orchFinalize(msg); _addLegMsg = null; return; }
+  _setMessageBody(msg, `${noun} — pick the site:`, { markdown: true });
+  const body = msg.querySelector('.message-content') || msg;
+  let pick = null; const cards = [];
+  const wrap = document.createElement('div'); wrap.className = 'intent-menu setup-catalog';
+  const hint = document.createElement('div'); hint.className = 'add-leg-hint';
+  for (const s of sites) {
+    const card = _mkPickCard(s.host, (s.title && s.title !== s.host) ? s.title : '', () => { pick = s; for (const c of cards) c.classList.remove('selected'); card.classList.add('selected'); hint.textContent = ''; });
+    cards.push(card); wrap.appendChild(card);
+  }
+  const runLabel = cls === 'ride' ? '⛏ Run forge' : cls === 'drive' ? '🔍 Run discovery' : '▸ Continue';
+  const run = () => {
+    if (!pick) { hint.textContent = 'Pick a site above first.'; return; }
+    if (cls === 'ride') void _runForge(pick);
+    else if (cls === 'drive') void _runDiscovery(pick);
+    else void _brokerUC(pick);
+  };
+  const bar = document.createElement('div'); bar.className = 'orch-action-bar';
+  bar.appendChild(_mkBtn(runLabel, run));
+  bar.appendChild(_mkBtn('← Back', () => _addLegClasses()));
+  bar.appendChild(_mkBtn('Cancel', () => _closeAddLeg('Okay — no leg added.')));
+  body.appendChild(wrap); body.appendChild(hint); body.appendChild(bar);
+  _orchFinalize(msg);
+}
+
+// Drive → DISCOVERY: ground the picked site + map it (EXPLORE_PAGE_STRUCTURE on its tab — the same explore the panel runs).
+async function _runDiscovery(site) {
+  _closeAddLeg(null);
+  const m = appendMessage({ role: 'assistant', body: '' });
+  _setMessageBody(m, `Grounding ${site.host}…`);
+  const g = await _orchReq('ENSURE_GROUND_FOR_URL', { url: site.url });
+  if (!g || g.success === false || !g.groundId) { _setMessageBody(m, `Couldn’t ground ${site.host}${g && g.error ? ` — ${g.error}` : ''}.`); _orchFinalize(m); return; }
+  try { if (Number.isInteger(site.id)) await _orchReq('FOCUS_TAB', { tabId: site.id }); } catch { /* */ }
+  _orchLog(`EXPLORE ▸ add-leg discovery → ground ${g.groundId} (${g.created ? 'minted' : 'reused'}) [${site.host}]`);
+  _setMessageBody(m, `🔍 Discovering ${site.host} — mapping the page (a few seconds; I’ll poke around it)…`);
+  const res = await _orchReq('EXPLORE_PAGE_STRUCTURE', { tabId: site.id, groundId: g.groundId });
+  if (!res || res.success === false) { _setMessageBody(m, `Discovery didn’t finish${res && res.error ? ` — ${res.error}` : ' (it may still be running — check the page)'}.`); _orchFinalize(m); return; }
+  const nFeat = Number.isFinite(res.featureCount) ? res.featureCount : null;
+  _setMessageBody(m, `✓ Discovered ${site.host}${nFeat != null ? ` — ${nFeat} feature${nFeat === 1 ? '' : 's'}` : ''}. Run \`legs\` to see the new Drive capabilities.`, { markdown: true });
+  _orchFinalize(m);
+}
+
+// The banked COUNT for a passive forage arrives via a FORAGE_COMPLETE runtime broadcast (forage.js), NOT the FORAGE
+// response. Resolve with its payload {banked, captures, error?} for the matching ground, or null on timeout. Panel-only.
+function _awaitForageComplete(groundId, timeoutMs = 25000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (v) => { if (settled) return; settled = true; try { chrome.runtime.onMessage.removeListener(listener); } catch { /* */ } resolve(v); };
+    const listener = (message) => {
+      if (message && message.type === 'FORAGE_COMPLETE' && message.payload && message.payload.groundId === groundId) finish(message.payload);
+    };
+    try { chrome.runtime.onMessage.addListener(listener); } catch { resolve(null); return; }
+    setTimeout(() => finish(null), timeoutMs);
+  });
+}
+
+// Ride → FORAGE (passive toggle, forage.js §19): arm on the logged-in tab, the user browses, then Bank the captured reads.
+async function _runForge(site) {
+  _closeAddLeg(null);
+  const m = appendMessage({ role: 'assistant', body: '' });
+  try { delete m.dataset.messageId; } catch { /* */ }   // ephemeral: the forge arm + its Bank button don't survive a reload
+  _addLegMsg = m;
+  _setMessageBody(m, `Grounding ${site.host}…`);
+  const g = await _orchReq('ENSURE_GROUND_FOR_URL', { url: site.url });
+  if (!g || g.success === false || !g.groundId) { _setMessageBody(m, `Couldn’t ground ${site.host}${g && g.error ? ` — ${g.error}` : ''}.`); _orchFinalize(m); _addLegMsg = null; return; }
+  const groundId = g.groundId;
+  if (!Number.isInteger(site.id)) { _setMessageBody(m, `Couldn’t find ${site.host}’s tab to forge on — reopen it and try again.`); _orchFinalize(m); _addLegMsg = null; return; }
+  try { await _orchReq('FOCUS_TAB', { tabId: site.id }); } catch { /* */ }
+  const armRes = await _orchReq('FORAGE', { groundId, sessionTabId: site.id });
+  if (!armRes || armRes.success === false || !armRes.armed) { _setMessageBody(m, `Couldn’t start forge on ${site.host}${armRes && armRes.error ? ` — ${armRes.error}` : ''}.`); _orchFinalize(m); _addLegMsg = null; return; }
+  _orchLog(`FORAGE ▸ add-leg arm → ground ${groundId} [${site.host}]`);
+  _setMessageBody(m, `⛏ **Foraging ${site.host}** — browse the site now (open a few pages / records) so I can capture its data reads. Then **Bank recipes**.`, { markdown: true });
+  const body = m.querySelector('.message-content') || m;
+  const bar = document.createElement('div'); bar.className = 'orch-action-bar';
+  bar.appendChild(_mkBtn('⛏ Bank recipes', () => {
+    _addLegMsg = null; try { m.remove(); } catch { /* */ }
+    void (async () => {
+      const t = appendMessage({ role: 'assistant', body: '' });
+      _setMessageBody(t, `Banking foraged reads on ${site.host}…`);
+      const done = _awaitForageComplete(groundId);   // the banked COUNT arrives via FORAGE_COMPLETE, not the FORAGE response — listen BEFORE the call
+      const bankRes = await _orchReq('FORAGE', { groundId });   // 2nd call → bank what the browsing captured
+      if (!bankRes || bankRes.success === false) { _setMessageBody(t, `Couldn’t bank${bankRes && bankRes.error ? ` — ${bankRes.error}` : ''}.`); _orchFinalize(t); return; }
+      const fc = await done;
+      const banked = (fc && typeof fc.banked === 'number') ? fc.banked : null;
+      if (banked && banked > 0) {
+        // Fetch the freshly-foraged (pending) recipes → render an INTERACTIVE verify list (select + arm right here).
+        let recipes = [];
+        try { const rr = await _orchReq('GET_RIDE_RECIPES', { groundId, origin: site.host }); recipes = ((rr && rr.recipes) || []).filter((r) => r && r.reviewState === 'pending'); } catch { /* */ }
+        try { t.remove(); } catch { /* */ }
+        if (recipes.length) { _renderForgeResults(site, groundId, recipes); return; }
+        const tt = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(tt, `✓ Foraged ${site.host} — banked ${banked} recipe${banked === 1 ? '' : 's'} (pending). Run \`legs\` to arm them.`, { markdown: true }); _orchFinalize(tt); return;
+      }
+      if (banked === 0) { _setMessageBody(t, `Foraged ${site.host} — no new recipes${fc.captures ? ` (${fc.captures} read${fc.captures === 1 ? '' : 's'} seen, none new)` : ' (no JSON reads captured)'}. Open a few DATA pages (a record, a list) while foraging, then run forge again.`, { markdown: true }); _orchFinalize(t); return; }
+      _setMessageBody(t, `Banked foraged reads on ${site.host} — run \`legs\` to see the new recipes (pending).`, { markdown: true });   // FORAGE_COMPLETE didn't arrive in time
+      _orchFinalize(t);
+    })();
+  }));
+  bar.appendChild(_mkBtn('Cancel', () => {
+    _addLegMsg = null; try { m.remove(); } catch { /* */ }
+    void _orchReq('ABORT_FORAGE', { groundId }).catch(() => { /* */ });
+    _orchFinalize(appendMessage({ role: 'assistant', body: 'Forge cancelled.' }));
+  }));
+  body.appendChild(bar);
+  _orchFinalize(m);
+}
+
+// Broker → under construction (OAuth/MCP linking, CX-5).
+function _brokerUC(site) {
+  _closeAddLeg(null);
+  _orchFinalize(appendMessage({ role: 'assistant', body: `Broker legs for ${site.host} (OAuth / MCP connectors) are under construction — coming soon.` }));
+}
+
+// OV-5d (v2.74.1427) — the forge RESULTS as an INTERACTIVE verify list (the AS-5 pattern): arm the foraged recipes RIGHT
+// HERE, no `legs` → `verify N` dance. All CHECKED by default → one Verify arms them all (click a card to EXCLUDE it).
+// Verify is ALWAYS clickable + hints when nothing's checked (the v1426 "does nothing": `disabled` fired once the user
+// clicked every card OFF). After arming, it shows the NEW capabilities as example ASKS derived from the recipe names.
+function _exampleAskFor(r) {
+  const name = String((r && (r.name || r.id)) || '').trim();
+  if (!name) return null;
+  const ask = name.toLowerCase();   // recipe names are already LLM-polished ("Read Open Warranty Task") → a natural ask
+  const req = (Array.isArray(r && r.params) ? r.params : []).find((p) => p && p.required && p.name);
+  return req ? `${ask} for <${req.name}>` : ask;
+}
+function _renderForgeResults(site, groundId, recipes) {
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  _addLegMsg = msg;
+  try { delete msg.dataset.messageId; } catch { /* */ }
+  _setMessageBody(msg, `✓ Foraged **${site.host}** — ${recipes.length} read recipe${recipes.length === 1 ? '' : 's'} captured (pending). They’re **all checked** — click **Verify** to arm them (or click a card to exclude it):`, { markdown: true });
+  const body = msg.querySelector('.message-content') || msg;
+  const sel = new Set(recipes.map((r) => r.id));
+  const wrap = document.createElement('div'); wrap.className = 'intent-menu setup-catalog';
+  for (const r of recipes) {
+    const card = document.createElement('button');
+    card.className = 'suggestion-card intent-chip setup-site selected';
+    card.innerHTML = `<div class="suggestion-card-name">${escHtml(r.name || r.id)}</div><div class="suggestion-card-summary">${escHtml(r.method || 'GET')}${(r.safetyClass && r.safetyClass !== 'auto') ? ` · ${escHtml(r.safetyClass)}` : ''}</div>`;
+    card.addEventListener('click', () => { if (sel.has(r.id)) { sel.delete(r.id); card.classList.remove('selected'); } else { sel.add(r.id); card.classList.add('selected'); } sync(); });
+    wrap.appendChild(card);
+  }
+  const hint = document.createElement('div'); hint.className = 'add-leg-hint';
+  const doVerify = () => {
+    const ids = [...sel];
+    if (!ids.length) { hint.textContent = 'Nothing checked — the recipes start checked; click a card to include it, then Verify.'; return; }
+    const armedRecipes = recipes.filter((r) => sel.has(r.id));
+    _addLegMsg = null; try { msg.remove(); } catch { /* */ }
+    void (async () => {
+      const t = appendMessage({ role: 'assistant', body: '' });
+      _setMessageBody(t, `Arming ${ids.length} capabilit${ids.length === 1 ? 'y' : 'ies'}…`);
+      let armed = 0;
+      for (const id of ids) { try { const r = await _orchReq('EDIT_RIDE_RECIPE', { groundId, id, op: 'review', value: 'accept' }); if (r && r.success !== false) armed += 1; } catch { /* */ } }
+      try { _orchLog(`LEG_VERIFY ▸ forge arm ${armed}/${ids.length} [${site.host}]`); } catch { /* */ }
+      // §20 — arm the PERSISTENT ride auth-capture on the tab so these harvested cross-origin reads have a fresh Bearer to
+      // replay with (else the first invoke hits `no-session-captured`). Mirrors the connected-app ground-panel arming.
+      try { if (Number.isInteger(site.id)) await _orchReq('ARM_RIDE_CAPTURE', { host: site.host, tabId: site.id }); } catch { /* */ }
+      _setMessageBody(t, `✓ Armed **${armed}** capabilit${armed === 1 ? 'y' : 'ies'} on **${site.host}** — you can use ${armed === 1 ? 'it' : 'them'} now (on this tab, just ask).${armed < ids.length ? `  (${ids.length - armed} couldn’t arm.)` : ''}`, { markdown: true });
+      // Discoverability — the armed capabilities as CLICKABLE example asks (click → fill the chat input, edit any <id>,
+      // Enter to run). Live-only chips on the persisted summary; the text is the durable record.
+      const asks = armedRecipes.slice(0, 8).map(_exampleAskFor).filter(Boolean);
+      if (asks.length) {
+        const tb = t.querySelector('.message-content') || t;
+        const lbl = document.createElement('div'); lbl.className = 'add-leg-hint'; lbl.style.color = 'inherit'; lbl.style.marginTop = '8px'; lbl.textContent = 'Try one (click to fill it in, then Enter):';
+        const chips = document.createElement('div'); chips.className = 'orch-action-bar';
+        for (const a of asks) chips.appendChild(_mkBtn(a, () => { const inp = $('chat-input'); if (inp) { inp.value = a; try { _autosizeInput(); } catch { /* */ } inp.focus(); } }));
+        tb.appendChild(lbl); tb.appendChild(chips);
+      }
+      _orchFinalize(t);
+    })();
+  };
+  const verifyBtn = _mkBtn('✓ Verify', doVerify);   // ALWAYS clickable — hint on empty, never a silent no-op
+  const sync = () => { verifyBtn.textContent = sel.size ? `✓ Verify (${sel.size})` : '✓ Verify'; };
+  const bar = document.createElement('div'); bar.className = 'orch-action-bar';
+  bar.appendChild(verifyBtn);
+  bar.appendChild(_mkBtn('Cancel', () => _closeAddLeg('Left them pending — run `legs` to arm them later.')));
+  body.appendChild(wrap); body.appendChild(hint); body.appendChild(bar);
+  sync();
+  _orchFinalize(msg);
+}
+
+// `add leg: <spec>` — author on the ACTIVE tab (the site you're looking at).
+async function _addLegActive(spec) {
+  const m = appendMessage({ role: 'assistant', body: '' });
+  const t = await _activeTab();
+  let u = null; try { u = t && t.url ? new URL(t.url) : null; } catch { u = null; }
+  if (!u || (u.protocol !== 'http:' && u.protocol !== 'https:')) { _setMessageBody(m, 'The active tab isn’t a site — open the one you want, or run `add leg` to pick from your open tabs.', { markdown: true }); _orchFinalize(m); return; }
+  await _addLegToSite(m, { host: u.host, origin: u.origin, url: t.url, title: t.title || u.host }, spec);
+}
+
+// `add leg on <host>: <spec>` — explicit host. Prefer an OPEN TAB on that host (gives a URL to ground + a live session
+// to test); fall back to a known ground; else ask the user to open it.
+async function _addLegOnHost(host, spec) {
+  const m = appendMessage({ role: 'assistant', body: '' });
+  const h = String(host || '').toLowerCase();
+  const sites = await _legOpenSites();
+  const s = sites.find((x) => x.host.toLowerCase() === h) || sites.find((x) => x.host.toLowerCase().includes(h));
+  if (s) { await _addLegToSite(m, s, spec); return; }
+  const gr = await _orchReq('GET_LEG_OVERVIEW', {});
+  const g = ((gr && gr.overview && gr.overview.grounds) || []).find((x) => x.host && (x.host.toLowerCase() === h || x.host.toLowerCase().includes(h)));
+  if (g) { await _addLegToSite(m, { host: g.host, origin: `https://${g.host}`, url: null, groundId: g.groundId }, spec); return; }
+  _setMessageBody(m, `No open tab or known ground for **${host}** — open it in a tab (logged in), then \`add leg\`.`, { markdown: true }); _orchFinalize(m);
+}
+
+// Shared: resolve the site's ground (reuse or mint via ENSURE_GROUND_FOR_URL), then ADD_RIDE_RECIPE. Never invokes.
+async function _addLegToSite(m, site, spec) {
+  let groundId = site.groundId || null;
+  if (!groundId && site.url) {
+    const eg = await _orchReq('ENSURE_GROUND_FOR_URL', { url: site.url });
+    if (!eg || eg.success === false || !eg.groundId) { _setMessageBody(m, `Couldn’t ground **${site.host}** — ${(eg && eg.error) || 'error'}.`, { markdown: true }); _orchFinalize(m); return; }
+    groundId = eg.groundId;
+  }
+  if (!groundId) { _setMessageBody(m, `Couldn’t resolve a ground for **${site.host}**.`, { markdown: true }); _orchFinalize(m); return; }
+  const r = await _orchReq('ADD_RIDE_RECIPE', { groundId, origin: site.host, spec });
   if (!r || r.success === false) { _setMessageBody(m, `Couldn’t add it — ${(r && r.error) || 'error'}.`, { markdown: true }); _orchFinalize(m); return; }
   const rec = r.recipe || {};
-  _setMessageBody(m, `Added **${rec.name}** (${rec.method} ${rec.endpoint}) on ${g.host} — it’s **pending**. Run \`legs\`, \`test\` it, then \`verify\` to arm it for apps.`, { markdown: true });
+  _setMessageBody(m, `Added **${rec.name}** (${rec.method} ${rec.endpoint}) on ${site.host} — it’s **pending**. Run \`legs\`, \`test\` it, then \`verify\` to arm it for apps.`, { markdown: true });
   _orchFinalize(m);
 }
 
@@ -6387,11 +6647,16 @@ async function sendChatMessage() {
     return;
   }
   {
-    const mAdd = text.match(/^add\s+leg(?:\s+on\s+([^\s:][^:]*?))?\s*:\s*(.+)$/i);
-    if (mAdd) {
+    // OV-5c (v2.74.1424) — `add leg` opens the CLASS-FIRST WIZARD (Drive/Ride/Broker → site → forge/discovery). The
+    // console forms `add leg on <host>: <spec>` and `add leg: <spec>` (active tab) stay as a hand-authoring power path.
+    const mAddHost = text.match(/^add\s+leg\s+on\s+([^\s:]+[^:]*?)\s*:\s*(.+)$/i);
+    const mAddActive = mAddHost ? null : text.match(/^add\s+leg\s*:\s*(.+)$/i);
+    if (mAddHost || mAddActive || /^add\s+leg\s*$/i.test(text)) {
       input.value = ''; _autosizeInput();
       appendMessage({ role: 'user', body: text });
-      await _addLeg((mAdd[1] || '').trim(), mAdd[2].trim());
+      if (mAddHost) await _addLegOnHost(mAddHost[1].trim(), mAddHost[2].trim());
+      else if (mAddActive) await _addLegActive(mAddActive[1].trim());
+      else await _addLegClasses();
       return;
     }
     const mTest = text.match(/^test\s+(?:leg\s+)?#?(\d+)\s*(.*)$/i);

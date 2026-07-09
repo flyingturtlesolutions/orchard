@@ -87,8 +87,17 @@ invoke need a live eyeball (chrome.storage/session seams the harness can't reach
   guard. *Known limit:* Shopify-class **gql/csrf reads** aren't testable here yet — `recipeFromCatalogEntry` is a lossy
   projection (drops gql/csrf/persistedOp), so the stored record can't faithfully reconstruct that transport. Follow-up:
   make the stored record the faithful invoke source (or fetch the catalog leg).
-- **OV-5 — Add** ✅ (`Core/manualRecipe.js` + `add leg on <site>: <Name> | <M> <path>` + `ADD_RIDE_RECIPE`): author a
-  ride recipe by a compact one-line spec (method-derived safety, lands `pending`). A DOM form is a follow-up.
+- **OV-5 — Add** ✅ — a **CLASS-FIRST WIZARD** (v1424, `add leg`): pick a leg CLASS (card UI) → the SITE (from your OPEN
+  TABS, single-select cards) → run the class's MACHINE authoring. Legs are authored by the machine, NOT hand-typed:
+  - **Ride → FORAGE** (`forage.js` §19, passive toggle): arm on the logged-in tab → the user browses → **Bank** the
+    captured API reads as `pending` ride recipes.
+  - **Drive → DISCOVERY** (`EXPLORE_PAGE_STRUCTURE`): map the page into taught capabilities (the same explore the panel
+    runs; it also auto-chains a forage pass).
+  - **Broker → under construction** (OAuth/MCP, CX-5).
+  The ground is minted/reused on demand (`ENSURE_GROUND_FOR_URL`, dedup-before-mint). **Superseded** the earlier
+  spec-typing UI (v1421 open-tab list → v1422 card+spec picker → v1424 class wizard) — hand-typing a `<Name> | <METHOD>
+  <endpoint>` spec was "too specific"; the machine forges/discovers instead. The console forms `add leg: <spec>` and
+  `add leg on <host>: <spec>` (+ `Core/manualRecipe.js` + `ADD_RIDE_RECIPE`) remain as a hand-authoring power path.
 - **OV-6 — Verify/arm** ✅ (`verify N` → existing `EDIT_RIDE_RECIPE {op:'review'}`): pending → accepted → app-consumable.
 - Capture/demonstrate Add paths reuse §17 harvest + OBS (wire, don't rebuild) — not yet wired into the workbench UI.
 

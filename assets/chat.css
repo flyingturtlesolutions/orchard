@@ -16,6 +16,10 @@
   --c-border-soft: #2c2825;
   --c-scrollbar:   #16130f;         /* v2.74.1258 — webkit scrollbar thumb: a shade darker than --c-bg (chat body) */
 
+  /* v2.74.1420 — the Rail's frosted fill: --c-bg-elevated at RAIL_ALPHA. Overwritten by
+     Services/Chat/tabTint.js with the sampled elevated surface; this is the untinted default. */
+  --c-rail-bg:     rgba(40, 37, 31, 0.55);
+
   --c-text:         #e8e3d8;        /* warm off-white, easier on eyes than pure white */
   --c-text-muted:   #b5ad9d;
   --c-text-subtle:  #80796d;
@@ -692,6 +696,9 @@ textarea {
   content: '✓\00a0';
   font-weight: 700;
 }
+/* OV-5c (v2.74.1424) — the add-leg wizard's inline correction line (shown only when a step needs a pick / a bad spec). */
+.add-leg-hint { margin: 6px 0 0; font-size: 0.82em; color: var(--c-danger, #c0392b); }
+.add-leg-hint:empty { display: none; }
 /* OM (v2.74.1200) — a named PRESET under its abstract type: dashed + transparent so the type cards read as the
    primary choice and presets as their lighter-weight specializations. Layout-safe (no width/margin change). */
 .suggestion-card-preset {
@@ -1481,20 +1488,38 @@ textarea {
 /* ── Conversation drawer (v2.74.1207 — FULL-WIDTH overlay over the chat history only) ─────────────────
    The drawer absolutely overlays .app-body (the conversation region), so it covers the ENTIRE panel width
    and the messages behind it. The input row lives OUTSIDE .app-body (a body-level row), so it is NEVER
-   covered — always visible at its own width/height. Slides in from the left; opaque, fully replacing the
-   history view while open. */
+   covered — always visible at its own width/height. Slides in from the left.
+
+   v2.74.1420 — FROSTED, not opaque: a translucent fill over a blurred backdrop, so the thread and the
+   sampled gradient read through it. --c-rail-bg is --c-bg-elevated at RAIL_ALPHA, written by
+   Services/Chat/tabTint.js alongside the other surfaces, so the frost re-tints with the active tab.
+
+   backdrop-filter works here (unlike anything trying to see the web page) because the Rail overlays
+   content in the SAME document. .app-body has no filter/opacity of its own, so it does not form a
+   backdrop root and the body gradient is included in what gets blurred.
+
+   The Rail's own `opacity` transition is what fades the frost in; it composites AFTER the backdrop
+   filter, so there is no flash of unblurred content. */
 .rail {
   position: absolute;
   inset: 0;                       /* full width + full height of .app-body (= the chat-history region) */
   z-index: 20;
   overflow: hidden;
-  background: var(--c-bg-elevated);
+  background: var(--c-rail-bg);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
   box-shadow: var(--shadow-lg);
   display: flex;
   transform: translateX(-100%);   /* off-screen left when closed */
   opacity: 0;
   pointer-events: none;           /* closed → doesn't intercept clicks on the conversation */
   transition: transform var(--t-med), opacity var(--t-med);
+}
+
+/* No backdrop-filter → a translucent Rail would show sharp text straight through itself,
+   which is worse than not frosting at all. Fall back to the opaque surface. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .rail { background: var(--c-bg-elevated); }
 }
 .rail.open {
   transform: translateX(0);

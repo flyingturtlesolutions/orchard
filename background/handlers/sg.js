@@ -1196,14 +1196,27 @@ export function createSgMessageHandlers(ctx) {
         // SESSION_REPLAY (page-captured auth headers). Reads only (mode 'ask'); best-effort (never blocks interpret).
         let harvestedLegs = [];
         try {
-          if (typeof ctx.readRideRecipes === 'function' && connections.length) {
-            const _allG = await StorageManager.getAllGrounds();
+          if (typeof ctx.readRideRecipes === 'function' && (connections.length || groundId)) {
             const _seen = new Set([...ragLegs, ...connLegs].map((l) => legRef(l)).filter(Boolean));
-            for (const c of connections) {
-              const gid = _groundIdForUrl(c.origin, _allG); if (!gid) continue;
-              const recs = await ctx.readRideRecipes(gid);
-              const host = String(c.origin || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
-              harvestedLegs.push(...harvestedRecipeLegs(recs, { host, mode: 'ask', seenKeys: _seen, groundId: gid }));   // v1340 (review A/§18) — carry the Ground for the run-time arm guard
+            if (connections.length) {
+              const _allG = await StorageManager.getAllGrounds();
+              for (const c of connections) {
+                const gid = _groundIdForUrl(c.origin, _allG); if (!gid) continue;
+                const recs = await ctx.readRideRecipes(gid);
+                const host = String(c.origin || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+                harvestedLegs.push(...harvestedRecipeLegs(recs, { host, mode: 'ask', seenKeys: _seen, groundId: gid }));   // v1340 (review A/§18) — carry the Ground for the run-time arm guard
+              }
+            } else if (groundId) {
+              // v2.74.1428 (OV-6b) — OVERVIEW (no connected app): ALSO offer the ACTIVE TAB's Ground's armable ride recipes,
+              // so a freshly forged+armed read ("get open warranty tasks" on the vendor portal) is REACHABLE from a plain
+              // ask. The connections-only gate had silently dropped these — an armed workbench recipe was invocable by no
+              // one. Scoped to the active tab's Ground; the §18 arm guard (armable) still filters inside harvestedRecipeLegs.
+              const recs = await ctx.readRideRecipes(groundId);
+              let host = ''; try { host = new URL(tabUrl).host; } catch { /* */ }
+              harvestedLegs.push(...harvestedRecipeLegs(recs, { host, mode: 'ask', seenKeys: _seen, groundId }));
+              // §20 — keep the ride auth-capture armed on the active tab so a header-replay pick has a FRESH token to
+              // replay (fire-and-forget; idempotent host-dedup). Without this the Overview invoke hits no-session-captured.
+              if (host && typeof tabId === 'number' && harvestedLegs.length) { void armRideAuthCapture({ host, tabId }).catch(() => { /* */ }); }
             }
           }
         } catch { /* never block interpret on the harvested-leg projection */ }
