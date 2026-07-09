@@ -63,6 +63,29 @@ export const BROKER_CATALOG = Object.freeze([
         inputSchema: { type: 'object', properties: { documentId: { type: 'string' } }, required: ['documentId'] } },
     ],
   }),
+  // CX-5a — HubSpot (the BROKER leg for the CS app). ride-legs-spec §HubSpot decided this: HubSpot is reached via
+  // the OAuth MCP broker (`mcp.hubspot.com`, registered in mcpServers.js), NOT session-ride — app.hubspot.com's
+  // internal endpoints are undocumented + `api.hubapi.com` is token-only, so a cookie ride is unproven. Its CS ROLE
+  // is READ-only: resolve an aircall/SAS phone → the contact → their email + tickets/deals, which feed the Zendesk +
+  // Shopify lookups (the spec's phone→email→identity chain). ⚠ Tool NAMES + schemas are a SELECTABILITY stand-in —
+  // the live `tools/list` (mcp.hubspot.com) supersedes them once linked (the Google "Unknown name" lesson: seeds rot).
+  Object.freeze({
+    server: 'hubspot',
+    provider: 'hubspot',
+    label: 'HubSpot',
+    hosts: ['app.hubspot.com', 'hubspot.com'],
+    scopes: [],   // RFC 9728 protected-resource metadata declares the granular scopes at link time (contacts/tickets/deals .read)
+    tools: [
+      { name: 'hubspot-search-objects', description: 'Search HubSpot CRM objects — a contact by email or phone, or companies/deals/tickets', annotations: { readOnlyHint: true },
+        inputSchema: { type: 'object', properties: { objectType: { type: 'string' }, query: { type: 'string' }, properties: { type: 'array' }, limit: { type: 'integer' } }, required: ['objectType'] } },
+      { name: 'hubspot-batch-read-objects', description: 'Read HubSpot CRM object(s) by id with selected properties', annotations: { readOnlyHint: true },
+        inputSchema: { type: 'object', properties: { objectType: { type: 'string' }, ids: { type: 'array' }, properties: { type: 'array' } }, required: ['objectType', 'ids'] } },
+      { name: 'hubspot-list-associations', description: 'List a HubSpot object’s associations — a contact’s tickets, deals, companies', annotations: { readOnlyHint: true },
+        inputSchema: { type: 'object', properties: { objectType: { type: 'string' }, objectId: { type: 'string' }, toObjectType: { type: 'string' } }, required: ['objectType', 'objectId', 'toObjectType'] } },
+      { name: 'hubspot-get-user-details', description: 'Get the authenticated HubSpot user + account (the identity / liveness check)', annotations: { readOnlyHint: true },
+        inputSchema: { type: 'object', properties: {}, required: [] } },
+    ],
+  }),
 ]);
 
 const _host = (h) => String(h || '').toLowerCase().replace(/^www\./, '');

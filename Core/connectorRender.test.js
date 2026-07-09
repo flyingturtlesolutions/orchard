@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { primaryList, primaryObject, summarizeItem, renderConnectorLines, itemLabels } from './connectorRender.js';
+import { primaryList, primaryObject, summarizeItem, renderConnectorLines, itemLabels, primaryItemId } from './connectorRender.js';
 
 describe('primaryList — find the data array', () => {
   it('prefers known data keys, falls back to any object-array, ignores scalar arrays', () => {
@@ -14,6 +14,30 @@ describe('primaryList — find the data array', () => {
     assert.equal(primaryList({ tags: ['a', 'b'], count: 0 }), null);          // a scalar array is not the data list
     assert.deepEqual(primaryList([{ id: 1 }]), [{ id: 1 }]);                  // a bare array
     assert.equal(primaryList(null), null);
+  });
+  it('CX-7 (v2.74.1390): recurses into a nested GraphQL envelope and unwraps edges[].node', () => {
+    const gql = { data: { customers: { edges: [
+      { node: { id: 'gid://shopify/Customer/12345', firstName: 'Divine', lastName: 'Monkam', email: 'dmonkam.tc@example.com', numberOfOrders: 3 }, cursor: 'x' },
+    ] } } };
+    const list = primaryList(gql);
+    assert.equal(list.length, 1);
+    assert.equal(list[0].email, 'dmonkam.tc@example.com');   // reached the node
+    assert.ok(!('node' in list[0]) && !('cursor' in list[0]));   // edge unwrapped
+    // a genuinely-empty search stays empty (0), not a false "found"
+    assert.deepEqual(primaryList({ data: { customers: { edges: [] } } }), []);
+  });
+});
+
+describe('summarizeItem — Shopify records (CX-7)', () => {
+  it('names a customer from firstName+lastName (no name field), shortens the gid, reads the display status', () => {
+    const cust = summarizeItem({ id: 'gid://shopify/Customer/12345', firstName: 'Divine', lastName: 'Monkam', email: 'd@example.com' });
+    assert.equal(cust.title, 'Divine Monkam');
+    assert.equal(cust.id, '12345');                          // gid → numeric tail
+    const order = summarizeItem({ id: 'gid://shopify/Order/9', name: 'DEAKO#69872', displayFulfillmentStatus: 'FULFILLED' });
+    assert.equal(order.title, 'DEAKO#69872');
+    assert.equal(order.status, 'FULFILLED');                 // camelCase status key
+    const emailOnly = summarizeItem({ id: 'gid://shopify/Customer/7', email: 'only@example.com' });
+    assert.equal(emailOnly.title, 'only@example.com');       // email fallback when no name
   });
 });
 
@@ -44,6 +68,17 @@ describe('summarizeItem — salient fields, app-agnostic', () => {
   });
 });
 
+describe('primaryItemId — the record a read RETURNED (CX-7e, for "show profile")', () => {
+  it('the id of the single/first record, gid → numeric tail; null when none', () => {
+    const gql = { data: { customers: { edges: [{ node: { id: 'gid://shopify/Customer/12345', firstName: 'A', lastName: 'B' } }] } } };
+    assert.equal(primaryItemId(gql), '12345');                 // gid tail — feeds the /customers/{id} itemUrl
+    assert.equal(primaryItemId({ tickets: [{ id: 64775, subject: 's' }] }), 64775);   // Zendesk numeric id
+    assert.equal(primaryItemId({ ticket: { id: 7 } }), 7);     // wrapped single object
+    assert.equal(primaryItemId({ data: { customers: { edges: [] } } }), null);        // empty → null
+    assert.equal(primaryItemId(null), null);
+  });
+});
+
 describe('renderConnectorLines — the chat lines', () => {
   it('a ticket list → header (N): + bullets; an empty list → header.', () => {
     const lines = renderConnectorLines({ results: [{ id: 1, subject: 'A', status: 'open' }, { id: 2, subject: 'B', status: 'open' }] }, { name: 'My open Zendesk tickets' });
@@ -51,10 +86,55 @@ describe('renderConnectorLines — the chat lines', () => {
     assert.equal(lines[1], '• #1 A — open');
     assert.deepEqual(renderConnectorLines({ tickets: [] }, { name: 'Tickets' }), ['Tickets (0).']);
   });
-  it('a comments list (different shape) renders too — content as the title', () => {
+  it('a SINGLE-record list renders as the full record (v2.74.1392), not a bare bullet', () => {
     const lines = renderConnectorLines({ comments: [{ id: 9, body: 'Call me back' }] }, { name: 'Conversation' });
-    assert.equal(lines[0], 'Conversation (1):');
-    assert.equal(lines[1], '• #9 Call me back');
+    assert.deepEqual(lines, ['#9 Call me back']);        // content as title; no header/bullet for a lone record
+  });
+  it('CX-7: a single Shopify customer renders its PROFILE (email/phone/orders/tags/location), not #id name', () => {
+    const gql = { data: { customers: { edges: [{ node: {
+      id: 'gid://shopify/Customer/12345', firstName: 'Divine', lastName: 'Monkam', email: 'd@example.com',
+      phone: '+15551234567', numberOfOrders: 3, tags: ['vip', 'wholesale'], defaultAddress: { city: 'Austin', province: 'TX', country: 'US' },
+    } }] } } };
+    const lines = renderConnectorLines(gql, { name: 'Find a Shopify customer by email' });
+    assert.equal(lines[0], '#12345 Divine Monkam');       // name + shortened gid
+    const text = lines.join('\n');
+    assert.match(text, /Email: d@example\.com/);
+    assert.match(text, /Phone: \+15551234567/);
+    assert.match(text, /Orders: 3/);                      // aliased label (numberOfOrders → "Orders")
+    assert.match(text, /Tags: vip, wholesale/);
+    assert.match(text, /Location: Austin, TX, US/);       // aliased (defaultAddress → "Location")
+  });
+  it('CX-7e: a single Shopify ORDER surfaces payment/total/tracking (the nested CS fields), deduped vs the shown status', () => {
+    const gql = { data: { orders: { edges: [{ node: {
+      id: 'gid://shopify/Order/6818042937478', name: 'DEAKO#12043', createdAt: '2025-10-09T23:53:59Z',
+      displayFinancialStatus: 'PAID', displayFulfillmentStatus: 'FULFILLED',
+      totalPriceSet: { shopMoney: { amount: '0.00', currencyCode: 'USD' } },
+      customer: { email: 'd@example.com' },
+      fulfillments: [{ status: 'success', trackingInfo: [{ company: 'UPS', number: '1Z999', url: 'https://ups.com/1Z999' }] }],
+      returns: [], refunds: [], tags: ['draft', 'FOC', 'sent-to-3PL'],
+    } }] } } };
+    const text = renderConnectorLines(gql, { name: 'Look up a Shopify order' }).join('\n');
+    assert.match(text, /#6818042937478 DEAKO#12043 — FULFILLED/);   // primary status = fulfillment
+    assert.match(text, /Payment: PAID/);                            // the SECOND status now shows (was dropped)
+    assert.match(text, /Total: 0\.00 USD/);                         // money nested 2 deep, formatted
+    assert.match(text, /Tracking: UPS 1Z999/);                      // pulled from fulfillments[].trackingInfo
+    assert.match(text, /Customer: d@example\.com/);
+    assert.ok(!/Fulfillment: FULFILLED/.test(text));                // not duplicated as an extra (dedup vs shown status)
+  });
+  it('CX-7f: a returned/refunded order surfaces Payment + Return status + Refund amount (the live gap)', () => {
+    const gql = { data: { orders: { edges: [{ node: {
+      id: 'gid://shopify/Order/99', name: 'DEAKO#500', displayFinancialStatus: 'PARTIALLY_REFUNDED', displayFulfillmentStatus: 'FULFILLED',
+      totalPriceSet: { shopMoney: { amount: '86.40', currencyCode: 'USD' } },
+      fulfillments: [{ trackingInfo: [{ company: 'FedEx', number: '7712345' }] }],
+      returns: { edges: [{ node: { status: 'IN_PROGRESS', returnLineItems: { edges: [{ node: { quantity: 4 } }] } } }] },   // a CONNECTION
+      refunds: [{ createdAt: '2026-03-23', totalRefundedSet: { shopMoney: { amount: '86.40', currencyCode: 'USD' } } }],       // a plain list
+      tags: [],
+    } }] } } };
+    const text = renderConnectorLines(gql, { name: 'Look up a Shopify order' }).join('\n');
+    assert.match(text, /Payment: PARTIALLY_REFUNDED/);              // the return/refund state the coarse status hid
+    assert.match(text, /Return: 1 \(in progress\)/);               // returns connection unwrapped + status
+    assert.match(text, /Refunded: 86\.40 USD/);                    // refund amount (nested money in a list)
+    assert.match(text, /Tracking: FedEx 7712345/);
   });
   it('caps a long list at 25 with a "+ N more" note (no silent truncation)', () => {
     const big = Array.from({ length: 30 }, (_, i) => ({ id: i, subject: `t${i}` }));

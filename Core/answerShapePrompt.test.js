@@ -33,6 +33,21 @@ describe('answerShapePrompt — readShapeFacts (deterministic count + MINIMIZED 
     assert.deepEqual(readShapeFacts(null), { kind: 'empty', count: 0, sampleN: 0, sample: [] });
     assert.equal(readShapeFacts({}).kind, 'empty');
   });
+  it('CX-7f: a SINGLE record carries `details` so the answer is accurate, not just the coarse status', () => {
+    const order = { data: { orders: { edges: [{ node: {
+      id: 'gid://shopify/Order/99', name: 'DEAKO#500', displayFinancialStatus: 'PARTIALLY_REFUNDED', displayFulfillmentStatus: 'FULFILLED',
+      totalPriceSet: { shopMoney: { amount: '86.40', currencyCode: 'USD' } },
+      returns: { edges: [{ node: { status: 'IN_PROGRESS', returnLineItems: { edges: [] } } }] },
+      refunds: [{ totalRefundedSet: { shopMoney: { amount: '86.40', currencyCode: 'USD' } } }],
+    } }] } } };
+    const f = readShapeFacts(order);
+    assert.equal(f.kind, 'object');
+    assert.equal(f.count, 1);
+    assert.equal(f.sample[0].details.Payment, 'PARTIALLY_REFUNDED');   // the shaper can now say "partially refunded"
+    assert.equal(f.sample[0].details.Return, '1 (in progress)');
+    assert.equal(f.sample[0].details.Refunded, '86.40 USD');
+    assert.ok(!('details' in readShapeFacts(TICKETS).sample[0]));       // a MULTI list stays lean (size + privacy)
+  });
 });
 
 describe('answerShapePrompt — buildAnswerShapeMessages', () => {

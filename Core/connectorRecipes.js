@@ -72,6 +72,55 @@ export function fillBody(template, args = {}) {
 // (connection origin + this template + a sanitized id) — the model never mints URLs. view_user overrides (users).
 const ZD = Object.freeze({ app: 'zendesk', appHost: 'zendesk.com', verifyIdentity: true, identityProbe: '/api/v2/users/me.json', method: 'GET', itemUrl: '/agent/tickets/{id}' });
 
+/**
+ * CX-7 (v2.74.1386) — is a GraphQL document READ-ONLY (a query, never a mutation/subscription)? The Shopify ride's
+ * reads are POSTs, and a POST normally demands the HITL write gate — this predicate is what lets a curated GraphQL
+ * READ run unconfirmed. Enforced at BOTH belts: background validates the template before dispatch, and the content
+ * script re-validates the FINAL body at the execution boundary (ContentScripts SESSION_FETCH keeps an inline twin
+ * of this exact logic — keep them in lockstep). String literals are stripped before the keyword scan. PURE.
+ */
+export function isReadOnlyGql(query) {
+  const q = String(query || '').trim();
+  if (!q || !/^(query\b|\{)/.test(q)) return false;
+  const noStrings = q.replace(/"(?:[^"\\]|\\.)*"/g, '');
+  return !(/\bmutation\b/i.test(noStrings) || /\bsubscription\b/i.test(noStrings));
+}
+
+// ── Shopify (CX-7, v2.74.1386 — from logs/run/ride-legs-spec.md §Shopify, the CS stack's LIVE implementation) ────
+// Transport: the admin SPA's own GraphQL endpoint, POST /api/shopify/{handle} with {query, variables} — riding the
+// user's real admin.shopify.com tab (no Playwright/Cloudflare problem: the logged-in tab IS the headed browser).
+// `{handle}` (the store slug in /store/<handle>/…) fills from the RIDE TAB's URL (`urlParam`), never from the model.
+// CSRF: REQUIRED on these POSTs and NOT in a meta tag — `csrf:'sniff'` makes INVOKE_SESSION capture `x-csrf-token`
+// off the SPA's own outbound requests (MAIN-world tee) and cache it per origin. READ-ONLY BY POLICY (the spec's
+// money=human-click-only rule): no Shopify mutations ship as recipes — their write path is store-captured persisted-op
+// hashes that rotate on admin deploys (HASH_STALE), unportable as curated data; refunds/returns are navigate-only.
+// Spec traps honored elsewhere: a 200-with-HTML login page = auth failure (SESSION_FETCH 'non-json'), and email/phone
+// search returns NEAR-MATCHES — exact-match before binding a customer to anything (recipe `does` says so).
+const _GQL_CUSTOMERS = 'query($q: String!, $n: Int!) { customers(first: $n, query: $q) { edges { node { id firstName lastName email phone numberOfOrders tags defaultAddress { city province country } } } } }';
+// CX-7c (v2.74.1388) — order read now carries RETURNS (return/exchange status + reverse tracking — the "where's my
+// exchange?" question) and the refund AMOUNT (totalRefundedSet), plus the fulfillment event timeline. Spec §3.
+const _GQL_ORDERS = 'query($q: String!, $n: Int!) { orders(first: $n, query: $q, sortKey: CREATED_AT, reverse: true) { edges { node { id name createdAt displayFinancialStatus displayFulfillmentStatus totalPriceSet { shopMoney { amount currencyCode } } customer { email } lineItems(first: 10) { edges { node { title quantity } } } fulfillments { status displayStatus estimatedDeliveryAt deliveredAt trackingInfo { number company url } events(first: 10) { edges { node { status happenedAt } } } } returns(first: 10) { edges { node { id status returnLineItems(first: 10) { edges { node { quantity } } } reverseFulfillmentOrders(first: 5) { edges { node { reverseDeliveries(first: 5) { edges { node { deliverable { ... on ReverseDeliveryShippingDeliverable { tracking { carrierName number url } } } } } } } } } } } } refunds { createdAt note totalRefundedSet { shopMoney { amount currencyCode } } } tags note } } } }';
+const _GQL_PRODUCTS = 'query($q: String!, $n: Int!) { products(first: $n, query: $q) { edges { node { id title status totalInventory variants(first: 10) { edges { node { id title sku price inventoryQuantity } } } } } } }';
+// CX-7c — the LIVENESS probe document: `{ shop { name } }` (spec §2 probeShopify). `shopProbe:true` makes
+// INVOKE_SESSION run it once (cached) before the call — a clean signed-out verdict instead of a mid-call surprise.
+const SH = Object.freeze({
+  app: 'shopify', appHost: 'admin.shopify.com', method: 'POST', gql: true, csrf: 'sniff', contentType: 'application/json',
+  endpoint: '/api/shopify/{handle}', urlParam: { name: 'handle', pattern: '\\/store\\/([^\\/]+)' }, shopProbe: true,
+});
+
+/**
+ * CX-7c (v2.74.1388) — coerce a Shopify object id to a gid. Reads return `id` as a full gid
+ * (`gid://shopify/Customer/123`); the model usually passes that back, but a bare numeric or a `#`-prefixed value
+ * is normalized to the gid the write needs. A value that is already a gid passes through. PURE.
+ */
+export function toShopifyGid(value, kind) {
+  const s = String(value == null ? '' : value).trim();
+  if (!s || !kind) return s;
+  if (/^gid:\/\/shopify\//i.test(s)) return s;
+  const digits = s.replace(/[^0-9]/g, '');
+  return digits ? `gid://shopify/${kind}/${digits}` : s;
+}
+
 // The curated catalog — full CRUD (CX-3/4a reads + CX-6a writes). `{me}` resolves server-side from the session cookie,
 // so "my X" reads are param-free (no LLM binder, §13); by-id / search reads carry one typed param. A WRITE adds
 // `write:true`, a non-GET `method`, and a `body` template (fillBody substitutes its `{param}`s). Writes are gated HARD
@@ -84,7 +133,10 @@ export const CONNECTOR_RECIPES = [
   // FL-1d (v2.74.1349) — `listUrl`: the COLLECTION's human page (the itemUrl counterpart for list-shaped reads).
   // These are search reads, so the honest view is the agent search page running the SAME query — "show me" after
   // "how many open tickets" opens the list the count came from, not a random item.
-  { ...ZD, id: 'my_open_tickets', name: 'My open Zendesk tickets', pulse: { scope: 'mine', status: 'open' },
+  // FL-10b (v2.74.1383) — `drill: { via }`: rows from this LIST read may be evidence-drilled through the named
+  // comments read (fleet triage → per-ticket thread fetch → deterministic extract; Core/ticketEvidence.js).
+  // Recipe DATA declares drillability; the fleet harness only follows the marker.
+  { ...ZD, id: 'my_open_tickets', name: 'My open Zendesk tickets', pulse: { scope: 'mine', status: 'open' }, drill: { via: 'ticket_comments' },
     does: 'list your OPEN Zendesk tickets (assigned to you), riding your Zendesk login',
     endpoint: '/api/v2/search.json?query=type:ticket%20status:open%20assignee:{me}&per_page=25&sort_by=created_at&sort_order=desc',
     listUrl: '/agent/search/1?type=ticket&q=status%3Aopen%20assignee%3Ame',
@@ -105,17 +157,17 @@ export const CONNECTOR_RECIPES = [
   // read's exact API `count` into the queue-state breakdown ("You: 4 open · 3 pending / Team: 32 open · 3
   // unassigned") — CODE assembles counts, the model never counts. Never keyed on a recipe id — a Gmail fleet app
   // tags its own reads and gets the same digest for free (the portability test). ──
-  { ...ZD, id: 'all_open_tickets', name: 'All open Zendesk tickets (whole queue)', pulse: { kind: 'inventory', scope: 'team', status: 'open' },
+  { ...ZD, id: 'all_open_tickets', name: 'All open Zendesk tickets (whole queue)', pulse: { kind: 'inventory', scope: 'team', status: 'open' }, drill: { via: 'ticket_comments' },
     does: 'list ALL open Zendesk tickets across the whole queue — everyone’s and unassigned, oldest first (the admin/queue-review view, not just yours), riding your login',
     endpoint: '/api/v2/search.json?query=type:ticket%20status:open&per_page=100&sort_by=created_at&sort_order=asc',
     listUrl: '/agent/search/1?type=ticket&q=status%3Aopen',
     params: [] },
-  { ...ZD, id: 'unassigned_tickets', name: 'Unassigned Zendesk tickets', pulse: { kind: 'backlog', scope: 'team', status: 'unassigned' },
+  { ...ZD, id: 'unassigned_tickets', name: 'Unassigned Zendesk tickets', pulse: { kind: 'backlog', scope: 'team', status: 'unassigned' }, drill: { via: 'ticket_comments' },
     does: 'list open Zendesk tickets with NO assignee (the assignment backlog), oldest first, riding your login',
     endpoint: '/api/v2/search.json?query=type:ticket%20status:open%20assignee:none&per_page=100&sort_by=created_at&sort_order=asc',
     listUrl: '/agent/search/1?type=ticket&q=status%3Aopen%20assignee%3Anone',
     params: [] },
-  { ...ZD, id: 'tickets_last_day', name: 'Zendesk tickets created in the last 24h', pulse: { kind: 'inflow' },
+  { ...ZD, id: 'tickets_last_day', name: 'Zendesk tickets created in the last 24h', pulse: { kind: 'inflow' }, drill: { via: 'ticket_comments' },
     does: 'list Zendesk tickets CREATED in the last 24 hours (new-volume pulse — the digest / spike-detection feed), riding your login',
     endpoint: '/api/v2/search.json?query=type:ticket%20created>24hours&per_page=100&sort_by=created_at&sort_order=desc',
     listUrl: '/agent/search/1?type=ticket&q=created%3E24hours',
@@ -158,7 +210,10 @@ export const CONNECTOR_RECIPES = [
       { name: 'comment', type: 'string', required: true },
       { name: 'public', type: 'boolean', enum: [true, false], required: true },   // force the model to classify visibility — no accidental public reply
     ] },
-  { ...ZD, id: 'update_ticket_status', name: 'Set a Zendesk ticket status', write: true, method: 'PUT',
+  // FL-10c (v2.74.1383) — `autoRequires: 'evidence'`: UNATTENDED execution of this class needs same-run
+  // CODE-verified proof (a drill verdict: POSITIVE sentiment + no open commitment + mine, or an aged empty stub)
+  // on top of the autonomy policy. A human approving from a card is never gated by this.
+  { ...ZD, id: 'update_ticket_status', name: 'Set a Zendesk ticket status', write: true, method: 'PUT', autoRequires: 'evidence',
     does: 'change a Zendesk ticket status (open / pending / hold / solved), riding your login',
     endpoint: '/api/v2/tickets/{id}.json',
     body: { ticket: { status: '{status}' } },
@@ -232,6 +287,86 @@ export const CONNECTOR_RECIPES = [
     does: 'permanently delete a Zendesk ticket by number (irreversible), riding your login',
     endpoint: '/api/v2/tickets/{id}.json',                  // no body
     params: [{ name: 'id', type: 'integer', required: true }] },
+
+  // ── Shopify reads (CX-7) — GraphQL query documents are STATIC (params fill only the `variables`), so the
+  // read-only belt validates a fixed text. All READ-ONLY by policy — no Shopify write recipes exist on purpose. ──
+  // FL-1c/CX-7e (v2.74.1393) — `itemUrl`: the record's HUMAN admin page ("show profile" opens it, like "show ticket"
+  // on Zendesk). {handle} fills from the read's tab-derived urlParam (the same /store/<handle>/ the read rode);
+  // {id} is the RESULT's record id (a customer lookup by email → the customer gid, tail-stripped to numeric).
+  { ...SH, id: 'shopify_customer_by_email', name: 'Find a Shopify customer by email', itemUrl: '/store/{handle}/customers/{id}',
+    does: 'look up Shopify customer(s) by EMAIL, riding your admin login — search returns near-matches: confirm the exact email before trusting a hit',
+    body: { query: _GQL_CUSTOMERS, variables: { q: 'email:"{email}"', n: 5 } },
+    params: [{ name: 'email', type: 'string', required: true }] },
+  { ...SH, id: 'shopify_customer_by_phone', name: 'Find a Shopify customer by phone', itemUrl: '/store/{handle}/customers/{id}',
+    does: 'look up Shopify customer(s) by PHONE number, riding your admin login — search returns near-matches: confirm the digits match exactly before trusting a hit',
+    body: { query: _GQL_CUSTOMERS, variables: { q: 'phone:"{phone}"', n: 5 } },
+    params: [{ name: 'phone', type: 'string', required: true }] },
+  { ...SH, id: 'shopify_orders_for_customer', name: 'Shopify orders for a customer',
+    does: 'list a customer’s recent Shopify orders by their EMAIL (status, totals, line items, fulfillment/tracking, refunds), riding your admin login',
+    body: { query: _GQL_ORDERS, variables: { q: 'email:"{email}"', n: 5 } },
+    params: [{ name: 'email', type: 'string', required: true }] },
+  { ...SH, id: 'shopify_order', name: 'Look up a Shopify order', itemUrl: '/store/{handle}/orders/{id}',
+    does: 'fetch one Shopify order by its ORDER NUMBER (digits, e.g. 69872 — not the DEAKO# prefix): status, totals, line items, fulfillment/tracking, refunds — riding your admin login',
+    body: { query: _GQL_ORDERS, variables: { q: 'name:{order}', n: 3 } },
+    params: [{ name: 'order', type: 'string', required: true }] },
+  { ...SH, id: 'shopify_search_products', name: 'Search Shopify products',
+    does: 'search Shopify products by title / sku / tag query (with variants, price, inventory), riding your admin login',
+    body: { query: _GQL_PRODUCTS, variables: { q: '{query}', n: 5 } },
+    params: [{ name: 'query', type: 'string', required: true }] },
+
+  // ── Shopify write (CX-7b, v2.74.1387) — the spec's ALLOWED mutation class (customer create is NOT money; the
+  // banned classes stay banned: refunds/returns/inventory never ship as recipes). Shopify admin mutations are
+  // PERSISTED OPERATIONS: POST /api/operations/<sha256>/<OpName>/shopify/<handle> — the sha is per-store and
+  // rotates on admin deploys, so it is NEVER curated data: `persistedOp` makes INVOKE_SESSION fill {op_sha} from
+  // the per-origin op bank the MAIN-world tee captures off the SPA's own traffic (create one customer by hand
+  // once with the tab ridden → the op is banked; a stale hash after a deploy re-captures the same way).
+  // Fail-closed like every write: confirmed:true at both belts + sniffed CSRF; 200-with-userErrors = failure.
+  { ...SH, id: 'shopify_create_customer', name: 'Create a Shopify customer', write: true, gql: false, persistedOp: 'CustomerCreate',
+    does: 'create a NEW Shopify customer profile (name + email and/or phone — at least one contact is required), riding your admin login',
+    endpoint: '/api/operations/{op_sha}/CustomerCreate/shopify/{handle}',
+    body: { operationName: 'CustomerCreate', variables: { customerInput: { firstName: '{first_name}', lastName: '{last_name}', email: '{email}', phone: '{phone}', note: '{note}' } } },
+    params: [
+      { name: 'first_name', type: 'string', required: true },
+      { name: 'last_name', type: 'string', required: true },
+      { name: 'email', type: 'string' },      // email OR phone — unfilled optionals drop from the body (fillBody);
+      { name: 'phone', type: 'string' },      // Shopify rejects a contactless input with userErrors (surfaced honestly)
+      { name: 'note', type: 'string' },
+    ] },
+  // CX-7c (v2.74.1388) — EDIT an existing customer (spec's ALLOWED EditCustomer op). Partial: only filled fields
+  // ride the body (fillBody drops unfilled optionals). `customer_gid` gid-coerces (bare id → gid) — it's the `id`
+  // a customer read returned.
+  { ...SH, id: 'shopify_update_customer', name: 'Edit a Shopify customer', write: true, gql: false, persistedOp: 'EditCustomer',
+    does: 'update fields on an EXISTING Shopify customer (name, email, phone, note, tags) — only the fields you set change; identify them by the customer id from a lookup',
+    endpoint: '/api/operations/{op_sha}/EditCustomer/shopify/{handle}',
+    body: { operationName: 'EditCustomer', variables: { input: { id: '{customer_gid}', firstName: '{first_name}', lastName: '{last_name}', email: '{email}', phone: '{phone}', note: '{note}', tags: '{tags}' } } },
+    params: [
+      { name: 'customer_gid', type: 'string', required: true, gid: 'Customer' },
+      { name: 'first_name', type: 'string' },
+      { name: 'last_name', type: 'string' },
+      { name: 'email', type: 'string' },
+      { name: 'phone', type: 'string' },
+      { name: 'note', type: 'string' },
+      { name: 'tags', type: 'array' },
+    ] },
+  // CX-7c (v2.74.1388) — create a DRAFT order (spec: "safe/reversible" — a draft is NOT a charge; completing it is
+  // the money step and stays HUMAN-CLICK, never a recipe). The FOC/warranty-replacement path: pass a 100%
+  // PERCENTAGE `applied_discount` + a zero `shipping_line`. Nested structures ride as WHOLE object params (sole
+  // placeholders → native value; unfilled → dropped), so an ordinary paid draft omits them cleanly.
+  { ...SH, id: 'shopify_create_order', name: 'Create a Shopify draft order', write: true, gql: false, persistedOp: 'DraftOrderCreate',
+    does: 'create a DRAFT order for a customer (line items by variant id + quantity) — a reversible draft the human reviews and completes; for a free warranty replacement pass a 100% applied_discount and a zero shipping_line',
+    endpoint: '/api/operations/{op_sha}/DraftOrderCreate/shopify/{handle}',
+    body: { operationName: 'DraftOrderCreate', variables: {
+      input: { purchasingEntity: { customerId: '{customer_gid}' }, lineItems: '{line_items}', useCustomerDefaultAddress: true, note: '{note}', poNumber: '{po_number}', tags: '{tags}', appliedDiscount: '{applied_discount}', shippingLine: '{shipping_line}' },
+      hasDiscountsPermission: true, hasVaultedPaymentPermissions: true, firstLineItems: 50 } },
+    params: [
+      { name: 'customer_gid', type: 'string', required: true, gid: 'Customer' },   // purchasingEntity.customerId — the customer's id from a lookup
+      { name: 'line_items', type: 'array', required: true },   // [{ variantId: 'gid://shopify/ProductVariant/…', quantity: 1 }] — variant ids from a product search
+      { name: 'note', type: 'string' },
+      { name: 'po_number', type: 'string' },
+      { name: 'tags', type: 'array' },
+      { name: 'applied_discount', type: 'object' },   // { value, valueType: 'PERCENTAGE'|'FIXED_AMOUNT', title } — 100% PERCENTAGE for a warranty replacement
+      { name: 'shipping_line', type: 'object' },       // { title, price } — { price: '0.00' } for free shipping
+    ] },
 ];
 
 // The "useful subset" render shape (CS Tools normalizeTicket — 10 of ~80 fields). Pure; used by the CX-4a.2 list render.
@@ -261,7 +396,10 @@ export function coerceParams(params, paramSchema) {
   const out = {};
   for (const [k, v] of Object.entries((params && typeof params === 'object') ? params : {})) {
     const t = props[k] && props[k].type;
-    if ((t === 'integer' || t === 'number') && typeof v === 'string') {
+    const gidKind = props[k] && props[k].gid;
+    if (gidKind && (typeof v === 'string' || typeof v === 'number')) {   // CX-7c — a customer/variant id → its gid form
+      out[k] = toShopifyGid(v, gidKind);
+    } else if ((t === 'integer' || t === 'number') && typeof v === 'string') {
       const n = Number(v.replace(/[^0-9.\-]/g, ''));   // strip '#', spaces, stray text
       out[k] = Number.isFinite(n) && v.replace(/[^0-9.\-]/g, '') !== '' ? n : v;
     } else if (t === 'boolean') {   // v1342 (review I) — "false" must not serialize as a truthy string

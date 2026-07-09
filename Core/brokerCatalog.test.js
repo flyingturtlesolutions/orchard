@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { BROKER_CATALOG, brokerConnectorForHost, brokerLegsForHost } from './brokerCatalog.js';
+import { BROKER_CATALOG, brokerConnectorForHost, brokerLegsForHost, brokerLegsForLinked } from './brokerCatalog.js';
 import { assessLegAvailability } from './legAvailability.js';
 
 describe('brokerCatalog — brokerConnectorForHost', () => {
@@ -89,6 +89,22 @@ describe('brokerCatalog — brokerLegsForLinked (CX-5c palette gate)', () => {
     assert.ok(reads.every((l) => l.mode === 'ask'));
     const seen = new Set(brokerLegsForLinked('calendar.google.com', ['google']).map((l) => l.key));
     assert.deepEqual(brokerLegsForLinked('calendar.google.com', ['google'], { seenKeys: seen }), []);
+  });
+});
+
+describe('brokerCatalog — HubSpot (the CS app’s broker leg, CX-5a)', () => {
+  it('serves app.hubspot.com + hubspot.com → the hubspot server; projects READ legs (CS resolution)', () => {
+    assert.equal(brokerConnectorForHost('app.hubspot.com')?.server, 'hubspot');
+    assert.equal(brokerConnectorForHost('hubspot.com')?.server, 'hubspot');
+    const legs = brokerLegsForHost('app.hubspot.com');
+    assert.ok(legs.length >= 3);
+    assert.ok(legs.every((l) => l.tool.impl === 'oauth' && l.tool.server === 'hubspot'));
+    assert.ok(legs.every((l) => l.mode === 'ask'));           // CS role is read-only (resolve → context)
+    assert.ok(legs.some((l) => l.tool.name === 'hubspot-search-objects'));
+  });
+  it('gated on LINKED provider like every broker leg (unlinked → not in the palette)', () => {
+    assert.deepEqual(brokerLegsForLinked('app.hubspot.com', []), []);           // unlinked → out
+    assert.ok(brokerLegsForLinked('app.hubspot.com', ['hubspot']).length >= 3); // linked → in
   });
 });
 

@@ -371,6 +371,28 @@ export const ConversationStore = {
   },
 
   /**
+   * v2.74.1382 — ROLL a recurring message to the TAIL: remove every prior message whose id starts with `idPrefix`,
+   * append a fresh one (new per-roll id) at the end. The upsert pattern pinned recurring notes (the scheduled
+   * sweep's "nothing to act on" / status bubbles) at their FIRST-created position — the freshest report sat
+   * buried mid-thread while the user watched the tail ("sweep runs but nothing happens"). A chat timeline's
+   * contract is recency-at-the-bottom; rolling honors it without spamming (one bubble per kind survives).
+   * @returns {Promise<{ id: string } | null>} the new message id, or null if the conversation vanished.
+   */
+  async rollMessage(conversationId, idPrefix, updates) {
+    const conv = await ConversationStore.load(conversationId);
+    if (!conv) return null;
+    conv.messages = (conv.messages || []).filter((m) => !(m && typeof m.id === 'string' && m.id.startsWith(idPrefix)));
+    const id = `${idPrefix}_${Date.now().toString(36)}`;
+    conv.messages.push({ id, ts: Date.now(), ...updates });
+    conv.updatedAt = Date.now();
+    const stillExists = await ConversationStore.load(conversationId);   // narrow the delete race (mirrors updateMessage)
+    if (!stillExists) return null;
+    await chrome.storage.local.set({ [convKey(conversationId)]: conv });
+    await _touchIndex(conversationId, conv.updatedAt, conversationPeek(conv.messages));
+    return { id };
+  },
+
+  /**
    * Update the title of a conversation.
    * @param {string} conversationId
    * @param {string} title

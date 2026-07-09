@@ -1307,7 +1307,7 @@ export function createSgMessageHandlers(ctx) {
           // FL-1b (v1347) — round 1 may return `needs` (targeted evidence reads); round 2 is FINAL (needs ignored).
           const round = payload?.round === 2 ? 2 : 1;
           const results = Array.isArray(payload?.results) ? payload.results.slice(0, 12) : [];   // 3 breadth + 8 evidence (FL-2b) + margin
-          const raw = await AnthropicService.sweepPropose({ seed, learned, objects, legs: actLegs, askLegs: round === 1 ? askLegs : [], results, round, context: String(payload?.context || '') });
+          const raw = await AnthropicService.sweepPropose({ seed, learned, objects, legs: actLegs, askLegs: round === 1 ? askLegs : [], results, round, context: String(payload?.context || ''), evidence: String(payload?.evidence || '') });   // FL-10b — the drill's fenced extracts ride through
           const { proposals, needs, summary } = parseSweepProposals(raw, { legs: actLegs, askLegs });
           const outNeeds = round === 1 ? needs : [];
           Logger.info('route', `SWEEP ▸ propose r${round} → ${proposals.length} proposal(s)${outNeeds.length ? ` + ${outNeeds.length} evidence need(s)` : ''} from ${results.length} read(s), ${actLegs.length} action(s) offered${summary ? ` — ${summary.slice(0, 80)}` : ''}`);

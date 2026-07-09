@@ -29,18 +29,18 @@ import { classifyFeedback } from './Core/orchFeedback.js'; // ORCH-FB — recogn
 import { parseAdminCommand, parseDedupCommand } from './Core/orchAdmin.js';    // ORCH-ADMIN — management commands (clear/delete); dedup — find duplicate Grounds
 import { classifyReadAsk, askListIndex } from './Core/observe.js';   // OBS-READ — is the ask a question (a read)? + the index a singular/ordinal read wants
 import { runIlStandin } from './Core/ilStandin.js';   // IL-3 — the single-shot stand-in folded through agentLoop@maxSteps=1 (DESIGN §8 Phase-1 parity)
-import { canBulkApprove, getPath, pendingSummary, targetUrls } from './Core/proposals.js';   // FL-2 (v2.74.1346) — the fleet pending queue's pure helpers; FL-1c (v1347) — ground-truth target links
+import { canBulkApprove, getPath, pendingSummary, targetUrls, renderProposalCards } from './Core/proposals.js';   // FL-2 (v2.74.1346) — the fleet pending queue's pure helpers; FL-1c (v1347) — ground-truth target links; FL-10f (v1385) — the grouped review render
 import { minimizeReadValue } from './Core/sweepPrompt.js';   // FL-2b (v1353) — slim read facts into the sweep prompt (coverage + privacy)
 import { parseEvery, describeEvery, instanceFromAlarmName, fmtCountdown, queueStateLines } from './Core/fleetSchedule.js';   // FL-6 (v1355) — the clock trigger's interval grammar; FL-6d (v1361) — the card countdown; v1375 — the queue-state breakdown
 import { ledgerEntry, summarizeLedger, renderLedgerLines, renderWorkTrace } from './Core/actionLedger.js';   // FL-4 — the app action ledger (pure half); FL-1e (v1352) — the "show work" run trace
 import { loadProposals, addProposals, decideProposal, pendingCounts } from './Services/Storage/ProposalStore.js';   // FL-2 — instance-keyed pending queue; FL-6c — batched counts for the Rail chip
-import { filterRejectedRepeats, rejectionContext } from './Core/proposals.js';   // FL-9 (v1370) — rejections stick
+import { filterRejectedRepeats, rejectionContext, supersedePlan } from './Core/proposals.js';   // FL-9 (v1370) — rejections stick; v1381 — pendings survive sweeps
 import { appendLedger, loadLedger } from './Services/Storage/ActionLedgerStore.js';   // FL-4 — instance-keyed ledger
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
 import { recipeLegs, coerceParams, fillBody, fillEndpoint } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template
 import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 — header-replay writes: json/form/raw + contentType (review I)
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
-import { renderConnectorLines, itemLabels } from './Core/connectorRender.js';   // CX-4c — generic render of ANY connector read (not just tickets); CV-4-full — itemLabels: read list → fan-out labels
+import { renderConnectorLines, itemLabels, primaryItemId } from './Core/connectorRender.js';   // CX-4c — generic render of ANY connector read (not just tickets); CV-4-full — itemLabels: read list → fan-out labels; CX-7e — primaryItemId: the record a lookup returned (for "show profile")
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
 import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recent-turn window selector (follow-up continuity for the IL)
@@ -251,13 +251,26 @@ chrome.storage.onChanged.addListener((changes, area) => {
   const rec = changes[`conv:${_currentConversationId}`];
   const conv = rec && rec.newValue;
   if (!conv || !Array.isArray(conv.messages)) return;
+  // v1382 — recurring notes ROLL (rollMessage: remove prior + append fresh-id at tail) so the newest report is at
+  // the BOTTOM where the user watches; the upsert kept it pinned at first-created position, buried up-thread. The
+  // roll orphans the OLD bubble in the DOM — remove bubbles for these two prefixes ONLY when their id left the
+  // record (never generic: in-flight local bubbles aren't in storage yet and must survive this pass).
+  const _ids = new Set(conv.messages.map((m) => (m && m.id != null ? String(m.id) : '')));
+  for (const el of document.querySelectorAll('[data-message-id^="sweep_idle"], [data-message-id^="sweep_status"]')) {
+    if (!_ids.has(el.dataset.messageId)) el.remove();
+  }
   for (const m of conv.messages) {
     if (!m || !m.id || m.role !== 'assistant' || typeof m.body !== 'string' || !m.body.trim()) continue;
-    let exists = true;
-    try { exists = !!document.querySelector(`[data-message-id="${CSS.escape(String(m.id))}"]`); } catch { /* */ }
-    if (exists) continue;
-    const el = appendMessage({ role: 'assistant', body: '', id: `msg-${m.id}`, skipPersist: true });
-    _setMessageBody(el, m.body, { markdown: true });
+    let el = null;
+    try { el = document.querySelector(`[data-message-id="${CSS.escape(String(m.id))}"]`); } catch { el = null; }
+    if (el) {
+      // v1381 — an UPSERTED stable-id note (sweep_idle / sweep_status) changes body in storage; without this the
+      // open thread kept showing the old text ("timer expires, nothing happens" while the note updated silently).
+      if (el.dataset.srcText !== m.body) _setMessageBody(el, m.body, { markdown: true });
+      continue;
+    }
+    const added = appendMessage({ role: 'assistant', body: '', id: `msg-${m.id}`, skipPersist: true });
+    _setMessageBody(added, m.body, { markdown: true });
   }
 });
 
@@ -3130,26 +3143,29 @@ async function _runFleetSweep() {
   const rr = filterRejectedRepeats(proposals, allPrior);
   if (rr.suppressed.length) await _step('propose', 'rejected-repeat', true, `suppressed ${rr.suppressed.length} re-proposal(s) of user-rejected action(s)`);
   proposals = rr.kept;
-  // FL-1d (v1349) — a NEW sweep SUPERSEDES the previous pending batch: those proposals were grounded in reads the
-  // sweep just re-ran, so they expire as stale instead of lingering (the "show me opened an old proposal" hazard).
-  const prior = (await loadProposals(inst)).filter((p) => p.status === 'pending');
-  for (const p of prior) await decideProposal(inst, p.id, { status: 'stale', reason: 'superseded by a new sweep' });
-  if (prior.length) await appendLedger(inst, ledgerEntry('decision', { status: 'stale', reason: `superseded ${prior.length} pending proposal${prior.length === 1 ? '' : 's'} (new sweep)`, runId }));
+  // v1381 — pendings SURVIVE sweeps (was: wholesale supersede, v1349): stale only same-pair replacements +
+  // 24h-unreviewed expiries — the 5-minute clock was expiring proposals faster than the human could review them.
+  // Survivors stay safe: the approve-time staleness CAS still refuses items whose anchor moved.
+  const plan = supersedePlan(allPrior, proposals);
+  for (const s of plan.stale) await decideProposal(inst, s.id, { status: 'stale', reason: s.reason });
+  if (plan.stale.length) await appendLedger(inst, ledgerEntry('decision', { status: 'stale', reason: `superseded ${plan.stale.length} pending proposal${plan.stale.length === 1 ? '' : 's'} (replaced / expired)`, runId }));
   const minted = await addProposals(inst, proposals);
   await appendLedger(inst, ledgerEntry('sweep', { counts: { reads: results.length, proposals: minted.length }, runId }));
   for (const p of minted) await appendLedger(inst, ledgerEntry('proposal', { action: p.name, targets: p.targets, why: p.why, proposalId: p.id, urls: p.urls, runId }));
   // v1375 — the queue-state breakdown ("You: 4 open · 3 pending"), from whatever pulse-tagged reads this sweep
   // ran (code-assembled counts; the scheduled path additionally runs the full pulse set for a complete block).
   const qBlock = queueStateLines(results).join('\n');
-  if (!minted.length) {
+  // v1381 — the batch renders EVERYTHING now pending (fresh mints + surviving priors), not just this run's mints.
+  const nowPending = (await loadProposals(inst)).filter((p) => p.status === 'pending');
+  if (!nowPending.length) {
     // v1347 honesty — don't claim "nothing needs doing" when the model's own summary says otherwise.
     _setMessageBody(msg, `Swept ${results.length} read${results.length === 1 ? '' : 's'} — ${summary ? 'no actionable proposals.' : 'the queue looks clean.'}${qBlock ? `\n\n${qBlock}` : ''}${summary ? `\n\n${summary}` : ''}`, { markdown: true });
     _orchFinalize(msg);
     return;
   }
-  _setMessageBody(msg, `Sweep done${summary ? ` — ${summary.replace(/\.+$/, '')}` : ''}.${qBlock ? `\n\n${qBlock}` : ''}`, { markdown: true });   // v1351 — no doubled period when the summary ends with one
+  _setMessageBody(msg, `Sweep done${summary ? ` — ${summary.replace(/\.+$/, '')}` : ''}.${qBlock ? `\n\n${qBlock}` : ''}${minted.length < nowPending.length ? `\n\n(${nowPending.length - minted.length} earlier proposal${nowPending.length - minted.length === 1 ? '' : 's'} still awaiting review.)` : ''}`, { markdown: true });   // v1351 — no doubled period when the summary ends with one
   _orchFinalize(msg);
-  _renderProposalBatch(minted);
+  _renderProposalBatch(nowPending);
 }
 
 async function _showProposalSources(p) {
@@ -3171,34 +3187,23 @@ function _renderProposalBatch(list) {
   // v1348 (user direction) — CONVERSATIONAL ground truth: targets render as PLAIN TEXT (no hyperlinks anywhere);
   // viewing the real pages is a VERB — `show 2` / `show tickets` / `go to origin` — resolved through SHOW_SOURCES
   // (reuse-then-navigate). The trusted urls still ride the records (provenance); only the entry is conversational.
-  // v1372 (live gap: "is the proposal to change status to pending? to close?") — the card must state the EXACT
-  // parameters that will be sent, not just the action name: "Set a Zendesk ticket status — 65679 → status: solved".
-  // Params are model-bound (untrusted) — escape-first markdown renders them; backticks stripped so the code spans
-  // can't be broken; params that merely repeat a target (the id) are elided.
-  const _paramBits = (p) => {
-    const tset = new Set((Array.isArray(p.targets) ? p.targets : []).map((t) => String(t).replace(/^#/, '')));
-    return Object.entries((p.params && typeof p.params === 'object') ? p.params : {})
-      .filter(([, v]) => v != null && (typeof v !== 'object' || Array.isArray(v)))
-      .map(([k, v]) => [k, (Array.isArray(v) ? v.map(String).join(', ') : String(v)).replace(/`/g, '′').slice(0, 80)])
-      .filter(([, v]) => v.trim() && !tset.has(v.replace(/^#/, '')));
-  };
-  const lines = pend.map((p, i) => {
-    const tag = p.safety === 'gated' ? ' ' : '';
-    const tgt = p.targets && p.targets.length ? ` — ${p.targets.join(', ')}` : '';
-    const bits = _paramBits(p);
-    const prm = bits.length ? `\n   → ${bits.map(([k, v]) => `\`${k}: ${v}\``).join(' · ')}` : '';
-    const ev = p.evidence && p.evidence.length ? `\n   > ${p.evidence.join(' · ')}` : '';
-    return `${i + 1}. **${p.name}**${tag}${tgt}${prm}\n   ${p.why || ''}${ev}`;
-  });
+  // FL-10f (v2.74.1385, live: "this better but terrible UX") — the batch renders GROUPED, not as a wall: items
+  // needing real judgment lead as full cards (consolidation direction, drill facts, cleaned quotes — Core/
+  // proposals.renderProposalCards, pure/tested); routine policy work collapses to per-action one-liner groups
+  // (12 same-shaped assigns are a list, not 12 cards). NUMBERING FOLLOWS THE DISPLAY (`approve 2` = visible #2 —
+  // _sweepBatchIndex is the display order). Buttons shrink to match: ✓/✗ per JUDGMENT item only + one
+  // "Approve routine (N)"; routine rejections go by number (`reject 9 <why>`), which the grammar already covers.
+  const { lines, order, judgmentCount } = renderProposalCards(pend);
+  _sweepBatchIndex = order.map((p) => p.id);
   _setMessageBody(msg, `**${pendingSummary(pend)}**\n\n${lines.join('\n')}\n\n_Say:_ \`approve all\` · \`approve 1,3\` · \`reject 2 <why>\` · \`show 2\` — _or just ask (“show me both tickets”, “open zendesk”)._`, { markdown: true });
   const bar = _orchActionBar(msg, { scope: 'proposals' });   // v1373 — a new batch retires every older batch's bar
-  pend.forEach((p, i) => {
+  order.slice(0, judgmentCount).forEach((p, i) => {
     const a = _mkOnceBtn(`✓ ${i + 1}`, () => { void _approveProposal(p.id); }); a.dataset.proposalId = p.id;
     const r = _mkOnceBtn(`✗ ${i + 1}`, () => { void _rejectProposal(p.id, ''); }); r.dataset.proposalId = p.id;
     bar.appendChild(a); bar.appendChild(r);
   });
-  const bulk = pend.filter(canBulkApprove);
-  if (bulk.length > 1) bar.appendChild(_mkOnceBtn(`Approve all safe (${bulk.length})`, () => { void _approveMany(bulk.map((b) => b.id)); }));
+  const routineBulk = order.slice(judgmentCount).filter(canBulkApprove);
+  if (routineBulk.length) bar.appendChild(_mkOnceBtn(`Approve routine (${routineBulk.length})`, () => { void _approveMany(routineBulk.map((b) => b.id)); }));
   _orchFinalize(msg);
 }
 
@@ -3252,14 +3257,42 @@ async function _showGroundedReadView() {
   const host = tool && String(tool.origin || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
   if (!host) { _setMessageBody(m, 'I’ve lost track of what grounded that — ask again and then say “show me”.'); _orchFinalize(m); return; }
   let path = '';
-  if (tool.listUrl) { path = fillEndpoint(tool.listUrl, g.params || {}); if (path.includes('{')) path = ''; }   // an UNFILLED placeholder must not leak into the URL → treat as unmapped
-  else if (tool.itemUrl && (g.params && (g.params.id != null))) path = tool.itemUrl.replace('{id}', encodeURIComponent(String(g.params.id)));
+  let kind = '';   // CX-7e — 'view' (a listUrl collection) vs 'record' (an itemUrl page), for an honest message
+  if (tool.listUrl) { path = fillEndpoint(tool.listUrl, g.params || {}); if (path.includes('{')) path = ''; else kind = 'view'; }   // an UNFILLED placeholder must not leak into the URL → treat as unmapped
+  else if (tool.itemUrl) {
+    // CX-7e — the target id is the read's OWN id param (read_ticket {id}) OR the id of the record the read RETURNED
+    // (a customer/order lookup by email/number → that record's id). {handle} + any other tab-derived urlArgs fill
+    // from the read's reply. All TRUSTED (origin + curated template + the read's own params/result), never model text.
+    const id = (g.params && g.params.id != null) ? g.params.id : (g.itemId != null ? g.itemId : null);
+    if (id != null) { path = fillEndpoint(tool.itemUrl, { ...(g.urlArgs || {}), id }); if (path.includes('{')) path = ''; else kind = 'record'; }
+  }
   const url = `https://${host}${path && path.startsWith('/') ? path : '/'}`;
   const r = await _orchReq('SHOW_SOURCES', { origin: host, urls: [url] });
   const ok = !!(r && r.success !== false);
+  const verb = r && r.reused ? 'Focused' : 'Opened';
   _setMessageBody(m, ok
-    ? (path ? `${r.reused ? 'Focused' : 'Opened'} the ${g.leg.name || 'source'} view in ${host}.` : `${r.reused ? 'Focused' : 'Opened'} ${host} — the exact view isn’t mapped for “${g.leg.name || 'that read'}” yet.`)
+    ? (kind === 'record' ? `${verb} the ${host} tab on that record’s page.`
+      : (kind === 'view' ? `${verb} the ${g.leg.name || 'source'} view in ${host}.`
+        : `${verb} ${host} — the exact page isn’t mapped for “${g.leg.name || 'that read'}” yet.`))
     : `Couldn’t open ${host} — ${(r && r.error) || 'error'}.`);
+  _orchFinalize(m);
+}
+
+// CX-7d (v2.74.1396) — the persisted-op bank viewer: which write operations the sniffer has captured off the open
+// admin tab (T4 verification). A session-ride write replays only once its per-store hash is banked — so this is how
+// you confirm "do it once by hand" worked before trying the write.
+async function _showRideOps() {
+  const m = appendMessage({ role: 'assistant', body: '' });
+  const r = await _orchReq('GET_RIDE_OPS', {});
+  if (!r || r.success === false) { _setMessageBody(m, `Couldn’t check captured operations — ${(r && r.error) || 'error'}.`); _orchFinalize(m); return; }
+  if (!r.tab) { _setMessageBody(m, 'No open Shopify admin tab to check — open your store admin (a `/store/…` page) and try again.', { markdown: true }); _orchFinalize(m); return; }
+  const ops = Array.isArray(r.ops) ? r.ops : [];
+  if (!ops.length) {
+    _setMessageBody(m, `No write operations captured yet on **${r.origin}**.\n\nPerform the action once **by hand** in the admin (e.g. **Customers → Add customer**, Save) with this tab open — the operation is captured, then it can replay. Run \`ops\` again to confirm.`, { markdown: true });
+    _orchFinalize(m); return;
+  }
+  const lines = ops.map((o) => `• **${o.name}** — \`${o.sha8}…\`${o.handle ? ` (store ${o.handle})` : ''} — ready to replay`);
+  _setMessageBody(m, `Captured write operations on **${r.origin}**:\n${lines.join('\n')}`, { markdown: true });
   _orchFinalize(m);
 }
 
@@ -5097,7 +5130,9 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
     // number), not the recipe's default list. The model SHAPES + phrases; `readShapeFacts` hands it the EXACT count + a
     // MINIMIZED sample (ids/titles/status, NO bodies — the privacy-minimization lever). A shaped answer → show it;
     // showList / a miss / no-LLM → the deterministic CX-4c render below (grounded #ids, never LLM-re-emitted).
-    _lastGroundedRead = { leg, params, at: Date.now() };   // FL-1d — this read grounds the coming answer
+    // FL-1d — this read grounds the coming answer. CX-7e — also remember the RETURNED record's id + the read's
+    // tab-derived urlArgs (handle), so "show profile" can open that record's admin page even for a by-email lookup.
+    _lastGroundedRead = { leg, params, at: Date.now(), itemId: primaryItemId(res.value), urlArgs: res.urlArgs || null };
     const facts = readShapeFacts(res.value);
     let shaped = null;
     try { shaped = await _orchReq('SHAPE_ANSWER', { ask, facts }); } catch { /* shaper is best-effort → fall through to the render */ }
@@ -6064,7 +6099,18 @@ async function sendChatMessage() {
     // v1378 (live miss: "show ticket" with ONE pending → interpret asked "Which ticket?") — the bare console
     // phrasings are DETERMINISTIC: the FL-1d cascade already resolves the referent (last answer's read → the
     // batch → origin), so a plain `show` / `show ticket(s)` / `show me` never needs the model at all.
-    if (/^show(\s+(me|the|it|tickets?|items?|sources?))*\s*$/i.test(text) && _memoryId()) {
+    // CX-7e (v2.74.1393) — added profile|customer|order(s)|record|page so "show profile" opens the record's admin
+    // page (like "show ticket"), routing to _showItemSources → the last-read's itemUrl instead of re-rendering.
+    // CX-7d (v2.74.1396) — `ops` / `captured ops`: the persisted-op bank viewer (verifies T4). Reads which write
+    // operations the sniffer has captured off the open admin tab — a session-ride op replays only once its store's
+    // hash is banked (do the action by hand once, with the tab open, to capture it).
+    if (/^(shopify\s+ops|captured\s+ops|ride\s+ops|ops)\s*$/i.test(text)) {
+      input.value = ''; _autosizeInput();
+      appendMessage({ role: 'user', body: text });
+      await _showRideOps();
+      return;
+    }
+    if (/^show(\s+(me|the|it|tickets?|items?|sources?|profile|customer|order|orders|record|page))*\s*$/i.test(text) && _memoryId()) {
       input.value = ''; _autosizeInput();
       appendMessage({ role: 'user', body: text });
       await _showItemSources({});

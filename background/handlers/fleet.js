@@ -15,9 +15,10 @@
 import { planExec } from '../../Core/execPlan.js';
 import { coerceParams } from '../../Core/connectorRecipes.js';
 import { minimizeReadValue } from '../../Core/sweepPrompt.js';
-import { targetUrls, getPath, autonomyFor, executedTodayByRecipe, filterRejectedRepeats, rejectionContext } from '../../Core/proposals.js';
+import { targetUrls, getPath, autonomyFor, executedTodayByRecipe, filterRejectedRepeats, rejectionContext, supersedePlan } from '../../Core/proposals.js';
 import { ledgerEntry } from '../../Core/actionLedger.js';
 import { sweepAlarmName, instanceFromAlarmName, describeEvery, rollDailyCounts, spikeVerdict, localDay, queueStateLines, priorRunVerdict } from '../../Core/fleetSchedule.js';
+import { listRows, pickDrillCandidates, extractTicketEvidence, solveVerdict, stubCloseVerdict, clusterTickets, mergeAdvice, renderTicketEvidence, deriveMe, updateSeen, toBankEntry, bankEvidence } from '../../Core/ticketEvidence.js';
 import { builtinApp } from '../../Core/appCatalog.js';
 import { loadProposals, addProposals, decideProposal } from '../../Services/Storage/ProposalStore.js';
 import { appendLedger } from '../../Services/Storage/ActionLedgerStore.js';
@@ -39,6 +40,105 @@ async function _runReadLeg(invokeSgHandler, leg, params) {
   const res = await invokeSgHandler(plan.channel, { ...plan.payload, headless: true });
   if (!res || res.success === false) return { ok: false, error: (res && res.error) || 'failed' };
   return { ok: true, value: res.value };
+}
+
+const _SEEN_KEY = (instanceId) => `fleetSeen:${instanceId}`;   // FL-10b — the drill's pass-state (per-ticket updated_at + held/done)
+
+/**
+ * FL-10b (v2.74.1383, from logs/run/zendesk-queue-workflow-spec.md) — the EVIDENCE DRILL: triage the list rows
+ * (code, the spec §2 signals), fetch the candidates' FULL threads through the recipe the list read declares
+ * (`tool.drill.via`), extract deterministic facts + rubric verdicts (Core/ticketEvidence), and hand the propose
+ * model a fenced per-item evidence block. This closes the gap the Claude Code MVP exposed: "solve what looks
+ * resolved" was unjudgeable from subject+status rows — the model was evidence-STARVED, not under-reasoned.
+ * Held stubs (call intelligence not posted yet) re-drill every fire until populated. Never throws.
+ */
+async function _runDrill({ instanceId, legs, allReads, rawByKey, cfg, invokeSgHandler, step }) {
+  const out = { evidence: '', verdicts: new Map(), attach: new Map(), drilled: 0, held: 0 };
+  let via = null;
+  const rows = []; const seenRowIds = new Set();
+  for (const r of allReads) {
+    const spec = r.leg && r.leg.tool && r.leg.tool.drill;
+    if (!spec || !spec.via || !rawByKey.has(r.key)) continue;
+    via = via || spec.via;
+    for (const row of listRows(rawByKey.get(r.key))) {
+      const id = row && row.id != null ? String(row.id) : '';
+      if (!id || seenRowIds.has(id)) continue;
+      seenRowIds.add(id); rows.push(row);
+    }
+  }
+  if (!rows.length || !via) return out;
+  const drillLeg = legs.find((l) => l && l.mode === 'ask' && l.tool && l.tool.recipeId === via);
+  if (!drillLeg) { await step('drill', 'evidence', false, `drill read "${via}" not offered`); return out; }
+  // MY agent id + MY ticket ids — derived from the mine-scoped reads' own rows, never config. Unknown me → the
+  // "assigned to me" checks fail CLOSED (nothing auto-executes on evidence this run). mineIds feeds the solve
+  // lane: only my tickets can ever be solve-eligible, so they get the protected budget share (FL-10e).
+  let mineRows = [];
+  for (const r of allReads) {
+    if (r.leg && r.leg.tool && r.leg.tool.pulse && r.leg.tool.pulse.scope === 'mine' && rawByKey.has(r.key)) mineRows = mineRows.concat(listRows(rawByKey.get(r.key)));
+  }
+  const me = deriveMe(mineRows);
+  const mineIds = new Set(mineRows.filter((r) => r && r.id != null).map((r) => String(r.id)));
+  let seen = {};
+  try { const got = await chrome.storage.local.get(_SEEN_KEY(instanceId)); seen = got[_SEEN_KEY(instanceId)] || {}; } catch { /* */ }
+  const cap = Math.max(1, Math.min(12, Number(cfg && cfg.drill && cfg.drill.cap) || 8));
+  const cands = pickDrillCandidates(rows, { cap, seen, mineIds });
+  if (!cands.length) return out;
+  const now = Date.now();
+  const evidences = []; const seenUpdates = [];
+  for (const c of cands) {
+    const run = await _runReadLeg(invokeSgHandler, drillLeg, { id: c.id });
+    if (!run.ok) { await step('drill', `#${c.id}`, false, run.error || 'read failed'); continue; }
+    const ev = extractTicketEvidence(c.row, listRows(run.value), { now });
+    const sv = solveVerdict(ev, { me });
+    const cv = stubCloseVerdict(ev, { afterMs: Math.max(1, Number(cfg && cfg.drill && cfg.drill.stubCloseAfterHours) || 4) * 3600e3 });
+    const held = (ev.stub && !ev.populated && cv.tooNew);
+    out.verdicts.set(ev.id, { autoSolve: sv.autoEligible, autoClose: cv.autoEligible, solveEligible: sv.eligible, closeEligible: cv.eligible, holds: held ? sv.holds : sv.holds.filter((h) => !h.startsWith('call intelligence')), missing: sv.missing });
+    out.attach.set(ev.id, { klass: ev.klass, sentiment: ev.sentiment, commitment: !!ev.actionItem, matched: null, crossAgent: false });
+    evidences.push(ev);
+    seenUpdates.push({ id: ev.id, updatedAt: ev.updatedAt, held, bank: toBankEntry(ev, { now }) });
+    if (held) out.held++;
+    await step('drill', `#${ev.id}`, true, `[${c.lane}] ${held ? 'held — call intelligence not posted yet' : [ev.klass, ev.sentiment ? `sentiment ${ev.sentiment}` : null, ev.actionItem ? 'open commitment' : null].filter(Boolean).join(' · ')}`);
+  }
+  out.drilled = evidences.length;
+  // FL-10e — same-customer clustering across THIS RUN ∪ the EVIDENCE BANK (prior fires' compact facts): pairs no
+  // longer need to be drilled in the same fire to meet, and an already-solved twin (drilled while open, since
+  // resolved) surfaces as "already handled". Advice only for clusters touching a FRESH member — bank-only
+  // clusters were advised when their members were fresh.
+  const freshIds = new Set(evidences.map((e) => e.id));
+  const bankEvs = Object.entries(seen)
+    .filter(([id, sn]) => sn && sn.b && !freshIds.has(String(id)))
+    .map(([id, sn]) => bankEvidence(id, sn.b, { now }));
+  const pool = [...evidences, ...bankEvs];
+  const byId = new Map(pool.map((e) => [e.id, e]));
+  const clusters = clusterTickets(pool).filter((cl) => cl.ids.some((id) => freshIds.has(id)));
+  const advices = clusters.map((cl) => mergeAdvice(cl, byId, { me })).filter(Boolean).map((a, i) => ({ ...a, ids: clusters[i].ids }));
+  const bankLines = [];
+  for (const a of advices) for (const id of a.ids) {
+    const at = out.attach.get(id);
+    if (at) { at.matched = a.matchedBy.join('+'); at.crossAgent = a.crossAgent; }
+    const b = !freshIds.has(id) && byId.get(id);
+    if (b) bankLines.push(`#${id} (from a prior sweep) "${b.subject}" — ${b.klass} · status-at-last-read ${b.status || 'n/a'} · ${b.assigneeId == null ? 'unassigned' : (me != null && String(b.assigneeId) === String(me) ? 'assigned to me' : 'ANOTHER AGENT’S')}`);
+  }
+  // FL-10e — REQUESTER-HISTORY reads (the MVP checklist's get_user_tickets): for ≤2 fresh identity-bearing
+  // tickets with no cluster hit, search the extracted email — surfaces prior/related tickets the list reads
+  // can't see (incl. solved twins). ids+status only ride the evidence; never bodies.
+  const histLines = [];
+  const searchLeg = legs.find((l) => l && l.mode === 'ask' && l.tool && l.tool.recipeId === 'search_tickets');
+  if (searchLeg) {
+    const clustered = new Set(advices.flatMap((a) => a.ids));
+    const wantHist = evidences.filter((e) => !clustered.has(e.id) && e.identity.emails.length && (e.klass !== 'other' || e.identity.refs.length)).slice(0, 2);
+    for (const e of wantHist) {
+      const run = await _runReadLeg(invokeSgHandler, searchLeg, { query: e.identity.emails[0] });
+      if (!run.ok) { await step('drill', `history #${e.id}`, false, run.error || 'search failed'); continue; }
+      const hits = listRows(run.value).filter((r) => r && r.id != null && String(r.id) !== e.id).slice(0, 5);
+      if (hits.length) histLines.push(`HISTORY for #${e.id}'s customer (email search): ${hits.map((r) => `#${r.id} (${String(r.status || '?')}${r.assignee_id != null ? ', assigned' : ''})`).join(', ')} — check for an already-handled or mergeable thread`);
+      await step('drill', `history #${e.id}`, true, `${hits.length} prior ticket(s)`);
+    }
+  }
+  out.evidence = [...renderTicketEvidence(evidences, advices, { verdicts: out.verdicts, me }), ...bankLines, ...histLines].join('\n');
+  try { await chrome.storage.local.set({ [_SEEN_KEY(instanceId)]: updateSeen(seen, seenUpdates, { now }) }); } catch { /* */ }
+  if (evidences.length || out.held) await step('drill', 'evidence', true, `${evidences.length} drilled — ${cands.filter((c) => c.lane === 'mine').length} mine / ${cands.filter((c) => c.lane === 'merge').length} merge / ${cands.filter((c) => c.lane === 'stub').length} stub / ${cands.filter((c) => c.lane === 'held').length} held-recheck · ${clusters.length} same-customer cluster(s) (bank ${bankEvs.length})${me == null ? ' — my agent id underivable: nothing auto-executes on evidence' : ''}`);
+  return out;
 }
 
 // FL-8b (v2.74.1358) — execute ONE minted proposal UNATTENDED (the autonomy policy said 'auto'). The panel's
@@ -69,11 +169,15 @@ async function _executeHeadless(instanceId, p, { invokeSgHandler, runId }) {
   return { status: ok ? 'executed' : 'failed' };
 }
 
-// FL-6e (v2.74.1367) — one persisted note, upserted, never throws. `id` is the dedupe key: per-run ids for
-// eventful runs; STABLE ids ('sweep_status' / 'sweep_idle') for failures + quiet runs, so consecutive repeats
-// update ONE bubble in place instead of spamming the thread hourly.
+// FL-6e (v2.74.1367; ROLLING since v1382) — one persisted note per kind, never throws. Eventful runs keep
+// per-run ids (append, permanent). RECURRING kinds ('sweep_status' / 'sweep_idle') ROLL: the prior bubble is
+// removed and a fresh one appends at the TAIL — the upsert pattern pinned them at their first-created position,
+// so the freshest report sat buried mid-thread while the user watched the bottom ("sweep runs, nothing happens").
 async function _note(convId, id, body) {
-  try { await ConversationStore.updateMessage(convId, id, { role: 'assistant', body }, { upsert: true }); } catch { /* */ }
+  try {
+    if (id === 'sweep_status' || id === 'sweep_idle') await ConversationStore.rollMessage(convId, id, { role: 'assistant', body });
+    else await ConversationStore.updateMessage(convId, id, { role: 'assistant', body }, { upsert: true });
+  } catch { /* */ }
 }
 const _hhmm = () => { try { return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); } catch { return ''; } };
 
@@ -118,8 +222,16 @@ export async function runHeadlessSweep(instanceId, { invokeSgHandler } = {}) {
     // (read-through, so instances created before v1358 inherit the type's policy without migration).
     const cfg = (conv.config && typeof conv.config === 'object') ? conv.config : {};
     const preset = conv.appId ? builtinApp(conv.appId) : null;
-    const autonomy = cfg.autonomy || (preset && preset.defaultConfig && preset.defaultConfig.autonomy) || {};
-    const dailyCaps = cfg.dailyCaps || (preset && preset.defaultConfig && preset.defaultConfig.dailyCaps) || {};
+    // FL-10e — an EMPTY instance map must not shadow the preset (an `autonomy: {}` written by any older setup
+    // path silently gated EVERYTHING — the recurring "auto-class proposals parked" anomaly). Non-empty instance
+    // config wins; empty/absent falls through to the preset's defaults.
+    const _keys = (o) => (o && typeof o === 'object' && !Array.isArray(o)) ? Object.keys(o).length : 0;
+    const autonomy = (_keys(cfg.autonomy) ? cfg.autonomy : (preset && preset.defaultConfig && preset.defaultConfig.autonomy)) || {};
+    const dailyCaps = (_keys(cfg.dailyCaps) ? cfg.dailyCaps : (preset && preset.defaultConfig && preset.defaultConfig.dailyCaps)) || {};
+    // …and SAY which policy is in force — the parked-instead-of-executed anomaly was undiagnosable because the
+    // resolved policy was invisible. One ledger step makes the next occurrence readable from `show work`.
+    const _autoClasses = Object.entries(autonomy).filter(([, v]) => v === 'auto').map(([k]) => k);
+    await _step('plan', 'autonomy', true, `${_keys(cfg.autonomy) ? 'instance' : (preset ? 'preset' : 'NONE (no appId — preset defaults unreachable)')} policy — auto: ${_autoClasses.join(', ') || 'none'}`);
 
     const r1 = await invokeSgHandler('SWEEP_PROPOSE', { ...base, phase: 'reads' });
     if (!r1 || r1.success === false) { const e = (r1 && r1.error) || 'no reply'; await _step('plan', 'reads', false, e); await _fail(`planning the reads failed (${e})`); return; }
@@ -128,10 +240,12 @@ export async function runHeadlessSweep(instanceId, { invokeSgHandler } = {}) {
     await _step('plan', 'reads', true, reads.length ? reads.map((rd) => (legs.find((l) => l && l.key === rd.key)?.name) || rd.key).join(' · ') : 'none picked');
 
     const results = [];
+    const rawByKey = new Map();   // FL-10b — pre-minimization values for the drill's triage (transient, this run only)
     for (const rd of reads) {
       const leg = legs.find((l) => l && l.key === rd.key);
       if (!leg) continue;
       const run = await _runReadLeg(invokeSgHandler, leg, rd.params);
+      if (run.ok) rawByKey.set(rd.key, run.value);
       const mv = run.ok ? minimizeReadValue(run.value) : { error: run.error || 'read failed' };
       results.push({ key: rd.key, params: rd.params || {}, value: mv, leg });
       let _size = ''; try { _size = run.ok ? `${mv && mv.count != null ? `${mv.shown}/${mv.count} items, ` : ''}~${JSON.stringify(mv).length} chars` : ''; } catch { /* */ }
@@ -148,7 +262,7 @@ export async function runHeadlessSweep(instanceId, { invokeSgHandler } = {}) {
       if (!pl || _readKeys.has(leg.key)) continue;
       if (Array.isArray(leg.params) && leg.params.length) continue;   // param-free only — nothing to bind headless
       const run = await _runReadLeg(invokeSgHandler, leg, {});
-      if (run.ok) { pulseResults.push({ key: leg.key, params: {}, value: minimizeReadValue(run.value), leg }); await _step('read', leg.name || leg.key, true, 'digest pulse'); }
+      if (run.ok) { rawByKey.set(leg.key, run.value); pulseResults.push({ key: leg.key, params: {}, value: minimizeReadValue(run.value), leg }); await _step('read', leg.name || leg.key, true, 'digest pulse'); }
       else await _step('read', leg.name || leg.key, false, run.error || 'read failed');
     }
 
@@ -157,6 +271,12 @@ export async function runHeadlessSweep(instanceId, { invokeSgHandler } = {}) {
       await _fail('the queue wasn’t readable (signed out or the site is unreachable?)');
       return;
     }
+
+    // FL-10b — the evidence drill: triage → per-ticket thread reads → deterministic facts/verdicts/clusters.
+    // Best-effort: a drill failure degrades to the pre-FL-10 list-level sweep, never kills the run.
+    let drill = { evidence: '', verdicts: new Map(), attach: new Map(), drilled: 0, held: 0 };
+    try { drill = await _runDrill({ instanceId, legs, allReads: [...results, ...pulseResults], rawByKey, cfg, invokeSgHandler, step: _step }); }
+    catch (e) { await _step('drill', 'evidence', false, (e && e.message) || 'drill failed'); }
 
     // FL-8c — operational counters into the propose prompt (fenced data): quota state + the volume baseline.
     // Derived from the queue + the schedule record — the model proposes within the remainder; the executor
@@ -177,7 +297,7 @@ export async function runHeadlessSweep(instanceId, { invokeSgHandler } = {}) {
 
     let proposals = []; let summary = '';
     for (let round = 1; round <= 2; round++) {
-      const r = await invokeSgHandler('SWEEP_PROPOSE', { ...base, phase: 'propose', round, context, results: results.map((x) => ({ key: x.key, params: x.params, value: x.value })) });
+      const r = await invokeSgHandler('SWEEP_PROPOSE', { ...base, phase: 'propose', round, context, evidence: drill.evidence, results: results.map((x) => ({ key: x.key, params: x.params, value: x.value })) });
       if (!r || r.success === false) { const e = (r && r.error) || 'no reply'; await _step('propose', `round ${round}`, false, e); await _fail(`the propose step failed (${e})`); return; }
       proposals = Array.isArray(r.proposals) ? r.proposals : [];
       summary = r.summary || '';
@@ -199,15 +319,22 @@ export async function runHeadlessSweep(instanceId, { invokeSgHandler } = {}) {
         if (src) { p.readLeg = src.leg; p.readParams = src.params; }
       }
       p.urls = targetUrls(p);
+      // FL-10c — ride the drill's code-derived facts on the proposal (approval cards render them: sentiment,
+      // commitment, same-customer match keys, cross-agent). Enums/key-names only — never thread content.
+      const _tid = String((Array.isArray(p.targets) && p.targets[0]) || '').replace(/\D/g, '');
+      if (_tid && drill.attach.has(_tid)) p.drill = drill.attach.get(_tid);
     }
     // FL-9 — rejections STICK: never re-mint an (action, targets) pair the user rejected in the last 24h,
     // unless the grounding anchor moved (the item changed). Belt to the prompt context's suspenders.
     const rr = filterRejectedRepeats(proposals, allPrior);
     if (rr.suppressed.length) await _step('propose', 'rejected-repeat', true, `suppressed ${rr.suppressed.length} re-proposal(s) of user-rejected action(s)`);
     proposals = rr.kept;
-    const prior = allPrior.filter((p) => p.status === 'pending');
-    for (const p of prior) await decideProposal(instanceId, p.id, { status: 'stale', reason: 'superseded by a new sweep' });
-    if (prior.length) await appendLedger(instanceId, ledgerEntry('decision', { status: 'stale', reason: `superseded ${prior.length} pending proposal${prior.length === 1 ? '' : 's'} (scheduled sweep)`, runId }));
+    // v1381 — pendings SURVIVE sweeps: stale only same-pair replacements + 24h-unreviewed expiries (the 5-minute
+    // clock was expiring proposals faster than the human could review them — "1 pending" → "Nothing pending").
+    const plan = supersedePlan(allPrior, proposals);
+    for (const s of plan.stale) await decideProposal(instanceId, s.id, { status: 'stale', reason: s.reason });
+    if (plan.stale.length) await appendLedger(instanceId, ledgerEntry('decision', { status: 'stale', reason: `superseded ${plan.stale.length} pending proposal${plan.stale.length === 1 ? '' : 's'} (replaced / expired)`, runId }));
+    const surviving = plan.kept.length;
     const minted = await addProposals(instanceId, proposals);
     await appendLedger(instanceId, ledgerEntry('sweep', { counts: { reads: results.length, proposals: minted.length }, runId }));
     for (const p of minted) await appendLedger(instanceId, ledgerEntry('proposal', { action: p.name, targets: p.targets, why: p.why, proposalId: p.id, urls: p.urls, runId }));
@@ -215,10 +342,25 @@ export async function runHeadlessSweep(instanceId, { invokeSgHandler } = {}) {
     // FL-8b — the UNATTENDED half: execute the policy-auto'd classes now; gated/capped classes park for the human.
     // Order: as minted (the model's own priority). The cap re-checks per execution — defense in depth vs the prompt.
     const ranByRecipe = {};
-    let executed = 0, failed = 0, staleN = 0, capped = 0;
+    let executed = 0, failed = 0, staleN = 0, capped = 0, egated = 0;
     for (const p of minted) {
       if (autonomyFor({ autonomy }, p) !== 'auto') continue;
       const rid = (p.leg && p.leg.tool && p.leg.tool.recipeId) || '';
+      // FL-10c — the EVIDENCE GATE: a recipe marked `autoRequires:'evidence'` executes unattended only with a
+      // same-run CODE-verified verdict for its target (solved needs autoSolve/autoClose — POSITIVE + no
+      // commitment + mine, or an aged empty stub). The model's say-so is never enough; undrilled targets park.
+      // A human approving from the card is untouched by this.
+      if (p.leg && p.leg.tool && p.leg.tool.autoRequires === 'evidence') {
+        const tid = String((Array.isArray(p.targets) && p.targets[0]) || '').replace(/\D/g, '');
+        const v = tid ? drill.verdicts.get(tid) : null;
+        const want = String((p.params && p.params.status) || '').toLowerCase();
+        const proven = !!v && (want === 'solved' ? (v.autoSolve || v.autoClose) : false);
+        if (!proven) {
+          egated++;
+          await _step('execute', p.name, true, `parked for review (evidence gate — ${v ? (v.missing && v.missing.length ? v.missing.join('; ') : 'not auto-grade') : 'target not drilled this run'})`);
+          continue;
+        }
+      }
       const cap = rid && dailyCaps[rid] != null ? Number(dailyCaps[rid]) : null;
       if (cap != null && ((executedToday[rid] || 0) + (ranByRecipe[rid] || 0)) >= cap) {
         capped++;
@@ -230,6 +372,10 @@ export async function runHeadlessSweep(instanceId, { invokeSgHandler } = {}) {
       else if (r.status === 'failed') failed++;
       else staleN++;
       await _step('execute', p.name, r.status === 'executed', r.status === 'executed' ? '' : r.status);
+    }
+    // v1381 — visibility for "why didn't it run on its own?": when everything minted parked, say so in the trail.
+    if (minted.length && !executed && !failed && !staleN && !capped && !egated) {
+      await _step('execute', 'policy', true, `all ${minted.length} parked for review (no auto-class match — see config.autonomy)`);
     }
     try { Logger.info('route', `SWEEP ▸ clock ${instanceId.slice(0, 12)} → ${minted.length} proposal(s) from ${results.length} read(s); auto-executed ${executed}${failed ? `, ${failed} failed` : ''}${capped ? `, ${capped} capped` : ''}`); } catch { /* */ }
 
@@ -253,7 +399,7 @@ export async function runHeadlessSweep(instanceId, { invokeSgHandler } = {}) {
     // FL-6e (v1367) — EVERY scheduled run reports to chat. Eventful runs (minted / executed / first-of-day
     // digest) get their own per-run note; a QUIET run upserts ONE 'sweep_idle' bubble in place (stamped with the
     // time), so results are always visible without hourly spam.
-    const pendingLeft = minted.length - executed - failed - staleN;
+    const pendingLeft = surviving + minted.length - executed - failed - staleN;   // v1381 — survivors count too
     const lines = [];
     // v1375 — the queue-state breakdown ("You: 4 open · 3 pending / Team: 32 open · 3 unassigned"), assembled by
     // CODE from the reads' own API counts + their pulse {scope, status} data. Inflow keeps its baseline tail.
@@ -263,6 +409,11 @@ export async function runHeadlessSweep(instanceId, { invokeSgHandler } = {}) {
     if (spike.spike) lines.push(`New-ticket volume spike — ${newN} in 24h vs ~${spike.baseline}/day${spike.ratio ? ` (${spike.ratio}×)` : ''}. See the sweep summary / \`show work\` for the cluster.`);
     if (executed || failed || staleN) lines.push(`Ran ${executed} action${executed === 1 ? '' : 's'} unattended (policy)${failed ? `, ${failed} failed` : ''}${staleN ? `, ${staleN} skipped as stale` : ''} — \`ledger\` has the trail.`);
     if (capped) lines.push(`${capped} held at the daily cap.`);
+    if (egated) lines.push(`${egated} parked for your review (no code-verified evidence this run).`);
+    if (drill.held) lines.push(`${drill.held} fresh call record${drill.held === 1 ? '' : 's'} held — call intelligence not posted yet (re-checked next sweep).`);
+    // FL-10e — the parked-anomaly, IN THE NOTE: when the policy auto-matched nothing at all, say so where the
+    // user reads (the ledger step alone left them staring at parked auto-class proposals with no explanation).
+    if (minted.length && !executed && !failed && !staleN && !capped && !egated) lines.push(`All ${minted.length} parked — the autonomy policy matched none of them (\`show work\` has the resolved policy).`);
     if (pendingLeft > 0) lines.push(`**${pendingLeft} proposal${pendingLeft === 1 ? '' : 's'} pending** — say \`pending\` to review.`);
     if (summary) lines.push(summary.replace(/\.+$/, '') + '.');
     if (minted.length || executed || firstOfDay) {
@@ -271,7 +422,10 @@ export async function runHeadlessSweep(instanceId, { invokeSgHandler } = {}) {
       await _note(sched.convId, 'sweep_idle', `Scheduled sweep at ${_hhmm()} — nothing to act on.${lines.length ? `\n\n${lines.join('\n\n')}` : ''}`);
     }
   } catch (e) {
+    // v1379 — the LAST chat-silent branch (FL-6e covered every early exit but not an unexpected throw): an
+    // exception mid-run now reports to the thread like every other failure, not just the ledger.
     try { await _step('propose', 'run', false, (e && e.message) || 'headless sweep failed'); } catch { /* */ }
+    try { await _fail(`it hit an unexpected error (${(e && e.message) || 'unknown'})`); } catch { /* */ }
   } finally {
     // H-1b — clear OUR marker only (an overlapping newer run owns its own); a crash before this line is exactly
     // what the next fire's dead-run verdict reports.

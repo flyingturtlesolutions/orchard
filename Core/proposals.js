@@ -18,6 +18,35 @@ export const PROPOSAL_STATUS = ['pending', 'approved', 'executed', 'rejected', '
  * @param {object} raw               the LLM's proposal object
  * @param {{ legs?: Array<object> }} opts   the act-mode legs that were offered
  */
+/**
+ * FL-10f (v2.74.1385) — evidence HYGIENE: the model quotes raw minimized-JSON shards (`"id":65798,"subject":"…`)
+ * as "evidence" — noise on an approval card a human must read in one glance. A JSON-ish shard is rewritten to the
+ * human facts it carries (subject · status/priority · when); a shard carrying nothing extractable is DROPPED (the
+ * `why` states the claim — a raw fragment adds no proof). Human quotes (transcript lines, thread sentences) pass
+ * through untouched. PURE.
+ */
+export function cleanEvidence(list) {
+  const out = [];
+  for (const raw of (Array.isArray(list) ? list : [])) {
+    const e = String(raw ?? '').trim();
+    if (!e) continue;
+    const jsonish = (e.match(/"?\w+"\s*:\s*/g) || []).length >= 2;
+    if (!jsonish) { if (!out.includes(e)) out.push(e); }
+    else {
+      const g = (re) => { const m = e.match(re); return m ? m[1].trim() : null; };
+      const subject = g(/"subject"\s*:\s*"([^"]{1,120})"/i);
+      const status = g(/"status"\s*:\s*"([A-Za-z]+)"/i);
+      const prio = g(/"priority"\s*:\s*"([A-Za-z]+)"/i);
+      const created = g(/"created_at"\s*:\s*"([^"]{4,40})"/i);
+      const when = created ? created.replace('T', ' ').replace(/:\d\d(?:\.\d+)?Z?$/, '') : null;
+      const bits = [subject, [status, prio].filter(Boolean).join('/'), when].filter(Boolean);
+      if (bits.length) { const line = bits.join(' · '); if (!out.includes(line)) out.push(line); }
+    }
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+
 export function normalizeProposal(raw, { legs = [] } = {}) {
   if (!raw || typeof raw !== 'object') return null;
   const key = _str(raw.key) || _str(raw.tool) || _str(raw.capabilityId);
@@ -25,7 +54,7 @@ export function normalizeProposal(raw, { legs = [] } = {}) {
   if (!leg) return null;
   const params = (raw.params && typeof raw.params === 'object' && !Array.isArray(raw.params)) ? raw.params : {};
   const targets = (Array.isArray(raw.targets) ? raw.targets : []).map((t) => _str(String(t))).filter(Boolean).slice(0, 12);
-  const evidence = (Array.isArray(raw.evidence) ? raw.evidence : []).map((e) => _str(String(e))).filter(Boolean).slice(0, 4);
+  const evidence = cleanEvidence((Array.isArray(raw.evidence) ? raw.evidence : []).map((e) => _str(String(e))).filter(Boolean).slice(0, 4));
   let basedOn = null;
   if (raw.basedOn && typeof raw.basedOn === 'object' && _str(raw.basedOn.readKey) && _str(raw.basedOn.path)) {
     basedOn = { readKey: _str(raw.basedOn.readKey), path: _str(raw.basedOn.path), value: raw.basedOn.value == null ? '' : String(raw.basedOn.value) };
@@ -46,6 +75,73 @@ export function normalizeProposal(raw, { legs = [] } = {}) {
 /** Bulk approval covers only the reversible classes; destructive/gated stays per-item. PURE. */
 export function canBulkApprove(p) {
   return !!p && (p.safety === 'auto' || p.safety === 'confirm');
+}
+
+/** FL-10f — a proposal that needs HUMAN JUDGMENT (vs routine policy work): gated/destructive classes + anything
+ * whose recipe demands evidence for unattended execution. Data-driven — never a recipe-id check. PURE. */
+export function isJudgment(p) {
+  return !!p && (p.safety === 'gated' || p.safety === 'destructive' || !!(p.leg && p.leg.tool && p.leg.tool.autoRequires));
+}
+
+/**
+ * FL-10f (v2.74.1385) — the pending batch as a READABLE review, not a wall: judgment items first as full cards
+ * (direction line for consolidations, drill facts, cleaned quotes), routine items grouped per action as
+ * one-liners (12 same-shaped assigns don't deserve 12 cards). Returns the DISPLAY order (numbering follows what
+ * the user sees — `approve 2` means visible #2) + how many lead items get their own ✓/✗ buttons. PURE.
+ */
+export function renderProposalCards(pend) {
+  const list = (Array.isArray(pend) ? pend : []).filter(Boolean);
+  const judgment = list.filter(isJudgment);
+  const routine = list.filter((p) => !isJudgment(p));
+  const order = [];
+  const lines = [];
+  const tsetOf = (p) => new Set((Array.isArray(p.targets) ? p.targets : []).map((t) => String(t).replace(/^#/, '')));
+  const paramBits = (p) => Object.entries((p.params && typeof p.params === 'object') ? p.params : {})
+    .filter(([, v]) => v != null && (typeof v !== 'object' || Array.isArray(v)))
+    .filter(([k]) => !/comment|note|body|message/i.test(k))   // boilerplate prose params — the direction/why carry the meaning
+    .map(([k, v]) => [k, (Array.isArray(v) ? v.map(String).join(', ') : String(v)).replace(/`/g, '′').slice(0, 80)])
+    .filter(([, v]) => v.trim() && !tsetOf(p).has(v.replace(/^#/, '')));
+  // consolidation direction: an all-numeric array param + a scalar id param = sources → target ("which one survives?"
+  // must never take a second read)
+  const direction = (p) => {
+    const prm = (p.params && typeof p.params === 'object') ? p.params : {};
+    const arr = Object.entries(prm).find(([, v]) => Array.isArray(v) && v.length && v.every((x) => /^\d{2,}$/.test(String(x))));
+    const tgt = prm.id != null && /^\d{2,}$/.test(String(prm.id)) ? String(prm.id) : null;
+    return (arr && tgt) ? `#${arr[1].map(String).join(', #')} → #${tgt} _(target keeps the thread)_` : null;
+  };
+  if (judgment.length) {
+    lines.push(`**Needs your judgment (${judgment.length})**`);
+    for (const p of judgment) {
+      order.push(p);
+      const n = order.length;
+      const tgt = direction(p) || (p.targets && p.targets.length ? p.targets.join(', ') : '');
+      const bits = paramBits(p);
+      const prm = bits.length ? `\n   → ${bits.map(([k, v]) => `\`${k}: ${v}\``).join(' · ')}` : '';
+      const d = p.drill;
+      const dr = d ? `\n   _${[
+        d.klass || '', d.sentiment ? `sentiment ${d.sentiment}` : '', d.commitment ? 'OPEN COMMITMENT' : '',
+        d.matched ? `same customer via ${d.matched}` : '', d.crossAgent ? 'CROSS-AGENT — solve own record, don’t merge' : '',
+        p.safety === 'destructive' ? 'hard to reverse (source closes)' : 'reversible',
+      ].filter(Boolean).join(' · ')}_` : '';
+      // drop quotes that only restate the drill line (SAME CUSTOMER …) — say each fact once
+      const evs = cleanEvidence(p.evidence).filter((e) => !(d && d.matched && /^['"]?(SAME CUSTOMER|TICKET_EVIDENCE)/i.test(e)));
+      const ev = evs.length ? `\n   > ${evs.join('\n   > ')}` : '';
+      lines.push(`${n}. **${p.name}** — ${tgt}${prm}${dr}\n   ${p.why || ''}${ev}`);
+    }
+  }
+  if (routine.length) {
+    const byName = new Map();
+    for (const p of routine) { if (!byName.has(p.name)) byName.set(p.name, []); byName.get(p.name).push(p); }
+    for (const [name, grp] of byName) {
+      lines.push(`**Routine — ${name} (${grp.length})** _reversible, within policy_`);
+      for (const p of grp) {
+        order.push(p);
+        const gist = (cleanEvidence(p.evidence)[0] || p.why || '').replace(/\s+/g, ' ').slice(0, 90);
+        lines.push(`${order.length}. ${p.targets && p.targets.length ? p.targets.join(', ') : '—'}${gist ? ` — ${gist}` : ''}`);
+      }
+    }
+  }
+  return { lines, order, judgmentCount: judgment.length };
 }
 
 /** A tiny JSON-path getter for the staleness check: 'a.b[0].c' over a read result. PURE, never throws. */
@@ -146,6 +242,26 @@ export function filterRejectedRepeats(proposals, prior, { windowMs = REJECT_COOL
     else kept.push(p);
   }
   return { kept, suppressed };
+}
+
+/**
+ * v1381 (live: "1 proposal pending — say pending" → "Nothing pending") — pendings SURVIVE sweeps. The v1349
+ * wholesale-supersede was built for manual sweeps; on a 5-minute clock it expired proposals faster than a human
+ * could review them. New rule: a prior pending goes stale ONLY when (a) the fresh mint contains the same
+ * (action, targets) pair — replaced with fresh grounding — or (b) it sat unreviewed past maxAge. Everything else
+ * survives; the approve-time staleness CAS still refuses items whose anchor moved, so survivors stay safe. PURE.
+ * @returns {{ stale: Array<{id:string, reason:string}>, kept: Array<object> }}
+ */
+export function supersedePlan(prior, fresh, { now = Date.now(), maxAgeMs = 24 * 3600_000 } = {}) {
+  const freshKeys = new Set((Array.isArray(fresh) ? fresh : []).map(_pairKey));
+  const stale = []; const kept = [];
+  for (const p of (Array.isArray(prior) ? prior : [])) {
+    if (!p || p.status !== 'pending') continue;
+    if (freshKeys.has(_pairKey(p))) stale.push({ id: p.id, reason: 'replaced by a fresh proposal (new sweep)' });
+    else if ((now - (p.ts || 0)) > maxAgeMs) stale.push({ id: p.id, reason: 'expired unreviewed (24h)' });
+    else kept.push(p);
+  }
+  return { stale, kept };
 }
 
 /** The recent-rejection lines for the propose prompt's operational context (fenced data, last 8). PURE.

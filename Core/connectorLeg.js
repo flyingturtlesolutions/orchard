@@ -64,6 +64,7 @@ function recipeParamSchema(params) {
     const slot = {};
     if (p && p.type) slot.type = p.type;
     if (p && Array.isArray(p.enum)) slot.enum = p.enum.slice(0, 50);
+    if (p && p.gid) slot.gid = String(p.gid);   // CX-7c — the Shopify resource Kind; coerceParams wraps a bare id into a gid
     properties[name] = slot;
     if (p && p.required) required.push(name);
   }
@@ -107,12 +108,25 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
       // FL-8d (v2.74.1359; object form v1375) — the read's generic digest semantics {kind, scope, status}; the
       // fleet digest keys on THIS, never a recipe id. A legacy string pulse normalizes to {kind}.
       pulse: (r.pulse && typeof r.pulse === 'object') ? r.pulse : (_str(r.pulse) ? { kind: _str(r.pulse) } : null),
+      // FL-10 (v2.74.1383) — drill declaration (list rows → evidence via the named comments read) + the
+      // evidence gate on unattended writes. Recipe DATA; the fleet harness only reads these markers.
+      drill: (r.drill && typeof r.drill === 'object' && _str(r.drill.via)) ? { via: _str(r.drill.via) } : null,
+      autoRequires: _str(r.autoRequires) || null,
       endpoint, method: _str(r.method).toUpperCase() || 'GET',
-      body: (write && r.body && typeof r.body === 'object') ? r.body : null,   // write body TEMPLATE; the executor fillBody()s it
+      // CX-7 — a GraphQL READ is a POST with a body (the query document), so the body threads for gql recipes too
+      body: ((write || r.gql === true) && r.body && typeof r.body === 'object') ? r.body : null,
       bodyType: _str(r.bodyType) || (write && r.body ? 'json' : null),         // v1342 — json | form | raw (fillWriteBody)
       contentType: _str(r.contentType) || null,
       verifyIdentity: r.verifyIdentity === true,
       identityProbe: _str(r.identityProbe) || null,
+      // CX-7 (v2.74.1386) — the Shopify-class transport markers: gql (POST body is a GraphQL document; a READ-ONLY
+      // document may run unconfirmed — validated at both belts), csrf 'sniff' (token captured off the SPA's own
+      // requests, no meta tag), urlParam (fill e.g. {handle} from the ride tab's URL — never from the model).
+      gql: r.gql === true,
+      csrf: _str(r.csrf) || null,
+      urlParam: (r.urlParam && typeof r.urlParam === 'object' && _str(r.urlParam.name) && _str(r.urlParam.pattern)) ? { name: _str(r.urlParam.name), pattern: _str(r.urlParam.pattern) } : null,
+      persistedOp: _str(r.persistedOp) || null,   // CX-7b — {op_sha} fills from the per-origin op bank (sniffed, never curated/model data)
+      shopProbe: r.shopProbe === true,             // CX-7c — run the `{shop{name}}` liveness probe before the call
     },
   };
 }

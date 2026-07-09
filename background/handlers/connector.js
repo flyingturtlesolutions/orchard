@@ -13,7 +13,7 @@
 // Identity (CS Tools §14): verify the RETURNED identity, never `res.ok`. The verdict + the open-tab-vs-ephemeral
 // decision live in the pure `Core/connection.js` core; this handler is the live tab glue.
 
-import { fillEndpoint, fillBody, recipeForOrigin } from '../../Core/connectorRecipes.js';
+import { fillEndpoint, fillBody, recipeForOrigin, isReadOnlyGql } from '../../Core/connectorRecipes.js';
 import { pickRideTab, assessProbe, rideAction, STATUS, classifyReachProbe } from '../../Core/connection.js';
 import { armable } from '../../Core/rideRecipe.js';   // §18 — the arm guard: a non-armable (disabled / pending / rejected) per-Ground recipe must not run
 import { brokerInvokeGate, brokerReplyFromCloud } from '../../Core/brokerInvoke.js';   // CX-5b — the broker (OAuth/MCP) fail-closed gate + cloud-reply normalizer (pure)
@@ -157,19 +157,136 @@ async function _writeLiveTools(map) {
 export function createConnectorHandlers({ ensureContentScript, readRideRecipes, cloudInvokeConnector, cloudLinkConnector, cloudUnlinkConnector, cloudListConnectorTools, cloudHasSession } = {}) {
   // v2.74.1340 (review A) — `confirmed` rides through to SESSION_FETCH so the CONTENT-SCRIPT boundary can hold its
   // own fail-closed write belt (second belt): only a caller that already passed the HITL gate hands it a write.
-  const fetchVia = (tabId, url, method, body, confirmed = false, contentType = '') =>
-    chrome.tabs.sendMessage(tabId, { type: 'SESSION_FETCH', payload: { url, method, body, contentType: contentType || undefined, confirmed: confirmed === true } }, { frameId: 0 });
+  const fetchVia = (tabId, url, method, body, confirmed = false, contentType = '', extra = null) =>
+    chrome.tabs.sendMessage(tabId, { type: 'SESSION_FETCH', payload: { url, method, body, contentType: contentType || undefined, confirmed: confirmed === true,
+      headers: (extra && extra.headers) || undefined, gqlRead: !!(extra && extra.gqlRead) } }, { frameId: 0 });   // CX-7 — sniffed-CSRF header + the gql-read carve-out flag (re-validated page-side)
   // The TOP-FRAME content script can be orphaned (an extension reload kills it; the all-frames PING can read a live
   // SUBframe as "live" while frame 0 is dead). On a frame-0 connection error, force-reinject + retry once.
-  const fetchViaHealed = async (tabId, url, method, body, confirmed = false, contentType = '') => {
-    try { return await fetchVia(tabId, url, method, body, confirmed, contentType); }
+  const fetchViaHealed = async (tabId, url, method, body, confirmed = false, contentType = '', extra = null) => {
+    try { return await fetchVia(tabId, url, method, body, confirmed, contentType, extra); }
     catch (e) {
       if (!/Receiving end does not exist|Could not establish connection/i.test((e && e.message) || '')) throw e;
       try { await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['ContentScripts/contentScript.js'] }); } catch { /* */ }
       await new Promise((r) => setTimeout(r, 300));
-      return await fetchVia(tabId, url, method, body, confirmed, contentType);
+      return await fetchVia(tabId, url, method, body, confirmed, contentType, extra);
     }
   };
+
+  // ── CX-7 (v2.74.1386) — SNIFFED CSRF (the Shopify class, ride-legs-spec §Shopify): the admin SPA's POSTs need an
+  // `x-csrf-token` that lives in NO meta tag — the CS stack captures it off the SPA's own outbound requests. Same
+  // trick, in-tab: a MAIN-world tee wraps fetch/XHR, posts the first token it sees to the content script (which
+  // caches it); we cache per-origin here too. The SPA fires its own calls continuously while the admin is open, so
+  // a token usually appears within seconds; an idle tab may need one interaction (the failure hint says so). ──
+  const _sniffedCsrf = new Map();               // origin → { token, at }
+  const CSRF_TTL_MS = 20 * 60e3;
+  function _csrfSnifferFunc() {
+    try {
+      if (window.__ahubCsrfSniff) return; window.__ahubCsrfSniff = true;
+      var post = function (tok) { try { window.postMessage({ __ahub_sniffed_csrf: { token: String(tok).slice(0, 400), host: location.host } }, location.origin); } catch (e) { /* */ } };
+      // CX-7b — PERSISTED-OP capture: the admin's mutations POST /api/operations/<sha>/<OpName>/shopify/<handle>;
+      // the sha is per-store + rotates on deploys. Capturing the URL off the SPA's own traffic (the user performing
+      // the action once by hand) banks the op for replay — the CS stack's save-shopify-session step, done in-tab.
+      var OP_RE = /\/api\/operations\/([a-f0-9]{16,64})\/(\w+)\/shopify\/([^/?#]+)/i;
+      var postOp = function (u) {
+        try {
+          var m = String(u || '').match(OP_RE);
+          if (m) window.postMessage({ __ahub_sniffed_op: { sha: m[1], name: m[2], handle: m[3], host: location.host } }, location.origin);
+        } catch (e) { /* */ }
+      };
+      var scan = function (h) {
+        try {
+          if (!h) return null;
+          if (typeof Headers !== 'undefined' && h instanceof Headers) return h.get('x-csrf-token');
+          if (Array.isArray(h)) { for (var i = 0; i < h.length; i++) if (String(h[i][0]).toLowerCase() === 'x-csrf-token') return h[i][1]; return null; }
+          for (var k in h) if (String(k).toLowerCase() === 'x-csrf-token') return h[k];
+        } catch (e) { /* */ }
+        return null;
+      };
+      var of = window.fetch;
+      window.fetch = function (input, init) {
+        try {
+          var tok = scan(init && init.headers) || (input && typeof input === 'object' && input.headers ? scan(input.headers) : null); if (tok) post(tok);
+          postOp(typeof input === 'string' ? input : (input && input.url));
+        } catch (e) { /* */ }
+        return of.apply(this, arguments);
+      };
+      var osrh = XMLHttpRequest.prototype.setRequestHeader;
+      XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+        try { if (String(name).toLowerCase() === 'x-csrf-token' && value) post(value); } catch (e) { /* */ }
+        return osrh.apply(this, arguments);
+      };
+      var oopen = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function (method, url) {
+        try { postOp(url); } catch (e) { /* */ }
+        return oopen.apply(this, arguments);
+      };
+    } catch (e) { /* */ }
+  }
+  // CX-7b — the per-origin PERSISTED-OP BANK (chrome.storage: survives SW restarts, per store instance). Sniffed
+  // ops flow CS → the acquire poll → here. TRUSTED data only — a model-supplied op_sha never reaches an endpoint.
+  const _OPS_KEY = (origin) => `rideOps:${origin}`;
+  async function _persistSniffedOps(origin, ops) {
+    if (!ops || typeof ops !== 'object' || !Object.keys(ops).length) return;
+    try {
+      const got = await chrome.storage.local.get(_OPS_KEY(origin));
+      const cur = got[_OPS_KEY(origin)] || {};
+      let changed = false;
+      for (const [name, o] of Object.entries(ops)) {
+        if (o && o.sha && (!cur[name] || cur[name].sha !== o.sha)) { cur[name] = { sha: o.sha, handle: o.handle || null, at: Date.now() }; changed = true; }
+      }
+      if (changed) { await chrome.storage.local.set({ [_OPS_KEY(origin)]: cur }); try { Logger.info('connector', `SESSION ▸ op bank ${origin} ← ${Object.keys(ops).join(', ')}`); } catch { /* */ } }
+    } catch { /* */ }
+  }
+  async function _bankedOp(origin, name) {
+    try { const got = await chrome.storage.local.get(_OPS_KEY(origin)); return (got[_OPS_KEY(origin)] || {})[name] || null; } catch { return null; }
+  }
+  async function _clearBankedOp(origin, name) {
+    try { const got = await chrome.storage.local.get(_OPS_KEY(origin)); const cur = got[_OPS_KEY(origin)] || {}; if (cur[name]) { delete cur[name]; await chrome.storage.local.set({ [_OPS_KEY(origin)]: cur }); } } catch { /* */ }
+  }
+
+  // ── CX-7c (v2.74.1388) — the SHOPIFY LIVENESS PROBE (spec §2 probeShopify): a GraphQL `{ shop { name } }` before
+  // the real call, so a signed-out session fails FAST + honest instead of mid-write. Cached 60s per origin (a burst
+  // of reads probes once). Reuses the sniffed CSRF the main call needs anyway. A non-JSON body (the login/challenge
+  // HTML masquerading as 200 — the spec's trap) or a missing `data.shop.name` = not logged in. Returns the shop
+  // name on success (for a "signed into <shop>" confirmation). ──
+  const _shopLive = new Map();                  // origin → { name, at }
+  const SHOP_LIVE_TTL_MS = 60e3;
+  async function _probeShopLiveness(tabId, origin, handle, csrfTok) {
+    const c = _shopLive.get(origin);
+    if (c && (Date.now() - c.at) < SHOP_LIVE_TTL_MS) return { live: true, name: c.name };
+    const url = `https://${origin}/api/shopify/${encodeURIComponent(handle)}`;
+    const body = { query: '{ shop { name } }' };
+    const reply = await fetchViaHealed(tabId, url, 'POST', body, false, 'application/json',
+      { gqlRead: true, headers: csrfTok ? { 'x-csrf-token': csrfTok } : undefined });
+    if (!reply || reply.success === false) {
+      // non-json (login/challenge page) or http-40x → signed out; anything else is transient (treat as live-unknown, let the real call speak)
+      if (reply && (reply.error === 'non-json' || /^http-40[13]$/.test(String(reply.error || '')))) return { live: false };
+      return { live: true, name: null, unknown: true };
+    }
+    const name = reply.value && reply.value.data && reply.value.data.shop && reply.value.data.shop.name;
+    if (!name) return { live: false };
+    _shopLive.set(origin, { name, at: Date.now() });
+    return { live: true, name };
+  }
+  async function _acquireSniffedCsrf(tabId, origin, { force = false } = {}) {
+    const c = _sniffedCsrf.get(origin);
+    const ask = async () => {
+      try {
+        const r = await chrome.tabs.sendMessage(tabId, { type: 'GET_SNIFFED_CSRF', payload: {} }, { frameId: 0 });
+        if (r && r.ops) await _persistSniffedOps(origin, r.ops);   // CX-7b — bank any ops the tee saw, whatever we came for
+        return (r && r.token) || null;
+      } catch { return null; }
+    };
+    if (!force && c && (Date.now() - c.at) < CSRF_TTL_MS) { await ask(); return c.token; }   // still harvest ops on the warm path
+    let tok = await ask();                       // ORDER MATTERS: the first ask wires the page's message listener…
+    if (!tok || force) {
+      try { await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func: _csrfSnifferFunc }); } catch { /* CSP-proof: MAIN-world exec needs no page <script> */ }
+      const deadline = Date.now() + 8000;        // …so the tee (injected after) can never post into the void
+      while (!tok && Date.now() < deadline) { await new Promise((r) => setTimeout(r, 500)); tok = await ask(); }
+    }
+    if (tok) _sniffedCsrf.set(origin, { token: tok, at: Date.now() });
+    return tok || null;
+  }
 
   // MP-2c — refresh linked-state + LIVE TOOLS from the backend (fires at link time + on GET_CONNECTOR_STATUS).
   // Logs `CONNECTOR_TOOLS ▸` (Invariant #1: in studio.js _DECISION_RE). Returns the summary or null (no cloud client).
@@ -228,6 +345,30 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
       return true;
     },
 
+    // CX-7d (v2.74.1396) — GET_RIDE_OPS: the op-bank VIEWER (makes T4 verifiable). Resolve the store's admin tab,
+    // harvest any freshly-captured ops off it (the sniffer's window state → banked), then report what's banked for
+    // the origin. Read-only introspection over the user's own captured operations; never drives a write.
+    'GET_RIDE_OPS': (payload, _sender, sendResponse) => {
+      (async () => {
+        try {
+          let origin = String((payload && payload.origin) || '').replace(/^https?:\/\//, '').replace(/\/+$/, '').toLowerCase();
+          let tabs = [];
+          try { tabs = await chrome.tabs.query({ url: origin ? `*://${origin}/*` : '*://admin.shopify.com/*' }); } catch { tabs = []; }
+          const tab = pickRideTab(tabs);
+          if (tab && !origin) { try { origin = new URL(tab.url).host; } catch { /* */ } }
+          if (tab && origin) {   // harvest what the tee has seen since the last connector call, then it's banked
+            try { if (typeof ensureContentScript === 'function') await ensureContentScript(tab.id); } catch { /* */ }
+            try { await _acquireSniffedCsrf(tab.id, origin); } catch { /* */ }
+          }
+          let banked = {};
+          if (origin) { try { const got = await chrome.storage.local.get(_OPS_KEY(origin)); banked = got[_OPS_KEY(origin)] || {}; } catch { /* */ } }
+          const ops = Object.entries(banked).map(([name, o]) => ({ name, sha8: String((o && o.sha) || '').slice(0, 8), handle: (o && o.handle) || null, at: (o && o.at) || 0 }));
+          sendResponse({ success: true, origin: origin || null, ops, tab: !!tab });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'ride-ops-failed' }); }
+      })();
+      return true;
+    },
+
     'INVOKE_SESSION': (payload, _sender, sendResponse) => {
       (async () => {
         let ephemeralOrigin = null;          // set when this ride opened/reused a managed tab (→ idle-close on exit)
@@ -245,7 +386,11 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           const args = (payload && typeof payload.args === 'object' && payload.args) || {};
           const method = String((payload && payload.method) || 'GET').toUpperCase();
           // CX-6 — a non-GET is fail-closed behind explicit post-HITL `confirmed:true` (Belt #1). CSRF is page-side (Belt #2).
-          const isWrite = method !== 'GET' && method !== 'HEAD';
+          // CX-7 — carve-out: a GraphQL READ is a POST whose document is provably read-only (the curated query text is
+          // STATIC — params fill only `variables`). Validated here on the template AND re-validated on the final body
+          // at the content-script boundary (belt #2) — a mutation document always needs the write gate.
+          const isGqlRead = !!(payload && payload.gql === true && method === 'POST' && payload.body && typeof payload.body === 'object' && isReadOnlyGql(payload.body.query));
+          const isWrite = (method !== 'GET' && method !== 'HEAD') && !isGqlRead;
           if (isWrite && !(payload && payload.confirmed === true)) { sendResponse({ success: false, error: 'write-needs-confirm' }); return; }
 
           let origin = fillEndpoint(String((payload && payload.origin) || ''), args).replace(/^https?:\/\//i, '').replace(/\/+$/, '');
@@ -275,9 +420,66 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           }
           if (origin && appHost) _lastOriginByAppHost.set(appHost, origin);   // remember the instance for next cold start
 
+          // v1380 (live: "sweep only runs if the zendesk tab is visible") — a BACKGROUND ride tab gets DISCARDED
+          // (Memory Saver) or FROZEN by Chrome: its content script is gone/paused, so the page-side fetch hangs
+          // or fails — which reads as "works only when the tab is focused". Revive WITHOUT focusing (a background
+          // reload never touches the screen), wait for load, then ride as normal. `frozen` guards === true so
+          // older Chrome (no field) skips.
+          try {
+            const t = await chrome.tabs.get(tab.id);
+            if (t && (t.discarded === true || t.frozen === true)) {
+              await chrome.tabs.reload(tab.id);
+              await _waitTabComplete(tab.id);
+            }
+          } catch { /* revive is best-effort; ensureContentScript below still gates */ }
+
           if (typeof ensureContentScript === 'function') {
             const ok = await ensureContentScript(tab.id);
             if (!ok) { sendResponse({ success: false, error: 'no-content-script', origin }); return; }
+          }
+
+          // CX-7 — tab-URL params: fill e.g. {handle} from the RIDE TAB's own URL (admin.shopify.com/store/<handle>/…).
+          // TRUSTED source (the user's real workspace tab), never the model — a model-supplied value is DELETED first.
+          if (payload && payload.urlParam && payload.urlParam.name && payload.urlParam.pattern) {
+            delete args[payload.urlParam.name];
+            try {
+              const t = await chrome.tabs.get(tab.id);
+              const m = String((t && t.url) || '').match(new RegExp(payload.urlParam.pattern));
+              if (m && m[1]) args[payload.urlParam.name] = m[1];
+            } catch { /* */ }
+            if (args[payload.urlParam.name] == null) {
+              sendResponse({ success: false, error: 'no-url-param', origin, hint: `open your ${appHost || origin} workspace (a /store/… page) so the {${payload.urlParam.name}} can be read from the tab` });
+              return;
+            }
+          }
+
+          // CX-7 — acquire the sniffed CSRF ONCE here (the liveness probe + the main call both ride it), so we don't
+          // double-sniff. Cached per-origin inside _acquireSniffedCsrf; null is fine (a gql read may go cookie-only).
+          let csrfTok = null;
+          if (payload && payload.csrf === 'sniff') { csrfTok = await _acquireSniffedCsrf(tab.id, origin); }
+
+          // CX-7c (ADVISORY since v2.74.1389) — the liveness probe NEVER blocks the call. The first cut hard-gated
+          // on it and BLOCKED a signed-in user: the probe needs the sniffed CSRF, and a cold/idle admin tab hasn't
+          // fired an SPA request yet, so no token is captured → the probe 403s → misread as "signed out". A 403
+          // without a token is a CSRF-not-ready problem, not a login one — and Shopify's REAL signed-out signal (an
+          // HTML login page → SESSION_FETCH 'non-json' with an honest hint) is already caught by the main call.
+          // So we probe only when a token exists, purely to warm the shop cache; the main call is the source of truth.
+          if (payload && payload.shopProbe && csrfTok) {
+            try { await _probeShopLiveness(tab.id, origin, args[(payload.urlParam && payload.urlParam.name) || 'handle'], csrfTok); } catch { /* advisory — never blocks */ }
+          }
+
+          // CX-7b — persisted-op hash: {op_sha} fills from the SNIFFED per-origin bank ONLY (model values deleted).
+          // No banked op yet → inject the tee and ask the human to perform the action once by hand — that demo IS
+          // the capture (their save-shopify-session step, in-tab); the next attempt replays it.
+          if (payload && payload.persistedOp) {
+            delete args.op_sha;
+            const op = await _bankedOp(origin, String(payload.persistedOp));
+            if (op && op.sha) args.op_sha = op.sha;
+            else {
+              try { await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'MAIN', func: _csrfSnifferFunc }); } catch { /* */ }
+              sendResponse({ success: false, error: 'op-not-captured', origin, hint: `do one ${String(payload.persistedOp)} by hand in the admin (e.g. create any customer) while this tab stays open — Orchard captures the operation and can replay it from then on` });
+              return;
+            }
           }
 
           // 3) Identity verdict (§14/§16) — verify the returned identity; guard the expected account.
@@ -317,13 +519,47 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           const url = `https://${origin}${path.startsWith('/') ? path : '/' + path}`;
           let body = undefined;
           const contentType = String((payload && payload.contentType) || '');
-          if (isWrite) {
+          if (isWrite || isGqlRead) {
             // v1342 — panel may pre-fill via fillWriteBody (string body + contentType); else template fillBody.
+            // CX-7 — a gql READ builds its body too (the query document + filled variables).
             if (typeof payload.body === 'string') body = payload.body;
             else body = fillBody(payload && payload.body, args);
           }
-          const reply = await fetchViaHealed(tab.id, url, method, body, isWrite, contentType);   // v1340 — the write already passed the confirmed:true gate above; carry it to the content-script belt
-          sendResponse(reply && reply.success ? { ...reply, origin } : (reply || { success: false, error: 'no-reply' }));
+          // CX-7 — sniffed-CSRF transport: ride the token acquired above (the liveness probe already sniffed it);
+          // a 403 = stale/missing token → one forced re-mint + retry, then surface honestly with the interact-once hint.
+          let extra = isGqlRead ? { gqlRead: true } : null;
+          if ((isWrite || isGqlRead) && payload && payload.csrf === 'sniff') {
+            extra = { ...(extra || {}), headers: csrfTok ? { 'x-csrf-token': csrfTok } : undefined };
+          }
+          let reply = await fetchViaHealed(tab.id, url, method, body, isWrite, contentType, extra);   // v1340 — the write already passed the confirmed:true gate above; carry it to the content-script belt
+          if (reply && reply.success === false && /^http-40[13]$/.test(String(reply.error || '')) && payload && payload.csrf === 'sniff') {
+            const tok2 = await _acquireSniffedCsrf(tab.id, origin, { force: true });
+            if (tok2) reply = await fetchViaHealed(tab.id, url, method, body, isWrite, contentType, { ...(extra || {}), headers: { 'x-csrf-token': tok2 } });
+            if (reply && reply.success === false && /^http-40[13]$/.test(String(reply.error || ''))) reply = { ...reply, hint: 'no CSRF token captured yet — click around the admin tab once, then retry' };
+          }
+          // CX-7b — HASH_STALE (the spec's deploy-rotation trap): a persisted-op 404/406 means the store's op hash
+          // changed — clear the banked op so the next attempt re-captures, and say so honestly.
+          if (reply && reply.success === false && payload && payload.persistedOp && /^http-40[46]$/.test(String(reply.error || ''))) {
+            await _clearBankedOp(origin, String(payload.persistedOp));
+            reply = { ...reply, error: 'op-hash-stale', hint: `the store's ${String(payload.persistedOp)} operation changed (admin deploy) — do one by hand with the tab open, then retry` };
+          }
+          // CX-7 — GraphQL's 200-is-not-ok trap (spec summarizeResult): top-level errors OR nested userErrors on a
+          // 2xx is a FAILURE — surface it, never hand a poisoned success downstream.
+          if (reply && reply.success && (payload && (payload.gql === true || payload.persistedOp)) && reply.value && typeof reply.value === 'object') {
+            const v = reply.value;
+            let msg = Array.isArray(v.errors) && v.errors.length ? String(v.errors[0].message || 'GraphQL error') : '';
+            if (!msg && v.data && typeof v.data === 'object') {
+              for (const node of Object.values(v.data)) {
+                if (node && typeof node === 'object' && Array.isArray(node.userErrors) && node.userErrors.length) { msg = String(node.userErrors[0].message || 'validation error'); break; }
+              }
+            }
+            if (msg) reply = { success: false, error: 'graphql-error', detail: msg.slice(0, 200), origin };
+          }
+          // CX-7e — surface the tab-derived urlParam (handle) so the panel can build the record's human page for
+          // "show profile" (the itemUrl needs {handle}, which lives on the ride tab, not on the record). TRUSTED.
+          const _urlArgs = (payload && payload.urlParam && payload.urlParam.name && args[payload.urlParam.name] != null)
+            ? { [payload.urlParam.name]: args[payload.urlParam.name] } : undefined;
+          sendResponse(reply && reply.success ? { ...reply, origin, urlArgs: _urlArgs } : (reply || { success: false, error: 'no-reply' }));
         } catch (e) {
           sendResponse({ success: false, error: (e && e.message) || 'invoke-session-failed' });
         } finally {

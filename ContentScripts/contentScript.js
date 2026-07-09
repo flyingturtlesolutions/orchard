@@ -46,6 +46,31 @@ if (window.__agentHubContentScriptLoaded === true) {
 }
 window.__agentHubContentScriptLoaded = true;
 
+// CX-7d (v2.74.1391) — wire the sniffed-CSRF/op RECEIVER at document_start on Shopify admin, so tokens the MAIN-
+// world tee (shopifyCsrfSniffer.js) captures from the SPA's own PAGE-LOAD traffic are stored before Orchard's
+// first ask — the token is then already primed, and the "click around the admin once" hint (which only fired
+// because the on-demand receiver wired too late) is virtually never seen. GET_SNIFFED_CSRF below is idempotent
+// against this (shares window.__ahubSniffCsrfWired) and still works on tabs where this eager path didn't run.
+(function () {
+  try {
+    if (!/(?:^|\.)shopify\.com$/i.test(location.host) || window.__ahubSniffCsrfWired) return;
+    window.__ahubSniffCsrfWired = true;
+    window.__ahubSniffCsrfTok = null;
+    window.__ahubSniffOps = {};
+    window.addEventListener('message', (ev) => {
+      try {
+        if (ev.source !== window || ev.origin !== location.origin) return;
+        const d = ev.data && ev.data.__ahub_sniffed_csrf;
+        if (d && d.token && d.host === location.host) window.__ahubSniffCsrfTok = { token: String(d.token).slice(0, 400), at: Date.now() };
+        const o = ev.data && ev.data.__ahub_sniffed_op;
+        if (o && o.sha && o.name && o.host === location.host && /^[a-f0-9]{16,64}$/i.test(String(o.sha)) && /^\w{1,60}$/.test(String(o.name))) {
+          window.__ahubSniffOps[String(o.name)] = { sha: String(o.sha), handle: o.handle ? String(o.handle).slice(0, 80) : null, at: Date.now() };
+        }
+      } catch { /* */ }
+    });
+  } catch { /* */ }
+})();
+
 // ─── Shadow DOM utilities ─────────────────────────────────────────────────────
 
 /**
@@ -6145,10 +6170,18 @@ const MESSAGE_HANDLERS = {
         const url = (payload && typeof payload.url === 'string') ? payload.url : '';
         const method = String((payload && payload.method) || 'GET').toUpperCase();
         if (!url) { sendResponse({ success: false, error: 'session-fetch-no-url' }); return; }
+        // CX-7 — the inline twin of Core/connectorRecipes.isReadOnlyGql (keep in lockstep): a GraphQL READ POST may
+        // run unconfirmed ONLY when its FINAL body re-validates as a read-only document HERE (belt #2 never trusts
+        // the background's flag alone — a mutation document always needs the write gate).
+        const _readOnlyGql = (q) => { const s = String(q || '').trim(); if (!s || !/^(query\b|\{)/.test(s)) return false; const ns = s.replace(/"(?:[^"\\]|\\.)*"/g, ''); return !(/\bmutation\b/i.test(ns) || /\bsubscription\b/i.test(ns)); };
+        let gqlReadOk = false;
+        if (payload && payload.gqlRead === true && method === 'POST') {
+          try { const b = (typeof payload.body === 'string') ? JSON.parse(payload.body) : payload.body; gqlReadOk = _readOnlyGql(b && b.query); } catch { gqlReadOk = false; }
+        }
         // v2.74.1340 (review A) — SECOND write belt AT THE EXECUTION BOUNDARY: this handler used to run any non-GET
         // handed to it (the confirm belt lived only in INVOKE_SESSION). Now a write must carry the confirmed:true the
         // HITL gate stamped — a future/rogue background path that skips the first belt is refused HERE too.
-        if (method !== 'GET' && method !== 'HEAD' && !(payload && payload.confirmed === true)) {
+        if (method !== 'GET' && method !== 'HEAD' && !(payload && payload.confirmed === true) && !gqlReadOk) {
           sendResponse({ success: false, error: 'write-needs-confirm' }); return;
         }
         const headers = Object.assign({ Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' }, (payload && payload.headers) || {});
@@ -6156,10 +6189,15 @@ const MESSAGE_HANDLERS = {
         if (method !== 'GET' && method !== 'HEAD') {
           // CX-6 (write) — read the CSRF token straight off the live page's DOM (the content script is ON the page —
           // no headless load, the CS Tools blueprint). A missing token means the page is logged out / not the app. Belt #2.
-          const metaTok = document.querySelector('meta[name="csrf-token"]');
-          const csrf = metaTok && metaTok.getAttribute('content');
-          if (!csrf) { sendResponse({ success: false, error: 'no-csrf', hint: 'open the app signed in so it can authorize the write' }); return; }
-          headers['X-CSRF-Token'] = csrf;
+          // CX-7 — a background-SUPPLIED token (the sniffed x-csrf-token) satisfies this; a gql READ with no token at
+          // all may still try cookie-only (the 403 surfaces honestly) — a WRITE without any token never runs.
+          const supplied = headers['x-csrf-token'] || headers['X-CSRF-Token'];
+          if (!supplied) {
+            const metaTok = document.querySelector('meta[name="csrf-token"]');
+            const csrf = metaTok && metaTok.getAttribute('content');
+            if (csrf) headers['X-CSRF-Token'] = csrf;
+            else if (!gqlReadOk) { sendResponse({ success: false, error: 'no-csrf', hint: 'open the app signed in so it can authorize the write' }); return; }
+          }
           if (payload && payload.body != null) {
             const ct = String(payload.contentType || 'application/json');
             headers['Content-Type'] = ct;
@@ -6182,6 +6220,36 @@ const MESSAGE_HANDLERS = {
       }
     })();
     return true;
+  },
+
+  // CX-7 (v2.74.1386) — the sniffed-CSRF cache half: the MAIN-world tee (injected by the background,
+  // _csrfSnifferFunc) posts the token it captures off the SPA's own requests; the FIRST call here wires the
+  // listener (the background always asks BEFORE injecting, so no capture can post into the void), later calls
+  // return the newest token. Top frame only; same-origin messages only.
+  // CX-7b (v2.74.1387) — the same tee also posts PERSISTED-OP URLs it sees (/api/operations/<sha>/<Name>/…); we
+  // cache the newest sha per op name and hand the batch back so the background can bank it for replay.
+  'GET_SNIFFED_CSRF': (_message, _sender, sendResponse) => {
+    try {
+      if (!window.__ahubSniffCsrfWired) {
+        window.__ahubSniffCsrfWired = true;
+        window.__ahubSniffCsrfTok = null;
+        window.__ahubSniffOps = {};
+        window.addEventListener('message', (ev) => {
+          try {
+            if (ev.source !== window || ev.origin !== location.origin) return;
+            const d = ev.data && ev.data.__ahub_sniffed_csrf;
+            if (d && d.token && d.host === location.host) window.__ahubSniffCsrfTok = { token: String(d.token).slice(0, 400), at: Date.now() };
+            const o = ev.data && ev.data.__ahub_sniffed_op;
+            if (o && o.sha && o.name && o.host === location.host && /^[a-f0-9]{16,64}$/i.test(String(o.sha)) && /^\w{1,60}$/.test(String(o.name))) {
+              window.__ahubSniffOps[String(o.name)] = { sha: String(o.sha), handle: o.handle ? String(o.handle).slice(0, 80) : null, at: Date.now() };
+            }
+          } catch { /* */ }
+        });
+      }
+    } catch { /* */ }
+    const t = window.__ahubSniffCsrfTok || null;
+    sendResponse({ success: true, token: (t && t.token) || null, at: (t && t.at) || 0, ops: window.__ahubSniffOps || {} });
+    return false;
   },
 
 

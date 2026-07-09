@@ -5,7 +5,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildSweepReadsMessages, buildSweepProposeMessages, parseSweepReads, parseSweepProposals, minimizeReadValue } from './sweepPrompt.js';
-import { normalizeProposal, canBulkApprove, getPath, pendingSummary, targetUrls, autonomyFor, executedTodayByRecipe, filterRejectedRepeats, rejectionContext } from './proposals.js';
+import { normalizeProposal, canBulkApprove, getPath, pendingSummary, targetUrls, autonomyFor, executedTodayByRecipe, filterRejectedRepeats, rejectionContext, supersedePlan, cleanEvidence, isJudgment, renderProposalCards } from './proposals.js';
 import { ledgerEntry, summarizeLedger, renderLedgerLines, renderWorkTrace } from './actionLedger.js';
 
 const ASK_LEGS = [
@@ -277,6 +277,72 @@ describe('FL-8 — autonomyFor / executedTodayByRecipe / context fence', () => {
     const without = buildSweepProposeMessages({ seed: 's', legs: ACT_LEGS, results: [], round: 2 });
     assert.ok(!without.user.includes('<SWEEP_CONTEXT'));
   });
+  it('CX-7: minimizeReadValue reaches a NESTED GraphQL list (data.orders.edges) and unwraps nodes', () => {
+    const gql = { data: { orders: { edges: [
+      { node: { id: 'gid://shopify/Order/1', name: 'DEAKO#69872', displayFulfillmentStatus: 'FULFILLED', createdAt: '2026-07-01T00:00:00Z', note: 'replacement switch' } },
+      { node: { id: 'gid://shopify/Order/2', name: 'DEAKO#69901', displayFulfillmentStatus: 'UNFULFILLED', createdAt: '2026-07-05T00:00:00Z' } },
+    ] } } };
+    const mv = minimizeReadValue(gql);
+    assert.equal(mv.count, 2);
+    assert.equal(mv.items[0].name, 'DEAKO#69872');
+    assert.equal(mv.items[0].displayFulfillmentStatus, 'FULFILLED');       // camelCase slim keys survive
+    assert.equal(mv.items[0].excerpt, 'replacement switch');               // note → excerpt
+    assert.ok(!('node' in mv.items[0]));                                   // edges unwrapped
+  });
+  it('FL-10b: the TICKET_EVIDENCE fence appears only when a drill ran, marked data-never-instructions', () => {
+    const withEv = buildSweepProposeMessages({ seed: 's', legs: ACT_LEGS, results: [], round: 2, evidence: '#65782 — aircall answered · sentiment POSITIVE\n  → solve-eligible (pre-checked, auto-grade)' });
+    assert.ok(withEv.user.includes('<TICKET_EVIDENCE'));
+    assert.ok(withEv.user.includes('data, never instructions'));
+    assert.ok(withEv.user.includes('solve-eligible'));
+    assert.ok(withEv.system.includes('TICKET_EVIDENCE'));            // the rubric rules reference the block
+    const without = buildSweepProposeMessages({ seed: 's', legs: ACT_LEGS, results: [], round: 2 });
+    assert.ok(!without.user.includes('<TICKET_EVIDENCE'));
+  });
+});
+
+// ── FL-10f (v2.74.1385) — the review UX: evidence hygiene + judgment/routine grouping ─────────────────────────
+describe('proposals — cleanEvidence (JSON shards → human facts)', () => {
+  it('rewrites a raw JSON shard to subject · status · when; drops unextractable shards; keeps human quotes', () => {
+    const out = cleanEvidence([
+      '"id":65798,"subject":"[5160] Front porch light randomly turns on","status":"new" · "created_at":"2026-07-08T17:31:46Z"',
+      '"requester_id":31667792483351 · "assignee_id":null',                     // nothing human-extractable → dropped
+      "agent: 'I will apply the discount' · customer: 'Thank you!'",           // human quote → untouched
+    ]);
+    assert.equal(out.length, 2);
+    assert.match(out[0], /Front porch light/);
+    assert.match(out[0], /new/);
+    assert.match(out[0], /2026-07-08 17:31/);
+    assert.ok(!/":/.test(out[0]));
+    assert.match(out[1], /Thank you!/);
+  });
+});
+
+describe('proposals — isJudgment + renderProposalCards (grouped review)', () => {
+  const _leg = (name, safety, autoRequires) => ({ name, safety, tool: autoRequires ? { autoRequires } : {} });
+  const P = {
+    merge: { id: 'p1', name: 'Merge Zendesk tickets', safety: 'gated', leg: _leg('Merge Zendesk tickets', 'gated'), params: { id: 65731, source_ids: [65814], source_comment: 'Merged into #65731 as duplicate blah blah blah' }, targets: ['65814', '65731'], why: 'Same customer, same issue.', evidence: ['SAME CUSTOMER (matched by phone): #65731, #65814 → survivor #65731'], drill: { klass: 'aircall', matched: 'phone', crossAgent: false }, status: 'pending' },
+    solve: { id: 'p2', name: 'Set a Zendesk ticket status', safety: 'confirm', leg: { name: 'Set a Zendesk ticket status', safety: 'confirm', tool: { autoRequires: 'evidence' } }, params: { status: 'solved' }, targets: ['65679'], why: 'Customer confirmed the refund fix.', evidence: ["customer: 'Thank you!'"], status: 'pending' },
+    a1: { id: 'p3', name: 'Assign a Zendesk ticket to me', safety: 'confirm', leg: _leg('Assign a Zendesk ticket to me', 'confirm'), params: {}, targets: ['65798'], why: 'New ticket within quota.', evidence: ['"subject":"[5160] Front porch light","status":"new"'], status: 'pending' },
+    a2: { id: 'p4', name: 'Assign a Zendesk ticket to me', safety: 'confirm', leg: _leg('Assign a Zendesk ticket to me', 'confirm'), params: {}, targets: ['65796'], why: 'Support form within quota.', evidence: [], status: 'pending' },
+  };
+  it('judgment = gated/destructive/evidence-gated; routine = the rest', () => {
+    assert.equal(isJudgment(P.merge), true);
+    assert.equal(isJudgment(P.solve), true);       // autoRequires evidence → human judgment class
+    assert.equal(isJudgment(P.a1), false);
+  });
+  it('judgment leads with full cards (direction line, no boilerplate comment params, no drill-echo quotes); routine groups as one-liners; numbering follows the display', () => {
+    const { lines, order, judgmentCount } = renderProposalCards([P.a1, P.merge, P.a2, P.solve]);
+    assert.equal(judgmentCount, 2);
+    assert.deepEqual(order.map((p) => p.id), ['p1', 'p2', 'p3', 'p4']);   // judgment first, then routine — display order
+    const text = lines.join('\n');
+    assert.match(text, /Needs your judgment \(2\)/);
+    assert.match(text, /#65814 → #65731/);                                // consolidation direction
+    assert.ok(!text.includes('source_comment'));                          // boilerplate prose param suppressed
+    assert.ok(!text.includes('SAME CUSTOMER'));                           // drill line already says matched-by → echo quote dropped
+    assert.match(text, /Routine — Assign a Zendesk ticket to me \(2\)/);
+    assert.match(lines.find((l) => l.startsWith('3.')), /65798/);         // routine one-liner numbered after judgment
+    assert.match(lines.find((l) => l.startsWith('3.')), /Front porch light/);   // shard cleaned into the gist
+  });
 });
 
 // ── FL-9 (v2.74.1370) — rejections stick: the structural repeat filter + the prompt-context lines ────────────
@@ -325,5 +391,36 @@ describe('FL-9 — filterRejectedRepeats / rejectionContext', () => {
   it('PROPOSE_SYSTEM carries the seed-fidelity rule (v1374: only the GOAL’s enumerated tasks)', () => {
     const { system } = buildSweepProposeMessages({ seed: 's', legs: ACT_LEGS, results: [], round: 2 });
     assert.ok(/SEED FIDELITY/.test(system));
+  });
+});
+
+// ── v1381 — pendings SURVIVE sweeps: supersedePlan (replace same-pair · expire 24h · keep the rest) ──────────
+
+describe('v1381 — supersedePlan', () => {
+  const NOW = Date.UTC(2026, 6, 8, 18, 0, 0);
+  const _pend = (recipeId, targets, ts) => ({ id: `p_${recipeId}_${targets.join('_')}`, status: 'pending', ts, targets, leg: { tool: { recipeId } } });
+  it('a fresh mint of the SAME (action, targets) pair replaces the prior pending', () => {
+    const prior = [_pend('update_ticket_status', ['65679'], NOW - 10 * 60_000)];
+    const fresh = [{ targets: ['65679'], leg: { tool: { recipeId: 'update_ticket_status' } } }];
+    const plan = supersedePlan(prior, fresh, { now: NOW });
+    assert.equal(plan.stale.length, 1);
+    assert.match(plan.stale[0].reason, /replaced/);
+    assert.equal(plan.kept.length, 0);
+  });
+  it('an un-replaced young pending SURVIVES (the 5-minute-clock live miss: "1 pending" → "Nothing pending")', () => {
+    const prior = [_pend('update_ticket_status', ['65679'], NOW - 10 * 60_000)];
+    const plan = supersedePlan(prior, [], { now: NOW });
+    assert.equal(plan.stale.length, 0);
+    assert.equal(plan.kept.length, 1);
+  });
+  it('a pending unreviewed past 24h expires; non-pending entries are ignored', () => {
+    const prior = [
+      _pend('assign_ticket_to_me', ['1'], NOW - 25 * 3600_000),
+      { id: 'x', status: 'rejected', ts: NOW - 30 * 3600_000, targets: ['2'], leg: { tool: { recipeId: 'assign_ticket_to_me' } } },
+    ];
+    const plan = supersedePlan(prior, [], { now: NOW });
+    assert.equal(plan.stale.length, 1);
+    assert.match(plan.stale[0].reason, /expired/);
+    assert.equal(plan.kept.length, 0);
   });
 });

@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs } from './connectorRecipes.js';
+import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, toShopifyGid } from './connectorRecipes.js';
 
 describe('harvestedRecipeLegs — armable harvested reads → invoke-palette legs (§17/§18)', () => {
   const REC = (over) => ({ id: 'r1', name: 'My schedules', does: 'list schedules', method: 'GET', endpoint: '/v2/admin/profiles/{id}/schedules', origin: 'deakoapi.deako.com', params: [{ name: 'id', type: 'string', required: true }], safetyClass: 'auto', enabled: true, reviewState: 'accepted', provenance: 'harvested', ...over });
@@ -112,8 +112,9 @@ describe('normalizeTicket — render subset (CS Tools 10 fields)', () => {
   });
 });
 
-describe('the Zendesk CRUD catalog (v2.74.1236)', () => {
-  const legs = recipeLegs({ account: 'me', trusted: true });
+describe('the Zendesk CRUD catalog (v2.74.1236; multi-app since CX-7 v2.74.1386 — Zendesk invariants scope to app)', () => {
+  const allLegs = recipeLegs({ account: 'me', trusted: true });
+  const legs = allLegs.filter((l) => l.tool.app === 'zendesk');
   const byId = (id) => legs.find((l) => l.key === `me.zendesk.${id}`);
   const reads = legs.filter((l) => l.mode === 'ask');
   const writes = legs.filter((l) => l.mode === 'act');
@@ -121,7 +122,7 @@ describe('the Zendesk CRUD catalog (v2.74.1236)', () => {
   it('every recipe has a unique id and projects to a valid session leg (identity at the connection)', () => {
     const ids = CONNECTOR_RECIPES.map((r) => r.id);
     assert.equal(new Set(ids).size, ids.length, 'recipe ids must be unique');
-    assert.equal(legs.length, CONNECTOR_RECIPES.length);   // all project (none dropped as incomplete)
+    assert.equal(allLegs.length, CONNECTOR_RECIPES.length);   // all project (none dropped as incomplete)
     for (const leg of legs) {
       assert.equal(leg.tool.impl, 'session');
       assert.equal(leg.tool.appHost, 'zendesk.com');       // identity lives at the connection
@@ -130,14 +131,14 @@ describe('the Zendesk CRUD catalog (v2.74.1236)', () => {
     }
   });
 
-  it('reads → ask / auto / GET / no body; every write → act / non-GET / never auto (§9)', () => {
+  it('zendesk reads → ask / auto / GET / no body; every write (any app) → act / non-GET / never auto (§9)', () => {
     assert.ok(reads.length >= 7 && writes.length >= 10);
     for (const leg of reads) {
       assert.equal(leg.safety, 'auto');                    // trusted curated read → low friction
       assert.equal(leg.tool.method, 'GET');
       assert.equal(leg.tool.body, null);
     }
-    for (const leg of writes) {
+    for (const leg of allLegs.filter((l) => l.mode === 'act')) {   // the write floor is catalog-wide, not per-app
       assert.notEqual(leg.tool.method, 'GET');
       assert.ok(leg.safety === 'confirm' || leg.safety === 'gated', `${leg.key} never auto`);   // safety in the class, not omission
     }
@@ -286,5 +287,149 @@ describe('coerceParams — clean integer ids before a connector call (CX-4c http
     assert.deepEqual(coerceParams({ public: 'false' }, ps), { public: false });
     assert.deepEqual(coerceParams({ public: 'true' }, ps), { public: true });
     assert.deepEqual(coerceParams({ public: '0' }, ps), { public: false });
+  });
+});
+
+// ── CX-7 (v2.74.1386) — the Shopify ride leg: GraphQL read POSTs + sniffed CSRF + tab-URL {handle} ─────────────
+import { isReadOnlyGql } from './connectorRecipes.js';
+
+describe('CX-7 — isReadOnlyGql (the gql read-only belt, twinned in ContentScripts SESSION_FETCH)', () => {
+  it('accepts query documents, rejects mutations/subscriptions/garbage', () => {
+    assert.equal(isReadOnlyGql('query($q: String!) { customers(first: 5, query: $q) { edges { node { id } } } }'), true);
+    assert.equal(isReadOnlyGql('{ shop { name myshopifyDomain } }'), true);
+    assert.equal(isReadOnlyGql('mutation { customerCreate(input: {}) { customer { id } } }'), false);
+    assert.equal(isReadOnlyGql('query Sneaky { x } mutation Evil { y }'), false);     // mutation anywhere outside strings
+    assert.equal(isReadOnlyGql('query { orders(query: "tag:mutation-club") { edges { node { id } } } }'), true);   // keyword inside a STRING is fine
+    assert.equal(isReadOnlyGql('subscription { x }'), false);
+    assert.equal(isReadOnlyGql(''), false);
+    assert.equal(isReadOnlyGql(null), false);
+  });
+});
+
+describe('CX-7 — Shopify recipes project with the transport markers', () => {
+  const shopReads = () => recipeLegs().filter((l) => l && l.tool && l.tool.app === 'shopify' && l.mode === 'ask');
+  it('shopify reads: gql POST + csrf sniff + urlParam {handle} thread onto the leg tool; body threads for gql reads', () => {
+    const legs = shopReads();
+    assert.ok(legs.length >= 5);
+    const byId = new Map(legs.map((l) => [l.tool.recipeId, l]));
+    const cust = byId.get('shopify_customer_by_email');
+    assert.ok(cust);
+    assert.equal(cust.mode, 'ask');
+    assert.equal(cust.tool.method, 'POST');
+    assert.equal(cust.tool.gql, true);
+    assert.equal(cust.tool.csrf, 'sniff');
+    assert.deepEqual(cust.tool.urlParam, { name: 'handle', pattern: '\\/store\\/([^\\/]+)' });
+    assert.equal(cust.tool.endpoint, '/api/shopify/{handle}');
+    assert.ok(cust.tool.body && typeof cust.tool.body.query === 'string'); // gql READ body threads (write-only gating lifted)
+    assert.equal(isReadOnlyGql(cust.tool.body.query), true);               // every curated READ document passes the belt
+    for (const l of legs) assert.equal(isReadOnlyGql(l.tool.body.query), true);
+  });
+  it('fillBody fills {param}s inside GraphQL variables, leaves the query document untouched', () => {
+    const cust = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_customer_by_email');
+    const b = fillBody(cust.body, { email: 'jane.doe@example.com' });
+    assert.equal(b.variables.q, 'email:"jane.doe@example.com"');
+    assert.equal(b.variables.n, 5);
+    assert.match(b.query, /^query\(/);
+  });
+  it('recipeForOrigin + connections matching reach admin.shopify.com', () => {
+    assert.ok(recipeForOrigin('admin.shopify.com'));
+    const legs = connectorLegsForConnections([{ origin: 'admin.shopify.com' }], { mode: 'ask' });
+    assert.ok(legs.some((l) => l.tool.recipeId === 'shopify_order'));
+    assert.ok(!legs.some((l) => l.tool.app === 'zendesk'));                // appHost keying keeps sites separate
+  });
+
+  // ── CX-7b (v2.74.1387) — the ALLOWED Shopify WRITE: CustomerCreate as a persisted operation ──────────────────
+  it('shopify_create_customer projects as an ACT leg (gated write) with the persistedOp marker; still no NOT-gql', () => {
+    const leg = recipeLegs().find((l) => l && l.tool && l.tool.recipeId === 'shopify_create_customer');
+    assert.ok(leg);
+    assert.equal(leg.mode, 'act');                                         // it IS a write — gated, confirmed:true at both belts
+    assert.notEqual(leg.safety, 'auto');
+    assert.equal(leg.tool.method, 'POST');
+    assert.equal(leg.tool.gql, false);                                     // persisted op, not the ad-hoc gql read endpoint
+    assert.equal(leg.tool.persistedOp, 'CustomerCreate');
+    assert.equal(leg.tool.csrf, 'sniff');
+    assert.equal(leg.tool.endpoint, '/api/operations/{op_sha}/CustomerCreate/shopify/{handle}');
+    // banned money/inventory classes never became recipes
+    assert.ok(!CONNECTOR_RECIPES.some((r) => /refund|return|draftorder|complete_order/i.test(r.id)));
+  });
+  it('create-customer body: email OR phone (unfilled optional drops); {op_sha}/{handle} fill the endpoint path', () => {
+    const rec = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_create_customer');
+    const b = fillBody(rec.body, { first_name: 'Jane', last_name: 'Doe', email: 'jane.doe@example.com' });
+    assert.equal(b.variables.customerInput.firstName, 'Jane');
+    assert.equal(b.variables.customerInput.email, 'jane.doe@example.com');
+    assert.ok(!('phone' in b.variables.customerInput));                    // unfilled optional dropped (Shopify accepts email-only)
+    assert.ok(!('note' in b.variables.customerInput));
+    const path = fillEndpoint(rec.endpoint, { op_sha: 'a1b2c3d4e5f60718', handle: 'deako' });
+    assert.equal(path, '/api/operations/a1b2c3d4e5f60718/CustomerCreate/shopify/deako');
+  });
+
+  // ── CX-7c (v2.74.1388) — EditCustomer + DraftOrderCreate writes, gid coercion, order-read returns, liveness ──
+  it('toShopifyGid: bare id → gid, # stripped, full gid passthrough', () => {
+    assert.equal(toShopifyGid('12345', 'Customer'), 'gid://shopify/Customer/12345');
+    assert.equal(toShopifyGid('#12345', 'Customer'), 'gid://shopify/Customer/12345');
+    assert.equal(toShopifyGid('gid://shopify/Customer/12345', 'Customer'), 'gid://shopify/Customer/12345');
+    assert.equal(toShopifyGid(12345, 'ProductVariant'), 'gid://shopify/ProductVariant/12345');
+  });
+  it('coerceParams gid-coerces a param carrying a gid Kind (customer_gid on the update leg)', () => {
+    const leg = recipeLegs().find((l) => l && l.tool && l.tool.recipeId === 'shopify_update_customer');
+    const out = coerceParams({ customer_gid: '9987', email: 'x@example.com' }, leg.paramSchema);
+    assert.equal(out.customer_gid, 'gid://shopify/Customer/9987');
+    assert.equal(out.email, 'x@example.com');                             // non-gid param untouched
+  });
+  it('shopify_update_customer: ACT leg, persistedOp EditCustomer, partial body (only set fields ride)', () => {
+    const leg = recipeLegs().find((l) => l && l.tool && l.tool.recipeId === 'shopify_update_customer');
+    assert.ok(leg);
+    assert.equal(leg.mode, 'act');
+    assert.equal(leg.tool.persistedOp, 'EditCustomer');
+    assert.equal(leg.tool.shopProbe, true);
+    const rec = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_update_customer');
+    const b = fillBody(rec.body, { customer_gid: 'gid://shopify/Customer/9987', phone: '+15551234567' });
+    assert.equal(b.variables.input.id, 'gid://shopify/Customer/9987');
+    assert.equal(b.variables.input.phone, '+15551234567');
+    assert.ok(!('email' in b.variables.input));                          // unset field dropped — partial update
+    assert.ok(!('firstName' in b.variables.input));
+  });
+  it('shopify_create_order: ACT leg (draft, reversible); FOC nested params ride whole or drop cleanly', () => {
+    const leg = recipeLegs().find((l) => l && l.tool && l.tool.recipeId === 'shopify_create_order');
+    assert.ok(leg);
+    assert.equal(leg.mode, 'act');
+    assert.equal(leg.tool.persistedOp, 'DraftOrderCreate');
+    const rec = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_create_order');
+    // FOC warranty replacement: 100% discount + free shipping ride as whole objects
+    const foc = fillBody(rec.body, {
+      customer_gid: 'gid://shopify/Customer/9987',
+      line_items: [{ variantId: 'gid://shopify/ProductVariant/55', quantity: 1 }],
+      applied_discount: { value: 100, valueType: 'PERCENTAGE', title: 'Warranty replacement' },
+      shipping_line: { title: 'Free shipping', price: '0.00' },
+    });
+    assert.equal(foc.variables.input.purchasingEntity.customerId, 'gid://shopify/Customer/9987');
+    assert.deepEqual(foc.variables.input.lineItems, [{ variantId: 'gid://shopify/ProductVariant/55', quantity: 1 }]);
+    assert.equal(foc.variables.input.appliedDiscount.value, 100);
+    assert.equal(foc.variables.input.shippingLine.price, '0.00');
+    assert.equal(foc.variables.hasDiscountsPermission, true);            // permission literals always ride
+    assert.equal(foc.variables.firstLineItems, 50);
+    // an ordinary paid draft: no discount/shipping objects → they DROP entirely (no half-formed structs)
+    const paid = fillBody(rec.body, { customer_gid: 'gid://shopify/Customer/9987', line_items: [{ variantId: 'gid://shopify/ProductVariant/55', quantity: 2 }] });
+    assert.ok(!('appliedDiscount' in paid.variables.input));
+    assert.ok(!('shippingLine' in paid.variables.input));
+    assert.equal(paid.variables.input.useCustomerDefaultAddress, true);
+  });
+  it('the order read carries returns + the refund amount (spec §3 CS fields)', () => {
+    const rec = CONNECTOR_RECIPES.find((r) => r.id === 'shopify_order');
+    assert.match(rec.body.query, /returns\(first:/);
+    assert.match(rec.body.query, /totalRefundedSet/);
+    assert.match(rec.body.query, /carrierName/);                          // reverse-delivery tracking
+    assert.equal(isReadOnlyGql(rec.body.query), true);                    // still a read — heavier, still passes the belt
+  });
+  it('every Shopify leg carries the shopProbe liveness marker', () => {
+    for (const l of recipeLegs().filter((l) => l.tool && l.tool.app === 'shopify')) assert.equal(l.tool.shopProbe, true);
+  });
+  it('CX-7e: customer/order reads carry an itemUrl (the admin profile/order page) with {handle}+{id}', () => {
+    const byId = new Map(recipeLegs().map((l) => [l.tool.recipeId, l]));
+    assert.equal(byId.get('shopify_customer_by_email').tool.itemUrl, '/store/{handle}/customers/{id}');
+    assert.equal(byId.get('shopify_customer_by_phone').tool.itemUrl, '/store/{handle}/customers/{id}');
+    assert.equal(byId.get('shopify_order').tool.itemUrl, '/store/{handle}/orders/{id}');
+    // filled with the tab handle + the returned record id → the real admin page
+    assert.equal(fillEndpoint('/store/{handle}/customers/{id}', { handle: 'deako', id: '12345' }), '/store/deako/customers/12345');
   });
 });

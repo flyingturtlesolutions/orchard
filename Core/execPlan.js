@@ -98,6 +98,10 @@ function _planExec(leg, params = {}, ctx = {}) {
       return { ok: true, channel: 'INVOKE_SESSION', busyMark: false, mode, domain: 'connector',
                payload: { origin: t.origin || null, appHost: t.appHost || null, endpoint: t.endpoint,
                           method: t.method || 'GET', body: t.body || null, account: t.account || null, args: p,
+                          // CX-7 (v2.74.1386) — Shopify-class transport markers: gql read POSTs, sniffed CSRF, tab-URL params
+                          gql: t.gql === true, csrf: t.csrf || null, urlParam: t.urlParam || null, contentType: t.contentType || null,
+                          persistedOp: t.persistedOp || null,   // CX-7b — sniffed per-store op hash fills {op_sha}
+                          shopProbe: t.shopProbe === true,      // CX-7c — `{shop{name}}` liveness probe before the call
                           // §18 — the arm guard checks the per-Ground recipe at INVOKE_SESSION. v2.74.1340 (review A):
                           // send the BARE stored id (tool.recipeId) — the prefixed leg.key (`me.zendesk.read_ticket`)
                           // never matched a stored record's bare id, so the guard silently always fell through.
