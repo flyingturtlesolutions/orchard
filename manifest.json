@@ -1,11 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Orchard",
-  "version": "2.74.1416",
+  "version": "2.74.1417",
   "description": "Automated AI agent interaction testing with variable-injected LLM execution.",
-
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvisPCa2Moog8iRlVxOxtLxzO9yRlZ9CmWSxdhORnygInd9dLtluK7CkZ1vxOS6PLziNUDaxcGGIkaJlAlpBAqOH3M3YmH3C8jMn96siaNPQSU+8pzDaa4nLULXQ5NeR+ErWBWq9hzEJD3kvdBAYbA6HdbZfy6TAn8uDnEssx7YCDR9VukxX8RMLWkGs7Fbhur1mHop7G4F8j01m8rD+9frwiW4QINon9KPNzat46KsOdtO1f3WO+emxVeZ6mdLxEVLWu5Y8Z1DHLLhiE6dREEWNWtFsKlXbp9tHVYAhXXUWwezK8GNANqJLlDmdVT00T/GRKOUZn3xnejzh9d2JDtQIDAQAB",
-
   "permissions": [
     "sidePanel",
     "tabs",
@@ -20,11 +18,9 @@
     "identity",
     "alarms"
   ],
-
   "optional_permissions": [
     "nativeMessaging"
   ],
-
   "host_permissions": [
     "<all_urls>",
     "https://api.anthropic.com/",
@@ -33,46 +29,59 @@
     "https://*.auth.us-east-1.amazoncognito.com/*",
     "https://*.s3.us-east-1.amazonaws.com/*"
   ],
-
   "background": {
     "service_worker": "background.js",
     "type": "module"
   },
-
   "side_panel": {
     "default_path": "chat.html"
   },
-
   "action": {
     "default_title": "Orchard"
   },
-
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["ContentScripts/contentScript.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "ContentScripts/contentScript.js"
+      ],
       "run_at": "document_start",
       "all_frames": true
     },
     {
-      "matches": ["*://admin.shopify.com/*"],
-      "js": ["ContentScripts/shopifyCsrfSniffer.js"],
+      "matches": [
+        "*://admin.shopify.com/*"
+      ],
+      "js": [
+        "ContentScripts/shopifyCsrfSniffer.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN",
       "all_frames": false
     }
   ],
-
   "web_accessible_resources": [
     {
-      "resources": ["ContentScripts/*", "assets/*", "Sidepanel/*", "studio.html", "chat.html", "canvas.html", "sidepanel.html", "popup.html"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "ContentScripts/*",
+        "assets/*",
+        "Sidepanel/*",
+        "studio.html",
+        "chat.html",
+        "canvas.html",
+        "sidepanel.html",
+        "popup.html"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ],
-
   "icons": {
-    "16":  "assets/icon16.png",
-    "48":  "assets/icon48.png",
+    "16": "assets/icon16.png",
+    "48": "assets/icon48.png",
     "128": "assets/icon128.png"
   }
 }

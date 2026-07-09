@@ -43,6 +43,8 @@ import { loadProposals, addProposals, decideProposal, pendingCounts } from './Se
 import { filterRejectedRepeats, rejectionContext, supersedePlan } from './Core/proposals.js';   // FL-9 (v1370) — rejections stick; v1381 — pendings survive sweeps
 import { appendLedger, loadLedger } from './Services/Storage/ActionLedgerStore.js';   // FL-4 — instance-keyed ledger
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
+import { recipeToLeg } from './Core/connectorLeg.js';   // OV-4 — a stored ride recipe → an invokable leg (for the Overview workbench's `test`)
+import { assessLegTest } from './Core/legTestVerdict.js';   // OV-4 — the structural pass/fail verdict for a leg test (deterministic, like the trial gate)
 import { recipeLegs, coerceParams, fillBody, fillEndpoint } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template
 import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 — header-replay writes: json/form/raw + contentType (review I)
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
@@ -83,6 +85,7 @@ let _currentConversationConfig = { writePolicy: 'gated' };   // v2.74.1172 (CV-6
 let _setupState = null;   // AS-2 (v2.74.1188) — the in-progress guided-setup flow: { convId, spec } while connecting an app to its site; null otherwise. While set (for the current conversation), the modal intercept at the top of sendChatMessage routes the next typed message into advanceSetup.
 let _setupPick = null;      // AS-5 (v2.74.1406) — the catalog-setup multi-select working set: Map<key,{origin,label}> while picking sites; null when not in catalog mode.
 let _setupCatalog = null;   // AS-5 — the last-rendered capability catalog list (so a typed-in site appends to it + re-renders with the pick checked).
+let _setupCatalogMsg = null;   // AS-5 (v2.74.1411) — the DOM message holding the catalog cards + Confirm/Cancel bar, removed on confirm/cancel/re-render (only ever one on screen).
 let _currentConversationAppId = null;   // AL-3b (v2.74.1193) — the current app's appId = its TYPE (preset id); object-model / canvas resolve through it. Tracked at create / rehydrate / clear.
 let _currentConversationInstanceId = null;   // AP-0 (v2.74.1211) — the per-INSTANCE identity (unique per configured app); the goal-memory key, so two apps of one type don't share learning. Tracked alongside appId.
 // AP-0 — THE goal-memory key: the per-instance id when present, else the app TYPE (legacy apps with no instanceId, e.g.
@@ -134,7 +137,7 @@ function _clearCurrentConversation() {
   _currentConversationKind = 'agent';   // v2.74.1029 — a fresh/blank surface is always an agent conversation
   _currentConversationSeed = '';        // v2.74.1163 (CV-2b) — clear the IL seed on a fresh surface
   _currentConversationConfig = { writePolicy: 'gated' };   // v2.74.1172 (CV-6) — a fresh/blank surface is unrestricted (gated)
-  _setupState = null; _setupPick = null; _setupCatalog = null;   // AS-2/AS-5 (v2.74.1188/.1406) — drop any in-progress setup flow + its multi-select picks when the surface changes
+  _setupState = null; _setupPick = null; _setupCatalog = null; _setupCatalogMsg = null;   // AS-2/AS-5 (v2.74.1188/.1406) — drop any in-progress setup flow + its multi-select picks when the surface changes
   _currentConversationAppId = null;   // AL-3b — clear the app type on a fresh surface
   _currentConversationInstanceId = null;   // AP-0 — clear the per-instance memory key too
   _currentConversationPresetId = null;     // §10.2 — clear the preset type too
@@ -1504,7 +1507,10 @@ async function _createAppConversation(def, { setup = false } = {}) {
   void _seedInstanceMemory(conv.instanceId, typeId);
   // FL-6b (v1356) — a cadence stated in the def's seed arms the clock at creation (quiet: the note persists to
   // the thread record; the empty-state greeting stays). Explicit args — never the globals across the await.
-  void _applySeedDirectives({ quiet: true, convId: conv.id, instanceId: conv.instanceId, seed: def.seed || '' });
+  // AS-5 (v2.74.1408) — but the app's SITES are a SEED PARAMETER: an app that still needs SETUP must NOT arm its
+  // seed (cadence/quota/sweep) over an unset domain — defer it to _bankSetup, which fires it once the sites are
+  // confirmed. Configured / no-setup apps apply it now, unchanged.
+  if (!(setup && !configured)) void _applySeedDirectives({ quiet: true, convId: conv.id, instanceId: conv.instanceId, seed: def.seed || '' });
   // The app's empty state: greet with the app, no generic suggestion cards.
   $('messages').innerHTML = '';
   $('messages').classList.add('hidden');
@@ -1919,8 +1925,11 @@ async function _capableSitesCatalog() {
 // picks it (bind directly — login is verified at RUN time, not setup); a connector class with no instance guides the
 // user to type its address (which appends to the catalog + auto-picks). Confirm drives the pure spec to done + banks.
 function _renderSetupCatalog(catalog) {
+  try { if (_setupCatalogMsg) _setupCatalogMsg.remove(); } catch { /* */ }   // AS-5 (v1411) — only ever ONE catalog on screen; a re-render / reshow replaces the prior
   const list = Array.isArray(catalog) ? catalog : [];
   const msg = appendMessage({ role: 'assistant', body: '' });
+  _setupCatalogMsg = msg;
+  try { delete msg.dataset.messageId; } catch { /* */ }   // AS-5 (v1411) — the picker is TRANSIENT DOM (cards + buttons), like the workflows/distill menus: no messageId → _orchFinalize/_persistMessageUpdate no-op, so it's NEVER saved. Persisting it left a bare "Select the sites…" record that re-appeared (cardless) after the connect message on any thread re-render.
   _setMessageBody(msg, list.length ? 'Select the sites this app works on, then **Confirm**:' : 'No sites with saved capabilities yet — type a site address (e.g. `deako.zendesk.com`) to add one, then **Confirm**.', { markdown: true });
   const body = msg.querySelector('.message-content') || msg;
   const confirmBtn = _mkBtn('✓ Confirm', () => { void _confirmSetupCatalog(); });
@@ -1950,7 +1959,7 @@ function _renderSetupCatalog(catalog) {
   }
   const bar = document.createElement('div'); bar.className = 'orch-action-bar';
   bar.appendChild(confirmBtn);
-  bar.appendChild(_mkBtn('Cancel', () => { _setupState = null; _setupPick = null; _setupCatalog = null; _persistSetupState(); _orchFinalize(appendMessage({ role: 'assistant', body: 'Setup cancelled — type “setup” to start again.' })); }));
+  bar.appendChild(_mkBtn('Cancel', () => { try { if (_setupCatalogMsg) _setupCatalogMsg.remove(); } catch { /* */ } _setupState = null; _setupPick = null; _setupCatalog = null; _setupCatalogMsg = null; _persistSetupState(); _orchFinalize(appendMessage({ role: 'assistant', body: 'Setup cancelled — type “setup” to start again.' })); }));
   body.appendChild(bar);
   sync();
   _orchFinalize(msg);
@@ -1969,6 +1978,8 @@ async function _reshowSetupCatalog() {
 // the tab for sign-in), so you can pick sites you aren't logged into right now.
 async function _confirmSetupCatalog() {
   if (!_setupState || !_setupPick || !_setupPick.size) return;
+  try { if (_setupCatalogMsg) _setupCatalogMsg.remove(); } catch { /* */ }   // AS-5 (v1411) — the option cards + Confirm/Cancel bar go once the selection is confirmed
+  _setupCatalogMsg = null;
   let spec = _setupState.spec;
   for (const conn of _setupPick.values()) {
     if (conn && conn.origin) { try { ({ spec } = advanceSetup(spec, { origin: conn.origin, label: conn.label })); } catch { /* */ } }
@@ -2073,9 +2084,25 @@ async function _bankSetup(step) {
   const om = typeDef && typeDef.objectModel;
   const eg = (typeDef && Array.isArray(typeDef.starters) && typeDef.starters.find(Boolean))
     || (om && om.plural ? `get my ${om.plural}` : '');
-  const egText = eg ? ` — e.g. “${eg}”` : '';
-  _setMessageBody(msg, `**Connected to ${where}.** Now just tell me what to do${egText} — and I’ll learn each task the first time, then recall it when you ask again (even worded differently).`, { markdown: true });
+  const _connectMsg = (example) => `**Connected to ${where}.** Now just tell me what to do${example ? ` — e.g. “${example}”` : ''} — and I’ll learn each task the first time, then recall it when you ask again (even worded differently).`;
+  _setMessageBody(msg, _connectMsg(eg), { markdown: true });
   _orchFinalize(msg);
+  // AS-5c (v2.74.1409) — upgrade the example to a DYNAMIC compound instruction grounded in the PICKED sites (async,
+  // non-blocking — the static eg showed instantly). Spans ≥2 of the chosen sites, so the first thing you see is a
+  // concrete cross-site task for THIS domain, not a generic starter. Fails safe to the static example.
+  (async () => {
+    try {
+      const siteLabels = (Array.isArray(cfg.connections) ? cfg.connections : []).map((c) => c && (c.label || c.origin)).filter(Boolean);
+      if (siteLabels.length) {
+        const r = await _orchReq('SUGGEST_SETUP_EXAMPLE', { appName: (conv && conv.title) || (typeDef && typeDef.name) || 'this app', role: (conv && conv.seed) || _currentConversationSeed || '', sites: siteLabels });
+        if (r && r.success !== false && r.example) _setMessageBody(msg, _connectMsg(r.example), { markdown: true });
+      }
+    } catch { /* keep the static example */ }
+  })();
+  // AS-5 (v2.74.1408) — NOW arm the seed (cadence / quota) — deferred from _createAppConversation to here so a
+  // scheduled sweep runs over the CONFIRMED site domain, never an empty set (the "seed fired before setup" bug the
+  // sites are a seed parameter). Visible: the "sweeping every …" note lands AFTER "Connected to …", in order.
+  try { await _applySeedDirectives({ quiet: false, convId: state.convId, instanceId: (conv && conv.instanceId) || null, seed: (conv && conv.seed) || _currentConversationSeed || '' }); } catch { /* */ }
   _refreshRailIfOpen().catch(() => {});
 }
 
@@ -3146,7 +3173,7 @@ async function _runConnectorLeg(leg, params, { tabId = null, groundId = null } =
   if (!plan || !plan.ok || !plan.channel) return { ok: false, error: 'no executor' };
   let res = null;
   try { res = await _orchReq(plan.channel, plan.payload); } catch (e) { return { ok: false, error: (e && e.message) || 'failed' }; }
-  if (!res || res.success === false) return { ok: false, error: res && res.error, hint: res && res.hint };
+  if (!res || res.success === false) return { ok: false, error: res && res.error, hint: res && res.hint, detail: res && res.detail };
   return { ok: true, value: res.value };
 }
 
@@ -3387,6 +3414,130 @@ async function _showRideOps() {
   }
   const lines = ops.map((o) => `• **${o.name}** — \`${o.sha8}…\`${o.handle ? ` (store ${o.handle})` : ''} — ready to replay`);
   _setMessageBody(m, `Captured write operations on **${r.origin}**:\n${lines.join('\n')}`, { markdown: true });
+  _orchFinalize(m);
+}
+
+// ─── OV (v2.74.1417, DESIGN_overview.md) — the OVERVIEW LEG WORKBENCH ────────────────────────────────────────────
+// Overview is the developer plane where legs are AUTHORED, TESTED, and VERIFIED before an app consumes them (apps are
+// pure consumers — AS-5). Four terse, numbered console commands (mirroring `ops`/`approve N`):
+//   `legs`                                   — the cross-Ground inventory, numbered, work-queue first
+//   `test N`                                 — invoke a READ leg live → a STRUCTURAL verdict (deterministic, like the trial gate)
+//   `verify N` / `arm N`                     — arm a leg (§18 review→accepted) so an app can use it
+//   `add leg on <site>: <Name> | <M> <path>`  — author a ride recipe by hand (the no-code CONNECTOR_RECIPES editor)
+// SAFETY: `test` NEVER auto-fires a write. Only GET (auto-safety) reads invoke; a write is armed here but fired ONLY
+// through an app's HITL confirm gate (§9). The invoke reuses the app's own session-ride path (_runConnectorLeg).
+let _legWorkbench = { legs: [], at: 0 };   // render-order (1-based) → leg ref, for `test N` / `verify N`
+
+function _legLine(e) {
+  const badge = e.verified ? '✓ armed' : e.reviewState === 'pending' ? '○ pending' : e.reviewState === 'rejected' ? '✗ rejected' : '· disabled';
+  const risk = (e.safetyClass && e.safetyClass !== 'auto') ? ` · ${e.safetyClass}` : '';
+  return `**${e.name || e.id}** — ${e.method || '—'} · ${e.class}${risk} — ${badge}${e.host ? `  · ${e.host}` : ''}`;
+}
+
+// Parse trailing `k=v k2=v2` params off a `test N …` command (unquoted; v1). PURE.
+function _parseKvParams(s) {
+  const out = {};
+  for (const tok of String(s || '').trim().split(/\s+/).filter(Boolean)) {
+    const i = tok.indexOf('='); if (i > 0) out[tok.slice(0, i)] = tok.slice(i + 1);
+  }
+  return out;
+}
+
+// `legs` — the cross-Ground leg inventory (OV-3). Numbers every leg (work-queue first) into `_legWorkbench` so
+// `test N` / `verify N` can address them. Read-only.
+async function _showLegOverview() {
+  const m = appendMessage({ role: 'assistant', body: '' });
+  const r = await _orchReq('GET_LEG_OVERVIEW', {});
+  if (!r || r.success === false || !r.overview) { _setMessageBody(m, `Couldn’t read the leg inventory${r && r.error ? ` — ${r.error}` : ''}.`); _orchFinalize(m); return; }
+  const ov = r.overview;
+  const legs = Array.isArray(ov.legs) ? ov.legs : [];
+  const queue = Array.isArray(ov.queue) ? ov.queue : [];
+  const qKey = (e) => `${e.groundId}::${e.class}::${e.id}`;
+  const qSet = new Set(queue.map(qKey));
+  const rest = legs.filter((e) => !qSet.has(qKey(e)));
+  const ordered = [...queue, ...rest];
+  _legWorkbench = { legs: ordered, at: Date.now() };
+  if (!ordered.length) { _setMessageBody(m, 'No legs yet — author one with `add leg on <site>: <Name> | <METHOD> <endpoint>`, or teach/harvest a site so its capabilities accrue here.', { markdown: true }); _orchFinalize(m); return; }
+  const c = ov.counts || {};
+  const nSites = (ov.grounds || []).length;
+  const lines = [`**Legs** — ${c.total || ordered.length} across ${nSites} site${nSites === 1 ? '' : 's'} · ${c.verified || 0} verified · ${queue.length} need${queue.length === 1 ? 's' : ''} work`, ''];
+  let n = 0;
+  if (queue.length) { lines.push('**Needs work**'); for (const e of queue) { n += 1; lines.push(`\`${n}\` ${_legLine(e)}`); } lines.push(''); }
+  if (rest.length) { lines.push('**Ready**'); for (const e of rest) { n += 1; lines.push(`\`${n}\` ${_legLine(e)}`); } lines.push(''); }
+  lines.push('Test a read with `test N`, arm with `verify N`, or `add leg on <site>: <Name> | <METHOD> <endpoint>`.');
+  _setMessageBody(m, lines.join('\n'), { markdown: true });
+  _orchFinalize(m);
+}
+
+// `test N` — invoke a leg live and render a STRUCTURAL verdict (OV-4). Scoped to RIDE reads (auto safety): a write is
+// never auto-fired from the workbench (it's armed here + fired through an app's confirm gate). Emits LEG_TEST ▸.
+async function _testLeg(n, params) {
+  const m = appendMessage({ role: 'assistant', body: '' });
+  const e = _legWorkbench.legs[n - 1];
+  if (!e) { _setMessageBody(m, `No leg #${n} — run \`legs\` to list them.`, { markdown: true }); _orchFinalize(m); return; }
+  if (e.class !== 'ride') { _setMessageBody(m, `Leg #${n} “${e.name}” is a **${e.class}** leg — the workbench tests session-ride legs here. Drive legs are tested in Studio; broker legs via the connector panel.`, { markdown: true }); _orchFinalize(m); return; }
+  if (e.safetyClass !== 'auto') {   // SAFETY: a write/POST is never auto-fired — arm it here, fire it through an app's confirm gate (§9)
+    _setMessageBody(m, `Leg #${n} “${e.name}” is a **${e.method || 'write'}** (${e.safetyClass}). The workbench auto-tests **reads**; a write is armed here (\`verify ${n}\`) and only ever fired through an app’s confirm gate — never auto-fired. Run it from an app to validate the write end-to-end.`, { markdown: true }); _orchFinalize(m); return;
+  }
+  const rr = await _orchReq('GET_RIDE_RECIPES', { groundId: e.groundId, origin: e.host });
+  const recipe = ((rr && rr.recipes) || []).find((x) => x && x.id === e.id);
+  if (!recipe) { _setMessageBody(m, `Couldn’t load leg #${n}’s recipe.`); _orchFinalize(m); return; }
+  const leg = recipeToLeg({ ...recipe, app: recipe.app || recipe.origin || e.host }, { trusted: true });
+  if (!leg || !leg.tool) { _setMessageBody(m, `Leg #${n} isn’t invokable — its recipe is incomplete (needs an endpoint + origin).`); _orchFinalize(m); return; }
+  const _m = String(leg.tool.method || 'GET').toUpperCase();
+  if (_m !== 'GET' && _m !== 'HEAD') {   // defense-in-depth: even if safetyClass/method disagree, NEVER auto-fire a non-GET (§9 write belt)
+    _setMessageBody(m, `Leg #${n} “${e.name}” is a **${_m}** — the workbench never auto-fires a non-GET. Arm it with \`verify ${n}\` and run it through an app’s confirm gate.`, { markdown: true }); _orchFinalize(m); return;
+  }
+  const need = ((recipe.params) || []).filter((p) => p && p.required && !(params && Object.prototype.hasOwnProperty.call(params, p.name))).map((p) => p.name);
+  if (need.length) { _setMessageBody(m, `**${e.name}** needs ${need.map((x) => `\`${x}\``).join(', ')} — run \`test ${n} ${need.map((x) => `${x}=…`).join(' ')}\`.`, { markdown: true }); _orchFinalize(m); return; }
+  _setMessageBody(m, `Testing **${e.name}** — ${leg.tool.method} ${leg.tool.endpoint} on ${e.host}…`, { markdown: true });
+  const res = await _runConnectorLeg(leg, params || {}, { groundId: e.groundId });
+  const verdict = assessLegTest({ success: res.ok, value: res.value, error: res.error, hint: res.hint, detail: res.detail }, {});
+  try { _orchLog(`LEG_TEST ▸ #${n} ${e.id} → ${verdict.pass ? 'PASS' : 'FAIL'} (${verdict.verdict}${verdict.count ? `, ${verdict.count} rec` : ''})`); } catch { /* */ }
+  const head = verdict.pass ? `✓ **${e.name}** works — ${verdict.summary}` : `✗ **${e.name}** — ${verdict.summary}`;
+  const detail = (!verdict.pass && verdict.detail) ? `\n\n> ${verdict.detail}` : '';
+  const hint = (!verdict.pass && (verdict.verdict === 'not-logged-in' || verdict.verdict === 'no-csrf')) ? `\n\nOpen a logged-in **${e.host}** tab and try again.` : '';
+  const arm = (verdict.pass && !e.verified) ? `\n\nArm it for apps with \`verify ${n}\`.` : '';
+  _setMessageBody(m, `${head}${detail}${hint}${arm}`, { markdown: true });
+  _orchFinalize(m);
+}
+
+// `verify N` / `arm N` — arm a leg (§18 review → accepted) so an app can consume it (OV-6). Emits LEG_VERIFY ▸.
+async function _verifyLeg(n) {
+  const m = appendMessage({ role: 'assistant', body: '' });
+  const e = _legWorkbench.legs[n - 1];
+  if (!e) { _setMessageBody(m, `No leg #${n} — run \`legs\` first.`, { markdown: true }); _orchFinalize(m); return; }
+  if (e.class !== 'ride') { _setMessageBody(m, `Leg #${n} is a **${e.class}** leg — arm it from its own surface (Studio / connector panel).`, { markdown: true }); _orchFinalize(m); return; }
+  if (e.verified) { _setMessageBody(m, `**${e.name}** is already armed — apps can use it.`, { markdown: true }); _orchFinalize(m); return; }
+  const r = await _orchReq('EDIT_RIDE_RECIPE', { groundId: e.groundId, id: e.id, op: 'review', value: 'accept' });
+  if (!r || r.success === false) { _setMessageBody(m, `Couldn’t arm it — ${(r && r.error) || 'error'}.`); _orchFinalize(m); return; }
+  e.reviewState = 'accepted'; e.armable = true; e.verified = true;   // reflect locally so a follow-up `test`/`legs` render is consistent
+  try { _orchLog(`LEG_VERIFY ▸ #${n} ${e.id} → armed (${e.safetyClass})`); } catch { /* */ }
+  const note = (e.safetyClass !== 'auto') ? '  It still asks for your confirm on each write (§9).' : '';
+  _setMessageBody(m, `✓ Armed **${e.name}** — apps can now use it.${note}`, { markdown: true });
+  _orchFinalize(m);
+}
+
+// `add leg on <site>: <Name> | <METHOD> <endpoint>` — author a ride recipe by hand (OV-5). Resolves <site> to a known
+// ground, sends the spec to ADD_RIDE_RECIPE (validate + method-derived safety, lands pending). Never invokes.
+async function _addLeg(host, spec) {
+  const m = appendMessage({ role: 'assistant', body: '' });
+  const gr = await _orchReq('GET_LEG_OVERVIEW', {});
+  const grounds = (gr && gr.overview && gr.overview.grounds) || [];
+  const h = String(host || '').toLowerCase();
+  const g = h
+    ? (grounds.find((x) => x && x.host && x.host.toLowerCase() === h) || grounds.find((x) => x && x.host && x.host.toLowerCase().includes(h)))
+    : (grounds.length === 1 ? grounds[0] : null);
+  if (!g) {
+    _setMessageBody(m, h
+      ? `I don’t have a ground for **${host}** yet. Open the site and teach or harvest one capability first — it’ll appear in \`legs\`, then you can add more by hand.`
+      : 'Say which site: `add leg on <site>: <Name> | <METHOD> <endpoint>`.', { markdown: true });
+    _orchFinalize(m); return;
+  }
+  const r = await _orchReq('ADD_RIDE_RECIPE', { groundId: g.groundId, origin: g.host, spec });
+  if (!r || r.success === false) { _setMessageBody(m, `Couldn’t add it — ${(r && r.error) || 'error'}.`, { markdown: true }); _orchFinalize(m); return; }
+  const rec = r.recipe || {};
+  _setMessageBody(m, `Added **${rec.name}** (${rec.method} ${rec.endpoint}) on ${g.host} — it’s **pending**. Run \`legs\`, \`test\` it, then \`verify\` to arm it for apps.`, { markdown: true });
   _orchFinalize(m);
 }
 
@@ -6226,6 +6377,37 @@ async function sendChatMessage() {
     appendMessage({ role: 'user', body: text });
     await _clearCurrentChat();
     return;
+  }
+  // OV (v2.74.1417, DESIGN_overview.md) — the Overview LEG WORKBENCH commands (author / test / verify legs before an
+  // app consumes them). Numbered + terse, like `ops` / `approve N`. `legs` populates the number index the others use.
+  if (/^legs\s*$/i.test(text)) {
+    input.value = ''; _autosizeInput();
+    appendMessage({ role: 'user', body: text });
+    await _showLegOverview();
+    return;
+  }
+  {
+    const mAdd = text.match(/^add\s+leg(?:\s+on\s+([^\s:][^:]*?))?\s*:\s*(.+)$/i);
+    if (mAdd) {
+      input.value = ''; _autosizeInput();
+      appendMessage({ role: 'user', body: text });
+      await _addLeg((mAdd[1] || '').trim(), mAdd[2].trim());
+      return;
+    }
+    const mTest = text.match(/^test\s+(?:leg\s+)?#?(\d+)\s*(.*)$/i);
+    if (mTest) {
+      input.value = ''; _autosizeInput();
+      appendMessage({ role: 'user', body: text });
+      await _testLeg(parseInt(mTest[1], 10), _parseKvParams(mTest[2]));
+      return;
+    }
+    const mVerify = text.match(/^(?:verify|arm)\s+(?:leg\s+)?#?(\d+)\s*$/i);
+    if (mVerify) {
+      input.value = ''; _autosizeInput();
+      appendMessage({ role: 'user', body: text });
+      await _verifyLeg(parseInt(mVerify[1], 10));
+      return;
+    }
   }
   // FL-1e (v1352) — `show work`: the last run's step-by-step audit (a terse console command; NL "what did you
   // just do" / "why no proposals" routes through the SHOW_WORK leg).

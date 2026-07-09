@@ -47,8 +47,9 @@ describe('capableSitesCatalog — concrete sites + the class MERGE', () => {
     assert.ok(site && site.kind === 'site' && site.concrete === true);
     assert.equal(site.origin, 'https://deako.zendesk.com');
     assert.equal(site.groundId, 'g1');
+    assert.equal(site.label, 'Deako Zendesk');                       // derived alias (org + SaaS name)
     assert.ok(site.offers.includes('5 taught'));
-    assert.ok(site.offers.some((o) => o.startsWith('Zendesk')));     // tagged with the curated offer
+    assert.ok(site.offers.includes('reads + writes'));               // curated offer, deduped (the label already names Zendesk)
     // shopify has no instance → stays a connector class
     assert.ok(cat.some((e) => e.key === 'connector:shopify'));
   });
@@ -74,6 +75,29 @@ describe('capableSitesCatalog — concrete sites + the class MERGE', () => {
     const kinds = cat.map((e) => e.kind);
     assert.ok(kinds.indexOf('site') < kinds.indexOf('connector'));
     assert.ok(kinds.indexOf('connector') < kinds.indexOf('broker'));
+  });
+  it('AS-5b — a well-known host gets a brand ALIAS; a class-name offer prefix equal to the label is deduped; a business subdomain keeps its host', () => {
+    const cat = capableSitesCatalog({ curated: CUR, broker: BRK, linkedProviders: ['hubspot'],
+      grounds: [{ url: 'https://youtube.com/feed', caps: 3 }, { url: 'https://mail.google.com', caps: 1 }, { url: 'https://calendar.google.com', caps: 2 }],
+      connections: [{ origin: 'https://admin.shopify.com/store/deako', label: 'admin.shopify.com' }, { origin: 'https://deako.zendesk.com', label: 'deako.zendesk.com' }] });
+    assert.equal(cat.find((e) => e.host === 'youtube.com').label, 'YouTube');
+    assert.equal(cat.find((e) => e.host === 'mail.google.com').label, 'Gmail');
+    assert.equal(cat.find((e) => e.host === 'calendar.google.com').label, 'Google Calendar');   // aliased from the broker catalog's own label
+    const shop = cat.find((e) => e.host === 'admin.shopify.com');
+    assert.equal(shop.label, 'Shopify');                                    // aliased
+    assert.ok(shop.offers.includes('writes'));                             // "Shopify · writes" → deduped to "writes"
+    assert.ok(!shop.offers.some((o) => o.startsWith('Shopify')));
+    const zd = cat.find((e) => e.host === 'deako.zendesk.com');
+    assert.equal(zd.label, 'Deako Zendesk');                                // DERIVED (org + SaaS), not the raw host
+    assert.ok(zd.offers.includes('reads + writes'));                       // class offer deduped (label already names Zendesk)
+  });
+  it('AS-5b — DERIVES a readable name for a business/custom host with no curated brand (SaaS org, S3 app label, sub.org)', () => {
+    const cat = capableSitesCatalog({ curated: [], broker: [],
+      grounds: [{ url: 'https://deako-cstool-dev.s3-website-us-east-1.amazonaws.com', caps: 2 }],
+      connections: [{ origin: 'https://support.deako.com', label: 'support.deako.com' }, { origin: 'https://deako.zendesk.com', label: 'deako.zendesk.com' }] });
+    assert.equal(cat.find((e) => e.host === 'support.deako.com').label, 'Deako Support');           // sub.org.tld → "Org Sub"
+    assert.equal(cat.find((e) => e.host === 'deako.zendesk.com').label, 'Deako Zendesk');           // known SaaS → "Org Service"
+    assert.equal(cat.find((e) => e.host.startsWith('deako-cstool-dev')).label, 'Deako CSTool');     // S3 app label, env dropped, acronym cased
   });
 });
 

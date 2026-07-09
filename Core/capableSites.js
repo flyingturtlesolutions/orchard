@@ -31,6 +31,55 @@ const _title = (app) => String(app || '').split(/[-_ ]+/).filter(Boolean).map((w
 const _offer = (cc) => (cc.reads && cc.writes) ? 'reads + writes' : cc.writes ? 'writes' : 'reads';
 // A concrete Ground's display label — its host, or its stored name if that's not a raw uuid-ish token.
 const _groundLabel = (g) => { const host = _host(g && (g.origin || g.url)); if (host) return host; const n = String((g && g.name) || '').trim(); return (n && !/^[0-9a-f]{6,}$/i.test(n)) ? n : (host || 'site'); };
+// AS-5b (v2.74.1409) — brand ALIASES for brevity (youtube.com → "YouTube", calendar.google.com → "Google Calendar").
+// EXACT-host match only: a business subdomain (deako.zendesk.com) keeps its host — the instance IS the identifier, and
+// its class offer ("Zendesk · reads + writes") already names the product. Seeded from the broker catalog's own labels
+// + a small consumer/product table.
+const _EXTRA_ALIAS = {
+  'youtube.com': 'YouTube', 'mail.google.com': 'Gmail', 'gmail.com': 'Gmail', 'drive.google.com': 'Google Drive',
+  'sheets.google.com': 'Google Sheets', 'meet.google.com': 'Google Meet', 'admin.shopify.com': 'Shopify',
+  'github.com': 'GitHub', 'notion.so': 'Notion', 'www.notion.so': 'Notion', 'linkedin.com': 'LinkedIn',
+  'x.com': 'X', 'twitter.com': 'X', 'reddit.com': 'Reddit', 'app.slack.com': 'Slack', 'figma.com': 'Figma',
+};
+function _aliasMap(broker) {
+  const m = { ..._EXTRA_ALIAS };
+  for (const b of (Array.isArray(broker) ? broker : [])) for (const h of (Array.isArray(b.hosts) ? b.hosts : [])) { const k = _host(h); if (k && b.label && !m[k]) m[k] = b.label; }
+  return m;
+}
+
+// AS-5b (v2.74.1410) — DERIVE a readable alias for a host with no curated brand match, so business / custom sites read
+// as names too: "support.deako.com" → "Deako Support", "deako.zendesk.com" → "Deako Zendesk", and
+// "deako-cstool-dev.s3-website-us-east-1.amazonaws.com" → "Deako CSTool". Heuristic — known-SaaS → "<Org> <Service>";
+// hosting infra (S3 / Heroku / Netlify / …) → the deployed app label; else the registrable org + a meaningful
+// subdomain. Env + infra tokens dropped, a small acronym set upper-cased. Purely COSMETIC — never touches origin/match.
+const _SAAS = { 'zendesk.com': 'Zendesk', 'myshopify.com': 'Shopify', 'atlassian.net': 'Jira', 'slack.com': 'Slack', 'hubspot.com': 'HubSpot', 'freshdesk.com': 'Freshdesk', 'intercom.com': 'Intercom', 'salesforce.com': 'Salesforce' };
+const _ENV_TOK = new Set(['dev', 'development', 'staging', 'stage', 'stg', 'prod', 'production', 'test', 'qa', 'demo', 'sandbox', 'uat', 'local', 'app', 'admin', 'www']);
+const _ACRONYM = new Set(['cs', 'api', 'ui', 'ux', 'crm', 'cms', 'hr', 'seo', 'ai', 'ml']);
+function _titleTok(t) {
+  if (!t) return '';
+  if (_ACRONYM.has(t)) return t.toUpperCase();
+  for (const a of _ACRONYM) if (t.length > a.length && t.startsWith(a)) { const r = t.slice(a.length); return a.toUpperCase() + r.charAt(0).toUpperCase() + r.slice(1); }   // "cstool" → "CSTool"
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+function _titleWords(s) {
+  const seen = new Set(); const out = [];
+  for (const t of String(s || '').toLowerCase().split(/[.\-_\s]+/)) { if (!t || _ENV_TOK.has(t) || seen.has(t)) continue; seen.add(t); out.push(_titleTok(t)); }
+  return out.join(' ');
+}
+function _prettyHost(host) {
+  const h = String(host || '').toLowerCase().replace(/^www\./, '').replace(/[/?#].*$/, '');
+  if (!h) return '';
+  for (const [suf, name] of Object.entries(_SAAS)) if (h === suf || h.endsWith('.' + suf)) {
+    const org = h.slice(0, h.length - suf.length).replace(/\.$/, '').split('.').pop();      // the label just before the SaaS domain
+    return org ? `${_titleWords(org)} ${name}` : name;
+  }
+  let core = null;
+  const s3 = h.match(/^([^.]+)\.s3[.-]/);                                                    // <app>.s3-website-… / <app>.s3.…
+  if (s3) core = s3[1];
+  else { const plat = h.match(/^(.+?)\.(herokuapp\.com|netlify\.app|vercel\.app|web\.app|github\.io|pages\.dev|onrender\.com|fly\.dev|amazonaws\.com)$/); if (plat) core = plat[1].split('.').pop(); }
+  if (core == null) { const p = h.split('.'); core = (p.length >= 3) ? `${p[p.length - 2]} ${p[0]}` : (p[0] || h); }   // sub.org.tld → "org sub"; org.tld → "org"
+  return _titleWords(core) || h;
+}
 
 /**
  * Assemble the capability catalog. PURE.
@@ -81,16 +130,21 @@ export function capableSitesCatalog({ curated = CONNECTOR_RECIPES, broker = BROK
   }
   for (const c of (Array.isArray(connections) ? connections : [])) { if (c && c.origin) addConcrete(c.origin, c.label && String(c.label), 0, null); }
 
-  // 4) MERGE: emit each concrete site once, tagged with any curated/broker class it belongs to.
+  // 4) MERGE: emit each concrete site once, ALIASED for brevity + tagged with any curated/broker class it belongs to.
+  const amap = _aliasMap(broker);
   const usedApp = new Set();      // curated app keys represented by a concrete instance
   const usedBroker = new Set();   // broker hosts represented by a concrete instance
   const out = [];
   for (const s of concrete.values()) {
+    // brand alias for a well-known host → a real custom connection label → a DERIVED pretty name → the raw host.
+    const label = amap[s.host] || (s.label && s.label !== s.host ? s.label : _prettyHost(s.host)) || s.host;
     const offers = [];
     if (s.caps > 0) offers.push(`${s.caps} taught`);
     for (const [app, cc] of connClasses) if (_inClass(s.host, cc.host)) { usedApp.add(app); offers.push(`${cc.label} · ${_offer(cc)}`); }
     for (const bc of brokerClasses) if (_inClass(s.host, bc.host)) { usedBroker.add(bc.host); offers.push(`${bc.label} · ${bc.tools} tools`); }
-    out.push({ key: `site:${s.host}`, origin: s.origin, host: s.host, label: s.label, kind: 'site', offers, concrete: true, needsInstance: false, groundId: s.groundId, provider: null });
+    // dedup a class-name prefix the label already NAMES ("Deako Zendesk" + "Zendesk · reads + writes" → "reads + writes")
+    const cleaned = offers.map((o) => { const m = o.match(/^(.+?) · (.+)$/); return (m && label.toLowerCase().includes(m[1].toLowerCase())) ? m[2] : o; });
+    out.push({ key: `site:${s.host}`, origin: s.origin, host: s.host, label, kind: 'site', offers: cleaned, concrete: true, needsInstance: false, groundId: s.groundId, provider: null });
   }
   // 5) curated classes with NO concrete instance → an abstract entry (needs a typed instance on select).
   for (const [app, cc] of connClasses) {

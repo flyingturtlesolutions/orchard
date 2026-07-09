@@ -18,6 +18,8 @@ import { evaluatePostcondition } from '../../Core/postcondition.js';
 import { coerceRecentTurns as _recentTurnsPayload } from '../../Core/recentTurns.js';   // Q1 — coerce + bound the panel-sent recent-turn window (untrusted; fenced as data downstream)
 import { CONNECTOR_RECIPES } from '../../Core/connectorRecipes.js';   // §18 — the curated catalog seeded into a Ground's ride-recipe collection
 import { seedFromCatalog as seedRideFromCatalog, setEnabled as rideSetEnabled, review as rideReview, downgradeSafety as rideDowngradeSafety, editMeta as rideEditMeta, mergeRecipes as rideMergeRecipes, acceptPendingReads as rideAcceptPendingReads } from '../../Core/rideRecipe.js';   // §18 — the per-Ground ride-recipe transforms (safety enforced here, not the UI)
+import { buildLegOverview } from '../../Core/legOverview.js';   // OV-1 (DESIGN_overview.md) — the cross-Ground leg inventory + work queue for the Overview workbench
+import { buildManualRecipe, parseLegSpec } from '../../Core/manualRecipe.js';   // OV-5 — author a ride recipe BY HAND (validate + method-derived safety, lands pending)
 import { recipesFromHarvest } from '../../Core/recipeFromHarvest.js';   // §17 — the crawl-as-generalizer: captures → proto ride-recipes (templated, method-classed, pending)
 import { applyPolish } from '../../Core/recipePolishPrompt.js';   // §17 — apply an LLM polish (name/does/param-names) onto a proto — the SAFE relabel (never touches method/safety)
 import { recipesFromObservedWrites } from '../../Core/recipeFromObservedWrite.js';   // CX-8 — a demo's captured WRITE requests → proto ride write-recipes (body templated; typed values → params, never banked)
@@ -908,6 +910,23 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, answer: shaped.answer, showList: shaped.showList });
       } catch (err) {
         Logger.error('background', `SHAPE_ANSWER failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // AS-5c (v2.74.1409) — SUGGEST_SETUP_EXAMPLE: a dynamic compound EXAMPLE instruction for a just-set-up app,
+    // grounded in the sites the user picked (shown as a starter, NEVER executed). Best-effort; null → the panel keeps
+    // its static example. Inputs are the app's own config (seed) + the picked site labels — no page/PII data.
+    SUGGEST_SETUP_EXAMPLE: async (payload, _sender, sendResponse) => {
+      try {
+        const appName = String(payload?.appName || '').slice(0, 100);
+        const role = String(payload?.role || '').slice(0, 500);
+        const sites = Array.isArray(payload?.sites) ? payload.sites.map((s) => String(s || '')).filter(Boolean).slice(0, 8) : [];
+        if (!sites.length) { sendResponse({ success: true, example: null }); return; }
+        const example = await AnthropicService.suggestSetupExample({ appName, role, sites });
+        sendResponse({ success: true, example: example || null });
+      } catch (err) {
+        Logger.error('background', `SUGGEST_SETUP_EXAMPLE failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },
@@ -2176,6 +2195,66 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, sites, linkedProviders });
       } catch (err) {
         try { Logger.error('background', `GET_CAPABLE_SITES failed: ${err.message}`); } catch { /* */ }
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // OV-2 (v2.74.1417, DESIGN_overview.md §3) — GET_LEG_OVERVIEW: the cross-Ground LEG INVENTORY for the Overview
+    // workbench (the developer plane where legs are authored + tested + verified BEFORE an app consumes them). Reads
+    // every Ground's RIDE recipes (the authored/harvested/curated tail — the testable + verifiable class) plus a
+    // read-only summary of its taught page-capabilities (the DRIVE class, developed in Studio), and runs the pure
+    // buildLegOverview rollup (counts + per-Ground breakdown + the work QUEUE = what still needs the developer).
+    // Read-only introspection over the user's OWN Grounds — mints/drives nothing.
+    GET_LEG_OVERVIEW: async (_payload, _sender, sendResponse) => {
+      try {
+        let grounds = [];
+        try { grounds = (await StorageManager.getAllGrounds()) || []; } catch { grounds = []; }
+        const shaped = [];
+        for (const g of (Array.isArray(grounds) ? grounds : [])) {
+          const gid = g && (g.id || g.groundId); if (!gid) continue;
+          let origin = null; try { origin = g.url ? new URL(g.url).origin : (g.origin || null); } catch { origin = g.origin || null; }
+          let host = g.name || String(gid); try { if (origin) host = new URL(origin).host; } catch { /* */ }
+          let recipes = []; try { recipes = (await ctx.readRideRecipes(gid)) || []; } catch { recipes = []; }
+          let caps = []; try { caps = ((await ctx.readSgCapabilities(gid)) || []).filter((c) => isActiveCapability(c)); } catch { caps = []; }
+          if (!recipes.length && !caps.length) continue;   // skip empty Grounds — the workbench lists only sites with legs
+          const driveSections = caps.length
+            ? [{ type: 'capabilities', label: 'Page capabilities', count: caps.length, entries: caps.map((c) => ({ id: c.id || c.capabilityId, name: c.name || c.label || c.intent || 'capability' })) }]
+            : [];
+          shaped.push({ groundId: gid, host, label: g.name || host, origin, recipes, driveSections });
+        }
+        const overview = buildLegOverview({ grounds: shaped });
+        Logger.info('background', `LEG_OVERVIEW ▸ ${overview.counts.total} leg(s) · ${overview.grounds.length} ground(s) · ${overview.counts.verified} verified · ${overview.queue.length} queued`);
+        sendResponse({ success: true, overview });
+      } catch (err) {
+        try { Logger.error('background', `GET_LEG_OVERVIEW failed: ${err.message}`); } catch { /* */ }
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // OV-5 (v2.74.1417, DESIGN_overview.md §3) — ADD_RIDE_RECIPE: author a leg BY HAND (the no-code replacement for
+    // editing CONNECTOR_RECIPES). Accepts either a compact one-line `spec` ("<Name> | <METHOD> <endpoint>") or explicit
+    // `fields`; buildManualRecipe validates and DERIVES the safety class from the METHOD (never the untrusted name — §9),
+    // landing the recipe `pending` (unverified) so it MUST be tested + accepted before an app can consume it. Merged
+    // (id-keyed upsert, keeps prior user edits) into the Ground's collection, then persisted. Authoring only — drives nothing.
+    ADD_RIDE_RECIPE: async (payload, _sender, sendResponse) => {
+      try {
+        const groundId = String(payload?.groundId ?? '').trim();
+        const origin = String(payload?.origin ?? '').trim();
+        if (!groundId) { sendResponse({ success: false, error: 'groundId required' }); return; }
+        const specStr = (typeof payload?.spec === 'string') ? payload.spec.trim() : '';
+        const spec = specStr ? parseLegSpec(specStr) : null;
+        if (specStr && !spec) { sendResponse({ success: false, error: 'spec format: "<Name> | <METHOD> <endpoint>" — e.g. "Read ticket | GET /api/v2/tickets/{id}.json"' }); return; }
+        const fields = (payload?.fields && typeof payload.fields === 'object') ? payload.fields : {};
+        const input = spec ? { ...spec, ...fields } : fields;
+        const { ok, errors, recipe } = buildManualRecipe(input, { groundId, origin });
+        if (!ok) { sendResponse({ success: false, error: errors.join('; ') }); return; }
+        const existing = (await ctx.readRideRecipes(groundId)) || [];
+        const next = rideMergeRecipes(existing, [recipe]);
+        await ctx.writeRideRecipes(groundId, next);
+        Logger.info('ride', `ADD_RIDE_RECIPE ${recipe.method} ${String(recipe.id).slice(0, 40)} → ${recipe.safetyClass}/pending (ground ${groundId})`);
+        sendResponse({ success: true, recipe, recipes: next });
+      } catch (err) {
+        try { Logger.error('background', `ADD_RIDE_RECIPE failed: ${err.message}`); } catch { /* */ }
         sendResponse({ success: false, error: err.message });
       }
     },

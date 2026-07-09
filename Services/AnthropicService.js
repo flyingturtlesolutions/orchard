@@ -5384,6 +5384,26 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
   }
 
   /**
+   * AS-5c (v2.74.1409) — a DYNAMIC compound EXAMPLE instruction for a just-set-up app, grounded in the sites the
+   * user picked (so setup ends on a concrete cross-site task for THEIR domain, not a generic starter). Cheap tier;
+   * returns ONE one-line imperative instruction (spanning ≥2 sites when ≥2 are available) or null. Shown as an
+   * example only (escape-first render) — never executed. No untrusted input: the seed is the user's own config, the
+   * site labels are hosts/brands; no PII. Fails safe to null (the panel keeps its static example).
+   * @param {{ appName:string, role:string, sites:string[] }} args
+   * @returns {Promise<string|null>}
+   */
+  static async suggestSetupExample({ appName = '', role = '', sites = [] } = {}) {
+    const list = (Array.isArray(sites) ? sites : []).map((s) => String(s || '').trim()).filter(Boolean).slice(0, 8);
+    if (!list.length || !(await AnthropicService.hasLlm())) return null;
+    const system = 'You help someone set up a cross-site automation assistant. Given the app and the sites it is connected to, write ONE short EXAMPLE instruction the user could give it — imperative mood, a single sentence, naturally spanning TWO OR MORE of the connected sites whenever two or more are available. Make it concrete and plausible for the app’s purpose. Return ONLY the instruction: no quotes, no preamble, no explanation.';
+    const user = `App: ${String(appName || 'this app').slice(0, 80)}${role ? `\nPurpose: ${String(role).slice(0, 300)}` : ''}\nConnected sites: ${list.join(', ')}\n\nExample instruction:`;
+    const res = await AnthropicService.#call(system, user, 80, [], { role: 'routing', operation: 'setup-example' });
+    if (!res || res.success === false || !res.text) return null;
+    const t = String(res.text).trim().replace(/^["'“”\s]+|["'“”\s]+$/g, '').trim();
+    return t ? t.slice(0, 200) : null;
+  }
+
+  /**
    * §17 POLISH (v2.74.1273) — name a HARVESTED ride-recipe + write its one-line `does` + suggest clearer param names.
    * The OBS-4 analog for the network twin. PRIVACY-FIRST: the input is the endpoint's STRUCTURE only (method, the path
    * with real ids already collapsed to {params}, param types) — no instance data ever leaves (DESIGN_llm_privacy.md).
