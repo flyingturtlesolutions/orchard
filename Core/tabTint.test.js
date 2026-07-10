@@ -1,4 +1,4 @@
-// Core/tabTint.test.js — v2.74.1416 active-tab tint colour math (node --test). PURE.
+// Core/tabTint.test.js — v2.74.1433 active-tab tint colour math (node --test). PURE.
 // Run via the temp-dir ESM harness (npm test).
 
 import { describe, it } from 'node:test';
@@ -7,9 +7,9 @@ import assert from 'node:assert/strict';
 import {
   rgbToHsl, hslToRgb, toHex, relativeLuminance, contrastRatio,
   clampSurface, samplePalette, tintFor, tintTokens, tintCss,
-  lerpTokens, tokensClose, bandAt, polarityFor,
-  TEXT_ON_DARK, TEXT_ON_LIGHT, NEUTRAL_HUE, TINT_MAX_S, TINT_MAX_L, BAND_COUNT,
-  POLARITY_ENTER_LIGHT, POLARITY_LEAVE_LIGHT,
+  lerpTokens, flipTokens, regionAt, polarityFor, compositeOver,
+  TEXT_ON_DARK, TEXT_ON_LIGHT, NEUTRAL_HUE, TINT_MAX_S, TINT_MAX_L, REGION_COUNT,
+  POLARITY_ENTER_LIGHT, POLARITY_LEAVE_LIGHT, RAIL_ALPHA,
 } from './tabTint.js';
 
 /** Build a flat RGBA image; `rows` is an array of per-row [r,g,b] (or [r,g,b,a]). */
@@ -25,8 +25,20 @@ const imageFromRows = (rows, width) => {
   return { data, width, height };
 };
 
-const hexToRgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+/** Build an RGBA image from per-COLUMN colours — the shape the ring's horizontal axis needs. */
+const imageFromCols = (cols, height) => {
+  const width = cols.length;
+  const data = new Uint8ClampedArray(width * height * 4);
+  cols.forEach(([r, g, b, a = 255], x) => {
+    for (let y = 0; y < height; y++) {
+      const i = (y * width + x) * 4;
+      data[i] = r; data[i + 1] = g; data[i + 2] = b; data[i + 3] = a;
+    }
+  });
+  return { data, width, height };
+};
 
+const hexToRgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
 
 // A spread that deliberately includes the hostile cases: pure white (docs),
 // pure black, and fully-saturated primaries (marketing pages).
@@ -67,6 +79,12 @@ describe('tabTint — colour space', () => {
     assert.equal(toHex([255, 255, 255]), '#ffffff');
   });
 
+  // toHex is the ONLY place channels are quantised — interpolation carries floats.
+  it('toHex rounds floats and clamps out-of-gamut channels', () => {
+    assert.equal(toHex([0.6, 0.4, 30.5]), '#01001f');
+    assert.equal(toHex([-3, 260, 128.2]), '#00ff80');
+  });
+
   it('contrastRatio is order-independent and spans the WCAG range', () => {
     assert.ok(Math.abs(contrastRatio([0, 0, 0], [255, 255, 255]) - 21) < 0.01);
     assert.equal(contrastRatio([0, 0, 0], [255, 255, 255]), contrastRatio([255, 255, 255], [0, 0, 0]));
@@ -90,7 +108,11 @@ describe('tabTint — clampSurface (dark band)', () => {
       // rounding error on each endpoint inflates the *derived* saturation by ~0.015.
       assert.ok(sOut <= TINT_MAX_S + 0.02, `sat ${sOut} for ${rgb}`);
       assert.ok(lOut <= TINT_MAX_L + 0.01, `lum ${lOut} for ${rgb}`);
-      if (sIn >= 0.02) {
+
+      // Hue is only meaningful where the channels have room to differ. The dark band
+      // floors at lightness 0.05, where the spread is 1-2/255 and hue is quantisation
+      // noise — so only hold the tight bound once the output is out of the mud.
+      if (sIn >= 0.02 && lOut > 0.12) {
         const dh = Math.abs(hOut - hIn);
         assert.ok(Math.min(dh, 360 - dh) < 6, `hue drift ${hIn} → ${hOut}`);
       }
@@ -102,13 +124,18 @@ describe('tabTint — clampSurface (dark band)', () => {
       const out = clampSurface(grey, 0, 'dark');
       const { h, s } = rgbToHsl(...out);
 
-      // At 5% saturation in the dark band the channel delta is ~3/255, where hue is
-      // quantized to roughly ±10°. The warmth ORDERING is the real invariant; the
-      // exact hue there is rounding noise, so it gets a loose bound.
+      // The warmth ORDERING is the invariant. At the band floor (black in, lightness
+      // 0.05) the channel spread collapses to 1/255 and hue is not merely noisy but
+      // undefined — r == g == b reads back as hue 0. Only bound the hue where the
+      // channels can actually express one.
       assert.ok(s > 0, 'a flat grey would read as screen, not paper');
       assert.ok(out[0] >= out[1] && out[1] >= out[2], `not warm: ${out}`);
-      const dh = Math.abs(h - NEUTRAL_HUE);
-      assert.ok(Math.min(dh, 360 - dh) <= 15, `hue ${h} strayed out of the warm band`);
+
+      const spread = Math.max(...out) - Math.min(...out);
+      if (spread >= 3) {
+        const dh = Math.abs(h - NEUTRAL_HUE);
+        assert.ok(Math.min(dh, 360 - dh) <= 15, `hue ${h} strayed out of the warm band`);
+      }
     }
   });
 
@@ -121,7 +148,8 @@ describe('tabTint — clampSurface (dark band)', () => {
 
   it('lift cannot escape the band — the caps hold at the extremes', () => {
     assert.ok(rgbToHsl(...clampSurface([255, 255, 0], 5, 'dark')).l <= TINT_MAX_L + 0.01);
-    assert.ok(rgbToHsl(...clampSurface([0, 0, 0], -5, 'dark')).l >= 0.06 - 0.01);
+    // 0.04, not the 0.05 band floor: an 8-bit round-trip of a near-black channel reads back under it.
+    assert.ok(rgbToHsl(...clampSurface([0, 0, 0], -5, 'dark')).l >= 0.04);
   });
 });
 
@@ -164,10 +192,30 @@ describe('tabTint — polarity', () => {
     assert.equal(polarityFor([0, 0, 0], 'light'), 'dark');
   });
 
-  it('clampSurface lands the SAME input in opposite bands, per polarity', () => {
+  it('clampSurface lands the SAME input in opposite regions, per polarity', () => {
     const white = [255, 255, 255];
     assert.ok(relativeLuminance(clampSurface(white, 0, 'light')) > 0.7);
     assert.ok(relativeLuminance(clampSurface(white, 0, 'dark')) < 0.1);
+  });
+
+  // REGRESSION, the other half. The light band used to be base 0.86 / slope 0.07 with
+  // saturation capped at 0.22, so a saturated purple (#8000be) came out #ede7f0 — hue
+  // intact, everything else gone. Contrast is now SOLVED for rather than assumed.
+  it('a saturated colour survives the light panel instead of washing out to white', () => {
+    const purple = clampSurface([128, 0, 190], 0, 'light');
+    const { h, s } = rgbToHsl(...purple);
+
+    assert.ok(Math.abs(h - 280) < 8, `hue drifted to ${h.toFixed(0)}`);
+    assert.ok(s > 0.35, `saturation collapsed to ${s.toFixed(2)} — this is the white-out bug`);
+    assert.ok(contrastRatio(purple, TEXT_ON_LIGHT) >= 7, 'but it must still hold AAA');
+  });
+
+  it('a saturated colour survives the dark panel too', () => {
+    const purple = clampSurface([128, 0, 190], 0, 'dark');
+    const { h, s } = rgbToHsl(...purple);
+    assert.ok(Math.abs(h - 280) < 8, `hue drifted to ${h.toFixed(0)}`);
+    assert.ok(s > 0.35, `saturation collapsed to ${s.toFixed(2)}`);
+    assert.ok(contrastRatio(purple, TEXT_ON_DARK) >= 7);
   });
 
   it('a lift always moves TOWARD the text, whichever way that is', () => {
@@ -238,6 +286,47 @@ describe('tabTint — the readability contract', () => {
     }
   });
 
+  // The Rail is translucent over the thread, so its EFFECTIVE background is a composite.
+  // The blur contributes nothing here — it destroys detail, not luminance — so the alpha
+  // is the whole safety margin. Every surface the Rail can sit over must still work.
+  it('the frosted Rail clears AAA over every surface it can overlay', () => {
+    const BEHIND = ['bg', 'bgSubtle', 'bgElevated', 'gradTop', 'gradMid', 'gradBot'];
+
+    for (const rgb of HOSTILE) {
+      const t = pageTokens(rgb);
+      for (const key of BEHIND) {
+        const effective = compositeOver(t.bgElevated, RAIL_ALPHA, t[key]);
+        const ratio = contrastRatio(effective, t.text);
+        assert.ok(ratio >= 7, `${toHex(rgb)} [${t.polarity}] rail over ${key} = ${ratio.toFixed(2)}:1`);
+      }
+    }
+  });
+
+  it('the frosted Rail holds up mid-breath and mid-follow, not just at rest', () => {
+    for (const rgb of HOSTILE) {
+      for (let phase = 0; phase < REGION_COUNT; phase += 0.5) {
+        const t = pageTokens(rgb, phase);
+        const effective = compositeOver(t.bgElevated, RAIL_ALPHA, t.gradMid);
+        assert.ok(contrastRatio(effective, t.text) >= 7, `${toHex(rgb)} phase=${phase}`);
+      }
+    }
+  });
+
+  it('compositeOver matches the browser: sRGB blend, endpoints exact', () => {
+    const fg = [200, 100, 50];
+    const bg = [0, 0, 0];
+    assert.deepEqual(compositeOver(fg, 1, bg), fg);
+    assert.deepEqual(compositeOver(fg, 0, bg), bg);
+    assert.deepEqual(compositeOver([100, 100, 100], 0.5, [200, 200, 200]), [150, 150, 150]);
+  });
+
+  it('tintCss emits a railBg rgba derived from the resolved elevated surface', () => {
+    const t = pageTokens([255, 255, 255]);
+    const css = tintCss(t);
+    const [r, g, b] = t.bgElevated.map((n) => Math.round(n));
+    assert.equal(css.railBg, `rgba(${r}, ${g}, ${b}, ${RAIL_ALPHA})`);
+  });
+
   it('tintCss emits an accentBg rgba derived from the resolved accent', () => {
     const t = pageTokens([255, 255, 255]);
     const css = tintCss(t);
@@ -260,20 +349,46 @@ describe('tabTint — samplePalette', () => {
     assert.deepEqual(samplePalette(img).dominant, [203, 23, 23]);
   });
 
-  it('bands slice the page top → bottom and track its vertical flow', () => {
-    const rows = [...Array(5).fill([250, 250, 250]), ...Array(5).fill([10, 10, 40])];
-    const { bands } = samplePalette(imageFromRows(rows, 4));
+  it('the ring has eight cells and tracks vertical structure', () => {
+    // ring order: TL TC TR RM BR BC BL LM — index 1 is top-centre, 5 is bottom-centre.
+    const rows = [...Array(6).fill([250, 250, 250]), ...Array(6).fill([10, 10, 40])];
+    const { regions } = samplePalette(imageFromRows(rows, 6));
 
-    assert.equal(bands.length, BAND_COUNT);
-    assert.ok(bands[0][0] > 200, `first band ${bands[0]} should be the white top`);
-    const last = bands[bands.length - 1];
-    assert.ok(last[2] > last[0], `last band ${last} should be the blue bottom`);
+    assert.equal(regions.length, REGION_COUNT);
+    assert.equal(REGION_COUNT, 8);
+    assert.ok(regions[1][0] > 200, `top-centre ${regions[1]} should be white`);
+    assert.ok(regions[5][2] > regions[5][0], `bottom-centre ${regions[5]} should be blue`);
   });
 
-  it('bands survive an image shorter than BAND_COUNT — no empty slice, no throw', () => {
-    const { bands } = samplePalette(imageFromRows([[200, 20, 20], [20, 20, 200]], 4));
-    assert.equal(bands.length, BAND_COUNT);
-    for (const b of bands) assert.ok(b.every(Number.isFinite), `bad band ${b}`);
+  // REGRESSION. Bands were horizontal, so on a page split LEFT/RIGHT every row held the
+  // same mixture, every band returned the same modal colour, and the gradient came out
+  // flat. A 50% white / 50% purple page rendered as all white.
+  it('the ring tracks HORIZONTAL structure — a left/right split is not flat', () => {
+    const W = 6, H = 6;
+    const { regions } = samplePalette(imageFromCols(
+      Array.from({ length: W }, (_, x) => (x < W / 2 ? [255, 255, 255] : [128, 0, 190])), H));
+
+    // ring index 0 is top-LEFT, index 2 is top-RIGHT: opposite sides of the split.
+    assert.ok(regions[0][0] > 200 && regions[0][2] > 200, `top-left ${regions[0]} should be white`);
+    assert.ok(regions[2][2] > 150 && regions[2][1] < 60, `top-right ${regions[2]} should be purple`);
+
+    const distinct = new Set(regions.map((r) => r.join(','))).size;
+    assert.ok(distinct > 1, 'a split page must not produce eight identical cells');
+  });
+
+  it('opposite ring positions are opposite corners — the gradient endpoints', () => {
+    const W = 6, H = 6;
+    const p = samplePalette(imageFromCols(
+      Array.from({ length: W }, (_, x) => (x < W / 2 ? [255, 255, 255] : [128, 0, 190])), H));
+
+    // gradTop rides phase, gradBot rides phase + n/2 — so they must disagree here.
+    assert.notDeepEqual(p.regions[0], p.regions[4], 'ring[0] and ring[4] should be opposite corners');
+  });
+
+  it('regions survive an image smaller than the grid — no empty cell, no throw', () => {
+    const { regions } = samplePalette(imageFromRows([[200, 20, 20], [20, 20, 200]], 2));
+    assert.equal(regions.length, REGION_COUNT);
+    for (const r of regions) assert.ok(r.every(Number.isFinite), `bad region ${r}`);
   });
 
   it('accent finds the characteristic hue on an overwhelmingly white page', () => {
@@ -334,15 +449,15 @@ describe('tabTint — the breath', () => {
   const STRIPED = imageFromRows([[240, 240, 250], [200, 60, 60], [60, 160, 90], [40, 40, 120], [20, 20, 30]], 4);
   const UNIFORM = imageFromRows([[40, 90, 160]], 4);
 
-  it('bandAt wraps around the ring and interpolates between neighbours', () => {
-    const bands = [[0, 0, 0], [100, 100, 100], [200, 200, 200]];
+  it('regionAt wraps around the ring and interpolates between neighbours', () => {
+    const regions = [[0, 0, 0], [100, 100, 100], [200, 200, 200]];
 
-    assert.deepEqual(bandAt(bands, 0), [0, 0, 0]);
-    assert.deepEqual(bandAt(bands, 1), [100, 100, 100]);
-    assert.deepEqual(bandAt(bands, 0.5), [50, 50, 50]);
-    assert.deepEqual(bandAt(bands, 3), [0, 0, 0], 'a full cycle returns to the start');
-    assert.deepEqual(bandAt(bands, -1), [200, 200, 200], 'negative phase wraps backwards');
-    assert.deepEqual(bandAt(bands, 2.5), [100, 100, 100], 'the last band wraps into the first');
+    assert.deepEqual(regionAt(regions, 0), [0, 0, 0]);
+    assert.deepEqual(regionAt(regions, 1), [100, 100, 100]);
+    assert.deepEqual(regionAt(regions, 0.5), [50, 50, 50]);
+    assert.deepEqual(regionAt(regions, 3), [0, 0, 0], 'a full cycle returns to the start');
+    assert.deepEqual(regionAt(regions, -1), [200, 200, 200], 'negative phase wraps backwards');
+    assert.deepEqual(regionAt(regions, 2.5), [100, 100, 100], 'the last band wraps into the first');
   });
 
   it('sweeping the phase moves the gradient on a structured page', () => {
@@ -355,29 +470,34 @@ describe('tabTint — the breath', () => {
   // The reason BREATH_AMPLITUDE exists: band-sweeping alone is a no-op here.
   it('breathes even on a UNIFORM page, where every band is identical', () => {
     const p = samplePalette(UNIFORM);
-    assert.ok(p.bands.every((b) => b.every((v, i) => v === p.bands[0][i])), 'fixture must be uniform');
+    assert.ok(p.regions.every((b) => b.every((v, i) => v === p.regions[0][i])), 'fixture must be uniform');
 
-    const quarter = BAND_COUNT / 4;   // sin peaks here — maximum swing from phase 0
+    const quarter = REGION_COUNT / 4;   // sin peaks here — maximum swing from phase 0
     assert.notEqual(tintFor(p, 0).gradient, tintFor(p, quarter).gradient);
   });
 
-  it('the breath clears the noise deadband — phases must not be swallowed as jitter', () => {
+  // The swing has to survive 8-bit rounding. Below one colour step it quantises to
+  // nothing, and the panel sits perfectly still on exactly the pages that need it most.
+  it('a peak-to-zero swing moves the gradient by more than one rounded colour step', () => {
     const p = samplePalette(UNIFORM);
-    const a = tintTokens(p, 0);
-    const b = tintTokens(p, BAND_COUNT / 4);
-    assert.ok(!tokensClose(a, b), 'a peak-to-zero swing would be mistaken for sensor noise');
+    const a = tintTokens(p, 0, 'dark');
+    const b = tintTokens(p, REGION_COUNT / 4, 'dark');
+
+    const maxDelta = (key) => Math.max(...[0, 1, 2].map((i) => Math.abs(a[key][i] - b[key][i])));
+    assert.ok(maxDelta('gradTop') >= 2, `gradTop moved only ${maxDelta('gradTop')}/255`);
+    assert.ok(maxDelta('gradBot') >= 2, `gradBot moved only ${maxDelta('gradBot')}/255`);
   });
 
   it('the phase is cyclic — a full cycle returns to the same tint', () => {
     const p = samplePalette(STRIPED);
-    assert.deepEqual(tintTokens(p, 0), tintTokens(p, BAND_COUNT));
-    assert.deepEqual(tintTokens(p, 1.5), tintTokens(p, 1.5 + BAND_COUNT));
+    assert.deepEqual(tintTokens(p, 0), tintTokens(p, REGION_COUNT));
+    assert.deepEqual(tintTokens(p, 1.5), tintTokens(p, 1.5 + REGION_COUNT));
   });
 
   it('only the gradient breathes — surfaces stay pinned across every phase', () => {
     const p = samplePalette(STRIPED);
     const base = tintTokens(p, 0);
-    for (let phase = 0; phase < BAND_COUNT; phase += 0.25) {
+    for (let phase = 0; phase < REGION_COUNT; phase += 0.25) {
       const t = tintTokens(p, phase);
       for (const key of ['bg', 'bgElevated', 'bgSubtle', 'border', 'borderSoft', 'scrollbar']) {
         assert.deepEqual(t[key], base[key], `${key} moved at phase ${phase}`);
@@ -387,7 +507,7 @@ describe('tabTint — the breath', () => {
 
   it('NO phase of the breath dips below AAA, for any page colour, at its own polarity', () => {
     for (const rgb of HOSTILE) {
-      for (let phase = 0; phase < BAND_COUNT; phase += 0.25) {
+      for (let phase = 0; phase < REGION_COUNT; phase += 0.25) {
         const t = pageTokens(rgb, phase);
         for (const key of ['bg', 'gradTop', 'gradMid', 'gradBot']) {
           const ratio = contrastRatio(t[key], t.text);
@@ -400,7 +520,7 @@ describe('tabTint — the breath', () => {
   it('the breath holds AAA on a structured page, in BOTH polarities', () => {
     const p = samplePalette(STRIPED);
     for (const polarity of ['dark', 'light']) {
-      for (let phase = 0; phase < BAND_COUNT; phase += 0.1) {
+      for (let phase = 0; phase < REGION_COUNT; phase += 0.1) {
         const t = tintTokens(p, phase, polarity);
         for (const key of ['gradTop', 'gradMid', 'gradBot']) {
           const ratio = contrastRatio(t[key], t.text);
@@ -422,6 +542,50 @@ describe('tabTint — tween (dynamic resample)', () => {
     assert.deepEqual(lerpTokens(a, b, 1), b);
     assert.deepEqual(lerpTokens(a, b, -5), a);
     assert.deepEqual(lerpTokens(a, b, 5), b);
+  });
+
+  // REGRESSION. lerpTokens used to round each channel. The follower advances by
+  // k = 1 - exp(-dt/tau) ≈ 0.0075 per frame at 60fps/2200ms, so a 26-unit gap moves 0.196
+  // and Math.round snapped it straight back: the panel never moved at all. Floats now,
+  // quantised once in toHex.
+  it('lerpTokens does not round — a sub-unit step survives, and iterating converges', () => {
+    const a = tokensOf([20, 40, 200]);
+    const b = tokensOf([200, 30, 20]);
+    const k = 1 - Math.exp(-16.67 / 2200);   // one 60fps frame at the follower's time constant
+
+    const oneFrame = lerpTokens(a, b, k);
+    assert.notDeepEqual(oneFrame.bg, a.bg, 'a single follower frame must move the background');
+
+    // ~10s of frames is >3 time constants; the gap must close to under one colour step.
+    let cur = a;
+    for (let i = 0; i < 600; i++) cur = lerpTokens(cur, b, k);
+    for (let i = 0; i < 3; i++) {
+      assert.ok(Math.abs(cur.bg[i] - b.bg[i]) < 1, `channel ${i} stalled at ${cur.bg[i]} (target ${b.bg[i]})`);
+    }
+  });
+
+  it('the follower is frame-rate independent — same trajectory at 30, 60 and 144fps', () => {
+    const a = tokensOf([20, 40, 200]);
+    const b = tokensOf([200, 30, 20]);
+    const TAU = 2200;
+
+    // Advance each rate to the same WALL-CLOCK time; the results must agree.
+    const after = (fps, ms) => {
+      const dt = 1000 / fps;
+      let cur = a;
+      for (let t = 0; t < ms; t += dt) cur = lerpTokens(cur, b, 1 - Math.exp(-dt / TAU));
+      return cur.bg[0];
+    };
+
+    const at60 = after(60, TAU);
+    assert.ok(Math.abs(after(144, TAU) - at60) < 1, '144fps diverged from 60fps');
+    assert.ok(Math.abs(after(30, TAU) - at60) < 1, '30fps diverged from 60fps');
+
+    // One time constant closes ~63% of the gap — IN LINEAR LIGHT, which is where
+    // lerpTokens blends. Measured in sRGB the same motion reads as ~74%, because gamma.
+    const lin = (c) => { const v = c / 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+    const closed = (lin(at60) - lin(a.bg[0])) / (lin(b.bg[0]) - lin(a.bg[0]));
+    assert.ok(Math.abs(closed - (1 - 1 / Math.E)) < 0.02, `closed ${closed.toFixed(3)} of the gap at tau (linear)`);
   });
 
   it('lerpTokens moves every token monotonically toward the target', () => {
@@ -458,10 +622,9 @@ describe('tabTint — tween (dynamic resample)', () => {
     }
   });
 
-  // Interpolating dark-bg/light-text into light-bg/dark-text drags both through mid-grey,
-  // where they meet at ~1:1. No easing fixes that — the midpoint IS the problem. So the
-  // flip must snap, and lerpTokens enforces it rather than trusting the caller.
-  it('a polarity flip SNAPS — it is never interpolated through the unreadable middle', () => {
+  // lerpTokens still refuses a flip — crossing polarity is flipTokens' job, and a caller
+  // that reaches for the wrong one gets the target rather than an unreadable blend.
+  it('lerpTokens refuses to interpolate across a polarity — it returns the target', () => {
     const dark = pageTokens([10, 10, 12]);
     const light = pageTokens([255, 255, 255]);
     assert.notEqual(dark.polarity, light.polarity, 'fixtures must straddle the flip');
@@ -471,37 +634,102 @@ describe('tabTint — tween (dynamic resample)', () => {
     }
   });
 
-  it('no frame of a flip is ever unreadable, because no frame exists', () => {
-    const dark = pageTokens([10, 10, 12]);
-    const light = pageTokens([255, 255, 255]);
-    for (let t = 0; t <= 1.0001; t += 0.05) {
-      const frame = lerpTokens(dark, light, t);
-      assert.ok(contrastRatio(frame.bg, frame.text) >= 7, `t=${t.toFixed(2)} went unreadable`);
+});
+
+describe('tabTint — the polarity crossfade', () => {
+  const SURFACES = ['bg', 'bgElevated', 'bgSubtle', 'gradTop', 'gradMid', 'gradBot'];
+  const FLIPS = [
+    ['black → white', [0, 0, 0], [255, 255, 255]],
+    ['blue → white', [24, 119, 242], [250, 250, 250]],
+    ['dark grey → light grey', [30, 30, 30], [240, 240, 240]],
+    ['red → white', [255, 0, 0], [255, 255, 255]],
+  ];
+
+  /** Worst contrast the foreground holds against any surface it sits on, this frame. */
+  const worstOfFrame = (f) => Math.min(...SURFACES.map((k) => contrastRatio(f[k], f.text)));
+
+  it('reproduces both endpoints exactly — a flip starts and lands where it should', () => {
+    for (const [name, from, to] of FLIPS) {
+      const a = pageTokens(from);
+      const b = pageTokens(to);
+      assert.deepEqual(flipTokens(a, b, 0), a, `${name} t=0`);
+      assert.deepEqual(flipTokens(a, b, 1), b, `${name} t=1`);
     }
   });
 
-  it('tokensClose treats a polarity flip as a real change, however near the channels', () => {
-    const a = pageTokens([255, 255, 255]);
-    const b = { ...a, polarity: 'dark' };
-    assert.ok(!tokensClose(a, b), 'a flip must never be swallowed by the deadband');
+  // The floor is a PROPERTY of the two foregrounds, not a tuning choice: it is the
+  // background luminance where the two contrast curves cross. Measured at 3.50:1.
+  it('never drops below 3.4:1 at any frame — the crossover is the floor', () => {
+    for (const [name, from, to] of FLIPS) {
+      const a = pageTokens(from);
+      const b = pageTokens(to);
+      for (let t = 0; t <= 1.0001; t += 0.01) {
+        const ratio = worstOfFrame(flipTokens(a, b, t));
+        assert.ok(ratio >= 3.4, `${name} t=${t.toFixed(2)} = ${ratio.toFixed(2)}:1`);
+      }
+    }
   });
 
-  it('tokensClose absorbs sensor noise but not a real colour change', () => {
-    const a = tokensOf([24, 119, 242]);
-    assert.ok(tokensClose(a, a), 'identical must be close');
+  // Guards the whole point of choosing the text instead of lerping it. A lerped
+  // foreground bottoms out near 1:1; this must stay far above that.
+  it('beats a naive lerp of the foreground by a wide margin at the midpoint', () => {
+    const a = pageTokens([0, 0, 0]);
+    const b = pageTokens([255, 255, 255]);
 
-    // ±2 per channel is JPEG/bucket-mean jitter, not a page repaint.
-    const jittered = lerpTokens(a, a, 0);
-    jittered.bg = [a.bg[0] + 2, a.bg[1] - 2, a.bg[2] + 1];
-    assert.ok(tokensClose(a, jittered), 'a 2-unit wobble must not trigger a tween');
+    const chosen = worstOfFrame(flipTokens(a, b, 0.5));
+    const naiveBg = [0, 1, 2].map((i) => Math.round((a.bg[i] + b.bg[i]) / 2));
+    const naiveText = [0, 1, 2].map((i) => Math.round((a.text[i] + b.text[i]) / 2));
+    const naive = contrastRatio(naiveBg, naiveText);
 
-    assert.ok(!tokensClose(a, tokensOf([200, 20, 20])), 'blue → red must trigger a tween');
+    assert.ok(naive < 1.5, `sanity: a lerped foreground really is unreadable (${naive.toFixed(2)}:1)`);
+    assert.ok(chosen > 3, `chosen foreground held ${chosen.toFixed(2)}:1`);
   });
 
-  it('tokensClose honours a custom tolerance', () => {
-    const a = tokensOf([24, 119, 242]);
-    const b = { ...a, bg: [a.bg[0] + 5, a.bg[1], a.bg[2]] };
-    assert.ok(!tokensClose(a, b));
-    assert.ok(tokensClose(a, b, 5));
+  it('the text swaps exactly once, and monotonically — no flicker back and forth', () => {
+    for (const [name, from, to] of FLIPS) {
+      const a = pageTokens(from);
+      const b = pageTokens(to);
+
+      let swaps = 0;
+      let prev = flipTokens(a, b, 0).polarity;
+      for (let t = 0; t <= 1.0001; t += 0.005) {
+        const p = flipTokens(a, b, t).polarity;
+        if (p !== prev) { swaps++; prev = p; }
+      }
+      assert.equal(swaps, 1, `${name} swapped ${swaps} times`);
+      assert.equal(prev, b.polarity, `${name} did not end on the target polarity`);
+    }
+  });
+
+  it('polarity tracks the text, so .tinted-light switches on the crossover frame', () => {
+    const a = pageTokens([0, 0, 0]);
+    const b = pageTokens([255, 255, 255]);
+    for (const t of [0, 0.2, 0.5, 0.8, 1]) {
+      const f = flipTokens(a, b, t);
+      const expected = f.text === TEXT_ON_LIGHT ? 'light' : 'dark';
+      assert.equal(f.polarity, expected, `t=${t} polarity disagrees with its own text`);
+    }
+  });
+
+  // Secondary text is the foreground mixed toward the background, so at the crossover —
+  // where the foreground itself only holds 3.5:1 — a full mix would sink it to ~2.2:1.
+  // flipTokens shrinks the mix as headroom shrinks, so muted converges on the primary
+  // text exactly where it must, and returns to its normal weight once the flip lands.
+  it('muted, subtle and accent are re-derived per frame, never left sagging', () => {
+    const a = pageTokens([0, 0, 0]);
+    const b = pageTokens([255, 255, 255]);
+    for (let t = 0; t <= 1.0001; t += 0.05) {
+      const f = flipTokens(a, b, t);
+      assert.ok(contrastRatio(f.accent, f.bg) >= 4.5, `t=${t.toFixed(2)} accent sagged`);
+      assert.ok(contrastRatio(f.textMuted, f.bg) >= 3, `t=${t.toFixed(2)} muted sagged`);
+      assert.ok(contrastRatio(f.textSubtle, f.bg) >= 2.5, `t=${t.toFixed(2)} subtle sagged`);
+    }
+  });
+
+  it('at rest the mix is untouched — a settled flip matches tintTokens exactly', () => {
+    const a = pageTokens([0, 0, 0]);
+    const b = pageTokens([255, 255, 255]);
+    assert.deepEqual(flipTokens(a, b, 1).textMuted, b.textMuted);
+    assert.deepEqual(flipTokens(a, b, 1).textSubtle, b.textSubtle);
   });
 });

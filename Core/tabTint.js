@@ -1,20 +1,25 @@
 /**
  * @file Core/tabTint.js
- * @description v2.74.1416 — pure colour math for the active-tab background tint.
+ * @description v2.74.1433 — pure colour math for the active-tab background tint.
  *
  * The side panel samples a downscaled screenshot of the active tab and derives a
  * gradient from it. This module is the PURE half: pixels in → hex tokens out. No
  * DOM, no chrome.*, no canvas. The capture/apply half lives in Services/Chat/tabTint.js.
+ *
+ * SAMPLING reads a ring of eight cells around a 3x3 grid, so the page's spatial layout —
+ * a left/right split, a hero band — reaches the gradient. Plus `dominant` (the bulk
+ * colour, which anchors the surfaces) and `accent` (its characteristic hue).
  *
  * POLARITY is the first decision: a light page gets a light panel with dark text, a dark
  * page the reverse. Before that existed, the foreground was a fixed off-white and every
  * background had to stay dark enough to sit under it — which crushed pure white and pure
  * black into the same 5% lightness sliver, so every site rendered as the same brown.
  *
- * The clamp is the second. Within a polarity a sampled colour is still arbitrary, so it
- * is forced into that polarity's band: hue survives, lightness and saturation do not.
- * tabTint.test.js asserts the resulting contrast ratios against each polarity's OWN text,
- * which is what makes the clamp a contract rather than a guess.
+ * The CLAMP is the second. A sampled colour is fitted into its polarity's (wide) band, and
+ * only then pushed away from the text until it clears its contrast floor. Solving for
+ * contrast rather than assuming it is what lets a saturated purple stay purple instead of
+ * washing out to white. tabTint.test.js asserts every floor against each polarity's OWN
+ * text, which is what makes the clamp a contract rather than a guess.
  */
 
 /** Foreground for a DARK panel — the historical --c-text. */
@@ -46,13 +51,24 @@ export const POLARITY_LEAVE_LIGHT = 0.30;
  * base; on a light panel it is DARKER. Both mean "further from the background, toward the
  * text" — one constant instead of two mirrored code paths.
  *
- * Light panels get a tighter saturation cap: the same 38% that reads as a rich tint at 12%
- * lightness reads as a highlighter at 93%.
+ * The bands are WIDE, and deliberately: they only have to place a colour plausibly, since
+ * clampSurface then solves for contrast rather than assuming it. Narrow bands were the
+ * white-out bug — the light band spanned lightness 0.86..0.93 with saturation capped at
+ * 0.22, so every page, purple or white, landed on the same near-white.
  */
 const BAND = {
-  dark:  { base: 0.09, slope: 0.10, dir: +1, minL: 0.06, maxL: 0.24, maxS: 0.38, minS: 0.06, achroS: 0.05 },
-  light: { base: 0.86, slope: 0.07, dir: -1, minL: 0.80, maxL: 0.96, maxS: 0.22, minS: 0.04, achroS: 0.03 },
+  dark:  { base: 0.06, slope: 0.22, dir: +1, minL: 0.05, maxL: 0.45, maxS: 0.55, minS: 0.06, achroS: 0.05 },
+  light: { base: 0.55, slope: 0.40, dir: -1, minL: 0.45, maxL: 0.97, maxS: 0.55, minS: 0.04, achroS: 0.03 },
 };
+
+/**
+ * Contrast a surface owes the text that sits on it. Backgrounds behind body copy hold AAA;
+ * elevated/subtle cards hold AA (a lift moves TOWARD the text, spending contrast on
+ * purpose); borders and the scrollbar carry no text and are exempt.
+ */
+const SURFACE_AAA = 7;
+const SURFACE_AA = 4.5;
+const SURFACE_NONE = 1;
 
 /** The dark band's caps, exposed so the tests can assert against them by name. */
 export const TINT_MAX_L = BAND.dark.maxL;
@@ -64,6 +80,22 @@ const SUBTLE_MIX = { dark: 0.52, light: 0.45 };
 
 /** Minimum contrast the accent must hold against the panel it sits on. */
 const ACCENT_MIN_CONTRAST = 4.5;
+
+/**
+ * Opacity of the Rail's frosted background over the thread behind it.
+ *
+ * Contrast turns out not to constrain this at all: everything the Rail can sit over is a
+ * surface from the same polarity band, so the composite lands in that band too and clears
+ * AAA even at alpha 0.40 (worst case measured: 8.74:1 over bgSubtle). The value is chosen
+ * for LOOK — clear enough that the gradient reads through, opaque enough that the frost
+ * has a surface. tabTint.test.js pins the contrast bound anyway, so lowering it further
+ * cannot quietly become a legibility bug.
+ *
+ * The blur contributes nothing to contrast — it destroys detail, not luminance. It does
+ * mean the flat-surface model the test uses is the right one: a large-radius blur is a
+ * local average, which is exactly a flat surface.
+ */
+export const RAIL_ALPHA = 0.55;
 
 const clamp01 = (n) => (n < 0 ? 0 : n > 1 ? 1 : n);
 
@@ -113,14 +145,24 @@ export function hslToRgb(h, s, l) {
   return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
 }
 
+/**
+ * The single rounding point. Channels are carried as FLOATS through interpolation — see
+ * lerpTokens — and are quantised to 8 bits only here, on the way to CSS.
+ */
 export function toHex([r, g, b]) {
-  const h = (n) => n.toString(16).padStart(2, '0');
+  const h = (n) => Math.min(255, Math.max(0, Math.round(n))).toString(16).padStart(2, '0');
   return `#${h(r)}${h(g)}${h(b)}`;
 }
 
 const linearize = (c) => {
   const v = c / 255;
   return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+};
+
+/** Inverse of `linearize`: linear-light 0..1 back to an sRGB channel 0..255 (float). */
+const delinearize = (u) => {
+  const v = u <= 0.0031308 ? u * 12.92 : 1.055 * Math.pow(u, 1 / 2.4) - 0.055;
+  return v * 255;
 };
 
 /** WCAG 2.x relative luminance. */
@@ -155,20 +197,33 @@ export function polarityFor(dominant, previous = 'dark') {
 
 // ── The clamp ──────────────────────────────────────────────────────────────
 
+/** The foreground a polarity ships with. Every surface is measured against this. */
+const textFor = (polarity) => (polarity === 'light' ? TEXT_ON_LIGHT : TEXT_ON_DARK);
+
 /**
  * Force an arbitrary sampled colour into one polarity's surface band.
- * Hue is preserved (that's the tint); lightness and saturation are not.
+ * Hue is preserved (that's the tint); lightness and saturation are re-fitted.
  *
- * This is why a white page can now produce a white-ish panel: polarity picks the band,
- * and the band decides what "background" means. The old single dark band mapped every
- * page — pure white to pure black — into a 5% lightness sliver, so every site looked
- * like the same brown.
+ * Two stages, and the second is why a purple page no longer renders as white.
+ *
+ *   1. Map the source lightness through the polarity's band, and cap saturation. The band
+ *      is WIDE — a light panel spans lightness 0.45..0.97 — so a page's own light/dark
+ *      structure survives instead of collapsing onto a single value.
+ *   2. Only then enforce contrast, by pushing the colour AWAY from the text until it
+ *      clears `minContrast`. Nothing is crushed pre-emptively.
+ *
+ * The previous version had no stage 2, so stage 1 had to be conservative enough to be
+ * safe for every input: base 0.86, slope 0.07, saturation capped at 0.22. That mapped a
+ * saturated purple (#8000be) to #ede7f0 — hue intact, everything else gone. Solving for
+ * contrast instead of assuming it lets the same purple land near #c79add, which still
+ * clears 7:1 against the dark text.
  *
  * @param {[number,number,number]} rgb
  * @param {number} [lift] — distance from the base surface, TOWARD the text (see BAND.dir)
  * @param {'light'|'dark'} [polarity]
+ * @param {number} [minContrast] — floor against this polarity's text; SURFACE_NONE to skip
  */
-export function clampSurface(rgb, lift = 0, polarity = 'dark') {
+export function clampSurface(rgb, lift = 0, polarity = 'dark', minContrast = SURFACE_AAA) {
   const cfg = BAND[polarity];
   const { h, s, l } = rgbToHsl(rgb[0], rgb[1], rgb[2]);
 
@@ -179,10 +234,27 @@ export function clampSurface(rgb, lift = 0, polarity = 'dark') {
   const sat = achromatic ? cfg.achroS : Math.min(Math.max(s, cfg.minS), cfg.maxS);
   const lum = Math.min(cfg.maxL, Math.max(cfg.minL, cfg.base + cfg.slope * l + cfg.dir * lift));
 
-  return hslToRgb(hue, sat, lum);
+  const fitted = hslToRgb(hue, sat, lum);
+  if (minContrast <= SURFACE_NONE) return fitted;
+
+  // `dir` points toward the text; contrast is bought by moving the other way.
+  return pushUntilContrast(fitted, textFor(polarity), minContrast, -cfg.dir);
 }
 
 const mixRgb = (a, b, t) => [0, 1, 2].map((i) => Math.round(a[i] + (b[i] - a[i]) * t));
+
+/**
+ * `fg` at `alpha` painted over `bg` — what the browser actually renders for a translucent
+ * surface like the Rail.
+ *
+ * Blends in sRGB, NOT linear light, and that asymmetry with lerpTokens is deliberate: CSS
+ * alpha compositing is defined on the encoded channels, so matching the renderer matters
+ * more here than the affine-luminance property we exploit when interpolating.
+ */
+export function compositeOver(fg, alpha, bg) {
+  const a = clamp01(alpha);
+  return [0, 1, 2].map((i) => fg[i] * a + bg[i] * (1 - a));
+}
 
 /**
  * Walk a colour's lightness until it clears `ratio` against `bg`, or runs out of room.
@@ -215,16 +287,17 @@ const isAccent = (r, g, b) => {
 };
 
 /**
- * Most-common colour bucket in a row range, returned as the true mean of its members.
+ * Most-common colour bucket in a rect, returned as the true mean of its members.
  * Ties resolve to the first bucket seen (Map preserves insertion order) — deterministic.
  *
  * @returns {[number,number,number]|null} null when every pixel was filtered out.
  */
-function dominantIn(data, width, rowStart, rowEnd, filter) {
+function dominantIn(data, width, rect, filter) {
+  const { x0, x1, y0, y1 } = rect;
   const buckets = new Map();
 
-  for (let y = rowStart; y < rowEnd; y++) {
-    for (let x = 0; x < width; x++) {
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
       const i = (y * width + x) * 4;
       if (data[i + 3] < 128) continue;
 
@@ -246,18 +319,29 @@ function dominantIn(data, width, rowStart, rowEnd, filter) {
 }
 
 /**
- * How many horizontal slices of the page the gradient can draw its endpoints from.
- * The breath sweeps a cursor across these, so this is also the length of one cycle.
+ * The page is diced into a 3x3 grid and the gradient draws from the RING of eight cells
+ * around it, clockwise from the top-left.
+ *
+ * It used to be five horizontal bands, which was blind to horizontal structure: on a page
+ * split left/right — a sidebar, a split hero — every row is the same mixture, so every
+ * band returned the same modal colour and the gradient came out flat. A ring sees both
+ * axes. It is also cyclic and spatially adjacent, so the breath sweeps neighbours and
+ * wraps without a seam, and opposite ring positions (i, i+4) are opposite corners — which
+ * is exactly what the gradient's two endpoints want.
+ *
+ * The centre cell is left out on purpose: it is where `dominant` already looks.
  */
-export const BAND_COUNT = 5;
+const RING = [[0, 0], [1, 0], [2, 0], [2, 1], [2, 2], [1, 2], [0, 2], [0, 1]];
+
+/** Length of one full breath cycle, in region units. */
+export const REGION_COUNT = RING.length;
 
 /**
  * @param {{data: Uint8ClampedArray|number[], width: number, height: number}} image — RGBA
- * @returns {{bands: number[][], dominant: number[], accent: number[]}}
+ * @returns {{regions: number[][], dominant: number[], accent: number[]}}
  *
- * `bands` are the page's horizontal slices, ordered top → bottom. The gradient's
- * endpoints ride a cursor over them, so the panel drifts through the page's vertical
- * colour flow rather than pinning to its extremes.
+ * `regions` are the ring cells, in ring order. The gradient's endpoints ride a cursor
+ * over them, so the panel drifts through the page's actual spatial colour layout.
  *
  * `dominant` is the page's bulk colour — it anchors the surfaces that must NOT move.
  * `accent` is its characteristic hue (a brand red survives a 95%-white page).
@@ -265,19 +349,25 @@ export const BAND_COUNT = 5;
 export function samplePalette(image) {
   const { data, width, height } = image;
 
-  const dominant = dominantIn(data, width, 0, height) ?? [31, 29, 27];
+  const full = { x0: 0, x1: width, y0: 0, y1: height };
+  const dominant = dominantIn(data, width, full) ?? [31, 29, 27];
 
-  const bands = [];
-  for (let i = 0; i < BAND_COUNT; i++) {
-    const y0 = Math.floor((i * height) / BAND_COUNT);
-    const y1 = Math.min(height, Math.max(y0 + 1, Math.floor(((i + 1) * height) / BAND_COUNT)));
-    bands.push(dominantIn(data, width, y0, y1) ?? dominant);
-  }
+  const edge = (n, total) => {
+    const a = Math.floor((n * total) / 3);
+    const b = Math.min(total, Math.max(a + 1, Math.floor(((n + 1) * total) / 3)));
+    return [a, b];
+  };
+
+  const regions = RING.map(([cx, cy]) => {
+    const [x0, x1] = edge(cx, width);
+    const [y0, y1] = edge(cy, height);
+    return dominantIn(data, width, { x0, x1, y0, y1 }) ?? dominant;
+  });
 
   return {
-    bands,
+    regions,
     dominant,
-    accent: dominantIn(data, width, 0, height, isAccent) ?? dominant,
+    accent: dominantIn(data, width, full, isAccent) ?? dominant,
   };
 }
 
@@ -295,26 +385,27 @@ const TOKEN_KEYS = [
  *
  * Band-sweeping alone cannot move a UNIFORM page — a solid-colour site has no second
  * colour to drift toward, so every band is identical and the cursor sweeps through
- * nothing. This oscillation is what keeps such a page breathing. It must also exceed the
- * glue's noise deadband (~2/255 per channel), or small phases would be swallowed as
- * jitter and the panel would stutter instead of drift.
+ * nothing. This oscillation is what keeps such a page breathing. It also has to clear
+ * one rounded colour step (~1/255), or the swing would quantise away to nothing and the
+ * panel would sit still on exactly the pages that need it most.
  */
 export const BREATH_AMPLITUDE = 0.022;
 
 const mod = (n, m) => ((n % m) + m) % m;
 
 /**
- * Sample the band ring at a continuous, wrapping position — `x` need not be an integer.
- * Interpolating BETWEEN adjacent bands is what makes the sweep a drift rather than a
- * five-step slideshow.
+ * Sample the region ring at a continuous, wrapping position — `x` need not be an integer.
+ * Interpolating BETWEEN adjacent cells is what makes the sweep a drift rather than an
+ * eight-step slideshow, and the ring's neighbours are spatial neighbours, so the blend is
+ * between colours that actually touch on the page.
  */
-export function bandAt(bands, x) {
-  const n = bands.length;
+export function regionAt(regions, x) {
+  const n = regions.length;
   const pos = mod(x, n);
   const i = Math.floor(pos);
   const f = pos - i;
-  const a = bands[i];
-  const b = bands[(i + 1) % n];
+  const a = regions[i];
+  const b = regions[(i + 1) % n];
   return [0, 1, 2].map((c) => Math.round(a[c] + (b[c] - a[c]) * f));
 }
 
@@ -323,7 +414,7 @@ export function bandAt(bands, x) {
  * This is the lerpable form: the tint tweens between two of these, then renders.
  * Every entry passes through clampSurface, so every one clears its contrast floor.
  *
- * `phase` (in band units; one full cycle is BAND_COUNT) drives the breath. The gradient's
+ * `phase` (in region units; one full cycle is REGION_COUNT) drives the breath. The gradient's
  * two endpoints ride the band ring half a cycle apart, so they cross and part like a
  * chest rising — while a counter-phased lightness swing keeps even a flat page moving.
  *
@@ -332,15 +423,15 @@ export function bandAt(bands, x) {
  * gradient breathes.
  */
 export function tintTokens(palette, phase = 0, polarity = 'dark') {
-  const { bands, dominant, accent } = palette;
-  const n = bands.length;
+  const { regions, dominant, accent } = palette;
+  const n = regions.length;
   const cfg = BAND[polarity];
 
   const swing = BREATH_AMPLITUDE * Math.sin((2 * Math.PI * phase) / n);
-  const surface = (rgb, lift = 0) => clampSurface(rgb, lift, polarity);
+  const surface = (rgb, lift = 0, minContrast = SURFACE_AAA) => clampSurface(rgb, lift, polarity, minContrast);
 
   const bg = surface(dominant);
-  const text = polarity === 'light' ? TEXT_ON_LIGHT : TEXT_ON_DARK;
+  const text = textFor(polarity);
 
   // The accent must be legible on whichever panel it landed on: lighten it on a dark
   // panel, darken it on a light one. `dir` already encodes "away from the background".
@@ -351,15 +442,17 @@ export function tintTokens(palette, phase = 0, polarity = 'dark') {
     polarity,
 
     bg,
-    bgElevated: surface(dominant, 0.035),
-    bgSubtle: surface(dominant, 0.06),
-    border: surface(dominant, 0.095),
-    borderSoft: surface(dominant, 0.05),
-    scrollbar: surface(dominant, -0.03),
+    bgElevated: surface(dominant, 0.035, SURFACE_AA),
+    bgSubtle: surface(dominant, 0.06, SURFACE_AA),
+    border: surface(dominant, 0.095, SURFACE_NONE),
+    borderSoft: surface(dominant, 0.05, SURFACE_NONE),
+    scrollbar: surface(dominant, -0.03, SURFACE_NONE),
 
-    gradTop: surface(bandAt(bands, phase), 0.02 + swing),
+    // Opposite ring positions are opposite corners of the page, so a left/right split
+    // reads as a gradient rather than as one flat colour.
+    gradTop: surface(regionAt(regions, phase), 0.02 + swing),
     gradMid: surface(accent, 0.005),
-    gradBot: surface(bandAt(bands, phase + n / 2), -0.015 - swing),
+    gradBot: surface(regionAt(regions, phase + n / 2), -0.015 - swing),
 
     text,
     textMuted: mixRgb(text, bg, MUTED_MIX[polarity]),
@@ -369,16 +462,25 @@ export function tintTokens(palette, phase = 0, polarity = 'dark') {
   };
 }
 
+/** Round a float channel for use in an rgba() string. */
+const ch = (n) => Math.min(255, Math.max(0, Math.round(n)));
+
 /** Tokens → the CSS custom-property values the panel sets on :root. */
 export function tintCss(tokens) {
-  const { gradTop, gradMid, gradBot, accent } = tokens;
+  const { gradTop, gradMid, gradBot, accent, bgElevated } = tokens;
   const [ar, ag, ab] = accent;
+  const [er, eg, eb] = bgElevated;
 
   return {
     polarity: tokens.polarity,
 
     bg: toHex(tokens.bg),
     bgElevated: toHex(tokens.bgElevated),
+
+    // The Rail's frosted fill: the elevated surface, made translucent. Emitted as rgba
+    // rather than left to color-mix() in CSS, which would compute to `transparent` — an
+    // invisible Rail — anywhere the function is unsupported.
+    railBg: `rgba(${ch(er)}, ${ch(eg)}, ${ch(eb)}, ${RAIL_ALPHA})`,
     bgSubtle: toHex(tokens.bgSubtle),
     border: toHex(tokens.border),
     borderSoft: toHex(tokens.borderSoft),
@@ -400,44 +502,110 @@ export function tintFor(palette, phase = 0, polarity = 'dark') {
   return tintCss(tintTokens(palette, phase, polarity));
 }
 
-const lerp = (a, b, t) => Math.round(a + (b - a) * t);
+/** Blend one channel in LINEAR light, returning a float sRGB channel. */
+const lerpChannel = (a, b, t) => delinearize(linearize(a) + (linearize(b) - linearize(a)) * t);
+
+const copyTokens = (t) => {
+  const out = { polarity: t.polarity };
+  for (const key of TOKEN_KEYS) out[key] = [t[key][0], t[key][1], t[key][2]];
+  return out;
+};
 
 /**
- * Interpolate two token sets in sRGB. `t` is clamped to [0,1].
+ * Interpolate two token sets. `t` is clamped to [0,1].
  *
- * Why sRGB is safe WITHIN a polarity, rather than merely convenient: relativeLuminance is
- * convex in sRGB (the v/12.92 leg's slope is below the ^2.4 leg's derivative at the join,
- * and x^2.4 is convex), so lum(lerp(a,b,t)) <= max(lum(a), lum(b)) for every t. Contrast
- * against a fixed foreground falls monotonically with background luminance. So a lerp
- * between two AAA-clearing backgrounds is itself AAA at every frame.
+ * DOES NOT ROUND. Channels stay floating point, and toHex quantises them on the way to
+ * CSS. This is load-bearing for the exponential follower in Services/Chat/tabTint.js: it
+ * advances by k = 1 - exp(-dt/tau) per frame, which at 60fps and tau=2200ms is ~0.0075.
+ * Rounding each step would snap a 26-unit gap's 0.196-unit advance straight back to where
+ * it started, and the follower would never move at all. Round once, at the end.
  *
- * ACROSS a polarity, that argument collapses — the foreground moves too. Interpolating a
- * dark-bg/light-text panel into a light-bg/dark-text one drags both through mid-grey,
- * where they meet at ~1:1 and the panel is briefly unreadable. There is no easing that
- * fixes it; the midpoint itself is the problem. So a flip SNAPS: this returns `b` outright.
+ * BLENDS IN LINEAR LIGHT, and that is a correctness requirement, not a nicety. Luminance
+ * is AFFINE in linear light, so lum(lerp(a,b,t)) sits exactly between lum(a) and lum(b);
+ * contrast is monotone in luminance; therefore a blend of two surfaces that each clear a
+ * floor clears it too, at every frame, in EITHER polarity.
+ *
+ * Blending in sRGB instead only bounds luminance from ABOVE (relativeLuminance is convex
+ * there). That is the right direction on a dark panel, where lower luminance means more
+ * contrast against light text — and the wrong one on a light panel, where a blend of two
+ * surfaces sitting at exactly 7.00:1 can sag below the floor between them. It did.
+ *
+ * ACROSS a polarity, no interpolation is safe — the foreground moves too, and drags
+ * through mid-grey to meet the background at ~1:1. So this refuses the job and returns
+ * `b` outright. Crossing a polarity is flipTokens', which lerps the surfaces but CHOOSES
+ * the foreground rather than blending it.
  */
 export function lerpTokens(a, b, t) {
   if (a.polarity !== b.polarity) return b;
 
   const k = clamp01(t);
+  if (k === 0) return copyTokens(a);   // exact endpoints; the linear round-trip is lossy at 1e-13
+  if (k === 1) return copyTokens(b);
+
   const out = { polarity: b.polarity };
   for (const key of TOKEN_KEYS) {
     const [ar, ag, ab] = a[key];
     const [br, bg, bb] = b[key];
-    out[key] = [lerp(ar, br, k), lerp(ag, bg, k), lerp(ab, bb, k)];
+    out[key] = [lerpChannel(ar, br, k), lerpChannel(ag, bg, k), lerpChannel(ab, bb, k)];
   }
   return out;
 }
 
+/** The surfaces the foreground actually sits on. A flip frame is judged against all of them. */
+const FLIP_SURFACES = ['bg', 'bgElevated', 'bgSubtle', 'gradTop', 'gradMid', 'gradBot'];
+
 /**
- * Are two token sets within `tol` on every channel, and the same polarity?
- *
- * JPEG noise and bucket-mean drift make a re-sample of an UNCHANGED page differ by a
- * unit or two. Without a deadband the panel would tween perpetually against sensor
- * noise — motion the page never actually made. A polarity flip is never "close",
- * however near the channels happen to land.
+ * The contrast at a flip's crossover — where the two foregrounds' curves meet. Not a knob:
+ * it falls out of TEXT_ON_DARK and TEXT_ON_LIGHT, and measures 3.50:1. Used to scale the
+ * secondary-text mix, so `headroom` is 0 exactly at the trough.
  */
-export function tokensClose(a, b, tol = 2) {
-  if (a.polarity !== b.polarity) return false;
-  return TOKEN_KEYS.every((key) => a[key].every((v, i) => Math.abs(v - b[key][i]) <= tol));
+const FLIP_FLOOR = 3.5;
+
+/**
+ * One frame of a POLARITY CROSSFADE — the transition lerpTokens refuses to make.
+ *
+ * The trick is that the foreground is not interpolated, it is CHOSEN. Surfaces lerp
+ * normally; then each candidate text is scored by its worst contrast across every
+ * surface it sits on, and the winner takes the frame. Early frames pick the old text,
+ * late frames the new one, and the swap lands exactly at the crossover — the background
+ * luminance where the two curves meet.
+ *
+ * That crossover is the transition's floor, and it is a fixed property of the two
+ * foregrounds rather than a tuning choice: roughly 3.5:1, for a single frame, recovering
+ * immediately on either side. Below the 7:1 the settled panel holds, but nowhere near the
+ * ~1:1 that interpolating the text through mid-grey would produce.
+ *
+ * `polarity` flips with the text, so a caller keying CSS off it (the .tinted-light class,
+ * and the accent palette it carries) switches on the same frame the background crosses.
+ */
+export function flipTokens(a, b, t) {   // v2.74.1433
+  const k = clamp01(t);
+
+  const frame = { };
+  for (const key of TOKEN_KEYS) frame[key] = mixRgb(a[key], b[key], k);
+
+  const worstAgainst = (text) => Math.min(...FLIP_SURFACES.map((key) => contrastRatio(frame[key], text)));
+  const polarity = worstAgainst(TEXT_ON_LIGHT) >= worstAgainst(TEXT_ON_DARK) ? 'light' : 'dark';
+  const text = polarity === 'light' ? TEXT_ON_LIGHT : TEXT_ON_DARK;
+
+  frame.polarity = polarity;
+  frame.text = text;
+
+  // Secondary text is the foreground mixed TOWARD the background, which spends contrast
+  // the flip's trough cannot afford: at the crossover the primary holds only ~3.5:1, and a
+  // full mix would sink muted to ~2.2:1. So the mix shrinks with the headroom — muted and
+  // subtle converge on the primary exactly where they must, and are untouched at rest
+  // (a settled frame has 12:1+, so `headroom` saturates at 1 and this reduces to a no-op).
+  const headroom = clamp01((contrastRatio(frame.bg, text) - FLIP_FLOOR) / (7 - FLIP_FLOOR));
+  frame.textMuted = mixRgb(text, frame.bg, MUTED_MIX[polarity] * headroom);
+  frame.textSubtle = mixRgb(text, frame.bg, SUBTLE_MIX[polarity] * headroom);
+
+  // Re-derive rather than lerp: a lerped accent would sag through the middle exactly
+  // where the background is least forgiving.
+  frame.accent = pushUntilContrast(ACCENT_BASE, frame.bg, ACCENT_MIN_CONTRAST, BAND[polarity].dir);
+  const { h, s, l } = rgbToHsl(frame.accent[0], frame.accent[1], frame.accent[2]);
+  frame.accentHover = hslToRgb(h, s, clamp01(l - 0.05));
+
+  return frame;
 }
+
