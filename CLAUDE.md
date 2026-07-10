@@ -16,7 +16,7 @@ Chrome side-panel agent that learns to operate websites. MV3 extension; no build
 
 # Invariants — add to these, don't relearn them
 
-Two failure *families* below have each been re-diagnosed from scratch several times (see `logs/run/findings.md`). They are checklist-shaped: a new code path silently breaks an observability contract that no test covers. Before finishing any change that touches the listed trigger, confirm the paired rule.
+Three failure *families* below have each been re-diagnosed from scratch several times (see `logs/run/findings.md`). They are checklist-shaped: a new code path silently breaks a contract that no test covers. Before finishing any change that touches the listed trigger, confirm the paired rule.
 
 ## 1. New decision marker → add it to `_DECISION_RE`
 **Trigger:** you add or rename a decision-worthy log marker (anything a `-decisions-` download should surface — `ROUTE ▸`, `ORCH_MATCH`, `WALK ▸`, `RICH_INTENTS ▸`, `INTENT_MENU ▸`, `ACCEPT_SG_TRIAL`, `INTERACTION_OUTCOMES ▸`, etc.).
@@ -33,6 +33,17 @@ Two failure *families* below have each been re-diagnosed from scratch several ti
 **Exception — do NOT suppress the observation/demonstration recorder.** When the *user* is demonstrating a capability, those clicks ARE the signal; busy-marking them would erase the recording. Suppress engine-synthesized clicks only.
 
 **Why this keeps biting:** discovered one emitter at a time — `REPLAY_SG_CAPABILITY` (.908) → `EXPLORE_PAGE_STRUCTURE` sweep (.911) → `RUN_SG_TRIAL` (.912) → `INVOKE_WORKFLOW` (flagged .966, distinct dispatch path). Each new driver re-introduced the same monitor pollution. Treat busy-marking as part of the definition of "engine drives a tab," not a follow-up.
+
+## 3. New ride-recipe field → thread it through all THREE catalog→leg hops (+ seed into existing Grounds)
+**Trigger:** you add a field to a `CONNECTOR_RECIPES` entry (`Core/connectorRecipes.js`) — a transport marker (`gql` / `csrf` / `persistedOp` / `urlParam` / `bodyType` / `contentType`), a human-page marker (`itemUrl` / `listUrl`), an identity marker (`verifyIdentity` / `identityProbe`), or a digest marker (`pulse` / `drill`).
+
+**Rule:** the field must survive the **SEEDED** path (a forged / Overview-workbench Ground rides `harvestedRecipeLegs`), not just the catalog-invoked path — an app selecting a curated leg reads the entry DIRECTLY, so it never notices a drop; only a seeded Ground exercises all three hops. Catalog → invocable leg is three hops:
+1. `recipeFromCatalogEntry` (`Core/rideRecipe.js`) — entry → stored per-Ground record. **Add the field** to the additive block.
+2. `harvestedRecipeLegs` (`Core/connectorRecipes.js`) — record → leg. It SPREADS the whole record into `recipeToLeg`, so a new field flows **automatically** — nothing to do here (that spread IS the v1432 consolidation).
+3. `recipeToLeg` (`Core/connectorLeg.js`) — the single field-reader (record/entry → `leg.tool`). **Add the field** here.
+Plus: `GET_RIDE_RECIPES` (`background/handlers/sg.js`) MERGES curated into a NON-empty Ground (adds-missing; preserves a user's disable/reject), so a forged Ground actually receives the curated legs — it is not seed-on-empty-only.
+
+**Why this keeps biting (the "re-learn per ride" lesson):** the ride MODEL generalized cleanly, but ACTIVATION (reachable + fresh + armed) was hardcoded to the Zendesk/Shopify connected-app shape, so each new transport/field was dropped on the seeded path one at a time — cookie-ride auth (v1430), palette projection (v1428), `itemUrl` for "show warranty" (v1432). Same class every time: the curated app worked, the forged/seeded Ground silently lost the marker. The v1432 spread makes hop 2 automatic; hops 1 + 3 (+ the merge) are the residual two-line discipline.
 
 ---
 

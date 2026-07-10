@@ -48,6 +48,29 @@ describe('harvestedRecipeLegs — armable harvested reads → invoke-palette leg
     assert.equal(harvestedRecipeLegs([REC()], { host: 'deakoapi.deako.com', mode: 'ask' })[0].tool.groundId, undefined);   // no ground → not stamped
   });
 
+  it('v1432 (Invariant #3): carries itemUrl/listUrl from the record → leg.tool (the SEEDED path is now lossless)', () => {
+    const legs = harvestedRecipeLegs([REC({ itemUrl: '/#warranty', listUrl: '/#dashboard' })], { host: 'deakoapi.deako.com', mode: 'ask' });
+    assert.equal(legs.length, 1);
+    assert.equal(legs[0].tool.itemUrl, '/#warranty');   // "show X" opens the object's page — was DROPPED before the whole-record spread
+    assert.equal(legs[0].tool.listUrl, '/#dashboard');
+  });
+
+  it('v1432: a curated gql READ (POST + write:false) is NOT misclassed as a write; its transport markers flow', () => {
+    const legs = harvestedRecipeLegs([REC({ id: 'g1', method: 'POST', write: false, gql: true, body: { query: 'query{x}' }, csrf: 'sniff' })], { host: 'deakoapi.deako.com', mode: 'ask' });
+    assert.equal(legs.length, 1);
+    assert.equal(legs[0].mode, 'ask');            // explicit write:false honored — a POST read stays a read (was: method→write=true)
+    assert.equal(legs[0].safety, 'auto');         // trusted read → auto
+    assert.equal(legs[0].tool.gql, true);
+    assert.equal(legs[0].tool.csrf, 'sniff');
+    assert.ok(legs[0].tool.body);                 // gql body threads for a read
+  });
+
+  it('v1432: a record with NO explicit write still method-derives (a non-GET harvested record stays a write — §9 fail-safe)', () => {
+    const legs = harvestedRecipeLegs([REC({ id: 'h1', method: 'POST', safetyClass: 'gated' })], { host: 'deakoapi.deako.com', mode: 'ask' });
+    assert.equal(legs[0].mode, 'act');            // write == null && method !== GET → write
+    assert.notEqual(legs[0].safety, 'auto');
+  });
+
   it('degrades on empty / garbage', () => {
     assert.deepEqual(harvestedRecipeLegs(), []);
     assert.deepEqual(harvestedRecipeLegs([null, {}], { host: 'x.com' }), []);

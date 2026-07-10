@@ -40,7 +40,7 @@ export function originMatchesAppHost(origin, appHost) {
  */
 export function recipeFromCatalogEntry(entry, { groundId = '', origin = '' } = {}) {
   const e = (entry && typeof entry === 'object') ? entry : {};
-  return {
+  const rec = {
     id: String(e.id || ''),
     groundId: String(groundId || ''),
     origin: _host(origin) || _host(e.appHost),
@@ -56,6 +56,24 @@ export function recipeFromCatalogEntry(entry, { groundId = '', origin = '' } = {
     enabled: true,
     reviewState: 'accepted',
   };
+  // v2.74.1432 — carry the FULL transport + human-page + digest markers so a SEEDED record (the Overview/workbench path,
+  // which invokes via harvestedRecipeLegs → recipeToLeg) is invocation-COMPLETE — not just the catalog-invoked connector
+  // (an app selecting a curated leg reads the entry DIRECTLY, so it never noticed the loss). WAS lossy: itemUrl/write/gql/
+  // csrf/… were dropped, so a seeded ground lost "show X" (itemUrl) and every non-Zendesk-shaped transport marker. This is
+  // the root of the "re-learn per ride" churn (see Invariant #3). Additive: a field absent on the entry stays absent on the
+  // record (no empty keys), so a plain Zendesk-read record is byte-identical to before.
+  if (e.write === true) rec.write = true;
+  if (e.destructive === true) rec.destructive = true;                 // kept explicit too (safetyClass already encodes it)
+  if (e.gql === true) rec.gql = true;
+  if (e.shopProbe === true) rec.shopProbe = true;
+  if (e.verifyIdentity === true) rec.verifyIdentity = true;
+  if (e.urlParam && typeof e.urlParam === 'object') rec.urlParam = e.urlParam;
+  if (e.pulse != null) rec.pulse = e.pulse;
+  if (e.drill && typeof e.drill === 'object') rec.drill = e.drill;
+  for (const k of ['itemUrl', 'listUrl', 'bodyType', 'contentType', 'identityProbe', 'persistedOp', 'csrf', 'autoRequires']) {
+    if (e[k] != null && e[k] !== '') rec[k] = e[k];
+  }
+  return rec;
 }
 
 /**

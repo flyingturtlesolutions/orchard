@@ -398,26 +398,30 @@ export const CONNECTOR_RECIPES = [
       { name: 'shipping_line', type: 'object' },       // { title, price } — { price: '0.00' } for free shipping
     ] },
   // ── VendorSuite (CX-9) — the curated cookie-ride READS. {divisionId}/{status}/{taskId} are explicit params for now;
-  // the convivial auto-fill of {divisionId} from VendorSuite/State (access.DefaultDivision.Id) is the next slice. ──
-  { ...VS, id: 'vs_state', name: 'My VendorSuite state',
+  // the convivial auto-fill of {divisionId} from VendorSuite/State (access.DefaultDivision.Id) is the next slice.
+  // FL-1c/1d (v2.74.1432) — `itemUrl`/`listUrl`: VendorSuite is a hash-route SPA with ONLY 4 sections (#warranty /
+  // #dashboard / #settings / #documents — no per-task route), so "show warranty" opens the #warranty SECTION (the
+  // honest home of the task), exactly like "show ticket" opens a Zendesk ticket. The section link carries no {id}
+  // placeholder — the read's result id has nowhere per-task to go, so it just opens the section the object lives in. ──
+  { ...VS, id: 'vs_state', name: 'My VendorSuite state', itemUrl: '/#dashboard',
     does: 'read your VendorSuite state — your current division, the divisions you can access, your permissions, and current announcements — riding your login',
     endpoint: '/api/VendorSuite/State', params: [] },
   { ...VS, id: 'vs_versions', name: 'VendorSuite versions',
     does: 'the VendorSuite app component versions and environment',
     endpoint: '/api/Versions', params: [] },
-  { ...VS, id: 'vs_warranty_tasks', name: 'Warranty tasks by status',
+  { ...VS, id: 'vs_warranty_tasks', name: 'Warranty tasks by status', listUrl: '/#warranty',
     does: 'list a division\'s warranty tasks by status (new / open / fixed / closed) — task number, claim number, address, age, allowed amount; the division id comes from your VendorSuite state',
     endpoint: '/api/Vendor/Warranty/Tasks/{divisionId}/{status}',
     params: [{ name: 'divisionId', type: 'string', required: true }, { name: 'status', type: 'string', required: true }] },
-  { ...VS, id: 'vs_warranty_task', name: 'Warranty task details',
+  { ...VS, id: 'vs_warranty_task', name: 'Warranty task details', itemUrl: '/#warranty',
     does: 'read a warranty task\'s full details by its task id — status, project, address, priority, instructions, vendor explanation, appointments',
     endpoint: '/api/Vendor/Warranty/Task/{taskId}',
     params: [{ name: 'taskId', type: 'string', required: true }] },
-  { ...VS, id: 'vs_warranty_stats', name: 'Warranty task counts',
+  { ...VS, id: 'vs_warranty_stats', name: 'Warranty task counts', listUrl: '/#dashboard',
     does: 'warranty task counts (new / open / fixed) for a division — the dashboard statistic',
     endpoint: '/api/Vendor/Dashboard/Statistic/{divisionId}/Warranty',
     params: [{ name: 'divisionId', type: 'string', required: true }] },
-  { ...VS, id: 'vs_announcements', name: 'Vendor announcements',
+  { ...VS, id: 'vs_announcements', name: 'Vendor announcements', listUrl: '/#dashboard',
     does: 'a division\'s vendor announcements — title, message, dates, attachments',
     endpoint: '/api/Vendor/Announcement/{divisionId}',
     params: [{ name: 'divisionId', type: 'string', required: true }] },
@@ -510,15 +514,22 @@ export function harvestedRecipeLegs(recipes, { host = '', account = 'me', mode =
   const out = [];
   for (const r of list) {
     if (!r || !armable(r)) continue;                                   // the §18 gate — accepted ∧ enabled only
-    const write = String(r.method || 'GET').toUpperCase() !== 'GET';
+    const method = String(r.method || 'GET').toUpperCase();
+    // A record's OWN `write` wins (a curated gql READ is a POST but write:false); else method-derive (a harvested §17
+    // record may carry no `write`, and a non-GET must still class as a write, never silently a read). §9 fail-safe.
+    const write = r.write === true || (r.write == null && method !== 'GET');
     // v2.74.1303 (CX-6) — writes ARE now projected (mode:'act' legs): the dispatch confirm-gates them AND the
     // SESSION_REPLAY handler fail-closes on `confirmed:true`, so a demonstrated "Create X" is selectable and can only
     // run through the HITL gate — a write reaching execution un-confirmed is refused at the boundary. (Was: reads-only skip.)
+    // v2.74.1432 (Invariant #3) — SPREAD the whole record so recipeToLeg (the SINGLE field-reader) receives EVERY carried
+    // marker (itemUrl/listUrl/gql/csrf/urlParam/persistedOp/shopProbe/verifyIdentity/identityProbe/pulse/drill) — not the
+    // old hand-picked subset that silently dropped "show X" (itemUrl) + every non-cookie transport marker on the SEEDED
+    // path. A new recipe field now flows here for free; only recipeFromCatalogEntry + recipeToLeg still need the field added.
     const leg = recipeToLeg({
-      id: r.id, name: r.name, does: r.does, app,
-      origin: r.origin || host, endpoint: r.endpoint, method: r.method,
-      write, destructive: r.safetyClass === 'destructive', body: r.body, params: r.params,
-      bodyType: r.bodyType, contentType: r.contentType,
+      ...r,
+      app,                                                             // derived from host — the per-Ground record carries no `app`
+      origin: r.origin || host, method, write,
+      destructive: r.destructive === true || r.safetyClass === 'destructive',
     }, { account, trusted: true });                                    // accepted = user-vetted → read drops to 'auto'
     if (!leg) continue;
     if (seen.has(leg.key)) continue; seen.add(leg.key);

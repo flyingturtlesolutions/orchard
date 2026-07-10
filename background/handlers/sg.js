@@ -940,9 +940,21 @@ export function createSgMessageHandlers(ctx) {
         const origin = String(payload?.origin ?? '').trim();
         if (!groundId) { sendResponse({ success: true, recipes: [] }); return; }
         let recipes = await ctx.readRideRecipes(groundId);
-        if (!recipes.length && origin) {   // first access → seed the curated catalog matched to this Ground's origin
-          recipes = seedRideFromCatalog(CONNECTOR_RECIPES, { groundId, origin });
-          if (recipes.length) await ctx.writeRideRecipes(groundId, recipes);
+        if (origin) {
+          // v2.74.1432 (Invariant #3) — seed/REFRESH the curated catalog matched to this Ground's origin. WAS
+          // seed-on-EMPTY-only, so a Ground that already had forged/harvested recipes NEVER received the curated legs
+          // (or their itemUrl/write) — a forged VendorSuite ground could read but "show warranty" had no itemUrl.
+          // Now: ADD any curated recipe the Ground is MISSING (matched by origin). Only ADDS — a curated recipe the user
+          // DISABLED/REJECTED stays present (present ≠ missing), so its user state is preserved and this never re-arms
+          // it; a HARD-deleted one re-appears (so disable/reject a curated leg you don't want — don't delete it). The
+          // `missing` set is disjoint from `recipes` by construction, so a plain append IS the id-keyed merge.
+          const curated = seedRideFromCatalog(CONNECTOR_RECIPES, { groundId, origin });
+          const have = new Set(recipes.map((r) => r && r.id));
+          const missing = curated.filter((c) => c && !have.has(c.id));
+          if (missing.length) {
+            recipes = recipes.concat(missing);
+            await ctx.writeRideRecipes(groundId, recipes);
+          }
         }
         sendResponse({ success: true, recipes });
       } catch (err) {

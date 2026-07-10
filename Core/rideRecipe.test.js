@@ -56,6 +56,34 @@ describe('rideRecipe — seed from catalog', () => {
     assert.equal(seeded.find((r) => r.id === 'add_comment').safetyClass, 'gated');
     assert.equal(seeded.find((r) => r.id === 'delete_ticket').safetyClass, 'destructive');
   });
+
+  it('v1432 (Invariant #3): carries the FULL markers so a SEEDED record is invocation-complete', () => {
+    const rec = recipeFromCatalogEntry(
+      { id: 'x', name: 'X', does: 'd', method: 'POST', endpoint: '/e', appHost: 'zendesk.com',
+        itemUrl: '/agent/tickets/{id}', listUrl: '/agent/search', write: true, gql: true, csrf: 'sniff',
+        bodyType: 'form', contentType: 'application/json', verifyIdentity: true, identityProbe: '/me.json',
+        persistedOp: 'CreateX', shopProbe: true, pulse: { kind: 'inflow' }, drill: { via: 'y' }, urlParam: { name: 'h', pattern: 'p' } },
+      { groundId: 'g1', origin: 'deako.zendesk.com' });
+    assert.equal(rec.itemUrl, '/agent/tickets/{id}');
+    assert.equal(rec.listUrl, '/agent/search');
+    assert.equal(rec.write, true);
+    assert.equal(rec.gql, true);
+    assert.equal(rec.csrf, 'sniff');
+    assert.equal(rec.bodyType, 'form');
+    assert.equal(rec.contentType, 'application/json');
+    assert.equal(rec.verifyIdentity, true);
+    assert.equal(rec.identityProbe, '/me.json');
+    assert.equal(rec.persistedOp, 'CreateX');
+    assert.equal(rec.shopProbe, true);
+    assert.deepEqual(rec.pulse, { kind: 'inflow' });
+    assert.deepEqual(rec.drill, { via: 'y' });
+    assert.deepEqual(rec.urlParam, { name: 'h', pattern: 'p' });
+    // a plain GET read carries NONE of these — additive, no empty keys (byte-identical to the pre-v1432 record)
+    const plain = recipeFromCatalogEntry({ id: 'p', method: 'GET', endpoint: '/g', appHost: 'zendesk.com' }, { origin: 'deako.zendesk.com' });
+    for (const k of ['itemUrl', 'listUrl', 'write', 'gql', 'csrf', 'bodyType', 'verifyIdentity', 'persistedOp', 'shopProbe', 'pulse', 'drill', 'urlParam']) {
+      assert.equal(k in plain, false, `plain read must not carry ${k}`);
+    }
+  });
 });
 
 describe('rideRecipe — merge preserves user state', () => {
