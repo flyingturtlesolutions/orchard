@@ -1,6 +1,6 @@
 /**
  * @file Services/Chat/tabTint.js
- * @description v2.74.1433 — active-tab background tint: the impure half.
+ * @description v2.74.1435 — active-tab background tint: the impure half.
  *
  * Captures the visible tab, downscales it to a thumbnail, hands the pixels to the
  * pure colour math in Core/tabTint.js, and writes the resulting hex tokens onto
@@ -25,7 +25,7 @@
  *     crossing sits below AAA. So it is a brief crossfade of the SCHEME ONLY — the colours
  *     already on screen, re-rendered at the new polarity — after which the follower carries
  *     the colour distance at its usual pace. A light-to-dark tab switch therefore reads as
- *     a quick scheme change followed by a long drift, never as a minute in the trough.
+ *     a quick scheme change followed by a long drift, never as a slow crawl through the trough.
  *
  * All of it yields to prefers-reduced-motion: under `reduce` the tint still tracks the
  * tab, but it lands instantly, never breathes, and runs no animation frames at all.
@@ -70,22 +70,16 @@ const DEBOUNCE_MS = 320;
  * Frame-rate independent by construction (see the exp(-dt/tau) in tick), so it behaves the
  * same on a 60Hz and a 144Hz display, and survives a frame budget it misses.
  */
-const FOLLOW_SETTLE_MS = 66000;
-const FOLLOW_TAU_MS = FOLLOW_SETTLE_MS / 3;   // 63% closed at 22s, 95% at 66s
-
-/*
- * 66s, not 60: a flip's bridge starts nearer the target than a cold start does, so an exact
- * 60s constant let the fastest case (black -> white) land at 57s. Measured settle across
- * the corners is now 63s .. 87s, i.e. never under the minute.
- */
+const FOLLOW_SETTLE_MS = 15000;   // v2.74.1435 — was 66000; the minute-long drift read as lag once seen live
+const FOLLOW_TAU_MS = FOLLOW_SETTLE_MS / 3;   // 63% closed at 5s, 95% at 15s
 
 /**
  * One full sweep of the breath across all regions.
  *
  * Coupled to FOLLOW_TAU_MS, not freely chosen. The follower is a first-order low-pass
- * filter, so it attenuates the breath by 1/sqrt(1 + (2*pi*tau/period)^2). At the old 60s
- * period against a 22s tau that keeps only ~40% of the swing — the breath would be eaten by
- * the very slowness that makes a tab switch gentle. 180s keeps 79%.
+ * filter, so it attenuates the breath by 1/sqrt(1 + (2*pi*tau/period)^2). At tau=5s a
+ * 180s period passes ~98% of the swing; shortening the settle further needs no breath
+ * change, but LENGTHENING it does — at tau=22s this same period kept only 79%.
  */
 const BREATH_PERIOD_MS = 180000;
 
@@ -102,7 +96,8 @@ const MAX_FRAME_DT_MS = 100;
  * flipTokens; the trough at the crossover bottoms out near 3.5:1). At 1200ms that is at
  * most 0.59s under AAA and 0.20s under AA — and less in practice, since the bridge below
  * crosses a shorter colour distance (measured 0.28s / 0.27s black->white). Stretched to
- * FOLLOW_SETTLE_MS it would be ~30s and ~10s: a minute of barely-legible panel.
+ * the follower's settle time it multiplies those windows by settle/1.2 — seconds of
+ * barely-legible panel at any settle worth having.
  *
  * So a polarity flip is NOT slowed down. It is decoupled instead: `adopt` crossfades only
  * the SCHEME (old colours, new polarity) at this speed, then hands the panel to the
@@ -113,7 +108,7 @@ const FLIP_MS = 1200;
 /*
  * No noise deadband here any more, and deliberately so. The discrete-tween model needed
  * one: a ±2-unit JPEG wobble would kick off a fresh tween on every idle re-sample. The
- * follower doesn't — a target jittering by two units is attenuated to nothing by a 22s
+ * follower doesn't — a target jittering by two units is attenuated to nothing by a multi-second
  * time constant, and paint() skips the DOM when the rounded hex is unchanged. Keeping a
  * deadband would also have been a BUG: it short-circuited before polarityFor ran, so a
  * page darkening past the threshold in sub-tolerance steps would never have flipped.
@@ -328,7 +323,7 @@ export function installTabTint() {
       // polarity. Fast, because the crossover trough is unavoidable and must be brief.
       // Then the follower takes the colour journey to `fresh` at its own slow pace — so a
       // light-to-dark tab switch reads as a quick scheme change followed by a long drift,
-      // not as a minute spent inside the trough.
+      // not as the whole settle time spent inside the trough.
       const bridge = tintTokens(prevPalette, phase, nextPolarity);
       polarity = nextPolarity;
       palette = fresh;

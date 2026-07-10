@@ -1,4 +1,4 @@
-// Core/tabTint.test.js — v2.74.1433 active-tab tint colour math (node --test). PURE.
+// Core/tabTint.test.js — v2.74.1435 active-tab tint colour math (node --test). PURE.
 // Run via the temp-dir ESM harness (npm test).
 
 import { describe, it } from 'node:test';
@@ -347,6 +347,35 @@ describe('tabTint — samplePalette', () => {
     // Both rows land in the same 4-bit bucket; the result is their true mean.
     const img = imageFromRows([[200, 20, 20], [206, 26, 26]], 2);
     assert.deepEqual(samplePalette(img).dominant, [203, 23, 23]);
+  });
+
+  // v2.74.1435 — white votes at 52.5%, because most of the web is majority-white and an
+  // unweighted mode hands every merely-half-colourful page to white.
+  it('white LOSES a 50/50 split — its vote is discounted', () => {
+    // 2 white rows (1.05 effective votes) vs 2 red rows (2.0): red must win.
+    const img = imageFromRows([[255, 255, 255], [255, 255, 255], [200, 20, 20], [200, 20, 20]], 4);
+    const { dominant } = samplePalette(img);
+    assert.ok(dominant[0] > 150 && dominant[2] < 60, `got ${dominant} — white won a tie it should lose`);
+  });
+
+  it('white still wins a true majority — the discount is a thumb, not a veto', () => {
+    // 3 white rows (1.575 effective) vs 1 red row (1.0): white holds.
+    const img = imageFromRows([[255, 255, 255], [255, 255, 255], [255, 255, 255], [200, 20, 20]], 4);
+    const { dominant } = samplePalette(img);
+    assert.ok(dominant[0] > 240 && dominant[2] > 240, `got ${dominant} — a 75% white page must stay white`);
+  });
+
+  it('the weighted white bucket still averages to true white', () => {
+    // Weighting must scale the sums with the votes, or the bucket mean drifts off-colour.
+    const { dominant } = samplePalette(imageFromRows([[255, 255, 255]], 4));
+    assert.deepEqual(dominant, [255, 255, 255]);
+  });
+
+  it('near-white below the top bucket votes at full weight', () => {
+    // #ee (238) sits outside the >=240 white bucket: 50/50 against a colour, it WINS.
+    const img = imageFromRows([[238, 238, 238], [238, 238, 238], [200, 20, 20], [200, 20, 20]], 4);
+    const { dominant } = samplePalette(img);
+    assert.ok(dominant[0] > 220 && dominant[2] > 220, `got ${dominant} — the discount leaked below the white bucket`);
   });
 
   it('the ring has eight cells and tracks vertical structure', () => {

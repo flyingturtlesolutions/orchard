@@ -1,6 +1,6 @@
 /**
  * @file Core/tabTint.js
- * @description v2.74.1433 — pure colour math for the active-tab background tint.
+ * @description v2.74.1435 — pure colour math for the active-tab background tint.
  *
  * The side panel samples a downscaled screenshot of the active tab and derives a
  * gradient from it. This module is the PURE half: pixels in → hex tokens out. No
@@ -287,6 +287,17 @@ const isAccent = (r, g, b) => {
 };
 
 /**
+ * v2.74.1435 — white pixels vote at 52.5% (two user passes: 0.7, then a further −25%).
+ *
+ * Most of the web is majority-white, so an unweighted mode hands the palette to white on
+ * any page that is merely ~half colourful, and the tint spends its life washed out. At
+ * 0.525, white needs a genuine ~66% majority in a region to win it (0.525w > c, w + c = 1)
+ * instead of 50%. "White" is the sampler's own top bucket — every channel >= 240, the
+ * same 4-bit granularity the vote is already counted at.
+ */
+const WHITE_WEIGHT = 0.525;
+
+/**
  * Most-common colour bucket in a rect, returned as the true mean of its members.
  * Ties resolve to the first bucket seen (Map preserves insertion order) — deterministic.
  *
@@ -307,7 +318,10 @@ function dominantIn(data, width, rect, filter) {
       const k = binKey(r, g, b);
       let e = buckets.get(k);
       if (!e) { e = { n: 0, r: 0, g: 0, b: 0 }; buckets.set(k, e); }
-      e.n++; e.r += r; e.g += g; e.b += b;
+
+      // Weight the sums along with the vote, so a bucket's mean (sum/n) stays a true mean.
+      const w = (r >= 240 && g >= 240 && b >= 240) ? WHITE_WEIGHT : 1;
+      e.n += w; e.r += r * w; e.g += g * w; e.b += b * w;
     }
   }
 
