@@ -112,6 +112,17 @@ const SH = Object.freeze({
   endpoint: '/api/shopify/{handle}', urlParam: { name: 'handle', pattern: '\\/store\\/([^\\/]+)' }, shopProbe: true,
 });
 
+// ── VendorSuite (D.R. Horton vendor portal, vendorsuite.drhorton.com) — CX-9 (v2.74.1431), authored from HAR captures.
+// SAME-ORIGIN COOKIE-RIDE: the SPA's own /api/* reads, riding the vendor's logged-in session — NO Bearer/Authorization
+// header (v1430's cookie fallback carries them). {divisionId} = the D.R. Horton MARKET/division (Atlanta West-210 = 83,
+// Seattle-750 = 10, …); the VENDOR (e.g. DEAKO) is the session, the DIVISION is the variable. Resolve {divisionId} from
+// /api/VendorSuite/State: `access.DefaultDivision.Id` = the current division; `access.Hubs[].Divisions` = the whole list
+// the vendor can pick (the #divisionMenu). {status} ∈ new | open | fixed | closed. Reads only here — the warranty-note
+// WRITE (POST UpdateCompleteTask, form-urlencoded taskId+note) is a follow-on: it needs the form-urlencoded cookie-ride
+// write transport verified AND recipeFromCatalogEntry taught to carry write/body/bodyType (today's lossy projection drops
+// them), so it stays out of the curated surface until both land.
+const VS = Object.freeze({ app: 'vendorsuite', appHost: 'vendorsuite.drhorton.com', method: 'GET' });
+
 /**
  * CX-7c (v2.74.1388) — coerce a Shopify object id to a gid. Reads return `id` as a full gid
  * (`gid://shopify/Customer/123`); the model usually passes that back, but a bare numeric or a `#`-prefixed value
@@ -386,6 +397,30 @@ export const CONNECTOR_RECIPES = [
       { name: 'applied_discount', type: 'object' },   // { value, valueType: 'PERCENTAGE'|'FIXED_AMOUNT', title } — 100% PERCENTAGE for a warranty replacement
       { name: 'shipping_line', type: 'object' },       // { title, price } — { price: '0.00' } for free shipping
     ] },
+  // ── VendorSuite (CX-9) — the curated cookie-ride READS. {divisionId}/{status}/{taskId} are explicit params for now;
+  // the convivial auto-fill of {divisionId} from VendorSuite/State (access.DefaultDivision.Id) is the next slice. ──
+  { ...VS, id: 'vs_state', name: 'My VendorSuite state',
+    does: 'read your VendorSuite state — your current division, the divisions you can access, your permissions, and current announcements — riding your login',
+    endpoint: '/api/VendorSuite/State', params: [] },
+  { ...VS, id: 'vs_versions', name: 'VendorSuite versions',
+    does: 'the VendorSuite app component versions and environment',
+    endpoint: '/api/Versions', params: [] },
+  { ...VS, id: 'vs_warranty_tasks', name: 'Warranty tasks by status',
+    does: 'list a division\'s warranty tasks by status (new / open / fixed / closed) — task number, claim number, address, age, allowed amount; the division id comes from your VendorSuite state',
+    endpoint: '/api/Vendor/Warranty/Tasks/{divisionId}/{status}',
+    params: [{ name: 'divisionId', type: 'string', required: true }, { name: 'status', type: 'string', required: true }] },
+  { ...VS, id: 'vs_warranty_task', name: 'Warranty task details',
+    does: 'read a warranty task\'s full details by its task id — status, project, address, priority, instructions, vendor explanation, appointments',
+    endpoint: '/api/Vendor/Warranty/Task/{taskId}',
+    params: [{ name: 'taskId', type: 'string', required: true }] },
+  { ...VS, id: 'vs_warranty_stats', name: 'Warranty task counts',
+    does: 'warranty task counts (new / open / fixed) for a division — the dashboard statistic',
+    endpoint: '/api/Vendor/Dashboard/Statistic/{divisionId}/Warranty',
+    params: [{ name: 'divisionId', type: 'string', required: true }] },
+  { ...VS, id: 'vs_announcements', name: 'Vendor announcements',
+    does: 'a division\'s vendor announcements — title, message, dates, attachments',
+    endpoint: '/api/Vendor/Announcement/{divisionId}',
+    params: [{ name: 'divisionId', type: 'string', required: true }] },
 ];
 
 // The "useful subset" render shape (CS Tools normalizeTicket — 10 of ~80 fields). Pure; used by the CX-4a.2 list render.

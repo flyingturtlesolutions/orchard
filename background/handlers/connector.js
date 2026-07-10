@@ -119,15 +119,27 @@ function _replayFetchFunc(url, apiHost, method, reqBody, contentType) {
     try {
       var store = window.__ahub_ride_auth || {};
       var cap = store[apiHost] || null;
-      if (!cap || !cap.headers || !cap.headers.authorization) return { noAuth: true, keys: Object.keys(store) };   // keys → diagnose a host-key mismatch vs an empty global
+      var hasBearer = !!(cap && cap.headers && cap.headers.authorization);
+      var sameOrigin = false; try { sameOrigin = (String(apiHost) === location.host); } catch (e) { sameOrigin = false; }
+      // §20 (v2.74.1430) — AUTH MODEL, auto-selected (the replay handles BOTH, it no longer assumes Bearer): a captured
+      // BEARER (a cross-origin header-auth API) replays with that header, cookies omitted. NO Bearer but the API is
+      // SAME-ORIGIN as this logged-in page → ride the session COOKIE (credentials 'include'), exactly like a cookie-ride
+      // read — a cookie-auth portal has no Authorization header for the tee to capture, so the old Bearer-only path wrongly
+      // failed it as no-session-captured. A CROSS-origin API with no captured Bearer genuinely needs one (→ noAuth; arm + retry).
+      if (!hasBearer && !sameOrigin) return { noAuth: true, keys: Object.keys(store) };   // keys → diagnose a host-key mismatch vs an empty global
       var headers = { accept: 'application/json' };
-      for (var k in cap.headers) { if (Object.prototype.hasOwnProperty.call(cap.headers, k)) headers[k] = cap.headers[k]; }
-      var init = { method: method || 'GET', headers: headers, credentials: 'omit' };   // §20 — Bearer HEADER auth, not cookies; credentialed CORS ('include') is rejected by a header-auth API (Failed to fetch)
+      var init;
+      if (hasBearer) {
+        for (var k in cap.headers) { if (Object.prototype.hasOwnProperty.call(cap.headers, k)) headers[k] = cap.headers[k]; }
+        init = { method: method || 'GET', headers: headers, credentials: 'omit' };   // Bearer HEADER auth (credentialed CORS is rejected by a header-auth API)
+      } else {
+        init = { method: method || 'GET', headers: headers, credentials: 'include' };   // same-origin cookie-ride: the session cookie rides automatically
+      }
       if (reqBody != null && method && method !== 'GET' && method !== 'HEAD') { init.body = reqBody; if (contentType) headers['content-type'] = contentType; }   // CX-6 — a confirmed WRITE: attach the filled body + its content type
       var res = await fetch(url, init);
       var status = res.status, body = null;
       try { body = await res.json(); } catch (e) { try { body = await res.text(); } catch (e2) { body = null; } }
-      return { status: status, body: body };
+      return { status: status, body: body, mode: hasBearer ? 'bearer' : 'cookie' };
     } catch (e) { return { error: String((e && e.message) || e) }; }
   })();
 }
@@ -757,7 +769,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           if (r.error) { try { Logger.warn('background', `SESSION_REPLAY ▸ ${apiHost} ${method} → fetch-error: ${r.error} (tab ${tab.id})`); } catch { /* */ } sendResponse({ success: false, error: r.error }); return; }
           if (r.status === 401 || r.status === 403) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → ${r.status} session-expired (tab ${tab.id})`); } catch { /* */ } sendResponse({ success: false, error: 'session-expired', hint: `re-arm Forage on ${sessionHost} to refresh the session` }); return; }
           if (r.status >= 400) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → ${r.status} http-error (tab ${tab.id})`); } catch { /* */ } sendResponse({ success: false, error: `http-${r.status}`, hint: 'the server rejected the request', status: r.status, value: r.body }); return; }
-          try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → ${r.status} ${_shape} (tab ${tab.id})`); } catch { /* */ }
+          try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → ${r.mode ? r.mode + ' ' : ''}${r.status} ${_shape} (tab ${tab.id})`); } catch { /* */ }
           sendResponse({ success: true, value: r.body, status: r.status, origin: apiHost });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'replay-failed' }); }
       })();
