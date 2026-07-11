@@ -19,6 +19,10 @@ describe('probedUser / isAnonUser — §14 verify identity, not status', () => {
     assert.equal(probedUser({ success: false }), null);
     assert.equal(probedUser({ success: true, value: {} }), null);
   });
+  it('extracts Aircall Workspace current_user flat shape (no nested .user)', () => {
+    const ac = { id: 'agent-99', email: 'agent@deako.com', first_name: 'Jane' };
+    assert.deepEqual(probedUser({ success: true, value: ac }), ac);
+  });
   it('flags the logged-out sentinels (200 + anon)', () => {
     assert.equal(isAnonUser(ALICE), false);
     assert.equal(isAnonUser(null), true);

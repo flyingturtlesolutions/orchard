@@ -1,6 +1,6 @@
 /**
  * @file Services/Chat/tabTint.js
- * @description v2.74.1435 — active-tab background tint: the impure half.
+ * @description v2.74.1436 — active-tab background tint: the impure half.
  *
  * Captures the visible tab, downscales it to a thumbnail, hands the pixels to the
  * pure colour math in Core/tabTint.js, and writes the resulting hex tokens onto
@@ -45,6 +45,7 @@
  */
 
 import { samplePalette, tintTokens, tintCss, lerpTokens, flipTokens, polarityFor, REGION_COUNT } from '../../Core/tabTint.js';
+import { deriveType } from '../../Core/tabType.js';   // v2.74.1436 — page-matched prose
 
 /** Thumbnail edge, in pixels. 32x32 is ~1k pixels — plenty for a small colour reduction. */
 const THUMB = 32;
@@ -148,6 +149,50 @@ const TOKEN_VARS = {
 const GRADIENT_VAR = '--c-tint-gradient';
 
 /**
+ * v2.74.1436 — the prose of the chat adopts the ACTIVE TAB's text style (message bodies
+ * only; the panel chrome keeps its own type). Unlike the gradient this cannot come from
+ * pixels — only the DOM can name a font — so it is read via chrome.scripting from the
+ * page's computed styles, at TAB/NAVIGATION cadence rather than the 1s capture clock:
+ * fonts do not change on scroll, and injecting into the page every second would not be
+ * free the way a screenshot is.
+ *
+ * And unlike the gradient it is a DISCRETE swap, never animated: colour interpolation is
+ * a repaint, but type changes are a REFLOW — a follower lerping font-size would thrash
+ * layout every frame, and font-family cannot interpolate at all.
+ */
+const TYPE_VARS = {
+  family: '--page-font',
+  fontSize: '--page-fs',
+  lineHeight: '--page-lh',
+  fontWeight: '--page-fw',
+  letterSpacing: '--page-ls',
+};
+
+/**
+ * Runs INSIDE the page via chrome.scripting.executeScript — must stay self-contained.
+ * Collects computed styles from body-text elements, weighted by the visible text each
+ * carries, so the page's most-read font wins the election in Core/tabType.js.
+ */
+function sampleTypeInPage() {
+  const out = [];
+  const els = document.querySelectorAll('p, li, blockquote, dd, td, article');
+  for (const el of els) {
+    if (out.length >= 50) break;
+    const len = (el.textContent || '').trim().length;
+    if (len < 40) continue;
+    const cs = getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+    out.push({ ff: cs.fontFamily, fs: parseFloat(cs.fontSize), fw: cs.fontWeight, lh: cs.lineHeight, ls: cs.letterSpacing, n: len });
+  }
+  if (out.length === 0) {
+    // A page with no prose elements still has a body font.
+    const cs = getComputedStyle(document.body);
+    out.push({ ff: cs.fontFamily, fs: parseFloat(cs.fontSize), fw: cs.fontWeight, lh: cs.lineHeight, ls: cs.letterSpacing, n: 40 });
+  }
+  return out;
+}
+
+/**
  * Schemes captureVisibleTab can actually read. Everything else — chrome://, the Web
  * Store, other extensions, about:blank — throws. Checking up front lets us treat a
  * thrown capture as TRANSIENT (throttle, backgrounded window) and retry it, instead
@@ -183,6 +228,9 @@ export function installTabTint() {
   let inFlight = 0;        // monotonic token — a stale capture must not overwrite a fresh one
   let failures = 0;        // consecutive transient capture failures; reset on any success
 
+  let lastTypeKey = '';    // tabId|url of the last type sample — re-sample only on real navigation
+  let typeInFlight = 0;    // monotonic token — a slow page's stale type must not overwrite a fresh one
+
   let current = null;      // the tokens on screen right now
   let lastPaintKey = '';   // rendered CSS of the last painted frame — skips no-op repaints
   let tinted = false;
@@ -217,12 +265,49 @@ export function installTabTint() {
     current = null;
     palette = null;      // stop the breath: an unreadable page has no colours to keep pulsing
     polarity = 'dark';   // the stylesheet we fall back to IS dark — hysteresis must agree
+
+    // Type resets BEFORE the tinted guard: type can be applied while the tint is not
+    // (its sample lands ahead of the first paint, and survives a failed screenshot).
+    revertType();
+    lastTypeKey = '';
+
     if (!tinted) return;
     for (const cssVar of Object.values(TOKEN_VARS)) root.style.removeProperty(cssVar);
     root.style.removeProperty(GRADIENT_VAR);
     document.body.classList.remove('tinted', 'tinted-light');
     lastPaintKey = '';
     tinted = false;
+  };
+
+  /** Page-derived strings reach CSS via setProperty ONLY — never string-built into a
+   *  stylesheet — so a hostile font-family value cannot escape its declaration. */
+  const applyType = (t) => {
+    for (const [key, cssVar] of Object.entries(TYPE_VARS)) {
+      if (t[key]) root.style.setProperty(cssVar, t[key]);
+      else root.style.removeProperty(cssVar);   // '' means "keep the panel default"
+    }
+  };
+
+  const revertType = () => {
+    for (const cssVar of Object.values(TYPE_VARS)) root.style.removeProperty(cssVar);
+  };
+
+  /**
+   * Fire-and-forget: read the page's computed text styles and re-type the prose. Failure
+   * always reverts to the panel's own type — and it is a SEPARATE failure domain from the
+   * tint: pages that allow a screenshot but refuse injection (Web Store, PDF viewer,
+   * other extensions) keep their gradient and lose only the font match.
+   */
+  const sampleType = async (tabId) => {
+    const token = ++typeInFlight;
+    let t = null;
+    try {
+      const [res] = await chrome.scripting.executeScript({ target: { tabId }, func: sampleTypeInPage });
+      t = deriveType(res?.result);
+    } catch { /* injection refused — fall through to revert */ }
+    if (disposed || token !== typeInFlight) return;   // a newer navigation's sample owns the panel
+    if (t) applyType(t);
+    else revertType();
   };
 
   // ── The follower ─────────────────────────────────────────────────────────
@@ -386,6 +471,14 @@ export function installTabTint() {
       failures = 0;
       revert();
       return;
+    }
+
+    // Type rides the capture's tab lookup but at NAVIGATION cadence: re-sample only when
+    // the tab or URL actually changed (SPA route changes update tab.url too).
+    const typeKey = `${tab.id}|${tab.url}`;
+    if (typeKey !== lastTypeKey) {
+      lastTypeKey = typeKey;
+      void sampleType(tab.id);
     }
 
     let image;

@@ -5372,12 +5372,14 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
    * Cheap tier (small bounded input). Returns {answer, showList}: a non-empty answer → show it; showList → the caller
    * renders the list deterministically; a miss → {answer:null, showList:false} (caller falls back to the render).
    * PURE prompt+parse in Core/answerShapePrompt.js. Fails safe.
-   * @param {{ ask:string, facts:object }} args
+   * CX-9d (v2.74.1437) — `scope`: the filters CODE already applied (resolved division label, status) so the shaper
+   * never re-filters pre-scoped rows against the question's own words (the greensboro division-vs-city live miss).
+   * @param {{ ask:string, facts:object, scope?:string }} args
    * @returns {Promise<{ answer:string|null, showList:boolean }>}
    */
-  static async shapeAnswer({ ask, facts } = {}) {
+  static async shapeAnswer({ ask, facts, scope } = {}) {
     if (!String(ask || '').trim() || !facts || typeof facts !== 'object' || !(await AnthropicService.hasLlm())) return { answer: null, showList: false };
-    const { system, user } = buildAnswerShapeMessages({ ask, facts });
+    const { system, user } = buildAnswerShapeMessages({ ask, facts, scope });
     const res = await AnthropicService.#call(system, user, 300, [], { role: 'routing', operation: 'answer-shape' });
     if (!res || res.success === false) return { answer: null, showList: false };
     return parseAnswerShapeOutput(res.text);

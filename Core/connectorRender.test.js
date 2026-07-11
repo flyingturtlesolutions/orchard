@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { primaryList, primaryObject, summarizeItem, renderConnectorLines, itemLabels, primaryItemId, createdRecordId } from './connectorRender.js';
+import { primaryList, primaryObject, summarizeItem, renderConnectorLines, itemLabels, primaryItemId, createdRecordId, itemFields, recordDetails } from './connectorRender.js';
 
 describe('primaryList — find the data array', () => {
   it('prefers known data keys, falls back to any object-array, ignores scalar arrays', () => {
@@ -185,5 +185,103 @@ describe('itemLabels — fan-out labels from a read (CV-4-full)', () => {
     assert.deepEqual(itemLabels({ comments: [{ body: 'Call me back' }] }).labels, ['Call me back']);
     assert.deepEqual(itemLabels({ ticket: { id: 7 } }).labels, [], 'a single object is not a list');
     assert.deepEqual(itemLabels(null).labels, []);
+  });
+});
+
+// CX-9c (v2.74.1436) — rows OUTSIDE the key vocabulary (the VendorSuite warranty shape) must not render as empty
+// husks: id falls back to a …Number/…Id key, and lists carry the generic fields the single-record view already had.
+describe('CX-9c — vocabulary-less rows (VendorSuite shape) render their real fields', () => {
+  const ROW = (over) => ({ TaskId: 4001, TicketId: 9001, TaskNumber: '4090740', ClaimNumber: '01', Age: '263 days',
+    IsPayable: true, AllowedAmount: 214, AddressLine1: '3955 Gallery Chase', CityStateZip: 'Cumming, GA 30028',
+    ProjectId: 55, ProjectName: 'Brookside', JobNumber: '217710051', ...over });
+
+  it('summarizeItem: id falls back to the HUMAN …Number key (TaskNumber beats TaskId); title stays empty (no name key)', () => {
+    const it_ = summarizeItem(ROW());
+    assert.equal(it_.id, '4090740');           // TaskNumber — the number the site shows, not the internal TaskId
+    assert.equal(it_.title, '');
+    const idOnly = summarizeItem({ TaskId: 4001, AddressLine1: 'x' });
+    assert.equal(idOnly.id, 4001);             // no …Number key → …Id fallback
+  });
+
+  it('itemFields: the generic labeled projection (skips …Id noise, keeps address/claim/amount)', () => {
+    const f = Object.fromEntries(itemFields(ROW(), { max: 8 }));
+    const keys = Object.keys(f).join('|').toLowerCase();
+    assert.ok(Object.values(f).includes('3955 Gallery Chase'), 'address value present');
+    assert.ok(Object.values(f).includes('Cumming, GA 30028'), 'city/state/zip present');
+    assert.equal(/task id|ticket id|project id/.test(keys), false, 'foreign-id noise skipped');
+  });
+
+  it('renderConnectorLines: a MULTI-row list shows real fields, never "(no title)"', () => {
+    const lines = renderConnectorLines([ROW(), ROW({ TaskNumber: '4090741', AddressLine1: '456 Oak Ave' })], { name: 'Warranty tasks' });
+    assert.equal(lines.length, 3);             // header + 2 rows
+    assert.match(lines[1], /#4090740/);
+    assert.match(lines[1], /3955 Gallery Chase/);
+    assert.doesNotMatch(lines[1], /\(no title\)/);
+  });
+
+  it('itemLabels: fan-out labels carry the fields fallback too', () => {
+    const { labels } = itemLabels([ROW()]);
+    assert.match(labels[0], /#4090740/);
+    assert.doesNotMatch(labels[0], /\bitem\b/);
+  });
+});
+
+// CX-9g (v2.74.1440) — the DETAIL record's payload must survive the cap: the live warranty detail carried
+// Priority/Instructions/VendorExplanation at the TAIL of 25+ fields, and the old walk-order cap-8 filled up on
+// SearchField + booleans before reaching them — the drilled answer had "no warranty details". Rank-then-cap.
+describe('CX-9g — a tail-heavy DETAIL record surfaces its instructions/priority/explanation', () => {
+  const DETAIL = {
+    SearchField: 'blob4090740cummingga', TaskId: 963119, TicketId: 9001, BusinessUnitId: 7, TaskNumber: '10803524',
+    ClaimNumber: '01', Age: '263', IsFixed: false, IsPayable: true, IsPaid: false, AllowedAmount: 214,
+    AddressLine1: '216 Indigo Bunting Court', CityStateZip: 'LEXINGTON, NC 27295', ProjectId: 55,
+    ProjectCode: 'PC1', ProjectName: 'Brookside', CostCode: 'CC', VendorId: 3159950, ProjectDisplayName: 'Brookside Ph2',
+    LotBlockPhase: '2A W', DateCreated: '2025-06-30T00:00:00', TaskStatus: 'Open',
+    Appointments: [{ StartDate: '2026-07-10T07:00:00', EndDate: '2026-07-10T16:00:00' }],
+    Priority: '1', Instructions: 'Replace the smart switch in the master bedroom and verify the 3-way circuit works',
+    VendorExplanation: 'Awaiting parts from the supplier, scheduled for the next visit',
+  };
+  it('recordDetails: Instructions + VendorExplanation + Address make the cut (rank-then-cap, 12 budget, 200-char text)', () => {
+    const d = recordDetails(DETAIL);
+    const vals = Object.values(d).join(' | ');
+    assert.match(vals, /Replace the smart switch in the master bedroom/);   // the INSTRUCTIONS — the answer the user asked for
+    assert.match(vals, /Awaiting parts from the supplier/);                 // the vendor explanation
+    assert.match(vals, /216 Indigo Bunting Court/);
+    assert.equal(Object.values(d).includes('10803524'), false);             // the id never re-renders as an extra field
+  });
+  it('summarizeItem: Priority reaches the status slot case-insensitively; the appointment array renders generically', () => {
+    const it_ = summarizeItem(DETAIL);
+    assert.equal(it_.status, '1');                                          // Priority (PascalCase) ∈ STATUS_KEYS('priority') — was a silent case miss
+    const d = recordDetails(DETAIL);
+    assert.ok(Object.entries(d).some(([k, v]) => /appointment/i.test(k) && /2026-07-10T07:00:00/.test(String(v))), 'appointments array → first row scalars');
+  });
+
+  // CX-9h (v2.74.1441) — the LIVE bug both drilled answers hit: the generic any-object-array hunt returned the
+  // detail's Appointments[1] as "the data list", so the render/shaper saw the APPOINTMENT (start/end + booleans)
+  // and never the task — "there are no warranty details", twice. A record-shaped root IS the record.
+  it('CX-9h: a record-shaped root with a nested child array resolves as the RECORD, never the child list', () => {
+    assert.equal(primaryList(DETAIL), null);                                // Appointments is a CHILD, not the data
+    assert.equal(primaryObject(DETAIL), DETAIL);                            // suffix-id shapes count as record-shaped
+    const lines = renderConnectorLines(DETAIL, { name: 'Warranty task details' });
+    const text = lines.join('\n');
+    assert.match(text, /Replace the smart switch in the master bedroom/);   // the task's INSTRUCTIONS render
+    assert.doesNotMatch(lines[0], /1744395/);                               // the head line is the task, not an appointment id
+  });
+
+  it('CX-9h: the Zendesk twin — {ticket:{…custom_fields:[{…}]}} resolves as the ticket, and explicit lists still win', () => {
+    const t = { ticket: { id: 7, subject: 'Broken switch', status: 'open', custom_fields: [{ id: 1, value: 'x' }, { id: 2, value: null }] } };
+    assert.equal(primaryList(t), null);                                     // custom_fields never hijacks a single-ticket read
+    assert.equal(primaryObject(t).id, 7);
+    assert.equal(primaryList({ results: [{ id: 1 }, { id: 2 }] }).length, 2);   // LIST_KEYS roots unchanged
+    assert.equal(primaryList([{ TaskId: 1 }, { TaskId: 2 }]).length, 2);        // bare arrays unchanged
+  });
+});
+
+describe('v2.74.1469 — the Aircall teammate row renders name + availability (live: "#1740968 email" with no status)', () => {
+  it('fullName wins the title, availabilityStatus fills status', () => {
+    const row = { __typename: 'Agent', ID: 1740968, fullName: 'D Monkam', extension: 101, avatarUrl: 'x', availabilityStatus: 'available', email: 'user@example.com', deleted: false };
+    const it_ = summarizeItem(row);
+    assert.equal(it_.title, 'D Monkam');            // was the email (fullName absent from NAME_KEYS)
+    assert.equal(it_.status, 'available');           // was null (availabilityStatus absent from STATUS_KEYS)
+    assert.equal(String(it_.id), '1740968');
   });
 });

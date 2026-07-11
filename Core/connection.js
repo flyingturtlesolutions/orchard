@@ -24,8 +24,13 @@ const _email = (x) => _str(x).trim().toLowerCase();
 export function probedUser(reply) {
   if (!reply || typeof reply !== 'object') return null;
   if (reply.id != null || reply.email != null) return reply;            // already a bare user object
-  const u = reply.success && reply.value && reply.value.user;
-  return (u && typeof u === 'object') ? u : null;
+  const v = reply.success && reply.value;
+  if (v && typeof v === 'object') {
+    const u = v.user;
+    if (u && typeof u === 'object') return u;                            // Zendesk-style { user: { id, email } }
+    if (v.id != null || v.email != null) return v;                        // Aircall Workspace current_user flat shape
+  }
+  return null;
 }
 
 /** Anon-sentinel test (§14): a logged-out session returns 200 + a sentinel user. PURE. */

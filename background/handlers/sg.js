@@ -16,8 +16,10 @@ import { selectionToTrialRoles } from '../../Core/bind.js';
 import { lowerToTier2, orderForRun, scoreTier2, topoOrder } from '../../Core/tier2Lower.js';
 import { evaluatePostcondition } from '../../Core/postcondition.js';
 import { coerceRecentTurns as _recentTurnsPayload } from '../../Core/recentTurns.js';   // Q1 — coerce + bound the panel-sent recent-turn window (untrusted; fenced as data downstream)
-import { CONNECTOR_RECIPES } from '../../Core/connectorRecipes.js';   // §18 — the curated catalog seeded into a Ground's ride-recipe collection
-import { seedFromCatalog as seedRideFromCatalog, setEnabled as rideSetEnabled, review as rideReview, downgradeSafety as rideDowngradeSafety, editMeta as rideEditMeta, mergeRecipes as rideMergeRecipes, acceptPendingReads as rideAcceptPendingReads } from '../../Core/rideRecipe.js';   // §18 — the per-Ground ride-recipe transforms (safety enforced here, not the UI)
+import { CONNECTOR_RECIPES, fillEndpoint } from '../../Core/connectorRecipes.js';   // §18 — the curated catalog seeded into a Ground's ride-recipe collection; CX-9o — fillEndpoint derives the section-nav pages
+import { seedFromCatalog as seedRideFromCatalog, setEnabled as rideSetEnabled, review as rideReview, downgradeSafety as rideDowngradeSafety, editMeta as rideEditMeta, mergeRecipes as rideMergeRecipes, acceptPendingReads as rideAcceptPendingReads, armable as rideArmable, curatedRidesForConnections, mergeRideCatalogForAnswer, catalogArmedEntries } from '../../Core/rideRecipe.js';   // §18 — the per-Ground ride-recipe transforms (safety enforced here, not the UI); CX-9r — catalog-armed origins from open tabs
+import { groundVocabIndex } from '../../Core/rideVocab.js';   // CX-9q (v1462) — DOMAIN-MATCH vocab with HOST-level distinctiveness (a dup ground reinforces, never annihilates)
+import { DRIVE_ARTIFACTS, seedFromCatalog as seedDriveFromCatalog, mergeArtifacts as driveMergeArtifacts, seededDriveLegs, buildDriveFragment, buildDriveStrategy } from '../../Core/driveArtifacts.js';   // HL-1 (v2.74.1454) — the BUILT-IN DRIVE catalog (heterogeneous legs: ride answers, drive shows) + hydrate-on-first-use builders
 import { buildLegOverview } from '../../Core/legOverview.js';   // OV-1 (DESIGN_overview.md) — the cross-Ground leg inventory + work queue for the Overview workbench
 import { buildManualRecipe, parseLegSpec } from '../../Core/manualRecipe.js';   // OV-5 — author a ride recipe BY HAND (validate + method-derived safety, lands pending)
 import { recipesFromHarvest } from '../../Core/recipeFromHarvest.js';   // §17 — the crawl-as-generalizer: captures → proto ride-recipes (templated, method-classed, pending)
@@ -40,6 +42,8 @@ import { builtinApp } from '../../Core/appCatalog.js';   // OM — the app's cat
 import { connectorLegsForConnections, harvestedRecipeLegs } from '../../Core/connectorRecipes.js';   // CX-4c + §20 — connected session-ride recipes (curated + harvested header-replay) as selectable interpret tools
 import { brokerLegsForLinked } from '../../Core/brokerCatalog.js';   // CX-5c — broker (OAuth/MCP) legs, gated on LINKED providers
 import { legRef } from '../../Core/legRef.js';   // v1342 — unified ref for palette dedup (_seen seeding)
+import { prerankLegs } from '../../Core/legPrerank.js';   // CX-9p (v1461) — deterministic pre-rank of the scope-tiered palette (winner leads; zero-overlap globals capped)
+import { recordAlias, recallAlias } from '../../Core/connectorAlias.js';   // CX-9p (v1461) — the connector-leg alias store (ask-shape → leg warm path; the teach-once flywheel for connectors)
 import { parseSweepReads, parseSweepProposals } from '../../Core/sweepPrompt.js';   // FL-1 (v2.74.1346) — sweep output validated against the OFFERED legs
 import { parseSeedDirectives } from '../../Core/fleetSchedule.js';   // FL-6b (v2.74.1356) — the seed's stated cadence, strict-parsed
 import { composeOfferedLeg, policyFilter, fleetOfferedLegs, panelOfferedLegs } from '../../Core/palette.js';   // GD-4b — the app's COMPOSE (draft-on-canvas) leg joins interpret's palette; v1340 (review A) — policyFilter: the 'forbidden' floor now runs on the LIVE interpret palette, not just the dormant ilRun; FL (v1348) — the fleet console legs (NL → sweep/show via IL, never regex); v1354 — CLEAR_CHAT (conversation-management panel legs)
@@ -806,6 +810,160 @@ export function createSgMessageHandlers(ctx) {
   // core the Discovery crawl uses). generalize → polish NEW ids → mergeRecipes, landing `pending`.
   const _bankHarvested = (args) => bankHarvested({ readRideRecipes: ctx.readRideRecipes, writeRideRecipes: ctx.writeRideRecipes, ...args });
 
+  // v2.74.1435 (Invariant #3, the STALE-RECORD fix) — read a Ground's ride recipes MERGED with the curated catalog.
+  // EVERY projection path (interpret palette, sweep, GET_RIDE_RECIPES) reads through THIS, so a catalog upgrade
+  // (new fields, endpoint fixes, coaching text) reaches already-seeded Grounds the moment it ships — the v1432
+  // add-missing concat left existing records frozen at seed-time shape (live: one ask rode a fresh catalog leg,
+  // the next the stale stored twin → raw name in the URL → http-400). rideMergeRecipes refreshes MECHANICAL fields;
+  // user state (enabled/reviewState/safetyClass/trust) + harvested records survive; curated NAME/DOES refresh too
+  // (catalog-owned text — the binder reads `does`, and stale coaching mis-binds). Write-back only on real change
+  // (stringify compare), so the steady state is a pure read. Merge failure never blocks the read.
+  // v2.74.1446 (CX-9k) — the RIDE-ARMED Ground index: every Ground holding ≥1 armable ride recipe, with its host
+  // (taken from the recipes' own stored `origin` — no Ground-shape assumptions). Armed ride capabilities are DURABLE
+  // and TAB-INDEPENDENT (SESSION_REPLAY rides the app's own tab wherever it is), so the interpret palette projects
+  // them from EVERY such Ground — the ACTIVE tab is context, never a capability filter (live: "on vendorsuite, pull
+  // up …" from an unrelated tab found no vendorsuite legs and the model narrated page-dependence it doesn't have).
+  // Cached 5 min; busted on ride-recipe edits (arm/disable/delete) so a fresh `verify` shows up immediately.
+  const _rideArmedCache = { at: 0, list: [] };
+  const _bustRideArmedCache = () => { _rideArmedCache.at = 0; };
+  async function _rideArmedGrounds() {
+    // CX-9p (v1461) — SHAPE-GUARD the cache: serve it only when it is fresh AND every entry carries the current
+    // shape (`texts` array since v1463 — the vocab index is now computed at the CALL SITE, jointly with the
+    // catalog-armed virtual origins). A stale shape held across a partial reload mis-routes — rebuild is cheap.
+    if (Date.now() - _rideArmedCache.at < 300000
+      && _rideArmedCache.list.every((e) => e && Array.isArray(e.texts))) return _rideArmedCache.list;
+    const out = [];
+    try {
+      const grounds = await StorageManager.getAllGrounds();
+      for (const g of (Array.isArray(grounds) ? grounds : [])) {
+        const gid = g && (g.id || g.groundId); if (!gid) continue;
+        let recs = []; try { recs = (await ctx.readRideRecipes(gid)) || []; } catch { recs = []; }
+        const armedRecs = recs.filter((r) => r && rideArmable(r) && r.origin);
+        if (!armedRecs.length) continue;
+        // CX-9m (v2.74.1450) — each ground's DOMAIN VOCABULARY: the significant words of its armable recipes'
+        // name+does ("warranty", "division", "announcements"…). An ask using a ground's distinctive vocabulary is
+        // an IMPLICIT site naming ("pull up the warranty task…" without "on vendorsuite") — the DOMAIN-MATCH tier.
+        out.push({ gid, host: String(armedRecs[0].origin), texts: armedRecs.map((r) => `${r.name || ''} ${r.does || ''}`) });
+      }
+    } catch { /* best-effort — an empty index just means no ride legs offered */ }
+    // v1463 — the cache holds {gid, host, texts}: the vocab index (CX-9q host-level distinctiveness,
+    // Core/rideVocab.js) is computed at the CALL SITE per ask, jointly with the catalog-armed virtual origins,
+    // so a curated app visible only as an open tab still participates in DOMAIN-MATCH distinctiveness.
+    _rideArmedCache.at = Date.now(); _rideArmedCache.list = out;
+    return out;
+  }
+
+  async function _readRideRecipesMerged(groundId, origin) {
+    let recipes = [];
+    try { recipes = (await ctx.readRideRecipes(groundId)) || []; } catch { recipes = []; }
+    const host = String(origin || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '').toLowerCase();
+    if (!host) return recipes;
+    try {
+      const curated = seedRideFromCatalog(CONNECTOR_RECIPES, { groundId, origin: host });
+      if (!curated.length) return recipes;
+      const byId = new Map(curated.map((c) => [c.id, c]));
+      let merged = rideMergeRecipes(recipes, curated);
+      merged = merged.map((r) => (r && r.provenance === 'curated' && byId.has(r.id)) ? { ...r, name: byId.get(r.id).name, does: byId.get(r.id).does } : r);
+      // CX-9p (v1461) — a curated merge added/changed recipes → bust the armed-grounds index so the newly-merged
+      // vocabulary (e.g. a curated "warranty" leg) reaches the DOMAIN-MATCH tier on the next interpret, not in ≤5min.
+      if (JSON.stringify(merged) !== JSON.stringify(recipes)) { await ctx.writeRideRecipes(groundId, merged); _bustRideArmedCache(); return merged; }
+    } catch { /* the merge is an enhancement — never blocks a read */ }
+    return recipes;
+  }
+
+  // HL-1 (v2.74.1454) — the drive twin of _readRideRecipesMerged: read the Ground's drive-artifact collection,
+  // seeding/refreshing it from DRIVE_ARTIFACTS (matched by origin). Same merge semantics as ride (mechanical
+  // fields refresh, user state preserved) PLUS the hydration stamps survive a re-seed — an already-hydrated
+  // artifact's capabilityId/fragmentId/strategyId must never be dropped by a catalog refresh (Invariant #3's
+  // drive analogue: only the seeded path exercises this, so a drop is silent until a live re-invoke).
+  async function _readDriveArtifactsMerged(groundId, origin) {
+    let artifacts = [];
+    try { artifacts = (await ctx.readDriveArtifacts(groundId)) || []; } catch { artifacts = []; }
+    const host = String(origin || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '').toLowerCase();
+    if (!host) return artifacts;
+    try {
+      const curated = seedDriveFromCatalog(DRIVE_ARTIFACTS, { groundId, origin: host });
+      if (!curated.length) return artifacts;
+      const byId = new Map(curated.map((c) => [c.id, c]));
+      let merged = driveMergeArtifacts(artifacts, curated);
+      merged = merged.map((r) => (r && r.provenance === 'curated' && byId.has(r.id)) ? { ...r, name: byId.get(r.id).name, does: byId.get(r.id).does } : r);
+      if (JSON.stringify(merged) !== JSON.stringify(artifacts)) { await ctx.writeDriveArtifacts(groundId, merged); return merged; }
+    } catch { /* the merge is an enhancement — never blocks a read */ }
+    return artifacts;
+  }
+
+  // HL-2 — HYDRATE a drive artifact into the library entities (Fragment(s) + Strategy + sgCapability), marked
+  // trial.verdict:'observed' (selector-guessed, behaviour-UNVERIFIED — the PS-3 doctrine: the first real run IS
+  // the verification). Steps carry INLINE SG-LM-3 landmarks when authored; selector-only steps rely on the HAR
+  // id alone (a wrong proto makes recovery worse — v1455). Idempotent when hydratedCatalogVersion matches
+  // catalogVersion; a catalogVersion bump invalidates stale hydration (merge drops the stamps) and re-compose runs.
+  async function _hydrateDriveArtifact(groundId, list, rec, localeUrl) {
+    if (rec.capabilityId && Number(rec.hydratedCatalogVersion || 0) === Number(rec.catalogVersion || 0)) {
+      return { list, rec, capabilityId: rec.capabilityId, hydrated: false };
+    }
+    const now = Date.now(); const newId = () => crypto.randomUUID();
+    const stamp = (l, id, patch) => l.map((r) => (r && r.id === id) ? { ...r, ...patch } : r);
+    const verStamp = { hydratedAt: now, hydratedCatalogVersion: Number(rec.catalogVersion || 0) };
+    if (rec.tier === 2 && Array.isArray(rec.compose)) {
+      const composed = [];
+      for (const cid of rec.compose) {
+        let sub = list.find((r) => r && r.id === cid);
+        if (!sub) return null;
+        if (!sub.fragmentId || Number(sub.hydratedCatalogVersion || 0) !== Number(sub.catalogVersion || 0)) {
+          const h = await _hydrateDriveArtifact(groundId, list, sub, localeUrl);
+          if (!h) return null;
+          list = h.list; sub = h.rec;
+        }
+        let frag = null; try { frag = await StorageManager.getFragment(sub.fragmentId); } catch { frag = null; }
+        composed.push({ fragmentId: sub.fragmentId, params: (frag && Array.isArray(frag.params)) ? frag.params : [] });
+      }
+      const built = buildDriveStrategy(rec, composed, { groundId, localeUrl, now, newId });
+      if (!built) return null;
+      await StorageManager.saveStrategy(built.strategy);
+      await ctx.writeSgCapability(groundId, built.capability);
+      list = stamp(list, rec.id, { strategyId: built.strategy.id, capabilityId: built.capability.id, ...verStamp });
+      await ctx.writeDriveArtifacts(groundId, list);
+      Logger.info('drive', `DRIVE_HYDRATE ▸ ${rec.id} (tier 2) → strategy ${built.strategy.id} + capability ${built.capability.id} (observed, ${composed.length} fragment(s)) @ ${groundId}`);
+      return { list, rec: list.find((r) => r && r.id === rec.id), capabilityId: built.capability.id, hydrated: true };
+    }
+    const built = buildDriveFragment(rec, { groundId, localeUrl, now, newId });
+    if (!built) return null;
+    await StorageManager.saveFragment(built.fragment);
+    await ctx.writeSgCapability(groundId, built.capability);
+    list = stamp(list, rec.id, { fragmentId: built.fragment.id, capabilityId: built.capability.id, ...verStamp });
+    await ctx.writeDriveArtifacts(groundId, list);
+    Logger.info('drive', `DRIVE_HYDRATE ▸ ${rec.id} (tier 1) → fragment ${built.fragment.id} + capability ${built.capability.id} (observed) @ ${groundId}`);
+    return { list, rec: list.find((r) => r && r.id === rec.id), capabilityId: built.capability.id, hydrated: true };
+  }
+
+  // HL-2b (v2.74.1455) — wait for the SPA section to render after SHOW_SOURCES navigates to /#warranty.
+  // chrome.tabs 'complete' fires at document load, NOT after the hash route paints — the v1455 live miss ran
+  // F1 against `[url=/]` with no #divisionMenu. Poll until the HAR-verified header control is probe-visible.
+  async function _settleDriveSection(tabId, sectionPath) {
+    if (typeof tabId !== 'number') return { ok: false, reason: 'no-tab' };
+    try { await ctx.ensureContentScript(tabId); } catch { /* */ }
+    const want = String(sectionPath || '').replace(/^[^#]*#?\/?/, '').toLowerCase();
+    const deadline = Date.now() + 12000;
+    const _probe = async (selector) => {
+      try {
+        const p = await chrome.tabs.sendMessage(tabId, { type: 'WAIT_FOR_PROBE', payload: { selector } });
+        return !!(p && p.matched);
+      } catch { return false; }
+    };
+    while (Date.now() < deadline) {
+      let url = '';
+      try { url = (await chrome.tabs.get(tabId))?.url || ''; } catch { break; }
+      const urlLc = url.toLowerCase();
+      const hashOk = !want || urlLc.includes(`#${want}`) || urlLc.includes(`#/${want}`);
+      const menu = await _probe('#divisionMenu');
+      const tabs = await _probe('.nav-tabs, [role="tablist"]');
+      // Header #divisionMenu exists site-wide — require hash OR warranty status tabs so we don't run on `/`.
+      if (menu && (hashOk || tabs)) return { ok: true };
+      await new Promise((r) => setTimeout(r, 350));
+    }
+    return { ok: false, reason: 'the warranty section did not finish loading — the SPA may still be on the home view' };
+  }
+
   return {
     // R-3/R-4a — the LLM front-door ROUTER (DESIGN_llm_front_door.md). ISOLATED + console-testable: resolve the
     // Ground, retrieve a small candidate palette (R-2), let the router LLM (R-3) select+parameterize ONE tool,
@@ -905,8 +1063,9 @@ export function createSgMessageHandlers(ctx) {
       try {
         const ask = String(payload?.ask ?? '').trim();
         const facts = (payload && typeof payload.facts === 'object') ? payload.facts : null;
+        const scope = String(payload?.scope ?? '').trim();   // CX-9d (v1437) — the params CODE already applied (resolved labels)
         if (!ask || !facts) { sendResponse({ success: true, answer: null, showList: false }); return; }
-        const shaped = await AnthropicService.shapeAnswer({ ask, facts });
+        const shaped = await AnthropicService.shapeAnswer({ ask, facts, scope });
         sendResponse({ success: true, answer: shaped.answer, showList: shaped.showList });
       } catch (err) {
         Logger.error('background', `SHAPE_ANSWER failed: ${err.message}`);
@@ -934,28 +1093,48 @@ export function createSgMessageHandlers(ctx) {
     // §18 — the per-Ground RIDE-RECIPE collection. GET reads the stored list, SEEDING it from CONNECTOR_RECIPES (matched
     // to the Ground's origin) on first access so a Ground always shows its curated reads; harvested recipes (§17) accrete
     // here later. Returns the full collection (the Studio + Ground-panel surfaces render it via groundToolSurface).
+    // CX-9n (v2.74.1452) — the ride-armed Ground index, panel-readable: every Ground holding ≥1 armable ride recipe
+    // (gid + host; the cached 5-min index the interpret cascade uses). The section-opener (`view warranty task`)
+    // consults it so a section on ANY ride site resolves from ANY tab — `_showSection` scanning only connections ∪
+    // the active tab was the FOURTH layer of the tab-precedence assumption (palette v1446 · branch v1447 · outer
+    // gate v1449 · section-opener v1452).
+    GET_RIDE_ARMED_GROUNDS: async (_payload, _sender, sendResponse) => {
+      try {
+        const grounds = (await _rideArmedGrounds()).map(({ gid, host }) => ({ gid, host }));
+        sendResponse({ success: true, grounds });
+      } catch (err) {
+        sendResponse({ success: false, error: err.message, grounds: [] });
+      }
+    },
+
+    // CX-9p (v2.74.1461) — RECORD_CONNECTOR_ALIAS: the panel dispatch (chat.js _ilRunBuiltin) reports a SUCCESSFUL
+    // connector invoke here; persist the ask-shape → leg association (Core/connectorAlias, bounded LRU, LOCAL-only)
+    // so a future matching ask recalls this leg as a warm path (stamped scope 'alias' at the next projection). The
+    // teach-once flywheel extended to connector legs — the durable answer to "does the router LEARN the shape → site?"
+    RECORD_CONNECTOR_ALIAS: async (payload, _sender, sendResponse) => {
+      try {
+        const ask = String(payload?.ask ?? '').trim();
+        const ref = String(payload?.legRef ?? '').trim();
+        const host = String(payload?.host ?? '').trim();
+        if (!ask || !ref) { sendResponse({ success: false, error: 'ask + legRef required' }); return; }
+        const prev = (await chrome.storage.local.get('connector:aliases'))['connector:aliases'];
+        const next = recordAlias(Array.isArray(prev) ? prev : [], { ask, legRef: ref, host, at: Date.now() });
+        await chrome.storage.local.set({ 'connector:aliases': next });
+        sendResponse({ success: true, count: next.length });
+      } catch (err) {
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
     GET_RIDE_RECIPES: async (payload, _sender, sendResponse) => {
       try {
         const groundId = String(payload?.groundId ?? '').trim();
         const origin = String(payload?.origin ?? '').trim();
         if (!groundId) { sendResponse({ success: true, recipes: [] }); return; }
-        let recipes = await ctx.readRideRecipes(groundId);
-        if (origin) {
-          // v2.74.1432 (Invariant #3) — seed/REFRESH the curated catalog matched to this Ground's origin. WAS
-          // seed-on-EMPTY-only, so a Ground that already had forged/harvested recipes NEVER received the curated legs
-          // (or their itemUrl/write) — a forged VendorSuite ground could read but "show warranty" had no itemUrl.
-          // Now: ADD any curated recipe the Ground is MISSING (matched by origin). Only ADDS — a curated recipe the user
-          // DISABLED/REJECTED stays present (present ≠ missing), so its user state is preserved and this never re-arms
-          // it; a HARD-deleted one re-appears (so disable/reject a curated leg you don't want — don't delete it). The
-          // `missing` set is disjoint from `recipes` by construction, so a plain append IS the id-keyed merge.
-          const curated = seedRideFromCatalog(CONNECTOR_RECIPES, { groundId, origin });
-          const have = new Set(recipes.map((r) => r && r.id));
-          const missing = curated.filter((c) => c && !have.has(c.id));
-          if (missing.length) {
-            recipes = recipes.concat(missing);
-            await ctx.writeRideRecipes(groundId, recipes);
-          }
-        }
+        // v2.74.1432 seed-into-forged → v2.74.1435 FULL merge-on-read: _readRideRecipesMerged (defined above) refreshes
+        // existing records' mechanical fields from the catalog (the stale-record fix), preserves user state + harvested
+        // records, and re-adds a hard-deleted curated id (disable/reject a curated leg you don't want — don't delete it).
+        const recipes = await _readRideRecipesMerged(groundId, origin);
         sendResponse({ success: true, recipes });
       } catch (err) {
         Logger.error('background', `GET_RIDE_RECIPES failed: ${err.message}`);
@@ -988,6 +1167,7 @@ export function createSgMessageHandlers(ctx) {
           next = list.slice(); next[idx] = edited;
         }
         await ctx.writeRideRecipes(groundId, next);
+        _bustRideArmedCache();   // v1446 — arming state changed → the capability-global index refreshes next interpret
         Logger.info('ride', `EDIT_RIDE_RECIPE ${op} ${id.slice(0, 40)} (ground ${groundId})`);
         sendResponse({ success: true, recipes: next });
       } catch (err) {
@@ -1007,13 +1187,103 @@ export function createSgMessageHandlers(ctx) {
         if (scope !== 'reads') { sendResponse({ success: false, error: `unsupported scope: ${scope}` }); return; }
         const list = await ctx.readRideRecipes(groundId);
         const { recipes: next, accepted } = rideAcceptPendingReads(list);
-        if (accepted) await ctx.writeRideRecipes(groundId, next);
+        if (accepted) { await ctx.writeRideRecipes(groundId, next); _bustRideArmedCache(); }   // v1446 — newly armed reads join the global index now
         Logger.info('ride', `BULK_REVIEW_RIDE_RECIPES reads: accepted ${accepted} (ground ${groundId})`);
         sendResponse({ success: true, accepted, recipes: next });
       } catch (err) {
         Logger.error('background', `BULK_REVIEW_RIDE_RECIPES failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
+    },
+
+    // HL-1 (v2.74.1454) — the per-Ground DRIVE-ARTIFACT collection (the built-in drive twin of GET_RIDE_RECIPES).
+    // Merged read: seeds from DRIVE_ARTIFACTS by origin on first access, refreshes mechanical fields on catalog
+    // upgrades, preserves user state + hydration stamps.
+    GET_DRIVE_ARTIFACTS: async (payload, _sender, sendResponse) => {
+      try {
+        const groundId = String(payload?.groundId ?? '').trim();
+        const origin = String(payload?.origin ?? '').trim();
+        if (!groundId) { sendResponse({ success: true, artifacts: [] }); return; }
+        sendResponse({ success: true, artifacts: await _readDriveArtifactsMerged(groundId, origin) });
+      } catch (err) {
+        Logger.error('background', `GET_DRIVE_ARTIFACTS failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // HL-2/HL-3 (v2.74.1454) — INVOKE a built-in drive artifact on the live page. First use HYDRATES (compose +
+    // persist the library entities, verdict 'observed') — then EVERY use executes through the same landmark-backed
+    // ExecutionEngine path a taught capability replays through, and a clean FIRST run PROMOTES the capability to
+    // trial-pass + healthStatus 'ready' (the visible verify-on-first-use gate; a failed first run stays 'observed'
+    // and reports honestly). The §18-style arm guard applies; the driven span is busy-marked (Invariant #2). The
+    // caller (chat.js) navigates the tab to the artifact's sectionPath BEFORE invoking (nav-THEN-drive, v1453).
+    INVOKE_DRIVE_ARTIFACT: async (payload, _sender, sendResponse) => {
+      const _busyTab = (typeof payload?.tabId === 'number') ? payload.tabId : null;
+      if (_busyTab != null) markEngineBusy(_busyTab, true);
+      try {
+        const groundId = String(payload?.groundId ?? '').trim();
+        const driveId = String(payload?.driveId ?? '').trim();
+        const tabId = (typeof payload?.tabId === 'number') ? payload.tabId : null;
+        if (!groundId || !driveId) { sendResponse({ success: false, error: 'groundId + driveId required' }); return; }
+        const origin = String(payload?.origin ?? '').trim();
+        let list = await _readDriveArtifactsMerged(groundId, origin);
+        const rec = list.find((r) => r && r.id === driveId);
+        if (!rec) { sendResponse({ success: false, error: 'drive artifact not found' }); return; }
+        if (!rideArmable(rec)) { sendResponse({ success: false, error: 'artifact-not-armable', hint: rec.reviewState === 'pending' ? 'accept this artifact first' : 'this artifact is disabled' }); return; }
+        let liveUrl = '';
+        if (tabId != null) { try { liveUrl = (await chrome.tabs.get(tabId))?.url || ''; } catch { /* */ } }
+        const settle = await _settleDriveSection(tabId, rec.sectionPath || '/#warranty');
+        if (!settle.ok) {
+          sendResponse({ success: true, ran: false, ok: false, reason: settle.reason || 'section-not-ready' });
+          return;
+        }
+        const h = await _hydrateDriveArtifact(groundId, list, rec, ctx.normalizeUrl(liveUrl));
+        if (!h) { sendResponse({ success: false, error: 'could not compose the drive artifact' }); return; }
+        list = h.list; const stamped = h.rec;
+        // Bind ONLY the declared params ({{NAME}} slots); an unbound label-click SKIPS (the v2.74.877 contract).
+        const strategyParamValues = {};
+        for (const p of (Array.isArray(stamped.params) ? stamped.params : [])) {
+          if (p && p.name) strategyParamValues[p.name] = '';
+        }
+        const supplied = (payload?.params && typeof payload.params === 'object') ? payload.params : {};
+        for (const [k, v] of Object.entries(supplied)) if (strategyParamValues[k] !== undefined) strategyParamValues[k] = String(v ?? '');
+        if (tabId != null) { try { await ctx.ensureContentScript(tabId); } catch { /* */ } }
+        let result = null;
+        if (stamped.strategyId) {
+          try { result = await ExecutionEngine.executeStrategy({ strategyId: stamped.strategyId, strategyParamValues, targetTabId: tabId }); }
+          catch (e) { sendResponse({ success: false, error: `drive run failed: ${e.message}` }); return; }
+        } else if (stamped.fragmentId) {
+          let frag = null; try { frag = await StorageManager.getFragment(stamped.fragmentId); } catch { /* */ }
+          if (!frag) { sendResponse({ success: false, error: 'hydrated fragment missing' }); return; }
+          const synthetic = CapabilitySynth.wrapFragmentAsStrategy(frag, { strategyId: `fragment:${frag.id}`, now: Date.now() });
+          try { result = await ExecutionEngine.executeStrategy({ strategyId: synthetic.id, strategy: synthetic, strategyParamValues, targetTabId: tabId }); }
+          catch (e) { sendResponse({ success: false, error: `drive run failed: ${e.message}` }); return; }
+        } else { sendResponse({ success: false, error: 'artifact hydrated without a runnable entity' }); return; }
+        const ok = !!(result && result.success);
+        // Verify-on-first-use promotion: a clean run upgrades 'observed' → 'trial-pass' (the run IS the trial —
+        // the same doctrine as PS-3's staged caps) + healthStatus 'ready' on the backing records. A failure
+        // leaves the verdict honest; nothing is silently promoted.
+        let promoted = false;
+        if (ok) {
+          try {
+            const cap = (await ctx.readSgCapabilities(groundId)).find((c) => c && c.id === stamped.capabilityId);
+            if (cap && cap.trial && cap.trial.verdict === 'observed') {
+              const now = Date.now();
+              await ctx.writeSgCapability(groundId, { ...cap, trial: { ...cap.trial, verdict: 'trial-pass' }, lastVerifiedAt: now });
+              const health = { healthStatus: 'ready', lastExecutedAt: now, lastVerifiedAt: now };
+              try { if (stamped.fragmentId) await StorageManager.updateFragment(stamped.fragmentId, health); } catch { /* */ }
+              try { if (stamped.strategyId) await StorageManager.updateStrategy(stamped.strategyId, health); } catch { /* */ }
+              promoted = true;
+            }
+          } catch (e) { Logger.warn('background', `drive first-use promotion failed (non-fatal): ${e.message}`); }
+        }
+        const pv = Object.entries(strategyParamValues).filter(([, v]) => v !== '').map(([k, v]) => `${k}="${String(v).slice(0, 30)}"`);
+        Logger.info('drive', `DRIVE_INVOKE ▸ ${driveId} (tier ${stamped.tier || 1}) → ${ok ? 'ok' : 'failed'}${h.hydrated ? ' [hydrated]' : ''}${promoted ? ' [promoted trial-pass]' : ''}${pv.length ? ` params: ${pv.join(', ')}` : ''} @ ${groundId}`);
+        sendResponse({ success: true, ran: true, ok, hydrated: h.hydrated, promoted, capabilityId: stamped.capabilityId, reason: ok ? undefined : ((result && result.error) || 'a step failed') });
+      } catch (err) {
+        Logger.error('background', `INVOKE_DRIVE_ARTIFACT failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      } finally { if (_busyTab != null) markEngineBusy(_busyTab, false); }
     },
 
     // §17 (DESIGN_connectors.md) — BANK already-captured network reads into the Ground's ride-recipe collection (the
@@ -1208,30 +1478,180 @@ export function createSgMessageHandlers(ctx) {
         // SESSION_REPLAY (page-captured auth headers). Reads only (mode 'ask'); best-effort (never blocks interpret).
         let harvestedLegs = [];
         try {
-          if (typeof ctx.readRideRecipes === 'function' && (connections.length || groundId)) {
+          // v2.74.1449 (CX-9l fix) — the cascade runs UNCONDITIONALLY (was gated on `connections.length || groundId`,
+          // v1428's outer condition): a ground-LESS active tab (any unexplored page) nulled groundId and skipped the
+          // WHOLE ride projection — the last hidden active-tab precedence. Live: "on vendorsuite…" from a Deepgram tab
+          // → zero connector legs → the router's honest teach ("I don't have a way to do that here yet") despite 19
+          // armed vendorsuite legs existing. Ride capabilities must not depend on where the user happens to be.
+          if (typeof ctx.readRideRecipes === 'function') {
             const _seen = new Set([...ragLegs, ...connLegs].map((l) => legRef(l)).filter(Boolean));
             if (connections.length) {
               const _allG = await StorageManager.getAllGrounds();
               for (const c of connections) {
                 const gid = _groundIdForUrl(c.origin, _allG); if (!gid) continue;
-                const recs = await ctx.readRideRecipes(gid);
+                const recs = await _readRideRecipesMerged(gid, c.origin);   // v1435 — merged read: the palette never projects a stale stored shape
                 const host = String(c.origin || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
                 harvestedLegs.push(...harvestedRecipeLegs(recs, { host, mode: 'ask', seenKeys: _seen, groundId: gid }));   // v1340 (review A/§18) — carry the Ground for the run-time arm guard
+                // HL-1 (v2.74.1454) — the Ground's built-in DRIVE legs ride along (heterogeneous legs: the data
+                // reads ANSWER, the drive artifacts SHOW/act on the live page). Best-effort, deduped with the rest.
+                try { harvestedLegs.push(...seededDriveLegs(await _readDriveArtifactsMerged(gid, c.origin), { host, groundId: gid, seenKeys: _seen })); } catch { /* */ }
               }
-            } else if (groundId) {
-              // v2.74.1428 (OV-6b) — OVERVIEW (no connected app): ALSO offer the ACTIVE TAB's Ground's armable ride recipes,
-              // so a freshly forged+armed read ("get open warranty tasks" on the vendor portal) is REACHABLE from a plain
-              // ask. The connections-only gate had silently dropped these — an armed workbench recipe was invocable by no
-              // one. Scoped to the active tab's Ground; the §18 arm guard (armable) still filters inside harvestedRecipeLegs.
-              const recs = await ctx.readRideRecipes(groundId);
-              let host = ''; try { host = new URL(tabUrl).host; } catch { /* */ }
-              harvestedLegs.push(...harvestedRecipeLegs(recs, { host, mode: 'ask', seenKeys: _seen, groundId }));
-              // §20 — keep the ride auth-capture armed on the active tab so a header-replay pick has a FRESH token to
-              // replay (fire-and-forget; idempotent host-dedup). Without this the Overview invoke hits no-session-captured.
-              if (host && typeof tabId === 'number' && harvestedLegs.length) { void armRideAuthCapture({ host, tabId }).catch(() => { /* */ }); }
+            } else {
+              // v2.74.1428 (OV-6b) → v2.74.1446 (capability-global) → v2.74.1447 (CX-9l) — the SCOPING CASCADE, the
+              // user-specified order of operations:
+              //   1) the ask NAMES a site ("on vendorsuite…") → THAT site's legs only         [TARGET-SITE]
+              //   2) no target → the ACTIVE TAB's ground legs first                            [ACTIVE-TAB]
+              //   3) plus GLOBAL fallback legs from every other ride-armed Ground              [GLOBAL]
+              //   4) nothing serves → the router's "teach" intent proposes LEARNING a leg (ride/drive/broker)
+              // Target naming is DETERMINISTIC (host-label tokens ≥4 chars matched in the ask), and a named target
+              // excludes everything else — the active tab NEVER outranks a named site (the Deepgram-tab live miss).
+              // Tiers render as palette markers; the system SCOPING rule tells the router the precedence.
+              let activeHost = ''; try { activeHost = new URL(tabUrl).host; } catch { /* */ }
+              const armedEntries = await _rideArmedGrounds();
+              // CX-9r (v2.74.1463) — CATALOG-ARMED origins: every OPEN TAB whose host matches a curated appHost is
+              // routable WITHOUT a Ground (gid:null). The Ground is user-state's home, not a reachability gate — a
+              // curated pre-accepted leg needs only a logged-in tab at dispatch (the exact asymmetry live: Aircall's
+              // 17 HAR-built legs were unreachable in plain chat because no ground had ever seeded them, while an
+              // APP connection would have projected them catalog-direct). Stored records outrank the projection
+              // (covered hosts skip); the tab scan runs per-ask, OUTSIDE the 5-min cache, so a freshly opened app
+              // tab is routable immediately. The joint vocab index keeps host-level distinctiveness global.
+              let virtualEntries = [];
+              try {
+                const _tabs = await chrome.tabs.query({});
+                const _tabHosts = [];
+                for (const t of _tabs) { try { const u = new URL(t.url || ''); if (u.protocol === 'https:' || u.protocol === 'http:') _tabHosts.push(u.host); } catch { /* */ } }
+                virtualEntries = catalogArmedEntries(_tabHosts, CONNECTOR_RECIPES, armedEntries.map((e) => e.host));
+              } catch { /* best-effort — no tabs access, no virtual origins */ }
+              const _entriesAll = [...armedEntries, ...virtualEntries];
+              const armedGrounds = groundVocabIndex(_entriesAll);   // CX-9q — joint HOST-level distinctiveness
+              const askLc = String(ask || '').toLowerCase();
+              // v2.74.1471 — RAW ask-relevance per ground (pre-distinctness): the DISTINCTIVE vocab can lose a word to
+              // cross-host sharing ("available" stopped being aircall-unique once other grounds' texts carried it), and
+              // a CX-9r virtual origin sits LAST in projection order — live: workspace.aircall.io cap-starved on
+              // "am I available?" (ride[global:104], aircall in the skipped list). Raw hits break the cap ordering tie
+              // below so an ask-relevant ground projects before irrelevant global bulk. Object-identity keyed.
+              const _rawHits = new Map();
+              {
+                const _askWords = [...new Set(askLc.split(/[^a-z]+/).filter((w) => w.length >= 5))];
+                _entriesAll.forEach((e, i) => {
+                  // v1473 — DENSITY, not binary presence: count (text × word) matches. Binary hits TIED aircall (whose
+                  // whole catalog speaks "availab…") with grounds carrying one incidental mention, and ties fall back
+                  // to storage order — live 21:45:01: workspace.aircall.io cap-skipped on "am I available?" AGAIN.
+                  let h = 0;
+                  try { for (const tx of (Array.isArray(e.texts) ? e.texts : [])) { const t = String(tx).toLowerCase(); for (const w of _askWords) if (t.includes(w)) h++; } } catch { /* */ }
+                  _rawHits.set(armedGrounds[i], h);
+                });
+              }
+              const _hostTokens = (h) => { const s = String(h).toLowerCase(); return [...new Set(s.split('.').filter((x) => x.length >= 4 && x !== 'www').concat([s]))]; };
+              const targets = armedGrounds.filter(({ host }) => _hostTokens(host).some((t) => askLc.includes(t)));
+              // CX-9m (v2.74.1450) — DOMAIN-MATCH: no site named, but the ask uses ONE ground's distinctive recipe
+              // vocabulary ("warranty task…" → the vendorsuite ground) → promote that ground above GLOBAL. Only an
+              // UNAMBIGUOUS best (a single ground, or a strict hit-count winner) promotes — ties stay plain global.
+              // (Live: the unnamed re-ask decomposed into page steps because nothing distinguished the right GLOBAL leg.)
+              let vocabHost = '';
+              if (!targets.length) {
+                const scored = armedGrounds
+                  .map((g) => ({ g, hits: [...(g.vocab || [])].filter((w) => askLc.includes(w)).length }))
+                  .filter((x) => x.hits > 0)
+                  .sort((a, b) => b.hits - a.hits);
+                if (scored.length === 1 || (scored.length > 1 && scored[0].hits > scored[1].hits)) vocabHost = scored[0].g.host;
+              }
+              // CX-9q (v2.74.1462) — the DOMAIN-MATCH winner projects FIRST: v1450 promoted it only via the scope
+              // STAMP, but the 80-leg cap walked `chosen` in tab-local-then-storage order, so a late-stored vocab
+              // winner could be cap-skipped entirely (live: 225 legs across 8 armed grounds, active tab = zendesk →
+              // the vendorsuite grounds were among the "3 not projected" and vs_warranty_stats never reached the
+              // palette). Order: vocab winner → tab-local → the rest; the cap now starves GLOBAL noise, not the winner.
+              const chosen = (targets.length ? targets : armedGrounds.slice())
+                .sort((a, b) => (Number(b.host === vocabHost) - Number(a.host === vocabHost))
+                  || (Number(b.host === activeHost) - Number(a.host === activeHost))
+                  || ((_rawHits.get(b) || 0) - (_rawHits.get(a) || 0)));   // DOMAIN-MATCH winner → tab-local → ask-relevance (v1471: the cap starves irrelevant bulk, never a relevant ground)
+              let _capSkipped = 0; const _capSkippedHosts = [];   // v1467 (obs #4) — NAME the starved grounds, not just count them
+              for (const { gid, host } of chosen) {
+                if (harvestedLegs.length >= 80) { _capSkipped++; _capSkippedHosts.push(host); continue; }   // soft cap — logged below, never silent
+                // CX-9r — a virtual (catalog-armed, gid:null) origin projects the curated records directly; a real
+                // Ground reads merged storage (v1435) so user edits/harvested legs ride. Same records shape either way.
+                const recs = (gid != null)
+                  ? await _readRideRecipesMerged(gid, host)   // v1435 — merged read (catalog upgrades reach every projection)
+                  : curatedRidesForConnections([{ origin: host }], CONNECTOR_RECIPES);
+                const legs = harvestedRecipeLegs(recs, { host, mode: 'ask', seenKeys: _seen, groundId: gid });
+                const scope = targets.length ? 'target' : (host === vocabHost ? 'vocab' : (host === activeHost ? 'tab' : 'global'));
+                for (const l of legs) l.scope = scope;                  // the tier marker interpretPrompt renders
+                harvestedLegs.push(...legs);
+                // HL-1 (v2.74.1454) — the Ground's built-in DRIVE legs join at the SAME scope tier (heterogeneous
+                // legs: ride ANSWERS a question, drive SHOWS/acts on the live page — "review that task" picks drive).
+                try {
+                  const dLegs = seededDriveLegs(await _readDriveArtifactsMerged(gid, host), { host, groundId: gid, seenKeys: _seen });
+                  for (const l of dLegs) l.scope = scope;
+                  harvestedLegs.push(...dLegs);
+                } catch { /* best-effort — drive legs never block interpret */ }
+                // CX-9o (v2.74.1453) — the SECTION-NAV leg, DATA-derived (the anti-hardcode rule: navigation is a
+                // router-selectable TOOL, never a chat regex). This ground's param-free section pages (its recipes'
+                // listUrl/itemUrl filled with no params: '/#warranty' → warranty) become ONE leg with a `section`
+                // enum + an optional `find` (open a SPECIFIC item on the page — the SPA has no per-item URL, so the
+                // dispatch text-clicks its row after navigating). Same scope tier as the ground's other legs.
+                const secPaths = {};
+                for (const r of recs) {
+                  if (!r || !(r.enabled && r.reviewState === 'accepted')) continue;
+                  for (const t of [r.listUrl, r.itemUrl]) {
+                    if (!t) continue;
+                    const p = fillEndpoint(String(t), {});
+                    if (!p || p.includes('{')) continue;
+                    let lbl = '';
+                    try {
+                      const u = new URL(`https://${host}${p.startsWith('/') ? p : '/' + p}`);
+                      lbl = (u.hash || '').replace(/[^a-z]/gi, '').toLowerCase();
+                      if (!lbl) { const segs = u.pathname.split('/').filter((s) => /^[a-z-]+$/i.test(s)); lbl = (segs[segs.length - 1] || '').toLowerCase(); }
+                    } catch { /* */ }
+                    if (lbl && lbl.length >= 4 && !secPaths[lbl]) secPaths[lbl] = p;
+                  }
+                }
+                const secLabels = Object.keys(secPaths);
+                const navKey = `me.site.open_page@${host}`;
+                if (secLabels.length && !_seen.has(navKey)) {
+                  _seen.add(navKey);
+                  harvestedLegs.push({
+                    key: navKey, name: `Open ${host}`,
+                    does: `NAVIGATE to / focus the live ${host} site — open its ${secLabels.join(' / ')} page, optionally jumping to ONE item on it (find). Use this to SHOW the site; use the data reads to ANSWER questions.`,
+                    mode: 'act', domain: 'connector', source: 'builtin', safety: 'auto',
+                    params: ['section', 'find'],
+                    paramSchema: { type: 'object', properties: {
+                      section: { type: 'string', enum: secLabels, hint: 'which page of the site to open' },
+                      find: { type: 'string', hint: 'text identifying ONE item to open there — a street address or task/claim number' },
+                    }, required: [] },
+                    tool: { impl: 'session', sectionNav: { sections: secPaths }, origin: host, groundId: gid },
+                    scope,
+                  });
+                }
+              }
+              if (_capSkipped) { try { Logger.info('background', `INTERPRET_ASK ▸ ride-leg cap (80) — ${_capSkipped} ride-armed ground(s) not projected: ${_capSkippedHosts.slice(0, 8).join(', ')}${_capSkipped > 8 ? ' …' : ''}`); } catch { /* */ } }
+              if (targets.length) { try { Logger.info('background', `INTERPRET_ASK ▸ scope=TARGET ${targets.map((t) => t.host).join(',')}`); } catch { /* */ } }
+              else if (vocabHost) { try { Logger.info('background', `INTERPRET_ASK ▸ scope=VOCAB ${vocabHost}`); } catch { /* */ } }
+              // §20 — keep the ride auth-capture armed on the ACTIVE tab when it is itself a ride host, so a pick has a
+              // FRESH token (fire-and-forget; idempotent). Non-active ride hosts arm at dispatch (SESSION_REPLAY does).
+              if (activeHost && typeof tabId === 'number' && chosen.some((x) => x.host === activeHost)) { void armRideAuthCapture({ host: activeHost, tabId }).catch(() => { /* */ }); }
             }
           }
         } catch { /* never block interpret on the harvested-leg projection */ }
+        // CX-9p (v2.74.1461) — the routing-review fix, applied once the harvested/ride/drive legs are built:
+        //   1) LEARNED-MATCH (warm path): recall a recorded ask-shape→leg SUCCESS (Core/connectorAlias). If that leg
+        //      is in the palette, stamp it scope 'alias' (top of the cascade) — a repeat of an ask that once resolved
+        //      warms straight back to the same leg, without re-deriving it from vocabulary. Empty store → no-op.
+        //   2) PRE-RANK (Core/legPrerank): order the scope-tiered legs so the highest tier + most ask-relevant lead,
+        //      and CAP zero-overlap GLOBAL legs when a winner (alias/target/vocab) owns the ask — so a lexically
+        //      attractive but out-of-domain global ("Search Zendesk tickets" for the warranty ask) can no longer
+        //      out-attract the implied site's leg. Makes the SCOPING precedence DATA, not just a soft rule the LLM
+        //      is asked to honor (findings v1450/v1451: the unnamed warranty ask picked search_tickets → no-app-tab).
+        try {
+          if (harvestedLegs.length) {
+            const _al = (await chrome.storage.local.get('connector:aliases'))['connector:aliases'];
+            const recalled = recallAlias(Array.isArray(_al) ? _al : [], ask);
+            if (recalled && recalled.ref) {
+              const hit = harvestedLegs.find((l) => legRef(l) === recalled.ref);
+              if (hit) { hit.scope = 'alias'; try { Logger.info('background', `INTERPRET_ASK ▸ scope=ALIAS ${recalled.host || ''}`.trim()); } catch { /* */ } }
+            }
+          }
+          harvestedLegs = prerankLegs(harvestedLegs, ask);
+        } catch { /* the recall/pre-rank is an enhancement — never blocks interpret */ }
         // CX-5c — the BROKER (OAuth/MCP) legs for the active page + connected hosts, gated on LINKED providers (the
         // `connector:linkedProviders` cache LINK/UNLINK maintain — an unlinked provider's legs stay out; a
         // selectable-but-dead leg reads as broken). Reads AND writes project: a write pick hits the chat-side HITL
@@ -1263,6 +1683,15 @@ export function createSgMessageHandlers(ctx) {
         // offerable to interpret (it previously ran only in the dormant Core/ilRun.js — the floor was unwired here).
         // The rule table stays empty until user routing-rules ship; the unrelaxable floor is what matters now.
         const retrieved = policyFilter([...ragLegs, ...connLegs, ...harvestedLegs, ...brokerLegs, ...(composeLeg ? [composeLeg] : []), ...fleetLegs, ...panelOfferedLegs()], { scope: { ground: groundId || null } });   // v1354 — CLEAR_CHAT joins (a typed "clear chat" used to fall through to the TEACH offer)
+        // v1467 (obs #5) — PALETTE ▸: what the router SAW, by source + scope tier (counts + tier keys only — body-blind).
+        // The v1462 vocab-annihilation diagnosis took candidate-count arithmetic across two traces; this line is the
+        // direct evidence: e.g. `PALETTE ▸ 93 leg(s) — rag:0 conn:0 ride[tab:17 global:45] broker:0 fleet:0 panel:1`.
+        try {
+          const _byScope = {};
+          for (const l of harvestedLegs) { const s = (l && l.scope) || 'conn'; _byScope[s] = (_byScope[s] || 0) + 1; }
+          const _scopeStr = Object.entries(_byScope).map(([s, n]) => `${s}:${n}`).join(' ');
+          Logger.info('background', `PALETTE ▸ ${retrieved.length} leg(s) — rag:${ragLegs.length} conn:${connLegs.length} ride[${_scopeStr || '—'}] broker:${brokerLegs.length} fleet:${fleetLegs.length} panel:${panelOfferedLegs().length}${composeLeg ? ' compose:1' : ''}`);
+        } catch { /* never block interpret on its own observability */ }
         const primitives = ['OPEN_URL', 'CLICK', 'TYPE', 'SCROLL', 'EXTRACT'];
         // F-2 (v2.74.1179) — feed interpret the live page VOCABULARY (the same affordances IL_ANSWER reads from the
         // cached Locale) so its act/teach/clarify decisions are grounded in what the page actually offers, not just
@@ -1286,7 +1715,15 @@ export function createSgMessageHandlers(ctx) {
         if (memId) { try { learned = goalContextFor(await loadGoalItems(memId), ask, { om }); } catch { /* */ } }
         const objects = describeObjectModel(om);
         const decision = await AnthropicService.interpret({ ask, retrieved, primitives, affordances, seed, target, connections, learned, objects, subTasks, history });
-        Logger.info('route', `INTERPRET_ASK "${ask.slice(0, 60)}" → ${decision.intent} (conf ${decision.confidence}, ${retrieved.length} cand, ground ${groundId || '—'})`);
+        // v1467 (obs #2) — name the CHOSEN LEG + bound param NAMES (never values) on the decision line. The wrong-leg
+        // class ("0 warranty tasks" was Zendesk search_tickets) previously took response-vocabulary forensics to spot;
+        // the pick was in `decision` all along and just never printed.
+        const _pick = String(decision.tool || decision.capabilityId || decision.op || '') || '—';
+        const _pNames = (decision.params && typeof decision.params === 'object') ? Object.keys(decision.params).join(',') : '';
+        // v1476 — the chosen leg's SCOPE TIER (alias/target/vocab/tab/global): the alias marker (ask #5) that says
+        // whether this pick came from a warm recall vs a fresh vocab match — visible without cross-referencing the palette.
+        let _pScope = ''; try { const _pl = retrieved.find((l) => l && legRef(l) === _pick); if (_pl && _pl.scope) _pScope = ` scope:${_pl.scope}`; } catch { /* */ }
+        Logger.info('route', `INTERPRET_ASK "${ask.slice(0, 60)}" → ${decision.intent} leg=${_pick.slice(0, 60)}${_pNames ? ` params:{${_pNames}}` : ''}${_pScope} (conf ${decision.confidence}, ${retrieved.length} cand, ground ${groundId || '—'})`);
         sendResponse({ success: true, decision, groundId: groundId || null, retrieved });
       } catch (err) {
         Logger.error('background', `INTERPRET_ASK failed: ${err.message}`);
@@ -1322,7 +1759,7 @@ export function createSgMessageHandlers(ctx) {
             const _seen = new Set(curated.map((l) => legRef(l)).filter(Boolean));
             for (const c of connections) {
               const gid = _groundIdForUrl(c.origin, _allG); if (!gid) continue;
-              const recs = await ctx.readRideRecipes(gid);
+              const recs = await _readRideRecipesMerged(gid, c.origin);   // v1435 — merged read (the sweep projects fresh catalog shapes too)
               const host = String(c.origin || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
               harvested.push(...harvestedRecipeLegs(recs, { host, mode: 'ask', seenKeys: _seen, groundId: gid }));
             }
@@ -1499,7 +1936,20 @@ export function createSgMessageHandlers(ctx) {
         if (memId) { try { learned = goalContextFor(await loadGoalItems(memId), ask, { om }); } catch { /* */ } }
         const objects = describeObjectModel(om);
         let ride = [];   // §18 — the RIDE class (harvested/curated ride-recipes) so "what can you do" covers the app's Data/API actions, not only page actions
-        if (groundId) { try { ride = (await ctx.readRideRecipes(groundId)) || []; } catch { ride = []; } }
+        try { ride = curatedRidesForConnections(connections, CONNECTOR_RECIPES); } catch { ride = []; }
+        const storedRide = [];
+        try {
+          if (connections.length && typeof ctx.readRideRecipes === 'function') {
+            const allG = await StorageManager.getAllGrounds();
+            for (const c of connections) {
+              const gid = _groundIdForUrl(c.origin, allG); if (!gid) continue;
+              storedRide.push(...((await _readRideRecipesMerged(gid, c.origin)) || []));
+            }
+          } else if (groundId && typeof ctx.readRideRecipes === 'function') {
+            storedRide.push(...((await ctx.readRideRecipes(groundId)) || []));
+          }
+        } catch { /* best-effort — curated connection rides still list */ }
+        try { ride = mergeRideCatalogForAnswer(ride, storedRide); } catch { /* */ }
         let answer = await AnthropicService.answerAsk({ ask, capabilities: caps, affordances, coverage, url: tabUrl, seed, connections, ride, learned, objects, subTasks, history });
         // Honesty belt (v2.74.1295) — the answer path dispatched NOTHING, so a completion claim on a side-effect
         // COMMAND is a fabrication (the calendar "✅ I created it" bug, findings 2026-06-27 21:27). Neutralize +

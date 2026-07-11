@@ -8,11 +8,11 @@
 // SAFETY: the result is UNTRUSTED page-origin data (§9). This module only SELECTS + TRUNCATES fields into plain text;
 // the caller escapes it (renderMarkdown HTML-escapes). Never treat any field as an instruction.
 
-const NAME_KEYS = ['subject', 'title', 'name', 'display_name', 'summary', 'headline'];
+const NAME_KEYS = ['subject', 'title', 'name', 'display_name', 'fullName', 'full_name', 'summary', 'headline'];   // v1469 — + fullName (an Aircall teammate row fell through to its email)
 const CONTENT_KEYS = ['description', 'body', 'plain_body', 'details', 'text', 'message', 'note'];
 const ID_KEYS = ['id', 'number', 'iid', 'key'];
 // CX-7 — GraphQL connectors carry camelCase status fields (displayFinancialStatus / displayFulfillmentStatus / status).
-const STATUS_KEYS = ['status', 'state', 'priority', 'stage', 'displayFulfillmentStatus', 'displayFinancialStatus'];
+const STATUS_KEYS = ['status', 'state', 'priority', 'stage', 'availabilityStatus', 'availability', 'displayFulfillmentStatus', 'displayFinancialStatus'];   // v1469 — + availability (the roster's WHOLE point was the status and the render dropped it)
 const URL_KEYS = ['html_url', 'web_url', 'permalink', 'link', 'url'];
 const LIST_KEYS = ['results', 'tickets', 'comments', 'users', 'orders', 'customers', 'products', 'records', 'items', 'rows', 'messages', 'data'];
 const OBJ_KEYS = ['ticket', 'user', 'order', 'customer', 'product', 'record', 'item', 'result', 'shop'];
@@ -21,7 +21,14 @@ const MAX_ROWS = 25;
 const _str = (x) => String(x ?? '').replace(/\s+/g, ' ').trim();
 const _trunc = (x, n) => { const t = _str(x); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 // First SCALAR (non-object) value among `keys`, or null. Skips nested objects (e.g. requester:{…}).
-const _pick = (o, keys) => { for (const k of keys) { const v = o && o[k]; if (v != null && v !== '' && typeof v !== 'object') return v; } return null; };
+// CX-9g (v2.74.1440) — CASE-INSENSITIVE: app shapes PascalCase their fields (VendorSuite `Priority`/`TaskStatus`),
+// and an exact-key vocab silently missed them ("priority" ∈ STATUS_KEYS never matched `Priority`).
+const _pick = (o, keys) => {
+  if (!o || typeof o !== 'object') return null;
+  const lower = new Map(Object.entries(o).map(([k, v]) => [k.toLowerCase(), v]));
+  for (const k of keys) { const v = lower.get(k.toLowerCase()); if (v != null && v !== '' && typeof v !== 'object') return v; }
+  return null;
+};
 // CX-7 — GraphQL connections wrap items as edges:[{node,cursor}]; unwrap to the node objects. A non-GraphQL array
 // (Zendesk tickets etc.) has no `.node` and passes through unchanged — safe no-op.
 const _unwrapNodes = (arr) => arr.map((x) => (x && typeof x === 'object' && x.node && typeof x.node === 'object') ? x.node : x);
@@ -32,11 +39,19 @@ const _unwrapNodes = (arr) => arr.map((x) => (x && typeof x === 'object' && x.no
  * `{data:{customers:{edges:[{node}]}}}` yields the customer objects (the old top-level-only scan returned null →
  * every GraphQL read read as "nothing found").
  */
+// CX-9h (v2.74.1441) — is this object ITSELF a record (an id-shaped / suffix-id-shaped / named thing)? Such a root is a
+// SINGLE RECORD whose nested object-arrays are CHILD collections (a warranty task's Appointments, a ticket's
+// custom_fields) — never "the data list". Live bug: the generic any-object-array hunt returned the task detail's
+// Appointments[1], so the drilled answer rendered the APPOINTMENT (start/end + IsCanceled booleans) and the user got
+// "no warranty details" twice — the render never even saw the task object.
+const _recordShaped = (o) => !!(o && typeof o === 'object' && !Array.isArray(o) && (_pick(o, ID_KEYS) != null || _suffixId(o) != null || _displayName(o) != null));
+
 export function primaryList(value, _depth = 0) {
   if (Array.isArray(value)) return _unwrapNodes(value);
   if (!value || typeof value !== 'object') return null;
   for (const k of LIST_KEYS) if (Array.isArray(value[k])) return _unwrapNodes(value[k]);
   if (Array.isArray(value.edges)) return _unwrapNodes(value.edges);                    // a GraphQL connection at this level
+  if (_recordShaped(value)) return null;                                              // CX-9h — a record root is NOT a list container (its arrays are children)
   for (const v of Object.values(value)) if (Array.isArray(v) && v.length && v[0] && typeof v[0] === 'object') return _unwrapNodes(v);
   if (_depth < 5) for (const v of Object.values(value)) {                              // recurse: data → customers → edges
     if (v && typeof v === 'object' && !Array.isArray(v)) { const found = primaryList(v, _depth + 1); if (found) return found; }
@@ -79,7 +94,7 @@ export function createdRecordId(value) {
 export function primaryObject(value, _depth = 0) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   for (const k of OBJ_KEYS) { const v = value[k]; if (v && typeof v === 'object' && !Array.isArray(v)) return v; }
-  if (_pick(value, ID_KEYS) != null || _displayName(value) != null) return value;
+  if (_recordShaped(value)) return value;   // CX-9h (v1441) — suffix-id shapes (TaskId/TaskNumber…) count as record-shaped, same predicate as primaryList's stop
   if (_depth < 5 && value.data && typeof value.data === 'object' && !Array.isArray(value.data)) return primaryObject(value.data, _depth + 1);
   return null;
 }
@@ -95,6 +110,17 @@ function _displayName(o) {
   return null;
 }
 
+// CX-9c (v2.74.1436) — generic id fallback for app-shaped rows carrying NO exact ID_KEYS (a VendorSuite warranty row:
+// TaskId/TaskNumber/ClaimNumber…). Prefer a `…Number` key (the HUMAN number the site shows — TaskNumber "4090740")
+// over a `…Id` key (the internal join key); first key in record order wins (the entity's own field precedes foreign
+// ones in every shape seen). Scalars only. PURE.
+function _suffixId(o) {
+  for (const suf of [/[a-z]Number$/, /[a-z]Id$/]) {
+    for (const [k, v] of Object.entries(o)) { if (suf.test(k) && v != null && v !== '' && typeof v !== 'object') return v; }
+  }
+  return null;
+}
+
 /** Pull one item's salient fields. PURE. `full` → a longer title + a separate body when there's a distinct name + content. */
 export function summarizeItem(o, { full = false } = {}) {
   if (o == null) return { title: '' };
@@ -105,8 +131,23 @@ export function summarizeItem(o, { full = false } = {}) {
   const body = (full && name != null && content != null) ? _trunc(content, 500) : '';   // only when name + content are distinct
   const url = _pick(o, URL_KEYS);
   let id = _pick(o, ID_KEYS);
+  if (id == null) id = _suffixId(o);   // CX-9c — …Number/…Id suffix fallback (TaskNumber) when no exact id key exists
   if (typeof id === 'string' && /^gid:\/\/shopify\//i.test(id)) id = id.split('/').pop();   // CX-7 — gid → numeric tail for a readable id
   return { id, title, status: _pick(o, STATUS_KEYS), body, url: (url && !/\/api\//.test(url)) ? url : null };
+}
+
+/**
+ * CX-9c (v2.74.1436) — an item's compact GENERIC field projection: [label, value] pairs from the same `_extraFields`
+ * machinery the single-record view uses (scalars + formatted money/tracking; content BODIES never included — the
+ * privacy lever holds), capped. The LIST twin of `recordDetails`: a row whose shape matches no known vocabulary
+ * (VendorSuite: AddressLine1/ClaimNumber/Age/AllowedAmount…) still renders/answers with its real fields instead of
+ * an empty husk — the live "records shown are empty" class. PURE.
+ */
+export function itemFields(o, { max = 5 } = {}) {
+  if (!o || typeof o !== 'object') return [];
+  const it = summarizeItem(o);
+  const used = new Set([it.title, it.status, it.id].filter((x) => x != null && x !== '').map(String));
+  return _extraFields(o, used, { max }).map(([k, v]) => [_label(k), v]);   // CX-9g — _extraFields now ranks internally (rank-then-cap, both paths)
 }
 
 // A field's human label: a few known aliases (a Shopify order's totalPriceSet → "Total"), else camelCase /
@@ -145,28 +186,53 @@ function _refundInfo(arr) {
 // view — a Shopify customer's email/phone/orders/tags/location, an order's payment/total/tracking. Skips
 // foreign-id noise (…_id / …Id); formats money nodes + fulfillment tracking; joins scalar arrays (tags) and
 // shallow nested objects (an address). `used` = values already shown (title, status) → no duplication. Capped. PURE.
-const _STRUCT_SKIP = new Set([...NAME_KEYS, ...CONTENT_KEYS, ...ID_KEYS, ...URL_KEYS, 'firstName', 'lastName']);
-function _extraFields(o, used = new Set()) {
-  const out = [];
+const _STRUCT_SKIP = new Set([...NAME_KEYS, ...CONTENT_KEYS, ...ID_KEYS, ...URL_KEYS, 'firstName', 'lastName'].map((k) => k.toLowerCase()));
+// CX-9g (v2.74.1440) — rank a DISPLAY value: 0 = human TEXT (multi-word — instructions, an address), 1 = wordish
+// (a status token, a date), 2 = bare numbers. Shared by the list + single-record paths.
+const _fieldRank = (v) => { const s = String(v); return (/\s/.test(s) && /[a-z]/i.test(s)) ? 0 : (/[a-z]/i.test(s) ? 1 : 2); };
+// CX-9g (v2.74.1440) — the cap now runs AFTER ranking, not during the walk. The live miss: a warranty DETAIL carries
+// 25+ fields with Priority/Instructions/VendorExplanation at the TAIL, and the old walk-order cap-8 filled up on
+// SearchField + booleans before ever REACHING them — the one answer the user asked for was structurally unshowable.
+// Now: collect every displayable field (bounded), rank human-text-first, THEN cap; long text keeps 200 chars (an
+// instruction truncated at 60 was useless). Bodies (CONTENT_KEYS) still never ride — the privacy lever holds.
+function _extraFields(o, used = new Set(), { max = 8 } = {}) {
+  const all = [];
   for (const [k, raw] of Object.entries((o && typeof o === 'object') ? o : {})) {
-    if (out.length >= 8) break;
-    if (_STRUCT_SKIP.has(k) || /(?:_id|[a-z]Id)$/.test(k) || /^gid$/i.test(k)) continue;
+    if (all.length >= 40) break;   // pathological-shape guard only — generous, so tail fields still make the ranking
+    if (_STRUCT_SKIP.has(k.toLowerCase()) || /(?:_id|[a-z]Id)$/.test(k) || /^gid$/i.test(k)) continue;
+    if (/^search/i.test(k)) continue;   // CX-9i — a Search* field is a search-INDEX blob ("|3955 gallery chase|217710000|…"), never display data (real VS shape)
     if (raw == null || raw === '') continue;
     // CX-7f — unwrap a GraphQL CONNECTION ({edges:[{node}]}, e.g. an order's returns) to its node array so the
     // array formatters below reach it (returns is a connection; fulfillments/refunds are plain lists).
     const v = (raw && typeof raw === 'object' && !Array.isArray(raw) && Array.isArray(raw.edges)) ? _unwrapNodes(raw.edges) : raw;
     let display = null;
-    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') display = _trunc(String(v), 60);
-    else if (Array.isArray(v)) {
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+      display = _trunc(String(v), (typeof v === 'string' && /\s/.test(v.trim())) ? 400 : 60);   // CX-9g/9i — TEXT keeps a real excerpt (400: a vendor explanation's CONCLUSION lives at the end — 200 cut it)
+    } else if (Array.isArray(v)) {
       if (v.length && v.every((x) => x != null && typeof x !== 'object')) display = _trunc(v.join(', '), 60);   // tags
-      else display = _tracking(v) || _returnsInfo(v) || _refundInfo(v);                                         // fulfillments / returns / refunds
+      else {
+        display = _tracking(v) || _returnsInfo(v) || _refundInfo(v);                                            // fulfillments / returns / refunds
+        // CX-9g — GENERIC array-of-objects fallback (a warranty task's Appointments): the first row's scalars,
+        // "+N more" when several — never a silently skipped field.
+        if (!display && v.length && v[0] && typeof v[0] === 'object') {
+          const sc = Object.values(v[0]).filter((x) => x != null && x !== '' && typeof x !== 'object');
+          if (sc.length) display = `${_trunc(sc.join(', '), 90)}${v.length > 1 ? ` (+${v.length - 1} more)` : ''}`;
+        }
+      }
     } else if (v && typeof v === 'object') {
       display = _money(v);                                                                                      // totalPriceSet → "0.00 USD"
       if (!display) { const sc = Object.values(v).filter((x) => x != null && x !== '' && typeof x !== 'object'); display = sc.length ? _trunc(sc.join(', '), 60) : null; }   // customer{email}, defaultAddress
     }
-    if (display && !used.has(display)) out.push([k, display]);
+    if (display && !used.has(display)) all.push([k, display]);
   }
-  return out;
+  // CX-9i — a MONEY-ish key (Amount/Total/Price/Cost) ranks as wordish (1), not bare-number (2): the payable amount
+  // must survive the cap on a field-heavy record (live: AllowedAmount 214 was cut while three booleans made it).
+  const rank = ([k, v]) => { const r = _fieldRank(v); return (r === 2 && /amount|total|price|cost(?!\s*code)/i.test(k)) ? 1 : r; };
+  return all
+    .map((pair, i) => [rank(pair), i, pair])
+    .sort((a, b) => a[0] - b[0] || a[1] - b[1])
+    .slice(0, Math.max(0, max | 0))
+    .map(([, , pair]) => pair);
 }
 
 /**
@@ -177,9 +243,11 @@ function _extraFields(o, used = new Set()) {
  */
 export function recordDetails(o) {
   const it = summarizeItem(o, { full: true });
-  const used = new Set([it.title, it.status].filter((x) => x != null).map(String));
+  // CX-9g (v1440) — the id joins `used` (the …Number fallback id would otherwise re-render as an extra field), and a
+  // single record gets a BIGGER budget (12): one record's answer deserves its instructions, not just its booleans.
+  const used = new Set([it.title, it.status, it.id].filter((x) => x != null && x !== '').map(String));
   const d = {};
-  for (const [k, v] of _extraFields(o, used)) d[_label(k)] = v;
+  for (const [k, v] of _extraFields(o, used, { max: 12 })) d[_label(k)] = v;
   return d;
 }
 
@@ -196,7 +264,11 @@ export function renderConnectorLines(value, { name = 'Results' } = {}) {
     const head = `${name} (${list.length})`;
     const lines = list.slice(0, MAX_ROWS).map((o) => {
       const it = summarizeItem(o);
-      return `• ${it.id != null ? `#${it.id} ` : ''}${it.title || '(no title)'}${it.status ? ` — ${it.status}` : ''}`;
+      // CX-9c (v2.74.1436) — a row with NO recognized name/status (an app shape outside the key vocabulary, e.g. a
+      // VendorSuite warranty row) falls back to its generic fields ("3955 Gallery Chase · Cumming, GA 30028 · …")
+      // instead of a dead "(no title)" bullet — the list twin of the single-record enrichment.
+      const label = it.title || itemFields(o, { max: 4 }).map(([, v]) => v).join(' · ') || '(no title)';
+      return `• ${it.id != null ? `#${it.id} ` : ''}${label}${it.status ? ` — ${it.status}` : ''}`;
     });
     if (list.length > MAX_ROWS) lines.push(`… +${list.length - MAX_ROWS} more`);
     return [`${head}:`, ...lines];
@@ -207,8 +279,8 @@ export function renderConnectorLines(value, { name = 'Results' } = {}) {
     const it = summarizeItem(obj, { full: true });
     const out = [`${it.id != null ? `#${it.id} ` : ''}${it.title || ''}${it.status ? ` — ${it.status}` : ''}`.trim() || '(no details)'];
     if (it.body) out.push(it.body);
-    const used = new Set([it.title, it.status].filter((x) => x != null).map(String));   // don't repeat the title/status as an extra
-    for (const [k, v] of _extraFields(obj, used)) out.push(`${_label(k)}: ${v}`);
+    const used = new Set([it.title, it.status, it.id].filter((x) => x != null && x !== '').map(String));   // don't repeat the title/status/id as an extra
+    for (const [k, v] of _extraFields(obj, used, { max: 12 })) out.push(`${_label(k)}: ${v}`);   // CX-9g — the single-record budget
     if (it.url) out.push(it.url);
     return out;
   }
@@ -225,7 +297,8 @@ export function itemLabels(value, cap = 20) {
   const list = primaryList(value) || [];
   const labels = list.slice(0, cap).map((o) => {
     const it = summarizeItem(o);
-    return `${it.id != null ? `#${it.id} ` : ''}${it.title || 'item'}`.trim();
+    const label = it.title || itemFields(o, { max: 2 }).map(([, v]) => v).join(' · ') || 'item';   // CX-9c — generic-fields fallback (fan-out labels for vocabulary-less rows)
+    return `${it.id != null ? `#${it.id} ` : ''}${label}`.trim();
   }).filter(Boolean);
   return { labels, total: list.length, capped: list.length > cap };
 }

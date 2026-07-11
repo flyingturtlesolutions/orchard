@@ -14,7 +14,7 @@
 // decision live in the pure `Core/connection.js` core; this handler is the live tab glue.
 
 import { fillEndpoint, fillBody, recipeForOrigin, isReadOnlyGql } from '../../Core/connectorRecipes.js';
-import { pickRideTab, assessProbe, rideAction, STATUS, classifyReachProbe } from '../../Core/connection.js';
+import { pickRideTab, assessProbe, rideAction, STATUS, classifyReachProbe, probedUser, isAnonUser } from '../../Core/connection.js';   // v1471 — probedUser/isAnonUser for the SESSION_REPLAY {me} fill
 import { armable } from '../../Core/rideRecipe.js';   // §18 — the arm guard: a non-armable (disabled / pending / rejected) per-Ground recipe must not run
 import { brokerInvokeGate, brokerReplyFromCloud } from '../../Core/brokerInvoke.js';   // CX-5b — the broker (OAuth/MCP) fail-closed gate + cloud-reply normalizer (pure)
 import { BROKER_CATALOG } from '../../Core/brokerCatalog.js';   // v1342 — UNLINK clears this provider's liveTools cache entries
@@ -114,7 +114,70 @@ try {
 // (window.__ahub_ride_auth[apiHost], stashed by the §20 tee) and fetches the (cross-origin) endpoint WITH them. Runs from
 // the app's own origin so the API's CORS is satisfied; the token never leaves the page. Self-contained (serialized). GET-
 // shaped reads only. → { status, body } | { noAuth } | { error }.
-function _replayFetchFunc(url, apiHost, method, reqBody, contentType) {
+// CX-9o (v2.74.1453) — injected into the ride tab (isolated world) by CLICK_TEXT_ON_TAB: click the most SPECIFIC
+// visible element containing `text`, climbing ≤4 levels to its clickable unit (link/button/row). Returns what was
+// clicked (tag + a short excerpt) or {clicked:false}. Self-contained — no page/extension state touched.
+function _clickTextFunc(text) {
+  const q = String(text).toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!q) return { clicked: false };
+  let best = null;
+  for (const el of document.querySelectorAll('a,button,[role],tr,td,li,div,span')) {
+    const t = (el.textContent || '').toLowerCase().replace(/\s+/g, ' ');
+    if (!t.includes(q)) continue;
+    if (el.getClientRects().length === 0) continue;                    // invisible → not a real target
+    if (!best || t.length < best.len) best = { el, len: t.length };    // smallest containing element = most specific
+  }
+  if (!best) return { clicked: false };
+  let target = best.el;
+  let n = best.el;
+  for (let d = 0; d < 4 && n; d++, n = n.parentElement) {              // climb to the clickable UNIT (row/link/button)
+    let hits = false;
+    try { hits = n.matches('a,button,[role="button"],[role="row"],[role="link"],tr,[onclick]'); } catch { hits = false; }
+    if (hits) { target = n; break; }
+  }
+  try { target.click(); } catch { return { clicked: false }; }
+  return { clicked: true, tag: target.tagName };
+}
+
+function _replayFetchFunc(url, apiHost, method, reqBody, contentType, extraHeaders) {
+  // v1477 — JWT helpers (MAIN-world, inlined so executeScript serializes them). Decode ONLY the payload's exp/iss/
+  // aud claims — never the signature, never logged; the token stays in the page (background sees minutes-to-expiry).
+  function _b64url(x) { try { x = String(x).replace(/-/g, '+').replace(/_/g, '/'); while (x.length % 4) x += '='; return atob(x); } catch (e) { return null; } }
+  function _jwtPayload(tok) { try { var pr = String(tok).split('.'); if (pr.length !== 3 || pr[0].indexOf('eyJ') !== 0) return null; var j = _b64url(pr[1]); return j ? JSON.parse(j) : null; } catch (e) { return null; } }
+  var _JWT_RE = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
+  // Scan web storage for the FRESHEST still-valid JWT whose issuer + client/audience match the CAPTURED bearer.
+  // OPAQUE-SAFE (v1478): a captured token that is NOT a JWT ('opaque') can't be matched by claims, so we NEVER
+  // grab an unrelated storage JWT for it — return token:null and let the diagnostic say 'opaque' (the live-read
+  // can't refresh it; a re-capture is needed). Returns { token, count, capKind }. Claims/counts only, never a value.
+  function _freshestBearer(capAuth) {
+    var count = 0, capKind = 'none';
+    try {
+      var capTok = null; if (capAuth) { var m = String(capAuth).match(/Bearer\s+(\S+)/i); capTok = m ? m[1] : String(capAuth); }
+      var capPl = capTok ? _jwtPayload(capTok) : null;
+      capKind = capTok ? (capPl ? 'jwt' : 'opaque') : 'none';
+      var nowSec = Date.now() / 1000;
+      var best = null, bestExp = (capPl && capPl.exp) ? capPl.exp : 0;   // must beat the captured token's own exp
+      var stores = []; try { stores.push(localStorage); } catch (e) {} try { stores.push(sessionStorage); } catch (e) {}
+      for (var si = 0; si < stores.length; si++) {
+        var st = stores[si]; if (!st) continue;
+        for (var i = 0; i < st.length; i++) {
+          var v = null; try { v = st.getItem(st.key(i)); } catch (e) { continue; }
+          if (!v || v.indexOf('eyJ') === -1) continue;
+          var found = v.match(_JWT_RE); if (!found) continue;
+          for (var c = 0; c < found.length; c++) {
+            var pl = _jwtPayload(found[c]); if (!pl || !pl.exp) continue;
+            count++;
+            if (!capPl) continue;                                                                     // opaque capture → count only, never substitute
+            if (capPl.iss && pl.iss && pl.iss !== capPl.iss) continue;                                 // same issuer
+            var capAud = (capPl.client_id || capPl.aud), plAud = pl.client_id || pl.aud;
+            if (capAud && plAud && String(plAud) !== String(capAud)) continue;                         // same client/audience
+            if (pl.exp > nowSec && pl.exp > bestExp) { best = found[c]; bestExp = pl.exp; }            // valid + fresher
+          }
+        }
+      }
+      return { token: best, count: count, capKind: capKind };
+    } catch (e) { return { token: null, count: count, capKind: capKind }; }
+  }
   return (async function () {
     try {
       var store = window.__ahub_ride_auth || {};
@@ -128,10 +191,22 @@ function _replayFetchFunc(url, apiHost, method, reqBody, contentType) {
       // failed it as no-session-captured. A CROSS-origin API with no captured Bearer genuinely needs one (→ noAuth; arm + retry).
       if (!hasBearer && !sameOrigin) return { noAuth: true, keys: Object.keys(store) };   // keys → diagnose a host-key mismatch vs an empty global
       var headers = { accept: 'application/json' };
+      // CX-10 (v2.74.1464) — the recipe's static requestHeaders ride BOTH auth modes (the v1459 class, third hop:
+      // a BFF that requires a routing header — Aircall's `aircall-platform` — 401s the cookie fetch without it, and
+      // the 401 reads as "session-expired" on a LIVE login). Captured bearer headers still override on collision.
+      if (extraHeaders && typeof extraHeaders === 'object') { for (var xh in extraHeaders) { if (Object.prototype.hasOwnProperty.call(extraHeaders, xh)) headers[xh] = extraHeaders[xh]; } }
       var init;
+      var refreshedBearer = false, capKindOut = 'none', storedJwtsOut = 0;
       if (hasBearer) {
         for (var k in cap.headers) { if (Object.prototype.hasOwnProperty.call(cap.headers, k)) headers[k] = cap.headers[k]; }
-        init = { method: method || 'GET', headers: headers, credentials: 'omit' };   // Bearer HEADER auth (credentialed CORS is rejected by a header-auth API)
+        // v1477 — REFRESH the captured (possibly-expired) bearer from the SPA's OWN live token store. The SPA silently
+        // rotates its token; our capture is a stale snapshot. Use the freshest matching token in web storage instead.
+        try { var _fb = _freshestBearer(cap.headers.authorization); if (_fb) { capKindOut = _fb.capKind; storedJwtsOut = _fb.count; if (_fb.token) { headers.authorization = 'Bearer ' + _fb.token; refreshedBearer = true; } } } catch (e) {}
+        // v1466 — a SAME-ORIGIN bearer sends cookies TOO: the SPA's own same-origin fetches carry BOTH the session
+        // cookie and the Authorization header, and an app can require the PAIR (live gc 18:38: Aircall /v3 401'd
+        // `cookie+hdrs` AND `bearer+hdrs` — each alone). Cross-origin bearer keeps credentials:'omit' (credentialed
+        // CORS is rejected by a header-auth API — the v1430 rationale, unchanged).
+        init = { method: method || 'GET', headers: headers, credentials: sameOrigin ? 'include' : 'omit' };
       } else {
         init = { method: method || 'GET', headers: headers, credentials: 'include' };   // same-origin cookie-ride: the session cookie rides automatically
       }
@@ -139,7 +214,29 @@ function _replayFetchFunc(url, apiHost, method, reqBody, contentType) {
       var res = await fetch(url, init);
       var status = res.status, body = null;
       try { body = await res.json(); } catch (e) { try { body = await res.text(); } catch (e2) { body = null; } }
-      return { status: status, body: body, mode: hasBearer ? 'bearer' : 'cookie' };
+      var capAgeMin = null; try { if (hasBearer && cap && cap.at && window.performance && performance.now) capAgeMin = Math.round((performance.now() - cap.at) / 60000); } catch (e) {}
+      // v1477 — the SENT token's REAL freshness (minutes to expiry; negative = expired) — the honest number the
+      // misleading capAge (snapshot age, not token age) obscured. Decoded from the token we actually sent.
+      var tokExpMin = null; try { var _am = String(headers.authorization || '').match(/Bearer\s+(\S+)/i); var _sp = _am ? _jwtPayload(_am[1]) : null; if (_sp && _sp.exp) tokExpMin = Math.round((_sp.exp - Date.now() / 1000) / 60); } catch (e) {}
+      // v1478 — the SENT token's KIND (jwt|opaque|none), unconditional: the datum that ends 'why didn't the live-read refresh?'.
+      var tokKindOut = 'none'; try { var _tm = String(headers.authorization || '').match(/Bearer\s+(\S+)/i); tokKindOut = _tm ? (_jwtPayload(_tm[1]) ? 'jwt' : 'opaque') : 'none'; } catch (e) {}
+      // v1476 — the WIRE: the NAMES actually sent (post-merge, lowercased) + the captured baseline's names, so the
+      // background can diff "what we sent" vs "what the SPA's own request carried". NAMES ONLY — a value never leaves.
+      var sentNames = []; try { sentNames = Object.keys(headers).map(function (h) { return String(h).toLowerCase(); }).sort(); } catch (e) {}
+      var capNames = []; try { if (cap && cap.headers) capNames = Object.keys(cap.headers).map(function (h) { return String(h).toLowerCase(); }).sort(); } catch (e) {}
+      // v1476 — the server's OWN failure STATEMENT (gql errors[].message / REST error|message|troubleshoot / a text
+      // body's head). The Logger scrubber redacts any PII (email/phone) downstream; kept short. This is the token that
+      // would have ended six rounds of guessing at the first 401 — the app TELLS you why, if you log what it says.
+      var srvMsg = null;
+      try {
+        if (body && typeof body === 'object') {
+          if (Array.isArray(body.errors) && body.errors.length) { var e0 = body.errors[0] || {}; srvMsg = e0.message || e0.code || e0.reason || (e0.extensions && e0.extensions.code) || 'error'; }
+          else srvMsg = body.error || body.message || body.troubleshoot || body.error_description || body.detail || null;
+          if (srvMsg && typeof srvMsg === 'object') srvMsg = (srvMsg.message || srvMsg.code || JSON.stringify(srvMsg));
+        } else if (typeof body === 'string' && body) { srvMsg = body.slice(0, 160); }
+        if (srvMsg != null) srvMsg = String(srvMsg).replace(/\s+/g, ' ').trim().slice(0, 160);
+      } catch (e) {}
+      return { status: status, body: body, mode: hasBearer ? (sameOrigin ? 'bearer+cookie' : 'bearer') : 'cookie', hdrs: !!extraHeaders, capAge: capAgeMin, sent: sentNames, capNames: capNames, srvMsg: srvMsg, tokExp: tokExpMin, refreshed: refreshedBearer, tokKind: tokKindOut, capKind: capKindOut, storedJwts: storedJwtsOut };
     } catch (e) { return { error: String((e && e.message) || e) }; }
   })();
 }
@@ -341,6 +438,35 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
   }
 
   return {
+    // CX-9o (v2.74.1453) — CLICK_TEXT_ON_TAB: after a section navigation, open ONE item by clicking the most
+    // specific visible element containing `text` (an address / task number), climbing to its clickable unit (row /
+    // link / button). The SPA has no per-item URL — navigate + click IS "open that specific task". ENGINE-DRIVEN
+    // → busy-marked (Invariant #2). Retries ~5s (the list renders after the hash nav). Best-effort by design: a
+    // miss reports honestly (the durable upgrade is a TAUGHT drive click, which replaces this generic one).
+    'CLICK_TEXT_ON_TAB': (payload, _sender, sendResponse) => {
+      (async () => {
+        const tabId = payload && payload.tabId;
+        const text = String((payload && payload.text) || '').trim();
+        if (!Number.isInteger(tabId) || !text) { sendResponse({ success: false, error: 'bad-args' }); return; }
+        markEngineBusy(tabId, true);
+        try {
+          let hit = null;
+          for (let i = 0; i < 10 && !hit; i++) {
+            let out = null;
+            try { out = await chrome.scripting.executeScript({ target: { tabId }, func: _clickTextFunc, args: [text] }); } catch { out = null; }
+            const r = out && out[0] && out[0].result;
+            if (r && r.clicked) hit = r;
+            else await new Promise((res) => setTimeout(res, 500));
+          }
+          try { Logger.info('connector', `SECTION_NAV ▸ click "${text.slice(0, 40)}" → ${hit ? `${hit.tag}` : 'no-match'} (tab ${tabId})`); } catch { /* */ }
+          sendResponse(hit ? { success: true, tag: hit.tag } : { success: false, error: 'text-not-found' });
+        } catch (e) {
+          sendResponse({ success: false, error: (e && e.message) || 'click-failed' });
+        } finally { markEngineBusy(tabId, false); }
+      })();
+      return true;
+    },
+
     // FL-1c (v2.74.1347, DESIGN_app_fleet.md) — SHOW_SOURCES: ground-truth viewing with REUSE-THEN-NAVIGATE. One
     // tab per origin, ever: reuse the origin's existing tab (the same one session-ride picks — the session tab IS
     // the evidence tab), focus it, navigate it to each target sequentially (Zendesk's agent workspace accumulates
@@ -364,7 +490,9 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           if (!tab) { tab = await chrome.tabs.create({ url: urls[0], active: true }); reused = false; await _waitTabComplete(tab.id); }
           markEngineBusy(tab.id, true);   // engine-driven navigation — keep it out of the interaction monitor
           try {
-            for (const u of (reused ? urls : urls.slice(1))) {
+            // CX-9l (v2.74.1448) — `focusOnly`: a REUSED tab is FOCUSED, never re-navigated (a "go to <known site>"
+            // must not blow away the page the user's live tab is on). A fresh tab still opens urls[0] above.
+            for (const u of ((payload && payload.focusOnly === true && reused) ? [] : (reused ? urls : urls.slice(1)))) {
               await chrome.tabs.update(tab.id, { url: u, active: true });
               await _waitTabComplete(tab.id);
             }
@@ -519,7 +647,16 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           if (payload && payload.verifyIdentity) {
             const probePath = String(payload.identityProbe || '/api/v2/users/me.json');
             const probeUrl = `https://${origin}${probePath.startsWith('/') ? probePath : '/' + probePath}`;
-            const verdict = assessProbe(await fetchViaHealed(tab.id, probeUrl, 'GET'), expectedAccount);
+            // CX-10 (v2.74.1459) — the probe carries the recipe's requestHeaders too. An app whose BFF requires a
+            // routing header (Aircall's `aircall-platform: aircall-workspace`) returns 401 on the identity endpoint
+            // WITHOUT it → assessProbe reads SIGNED_OUT → EVERY read of that app falsely fails "not logged in" even
+            // though the session is live (a header-caused anon-sentinel). Null for header-less apps → unchanged.
+            const _probeExtra = (payload.requestHeaders && typeof payload.requestHeaders === 'object') ? { headers: payload.requestHeaders } : null;
+            const verdict = assessProbe(await fetchViaHealed(tab.id, probeUrl, 'GET', null, false, '', _probeExtra), expectedAccount);
+            // v1467 (obs #6) — the probe VERDICT with its cause is visible: "signed-out" alone can't distinguish a
+            // real logout from a 401'd bare probe (the v1459 class) or an anon-sentinel (§14). Status token + hdrs
+            // flag only — never identity values.
+            try { Logger.info('ride', `IDENTITY_PROBE ▸ ${origin} → ${(verdict && verdict.status) || '?'}${_probeExtra ? ' (+hdrs)' : ''}`); } catch { /* */ }
             if (rideAction(verdict, { ephemeral }).action === 'reauth-focus') {
               // H-1a (v2.74.1376) — a HEADLESS caller (the scheduled sweep) must NEVER steal the screen or hang
               // waiting for a human: no focus, no wait — fail fast as signed-out. The sweep's status note + `show
@@ -533,7 +670,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
               // disposable registry so it's never auto-closed.
               if (ephemeralOrigin) { const rec = _managed.get(ephemeralOrigin); _clearTimer(rec); _managed.delete(ephemeralOrigin); ephemeralOrigin = null; }
               await _focusTab(tab.id);
-              const resumed = await _waitForReauth({ tabId: tab.id, origin, probe: () => fetchViaHealed(tab.id, probeUrl, 'GET'), expectedAccount });
+              const resumed = await _waitForReauth({ tabId: tab.id, origin, probe: () => fetchViaHealed(tab.id, probeUrl, 'GET', null, false, '', _probeExtra), expectedAccount });   // CX-10 — reauth poll carries the routing header too
               if (!resumed) {
                 const isWrong = verdict.status === STATUS.WRONG_ACCOUNT;
                 sendResponse({ success: false, reauth: true, error: isWrong ? 'wrong-account' : 'not-logged-in', origin,
@@ -549,6 +686,10 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // 4) Build + run the call (write body filled from args incl. {me}; SESSION_FETCH JSON-encodes + adds CSRF).
           const path = fillEndpoint(String((payload && payload.endpoint) || ''), args);
           if (!path) { sendResponse({ success: false, error: 'session-no-recipe' }); return; }
+          // v2.74.1433 — a `{param}` STILL in the path after fill = a missing REQUIRED param (the interpret binder left it
+          // unbound). NEVER send it: `{taskId}` URL-encodes to %7BtaskId%7D and the app returns http-500. Refuse honestly,
+          // naming the param — the same discipline the SESSION_REPLAY twin now enforces (keep both in lockstep).
+          { const _miss = path.match(/\{([a-zA-Z_][\w-]*)\}/); if (_miss) { sendResponse({ success: false, error: `needs ${_miss[1]}`, hint: `tell me which ${_miss[1]} and I’ll fetch it` }); return; } }
           const url = `https://${origin}${path.startsWith('/') ? path : '/' + path}`;
           let body = undefined;
           const contentType = String((payload && payload.contentType) || '');
@@ -561,8 +702,10 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // CX-7 — sniffed-CSRF transport: ride the token acquired above (the liveness probe already sniffed it);
           // a 403 = stale/missing token → one forced re-mint + retry, then surface honestly with the interact-once hint.
           let extra = isGqlRead ? { gqlRead: true } : null;
+          const _rideHdrs = (payload && payload.requestHeaders && typeof payload.requestHeaders === 'object') ? payload.requestHeaders : null;
+          if (_rideHdrs) extra = { ...(extra || {}), headers: { ...((extra && extra.headers) || {}), ..._rideHdrs } };
           if ((isWrite || isGqlRead) && payload && payload.csrf === 'sniff') {
-            extra = { ...(extra || {}), headers: csrfTok ? { 'x-csrf-token': csrfTok } : undefined };
+            extra = { ...(extra || {}), headers: { ...((extra && extra.headers) || {}), ...(csrfTok ? { 'x-csrf-token': csrfTok } : {}) } };
           }
           let reply = await fetchViaHealed(tab.id, url, method, body, isWrite, contentType, extra);   // v1340 — the write already passed the confirmed:true gate above; carry it to the content-script belt
           // v1401 — a cold write hits the content-script belt's `no-csrf` HARD reject (not an http-40x), so include it
@@ -733,7 +876,17 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           const sessionHost = String((payload && payload.sessionHost) || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
           const apiHost = String((payload && payload.origin) || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '');
           const method = String((payload && payload.method) || 'GET').toUpperCase();
-          const isWrite = (method !== 'GET' && method !== 'HEAD');
+          // v1467 (obs #3) — the RECIPE ID rides every outcome line: `workspace.aircall.io GET` was ambiguous across
+          // 4 REST reads; the id has been in the payload since v1340 and was never printed. Ids only — body-blind.
+          const _rid = (payload && payload.recipeId) ? ` [${String(payload.recipeId).slice(0, 40)}]` : '';
+          // v2.74.1468 — a READ-ONLY GraphQL document is a READ despite POST (the twin of INVOKE_SESSION's isGqlRead,
+          // v1386 — this executor never got it, so a curated roster read was write-gated and its body dropped). The
+          // document is re-validated HERE, never trusted from the caller's flag alone: a `mutation` always fails
+          // isReadOnlyGql and stays on the write path (confirm-gated, §9 both belts).
+          const _bodyObj = (payload && payload.body && typeof payload.body === 'object') ? payload.body
+            : ((payload && typeof payload.body === 'string') ? (() => { try { return JSON.parse(payload.body); } catch { return null; } })() : null);
+          const isGqlRead = !!(payload && payload.gql === true && method === 'POST' && _bodyObj && isReadOnlyGql(String(_bodyObj.query || '')));
+          const isWrite = (method !== 'GET' && method !== 'HEAD') && !isGqlRead;
           // §18 arm guard (v2.74.1340, review A) — SESSION_REPLAY is where HARVESTED recipes execute, so it re-checks
           // armable at run time exactly like INVOKE_SESSION: a recipe disabled / un-accepted / rejected in Studio after
           // projection must not run. Same fall-through semantics: no {groundId, recipeId} or no stored record → proceed.
@@ -741,35 +894,143 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             try {
               const _recs = await readRideRecipes(payload.groundId);
               const _rec = Array.isArray(_recs) ? _recs.find((r) => r && r.id === payload.recipeId) : null;
-              if (_rec && !armable(_rec)) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → BLOCKED (recipe ${payload.recipeId} not armable)`); } catch { /* */ } sendResponse({ success: false, error: 'recipe-not-armable', hint: _rec.reviewState === 'pending' ? 'accept this recipe in Studio first' : 'this recipe is disabled in Studio' }); return; }
+              if (_rec && !armable(_rec)) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → BLOCKED (recipe ${payload.recipeId} not armable)`); } catch { /* */ } sendResponse({ success: false, error: 'recipe-not-armable', hint: _rec.reviewState === 'pending' ? 'accept this recipe in Studio first' : 'this recipe is disabled in Studio' }); return; }
             } catch { /* never block on the guard's own failure */ }
           }
           // CX-6 (v2.74.1303) — FAIL-CLOSED write gate: a header-replay WRITE fires ONLY with explicit confirmation
           // (the panel's HITL confirm passes confirmed:true). A write can NEVER run unattended or without the user
           // approving THIS exact request — the execution boundary itself refuses it, independent of any caller.
-          if (isWrite && !(payload && payload.confirmed === true)) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → BLOCKED (write, not confirmed)`); } catch { /* */ } sendResponse({ success: false, error: 'write-needs-confirm' }); return; }
-          const reqBody = isWrite ? ((payload && typeof payload.body === 'string') ? payload.body : ((payload && payload.body != null) ? JSON.stringify(payload.body) : null)) : null;
-          const contentType = isWrite ? String((payload && payload.contentType) || '') : '';
-          const args = (payload && typeof payload.params === 'object' && payload.params) || {};
-          const path = fillEndpoint(String((payload && payload.endpoint) || ''), args);
-          if (!sessionHost || !apiHost || !path) { sendResponse({ success: false, error: 'replay-missing-fields' }); return; }
-          const url = `https://${apiHost}${path.startsWith('/') ? path : '/' + path}`;
+          if (isWrite && !(payload && payload.confirmed === true)) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → BLOCKED (write, not confirmed)`); } catch { /* */ } sendResponse({ success: false, error: 'write-needs-confirm' }); return; }
+          const args = { ...((payload && typeof payload.params === 'object' && payload.params) || {}) };
+          if (!sessionHost || !apiHost || !(payload && payload.endpoint)) { sendResponse({ success: false, error: 'replay-missing-fields' }); return; }
           let tabs = []; try { tabs = await chrome.tabs.query({ url: `*://${sessionHost}/*` }); } catch { tabs = []; }
           const tab = pickRideTab(tabs);
-          if (!tab) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → NO-APP-TAB on ${sessionHost} (open it + arm Forage)`); } catch { /* */ } sendResponse({ success: false, error: 'no-app-tab', hint: `open ${sessionHost} (your logged-in app) and arm Forage` }); return; }
+          if (!tab) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → NO-APP-TAB on ${sessionHost} (open it + arm Forage)`); } catch { /* */ } sendResponse({ success: false, error: 'no-app-tab', hint: `open ${sessionHost} (your logged-in app) and arm Forage` }); return; }
           try { await armRideAuthCapture({ host: sessionHost, tabId: tab.id }); } catch { /* §20 — keep the token fresh for next time (+ in-place arm now); best-effort */ }
+          // CX-10 (v2.74.1464) — the recipe's static requestHeaders ride the replay fetch (the v1459 class, this
+          // executor: Aircall's BFF 401s a cookie fetch without `aircall-platform` → a false "session-expired").
+          const _replayHdrs = (payload && payload.requestHeaders && typeof payload.requestHeaders === 'object') ? payload.requestHeaders : null;
+          // v2.74.1471 — the {me} FILL, INVOKE_SESSION parity (live: "am I available?" → "needs me" — this executor
+          // had no identity mechanism, and the write body's ID:'{me}' silently DROPPED chat-side → a 200-with-errors
+          // "Sent" that never changed anything). When the endpoint or body template mentions {me}: probe the recipe's
+          // identityProbe through the SAME auth model as the ride itself (_replayFetchFunc — bearer+cookie+hdrs),
+          // extract the user via probedUser (flat + wrapped shapes), refuse anon (§14), bind args.me. Probe fails →
+          // fall through; the v1433 unfilled-{param} guard below still refuses honestly.
+          const _tmplStr = String((payload && payload.endpoint) || '') + ((payload && payload.bodyTemplate) ? JSON.stringify(payload.bodyTemplate) : '');
+          if (args.me == null && _tmplStr.includes('{me}') && payload && payload.identityProbe) {
+            try {
+              const probePath = String(payload.identityProbe);
+              const probeUrl = `https://${apiHost}${probePath.startsWith('/') ? probePath : '/' + probePath}`;
+              const _tryFill = (reply) => { const u = probedUser(reply); if (u && !isAnonUser(u) && u.id != null) { args.me = u.id; return true; } return false; };
+              // v1473 — COOKIE mode first: the identity endpoint is the INVOKE_SESSION probe's home turf (v1459:
+              // cookie + the recipe's routing headers — the HAR-proven shape); the captured data-path BEARER can 401
+              // it (live 21:45:39: `bearer+cookie+hdrs 401` on current_user while the data reads 200 fine).
+              let _pnote = '';
+              try {
+                const _probeExtra = _replayHdrs ? { headers: _replayHdrs } : null;
+                const cookieReply = await fetchViaHealed(tab.id, probeUrl, 'GET', null, false, '', _probeExtra);
+                _pnote = `cookie${_replayHdrs ? '+hdrs' : ''} ${(cookieReply && (cookieReply.status ?? cookieReply.error)) ?? '?'}`;
+                _tryFill(cookieReply);
+              } catch { _pnote = 'cookie exec-fail'; }
+              if (args.me == null) {
+                // fallback: the ride's own auth model (bearer+cookie) for apps whose identity endpoint IS bearer-auth
+                const pOut = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, world: 'MAIN', func: _replayFetchFunc, args: [probeUrl, apiHost, 'GET', null, '', _replayHdrs] });
+                const pr = pOut && pOut[0] && pOut[0].result;
+                if (pr && pr.status === 200) _tryFill({ success: true, value: pr.body });
+                _pnote += ` · ${pr ? `${pr.mode || '?'}${pr.hdrs ? '+hdrs' : ''} ${pr.status ?? pr.error ?? '?'}` : 'no-result'}`;
+              }
+              // v1472 — the probe outcome is ALWAYS logged (the v1465 lesson applied to this line's own code).
+              try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} {me} probe → ${_pnote}${args.me != null ? ' → filled' : ' → UNFILLED'}`); } catch { /* */ }
+            } catch { /* best-effort — the {param} guard below carries the honest refusal */ }
+          }
+          // v2.74.1471 — the body fills at the EXECUTOR when a template rides (chat sends leg.tool.body verbatim):
+          // fillBody after the {me} bind, so ID:'{me}' becomes the real id instead of silently dropping. The legacy
+          // pre-filled `body` string stays for callers that still send it; template wins when both are present.
+          let reqBody = null;
+          if (isWrite || isGqlRead) {
+            if (payload && payload.bodyTemplate && typeof payload.bodyTemplate === 'object') {
+              const _filled = fillBody(payload.bodyTemplate, args);
+              reqBody = _filled != null ? JSON.stringify(_filled) : null;
+            } else {
+              reqBody = (payload && typeof payload.body === 'string') ? payload.body : ((payload && payload.body != null) ? JSON.stringify(payload.body) : null);   // v1468 — a gql READ carries its document
+            }
+          }
+          const contentType = (isWrite || isGqlRead) ? String((payload && payload.contentType) || '') : '';
+          const path = fillEndpoint(String((payload && payload.endpoint) || ''), args);
+          if (!path) { sendResponse({ success: false, error: 'replay-missing-fields' }); return; }
+          // v2.74.1433 — an unfilled `{param}` reaching here is a missing required param; never dispatch it (a literal
+          // {taskId} → the app's http-500 "server rejected"). Refuse, naming the param. Twin of the INVOKE_SESSION guard.
+          { const _miss = path.match(/\{([a-zA-Z_][\w-]*)\}/); if (_miss) { sendResponse({ success: false, error: `needs ${_miss[1]}`, hint: `tell me which ${_miss[1]} and I’ll fetch it` }); return; } }
+          { const _bmiss = reqBody && reqBody.match(/\{(me)\}/); if (_bmiss) { sendResponse({ success: false, error: 'needs me', hint: 'could not resolve your identity on this app — open its tab logged-in and retry' }); return; } }
+          const url = `https://${apiHost}${path.startsWith('/') ? path : '/' + path}`;
           let out = null;
-          try { out = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, world: 'MAIN', func: _replayFetchFunc, args: [url, apiHost, method, reqBody, contentType] }); }
+          try { out = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, world: 'MAIN', func: _replayFetchFunc, args: [url, apiHost, method, reqBody, contentType, _replayHdrs] }); }
           catch (e) { try { Logger.warn('background', `SESSION_REPLAY ▸ ${apiHost} exec-failed: ${e && e.message}`); } catch { /* */ } sendResponse({ success: false, error: 'replay-exec-failed' }); return; }
           const r = out && out[0] && out[0].result;
-          if (!r) { try { Logger.warn('background', `SESSION_REPLAY ▸ ${apiHost} no-result (tab ${tab.id})`); } catch { /* */ } sendResponse({ success: false, error: 'replay-no-result' }); return; }
+          if (!r) { try { Logger.warn('background', `SESSION_REPLAY ▸ ${apiHost} no-result (tab_${tab.id})`); } catch { /* */ } sendResponse({ success: false, error: 'replay-no-result' }); return; }
+          // v1476 — the diagnostic tokens: leg SOURCE (virtual = catalog-fresh via CX-9r, ground = stored+merged) +
+          // payload FINGERPRINT (what the executor actually received) + the WIRE diff (sent vs captured baseline) +
+          // the server's statement. NAMES + the app's own message only — the body-blind rule holds (no values, no rows).
+          const _src = (payload && payload.groundId) ? 'ground' : 'virtual';
+          const _pl = []; if (payload) { if (payload.gql) _pl.push('gql'); if (payload.bodyTemplate) _pl.push('tmpl'); if (payload.requestHeaders) _pl.push('hdrs'); if (payload.identityProbe) _pl.push('probe'); if (payload.confirmed === true) _pl.push('confirmed'); }
+          const _ctx = ` src:${_src} pl:[${_pl.join(',')}]`;
+          const _jwt = (r.tokKind && r.tokKind !== 'none') ? ` tok:${r.tokKind}${r.tokExp != null ? `(${r.tokExp}m)` : ''}${r.refreshed ? '↑' : ''} stored:${r.storedJwts != null ? r.storedJwts : '?'}` : '';   // v1478 — token KIND (jwt|opaque) + storage-candidate count + ↑ refreshed; unconditional
+          const _wire = (rr) => { try {
+            const sent = Array.isArray(rr.sent) ? rr.sent : []; const cap = Array.isArray(rr.capNames) ? rr.capNames : [];
+            const OURS = new Set(['accept', 'content-type']);
+            const miss = cap.filter((h) => !sent.includes(h)); const extra = sent.filter((h) => !cap.includes(h) && !OURS.has(h));
+            let d = sent.length ? ` sent:[${sent.join(',')}]` : '';
+            if (cap.length && miss.length) d += ` miss:[${miss.join(',')}]`;
+            if (cap.length && extra.length) d += ` extra:[${extra.join(',')}]`;
+            if (rr.srvMsg) d += ` err:"${rr.srvMsg}"`;
+            return d;
+          } catch { return ''; } };
           // §20 — outcome observability (Invariant #1: `SESSION_REPLAY ▸` is in studio.js _DECISION_RE). Body-SHAPE only (no PII): array length / object-key count, never the rows.
           const _shape = Array.isArray(r.body) ? `array[${r.body.length}]` : (r.body && typeof r.body === 'object' ? `object{${Object.keys(r.body).length}}` : (r.body == null ? 'empty' : typeof r.body));
-          if (r.noAuth) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → NO-AUTH on tab ${tab.id} (looked for "${apiHost}"; captured hosts: [${(r.keys || []).join(', ')}])`); } catch { /* */ } sendResponse({ success: false, error: 'no-session-captured', hint: `arm Forage on ${sessionHost} to capture the session, then retry` }); return; }
-          if (r.error) { try { Logger.warn('background', `SESSION_REPLAY ▸ ${apiHost} ${method} → fetch-error: ${r.error} (tab ${tab.id})`); } catch { /* */ } sendResponse({ success: false, error: r.error }); return; }
-          if (r.status === 401 || r.status === 403) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → ${r.status} session-expired (tab ${tab.id})`); } catch { /* */ } sendResponse({ success: false, error: 'session-expired', hint: `re-arm Forage on ${sessionHost} to refresh the session` }); return; }
-          if (r.status >= 400) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → ${r.status} http-error (tab ${tab.id})`); } catch { /* */ } sendResponse({ success: false, error: `http-${r.status}`, hint: 'the server rejected the request', status: r.status, value: r.body }); return; }
-          try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method} → ${r.mode ? r.mode + ' ' : ''}${r.status} ${_shape} (tab ${tab.id})`); } catch { /* */ }
+          // CX-9i (v2.74.1442) — plus the KEY NAMES (an object's, or the first row's): structure, never values — the
+          // body-blind discipline holds, but a trace can now answer "what does this endpoint actually return" (the
+          // guess-the-shape loop the vendorsuite detail cost three rounds).
+          let _keys = '';
+          try {
+            const _o = Array.isArray(r.body) ? ((r.body[0] && typeof r.body[0] === 'object') ? r.body[0] : null) : ((r.body && typeof r.body === 'object') ? r.body : null);
+            if (_o) { const ks = Object.keys(_o); _keys = ` keys:[${ks.slice(0, 30).join(',')}${ks.length > 30 ? `,+${ks.length - 30}` : ''}]`; }
+          } catch { /* */ }
+          if (r.noAuth) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → NO-AUTH on tab ${tab.id} (looked for "${apiHost}"; captured hosts: [${(r.keys || []).join(', ')}])`); } catch { /* */ } sendResponse({ success: false, error: 'no-session-captured', hint: `arm Forage on ${sessionHost} to capture the session, then retry` }); return; }
+          if (r.error) { try { Logger.warn('background', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → fetch-error: ${r.error} (tab_${tab.id})`); } catch { /* */ } sendResponse({ success: false, error: r.error }); return; }
+          // v1465 — failure lines carry the attempted AUTH MODE + whether the recipe's requestHeaders were applied
+          // (+ the body's key STRUCTURE, already computed above): `cookie+hdrs 401` vs `cookie 401` vs `bearer 401`
+          // distinguishes "cookie auth rejected despite the routing header" (needs Bearer / more headers) from "the
+          // headers never rode" (a threading gap / stale build) from "captured token rejected" — ONE gc decides.
+          // v2.74.1471 — a GraphQL 200 can carry {errors}: HTTP status is NOT the verdict (live: UpdateAgent_Mutation
+          // "Sent → 200" with keys:[data,errors] — the mutation FAILED and the render claimed success). Any gql-shaped
+          // call with a non-empty errors array is a FAILURE; the first error message rides the hint (panel-only).
+          if (r.status < 400 && r.body && typeof r.body === 'object' && Array.isArray(r.body.errors) && r.body.errors.length) {
+            const _e0 = r.body.errors[0] || {};
+            const _emsg = String(_e0.message || _e0.code || 'GraphQL error').slice(0, 200);
+            try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → ${r.mode || '?'}${r.hdrs ? '+hdrs' : ''} ${r.status} GQL-ERRORS${_ctx}${_jwt}${_wire(r)}${_keys} (tab_${tab.id})`); } catch { /* */ }
+            sendResponse({ success: false, error: 'gql-error', hint: _emsg, status: r.status, value: r.body }); return;
+          }
+          if (r.status === 401 || r.status === 403) {
+            // v1474 — a bearer 401 is usually a STALE CAPTURE (the tee refreshes only from the SPA's own traffic; an
+            // idle tab stops polling — live: the write 401'd at 21:02:10 and the identical dispatch 200'd 34s later).
+            // READS retry ONCE after a short wait (a fresh poll may have re-captured); a WRITE is never auto-refired.
+            if (!isWrite && !payload.__retried) {
+              await new Promise((res) => setTimeout(res, 4000));
+              let out2 = null;
+              try { out2 = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, world: 'MAIN', func: _replayFetchFunc, args: [url, apiHost, method, reqBody, contentType, _replayHdrs] }); } catch { /* */ }
+              const r2 = out2 && out2[0] && out2[0].result;
+              if (r2 && r2.status && r2.status < 400 && !(r2.body && typeof r2.body === 'object' && Array.isArray(r2.body.errors) && r2.body.errors.length)) {
+                try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → retry ${r2.mode || '?'}${r2.hdrs ? '+hdrs' : ''} ${r2.status} (was ${r.status}${r.capAge != null ? ` bearer≈${r.capAge}m` : ''}) (tab_${tab.id})`); } catch { /* */ }
+                sendResponse({ success: true, value: r2.body, status: r2.status, origin: apiHost }); return;
+              }
+            }
+            try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → ${r.mode || '?'}${r.hdrs ? '+hdrs' : ''}${r.capAge != null ? `(≈${r.capAge}m)` : ''} ${r.status} session-expired${_ctx}${_jwt}${_wire(r)}${_keys} (tab_${tab.id})`); } catch { /* */ }
+            // v1476 — the hint speaks the SERVER's own reason when it gave one (the token that ends the guessing);
+            // else the stale-capture nudge. srvMsg is short + Logger-scrubbed downstream.
+            sendResponse({ success: false, error: 'session-expired', hint: r.srvMsg ? `the app rejected the request: ${r.srvMsg}` : `the captured session token looks stale — click into the ${sessionHost} tab for a moment (its own traffic refreshes it), then re-ask` }); return;
+          }
+          if (r.status >= 400) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → ${r.mode || '?'}${r.hdrs ? '+hdrs' : ''} ${r.status} http-error${_ctx}${_jwt}${_wire(r)}${_keys} (tab_${tab.id})`); } catch { /* */ } sendResponse({ success: false, error: `http-${r.status}`, hint: r.srvMsg ? `the server said: ${r.srvMsg}` : 'the server rejected the request', status: r.status, value: r.body }); return; }
+          try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → ${r.mode ? r.mode + ' ' : ''}${r.status}${_ctx}${_jwt} ${_shape}${_keys} (tab_${tab.id})`); } catch { /* */ }
           sendResponse({ success: true, value: r.body, status: r.status, origin: apiHost });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'replay-failed' }); }
       })();
@@ -797,7 +1058,10 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           let verdict, identity = null;
           if (recipe && recipe.verifyIdentity) {
             const probePath = String(recipe.identityProbe || '/api/v2/users/me.json');
-            const reply = await fetchViaHealed(tab.id, `https://${origin}${probePath.startsWith('/') ? probePath : '/' + probePath}`, 'GET');
+            // CX-10 (v2.74.1464) — the probe carries the recipe's requestHeaders (the v1459 class, third executor:
+            // a routing-header BFF 401s a bare probe → a false "signed-out" on a LIVE login at connect-check time).
+            const _vcExtra = (recipe.requestHeaders && typeof recipe.requestHeaders === 'object') ? { headers: recipe.requestHeaders } : null;
+            const reply = await fetchViaHealed(tab.id, `https://${origin}${probePath.startsWith('/') ? probePath : '/' + probePath}`, 'GET', null, false, '', _vcExtra);
             const v = assessProbe(reply, null);
             verdict = v.status === STATUS.FRESH ? 'connected' : 'signed-out';
             if (v.user) identity = { id: v.user.id ?? null, name: v.user.name ?? null, email: v.user.email ?? null };

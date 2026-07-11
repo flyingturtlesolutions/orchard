@@ -70,9 +70,11 @@ export function recipeFromCatalogEntry(entry, { groundId = '', origin = '' } = {
   if (e.urlParam && typeof e.urlParam === 'object') rec.urlParam = e.urlParam;
   if (e.pulse != null) rec.pulse = e.pulse;
   if (e.drill && typeof e.drill === 'object') rec.drill = e.drill;
+  if (e.resolve && typeof e.resolve === 'object') rec.resolve = e.resolve;   // CX-9b (v1434) — per-param resolve specs
   for (const k of ['itemUrl', 'listUrl', 'bodyType', 'contentType', 'identityProbe', 'persistedOp', 'csrf', 'autoRequires']) {
     if (e[k] != null && e[k] !== '') rec[k] = e[k];
   }
+  if (e.requestHeaders && typeof e.requestHeaders === 'object') rec.requestHeaders = e.requestHeaders;
   return rec;
 }
 
@@ -84,6 +86,36 @@ export function seedFromCatalog(catalog, { groundId = '', origin = '' } = {}) {
   return (Array.isArray(catalog) ? catalog : [])
     .filter((e) => e && originMatchesAppHost(origin, e.appHost))
     .map((e) => recipeFromCatalogEntry(e, { groundId, origin }));
+}
+
+/**
+ * Project the curated catalog into answer-prompt ride records for an app's CONNECTED sites. PURE. IL_ANSWER used to
+ * read only the active-tab Ground — so a freshly-connected site (e.g. workspace.aircall.io) showed zero RIDE legs
+ * until you visited it and minted a Ground. Interpret already projects these via connectorLegsForConnections; this
+ * closes the same gap for "what can you do?" prose.
+ */
+export function curatedRidesForConnections(connections, catalog) {
+  const out = [];
+  const seen = new Set();
+  for (const c of (Array.isArray(connections) ? connections : [])) {
+    const origin = String((c && c.origin) || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '').toLowerCase();
+    if (!origin) continue;
+    for (const r of seedFromCatalog(catalog, { origin })) {
+      const k = `${r.origin}|${r.id}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(r);
+    }
+  }
+  return out;
+}
+
+/** Merge curated connection rides with per-Ground stored rides for IL_ANSWER. Stored wins on origin|id (user state). PURE. */
+export function mergeRideCatalogForAnswer(curated, stored) {
+  const byKey = new Map();
+  for (const r of (Array.isArray(curated) ? curated : [])) { if (r && r.id) byKey.set(`${r.origin || ''}|${r.id}`, r); }
+  for (const r of (Array.isArray(stored) ? stored : [])) { if (r && r.id) byKey.set(`${r.origin || ''}|${r.id}`, r); }
+  return [...byKey.values()];
 }
 
 // User-owned fields are PRESERVED across a re-seed / re-harvest; mechanical fields come from the incoming record.
@@ -155,4 +187,30 @@ export function acceptPendingReads(recipes) {
     return r;
   });
   return { recipes: out, accepted };
+}
+
+/**
+ * CX-9r (v2.74.1463) — CATALOG-ARMED origins: hosts (typically from OPEN TABS) that match a curated `appHost`
+ * become routable WITHOUT a Ground. The Ground is user-state's home (disable/reject/trust, harvested additions) —
+ * not a reachability gate: a curated, pre-accepted leg needs only a logged-in tab at dispatch, and the Ground
+ * materializes lazily on first panel read/edit. `covered` hosts (already ride-armed via a real Ground's stored
+ * records) are skipped, so stored user state always outranks the catalog projection.
+ * @param {string[]} hosts     candidate hosts (e.g. every open http(s) tab's host)
+ * @param {Array}    catalog   CONNECTOR_RECIPES
+ * @param {string[]} [covered] hosts already served by a ride-armed Ground
+ * @returns {Array<{gid:null, host:string, texts:string[]}>} entries shaped for the DOMAIN-MATCH vocab index
+ */
+export function catalogArmedEntries(hosts, catalog, covered = []) {
+  const cov = new Set((Array.isArray(covered) ? covered : []).map((h) => String(h || '').toLowerCase()));
+  const seen = new Set();
+  const out = [];
+  for (const raw of (Array.isArray(hosts) ? hosts : [])) {
+    const host = String(raw || '').toLowerCase();
+    if (!host || seen.has(host) || cov.has(host)) continue;
+    seen.add(host);
+    const entries = (Array.isArray(catalog) ? catalog : []).filter((e) => e && e.appHost && originMatchesAppHost(host, e.appHost));
+    if (!entries.length) continue;
+    out.push({ gid: null, host, texts: entries.map((e) => `${e.name || ''} ${e.does || ''}`) });
+  }
+  return out;
 }

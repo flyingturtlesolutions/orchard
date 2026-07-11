@@ -96,6 +96,56 @@ describe('interpretPrompt — buildInterpretMessages', () => {
     assert.doesNotMatch(buildInterpretMessages('x', { retrieved: [{ capabilityId: 'cap-x', name: 'X' }] }).user, /params:/);   // no schema → no params line
   });
 
+  it('CX-9l (v1447) — scope tiers render ([TARGET-SITE] > [ACTIVE-TAB] > [GLOBAL fallback]) + the SCOPING rule', () => {
+    const mk = (key, scope) => ({ key, name: key, does: 'read', domain: 'connector', scope, paramSchema: { type: 'object', properties: {}, required: [] } });
+    const { system, user } = buildInterpretMessages('on vendorsuite, pull up the task', {
+      retrieved: [mk('me.vendorsuite.a', 'target'), mk('me.deako.b', 'tab'), mk('me.zendesk.c', 'global')],
+    });
+    assert.match(user, /me\.vendorsuite\.a.*\[TARGET-SITE: the ask names this site\]/);
+    assert.match(user, /me\.deako\.b.*\[ACTIVE-TAB\]/);
+    assert.match(user, /me\.zendesk\.c.*\[GLOBAL fallback\]/);
+    assert.match(system, /SCOPING \(order of operations for connector tools\)/);
+    assert.match(system, /never prefer the current page over a named target/);
+    assert.match(system, /prefer "teach" \(offer to learn it\) over a miss/);
+    // CX-9m (v1450) — the DOMAIN-MATCH tier (implicit naming by vocabulary) + the no-decompose-over-a-serving-leg rule
+    const vocabUser = buildInterpretMessages('pull up the warranty task', {
+      retrieved: [{ key: 'me.vendorsuite.a', name: 'Warranty tasks', does: 'list', domain: 'connector', scope: 'vocab', paramSchema: { type: 'object', properties: {}, required: [] } }],
+    });
+    assert.match(vocabUser.user, /\[DOMAIN-MATCH: the ask’s vocabulary matches this site’s tools\]/);
+    assert.match(system, /never decompose an ask into page steps/);
+    assert.doesNotMatch(buildInterpretMessages('x', { retrieved: [mk('me.x.d', undefined)] }).user, /TARGET-SITE|ACTIVE-TAB|GLOBAL fallback/);   // unscoped legs unmarked
+    // CX-9p (v1461) — the LEARNED-MATCH (alias) tier tops the cascade + the pre-rank steering line binds
+    const aliasUser = buildInterpretMessages('pull up the warranty task', {
+      retrieved: [{ key: 'me.vendorsuite.a', name: 'Warranty tasks', does: 'list', domain: 'connector', scope: 'alias', paramSchema: { type: 'object', properties: {}, required: [] } }],
+    });
+    assert.match(aliasUser.user, /\[LEARNED-MATCH: this ask-shape succeeded with this tool before\]/);
+    assert.match(system, /LEARNED-MATCH/);
+    assert.match(system, /PRE-RANKED/);
+  });
+
+  it('CX-9k (v1446) — a connector leg carries the page-independence marker (no false "wrong page" narration)', () => {
+    const { user } = buildInterpretMessages('on vendorsuite, pull up the task', {
+      retrieved: [{ key: 'me.vendorsuite.vs_warranty_task', name: 'Warranty task details', does: 'read a task', domain: 'connector',
+        paramSchema: { type: 'object', properties: { taskId: { type: 'string' } }, required: ['taskId'] } }],
+    });
+    assert.match(user, /\[CONNECTOR: page-independent — runs on the app’s own session, any current tab\]/);
+    assert.doesNotMatch(buildInterpretMessages('x', { retrieved: [{ key: 'k', name: 'N', domain: 'page' }] }).user, /CONNECTOR: page-independent/);   // page legs unmarked
+  });
+
+  it('CX-9f (v1439) — renders enum values + the per-param HINT (the binder finally sees slot semantics)', () => {
+    const { user } = buildInterpretMessages('fixed warranty tasks for 210, address cumming', {
+      retrieved: [{ key: 'me.vendorsuite.vs_warranty_tasks', name: 'Warranty tasks by status', does: 'list tasks',
+        paramSchema: { type: 'object', properties: {
+          divisionId: { type: 'string', hint: 'the DIVISION — a name or market number; never a street' },
+          status: { type: 'string', enum: ['new', 'open', 'fixed', 'closed'] },
+          address: { type: 'string', hint: 'a STREET address or task number — set ONLY when the user names one specific property/task' },
+        }, required: ['divisionId', 'status'] } }],
+    });
+    assert.match(user, /divisionId\*:string "the DIVISION — a name or market number; never a street"/);
+    assert.match(user, /status\*:string\[new\|open\|fixed\|closed\]/);   // the enum is finally visible to the binder
+    assert.match(user, /address:string "a STREET address or task number/);
+  });
+
   it('includes NO raw DOM — only the fenced summary affordances', () => {
     const { user } = buildInterpretMessages('x', { affordances: 'search box, results list' });
     assert.match(user, /<PAGE_AFFORDANCES/);

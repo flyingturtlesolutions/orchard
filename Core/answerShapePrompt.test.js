@@ -48,6 +48,39 @@ describe('answerShapePrompt — readShapeFacts (deterministic count + MINIMIZED 
     assert.equal(f.sample[0].details.Refunded, '86.40 USD');
     assert.ok(!('details' in readShapeFacts(TICKETS).sample[0]));       // a MULTI list stays lean (size + privacy)
   });
+
+  it('CX-9c (v1436): a vocabulary-less MULTI-row list (VendorSuite shape) carries generic fields, not empty husks', () => {
+    const vs = [
+      { TaskId: 4001, TaskNumber: '4090740', ClaimNumber: '01', AddressLine1: '3955 Gallery Chase', CityStateZip: 'Cumming, GA 30028', AllowedAmount: 214 },
+      { TaskId: 4002, TaskNumber: '4090741', ClaimNumber: '02', AddressLine1: '456 Oak Ave', CityStateZip: 'Cumming, GA 30041', AllowedAmount: 80 },
+    ];
+    const f = readShapeFacts(vs);
+    assert.equal(f.kind, 'list');
+    assert.equal(f.count, 2);
+    assert.equal(f.sample[0].id, '4090740');                            // …Number suffix fallback — the human number
+    assert.ok(f.sample[0].fields, 'generic fields present when title+status are empty');
+    assert.ok(Object.values(f.sample[0].fields).includes('3955 Gallery Chase'));   // the shaper can now answer "which address"
+    assert.ok(!('fields' in readShapeFacts(TICKETS).sample[0]));        // a recognized shape (title present) stays lean — unchanged payload
+  });
+
+  it('CX-9h (v1441): a DETAIL record with a child array shapes as kind:object — the record, never the child rows', () => {
+    const detail = { TaskId: 963119, TaskNumber: '10803524', Priority: '1',
+      Instructions: 'Replace the smart switch and verify the circuit',
+      Appointments: [{ AppointmentId: 1744395, StartDate: '2026-07-10T07:00:00', IsCanceled: false }] };
+    const f = readShapeFacts(detail);
+    assert.equal(f.kind, 'object');                                        // was: kind 'object' over the APPOINTMENT (the child hijack)
+    assert.equal(f.sample[0].id, '10803524');                              // the TASK's number, not the appointment's
+    assert.match(JSON.stringify(f.sample[0].details || {}), /Replace the smart switch/);   // the payload reaches the shaper
+  });
+
+  it('CX-9d (v1437): buildAnswerShapeMessages carries the SCOPE line (code-applied filters); absent → byte-identical', () => {
+    const facts = readShapeFacts(TICKETS);
+    const withScope = buildAnswerShapeMessages({ ask: 'open tasks for greensboro', facts, scope: 'divisionId=Greensboro (62), status=open' });
+    assert.match(withScope.user, /SCOPE \(already applied by the app\): divisionId=Greensboro \(62\), status=open/);
+    assert.match(withScope.system, /NEVER re-filter/);                  // the no-refilter rule is in the system prompt
+    const without = buildAnswerShapeMessages({ ask: 'open tasks', facts });
+    assert.doesNotMatch(without.user, /SCOPE/);                          // no scope → no line
+  });
 });
 
 describe('answerShapePrompt — buildAnswerShapeMessages', () => {

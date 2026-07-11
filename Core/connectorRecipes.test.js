@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, toShopifyGid } from './connectorRecipes.js';
+import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, toShopifyGid, acGqlBody, acGqlEndpoint } from './connectorRecipes.js';
 
 describe('harvestedRecipeLegs — armable harvested reads → invoke-palette legs (§17/§18)', () => {
   const REC = (over) => ({ id: 'r1', name: 'My schedules', does: 'list schedules', method: 'GET', endpoint: '/v2/admin/profiles/{id}/schedules', origin: 'deakoapi.deako.com', params: [{ name: 'id', type: 'string', required: true }], safetyClass: 'auto', enabled: true, reviewState: 'accepted', provenance: 'harvested', ...over });
@@ -53,6 +53,19 @@ describe('harvestedRecipeLegs — armable harvested reads → invoke-palette leg
     assert.equal(legs.length, 1);
     assert.equal(legs[0].tool.itemUrl, '/#warranty');   // "show X" opens the object's page — was DROPPED before the whole-record spread
     assert.equal(legs[0].tool.listUrl, '/#dashboard');
+  });
+
+  it('v1434 (CX-9b): resolve + the FULL drill (param/from/matchOn/label) survive the seeded path → leg.tool', () => {
+    const legs = harvestedRecipeLegs([REC({
+      resolve: { divisionId: { via: '/api/State', defaultPath: 'a.b.Id', lists: ['c'], match: ['Code', 'Name'], id: 'Id', label: 'Name' } },
+      drill: { via: 'vs_warranty_task', param: 'taskId', from: 'TaskId', matchOn: 'address', label: ['AddressLine1', 'CityStateZip'] },
+    })], { host: 'vendorsuite.drhorton.com', mode: 'ask' });
+    assert.equal(legs.length, 1);
+    assert.equal(legs[0].tool.resolve.divisionId.via, '/api/State');                       // the ID layer rides the leg
+    assert.deepEqual(legs[0].tool.drill, { via: 'vs_warranty_task', param: 'taskId', from: 'TaskId', matchOn: 'address', label: ['AddressLine1', 'CityStateZip'] });   // join fields no longer pruned to {via}
+    // a via-only drill still projects as {via} — the Zendesk fleet shape unchanged
+    const zd = harvestedRecipeLegs([REC({ id: 'z1', drill: { via: 'ticket_comments' } })], { host: 'deako.zendesk.com', mode: 'ask' });
+    assert.deepEqual(zd[0].tool.drill, { via: 'ticket_comments' });
   });
 
   it('v1432: a curated gql READ (POST + write:false) is NOT misclassed as a write; its transport markers flow', () => {
@@ -468,5 +481,98 @@ describe('CX-7 — Shopify recipes project with the transport markers', () => {
     assert.equal(byId.get('shopify_order').tool.itemUrl, '/store/{handle}/orders/{id}');
     // filled with the tab handle + the returned record id → the real admin page
     assert.equal(fillEndpoint('/store/{handle}/customers/{id}', { handle: 'deako', id: '12345' }), '/store/deako/customers/12345');
+  });
+
+  // ── CX-10 (v2.74.1456) — Aircall Workspace curated legs from HAR captures ─────────────────────────────────────
+  it('recipeForOrigin + connections matching reach workspace.aircall.io', () => {
+    const hit = recipeForOrigin('workspace.aircall.io');
+    assert.ok(hit);
+    assert.equal(hit.app, 'aircall');
+    const legs = connectorLegsForConnections([{ origin: 'https://workspace.aircall.io', label: 'Aircall' }], { mode: 'ask' });
+    assert.ok(legs.some((l) => l.tool.recipeId === 'aw_team_availability'));
+    assert.ok(legs.some((l) => l.tool.recipeId === 'aw_conversation_by_number'));
+    assert.ok(!legs.some((l) => l.tool.app === 'zendesk'));
+  });
+  it('Aircall REST legs carry requestHeaders + verifyIdentity; GraphQL legs carry gql + static query docs', () => {
+    const byId = new Map(recipeLegs().filter((l) => l.tool && l.tool.app === 'aircall').map((l) => [l.tool.recipeId, l]));
+    const team = byId.get('aw_team_availability');
+    assert.deepEqual(team.tool.requestHeaders, { 'aircall-platform': 'aircall-workspace' });
+    assert.equal(team.tool.verifyIdentity, true);
+    assert.equal(team.tool.identityProbe, '/v5/users/current_user?activation_state=active');
+    const gql = byId.get('aw_contact_by_phone');
+    assert.equal(gql.tool.gql, true);
+    assert.equal(gql.tool.method, 'POST');
+    assert.match(gql.tool.endpoint, /^\/graphql\?name=ContactByPhoneNumber_Query$/);
+    assert.ok(gql.tool.body && typeof gql.tool.body.query === 'string');
+    assert.equal(gql.tool.body.operationName, 'ContactByPhoneNumber_Query');
+  });
+  it('acGqlBody / acGqlEndpoint build HAR-static GraphQL ride shapes; fillBody fills variables', () => {
+    assert.equal(acGqlEndpoint('lookupTeammates'), '/graphql?name=lookupTeammates');
+    const raw = acGqlBody('ContactByPhoneNumber_Query', { input: { phoneNumber: '{phone}' } });
+    assert.equal(raw.operationName, 'ContactByPhoneNumber_Query');
+    const filled = fillBody(raw, { phone: '+15551234567' });
+    assert.equal(filled.variables.input.phoneNumber, '+15551234567');
+    assert.match(filled.query, /^query ContactByPhoneNumber_Query/);
+  });
+  it('Aircall writes project as ACT legs (gated); reads stay ask', () => {
+    const byId = new Map(recipeLegs().filter((l) => l.tool && l.tool.app === 'aircall').map((l) => [l.tool.recipeId, l]));
+    assert.equal(byId.get('aw_close_conversation').mode, 'act');
+    assert.equal(byId.get('aw_set_availability').mode, 'act');
+    assert.equal(byId.get('aw_team_availability').mode, 'ask');
+  });
+
+  // v2.74.1459 (review) — invariant locks: catch a doc-less op, a read that would be blocked as a write, or a write
+  // that would run unconfirmed — the exact classes the manual review verified.
+  it('every Aircall GraphQL leg resolves its op to a real document (no dangling acGqlBody)', () => {
+    for (const l of recipeLegs().filter((l) => l.tool && l.tool.app === 'aircall' && l.tool.gql === true)) {
+      assert.ok(l.tool.body && typeof l.tool.body.query === 'string' && l.tool.body.query.length > 0,
+        `aircall gql leg ${l.tool.recipeId} has no resolved query document (missing AC_GQL entry?)`);
+    }
+  });
+  it('every Aircall READ gql leg passes isReadOnlyGql (runs unconfirmed); every WRITE gql leg does NOT (gates)', () => {
+    for (const l of recipeLegs().filter((l) => l.tool && l.tool.app === 'aircall' && l.tool.gql === true)) {
+      const ro = isReadOnlyGql(l.tool.body.query);
+      if (l.mode === 'ask') assert.equal(ro, true, `${l.tool.recipeId}: a READ document must be read-only or it is blocked as a write`);
+      else assert.equal(ro, false, `${l.tool.recipeId}: a WRITE document must NOT classify read-only (would run unconfirmed!)`);
+    }
+  });
+  it('aw_send_sms rides the DESTRUCTIVE (two-step) tier — outward-facing message; ordinary writes stay single-confirm', () => {
+    const byId = new Map(recipeLegs().filter((l) => l.tool && l.tool.app === 'aircall').map((l) => [l.tool.recipeId, l]));
+    assert.equal(byId.get('aw_send_sms').safety, 'gated');            // outward SMS → two-step confirm
+    assert.equal(byId.get('aw_close_conversation').safety, 'confirm'); // internal wrap-up → single confirm
+    assert.equal(byId.get('aw_set_availability').safety, 'confirm');   // self-only preference → single confirm
+  });
+});
+
+describe('v2.74.1468 — harvestedRecipeLegs: a gql READ record is a READ even unannotated (the live "Sent" bug)', () => {
+  const GQL_REC = (over) => ({ id: 'gr1', name: 'Teammate roster', does: 'list teammates', method: 'POST', gql: true,
+    contentType: 'application/json', endpoint: '/graphql?name=lookupTeammates',
+    body: { operationName: 'lookupTeammates', variables: {}, query: 'query lookupTeammates { agents { ID } }' },
+    origin: 'workspace.aircall.io', params: [], provenance: 'curated', safetyClass: 'gated',
+    enabled: true, reviewState: 'accepted', trust: 1, ...over });
+  it('read-only document + no write flag → mode ask, safety auto (never the confirm gate)', () => {
+    const legs = harvestedRecipeLegs([GQL_REC({})], { host: 'workspace.aircall.io', mode: 'ask' });
+    assert.equal(legs.length, 1);
+    assert.equal(legs[0].mode, 'ask');
+    assert.equal(legs[0].safety, 'auto');           // trusted curated READ — the write class was the live bug
+  });
+  it('a mutation document (still no write flag) stays a WRITE — §9 fail-safe holds', () => {
+    const legs = harvestedRecipeLegs([GQL_REC({ id: 'gm1', body: { query: 'mutation { updateAgent { ID } }' } })], { host: 'workspace.aircall.io', mode: 'ask' });
+    assert.equal(legs[0].mode, 'act');
+    assert.notEqual(legs[0].safety, 'auto');
+  });
+  it('explicit write:true always wins, even with a read-shaped document', () => {
+    const legs = harvestedRecipeLegs([GQL_REC({ id: 'gw1', write: true })], { host: 'workspace.aircall.io', mode: 'ask' });
+    assert.equal(legs[0].mode, 'act');
+    assert.notEqual(legs[0].safety, 'auto');
+  });
+});
+
+describe('v2.74.1477 — aircall-platform rides EVERY aircall call (v1475 reverted: the SPA sends it on /graphql too)', () => {
+  const AC_ENTRIES = CONNECTOR_RECIPES.filter((e) => e && e.appHost === 'workspace.aircall.io');
+  it('every aircall entry (gql + REST) carries the routing header', () => {
+    for (const e of AC_ENTRIES) {
+      assert.ok(e.requestHeaders && e.requestHeaders['aircall-platform'] === 'aircall-workspace', `${e.id} must carry aircall-platform (the SPA sends it on gql + REST)`);
+    }
   });
 });

@@ -13,6 +13,7 @@
 
 import { recipeToLeg } from './connectorLeg.js';
 import { armable } from './rideRecipe.js';
+import { AC_GQL as AC_GQL_DOCS } from './aircallGqlDocs.js';
 
 /**
  * Substitute `{name}` placeholders in a template from `args`, URL-encoding each value. PURE.
@@ -65,6 +66,18 @@ export function fillBody(template, args = {}) {
   if (template == null) return null;
   const r = _fillBodyNode(template, (args && typeof args === 'object') ? args : {});
   return r.drop ? null : r.value;
+}
+
+/** Build a static Aircall Workspace GraphQL POST body from a HAR-captured document. PURE. */
+export function acGqlBody(operationName, variables = {}) {
+  const doc = AC_GQL_DOCS[operationName];
+  if (!doc) return null;
+  return { operationName: doc.operationName, variables, query: doc.query };
+}
+
+/** GraphQL endpoint for a named Aircall Workspace operation (`?name=` matches the SPA). PURE. */
+export function acGqlEndpoint(operationName) {
+  return `/graphql?name=${String(operationName || '')}`;
 }
 
 // The shared Zendesk session-ride identity (the operator's real queue, /api/v2 — same-origin + session-ride proven
@@ -122,6 +135,35 @@ const SH = Object.freeze({
 // write transport verified AND recipeFromCatalogEntry taught to carry write/body/bodyType (today's lossy projection drops
 // them), so it stays out of the curated surface until both land.
 const VS = Object.freeze({ app: 'vendorsuite', appHost: 'vendorsuite.drhorton.com', method: 'GET' });
+// CX-9b (v2.74.1434) — the DIVISION ID layer, as recipe DATA (the live test's lesson: users speak market language —
+// "Atlanta West" / "210" — the API speaks internal ids — 83; wrong id = a silent empty list, not an error). The
+// `resolve` marker declares how {divisionId} maps via the app's OWN State read: missing → the user's current division
+// (DefaultDivision), a market number → Code match, a name → Name match; a Code/Id collision asks instead of guessing.
+// Mechanism: Core/rideParamResolve.js + the panel dispatch hook — nothing VS-specific outside this spec.
+const VS_DIVISION = Object.freeze({
+  via: '/api/VendorSuite/State',
+  defaultPath: 'access.DefaultDivision.Id',
+  lists: ['currentHub.Divisions', 'access.Hubs[].Divisions'],
+  match: ['Code', 'Name'],
+  id: 'Id', label: 'Name',
+});
+
+// ── Aircall Workspace (CX-10, v2.74.1456) — HAR-authored from workspace.aircall.io + Zendesk CTI outbound captures.
+// Transport: same-origin cookie-ride on workspace.aircall.io (CTI iframe OR standalone tab). GraphQL ops POST to
+// `/graphql?name=<Operation>` with static documents in Core/aircallGqlDocs.js; REST BFF reads carry `requestHeaders`.
+// Identity: `/v5/users/current_user` fills `{me}` (flat user shape — Core/connection.js probedUser). Place/answer/hangup
+// are Twilio WebRTC — NOT recipes; DOM legs in the CTI iframe handle the media plane.
+const _AC_HDR = Object.freeze({ 'aircall-platform': 'aircall-workspace' });
+const _AC_AVAIL_Q = 'rules[]=phone_v4&rules[]=phone_v3&rules[]=client_v1';
+// v2.74.1477 — requestHeaders BACK on the base (v1475 REVERTED): the v1476 wire trace disproved v1475's premise —
+// `aircall-platform` was in the SENT set of a FAILING /graphql call, sourced from the CAPTURED bundle, i.e. the SPA
+// DOES send it on /graphql. The 401 was never the header (err:"Token has expired."); v1475's +hdrs correlation was
+// coincidental token-freshness. So `aircall-platform` rides ALL aircall calls, gql included.
+const AC = Object.freeze({
+  app: 'aircall', appHost: 'workspace.aircall.io', verifyIdentity: true,
+  identityProbe: '/v5/users/current_user?activation_state=active', requestHeaders: _AC_HDR,
+});
+const AC_GQL = Object.freeze({ ...AC, method: 'POST', gql: true, contentType: 'application/json' });
 
 /**
  * CX-7c (v2.74.1388) — coerce a Shopify object id to a gid. Reads return `id` as a full gid
@@ -409,22 +451,126 @@ export const CONNECTOR_RECIPES = [
   { ...VS, id: 'vs_versions', name: 'VendorSuite versions',
     does: 'the VendorSuite app component versions and environment',
     endpoint: '/api/Versions', params: [] },
+  // CX-9b — `resolve` on every {divisionId} read (name/market-number/missing → the internal id); `drill` on the LIST:
+  // its rows join into the DETAILS read by TaskId, matched on a bound `address` (an optional param that is NOT in the
+  // endpoint — fillEndpoint ignores it — it exists so the binder has a declared slot for "…at 123 Main St", and the
+  // panel's deterministic join consumes it: CODE matches the row, the model never joins). One ask → division+status+
+  // address → the task's full details.
   { ...VS, id: 'vs_warranty_tasks', name: 'Warranty tasks by status', listUrl: '/#warranty',
-    does: 'list a division\'s warranty tasks by status (new / open / fixed / closed) — task number, claim number, address, age, allowed amount; the division id comes from your VendorSuite state',
+    resolve: { divisionId: VS_DIVISION },
+    drill: { via: 'vs_warranty_task', param: 'taskId', from: 'TaskId', matchOn: 'address', label: ['AddressLine1', 'CityStateZip', 'TaskNumber', 'ClaimNumber', 'ProjectName'] },
+    does: 'list a division\'s warranty tasks by status (new / open / fixed / closed) — task number, claim number, address, age, allowed amount. The division can be a name ("Atlanta West"), a market number ("210"), or blank for your current division; give a street address to drill straight into that one task\'s details',
     endpoint: '/api/Vendor/Warranty/Tasks/{divisionId}/{status}',
-    params: [{ name: 'divisionId', type: 'string', required: true }, { name: 'status', type: 'string', required: true }] },
+    params: [
+      { name: 'divisionId', type: 'string', required: true, hint: 'the DIVISION — a name ("Atlanta West") or market number ("210"); never a street' },
+      { name: 'status', type: 'string', enum: ['new', 'open', 'fixed', 'closed'], required: true },
+      { name: 'address', type: 'string', hint: 'a STREET address or task number — set ONLY when the user names one specific property/task to drill into' },   // NOT in the endpoint — the drill join's filter
+    ] },
   { ...VS, id: 'vs_warranty_task', name: 'Warranty task details', itemUrl: '/#warranty',
-    does: 'read a warranty task\'s full details by its task id — status, project, address, priority, instructions, vendor explanation, appointments',
+    does: 'read a warranty task\'s full details by its INTERNAL task id (from a task list row — for a human task number or an address, use the task LIST with that as the address filter)',
     endpoint: '/api/Vendor/Warranty/Task/{taskId}',
-    params: [{ name: 'taskId', type: 'string', required: true }] },
+    params: [{ name: 'taskId', type: 'string', required: true, hint: 'the INTERNAL task id from a list row — for a human task number or address, use the task LIST' }] },
   { ...VS, id: 'vs_warranty_stats', name: 'Warranty task counts', listUrl: '/#dashboard',
-    does: 'warranty task counts (new / open / fixed) for a division — the dashboard statistic',
+    resolve: { divisionId: VS_DIVISION },
+    does: 'warranty task counts (new / open / fixed) for a division — the dashboard statistic; division by name, market number, or blank for your current one',
     endpoint: '/api/Vendor/Dashboard/Statistic/{divisionId}/Warranty',
     params: [{ name: 'divisionId', type: 'string', required: true }] },
   { ...VS, id: 'vs_announcements', name: 'Vendor announcements', listUrl: '/#dashboard',
-    does: 'a division\'s vendor announcements — title, message, dates, attachments',
+    resolve: { divisionId: VS_DIVISION },
+    does: 'a division\'s vendor announcements — title, message, dates, attachments; division by name, market number, or blank for your current one',
     endpoint: '/api/Vendor/Announcement/{divisionId}',
     params: [{ name: 'divisionId', type: 'string', required: true }] },
+
+  // ── Aircall Workspace — supervisor / inbox reads ───────────────────────────────────────────────────────────────
+  { ...AC, id: 'aw_team_availability', name: 'Team availability (all agents)', pulse: { kind: 'inventory', scope: 'team' },
+    does: 'list EVERY teammate\'s live availability across the company (available / on_mobile / offline / do_not_disturb / other), riding your Aircall Workspace login — answers "who is available?", "is anyone free right now?"',
+    endpoint: `/v3/availabilities?${_AC_AVAIL_Q}`, params: [] },
+  { ...AC, id: 'aw_my_availability', name: 'My availability status',
+    does: 'read YOUR OWN current availability on all channels (phone + client), riding your login — answers "am I available?", "what is my status?", "am I on do-not-disturb?"',
+    endpoint: `/v3/users/{me}/availabilities?${_AC_AVAIL_Q}`, params: [] },
+  { ...AC, id: 'aw_my_agent', name: 'My Aircall agent profile and teams', method: 'POST', gql: true, contentType: 'application/json',
+    does: 'read your agent profile — teams you belong to (with member ids), default outbound line, availability state, and associated phone lines',
+    endpoint: acGqlEndpoint('GetCurrentAgentV2_Query'),
+    body: acGqlBody('GetCurrentAgentV2_Query', {}), params: [] },
+  { ...AC, id: 'aw_teammate_roster', name: 'Teammate roster and status', method: 'POST', gql: true, contentType: 'application/json',
+    does: 'list teammates with their live availabilityStatus (on_mobile / offline / do_not_disturb / other) — the supervisor roster view',
+    endpoint: acGqlEndpoint('lookupTeammates'),
+    body: acGqlBody('lookupTeammates', { input: { filters: { query: '' }, pageRequest: { limit: 50 } } }), params: [] },
+  { ...AC, id: 'aw_teammate_search', name: 'Search teammates by name or extension', method: 'POST', gql: true, contentType: 'application/json',
+    does: 'search teammates by name, extension, or partial phone digits — returns availabilityStatus per hit',
+    endpoint: acGqlEndpoint('lookupTeammates'),
+    body: acGqlBody('lookupTeammates', { input: { filters: { query: '{query}' }, pageRequest: { limit: 25 } } }),
+    params: [{ name: 'query', type: 'string', required: true }] },
+  { ...AC, id: 'aw_search_teams', name: 'List Aircall teams', method: 'POST', gql: true, contentType: 'application/json',
+    does: 'list Aircall teams with their member agent ids — use with team availability to filter the roster',
+    endpoint: acGqlEndpoint('SearchTeamsQuery'),
+    body: acGqlBody('SearchTeamsQuery', { from: 0, limit: 25 }), params: [] },
+  { ...AC, id: 'aw_missed_calls', name: 'Missed calls inbox', method: 'POST', gql: true, contentType: 'application/json', pulse: { kind: 'backlog', scope: 'team', status: 'missed' },
+    does: 'list OPEN missed inbound calls (newest first) with contact extracts including Zendesk user links when integrated',
+    endpoint: acGqlEndpoint('CallEngagementsList_Query'),
+    body: acGqlBody('CallEngagementsList_Query', { pageRequest: { limit: 25, sort: 'desc' }, filters: { status: 'OPENED', callType: ['ALL_MISSED'] } }),
+    listUrl: '/inbox/calls?category=missedcalls', params: [] },
+  { ...AC, id: 'aw_open_conversations', name: 'Open conversations inbox', method: 'POST', gql: true, contentType: 'application/json',
+    does: 'list open Aircall Workspace conversations (calls + SMS threads unified), riding your login',
+    endpoint: acGqlEndpoint('ConversationsList_Query'),
+    body: acGqlBody('ConversationsList_Query', { pageRequest: { limit: 25, sort: 'desc' }, filters: { status: { in: ['OPENED'] }, withGroupSmsMmsConversations: true, withWhatsappUsernameConversations: false } }),
+    listUrl: '/inbox/conversations?category=open', params: [] },
+  { ...AC, id: 'aw_unread_count', name: 'Unread conversation count', method: 'POST', gql: true, contentType: 'application/json',
+    does: 'how many Aircall Workspace conversations have unread engagements',
+    endpoint: acGqlEndpoint('GetUnreadAircallWorkspaceConversationsCount'),
+    body: acGqlBody('GetUnreadAircallWorkspaceConversationsCount', {}), params: [] },
+  // ── contact / pre-dial / post-call (Zendesk CTI outbound capture) ─────────────────────────────────────────────
+  { ...AC, id: 'aw_contact_by_phone', name: 'Find contact by phone', method: 'POST', gql: true, contentType: 'application/json',
+    does: 'look up an Aircall contact by phone number — includes CRM extracts (Zendesk user link, HubSpot, etc.) when integrated',
+    endpoint: acGqlEndpoint('ContactByPhoneNumber_Query'),
+    body: acGqlBody('ContactByPhoneNumber_Query', { input: { phoneNumber: '{phone}' } }),
+    params: [{ name: 'phone', type: 'string', required: true, hint: 'digits only or E.164 — the number you are about to dial or just called' }] },
+  { ...AC, id: 'aw_authorized_lines', name: 'Authorized lines for a number', method: 'POST', gql: true, contentType: 'application/json',
+    does: 'check which of YOUR phone lines are authorized to dial a given number — the pre-dial gate the CTI runs before outbound',
+    endpoint: acGqlEndpoint('SearchAuthorizedLines_Query'),
+    body: acGqlBody('SearchAuthorizedLines_Query', { filter: { phoneNumber: { match: '{phone}' } }, limit: 5 }),
+    params: [{ name: 'phone', type: 'string', required: true }] },
+  { ...AC, id: 'aw_conversation_by_number', name: 'Conversation for line and number', method: 'POST', gql: true, contentType: 'application/json',
+    does: 'find the Aircall Workspace conversation thread for an outbound/inbound number on a specific line — includes Zendesk externalLink in contact extracts',
+    endpoint: acGqlEndpoint('ConversationByNumber_Query'),
+    body: acGqlBody('ConversationByNumber_Query', { lineID: '{lineId}', phoneNumber: '{phone}', withMessagingAI: true }),
+    itemUrl: '/inbox/conversations/{id}', params: [
+      { name: 'lineId', type: 'string', required: true, hint: 'your Aircall line id (from my agent profile / default line)' },
+      { name: 'phone', type: 'string', required: true, hint: 'the external number digits' },
+    ] },
+  { ...AC, id: 'aw_my_line', name: 'My phone line details',
+    does: 'read one of your Aircall phone lines — digits, timezone, recording settings',
+    endpoint: '/v3/numbers/{lineId}', params: [{ name: 'lineId', type: 'string', required: true }] },
+  { ...AC, id: 'aw_call_history', name: 'Call history for a number',
+    does: 'search your recent calls to/from a phone number on a specific line (post-hoc log — the call itself is WebRTC, not this read)',
+    endpoint: '/v4/calls/search?category=custom_filter&per_page=25&page=1&numbers[]={phone}&number_ids[]={lineId}&strict_call_ownership=true',
+    params: [
+      { name: 'phone', type: 'string', required: true },
+      { name: 'lineId', type: 'string', required: true },
+    ] },
+  // ── writes (gated; self-only availability) ───────────────────────────────────────────────────────────────────
+  { ...AC, id: 'aw_set_availability', name: 'Set my Aircall availability', write: true, method: 'POST', gql: true, contentType: 'application/json',
+    does: 'set YOUR availability preference — answers "set me to available / unavailable / do-not-disturb / busy / back-office"; does not place or answer calls',
+    endpoint: acGqlEndpoint('UpdateAgent_Mutation'),
+    body: acGqlBody('UpdateAgent_Mutation', { input: { ID: '{me}', availability: { preference: '{preference}' } } }),
+    params: [{ name: 'preference', type: 'string', enum: ['ALWAYS_OPENED', 'ALWAYS_CLOSED', 'DOING_BACK_OFFICE', 'OTHER'], required: true, hint: 'ALWAYS_OPENED = available; ALWAYS_CLOSED = unavailable / do-not-disturb / busy; DOING_BACK_OFFICE = back-office; OTHER = custom' }] },   // v1470 — the opaque enum needs user-language mapping (live: "set me to unavailable" fell to teach)
+  { ...AC, id: 'aw_send_sms', name: 'Send an SMS from my line', write: true, destructive: true, method: 'POST', gql: true, contentType: 'application/json',
+    // v2.74.1459 (safety review) — destructive: an SMS is an OUTWARD-FACING message to a real external person (can't
+    // unsend), so it rides the two-step confirm tier (safetyClass 'destructive'), same as Zendesk merge/mark-as-spam —
+    // never the single-click write gate. The §9 outward-comms rule: a message a human receives is human-approved.
+    does: 'send an SMS text from one of your Aircall lines to an external number, riding your login',
+    endpoint: acGqlEndpoint('sendMessage_Mutation'),
+    body: acGqlBody('sendMessage_Mutation', { input: { text: '{text}', mediaKeys: [], lineID: '{lineId}', externalNumber: '{phone}' } }),
+    params: [
+      { name: 'lineId', type: 'string', required: true },
+      { name: 'phone', type: 'string', required: true },
+      { name: 'text', type: 'string', required: true },
+    ] },
+  { ...AC, id: 'aw_close_conversation', name: 'Close conversation after a call', write: true, method: 'POST', gql: true, contentType: 'application/json',
+    does: 'close/wrap up an Aircall Workspace conversation by its call id (post-call housekeeping — the Zendesk CTI wrap-up step)',
+    endpoint: acGqlEndpoint('closeConversationByCallID_Mutation'),
+    body: acGqlBody('closeConversationByCallID_Mutation', { callID: '{callId}' }),
+    params: [{ name: 'callId', type: 'string', required: true, hint: 'the Aircall call id from the conversation/call read — NOT the Zendesk ticket id' }] },
 ];
 
 // The "useful subset" render shape (CS Tools normalizeTicket — 10 of ~80 fields). Pure; used by the CX-4a.2 list render.
@@ -517,7 +663,14 @@ export function harvestedRecipeLegs(recipes, { host = '', account = 'me', mode =
     const method = String(r.method || 'GET').toUpperCase();
     // A record's OWN `write` wins (a curated gql READ is a POST but write:false); else method-derive (a harvested §17
     // record may carry no `write`, and a non-GET must still class as a write, never silently a read). §9 fail-safe.
-    const write = r.write === true || (r.write == null && method !== 'GET');
+    // v2.74.1468 — EXCEPT a read-only GraphQL document: a gql READ tunnels through POST with no `write` annotation,
+    // and method-derivation classed it a WRITE → mode 'act' → the HITL confirm fired for a ROSTER READ and the 200
+    // rendered as "Sent" (live: aw_teammate_roster). recipeLegs (the catalog-direct path) already applied
+    // isReadOnlyGql; this record path — which CX-9r's catalog-armed origins ride — did not (Invariant #3's shape:
+    // the curated-direct path got the rule, the seeded path didn't). A `mutation` NEVER passes isReadOnlyGql, and an
+    // explicit write:true always wins — the §9 fail-safe holds.
+    const write = r.write === true || (r.write == null && method !== 'GET'
+      && !(r.gql === true && r.body && typeof r.body === 'object' && isReadOnlyGql(String(r.body.query || ''))));
     // v2.74.1303 (CX-6) — writes ARE now projected (mode:'act' legs): the dispatch confirm-gates them AND the
     // SESSION_REPLAY handler fail-closes on `confirmed:true`, so a demonstrated "Create X" is selectable and can only
     // run through the HITL gate — a write reaching execution un-confirmed is refused at the boundary. (Was: reads-only skip.)

@@ -399,6 +399,11 @@ export class Logger {
     function scrubString(s) {
       if (typeof s !== 'string') return s;
       return s
+        // v2.74.1468 — MASK leg refs before the email rule: a leg key (`me.aircall.aw_roster@workspace.aircall.io`)
+        // is email-SHAPED, so the v1467 `leg=` decision token logged as `leg=[email]` (the #138 "scrub eats artifact
+        // ids" class again). Account-prefixed refs (`me.`/`team.`) are identifiers, not PII — hide their @ from the
+        // email rule, restore at the end. A real email never starts with an account prefix + dot chain like this.
+        .replace(/\b(?:me|team)\.[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}/g, (m) => m.replace(/@/g, '\u0001'))
         // Email addresses
         .replace(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g, '[email]')
         // Phone numbers (various formats). v2.74.812 — the lookaround guards stop this from eating a digit run
@@ -410,7 +415,10 @@ export class Logger {
         // UUIDs (free-standing; an artifact id is prefixed so `gnd_…`/`wf_…` survive)
         .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '[id]')
         // HubSpot numeric record IDs (8+ digits standalone — \b already skips `_`-flanked id digits)
-        .replace(/\b\d{8,}\b/g, '[id]');
+        .replace(/\b\d{8,}\b/g, '[id]')
+        // v1468 — RESTORE the leg-ref @ masked above (\u0001 never occurs in real log text), after every rule has run:
+        // the TRUE ref survives the export (`leg=me.aircall.aw_roster@host` stays greppable, a real email still scrubs).
+        .replace(/\u0001/g, '@');
     }
 
     function scrubValue(v) {

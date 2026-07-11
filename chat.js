@@ -45,10 +45,12 @@ import { appendLedger, loadLedger } from './Services/Storage/ActionLedgerStore.j
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
 import { recipeToLeg } from './Core/connectorLeg.js';   // OV-4 — a stored ride recipe → an invokable leg (for the Overview workbench's `test`)
 import { assessLegTest } from './Core/legTestVerdict.js';   // OV-4 — the structural pass/fail verdict for a leg test (deterministic, like the trial gate)
-import { recipeLegs, coerceParams, fillBody, fillEndpoint } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template
+import { recipeLegs, coerceParams, fillBody, fillEndpoint, isReadOnlyGql } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template; CX-10 (v1460) — isReadOnlyGql lets the workbench auto-test a GraphQL READ (POST-by-transport)
 import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 — header-replay writes: json/form/raw + contentType (review I)
+import { resolveRideParam, filterRowsByText } from './Core/rideParamResolve.js';   // CX-9b (v1434) — human value → canonical id (the `resolve` marker) + the drill row join
+import { armable as rideArmable } from './Core/rideRecipe.js';   // CX-9b — the drill's via-recipe honors the §18 arm guard
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
-import { renderConnectorLines, itemLabels, primaryItemId, createdRecordId } from './Core/connectorRender.js';   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it")
+import { renderConnectorLines, itemLabels, primaryItemId, createdRecordId, primaryObject, primaryList } from './Core/connectorRender.js';   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
 import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recent-turn window selector (follow-up continuity for the IL)
@@ -3478,17 +3480,26 @@ async function _testLeg(n, params) {
   const e = _legWorkbench.legs[n - 1];
   if (!e) { _setMessageBody(m, `No leg #${n} — run \`legs\` to list them.`, { markdown: true }); _orchFinalize(m); return; }
   if (e.class !== 'ride') { _setMessageBody(m, `Leg #${n} “${e.name}” is a **${e.class}** leg — the workbench tests session-ride legs here. Drive legs are tested in Studio; broker legs via the connector panel.`, { markdown: true }); _orchFinalize(m); return; }
-  if (e.safetyClass !== 'auto') {   // SAFETY: a write/POST is never auto-fired — arm it here, fire it through an app's confirm gate (§9)
-    _setMessageBody(m, `Leg #${n} “${e.name}” is a **${e.method || 'write'}** (${e.safetyClass}). The workbench auto-tests **reads**; a write is armed here (\`verify ${n}\`) and only ever fired through an app’s confirm gate — never auto-fired. Run it from an app to validate the write end-to-end.`, { markdown: true }); _orchFinalize(m); return;
-  }
+  // Load the recipe + leg up front so a read-only GraphQL leg (POST by transport, READ by intent) can be told apart
+  // from a real write BEFORE the safety gates fire — the method alone can't distinguish them.
   const rr = await _orchReq('GET_RIDE_RECIPES', { groundId: e.groundId, origin: e.host });
   const recipe = ((rr && rr.recipes) || []).find((x) => x && x.id === e.id);
   if (!recipe) { _setMessageBody(m, `Couldn’t load leg #${n}’s recipe.`); _orchFinalize(m); return; }
   const leg = recipeToLeg({ ...recipe, app: recipe.app || recipe.origin || e.host }, { trusted: true });
   if (!leg || !leg.tool) { _setMessageBody(m, `Leg #${n} isn’t invokable — its recipe is incomplete (needs an endpoint + origin).`); _orchFinalize(m); return; }
   const _m = String(leg.tool.method || 'GET').toUpperCase();
-  if (_m !== 'GET' && _m !== 'HEAD') {   // defense-in-depth: even if safetyClass/method disagree, NEVER auto-fire a non-GET (§9 write belt)
-    _setMessageBody(m, `Leg #${n} “${e.name}” is a **${_m}** — the workbench never auto-fires a non-GET. Arm it with \`verify ${n}\` and run it through an app’s confirm gate.`, { markdown: true }); _orchFinalize(m); return;
+  // CX-10 (v2.74.1460) — a GraphQL READ tunnels through POST, so method-derived safety classes it `gated` and the
+  // non-GET belt would refuse it — yet it IS a read (the Aircall/Shopify supervisor reads). Recognize a proven
+  // read-only GraphQL leg — never a `write:true` recipe, and its query document passes isReadOnlyGql (a `mutation`
+  // or `subscription` never does) — and let it auto-test exactly like a GET. Every real write still falls through to
+  // the arm-only path below. The §9 write belt stays intact: a mutation cannot sneak through this predicate.
+  const _gqlRead = !recipe.write && leg.tool.gql === true && leg.tool.body && typeof leg.tool.body === 'object'
+    && isReadOnlyGql(leg.tool.body.query || '');
+  if (e.safetyClass !== 'auto' && !_gqlRead) {   // SAFETY: a write/POST is never auto-fired — arm it here, fire it through an app's confirm gate (§9)
+    _setMessageBody(m, `Leg #${n} “${e.name}” is a **${e.method || 'write'}** (${e.safetyClass}). The workbench auto-tests **reads** (including read-only GraphQL); a write is armed here (\`verify ${n}\`) and only ever fired through an app’s confirm gate — never auto-fired. Run it from an app to validate the write end-to-end.`, { markdown: true }); _orchFinalize(m); return;
+  }
+  if (_m !== 'GET' && _m !== 'HEAD' && !_gqlRead) {   // defense-in-depth: NEVER auto-fire a non-GET that isn't a proven read-only GraphQL query (§9 write belt)
+    _setMessageBody(m, `Leg #${n} “${e.name}” is a **${_m}** — the workbench never auto-fires a non-GET write. Arm it with \`verify ${n}\` and run it through an app’s confirm gate.`, { markdown: true }); _orchFinalize(m); return;
   }
   const need = ((recipe.params) || []).filter((p) => p && p.required && !(params && Object.prototype.hasOwnProperty.call(params, p.name))).map((p) => p.name);
   if (need.length) { _setMessageBody(m, `**${e.name}** needs ${need.map((x) => `\`${x}\``).join(', ')} — run \`test ${n} ${need.map((x) => `${x}=…`).join(' ')}\`.`, { markdown: true }); _orchFinalize(m); return; }
@@ -3500,7 +3511,18 @@ async function _testLeg(n, params) {
   const detail = (!verdict.pass && verdict.detail) ? `\n\n> ${verdict.detail}` : '';
   const hint = (!verdict.pass && (verdict.verdict === 'not-logged-in' || verdict.verdict === 'no-csrf')) ? `\n\nOpen a logged-in **${e.host}** tab and try again.` : '';
   const arm = (verdict.pass && !e.verified) ? `\n\nArm it for apps with \`verify ${n}\`.` : '';
-  _setMessageBody(m, `${head}${detail}${hint}${arm}`, { markdown: true });
+  // CX-9i (v2.74.1442) — the workbench shows the RAW response ("log exactly what's returned"): the developer plane's
+  // ground truth, ending the guess-the-shape loop. LOCAL DISPLAY ONLY — the raw body goes to the panel (the user's own
+  // data on their own screen, escape-first render), never to the LLM and never into the exported logs (which stay
+  // body-blind: the SESSION_REPLAY trace line carries key STRUCTURE only). Truncated, never silently.
+  let raw = '';
+  if (res.value !== undefined) {
+    try {
+      const j = JSON.stringify(res.value, null, 2);
+      if (j) raw = `\n\nRaw response:\n\`\`\`json\n${j.length > 6000 ? `${j.slice(0, 6000)}\n… (truncated — ${j.length} chars total)` : j}\n\`\`\``;
+    } catch { /* unserializable → skip the dump, keep the verdict */ }
+  }
+  _setMessageBody(m, `${head}${detail}${hint}${arm}${raw}`, { markdown: true });
   _orchFinalize(m);
 }
 
@@ -3935,6 +3957,112 @@ async function _goToOrigin() {
   const r = await _orchReq('SHOW_SOURCES', { origin: host, urls: [`https://${host}/`] });
   _setMessageBody(m, r && r.success !== false ? `${r.reused ? 'Focused' : 'Opened'} ${host}.` : `Couldn’t open ${host} — ${(r && r.error) || 'error'}.`);
   _orchFinalize(m);
+}
+
+// FL-1e (v2.74.1433) — "show/go to <section>" opens a grounded site's SECTION page by NAVIGATING to a ride recipe's
+// listUrl/itemUrl that fills to a bare path with NO leftover params (e.g. VendorSuite's '/#warranty'). This is why the
+// user says "show" and not "get": a section-open needs NO {divisionId}/{taskId}, so it works where a data read would
+// stall on a missing required param. Candidate sites = the app's bound connections ∪ the ACTIVE tab's ground (a forged /
+// Overview ground has no app connection). Each site's ground is resolved (dedup-before-mint) so GET_RIDE_RECIPES seeds
+// the curated section legs even for a fresh ground. `<word>` matches the section PATH / recipe name / does. Returns true
+// only when it actually navigated — the caller falls through to interpret otherwise, so a non-section "show …" is
+// unchanged. Trusted-data rule holds: origin + curated section template, no model-minted URL.
+async function _showSection(word) {
+  const w = String(word || '').trim().toLowerCase();
+  if (!w) return false;
+  const hosts = []; const seen = new Set();
+  const add = (origin) => { let h = ''; try { h = new URL(/^https?:\/\//i.test(origin) ? origin : `https://${origin}`).host; } catch { return; } if (h && !seen.has(h)) { seen.add(h); hosts.push(h); } };
+  for (const c of _boundConnections()) add(c && c.origin);
+  try { const tabs = await chrome.tabs.query({ active: true, currentWindow: true }); const t = tabs && tabs[0]; if (t && /^https?:/i.test(t.url || '')) add(new URL(t.url).host); } catch { /* */ }
+  // CX-9n (v2.74.1452) — ALSO every ride-armed Ground: a section on ANY ride site resolves from ANY tab (live:
+  // `view warranty task` from a foreign tab scanned only connections ∪ active tab → no match → silent fallthrough
+  // to the router → a Zendesk mis-pick. The tab is context, never a capability filter — the section-opener too.)
+  try { const rg = await _orchReq('GET_RIDE_ARMED_GROUNDS', {}); for (const g of ((rg && rg.grounds) || [])) add(g && g.host); } catch { /* */ }
+  // CX-9n (v2.74.1451) — match the FULL phrase first ("warranty task" ⊂ "Warranty tasks by status"), then fall back
+  // to its ≥4-char TOKENS ("view the warranty section" → "warranty" hits '/#warranty' even though "section" is
+  // nobody's word). First query with a hit wins — phrase specificity beats token looseness.
+  const queries = [w, ...w.split(/\s+/).filter((t) => t.length >= 4 && t !== w)];
+  let best = null;   // strongest match across all sites — a section PATH containing the word beats a mere name/does hit,
+  for (const host of hosts) {   // so "warranty" → '/#warranty', never '/#dashboard' whose recipe NAME ("Warranty counts") also says warranty
+    let groundId = ''; try { const g = await _orchReq('ENSURE_GROUND_FOR_URL', { url: `https://${host}/` }); groundId = (g && g.groundId) || ''; } catch { /* */ }
+    if (!groundId) continue;
+    let recs = []; try { const rr = await _orchReq('GET_RIDE_RECIPES', { groundId, origin: host }); recs = (rr && rr.recipes) || []; } catch { /* */ }
+    for (const r of recs) {
+      if (!r) continue;
+      for (const tmpl of [r.listUrl, r.itemUrl]) {
+        if (!tmpl) continue;
+        const path = fillEndpoint(String(tmpl), {});                       // fill with NO params — a bare section survives; an item page keeps its {id}
+        if (!path || path.includes('{')) continue;                         // still has a placeholder → needs a param, not a bare section
+        for (let qi = 0; qi < queries.length; qi++) {
+          const q = queries[qi];
+          const inPath = path.toLowerCase().includes(q);
+          const inMeta = `${r.name || ''} ${r.does || ''}`.toLowerCase().includes(q);
+          if (!inPath && !inMeta) continue;
+          // phrase matches (qi 0) outrank token matches; within a rank, path beats meta
+          const score = (queries.length - qi) * 10 + (inPath ? 2 : 0) + (inMeta ? 1 : 0);
+          if (!best || score > best.score) best = { host, path, score };
+          break;   // this template's best query found — stop downgrading
+        }
+      }
+    }
+  }
+  if (!best) return false;
+  appendMessage({ role: 'user', body: `show ${word}` });
+  const m = appendMessage({ role: 'assistant', body: '' });
+  const url = `https://${best.host}${best.path.startsWith('/') ? best.path : '/' + best.path}`;
+  const res = await _orchReq('SHOW_SOURCES', { origin: best.host, urls: [url] });
+  _setMessageBody(m, res && res.success !== false ? `${res.reused ? 'Focused' : 'Opened'} the ${best.host} tab on its ${w} page.` : `Couldn’t open ${best.host} — ${(res && res.error) || 'error'}.`);
+  _orchFinalize(m);
+  return true;
+}
+
+// CX-9j (v2.74.1444) — FIELD FOLLOW-UP: after a grounded read, "what are the instructions?" answers FROM THE RECORD —
+// deterministically, full untruncated text, no LLM (live miss: the follow-up lost the record context entirely and the
+// front door answered about its OWN system-prompt instructions). Intercepts ONLY when the last read is fresh AND the
+// record literally has a matching field — anything else falls through to normal routing untouched. "details" /
+// "everything" dumps the full record render. Local display of the user's own data; nothing leaves the panel.
+const _FOLLOWUP_TTL = 600000;   // 10 min — the conversational window a follow-up plausibly refers to
+async function _fieldFollowup(text) {
+  const g = _lastGroundedRead;
+  if (!g || g.value === undefined || (Date.now() - g.at) > _FOLLOWUP_TTL) return false;
+  const t = String(text).trim();
+  // verbed form ("what are the instructions?") OR a BARE short ask ("details", "instructions", "vendor explanation") —
+  // the live miss: bare `details` had no verb, missed this regex, fell to the ROUTER, which invoked the detail READ
+  // with a junk taskId → http-500. A bare ask ≤4 words is safe here: it acts only on a literal field/details match.
+  const mv = t.match(/^(?:what(?:'s|\s+is|\s+are)?|show\s+me|give\s+me|read)\s+(?:the\s+|its\s+)?([\w][\w\s\/-]{1,40}?)\s*\??$/i);
+  const bare = !mv && /^[\w][\w\s\/-]{0,40}\??$/.test(t) && t.replace(/\?+$/, '').trim().split(/\s+/).length <= 4
+    ? t.replace(/\?+$/, '').trim() : null;
+  if (!mv && !bare) return false;
+  const obj = primaryObject(g.value) || (primaryList(g.value) || [])[0] || null;
+  if (!obj || typeof obj !== 'object') return false;
+  const q = (mv ? mv[1] : bare).trim().toLowerCase().replace(/\s+/g, ' ');
+  const norm = (s) => String(s).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').toLowerCase().trim();
+  const nice = (k) => { const s = norm(k); return s.charAt(0).toUpperCase() + s.slice(1); };
+  const msgFor = (body) => { appendMessage({ role: 'user', body: text }); const mm = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(mm, body, { markdown: true }); _orchFinalize(mm); };
+  // "details / everything / all fields / full record" → the full deterministic record render
+  if (/^(details|everything|all(\s+fields)?|full\s+record)$/.test(q)) {
+    const lines = renderConnectorLines(obj, { name: (g.leg && g.leg.name) || 'Record' });
+    if (!lines) return false;
+    msgFor(lines.join('\n'));
+    try { _orchLog(`FIELD_FOLLOWUP ▸ "details" → full record (${(g.leg && (g.leg.tool && g.leg.tool.recipeId)) || ''})`); } catch { /* */ }
+    return true;
+  }
+  // match the ask against the record's OWN keys ("vendor explanation" → VendorExplanation; "status" → TaskStatus)
+  const hits = Object.entries(obj).filter(([k, v]) => {
+    if (v == null || v === '') return false;
+    const nk = norm(k);
+    return nk === q || nk.includes(q) || q.includes(nk);
+  }).slice(0, 4);
+  if (!hits.length) return false;   // not a field of this record → normal routing (the ask may genuinely be conversational)
+  const parts = hits.map(([k, v]) => {
+    if (v !== null && typeof v === 'object') {   // an array/nested field ("payments") → the exact JSON, fenced
+      try { const j = JSON.stringify(v, null, 2); return `**${nice(k)}:**\n\`\`\`json\n${j.length > 4000 ? `${j.slice(0, 4000)}\n… (truncated)` : j}\n\`\`\``; } catch { return `**${nice(k)}:** (unrenderable)`; }
+    }
+    return `**${nice(k)}:** ${String(v)}`;      // FULL scalar value — never truncated (this is the "exact instructions" ask)
+  });
+  msgFor(parts.join('\n\n'));
+  try { _orchLog(`FIELD_FOLLOWUP ▸ "${q}" → ${hits.map(([k]) => k).join(',')}`); } catch { /* */ }
+  return true;
 }
 
 async function _approveMany(ids) {
@@ -5353,10 +5481,16 @@ async function _dispatchRouteDecision(d, { tabId = null, groundId = null, text, 
   if (d.action === 'primitive' && d.tool && d.tool.op === 'OPEN_URL') {
     const url = (d.params && typeof d.params.url === 'string') ? d.params.url.trim() : '';
     if (!/^https?:\/\//i.test(url)) return false;
-    let host = url; try { host = new URL(url).host.replace(/^www\./, ''); } catch { /* */ }
+    let host = url; let hostFull = ''; let rootish = false;
+    try { const u0 = new URL(url); hostFull = u0.host; host = u0.host.replace(/^www\./, ''); rootish = (u0.pathname === '/' || u0.pathname === '') && !u0.search && !u0.hash; } catch { /* */ }
     const msg = appendMessage({ role: 'assistant', body: `Opening ${host}…`, convId });   // v1338 (review P1-1) — pin to the turn's conversation
-    const r = await _orchReq('OPEN_URL_NEW_TAB', { url, active: true });   // v2.74.909 — a NAV ask transfers focus
-    _setMessageBody(msg, (r && r.success !== false) ? `Opened ${host}.` : `Couldn't open ${url}.`);
+    // CX-9l (v2.74.1448) — REUSE-FIRST navigation: an https navigate rides SHOW_SOURCES (focus the site's EXISTING tab
+    // — a duplicate tab was the live complaint; a bare-origin navigate is focusOnly so the live tab's page is never
+    // blown away; a deep link navigates the reused tab). http / handler-miss falls back to the old new-tab open.
+    let r = null;
+    if (hostFull && /^https:/i.test(url)) { try { r = await _orchReq('SHOW_SOURCES', { origin: hostFull, urls: [url], focusOnly: rootish }); } catch { r = null; } }
+    if (!r || r.success === false) r = await _orchReq('OPEN_URL_NEW_TAB', { url, active: true });   // v2.74.909 — a NAV ask transfers focus
+    _setMessageBody(msg, (r && r.success !== false) ? `${r.reused ? `Focused your existing ${host} tab` : `Opened ${host}`}.` : `Couldn't open ${url}.`);
     _orchFinalize(msg);   // v2.74.938 (CR-U1)
     return true;
   }
@@ -5522,9 +5656,155 @@ async function _ilRunPanelAction(msg, { leg, panel, ask, params = {} }) {
   _setMessageBody(msg, panel.done || `${leg.name || 'Done'}.`);
 }
 
+// CX-9b (v2.74.1434) — the `resolve` marker's via-read cache (e.g. VendorSuite/State): one fetch per origin+endpoint
+// per 10 min, so resolving divisionId on every ask doesn't re-pull State each time. Panel-lifetime map, TTL-checked.
+const _rideResolveCache = new Map();
+async function _rideResolveVia(leg, via, { tabId, groundId } = {}) {
+  const host = String((leg.tool && (leg.tool.origin || leg.tool.appHost)) || '');
+  const key = `${host}|${via}`;
+  const hit = _rideResolveCache.get(key);
+  if (hit && (Date.now() - hit.at) < 600000) return hit.value;
+  let r = null;
+  try {
+    if (leg.tool && leg.tool.replay === 'headers') {   // the harvested/seeded transport (mirror the dispatch's payload shape)
+      r = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost || host, origin: host, endpoint: via, method: 'GET', params: {}, groundId: leg.tool.groundId || groundId || null, recipeId: null, requestHeaders: leg.tool.requestHeaders || null });   // v1464 — the static routing headers ride the resolve read too
+    } else {                                            // cookie-ride / connected-app — route via the same planner the leg itself uses
+      const viaLeg = { ...leg, mode: 'ask', params: [], paramSchema: { type: 'object', properties: {}, required: [] }, tool: { ...leg.tool, endpoint: via, method: 'GET', body: null } };
+      const plan = planExec(viaLeg, {}, { tabId, groundId });
+      if (plan && plan.ok && plan.channel) r = await _orchReq(plan.channel, plan.payload);
+    }
+  } catch { r = null; }
+  const value = (r && r.success !== false && r.value != null) ? r.value : null;
+  if (value) _rideResolveCache.set(key, { at: Date.now(), value });
+  return value;
+}
+
+// CX-9b — resolve every `leg.tool.resolve` param BEFORE dispatch (both transports; the HITL write preview then shows
+// the RESOLVED request). A human value maps via the app's own read ("Atlanta West"/"210" → 83; missing → the user's
+// current division); ambiguity/unknown ASKS with candidates instead of dispatching a silent wrong-id read (the live
+// lesson: a wrong division id returns an empty 200, not an error — the worst failure is the quiet one).
+// Returns { params, labels } or { error: true } with the honest message already set.
+async function _resolveRideParams(msg, leg, params, { tabId, groundId } = {}) {
+  const specs = (leg && leg.tool && leg.tool.resolve && typeof leg.tool.resolve === 'object') ? leg.tool.resolve : null;
+  if (!specs) return { params, labels: {} };
+  const out = { ...(params || {}) }; const labels = {};
+  const _normEq = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
+  const mo = (leg.tool && leg.tool.drill && leg.tool.drill.matchOn) || null;   // the drill's free-text filter slot (e.g. address)
+  for (const [name, spec] of Object.entries(specs)) {
+    if (!spec || typeof spec !== 'object' || !spec.via) continue;
+    const state = await _rideResolveVia(leg, String(spec.via), { tabId, groundId });
+    if (!state) continue;   // no state → leave as-is; the executor's needs-param guard answers honestly
+    // CX-9e (v2.74.1438) — MIS-BIND REPAIR: the router sometimes drops a division NAME into the free-text drill
+    // filter ("greensboro" → address) and leaves the resolve-param EMPTY — which would silently DEFAULT to the
+    // wrong scope (live: "greensboro" filtered Atlanta West's empty list). If the filter value resolves EXACTLY as
+    // this param (a known division name / market number), it WAS this param — migrate it. A real street address
+    // ("cumming") resolves as nothing and stays put. Deterministic; no prompt change.
+    const missing = out[name] == null || String(out[name]).trim() === '';
+    if (missing && mo && mo !== name && out[mo] != null && String(out[mo]).trim() !== '') {
+      const mig = resolveRideParam(spec, out[mo], state);
+      if (mig && mig.value !== undefined) {
+        try { _orchLog(`RIDE_RESOLVE ▸ ${name} ← ${mo} "${out[mo]}" → ${mig.value}${mig.label ? ` (${mig.label})` : ''} (mis-bind repair)`); } catch { /* */ }
+        out[name] = mig.value;
+        if (mig.label) labels[name] = mig.label;
+        delete out[mo];
+        continue;
+      }
+    }
+    const r = resolveRideParam(spec, out[name], state);
+    if (!r) continue;   // no default + nothing given → the needs-param guard answers honestly
+    if (r.ambiguous || r.unknown) {
+      const cands = (r.candidates || []).slice(0, 5).map((c) => `**${c.label}** (#${c.value})`).join(' · ');
+      _setMessageBody(msg, r.ambiguous
+        ? `“${out[name]}” matches more than one ${name === 'divisionId' ? 'division' : name}: ${cands} — which one?`
+        : `I don’t know ${name === 'divisionId' ? 'division' : name} “${out[name]}”${cands ? ` — closest: ${cands}` : ''}. Say the name or the market number.`, { markdown: true });
+      return { error: true };
+    }
+    if (r.value !== undefined) {
+      const was = out[name];
+      out[name] = r.value;
+      if (r.label) labels[name] = r.label;
+      try { _orchLog(`RIDE_RESOLVE ▸ ${name} "${was == null ? '(default)' : was}" → ${r.value}${r.label ? ` (${r.label})` : ''}`); } catch { /* */ }
+      // CX-9e — ECHO-BIND drop: the router bound the SAME place into both slots ("greensboro" division AND address).
+      // A filter that merely repeats this param's raw value or resolved label is not a row filter — drop it so the
+      // drill doesn't filter the division's rows by the division's own name (cities never match the market name).
+      if (mo && mo !== name && out[mo] != null && (_normEq(out[mo], was) || _normEq(out[mo], r.label))) {
+        try { _orchLog(`RIDE_RESOLVE ▸ ${mo} "${out[mo]}" dropped (echoes ${name})`); } catch { /* */ }
+        delete out[mo];
+      }
+    }
+  }
+  return { params: out, labels };
+}
+
+// CX-9b — project the drill's VIA recipe (the details read) from the same Ground, riding the parent leg's transport.
+// Honors the §18 arm guard (a disabled/rejected details read is never drilled into). Null → the caller just renders
+// the list (drill is an enhancement, never a blocker).
+async function _rideDrillLeg(parentLeg, viaId, groundId) {
+  const gid = (parentLeg.tool && parentLeg.tool.groundId) || groundId || '';
+  const origin = (parentLeg.tool && parentLeg.tool.origin) || '';
+  if (!gid || !viaId) return null;
+  let rec = null;
+  try { const rr = await _orchReq('GET_RIDE_RECIPES', { groundId: gid, origin }); rec = ((rr && rr.recipes) || []).find((x) => x && x.id === viaId) || null; } catch { rec = null; }
+  if (!rec || !rideArmable(rec)) return null;
+  const l = recipeToLeg({ ...rec, app: (parentLeg.tool && parentLeg.tool.app) || rec.origin || origin }, { trusted: true });
+  if (!l || !l.tool) return null;
+  l.tool.sessionHost = parentLeg.tool.sessionHost || null;   // same transport stamping harvestedRecipeLegs applies
+  l.tool.replay = parentLeg.tool.replay || null;
+  l.tool.groundId = gid;
+  return l;
+}
+
+// CX-9b (v2.74.1435) — the DRILL JOIN, shared by BOTH read renders (SESSION_REPLAY + the planExec/INVOKE_SESSION
+// tail — the v1434 lesson: hooking one transport at a time is the Invariant-#2 anti-pattern). A list read whose
+// recipe declares `drill` {via,param,from,matchOn,label} AND whose ask bound the matchOn filter (e.g. address)
+// joins CODE-side: filterRowsByText picks the row(s); a single hit's `from` id (TaskId) invokes the details read on
+// the same transport. The model never joins; 0/many hits ask back honestly. One level only — a details read never
+// re-drills. Returns null when the drill doesn't apply (caller falls through to its normal render).
+async function _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value, where = '', _drilled = false }) {
+  const dj = (leg.tool && leg.tool.drill) || null;
+  const dval = (dj && dj.param && dj.from && dj.matchOn) ? params[dj.matchOn] : null;
+  // CX-9e (v1438) — an EMPTY list skips the drill entirely: "no <status> tasks in <division>" (the shaper's scoped
+  // honest empty) beats a confusing `No match for "X" — 0 tasks listed` over zero rows.
+  if (_drilled || !dj || dval == null || String(dval).trim() === '' || !Array.isArray(value) || value.length === 0) return null;
+  const hits = filterRowsByText(value, dj.label || [], dval);
+  if (hits.length === 1) {
+    const viaLeg = await _rideDrillLeg(leg, dj.via, groundId);
+    if (!viaLeg) return null;   // details read unavailable/unarmed → fall back to the plain list render
+    try { _orchLog(`RIDE_DRILL ▸ ${leg.tool.recipeId || leg.key} → ${dj.via} (${dj.param}=${hits[0][dj.from]}) match "${String(dval).slice(0, 40)}"`); } catch { /* */ }
+    return _ilRunBuiltin(msg, { leg: viaLeg, ask, tabId, groundId, params: { [dj.param]: hits[0][dj.from] }, _drilled: true });
+  }
+  if (hits.length === 0) {
+    _setMessageBody(msg, `No match for “${dval}”${where} — ${value.length} task${value.length === 1 ? '' : 's'} listed. Check the address or say the task number.`, { markdown: true });
+    return true;
+  }
+  const lines = hits.slice(0, 6).map((h) => `- ${(dj.label || []).map((f) => h[f]).filter((v) => v != null && v !== '').join(' · ')}`);
+  _setMessageBody(msg, `“${dval}”${where} matches ${hits.length} tasks — which one?\n${lines.join('\n')}`, { markdown: true });
+  return true;
+}
+
+// CX-9d (v2.74.1437) — the code-applied filter summary the shaper receives ("divisionId=Greensboro (62), status=open").
+// Resolved labels ride next to their raw values so the shaper knows the rows are ALREADY scoped (a division is a
+// MARKET — its tasks live in nearby towns) and never re-filters them against the question's own words.
+function _shapeScope(params, labels) {
+  try {
+    return Object.entries(params || {})
+      .filter(([, v]) => v != null && v !== '' && typeof v !== 'object')
+      .map(([k, v]) => `${k}=${labels && labels[k] ? `${labels[k]} (${v})` : v}`).join(', ');
+  } catch { return ''; }
+}
+
 // Dispatch a builtin leg JUDGE picked. A PANEL (ACT×Self) leg runs locally (above); a Browser/Self READ leg goes
 // through its existing SW channel (via the pure execPlan planner) and renders here. Reads auto-run (no confirm).
-async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
+async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {}, _drilled = false }) {
+  // CX-9b (v2.74.1434) — the ID layer: resolve marked params (divisionId et al.) BEFORE any branch, so every
+  // transport (replay read/write, cookie-ride write, the planExec tail) dispatches canonical ids — and a write's
+  // HITL preview shows the real request. On ambiguity/unknown the honest ask-back is already rendered.
+  let _resolvedLabels = {};
+  if (leg && leg.domain === 'connector' && leg.tool && leg.tool.resolve) {
+    const rp = await _resolveRideParams(msg, leg, params, { tabId, groundId });
+    if (rp.error) return false;
+    params = rp.params; _resolvedLabels = rp.labels || {};
+  }
   const panel = IL_PANEL_LEGS[leg.key];
   if (panel) {
     // v2.74.1340 (review A) — HONOR leg.safety on the panel legs: NEW_DEV_CONVERSATION / TOGGLE_TRACKING carry
@@ -5538,14 +5818,66 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
     }
     return _ilRunPanelAction(msg, { leg, panel, ask, params });
   }
+  // CX-9o (v2.74.1453) — the SECTION-NAV leg (data-derived navigation; the anti-hardcode rule): open one of the
+  // site's section pages on its OWN tab (reuse-then-navigate), then optionally text-click ONE item's row (`find`)
+  // — the SPA has no per-item URL, so navigate + click IS "open that specific task". Click misses stay honest.
+  if (leg.domain === 'connector' && leg.tool && leg.tool.sectionNav) {
+    const secs = (leg.tool.sectionNav && leg.tool.sectionNav.sections) || {};
+    const label = String(params.section || '').toLowerCase().trim();
+    const path = secs[label] || secs[Object.keys(secs)[0]];
+    if (!path) { _setMessageBody(msg, 'That site has no known section pages.'); return false; }
+    const host = String(leg.tool.origin || '');
+    const shownLabel = secs[label] ? label : Object.keys(secs)[0];
+    const r = await _orchReq('SHOW_SOURCES', { origin: host, urls: [`https://${host}${path.startsWith('/') ? path : '/' + path}`] });
+    if (!r || r.success === false) { _setMessageBody(msg, `Couldn’t open ${host} — ${(r && r.error) || 'error'}.`); return false; }
+    let clickNote = '';
+    const find = String(params.find || '').trim();
+    if (find && r.tabId != null) {
+      let c = null;
+      try { c = await _orchReq('CLICK_TEXT_ON_TAB', { tabId: r.tabId, text: find }); } catch { c = null; }
+      clickNote = (c && c.success) ? ` and opened “${find}”` : ` — couldn’t auto-open “${find}” there (${(c && c.error) || 'no match'}); it’s on that page`;
+    }
+    _setMessageBody(msg, `${r.reused ? 'Focused' : 'Opened'} ${host} on its ${shownLabel} page${clickNote}.`);
+    try { _orchLog(`SECTION_NAV ▸ ${host} ${shownLabel}${find ? ` find="${find.slice(0, 40)}"` : ''}${clickNote.startsWith(' and') ? ' → clicked' : (find ? ' → click-miss' : '')}`); } catch { /* */ }
+    return true;
+  }
+  // HL-3 (v2.74.1454) — a BUILT-IN DRIVE artifact (Core/driveArtifacts.js): nav-THEN-drive. Open the site's
+  // section page on its own tab (the v1453 SHOW_SOURCES reuse-then-navigate), then walk the landmark-backed
+  // steps via INVOKE_DRIVE_ARTIFACT. FIRST use hydrates + verifies live (the visible trial gate — the message
+  // says so; a clean run promotes to trial-pass in the SW); later uses replay the promoted entities. Honest
+  // on a step miss ("as far as X"), never a fabricated completion.
+  if (leg.domain === 'connector' && leg.tool && leg.tool.impl === 'drive') {
+    const host = String(leg.tool.origin || '');
+    const path = String(leg.tool.sectionPath || '/');
+    const firstUse = !leg.tool.hydrated;
+    _setMessageBody(msg, firstUse ? `Opening ${host} — first use of “${leg.name}”, verifying the steps on the live page…` : `Opening ${host}…`);
+    const r = await _orchReq('SHOW_SOURCES', { origin: host, urls: [`https://${host}${path.startsWith('/') ? path : '/' + path}`] });
+    if (!r || r.success === false) { _setMessageBody(msg, `Couldn’t open ${host} — ${(r && r.error) || 'error'}.`); return false; }
+    let d = null;
+    try { d = await _orchReq('INVOKE_DRIVE_ARTIFACT', { groundId: leg.tool.groundId || groundId || null, driveId: leg.tool.driveId, tabId: r.tabId, origin: host, params }); } catch { d = null; }
+    const bound = Object.entries(params || {}).filter(([, v]) => v != null && String(v).trim() !== '').map(([, v]) => `“${String(v).slice(0, 40)}”`).join(', ');
+    if (d && d.success !== false && d.ok) {
+      _setMessageBody(msg, `${leg.name || 'Done'} — walked the ${host} page${bound ? ` to ${bound}` : ''}.${d.promoted ? ' (First run verified — this now replays instantly.)' : ''}`);
+      return true;
+    }
+    const why = (d && (d.reason || d.error)) || 'a step failed';
+    _setMessageBody(msg, `Opened ${host}, but couldn’t finish “${leg.name || 'the walk'}” — ${why}. The page is open where it stopped.`);
+    return false;
+  }
   // §20 (v2.74.1288) — HEADER-REPLAY session-ride: a harvested cross-origin Bearer read (cookie-ride can't reach it) runs
   // via SESSION_REPLAY on the app tab, carrying the page-captured auth headers. Reuses the connector ANSWER-SHAPE render.
   if (leg.domain === 'connector' && leg.tool && leg.tool.replay === 'headers') {
     const _method = String(leg.tool.method || 'GET').toUpperCase();
+    // v2.74.1468 — a READ-ONLY GraphQL leg (POST by transport, READ by intent) takes the READ path: the method fork
+    // below sent aw_teammate_roster through the WRITE confirm ("…creates or modifies data") and rendered the 200 as
+    // "Sent" with the roster thrown away. Same double-guarded predicate as the workbench (v1460): never a write:true
+    // tool, and the document must pass isReadOnlyGql (a mutation never does).
+    const _gqlRead = leg.tool.write !== true && leg.tool.gql === true && leg.tool.body && typeof leg.tool.body === 'object'
+      && isReadOnlyGql(String(leg.tool.body.query || ''));
     // CX-6 (v2.74.1303) — a demonstrated/curated WRITE: fill the body template, show the EXACT request in a HITL confirm
     // gate, and fire ONLY on the user's confirm (the SESSION_REPLAY handler ALSO fail-closes on confirmed:true). Never
     // engine-fired, never unattended — the user approves THIS specific request. JSON bodies for now (form/raw: follow-up).
-    if (_method !== 'GET' && _method !== 'HEAD') {
+    if (_method !== 'GET' && _method !== 'HEAD' && !_gqlRead) {
       const { body: bodyStr, contentType } = _filledConnectorWrite(leg, params);
       const preview = _hitlRequestPreview(bodyStr);
       _setMessageBody(msg, `This will send **${_method} ${leg.tool.endpoint}** to \`${leg.tool.origin || leg.tool.appHost || ''}\` on your logged-in session — it **creates or modifies data**. Review the exact request, then confirm:\n\n${preview}`, { markdown: true });   // v1338 — render the review, not literal ** walls (escape-first path)
@@ -5554,22 +5886,37 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
       if (!confirmed) { _setMessageBody(msg, 'Cancelled — nothing was sent.'); return 'cancelled'; }   // v1338 (review C) — a user cancel is NOT a capability failure
       try { _orchLog(`RIDE_WRITE ▸ confirm ${leg.key || leg.tool.recipeId || ''} → ${leg.tool.endpoint}`); } catch { /* */ }
       let wr = null;
-      try { wr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: _method, params, body: bodyStr, contentType: contentType || 'application/json', confirmed: true, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null }); } catch { /* */ }   // v1340 (review A/§18) — hand the executor the arm-guard pair
+      try { wr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: _method, params, body: bodyStr, bodyTemplate: leg.tool.body || null, contentType: contentType || 'application/json', confirmed: true, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null, requestHeaders: leg.tool.requestHeaders || null, identityProbe: leg.tool.identityProbe || null }); } catch { /* */ }   // v1340 arm-guard pair · v1464 routing headers · v1471 — TEMPLATE + probe ride so the EXECUTOR fills {me} (chat-side fill silently DROPPED ID:'{me}')
       if (!wr || wr.success === false || (typeof wr.status === 'number' && wr.status >= 400)) { _setMessageBody(msg, `Couldn’t ${leg.does || leg.name || 'send that'}${wr && wr.error ? ` — ${wr.error}` : ''}.${wr && wr.hint ? `  ${wr.hint}.` : ''}`); return false; }
       _setMessageBody(msg, `Sent — ${_method} ${leg.tool.endpoint} → ${wr.status || 'ok'}.`);
       return true;
     }
     let rr = null;
-    try { rr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null }); } catch { /* */ }   // v1340 (review A/§18) — the arm-guard pair rides the read too
+    // v1468 — a gql READ carries its (param-filled) document + gql marker so SESSION_REPLAY attaches the body and
+    // its read-gate lets it run unconfirmed (the executor re-checks isReadOnlyGql itself — the second belt).
+    const _rb = _gqlRead ? _filledConnectorWrite(leg, params) : null;
+    try { rr = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null, requestHeaders: leg.tool.requestHeaders || null, identityProbe: leg.tool.identityProbe || null, ...(_rb ? { gql: true, body: _rb.body, bodyTemplate: leg.tool.body || null, contentType: _rb.contentType || 'application/json' } : {}) }); } catch { /* */ }   // v1340 (review A/§18) — the arm-guard pair rides the read too; v1464 — routing headers; v1471 — probe + template so the EXECUTOR fills {me}
     if (!rr || rr.success === false) {
       const hint = (rr && rr.hint) ? `  ${rr.hint}.` : '';
       _setMessageBody(msg, `Couldn’t ${leg.does || leg.name || 'do that'}${rr && rr.error ? ` — ${rr.error}` : ''}${rr && rr.detail ? ` (${rr.detail})` : ''}.${hint}`);
       return false;
     }
-    _lastGroundedRead = { leg, params, at: Date.now() };   // FL-1d — this read grounds the coming answer
+    // CX-9b — the drill join (shared helper; also hooked in the planExec tail below — both transports, v1435).
+    {
+      const dj = await _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value: rr.value, where: _resolvedLabels.divisionId ? ` in ${_resolvedLabels.divisionId}` : '', _drilled });
+      if (dj !== null) return dj;
+    }
+    _lastGroundedRead = { leg, params, at: Date.now(), value: rr.value };   // FL-1d — this read grounds the coming answer; CX-9j — the VALUE stays (panel memory) so a follow-up ("what are the instructions?") answers from THIS record
     const facts = readShapeFacts(rr.value);
+    // CX-9j (v2.74.1445) — an explicit DETAILS-intent in the ask ("… and show details", "warranty details for …") on a
+    // SINGLE record → the FULL FORMATTED RECORD, deterministically (live: the clause rode along as words and the shaper
+    // digested anyway — but "details" means the fields, not a summary). Lists still digest (N records can't full-render).
+    if (facts.kind === 'object' && /\b(?:details?|full\s+record|all\s+fields|everything)\b/i.test(ask)) {
+      const flines = renderConnectorLines(rr.value, { name: leg.name || 'Record' });
+      if (flines) { _setMessageBody(msg, flines.join('\n')); return true; }
+    }
     let shaped = null;
-    try { shaped = await _orchReq('SHAPE_ANSWER', { ask, facts }); } catch { /* best-effort */ }
+    try { shaped = await _orchReq('SHAPE_ANSWER', { ask, facts, scope: _shapeScope(params, _resolvedLabels) }); } catch { /* best-effort */ }   // CX-9d — the applied filters ride along
     if (shaped && shaped.answer) { _setMessageBody(msg, `${shaped.answer}`); return true; }
     const rlines = renderConnectorLines(rr.value, { name: leg.name || 'Results' });
     _setMessageBody(msg, rlines ? `${rlines.join('\n')}` : 'Done.');
@@ -5640,16 +5987,27 @@ async function _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params = {} }) {
     return false;
   }
   if (leg.domain === 'connector') {
+    // CX-9b (v2.74.1435) — the drill join on THIS transport too (the cookie-ride/INVOKE_SESSION read tail; the
+    // replay branch above has the twin call — one helper, both renders).
+    {
+      const dj = await _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value: res.value, where: _resolvedLabels.divisionId ? ` in ${_resolvedLabels.divisionId}` : '', _drilled });
+      if (dj !== null) return dj;
+    }
     // ANSWER-SHAPE (v2.74.1267) — the interrogator's final stage: match the answer to the QUESTION ("how many" → a
     // number), not the recipe's default list. The model SHAPES + phrases; `readShapeFacts` hands it the EXACT count + a
     // MINIMIZED sample (ids/titles/status, NO bodies — the privacy-minimization lever). A shaped answer → show it;
     // showList / a miss / no-LLM → the deterministic CX-4c render below (grounded #ids, never LLM-re-emitted).
     // FL-1d — this read grounds the coming answer. CX-7e — also remember the RETURNED record's id + the read's
     // tab-derived urlArgs (handle), so "show profile" can open that record's admin page even for a by-email lookup.
-    _lastGroundedRead = { leg, params, at: Date.now(), itemId: primaryItemId(res.value), urlArgs: res.urlArgs || null };
+    _lastGroundedRead = { leg, params, at: Date.now(), itemId: primaryItemId(res.value), urlArgs: res.urlArgs || null, value: res.value };   // CX-9j — the value stays for field follow-ups
     const facts = readShapeFacts(res.value);
+    // CX-9j (v2.74.1445) — details-intent on a single record → the full formatted record (twin of the replay tail).
+    if (facts.kind === 'object' && /\b(?:details?|full\s+record|all\s+fields|everything)\b/i.test(ask)) {
+      const flines = renderConnectorLines(res.value, { name: leg.name || 'Record' });
+      if (flines) { _setMessageBody(msg, flines.join('\n')); return true; }
+    }
     let shaped = null;
-    try { shaped = await _orchReq('SHAPE_ANSWER', { ask, facts }); } catch { /* shaper is best-effort → fall through to the render */ }
+    try { shaped = await _orchReq('SHAPE_ANSWER', { ask, facts, scope: _shapeScope(params, _resolvedLabels) }); } catch { /* shaper is best-effort → fall through to the render */ }   // CX-9d — the applied filters ride along
     if (shaped && shaped.answer) { _setMessageBody(msg, `${shaped.answer}`); return true; }
     // CX-4c — GENERIC render: ANY app's read (tickets, comments, users, orders, messages…) → its salient fields, not
     // just tickets. PII stays in the user's own panel; the result is UNTRUSTED page data → rendered as escaped text only.
@@ -5820,9 +6178,15 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
     const r = await _orchReq('INTERPRET_ASK', { ask: goal, tabId, seed: turn.seed, target: turn.target, connections: turn.connections, subTasks, history, appId: turn.appId, memoryId: turn.memoryId });
     if (r && r.success !== false) { raw = r.decision; retrieved = Array.isArray(r.retrieved) ? r.retrieved : []; groundId = r.groundId || null; }
   } catch { /* */ }
-  // F-2c-flip (v2.74.1180) — interpret unavailable (no LLM / handler error) → return FALSE so the caller falls back
-  // to the prior path (the floor never drops below pre-flip behaviour). Drop the placeholder so there's no orphan.
-  if (!raw || raw.why === 'interpret-unavailable') { try { msg.remove(); } catch { /* */ } return false; }
+  // F-2c-flip (v2.74.1180) → v2.74.1471 — interpret unavailable (no LLM / API error) now renders HONESTLY instead of
+  // cascading: the fallback chain (nav router, IL loop, legacy matcher) is LLM-backed too, so when the API itself is
+  // down every rung fails and the ask dead-ends in the TEACH offer — which LIES about the cause (live 20:47: API
+  // credits exhausted → 4 doomed calls per ask → "I don't have a saved capability… want to show me?"). Say what broke.
+  if (!raw || raw.why === 'interpret-unavailable') {
+    _setMessageBody(msg, 'I can’t reach my reasoning service right now — the API call failed (check the Anthropic key/credits in Settings, or your network). Deterministic commands still work (`legs`, `ops`, `pending`); retry the ask once it’s restored.', { markdown: true });
+    _orchFinalize(msg);
+    return true;
+  }
   const d = applyConfidenceGate(
     normalizeInterpretDecision(raw, { retrieved, primitives: ['OPEN_URL', 'CLICK', 'TYPE', 'SCROLL', 'EXTRACT'] }),
     { minConfidence: 0.6 },
@@ -5917,6 +6281,22 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
     return true;
   }
 
+  // CX-9l (v2.74.1448) — NAVIGATE to a NAMED KNOWN site: when the palette carries [TARGET-SITE] legs, the ask named a
+  // site whose TRUE origin we hold — never navigate to a world-knowledge-minted domain (live: "on vendorsuite…" →
+  // "Opened vendorsuite.com", a wrong guess; the site is vendorsuite.drhorton.com), and FOCUS the site's existing tab
+  // instead of opening a duplicate (focusOnly — the live tab's page is never blown away).
+  if (d.intent === 'navigate') {
+    const t = (retrieved || []).find((c) => c && c.scope === 'target' && c.tool && (c.tool.origin || c.tool.appHost));
+    if (t) {
+      const host = String(t.tool.origin || t.tool.appHost).replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+      try { msg.remove(); } catch { /* */ }
+      const m2 = appendMessage({ role: 'assistant', body: '' });
+      const r = await _orchReq('SHOW_SOURCES', { origin: host, urls: [`https://${host}/`], focusOnly: true });
+      _setMessageBody(m2, r && r.success !== false ? `${r.reused ? `Focused your existing ${host} tab` : `Opened ${host}`}.` : `Couldn’t open ${host} — ${(r && r.error) || 'error'}.`);
+      _orchFinalize(m2);
+      return true;
+    }
+  }
   // navigate / act / decompose → map to a RouteDecision and dispatch through the VERIFIED runners (the dispatcher
   // renders its own bubbles, so drop the placeholder). act→replay confirms first; _orchRun carries the CV-6 gate.
   const rd = (d.intent === 'navigate') ? { action: 'primitive', tool: { op: 'OPEN_URL' }, params: _withBoundUrl(d.params), confidence: d.confidence }
@@ -5983,7 +6363,16 @@ async function _tryIlCommand(text) {
   // a Browser/Self builtin READ leg dispatches through its channel and renders here (IL-3b).
   if (out.status === 'act' && out.decision && out.decision.leg) {
     const leg = out.decision.leg;
-    if (leg.domain && leg.domain !== 'page') { await _ilRunBuiltin(msg, { leg, ask, tabId, groundId: out.groundId }); _orchFinalize(msg); return true; }   // v1338 (review D) — the builtin's terminal text survives a reload
+    if (leg.domain && leg.domain !== 'page') {
+      const _ok = await _ilRunBuiltin(msg, { leg, ask, tabId, groundId: out.groundId });   // v1338 (review D) — the builtin's terminal text survives a reload
+      // CX-9p (v2.74.1461) — WRITE-BACK the alias on a SUCCESSFUL connector invoke: record this ask-shape → this leg
+      // so a future matching ask warms straight back to it (stamped scope 'alias' at the next projection). The
+      // teach-once flywheel extended to connector legs. Fire-and-forget, SW-owned store; never blocks the turn.
+      if (_ok === true && leg.domain === 'connector' && leg.key) {
+        try { _orchReq('RECORD_CONNECTOR_ALIAS', { ask, legRef: leg.key, host: (leg.tool && (leg.tool.origin || leg.tool.appHost)) || '' }).catch(() => { /* */ }); } catch { /* */ }
+      }
+      _orchFinalize(msg); return true;
+    }
     const why = out.decision.reason ? ` — ${out.decision.reason}` : '';
     try { _orchLog(`IL ▸ "${String(ask).slice(0, 50)}" → run "${leg.name || leg.key}"${why}`); } catch { /* */ }
     await _orchRun(msg, {
@@ -6638,6 +7027,19 @@ async function sendChatMessage() {
     await _clearCurrentChat();
     return;
   }
+  // FL-1e (v2.74.1433) — "show/go to <section>" (e.g. "show warranty"): navigate a grounded site to a PARAM-FREE section
+  // page (a ride recipe's listUrl/itemUrl that fills with no params). Runs AFTER the in-memory `show N` / bare-show
+  // handlers (they return first) and only ACTS on a real section match — else `_showSection` returns false and the ask
+  // falls through to interpret UNCHANGED. Verbs: show / view (v1451) / go to — NOT bare "open" (collides with the
+  // status word: "open warranty tasks" is a LIST read, never a navigation).
+  {
+    const mSectionShow = text.match(/^(?:show|view|go\s+to)\s+(?:the\s+)?([a-z][\w ]*?)\s*$/i);
+    if (mSectionShow && await _showSection(mSectionShow[1].trim())) { input.value = ''; _autosizeInput(); return; }
+  }
+  // CX-9j (v2.74.1444) — field follow-up on the last grounded read ("what are the instructions?" after a task read →
+  // the record's OWN Instructions field, full text, deterministic). Acts only on a fresh read + a real field match;
+  // everything else falls through untouched (so "what are the instructions?" with no recent read still routes normally).
+  if (await _fieldFollowup(text)) { input.value = ''; _autosizeInput(); return; }
   // OV (v2.74.1417, DESIGN_overview.md) — the Overview LEG WORKBENCH commands (author / test / verify legs before an
   // app consumes them). Numbered + terse, like `ops` / `approve N`. `legs` populates the number index the others use.
   if (/^legs\s*$/i.test(text)) {
@@ -6664,6 +7066,19 @@ async function sendChatMessage() {
       input.value = ''; _autosizeInput();
       appendMessage({ role: 'user', body: text });
       await _testLeg(parseInt(mTest[1], 10), _parseKvParams(mTest[2]));
+      return;
+    }
+    // CX-9i (v2.74.1442) — a test-SHAPED ask with no leg NUMBER (a pasted `<placeholder>` or k=v without the index):
+    // COACH instead of silently falling through to the LLM router (live: `test <Warranty tasks #> divisionId=83` routed
+    // to interpret and produced a shaped prose answer that LOOKED like a workbench result; the literal "<TaskId…>"
+    // twin filled a URL and 500'd). Guarded to clearly-workbench forms (contains = or <) so a conversational
+    // "test my zendesk connection" still reaches the router.
+    if (/^test\s+\S/i.test(text) && /[=<]/.test(text)) {
+      input.value = ''; _autosizeInput();
+      appendMessage({ role: 'user', body: text });
+      const mT = appendMessage({ role: 'assistant', body: '' });
+      _setMessageBody(mT, 'The workbench needs the leg **number** — run `legs` to see them, then e.g. `test 12 divisionId=83 status=fixed` (replace 12 with the number shown).', { markdown: true });
+      _orchFinalize(mT);
       return;
     }
     const mVerify = text.match(/^(?:verify|arm)\s+(?:leg\s+)?#?(\d+)\s*$/i);

@@ -57,6 +57,16 @@ const SYSTEM = [
   '- SELF-SURFACE tools (marked [SELF-SURFACE]) run on the app\'s OWN surface (its canvas/panel), never the live page —',
   '  the CURRENT TAB is IRRELEVANT to selecting one: never reject or downgrade it because the active site looks',
   '  unrelated to the ask ("draft a reply" composes on the app\'s canvas from ANY page).',
+  '- SCOPING (order of operations for connector tools): a [LEARNED-MATCH] leg (this exact ask-shape resolved to it',
+  '  before) wins outright — select it. Else [TARGET-SITE] legs (the ask NAMES their site) come first — when present,',
+  '  select among THEM; never prefer the current page over a named target. Next, a [DOMAIN-MATCH] leg: the ask\'s own',
+  '  vocabulary ("warranty task", "announcements") matches that site\'s tools — treat it like an implicitly named',
+  '  target. Then an [ACTIVE-TAB] leg that serves the ask; then [GLOBAL fallback]. A farther tier that clearly serves',
+  '  the ask BEATS forcing a closer tier that does not — never decompose an ask into page steps when a single',
+  '  connector leg in ANY tier does the whole thing. The connector legs are PRE-RANKED (highest precedence first) —',
+  '  prefer earlier legs; a generic globally-scoped tool never outranks the named/implied site\'s tool.',
+  '  A [CONNECTOR] leg never needs the current page — never reject one for being "on the wrong page".',
+  '  If NO tool serves an act-shaped ask on the named/current site, prefer "teach" (offer to learn it) over a miss.',
   '- RETRY: if RECENT_TURNS shows the matching act FAILED and the user asks again, RE-SELECT that act — a re-ask after',
   '  a failure means the user likely fixed the blocker and wants a retry, not an "answer" explaining the old failure.',
   '- OBJECTS: if an <OBJECTS> block is given, it is the app\'s schema (its objects, states, actions). Use its exact',
@@ -97,14 +107,31 @@ export function buildInterpretMessages(ask, { retrieved = [], primitives = [], a
     // page-independent, and without this marker the model can't tell it from a page capability (live .1326: on an
     // unrelated tab it reasoned "tickets don't live here" and answered instead of composing).
     const selfMark = (c && c.domain === 'self') ? '   [SELF-SURFACE: page-independent]' : '';
+    // CX-9k (v2.74.1446) — the CONNECTOR twin of that lesson: a session-ride/broker leg runs on the APP'S OWN
+    // tab/session wherever it is — the CURRENT page is irrelevant. Without the marker the model narrates false
+    // page-dependence (live: "I'm on a Deepgram page … I'd need to be on the VendorSuite page" for a ride read).
+    const connMark = (c && c.domain === 'connector') ? '   [CONNECTOR: page-independent — runs on the app’s own session, any current tab]' : '';
+    // CX-9l (v2.74.1447) → CX-9m (v1450) → CX-9p (v1461) — the SCOPING tier (the user-specified order of operations):
+    // LEARNED-MATCH (a recorded ask-shape→leg success) > TARGET-SITE (the ask names the site) > DOMAIN-MATCH (the
+    // ask's vocabulary implies it) > ACTIVE-TAB > GLOBAL fallback. Deterministically stamped at projection AND
+    // pre-ranked (Core/legPrerank) so the highest tier leads; the SCOPING rule binds on these markers.
+    const scopeMark = (c && c.scope === 'alias') ? '   [LEARNED-MATCH: this ask-shape succeeded with this tool before]'
+      : (c && c.scope === 'target') ? '   [TARGET-SITE: the ask names this site]'
+        : (c && c.scope === 'vocab') ? '   [DOMAIN-MATCH: the ask’s vocabulary matches this site’s tools]'
+          : (c && c.scope === 'tab') ? '   [ACTIVE-TAB]'
+            : (c && c.scope === 'global') ? '   [GLOBAL fallback]' : '';
     // CX-4c — render the param schema so the LLM binds the EXACT names/types (a connector read like read_ticket needs {id}).
+    // CX-9f (v2.74.1439) — ALSO render enum values + the per-param HINT: `status:string[new|open|fixed|closed]`,
+    // `address:string "street address or task number — picks ONE task"`. A bare name:type gave the binder nothing to
+    // bind BY (live: "greensboro" landed in `address` once, and `address` was skipped once, on the same ask shape).
+    // Hints are curated recipe text but still flow through sanitizeToolString (injection boundary — data, never markup).
     const ps = c && c.paramSchema && c.paramSchema.properties;
     const req = (c && c.paramSchema && Array.isArray(c.paramSchema.required)) ? c.paramSchema.required : [];
     const pkeys = (ps && typeof ps === 'object') ? Object.keys(ps) : [];
     const params = pkeys.length
-      ? `\n  params: ${pkeys.map((k) => `${sanitizeToolString(k, 40)}${req.includes(k) ? '*' : ''}${ps[k] && ps[k].type ? `:${sanitizeToolString(String(ps[k].type), 20)}` : ''}${ps[k] && ps[k].format ? `(${sanitizeToolString(String(ps[k].format), 20)})` : ''}`).join(', ')}`
+      ? `\n  params: ${pkeys.map((k) => `${sanitizeToolString(k, 40)}${req.includes(k) ? '*' : ''}${ps[k] && ps[k].type ? `:${sanitizeToolString(String(ps[k].type), 20)}` : ''}${ps[k] && ps[k].format ? `(${sanitizeToolString(String(ps[k].format), 20)})` : ''}${ps[k] && Array.isArray(ps[k].enum) && ps[k].enum.length ? `[${ps[k].enum.slice(0, 8).map((e) => sanitizeToolString(String(e), 20)).join('|')}]` : ''}${ps[k] && ps[k].hint ? ` "${sanitizeToolString(String(ps[k].hint), 140)}"` : ''}`).join(', ')}`
       : '';
-    return `- ref: ${ref}${irr}${selfMark}\n  does: ${label}${params}`;
+    return `- ref: ${ref}${irr}${selfMark}${connMark}${scopeMark}\n  does: ${label}${params}`;
   }).filter(Boolean);
   const prims = (Array.isArray(primitives) ? primitives : []).map((p) => (typeof p === 'string' ? p : (p && (p.op || p.key)))).filter(Boolean);
   const intent = String(seed ?? '').trim();

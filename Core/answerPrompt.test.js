@@ -99,3 +99,19 @@ describe('buildAnswerMessages — OM object model', () => {
     assert.doesNotMatch(buildAnswerMessages({ ask: 'x' }).user, /<OBJECTS/);
   });
 });
+
+describe('buildAnswerMessages — RIDE class (session API actions)', () => {
+  it('lists armable curated rides so "what can you do" covers connected API legs', () => {
+    const { user } = buildAnswerMessages({
+      ask: 'what can you do on aircall workspace',
+      connections: [{ origin: 'https://workspace.aircall.io', label: 'Aircall Workspace' }],
+      ride: [
+        { id: 'aw_team_availability', name: 'Team availability (all agents)', does: 'list EVERY teammate live availability', reviewState: 'accepted', enabled: true },
+        { id: 'aw_contact_by_phone', name: 'Find contact by phone', does: 'look up a contact by phone number', reviewState: 'accepted', enabled: true },
+      ],
+    });
+    assert.match(user, /<RIDE/);
+    assert.match(user, /Team availability \(all agents\)/);
+    assert.match(user, /Find contact by phone/);
+  });
+});

@@ -315,9 +315,12 @@ getIdentitySummary()
     // misleading when debugging cloud paths.
     const session = await getCloudSession().catch(() => null);
     const boundId = session?.orchardUserId;
+    // v1467 (obs #1) — stamp the BUILD VERSION on the trace's first line: the version is the join key between
+    // findings/commits/logs, and "is this a stale build?" burned multiple live round-trips with no way to tell.
+    let _v = ''; try { _v = chrome.runtime.getManifest().version; } catch { /* */ }
     Logger.info('background', boundId
-      ? `Orchard identity ready (orchardUserId ${boundId}; device key preview ${orchardUserIdPreview})`
-      : `Orchard identity ready (preview ${orchardUserIdPreview}; not bound to cloud)`);
+      ? `Orchard v${_v} identity ready (orchardUserId ${boundId}; device key preview ${orchardUserIdPreview})`
+      : `Orchard v${_v} identity ready (preview ${orchardUserIdPreview}; not bound to cloud)`);
   })
   .catch(err => Logger.warn('background', `Orchard identity init: ${err.message}`));
 
@@ -1307,6 +1310,33 @@ async function _writeRideRecipes(groundId, list) {
   });
 }
 
+// HL-1 (v2.74.1454) — the per-Ground DRIVE-ARTIFACT collection (built-in drive twins of the ride recipes;
+// Core/driveArtifacts.js). Mirrors the rideRecipes store exactly: per-ground array, chained RMW, seeded from
+// DRIVE_ARTIFACTS on first access (in the sg.js merged read, which knows the origin). Hydration stamps
+// (capabilityId/fragmentId/strategyId) live ON these records so a catalog re-seed never orphans them.
+const _driveArtifactsKey = (groundId) => `driveArtifacts:${groundId}`;
+const DRIVE_ARTIFACT_CAP = 100;
+async function _readDriveArtifacts(groundId) {
+  if (!groundId) return [];
+  try { const k = _driveArtifactsKey(groundId); const got = await chrome.storage.local.get(k); return Array.isArray(got?.[k]) ? got[k] : []; }
+  catch { return []; }
+}
+const _driveArtifactChains = new Map();
+function _driveArtifactChained(groundId, fn) {
+  const tail = _driveArtifactChains.get(groundId) || Promise.resolve();
+  const next = tail.then(() => fn());
+  const stored = next.catch(() => {});
+  _driveArtifactChains.set(groundId, stored);
+  stored.then(() => { if (_driveArtifactChains.get(groundId) === stored) _driveArtifactChains.delete(groundId); });
+  return next;
+}
+async function _writeDriveArtifacts(groundId, list) {
+  if (!groundId) return;
+  return _driveArtifactChained(groundId, async () => {
+    await chrome.storage.local.set({ [_driveArtifactsKey(groundId)]: (Array.isArray(list) ? list : []).slice(0, DRIVE_ARTIFACT_CAP) });
+  });
+}
+
 // PS-0 (v2.74.1123) — the per-Ground capability-gap registry: Orchard's "how could you do better?" enumeration,
 // PERSISTED (durable chrome.storage.local) instead of discarded. The inverse of a Perspective; PS-1 arms it into
 // the interaction monitor so the user's ordinary actions passively fulfil + learn the gaps. (DESIGN_passive_synthesis §2.1)
@@ -1767,6 +1797,8 @@ const _sgMessageHandlers = {
   mutateObsPool        : _mutateObsPool,           // PS-2 — atomic per-Ground RMW of the long-tail observed pool
   readRideRecipes      : _readRideRecipes,         // §18 — the per-Ground ride-recipe collection (read)
   writeRideRecipes     : _writeRideRecipes,        // §18 — replace the per-Ground ride-recipe list (chained RMW)
+  readDriveArtifacts   : _readDriveArtifacts,      // HL-1 (v2.74.1454) — the per-Ground drive-artifact collection (read)
+  writeDriveArtifacts  : _writeDriveArtifacts,     // HL-1 — replace the per-Ground drive-artifact list (chained RMW)
   getDemoWriteCaptures : () => _obsLastWriteCaptures,   // CX-8c — DERIVE reads the demo's captured writes to bank pending ride write-recipes
   }),
 };
@@ -1860,9 +1892,13 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   }
 });
 
+// v1467 (obs #7) — the read-only VIEWER pump (Studio/panel poll getters) drowned the trace: one Studio open emitted
+// ~60 `Message:` DEBUG lines (~40% of a day's exported log), burying the decision signal. These carry zero decision
+// content — drop them from the log entirely (the handlers still run; a FAILING getter logs from its own handler).
+const _QUIET_MSG = new Set(['GET_SITEMAP', 'GET_GROUND_CHROME', 'GET_OUTCOMES', 'GET_RIDE_RECIPES', 'GET_LOGS', 'LOG_ENTRY', 'GET_MONITOR_CONSENT', 'CAPABILITY_LIST_INVOCATIONS', 'GET_LEG_OVERVIEW', 'GET_RIDE_ARMED_GROUNDS']);
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const { type, payload } = message;
-  Logger.debug('background', `Message: ${type}`);
+  if (!_QUIET_MSG.has(type)) Logger.debug('background', `Message: ${type}`);
 
   // Registry dispatch (R1): SG handlers call sendResponse themselves (verbatim with the old switch); the
   // `.catch` is a safety net if a handler rejects before responding. Checked before the legacy switch;

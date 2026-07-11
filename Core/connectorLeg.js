@@ -65,6 +65,10 @@ function recipeParamSchema(params) {
     if (p && p.type) slot.type = p.type;
     if (p && Array.isArray(p.enum)) slot.enum = p.enum.slice(0, 50);
     if (p && p.gid) slot.gid = String(p.gid);   // CX-7c — the Shopify resource Kind; coerceParams wraps a bare id into a gid
+    // CX-9f (v2.74.1439) — a short per-param HINT the interpret palette renders, so the BINDER knows the slot's
+    // semantics (live: `address {type:string}` was bound "greensboro" once and skipped once — a bare name+type gives
+    // the router nothing to bind BY). Curated text, capped; rendered through sanitizeToolString like every tool string.
+    if (p && p.hint) slot.hint = String(p.hint).slice(0, 140);
     properties[name] = slot;
     if (p && p.required) required.push(name);
   }
@@ -110,7 +114,18 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
       pulse: (r.pulse && typeof r.pulse === 'object') ? r.pulse : (_str(r.pulse) ? { kind: _str(r.pulse) } : null),
       // FL-10 (v2.74.1383) — drill declaration (list rows → evidence via the named comments read) + the
       // evidence gate on unattended writes. Recipe DATA; the fleet harness only reads these markers.
-      drill: (r.drill && typeof r.drill === 'object' && _str(r.drill.via)) ? { via: _str(r.drill.via) } : null,
+      // CX-9b (v2.74.1434) — drill grew the JOIN fields (param/from/matchOn/label: list row → the details read,
+      // matched on a bound ask-param). Additive — fleet consumers read only `.via`.
+      drill: (r.drill && typeof r.drill === 'object' && _str(r.drill.via)) ? {
+        via: _str(r.drill.via),
+        ...(_str(r.drill.param) ? { param: _str(r.drill.param) } : {}),
+        ...(_str(r.drill.from) ? { from: _str(r.drill.from) } : {}),
+        ...(_str(r.drill.matchOn) ? { matchOn: _str(r.drill.matchOn) } : {}),
+        ...(Array.isArray(r.drill.label) ? { label: r.drill.label.filter((x) => _str(x)).slice(0, 10) } : {}),
+      } : null,
+      // CX-9b (v2.74.1434) — per-param `resolve` specs (human value → canonical id via one of the app's own reads;
+      // Core/rideParamResolve.js). The panel dispatch resolves BEFORE the executor, so both transports benefit.
+      resolve: (r.resolve && typeof r.resolve === 'object') ? r.resolve : null,
       autoRequires: _str(r.autoRequires) || null,
       endpoint, method: _str(r.method).toUpperCase() || 'GET',
       // CX-7 — a GraphQL READ is a POST with a body (the query document), so the body threads for gql recipes too
@@ -127,6 +142,7 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
       urlParam: (r.urlParam && typeof r.urlParam === 'object' && _str(r.urlParam.name) && _str(r.urlParam.pattern)) ? { name: _str(r.urlParam.name), pattern: _str(r.urlParam.pattern) } : null,
       persistedOp: _str(r.persistedOp) || null,   // CX-7b — {op_sha} fills from the per-origin op bank (sniffed, never curated/model data)
       shopProbe: r.shopProbe === true,             // CX-7c — run the `{shop{name}}` liveness probe before the call
+      requestHeaders: (r.requestHeaders && typeof r.requestHeaders === 'object') ? r.requestHeaders : null,
     },
   };
 }

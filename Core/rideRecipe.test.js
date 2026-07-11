@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import {
   safetyClassForMethod, safetyRank, originMatchesAppHost, recipeFromCatalogEntry,
   seedFromCatalog, mergeRecipes, setEnabled, review, downgradeSafety, editMeta, armable, acceptPendingReads,
+  curatedRidesForConnections, mergeRideCatalogForAnswer, catalogArmedEntries,
 } from './rideRecipe.js';
 
 // A miniature of the CONNECTOR_RECIPES shape.
@@ -62,7 +63,8 @@ describe('rideRecipe — seed from catalog', () => {
       { id: 'x', name: 'X', does: 'd', method: 'POST', endpoint: '/e', appHost: 'zendesk.com',
         itemUrl: '/agent/tickets/{id}', listUrl: '/agent/search', write: true, gql: true, csrf: 'sniff',
         bodyType: 'form', contentType: 'application/json', verifyIdentity: true, identityProbe: '/me.json',
-        persistedOp: 'CreateX', shopProbe: true, pulse: { kind: 'inflow' }, drill: { via: 'y' }, urlParam: { name: 'h', pattern: 'p' } },
+        persistedOp: 'CreateX', shopProbe: true, pulse: { kind: 'inflow' }, drill: { via: 'y' }, urlParam: { name: 'h', pattern: 'p' },
+        resolve: { divisionId: { via: '/api/State', defaultPath: 'a.b', lists: ['c'], match: ['Code'], id: 'Id', label: 'Name' } } },
       { groundId: 'g1', origin: 'deako.zendesk.com' });
     assert.equal(rec.itemUrl, '/agent/tickets/{id}');
     assert.equal(rec.listUrl, '/agent/search');
@@ -78,9 +80,10 @@ describe('rideRecipe — seed from catalog', () => {
     assert.deepEqual(rec.pulse, { kind: 'inflow' });
     assert.deepEqual(rec.drill, { via: 'y' });
     assert.deepEqual(rec.urlParam, { name: 'h', pattern: 'p' });
+    assert.equal(rec.resolve.divisionId.defaultPath, 'a.b');   // CX-9b (v1434) — the resolve specs ride the seeded record
     // a plain GET read carries NONE of these — additive, no empty keys (byte-identical to the pre-v1432 record)
     const plain = recipeFromCatalogEntry({ id: 'p', method: 'GET', endpoint: '/g', appHost: 'zendesk.com' }, { origin: 'deako.zendesk.com' });
-    for (const k of ['itemUrl', 'listUrl', 'write', 'gql', 'csrf', 'bodyType', 'verifyIdentity', 'persistedOp', 'shopProbe', 'pulse', 'drill', 'urlParam']) {
+    for (const k of ['itemUrl', 'listUrl', 'write', 'gql', 'csrf', 'bodyType', 'verifyIdentity', 'persistedOp', 'shopProbe', 'pulse', 'drill', 'urlParam', 'resolve']) {
       assert.equal(k in plain, false, `plain read must not carry ${k}`);
     }
   });
@@ -138,5 +141,52 @@ describe('rideRecipe — edit transforms + arm guard', () => {
     assert.equal(recipes.find((r) => r.id === 'r3').reviewState, 'pending');
     assert.equal(recipes.find((r) => r.id === 'r5').reviewState, 'rejected');
     assert.deepEqual(acceptPendingReads([]), { recipes: [], accepted: 0 });
+  });
+});
+
+describe('curatedRidesForConnections — IL_ANSWER ride projection (v2.74.1458)', () => {
+  const AC_CAT = [
+    { id: 'aw_team_availability', name: 'Team availability (all agents)', does: 'list every teammate availability', method: 'GET', endpoint: '/v3/availabilities', params: [], appHost: 'workspace.aircall.io' },
+    { id: 'aw_close_conversation', name: 'Close conversation after a call', does: 'wrap up', method: 'POST', endpoint: '/graphql', params: [{ name: 'callId' }], appHost: 'workspace.aircall.io', write: true, gql: true },
+  ];
+  it('projects curated catalog rides for connected origins without a Ground', () => {
+    const rides = curatedRidesForConnections([{ origin: 'https://workspace.aircall.io', label: 'Aircall' }], AC_CAT);
+    assert.equal(rides.length, 2);
+    assert.equal(rides[0].reviewState, 'accepted');
+    assert.equal(rides.find((r) => r.id === 'aw_team_availability').origin, 'workspace.aircall.io');
+  });
+  it('mergeRideCatalogForAnswer: stored records override curated on the same origin|id', () => {
+    const curated = curatedRidesForConnections([{ origin: 'https://workspace.aircall.io' }], AC_CAT);
+    const stored = [{ ...curated[0], reviewState: 'rejected', enabled: false }];
+    const merged = mergeRideCatalogForAnswer(curated, stored);
+    assert.equal(merged.find((r) => r.id === 'aw_team_availability').reviewState, 'rejected');
+    assert.equal(merged.length, 2);
+  });
+});
+
+describe('catalogArmedEntries — CX-9r catalog-armed origins (v2.74.1463)', () => {
+  it('an open-tab host matching a curated appHost projects WITHOUT a Ground (subdomain + exact)', () => {
+    const entries = catalogArmedEntries(['deako.zendesk.com', 'workspace.aircall.io'], [
+      ...CATALOG,
+      { id: 'aw_x', name: 'Team availability', does: 'who is available', method: 'GET', endpoint: '/v3/a', appHost: 'workspace.aircall.io' },
+    ]);
+    const zd = entries.find((e) => e.host === 'deako.zendesk.com');
+    const ac = entries.find((e) => e.host === 'workspace.aircall.io');
+    assert.ok(zd && zd.gid === null, 'subdomain matches appHost zendesk.com');
+    assert.equal(zd.texts.length, 3);                          // the 3 zendesk CATALOG entries, not shopify
+    assert.ok(ac && ac.texts[0].includes('Team availability')); // texts = name+does (the vocab source)
+  });
+  it('covered hosts (a real ride-armed Ground exists) are skipped — stored user state outranks the catalog', () => {
+    const entries = catalogArmedEntries(['deako.zendesk.com'], CATALOG, ['DEAKO.zendesk.com']);
+    assert.equal(entries.length, 0);
+  });
+  it('non-matching hosts and duplicates drop; evil-suffix host does NOT match', () => {
+    const entries = catalogArmedEntries(['example.com', 'evil-zendesk.com', 'a.zendesk.com', 'a.zendesk.com'], CATALOG);
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].host, 'a.zendesk.com');
+  });
+  it('malformed input → empty', () => {
+    assert.deepEqual(catalogArmedEntries(null, CATALOG), []);
+    assert.deepEqual(catalogArmedEntries(['x.zendesk.com'], null), []);
   });
 });

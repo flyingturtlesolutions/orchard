@@ -2326,8 +2326,10 @@ function handleSetFile(selector, value) {
  *   5. All descendants (last resort)
  *
  * Match rule: case-insensitive, trimmed, whitespace-collapsed exact
- * match against the candidate's textContent. First match wins; multiple
- * matches log a warning in info but click the first.
+ * match against the candidate's textContent; when no exact match, a
+ * contains fallback (shortest containing label wins — rollup rows like
+ * "Atlanta West - 210 All" before vendor-specific duplicates). First
+ * match wins; multiple matches log a warning in info but click the first.
  *
  * Verify-time sentinel: when value is "__VERIFY_FIRST__" (set by
  * fragment-author when the user's saved value is parameterized),
@@ -2466,32 +2468,32 @@ function _findFirstOptionCandidate(container) {
  * nothing.
  */
 function _findLabelMatches(container, normalizedTarget) {
-  const tryGroup = (selector) => {
-    const els = container.querySelectorAll(selector);
-    return [...els].filter(el => {
+  const matchIn = (els, mode) => {
+    const out = [...els].filter((el) => {
       const text = _normalizeLabelForMatch(el.textContent || '');
-      return text === normalizedTarget;
+      if (mode === 'exact') return text === normalizedTarget;
+      return text.includes(normalizedTarget);
     });
+    if (mode === 'contains' && out.length > 1) {
+      // Shortest containing label wins — e.g. "Atlanta West" → "Atlanta West - 210 All" before vendor-specific duplicates.
+      out.sort((a, b) => _normalizeLabelForMatch(a.textContent || '').length - _normalizeLabelForMatch(b.textContent || '').length);
+    }
+    return out;
   };
+  const tryGroup = (selector, mode) => matchIn(container.querySelectorAll(selector), mode);
 
-  // Try in priority order.
-  let group = tryGroup('[role="option"]');
-  if (group.length > 0) return group;
-  group = tryGroup('[role="menuitem"]');
-  if (group.length > 0) return group;
-  // v2.72.92 — Interactive descendants (anchor-based menus, button menus).
-  group = tryGroup(_CLICKABLE_DESCENDANTS_SEL);
-  if (group.length > 0) return group;
-  // Direct children — the wrapper-div pattern (custom dropdowns where
-  // the wrapper itself is the click target).
-  group = [...container.children].filter(el => {
-    const text = _normalizeLabelForMatch(el.textContent || '');
-    return text === normalizedTarget;
-  });
-  if (group.length > 0) return group;
-  // Any descendant — broadest fallback.
-  group = tryGroup('*');
-  return group;
+  const groups = ['[role="option"]', '[role="menuitem"]', _CLICKABLE_DESCENDANTS_SEL];
+  for (const mode of ['exact', 'contains']) {
+    for (const sel of groups) {
+      const g = tryGroup(sel, mode);
+      if (g.length > 0) return g;
+    }
+    const direct = matchIn(container.children, mode);
+    if (direct.length > 0) return direct;
+    const any = tryGroup('*', mode);
+    if (any.length > 0) return any;
+  }
+  return [];
 }
 
 /**

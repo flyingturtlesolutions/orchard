@@ -792,9 +792,15 @@ textarea {
 }
 
 .message-body {
-  font-family: var(--font-serif);
-  font-size: 15px;
-  line-height: 1.65;
+  /* v2.74.1436 — prose adopts the ACTIVE TAB's text style. Services/Chat/tabTint.js
+     writes the --page-* tokens from the page's computed styles (clamped for legibility
+     in Core/tabType.js); unset, the fallbacks below are exactly the native look. Message
+     prose only — the panel chrome keeps Orchard's own type. */
+  font-family: var(--page-font, var(--font-serif));
+  font-size: var(--page-fs, 15px);
+  line-height: var(--page-lh, 1.65);
+  font-weight: var(--page-fw, 400);
+  letter-spacing: var(--page-ls, normal);
   color: var(--c-text);
   word-wrap: break-word;
   white-space: pre-wrap;

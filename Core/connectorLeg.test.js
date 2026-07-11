@@ -71,6 +71,10 @@ describe('recipeToLeg — session-ride recipe → client connector leg (§4)', (
     assert.equal(withUrls.tool.listUrl, '/agent/search/1?q={query}');
     assert.equal(leg.paramSchema.properties.id.type, 'integer');
     assert.deepEqual(leg.paramSchema.required, ['id']);
+    // CX-9f (v1439) — a param `hint` threads into the schema (capped) so the interpret palette can render slot semantics.
+    const withHint = recipeToLeg({ ...recipe, params: [{ name: 'id', type: 'integer', required: true, hint: 'the ticket number, digits only' }] }, { account: 'acme', trusted: true });
+    assert.equal(withHint.paramSchema.properties.id.hint, 'the ticket number, digits only');
+    assert.equal('hint' in leg.paramSchema.properties.id, false);   // no hint → no key (payload unchanged)
   });
 
   it('a write recipe → act mode + confirm (floors even when trusted); honors method', () => {
