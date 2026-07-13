@@ -134,6 +134,7 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
       contentType: _str(r.contentType) || null,
       verifyIdentity: r.verifyIdentity === true,
       identityProbe: _str(r.identityProbe) || null,
+      identityGql: (r.identityGql && typeof r.identityGql === 'object') ? r.identityGql : null,   // v1479 — {me} via a GraphQL identity read (the working transport → the AGENT id)
       // CX-7 (v2.74.1386) — the Shopify-class transport markers: gql (POST body is a GraphQL document; a READ-ONLY
       // document may run unconfirmed — validated at both belts), csrf 'sniff' (token captured off the SPA's own
       // requests, no meta tag), urlParam (fill e.g. {handle} from the ride tab's URL — never from the model).

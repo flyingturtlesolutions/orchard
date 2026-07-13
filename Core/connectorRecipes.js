@@ -552,6 +552,10 @@ export const CONNECTOR_RECIPES = [
   { ...AC, id: 'aw_set_availability', name: 'Set my Aircall availability', write: true, method: 'POST', gql: true, contentType: 'application/json',
     does: 'set YOUR availability preference — answers "set me to available / unavailable / do-not-disturb / busy / back-office"; does not place or answer calls',
     endpoint: acGqlEndpoint('UpdateAgent_Mutation'),
+    // v2.74.1479 — {me} = the AGENT id (input.ID), NOT the REST user id: resolve it from the GraphQL agent read
+    // (getAgentV2.ID) over the WORKING transport. The /v5 REST identityProbe 401s here (live 00:08:58), and it would
+    // return the wrong id anyway. GetCurrentAgentV2_Query returns exactly the ID UpdateAgent_Mutation wants.
+    identityGql: { endpoint: acGqlEndpoint('GetCurrentAgentV2_Query'), body: acGqlBody('GetCurrentAgentV2_Query', {}), idPath: 'data.getAgentV2.ID' },
     body: acGqlBody('UpdateAgent_Mutation', { input: { ID: '{me}', availability: { preference: '{preference}' } } }),
     params: [{ name: 'preference', type: 'string', enum: ['ALWAYS_OPENED', 'ALWAYS_CLOSED', 'DOING_BACK_OFFICE', 'OTHER'], required: true, hint: 'ALWAYS_OPENED = available; ALWAYS_CLOSED = unavailable / do-not-disturb / busy; DOING_BACK_OFFICE = back-office; OTHER = custom' }] },   // v1470 — the opaque enum needs user-language mapping (live: "set me to unavailable" fell to teach)
   { ...AC, id: 'aw_send_sms', name: 'Send an SMS from my line', write: true, destructive: true, method: 'POST', gql: true, contentType: 'application/json',

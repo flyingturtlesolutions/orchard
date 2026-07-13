@@ -71,6 +71,7 @@ export function recipeFromCatalogEntry(entry, { groundId = '', origin = '' } = {
   if (e.pulse != null) rec.pulse = e.pulse;
   if (e.drill && typeof e.drill === 'object') rec.drill = e.drill;
   if (e.resolve && typeof e.resolve === 'object') rec.resolve = e.resolve;   // CX-9b (v1434) — per-param resolve specs
+  if (e.identityGql && typeof e.identityGql === 'object') rec.identityGql = e.identityGql;   // v1479 — {me} from a GraphQL identity read (endpoint/body/idPath) when the REST probe can't (agent-id vs user-id)
   for (const k of ['itemUrl', 'listUrl', 'bodyType', 'contentType', 'identityProbe', 'persistedOp', 'csrf', 'autoRequires']) {
     if (e[k] != null && e[k] !== '') rec[k] = e[k];
   }

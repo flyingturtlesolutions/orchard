@@ -4,6 +4,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { CONNECTOR_RECIPES, fillEndpoint, fillBody, recipeLegs, normalizeTicket, recipeForOrigin, connectorLegsForConnections, coerceParams, harvestedRecipeLegs, toShopifyGid, acGqlBody, acGqlEndpoint } from './connectorRecipes.js';
+import { recipeToLeg } from './connectorLeg.js';   // v1479 — identityGql threading assertion
 
 describe('harvestedRecipeLegs — armable harvested reads → invoke-palette legs (§17/§18)', () => {
   const REC = (over) => ({ id: 'r1', name: 'My schedules', does: 'list schedules', method: 'GET', endpoint: '/v2/admin/profiles/{id}/schedules', origin: 'deakoapi.deako.com', params: [{ name: 'id', type: 'string', required: true }], safetyClass: 'auto', enabled: true, reviewState: 'accepted', provenance: 'harvested', ...over });
@@ -574,5 +575,20 @@ describe('v2.74.1477 — aircall-platform rides EVERY aircall call (v1475 revert
     for (const e of AC_ENTRIES) {
       assert.ok(e.requestHeaders && e.requestHeaders['aircall-platform'] === 'aircall-workspace', `${e.id} must carry aircall-platform (the SPA sends it on gql + REST)`);
     }
+  });
+});
+
+describe('v2.74.1479 — aw_set_availability resolves {me} from the GraphQL agent read (the {me}≠agent-id fix)', () => {
+  const sa = CONNECTOR_RECIPES.find((e) => e && e.id === 'aw_set_availability');
+  it('carries identityGql pointing at getAgentV2.ID (the id UpdateAgent_Mutation wants), via the gql transport', () => {
+    assert.ok(sa && sa.identityGql, 'aw_set_availability must carry identityGql');
+    assert.equal(sa.identityGql.idPath, 'data.getAgentV2.ID');
+    assert.ok(/\/graphql\?name=GetCurrentAgentV2_Query/.test(sa.identityGql.endpoint));
+    assert.ok(sa.identityGql.body && /getAgentV2/.test(sa.identityGql.body.query), 'the identity doc reads getAgentV2');
+    assert.ok(/\{me\}/.test(JSON.stringify(sa.body)), 'the mutation body still templates {me} for the executor to fill');
+  });
+  it('recipeToLeg threads identityGql onto leg.tool (Invariant #3 hop)', () => {
+    const leg = recipeToLeg({ ...sa, app: 'aircall', origin: 'workspace.aircall.io' }, { trusted: true });
+    assert.ok(leg && leg.tool && leg.tool.identityGql && leg.tool.identityGql.idPath === 'data.getAgentV2.ID');
   });
 });

@@ -178,6 +178,42 @@ function _replayFetchFunc(url, apiHost, method, reqBody, contentType, extraHeade
       return { token: best, count: count, capKind: capKind };
     } catch (e) { return { token: null, count: count, capKind: capKind }; }
   }
+  // v2.74.1480 (Fix B) — locate the app's OWN Cognito/Amplify store: { clientId, user, refreshToken, iss } from the
+  // stable `CognitoIdentityServiceProvider.<clientId>.<user>.<type>` key layout. iss comes from the STORED access
+  // token's own claim (never constructed), so the refresh POSTs only to the token's verified issuer. Reads only.
+  function _findCognito() {
+    try {
+      var re = /^CognitoIdentityServiceProvider\.([^.]+)\.LastAuthUser$/;
+      for (var i = 0; i < localStorage.length; i++) {
+        var k = localStorage.key(i); var m = k && k.match(re); if (!m) continue;
+        var clientId = m[1]; var user = localStorage.getItem(k); if (!user) continue;
+        var base = 'CognitoIdentityServiceProvider.' + clientId + '.' + user + '.';
+        var refreshToken = localStorage.getItem(base + 'refreshToken');
+        var accessToken = localStorage.getItem(base + 'accessToken');
+        var ap = accessToken ? _jwtPayload(accessToken) : null;
+        if (refreshToken && ap && ap.iss) return { clientId: clientId, user: user, refreshToken: refreshToken, iss: ap.iss };
+      }
+    } catch (e) {}
+    return null;
+  }
+  // v2.74.1480 (Fix B) — InitiateAuth REFRESH_TOKEN_AUTH at the token's OWN issuer (what amazon-cognito-identity-js
+  // does). Returns { token, status, note } — the fresh ACCESS token or null + a diag NOTE (Cognito's error CODE /
+  // http status ONLY). The refresh token + minted token NEVER leave the page and are NEVER logged. A dead refresh
+  // token (NotAuthorizedException) → note carries Cognito's own reason → the user must actually re-login.
+  async function _cognitoRefresh() {
+    var c = null; try { c = _findCognito(); } catch (e) {}
+    if (!c) return { token: null, note: 'no-cognito-store' };
+    try {
+      var endpoint; try { endpoint = new URL(c.iss).origin + '/'; } catch (e) { return { token: null, note: 'bad-iss' }; }
+      var res = await fetch(endpoint, { method: 'POST', credentials: 'omit',
+        headers: { 'content-type': 'application/x-amz-json-1.1', 'x-amz-target': 'AWSCognitoIdentityProviderService.InitiateAuth' },
+        body: JSON.stringify({ AuthFlow: 'REFRESH_TOKEN_AUTH', ClientId: c.clientId, AuthParameters: { REFRESH_TOKEN: c.refreshToken } }) });
+      var b = null; try { b = await res.json(); } catch (e) {}
+      if (res.status === 200 && b && b.AuthenticationResult && b.AuthenticationResult.AccessToken) return { token: b.AuthenticationResult.AccessToken, status: res.status, note: 'ok' };
+      var code = (b && b.__type) ? String(b.__type).split(/[#:.]/).pop() : ('http-' + res.status);
+      return { token: null, status: res.status, note: code };
+    } catch (e) { return { token: null, note: 'net-fail' }; }
+  }
   return (async function () {
     try {
       var store = window.__ahub_ride_auth || {};
@@ -196,12 +232,26 @@ function _replayFetchFunc(url, apiHost, method, reqBody, contentType, extraHeade
       // the 401 reads as "session-expired" on a LIVE login). Captured bearer headers still override on collision.
       if (extraHeaders && typeof extraHeaders === 'object') { for (var xh in extraHeaders) { if (Object.prototype.hasOwnProperty.call(extraHeaders, xh)) headers[xh] = extraHeaders[xh]; } }
       var init;
-      var refreshedBearer = false, capKindOut = 'none', storedJwtsOut = 0;
+      var refreshedBearer = '', capKindOut = 'none', storedJwtsOut = 0, cognitoNote = '';
       if (hasBearer) {
         for (var k in cap.headers) { if (Object.prototype.hasOwnProperty.call(cap.headers, k)) headers[k] = cap.headers[k]; }
         // v1477 — REFRESH the captured (possibly-expired) bearer from the SPA's OWN live token store. The SPA silently
         // rotates its token; our capture is a stale snapshot. Use the freshest matching token in web storage instead.
-        try { var _fb = _freshestBearer(cap.headers.authorization); if (_fb) { capKindOut = _fb.capKind; storedJwtsOut = _fb.count; if (_fb.token) { headers.authorization = 'Bearer ' + _fb.token; refreshedBearer = true; } } } catch (e) {}
+        try { var _fb = _freshestBearer(cap.headers.authorization); if (_fb) { capKindOut = _fb.capKind; storedJwtsOut = _fb.count; if (_fb.token) { headers.authorization = 'Bearer ' + _fb.token; refreshedBearer = 'store'; } } } catch (e) {}
+        // v1480 (Fix B) — if the token we'd send is EXPIRED (or undecodeable), MINT a fresh one from the refresh token
+        // (the SPA's own hourly refresh, done silently for the user). Cache the mint page-locally so the NEXT call
+        // reuses it until IT expires — one mint per token-lifetime, not per request.
+        try {
+          var _curM = String(headers.authorization || '').match(/Bearer\s+(\S+)/i); var _curPl = _curM ? _jwtPayload(_curM[1]) : null;
+          var _needMint = !_curPl || !_curPl.exp || (_curPl.exp < (Date.now() / 1000) + 30);
+          if (_needMint) {
+            var _cr = await _cognitoRefresh(); cognitoNote = _cr.note || '';
+            if (_cr.token) {
+              headers.authorization = 'Bearer ' + _cr.token; refreshedBearer = 'cognito';
+              try { if (!window.__ahub_ride_auth) window.__ahub_ride_auth = {}; var _nh = {}; for (var _ck in cap.headers) { if (Object.prototype.hasOwnProperty.call(cap.headers, _ck)) _nh[_ck] = cap.headers[_ck]; } _nh.authorization = 'Bearer ' + _cr.token; window.__ahub_ride_auth[apiHost] = { headers: _nh, at: (window.performance && performance.now) ? performance.now() : 0 }; } catch (e) {}
+            }
+          }
+        } catch (e) {}
         // v1466 — a SAME-ORIGIN bearer sends cookies TOO: the SPA's own same-origin fetches carry BOTH the session
         // cookie and the Authorization header, and an app can require the PAIR (live gc 18:38: Aircall /v3 401'd
         // `cookie+hdrs` AND `bearer+hdrs` — each alone). Cross-origin bearer keeps credentials:'omit' (credentialed
@@ -236,7 +286,7 @@ function _replayFetchFunc(url, apiHost, method, reqBody, contentType, extraHeade
         } else if (typeof body === 'string' && body) { srvMsg = body.slice(0, 160); }
         if (srvMsg != null) srvMsg = String(srvMsg).replace(/\s+/g, ' ').trim().slice(0, 160);
       } catch (e) {}
-      return { status: status, body: body, mode: hasBearer ? (sameOrigin ? 'bearer+cookie' : 'bearer') : 'cookie', hdrs: !!extraHeaders, capAge: capAgeMin, sent: sentNames, capNames: capNames, srvMsg: srvMsg, tokExp: tokExpMin, refreshed: refreshedBearer, tokKind: tokKindOut, capKind: capKindOut, storedJwts: storedJwtsOut };
+      return { status: status, body: body, mode: hasBearer ? (sameOrigin ? 'bearer+cookie' : 'bearer') : 'cookie', hdrs: !!extraHeaders, capAge: capAgeMin, sent: sentNames, capNames: capNames, srvMsg: srvMsg, tokExp: tokExpMin, refreshed: refreshedBearer, tokKind: tokKindOut, capKind: capKindOut, storedJwts: storedJwtsOut, cognitoNote: cognitoNote };
     } catch (e) { return { error: String((e && e.message) || e) }; }
   })();
 }
@@ -917,6 +967,26 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           // extract the user via probedUser (flat + wrapped shapes), refuse anon (§14), bind args.me. Probe fails →
           // fall through; the v1433 unfilled-{param} guard below still refuses honestly.
           const _tmplStr = String((payload && payload.endpoint) || '') + ((payload && payload.bodyTemplate) ? JSON.stringify(payload.bodyTemplate) : '');
+          // v2.74.1479 — GraphQL IDENTITY source (the {me}≠agent-id fix, live: UpdateAgent 200-GQL-ERRORS "coerced Null
+          // for NonNull ID!"): when {me} is an app-internal AGENT id — NOT the REST user id — and the REST identityProbe
+          // 401s while the gql transport works, resolve {me} from a GraphQL identity read. POST the recipe's identityGql
+          // doc via the SAME working transport (_replayFetchFunc, bearer+cookie+hdrs), extract the id at idPath. Tried
+          // FIRST (it rides the proven transport + returns the right id); the REST probe below stays as the fallback.
+          const _ig = payload && payload.identityGql;
+          if (args.me == null && _tmplStr.includes('{me}') && _ig && _ig.endpoint && _ig.body && _ig.idPath) {
+            try {
+              const igUrl = `https://${apiHost}${String(_ig.endpoint).startsWith('/') ? _ig.endpoint : '/' + _ig.endpoint}`;
+              const igBody = (typeof _ig.body === 'string') ? _ig.body : JSON.stringify(_ig.body);
+              const igOut = await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, world: 'MAIN', func: _replayFetchFunc, args: [igUrl, apiHost, 'POST', igBody, 'application/json', _replayHdrs] });
+              const igr = igOut && igOut[0] && igOut[0].result;
+              let _igVal = null;
+              if (igr && igr.status === 200 && igr.body && typeof igr.body === 'object' && !(Array.isArray(igr.body.errors) && igr.body.errors.length)) {
+                _igVal = String(_ig.idPath).split('.').reduce((o, k) => ((o && typeof o === 'object') ? o[k] : undefined), igr.body);
+              }
+              if (_igVal != null && _igVal !== '') args.me = _igVal;
+              try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} {me} identityGql → ${igr ? `${igr.mode || '?'} ${igr.status ?? igr.error ?? '?'}` : 'no-result'}${args.me != null ? ' → filled' : ' → UNFILLED'}`); } catch { /* */ }
+            } catch { /* fall through to the REST probe */ }
+          }
           if (args.me == null && _tmplStr.includes('{me}') && payload && payload.identityProbe) {
             try {
               const probePath = String(payload.identityProbe);
@@ -974,7 +1044,9 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
           const _src = (payload && payload.groundId) ? 'ground' : 'virtual';
           const _pl = []; if (payload) { if (payload.gql) _pl.push('gql'); if (payload.bodyTemplate) _pl.push('tmpl'); if (payload.requestHeaders) _pl.push('hdrs'); if (payload.identityProbe) _pl.push('probe'); if (payload.confirmed === true) _pl.push('confirmed'); }
           const _ctx = ` src:${_src} pl:[${_pl.join(',')}]`;
-          const _jwt = (r.tokKind && r.tokKind !== 'none') ? ` tok:${r.tokKind}${r.tokExp != null ? `(${r.tokExp}m)` : ''}${r.refreshed ? '↑' : ''} stored:${r.storedJwts != null ? r.storedJwts : '?'}` : '';   // v1478 — token KIND (jwt|opaque) + storage-candidate count + ↑ refreshed; unconditional
+          const _refl = r.refreshed === 'cognito' ? '↻' : (r.refreshed === 'store' ? '↑' : '');   // v1480 — ↻ minted from the refresh token, ↑ read from storage
+          const _cog = (r.cognitoNote && r.cognitoNote !== 'ok') ? ` refresh:${r.cognitoNote}` : '';
+          const _jwt = (r.tokKind && r.tokKind !== 'none') ? ` tok:${r.tokKind}${r.tokExp != null ? `(${r.tokExp}m)` : ''}${_refl}${_cog} stored:${r.storedJwts != null ? r.storedJwts : '?'}` : ((r.refreshed || r.cognitoNote) ? ` tok:none${_refl}${_cog}` : '');   // v1478/1480 — token kind/freshness + refresh mode + Cognito note; unconditional when a bearer was involved
           const _wire = (rr) => { try {
             const sent = Array.isArray(rr.sent) ? rr.sent : []; const cap = Array.isArray(rr.capNames) ? rr.capNames : [];
             const OURS = new Set(['accept', 'content-type']);
@@ -1027,7 +1099,7 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → ${r.mode || '?'}${r.hdrs ? '+hdrs' : ''}${r.capAge != null ? `(≈${r.capAge}m)` : ''} ${r.status} session-expired${_ctx}${_jwt}${_wire(r)}${_keys} (tab_${tab.id})`); } catch { /* */ }
             // v1476 — the hint speaks the SERVER's own reason when it gave one (the token that ends the guessing);
             // else the stale-capture nudge. srvMsg is short + Logger-scrubbed downstream.
-            sendResponse({ success: false, error: 'session-expired', hint: r.srvMsg ? `the app rejected the request: ${r.srvMsg}` : `the captured session token looks stale — click into the ${sessionHost} tab for a moment (its own traffic refreshes it), then re-ask` }); return;
+            sendResponse({ success: false, error: 'session-expired', hint: (r.cognitoNote && r.cognitoNote !== 'ok' && r.cognitoNote !== 'no-cognito-store' && r.cognitoNote !== 'net-fail') ? `your ${sessionHost} login has fully expired — sign in to ${sessionHost} again, then re-ask` : (r.srvMsg ? `the app rejected the request: ${r.srvMsg}` : `refresh the ${sessionHost} tab (its token expired), then re-ask`) }); return;
           }
           if (r.status >= 400) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → ${r.mode || '?'}${r.hdrs ? '+hdrs' : ''} ${r.status} http-error${_ctx}${_jwt}${_wire(r)}${_keys} (tab_${tab.id})`); } catch { /* */ } sendResponse({ success: false, error: `http-${r.status}`, hint: r.srvMsg ? `the server said: ${r.srvMsg}` : 'the server rejected the request', status: r.status, value: r.body }); return; }
           try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → ${r.mode ? r.mode + ' ' : ''}${r.status}${_ctx}${_jwt} ${_shape}${_keys} (tab_${tab.id})`); } catch { /* */ }

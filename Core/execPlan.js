@@ -106,7 +106,7 @@ function _planExec(leg, params = {}, ctx = {}) {
                           // send the BARE stored id (tool.recipeId) — the prefixed leg.key (`me.zendesk.read_ticket`)
                           // never matched a stored record's bare id, so the guard silently always fell through.
                           groundId: (t.groundId || groundId) || null, recipeId: t.recipeId || null,
-                          verifyIdentity: t.verifyIdentity === true, identityProbe: t.identityProbe || null,
+                          verifyIdentity: t.verifyIdentity === true, identityProbe: t.identityProbe || null, identityGql: t.identityGql || null,
                           requestHeaders: (t.requestHeaders && typeof t.requestHeaders === 'object') ? t.requestHeaders : null },
                reason: 'session-ride' };
     }
