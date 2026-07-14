@@ -136,6 +136,88 @@ export function summarizeItem(o, { full = false } = {}) {
   return { id, title, status: _pick(o, STATUS_KEYS), body, url: (url && !/\/api\//.test(url)) ? url : null };
 }
 
+// ── DK-3 (DESIGN_desks.md §6) — the federated WorkItem ────────────────────────────────────────────────────────────
+// One row from ANY connected site → { source, id, subject, state, owner, url, corrKeys[] }. summarizeItem already
+// yields id/subject/state/url app-agnostically; DK-3 adds `source` (which connection the row came from — passed in,
+// not in the row), `owner` (who's WORKING it), and `corrKeys` (email / phone / order-no → the JOIN across sites: a
+// call ↔ warranty ↔ ticket ↔ order sharing a key are ONE issue). corrKeys are typed + normalized ("email:a@b.com" /
+// "phone:4045551234" / "order:1001") for EXACT grouping (§9 — start exact, no fuzzy merges). The OWNER's own contact
+// is deliberately excluded (else every item an agent touches would merge), and free-text BODIES are never mined
+// (the §8 privacy lever — corrKeys come only from structured identity fields).
+const OWNER_KEYS = ['assignee', 'assignee_name', 'assigneeName', 'agent', 'agent_name', 'agentName', 'owner', 'owner_name', 'ownerName', 'assigned_to', 'assignedTo', 'rep', 'handledBy'];
+const _OWNER_KEY = /assign|agent|owner|handled|(^|_)reps?($|_)/i;
+const _CONTENT_SET = new Set(CONTENT_KEYS.map((k) => k.toLowerCase()));
+const _EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i;
+const _ORDERHASH_RE = /^#(\d{3,})$/;
+const _PHONE_KEY = /phone|(^|[^a-z])tel($|[^a-z])|msisdn|e164|mobile|caller/i;
+const _ORDER_KEY = /order[_\s]?(number|no|id|name)|ordernumber|orderno/i;
+const _normPhone = (v) => { const d = String(v).replace(/\D+/g, ''); return (d.length === 11 && d[0] === '1') ? d.slice(1) : d; };   // US: drop the country-code 1 so "+1 404…" ≡ "(404)…"
+
+// The OWNER — who's working the item (agent/assignee/rep), scalar-first then one nested hop (Zendesk assignee:{name}).
+// NOT the requester/customer (that's a correlation key). PURE. '' when none.
+function _owner(o) {
+  if (!o || typeof o !== 'object') return '';
+  const v = _pick(o, OWNER_KEYS);
+  if (v != null) return _trunc(v, 80);
+  const lower = new Map(Object.entries(o).map(([k, val]) => [k.toLowerCase(), val]));
+  for (const k of OWNER_KEYS) {
+    const nv = lower.get(k.toLowerCase());
+    if (nv && typeof nv === 'object' && !Array.isArray(nv)) { const n = _displayName(nv) || (typeof nv.email === 'string' ? nv.email : null); if (n) return _trunc(n, 80); }
+  }
+  return '';
+}
+
+// The correlation keys — email / phone / order-no that JOIN this item to items on OTHER sites. Typed + normalized +
+// deduped + sorted (deterministic). Scans the row's scalar leaves (top + one nested hop); SKIPS owner-ish subtrees (an
+// agent's own email/line is never a join key) and free-text body fields (privacy). PURE. Capped at 8.
+function _corrKeys(o) {
+  if (!o || typeof o !== 'object') return [];
+  const keys = new Set();
+  const scan = (obj, depth, ownerCtx) => {
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj) || depth > 1) return;
+    for (const [k, v] of Object.entries(obj)) {
+      if (v == null) continue;
+      const ownerHere = ownerCtx || _OWNER_KEY.test(k);
+      if (typeof v === 'object') { scan(v, depth + 1, ownerHere); continue; }
+      if (ownerHere || _CONTENT_SET.has(k.toLowerCase())) continue;   // agent's own contact / free-text body → never a join key
+      const s = String(v);
+      const em = s.match(_EMAIL_RE); if (em) keys.add(`email:${em[0].toLowerCase()}`);
+      if (_PHONE_KEY.test(k)) { const p = _normPhone(s); if (p.length >= 7 && p.length <= 15) keys.add(`phone:${p}`); }
+      if (_ORDER_KEY.test(k)) { const d = s.replace(/\D+/g, ''); if (d) keys.add(`order:${d}`); }
+      const oh = s.match(_ORDERHASH_RE); if (oh) keys.add(`order:${oh[1]}`);
+    }
+  };
+  scan(o, 0, false);
+  return [...keys].sort().slice(0, 8);
+}
+
+/**
+ * DK-3 (DESIGN_desks.md §6) — ONE app-shaped row → a normalized federated WorkItem. `source` is the connection it came
+ * from (label/origin; not in the row). PURE. The unit DK-4's federated sweep groups by `corrKeys` into cross-site issues.
+ */
+export function toWorkItem(row, { source = '', full = false } = {}) {
+  const s = summarizeItem(row, { full });
+  return {
+    source: _str(source),
+    id: s.id != null ? _str(s.id) : '',
+    subject: s.title || '',
+    state: s.status != null ? _str(s.status) : '',
+    owner: _owner(row),
+    url: s.url || '',
+    corrKeys: _corrKeys(row),
+  };
+}
+
+/**
+ * DK-3 — a whole read RESULT (any app shape) → WorkItem[]: find the primary list (or single object) the way the render
+ * does, map each row through toWorkItem, capped at MAX_ROWS. PURE. This is what DK-4 calls per connection before grouping.
+ */
+export function toWorkItems(result, { source = '', full = false } = {}) {
+  const list = primaryList(result);
+  const rows = (list && list.length) ? list : (primaryObject(result) ? [primaryObject(result)] : []);
+  return rows.slice(0, MAX_ROWS).map((r) => toWorkItem(r, { source, full }));
+}
+
 /**
  * CX-9c (v2.74.1436) — an item's compact GENERIC field projection: [label, value] pairs from the same `_extraFields`
  * machinery the single-record view uses (scalars + formatted money/tracking; content BODIES never included — the

@@ -135,6 +135,7 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
       verifyIdentity: r.verifyIdentity === true,
       identityProbe: _str(r.identityProbe) || null,
       identityGql: (r.identityGql && typeof r.identityGql === 'object') ? r.identityGql : null,   // v1479 — {me} via a GraphQL identity read (the working transport → the AGENT id)
+      capClass: _str(r.capClass) || null,   // DK-2 (v1482) — 'presence' = operator state (availability/roster/set), not queue-work; the queue sweep excludes it (§5). Invariant #3 hop 3.
       // CX-7 (v2.74.1386) — the Shopify-class transport markers: gql (POST body is a GraphQL document; a READ-ONLY
       // document may run unconfirmed — validated at both belts), csrf 'sniff' (token captured off the SPA's own
       // requests, no meta tag), urlParam (fill e.g. {handle} from the ride tab's URL — never from the model).

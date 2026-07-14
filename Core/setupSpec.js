@@ -114,7 +114,7 @@ export function buildSetupSpec(def, { connections = [] } = {}) {
   const archetype = ARCHETYPES.includes(d.archetype) ? d.archetype : null;
   const slots = [
     { key: 'connections', kind: 'connections', required: true, value: null, candidates: dedupConnections(connections),
-      prompt: 'Which site should this app work on? Sign in to it in a tab, then pick it here — add as many as it needs.' },
+      prompt: 'Which site should this desk work on? Sign in to it in a tab, then pick it here — add as many as it needs.' },
     { key: 'shape', kind: 'shape', required: false, value: archetypeShape(archetype), candidates: [],
       prompt: 'How should it run?' },
   ];

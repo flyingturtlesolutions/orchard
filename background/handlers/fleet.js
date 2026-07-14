@@ -17,7 +17,7 @@ import { coerceParams } from '../../Core/connectorRecipes.js';
 import { minimizeReadValue } from '../../Core/sweepPrompt.js';
 import { targetUrls, getPath, autonomyFor, executedTodayByRecipe, filterRejectedRepeats, rejectionContext, supersedePlan } from '../../Core/proposals.js';
 import { ledgerEntry } from '../../Core/actionLedger.js';
-import { sweepAlarmName, instanceFromAlarmName, describeEvery, rollDailyCounts, spikeVerdict, localDay, queueStateLines, priorRunVerdict } from '../../Core/fleetSchedule.js';
+import { sweepAlarmName, instanceFromAlarmName, describeEvery, rollDailyCounts, spikeVerdict, localDay, queueStateLines, priorRunVerdict, routineAlarmName, instanceFromRoutineAlarm } from '../../Core/fleetSchedule.js';   // DK-8 (v1491) — + the routine alarm identity
 import { listRows, pickDrillCandidates, extractTicketEvidence, solveVerdict, stubCloseVerdict, clusterTickets, mergeAdvice, renderTicketEvidence, deriveMe, updateSeen, toBankEntry, bankEvidence } from '../../Core/ticketEvidence.js';
 import { builtinApp } from '../../Core/appCatalog.js';
 import { loadProposals, addProposals, decideProposal } from '../../Services/Storage/ProposalStore.js';
@@ -26,6 +26,7 @@ import { ConversationStore } from '../../Services/ConversationStore.js';
 import { Logger } from '../../Core/Logger.js';
 
 const _SCHED_KEY = (instanceId) => `fleetSchedule:${instanceId}`;   // instance-keyed (the identity invariant)
+const _ROUT_KEY = (instanceId) => `fleetRoutine:${instanceId}`;     // DK-8 (v1491) — the desk's declared routine record (one per desk, v1)
 
 async function _readSchedule(instanceId) {
   try { const got = await chrome.storage.local.get(_SCHED_KEY(instanceId)); return got[_SCHED_KEY(instanceId)] || null; } catch { return null; }
@@ -486,6 +487,64 @@ export function createFleetHandlers({ invokeSgHandler } = {}) {
       })();
       return true;
     },
+
+    // DK-8 (v2.74.1491) — the desk ROUTINE: a DECLARED recurring ask, stored as a first-class record (the seed
+    // declares it, only the USER arms it — HITL at declaration; enabling creates the alarm). v1 fire model: the
+    // alarm marks the record DUE; the panel runs the ask when the desk next opens (the ask needs the panel
+    // pipeline — each fan-out, sub-task creation). One routine per desk (v1 — deliberate).
+    'FLEET_ROUTINE': (payload, _sender, sendResponse) => {
+      (async () => {
+        try {
+          const instanceId = String((payload && payload.instanceId) || '');
+          if (!instanceId) { sendResponse({ success: false, error: 'no-instance' }); return; }
+          const key = _ROUT_KEY(instanceId);
+          const read = async () => (await chrome.storage.local.get(key))[key] || null;
+          if (payload.off === true) {
+            const ifSource = payload.ifSource ? String(payload.ifSource) : null;   // seed-owned clear mirrors FLEET_SCHEDULE
+            if (ifSource) { const cur = await read(); if (!cur || (cur.source || 'command') !== ifSource) { sendResponse({ success: true, off: false, kept: true }); return; } }
+            try { await chrome.alarms.clear(routineAlarmName(instanceId)); } catch { /* */ }
+            try { await chrome.storage.local.remove(key); } catch { /* */ }
+            try { Logger.info('route', `ROUTINE ▸ ${instanceId.slice(0, 12)} → OFF${ifSource ? ` (${ifSource}-owned)` : ''}`); } catch { /* */ }
+            sendResponse({ success: true, off: true }); return;
+          }
+          if (payload.set && typeof payload.set === 'object') {
+            const minutes = Number(payload.set.minutes);
+            const ask = String(payload.set.ask || '').trim().slice(0, 200);
+            if (!Number.isFinite(minutes) || minutes < 1 || !ask) { sendResponse({ success: false, error: 'bad-routine' }); return; }
+            const source = payload.set.source === 'seed' ? 'seed' : 'command';
+            const prior = await read();
+            const changed = !(prior && prior.minutes === minutes && prior.ask === ask);
+            // enabled NEVER auto-flips on a re-declare — the user's arm/disarm survives seed edits.
+            const rec = { minutes, ask, source, enabled: !!(prior && prior.enabled), declaredAt: (prior && prior.declaredAt) || Date.now(), due: !!(prior && prior.due), lastFiredAt: (prior && prior.lastFiredAt) || null, convId: String((payload && payload.convId) || (prior && prior.convId) || '') };
+            await chrome.storage.local.set({ [key]: rec });
+            if (rec.enabled) { try { await chrome.alarms.create(routineAlarmName(instanceId), { periodInMinutes: minutes, delayInMinutes: minutes }); } catch { /* */ } }
+            try { Logger.info('route', `ROUTINE ▸ ${instanceId.slice(0, 12)} declared every ${describeEvery(minutes)} (${source}${rec.enabled ? ', armed' : ', OFF until enabled'}) — "${ask.slice(0, 50)}"`); } catch { /* */ }
+            sendResponse({ success: true, changed, enabled: rec.enabled }); return;
+          }
+          if (payload.enable === true || payload.enable === false) {
+            const cur = await read();
+            if (!cur) { sendResponse({ success: false, error: 'no-routine' }); return; }
+            cur.enabled = payload.enable === true;
+            if (payload.convId) cur.convId = String(payload.convId);
+            await chrome.storage.local.set({ [key]: cur });
+            if (cur.enabled) { try { await chrome.alarms.create(routineAlarmName(instanceId), { periodInMinutes: cur.minutes, delayInMinutes: cur.minutes }); } catch { /* */ } }
+            else { try { await chrome.alarms.clear(routineAlarmName(instanceId)); } catch { /* */ } }
+            try { Logger.info('route', `ROUTINE ▸ ${instanceId.slice(0, 12)} → ${cur.enabled ? `ARMED every ${describeEvery(cur.minutes)}` : 'disabled'}`); } catch { /* */ }
+            sendResponse({ success: true, enabled: cur.enabled }); return;
+          }
+          if (payload.fired === true) {   // the panel ran the ask — clear due + stamp
+            const cur = await read();
+            if (cur) { cur.due = false; cur.lastFiredAt = Date.now(); await chrome.storage.local.set({ [key]: cur }); }
+            sendResponse({ success: true }); return;
+          }
+          const cur = await read();   // status
+          let nextAt = null;
+          if (cur && cur.enabled) { try { const a = await chrome.alarms.get(routineAlarmName(instanceId)); nextAt = (a && a.scheduledTime) || null; } catch { /* */ } }
+          sendResponse({ success: true, routine: cur ? { ...cur, nextAt } : null });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'routine-failed' }); }
+      })();
+      return true;
+    },
   };
 }
 
@@ -493,7 +552,21 @@ export function createFleetHandlers({ invokeSgHandler } = {}) {
 export function registerFleetAlarmListener({ invokeSgHandler } = {}) {
   chrome.alarms.onAlarm.addListener((alarm) => {
     const instanceId = instanceFromAlarmName(alarm && alarm.name);
-    if (!instanceId) return;   // foreign alarm (orchard-sync etc.)
-    runHeadlessSweep(instanceId, { invokeSgHandler }).catch((e) => { try { Logger.warn('background', `fleet alarm: ${e?.message || e}`); } catch { /* */ } });
+    if (instanceId) {
+      runHeadlessSweep(instanceId, { invokeSgHandler }).catch((e) => { try { Logger.warn('background', `fleet alarm: ${e?.message || e}`); } catch { /* */ } });
+      return;
+    }
+    // DK-8 (v2.74.1491) — a ROUTINE alarm marks the record DUE; the panel fires the ask when the desk next opens
+    // (v1 — the routine's ask needs the panel pipeline: each fan-out, sub-task creation. Headless execution owed).
+    const routInst = instanceFromRoutineAlarm(alarm && alarm.name);
+    if (!routInst) return;   // foreign alarm (orchard-sync etc.)
+    (async () => {
+      const key = _ROUT_KEY(routInst);
+      const cur = (await chrome.storage.local.get(key))[key];
+      if (!cur || !cur.enabled) return;   // disabled records never fire (a stale alarm self-noops)
+      cur.due = true;
+      await chrome.storage.local.set({ [key]: cur });
+      try { Logger.info('route', `ROUTINE ▸ due ${routInst.slice(0, 12)} — "${String(cur.ask).slice(0, 50)}" (runs when the desk opens)`); } catch { /* */ }
+    })().catch((e) => { try { Logger.warn('background', `routine alarm: ${e?.message || e}`); } catch { /* */ } });
   });
 }

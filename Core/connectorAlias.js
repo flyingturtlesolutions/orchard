@@ -42,11 +42,18 @@ const _key = (sig, ref) => `${(Array.isArray(sig) ? sig : []).join(' ')}|${ref}`
  * @param {Array<object>} store
  * @param {{ ask?:string, legRef?:string, host?:string, at?:number }} entry — `at` = the caller's Date.now()
  */
+// DK-7b (v2.74.1489) — CONTINUATION/ACK words never key an alias. Live poisoning: a windowed each fan-out's
+// follow-up "continue" re-ran the leg successfully → the flywheel RECORDED "continue" → that leg, so every later
+// bare "continue" warm-pathed to it. A sig made ONLY of these tokens is refused, and already-poisoned entries
+// scrub on the next write (self-heal — no migration needed).
+const _CONT = new Set(['continue', 'next', 'more', 'again', 'repeat', 'okay', 'yes', 'keep', 'going', 'sure']);
+const _contaminated = (sig) => Array.isArray(sig) && sig.length > 0 && sig.every((t) => _CONT.has(t));
+
 export function recordAlias(store, { ask = '', legRef = '', host = '', at = 0 } = {}) {
-  const list = Array.isArray(store) ? store.slice() : [];
+  const list = (Array.isArray(store) ? store.slice() : []).filter((e) => !(e && _contaminated(e.sig)));   // DK-7b — scrub prior poison on every write
   const sig = aliasSignature(ask);
   const ref = String(legRef || '').trim();
-  if (!sig.length || !ref) return list;
+  if (!sig.length || !ref || _contaminated(sig)) return list;   // DK-7b — a continuation word is FLOW control, never an ask shape
   const now = Number(at) || 0;
   const k = _key(sig, ref);
   const idx = list.findIndex((e) => e && _key(e.sig, e.ref) === k);

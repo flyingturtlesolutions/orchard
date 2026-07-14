@@ -161,3 +161,36 @@ export function capableSitesCatalog({ curated = CONNECTOR_RECIPES, broker = BROK
   const rank = (e) => e.kind === 'site' ? (e.groundId ? 0 : 1) : e.kind === 'connector' ? 2 : 3;
   return out.sort((a, b) => rank(a) - rank(b) || ((b.offers.length) - (a.offers.length)) || String(a.label).localeCompare(String(b.label)));
 }
+
+/**
+ * DK-6 (v2.74.1486, DESIGN_desks.md) — seed the setup catalog with a PRECONFIGURED desk's builtin `sites`
+ * ({host,label}) and PRE-PICK every resolvable one, so setup is review-and-Confirm instead of hunt-and-pick. PURE.
+ * Per site, in order:
+ *   1. a CONCRETE catalog entry covering it (exact host, or an instance of the site's class — deako.zendesk.com
+ *      for zendesk.com) → pre-pick that entry;
+ *   2. a DEEP host (≥3 labels: vendorsuite.drhorton.com, app.hubspot.com) is itself the bindable origin → synthesize
+ *      a concrete card (absorbing any matching class card + its offer tag so the list shows ONE entry) + pre-pick;
+ *   3. a bare TENANT class (zendesk.com with no instance anywhere) can't be picked for the user — it stays a guided
+ *      card (`unresolved` names it; the existing type-your-address flow adds the instance).
+ * @returns {{ catalog: Array, picks: Array<[string, {origin:string,label:string}]>, unresolved: string[] }}
+ */
+export function seedDeskCatalog(catalog, sites) {
+  const list = (Array.isArray(catalog) ? catalog : []).slice();
+  const picks = []; const unresolved = [];
+  for (const s of (Array.isArray(sites) ? sites : [])) {
+    const host = _host(s && s.host); if (!host) continue;
+    const label = (s && s.label) ? String(s.label) : host;
+    const conc = list.find((e) => e && e.concrete && e.origin && _inClass(e.host, host));
+    if (conc) { picks.push([conc.key, { origin: conc.origin, label: conc.label || label }]); continue; }
+    if (host.split('.').length >= 3) {
+      const clsIdx = list.findIndex((e) => e && !e.concrete && _inClass(host, e.host));
+      const cls = clsIdx >= 0 ? list.splice(clsIdx, 1)[0] : null;   // absorb the class card — one entry, not rivals
+      const entry = { key: `site:${host}`, origin: _origin(host), host, label, kind: 'site', offers: cls ? cls.offers : [], concrete: true, needsInstance: false, groundId: null, provider: cls ? cls.provider : null };
+      list.push(entry); picks.push([entry.key, { origin: entry.origin, label }]);
+      continue;
+    }
+    const cls = list.find((e) => e && !e.concrete && _inClass(host, e.host));
+    unresolved.push((cls && cls.label) || label);
+  }
+  return { catalog: list, picks, unresolved };
+}

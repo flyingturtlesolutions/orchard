@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { primaryList, primaryObject, summarizeItem, renderConnectorLines, itemLabels, primaryItemId, createdRecordId, itemFields, recordDetails } from './connectorRender.js';
+import { primaryList, primaryObject, summarizeItem, renderConnectorLines, itemLabels, primaryItemId, createdRecordId, itemFields, recordDetails, toWorkItem, toWorkItems } from './connectorRender.js';
 
 describe('primaryList — find the data array', () => {
   it('prefers known data keys, falls back to any object-array, ignores scalar arrays', () => {
@@ -283,5 +283,51 @@ describe('v2.74.1469 — the Aircall teammate row renders name + availability (l
     assert.equal(it_.title, 'D Monkam');            // was the email (fullName absent from NAME_KEYS)
     assert.equal(it_.status, 'available');           // was null (availabilityStatus absent from STATUS_KEYS)
     assert.equal(String(it_.id), '1740968');
+  });
+});
+
+describe('DK-3 (DESIGN_desks.md §6) — WorkItem normalizer (toWorkItem / toWorkItems)', () => {
+  it('a Zendesk-shaped ticket → WorkItem with source/owner/corrKeys (owner = assignee, keys = requester)', () => {
+    const ticket = { id: 4090, subject: 'Dishwasher leak', status: 'open',
+      assignee: { name: 'Divine Monkam', email: 'agent@deako.com' },
+      requester: { name: 'Jane Doe', email: 'Jane.Doe@example.com', phone: '+1 (404) 555-1234' } };
+    const w = toWorkItem(ticket, { source: 'Zendesk' });
+    assert.equal(w.source, 'Zendesk');
+    assert.equal(w.id, '4090');
+    assert.equal(w.subject, 'Dishwasher leak');
+    assert.equal(w.state, 'open');
+    assert.equal(w.owner, 'Divine Monkam');
+    assert.deepEqual(w.corrKeys, ['email:jane.doe@example.com', 'phone:4045551234']);
+  });
+  it('the OWNER own email/phone is NOT a correlation key (no agent-merge)', () => {
+    const t = { id: 1, subject: 'x', assignee: { email: 'agent@deako.com', phone: '5551110000' } };
+    assert.deepEqual(toWorkItem(t, { source: 'Z' }).corrKeys, []);
+  });
+  it('phone normalization converges +1 / formatting; order-no converges #hash and order_number', () => {
+    assert.deepEqual(toWorkItem({ id: 1, phone: '+1 404-555-1234' }).corrKeys, ['phone:4045551234']);
+    assert.deepEqual(toWorkItem({ id: 1, phone: '(404) 555 1234' }).corrKeys, ['phone:4045551234']);
+    assert.deepEqual(toWorkItem({ id: 2, name: '#1001' }).corrKeys, ['order:1001']);
+    assert.deepEqual(toWorkItem({ id: 2, order_number: '1001' }).corrKeys, ['order:1001']);
+  });
+  it('a call and a ticket that share a phone produce the SAME join key (the cross-site link)', () => {
+    const call = toWorkItem({ id: 'c1', contact: { phoneNumber: '14045551234' } }, { source: 'Aircall' });
+    const ticket = toWorkItem({ id: 't1', requester: { phone: '(404) 555-1234' } }, { source: 'Zendesk' });
+    assert.ok(call.corrKeys.includes('phone:4045551234'));
+    assert.ok(ticket.corrKeys.includes('phone:4045551234'));
+  });
+  it('free-text bodies are NOT mined for keys (the privacy lever)', () => {
+    const t = { id: 1, subject: 'hi', description: 'reach me at sneaky@example.com about order #9999' };
+    assert.deepEqual(toWorkItem(t).corrKeys, []);
+  });
+  it('toWorkItems maps a whole GraphQL list result + stamps source', () => {
+    const result = { data: { conversations: { edges: [{ node: { id: 'a', subject: 'A', status: 'OPENED' } }, { node: { id: 'b', subject: 'B', status: 'OPENED' } }] } } };
+    const items = toWorkItems(result, { source: 'Aircall' });
+    assert.equal(items.length, 2);
+    assert.deepEqual(items.map((i) => i.id), ['a', 'b']);
+    assert.ok(items.every((i) => i.source === 'Aircall'));
+  });
+  it('safe on null / scalar rows', () => {
+    assert.deepEqual(toWorkItem(null, { source: 'X' }), { source: 'X', id: '', subject: '', state: '', owner: '', url: '', corrKeys: [] });
+    assert.deepEqual(toWorkItems(null), []);
   });
 });

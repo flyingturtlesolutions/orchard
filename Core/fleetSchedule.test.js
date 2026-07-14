@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseEvery, describeEvery, sweepAlarmName, instanceFromAlarmName, buildSeedDirectivesMessages, parseSeedDirectives, rollDailyCounts, spikeVerdict, localDay, fmtCountdown, queueStateLines, priorRunVerdict } from './fleetSchedule.js';
+import { parseEvery, describeEvery, sweepAlarmName, instanceFromAlarmName, buildSeedDirectivesMessages, parseSeedDirectives, rollDailyCounts, spikeVerdict, localDay, fmtCountdown, queueStateLines, priorRunVerdict, routineAlarmName, instanceFromRoutineAlarm } from './fleetSchedule.js';
 
 describe('fleetSchedule — parseEvery (human interval → clamped minutes)', () => {
   it('parses m/h forms and bare numbers (minutes default)', () => {
@@ -153,5 +153,36 @@ describe('fleetSchedule — seed directives (FL-6b: the IL reads the seed, the h
     assert.equal(parseSeedDirectives('{"assignQuota": 9999}').assignQuota, null); // ceiling
     assert.equal(parseSeedDirectives('{"every": "1h"}').assignQuota, null);       // stated-only
     assert.ok(/assignQuota/.test(buildSeedDirectivesMessages({ seed: 's' }).system));
+  });
+});
+
+describe('DK-8 (v2.74.1491) — the routine directive + alarm identity', () => {
+  it('parseSeedDirectives extracts a valid routine {every, ask}; malformed → null; absent → null', () => {
+    const d = parseSeedDirectives('{"every": null, "assignQuota": null, "routine": {"every": "24h", "ask": "for each division, list new warranty tasks"}}');
+    assert.deepEqual(d.routine, { every: '24h', ask: 'for each division, list new warranty tasks' });
+    assert.equal(parseSeedDirectives('{"every":"1h","assignQuota":5,"routine":null}').routine, null);
+    assert.equal(parseSeedDirectives('{"routine": {"every": "24h"}}').routine, null);          // ask missing
+    assert.equal(parseSeedDirectives('{"routine": {"ask": "do things"}}').routine, null);      // every missing
+    assert.equal(parseSeedDirectives('{"routine": "daily"}').routine, null);                   // wrong shape
+    assert.equal(parseSeedDirectives('junk').routine, null);
+  });
+  it('a routine reply still parses the sibling directives (the greedy JSON match spans the nested object)', () => {
+    const d = parseSeedDirectives('{"every": "1h", "assignQuota": 10, "routine": {"every": "24h", "ask": "x"}}');
+    assert.equal(d.every, '1h');
+    assert.equal(d.assignQuota, 10);
+    assert.equal(d.routine.ask, 'x');
+  });
+  it('routine ask/every are trimmed + capped (200 / 40)', () => {
+    const long = 'a'.repeat(300);
+    const d = parseSeedDirectives(JSON.stringify({ routine: { every: '  24h  ', ask: `  ${long}  ` } }));
+    assert.equal(d.routine.every, '24h');
+    assert.equal(d.routine.ask.length, 200);
+  });
+  it('routineAlarmName / instanceFromRoutineAlarm round-trip; foreign + sweep alarms → null', () => {
+    assert.equal(instanceFromRoutineAlarm(routineAlarmName('inst_9')), 'inst_9');
+    assert.equal(instanceFromRoutineAlarm(sweepAlarmName('inst_9')), null);
+    assert.equal(instanceFromRoutineAlarm('orchard-sync'), null);
+    assert.equal(instanceFromRoutineAlarm(''), null);
+    assert.equal(instanceFromAlarmName(routineAlarmName('inst_9')), null);   // the sweep parser ignores routine alarms too
   });
 });

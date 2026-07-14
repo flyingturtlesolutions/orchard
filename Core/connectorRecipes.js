@@ -146,6 +146,7 @@ const VS_DIVISION = Object.freeze({
   lists: ['currentHub.Divisions', 'access.Hubs[].Divisions'],
   match: ['Code', 'Name'],
   id: 'Id', label: 'Name',
+  each: true,   // DK-7 (v2.74.1488) — "for each division…" fans the READ out over every accessible division (the model binds divisionId:"each"; reads only, capped)
 });
 
 // ── Aircall Workspace (CX-10, v2.74.1456) — HAR-authored from workspace.aircall.io + Zendesk CTI outbound captures.
@@ -459,10 +460,10 @@ export const CONNECTOR_RECIPES = [
   { ...VS, id: 'vs_warranty_tasks', name: 'Warranty tasks by status', listUrl: '/#warranty',
     resolve: { divisionId: VS_DIVISION },
     drill: { via: 'vs_warranty_task', param: 'taskId', from: 'TaskId', matchOn: 'address', label: ['AddressLine1', 'CityStateZip', 'TaskNumber', 'ClaimNumber', 'ProjectName'] },
-    does: 'list a division\'s warranty tasks by status (new / open / fixed / closed) — task number, claim number, address, age, allowed amount. The division can be a name ("Atlanta West"), a market number ("210"), or blank for your current division; give a street address to drill straight into that one task\'s details',
+    does: 'list a division\'s warranty tasks by status (new / open / fixed / closed) — task number, claim number, address, age, allowed amount. The division can be a name ("Atlanta West"), a market number ("210"), blank for your current division, or "each" to list EVERY division you can access ("for each division…" / "across all divisions"); give a street address to drill straight into that one task\'s details',
     endpoint: '/api/Vendor/Warranty/Tasks/{divisionId}/{status}',
     params: [
-      { name: 'divisionId', type: 'string', required: true, hint: 'the DIVISION — a name ("Atlanta West") or market number ("210"); never a street' },
+      { name: 'divisionId', type: 'string', required: true, hint: 'the DIVISION — a name ("Atlanta West"), a market number ("210"), or exactly "each" for every accessible division; never a street' },
       { name: 'status', type: 'string', enum: ['new', 'open', 'fixed', 'closed'], required: true },
       { name: 'address', type: 'string', hint: 'a STREET address or task number — set ONLY when the user names one specific property/task to drill into' },   // NOT in the endpoint — the drill join's filter
     ] },
@@ -482,17 +483,20 @@ export const CONNECTOR_RECIPES = [
     params: [{ name: 'divisionId', type: 'string', required: true }] },
 
   // ── Aircall Workspace — supervisor / inbox reads ───────────────────────────────────────────────────────────────
-  { ...AC, id: 'aw_team_availability', name: 'Team availability (all agents)', pulse: { kind: 'inventory', scope: 'team' },
+  // DK-2 (DESIGN_desks.md §5) — capClass:'presence' = operator STATE (my/team availability, roster, set). A desk
+  // carries it, but the queue SWEEP never sweeps it as backlog ("set my availability" is not a queue item); it stays
+  // a DIRECT capability on the interpret palette. Threads through recipeFromCatalogEntry → recipeToLeg (Invariant #3).
+  { ...AC, id: 'aw_team_availability', name: 'Team availability (all agents)', capClass: 'presence', pulse: { kind: 'inventory', scope: 'team' },
     does: 'list EVERY teammate\'s live availability across the company (available / on_mobile / offline / do_not_disturb / other), riding your Aircall Workspace login — answers "who is available?", "is anyone free right now?"',
     endpoint: `/v3/availabilities?${_AC_AVAIL_Q}`, params: [] },
-  { ...AC, id: 'aw_my_availability', name: 'My availability status',
+  { ...AC, id: 'aw_my_availability', name: 'My availability status', capClass: 'presence',
     does: 'read YOUR OWN current availability on all channels (phone + client), riding your login — answers "am I available?", "what is my status?", "am I on do-not-disturb?"',
     endpoint: `/v3/users/{me}/availabilities?${_AC_AVAIL_Q}`, params: [] },
-  { ...AC, id: 'aw_my_agent', name: 'My Aircall agent profile and teams', method: 'POST', gql: true, contentType: 'application/json',
+  { ...AC, id: 'aw_my_agent', name: 'My Aircall agent profile and teams', capClass: 'presence', method: 'POST', gql: true, contentType: 'application/json',
     does: 'read your agent profile — teams you belong to (with member ids), default outbound line, availability state, and associated phone lines',
     endpoint: acGqlEndpoint('GetCurrentAgentV2_Query'),
     body: acGqlBody('GetCurrentAgentV2_Query', {}), params: [] },
-  { ...AC, id: 'aw_teammate_roster', name: 'Teammate roster and status', method: 'POST', gql: true, contentType: 'application/json',
+  { ...AC, id: 'aw_teammate_roster', name: 'Teammate roster and status', capClass: 'presence', method: 'POST', gql: true, contentType: 'application/json',
     does: 'list teammates with their live availabilityStatus (on_mobile / offline / do_not_disturb / other) — the supervisor roster view',
     endpoint: acGqlEndpoint('lookupTeammates'),
     body: acGqlBody('lookupTeammates', { input: { filters: { query: '' }, pageRequest: { limit: 50 } } }), params: [] },
@@ -549,7 +553,7 @@ export const CONNECTOR_RECIPES = [
       { name: 'lineId', type: 'string', required: true },
     ] },
   // ── writes (gated; self-only availability) ───────────────────────────────────────────────────────────────────
-  { ...AC, id: 'aw_set_availability', name: 'Set my Aircall availability', write: true, method: 'POST', gql: true, contentType: 'application/json',
+  { ...AC, id: 'aw_set_availability', name: 'Set my Aircall availability', capClass: 'presence', write: true, method: 'POST', gql: true, contentType: 'application/json',
     does: 'set YOUR availability preference — answers "set me to available / unavailable / do-not-disturb / busy / back-office"; does not place or answer calls',
     endpoint: acGqlEndpoint('UpdateAgent_Mutation'),
     // v2.74.1479 — {me} = the AGENT id (input.ID), NOT the REST user id: resolve it from the GraphQL agent read

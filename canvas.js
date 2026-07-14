@@ -178,7 +178,7 @@ function _applyDiff(next, d) {
 
 async function _boot() {
   if (!_anchor.appId && !_anchor.conversationId) {
-    _renderAll(newCanvasSpec({ anchor: _anchor, title: 'Canvas', blocks: [{ id: 'hint', kind: 'markdown', text: 'Open the canvas from an app conversation (the `canvas` command).' }] }));
+    _renderAll(newCanvasSpec({ anchor: _anchor, title: 'Canvas', blocks: [{ id: 'hint', kind: 'markdown', text: 'Open the canvas from a desk conversation (the `canvas` command).' }] }));
     return;
   }
   let spec = null;

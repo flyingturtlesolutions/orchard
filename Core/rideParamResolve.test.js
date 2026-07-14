@@ -102,3 +102,46 @@ describe('rideParamResolve — filterRowsByText (the drill join)', () => {
     assert.deepEqual(filterRowsByText(ROWS, FIELDS, 'zzz nowhere'), []);
   });
 });
+
+describe('DK-7 (v2.74.1488) — the "each" mode (enumeration, opt-in, capped)', () => {
+  const EACH_SPEC = { ...SPEC, each: true };
+  it('spec.each + the sentinel → the FULL deduped enumeration in list order, {value,label} pairs', () => {
+    const r = resolveRideParam(EACH_SPEC, 'each', STATE);
+    assert.equal(r.each, true);
+    assert.deepEqual(r.values.map((v) => v.value), [83, 11, 62, 10, 210]);
+    assert.deepEqual(r.values.map((v) => v.label), ['Atlanta West', 'Charleston', 'Greensboro', 'Seattle', 'Boise']);
+    assert.equal(r.total, 5);
+    assert.equal(r.capped, false);
+  });
+  it('all three sentinels work, case/format-insensitively (EACH / Every / all)', () => {
+    for (const s of ['EACH', 'Every', 'all']) assert.equal(resolveRideParam(EACH_SPEC, s, STATE).each, true, s);
+  });
+  it('OPT-IN only: without spec.each, "each" is an unknown value (honest ask-back, never a silent fan-out)', () => {
+    const r = resolveRideParam(SPEC, 'each', STATE);
+    assert.equal(r.each, undefined);
+    assert.equal(r.unknown, true);
+  });
+  it('eachCap caps the values and flags capped, total stays the real count', () => {
+    const r = resolveRideParam({ ...EACH_SPEC, eachCap: 2 }, 'each', STATE);
+    assert.equal(r.values.length, 2);
+    assert.equal(r.total, 5);
+    assert.equal(r.capped, true);
+  });
+  it('an enumerable but EMPTY state → honest unknown, never a zero-item fan-out', () => {
+    const r = resolveRideParam(EACH_SPEC, 'each', { access: {}, currentHub: {} });
+    assert.equal(r.unknown, true);
+  });
+  it('a real division value still resolves normally on an each-enabled spec', () => {
+    assert.deepEqual(resolveRideParam(EACH_SPEC, 'Atlanta West', STATE), { value: 83, label: 'Atlanta West' });
+  });
+});
+
+describe('DK-7b (v2.74.1489) — eachCap guards ENUMERATION, not execution (windowing is the dispatcher\'s)', () => {
+  it('a 30-division state enumerates fully under the 200 default (the live 121-division case fits)', () => {
+    const rows = Array.from({ length: 30 }, (_, i) => ({ Id: i + 1, Name: `Div ${i + 1}`, Code: String(100 + i) }));
+    const st = { access: { Hubs: [{ Divisions: rows }] }, currentHub: {} };
+    const r = resolveRideParam({ ...SPEC, each: true }, 'each', st);
+    assert.equal(r.values.length, 30);
+    assert.equal(r.capped, false);
+  });
+});

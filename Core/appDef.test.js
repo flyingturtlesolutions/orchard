@@ -257,3 +257,15 @@ describe('appDef — presentation (CA-7, the optional canvas declaration)', () =
     assert.equal(normalizeAppDefinition({ ...DEF, presentation: { backend: 'gdoc' } }).presentation.backend, 'gdoc');
   });
 });
+
+describe('DK-6 — def.sites (a preconfigured desk’s builtin connection set)', () => {
+  it('normalizes {host,label}: lowercases host, label defaults to host, drops junk, caps at 8; absent → []', () => {
+    const d = normalizeAppDefinition({ id: 'x', name: 'X', seed: 's', sites: [
+      { host: 'Vendorsuite.DRHorton.com', label: 'VendorSuite' }, { host: 'zendesk.com' }, { label: 'no-host' }, null, 'junk',
+    ] });
+    assert.deepEqual(d.sites, [{ host: 'vendorsuite.drhorton.com', label: 'VendorSuite' }, { host: 'zendesk.com', label: 'zendesk.com' }]);
+    assert.equal(normalizeAppDefinition({ id: 'x', name: 'X', seed: 's', sites: Array.from({ length: 12 }, (_, i) => ({ host: `h${i}.com` })) }).sites.length, 8);
+    assert.deepEqual(normalizeAppDefinition({ id: 'x', name: 'X', seed: 's' }).sites, []);
+    assert.deepEqual(normalizeAppDefinition(normalizeAppDefinition({ id: 'x', name: 'X', seed: 's', sites: [{ host: 'A.com' }] })).sites, [{ host: 'a.com', label: 'a.com' }]);   // idempotent
+  });
+});

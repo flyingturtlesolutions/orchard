@@ -592,3 +592,31 @@ describe('v2.74.1479 — aw_set_availability resolves {me} from the GraphQL agen
     assert.ok(leg && leg.tool && leg.tool.identityGql && leg.tool.identityGql.idPath === 'data.getAgentV2.ID');
   });
 });
+
+describe('DK-2 (DESIGN_desks.md §5) — presence capability class threads catalog → leg (Invariant #3)', () => {
+  const legs = recipeLegs({ account: 'me', trusted: true });
+  it('EXACTLY the five operator-presence Aircall legs carry tool.capClass="presence" — nothing else in the catalog', () => {
+    const presenceIds = legs.filter((l) => l && l.tool && l.tool.capClass === 'presence').map((l) => l.tool.recipeId).sort();
+    assert.deepEqual(presenceIds, ['aw_my_agent', 'aw_my_availability', 'aw_set_availability', 'aw_team_availability', 'aw_teammate_roster']);
+  });
+  it('conversation-queue reads are NOT presence — they ARE the backlog', () => {
+    for (const rid of ['aw_missed_calls', 'aw_open_conversations']) {
+      const leg = legs.find((l) => l && l.tool && l.tool.recipeId === rid);
+      assert.ok(leg, `${rid} projects a leg`);
+      assert.equal(leg.tool.capClass, null);
+    }
+  });
+  it('recipeToLeg threads capClass onto leg.tool; absent → null (hop 3)', () => {
+    assert.equal(recipeToLeg({ id: 'x', name: 'X', endpoint: '/x', app: 'aircall', origin: 'workspace.aircall.io', capClass: 'presence' }, { trusted: true }).tool.capClass, 'presence');
+    assert.equal(recipeToLeg({ id: 'y', name: 'Y', endpoint: '/y', app: 'aircall', origin: 'workspace.aircall.io' }, { trusted: true }).tool.capClass, null);
+  });
+});
+
+describe('DK-7 (v2.74.1488) — the each-mode marker rides the resolve spec through to the leg (zero new hops)', () => {
+  it('vs_warranty_tasks: leg.tool.resolve.divisionId carries each:true (the resolve object threads WHOLE)', () => {
+    const leg = recipeLegs({ account: 'me', trusted: true }).find((l) => l && l.tool && l.tool.recipeId === 'vs_warranty_tasks');
+    assert.ok(leg, 'vs_warranty_tasks projects a leg');
+    assert.equal(leg.tool.resolve.divisionId.each, true);
+    assert.ok(/"each"/.test(leg.does), 'the does-text teaches the model the sentinel');
+  });
+});

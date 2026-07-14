@@ -45,8 +45,9 @@ import { legRef } from '../../Core/legRef.js';   // v1342 — unified ref for pa
 import { prerankLegs } from '../../Core/legPrerank.js';   // CX-9p (v1461) — deterministic pre-rank of the scope-tiered palette (winner leads; zero-overlap globals capped)
 import { recordAlias, recallAlias } from '../../Core/connectorAlias.js';   // CX-9p (v1461) — the connector-leg alias store (ask-shape → leg warm path; the teach-once flywheel for connectors)
 import { parseSweepReads, parseSweepProposals } from '../../Core/sweepPrompt.js';   // FL-1 (v2.74.1346) — sweep output validated against the OFFERED legs
+import { federateResults, issueLines, crossSiteKinds } from '../../Core/federate.js';   // DK-4 (DESIGN_desks.md §6) — federate the sweep's reads into cross-site issues (union by corrKeys)
 import { parseSeedDirectives } from '../../Core/fleetSchedule.js';   // FL-6b (v2.74.1356) — the seed's stated cadence, strict-parsed
-import { composeOfferedLeg, policyFilter, fleetOfferedLegs, panelOfferedLegs } from '../../Core/palette.js';   // GD-4b — the app's COMPOSE (draft-on-canvas) leg joins interpret's palette; v1340 (review A) — policyFilter: the 'forbidden' floor now runs on the LIVE interpret palette, not just the dormant ilRun; FL (v1348) — the fleet console legs (NL → sweep/show via IL, never regex); v1354 — CLEAR_CHAT (conversation-management panel legs)
+import { composeOfferedLeg, policyFilter, fleetOfferedLegs, panelOfferedLegs, partitionDeskLegs } from '../../Core/palette.js';   // GD-4b — the app's COMPOSE (draft-on-canvas) leg joins interpret's palette; v1340 (review A) — policyFilter: the 'forbidden' floor now runs on the LIVE interpret palette, not just the dormant ilRun; FL (v1348) — the fleet console legs (NL → sweep/show via IL, never regex); v1354 — CLEAR_CHAT (conversation-management panel legs)
 import { neutralizeFalseCompletion } from '../../Core/answerGuard.js';   // honesty belt — the answer path dispatches nothing, so a completion claim on a side-effect COMMAND is a fabrication (the calendar "✅ I created it" bug)
 import { describeObjectModel } from '../../Core/appDef.js';   // OM — render the app's object model (noun/states/actions/transitions) as a context block
 import { toCandidate, scopeAndPartition, rankAndDecide, scoresToScorer, validateBindings, normalizeAliasPhrase, accreteAlias, removeAlias, tallyCapabilityConfirmations, localeAffordanceLabels, isOrphanCapability, findDuplicateCapabilities } from '../../Core/orchMatch.js';   // ORCH-M0/D/M/G/A; GA-6 dedup
@@ -1778,8 +1779,12 @@ export function createSgMessageHandlers(ctx) {
           }
         } catch { /* never block the sweep on the broker projection */ }
         const legsAll = policyFilter([...curated, ...harvested, ...broker], { scope: {} });   // the 'forbidden' floor holds here too
-        const askLegs = legsAll.filter((l) => l && l.mode === 'ask');
-        const actLegs = legsAll.filter((l) => l && l.mode === 'act');
+        // DK-2 (DESIGN_desks.md §5) — presence (my/team availability, set-availability) is operator STATE, not
+        // backlog: drop it from the sweep so "review the queue" never offers "my availability" as a queue read nor
+        // proposes "set your availability" as a queue action. Presence stays a DIRECT capability on interpret.
+        const { queue: queueLegs } = partitionDeskLegs(legsAll);
+        const askLegs = queueLegs.filter((l) => l && l.mode === 'ask');
+        const actLegs = queueLegs.filter((l) => l && l.mode === 'act');
         const om = appId ? (builtinApp(appId)?.objectModel || null) : null;
         let learned = '';
         if (memId) { try { learned = goalContextFor(await loadGoalItems(memId), `sweep: ${seed.slice(0, 80)}`, { om }); } catch { /* */ } }
@@ -1793,7 +1798,17 @@ export function createSgMessageHandlers(ctx) {
           // FL-1b (v1347) — round 1 may return `needs` (targeted evidence reads); round 2 is FINAL (needs ignored).
           const round = payload?.round === 2 ? 2 : 1;
           const results = Array.isArray(payload?.results) ? payload.results.slice(0, 12) : [];   // 3 breadth + 8 evidence (FL-2b) + margin
-          const raw = await AnthropicService.sweepPropose({ seed, learned, objects, legs: actLegs, askLegs: round === 1 ? askLegs : [], results, round, context: String(payload?.context || ''), evidence: String(payload?.evidence || '') });   // FL-10b — the drill's fenced extracts ride through
+          // DK-4 (DESIGN_desks.md §6) — FEDERATE the executed reads into cross-site ISSUES: normalize each result to
+          // WorkItems (source = the leg's host), union by shared corrKeys (email/phone/order). A call+warranty+ticket+
+          // order sharing a key are ONE issue → propose reasons over the issue, not the isolated row. Additive: a
+          // single-connection sweep links nothing → `issues` empty → the prompt is byte-identical (zero regression).
+          let issueCtx = [];
+          try {
+            const fed = federateResults(results, { sourceOf: (r) => { const k = String((r && r.key) || ''); const at = k.indexOf('@'); return at >= 0 ? k.slice(at + 1) : k; } });
+            Logger.info('route', `SWEEP ▸ federate → ${fed.items.length} item(s) → ${fed.issues.length} issue(s), ${fed.crossSite} cross-site${fed.crossSite ? ` [${crossSiteKinds(fed.issues).join('/')}]` : ''}`);
+            if (fed.crossSite) issueCtx = issueLines(fed.issues);
+          } catch { /* federation is additive — never block the sweep */ }
+          const raw = await AnthropicService.sweepPropose({ seed, learned, objects, legs: actLegs, askLegs: round === 1 ? askLegs : [], results, round, context: String(payload?.context || ''), evidence: String(payload?.evidence || ''), issues: issueCtx });   // FL-10b — drill extracts ride through; DK-4 — + cross-site issues
           const { proposals, needs, summary } = parseSweepProposals(raw, { legs: actLegs, askLegs });
           const outNeeds = round === 1 ? needs : [];
           Logger.info('route', `SWEEP ▸ propose r${round} → ${proposals.length} proposal(s)${outNeeds.length ? ` + ${outNeeds.length} evidence need(s)` : ''} from ${results.length} read(s), ${actLegs.length} action(s) offered${summary ? ` — ${summary.slice(0, 80)}` : ''}`);

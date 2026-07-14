@@ -148,6 +148,12 @@ export function normalizeAppDefinition(def) {
     presetId: _str(d.presetId) || null,
     instanceId: _str(d.instanceId) || null,
     setup: (d.setup && typeof d.setup === 'object') ? d.setup : null,
+    // DK-6 (v2.74.1486, DESIGN_desks.md) — a PRECONFIGURED desk's builtin SITES ({host,label}, host lowercased,
+    // label defaults to the host). Setup pre-picks them (seedDeskCatalog) so a preconfigured desk is
+    // review-and-Confirm; [] = a custom desk (the user picks sites). Gallery membership: sites.length > 0.
+    sites: Array.isArray(d.sites)
+      ? d.sites.map((s) => { const host = _str(s && s.host).toLowerCase(); return host ? { host, label: _str(s && s.label) || host } : null; }).filter(Boolean).slice(0, 8)
+      : [],
     // §10.1 (v2.74.1215) — the preset's hand-authored BASELINE rules (behavior deltas), SEEDED into every new
     // instance (Core/presetMemory.seedInstanceFromPreset). Carried OPAQUE here as a raw object list (cap 16) — the
     // seeder validates each via goalMemory's normalizeMemoryItem + drops non-deltas, keeping appDef goalMemory-free.

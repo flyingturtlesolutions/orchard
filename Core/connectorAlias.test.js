@@ -86,3 +86,22 @@ describe('recallAlias — conservative warm-path recall', () => {
     assert.equal(hit.ref, 'A', 'the more-confirmed association wins the tie');
   });
 });
+
+describe('DK-7b (v2.74.1489) — continuation words never key an alias (the "continue" poisoning fix)', () => {
+  it('refuses a bare continuation/ack ask ("continue", "next", "more") — the store is unchanged', () => {
+    for (const w of ['continue', 'Next', 'more', 'again']) {
+      assert.equal(recordAlias([], { ask: w, legRef: 'me.vendorsuite.vs_warranty_tasks@vendorsuite.drhorton.com', at: 1 }).length, 0, w);
+    }
+  });
+  it('scrubs an ALREADY-poisoned entry on the next write (self-heal, no migration)', () => {
+    const poisoned = recordAlias([], { ask: 'warranty task counts', legRef: 'a@x', at: 1 })
+      .concat([{ sig: ['continue'], ref: 'b@y', host: 'y', count: 3, at: 2 }]);   // a pre-fix store shape
+    const next = recordAlias(poisoned, { ask: 'open warranty tasks', legRef: 'c@z', at: 3 });
+    assert.equal(next.some((e) => e.sig.length === 1 && e.sig[0] === 'continue'), false, 'poison scrubbed');
+    assert.equal(next.length, 2);   // the real alias + the new one survive
+  });
+  it('a REAL ask containing a continuation word still records ("continue the greensboro sweep" has content words)', () => {
+    const next = recordAlias([], { ask: 'continue the greensboro sweep', legRef: 'a@x', at: 1 });
+    assert.equal(next.length, 1);
+  });
+});

@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { builtinApps, builtinPresets, builtinApp, presetsForType } from './appCatalog.js';
+import { builtinApps, builtinPresets, builtinApp, presetsForType, preconfiguredDesks } from './appCatalog.js';
 import { appFromDefinition, normalizeAppDefinition, APP_TYPES } from './appDef.js';
 
 describe('appCatalog — the abstract TYPES (what the gallery shows)', () => {
@@ -73,7 +73,7 @@ describe('appCatalog — resolution', () => {
   });
 
   it('presetsForType groups presets under their abstract type', () => {
-    assert.deepEqual(presetsForType('inbox').map((p) => p.id).sort(), ['inbox-email', 'support', 'ticket-manager']);   // FL-5 (v1346) — the fleet preset joins the inbox type
+    assert.deepEqual(presetsForType('inbox').map((p) => p.id).sort(), ['call-manager', 'inbox-email', 'support', 'ticket-manager', 'warranty-manager']);   // FL-5 (v1346) fleet preset; DK-1 (v1481) warranty + call presets join the inbox type
     assert.deepEqual(presetsForType('concierge').map((p) => p.id), ['shopper']);
   });
 
@@ -94,5 +94,41 @@ describe('appCatalog — resolution', () => {
     assert.equal(a.appId, 'financial');
     assert.equal(a.config.writePolicy, 'never');                   // the read-only floor carries onto the app
     assert.ok(a.seed.includes('READ ONLY'));
+  });
+});
+
+describe('appCatalog — DK-1 (DESIGN_desks.md §4): a new site is an Inbox PRESET, not a new TYPE', () => {
+  it('still exactly 3 TYPES — no "Warranty/Call Manager" type was introduced', () => {
+    assert.deepEqual(builtinApps().map((a) => a.id).sort(), [...APP_TYPES].sort());
+  });
+  it('Warranty manager — inbox/operator preset bound to warranty tasks', () => {
+    const w = builtinApp('warranty-manager');
+    assert.ok(w && w.type === 'inbox' && w.archetype === 'operator');
+    assert.equal(w.objectModel.noun, 'warranty task');
+    assert.deepEqual(w.objectModel.states, ['new', 'open', 'fixed', 'closed']);
+    assert.equal(w.defaultConfig.writePolicy, 'gated');
+    assert.ok(w.baseline.length >= 1);
+  });
+  it('Call manager — inbox/operator preset bound to conversations, close transition', () => {
+    const c = builtinApp('call-manager');
+    assert.ok(c && c.type === 'inbox' && c.archetype === 'operator');
+    assert.equal(c.objectModel.noun, 'conversation');
+    assert.ok(c.objectModel.transitions.some((t) => t.verb === 'close' && t.to === 'closed'));
+    assert.equal(c.defaultConfig.writePolicy, 'gated');
+  });
+});
+
+describe('appCatalog — DK-6: preconfigured desks (the flat gallery — sites built in, no type level)', () => {
+  it('the Warranty desk (id warranty-manager, identity kept) ships its 4 sites in order', () => {
+    const w = builtinApp('warranty-manager');
+    assert.equal(w.name, 'Warranty desk');
+    assert.deepEqual(w.sites.map((s) => s.host), ['vendorsuite.drhorton.com', 'zendesk.com', 'admin.shopify.com', 'app.hubspot.com']);
+    assert.deepEqual(w.sites.map((s) => s.label), ['VendorSuite', 'Zendesk', 'Shopify', 'HubSpot']);
+    assert.ok(/HubSpot/.test(w.seed) && /ONE case/.test(w.seed), 'the seed spans the homeowner’s whole record + correlation');
+  });
+  it('preconfiguredDesks = presets WITH sites (just the Warranty desk today); legacy presets carry sites: [] and stay resolvable', () => {
+    assert.deepEqual(preconfiguredDesks().map((d) => d.id), ['warranty-manager']);
+    assert.deepEqual(builtinApp('support').sites, []);
+    assert.ok(builtinApp('call-manager'), 'a gallery-hidden preset still resolves by id (existing instances keep working)');
   });
 });

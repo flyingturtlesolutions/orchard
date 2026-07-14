@@ -66,6 +66,21 @@ export function resolveRideParam(spec, raw, state) {
   if (!spec || typeof spec !== 'object' || !spec.id || !state || typeof state !== 'object') return null;
   const rows = _rows(state, spec);
   const has = raw !== undefined && raw !== null && String(raw).trim() !== '';
+  // DK-7 (v2.74.1488) — the "each" mode: same spec, same via-read, different CARDINALITY. When the recipe OPTS IN
+  // (spec.each: true) and the model bound the each-sentinel ("for each division…" → divisionId:"each"), return the
+  // FULL candidate list instead of matching one — the dispatcher fans the leg out over it (reads only, capped).
+  // Interpretation stays with the model (it binds the sentinel); enumeration + iteration stay deterministic. A spec
+  // without each:true treats "each" like any other unknown value (honest ask-back) — tighten by default. Note: a
+  // row literally NAMED "All"/"Each" is shadowed on an each-enabled spec — acceptable, the collective sense wins.
+  if (has && spec.each === true && /^(each|every|all)$/.test(_norm(raw))) {
+    // DK-7b (v2.74.1489) — eachCap guards the ENUMERATION (an absurd state can't mint a 10k list); the EXECUTION
+    // budget is the dispatcher's window (16 per pass + "continue" — live: 121 divisions, and the old cap-16 here
+    // made rows 17+ structurally unreachable).
+    const cap = (Number.isFinite(spec.eachCap) && spec.eachCap > 0) ? spec.eachCap : 200;
+    const values = rows.slice(0, cap).map((r) => ({ value: r[spec.id], label: _label(r, spec) }));
+    if (!values.length) return { unknown: true, candidates: [] };   // enumerable but EMPTY state → honest ask-back, never a silent no-op
+    return { each: true, values, total: rows.length, capped: rows.length > values.length };
+  }
   if (!has) {
     const dv = spec.defaultPath ? getPath(state, spec.defaultPath) : undefined;
     if (dv === undefined || dv === null) return null;

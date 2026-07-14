@@ -277,6 +277,15 @@ describe('FL-8 — autonomyFor / executedTodayByRecipe / context fence', () => {
     const without = buildSweepProposeMessages({ seed: 's', legs: ACT_LEGS, results: [], round: 2 });
     assert.ok(!without.user.includes('<SWEEP_CONTEXT'));
   });
+  it('DK-4: the CROSS_SITE_ISSUES block appears only when issues are passed; empty = byte-identical (the no-op guarantee)', () => {
+    const withIssues = buildSweepProposeMessages({ seed: 's', legs: ACT_LEGS, results: [], round: 2, issues: ['ISSUE i1 (phone:1) — 2 items across Aircall, Zendesk:'] });
+    assert.ok(withIssues.user.includes('<CROSS_SITE_ISSUES'));
+    assert.ok(withIssues.user.includes('ISSUE i1 (phone:1)'));
+    const withEmpty = buildSweepProposeMessages({ seed: 's', legs: ACT_LEGS, results: [], round: 2, issues: [] }).user;
+    const without = buildSweepProposeMessages({ seed: 's', legs: ACT_LEGS, results: [], round: 2 }).user;
+    assert.ok(!withEmpty.includes('CROSS_SITE_ISSUES'));
+    assert.equal(withEmpty, without);   // the additive param defaults to a no-op → single-connection sweeps unchanged
+  });
   it('CX-7: minimizeReadValue reaches a NESTED GraphQL list (data.orders.edges) and unwraps nodes', () => {
     const gql = { data: { orders: { edges: [
       { node: { id: 'gid://shopify/Order/1', name: 'DEAKO#69872', displayFulfillmentStatus: 'FULFILLED', createdAt: '2026-07-01T00:00:00Z', note: 'replacement switch' } },

@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { assemblePalette, toOfferedLeg, availableBuiltins, policyFilter, attachPrior, composeOfferedLeg, BUILTIN_LEGS } from './palette.js';
+import { assemblePalette, toOfferedLeg, availableBuiltins, policyFilter, attachPrior, composeOfferedLeg, BUILTIN_LEGS, isPresenceLeg, partitionDeskLegs } from './palette.js';
 import { normalizeInterpretDecision } from './interpret.js';
 
 const cap = (id, extra = {}) => ({ kind: 'capability', capabilityId: id, name: id, ...extra });
@@ -155,5 +155,29 @@ describe('assemblePalette — the §4.3 pipeline (pure, injected deps)', () => {
     let seenK = null;
     await assemblePalette('x', {}, { retrieve: async (_g, k) => { seenK = k; return []; } }, { k: 5 });
     assert.equal(seenK, 5);
+  });
+});
+
+describe('DK-2 (DESIGN_desks.md §5) — presence capability class helpers', () => {
+  const presence = { key: 'p', mode: 'ask', tool: { capClass: 'presence' } };
+  const presenceTop = { key: 'p2', mode: 'act', capClass: 'presence' };   // marker read at the leg top level too
+  const queueRead = { key: 'q', mode: 'ask', tool: { capClass: null } };
+  const queueAct = { key: 'a', mode: 'act', tool: {} };
+  it('isPresenceLeg reads tool.capClass OR a top-level capClass; safe on junk', () => {
+    assert.equal(isPresenceLeg(presence), true);
+    assert.equal(isPresenceLeg(presenceTop), true);
+    assert.equal(isPresenceLeg(queueRead), false);
+    assert.equal(isPresenceLeg(queueAct), false);
+    assert.equal(isPresenceLeg(null), false);
+    assert.equal(isPresenceLeg({}), false);
+  });
+  it('partitionDeskLegs splits queue vs presence, order-preserving', () => {
+    const { queue, presence: pres } = partitionDeskLegs([queueRead, presence, queueAct, presenceTop]);
+    assert.deepEqual(queue.map((l) => l.key), ['q', 'a']);
+    assert.deepEqual(pres.map((l) => l.key), ['p', 'p2']);
+  });
+  it('tolerates non-arrays', () => {
+    assert.deepEqual(partitionDeskLegs(null), { queue: [], presence: [] });
+    assert.deepEqual(partitionDeskLegs(undefined), { queue: [], presence: [] });
   });
 });

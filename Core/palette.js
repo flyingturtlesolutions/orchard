@@ -142,6 +142,24 @@ export function fleetOfferedLegs(app, connected = false) {
   ];
 }
 
+/**
+ * DK-2 (DESIGN_desks.md §5) — PRESENCE is a secondary capability class: operator STATE (read/set my availability,
+ * the team roster), NOT queue-work. A leg is presence when its curated recipe marks tool.capClass:'presence'. Pure.
+ */
+export function isPresenceLeg(leg) {
+  const cc = (leg && (leg.capClass || (leg.tool && leg.tool.capClass))) || '';
+  return cc === 'presence';
+}
+/**
+ * Split a connected desk's offered legs into { queue, presence } so the sweep works the BACKLOG while presence
+ * rides as standing operator state (the §5 wrinkle — "set my availability" is never an item to resolve). Pure.
+ */
+export function partitionDeskLegs(legs) {
+  const queue = [], presence = [];
+  for (const l of (Array.isArray(legs) ? legs : [])) { if (isPresenceLeg(l)) presence.push(l); else queue.push(l); }
+  return { queue, presence };
+}
+
 const _ruleApplies = (r, scope) => !r || !r.when || (r.when.ground == null) || (r.when.ground === (scope && scope.ground));
 const _ruleForbids = (r, leg) => !!((Array.isArray(r.forbidKeys) && r.forbidKeys.includes(keyOf(leg))) ||
                                     (Array.isArray(r.forbidDomains) && r.forbidDomains.includes(leg.domain)));

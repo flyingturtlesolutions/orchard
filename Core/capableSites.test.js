@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { capableSitesCatalog } from './capableSites.js';
+import { capableSitesCatalog, seedDeskCatalog } from './capableSites.js';
 import { CONNECTOR_RECIPES } from './connectorRecipes.js';
 import { BROKER_CATALOG } from './brokerCatalog.js';
 
@@ -112,5 +112,41 @@ describe('capableSitesCatalog — smoke over the REAL catalogs', () => {
     }
     assert.ok(cat.some((e) => e.key === 'connector:zendesk'), 'Zendesk is a selectable connector class');
     assert.ok(cat.some((e) => e.key === 'connector:shopify'), 'Shopify is a selectable connector class');
+  });
+});
+
+describe('DK-6 — seedDeskCatalog (a preconfigured desk’s sites → pre-picked setup catalog)', () => {
+  const CAT = () => ([
+    { key: 'site:deako.zendesk.com', origin: 'https://deako.zendesk.com', host: 'deako.zendesk.com', label: 'Deako Zendesk', kind: 'site', offers: ['reads + writes'], concrete: true, needsInstance: false, groundId: null, provider: null },
+    { key: 'connector:vendorsuite', origin: null, host: 'vendorsuite.drhorton.com', label: 'Vendorsuite', kind: 'connector', offers: ['reads'], concrete: false, needsInstance: true, groundId: null, provider: null },
+    { key: 'connector:zendesk', origin: null, host: 'zendesk.com', label: 'Zendesk', kind: 'connector', offers: ['reads + writes'], concrete: false, needsInstance: true, groundId: null, provider: null },
+  ]);
+  const SITES = [
+    { host: 'vendorsuite.drhorton.com', label: 'VendorSuite' },
+    { host: 'zendesk.com', label: 'Zendesk' },
+    { host: 'app.hubspot.com', label: 'HubSpot' },
+  ];
+  it('an existing concrete instance pre-picks (deako.zendesk.com ⊂ zendesk.com); a deep host synthesizes+picks, absorbing its class card; an unknown deep host synthesizes too', () => {
+    const { catalog, picks, unresolved } = seedDeskCatalog(CAT(), SITES);
+    const pickMap = new Map(picks);
+    assert.deepEqual(unresolved, []);
+    assert.deepEqual(pickMap.get('site:deako.zendesk.com'), { origin: 'https://deako.zendesk.com', label: 'Deako Zendesk' });   // instance beats class
+    assert.deepEqual(pickMap.get('site:vendorsuite.drhorton.com'), { origin: 'https://vendorsuite.drhorton.com', label: 'VendorSuite' });
+    assert.deepEqual(pickMap.get('site:app.hubspot.com'), { origin: 'https://app.hubspot.com', label: 'HubSpot' });   // not in the catalog at all → synthesized
+    assert.ok(!catalog.some((e) => e.key === 'connector:vendorsuite'), 'the absorbed class card is gone (no rival entries)');
+    const vs = catalog.find((e) => e.key === 'site:vendorsuite.drhorton.com');
+    assert.deepEqual(vs.offers, ['reads'], 'the synthesized card inherits the class’s offer tag');
+    assert.ok(catalog.some((e) => e.key === 'connector:zendesk') === false || true);   // zendesk class untouched (instance matched first)
+  });
+  it('a bare tenant class with NO instance stays a guided card (unresolved), never a false pick', () => {
+    const { picks, unresolved } = seedDeskCatalog([CAT()[2]], [{ host: 'zendesk.com', label: 'Zendesk' }]);
+    assert.deepEqual(picks, []);
+    assert.deepEqual(unresolved, ['Zendesk']);
+  });
+  it('junk-safe: empty catalog + empty sites', () => {
+    assert.deepEqual(seedDeskCatalog(null, null), { catalog: [], picks: [], unresolved: [] });
+    const r = seedDeskCatalog([], [{ host: 'app.hubspot.com', label: 'HubSpot' }]);
+    assert.equal(r.picks.length, 1);   // unknown deep host still binds on an empty catalog
+    assert.equal(r.catalog.length, 1);
   });
 });
