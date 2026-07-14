@@ -239,7 +239,7 @@ export function planSubTasks(app, items) {
     const key = item.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    const spec = subTaskFromApp(app, `This sub-task handles: ${item}. Apply the app's instructions to this specific item.`);
+    const spec = subTaskFromApp(app, `This case handles: ${item}. Apply the desk's instructions to this specific item.`);   // Case rename (v1492) — the child's persona speaks the taxonomy (Desk → Case)
     if (spec) specs.push({ ...spec, title: item.slice(0, 60) });
   }
   return specs;

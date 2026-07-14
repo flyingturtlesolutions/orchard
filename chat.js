@@ -773,7 +773,7 @@ function _historyNewAppRow() {
 function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
   const isDev = conv.kind === 'dev';
   const badge = isDev ? (conv.surface === 'high' ? '<span class="rail-item-badge design">design</span>' : '<span class="rail-item-badge">dev</span>')
-                      : '<span class="rail-item-badge app">desk</span>';
+                      : (row.role === 'subtask' ? '<span class="rail-item-badge app">case</span>' : '<span class="rail-item-badge app">desk</span>');   // Case rename (v1492) — a spawned child badges as a CASE
   // FL-6c (v2.74.1357) — the pending-proposals chip: a sweep with results lights the APP row (children share the
   // instance, so only the app row carries it). `pending` is a derived count (number), never untrusted text.
   const pendingChip = (row.role === 'app' && pending > 0)
@@ -790,7 +790,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
 
   const leaf = row.role === 'subtask' ? '<span class="rail-glyph leaf" aria-hidden="true">•</span>' : '';
   const chevron = (row.role === 'app' && row.hasChildren)
-    ? `<button class="rail-chevron" title="${row.expanded ? 'Collapse sub-tasks' : 'Expand sub-tasks'}" aria-label="Toggle sub-tasks">${row.expanded ? '▾' : '▸'} ${row.count}</button>`
+    ? `<button class="rail-chevron" title="${row.expanded ? 'Collapse cases' : 'Expand cases'}" aria-label="Toggle cases">${row.expanded ? '▾' : '▸'} ${row.count}</button>`
     : '';
   const previewBtn = isDev ? `<button class="rail-item-preview" title="Load this branch into the live build (reloads the panel)">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -799,7 +799,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
       </button>` : '';
   // AP-2 (v2.74.1213) — a "+" on an app row starts a sub-conversation under it (the spawn concept, surfaced as an icon).
   const subtaskBtn = row.role === 'app'
-    ? `<button class="rail-item-subtask" title="New sub-conversation"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`
+    ? `<button class="rail-item-subtask" title="Open a case"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>`
     : '';
   // v2.74.1217 — a 3-line "quick peek" at the conversation's recent direction, shown UNDER the name. row.summary is
   // the index-mirrored recent-activity peek (untrusted message text → escHtml; CSS clamps to 3 lines). CV-4-map — also
@@ -861,7 +861,7 @@ function _historyConvRow(conv, row, pending = 0, nextSweep = 0) {
     const prompt = liveRun
       ? `"${conv.title}" has a run in progress.\n\nDeleting will STOP the run and free its slot. Its git branch${conv.branch ? ` (${conv.branch})` : ''} is KEPT — open the conversation and run "delete branch" first if you also want that removed.\n\nDelete anyway?`
       : childN
-        ? `Delete "${conv.title}" and its ${childN} sub-conversation${childN === 1 ? '' : 's'}? This can't be undone.`
+        ? `Delete "${conv.title}" and its ${childN} case${childN === 1 ? '' : 's'}? This can't be undone.`
         : `Delete "${conv.title}"?`;
     if (!confirm(prompt)) return;
     if (liveRun) { try { _getDevBridge()?.cancelConversationRuns?.(conv.id); } catch { /* */ } }
@@ -1362,19 +1362,19 @@ function _renderAppGallery() {
 async function _spawnSubTask(appConvId) {
   let app = null;
   try { app = await ConversationStore.load(appConvId); } catch { /* */ }
-  if (!app || !app.appId || app.parentId) { toast('Sub-conversations start under a desk.', 'err'); return; }
+  if (!app || !app.appId || app.parentId) { toast('Cases open under a desk.', 'err'); return; }
   let n = 1; let titles = new Set();
   try { const all = await ConversationStore.list(); const kids = all.filter((c) => c && c.parentId === appConvId); n = kids.length + 1; titles = new Set(kids.map((k) => String(k.title || ''))); } catch { /* */ }
   const base = app.title || 'Task';
   while (titles.has(`${base} #${n}`)) n++;     // a deletion can leave a gap — bump past any taken number
   const title = `${base} #${n}`;
   const spec = subTaskFromApp(app, '');        // blank sub-seed → the child inherits the app's seed (composeSeed)
-  if (!spec) { toast('Sub-conversations start under a desk.', 'err'); return; }
+  if (!spec) { toast('Cases open under a desk.', 'err'); return; }
   try {
     await ConversationStore.create({ title: title.slice(0, 60), kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config, instanceId: app.instanceId || app.appId || null, presetId: app.presetId || app.appId || null });
     _expandedApps.add(app.id);
     await _revealRail();   // v2.74.1249 — open the drawer (if closed) so the new sub-conversation is visible
-  } catch (e) { try { console.warn('[chat] sub-task spawn failed:', e?.message); } catch { /* */ } toast('Couldn’t start the sub-conversation.', 'err'); }
+  } catch (e) { try { console.warn('[chat] sub-task spawn failed:', e?.message); } catch { /* */ } toast('Couldn’t open the case.', 'err'); }
 }
 
 // CV-5 (v2.74.1173, DESIGN_conversations.md §9) — the user app catalog: user-authored AppDefinitions persisted in
@@ -1549,13 +1549,13 @@ async function _seedInstanceMemory(instanceId, presetId) {
 // CV-4 — the shared fan-out parent guard: the CURRENT conversation must be a real APP (not a sub-task / Overview /
 // non-app), since children nest ONE level under an app. Returns {app} or {error:<message>}. (One store load.)
 async function _fanoutParentApp() {
-  if (!_currentConversationId) return { error: 'Open a desk first — sub-tasks fan out under an app.' };
+  if (!_currentConversationId) return { error: 'Open a desk first — cases open under a desk.' };
   let app = null;
   try { app = await ConversationStore.load(_currentConversationId); } catch { /* */ }
   if (!app || !app.appId || app.parentId) {
     return { error: (app && app.parentId)
-      ? 'This is already a sub-task — sub-tasks can’t have their own sub-tasks (one level only).'
-      : 'Sub-tasks fan out under a desk. Open or create a desk (New desk → the gallery), then try again.' };
+      ? 'This is already a case — a case can’t have its own cases (one level only).'
+      : 'Cases open under a desk. Open or create a desk (New desk → the gallery), then try again.' };
   }
   return { app };
 }
@@ -1584,8 +1584,8 @@ async function _spawnSubTasks(listText) {
   if (!items.length) { _setMessageBody(msg, 'Give me a list, e.g. `subtasks: first item, second item, third`.'); _orchFinalize(msg); return; }
   const made = (await _createSubTasks(app, items)).length;
   _setMessageBody(msg, made
-    ? `Spawned ${made} sub-task${made === 1 ? '' : 's'} under “${app.title}”. Open the conversation drawer — they’re nested under the app.`
-    : 'Couldn’t create any sub-tasks.');
+    ? `Opened ${made} case${made === 1 ? '' : 's'} under “${app.title}” — nested under the desk in the rail.`
+    : 'Couldn’t open any cases.');
   _orchFinalize(msg);
 }
 
@@ -1772,12 +1772,12 @@ async function _runEphemeralFanout(app, children, directive, msg) {
 // "needs you" on that child (the per-child safety gate in _runChildTask — never an unattended action). §9 boundary +
 // the bounded concurrent pool live in the shared _runEachChild. `msg` is the chain's reused bubble (its progress line).
 async function _runPersistentFanout(app, children, directive, msg, { suffix = '' } = {}) {
-  _setMessageBody(msg, `${children.length} sub-task${children.length === 1 ? '' : 's'} — ${directive}…`);
+  _setMessageBody(msg, `${children.length} case${children.length === 1 ? '' : 's'} — ${directive}…`);
   const results = await _runEachChild(children, directive, (fin) => _setMessageBody(msg, `Working ${fin}/${children.length}…`));
   const done = results.filter((r) => r && r.status === 'done').length;
   const need = results.length - done;
   _revealRail().catch(() => {});   // children's peeks updated → reveal them
-  _setMessageBody(msg, `Opened ${children.length} sub-task${children.length === 1 ? '' : 's'} under “${app.title}”${suffix} and ran “${directive}” in each — ${done} done${need ? `, ${need} need you (open them to continue)` : ''}. Open any to see its result; ask me to “summarize what each found”.`);
+  _setMessageBody(msg, `Opened ${children.length} case${children.length === 1 ? '' : 's'} under “${app.title}”${suffix} and ran “${directive}” in each — ${done} done${need ? `, ${need} need you (open them to continue)` : ''}. Open any to see its result; ask me to “summarize what each found”.`);
   _orchFinalize(msg);
 }
 
@@ -1858,7 +1858,7 @@ async function _startSetupFlow({ auto = false } = {}) {
   try { conv = await ConversationStore.load(_currentConversationId); } catch { /* */ }
   if (!conv || !conv.appId || conv.parentId) {
     _setMessageBody(msg, (conv && conv.parentId)
-      ? 'A sub-task inherits its app’s setup — run `setup` on the app itself.'
+      ? 'A case inherits its desk’s setup — run `setup` on the desk itself.'
       : 'Setup configures an APP. Open or create an app (New desk → the gallery), then type “setup”.');
     _orchFinalize(msg); return;
   }
