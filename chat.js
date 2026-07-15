@@ -4471,10 +4471,18 @@ async function _fieldFollowup(text) {
   const mv = t.match(/^(?:what(?:'s|\s+is|\s+are)?|show\s+me|give\s+me|read)\s+(?:the\s+|its\s+)?([\w][\w\s\/-]{1,40}?)\s*\??$/i);
   const bare = !mv && /^[\w][\w\s\/-]{0,40}\??$/.test(t) && t.replace(/\?+$/, '').trim().split(/\s+/).length <= 4
     ? t.replace(/\?+$/, '').trim() : null;
-  if (!mv && !bare) return false;
+  // v2.74.1526 — an EXPLICIT field reference ("what does the field, X say?", "the X field") names X regardless of
+  // the verb frame, so it's caught even when mv/bare miss (live: that phrasing reached the LLM answer path, which
+  // had already FABRICATED a "vendor explanation" value from Instructions a turn earlier). Read-only: gated to a
+  // QUESTION with no action verb, so "should I update the status field?" still routes normally.
+  const _actionVerb = /\b(update|set|change|mark|assign|schedule|add|edit|close[sd]?|open(?:ed|s)?|create|clear|write|save|put|remove|delete|fill|reassign|reschedule)\b/i;
+  const fieldRef = t.match(/\bfields?\s*[,:]\s*([\w][\w\s\/-]{1,40}?)(?:\s+(?:say|says|shows?|reads?|contains?|value|is|are))?\s*[\?.]?$/i)
+    || t.match(/\bthe\s+([\w][\w\s\/-]{1,40}?)\s+fields?\b/i);
+  const fieldRefOk = !!fieldRef && /\?\s*$/.test(t) && !_actionVerb.test(t);
+  if (!mv && !bare && !fieldRefOk) return false;
   const obj = primaryObject(g.value) || (primaryList(g.value) || [])[0] || null;
   if (!obj || typeof obj !== 'object') return false;
-  const q = (mv ? mv[1] : bare).trim().toLowerCase().replace(/\s+/g, ' ');
+  const q = (fieldRefOk ? fieldRef[1] : (mv ? mv[1] : bare)).trim().toLowerCase().replace(/\s+/g, ' ');
   const norm = (s) => String(s).replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').toLowerCase().trim();
   const nice = (k) => { const s = norm(k); return s.charAt(0).toUpperCase() + s.slice(1); };
   const msgFor = (body) => { appendMessage({ role: 'user', body: text }); const mm = appendMessage({ role: 'assistant', body: '' }); _setMessageBody(mm, body, { markdown: true }); _orchFinalize(mm); };
@@ -4492,7 +4500,34 @@ async function _fieldFollowup(text) {
     const nk = norm(k);
     return nk === q || nk.includes(q) || q.includes(nk);
   }).slice(0, 4);
-  if (!hits.length) return false;   // not a field of this record → normal routing (the ask may genuinely be conversational)
+  if (!hits.length) {
+    // v2.74.1526 — a NAMED-FIELD probe that matches NO field answers HONESTLY (absence + the real field list),
+    // instead of falling through — where interpret mis-bound a record id as a division ("I don't know division
+    // 3628151") and the LLM answer path FABRICATED a value ("the vendor explanation is …", paraphrasing the
+    // Instructions field). Gated to an UNAMBIGUOUS field reference so a genuine reasoning aside ("is this urgent?")
+    // still falls through: an explicit "field" reference, a verbed READ (mv), or an "any <X>?"/noun phrase that does
+    // NOT lead with a reasoning interrogative.
+    const _reasoning = /^(is|are|was|were|does|do|did|should|can|could|will|would|has|have|how|why|when|who|which|may|might)\b/i;
+    const fieldProbe = fieldRefOk || !!mv || (!!bare && (/^any\b/i.test(q) || !_reasoning.test(q)));
+    if (!fieldProbe) return false;   // genuinely conversational → normal routing (unchanged)
+    const labels = Object.entries(obj)
+      .filter(([, v]) => v != null && v !== '' && !(typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length))
+      .map(([k]) => nice(k));
+    if (!labels.length) return false;
+    // the clean "named" term (strip structural filler) for the message + the closest-field hint
+    const named = q.replace(/\b(the|a|an|any|this|that|its|please|for|of|on|in|to|show|me|give|read|what|is|are|does|do|say|says|value|request|record|task|claim|item|fields?)\b/gi, ' ').replace(/\s+/g, ' ').trim() || q;
+    const qtok = new Set(named.split(' ').filter((w) => w.length > 2));
+    let closest = ''; let bestOv = 0;
+    for (const [k, v] of Object.entries(obj)) {
+      if (v == null || v === '') continue;
+      const ov = norm(k).split(' ').filter((w) => qtok.has(w)).length;
+      if (ov > bestOv) { bestOv = ov; closest = nice(k); }
+    }
+    const recordNoun = (g.leg && g.leg.name) ? String(g.leg.name).replace(/\s+details?$/i, '').toLowerCase() : 'record';
+    msgFor(`There’s no **${named}** field on this ${recordNoun}.${closest ? ` Did you mean **${closest}**?` : ''}\n\nFields on file: ${labels.join(' · ')}.`);
+    try { _orchLog(`FIELD_FOLLOWUP ▸ "${q}" → absent (${labels.length} field(s)${closest ? `, nearest=${closest}` : ''})`); } catch { /* */ }
+    return true;
+  }
   const parts = hits.map(([k, v]) => {
     if (v !== null && typeof v === 'object') {   // an array/nested field ("payments") → the exact JSON, fenced
       try { const j = JSON.stringify(v, null, 2); return `**${nice(k)}:**\n\`\`\`json\n${j.length > 4000 ? `${j.slice(0, 4000)}\n… (truncated)` : j}\n\`\`\``; } catch { return `**${nice(k)}:** (unrenderable)`; }
