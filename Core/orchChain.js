@@ -278,13 +278,16 @@ const _ANALYSIS = /\b(research|investigate|analy[sz]e|review|assess|evaluate|stu
 // v2.74.1262 — post the Rail/Thread/Canvas rename, **Thread is a conversation**, so a QUALIFIED thread (sub/new/
 // separate/own) counts; bare "thread" still does NOT (a forum/email page has threads). This is what the .1257 rename
 // broke in the live "open each in a sub thread" trace — the old detector excluded "thread" wholesale.
-const _CONV_TARGET = /\b(conversations?|sub-?tasks?|chats?)\b|\b(?:sub|new|separate|own|individual)[\s-]*threads?\b/i;
+// Case rename (v2.74.1494) — the spawned-child noun is CASE (DESIGN_desks.md §2): "open a case for each new task"
+// must route to the fan-out, not the teach gap (live miss). ANCHORED patterns only — a bare "case" is a common
+// word ("in case", "in that case"), so match it as a TARGET (open/a/new/own/per-each case), never as a stray noun.
+const _CONV_TARGET = /\b(conversations?|sub-?tasks?|chats?)\b|\b(?:sub|new|separate|own|individual)[\s-]*threads?\b|\b(?:open|create|start|spawn)\s+(?:a\s+)?(?:new\s+)?cases?\b|\bcases?\s+(?:per|for\s+each)\b|\b(?:its|their)\s+own\s+case\b|\bas\s+cases?\b/i;
 // A REDUCE over the whole set — ONE answer ABOUT all items ("summarize them", "a digest", "compare", "rank"). Marks an
 // EPHEMERAL fan-out: the per-item workers are map-stage compute, disposed once the reduce is rendered in the parent.
 const _REDUCE = /\b(summari[sz]e|summary|digest|consolidate|combined?|compare|contrast|rank|overview|recap|round-?up|tl;?dr|aggregate)\b/i;
 // An explicit PERSIST signal — keep each item as a durable workspace ("in a new conversation/thread/sub-task", "keep
 // each", "in its own chat"). OVERRIDES ephemeral: an explicit keep persists the children even alongside a reduce.
-const _PERSIST = /\b(?:in|into|as)\b[^.]*\b(conversations?|sub-?tasks?|chats?|threads?)\b|\bkeep\s+(?:each|them|the)\b|\b(?:its|their)\s+own\b/i;
+const _PERSIST = /\b(?:in|into|as)\b[^.]*\b(conversations?|sub-?tasks?|chats?|threads?)\b|\bkeep\s+(?:each|them|the)\b|\b(?:its|their)\s+own\b|\b(?:open|create|start|spawn)\s+(?:a\s+)?(?:new\s+)?cases?\b|\bas\s+cases?\b/i;   // Case rename (v1494) — an opened case is a durable child (verb-anchored — bare "in case" never matches)
 
 /** A FAN-OUT ask: a foreach whose per-item task is a CONVERSATION/ANALYSIS (one child conversation per item), not a
  *  page open-each. PURE. CV-4-full routes these to the conversation fan-out OVER THE PRIOR STEP'S read (enumerate →
@@ -326,11 +329,18 @@ export function personaHint(ask) { return _PERSONA_HINT.test(String(ask || ''));
  *  auto-run). The caller appends the item to bind it: `${directive} ${itemLabel}`. */
 export function innerDirective(ask) {
   let s = String(ask || '').trim();
+  // DK-8d (v2.74.1495) — a LEADING foreach wrapper strips FIRST ("for each division with new tasks, open a case
+  // per task"): the old pipeline dropped from the first "each", annihilating the verb phrase and returning the
+  // husk "for" — a truthy garbage directive that auto-ran in every spawned case (live: every case rendered the
+  // full 13-row list). Comma-bounded form, else strip up to a known verb.
+  s = s.replace(/^\s*for\s+(?:each|every)\b[^,]*,\s*/i, '');
+  s = s.replace(/^\s*for\s+(?:each|every)\b[\s\S]*?(?=\b(?:open|create|start|spawn|make|research|investigate|analy[sz]e|review|assess|evaluate|study|triage|draft|respond|repl(?:y|ies)|summari[sz]e|read|list|check|write|send|look)\b)/i, '');
   s = s.replace(/\b(in|into)\b[\s\S]*$/i, '');     // drop the "in a new conversation …" tail
   s = s.replace(/\beach\b[\s\S]*$/i, '');          // drop "each [noun] …" onward
   s = s.replace(/[\s,]*\b(and|then)\b[\s,]*$/i, '').replace(/[\s,]+$/,'').trim();
   const verb = s.toLowerCase().replace(/[^a-z ]/g, '').trim();
   if (!verb || /^(open|start|create|make|spin\s*up|spawn|fan\s*out)\b/.test(verb)) return '';
+  if (/^(for|and|then|to|of|with|the|an?|per)$/.test(verb)) return '';   // DK-8d — a stripped-wrapper husk is never a directive
   return s;
 }
 

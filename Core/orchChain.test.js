@@ -515,3 +515,44 @@ describe('orchChain — decompose a compound ask + assemble a sequential plan (O
     assert.equal(liftConditional(noObs, 'if it works, save and apply').lifted, false, 'no observation to test → flat');
   });
 });
+
+describe('Case rename (v2.74.1494) — the fan-out grammar knows the CASE vocabulary (the live teach-gap miss)', () => {
+  it('the EXACT live clause routes to the fan-out, persistent', () => {
+    const clause = 'for each division with new warranty tasks, open a case for each new task';
+    assert.equal(isFanoutAsk(clause), true);
+    assert.equal(fanoutLifecycle(clause), 'persistent');
+  });
+  it('case-target phrasings fan out: open/create/spawn a case, cases per item, as cases, its own case', () => {
+    for (const s of ['open a case for each new task', 'create a case per ticket for each of them', 'for each item, spawn a new case', 'research each task as cases', 'for each task in its own case, research next steps']) {
+      assert.equal(isFanoutAsk(s), true, s);
+    }
+  });
+  it('bare "in case" prose NEVER false-positives the case target', () => {
+    // no analysis verb + no case-TARGET phrasing → not a fan-out, even with foreach + the word "case"
+    // (verbs chosen OUTSIDE _ANALYSIS — "reply"/"review" would legitimately fan out on their own)
+    assert.equal(isFanoutAsk('for each ticket, wait in case they call back'), false);
+    assert.equal(isFanoutAsk('for each task, flag it just in case'), false);
+    // "in that case" must not trip _PERSIST — a bare reduce stays EPHEMERAL (the regression that would flip it durable)
+    assert.equal(fanoutLifecycle('summarize each in that case'), 'ephemeral');
+  });
+  it('an opened case is a durable child even alongside a reduce verb', () => {
+    assert.equal(fanoutLifecycle('summarize each and open a case per task'), 'persistent');   // _PERSIST (open a case) overrides _REDUCE
+  });
+});
+
+describe('DK-8d (v2.74.1495) — innerDirective survives a LEADING foreach wrapper (the "for" husk bug)', () => {
+  it('the EXACT live clause → NO directive (spawn-only: cases open bare, each scoped by its seed)', () => {
+    assert.equal(innerDirective('for each division with new warranty tasks, open a case for each new task'), '');
+  });
+  it('a leading wrapper with a REAL directive keeps it (comma and comma-less forms)', () => {
+    assert.equal(innerDirective('for each new task in greensboro, research next steps in a new conversation'), 'research next steps');
+    assert.equal(innerDirective('for each task research next steps in its own case'), 'research next steps');
+  });
+  it('the classic trailing-wrapper shapes are unchanged', () => {
+    assert.equal(innerDirective('research each in a new conversation'), 'research');
+    assert.equal(innerDirective('open each in a sub thread'), '');
+  });
+  it('a stripped-wrapper husk ("for"/"per") never becomes a directive', () => {
+    assert.equal(innerDirective('for each division with new tasks, open a case per task'), '');
+  });
+});

@@ -1630,8 +1630,8 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
     return { ok: true, summary: `Ran “${directive}” in ${created.length}.` };
   }
   const summary = created.length
-    ? `Opened ${created.length} conversation${created.length === 1 ? '' : 's'} under “${app.title}”${capped ? ` (capped at ${cap} of ${n})` : ''} — nested under the app in the drawer.`
-    : 'Couldn’t open any conversations.';
+    ? `Opened ${created.length} case${created.length === 1 ? '' : 's'} under “${app.title}”${capped ? ` (capped at ${cap} of ${n})` : ''} — nested under the desk in the rail. Open any to work it.`
+    : 'Couldn’t open any cases.';
   _setMessageBody(msg, summary);
   return { ok: created.length > 0, summary };
 }
@@ -3168,9 +3168,42 @@ function _orchConfirmChain(msg, { tabId, clauses, firstMatch, ask = '' }) {
 }
 
 // CX-4d — run a session-ride connector leg → {ok, value, error, hint}. The lean primitive shared by the chain
-// runner's connector-clause path and any caller that needs the STRUCTURED result (not just the rendered text that
-// `_ilRunBuiltin` produces). One `_orchReq` over the leg's planned channel (INVOKE_SESSION); never throws.
-async function _runConnectorLeg(leg, params, { tabId = null, groundId = null } = {}) {
+// runner's connector-clause path, the sub-task (case) workers, and any caller that needs the STRUCTURED result.
+// DK-8b (v2.74.1493) — the ID LAYER runs on THIS path too (the live http-400: a chain clause dispatched
+// vs_warranty_tasks with divisionId unresolved — "each"/a name went into the URL literally, because resolve/each
+// were hooked only on the interpret dispatch. The CX-9b anti-pattern, re-learned on a dispatch PATH): resolve
+// marked params (names → ids, missing → default), honor the each-mode with a HEADLESS full fan-out (reads only,
+// same abort latch, merged group-tagged rows as ONE value — the next chain step / reduce consumes it), and turn
+// an ambiguous/unknown value into an honest structured error instead of a silent wrong-scope read.
+async function _runConnectorLeg(leg, params, { tabId = null, groundId = null, onEach = null } = {}) {
+  if (leg && leg.domain === 'connector' && leg.tool && leg.tool.resolve) {
+    const rp = await _resolveRideParamsCore(leg, params, { tabId, groundId });
+    if (rp.needs) {
+      const cands = (rp.needs.candidates || []).map((c) => `${c.label} (#${c.value})`).join(' · ');
+      return { ok: false,
+        error: rp.needs.reason === 'ambiguous' ? `“${rp.needs.raw}” matches more than one ${rp.needs.noun}` : `unknown ${rp.needs.noun} “${rp.needs.raw}”`,
+        hint: cands ? `closest: ${cands}` : 'say the name or the market number' };
+    }
+    params = rp.params;
+    if (rp.each) {
+      if (leg.mode !== 'ask') return { ok: false, error: '“each” only works for reads', hint: 'a write stays one item per confirm' };
+      const noun = String(rp.each.name || '').replace(/Id$/i, '') || 'item';
+      const all = Array.isArray(rp.each.values) ? rp.each.values : [];
+      const items = []; let failed = 0;
+      for (let i = 0; i < all.length; i++) {
+        if (_rideEachAbort) break;
+        try { if (typeof onEach === 'function') onEach(i + 1, all.length, all[i].label); } catch { /* progress is cosmetic */ }   // DK-8c (v1494) — the live gap: the chain's each ran with a static step line
+        const r = await _rideExecOnce(leg, { ...params, [rp.each.name]: all[i].value }, { tabId, groundId });
+        if (r.ok) items.push({ label: all[i].label, rows: _rideEachRows(r.value) });
+        else failed++;
+      }
+      try { _orchLog(`RIDE_EACH ▸ ${leg.tool.recipeId || leg.key} × ${all.length} ${noun}(s) (chain) → ${items.length} ok, ${failed} failed, ${items.reduce((n, it) => n + it.rows.length, 0)} row(s)`); } catch { /* */ }
+      if (!items.length) return { ok: false, error: `couldn’t read any ${noun} (${failed} tried)`, hint: 'the session may have expired — click into the site’s tab and retry' };
+      const tagged = [];
+      for (const it of items) for (const row of it.rows) { if (tagged.length >= 200) break; tagged.push({ [noun]: it.label, ...row }); }
+      return { ok: true, value: { results: tagged } };
+    }
+  }
   const plan = planExec(leg, params, { tabId, groundId });
   if (!plan || !plan.ok || !plan.channel) return { ok: false, error: 'no executor' };
   let res = null;
@@ -4202,7 +4235,7 @@ async function _rejectProposal(id, reason) {
 // binding the single-ask path uses — and if it picks a connector leg, RUN it and return {leg, ok, value, …}. Returns
 // null when the app has no connections OR the clause isn't a connector read → the chain falls through to ORCH_MATCH
 // unchanged. Gated by the caller on `_boundConnections().length`, so non-connector apps pay nothing.
-async function _chainConnectorRun(clauseText, { tabId }) {
+async function _chainConnectorRun(clauseText, { tabId, onEach = null }) {   // DK-8c (v1494) — onEach threads chain-step progress into the each fan-out
   let raw = null; let retrieved = []; let groundId = null;
   try {
     const r = await _orchReq('INTERPRET_ASK', { ask: clauseText, tabId, seed: _currentConversationSeed, target: _boundTarget(), connections: _boundConnections(), appId: _currentConversationAppId, memoryId: _memoryId() });
@@ -4213,7 +4246,7 @@ async function _chainConnectorRun(clauseText, { tabId }) {
   if (d.intent !== 'act' || !d.capabilityId) return null;
   const leg = retrieved.find((l) => l && l.domain === 'connector' && l.key === d.capabilityId);
   if (!leg) return null;
-  const run = await _runConnectorLeg(leg, coerceParams(d.params || {}, leg.paramSchema), { tabId, groundId });
+  const run = await _runConnectorLeg(leg, coerceParams(d.params || {}, leg.paramSchema), { tabId, groundId, onEach });
   return { leg, ...run };
 }
 
@@ -4301,7 +4334,9 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
       // declaring the step un-runnable; stash the structured result in st.lastValue so a following "open each…"
       // (Slice B) can fan out over it. Gated on bound connections → non-connector apps skip the extra interpret.
       if (_boundConnections().length) {
-        const cr = await _chainConnectorRun(clause.text, { tabId });
+        // DK-8c (v1494) — the each fan-out ticks the STEP line ("Step 1 of 2: … — 37/121 (Greensboro)…"): the live
+        // run's whole first clause showed one static line while 121 reads ran.
+        const cr = await _chainConnectorRun(clause.text, { tabId, onEach: (n, t2, label) => { try { _setMessageBody(msg, `Step ${i + 1} of ${total}: “${clause.text}” — ${n}/${t2} (${label})…`); } catch { /* */ } } });
         if (cr && cr.ok) {
           const lines = renderConnectorLines(cr.value, { name: cr.leg.name || 'Results' });
           st.lastValue = cr.value;
@@ -5756,9 +5791,12 @@ async function _rideResolveVia(leg, via, { tabId, groundId } = {}) {
 // current division); ambiguity/unknown ASKS with candidates instead of dispatching a silent wrong-id read (the live
 // lesson: a wrong division id returns an empty 200, not an error — the worst failure is the quiet one).
 // Returns { params, labels } or { error: true } with the honest message already set.
-async function _resolveRideParams(msg, leg, params, { tabId, groundId } = {}) {
+// DK-8b (v2.74.1493) — the CORE (no DOM): every dispatch path shares ONE resolver. Returns
+// { params, labels, each, needs } — `needs` = an ambiguous/unknown value the caller must ask about
+// ({param, noun, raw, reason, candidates}); the interpret wrapper renders it, the chain path returns it as an error.
+async function _resolveRideParamsCore(leg, params, { tabId, groundId } = {}) {
   const specs = (leg && leg.tool && leg.tool.resolve && typeof leg.tool.resolve === 'object') ? leg.tool.resolve : null;
-  if (!specs) return { params, labels: {} };
+  if (!specs) return { params, labels: {}, each: null, needs: null };
   const out = { ...(params || {}) }; const labels = {};
   let eachPlan = null;   // DK-7 (v2.74.1488) — an each-mode enumeration ({name, values, total, capped}); first wins
   const _normEq = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
@@ -5793,11 +5831,10 @@ async function _resolveRideParams(msg, leg, params, { tabId, groundId } = {}) {
       continue;
     }
     if (r.ambiguous || r.unknown) {
-      const cands = (r.candidates || []).slice(0, 5).map((c) => `**${c.label}** (#${c.value})`).join(' · ');
-      _setMessageBody(msg, r.ambiguous
-        ? `“${out[name]}” matches more than one ${name === 'divisionId' ? 'division' : name}: ${cands} — which one?`
-        : `I don’t know ${name === 'divisionId' ? 'division' : name} “${out[name]}”${cands ? ` — closest: ${cands}` : ''}. Say the name or the market number.`, { markdown: true });
-      return { error: true };
+      return { params: out, labels, each: eachPlan, needs: {
+        param: name, noun: name === 'divisionId' ? 'division' : name, raw: out[name],
+        reason: r.ambiguous ? 'ambiguous' : 'unknown', candidates: (r.candidates || []).slice(0, 5),
+      } };
     }
     if (r.value !== undefined) {
       const was = out[name];
@@ -5813,7 +5850,20 @@ async function _resolveRideParams(msg, leg, params, { tabId, groundId } = {}) {
       }
     }
   }
-  return { params: out, labels, each: eachPlan };
+  return { params: out, labels, each: eachPlan, needs: null };
+}
+
+// The interpret-path wrapper: renders an ask-back for `needs` (behavior unchanged from CX-9b).
+async function _resolveRideParams(msg, leg, params, { tabId, groundId } = {}) {
+  const rp = await _resolveRideParamsCore(leg, params, { tabId, groundId });
+  if (rp.needs) {
+    const cands = (rp.needs.candidates || []).map((c) => `**${c.label}** (#${c.value})`).join(' · ');
+    _setMessageBody(msg, rp.needs.reason === 'ambiguous'
+      ? `“${rp.needs.raw}” matches more than one ${rp.needs.noun}: ${cands} — which one?`
+      : `I don’t know ${rp.needs.noun} “${rp.needs.raw}”${cands ? ` — closest: ${cands}` : ''}. Say the name or the market number.`, { markdown: true });
+    return { error: true };
+  }
+  return { params: rp.params, labels: rp.labels, each: rp.each };
 }
 
 // DK-7 (v2.74.1488) — the EACH fan-out: run one READ leg once per enumerated value ("for each division, list open
@@ -5822,6 +5872,31 @@ async function _resolveRideParams(msg, leg, params, { tabId, groundId } = {}) {
 // are rendered, never fed back to the model (the injection boundary holds). Sequential (the executor's page-local
 // auth cache makes repeats cheap); a per-item failure counts + continues (partial coverage stays honest, never
 // fatal); rows render GROUPED by label with the drill/shaper skipped (a cross-scope merge is its own answer shape).
+// DK-8b (v2.74.1493) — ONE per-item read executor, shared by the interactive fan-out and the chain path's headless
+// each (the CX-9b lesson, dispatch-path edition: hooking a layer on one path at a time re-learns the same bug).
+// Both transports: header-replay (the single-read branch's exact payload) or the cookie-ride/planExec channel.
+async function _rideExecOnce(leg, p, { tabId = null, groundId = null } = {}) {
+  let r = null;
+  try {
+    if (leg.tool.replay === 'headers') {
+      const _gqlRead = leg.tool.write !== true && leg.tool.gql === true && leg.tool.body && typeof leg.tool.body === 'object' && isReadOnlyGql(String(leg.tool.body.query || ''));
+      const _rb = _gqlRead ? _filledConnectorWrite(leg, p) : null;
+      r = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params: p, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null, requestHeaders: leg.tool.requestHeaders || null, identityProbe: leg.tool.identityProbe || null, ...(_rb ? { gql: true, body: _rb.body, bodyTemplate: leg.tool.body || null, contentType: _rb.contentType || 'application/json' } : {}) });
+    } else {
+      const plan = planExec(leg, p, { tabId, groundId });
+      if (plan && plan.ok && plan.channel) r = await _orchReq(plan.channel, plan.payload);
+    }
+  } catch { r = null; }
+  if (!r || r.success === false) return { ok: false, error: r && r.error, hint: r && r.hint };
+  return { ok: true, value: r.value };
+}
+
+// Rows from one each-item's reply, list-or-single normalized. Shared by both each consumers.
+function _rideEachRows(value) {
+  const rows = primaryList(value);
+  return Array.isArray(rows) ? rows : (primaryObject(value) ? [primaryObject(value)] : []);
+}
+
 // DK-7c (v2.74.1490) — the fan-out AUTO-RUNS to completion: paging by typed "continue" was bad UX, and the durable
 // consumer is an unattended flow (a daily sweep opening new tasks in sub-tasks), not a human pager. Typed "stop"
 // pauses between items (the abort latch); "continue" is now the RESUME after a stop, not the pager.
@@ -5840,22 +5915,9 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
       if (_rideEachAbort) break;
       const v = all[i];
       _setMessageBody(msg, `Reading ${legName} — ${i + 1}/${total} (${v.label})… (type “stop” to pause)`);
-      const p = { ...params, [each.name]: v.value };
-      let r = null;
-      try {
-        if (leg.tool.replay === 'headers') {   // the header-replay read (same payload the single-read branch sends)
-          const _gqlRead = leg.tool.write !== true && leg.tool.gql === true && leg.tool.body && typeof leg.tool.body === 'object' && isReadOnlyGql(String(leg.tool.body.query || ''));
-          const _rb = _gqlRead ? _filledConnectorWrite(leg, p) : null;
-          r = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params: p, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null, requestHeaders: leg.tool.requestHeaders || null, identityProbe: leg.tool.identityProbe || null, ...(_rb ? { gql: true, body: _rb.body, bodyTemplate: leg.tool.body || null, contentType: _rb.contentType || 'application/json' } : {}) });
-        } else {                               // the cookie-ride / planExec read
-          const plan = planExec(leg, p, { tabId, groundId });
-          if (plan && plan.ok && plan.channel) r = await _orchReq(plan.channel, plan.payload);
-        }
-      } catch { r = null; }
-      if (r && r.success !== false) {
-        const rows = primaryList(r.value);
-        items.push({ label: v.label, value: r.value, rows: Array.isArray(rows) ? rows : (primaryObject(r.value) ? [primaryObject(r.value)] : []) });
-      } else failed++;
+      const r = await _rideExecOnce(leg, { ...params, [each.name]: v.value }, { tabId, groundId });   // DK-8b — the shared per-item executor
+      if (r.ok) items.push({ label: v.label, value: r.value, rows: _rideEachRows(r.value) });
+      else failed++;
     }
   } finally { _rideEachRunning = false; }
   const stopped = _rideEachAbort; _rideEachAbort = false;
