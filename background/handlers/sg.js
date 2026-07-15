@@ -3104,9 +3104,15 @@ export function createSgMessageHandlers(ctx) {
         // pool only when there are NO actions (guards an ask the read-classifier under-called as not-a-read).
         const _isReadCand = (c) => !!c && (c.kind === 'observation' || c.effect === 'read');
         const _askIsRead = classifyReadAsk(ask).isRead;
+        // v2.74.1525 — an EXACT-ALIAS capability SURVIVES effect scoping: that alias IS this very ask's taught
+        // phrasing, and the user's own naming outranks the verb heuristic. Live ("where's the teach?"): "show
+        // ticket … on vendorsuite" classified READ → the twice-demonstrated ACTION strategy was scoped out
+        // BEFORE the alias was ever consulted, so the taught capability could never fire on the ask that taught it.
+        const _nAsk = normalizeAliasPhrase(ask);
+        const _aliasHit = (c) => !!c && Array.isArray(c.aliases) && c.aliases.some((al) => normalizeAliasPhrase(al) === _nAsk);
         let pool;
-        if (_askIsRead) pool = projected.filter(_isReadCand);
-        else { const _acts = projected.filter((c) => !_isReadCand(c)); pool = _acts.length ? _acts : projected; }
+        if (_askIsRead) pool = projected.filter((c) => _isReadCand(c) || _aliasHit(c));
+        else { const _acts = projected.filter((c) => !_isReadCand(c) || _aliasHit(c)); pool = _acts.length ? _acts : projected; }
         Logger.info('background', `ORCH_MATCH scope ▸ ask=${_askIsRead ? 'READ' : 'ACTION'} → ${pool.length}/${projected.length} candidate(s) (effect-scoped${_askIsRead ? ', observations only' : ', actions only'})`);
         const parts = scopeAndPartition(pool, { currentGroundId: gid, currentLocaleUrl: localeUrl, sameLocale });
         // ORCH — rank over ALL same-Ground capabilities (here + reachable). The exact-locale "here vs reachable"
@@ -3195,6 +3201,9 @@ export function createSgMessageHandlers(ctx) {
         if (typeof ask !== 'string' || !ask.trim()) { sendResponse({ success: false, error: 'ask required' }); return; }
         const askIsRead = classifyReadAsk(ask).isRead;
         const _isReadCand = (c) => !!c && (c.kind === 'observation' || c.effect === 'read');
+        // v2.74.1525 — same exact-alias scope bypass as ORCH_MATCH (the taught phrasing outranks the verb heuristic).
+        const _nAskG = normalizeAliasPhrase(ask);
+        const _aliasHitG = (c) => !!c && Array.isArray(c.aliases) && c.aliases.some((al) => normalizeAliasPhrase(al) === _nAskG);
         const grounds = (await StorageManager.getAllGrounds()) || [];
         // Collect every effect-scoped, ACTIVE, non-orphan candidate across ALL Grounds, tagged with its Ground.
         const tagged = [];   // { cand, gid, g }
@@ -3210,8 +3219,8 @@ export function createSgMessageHandlers(ctx) {
           const { liveStrategyIds, liveFragmentIds, strategyFragments } = await _liveBackingIds(gid);   // v2.74.827 — Strategy AND Fragment liveness (per-Ground in the global sweep)
           const _orphan = (c) => isOrphanCapability(c, { liveStrategyIds, liveFragmentIds, strategyFragments });
           const projected = caps.filter((c) => isActiveCapability(c) && !_orphan(c) && c.kind !== 'composite').map((c) => toCandidate(c)).filter(Boolean);
-          const pool = askIsRead ? projected.filter(_isReadCand)
-            : (projected.filter((c) => !_isReadCand(c)).length ? projected.filter((c) => !_isReadCand(c)) : projected);
+          const pool = askIsRead ? projected.filter((c) => _isReadCand(c) || _aliasHitG(c))
+            : (projected.filter((c) => !_isReadCand(c) || _aliasHitG(c)).length ? projected.filter((c) => !_isReadCand(c) || _aliasHitG(c)) : projected);
           for (const c of pool) tagged.push({ cand: c, gid, g });
         }
         Logger.info('background', `GROUNDS ▸ ${roster.length} ground(s): ${roster.join(' · ') || '(none)'}`);   // v2.74.818 — the inventory blind-spot: host(id,Ncap) for every Ground

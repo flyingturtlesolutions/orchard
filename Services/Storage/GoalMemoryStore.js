@@ -17,6 +17,7 @@
 
 import { goalMemoryStorageKey, goalMemorySyncRecord } from './GoalMemorySyncRecords.js';
 import { addItem, promoteItemInList, capItems, settleItemInList, goalItemId } from '../../Core/goalStore.js';
+import { retireActFailDeltas } from '../../Core/goalMemory.js';   // v2.74.1523 — consume the "re-teach" lesson once the re-teach happens
 
 const GOAL_MEMORY_CAP = 200;   // bounded growth — capItems protects canonical/summary, prunes the cheap tiers
 
@@ -86,6 +87,20 @@ export async function promoteGoalItem(appId, id, signals) {
     const next = promoteItemInList(items, id, signals || {});
     await _writeGoalMemory(appId, next);
     return next;
+  });
+}
+
+/**
+ * v2.74.1523 — retire the act-fail lesson(s) for a goal the user just RE-TAUGHT (see Core/goalMemory.js
+ * retireActFailDeltas — the write-time half of the AL-3e conflict story). @returns {Promise<number>} removed count.
+ */
+export async function retireActFail(appId, goal) {
+  if (!appId || !String(goal || '').trim()) return 0;
+  return _chained(appId, async () => {
+    const items = await loadGoalItems(appId);
+    const { items: next, removed } = retireActFailDeltas(items, goal);
+    if (removed) await _writeGoalMemory(appId, next);
+    return removed;
   });
 }
 

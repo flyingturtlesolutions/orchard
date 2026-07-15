@@ -498,17 +498,26 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
       (async () => {
         try {
           const origin = String(payload?.origin || '').trim().toLowerCase();
-          const probePath = String(payload?.probePath || '').trim();
+          let probePath = String(payload?.probePath || '').trim();
+          // v2.74.1518 — the probe SPEC is CATALOG-owned when the origin has a recipe (the live false-signed-out:
+          // a registry entry taught a probePath WITHOUT its probeAccept, so Check-now judged VendorSuite's
+          // user-less State JSON with the IDENTITY verdict → anon-sentinel → a false ✖ on a live session). The
+          // stored/payload spec remains the fallback for recipe-less origins only.
+          const rec = recipeForOrigin(origin);
+          if (rec && rec.identityProbe) probePath = String(rec.identityProbe);
+          const probeAccept = (rec && rec.probeAccept === 'json') ? 'json' : (payload.probeAccept === 'json' ? 'json' : null);
+          const probeHeaders = (rec && rec.requestHeaders && typeof rec.requestHeaders === 'object') ? rec.requestHeaders
+            : ((payload.probeHeaders && typeof payload.probeHeaders === 'object') ? payload.probeHeaders : null);
           if (!origin || !probePath) { sendResponse({ success: false, error: 'no-probe-spec' }); return; }
           const tabs = await chrome.tabs.query({ url: [`https://${origin}/*`] });
           const tab = pickRideTab(tabs);
           if (!tab) { sendResponse({ success: false, error: 'no-tab' }); return; }
-          const extra = (payload.probeHeaders && typeof payload.probeHeaders === 'object') ? { headers: payload.probeHeaders } : null;
+          const extra = probeHeaders ? { headers: probeHeaders } : null;
           const reply = await fetchViaHealed(tab.id, `https://${origin}${probePath.startsWith('/') ? probePath : '/' + probePath}`, 'GET', null, false, '', extra);
-          const verdict = payload.probeAccept === 'json' ? assessLiveness(reply) : assessProbe(reply, null);
+          const verdict = probeAccept === 'json' ? assessLiveness(reply) : assessProbe(reply, null);
           await reportAuthSignal({ origin, status: verdict.status, cause: verdict.reason, source: payload.source === 'heartbeat' ? 'heartbeat' : 'probe',
             identityName: verdict.user ? (verdict.user.name || verdict.user.email || null) : null,
-            probePath, probeHeaders: payload.probeHeaders || null, probeAccept: payload.probeAccept || null });
+            probePath, probeHeaders, probeAccept });   // the corrected spec self-heals the registry entry
           sendResponse({ success: true, status: verdict.status });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'probe-failed' }); }
       })();

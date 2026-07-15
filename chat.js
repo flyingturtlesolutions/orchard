@@ -45,7 +45,7 @@ import { appendLedger, loadLedger } from './Services/Storage/ActionLedgerStore.j
 import { planExec } from './Core/execPlan.js';   // IL-3b — pure dispatch planner: a builtin leg → its executor channel
 import { recipeToLeg } from './Core/connectorLeg.js';   // OV-4 — a stored ride recipe → an invokable leg (for the Overview workbench's `test`)
 import { assessLegTest } from './Core/legTestVerdict.js';   // OV-4 — the structural pass/fail verdict for a leg test (deterministic, like the trial gate)
-import { recipeLegs, coerceParams, fillBody, fillEndpoint, isReadOnlyGql } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template; CX-10 (v1460) — isReadOnlyGql lets the workbench auto-test a GraphQL READ (POST-by-transport)
+import { recipeLegs, coerceParams, fillBody, fillEndpoint, isReadOnlyGql, harvestedRecipeLegs } from './Core/connectorRecipes.js';   // CX-4a.2 — session-ride connector reads in the palette; CX-4c — coerce {id}=#64775→64775; CX-6 — fill a write body template; FL-1d (v1349) — fill a listUrl view template; CX-10 (v1460) — isReadOnlyGql lets the workbench auto-test a GraphQL READ (POST-by-transport)
 import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 — header-replay writes: json/form/raw + contentType (review I)
 import { resolveRideParam, filterRowsByText } from './Core/rideParamResolve.js';   // CX-9b (v1434) — human value → canonical id (the `resolve` marker) + the drill row join
 import { armable as rideArmable } from './Core/rideRecipe.js';   // CX-9b — the drill's via-recipe honors the §18 arm guard
@@ -61,7 +61,7 @@ import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, 
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
 import { capableSitesCatalog, seedDeskCatalog } from './Core/capableSites.js';   // AS-5 — the "sites with defined capabilities" catalog the setup multi-select lists (pure merge); DK-6 — seedDeskCatalog pre-picks a preconfigured desk's builtin sites
 import { originFromText } from './Core/setupSpec.js';   // AS-4 / review P1-6 — the host-shape floor: a real public host has a dot (TLD); rejects bare words like "gmail" before they bank a poisoned target
-import { recordGoalItem, loadGoalItems, clearGoalMemory, promoteGoalItem } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view
+import { recordGoalItem, loadGoalItems, clearGoalMemory, promoteGoalItem, retireActFail } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view; v1523 — retireActFail consumes the "re-teach" lesson at re-teach
 import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
 import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab, workflowId } from './Core/workflowMemory.js';   // WF-1 lexical recall + WF-3 LLM-fallback prep/validate/gate; workflowId — the DK-8j already-banked check (no re-offer)
 import { renderConnectionsCard, attentionOrigins } from './Core/connectionPresence.js';   // CP-3 (v2.74.1506) — the Overview Connections card + a desk's signed-out dependency check
@@ -746,11 +746,16 @@ function _historyPinRow(row) {
     const conv = await _ensureOverviewConversation();
     if ((conv.messages || []).length) {
       if (conv.id !== _currentConversationId) { await _rehydrateConversation(conv); await _resumeRunningInvocations(); }
+      else void _maybeRenderConnCard();    // v2.74.1515 — a re-click refreshes the standing card (no rehydrate ran)
     } else {
       _clearCurrentConversation();         // general-assistant defaults (agent, no app, gated)…
       _currentConversationId = conv.id;    // …but pinned to the Overview thread so chatting appends to it
       _resetConversation();
       await renderSuggestionCards();
+      // v2.74.1515 — the EMPTY Front desk never runs _rehydrateConversation, so the Connections card had NO render
+      // path on first open (the live miss: "front desk hasn't shown anything"). Render it here too — once it
+      // persists, the conversation is non-empty and the rehydrate path owns it from then on.
+      void _maybeRenderConnCard();
     }
     await _renderRailList();
     _closeRail();
@@ -763,7 +768,7 @@ function _historyPinRow(row) {
 function _historyNewAppRow() {
   const el = document.createElement('div');
   el.className = 'rail-item rail-new-app';
-  el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">＋</span>New desk</div>`;
+  el.innerHTML = `<div class="rail-item-title"><span class="rail-glyph" aria-hidden="true">＋</span>desk</div>`;   // v2.74.1517 — "＋ desk" (the gallery's constructor card owns "New desk…")
   el.addEventListener('click', () => { _closeRail(); _renderAppGallery(); });
   _wireRowKeyboard(el, () => el.click(), 'New desk');   // v1343 (a11y)
   return el;
@@ -965,6 +970,7 @@ function _scrollToBottomIfNearBottom() {
 // under #conversation) without patching each call site; scrolling up to read turns following off until the
 // user returns to the bottom — standard chat behavior.
 let _stickToBottom = true;
+let _revealHold = false;   // v2.74.1513 — while a reply REVEAL drives the scroll, the sticky-follow pin yields
 let _autoScrollWired = false;
 function _setupAutoScroll() {
   if (_autoScrollWired) return;
@@ -978,9 +984,9 @@ function _setupAutoScroll() {
   }, { passive: true });
   let pending = false;
   const obs = new MutationObserver(() => {
-    if (!_stickToBottom || pending) return;
+    if (!_stickToBottom || _revealHold || pending) return;   // v1513 — the reveal owns the scroll while it runs
     pending = true;
-    requestAnimationFrame(() => { pending = false; if (_stickToBottom && c) c.scrollTop = c.scrollHeight; });
+    requestAnimationFrame(() => { pending = false; if (_stickToBottom && !_revealHold && c) c.scrollTop = c.scrollHeight; });
   });
   obs.observe(messages, { childList: true, subtree: true, characterData: true });
 }
@@ -1341,17 +1347,73 @@ function _renderAppGallery() {
       <div class="suggestion-card-name">${escHtml(def.name)}</div>
       ${def.description ? `<div class="suggestion-card-summary">${escHtml(def.description)}</div>` : ''}
       ${sitesLine ? `<div class="suggestion-card-meta"><span class="suggestion-card-kind">${escHtml(sitesLine)}</span></div>` : ''}`;
-    card.addEventListener('click', () => { void _createAppConversation(def, { setup: true }); });   // → setup, sites preselected
+    // v2.74.1517 — RETURN-FIRST: a preconfigured card with an existing instance OPENS it (an accidental twin
+    // doubles routines and splits the case dedup — the identical-scope duplicate is always a mistake). An
+    // intentional second goes through "+ New desk…" → Extend, which REQUIRES differentiation.
+    card.addEventListener('click', async () => {
+      try {
+        const all = await ConversationStore.list();
+        const mine = all.filter((c) => c && !c.parentId && (c.presetId === def.id || c.appId === def.id))
+          .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+        if (mine.length) {
+          const conv = await ConversationStore.load(mine[0].id);
+          if (conv) { await _rehydrateConversation(conv); await _resumeRunningInvocations(); return; }
+        }
+      } catch { /* fall through to create */ }
+      void _createAppConversation(def, { setup: true });   // no instance yet → first setup, sites preselected
+    });
     container.appendChild(card);
   }
-  // the ONE custom option — the same engine (a generic operator def), the user picks the sites + sets the role.
+  // v2.74.1517 — "+ New desk…": the ONE desk constructor — from scratch (the v1510 sites→seed→name wizard) or
+  // EXTEND an existing desk (differentiated second: base sites pre-picked, the seed step asks what makes this
+  // one different, the name derives from it).
   const custom = document.createElement('button');
   custom.className = 'suggestion-card suggestion-card-preset';
-  custom.innerHTML = '<div class="suggestion-card-name">+ Custom desk</div><div class="suggestion-card-summary">Pick the sites and tell it what to do — set its role with seed:.</div>';
-  // v1508 — the INSTANCE name drops the descriptor (the rail badges the kind); the card label above keeps the prose.
-  custom.addEventListener('click', () => { void _createAppConversation({ ...builtinApp('inbox'), name: 'Custom', description: null }, { setup: true }); });
+  custom.innerHTML = '<div class="suggestion-card-name">+ New desk…</div><div class="suggestion-card-summary">From scratch, or extend an existing desk — pick sites, define the seed, name it.</div>';
+  custom.addEventListener('click', () => { _renderNewDeskChooser(container); });
   container.appendChild(custom);
   void _appendUserApps(container);   // CV-5 — async-append "Your desks" (saved + configured) below
+}
+
+// v2.74.1517 — the "+ New desk…" CHOOSER: from scratch (the v1510 wizard verbatim) or EXTEND an existing desk —
+// the differentiated second (two Warranty desks are legitimate ONLY when their scopes differ; an identical twin
+// doubles routines and splits the case dedup, so the preconfigured cards are return-first and intentional seconds
+// come through here). Extend inherits the base's TYPE + seed + sites (pre-picked, editable); the seed step asks
+// what makes this one different; the name derives from the answer. Instance memory is NEVER inherited (AP-0).
+let _pendingExtend = null;   // { baseName, baseSeed, hasRoutine, sites } — armed by a base card, consumed by _startSetupFlow
+async function _renderNewDeskChooser(container) {
+  if (!container) return;
+  container.innerHTML = '';
+  const scratch = document.createElement('button');
+  scratch.className = 'suggestion-card suggestion-card-preset';
+  scratch.innerHTML = '<div class="suggestion-card-name">From scratch</div><div class="suggestion-card-summary">Pick the sites, define the seed, name it.</div>';
+  scratch.addEventListener('click', () => { _pendingExtend = null; void _createAppConversation({ ...builtinApp('inbox'), name: 'Custom', description: null }, { setup: true }); });
+  container.appendChild(scratch);
+  const hdr = document.createElement('div');
+  hdr.className = 'suggestion-section';
+  hdr.textContent = 'Extend an existing desk';
+  container.appendChild(hdr);
+  try { await _loadUserCatalog(); } catch { /* */ }
+  const bases = [...preconfiguredDesks(), ...galleryUserDefs(_userCatalog, preconfiguredDesks().map((d) => ({ id: d.id, name: d.name })))];
+  for (const b of bases) {
+    const card = document.createElement('button');
+    card.className = 'suggestion-card';
+    card.innerHTML = `<div class="suggestion-card-name">${escHtml(b.name)}</div><div class="suggestion-card-summary">Another ${escHtml(b.name)} — scoped to a division, an account, or a different site set.</div>`;
+    card.addEventListener('click', () => {
+      const typeDef = builtinApp(b.presetId || b.id) || builtinApp('inbox');
+      const exSites = (Array.isArray(b.sites) && b.sites.length) ? b.sites
+        : ((b.setup && Array.isArray(b.setup.connections)) ? b.setup.connections.map((c) => ({ host: String(c.origin || '').replace(/^https?:\/\//i, '').replace(/\/.*$/, ''), label: c.label || String(c.origin || '') })) : []);
+      _pendingExtend = { baseName: b.name, baseSeed: String(b.seed || (typeDef && typeDef.seed) || ''), hasRoutine: /routine\s*:/i.test(String(b.seed || '')), sites: exSites };
+      // born 'Custom'-titled so the v1510 phase machine runs; inherits the base's TYPE (object model) + seed.
+      void _createAppConversation({ ...typeDef, name: 'Custom', description: null, seed: b.seed || (typeDef && typeDef.seed) }, { setup: true });
+    });
+    container.appendChild(card);
+  }
+  const back = document.createElement('button');
+  back.className = 'suggestion-card suggestion-card-preset';
+  back.innerHTML = '<div class="suggestion-card-name">← Back</div>';
+  back.addEventListener('click', () => { _pendingExtend = null; _renderAppGallery(); });
+  container.appendChild(back);
 }
 
 // DK-6 (v2.74.1486) — _renderCategoryMenu + _appendConfiguredApps (the CV-3b/OM two-level type menu + AP-4's
@@ -1399,7 +1461,7 @@ async function _appendUserApps(container) {
   // DK-6b (v2.74.1503) — "Your desks" lists the user's CUSTOM desks only: a configured copy of a PRECONFIGURED
   // desk (AP-4 mints one per completed setup) duplicated its own gallery card (the live complaint). The copy stays
   // in the catalog (seed-sync/restore still resolve it by id) — it's just not a gallery entry.
-  const defs = galleryUserDefs(_userCatalog, preconfiguredDesks().map((d) => d.id));
+  const defs = galleryUserDefs(_userCatalog, preconfiguredDesks().map((d) => ({ id: d.id, name: d.name })));   // v1517 — name-aware: extended variants ("Warranty — Las Vegas") SHOW; only the same-name AP-4 copy hides
   if (!defs.length) return;
   const hdr = document.createElement('div');
   hdr.className = 'suggestion-section';
@@ -1892,7 +1954,7 @@ const _SETUP_STORE_KEY = 'setup:inProgress';
 let _setupStash = null;
 function _persistSetupState() {
   // v2.74.1510 — phase/freshCustom/cfg ride the stash too (the custom flow's seed/name steps survive a reload).
-  const v = _setupState ? { convId: _setupState.convId, spec: _setupState.spec, phase: _setupState.phase || null, freshCustom: !!_setupState.freshCustom, cfg: _setupState.cfg || null } : null;
+  const v = _setupState ? { convId: _setupState.convId, spec: _setupState.spec, phase: _setupState.phase || null, freshCustom: !!_setupState.freshCustom, cfg: _setupState.cfg || null, extend: _setupState.extend || null } : null;
   _setupStash = v;
   try { if (v) chrome.storage.session.set({ [_SETUP_STORE_KEY]: v }); else chrome.storage.session.remove(_SETUP_STORE_KEY); } catch { /* */ }
 }
@@ -1901,7 +1963,7 @@ async function _loadSetupStash() {
 }
 function _adoptSetupStash() {
   if (_setupState || !_setupStash) return;
-  if (_setupStash.convId === _currentConversationId) { _setupState = { convId: _setupStash.convId, spec: _setupStash.spec, phase: _setupStash.phase || null, freshCustom: !!_setupStash.freshCustom, cfg: _setupStash.cfg || null }; }
+  if (_setupStash.convId === _currentConversationId) { _setupState = { convId: _setupStash.convId, spec: _setupStash.spec, phase: _setupStash.phase || null, freshCustom: !!_setupStash.freshCustom, cfg: _setupStash.cfg || null, extend: _setupStash.extend || null }; }
 }
 
 // v2.74.1340 (review J-setup) — command-shaped input mid-setup FALLS THROUGH to the normal cascade instead of being
@@ -1964,21 +2026,26 @@ async function _startSetupFlow({ auto = false } = {}) {
   // taught capabilities for), NOT the open tabs. The pure controller's candidate list stays empty — we render the
   // catalog as a MULTI-SELECT directly and drive the spec to done at Confirm.
   const { spec } = startSetup(def, {});
+  // v2.74.1517 — consume the EXTEND context (armed by the "+ New desk…" chooser): it forces the picker (never
+  // auto-connect — differentiation may change sites), joins the phase machine, and carries the base for the
+  // scope question + name suggestion. Consumed here so a later plain `setup` isn't polluted.
+  const _extend = _pendingExtend; _pendingExtend = null;
   // v2.74.1510 — a FRESH custom desk (still default-titled, never set up) gets the guided finish: sites → SEED →
   // NAME. A `setup` re-run on a configured/renamed desk stays the plain adjust path (no re-asking seed/name).
-  const _freshCustom = !(def && Array.isArray(def.sites) && def.sites.length) && (conv.title === 'Custom') && !(conv.config && conv.config.setupComplete);
-  _setupState = { convId: _currentConversationId, spec, freshCustom: _freshCustom };
+  const _freshCustom = ((!(def && Array.isArray(def.sites) && def.sites.length)) || !!_extend) && (conv.title === 'Custom') && !(conv.config && conv.config.setupComplete);
+  _setupState = { convId: _currentConversationId, spec, freshCustom: _freshCustom, extend: _extend || null };
   _setupPick = new Map();
   _setupCatalog = await _capableSitesCatalog();
   // DK-6 (v2.74.1486) — a PRECONFIGURED desk ships its sites: resolve them against the catalog (seedDeskCatalog —
   // an existing instance beats its class; a deep host synthesizes its card; a tenant class with no instance stays
   // unresolved). A custom desk (no sites) → seeded = null, the plain picker.
-  const seeded = (def && Array.isArray(def.sites) && def.sites.length) ? seedDeskCatalog(_setupCatalog, def.sites) : null;
+  const seeded = (def && Array.isArray(def.sites) && def.sites.length) ? seedDeskCatalog(_setupCatalog, def.sites)
+    : (_setupState.extend && Array.isArray(_setupState.extend.sites) && _setupState.extend.sites.length ? seedDeskCatalog(_setupCatalog, _setupState.extend.sites) : null);   // v1517 — an EXTEND from a custom base pre-picks the base's connections
   // DK-6b (v2.74.1487) — FIRST setup of a preconfigured desk AUTO-CONNECTS: its sites ARE the definition, so the
   // picker is redundant — bank the resolvable picks directly (the same advanceSetup→done→_bankSetup path Confirm
   // drives) and only NAME what couldn't resolve. The explicit `setup` command (and the Set-up card) still opens
   // the picker with pre-picks — that's the ADJUST path; auto is only the gallery's first-time flow.
-  if (auto && seeded && seeded.picks.length) {
+  if (auto && seeded && seeded.picks.length && !_setupState.extend) {   // v1517 — an EXTEND never auto-connects: differentiation may change the sites (the picker shows with pre-picks)
     _setMessageBody(msg, `Connecting **${conv.title || def.name}** — ${seeded.picks.map(([, v]) => v.label).join(' · ')}…`, { markdown: true });
     _orchFinalize(msg);
     let autoSpec = _setupState.spec;
@@ -2166,10 +2233,13 @@ async function _bankSetup(step) {
   // The AP-4 def mint, the ready message, and seed-directive arming DEFER to _finishCustomSetup — the configured
   // def's id derives from name+site, so minting at "Custom" would duplicate under the real name.
   if (state.freshCustom) {
-    _setupState = { convId: state.convId, phase: 'seed', freshCustom: true, cfg: { connections: cfg.connections, target: cfg.target, shape: cfg.shape } };
+    _setupState = { convId: state.convId, phase: 'seed', freshCustom: true, cfg: { connections: cfg.connections, target: cfg.target, shape: cfg.shape }, extend: state.extend || null };
     _persistSetupState();
     const _where = (cfg.connections && cfg.connections.length) ? cfg.connections.map((c) => `\`${c.label}\``).join(', ') : 'your site';
-    _setMessageBody(msg, `**Connected to ${_where}.** Next — **what should this desk do?** Describe its role in a sentence or two (this becomes its seed), or say \`skip\` for a general operator.`, { markdown: true });
+    // v2.74.1517 — the EXTEND flow's seed step IS the differentiation question (the base role carries over).
+    _setMessageBody(msg, state.extend
+      ? `**Connected to ${_where}.** Extending **${state.extend.baseName}** — **what makes this one different?** A division, an account, a site set (e.g. “the Las Vegas division”, “the Acme tenant”). Your answer scopes its role; \`skip\` keeps the base role unchanged.`
+      : `**Connected to ${_where}.** Next — **what should this desk do?** Describe its role in a sentence or two (this becomes its seed), or say \`skip\` for a general operator.`, { markdown: true });
     _orchFinalize(msg);
     return;
   }
@@ -2227,20 +2297,29 @@ async function _setupPhaseAnswer(text) {
   const t = String(text || '').trim();
   const skip = !t || /^(skip|done|none|no)$/i.test(t);
   if (state.phase === 'seed') {
+    const ex = state.extend || null;
     if (!skip) {
-      const seed = t.slice(0, 4000);
+      // v2.74.1517 — an EXTEND answer SCOPES the inherited role (append, never replace); scratch replaces wholesale.
+      const seed = ex ? `${ex.baseSeed}\n\nScope: this desk handles ONLY ${t.slice(0, 200)}.`.slice(0, 4000) : t.slice(0, 4000);
       try { await ConversationStore.patchMeta(state.convId, { seed }); } catch { /* */ }
       if (state.convId === _currentConversationId) _currentConversationSeed = seed;
+      if (ex) ex.scope = t.slice(0, 200);
     }
     state.phase = 'name';
     _persistSetupState();
     const m = appendMessage({ role: 'assistant', body: '' });
-    _setMessageBody(m, `${skip ? 'Keeping the general operator role.' : 'Seed saved.'} Last step — **name this desk** (e.g. “Ops”), or say \`skip\` to keep “Custom”.`, { markdown: true });
+    // v2.74.1517 — the sibling-routine OVERLAP warning: an unscoped copy of a routine-bearing seed runs the same
+    // sweep in BOTH desks against the same queue.
+    const warn = (ex && ex.hasRoutine && skip) ? '\n\n⚠ The inherited seed declares a **routine** — unscoped, it will run in **both** desks against the same queue. Scope it later with `seed:`, or `cancel` and answer the scope question.' : '';
+    const suggest = ex ? (ex.scope ? `${ex.baseName} — ${ex.scope.slice(0, 24)}` : `${ex.baseName} 2`) : '';
+    _setMessageBody(m, `${skip ? (ex ? 'Keeping the base role unchanged.' : 'Keeping the general operator role.') : (ex ? 'Scoped.' : 'Seed saved.')} Last step — **name this desk**${ex ? ` (\`skip\` uses “${suggest}”)` : ' (e.g. “Ops”), or say `skip` to keep “Custom”'}.${warn}`, { markdown: true });
     _orchFinalize(m);
     return;
   }
   if (state.phase === 'name') {
-    const name = skip ? '' : t.replace(/\s+desk$/i, '').slice(0, 40);   // v1508 — the rail badges the kind; a typed "… desk" drops the descriptor
+    const ex = state.extend || null;
+    const exSuggest = ex ? (ex.scope ? `${ex.baseName} — ${ex.scope.slice(0, 24)}` : `${ex.baseName} 2`) : '';
+    const name = skip ? exSuggest : t.replace(/\s+desk$/i, '').slice(0, 40);   // v1508 — the rail badges the kind; v1517 — an extend skip takes the derived suggestion, never 'Custom'
     if (name) { try { await ConversationStore.patchMeta(state.convId, { title: name }); } catch { /* */ } }
     _setupState = null;
     _persistSetupState();
@@ -2607,6 +2686,55 @@ function _ilBusy(msg, on) {
     _ilSyncHeader();
   } catch { /* */ }
 }
+// v2.74.1512 — the reply REVEAL: a settled reply reads in LINE BY LINE (a typing-effect rhythm), never as one
+// blob. Runs ONCE per bubble at _orchFinalize — mid-run progress rewrites (_setMessageBody ticks) never animate,
+// so there's no flicker; a bubble that finalizes again (the conn card refresh) doesn't re-animate (dataset guard).
+// Markdown animates its existing block elements IN PLACE; plain multi-line text re-wraps into per-line spans via
+// textContent ONLY (the escape-first boundary holds — no innerHTML from content); a body with inline formatting
+// but one block gets a single soft fade. Cosmetic by contract: called AFTER finalize's body extraction (the
+// re-wrap can't touch what persists), and any failure is swallowed. Reduced motion → instant (CSS).
+function _revealLines(msg) {
+  try {
+    if (!msg || !msg.dataset || msg.dataset.revealed === '1') return;
+    msg.dataset.revealed = '1';
+    const body = msg.querySelector('.message-body');
+    if (!body) return;
+    const text = body.textContent || '';
+    if (!text.trim()) return;
+    let units;
+    if (body.children.length >= 2) units = Array.from(body.children);          // markdown blocks — animate in place
+    else if (body.children.length === 0 && /\n/.test(text)) {                  // plain multi-line → per-line spans
+      const lines = text.split('\n');
+      body.textContent = '';
+      units = lines.map((ln) => { const s = document.createElement('span'); s.className = 'reveal-line'; s.textContent = ln === '' ? ' ' : ln; body.appendChild(s); return s; });
+    } else units = [body];                                                     // short / single-block → one soft fade
+    const cap = 28, step = 140;                                                // v1514 — half speed (user dial): ≤ ~4s to full reveal, however long the reply
+    units.forEach((el, i) => { el.classList.add('reveal-anim'); el.style.animationDelay = `${Math.min(i, cap) * step}ms`; });
+    // v2.74.1513 — the SCROLL TRACKS the reveal: start at the reply's TOP and follow the lines down as they land
+    // (the sticky bottom-pin used to jump straight to the end, so a long reply revealed above the fold, unseen).
+    // Only when the user was following (near bottom) and it's a real multi-line reveal; the user's own wheel/touch
+    // aborts the ride immediately; a safety timer releases the hold even if animationend never fires.
+    const c = $('thread');
+    const reduced = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    if (c && units.length >= 3 && _stickToBottom && !reduced) {
+      _revealHold = true;
+      let aborted = false;
+      const stop = () => { aborted = true; _revealHold = false; try { c.removeEventListener('wheel', stop); c.removeEventListener('touchstart', stop); } catch { /* */ } };
+      c.addEventListener('wheel', stop, { passive: true, once: true });
+      c.addEventListener('touchstart', stop, { passive: true, once: true });
+      c.scrollTop = Math.max(0, (msg.getBoundingClientRect().top - c.getBoundingClientRect().top) + c.scrollTop - 10);
+      const last = units[units.length - 1];
+      units.forEach((el) => {
+        el.addEventListener('animationend', () => {
+          if (aborted) return;
+          try { el.scrollIntoView({ block: 'nearest' }); } catch { /* */ }
+          if (el === last) stop();   // reveal done → release the hold; the bottom position re-arms sticky-follow naturally
+        }, { once: true });
+      });
+      setTimeout(() => { if (!aborted) stop(); }, (Math.min(units.length, cap + 1)) * step + 900);   // belt — never hold past the reveal
+    }
+  } catch { _revealHold = false; /* the reveal is cosmetic — never break finalize */ }
+}
 function _orchFinalize(msg, { outcome = null } = {}) {
   _ilBusy(msg, false);   // v1505 — the glyph settles the moment the run ends (even when nothing persists)
   try {
@@ -2620,6 +2748,7 @@ function _orchFinalize(msg, { outcome = null } = {}) {
       .then(() => _refreshRailIfOpen())   // v2.74.1223 — the selected app "updates accordingly": refresh its drawer peek live once the reply is persisted (peek mirrored into the index by then)
       .catch(() => { /* persistence must never break the flow */ });
   } catch { /* */ }
+  _revealLines(msg);   // v1512 — AFTER the body extraction above (the line re-wrap can never touch what persists)
 }
 
 // ── ORCH-FB — corrective feedback ───────────────────────────────────────────────────────────────────────────
@@ -4263,8 +4392,22 @@ async function _goToOrigin() {
 // only when it actually navigated — the caller falls through to interpret otherwise, so a non-section "show …" is
 // unchanged. Trusted-data rule holds: origin + curated section template, no model-minted URL.
 async function _showSection(word) {
-  const w = String(word || '').trim().toLowerCase();
+  let w = String(word || '').trim().toLowerCase();
   if (!w) return false;
+  // v2.74.1521 — a digit-run means a RECORD ask ("show ticket 4867009 on vendorsuite"), never a section name.
+  // Fall through to interpret, where the ride drill owns it (v1520 on-site open). Live miss: the token fallback
+  // matched "ticket" against a Zendesk leg's does-line and navigated the WRONG SITE with the ask's value ignored.
+  if (/\d{3,}/.test(w)) return false;
+  // v2.74.1521 — a trailing "on/in <app>" SCOPES the candidate hosts instead of joining the match string ("show
+  // warranty on vendorsuite" → only vendorsuite hosts considered; "vendorsuite" itself is nobody's section word).
+  // Generic tails ("on the site/page/tab") strip without scoping.
+  let siteScope = '';
+  const mScope = w.match(/^(.*?)\s+(?:on|in)\s+(?:the\s+)?([a-z][\w.-]{2,})$/);
+  if (mScope && mScope[1]) {
+    w = mScope[1].trim();
+    siteScope = ['site', 'page', 'tab', 'browser', 'web'].includes(mScope[2]) ? '' : mScope[2];
+    if (!w) return false;
+  }
   const hosts = []; const seen = new Set();
   const add = (origin) => { let h = ''; try { h = new URL(/^https?:\/\//i.test(origin) ? origin : `https://${origin}`).host; } catch { return; } if (h && !seen.has(h)) { seen.add(h); hosts.push(h); } };
   for (const c of _boundConnections()) add(c && c.origin);
@@ -4277,8 +4420,9 @@ async function _showSection(word) {
   // to its ≥4-char TOKENS ("view the warranty section" → "warranty" hits '/#warranty' even though "section" is
   // nobody's word). First query with a hit wins — phrase specificity beats token looseness.
   const queries = [w, ...w.split(/\s+/).filter((t) => t.length >= 4 && t !== w)];
+  const cands = siteScope ? hosts.filter((h) => h.includes(siteScope)) : hosts;   // v1521 — "on <app>" narrows the sites
   let best = null;   // strongest match across all sites — a section PATH containing the word beats a mere name/does hit,
-  for (const host of hosts) {   // so "warranty" → '/#warranty', never '/#dashboard' whose recipe NAME ("Warranty counts") also says warranty
+  for (const host of cands) {   // so "warranty" → '/#warranty', never '/#dashboard' whose recipe NAME ("Warranty counts") also says warranty
     let groundId = ''; try { const g = await _orchReq('ENSURE_GROUND_FOR_URL', { url: `https://${host}/` }); groundId = (g && g.groundId) || ''; } catch { /* */ }
     if (!groundId) continue;
     let recs = []; try { const rr = await _orchReq('GET_RIDE_RECIPES', { groundId, origin: host }); recs = (rr && rr.recipes) || []; } catch { /* */ }
@@ -5798,6 +5942,16 @@ async function _orchRecordFlow(msg, { groundId, tabId, ask, onAuthored = null })
     const res = await _orchReq('DERIVE_OBSERVED_CAPABILITY', { groundId, trace });
     if (res && res.success && res.capability) {
       _orchReq('ORCH_RECORD_ALIAS', { groundId, capabilityId: res.capability.id, phrase: ask });   // so the next ask hits
+      // v2.74.1523 — the teach IS the outcome. Bank the positive intent→capability belief for the NEW capability,
+      // and RETIRE the act-fail "re-teach or pick a different approach" lesson for this exact ask — its advice was
+      // just followed. The v1328 read-time retire keys on the FAILED capability's ref, which a fresh demonstration
+      // never carries, so without this the rule forced `teach` forever (live: 3 consecutive gap-offers on
+      // "show ticket … on vendorsuite" AFTER two successful demonstrations — the teach-loop wedge).
+      _bankCapabilityOutcome(ask, res.capability.id, true);
+      try {
+        const mid = _memoryId();
+        if (mid) retireActFail(mid, ask).then((n) => { if (n) _orchLog(`LEARNED ▸ retired ${n} act-fail rule(s) for "${String(ask).slice(0, 40)}" after re-teach`); }).catch(() => { /* */ });
+      } catch { /* best-effort — never block the teach reply */ }
       // When a caller wants to CONTINUE after the demo (the chain runner resuming a cold compound), hand back the
       // derived capability instead of the dead-end "ask me again" copy — the chain picks up from the next clause.
       if (typeof onAuthored === 'function') {
@@ -6168,15 +6322,54 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
     _setMessageBody(msg, `Couldn’t read ${legName} for any ${noun} (${failed} tried) — the session may have expired; click into the site’s tab and re-ask.`);
     return false;   // total failure → no resume point (continuing would just fail again)
   }
-  const totalRows = items.reduce((n, it) => n + it.rows.length, 0);
   const remaining = all.length - ranTo;
-  // grouped render: coverage leads, non-empty groups first, empties collapse to one line.
   const span = (started > 0 || remaining > 0) ? `${noun}s ${started + 1}–${ranTo} of ${total}` : `all ${total} ${noun}${total === 1 ? '' : 's'}`;
-  const head = `${legName} — ${totalRows} across ${span}${each.capped ? ` (enumeration capped at ${all.length})` : ''}${failed ? ` — ${failed} ${noun}${failed === 1 ? '' : 's'} failed` : ''}:`;
+  // v2.74.1525 — the fan-out HONORS a bound DRILL filter (live: "show ticket 4867009 on vendorsuite" bound
+  // divisionId=each → the ticket value was silently DROPPED and 22 unrelated rows rendered). With a drill
+  // matchOn value bound, each group's rows run the same join math: ONE hit total drills straight into it (the
+  // each-sweep IS the division-unknown search); several render only the matches; none says so honestly.
+  const dj = (leg.tool && leg.tool.drill) || null;
+  const dval = (dj && dj.param && dj.from && dj.matchOn) ? params[dj.matchOn] : null;
+  let view = items;
+  let headNote = '';
+  if (dval != null && String(dval).trim() !== '') {
+    const matched = items.map((it) => ({ ...it, rows: filterRowsByText(it.rows, dj.label || [], dval) })).filter((it) => it.rows.length);
+    const nHits = matched.reduce((n, it) => n + it.rows.length, 0);
+    try { _orchLog(`RIDE_DRILL ▸ ${leg.tool.recipeId || leg.key} each-filter "${String(dval).slice(0, 40)}" → ${nHits} hit(s) in ${matched.length}/${items.length} ${noun}(s)`); } catch { /* */ }
+    if (nHits === 1) {
+      const one = matched[0];
+      const dj2 = await _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value: one.rows, where: ` in ${one.label}` });
+      if (dj2 === true) {
+        _lastGroundedRead = { leg, params, at: Date.now(), value: { results: one.rows.map((r) => ({ [noun]: one.label, ...r })) } };
+        return true;
+      }
+    }
+    if (nHits === 0) {
+      if (remaining > 0) _rideEachCursor = { at: Date.now(), leg, ask, tabId, groundId, params, each: { name: each.name, values: all, total }, offset: ranTo };
+      _setMessageBody(msg, `No match for “${dval}” across ${span}${params.status ? ` (status: ${params.status})` : ''}.${remaining > 0 ? ` Say “continue” for the rest (${remaining} more).` : ''}`);
+      return true;
+    }
+    view = matched;
+    headNote = ` matching “${dval}”`;
+  }
+  const totalRows = view.reduce((n, it) => n + it.rows.length, 0);
+  // grouped render: coverage leads, non-empty groups first, empties collapse to one line.
+  const head = `${legName} — ${totalRows}${headNote} across ${span}${each.capped ? ` (enumeration capped at ${all.length})` : ''}${failed ? ` — ${failed} ${noun}${failed === 1 ? '' : 's'} failed` : ''}:`;
   const secs = [];
-  const nonEmpty = items.filter((it) => it.rows.length); const empty = items.filter((it) => !it.rows.length);
-  for (const it of nonEmpty) secs.push((renderConnectorLines(it.value, { name: it.label }) || [`${it.label} (0).`]).join('\n'));
-  if (empty.length) secs.push(`Nothing in: ${empty.map((it) => it.label).join(', ')}.`);
+  const nonEmpty = view.filter((it) => it.rows.length); const empty = view.filter((it) => !it.rows.length);
+  // a drill-filtered view renders ONLY its matching rows (label lines, like the drill's many-hit list) — the
+  // group's full read would resurface the very rows the filter excluded.
+  for (const it of nonEmpty) secs.push(headNote
+    ? [`${it.label}:`, ...it.rows.slice(0, 6).map((h) => `- ${(dj.label || []).map((f) => h[f]).filter((v) => v != null && v !== '').join(' · ')}`)].join('\n')
+    : (renderConnectorLines(it.value, { name: it.label }) || [`${it.label} (0).`]).join('\n'));
+  // v2.74.1524 — the RESULT is the message; a wall of empty group names isn't (live: "0 across all 121 divisions"
+  // followed by every one of the 121 names — the user asked for "only the result"). Name empties only while the
+  // list stays readable; past that, the COUNT carries all the information.
+  if (empty.length) {
+    secs.push(empty.length <= 8
+      ? `Nothing in: ${empty.map((it) => it.label).join(', ')}.`
+      : (nonEmpty.length ? `Nothing in the other ${empty.length} ${noun}s.` : `Nothing in any of the ${empty.length} ${noun}s.`));
+  }
   // DK-7c — a STOP parks the resume point; "continue" picks up exactly where it paused.
   if (remaining > 0) {
     _rideEachCursor = { at: Date.now(), leg, ask, tabId, groundId, params, each: { name: each.name, values: all, total }, offset: ranTo };
@@ -6186,7 +6379,7 @@ async function _rideEachFanOut(msg, { leg, ask, tabId, groundId, params, each })
   // FL-1d/CX-9j — the merged, group-TAGGED rows ground follow-ups ("which division has the most?"): shallow-tag
   // each row with its group label (copies — the originals untouched), capped.
   const tagged = [];
-  for (const it of items) for (const row of it.rows) { if (tagged.length >= 200) break; tagged.push({ [noun]: it.label, ...row }); }
+  for (const it of view) for (const row of it.rows) { if (tagged.length >= 200) break; tagged.push({ [noun]: it.label, ...row }); }
   _lastGroundedRead = { leg, params, at: Date.now(), value: { results: tagged } };
   return true;
 }
@@ -6215,25 +6408,146 @@ async function _rideDrillLeg(parentLeg, viaId, groundId) {
 // joins CODE-side: filterRowsByText picks the row(s); a single hit's `from` id (TaskId) invokes the details read on
 // the same transport. The model never joins; 0/many hits ask back honestly. One level only — a details read never
 // re-drills. Returns null when the drill doesn't apply (caller falls through to its normal render).
+const _drillWalk = new WeakMap();   // v2.74.1522 — per-reply set of statuses already searched (the id-shaped retry walk)
 async function _rideDrillJoin(msg, { leg, ask, tabId, groundId, params, value, where = '', _drilled = false }) {
   const dj = (leg.tool && leg.tool.drill) || null;
   const dval = (dj && dj.param && dj.from && dj.matchOn) ? params[dj.matchOn] : null;
-  // CX-9e (v1438) — an EMPTY list skips the drill entirely: "no <status> tasks in <division>" (the shaper's scoped
-  // honest empty) beats a confusing `No match for "X" — 0 tasks listed` over zero rows.
-  if (_drilled || !dj || dval == null || String(dval).trim() === '' || !Array.isArray(value) || value.length === 0) return null;
-  const hits = filterRowsByText(value, dj.label || [], dval);
+  if (_drilled || !dj || dval == null || String(dval).trim() === '') return null;
+  const rows = Array.isArray(value) ? value : [];
+  const hits = rows.length ? filterRowsByText(rows, dj.label || [], dval) : [];
   if (hits.length === 1) {
+    // v2.74.1519/1520 — the HUMAN-HANDOFF open: the drilled record can open ON THE SITE'S OWN PAGE so a field can
+    // be updated by hand. The SPA has no per-item URL, so navigate-to-the-list + text-click IS the open (CX-9o);
+    // the click text is the row's first prose-shaped label field (an address — never a bare numeric id, which
+    // isn't visible row text). Generic: any drill-bearing list leg with a `listUrl` human-page marker.
+    const row = hits[0];
+    const clickText = (dj.label || []).map((f) => (row[f] == null ? '' : String(row[f]).trim()))
+      .find((v) => v.length >= 6 && /[a-z]/i.test(v)) || '';
+    const listPath = (leg.tool && leg.tool.listUrl) || null;
+    const host = (leg.tool && leg.tool.origin) || '';
+    const canOpen = !!(clickText && listPath && host);
+    const driveOpen = async (n) => {
+      let r = null;
+      try { r = await _orchReq('SHOW_SOURCES', { origin: host, urls: [`https://${host}${listPath.startsWith('/') ? listPath : '/' + listPath}`] }); } catch { r = null; }
+      if (!r || r.success === false) { _setMessageBody(n, `Couldn’t open ${host}.`); _orchFinalize(n); return; }
+      let c = null;
+      if (r.tabId != null) { try { c = await _orchReq('CLICK_TEXT_ON_TAB', { tabId: r.tabId, text: clickText }); } catch { c = null; } }
+      _setMessageBody(n, (c && c.success)
+        ? `Opened “${clickText}” on ${host} — make the update there; I’ll see the change on the next read.`
+        : `${r.reused ? 'Focused' : 'Opened'} ${host}’s page — couldn’t auto-open “${clickText}” (${(c && c.error) || 'no match'}); it’s in that list.`);
+      try { _orchLog(`SECTION_NAV ▸ ${host} (drill open) find="${clickText.slice(0, 40)}" → ${(c && c.success) ? 'clicked' : 'click-miss'}`); } catch { /* */ }
+      _orchFinalize(n);
+    };
+    // v2.74.1520 — an ON-SITE ask ("show ticket 4867009 ON VENDORSUITE" / "open the warranty PAGE to …") drives
+    // straight to the record — no panel detail render at all (navigation, not a write → no confirm). The join
+    // still happens here (the ticket number isn't visible row text; the API row supplies the clickable address).
+    const _app = String((leg.tool && leg.tool.app) || '').replace(/[^a-z0-9]/gi, '');
+    const _onSiteRe = new RegExp(`\\b(?:on|in)\\s+(?:the\\s+)?(?:site|page|tab${_app ? '|' + _app : ''})\\b|\\bopen\\s+(?:the\\s+)?[a-z]*\\s*page\\b`, 'i');
+    if (canOpen && _onSiteRe.test(String(ask || ''))) {
+      try { _orchLog(`RIDE_DRILL ▸ ${leg.tool.recipeId || leg.key} → on-site open (match "${String(dval).slice(0, 40)}")`); } catch { /* */ }
+      await driveOpen(msg);
+      return true;
+    }
     const viaLeg = await _rideDrillLeg(leg, dj.via, groundId);
     if (!viaLeg) return null;   // details read unavailable/unarmed → fall back to the plain list render
     try { _orchLog(`RIDE_DRILL ▸ ${leg.tool.recipeId || leg.key} → ${dj.via} (${dj.param}=${hits[0][dj.from]}) match "${String(dval).slice(0, 40)}"`); } catch { /* */ }
-    return _ilRunBuiltin(msg, { leg: viaLeg, ask, tabId, groundId, params: { [dj.param]: hits[0][dj.from] }, _drilled: true });
+    const _res = await _ilRunBuiltin(msg, { leg: viaLeg, ask, tabId, groundId, params: { [dj.param]: hits[0][dj.from] }, _drilled: true });
+    try {
+      if (_res === true && canOpen) {
+        const bar = _orchActionBar(msg);
+        bar.appendChild(_mkBtn('Open the record on the site', async () => { bar.remove(); await driveOpen(appendMessage({ role: 'assistant', body: `Opening ${host}…` })); }));
+      }
+    } catch { /* the open offer is an enhancement — never break the drill render */ }
+    return _res;
   }
   if (hits.length === 0) {
-    _setMessageBody(msg, `No match for “${dval}”${where} — ${value.length} task${value.length === 1 ? '' : 's'} listed. Check the address or say the task number.`, { markdown: true });
+    // v2.74.1522 — RETRY ACROSS STATUSES on an id-shaped miss (the v1519 deferred limit): a ticket/task NUMBER is
+    // status-blind — the ask almost never says which bucket its task lives in — so a digit value that missed the
+    // current status's rows (or hit an EMPTY bucket) walks the leg's remaining status enum before giving up. One
+    // more read per step, bounded by the enum. Text values (addresses) never walk — their miss is a real miss in
+    // the scoped list. `_drillWalk` (WeakMap on the reply node) is the tried-set across the re-entrant reads.
+    const statusSlot = leg.paramSchema && leg.paramSchema.properties && leg.paramSchema.properties.status;
+    if (/^\d{3,}$/.test(String(dval).trim()) && statusSlot && Array.isArray(statusSlot.enum) && statusSlot.enum.length && params.status != null) {
+      let tried = _drillWalk.get(msg);
+      if (!tried) { tried = new Set(); _drillWalk.set(msg, tried); }
+      tried.add(String(params.status));
+      const next = statusSlot.enum.map(String).find((s) => !tried.has(s));
+      if (next) {
+        try { _orchLog(`RIDE_DRILL ▸ ${leg.tool.recipeId || leg.key} "${String(dval).slice(0, 40)}" not in status=${params.status} → trying ${next}`); } catch { /* */ }
+        _setMessageBody(msg, `Not in ${params.status} — checking ${next}…`);
+        return _ilRunBuiltin(msg, { leg, ask, tabId, groundId, params: { ...params, status: next } });
+      }
+      _drillWalk.delete(msg);
+      _setMessageBody(msg, `No match for “${dval}”${where} in any status (${statusSlot.enum.join(' / ')}). Check the number or the division.`, { markdown: true });
+      return true;
+    }
+    // CX-9e (v1438) — an EMPTY list (no walk) skips the drill entirely: "no <status> tasks in <division>" (the
+    // shaper's scoped honest empty) beats a confusing `No match for "X" — 0 tasks listed` over zero rows.
+    if (rows.length === 0) return null;
+    _setMessageBody(msg, `No match for “${dval}”${where} — ${rows.length} task${rows.length === 1 ? '' : 's'} listed. Check the address or say the task number.`, { markdown: true });
     return true;
   }
   const lines = hits.slice(0, 6).map((h) => `- ${(dj.label || []).map((f) => h[f]).filter((v) => v != null && v !== '').join(' · ')}`);
   _setMessageBody(msg, `“${dval}”${where} matches ${hits.length} tasks — which one?\n${lines.join('\n')}`, { markdown: true });
+  return true;
+}
+
+// v2.74.1522 — the ON-SITE RECORD ask, deterministic end-to-end ("show ticket 4867009 on vendorsuite"): a leading
+// show/open verb + a digit-run + a trailing "on/in <site>" names everything the drill needs, so it never rides the
+// model (live, twice: the section-opener hijacked it at v1520, then interpret BOUNCED it conversationally at v1521 —
+// tab-context bias beat the explicitly named site). The named app (or a generic "the site" tail when exactly ONE
+// drill-bearing ride ground exists) picks the leg; the list read + drill join do the rest — including the v1522
+// status walk and the on-site open (the ask carries the on-site phrase _rideDrillJoin keys on). Trusted-data rule
+// holds: curated leg + origin; the only ask-derived value is the drill filter. Returns false → interpret, unchanged.
+async function _openRecordOnSite(ask, recordValue, siteWord) {
+  const generic = ['site', 'page', 'tab', 'browser', 'web'].includes(siteWord);
+  let tabId = null;
+  try { const tabs = await chrome.tabs.query({ active: true, currentWindow: true }); tabId = (tabs && tabs[0] && tabs[0].id) ?? null; } catch { /* */ }
+  // v2.74.1523 — TEACH-ONCE WINS: a saved capability matching this ask owns the phrase (live: the demonstrated
+  // "Search and open ticket by ID" rides the site's OWN search box — robust across divisions, where the drill's
+  // address-click missed with text-not-found). The generic drill route below is the COLD fallback only.
+  // v2.74.1525 — a warm ALIAS-EXACT hit REPLAYS RIGHT HERE (the PRECISION-FIRST auto-run rule): deferring to
+  // interpret handed the phrase to the model, which twice picked a DIFFERENT (twice-failed) artifact over the
+  // exact-alias capability. Weaker hits still defer — interpret arbitrates anything short of the user's own phrase.
+  try {
+    const m = await _orchReq('ORCH_MATCH', { tabId, ask });
+    if (m && m.success !== false && m.capabilityId && m.decision !== 'miss') {
+      const turn = planAssistantTurn(m);
+      if (turn.action === 'run' && turn.reason === 'alias-exact') {
+        appendMessage({ role: 'user', body: ask });
+        const rmsg = appendMessage({ role: 'assistant', body: turn.say || 'On it…' });
+        try { _orchLog(`RIDE_DRILL ▸ on-site intercept → alias-exact replay ${m.capabilityId}`); } catch { /* */ }
+        await _orchRun(rmsg, { groundId: m.groundId, tabId, ask, intent: m.candidate && m.candidate.intent, paramValues: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {}, params: m.candidate && m.candidate.params, capabilityId: m.capabilityId });
+        return true;
+      }
+      return false;
+    }
+  } catch { /* probe only — never blocks the fallback */ }
+  let grounds = [];
+  try { const rg = await _orchReq('GET_RIDE_ARMED_GROUNDS', {}); grounds = (rg && rg.grounds) || []; } catch { return false; }
+  const cands = [];
+  const seenLeg = new Set();   // v2.74.1525 — DUPLICATE grounds on one host (live: two vendorsuite.drhorton.com
+  for (const g of grounds) {   // grounds) are ONE candidate, not an ambiguity that silently bails to interpret.
+    if (!g || !g.host || !g.gid) continue;
+    if (!generic && !String(g.host).toLowerCase().includes(siteWord)) continue;
+    let recs = [];
+    try { const rr = await _orchReq('GET_RIDE_RECIPES', { groundId: g.gid, origin: g.host }); recs = (rr && rr.recipes) || []; } catch { continue; }
+    const leg = harvestedRecipeLegs(recs, { host: g.host, mode: 'ask', groundId: g.gid })
+      .find((l) => l && l.tool && l.tool.drill && l.tool.drill.matchOn && l.tool.listUrl);
+    if (!leg) continue;
+    const key = `${String(g.host).toLowerCase()}·${leg.tool.recipeId || leg.key}`;
+    if (!seenLeg.has(key)) { seenLeg.add(key); cands.push({ leg, gid: g.gid }); }
+  }
+  if (cands.length !== 1) return false;   // 0 = nothing drillable here; >1 on a generic tail = ambiguous — interpret decides
+  const { leg, gid } = cands[0];
+  appendMessage({ role: 'user', body: ask });
+  const msg = appendMessage({ role: 'assistant', body: `Looking up ${recordValue}…` });
+  const statusSlot = leg.paramSchema && leg.paramSchema.properties && leg.paramSchema.properties.status;
+  const statuses = (statusSlot && Array.isArray(statusSlot.enum)) ? statusSlot.enum.map(String) : [];
+  const params = { [leg.tool.drill.matchOn]: String(recordValue) };
+  if (statuses.length) params.status = statuses.includes('open') ? 'open' : statuses[0];   // most-likely bucket first; the drill walk covers the rest
+  try { _orchLog(`RIDE_DRILL ▸ on-site intercept → ${leg.tool.recipeId || leg.key} (${leg.tool.drill.matchOn}="${String(recordValue).slice(0, 40)}")`); } catch { /* */ }
+  await _ilRunBuiltin(msg, { leg, ask, tabId, groundId: gid, params });
   return true;
 }
 
@@ -7530,6 +7844,13 @@ async function sendChatMessage() {
     const mSectionShow = text.match(/^(?:show|view|go\s+to)\s+(?:the\s+)?([a-z][\w ]*?)\s*$/i);
     if (mSectionShow && await _showSection(mSectionShow[1].trim())) { input.value = ''; _autosizeInput(); return; }
   }
+  // v2.74.1522 — the ON-SITE RECORD ask ("show ticket 4867009 on vendorsuite"): verb + digit-run + trailing
+  // "on/in <site>" runs the drill-bearing list leg DETERMINISTICALLY (the named site scopes it; the drill join
+  // matches the number, walks statuses, and the on-site phrase drives the open). No match shape → interpret.
+  {
+    const mOnSite = text.match(/^(?:show|open|view|pull\s+up|bring\s+up|go\s+to)\b[^\n]*?\b(\d{3,})\b[^\n]*\b(?:on|in)\s+(?:the\s+)?([a-z][\w.-]{2,})\s*$/i);
+    if (mOnSite && await _openRecordOnSite(text, mOnSite[1], mOnSite[2].toLowerCase())) { input.value = ''; _autosizeInput(); return; }
+  }
   // CX-9j (v2.74.1444) — field follow-up on the last grounded read ("what are the instructions?" after a task read →
   // the record's OWN Instructions field, full text, deterministic). Acts only on a fresh read + a real field match;
   // everything else falls through untouched (so "what are the instructions?" with no recent read still routes normally).
@@ -7645,12 +7966,17 @@ async function sendChatMessage() {
   // AL-3c (v2.74.1194) — `remember: <rule>` authors a STANDING RULE (a behavior delta) into this app's goal memory:
   // NON-tool learning (a behavior, not a capability choice). Light `if X, Y` parse → trigger/body. Shows under
   // "Rules" in `memory`; AL-4 will apply it (thread it into the app's reasoning context).
-  if (/^remember:/i.test(text)) {
+  // v2.74.1524 — the NL forms route here too ("add to memory, …" / "save to memory: …" / "remember this: …" /
+  // "memorize …"). Live: "add to memory, return only the result…" fell to the LLM answer path, which ECHOED a
+  // FABRICATED division list and claimed "Added to memory" — a false side-effect claim. A memory command is
+  // deterministic: bank + the honest ack, never a model turn.
+  const _mRemember = text.match(/^(?:remember\s*:|remember\s+this\s*[:,—–-]|add\s+(?:this\s+)?to\s+(?:your\s+)?memory\s*[:,—–-]?|save\s+(?:this\s+)?to\s+(?:your\s+)?memory\s*[:,—–-]?|memorize\s*[:,—–-])\s*(\S[\s\S]*)$/i);
+  if (_mRemember) {
     input.value = ''; _autosizeInput();
     appendMessage({ role: 'user', body: text });
     const m = appendMessage({ role: 'assistant', body: '' });
     if (!_currentConversationAppId) { _setMessageBody(m, 'Open a desk — standing rules are per-desk.'); _orchFinalize(m); return; }
-    const rule = standingRuleFromText(text.replace(/^remember:\s*/i, ''));
+    const rule = standingRuleFromText(_mRemember[1]);
     if (!rule) { _setMessageBody(m, 'Tell me a rule to remember, e.g. “remember: keep replies under 3 sentences”.'); _orchFinalize(m); return; }
     try { await recordGoalItem(_memoryId(), rule); } catch { /* */ }   // AP-0 — a standing rule banks to THIS instance
     const when = rule.trigger ? ` when ${rule.trigger}` : '';
@@ -9224,6 +9550,9 @@ async function _maybeRenderConnCard() {
   if (!r || r.success === false) return;
   const body = renderConnectionsCard(r.registry || {}, { now: r.now || Date.now() });
   if (!body) return;   // nothing connected yet → no card
+  // v2.74.1515 — the empty Front desk shows its HOME (messages pane hidden); a real card ENTERS the thread so it's
+  // visible (once it persists, the conversation is non-empty and the rehydrate path owns rendering from then on).
+  if ($('messages') && $('messages').classList.contains('hidden')) _enterConversation();
   let msg = document.querySelector('#messages .message[data-message-id="conn_status"]');
   if (msg) _setMessageBody(msg, body);
   else { msg = appendMessage({ role: 'assistant', body, id: 'msg-conn_status' }); }

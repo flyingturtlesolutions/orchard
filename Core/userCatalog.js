@@ -54,9 +54,22 @@ export function configuredAppDefinition({ name, seed, type = null, objectModel =
  * @param {Array} list            the user catalog (listUserDefs output)
  * @param {string[]} preconfiguredIds  ids of the gallery's preconfigured desks (appCatalog.preconfiguredDesks)
  */
-export function galleryUserDefs(list, preconfiguredIds = []) {
-  const pre = new Set(Array.isArray(preconfiguredIds) ? preconfiguredIds.filter(Boolean) : []);
-  return (Array.isArray(list) ? list : []).filter((d) => d && !(d.presetId && pre.has(d.presetId)));
+export function galleryUserDefs(list, preconfigured = []) {
+  // v2.74.1517 — EXTENDED variants of a preconfigured desk ("Warranty — Las Vegas") are user-made desks and DO
+  // show; only the true duplicate hides (same presetId AND the preset's own display name — the AP-4 copy a plain
+  // setup mints). Accepts ids (legacy — hides every same-preset def) or {id, name} pairs (the name-aware rule).
+  const pre = new Map();
+  for (const p of (Array.isArray(preconfigured) ? preconfigured : [])) {
+    if (!p) continue;
+    if (typeof p === 'string') pre.set(p, null);
+    else if (p.id) pre.set(p.id, p.name || null);
+  }
+  return (Array.isArray(list) ? list : []).filter((d) => {
+    if (!d) return false;                                       // junk drops (the pre-v1517 behavior)
+    if (!d.presetId || !pre.has(d.presetId)) return true;
+    const pname = pre.get(d.presetId);
+    return pname != null && d.name !== pname;
+  });
 }
 
 /** Add (or REPLACE same-id) a def in the catalog list. PURE — returns a new array, newest last. */

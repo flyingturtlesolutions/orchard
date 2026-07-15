@@ -1706,12 +1706,22 @@ textarea {
   -webkit-line-clamp: 3;
   overflow: hidden;
   margin-top: 1px;
+  /* v2.74.1516 — the hover peek EASES open (line-clamp isn't animatable, so the un-clamp snapped the row height):
+     animate max-height from the 3-line rest height to the content's own height (interpolate-size lets a keyword
+     be a transition endpoint). Unhover glides closed the same way. */
+  interpolate-size: allow-keywords;
+  max-height: calc(3 * 1.35em + 2px);
+  transition: max-height 0.32s ease;
 }
 /* v2.74.1225 — hovering a row VERTICALLY EXPANDS the card: the 3-line clamp lifts so the full last-LLM-message peek
    shows. The row grows to fit (the drawer is a flex column), so neighbours reflow down. */
 .rail-item:hover .rail-item-summary {
   -webkit-line-clamp: unset;
-  overflow: visible;
+  overflow: hidden;              /* v1516 — stay hidden so the growing max-height IS the reveal */
+  max-height: max-content;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rail-item-summary { transition: none; }
 }
 
 .rail-item-meta {
@@ -2741,3 +2751,17 @@ div.suggestion-card { cursor: pointer; }
 .suggestion-card:hover .suggestion-card-delete,
 .suggestion-card-delete:focus-visible { opacity: 1; }
 .suggestion-card-delete:hover { color: #d33; background: var(--c-bg-subtle); }
+
+/* ── v2.74.1512 — the reply REVEAL: settled replies read in line by line (chat.js _revealLines) ──────────────── */
+.reveal-line { display: block; white-space: pre-wrap; }
+.reveal-anim {
+  opacity: 0;
+  transform: translateY(2px);
+  animation: il-reveal 0.36s ease-out forwards;   /* v1514 - half-speed cadence, slightly longer fade to match */
+}
+@keyframes il-reveal {
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .reveal-anim { animation: none; opacity: 1; transform: none; }
+}

@@ -150,6 +150,32 @@ export function capabilityOutcomeItem(goal, capabilityId, ok) {
     : { kind: 'delta', confidence: 0.4, trigger: g.slice(0, 120), body: 'a saved capability was tried for this and didn\'t work — re-teach or pick a different approach', ref, provenance: 'act-fail' };
 }
 
+/**
+ * v2.74.1523 — RETIRE the act-fail lesson(s) for a goal that was just RE-TAUGHT. PURE. The act-fail delta's own
+ * advice is "re-teach or pick a different approach" — once the user demonstrates a NEW capability for that exact
+ * ask, the lesson is CONSUMED: the v1328 read-time retire keys on the delta's ref (the capability that failed),
+ * which a fresh demonstration can never carry, so without this write-time retire the rule forces `teach` forever
+ * (live: three consecutive gap-offers on "show ticket … on vendorsuite" AFTER two successful demonstrations).
+ * Only act-fail deltas whose trigger matches the goal (normalized; the 120-char producer truncation honored) are
+ * removed — other phrasings' lessons, genuine standing rules, and every belief stay untouched.
+ * @returns {{ items: Array, removed: number }}
+ */
+export function retireActFailDeltas(items, goal) {
+  const norm = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const g = norm(goal);
+  const list = Array.isArray(items) ? items : [];
+  if (!g) return { items: list, removed: 0 };
+  const g120 = norm(_str(goal).slice(0, 120));
+  const keep = [];
+  let removed = 0;
+  for (const it of list) {
+    const t = (it && it.kind === 'delta' && it.provenance === 'act-fail') ? norm(it.trigger) : '';
+    if (t && (t === g || t === g120)) { removed++; continue; }
+    keep.push(it);
+  }
+  return { items: keep, removed };
+}
+
 // The per-target-tier promotion gate (the ratchet, §4). `s` = normalized signals. Cheap to hypothesize; corroborated
 // to confirm; HITL to canonize (§7 — confidence alone never canonizes); consolidation-only to summarize (§5).
 function _gateFor(target, s) {

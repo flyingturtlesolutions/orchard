@@ -128,3 +128,49 @@ three roles in one office noun, completing the Desk/Case/Routine vocabulary ("Ov
 and was the odd abstraction out). Boundaries: NOT in the desk gallery (reserved, always exists), takes NO cases
 (plumbing produces notices, not cases). Internal tokens (`OVERVIEW_ID`, `isOverview`, `role:'overview'`, the OV-*
 workbench markers, `DESIGN_overview.md`) stay — display strings only, same pattern as the Desk and Case adopts.
+
+## §11 — Role fidelity: preventing OMNI DESKS (RF — future work, specced v2.74.1518)
+
+**Problem.** A desk's value is focused learning + honest reporting. Off-role use (Support-shaped asks run at the
+Warranty desk) corrupts both: capability outcomes bank wrong-role beliefs, aliases/workflows accrete off-role,
+cases open for off-role items, and reporting ("what did this desk accomplish") stops being true. A hard fence is
+the WRONG tool — the Warranty seed legitimately spans Zendesk/Shopify/HubSpot for the homeowner's record, so any
+site/tool-based block misfires on the desk's own core loop. The boundary is SEMANTIC (role-fit), so the design is:
+**route instead of refuse, and quarantine the learning when the user overrides.** The reframe that makes this
+tractable: the danger of an off-role ask is not that it RUNS — it's that it TEACHES. Protect the learning and
+reporting channels; execution stays user-sovereign.
+
+**RF-1 — role-fit at the front door (route, don't refuse).** Add `roleFit: 'in-role' | 'adjacent' | 'off-role'`
+(+ a one-line reason) to INTERPRET_ASK's EXISTING structured output — zero extra LLM calls; the call already
+carries the seed. Judged against the ROLE PROSE, never the site list ("pull this homeowner's ticket" = in-role
+for Warranty; "triage my queue by urgency" = off-role). On off-role: don't run — offer the HANDOFF: "This looks
+like Support work. [Open in Support] · [Run here anyway]". Handoff candidates = the other desks' names +
+object-model nouns (a tiny palette addition to the interpret prompt); no fit anywhere → "run at the Front desk".
+One click opens the target desk with the ask pre-filled through the starter path (every gate identical to typing
+it). "Run here anyway" = the user override — sovereignty is never taken.
+
+**RF-2 — learning quarantine on override.** A forced off-role run executes normally but its learning
+side-effects are TAGGED, not banked clean: `offRole: true` rides the capability-outcome write (AL-3e), alias
+accretion, and goal-memory items; recall filters exclude tagged items; the workflow-save offer is suppressed;
+distill-up never considers them (the preset tier is already HITL-gated — this closes the last pollution path).
+Tagging beats skipping: the record stays honest and REVERSIBLE — "no, this IS warranty work" untags and is itself
+a teachable correction (the seed's scope was too narrow → offer a seed edit).
+
+**RF-3 — reporting separation.** An off-role run never opens CASES under the desk (the fan-out gate consults
+roleFit), and the ledger/work-trace marks off-role runs so desk-level reporting excludes them by default.
+
+**RF-4 — fit telemetry (the tuning loop).** `ROLEFIT ▸ <verdict> "<ask …>" [overridden]` decision marker
+(+ `_DECISION_RE`, Invariant #1) so gl/gc can audit false positives — the real risk of RF-1 is over-flagging
+adjacent work; the marker makes the classifier's precision inspectable before any tightening.
+
+**Non-goals (decided).** No separate classifier call (cost; the interpret already reads the seed). No silent
+refusal (trust dies; the confirm-with-handoff keeps the user in charge). No site/tool fencing beyond the existing
+`allowedOrigins` scope fence (§6A) — cross-site correlate IS the desk's job. No auto-migration of an ask to
+another desk without the click (the handoff is always a confirm).
+
+**Leans on (already built):** differentiated desks (return-first + Extend, v1517 — role-fit is only judgeable
+because scopes stay distinct), the Front desk as the general-ask home (v1507), per-instance memory (AP-0) +
+HITL distill (§10) as the existing containment layers RF completes.
+
+**Order:** RF-1 → RF-4 → RF-2 → RF-3 (ship the signal + telemetry first; quarantine once precision is proven —
+a quarantine driven by an unproven classifier would corrupt learning in the opposite direction).

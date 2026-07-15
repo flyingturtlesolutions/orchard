@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {
   ITEM_KINDS, EPISTEMIC, TIERS, tierRank, nextTier,
   normalizeBelief, normalizeDelta, normalizeMemoryItem, isBelief, isDelta,
-  canPromote, promote, standingRuleFromText, capabilityOutcomeItem, looksLikeStandingRule,
+  canPromote, promote, standingRuleFromText, capabilityOutcomeItem, looksLikeStandingRule, retireActFailDeltas,
 } from './goalMemory.js';
 
 describe('goalMemory — enums + tier helpers', () => {
@@ -211,5 +211,36 @@ describe('goalMemory — capabilityOutcomeItem (AL-3e, the outcome hook)', () =>
   it('missing goal or capabilityId → null (no-op)', () => {
     assert.equal(capabilityOutcomeItem('', 'cap-1', true), null);
     assert.equal(capabilityOutcomeItem('x', '', true), null);
+  });
+});
+
+describe('goalMemory — retireActFailDeltas (v2.74.1523, the re-teach consumes the "re-teach" lesson)', () => {
+  const ASK = 'show ticket 4867009 on vendorsuite';
+  const failFor = (goal, over = {}) => ({ ...capabilityOutcomeItem(goal, 'cap-old-drive', false), id: 'd1', ...over });
+  it('removes the act-fail delta whose trigger matches the re-taught ask (case/whitespace-insensitive)', () => {
+    const items = [failFor(ASK), capabilityOutcomeItem(ASK, 'cap-new', true)];
+    const { items: next, removed } = retireActFailDeltas(items, '  Show  Ticket 4867009 ON vendorsuite ');
+    assert.equal(removed, 1);
+    assert.equal(next.length, 1);
+    assert.equal(next[0].kind, 'belief');                       // the positive association survives
+  });
+  it('a DIFFERENT phrasing\'s lesson stays (only the re-taught ask is consumed)', () => {
+    const other = failFor('open warranty task details for Raleigh');
+    const { items: next, removed } = retireActFailDeltas([failFor(ASK), other], ASK);
+    assert.equal(removed, 1);
+    assert.deepEqual(next.map((x) => x.trigger), ['open warranty task details for Raleigh']);
+  });
+  it('matches the producer\'s 120-char trigger truncation on a long ask', () => {
+    const LONG = `please ${'x'.repeat(130)} on vendorsuite`;
+    const { removed } = retireActFailDeltas([failFor(LONG)], LONG);   // trigger was sliced to 120 at mint
+    assert.equal(removed, 1);
+  });
+  it('never touches beliefs, user rules (no act-fail provenance), or unrelated deltas; garbage-safe', () => {
+    const userRule = { kind: 'delta', trigger: ASK, body: 'always confirm first', provenance: 'user-rule', id: 'r1' };
+    const { items: next, removed } = retireActFailDeltas([userRule, capabilityOutcomeItem(ASK, 'cap-new', true)], ASK);
+    assert.equal(removed, 0);
+    assert.equal(next.length, 2);
+    assert.deepEqual(retireActFailDeltas(null, ASK), { items: [], removed: 0 });
+    assert.deepEqual(retireActFailDeltas([failFor(ASK)], '').removed, 0);
   });
 });

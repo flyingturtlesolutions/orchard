@@ -59,7 +59,16 @@ describe('DK-6b (v2.74.1503) — galleryUserDefs ("Your desks" = CUSTOM desks on
     setup: { target: { label: 'vendorsuite.drhorton.com' } } });                                            // AP-4 copy of a PRECONFIGURED desk
   it('drops the configured copy of a preconfigured desk; keeps promoted seeds + configured customs', () => {
     const out = galleryUserDefs([promoted, configuredCustom, configuredPre], PRE);
-    assert.deepEqual(out.map((d) => d.name), ['My triage', 'Ops desk']);   // the Warranty copy is gallery-hidden
+    assert.deepEqual(out.map((d) => d.name), ['My triage', 'Ops desk']);   // the Warranty copy is gallery-hidden (legacy id list → hide by preset)
+  });
+  it('v1517 — name-aware pairs: an EXTENDED variant shows; only the same-name copy hides', () => {
+    const PAIRS = [{ id: 'warranty-manager', name: 'Warranty' }];
+    const extended = configuredAppDefinition({ name: 'Warranty — Las Vegas', seed: 'warranty role\n\nScope: this desk handles ONLY the Las Vegas division.', presetId: 'warranty-manager',
+      setup: { target: { label: 'vendorsuite.drhorton.com' } } });
+    const copy = configuredAppDefinition({ name: 'Warranty', seed: 'warranty role', presetId: 'warranty-manager',
+      setup: { target: { label: 'vendorsuite.drhorton.com' } } });
+    const out = galleryUserDefs([extended, copy, promoted], PAIRS);
+    assert.deepEqual(out.map((d) => d.name), ['Warranty — Las Vegas', 'My triage']);   // the variant SHOWS; the true duplicate hides
   });
   it('no preconfigured ids / junk-safe → everything user-made still shows', () => {
     assert.equal(galleryUserDefs([promoted, configuredPre], []).length, 2);   // nothing to hide against
