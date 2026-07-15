@@ -438,3 +438,45 @@ describe('observedSegment — segment a demonstration into Fragments (OBS-2)', (
     assert.equal(op2.default, 'Last 3 days', 'option strategy param carries the demonstrated label as default');
   });
 });
+
+describe('observedSegment — v2.74.1528 result-row content-addressing (the "Navigate to specific list item" fix)', () => {
+  const search = buildRawAction({ domKind: 'input', value: '4867009', url: 'https://vendorsuite.drhorton.com/#warranty',
+    target: { role: 'searchbox', accessibleName: 'Find a ticket or task...', selector: 'input.search' } });
+  const rowClick = buildRawAction({ domKind: 'click', url: 'https://vendorsuite.drhorton.com/#warranty',
+    target: { role: 'button', accessibleName: '1091 Misty Creek Drive', selector: 'ul.results > li.row:nth-of-type(72) > div',
+      text: '1091 Misty Creek Drive', rowText: '#05 Open 1091 Misty Creek Drive ABERDEEN NC 4867009 Collinswood', resultContainer: 'ul.results' } });
+  it('a result-row click after a search REUSES the search param as CLICK_BY_LABEL in the results container', () => {
+    const op = segmentTrace(coalesce([search, rowClick]));
+    const params = deriveObservedParams(op);
+    const searchP = params.find((p) => p.kind === 'text');
+    assert.ok(searchP && searchP.clickReuse, 'the search text param carries a clickReuse for the result row');
+    assert.equal(searchP.clickReuse.container, 'ul.results', 'scoped to the results list container');
+    const { phases } = parameterizeObserved(opToPhases(op), params);
+    const acts = phases.flatMap((ph) => ph.actions);
+    const cbl = acts.find((a) => a.action === 'CLICK_BY_LABEL');
+    assert.ok(cbl, 'the positional row CLICK became CLICK_BY_LABEL');
+    assert.equal(cbl.selector, 'ul.results', 'the by-label click is scoped to the results list');
+    assert.match(cbl.value, /^\{\{[A-Z0-9_]+\}\}$/, 'its value is the search param placeholder');
+    const typeAct = acts.find((a) => a.action === 'TYPE');
+    assert.equal(typeAct.value, cbl.value, 'the SAME param fills the search TYPE and the by-label click (one param, two uses)');
+  });
+  it('falls back to the captured optionContainer / derived container when no resultContainer was captured', () => {
+    const rc2 = buildRawAction({ domKind: 'click', url: 'https://x/#warranty',
+      target: { role: 'button', accessibleName: 'row', selector: '#list > li:nth-of-type(3) > span', rowText: 'match 4867009 here' } });
+    const params = deriveObservedParams(segmentTrace(coalesce([search, rc2])));
+    const p = params.find((x) => x.clickReuse);
+    assert.ok(p, 'still reuses when the row text contains the value');
+    assert.equal(p.clickReuse.container, '#list > li:nth-of-type(3)', 'optionContainerSelector derives a container from the selector');
+  });
+  it('NO reuse when the clicked row text lacks the search value (no regression → the click stays literal)', () => {
+    const other = buildRawAction({ domKind: 'click', url: 'https://x/#warranty',
+      target: { role: 'button', accessibleName: 'Apply', selector: 'button.apply', text: 'Apply', rowText: 'nothing relevant here' } });
+    const params = deriveObservedParams(segmentTrace(coalesce([search, other])));
+    assert.ok(!params.find((p) => p.clickReuse), 'no clickReuse when the row text does not contain the search value');
+  });
+  it('a short search value (<3 chars) never content-addresses (guards spurious matches)', () => {
+    const shortS = buildRawAction({ domKind: 'input', value: '05', url: 'https://x/#warranty', target: { role: 'searchbox', accessibleName: 'q', selector: '#q' } });
+    const row = buildRawAction({ domKind: 'click', url: 'https://x/#warranty', target: { role: 'button', accessibleName: 'r', selector: '#l > li:nth-of-type(2)', rowText: 'contains 05 somewhere' } });
+    assert.ok(!deriveObservedParams(segmentTrace(coalesce([shortS, row]))).find((p) => p.clickReuse), 'a 2-char value is too short to content-address');
+  });
+});

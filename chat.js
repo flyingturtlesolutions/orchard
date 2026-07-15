@@ -6538,31 +6538,13 @@ async function _openRecordOnSite(ask, recordValue, siteWord) {
   const generic = ['site', 'page', 'tab', 'browser', 'web'].includes(siteWord);
   let tabId = null;
   try { const tabs = await chrome.tabs.query({ active: true, currentWindow: true }); tabId = (tabs && tabs[0] && tabs[0].id) ?? null; } catch { /* */ }
-  // v2.74.1523 — TEACH-ONCE WINS: a saved capability matching this ask owns the phrase (live: the demonstrated
-  // "Search and open ticket by ID" rides the site's OWN search box — robust across divisions, where the drill's
-  // address-click missed with text-not-found). The generic drill route below is the COLD fallback only.
-  // v2.74.1525 — a warm ALIAS-EXACT hit REPLAYS RIGHT HERE (the PRECISION-FIRST auto-run rule): deferring to
-  // interpret handed the phrase to the model, which twice picked a DIFFERENT (twice-failed) artifact over the
-  // exact-alias capability. Weaker hits still defer — interpret arbitrates anything short of the user's own phrase.
-  try {
-    const m = await _orchReq('ORCH_MATCH', { tabId, ask });
-    if (m && m.success !== false && m.capabilityId && m.decision !== 'miss') {
-      const turn = planAssistantTurn(m);
-      if (turn.action === 'run' && turn.reason === 'alias-exact') {
-        appendMessage({ role: 'user', body: ask });
-        const rmsg = appendMessage({ role: 'assistant', body: turn.say || 'On it…' });
-        try { _orchLog(`RIDE_DRILL ▸ on-site intercept → alias-exact replay ${m.capabilityId}`); } catch { /* */ }
-        await _orchRun(rmsg, { groundId: m.groundId, tabId, ask, intent: m.candidate && m.candidate.intent, paramValues: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {}, params: m.candidate && m.candidate.params, capabilityId: m.capabilityId });
-        return true;
-      }
-      return false;
-    }
-  } catch { /* probe only — never blocks the fallback */ }
+  // The deterministic DRILL candidate (API read → navigate → text-click the row's address) is landmark-free — the
+  // RELIABLE path. Built up front so it serves BOTH as the cold route AND as the FALLBACK when a taught capability
+  // fails to replay. v2.74.1525 — same-host duplicate grounds dedupe to ONE candidate.
   let grounds = [];
-  try { const rg = await _orchReq('GET_RIDE_ARMED_GROUNDS', {}); grounds = (rg && rg.grounds) || []; } catch { return false; }
-  const cands = [];
-  const seenLeg = new Set();   // v2.74.1525 — DUPLICATE grounds on one host (live: two vendorsuite.drhorton.com
-  for (const g of grounds) {   // grounds) are ONE candidate, not an ambiguity that silently bails to interpret.
+  try { const rg = await _orchReq('GET_RIDE_ARMED_GROUNDS', {}); grounds = (rg && rg.grounds) || []; } catch { grounds = []; }
+  const cands = []; const seenLeg = new Set();
+  for (const g of grounds) {
     if (!g || !g.host || !g.gid) continue;
     if (!generic && !String(g.host).toLowerCase().includes(siteWord)) continue;
     let recs = [];
@@ -6573,16 +6555,61 @@ async function _openRecordOnSite(ask, recordValue, siteWord) {
     const key = `${String(g.host).toLowerCase()}·${leg.tool.recipeId || leg.key}`;
     if (!seenLeg.has(key)) { seenLeg.add(key); cands.push({ leg, gid: g.gid }); }
   }
-  if (cands.length !== 1) return false;   // 0 = nothing drillable here; >1 on a generic tail = ambiguous — interpret decides
-  const { leg, gid } = cands[0];
+  const drill = cands.length === 1 ? cands[0] : null;   // 0 = nothing drillable; >1 on a generic tail = ambiguous
+  const runDrill = async (msg) => {
+    const { leg, gid } = drill;
+    const statusSlot = leg.paramSchema && leg.paramSchema.properties && leg.paramSchema.properties.status;
+    const statuses = (statusSlot && Array.isArray(statusSlot.enum)) ? statusSlot.enum.map(String) : [];
+    const params = { [leg.tool.drill.matchOn]: String(recordValue) };
+    if (statuses.length) params.status = statuses.includes('open') ? 'open' : statuses[0];   // most-likely bucket first; the drill walk covers the rest
+    try { _orchLog(`RIDE_DRILL ▸ on-site intercept → ${leg.tool.recipeId || leg.key} (${leg.tool.drill.matchOn}="${String(recordValue).slice(0, 40)}")`); } catch { /* */ }
+    await _ilRunBuiltin(msg, { leg, ask, tabId, groundId: gid, params });
+  };
+  // TEACH-ONCE WINS — a saved capability whose EXACT alias is this ask replays first (it rides the site's own
+  // search box). v2.74.1526 — but it now FALLS BACK to the drill when the replay FAILS, instead of dead-ending
+  // (live: the taught "Search and open ticket by ID" baked in a click on the division-selector heading showing
+  // "Atlanta West" at demo time — that division isn't current, so the landmark was unresolvable). A NON-exact hit
+  // also prefers the drill when one exists — deferring to interpret handed the phrase to the model, which reliably
+  // mis-picks a broken drive artifact. Only a hit with NO drill defers to interpret (unchanged).
+  let m = null;
+  try { m = await _orchReq('ORCH_MATCH', { tabId, ask }); } catch { m = null; }
+  const hit = m && m.success !== false && m.capabilityId && m.decision !== 'miss';
+  const turn = hit ? planAssistantTurn(m) : null;
+  if (turn && turn.action === 'run' && turn.reason === 'alias-exact') {
+    appendMessage({ role: 'user', body: ask });
+    const rmsg = appendMessage({ role: 'assistant', body: turn.say || `Opening ${recordValue}…` });
+    let rep = null;
+    try { rep = await _orchReq('REPLAY_SG_CAPABILITY', { tabId, groundId: m.groundId, capabilityId: m.capabilityId, paramValues: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {} }); } catch { rep = null; }
+    if (rep && rep.success !== false && rep.ran !== false && rep.ok) {
+      _setMessageBody(rmsg, `Done — opened ${recordValue} on the site.`);
+      _orchReq('ORCH_RECORD_ALIAS', { groundId: m.groundId, capabilityId: m.capabilityId, phrase: ask });
+      _bankCapabilityOutcome(ask, m.capabilityId, true);
+      try { _orchLog(`RIDE_DRILL ▸ on-site intercept → alias-exact replay ${m.capabilityId} → ok`); } catch { /* */ }
+      _orchFinalize(rmsg);
+      return true;
+    }
+    _bankCapabilityOutcome(ask, m.capabilityId, false);   // the taught capability failed — don't corroborate it
+    try { _orchLog(`RIDE_DRILL ▸ on-site intercept → taught ${m.capabilityId} replay failed (${(rep && (rep.reason || rep.error)) || 'unresolvable'}) → ${drill ? 'drill fallback' : 'no drill'}`); } catch { /* */ }
+    if (drill) {
+      _setMessageBody(rmsg, `The saved shortcut didn’t match the page — looking it up directly…`);
+      await runDrill(rmsg);
+      // v2.74.1529 — the drill only showed the DATA; the taught walk (which OPENS the record on the page) is stale.
+      // OFFER to re-teach it here — otherwise the intercept always resolves via the drill and the user can NEVER
+      // reach the record offer (the v1527 drill fallback silently suppressed re-teach, the live block: "not yet").
+      const t = appendMessage({ role: 'assistant', body: 'That shortcut’s saved steps are stale — show me the right way and I’ll replace it.' });
+      _orchOfferRecord(t, { groundId: m.groundId, tabId, ask, label: '● Show me the right way' });
+      _orchFinalize(t);
+      return true;
+    }
+    _setMessageBody(rmsg, `“${(m.candidate && m.candidate.intent) || 'That shortcut'}” didn’t work here — its saved steps don’t match the current page (re-teach it and I’ll replace it).`);
+    _orchOfferRecord(rmsg, { groundId: m.groundId, tabId, ask, label: '● Show me the right way' });
+    _orchFinalize(rmsg);
+    return true;
+  }
+  if (hit && !drill) return false;   // a non-exact hit with no reliable drill → let interpret arbitrate (unchanged)
+  if (!drill) return false;
   appendMessage({ role: 'user', body: ask });
-  const msg = appendMessage({ role: 'assistant', body: `Looking up ${recordValue}…` });
-  const statusSlot = leg.paramSchema && leg.paramSchema.properties && leg.paramSchema.properties.status;
-  const statuses = (statusSlot && Array.isArray(statusSlot.enum)) ? statusSlot.enum.map(String) : [];
-  const params = { [leg.tool.drill.matchOn]: String(recordValue) };
-  if (statuses.length) params.status = statuses.includes('open') ? 'open' : statuses[0];   // most-likely bucket first; the drill walk covers the rest
-  try { _orchLog(`RIDE_DRILL ▸ on-site intercept → ${leg.tool.recipeId || leg.key} (${leg.tool.drill.matchOn}="${String(recordValue).slice(0, 40)}")`); } catch { /* */ }
-  await _ilRunBuiltin(msg, { leg, ask, tabId, groundId: gid, params });
+  await runDrill(appendMessage({ role: 'assistant', body: `Looking up ${recordValue}…` }));
   return true;
 }
 

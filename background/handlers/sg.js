@@ -2417,6 +2417,9 @@ export function createSgMessageHandlers(ctx) {
         if (recon.total) Logger.info('background', `DERIVE_OBSERVED — reconciled ${recon.reconciled}/${recon.total} demonstrated landmark(s) to grounded Locale features`);
         const phasesGrounded = recon.phases;
         const params = deriveObservedParams(op);   // OBS-4 — reusable param schema (typed fields + option choices)
+        // v2.74.1530 — diagnostic: did a result-row click content-address (reuse the search value as CLICK_BY_LABEL)?
+        // Surfaces in gl so the OBS-4b content-addressing (v1528/1530) is verifiable from a re-teach trace.
+        try { const _ca = params.filter((p) => p && p.clickReuse).length; if (_ca) Logger.info('background', `OBS_PARAM ▸ content-addressed ${_ca} result-row click(s) → CLICK_BY_LABEL by search value`); } catch { /* */ }
         // OBS-3b — DERIVE DURABLE LANDMARKS from the demonstrated elements (your step 3): each step carries an
         // inline landmark (role + accessibleName + hierarchicalContext + selector); mint a per-Ground Landmark
         // record per unique identity and convert every step to a `landmarkRef` so the capability is

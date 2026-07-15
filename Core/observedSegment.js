@@ -182,8 +182,17 @@ export function deriveObservedParams(op) {
     let k = key; let n = 2; while (seen.has(k)) k = `${key}-${n++}`;
     seen.add(k);
     const vocab = (Array.isArray(vocabulary) ? vocabulary.map(String).filter(Boolean) : []);
-    out.push({ key: k, label: label || base || k, kind, value: value != null ? String(value) : '', selector: selector || null, ...(vocab.length > 1 ? { vocabulary: Array.from(new Set(vocab)) } : {}), ...(containerHint ? { containerHint: String(containerHint) } : {}) });
+    const p = { key: k, label: label || base || k, kind, value: value != null ? String(value) : '', selector: selector || null, ...(vocab.length > 1 ? { vocabulary: Array.from(new Set(vocab)) } : {}), ...(containerHint ? { containerHint: String(containerHint) } : {}) };
+    out.push(p);
+    return p;
   };
+  // v2.74.1528 — the RESULT-ROW REUSE: a demonstrated CLICK that SELECTS a search result (its captured row text
+  // CONTAINS the value just typed into a search field) is otherwise captured POSITIONALLY (li:nth-of-type(72)) —
+  // meaningless on any other search (the live "Navigate to specific list item" failure). Instead of a fixed click
+  // (or a new param), the click REUSES the search text-param as a CLICK_BY_LABEL {value} scoped to the results
+  // list — so replay re-finds the row by CONTENT. `lastText` carries the pending search param across the
+  // search↔results fragment boundary; the first matching click CONSUMES it (one reuse per search).
+  let lastText = null;
   for (const node of nodes) {
     if (!node || node.type !== 'fragment') continue;
     let disclosure = null;
@@ -193,7 +202,7 @@ export function deriveObservedParams(op) {
       // ORCH-V — an option choice carries its dropdown's full vocabulary (the closed set the binder classifies
       // against + the datalist the re-run form offers); a typed field has no vocabulary.
       const vocab = s.target && s.target.options;
-      if (s.kind === 'type' && s.value != null && s.value !== '') add(name || 'field', name || 'Field', 'text', s.value, sel);
+      if (s.kind === 'type' && s.value != null && s.value !== '') lastText = add(name || 'field', name || 'Field', 'text', s.value, sel);
       else if (s.kind === 'select' && s.value != null && s.value !== '') add(disclosure || name || 'choice', disclosure || name || 'Choice', 'option', s.value, sel, vocab, s.target && s.target.optionContainer);
       // B — a CLICK that carries a captured peer GROUP (a category nav / tablist: ≥3 sibling links/tabs) is a
       // re-bindable OPTION, not a fixed click. The demonstrated label ("Music") is the default; the group is the
@@ -201,10 +210,26 @@ export function deriveObservedParams(op) {
       // CATEGORY param. The clicked item is included in `vocab` so the default replay validates.
       else if (s.kind === 'click' && Array.isArray(vocab) && vocab.length >= 3 && s.value != null && s.value !== '')
         add('category', 'Category', 'option', s.value, sel, vocab.includes(s.value) ? vocab : [s.value, ...vocab], s.target && s.target.optionContainer);
+      // v2.74.1528 — a result-row click after a search → reuse the search param as a by-label click in the list
+      else if (s.kind === 'click' && sel && lastText && lastText.value && _rowContainsValue(s, lastText.value)) {
+        lastText.clickReuse = { selector: sel, container: (s.target && s.target.resultContainer) || (s.target && s.target.optionContainer) || optionContainerSelector(sel) || sel };
+        lastText = null;
+      }
       else if (s.kind === 'click' && _DISCLOSURE_HINT.test(name || '')) disclosure = name;
     }
   }
   return out;
+}
+
+// v2.74.1528 — does a demonstrated result-row click's captured text CONTAIN the search value? Matches the ROW's
+// text (captured on a repeating-list click, `target.rowText`), else the clicked element's own text / a11y name.
+// Case-insensitive; the value must be ≥3 chars so a short value can't match spuriously. PURE.
+function _rowContainsValue(step, value) {
+  const v = String(value || '').trim().toLowerCase();
+  if (v.length < 3) return false;
+  const t = (step && step.target) || {};
+  const hay = [t.rowText, t.text, t.accessibleName].filter(Boolean).join(' ').toLowerCase();
+  return hay.includes(v);
 }
 
 /** OBS-4b — placeholder NAME for a param key: UPPER_SNAKE, [A-Z0-9_], bounded — matches the `{{NAME}}` regex
@@ -260,7 +285,9 @@ export function parameterizeObserved(phases, params) {
   // (native). The container is derived per-action, only for the CLICK (custom dropdown) case.
   const textBySel = new Map();
   const optBySel = new Map();
+  const reuseBySel = new Map();   // v2.74.1528 — a result-row click REUSES a text param as CLICK_BY_LABEL {value}
   for (const p of ps) {
+    if (p.clickReuse && p.clickReuse.selector) reuseBySel.set(p.clickReuse.selector, p);
     if (!p.selector) continue;
     if (p.kind === 'text') textBySel.set(p.selector, p);
     else if (p.kind === 'option') optBySel.set(p.selector, p);
@@ -269,6 +296,12 @@ export function parameterizeObserved(phases, params) {
     ...ph,
     actions: (Array.isArray(ph.actions) ? ph.actions : []).map((a) => {
       if (!a || !a.selector) return a;
+      // v2.74.1528 — the result-row CLICK → CLICK_BY_LABEL the search value in the results container (the row is
+      // re-found by CONTENT, never by the demonstrated position). Checked FIRST so it wins over a stray option map.
+      if (a.action === 'CLICK' && reuseBySel.has(a.selector)) {
+        const p = reuseBySel.get(a.selector); p.used = true;
+        return { action: 'CLICK_BY_LABEL', selector: p.clickReuse.container || a.selector, value: `{{${p.name}}}` };
+      }
       if (a.action === 'TYPE' && textBySel.has(a.selector)) {
         const p = textBySel.get(a.selector); p.used = true;
         return { ...a, value: `{{${p.name}}}` };

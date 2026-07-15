@@ -96,6 +96,11 @@ export function buildRawAction(parts) {
       // B — the SELECTOR of the container the peer group was found in (the nav/listbox), so CLICK_BY_LABEL
       // re-binds by searching the whole set, not the single demonstrated item's li (which holds only one label).
       optionContainer: target.optionContainer ? String(target.optionContainer).slice(0, 400) : undefined,
+      // v2.74.1528 — the results-LIST container + the ROW's full text for a search-RESULT click (a row in a
+      // repeating list). Lets the OBS param path content-address the row (CLICK_BY_LABEL {searchValue}) instead
+      // of its fragile position. Distinct from optionContainer (a 3–18-item option group; a result list is bigger).
+      resultContainer: target.resultContainer ? String(target.resultContainer).slice(0, 400) : undefined,
+      rowText: target.rowText ? String(target.rowText).slice(0, 200) : undefined,
     },
   };
   if (kind === 'type' || kind === 'select') action.value = scrubValue(p.value, target);

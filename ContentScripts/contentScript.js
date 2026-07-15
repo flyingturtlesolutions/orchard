@@ -5812,6 +5812,40 @@ function _obsFlushBuffer() {
     for (const p of (JSON.parse(raw) || [])) { try { chrome.runtime.sendMessage({ type: 'INTERACTION_RECORD', payload: p }); } catch { /* */ } }
   } catch { /* */ }
 }
+// v2.74.1528/1530 — the RESULTS-LIST container + ROW text for a search-result click. Climbs from the clicked
+// element to the nearest REPEATING ROW ancestor — a list-item tag/role (li / tr / [role=row|option]) with ≥3
+// same-tag siblings, OR (v1530) any element whose full CLASS signature repeats across ≥3 siblings (VendorSuite's
+// `div.pointer-select` rows). Bigger than the 3–18 option group _obsOptionVocabulary captures, which EXCLUDES
+// result lists. Returns the list container's selector + the row's text, so the OBS param path can content-address
+// the row (CLICK_BY_LABEL {searchValue}) instead of its fragile position. null → no capture, no change. The
+// class-signature (not bare tag) requirement keeps a generic <div> grid from over-capturing.
+function _obsResultListContainer(el) {
+  try {
+    let row = el;
+    for (let i = 0; i < 6 && row && row !== document.body && row !== document.documentElement; i++) {
+      const p = row.parentElement;
+      if (!p) break;
+      const tag = row.tagName;
+      let role = ''; try { role = String((row.getAttribute && row.getAttribute('role')) || '').toLowerCase(); } catch { /* */ }
+      const cls = (typeof row.className === 'string') ? row.className.trim() : '';
+      // A REPEATING row: a list-item TAG/ROLE (li/tr/row/option) with ≥3 same-tag siblings, OR — the VendorSuite
+      // case (v2.74.1530) — a DIV/other whose full CLASS signature repeats across ≥3 siblings (result rows are
+      // `div.flex.align-center.justify-between.pointer-select`, NOT <li>; v1528's li-only gate skipped them, so the
+      // result-row click stayed positional `:nth-of-type(72)`). Class-signature match keeps a generic <div> grid safe.
+      const isListItem = tag === 'LI' || tag === 'TR' || role === 'row' || role === 'option';
+      const repeating = isListItem
+        ? Array.from(p.children).filter((c) => c.tagName === tag).length >= 3
+        : (!!cls && Array.from(p.children).filter((c) => c.tagName === tag && typeof c.className === 'string' && c.className.trim() === cls).length >= 3);
+      if (repeating) {
+        let rowText = ''; try { rowText = (row.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 200); } catch { /* */ }
+        let container = null; try { container = computeUniqueSelector(p); } catch { /* */ }
+        if (container) return { container, rowText };
+      }
+      row = p;
+    }
+  } catch { /* */ }
+  return null;
+}
 function _obsSend(domKind, el, rawValue) {
   if (!_obsRec.active || !el) return;
   const target = _obsExtract(el);
@@ -5822,6 +5856,11 @@ function _obsSend(domKind, el, rawValue) {
   else if (domKind === 'click') value = sensitive ? null : (target.accessibleName || null);   // used only if it classifies as a select
   else if (domKind === 'keypress') value = rawValue || 'Enter';                                 // the key (Enter)
   if (!sensitive) { const vocab = _obsOptionVocabulary(domKind, el, target); if (vocab && vocab.length > 1) target.options = vocab; }   // ORCH-V — dropdown vocabulary (+B nav container)
+  // v2.74.1528 — a search-RESULT row click (a row in a repeating list, NOT a 3–18 option group) → capture the LIST
+  // container + ROW text so the OBS param path content-addresses the row instead of its position (li:nth-of-type(72)).
+  if (!sensitive && domKind === 'click' && !(target.options && target.options.length > 1)) {
+    try { const rc = _obsResultListContainer(el); if (rc && rc.container) { target.resultContainer = rc.container; if (rc.rowText) target.rowText = rc.rowText; } } catch { /* */ }
+  }
   const payload = { domKind, target, value, sensitive, ts: Date.now(), url: location.href, uid: `${_obsFrameSalt}-${_obsClientSeq++}-${Date.now()}` };
   if (domKind === 'click' || domKind === 'keypress') _obsBufferAction(payload);   // navigating-prone → survive a page unload
   try { chrome.runtime.sendMessage({ type: 'INTERACTION_RECORD', payload }); } catch { /* */ }
