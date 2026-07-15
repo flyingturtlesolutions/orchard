@@ -57,7 +57,7 @@ describe('appCatalog — resolution', () => {
 
   it('builtinApp resolves a type OR a preset; null on unknown/empty', () => {
     assert.equal(builtinApp('inbox').name, 'Inbox');               // a type
-    assert.equal(builtinApp('support').name, 'Support agent');     // a preset
+    assert.equal(builtinApp('support').name, 'Support');     // a preset (v1509 — descriptor + 'agent' dropped)
     assert.equal(builtinApp('nope'), null);
     assert.equal(builtinApp(''), null);
     assert.equal(builtinApp(null), null);
@@ -121,14 +121,27 @@ describe('appCatalog — DK-1 (DESIGN_desks.md §4): a new site is an Inbox PRES
 describe('appCatalog — DK-6: preconfigured desks (the flat gallery — sites built in, no type level)', () => {
   it('the Warranty desk (id warranty-manager, identity kept) ships its 4 sites in order', () => {
     const w = builtinApp('warranty-manager');
-    assert.equal(w.name, 'Warranty desk');
+    assert.equal(w.name, 'Warranty');   // v1508 — the kind badge carries 'desk'; the name drops the descriptor
     assert.deepEqual(w.sites.map((s) => s.host), ['vendorsuite.drhorton.com', 'zendesk.com', 'admin.shopify.com', 'app.hubspot.com']);
     assert.deepEqual(w.sites.map((s) => s.label), ['VendorSuite', 'Zendesk', 'Shopify', 'HubSpot']);
     assert.ok(/HubSpot/.test(w.seed) && /ONE case/.test(w.seed), 'the seed spans the homeowner’s whole record + correlation');
   });
-  it('preconfiguredDesks = presets WITH sites (just the Warranty desk today); legacy presets carry sites: [] and stay resolvable', () => {
-    assert.deepEqual(preconfiguredDesks().map((d) => d.id), ['warranty-manager']);
-    assert.deepEqual(builtinApp('support').sites, []);
-    assert.ok(builtinApp('call-manager'), 'a gallery-hidden preset still resolves by id (existing instances keep working)');
+  it('preconfiguredDesks = presets WITH sites (Support + Warranty + Call, v2.74.1509); site-less presets stay resolvable', () => {
+    assert.deepEqual(preconfiguredDesks().map((d) => d.id).sort(), ['call-manager', 'support', 'warranty-manager']);
+    assert.deepEqual(builtinApp('ticket-manager').sites, []);   // the clock harness stays gallery-hidden
+    assert.ok(builtinApp('ticket-manager'), 'a gallery-hidden preset still resolves by id (existing instances keep working)');
+  });
+  it('the Support desk (v2.74.1509, id support kept) ships the support stack; the seed spans the customer record + queue hygiene', () => {
+    const s = builtinApp('support');
+    assert.equal(s.name, 'Support');
+    assert.deepEqual(s.sites.map((x) => x.host), ['zendesk.com', 'app.hubspot.com', 'app.slack.com', 'admin.shopify.com', 'app.mezmo.com']);
+    assert.ok(/Mezmo/.test(s.seed) && /ONE case/.test(s.seed) && /duplicate tickets/.test(s.seed), 'mirrors Support-agent + Queue-manager functions');
+    assert.ok(/setup/.test(s.seed), 'the CS tool (no public host) joins per-instance via setup');
+  });
+  it('the Call desk (v2.74.1509, id call-manager kept) ships Aircall + Zendesk + Google Calendar; presence + calendar-aware call-backs', () => {
+    const c = builtinApp('call-manager');
+    assert.equal(c.name, 'Call');
+    assert.deepEqual(c.sites.map((x) => x.host), ['workspace.aircall.io', 'zendesk.com', 'calendar.google.com']);
+    assert.ok(/calendar/i.test(c.seed) && /availability/.test(c.seed) && /can’t be unsent/.test(c.seed), 'calendar call-backs + presence + the SMS confirm survive');
   });
 });

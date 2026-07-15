@@ -117,3 +117,14 @@ WorkItem { source, id, subject, state, owner, url, corrKeys[] }
 - **Preset vs instance for a multi-site desk.** Is "CS Desk (Zendesk + Aircall + VendorSuite + Shopify)" one shipped PRESET, or an INSTANCE a user assembles from connections? Lean: ship a broad preset; let instances narrow.
 - **User-declarable object models / identity resolution.** Today `objectModel`, `resolve`/`drill`/`identityGql` are curator-authored. Making them user-settable in the add-leg/forge flow is the generalization that lets *any* site a user connects join a Desk without a catalog edit — a separate, larger track (`DESIGN_connectors.md` §17 harvest is the read half).
 - **Presence federation.** One Aircall presence is clear; if a desk connects two comms tools, is there one "available" or per-tool? Per-tool, surfaced together.
+
+## §10 — The FRONT DESK (Overview adopted, v2.74.1507)
+
+The reserved general conversation (internally `OVERVIEW_ID`, unchanged) is displayed as the **Front desk** — the
+desk that runs the office: **home** (general asks, choosing where to work), **fleet status** (the Connections card,
+§16b of DESIGN_connectors.md), and **the plumbing operator** (sign-in recovery; next: routine ledger, pending gates,
+sweep health). Naming rationale: a real front desk greets, knows every desk's status, and calls maintenance — all
+three roles in one office noun, completing the Desk/Case/Routine vocabulary ("Overview" said watching, not acting,
+and was the odd abstraction out). Boundaries: NOT in the desk gallery (reserved, always exists), takes NO cases
+(plumbing produces notices, not cases). Internal tokens (`OVERVIEW_ID`, `isOverview`, `role:'overview'`, the OV-*
+workbench markers, `DESIGN_overview.md`) stay — display strings only, same pattern as the Desk and Case adopts.

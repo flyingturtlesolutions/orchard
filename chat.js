@@ -64,6 +64,7 @@ import { originFromText } from './Core/setupSpec.js';   // AS-4 / review P1-6 �
 import { recordGoalItem, loadGoalItems, clearGoalMemory, promoteGoalItem } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view
 import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
 import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab, workflowId } from './Core/workflowMemory.js';   // WF-1 lexical recall + WF-3 LLM-fallback prep/validate/gate; workflowId — the DK-8j already-banked check (no re-offer)
+import { renderConnectionsCard, attentionOrigins } from './Core/connectionPresence.js';   // CP-3 (v2.74.1506) — the Overview Connections card + a desk's signed-out dependency check
 import { loadWorkflows, saveWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete)
 import { seedInstanceFromPreset, distillCandidates, presetRuleFromAbstract, presetMemoryKey } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
 import { standingRuleFromText, looksLikeStandingRule } from './Core/goalMemory.js';   // AL-3c — `remember:` authors a standing-rule delta; §12.2 — looksLikeStandingRule offers prefix-less capture
@@ -114,7 +115,8 @@ let _ensureConversationPromise = null;
 async function _ensureOverviewConversation() {
   let conv = null;
   try { conv = await ConversationStore.load(OVERVIEW_ID); } catch { /* */ }
-  if (!conv) conv = await ConversationStore.create({ id: OVERVIEW_ID, title: 'Overview' });
+  if (!conv) conv = await ConversationStore.create({ id: OVERVIEW_ID, title: 'Front desk' });   // Front-desk adopt (v2.74.1507) — display noun; OVERVIEW_ID stays the internal join key
+  else if (conv.title === 'Overview') { try { await ConversationStore.patchMeta(OVERVIEW_ID, { title: 'Front desk' }); conv = { ...conv, title: 'Front desk' }; } catch { /* heal is best-effort */ } }   // one-time heal of existing installs
   return conv;
 }
 
@@ -1346,7 +1348,8 @@ function _renderAppGallery() {
   const custom = document.createElement('button');
   custom.className = 'suggestion-card suggestion-card-preset';
   custom.innerHTML = '<div class="suggestion-card-name">+ Custom desk</div><div class="suggestion-card-summary">Pick the sites and tell it what to do — set its role with seed:.</div>';
-  custom.addEventListener('click', () => { void _createAppConversation({ ...builtinApp('inbox'), name: 'Custom desk', description: null }, { setup: true }); });
+  // v1508 — the INSTANCE name drops the descriptor (the rail badges the kind); the card label above keeps the prose.
+  custom.addEventListener('click', () => { void _createAppConversation({ ...builtinApp('inbox'), name: 'Custom', description: null }, { setup: true }); });
   container.appendChild(custom);
   void _appendUserApps(container);   // CV-5 — async-append "Your desks" (saved + configured) below
 }
@@ -1403,8 +1406,10 @@ async function _appendUserApps(container) {
   hdr.textContent = 'Your desks';
   container.appendChild(hdr);
   for (const def of defs) {
-    const card = document.createElement('button');
+    // v2.74.1509 — a DIV (not a button) so the DELETE control can nest (button-in-button is invalid HTML).
+    const card = document.createElement('div');
     card.className = 'suggestion-card';
+    card.setAttribute('role', 'button'); card.tabIndex = 0;
     // DK-6 — a CONFIGURED desk (AP-4) says so and opens ready (no setup); a saved seed shows its description.
     // The archetype chip is gone with the type level — only the read-only tightening still badges.
     const site = (isConfiguredDef(def) && def.setup && def.setup.target && def.setup.target.label) ? def.setup.target.label : '';
@@ -1415,7 +1420,22 @@ async function _appendUserApps(container) {
       <div class="suggestion-card-name">${escHtml(def.name)}</div>
       ${summary ? `<div class="suggestion-card-summary">${escHtml(summary)}</div>` : ''}
       ${def.defaultConfig && def.defaultConfig.writePolicy === 'never' ? '<div class="suggestion-card-meta"><span class="suggestion-card-kind">read-only</span></div>' : ''}`;
+    // v2.74.1509 — delete a saved custom desk from the gallery (the `forget desk:` action, click + inline confirm).
+    // Removes the DEF only — existing instances stay in the rail (delete those there, cascade as usual).
+    const del = document.createElement('button');
+    del.className = 'suggestion-card-delete'; del.type = 'button'; del.title = 'Delete this desk'; del.textContent = '✕';
+    del.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (del.dataset.armed !== '1') { del.dataset.armed = '1'; del.textContent = 'Delete?'; setTimeout(() => { del.dataset.armed = ''; del.textContent = '✕'; }, 2500); return; }
+      await _loadUserCatalog();
+      _userCatalog = removeUserDef(_userCatalog, def.id);
+      await _saveUserCatalog();
+      toast(`Deleted “${def.name}” from Your desks.`);
+      _renderAppGallery();   // re-render; the section disappears when empty
+    });
+    card.appendChild(del);
     card.addEventListener('click', () => { void _createAppConversation(def); });
+    card.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void _createAppConversation(def); } });
     container.appendChild(card);
   }
 }
@@ -1871,7 +1891,8 @@ async function _runPersistentFanout(app, children, directive, msg, { suffix = ''
 const _SETUP_STORE_KEY = 'setup:inProgress';
 let _setupStash = null;
 function _persistSetupState() {
-  const v = _setupState ? { convId: _setupState.convId, spec: _setupState.spec } : null;
+  // v2.74.1510 — phase/freshCustom/cfg ride the stash too (the custom flow's seed/name steps survive a reload).
+  const v = _setupState ? { convId: _setupState.convId, spec: _setupState.spec, phase: _setupState.phase || null, freshCustom: !!_setupState.freshCustom, cfg: _setupState.cfg || null } : null;
   _setupStash = v;
   try { if (v) chrome.storage.session.set({ [_SETUP_STORE_KEY]: v }); else chrome.storage.session.remove(_SETUP_STORE_KEY); } catch { /* */ }
 }
@@ -1880,7 +1901,7 @@ async function _loadSetupStash() {
 }
 function _adoptSetupStash() {
   if (_setupState || !_setupStash) return;
-  if (_setupStash.convId === _currentConversationId) { _setupState = { convId: _setupStash.convId, spec: _setupStash.spec }; }
+  if (_setupStash.convId === _currentConversationId) { _setupState = { convId: _setupStash.convId, spec: _setupStash.spec, phase: _setupStash.phase || null, freshCustom: !!_setupStash.freshCustom, cfg: _setupStash.cfg || null }; }
 }
 
 // v2.74.1340 (review J-setup) — command-shaped input mid-setup FALLS THROUGH to the normal cascade instead of being
@@ -1943,7 +1964,10 @@ async function _startSetupFlow({ auto = false } = {}) {
   // taught capabilities for), NOT the open tabs. The pure controller's candidate list stays empty — we render the
   // catalog as a MULTI-SELECT directly and drive the spec to done at Confirm.
   const { spec } = startSetup(def, {});
-  _setupState = { convId: _currentConversationId, spec };
+  // v2.74.1510 — a FRESH custom desk (still default-titled, never set up) gets the guided finish: sites → SEED →
+  // NAME. A `setup` re-run on a configured/renamed desk stays the plain adjust path (no re-asking seed/name).
+  const _freshCustom = !(def && Array.isArray(def.sites) && def.sites.length) && (conv.title === 'Custom') && !(conv.config && conv.config.setupComplete);
+  _setupState = { convId: _currentConversationId, spec, freshCustom: _freshCustom };
   _setupPick = new Map();
   _setupCatalog = await _capableSitesCatalog();
   // DK-6 (v2.74.1486) — a PRECONFIGURED desk ships its sites: resolve them against the catalog (seedDeskCatalog —
@@ -2138,6 +2162,17 @@ async function _bankSetup(step) {
   try { await ConversationStore.patchMeta(state.convId, { config: merged, pinned: true }); }
   catch (e) { try { console.warn('[chat] setup bank failed:', e?.message); } catch { /* */ } }
   if (state.convId === _currentConversationId) _currentConversationConfig = merged;
+  // v2.74.1510 — the CUSTOM flow's guided finish: sites are banked; SEED and NAME follow as one question each.
+  // The AP-4 def mint, the ready message, and seed-directive arming DEFER to _finishCustomSetup — the configured
+  // def's id derives from name+site, so minting at "Custom" would duplicate under the real name.
+  if (state.freshCustom) {
+    _setupState = { convId: state.convId, phase: 'seed', freshCustom: true, cfg: { connections: cfg.connections, target: cfg.target, shape: cfg.shape } };
+    _persistSetupState();
+    const _where = (cfg.connections && cfg.connections.length) ? cfg.connections.map((c) => `\`${c.label}\``).join(', ') : 'your site';
+    _setMessageBody(msg, `**Connected to ${_where}.** Next — **what should this desk do?** Describe its role in a sentence or two (this becomes its seed), or say \`skip\` for a general operator.`, { markdown: true });
+    _orchFinalize(msg);
+    return;
+  }
   const presetId = (conv && conv.presetId) || (conv && conv.appId) || _currentConversationAppId;
   const typeDef = presetId ? builtinApp(presetId) : null;   // the app's preset (object model + curated starters) — also used for the "e.g." hint below
   // AP-4 (v2.74.1211) — mint a durable, re-creatable CONFIGURED app from this just-set-up instance: it carries the
@@ -2183,13 +2218,68 @@ async function _bankSetup(step) {
   _refreshRailIfOpen().catch(() => {});
 }
 
+// v2.74.1510 — the CUSTOM desk's guided finish: sites → SEED → NAME (one question each; `skip`/`done`/`none`
+// skips a step). The modal intercept routes typed answers here while `_setupState.phase` is set; `cancel` still
+// aborts the whole flow. Reload-safe (phase/cfg ride the session stash).
+async function _setupPhaseAnswer(text) {
+  const state = _setupState;
+  if (!state || !state.phase) return;
+  const t = String(text || '').trim();
+  const skip = !t || /^(skip|done|none|no)$/i.test(t);
+  if (state.phase === 'seed') {
+    if (!skip) {
+      const seed = t.slice(0, 4000);
+      try { await ConversationStore.patchMeta(state.convId, { seed }); } catch { /* */ }
+      if (state.convId === _currentConversationId) _currentConversationSeed = seed;
+    }
+    state.phase = 'name';
+    _persistSetupState();
+    const m = appendMessage({ role: 'assistant', body: '' });
+    _setMessageBody(m, `${skip ? 'Keeping the general operator role.' : 'Seed saved.'} Last step — **name this desk** (e.g. “Ops”), or say \`skip\` to keep “Custom”.`, { markdown: true });
+    _orchFinalize(m);
+    return;
+  }
+  if (state.phase === 'name') {
+    const name = skip ? '' : t.replace(/\s+desk$/i, '').slice(0, 40);   // v1508 — the rail badges the kind; a typed "… desk" drops the descriptor
+    if (name) { try { await ConversationStore.patchMeta(state.convId, { title: name }); } catch { /* */ } }
+    _setupState = null;
+    _persistSetupState();
+    await _finishCustomSetup(state, name);
+  }
+}
+// The deferred tail of the custom flow: mint the AP-4 configured def under the FINAL name+seed, show the ready
+// message, arm any seed directives (cadence/routine), refresh the rail.
+async function _finishCustomSetup(state, name) {
+  const msg = appendMessage({ role: 'assistant', body: '' });
+  let conv = null;
+  try { conv = await ConversationStore.load(state.convId); } catch { /* */ }
+  const cfg = state.cfg || {};
+  const presetId = (conv && conv.presetId) || (conv && conv.appId) || 'inbox';
+  const typeDef = presetId ? builtinApp(presetId) : null;
+  try {
+    const def = configuredAppDefinition({
+      name: (conv && conv.title) || name || 'Custom',
+      seed: (conv && conv.seed) || _currentConversationSeed,
+      type: typeDef && typeDef.type, objectModel: typeDef && typeDef.objectModel, icon: (conv && conv.icon) || (typeDef && typeDef.icon),
+      config: (conv && conv.config) || null, setup: { target: cfg.target, connections: cfg.connections, shape: cfg.shape }, presetId,
+      instanceId: (conv && conv.instanceId) || _currentConversationInstanceId,
+    });
+    if (def) { await _loadUserCatalog(); _userCatalog = addUserDef(_userCatalog, def); await _saveUserCatalog(); }
+  } catch (e) { try { console.warn('[chat] configured-app mint failed:', e?.message); } catch { /* */ } }
+  const where = (cfg.connections && cfg.connections.length) ? cfg.connections.map((c) => `\`${c.label}\``).join(', ') : 'your sites';
+  _setMessageBody(msg, `**“${(conv && conv.title) || 'Custom'}” is ready** — connected to ${where}. Tell it what to do — it learns each task the first time, then recalls it when you ask again.`, { markdown: true });
+  _orchFinalize(msg);
+  try { await _applySeedDirectives({ quiet: false, convId: state.convId, instanceId: (conv && conv.instanceId) || null, seed: (conv && conv.seed) || _currentConversationSeed || '' }); } catch { /* */ }
+  _refreshRailIfOpen().catch(() => {});
+}
+
 // AL-3b (v2.74.1193) — render what the current app has LEARNED (its goal memory): beliefs/deltas with tier,
 // confidence, evidence (corroboration ×N), and the ref (the capability an association points at), grouped by kind.
 // Read-only; renders one markdown message. Off-app → a gentle note (Overview has no goal memory).
 async function _renderAppMemory() {
   const msg = appendMessage({ role: 'assistant', body: '' });
   const appId = _memoryId();   // AP-0 — the audit reads THIS instance's memory (per-instance, not the shared type)
-  if (!appId) { _setMessageBody(msg, 'Open a desk — goal memory is per-desk. (Overview has none.)'); _orchFinalize(msg); return; }
+  if (!appId) { _setMessageBody(msg, 'Open a desk — goal memory is per-desk. (The Front desk has none.)'); _orchFinalize(msg); return; }
   let items = [];
   try { items = await loadGoalItems(appId); } catch { /* */ }
   if (!items.length) {
@@ -2420,7 +2510,7 @@ async function _orchRun(msg, { groundId, capabilityId, intent, paramValues, tabI
   // v2.74.1338 (review B) — `policyConfig` = the ORIGINATING conversation's config: a chain/plan started in a
   // read-only app must stay gated by THAT app's policy even after the user switches conversations mid-run.
   if (!actAllowed(policyConfig ?? _currentConversationConfig)) {
-    _setMessageBody(msg, 'This desk is read-only — it watches and reports, but won’t run actions that change things. Switch to Overview (or a non-read-only desk) to act.');
+    _setMessageBody(msg, 'This desk is read-only — it watches and reports, but won’t run actions that change things. Switch to the Front desk (or a non-read-only desk) to act.');
     try { _orchLog(`WRITE_GATE ▸ blocked "${intent || capabilityId || 'act'}" — track writePolicy:never`); } catch { /* */ }
     _orchFinalize(msg);
     return;
@@ -4454,7 +4544,19 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
           st.ranSteps.push({ capabilityId: cr.leg.key, bindings: {}, kind: 'connector', clause: clause.text, intent: cr.leg.name || clause.text });
           continue;
         }
-        if (cr && !cr.ok) { _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t ${cr.leg.does || cr.leg.name || 'run that'}${cr.error ? ` — ${cr.error}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return; }
+        if (cr && !cr.ok) {
+          // CP-4 (v2.74.1506) — a SIGNED-OUT failure gets its recovery instead of a bare status code (the live
+          // http-403 round): name the session, offer Sign in (focus the tab — the human signs in) + Try again.
+          const _authErr = /^(http-40[13]|session-expired|not-logged-in)$/.test(String(cr.error || ''));
+          const _authOrigin = _authErr ? String((cr.leg.tool && (cr.leg.tool.sessionHost || cr.leg.tool.origin)) || '') : '';
+          if (_authErr && _authOrigin) {
+            _setMessageBody(msg, `Ran ${i} of ${total}. ${_authOrigin} looks signed out (${cr.error}) — sign in, then try again.`);
+            _orchFinalize(msg);
+            _connSignInBar(msg, [_authOrigin], { retryAsk: ask });
+            return;
+          }
+          _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t ${cr.leg.does || cr.leg.name || 'run that'}${cr.error ? ` — ${cr.error}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return;
+        }
       }
       const gid = (m && m.groundId) || st.chainGroundId;
       if (!gid) { _setMessageBody(msg, `Ran ${i} of ${total}. I don’t know how to “${clause.text}” here, and I don’t have this site mapped to learn it.`); _orchFinalize(msg); return; }
@@ -6020,7 +6122,7 @@ async function _rideExecOnce(leg, p, { tabId = null, groundId = null } = {}) {
     if (leg.tool.replay === 'headers') {
       const _gqlRead = leg.tool.write !== true && leg.tool.gql === true && leg.tool.body && typeof leg.tool.body === 'object' && isReadOnlyGql(String(leg.tool.body.query || ''));
       const _rb = _gqlRead ? _filledConnectorWrite(leg, p) : null;
-      r = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params: p, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null, requestHeaders: leg.tool.requestHeaders || null, identityProbe: leg.tool.identityProbe || null, ...(_rb ? { gql: true, body: _rb.body, bodyTemplate: leg.tool.body || null, contentType: _rb.contentType || 'application/json' } : {}) });
+      r = await _orchReq('SESSION_REPLAY', { sessionHost: leg.tool.sessionHost, origin: leg.tool.origin, endpoint: leg.tool.endpoint, method: leg.tool.method || 'GET', params: p, groundId: leg.tool.groundId || groundId || null, recipeId: leg.tool.recipeId || null, requestHeaders: leg.tool.requestHeaders || null, identityProbe: leg.tool.identityProbe || null, probeAccept: leg.tool.probeAccept || null, ...(_rb ? { gql: true, body: _rb.body, bodyTemplate: leg.tool.body || null, contentType: _rb.contentType || 'application/json' } : {}) });   // CP-1 — probeAccept rides so the registry learns the origin's probe kind from the FIRST ride
     } else {
       const plan = planExec(leg, p, { tabId, groundId });
       if (plan && plan.ok && plan.channel) r = await _orchReq(plan.channel, plan.payload);
@@ -7038,6 +7140,9 @@ async function sendChatMessage() {
       _orchFinalize(appendMessage({ role: 'assistant', body: 'Setup paused — type “setup” to pick up where you left off.' }));
       return;
     }
+    // v2.74.1510 — the custom flow's SEED / NAME steps own the input (before the done/confirm bank below —
+    // a typed "done" here means "skip this step", never "bank the sites again").
+    if (_setupState.phase === 'seed' || _setupState.phase === 'name') { void _setupPhaseAnswer(text); return; }
     if (/^set\s*up:?\s*$/i.test(text)) { void _reshowSetupCatalog(); return; }   // AS-5 — re-show the capability catalog, don't bind "setup" as a site
     // AS-5 (v2.74.1406) — catalog multi-select mode: `done`/`confirm` BANKS the current picks; a typed address
     // APPENDS to the catalog + auto-picks it (bind directly, runtime verifies login); anything unshapeable re-prompts.
@@ -9009,6 +9114,12 @@ async function _rehydrateConversation(conv) {
   _currentConversationAppId = (conv.kind !== 'dev' && conv.appId) ? String(conv.appId) : null;   // AL-3b — restore the app type
   _currentConversationInstanceId = (conv.kind !== 'dev' && conv.instanceId) ? String(conv.instanceId) : null;   // AP-0 — restore the per-instance memory key
   _currentConversationPresetId = (conv.kind !== 'dev' && conv.presetId) ? String(conv.presetId) : null;        // §10.2 — restore the preset type (distill-up)
+  // v2.74.1508 — one-time HEAL of the dropped "desk" descriptor (the rail badges the kind, so "Warranty desk"
+  // read "desk Warranty desk"): an existing instance still carrying the old suffixed default title renames once.
+  if (conv.title === 'Warranty desk' || conv.title === 'Custom desk') {
+    const _healed = conv.title.replace(/\s+desk$/i, '');
+    try { ConversationStore.patchMeta(conv.id, { title: _healed }).then(() => _refreshRailIfOpen()).catch(() => {}); conv.title = _healed; } catch { /* best-effort */ }
+  }
   // DBR-P3-1 (v2.74.1053) — a split-seeded dev conversation: pre-fill the composer with its seed the first time
   // it's opened (SEED-AND-HOLD — not sent; the human reviews + presses enter), then clear the seed so reopening
   // doesn't re-fill it. The composer (#chat-input) is visible even in the empty-dev state below.
@@ -9079,5 +9190,81 @@ async function _rehydrateConversation(conv) {
   // DK-8 (v2.74.1491) — opening a desk fires its DUE routine (the v1 fire model: the alarm marked due in the SW;
   // the ask runs here where the full pipeline lives). Non-blocking; a non-desk conversation no-ops inside.
   void _maybeFireDueRoutine();
+  // CP-3 (v2.74.1506) — the Overview's standing Connections card + a desk's signed-out dependency warning.
+  void _maybeRenderConnCard();
+  void _maybeWarnDeskConnections();
 }
+
+// ── CP-3/4 (v2.74.1506) — connection presence in the panel ─────────────────────────────────────────────────────────
+// Overview = the FLEET view (the standing Connections card: status per origin, verified-age, Sign in / Check now);
+// a desk = its OWN dependencies (a transient warning line when one of its sites is signed out). Sign in NEVER
+// touches credentials — CONN_FOCUS focuses/opens the origin's tab and the HUMAN signs in (§16); the next
+// probe/ride flips the registry fresh and the card follows.
+function _connSignInBar(msg, origins, { retryAsk = null } = {}) {
+  const list = (Array.isArray(origins) ? origins : []).filter(Boolean).slice(0, 4);
+  if (!list.length && !retryAsk) return;
+  const bar = _orchActionBar(msg);
+  for (const o of list) {
+    bar.appendChild(_mkBtn(`Sign in ${o}`, async () => {
+      try { await _orchReq('CONN_FOCUS', { origin: o }); } catch { /* */ }
+    }));
+  }
+  if (retryAsk) {
+    bar.appendChild(_mkBtn('↻ Try again', () => {
+      bar.remove();
+      const input = $('chat-input');
+      if (input) { input.value = retryAsk; sendChatMessage(); }   // the routine-starter path — every gate identical to typing it
+    }));
+  }
+}
+async function _maybeRenderConnCard() {
+  if (_currentConversationId !== OVERVIEW_ID) return;
+  let r = null;
+  try { r = await _orchReq('CONN_LIST', {}); } catch { return; }
+  if (!r || r.success === false) return;
+  const body = renderConnectionsCard(r.registry || {}, { now: r.now || Date.now() });
+  if (!body) return;   // nothing connected yet → no card
+  let msg = document.querySelector('#messages .message[data-message-id="conn_status"]');
+  if (msg) _setMessageBody(msg, body);
+  else { msg = appendMessage({ role: 'assistant', body, id: 'msg-conn_status' }); }
+  _orchFinalize(msg);   // persists the card (stable id → upsert; reopening shows the last-known state instantly)
+  try { msg.querySelectorAll('.orch-actions').forEach((b) => b.remove()); } catch { /* */ }   // re-render replaces the bar (no stacking)
+  const attn = attentionOrigins(r.registry || {}, Object.keys(r.registry || {}));
+  const bar = _orchActionBar(msg);
+  for (const a of attn.slice(0, 4)) bar.appendChild(_mkBtn(`Sign in ${a.origin}`, async () => { try { await _orchReq('CONN_FOCUS', { origin: a.origin }); } catch { /* */ } }));
+  bar.appendChild(_mkBtn('Check now', async () => {
+    _setMessageBody(msg, `${body}\n\nChecking…`);
+    try { await _orchReq('CONN_CHECK', {}); } catch { /* */ }
+    void _maybeRenderConnCard();   // re-render from the refreshed registry
+  }));
+}
+async function _maybeWarnDeskConnections() {
+  if (!_currentConversationId || _currentConversationId === OVERVIEW_ID) return;
+  const conns = _boundConnections();
+  const origins = (Array.isArray(conns) ? conns : []).map((c) => c && (c.origin || c.label)).filter(Boolean);
+  if (!origins.length) return;
+  let r = null;
+  try { r = await _orchReq('CONN_LIST', {}); } catch { return; }
+  if (!r || r.success === false) return;
+  const attn = attentionOrigins(r.registry || {}, origins);
+  if (!attn.length) return;
+  // TRANSIENT (never finalized → never persisted): a status nudge, not transcript history.
+  const m = appendMessage({ role: 'assistant', body: `⚠ ${attn.map((a) => `${a.origin} looks ${a.status === 'wrong-account' ? 'signed in as the wrong account' : 'signed out'}${a.cause ? ` (${a.cause})` : ''}`).join('; ')} — this desk's rides will fail until you sign in.` });
+  _connSignInBar(m, attn.map((a) => a.origin));
+}
+// CP-4 — live transitions: the SW broadcasts CONN_STATUS_CHANGED on a REAL change (never heartbeat ticks). The open
+// panel refreshes the Overview card; if the Overview is the current conversation, the transition gets its own line.
+try {
+  chrome.runtime.onMessage.addListener((m) => {
+    if (!m || m.type !== 'CONN_STATUS_CHANGED') return;
+    if (_currentConversationId === OVERVIEW_ID) {
+      const line = (m.to === 'fresh')
+        ? `● ${m.origin} is signed in again.`
+        : `✖ ${m.origin} ${m.to === 'wrong-account' ? 'is signed in as the wrong account' : 'signed out'}${m.cause ? ` (${m.cause})` : ''}.`;
+      const note = appendMessage({ role: 'assistant', body: line });
+      if (m.to !== 'fresh') _connSignInBar(note, [m.origin]);
+      void _maybeRenderConnCard();
+    }
+  });
+} catch { /* */ }
 

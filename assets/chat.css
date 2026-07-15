@@ -2719,3 +2719,25 @@ textarea {
   .message.thinking .message-avatar.il-busy::before,
   .app-brand-mark.il-busy { animation: none; opacity: 0.7; }
 }
+
+/* ── v2.74.1509 — delete a saved custom desk from the gallery ("Your desks") ──────────────────────────────────── */
+.suggestion-card { position: relative; }
+div.suggestion-card { cursor: pointer; }
+.suggestion-card-delete {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  background: none;
+  border: none;
+  color: var(--c-text-muted);
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: var(--r-full, 999px);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.suggestion-card:hover .suggestion-card-delete,
+.suggestion-card-delete:focus-visible { opacity: 1; }
+.suggestion-card-delete:hover { color: #d33; background: var(--c-bg-subtle); }

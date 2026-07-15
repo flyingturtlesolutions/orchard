@@ -257,7 +257,9 @@ export function planSubTasks(app, items) {
   return specs;
 }
 
-/** The reserved Overview conversation-extension fields. PURE. Fixed id, agent kind, system-default seed (null). */
+/** The reserved FRONT DESK (internally: Overview) conversation-extension fields. PURE. Fixed id, agent kind,
+ *  system-default seed (null). Front-desk adopt (v2.74.1507): the display noun is "Front desk" — the desk that
+ *  runs the office (home + fleet status + the plumbing); OVERVIEW_ID and the is/overview tokens stay internal. */
 export function overviewShape() {
-  return { id: OVERVIEW_ID, kind: 'agent', title: 'Overview', seed: null };
+  return { id: OVERVIEW_ID, kind: 'agent', title: 'Front desk', seed: null };
 }

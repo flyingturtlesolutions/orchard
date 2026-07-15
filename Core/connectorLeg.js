@@ -134,6 +134,7 @@ export function recipeToLeg(recipe, { account = 'me', trusted = false } = {}) {
       contentType: _str(r.contentType) || null,
       verifyIdentity: r.verifyIdentity === true,
       identityProbe: _str(r.identityProbe) || null,
+      probeAccept: r.probeAccept === 'json' ? 'json' : null,   // CP-1 — the json-liveness probe kind (Invariant #3 hop 3)
       identityGql: (r.identityGql && typeof r.identityGql === 'object') ? r.identityGql : null,   // v1479 — {me} via a GraphQL identity read (the working transport → the AGENT id)
       capClass: _str(r.capClass) || null,   // DK-2 (v1482) — 'presence' = operator state (availability/roster/set), not queue-work; the queue sweep excludes it (§5). Invariant #3 hop 3.
       // CX-7 (v2.74.1386) — the Shopify-class transport markers: gql (POST body is a GraphQL document; a READ-ONLY

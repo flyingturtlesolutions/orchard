@@ -1,0 +1,122 @@
+/**
+ * @file background/handlers/connections.js
+ * @description CP-1/2 (v2.74.1506) — the CONNECTIONS domain: the auth-presence registry (one store, many signals,
+ * single writer) + the open-tab heartbeat. The MATH is pure (Core/connectionPresence.js); this is the I/O — the
+ * chained read-modify-write (CR-ST1 pattern), the transition broadcast + `CONN ▸` trace, the CONN_* handlers, and
+ * the `conn:heartbeat` alarm. Probing itself stays in the connector domain (CONN_PROBE_ORIGIN — it owns the tab
+ * fetch machinery); this module only decides WHO to probe and records what came back.
+ *
+ * PRIVACY: identityName is display-only (the Overview card); logs carry origins + status tokens, never identities.
+ */
+
+import { Logger } from '../../Core/Logger.js';
+import { REG_KEY, authSignal, applySignal, heartbeatTargets } from '../../Core/connectionPresence.js';
+
+// ── the registry store (chained read-modify-write; single writer) ─────────────────────────────────────────────────
+let _chain = Promise.resolve();
+async function _read() {
+  try { const got = await chrome.storage.local.get(REG_KEY); return got?.[REG_KEY] || {}; } catch { return {}; }
+}
+export async function readConnRegistry() { return _read(); }
+
+/**
+ * THE single write door: normalize the signal, apply it, persist, and on a REAL transition (→signed-out /
+ * →wrong-account / back→fresh) log `CONN ▸` + broadcast CONN_STATUS_CHANGED (the open panel refreshes its card).
+ * Fire-and-forget safe; never throws.
+ */
+export function reportAuthSignal(raw) {
+  const sig = authSignal({ ...raw, at: (raw && raw.at) || Date.now() });
+  if (!sig) return Promise.resolve(null);
+  const step = _chain.then(async () => {
+    const before = await _read();
+    // Write-coalesce: an unchanged status re-verified within 30s skips the write (an each-mode fan-out fires a
+    // fresh signal per ride — 121 identical writes would be pure churn). A status CHANGE always writes.
+    const prev = before[sig.origin];
+    if (prev && prev.status === sig.status && (sig.at - (prev.lastVerifiedAt || 0)) < 30_000) return null;
+    const { registry, transition } = applySignal(before, sig);
+    try { await chrome.storage.local.set({ [REG_KEY]: registry }); } catch { /* */ }
+    if (transition) {
+      try { Logger.info('conn', `CONN ▸ ${transition.origin} ${transition.from} → ${transition.to}${transition.cause ? ` (${transition.cause})` : ''} [${transition.source}]`); } catch { /* */ }
+      try { chrome.runtime.sendMessage({ type: 'CONN_STATUS_CHANGED', origin: transition.origin, from: transition.from, to: transition.to, cause: transition.cause || null }, () => { void chrome.runtime.lastError; }); } catch { /* */ }
+    }
+    return transition;
+  }).catch(() => null);
+  _chain = step.then(() => {}, () => {});
+  return step;
+}
+
+// Origins with a LIVE http(s) tab open right now (probes ride tabs; no tab → no probe, ever).
+async function _openOrigins() {
+  try {
+    const tabs = await chrome.tabs.query({});
+    return [...new Set(tabs.filter((t) => t && !t.discarded && /^https?:\/\//i.test(t.url || ''))
+      .map((t) => { try { return new URL(t.url).host.toLowerCase(); } catch { return null; } })
+      .filter(Boolean))];
+  } catch { return []; }
+}
+
+async function _probeTargets(invokeSgHandler, targets) {
+  let probed = 0;
+  for (const t of targets) {
+    try {
+      const r = await invokeSgHandler('CONN_PROBE_ORIGIN', { origin: t.origin, probePath: t.probePath, probeHeaders: t.probeHeaders, probeAccept: t.probeAccept });
+      if (r && r.success !== false) probed++;
+    } catch { /* per-origin best-effort */ }
+  }
+  return probed;
+}
+
+/** The CONN_* handler map (merged into the SW dispatch like every domain). */
+export function createConnectionsHandlers({ invokeSgHandler } = {}) {
+  return {
+    // The registry, verbatim (statuses + ages; identityName is display-only). The panel renders the Overview card.
+    CONN_LIST: (_payload, _sender, sendResponse) => {
+      _read().then((registry) => sendResponse({ success: true, registry, now: Date.now() }));
+      return true;
+    },
+    // On-demand refresh ("Check now" / Overview open): probe every probe-bearing origin with an open tab, no age gate.
+    CONN_CHECK: (_payload, _sender, sendResponse) => {
+      (async () => {
+        const [registry, open] = await Promise.all([_read(), _openOrigins()]);
+        const targets = heartbeatTargets(registry, open, { now: Date.now(), minAgeMs: 0, cap: 8 });
+        const probed = await _probeTargets(invokeSgHandler, targets);
+        sendResponse({ success: true, probed, registry: await _read(), now: Date.now() });
+      })();
+      return true;
+    },
+    // Focus (or open) the origin's tab so the HUMAN signs in — §16: a tab inherits auth, never creates it; Orchard
+    // never touches credentials. The next probe/ride marks it fresh.
+    CONN_FOCUS: (payload, _sender, sendResponse) => {
+      (async () => {
+        const origin = String(payload?.origin || '').trim().toLowerCase();
+        if (!origin) { sendResponse({ success: false, error: 'no-origin' }); return; }
+        try {
+          const tabs = await chrome.tabs.query({});
+          const hit = tabs.find((t) => { try { return t && !t.discarded && new URL(t.url).host.toLowerCase() === origin; } catch { return false; } });
+          if (hit) { await chrome.tabs.update(hit.id, { active: true }); try { await chrome.windows.update(hit.windowId, { focused: true }); } catch { /* */ } }
+          else await chrome.tabs.create({ url: `https://${origin}/`, active: true });
+          sendResponse({ success: true, opened: !hit });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'focus-failed' }); }
+      })();
+      return true;
+    },
+  };
+}
+
+// ── CP-2 — the heartbeat: one slow alarm; probes ONLY open-tab, probe-bearing, stale-enough origins ───────────────
+const ALARM = 'conn:heartbeat';
+export function registerConnHeartbeat({ invokeSgHandler } = {}) {
+  try { chrome.alarms.create(ALARM, { periodInMinutes: 20 }); } catch { /* */ }
+  try {
+    chrome.alarms.onAlarm.addListener((alarm) => {
+      if (!alarm || alarm.name !== ALARM) return;
+      (async () => {
+        const [registry, open] = await Promise.all([_read(), _openOrigins()]);
+        const targets = heartbeatTargets(registry, open, { now: Date.now(), minAgeMs: 10 * 60 * 1000, cap: 4 });
+        if (!targets.length) return;                      // nothing probeable → a silent tick (no logs, no traffic)
+        const probed = await _probeTargets(invokeSgHandler, targets);
+        try { Logger.info('conn', `CONN ▸ heartbeat probed ${probed}/${targets.length} open-tab origin(s)`); } catch { /* */ }
+      })().catch(() => { /* the heartbeat must never throw out of the alarm */ });
+    });
+  } catch { /* */ }
+}

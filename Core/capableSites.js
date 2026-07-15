@@ -146,10 +146,14 @@ export function capableSitesCatalog({ curated = CONNECTOR_RECIPES, broker = BROK
     const cleaned = offers.map((o) => { const m = o.match(/^(.+?) · (.+)$/); return (m && label.toLowerCase().includes(m[1].toLowerCase())) ? m[2] : o; });
     out.push({ key: `site:${s.host}`, origin: s.origin, host: s.host, label, kind: 'site', offers: cleaned, concrete: true, needsInstance: false, groundId: s.groundId, provider: null });
   }
-  // 5) curated classes with NO concrete instance → an abstract entry (needs a typed instance on select).
+  // 5) curated classes with NO concrete instance. A DEEP appHost (≥3 labels — workspace.aircall.io,
+  //    admin.shopify.com) IS the concrete host for every tenant → bind it directly (v2.74.1511 — the live miss:
+  //    picking Aircall asked to "type yourteam.workspace.aircall.io", but Aircall has no per-team subdomain).
+  //    Only a bare 2-label TENANT class (zendesk.com — each team its own subdomain) needs a typed instance.
   for (const [app, cc] of connClasses) {
     if (usedApp.has(app)) continue;
-    out.push({ key: `connector:${app}`, origin: null, host: cc.host, label: cc.label, kind: 'connector', offers: [_offer(cc)], concrete: false, needsInstance: true, groundId: null, provider: null });
+    const deep = String(cc.host || '').split('.').length >= 3;
+    out.push({ key: `connector:${app}`, origin: deep ? _origin(cc.host) : null, host: cc.host, label: cc.label, kind: 'connector', offers: [_offer(cc)], concrete: deep, needsInstance: !deep, groundId: null, provider: null });
   }
   // 6) broker classes with no concrete instance → bind the provider host directly (no instance to type).
   for (const bc of brokerClasses) {

@@ -22,6 +22,8 @@ import { pkcePair, authorizeUrl, parseAuthRedirect } from '../../Core/oauthLink.
 import { providerScopes } from '../../Core/mcpServers.js';                             // MP-3 — one dance grants every server the provider fronts
 import { Logger } from '../../Core/Logger.js';   // §20 — SESSION_REPLAY outcome observability (Invariant #1)
 import { armRideAuthCapture, markEngineBusy } from './sg.js';   // §20 — keep the page-local token fresh on the app tab (no import cycle: sg.js doesn't import connector.js); FL-1c — SHOW_SOURCES busy-marks its driven navigation (Invariant #2)
+import { reportAuthSignal } from './connections.js';   // CP-1 (v2.74.1506) — every auth outcome feeds the connections registry (one write door)
+import { assessLiveness, rideOutcomeSignal } from '../../Core/connectionPresence.js';   // CP-1 — the json-liveness probe verdict + ride-outcome→signal classifier
 
 // ── Ephemeral managed-tab registry (§16) — module singleton, lives within a SW lifetime ─────────────────────────────
 const IDLE_CLOSE_MS = 8000;                 // close an Orchard-opened tab this long after its last ride (burst-reuse window)
@@ -488,6 +490,31 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
   }
 
   return {
+    // CP-1/2 (v2.74.1506) — probe ONE origin's auth via its OPEN tab (the heartbeat / Check-now unit). No open tab
+    // → honest 'no-tab' (NEVER opens one — no tab churn from a clock; §16b). Two verdict kinds: 'identity'
+    // (assessProbe — the §14 anon-sentinel rule) and 'json' (liveness — VendorSuite-class endpoints that 403 when
+    // signed out but carry no user shape). The verdict lands in the registry through the single write door.
+    CONN_PROBE_ORIGIN: (payload, _sender, sendResponse) => {
+      (async () => {
+        try {
+          const origin = String(payload?.origin || '').trim().toLowerCase();
+          const probePath = String(payload?.probePath || '').trim();
+          if (!origin || !probePath) { sendResponse({ success: false, error: 'no-probe-spec' }); return; }
+          const tabs = await chrome.tabs.query({ url: [`https://${origin}/*`] });
+          const tab = pickRideTab(tabs);
+          if (!tab) { sendResponse({ success: false, error: 'no-tab' }); return; }
+          const extra = (payload.probeHeaders && typeof payload.probeHeaders === 'object') ? { headers: payload.probeHeaders } : null;
+          const reply = await fetchViaHealed(tab.id, `https://${origin}${probePath.startsWith('/') ? probePath : '/' + probePath}`, 'GET', null, false, '', extra);
+          const verdict = payload.probeAccept === 'json' ? assessLiveness(reply) : assessProbe(reply, null);
+          await reportAuthSignal({ origin, status: verdict.status, cause: verdict.reason, source: payload.source === 'heartbeat' ? 'heartbeat' : 'probe',
+            identityName: verdict.user ? (verdict.user.name || verdict.user.email || null) : null,
+            probePath, probeHeaders: payload.probeHeaders || null, probeAccept: payload.probeAccept || null });
+          sendResponse({ success: true, status: verdict.status });
+        } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'probe-failed' }); }
+      })();
+      return true;
+    },
+
     // CX-9o (v2.74.1453) — CLICK_TEXT_ON_TAB: after a section navigation, open ONE item by clicking the most
     // specific visible element containing `text` (an address / task number), climbing to its clickable unit (row /
     // link / button). The SPA has no per-item URL — navigate + click IS "open that specific task". ENGINE-DRIVEN
@@ -702,16 +729,21 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
             // WITHOUT it → assessProbe reads SIGNED_OUT → EVERY read of that app falsely fails "not logged in" even
             // though the session is live (a header-caused anon-sentinel). Null for header-less apps → unchanged.
             const _probeExtra = (payload.requestHeaders && typeof payload.requestHeaders === 'object') ? { headers: payload.requestHeaders } : null;
-            const verdict = assessProbe(await fetchViaHealed(tab.id, probeUrl, 'GET', null, false, '', _probeExtra), expectedAccount);
+            const _probeReply = await fetchViaHealed(tab.id, probeUrl, 'GET', null, false, '', _probeExtra);
+            const verdict = (payload.probeAccept === 'json') ? assessLiveness(_probeReply) : assessProbe(_probeReply, expectedAccount);   // CP-1 — json-liveness apps verify by parseable JSON
             // v1467 (obs #6) — the probe VERDICT with its cause is visible: "signed-out" alone can't distinguish a
             // real logout from a 401'd bare probe (the v1459 class) or an anon-sentinel (§14). Status token + hdrs
             // flag only — never identity values.
             try { Logger.info('ride', `IDENTITY_PROBE ▸ ${origin} → ${(verdict && verdict.status) || '?'}${_probeExtra ? ' (+hdrs)' : ''}`); } catch { /* */ }
+            // CP-1 (v2.74.1506) — every pre-flight verdict feeds the connections registry (single write door).
+            void reportAuthSignal({ origin, status: verdict.status, cause: verdict.reason, source: 'probe', identityName: verdict.user ? (verdict.user.name || verdict.user.email || null) : null, probePath, probeHeaders: (payload.requestHeaders && typeof payload.requestHeaders === 'object') ? payload.requestHeaders : null, probeAccept: 'identity' });
             if (rideAction(verdict, { ephemeral }).action === 'reauth-focus') {
               // H-1a (v2.74.1376) — a HEADLESS caller (the scheduled sweep) must NEVER steal the screen or hang
               // waiting for a human: no focus, no wait — fail fast as signed-out. The sweep's status note + `show
               // work` carry the honest reason; the ephemeral tab (if any) idle-closes via the managed registry.
               if (payload && payload.headless === true) {
+                // CP-1 — the clock's skip still teaches the registry (Overview explains WHY the sweep skipped).
+                void reportAuthSignal({ origin, status: 'signed-out', cause: 'not-logged-in', source: 'ride', probePath, probeAccept: 'identity' });
                 sendResponse({ success: false, error: 'not-logged-in', origin, hint: `sign in to ${origin} to continue` });
                 return;
               }
@@ -727,6 +759,8 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
                   hint: isWrong ? 'signed in as a different account — switch to continue' : `sign in to ${origin} to continue` });
                 return;
               }
+              // CP-1 — the human signed back in: the registry flips fresh ("back in" is a real transition).
+              void reportAuthSignal({ origin, status: 'fresh', source: 'reauth', identityName: resumed.user ? (resumed.user.name || resumed.user.email || null) : null, probePath, probeAccept: 'identity' });
               if (resumed.user && resumed.user.id != null) args.me = resumed.user.id;   // signed in — bind {me}, fall through to the call
             } else if (verdict.user && verdict.user.id != null) {
               args.me = verdict.user.id;
@@ -1097,12 +1131,24 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
               }
             }
             try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → ${r.mode || '?'}${r.hdrs ? '+hdrs' : ''}${r.capAge != null ? `(≈${r.capAge}m)` : ''} ${r.status} session-expired${_ctx}${_jwt}${_wire(r)}${_keys} (tab_${tab.id})`); } catch { /* */ }
+            // CP-1 (v2.74.1506) — a session-expired outcome is a FREE signed-out signal (the registry + Overview go red).
+            void reportAuthSignal({ origin: sessionHost, status: 'signed-out', cause: 'session expired', source: 'ride', probePath: (payload && payload.identityProbe) || null, probeHeaders: (payload && payload.requestHeaders) || null, probeAccept: (payload && payload.probeAccept) || null });
             // v1476 — the hint speaks the SERVER's own reason when it gave one (the token that ends the guessing);
             // else the stale-capture nudge. srvMsg is short + Logger-scrubbed downstream.
-            sendResponse({ success: false, error: 'session-expired', hint: (r.cognitoNote && r.cognitoNote !== 'ok' && r.cognitoNote !== 'no-cognito-store' && r.cognitoNote !== 'net-fail') ? `your ${sessionHost} login has fully expired — sign in to ${sessionHost} again, then re-ask` : (r.srvMsg ? `the app rejected the request: ${r.srvMsg}` : `refresh the ${sessionHost} tab (its token expired), then re-ask`) }); return;
+            sendResponse({ success: false, error: 'session-expired', reauthOrigin: sessionHost, hint: (r.cognitoNote && r.cognitoNote !== 'ok' && r.cognitoNote !== 'no-cognito-store' && r.cognitoNote !== 'net-fail') ? `your ${sessionHost} login has fully expired — sign in to ${sessionHost} again, then re-ask` : (r.srvMsg ? `the app rejected the request: ${r.srvMsg}` : `refresh the ${sessionHost} tab (its token expired), then re-ask`) }); return;
           }
-          if (r.status >= 400) { try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → ${r.mode || '?'}${r.hdrs ? '+hdrs' : ''} ${r.status} http-error${_ctx}${_jwt}${_wire(r)}${_keys} (tab_${tab.id})`); } catch { /* */ } sendResponse({ success: false, error: `http-${r.status}`, hint: r.srvMsg ? `the server said: ${r.srvMsg}` : 'the server rejected the request', status: r.status, value: r.body }); return; }
+          if (r.status >= 400) {
+            try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → ${r.mode || '?'}${r.hdrs ? '+hdrs' : ''} ${r.status} http-error${_ctx}${_jwt}${_wire(r)}${_keys} (tab_${tab.id})`); } catch { /* */ }
+            // CP-1 (v2.74.1506) — classify the failure as an auth signal (401 always; 403 only without csrf/gql — the
+            // v1389 lesson): the live gap was a VendorSuite 403 that told the registry nothing.
+            const _as = rideOutcomeSignal({ ok: false, httpStatus: r.status, csrfInvolved: !!(payload && (payload.gql || payload.csrf)) });
+            if (_as) void reportAuthSignal({ origin: sessionHost, status: _as, cause: `http-${r.status}`, source: 'ride', probePath: (payload && payload.identityProbe) || null, probeHeaders: (payload && payload.requestHeaders) || null, probeAccept: (payload && payload.probeAccept) || null });
+            sendResponse({ success: false, error: `http-${r.status}`, ...(_as === 'signed-out' ? { reauthOrigin: sessionHost } : {}), hint: r.srvMsg ? `the server said: ${r.srvMsg}` : 'the server rejected the request', status: r.status, value: r.body }); return;
+          }
           try { Logger.info('ride', `SESSION_REPLAY ▸ ${apiHost} ${method}${_rid} → ${r.mode ? r.mode + ' ' : ''}${r.status}${_ctx}${_jwt} ${_shape}${_keys} (tab_${tab.id})`); } catch { /* */ }
+          // CP-1 — a successful ride is a FREE fresh signal; it also TEACHES the registry this origin's probe spec
+          // (VendorSuite's json-liveness probe registers on the first good ride — the heartbeat can watch it from then on).
+          void reportAuthSignal({ origin: sessionHost, status: 'fresh', source: 'ride', probePath: (payload && payload.identityProbe) || null, probeHeaders: (payload && payload.requestHeaders) || null, probeAccept: (payload && payload.probeAccept) || null });
           sendResponse({ success: true, value: r.body, status: r.status, origin: apiHost });
         } catch (e) { sendResponse({ success: false, error: (e && e.message) || 'replay-failed' }); }
       })();
@@ -1128,15 +1174,17 @@ export function createConnectorHandlers({ ensureContentScript, readRideRecipes, 
 
           const recipe = recipeForOrigin(origin);
           let verdict, identity = null;
-          if (recipe && recipe.verifyIdentity) {
+          if (recipe && (recipe.verifyIdentity || recipe.identityProbe)) {   // CP-1 — a probe-bearing app (even json-liveness, no verifyIdentity pre-flight) verifies by its probe
             const probePath = String(recipe.identityProbe || '/api/v2/users/me.json');
             // CX-10 (v2.74.1464) — the probe carries the recipe's requestHeaders (the v1459 class, third executor:
             // a routing-header BFF 401s a bare probe → a false "signed-out" on a LIVE login at connect-check time).
             const _vcExtra = (recipe.requestHeaders && typeof recipe.requestHeaders === 'object') ? { headers: recipe.requestHeaders } : null;
             const reply = await fetchViaHealed(tab.id, `https://${origin}${probePath.startsWith('/') ? probePath : '/' + probePath}`, 'GET', null, false, '', _vcExtra);
-            const v = assessProbe(reply, null);
+            const v = (recipe.probeAccept === 'json') ? assessLiveness(reply) : assessProbe(reply, null);   // CP-1 — json-liveness apps (VendorSuite) verify by parseable JSON
             verdict = v.status === STATUS.FRESH ? 'connected' : 'signed-out';
             if (v.user) identity = { id: v.user.id ?? null, name: v.user.name ?? null, email: v.user.email ?? null };
+            // CP-1 — connect-time checks feed the registry too (the Overview card is warm from the first setup).
+            void reportAuthSignal({ origin, status: v.status, cause: v.reason, source: 'connect', identityName: v.user ? (v.user.name || v.user.email || null) : null, probePath, probeHeaders: (recipe.requestHeaders && typeof recipe.requestHeaders === 'object') ? recipe.requestHeaders : null, probeAccept: recipe.probeAccept === 'json' ? 'json' : 'identity' });
           } else {
             let url = '';
             try { const t = await chrome.tabs.get(tab.id); url = (t && t.url) || ''; } catch { /* */ }

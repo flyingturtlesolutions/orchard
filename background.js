@@ -43,6 +43,7 @@ import { createWorkflowDebugHandlers } from './background/handlers/workflowDebug
 import { createConnectorHandlers } from './background/handlers/connector.js';  // v2.74.1151 (CX-3) — the connector domain (session-ride)
 import { createCanvasHandlers } from './background/handlers/canvas.js';  // v2.74.1205 (CA-4) — the canvas domain (RENDER_CANVAS → the presentation tab)
 import { createFleetHandlers, registerFleetAlarmListener } from './background/handlers/fleet.js';  // FL-6 (v2.74.1355) — the fleet clock trigger (scheduled headless sweeps)
+import { createConnectionsHandlers, registerConnHeartbeat } from './background/handlers/connections.js';  // CP-1/2 (v2.74.1506) — the connections auth-presence registry + open-tab heartbeat
 import { buildRawAction, coalesce } from './Core/observedTrace.js';     // OBS-1 — observed demonstration recorder
 import * as ChromeHoist        from './Core/chromeHoist.js';  // v2.74.480 — hoist recurring chrome off Locales → Ground.chrome
 import * as Workflows          from './Core/workflows.js';   // v2.74.488 — cross-Locale workflows (partOf) over the siteMap
@@ -418,6 +419,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // chrome.alarms persist across SW restarts natively, so scheduling once is durable; the listener re-registers
 // on every SW boot (this module eval). _invokeSgHandler is hoisted; the map is initialized long before any fire.
 registerFleetAlarmListener({ invokeSgHandler: _invokeSgHandler });
+// CP-2 (v2.74.1506) — the connections heartbeat: one slow alarm; probes ONLY open-tab, probe-bearing origins.
+registerConnHeartbeat({ invokeSgHandler: _invokeSgHandler });
 
 
 // v2.74.22 — walkAbortFlags + stepApprovalResolvers removed; only the
@@ -1750,6 +1753,7 @@ const _sgMessageHandlers = {
     ensureContentScript: _ensureContentScript,
   }),
   ...createFleetHandlers({ invokeSgHandler: _invokeSgHandler }),   // FL-6 (v1355) — FLEET_SCHEDULE (set/off/status); the alarm listener registers below
+  ...createConnectionsHandlers({ invokeSgHandler: _invokeSgHandler }),   // CP-1/2 (v1506) — CONN_LIST / CONN_CHECK / CONN_FOCUS (the auth-presence registry)
 
   ...createDiscoveryHandlers({
     readSiteMap          : _readSiteMap,

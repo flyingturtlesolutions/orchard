@@ -516,3 +516,27 @@ Forging the RIDE from a demo is NOT symmetric with §17's read-harvest. A **read
 ### 20.10 Build status (v2.74.1397)
 - ✅ **Slice 1 — `Core/writeDispatch.js` (pure + tested).** The cascade: `planWrite` (ride→drive lane order; headless drops the drive lane), `recoverAfterRide` (drive / park / stop), `isRideRecoverable` (the pre-execution hash failures ONLY — the no-duplicate safety property). 20 assertions.
 - ⏳ **Slices 2–4 (live, need the app + OBS + a body-tee).** Dual-capture wiring (arm a **body-capturing** tee during an OBS write demo + `forgeWriteRecipe` → bank the ride beside the drive), the dispatch glue (connector write path consults `recoverAfterRide`; a `HASH_STALE` interactive → invoke the drive; headless → park), retire T4-as-ritual. Blocked on: a drive artifact to fall back to (only a demonstrated write has one) → these land WITH the app that first teaches a write. `forgeWriteRecipe` (pure) can precede the app.
+
+## §16b — Connection PRESENCE (CP-1/2/3, v2.74.1506) — proactive auth status, event-driven
+
+*(Extends §16. Placed at file end for append-safety; §16 is the per-ride flow, this is the STANDING model.)*
+
+**One registry, many signals, single writer.** `conn:registry` (chrome.storage, SW-owned; `Core/connectionPresence.js`
+pure + tested; `background/handlers/connections.js` = the I/O). Every signal that proves/disproves identity flows
+through `reportAuthSignal`: pre-flight `IDENTITY_PROBE ▸` verdicts, connect-time checks, reauth resumes, and **ride
+outcomes** (a successful ride = free `fresh`; 401 / session-expired / non-json = `signed-out`; **403 = signed-out only
+without csrf/gql** — the v1389 lesson; VendorSuite's cookie GETs qualify). Transitions (→signed-out / →wrong-account /
+back→fresh) log `CONN ▸` + broadcast `CONN_STATUS_CHANGED`; repeats are silent.
+
+**Freshness by events; cadence only where free.** No blind polling. The `conn:heartbeat` alarm (20 min) probes ONLY
+origins that (a) know their probe (`identityProbe` recipe data, learned by the registry from the first ride/connect)
+and (b) have an OPEN tab — probes ride sessions through tabs, and opening tabs on a timer is churn. No-tab origins
+DECAY to `stale` by TTL (honest), refreshed on next touch. Probe kinds: `identity` (assessProbe, §14 anon-sentinel)
+and **`json`** (`probeAccept:'json'` — liveness by parseable JSON 2xx, for apps whose endpoints 403 when signed out
+but carry no user shape: VendorSuite `/api/VendorSuite/State`). `probeAccept` threads Invariant-#3 hops 1+3.
+
+**Surfaces.** Overview = the fleet view: a standing Connections card (stable message id `conn_status`; glyph ·
+identity (display-only, never logged/LLM) · verified-age; Sign in / Check now buttons) + one line per TRANSITION.
+A desk warns transiently on open when one of ITS origins is signed out. A chain ride that fails signed-out offers
+`Sign in <origin>` + `↻ Try again` instead of a bare status code. **Sign in = CONN_FOCUS** — focus/open the origin
+tab; the HUMAN signs in (§16: a tab inherits auth, never creates it; Orchard never touches credentials).

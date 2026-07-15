@@ -134,7 +134,11 @@ const SH = Object.freeze({
 // WRITE (POST UpdateCompleteTask, form-urlencoded taskId+note) is a follow-on: it needs the form-urlencoded cookie-ride
 // write transport verified AND recipeFromCatalogEntry taught to carry write/body/bodyType (today's lossy projection drops
 // them), so it stays out of the curated surface until both land.
-const VS = Object.freeze({ app: 'vendorsuite', appHost: 'vendorsuite.drhorton.com', method: 'GET' });
+// CP-1 (v2.74.1506) — VendorSuite's auth spec: a JSON-LIVENESS probe (`probeAccept:'json'`), NOT an identity probe —
+// the State read is user-scoped (access/DefaultDivision) but carries no {id,email} user shape, and when the SSO
+// session expires it 403s. So: parseable JSON 2xx = signed in; anything else = signed out. NO `verifyIdentity`
+// (no per-ride pre-flight — rides are bursty; outcomes + the heartbeat carry the presence instead).
+const VS = Object.freeze({ app: 'vendorsuite', appHost: 'vendorsuite.drhorton.com', method: 'GET', identityProbe: '/api/VendorSuite/State', probeAccept: 'json' });
 // CX-9b (v2.74.1434) — the DIVISION ID layer, as recipe DATA (the live test's lesson: users speak market language —
 // "Atlanta West" / "210" — the API speaks internal ids — 83; wrong id = a silent empty list, not an error). The
 // `resolve` marker declares how {divisionId} maps via the app's OWN State read: missing → the user's current division

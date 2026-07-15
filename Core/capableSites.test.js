@@ -27,6 +27,14 @@ describe('capableSitesCatalog — curated + broker classes', () => {
     assert.deepEqual(zd.offers, ['reads + writes']);
     assert.equal(cat.find((e) => e.key === 'connector:shopify').offers[0], 'writes');   // shopify stand-in is write-only
   });
+  it('v1511 — a DEEP appHost class (no per-tenant subdomain: workspace.aircall.io) binds DIRECTLY; only a bare 2-label class needs a typed instance', () => {
+    const cat = capableSitesCatalog({ curated: [{ app: 'aircall', appHost: 'workspace.aircall.io', write: false }, { app: 'zendesk', appHost: 'zendesk.com', write: false }], broker: [], linkedProviders: [] });
+    const ac = cat.find((e) => e.key === 'connector:aircall');
+    assert.equal(ac.needsInstance, false);                       // the live miss: picking Aircall asked to type "yourteam.workspace.aircall.io"
+    assert.equal(ac.concrete, true);
+    assert.equal(ac.origin, 'https://workspace.aircall.io');     // click = bind
+    assert.equal(cat.find((e) => e.key === 'connector:zendesk').needsInstance, true);   // zendesk stays a guided class (real per-tenant subdomains)
+  });
   it('a broker class shows ONLY when its provider is linked (an unlinked pick reads as dead)', () => {
     assert.equal(capableSitesCatalog({ curated: [], broker: BRK, linkedProviders: [] }).length, 0);
     const linked = capableSitesCatalog({ curated: [], broker: BRK, linkedProviders: ['hubspot'] });

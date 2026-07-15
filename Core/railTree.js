@@ -73,7 +73,7 @@ export function buildRailTree(summaries, { devMode = false, activeId = null, exp
   // (from its index entry's summary), not an echo of another app. Null until it has activity.
   const overviewConv = visible.find((c) => c.id === OVERVIEW_ID) || null;
   rows.push({
-    id: OVERVIEW_ID, role: 'overview', title: 'Overview', icon: 'home', depth: 0,
+    id: OVERVIEW_ID, role: 'overview', title: 'Front desk', icon: 'home', depth: 0,   // Front-desk adopt (v2.74.1507) — the display noun; OVERVIEW_ID + role token stay internal
     hasChildren: false, expanded: false, active: activeId == null || activeId === OVERVIEW_ID,
     count: 0, kind: 'agent',
     summary: (overviewConv && overviewConv.summary) ? overviewConv.summary : null,
