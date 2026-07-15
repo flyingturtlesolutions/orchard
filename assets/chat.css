@@ -2678,3 +2678,44 @@ textarea {
 }
 .foreach-iteration-row.success .step-icon { color: var(--c-x-ok-soft); }
 .foreach-iteration-row.error   .step-icon { color: var(--c-x-error); }
+
+/* ── v2.74.1505 — the IL glyph THINKS while a request is in flight ─────────────────────────────────────────────
+   A+B: the in-flight bubble's ◈ facet-cycles (◇→◈→◆) + the avatar softly pulses; C: the header brand mark pulses
+   whenever ANY run is live (the active bubble may be scrolled away). Marked at the long-run entries, cleared at
+   _orchFinalize / every chain exit (chat.js _ilBusy). Reduced motion → a static dimmed glyph, no animation. */
+.message.assistant .message-avatar.il-busy,
+.message.thinking .message-avatar.il-busy {
+  position: relative;
+  color: transparent;                     /* the base ◈ yields to the cycling overlay */
+  animation: il-pulse 1.26s ease-in-out infinite;
+}
+.message.assistant .message-avatar.il-busy::before,
+.message.thinking .message-avatar.il-busy::before {
+  content: '◈';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  animation: il-facet 1.26s steps(1, end) infinite;
+}
+.app-brand-mark.il-busy {
+  animation: il-pulse 1.26s ease-in-out infinite;
+}
+@keyframes il-facet {
+  0%   { content: '◇'; }
+  33%  { content: '◈'; }
+  66%  { content: '◆'; }
+}
+@keyframes il-pulse {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .message.assistant .message-avatar.il-busy,
+  .message.thinking .message-avatar.il-busy,
+  .message.assistant .message-avatar.il-busy::before,
+  .message.thinking .message-avatar.il-busy::before,
+  .app-brand-mark.il-busy { animation: none; opacity: 0.7; }
+}

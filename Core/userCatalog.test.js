@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { slugifyAppId, userAppDefinition, addUserDef, removeUserDef, listUserDefs } from './userCatalog.js';
+import { slugifyAppId, userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, listUserDefs, galleryUserDefs } from './userCatalog.js';
 
 describe('userCatalog — slugifyAppId', () => {
   it('namespaces + slugifies a name; empty when nothing usable', () => {
@@ -47,5 +47,23 @@ describe('userCatalog — list ops', () => {
   it('removeUserDef drops by id; listUserDefs normalizes + filters junk', () => {
     assert.deepEqual(removeUserDef([a, b], 'user-a').map((d) => d.id), ['user-b']);
     assert.deepEqual(listUserDefs([a, null, { id: 'x' /* no name/seed */ }, b]).map((d) => d.id), ['user-a', 'user-b']);
+  });
+});
+
+describe('DK-6b (v2.74.1503) — galleryUserDefs ("Your desks" = CUSTOM desks only)', () => {
+  const PRE = ['warranty-manager', 'call-manager'];
+  const promoted = userAppDefinition({ name: 'My triage', seed: 'triage things' });                        // save as desk: — no presetId
+  const configuredCustom = configuredAppDefinition({ name: 'Ops desk', seed: 'run ops', presetId: 'inbox',  // custom flow → generic engine
+    setup: { target: { label: 'ops.example.com' } } });
+  const configuredPre = configuredAppDefinition({ name: 'Warranty desk', seed: 'warranty role', presetId: 'warranty-manager',
+    setup: { target: { label: 'vendorsuite.drhorton.com' } } });                                            // AP-4 copy of a PRECONFIGURED desk
+  it('drops the configured copy of a preconfigured desk; keeps promoted seeds + configured customs', () => {
+    const out = galleryUserDefs([promoted, configuredCustom, configuredPre], PRE);
+    assert.deepEqual(out.map((d) => d.name), ['My triage', 'Ops desk']);   // the Warranty copy is gallery-hidden
+  });
+  it('no preconfigured ids / junk-safe → everything user-made still shows', () => {
+    assert.equal(galleryUserDefs([promoted, configuredPre], []).length, 2);   // nothing to hide against
+    assert.deepEqual(galleryUserDefs(null, PRE), []);
+    assert.equal(galleryUserDefs([null, promoted], PRE).length, 1);
   });
 });

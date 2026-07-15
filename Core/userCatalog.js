@@ -43,6 +43,22 @@ export function configuredAppDefinition({ name, seed, type = null, objectModel =
   });
 }
 
+/**
+ * DK-6b (v2.74.1503) — "Your desks" = the user's CUSTOM desks only. PURE. A completed setup mints a configured
+ * def for EVERY desk (AP-4) — including PRECONFIGURED ones, whose copy then duplicates its own gallery card (the
+ * live complaint: the set-up Warranty desk listed twice, once preconfigured + once "Configured · opens ready").
+ * A configured copy of a preconfigured desk is gallery-HIDDEN: the durable instance already lives PINNED in the
+ * rail (AP-1), and the preconfigured card auto-connects a fresh one (DK-6). It STAYS in the catalog — resolvable
+ * by id, so seed-sync and any restore path keep working. Custom desks always show: a promoted seed (`save as
+ * desk:`, no presetId) or a configured CUSTOM desk (presetId = the generic engine, not gallery-preconfigured).
+ * @param {Array} list            the user catalog (listUserDefs output)
+ * @param {string[]} preconfiguredIds  ids of the gallery's preconfigured desks (appCatalog.preconfiguredDesks)
+ */
+export function galleryUserDefs(list, preconfiguredIds = []) {
+  const pre = new Set(Array.isArray(preconfiguredIds) ? preconfiguredIds.filter(Boolean) : []);
+  return (Array.isArray(list) ? list : []).filter((d) => d && !(d.presetId && pre.has(d.presetId)));
+}
+
 /** Add (or REPLACE same-id) a def in the catalog list. PURE — returns a new array, newest last. */
 export function addUserDef(list, def) {
   if (!def || !def.id) return Array.isArray(list) ? [...list] : [];

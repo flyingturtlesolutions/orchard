@@ -39,6 +39,7 @@ import { buildWorkflowMatchMessages, parseWorkflowMatchOutput } from '../Core/wo
 import { buildPresetAbstractMessages, parsePresetAbstractOutput } from '../Core/presetAbstractPrompt.js';   // §10.2 — abstract an instance rule for the shared preset (distill-up)
 import { buildFanoutSpecMessages, parseFanoutSpecOutput } from '../Core/fanoutPersonaPrompt.js';   // Q2 — split a fan-out into {task, persona}
 import { buildAnswerShapeMessages, parseAnswerShapeOutput } from '../Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — match a read's answer to the question
+import { buildCaseBriefMessages, parseCaseBrief } from '../Core/caseBrief.js';   // DK-8h — a spawned case's conversational framing (the requestor's voice)
 import { buildRecipePolishMessages, parseRecipePolishOutput } from '../Core/recipePolishPrompt.js';   // §17 — name/does/param-name a HARVESTED ride-recipe (structure-only input; the OBS-4 analog)
 import { buildGapMessages, parseGaps } from '../Core/gapPrompt.js';   // PS-0 — Orchard's STRUCTURED capability-gap enumeration (the per-Ground demand signal)
 
@@ -5383,6 +5384,23 @@ OUTPUT: Return ONLY the raw JSON array. No fences, no explanation. {{USER_QUESTI
     const res = await AnthropicService.#call(system, user, 300, [], { role: 'routing', operation: 'answer-shape' });
     if (!res || res.success === false) return { answer: null, showList: false };
     return parseAnswerShapeOutput(res.text);
+  }
+
+  /**
+   * DK-8h (v2.74.1500) — brief a spawned CASE: turn its record dossier into the requestor's own conversational
+   * presentation (what's wrong, where, how old, what's scheduled, the vendor's note) — the case's opening message,
+   * replacing the raw field-dump card. Every value comes from the record verbatim; the record is fenced as data
+   * (§9). Cheap tier; the dossier already rides the case's seed to the LLM, so no new egress channel opens here.
+   * PURE prompt+parse in Core/caseBrief.js. Fails safe → null (the caller keeps the raw record card).
+   * @param {{ role?:string, label?:string, dossier:string }} args
+   * @returns {Promise<string|null>}
+   */
+  static async briefCase({ role, label, dossier } = {}) {
+    if (!String(dossier || '').trim() || !(await AnthropicService.hasLlm())) return null;
+    const { system, user } = buildCaseBriefMessages({ role, label, dossier });
+    const res = await AnthropicService.#call(system, user, 350, [], { role: 'routing', operation: 'case-brief' });
+    if (!res || res.success === false) return null;
+    return parseCaseBrief(res.text);
   }
 
   /**

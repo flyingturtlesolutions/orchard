@@ -50,20 +50,20 @@ import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 �
 import { resolveRideParam, filterRowsByText } from './Core/rideParamResolve.js';   // CX-9b (v1434) — human value → canonical id (the `resolve` marker) + the drill row join
 import { armable as rideArmable } from './Core/rideRecipe.js';   // CX-9b — the drill's via-recipe honors the §18 arm guard
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
-import { renderConnectorLines, itemLabels, fanoutItems, dossierLines, primaryItemId, createdRecordId, primaryObject, primaryList } from './Core/connectorRender.js';   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
+import { renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, primaryObject, primaryList } from './Core/connectorRender.js';   // DK-8i — fanoutSummary: the desk's meta LEDGER line for a case spawn   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
 import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recent-turn window selector (follow-up continuity for the IL)
 import { readShapeFacts } from './Core/answerShapePrompt.js';   // the interrogator's answer-shape stage — derive the deterministic, minimized facts a read's answer is shaped from
 import { planSubTasks, subTaskFromApp, composeSeed, classifyAskToGrid, isConfiguredDef, OVERVIEW_ID } from './Core/appDef.js';          // CV-4 — fan-out: an app + items → sub-task specs (pure). OM #3a — classify a belief's ask into its operation×object grid cell. AP-4 — isConfiguredDef (a re-creatable, already-set-up app). Q2 — composeSeed: fold a per-child persona into each worker's seed
 import { actAllowed } from './Core/writeGate.js';         // CV-6 — the per-desk write gate (read-only enforcement)
-import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId } from './Core/userCatalog.js';   // CV-5 — user-authored apps; AP-4 — configuredAppDefinition (mint a durable, re-creatable app from a set-up instance)
+import { userAppDefinition, configuredAppDefinition, addUserDef, removeUserDef, listUserDefs, slugifyAppId, galleryUserDefs } from './Core/userCatalog.js';   // CV-5 — user-authored apps; AP-4 — configuredAppDefinition (mint a durable, re-creatable app from a set-up instance); DK-6b — galleryUserDefs ("Your desks" = customs only)
 import { startSetup, advanceSetup, setupStep } from './Core/setupFlow.js';   // AS-2 — the guided setup-flow controller (connect an app to its site; pure)
 import { capableSitesCatalog, seedDeskCatalog } from './Core/capableSites.js';   // AS-5 — the "sites with defined capabilities" catalog the setup multi-select lists (pure merge); DK-6 — seedDeskCatalog pre-picks a preconfigured desk's builtin sites
 import { originFromText } from './Core/setupSpec.js';   // AS-4 / review P1-6 — the host-shape floor: a real public host has a dot (TLD); rejects bare words like "gmail" before they bank a poisoned target
 import { recordGoalItem, loadGoalItems, clearGoalMemory, promoteGoalItem } from './Services/Storage/GoalMemoryStore.js';   // AL-3b — the app's goal memory: bank a belief on a capability act + the `memory` view
 import { capabilityOutcomeItem } from './Core/goalMemory.js';   // AL-3e — success → observed belief; failure → mismatch delta (the OUTCOME hook)
-import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab } from './Core/workflowMemory.js';   // WF-1 lexical recall + WF-3 LLM-fallback prep/validate/gate
+import { workflowMatch, workflowCandidates, resolveWorkflowMatch, workflowSharesVocab, workflowId } from './Core/workflowMemory.js';   // WF-1 lexical recall + WF-3 LLM-fallback prep/validate/gate; workflowId — the DK-8j already-banked check (no re-offer)
 import { loadWorkflows, saveWorkflow, bumpWorkflowRun, bumpWorkflowDismissed, deleteWorkflow } from './Services/Storage/WorkflowStore.js';   // WF-1/2 — per-instance saved workflows (bank → recall → replay; dismiss + delete)
 import { seedInstanceFromPreset, distillCandidates, presetRuleFromAbstract, presetMemoryKey } from './Core/presetMemory.js';   // §10.1 — seed a NEW instance from its preset's baseline + accrued rules (two-tier learning, seed-down)
 import { standingRuleFromText, looksLikeStandingRule } from './Core/goalMemory.js';   // AL-3c — `remember:` authors a standing-rule delta; §12.2 — looksLikeStandingRule offers prefix-less capture
@@ -1393,12 +1393,16 @@ async function _saveUserCatalog() {
 async function _appendUserApps(container) {
   if (!container) return;
   await _loadUserCatalog();
-  if (!_userCatalog.length) return;
+  // DK-6b (v2.74.1503) — "Your desks" lists the user's CUSTOM desks only: a configured copy of a PRECONFIGURED
+  // desk (AP-4 mints one per completed setup) duplicated its own gallery card (the live complaint). The copy stays
+  // in the catalog (seed-sync/restore still resolve it by id) — it's just not a gallery entry.
+  const defs = galleryUserDefs(_userCatalog, preconfiguredDesks().map((d) => d.id));
+  if (!defs.length) return;
   const hdr = document.createElement('div');
   hdr.className = 'suggestion-section';
   hdr.textContent = 'Your desks';
   container.appendChild(hdr);
-  for (const def of _userCatalog) {
+  for (const def of defs) {
     const card = document.createElement('button');
     card.className = 'suggestion-card';
     // DK-6 — a CONFIGURED desk (AP-4) says so and opens ready (no setup); a saved seed shows its description.
@@ -1565,20 +1569,57 @@ async function _fanoutParentApp() {
 // run loop can drive them); reveals the drawer. AP-0 — a sub-task SHARES its parent app's memory key (instanceId) + type.
 async function _createSubTasks(app, items) {
   const specs = planSubTasks(app, items);
+  // DK-8k (v2.74.1504) — never re-open an ALREADY-OPEN case: re-running the same read (the live workflow test
+  // loop) spawned a duplicate case per run ("duplicate cases unchecked"). Identity = the case title (the item's
+  // label) among THIS desk's live children; a deleted case frees its slot, so closing-and-redoing still works.
+  let existing = new Set();
+  try {
+    const all = await ConversationStore.list();
+    existing = new Set(all.filter((c) => c && c.parentId === app.id).map((c) => String(c.title || '').trim().toLowerCase()));
+  } catch { /* dedup is best-effort — worst case the old duplicate behavior */ }
   const created = [];
+  const briefable = [];   // DK-8h — the cases that carry a record (detail) → conversational framing pass
+  let skipped = 0;
   for (const spec of specs) {
+    if (existing.has(String(spec.title || '').trim().toLowerCase())) { skipped++; continue; }
     try {
       const conv = await ConversationStore.create({ title: spec.title, kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config, instanceId: app.instanceId || app.appId || null, presetId: app.presetId || app.appId || null });
       // DK-8e (v2.74.1496) — the case opens WITH its record on screen (the dossier's first page): the same quiet
       // upsert the seed-directive note uses, so it's there before the case is ever opened. Plain text (escape-first).
       if (spec.detail) {
         try { await ConversationStore.updateMessage(conv.id, 'case_record', { role: 'assistant', body: `${spec.title}\n\n${spec.detail}` }, { upsert: true }); } catch { /* the record still rides the seed */ }
+        briefable.push({ id: conv.id, title: spec.title, detail: spec.detail });
       }
       created.push(conv);
     } catch (e) { try { console.warn('[chat] sub-task create failed:', e?.message); } catch { /* */ } }
   }
   if (created.length) { _expandedApps.add(app.id); _revealRail().catch(() => {}); }   // v2.74.1249 — OPEN the drawer (if closed) so the spawned children are visible, not just refresh-if-open
-  return created;
+  if (briefable.length) _briefCases(app, briefable).catch(() => {});   // DK-8h — non-blocking: cases exist NOW; the framing lands when it lands
+  return { created, skipped };   // DK-8k — callers report skips honestly ("N already open")
+}
+
+// DK-8h (v2.74.1500) — the conversational FRAMING pass: a case should open as the REQUESTOR presenting their
+// request (what's wrong, where, how old it is, what's scheduled, the vendor's note), not a field dump — "the IL
+// presents it as the requestor would". Cases spawn instantly with the raw record card (the fallback); each brief
+// then REPLACES that card's body (same 'case_record' upsert id), with the full record still on demand — it rides
+// the seed's fenced CASE_RECORD, and the trailing hint line says so. Best-effort + sequential (gentle on the
+// cheap tier); no LLM / any failure → the raw card simply stays. A case already open on screen re-renders on its
+// next open (the store is the source of truth; the spawn parent is what's on screen during a fan-out).
+async function _briefCases(app, cases) {
+  const role = String(app.seed || '').split('\n')[0].trim() || String(app.title || '');   // the desk's role line = "what kind of request is this" context
+  let briefed = 0;
+  for (const c of (Array.isArray(cases) ? cases : [])) {
+    if (!c || !c.id || !c.detail) continue;
+    let r = null;
+    try { r = await _orchReq('CASE_BRIEF', { role, label: c.title || '', dossier: c.detail }); } catch { /* keep the raw card */ }
+    const brief = (r && r.success !== false && typeof r.brief === 'string') ? r.brief.trim() : '';
+    if (!brief) continue;
+    try {
+      await ConversationStore.updateMessage(c.id, 'case_record', { role: 'assistant', body: `${brief}\n\n— Full record on file — ask for any field.` }, { upsert: true });
+      briefed++;
+    } catch { /* the raw card stays */ }
+  }
+  if (briefed) { try { _orchLog(`CASE_BRIEF ▸ ${briefed}/${cases.length} case${briefed === 1 ? '' : 's'} framed in the requestor's voice`); } catch { /* */ } }
 }
 
 async function _spawnSubTasks(listText) {
@@ -1587,10 +1628,11 @@ async function _spawnSubTasks(listText) {
   if (error) { _setMessageBody(msg, error); _orchFinalize(msg); return; }
   const items = String(listText).split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
   if (!items.length) { _setMessageBody(msg, 'Give me a list, e.g. `subtasks: first item, second item, third`.'); _orchFinalize(msg); return; }
-  const made = (await _createSubTasks(app, items)).length;
+  const { created, skipped } = await _createSubTasks(app, items);
+  const made = created.length;
   _setMessageBody(msg, made
-    ? `Opened ${made} case${made === 1 ? '' : 's'} under “${app.title}” — nested under the desk in the rail.`
-    : 'Couldn’t open any cases.');
+    ? `Opened ${made} case${made === 1 ? '' : 's'} under “${app.title}”${skipped ? ` (${skipped} already open — skipped)` : ''} — nested under the desk in the rail.`
+    : (skipped ? `${skipped === 1 ? 'That case is' : `All ${skipped} are`} already open under “${app.title}” — nothing new to open.` : 'Couldn’t open any cases.'));
   _orchFinalize(msg);
 }
 
@@ -1645,7 +1687,7 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
       }
     } catch { /* extraction is best-effort; keep innerDirective + the app's own seed */ }
   }
-  const created = await _createSubTasks(childApp, foItems);
+  const { created, skipped } = await _createSubTasks(childApp, foItems);   // DK-8k — already-open cases skip (dedup by title under this desk)
   // EPHEMERAL (v2.74.1262) — a REDUCE over the set: the workers run → the parent SYNTHESIZES their findings → the
   // workers CLOSE (delete). No durable sub-tasks; the deliverable is the summary. Auto-runs (the ask was the intent).
   if (lifecycle === 'ephemeral' && created.length) {
@@ -1656,14 +1698,15 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
   // RESOLVES (this populates each durable thread), then STAYS open. v2.74.1265 — was an offer-button in the parent, so
   // the user opened the children and found them BLANK. A bare "open each …" (no directive) just creates the threads.
   if (directive && created.length) {
-    await _runPersistentFanout(childApp, created, directive, msg, { suffix: capped ? ` (capped at ${cap} of ${n})` : '' });
-    return { ok: true, summary: `Ran “${directive}” in ${created.length}.` };
+    // DK-8i (v2.74.1501) — the run's own status line ("N done, K need you") IS the meta summary; returning it keeps
+    // it alive through the chain-end readouts join (it used to be overwritten by `Ran "…" in N.`).
+    const ran = await _runPersistentFanout(childApp, created, directive, msg, { suffix: capped ? ` (capped at ${cap} of ${n})` : '' });
+    return { ok: true, summary: ran || `Ran “${directive}” in ${created.length}.` };
   }
-  const summary = created.length
-    ? `Opened ${created.length} case${created.length === 1 ? '' : 's'} under “${app.title}”${capped ? ` (capped at ${cap} of ${n})` : ''} — nested under the desk in the rail. Open any to work it.`
-    : 'Couldn’t open any cases.';
+  // DK-8i (v2.74.1501) — the desk gets the operator's LEDGER line (what was accomplished), never the record dump.
+  const summary = fanoutSummary({ found: n, opened: created.length, skipped, capped, source: (leg && (leg.name || leg.does)) || '', deskTitle: app.title, titles: created.map((c) => c.title) });
   _setMessageBody(msg, summary);
-  return { ok: created.length > 0, summary };
+  return { ok: created.length > 0 || skipped > 0, summary };   // DK-8k — all-already-open is a SUCCESS (idempotent), not a failed clause
 }
 
 // CV-4-map — persist a message INTO a child conversation (not the visible panel). upsert appends; the write refreshes
@@ -1807,8 +1850,10 @@ async function _runPersistentFanout(app, children, directive, msg, { suffix = ''
   const done = results.filter((r) => r && r.status === 'done').length;
   const need = results.length - done;
   _revealRail().catch(() => {});   // children's peeks updated → reveal them
-  _setMessageBody(msg, `Opened ${children.length} case${children.length === 1 ? '' : 's'} under “${app.title}”${suffix} and ran “${directive}” in each — ${done} done${need ? `, ${need} need you (open them to continue)` : ''}. Open any to see its result; ask me to “summarize what each found”.`);
+  const line = `Opened ${children.length} case${children.length === 1 ? '' : 's'} under “${app.title}”${suffix} and ran “${directive}” in each — ${done} done${need ? `, ${need} need you (open them to continue)` : ''}. Open any to see its result; ask me to “summarize what each found”.`;
+  _setMessageBody(msg, line);
   _orchFinalize(msg);
+  return line;   // DK-8i — the caller's chain summary (survives the readouts join instead of being flattened to `Ran "…" in N.`)
 }
 
 // ─── AS-2 (v2.74.1188): guided setup — connect an app to its site ──────────────────────────────────────────
@@ -2448,7 +2493,32 @@ function _disableProposalButtons(id) {
 // explore results, intent menus) was DOM-only — a panel reload rehydrated a user-half-only transcript.
 // Upserts by the bubble's stable messageId (safe to call again when a reteach upgrades the text); never
 // touches the legacy invocation path, which has its own finalize.
+// ── v2.74.1505 — the IL glyph THINKS: the in-flight bubble's ◈ facet-cycles + pulses (A+B), and the header brand
+// mark pulses while ANY run is live (C — visible when the bubble has scrolled away). Marked at the long-run entry
+// points (interpret / the chain runner / the IL answer fallback), cleared UNCONDITIONALLY at _orchFinalize and at
+// every chain exit (the runner's finally); a busy bubble that gets REMOVED (interpret handing off to dispatch)
+// re-syncs the header via a messages-list observer — a DOM scan, not a refcount, so nothing can leak stuck-on.
+let _ilBusyObserver = null;
+function _ilSyncHeader() {
+  try {
+    const busy = !!document.querySelector('#messages .message-avatar.il-busy');
+    const mark = document.querySelector('.app-brand-mark');
+    if (mark) mark.classList.toggle('il-busy', busy);
+  } catch { /* */ }
+}
+function _ilBusy(msg, on) {
+  try {
+    const av = msg && msg.querySelector ? msg.querySelector('.message-avatar') : null;
+    if (av) av.classList.toggle('il-busy', !!on);
+    if (!_ilBusyObserver) {
+      const host = $('messages');
+      if (host) { _ilBusyObserver = new MutationObserver(_ilSyncHeader); _ilBusyObserver.observe(host, { childList: true }); }
+    }
+    _ilSyncHeader();
+  } catch { /* */ }
+}
 function _orchFinalize(msg, { outcome = null } = {}) {
+  _ilBusy(msg, false);   // v1505 — the glyph settles the moment the run ends (even when nothing persists)
   try {
     if (!msg || !msg.dataset || !msg.dataset.messageId) return;
     // v2.74.1338 (review D) — prefer the stashed SOURCE text (+ its markdown flag) over textContent, which strips
@@ -4306,7 +4376,7 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
   // v2.74.1338 (review B/E) — the chain snapshots its ORIGIN policy config once (a mid-run conversation switch
   // must not re-gate the steps under a different app's writePolicy), and registers with the CR-S1 liveness
   // refcount so "stop" reaches a runaway chain (it was invisible to _stopLongRunning before).
-  const st = state || { readouts: [], ranSteps: [], chainGroundId: null, lastValue: null, lastLeg: null, policyConfig: _currentConversationConfig };   // T2 — resolved steps for promotion; lastValue/lastLeg — last read's result + source leg (CV-4-full fan-out + the DK-8f drill)
+  const st = state || { readouts: [], ranSteps: [], chainGroundId: null, lastValue: null, lastLeg: null, lastReadoutIdx: null, policyConfig: _currentConversationConfig };   // T2 — resolved steps for promotion; lastValue/lastLeg — last read's result + source leg (CV-4-full fan-out + the DK-8f drill); lastReadoutIdx — that read's readout slot (DK-8i drops it when a spawn consumes the read)
   if (!state) _walkAbortFlag.requested = false;   // a FRESH chain clears a stale stop; a demo-resume (state passed) honors an in-flight one
   const _record = (m, clause, kind) => { st.ranSteps.push({ capabilityId: m.capabilityId, bindings: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {}, kind: kind || (m.candidate && m.candidate.kind) || null, clause: clause.text, intent: (m.candidate && m.candidate.intent) || clause.text }); st.chainGroundId = m.groundId; };
   // The demo of clause i performed it live → record the new capability for promotion, then continue from i+1.
@@ -4316,6 +4386,7 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
     _orchRunChain(appendMessage({ role: 'assistant', body: '' }), { tabId, clauses, firstMatch: null, ask, startIndex: i + 1, state: st });
   };
   _planLive++;   // v1338 (review E) — the chain is a stoppable long-run (CR-S1)
+  _ilBusy(msg, true);   // v1505 — the glyph thinks for the whole chain (each-runs, fan-outs, drills)
   try {
   for (let i = startIndex; i < total; i++) {
     if (_walkAbortFlag.requested) {   // v1338 — "stop" lands at the next clause boundary
@@ -4353,7 +4424,13 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
     if (_foLifecycle) {
       const _foCap = fanoutLimit(clause.text);   // DK-8g — "open the first as a case" / "open 3 cases" caps the spawn (the single-case test primitive)
       const fo = await _fanOutFromList(msg, st.lastValue, { i, total, clause: clause.text, lifecycle: _foLifecycle, leg: st.lastLeg || null, ...(_foCap ? { cap: _foCap } : {}) });   // clause → the per-child directive (CV-4-map); leg → the DK-8f detail drill
-      if (!fo.ok) return;
+      if (!fo.ok) { _orchFinalize(msg); return; }   // v1505 — settle + persist the failure line (was an unfinalized exit)
+      // DK-8i (v2.74.1501) — the desk transcript is the operator's LEDGER: a read CONSUMED by a case spawn drops its
+      // row dump from the desk (the rows live in the cases; fo.summary carries the found-count) — the live UX round:
+      // the desk showed the full record dump above "Opened 1 case…". Reduce (ephemeral) keeps its rows — the workers
+      // close, so the parent's transcript is where the read survives.
+      if (_foLifecycle === 'persistent' && st.lastReadoutIdx != null) st.readouts[st.lastReadoutIdx] = null;
+      st.lastReadoutIdx = null;
       st.readouts.push(fo.summary);
       st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'fanout', clause: clause.text, intent: clause.text });
       continue;
@@ -4373,6 +4450,7 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
           st.lastValue = cr.value;
           st.lastLeg = cr.leg;   // DK-8f — the SOURCE leg rides along (its `drill` marker lets a following fan-out pull each item's FULL record)
           st.readouts.push(lines ? lines.join('\n') : `Ran “${clause.text}”.`);
+          st.lastReadoutIdx = st.readouts.length - 1;   // DK-8i — this readout's slot (dropped if a spawn consumes the read)
           st.ranSteps.push({ capabilityId: cr.leg.key, bindings: {}, kind: 'connector', clause: clause.text, intent: cr.leg.name || clause.text });
           continue;
         }
@@ -4391,7 +4469,7 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
     if (m.candidate && m.candidate.kind === 'observation') {
       const r = await _runResolvedStep({ tabId, groundId: m.groundId, ask: clause.text, capabilityId: m.capabilityId, isRead: true });
       if (!r.ok) { _setMessageBody(msg, `Step ${i + 1} of ${total}: couldn’t read “${clause.text}” here — show me this step and I’ll keep going.`); _orchFinalize(msg); _orchOfferRecord(msg, { groundId: m.groundId, tabId, ask: clause.text, label: '● Show me this step', onAuthored: _resumeAfterDemo(i, clause, m.groundId) }); return; }
-      st.readouts.push(r.value); st.lastValue = r.value; _record(m, clause, 'observation');   // CV-4-full — a grounded read also feeds a following "open each…" fan-out (Slice B)
+      st.readouts.push(r.value); st.lastValue = r.value; st.lastReadoutIdx = st.readouts.length - 1; _record(m, clause, 'observation');   // CV-4-full — a grounded read also feeds a following "open each…" fan-out (Slice B); the slot drops if a spawn consumes it (DK-8i)
       continue;
     }
     const r = await _runResolvedStep({ tabId, groundId: m.groundId, ask: clause.text, capabilityId: m.capabilityId, bindings: m.bindings, policyConfig: st.policyConfig });
@@ -4404,14 +4482,15 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
     }
     _record(m, clause);
   }
-  _setMessageBody(msg, st.readouts.length ? st.readouts.join('\n') : `Done — ran all ${total} steps.`);
+  const _outs = st.readouts.filter((x) => x != null && x !== '');   // DK-8i — spawn-consumed reads left null slots
+  _setMessageBody(msg, _outs.length ? _outs.join('\n') : `Done — ran all ${total} steps.`);
   _orchFinalize(msg);   // v1338 (review D) — the chain summary survives a reload
   // T2 — the whole compound ran cleanly → offer to promote it to a durable composite (cache hit next time).
   _orchOfferSaveCompound(msg, { tabId, groundId: st.chainGroundId, ask, steps: st.ranSteps });
   // WF-1 — an AUTONOMOUS compound (a connector read / fan-out chain) has no Ground, so the composite saver above
   // bails; offer instead to bank it as a recallable WORKFLOW keyed to the ask (bank → recall → suggest-and-confirm).
   _maybeOfferWorkflowSave(msg, { ask, clauses, steps: st.ranSteps });
-  } finally { _planLive = Math.max(0, _planLive - 1); }   // v1338 (review E, CR-S1 pattern)
+  } finally { _planLive = Math.max(0, _planLive - 1); _ilBusy(msg, false); }   // v1338 (review E, CR-S1 pattern); v1505 — the glyph settles on EVERY chain exit, thrown paths included
 }
 
 // A "show me" record button (offered on a grounded MISS or after a failed run). No groundId → no-op.
@@ -4466,11 +4545,20 @@ function _orchOfferSaveCompound(msg, { tabId, groundId, ask, steps, plan = null 
 
 // Bank offer: only for an AUTONOMOUS compound (a connector/fan-out step — what the Ground-composite saver can't hold),
 // on an app instance, ≥2 clauses. The button banks {ask, subAsks = the clause texts}.
-function _maybeOfferWorkflowSave(msg, { ask, clauses, steps }) {
+// DK-8j (v2.74.1502) — and only for an UNBANKED one: the workflow-replay path and any matching re-ask both end at
+// this same chain tail, so the offer re-rendered after EVERY run of an already-saved workflow ("shows up each time,
+// even after 'remember this workflow' is selected" — the live nag). If the ask is content-identical to a banked
+// record (the replay) or would RECALL one (workflowMatch — the same matcher the front door suggests with), the
+// flywheel is already closed → no offer. Load failure → offer anyway (saveWorkflow dedups by content id regardless).
+async function _maybeOfferWorkflowSave(msg, { ask, clauses, steps }) {
   const appId = _memoryId();
   const autonomous = Array.isArray(steps) && steps.some((s) => s && (s.kind === 'connector' || s.kind === 'fanout'));
   const subAsks = (Array.isArray(clauses) ? clauses : []).map((c) => c && c.text).filter(Boolean);
   if (!appId || !autonomous || subAsks.length < 2 || !String(ask || '').trim()) return;
+  try {
+    const wfs = await _loadWorkflowsMerged();   // DK-8k — the gate sweeps every candidate key, same as recall
+    if (wfs.some((w) => w && w.id === workflowId(ask, subAsks)) || workflowMatch(ask, wfs)) return;   // already banked / recallable
+  } catch { /* offer anyway */ }
   const bar = _orchActionBar(msg);
   const name = document.createElement('input');   // WF-2 — an optional short alias to invoke it by ("standup")
   name.type = 'text'; name.placeholder = 'name it (optional, e.g. standup)'; name.style.cssText = 'width:13em;margin-right:6px;';
@@ -4479,7 +4567,11 @@ function _maybeOfferWorkflowSave(msg, { ask, clauses, steps }) {
     bar.remove();
     const nm = name.value.trim() || null;
     let saved = false;
-    try { saved = (await saveWorkflow(appId, { ask, subAsks, name: nm })).some((w) => w && w.ask === ask); } catch { /* */ }
+    try {
+      const list = await saveWorkflow(appId, { ask, subAsks, name: nm });
+      saved = list.some((w) => w && w.ask === ask);
+      if (saved) { try { _orchLog(`WORKFLOW ▸ banked "${String(ask).slice(0, 40)}" key=${appId} (${list.length} saved)`); } catch { /* */ } }   // DK-8k — the save is now diagnosable against a later recall miss
+    } catch { /* */ }
     const note = appendMessage({ role: 'assistant', body: saved
       ? (nm ? `Saved as “${nm}”. Say “${nm}” any time to run it.` : `Saved. Next time you ask something like “${String(ask).slice(0, 60)}…”, I’ll offer to run the whole workflow.`)
       : 'Couldn’t save that workflow.' });
@@ -4492,13 +4584,27 @@ function _maybeOfferWorkflowSave(msg, { ask, clauses, steps }) {
 // near-miss (shares vocab with a saved workflow), so the common unrelated ask pays nothing. The model's id is
 // VALIDATED (resolveWorkflowMatch) and the suggestion is still a CONFIRM (_offerWorkflowReplay), so a mismatch can't
 // silently replay a side-effectful chain.
+// DK-8k (v2.74.1504) — workflow READS merge every candidate memory key for this conversation. The live loop —
+// "Saved." → the SAME ask re-typed → NO suggestion + the offer again — means the save keyed one id and the recall
+// keyed another: `_memoryId()` is `instanceId || appId` (AP-0), and that fallback DRIFTS when a conversation's
+// instanceId is stamped between the two moments (setup completing, a reload rehydrating a patched record). Writes
+// stay canonical (`_memoryId()` at write time); reads sweep both keys so a drifted record is still found. The
+// `WORKFLOW ▸ banked / recall miss` traces make the next divergence diagnosable from a decisions download.
+function _workflowKeys() {
+  return [...new Set([_currentConversationInstanceId, _currentConversationAppId].filter(Boolean).map(String))];
+}
+async function _loadWorkflowsMerged() {
+  const out = [];
+  for (const k of _workflowKeys()) { try { out.push(...await loadWorkflows(k)); } catch { /* */ } }
+  return out;
+}
 async function _matchWorkflow(goal) {
-  const appId = _memoryId();
-  if (!appId) return null;
-  let workflows;
-  try { workflows = await loadWorkflows(appId); } catch { return null; }
+  if (!_workflowKeys().length) return null;
+  const workflows = await _loadWorkflowsMerged();
   const lex = workflowMatch(goal, workflows);
   if (lex) return lex;
+  // a miss with a non-empty bank is the diagnosable event (an empty bank is just a normal ask — no noise)
+  if (workflows.length) { try { _orchLog(`WORKFLOW ▸ recall miss "${String(goal).slice(0, 40)}" keys=${_workflowKeys().join('+')} (${workflows.length} saved)`); } catch { /* */ } }
   const candidates = workflowCandidates(workflows);
   if (!candidates.length || !workflowSharesVocab(goal, candidates)) return null;   // near-miss gate — no LLM otherwise
   try {
@@ -4519,14 +4625,14 @@ function _offerWorkflowReplay(goal, wf) {
   // was a race with fast dblclick; the synchronous disable closes it).
   bar.appendChild(_mkOnceBtn('▶ Run it', async () => {
     bar.remove();
-    try { await bumpWorkflowRun(_memoryId(), wf.id); } catch { /* */ }   // corroboration
+    try { await bumpWorkflowRun(wf.appId || _memoryId(), wf.id); } catch { /* */ }   // corroboration — the record's OWN key (DK-8k merged reads can surface the other key's record)
     const tab = await _orchActiveTab();
     const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
     _orchRunChain(m, { tabId, clauses: wf.subAsks.map((t) => ({ text: t })), firstMatch: null, ask: wf.ask });   // replay via the same chain runner
   }, { lockBar: true }));
   bar.appendChild(_mkBtn('No, interpret it', () => {
     bar.remove();
-    bumpWorkflowDismissed(_memoryId(), wf.id).catch(() => {});   // WF-2 — a wrong/unwanted match learns to stop nagging (twice-dismissed + never-run → suppressed)
+    bumpWorkflowDismissed(wf.appId || _memoryId(), wf.id).catch(() => {});   // WF-2 — a wrong/unwanted match learns to stop nagging (twice-dismissed + never-run → suppressed); the record's OWN key (DK-8k)
     _setMessageBody(m, 'Okay — interpreting it fresh.'); _orchFinalize(m);
     _tryInterpret(goal, { suggestWorkflows: false });   // re-run the front door WITHOUT re-suggesting (no loop)
   }));
@@ -4584,22 +4690,23 @@ async function _renderWorkflows() {
   const appId = _memoryId();
   if (!appId) { _setMessageBody(m, 'Open a desk — workflows are saved per desk.'); return; }
   let wfs = [];
-  try { wfs = await loadWorkflows(appId); } catch { /* */ }
+  try { wfs = await _loadWorkflowsMerged(); } catch { /* */ }   // DK-8k — the manage view sweeps every candidate key too
   if (!wfs.length) { _setMessageBody(m, 'No saved workflows yet. Run a multi-step ask (e.g. “get my open tickets and research each in a new conversation”), then click “Remember this workflow”.'); return; }
   _setMessageBody(m, `${wfs.length} saved workflow${wfs.length === 1 ? '' : 's'} :`);
   for (const wf of wfs) {
+    const wfKey = wf.appId || appId;   // DK-8k — operate on the record's OWN store
     const steps = Array.isArray(wf.subAsks) ? wf.subAsks.length : 0;
     const row = appendMessage({ role: 'assistant', body: `• ${wf.name ? `${wf.name} — ` : ''}${wf.ask}  (${steps} step${steps === 1 ? '' : 's'}${wf.runs ? `, run ${wf.runs}×` : ''})` });
     const bar = _orchActionBar(row);
     bar.appendChild(_mkOnceBtn('▶ Run', async () => {   // v1343 — a double-click no longer launches the chain twice
       const tab = await _orchActiveTab();
       const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
-      bumpWorkflowRun(appId, wf.id).catch(() => {});
+      bumpWorkflowRun(wfKey, wf.id).catch(() => {});
       _orchRunChain(appendMessage({ role: 'assistant', body: '' }), { tabId, clauses: (wf.subAsks || []).map((t) => ({ text: t })), firstMatch: null, ask: wf.ask });
     }));
     bar.appendChild(_mkBtn('🗑 Delete', async () => {
       bar.remove();
-      try { await deleteWorkflow(appId, wf.id); } catch { /* */ }
+      try { await deleteWorkflow(wfKey, wf.id); } catch { /* */ }
       _setMessageBody(row, `Deleted${wf.name ? ` “${wf.name}”` : ''}.`);
     }));
   }
@@ -6421,6 +6528,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
   const turn = { convId: _currentConversationId, appId: _currentConversationAppId, seed: _currentConversationSeed,
                  memoryId: _memoryId(), connections: _boundConnections(), target: _boundTarget() };
   const msg = appendMessage({ role: 'assistant', body: 'interpreting…', convId: turn.convId });
+  _ilBusy(msg, true);   // v1505 — the glyph thinks while the interpret runs
   const tab = await _orchActiveTab();
   const tabId = (tab && typeof tab.id === 'number') ? tab.id : null;
   const subTasks = await _childSummariesForCurrent();   // CV-4-reduce — THIS app's own children + their latest results (reason over them)
@@ -6564,6 +6672,7 @@ async function _tryInterpret(ask, { suggestWorkflows = true } = {}) {
 
   // couldn't dispatch (an act with only a primitive op, or a nav with no ground) → reasoned answer fallback.
   const m2 = appendMessage({ role: 'assistant', body: 'thinking…', convId: turn.convId });   // v1338 (review P1-1)
+  _ilBusy(m2, true);   // v1505 — the glyph thinks through the reasoned-answer call
   let answer = null;
   try { const r = await _orchReq('IL_ANSWER', { ask: goal, tabId, seed: turn.seed, connections: turn.connections, history, appId: turn.appId, memoryId: turn.memoryId }); answer = r && r.answer; } catch { /* */ }
   _setMessageBody(m2, answer ? `${answer}` : 'I’m not sure how to do that here — want to show me?');

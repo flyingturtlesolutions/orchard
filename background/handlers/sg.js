@@ -1074,6 +1074,23 @@ export function createSgMessageHandlers(ctx) {
       }
     },
 
+    // DK-8h (v2.74.1500) — CASE_BRIEF: a spawned case's opening message in the REQUESTOR's voice (its record
+    // dossier → 3-6 sentences of plain prose), replacing the raw field-dump card. Best-effort: null → the panel
+    // keeps the raw card. The dossier already rides the case's seed to the LLM — no new egress channel.
+    CASE_BRIEF: async (payload, _sender, sendResponse) => {
+      try {
+        const role = String(payload?.role ?? '').slice(0, 400);
+        const label = String(payload?.label ?? '').slice(0, 120);
+        const dossier = String(payload?.dossier ?? '').slice(0, 1600);
+        if (!dossier.trim()) { sendResponse({ success: true, brief: null }); return; }
+        const brief = await AnthropicService.briefCase({ role, label, dossier });
+        sendResponse({ success: true, brief });
+      } catch (err) {
+        Logger.error('background', `CASE_BRIEF failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
     // AS-5c (v2.74.1409) — SUGGEST_SETUP_EXAMPLE: a dynamic compound EXAMPLE instruction for a just-set-up app,
     // grounded in the sites the user picked (shown as a starter, NEVER executed). Best-effort; null → the panel keeps
     // its static example. Inputs are the app's own config (seed) + the picked site labels — no page/PII data.

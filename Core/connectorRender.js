@@ -430,3 +430,28 @@ export function fanoutItems(value, cap = 20) {
   }).filter((x) => x.label);
   return { items, total: list.length, capped: list.length > cap };
 }
+
+/**
+ * DK-8i (v2.74.1501) — the desk's META description of a case spawn: the desk transcript is the operator's LEDGER
+ * ("what was accomplished"), never the record dump (the rows live in the cases). PURE.
+ * "Found 13 items from “Warranty tasks by status” → opened the first as a case: “Magnolia Bay …” — nested under
+ * “Warranty desk” in the rail. Open it to work it."
+ * @param {{ found?:number, opened?:number, capped?:boolean, source?:string, deskTitle?:string, titles?:string[] }} args
+ * @returns {string}
+ */
+export function fanoutSummary({ found = 0, opened = 0, skipped = 0, capped = false, source = '', deskTitle = '', titles = [] } = {}) {
+  const src = source ? ` from “${source}”` : '';
+  // DK-8k (v2.74.1504) — the ALREADY-OPEN reasoning: a re-run that finds its case(s) open says so instead of
+  // silently duplicating (the live round: run 2 spawned a second identical case) or reading as a failure.
+  if (!opened && skipped) {
+    return `Found ${found} item${found === 1 ? '' : 's'}${src} — ${skipped === 1 ? 'it’s already open as a case' : `all ${skipped} are already open as cases`} under “${deskTitle}”. Nothing new to open.`;
+  }
+  if (!opened) return 'Couldn’t open any cases.';
+  const few = (Array.isArray(titles) && titles.length === opened && opened <= 3)
+    ? titles.map((t) => `“${String(t)}”`).join(', ') : '';
+  const openedTxt = opened === 1
+    ? `opened ${capped ? 'the first' : (found === 1 ? 'it' : 'one')} as a case${few ? `: ${few}` : ''}`
+    : `opened ${capped ? `the first ${opened}` : (opened === found ? 'each' : String(opened))} as cases${few ? ` (${few})` : ''}`;
+  const skipTxt = skipped ? ` (${skipped} already open, skipped)` : '';
+  return `Found ${found} item${found === 1 ? '' : 's'}${src} → ${openedTxt}${skipTxt} — nested under “${deskTitle}” in the rail. ${opened === 1 ? 'Open it to work it.' : 'Open any to work it.'}`;
+}

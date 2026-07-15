@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { primaryList, primaryObject, summarizeItem, renderConnectorLines, itemLabels, fanoutItems, dossierLines, primaryItemId, createdRecordId, itemFields, recordDetails, toWorkItem, toWorkItems } from './connectorRender.js';
+import { primaryList, primaryObject, summarizeItem, renderConnectorLines, itemLabels, fanoutItems, fanoutSummary, dossierLines, primaryItemId, createdRecordId, itemFields, recordDetails, toWorkItem, toWorkItems } from './connectorRender.js';
 
 describe('primaryList — find the data array', () => {
   it('prefers known data keys, falls back to any object-array, ignores scalar arrays', () => {
@@ -354,6 +354,40 @@ describe('DK-8e (v2.74.1496) — fanoutItems (a case is born with its record, no
     assert.equal(r.total, 30);
     assert.equal(r.capped, true);
     assert.deepEqual(fanoutItems(null).items, []);
+  });
+});
+
+describe('DK-8i (v2.74.1501) — fanoutSummary (the desk gets the operator LEDGER line, never the record dump)', () => {
+  it('the live shape: 1 found from a named read → opened it as a case, titled', () => {
+    const s = fanoutSummary({ found: 1, opened: 1, capped: false, source: 'Warranty tasks by status', deskTitle: 'Warranty desk', titles: ['Magnolia Bay - 634270000'] });
+    assert.ok(s.startsWith('Found 1 item from “Warranty tasks by status” → opened it as a case: “Magnolia Bay - 634270000”'), s);
+    assert.ok(s.includes('nested under “Warranty desk” in the rail. Open it to work it.'), s);
+    assert.ok(!/Address|City state|Claim number/i.test(s));   // the record dump NEVER rides the desk line
+  });
+  it('"open the first as a case" (capped 1 of 13) says so — count honesty', () => {
+    const s = fanoutSummary({ found: 13, opened: 1, capped: true, source: 'Warranty tasks by status', deskTitle: 'Warranty desk', titles: ['Magnolia Bay'] });
+    assert.ok(s.startsWith('Found 13 items'), s);
+    assert.ok(s.includes('opened the first as a case: “Magnolia Bay”'), s);
+  });
+  it('plural: opened each (uncapped) / the first N (capped); >3 titles stay off the line', () => {
+    const s = fanoutSummary({ found: 3, opened: 3, deskTitle: 'Warranty desk', titles: ['a', 'b', 'c'] });
+    assert.ok(s.includes('opened each as cases (“a”, “b”, “c”)'), s);
+    const big = fanoutSummary({ found: 13, opened: 5, capped: true, deskTitle: 'D', titles: ['a', 'b', 'c', 'd', 'e'] });
+    assert.ok(big.includes('opened the first 5 as cases —'), big);
+    assert.ok(!big.includes('“a”'), big);
+  });
+  it('zero opened → the honest failure line', () => {
+    assert.equal(fanoutSummary({ found: 4, opened: 0 }), 'Couldn’t open any cases.');
+    assert.equal(fanoutSummary(), 'Couldn’t open any cases.');
+  });
+  it('DK-8k — the ALREADY-OPEN reasoning: a re-run says its case is open, never duplicates or reads as failure', () => {
+    const s = fanoutSummary({ found: 1, opened: 0, skipped: 1, source: 'Warranty tasks by status', deskTitle: 'Warranty desk' });
+    assert.ok(s.includes('it’s already open as a case under “Warranty desk”'), s);
+    assert.ok(s.includes('Nothing new to open.'), s);
+    const all = fanoutSummary({ found: 3, opened: 0, skipped: 3, deskTitle: 'D' });
+    assert.ok(all.includes('all 3 are already open as cases'), all);
+    const mixed = fanoutSummary({ found: 3, opened: 2, skipped: 1, deskTitle: 'D', titles: ['a', 'b'] });
+    assert.ok(mixed.includes('(1 already open, skipped)'), mixed);
   });
 });
 
