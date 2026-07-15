@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites, namesAnySite, isForeachAsk, isFanoutAsk, innerDirective, fanoutLifecycle, isEphemeralFanout, isReduceAsk, personaHint } from './orchChain.js';
+import { decomposeAsk, isCompoundAsk, assembleSequentialPlan, looksComplex, buildCompositeCapability, liftControlFlow, deriveCompositeSignature, deriveCompositeIntent, liftConditional, namesMultipleSites, namesAnySite, isForeachAsk, isFanoutAsk, innerDirective, fanoutLifecycle, fanoutLimit, isEphemeralFanout, isReduceAsk, personaHint } from './orchChain.js';
 import { validatePlan } from './orchPlan.js';
 import { walkPlan } from './orchRun.js';   // ORCH-L — the pure interpreter, to RUN the lifted open-each loop end-to-end
 
@@ -554,5 +554,41 @@ describe('DK-8d (v2.74.1495) — innerDirective survives a LEADING foreach wrapp
   });
   it('a stripped-wrapper husk ("for"/"per") never becomes a directive', () => {
     assert.equal(innerDirective('for each division with new tasks, open a case per task'), '');
+  });
+});
+
+describe('DK-8g (v2.74.1498) — fanoutLimit (the single-case test primitive)', () => {
+  it('"open the first as a case" / "open one case" → 1; "open 3 cases" → 3', () => {
+    assert.equal(fanoutLimit('list new warranty tasks for Las Vegas and open the first as a case'), 1);
+    assert.equal(fanoutLimit('open one case for each'), 1);
+    assert.equal(fanoutLimit('open a single case'), 1);
+    assert.equal(fanoutLimit('open the first 2 as cases'), 2);
+    assert.equal(fanoutLimit('open 3 cases'), 3);
+  });
+  it('no stated count → null (the default cap applies)', () => {
+    assert.equal(fanoutLimit('for each new task, open a case'), null);
+    assert.equal(fanoutLimit('open each as a case'), null);
+    assert.equal(fanoutLimit(''), null);
+  });
+});
+
+describe('DK-8g fix (v2.74.1499) — a SINGULAR case-spawn clause is a fan-out of one (the live teach-gap miss)', () => {
+  it('the EXACT live clause + the suggested phrasing route: fanout, limit 1, persistent, NO directive', () => {
+    for (const c of ['open the first as a case', 'open the first task as a case']) {
+      assert.equal(isFanoutAsk(c), true, c);
+      assert.equal(fanoutLimit(c), 1, c);
+      assert.equal(fanoutLifecycle(c), 'persistent', c);
+      assert.equal(innerDirective(c), '', c);
+    }
+  });
+  it('the full ask decomposes to [read, spawn] and clause 2 gates correctly', () => {
+    const clauses = decomposeAsk('list new warranty tasks for Las Vegas and open the first as a case').map((c) => c.text);
+    assert.equal(clauses.length, 2);
+    assert.equal(isFanoutAsk(clauses[1]), true, clauses[1]);
+  });
+  it('"as a case" (the article) counts as the case target; a countless singular DOM ask does NOT fan out', () => {
+    assert.equal(isFanoutAsk('open one case'), true);          // count + case target
+    assert.equal(isFanoutAsk('open the first result'), false); // count, NO case/conversation target → DOM ask
+    assert.equal(isFanoutAsk('open the case file cabinet'), false);   // no count, no foreach → never
   });
 });

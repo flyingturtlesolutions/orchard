@@ -384,3 +384,49 @@ export function itemLabels(value, cap = 20) {
   }).filter(Boolean);
   return { labels, total: list.length, capped: list.length > cap };
 }
+
+/**
+ * DK-8e (v2.74.1496) — the fan-out's STRUCTURED items: a spawned CASE carries its RECORD + identity, never just a
+ * display label (live: each case held only "This case handles: #01 Eastern PA · …" — no fields, no ids — so "task
+ * details" re-fetched from a mangled label and mis-resolved the division). Per row:
+ *   label  — the human title WITHOUT a leading #id (an id/index prefix poisoned division resolution),
+ *   detail — bounded "Key: value" lines: the display id + status + the record's salient fields (recordDetails —
+ *            bodies never included) + every scalar `…Id` join key (TaskId etc. — the deterministic drill identity).
+ * Labels/details are UNTRUSTED page text — callers fence them as data, never instructions.
+ */
+/**
+ * DK-8f (v2.74.1497) — ONE record → dossier lines ("Key: value"), shared by the fan-out's row projection AND the
+ * drilled DETAIL record: display id + status + the salient fields (recordDetails — bodies never included) + every
+ * scalar `…Id` join key. `max` caps the line count (a drilled full record earns a bigger budget than a list row). PURE.
+ */
+export function dossierLines(o, { max = 16 } = {}) {
+  if (!o || typeof o !== 'object') return [];
+  const it = summarizeItem(o, { full: true });
+  const lines = [];
+  if (it.id != null && it.id !== '') lines.push(`Id: ${it.id}`);
+  if (it.status != null && it.status !== '') lines.push(`Status: ${it.status}`);
+  for (const [k, v] of Object.entries(recordDetails(o))) lines.push(`${k}: ${v}`);
+  for (const [k, v] of Object.entries(o)) {   // the internal join keys (TaskId …) — recordDetails may rank them out
+    if (/[a-z]Id$/.test(k) && v != null && v !== '' && typeof v !== 'object' && !lines.some((l) => l.toLowerCase().startsWith(`${_label(k).toLowerCase()}:`))) lines.push(`${_label(k)}: ${v}`);
+  }
+  // DK-8g (v2.74.1498) — the record's own NARRATIVE (description / notes / vendor explanation — content-classed
+  // fields recordDetails deliberately excludes as the SWEEP-prompt privacy lever). A case's dossier is the item's
+  // own working file — its narrative belongs IN it (bounded; the caller fences it as data, never instructions).
+  if (it.body) lines.push(`Notes: ${it.body.slice(0, 400)}`);
+  for (const [k, v] of Object.entries(o)) {   // long text fields under non-standard names (VendorExplanation …)
+    if (typeof v === 'string' && v.length >= 40 && !/^https?:\/\//.test(v) && !lines.some((l) => l.toLowerCase().startsWith(`${_label(k).toLowerCase()}:`)) && /explan|reason|note|comment|instruct|descript/i.test(k)) {
+      lines.push(`${_label(k)}: ${v.slice(0, 400)}`);
+    }
+  }
+  return lines.slice(0, max);
+}
+
+export function fanoutItems(value, cap = 20) {
+  const list = primaryList(value) || [];
+  const items = list.slice(0, cap).map((o) => {
+    const it = summarizeItem(o);
+    const label = (it.title || itemFields(o, { max: 2 }).map(([, v]) => v).join(' · ') || 'item').trim();
+    return { label, detail: dossierLines(o).join('\n'), row: o };   // DK-8f — the RAW row rides too (the drill's join key source)
+  }).filter((x) => x.label);
+  return { items, total: list.length, capped: list.length > cap };
+}

@@ -3,7 +3,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { primaryList, primaryObject, summarizeItem, renderConnectorLines, itemLabels, primaryItemId, createdRecordId, itemFields, recordDetails, toWorkItem, toWorkItems } from './connectorRender.js';
+import { primaryList, primaryObject, summarizeItem, renderConnectorLines, itemLabels, fanoutItems, dossierLines, primaryItemId, createdRecordId, itemFields, recordDetails, toWorkItem, toWorkItems } from './connectorRender.js';
 
 describe('primaryList — find the data array', () => {
   it('prefers known data keys, falls back to any object-array, ignores scalar arrays', () => {
@@ -329,5 +329,60 @@ describe('DK-3 (DESIGN_desks.md §6) — WorkItem normalizer (toWorkItem / toWor
   it('safe on null / scalar rows', () => {
     assert.deepEqual(toWorkItem(null, { source: 'X' }), { source: 'X', id: '', subject: '', state: '', owner: '', url: '', corrKeys: [] });
     assert.deepEqual(toWorkItems(null), []);
+  });
+});
+
+describe('DK-8e (v2.74.1496) — fanoutItems (a case is born with its record, not a label)', () => {
+  const VS_ROW = { division: 'Las Vegas', TaskId: 2841790, TaskNumber: '4090740', ClaimNumber: '01', AddressLine1: '811 CALM CRYSTAL CT', CityStateZip: 'LAS VEGAS, NV 89123', Age: '004', AllowedAmount: 0, IsNew: true };
+  it('label = the human title with NO leading #id (the id prefix poisoned division resolution live)', () => {
+    const { items } = fanoutItems({ results: [VS_ROW] });
+    assert.equal(items.length, 1);
+    assert.ok(!items[0].label.startsWith('#'), items[0].label);
+    assert.ok(items[0].label.includes('Las Vegas'), items[0].label);
+  });
+  it('detail carries the display id, the record fields, AND the internal …Id join keys (TaskId — the drill identity)', () => {
+    const { items } = fanoutItems({ results: [VS_ROW] });
+    const d = items[0].detail;
+    assert.ok(/^Id: /m.test(d), 'display id line');
+    assert.ok(/Task id: 2841790/i.test(d), 'TaskId join key rides the dossier');
+    assert.ok(/811 CALM CRYSTAL CT|Address/i.test(d), 'record fields present');
+  });
+  it('caps + totals honest; empty/listless-safe', () => {
+    const many = { results: Array.from({ length: 30 }, (_, i) => ({ id: i + 1, subject: `T${i + 1}` })) };
+    const r = fanoutItems(many, 20);
+    assert.equal(r.items.length, 20);
+    assert.equal(r.total, 30);
+    assert.equal(r.capped, true);
+    assert.deepEqual(fanoutItems(null).items, []);
+  });
+});
+
+describe('DK-8f (v2.74.1497) — dossierLines + the raw row rides the fan-out item (the drill join source)', () => {
+  it('fanoutItems carries the RAW row (the drill reads its join key from it)', () => {
+    const row = { TaskId: 10833116, AddressLine1: '8317 Alexander Court', ClaimNumber: '03' };
+    const { items } = fanoutItems({ results: [row] });
+    assert.equal(items[0].row.TaskId, 10833116);
+  });
+  it('dossierLines: a drilled DETAIL record earns a bigger budget (max), null-safe', () => {
+    const detail = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`Field${i}`, `v${i}`]));
+    detail.TaskId = 10833116; detail.status = 'new';
+    assert.ok(dossierLines(detail, { max: 24 }).length <= 24);
+    assert.ok(dossierLines(detail, { max: 24 }).length > dossierLines(detail, { max: 8 }).length);
+    assert.deepEqual(dossierLines(null), []);
+  });
+});
+
+describe('DK-8g (v2.74.1498) — the dossier carries the record NARRATIVE (vendor explanation etc.)', () => {
+  it('a content-classed field (description) lands as Notes; a named explanation field lands under its label', () => {
+    const detail = { TaskId: 1, AddressLine1: '811 Calm Crystal Ct', description: 'Homeowner reports the master bath switch is dead after the storm.', VendorExplanation: 'Replaced the failed dimmer module; homeowner verified operation before departure.' };
+    const lines = dossierLines(detail, { max: 24 });
+    assert.ok(lines.some((l) => /^(Notes|Description): Homeowner reports/.test(l)), lines.join('|'));
+    assert.ok(lines.some((l) => /^Vendor explanation: Replaced the failed dimmer/.test(l)), lines.join('|'));
+  });
+  it('a narrative field is never duplicated when recordDetails already listed it; the cap holds', () => {
+    const long = 'Replaced the failed dimmer module; homeowner verified operation before departure.';
+    const lines = dossierLines({ TaskId: 1, VendorExplanation: long }, { max: 24 });
+    assert.equal(lines.filter((l) => l.includes('Replaced the failed dimmer')).length, 1, lines.join('|'));
+    assert.ok(lines.length <= 24);
   });
 });

@@ -24,7 +24,7 @@ import { createDevBridge } from './Services/Chat/devBridge.js';   // DB-1b (v2.7
 import { renderMarkdown, wireCodeCopyButtons } from './markdown.js';
 import { createParamForm, promptForParams } from './Services/ParamForm.js';
 import { planAssistantTurn } from './Core/orchTurn.js';   // ORCH-C — grounded turn-brain (decision → say + action)
-import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, isFanoutAsk, innerDirective, namesMultipleSites, namesAnySite, fanoutLifecycle, isReduceAsk, personaHint } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; isFanoutAsk/innerDirective — CV-4 "open each in a conversation" + the per-child task; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X); personaHint — Q2 cost-gate for the per-child persona extractor
+import { decomposeAsk, isCompoundAsk, looksComplex, isForeachAsk, isFanoutAsk, innerDirective, namesMultipleSites, namesAnySite, fanoutLifecycle, fanoutLimit, isReduceAsk, personaHint } from './Core/orchChain.js';   // ORCH-X — decompose / complexity gate + foreach routing; isFanoutAsk/innerDirective — CV-4 "open each in a conversation" + the per-child task; namesMultipleSites/namesAnySite — cross-site pre-filters (T3X); personaHint — Q2 cost-gate for the per-child persona extractor
 import { walkPlan, scanPlan } from './Core/orchRun.js';   // ORCH-L — the pure control-flow interpreter (foreach / loop / gate); scanPlan — THE recursive plan walker (CR-D7)
 import { builtinApp, preconfiguredDesks } from './Core/appCatalog.js';   // CV-3/DK-6 — the builtin desk catalog: preconfiguredDesks() = the flat gallery's cards (sites built in); builtinApp(appId) → the def behind a conversation (AS-2). The TYPE level (builtinApps/presetsForType) is retired from the UX (DK-6).
 import { isConditionalAsk, evaluatePredicate } from './Core/orchAnalyze.js';   // ORCH-A — predicate → gate (conditional routing + the analysis)
@@ -50,7 +50,7 @@ import { fillWriteBody } from './Core/recipeFromObservedWrite.js';   // v1342 �
 import { resolveRideParam, filterRowsByText } from './Core/rideParamResolve.js';   // CX-9b (v1434) — human value → canonical id (the `resolve` marker) + the drill row join
 import { armable as rideArmable } from './Core/rideRecipe.js';   // CX-9b — the drill's via-recipe honors the §18 arm guard
 import { legRef } from './Core/legRef.js';   // v1342 — unified ref key for dispatch + interpret replay lookup
-import { renderConnectorLines, itemLabels, primaryItemId, createdRecordId, primaryObject, primaryList } from './Core/connectorRender.js';   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
+import { renderConnectorLines, itemLabels, fanoutItems, dossierLines, primaryItemId, createdRecordId, primaryObject, primaryList } from './Core/connectorRender.js';   // DK-8e/f — fanoutItems + dossierLines: the read→case fan-out's STRUCTURED items (label + record detail, drilled at spawn)   // CX-4c — generic render of ANY connector read; CV-4-full — itemLabels: read list → fan-out labels; CX-7e/f — primaryItemId + createdRecordId: the record a lookup RETURNED / a write CREATED (for "show it"); CX-9j — primaryObject/primaryList: the field-followup's record resolver
 import { BUILTIN_LEGS, availableBuiltins, toOfferedLeg } from './Core/palette.js';   // IL-3b — the Browser/Self leg registry
 import { buildRailTree } from './Core/railTree.js';   // CV-3c — the pure flush-left accordion model
 import { selectRecentTurns } from './Core/recentTurns.js';   // Q1 — the recent-turn window selector (follow-up continuity for the IL)
@@ -1569,6 +1569,11 @@ async function _createSubTasks(app, items) {
   for (const spec of specs) {
     try {
       const conv = await ConversationStore.create({ title: spec.title, kind: 'app', seed: spec.seed, parentId: spec.parentId, appId: spec.appId, icon: app.icon || null, config: spec.config, instanceId: app.instanceId || app.appId || null, presetId: app.presetId || app.appId || null });
+      // DK-8e (v2.74.1496) — the case opens WITH its record on screen (the dossier's first page): the same quiet
+      // upsert the seed-directive note uses, so it's there before the case is ever opened. Plain text (escape-first).
+      if (spec.detail) {
+        try { await ConversationStore.updateMessage(conv.id, 'case_record', { role: 'assistant', body: `${spec.title}\n\n${spec.detail}` }, { upsert: true }); } catch { /* the record still rides the seed */ }
+      }
       created.push(conv);
     } catch (e) { try { console.warn('[chat] sub-task create failed:', e?.message); } catch { /* */ } }
   }
@@ -1594,11 +1599,36 @@ async function _spawnSubTasks(listText) {
 // read (itemLabels) instead of a typed comma-list. Capped + honest ("N of M" — never a silent truncation). Sets
 // `msg` to the outcome and returns {ok, summary}; ok:false → the chain stops with the message already shown.
 // UNTRUSTED: each label becomes a sub-task title/seed (escaped on render), never an instruction.
-async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', lifecycle = 'persistent' } = {}) {
+async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', lifecycle = 'persistent', leg = null } = {}) {
   const { app, error } = await _fanoutParentApp();
   if (error) { const s = `Ran ${i} of ${total}. ${error}`; _setMessageBody(msg, s); return { ok: false, summary: s }; }
-  const { labels, total: n, capped } = itemLabels(value, cap);
-  if (!labels.length) { const s = `Ran ${i} of ${total}. Nothing to open — the previous step returned no list of items.`; _setMessageBody(msg, s); return { ok: false, summary: s }; }
+  // DK-8e (v2.74.1496) — STRUCTURED items (label + record detail), not display labels: each case is born holding
+  // its record + join ids (the live gap: cases were empty shells that re-fetched from a mangled label).
+  const { items: foItems, total: n, capped } = fanoutItems(value, cap);
+  if (!foItems.length) { const s = `Ran ${i} of ${total}. Nothing to open — the previous step returned no list of items.`; _setMessageBody(msg, s); return { ok: false, summary: s }; }
+  // DK-8f (v2.74.1497) — the dossier DRILLS: a LIST row is a summary (the live gap round 2 — no vendor explanation,
+  // no issued date); the item's FULL record lives behind the source leg's declared `drill` (vs_warranty_task by
+  // TaskId). Pull it per case at spawn — the case is born with the DETAIL record. Best-effort per item (a failed
+  // drill keeps the row projection); same session, sequential, capped by the fan-out cap.
+  if (leg && leg.tool && leg.tool.drill && leg.tool.drill.via && leg.tool.drill.from) {
+    const dj = leg.tool.drill;
+    const viaLeg = await _rideDrillLeg(leg, dj.via, leg.tool.groundId || null);
+    if (viaLeg) {
+      for (let k = 0; k < foItems.length; k++) {
+        const row = foItems[k].row || {};
+        const joinId = row[dj.from];
+        if (joinId == null || joinId === '') continue;
+        _setMessageBody(msg, `Step ${i + 1} of ${total}: pulling the full record ${k + 1}/${foItems.length} (${foItems[k].label})…`);
+        const dr = await _rideExecOnce(viaLeg, { [dj.param || 'id']: joinId }, { groundId: leg.tool.groundId || null });
+        if (dr.ok) {
+          const detailObj = primaryObject(dr.value) || dr.value;
+          const lines = dossierLines(detailObj, { max: 24 });   // the full record earns a bigger budget than a row
+          if (lines.length) foItems[k] = { ...foItems[k], detail: lines.join('\n') };
+        }
+      }
+      try { _orchLog(`RIDE_DRILL ▸ dossier ${leg.tool.recipeId || leg.key} → ${dj.via} × ${foItems.length} (fan-out spawn)`); } catch { /* */ }
+    }
+  }
   // Q2 (v2.74.1263) — a PERSONA-bearing fan-out ("… and respond in the customer's voice") needs the {task, persona}
   // split: the lexical innerDirective reads "in the customer's voice" as the "in a …" wrapper and drops the persona.
   // Behind the personaHint cost gate (no LLM otherwise). The persona composes into each child's SEED so every worker
@@ -1615,7 +1645,7 @@ async function _fanOutFromList(msg, value, { i, total, cap = 20, clause = '', li
       }
     } catch { /* extraction is best-effort; keep innerDirective + the app's own seed */ }
   }
-  const created = await _createSubTasks(childApp, labels);
+  const created = await _createSubTasks(childApp, foItems);
   // EPHEMERAL (v2.74.1262) — a REDUCE over the set: the workers run → the parent SYNTHESIZES their findings → the
   // workers CLOSE (delete). No durable sub-tasks; the deliverable is the summary. Auto-runs (the ask was the intent).
   if (lifecycle === 'ephemeral' && created.length) {
@@ -4276,7 +4306,7 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
   // v2.74.1338 (review B/E) — the chain snapshots its ORIGIN policy config once (a mid-run conversation switch
   // must not re-gate the steps under a different app's writePolicy), and registers with the CR-S1 liveness
   // refcount so "stop" reaches a runaway chain (it was invisible to _stopLongRunning before).
-  const st = state || { readouts: [], ranSteps: [], chainGroundId: null, lastValue: null, policyConfig: _currentConversationConfig };   // T2 — resolved steps for promotion; lastValue — last read's result (CV-4-full fan-out source)
+  const st = state || { readouts: [], ranSteps: [], chainGroundId: null, lastValue: null, lastLeg: null, policyConfig: _currentConversationConfig };   // T2 — resolved steps for promotion; lastValue/lastLeg — last read's result + source leg (CV-4-full fan-out + the DK-8f drill)
   if (!state) _walkAbortFlag.requested = false;   // a FRESH chain clears a stale stop; a demo-resume (state passed) honors an in-flight one
   const _record = (m, clause, kind) => { st.ranSteps.push({ capabilityId: m.capabilityId, bindings: (m.bindings && typeof m.bindings === 'object') ? m.bindings : {}, kind: kind || (m.candidate && m.candidate.kind) || null, clause: clause.text, intent: (m.candidate && m.candidate.intent) || clause.text }); st.chainGroundId = m.groundId; };
   // The demo of clause i performed it live → record the new capability for promotion, then continue from i+1.
@@ -4321,7 +4351,8 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
     const _foLifecycle = isFanoutAsk(clause.text) ? fanoutLifecycle(clause.text)
       : (isReduceAsk(clause.text) && st.lastValue != null && itemLabels(st.lastValue, 1).labels.length >= 1) ? 'ephemeral' : null;
     if (_foLifecycle) {
-      const fo = await _fanOutFromList(msg, st.lastValue, { i, total, clause: clause.text, lifecycle: _foLifecycle });   // clause → the per-child directive (CV-4-map)
+      const _foCap = fanoutLimit(clause.text);   // DK-8g — "open the first as a case" / "open 3 cases" caps the spawn (the single-case test primitive)
+      const fo = await _fanOutFromList(msg, st.lastValue, { i, total, clause: clause.text, lifecycle: _foLifecycle, leg: st.lastLeg || null, ...(_foCap ? { cap: _foCap } : {}) });   // clause → the per-child directive (CV-4-map); leg → the DK-8f detail drill
       if (!fo.ok) return;
       st.readouts.push(fo.summary);
       st.ranSteps.push({ capabilityId: null, bindings: {}, kind: 'fanout', clause: clause.text, intent: clause.text });
@@ -4340,6 +4371,7 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
         if (cr && cr.ok) {
           const lines = renderConnectorLines(cr.value, { name: cr.leg.name || 'Results' });
           st.lastValue = cr.value;
+          st.lastLeg = cr.leg;   // DK-8f — the SOURCE leg rides along (its `drill` marker lets a following fan-out pull each item's FULL record)
           st.readouts.push(lines ? lines.join('\n') : `Ran “${clause.text}”.`);
           st.ranSteps.push({ capabilityId: cr.leg.key, bindings: {}, kind: 'connector', clause: clause.text, intent: cr.leg.name || clause.text });
           continue;

@@ -281,13 +281,13 @@ const _ANALYSIS = /\b(research|investigate|analy[sz]e|review|assess|evaluate|stu
 // Case rename (v2.74.1494) — the spawned-child noun is CASE (DESIGN_desks.md §2): "open a case for each new task"
 // must route to the fan-out, not the teach gap (live miss). ANCHORED patterns only — a bare "case" is a common
 // word ("in case", "in that case"), so match it as a TARGET (open/a/new/own/per-each case), never as a stray noun.
-const _CONV_TARGET = /\b(conversations?|sub-?tasks?|chats?)\b|\b(?:sub|new|separate|own|individual)[\s-]*threads?\b|\b(?:open|create|start|spawn)\s+(?:a\s+)?(?:new\s+)?cases?\b|\bcases?\s+(?:per|for\s+each)\b|\b(?:its|their)\s+own\s+case\b|\bas\s+cases?\b/i;
+const _CONV_TARGET = /\b(conversations?|sub-?tasks?|chats?)\b|\b(?:sub|new|separate|own|individual)[\s-]*threads?\b|\b(?:open|create|start|spawn)\s+(?:[a-z0-9-]+\s+){0,3}?cases?\b|\bcases?\s+(?:per|for\s+each)\b|\b(?:its|their)\s+own\s+case\b|\bas\s+(?:a\s+|new\s+)?cases?\b/i;   // v1499 — "as A case" + verb-within-3-tokens ("open ONE case") — the live singular clause missed on both
 // A REDUCE over the whole set — ONE answer ABOUT all items ("summarize them", "a digest", "compare", "rank"). Marks an
 // EPHEMERAL fan-out: the per-item workers are map-stage compute, disposed once the reduce is rendered in the parent.
 const _REDUCE = /\b(summari[sz]e|summary|digest|consolidate|combined?|compare|contrast|rank|overview|recap|round-?up|tl;?dr|aggregate)\b/i;
 // An explicit PERSIST signal — keep each item as a durable workspace ("in a new conversation/thread/sub-task", "keep
 // each", "in its own chat"). OVERRIDES ephemeral: an explicit keep persists the children even alongside a reduce.
-const _PERSIST = /\b(?:in|into|as)\b[^.]*\b(conversations?|sub-?tasks?|chats?|threads?)\b|\bkeep\s+(?:each|them|the)\b|\b(?:its|their)\s+own\b|\b(?:open|create|start|spawn)\s+(?:a\s+)?(?:new\s+)?cases?\b|\bas\s+cases?\b/i;   // Case rename (v1494) — an opened case is a durable child (verb-anchored — bare "in case" never matches)
+const _PERSIST = /\b(?:in|into|as)\b[^.]*\b(conversations?|sub-?tasks?|chats?|threads?)\b|\bkeep\s+(?:each|them|the)\b|\b(?:its|their)\s+own\b|\b(?:open|create|start|spawn)\s+(?:[a-z0-9-]+\s+){0,3}?cases?\b|\bas\s+(?:a\s+|new\s+)?cases?\b/i;   // Case rename (v1494; article + token-window v1499) — an opened case is a durable child (verb-anchored — bare "in case" never matches)
 
 /** A FAN-OUT ask: a foreach whose per-item task is a CONVERSATION/ANALYSIS (one child conversation per item), not a
  *  page open-each. PURE. CV-4-full routes these to the conversation fan-out OVER THE PRIOR STEP'S read (enumerate →
@@ -296,7 +296,11 @@ const _PERSIST = /\b(?:in|into|as)\b[^.]*\b(conversations?|sub-?tasks?|chats?|th
  *  only test, which missed "research each" and (post-rename) "open each in a sub thread". */
 export function isFanoutAsk(ask) {
   const s = String(ask || '');
-  return isForeachAsk(s) && (_ANALYSIS.test(s) || _CONV_TARGET.test(s));
+  // DK-8g (v2.74.1499) — an explicit COUNT stands in for the quantifier: "open the FIRST task as a case" is a
+  // fan-out of one (the live miss: no "each" → the gate never fired → the teach gap). Still requires the
+  // conversation/case TARGET (or an analysis verb under a real foreach) — "open the first result" stays a DOM ask.
+  return (isForeachAsk(s) && (_ANALYSIS.test(s) || _CONV_TARGET.test(s)))
+    || (fanoutLimit(s) != null && _CONV_TARGET.test(s));
 }
 
 /** The LIFECYCLE of a fan-out's children: 'ephemeral' | 'persistent'. PURE. v2.74.1262 — PERSISTENCE IS THE DEFAULT
@@ -310,6 +314,20 @@ export function fanoutLifecycle(ask) {
 
 /** Convenience: is this fan-out EPHEMERAL (its workers are disposed after the reduce)? PURE. */
 export function isEphemeralFanout(ask) { return fanoutLifecycle(ask) === 'ephemeral'; }
+
+/**
+ * DK-8g (v2.74.1498) — an explicit COUNT in a fan-out ask caps the spawn ("open the first as a case" → 1,
+ * "open 3 cases" → 3) — the single-case testing/iteration primitive. PURE. null = no stated limit (the default cap).
+ */
+export function fanoutLimit(ask) {
+  const s = String(ask || '');
+  if (/\b(?:open|create|spawn)\s+(?:just\s+)?(?:one|a\s+single)\b/i.test(s)) return 1;
+  const first = s.match(/\b(?:open|create|spawn)\s+(?:the\s+)?first(?:\s+(\d{1,2}))?\b/i);
+  if (first) return Math.max(1, Number(first[1] || 1));
+  const n = s.match(/\b(?:open|create|spawn)\s+(\d{1,2})\s+(?:cases?|conversations?|sub-?tasks?)\b/i);
+  if (n) return Math.max(1, Number(n[1]));
+  return null;
+}
 
 /** Is this clause a REDUCE over a set (summarize/digest/compare …)? PURE. Used to AUTO-fan-out a bare reduce over a
  *  freshly-read list ("get my tickets and summarize" → a worker per item, ephemeral) even WITHOUT an explicit "each". */
