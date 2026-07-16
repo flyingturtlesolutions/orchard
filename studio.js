@@ -4037,6 +4037,40 @@ $('btn-add-ground').addEventListener('click', () => openGroundForm(null));
 $('btn-cancel-ground').addEventListener('click', () => closeGroundForm());
 $('btn-save-ground').addEventListener('click', saveGroundFromForm);
 
+// v2.74.1541 — "⇄ Merge duplicates": the STUDIO door for ground dedup. The chat route proved convoluted AND
+// hazardous — the LLM front door once read "dedupe grounds" as a Zendesk ticket-merge WRITE proposal (the HITL
+// belt caught it) — a library-maintenance action belongs on the library surface, deterministic end to end.
+// DETECT_DUPLICATE_GROUNDS (read-only) → one confirm() per cluster → MERGE_GROUNDS (canonical = richest by live
+// capability count; moves sgCapabilities + per-Ground artifacts, unions urlPatterns, deletes the emptied
+// siblings, reconciles cloud). Progress rides the button label; outcomes toast (both existing conventions).
+async function dedupeGroundsFlow() {
+  const btn = $('btn-dedupe-grounds');
+  const reset = () => { if (btn) { btn.disabled = false; btn.textContent = '⇄ Merge duplicates'; } };
+  if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
+  let r = null;
+  try { r = await new Promise((res) => chrome.runtime.sendMessage({ type: 'DETECT_DUPLICATE_GROUNDS', payload: {} }, res)); } catch { r = null; }
+  const clusters = (r && r.success && Array.isArray(r.clusters)) ? r.clusters : null;
+  if (!clusters) { toast(`Couldn't scan Grounds${r && r.error ? ` — ${r.error}` : ''}`); reset(); return; }
+  if (!clusters.length) { toast(`No duplicates — your ${r.groundCount || 0} Ground${r.groundCount === 1 ? ' is' : 's are all'} distinct site${r.groundCount === 1 ? '' : 's'}`); reset(); return; }
+  let merged = 0, failed = 0, moved = 0, removed = 0;
+  for (const c of clusters) {
+    const gs = Array.isArray(c.grounds) ? c.grounds : [];
+    if (gs.length < 2) continue;
+    const lines = gs.map((g) => `  • ${g.host || g.name || g.id}${g.capabilityCount ? ` — ${g.capabilityCount} capabilit${g.capabilityCount === 1 ? 'y' : 'ies'}` : ' — empty'}`).join('\n');
+    const tag = c.confidence === 'host' ? 'same site' : 'same brand';
+    if (!confirm(`Merge "${c.key}" (${tag} — ${gs.length} Grounds)?\n\n${lines}\n\nEverything moves onto the richest Ground; the emptied duplicates are deleted. Nothing is lost.`)) continue;
+    if (btn) btn.textContent = `Merging ${c.key}…`;
+    let m = null;
+    try { m = await new Promise((res) => chrome.runtime.sendMessage({ type: 'MERGE_GROUNDS', payload: { groundIds: gs.map((g) => g.id) } }, res)); } catch { m = null; }
+    if (m && m.success) { merged++; moved += m.movedCapabilities || 0; removed += m.absorbed || 0; }
+    else { failed++; toast(`Couldn't merge "${c.key}"${m && m.error ? ` — ${m.error}` : ''}`); }
+  }
+  if (merged) { toast(`✓ Merged ${merged} cluster${merged === 1 ? '' : 's'} — moved ${moved} capabilit${moved === 1 ? 'y' : 'ies'}, removed ${removed} duplicate Ground${removed === 1 ? '' : 's'}`); await refreshGroundList(); }
+  else if (!failed) toast('Nothing merged');
+  reset();
+}
+$('btn-dedupe-grounds').addEventListener('click', () => { void dedupeGroundsFlow(); });
+
 async function deleteGround(id) {
   await new Promise((resolve) => {
     chrome.runtime.sendMessage({ type: 'SYNC_BRIDGE', kind: 'ground', id, action: 'deleted' }, () => resolve());

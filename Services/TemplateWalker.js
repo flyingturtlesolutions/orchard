@@ -1365,6 +1365,16 @@ export class TemplateWalker {
             }
           } catch { /* tab closed — fine */ }
         }
+        // v2.74.1542 — OPTION-SELECT SETTLE: a successful CLICK_BY_LABEL is an option PICK (a division, a filter,
+        // a tab), and picking one routinely triggers an IN-PLACE data reload that the fixed 200ms inter-step pause
+        // can't cover — the NEXT step then probes a mid-re-render DOM (live: the VendorSuite division switch; the
+        // single-fragment walk died at the search box 0.8s later "stale-suspected", and even the two-fragment walk
+        // races when steps follow the pick INSIDE the fragment). Reuse the fragment-boundary page-idle settle right
+        // here — it returns as soon as the page reports quiet, so a pick that reloads nothing costs one probe.
+        // Skipped picks (empty-label no-op) changed nothing → no settle.
+        if (action.action === 'CLICK_BY_LABEL' && !execResult.skipped) {
+          await TemplateWalker.#waitForPageIdle(tabId, TOP_FRAME_ID).catch(() => {});
+        }
         rememberAction(action);
         actionsRun++;
         await TemplateWalker.#sleep(200);
