@@ -23,6 +23,30 @@ describe('orchChain — isFanoutAsk (CV-4-full: foreach over a read → conversa
     assert.equal(isFanoutAsk('start a new conversation'), false, 'a conversation noun without "each" is not a fan-out');
     assert.equal(isForeachAsk('open each in a new conversation'), true, 'still a foreach (the broader gate)');
   });
+  it('v2.74.1543 — the fused "foreach" quantifier + "in a (new) case" target (the live schedule mis-route)', () => {
+    // Live: "foreach division, open new warranty tasks in a new case" — `\beach\b` can't match inside the fused
+    // word, and the open-verb case anchor allows ≤3 tokens ("open NEW WARRANTY TASKS IN A new case" has 5) — so
+    // isFanoutAsk said no and the LLM front door read it as a SCHEDULE ("Setting the schedule…").
+    assert.equal(isForeachAsk('foreach division, list new tasks'), true, 'the fused one-word foreach quantifies');
+    assert.equal(isFanoutAsk('foreach division, open new warranty tasks in a new case'), true, 'the live phrase');
+    assert.equal(isFanoutAsk('for each division, open new warranty tasks in a case'), true, 'the canonical desk flow ("in a case")');
+    assert.equal(isFanoutAsk('open every alert into a separate case'), true, '"into a separate case"');
+    assert.equal(isFanoutAsk('read each note in case it matters'), false, '"in case" (the idiom) is not a case target');
+    assert.equal(isFanoutAsk('open each result in that case'), false, '"in that case" (the idiom) is not a case target');
+  });
+  it('v2.74.1544 — a bare quantifier PREFIX stays joined to its body (decompose must not strand the fan-out)', () => {
+    // Live (after the v1543 gate routed deterministically): decompose split "foreach division, open new warranty
+    // tasks in a new case" into ["foreach division", "open new warranty tasks in a new case"] — the prefix has no
+    // verb, the body no quantifier, so BOTH clauses missed the fan-out gate → two teach-gap offers.
+    const one = decomposeAsk('foreach division, open new warranty tasks in a new case');
+    assert.equal(one.length, 1, 'the quantifier prefix folds into its body — ONE clause');
+    assert.equal(isFanoutAsk(one[0].text), true, 'and that clause is the fan-out');
+    const two = decomposeAsk('for each division, open new warranty tasks in a case');
+    assert.equal(two.length, 1, 'the spaced form folds too');
+    // a REAL compound with a verb in the first clause still splits (no regression)
+    const seq = decomposeAsk('search remote jobs, then sort by date');
+    assert.equal(seq.length, 2, 'a verb-led first clause is a real step — still splits');
+  });
   it('v2.74.1262 — ALSO fires on an analysis-verb foreach (no conversation noun) + a QUALIFIED "sub thread"', () => {
     assert.equal(isFanoutAsk('research each ticket'), true, 'analysis per item → worker fan-out, no conv noun needed');
     assert.equal(isFanoutAsk('summarize each order'), true);

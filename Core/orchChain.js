@@ -48,6 +48,15 @@ export function decomposeAsk(ask) {
     const delim = parts[i] || '';
     const seg = parts[i + 1] || '';
     if (_VERB.test(seg.trim())) {
+      // v2.74.1544 — a BARE QUANTIFIER PREFIX is not a step: "foreach division, open new warranty tasks in a new
+      // case" quantifies the clause that FOLLOWS the comma. Splitting there strands both halves — the prefix has
+      // no verb to match, and the body loses its quantifier so the fan-out gate can't fire (live: two teach-gap
+      // clauses "1. foreach division 2. open new warranty tasks…"). A verbless, quantifier-bearing `cur` treats
+      // this boundary as a NON-boundary and stays joined to its body.
+      if (cur.trim() && !_VERB.test(cur.trim()) && _QUANTIFIER.test(cur.trim())) {
+        cur = cur + delim + seg;
+        continue;
+      }
       if (cur.trim()) clauses.push({ text: cur.trim(), connective: curConn });
       // Strip a leading connective the COMMA/semicolon split left on the segment ("…, then sort" → seg="then
       // sort"), so the clause text sent to the matcher is the bare intent ("sort by date"), not "then sort by date".
@@ -218,7 +227,10 @@ export function buildCompositeCapability(input) {
 
 // A QUANTIFIER over a collection — "the salaries of EACH job", "open EVERY result", "per row". The signal that a
 // compound's tail should run PER ITEM (a foreach), not once.
-const _QUANTIFIER = /\b(each|every|for each|of each|all of (?:the|them)|per (?:item|result|job|row|one))\b/i;
+// v2.74.1543 — `foreach` (the fused one-word form) added: `\beach\b` can't match inside it (no word boundary),
+// so "foreach division, open new warranty tasks in a new case" read as NOT-quantified and fell to the LLM front
+// door, which free-associated it into a SCHEDULE ("Setting the schedule… I didn't catch the interval").
+const _QUANTIFIER = /\b(foreach|for-each|each|every|for each|of each|all of (?:the|them)|per (?:item|result|job|row|one))\b/i;
 // A per-item ACTION ("click each", "open every result", "save each") — the body clicks the item BEFORE reading.
 const _CLICK_EACH = /\b(click|open|select|tap|press|expand|save|apply|view)(\s+(?:on|into))?\s+(each|every|all)\b|\b(each|every|all)\b[^.]*\b(click|open|select|expand|view)\b/i;
 // The COLLECTION NOUN in an "…each/every/all <noun>" phrase ("open each JOB" → "job"). Stops at structural words so
@@ -281,7 +293,7 @@ const _ANALYSIS = /\b(research|investigate|analy[sz]e|review|assess|evaluate|stu
 // Case rename (v2.74.1494) — the spawned-child noun is CASE (DESIGN_desks.md §2): "open a case for each new task"
 // must route to the fan-out, not the teach gap (live miss). ANCHORED patterns only — a bare "case" is a common
 // word ("in case", "in that case"), so match it as a TARGET (open/a/new/own/per-each case), never as a stray noun.
-const _CONV_TARGET = /\b(conversations?|sub-?tasks?|chats?)\b|\b(?:sub|new|separate|own|individual)[\s-]*threads?\b|\b(?:open|create|start|spawn)\s+(?:[a-z0-9-]+\s+){0,3}?cases?\b|\bcases?\s+(?:per|for\s+each)\b|\b(?:its|their)\s+own\s+case\b|\bas\s+(?:a\s+|new\s+)?cases?\b/i;   // v1499 — "as A case" + verb-within-3-tokens ("open ONE case") — the live singular clause missed on both
+const _CONV_TARGET = /\b(conversations?|sub-?tasks?|chats?)\b|\b(?:sub|new|separate|own|individual)[\s-]*threads?\b|\b(?:open|create|start|spawn)\s+(?:[a-z0-9-]+\s+){0,3}?cases?\b|\bcases?\s+(?:per|for\s+each)\b|\b(?:its|their)\s+own\s+case\b|\bas\s+(?:a\s+|new\s+)?cases?\b|\bin(?:to)?\s+(?:(?:a|its\s+own|their\s+own)\s+(?:new\s+|separate\s+|individual\s+)?|(?:new|separate|individual)\s+)cases?\b/i;   // v1543 — "in(to) a [new/separate] case" / "in separate cases" (the live "open new warranty tasks IN A NEW CASE" missed — the open-verb anchor allows ≤3 tokens and the ask had 5). "in case"/"in that case" (the idioms) stay excluded: an article or qualifier is required.
 // A REDUCE over the whole set — ONE answer ABOUT all items ("summarize them", "a digest", "compare", "rank"). Marks an
 // EPHEMERAL fan-out: the per-item workers are map-stage compute, disposed once the reduce is rendered in the parent.
 const _REDUCE = /\b(summari[sz]e|summary|digest|consolidate|combined?|compare|contrast|rank|overview|recap|round-?up|tl;?dr|aggregate)\b/i;

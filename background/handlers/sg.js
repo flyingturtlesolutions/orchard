@@ -67,6 +67,13 @@ import { listActivePerspectives } from '../../Services/PerspectivePredicates.js'
 import { listLandmarksForGround } from '../../Services/LandmarkResolver.js';   // C1 — accepted-Perspective landmarks (+ a11yRole)
 import { matchGroundForUrl } from '../../Core/GroundMatcher.js';   // v2.74.823 — canonical URL→Ground matcher (honors urlPatterns, incl. the sibling hosts a dedup merge unions)
 import { planCorrection, applyRetraction, isActiveCapability } from '../../Core/orchFeedback.js';   // ORCH-FB — corrective actions
+import { resolveTarget, renderTargetDecision } from '../../Core/targetResolve.js';   // TRT-2 — the TR-ladder target resolver (DESIGN_target_routing.md §3)
+import { vocabularyFingerprint } from '../../Core/groundVocabulary.js';   // TRT-1 — derived ground vocabulary fingerprints (§4)
+import { readConnRegistry } from './connections.js';   // TRT-2 — TR-5 live-session origins (CP-3 registry)
+import { attentionOrigins } from '../../Core/connectionPresence.js';   // TRT-2 — exclude stale/signed-out origins from TR-5
+
+// TRT-2 — the resolver's caps/alias context cache (fingerprints + global alias index; 60s TTL — see TARGET_RESOLVE).
+let _targetCtxCache = null;
 import { feedbackExamples } from '../../Core/feedbackLearn.js';   // ORCH-FB-2 — relevance shaping from feedback history
 import { buildObservationCapability, scoreObservationMatch, classifyReadAsk } from '../../Core/observe.js';   // OBS-READ — observation records + manual-obs match + read/action effect scoping
 import { buildCompositeCapability, liftControlFlow, liftConditional } from '../../Core/orchChain.js';   // ORCH-X T2 — composite promotion + ORCH-L control-flow lift + ORCH-A conditional lift
@@ -3275,6 +3282,59 @@ export function createSgMessageHandlers(ctx) {
         sendResponse({ success: true, hits });
       } catch (err) {
         Logger.error('background', `ORCH_MATCH_GLOBAL failed: ${err.message}`);
+        sendResponse({ success: false, error: err.message });
+      }
+    },
+
+    // TRT-2 (v2.74.1546, DESIGN_target_routing.md §3/§9) — TARGET_RESOLVE: the TR-ladder resolver, answering
+    // "WHERE does this ask run?" as ONE observable decision (`TARGET ▸` line) instead of a side effect scattered
+    // across routing branches. Composes injected data for the PURE resolver: grounds, per-ground vocabulary
+    // fingerprints (capabilities + aliases everywhere; ride-leg vocabulary ONLY for the bounded desk/tab grounds —
+    // _readRideRecipesMerged touches storage, so it is never swept across all grounds), the global alias index,
+    // the tab's ground, and TR-5 live origins (fresh CONN-registry entries + open-tab hosts). The caps/alias part
+    // is cached 60s (aliases recorded mid-window surface within a minute — acceptable staleness, documented).
+    // The resolver NAMES the target; run authority stays with ORCH-G. Never LLM, never a minted origin.
+    TARGET_RESOLVE: async (payload, _sender, sendResponse) => {
+      try {
+        const { ask = '', tabId = null, deskOrigins = [] } = payload ?? {};
+        if (typeof ask !== 'string' || !ask.trim()) { sendResponse({ success: false, error: 'ask required' }); return; }
+        const all = (await StorageManager.getAllGrounds()) || [];
+        const grounds = all.map((g) => ({ groundId: g.id || g.groundId, host: primaryHost(g) || '', name: _groundLabel(g) || '' })).filter((g) => g.groundId);
+        const now = Date.now();
+        if (!_targetCtxCache || (now - _targetCtxCache.at) > 60000) {
+          const fingerprints = []; const aliasIndex = [];
+          for (const g of grounds) {
+            let caps = [];
+            try { caps = ((await ctx.readSgCapabilities(g.groundId)) || []).filter((c) => c && isActiveCapability(c)); } catch { caps = []; }
+            for (const c of caps) for (const al of (Array.isArray(c.aliases) ? c.aliases : [])) aliasIndex.push({ phrase: normalizeAliasPhrase(al), groundId: g.groundId, capabilityId: c.id });
+            fingerprints.push({ groundId: g.groundId, fp: vocabularyFingerprint({ capabilities: caps }) });
+          }
+          _targetCtxCache = { at: now, fingerprints, aliasIndex };
+        }
+        let tabGroundId = null; let tabHost = '';
+        if (typeof tabId === 'number') {
+          try { const t = await chrome.tabs.get(tabId); tabGroundId = _groundIdForUrl(t?.url || '', all); try { tabHost = new URL(t?.url || '').host; } catch { /* */ } } catch { /* */ }
+        }
+        // Enrich the NEAR grounds (desk connections + the tab) with ride-leg vocabulary — bounded to ≤4 reads.
+        const nearHosts = new Set([...(Array.isArray(deskOrigins) ? deskOrigins : []), tabHost].filter(Boolean).map((s) => String(s).toLowerCase()));
+        const fingerprints = _targetCtxCache.fingerprints.map((f) => ({ ...f }));
+        for (const g of grounds) {
+          if (!nearHosts.has(String(g.host).toLowerCase())) continue;
+          try {
+            const recipes = await _readRideRecipesMerged(g.groundId, g.host);
+            const legFp = vocabularyFingerprint({ legs: (recipes || []).map((r) => ({ name: r.name, does: r.does, params: r.params })) });
+            const mine = fingerprints.find((f) => f.groundId === g.groundId);
+            if (mine) { const merged = { ...mine.fp }; for (const [t, n] of Object.entries(legFp)) merged[t] = (merged[t] || 0) + n; mine.fp = merged; }
+          } catch { /* legs are enrichment — the caps fingerprint stands */ }
+        }
+        let liveOrigins = [];
+        try { const reg = (await readConnRegistry()) || {}; const bad = new Set(attentionOrigins(reg, Object.keys(reg)).map((a) => a.origin)); liveOrigins = Object.keys(reg).filter((o) => !bad.has(o)); } catch { /* */ }
+        try { const tabs = await chrome.tabs.query({}); for (const t of tabs) { try { const h = new URL(t.url || '').host; if (h && /^https?:/.test(t.url || '') && !liveOrigins.includes(h)) liveOrigins.push(h); } catch { /* */ } } } catch { /* */ }
+        const decision = resolveTarget(ask, { grounds, fingerprints, aliasIndex: _targetCtxCache.aliasIndex, normalizePhrase: normalizeAliasPhrase, deskOrigins, tabGroundId, liveOrigins });
+        Logger.info('background', renderTargetDecision(decision));
+        sendResponse({ success: true, decision, tabGroundId });
+      } catch (err) {
+        Logger.error('background', `TARGET_RESOLVE failed: ${err.message}`);
         sendResponse({ success: false, error: err.message });
       }
     },

@@ -3544,6 +3544,60 @@ let _sweepBatchIndex = [];   // render-order number → proposalId (what `approv
 // a claim's ground truth is the read that produced it, never a random item.
 let _lastGroundedRead = null;   // { leg, params, at }
 let _lastReteach = null;   // v2.74.1533 — { groundId, tabId, ask } of the last on-site record run, so `re-teach` can re-record it even when it WORKED
+// ── TRT-2..5 (v2.74.1546, DESIGN_target_routing.md) — the chat side of the TARGET resolver ─────────────────────
+let _turnVisitor = null;          // TRT-5 §5.2 — {origin, convId} when THIS turn targets off-desk: fences the desk-instance memory write
+let _lastTargetResolve = { ask: '', at: 0, decision: null };   // both doors resolve; dedup so one turn logs ONE `TARGET ▸` line
+async function _resolveTarget(ask) {
+  const a = String(ask || '').trim();
+  if (!a) return null;
+  if (_lastTargetResolve.ask === a && (Date.now() - _lastTargetResolve.at) < 5000) return _lastTargetResolve.decision;
+  let decision = null;
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tabId = (tabs && tabs[0] && tabs[0].id) ?? null;
+    const deskOrigins = _boundConnections().map((c) => c.origin);
+    const r = await _orchReq('TARGET_RESOLVE', { ask: a, tabId, deskOrigins });
+    decision = (r && r.success && r.decision) ? { ...r.decision, tabGroundId: r.tabGroundId ?? null } : null;
+  } catch { decision = null; }
+  _lastTargetResolve = { ask: a, at: Date.now(), decision };
+  return decision;
+}
+// TRT-5 §5.3 — the ADOPT counter: the Nth (≥2) off-desk run of the SAME origin from the SAME desk is role signal →
+// offer ONCE (consent-gated scope widening); declining stops the counter for good. One stray ask never nags.
+async function _visitorTick({ origin, convId }) {
+  if (!origin || !convId) return;
+  const key = `targetVisitor:${convId}`;
+  let book = {};
+  try { const got = await new Promise((r) => chrome.storage.local.get(key, r)); book = (got && got[key]) || {}; } catch { book = {}; }
+  const rec = book[origin] || { n: 0, offered: false, declined: false };
+  rec.n += 1; book[origin] = rec;
+  try { await new Promise((r) => chrome.storage.local.set({ [key]: book }, r)); } catch { /* */ }
+  if (rec.n < 2 || rec.offered || rec.declined) return;
+  rec.offered = true;
+  try { await new Promise((r) => chrome.storage.local.set({ [key]: book }, r)); } catch { /* */ }
+  const m = appendMessage({ role: 'assistant', body: `You’ve used ${origin} from this desk ${rec.n} times — adopt it as a connection? That brings it into the desk’s scope: memory, sweeps, routines.` });
+  const bar = _orchActionBar(m);
+  bar.appendChild(_mkBtn(`Adopt ${origin}`, async () => {
+    bar.remove();
+    try {
+      const existing = (_currentConversationConfig && Array.isArray(_currentConversationConfig.connections)) ? _currentConversationConfig.connections : [];
+      if (!existing.some((c) => c && c.origin === origin)) {
+        const merged = { ..._currentConversationConfig, connections: [...existing, { origin, label: origin }] };
+        await ConversationStore.patchMeta(convId, { config: merged });
+        if (convId === _currentConversationId) _currentConversationConfig = merged;
+      }
+      _setMessageBody(m, `Adopted ${origin} — it’s now part of this desk’s scope.`);
+    } catch (e) { _setMessageBody(m, `Couldn’t adopt ${origin}${e && e.message ? ` — ${e.message}` : ''}.`); }
+    _orchFinalize(m);
+  }));
+  bar.appendChild(_mkBtn('Not now', async () => {
+    bar.remove();
+    rec.declined = true; book[origin] = rec;
+    try { await new Promise((r) => chrome.storage.local.set({ [key]: book }, r)); } catch { /* */ }
+    _setMessageBody(m, `Okay — ${origin} stays a visitor (I won’t ask again).`);
+    _orchFinalize(m);
+  }));
+}
 let _rideEachCursor = null;     // DK-7b/c — a PAUSED each fan-out's resume point: { at, leg, ask, tabId, groundId, params, each:{name,values,total}, offset }; bare "continue" resumes it
 let _rideEachRunning = false;   // DK-7c (v2.74.1490) — a fan-out is mid-run (typed "stop" aborts it instead of the engine-run stop)
 let _rideEachAbort = false;     // DK-7c — the abort latch the running loop checks between items
@@ -4692,6 +4746,17 @@ async function _orchRunChain(msg, { tabId, clauses, firstMatch, ask = '', startI
     const _foLifecycle = isFanoutAsk(clause.text) ? fanoutLifecycle(clause.text)
       : (isReduceAsk(clause.text) && st.lastValue != null && itemLabels(st.lastValue, 1).labels.length >= 1) ? 'ephemeral' : null;
     if (_foLifecycle) {
+      // v2.74.1545 — a SELF-CONTAINED fan-out clause carries its OWN collection ("foreach division, open new
+      // warranty tasks in a new case"): there is no prior read step, so st.lastValue is empty and the spawn would
+      // report "Nothing to open". Run the clause through the connector read FIRST — the same CX-4d path a read
+      // clause uses (its ID layer honors the each-mode: "foreach division" → divisionId="each", the headless
+      // full sweep, merged group-tagged rows as ONE value) — then fan out over what it returned. A fan-out that
+      // FOLLOWS a read keeps consuming st.lastValue unchanged.
+      if (st.lastValue == null && _boundConnections().length) {
+        const cr = await _chainConnectorRun(clause.text, { tabId, onEach: (n, t2, label) => { try { _setMessageBody(msg, `Step ${i + 1} of ${total}: “${clause.text}” — ${n}/${t2} (${label})…`); } catch { /* */ } } });
+        if (cr && cr.ok) { st.lastValue = cr.value; st.lastLeg = cr.leg; }
+        else if (cr && !cr.ok) { _setMessageBody(msg, `Ran ${i} of ${total}. Couldn’t ${(cr.leg && (cr.leg.does || cr.leg.name)) || 'read the list to fan out over'}${cr.error ? ` — ${cr.error}` : ''}.${cr.hint ? `  ${cr.hint}.` : ''}`); _orchFinalize(msg); return; }
+      }
       const _foCap = fanoutLimit(clause.text);   // DK-8g — "open the first as a case" / "open 3 cases" caps the spawn (the single-case test primitive)
       const fo = await _fanOutFromList(msg, st.lastValue, { i, total, clause: clause.text, lifecycle: _foLifecycle, leg: st.lastLeg || null, ...(_foCap ? { cap: _foCap } : {}) });   // clause → the per-child directive (CV-4-map); leg → the DK-8f detail drill
       if (!fo.ok) { _orchFinalize(msg); return; }   // v1505 — settle + persist the failure line (was an unfinalized exit)
@@ -5640,6 +5705,11 @@ async function _tryGroundedTurn(text) {
   }
   if (_ORCH_FILLER.test(String(text).trim())) return false;   // "yes"/"ok"/… → conversation, not a page task
 
+  // TRT-2 (v2.74.1546) — the tool-door SHADOW resolve: this legacy cascade IS the old target ladder, so nothing is
+  // enforced here — but every turn through it still stamps its `TARGET ▸` line (the 5s dedup in _resolveTarget
+  // keeps one line per turn when the default door, or its fan-out gate, already resolved this ask).
+  void _resolveTarget(text);
+
   // ORCH-ADMIN — management commands ("clear chat", "delete all fragments on this ground") run BEFORE matching.
   // A bulk delete counts + confirms first. "delete that" (singular) is NOT admin → it falls to the feedback path.
   const admin = parseAdminCommand(text);
@@ -5773,6 +5843,17 @@ async function _tryGroundedTurn(text) {
     }
     probe.classList.remove('thinking'); probe.classList.add('assistant');
     _orchConfirmChain(probe, { tabId: tab.id, clauses, firstMatch: m0, ask: text });
+    return true;
+  }
+
+  // v2.74.1545 — a SELF-CONTAINED FAN-OUT ("foreach division, open new warranty tasks in a new case") skips the
+  // PLANNER: ORCH_PLAN plans over PAGE capabilities and finds none for a spawn ask (live: "0 step(s), 3 uncovered"
+  // → fell to a single ORCH_MATCH, which misread "open new…" as CREATE → miss/no-eligible-effect → dead end). The
+  // CHAIN's clause loop owns fan-outs (the isFanoutAsk gate → connector read → case spawns) — confirm-first, the
+  // whole ask as ONE clause (v1544 keeps the quantifier prefix attached to its body).
+  if (isFanoutAsk(text)) {
+    const probe = appendMessage({ role: 'assistant', body: '' });
+    _orchConfirmChain(probe, { tabId: tab.id, clauses: [{ text, connective: null }], firstMatch: null, ask: text });
     return true;
   }
 
@@ -7048,6 +7129,11 @@ function _withBoundUrl(params) {
 // settles on write). FAILURE → a low-confidence mismatch DELTA (§2), keyed separately so it can't corroborate the
 // positive. The body/ask phrasing is the recall key (a paraphrase MERGES → bumps evidence). Off-app → no-op.
 function _bankCapabilityOutcome(goal, capabilityId, ok, memoryId = null) {
+  // TRT-5 §5.2 (v2.74.1546) — the VISITOR FENCE: an off-desk turn's outcome never enters the desk's instance
+  // memory (the desk's learned role stays coherent — its memory describes ITS work, not errands run from its
+  // window). Ground/capability-level learning (aliases, outcomes stream, confirmations) is untouched — those are
+  // ground-scoped and bank elsewhere, so the flywheel still warms for next time anywhere.
+  if (_turnVisitor && _turnVisitor.convId === _currentConversationId) return;
   // v2.74.1338 (review B) — callers that span awaits pass their TURN-START memoryId; reading the global at
   // completion time banked app A's outcome into app B's instance memory after a mid-flight switch (AP-0 defeated).
   const appId = memoryId || _memoryId();   // AP-0 — bank to THIS instance's memory
@@ -8342,6 +8428,56 @@ async function sendChatMessage() {
   if (!/^tool:/i.test(text)) {
     $('btn-chat-send').disabled = false;
     const ask = text.replace(/^il:\s*/i, '').trim();
+    // v2.74.1543 — DETERMINISTIC FAN-OUT GATE before the LLM front door: an ask the regex is CERTAIN is a
+    // quantified fan-out ("foreach division, open new warranty tasks in a new case") must never depend on the
+    // model choosing 'decompose' — live it picked REVIEW_QUEUE with an `every` param instead and answered
+    // "Setting the schedule… I didn't catch the interval" (the same class as "dedupe grounds" → a Zendesk
+    // ticket-merge proposal: a deterministically-recognizable shape reaching the LLM). isFanoutAsk is NARROW
+    // (quantifier + a conversation/case target or per-item analysis verb), so plain each-mode READS ("how many
+    // per division") and everything else still route through interpret unchanged. A false return (no tab, no
+    // ground) falls through to interpret exactly as before.
+    if (isFanoutAsk(ask)) {
+      try { if (await _tryGroundedTurn(ask)) return; }
+      catch (e) { try { console.warn('[chat] fan-out gate fell through:', e?.message); } catch { /* */ } }
+    }
+    // ── TRT-3/4 (v2.74.1546, DESIGN_target_routing.md §3/§8) — the TARGET resolver, ahead of the LLM door.
+    // Every turn resolves + logs ONE `TARGET ▸` line (the observability that would have made this week's three
+    // mis-routes one-glance diagnoses). ENFORCED here are only the tiers the ladder is CERTAIN about:
+    //   • TR-1 explicit named ground ≠ this tab (non-nav): match ON THAT GROUND ONLY — hit → confirm-run there
+    //     (the proven _orchRunOnGround path); no hit → the §3 HONEST GAP + Show me (never silent re-targeting,
+    //     never an interpret guess — the misread class of this week).
+    //   • TR-3 exact alias on another ground: the proven _tryGlobalMatch (its v1525 alias bypass finds it;
+    //     1 hit → confirm-run there). Falls through untouched when it finds nothing.
+    // Everything else (conversation/tab/live/global/teach) proceeds to interpret UNCHANGED — the decision line
+    // is the shadow record the §9 build path grades the next flips against. The visitor flag arms the §5
+    // membrane (memory fence + adopt counter).
+    _turnVisitor = null;
+    const _tgt = await _resolveTarget(ask);
+    if (_tgt) {
+      if (_tgt.visitor && (_tgt.host || _tgt.groundId)) {
+        _turnVisitor = { origin: _tgt.host || _tgt.groundId, convId: _currentConversationId };
+        void _visitorTick(_turnVisitor);
+      }
+      if (_tgt.tier === 'explicit' && _tgt.groundId && _tgt.groundId !== _tgt.tabGroundId && !_NAV_RE.test(ask)) {
+        let em = null;
+        try { em = await _orchReq('ORCH_MATCH', { groundId: _tgt.groundId, ask, includeActions: true }); } catch { em = null; }
+        const msg = appendMessage({ role: 'assistant', body: '' });
+        if (em && em.success !== false && em.capabilityId && em.decision !== 'miss') {
+          _setMessageBody(msg, `I can do that on ${_tgt.host}. Run it there?`);
+          const bar = _orchActionBar(msg);
+          bar.appendChild(_mkBtn(`▶ Run on ${_tgt.host}`, () => { bar.remove(); _orchRunOnGround(appendMessage({ role: 'assistant', body: '' }), { ask, hit: { groundId: _tgt.groundId, capabilityId: em.capabilityId, groundName: _tgt.host } }); }));
+          bar.appendChild(_mkBtn('Not now', () => { bar.remove(); _setMessageBody(msg, 'Okay.'); }));
+          return;
+        }
+        _setMessageBody(msg, `I don’t have a way to do that on ${_tgt.host} yet — want to show me?`);
+        _orchFinalize(msg);
+        _orchOfferRecord(msg, { groundId: _tgt.groundId, tabId: null, ask, label: '● Show me' });
+        return;
+      }
+      if (_tgt.tier === 'alias' && _tgt.groundId && _tgt.groundId !== _tgt.tabGroundId) {
+        try { if (await _tryGlobalMatch(ask)) return; } catch { /* fall through to interpret */ }
+      }
+    }
     // F-2c-flip (v2.74.1180) — INTERPRET is the DEFAULT front door (DESIGN_llm_front_door.md §9): one reasoning call
     // → normalize + the §9.3 confidence/clarify gate → dispatch to the verified runners. It returns false ONLY if the
     // interpret CALL was unavailable, then we fall back to the prior path below (nav head-check + the IL loop) so the
